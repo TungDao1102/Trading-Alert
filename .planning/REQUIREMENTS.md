@@ -125,11 +125,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 | APRV-01 | Phase 8 | Pending |
 | APRV-02 | Phase 8 | Pending |
 | EXEC-01 | Phase 9 | Pending |
-| EXEC-02 | Phase 9 | Pending |
-| EXEC-03 | Phase 9 | Pending |
+| EXEC-02 | Phase 8 | Pending |
+| EXEC-03 | Phase 8 | Pending |
 | JRN-01 | Phase 10 | Pending |
-| OPS-01 | Phase 10 | Pending |
-| OPS-02 | Phase 10 | Pending |
+| OPS-01 | Phase 8 | Pending |
+| OPS-02 | Phase 9 | Pending |
 | GOV-01 | Phase 10 | Pending |
 
 **Coverage:**
