@@ -1,0 +1,80 @@
+[project]
+name = "trading-alert"
+version = "0.1.0"
+description = "Deterministic Binance Futures research and semi-automated execution system"
+requires-python = "==3.13.*"
+readme = "README.md"
+authors = [{ name = "trading-alert" }]
+
+dependencies = [
+  # Exchange connector (re-verified against current Binance SDK; STACK canonical)
+  "binance-sdk-derivatives-trading-usds-futures>=17.3,<18",
+  # Storage / analytical
+  "pyarrow>=19",
+  "duckdb==1.5.5",
+  "polars>=1.44,<2.0",
+  # Operational persistence
+  "sqlalchemy>=2.0,<2.1",
+  "psycopg[binary,pool]>=3.3,<4",
+  "alembic>=1.19",
+  # Boundary validation
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2",
+  # Resilience
+  "tenacity>=9",
+  # Observability
+  "structlog>=25",
+  # Timezones on Windows
+  "tzdata",
+  # Async / HTTP plumbing for the edge (webhook/health later; keep floor in lockfile)
+  "httpx>=0.28,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=9",
+  "pytest-asyncio>=1.4",
+  "respx>=0.23",
+  "ruff",
+  "mypy",
+]
+
+[tool.uv]
+# Pin the managed 3.13 interpreter we just installed
+managed = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E",  # pycodestyle errors
+  "W",  # pycodestyle warnings
+  "F",  # pyflakes
+  "I",  # isort
+  "B",  # flake8-bugbear
+  "UP", # pyupgrade
+]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # asserts are fine in tests
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["src"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_return_any = true
+disallow_untyped_defs = true
