@@ -1,0 +1,25 @@
+=== research-gate RED run with decoys present ===
+Date: 2026-09-19T14:10:46.0890587+07:00
+Branch: scratch/01-04-decoy-test
+Decoy files: decoy/unregistered-params.json (parameter set outside registry path), decoy/experiment-missing-hash.json (experiment record missing parameterSetId/parameterSetHash)
+
+[1/3] Freeze check...
+  PASS: protocol header reads Status: FROZEN
+  PASS: Frozen-on date present
+  PASS: DOC_STATUS.md lists protocol
+  PASS: DOC_STATUS.md entry is not pending-freeze or DRAFT
+  PASS: DECISIONS.md has protocol v1.0.0 freeze row
+
+[2/3] Identity-tuple check...
+  Scanning 1 record file(s)...
+  FAIL: missing identity fields:
+    - experiment-missing-hash.json:parameterSetId
+    - experiment-missing-hash.json:parameterSetHash
+
+[3/3] Registry-path tripwire...
+  FAIL: parameter set files outside docs/research/registry/:
+    - decoy/unregistered-params.json
+
+=== Exit code: 1 ===
+Expected: non-zero exit (gate FAILS as required on decoy presence)
+RED CAPTURED ? gate correctly rejected the decoy
