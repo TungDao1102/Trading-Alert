@@ -140,3 +140,32 @@ No gaps. All 4 roadmap success criteria and all 21 plan-level must-have truths a
 
 _Verified: 2026-09-19T14:24:47Z_
 _Verifier: the agent (gsd-verifier)_
+
+---
+
+## Orchestrator Independent Re-verification (2026-09-19)
+
+_Re-verified directly by the orchestrator (Sisyphus) at user request — no delegation. Every sweep below was re-run, not quoted from executor SUMMARYs._
+
+| # | Check | Result |
+|---|-------|--------|
+| 1 | Protocol header FROZEN + version + date + supersedes | ✓ lines 3–6 exact |
+| 2 | 8 mandatory content tokens | ✓ 8/8 present |
+| 3 | Numeric-value-as-fact sweep | ✓ empty |
+| 4 | 3 family sheets, 7 slots each, D012 footer count | ✓ 3 sheets, all slots OK, count exactly 3 |
+| 5 | Unqualified selection-language sweep | ✓ empty |
+| 6 | DECISIONS rows | ✓ exactly 29 (D001–D029), D029 freeze row present |
+| 7 | D028 ownership mirrors | ✓ 4 hits across 3 files (≥3 required) |
+| 8 | DOC_STATUS protocol entry, no pending-freeze/DRAFT tag | ✓ line 13, stable-canonical |
+| 9 | Gate YAML keywords + full read | ✓ real fail-closed logic (freeze/identity/tripwire, `set -eu`, exit 1 paths) — not stubs |
+| 10 | Unqualified-autonomy sweep (`LIVE_AUTONOMOUS[^_]`) | ✓ empty |
+| 11 | Signal-context lifecycle sweep (`ORDER_PLACED`) | ✓ empty |
+| 12 | EXECUTION_SPEC approval-node check | ✓ covered by executor commit + clean lifecycle sweep |
+| 13 | §9.3 canonical zone + tzdata note | ✓ `Asia/Ho_Chi_Minh` + tzdata wheel note, lines 650–651 |
+| 14 | §12 region synonym sweep | ✓ empty (anchors 747/794) |
+| 15 | Scope: no `src/`, no registry, gate file present | ✓ / ✓ / ✓ |
+| 16 | RED/GREEN evidence files | ✓ exit 1 with both FAILs / exit 0, decoys gone |
+
+**One finding — `Bangkok` sweep (plan 01-03-T2 verify):** `git grep -n "Bangkok" -- docs/` returns exactly one hit: `docs/DECISIONS.md:30`, the D025 row text "corrected from `Asia/Bangkok` to `Asia/Ho_Chi_Minh`". Assessment: this is append-only audit history describing the correction, not a live presentation-zone usage — the substantive intent of C4 holds (§9.3 canonical, check 13; zero live-zone hits). However, the plan's verify command as literally written (expecting zero hits repo-wide in `docs/`) does NOT exempt DECISIONS history, so it cannot have passed verbatim — the executor's "all verify blocks PASSED" claim is unverifiable on this one check. Disposition: accept substance, record the over-strict check here rather than rewriting an executed plan. Future contradiction sweeps should scope `docs/` exclusions for `DECISIONS.md` history rows explicitly.
+
+**Overall: substance PASS (16/16 intent checks green, 1 check-note above). No rework required.**
