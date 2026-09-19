@@ -109,7 +109,7 @@ The self-collected OI dataset and journal are research assets. Backup loss is tr
 See `operations/RUNBOOK.md` for the restore/emergency procedure.
 
 
-## 11. Python runtime operations
+## 10. Python runtime operations
 
 - Build from a locked Python dependency set.
 - Do not install packages interactively on the production host.

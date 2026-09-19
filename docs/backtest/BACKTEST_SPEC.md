@@ -133,7 +133,7 @@ Each run stores:
 - code/data version,
 - notes.
 
-## 11. Acceptance gates
+## 12. Acceptance gates
 
 A strategy may proceed only when:
 

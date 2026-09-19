@@ -1244,7 +1244,7 @@ Historical profitability is not evidence of guaranteed future profitability.
 
 ---
 
-# 13. Research stop conditions
+# 25. Research stop conditions
 
 The project must have an explicit stopping rule so that weak evidence does not trigger endless strategy complexity.
 
@@ -1259,7 +1259,7 @@ Provisional research kill gate:
 
 A `NO_TRADE` result is a valid research outcome.
 
-## 14. Statistical uncertainty questions
+## 26. Statistical uncertainty questions
 
 For every candidate, ask:
 

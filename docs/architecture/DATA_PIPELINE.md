@@ -141,7 +141,7 @@ The OI collector must begin as soon as practical during research.
 
 Historical candles and historical funding can be backfilled later; OI history outside Binance's documented API window cannot be recreated from that API. The collector is therefore an explicit Phase-0 workstream.
 
-## 8. Storage architecture
+## 13. Storage architecture
 
 Separate analytical and operational storage:
 
@@ -159,6 +159,6 @@ PostgreSQL
 
 Do not make PostgreSQL the only storage layer for the historical market dataset. Partition large candle datasets by symbol/date where practical and index operational tables by the lookup paths defined in `data/DATA_MODEL.md`.
 
-## 9. Python implementation rule
+## 14. Python implementation rule
 
 The collector may use the Binance Python SDK and asyncio, but the normalized domain data passed to the strategy must be project-defined types/models. SDK classes and raw JSON must not leak into the strategy layer.
