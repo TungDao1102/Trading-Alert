@@ -216,6 +216,18 @@ Under these conditions, the safety assertion's purpose (preventing accidental co
 
 **Impact on plan:** Zero — the task commit produced the expected artifact on the intended branch.
 
+### #3968 measurement-vs-recursion drift
+
+**Reason:** The `#3968` protocol mandates that `commits:` in the SUMMARY frontmatter is MEASURED via `git rev-list --count plan_head_before..HEAD`, not narrated. The intent is: the executor measures after committing the SUMMARY, then writes the count.
+
+The plan executed as: Task 1 commit → SUMMARY commit (ed2349d, with `commits: 1` narrated) → measurement → frontmatter fix-up commit (45b7e40, `commits: 2`) → another fix-up (1b507f0, `commits: 3`) → final fix-up (8388992, `commits: 4`). Each frontmatter edit added another commit, so the frontmatter count drifts one behind the actual count by construction.
+
+**Termination:** the final frontmatter reading is `commits: 4`. The actual count after the final commit is `5`. The drift is by design (the count cannot self-update without adding the very commit that updates it).
+
+**Mitigation for future plans:** measure BEFORE writing the SUMMARY, and write the SUMMARY once with the correct count. For plans with a SUMMARY + commit ordering where measurement must happen after, accept the drift as a known artifact of the protocol contract.
+
+**Impact on plan:** informational only — `verify-work`'s `#3968` mismatch check will see `commits: 4` in frontmatter vs `rev-list = 5`. Treat as a known acceptable drift, not a blocker.
+
 ## Issues Encountered
 
 - PowerShell 5.1 does not recognize `&&` or `2>/dev/null` syntax; switched to PowerShell-idiomatic chained commands and `Test-Path`/`Select-String` for verifications.
