@@ -18,6 +18,9 @@ dist/
 data/
 backup/
 
+# Allow source-tree packages named "data" (src/data/...)
+!src/data/
+
 # Test artefacts
 .pytest_cache/
 .mypy_cache/

@@ -1,0 +1,167 @@
+"""Pure-function quality gate for backfilled candle batches (D-10).
+
+Fail-closed posture per DATA_PIPELINE.md §6 and ENGINEERING_PRINCIPLES.md §9:
+  - Structural corruption (duplicate timestamps, impossible OHLC, timestamp
+    regressions) → reject the batch, NO overwrite.
+  - Continuity gaps (missing sequence) → publish the batch but record a
+    warning; downstream coverage tracking will flag it.
+
+Inputs are plain `Kline` dataclasses projected to a Polars frame so the
+pure-function surface is testable without network or DB dependencies
+(PATTERNS §8).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import polars as pl
+
+from src.adapters.binance_usdm import Kline
+
+
+# Interval → millisecond duration. Single source of truth for the
+# quality + paginator math; later phases extend the table when 15m
+# arrives.
+INTERVAL_MS: dict[str, int] = {
+    "1m": 60_000,
+    "3m": 3 * 60_000,
+    "5m": 5 * 60_000,
+    "15m": 15 * 60_000,
+    "1h": 60 * 60_000,
+    "4h": 4 * 60 * 60_000,
+    "1d": 24 * 60 * 60_000,
+}
+
+
+@dataclass(frozen=True)
+class QualityVerdict:
+    """Result of one batch quality check.
+
+    `structural_ok` is the gate: False ⇒ caller MUST NOT publish the batch
+    (D-10 fail-closed). The other counters are telemetry for the
+    coverage layer to report.
+    """
+
+    structural_ok: bool
+    duplicates: int
+    ohlc_violations: int
+    timestamp_regressions: int
+    gap_count: int
+
+
+def klines_to_frame(klines: list[Kline]) -> pl.DataFrame:
+    """Project a list of `Kline` to a Polars frame.
+
+    The schema is the canonical candle schema used by the paginator
+    (backfill), the quality gate, and the Parquet store.
+    """
+    if not klines:
+        return pl.DataFrame(
+            schema={
+                "open_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
+                "close_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
+                "open": pl.Decimal(scale=8),
+                "high": pl.Decimal(scale=8),
+                "low": pl.Decimal(scale=8),
+                "close": pl.Decimal(scale=8),
+                "volume": pl.Decimal(scale=8),
+                "quote_volume": pl.Decimal(scale=8),
+                "trade_count": pl.Int64,
+                "interval": pl.Utf8,
+                "symbol": pl.Utf8,
+            }
+        )
+    return pl.DataFrame(
+        {
+            "open_time_utc": [k.open_time_utc for k in klines],
+            "close_time_utc": [k.close_time_utc for k in klines],
+            "open": [k.open for k in klines],
+            "high": [k.high for k in klines],
+            "low": [k.low for k in klines],
+            "close": [k.close for k in klines],
+            "volume": [k.volume for k in klines],
+            "quote_volume": [k.quote_volume for k in klines],
+            "trade_count": [k.trade_count for k in klines],
+            "interval": [k.interval for k in klines],
+            "symbol": [k.symbol for k in klines],
+        },
+        schema_overrides={
+            "open_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
+            "close_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
+        },
+    )
+
+
+def check_batch(klines: list[Kline], interval: str) -> QualityVerdict:
+    """Return a quality verdict for one batch.
+
+    The batch is expected to be sorted by `open_time_utc` ascending — the
+    paginator enforces this on every publish. Out-of-order rows are still
+    caught as `timestamp_regressions` so the test surface covers the
+    pathological case.
+    """
+    if interval not in INTERVAL_MS:
+        raise ValueError(
+            f"unsupported interval {interval!r}; expected one of {sorted(INTERVAL_MS)}"
+        )
+    df = klines_to_frame(klines)
+    if df.is_empty():
+        return QualityVerdict(
+            structural_ok=True,
+            duplicates=0,
+            ohlc_violations=0,
+            timestamp_regressions=0,
+            gap_count=0,
+        )
+
+    duplicates = df.filter(pl.col("open_time_utc").is_duplicated()).height
+
+    # OHLC violations: high must be ≥ open, close, low; low must be ≤ open,
+    # close, high. None of these may be violated.
+    ohlc_violations = df.filter(
+        (pl.col("high") < pl.col("open"))
+        | (pl.col("high") < pl.col("close"))
+        | (pl.col("low") > pl.col("open"))
+        | (pl.col("low") > pl.col("close"))
+        | (pl.col("high") < pl.col("low"))
+    ).height
+
+    # Timestamp regression: open_time_utc must be strictly ascending.
+    diffs = df["open_time_utc"].diff()
+    # diff is a Timedelta series; compare via `== timedelta(0)` or `<=`.
+    # Build a boolean series using a list comprehension over Python timedeltas
+    # so we avoid coupling to Polars internals.
+    ts_regression_count = 0
+    if diffs.len() > 0:
+        for v in diffs.to_list():
+            if v is None:
+                continue
+            # Strict ascending: each diff must be > 0.
+            if v.total_seconds() * 1000 <= 0:
+                ts_regression_count += 1
+    timestamp_regressions = ts_regression_count
+
+    # Continuity: how many rows are missing between the first and last
+    # open_time_utc if the batch were dense at the requested interval?
+    # This is warn-only — batches publish with flags, never reject.
+    interval_ms = INTERVAL_MS[interval]
+    max_t = df["open_time_utc"].max()
+    min_t = df["open_time_utc"].min()
+    if max_t is not None and min_t is not None:
+        span_ms = (max_t - min_t).total_seconds() * 1000
+        expected = int(span_ms // interval_ms) + 1 if span_ms else df.height
+    else:
+        expected = df.height
+    gap_count = max(0, expected - df.height)
+
+    structural_ok = (
+        duplicates == 0 and ohlc_violations == 0 and timestamp_regressions == 0
+    )
+    return QualityVerdict(
+        structural_ok=structural_ok,
+        duplicates=duplicates,
+        ohlc_violations=ohlc_violations,
+        timestamp_regressions=int(timestamp_regressions),
+        gap_count=gap_count,
+    )
