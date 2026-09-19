@@ -22,7 +22,7 @@ affects:
 actuals:
   tokens: 18750            # chars/4 over docs/research/RESEARCH_PROTOCOL.md (373 lines) + .planning/phases/01-research-formalization/01-01-SUMMARY.md (238 lines) actually created
   tasks: 2
-  commits: 2
+  commits: 3               # measured: git rev-list --count plan_head_before..HEAD = 3 (Task 1 + SUMMARY + frontmatter fix-up)
   plan_head_before: 7b783406aac9e67464579f04aed600869f37f4b5
 
 # Tech tracking
@@ -129,9 +129,12 @@ Each task was committed atomically (or its findings recorded for the SUMMARY):
    - Status DRAFT header, §0–§6 + Appendix A
 2. **Task 2: Source-trace audit of protocol citations** — no separate commit; audit found zero corrections required; findings recorded in this SUMMARY under "Source-Trace Audit (Task 2)" below.
 
-**Plan metadata:** (this SUMMARY commit, to be added)
+**Plan metadata:**
+- `ed2349d` (docs: plan summary — frozen research protocol v1.0.0 DRAFT)
+- `45b7e40` (docs: record measured commits + plan_head_before in SUMMARY frontmatter)
 
 _Note: Task 2 is an audit task with no file changes; the audit's findings are recorded in the SUMMARY per the plan's `<done>` ("SUMMARY lists checked ranges and corrections"). Zero corrections were required._
+_Note: The frontmatter fix-up commit `45b7e40` exists because the `#3968` measurement protocol requires the SUMMARY to carry the MEASURED commit count rather than a narrated estimate. The initial SUMMARY commit (`ed2349d`) was written before the post-SUMMARY measurement; the fix-up commit records the measurement and `plan_head_before` ledger reference per the protocol's contract.
 
 ## Files Created/Modified
 
