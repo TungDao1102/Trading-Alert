@@ -22,7 +22,7 @@ affects:
 actuals:
   tokens: 18750            # chars/4 over docs/research/RESEARCH_PROTOCOL.md (373 lines) + .planning/phases/01-research-formalization/01-01-SUMMARY.md (238 lines) actually created
   tasks: 2
-  commits: 3               # measured: git rev-list --count plan_head_before..HEAD = 3 (Task 1 + SUMMARY + frontmatter fix-up)
+  commits: 4               # measured: git rev-list --count plan_head_before..HEAD = 4 (Task 1 + SUMMARY + 2 frontmatter fix-ups)
   plan_head_before: 7b783406aac9e67464579f04aed600869f37f4b5
 
 # Tech tracking
