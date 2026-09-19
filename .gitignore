@@ -1,0 +1,2 @@
+# OMO harness runtime state — machine-local session continuation pointers, never commit
+.omo/**/*.json
