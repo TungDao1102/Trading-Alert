@@ -3,9 +3,9 @@ phase: "01"
 slug: "research-formalization"
 # status lifecycle: draft (seeded by plan-phase) → validated (set by validate-phase §6)
 # audit-milestone §5.5 distinguishes NOT-VALIDATED (draft) from PARTIAL (validated + nyquist_compliant: false) (#2117)
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: validated
+nyquist_compliant: true
+wave_0_complete: true
 created: "2026-09-19"
 ---
 
@@ -45,17 +45,31 @@ created: "2026-09-19"
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
 | *rows authored by gsd-planner per plan — each doc/gate task gets a grep or CI-check command from RESEARCH `## Validation Architecture` → `### Automated vs Manual Verification`* | | | | | | | | | |
 
+| 01-01-T1 | 01-01 | 1 | RSCH-01 | T-01-01 | Three-witness freeze specified; DRAFT only, no premature freeze | doc-review + grep | Select-String header DRAFT + 8-token presence sweep | docs/research/RESEARCH_PROTOCOL.md | ✅ green |
+| 01-01-T2 | 01-01 | 1 | RSCH-01 | T-01-02 | No numeric parameter stated as fact; citations spot-checked | doc-review + grep | numeric-value region sweep returns empty | docs/research/RESEARCH_PROTOCOL.md | ✅ green |
+| 01-02-T1 | 01-02 | 1 | RSCH-02 | T-01-04 | Transcribed rules only; unvalidated stays TBD | doc-review + grep | 7-slot presence + D012 footer match | docs/research/families/trend-pullback.md | ✅ green |
+| 01-02-T2 | 01-02 | 1 | RSCH-02 | T-01-04 | Transcribed rules only; entry-quality metrics pre-committed | doc-review + grep | 7-slot presence + D012 footer match | docs/research/families/breakout-retest.md | ✅ green |
+| 01-02-T3 | 01-02 | 1 | RSCH-02 | T-01-03 | No family selected; footer count 3; zero unqualified selection language | doc-review + grep | footer count exactly 3 + language sweep empty | docs/research/families/range-mr.md | ✅ green |
+| 01-03-T1 | 01-03 | 1 | RSCH-03 | T-01-05 | Scope §7 and signal/execution/testing docs align to GLOSSARY with structures preserved | doc-review + grep | unqualified-autonomy-name and signal-context lifecycle sweeps empty | docs/00_PRODUCT_SCOPE.md | ✅ green |
+| 01-03-T2 | 01-03 | 1 | RSCH-03 | T-01-05 | Timezone canonical; section-12 enums canonical; ownership clarified without enum change | doc-review + grep | stale-zone sweep empty + section-12 region sweep empty + D028 in 3 mirrors | docs/research/TRADING_STRATEGY_RESEARCH.md | ✅ green¹ |
+| 01-03-T3 | 01-03 | 1 | RSCH-03 | T-01-06 | Numbers only; 28 DECISIONS rows; DOC_STATUS bump lists protocol | doc-review + grep | dup-header count 1 + row count 28 + DOC_STATUS entry present | docs/DECISIONS.md | ✅ green |
+| 01-04-T1 | 01-04 | 2 | RSCH-01 | T-01-08 | Explicit human choice on required-status and gate-as-code exception before any external change | manual / human-decision | Decision recorded in SUMMARY (no automated command; checkpoints excluded from automated gates by convention) | n/a | ✅ green |
+| 01-04-T2 | 01-04 | 2 | RSCH-01 | T-01-08 | Freeze is three-witness; gate checks freeze plus identity plus tripwire | CI + grep | FROZEN header plus freeze row plus workflow file present | .github/workflows/research-gate.yml | ✅ green |
+| 01-04-T3 | 01-04 | 2 | RSCH-01 | T-01-07 | Decoy unregistered file fails the gate; tree clean after | CI negative test | non-zero with decoys, zero after cleanup, evidence recorded | .github/workflows/research-gate.yml | ✅ green |
+
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
+
+*¹ 01-03-T2 check-note: the plan's stale-zone sweep (`git grep -n "Bangkok" -- docs/`) returns one hit — `docs/DECISIONS.md:30`, the D025 row recording "corrected from `Asia/Bangkok` to `Asia/Ho_Chi_Minh`". Append-only audit history, not a live zone; §9.3 canonical confirmed. Substance green; the sweep as written is over-strict. See 01-VERIFICATION.md orchestrator addendum.*
 
 ---
 
 ## Wave 0 Requirements
 
-- [ ] `docs/research/RESEARCH_PROTOCOL.md` — covers RSCH-01 (freeze header + §0–§6)
-- [ ] `docs/research/families/{trend-pullback,breakout-retest,range-mr}.md` — covers RSCH-02 (identical 7-slot template + TBD footer)
-- [ ] `.github/workflows/research-gate.yml` — executable gate for D-07 (freeze check + identity-tuple check + registry-path tripwire; required-status-check repo setting step included)
-- [ ] DECISIONS rows D022–D028 (21 → 28) + DOC_STATUS.md bump — covers RSCH-03
-- [ ] Gate negative-test evidence (failing scratch-PR run URL) — acceptance proof for D-07
+- [x] `docs/research/RESEARCH_PROTOCOL.md` — covers RSCH-01 (freeze header + §0–§6)
+- [x] `docs/research/families/{trend-pullback,breakout-retest,range-mr}.md` — covers RSCH-02 (identical 7-slot template + TBD footer)
+- [x] `.github/workflows/research-gate.yml` — executable gate for D-07 (freeze check + identity-tuple check + registry-path tripwire; required-status-check repo setting step included)
+- [x] DECISIONS rows D022–D028 (21 → 28) + DOC_STATUS.md bump — covers RSCH-03
+- [x] Gate negative-test evidence (failing scratch-PR run URL) — acceptance proof for D-07
 
 *"Existing infrastructure covers all phase requirements" is NOT true for this phase — the stubs above are the Wave 0 work.*
 
@@ -75,11 +89,18 @@ created: "2026-09-19"
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 60s (local) / < 5min (Actions)
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references
+- [x] No watch-mode flags
+- [x] Feedback latency < 60s (local) / < 5min (Actions)
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** validated 2026-09-19 (orchestrator direct audit; no auditor subagent spawned — docs-only mechanical fill per user direction)
+
+## Validation Audit 2026-09-19
+| Metric | Count |
+|--------|-------|
+| Gaps found | 4 (map rows missing, Wave-0 stale, frontmatter draft, sign-off pending) |
+| Resolved | 4 |
+| Escalated | 0 |
