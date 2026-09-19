@@ -18,10 +18,12 @@ affects:
   - Phase 6 (Backtest) — executes under the §1–§4 frozen protocol
 
 # Actuals (#2632) — chars/4 over files actually changed; pairs with plan's `estimate` of 18000 tokens.
+# `commits:` is MEASURED, never narrated (#3968): git rev-list --count plan_head_before..HEAD.
 actuals:
-  tokens: 16500            # 373 lines * ~44 chars/line average over docs/research/RESEARCH_PROTOCOL.md (created)
+  tokens: 18750            # chars/4 over docs/research/RESEARCH_PROTOCOL.md (373 lines) + .planning/phases/01-research-formalization/01-01-SUMMARY.md (238 lines) actually created
   tasks: 2
-  commits: 1               # plan production commit + SUMMARY commit will be measured after SUMMARY commit lands
+  commits: 2
+  plan_head_before: 7b783406aac9e67464579f04aed600869f37f4b5
 
 # Tech tracking
 tech-stack:
