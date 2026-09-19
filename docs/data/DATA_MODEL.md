@@ -337,7 +337,7 @@ Domain separation is mandatory:
 SignalStatus       ≠ OrderStatus ≠ PositionStatus ≠ ApprovalAction
 ```
 
-A signal reaching `APPROVED` must never imply that an order was accepted by Binance.
+A signal reaching `APPROVED` must never imply that an order was accepted by Binance. Signal-level approval and plan-level approval are separate: `SignalStatus.APPROVED` records user approval observed on the signal instance, `TradePlanStatus.APPROVED` authorizes execution handoff, and order placement reads the plan status. (D028)
 
 ## 4. Relationships
 

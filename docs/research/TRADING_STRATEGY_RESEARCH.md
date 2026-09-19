@@ -647,7 +647,8 @@ Ví dụ EMA200 trên 4H không được coi là hợp lệ ngay sau khi service
 ## 9.3. Time standard
 
 - DB: UTC.
-- UI/Telegram: convert sang Asia/Bangkok (UTC+7) khi cần.
+- UI/Telegram: convert sang Asia/Ho_Chi_Minh (UTC+7) khi cần.
+- Windows runtime: cần cài thêm `tzdata` wheel vì OS không có zoneinfo database; dùng `zoneinfo.ZoneInfo("Asia/Ho_Chi_Minh")` thay vì hard-code UTC+7 offset.
 
 ---
 
@@ -747,27 +748,24 @@ Không dùng win rate làm metric duy nhất.
 
 Do selection bias không làm hỏng journal; nó làm cho **một metric duy nhất trở nên dễ gây hiểu nhầm**.
 
-Mỗi signal cần có trạng thái:
+Mỗi signal cần có trạng thái theo canonical `SignalStatus` (`GLOSSARY.md` §2):
 
 ```text
-Generated
-Approved
+DETECTED
+NOTIFIED
+VIEWED
+APPROVED
 SKIPPED_USER
-Skipped-Busy
-Expired
-Invalidated
+SKIPPED_BUSY
+EXPIRED
+INVALIDATED
 ```
 
-Nếu được approve:
+Sau khi signal/plan được approve, order và trade đi theo canonical `OrderStatus` (`GLOSSARY.md` §5) và `TradeStatus` (`GLOSSARY.md` §6):
 
 ```text
-OrderPlaced
-PartiallyFilled
-Filled
-Canceled
-TP
-SL
-ManualExit
+OrderStatus: PLANNED, SUBMITTING, NEW, PARTIALLY_FILLED, FILLED, CANCELED, EXPIRED, REJECTED, UNKNOWN
+TradeStatus: PENDING, OPEN, CLOSED, ABORTED, UNKNOWN
 ```
 
 ## Hai bảng performance

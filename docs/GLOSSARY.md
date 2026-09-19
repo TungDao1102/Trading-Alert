@@ -49,6 +49,10 @@ INVALIDATED
 
 Execution lifecycle states do not belong in `SignalStatus`.
 
+### 2.1 Signal/Plan APPROVED ownership (D028)
+
+`SignalStatus.APPROVED` records that the user approved the signal instance. `TradePlanStatus.APPROVED` is a separate value that records the plan has been authorized for execution handoff. Order placement reads the `TradePlan` status, never the `Signal` status directly. The transition order is: Signal APPROVED → TradePlan APPROVED → Order PLANNED. Authority: D007 (signal/plan/order separation) and D016 (canonical terminology). (D028)
+
 ## 3. Canonical TradePlanStatus
 
 ```text

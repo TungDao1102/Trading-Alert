@@ -16,6 +16,8 @@ An order means:
 
 Keep these as separate domain objects.
 
+Signal-level approval (`SignalStatus.APPROVED`) records user approval observed on the signal instance; plan-level approval (`TradePlanStatus.APPROVED`) authorizes execution handoff; order placement reads the plan status. The transition order is Signal APPROVED → TradePlan APPROVED → Order PLANNED. (D028)
+
 ## 2. Signal fields
 
 Minimum:
