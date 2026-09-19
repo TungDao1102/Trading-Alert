@@ -58,7 +58,7 @@ hash(
 
 This protects against duplicate alerts after restart.
 
-## 4. Alert states
+## 4. Signal states (canonical)
 
 ```text
 DETECTED
@@ -69,10 +69,11 @@ SKIPPED_USER
 SKIPPED_BUSY
 EXPIRED
 INVALIDATED
-ORDER_PLACED
-FILLED
-CLOSED
 ```
+
+Execution lifecycle states do not belong in `SignalStatus`; the canonical signal-state list above is the sole authoritative per `GLOSSARY.md` §2.
+
+The execution lifecycle for an order after a plan approval is documented under the OrderStatus section of `GLOSSARY.md` (canonical order-state values) and under the TradeStatus section of `GLOSSARY.md` (canonical trade-state values); cross-reference those sections for execution-side state names. The domain-separation rule is defined in `DATA_MODEL.md` §3.
 
 ## 5. User-facing alert
 

@@ -41,8 +41,6 @@ Important current Binance API detail: since late 2025, USDⓈ-M `STOP_MARKET` / 
 ```text
 PLANNED
   ↓
-APPROVED
-  ↓
 SUBMITTING
   ↓
 NEW
@@ -51,6 +49,8 @@ NEW
   ├→ CANCELED
   └→ EXPIRED
 ```
+
+An order enters `PLANNED` only after the upstream plan has been approved; approval lives on the signal and trade-plan machines (see `GLOSSARY.md` §2 and §3), not on the order state machine.
 
 ## 4. Pending-order expiry
 

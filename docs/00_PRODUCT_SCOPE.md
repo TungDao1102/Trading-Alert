@@ -91,11 +91,16 @@ Backtest execution simulation may use 1M data to resolve intrabar order sequenci
 
 ## 7. Operating modes
 
+Canonical list per `GLOSSARY.md` §8:
+
 1. `RESEARCH`
 2. `BACKTEST`
 3. `PAPER`
 4. `LIVE_APPROVAL`
-5. `LIVE_AUTONOMOUS` — future only, disabled by default and requiring explicit evidence/gates.
+5. `SAFE_MODE`
+6. `LIVE_AUTONOMOUS_DISABLED` — future only, disabled by default and requiring explicit evidence/gates.
+
+The canonical name `LIVE_AUTONOMOUS_DISABLED` records the current disabled-by-default state of the future autonomous mode described in `GLOSSARY.md` §8.
 
 ## 8. Daily-profit principle
 

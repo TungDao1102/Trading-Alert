@@ -109,12 +109,14 @@ Cover:
 At minimum validate invalid transitions such as:
 
 ```text
-EXPIRED → APPROVED
-CANCELED → FILLED
-CLOSED → NEW PROTECTIVE ORDER
+SignalStatus:    EXPIRED → APPROVED
+TradePlanStatus: CANCELED → APPROVED
+TradeStatus:     CLOSED   → NEW PROTECTIVE ORDER
 ```
 
 unless an explicit reconciliation workflow authorizes the transition.
+
+The order state machine has no approval state — order transitions start at `PLANNED` per `GLOSSARY.md` §5 and `EXECUTION_SPEC.md` §3. Approval is a signal/plan transition, not an order transition.
 
 ## 9. Quantization fixtures
 
