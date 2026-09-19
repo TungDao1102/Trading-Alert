@@ -286,3 +286,17 @@ None - no external service configuration required.
 
 *Phase: 01-research-formalization*
 *Completed: 2026-09-19*
+
+## Self-Check: PASSED
+
+| # | Check | Result |
+|---|-------|--------|
+| 1 | `01-03-SUMMARY.md` exists at `.planning/phases/01-research-formalization/` | FOUND |
+| 2 | All 4 commits exist on master (`e1ec86a`, `562975b`, `4b6d6c0`, `f5087b4`) | FOUND |
+| 3 | `.planning/STATE.md` and `.planning/ROADMAP.md` NOT modified by executor (orchestrator-owned) | PASS (0 diff lines) |
+| 4 | `docs/DECISIONS.md` row count = 28 (baseline 21 + D022-D028) | PASS |
+| 5 | `docs/DOC_STATUS.md` lists `research/RESEARCH_PROTOCOL.md` under Stable/canonical + change-log records C1-C7 edits | PASS |
+| 6 | `docs/backtest/BACKTEST_SPEC.md` has exactly one `^## 11.` header (Experiment record); duplicate gates header is now `^## 12. Acceptance gates` | PASS |
+| 7 | `Bangkok` references in docs/: only D025 row describing the resolved change (audit trail); no other stale-zone hits | PASS (audit trail only) |
+| 8 | `LIVE_AUTONOMOUS[^_]` and `ORDER_PLACED` no longer appear in scope/signal/execution/testing docs | PASS |
+| 9 | D028 mirror count in GLOSSARY/DATA_MODEL/SIGNAL_AND_ALERTS = 4 (≥ 3 required) | PASS |
