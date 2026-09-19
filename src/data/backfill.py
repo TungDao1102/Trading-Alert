@@ -22,18 +22,15 @@ tracer's wiring skeleton (PLAN 02-02 Task 1).
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import structlog
 import tenacity
-
 from src.adapters.binance_usdm import BinanceUsdmAdapter, Kline
-from src.data.quality import QualityVerdict, check_batch
+from src.data.quality import check_batch
 from src.data.store import DEFAULT_RAW_ROOT, publish_batch
 
 log = structlog.get_logger()
@@ -145,12 +142,18 @@ async def backfill_symbol_interval(
     pages = 0
     rows_published = 0
     structural_rejections = 0
+    duplicates_skipped = 0
     durations: list[int] = []
     cursor = start_ms
     now_ms = int(clock().timestamp() * 1000)
+    # Cross-page dedup: Binance's paginated response can return an
+    # overlapping row at the boundary (Pitfall 2). Track every open_time
+    # we've already published so the overlap lands in Parquet exactly once.
+    seen_open_times: set[int] = set()
 
     while cursor < end_ms:
         page_start = cursor
+        pages += 1
         t0 = datetime.now(UTC)
         raw_page = await fetch_page_with_retry(
             adapter,
@@ -162,12 +165,28 @@ async def backfill_symbol_interval(
             jitter_max_seconds=cfg.jitter_max_seconds,
         )
         durations.append(int((datetime.now(UTC) - t0).total_seconds() * 1000))
-        pages += 1
 
         # Drop the forming candle: anything whose close_time is in the future
         # relative to the injected clock (Pitfall 1). This must run BEFORE the
         # quality gate so it never inspects an unclosed bar.
-        closed: list[Kline] = [k for k in raw_page if int(k.close_time_utc.timestamp() * 1000) <= now_ms]
+        closed: list[Kline] = [
+            k for k in raw_page if int(k.close_time_utc.timestamp() * 1000) <= now_ms
+        ]
+
+        # Cross-page dedup: skip rows whose open_time we already published
+        # on a previous page. Track them as "seen" only after the batch
+        # passes the quality gate so a rejected batch never poisons later
+        # cursor advances.
+        if closed:
+            deduped: list[Kline] = []
+            for k in closed:
+                k_open_ms = int(k.open_time_utc.timestamp() * 1000)
+                if k_open_ms in seen_open_times:
+                    duplicates_skipped += 1
+                    continue
+                seen_open_times.add(k_open_ms)
+                deduped.append(k)
+            closed = deduped
 
         if closed:
             verdict = check_batch(closed, interval)
@@ -197,6 +216,7 @@ async def backfill_symbol_interval(
                     rows=len(closed),
                     files=written,
                     gap_count=verdict.gap_count,
+                    duplicates_skipped=duplicates_skipped,
                 )
                 if on_publish is not None:
                     result = on_publish(len(closed))

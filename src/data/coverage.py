@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from collections.abc import Sequence
 from datetime import datetime
@@ -21,7 +20,6 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import duckdb
-
 from src.data.store import DEFAULT_RAW_ROOT
 
 DEFAULT_SQL_PATH = Path(__file__).resolve().parent.parent / "sql" / "coverage_v1.sql"

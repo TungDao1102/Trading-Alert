@@ -16,9 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import polars as pl
-
 from src.adapters.binance_usdm import Kline
-
 
 # Interval → millisecond duration. Single source of truth for the
 # quality + paginator math; later phases extend the table when 15m

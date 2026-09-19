@@ -17,7 +17,6 @@ from datetime import date
 from pathlib import Path
 
 import polars as pl
-
 from src.adapters.binance_usdm import Kline
 from src.data.quality import klines_to_frame
 
