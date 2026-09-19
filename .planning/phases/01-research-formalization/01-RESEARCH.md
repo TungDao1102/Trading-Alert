@@ -303,32 +303,58 @@ SKIPPED — docs-only phase. No runtimes, services, or CLIs required beyond the 
 
 ## Validation Architecture
 
-Nyquist validation is enabled (config `workflow.nyquist_validation: true`), but this phase produces documents + one CI YAML, not product behavior. Adapted mapping:
+> DOCUMENTS-AND-GATES-ONLY phase (D-01–D-08): zero product code, zero test framework, zero test runner. Verification = git + markdown + one GitHub Actions CI YAML gate + grep-based doc-consistency checks. There is no pytest/jest/vitest surface to install, configure, or run — any plan task that invents one is out of scope and must be rejected at plan review.
 
-### Test Framework
+### Test Infrastructure
+
 | Property | Value |
 |----------|-------|
-| Framework | GitHub Actions YAML check (research-gate) + human doc review |
-| Config file | `.github/workflows/research-gate.yml` (created this phase — Wave 0 gap) |
-| Quick run command | `grep -n "Status.*FROZEN" docs/research/RESEARCH_PROTOCOL.md` |
-| Full suite command | Full research-gate workflow (freeze check + identity-tuple check + path tripwire) |
+| Framework | none — no code under test; verification is doc-review + grep checks + one CI YAML gate |
+| Config file | `.github/workflows/research-gate.yml` (created this phase — Wave 0 gap; verified absent: no `.github/workflows/*.yml` exists in repo) |
+| Quick run command | `grep -n "Status.*FROZEN" docs/research/RESEARCH_PROTOCOL.md && grep -c "^\\| D0" docs/DECISIONS.md` — protocol frozen AND decision log growing; ~2 s |
+| Full suite command | Full research-gate workflow on a scratch PR: freeze check + identity-tuple check + registry-path tripwire + contradiction-token grep sweep (the four `grep` blocks in `## Code Examples`); ~1–3 min wall-clock (actions queue + checkout), ~5 s of actual check time locally |
 
-### Phase Requirements → Test Map
-| Req ID | Behavior | Test Type | Automated Command | File Exists? |
-|--------|----------|-----------|-------------------|-------------|
-| RSCH-01 | Protocol frozen with splits/cost/execution/gates | doc-review + CI | `grep -n "Status.*FROZEN" docs/research/RESEARCH_PROTOCOL.md` | ❌ Wave 0 (protocol doc + workflow) |
-| RSCH-02 | Three 7-slot family sheets, comparable, TBD-footered | doc-review | `grep -c "TBD (D012)" docs/research/families/*.md` (= 3) | ❌ Wave 0 |
-| RSCH-03 | C1–C7 edits + D022–D028 rows + DOC_STATUS bump | doc-review + grep | contradiction-token greps in Code Examples | ❌ Wave 0 (rows + bump) |
+**Estimated runtimes:** quick check ~2 s local; full gate ~5 s of checks locally, ~1–3 min via GitHub Actions (queue-dominated). No build, no dependencies, no toolchain beyond `git` + `grep` + YAML.
 
 ### Sampling Rate
-- **Per plan commit:** relevant `grep` verification from Code Examples.
-- **Phase gate:** research-gate workflow green + reviewer confirms no winner declared + SPEC still TBD.
+
+- **After every doc-commit (each plan's commit):** run the quick check relevant to that plan's scope — protocol plan: `grep -n "Status.*FROZEN"` header presence + DECISIONS-row grep for the freeze row; family-sheets plan: `grep -c "TBD (D012)" docs/research/families/*.md` must equal 3 and `grep -rni "\bbest\b\|\boptimal\b\|\bchosen\b\|\bpreferred variant\b\|\bwinner\b" docs/research/families/` must be empty-or-qualified; C1–C7 plan: contradiction-token greps (Bangkok / `LIVE_AUTONOMOUS[^_]` / ORDER_PLACED / OrderPlaced / `Skipped-Busy`) must return zero hits in the edited files. Max feedback latency: seconds — the author runs the grep before `git commit`.
+- **After every plan wave (phase has one batched C1–C7 wave + sequential doc waves):** run the full sweep — all four `## Code Examples` grep blocks + DECISIONS row-count check (baseline 21 rows D001–D021, verified by grep this session; post-phase expectation: 28 rows, D022–D028 added) + confirm `docs/research/RESEARCH_PROTOCOL.md`, the three family sheets, and `.github/workflows/research-gate.yml` all exist on the branch. Max feedback latency: minutes (one Actions run on the wave's PR).
+- **Phase gate (before `/gsd-verify-work`):** research-gate workflow green as a required status check on the merge PR + human reviewer confirms (a) no winner declared, (b) SPEC still TBD where unvalidated, (c) DOC_STATUS bump lists every touched doc.
+
+### Automated vs Manual Verification (for THESE deliverables)
+
+**Automated (grep / CI — mechanical, no judgment):**
+
+1. **Frozen-protocol completeness checklist** — each of §1–§5 asserts a source-line trace. Automated part: `grep` each mandatory token/phrase in `docs/research/RESEARCH_PROTOCOL.md` (e.g. `Development → Validation`, `parameterSetHash`, `Status.*FROZEN`, `Supersedes`, one-way-flow paragraph). The trace table itself (§-to-source-lines) is verified by spot-checking ≥50% of cited line ranges with `Read`, not by trusting the author's citation strings.
+2. **Per-family 7-slot conformance check** — automated: each of the three family sheets contains all 7 slot headings (informal → machine-detectable → alternatives → adv/disadv → look-ahead-bias → testable parameters → backtest path) exactly once, in order, plus the `V1 family selection: TBD (D012)` footer. Scriptable as heading-count greps; `grep -c "TBD (D012)"` across `docs/research/families/*.md` must equal 3.
+3. **C1–C7 resolution proof** — automated before/after evidence: the *before* state is already captured in this RESEARCH.md (C1–C7 evidence blocks with `[VERIFIED: path:lines]` citations); the *after* state must show (a) zero hits on the contradiction-token sweep (`Bangkok`, `LIVE_AUTONOMOUS` without `_DISABLED` suffix, `ORDER_PLACED` in signal context, `OrderPlaced`, `Skipped-Busy`, duplicate `## 11.` headers), (b) exactly 7 new DECISIONS rows D022–D028 (row-count 21 → 28), (c) DOC_STATUS.md diff touching every edited doc's line.
+4. **Gate negative test** — automated and mandatory: on a scratch branch, commit a decoy file containing a `parameterSetId`-looking JSON outside the registry path (and one experiment record missing `parameterSetHash`) and confirm the CI check exits non-zero and blocks the PR; then delete the decoy. A gate that has never been observed to fail is not a gate — the negative test is the acceptance proof for D-07. Record the failing run URL in the plan's summary.
+
+**Manual (human reviewer — judgment required, cannot be grepped):**
+
+1. Family sheets are genuinely comparable (same framework, competing Variants as rows not prose) and contain no de-facto winner language even where greps pass (e.g. "natural default", "obvious baseline choice").
+2. Protocol freezes methodology (splits/cost/execution/gates/ranges-to-explore) and pins no parameter values (no ATR multiplier, RR minimum, or expiry hour stated as fact).
+3. C1–C7 edits preserve each doc's purpose (D-05) — diff review restricted to contradiction scope; any out-of-scope rename is reverted or gets its own DECISIONS row (Pitfall 3).
+4. C7 ownership note reads as clarification a future implementer can apply (Signal.APPROVED → Plan.APPROVED → Order.PLANNED), not as a new enum.
+5. Freeze-timing decision (Open Question 1): reviewer confirms whether freeze landed inside the batch or as a separate beat, and the DECISIONS freeze row records which.
 
 ### Wave 0 Gaps
-- [ ] `docs/research/RESEARCH_PROTOCOL.md` — covers RSCH-01 (Plan 1 output)
-- [ ] `docs/research/families/{trend-pullback,breakout-retest,range-mr}.md` — covers RSCH-02
-- [ ] `.github/workflows/research-gate.yml` — executable gate for D-07
-- [ ] DECISIONS rows D022–D028 + DOC_STATUS bump — covers RSCH-03
+
+No test framework to install — Wave 0 here means the doc-check stubs and gate file the plans themselves create. None exist yet (verified this session: `docs/research/` contains only `TRADING_STRATEGY_RESEARCH.md`; no `.github/workflows/*.yml`; DECISIONS at 21 rows):
+
+- [ ] `docs/research/RESEARCH_PROTOCOL.md` — covers RSCH-01 (Plan 1 output; freeze header + §0–§6)
+- [ ] `docs/research/families/{trend-pullback,breakout-retest,range-mr}.md` — covers RSCH-02 (one plan, three sheets, identical 7-slot template + TBD footer)
+- [ ] `.github/workflows/research-gate.yml` — executable gate for D-07 (freeze check + identity-tuple check + registry-path tripwire; required-status-check repo setting step included in the plan)
+- [ ] DECISIONS rows D022–D028 (21 → 28) + DOC_STATUS.md bump — covers RSCH-03
+- [ ] Gate negative-test evidence (failing scratch-PR run URL) — acceptance proof for D-07, recorded in plan summary
+
+"Existing infrastructure covers all phase requirements" is NOT true for this phase — the four stubs above are the Wave 0 work, and the first plan wave must land them before dependent verification means anything.
+
+### Carried Risks (from prior findings — planner must convert to verification steps)
+
+1. **Vacuous-pass gate (Pitfall 4, HIGH attention):** with zero registered parameter sets and zero experiment records, gate checks 2–3 pass vacuously and only check 1 (FROZEN header + DECISIONS freeze row) carries weight. If the registry-path tripwire (check 3) is omitted, the empty-repo pass becomes a permanent pass after parameter files appear in Phase 4+. Mitigations, all mandatory: (a) tripwire included in the YAML from day one; (b) workflow marked as required status check (repo-settings step in the plan — without this, `exit 1` blocks nothing); (c) gate negative test with decoy file observed failing; (d) Phase 3 plan references this gate file as its acceptance criterion.
+2. **C6 renumber breaking numeric cross-references (Pitfall 6):** BACKTEST §11-gates is referenced by title from scope §9 (safe), but unknown numeric citations (`§11`, `Section 8`, `§13`) may exist elsewhere in `docs/`. Mitigation: run the before-grep (`grep -rn "§ *1[123]\|section 1[123]\|Section [789]\|§ *[789]" docs/`) and archive its output in the plan BEFORE renumbering, run the identical after-grep, and diff the two — every delta must map to an intended C6 renumber or be fixed; all new prose must cite sections by title, never by number.
 
 ## Security Domain
 
