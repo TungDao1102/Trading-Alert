@@ -12,7 +12,7 @@ Research-first path from frozen protocol to cautious live orders: formalize the 
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Research Formalization** - Frozen protocol, three family hypotheses, doc contradictions resolved
+- [x] **Phase 1: Research Formalization** - Frozen protocol, three family hypotheses, doc contradictions resolved
 - [ ] **Phase 2: Data Foundation** - Candles, day-one OI collector, funding, metadata, backup drill
 - [ ] **Phase 3: Domain + Registry + Fixtures** - Seven entities, versioned params, golden-fixture harness
 - [ ] **Phase 4: Pure Core (Feature + Strategy + Planner)** - Deterministic signals and trade plans from closed candles
@@ -38,10 +38,10 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 4 plans
 
 Plans:
-- [ ] 01-01: Frozen protocol doc DRAFT (tracer slice with verification greps)
-- [ ] 01-02: Three family sheets in the fixed 7-slot template
-- [ ] 01-03: C1–C7 edit batch + DECISIONS D022–D028 + DOC_STATUS bump
-- [ ] 01-04: CI gate YAML + required-status-check + freeze beat + negative test
+- [x] 01-01: Frozen protocol doc DRAFT (tracer slice with verification greps)
+- [x] 01-02: Three family sheets in the fixed 7-slot template
+- [x] 01-03: C1–C7 edit batch + DECISIONS D022–D028 + DOC_STATUS bump
+- [x] 01-04: CI gate YAML + required-status-check + freeze beat + negative test
 
 ### Phase 2: Data Foundation
 **Goal**: Irrecoverable data is safe — OI accumulates from day one and every symbol has queryable, quality-checked coverage.
