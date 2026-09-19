@@ -28,7 +28,7 @@ affects:
 actuals:
   tokens: 18406            # chars/4 over the three family sheets (trend-pullback 5190 + breakout-retest 6530 + range-mr 6686) -- SUMMARY itself excluded from this count
   tasks: 3
-  commits: 3               # measured: git rev-list --count plan_head_before..HEAD = 3 (befc99a + fedf924 + d8a9405); SUMMARY commit lands after this measurement
+  commits: 4               # measured: git rev-list --count plan_head_before..HEAD = 4 (befc99a + fedf924 + d8a9405 + 172a157 SUMMARY)
   plan_head_before: 39e03f94d56c96da274280d89cd4a47dbcc3cb83
 
 # Tech tracking
@@ -206,7 +206,7 @@ Each task was committed atomically:
    - Side-by-side read of cosmetics + slot order + row order: aligned across all 3 sheets
 
 **Plan metadata:**
-- (SUMMARY commit lands after this measurement; see "Deviations from Plan" #2 for the #3968 measurement-vs-recursion drift.)
+- `172a157` (docs: plan summary — three family spec sheets + cross-sheet comparability pass)
 
 ## Files Created/Modified
 
