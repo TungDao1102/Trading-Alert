@@ -53,10 +53,14 @@ Plans:
   2. OI snapshots accumulate continuously from day one plus funding history, so the 30-day API window can never destroy research data going forward
   3. Symbol metadata (tick/step, min/max qty, notional constraints, position modes, onboard time) loads versioned from live exchangeInfo instead of hard-coded values
   4. Automated backup + restore drill passes covering PostgreSQL state and the self-collected OI dataset
-**Plans**: TBD
+**Plans**: 5 plans
 
 Plans:
-- [ ] 02-01: TBD (derived during plan-phase)
+- [ ] 02-01: Toolchain + storage skeleton + SDK re-verify + COVERAGE matrix
+- [ ] 02-02: Tracer end-to-end candle slice (one symbol, one interval)
+- [ ] 02-03: Full live-5 bounded-depth bootstrap with TDD quality gates
+- [ ] 02-04: Versioned metadata + day-one OI/funding collector (TDD)
+- [ ] 02-05: Coverage CLI/views + backup drill on off-host target
 
 ### Phase 3: Domain + Registry + Fixtures
 **Goal**: Every decision is traceable and reproducible — new behavior must be expressible as a versioned set before it exists.
