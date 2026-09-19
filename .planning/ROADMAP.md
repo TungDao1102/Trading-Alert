@@ -35,10 +35,13 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Each of the three families (Trend Pullback, Breakout+Retest, Range Mean-Reversion) has an independent spec tracing informal concept → machine-detectable rule → deterministic alternatives → bias notes → parameters → backtest path
   3. Every known Core Docs v0.3 contradiction appears as an explicit resolved decision in DECISIONS.md (SystemMode naming, APPROVED lifecycle, timezone, §12 status names, duplicate sections) — no silent renames
   4. A parameter run attempted without a frozen protocol and registered parameter set is rejected by gate, not by convention
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
-- [ ] 01-01: TBD (derived during plan-phase)
+- [ ] 01-01: Frozen protocol doc DRAFT (tracer slice with verification greps)
+- [ ] 01-02: Three family sheets in the fixed 7-slot template
+- [ ] 01-03: C1–C7 edit batch + DECISIONS D022–D028 + DOC_STATUS bump
+- [ ] 01-04: CI gate YAML + required-status-check + freeze beat + negative test
 
 ### Phase 2: Data Foundation
 **Goal**: Irrecoverable data is safe — OI accumulates from day one and every symbol has queryable, quality-checked coverage.
