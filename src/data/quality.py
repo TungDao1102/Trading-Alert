@@ -125,18 +125,20 @@ def check_batch(klines: list[Kline], interval: str) -> QualityVerdict:
         | (pl.col("high") < pl.col("low"))
     ).height
 
-    # Timestamp regression: open_time_utc must be strictly ascending.
+    # Timestamp regression: open_time_utc must be strictly ascending. A
+    # `diff == 0` is reported as a DUPLICATE (above), not as a regression —
+    # conflating the two would force the test for a duplicate batch to also
+    # see a non-zero regression count, which hides the separate failure modes
+    # the paginator logs downstream.
     diffs = df["open_time_utc"].diff()
-    # diff is a Timedelta series; compare via `== timedelta(0)` or `<=`.
-    # Build a boolean series using a list comprehension over Python timedeltas
-    # so we avoid coupling to Polars internals.
     ts_regression_count = 0
     if diffs.len() > 0:
         for v in diffs.to_list():
             if v is None:
                 continue
-            # Strict ascending: each diff must be > 0.
-            if v.total_seconds() * 1000 <= 0:
+            # Strict backwards step: each diff must be > 0. A zero diff is
+            # a duplicate (counted above), not a regression.
+            if v.total_seconds() * 1000 < 0:
                 ts_regression_count += 1
     timestamp_regressions = ts_regression_count
 
