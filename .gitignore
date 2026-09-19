@@ -1,2 +1,30 @@
 # OMO harness runtime state — machine-local session continuation pointers, never commit
 .omo/**/*.json
+
+# Python build/cache artefacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+
+# uv-managed virtualenv
+.venv/
+
+# Local data — Parquet raw store + DuckDB scratch live outside git (D-04)
+data/
+backup/
+
+# Test artefacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local env (T-02-02 — credentials must never be in git)
+.env
+.env.local
