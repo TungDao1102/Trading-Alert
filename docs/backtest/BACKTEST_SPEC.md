@@ -133,6 +133,8 @@ Each run stores:
 - code/data version,
 - notes.
 
+The canonical six-field identity tuple required on every experiment record is defined in `docs/research/RESEARCH_PROTOCOL.md` §5 and `docs/configuration/CONFIGURATION.md` §7 (`experimentId`, `strategyVersion`, `parameterSetHash`, `dataSnapshotId`, `codeVersion`, `costModelHash`); the `parameterSetId` runtime identifier is required alongside `parameterSetHash` per the same source. An experiment record missing any of these six fields does not satisfy this section.
+
 ## 12. Acceptance gates
 
 A strategy may proceed only when:

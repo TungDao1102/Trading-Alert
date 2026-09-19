@@ -1,8 +1,8 @@
 # Research Protocol (Frozen)
 
 > **Protocol version:** v1.0.0
-> **Status:** DRAFT
-> **Frozen on:**
+> **Status:** FROZEN
+> **Frozen on:** 2026-09-19
 > **Supersedes:** none
 
 ## §0 Identity, status, and one-way flow

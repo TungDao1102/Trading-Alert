@@ -1,0 +1,135 @@
+name: research-gate
+
+on:
+  pull_request:
+    branches:
+      - master
+  push:
+    branches:
+      - master
+
+jobs:
+  research-gate:
+    name: research-gate (D-07)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Freeze check (protocol header + DECISIONS row + DOC_STATUS index must all agree)
+        id: freeze
+        run: |
+          set -eu
+          PROTOCOL=docs/research/RESEARCH_PROTOCOL.md
+
+          # Witness 1: protocol header must read Status: FROZEN with a Frozen-on date.
+          if [ ! -f "$PROTOCOL" ]; then
+            echo "::error::Research protocol file missing at $PROTOCOL"
+            exit 1
+          fi
+          if ! grep -E "^>\s*\*\*Status:\*\*\s*FROZEN\b" "$PROTOCOL" >/dev/null; then
+            echo "::error::$PROTOCOL header does not read Status: FROZEN"
+            exit 1
+          fi
+          if ! grep -E "^>\s*\*\*Frozen on:\*\*\s*[0-9]{4}-[0-9]{2}-[0-9]{2}" "$PROTOCOL" >/dev/null; then
+            echo "::error::$PROTOCOL header does not carry a Frozen-on date"
+            exit 1
+          fi
+
+          # Witness 2: DOC_STATUS.md must list the protocol under ## Stable / canonical and not still mark it pending-freeze or DRAFT.
+          if ! grep -E "research/RESEARCH_PROTOCOL\.md" docs/DOC_STATUS.md >/dev/null; then
+            echo "::error::docs/DOC_STATUS.md does not list research/RESEARCH_PROTOCOL.md"
+            exit 1
+          fi
+          if grep -E "research/RESEARCH_PROTOCOL\.md.*(pending-freeze|DRAFT|Living research)" docs/DOC_STATUS.md >/dev/null; then
+            echo "::error::docs/DOC_STATUS.md still tags research/RESEARCH_PROTOCOL.md as pending-freeze or DRAFT"
+            exit 1
+          fi
+
+          # Witness 3: DECISIONS.md must have a freeze row referencing protocol v1.0.0 frozen / RESEARCH_PROTOCOL frozen.
+          if ! grep -E "protocol v1\.0\.0 frozen|RESEARCH_PROTOCOL.*frozen|frozen.*RESEARCH_PROTOCOL" docs/DECISIONS.md >/dev/null; then
+            echo "::error::docs/DECISIONS.md has no protocol v1.0.0 freeze row"
+            exit 1
+          fi
+
+          echo "Freeze check passed: protocol FROZEN with matching DECISIONS row + DOC_STATUS index."
+
+      - name: Identity-tuple check (experiment and backtest records must carry the six identity fields)
+        id: identity
+        run: |
+          set -eu
+          # The six required identity fields per docs/research/RESEARCH_PROTOCOL.md §5 and docs/configuration/CONFIGURATION.md §7.
+          REQUIRED=(strategyVersion parameterSetId parameterSetHash dataSnapshotId codeVersion costModelHash)
+
+          # Locate experiment and backtest record files (JSON or YAML) anywhere in the repo.
+          # Exclude .git, node_modules, .github (this workflow), and the registry docs themselves.
+          mapfile -t FILES < <(
+            find . -type f \
+              \( -name 'experiment*.json' -o -name 'experiment*.yaml' -o -name 'experiment*.yml' \
+              -o -name 'backtest*.json'  -o -name 'backtest*.yaml'  -o -name 'backtest*.yml' \) \
+              -not -path './.git/*' \
+              -not -path './node_modules/*' \
+              -not -path './.github/*' 2>/dev/null || true
+          )
+
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "Identity-tuple check: no experiment or backtest records present; passes vacuously."
+            echo "::warning::Empty-repo semantics: with zero registered parameter sets, the identity and tripwire checks pass vacuously; the freeze check above carries the gate."
+            exit 0
+          fi
+
+          MISSING=()
+          for f in "${FILES[@]}"; do
+            for k in "${REQUIRED[@]}"; do
+              if ! grep -q "$k" "$f"; then
+                MISSING+=("$f:$k")
+              fi
+            done
+          done
+
+          if [ "${#MISSING[@]}" -gt 0 ]; then
+            echo "::error::Identity-tuple check failed. Records missing required identity fields:"
+            for m in "${MISSING[@]}"; do echo "  - $m"; done
+            exit 1
+          fi
+
+          echo "Identity-tuple check passed: ${#FILES[@]} record(s) carry all six required identity fields."
+
+      - name: Registry-path tripwire (parameter set files must live under docs/research/registry/)
+        id: tripwire
+        run: |
+          set -eu
+          REGISTRY=docs/research/registry
+
+          # A "parameter set file" is a JSON or YAML file that carries a parameter-set ID AND a parameters block.
+          # Markdown documentation that mentions parameterSetId in prose does NOT match (JSON/YAML only).
+          mapfile -t CANDIDATES < <(
+            grep -rl --include='*.json' --include='*.yaml' --include='*.yml' \
+              -E "parameterSetId|parameter_set_id|parameterSetHash|parameter_set_hash" \
+              . \
+              --exclude-dir=.git \
+              --exclude-dir=node_modules \
+              --exclude-dir=.github 2>/dev/null || true
+          )
+
+          hits=""
+          for f in "${CANDIDATES[@]}"; do
+            # Must also carry a parameters block (rules out prose-mention files).
+            if ! grep -qE '"parameters"|^parameters:|"parameters_json"|^parameters_json:' "$f"; then
+              continue
+            fi
+            # Must be outside the registry path.
+            case "$f" in
+              "$REGISTRY"/*|"./$REGISTRY"/*) ;;
+              *) hits="$hits $f" ;;
+            esac
+          done
+
+          if [ -n "$hits" ]; then
+            echo "::error::Registry-path tripwire failed. Parameter set files found outside $REGISTRY:"
+            for h in $hits; do echo "  - $h"; done
+            echo "::error::Move parameter set files to $REGISTRY/ or remove them."
+            exit 1
+          fi
+
+          echo "Registry-path tripwire passed."
