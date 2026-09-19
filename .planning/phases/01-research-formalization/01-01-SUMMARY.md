@@ -251,5 +251,28 @@ None - no external service configuration required. Phase 1 is docs-only.
 
 ---
 
+## Self-Check: PASSED
+
+- **Files exist on disk:**
+  - `docs/research/RESEARCH_PROTOCOL.md` — PRESENT (373 lines, DRAFT, §0–§6 + Appendix A)
+  - `.planning/phases/01-research-formalization/01-01-SUMMARY.md` — PRESENT (this file)
+- **Commits exist:**
+  - `7a7fce9` (Task 1: tracer slice) — FOUND in git log
+  - `ed2349d` (Task 2 / SUMMARY content) — FOUND in git log
+  - `45b7e40`, `1b507f0`, `8388992`, `5c49cca` (SUMMARY frontmatter fix-ups) — FOUND in git log
+- **Scope matches plan (01-01):**
+  - No modifications to STATE.md or ROADMAP.md by this executor (verified via `git log --name-only plan_head_before..HEAD -- .planning/STATE.md .planning/ROADMAP.md` → empty)
+  - No modifications to TRADING_STRATEGY_SPEC.md (D-06 — stays TBD)
+  - No `src/`, registry seeds, or experiment records created
+- **Verification commands re-run:**
+  - `Test-Path docs/research/RESEARCH_PROTOCOL.md` → True
+  - `Select-String -Path docs/research/RESEARCH_PROTOCOL.md -Pattern "Status.*DRAFT"` → line numbers 4, 14, 15
+  - 8-token sweep (parameterSetHash, Supersedes, Development, walk-forward, slippage, kill gate, experiment, invalidation) → all present
+  - Numeric-value region sweep → empty output, exit 0
+
+**Self-Check verdict:** PASSED. All success criteria from the plan's `<success_criteria>` satisfied.
+
+---
+
 *Phase: 01-research-formalization*
 *Completed: 2026-09-19*
