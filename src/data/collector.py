@@ -288,18 +288,17 @@ async def async_oi_tick(
     Three outcomes:
       - Healthy: one snapshot per universe symbol + watermark advance,
         all in ONE transaction. `gaps_recorded == 0`.
-      - Adapter error: ONE tick-wide gap row, no snapshots, no watermark
-        advance. Returns `gaps_recorded == 1`.
+      - Per-symbol adapter error: the failed symbol gets its own gap row
+        while healthy symbols still commit + advance — one bad symbol
+        never blinds the whole tick. `gaps_recorded` counts failed symbols.
       - Skipped (`skip=True`): caller signals the scheduled tick did not
-        run (e.g. process restart). ONE gap row with expected vs observed
-        timestamps, no adapter call.
+        run (e.g. process restart). ONE tick-wide gap row with expected
+        vs observed timestamps, no adapter call.
 
-    Atomicity: snapshot file writes happen BEFORE `session.commit()`. If
-    the commit fails, the on-disk files exist but the watermark does not
-    advance — the next tick re-writes the same date-partition files
-    with the same data. This is acceptable because D-04 demands immutable
-    per-day files; a re-write with the same data is a no-op against the
-    immutable store, and the gap row (if raised) flags the inconsistency.
+    Atomicity: snapshot file writes happen BEFORE `session.commit()`. A
+    disk/permission failure in the write+commit section records a
+    tick-wide gap row and re-raises — a half-written tick is never left
+    without a journal entry.
     """
     if skip:
         _record_gap(
@@ -315,45 +314,57 @@ async def async_oi_tick(
         )
 
     # Poll the adapter sequentially (5 symbols — bounded concurrency
-    # unnecessary). On any exception, write a tick-wide gap row and
-    # bail. Per-symbol recovery is deferred to a future plan; V1 fail-
-    # closed posture aborts the whole tick.
+    # unnecessary), isolating failures per symbol.
     snapshots: list[OiSnapshot] = []
-    try:
-        for sym in universe:
+    gaps = 0
+    for sym in universe:
+        try:
             snap = await adapter.open_interest(sym)  # type: ignore[attr-defined]
-            snapshots.append(snap)
+        except Exception as exc:
+            _record_gap(
+                session,
+                symbol=sym,
+                data_class="oi",
+                expected_utc=expected_utc,
+                observed_utc=observed_utc,
+                reason=f"adapter_error: {type(exc).__name__}: {exc}",
+            )
+            gaps += 1
+            continue
+        snapshots.append(snap)
+
+    # Write snapshot files + advance watermarks in ONE transaction. Any
+    # failure journals a gap row before propagating (never half-fail
+    # without a gap).
+    inserted = 0
+    try:
+        for snap in snapshots:
+            _write_oi_snapshot(snap, raw_root)
+            _advance_watermark(
+                session,
+                symbol=snap.symbol,
+                data_class="oi",
+                last_tick_utc=snap.observed_at_utc,
+                updated_at_utc=observed_utc,
+            )
+            inserted += 1
+        session.commit()
     except Exception as exc:
+        session.rollback()
         _record_gap(
             session,
             symbol=TICK_WIDE_SYMBOL,
             data_class="oi",
             expected_utc=expected_utc,
             observed_utc=observed_utc,
-            reason=f"adapter_error: {type(exc).__name__}: {exc}",
+            reason=f"write_error: {type(exc).__name__}: {exc}",
         )
-        return OITickResult(
-            snapshots_inserted=0, watermarks_advanced=0, gaps_recorded=1
-        )
-
-    # Write all snapshot files + advance all watermarks in ONE transaction.
-    inserted = 0
-    for snap in snapshots:
-        _write_oi_snapshot(snap, raw_root)
-        _advance_watermark(
-            session,
-            symbol=snap.symbol,
-            data_class="oi",
-            last_tick_utc=snap.observed_at_utc,
-            updated_at_utc=observed_utc,
-        )
-        inserted += 1
-    session.commit()
+        raise
 
     return OITickResult(
         snapshots_inserted=inserted,
         watermarks_advanced=inserted,
-        gaps_recorded=0,
+        gaps_recorded=gaps,
     )
 
 

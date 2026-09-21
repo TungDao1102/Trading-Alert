@@ -213,12 +213,22 @@ async def test_oi_tick_writes_one_snapshot_per_live5_and_advances_watermarks_ato
 # --------------------------------------------------------------------------- #
 
 
-async def test_oi_tick_adapter_exception_writes_gap_row_no_snapshot_no_watermark(
+async def test_oi_tick_symbol_failure_records_per_symbol_gap_healthy_symbols_commit(
     session: Session, tmp_path: Path
 ) -> None:
-    """Beh. 2: adapter raises → 1 gap row written, no snapshots, no watermark advance."""
+    """Beh. 2 (per-symbol recovery): one bad symbol records its own gap row
+    while healthy symbols still write snapshots + advance watermarks — a
+    single delisted symbol must not blind the other four indefinitely."""
     observed = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
-    adapter = FakeAdapter(oi_responses=[RuntimeError("simulated Binance timeout")])
+    # LIVE_5 order is BTC, ETH, BNB, SOL, XRP — fail ETH mid-universe.
+    oi_responses: list = [
+        _mk_oi_snapshot("BTCUSDT"),
+        RuntimeError("simulated Binance timeout"),
+        _mk_oi_snapshot("BNBUSDT"),
+        _mk_oi_snapshot("SOLUSDT"),
+        _mk_oi_snapshot("XRPUSDT"),
+    ]
+    adapter = FakeAdapter(oi_responses=oi_responses)
 
     result = await async_oi_tick(
         adapter,  # type: ignore[arg-type]
@@ -229,23 +239,25 @@ async def test_oi_tick_adapter_exception_writes_gap_row_no_snapshot_no_watermark
         raw_root=tmp_path,
     )
 
-    assert result.snapshots_inserted == 0
-    assert result.watermarks_advanced == 0
+    assert result.snapshots_inserted == 4
+    assert result.watermarks_advanced == 4
     assert result.gaps_recorded == 1
 
-    # Exactly one gap row, no watermark rows.
+    # Exactly one gap row, scoped to the failed symbol.
     gaps = session.execute(select(CollectorGap)).scalars().all()
     assert len(gaps) == 1
+    assert gaps[0].symbol == "ETHUSDT"
     assert gaps[0].data_class == "oi"
     assert _epoch_ms(gaps[0].expected_utc) == _epoch_ms(observed)
     assert "simulated" in gaps[0].reason
 
+    # Healthy symbols advanced; the failed one did not.
     wms = session.execute(select(CollectorWatermark)).scalars().all()
-    assert len(wms) == 0
+    assert {w.symbol for w in wms} == set(LIVE_5) - {"ETHUSDT"}
 
-    # No snapshot files written on the failure path.
+    # Snapshot files exist for healthy symbols only.
     snapshot_files = sorted((tmp_path / "data_class=oi").rglob("*.parquet"))
-    assert len(snapshot_files) == 0
+    assert len(snapshot_files) == 4
 
 
 # --------------------------------------------------------------------------- #
