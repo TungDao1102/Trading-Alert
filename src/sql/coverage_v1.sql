@@ -1,11 +1,15 @@
 -- Canonical DuckDB views over the Hive-partitioned Parquet store
 -- (D-04 + D-08 + D-11 + DATA_PIPELINE §10).
 --
--- Layout referenced (per 02-PATTERNS §14):
+-- Layout referenced (per 02-PATTERNS §14 + the collector writers):
 --   data/raw/interval=<TF>/symbol=<SYM>/date=<YYYY-MM-DD>/part.parquet
 --   data/raw/data_class=oi/symbol=<SYM>/date=<YYYY-MM-DD>/tick-<ISO>.parquet
---   data/raw/data_class=funding/symbol=<SYM>/date=<YYYY-MM-DD>/tick-<ISO>.parquet
+--   data/raw/data_class=funding/symbol=<SYM>/date=<YYYY-MM-DD>/sweep-<ISO>.parquet
 --   data/raw/data_class=oi_research/symbol=<SYM>/date=<YYYY-MM-DD>/tick-<ISO>.parquet
+--
+-- Reader/writer contract: the funding view selects `funding_time_utc`
+-- from `sweep-*.parquet`; the oi views select `observed_at_utc` from
+-- `tick-*.parquet`. Keep both sides in sync with `_write_funding_tick`.
 --
 -- DuckDB's `read_parquet(..., hive_partitioning=true)` auto-exposes the
 -- partition columns as virtual columns; we project them as `tf`,
@@ -82,17 +86,16 @@ CREATE OR REPLACE VIEW funding_coverage_v1 AS
 SELECT
     symbol,
     data_class,
-    MIN(CAST(observed_at_utc AS TIMESTAMP)) AS historical_data_start_utc,
-    MAX(CAST(observed_at_utc AS TIMESTAMP)) AS historical_data_end_utc,
+    MIN(CAST(funding_time_utc AS TIMESTAMP)) AS historical_data_start_utc,
+    MAX(CAST(funding_time_utc AS TIMESTAMP)) AS historical_data_end_utc,
     COUNT(*)              AS rows
 FROM read_parquet(
-    'data/raw/data_class=funding/symbol=*/date=*/tick-*.parquet',
+    'data/raw/data_class=funding/symbol=*/date=*/sweep-*.parquet',
     hive_partitioning = true
 )
 GROUP BY symbol, data_class;
 
--- Combined view (oi + funding + oi_research) so the CLI can iterate once.
-CREATE OR REPLACE VIEW all_tick_coverage_v1 AS
+CREATE OR REPLACE VIEW oi_research_coverage_v1 AS
 SELECT
     symbol,
     data_class,
@@ -100,8 +103,21 @@ SELECT
     MAX(CAST(observed_at_utc AS TIMESTAMP)) AS historical_data_end_utc,
     COUNT(*)              AS rows
 FROM read_parquet(
-    'data/raw/data_class=*/symbol=*/date=*/tick-*.parquet',
+    'data/raw/data_class=oi_research/symbol=*/date=*/tick-*.parquet',
     hive_partitioning = true
 )
 GROUP BY symbol, data_class;
+
+-- Combined view (oi + funding + oi_research) so the CLI can iterate once.
+-- A UNION of the per-class views: each class has its own timestamp column
+-- and filename shape, so no single glob can cover them all.
+CREATE OR REPLACE VIEW all_tick_coverage_v1 AS
+SELECT symbol, data_class, historical_data_start_utc,
+    historical_data_end_utc, rows FROM oi_coverage_v1
+UNION ALL
+SELECT symbol, data_class, historical_data_start_utc,
+    historical_data_end_utc, rows FROM funding_coverage_v1
+UNION ALL
+SELECT symbol, data_class, historical_data_start_utc,
+    historical_data_end_utc, rows FROM oi_research_coverage_v1;
 

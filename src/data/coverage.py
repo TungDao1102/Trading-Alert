@@ -166,14 +166,19 @@ def _columns_for_view(view_name: str) -> str:
             "CAST(NULL AS VARCHAR) AS tf, "
             "CAST(NULL AS DATE) AS date"
         )
-    if view_name in ("oi_coverage_v1", "funding_coverage_v1", "all_tick_coverage_v1"):
+    if view_name in ("oi_coverage_v1", "oi_research_coverage_v1"):
         return (
             "CAST(NULL AS VARCHAR) AS symbol, "
             "CAST(NULL AS VARCHAR) AS data_class, "
-            "CAST(NULL AS TIMESTAMP) AS observed_at_utc, "
-            "CAST(NULL AS DECIMAL(38, 18)) AS open_interest, "
-            "CAST(NULL AS VARCHAR) AS source, "
-            "CAST(NULL AS DATE) AS date"
+            "CAST(NULL AS TIMESTAMP) AS observed_at_utc"
+        )
+    if view_name == "funding_coverage_v1":
+        # Funding ticks carry funding_time_utc (not observed_at_utc) — the
+        # stub must project the real column or the view fails to compile.
+        return (
+            "CAST(NULL AS VARCHAR) AS symbol, "
+            "CAST(NULL AS VARCHAR) AS data_class, "
+            "CAST(NULL AS TIMESTAMP) AS funding_time_utc"
         )
     return "CAST(NULL AS TIMESTAMP) AS __empty"
 

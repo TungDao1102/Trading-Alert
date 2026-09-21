@@ -138,6 +138,40 @@ def _seed_oi_snapshot(
     return out_path
 
 
+def _seed_funding_tick(
+    *,
+    raw_root: Path,
+    symbol: str,
+    funding_ms: int,
+    funding_rate: str = "0.0001",
+) -> Path:
+    """Write one funding tick in the REAL collector schema.
+
+    Mirrors `_write_funding_tick`: `sweep-<iso>.parquet` carrying
+    `funding_time_utc` / `funding_rate` (never the OI shape — seeding the
+    funding partition with OI-shaped rows masks view/column drift).
+    """
+    funding_dt = _dt.datetime.fromtimestamp(funding_ms / 1000, tz=_dt.UTC)
+    day = funding_dt.date().isoformat()
+    iso = funding_dt.strftime("%Y%m%dT%H%M%SZ")
+    out_dir = raw_root / "data_class=funding" / f"symbol={symbol}" / f"date={day}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"sweep-{iso}.parquet"
+    df = pl.DataFrame(
+        {
+            "symbol": [symbol],
+            "funding_time_utc": [funding_dt],
+            "funding_rate": [Decimal(funding_rate)],
+            "mark_price": [Decimal("50000.00")],
+        },
+        schema_overrides={
+            "funding_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
+        },
+    )
+    df.write_parquet(out_path)
+    return out_path
+
+
 # --------------------------------------------------------------------------- #
 # Test 1 — CLI prints effective range + counts for a single symbol/interval.
 # --------------------------------------------------------------------------- #
@@ -339,13 +373,12 @@ def test_oi_coverage_view_reports_per_symbol_range(tmp_path: Path) -> None:
             oi_value="100.0",
             data_class="oi",
         )
-    # Seed funding tick (different data_class)
-    _seed_oi_snapshot(
+    # Seed funding tick in the real funding schema (different data_class)
+    _seed_funding_tick(
         raw_root=tmp_path,
         symbol="BTCUSDT",
-        observed_ms=1_700_000_000_000,
-        oi_value="0.0001",
-        data_class="funding",
+        funding_ms=1_700_000_000_000,
+        funding_rate="0.0001",
     )
     con = duckdb.connect(":memory:")
     try:
