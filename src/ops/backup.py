@@ -244,6 +244,23 @@ def _assert_safe_scratch_root(scratch_root: Path, bundle_root: Path) -> None:
             f"refusing drill: --scratch-root {scratch_root} lives inside "
             f"the bundle root {bundle_root} — ambiguous layout, refusing"
         )
+    # Never wipe the live immutable Parquet store (D-04): a
+    # `--scratch-root data/raw` typo resolves differently from CWD,
+    # home, and the bundle root, so none of the guards above catch it.
+    # Refuse the store itself, anything inside it (partial wipe), and
+    # anything above it (wiping an ancestor deletes the store too —
+    # e.g. `--scratch-root data` when the bundle lives off-host).
+    live_raw = DEFAULT_PARQUET_ROOT.resolve()
+    if (
+        resolved == live_raw
+        or resolved.is_relative_to(live_raw)
+        or live_raw.is_relative_to(resolved)
+    ):
+        raise ValueError(
+            f"refusing drill: --scratch-root {scratch_root} is the live "
+            f"raw store {live_raw} (or overlaps it) — wiping it would "
+            "delete collected candles"
+        )
 
 
 def run_drill(

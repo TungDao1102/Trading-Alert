@@ -493,6 +493,33 @@ def test_backup_creates_bundle_root_if_missing(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Test 16 — scratch-root guard refuses the live immutable store (WR-02).
+# --------------------------------------------------------------------------- #
+
+
+def test_drill_refuses_live_raw_store_as_scratch(tmp_path: Path) -> None:
+    """`--scratch-root data/raw` (or anything overlapping it) must fail
+    closed BEFORE any recursive delete — a typo must never wipe the
+    live D-04 store."""
+    from src.ops.backup import _assert_safe_scratch_root
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    live = backup_mod.DEFAULT_PARQUET_ROOT.resolve()
+    # The store itself.
+    with pytest.raises(ValueError, match="live"):
+        _assert_safe_scratch_root(live, bundle)
+    # Anything inside the store (partial wipe).
+    with pytest.raises(ValueError, match="live"):
+        _assert_safe_scratch_root(live / "data_class=oi", bundle)
+    # Anything above the store (wiping an ancestor deletes the store).
+    with pytest.raises(ValueError, match="live"):
+        _assert_safe_scratch_root(live.parent, bundle)
+    # An unrelated scratch dir still passes the guard.
+    _assert_safe_scratch_root(tmp_path / "scratch", bundle)
+
+
+# --------------------------------------------------------------------------- #
 # Test 15 — secret-free: backup code contains no literal API key pattern.
 # --------------------------------------------------------------------------- #
 
