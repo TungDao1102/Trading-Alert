@@ -210,6 +210,10 @@ def _record_gap(
     missed rather than one specific symbol) — never NULL, because
     PostgreSQL rejects NULL in PK columns.
     """
+    # Truncate to the String(256) column BEFORE insert: an unbounded
+    # `adapter_error: ...` message would otherwise make the very insert
+    # meant to record the outage fail on PostgreSQL with a length
+    # violation (SQLite ignores the length and masked this).
     # Use merge() so the insert is idempotent on the PK.
     session.merge(
         CollectorGap(
@@ -217,7 +221,7 @@ def _record_gap(
             data_class=data_class,
             expected_utc=expected_utc,
             observed_utc=observed_utc,
-            reason=reason,
+            reason=reason[:256],
             recorded_at_utc=datetime.now(UTC),
         )
     )
