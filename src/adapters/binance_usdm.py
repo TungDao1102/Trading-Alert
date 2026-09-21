@@ -22,9 +22,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+import structlog
 from binance_sdk_derivatives_trading_usds_futures import (
     DerivativesTradingUsdsFutures,
 )
+
+log = structlog.get_logger()
 
 if TYPE_CHECKING:
     from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
@@ -312,14 +315,30 @@ class BinanceUsdmAdapter:
         response = await asyncio.to_thread(self._sdk.rest_api.exchange_information)
         info: ExchangeInformationResponse = response.data()
         out: list[SymbolFilters] = []
+        drifted: list[str] = []
         for sym in info.symbols or []:
             f_price = _find_filter(sym.filters, "PRICE_FILTER")
             f_lot = _find_filter(sym.filters, "LOT_SIZE")
             f_min_notional = _find_filter(sym.filters, "MIN_NOTIONAL")
-            if f_lot is None or f_price is None or f_min_notional is None:
-                # Skip symbols with missing required filters (the live-5
-                # always carry these, so a missing one is a contract drift
-                # that should surface loudly via the fail-closed posture).
+            if f_price is None or f_lot is None or f_min_notional is None:
+                # A missing required filter is contract drift (delist /
+                # spec change): log loudly and fail the refresh rather
+                # than silently shrinking the universe.
+                missing = ",".join(
+                    name
+                    for name, f in (
+                        ("PRICE_FILTER", f_price),
+                        ("LOT_SIZE", f_lot),
+                        ("MIN_NOTIONAL", f_min_notional),
+                    )
+                    if f is None
+                )
+                log.error(
+                    "adapter.exchange_info.filter_drift",
+                    symbol=sym.symbol,
+                    missing_filters=missing,
+                )
+                drifted.append(f"{sym.symbol} lacks {missing}")
                 continue
             tick = Decimal(str(f_price.tick_size or "0"))
             step = Decimal(str(f_lot.step_size or "0"))
@@ -354,6 +373,11 @@ class BinanceUsdmAdapter:
                     order_capabilities_json=capabilities_blob,
                     position_mode_snapshot_json=position_mode_blob,
                 )
+            )
+        if drifted:
+            raise ValueError(
+                "exchangeInfo contract drift — symbols with missing "
+                f"required filters: {'; '.join(drifted)}"
             )
         return out
 
