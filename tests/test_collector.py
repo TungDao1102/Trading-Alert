@@ -27,7 +27,6 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
-
 from src.adapters.binance_usdm import FundingTick, OiSnapshot
 from src.data.backfill import LIVE_5
 from src.data.collector import (
@@ -38,7 +37,6 @@ from src.data.collector import (
     harvest_open_interest_history,
 )
 from src.db.models import Base, CollectorGap, CollectorWatermark
-
 
 # --------------------------------------------------------------------------- #
 # Test scaffold.
@@ -136,6 +134,31 @@ def session() -> Iterator[Session]:
         engine.dispose()
 
 
+def _to_naive_utc(dt: datetime) -> datetime:
+    """Normalize a datetime to naive UTC for SQLite roundtrip comparisons.
+
+    SQLite drops tzinfo on roundtrip (it has no TIMESTAMPTZ type), so
+    values read back from the DB are naive even when we wrote tz-aware
+    datetimes. Production uses PostgreSQL TIMESTAMPTZ which preserves
+    tzinfo exactly. For tests, comparing via `epoch_ms` is the cleanest
+    cross-DB equivalence.
+    """
+    return dt.replace(tzinfo=None) if dt.tzinfo else dt
+
+
+def _epoch_ms(dt: datetime) -> int:
+    """Compare datetimes across the SQLite roundtrip via epoch ms.
+
+    SQLite drops tzinfo on roundtrip; naive datetimes read back are
+    assumed to be UTC (the convention we wrote them in). Production uses
+    PostgreSQL TIMESTAMPTZ which preserves tzinfo exactly.
+    """
+    if dt.tzinfo is None:
+        # Already-naive: assume UTC (SQLite convention for our writes).
+        return int(dt.replace(tzinfo=UTC).timestamp() * 1000)
+    return int(dt.timestamp() * 1000)
+
+
 # --------------------------------------------------------------------------- #
 # Test 1 — healthy tick writes one snapshot per live-5 + 5 watermark advances.
 # --------------------------------------------------------------------------- #
@@ -171,7 +194,7 @@ async def test_oi_tick_writes_one_snapshot_per_live5_and_advances_watermarks_ato
     for sym in LIVE_5:
         wm = next(w for w in wms if w.symbol == sym)
         assert wm.data_class == "oi"
-        assert wm.last_tick_utc == observed
+        assert _epoch_ms(wm.last_tick_utc) == _epoch_ms(observed)
 
     # 5 Parquet snapshot files written, one per symbol.
     snapshot_files = sorted((tmp_path / "data_class=oi").rglob("*.parquet"))
@@ -214,7 +237,7 @@ async def test_oi_tick_adapter_exception_writes_gap_row_no_snapshot_no_watermark
     gaps = session.execute(select(CollectorGap)).scalars().all()
     assert len(gaps) == 1
     assert gaps[0].data_class == "oi"
-    assert gaps[0].expected_utc == observed
+    assert _epoch_ms(gaps[0].expected_utc) == _epoch_ms(observed)
     assert "simulated" in gaps[0].reason
 
     wms = session.execute(select(CollectorWatermark)).scalars().all()
@@ -262,8 +285,10 @@ async def test_oi_skipped_tick_records_expected_vs_observed_no_interpolation(
     gaps = session.execute(select(CollectorGap)).scalars().all()
     assert len(gaps) == 1
     assert gaps[0].data_class == "oi"
-    assert gaps[0].expected_utc == expected
-    assert gaps[0].observed_utc == observed  # != expected — shows the lag
+    assert _epoch_ms(gaps[0].expected_utc) == _epoch_ms(expected)
+    assert _epoch_ms(gaps[0].observed_utc) == _epoch_ms(observed)  # != expected — shows the lag
+    assert gaps[0].expected_utc == _to_naive_utc(expected)
+    assert gaps[0].observed_utc == _to_naive_utc(observed)
     assert "skip" in gaps[0].reason.lower()
 
     # No snapshot files for a skipped tick.
@@ -377,7 +402,13 @@ async def test_open_interest_history_harvest_tagged_as_research_grade(
     import polars as pl
 
     for sym in LIVE_5:
-        sym_files = sorted(research_dir.rglob(f"*symbol={sym}*.parquet"))
+        # Pathlib glob matches the directory containing the symbol partition.
+        sym_dir = next(
+            (d for d in research_dir.iterdir() if d.name == f"symbol={sym}"),
+            None,
+        )
+        assert sym_dir is not None, f"missing research partition for {sym}"
+        sym_files = sorted(sym_dir.rglob("*.parquet"))
         assert sym_files, f"missing research file for {sym}"
         df = pl.concat([pl.read_parquet(f) for f in sym_files])
         sources = df["source"].unique().to_list()

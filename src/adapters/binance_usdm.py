@@ -63,11 +63,20 @@ class Kline:
 
 @dataclass(frozen=True)
 class OiSnapshot:
-    """One open-interest observation for a symbol."""
+    """One open-interest observation for a symbol.
+
+    `source` distinguishes canonical day-one polling snapshots from
+    opportunistic historical harvests (D-08). Allowed values:
+      - "canonical"  — produced by the live 5-minute poll loop
+      - "research"   — produced by the opportunistic openInterestHist
+                       harvest at bootstrap; never relied upon as the
+                       forward source
+    """
 
     symbol: str
     observed_at_utc: datetime
     open_interest: Decimal
+    source: str = "canonical"
 
 
 @dataclass(frozen=True)
@@ -212,6 +221,44 @@ class BinanceUsdmAdapter:
             observed_at_utc=_ms_to_utc(int(oi.time or 0)),
             open_interest=Decimal(str(oi.open_interest or "0")),
         )
+
+    async def open_interest_statistics(
+        self,
+        symbol: str,
+        period: str,
+        limit: int = 30,
+    ) -> list[OiSnapshot]:
+        """Opportunistic historical OI harvest (D-08).
+
+        Per Binance docs the response is a list of `{symbol, sum_open_interest,
+        sum_open_interest_value, cmc_circulating_supply, timestamp}` rows.
+        Only the latest ~30 days are available — this is NOT the forward
+        source. Each returned `OiSnapshot` carries `source="research"` so
+        downstream consumers can distinguish from canonical day-one
+        snapshots.
+        """
+        response = await asyncio.to_thread(
+            self._sdk.rest_api.open_interest_statistics,
+            symbol=symbol,
+            period=period,  # type: ignore[arg-type]
+            limit=limit,
+        )
+        raw = response.data()
+        out: list[OiSnapshot] = []
+        for item in raw or []:
+            ts = getattr(item, "timestamp", None)
+            oi = getattr(item, "sum_open_interest", None)
+            if ts is None or oi is None:
+                continue
+            out.append(
+                OiSnapshot(
+                    symbol=getattr(item, "symbol", None) or symbol,
+                    observed_at_utc=_ms_to_utc(int(ts)),
+                    open_interest=Decimal(str(oi)),
+                    source="research",
+                )
+            )
+        return out
 
     # ----- funding rate ---------------------------------------------------- #
 
