@@ -33,9 +33,9 @@ Operator notes (D-12):
     proposal is a OneDrive-synced directory on the operator's host —
     the sync agent copies the bundle root off the primary host, so a
     primary-host loss does NOT destroy the backup.
-  - The restore drill runs against a scratch database created by the
-    `pg_dump_runner` callable (default: write a sqlite snapshot for
-    tests; production wires the real `pg_restore --create`).
+  - The backup shell-out is the real `pg_dump` (`_prod_pg_dump_runner`,
+    configured via `PG_DUMP_BIN` / `DATABASE_URL_SYNC`); tests pass an
+    explicit sqlite fake via `--sqlite-fake-pg-dump`, never the default.
 """
 
 from __future__ import annotations
@@ -44,7 +44,9 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import os
 import shutil
+import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -277,12 +279,35 @@ def run_drill(
 # --------------------------------------------------------------------------- #
 
 
-def _default_pg_dump_runner(out: Path) -> Path:
-    """Default pg_dump runner — write a sqlite snapshot.
+def _prod_pg_dump_runner(out: Path) -> Path:
+    """Production pg_dump runner — shells out to the real `pg_dump`.
 
-    Production callers wire a real `subprocess.run(['pg_dump', ...])`.
-    The default keeps the module testable without a live PostgreSQL
-    server (the operator's environment supplies the real runner).
+    Binary from `PG_DUMP_BIN` (default `pg_dump`); database URL from
+    `DATABASE_URL_SYNC` (fallback `DATABASE_URL`). Raises on any failure
+    so the CLI never prints `backup-OK` without archiving real
+    PostgreSQL state (D-12).
+    """
+    pg_bin = os.environ.get("PG_DUMP_BIN", "pg_dump")
+    db_url = os.environ.get("DATABASE_URL_SYNC") or os.environ.get("DATABASE_URL")
+    if not db_url:
+        raise RuntimeError(
+            "refusing backup: neither DATABASE_URL_SYNC nor DATABASE_URL "
+            "is set — no PostgreSQL dump was taken, backup-OK refused"
+        )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [pg_bin, "--format=custom", "-f", str(out), db_url],
+        check=True,
+    )
+    return out
+
+
+def _sqlite_fake_pg_dump_runner(out: Path) -> Path:
+    """TEST-ONLY fake — write a sqlite snapshot instead of a real dump.
+
+    Used exclusively by the test suite (via the `--sqlite-fake-pg-dump`
+    CLI flag) so tests run without a live PostgreSQL server. NEVER the
+    default: production always goes through `_prod_pg_dump_runner`.
     """
     import sqlite3
 
@@ -315,6 +340,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="Override the pg_dump output path (default: <bundle-root>/pg.dump).",
     )
+    backup_p.add_argument(
+        "--sqlite-fake-pg-dump",
+        action="store_true",
+        help="TEST ONLY: write a sqlite snapshot instead of running pg_dump. "
+        "Never use in production — the default is the real pg_dump runner.",
+    )
 
     drill_p = sub.add_parser("drill", help="Restore into a scratch root + assert equality.")
     drill_p.add_argument("--bundle-root", type=Path, default=DEFAULT_BUNDLE_ROOT)
@@ -330,9 +361,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.cmd == "backup":
+        runner = (
+            _sqlite_fake_pg_dump_runner
+            if args.sqlite_fake_pg_dump
+            else _prod_pg_dump_runner
+        )
         result = backup(
             bundle_root=args.bundle_root,
-            pg_dump_runner=lambda out: _default_pg_dump_runner(out),
+            pg_dump_runner=runner,
             parquet_roots=tuple(args.parquet_roots),
             pg_dump_name=(
                 args.pg_dump_path.name

@@ -369,7 +369,12 @@ def test_backup_cli_exits_nonzero_on_tampered_backup(tmp_path: Path) -> None:
 
 
 def test_backup_cli_runs_backup_mode(tmp_path: Path) -> None:
-    """`python -m src.ops.backup backup` writes a bundle + manifest + exits 0."""
+    """`python -m src.ops.backup backup` writes a bundle + manifest + exits 0.
+
+    The suite has no live PostgreSQL, so the CLI runs with the explicit
+    TEST-ONLY `--sqlite-fake-pg-dump` flag. Production never passes that
+    flag and goes through the real `pg_dump` runner (CR-06).
+    """
     bundle_root = tmp_path / "bundle"
     parquet_root = tmp_path / "parquet"
     parquet_root.mkdir()
@@ -387,6 +392,7 @@ def test_backup_cli_runs_backup_mode(tmp_path: Path) -> None:
             str(parquet_root),
             "--pg-dump-path",
             str(bundle_root / "pg.dump"),
+            "--sqlite-fake-pg-dump",
         ],
         check=False,
         capture_output=True,
