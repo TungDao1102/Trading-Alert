@@ -46,6 +46,9 @@ class QualityVerdict:
     ohlc_violations: int
     timestamp_regressions: int
     gap_count: int
+    negative_values: int = 0
+    bad_durations: int = 0
+    mixed_keys: int = 0
 
 
 def klines_to_frame(klines: list[Kline]) -> pl.DataFrame:
@@ -155,8 +158,36 @@ def check_batch(klines: list[Kline], interval: str) -> QualityVerdict:
         expected = df.height
     gap_count = max(0, expected - df.height)
 
+    # Exchange-data structural rejects (checked on the raw rows so
+    # Decimal comparisons stay in Python, never in frame SQL):
+    # negative prices/volumes, non-positive trade counts, inverted
+    # close-times, and rows from more than one symbol/interval.
+    negative_values = sum(
+        1
+        for k in klines
+        if k.open < 0
+        or k.high < 0
+        or k.low < 0
+        or k.close < 0
+        or k.volume < 0
+        or k.quote_volume < 0
+        or k.trade_count <= 0
+    )
+    bad_durations = sum(
+        1 for k in klines if k.close_time_utc <= k.open_time_utc
+    )
+    first_key = (klines[0].symbol, klines[0].interval)
+    mixed_keys = sum(
+        1 for k in klines if (k.symbol, k.interval) != first_key
+    )
+
     structural_ok = (
-        duplicates == 0 and ohlc_violations == 0 and timestamp_regressions == 0
+        duplicates == 0
+        and ohlc_violations == 0
+        and timestamp_regressions == 0
+        and negative_values == 0
+        and bad_durations == 0
+        and mixed_keys == 0
     )
     return QualityVerdict(
         structural_ok=structural_ok,
@@ -164,4 +195,7 @@ def check_batch(klines: list[Kline], interval: str) -> QualityVerdict:
         ohlc_violations=ohlc_violations,
         timestamp_regressions=int(timestamp_regressions),
         gap_count=gap_count,
+        negative_values=negative_values,
+        bad_durations=bad_durations,
+        mixed_keys=mixed_keys,
     )
