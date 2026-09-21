@@ -101,6 +101,19 @@ def _tick_iso(dt: datetime) -> str:
     return dt.strftime("%Y%m%dT%H%M%SZ")
 
 
+def _guard_no_overwrite(path: Path) -> None:
+    """Enforce D-04 immutability for tick files (same rule as `publish_batch`).
+
+    Two ticks in the same second (or a retried tick) resolve to the same
+    filename — overwriting would silently destroy evidence, so refuse.
+    """
+    if path.exists():
+        raise FileExistsError(
+            f"refusing to overwrite immutable tick file at {path} "
+            "(D-04 immutability rule)."
+        )
+
+
 def _write_oi_snapshot(snap: OiSnapshot, raw_root: Path) -> Path:
     """Write one OI snapshot to a per-tick Parquet file.
 
@@ -115,6 +128,7 @@ def _write_oi_snapshot(snap: OiSnapshot, raw_root: Path) -> Path:
         / f"tick-{_tick_iso(snap.observed_at_utc)}.parquet"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
+    _guard_no_overwrite(path)
     df = pl.DataFrame(
         [
             {
@@ -144,6 +158,7 @@ def _write_oi_research_snapshot(snap: OiSnapshot, raw_root: Path) -> Path:
         / f"tick-{_tick_iso(snap.observed_at_utc)}.parquet"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
+    _guard_no_overwrite(path)
     df = pl.DataFrame(
         [
             {
@@ -173,6 +188,7 @@ def _write_funding_tick(tick: FundingTick, raw_root: Path) -> Path:
         / f"sweep-{_tick_iso(tick.funding_time_utc)}.parquet"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
+    _guard_no_overwrite(path)
     df = pl.DataFrame(
         [
             {
