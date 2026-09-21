@@ -111,17 +111,25 @@ class CollectorWatermark(Base):
 # ---------- collector_gaps ---------------------------------------------------
 
 
+# Sentinel symbol for tick-wide gap rows (the whole poll missed rather
+# than one specific symbol). PostgreSQL implicitly forces PK columns NOT
+# NULL, so a NULL symbol in the (symbol, data_class, expected_utc) PK
+# would be rejected on PG (SQLite tolerates it and masked the bug).
+TICK_WIDE_SYMBOL = "__TICK__"
+
+
 class CollectorGap(Base):
     """Explicit gap row when a scheduled tick fails — D-09.
 
     Downstream MUST treat gap rows as missing, NEVER as zero / interpolated
     values. Idempotent inserts: a second gap for the same expected tick is
-    a no-op via the (symbol, data_class, expected_utc) PK.
+    a no-op via the (symbol, data_class, expected_utc) PK. Tick-wide
+    failures use `TICK_WIDE_SYMBOL` (never NULL) as the symbol.
     """
 
     __tablename__ = "collector_gaps"
 
-    symbol: Mapped[str | None] = mapped_column(String(32), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
     data_class: Mapped[str] = mapped_column(String(16), primary_key=True)
     expected_utc: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), primary_key=True

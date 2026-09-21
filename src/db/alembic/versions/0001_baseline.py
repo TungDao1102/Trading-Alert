@@ -65,8 +65,12 @@ def upgrade() -> None:
     )
 
     op.create_table(
+        # NOTE: `symbol` is NOT NULL — tick-wide gaps use the "__TICK__"
+        # sentinel (see TICK_WIDE_SYMBOL in src/db/models.py). PostgreSQL
+        # rejects NULL in PK columns; the baseline is edited in place
+        # because it has not shipped to a prod database yet.
         "collector_gaps",
-        sa.Column("symbol", sa.String(length=32), nullable=True),
+        sa.Column("symbol", sa.String(length=32), nullable=False),
         sa.Column("data_class", sa.String(length=16), nullable=False),
         sa.Column("expected_utc", sa.DateTime(timezone=True), nullable=False),
         sa.Column("observed_utc", sa.DateTime(timezone=True), nullable=False),

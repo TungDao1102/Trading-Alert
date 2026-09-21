@@ -45,7 +45,7 @@ from src.adapters.binance_usdm import (
     FundingTick,
     OiSnapshot,
 )
-from src.db.models import CollectorGap, CollectorWatermark
+from src.db.models import CollectorGap, CollectorWatermark, TICK_WIDE_SYMBOL
 
 # Type alias: anything that quacks like the project adapter. Tests
 # inject a `FakeAdapter`; production passes a `BinanceUsdmAdapter`.
@@ -196,7 +196,7 @@ def _write_funding_tick(tick: FundingTick, raw_root: Path) -> Path:
 def _record_gap(
     session: Session,
     *,
-    symbol: str | None,
+    symbol: str,
     data_class: str,
     expected_utc: datetime,
     observed_utc: datetime,
@@ -206,8 +206,9 @@ def _record_gap(
 
     PK = `(symbol, data_class, expected_utc)`. A second call with the
     same expected timestamp + data_class is a no-op (D-09 idempotent).
-    `symbol=None` represents a tick-wide failure (the whole poll missed
-    rather than one specific symbol).
+    `TICK_WIDE_SYMBOL` represents a tick-wide failure (the whole poll
+    missed rather than one specific symbol) — never NULL, because
+    PostgreSQL rejects NULL in PK columns.
     """
     # Use merge() so the insert is idempotent on the PK.
     session.merge(
@@ -283,7 +284,7 @@ async def async_oi_tick(
     if skip:
         _record_gap(
             session,
-            symbol=None,
+            symbol=TICK_WIDE_SYMBOL,
             data_class="oi",
             expected_utc=expected_utc,
             observed_utc=observed_utc,
@@ -305,7 +306,7 @@ async def async_oi_tick(
     except Exception as exc:
         _record_gap(
             session,
-            symbol=None,
+            symbol=TICK_WIDE_SYMBOL,
             data_class="oi",
             expected_utc=expected_utc,
             observed_utc=observed_utc,
@@ -368,7 +369,7 @@ async def async_funding_sweep(
     except Exception as exc:
         _record_gap(
             session,
-            symbol=None,
+            symbol=TICK_WIDE_SYMBOL,
             data_class="funding",
             expected_utc=datetime.fromtimestamp(since_ms / 1000, tz=UTC),
             observed_utc=observed_utc,
@@ -438,7 +439,7 @@ async def harvest_open_interest_history(
     # not a real gap. Keeps the audit trail unified.
     _record_gap(
         session,
-        symbol=None,
+        symbol=TICK_WIDE_SYMBOL,
         data_class="oi_research_harvest",
         expected_utc=datetime.fromtimestamp(0, tz=UTC),  # sentinel
         observed_utc=observed_utc,
