@@ -33,7 +33,8 @@ calls per tick:
 
 `--once` runs a single tick (smoke tests); `--healthcheck` is the
 container watermark-freshness probe (fails when no OI tick has
-completed within 2x cadence).
+completed within 2x cadence, or no funding sweep within one 8h
+interval + margin).
 """
 
 from __future__ import annotations
@@ -71,6 +72,12 @@ COLLECTOR_CADENCE_SECONDS = 300.0
 # First funding sweep looks back 8h (one funding interval) so a fresh
 # deploy fetches a bounded window; later sweeps resume from watermarks.
 FUNDING_BOOTSTRAP_LOOKBACK_MS = 8 * 60 * 60_000
+
+# Container healthcheck freshness bound for funding watermarks: one 8h
+# funding interval plus margin. OI ticks every 5 minutes (checked
+# against 2x cadence); funding only settles every 8h, so it needs its
+# own bound — sharing the OI bound would flap unhealthy forever.
+FUNDING_HEALTH_MAX_AGE_SECONDS = 9 * 3600.0
 
 # Structural adapter surface used by the collector (IN-01). Production
 # passes a `BinanceUsdmAdapter`; tests inject a `FakeAdapter`. A
@@ -119,6 +126,7 @@ class FundingSweepResult:
     watermarks_advanced: int
     gaps_recorded: int
     empty: bool = False
+    skipped_existing: int = 0
 
 
 # --------------------------------------------------------------------------- #
@@ -145,6 +153,18 @@ _FUNDING_SCHEMA: dict[str, pl.DataType] = {
 def _tick_iso(dt: datetime) -> str:
     """ISO-8601 filename-safe tick timestamp."""
     return dt.strftime("%Y%m%dT%H%M%SZ")
+
+
+def _tick_epoch_ms(dt: datetime) -> int:
+    """Epoch-ms for a tick/watermark timestamp across DB roundtrips.
+
+    SQLite drops tzinfo (naive roundtrip) while PostgreSQL TIMESTAMPTZ
+    preserves it — normalizing naive as UTC keeps watermark comparisons
+    (`already covered?`) total-ordered on both backends.
+    """
+    if dt.tzinfo is None:
+        return int(dt.replace(tzinfo=UTC).timestamp() * 1000)
+    return int(dt.timestamp() * 1000)
 
 
 def _guard_no_overwrite(path: Path) -> None:
@@ -435,20 +455,42 @@ async def async_funding_sweep(
 
     On adapter exception: a per-symbol gap row and no watermark advance
     for the failed symbol; healthy symbols still commit.
+
+    Per-symbol resume (WR-01): each symbol fetches from just after its
+    OWN funding watermark, never from a global minimum. A transient
+    failure for one symbol therefore cannot force healthy symbols to
+    re-fetch already-written ticks on the next sweep. Ticks already
+    covered by the watermark — or already on disk from a sweep whose
+    DB commit rolled back — are skipped idempotently instead of
+    tripping the D-04 immutability guard and wedging every later sweep.
     """
+    # Snapshot each symbol's funding watermark up front: the resume
+    # point for the fetch AND the already-covered cutoff for the write.
+    watermarks: dict[str, datetime | None] = {}
+    for sym in universe:
+        row = session.execute(
+            select(CollectorWatermark).where(
+                CollectorWatermark.symbol == sym,
+                CollectorWatermark.data_class == "funding",
+            )
+        ).scalar_one_or_none()
+        watermarks[sym] = row.last_tick_utc if row is not None else None
+
     ticks: list[FundingTick] = []
     gaps = 0
     for sym in universe:
+        wm = watermarks[sym]
+        sym_since = _tick_epoch_ms(wm) + 1 if wm is not None else since_ms
         try:
             sym_ticks = await adapter.funding_rate(
-                symbol=sym, start_ms=since_ms, end_ms=end_ms, limit=limit
+                symbol=sym, start_ms=sym_since, end_ms=end_ms, limit=limit
             )
         except Exception as exc:
             _record_gap(
                 session,
                 symbol=sym,
                 data_class="funding",
-                expected_utc=datetime.fromtimestamp(since_ms / 1000, tz=UTC),
+                expected_utc=datetime.fromtimestamp(sym_since / 1000, tz=UTC),
                 observed_utc=observed_utc,
                 reason=f"adapter_error: {type(exc).__name__}: {exc}",
             )
@@ -459,14 +501,36 @@ async def async_funding_sweep(
     # Write every tick + advance watermarks per symbol, atomically. A
     # write/commit failure journals a gap row before propagating.
     inserted = 0
+    skipped_existing = 0
     latest_per_symbol: dict[str, datetime] = {}
     try:
         for tick in ticks:
-            _write_funding_tick(tick, raw_root)
+            wm = watermarks.get(tick.symbol)
+            if wm is not None and _tick_epoch_ms(
+                tick.funding_time_utc
+            ) <= _tick_epoch_ms(wm):
+                # Already covered by this symbol's watermark — never
+                # re-hit the immutability guard.
+                skipped_existing += 1
+                continue
+            try:
+                _write_funding_tick(tick, raw_root)
+                inserted += 1
+            except FileExistsError:
+                # Parquet advanced without the DB (a prior sweep wrote
+                # the file, then the bulk commit rolled back). The tick
+                # IS on disk, so it is covered: count it as skipped and
+                # still advance the watermark past it below instead of
+                # aborting the whole sweep.
+                log.info(
+                    "collector.funding.tick_exists",
+                    symbol=tick.symbol,
+                    funding_time=tick.funding_time_utc.isoformat(),
+                )
+                skipped_existing += 1
             cur = latest_per_symbol.get(tick.symbol)
             if cur is None or tick.funding_time_utc > cur:
                 latest_per_symbol[tick.symbol] = tick.funding_time_utc
-            inserted += 1
         for sym, last_tick in latest_per_symbol.items():
             _advance_watermark(
                 session,
@@ -493,6 +557,7 @@ async def async_funding_sweep(
         watermarks_advanced=len(latest_per_symbol),
         gaps_recorded=gaps,
         empty=(inserted == 0 and gaps == 0),
+        skipped_existing=skipped_existing,
     )
 
 
@@ -649,18 +714,52 @@ async def _run_once_tick(
     return oi, funding
 
 
+def _watermark_staleness(
+    session: Session,
+    *,
+    symbol: str,
+    data_class: str,
+    now: datetime,
+    max_age_seconds: float,
+) -> str | None:
+    """Freshness check for one (symbol, data_class) watermark.
+
+    Returns `None` iff fresh; otherwise a `symbol:class:reason` string
+    for the UNHEALTHY report. Naive DB timestamps are read as UTC
+    (SQLite drops tzinfo on roundtrip; PostgreSQL preserves it).
+    """
+    row = session.execute(
+        select(CollectorWatermark).where(
+            CollectorWatermark.symbol == symbol,
+            CollectorWatermark.data_class == data_class,
+        )
+    ).scalar_one_or_none()
+    if row is None or row.updated_at_utc is None:
+        return f"{symbol}:{data_class}:no-watermark"
+    updated = row.updated_at_utc
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=UTC)
+    age = (now - updated).total_seconds()
+    if age > max_age_seconds:
+        return f"{symbol}:{data_class}:age={age:.0f}s"
+    return None
+
+
 def _check_health(
     database_url: str | None,
     *,
     universe: Sequence[str],
     max_age_seconds: float,
+    funding_max_age_seconds: float = FUNDING_HEALTH_MAX_AGE_SECONDS,
 ) -> int:
     """Watermark-freshness probe for the container HEALTHCHECK.
 
     Exit 0 iff every universe symbol has an OI watermark updated within
-    `max_age_seconds` (2x cadence); otherwise exit 1 with the stale
-    symbols on stderr. A wedged loop surfaces as unhealthy instead of
-    reporting healthy forever.
+    `max_age_seconds` (2x cadence) AND a funding watermark updated
+    within `funding_max_age_seconds` (one 8h interval + margin).
+    Otherwise exit 1 with the stale symbols on stderr. A wedged loop —
+    including a funding-only wedge while OI keeps succeeding (WR-01) —
+    surfaces as unhealthy instead of reporting healthy forever.
     """
     session: Session | None = None
     try:
@@ -669,21 +768,24 @@ def _check_health(
         now = datetime.now(UTC)
         stale: list[str] = []
         for sym in universe:
-            row = session.execute(
-                select(CollectorWatermark).where(
-                    CollectorWatermark.symbol == sym,
-                    CollectorWatermark.data_class == "oi",
-                )
-            ).scalar_one_or_none()
-            if row is None or row.updated_at_utc is None:
-                stale.append(f"{sym}:no-watermark")
-                continue
-            updated = row.updated_at_utc
-            if updated.tzinfo is None:
-                updated = updated.replace(tzinfo=UTC)
-            age = (now - updated).total_seconds()
-            if age > max_age_seconds:
-                stale.append(f"{sym}:age={age:.0f}s")
+            reason = _watermark_staleness(
+                session,
+                symbol=sym,
+                data_class="oi",
+                now=now,
+                max_age_seconds=max_age_seconds,
+            )
+            if reason is not None:
+                stale.append(reason)
+            reason = _watermark_staleness(
+                session,
+                symbol=sym,
+                data_class="funding",
+                now=now,
+                max_age_seconds=funding_max_age_seconds,
+            )
+            if reason is not None:
+                stale.append(reason)
         if stale:
             print(
                 f"collector-health: UNHEALTHY — {'; '.join(stale)}",
@@ -744,7 +846,8 @@ def _parse_collector_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--healthcheck",
         action="store_true",
         help="Watermark-freshness probe: exit 0 iff every universe symbol "
-        "has an OI watermark newer than 2x cadence.",
+        "has an OI watermark newer than 2x cadence AND a funding "
+        "watermark newer than one 8h interval + margin.",
     )
     return parser.parse_args(argv)
 

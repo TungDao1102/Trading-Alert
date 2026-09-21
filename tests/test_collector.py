@@ -527,6 +527,41 @@ def test_healthcheck_passes_with_fresh_watermarks(tmp_path: Path) -> None:
     s = SessionLocal()
     now = datetime.now(UTC)
     for sym in LIVE_5:
+        for data_class in ("oi", "funding"):
+            s.merge(
+                CollectorWatermark(
+                    symbol=sym,
+                    data_class=data_class,
+                    last_tick_utc=now,
+                    updated_at_utc=now,
+                )
+            )
+    s.commit()
+    s.close()
+    engine.dispose()
+
+    assert _check_health(url, universe=LIVE_5, max_age_seconds=600) == 0
+
+
+def test_healthcheck_fails_with_stale_funding(tmp_path: Path) -> None:
+    """WR-01: fresh OI but stale funding → exit 1, not silently healthy.
+
+    The funding wedge (one transient per-symbol failure stalling the
+    whole funding sweep while OI keeps succeeding) must surface as
+    UNHEALTHY instead of hiding behind the OI-only probe.
+    """
+    from datetime import timedelta
+
+    from src.data.collector import _check_health
+
+    db_path = tmp_path / "health.db"
+    url = f"sqlite:///{db_path}"
+    engine = create_engine(url)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+    s = SessionLocal()
+    now = datetime.now(UTC)
+    for sym in LIVE_5:
         s.merge(
             CollectorWatermark(
                 symbol=sym,
@@ -535,11 +570,20 @@ def test_healthcheck_passes_with_fresh_watermarks(tmp_path: Path) -> None:
                 updated_at_utc=now,
             )
         )
+        stale = now - timedelta(hours=10)
+        s.merge(
+            CollectorWatermark(
+                symbol=sym,
+                data_class="funding",
+                last_tick_utc=stale,
+                updated_at_utc=stale,
+            )
+        )
     s.commit()
     s.close()
     engine.dispose()
 
-    assert _check_health(url, universe=LIVE_5, max_age_seconds=600) == 0
+    assert _check_health(url, universe=LIVE_5, max_age_seconds=600) == 1
 
 
 def test_collector_module_has_real_entrypoint() -> None:
@@ -556,3 +600,137 @@ def test_collector_module_has_real_entrypoint() -> None:
     assert proc.returncode == 0, f"stderr={proc.stderr!r}"
     assert "--healthcheck" in proc.stdout
     assert "--once" in proc.stdout
+
+
+# --------------------------------------------------------------------------- #
+# WR-01 regression: per-symbol funding resume + idempotent retry.
+# --------------------------------------------------------------------------- #
+
+
+def _mk_funding_tick_at(
+    symbol: str, ts: datetime, *, rate: str = "0.0001"
+) -> FundingTick:
+    """Build a funding tick for a specific funding timestamp."""
+    return FundingTick(
+        symbol=symbol,
+        funding_time_utc=ts,
+        funding_rate=Decimal(rate),
+        mark_price=Decimal("50000.00"),
+    )
+
+
+async def test_funding_sweep_retry_after_transient_failure_makes_progress(
+    session: Session, tmp_path: Path
+) -> None:
+    """WR-01: one transient per-symbol failure must not wedge later sweeps.
+
+    Sweep 1: BTC fails (adapter error → gap row), ETH writes event E and
+    advances. Sweep 2 (retry, BTC healthy again): per-symbol resume
+    means ETH resumes from E+1 — its re-fetched E is skipped as
+    already-covered instead of tripping the D-04 immutability guard —
+    while BTC backfills its missed tick. Both watermarks converge; the
+    sweep completes instead of raising FileExistsError forever.
+    """
+    universe = ["BTCUSDT", "ETHUSDT"]
+    observed = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
+    event_e = datetime(2026, 9, 19, 8, 0, tzinfo=UTC)
+    adapter = FakeAdapter(
+        funding_responses=[
+            RuntimeError("simulated transient funding outage"),  # sweep 1 BTC
+            [_mk_funding_tick_at("ETHUSDT", event_e)],  # sweep 1 ETH
+            [_mk_funding_tick_at("BTCUSDT", event_e)],  # sweep 2 BTC retry
+            [_mk_funding_tick_at("ETHUSDT", event_e)],  # sweep 2 ETH re-fetch
+        ]
+    )
+
+    sweep1 = await async_funding_sweep(
+        adapter,  # type: ignore[arg-type]
+        session,
+        universe=universe,
+        observed_utc=observed,
+        raw_root=tmp_path,
+        since_ms=0,
+    )
+    assert sweep1.funding_inserted == 1
+    assert sweep1.gaps_recorded == 1
+
+    # The retry must complete (no FileExistsError), backfill BTC, and
+    # skip ETH's already-covered re-fetch.
+    sweep2 = await async_funding_sweep(
+        adapter,  # type: ignore[arg-type]
+        session,
+        universe=universe,
+        observed_utc=observed,
+        raw_root=tmp_path,
+        since_ms=0,
+    )
+    assert sweep2.funding_inserted == 1
+    assert sweep2.gaps_recorded == 0
+    assert sweep2.skipped_existing == 1
+
+    # Per-symbol resume: BTC had no watermark → falls back to since_ms;
+    # ETH resumes just after its own watermark, NOT the global minimum.
+    btc_calls = [c for c in adapter.funding_calls if c[0] == "BTCUSDT"]
+    eth_calls = [c for c in adapter.funding_calls if c[0] == "ETHUSDT"]
+    assert btc_calls[1][1] == 0
+    assert eth_calls[1][1] == int(event_e.timestamp() * 1000) + 1
+
+    # Both watermarks converged on E; exactly 2 tick files on disk.
+    wms = {
+        w.symbol: w
+        for w in session.execute(
+            select(CollectorWatermark).where(
+                CollectorWatermark.data_class == "funding"
+            )
+        )
+        .scalars()
+        .all()
+    }
+    assert set(wms) == set(universe)
+    assert _epoch_ms(wms["BTCUSDT"].last_tick_utc) == _epoch_ms(event_e)
+    assert _epoch_ms(wms["ETHUSDT"].last_tick_utc) == _epoch_ms(event_e)
+    assert (
+        len(sorted((tmp_path / "data_class=funding").rglob("*.parquet"))) == 2
+    )
+
+
+async def test_funding_sweep_treats_existing_tick_file_as_covered(
+    session: Session, tmp_path: Path
+) -> None:
+    """WR-01: a tick file already on disk is covered, not fatal.
+
+    A prior sweep may have written the Parquet file and then rolled
+    back its DB commit (non-transactional writes vs transactional
+    watermarks diverge). The retry sees a stale watermark but an
+    existing file: it must skip idempotently and advance the watermark
+    past the on-disk tick instead of aborting the sweep.
+    """
+    from src.data.collector import _write_funding_tick
+
+    observed = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
+    event_e = datetime(2026, 9, 19, 8, 0, tzinfo=UTC)
+    tick = _mk_funding_tick_at("BTCUSDT", event_e)
+    _write_funding_tick(tick, tmp_path)  # orphaned Parquet, no watermark yet
+
+    adapter = FakeAdapter(funding_responses=[[tick]])
+    result = await async_funding_sweep(
+        adapter,  # type: ignore[arg-type]
+        session,
+        universe=["BTCUSDT"],
+        observed_utc=observed,
+        raw_root=tmp_path,
+        since_ms=0,
+    )
+
+    assert result.funding_inserted == 0
+    assert result.skipped_existing == 1
+    assert result.gaps_recorded == 0
+    assert result.watermarks_advanced == 1
+    wm = session.execute(
+        select(CollectorWatermark).where(
+            CollectorWatermark.symbol == "BTCUSDT",
+            CollectorWatermark.data_class == "funding",
+        )
+    ).scalar_one_or_none()
+    assert wm is not None
+    assert _epoch_ms(wm.last_tick_utc) == _epoch_ms(event_e)
