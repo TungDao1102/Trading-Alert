@@ -292,9 +292,13 @@ async def backfill_symbol_interval(
         ]
 
         # Cross-page dedup: skip rows whose open_time we already buffered
-        # on a previous page. Track them as "seen" only after the batch
-        # passes the quality gate so a rejected batch never poisons later
-        # cursor advances.
+        # on a previous page. Open_times are marked "seen" ONLY after the
+        # batch passes the quality gate (in the structural_ok branch
+        # below) so a rejected batch never poisons the set: on a
+        # structural rejection the cursor rolls back and the next fetch
+        # re-encounters the same rows, which must NOT be dropped as
+        # "duplicates" (fail-closed — corrupt data is surfaced, never
+        # silently skipped).
         if closed:
             deduped: list[Kline] = []
             for k in closed:
@@ -302,7 +306,6 @@ async def backfill_symbol_interval(
                 if k_open_ms in seen_open_times:
                     duplicates_skipped += 1
                     continue
-                seen_open_times.add(k_open_ms)
                 deduped.append(k)
             closed = deduped
 
@@ -324,8 +327,12 @@ async def backfill_symbol_interval(
                 # D-10: do NOT publish; do NOT overwrite prior data. The
                 # caller observes the rejection via the counter.
             else:
-                # Group the closed batch by date and add to per-date buffer.
+                # The batch passed the gate: only NOW mark its rows seen
+                # (see the dedup comment above) and buffer them by date.
                 for k in closed:
+                    seen_open_times.add(
+                        int(k.open_time_utc.timestamp() * 1000)
+                    )
                     d = k.open_time_utc.date()
                     date_buffers.setdefault(d, []).append(k)
 
