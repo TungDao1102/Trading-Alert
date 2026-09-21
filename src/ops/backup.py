@@ -46,6 +46,7 @@ import hashlib
 import json
 import os
 import shutil
+import structlog
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -168,6 +169,18 @@ def backup(
     bundle_root.mkdir(parents=True, exist_ok=True)
     pg_dump_path = bundle_root / pg_dump_name
     pg_dump_runner(pg_dump_path)
+
+    _blog = structlog.get_logger()
+    missing_roots = [s for s in parquet_roots if not s.exists()]
+    for source in missing_roots:
+        # A typo'd root must never yield a silent pg.dump-only bundle.
+        _blog.warning("backup.parquet_root_missing", root=str(source))
+    if parquet_roots and len(missing_roots) == len(parquet_roots):
+        raise FileNotFoundError(
+            "refusing backup: every parquet root is missing "
+            f"({[str(s) for s in parquet_roots]}) — bundle would contain "
+            "only pg.dump"
+        )
 
     for source in parquet_roots:
         if not source.exists():
