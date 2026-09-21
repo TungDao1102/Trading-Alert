@@ -125,10 +125,16 @@ def write_manifest(payload_root: Path, manifest_path: Path) -> dict[str, str]:
     """Walk `payload_root`, compute sha256 of every file, write JSON map.
 
     Path keys are relative to `payload_root` (POSIX-style for portability)
-    so the same payload produces the same manifest on every host.
+    so the same payload produces the same manifest on every host. The
+    manifest file itself is excluded from its own hash: on incremental
+    re-runs into the same bundle root the pre-existing manifest would
+    otherwise be hashed into the new manifest (self-referential entry
+    whose stored hash is immediately stale).
     """
     manifest: dict[str, str] = {}
-    files = sorted(p for p in payload_root.rglob("*") if p.is_file())
+    files = sorted(
+        p for p in payload_root.rglob("*") if p.is_file() and p.name != MANIFEST_NAME
+    )
     for path in files:
         rel = path.relative_to(payload_root).as_posix()
         manifest[rel] = _sha256_file(path)
@@ -294,7 +300,13 @@ def run_drill(
         p for p in (scratch_root / "parquet").rglob("*") if p.is_file()
     )
     for path in candidate_files:
-        rel = path.relative_to(scratch_root).as_posix()
+        try:
+            rel = path.relative_to(scratch_root).as_posix()
+        except ValueError:
+            rel = path.as_posix()
+            report.failed_files.append(rel)
+            report.messages.append(f"{rel}: outside scratch root, not verified")
+            continue
         expected = manifest.get(rel)
         if expected is None:
             report.failed_files.append(rel)
@@ -308,6 +320,18 @@ def run_drill(
             )
         else:
             report.restored_files.append(rel)
+
+    # Full-set comparison: every manifest key must have been visited. Extra
+    # bundle files, a skipped root, or a truncated restore otherwise still
+    # yields equal=True. (The manifest.json entry itself is excluded — it
+    # is never part of its own hash.)
+    visited = set(report.restored_files) | set(report.failed_files)
+    for key in sorted(manifest):
+        if key == MANIFEST_NAME:
+            continue
+        if key not in visited:
+            report.failed_files.append(key)
+            report.messages.append(f"{key}: in manifest but never restored")
 
     report.manifest = manifest
     report.equal = not report.failed_files
