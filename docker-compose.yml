@@ -41,6 +41,9 @@ services:
       POSTGRES_HOST: postgres
     volumes:
       - rawdata:/app/data/raw
+      # The backup bundle must survive container restarts — without this
+      # mount, "off-host" bundles live on the ephemeral container FS.
+      - backupdata:/app/data/backup
     # Phase 2 entrypoint is the OI/funding collector (5-min poll per D-07).
     # Backup drill runs as a one-shot Compose target (see scripts/backup-drill.ps1).
     command: ["uv", "run", "python", "-m", "src.data.collector"]
@@ -48,3 +51,4 @@ services:
 volumes:
   pgdata:
   rawdata:
+  backupdata:
