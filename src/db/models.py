@@ -16,6 +16,7 @@ Python rule — no float for exchange-sensitive values).
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
 
@@ -194,6 +195,7 @@ def make_session_factory(database_url: str) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
+@asynccontextmanager
 async def session_scope(
     factory: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[AsyncSession]:
