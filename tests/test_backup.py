@@ -520,6 +520,90 @@ def test_drill_refuses_live_raw_store_as_scratch(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Test 17 — prune garbage-collects stale bundle entries (WR-04).
+# --------------------------------------------------------------------------- #
+
+
+def test_prune_removes_stale_bundle_entries(tmp_path: Path) -> None:
+    """Files deleted from the source are pruned from the bundle + manifest."""
+    bundle = tmp_path / "bundle"
+    source = tmp_path / "parquet"
+    source.mkdir()
+    _seed_fake_parquet(source / "keep.parquet")
+    _seed_fake_parquet(source / "stale.parquet")
+    backup_mod.backup(
+        bundle_root=bundle,
+        pg_dump_runner=lambda out: _no_op_pg_dump(out),
+        parquet_roots=[source],
+    )
+    stale_key = f"parquet/{source.name}/stale.parquet"
+    assert (bundle / stale_key).exists()
+
+    (source / "stale.parquet").unlink()
+    report = backup_mod.prune_bundle(bundle_root=bundle, parquet_roots=[source])
+
+    assert stale_key in report.pruned_files
+    assert not (bundle / stale_key).exists()
+    assert (bundle / f"parquet/{source.name}/keep.parquet").exists()
+    assert (bundle / "pg.dump").exists()
+    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    assert stale_key not in manifest
+    assert "pg.dump" in manifest
+
+
+def test_prune_dry_run_deletes_nothing(tmp_path: Path) -> None:
+    """`dry_run=True` reports without deleting or rewriting the manifest."""
+    bundle = tmp_path / "bundle"
+    source = tmp_path / "parquet"
+    source.mkdir()
+    _seed_fake_parquet(source / "stale.parquet")
+    backup_mod.backup(
+        bundle_root=bundle,
+        pg_dump_runner=lambda out: _no_op_pg_dump(out),
+        parquet_roots=[source],
+    )
+    (source / "stale.parquet").unlink()
+    manifest_before = (bundle / "manifest.json").read_text(encoding="utf-8")
+
+    report = backup_mod.prune_bundle(
+        bundle_root=bundle, parquet_roots=[source], dry_run=True
+    )
+
+    stale_key = f"parquet/{source.name}/stale.parquet"
+    assert stale_key in report.pruned_files
+    assert report.dry_run is True
+    assert (bundle / stale_key).exists()
+    assert (bundle / "manifest.json").read_text(encoding="utf-8") == manifest_before
+
+
+def test_prune_keeps_unmapped_keys(tmp_path: Path) -> None:
+    """Keys that cannot be mapped to a known root are kept, never deleted."""
+    bundle = tmp_path / "bundle"
+    source = tmp_path / "parquet"
+    source.mkdir()
+    _seed_fake_parquet(source / "x.parquet")
+    backup_mod.backup(
+        bundle_root=bundle,
+        pg_dump_runner=lambda out: _no_op_pg_dump(out),
+        parquet_roots=[source],
+    )
+    ghost = bundle / "parquet" / "ghost" / "g.parquet"
+    ghost.parent.mkdir(parents=True, exist_ok=True)
+    ghost.write_bytes(b"GHOST")
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["parquet/ghost/g.parquet"] = _sha256(ghost)
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+    report = backup_mod.prune_bundle(bundle_root=bundle, parquet_roots=[source])
+
+    assert report.pruned_files == ()
+    assert ghost.exists()
+
+
+# --------------------------------------------------------------------------- #
 # Test 15 — secret-free: backup code contains no literal API key pattern.
 # --------------------------------------------------------------------------- #
 

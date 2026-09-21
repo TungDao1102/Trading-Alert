@@ -164,8 +164,12 @@ def backup(
       3. Write `manifest.json` of the full payload.
       4. Compute the manifest sha256 (bundle_sha256).
 
-    `bundle_root` is created if missing. The function never deletes
-    files in `bundle_root` — operators can run it incrementally.
+    `bundle_root` is created if missing. The backup is append-only: it
+    never deletes files in `bundle_root` (re-runs overwrite the same
+    tree), so files deleted from a source root survive in the bundle
+    until `prune_bundle()` (the `prune` subcommand) garbage-collects
+    them — without pruning, a restore would resurrect deliberately
+    removed data.
     """
     bundle_root.mkdir(parents=True, exist_ok=True)
     pg_dump_path = bundle_root / pg_dump_name
@@ -206,6 +210,82 @@ def backup(
         parquet_files=parquet_files,
         manifest_path=manifest_path,
         bundle_sha256=bundle_sha256,
+    )
+
+
+@dataclass(frozen=True)
+class PruneReport:
+    """Outcome of one `prune_bundle()` call.
+
+    `pruned_files` are manifest relpaths whose source file no longer
+    exists (deleted from the bundle unless `dry_run`). Keys that cannot
+    be mapped to a known source root (`pg.dump`, unknown basenames) are
+    always kept — pruning only garbage-collects what it can prove stale.
+    """
+
+    bundle_root: Path
+    pruned_files: tuple[str, ...]
+    dry_run: bool
+    manifest_path: Path
+
+
+def _remove_empty_dirs(root: Path) -> None:
+    """Recursively remove empty directories under `root` (prune cleanup)."""
+    if not root.is_dir():
+        return
+    for child in sorted(root.iterdir()):
+        if child.is_dir():
+            _remove_empty_dirs(child)
+    if not any(root.iterdir()):
+        root.rmdir()
+
+
+def prune_bundle(
+    *,
+    bundle_root: Path,
+    parquet_roots: Sequence[Path] = (DEFAULT_PARQUET_ROOT,),
+    dry_run: bool = False,
+) -> PruneReport:
+    """Reconcile the bundle against the live source roots (WR-04).
+
+    Deletes bundle entries under `parquet/<basename>/...` whose source
+    file no longer exists under the matching root, then rewrites the
+    manifest so it describes the source of truth again. With
+    `dry_run=True` nothing is deleted or rewritten — the report lists
+    what WOULD be pruned.
+    """
+    manifest_path = bundle_root / MANIFEST_NAME
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"refusing prune: no manifest at {manifest_path}")
+    manifest: dict[str, str] = json.loads(manifest_path.read_text(encoding="utf-8"))
+    by_basename = {s.name: s for s in parquet_roots}
+    pruned: list[str] = []
+    for key in sorted(manifest):
+        if not key.startswith("parquet/"):
+            continue
+        parts = key.split("/", 2)
+        if len(parts) != 3:
+            continue
+        _, base, rel = parts
+        source = by_basename.get(base)
+        if source is None:
+            continue
+        if not (source / rel).exists():
+            pruned.append(key)
+    if not dry_run:
+        for key in pruned:
+            (bundle_root / key).unlink(missing_ok=True)
+        _remove_empty_dirs(bundle_root / "parquet")
+        remaining = {k: v for k, v in manifest.items() if k not in set(pruned)}
+        manifest_path.write_text(
+            json.dumps(remaining, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    return PruneReport(
+        bundle_root=bundle_root,
+        pruned_files=tuple(pruned),
+        dry_run=dry_run,
+        manifest_path=manifest_path,
     )
 
 
@@ -453,6 +533,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=[DEFAULT_PARQUET_ROOT],
     )
 
+    prune_p = sub.add_parser(
+        "prune",
+        help="Garbage-collect bundle entries whose source file no longer exists.",
+    )
+    prune_p.add_argument("--bundle-root", type=Path, default=DEFAULT_BUNDLE_ROOT)
+    prune_p.add_argument(
+        "--parquet-roots",
+        type=Path,
+        nargs="+",
+        default=[DEFAULT_PARQUET_ROOT],
+    )
+    prune_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List what would be pruned without deleting or rewriting.",
+    )
+
     args = parser.parse_args(argv)
 
     if args.cmd == "backup":
@@ -492,6 +589,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         for msg in report.messages:
             print(f"  {msg}", file=sys.stderr)
         return 1
+
+    if args.cmd == "prune":
+        report = prune_bundle(
+            bundle_root=args.bundle_root,
+            parquet_roots=tuple(args.parquet_roots),
+            dry_run=args.dry_run,
+        )
+        verb = "would prune" if report.dry_run else "pruned"
+        print(
+            f"prune-OK bundle_root={args.bundle_root} "
+            f"{verb}={len(report.pruned_files)}"
+        )
+        for key in report.pruned_files:
+            print(f"  {key}")
+        return 0
 
     return 2
 
