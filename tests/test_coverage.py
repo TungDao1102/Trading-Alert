@@ -161,16 +161,15 @@ def test_report_symbol_returns_range_and_counts(tmp_path: Path) -> None:
     finally:
         con.close()
 
-    by_tf = {r["tf"]: r for r in rows}
+    by_tf = {r.tf: r for r in rows}
     assert "1h" in by_tf
     r = by_tf["1h"]
-    assert r["rows"] == 10
-    assert r["start_utc"] is not None
-    assert r["end_utc"] is not None
-    assert r["start_utc"].tzinfo is not None
-    assert int(r["start_utc"].timestamp() * 1000) == start_ms
-    # gap_count for a dense 1h run of 10 bars = 0
-    assert r["gap_count"] == 0
+    assert r.rows == 10
+    assert r.start_utc is not None
+    assert r.end_utc is not None
+    assert r.start_utc.tzinfo is not None
+    assert int(r.start_utc.timestamp() * 1000) == start_ms
+    assert r.gap_count == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -218,9 +217,9 @@ def test_gap_count_reports_continuity_gaps(tmp_path: Path) -> None:
     finally:
         con.close()
 
-    by_tf = {r["tf"]: r for r in rows}
-    assert by_tf["1h"]["rows"] == 23
-    assert by_tf["1h"]["gap_count"] >= 1
+    by_tf = {r.tf: r for r in rows}
+    assert by_tf["1h"].rows == 23
+    assert by_tf["1h"].gap_count >= 1
 
 
 # --------------------------------------------------------------------------- #
@@ -246,9 +245,9 @@ def test_range_uses_min_open_and_max_close(tmp_path: Path) -> None:
         rows = report_symbol(con, "ETHUSDT", raw_root=tmp_path)
     finally:
         con.close()
-    r = next(r for r in rows if r["tf"] == "1h")
-    assert int(r["start_utc"].timestamp() * 1000) == start_ms
-    assert int(r["end_utc"].timestamp() * 1000) == last_close_ms
+    r = next(r for r in rows if r.tf == "1h")
+    assert int(r.start_utc.timestamp() * 1000) == start_ms
+    assert int(r.end_utc.timestamp() * 1000) == last_close_ms
 
 
 # --------------------------------------------------------------------------- #
@@ -427,8 +426,17 @@ def test_cli_runs_for_seeded_symbol(tmp_path: Path) -> None:
         interval_ms=3_600_000,
         count=3,
     )
+    cmd = [
+        sys.executable,
+        "-m",
+        "src.data.coverage",
+        "--symbol",
+        "BTCUSDT",
+        "--raw-root",
+        str(tmp_path),
+    ]
     proc = subprocess.run(
-        [sys.executable, "-m", "src.data.coverage", "--symbol", "BTCUSDT", "--raw-root", str(tmp_path)],
+        cmd,
         check=False,
         capture_output=True,
         text=True,
@@ -440,8 +448,17 @@ def test_cli_runs_for_seeded_symbol(tmp_path: Path) -> None:
 
 def test_cli_exits_nonzero_for_unknown_symbol(tmp_path: Path) -> None:
     """`--symbol XYZ` with no data exits 1 with a 'no coverage rows' stderr."""
+    cmd = [
+        sys.executable,
+        "-m",
+        "src.data.coverage",
+        "--symbol",
+        "XYZUSDT",
+        "--raw-root",
+        str(tmp_path),
+    ]
     proc = subprocess.run(
-        [sys.executable, "-m", "src.data.coverage", "--symbol", "XYZUSDT", "--raw-root", str(tmp_path)],
+        cmd,
         check=False,
         capture_output=True,
         text=True,
@@ -465,8 +482,16 @@ def test_cli_all_live5_prints_full_matrix(tmp_path: Path) -> None:
         interval_ms=3_600_000,
         count=2,
     )
+    cmd = [
+        sys.executable,
+        "-m",
+        "src.data.coverage",
+        "--all",
+        "--raw-root",
+        str(tmp_path),
+    ]
     proc = subprocess.run(
-        [sys.executable, "-m", "src.data.coverage", "--all", "--raw-root", str(tmp_path)],
+        cmd,
         check=False,
         capture_output=True,
         text=True,
@@ -495,8 +520,17 @@ def test_cli_displays_asia_ho_chi_minh_at_print_edge(tmp_path: Path) -> None:
         interval_ms=3_600_000,
         count=1,
     )
+    cmd = [
+        sys.executable,
+        "-m",
+        "src.data.coverage",
+        "--symbol",
+        "BTCUSDT",
+        "--raw-root",
+        str(tmp_path),
+    ]
     proc = subprocess.run(
-        [sys.executable, "-m", "src.data.coverage", "--symbol", "BTCUSDT", "--raw-root", str(tmp_path)],
+        cmd,
         check=False,
         capture_output=True,
         text=True,
@@ -550,8 +584,18 @@ def test_cli_json_mode_emits_machine_readable(tmp_path: Path) -> None:
         interval_ms=3_600_000,
         count=2,
     )
+    cmd = [
+        sys.executable,
+        "-m",
+        "src.data.coverage",
+        "--symbol",
+        "BTCUSDT",
+        "--raw-root",
+        str(tmp_path),
+        "--json",
+    ]
     proc = subprocess.run(
-        [sys.executable, "-m", "src.data.coverage", "--symbol", "BTCUSDT", "--raw-root", str(tmp_path), "--json"],
+        cmd,
         check=False,
         capture_output=True,
         text=True,
