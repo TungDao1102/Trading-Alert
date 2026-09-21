@@ -41,7 +41,11 @@ log = structlog.get_logger()
 
 # Rate-limited failures are retried with jitter; on exhaustion the paginator
 # raises and lets the caller decide (D-09 fail-closed posture).
-_RATE_LIMIT_ERRORS: tuple[type[BaseException], ...] = (tenacity.RetryError,)
+
+# An empty page advances only one interval per round-trip — a long hole
+# (e.g. a 30-day `1m` gap ≈ 43k serial fetches) must break fast instead
+# of crawling one interval at a time.
+MAX_CONSECUTIVE_EMPTY_PAGES = 100
 
 # Fail closed AND terminate: a deterministically corrupt window never
 # becomes a rate-limit, so consecutive structural rejections without a
@@ -247,10 +251,19 @@ async def backfill_symbol_interval(
     reversibility, idempotent re-run).
     """
     cfg = config or BackfillConfig(interval_ms=interval_ms(interval))
+    # The cadence is load-bearing for resume math + cursor advance — a
+    # config built for another interval must fail loudly, never drift.
+    expected_interval_ms = interval_ms(interval)
+    if cfg.interval_ms != expected_interval_ms:
+        raise ValueError(
+            f"BackfillConfig.interval_ms={cfg.interval_ms} does not match "
+            f"interval {interval!r} ({expected_interval_ms} ms)"
+        )
     pages = 0
     rows_published = 0
     structural_rejections = 0
     consecutive_rejections = 0
+    consecutive_empty_pages = 0
     duplicates_skipped = 0
     durations: list[int] = []
 
@@ -436,11 +449,22 @@ async def backfill_symbol_interval(
             cursor = last_published_open_ms + cfg.interval_ms
         elif raw_page:
             consecutive_rejections = 0
+            consecutive_empty_pages = 0
             # Normal advance past the page we just fetched.
             last_open = int(raw_page[-1].open_time_utc.timestamp() * 1000)
             cursor = max(last_open + cfg.interval_ms, page_start + cfg.interval_ms)
         else:
             consecutive_rejections = 0
+            consecutive_empty_pages += 1
+            if consecutive_empty_pages > MAX_CONSECUTIVE_EMPTY_PAGES:
+                log.warning(
+                    "backfill.empty_hole",
+                    symbol=symbol,
+                    interval=interval,
+                    cursor_ms=cursor,
+                    consecutive_empty_pages=consecutive_empty_pages,
+                )
+                break
             cursor = page_start + cfg.interval_ms
 
         if cursor < end_ms and cfg.pace_seconds > 0:
@@ -481,6 +505,12 @@ async def backfill_symbol_interval(
                 files=written,
             )
             del date_buffers[d]
+            # Progress consumers must see flushed rows too — the buffered
+            # publish path fires on_publish, so the final flush does as well.
+            if on_publish is not None:
+                result = on_publish(len(candles))
+                if asyncio.iscoroutine(result):
+                    await result
 
     return BackfillResult(
         pages=pages,

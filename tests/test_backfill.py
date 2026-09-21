@@ -442,6 +442,27 @@ async def test_corrupt_page_rejected_cursor_not_advanced_past_good_data(
 # --------------------------------------------------------------------------- #
 
 
+def test_rate_limit_predicate_pins_canonical_sdk_error_names() -> None:
+    """Pin the retry predicate to the SDK's real error-class substrings.
+
+    `fetch_page_with_retry` sniffs exception class names (the SDK raises
+    its own hierarchy). If Binance renames the exception, this test fails
+    loudly instead of silently disabling all retry.
+    """
+    from src.data.backfill import _is_rate_limit
+
+    class TooManyRequestsError(Exception):
+        pass
+
+    class RateLimitExceeded(Exception):
+        pass
+
+    assert _is_rate_limit(TooManyRequestsError("429")) is True
+    assert _is_rate_limit(RateLimitExceeded("418")) is True
+    assert _is_rate_limit(RuntimeError("boom")) is False
+    assert _is_rate_limit(ValueError("TooManyRequests-like value")) is False
+
+
 def _result_summary(result: BackfillResult) -> str:
     """Tiny formatter for ad-hoc verification scripts."""
     return (
