@@ -41,6 +41,28 @@ log = structlog.get_logger()
 # raises and lets the caller decide (D-09 fail-closed posture).
 _RATE_LIMIT_ERRORS: tuple[type[BaseException], ...] = (tenacity.RetryError,)
 
+# Fail closed AND terminate: a deterministically corrupt window never
+# becomes a rate-limit, so consecutive structural rejections without a
+# single successful publish raise instead of re-fetching forever.
+MAX_CONSECUTIVE_REJECTIONS = 5
+
+
+class StructuralRejectionError(RuntimeError):
+    """Raised when consecutive corrupt pages exceed the in-run budget."""
+
+    def __init__(
+        self, symbol: str, interval: str, cursor_ms: int, consecutive: int
+    ) -> None:
+        super().__init__(
+            f"structural rejection budget exhausted for {symbol}/{interval} "
+            f"at cursor_ms={cursor_ms} "
+            f"({consecutive} consecutive rejections, no successful publish)"
+        )
+        self.symbol = symbol
+        self.interval = interval
+        self.cursor_ms = cursor_ms
+        self.consecutive = consecutive
+
 
 @dataclass(frozen=True)
 class BackfillConfig:
@@ -221,6 +243,7 @@ async def backfill_symbol_interval(
     pages = 0
     rows_published = 0
     structural_rejections = 0
+    consecutive_rejections = 0
     duplicates_skipped = 0
     durations: list[int] = []
 
@@ -391,14 +414,22 @@ async def backfill_symbol_interval(
             # re-encounters the corrupt page (Behavior #4). When the
             # FIRST page was corrupt and nothing is published yet, the
             # cursor stays at `start_ms` and the next fetch retries from
-            # there — a real Binance rate-limit response will eventually
-            # surface so we don't loop forever.
+            # there — but only up to MAX_CONSECUTIVE_REJECTIONS times: a
+            # deterministically corrupt window never heals, so we raise
+            # instead of re-fetching the identical page forever.
+            consecutive_rejections += 1
+            if consecutive_rejections > MAX_CONSECUTIVE_REJECTIONS:
+                raise StructuralRejectionError(
+                    symbol, interval, cursor, consecutive_rejections
+                )
             cursor = last_published_open_ms + cfg.interval_ms
         elif raw_page:
+            consecutive_rejections = 0
             # Normal advance past the page we just fetched.
             last_open = int(raw_page[-1].open_time_utc.timestamp() * 1000)
             cursor = max(last_open + cfg.interval_ms, page_start + cfg.interval_ms)
         else:
+            consecutive_rejections = 0
             cursor = page_start + cfg.interval_ms
 
         if cursor < end_ms and cfg.pace_seconds > 0:
