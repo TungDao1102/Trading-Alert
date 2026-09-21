@@ -47,6 +47,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 
 import polars as pl
 import structlog
@@ -71,9 +72,24 @@ COLLECTOR_CADENCE_SECONDS = 300.0
 # deploy fetches a bounded window; later sweeps resume from watermarks.
 FUNDING_BOOTSTRAP_LOOKBACK_MS = 8 * 60 * 60_000
 
-# Type alias: anything that quacks like the project adapter. Tests
-# inject a `FakeAdapter`; production passes a `BinanceUsdmAdapter`.
-AdapterLike = BinanceUsdmAdapter | object
+# Structural adapter surface used by the collector (IN-01). Production
+# passes a `BinanceUsdmAdapter`; tests inject a `FakeAdapter`. A
+# `Protocol` (not a `BinanceUsdmAdapter | object` union) means mypy
+# checks the adapter boundary instead of collapsing to `object`.
+class AdapterLike(Protocol):
+    """Anything that quacks like the project adapter for OI/funding."""
+
+    async def open_interest(self, symbol: str) -> OiSnapshot: ...
+    async def funding_rate(
+        self,
+        symbol: str | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 1000,
+    ) -> list[FundingTick]: ...
+    async def open_interest_statistics(
+        self, symbol: str, period: str, limit: int = 30
+    ) -> list[OiSnapshot]: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -112,14 +128,14 @@ class FundingSweepResult:
 
 
 _OI_SCHEMA: dict[str, pl.DataType] = {
-    "symbol": pl.Utf8,
+    "symbol": pl.String(),
     "observed_at_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
     "open_interest": pl.Decimal(scale=8),
-    "source": pl.Utf8,
+    "source": pl.String(),
 }
 
 _FUNDING_SCHEMA: dict[str, pl.DataType] = {
-    "symbol": pl.Utf8,
+    "symbol": pl.String(),
     "funding_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
     "funding_rate": pl.Decimal(scale=10),
     "mark_price": pl.Decimal(scale=8),
@@ -349,7 +365,7 @@ async def async_oi_tick(
     gaps = 0
     for sym in universe:
         try:
-            snap = await adapter.open_interest(sym)  # type: ignore[attr-defined]
+            snap = await adapter.open_interest(sym)
         except Exception as exc:
             _record_gap(
                 session,
@@ -424,7 +440,7 @@ async def async_funding_sweep(
     gaps = 0
     for sym in universe:
         try:
-            sym_ticks = await adapter.funding_rate(  # type: ignore[attr-defined]
+            sym_ticks = await adapter.funding_rate(
                 symbol=sym, start_ms=since_ms, end_ms=end_ms, limit=limit
             )
         except Exception as exc:
@@ -507,7 +523,7 @@ async def harvest_open_interest_history(
     rows_inserted = 0
     for sym in universe:
         try:
-            snapshots = await adapter.open_interest_statistics(  # type: ignore[attr-defined]
+            snapshots = await adapter.open_interest_statistics(
                 symbol=sym, period=period, limit=lookback_days
             )
         except Exception as exc:

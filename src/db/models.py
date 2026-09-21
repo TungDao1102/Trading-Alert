@@ -19,10 +19,10 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
 
 from sqlalchemy import DateTime, Numeric, String
 from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
@@ -180,10 +180,10 @@ class CoverageWindow(Base):
 
 # One shared async engine per URL: repeated `make_session_factory` calls
 # (tests, CLI, collector restarts) must not leak a pool per call.
-_ENGINE_CACHE: dict[str, Any] = {}
+_ENGINE_CACHE: dict[str, AsyncEngine] = {}
 
 
-def make_engine(database_url: str):
+def make_engine(database_url: str) -> AsyncEngine:
     """Return the shared async engine for `database_url`.
 
     Accepts `postgresql+psycopg://...` or bare `postgresql://...` (libpq

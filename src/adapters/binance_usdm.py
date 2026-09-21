@@ -17,6 +17,7 @@ Dataclass conventions:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -157,7 +158,7 @@ def is_rate_limit_error(exc: BaseException) -> bool:
     return "TooManyRequests" in cls_name or "RateLimit" in cls_name
 
 
-def _row_to_kline(symbol: str, interval: str, row: list[Any]) -> Kline:
+def _row_to_kline(symbol: str, interval: str, row: Sequence[Any]) -> Kline:
     """Map one raw kline list (12-field tuple) to a `Kline`.
 
     Per Binance docs the order is:
@@ -315,9 +316,15 @@ class BinanceUsdmAdapter:
             end_time=end_ms,
             limit=limit,
         )
-        items: list[GetFundingRateHistoryResponseInner] = response.data()
+        raw = response.data()
+        # The stub types `data()` as the single response model, but array
+        # endpoints return a list at runtime (`is_array` models) — unwrap
+        # defensively instead of casting.
+        rows: list[GetFundingRateHistoryResponseInner] = (
+            raw if isinstance(raw, list) else [raw]
+        )
         out: list[FundingTick] = []
-        for item in items:
+        for item in rows:
             # Same strictness as open_interest: skip-and-raise, never
             # default a missing timestamp/rate to epoch-0 or zero.
             if item.funding_time is None or item.funding_rate is None:

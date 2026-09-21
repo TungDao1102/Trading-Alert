@@ -26,7 +26,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -237,6 +237,22 @@ class CoverageReport:
         return self.cells
 
 
+class OICoverageRow(TypedDict):
+    """One per-(symbol, data_class) tick-coverage row (OI + funding views).
+
+    Typed (instead of `dict[str, object]`) so gap-math call sites type
+    check: `start_utc`/`end_utc` are datetimes-or-None, `rows` an int.
+    A plain dict at runtime — callers iterating keys are unaffected.
+    """
+
+    symbol: str
+    data_class: str
+    start_utc: datetime | None
+    end_utc: datetime | None
+    rows: int
+    gap_count: int
+
+
 def _gap_count_for_range(
     *,
     start_utc: datetime | None,
@@ -359,7 +375,7 @@ def report_all_live5(
 def oi_coverage_rows(
     con: duckdb.DuckDBPyConnection,
     raw_root: Path = DEFAULT_RAW_ROOT,
-) -> list[dict[str, object]]:
+) -> list[OICoverageRow]:
     """Return per-(symbol, data_class) tick coverage rows from the OI + funding views.
 
     Combines `oi_coverage_v1` and `funding_coverage_v1` into one list so
@@ -367,7 +383,7 @@ def oi_coverage_rows(
     empty list — never raise.
     """
     _load_views(con, raw_root)
-    out: list[dict[str, object]] = []
+    out: list[OICoverageRow] = []
     for view in ("oi_coverage_v1", "funding_coverage_v1"):
         try:
             rows = con.execute(
@@ -396,7 +412,7 @@ def build_oi_coverage(
     *,
     expected_interval_ms: int = DEFAULT_OI_INTERVAL_MS,
     funding_interval_ms: int = DEFAULT_FUNDING_INTERVAL_MS,
-) -> list[dict[str, object]]:
+) -> list[OICoverageRow]:
     """Tick coverage with explicit gap_count against each class cadence.
 
     OI rows use the 5-minute canonical cadence; funding rows use the
@@ -435,8 +451,8 @@ def build_oimeta_view(
             pg_index[str(r["symbol"])] = r
 
     out: list[dict[str, object]] = []
-    for r in candle_report.rows:
-        sym = r.symbol
+    for cell in candle_report.rows:
+        sym = cell.symbol
         pg_meta = pg_index.get(sym, {})
         onboard_ms = pg_meta.get("onboard_ms")
         onboard_utc: datetime | None = None
@@ -445,11 +461,11 @@ def build_oimeta_view(
         out.append(
             {
                 "symbol": sym,
-                "tf": r.tf,
-                "start_utc": r.start_utc,
-                "end_utc": r.end_utc,
-                "rows": r.rows,
-                "gap_count": r.gap_count,
+                "tf": cell.tf,
+                "start_utc": cell.start_utc,
+                "end_utc": cell.end_utc,
+                "rows": cell.rows,
+                "gap_count": cell.gap_count,
                 "onboard_utc": onboard_utc,
                 "status_history_json": pg_meta.get("status_history_json", "[]"),
             }

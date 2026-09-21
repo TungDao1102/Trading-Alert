@@ -14,6 +14,7 @@ pure-function surface is testable without network or DB dependencies
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 import polars as pl
 from src.adapters.binance_usdm import Kline
@@ -151,9 +152,17 @@ def check_batch(klines: list[Kline], interval: str) -> QualityVerdict:
     interval_ms = INTERVAL_MS[interval]
     max_t = df["open_time_utc"].max()
     min_t = df["open_time_utc"].min()
-    if max_t is not None and min_t is not None:
-        span_ms = (max_t - min_t).total_seconds() * 1000
-        expected = int(span_ms // interval_ms) + 1 if span_ms else df.height
+    # Polars types the extrema as a broad scalar union; narrow to the
+    # datetimes the Datetime column guarantees. Anything else is schema
+    # drift — reject loudly (fail closed) instead of guessing gap math.
+    if not isinstance(max_t, datetime) or not isinstance(min_t, datetime):
+        raise ValueError(
+            "quality gate: open_time_utc extrema are not datetimes "
+            f"({max_t!r}, {min_t!r}) — schema drift, refusing batch"
+        )
+    span_ms = (max_t - min_t).total_seconds() * 1000
+    if span_ms:
+        expected = int(span_ms // interval_ms) + 1
     else:
         expected = df.height
     gap_count = max(0, expected - df.height)

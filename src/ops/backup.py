@@ -591,17 +591,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     if args.cmd == "prune":
-        report = prune_bundle(
+        prune_report = prune_bundle(
             bundle_root=args.bundle_root,
             parquet_roots=tuple(args.parquet_roots),
             dry_run=args.dry_run,
         )
-        verb = "would prune" if report.dry_run else "pruned"
+        verb = "would prune" if prune_report.dry_run else "pruned"
         print(
             f"prune-OK bundle_root={args.bundle_root} "
-            f"{verb}={len(report.pruned_files)}"
+            f"{verb}={len(prune_report.pruned_files)}"
         )
-        for key in report.pruned_files:
+        for key in prune_report.pruned_files:
             print(f"  {key}")
         return 0
 
