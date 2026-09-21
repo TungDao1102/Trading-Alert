@@ -189,6 +189,43 @@ def backup(
     )
 
 
+def _assert_safe_scratch_root(scratch_root: Path, bundle_root: Path) -> None:
+    """Fail closed before any recursive delete of an operator-supplied path.
+
+    A typo (`--scratch-root .`, `/`, `~`, the bundle root itself, or
+    `data/raw`) must never wipe the working tree, the live store, or the
+    backup bundle. Raises `ValueError` on any dangerous layout.
+    """
+    resolved = scratch_root.resolve()
+    bundle = bundle_root.resolve()
+    if resolved == bundle:
+        raise ValueError(
+            f"refusing drill: --scratch-root {scratch_root} resolves to "
+            "the bundle root itself"
+        )
+    if resolved == Path(resolved.anchor):
+        raise ValueError(
+            f"refusing drill: --scratch-root {scratch_root} is a filesystem root"
+        )
+    for protected in (Path.home().resolve(), Path.cwd().resolve()):
+        if resolved == protected:
+            raise ValueError(
+                f"refusing drill: --scratch-root {scratch_root} resolves to "
+                f"protected directory {protected}"
+            )
+    if bundle.is_relative_to(resolved):
+        raise ValueError(
+            f"refusing drill: bundle root {bundle_root} lives inside "
+            f"--scratch-root {scratch_root} — wiping scratch would destroy "
+            "the backup bundle"
+        )
+    if resolved.is_relative_to(bundle):
+        raise ValueError(
+            f"refusing drill: --scratch-root {scratch_root} lives inside "
+            f"the bundle root {bundle_root} — ambiguous layout, refusing"
+        )
+
+
 def run_drill(
     *,
     bundle_root: Path,
@@ -216,6 +253,9 @@ def run_drill(
     argument.
     """
     report = RestoreReport(bundle_root=bundle_root, scratch_root=scratch_root)
+    # Destructive recursive delete on an operator-supplied path: validate
+    # FIRST, fail closed on any dangerous layout (never wipe blindly).
+    _assert_safe_scratch_root(scratch_root, bundle_root)
     if scratch_root.exists():
         shutil.rmtree(scratch_root)
     scratch_root.mkdir(parents=True, exist_ok=True)
