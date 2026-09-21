@@ -255,8 +255,12 @@ class BinanceUsdmAdapter:
         for item in raw or []:
             ts = getattr(item, "timestamp", None)
             oi = getattr(item, "sum_open_interest", None)
+            # Same strictness as open_interest/funding_rate: a malformed
+            # harvest row raises loudly, never drops silently (D-09).
             if ts is None or oi is None:
-                continue
+                raise ValueError(
+                    f"open_interest_statistics row missing fields: {item!r}"
+                )
             out.append(
                 OiSnapshot(
                     symbol=getattr(item, "symbol", None) or symbol,
@@ -340,13 +344,45 @@ class BinanceUsdmAdapter:
                 )
                 drifted.append(f"{sym.symbol} lacks {missing}")
                 continue
-            tick = Decimal(str(f_price.tick_size or "0"))
-            step = Decimal(str(f_lot.step_size or "0"))
-            min_qty = Decimal(str(f_lot.min_qty or "0"))
+            # Flag-never-fabricate (D-09): a missing numeric filter field
+            # must raise loudly, never become a plausible zero that poisons
+            # downstream quantization (zero tick_size floors everything to
+            # zero wearing the clothes of real data).
+            if (
+                f_price.tick_size is None
+                or f_lot.step_size is None
+                or f_lot.min_qty is None
+                or f_min_notional.notional is None
+            ):
+                raise ValueError(
+                    "exchangeInfo filter missing numeric field "
+                    f"for {sym.symbol!r}: {sym.filters!r}"
+                )
+            # Identity fields are the partition keys downstream (symbol
+            # partitions, metadata PK): an empty-string symbol is a corrupt
+            # partition, so a missing one joins the drift failure, never
+            # an empty default.
+            if (
+                not sym.symbol
+                or not sym.contract_type
+                or not sym.status
+                or not sym.base_asset
+                or not sym.quote_asset
+                or not sym.margin_asset
+            ):
+                log.error(
+                    "adapter.exchange_info.symbol_drift",
+                    symbol=sym.symbol,
+                )
+                drifted.append(f"symbol record missing identity fields: {sym!r}")
+                continue
+            tick = Decimal(str(f_price.tick_size))
+            step = Decimal(str(f_lot.step_size))
+            min_qty = Decimal(str(f_lot.min_qty))
             max_qty = (
                 Decimal(str(f_lot.max_qty)) if f_lot.max_qty is not None else None
             )
-            min_notional = Decimal(str(f_min_notional.notional or "0"))
+            min_notional = Decimal(str(f_min_notional.notional))
             notional_blob = _filter_blob(f_min_notional)
             capabilities_blob = _order_capabilities_blob(sym.order_types or [])
             position_mode_blob = _position_mode_blob(sym)
@@ -357,18 +393,18 @@ class BinanceUsdmAdapter:
             )
             out.append(
                 SymbolFilters(
-                    symbol=sym.symbol or "",
-                    contract_type=sym.contract_type or "",
-                    status=sym.status or "",
+                    symbol=sym.symbol,
+                    contract_type=sym.contract_type,
+                    status=sym.status,
                     onboard_time_utc=onboard,
                     price_tick_size=tick,
                     quantity_step_size=step,
                     min_quantity=min_qty,
                     max_quantity=max_qty,
                     min_notional=min_notional,
-                    base_asset=sym.base_asset or "",
-                    quote_asset=sym.quote_asset or "",
-                    margin_asset=sym.margin_asset or "",
+                    base_asset=sym.base_asset,
+                    quote_asset=sym.quote_asset,
+                    margin_asset=sym.margin_asset,
                     notional_constraints_json=notional_blob,
                     order_capabilities_json=capabilities_blob,
                     position_mode_snapshot_json=position_mode_blob,
