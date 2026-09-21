@@ -26,9 +26,10 @@ USER appuser
 
 # Healthcheck for the collector/backfill image; entrypoints are docker-compose
 # overrides per service (Phase 2 single image, multiple entrypoints).
-# Importing the collector proves the runtime + dependencies load; a dead
-# loop surfaces via watermark freshness checks outside the image.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import src.data.collector" || exit 1
+# Watermark-freshness probe: exit 0 iff every universe symbol has an OI
+# watermark updated within 2x cadence, so a wedged poll loop surfaces as
+# unhealthy instead of reporting healthy forever.
+HEALTHCHECK --interval=60s --timeout=15s --start-period=90s --retries=3 \
+    CMD python -m src.data.collector --healthcheck || exit 1
 
 CMD ["uv", "run", "python", "-m", "src.data.collector"]

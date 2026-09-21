@@ -459,3 +459,100 @@ def test_gap_pk_columns_are_not_null_under_postgres_dialect() -> None:
         # The compiled PG DDL must agree (belt-and-braces against the ORM).
         ddl = str(CreateTable(tbl).compile(dialect=dialect))
         assert "CREATE TABLE" in ddl
+
+
+# --------------------------------------------------------------------------- #
+# Runner entrypoint (WR-06): one tick, healthcheck, module entrypoint.
+# --------------------------------------------------------------------------- #
+
+
+async def test_run_once_tick_publishes_snapshots_and_watermarks(
+    session: Session, tmp_path: Path
+) -> None:
+    """The loop's unit of work: one OI tick + one funding sweep."""
+    from src.data.collector import _run_once_tick
+
+    snapshots = [_mk_oi_snapshot(sym) for sym in LIVE_5]
+    ticks = [[_mk_funding_tick(sym)] for sym in LIVE_5]
+    adapter = FakeAdapter(oi_responses=snapshots, funding_responses=ticks)
+    observed = datetime(2026, 9, 19, 12, 5, tzinfo=UTC)
+
+    oi, funding = await _run_once_tick(
+        adapter,  # type: ignore[arg-type]
+        session,
+        universe=LIVE_5,
+        raw_root=tmp_path,
+        observed_utc=observed,
+    )
+
+    assert oi.snapshots_inserted == len(LIVE_5)
+    assert oi.gaps_recorded == 0
+    assert funding.funding_inserted == len(LIVE_5)
+    assert funding.gaps_recorded == 0
+    # Both watermark namespaces advanced.
+    oi_marks = session.execute(
+        select(CollectorWatermark).where(CollectorWatermark.data_class == "oi")
+    ).scalars().all()
+    funding_marks = session.execute(
+        select(CollectorWatermark).where(
+            CollectorWatermark.data_class == "funding"
+        )
+    ).scalars().all()
+    assert len(oi_marks) == len(LIVE_5)
+    assert len(funding_marks) == len(LIVE_5)
+
+
+def test_healthcheck_fails_without_watermarks(tmp_path: Path) -> None:
+    """No OI tick ever completed → exit 1 (fail closed, not healthy)."""
+    from src.data.collector import _check_health
+
+    db_path = tmp_path / "health.db"
+    url = f"sqlite:///{db_path}"
+    engine = create_engine(url)
+    Base.metadata.create_all(engine)
+    engine.dispose()
+
+    assert _check_health(url, universe=LIVE_5, max_age_seconds=600) == 1
+
+
+def test_healthcheck_passes_with_fresh_watermarks(tmp_path: Path) -> None:
+    """A recent tick per symbol → exit 0."""
+    from src.data.collector import _check_health
+
+    db_path = tmp_path / "health.db"
+    url = f"sqlite:///{db_path}"
+    engine = create_engine(url)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+    s = SessionLocal()
+    now = datetime.now(UTC)
+    for sym in LIVE_5:
+        s.merge(
+            CollectorWatermark(
+                symbol=sym,
+                data_class="oi",
+                last_tick_utc=now,
+                updated_at_utc=now,
+            )
+        )
+    s.commit()
+    s.close()
+    engine.dispose()
+
+    assert _check_health(url, universe=LIVE_5, max_age_seconds=600) == 0
+
+
+def test_collector_module_has_real_entrypoint() -> None:
+    """`python -m src.data.collector --help` exits 0 (not import-and-exit)."""
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "src.data.collector", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, f"stderr={proc.stderr!r}"
+    assert "--healthcheck" in proc.stdout
+    assert "--once" in proc.stdout

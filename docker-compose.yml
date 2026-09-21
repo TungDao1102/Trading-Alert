@@ -39,12 +39,20 @@ services:
     environment:
       # Compose hostname (overrides POSTGRES_HOST=localhost from .env)
       POSTGRES_HOST: postgres
+      # In-network DB URL: the container cannot reach PG via the
+      # localhost URL in .env, so the collector/healthcheck get a
+      # compose-hostname URL built from the same required vars as the
+      # postgres service above (passwords must stay URL-safe).
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER required in .env}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required in .env}@postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-trading}
     volumes:
       - rawdata:/app/data/raw
       # The backup bundle must survive container restarts — without this
       # mount, "off-host" bundles live on the ephemeral container FS.
       - backupdata:/app/data/backup
     # Phase 2 entrypoint is the OI/funding collector (5-min poll per D-07).
+    # `python -m src.data.collector` runs the poll loop (main() +
+    # __main__ in src/data/collector.py); the image HEALTHCHECK probes
+    # watermark freshness via `--healthcheck`.
     # Backup drill runs as a one-shot Compose target (see scripts/backup-drill.ps1).
     command: ["uv", "run", "python", "-m", "src.data.collector"]
 

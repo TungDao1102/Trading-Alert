@@ -21,31 +21,55 @@ Async / sync split:
   - Parquet writes are SYNC (Polars is sync).
 
 The collector is intentionally NOT a single asyncio Task class — the
-loop is owned by the orchestrator (Docker Compose long-running process
-or a systemd unit, per plan discretion). This module exposes three
-operations the orchestrator calls per tick:
+loop is owned by `main()` below (`python -m src.data.collector` runs
+the 5-minute poll loop: universe, cadence, watermark session,
+fail-closed handling). This module exposes three operations the loop
+calls per tick:
 
-  - `async_oi_tick(...)`                — canonical 5-min OI poll
-  - `async_funding_sweep(...)`          — funding history backfill + sweep
-  - `harvest_open_interest_history(...)`— opportunistic 30-day harvest
-                                          (D-08, research-grade only)
+   - `async_oi_tick(...)`                — canonical 5-min OI poll
+   - `async_funding_sweep(...)`          — funding history backfill + sweep
+   - `harvest_open_interest_history(...)`— opportunistic 30-day harvest
+                                           (D-08, research-grade only)
+
+`--once` runs a single tick (smoke tests); `--healthcheck` is the
+container watermark-freshness probe (fails when no OI tick has
+completed within 2x cadence).
 """
 
 from __future__ import annotations
 
+import argparse
+import asyncio
+import os
+import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 import polars as pl
-from sqlalchemy.orm import Session
+import structlog
+from sqlalchemy import Engine, create_engine, select
+from sqlalchemy.orm import Session, sessionmaker
 from src.adapters.binance_usdm import (
     BinanceUsdmAdapter,
     FundingTick,
     OiSnapshot,
 )
+from src.data.backfill import LIVE_5
 from src.db.models import TICK_WIDE_SYMBOL, CollectorGap, CollectorWatermark
+
+log = structlog.get_logger()
+
+# Canonical 5-minute OI cadence (D-07). Overridable via
+# `--cadence-seconds` (and `OI_POLL_INTERVAL_SECONDS` in .env documents
+# the same baseline for operators).
+COLLECTOR_CADENCE_SECONDS = 300.0
+
+# First funding sweep looks back 8h (one funding interval) so a fresh
+# deploy fetches a bounded window; later sweeps resume from watermarks.
+FUNDING_BOOTSTRAP_LOOKBACK_MS = 8 * 60 * 60_000
 
 # Type alias: anything that quacks like the project adapter. Tests
 # inject a `FakeAdapter`; production passes a `BinanceUsdmAdapter`.
@@ -510,3 +534,284 @@ async def harvest_open_interest_history(
         reason=f"harvest_complete: rows={rows_inserted} lookback_days={lookback_days}",
     )
     return rows_inserted
+
+
+# --------------------------------------------------------------------------- #
+# Runner entrypoint — the 5-minute poll loop (D-07).
+# --------------------------------------------------------------------------- #
+
+
+def _resolve_database_url(explicit: str | None) -> str:
+    """Resolve the sync DB URL: explicit flag, then env (SYNC first).
+
+    Raises loudly when nothing is set — the loop must never start
+    without a watermark session (fail closed, no phantom ticks).
+    """
+    url = (
+        explicit
+        or os.environ.get("DATABASE_URL_SYNC")
+        or os.environ.get("DATABASE_URL")
+    )
+    if not url:
+        raise RuntimeError(
+            "refusing collector start: neither --database-url nor "
+            "DATABASE_URL_SYNC nor DATABASE_URL is set — no watermark "
+            "session, no ticks"
+        )
+    if url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return url
+
+
+def _make_sync_engine(database_url: str | None) -> Engine:
+    """Build the sync engine for the collector loop / healthcheck."""
+    return create_engine(_resolve_database_url(database_url), future=True)
+
+
+def _floor_to_cadence(dt: datetime, cadence_seconds: float) -> datetime:
+    """Floor `dt` to the cadence grid — the tick's expected timestamp."""
+    epoch_s = int(dt.timestamp())
+    step = max(1, int(cadence_seconds))
+    return datetime.fromtimestamp(epoch_s - (epoch_s % step), tz=UTC)
+
+
+def _funding_since_ms(
+    session: Session, universe: Sequence[str], now_ms: int
+) -> int:
+    """Resume each symbol just after its funding watermark.
+
+    Symbols without a watermark (fresh deploy) start one funding
+    interval back so the first sweep is bounded; resuming at
+    `watermark + 1` never re-fetches an already-written tick (the
+    tick-file immutability guard would refuse the overwrite).
+    """
+    starts: list[int] = []
+    for sym in universe:
+        row = session.execute(
+            select(CollectorWatermark).where(
+                CollectorWatermark.symbol == sym,
+                CollectorWatermark.data_class == "funding",
+            )
+        ).scalar_one_or_none()
+        if row is None or row.last_tick_utc is None:
+            starts.append(now_ms - FUNDING_BOOTSTRAP_LOOKBACK_MS)
+        else:
+            starts.append(int(row.last_tick_utc.timestamp() * 1000) + 1)
+    return min(starts)
+
+
+async def _run_once_tick(
+    adapter: AdapterLike,
+    session: Session,
+    *,
+    universe: Sequence[str],
+    raw_root: Path,
+    observed_utc: datetime,
+    cadence_seconds: float = COLLECTOR_CADENCE_SECONDS,
+) -> tuple[OITickResult, FundingSweepResult]:
+    """Run one OI tick + one funding sweep (the unit the loop repeats)."""
+    expected_utc = _floor_to_cadence(observed_utc, cadence_seconds)
+    oi = await async_oi_tick(
+        adapter,
+        session,
+        universe=universe,
+        expected_utc=expected_utc,
+        observed_utc=observed_utc,
+        raw_root=raw_root,
+    )
+    now_ms = int(observed_utc.timestamp() * 1000)
+    since_ms = _funding_since_ms(session, universe, now_ms)
+    funding = await async_funding_sweep(
+        adapter,
+        session,
+        universe=universe,
+        observed_utc=observed_utc,
+        raw_root=raw_root,
+        since_ms=since_ms,
+        end_ms=now_ms,
+    )
+    return oi, funding
+
+
+def _check_health(
+    database_url: str | None,
+    *,
+    universe: Sequence[str],
+    max_age_seconds: float,
+) -> int:
+    """Watermark-freshness probe for the container HEALTHCHECK.
+
+    Exit 0 iff every universe symbol has an OI watermark updated within
+    `max_age_seconds` (2x cadence); otherwise exit 1 with the stale
+    symbols on stderr. A wedged loop surfaces as unhealthy instead of
+    reporting healthy forever.
+    """
+    session: Session | None = None
+    try:
+        engine = _make_sync_engine(database_url)
+        session = sessionmaker(bind=engine)()
+        now = datetime.now(UTC)
+        stale: list[str] = []
+        for sym in universe:
+            row = session.execute(
+                select(CollectorWatermark).where(
+                    CollectorWatermark.symbol == sym,
+                    CollectorWatermark.data_class == "oi",
+                )
+            ).scalar_one_or_none()
+            if row is None or row.updated_at_utc is None:
+                stale.append(f"{sym}:no-watermark")
+                continue
+            updated = row.updated_at_utc
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=UTC)
+            age = (now - updated).total_seconds()
+            if age > max_age_seconds:
+                stale.append(f"{sym}:age={age:.0f}s")
+        if stale:
+            print(
+                f"collector-health: UNHEALTHY — {'; '.join(stale)}",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"collector-health: OK — {len(universe)} symbols fresh")
+        return 0
+    except Exception as exc:
+        print(
+            f"collector-health: UNKNOWN — {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    finally:
+        if session is not None:
+            session.close()
+
+
+def _parse_collector_args(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="python -m src.data.collector",
+        description=(
+            "Canonical 5-minute OI poll loop + funding sweep (D-07/D-08). "
+            "Snapshots land in the Parquet raw store; watermarks advance "
+            "in PostgreSQL; failures journal gap rows and never advance."
+        ),
+    )
+    parser.add_argument(
+        "--universe",
+        nargs="+",
+        default=list(LIVE_5),
+        help="Symbols to poll (default: live-5).",
+    )
+    parser.add_argument(
+        "--raw-root",
+        type=Path,
+        default=Path("data") / "raw",
+        help="Parquet raw-store root (default: data/raw).",
+    )
+    parser.add_argument(
+        "--database-url",
+        default=None,
+        help="Sync DB URL (default: DATABASE_URL_SYNC / DATABASE_URL env).",
+    )
+    parser.add_argument(
+        "--cadence-seconds",
+        type=float,
+        default=COLLECTOR_CADENCE_SECONDS,
+        help="Poll cadence in seconds (default: 300).",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single tick + sweep, then exit (smoke tests).",
+    )
+    parser.add_argument(
+        "--healthcheck",
+        action="store_true",
+        help="Watermark-freshness probe: exit 0 iff every universe symbol "
+        "has an OI watermark newer than 2x cadence.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the collector: loop (default), one tick (`--once`), or probe."""
+    args = _parse_collector_args(argv)
+    universe: list[str] = list(args.universe) or list(LIVE_5)
+    raw_root = Path(args.raw_root)
+    cadence: float = float(args.cadence_seconds)
+    if args.healthcheck:
+        return _check_health(
+            args.database_url,
+            universe=universe,
+            max_age_seconds=2 * cadence,
+        )
+    try:
+        engine = _make_sync_engine(args.database_url)
+    except RuntimeError as exc:
+        print(f"collector: {exc}", file=sys.stderr)
+        return 2
+    adapter = BinanceUsdmAdapter()
+    session_factory = sessionmaker(bind=engine)
+    if args.once:
+        session = session_factory()
+        try:
+            observed = datetime.now(UTC)
+            oi, funding = asyncio.run(
+                _run_once_tick(
+                    adapter,
+                    session,
+                    universe=universe,
+                    raw_root=raw_root,
+                    observed_utc=observed,
+                    cadence_seconds=cadence,
+                )
+            )
+        finally:
+            session.close()
+        print(
+            f"collector-once: oi={oi.snapshots_inserted} "
+            f"funding={funding.funding_inserted} "
+            f"gaps={oi.gaps_recorded + funding.gaps_recorded}"
+        )
+        return 0
+    print(
+        f"collector: loop start universe={len(universe)} "
+        f"cadence={cadence}s raw_root={raw_root}"
+    )
+    try:
+        while True:
+            observed = datetime.now(UTC)
+            session = session_factory()
+            try:
+                oi, funding = asyncio.run(
+                    _run_once_tick(
+                        adapter,
+                        session,
+                        universe=universe,
+                        raw_root=raw_root,
+                        observed_utc=observed,
+                        cadence_seconds=cadence,
+                    )
+                )
+                log.info(
+                    "collector.tick",
+                    oi=oi.snapshots_inserted,
+                    funding=funding.funding_inserted,
+                    gaps=oi.gaps_recorded + funding.gaps_recorded,
+                )
+            except Exception:
+                # Fail-closed accounting already journaled a gap row
+                # inside the tick; the loop itself must survive the
+                # unexpected (never crash-loop silently — the exception
+                # is logged with traceback).
+                log.exception("collector.tick.failed")
+            finally:
+                session.close()
+            time.sleep(cadence)
+    except KeyboardInterrupt:
+        print("collector: stopping")
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
