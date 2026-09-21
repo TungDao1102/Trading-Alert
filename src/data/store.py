@@ -58,6 +58,18 @@ def publish_batch(
     if not klines_list:
         return []
 
+    # Batch homogeneity: a batch mixing symbols/intervals — or rows that
+    # do not match the caller's partition args — would cross-contaminate
+    # the immutable partition. Reject instead of trusting caller args.
+    row_symbols = {k.symbol for k in klines_list}
+    row_intervals = {k.interval for k in klines_list}
+    if row_symbols != {symbol} or row_intervals != {interval}:
+        raise ValueError(
+            f"refusing to publish heterogeneous batch under "
+            f"({symbol}, {interval}): rows carry symbols={sorted(row_symbols)} "
+            f"intervals={sorted(row_intervals)}"
+        )
+
     df = klines_to_frame(klines_list)
     # Polars expresses `date` over a Datetime column with `dt.date()`.
     # Compute the partition day once per row, then group.
