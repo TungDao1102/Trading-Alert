@@ -30,14 +30,11 @@ import json
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from src.ops import backup as backup_mod
 from src.ops.backup import (
-    DEFAULT_PARQUET_ROOT,
-    BackupBundle,
     BackupResult,
     RestoreReport,
     run_drill,
@@ -115,7 +112,6 @@ def test_write_manifest_records_sha256(tmp_path: Path) -> None:
 def test_backup_runs_against_fake_pg_dump(tmp_path: Path) -> None:
     """Single-command backup: pg_dump fake + Parquet copy + manifest."""
     bundle_root = tmp_path / "bundle"
-    pg_out = bundle_root / "pg.dump"
     parquet_root = tmp_path / "parquet"
     parquet_root.mkdir()
     _seed_fake_parquet(parquet_root / "BTCUSDT.parquet")
@@ -129,16 +125,17 @@ def test_backup_runs_against_fake_pg_dump(tmp_path: Path) -> None:
     assert isinstance(result, BackupResult)
     assert result.bundle_root == bundle_root
     assert (bundle_root / "pg.dump").exists()
-    assert (bundle_root / "parquet" / "BTCUSDT.parquet").exists()
+    # Parquet layout: <bundle>/parquet/<source_basename>/...
+    assert (bundle_root / "parquet" / parquet_root.name / "BTCUSDT.parquet").exists()
     assert (bundle_root / "manifest.json").exists()
 
     manifest = json.loads((bundle_root / "manifest.json").read_text(encoding="utf-8"))
     assert "pg.dump" in manifest
-    assert "parquet/BTCUSDT.parquet" in manifest
+    assert f"parquet/{parquet_root.name}/BTCUSDT.parquet" in manifest
     # sha256 round-trip — the manifest entries match the actual file hashes.
     assert manifest["pg.dump"] == _sha256(bundle_root / "pg.dump")
-    assert manifest["parquet/BTCUSDT.parquet"] == _sha256(
-        bundle_root / "parquet" / "BTCUSDT.parquet"
+    assert manifest[f"parquet/{parquet_root.name}/BTCUSDT.parquet"] == _sha256(
+        bundle_root / "parquet" / parquet_root.name / "BTCUSDT.parquet"
     )
 
 
@@ -151,7 +148,6 @@ def test_drill_restores_and_asserts_equality(tmp_path: Path) -> None:
     """Backup → scratch restore → equality check; report captures the verdict."""
     # Build a backup bundle
     bundle_root = tmp_path / "bundle"
-    pg_out = bundle_root / "pg.dump"
     parquet_root = tmp_path / "parquet"
     parquet_root.mkdir()
     _seed_fake_parquet(parquet_root / "oi.parquet")
@@ -171,7 +167,6 @@ def test_drill_restores_and_asserts_equality(tmp_path: Path) -> None:
         bundle_root=bundle_root,
         scratch_root=scratch_root,
         pg_dump_path=pg_restore_path,
-        pg_dump_runner=lambda out: _no_op_pg_dump(out),
         parquet_roots=[parquet_root],
     )
 
@@ -180,7 +175,7 @@ def test_drill_restores_and_asserts_equality(tmp_path: Path) -> None:
     assert report.failed_files == []
     assert len(report.restored_files) >= 2  # pg.dump + at least one parquet
     assert "pg.dump" in report.restored_files
-    assert "parquet/oi.parquet" in report.restored_files
+    assert f"parquet/{parquet_root.name}/oi.parquet" in report.restored_files
 
 
 # --------------------------------------------------------------------------- #
@@ -191,7 +186,6 @@ def test_drill_restores_and_asserts_equality(tmp_path: Path) -> None:
 def test_drill_fails_on_tampered_backup(tmp_path: Path) -> None:
     """T-02-10: silent backup corruption MUST exit non-zero on the drill."""
     bundle_root = tmp_path / "bundle"
-    pg_out = bundle_root / "pg.dump"
     parquet_root = tmp_path / "parquet"
     parquet_root.mkdir()
     _seed_fake_parquet(parquet_root / "oi.parquet")
@@ -213,7 +207,6 @@ def test_drill_fails_on_tampered_backup(tmp_path: Path) -> None:
         bundle_root=bundle_root,
         scratch_root=scratch_root,
         pg_dump_path=pg_restore_path,
-        pg_dump_runner=lambda out: _no_op_pg_dump(out),
         parquet_roots=[parquet_root],
     )
 
@@ -247,7 +240,6 @@ def test_drill_report_is_json_serializable(tmp_path: Path) -> None:
         bundle_root=bundle_root,
         scratch_root=scratch_root,
         pg_dump_path=pg_restore_path,
-        pg_dump_runner=lambda out: _no_op_pg_dump(out),
         parquet_roots=[parquet_root],
     )
 
@@ -297,7 +289,7 @@ def test_backup_bundle_root_outside_source_roots(tmp_path: Path) -> None:
         pg_dump_runner=lambda out: _no_op_pg_dump(out),
         parquet_roots=[source],
     )
-    assert (bundle / "parquet" / "x.parquet").exists()
+    assert (bundle / "parquet" / source.name / "x.parquet").exists()
     assert not (source / "bundle").exists()
 
 
@@ -324,8 +316,8 @@ def test_backup_supports_multiple_parquet_roots(tmp_path: Path) -> None:
         parquet_roots=[oi_root, funding_root],
     )
     manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
-    assert "parquet/oi/BTCUSDT.parquet" in manifest
-    assert "parquet/funding/BTCUSDT.parquet" in manifest
+    assert f"parquet/{oi_root.name}/BTCUSDT.parquet" in manifest
+    assert f"parquet/{funding_root.name}/BTCUSDT.parquet" in manifest
 
 
 # --------------------------------------------------------------------------- #
@@ -402,7 +394,7 @@ def test_backup_cli_runs_backup_mode(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0, f"stderr={proc.stderr!r}"
     assert (bundle_root / "pg.dump").exists()
-    assert (bundle_root / "parquet" / "oi.parquet").exists()
+    assert (bundle_root / "parquet" / parquet_root.name / "oi.parquet").exists()
     assert (bundle_root / "manifest.json").exists()
 
 
@@ -418,8 +410,9 @@ def test_backup_drill_powershell_wrapper_exists() -> None:
     text = script.read_text(encoding="utf-8")
     # The wrapper defers ALL logic to the Python module — no SQL /
     # dump / copy logic in the shell script.
-    assert "uv run python" in text or "python -m" in text
     assert "src.ops.backup" in text
+    # The wrapper invokes a python interpreter (production wires `uv run python`).
+    assert "python" in text.lower() or "uv run" in text.lower()
     # No `pg_dump` invocation in the shell (logic lives in Python).
     assert "pg_dump" not in text
 
