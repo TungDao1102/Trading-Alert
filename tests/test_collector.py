@@ -430,3 +430,33 @@ async def test_open_interest_history_harvest_tagged_as_research_grade(
 
     # The opportunistic hist call hit the adapter once per live-5 symbol.
     assert sorted(s for s, _, _ in adapter.oi_hist_calls) == sorted(LIVE_5)
+
+
+def test_gap_pk_columns_are_not_null_under_postgres_dialect() -> None:
+    """PG rejects NULL in PK columns — SQLite tolerates it and masked CR-04.
+
+    Compiles every model table against the PostgreSQL dialect and asserts
+    no primary-key column is nullable, so a future `nullable=True` PK
+    regresses here instead of on the real database. Tick-wide gaps use
+    the `TICK_WIDE_SYMBOL` sentinel, never NULL.
+    """
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import CreateTable
+
+    from src.db.models import TICK_WIDE_SYMBOL
+
+    assert TICK_WIDE_SYMBOL, "tick-wide gap sentinel must be a non-empty string"
+
+    dialect = postgresql.dialect()
+    for tbl in Base.metadata.sorted_tables:
+        pk_names = {c.name for c in tbl.primary_key.columns}
+        assert pk_names, f"{tbl.name} has no primary key"
+        for col in tbl.columns:
+            if col.name in pk_names:
+                assert col.nullable is False, (
+                    f"{tbl.name}.{col.name} is a nullable PK column — "
+                    "PostgreSQL rejects NULL in PKs"
+                )
+        # The compiled PG DDL must agree (belt-and-braces against the ORM).
+        ddl = str(CreateTable(tbl).compile(dialect=dialect))
+        assert "CREATE TABLE" in ddl
