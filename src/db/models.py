@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import DateTime, Numeric, String
 from sqlalchemy.ext.asyncio import (
@@ -177,20 +178,43 @@ class CoverageWindow(Base):
 # ---------- engine factory ---------------------------------------------------
 
 
-def make_engine(database_url: str):
-    """Create the async engine for application code.
+# One shared async engine per URL: repeated `make_session_factory` calls
+# (tests, CLI, collector restarts) must not leak a pool per call.
+_ENGINE_CACHE: dict[str, Any] = {}
 
-    Accepts `postgresql+psycopg://...` (sync) or `postgresql://...` (libpq)
-    and normalizes to the async dialect. The synchronous form remains the
-    contract for Alembic (env.py).
+
+def make_engine(database_url: str):
+    """Return the shared async engine for `database_url`.
+
+    Accepts `postgresql+psycopg://...` or bare `postgresql://...` (libpq
+    scheme, normalized to `+psycopg`); the synchronous form remains the
+    contract for Alembic (env.py). The resolved URL must name an async
+    driver — handing a sync-scheme string to `create_async_engine`
+    without validation is refused loudly.
     """
     if database_url.startswith("postgresql://"):
         database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
-    return create_async_engine(database_url, future=True, echo=False)
+    if "+psycopg" not in database_url and "+asyncpg" not in database_url:
+        raise ValueError(
+            f"refusing engine: {database_url!r} names no async driver "
+            "(expected postgresql+psycopg:// or postgresql+asyncpg://)"
+        )
+    if database_url not in _ENGINE_CACHE:
+        _ENGINE_CACHE[database_url] = create_async_engine(
+            database_url, future=True, echo=False
+        )
+    return _ENGINE_CACHE[database_url]
+
+
+async def dispose_engine(database_url: str) -> None:
+    """Drop the cached engine for `database_url`, closing its pool."""
+    engine = _ENGINE_CACHE.pop(database_url, None)
+    if engine is not None:
+        await engine.dispose()
 
 
 def make_session_factory(database_url: str) -> async_sessionmaker[AsyncSession]:
-    """Return an `async_sessionmaker` bound to the engine above."""
+    """Return an `async_sessionmaker` bound to the shared engine above."""
     engine = make_engine(database_url)
     return async_sessionmaker(engine, expire_on_commit=False)
 
