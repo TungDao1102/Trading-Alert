@@ -25,12 +25,10 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
-
 from src.adapters.binance_usdm import SymbolFilters
 from src.data.backfill import LIVE_5
 from src.data.metadata import refresh_symbol_metadata
 from src.db.models import Base, SymbolMetadata
-
 
 # --------------------------------------------------------------------------- #
 # Test scaffold.
@@ -88,6 +86,64 @@ def session() -> Iterator[Session]:
         engine.dispose()
 
 
+class CapturingSession:
+    """Wraps a SQLAlchemy session and records every `add()` call.
+
+    SQLite stores NUMERIC as REAL (loses precision) and TIMESTAMP without
+    tzinfo (drops the timezone). To assert on the values the metadata
+    module ACTUALLY wrote — not the lossy SQLite roundtrip — we snapshot
+    a deep copy of the SymbolMetadata instance at `add()` time (BEFORE
+    the commit that triggers SQLAlchemy's post-flush refresh from the
+    DB). Production uses PostgreSQL NUMERIC(38,18) + TIMESTAMPTZ which
+    preserve both exactly.
+    """
+
+    def __init__(self, real: Session) -> None:
+        self._real = real
+        self.added: list[SymbolMetadata] = []
+
+    def add(self, obj: object) -> None:
+        if isinstance(obj, SymbolMetadata):
+            # Snapshot via attribute copy (SymbolMetadata is a frozen
+            # ORM instance; we cannot replace fields after construction,
+            # so we build a sibling instance carrying the same field
+            # values). This MUST run before the caller commits — post-
+            # commit the object's attributes reflect the SQLite roundtrip.
+            self.added.append(
+                SymbolMetadata(
+                    symbol=obj.symbol,
+                    metadata_observed_at_utc=obj.metadata_observed_at_utc,
+                    status=obj.status,
+                    contract_type=obj.contract_type,
+                    onboard_time_utc=obj.onboard_time_utc,
+                    price_tick_size=obj.price_tick_size,
+                    quantity_step_size=obj.quantity_step_size,
+                    min_quantity=obj.min_quantity,
+                    max_quantity=obj.max_quantity,
+                    min_notional=obj.min_notional,
+                    notional_constraints_json=obj.notional_constraints_json,
+                    order_capabilities_json=obj.order_capabilities_json,
+                    position_mode_snapshot_json=obj.position_mode_snapshot_json,
+                    base_asset=obj.base_asset,
+                    quote_asset=obj.quote_asset,
+                    margin_asset=obj.margin_asset,
+                )
+            )
+        return self._real.add(obj)
+
+    def commit(self) -> None:
+        return self._real.commit()
+
+    def execute(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return self._real.execute(*args, **kwargs)
+
+    def rollback(self) -> None:
+        return self._real.rollback()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
 # --------------------------------------------------------------------------- #
 # Test 1 — golden exchangeInfo inserts one new version row per live-5.
 # --------------------------------------------------------------------------- #
@@ -98,28 +154,37 @@ def test_refresh_inserts_one_version_row_per_live5_symbol(session: Session) -> N
 
     Each row carries a Decimal tick/step (no float). The PK observed-at
     is the value passed to refresh_symbol_metadata (not now()).
+
+    Note: we assert on the captured SymbolMetadata instances (NOT the
+    SQLite roundtrip), because SQLite's REAL storage for NUMERIC drops
+    precision. Production uses PostgreSQL NUMERIC(38,18) which preserves
+    the Decimal exactly.
     """
     observed = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
     filters = [_mk_filters(sym) for sym in LIVE_5]
+    cap = CapturingSession(session)
 
-    inserted = refresh_symbol_metadata(session, filters, observed_at=observed)
+    inserted = refresh_symbol_metadata(cap, filters, observed_at=observed)
 
     assert inserted == len(LIVE_5)
+    assert len(cap.added) == len(LIVE_5)
 
-    rows = session.execute(
-        select(SymbolMetadata).order_by(SymbolMetadata.symbol)
-    ).scalars().all()
-    assert len(rows) == len(LIVE_5)
+    symbols_captured = {r.symbol for r in cap.added}
+    assert symbols_captured == set(LIVE_5)
 
-    symbols_in_db = {r.symbol for r in rows}
-    assert symbols_in_db == set(LIVE_5)
-
-    for row in rows:
+    for row in cap.added:
         assert row.metadata_observed_at_utc == observed
         assert isinstance(row.price_tick_size, Decimal)
         assert isinstance(row.quantity_step_size, Decimal)
         assert isinstance(row.min_quantity, Decimal)
         assert isinstance(row.min_notional, Decimal)
+
+    # Sanity: rows are also persisted (count via real session).
+
+    rows_persisted = session.execute(
+        select(SymbolMetadata).order_by(SymbolMetadata.symbol)
+    ).scalars().all()
+    assert len(rows_persisted) == len(LIVE_5)
 
 
 # --------------------------------------------------------------------------- #
@@ -136,22 +201,18 @@ def test_second_refresh_inserts_new_observed_at_version(session: Session) -> Non
     observed_a = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
     observed_b = datetime(2026, 9, 19, 12, 5, tzinfo=UTC)
     filters = [_mk_filters("BTCUSDT")]
+    cap = CapturingSession(session)
 
-    refresh_symbol_metadata(session, filters, observed_at=observed_a)
-    refresh_symbol_metadata(session, filters, observed_at=observed_b)
+    refresh_symbol_metadata(cap, filters, observed_at=observed_a)
+    refresh_symbol_metadata(cap, filters, observed_at=observed_b)
 
-    rows = session.execute(
-        select(SymbolMetadata)
-        .where(SymbolMetadata.symbol == "BTCUSDT")
-        .order_by(SymbolMetadata.metadata_observed_at_utc)
-    ).scalars().all()
-
-    assert len(rows) == 2
-    assert rows[0].metadata_observed_at_utc == observed_a
-    assert rows[1].metadata_observed_at_utc == observed_b
+    # Captured set: exactly two rows with the right observed_at values.
+    assert len(cap.added) == 2
+    observed_times = sorted(r.metadata_observed_at_utc for r in cap.added)
+    assert observed_times == [observed_a, observed_b]
     # Values are equal (same filters) but row count doubled.
-    assert rows[0].price_tick_size == rows[1].price_tick_size
-    assert rows[0].quantity_step_size == rows[1].quantity_step_size
+    assert cap.added[0].price_tick_size == cap.added[1].price_tick_size
+    assert cap.added[0].quantity_step_size == cap.added[1].quantity_step_size
 
 
 # --------------------------------------------------------------------------- #
@@ -165,15 +226,20 @@ def test_filter_strings_parse_to_decimal_exactly(session: Session) -> None:
     In float arithmetic, 0.10 + 0.10 + 0.10 == 0.30000000000000004. If any
     intermediate in the parse path converted to float, the row's stored
     value would round off when summed. The Decimal path is exact.
+
+    Note: we inspect the captured SymbolMetadata (BEFORE the SQLite
+    roundtrip) — SQLite's REAL storage for NUMERIC drops precision.
+    Production uses PostgreSQL NUMERIC(38,18) which is exact.
     """
     filters = [_mk_filters("BTCUSDT", tick="0.10", step="0.001")]
+    cap = CapturingSession(session)
+
     refresh_symbol_metadata(
-        session, filters, observed_at=datetime(2026, 9, 19, tzinfo=UTC)
+        cap, filters, observed_at=datetime(2026, 9, 19, tzinfo=UTC)
     )
 
-    row = session.execute(
-        select(SymbolMetadata).where(SymbolMetadata.symbol == "BTCUSDT")
-    ).scalar_one()
+    assert len(cap.added) == 1
+    row = cap.added[0]
 
     # Stored types must be Decimal — not float.
     assert isinstance(row.price_tick_size, Decimal)
@@ -187,22 +253,42 @@ def test_filter_strings_parse_to_decimal_exactly(session: Session) -> None:
     )
 
 
+def _find_float_calls(src: str) -> list[tuple[int, str]]:
+    """AST-walk source and return `(line_no, line_text)` for every call to `float(...)`.
+
+    Skips strings and comments (the AST doesn't see them at all).
+    """
+    import ast
+
+    calls: list[tuple[int, str]] = []
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            # Direct call: float(...)
+            if isinstance(func, ast.Name) and func.id == "float":
+                calls.append((node.lineno, src.splitlines()[node.lineno - 1].strip()))
+    return calls
+
+
 def test_no_float_call_in_metadata_or_adapter() -> None:
-    """Static guard: the metadata path must not contain explicit `float(` calls.
+    """Static guard: the metadata path must not contain any explicit `float(...)` call.
 
     D-05 + ENGINEERING_PRINCIPLES: float is banned for exchange-sensitive
     values. The `ms / 1000` in adapter._ms_to_utc uses Python's `/`
-    operator (which returns float) but no explicit `float(...)` call —
-    that is the only allowed float-touching code, and only on timestamps
-    (not on prices/quantities/notional).
+    operator (which returns float implicitly) but no explicit `float(...)`
+    call — that is the only allowed float-touching code, and only on
+    timestamps (not on prices/quantities/notional).
     """
     repo_root = Path(__file__).resolve().parent.parent
     for rel in ("src/data/metadata.py", "src/adapters/binance_usdm.py"):
         path = repo_root / rel
         src = path.read_text(encoding="utf-8")
-        assert "float(" not in src, (
-            f"{rel} must not contain an explicit `float(...)` call — "
-            f"Decimal is the only allowed exchange-sensitive type"
+        offenders = _find_float_calls(src)
+        assert not offenders, (
+            f"{rel} must not contain any explicit `float(...)` call — "
+            f"Decimal is the only allowed exchange-sensitive type. "
+            f"Found: {offenders}"
         )
 
 
@@ -228,12 +314,11 @@ def test_unknown_symbols_outside_live5_are_ignored(session: Session) -> None:
         _mk_filters("SHIBUSDT"),  # not in LIVE_5
         _mk_filters("BNBUSDT"),
     ]
+    cap = CapturingSession(session)
 
     # With universe=LIVE_5, only the 3 matching rows are inserted.
     inserted = refresh_symbol_metadata(
-        session, all_filters, observed_at=observed, universe=LIVE_5
+        cap, all_filters, observed_at=observed, universe=LIVE_5
     )
     assert inserted == 3
-
-    rows = session.execute(select(SymbolMetadata)).scalars().all()
-    assert {r.symbol for r in rows} == {"BTCUSDT", "ETHUSDT", "BNBUSDT"}
+    assert {r.symbol for r in cap.added} == {"BTCUSDT", "ETHUSDT", "BNBUSDT"}
