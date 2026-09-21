@@ -41,6 +41,7 @@ DISPLAY_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 # operator sees missing partitions at a glance.
 CANONICAL_INTERVALS: tuple[str, ...] = ("1m", "1h", "4h")
 DEFAULT_OI_INTERVAL_MS = 300_000  # 5-minute canonical cadence (D-07)
+DEFAULT_FUNDING_INTERVAL_MS = 28_800_000  # 8-hour funding cadence
 
 
 def _load_views(
@@ -109,9 +110,12 @@ def _load_views(
 
         def _maybe_replace(read_match: re.Match[str], _cols: str = cols) -> str:
             glob_pat = read_match.group(1)
+            # Escape single quotes: an operator path containing `'` must
+            # not break the statement (or worse, inject SQL).
+            glob_lit = glob_pat.replace("'", "''")
             try:
                 hits = con.execute(
-                    f"SELECT count(*) FROM glob('{glob_pat}')"
+                    f"SELECT count(*) FROM glob('{glob_lit}')"
                 ).fetchone()
                 n = int(hits[0]) if hits else 0
             except duckdb.Error:
@@ -130,16 +134,17 @@ def _load_views(
         stmt = stmt.strip()
         if not stmt:
             continue
+        # Every view in the checked-in file is required: a creation
+        # failure (wrong column, bad glob, schema drift) must fail loudly
+        # at the cause, never downgrade to a warning that crashes a later
+        # SELECT far from the defect.
         try:
             con.execute(stmt)
         except duckdb.Error as exc:
-            import structlog
-
-            structlog.get_logger().warning(
-                "coverage.view_skipped",
-                statement=stmt.splitlines()[0][:80],
-                error=str(exc),
-            )
+            raise RuntimeError(
+                "coverage view failed to build: "
+                f"{stmt.splitlines()[0][:120]}: {exc}"
+            ) from exc
 
 
 def _columns_for_view(view_name: str) -> str:
@@ -390,8 +395,13 @@ def build_oi_coverage(
     raw_root: Path = DEFAULT_RAW_ROOT,
     *,
     expected_interval_ms: int = DEFAULT_OI_INTERVAL_MS,
+    funding_interval_ms: int = DEFAULT_FUNDING_INTERVAL_MS,
 ) -> list[dict[str, object]]:
-    """OI coverage with explicit gap_count against the canonical cadence."""
+    """Tick coverage with explicit gap_count against each class cadence.
+
+    OI rows use the 5-minute canonical cadence; funding rows use the
+    8-hour funding cadence (funding is not exempt from D-11 continuity).
+    """
     rows = oi_coverage_rows(con, raw_root)
     for r in rows:
         if r["data_class"] == "oi" and r["start_utc"] and r["end_utc"]:
@@ -400,6 +410,13 @@ def build_oi_coverage(
                 end_utc=r["end_utc"],
                 rows=int(r["rows"]),
                 expected_interval_ms=expected_interval_ms,
+            )
+        elif r["data_class"] == "funding" and r["start_utc"] and r["end_utc"]:
+            r["gap_count"] = _gap_count_for_range(
+                start_utc=r["start_utc"],
+                end_utc=r["end_utc"],
+                rows=int(r["rows"]),
+                expected_interval_ms=funding_interval_ms,
             )
     return rows
 
