@@ -442,22 +442,20 @@ async def test_corrupt_page_rejected_cursor_not_advanced_past_good_data(
 
 
 def test_rate_limit_predicate_pins_canonical_sdk_error_names() -> None:
-    """Pin the retry predicate to the SDK's real error-class substrings.
+    """Pin the retry predicate to the SDK's real error classes.
 
-    `fetch_page_with_retry` sniffs exception class names (the SDK raises
-    its own hierarchy). If Binance renames the exception, this test fails
-    loudly instead of silently disabling all retry.
+    `fetch_page_with_retry` matches `isinstance` against the installed
+    SDK's errors. If Binance renames the exception, the import (or this
+    test) fails loudly instead of silently disabling all retry.
     """
+    from binance_sdk_derivatives_trading_usds_futures import (
+        RateLimitBanError,
+        TooManyRequestsError,
+    )
     from src.data.backfill import _is_rate_limit
 
-    class TooManyRequestsError(Exception):
-        pass
-
-    class RateLimitExceeded(Exception):
-        pass
-
     assert _is_rate_limit(TooManyRequestsError("429")) is True
-    assert _is_rate_limit(RateLimitExceeded("418")) is True
+    assert _is_rate_limit(RateLimitBanError("418")) is True
     assert _is_rate_limit(RuntimeError("boom")) is False
     assert _is_rate_limit(ValueError("TooManyRequests-like value")) is False
 

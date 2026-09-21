@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from binance_sdk_derivatives_trading_usds_futures import (
     DerivativesTradingUsdsFutures,
+    RateLimitBanError,
+    TooManyRequestsError,
 )
 
 log = structlog.get_logger()
@@ -127,6 +129,32 @@ class SymbolFilters:
 def _ms_to_utc(ms: int) -> datetime:
     """Convert a millisecond Unix epoch to a tz-aware UTC datetime."""
     return datetime.fromtimestamp(ms / 1000, tz=UTC)
+
+
+# The installed SDK's canonical rate-limit errors. `is_rate_limit_error`
+# matches `isinstance` against these real classes (not name substrings),
+# pinned by `test_rate_limit_predicate_pins_canonical_sdk_error_names` —
+# an SDK rename fails loudly at import/test time instead of silently
+# disabling bootstrap retry.
+_RATE_LIMIT_ERRORS: tuple[type[BaseException], ...] = (
+    TooManyRequestsError,
+    RateLimitBanError,
+)
+
+
+def is_rate_limit_error(exc: BaseException) -> bool:
+    """True when `exc` is one of the installed SDK's rate-limit errors.
+
+    Primary check is `isinstance` against the real SDK classes; the
+    class-name sniff survives only as a fallback for wrapped/proxied
+    errors whose type identity is lost. Lives here (not in the
+    paginator) because this module is the only one allowed to import
+    the SDK.
+    """
+    if isinstance(exc, _RATE_LIMIT_ERRORS):
+        return True
+    cls_name = type(exc).__name__
+    return "TooManyRequests" in cls_name or "RateLimit" in cls_name
 
 
 def _row_to_kline(symbol: str, interval: str, row: list[Any]) -> Kline:

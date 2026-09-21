@@ -32,7 +32,11 @@ from pathlib import Path
 
 import structlog
 import tenacity
-from src.adapters.binance_usdm import BinanceUsdmAdapter, Kline
+from src.adapters.binance_usdm import (
+    BinanceUsdmAdapter,
+    Kline,
+    is_rate_limit_error,
+)
 from src.data.quality import check_batch
 from src.data.store import DEFAULT_RAW_ROOT, publish_batch
 
@@ -180,12 +184,11 @@ class CursorStore:
 def _is_rate_limit(exc: BaseException) -> bool:
     """Best-effort detection of a 429/418 response inside an SDK error.
 
-    The SDK raises its own exception types; we sniff for the canonical
-    Binance `TooManyRequestsError` class by name to keep this module
-    independent of the SDK's internal exception hierarchy.
+    Delegates to the adapter (`is_rate_limit_error`), the only module
+    allowed to import the SDK — the paginator never touches SDK types
+    directly (`test_adapter_returned_type_is_domain_kline`).
     """
-    cls_name = type(exc).__name__
-    return "TooManyRequests" in cls_name or "RateLimit" in cls_name
+    return is_rate_limit_error(exc)
 
 
 async def fetch_page_with_retry(
