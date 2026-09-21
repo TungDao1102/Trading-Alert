@@ -22,6 +22,8 @@ tracer's wiring skeleton (PLAN 02-02 Task 1).
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -93,10 +95,11 @@ def align_to_day_start_ms(ms: int) -> int:
     For V1 this is the pragmatic fix; a deeper redesign (sequence-numbered
     `part-001.parquet`, `part-002.parquet` per date, union-read in the
     DuckDB view) is deferred to a future plan.
+
+    Integer math only: the float round-trip through `timestamp() * 1000`
+    can skew the snap by up to 1 ms.
     """
-    dt = datetime.fromtimestamp(ms / 1000, tz=UTC)
-    day_start = dt.replace(hour=0, minute=0, second=0, microsecond=0)
-    return int(day_start.timestamp() * 1000)
+    return ms - (ms % 86_400_000)
 
 
 @dataclass(frozen=True)
@@ -156,9 +159,13 @@ class CursorStore:
             return None
 
     def write(self, *, symbol: str, interval: str, cursor_ms: int) -> None:
+        # Atomic persist: a kill mid-write must never leave a torn cursor
+        # file behind (tmp + os.replace is atomic on POSIX and Windows).
         path = self._path(symbol=symbol, interval=interval)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(str(cursor_ms), encoding="utf-8")
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(str(cursor_ms), encoding="utf-8")
+        os.replace(tmp, path)
 
 
 # --------------------------------------------------------------------------- #
@@ -295,7 +302,11 @@ async def backfill_symbol_interval(
     while cursor < end_ms:
         page_start = cursor
         pages += 1
-        t0 = datetime.now(UTC)
+        # Monotonic clock for durations: wall-clock `datetime.now(UTC)`
+        # would leak host time into `BackfillResult`, breaking the
+        # byte-reproducibility contract (durations are telemetry only and
+        # excluded from equality assertions).
+        t0 = time.monotonic()
         raw_page = await fetch_page_with_retry(
             adapter,
             symbol=symbol,
@@ -305,7 +316,7 @@ async def backfill_symbol_interval(
             max_retries=cfg.max_retries,
             jitter_max_seconds=cfg.jitter_max_seconds,
         )
-        durations.append(int((datetime.now(UTC) - t0).total_seconds() * 1000))
+        durations.append(int((time.monotonic() - t0) * 1000))
 
         # Drop the forming candle: anything whose close_time is in the future
         # relative to the injected clock (Pitfall 1). This must run BEFORE the
