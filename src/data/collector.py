@@ -68,11 +68,17 @@ class OITickResult:
 
 @dataclass(frozen=True)
 class FundingSweepResult:
-    """Outcome of one `async_funding_sweep` call."""
+    """Outcome of one `async_funding_sweep` call.
+
+    `empty` distinguishes "genuinely nothing new" (True, no gaps) from a
+    blind sweep — callers must not mistake an upstream outage that
+    yielded zero rows for "caught up".
+    """
 
     funding_inserted: int
     watermarks_advanced: int
     gaps_recorded: int
+    empty: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -387,52 +393,66 @@ async def async_funding_sweep(
     partition AND advances the `data_class=funding` watermark — separate
     namespace from the OI loop (D-08).
 
-    On adapter exception: ONE gap row with `data_class=funding` and no
-    watermark advance.
+    On adapter exception: a per-symbol gap row and no watermark advance
+    for the failed symbol; healthy symbols still commit.
     """
-    try:
-        ticks: list[FundingTick] = []
-        for sym in universe:
+    ticks: list[FundingTick] = []
+    gaps = 0
+    for sym in universe:
+        try:
             sym_ticks = await adapter.funding_rate(  # type: ignore[attr-defined]
                 symbol=sym, start_ms=since_ms, end_ms=end_ms, limit=limit
             )
-            ticks.extend(sym_ticks)
+        except Exception as exc:
+            _record_gap(
+                session,
+                symbol=sym,
+                data_class="funding",
+                expected_utc=datetime.fromtimestamp(since_ms / 1000, tz=UTC),
+                observed_utc=observed_utc,
+                reason=f"adapter_error: {type(exc).__name__}: {exc}",
+            )
+            gaps += 1
+            continue
+        ticks.extend(sym_ticks)
+
+    # Write every tick + advance watermarks per symbol, atomically. A
+    # write/commit failure journals a gap row before propagating.
+    inserted = 0
+    latest_per_symbol: dict[str, datetime] = {}
+    try:
+        for tick in ticks:
+            _write_funding_tick(tick, raw_root)
+            cur = latest_per_symbol.get(tick.symbol)
+            if cur is None or tick.funding_time_utc > cur:
+                latest_per_symbol[tick.symbol] = tick.funding_time_utc
+            inserted += 1
+        for sym, last_tick in latest_per_symbol.items():
+            _advance_watermark(
+                session,
+                symbol=sym,
+                data_class="funding",
+                last_tick_utc=last_tick,
+                updated_at_utc=observed_utc,
+            )
+        session.commit()
     except Exception as exc:
+        session.rollback()
         _record_gap(
             session,
             symbol=TICK_WIDE_SYMBOL,
             data_class="funding",
             expected_utc=datetime.fromtimestamp(since_ms / 1000, tz=UTC),
             observed_utc=observed_utc,
-            reason=f"adapter_error: {type(exc).__name__}: {exc}",
+            reason=f"write_error: {type(exc).__name__}: {exc}",
         )
-        return FundingSweepResult(
-            funding_inserted=0, watermarks_advanced=0, gaps_recorded=1
-        )
-
-    # Write every tick + advance watermarks per symbol, atomically.
-    inserted = 0
-    latest_per_symbol: dict[str, datetime] = {}
-    for tick in ticks:
-        _write_funding_tick(tick, raw_root)
-        cur = latest_per_symbol.get(tick.symbol)
-        if cur is None or tick.funding_time_utc > cur:
-            latest_per_symbol[tick.symbol] = tick.funding_time_utc
-        inserted += 1
-    for sym, last_tick in latest_per_symbol.items():
-        _advance_watermark(
-            session,
-            symbol=sym,
-            data_class="funding",
-            last_tick_utc=last_tick,
-            updated_at_utc=observed_utc,
-        )
-    session.commit()
+        raise
 
     return FundingSweepResult(
         funding_inserted=inserted,
         watermarks_advanced=len(latest_per_symbol),
-        gaps_recorded=0,
+        gaps_recorded=gaps,
+        empty=(inserted == 0 and gaps == 0),
     )
 
 
@@ -456,13 +476,26 @@ async def harvest_open_interest_history(
     canonical 5-minute snapshots.
 
     Returns the total number of harvested rows. Watermarks are NOT
-    advanced — this is not the forward source.
+    advanced — this is not the forward source. An adapter exception for
+    one symbol journals a per-symbol gap row (no watermark advance, which
+    the harvest never does) while the remaining symbols still harvest.
     """
     rows_inserted = 0
     for sym in universe:
-        snapshots = await adapter.open_interest_statistics(  # type: ignore[attr-defined]
-            symbol=sym, period=period, limit=lookback_days
-        )
+        try:
+            snapshots = await adapter.open_interest_statistics(  # type: ignore[attr-defined]
+                symbol=sym, period=period, limit=lookback_days
+            )
+        except Exception as exc:
+            _record_gap(
+                session,
+                symbol=sym,
+                data_class="oi_research_harvest",
+                expected_utc=observed_utc,
+                observed_utc=observed_utc,
+                reason=f"adapter_error: {type(exc).__name__}: {exc}",
+            )
+            continue
         for snap in snapshots:
             _write_oi_research_snapshot(snap, raw_root)
             rows_inserted += 1
