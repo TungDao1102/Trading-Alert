@@ -46,13 +46,14 @@ import hashlib
 import json
 import os
 import shutil
-import structlog
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import structlog
 
 DEFAULT_PARQUET_ROOT = Path("data") / "raw"
 DEFAULT_BUNDLE_ROOT = Path("data") / "backup"

@@ -45,7 +45,7 @@ from src.adapters.binance_usdm import (
     FundingTick,
     OiSnapshot,
 )
-from src.db.models import CollectorGap, CollectorWatermark, TICK_WIDE_SYMBOL
+from src.db.models import TICK_WIDE_SYMBOL, CollectorGap, CollectorWatermark
 
 # Type alias: anything that quacks like the project adapter. Tests
 # inject a `FakeAdapter`; production passes a `BinanceUsdmAdapter`.

@@ -442,7 +442,6 @@ def test_gap_pk_columns_are_not_null_under_postgres_dialect() -> None:
     """
     from sqlalchemy.dialects import postgresql
     from sqlalchemy.schema import CreateTable
-
     from src.db.models import TICK_WIDE_SYMBOL
 
     assert TICK_WIDE_SYMBOL, "tick-wide gap sentinel must be a non-empty string"

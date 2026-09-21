@@ -21,7 +21,6 @@ the forming-candle test here because the plan explicitly enumerates it.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -131,7 +130,7 @@ def _mk_kline(
     )
 
 
-def _frozen_clock(ms: int) -> "callable":
+def _frozen_clock(ms: int) -> callable:
     """Return a callable that always returns the same UTC instant."""
     fixed = datetime.fromtimestamp(ms / 1000, tz=UTC)
 
