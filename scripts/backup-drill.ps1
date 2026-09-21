@@ -18,7 +18,9 @@
 #   SCRATCH_ROOT      - scratch root for the restore drill (default:
 #                       data/backup-drill).
 #   PARQUET_ROOTS     - `;`-separated parquet roots to include
-#                       (default: data/raw; spaces also accepted).
+#                       (default: data/raw). Paths containing spaces are
+#                       supported — `;` is the ONLY separator (whitespace
+#                       never splits, so OneDrive/user-dir roots survive).
 #   PYTHON_BIN        - python interpreter to invoke (default: python).
 
 [CmdletBinding()]
@@ -35,9 +37,11 @@ if (-not $ScratchRoot)   { $ScratchRoot   = "data/backup-drill" }
 if (-not $ParquetRoots)  { $ParquetRoots  = "data/raw" }
 if (-not $PythonBin)     { $PythonBin     = "python" }
 
-# Split on `;` or whitespace so roots under space-containing profiles
-# (OneDrive/user dirs) survive as single paths; drop empty entries.
-$RootList = @($ParquetRoots -split "[;\s]+" | Where-Object { $_ })
+# Split on `;` ONLY (the documented separator) so roots under
+# space-containing profiles (OneDrive/user dirs) survive as single
+# paths; trim each entry and drop empties. Never split on whitespace:
+# a space inside a path is data, not a separator.
+$RootList = @($ParquetRoots -split ";" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
 Write-Host "backup-drill: bundle_root=$BackupTarget scratch_root=$ScratchRoot"
 
