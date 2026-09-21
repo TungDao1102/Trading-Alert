@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from datetime import date as _date
 from pathlib import Path
@@ -503,7 +503,6 @@ async def backfill_universe(
     parallelize across symbols with a bounded semaphore; for V1 the
     sequential runner is enough to cover the live-5 bounded bootstrap.
     """
-    cfg = config or BackfillConfig(interval_ms=0)
     # Resolve end_ms once so every per-(symbol, interval) call uses the
     # same "now" anchor (deterministic — same input → same output).
     resolved_end_ms = (
@@ -545,6 +544,16 @@ async def backfill_universe(
                 end_ms=resolved_end_ms,
                 from_persisted=persisted,
             )
+            # Per-interval config: never share one interval_ms across
+            # timeframes (a shared interval_ms=0 froze the cursor and the
+            # `while cursor < end_ms` loop could never terminate). The
+            # caller's other knobs (page_size, pacing, retries) are
+            # preserved; only the cadence is derived per interval.
+            per_cfg = (
+                replace(config, interval_ms=interval_ms(interval))
+                if config is not None
+                else BackfillConfig(interval_ms=interval_ms(interval))
+            )
             result = await backfill_symbol_interval(
                 adapter,
                 symbol=symbol,
@@ -552,7 +561,7 @@ async def backfill_universe(
                 start_ms=key_start_ms,
                 end_ms=resolved_end_ms,
                 raw_root=raw_root,
-                config=cfg,
+                config=per_cfg,
                 clock=clock,
                 cursor_store=cursor_store,
             )
