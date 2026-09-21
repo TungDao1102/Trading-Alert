@@ -216,10 +216,14 @@ class BinanceUsdmAdapter:
             self._sdk.rest_api.open_interest, symbol=symbol
         )
         oi: OpenInterestResponse = response.data()
+        # Flag-never-fabricate (D-09): a missing timestamp or measurement
+        # must surface loudly, never become epoch-0 or a plausible zero.
+        if oi.time is None or oi.open_interest is None:
+            raise ValueError(f"open_interest response missing fields: {oi!r}")
         return OiSnapshot(
             symbol=oi.symbol or symbol,
-            observed_at_utc=_ms_to_utc(int(oi.time or 0)),
-            open_interest=Decimal(str(oi.open_interest or "0")),
+            observed_at_utc=_ms_to_utc(int(oi.time)),
+            open_interest=Decimal(str(oi.open_interest)),
         )
 
     async def open_interest_statistics(
@@ -279,11 +283,20 @@ class BinanceUsdmAdapter:
         items: list[GetFundingRateHistoryResponseInner] = response.data()
         out: list[FundingTick] = []
         for item in items:
+            # Same strictness as open_interest: skip-and-raise, never
+            # default a missing timestamp/rate to epoch-0 or zero.
+            if item.funding_time is None or item.funding_rate is None:
+                raise ValueError(f"funding_rate row missing fields: {item!r}")
+            resolved_symbol = item.symbol or symbol
+            if not resolved_symbol:
+                raise ValueError(
+                    f"funding_rate row missing symbol: {item!r}"
+                )
             out.append(
                 FundingTick(
-                    symbol=item.symbol or symbol or "",
-                    funding_time_utc=_ms_to_utc(int(item.funding_time or 0)),
-                    funding_rate=Decimal(str(item.funding_rate or "0")),
+                    symbol=resolved_symbol,
+                    funding_time_utc=_ms_to_utc(int(item.funding_time)),
+                    funding_rate=Decimal(str(item.funding_rate)),
                     mark_price=(
                         Decimal(str(item.mark_price))
                         if item.mark_price is not None
