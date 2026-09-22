@@ -129,8 +129,65 @@ def test_phase3_parameters_hash_matches_registry(phase3_parameters) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Test 7 — placeholder expectations match harness output byte-exactly.
+# Test 8 — harness output matches expected files digest-exactly.
 # --------------------------------------------------------------------------- #
+
+# Canonical-digest pins of the placeholder expected files (D-09).
+# T-03-09 tripwire: ANY edit to expected_signals.json /
+# expected_plans.json changes these digests and fails here.
+# Regenerate ONLY in Phase 4 with spec citations.
+EXPECTED_SIGNALS_DIGEST = "78abe5a2b4cc98cca7c4411e8caaee2a772a2e4301725f82af9b37f21a4e1a09"
+EXPECTED_PLANS_DIGEST = "c40f0ef815ddea83c6d4375f23c02a2d8a5cab1dddd42ba90a5a589319be5ac3"
+
+
+def test_harness_output_matches_expected_files_digest_exactly(
+    phase3_expected_signals, phase3_expected_plans
+) -> None:
+    """Beh. 8: harness output matches both expected files digest-exactly.
+
+    The placeholder harness output (empty signals/plans per D-09) must
+    hash to the pinned digests above through canonical_bytes. Any
+    unregistered semantic change to domain outputs fails here.
+    """
+    from src.domain.canonical import sha256_hex
+
+    harness_signals_output: list = []
+    harness_plans_output: list = []
+
+    assert (
+        sha256_hex({"signals": harness_signals_output})
+        == sha256_hex({"signals": phase3_expected_signals["signals"]})
+        == EXPECTED_SIGNALS_DIGEST
+    )
+    assert (
+        sha256_hex({"plans": harness_plans_output})
+        == sha256_hex({"plans": phase3_expected_plans["plans"]})
+        == EXPECTED_PLANS_DIGEST
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Test 9 — loaded registry set matches the pinned identity in full.
+# --------------------------------------------------------------------------- #
+
+
+def test_loaded_registry_set_matches_pinned_identity(phase3_parameters) -> None:
+    """Beh. 9: the loaded ParameterSet matches parameters.json identity.
+
+    Beyond the hash tripwire (Beh. 6): strategy_id, strategy_version,
+    and parameter_set_id must all agree between the pinned file and
+    the loader, closing the DOMN-02 half of the harness contract.
+    """
+    from src.domain.registry import load_parameter_set
+
+    ps = load_parameter_set(
+        phase3_parameters["strategy_id"],
+        phase3_parameters["parameter_set_id"],
+    )
+    assert ps.strategy_id == phase3_parameters["strategy_id"]
+    assert ps.strategy_version == phase3_parameters["strategy_version"]
+    assert ps.parameter_set_id == phase3_parameters["parameter_set_id"]
+    assert ps.parameter_set_hash == phase3_parameters["parameter_set_hash"]
 
 
 def test_placeholder_expectations_match_harness_output_byte_exactly(
