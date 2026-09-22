@@ -6,8 +6,14 @@ Per D-05, this package owns *operational* state in PostgreSQL 17:
   - collector_gaps            (D-09 — flag-never-fabricate gap journal)
   - coverage_windows          (DATA_PIPELINE §10 — per-symbol effective range)
 
-Phase 3 additions (plan 03-01, D-02):
+Phase 3 additions (plans 03-01 + 03-04, D-02):
   - signals                   (SignalRow — content-hash PK, explicit status)
+  - trade_plans               (TradePlanRow — content-hash PK, explicit status)
+  - approvals                 (ApprovalRow — action + result + explicit status)
+  - orders                    (OrderRow — three independent identifier fields)
+  - fills                     (FillRow — event, no status; unique on order+trade)
+  - positions                 (PositionRow — content-hash PK, explicit status)
+  - journal_events            (JournalEventRow — append-only audit events)
 
 No OHLCV rows live here (D-05 one-way; candles live in Parquet + DuckDB).
 
@@ -23,7 +29,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Numeric, String
+from sqlalchemy import Boolean, DateTime, Numeric, String, UniqueConstraint
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -211,6 +217,235 @@ class SignalRow(Base):
         DateTime(timezone=True), nullable=False
     )
     invalidated_at_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+# ---------- trade_plans (Phase 3, plan 03-04) -------------------------------
+
+
+class TradePlanRow(Base):
+    """ORM mirror of the domain TradePlan entity (D-02).
+
+    PK is the content-hash `trade_plan_id` from `ids.derive_child_id` with
+    discriminator `trade_plan:v1` (D-03). `status` stores
+    `TradePlanStatus.value` (explicit, never inferred — D-11).
+    """
+
+    __tablename__ = "trade_plans"
+
+    trade_plan_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    signal_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    trade_plan_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    entry_model: Mapped[str] = mapped_column(String(32), nullable=False)
+    entry_min_price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    entry_max_price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    stop_loss_price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    take_profit_json: Mapped[str] = mapped_column(String, nullable=False)
+    invalidation_rule_json: Mapped[str] = mapped_column(String, nullable=False)
+    expiry_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    expected_rr_json: Mapped[str] = mapped_column(String, nullable=False)
+    risk_rate: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    risk_budget: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    suggested_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    quantity_before_rounding: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18), nullable=False
+    )
+    quantity_after_rounding: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18), nullable=False
+    )
+    quantization_decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    plan_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+# ---------- approvals (Phase 3, plan 03-04) ---------------------------------
+
+
+class ApprovalRow(Base):
+    """ORM mirror of the domain Approval entity (D-02).
+
+    PK is the content-hash `approval_id`. Carries `action` (ApprovalAction),
+    `result` (ApprovalResult), and explicit `status` (ApprovalResult) —
+    `status` alone answers state (D-11). `acted_at_utc` and
+    `telegram_message_id` are nullable: NULL means "transition never
+    happened" / "no Telegram message yet".
+    """
+
+    __tablename__ = "approvals"
+
+    approval_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    trade_plan_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    signal_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    result: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    approval_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    requested_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    acted_at_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    actor_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    telegram_message_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+# ---------- orders (Phase 3, plan 03-04) -------------------------------------
+
+
+class OrderRow(Base):
+    """ORM mirror of the domain Order entity (D-02).
+
+    PK is the content-hash `order_id`. Three independent identifier
+    fields (client_order_id, exchange_order_id, algo_client_id) are
+    independently nullable because Binance may use different identifiers
+    for normal and algo orders (DATA_MODEL §2.7). `local_status` stores
+    `OrderStatus.value`; `exchange_status` is a raw string from Binance.
+    """
+
+    __tablename__ = "orders"
+
+    order_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    trade_plan_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    position_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    parent_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    order_role: Mapped[str] = mapped_column(String(32), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    position_side: Mapped[str] = mapped_column(String(8), nullable=False)
+    order_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    time_in_force: Mapped[str] = mapped_column(String(8), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    stop_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    close_position: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    client_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    exchange_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    algo_client_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    exchange_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    local_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    submitted_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    canceled_at_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+# ---------- fills (Phase 3, plan 03-04) --------------------------------------
+
+
+class FillRow(Base):
+    """ORM mirror of the domain Fill entity (D-02).
+
+    PK is the content-hash `fill_id`. Fills are events with no status
+    field (DATA_MODEL §2.8). Unique constraint on
+    `(order_id, exchange_trade_id)` protects against duplicate fill
+    ingestion.
+    """
+
+    __tablename__ = "fills"
+    __table_args__ = (
+        UniqueConstraint(
+            "order_id", "exchange_trade_id", name="uq_fills_order_trade"
+        ),
+    )
+
+    fill_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    order_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    exchange_trade_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    position_side: Mapped[str] = mapped_column(String(8), nullable=False)
+    fill_price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    fill_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    quote_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    commission: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    commission_asset: Mapped[str] = mapped_column(String(16), nullable=False)
+    realized_pnl: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    fill_time_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    is_maker: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+
+# ---------- positions (Phase 3, plan 03-04) ----------------------------------
+
+
+class PositionRow(Base):
+    """ORM mirror of the domain Position entity (D-02).
+
+    PK is the content-hash `position_id`. `status` stores
+    `PositionStatus.value` (explicit, never inferred — D-11).
+    `closed_at_utc` is nullable: NULL means "transition never happened".
+    """
+
+    __tablename__ = "positions"
+
+    position_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    position_side: Mapped[str] = mapped_column(String(8), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    entry_price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    break_even_price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    unrealized_pnl: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    realized_pnl: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    opened_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    closed_at_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+
+
+# ---------- journal_events (Phase 3, plan 03-04) -----------------------------
+
+
+class JournalEventRow(Base):
+    """ORM mirror of the domain JournalEvent entity (D-02).
+
+    PK is the content-hash `journal_event_id`. Append-only operational
+    events; never substitutes for current-state tables (DATA_MODEL §2.10).
+    All linkage ids are nullable except `correlation_id` (every event
+    must be correlatable).
+    """
+
+    __tablename__ = "journal_events"
+
+    journal_event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    occurred_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    signal_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    trade_plan_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    approval_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    position_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    payload_json: Mapped[str] = mapped_column(String, nullable=False)
+    created_at_utc: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
