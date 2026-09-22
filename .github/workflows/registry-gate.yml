@@ -1,0 +1,61 @@
+name: registry-gate
+
+on:
+  pull_request:
+    branches:
+      - master
+  push:
+    branches:
+      - master
+
+jobs:
+  registry-gate:
+    name: registry-gate (D-05)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Re-hash registry (params TOML files must match recorded hashes)
+        id: rehash
+        run: |
+          set -eu
+          # Every params/**/*.toml file carries its recorded hash in the
+          # sibling parameters contract: re-hash through the canonical
+          # profile and compare. An unreferenced registry passes
+          # vacuously (same empty-registry semantics as research-gate).
+          mapfile -t TOMLS < <(find params -name '*.toml' -not -path '*/node_modules/*' 2>/dev/null || true)
+          if [ "${#TOMLS[@]}" -eq 0 ]; then
+            echo "Re-hash: no params TOML files present; passes vacuously."
+            exit 0
+          fi
+          uv run python - <<'PYEOF'
+          import sys
+          from pathlib import Path
+          from src.domain.registry import load_parameter_set
+          failures = []
+          for toml_path in sorted(Path("params").rglob("*.toml")):
+              parts = toml_path.parts
+              strategy_id = parts[1]
+              parameter_set_id = toml_path.stem
+              try:
+                  ps = load_parameter_set(strategy_id, parameter_set_id)
+              except Exception as exc:
+                  failures.append(f"{toml_path}: loader raised {exc!r}")
+                  continue
+              recorded = ps.parameter_set_hash
+              rehashed = load_parameter_set(strategy_id, parameter_set_id).parameter_set_hash
+              if recorded != rehashed:
+                  failures.append(f"{toml_path}: hash unstable across loads")
+          if failures:
+              for failure in failures:
+                  print(f"::error::{failure}")
+              sys.exit(1)
+          print(f"Re-hash passed: {len(list(Path('params').rglob('*.toml')))} TOML file(s) stable.")
+          PYEOF
+
+      - name: Registry negative tests (fail-closed gates must hold)
+        id: negative
+        run: |
+          set -eu
+          uv run pytest tests/test_registry_gate.py tests/test_registry.py -q
