@@ -1,8 +1,8 @@
 ---
 phase: 02-data-foundation
 fixed_at: 2026-09-22T00:00:00Z
-review_path: C:/Users/daotu/OneDrive/Documents/Trading-Alert/.planning/phases/02-data-foundation/02-REVIEW.md
-iteration: 3
+review_path: .planning/phases/02-data-foundation/02-REVIEW.md
+iteration: 1
 findings_in_scope: 1
 fixed: 1
 skipped: 0
@@ -12,36 +12,64 @@ status: all_fixed
 # Phase 02: Code Review Fix Report
 
 **Fixed at:** 2026-09-22T00:00:00Z
-**Source review:** `02-REVIEW.md` (iteration-3 re-review: 0 Critical / 1 Warning / 7 Info)
-**Iteration:** 3
+**Source review:** `.planning/phases/02-data-foundation/02-REVIEW.md`
+**Iteration:** 1
 
 **Summary:**
-- Findings in scope: 1 (Critical + Warning only; 7 Info findings out of scope per fix_scope)
+- Findings in scope: 1
 - Fixed: 1
 - Skipped: 0
 
-**Verification (main checkout, no isolated worktree — `workflow.use_worktrees` is `false`):**
-- `uv run python -m pytest tests/` → **80 passed** (77 baseline + 3 new WR-01 regression tests)
-- `uv run ruff check src tests scripts` → **All checks passed!**
-- `uv run mypy src` → **Success: no issues found in 15 source files** (strict stays at 0 errors)
-- No failing test was deleted; tests were only added, plus one existing healthcheck test extended to seed the newly-required funding watermarks.
-
 ## Fixed Issues
 
-### WR-01: New production loop wedges funding forever after one transient per-symbol failure
+### WR-01: `_funding_since_ms` uses raw `.timestamp()` on possibly-naive datetimes and over-promises the fresh-symbol bootstrap
 
 **Files modified:** `src/data/collector.py`, `tests/test_collector.py`
-**Commit:** e37d80f
+**Commit:** `6a096e4`
 **Applied fix:**
-- `async_funding_sweep` now snapshots each symbol's own funding watermark up front and fetches per symbol from `watermark + 1` (falling back to the global `since_ms` only for never-seen symbols), instead of fetching every symbol from the global `min()` watermark. A transient failure for one symbol can no longer force healthy symbols to re-fetch already-written ticks.
-- Write path is idempotent on two layers: ticks at or below the symbol's watermark are skipped as already-covered (never re-hitting the D-04 immutability guard), and a `FileExistsError` from `_write_funding_tick` (Parquet-ahead-of-DB divergence after a rolled-back bulk commit) is treated as covered — counted in the new `FundingSweepResult.skipped_existing` field, logged via `collector.funding.tick_exists`, and still advanced past by the watermark — instead of aborting the whole sweep.
-- Per-symbol adapter-failure gap rows now record `expected_utc` from that symbol's own resume point (`sym_since`) rather than the global window start.
-- `_check_health` (and the `--healthcheck` probe) now covers funding freshness in addition to OI: every symbol needs a funding watermark newer than `FUNDING_HEALTH_MAX_AGE_SECONDS` (9h = one 8h funding interval + margin), via a shared `_watermark_staleness` helper. A funding-only wedge while OI keeps succeeding now reports UNHEALTHY instead of hiding behind the OI-only probe.
-- New `_tick_epoch_ms` helper normalizes naive (SQLite roundtrip) vs aware (PostgreSQL) timestamps to epoch-ms so watermark comparisons are total-ordered on both backends.
-- Tests: `test_funding_sweep_retry_after_transient_failure_makes_progress` (transient failure → retry converges, asserts per-symbol `start_ms` resume points, both watermarks converge, exactly 2 files, no raise), `test_funding_sweep_treats_existing_tick_file_as_covered` (orphaned Parquet file skipped idempotently with watermark advance), `test_healthcheck_fails_with_stale_funding` (fresh OI + 10h-stale funding → exit 1); extended `test_healthcheck_passes_with_fresh_watermarks` to seed funding watermarks alongside OI.
+
+1. **Naive-tz inconsistency (correctness edge) — resolved.** The helper
+   no longer calls `int(row.last_tick_utc.timestamp() * 1000) + 1`
+   directly. The new implementation returns the fresh-symbol bootstrap
+   window (`now_ms - FUNDING_BOOTSTRAP_LOOKBACK_MS`) directly when any
+   symbol lacks a watermark, and falls back to the same bounded value
+   when all symbols are watermarked (the returned value is unused for
+   those — per-symbol resume in `async_funding_sweep` handles them via
+   `_tick_epoch_ms(wm) + 1`). This eliminates the host-TZ-dependent
+   `.timestamp()` call on naive DB roundtrips while keeping the
+   per-symbol resume path (which already uses `_tick_epoch_ms`)
+   unchanged.
+
+2. **Docstring overstatement via `min()` aggregation — resolved.** The
+   `min(starts)` aggregation is gone. The helper now returns the
+   fresh-symbol bootstrap directly, so a fresh symbol no longer
+   inherits a stale watermarked symbol's `watermark + 1`. The
+   docstring is rewritten to state the actual contract: this helper
+   supplies the bootstrap window for fresh symbols only; per-symbol
+   resume happens inside `async_funding_sweep`.
+
+3. **Mixed-watermark test added.** Two new tests in
+   `tests/test_collector.py` lock the contract:
+   - `test_funding_since_ms_fresh_symbol_uses_bounded_bootstrap_not_stale_min`:
+     unit test on `_funding_since_ms` with one stale watermark + one
+     fresh symbol, asserting the returned value is the bounded
+     bootstrap (NOT `stale_watermark + 1`).
+   - `test_funding_sweep_mixed_watermarks_fresh_symbol_uses_bounded_bootstrap`:
+     end-to-end test via `_run_once_tick` asserting the fresh symbol's
+     adapter `start_ms` is `now_ms - 8h` while the stale-watermarked
+     symbol resumes from its own `watermark + 1`.
+
+**Verification (main checkout, no isolated worktree — `workflow.use_worktrees` is `false`):**
+- `uv run python -m pytest tests/test_collector.py -x` → **15 passed in 3.65s** (13 pre-existing + 2 new)
+- `uv run ruff check src tests` → **All checks passed!**
+- `uv run mypy src` → **Success: no issues found in 15 source files**
+
+## Skipped Issues
+
+None.
 
 ---
 
 _Fixed: 2026-09-22T00:00:00Z_
 _Fixer: the agent (gsd-code-fixer)_
-_Iteration: 3_
+_Iteration: 1_
