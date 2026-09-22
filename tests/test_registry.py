@@ -1,9 +1,21 @@
-"""Tests for the parameter registry loader (Phase 3, plan 03-01).
+"""Tests for the parameter registry loader (Phase 3, plans 03-01 + 03-03).
 
 Per D-04/D-05/D-06: file-based TOML registry is the source of truth;
 identity = parameterSetId + parameterSetHash (SHA256 over canonical
 JSON); loader is fail-closed (raises on unregistered/mutated/unknown
 keys, never silent fallback).
+
+Plan 03-03 additions (registry hardening):
+  - Whole-number TOML values normalize to int; fractional values become
+    Decimal from string form (so identical logical sets hash identically
+    regardless of source spelling).
+  - Parameter names are restricted to 7-bit ASCII so code-point sorting
+    matches the documented canonical profile; non-ASCII names raise at
+    load.
+  - Volatile sidecar fields (author, timestamp) never enter the hashed
+    body; editing them does not change the hash.
+  - Decimal values differing only in trailing precision produce distinct
+    hashes by documented design.
 
 TDD discipline: RED → GREEN. These tests are the RED phase — they MUST
 fail until `src/domain/registry.py` is implemented.
@@ -11,6 +23,7 @@ fail until `src/domain/registry.py` is implemented.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -217,5 +230,272 @@ def test_verify_parameter_set_passes_when_hash_matches(tmp_path: Path) -> None:
         # Same file, same hash → verify returns None (no exception).
         result = verify_parameter_set(copy_path, expected_hash=ps.parameter_set_hash)
         assert result is None
+    finally:
+        registry.REGISTRY_ROOT = original_root
+
+
+# =========================================================================== #
+# Plan 03-03 — Registry normalization and hash stability (TDD RED).
+# =========================================================================== #
+
+
+# --------------------------------------------------------------------------- #
+# Test 8 — whole-number TOML values normalize to int.
+# --------------------------------------------------------------------------- #
+
+
+def test_whole_number_toml_value_normalizes_to_int(tmp_path: Path) -> None:
+    """Beh. 8: a TOML integer like `swing_lookback = 20` stays int after load.
+
+    Per RESEARCH_PROTOCOL §5: numeric type coercion (string-vs-int for
+    whole numbers, exact decimal representation for fractional values).
+    Whole-number values must be int, not float, so the canonical hash
+    is stable across TOML spellings (`20` vs `20.0`).
+    """
+    strategy_dir = tmp_path / "test-strategy"
+    strategy_dir.mkdir()
+    toml_path = strategy_dir / "test-set.toml"
+    toml_path.write_text(
+        'schema_version = 1\n'
+        '[strategy]\n'
+        'strategy_id = "test-strategy"\n'
+        'strategy_version = "v1.0.0"\n'
+        '[parameters]\n'
+        'swing_lookback = 20\n',
+        encoding="utf-8",
+    )
+
+    from src.domain import registry
+
+    original_root = registry.REGISTRY_ROOT
+    registry.REGISTRY_ROOT = tmp_path
+    try:
+        ps = load_parameter_set("test-strategy", "test-set")
+        assert ps.params["swing_lookback"] == 20
+        assert isinstance(ps.params["swing_lookback"], int)
+        assert not isinstance(ps.params["swing_lookback"], float)
+    finally:
+        registry.REGISTRY_ROOT = original_root
+
+
+# --------------------------------------------------------------------------- #
+# Test 9 — fractional TOML values become Decimal from string form.
+# --------------------------------------------------------------------------- #
+
+
+def test_fractional_toml_value_normalizes_to_decimal_from_string(tmp_path: Path) -> None:
+    """Beh. 9: a TOML float like `zone_tolerance_atr = 0.5` becomes Decimal.
+
+    Per RESEARCH_PROTOCOL §5: exact decimal representation for
+    fractional values. The Decimal is built from the string form so
+    `0.5` → `Decimal("0.5")` (not `Decimal(0.5)` which would be
+    `Decimal("0.5")` but with float-binary noise on other values).
+    """
+    strategy_dir = tmp_path / "test-strategy"
+    strategy_dir.mkdir()
+    toml_path = strategy_dir / "test-set.toml"
+    toml_path.write_text(
+        'schema_version = 1\n'
+        '[strategy]\n'
+        'strategy_id = "test-strategy"\n'
+        'strategy_version = "v1.0.0"\n'
+        '[parameters]\n'
+        'zone_tolerance_atr = 0.5\n',
+        encoding="utf-8",
+    )
+
+    from src.domain import registry
+
+    original_root = registry.REGISTRY_ROOT
+    registry.REGISTRY_ROOT = tmp_path
+    try:
+        ps = load_parameter_set("test-strategy", "test-set")
+        assert ps.params["zone_tolerance_atr"] == Decimal("0.5")
+        assert isinstance(ps.params["zone_tolerance_atr"], Decimal)
+    finally:
+        registry.REGISTRY_ROOT = original_root
+
+
+# --------------------------------------------------------------------------- #
+# Test 10 — same TOML parsed twice yields identical hash.
+# --------------------------------------------------------------------------- #
+
+
+def test_same_toml_parsed_twice_yields_identical_hash(tmp_path: Path) -> None:
+    """Beh. 10: same TOML parsed twice yields identical parameter_set_hash.
+
+    Per D-04: parameterSetHash is stable across runs. The canonicalizer
+    sorts dict keys before hashing, so the order in which TOML keys
+    appear in the file does not affect the digest.
+    """
+    strategy_dir = tmp_path / "test-strategy"
+    strategy_dir.mkdir()
+    toml_path = strategy_dir / "test-set.toml"
+    toml_path.write_text(
+        'schema_version = 1\n'
+        '[strategy]\n'
+        'strategy_id = "test-strategy"\n'
+        'strategy_version = "v1.0.0"\n'
+        '[parameters]\n'
+        'swing_lookback = 20\n'
+        'zone_tolerance_atr = 0.5\n',
+        encoding="utf-8",
+    )
+
+    from src.domain import registry
+
+    original_root = registry.REGISTRY_ROOT
+    registry.REGISTRY_ROOT = tmp_path
+    try:
+        ps_a = load_parameter_set("test-strategy", "test-set")
+        ps_b = load_parameter_set("test-strategy", "test-set")
+        assert ps_a.parameter_set_hash == ps_b.parameter_set_hash
+    finally:
+        registry.REGISTRY_ROOT = original_root
+
+
+# --------------------------------------------------------------------------- #
+# Test 11 — non-ASCII parameter name raises at load.
+# --------------------------------------------------------------------------- #
+
+
+def test_non_ascii_parameter_name_raises_at_load(tmp_path: Path) -> None:
+    """Beh. 11: a parameter name with non-ASCII characters raises at load.
+
+    Per CONFIGURATION §9 + RESEARCH_PROTOCOL §5: parameter names are
+    restricted to 7-bit ASCII so code-point sorting matches the
+    documented canonical profile. Non-ASCII names raise a typed
+    exception (StrategyKeyOutsideRegistry) at load.
+    """
+    strategy_dir = tmp_path / "test-strategy"
+    strategy_dir.mkdir()
+    toml_path = strategy_dir / "test-set.toml"
+    # Use a quoted TOML key with a non-ASCII character (ñ = \xc3\xb1 in UTF-8).
+    toml_path.write_text(
+        'schema_version = 1\n'
+        '[strategy]\n'
+        'strategy_id = "test-strategy"\n'
+        'strategy_version = "v1.0.0"\n'
+        '[parameters]\n'
+        'swing_lookback = 20\n'
+        '"lookback_\xc3\xb1" = 10\n',
+        encoding="utf-8",
+    )
+
+    from src.domain import registry
+
+    original_root = registry.REGISTRY_ROOT
+    registry.REGISTRY_ROOT = tmp_path
+    try:
+        with pytest.raises(StrategyKeyOutsideRegistry):
+            load_parameter_set("test-strategy", "test-set")
+    finally:
+        registry.REGISTRY_ROOT = original_root
+
+
+# --------------------------------------------------------------------------- #
+# Test 12 — volatile sidecar fields (author, timestamp) do not affect hash.
+# --------------------------------------------------------------------------- #
+
+
+def test_volatile_sidecar_fields_do_not_affect_hash(tmp_path: Path) -> None:
+    """Beh. 12: editing author/timestamp sidecar fields does not change hash.
+
+    Per D-04: parameterSetHash is computed over the canonical JSON of
+    the normalized params body. Volatile sidecar fields (author,
+    timestamp) are metadata about the file, not the parameter set
+    itself, and must never enter the hashed body.
+    """
+    strategy_dir = tmp_path / "test-strategy"
+    strategy_dir.mkdir()
+    toml_path = strategy_dir / "test-set.toml"
+    toml_path.write_text(
+        'schema_version = 1\n'
+        '[strategy]\n'
+        'strategy_id = "test-strategy"\n'
+        'strategy_version = "v1.0.0"\n'
+        'author = "alice"\n'
+        'created_at_utc = "2026-09-19T00:00:00Z"\n'
+        '[parameters]\n'
+        'swing_lookback = 20\n',
+        encoding="utf-8",
+    )
+
+    from src.domain import registry
+
+    original_root = registry.REGISTRY_ROOT
+    registry.REGISTRY_ROOT = tmp_path
+    try:
+        ps_original = load_parameter_set("test-strategy", "test-set")
+        original_hash = ps_original.parameter_set_hash
+
+        # Mutate the volatile sidecar fields.
+        mutated = toml_path.read_text(encoding="utf-8").replace(
+            'author = "alice"', 'author = "bob"'
+        ).replace(
+            'created_at_utc = "2026-09-19T00:00:00Z"',
+            'created_at_utc = "2026-12-31T23:59:59Z"',
+        )
+        toml_path.write_text(mutated, encoding="utf-8")
+
+        ps_mutated = load_parameter_set("test-strategy", "test-set")
+        assert ps_mutated.parameter_set_hash == original_hash
+    finally:
+        registry.REGISTRY_ROOT = original_root
+
+
+# --------------------------------------------------------------------------- #
+# Test 13 — Decimal values with different trailing precision yield different hashes.
+# --------------------------------------------------------------------------- #
+
+
+def test_decimal_values_with_different_precision_yield_different_hashes(
+    tmp_path: Path,
+) -> None:
+    """Beh. 13: Decimal("1.50") vs Decimal("1.5") produce distinct hashes.
+
+    Per D-12: Decimal → str() preserving full precision. Decimal("1.50")
+    stays "1.50", never "1.5". This is documented design — trailing
+    precision is semantically meaningful for exchange-sensitive values.
+    """
+    strategy_dir_a = tmp_path / "test-strategy-a"
+    strategy_dir_a.mkdir()
+    toml_path_a = strategy_dir_a / "test-set.toml"
+    toml_path_a.write_text(
+        'schema_version = 1\n'
+        '[strategy]\n'
+        'strategy_id = "test-strategy-a"\n'
+        'strategy_version = "v1.0.0"\n'
+        '[parameters]\n'
+        'zone_tolerance_atr = 1.50\n',
+        encoding="utf-8",
+    )
+
+    strategy_dir_b = tmp_path / "test-strategy-b"
+    strategy_dir_b.mkdir()
+    toml_path_b = strategy_dir_b / "test-set.toml"
+    toml_path_b.write_text(
+        'schema_version = 1\n'
+        '[strategy]\n'
+        'strategy_id = "test-strategy-b"\n'
+        'strategy_version = "v1.0.0"\n'
+        '[parameters]\n'
+        'zone_tolerance_atr = 1.5\n',
+        encoding="utf-8",
+    )
+
+    from src.domain import registry
+
+    original_root = registry.REGISTRY_ROOT
+    registry.REGISTRY_ROOT = tmp_path
+    try:
+        ps_a = load_parameter_set("test-strategy-a", "test-set")
+        ps_b = load_parameter_set("test-strategy-b", "test-set")
+        # The params dict should preserve the trailing precision as a string.
+        assert str(ps_a.params["zone_tolerance_atr"]) == "1.50"
+        assert str(ps_b.params["zone_tolerance_atr"]) == "1.5"
+        # And the hashes must differ because the canonical form preserves
+        # the trailing precision (D-12).
+        assert ps_a.parameter_set_hash != ps_b.parameter_set_hash
     finally:
         registry.REGISTRY_ROOT = original_root
