@@ -88,7 +88,7 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 03-01: Tracer registry-to-Signal-to-row slice with seed TOML and fixture triple
+- [x] 03-01: Tracer registry-to-Signal-to-row slice with seed TOML and fixture triple
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -238,7 +238,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 |-------|----------------|--------|-----------|
 | 1. Research Formalization | 0/TBD | Not started | - |
 | 2. Data Foundation | 0/TBD | Not started | - |
-| 3. Domain + Registry + Fixtures | 0/TBD | Not started | - |
+| 3. Domain + Registry + Fixtures | 1/5 | In Progress | - |
 | 4. Pure Core (Feature + Strategy + Planner) | 0/TBD | Not started | - |
 | 5. Risk Engine | 0/TBD | Not started | - |
 | 6. Backtest Simulator + Experiment Registry | 0/TBD | Not started | - |

@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 03
 current_phase_name: domain-registry-fixtures
 status: executing
-stopped_at: Phase 3 context gathered
-last_updated: "2026-09-22T14:07:10.924Z"
-last_activity: 2026-09-19
-last_activity_desc: Phase 01 marked complete
-state_head: 9090b24ccabeab7c9a56612ce5eced1523104bcd
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-09-22T14:30:00.000Z"
+last_activity: 2026-09-22
+last_activity_desc: Phase 03 plan 01 (tracer slice) completed
+state_head: 866d607
 progress:
   total_phases: 10
   completed_phases: 0
   total_plans: 14
-  completed_plans: 9
+  completed_plans: 10
 ---
 
 <!-- STATE-MD-SCHEMA:END:frontmatter -->
@@ -25,34 +25,34 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 01 — Research Formalization
+**Current focus:** Phase 03 — domain-registry-fixtures
 
 ## Current Position
 
-Phase: 03 (domain-registry-fixtures) — READY TO EXECUTE
-Plan: 4 of 4
-Status: Ready to execute
-Last activity: 2026-09-19 — Phase 01 marked complete
+Phase: 03 (domain-registry-fixtures) — EXECUTING
+Plan: 1 of 5 complete
+Status: Plan 03-01 (tracer slice) complete; ready for plan 03-02
+Last activity: 2026-09-22 — Phase 03 plan 01 completed
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [██░░░░░░░░] 20%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 0
-- Average duration: -
-- Total execution time: 0 hours
+- Total plans completed: 1 (Phase 03)
+- Average duration: ~15 min
+- Total execution time: ~15 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 03 | 1 | 5 | ~15 min |
 
 **Recent Trend:**
 
-- Last 5 plans: -
+- Last 1 plan: 03-01 (tracer slice) — ~15 min
 - Trend: -
 
 *Updated after each plan completion*
@@ -67,6 +67,11 @@ Recent decisions affecting current work:
 - [Roadmap]: 10 fine-grained phases follow evidence order (protocol → data → domain → core → risk → backtest → paper → approval/reconciliation → live → journal/kill-gate); EXEC-02/EXEC-03/OPS-01 harden in Phase 8 before any live order
 - [Roadmap]: Strategy V1 family stays TBD (D012); no phase may declare a winner without backtest + out-of-sample evidence
 - [Roadmap]: Paper forward-observation (3–6 mo wall-clock) is the schedule long pole; Phase 8 construction may overlap the soak
+- [03-01]: D-10 enum values copy GLOSSARY §§2-9 verbatim; str+Enum mixin (not StrEnum) per research canonical pattern
+- [03-01]: D-04 parameterSetHash = SHA256 over canonical JSON of normalized TOML body (sorted keys, compact separators, ensure_ascii, allow_nan=False)
+- [03-01]: D-03 SignalId input list = strategyVersion + parameterSetId + symbol + source_timeframe + source_candle_close_utc + setup_fingerprint
+- [03-01]: D-06 closed whitelist of strategy-semantic keys (STRATEGY_KEYS); unknown keys raise StrategyKeyOutsideRegistry
+- [03-01]: D-12 float rejected loudly in canonical hash; TOML floats coerced to Decimal via str() before hashing
 
 ### Pending Todos
 
@@ -88,6 +93,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-22T13:38:45.286Z
-Stopped at: Phase 3 context gathered
-Resume file: C:/Users/daotu/OneDrive/Documents/Trading-Alert/.planning/phases/03-domain-registry-fixtures/03-CONTEXT.md
+Last session: 2026-09-22T14:30:00.000Z
+Stopped at: Completed 03-01-PLAN.md
+Resume file: C:/Users/daotu/OneDrive/Documents/Trading-Alert/.planning/phases/03-domain-registry-fixtures/03-01-SUMMARY.md
