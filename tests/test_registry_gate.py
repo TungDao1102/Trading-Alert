@@ -32,7 +32,6 @@ from src.domain.registry import (
     verify_parameter_set,
 )
 
-
 # --------------------------------------------------------------------------- #
 # Test 1 — loading a nonexistent strategy/set pair raises UnregisteredParameterSet.
 # --------------------------------------------------------------------------- #

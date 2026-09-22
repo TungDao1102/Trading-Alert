@@ -253,6 +253,25 @@ def verify_parameter_set(path: Path, expected_hash: str) -> None:
         )
 
 
+def check_strategy_key_outside_registry(ambient: dict[str, Any]) -> None:
+    """Raise StrategyKeyOutsideRegistry if any whitelisted strategy key appears.
+
+    D-06: strategy-semantic keys live ONLY in the registry. If a
+    whitelisted key appears in ambient configuration (env vars, CLI
+    flags, etc.), the loader raises StrategyKeyOutsideRegistry
+    instead of silently altering semantics.
+
+    Runtime config (endpoints, tokens, log levels, poll intervals)
+    is allowed in ambient configuration — only strategy-semantic
+    keys are rejected.
+    """
+    smuggled = set(ambient.keys()) & STRATEGY_KEYS
+    if smuggled:
+        raise StrategyKeyOutsideRegistry(
+            f"strategy-semantic keys found outside registry: {sorted(smuggled)}"
+        )
+
+
 __all__ = [
     "REGISTRY_ROOT",
     "SCHEMA_VERSION",
@@ -264,4 +283,5 @@ __all__ = [
     "StrategyKeyOutsideRegistry",
     "load_parameter_set",
     "verify_parameter_set",
+    "check_strategy_key_outside_registry",
 ]
