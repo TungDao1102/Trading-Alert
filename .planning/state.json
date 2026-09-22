@@ -1,0 +1,63 @@
+{
+  "contract": "1.0.0",
+  "flavor": "core",
+  "milestone": "v0.3",
+  "phases": [
+    {
+      "number": "1",
+      "name": "Research Formalization",
+      "status": "pending"
+    },
+    {
+      "number": "2",
+      "name": "Data Foundation",
+      "status": "pending"
+    },
+    {
+      "number": "3",
+      "name": "Domain + Registry + Fixtures",
+      "status": "pending"
+    },
+    {
+      "number": "4",
+      "name": "Pure Core (Feature + Strategy + Planner)",
+      "status": "pending"
+    },
+    {
+      "number": "5",
+      "name": "Risk Engine",
+      "status": "pending"
+    },
+    {
+      "number": "6",
+      "name": "Backtest Simulator + Experiment Registry",
+      "status": "pending"
+    },
+    {
+      "number": "7",
+      "name": "Paper Forward Observation",
+      "status": "pending"
+    },
+    {
+      "number": "8",
+      "name": "Approval + Reconciliation Hardening",
+      "status": "pending"
+    },
+    {
+      "number": "9",
+      "name": "Live Execution Rollout",
+      "status": "pending"
+    },
+    {
+      "number": "10",
+      "name": "Journal Depth + Kill-Gate Operations",
+      "status": "pending"
+    }
+  ],
+  "next": {
+    "command": "/gsd:progress --next",
+    "label": "Advance to the next step",
+    "reason": "Phase 02 of 10 · executing"
+  },
+  "updated_at": "2026-09-19T08:58:53.510Z"
+}

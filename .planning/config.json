@@ -1,7 +1,14 @@
 {
   "mode": "yolo",
   "granularity": "fine",
-  "model_profile": "adaptive",
+  "model_profile": "inherit",
+  "model_overrides": {
+    "gsd-pattern-mapper": "aigateway/MiniMax/MiniMax-M3",
+    "gsd-executor": "aigateway/MiniMax/MiniMax-M3",
+    "gsd-code-fixer": "aigateway/MiniMax/MiniMax-M3",
+    "gsd-security-auditor": "aigateway/MiniMax/MiniMax-M3",
+    "gsd-nyquist-auditor": "aigateway/MiniMax/MiniMax-M3"
+  },
   "commit_docs": true,
   "parallelization": true,
   "search_gitignored": false,
@@ -14,7 +21,7 @@
   "jina": false,
   "git": {
     "branching_strategy": "none",
-    "create_tag": true,
+    "create_tag": false,
     "phase_branch_template": "gsd/phase-{phase}-{slug}",
     "milestone_branch_template": "gsd/{milestone}-{slug}",
     "quick_branch_template": null
@@ -24,7 +31,7 @@
     "plan_check": true,
     "verifier": true,
     "nyquist_validation": true,
-    "auto_advance": true,
+    "auto_advance": false,
     "node_repair": true,
     "node_repair_budget": 2,
     "ui_phase": true,
@@ -35,11 +42,11 @@
     "context_guard_mode": "warn",
     "text_mode": false,
     "compact_content": false,
-    "research_before_questions": false,
+    "research_before_questions": true,
     "discuss_mode": "discuss",
     "skip_discuss": false,
     "code_review": true,
-    "code_review_depth": "standard",
+    "code_review_depth": "deep",
     "code_review_command": null,
     "pattern_mapper": true,
     "plan_bounce": false,
@@ -49,7 +56,11 @@
     "post_planning_gaps": true,
     "security_enforcement": true,
     "security_asvs_level": 1,
-    "security_block_on": "high"
+    "security_block_on": "high",
+    "tdd_mode": true,
+    "ui_review": true,
+    "use_worktrees": false,
+    "plan_review_convergence": true
   },
   "ship": {
     "pr_body_sections": [
@@ -88,5 +99,11 @@
   "plan_review": {
     "source_grounding": true,
     "source_grounding_authority": "grep"
+  },
+  "intel": {
+    "enabled": true
+  },
+  "graphify": {
+    "enabled": true
   }
 }
