@@ -7,6 +7,7 @@ Research-first path from frozen protocol to cautious live orders: formalize the 
 ## Phases
 
 **Phase Numbering:**
+
 - Integer phases (1, 2, 3): Planned milestone work
 - Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
 
@@ -26,36 +27,44 @@ Decimal phases appear between their surrounding integers in numeric order.
 ## Phase Details
 
 ### Phase 1: Research Formalization
+
 **Goal**: Parameter work is gated by a frozen, auditable research contract — no backtest is an anecdote.
 **Mode:** mvp
 **Depends on**: Nothing (first phase)
 **Requirements**: RSCH-01, RSCH-02, RSCH-03
 **Success Criteria** (what must be TRUE):
+
   1. Researcher can read the frozen protocol stating dataset splits, cost model, execution assumptions, and acceptance gates before any parameter run exists
   2. Each of the three families (Trend Pullback, Breakout+Retest, Range Mean-Reversion) has an independent spec tracing informal concept → machine-detectable rule → deterministic alternatives → bias notes → parameters → backtest path
   3. Every known Core Docs v0.3 contradiction appears as an explicit resolved decision in DECISIONS.md (SystemMode naming, APPROVED lifecycle, timezone, §12 status names, duplicate sections) — no silent renames
   4. A parameter run attempted without a frozen protocol and registered parameter set is rejected by gate, not by convention
+
 **Plans**: 4 plans
 
 Plans:
+
 - [x] 01-01: Frozen protocol doc DRAFT (tracer slice with verification greps)
 - [x] 01-02: Three family sheets in the fixed 7-slot template
 - [x] 01-03: C1–C7 edit batch + DECISIONS D022–D028 + DOC_STATUS bump
 - [x] 01-04: CI gate YAML + required-status-check + freeze beat + negative test
 
 ### Phase 2: Data Foundation
+
 **Goal**: Irrecoverable data is safe — OI accumulates from day one and every symbol has queryable, quality-checked coverage.
 **Mode:** mvp
 **Depends on**: Phase 1
 **Requirements**: DATA-01, DATA-02, DATA-03, DATA-04
 **Success Criteria** (what must be TRUE):
+
   1. User can bootstrap 1m/1H/4H candles per symbol and query effective per-symbol coverage with duplicates, OHLC violations, and gaps flagged
   2. OI snapshots accumulate continuously from day one plus funding history, so the 30-day API window can never destroy research data going forward
   3. Symbol metadata (tick/step, min/max qty, notional constraints, position modes, onboard time) loads versioned from live exchangeInfo instead of hard-coded values
   4. Automated backup + restore drill passes covering PostgreSQL state and the self-collected OI dataset
+
 **Plans**: 5 plans
 
 Plans:
+
 - [ ] 02-01: Toolchain + storage skeleton + SDK re-verify + COVERAGE matrix
 - [ ] 02-02: Tracer end-to-end candle slice (one symbol, one interval)
 - [ ] 02-03: Full live-5 bounded-depth bootstrap with TDD quality gates
@@ -63,118 +72,161 @@ Plans:
 - [ ] 02-05: Coverage CLI/views + backup drill on off-host target
 
 ### Phase 3: Domain + Registry + Fixtures
+
 **Goal**: Every decision is traceable and reproducible — new behavior must be expressible as a versioned set before it exists.
 **Mode:** mvp
 **Depends on**: Phase 2
 **Requirements**: DOMN-01, DOMN-02, DOMN-03
 **Success Criteria** (what must be TRUE):
+
   1. Seven entities (Signal, TradePlan, Approval, Order, Fill, Position, JournalEvent) persist separately with GLOSSARY-canonical enums and no state inferred from nullable columns
   2. Any backtest, paper run, alert, or order plan displays its immutable identity (strategyVersion + parameterSetId + parameterSetHash + experiment linkage)
   3. Golden fixtures (candles.csv + parameters.json + expected signals/plans) plus no-lookahead, prefix-invariance, candle-close-timing, and boundary suites pass in CI; unregistered semantic changes are rejected
-**Plans**: TBD
+
+**Plans**: 5 plans
 
 Plans:
-- [ ] 03-01: TBD (derived during plan-phase)
+**Wave 1**
+
+- [ ] 03-01: Tracer registry-to-Signal-to-row slice with seed TOML and fixture triple
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 03-02: Remaining six domain entities with ApprovalResult assumption (TDD)
+- [ ] 03-03: Registry hardening plus fail-closed negative gates (TDD)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 03-04: Seven-table ORM mirror plus mappers plus migration 0002 with parity gate
+- [ ] 03-05: Determinism suites plus CI registry gate plus no-float guard
 
 ### Phase 4: Pure Core (Feature + Strategy + Planner)
+
 **Goal**: Closed candles in, deterministic setups out — the pure core simulators will consume is fixture-green.
 **Mode:** mvp
 **Depends on**: Phase 3
 **Requirements**: STRAT-01, STRAT-02, STRAT-03
 **Success Criteria** (what must be TRUE):
+
   1. Feature engine computes indicators/structure/zones from closed candles only, and long-warm-up features (e.g. EMA200-4H) report invalid until history suffices
   2. Same market snapshot + account state + strategy version + config always yields the byte-identical decision (NO_TRADE or SETUP) with a deterministic SignalId — prefix-invariance check passes
   3. Every valid setup translates into a plan carrying entry zone, SL, TP(s), invalidation, expiry, expected RR, and plan hash
   4. No strategy family is declared a winner — all three remain hypotheses pending backtest plus out-of-sample evidence
+
 **Plans**: TBD
 
 Plans:
+
 - [ ] 04-01: TBD (derived during plan-phase)
 
 ### Phase 5: Risk Engine
+
 **Goal**: Risk math is byte-identical everywhere — no sizing surprise appears for the first time with money attached.
 **Mode:** mvp
 **Depends on**: Phase 4
 **Requirements**: RISK-01, RISK-02
 **Success Criteria** (what must be TRUE):
+
   1. Position size derives from equity × risk-rate ÷ SL-distance including modeled costs, floors quantity to stepSize, and rejects below the utilization threshold or exchange minimums (QUANTIZATION_REJECT / NO_TRADE preferred over round-up)
   2. Portfolio limits (max open positions, aggregate risk, correlated-cluster cap, DAILY_STOP states) are enforced, and uncertain account/risk state fails closed to NO_TRADE with no new orders
   3. Backtest, paper, and live produce identical sizing outputs for identical inputs (parity fixture green)
+
 **Plans**: TBD
 
 Plans:
+
 - [ ] 05-01: TBD (derived during plan-phase)
 
 ### Phase 6: Backtest Simulator + Experiment Registry
+
 **Goal**: Backtest is the canonical validation authority — selection decisions rest on costs-included, uncertainty-first evidence.
 **Mode:** mvp
 **Depends on**: Phase 5
 **Requirements**: BKTS-01, BKTS-02, BKTS-03
 **Success Criteria** (what must be TRUE):
+
   1. Both-touched SL/TP bars resolve with 1m intrabar data (SL-first conservative fallback), limit fills/partials/expiry/invalidation are modeled, and fees/funding/slippage apply from run #1 before any selection decision
   2. Every experiment reproduces from dataset + strategy + parameter set + cost + execution versions and is compared against no-trade and simple-trend baselines
   3. Reports show trade counts and slices (symbol/period/regime/version), R distribution, bootstrap intervals, and parameter-plateau analysis — never a single headline number — and no winner is declared without out-of-sample confirmation
+
 **Plans**: TBD
 
 Plans:
+
 - [ ] 06-01: TBD (derived during plan-phase)
 
 ### Phase 7: Paper Forward Observation
+
 **Goal**: Forward evidence accumulates over wall-clock time — the schedule long pole runs without contaminating itself.
 **Mode:** mvp
 **Depends on**: Phase 6
 **Requirements**: PAPER-01, PAPER-02, PAPER-03
 **Success Criteria** (what must be TRUE):
+
   1. Paper engine ingests WS market data with warm-up/reconnect/resync, evaluates closed candles only, and journals gaps without fabricating signals
   2. Paper loop records system vs user-executed vs opportunity (skipped/expired) attribution with signal/approve/order/fill timestamps
   3. Forward observation accumulates over the 3–6-month wall-clock envelope with zero tuning on the paper stream (registry diff proves no parameter change touched the running stream)
+
 **Plans**: TBD
 
 Plans:
+
 - [ ] 07-01: TBD (derived during plan-phase)
 
 ### Phase 8: Approval + Reconciliation Hardening
+
 **Goal**: Human control and exchange-truth safety land before any live order exists — much of it built during the paper soak.
 **Mode:** mvp
 **Depends on**: Phase 7 (construction may run parallel to the paper soak; enablement gates on paper evidence)
 **Requirements**: APRV-01, APRV-02, EXEC-02, EXEC-03, OPS-01
 **Success Criteria** (what must be TRUE):
+
   1. User receives Telegram alerts (SIMULATE/APPROVE/SKIP) carrying symbol, direction, setup, entry, SL, TP(s), RR, risk, expiry, invalidation, exposure, and reason codes
   2. Approval is bound to SignalId + strategy version + plan hash + expiry + authorized chat + one-time token, survives 5× duplicate-callback replay with exactly one state transition, and never auto-approves on notification failure; stale/invalid plans are unapprovable
   3. Reconciliation loop comparing local state against open normal orders, open algo orders, and positions detects an injected orphan/divergence, sweeps the orphan protective, and forces SAFE_MODE
   4. Retries, restarts, and replayed events never create duplicate entry orders (deterministic client/algo order identifiers verified)
   5. RUNBOOK failure drills (unprotected/orphan/duplicate/API-down/stale-feed/DB-failure/manual-close/restore) are rehearsed and logged; SAFE_MODE blocks new entries while monitoring and reconciliation continue
+
 **Plans**: TBD
 
 Plans:
+
 - [ ] 08-01: TBD (derived during plan-phase)
 
 ### Phase 9: Live Execution Rollout
+
 **Goal**: First cautious live orders on smallest capital — evidence earned in Phases 6–7 spends here.
 **Mode:** mvp
 **Depends on**: Phase 8
 **Requirements**: EXEC-01, OPS-02
 **Success Criteria** (what must be TRUE):
+
   1. Approved plan places a LIMIT-zone entry and Algo-Order protective exits (endpoints re-verified against current Binance docs), supports both position modes, and sizes protection correctly on partial fills
   2. Live constraints are revalidated from exchangeInfo at placement time and DAILY_STOP is enforced against live state
   3. Live credentials use no-withdrawal keys with IP allowlisting, secrets live off-source, logs are structured and secret-free, and health checks are green — first orders only on smallest capital in the live-5 universe
+
 **Plans**: TBD
 
 Plans:
+
 - [ ] 09-01: TBD (derived during plan-phase)
 
 ### Phase 10: Journal Depth + Kill-Gate Operations
+
 **Goal**: Honest analytics and an institutional stop rule — NO_TRADE stays a courageous, recordable outcome.
 **Mode:** mvp
 **Depends on**: Phase 9
 **Requirements**: JRN-01, GOV-01
 **Success Criteria** (what must be TRUE):
+
   1. Journal/analytics reports MFE/MAE, execution-quality latencies, approval-delay impact, and robustness slices without hiding the full report
   2. Kill-gate dashboard tracks the 3-families / 6-months budget with live-5 vs research-universe slices, and NO_TRADE / INSUFFICIENT EDGE is recordable as a valid terminal outcome
+
 **Plans**: TBD
 **UI hint**: yes
 
 Plans:
+
 - [ ] 10-01: TBD (derived during plan-phase)
 
 ## Progress
