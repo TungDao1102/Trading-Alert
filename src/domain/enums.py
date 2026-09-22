@@ -53,6 +53,23 @@ class ApprovalAction(str, Enum):
     CANCEL = "CANCEL"
 
 
+class ApprovalResult(str, Enum):
+    """Approval result lifecycle (D-10, planner assumption).
+
+    Maps to the approval result lifecycle. The value set
+    PENDING, APPROVED, SKIPPED, EXPIRED is the explicit planner
+    assumption flagged in plan 03-01 until user confirmation.
+
+    `status` alone answers state (D-11); NULL `acted_at_utc` means
+    "transition never happened".
+    """
+
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    SKIPPED = "SKIPPED"
+    EXPIRED = "EXPIRED"
+
+
 class OrderStatus(str, Enum):
     """GLOSSARY §5 — Order lifecycle states."""
 

@@ -29,6 +29,8 @@ UTC_LATER = datetime(2026, 9, 19, 4, 0, tzinfo=UTC)
 
 def _trade_plan_kwargs() -> dict:
     """Return a complete kwargs dict for constructing a TradePlan."""
+    from src.domain.enums import TradePlanStatus
+
     return {
         "trade_plan_id": "a" * 64,
         "signal_id": "b" * 64,
@@ -48,20 +50,22 @@ def _trade_plan_kwargs() -> dict:
         "quantity_after_rounding": Decimal("0.100"),
         "quantization_decision": "ACCEPTED",
         "plan_hash": "c" * 64,
-        "status": "READY",
+        "status": TradePlanStatus.READY,
         "created_at_utc": UTC_NOW,
     }
 
 
 def _approval_kwargs() -> dict:
     """Return a complete kwargs dict for constructing an Approval."""
+    from src.domain.enums import ApprovalAction, ApprovalResult
+
     return {
         "approval_id": "d" * 64,
         "trade_plan_id": "a" * 64,
         "signal_id": "b" * 64,
-        "action": "APPROVE",
-        "result": "PENDING",
-        "status": "PENDING",
+        "action": ApprovalAction.APPROVE,
+        "result": ApprovalResult.PENDING,
+        "status": ApprovalResult.PENDING,
         "approval_token_hash": "e" * 64,
         "requested_at_utc": UTC_NOW,
         "acted_at_utc": None,
@@ -73,6 +77,8 @@ def _approval_kwargs() -> dict:
 
 def _order_kwargs() -> dict:
     """Return a complete kwargs dict for constructing an Order."""
+    from src.domain.enums import OrderStatus
+
     return {
         "order_id": "1" * 64,
         "trade_plan_id": "a" * 64,
@@ -94,7 +100,7 @@ def _order_kwargs() -> dict:
         "exchange_order_id": None,
         "algo_client_id": None,
         "exchange_status": "NEW",
-        "local_status": "NEW",
+        "local_status": OrderStatus.NEW,
         "submitted_at_utc": UTC_NOW,
         "updated_at_utc": UTC_NOW,
         "canceled_at_utc": None,
@@ -123,6 +129,8 @@ def _fill_kwargs() -> dict:
 
 def _position_kwargs() -> dict:
     """Return a complete kwargs dict for constructing a Position."""
+    from src.domain.enums import PositionStatus
+
     return {
         "position_id": "3" * 64,
         "symbol": "BTCUSDT",
@@ -136,7 +144,7 @@ def _position_kwargs() -> dict:
         "opened_at_utc": UTC_NOW,
         "updated_at_utc": UTC_NOW,
         "closed_at_utc": None,
-        "status": "OPEN",
+        "status": PositionStatus.OPEN,
     }
 
 
