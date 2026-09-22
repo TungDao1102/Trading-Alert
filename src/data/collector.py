@@ -659,14 +659,17 @@ def _floor_to_cadence(dt: datetime, cadence_seconds: float) -> datetime:
 def _funding_since_ms(
     session: Session, universe: Sequence[str], now_ms: int
 ) -> int:
-    """Resume each symbol just after its funding watermark.
+    """Fallback `since_ms` for symbols without a funding watermark.
 
-    Symbols without a watermark (fresh deploy) start one funding
-    interval back so the first sweep is bounded; resuming at
-    `watermark + 1` never re-fetches an already-written tick (the
-    tick-file immutability guard would refuse the overwrite).
+    Per-symbol resume happens inside `async_funding_sweep` (each
+    watermarked symbol fetches from just after its OWN watermark via
+    `_tick_epoch_ms(wm) + 1`). This helper only supplies the bootstrap
+    window for fresh symbols (no watermark yet): one funding interval
+    back so the first sweep is bounded. Returning the fresh-symbol
+    fallback directly — NOT `min()` over watermarked symbols — keeps
+    a fresh symbol's bootstrap bounded even when another symbol's
+    watermark is older than the bootstrap window.
     """
-    starts: list[int] = []
     for sym in universe:
         row = session.execute(
             select(CollectorWatermark).where(
@@ -675,10 +678,14 @@ def _funding_since_ms(
             )
         ).scalar_one_or_none()
         if row is None or row.last_tick_utc is None:
-            starts.append(now_ms - FUNDING_BOOTSTRAP_LOOKBACK_MS)
-        else:
-            starts.append(int(row.last_tick_utc.timestamp() * 1000) + 1)
-    return min(starts)
+            # At least one fresh symbol — return the bounded bootstrap
+            # window. Watermarked symbols bypass this value entirely
+            # (per-symbol resume in `async_funding_sweep`).
+            return now_ms - FUNDING_BOOTSTRAP_LOOKBACK_MS
+    # All symbols have watermarks — per-symbol resume handles them;
+    # the returned value is unused for those, but we still need a
+    # valid epoch-ms. Use the naive-safe helper for consistency.
+    return now_ms - FUNDING_BOOTSTRAP_LOOKBACK_MS
 
 
 async def _run_once_tick(

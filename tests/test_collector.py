@@ -734,3 +734,119 @@ async def test_funding_sweep_treats_existing_tick_file_as_covered(
     ).scalar_one_or_none()
     assert wm is not None
     assert _epoch_ms(wm.last_tick_utc) == _epoch_ms(event_e)
+
+
+# --------------------------------------------------------------------------- #
+# WR-01 mixed-watermark contract: fresh symbol's bootstrap is bounded even
+# when another symbol's watermark is older than the bootstrap window.
+# --------------------------------------------------------------------------- #
+
+
+def test_funding_since_ms_fresh_symbol_uses_bounded_bootstrap_not_stale_min(
+    session: Session,
+) -> None:
+    """WR-01: a fresh symbol's `since_ms` must be the bounded bootstrap
+    window, NOT the stale watermark + 1 of another symbol.
+
+    Pre-fix, `_funding_since_ms` returned `min(starts)` over all symbols,
+    so a fresh symbol inherited the oldest watermarked symbol's
+    `watermark + 1` — over-fetching (extra exchange weight, possible
+    `limit=1000` truncation) on the first sweep. The fix returns the
+    fresh-symbol bootstrap directly; watermarked symbols bypass the
+    returned value via per-symbol resume in `async_funding_sweep`.
+    """
+    from src.data.collector import _funding_since_ms
+
+    # BTC has a stale watermark (10h old — older than the 8h bootstrap).
+    # ETH has no watermark (fresh deploy).
+    stale = datetime(2026, 9, 19, 2, 0, tzinfo=UTC)  # 10h before observed
+    session.merge(
+        CollectorWatermark(
+            symbol="BTCUSDT",
+            data_class="funding",
+            last_tick_utc=stale,
+            updated_at_utc=stale,
+        )
+    )
+    session.commit()
+
+    observed = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
+    now_ms = int(observed.timestamp() * 1000)
+    bootstrap_ms = 8 * 60 * 60_000  # FUNDING_BOOTSTRAP_LOOKBACK_MS
+
+    since_ms = _funding_since_ms(session, ["BTCUSDT", "ETHUSDT"], now_ms)
+
+    # Fresh symbol's bootstrap: now_ms - 8h, NOT stale_watermark + 1.
+    assert since_ms == now_ms - bootstrap_ms
+    # Sanity: the stale watermark + 1 would be ~2h earlier than the
+    # bootstrap — the pre-fix bug would have returned that smaller value.
+    stale_plus_one = int(stale.timestamp() * 1000) + 1
+    assert since_ms > stale_plus_one, (
+        "fresh symbol must NOT inherit the stale watermark + 1 "
+        f"(stale+1={stale_plus_one}, got={since_ms})"
+    )
+
+
+async def test_funding_sweep_mixed_watermarks_fresh_symbol_uses_bounded_bootstrap(
+    session: Session, tmp_path: Path
+) -> None:
+    """WR-01: end-to-end mixed-watermark contract.
+
+    One stale watermark (BTC, 10h old) + one fresh symbol (ETH, no
+    watermark). The fresh symbol's fetch `start_ms` must be the bounded
+    bootstrap window (`now_ms - 8h`), NOT the stale watermark + 1.
+    Locks the contract that `_funding_since_ms` returns the fresh-symbol
+    fallback directly.
+    """
+    from datetime import timedelta
+
+    from src.data.collector import _run_once_tick
+
+    observed = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
+    stale = observed - timedelta(hours=10)
+    session.merge(
+        CollectorWatermark(
+            symbol="BTCUSDT",
+            data_class="funding",
+            last_tick_utc=stale,
+            updated_at_utc=stale,
+        )
+    )
+    session.commit()
+
+    # Adapter returns one tick per symbol; OI responses for both.
+    oi_snapshots = [
+        _mk_oi_snapshot("BTCUSDT"),
+        _mk_oi_snapshot("ETHUSDT"),
+    ]
+    funding_ticks = [
+        [_mk_funding_tick_at("BTCUSDT", observed - timedelta(hours=8))],
+        [_mk_funding_tick_at("ETHUSDT", observed - timedelta(hours=8))],
+    ]
+    adapter = FakeAdapter(
+        oi_responses=oi_snapshots, funding_responses=funding_ticks
+    )
+
+    await _run_once_tick(
+        adapter,  # type: ignore[arg-type]
+        session,
+        universe=["BTCUSDT", "ETHUSDT"],
+        raw_root=tmp_path,
+        observed_utc=observed,
+    )
+
+    # BTC resumes from its own stale watermark + 1 (per-symbol resume).
+    # ETH (fresh) uses the bounded bootstrap: now_ms - 8h.
+    now_ms = int(observed.timestamp() * 1000)
+    bootstrap_ms = 8 * 60 * 60_000
+    expected_eth_start = now_ms - bootstrap_ms
+
+    btc_calls = [c for c in adapter.funding_calls if c[0] == "BTCUSDT"]
+    eth_calls = [c for c in adapter.funding_calls if c[0] == "ETHUSDT"]
+    assert len(btc_calls) == 1
+    assert len(eth_calls) == 1
+    assert btc_calls[0][1] == int(stale.timestamp() * 1000) + 1
+    assert eth_calls[0][1] == expected_eth_start, (
+        f"fresh ETH must use bounded bootstrap {expected_eth_start}, "
+        f"got {eth_calls[0][1]}"
+    )
