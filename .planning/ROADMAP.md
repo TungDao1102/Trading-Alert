@@ -83,9 +83,16 @@ Plans:
   2. Any backtest, paper run, alert, or order plan displays its immutable identity (strategyVersion + parameterSetId + parameterSetHash + experiment linkage)
   3. Golden fixtures (candles.csv + parameters.json + expected signals/plans) plus no-lookahead, prefix-invariance, candle-close-timing, and boundary suites pass in CI; unregistered semantic changes are rejected
 
-**Plans**: 5 plans
+**Plans**: 5/5 plans executed
 
 Plans:
+
+- [x] 03-01-PLAN.md
+- [x] 03-02-PLAN.md
+- [x] 03-03-PLAN.md
+- [x] 03-04-PLAN.md
+- [x] 03-05-PLAN.md
+
 **Wave 1**
 
 - [x] 03-01: Tracer registry-to-Signal-to-row slice with seed TOML and fixture triple
@@ -98,7 +105,7 @@ Plans:
 **Wave 3** *(blocked on Wave 2 completion)*
 
 - [x] 03-04: Seven-table ORM mirror plus mappers plus migration 0002 with parity gate
-- [ ] 03-05: Determinism suites plus CI registry gate plus no-float guard
+- [x] 03-05: Determinism suites plus CI registry gate plus no-float guard
 
 ### Phase 4: Pure Core (Feature + Strategy + Planner)
 
@@ -238,7 +245,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 |-------|----------------|--------|-----------|
 | 1. Research Formalization | 0/TBD | Not started | - |
 | 2. Data Foundation | 0/TBD | Not started | - |
-| 3. Domain + Registry + Fixtures | 4/5 | In Progress | - |
+| 3. Domain + Registry + Fixtures | 5/5 | In Progress|  |
 | 4. Pure Core (Feature + Strategy + Planner) | 0/TBD | Not started | - |
 | 5. Risk Engine | 0/TBD | Not started | - |
 | 6. Backtest Simulator + Experiment Registry | 0/TBD | Not started | - |
