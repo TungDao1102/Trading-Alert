@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 03
 current_phase_name: domain-registry-fixtures
 status: executing
-stopped_at: Completed 03-02-PLAN.md
-last_updated: "2026-09-22T15:00:00.000Z"
+stopped_at: Completed 03-03-PLAN.md
+last_updated: "2026-09-22T16:00:00.000Z"
 last_activity: 2026-09-22
-last_activity_desc: Phase 03 plan 02 (six remaining domain entities) completed
-state_head: d1deb4a
+last_activity_desc: Phase 03 plan 03 (registry hardening plus fail-closed negative gates) completed
+state_head: d6b3cd0
 progress:
   total_phases: 10
   completed_phases: 0
   total_plans: 14
-  completed_plans: 11
+  completed_plans: 12
 ---
 
 <!-- STATE-MD-SCHEMA:END:frontmatter -->
@@ -30,30 +30,30 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 03 (domain-registry-fixtures) — EXECUTING
-Plan: 2 of 5 complete
-Status: Plan 03-02 (six remaining domain entities) complete; ready for plan 03-03
-Last activity: 2026-09-22 — Phase 03 plan 02 completed
+Plan: 3 of 5 complete
+Status: Plan 03-03 (registry hardening plus fail-closed negative gates) complete; ready for plan 03-04
+Last activity: 2026-09-22 — Phase 03 plan 03 completed
 
-Progress: [████░░░░░░] 40%
+Progress: [█████░░░░░] 50%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 2 (Phase 03)
+- Total plans completed: 3 (Phase 03)
 - Average duration: ~12 min
-- Total execution time: ~25 min
+- Total execution time: ~35 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 03 | 2 | 5 | ~12 min |
+| 03 | 3 | 5 | ~12 min |
 
 **Recent Trend:**
 
-- Last 2 plans: 03-01 (tracer slice) — ~15 min, 03-02 (six entities) — ~10 min
-- Trend: accelerating
+- Last 3 plans: 03-01 (tracer slice) — ~15 min, 03-02 (six entities) — ~10 min, 03-03 (registry hardening) — ~10 min
+- Trend: stable
 
 *Updated after each plan completion*
 
@@ -79,6 +79,10 @@ Recent decisions affecting current work:
 - [03-02]: DATA_MODEL §2.8 Fill has no status attribute (fills are events, not state)
 - [03-02]: DATA_MODEL §2.7 Order carries three independent identifier fields (client_order_id, exchange_order_id, algo_client_id)
 - [03-02]: Phase 4 deferral — setup_type, regime, order_role, side, position_side, order_type, time_in_force, event_type, entity_type stay as validated non-empty strings; Enum promotion deferred to Phase 4
+- [03-03]: D-04/D-12 trailing precision preserved by reading raw TOML text and building Decimal from string form (1.50 stays Decimal('1.50'), not Decimal('1.5'))
+- [03-03]: D-06 parameter names restricted to 7-bit ASCII so code-point sorting matches the documented canonical profile
+- [03-03]: D-04 volatile sidecar fields (author, timestamp) never enter the hashed body; editing them does not change the hash
+- [03-03]: D-06 check_strategy_key_outside_registry raises StrategyKeyOutsideRegistry if any whitelisted strategy key appears in ambient configuration
 
 ### Pending Todos
 
@@ -101,6 +105,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-22T15:00:00.000Z
-Stopped at: Completed 03-02-PLAN.md
-Resume file: C:/Users/daotu/OneDrive/Documents/Trading-Alert/.planning/phases/03-domain-registry-fixtures/03-02-SUMMARY.md
+Last session: 2026-09-22T16:00:00.000Z
+Stopped at: Completed 03-03-PLAN.md
+Resume file: C:/Users/daotu/OneDrive/Documents/Trading-Alert/.planning/phases/03-domain-registry-fixtures/03-03-SUMMARY.md

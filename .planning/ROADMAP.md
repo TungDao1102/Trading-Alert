@@ -93,7 +93,7 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 
 - [x] 03-02: Remaining six domain entities with ApprovalResult assumption (TDD)
-- [ ] 03-03: Registry hardening plus fail-closed negative gates (TDD)
+- [x] 03-03: Registry hardening plus fail-closed negative gates (TDD)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -238,7 +238,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 |-------|----------------|--------|-----------|
 | 1. Research Formalization | 0/TBD | Not started | - |
 | 2. Data Foundation | 0/TBD | Not started | - |
-| 3. Domain + Registry + Fixtures | 2/5 | In Progress | - |
+| 3. Domain + Registry + Fixtures | 3/5 | In Progress | - |
 | 4. Pure Core (Feature + Strategy + Planner) | 0/TBD | Not started | - |
 | 5. Risk Engine | 0/TBD | Not started | - |
 | 6. Backtest Simulator + Experiment Registry | 0/TBD | Not started | - |
