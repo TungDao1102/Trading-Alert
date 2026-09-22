@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 03
 current_phase_name: domain-registry-fixtures
 status: executing
-stopped_at: Completed 03-03-PLAN.md
-last_updated: "2026-09-22T16:00:00.000Z"
+stopped_at: Completed 03-04-PLAN.md
+last_updated: "2026-09-22T16:30:00.000Z"
 last_activity: 2026-09-22
-last_activity_desc: Phase 03 plan 03 (registry hardening plus fail-closed negative gates) completed
-state_head: d6b3cd0
+last_activity_desc: Phase 03 plan 04 (seven-table ORM mirror plus mappers plus migration 0002) completed
+state_head: e8fdb58
 progress:
   total_phases: 10
   completed_phases: 0
   total_plans: 14
-  completed_plans: 12
+  completed_plans: 13
 ---
 
 <!-- STATE-MD-SCHEMA:END:frontmatter -->
@@ -30,29 +30,29 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 03 (domain-registry-fixtures) — EXECUTING
-Plan: 3 of 5 complete
-Status: Plan 03-03 (registry hardening plus fail-closed negative gates) complete; ready for plan 03-04
-Last activity: 2026-09-22 — Phase 03 plan 03 completed
+Plan: 4 of 5 complete
+Status: Plan 03-04 (seven-table ORM mirror plus mappers plus migration 0002) complete; ready for plan 03-05
+Last activity: 2026-09-22 — Phase 03 plan 04 completed
 
-Progress: [█████░░░░░] 50%
+Progress: [██████░░░░] 60%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 3 (Phase 03)
+- Total plans completed: 4 (Phase 03)
 - Average duration: ~12 min
-- Total execution time: ~35 min
+- Total execution time: ~50 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 03 | 3 | 5 | ~12 min |
+| 03 | 4 | 5 | ~12 min |
 
 **Recent Trend:**
 
-- Last 3 plans: 03-01 (tracer slice) — ~15 min, 03-02 (six entities) — ~10 min, 03-03 (registry hardening) — ~10 min
+- Last 4 plans: 03-01 (tracer slice) — ~15 min, 03-02 (six entities) — ~10 min, 03-03 (registry hardening) — ~10 min, 03-04 (ORM mirror + mappers + migration) — ~15 min
 - Trend: stable
 
 *Updated after each plan completion*
@@ -83,6 +83,12 @@ Recent decisions affecting current work:
 - [03-03]: D-06 parameter names restricted to 7-bit ASCII so code-point sorting matches the documented canonical profile
 - [03-03]: D-04 volatile sidecar fields (author, timestamp) never enter the hashed body; editing them does not change the hash
 - [03-03]: D-06 check_strategy_key_outside_registry raises StrategyKeyOutsideRegistry if any whitelisted strategy key appears in ambient configuration
+- [03-04]: D-02 seven ORM tables on the existing single Base; no separate Base per entity
+- [03-04]: D-03 all PKs are content-hash IDs (String(128)); no auto-increment anywhere
+- [03-04]: D-11 nullable columns ONLY for 'transition never happened' timestamps
+- [03-04]: D-10 Enum translation via .value for storage and Enum(value) for restore; unknown values raise ValueError
+- [03-04]: FillRow has unique constraint on (order_id, exchange_trade_id) to protect against duplicate fill ingestion
+- [03-04]: CapturingSession pattern snapshots ORM instances BEFORE SQLite roundtrip so NUMERIC lossiness cannot hide mapper errors
 
 ### Pending Todos
 
@@ -102,9 +108,12 @@ Items acknowledged and deferred at milestone close, most recent first:
 | Category | Item | Status | Deferred At | Milestone |
 |----------|------|--------|-------------|-----------|
 | Enum promotion | setup_type, regime, order_role, side, position_side, order_type, time_in_force, event_type, entity_type | Deferred to Phase 4 | 2026-09-22 | v0.3 |
+| trades table | Logical user-executed trade entity (DATA_MODEL §2.6) | Deferred to Phase 5 | 2026-09-22 | v0.3 |
+| experiment_runs table | Backtest/research reproducibility (DATA_MODEL §2.12) | Deferred to Phase 6 | 2026-09-22 | v0.3 |
+| Registry DB mirror | DB table mirroring registry rows for experiment-join queryability | Deferred to Phase 6 (files canonical) | 2026-09-22 | v0.3 |
 
 ## Session Continuity
 
-Last session: 2026-09-22T16:00:00.000Z
-Stopped at: Completed 03-03-PLAN.md
-Resume file: C:/Users/daotu/OneDrive/Documents/Trading-Alert/.planning/phases/03-domain-registry-fixtures/03-03-SUMMARY.md
+Last session: 2026-09-22T16:30:00.000Z
+Stopped at: Completed 03-04-PLAN.md
+Resume file: C:/Users/daotu/OneDrive/Documents/Trading-Alert/.planning/phases/03-domain-registry-fixtures/03-04-SUMMARY.md
