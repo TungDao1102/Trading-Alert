@@ -15,9 +15,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-
 from src.domain.ids import derive_child_id, make_signal_id
-
 
 # --------------------------------------------------------------------------- #
 # Test 1 — make_signal_id returns a stable 64-hex string.

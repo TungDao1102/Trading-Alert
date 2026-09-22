@@ -1,0 +1,28 @@
+# params/trend-pullback/baseline-v1.toml
+#
+# Seed parameter set for the trend-pullback strategy (Phase 3, plan 03-01).
+#
+# Per D-04: this file is the source of truth for the parameter set.
+# Once referenced by a backtest/alert/order plan, its hash is permanent.
+# Do not mutate — create a new parameter set + bump strategy version.
+#
+# Per D-06: strategy-semantic parameters live ONLY in the registry.
+# Runtime config (endpoints, tokens, DB refs, log levels, poll intervals)
+# lives in env/secret stores and must never silently alter strategy semantics.
+
+schema_version = 1
+
+[strategy]
+strategy_id = "trend-pullback"
+strategy_version = "v1.0.0"
+
+[parameters]
+swing_lookback = 20
+zone_tolerance_atr = 0.5
+breakout_confirmation_bars = 3
+entry_buffer_atr = 0.1
+sl_buffer_atr = 0.2
+minimum_rr = 2.0
+signal_expiry_hours = 4
+risk_rate = 0.005
+minimum_risk_utilization_after_rounding = 0.6

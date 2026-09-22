@@ -11,18 +11,16 @@ fail until `src/domain/enums.py` is implemented.
 from __future__ import annotations
 
 import pytest
-
 from src.domain.enums import (
     ApprovalAction,
     OrderStatus,
     PositionStatus,
+    RejectionReason,
     SignalStatus,
     SystemMode,
     TradePlanStatus,
     TradeStatus,
-    RejectionReason,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Test 1 — SignalStatus values match GLOSSARY §2 verbatim.

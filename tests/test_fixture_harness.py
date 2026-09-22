@@ -13,11 +13,7 @@ and the fixture files exist.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-
-import pytest
-
 
 # --------------------------------------------------------------------------- #
 # Test 1 — phase3_candles fixture loads the candle CSV.

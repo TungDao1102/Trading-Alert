@@ -1,10 +1,13 @@
-"""SQLAlchemy 2.0 async ORM — Phase 2 operational state only.
+"""SQLAlchemy 2.0 async ORM — Phase 2 operational state + Phase 3 domain mirror.
 
 Per D-05, this package owns *operational* state in PostgreSQL 17:
   - symbol_metadata           (versioned, never UPDATE — RESEARCH §Pattern 4)
   - collector_watermarks      (D-08 — last successful tick per symbol/class)
   - collector_gaps            (D-09 — flag-never-fabricate gap journal)
   - coverage_windows          (DATA_PIPELINE §10 — per-symbol effective range)
+
+Phase 3 additions (plan 03-01, D-02):
+  - signals                   (SignalRow — content-hash PK, explicit status)
 
 No OHLCV rows live here (D-05 one-way; candles live in Parquet + DuckDB).
 
@@ -172,6 +175,43 @@ class CoverageWindow(Base):
     status_history_json: Mapped[str] = mapped_column(String, nullable=False)
     updated_at_utc: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
+    )
+
+
+# ---------- signals (Phase 3, plan 03-01) ------------------------------------
+
+
+class SignalRow(Base):
+    """ORM mirror of the domain Signal entity (D-02).
+
+    PK is the content-hash `signal_id` from `ids.make_signal_id` (D-03).
+    `status` stores `SignalStatus.value` (explicit, never inferred — D-11).
+    `invalidated_at_utc` is nullable: NULL means "transition never happened".
+    """
+
+    __tablename__ = "signals"
+
+    signal_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    parameter_set_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    parameter_set_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    direction: Mapped[str] = mapped_column(String(8), nullable=False)
+    setup_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_timeframe: Mapped[str] = mapped_column(String(8), nullable=False)
+    source_candle_close_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    detected_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    expires_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    invalidated_at_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
 

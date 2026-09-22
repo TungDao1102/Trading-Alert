@@ -14,7 +14,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from src.domain.registry import (
     ParameterSet,
     ParameterSetMutated,
@@ -24,7 +23,6 @@ from src.domain.registry import (
     load_parameter_set,
     verify_parameter_set,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Test 1 — registered set loads with a 64-hex hash.

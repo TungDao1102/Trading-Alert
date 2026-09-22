@@ -65,7 +65,9 @@ select = [
   "B",  # flake8-bugbear
   "UP", # pyupgrade
 ]
-ignore = []
+ignore = [
+  "UP042",  # str+Enum mixin is the canonical pattern per 03-RESEARCH.md §Code Examples
+]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B011"]  # asserts are fine in tests
