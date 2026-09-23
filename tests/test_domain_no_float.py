@@ -32,19 +32,41 @@ SCANNED_FILES = (
 
 
 def _find_float_calls(src: str) -> list[tuple[int, str]]:
-    """AST-walk source and return `(line_no, line_text)` for `float(...)`."""
-    calls: list[tuple[int, str]] = []
+    """AST-walk source and return `(line_no, line_text)` for float shapes.
+
+    Flags `float(...)` calls, float literals (`0.5`), `Decimal(<float
+    literal>)` shapes (silent binary-noise constructors), and numpy
+    floating-type uses (`np.float64`). TOML-sourced floats are the
+    known exception: they never appear as literals on this path —
+    `_normalize_params` converts them at the registry boundary.
+    """
+    found: dict[tuple[int, str], None] = {}
+    lines = src.splitlines()
     tree = ast.parse(src)
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Name) and func.id == "float":
-                calls.append((node.lineno, src.splitlines()[node.lineno - 1].strip()))
-    return calls
+                found[(node.lineno, lines[node.lineno - 1].strip())] = None
+            elif (
+                isinstance(func, ast.Name)
+                and func.id == "Decimal"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, float)
+            ):
+                found[(node.lineno, lines[node.lineno - 1].strip())] = None
+        elif isinstance(node, ast.Constant):
+            if isinstance(node.value, float):
+                found[(node.lineno, lines[node.lineno - 1].strip())] = None
+        elif isinstance(node, ast.Attribute):
+            if node.attr in {"float16", "float32", "float64", "floating"}:
+                found[(node.lineno, lines[node.lineno - 1].strip())] = None
+    return sorted(found)
 
 
 def test_domain_mapper_registry_path_has_no_float_call() -> None:
-    """Beh. 1: zero explicit `float(...)` calls across the scanned list."""
+    """Beh. 1: zero float shapes across the scanned list."""
     repo_root = Path(__file__).resolve().parent.parent
     offenders: dict[str, list[tuple[int, str]]] = {}
     for rel in SCANNED_FILES:
@@ -54,6 +76,14 @@ def test_domain_mapper_registry_path_has_no_float_call() -> None:
         if found:
             offenders[rel] = found
     assert not offenders, (
-        "Decimal-only invariant violated (D-12) — explicit `float(...)` "
-        f"calls found: {offenders}"
+        "Decimal-only invariant violated (D-12) — float shapes "
+        f"found: {offenders}"
     )
+
+
+def test_float_guard_catches_literals_and_decimal_float() -> None:
+    """Beh. 2: the walker flags literals and Decimal(float) (WR-10)."""
+    assert _find_float_calls("x = 0.5\n") != []
+    assert _find_float_calls("from decimal import Decimal\nx = Decimal(0.5)\n") != []
+    assert _find_float_calls('x = Decimal("0.5")\n') == []
+    assert _find_float_calls("x = 1\n") == []
