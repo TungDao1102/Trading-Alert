@@ -1,11 +1,13 @@
-"""Pure trade planner — SETUP → TradePlan (Phase 4, plan 04-01).
+"""Pure trade planner — SETUP → TradePlan (Phase 4, plan 04-03).
 
 Per D-08/D-09: every SETUP produces exactly one TradePlan filling the
 existing `src/domain/trade_plan.py` shape. Entry zone from
 `entry_buffer_atr`, SL from `sl_buffer_atr`, TP1 at `minimum_rr`, TP2
-extension, invalidation JSON, expiry = source_close + signal_expiry_hours,
-plan_hash = SHA256 over canonical JSON. RR below `minimum_rr` → NO_TRADE
-with `RR_TOO_LOW` (never a downgraded plan).
+extension (2 * minimum_rr per the 04-03 checkpoint:decision option A),
+invalidation JSON with basis=CANDLE_CLOSE + level + break_distance,
+expiry = source_close + signal_expiry_hours, plan_hash = SHA256 over
+canonical JSON. RR below `minimum_rr` returns NO_TRADE with
+`RR_TOO_LOW` (never a downgraded plan).
 
 Quantization fields are populated with Decimal planner-side estimates
 for shape completeness, but exchange rounding/minimums enforcement stays
@@ -28,7 +30,7 @@ from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
 
 from .features import compute_features
-from .types import AccountState, Candle
+from .types import AccountState, Candle, PlanResult
 
 # --------------------------------------------------------------------------- #
 # Decimal helpers — pinned local context (D-10).
@@ -114,18 +116,21 @@ def plan(
     parameter_set: ParameterSet,
     account_state: AccountState,
     created_at_utc: datetime,
-) -> TradePlan:
+) -> PlanResult:
     """Build a TradePlan from a SETUP signal + the 1H candle stream.
 
     The planner recomputes features on the 1H setup stream — the same
     features the strategy already validated — to keep a single
     deterministic computation path (no double-source-of-truth). Entry
     zone from `entry_buffer_atr`, SL from `sl_buffer_atr`, TP1 at
-    `minimum_rr`, TP2 extension, invalidation JSON, expiry =
-    source_close + signal_expiry_hours, plan_hash via canonical SHA256.
+    `minimum_rr`, TP2 extension = 2 * minimum_rr (04-03 checkpoint
+    option A), invalidation JSON with basis=CANDLE_CLOSE + level +
+    break_distance, expiry = source_close + signal_expiry_hours,
+    plan_hash via canonical SHA256.
 
-    RR below `minimum_rr` raises `ValueError` (the strategy gate should
-    have caught this earlier; the planner is the second line of defense).
+    RR below `minimum_rr` returns NO_TRADE with RejectionReason.RR_TOO_LOW
+    (D-08: never a downgraded plan). The planner is the second line of
+    defense; the strategy gate should have caught this earlier.
     """
     # Pull parameters.
     entry_buffer_atr = parameter_set.params["entry_buffer_atr"]
@@ -178,6 +183,7 @@ def plan(
         stop_loss = _add(swing_high, _mul(sl_buffer_atr, atr))
 
     # Reference entry = midpoint of the zone (deterministic, no fill model).
+    # Per 04-03 checkpoint:decision option A: entry_ref = zone mid for LIMIT_ZONE.
     entry_ref = _div(_add(entry_min, entry_max), _q("2"))
 
     # Risk = |entry_ref - stop_loss|.
@@ -187,7 +193,7 @@ def plan(
             f"plan: risk {risk} must be > 0 (entry_ref={entry_ref}, stop={stop_loss})"
         )
 
-    # TP1 at minimum_rr; TP2 extension = 2 * minimum_rr (simple documented rule).
+    # TP1 at minimum_rr; TP2 extension = 2 * minimum_rr (04-03 option A).
     if signal.direction == "LONG":
         tp1 = _add(entry_ref, _mul(minimum_rr, risk))
         tp2 = _add(entry_ref, _mul(_mul(_q("2"), minimum_rr), risk))
@@ -198,9 +204,10 @@ def plan(
     # RR gate — RR < minimum_rr → NO_TRADE (D-08: never a downgraded plan).
     realized_rr = _div(abs(_sub(tp1, entry_ref)), risk)
     if realized_rr < minimum_rr:
-        raise ValueError(
-            f"plan: realized RR {realized_rr} < minimum_rr {minimum_rr} "
-            f"(rejection={RejectionReason.RR_TOO_LOW.value})"
+        return PlanResult(
+            is_no_trade=True,
+            trade_plan=None,
+            reason_code=RejectionReason.RR_TOO_LOW.value,
         )
 
     # Expiry = source_close + signal_expiry_hours.
@@ -217,12 +224,14 @@ def plan(
         sort_keys=True,
         separators=(",", ":"),
     )
+    # Invalidation schema (D-08): basis=CANDLE_CLOSE, level=stop_loss_price,
+    # break_distance_atr = sl_buffer_atr * ATR (family-specific break distance).
+    break_distance = _mul(sl_buffer_atr, atr)
     invalidation_rule_json = json.dumps(
         {
-            "basis": "structure_break_candle_close",
-            "direction": signal.direction,
-            "stop_loss_price": str(stop_loss),
-            "expiry_utc": expiry_utc.isoformat(),
+            "basis": "CANDLE_CLOSE",
+            "level": str(stop_loss),
+            "break_distance_atr": str(break_distance),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -257,7 +266,7 @@ def plan(
     # TradePlan ID via derive_child_id with discriminator "trade_plan:v1".
     trade_plan_id = derive_child_id(signal.signal_id, "trade_plan:v1")
 
-    return TradePlan(
+    trade_plan = TradePlan(
         trade_plan_id=trade_plan_id,
         signal_id=signal.signal_id,
         trade_plan_version="v1",
@@ -278,6 +287,12 @@ def plan(
         plan_hash=plan_hash_value,
         status=TradePlanStatus.READY,
         created_at_utc=created_at_utc,
+    )
+
+    return PlanResult(
+        is_no_trade=False,
+        trade_plan=trade_plan,
+        reason_code="OK",
     )
 
 

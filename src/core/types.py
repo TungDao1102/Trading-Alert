@@ -305,6 +305,43 @@ class AccountState:
 # Local re-export to keep `types` self-contained for the discriminator
 # check above (avoids a circular import on this module's public surface).
 from src.domain.signal import Signal  # noqa: E402
+from src.domain.trade_plan import TradePlan  # noqa: E402
+
+
+# --------------------------------------------------------------------------- #
+# PlanResult — discriminated NO_TRADE-or-TradePlan envelope (D-08).
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class PlanResult:
+    """Discriminated NO_TRADE-or-TradePlan envelope emitted by `planner.plan`.
+
+    Per D-08: RR below minimum_rr returns NO_TRADE with RR_TOO_LOW,
+    never a downgraded plan. The planner is the second line of defense
+    (the strategy gate should have caught this earlier).
+
+    `is_no_trade=True` carries a canonical `RejectionReason` value in
+    `reason_code`; `is_no_trade=False` carries a fully populated TradePlan.
+    """
+
+    is_no_trade: bool
+    trade_plan: TradePlan | None = None
+    reason_code: str = "OK"
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.reason_code, "reason_code")
+        if self.is_no_trade:
+            if self.trade_plan is not None:
+                raise ValueError(
+                    "PlanResult: is_no_trade=True requires trade_plan=None"
+                )
+        else:
+            if self.trade_plan is None:
+                raise ValueError(
+                    "PlanResult: is_no_trade=False requires a TradePlan"
+                )
+
 
 __all__ = [
     "REASON_OK",
@@ -317,4 +354,5 @@ __all__ = [
     "SetupResult",
     "MarketSnapshot",
     "AccountState",
+    "PlanResult",
 ]

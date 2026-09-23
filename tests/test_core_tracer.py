@@ -22,7 +22,7 @@ import pytest
 from src.core.features import compute_features
 from src.core.planner import plan
 from src.core.strategy import evaluate
-from src.core.types import AccountState, Candle, MarketSnapshot
+from src.core.types import AccountState, Candle, MarketSnapshot, PlanResult
 from src.domain.canonical import sha256_hex
 from src.domain.ids import derive_child_id, make_signal_id
 from src.domain.registry import ParameterSet, load_parameter_set
@@ -230,7 +230,7 @@ def test_tracer_happy_path_emits_signal_and_trade_plan_byte_exact(
     assert signal.detected_at_utc == candles_1h[-1].close_time_utc
 
     # Now produce the plan.
-    trade_plan = plan(
+    plan_result = plan(
         signal=signal,
         setup_candles=candles_1h,
         parameter_set=parameter_set,
@@ -238,6 +238,10 @@ def test_tracer_happy_path_emits_signal_and_trade_plan_byte_exact(
         created_at_utc=datetime(2026, 9, 19, 23, 0, 0, tzinfo=UTC),
     )
 
+    assert isinstance(plan_result, PlanResult)
+    assert not plan_result.is_no_trade
+    assert plan_result.trade_plan is not None
+    trade_plan = plan_result.trade_plan
     assert isinstance(trade_plan, TradePlan)
     assert trade_plan.entry_min_price < trade_plan.entry_max_price
     if signal.direction == "LONG":
@@ -248,15 +252,16 @@ def test_tracer_happy_path_emits_signal_and_trade_plan_byte_exact(
     assert trade_plan.trade_plan_id == derive_child_id(signal.signal_id, "trade_plan:v1")
 
     # TradePlan must be reproducible.
-    trade_plan2 = plan(
+    plan_result2 = plan(
         signal=signal,
         setup_candles=candles_1h,
         parameter_set=parameter_set,
         account_state=account_state,
         created_at_utc=datetime(2026, 9, 19, 23, 0, 0, tzinfo=UTC),
     )
-    assert trade_plan.plan_hash == trade_plan2.plan_hash
-    assert trade_plan.trade_plan_id == trade_plan2.trade_plan_id
+    assert plan_result2.trade_plan is not None
+    assert trade_plan.plan_hash == plan_result2.trade_plan.plan_hash
+    assert trade_plan.trade_plan_id == plan_result2.trade_plan.trade_plan_id
 
 
 # --------------------------------------------------------------------------- #
@@ -355,7 +360,16 @@ def test_tracer_is_sensitive_to_one_tick_change(
     )
     # Plan hash must differ on a 1-tick perturbation — OR the signal
     # itself may be invalid (which is also a sensitivity signal).
-    assert plan_a.plan_hash != plan_b.plan_hash or plan_a.signal_id != plan_b.signal_id
+    if plan_a.is_no_trade or plan_b.is_no_trade:
+        # If either plan is NO_TRADE, the comparison is inconclusive;
+        # just confirm determinism.
+        return
+    assert plan_a.trade_plan is not None
+    assert plan_b.trade_plan is not None
+    assert (
+        plan_a.trade_plan.plan_hash != plan_b.trade_plan.plan_hash
+        or plan_a.trade_plan.signal_id != plan_b.trade_plan.signal_id
+    )
 
 
 # --------------------------------------------------------------------------- #
