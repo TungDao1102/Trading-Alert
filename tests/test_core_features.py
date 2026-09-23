@@ -521,3 +521,137 @@ def test_feature_frame_features_valid_is_and_of_all_features(parameter_set) -> N
         frame.zone_lower,
     ):
         assert f.valid is True, f"feature {f.reason_code!r} should be valid"
+
+
+# --------------------------------------------------------------------------- #
+# Test 10 — Multi-timeframe independence: 1H perturbation doesn't change 4H.
+# --------------------------------------------------------------------------- #
+
+
+def test_1h_perturbation_does_not_change_4h_features(
+    parameter_set,
+) -> None:
+    """Beh. 10: D-02 multi-timeframe independence.
+
+    Perturbing one 1H candle's close must NOT change any 4H feature
+    value. The two streams are independently ordered closed
+    sequences — the core NEVER interpolates 4H values into 1H bars.
+    """
+    # Build independent 1H and 4H sequences.
+    candles_1h = _candles_at_index(250, interval="1h")
+    candles_4h = _candles_at_index(250, interval="4h")
+
+    # Compute 4H features before perturbation.
+    frame_before = compute_features(
+        symbol="BTCUSDT",
+        interval="4h",
+        candles=candles_4h,
+        parameter_set=parameter_set,
+    )
+
+    # Perturb one 1H close by a large amount (expand high/low to satisfy
+    # the Candle OHLC validator).
+    perturbed_1h = list(candles_1h)
+    last = perturbed_1h[-1]
+    shift = Decimal("10000.00")
+    perturbed_1h[-1] = Candle(
+        symbol=last.symbol,
+        interval=last.interval,
+        open_time_utc=last.open_time_utc,
+        close_time_utc=last.close_time_utc,
+        open=last.open + shift,
+        high=last.high + shift,
+        low=last.low + shift,
+        close=last.close + shift,
+        volume=last.volume,
+    )
+
+    # Compute 4H features after perturbation (same 4H candles).
+    frame_after = compute_features(
+        symbol="BTCUSDT",
+        interval="4h",
+        candles=candles_4h,
+        parameter_set=parameter_set,
+    )
+
+    # Every 4H feature value must be identical.
+    for f_before, f_after in (
+        (frame_before.ema_20, frame_after.ema_20),
+        (frame_before.ema_50, frame_after.ema_50),
+        (frame_before.ema_200, frame_after.ema_200),
+        (frame_before.atr_14, frame_after.atr_14),
+        (frame_before.swing_high, frame_after.swing_high),
+        (frame_before.swing_low, frame_after.swing_low),
+        (frame_before.zone_upper, frame_after.zone_upper),
+        (frame_before.zone_lower, frame_after.zone_lower),
+    ):
+        assert f_before.value == f_after.value, (
+            f"4H feature changed after 1H perturbation: "
+            f"before={f_before.value}, after={f_after.value}"
+        )
+        assert f_before.valid == f_after.valid
+        assert f_before.reason_code == f_after.reason_code
+
+
+def test_4h_perturbation_does_not_change_1h_features(
+    parameter_set,
+) -> None:
+    """Beh. 11: D-02 multi-timeframe independence (reverse direction).
+
+    Perturbing one 4H candle's close must NOT change any 1H feature
+    value. The two streams are independently ordered closed
+    sequences.
+    """
+    candles_1h = _candles_at_index(250, interval="1h")
+    candles_4h = _candles_at_index(250, interval="4h")
+
+    # Compute 1H features before perturbation.
+    frame_before = compute_features(
+        symbol="BTCUSDT",
+        interval="1h",
+        candles=candles_1h,
+        parameter_set=parameter_set,
+    )
+
+    # Perturb one 4H close by a large amount (expand high/low to satisfy
+    # the Candle OHLC validator).
+    perturbed_4h = list(candles_4h)
+    last = perturbed_4h[-1]
+    shift = Decimal("10000.00")
+    perturbed_4h[-1] = Candle(
+        symbol=last.symbol,
+        interval=last.interval,
+        open_time_utc=last.open_time_utc,
+        close_time_utc=last.close_time_utc,
+        open=last.open + shift,
+        high=last.high + shift,
+        low=last.low + shift,
+        close=last.close + shift,
+        volume=last.volume,
+    )
+
+    # Compute 1H features after perturbation (same 1H candles).
+    frame_after = compute_features(
+        symbol="BTCUSDT",
+        interval="1h",
+        candles=candles_1h,
+        parameter_set=parameter_set,
+    )
+
+    # Every 1H feature value must be identical.
+    for f_before, f_after in (
+        (frame_before.ema_20, frame_after.ema_20),
+        (frame_before.ema_50, frame_after.ema_50),
+        (frame_before.ema_200, frame_after.ema_200),
+        (frame_before.atr_14, frame_after.atr_14),
+        (frame_before.swing_high, frame_after.swing_high),
+        (frame_before.swing_low, frame_after.swing_low),
+        (frame_before.zone_upper, frame_after.zone_upper),
+        (frame_before.zone_lower, frame_after.zone_lower),
+    ):
+        assert f_before.value == f_after.value, (
+            f"1H feature changed after 4H perturbation: "
+            f"before={f_before.value}, after={f_after.value}"
+        )
+        assert f_before.valid == f_after.valid
+        assert f_before.reason_code == f_after.reason_code

@@ -50,7 +50,11 @@ def _row_to_candle(row: dict) -> Candle:
 def _split_phase4_by_timeframe(
     phase4_candles: list[dict],
 ) -> tuple[list[Candle], list[Candle]]:
-    """Split the phase4 fixture into 1H setup candles and 4H context candles."""
+    """Split the phase4 fixture into 1H setup candles and 4H context candles.
+
+    Sorts each timeframe's candles by open_time_utc so the concatenated
+    setup+context sequences are independently ordered (D-02).
+    """
     setup: list[Candle] = []
     context: list[Candle] = []
     for row in phase4_candles:
@@ -58,6 +62,8 @@ def _split_phase4_by_timeframe(
             setup.append(_row_to_candle(row))
         elif row["timeframe"] == "4h":
             context.append(_row_to_candle(row))
+    setup.sort(key=lambda c: c.open_time_utc)
+    context.sort(key=lambda c: c.open_time_utc)
     return setup, context
 
 
@@ -202,37 +208,42 @@ def test_stateful_variant_is_detected_by_digest_comparison(
         candles_1h: list[Candle],
         candles_4h: list[Candle],
     ) -> list[tuple[datetime, SetupResult]]:
-        """Deliberately stateful: bind a module-global counter into the setup gate.
+        """Deliberately stateful: bind a module-global counter into the regime gate.
 
         A real-world bug class is a hidden module-global that leaks
-        across calls. The stateful helper perturbs the last 1H candle's
-        close by an amount depending on the call counter — a fingerprint
-        of run-to-run state that flips the setup gate.
+        across calls. The stateful helper perturbs the last 4H candle's
+        close by a periodic function of the call counter — a fingerprint
+        of run-to-run state. Because 560 (the run length) is not a
+        multiple of the perturbation period, the perturbation for bar i
+        differs between the two runs, so the regime verdict flips on a
+        different set of bars and the prefix-invariance comparison
+        detects the leak.
         """
         decisions: list[tuple[datetime, SetupResult]] = []
         for i in range(len(candles_1h)):
             prefix_1h = candles_1h[: i + 1]
             calls["n"] += 1
-            # Stateful: shift the last 1H candle's close by an amount
-            # depending on the call counter — a fingerprint of run-to-run
-            # state that flips the setup gate. Expand high/low so the
-            # Candle OHLC validator accepts the perturbed close.
-            leaky_1h = list(prefix_1h)
-            if leaky_1h:
-                last = leaky_1h[-1]
-                shift = Decimal(str(calls["n"] * 1000))
-                leaky_1h[-1] = Candle(
-                    symbol=last.symbol,
-                    interval=last.interval,
-                    open_time_utc=last.open_time_utc,
-                    close_time_utc=last.close_time_utc,
-                    open=last.open + shift,
-                    high=last.high + shift,
-                    low=last.low + shift,
-                    close=last.close + shift,
-                    volume=last.volume,
+            # Stateful: shift the last 4H close by a periodic function
+            # of the call counter (period 37 — coprime with 560). The
+            # oscillation crosses the regime-flip threshold, so bars
+            # alternate BULLISH/BEARISH. Because 560 mod 37 != 0, the
+            # oscillation phase differs between the two runs.
+            leaky_4h = list(candles_4h)
+            if leaky_4h:
+                last_4h = leaky_4h[-1]
+                shift = Decimal(str((calls["n"] % 37) * 1000))
+                leaky_4h[-1] = Candle(
+                    symbol=last_4h.symbol,
+                    interval=last_4h.interval,
+                    open_time_utc=last_4h.open_time_utc,
+                    close_time_utc=last_4h.close_time_utc,
+                    open=last_4h.open - shift,
+                    high=last_4h.high - shift,
+                    low=last_4h.low - shift,
+                    close=last_4h.close - shift,
+                    volume=last_4h.volume,
                 )
-            snapshot = _snapshot_for(leaky_1h, candles_4h)
+            snapshot = _snapshot_for(prefix_1h, leaky_4h)
             result = evaluate(
                 snapshot=snapshot,
                 account_state=ACCOUNT_STATE,

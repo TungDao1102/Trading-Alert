@@ -38,6 +38,43 @@ from .types import (
 # --------------------------------------------------------------------------- #
 
 
+_INTERVAL_DURATIONS: dict[str, timedelta] = {
+    "1m": timedelta(minutes=1),
+    "5m": timedelta(minutes=5),
+    "15m": timedelta(minutes=15),
+    "30m": timedelta(minutes=30),
+    "1h": timedelta(hours=1),
+    "2h": timedelta(hours=2),
+    "4h": timedelta(hours=4),
+    "1d": timedelta(days=1),
+}
+
+
+def _interval_duration(interval: str) -> timedelta:
+    """Return the canonical bar duration for an interval string."""
+    duration = _INTERVAL_DURATIONS.get(interval)
+    if duration is None:
+        raise ValueError(
+            f"_interval_duration: unsupported interval {interval!r}; "
+            f"supported: {sorted(_INTERVAL_DURATIONS)}"
+        )
+    return duration
+
+
+def _is_forming_bar(candle: Candle, prev: Candle) -> bool:
+    """True iff `candle` is a forming (unclosed) bar relative to `prev`.
+
+    Per D-02/STRAT-01: the engine must NEVER source a SETUP from an
+    unclosed candle. A bar is forming when its close_time_utc is
+    earlier than the expected close_time_utc derived from the previous
+    bar's close_time_utc plus the bar duration. Equivalently: the
+    candle's close_time_utc has not yet been reached.
+    """
+    duration = _interval_duration(candle.interval)
+    expected_close = prev.close_time_utc + duration
+    return candle.close_time_utc < expected_close
+
+
 def _q(x: Decimal | int | str) -> Decimal:
     """Build a Decimal from a string/int (never from a float)."""
     if isinstance(x, Decimal):
@@ -281,8 +318,21 @@ def evaluate(
             reason_code=RejectionReason.NO_TRADE_REGIME.value,
         )
 
-    # Setup gate (1H setup stream).
+    # Forming-bar gate (D-02/STRAT-01): the engine must NEVER source a
+    # SETUP from an unclosed candle. If the last setup candle is still
+    # forming (its close_time_utc is earlier than the expected close
+    # derived from the previous bar), reject with DATA_STALE so the
+    # caller knows the data is not yet finalized.
     last_setup_candle = snapshot.setup_candles[-1]
+    if len(snapshot.setup_candles) >= 2 and _is_forming_bar(
+        last_setup_candle, snapshot.setup_candles[-2]
+    ):
+        return SetupResult(
+            is_no_trade=True,
+            reason_code=RejectionReason.DATA_STALE.value,
+        )
+
+    # Setup gate (1H setup stream).
     setup = _detect_setup(setup_frame, last_setup_candle, regime)
     if setup is None:
         return SetupResult(

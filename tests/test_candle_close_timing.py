@@ -50,7 +50,11 @@ def _row_to_candle(row: dict) -> Candle:
 def _split_phase4_by_timeframe(
     phase4_candles: list[dict],
 ) -> tuple[list[Candle], list[Candle]]:
-    """Split the phase4 fixture into 1H setup candles and 4H context candles."""
+    """Split the phase4 fixture into 1H setup candles and 4H context candles.
+
+    Sorts each timeframe's candles by open_time_utc so the concatenated
+    setup+context sequences are independently ordered (D-02).
+    """
     setup: list[Candle] = []
     context: list[Candle] = []
     for row in phase4_candles:
@@ -58,6 +62,8 @@ def _split_phase4_by_timeframe(
             setup.append(_row_to_candle(row))
         elif row["timeframe"] == "4h":
             context.append(_row_to_candle(row))
+    setup.sort(key=lambda c: c.open_time_utc)
+    context.sort(key=lambda c: c.open_time_utc)
     return setup, context
 
 
@@ -136,12 +142,14 @@ def test_forming_candle_contributes_no_setup_signal(
     # Shift the fixture back so the last bar closes well before now.
     closed_1h = _shift_back(setup_1h[-200:], 6)
     closed_4h = _shift_back(context_4h, 24)
-    # Build a forming bar whose close is AFTER frozen_clock.
+    # Build a forming bar whose open_time is AFTER the last closed bar
+    # and whose close is AFTER frozen_clock.
+    last_closed_open = closed_1h[-1].open_time_utc
     forming = Candle(
         symbol="BTCUSDT",
         interval="1h",
-        open_time_utc=frozen_clock,
-        close_time_utc=frozen_clock + timedelta(minutes=30),
+        open_time_utc=last_closed_open + timedelta(hours=1),
+        close_time_utc=last_closed_open + timedelta(hours=1, minutes=30),
         open=Decimal("50000.00"),
         high=Decimal("50100.00"),
         low=Decimal("49900.00"),
@@ -204,11 +212,12 @@ def test_forming_candle_leak_variant_is_detected(
     parameter_set = load_parameter_set("trend-pullback", "baseline-v1")
     closed_1h = _shift_back(setup_1h[-200:], 6)
     closed_4h = _shift_back(context_4h, 24)
+    last_closed_open = closed_1h[-1].open_time_utc
     forming = Candle(
         symbol="BTCUSDT",
         interval="1h",
-        open_time_utc=frozen_clock,
-        close_time_utc=frozen_clock + timedelta(minutes=30),
+        open_time_utc=last_closed_open + timedelta(hours=1),
+        close_time_utc=last_closed_open + timedelta(hours=1, minutes=30),
         open=Decimal("50000.00"),
         high=Decimal("50100.00"),
         low=Decimal("49900.00"),
