@@ -624,3 +624,36 @@ def test_normalize_params_recurses_into_nested_floats() -> None:
     assert out["k"][1] == 2
     assert out["k"][2] == "x"
     assert out["k"][3]["n"] == Decimal("1.5")
+
+
+def test_verify_rejects_unknown_key_like_load(tmp_path: Path) -> None:
+    """Beh. 20: copied TOML plus unknown key raises under verify (CR-05)."""
+    seed_path = Path("params/trend-pullback/baseline-v1.toml")
+    assert seed_path.is_file(), f"missing seed TOML: {seed_path}"
+
+    strategy_dir = tmp_path / "trend-pullback"
+    strategy_dir.mkdir()
+    copy_path = strategy_dir / "baseline-v1.toml"
+    copy_path.write_text(
+        seed_path.read_text(encoding="utf-8") + "unknown_strategy_key = 42\n",
+        encoding="utf-8",
+    )
+
+    ps = load_parameter_set("trend-pullback", "baseline-v1")
+    with pytest.raises(StrategyKeyOutsideRegistry):
+        verify_parameter_set(copy_path, expected_hash=ps.parameter_set_hash)
+
+
+def test_verify_rejects_renamed_identity(tmp_path: Path) -> None:
+    """Beh. 21: copied TOML under a mismatched path raises (CR-05)."""
+    seed_path = Path("params/trend-pullback/baseline-v1.toml")
+    assert seed_path.is_file(), f"missing seed TOML: {seed_path}"
+
+    other_dir = tmp_path / "other-strategy"
+    other_dir.mkdir()
+    copy_path = other_dir / "baseline-v1.toml"
+    copy_path.write_text(seed_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    ps = load_parameter_set("trend-pullback", "baseline-v1")
+    with pytest.raises(StrategyKeyOutsideRegistry):
+        verify_parameter_set(copy_path, expected_hash=ps.parameter_set_hash)

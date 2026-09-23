@@ -253,22 +253,19 @@ def _check_ascii_keys(params: dict[str, Any], path: Path) -> None:
             )
 
 
-def load_parameter_set(strategy_id: str, parameter_set_id: str) -> ParameterSet:
-    """Load and validate a parameter set from the registry.
+def _parse_and_validate(
+    text: str,
+    path: Path,
+    strategy_id: str,
+    parameter_set_id: str,
+) -> tuple[str, dict[str, Any]]:
+    """Parse TOML text and run every load-time validation (CR-05).
 
-    Raises:
-        UnregisteredParameterSet: file does not exist (or either id
-            contains path-unsafe characters — fail closed, WR-05).
-        RegistrySchemaMismatch: schema_version does not match.
-        StrategyKeyOutsideRegistry: unknown or non-ASCII strategy-semantic key.
+    Single shared path for `load_parameter_set` and
+    `verify_parameter_set`: schema version, path-vs-content identity,
+    required sections (CR-06), ASCII names, unknown-key whitelist, and
+    per-key types (WR-06). Returns `(strategy_version, normalized_params)`.
     """
-    _check_registry_segment(strategy_id, "strategy_id")
-    _check_registry_segment(parameter_set_id, "parameter_set_id")
-    path = REGISTRY_ROOT / strategy_id / f"{parameter_set_id}.toml"
-    if not path.is_file():
-        raise UnregisteredParameterSet(f"{strategy_id}/{parameter_set_id}")
-
-    text = path.read_bytes().decode("utf-8")
     doc = tomllib.loads(text)
 
     if doc.get("schema_version") != SCHEMA_VERSION:
@@ -302,7 +299,28 @@ def load_parameter_set(strategy_id: str, parameter_set_id: str) -> ParameterSet:
     raw_strings = _extract_raw_param_strings(text)
     normalized_params = _normalize_params(params, raw_strings)
     _check_param_types(normalized_params, path)
-    strategy_version = strategy["strategy_version"]
+    return strategy["strategy_version"], normalized_params
+
+
+def load_parameter_set(strategy_id: str, parameter_set_id: str) -> ParameterSet:
+    """Load and validate a parameter set from the registry.
+
+    Raises:
+        UnregisteredParameterSet: file does not exist (or either id
+            contains path-unsafe characters — fail closed, WR-05).
+        RegistrySchemaMismatch: schema_version does not match.
+        StrategyKeyOutsideRegistry: unknown or non-ASCII strategy-semantic key.
+    """
+    _check_registry_segment(strategy_id, "strategy_id")
+    _check_registry_segment(parameter_set_id, "parameter_set_id")
+    path = REGISTRY_ROOT / strategy_id / f"{parameter_set_id}.toml"
+    if not path.is_file():
+        raise UnregisteredParameterSet(f"{strategy_id}/{parameter_set_id}")
+
+    text = path.read_bytes().decode("utf-8")
+    strategy_version, normalized_params = _parse_and_validate(
+        text, path, strategy_id, parameter_set_id
+    )
 
     # Hash the normalized params + strategy identity (excluding
     # schema_version and volatile sidecar fields like author/timestamp,
@@ -329,18 +347,27 @@ def verify_parameter_set(path: Path, expected_hash: str) -> None:
 
     D-04/D-05: once a parameter set is referenced, its hash is
     permanent. Any mutation raises ParameterSetMutated.
+
+    Identity (`strategy_id`/`parameter_set_id`) is derived from the
+    file path — the same binding `load_parameter_set` uses — so a
+    renamed or copied file verifies under its path identity, not the
+    content's (CR-05). Every load-time validation runs first: schema,
+    identity, required sections, whitelist, and types all raise here
+    exactly as they do at load.
     """
+    strategy_id = path.parent.name
+    parameter_set_id = path.stem
+    _check_registry_segment(strategy_id, "strategy_id")
+    _check_registry_segment(parameter_set_id, "parameter_set_id")
     text = path.read_bytes().decode("utf-8")
-    doc = tomllib.loads(text)
-    strategy = doc.get("strategy", {})
-    params = doc.get("parameters", {})
-    raw_strings = _extract_raw_param_strings(text)
-    normalized_params = _normalize_params(params, raw_strings)
+    strategy_version, normalized_params = _parse_and_validate(
+        text, path, strategy_id, parameter_set_id
+    )
 
     hash_payload = {
-        "strategy_id": strategy.get("strategy_id", ""),
-        "strategy_version": strategy.get("strategy_version", ""),
-        "parameter_set_id": path.stem,
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version,
+        "parameter_set_id": parameter_set_id,
         "parameters": normalized_params,
     }
     actual_hash = sha256_hex(hash_payload)
