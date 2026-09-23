@@ -611,3 +611,16 @@ def test_inline_comment_and_quoted_key_load(tmp_path: Path) -> None:
         assert ps.params["zone_tolerance_atr"] == Decimal("0.5")
     finally:
         registry.REGISTRY_ROOT = original_root
+
+
+def test_normalize_params_recurses_into_nested_floats() -> None:
+    """Beh. 19: floats nested in lists/dicts convert, not TypeError (WR-13)."""
+    from decimal import Decimal
+
+    from src.domain.registry import _normalize_params
+
+    out = _normalize_params({"k": [0.5, 2.0, "x", {"n": 1.5}]})
+    assert out["k"][0] == Decimal("0.5")
+    assert out["k"][1] == 2
+    assert out["k"][2] == "x"
+    assert out["k"][3]["n"] == Decimal("1.5")

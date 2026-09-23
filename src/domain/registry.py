@@ -153,6 +153,29 @@ def _extract_raw_param_strings(text: str) -> dict[str, str]:
     return raw
 
 
+def _normalize_value(value: Any, raw: str | None) -> Any:
+    """Normalize one value, recursing into lists/tuples/dicts (WR-13).
+
+    `raw` is the original TOML spelling, meaningful only for a
+    top-level scalar float; nested floats fall back to `Decimal(str)`.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value)
+        if raw is not None:
+            return Decimal(raw)
+        return Decimal(str(value))
+    if isinstance(value, list):
+        return [_normalize_value(v, None) for v in value]
+    if isinstance(value, tuple):
+        return [_normalize_value(v, None) for v in value]
+    if isinstance(value, dict):
+        return {k: _normalize_value(v, None) for k, v in value.items()}
+    return value
+
+
 def _normalize_params(
     params: dict[str, Any],
     raw_strings: dict[str, str] | None = None,
@@ -171,16 +194,10 @@ def _normalize_params(
     """
     normalized: dict[str, Any] = {}
     for key, value in params.items():
-        if isinstance(value, float):
-            if value.is_integer():
-                normalized[key] = int(value)
-            else:
-                if raw_strings is not None and key in raw_strings:
-                    normalized[key] = Decimal(raw_strings[key])
-                else:
-                    normalized[key] = Decimal(str(value))
-        else:
-            normalized[key] = value
+        raw: str | None = None
+        if raw_strings is not None and isinstance(value, float):
+            raw = raw_strings.get(key)
+        normalized[key] = _normalize_value(value, raw)
     return normalized
 
 
