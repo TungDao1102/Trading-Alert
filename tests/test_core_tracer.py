@@ -14,7 +14,6 @@ the fixture loader being in place.
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -29,7 +28,6 @@ from src.domain.ids import derive_child_id, make_signal_id
 from src.domain.registry import ParameterSet, load_parameter_set
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
-
 
 # --------------------------------------------------------------------------- #
 # Candle builder — produces deterministic, Decimal-only candles.

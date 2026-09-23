@@ -1,0 +1,26 @@
+{
+  "plans": [
+    {
+      "created_at_utc": "2026-09-19T23:00:00+00:00",
+      "entry_max_price": "52946.11812218609640044949190",
+      "entry_min_price": "50733.88187781390359955050810",
+      "entry_model": "LIMIT_ZONE",
+      "expected_rr_json": "{\"tp1_rr\":\"2\",\"tp2_rr\":\"4\"}",
+      "expiry_utc": "2026-09-18T13:59:59+00:00",
+      "invalidation_rule_json": "{\"basis\":\"structure_break_candle_close\",\"direction\":\"LONG\",\"expiry_utc\":\"2026-09-18T13:59:59+00:00\",\"stop_loss_price\":\"50804.62729260463453318350270\"}",
+      "plan_hash": "a33e7c21635ba27605a7d369869104c3b6a310647a4aa0e6ad9f263fd912a1f7",
+      "quantity_after_rounding": "0.04829178868910158979256317769",
+      "quantity_before_rounding": "0.04829178868910158979256317769",
+      "quantization_decision": "DEFERRED_TO_RISK",
+      "risk_budget": "50.00000",
+      "risk_rate": "0.005",
+      "signal_id": "614c7a80fb496fdaa9b176f593fdde6bb13367a36b8502bf55ac17c488b0547b",
+      "status": "READY",
+      "stop_loss_price": "50804.62729260463453318350270",
+      "suggested_quantity": "0.04829178868910158979256317769",
+      "take_profit_json": "{\"tp1\":\"53910.74541479073093363299460\",\"tp1_role\":\"TAKE_PROFIT_1\",\"tp2\":\"55981.49082958146186726598920\",\"tp2_role\":\"TAKE_PROFIT_2\"}",
+      "trade_plan_id": "eede5fab3baa2c1cbf0ee95c3714c97809c0828433ee082c74725baff8fb918d",
+      "trade_plan_version": "v1"
+    }
+  ]
+}

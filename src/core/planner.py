@@ -28,8 +28,7 @@ from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
 
 from .features import compute_features
-from .types import AccountState, Candle, MarketSnapshot
-
+from .types import AccountState, Candle
 
 # --------------------------------------------------------------------------- #
 # Decimal helpers — pinned local context (D-10).

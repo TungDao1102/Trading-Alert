@@ -11,6 +11,13 @@ Phase-3 additions (plan 03-01):
   - `phase3_parameters`      — pinned registry set
   - `phase3_expected_signals` — byte-exact expected signals (placeholder)
   - `phase3_expected_plans`  — byte-exact expected plans (placeholder)
+
+Phase-4 additions (plan 04-01):
+  - `phase4_candles`         — 1H + 4H closed candles for the tracer slice
+  - `phase4_parameters`      — pinned registry set (trend-pullback/baseline-v1)
+  - `phase4_expected_features` — byte-exact expected feature values
+  - `phase4_expected_signals` — byte-exact expected signals
+  - `phase4_expected_plans`  — byte-exact expected plans
 """
 
 from __future__ import annotations
@@ -28,6 +35,9 @@ EXCHANGE_INFO_FIXTURE = FIXTURES_DIR / "exchange_info_sample.json"
 
 # Phase 3 fixtures directory (D-07).
 PHASE3_FIXTURES_DIR = FIXTURES_DIR / "phase3"
+
+# Phase 4 fixtures directory (plan 04-01).
+PHASE4_FIXTURES_DIR = FIXTURES_DIR / "phase4"
 
 # D-01 — V1 live-5 universe, locked.
 LIVE_5: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")
@@ -99,4 +109,52 @@ def phase3_expected_plans() -> dict:
     """Load the byte-exact expected plans (placeholder per D-09)."""
     return json.loads(
         (PHASE3_FIXTURES_DIR / "expected_plans.json").read_text(encoding="utf-8")
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4 fixtures (plan 04-01, D-05/D-07/D-09).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="session")
+def phase4_candles() -> list[dict]:
+    """Load the hand-built 1H + 4H closed candle CSV for the tracer slice.
+
+    Columns per TESTING_STRATEGY §2:
+    symbol,timeframe,open_time_utc,open,high,low,close,volume
+    """
+    with (PHASE4_FIXTURES_DIR / "candles.csv").open(encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+@pytest.fixture(scope="session")
+def phase4_parameters() -> dict:
+    """Load the pinned registry set (trend-pullback/baseline-v1)."""
+    return json.loads(
+        (PHASE4_FIXTURES_DIR / "parameters.json").read_text(encoding="utf-8")
+    )
+
+
+@pytest.fixture(scope="session")
+def phase4_expected_features() -> dict:
+    """Load the byte-exact expected feature values for the tracer slice."""
+    return json.loads(
+        (PHASE4_FIXTURES_DIR / "expected_features.json").read_text(encoding="utf-8")
+    )
+
+
+@pytest.fixture(scope="session")
+def phase4_expected_signals() -> dict:
+    """Load the byte-exact expected signals for the tracer slice."""
+    return json.loads(
+        (PHASE4_FIXTURES_DIR / "expected_signals.json").read_text(encoding="utf-8")
+    )
+
+
+@pytest.fixture(scope="session")
+def phase4_expected_plans() -> dict:
+    """Load the byte-exact expected plans for the tracer slice."""
+    return json.loads(
+        (PHASE4_FIXTURES_DIR / "expected_plans.json").read_text(encoding="utf-8")
     )

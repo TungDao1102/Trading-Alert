@@ -21,16 +21,13 @@ Indicator conventions (RESEARCH.md §Code Examples, Pitfall 1):
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal, localcontext
 
 from src.domain.registry import ParameterSet
 
 from .types import (
     REASON_GAP_IN_SOURCE,
-    REASON_INVALID_INPUT,
-    REASON_OK,
     REASON_WARMUP_INSUFFICIENT,
     Candle,
     FeatureFrame,
@@ -38,7 +35,6 @@ from .types import (
     _invalid,
     _ok,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Decimal arithmetic helpers — pinned local context (D-10).

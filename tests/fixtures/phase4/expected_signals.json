@@ -1,0 +1,19 @@
+{
+  "signals": [
+    {
+      "detected_at_utc": "2026-09-18T09:59:59+00:00",
+      "direction": "LONG",
+      "expires_at_utc": "2026-09-18T13:59:59+00:00",
+      "parameter_set_hash": "e1579900b1be20b8a6db76c554255cbec8125d5d317f6df7dadd5de78d2afae5",
+      "parameter_set_id": "baseline-v1",
+      "setup_type": "TREND_PULLBACK_LONG",
+      "signal_id": "614c7a80fb496fdaa9b176f593fdde6bb13367a36b8502bf55ac17c488b0547b",
+      "source_candle_close_utc": "2026-09-18T09:59:59+00:00",
+      "source_timeframe": "1h",
+      "status": "DETECTED",
+      "strategy_id": "trend-pullback",
+      "strategy_version": "v1.0.0",
+      "symbol": "BTCUSDT"
+    }
+  ]
+}

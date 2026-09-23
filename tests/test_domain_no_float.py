@@ -28,6 +28,12 @@ SCANNED_FILES = (
     "src/domain/signal.py",
     "src/domain/trade_plan.py",
     "src/db/mappers.py",
+    # Phase 4 plan 04-01 — pure core (D-10).
+    "src/core/__init__.py",
+    "src/core/types.py",
+    "src/core/features.py",
+    "src/core/strategy.py",
+    "src/core/planner.py",
 )
 
 

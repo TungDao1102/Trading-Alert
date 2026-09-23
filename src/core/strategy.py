@@ -15,8 +15,7 @@ collide.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal, localcontext
 
 from src.domain.canonical import sha256_hex
@@ -33,7 +32,6 @@ from .types import (
     MarketSnapshot,
     SetupResult,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Helpers.

@@ -20,8 +20,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any
-
 
 # --------------------------------------------------------------------------- #
 # Validation helpers — copied from the Phase-3 signal.py / trade_plan.py
