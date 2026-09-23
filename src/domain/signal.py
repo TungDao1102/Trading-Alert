@@ -18,6 +18,12 @@ from datetime import datetime, timedelta
 from .enums import SignalStatus
 
 
+def _require_non_empty(value: str, field_name: str) -> None:
+    """Reject empty strings for validated non-empty fields."""
+    if not isinstance(value, str) or value == "":
+        raise ValueError(f"{field_name} must be a non-empty string")
+
+
 def _require_utc_aware(value: datetime, field_name: str) -> None:
     """Reject naive and non-UTC datetimes (D-12)."""
     if value.tzinfo is None:
@@ -53,6 +59,18 @@ class Signal:
     invalidated_at_utc: datetime | None = None  # None = "never happened"
 
     def __post_init__(self) -> None:
+        for fname in (
+            "signal_id",
+            "strategy_id",
+            "strategy_version",
+            "parameter_set_id",
+            "parameter_set_hash",
+            "symbol",
+            "direction",
+            "setup_type",
+            "source_timeframe",
+        ):
+            _require_non_empty(getattr(self, fname), fname)
         _require_utc_aware(self.source_candle_close_utc, "source_candle_close_utc")
         _require_utc_aware(self.detected_at_utc, "detected_at_utc")
         _require_utc_aware(self.expires_at_utc, "expires_at_utc")

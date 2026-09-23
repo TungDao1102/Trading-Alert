@@ -26,6 +26,12 @@ def _require_decimal(value: object, field_name: str) -> None:
         )
 
 
+def _require_non_empty(value: str, field_name: str) -> None:
+    """Reject empty strings for validated non-empty fields."""
+    if not isinstance(value, str) or value == "":
+        raise ValueError(f"{field_name} must be a non-empty string")
+
+
 def _require_utc_aware(value: datetime, field_name: str) -> None:
     """Reject naive and non-UTC datetimes (D-12)."""
     if value.tzinfo is None:
@@ -62,6 +68,9 @@ class Position:
     status: PositionStatus = PositionStatus.UNKNOWN  # explicit (D-11)
 
     def __post_init__(self) -> None:
+        # Validated non-empty strings (docstring contract).
+        for fname in ("position_id", "symbol", "position_side", "mode"):
+            _require_non_empty(getattr(self, fname), fname)
         # D-12: Decimal-only for money/qty/price fields.
         for fname in (
             "quantity",

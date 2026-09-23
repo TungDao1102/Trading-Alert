@@ -651,3 +651,52 @@ def test_approval_result_values_match_assumed_set() -> None:
     expected = {"PENDING", "APPROVED", "SKIPPED", "EXPIRED"}
     actual = {member.value for member in ApprovalResult}
     assert actual == expected
+
+
+def test_documented_string_fields_reject_empty() -> None:
+    """Beh. 22: docstring-promised non-empty strings reject "" (WR-03)."""
+    from src.domain.fill import Fill
+    from src.domain.order import Order
+    from src.domain.position import Position
+    from src.domain.signal import Signal
+    from src.domain.trade_plan import TradePlan
+
+    bad = _signal_kwargs()
+    bad["symbol"] = ""
+    with pytest.raises((TypeError, ValueError)):
+        Signal(**bad)
+
+    bad = _trade_plan_kwargs()
+    bad["entry_model"] = ""
+    with pytest.raises((TypeError, ValueError)):
+        TradePlan(**bad)
+    bad = _trade_plan_kwargs()
+    bad["quantization_decision"] = ""
+    with pytest.raises((TypeError, ValueError)):
+        TradePlan(**bad)
+
+    for field in (
+        "order_role",
+        "side",
+        "position_side",
+        "order_type",
+        "time_in_force",
+    ):
+        bad = _order_kwargs()
+        bad[field] = ""
+        with pytest.raises((TypeError, ValueError)):
+            Order(**bad)
+
+    bad = _fill_kwargs()
+    bad["side"] = ""
+    with pytest.raises((TypeError, ValueError)):
+        Fill(**bad)
+
+    bad = _position_kwargs()
+    bad["position_side"] = ""
+    with pytest.raises((TypeError, ValueError)):
+        Position(**bad)
+    bad = _position_kwargs()
+    bad["mode"] = ""
+    with pytest.raises((TypeError, ValueError)):
+        Position(**bad)
