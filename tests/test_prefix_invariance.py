@@ -102,3 +102,35 @@ def test_full_run_digest_stable_over_identical_input(phase3_candles) -> None:
     first = _signal_entries(phase3_candles)
     second = _signal_entries(phase3_candles)
     assert first == second
+
+
+def test_stateful_variant_is_detected_by_digest_comparison(phase3_candles) -> None:
+    """Canary (WR-09): hidden run-to-run state changes digests.
+
+    A deliberately stateful helper (module-global call counter folded
+    into the fingerprint) yields DIFFERENT digests across two runs over
+    identical input — proving Beh. 2's comparison is sensitive to the
+    nondeterminism bug class before Phase 4 swaps in real logic.
+    """
+    calls = {"n": 0}
+
+    def _stateful_entries(candles: list[dict]) -> list[tuple[str, str]]:
+        entries = []
+        for candle in candles:
+            calls["n"] += 1
+            close = _close_time(candle)
+            sid = make_signal_id(
+                strategy_id=STRATEGY_ID,
+                strategy_version=STRATEGY_VERSION,
+                parameter_set_id=PARAMETER_SET_ID,
+                symbol=candle["symbol"],
+                source_timeframe=candle["timeframe"],
+                source_candle_close_utc=close,
+                setup_fingerprint=sha256_hex(dict(candle)) + f":{calls['n']}",
+            )
+            entries.append((close.isoformat(), sid))
+        return entries
+
+    first = _stateful_entries(phase3_candles)
+    second = _stateful_entries(phase3_candles)
+    assert first != second

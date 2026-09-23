@@ -105,3 +105,38 @@ def test_same_prefix_different_suffixes_identical(phase3_candles) -> None:
     assert [sid for _, sid in out_a[:2]] == [sid for _, sid in out_b[:2]]
     # Sanity: the comparison is sensitive — suffix outputs differ.
     assert out_a[2][1] != out_b[2][1]
+
+
+def test_leaky_variant_is_detected_by_prefix_comparison(phase3_candles) -> None:
+    """Canary (WR-09): a lookahead leak changes prefix digests.
+
+    A deliberately leaky helper (fingerprint binds the total input
+    length, i.e. future-bar knowledge) yields DIFFERENT prefix digests
+    after appends — proving Beh. 1's comparison is sensitive to the
+    bug class before Phase 4 swaps in real logic.
+    """
+
+    def _leaky_entries(candles: list[dict]) -> list[tuple[str, str]]:
+        entries = []
+        for candle in candles:
+            close = _close_time(candle)
+            sid = make_signal_id(
+                strategy_id=STRATEGY_ID,
+                strategy_version=STRATEGY_VERSION,
+                parameter_set_id=PARAMETER_SET_ID,
+                symbol=candle["symbol"],
+                source_timeframe=candle["timeframe"],
+                source_candle_close_utc=close,
+                setup_fingerprint=sha256_hex(dict(candle)) + f":{len(candles)}",
+            )
+            entries.append((close.isoformat(), sid))
+        return entries
+
+    prefix = phase3_candles[:3]
+    last_open = datetime.fromisoformat(prefix[-1]["open_time_utc"])
+    extra = [
+        _synthetic_bar("BTCUSDT", last_open + timedelta(hours=1), "50600.00"),
+    ]
+    before = _leaky_entries(prefix)
+    after = _leaky_entries(prefix + extra)
+    assert [sid for _, sid in after[:3]] != [sid for _, sid in before]

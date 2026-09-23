@@ -109,3 +109,24 @@ def test_closed_candle_contributes_exactly_one_reference(
     new_close = _close_time(closed[2]).isoformat()
     assert [close for close, _ in after].count(new_close) == 1
     assert new_close not in [close for close, _ in before]
+
+
+def test_forming_candle_leak_variant_is_detected(
+    phase3_candles, frozen_clock
+) -> None:
+    """Canary (WR-09): emitting the forming close trips the absence check.
+
+    A deliberately leaky helper (references the forming candle's
+    unclosed close alongside closed candles) DOES contain the forming
+    close — proving Beh. 1's `not in closes` assertion is sensitive to
+    the forming-candle leak class before Phase 4 swaps in real logic.
+    """
+    now = frozen_clock
+    closed = _shift_back(phase3_candles[:3], 6)
+    assert all(_close_time(c) <= now for c in closed)
+    forming = phase3_candles[0]
+    assert _close_time(forming) > now
+
+    leaky_outputs = _signal_entries(closed + [forming])
+    leaky_closes = [close for close, _ in leaky_outputs]
+    assert _close_time(forming).isoformat() in leaky_closes

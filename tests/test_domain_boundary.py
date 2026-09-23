@@ -77,3 +77,22 @@ def test_sufficient_input_never_raises(phase3_candles) -> None:
     verdict = _placeholder_decide(phase3_candles[:MIN_BARS_TBD])
     assert verdict["status"] == "NO_TRADE"
     assert verdict["reason"] == "MECHANISM_PLACEHOLDER_TBD"
+
+
+def test_raising_variant_is_detected_by_never_raises_contract() -> None:
+    """Canary (WR-09): a raising implementation trips the contract.
+
+    A deliberately broken helper (raises on empty input instead of
+    returning EMPTY_INPUT) raises under pytest.raises — proving Beh. 1's
+   no-exception assertion is sensitive to the crash bug class before
+    Phase 4 swaps in real logic.
+    """
+    import pytest
+
+    def _raising_decide(candles: list[dict]) -> dict:
+        if len(candles) == 0:
+            raise RuntimeError("empty input crashed the helper")
+        return _placeholder_decide(candles)
+
+    with pytest.raises(RuntimeError, match="empty input"):
+        _raising_decide([])
