@@ -12,7 +12,7 @@ deferred to Phase 4.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 def _require_non_empty(value: str, field_name: str) -> None:
@@ -22,9 +22,13 @@ def _require_non_empty(value: str, field_name: str) -> None:
 
 
 def _require_utc_aware(value: datetime, field_name: str) -> None:
-    """Reject naive datetimes (D-12)."""
+    """Reject naive and non-UTC datetimes (D-12)."""
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
+    if value.utcoffset() != timedelta(0):
+        raise ValueError(
+            f"{field_name} must be UTC, got offset {value.utcoffset()}"
+        )
 
 
 @dataclass(frozen=True)

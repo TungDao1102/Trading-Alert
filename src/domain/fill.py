@@ -8,7 +8,7 @@ are EVENTS, not state — there is no `status` field (DATA_MODEL §2.8).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 
@@ -21,9 +21,13 @@ def _require_decimal(value: object, field_name: str) -> None:
 
 
 def _require_utc_aware(value: datetime, field_name: str) -> None:
-    """Reject naive datetimes (D-12)."""
+    """Reject naive and non-UTC datetimes (D-12)."""
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
+    if value.utcoffset() != timedelta(0):
+        raise ValueError(
+            f"{field_name} must be UTC, got offset {value.utcoffset()}"
+        )
 
 
 @dataclass(frozen=True)

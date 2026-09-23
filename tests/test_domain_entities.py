@@ -579,6 +579,61 @@ def test_all_entities_reject_naive_datetimes() -> None:
         JournalEvent(**bad)
 
 
+def test_all_entities_reject_non_utc_aware_datetimes() -> None:
+    """Beh. 20b: all seven entities reject non-UTC aware datetimes (WR-02).
+
+    A `+07:00`-aware datetime passes a naive-only check but must not
+    reach domain state: hashes and DB rows assume UTC.
+    """
+    from datetime import timedelta, timezone
+
+    from src.domain.approval import Approval
+    from src.domain.fill import Fill
+    from src.domain.journal import JournalEvent
+    from src.domain.order import Order
+    from src.domain.position import Position
+    from src.domain.signal import Signal
+    from src.domain.trade_plan import TradePlan
+
+    plus7 = timezone(timedelta(hours=7))
+    non_utc = datetime(2026, 9, 19, 7, 0, tzinfo=plus7)
+
+    bad = _signal_kwargs()
+    bad["source_candle_close_utc"] = non_utc
+    with pytest.raises((TypeError, ValueError)):
+        Signal(**bad)
+
+    bad = _trade_plan_kwargs()
+    bad["expiry_utc"] = non_utc
+    with pytest.raises((TypeError, ValueError)):
+        TradePlan(**bad)
+
+    bad = _approval_kwargs()
+    bad["requested_at_utc"] = non_utc
+    with pytest.raises((TypeError, ValueError)):
+        Approval(**bad)
+
+    bad = _order_kwargs()
+    bad["submitted_at_utc"] = non_utc
+    with pytest.raises((TypeError, ValueError)):
+        Order(**bad)
+
+    bad = _fill_kwargs()
+    bad["fill_time_utc"] = non_utc
+    with pytest.raises((TypeError, ValueError)):
+        Fill(**bad)
+
+    bad = _position_kwargs()
+    bad["opened_at_utc"] = non_utc
+    with pytest.raises((TypeError, ValueError)):
+        Position(**bad)
+
+    bad = _journal_kwargs()
+    bad["occurred_at_utc"] = non_utc
+    with pytest.raises((TypeError, ValueError)):
+        JournalEvent(**bad)
+
+
 # --------------------------------------------------------------------------- #
 # Test 21 — ApprovalResult enum values match the assumed set.
 # --------------------------------------------------------------------------- #
