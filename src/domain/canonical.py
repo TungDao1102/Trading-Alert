@@ -9,8 +9,12 @@ call it.
 Policy:
   - Decimal → str() preserving full precision (Decimal("1.50") stays
     "1.50", never "1.5")
-  - datetime → isoformat() (must already be UTC-aware; loader asserts
-    tzinfo is not None)
+  - datetime → normalized to UTC then isoformat() (any aware tz is
+    accepted here; `astimezone(timezone.utc)` collapses the same
+    instant to one rendering — callers must already enforce UTC-aware
+    at the domain boundary; naive raises). Canonical rendering uses
+    the `+00:00` suffix (never `Z`): `fromisoformat` round-trips both
+    on 3.11+, but the hash input is always the `+00:00` spelling.
   - Enum → .value
   - dict → recursive, sorted keys
   - list/tuple → order-preserving
@@ -26,7 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -46,7 +50,10 @@ def canonical_scalars(value: Any) -> Any:
     if isinstance(value, datetime):
         if value.tzinfo is None:
             raise ValueError("naive datetime in canonical hash input")
-        return value.isoformat()
+        # WR-01: normalize to UTC so the same instant hashes identically
+        # regardless of caller timezone representation (e.g. +00:00 vs
+        # +07:00). Canonical rendering keeps the `+00:00` suffix.
+        return value.astimezone(timezone.utc).isoformat()
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, (set, frozenset)):
