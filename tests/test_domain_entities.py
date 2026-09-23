@@ -167,6 +167,28 @@ def _journal_kwargs() -> dict:
     }
 
 
+def _signal_kwargs() -> dict:
+    """Return a complete kwargs dict for constructing a Signal."""
+    from src.domain.enums import SignalStatus
+
+    return {
+        "signal_id": "b" * 64,
+        "strategy_id": "trend-pullback",
+        "strategy_version": "v1.0.0",
+        "parameter_set_id": "baseline-v1",
+        "parameter_set_hash": "c" * 64,
+        "symbol": "BTCUSDT",
+        "direction": "LONG",
+        "setup_type": "pullback",
+        "source_timeframe": "1h",
+        "source_candle_close_utc": UTC_NOW,
+        "detected_at_utc": UTC_NOW,
+        "status": SignalStatus.DETECTED,
+        "expires_at_utc": UTC_LATER,
+        "invalidated_at_utc": None,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Test 1 — TradePlan is frozen (mutation raises FrozenInstanceError).
 # --------------------------------------------------------------------------- #
@@ -508,9 +530,17 @@ def test_all_entities_reject_naive_datetimes() -> None:
     from src.domain.journal import JournalEvent
     from src.domain.order import Order
     from src.domain.position import Position
+    from src.domain.signal import Signal
     from src.domain.trade_plan import TradePlan
 
     naive = datetime(2026, 9, 19, 0, 0)  # naive!
+
+    # Signal (CR-02: the root identity entity must reject naive datetimes
+    # at the boundary, before they reach the canonical hash).
+    bad = _signal_kwargs()
+    bad["source_candle_close_utc"] = naive
+    with pytest.raises((TypeError, ValueError)):
+        Signal(**bad)
 
     # TradePlan
     bad = _trade_plan_kwargs()

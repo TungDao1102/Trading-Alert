@@ -18,6 +18,12 @@ from datetime import datetime
 from .enums import SignalStatus
 
 
+def _require_utc_aware(value: datetime, field_name: str) -> None:
+    """Reject naive datetimes (D-12)."""
+    if value.tzinfo is None:
+        raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
+
+
 @dataclass(frozen=True)
 class Signal:
     """A deterministic statement that the strategy detected a setup.
@@ -41,3 +47,10 @@ class Signal:
     status: SignalStatus  # explicit — never inferred (D-11)
     expires_at_utc: datetime
     invalidated_at_utc: datetime | None = None  # None = "never happened"
+
+    def __post_init__(self) -> None:
+        _require_utc_aware(self.source_candle_close_utc, "source_candle_close_utc")
+        _require_utc_aware(self.detected_at_utc, "detected_at_utc")
+        _require_utc_aware(self.expires_at_utc, "expires_at_utc")
+        if self.invalidated_at_utc is not None:
+            _require_utc_aware(self.invalidated_at_utc, "invalidated_at_utc")
