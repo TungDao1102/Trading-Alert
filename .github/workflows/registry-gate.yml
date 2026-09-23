@@ -16,42 +16,50 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Re-hash registry (params TOML files must match recorded hashes)
+      - name: Re-hash registry (params TOML files must match pinned hashes)
         id: rehash
         run: |
           set -eu
-          # Every params/**/*.toml file carries its recorded hash in the
-          # sibling parameters contract: re-hash through the canonical
-          # profile and compare. An unreferenced registry passes
-          # vacuously (same empty-registry semantics as research-gate).
+          # Every params/**/*.toml file is verified against the pinned
+          # hash in tests/fixtures/phase3/parameters.json via
+          # verify_parameter_set (D-04/D-05 tripwire). Comparing two
+          # live loads against each other is vacuous — the gate must
+          # compare against the recorded pin. TOML files with no pin
+          # fail closed: register them before merging.
           mapfile -t TOMLS < <(find params -name '*.toml' -not -path '*/node_modules/*' 2>/dev/null || true)
           if [ "${#TOMLS[@]}" -eq 0 ]; then
             echo "Re-hash: no params TOML files present; passes vacuously."
             exit 0
           fi
           uv run python - <<'PYEOF'
+          import json
           import sys
           from pathlib import Path
-          from src.domain.registry import load_parameter_set
+          from src.domain.registry import verify_parameter_set
+          pinned = json.loads(
+              Path("tests/fixtures/phase3/parameters.json").read_text()
+          )
+          pinned_sets = {
+              (pinned["strategy_id"], pinned["parameter_set_id"]): pinned[
+                  "parameter_set_hash"
+              ]
+          }
           failures = []
           for toml_path in sorted(Path("params").rglob("*.toml")):
               parts = toml_path.parts
-              strategy_id = parts[1]
-              parameter_set_id = toml_path.stem
-              try:
-                  ps = load_parameter_set(strategy_id, parameter_set_id)
-              except Exception as exc:
-                  failures.append(f"{toml_path}: loader raised {exc!r}")
+              key = (parts[1], toml_path.stem)
+              if key not in pinned_sets:
+                  failures.append(f"{toml_path}: no pinned hash — register it")
                   continue
-              recorded = ps.parameter_set_hash
-              rehashed = load_parameter_set(strategy_id, parameter_set_id).parameter_set_hash
-              if recorded != rehashed:
-                  failures.append(f"{toml_path}: hash unstable across loads")
+              try:
+                  verify_parameter_set(toml_path, pinned_sets[key])
+              except Exception as exc:
+                  failures.append(f"{toml_path}: pinned verify failed: {exc!r}")
           if failures:
               for failure in failures:
                   print(f"::error::{failure}")
               sys.exit(1)
-          print(f"Re-hash passed: {len(list(Path('params').rglob('*.toml')))} TOML file(s) stable.")
+          print(f"Re-hash passed: {len(list(Path('params').rglob('*.toml')))} TOML file(s) match pins.")
           PYEOF
 
       - name: Registry negative tests (fail-closed gates must hold)
