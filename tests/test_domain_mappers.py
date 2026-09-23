@@ -17,6 +17,12 @@ exercise the SQLAlchemy ORM mapping (Numeric → Decimal, TIMESTAMPTZ →
 datetime); no PostgreSQL-specific features (JSONB, partial indexes) are
 used. The CapturingSession pattern snapshots the ORM instance BEFORE
 the SQLite roundtrip so NUMERIC lossiness cannot hide mapper errors.
+
+Known gap (WR-11): SQLite does not enforce VARCHAR(n) lengths, drops
+tzinfo, stores NUMERIC as REAL, and never raises unique-constraint or
+38,18-overflow errors — so PG enforcement is UNTESTED by this module.
+Live-PG coverage lives in tests/test_domain_mappers_pg.py, gated on
+TEST_DATABASE_URL (skipped without it).
 """
 
 from __future__ import annotations
