@@ -233,6 +233,45 @@ def evaluate(
         parameter_set=parameter_set,
     )
 
+    # Feature gate (D-03/D-04): any required-feature-invalid on either
+    # stream returns NO_TRADE naming the exact reason code. The
+    # WARMUP_INSUFFICIENT / GAP_IN_SOURCE / INVALID_INPUT vocabulary
+    # propagates verbatim so the boundary + determinism suites can pin
+    # the reason without parsing generic regime messages.
+    for frame, label in (
+        (setup_frame, "setup"),
+        (context_frame, "context"),
+    ):
+        if frame.features_valid:
+            continue
+        # Pick the first invalid feature's reason for the rejection.
+        for feat in (
+            frame.ema_20,
+            frame.ema_50,
+            frame.ema_200,
+            frame.atr_14,
+            frame.swing_high,
+            frame.swing_low,
+            frame.zone_upper,
+            frame.zone_lower,
+        ):
+            if not feat.valid:
+                reason = feat.reason_code
+                # Map GAP_IN_SOURCE to DATA_STALE for the strategy's
+                # canonical RejectionReason vocabulary (the feature
+                # layer speaks the gap vocabulary; the strategy speaks
+                # the cross-module rejection vocabulary).
+                if reason == "GAP_IN_SOURCE":
+                    reason = RejectionReason.DATA_STALE.value
+                return SetupResult(
+                    is_no_trade=True,
+                    reason_code=reason,
+                )
+        return SetupResult(
+            is_no_trade=True,
+            reason_code=RejectionReason.NO_TRADE_REGIME.value,
+        )
+
     # Regime gate (4H context).
     last_context_close = snapshot.context_candles[-1].close
     regime = _resolve_regime(context_frame, last_context_close)

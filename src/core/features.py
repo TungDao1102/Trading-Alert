@@ -350,6 +350,28 @@ def compute_features(
                 f"compute_features: candle interval {c.interval!r} != {interval!r}"
             )
 
+    # Quality gate (D-04 fail-closed): duplicate timestamps and
+    # non-monotonic open_time_utc both raise ValueError naming the
+    # offending bar index BEFORE any feature computes.
+    # Candle.__post_init__ already validates OHLC, naive datetimes,
+    # and Decimal typing per-bar; these checks cross bar boundaries.
+    for i in range(1, len(candles)):
+        prev_open = candles[i - 1].open_time_utc
+        cur_open = candles[i].open_time_utc
+        if cur_open == prev_open:
+            raise ValueError(
+                f"compute_features: duplicate open_time_utc={cur_open.isoformat()} "
+                f"at bar index {i} (also at bar {i - 1}); "
+                "rejected before any feature computed"
+            )
+        if cur_open < prev_open:
+            raise ValueError(
+                f"compute_features: timestamp regression at bar index {i}: "
+                f"open_time_utc={cur_open.isoformat()} < "
+                f"prev open_time_utc={prev_open.isoformat()}; "
+                "non-monotonic timestamps rejected before any feature computed"
+            )
+
     # Pull parameters (Decimal-or-int per registry contract).
     swing_lookback = int(parameter_set.params["swing_lookback"])
     zone_tolerance_atr = parameter_set.params["zone_tolerance_atr"]
