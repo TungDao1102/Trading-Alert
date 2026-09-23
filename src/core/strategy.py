@@ -435,7 +435,7 @@ def _detect_range_mr_setup(
     )
 
     n = len(setup_candles)
-    if n < swing_lookback + zone_aging_bars:
+    if n < swing_lookback + zone_aging_bars + 1:
         return None
 
     swing_high_series = _swing_series(setup_candles, swing_lookback, high=True)
@@ -443,27 +443,28 @@ def _detect_range_mr_setup(
     atr_series = _atr_series(setup_candles, atr_period)
 
     last_idx = n - 1
-    sh_last_out = swing_high_series[last_idx]
-    sl_last_out = swing_low_series[last_idx]
+    ref_idx = last_idx - 1
+    sh_ref_out = swing_high_series[ref_idx]
+    sl_ref_out = swing_low_series[ref_idx]
     atr_last_out = atr_series[last_idx]
     if (
-        not sh_last_out.valid
-        or sh_last_out.value is None
-        or not sl_last_out.valid
-        or sl_last_out.value is None
+        not sh_ref_out.valid
+        or sh_ref_out.value is None
+        or not sl_ref_out.valid
+        or sl_ref_out.value is None
         or not atr_last_out.valid
         or atr_last_out.value is None
     ):
         return None
 
-    zone_upper = sh_last_out.value
-    zone_lower = sl_last_out.value
+    zone_upper = sh_ref_out.value
+    zone_lower = sl_ref_out.value
     atr_last = atr_last_out.value
     band = touch_tolerance_atr * atr_last
 
     upper_touches: list[int] = []
     lower_touches: list[int] = []
-    for j in range(swing_lookback, last_idx + 1):
+    for j in range(swing_lookback, last_idx):
         if abs(setup_candles[j].high - zone_upper) <= band:
             upper_touches.append(j)
         if abs(setup_candles[j].low - zone_lower) <= band:
@@ -471,30 +472,29 @@ def _detect_range_mr_setup(
 
     breakout_buffer = range_break_buffer_atr * atr_last
     last_close = setup_candles[last_idx].close
-    long_invalid = last_close < zone_lower - breakout_buffer
-    short_invalid = last_close > zone_upper + breakout_buffer
-    if long_invalid and short_invalid:
+    last_low = setup_candles[last_idx].low
+    last_high = setup_candles[last_idx].high
+    if last_close < zone_lower - breakout_buffer:
+        return None
+    if last_close > zone_upper + breakout_buffer:
         return None
 
-    direction: str | None = None
-    if (
-        not long_invalid
-        and len(upper_touches) >= zone_min_touches
-        and upper_touches[-1] >= last_idx - zone_aging_bars
-    ):
-        direction = "LONG"
-        setup_type = "RANGE_MR_LONG"
-    elif (
-        not short_invalid
+    long_eligible = (
+        last_low <= zone_lower
         and len(lower_touches) >= zone_min_touches
         and lower_touches[-1] >= last_idx - zone_aging_bars
-    ):
-        direction = "SHORT"
-        setup_type = "RANGE_MR_SHORT"
-    else:
-        return None
+    )
+    short_eligible = (
+        last_high >= zone_upper
+        and len(upper_touches) >= zone_min_touches
+        and upper_touches[-1] >= last_idx - zone_aging_bars
+    )
 
-    return (direction, setup_type, zone_upper, zone_lower)
+    if long_eligible:
+        return ("LONG", "RANGE_MR_LONG", zone_upper, zone_lower)
+    if short_eligible:
+        return ("SHORT", "RANGE_MR_SHORT", zone_upper, zone_lower)
+    return None
 
 
 # --------------------------------------------------------------------------- #
