@@ -3,8 +3,8 @@ phase: "3"
 slug: "domain-registry-fixtures"
 # status lifecycle: draft (seeded by plan-phase) → validated (set by validate-phase §6)
 # audit-milestone §5.5 distinguishes NOT-VALIDATED (draft) from PARTIAL (validated + nyquist_compliant: false) (#2117)
-status: draft
-nyquist_compliant: false
+status: validated
+nyquist_compliant: true
 wave_0_complete: false
 created: "2026-09-22"
 ---
@@ -41,13 +41,15 @@ created: "2026-09-22"
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 03-01-01 | 01 | 1 | DOMN-01 | — | 7 entities persist separately, no nullable-state inference | unit | `uv run pytest tests/test_domain_mappers.py tests/test_domain_enums.py -x -q` | ❌ W0 | ⬜ pending |
-| 03-01-02 | 01 | 1 | DOMN-01 | — | migration 0002 matches ORM 1:1 | static | `uv run python scripts/check_migration_parity.py` | ❌ W0 | ⬜ pending |
-| 03-02-01 | 02 | 1 | DOMN-02 | T-reg | registered set loads, hash stable, Decimal exact | unit | `uv run pytest tests/test_registry.py -x -q` | ❌ W0 | ⬜ pending |
-| 03-02-02 | 02 | 1 | DOMN-02 | T-reg | unregistered/mutated sets raise; CI gate rejects | unit+CI | `uv run pytest tests/test_registry_gate.py -x -q` | ❌ W0 | ⬜ pending |
-| 03-03-01 | 03 | 2 | DOMN-03 | — | golden triple loads byte-exact | unit | `uv run pytest tests/test_fixture_harness.py -x -q` | ❌ W0 | ⬜ pending |
-| 03-03-02 | 03 | 2 | DOMN-03 | — | no-lookahead / prefix-invariance / close-timing / boundary green | unit | `uv run pytest tests/test_no_lookahead.py tests/test_prefix_invariance.py tests/test_candle_close_timing.py tests/test_domain_boundary.py -x -q` | ❌ W0 | ⬜ pending |
-| 03-03-03 | 03 | 2 | DOMN-01 | — | no `float(` in domain/mapper/registry | static | `uv run pytest tests/test_domain_no_float.py -x -q` | ❌ W0 | ⬜ pending |
+| 03-01-01 | 01 | 1 | DOMN-01 | — | 7 entities persist separately, no nullable-state inference | unit | `uv run pytest tests/test_domain_mappers.py tests/test_domain_enums.py -x -q` | ✅ | ✅ green |
+| 03-01-02 | 01 | 1 | DOMN-01 | — | migration 0002 matches ORM 1:1 | static | `uv run python scripts/check_migration_parity.py` | ✅ | ✅ green |
+| 03-02-01 | 02 | 1 | DOMN-02 | T-reg | registered set loads, hash stable, Decimal exact | unit | `uv run pytest tests/test_registry.py -x -q` | ✅ | ✅ green |
+| 03-02-02 | 02 | 1 | DOMN-02 | T-reg | unregistered/mutated sets raise; CI gate rejects | unit+CI | `uv run pytest tests/test_registry_gate.py -x -q` | ✅ | ✅ green |
+| 03-03-01 | 03 | 2 | DOMN-03 | — | golden triple loads byte-exact | unit | `uv run pytest tests/test_fixture_harness.py -x -q` | ✅ | ✅ green |
+| 03-03-02 | 03 | 2 | DOMN-03 | — | no-lookahead / prefix-invariance / close-timing / boundary green | unit | `uv run pytest tests/test_no_lookahead.py tests/test_prefix_invariance.py tests/test_candle_close_timing.py tests/test_domain_boundary.py -x -q` | ✅ | ✅ green |
+| 03-03-03 | 03 | 2 | DOMN-01 | — | no `float(` in domain/mapper/registry | static | `uv run pytest tests/test_domain_no_float.py -x -q` | ✅ | ✅ green |
+| 03-04-01 | 04 | 3 | DOMN-01 | — | PG-gated mapper tests (skip without DATABASE_URL) | unit (gated) | `uv run pytest tests/test_domain_mappers_pg.py -q` | ✅ | ✅ green (5 skipped w/o live PG) |
+| 03-05-01 | 05 | 3 | DOMN-01/02/03 | — | post-review hardening: UTC normalization, Signal validation, per-key types, canaries | unit | `uv run pytest -q` (209 passed) | ✅ | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -82,4 +84,16 @@ created: "2026-09-22"
 - [ ] Feedback latency < 120s
 - [ ] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** granted (retroactive audit 2026-09-23)
+
+---
+
+## Validation Audit 2026-09-23
+
+| Metric | Count |
+|--------|-------|
+| Gaps found | 0 |
+| Resolved | 0 |
+| Escalated | 0 |
+
+Retroactive audit after code-review fix pass (19/19 findings fixed, 20 atomic commits): all DOMN-01/02/03 requirements COVERED — phase subset 127 passed, full suite 209 passed (5 PG-gated skips), migration parity green, ruff + mypy strict clean. `test_domain_mappers_pg.py` is live-PG-gated by design (skips without DATABASE_URL); live `alembic upgrade head` remains the single Manual-Only item. No auditor spawn needed (zero gaps).
