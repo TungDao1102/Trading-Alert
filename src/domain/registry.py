@@ -104,6 +104,27 @@ class ParameterSet:
     params: dict[str, Any]  # normalized values (Decimals preserved, not floats)
 
 
+def _strip_inline_comment(s: str) -> str:
+    """Cut a TOML line at the first `#` outside string literals."""
+    in_single = False
+    in_double = False
+    escaped = False
+    for i, ch in enumerate(s):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and in_double:
+            escaped = True
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif ch == "#" and not in_single and not in_double:
+            return s[:i]
+    return s
+
+
 def _extract_raw_param_strings(text: str) -> dict[str, str]:
     """Extract the original string form of each parameter value from TOML text.
 
@@ -124,10 +145,10 @@ def _extract_raw_param_strings(text: str) -> dict[str, str]:
             continue
         if not in_params or not stripped or stripped.startswith("#"):
             continue
-        match = re.match(r"^([A-Za-z0-9_\-]+)\s*=\s*(.+)$", stripped)
+        match = re.match(r'^(?:"([^"]+)"|([A-Za-z0-9_\-]+))\s*=\s*(.+)$', stripped)
         if match:
-            key = match.group(1)
-            value = match.group(2).strip()
+            key = match.group(1) if match.group(1) is not None else match.group(2)
+            value = _strip_inline_comment(match.group(3)).strip()
             raw[key] = value
     return raw
 

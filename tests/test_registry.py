@@ -586,3 +586,28 @@ def test_wrong_typed_values_raise_at_load(tmp_path: Path) -> None:
                 load_parameter_set("test-strategy", "test-set")
         finally:
             registry.REGISTRY_ROOT = original_root
+
+
+def test_inline_comment_and_quoted_key_load(tmp_path: Path) -> None:
+    """Beh. 18: trailing comments stripped, quoted keys read (WR-04)."""
+    from decimal import Decimal
+
+    from src.domain import registry
+
+    _write_toml(
+        tmp_path,
+        'schema_version = 1\n'
+        '[strategy]\n'
+        'strategy_id = "test-strategy"\n'
+        'strategy_version = "v1.0.0"\n'
+        '[parameters]\n'
+        'swing_lookback = 20\n'
+        '"zone_tolerance_atr" = 0.5  # tuned\n',
+    )
+    original_root = registry.REGISTRY_ROOT
+    registry.REGISTRY_ROOT = tmp_path
+    try:
+        ps = load_parameter_set("test-strategy", "test-set")
+        assert ps.params["zone_tolerance_atr"] == Decimal("0.5")
+    finally:
+        registry.REGISTRY_ROOT = original_root
