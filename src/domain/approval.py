@@ -59,3 +59,12 @@ class Approval:
         _require_utc_aware(self.requested_at_utc, "requested_at_utc")
         if self.acted_at_utc is not None:
             _require_utc_aware(self.acted_at_utc, "acted_at_utc")
+        # WR-07: state coherence — PENDING ⟺ acted_at_utc is None.
+        # A pending approval has no transition yet; a decided approval
+        # (APPROVED/SKIPPED/EXPIRED) must carry its transition time so
+        # idempotent-replay logic can trust the entity.
+        if self.status == ApprovalResult.PENDING and self.acted_at_utc is not None:
+            raise ValueError("PENDING approval must have acted_at_utc=None")
+        if self.status != ApprovalResult.PENDING and self.acted_at_utc is None:
+            status_name = getattr(self.status, "value", self.status)
+            raise ValueError(f"{status_name} approval must set acted_at_utc")

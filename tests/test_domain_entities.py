@@ -700,3 +700,26 @@ def test_documented_string_fields_reject_empty() -> None:
     bad["mode"] = ""
     with pytest.raises((TypeError, ValueError)):
         Position(**bad)
+
+
+def test_approval_rejects_incoherent_status_timestamps() -> None:
+    """Beh. 23: PENDING ⟺ acted_at_utc is None (WR-07)."""
+    from src.domain.approval import Approval
+    from src.domain.enums import ApprovalResult
+
+    bad = _approval_kwargs()
+    bad["acted_at_utc"] = UTC_NOW
+    with pytest.raises((TypeError, ValueError)):
+        Approval(**bad)
+
+    bad = _approval_kwargs()
+    bad["status"] = ApprovalResult.APPROVED
+    bad["result"] = ApprovalResult.APPROVED
+    with pytest.raises((TypeError, ValueError)):
+        Approval(**bad)
+
+    ok = _approval_kwargs()
+    ok["status"] = ApprovalResult.APPROVED
+    ok["result"] = ApprovalResult.APPROVED
+    ok["acted_at_utc"] = UTC_NOW
+    assert Approval(**ok).acted_at_utc == UTC_NOW
