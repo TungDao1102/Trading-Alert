@@ -559,3 +559,30 @@ def test_missing_parameters_table_raises(tmp_path: Path) -> None:
             load_parameter_set("test-strategy", "test-set")
     finally:
         registry.REGISTRY_ROOT = original_root
+
+
+def test_wrong_typed_values_raise_at_load(tmp_path: Path) -> None:
+    """Beh. 17: str/bool/list values raise at the boundary (WR-06)."""
+    from src.domain import registry
+
+    cases = [
+        'swing_lookback = "20"\n',  # string instead of int
+        'risk_rate = true\n',  # bool instead of Decimal
+        'signal_expiry_hours = [4]\n',  # list instead of int
+    ]
+    for extra in cases:
+        _write_toml(
+            tmp_path,
+            'schema_version = 1\n'
+            '[strategy]\n'
+            'strategy_id = "test-strategy"\n'
+            'strategy_version = "v1.0.0"\n'
+            '[parameters]\n' + extra,
+        )
+        original_root = registry.REGISTRY_ROOT
+        registry.REGISTRY_ROOT = tmp_path
+        try:
+            with pytest.raises(StrategyKeyOutsideRegistry):
+                load_parameter_set("test-strategy", "test-set")
+        finally:
+            registry.REGISTRY_ROOT = original_root

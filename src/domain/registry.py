@@ -163,6 +163,43 @@ def _normalize_params(
     return normalized
 
 
+# Expected value types per key (WR-06: fail closed at the registry
+# boundary instead of surfacing type errors in Phase 4 arithmetic).
+# Integer-count keys must be int; ratio/threshold keys accept int or
+# Decimal (whole-number TOML spellings like `minimum_rr = 2.0`
+# normalize to int 2, which stays valid). bool is rejected everywhere
+# even though bool subclasses int.
+INT_KEYS = frozenset(
+    {
+        "swing_lookback",
+        "breakout_confirmation_bars",
+        "signal_expiry_hours",
+    }
+)
+DECIMAL_KEYS = STRATEGY_KEYS - INT_KEYS
+
+
+def _check_param_types(params: dict[str, Any], path: Path) -> None:
+    """Raise StrategyKeyOutsideRegistry on wrong-typed parameter values."""
+    for key, value in params.items():
+        if isinstance(value, bool):
+            raise StrategyKeyOutsideRegistry(
+                f"{path}: parameter {key!r} must not be bool"
+            )
+        if key in INT_KEYS:
+            if not isinstance(value, int):
+                raise StrategyKeyOutsideRegistry(
+                    f"{path}: parameter {key!r} must be int, "
+                    f"got {type(value).__name__}"
+                )
+        elif key in DECIMAL_KEYS:
+            if not isinstance(value, (int, Decimal)):
+                raise StrategyKeyOutsideRegistry(
+                    f"{path}: parameter {key!r} must be Decimal or int, "
+                    f"got {type(value).__name__}"
+                )
+
+
 def _check_ascii_keys(params: dict[str, Any], path: Path) -> None:
     """Raise StrategyKeyOutsideRegistry if any parameter name is non-ASCII.
 
@@ -226,6 +263,7 @@ def load_parameter_set(strategy_id: str, parameter_set_id: str) -> ParameterSet:
 
     raw_strings = _extract_raw_param_strings(text)
     normalized_params = _normalize_params(params, raw_strings)
+    _check_param_types(normalized_params, path)
     strategy_version = strategy["strategy_version"]
 
     # Hash the normalized params + strategy identity (excluding
