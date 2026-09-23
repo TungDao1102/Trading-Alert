@@ -244,3 +244,27 @@ The pre-existing test failure in `test_no_lookahead.py::test_leaky_variant_is_de
 **Commits:**
 - `882cc26` — `feat(04-03): full planner contract — PlanResult envelope, RR gate returns NO_TRADE, invalidation schema (basis=CANDLE_CLOSE + level + break_distance)`
 - `efc30e1` — `feat(04-03): registry whitelist extension plus breakout-retest and range-mr baseline TOMLs`
+
+## Repair Note (post-04-02 landing)
+
+Plan 04-02 landed after 04-03 and added an intentional gap block to `tests/fixtures/phase4/candles.csv` (D-04 gap-policy boundary case). Feeding ALL 1H candles through `evaluate()`/`plan()` now hits `GAP_IN_SOURCE → DATA_STALE` instead of `SETUP`, breaking 9 of 11 tests in `tests/test_core_planner.py`.
+
+**Fix (within 04-03 scope only):** Subset the 1H fixture to the contiguous window before the first gap (bars 0–249, 250 bars). The 4H context uses all 500 bars from the fixture (contiguous, no gaps, enough for EMA200(4H) warm-up required by 04-02's feature gate).
+
+**Window choice documented in `tests/test_core_planner.py`:**
+- 1H: bars 0–249 (before the first gap at index 250) — contiguous, 250 bars, enough for EMA200(1H) warm-up
+- 4H: all 500 bars — contiguous, no gaps, enough for EMA200(4H) warm-up
+
+**Files modified (04-03 scope only):**
+- `tests/test_core_planner.py` — added `_first_gap_index` helper; `setup_candles` fixture subsets to pre-gap window; `context_candles` fixture uses all 4H bars
+
+**Files NOT modified (04-02-owned, out of scope):**
+- `tests/fixtures/phase4/candles.csv`
+- `src/core/strategy.py`
+- `src/core/features.py`
+- `tests/fixtures/phase4/expected_features.json`
+- `tests/fixtures/phase4/expected_signals.json`
+
+**Verification:**
+- `uv run pytest tests/test_core_planner.py -q` → 11 passed
+- `uv run pytest tests/ -q` → 260 passed, 5 skipped, 0 failures

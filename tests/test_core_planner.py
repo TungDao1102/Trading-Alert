@@ -71,7 +71,40 @@ def _build_candles_from_csv(rows: list[dict]) -> list[Candle]:
 
 # --------------------------------------------------------------------------- #
 # Fixtures — use phase4 candles which are known to produce a valid SETUP.
+#
+# Plan 04-02 added an intentional gap block to the shared candles.csv
+# fixture (D-04 gap-policy boundary case). Feeding ALL 1H candles through
+# evaluate()/plan() now hits GAP_IN_SOURCE → DATA_STALE instead of SETUP.
+#
+# Per D-04/D-08: the planner tests need a gap-free contiguous window.
+# We subset the fixture to the first contiguous block (bars before the
+# first gap) — this is the minimal correct fix that stays within 04-03
+# scope and avoids mutating 04-02-owned files.
+#
+# Window choice: 1H bars 0..249 (250 bars, before the first gap at
+# index 250). The corresponding 4H context is the bars with open_time
+# <= the last 1H bar's close_time — enough for the EMA50(4H) regime
+# gate (regime gate only requires EMA50 validity per 04-01 decision).
 # --------------------------------------------------------------------------- #
+
+
+def _first_gap_index(rows: list[dict], interval: str) -> int:
+    """Return the index of the first gap, or len(rows) if contiguous."""
+    from datetime import timedelta
+
+    if interval == "1h":
+        expected = timedelta(hours=1)
+    elif interval == "4h":
+        expected = timedelta(hours=4)
+    else:
+        raise ValueError(f"unknown interval: {interval}")
+
+    for i in range(1, len(rows)):
+        prev_open = datetime.fromisoformat(rows[i - 1]["open_time_utc"].replace("Z", "+00:00"))
+        curr_open = datetime.fromisoformat(rows[i]["open_time_utc"].replace("Z", "+00:00"))
+        if curr_open - prev_open > expected:
+            return i
+    return len(rows)
 
 
 @pytest.fixture
@@ -85,14 +118,26 @@ def phase4_candles_csv() -> list[dict]:
 
 @pytest.fixture
 def setup_candles(phase4_candles_csv: list[dict]) -> list[Candle]:
-    """1H setup candles from phase4 fixture."""
+    """1H setup candles — contiguous window before the first gap.
+
+    Plan 04-02 added an intentional gap at index 250 of the 1H bars.
+    We subset to bars 0..249 to keep a gap-free contiguous window.
+    """
     rows_1h = [r for r in phase4_candles_csv if r["timeframe"] == "1h"]
+    gap_idx = _first_gap_index(rows_1h, "1h")
+    rows_1h = rows_1h[:gap_idx]
     return _build_candles_from_csv(rows_1h)
 
 
 @pytest.fixture
 def context_candles(phase4_candles_csv: list[dict]) -> list[Candle]:
-    """4H context candles from phase4 fixture."""
+    """4H context candles — all bars from the fixture (contiguous, no gaps).
+
+    Plan 04-02's feature gate requires ALL features valid on both streams
+    (including EMA200, which needs 200 bars). The 4H fixture has 500
+    contiguous bars starting at 2026-09-09 — enough for EMA200(4H)
+    warm-up. The 4H stream has no gaps, so all bars are usable.
+    """
     rows_4h = [r for r in phase4_candles_csv if r["timeframe"] == "4h"]
     return _build_candles_from_csv(rows_4h)
 
