@@ -29,6 +29,7 @@ def test_make_signal_id_returns_64_hex_string() -> None:
     content-hash ID format.
     """
     signal_id = make_signal_id(
+        strategy_id="trend-pullback",
         strategy_version="v1.0.0",
         parameter_set_id="baseline-v1",
         symbol="BTCUSDT",
@@ -55,6 +56,7 @@ def test_make_signal_id_is_deterministic_across_key_orderings() -> None:
     this test pins the contract.)
     """
     kwargs = {
+        "strategy_id": "trend-pullback",
         "strategy_version": "v1.0.0",
         "parameter_set_id": "baseline-v1",
         "symbol": "BTCUSDT",
@@ -80,6 +82,7 @@ def test_make_signal_id_rejects_naive_datetime() -> None:
     """
     with pytest.raises(ValueError, match="naive datetime"):
         make_signal_id(
+            strategy_id="trend-pullback",
             strategy_version="v1.0.0",
             parameter_set_id="baseline-v1",
             symbol="BTCUSDT",
@@ -102,6 +105,7 @@ def test_make_signal_id_rejects_float_input() -> None:
     """
     with pytest.raises(TypeError, match="float"):
         make_signal_id(
+            strategy_id="trend-pullback",
             strategy_version="v1.0.0",
             parameter_set_id="baseline-v1",
             symbol="BTCUSDT",
@@ -124,6 +128,7 @@ def test_make_signal_id_rejects_set_input() -> None:
     """
     with pytest.raises(TypeError, match="unordered"):
         make_signal_id(
+            strategy_id="trend-pullback",
             strategy_version="v1.0.0",
             parameter_set_id="baseline-v1",
             symbol="BTCUSDT",
@@ -145,6 +150,7 @@ def test_make_signal_id_different_inputs_produce_different_ids() -> None:
     the identity.
     """
     base_kwargs = {
+        "strategy_id": "trend-pullback",
         "strategy_version": "v1.0.0",
         "parameter_set_id": "baseline-v1",
         "symbol": "BTCUSDT",
@@ -156,6 +162,7 @@ def test_make_signal_id_different_inputs_produce_different_ids() -> None:
 
     # Change each field in turn; each must produce a different digest.
     for changed_field, changed_value in [
+        ("strategy_id", "mean-reversion"),
         ("strategy_version", "v1.0.1"),
         ("parameter_set_id", "baseline-v2"),
         ("symbol", "ETHUSDT"),
@@ -231,3 +238,29 @@ def test_decimal_precision_preserved_in_canonical_hash() -> None:
     digest_a = sha256_hex({"value": Decimal("1.50")})
     digest_b = sha256_hex({"value": Decimal("1.5")})
     assert digest_a != digest_b
+
+
+# --------------------------------------------------------------------------- #
+# Test 9 — strategy_id is bound into the digest (CR-01).
+# --------------------------------------------------------------------------- #
+
+
+def test_make_signal_id_binds_strategy_id() -> None:
+    """Beh. 9: same version/id/symbol/time/close/fingerprint under two
+    strategy_id values yields different digests (CR-01).
+
+    Without strategy_id binding, `trend-pullback` and a future
+    `mean-reversion` strategy sharing every other field would collide
+    to the same signal_id.
+    """
+    kwargs = {
+        "strategy_version": "v1.0.0",
+        "parameter_set_id": "baseline-v1",
+        "symbol": "BTCUSDT",
+        "source_timeframe": "1h",
+        "source_candle_close_utc": datetime(2026, 9, 19, 0, 0, tzinfo=UTC),
+        "setup_fingerprint": "trend-pullback:long",
+    }
+    id_a = make_signal_id(strategy_id="trend-pullback", **kwargs)
+    id_b = make_signal_id(strategy_id="mean-reversion", **kwargs)
+    assert id_a != id_b

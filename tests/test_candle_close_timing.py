@@ -19,6 +19,7 @@ from src.domain.ids import make_signal_id
 
 TIMEFRAME_SECONDS = {"1m": 60, "1h": 3600, "4h": 14400}
 
+STRATEGY_ID = "trend-pullback"
 STRATEGY_VERSION = "v1.0.0"
 PARAMETER_SET_ID = "baseline-v1"
 
@@ -36,6 +37,7 @@ def _signal_entries(candles: list[dict]) -> list[tuple[str, str]]:
     for candle in candles:
         close = _close_time(candle)
         sid = make_signal_id(
+            strategy_id=STRATEGY_ID,
             strategy_version=STRATEGY_VERSION,
             parameter_set_id=PARAMETER_SET_ID,
             symbol=candle["symbol"],
