@@ -11,6 +11,7 @@ deferred to Phase 4.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -59,6 +60,17 @@ class JournalEvent:
         # T-03-04: validated non-empty strings with empty rejected at construction.
         _require_non_empty(self.event_type, "event_type")
         _require_non_empty(self.entity_type, "entity_type")
+        # WR-08: every event must be correlatable — empty correlation or
+        # entity ids silently break the audit-trail join.
+        _require_non_empty(self.correlation_id, "correlation_id")
+        _require_non_empty(self.entity_id, "entity_id")
+        # payload_json is JSON-as-TEXT; "" means "no payload" (default),
+        # any other value must parse.
+        if self.payload_json != "":
+            try:
+                json.loads(self.payload_json)
+            except ValueError as exc:
+                raise ValueError(f"payload_json must be valid JSON: {exc}") from exc
         # D-12: UTC-aware datetimes only.
         _require_utc_aware(self.occurred_at_utc, "occurred_at_utc")
         if self.created_at_utc is not None:

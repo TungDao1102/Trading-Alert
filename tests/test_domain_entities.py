@@ -723,3 +723,27 @@ def test_approval_rejects_incoherent_status_timestamps() -> None:
     ok["result"] = ApprovalResult.APPROVED
     ok["acted_at_utc"] = UTC_NOW
     assert Approval(**ok).acted_at_utc == UTC_NOW
+
+
+def test_journal_event_rejects_empty_correlation_or_entity_id() -> None:
+    """Beh. 24: empty correlation_id/entity_id/garbage payload raise (WR-08)."""
+    from src.domain.journal import JournalEvent
+
+    bad = _journal_kwargs()
+    bad["correlation_id"] = ""
+    with pytest.raises((TypeError, ValueError)):
+        JournalEvent(**bad)
+
+    bad = _journal_kwargs()
+    bad["entity_id"] = ""
+    with pytest.raises((TypeError, ValueError)):
+        JournalEvent(**bad)
+
+    bad = _journal_kwargs()
+    bad["payload_json"] = "{not-json"
+    with pytest.raises((TypeError, ValueError)):
+        JournalEvent(**bad)
+
+    ok = _journal_kwargs()
+    ok["payload_json"] = ""
+    assert JournalEvent(**ok).payload_json == ""
