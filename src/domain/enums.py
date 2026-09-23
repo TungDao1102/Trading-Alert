@@ -141,3 +141,70 @@ class RejectionReason(str, Enum):
     DATA_STALE = "DATA_STALE"
     RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
     APPROVAL_EXPIRED = "APPROVAL_EXPIRED"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4 plan 04-01 (D-06) — promoted enums.
+# --------------------------------------------------------------------------- #
+
+
+class Direction(str, Enum):
+    """GLOSSARY — Signal direction (D-06 promotion)."""
+
+    LONG = "LONG"
+    SHORT = "SHORT"
+
+
+class SetupType(str, Enum):
+    """GLOSSARY — Setup type per family (D-06 promotion).
+
+    Values cover all three Phase-4 families (trend-pullback,
+    breakout-retest, range-mr) with LONG/SHORT variants. The exact
+    tokens are the canonical setup names; unknown values raise at load.
+    """
+
+    TREND_PULLBACK_LONG = "TREND_PULLBACK_LONG"
+    TREND_PULLBACK_SHORT = "TREND_PULLBACK_SHORT"
+    BREAKOUT_RETEST_LONG = "BREAKOUT_RETEST_LONG"
+    BREAKOUT_RETEST_SHORT = "BREAKOUT_RETEST_SHORT"
+    RANGE_MR_LONG = "RANGE_MR_LONG"
+    RANGE_MR_SHORT = "RANGE_MR_SHORT"
+
+
+class SourceTimeframe(str, Enum):
+    """GLOSSARY — Source candle timeframe (D-06 promotion).
+
+    Values copy the exact timeframe spellings used in
+    `tests/fixtures/phase3/candles.csv` (lowercase "1h", "4h", "1m").
+    """
+
+    M1 = "1m"
+    H1 = "1h"
+    H4 = "4h"
+
+
+class EntryModel(str, Enum):
+    """GLOSSARY — Trade plan entry model (D-06 promotion)."""
+
+    LIMIT_ZONE = "LIMIT_ZONE"
+    MARKET = "MARKET"
+
+
+class OrderRole(str, Enum):
+    """GLOSSARY — Order role in plan (D-06 promotion)."""
+
+    ENTRY = "ENTRY"
+    STOP_LOSS = "STOP_LOSS"
+    TAKE_PROFIT_1 = "TAKE_PROFIT_1"
+    TAKE_PROFIT_2 = "TAKE_PROFIT_2"
+
+
+class QuantizationDecision(str, Enum):
+    """GLOSSARY — Quantization decision (D-06 promotion, D-09 deferral).
+
+    `DEFERRED_TO_RISK` is the V1 default — Phase 5 owns stepSize math.
+    """
+
+    DEFERRED_TO_RISK = "DEFERRED_TO_RISK"
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"

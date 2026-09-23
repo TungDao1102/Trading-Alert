@@ -6,11 +6,22 @@ load-time error.
 
 TDD discipline: RED → GREEN. These tests are the RED phase — they MUST
 fail until `src/domain/enums.py` is implemented.
+
+Phase 4 plan 04-01 (D-06) extends the enum set with Direction,
+SetupType, SourceTimeframe, EntryModel, OrderRole, QuantizationDecision.
 """
 
 from __future__ import annotations
 
 import pytest
+from src.domain import (
+    Direction,
+    EntryModel,
+    OrderRole,
+    QuantizationDecision,
+    SetupType,
+    SourceTimeframe,
+)
 from src.domain.enums import (
     ApprovalAction,
     OrderStatus,
@@ -254,3 +265,130 @@ def test_signal_status_str_mixin_compares_to_string() -> None:
     """
     assert SignalStatus.DETECTED == "DETECTED"
     assert SignalStatus.APPROVED == "APPROVED"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4 plan 04-01 (D-06) — promoted enums.
+# --------------------------------------------------------------------------- #
+
+
+def test_direction_values_match_glossary() -> None:
+    """Beh. 12: Direction enum values are LONG and SHORT (verbatim)."""
+    assert {m.value for m in Direction} == {"LONG", "SHORT"}
+    assert Direction.LONG.value == "LONG"
+    assert Direction.SHORT.value == "SHORT"
+
+
+def test_direction_unknown_raises_value_error() -> None:
+    """Beh. 13: Direction("BOGUS") raises ValueError (load-time error)."""
+    with pytest.raises(ValueError):
+        Direction("BOGUS")
+
+
+def test_direction_str_mixin_compares_to_string() -> None:
+    """Beh. 14: Direction.LONG == "LONG" (str mixin)."""
+    assert Direction.LONG == "LONG"
+    assert Direction.SHORT == "SHORT"
+
+
+def test_setup_type_values_match_glossary() -> None:
+    """Beh. 15: SetupType enum values cover all three families."""
+    expected = {
+        "TREND_PULLBACK_LONG",
+        "TREND_PULLBACK_SHORT",
+        "BREAKOUT_RETEST_LONG",
+        "BREAKOUT_RETEST_SHORT",
+        "RANGE_MR_LONG",
+        "RANGE_MR_SHORT",
+    }
+    assert {m.value for m in SetupType} == expected
+
+
+def test_setup_type_unknown_raises_value_error() -> None:
+    """Beh. 16: SetupType("UNKNOWN") raises ValueError."""
+    with pytest.raises(ValueError):
+        SetupType("UNKNOWN")
+
+
+def test_source_timeframe_values_match_phase3_fixture_spelling() -> None:
+    """Beh. 17: SourceTimeframe values copy phase-3 candles.csv spellings.
+
+    The phase-3 fixture uses "1h" (lowercase) for the 1H timeframe.
+    """
+    assert {m.value for m in SourceTimeframe} == {"1m", "1h", "4h"}
+    assert SourceTimeframe.H1.value == "1h"
+    assert SourceTimeframe.H4.value == "4h"
+    assert SourceTimeframe.M1.value == "1m"
+
+
+def test_source_timeframe_unknown_raises_value_error() -> None:
+    """Beh. 18: SourceTimeframe("5m") raises ValueError."""
+    with pytest.raises(ValueError):
+        SourceTimeframe("5m")
+
+
+def test_entry_model_values_match_glossary() -> None:
+    """Beh. 19: EntryModel enum values are LIMIT_ZONE and MARKET."""
+    assert {m.value for m in EntryModel} == {"LIMIT_ZONE", "MARKET"}
+
+
+def test_entry_model_unknown_raises_value_error() -> None:
+    """Beh. 20: EntryModel("STOP") raises ValueError."""
+    with pytest.raises(ValueError):
+        EntryModel("STOP")
+
+
+def test_order_role_values_match_glossary() -> None:
+    """Beh. 21: OrderRole enum values cover entry/SL/TP1/TP2."""
+    expected = {"ENTRY", "STOP_LOSS", "TAKE_PROFIT_1", "TAKE_PROFIT_2"}
+    assert {m.value for m in OrderRole} == expected
+
+
+def test_order_role_unknown_raises_value_error() -> None:
+    """Beh. 22: OrderRole("TAKE_PROFIT_3") raises ValueError."""
+    with pytest.raises(ValueError):
+        OrderRole("TAKE_PROFIT_3")
+
+
+def test_quantization_decision_values_match_glossary() -> None:
+    """Beh. 23: QuantizationDecision enum values are DEFERRED_TO_RISK, ACCEPTED, REJECTED."""
+    expected = {"DEFERRED_TO_RISK", "ACCEPTED", "REJECTED"}
+    assert {m.value for m in QuantizationDecision} == expected
+
+
+def test_quantization_decision_unknown_raises_value_error() -> None:
+    """Beh. 24: QuantizationDecision("UNKNOWN") raises ValueError."""
+    with pytest.raises(ValueError):
+        QuantizationDecision("UNKNOWN")
+
+
+def test_signal_constructs_with_direction_enum() -> None:
+    """Beh. 25: Signal accepts Direction enum (str-subclass compatibility).
+
+    The str+Enum mixin means Direction.LONG is a str subclass, so
+    Signal(direction=Direction.LONG, ...) constructs without explicit
+    .value coercion.
+    """
+    from datetime import UTC, datetime
+
+    from src.domain.enums import SignalStatus
+    from src.domain.signal import Signal
+
+    sig = Signal(
+        signal_id="abc",
+        strategy_id="trend-pullback",
+        strategy_version="v1.0.0",
+        parameter_set_id="baseline-v1",
+        parameter_set_hash="0" * 64,
+        symbol="BTCUSDT",
+        direction=Direction.LONG,
+        setup_type=SetupType.TREND_PULLBACK_LONG,
+        source_timeframe=SourceTimeframe.H1,
+        source_candle_close_utc=datetime(2026, 9, 19, 0, 59, 59, tzinfo=UTC),
+        detected_at_utc=datetime(2026, 9, 19, 0, 59, 59, tzinfo=UTC),
+        status=SignalStatus.DETECTED,
+        expires_at_utc=datetime(2026, 9, 19, 4, 59, 59, tzinfo=UTC),
+    )
+    assert sig.direction == "LONG"
+    assert sig.setup_type == "TREND_PULLBACK_LONG"
+    assert sig.source_timeframe == "1h"
