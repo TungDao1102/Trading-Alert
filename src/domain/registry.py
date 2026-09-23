@@ -377,22 +377,49 @@ def verify_parameter_set(path: Path, expected_hash: str) -> None:
         )
 
 
+def _iter_ambient_keys(ambient: dict[str, Any]) -> Any:
+    """Yield every key in a possibly nested ambient mapping."""
+    for key, value in ambient.items():
+        yield key
+        if isinstance(value, dict):
+            yield from _iter_ambient_keys(value)
+
+
+def _is_strategy_key_name(name: object) -> bool:
+    """Match a key against STRATEGY_KEYS, tolerating env-var spelling.
+
+    Env-var rule: upper-case with an optional strategy prefix
+    (`SWING_LOOKBACK`, `TREND_SWING_LOOKBACK`). Matching is
+    case-insensitive on the full name or on the trailing `_`-separated
+    suffix, so prefixed and unprefixed smuggling both raise.
+    """
+    if not isinstance(name, str):
+        return False
+    lowered = name.lower()
+    if lowered in STRATEGY_KEYS:
+        return True
+    return any(lowered == sk or lowered.endswith("_" + sk) for sk in STRATEGY_KEYS)
+
+
 def check_strategy_key_outside_registry(ambient: dict[str, Any]) -> None:
     """Raise StrategyKeyOutsideRegistry if any whitelisted strategy key appears.
 
     D-06: strategy-semantic keys live ONLY in the registry. If a
     whitelisted key appears in ambient configuration (env vars, CLI
-    flags, etc.), the loader raises StrategyKeyOutsideRegistry
-    instead of silently altering semantics.
+    flags, etc.) — at any nesting level, in any env-var spelling — the
+    loader raises StrategyKeyOutsideRegistry instead of silently
+    altering semantics.
 
     Runtime config (endpoints, tokens, log levels, poll intervals)
     is allowed in ambient configuration — only strategy-semantic
     keys are rejected.
     """
-    smuggled = set(ambient.keys()) & STRATEGY_KEYS
+    smuggled = sorted(
+        {str(key) for key in _iter_ambient_keys(ambient) if _is_strategy_key_name(key)}
+    )
     if smuggled:
         raise StrategyKeyOutsideRegistry(
-            f"strategy-semantic keys found outside registry: {sorted(smuggled)}"
+            f"strategy-semantic keys found outside registry: {smuggled}"
         )
 
 

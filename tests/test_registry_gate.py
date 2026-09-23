@@ -149,3 +149,17 @@ def test_check_strategy_key_outside_registry_passes_on_clean_ambient() -> None:
     ambient = {"log_level": "INFO", "poll_interval_seconds": 30}
     result = check_strategy_key_outside_registry(ambient)
     assert result is None
+
+
+def test_check_strategy_key_outside_registry_raises_on_nested_key() -> None:
+    """Beh. 5: a whitelisted key nested in ambient config raises (WR-12)."""
+    ambient = {"strategy": {"swing_lookback": 50}, "log_level": "INFO"}
+    with pytest.raises(StrategyKeyOutsideRegistry):
+        check_strategy_key_outside_registry(ambient)
+
+
+def test_check_strategy_key_outside_registry_raises_on_env_var_spelling() -> None:
+    """Beh. 6: prefixed UPPER_SNAKE ambient spelling raises (WR-12)."""
+    ambient = {"TREND_SWING_LOOKBACK": "50", "log_level": "INFO"}
+    with pytest.raises(StrategyKeyOutsideRegistry):
+        check_strategy_key_outside_registry(ambient)
