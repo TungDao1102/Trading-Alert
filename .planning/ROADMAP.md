@@ -123,10 +123,17 @@ Plans:
 **Plans**: 4 plans
 
 Plans:
+**Wave 1**
 
 - [ ] 04-01: Tracer trend-pullback end-to-end (src/core slice + D-06 enums + fixture skeleton)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 04-02: Feature validity hardening + determinism suites rewired to real evaluate
 - [ ] 04-03: Full planner contract + registry extension + family B/C param sets
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 04-04: Breakout-retest + range-mr slices + per-family determinism + phase gate
 
 ### Phase 5: Risk Engine
