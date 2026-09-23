@@ -41,6 +41,19 @@ from .canonical import sha256_hex
 REGISTRY_ROOT = Path("params")
 SCHEMA_VERSION = 1
 
+# Registry path segments are restricted to this charset so
+# `REGISTRY_ROOT / strategy_id / f"{parameter_set_id}.toml"` cannot
+# escape `params/` (WR-05: fail closed on `../../etc`-style inputs).
+_SEGMENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+def _check_registry_segment(value: str, field_name: str) -> None:
+    """Raise UnregisteredParameterSet if a path segment is unsafe."""
+    if not _SEGMENT_RE.fullmatch(value):
+        raise UnregisteredParameterSet(
+            f"invalid registry path segment {field_name}={value!r}"
+        )
+
 # Closed whitelist of strategy-semantic keys (D-06). Anything
 # strategy-semantic found OUTSIDE the registry raises; anything
 # unknown INSIDE raises.
@@ -169,10 +182,13 @@ def load_parameter_set(strategy_id: str, parameter_set_id: str) -> ParameterSet:
     """Load and validate a parameter set from the registry.
 
     Raises:
-        UnregisteredParameterSet: file does not exist.
+        UnregisteredParameterSet: file does not exist (or either id
+            contains path-unsafe characters — fail closed, WR-05).
         RegistrySchemaMismatch: schema_version does not match.
         StrategyKeyOutsideRegistry: unknown or non-ASCII strategy-semantic key.
     """
+    _check_registry_segment(strategy_id, "strategy_id")
+    _check_registry_segment(parameter_set_id, "parameter_set_id")
     path = REGISTRY_ROOT / strategy_id / f"{parameter_set_id}.toml"
     if not path.is_file():
         raise UnregisteredParameterSet(f"{strategy_id}/{parameter_set_id}")

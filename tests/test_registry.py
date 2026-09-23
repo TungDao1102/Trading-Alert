@@ -499,3 +499,13 @@ def test_decimal_values_with_different_precision_yield_different_hashes(
         assert ps_a.parameter_set_hash != ps_b.parameter_set_hash
     finally:
         registry.REGISTRY_ROOT = original_root
+
+
+def test_path_traversal_segments_raise_unregistered() -> None:
+    """Beh. 14: `../`-style ids raise UnregisteredParameterSet (WR-05)."""
+    with pytest.raises(UnregisteredParameterSet):
+        load_parameter_set("../../etc", "x")
+    with pytest.raises(UnregisteredParameterSet):
+        load_parameter_set("trend-pullback", "../baseline-v1")
+    with pytest.raises(UnregisteredParameterSet):
+        load_parameter_set("", "baseline-v1")
