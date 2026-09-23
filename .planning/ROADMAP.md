@@ -120,11 +120,14 @@ Plans:
   3. Every valid setup translates into a plan carrying entry zone, SL, TP(s), invalidation, expiry, expected RR, and plan hash
   4. No strategy family is declared a winner — all three remain hypotheses pending backtest plus out-of-sample evidence
 
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
 
-- [ ] 04-01: TBD (derived during plan-phase)
+- [ ] 04-01: Tracer trend-pullback end-to-end (src/core slice + D-06 enums + fixture skeleton)
+- [ ] 04-02: Feature validity hardening + determinism suites rewired to real evaluate
+- [ ] 04-03: Full planner contract + registry extension + family B/C param sets
+- [ ] 04-04: Breakout-retest + range-mr slices + per-family determinism + phase gate
 
 ### Phase 5: Risk Engine
 
