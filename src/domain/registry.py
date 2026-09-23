@@ -68,6 +68,15 @@ STRATEGY_KEYS = frozenset(
         "signal_expiry_hours",
         "risk_rate",
         "minimum_risk_utilization_after_rounding",
+        # Family B (breakout-retest) — added in plan 04-03 (D-05).
+        "retest_window_bars",
+        "retest_depth_atr",
+        "breakout_volume_threshold",
+        # Family C (range-mr) — added in plan 04-03 (D-05).
+        "zone_min_touches",
+        "zone_aging_bars",
+        "range_break_buffer_atr",
+        "regime_filter_lookback",
     }
 )
 
@@ -212,6 +221,12 @@ INT_KEYS = frozenset(
         "swing_lookback",
         "breakout_confirmation_bars",
         "signal_expiry_hours",
+        # Family B (breakout-retest) — added in plan 04-03 (D-05).
+        "retest_window_bars",
+        # Family C (range-mr) — added in plan 04-03 (D-05).
+        "zone_min_touches",
+        "zone_aging_bars",
+        "regime_filter_lookback",
     }
 )
 DECIMAL_KEYS = STRATEGY_KEYS - INT_KEYS

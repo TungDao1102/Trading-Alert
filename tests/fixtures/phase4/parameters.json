@@ -1,6 +1,22 @@
 {
-  "parameter_set_hash": "e1579900b1be20b8a6db76c554255cbec8125d5d317f6df7dadd5de78d2afae5",
-  "parameter_set_id": "baseline-v1",
-  "strategy_id": "trend-pullback",
-  "strategy_version": "v1.0.0"
+  "parameter_sets": [
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "baseline-v1",
+      "strategy_version": "v1.0.0",
+      "parameter_set_hash": "e1579900b1be20b8a6db76c554255cbec8125d5d317f6df7dadd5de78d2afae5"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "baseline-v1",
+      "strategy_version": "v1.0.0",
+      "parameter_set_hash": "dbcf730f2f9e5585b3661331f7738334d26341cc28fc170754a2168498dab56d"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "baseline-v1",
+      "strategy_version": "v1.0.0",
+      "parameter_set_hash": "2997f262349da8e5ba7af7837820a7a47fd9e83d6adcf3d316b0e19272f1c1c0"
+    }
+  ]
 }
