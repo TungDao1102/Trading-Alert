@@ -1,16 +1,30 @@
-"""Pure strategy function — trend-pullback tracer slice (Phase 4, plan 04-01).
+"""Pure strategy function — family dispatch (Phase 4, plans 04-01 + 04-04).
 
 Per D-05/D-07: pure function `evaluate(snapshot, account_state,
 strategy_version, parameter_set) -> NO_TRADE | SETUP(Signal)`. Zero I/O,
-zero clock reads (timestamps passed in), zero randomness. The tracer
-slice implements the Family A Stage A baseline (R1 structure-only regime
-+ P1 zone touch + E2 zone + ATR buffer entry + S2 structure + ATR buffer
-SL + T1 fixed-R TP) per `docs/research/families/trend-pullback.md` §3.
+zero clock reads (timestamps passed in), zero randomness.
+
+Family dispatch (D-05 — tracer-first, then parallel slices):
+  - `trend-pullback` (Family A, tracer): P1 zone touch on a regime-
+    confirming 4H context. The Stage A baseline per
+    `docs/research/families/trend-pullback.md` §3.
+  - `breakout-retest` (Family B, 04-04): breakout (3 consecutive bars
+    closing beyond the zone edge) followed by a retest within
+    `retest_window_bars` and `retest_depth_atr` × ATR. The countdown
+    starts at the breakout-bar close (retest on the breakout bar itself
+    never counts) per `docs/research/families/breakout-retest.md` §5.
+  - `range-mr` (Family C, 04-04): range-edge touch on a NEUTRAL regime
+    with `zone_min_touches` confirmed touches and `zone_aging_bars`
+    aging cutoff; range-break invalidation by `range_break_buffer_atr` ×
+    ATR per `docs/research/families/range-mr.md` §2.4.
 
 `SignalId` is built via `ids.make_signal_id` with `detected_at_utc =
 source_candle_close_utc` (candle-close timing, D-07). The setup
 fingerprint binds regime + setup + zone + ATR so distinct rules never
 collide.
+
+Per D-08 / Phase-1 D012: no family is declared a winner. All three
+families remain hypotheses pending backtest + out-of-sample evidence.
 """
 
 from __future__ import annotations
@@ -24,7 +38,7 @@ from src.domain.ids import make_signal_id
 from src.domain.registry import ParameterSet
 from src.domain.signal import Signal
 
-from .features import compute_features
+from .features import _atr_series, _swing_series, compute_features
 from .types import (
     AccountState,
     Candle,
@@ -228,6 +242,262 @@ def _setup_fingerprint(
 
 
 # --------------------------------------------------------------------------- #
+# Breakout-retest detector (Family B).
+# --------------------------------------------------------------------------- #
+
+
+def _detect_breakout_retest_setup(
+    *,
+    setup_candles: list[Candle],
+    parameter_set: ParameterSet,
+) -> tuple[str, str, Decimal, Decimal] | None:
+    """Family B detector: breakout followed by a retest within the window.
+
+    Per `docs/research/families/breakout-retest.md` §2.1 (B1 close
+    breakout) and §2.2 (R1 touch retest):
+      1. `breakout_confirmation_bars` consecutive bars close beyond the
+         zone edge — the zone edge is `swing_high[swing_lookback] +
+         zone_tolerance_atr * ATR` for LONG (symmetric for SHORT).
+      2. The countdown starts at the breakout-bar close: a retest on
+         the breakout bar itself NEVER counts (must be a later bar
+         within `retest_window_bars`).
+      3. The retest bar's extreme pierces into `[zone_edge −
+         retest_depth_atr * ATR, zone_edge + retest_depth_atr * ATR]`.
+
+    Self-inflation guard: the zone edge at bar `i` uses the swing and
+    ATR at bar `i − breakout_confirmation_bars − 1` (one bar before the
+    earliest confirmation bar). This keeps the breakout bars'
+    own highs out of the trailing swing window — without this guard
+    `swing_high[i]` includes bar `i`'s high and `zone_upper` becomes
+    strictly greater than `close[i]`, making the detector unsatisfiable.
+
+    Returns ``(direction, setup_type, zone_upper, zone_lower)`` or
+    ``None``.
+    """
+    breakout_confirmation_bars = int(
+        parameter_set.params["breakout_confirmation_bars"]
+    )
+    retest_window_bars = int(parameter_set.params["retest_window_bars"])
+    retest_depth_atr = Decimal(str(parameter_set.params["retest_depth_atr"]))
+    zone_tolerance_atr = Decimal(
+        str(parameter_set.params["zone_tolerance_atr"])
+    )
+    swing_lookback = int(parameter_set.params["swing_lookback"])
+    atr_period = int(parameter_set.params.get("atr_period", 14))
+
+    n = len(setup_candles)
+    min_bars = breakout_confirmation_bars + retest_window_bars + swing_lookback
+    if n < min_bars:
+        return None
+
+    swing_high_series = _swing_series(setup_candles, swing_lookback, high=True)
+    swing_low_series = _swing_series(setup_candles, swing_lookback, high=False)
+    atr_series = _atr_series(setup_candles, atr_period)
+
+    with localcontext() as ctx:
+        ctx.prec = 50
+
+        for i in range(n - 1, breakout_confirmation_bars - 1, -1):
+            ref_bar = i - breakout_confirmation_bars
+            ref_prev = ref_bar - 1
+            if ref_prev < 0:
+                continue
+            sh_ref_out = swing_high_series[ref_prev]
+            sl_ref_out = swing_low_series[ref_prev]
+            atr_ref_out = atr_series[ref_prev]
+            if (
+                not sh_ref_out.valid
+                or sh_ref_out.value is None
+                or not sl_ref_out.valid
+                or sl_ref_out.value is None
+                or not atr_ref_out.valid
+                or atr_ref_out.value is None
+            ):
+                continue
+            zone_upper = sh_ref_out.value + zone_tolerance_atr * atr_ref_out.value
+            zone_lower = sl_ref_out.value - zone_tolerance_atr * atr_ref_out.value
+
+            long_breakout = True
+            for j in range(breakout_confirmation_bars):
+                if setup_candles[i - j].close <= zone_upper:
+                    long_breakout = False
+                    break
+            if long_breakout:
+                retest_bar_idx = _find_retest_bar(
+                    setup_candles,
+                    atr_series,
+                    retest_window_bars,
+                    retest_depth_atr,
+                    zone_upper,
+                    i + 1,
+                    is_long=True,
+                )
+                if retest_bar_idx is not None:
+                    return ("LONG", "BREAKOUT_RETEST_LONG", zone_upper, zone_lower)
+
+            if (
+                not sl_ref_out.valid
+                or sl_ref_out.value is None
+            ):
+                continue
+            short_breakout = True
+            for j in range(breakout_confirmation_bars):
+                if setup_candles[i - j].close >= zone_lower:
+                    short_breakout = False
+                    break
+            if short_breakout:
+                retest_bar_idx = _find_retest_bar(
+                    setup_candles,
+                    atr_series,
+                    retest_window_bars,
+                    retest_depth_atr,
+                    zone_lower,
+                    i + 1,
+                    is_long=False,
+                )
+                if retest_bar_idx is not None:
+                    return (
+                        "SHORT",
+                        "BREAKOUT_RETEST_SHORT",
+                        zone_upper,
+                        zone_lower,
+                    )
+
+    return None
+
+
+def _find_retest_bar(
+    setup_candles: list[Candle],
+    atr_series: list,
+    retest_window_bars: int,
+    retest_depth_atr: Decimal,
+    zone_edge: Decimal,
+    start_idx: int,
+    *,
+    is_long: bool,
+) -> int | None:
+    """Scan forward from start_idx for a retest bar within window.
+
+    For LONG: the bar's low must be in `[zone_edge −
+    retest_depth_atr * ATR, zone_edge + retest_depth_atr * ATR]`.
+    For SHORT: the bar's high must be in the same band.
+    """
+    n = len(setup_candles)
+    end_idx = min(start_idx + retest_window_bars, n)
+    for k in range(start_idx, end_idx):
+        atr_out = atr_series[k]
+        if not atr_out.valid or atr_out.value is None:
+            continue
+        band = retest_depth_atr * atr_out.value
+        if is_long:
+            if zone_edge - band <= setup_candles[k].low <= zone_edge + band:
+                return k
+        else:
+            if zone_edge - band <= setup_candles[k].high <= zone_edge + band:
+                return k
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Range mean-reversion detector (Family C).
+# --------------------------------------------------------------------------- #
+
+
+def _detect_range_mr_setup(
+    *,
+    setup_candles: list[Candle],
+    parameter_set: ParameterSet,
+) -> tuple[str, str, Decimal, Decimal] | None:
+    """Family C detector: range-edge touch on a NEUTRAL regime.
+
+    Per `docs/research/families/range-mr.md` §2.4:
+      1. The 4H context must resolve to NEUTRAL (handled by the caller —
+         regime gate above rejects BULLISH/BEARISH for this family).
+      2. The range is defined by `swing_high` (resistance) and
+         `swing_low` (support) on the 1H setup stream.
+      3. The zone is valid when `zone_min_touches` bars have touched the
+         band AND the most recent touch is within `zone_aging_bars`.
+      4. Range-break invalidation: a close beyond the band by
+         `range_break_buffer_atr * ATR` invalidates the zone.
+
+    Returns ``(direction, setup_type, zone_upper, zone_lower)`` or
+    ``None``.
+    """
+    zone_min_touches = int(parameter_set.params["zone_min_touches"])
+    zone_aging_bars = int(parameter_set.params["zone_aging_bars"])
+    range_break_buffer_atr = Decimal(
+        str(parameter_set.params["range_break_buffer_atr"])
+    )
+    swing_lookback = int(parameter_set.params["swing_lookback"])
+    atr_period = int(parameter_set.params.get("atr_period", 14))
+    touch_tolerance_atr = Decimal(
+        str(parameter_set.params.get("touch_tolerance_atr", "0.3"))
+    )
+
+    n = len(setup_candles)
+    if n < swing_lookback + zone_aging_bars:
+        return None
+
+    swing_high_series = _swing_series(setup_candles, swing_lookback, high=True)
+    swing_low_series = _swing_series(setup_candles, swing_lookback, high=False)
+    atr_series = _atr_series(setup_candles, atr_period)
+
+    last_idx = n - 1
+    sh_last_out = swing_high_series[last_idx]
+    sl_last_out = swing_low_series[last_idx]
+    atr_last_out = atr_series[last_idx]
+    if (
+        not sh_last_out.valid
+        or sh_last_out.value is None
+        or not sl_last_out.valid
+        or sl_last_out.value is None
+        or not atr_last_out.valid
+        or atr_last_out.value is None
+    ):
+        return None
+
+    zone_upper = sh_last_out.value
+    zone_lower = sl_last_out.value
+    atr_last = atr_last_out.value
+    band = touch_tolerance_atr * atr_last
+
+    upper_touches: list[int] = []
+    lower_touches: list[int] = []
+    for j in range(swing_lookback, last_idx + 1):
+        if abs(setup_candles[j].high - zone_upper) <= band:
+            upper_touches.append(j)
+        if abs(setup_candles[j].low - zone_lower) <= band:
+            lower_touches.append(j)
+
+    breakout_buffer = range_break_buffer_atr * atr_last
+    last_close = setup_candles[last_idx].close
+    long_invalid = last_close < zone_lower - breakout_buffer
+    short_invalid = last_close > zone_upper + breakout_buffer
+    if long_invalid and short_invalid:
+        return None
+
+    direction: str | None = None
+    if (
+        not long_invalid
+        and len(upper_touches) >= zone_min_touches
+        and upper_touches[-1] >= last_idx - zone_aging_bars
+    ):
+        direction = "LONG"
+        setup_type = "RANGE_MR_LONG"
+    elif (
+        not short_invalid
+        and len(lower_touches) >= zone_min_touches
+        and lower_touches[-1] >= last_idx - zone_aging_bars
+    ):
+        direction = "SHORT"
+        setup_type = "RANGE_MR_SHORT"
+    else:
+        return None
+
+    return (direction, setup_type, zone_upper, zone_lower)
+
+
+# --------------------------------------------------------------------------- #
 # Public entry point — evaluate.
 # --------------------------------------------------------------------------- #
 
@@ -332,8 +602,19 @@ def evaluate(
             reason_code=RejectionReason.DATA_STALE.value,
         )
 
-    # Setup gate (1H setup stream).
-    setup = _detect_setup(setup_frame, last_setup_candle, regime)
+    # Setup gate (1H setup stream) — family dispatch (D-05).
+    if parameter_set.strategy_id == "breakout-retest":
+        setup = _detect_breakout_retest_setup(
+            setup_candles=snapshot.setup_candles,
+            parameter_set=parameter_set,
+        )
+    elif parameter_set.strategy_id == "range-mr":
+        setup = _detect_range_mr_setup(
+            setup_candles=snapshot.setup_candles,
+            parameter_set=parameter_set,
+        )
+    else:
+        setup = _detect_setup(setup_frame, last_setup_candle, regime)
     if setup is None:
         return SetupResult(
             is_no_trade=True,
