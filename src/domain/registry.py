@@ -209,10 +209,15 @@ def load_parameter_set(strategy_id: str, parameter_set_id: str) -> ParameterSet:
             f"does not match path strategy_id={strategy_id!r}"
         )
 
-    params = doc.get("parameters", {})
+    # CR-06: fail closed on absent identity/semantic sections — a
+    # truncated file must never load as a valid empty parameter set.
+    if "strategy_version" not in strategy or not strategy["strategy_version"]:
+        raise RegistrySchemaMismatch(f"{path}: missing strategy.strategy_version")
+    if "parameters" not in doc or not isinstance(doc["parameters"], dict):
+        raise RegistrySchemaMismatch(f"{path}: missing [parameters] table")
+    params = doc["parameters"]
 
     _check_ascii_keys(params, path)
-
     unknown_keys = set(params.keys()) - STRATEGY_KEYS
     if unknown_keys:
         raise StrategyKeyOutsideRegistry(
@@ -221,7 +226,7 @@ def load_parameter_set(strategy_id: str, parameter_set_id: str) -> ParameterSet:
 
     raw_strings = _extract_raw_param_strings(text)
     normalized_params = _normalize_params(params, raw_strings)
-    strategy_version = strategy.get("strategy_version", "")
+    strategy_version = strategy["strategy_version"]
 
     # Hash the normalized params + strategy identity (excluding
     # schema_version and volatile sidecar fields like author/timestamp,

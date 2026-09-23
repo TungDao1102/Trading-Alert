@@ -509,3 +509,53 @@ def test_path_traversal_segments_raise_unregistered() -> None:
         load_parameter_set("trend-pullback", "../baseline-v1")
     with pytest.raises(UnregisteredParameterSet):
         load_parameter_set("", "baseline-v1")
+
+
+def _write_toml(tmp_path: Path, body: str) -> None:
+    """Write body as tmp test-strategy/test-set TOML."""
+    strategy_dir = tmp_path / "test-strategy"
+    strategy_dir.mkdir(exist_ok=True)
+    (strategy_dir / "test-set.toml").write_text(body, encoding="utf-8")
+
+
+def test_missing_strategy_version_raises(tmp_path: Path) -> None:
+    """Beh. 15: TOML without strategy_version raises (CR-06)."""
+    _write_toml(
+        tmp_path,
+        'schema_version = 1\n'
+        '[strategy]\n'
+        'strategy_id = "test-strategy"\n'
+        '[parameters]\n'
+        'swing_lookback = 20\n',
+    )
+
+    from src.domain import registry
+
+    original_root = registry.REGISTRY_ROOT
+    registry.REGISTRY_ROOT = tmp_path
+    try:
+        with pytest.raises(RegistrySchemaMismatch):
+            load_parameter_set("test-strategy", "test-set")
+    finally:
+        registry.REGISTRY_ROOT = original_root
+
+
+def test_missing_parameters_table_raises(tmp_path: Path) -> None:
+    """Beh. 16: TOML without [parameters] raises (CR-06)."""
+    _write_toml(
+        tmp_path,
+        'schema_version = 1\n'
+        '[strategy]\n'
+        'strategy_id = "test-strategy"\n'
+        'strategy_version = "v1.0.0"\n',
+    )
+
+    from src.domain import registry
+
+    original_root = registry.REGISTRY_ROOT
+    registry.REGISTRY_ROOT = tmp_path
+    try:
+        with pytest.raises(RegistrySchemaMismatch):
+            load_parameter_set("test-strategy", "test-set")
+    finally:
+        registry.REGISTRY_ROOT = original_root
