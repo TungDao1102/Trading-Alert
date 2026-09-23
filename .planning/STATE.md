@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 04
 current_phase_name: pure-core-feature-strategy-planner
 status: executing
-stopped_at: Phase 4 plan 01 complete
-last_updated: "2026-09-23T16:30:00.000Z"
+stopped_at: Phase 4 plan 03 complete
+last_updated: "2026-09-23T23:30:00.000Z"
 last_activity: 2026-09-23
-last_activity_desc: Phase 04 plan 01 (pure-core tracer) complete
-state_head: 44770c03d63c98e65f58c07883e7034decb47c1
+last_activity_desc: Phase 04 plan 03 (full planner contract + registry extension) complete
+state_head: efc30e1
 progress:
   total_phases: 10
   completed_phases: 0
   total_plans: 18
-  completed_plans: 15
+  completed_plans: 17
 ---
 
 <!-- STATE-MD-SCHEMA:END:frontmatter -->
@@ -30,11 +30,11 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 04 (pure-core-feature-strategy-planner) — EXECUTING
-Plan: 1 of 4
+Plan: 3 of 4
 Status: Executing Phase 04
-Last activity: 2026-09-23 — Phase 04 execution started
+Last activity: 2026-09-23 — Phase 04 plan 03 complete
 
-Progress: [██████░░░░] 60%
+Progress: [████████░░] 80%
 
 ## Performance Metrics
 
@@ -89,6 +89,14 @@ Recent decisions affecting current work:
 - [03-04]: D-10 Enum translation via .value for storage and Enum(value) for restore; unknown values raise ValueError
 - [03-04]: FillRow has unique constraint on (order_id, exchange_trade_id) to protect against duplicate fill ingestion
 - [03-04]: CapturingSession pattern snapshots ORM instances BEFORE SQLite roundtrip so NUMERIC lossiness cannot hide mapper errors
+- [04-03]: TP2 rule (04-03 checkpoint:decision option A): TP2 = entry_ref + 2 * minimum_rr * risk, where entry_ref = zone mid for LIMIT_ZONE plans
+- [04-03]: Setup fingerprint key list: family id, variant codes, regime verdict + confirming 4H bar closes, trigger 1H bar close, zone bounds, ATR value at decision time
+- [04-03]: source_timeframe spelling: setup timeframe using exact spelling from tests/fixtures/phase3/candles.csv (lowercase "1h", "4h", "1m"); 4H context folded into fingerprint
+- [04-03]: SetupType tokens: TREND_PULLBACK_LONG/SHORT, BREAKOUT_RETEST_LONG/SHORT, RANGE_MR_LONG/SHORT
+- [04-03]: Invalidation JSON schema: basis=CANDLE_CLOSE, level=stop_loss_price, break_distance_atr=sl_buffer_atr*ATR
+- [04-03]: RR gate is a hard gate returning PlanResult(is_no_trade=True, reason_code=RR_TOO_LOW) — never a downgraded TP1-only plan
+- [04-03]: PlanResult envelope: is_no_trade=True requires trade_plan=None; is_no_trade=False requires a TradePlan
+- [04-03]: Registry whitelist extended with 7 family B/C keys (D-05); 4 keys assigned to INT_KEYS, rest to DECIMAL_KEYS
 
 ### Pending Todos
 
@@ -114,6 +122,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-23T14:31:22.983Z
-Stopped at: Phase 4 context gathered
-Resume file: C:/Users/daotu/OneDrive/Documents/Trading-Alert/.planning/phases/04-pure-core-feature-strategy-planner/04-CONTEXT.md
+Last session: 2026-09-23T23:30:00.000Z
+Stopped at: Phase 4 plan 03 complete
+Resume file: C:/Users/daotu/OneDrive/Documents/Trading-Alert/.planning/phases/04-pure-core-feature-strategy-planner/04-03-SUMMARY.md
