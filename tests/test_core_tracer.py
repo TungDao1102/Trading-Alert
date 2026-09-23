@@ -23,7 +23,7 @@ import pytest
 from src.core.features import compute_features
 from src.core.planner import plan
 from src.core.strategy import evaluate
-from src.core.types import AccountState, MarketSnapshot
+from src.core.types import AccountState, Candle, MarketSnapshot
 from src.domain.canonical import sha256_hex
 from src.domain.ids import derive_child_id, make_signal_id
 from src.domain.registry import ParameterSet, load_parameter_set
@@ -130,13 +130,13 @@ def _build_4h_candles() -> list[dict]:
 
 
 @pytest.fixture
-def candles_1h() -> list[dict]:
-    return _build_1h_candles()
+def candles_1h() -> list[Candle]:
+    return [Candle(**row) for row in _build_1h_candles()]
 
 
 @pytest.fixture
-def candles_4h() -> list[dict]:
-    return _build_4h_candles()
+def candles_4h() -> list[Candle]:
+    return [Candle(**row) for row in _build_4h_candles()]
 
 
 @pytest.fixture
@@ -153,7 +153,7 @@ def account_state() -> AccountState:
 
 
 def _to_snapshot(
-    candles_1h: list[dict], candles_4h: list[dict]
+    candles_1h: list[Candle], candles_4h: list[Candle]
 ) -> MarketSnapshot:
     return MarketSnapshot(
         symbol="BTCUSDT",
@@ -190,8 +190,8 @@ def _setup_fingerprint(features_map: dict) -> str:
 
 
 def test_tracer_happy_path_emits_signal_and_trade_plan_byte_exact(
-    candles_1h: list[dict],
-    candles_4h: list[dict],
+    candles_1h: list[Candle],
+    candles_4h: list[Candle],
     parameter_set,
     account_state: AccountState,
 ) -> None:
@@ -229,11 +229,12 @@ def test_tracer_happy_path_emits_signal_and_trade_plan_byte_exact(
     assert isinstance(signal, Signal)
     assert signal.direction in ("LONG", "SHORT")
     assert signal.setup_type.startswith(("TREND_PULLBACK_", "BREAKOUT_RETEST_", "RANGE_MR_"))
-    assert signal.detected_at_utc == candles_1h[-1]["close_time_utc"]
+    assert signal.detected_at_utc == candles_1h[-1].close_time_utc
 
     # Now produce the plan.
     trade_plan = plan(
         signal=signal,
+        setup_candles=candles_1h,
         parameter_set=parameter_set,
         account_state=account_state,
         created_at_utc=datetime(2026, 9, 19, 23, 0, 0, tzinfo=UTC),
@@ -251,6 +252,7 @@ def test_tracer_happy_path_emits_signal_and_trade_plan_byte_exact(
     # TradePlan must be reproducible.
     trade_plan2 = plan(
         signal=signal,
+        setup_candles=candles_1h,
         parameter_set=parameter_set,
         account_state=account_state,
         created_at_utc=datetime(2026, 9, 19, 23, 0, 0, tzinfo=UTC),
@@ -265,8 +267,8 @@ def test_tracer_happy_path_emits_signal_and_trade_plan_byte_exact(
 
 
 def test_tracer_is_sensitive_to_one_tick_change(
-    candles_1h: list[dict],
-    candles_4h: list[dict],
+    candles_1h: list[Candle],
+    candles_4h: list[Candle],
     parameter_set,
     account_state: AccountState,
 ) -> None:
@@ -285,8 +287,20 @@ def test_tracer_is_sensitive_to_one_tick_change(
         # No SETUP means no plan_hash; the test pivots — perturb and
         # re-evaluate, expect the reason_code to either stay or differ
         # deterministically (i.e. never crash, never silently agree).
-        perturbed = [dict(c) for c in candles_1h]
-        perturbed[-1] = {**perturbed[-1], "close": candles_1h[-1]["close"] + Decimal("0.01")}
+        perturbed = [
+            Candle(
+                symbol=c.symbol,
+                interval=c.interval,
+                open_time_utc=c.open_time_utc,
+                close_time_utc=c.close_time_utc,
+                open=c.open,
+                high=c.high,
+                low=c.low,
+                close=c.close + Decimal("0.01") if i == len(candles_1h) - 1 else c.close,
+                volume=c.volume,
+            )
+            for i, c in enumerate(candles_1h)
+        ]
         snapshot2 = _to_snapshot(perturbed, candles_4h)
         result2 = evaluate(
             snapshot=snapshot2,
@@ -299,8 +313,20 @@ def test_tracer_is_sensitive_to_one_tick_change(
         return
 
     # Perturb the last close by 1 tick (0.01 USD).
-    perturbed = [dict(c) for c in candles_1h]
-    perturbed[-1] = {**perturbed[-1], "close": candles_1h[-1]["close"] + Decimal("0.01")}
+    perturbed = [
+        Candle(
+            symbol=c.symbol,
+            interval=c.interval,
+            open_time_utc=c.open_time_utc,
+            close_time_utc=c.close_time_utc,
+            open=c.open,
+            high=c.high,
+            low=c.low,
+            close=c.close + Decimal("0.01") if i == len(candles_1h) - 1 else c.close,
+            volume=c.volume,
+        )
+        for i, c in enumerate(candles_1h)
+    ]
     snapshot2 = _to_snapshot(perturbed, candles_4h)
     result2 = evaluate(
         snapshot=snapshot2,
@@ -316,13 +342,15 @@ def test_tracer_is_sensitive_to_one_tick_change(
         return
 
     plan_a = plan(
-        signal=result.signal,
+        signal=result.signal,  # type: ignore[arg-type]
+        setup_candles=candles_1h,
         parameter_set=parameter_set,
         account_state=account_state,
         created_at_utc=datetime(2026, 9, 19, 23, 0, 0, tzinfo=UTC),
     )
     plan_b = plan(
-        signal=result2.signal,
+        signal=result2.signal,  # type: ignore[arg-type]
+        setup_candles=perturbed,
         parameter_set=parameter_set,
         account_state=account_state,
         created_at_utc=datetime(2026, 9, 19, 23, 0, 0, tzinfo=UTC),
@@ -340,26 +368,38 @@ def test_tracer_is_sensitive_to_one_tick_change(
 def test_tracer_is_pure_function_no_io() -> None:
     """Beh. 3: src/core modules import nothing from third-party libraries.
 
-    Static guard — read each file and assert no forbidden imports.
-    Forbidden: polars, pandas, numpy, binance, sqlalchemy, pydantic.
+    Static guard — AST-walk each file and assert no forbidden import
+    statements. Forbidden: polars, pandas, numpy, binance, sqlalchemy,
+    pydantic. Comment lines and docstrings are excluded.
     """
-    import os
+    import ast
 
     repo_root = Path(__file__).resolve().parent.parent
     core_dir = repo_root / "src" / "core"
-    forbidden = ("polars", "pandas", "numpy", "binance", "sqlalchemy", "pydantic")
+    forbidden = {
+        "polars",
+        "pandas",
+        "numpy",
+        "binance",
+        "sqlalchemy",
+        "pydantic",
+    }
     for fname in ("__init__.py", "types.py", "features.py", "strategy.py", "planner.py"):
         path = core_dir / fname
         assert path.is_file(), f"missing: {path}"
-        text = path.read_text(encoding="utf-8")
-        for token in forbidden:
-            # Comment lines excluded from the match set (per acceptance criteria).
-            non_comment = "\n".join(
-                line for line in text.splitlines() if not line.lstrip().startswith("#")
-            )
-            assert token not in non_comment, (
-                f"{fname} contains forbidden import {token!r}"
-            )
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = alias.name.split(".")[0]
+                    assert root not in forbidden, (
+                        f"{fname} contains forbidden import {alias.name!r}"
+                    )
+            elif isinstance(node, ast.ImportFrom):
+                root = (node.module or "").split(".")[0]
+                assert root not in forbidden, (
+                    f"{fname} contains forbidden import-from {node.module!r}"
+                )
 
 
 # --------------------------------------------------------------------------- #
@@ -368,7 +408,7 @@ def test_tracer_is_pure_function_no_io() -> None:
 
 
 def test_features_warmup_gates_for_ema200(
-    candles_4h: list[dict], parameter_set
+    candles_4h: list[Candle], parameter_set
 ) -> None:
     """Beh. 4: EMA200(4H) is invalid until 200 bars of history exist.
 
