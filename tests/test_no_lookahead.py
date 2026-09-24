@@ -47,21 +47,47 @@ def _row_to_candle(row: dict) -> Candle:
     )
 
 
+def _first_gap_index_rows(rows: list[dict], interval: str) -> int:
+    """Return the index of the first gap in time-ordered rows.
+
+    Plan 04-04 appended family B/C windows (with intentional gap blocks
+    per D-04) to the shared candles.csv. Determinism suites pin the
+    tracer window, so each stream is truncated to its first contiguous
+    block (1H: 250 bars, 4H: 500 bars — the pre-04-04 layout).
+    """
+    step = TIMEFRAME_SECONDS[interval]
+    ordered = sorted(rows, key=lambda r: r["open_time_utc"])
+    for i in range(1, len(ordered)):
+        prev = datetime.fromisoformat(ordered[i - 1]["open_time_utc"])
+        curr = datetime.fromisoformat(ordered[i]["open_time_utc"])
+        if (curr - prev).total_seconds() > step:
+            return i
+    return len(ordered)
+
+
 def _split_phase4_by_timeframe(
     phase4_candles: list[dict],
 ) -> tuple[list[Candle], list[Candle]]:
     """Split the phase4 fixture into 1H setup candles and 4H context candles.
 
     Sorts each timeframe's candles by open_time_utc so the concatenated
-    setup+context sequences are independently ordered (D-02).
+    setup+context sequences are independently ordered (D-02). Truncates
+    each stream to its first contiguous block (D-04): later family
+    windows carry intentional gaps that must not poison the tracer
+    decision window.
     """
     setup: list[Candle] = []
     context: list[Candle] = []
-    for row in phase4_candles:
-        if row["timeframe"] == "1h":
-            setup.append(_row_to_candle(row))
-        elif row["timeframe"] == "4h":
-            context.append(_row_to_candle(row))
+    rows_1h = [r for r in phase4_candles if r["timeframe"] == "1h"]
+    rows_4h = [r for r in phase4_candles if r["timeframe"] == "4h"]
+    rows_1h = sorted(rows_1h, key=lambda r: r["open_time_utc"])
+    rows_4h = sorted(rows_4h, key=lambda r: r["open_time_utc"])
+    rows_1h = rows_1h[: _first_gap_index_rows(rows_1h, "1h")]
+    rows_4h = rows_4h[: _first_gap_index_rows(rows_4h, "4h")]
+    for row in rows_1h:
+        setup.append(_row_to_candle(row))
+    for row in rows_4h:
+        context.append(_row_to_candle(row))
     setup.sort(key=lambda c: c.open_time_utc)
     context.sort(key=lambda c: c.open_time_utc)
     return setup, context

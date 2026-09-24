@@ -32,7 +32,6 @@ from src.domain.enums import RejectionReason, TradePlanStatus
 from src.domain.ids import derive_child_id
 from src.domain.registry import ParameterSet, load_parameter_set
 
-
 # --------------------------------------------------------------------------- #
 # Helpers — load phase4 candles and build Candle objects.
 # --------------------------------------------------------------------------- #
@@ -131,14 +130,18 @@ def setup_candles(phase4_candles_csv: list[dict]) -> list[Candle]:
 
 @pytest.fixture
 def context_candles(phase4_candles_csv: list[dict]) -> list[Candle]:
-    """4H context candles — all bars from the fixture (contiguous, no gaps).
+    """4H context candles — first contiguous block (pre-gap truncation).
 
     Plan 04-02's feature gate requires ALL features valid on both streams
-    (including EMA200, which needs 200 bars). The 4H fixture has 500
-    contiguous bars starting at 2026-09-09 — enough for EMA200(4H)
-    warm-up. The 4H stream has no gaps, so all bars are usable.
+    (including EMA200, which needs 200 bars). Plan 04-04 appended family
+    B/C windows with intentional gap blocks (D-04) after the tracer
+    window, so the 4H stream is truncated to its first contiguous block
+    (500 bars from 2026-09-09 — enough for EMA200(4H) warm-up), mirroring
+    the setup_candles truncation above.
     """
     rows_4h = [r for r in phase4_candles_csv if r["timeframe"] == "4h"]
+    gap_idx = _first_gap_index(rows_4h, "4h")
+    rows_4h = rows_4h[:gap_idx]
     return _build_candles_from_csv(rows_4h)
 
 
