@@ -229,7 +229,7 @@ class SetupResult:
     """
 
     is_no_trade: bool
-    signal: Signal | None = field(default=None)  # type: ignore[assignment]
+    signal: Signal | None = field(default=None)
     reason_code: str = "OK"
 
     def __post_init__(self) -> None:

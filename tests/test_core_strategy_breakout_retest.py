@@ -27,7 +27,6 @@ from src.core.types import AccountState, Candle, MarketSnapshot
 from src.domain.ids import make_signal_id
 from src.domain.registry import ParameterSet, load_parameter_set
 
-
 # --------------------------------------------------------------------------- #
 # Candle builders — deterministic, Decimal-only candles.
 # --------------------------------------------------------------------------- #

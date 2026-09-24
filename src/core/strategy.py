@@ -43,6 +43,7 @@ from .types import (
     AccountState,
     Candle,
     FeatureFrame,
+    FeatureOutput,
     MarketSnapshot,
     SetupResult,
 )
@@ -368,7 +369,7 @@ def _detect_breakout_retest_setup(
 
 def _find_retest_bar(
     setup_candles: list[Candle],
-    atr_series: list,
+    atr_series: list[FeatureOutput],
     retest_window_bars: int,
     retest_depth_atr: Decimal,
     zone_edge: Decimal,
@@ -545,7 +546,7 @@ def evaluate(
     # WARMUP_INSUFFICIENT / GAP_IN_SOURCE / INVALID_INPUT vocabulary
     # propagates verbatim so the boundary + determinism suites can pin
     # the reason without parsing generic regime messages.
-    for frame, label in (
+    for frame, _label in (
         (setup_frame, "setup"),
         (context_frame, "context"),
     ):
@@ -579,10 +580,15 @@ def evaluate(
             reason_code=RejectionReason.NO_TRADE_REGIME.value,
         )
 
-    # Regime gate (4H context).
+    # Regime gate (4H context) — family-specific.
     last_context_close = snapshot.context_candles[-1].close
     regime = _resolve_regime(context_frame, last_context_close)
-    if regime in ("NO_TRADE", "NEUTRAL"):
+    if regime == "NO_TRADE":
+        return SetupResult(
+            is_no_trade=True,
+            reason_code=RejectionReason.NO_TRADE_REGIME.value,
+        )
+    if parameter_set.strategy_id != "range-mr" and regime == "NEUTRAL":
         return SetupResult(
             is_no_trade=True,
             reason_code=RejectionReason.NO_TRADE_REGIME.value,

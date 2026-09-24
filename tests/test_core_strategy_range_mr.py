@@ -24,7 +24,6 @@ from src.core.types import AccountState, Candle, MarketSnapshot
 from src.domain.ids import make_signal_id
 from src.domain.registry import ParameterSet, load_parameter_set
 
-
 # --------------------------------------------------------------------------- #
 # Candle builders — deterministic, Decimal-only candles.
 # --------------------------------------------------------------------------- #
@@ -196,22 +195,20 @@ def _build_1h_candles_range_mr_short() -> list[Candle]:
 
 
 def _build_4h_candles_neutral() -> list[Candle]:
-    """Build 4H candles with a NEUTRAL regime (close oscillates around EMA50)."""
+    """Build 4H candles with a NEUTRAL regime (constant close = EMA50)."""
     rows: list[Candle] = []
-    base_price = Decimal("50000.00")
     for i in range(250):
-        # Oscillate around 51900 to create a NEUTRAL regime.
-        close = Decimal("51900.00") + Decimal(str((i % 10) * 5 - 25))
-        open_p = close - Decimal("20.00")
-        high = close + Decimal("40.00")
-        low = close - Decimal("40.00")
+        close = Decimal("51900.00")
+        open_p = Decimal("51900.00")
+        high = Decimal("51940.00")
+        low = Decimal("51860.00")
         open_time = _four_hour_open(i)
         rows.append(
             Candle(
                 symbol="BTCUSDT",
                 interval="4h",
                 open_time_utc=open_time,
-                close_time_utc=open_time + timedelta(hours=4) - timedelta(seconds=1),
+                close_time_utc=open_time + timedelta(hours=4) - timedelta(microseconds=1),
                 open=open_p,
                 high=high,
                 low=low,

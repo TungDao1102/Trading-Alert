@@ -14,6 +14,36 @@
       "strategy_id": "trend-pullback",
       "strategy_version": "v1.0.0",
       "symbol": "BTCUSDT"
+    },
+    {
+      "detected_at_utc": "2026-12-25T09:59:59.999999+00:00",
+      "direction": "LONG",
+      "expires_at_utc": "2026-12-25T13:59:59.999999+00:00",
+      "parameter_set_hash": "dbcf730f2f9e5585b3661331f7738334d26341cc28fc170754a2168498dab56d",
+      "parameter_set_id": "baseline-v1",
+      "setup_type": "BREAKOUT_RETEST_LONG",
+      "signal_id": "3b810262fabac24a4c15f199f6bb26ba089b646d8503db057920b8ba4ade6e15",
+      "source_candle_close_utc": "2026-12-25T09:59:59.999999+00:00",
+      "source_timeframe": "1h",
+      "status": "DETECTED",
+      "strategy_id": "breakout-retest",
+      "strategy_version": "v1.0.0",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "detected_at_utc": "2027-02-04T09:59:59.999999+00:00",
+      "direction": "LONG",
+      "expires_at_utc": "2027-02-04T13:59:59.999999+00:00",
+      "parameter_set_hash": "2997f262349da8e5ba7af7837820a7a47fd9e83d6adcf3d316b0e19272f1c1c0",
+      "parameter_set_id": "baseline-v1",
+      "setup_type": "RANGE_MR_LONG",
+      "signal_id": "08dbbcbcd2be16454570150d08b17fc681244a7185325b0385ae646cb5414cde",
+      "source_candle_close_utc": "2027-02-04T09:59:59.999999+00:00",
+      "source_timeframe": "1h",
+      "status": "DETECTED",
+      "strategy_id": "range-mr",
+      "strategy_version": "v1.0.0",
+      "symbol": "BTCUSDT"
     }
   ]
 }
