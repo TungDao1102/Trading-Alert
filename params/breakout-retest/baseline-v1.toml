@@ -28,10 +28,16 @@ sl_buffer_atr = 0.2
 minimum_rr = 2.0
 signal_expiry_hours = 4
 risk_rate = 0.005
+# RESERVED (review WR-10): minimum_risk_utilization_after_rounding has no
+# reader in src/ — no utilization gate exists yet. Wiring belongs to the
+# Phase 5 risk/quantization work. Do not assume an active gate.
 minimum_risk_utilization_after_rounding = 0.6
 # Family B keys (added in plan 04-03, D-05).
 retest_window_bars = 5
 retest_depth_atr = 0.3
+# RESERVED (review WR-10): breakout_volume_threshold has no reader in
+# src/ (volume features are deferred to v2). Wiring belongs to a future
+# family-B volume-confirmation phase. Do not assume an active filter.
 breakout_volume_threshold = 1.5
 # Detector volatility knob (Phase 04 review fix CR-01): the ATR period
 # the Family B detector sizes its zone edge and retest band with.

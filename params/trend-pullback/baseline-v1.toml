@@ -25,4 +25,7 @@ sl_buffer_atr = 0.2
 minimum_rr = 2.0
 signal_expiry_hours = 4
 risk_rate = 0.005
+# RESERVED (review WR-10): minimum_risk_utilization_after_rounding has no
+# reader in src/ — no utilization gate exists yet. Wiring belongs to the
+# Phase 5 risk/quantization work. Do not assume an active gate.
 minimum_risk_utilization_after_rounding = 0.6

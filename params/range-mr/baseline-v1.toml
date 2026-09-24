@@ -29,11 +29,17 @@ sl_buffer_atr = 0.2
 minimum_rr = 2.0
 signal_expiry_hours = 4
 risk_rate = 0.005
+# RESERVED (review WR-10): minimum_risk_utilization_after_rounding has no
+# reader in src/ — no utilization gate exists yet. Wiring belongs to the
+# Phase 5 risk/quantization work. Do not assume an active gate.
 minimum_risk_utilization_after_rounding = 0.6
 # Family C keys (added in plan 04-03, D-05).
 zone_min_touches = 2
 zone_aging_bars = 50
 range_break_buffer_atr = 0.2
+# RESERVED (review WR-10): regime_filter_lookback has no reader in src/ —
+# no lookback gate exists yet. Wiring belongs to a future family-C
+# refinement phase. Do not assume an active gate.
 regime_filter_lookback = 50
 # Detector volatility knobs (Phase 04 review fix CR-01): the ATR period
 # the Family C detector sizes its touch band and break buffer with, and
