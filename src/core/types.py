@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+from src.domain.enums import RejectionReason
+
 # --------------------------------------------------------------------------- #
 # Validation helpers — copied from the Phase-3 signal.py / trade_plan.py
 # pattern (no shared module; each Phase layer keeps its own guards).
@@ -144,12 +146,15 @@ class FeatureOutput:
                     "FeatureOutput: valid=True requires value to be Decimal"
                 )
         else:
+            # WR-09: a stale value must never ride along on invalid —
+            # the AND-gate's chokepoint type enforces "no value without
+            # validity" so `.value`-without-`.valid` misuse fails here,
+            # not downstream. Adapters needing last-known values carry
+            # them in their own local type.
             if self.value is not None:
-                # Permissive: a stale value may ride along on invalid;
-                # the contract is "value must be None when invalid" but
-                # we log rather than reject so adapters can carry
-                # last-known values during transitions.
-                pass
+                raise ValueError(
+                    "FeatureOutput: valid=False requires value=None"
+                )
 
 
 def _ok(value: Decimal) -> FeatureOutput:
@@ -213,6 +218,22 @@ class FeatureFrame:
                     )
 
 
+# SetupResult reason vocabulary (WR-06): the canonical RejectionReason
+# values plus the additive feature-layer codes the strategy gate
+# propagates verbatim (pinned by the boundary + determinism suites).
+# Anything else is a programming error that fails here instead of
+# throwing in a strict-enum downstream consumer.
+_SETUP_REASONS = frozenset(
+    {r.value for r in RejectionReason}
+    | {
+        REASON_OK,
+        REASON_WARMUP_INSUFFICIENT,
+        REASON_GAP_IN_SOURCE,
+        REASON_INVALID_INPUT,
+    }
+)
+
+
 # --------------------------------------------------------------------------- #
 # SetupResult — discriminated NO_TRADE | SETUP envelope (D-07).
 # --------------------------------------------------------------------------- #
@@ -234,6 +255,10 @@ class SetupResult:
 
     def __post_init__(self) -> None:
         _require_non_empty(self.reason_code, "reason_code")
+        if self.reason_code not in _SETUP_REASONS:
+            raise ValueError(
+                f"SetupResult: unknown reason_code {self.reason_code!r}"
+            )
         if self.is_no_trade:
             if self.signal is not None:
                 raise ValueError(
@@ -306,7 +331,6 @@ class AccountState:
 # check above (avoids a circular import on this module's public surface).
 from src.domain.signal import Signal  # noqa: E402
 from src.domain.trade_plan import TradePlan  # noqa: E402
-
 
 # --------------------------------------------------------------------------- #
 # PlanResult — discriminated NO_TRADE-or-TradePlan envelope (D-08).
