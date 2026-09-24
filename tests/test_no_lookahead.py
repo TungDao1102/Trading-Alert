@@ -263,6 +263,37 @@ def test_appending_ten_future_bars_changes_zero_historical_decisions(
 # --------------------------------------------------------------------------- #
 
 
+def _with_support_touch_last_bar(
+    candles: list[Candle], parameter_set: ParameterSet
+) -> list[Candle]:
+    """Patch the last bar's low onto the trailing swing low (CR-06 setup)."""
+    from src.core.features import compute_features
+
+    frame = compute_features(
+        symbol="BTCUSDT",
+        interval="1h",
+        candles=candles,
+        parameter_set=parameter_set,
+    )
+    assert frame.features_valid
+    assert frame.swing_low.value is not None
+    swing_low = frame.swing_low.value
+    last = candles[-1]
+    assert last.open >= swing_low and last.close >= swing_low
+    patched = Candle(
+        symbol=last.symbol,
+        interval=last.interval,
+        open_time_utc=last.open_time_utc,
+        close_time_utc=last.close_time_utc,
+        open=last.open,
+        high=max(last.high, last.open, last.close),
+        low=swing_low,
+        close=last.close,
+        volume=last.volume,
+    )
+    return [*candles[:-1], patched]
+
+
 def test_leaky_variant_is_detected_by_prefix_comparison(
     phase4_candles,
 ) -> None:
@@ -275,6 +306,13 @@ def test_leaky_variant_is_detected_by_prefix_comparison(
     setup_1h, context_4h = _split_phase4_by_timeframe(phase4_candles)
     parameter_set = load_parameter_set("trend-pullback", "baseline-v1")
     prefix = setup_1h[-200:]
+    # Review fix CR-06: the fixture's last prefix bar touches neither the
+    # support nor the resistance zone, so a regime flip alone no longer
+    # moves the decision (both sides stay NO_TRADE and the harness would
+    # go insensitive). Patch the last prefix bar to touch SUPPORT so the
+    # BULLISH side emits LONG while the perturbed (BEARISH) side stays
+    # NO_TRADE — the leak still flips a real decision.
+    prefix = _with_support_touch_last_bar(prefix, parameter_set)
     last_open = prefix[-1].open_time_utc
     extra_candles = [
         _row_to_candle(

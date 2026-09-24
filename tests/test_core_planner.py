@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -121,11 +121,44 @@ def setup_candles(phase4_candles_csv: list[dict]) -> list[Candle]:
 
     Plan 04-02 added an intentional gap at index 250 of the 1H bars.
     We subset to bars 0..249 to keep a gap-free contiguous window.
+
+    Review fix CR-06: the last fixture bar (a mid-range reversal bar)
+    is no longer a valid Family-A setup — LONG requires a touch of the
+    SUPPORT zone. The last bar is patched to touch support (its low is
+    set to the trailing swing low; times/symbol/interval untouched so
+    gap, forming-bar, and correspondence checks are unaffected).
     """
     rows_1h = [r for r in phase4_candles_csv if r["timeframe"] == "1h"]
     gap_idx = _first_gap_index(rows_1h, "1h")
     rows_1h = rows_1h[:gap_idx]
-    return _build_candles_from_csv(rows_1h)
+    return _with_support_touch_last_bar(_build_candles_from_csv(rows_1h))
+
+
+def _with_support_touch_last_bar(candles: list[Candle]) -> list[Candle]:
+    """Patch the last bar's low onto the trailing swing low (CR-06 setup)."""
+    frame = compute_features(
+        symbol="BTCUSDT",
+        interval="1h",
+        candles=candles,
+        parameter_set=load_parameter_set("trend-pullback", "baseline-v1"),
+    )
+    assert frame.features_valid
+    assert frame.swing_low.value is not None
+    swing_low = frame.swing_low.value
+    last = candles[-1]
+    assert last.open >= swing_low and last.close >= swing_low
+    patched = Candle(
+        symbol=last.symbol,
+        interval=last.interval,
+        open_time_utc=last.open_time_utc,
+        close_time_utc=last.close_time_utc,
+        open=last.open,
+        high=max(last.high, last.open, last.close),
+        low=swing_low,
+        close=last.close,
+        volume=last.volume,
+    )
+    return [*candles[:-1], patched]
 
 
 @pytest.fixture
@@ -185,12 +218,14 @@ def _get_signal_and_plan(
     assert not result.is_no_trade, f"expected SETUP, got NO_TRADE: {result.reason_code}"
     assert result.signal is not None
 
+    # CR-08: created_at must fall inside the signal's expiry window
+    # (source_close + signal_expiry_hours), never after it.
     return plan(
         signal=result.signal,
         setup_candles=setup_candles,
         parameter_set=parameter_set,
         account_state=account_state,
-        created_at_utc=datetime(2026, 9, 19, 23, 0, 0, tzinfo=UTC),
+        created_at_utc=result.signal.source_candle_close_utc + timedelta(hours=1),
     )
 
 
@@ -205,7 +240,7 @@ def test_entry_zone_math_long(
     parameter_set: ParameterSet,
     account_state: AccountState,
 ) -> None:
-    """Beh. 1: LONG entry_max = zone_upper + entry_buffer_atr * ATR."""
+    """Beh. 1: LONG entry zone is built off the SUPPORT zone (CR-06/WR-01)."""
     plan_result = _get_signal_and_plan(
         setup_candles, context_candles, parameter_set, account_state
     )
@@ -221,20 +256,21 @@ def test_entry_zone_math_long(
         parameter_set=parameter_set,
     )
     assert frame.features_valid
-    assert frame.zone_upper.value is not None
-    assert frame.zone_lower.value is not None
-    assert frame.atr_14.value is not None
     assert frame.swing_low.value is not None
+    assert frame.atr_14.value is not None
 
     entry_buffer_atr = Decimal(str(parameter_set.params["entry_buffer_atr"]))
     sl_buffer_atr = Decimal(str(parameter_set.params["sl_buffer_atr"]))
+    zone_tolerance_atr = Decimal(str(parameter_set.params["zone_tolerance_atr"]))
     atr = frame.atr_14.value
-    zone_upper = frame.zone_upper.value
-    zone_lower = frame.zone_lower.value
     swing_low = frame.swing_low.value
 
-    expected_entry_max = zone_upper + entry_buffer_atr * atr
-    expected_entry_min = zone_lower - entry_buffer_atr * atr
+    # Per-side Family-A geometry: LONG entry = support zone ± buffer.
+    half_width = zone_tolerance_atr * atr
+    support_upper = swing_low + half_width
+    support_lower = swing_low - half_width
+    expected_entry_max = support_upper + entry_buffer_atr * atr
+    expected_entry_min = support_lower - entry_buffer_atr * atr
     expected_stop = swing_low - sl_buffer_atr * atr
 
     tp = plan_result.trade_plan
@@ -325,12 +361,168 @@ def test_rr_gate_below_returns_no_trade_with_rr_too_low(
         setup_candles=perturbed,
         parameter_set=parameter_set,
         account_state=account_state,
-        created_at_utc=datetime(2026, 9, 19, 23, 0, 0, tzinfo=UTC),
+        created_at_utc=signal.source_candle_close_utc + timedelta(hours=1),
     )
     assert isinstance(plan_result, PlanResult)
     if plan_result.is_no_trade:
         assert plan_result.reason_code == RejectionReason.RR_TOO_LOW.value
         assert plan_result.trade_plan is None
+
+
+def test_rr_gate_fires_on_structure_tp_below_minimum(
+    setup_candles: list[Candle],
+    context_candles: list[Candle],
+    parameter_set: ParameterSet,
+    account_state: AccountState,
+) -> None:
+    """Beh. 2d (CR-03): TP1 is structure-derived, so the RR gate can fire.
+
+    With minimum_rr raised above the structure-implied RR, the planner
+    must return NO_TRADE with RR_TOO_LOW — the gate is a real
+    acceptance threshold, not a tautology.
+    """
+    from src.core.strategy import evaluate
+    from src.core.types import MarketSnapshot
+
+    snapshot = MarketSnapshot(
+        symbol="BTCUSDT",
+        setup_candles=setup_candles,
+        context_candles=context_candles,
+        source_timeframe="1h",
+    )
+    result = evaluate(
+        snapshot=snapshot,
+        account_state=account_state,
+        strategy_version=parameter_set.strategy_version,
+        parameter_set=parameter_set,
+    )
+    assert not result.is_no_trade
+    signal = result.signal
+    assert signal is not None
+
+    strict_params = ParameterSet(
+        strategy_id=parameter_set.strategy_id,
+        strategy_version=parameter_set.strategy_version,
+        parameter_set_id=parameter_set.parameter_set_id,
+        parameter_set_hash=parameter_set.parameter_set_hash,
+        params={**parameter_set.params, "minimum_rr": Decimal("1000")},
+    )
+    plan_result = plan(
+        signal=signal,
+        setup_candles=setup_candles,
+        parameter_set=strict_params,
+        account_state=account_state,
+        created_at_utc=signal.source_candle_close_utc + timedelta(hours=1),
+    )
+    assert isinstance(plan_result, PlanResult)
+    assert plan_result.is_no_trade
+    assert plan_result.reason_code == RejectionReason.RR_TOO_LOW.value
+    assert plan_result.trade_plan is None
+
+
+# --------------------------------------------------------------------------- #
+# Test 2e — fail-closed envelope (CR-02/CR-08/WR-14): never raise, mismatch
+# or stale input returns NO_TRADE with the mapped reason.
+# --------------------------------------------------------------------------- #
+
+
+def _valid_signal_and_params(
+    setup_candles: list[Candle],
+    context_candles: list[Candle],
+    parameter_set: ParameterSet,
+    account_state: AccountState,
+):
+    """Run evaluate and return (signal, created_at_inside_expiry)."""
+    from src.core.strategy import evaluate
+    from src.core.types import MarketSnapshot
+
+    snapshot = MarketSnapshot(
+        symbol="BTCUSDT",
+        setup_candles=setup_candles,
+        context_candles=context_candles,
+        source_timeframe="1h",
+    )
+    result = evaluate(
+        snapshot=snapshot,
+        account_state=account_state,
+        strategy_version=parameter_set.strategy_version,
+        parameter_set=parameter_set,
+    )
+    assert not result.is_no_trade
+    assert result.signal is not None
+    created = result.signal.source_candle_close_utc + timedelta(hours=1)
+    return result.signal, created
+
+
+def test_plan_empty_candles_returns_no_trade(
+    setup_candles: list[Candle],
+    context_candles: list[Candle],
+    parameter_set: ParameterSet,
+    account_state: AccountState,
+) -> None:
+    """Beh. 2e-i (CR-02): empty setup stream returns DATA_STALE, never raises."""
+    signal, created = _valid_signal_and_params(
+        setup_candles, context_candles, parameter_set, account_state
+    )
+    plan_result = plan(
+        signal=signal,
+        setup_candles=[],
+        parameter_set=parameter_set,
+        account_state=account_state,
+        created_at_utc=created,
+    )
+    assert plan_result.is_no_trade
+    assert plan_result.reason_code == RejectionReason.DATA_STALE.value
+    assert plan_result.trade_plan is None
+
+
+def test_plan_expired_signal_returns_no_trade(
+    setup_candles: list[Candle],
+    context_candles: list[Candle],
+    parameter_set: ParameterSet,
+    account_state: AccountState,
+) -> None:
+    """Beh. 2e-ii (CR-08): created_at past expiry returns APPROVAL_EXPIRED."""
+    signal, _ = _valid_signal_and_params(
+        setup_candles, context_candles, parameter_set, account_state
+    )
+    plan_result = plan(
+        signal=signal,
+        setup_candles=setup_candles,
+        parameter_set=parameter_set,
+        account_state=account_state,
+        created_at_utc=signal.source_candle_close_utc + timedelta(hours=99),
+    )
+    assert plan_result.is_no_trade
+    assert plan_result.reason_code == RejectionReason.APPROVAL_EXPIRED.value
+    assert plan_result.trade_plan is None
+
+
+def test_plan_symbol_mismatch_returns_no_trade(
+    setup_candles: list[Candle],
+    context_candles: list[Candle],
+    parameter_set: ParameterSet,
+    account_state: AccountState,
+) -> None:
+    """Beh. 2e-iii (WR-14): foreign-symbol candles return DATA_STALE."""
+    from dataclasses import replace
+
+    signal, created = _valid_signal_and_params(
+        setup_candles, context_candles, parameter_set, account_state
+    )
+    other = [
+        replace(c, symbol="ETHUSDT") for c in setup_candles
+    ]
+    plan_result = plan(
+        signal=signal,
+        setup_candles=other,
+        parameter_set=parameter_set,
+        account_state=account_state,
+        created_at_utc=created,
+    )
+    assert plan_result.is_no_trade
+    assert plan_result.reason_code == RejectionReason.DATA_STALE.value
+    assert plan_result.trade_plan is None
 
 
 # --------------------------------------------------------------------------- #
@@ -421,7 +613,7 @@ def test_expiry_equals_source_close_plus_signal_expiry_hours(
         setup_candles=setup_candles,
         parameter_set=parameter_set,
         account_state=account_state,
-        created_at_utc=datetime(2026, 9, 19, 23, 0, 0, tzinfo=UTC),
+        created_at_utc=signal.source_candle_close_utc + timedelta(hours=1),
     )
     assert isinstance(plan_result, PlanResult)
     assert not plan_result.is_no_trade
