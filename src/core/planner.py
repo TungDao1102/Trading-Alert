@@ -119,11 +119,15 @@ def _long_geometry(
         if setup is None or setup[0] != "LONG":
             return (None, None, None, None)
         _direction, _setup_type, zone_upper, zone_lower = setup
+        # Measured-move target over the range height; the stop sits
+        # under the retest edge (a lost retest invalidates the setup —
+        # a support-based stop is so far that TP1/structure-risk can
+        # never reach minimum_rr, which would NO_TRADE every plan).
         height = _sub(zone_upper, zone_lower)
         return (
             zone_upper,
             zone_upper,
-            _sub(zone_lower, sl_buffer),
+            _sub(zone_upper, sl_buffer),
             _add(zone_upper, height),
         )
     if strategy_id == "range-mr":
@@ -174,7 +178,7 @@ def _short_geometry(
         return (
             zone_lower,
             zone_lower,
-            _add(zone_upper, sl_buffer),
+            _add(zone_lower, sl_buffer),
             _sub(zone_lower, height),
         )
     if strategy_id == "range-mr":
