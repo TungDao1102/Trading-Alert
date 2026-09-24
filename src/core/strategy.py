@@ -250,7 +250,7 @@ def _detect_breakout_retest_setup(
         str(parameter_set.params["zone_tolerance_atr"])
     )
     swing_lookback = int(parameter_set.params["swing_lookback"])
-    atr_period = int(parameter_set.params.get("atr_period", 14))
+    atr_period = int(parameter_set.params["atr_period"])
 
     n = len(setup_candles)
     min_bars = breakout_confirmation_bars + retest_window_bars + swing_lookback
@@ -396,10 +396,9 @@ def _detect_range_mr_setup(
         str(parameter_set.params["range_break_buffer_atr"])
     )
     swing_lookback = int(parameter_set.params["swing_lookback"])
-    atr_period = int(parameter_set.params.get("atr_period", 14))
-    touch_tolerance_atr = Decimal(
-        str(parameter_set.params.get("touch_tolerance_atr", "0.3"))
-    )
+    # CR-01: versioned registry knobs — KeyError (never silent defaults).
+    atr_period = int(parameter_set.params["atr_period"])
+    touch_tolerance_atr = Decimal(str(parameter_set.params["touch_tolerance_atr"]))
 
     n = len(setup_candles)
     if n < swing_lookback + zone_aging_bars + 1:

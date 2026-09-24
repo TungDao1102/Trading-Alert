@@ -77,6 +77,12 @@ STRATEGY_KEYS = frozenset(
         "zone_aging_bars",
         "range_break_buffer_atr",
         "regime_filter_lookback",
+        # Detector volatility knobs — promoted to the registry in the
+        # Phase 04 review fix (CR-01). Previously silent `.get()`
+        # code defaults in the Family B/C detectors; now versioned
+        # parameters that fail closed (KeyError) when absent.
+        "atr_period",
+        "touch_tolerance_atr",
     }
 )
 
@@ -227,6 +233,8 @@ INT_KEYS = frozenset(
         "zone_min_touches",
         "zone_aging_bars",
         "regime_filter_lookback",
+        # Detector volatility knob — Phase 04 review fix (CR-01).
+        "atr_period",
     }
 )
 DECIMAL_KEYS = STRATEGY_KEYS - INT_KEYS

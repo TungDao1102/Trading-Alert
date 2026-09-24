@@ -35,3 +35,9 @@ zone_min_touches = 2
 zone_aging_bars = 50
 range_break_buffer_atr = 0.2
 regime_filter_lookback = 50
+# Detector volatility knobs (Phase 04 review fix CR-01): the ATR period
+# the Family C detector sizes its touch band and break buffer with, and
+# the touch-tolerance band around each range edge. Previously silent
+# code defaults; now versioned parameters.
+atr_period = 14
+touch_tolerance_atr = 0.3

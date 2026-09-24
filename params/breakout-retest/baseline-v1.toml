@@ -33,3 +33,7 @@ minimum_risk_utilization_after_rounding = 0.6
 retest_window_bars = 5
 retest_depth_atr = 0.3
 breakout_volume_threshold = 1.5
+# Detector volatility knob (Phase 04 review fix CR-01): the ATR period
+# the Family B detector sizes its zone edge and retest band with.
+# Previously a silent code default; now a versioned parameter.
+atr_period = 14
