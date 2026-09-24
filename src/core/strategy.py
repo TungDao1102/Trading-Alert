@@ -30,7 +30,7 @@ families remain hypotheses pending backtest + out-of-sample evidence.
 from __future__ import annotations
 
 from datetime import timedelta
-from decimal import Decimal, localcontext
+from decimal import Decimal
 
 from src.domain.canonical import sha256_hex
 from src.domain.enums import RejectionReason, SignalStatus
@@ -44,7 +44,6 @@ from .types import (
     AccountState,
     Candle,
     FeatureFrame,
-    FeatureOutput,
     MarketSnapshot,
     SetupResult,
 )
@@ -253,7 +252,10 @@ def _detect_breakout_retest_setup(
     atr_period = int(parameter_set.params["atr_period"])
 
     n = len(setup_candles)
-    min_bars = breakout_confirmation_bars + retest_window_bars + swing_lookback
+    # WR-15: only breakout_confirmation_bars + swing_lookback of HISTORY
+    # is required — the retest window extends FORWARD from the breakout
+    # bar, so it must not gate how much history a valid setup needs.
+    min_bars = breakout_confirmation_bars + swing_lookback
     if n < min_bars:
         return None
 
@@ -261,81 +263,88 @@ def _detect_breakout_retest_setup(
     swing_low_series = _swing_series(setup_candles, swing_lookback, high=False)
     atr_series = _atr_series(setup_candles, atr_period)
 
-    with localcontext() as ctx:
-        ctx.prec = 50
+    # CR-04: every op routes through the pinned prec-28 helpers — no
+    # localcontext(prec=50) block, no ambient-precision arithmetic.
+    for i in range(n - 1, breakout_confirmation_bars - 1, -1):
+        ref_bar = i - breakout_confirmation_bars
+        ref_prev = ref_bar - 1
+        if ref_prev < 0:
+            continue
+        sh_ref_out = swing_high_series[ref_prev]
+        sl_ref_out = swing_low_series[ref_prev]
+        atr_ref_out = atr_series[ref_prev]
+        if (
+            not sh_ref_out.valid
+            or sh_ref_out.value is None
+            or not sl_ref_out.valid
+            or sl_ref_out.value is None
+            or not atr_ref_out.valid
+            or atr_ref_out.value is None
+        ):
+            continue
+        # WR-12: one (zone, atr_ref) pair per candidate — the edge AND
+        # the retest band derive from the reference bar's ATR, never
+        # from a later bar's volatility.
+        atr_ref = atr_ref_out.value
+        zone_upper = _add(
+            sh_ref_out.value, _mul(zone_tolerance_atr, atr_ref)
+        )
+        zone_lower = _sub(
+            sl_ref_out.value, _mul(zone_tolerance_atr, atr_ref)
+        )
 
-        for i in range(n - 1, breakout_confirmation_bars - 1, -1):
-            ref_bar = i - breakout_confirmation_bars
-            ref_prev = ref_bar - 1
-            if ref_prev < 0:
-                continue
-            sh_ref_out = swing_high_series[ref_prev]
-            sl_ref_out = swing_low_series[ref_prev]
-            atr_ref_out = atr_series[ref_prev]
-            if (
-                not sh_ref_out.valid
-                or sh_ref_out.value is None
-                or not sl_ref_out.valid
-                or sl_ref_out.value is None
-                or not atr_ref_out.valid
-                or atr_ref_out.value is None
-            ):
-                continue
-            zone_upper = sh_ref_out.value + zone_tolerance_atr * atr_ref_out.value
-            zone_lower = sl_ref_out.value - zone_tolerance_atr * atr_ref_out.value
+        long_breakout = True
+        for j in range(breakout_confirmation_bars):
+            if setup_candles[i - j].close <= zone_upper:
+                long_breakout = False
+                break
+        if long_breakout:
+            retest_bar_idx = _find_retest_bar(
+                setup_candles,
+                atr_ref,
+                retest_window_bars,
+                retest_depth_atr,
+                zone_upper,
+                i + 1,
+                is_long=True,
+            )
+            if retest_bar_idx is not None:
+                return ("LONG", "BREAKOUT_RETEST_LONG", zone_upper, zone_lower)
 
-            long_breakout = True
-            for j in range(breakout_confirmation_bars):
-                if setup_candles[i - j].close <= zone_upper:
-                    long_breakout = False
-                    break
-            if long_breakout:
-                retest_bar_idx = _find_retest_bar(
-                    setup_candles,
-                    atr_series,
-                    retest_window_bars,
-                    retest_depth_atr,
+        if (
+            not sl_ref_out.valid
+            or sl_ref_out.value is None
+        ):
+            continue
+        short_breakout = True
+        for j in range(breakout_confirmation_bars):
+            if setup_candles[i - j].close >= zone_lower:
+                short_breakout = False
+                break
+        if short_breakout:
+            retest_bar_idx = _find_retest_bar(
+                setup_candles,
+                atr_ref,
+                retest_window_bars,
+                retest_depth_atr,
+                zone_lower,
+                i + 1,
+                is_long=False,
+            )
+            if retest_bar_idx is not None:
+                return (
+                    "SHORT",
+                    "BREAKOUT_RETEST_SHORT",
                     zone_upper,
-                    i + 1,
-                    is_long=True,
-                )
-                if retest_bar_idx is not None:
-                    return ("LONG", "BREAKOUT_RETEST_LONG", zone_upper, zone_lower)
-
-            if (
-                not sl_ref_out.valid
-                or sl_ref_out.value is None
-            ):
-                continue
-            short_breakout = True
-            for j in range(breakout_confirmation_bars):
-                if setup_candles[i - j].close >= zone_lower:
-                    short_breakout = False
-                    break
-            if short_breakout:
-                retest_bar_idx = _find_retest_bar(
-                    setup_candles,
-                    atr_series,
-                    retest_window_bars,
-                    retest_depth_atr,
                     zone_lower,
-                    i + 1,
-                    is_long=False,
                 )
-                if retest_bar_idx is not None:
-                    return (
-                        "SHORT",
-                        "BREAKOUT_RETEST_SHORT",
-                        zone_upper,
-                        zone_lower,
-                    )
 
     return None
 
 
 def _find_retest_bar(
     setup_candles: list[Candle],
-    atr_series: list[FeatureOutput],
+    atr_ref: Decimal,
     retest_window_bars: int,
     retest_depth_atr: Decimal,
     zone_edge: Decimal,
@@ -346,21 +355,21 @@ def _find_retest_bar(
     """Scan forward from start_idx for a retest bar within window.
 
     For LONG: the bar's low must be in `[zone_edge −
-    retest_depth_atr * ATR, zone_edge + retest_depth_atr * ATR]`.
-    For SHORT: the bar's high must be in the same band.
+    retest_depth_atr * ATR_ref, zone_edge + retest_depth_atr * ATR_ref]`.
+    For SHORT: the bar's high must be in the same band. `ATR_ref` is the
+    reference bar's ATR (WR-12: edge and band share one volatility).
     """
     n = len(setup_candles)
     end_idx = min(start_idx + retest_window_bars, n)
+    band = _mul(retest_depth_atr, atr_ref)
+    band_lo = _sub(zone_edge, band)
+    band_hi = _add(zone_edge, band)
     for k in range(start_idx, end_idx):
-        atr_out = atr_series[k]
-        if not atr_out.valid or atr_out.value is None:
-            continue
-        band = retest_depth_atr * atr_out.value
         if is_long:
-            if zone_edge - band <= setup_candles[k].low <= zone_edge + band:
+            if band_lo <= setup_candles[k].low <= band_hi:
                 return k
         else:
-            if zone_edge - band <= setup_candles[k].high <= zone_edge + band:
+            if band_lo <= setup_candles[k].high <= band_hi:
                 return k
     return None
 
