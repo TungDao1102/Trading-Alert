@@ -145,27 +145,36 @@ def _detect_setup(
     setup_frame: FeatureFrame,
     last_setup_candle: Candle,
     regime: str,
+    *,
+    zone_tolerance_atr: Decimal,
 ) -> tuple[str, str, Decimal, Decimal] | None:
     """Return (direction, setup_type, zone_upper, zone_lower) or None.
 
-    LONG: regime == BULLISH AND last_setup_candle.low <= zone_upper AND
-    last_setup_candle.low >= zone_lower (P1 zone touch).
-    SHORT: regime == BEARISH AND last_setup_candle.high >= zone_lower
-    AND last_setup_candle.high <= zone_upper (symmetric).
+    CR-06: per-side zones, not the cross-range pair. LONG keys off the
+    SUPPORT zone (swing low ± tolerance) in a BULLISH regime; SHORT keys
+    off the RESISTANCE zone (swing high ± tolerance) in a BEARISH
+    regime — per trend-pullback.md §3. A BULLISH bar touching
+    RESISTANCE is not a pullback to support and emits nothing. The
+    returned zone is the touched side's zone (bound into the setup
+    fingerprint), not the full support-to-resistance span.
     """
     if not setup_frame.features_valid:
         return None
-    assert setup_frame.zone_upper.value is not None
-    assert setup_frame.zone_lower.value is not None
-    zone_upper = setup_frame.zone_upper.value
-    zone_lower = setup_frame.zone_lower.value
+    assert setup_frame.swing_low.value is not None
+    assert setup_frame.swing_high.value is not None
+    assert setup_frame.atr_14.value is not None
+    half = _mul(zone_tolerance_atr, setup_frame.atr_14.value)
+    support_lower = _sub(setup_frame.swing_low.value, half)
+    support_upper = _add(setup_frame.swing_low.value, half)
+    resistance_lower = _sub(setup_frame.swing_high.value, half)
+    resistance_upper = _add(setup_frame.swing_high.value, half)
 
     if regime == "BULLISH":
-        if last_setup_candle.low <= zone_upper and last_setup_candle.low >= zone_lower:
-            return ("LONG", "TREND_PULLBACK_LONG", zone_upper, zone_lower)
+        if support_lower <= last_setup_candle.low <= support_upper:
+            return ("LONG", "TREND_PULLBACK_LONG", support_upper, support_lower)
     elif regime == "BEARISH":
-        if last_setup_candle.high >= zone_lower and last_setup_candle.high <= zone_upper:
-            return ("SHORT", "TREND_PULLBACK_SHORT", zone_upper, zone_lower)
+        if resistance_lower <= last_setup_candle.high <= resistance_upper:
+            return ("SHORT", "TREND_PULLBACK_SHORT", resistance_upper, resistance_lower)
     return None
 
 
@@ -585,6 +594,14 @@ def evaluate(
             is_no_trade=True,
             reason_code=RejectionReason.NO_TRADE_REGIME.value,
         )
+    # CR-07: range-mr is a NEUTRAL-regime family — fading an established
+    # trend as "mean reversion" is the false-positive class the regime
+    # gate exists to prevent.
+    if parameter_set.strategy_id == "range-mr" and regime != "NEUTRAL":
+        return SetupResult(
+            is_no_trade=True,
+            reason_code=RejectionReason.NO_TRADE_REGIME.value,
+        )
 
     # Forming-bar gate (D-02/STRAT-01): the engine must NEVER source a
     # SETUP from an unclosed candle. If the last setup candle is still
@@ -611,8 +628,20 @@ def evaluate(
             setup_candles=snapshot.setup_candles,
             parameter_set=parameter_set,
         )
+    elif parameter_set.strategy_id == "trend-pullback":
+        zone_tolerance_atr = Decimal(str(parameter_set.params["zone_tolerance_atr"]))
+        setup = _detect_setup(
+            setup_frame,
+            last_setup_candle,
+            regime,
+            zone_tolerance_atr=zone_tolerance_atr,
+        )
     else:
-        setup = _detect_setup(setup_frame, last_setup_candle, regime)
+        # WR-11: unknown family is NO_TRADE — never default to Family A.
+        return SetupResult(
+            is_no_trade=True,
+            reason_code=RejectionReason.DATA_STALE.value,
+        )
     if setup is None:
         return SetupResult(
             is_no_trade=True,
