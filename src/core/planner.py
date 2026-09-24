@@ -1,13 +1,18 @@
 """Pure trade planner — SETUP → TradePlan (Phase 4, plan 04-03).
 
 Per D-08/D-09: every SETUP produces exactly one TradePlan filling the
-existing `src/domain/trade_plan.py` shape. Entry zone from
-`entry_buffer_atr`, SL from `sl_buffer_atr`, TP1 at `minimum_rr`, TP2
-extension (2 * minimum_rr per the 04-03 checkpoint:decision option A),
-invalidation JSON with basis=CANDLE_CLOSE + level + break_distance,
-expiry = source_close + signal_expiry_hours, plan_hash = SHA256 over
-canonical JSON. RR below `minimum_rr` returns NO_TRADE with
-`RR_TOO_LOW` (never a downgraded plan).
+existing `src/domain/trade_plan.py` shape. Entry/SL geometry is built
+from the levels that triggered the setup (CR-05): Family A prices off
+its per-side support/resistance zone, Families B/C re-derive the
+detector's zone edge from the same candles (the signal carries no
+zone). TP1 is structure-derived (opposing extreme / measured move),
+never constructed from `minimum_rr` (CR-03) — `minimum_rr` stays purely
+an acceptance threshold, so the RR gate can actually fire. Invalidation
+JSON carries basis=CANDLE_CLOSE + level + break_distance, expiry =
+source_close + signal_expiry_hours, plan_hash = SHA256 over canonical
+JSON. RR below `minimum_rr` returns NO_TRADE with `RR_TOO_LOW` (never
+a downgraded plan); stale/foreign signals return NO_TRADE, never raise
+(CR-02/CR-08/WR-14).
 
 Quantization fields are populated with Decimal planner-side estimates
 for shape completeness, but exchange rounding/minimums enforcement stays
@@ -36,6 +41,7 @@ from src.domain.trade_plan import TradePlan
 # review WR-16); re-exported here for `from .planner import ...` users.
 from ._decimal import _add, _div, _mul, _q, _sub  # noqa: F401 (re-export for compat)
 from .features import compute_features
+from .strategy import _detect_breakout_retest_setup, _detect_range_mr_setup
 from .types import AccountState, Candle, PlanResult
 
 # --------------------------------------------------------------------------- #
@@ -72,6 +78,122 @@ def _plan_hash(
 
 
 # --------------------------------------------------------------------------- #
+# Setup-level geometry — entry/SL/TP1 from the trigger levels (CR-05).
+# --------------------------------------------------------------------------- #
+
+_Geometry = tuple[Decimal | None, Decimal | None, Decimal | None, Decimal | None]
+
+
+def _long_geometry(
+    strategy_id: str,
+    setup_candles: list[Candle],
+    parameter_set: ParameterSet,
+    atr: Decimal,
+    swing_high: Decimal,
+    swing_low: Decimal,
+    zone_tolerance_atr: Decimal,
+    sl_buffer: Decimal,
+) -> _Geometry:
+    """Return (zone_upper, zone_lower, stop_loss, tp1) for a LONG signal.
+
+    Family A prices off the support zone; Families B/C re-derive the
+    detector's zone edge from the same candles (CR-05) and price the
+    entry around that edge with a measured-move TP1 (CR-03). A
+    vanished, direction-mismatched, or unknown-family setup returns
+    all-None so the caller emits STALE_SETUP.
+    """
+    if strategy_id == "trend-pullback":
+        half = _mul(zone_tolerance_atr, atr)
+        support_upper = _add(swing_low, half)
+        support_lower = _sub(swing_low, half)
+        return (
+            support_upper,
+            support_lower,
+            _sub(swing_low, sl_buffer),
+            swing_high,
+        )
+    if strategy_id == "breakout-retest":
+        setup = _detect_breakout_retest_setup(
+            setup_candles=setup_candles, parameter_set=parameter_set
+        )
+        if setup is None or setup[0] != "LONG":
+            return (None, None, None, None)
+        _direction, _setup_type, zone_upper, zone_lower = setup
+        height = _sub(zone_upper, zone_lower)
+        return (
+            zone_upper,
+            zone_upper,
+            _sub(zone_lower, sl_buffer),
+            _add(zone_upper, height),
+        )
+    if strategy_id == "range-mr":
+        setup = _detect_range_mr_setup(
+            setup_candles=setup_candles, parameter_set=parameter_set
+        )
+        if setup is None or setup[0] != "LONG":
+            return (None, None, None, None)
+        _direction, _setup_type, zone_upper, zone_lower = setup
+        return (
+            zone_lower,
+            zone_lower,
+            _sub(zone_lower, sl_buffer),
+            zone_upper,
+        )
+    return (None, None, None, None)
+
+
+def _short_geometry(
+    strategy_id: str,
+    setup_candles: list[Candle],
+    parameter_set: ParameterSet,
+    atr: Decimal,
+    swing_high: Decimal,
+    swing_low: Decimal,
+    zone_tolerance_atr: Decimal,
+    sl_buffer: Decimal,
+) -> _Geometry:
+    """Return (zone_upper, zone_lower, stop_loss, tp1) for a SHORT signal."""
+    if strategy_id == "trend-pullback":
+        half = _mul(zone_tolerance_atr, atr)
+        resistance_upper = _add(swing_high, half)
+        resistance_lower = _sub(swing_high, half)
+        return (
+            resistance_upper,
+            resistance_lower,
+            _add(swing_high, sl_buffer),
+            swing_low,
+        )
+    if strategy_id == "breakout-retest":
+        setup = _detect_breakout_retest_setup(
+            setup_candles=setup_candles, parameter_set=parameter_set
+        )
+        if setup is None or setup[0] != "SHORT":
+            return (None, None, None, None)
+        _direction, _setup_type, zone_upper, zone_lower = setup
+        height = _sub(zone_upper, zone_lower)
+        return (
+            zone_lower,
+            zone_lower,
+            _add(zone_upper, sl_buffer),
+            _sub(zone_lower, height),
+        )
+    if strategy_id == "range-mr":
+        setup = _detect_range_mr_setup(
+            setup_candles=setup_candles, parameter_set=parameter_set
+        )
+        if setup is None or setup[0] != "SHORT":
+            return (None, None, None, None)
+        _direction, _setup_type, zone_upper, zone_lower = setup
+        return (
+            zone_upper,
+            zone_upper,
+            _add(zone_upper, sl_buffer),
+            zone_lower,
+        )
+    return (None, None, None, None)
+
+
+# --------------------------------------------------------------------------- #
 # Public entry point — plan.
 # --------------------------------------------------------------------------- #
 
@@ -86,89 +208,194 @@ def plan(
 ) -> PlanResult:
     """Build a TradePlan from a SETUP signal + the 1H candle stream.
 
-    The planner recomputes features on the 1H setup stream — the same
-    features the strategy already validated — to keep a single
-    deterministic computation path (no double-source-of-truth). Entry
-    zone from `entry_buffer_atr`, SL from `sl_buffer_atr`, TP1 at
-    `minimum_rr`, TP2 extension = 2 * minimum_rr (04-03 checkpoint
-    option A), invalidation JSON with basis=CANDLE_CLOSE + level +
-    break_distance, expiry = source_close + signal_expiry_hours,
-    plan_hash via canonical SHA256.
-
-    RR below `minimum_rr` returns NO_TRADE with RejectionReason.RR_TOO_LOW
-    (D-08: never a downgraded plan). The planner is the second line of
-    defense; the strategy gate should have caught this earlier.
+    Fail-closed (CR-02/CR-08/WR-14): empty streams, invalid features,
+    non-positive risk, expired signals, and any signal-vs-candles (or
+    signal-vs-parameter-set) mismatch return NO_TRADE — never raise.
+    Geometry comes from the levels that triggered the setup (CR-05):
+    the Family-A side zone, or the re-derived Family-B/C detector zone;
+    `compute_features` is the validity gate, not the geometry source.
+    TP1 is structure-derived and `minimum_rr` is purely an acceptance
+    threshold (CR-03), so the RR gate below can actually fire.
     """
+    # Signal-vs-candles correspondence (CR-08/WR-14) — before touching
+    # setup_candles[0], so an empty stream returns NO_TRADE (CR-02).
+    if not setup_candles:
+        return PlanResult(
+            is_no_trade=True,
+            trade_plan=None,
+            reason_code=RejectionReason.DATA_STALE.value,
+        )
+    if signal.symbol != setup_candles[0].symbol:
+        return PlanResult(
+            is_no_trade=True,
+            trade_plan=None,
+            reason_code=RejectionReason.DATA_STALE.value,
+        )
+    if signal.source_timeframe != setup_candles[0].interval:
+        return PlanResult(
+            is_no_trade=True,
+            trade_plan=None,
+            reason_code=RejectionReason.DATA_STALE.value,
+        )
+    if signal.strategy_id != parameter_set.strategy_id:
+        return PlanResult(
+            is_no_trade=True,
+            trade_plan=None,
+            reason_code=RejectionReason.DATA_STALE.value,
+        )
+    if signal.parameter_set_id != parameter_set.parameter_set_id:
+        return PlanResult(
+            is_no_trade=True,
+            trade_plan=None,
+            reason_code=RejectionReason.DATA_STALE.value,
+        )
+    if signal.source_candle_close_utc != setup_candles[-1].close_time_utc:
+        return PlanResult(
+            is_no_trade=True,
+            trade_plan=None,
+            reason_code=RejectionReason.STALE_SETUP.value,
+        )
+
     # Pull parameters.
     entry_buffer_atr = parameter_set.params["entry_buffer_atr"]
     sl_buffer_atr = parameter_set.params["sl_buffer_atr"]
     minimum_rr = parameter_set.params["minimum_rr"]
+    zone_tolerance_atr = parameter_set.params["zone_tolerance_atr"]
     signal_expiry_hours = int(parameter_set.params["signal_expiry_hours"])
-    risk_rate = parameter_set.params["risk_rate"]
+    # WR-03: the account's risk_rate is the single sizing source of
+    # truth — the registry copy is not read for sizing.
+    risk_rate = account_state.risk_rate
     if not isinstance(entry_buffer_atr, Decimal):
         entry_buffer_atr = Decimal(str(entry_buffer_atr))
     if not isinstance(sl_buffer_atr, Decimal):
         sl_buffer_atr = Decimal(str(sl_buffer_atr))
     if not isinstance(minimum_rr, Decimal):
         minimum_rr = Decimal(str(minimum_rr))
-    if not isinstance(risk_rate, Decimal):
-        risk_rate = Decimal(str(risk_rate))
+    if not isinstance(zone_tolerance_atr, Decimal):
+        zone_tolerance_atr = Decimal(str(zone_tolerance_atr))
 
-    # Compute features on the setup stream (deterministic; same path as strategy).
-    setup_frame = compute_features(
-        symbol=signal.symbol,
-        interval=setup_candles[0].interval,
-        candles=setup_candles,
-        parameter_set=parameter_set,
-    )
+    # Expiry = source_close + signal_expiry_hours; an already-expired
+    # signal at creation time is NO_TRADE, never a READY plan (CR-08).
+    expiry_utc = signal.source_candle_close_utc + timedelta(hours=signal_expiry_hours)
+    if expiry_utc <= created_at_utc:
+        return PlanResult(
+            is_no_trade=True,
+            trade_plan=None,
+            reason_code=RejectionReason.APPROVAL_EXPIRED.value,
+        )
+
+    # Features are the validity gate only (CR-05), never the geometry
+    # source. Mixed-symbol/interval streams raise inside — map to
+    # NO_TRADE rather than crashing the caller (CR-02).
+    try:
+        setup_frame = compute_features(
+            symbol=signal.symbol,
+            interval=signal.source_timeframe,
+            candles=setup_candles,
+            parameter_set=parameter_set,
+        )
+    except ValueError:
+        return PlanResult(
+            is_no_trade=True,
+            trade_plan=None,
+            reason_code=RejectionReason.DATA_STALE.value,
+        )
     if not setup_frame.features_valid:
-        raise ValueError(
-            f"plan: features invalid at bar {setup_frame.bar_index} "
-            f"(rejection={setup_frame.atr_14.reason_code})"
+        reason = RejectionReason.DATA_STALE.value
+        for feat in (
+            setup_frame.ema_20,
+            setup_frame.ema_50,
+            setup_frame.ema_200,
+            setup_frame.atr_14,
+            setup_frame.swing_high,
+            setup_frame.swing_low,
+            setup_frame.zone_upper,
+            setup_frame.zone_lower,
+        ):
+            if not feat.valid:
+                reason = feat.reason_code
+                if reason == "GAP_IN_SOURCE":
+                    reason = RejectionReason.DATA_STALE.value
+                break
+        return PlanResult(
+            is_no_trade=True,
+            trade_plan=None,
+            reason_code=reason,
         )
     assert setup_frame.atr_14.value is not None
     assert setup_frame.swing_high.value is not None
     assert setup_frame.swing_low.value is not None
-    assert setup_frame.zone_upper.value is not None
-    assert setup_frame.zone_lower.value is not None
 
     atr = setup_frame.atr_14.value
     swing_high = setup_frame.swing_high.value
     swing_low = setup_frame.swing_low.value
-    zone_upper = setup_frame.zone_upper.value
-    zone_lower = setup_frame.zone_lower.value
 
-    # Entry zone: zone ± entry_buffer_atr * ATR.
+    # Geometry from the trigger levels (CR-05/WR-01): per-side zones —
+    # LONG off support, SHORT off resistance. Families B/C re-derive
+    # the detector's zone edge; a vanished/mismatched setup at plan
+    # time is STALE_SETUP, never a repriced plan.
     entry_buffer = _mul(entry_buffer_atr, atr)
+    sl_buffer = _mul(sl_buffer_atr, atr)
     if signal.direction == "LONG":
-        entry_min = _sub(zone_lower, entry_buffer)
-        entry_max = _add(zone_upper, entry_buffer)
-        stop_loss = _sub(swing_low, _mul(sl_buffer_atr, atr))
+        zone_upper, zone_lower, stop_loss, take_profit_1 = _long_geometry(
+            signal.strategy_id,
+            setup_candles,
+            parameter_set,
+            atr,
+            swing_high,
+            swing_low,
+            zone_tolerance_atr,
+            sl_buffer,
+        )
+    elif signal.direction == "SHORT":
+        zone_upper, zone_lower, stop_loss, take_profit_1 = _short_geometry(
+            signal.strategy_id,
+            setup_candles,
+            parameter_set,
+            atr,
+            swing_high,
+            swing_low,
+            zone_tolerance_atr,
+            sl_buffer,
+        )
     else:
-        entry_min = _sub(zone_lower, entry_buffer)
-        entry_max = _add(zone_upper, entry_buffer)
-        stop_loss = _add(swing_high, _mul(sl_buffer_atr, atr))
+        return PlanResult(
+            is_no_trade=True,
+            trade_plan=None,
+            reason_code=RejectionReason.DATA_STALE.value,
+        )
+    if zone_upper is None or zone_lower is None or stop_loss is None:
+        return PlanResult(
+            is_no_trade=True,
+            trade_plan=None,
+            reason_code=RejectionReason.STALE_SETUP.value,
+        )
+    assert take_profit_1 is not None
+    entry_min = _sub(zone_lower, entry_buffer)
+    entry_max = _add(zone_upper, entry_buffer)
 
     # Reference entry = midpoint of the zone (deterministic, no fill model).
     # Per 04-03 checkpoint:decision option A: entry_ref = zone mid for LIMIT_ZONE.
     entry_ref = _div(_add(entry_min, entry_max), _q("2"))
 
-    # Risk = |entry_ref - stop_loss|.
+    # Risk = |entry_ref - stop_loss|; non-positive risk is NO_TRADE (CR-02).
     risk = abs(_sub(entry_ref, stop_loss))
     if risk <= Decimal("0"):
-        raise ValueError(
-            f"plan: risk {risk} must be > 0 (entry_ref={entry_ref}, stop={stop_loss})"
+        return PlanResult(
+            is_no_trade=True,
+            trade_plan=None,
+            reason_code=RejectionReason.RR_TOO_LOW.value,
         )
 
-    # TP1 at minimum_rr; TP2 extension = 2 * minimum_rr (04-03 option A).
+    # TP2 extends the structure move: entry ± 2 * (TP1 − entry).
+    tp1 = take_profit_1
+    tp1_leg = _sub(tp1, entry_ref) if signal.direction == "LONG" else _sub(entry_ref, tp1)
     if signal.direction == "LONG":
-        tp1 = _add(entry_ref, _mul(minimum_rr, risk))
-        tp2 = _add(entry_ref, _mul(_mul(_q("2"), minimum_rr), risk))
+        tp2 = _add(entry_ref, _mul(_q("2"), tp1_leg))
     else:
-        tp1 = _sub(entry_ref, _mul(minimum_rr, risk))
-        tp2 = _sub(entry_ref, _mul(_mul(_q("2"), minimum_rr), risk))
+        tp2 = _sub(entry_ref, _mul(_q("2"), tp1_leg))
 
-    # RR gate — RR < minimum_rr → NO_TRADE (D-08: never a downgraded plan).
+    # RR gate — TP1 is structure-derived, so this gate can fire (CR-03).
     realized_rr = _div(abs(_sub(tp1, entry_ref)), risk)
     if realized_rr < minimum_rr:
         return PlanResult(
@@ -176,9 +403,6 @@ def plan(
             trade_plan=None,
             reason_code=RejectionReason.RR_TOO_LOW.value,
         )
-
-    # Expiry = source_close + signal_expiry_hours.
-    expiry_utc = signal.source_candle_close_utc + timedelta(hours=signal_expiry_hours)
 
     # JSON-as-TEXT fields (DATA_MODEL §5).
     take_profit_json = json.dumps(
