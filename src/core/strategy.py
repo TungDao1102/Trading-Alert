@@ -95,28 +95,6 @@ def _is_forming_bar(candle: Candle, prev: Candle) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-def _regime_from_context(
-    context_frame: FeatureFrame,
-) -> tuple[str, str | None]:
-    """Return (regime, reason_code) for the 4H context.
-
-    R1 (structure-only): BULLISH if close > EMA50(4H); BEARISH if close <
-    EMA50(4H); NEUTRAL otherwise. The tracer slice uses EMA50 as the
-    regime proxy (R2-style simplification of R1 — see
-    trend-pullback.md §2.1 for the full R1/R2/R3 alternatives; the
-    Stage A baseline is R1, but the tracer uses EMA50 as a deterministic
-    proxy that is byte-exact reproducible without a structure detector).
-    """
-    if not context_frame.features_valid:
-        return ("NO_TRADE", RejectionReason.NO_TRADE_REGIME.value)
-    assert context_frame.ema_50.value is not None
-    assert context_frame.ema_200.value is not None
-    # We need the close of the last context candle. The frame doesn't
-    # carry it directly; the caller passes it via the snapshot. We
-    # return a placeholder here and let the caller resolve.
-    return ("OK", None)
-
-
 def _resolve_regime(
     context_frame: FeatureFrame,
     last_context_close: Decimal,
@@ -125,6 +103,12 @@ def _resolve_regime(
 
     BULLISH if last close > EMA50(4H); BEARISH if last close < EMA50(4H);
     NEUTRAL otherwise.
+
+    R1 (structure-only) design note: the tracer slice uses EMA50 as the
+    regime proxy (an R2-style simplification of R1 — see
+    trend-pullback.md §2.1 for the full R1/R2/R3 alternatives; the
+    Stage A baseline is R1, but EMA50 is a deterministic proxy that is
+    byte-exact reproducible without a structure detector).
     """
     if not context_frame.features_valid:
         return "NO_TRADE"
@@ -528,6 +512,25 @@ def evaluate(
             reason_code=RejectionReason.NO_TRADE_REGIME.value,
         )
 
+    # Stream-identity gate (WR-07/WR-05): the setup stream must be
+    # stamped with the snapshot's source timeframe (a 1H stream
+    # mislabeled "4h" corrupts signal IDs and expiry math), and both
+    # streams must use known intervals — an unknown interval is
+    # DATA_STALE, never a ValueError out of the pure core.
+    if snapshot.setup_candles[0].interval != snapshot.source_timeframe:
+        return SetupResult(
+            is_no_trade=True,
+            reason_code=RejectionReason.DATA_STALE.value,
+        )
+    try:
+        _interval_duration(snapshot.setup_candles[0].interval)
+        _interval_duration(snapshot.context_candles[0].interval)
+    except ValueError:
+        return SetupResult(
+            is_no_trade=True,
+            reason_code=RejectionReason.DATA_STALE.value,
+        )
+
     # Compute features on both streams.
     setup_frame = compute_features(
         symbol=snapshot.symbol,
@@ -604,14 +607,20 @@ def evaluate(
         )
 
     # Forming-bar gate (D-02/STRAT-01): the engine must NEVER source a
-    # SETUP from an unclosed candle. If the last setup candle is still
-    # forming (its close_time_utc is earlier than the expected close
-    # derived from the previous bar), reject with DATA_STALE so the
-    # caller knows the data is not yet finalized.
+    # SETUP from an unclosed candle. Both streams are gated (WR-05) —
+    # a forming bar on either side means the market state is not yet
+    # finalized. Single-bar streams carry no chaining evidence either
+    # way, so they skip this gate and fall through to the feature gate,
+    # which rejects them fail-closed with WARMUP_INSUFFICIENT.
     last_setup_candle = snapshot.setup_candles[-1]
-    if len(snapshot.setup_candles) >= 2 and _is_forming_bar(
+    last_context_candle = snapshot.context_candles[-1]
+    setup_forming = len(snapshot.setup_candles) >= 2 and _is_forming_bar(
         last_setup_candle, snapshot.setup_candles[-2]
-    ):
+    )
+    context_forming = len(snapshot.context_candles) >= 2 and _is_forming_bar(
+        last_context_candle, snapshot.context_candles[-2]
+    )
+    if setup_forming or context_forming:
         return SetupResult(
             is_no_trade=True,
             reason_code=RejectionReason.DATA_STALE.value,

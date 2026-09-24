@@ -240,15 +240,51 @@ def _zone_series(
 # Gap detection — flag-never-fabricate (D-04).
 # --------------------------------------------------------------------------- #
 
+# Declared bar durations per interval spell. WR-04: the gap check anchors
+# on the interval-declared duration, not on inference from the first two
+# bars (a leading gap is invisible to inference).
+_INTERVAL_BAR_DURATIONS: dict[str, timedelta] = {
+    "1m": timedelta(minutes=1),
+    "5m": timedelta(minutes=5),
+    "15m": timedelta(minutes=15),
+    "30m": timedelta(minutes=30),
+    "1h": timedelta(hours=1),
+    "2h": timedelta(hours=2),
+    "4h": timedelta(hours=4),
+    "1d": timedelta(days=1),
+}
 
-def _expected_bar_duration(candles: list[Candle]) -> timedelta | None:
-    """Infer the expected bar duration from the first two candles.
+# EMA periods are fixed by design (Stage A tracer baseline) — they are
+# named constants, not registry knobs. The ATR period is a versioned
+# registry knob (CR-01); legacy sets predating it fall back to 14,
+# reproducing the previously hardcoded ATR-14 exactly (WR-13).
+_EMA_FAST_PERIOD = 20
+_EMA_MID_PERIOD = 50
+_EMA_SLOW_PERIOD = 200
+_ATR_PERIOD_FALLBACK = 14
 
-    Returns None if there are fewer than two candles.
+
+def _atr_period_from_params(parameter_set: ParameterSet) -> int:
+    """Return the versioned ATR period, or 14 for legacy sets (WR-13)."""
+    raw = parameter_set.params.get("atr_period", _ATR_PERIOD_FALLBACK)
+    return int(raw)
+
+
+def _expected_bar_duration(candles: list[Candle], interval: str) -> timedelta | None:
+    """Return the interval-declared bar duration (WR-04).
+
+    Returns None if there are fewer than two candles. Raises
+    ValueError on an unknown interval — callers map it to NO_TRADE.
     """
     if len(candles) < 2:
         return None
-    return candles[1].open_time_utc - candles[0].open_time_utc
+    declared = _INTERVAL_BAR_DURATIONS.get(interval)
+    if declared is None:
+        raise ValueError(
+            f"_expected_bar_duration: unsupported interval {interval!r}; "
+            f"supported: {sorted(_INTERVAL_BAR_DURATIONS)}"
+        )
+    return declared
 
 
 def _detect_gaps(
@@ -256,8 +292,11 @@ def _detect_gaps(
 ) -> list[bool]:
     """Return a per-bar gap flag (True = this bar's open is later than expected).
 
-    A gap means the previous bar's close_time_utc + expected < this bar's
-    open_time_utc (a missing bar in between). The first bar is never a gap.
+    WR-04: the expectation anchors on each bar's PREVIOUS bar open
+    (`prev.open + expected`), not on `prev.close + expected` with a
+    baked-in `-1s` close-time convention. A leading gap (first two bars
+    disagreeing with the declared duration) flags bar 1, invalidating
+    the whole stream fail-closed. The first bar is never a gap.
     """
     if expected is None:
         return [False] * len(candles)
@@ -266,8 +305,8 @@ def _detect_gaps(
         if i == 0:
             flags.append(False)
             continue
-        prev_close = candles[i - 1].close_time_utc
-        expected_open = prev_close + expected
+        prev_open = candles[i - 1].open_time_utc
+        expected_open = prev_open + expected
         if c.open_time_utc > expected_open:
             flags.append(True)
         else:
@@ -342,10 +381,10 @@ def compute_features(
 
     closes = [c.close for c in candles]
 
-    ema_20 = _ema_series(closes, 20)
-    ema_50 = _ema_series(closes, 50)
-    ema_200 = _ema_series(closes, 200)
-    atr_14 = _atr_series(candles, 14)
+    ema_20 = _ema_series(closes, _EMA_FAST_PERIOD)
+    ema_50 = _ema_series(closes, _EMA_MID_PERIOD)
+    ema_200 = _ema_series(closes, _EMA_SLOW_PERIOD)
+    atr_14 = _atr_series(candles, _atr_period_from_params(parameter_set))
     swing_high = _swing_series(candles, swing_lookback, high=True)
     swing_low = _swing_series(candles, swing_lookback, high=False)
     zone_upper, zone_lower = _zone_series(
@@ -353,7 +392,7 @@ def compute_features(
     )
 
     # Gap detection — invalidate features spanning a gap.
-    expected = _expected_bar_duration(candles)
+    expected = _expected_bar_duration(candles, interval)
     gap_flags = _detect_gaps(candles, expected)
     if any(gap_flags):
         # Mark every feature at and after the first gap as GAP_IN_SOURCE.
