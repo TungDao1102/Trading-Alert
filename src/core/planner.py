@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
-from decimal import Decimal, localcontext
+from decimal import Decimal
 
 from src.domain.canonical import sha256_hex
 from src.domain.enums import RejectionReason, TradePlanStatus
@@ -29,47 +29,14 @@ from src.domain.registry import ParameterSet
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
 
-from .features import compute_features
-from .types import AccountState, Candle, PlanResult
-
 # --------------------------------------------------------------------------- #
 # Decimal helpers — pinned local context (D-10).
 # --------------------------------------------------------------------------- #
-
-
-def _q(x: Decimal | int | str) -> Decimal:
-    if isinstance(x, Decimal):
-        return x
-    if isinstance(x, int):
-        return Decimal(x)
-    if isinstance(x, str):
-        return Decimal(x)
-    raise TypeError(f"_q: unsupported type {type(x).__name__}")
-
-
-def _div(a: Decimal, b: Decimal) -> Decimal:
-    with localcontext() as ctx:
-        ctx.prec = 28
-        return a / b
-
-
-def _mul(a: Decimal, b: Decimal) -> Decimal:
-    with localcontext() as ctx:
-        ctx.prec = 28
-        return a * b
-
-
-def _add(a: Decimal, b: Decimal) -> Decimal:
-    with localcontext() as ctx:
-        ctx.prec = 28
-        return a + b
-
-
-def _sub(a: Decimal, b: Decimal) -> Decimal:
-    with localcontext() as ctx:
-        ctx.prec = 28
-        return a - b
-
+# Decimal arithmetic lives in `._decimal` (single pinned-prec source,
+# review WR-16); re-exported here for `from .planner import ...` users.
+from ._decimal import _add, _div, _mul, _q, _sub  # noqa: F401 (re-export for compat)
+from .features import compute_features
+from .types import AccountState, Candle, PlanResult
 
 # --------------------------------------------------------------------------- #
 # Plan hash — D-08 canonical-hash discipline.

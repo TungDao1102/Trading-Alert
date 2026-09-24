@@ -38,6 +38,7 @@ from src.domain.ids import make_signal_id
 from src.domain.registry import ParameterSet
 from src.domain.signal import Signal
 
+from ._decimal import _add, _div, _mul, _q, _sub  # noqa: F401 (re-export for compat)
 from .features import _atr_series, _swing_series, compute_features
 from .types import (
     AccountState,
@@ -88,41 +89,6 @@ def _is_forming_bar(candle: Candle, prev: Candle) -> bool:
     duration = _interval_duration(candle.interval)
     expected_close = prev.close_time_utc + duration
     return candle.close_time_utc < expected_close
-
-
-def _q(x: Decimal | int | str) -> Decimal:
-    """Build a Decimal from a string/int (never from a float)."""
-    if isinstance(x, Decimal):
-        return x
-    if isinstance(x, int):
-        return Decimal(x)
-    if isinstance(x, str):
-        return Decimal(x)
-    raise TypeError(f"_q: unsupported type {type(x).__name__}")
-
-
-def _div(a: Decimal, b: Decimal) -> Decimal:
-    with localcontext() as ctx:
-        ctx.prec = 28
-        return a / b
-
-
-def _mul(a: Decimal, b: Decimal) -> Decimal:
-    with localcontext() as ctx:
-        ctx.prec = 28
-        return a * b
-
-
-def _add(a: Decimal, b: Decimal) -> Decimal:
-    with localcontext() as ctx:
-        ctx.prec = 28
-        return a + b
-
-
-def _sub(a: Decimal, b: Decimal) -> Decimal:
-    with localcontext() as ctx:
-        ctx.prec = 28
-        return a - b
 
 
 # --------------------------------------------------------------------------- #

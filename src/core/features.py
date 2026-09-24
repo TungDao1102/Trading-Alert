@@ -26,6 +26,14 @@ from decimal import Decimal, localcontext
 
 from src.domain.registry import ParameterSet
 
+# --------------------------------------------------------------------------- #
+# Decimal arithmetic helpers — pinned local context (D-10).
+#
+# Single source of truth lives in `._decimal` (review WR-16); the names
+# are re-exported here so existing `from .features import ...` uses keep
+# working.
+# --------------------------------------------------------------------------- #
+from ._decimal import _PREC, _add, _div, _mul, _q, _sub
 from .types import (
     REASON_GAP_IN_SOURCE,
     REASON_WARMUP_INSUFFICIENT,
@@ -35,52 +43,6 @@ from .types import (
     _invalid,
     _ok,
 )
-
-# --------------------------------------------------------------------------- #
-# Decimal arithmetic helpers — pinned local context (D-10).
-# --------------------------------------------------------------------------- #
-
-_PREC = 28
-
-
-def _q(x: Decimal | int | str) -> Decimal:
-    """Build a Decimal from a string/int (never from a float)."""
-    if isinstance(x, Decimal):
-        return x
-    if isinstance(x, int):
-        return Decimal(x)
-    if isinstance(x, str):
-        return Decimal(x)
-    raise TypeError(f"_q: unsupported type {type(x).__name__}")
-
-
-def _div(a: Decimal, b: Decimal) -> Decimal:
-    """Divide two Decimals under a pinned local context (D-10)."""
-    with localcontext() as ctx:
-        ctx.prec = _PREC
-        return a / b
-
-
-def _mul(a: Decimal, b: Decimal) -> Decimal:
-    """Multiply two Decimals under a pinned local context."""
-    with localcontext() as ctx:
-        ctx.prec = _PREC
-        return a * b
-
-
-def _add(a: Decimal, b: Decimal) -> Decimal:
-    """Add two Decimals under a pinned local context."""
-    with localcontext() as ctx:
-        ctx.prec = _PREC
-        return a + b
-
-
-def _sub(a: Decimal, b: Decimal) -> Decimal:
-    """Subtract two Decimals under a pinned local context."""
-    with localcontext() as ctx:
-        ctx.prec = _PREC
-        return a - b
-
 
 # --------------------------------------------------------------------------- #
 # EMA — TA-Lib convention (alpha = 2 / (n + 1), SMA-seeded).
