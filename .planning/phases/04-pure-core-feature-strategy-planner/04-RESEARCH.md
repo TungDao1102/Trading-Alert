@@ -358,19 +358,19 @@ def true_range(high: Decimal, low: Decimal, prev_close: Decimal | None) -> Decim
 | A5 | Family B/C new registry keys (`retest_window_bars`, `retest_depth_atr`, `breakout_volume_threshold`, `zone_min_touches`, `zone_aging_bars`, `range_break_buffer_atr`, `regime_filter_lookback`, variant enums) — names/discretion per planner | Standard Stack | Registry whitelist extension is one-way; planner must review names once, since parameter hashes are permanent |
 | A6 | Wickra/TTR/polars-ta formula pages correctly state TA-Lib/Wilder conventions (secondary, non-official-TA-Lib sources) | Code Examples, Pitfalls | Wrong smoothing constant; mitigated by triple-source agreement + hand-computed fixture values |
 
-## Open Questions
+## Open Questions (RESOLVED — all items decided in the 04-03 checkpoint:decision record, see 04-03-SUMMARY.md)
 
-1. **TP2 extension rule details**
+1. **TP2 extension rule details (RESOLVED — 04-03 checkpoint:decision option A default, fixture-pinned)**
    - What we know: TP1 at `minimum_rr`; TP2 is an "extension" (D-08); Family C has explicit T-mid vs T-opposite modes [CITED: range-mr.md:66-78].
    - What's unclear: Exact TP2 formula for trend-pullback and breakout-retest tracers.
    - Recommendation: Planner picks one simple documented rule (e.g., TP2 = entry + k×risk with registered k, or next-structure with fallback), fixtures it, and notes it as costly-to-change.
 
-2. **Setup-fingerprint composition**
+2. **Setup-fingerprint composition (RESOLVED — 04-03 checkpoint:decision locked key list, fixture-pinned)**
    - What we know: `make_signal_id` takes an opaque `setup_fingerprint` string [VERIFIED: src/domain/ids.py:19-28]; it must bind regime + setup + confirmation inputs.
    - What's unclear: Exact fingerprint field list per family (must include parameter-influencing values so distinct rules never collide).
    - Recommendation: Fingerprint = canonical JSON of (family id, variant codes, regime verdict + confirming bar closes, trigger bar close, zone bounds, ATR value); fixture the byte-exact strings.
 
-3. **`source_timeframe` value spelling for multi-timeframe decisions**
+3. **`source_timeframe` value spelling for multi-timeframe decisions (RESOLVED — 04-03 checkpoint:decision setup-timeframe spelling, 4H context in fingerprint)**
    - What we know: 1H setup + 4H context arrive as separate sequences (D-02); Signal carries a single `source_timeframe` string.
    - What's unclear: Whether the signal's timeframe is the setup TF (`"1h"`) with 4H context recorded in the fingerprint, or a composite.
    - Recommendation: `source_timeframe` = setup timeframe; 4H context bar closes folded into `setup_fingerprint`. Planner locks spelling against `phase3_candles.csv` conventions.
