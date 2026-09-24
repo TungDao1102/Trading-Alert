@@ -421,48 +421,66 @@ def _detect_range_mr_setup(
     ref_idx = last_idx - 1
     sh_ref_out = swing_high_series[ref_idx]
     sl_ref_out = swing_low_series[ref_idx]
-    atr_last_out = atr_series[last_idx]
+    atr_ref_out = atr_series[ref_idx]
     if (
         not sh_ref_out.valid
         or sh_ref_out.value is None
         or not sl_ref_out.valid
         or sl_ref_out.value is None
-        or not atr_last_out.valid
-        or atr_last_out.value is None
+        or not atr_ref_out.valid
+        or atr_ref_out.value is None
     ):
         return None
 
+    # WR-12: one (zone, atr_ref) pair — touch band AND break buffer both
+    # derive from the reference bar's ATR. CR-04: pinned prec-28 helpers
+    # for every op; comparisons use precomputed bounds, never ambient `-`.
     zone_upper = sh_ref_out.value
     zone_lower = sl_ref_out.value
-    atr_last = atr_last_out.value
-    band = touch_tolerance_atr * atr_last
+    atr_ref = atr_ref_out.value
+    band = _mul(touch_tolerance_atr, atr_ref)
+    lower_lo = _sub(zone_lower, band)
+    lower_hi = _add(zone_lower, band)
+    upper_lo = _sub(zone_upper, band)
+    upper_hi = _add(zone_upper, band)
 
+    # WR-02: one band convention — historical touches and the current
+    # bar use the same within-band predicate. The scan covers bars
+    # strictly before the reference window (bars that define the
+    # reference level itself never count as confirmations of it).
     upper_touches: list[int] = []
     lower_touches: list[int] = []
-    for j in range(swing_lookback, last_idx):
-        if abs(setup_candles[j].high - zone_upper) <= band:
+    for j in range(swing_lookback, ref_idx - swing_lookback + 1):
+        if upper_lo <= setup_candles[j].high <= upper_hi:
             upper_touches.append(j)
-        if abs(setup_candles[j].low - zone_lower) <= band:
+        if lower_lo <= setup_candles[j].low <= lower_hi:
             lower_touches.append(j)
 
-    breakout_buffer = range_break_buffer_atr * atr_last
+    breakout_buffer = _mul(range_break_buffer_atr, atr_ref)
+    break_lo = _sub(zone_lower, breakout_buffer)
+    break_hi = _add(zone_upper, breakout_buffer)
     last_close = setup_candles[last_idx].close
     last_low = setup_candles[last_idx].low
     last_high = setup_candles[last_idx].high
-    if last_close < zone_lower - breakout_buffer:
+    if last_close < break_lo:
         return None
-    if last_close > zone_upper + breakout_buffer:
+    if last_close > break_hi:
         return None
 
     long_eligible = (
-        last_low <= zone_lower
+        lower_lo <= last_low <= lower_hi
         and len(lower_touches) >= zone_min_touches
         and lower_touches[-1] >= last_idx - zone_aging_bars
+        # Dual-touch disambiguation: a wide band can place one bar
+        # within BOTH edges — the setup fades the NEAR edge only, so
+        # the far-edge side stays ineligible. Ties keep LONG.
+        and abs(_sub(last_low, zone_lower)) <= abs(_sub(last_high, zone_upper))
     )
     short_eligible = (
-        last_high >= zone_upper
+        upper_lo <= last_high <= upper_hi
         and len(upper_touches) >= zone_min_touches
         and upper_touches[-1] >= last_idx - zone_aging_bars
+        and abs(_sub(last_high, zone_upper)) < abs(_sub(last_low, zone_lower))
     )
 
     if long_eligible:
