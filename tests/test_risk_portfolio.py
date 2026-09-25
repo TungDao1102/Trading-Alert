@@ -25,7 +25,7 @@ from src.core.types import AccountState
 from src.domain.canonical import sha256_hex
 from src.domain.enums import DailyState, TradePlanStatus
 from src.domain.trade_plan import TradePlan
-from src.risk.portfolio import PortfolioVerdict, check_portfolio
+from src.risk.portfolio import PortfolioVerdict, check_portfolio, resolve_absolute_thresholds
 from src.risk.quantization import quantize
 from src.risk.sizing import size_position
 from src.risk.types import (
@@ -831,6 +831,41 @@ def test_portfolio_verdict_envelope_guards() -> None:
             sized=None,
             reason_code="OK",
             daily_state=DailyState.NORMAL,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Test 18b — resolve_absolute_thresholds converts registry rates to absolutes.
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_absolute_thresholds_converts_rates() -> None:
+    """WR-07: raw registry rates × equity → absolute quote amounts.
+
+    A caller passing raw registry values (e.g. cluster_cap=0.005) through
+    the helper gets the absolute parameter set the gates expect
+    (e.g. 50 USDT at equity=10000); the input dict is never mutated.
+    """
+    rates: dict[str, Any] = {
+        "max_open_positions": 2,
+        "max_aggregate_open_risk": Decimal("0.01"),
+        "cluster_cap": Decimal("0.005"),
+        "daily_loss_warning_threshold": Decimal("0.005"),
+        "daily_loss_stop_threshold": Decimal("0.01"),
+    }
+    resolved = resolve_absolute_thresholds(
+        parameter_set=rates, equity=Decimal("10000")
+    )
+    assert resolved["max_open_positions"] == 2
+    assert resolved["max_aggregate_open_risk"] == Decimal("100")
+    assert resolved["cluster_cap"] == Decimal("50")
+    assert resolved["daily_loss_warning_threshold"] == Decimal("50")
+    assert resolved["daily_loss_stop_threshold"] == Decimal("100")
+    assert rates["cluster_cap"] == Decimal("0.005")
+    with pytest.raises(KeyError):
+        resolve_absolute_thresholds(
+            parameter_set={"max_open_positions": 2},
+            equity=Decimal("10000"),
         )
 
 

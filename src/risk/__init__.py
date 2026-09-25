@@ -12,7 +12,7 @@ This barrel re-exports the public symbols. No logic lives here.
 from __future__ import annotations
 
 from .gating import evaluate_risk
-from .portfolio import check_portfolio
+from .portfolio import check_portfolio, resolve_absolute_thresholds
 from .quantization import quantize
 from .sizing import size_position
 from .types import ConstraintSnapshot, OpenPosition, PortfolioVerdict, SizedResult
@@ -27,5 +27,6 @@ __all__ = [
     "size_position",
     "quantize",
     "check_portfolio",
+    "resolve_absolute_thresholds",
     "evaluate_risk",
 ]

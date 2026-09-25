@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from src.core._decimal import _add
+from src.core._decimal import _add, _mul
 from src.domain.enums import DailyState, Direction, RejectionReason
 
 from .types import OpenPosition, PortfolioVerdict, SizedResult
@@ -68,6 +68,47 @@ def _derive_daily_state(
     if daily_loss_quote >= warning_threshold_quote:
         return DailyState.WARNING
     return DailyState.NORMAL
+
+
+# Registry keys holding equity-fraction rates (converted to absolute
+# quote amounts by `resolve_absolute_thresholds` before gating).
+RATE_THRESHOLD_KEYS: tuple[str, ...] = (
+    "cluster_cap",
+    "max_aggregate_open_risk",
+    "daily_loss_warning_threshold",
+    "daily_loss_stop_threshold",
+)
+
+
+def resolve_absolute_thresholds(
+    *,
+    parameter_set: dict[str, Any],
+    equity: Decimal,
+) -> dict[str, Any]:
+    """Convert registry rate thresholds to absolute quote amounts.
+
+    Each key in `RATE_THRESHOLD_KEYS` is multiplied by `equity` under
+    pinned prec-28 (`rate × equity`); every other entry passes through
+    untouched and the input dict is never mutated. Callers holding raw
+    registry values (e.g. `cluster_cap = 0.005`) resolve them through
+    this helper before `check_portfolio`/`evaluate_risk`, whose contract
+    is absolute quote amounts. Missing keys, non-numeric rates, and
+    non-positive equity raise loudly instead of gating on garbage.
+    """
+    if not isinstance(equity, Decimal):
+        raise TypeError(f"equity must be Decimal, got {type(equity).__name__}")
+    if equity <= Decimal("0"):
+        raise ValueError(f"equity must be > 0, got {equity}")
+    resolved = dict(parameter_set)
+    for key in RATE_THRESHOLD_KEYS:
+        rate = parameter_set[key]
+        if isinstance(rate, bool) or not isinstance(rate, (int, Decimal)):
+            raise TypeError(
+                f"parameter_set[{key!r}] must be an equity-fraction rate "
+                f"(int or Decimal), got {type(rate).__name__}"
+            )
+        resolved[key] = _mul(Decimal(rate), equity)
+    return resolved
 
 
 def _extract_thresholds(
@@ -239,21 +280,8 @@ def check_portfolio(
             daily_state=derived_state,
         )
 
-    # Thresholds in quote currency (registry values are rates of equity).
-    # The caller is expected to pass `parameter_set` already loaded with
-    # the rate values; we multiply by the candidate's equity context
-    # only when the parameter set carries rates. For V1, the parameter
-    # set carries rates and we multiply by the candidate's realized_risk
-    # basis. To keep the gate math simple and the parity fixture
-    # byte-exact, we treat the registry values as absolute quote amounts
-    # when the parameter set provides them as such. The caller is
-    # responsible for converting rates to absolute amounts before
-    # calling check_portfolio (Phase-7+ caller concern).
-    #
-    # For V1 parity fixtures, the parameter_set values are passed as
-    # absolute quote amounts (e.g. cluster_cap=50 USDT for equity=10000
-    # with cluster_cap_rate=0.005). The caller (evaluate_risk) does the
-    # rate-to-absolute conversion.
+    # Thresholds arrive as absolute quote amounts (callers holding raw
+    # registry rates convert first via `resolve_absolute_thresholds`).
     cluster_cap_quote = cluster_cap
     max_aggregate_open_risk_quote = max_aggregate_open_risk
     warning_threshold_quote = daily_loss_warning_threshold
@@ -322,4 +350,4 @@ def check_portfolio(
     )
 
 
-__all__ = ["check_portfolio", "CLUSTER_SYMBOLS"]
+__all__ = ["check_portfolio", "resolve_absolute_thresholds", "CLUSTER_SYMBOLS"]

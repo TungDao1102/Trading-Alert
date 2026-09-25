@@ -52,8 +52,8 @@ def evaluate_risk(
 
     `parameter_set` carries the portfolio thresholds (cluster_cap,
     max_aggregate_open_risk, max_open_positions, daily_loss_*_threshold)
-    as ABSOLUTE quote amounts — the caller is responsible for converting
-    registry rates to absolute amounts before calling. This keeps the
+    as ABSOLUTE quote amounts — callers holding raw registry rates
+    convert first via `resolve_absolute_thresholds`. This keeps the
     gate math simple and the parity fixture byte-exact.
     """
     if candidate_position_side not in {d.value for d in Direction}:
