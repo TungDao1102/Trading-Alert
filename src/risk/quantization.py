@@ -63,6 +63,8 @@ def quantize(
         "minimum_risk_utilization_after_rounding",
     )
     _require_decimal(reference_price, "reference_price")
+    if sized.is_no_trade:
+        return sized
     raw_quantity = sized.quantity_before_rounding
 
     # Defensive: zero/negative step_size or reference_price → fail closed.
