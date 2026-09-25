@@ -9,6 +9,12 @@ The function never rounds up to meet minimums (§11 rule 1). The
 utilization gate uses `realized_risk / allowed_risk` (NOT
 `rounded / raw_quantity`) — the parity fixture pins a nonzero-cost
 case that distinguishes the two metrics (Pitfall 2).
+
+Per RISK_MANAGEMENT §11 rule 5, every `quantize` call emits a structlog
+lineage event carrying raw_quantity, rounded_quantity, realized_risk,
+and the realized-to-allowed ratio. The structlog import is local to
+the logging call site to preserve the module-level purity contract
+(stdlib + Decimal + `src/core/_decimal.py` only).
 """
 
 from __future__ import annotations
@@ -54,17 +60,19 @@ def quantize(
 
     # Defensive: zero/negative step_size or reference_price → fail closed.
     if constraint_snapshot.quantity_step_size <= Decimal("0"):
-        return _reject(
+        return _emit_and_reject(
             sized=sized,
             rounded=raw_quantity,
             realized_risk=Decimal("0"),
+            allowed_risk=allowed_risk,
             reason_code=RejectionReason.EXCHANGE_CONSTRAINT.value,
         )
     if reference_price <= Decimal("0"):
-        return _reject(
+        return _emit_and_reject(
             sized=sized,
             rounded=raw_quantity,
             realized_risk=Decimal("0"),
+            allowed_risk=allowed_risk,
             reason_code=RejectionReason.EXCHANGE_CONSTRAINT.value,
         )
 
@@ -74,20 +82,22 @@ def quantize(
 
     # Gate 1: min-quantity reject.
     if rounded < constraint_snapshot.min_quantity:
-        return _reject(
+        return _emit_and_reject(
             sized=sized,
             rounded=rounded,
             realized_risk=_mul(rounded, risk_per_unit),
+            allowed_risk=allowed_risk,
             reason_code=RejectionReason.MIN_QTY_REJECT.value,
         )
 
     # Gate 2: notional reject (zone-mid entry_ref per locked D-02 decision).
     notional = _mul(rounded, reference_price)
     if notional < constraint_snapshot.min_notional:
-        return _reject(
+        return _emit_and_reject(
             sized=sized,
             rounded=rounded,
             realized_risk=_mul(rounded, risk_per_unit),
+            allowed_risk=allowed_risk,
             reason_code=RejectionReason.NOTIONAL_REJECT.value,
         )
 
@@ -98,22 +108,24 @@ def quantize(
         utilization = _div(realized_risk, allowed_risk)
     else:
         # Defensive: zero allowed_risk → fail closed.
-        return _reject(
+        return _emit_and_reject(
             sized=sized,
             rounded=rounded,
             realized_risk=realized_risk,
+            allowed_risk=allowed_risk,
             reason_code=RejectionReason.UNCERTAIN_ACCOUNT_STATE.value,
         )
     if utilization < minimum_risk_utilization_after_rounding:
-        return _reject(
+        return _emit_and_reject(
             sized=sized,
             rounded=rounded,
             realized_risk=realized_risk,
+            allowed_risk=allowed_risk,
             reason_code=RejectionReason.UTILIZATION_REJECT.value,
         )
 
     # All gates passed → ACCEPTED.
-    return SizedResult(
+    result = SizedResult(
         is_no_trade=False,
         quantity=rounded,
         quantity_before_rounding=sized.quantity_before_rounding,
@@ -122,16 +134,32 @@ def quantize(
         realized_risk=realized_risk,
         reason_code=_OK,
     )
+    _emit_lineage(
+        raw_quantity=raw_quantity,
+        rounded_quantity=rounded,
+        realized_risk=realized_risk,
+        allowed_risk=allowed_risk,
+        reason_code=_OK,
+    )
+    return result
 
 
-def _reject(
+def _emit_and_reject(
     *,
     sized: SizedResult,
     rounded: Decimal,
     realized_risk: Decimal,
+    allowed_risk: Decimal,
     reason_code: str,
 ) -> SizedResult:
-    """Build a SizedResult with is_no_trade=True and the given reason code."""
+    """Emit the §11 rule 5 lineage event and build a reject SizedResult."""
+    _emit_lineage(
+        raw_quantity=sized.quantity_before_rounding,
+        rounded_quantity=rounded,
+        realized_risk=realized_risk,
+        allowed_risk=allowed_risk,
+        reason_code=reason_code,
+    )
     return SizedResult(
         is_no_trade=True,
         quantity=None,
@@ -139,6 +167,37 @@ def _reject(
         quantity_after_rounding=rounded,
         quantization_decision=QuantizationDecision.REJECTED.value,
         realized_risk=realized_risk,
+        reason_code=reason_code,
+    )
+
+
+def _emit_lineage(
+    *,
+    raw_quantity: Decimal,
+    rounded_quantity: Decimal,
+    realized_risk: Decimal,
+    allowed_risk: Decimal,
+    reason_code: str,
+) -> None:
+    """Emit the §11 rule 5 structlog lineage event for one quantize() call.
+
+    Local import preserves the module-level purity contract (stdlib +
+    Decimal + `src/core/_decimal.py` only). structlog is a project
+    dependency used at adapter/ops edges; the risk math package
+    imports it only at the logging call site.
+    """
+    import structlog
+
+    if allowed_risk > Decimal("0"):
+        ratio = _div(realized_risk, allowed_risk)
+    else:
+        ratio = Decimal("0")
+    structlog.get_logger().info(
+        "risk.quantize",
+        raw_quantity=str(raw_quantity),
+        rounded_quantity=str(rounded_quantity),
+        realized_risk=str(realized_risk),
+        realized_to_allowed_ratio=str(ratio),
         reason_code=reason_code,
     )
 

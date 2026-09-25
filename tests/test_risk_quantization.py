@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+import structlog
 from src.core.types import AccountState
 from src.domain.enums import TradePlanStatus
 from src.domain.trade_plan import TradePlan
@@ -356,3 +357,67 @@ def test_quantize_zero_reference_price_fails_closed() -> None:
     )
     assert result.is_no_trade is True
     assert result.reason_code == "EXCHANGE_CONSTRAINT"
+
+
+# --------------------------------------------------------------------------- #
+# Test 9 — §11 rule 5: structlog lineage event on every quantize() call.
+# --------------------------------------------------------------------------- #
+
+
+def test_quantize_emits_lineage_event_on_accept() -> None:
+    """§11 rule 5: ACCEPTED path emits risk.quantize with the four fields."""
+    sized, allowed_risk, risk_per_unit = _size()
+    constraints = _mk_constraints()
+    with structlog.testing.capture_logs() as cap_logs:
+        result = quantize(
+            sized=sized,
+            constraint_snapshot=constraints,
+            allowed_risk=allowed_risk,
+            risk_per_unit=risk_per_unit,
+            minimum_risk_utilization_after_rounding=Decimal("0.6"),
+            reference_price=Decimal("50000.00"),
+        )
+    assert result.is_no_trade is False
+    lineage = [e for e in cap_logs if e.get("event") == "risk.quantize"]
+    assert len(lineage) == 1, f"expected exactly one risk.quantize event, got {lineage}"
+    entry = lineage[0]
+    assert entry["raw_quantity"] == str(sized.quantity_before_rounding)
+    assert entry["rounded_quantity"] == str(result.quantity)
+    assert entry["realized_risk"] == str(result.realized_risk)
+    # realized_to_allowed_ratio must be a stringified Decimal
+    assert "realized_to_allowed_ratio" in entry
+    assert entry["reason_code"] == "OK"
+
+
+def test_quantize_emits_lineage_event_on_reject() -> None:
+    """§11 rule 5: REJECTED path also emits risk.quantize with the four fields."""
+    sized, allowed_risk, risk_per_unit = _size()
+    constraints = _mk_constraints()
+    # Force MIN_QTY_REJECT by setting min_quantity above the rounded quantity.
+    constraints = ConstraintSnapshot(
+        symbol=constraints.symbol,
+        price_tick_size=constraints.price_tick_size,
+        quantity_step_size=constraints.quantity_step_size,
+        min_quantity=Decimal("999999"),
+        min_notional=constraints.min_notional,
+        metadata_observed_at_utc=constraints.metadata_observed_at_utc,
+    )
+    with structlog.testing.capture_logs() as cap_logs:
+        result = quantize(
+            sized=sized,
+            constraint_snapshot=constraints,
+            allowed_risk=allowed_risk,
+            risk_per_unit=risk_per_unit,
+            minimum_risk_utilization_after_rounding=Decimal("0.6"),
+            reference_price=Decimal("50000.00"),
+        )
+    assert result.is_no_trade is True
+    assert result.reason_code == "MIN_QTY_REJECT"
+    lineage = [e for e in cap_logs if e.get("event") == "risk.quantize"]
+    assert len(lineage) == 1, f"expected exactly one risk.quantize event, got {lineage}"
+    entry = lineage[0]
+    assert entry["raw_quantity"] == str(sized.quantity_before_rounding)
+    assert entry["rounded_quantity"] == str(result.quantity_after_rounding)
+    assert entry["realized_risk"] == str(result.realized_risk)
+    assert "realized_to_allowed_ratio" in entry
+    assert entry["reason_code"] == "MIN_QTY_REJECT"

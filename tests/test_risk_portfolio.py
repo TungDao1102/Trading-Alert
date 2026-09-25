@@ -830,6 +830,10 @@ def _load_input(case_dir: Path) -> dict:
     return json.loads((case_dir / "input.json").read_text(encoding="utf-8"))
 
 
+def _load_expected(case_dir: Path) -> dict:
+    return json.loads((case_dir / "expected.json").read_text(encoding="utf-8"))
+
+
 def _build_trade_plan(tp_dict: dict) -> TradePlan:
     return TradePlan(
         trade_plan_id=tp_dict["trade_plan_id"],
@@ -965,3 +969,28 @@ def test_portfolio_case_byte_identical_across_runs(case_name: str) -> None:
     assert a.reason_code == b.reason_code
     assert a.daily_state == b.daily_state
     assert a.is_no_trade == b.is_no_trade
+
+
+# --------------------------------------------------------------------------- #
+# Test 20 — each portfolio case's evaluate_risk output matches expected.json
+# canonical-JSON-exactly (golden fixture lock).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("case_name", _PHASE5_PORTFOLIO_CASES)
+def test_portfolio_case_matches_expected_json(case_name: str) -> None:
+    """Beh. 1t: evaluate_risk output dict matches expected.json byte-exactly.
+
+    Mirrors the pattern from `test_risk_parity.py::test_phase5_pipeline_matches_expected`
+    for the 5 sizing cases. The golden fixture pins the byte-identical
+    guarantee so backtest, paper, and live modes share identical math.
+    """
+    case_dir = PHASE5_FIXTURES_DIR / case_name
+    case_input = _load_input(case_dir)
+    case_expected = _load_expected(case_dir)
+
+    result = _run_evaluate_risk(case_input)
+    actual = _to_parity_dict(result)
+    assert sha256_hex(actual) == sha256_hex(case_expected), (
+        f"parity mismatch in {case_name}: actual={actual}, expected={case_expected}"
+    )
