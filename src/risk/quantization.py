@@ -56,6 +56,13 @@ def quantize(
     `min_quantity`, `min_notional`, or `reference_price` returns
     `EXCHANGE_CONSTRAINT` (Pitfall 1 — never divide by zero).
     """
+    _require_decimal(allowed_risk, "allowed_risk")
+    _require_decimal(risk_per_unit, "risk_per_unit")
+    _require_decimal(
+        minimum_risk_utilization_after_rounding,
+        "minimum_risk_utilization_after_rounding",
+    )
+    _require_decimal(reference_price, "reference_price")
     raw_quantity = sized.quantity_before_rounding
 
     # Defensive: zero/negative step_size or reference_price → fail closed.
@@ -142,6 +149,13 @@ def quantize(
         reason_code=_OK,
     )
     return result
+
+
+def _require_decimal(value: object, field_name: str) -> Decimal:
+    """Reject non-Decimal values for money/qty/price inputs (D-12)."""
+    if not isinstance(value, Decimal):
+        raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
+    return value
 
 
 def _emit_and_reject(
