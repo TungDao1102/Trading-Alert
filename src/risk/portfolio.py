@@ -217,17 +217,25 @@ def check_portfolio(
             reason_code=RejectionReason.UNCERTAIN_ACCOUNT_STATE.value,
             daily_state=derived_state,
         )
-    if constraint_observed_at_utc is not None:
-        _require_utc_aware(constraint_observed_at_utc, "constraint_observed_at_utc")
-        age = now_utc - constraint_observed_at_utc
-        if age > ttl:
-            # Fail-closed: stale constraint snapshot → STALE_CONSTRAINTS.
-            return PortfolioVerdict(
-                is_no_trade=True,
-                sized=None,
-                reason_code=RejectionReason.STALE_CONSTRAINTS.value,
-                daily_state=derived_state,
-            )
+    if constraint_observed_at_utc is None:
+        # Fail-closed: a missing freshness timestamp must not bypass the
+        # §12 gate — an omitted argument is stale metadata, not fresh.
+        return PortfolioVerdict(
+            is_no_trade=True,
+            sized=None,
+            reason_code=RejectionReason.STALE_CONSTRAINTS.value,
+            daily_state=derived_state,
+        )
+    _require_utc_aware(constraint_observed_at_utc, "constraint_observed_at_utc")
+    age = now_utc - constraint_observed_at_utc
+    if age > ttl:
+        # Fail-closed: stale constraint snapshot → STALE_CONSTRAINTS.
+        return PortfolioVerdict(
+            is_no_trade=True,
+            sized=None,
+            reason_code=RejectionReason.STALE_CONSTRAINTS.value,
+            daily_state=derived_state,
+        )
 
     # Thresholds in quote currency (registry values are rates of equity).
     # The caller is expected to pass `parameter_set` already loaded with

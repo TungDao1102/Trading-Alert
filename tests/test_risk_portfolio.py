@@ -224,6 +224,7 @@ def test_cluster_cap_exact_pass() -> None:
         now_utc=FROZEN_NOW,
         ttl=timedelta(seconds=TTL_SECONDS),
         positions_reconciled=True,
+        constraint_observed_at_utc=FROZEN_NOW,
     )
     assert verdict.is_no_trade is False
     assert verdict.reason_code == "OK"
@@ -264,6 +265,7 @@ def test_cluster_cap_one_ulp_over_rejects() -> None:
         now_utc=FROZEN_NOW,
         ttl=timedelta(seconds=TTL_SECONDS),
         positions_reconciled=True,
+        constraint_observed_at_utc=FROZEN_NOW,
     )
     assert verdict.is_no_trade is True
     assert verdict.reason_code == "CLUSTER_CAP_REJECT"
@@ -301,6 +303,7 @@ def test_aggregate_cap_exact_pass() -> None:
         now_utc=FROZEN_NOW,
         ttl=timedelta(seconds=TTL_SECONDS),
         positions_reconciled=True,
+        constraint_observed_at_utc=FROZEN_NOW,
     )
     assert verdict.is_no_trade is False
     assert verdict.reason_code == "OK"
@@ -336,6 +339,7 @@ def test_aggregate_cap_one_ulp_over_rejects() -> None:
         now_utc=FROZEN_NOW,
         ttl=timedelta(seconds=TTL_SECONDS),
         positions_reconciled=True,
+        constraint_observed_at_utc=FROZEN_NOW,
     )
     assert verdict.is_no_trade is True
     assert verdict.reason_code == "AGGREGATE_CAP_REJECT"
@@ -386,6 +390,7 @@ def test_first_failure_wins_aggregate_over_cluster() -> None:
         now_utc=FROZEN_NOW,
         ttl=timedelta(seconds=TTL_SECONDS),
         positions_reconciled=True,
+        constraint_observed_at_utc=FROZEN_NOW,
     )
     assert verdict.is_no_trade is True
     assert verdict.reason_code == "AGGREGATE_CAP_REJECT"
@@ -428,6 +433,7 @@ def test_max_positions_at_limit_rejects() -> None:
         now_utc=FROZEN_NOW,
         ttl=timedelta(seconds=TTL_SECONDS),
         positions_reconciled=True,
+        constraint_observed_at_utc=FROZEN_NOW,
     )
     assert verdict.is_no_trade is True
     assert verdict.reason_code == "MAX_POSITIONS_REJECT"
@@ -465,6 +471,7 @@ def test_daily_stop_at_threshold_blocks() -> None:
         now_utc=FROZEN_NOW,
         ttl=timedelta(seconds=TTL_SECONDS),
         positions_reconciled=True,
+        constraint_observed_at_utc=FROZEN_NOW,
     )
     assert verdict.is_no_trade is True
     assert verdict.reason_code == "DAILY_STOP_BLOCK"
@@ -503,6 +510,7 @@ def test_warning_at_threshold_passes_with_state() -> None:
         now_utc=FROZEN_NOW,
         ttl=timedelta(seconds=TTL_SECONDS),
         positions_reconciled=True,
+        constraint_observed_at_utc=FROZEN_NOW,
     )
     assert verdict.is_no_trade is False
     assert verdict.reason_code == "OK"
@@ -529,6 +537,7 @@ def test_normal_below_warning_passes() -> None:
         now_utc=FROZEN_NOW,
         ttl=timedelta(seconds=TTL_SECONDS),
         positions_reconciled=True,
+        constraint_observed_at_utc=FROZEN_NOW,
     )
     assert verdict.is_no_trade is False
     assert verdict.reason_code == "OK"
@@ -609,6 +618,7 @@ def test_daily_loss_quote_none_rejects() -> None:
         now_utc=FROZEN_NOW,
         ttl=timedelta(seconds=TTL_SECONDS),
         positions_reconciled=True,
+        constraint_observed_at_utc=FROZEN_NOW,
     )
     assert verdict.is_no_trade is True
     assert verdict.reason_code == "UNCERTAIN_ACCOUNT_STATE"
@@ -633,8 +643,9 @@ def test_positions_unreconciled_rejects() -> None:
         parameter_set=PARAMETERS,
         now_utc=FROZEN_NOW,
         ttl=timedelta(seconds=TTL_SECONDS),
-        positions_reconciled=False,
-    )
+            positions_reconciled=False,
+            constraint_observed_at_utc=FROZEN_NOW,
+        )
     assert verdict.is_no_trade is True
     assert verdict.reason_code == "UNCERTAIN_ACCOUNT_STATE"
 
@@ -682,6 +693,7 @@ def test_open_positions_order_independence() -> None:
             now_utc=FROZEN_NOW,
             ttl=timedelta(seconds=TTL_SECONDS),
             positions_reconciled=True,
+            constraint_observed_at_utc=FROZEN_NOW,
         )
         verdicts.append(v)
 
@@ -726,6 +738,7 @@ def test_candidate_risk_added_to_open_risk_sums() -> None:
         now_utc=FROZEN_NOW,
         ttl=timedelta(seconds=TTL_SECONDS),
         positions_reconciled=True,
+        constraint_observed_at_utc=FROZEN_NOW,
     )
     assert verdict.is_no_trade is False
     assert verdict.reason_code == "OK"
@@ -764,6 +777,7 @@ def test_sized_no_trade_short_circuits() -> None:
         now_utc=FROZEN_NOW,
         ttl=timedelta(seconds=TTL_SECONDS),
         positions_reconciled=True,
+        constraint_observed_at_utc=FROZEN_NOW,
     )
     assert verdict.is_no_trade is True
     assert verdict.reason_code == "EXCHANGE_CONSTRAINT"
