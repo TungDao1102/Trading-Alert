@@ -25,7 +25,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Sync dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen --extra dev
 
       - name: Re-hash registry (params TOML files must match pinned hashes)
         id: rehash
