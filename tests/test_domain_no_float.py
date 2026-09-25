@@ -40,6 +40,8 @@ SCANNED_FILES = (
     "src/risk/sizing.py",
     "src/risk/quantization.py",
     "src/risk/gating.py",
+    # Phase 5 plan 05-02 — portfolio gates (D-03/D-04).
+    "src/risk/portfolio.py",
 )
 
 

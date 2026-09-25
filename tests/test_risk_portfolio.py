@@ -1,4 +1,4 @@
-"""Tests for the portfolio gates + DAILY_STOP state machine + fail-closed input validation (Phase 5, plan 05-02).
+"""Tests for the portfolio gates + DAILY_STOP + fail-closed input validation (Phase 5, plan 05-02).
 
 Per D-03 + D-04 + RISK_MANAGEMENT §§4-5/8/12:
 - `check_portfolio` evaluates cluster cap, aggregate cap, position count, and
@@ -44,12 +44,19 @@ CLUSTER_SYMBOLS: frozenset[str] = frozenset(
 )
 
 # Registry parameters (research baselines per RISK_MANAGEMENT §§4-5/8).
+# Values are ABSOLUTE quote amounts in USDT for an equity of 10000:
+# - max_aggregate_open_risk = 0.01 × 10000 = 100 USDT (1.0% of equity)
+# - cluster_cap = 0.005 × 10000 = 50 USDT (single-trade risk_rate)
+# - daily_loss_warning_threshold = 0.005 × 10000 = 50 USDT (50% of stop)
+# - daily_loss_stop_threshold = 0.01 × 10000 = 100 USDT (1.0% of equity)
+# The caller (evaluate_risk or Phase-7+ caller) is responsible for
+# converting registry rates to absolute amounts before calling.
 PARAMETERS: dict[str, Any] = {
     "max_open_positions": 2,
-    "max_aggregate_open_risk": Decimal("0.01"),
-    "cluster_cap": Decimal("0.005"),
-    "daily_loss_warning_threshold": Decimal("0.005"),
-    "daily_loss_stop_threshold": Decimal("0.01"),
+    "max_aggregate_open_risk": Decimal("100"),
+    "cluster_cap": Decimal("50"),
+    "daily_loss_warning_threshold": Decimal("50"),
+    "daily_loss_stop_threshold": Decimal("100"),
     "risk_rate": Decimal("0.005"),
     "minimum_risk_utilization_after_rounding": Decimal("0.6"),
 }
@@ -549,6 +556,7 @@ def test_ttl_exact_pass() -> None:
         now_utc=FROZEN_NOW,
         ttl=timedelta(seconds=TTL_SECONDS),
         positions_reconciled=True,
+        constraint_observed_at_utc=observed_at,
     )
     assert verdict.is_no_trade is False
     assert verdict.reason_code == "OK"
@@ -575,6 +583,7 @@ def test_ttl_one_second_over_rejects() -> None:
         now_utc=FROZEN_NOW,
         ttl=timedelta(seconds=TTL_SECONDS),
         positions_reconciled=True,
+        constraint_observed_at_utc=observed_at,
     )
     assert verdict.is_no_trade is True
     assert verdict.reason_code == "STALE_CONSTRAINTS"

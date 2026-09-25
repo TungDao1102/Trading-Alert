@@ -1,4 +1,4 @@
-"""Pure-risk frozen dataclasses (Phase 5, plan 05-01).
+"""Pure-risk frozen dataclasses (Phase 5, plans 05-01 + 05-02).
 
 Per D-05/D-12: frozen pure-Python dataclasses with Decimal money/qty/
 price fields and timezone-aware UTC datetime fields. Construction-time
@@ -6,8 +6,8 @@ guards mirror the Phase-4 domain pattern (`src/core/types.py`,
 `src/domain/trade_plan.py`).
 
 These types are the value objects flowing between the sizing, quantize,
-and gating services. All three live in this package and share the same
-purity contract (stdlib + Decimal + `src/core/_decimal.py` only).
+portfolio, and gating services. All four live in this package and share
+the same purity contract (stdlib + Decimal + `src/core/_decimal.py` only).
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
+
+from src.domain.enums import DailyState
 
 
 def _require_non_empty(value: str, field_name: str) -> None:
@@ -129,7 +131,79 @@ class SizedResult:
                 raise ValueError(f"SizedResult: quantity {self.quantity} must be > 0 when sized")
 
 
+# --------------------------------------------------------------------------- #
+# OpenPosition — frozen caller-supplied snapshot of one open position (D-03).
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class OpenPosition:
+    """One open position in the reconciled portfolio snapshot (D-03).
+
+    `open_risk` is the precomputed realized risk in quote currency
+    (caller-supplied — risk does not value positions from mark prices).
+    `daily_pnl_contribution` is reserved for Phase-7+ journaling (zero
+    in V1).
+    """
+
+    symbol: str
+    position_side: str
+    open_risk: Decimal
+    daily_pnl_contribution: Decimal
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.symbol, "symbol")
+        _require_non_empty(self.position_side, "position_side")
+        _require_decimal(self.open_risk, "open_risk")
+        _require_decimal(self.daily_pnl_contribution, "daily_pnl_contribution")
+        if self.open_risk < Decimal("0"):
+            raise ValueError(f"open_risk {self.open_risk} must be >= 0")
+
+
+# --------------------------------------------------------------------------- #
+# PortfolioVerdict — discriminated PASS-or-NO_TRADE envelope (D-03/D-04).
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class PortfolioVerdict:
+    """Discriminated PASS-or-NO_TRADE envelope emitted by `check_portfolio`.
+
+    `is_no_trade=True` carries a canonical RejectionReason value in
+    `reason_code` (CLUSTER_CAP_REJECT, AGGREGATE_CAP_REJECT,
+    MAX_POSITIONS_REJECT, DAILY_STOP_BLOCK, STALE_CONSTRAINTS,
+    UNCERTAIN_ACCOUNT_STATE) and `sized=None`.
+    `is_no_trade=False` carries the input SizedResult plus the derived
+    `daily_state` (NORMAL / WARNING / DAILY_STOP) for downstream
+    consumers (Phase-8 SAFE_MODE interplay).
+    """
+
+    is_no_trade: bool
+    sized: SizedResult | None
+    reason_code: str
+    daily_state: DailyState
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.reason_code, "reason_code")
+        if not isinstance(self.daily_state, DailyState):
+            raise TypeError(
+                f"daily_state must be DailyState, got {type(self.daily_state).__name__}"
+            )
+        if self.is_no_trade:
+            if self.sized is not None:
+                raise ValueError(
+                    "PortfolioVerdict: is_no_trade=True requires sized=None"
+                )
+        else:
+            if self.sized is None:
+                raise ValueError(
+                    "PortfolioVerdict: is_no_trade=False requires sized"
+                )
+
+
 __all__ = [
     "ConstraintSnapshot",
+    "OpenPosition",
+    "PortfolioVerdict",
     "SizedResult",
 ]

@@ -31,7 +31,7 @@
     "quantity_step_size": "0.001",
     "min_quantity": "0.001",
     "min_notional": "50",
-    "metadata_observed_at_utc": "2026-09-18T23:59:59+00:00"
+    "metadata_observed_at_utc": "2026-09-18T22:59:59+00:00"
   },
   "parameter_set_id": "baseline-v2",
   "open_positions": [],

@@ -1,0 +1,10 @@
+{
+  "is_no_trade": true,
+  "quantity": null,
+  "quantity_before_rounding": null,
+  "quantity_after_rounding": null,
+  "quantization_decision": null,
+  "realized_risk": null,
+  "reason_code": "DAILY_STOP_BLOCK",
+  "daily_state": "DAILY_STOP"
+}
