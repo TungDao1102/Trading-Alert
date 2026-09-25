@@ -16,12 +16,12 @@
     {
       "number": "3",
       "name": "Domain + Registry + Fixtures",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "4",
       "name": "Pure Core (Feature + Strategy + Planner)",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "5",
@@ -55,9 +55,9 @@
     }
   ],
   "next": {
-    "command": "/gsd:progress --next",
-    "label": "Advance to the next step",
-    "reason": "Phase 02 of 10 · executing"
+    "command": "/gsd:progress",
+    "label": "Show progress",
+    "reason": "Unsure of state — showing progress"
   },
-  "updated_at": "2026-09-19T08:58:53.510Z"
+  "updated_at": "2026-09-24T15:16:32.722Z"
 }
