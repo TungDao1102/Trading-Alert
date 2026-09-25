@@ -16,7 +16,16 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from src.domain.enums import DailyState
+from src.domain.enums import DailyState, QuantizationDecision, RejectionReason
+
+
+# Canonical reason-code vocabulary (WR-11): risk output feeds journals and
+# Telegram payloads, so `reason_code` is validated against the GLOSSARY §9
+# vocabulary (+ "OK" for pass) exactly like `SetupResult` validates against
+# `_SETUP_REASONS` in `src/core/types.py`. A typo'd code fails here instead
+# of propagating silently to every downstream consumer.
+_REASON_CODES = frozenset({r.value for r in RejectionReason} | {"OK"})
+_QUANTIZATION_DECISIONS = frozenset({d.value for d in QuantizationDecision})
 
 
 def _require_non_empty(value: str, field_name: str) -> None:
@@ -114,6 +123,15 @@ class SizedResult:
     def __post_init__(self) -> None:
         _require_non_empty(self.quantization_decision, "quantization_decision")
         _require_non_empty(self.reason_code, "reason_code")
+        if self.reason_code not in _REASON_CODES:
+            raise ValueError(
+                f"SizedResult: unknown reason_code {self.reason_code!r}"
+            )
+        if self.quantization_decision not in _QUANTIZATION_DECISIONS:
+            raise ValueError(
+                "SizedResult: unknown quantization_decision "
+                f"{self.quantization_decision!r}"
+            )
         for fname in (
             "quantity_before_rounding",
             "quantity_after_rounding",
@@ -185,6 +203,10 @@ class PortfolioVerdict:
 
     def __post_init__(self) -> None:
         _require_non_empty(self.reason_code, "reason_code")
+        if self.reason_code not in _REASON_CODES:
+            raise ValueError(
+                f"PortfolioVerdict: unknown reason_code {self.reason_code!r}"
+            )
         if not isinstance(self.daily_state, DailyState):
             raise TypeError(
                 f"daily_state must be DailyState, got {type(self.daily_state).__name__}"
