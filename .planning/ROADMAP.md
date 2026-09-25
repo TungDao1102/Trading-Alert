@@ -158,8 +158,8 @@ Plans:
 
 Plans:
 
-- [ ] 05-01-PLAN.md — Tracer sizing-plus-quantization slice with parity fixture (TDD, D-01/D-02/D-05)
-- [ ] 05-02-PLAN.md — Portfolio gates plus DAILY_STOP plus fail-closed with phase gate (TDD, D-03/D-04)
+- [x] 05-01-PLAN.md — Tracer sizing-plus-quantization slice with parity fixture (TDD, D-01/D-02/D-05)
+- [x] 05-02-PLAN.md — Portfolio gates plus DAILY_STOP plus fail-closed with phase gate (TDD, D-03/D-04)
 
 ### Phase 6: Backtest Simulator + Experiment Registry
 
@@ -264,7 +264,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 2. Data Foundation | 0/TBD | Not started | - |
 | 3. Domain + Registry + Fixtures | 5/5 | In Progress|  |
 | 4. Pure Core (Feature + Strategy + Planner) | 4/4 | In Progress|  |
-| 5. Risk Engine | 0/TBD | Not started | - |
+| 5. Risk Engine | 2/2 | In Progress|  |
 | 6. Backtest Simulator + Experiment Registry | 0/TBD | Not started | - |
 | 7. Paper Forward Observation | 0/TBD | Not started | - |
 | 8. Approval + Reconciliation Hardening | 0/TBD | Not started | - |

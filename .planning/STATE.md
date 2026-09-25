@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 05
 status: in_progress
-stopped_at: Phase 5 plan 1 complete
-last_updated: "2026-09-25T14:30:00.000Z"
+stopped_at: Phase 5 plan 2 complete
+last_updated: "2026-09-25T16:00:00.000Z"
 last_activity: 2026-09-25
-last_activity_desc: Phase 05 plan 1 (risk tracer slice) complete
-state_head: 74a04b8
+last_activity_desc: Phase 05 plan 2 (portfolio gates + DAILY_STOP + fail-closed) complete
+state_head: 4f6d968
 progress:
   total_phases: 10
   completed_phases: 0
   total_plans: 20
-  completed_plans: 19
+  completed_plans: 20
 current_phase_name: risk-engine
 ---
 
@@ -29,10 +29,10 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 ## Current Position
 
-Phase: 05 — risk-engine (plan 1 of 2 complete)
-Plan: 1 of 2
-Status: Phase 05 plan 1 complete; plan 2 (portfolio gates) next
-Last activity: 2026-09-25 — Phase 05 plan 1 marked complete
+Phase: 05 — risk-engine (plan 2 of 2 complete)
+Plan: 2 of 2
+Status: Phase 05 complete; Phase 6 (backtest) next
+Last activity: 2026-09-25 — Phase 05 plan 2 marked complete
 
 Progress: [█████████░] 90%
 
@@ -40,20 +40,20 @@ Progress: [█████████░] 90%
 
 **Velocity:**
 
-- Total plans completed: 5 (Phase 03 + Phase 05 plan 1)
-- Average duration: ~12 min
-- Total execution time: ~75 min
+- Total plans completed: 6 (Phase 03 + Phase 05 plans 1+2)
+- Average duration: ~14 min
+- Total execution time: ~100 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 03 | 4 | 5 | ~12 min |
-| 05 | 1 | 2 | ~25 min |
+| 05 | 2 | 2 | ~25 min |
 
 **Recent Trend:**
 
-- Last 5 plans: 03-01 (tracer slice) — ~15 min, 03-02 (six entities) — ~10 min, 03-03 (registry hardening) — ~10 min, 03-04 (ORM mirror + mappers + migration) — ~15 min, 05-01 (risk tracer slice) — ~25 min
+- Last 6 plans: 03-01 (tracer slice) — ~15 min, 03-02 (six entities) — ~10 min, 03-03 (registry hardening) — ~10 min, 03-04 (ORM mirror + mappers + migration) — ~15 min, 05-01 (risk tracer slice) — ~25 min, 05-02 (portfolio gates) — ~25 min
 - Trend: stable
 
 *Updated after each plan completion*
@@ -105,6 +105,14 @@ Recent decisions affecting current work:
 - [05-01]: D-05 new versioned parameter sets named baseline-v2.toml per family at strategy_version v2.0.0 (never ambient v1 edits)
 - [05-01]: D-06 src/risk/ is dependency-free (stdlib + Decimal + src/core/_decimal.py only); no Polars/pandas/NumPy/Binance SDK/SQLAlchemy/Pydantic
 - [05-01]: D-07 ConstraintSnapshot type guard rejects zero/negative step_size at construction (fail-closed at type level, not runtime)
+- [05-02]: D-01 Gate order fixed (cluster → aggregate → count → daily) with first-failure-wins reason code (D-03)
+- [05-02]: D-02 V1 conservative cluster rule: directionally-aligned BTC/ETH/SOL/XRP counted as one cluster (D-03 + RESEARCH A3)
+- [05-02]: D-03 Candidate risk ADDED to cluster/aggregate sums; candidate NOT counted in position count (Pitfall 6 lock)
+- [05-02]: D-04 Open positions sorted by (symbol, position_side) before aggregation for deterministic iteration (Pitfall 4)
+- [05-02]: D-05 TTL subtraction between UTC-aware datetimes only; boundary at exactly TTL is PASS, one second over is STALE_CONSTRAINTS (Pitfall 3)
+- [05-02]: D-06 Daily state machine NORMAL → WARNING → DAILY_STOP with inclusive boundaries; DAILY_STOP blocks, WARNING passes with state reported
+- [05-02]: D-07 Fail-closed on None daily_loss_quote, positions_reconciled=False, stale constraint snapshot (D-04)
+- [05-02]: D-08 parameter_set values are ABSOLUTE quote amounts in check_portfolio; caller converts registry rates to absolute amounts
 
 ### Pending Todos
 
@@ -116,6 +124,7 @@ None yet.
 - OI history irrecoverable outside ~30-day window — OI collector must start in Phase 2 day one
 - Algo-Order field details MEDIUM confidence — re-verify against current Binance docs before Phase 9 wiring
 - ApprovalResult value set is a planner assumption (D-10) — user confirmation pending
+- evaluate_risk currently passes absolute amounts directly; Phase-7+ caller must convert registry rates to absolute amounts before calling
 
 ## Deferred Items
 
@@ -123,6 +132,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 | Category | Item | Status | Deferred At | Milestone |
 |----------|------|--------|-------------|-----------|
+| Rate-to-absolute conversion | Phase-7+ caller converts registry rates to absolute amounts before calling check_portfolio | Deferred to Phase 7+ | 2026-09-25 | v0.3 |
 | Enum promotion | setup_type, regime, order_role, side, position_side, order_type, time_in_force, event_type, entity_type | Deferred to Phase 4 | 2026-09-22 | v0.3 |
 | trades table | Logical user-executed trade entity (DATA_MODEL §2.6) | Deferred to Phase 5 | 2026-09-22 | v0.3 |
 | experiment_runs table | Backtest/research reproducibility (DATA_MODEL §2.12) | Deferred to Phase 6 | 2026-09-22 | v0.3 |
@@ -130,6 +140,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-25T14:30:00.000Z
-Stopped at: Phase 5 plan 1 complete
-Resume file: .planning/phases/05-risk-engine/05-02-PLAN.md
+Last session: 2026-09-25T16:00:00.000Z
+Stopped at: Phase 5 plan 2 complete
+Resume file: .planning/phases/06-backtest/06-01-PLAN.md
