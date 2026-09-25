@@ -66,7 +66,7 @@ def evaluate_risk(
     if sized.is_no_trade:
         return check_portfolio(
             sized=sized,
-            candidate_symbol=trade_plan.entry_model and constraint_snapshot.symbol,
+            candidate_symbol=constraint_snapshot.symbol,
             candidate_position_side="LONG",  # V1: candidate side from plan; placeholder
             open_positions=open_positions,
             daily_loss_quote=daily_loss_quote,
