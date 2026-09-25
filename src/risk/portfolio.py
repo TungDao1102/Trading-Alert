@@ -19,7 +19,7 @@ from decimal import Decimal
 from typing import Any
 
 from src.core._decimal import _add
-from src.domain.enums import DailyState, RejectionReason
+from src.domain.enums import DailyState, Direction, RejectionReason
 
 from .types import OpenPosition, PortfolioVerdict, SizedResult
 
@@ -116,6 +116,11 @@ def check_portfolio(
     # Validate inputs.
     _require_utc_aware(now_utc, "now_utc")
     candidate_risk = _require_decimal(sized.realized_risk, "sized.realized_risk")
+    if candidate_position_side not in {d.value for d in Direction}:
+        raise ValueError(
+            "candidate_position_side must be a Direction value "
+            f"(LONG/SHORT), got {candidate_position_side!r}"
+        )
 
     # Read thresholds from the parameter set (registry-owned, never
     # hard-coded — D-03 + D-05).

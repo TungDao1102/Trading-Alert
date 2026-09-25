@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from src.domain.enums import DailyState, QuantizationDecision, RejectionReason
+from src.domain.enums import DailyState, Direction, QuantizationDecision, RejectionReason
 
 
 # Canonical reason-code vocabulary (WR-11): risk output feeds journals and
@@ -26,6 +26,7 @@ from src.domain.enums import DailyState, QuantizationDecision, RejectionReason
 # of propagating silently to every downstream consumer.
 _REASON_CODES = frozenset({r.value for r in RejectionReason} | {"OK"})
 _QUANTIZATION_DECISIONS = frozenset({d.value for d in QuantizationDecision})
+_DIRECTIONS = frozenset({d.value for d in Direction})
 
 
 def _require_non_empty(value: str, field_name: str) -> None:
@@ -172,6 +173,10 @@ class OpenPosition:
     def __post_init__(self) -> None:
         _require_non_empty(self.symbol, "symbol")
         _require_non_empty(self.position_side, "position_side")
+        if self.position_side not in _DIRECTIONS:
+            raise ValueError(
+                f"OpenPosition: unknown position_side {self.position_side!r}"
+            )
         _require_decimal(self.open_risk, "open_risk")
         _require_decimal(self.daily_pnl_contribution, "daily_pnl_contribution")
         if self.open_risk < Decimal("0"):
