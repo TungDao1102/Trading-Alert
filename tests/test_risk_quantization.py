@@ -15,13 +15,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+from src.core.types import AccountState
+from src.domain.enums import TradePlanStatus
+from src.domain.trade_plan import TradePlan
 from src.risk.quantization import quantize
 from src.risk.sizing import size_position
 from src.risk.types import ConstraintSnapshot, SizedResult
-from src.core.types import AccountState
-from src.domain.trade_plan import TradePlan
-from src.domain.enums import TradePlanStatus
-
 
 # --------------------------------------------------------------------------- #
 # Helpers — sized result + constraint snapshot factories.
@@ -81,8 +80,7 @@ def _mk_constraints(
         quantity_step_size=Decimal(step),
         min_quantity=Decimal(min_qty),
         min_notional=Decimal(min_notional),
-        metadata_observed_at_utc=metadata_observed_at_utc
-        or datetime(2026, 9, 19, tzinfo=UTC),
+        metadata_observed_at_utc=metadata_observed_at_utc or datetime(2026, 9, 19, tzinfo=UTC),
     )
 
 
@@ -285,56 +283,29 @@ def test_quantize_exact_0_6_utilization_accepted() -> None:
     """Beh. 1f: realized_risk / allowed_risk == 0.6 exactly → ACCEPTED.
 
     Per D-02: 0.6 is the baseline; equality is the inclusive boundary
-    (>=, not >).
+    (>=, not >). Construct inputs so utilization hits exactly 0.6:
+    - risk_per_unit = 600, raw = 1/600 ≈ 0.001667 (under prec-28).
+    - step = 0.001, rounded = floor(1.667) * 0.001 = 0.001.
+    - realized_risk = 0.001 * 600 = 0.6.
+    - allowed_risk = 1, utilization = 0.6 / 1 = 0.6 exactly → ACCEPTED.
     """
-    # allowed_risk = 0.6; risk_per_unit = 1.
-    # raw = 0.6; step = 0.001; rounded = 0.6.
-    # realized_risk = 0.6 * 1 = 0.6.
-    # utilization = 0.6 / 0.6 = 1.0 → ACCEPTED (well above 0.6).
-    # To hit exactly 0.6: need rounded/raw = 0.6.
-    # Try: raw = 0.0025, step = 0.001, rounded = 0.002.
-    # utilization = 0.002/0.0025 = 0.8 → ACCEPTED.
-    # Try: raw = 0.001667, rounded = 0.001, ratio = 0.5999 → REJECT.
-    # Use raw = 0.00167, rounded = 0.001, ratio = 0.598 → REJECT.
-    # For exact 0.6 equality: rounded = 0.6 * raw.
-    # raw = 0.005, rounded = 0.003 (3 * step), utilization = 0.6.
-    # allowed_risk = raw * risk_per_unit. Pick risk_per_unit = 1.
-    # allowed_risk = 0.005, equity * risk_rate = 0.005.
-    sized, allowed_risk, risk_per_unit = _size(
-        equity="0.5",
-        risk_rate="0.01",  # allowed_risk = 0.005
-        stop_loss="-0.5",  # sl_distance = 0.5 + 0.5 = 1.0? Need risk_per_unit = 1
-        entry_ref="0.5",
-        costs="0.5",  # sl_distance=1.0, costs=0.0
+    # Build directly with raw = 1/600 so the math is exact under prec-28.
+    plan = _mk_trade_plan(
+        stop_loss="0",  # sl_distance = 600 (entry_ref=600, stop_loss=0)
+        risk_rate="1.0",
+        risk_budget="1.0",
+        suggested_quantity=str(Decimal("1") / Decimal("600")),
     )
-    # Actually let me redesign. Use:
-    # equity = 0.005, risk_rate = 1.0, allowed_risk = 0.005.
-    # entry_ref = 1.0, stop_loss = 0.0, sl_distance = 1.0, costs = 0, risk_per_unit = 1.
-    # raw = 0.005/1 = 0.005.
-    # step = 0.001, rounded = 0.005 (5 * step), utilization = 1.0 → ACCEPTED.
-    # But we want utilization = 0.6 exactly.
-    # Need: rounded * risk_per_unit / allowed_risk = 0.6.
-    # rounded = 0.6 * allowed_risk / risk_per_unit.
-    # If allowed_risk = 0.006, risk_per_unit = 1, rounded = 0.0036.
-    # But step = 0.001, so rounded must be multiple of 0.001.
-    # 0.0036 is not a multiple. Use rounded = 0.003, allowed_risk = 0.005.
-    # Then utilization = 0.003/0.005 = 0.6. Need raw = 0.005 exactly.
-    # equity = 0.5, risk_rate = 0.01, allowed_risk = 0.005.
-    # risk_per_unit = 1, raw = 0.005.
-    # step = 0.001, rounded = 0.005, utilization = 1.0 → ACCEPTED (not 0.6).
-    # To get rounded < raw: raw = 0.0055, rounded = 0.005, util = 0.909 → ACCEPTED.
-    # raw = 0.0084, rounded = 0.008, util = 0.952 → ACCEPTED.
-    # raw = 0.0167, rounded = 0.016, util = 0.958 → ACCEPTED.
-    # To get exactly 0.6: rounded/raw = 0.6 → raw = rounded/0.6 = 0.001/0.6 = 0.001667.
-    # rounded = 0.001, raw = 0.001667.
-    # allowed_risk = 0.001667, risk_per_unit = 1, equity = 0.01667, risk_rate = 0.1.
-    sized, allowed_risk, risk_per_unit = _size(
-        equity="0.01667",
-        risk_rate="0.1",
-        stop_loss="-1.0",  # sl_distance = 1.0, costs = 0, risk_per_unit = 1
-        entry_ref="0",
-        costs="0.0",
+    from src.risk.sizing import size_position
+
+    sized = size_position(
+        trade_plan=plan,
+        account_state=_mk_account_state(equity="1.0", risk_rate="1.0"),
+        entry_ref=Decimal("600"),
+        modeled_costs_per_unit=Decimal("0"),
     )
+    allowed_risk = Decimal("1")
+    risk_per_unit = Decimal("600")
     constraints = _mk_constraints(step="0.001", min_qty="0.001")
     result = quantize(
         sized=sized,
@@ -342,30 +313,28 @@ def test_quantize_exact_0_6_utilization_accepted() -> None:
         allowed_risk=allowed_risk,
         risk_per_unit=risk_per_unit,
         minimum_risk_utilization_after_rounding=Decimal("0.6"),
-        reference_price=Decimal("100.00"),
+        reference_price=Decimal("100000.00"),
     )
     assert result.quantization_decision == "ACCEPTED"
+    assert result.reason_code == "OK"
+    assert result.realized_risk == Decimal("0.6")
 
 
 # --------------------------------------------------------------------------- #
-# Test 7 — quantity_step_size == 0 fails closed.
+# Test 7 — quantity_step_size == 0 fails closed at type construction (D-04).
 # --------------------------------------------------------------------------- #
 
 
-def test_quantize_zero_step_size_fails_closed() -> None:
-    """Beh. 1g: zero quantity_step_size → EXCHANGE_CONSTRAINT fail closed."""
-    sized, allowed_risk, risk_per_unit = _size()
-    constraints = _mk_constraints(step="0")
-    result = quantize(
-        sized=sized,
-        constraint_snapshot=constraints,
-        allowed_risk=allowed_risk,
-        risk_per_unit=risk_per_unit,
-        minimum_risk_utilization_after_rounding=Decimal("0.6"),
-        reference_price=Decimal("50000.00"),
-    )
-    assert result.is_no_trade is True
-    assert result.reason_code == "EXCHANGE_CONSTRAINT"
+def test_constraint_snapshot_zero_step_size_rejected() -> None:
+    """Beh. 1g: zero quantity_step_size rejected at ConstraintSnapshot construction.
+
+    Per D-04: invalid exchange metadata fails closed. The type guard
+    rejects zero/negative step_size before quantize ever runs — the
+    adapter edge must never produce zero step_size, and the loader
+    raises if it tries.
+    """
+    with pytest.raises(ValueError, match="quantity_step_size must be > 0"):
+        _mk_constraints(step="0")
 
 
 # --------------------------------------------------------------------------- #

@@ -657,3 +657,101 @@ def test_verify_rejects_renamed_identity(tmp_path: Path) -> None:
     ps = load_parameter_set("trend-pullback", "baseline-v1")
     with pytest.raises(StrategyKeyOutsideRegistry):
         verify_parameter_set(copy_path, expected_hash=ps.parameter_set_hash)
+
+
+# =========================================================================== #
+# Plan 05-01 — Phase 5 D-05 registry type classification (Pitfall 5).
+# =========================================================================== #
+
+
+def test_max_open_positions_int_key_rejects_decimal(tmp_path: Path) -> None:
+    """Beh. 22: max_open_positions (INT_KEY) rejects non-int like 2.5."""
+    from src.domain.registry import _check_param_types
+
+    params = {"max_open_positions": Decimal("2.5")}
+    with pytest.raises(StrategyKeyOutsideRegistry, match="must be int"):
+        _check_param_types(params, tmp_path / "test.toml")
+
+
+def test_constraint_snapshot_ttl_seconds_int_key_rejects_decimal(tmp_path: Path) -> None:
+    """Beh. 23: constraint_snapshot_ttl_seconds (INT_KEY) rejects non-int."""
+    from src.domain.registry import _check_param_types
+
+    params = {"constraint_snapshot_ttl_seconds": Decimal("3600.5")}
+    with pytest.raises(StrategyKeyOutsideRegistry, match="must be int"):
+        _check_param_types(params, tmp_path / "test.toml")
+
+
+def test_risk_rate_decimal_key_loads_as_decimal(tmp_path: Path) -> None:
+    """Beh. 24: risk_rate (DECIMAL_KEY) loads as Decimal."""
+    _write_toml(
+        tmp_path,
+        'schema_version = 1\n'
+        '[strategy]\n'
+        'strategy_id = "test-strategy"\n'
+        'strategy_version = "v1.0.0"\n'
+        '[parameters]\n'
+        'risk_rate = 0.005\n',
+    )
+
+    from src.domain import registry
+
+    original_root = registry.REGISTRY_ROOT
+    registry.REGISTRY_ROOT = tmp_path
+    try:
+        ps = load_parameter_set("test-strategy", "test-set")
+        assert isinstance(ps.params["risk_rate"], Decimal)
+        assert ps.params["risk_rate"] == Decimal("0.005")
+    finally:
+        registry.REGISTRY_ROOT = original_root
+
+
+def test_max_aggregate_open_risk_decimal_key_loads_as_decimal(tmp_path: Path) -> None:
+    """Beh. 25: max_aggregate_open_risk (DECIMAL_KEY) loads as Decimal."""
+    _write_toml(
+        tmp_path,
+        'schema_version = 1\n'
+        '[strategy]\n'
+        'strategy_id = "test-strategy"\n'
+        'strategy_version = "v1.0.0"\n'
+        '[parameters]\n'
+        'max_aggregate_open_risk = 0.01\n',
+    )
+
+    from src.domain import registry
+
+    original_root = registry.REGISTRY_ROOT
+    registry.REGISTRY_ROOT = tmp_path
+    try:
+        ps = load_parameter_set("test-strategy", "test-set")
+        assert isinstance(ps.params["max_aggregate_open_risk"], Decimal)
+        assert ps.params["max_aggregate_open_risk"] == Decimal("0.01")
+    finally:
+        registry.REGISTRY_ROOT = original_root
+
+
+def test_baseline_v2_sets_load_with_all_d05_keys() -> None:
+    """Beh. 26: all three baseline-v2 sets load cleanly with D-05 keys."""
+    for family in ("trend-pullback", "breakout-retest", "range-mr"):
+        ps = load_parameter_set(family, "baseline-v2")
+        assert ps.strategy_version == "v2.0.0"
+        # INT_KEYS present as int
+        assert isinstance(ps.params["max_open_positions"], int)
+        assert isinstance(ps.params["constraint_snapshot_ttl_seconds"], int)
+        # DECIMAL_KEYS present as Decimal
+        for key in (
+            "risk_rate",
+            "minimum_risk_utilization_after_rounding",
+            "max_aggregate_open_risk",
+            "cluster_cap",
+            "daily_loss_warning_threshold",
+            "daily_loss_stop_threshold",
+            "fee_rate_entry",
+            "fee_rate_exit",
+            "expected_slippage",
+        ):
+            assert key in ps.params, f"{family}/baseline-v2 missing {key}"
+            assert isinstance(ps.params[key], Decimal), (
+                f"{family}/baseline-v2[{key}] must be Decimal, got "
+                f"{type(ps.params[key]).__name__}"
+            )

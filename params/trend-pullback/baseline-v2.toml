@@ -1,0 +1,44 @@
+# params/trend-pullback/baseline-v2.toml
+#
+# Phase 5 risk-engine parameter set for the trend-pullback strategy (plan 05-01).
+#
+# Per D-04: this file is the source of truth for the parameter set.
+# Once referenced by a backtest/alert/order plan, its hash is permanent.
+# Do not mutate — create a new parameter set + bump strategy version.
+#
+# Per D-05: Phase 5 extends the registry with portfolio gates, daily-state
+# thresholds, cost-model keys, and constraint-snapshot TTL. New keys ship
+# as new versioned sets (baseline-v2), never ambient edits to baseline-v1.
+
+schema_version = 1
+
+[strategy]
+strategy_id = "trend-pullback"
+strategy_version = "v2.0.0"
+
+[parameters]
+# Inherited from baseline-v1.
+swing_lookback = 20
+zone_tolerance_atr = 0.5
+breakout_confirmation_bars = 3
+entry_buffer_atr = 0.1
+sl_buffer_atr = 0.2
+minimum_rr = 2.0
+signal_expiry_hours = 4
+risk_rate = 0.005
+minimum_risk_utilization_after_rounding = 0.6
+
+# Phase 5 D-05 additions.
+# Portfolio gates (RISK_MANAGEMENT §§4-5 research baselines).
+max_open_positions = 2
+max_aggregate_open_risk = 0.01          # 1.0%
+cluster_cap = 0.005                     # single-trade risk_rate
+# Daily PnL state machine (RISK_MANAGEMENT §8).
+daily_loss_warning_threshold = 0.005    # WARNING at 50% of stop
+daily_loss_stop_threshold = 0.01        # DAILY_STOP at 1.0% of equity
+# Cost model keys (RISK_MANAGEMENT §3) — Phase-6-compatible.
+fee_rate_entry = 0.0002                 # 2 bps maker
+fee_rate_exit = 0.0005                  # 5 bps taker
+expected_slippage = 0.0001              # 1 bps
+# Constraint-snapshot freshness (RISK_MANAGEMENT §12).
+constraint_snapshot_ttl_seconds = 3600  # 1 hour

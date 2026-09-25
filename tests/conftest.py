@@ -39,6 +39,9 @@ PHASE3_FIXTURES_DIR = FIXTURES_DIR / "phase3"
 # Phase 4 fixtures directory (plan 04-01).
 PHASE4_FIXTURES_DIR = FIXTURES_DIR / "phase4"
 
+# Phase 5 fixtures directory (plan 05-01, D-02 parity-fixture rule).
+PHASE5_FIXTURES_DIR = FIXTURES_DIR / "phase5"
+
 # D-01 — V1 live-5 universe, locked.
 LIVE_5: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")
 
@@ -158,3 +161,33 @@ def phase4_expected_plans() -> dict:
     return json.loads(
         (PHASE4_FIXTURES_DIR / "expected_plans.json").read_text(encoding="utf-8")
     )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 5 fixtures (plan 05-01, D-02 parity-fixture rule).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="session")
+def phase5_parity_cases() -> list[dict]:
+    """Load every parity case under tests/fixtures/phase5/.
+
+    Each case directory contains `input.json` + `expected.json`. The
+    list order is sorted by case name for deterministic iteration.
+    """
+    cases: list[dict] = []
+    for case_dir in sorted(PHASE5_FIXTURES_DIR.iterdir()):
+        if not case_dir.is_dir():
+            continue
+        cases.append({
+            "name": case_dir.name,
+            "input": json.loads((case_dir / "input.json").read_text(encoding="utf-8")),
+            "expected": json.loads((case_dir / "expected.json").read_text(encoding="utf-8")),
+        })
+    return cases
+
+
+@pytest.fixture
+def phase5_frozen_clock() -> datetime:
+    """Frozen UTC clock for parity fixtures — 2026-09-19T00:00:00Z."""
+    return datetime(2026, 9, 19, tzinfo=UTC)

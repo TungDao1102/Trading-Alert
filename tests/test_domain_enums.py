@@ -189,11 +189,14 @@ def test_system_mode_values_match_glossary_section_8() -> None:
 def test_rejection_reason_values_match_glossary_section_9() -> None:
     """Beh. 8: RejectionReason enum values are exactly the GLOSSARY §9 set.
 
-    GLOSSARY §9 (verbatim):
+    GLOSSARY §9 (verbatim, including Phase 5 D-05 fine-grained additions):
         NO_TRADE_REGIME, RR_TOO_LOW, STALE_SETUP, INVALIDATED, RISK_LIMIT,
         CORRELATED_RISK_LIMIT, DAILY_STOP, QUANTIZATION_REJECT,
         MIN_NOTIONAL_REJECT, INSUFFICIENT_MARGIN, EXCHANGE_CONSTRAINT,
-        DATA_STALE, RECONCILIATION_REQUIRED, APPROVAL_EXPIRED
+        DATA_STALE, RECONCILIATION_REQUIRED, APPROVAL_EXPIRED,
+        MIN_QTY_REJECT, NOTIONAL_REJECT, UTILIZATION_REJECT,
+        CLUSTER_CAP_REJECT, AGGREGATE_CAP_REJECT, MAX_POSITIONS_REJECT,
+        DAILY_STOP_BLOCK, STALE_CONSTRAINTS, UNCERTAIN_ACCOUNT_STATE
     """
     expected = {
         "NO_TRADE_REGIME",
@@ -210,6 +213,16 @@ def test_rejection_reason_values_match_glossary_section_9() -> None:
         "DATA_STALE",
         "RECONCILIATION_REQUIRED",
         "APPROVAL_EXPIRED",
+        # Phase 5 D-05 fine-grained codes (plan 05-01).
+        "MIN_QTY_REJECT",
+        "NOTIONAL_REJECT",
+        "UTILIZATION_REJECT",
+        "CLUSTER_CAP_REJECT",
+        "AGGREGATE_CAP_REJECT",
+        "MAX_POSITIONS_REJECT",
+        "DAILY_STOP_BLOCK",
+        "STALE_CONSTRAINTS",
+        "UNCERTAIN_ACCOUNT_STATE",
     }
     actual = {member.value for member in RejectionReason}
     assert actual == expected

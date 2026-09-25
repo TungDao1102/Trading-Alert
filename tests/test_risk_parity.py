@@ -13,7 +13,7 @@ implemented.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -82,9 +82,7 @@ def _build_constraints(cs_dict: dict) -> ConstraintSnapshot:
         quantity_step_size=Decimal(cs_dict["quantity_step_size"]),
         min_quantity=Decimal(cs_dict["min_quantity"]),
         min_notional=Decimal(cs_dict["min_notional"]),
-        metadata_observed_at_utc=datetime.fromisoformat(
-            cs_dict["metadata_observed_at_utc"]
-        ),
+        metadata_observed_at_utc=datetime.fromisoformat(cs_dict["metadata_observed_at_utc"]),
     )
 
 
@@ -167,9 +165,7 @@ def test_phase5_fixtures_exist() -> None:
         "min_qty_reject",
         "notional_reject",
     }
-    actual_cases = {
-        p.name for p in PHASE5_FIXTURES_DIR.iterdir() if p.is_dir()
-    }
+    actual_cases = {p.name for p in PHASE5_FIXTURES_DIR.iterdir() if p.is_dir()}
     assert expected_cases.issubset(actual_cases), (
         f"missing phase5 cases: {expected_cases - actual_cases}"
     )
@@ -180,10 +176,16 @@ def test_phase5_fixtures_exist() -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize(
-    "case_name",
-    ["happy_path_long", "happy_path_short", "utilization_reject_edge", "min_qty_reject", "notional_reject"],
+_PHASE5_CASES = (
+    "happy_path_long",
+    "happy_path_short",
+    "utilization_reject_edge",
+    "min_qty_reject",
+    "notional_reject",
 )
+
+
+@pytest.mark.parametrize("case_name", _PHASE5_CASES)
 def test_phase5_pipeline_matches_expected(case_name: str) -> None:
     """Beh. 4: pipeline output dict matches expected.json canonical-JSON-exactly."""
     case_dir = PHASE5_FIXTURES_DIR / case_name

@@ -1,0 +1,9 @@
+{
+  "is_no_trade": true,
+  "quantity": null,
+  "quantity_before_rounding": "0.10",
+  "quantity_after_rounding": "0.100",
+  "quantization_decision": "REJECTED",
+  "realized_risk": "1.00000",
+  "reason_code": "NOTIONAL_REJECT"
+}

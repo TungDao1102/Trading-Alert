@@ -14,13 +14,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
-import pytest
 from src.core.types import AccountState
-from src.domain.trade_plan import TradePlan
 from src.domain.enums import TradePlanStatus
+from src.domain.trade_plan import TradePlan
 from src.risk.sizing import size_position
 from src.risk.types import SizedResult
-
 
 # --------------------------------------------------------------------------- #
 # Helpers — build a frozen TradePlan with DEFERRED_TO_RISK estimate fields.

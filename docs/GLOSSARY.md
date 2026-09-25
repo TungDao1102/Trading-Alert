@@ -123,6 +123,18 @@ LIVE_AUTONOMOUS_DISABLED
 
 `LIVE_AUTONOMOUS` is a future architecture mode and is disabled by default.
 
+### 8.1 Canonical DailyState (Phase 5, D-03)
+
+```text
+NORMAL
+WARNING
+DAILY_STOP
+```
+
+`NORMAL` — daily loss below the warning threshold; new entries permitted.
+`WARNING` — warning threshold reached but stop threshold not yet; new entries still permitted (alert fires).
+`DAILY_STOP` — stop threshold reached; no new entries, existing protective exits remain active.
+
 ## 9. Canonical rejection reasons
 
 ```text
@@ -140,6 +152,16 @@ EXCHANGE_CONSTRAINT
 DATA_STALE
 RECONCILIATION_REQUIRED
 APPROVAL_EXPIRED
+# Phase 5 D-05 fine-grained codes (plan 05-01, locked D-02 semantics)
+MIN_QTY_REJECT
+NOTIONAL_REJECT
+UTILIZATION_REJECT
+CLUSTER_CAP_REJECT
+AGGREGATE_CAP_REJECT
+MAX_POSITIONS_REJECT
+DAILY_STOP_BLOCK
+STALE_CONSTRAINTS
+UNCERTAIN_ACCOUNT_STATE
 ```
 
 Do not create synonyms such as `Skipped-User`, `USER_SKIPPED`, and `SKIPPED_USER` in different modules. Use the canonical enum names above.

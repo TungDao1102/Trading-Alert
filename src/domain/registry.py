@@ -83,6 +83,20 @@ STRATEGY_KEYS = frozenset(
         # parameters that fail closed (KeyError) when absent.
         "atr_period",
         "touch_tolerance_atr",
+        # Phase 5 D-05 additions (D-03 portfolio + cost model).
+        # Portfolio gates (research baselines per RISK_MANAGEMENT §§4-5).
+        "max_open_positions",
+        "max_aggregate_open_risk",
+        "cluster_cap",
+        # Daily PnL state machine (RISK_MANAGEMENT §8).
+        "daily_loss_warning_threshold",
+        "daily_loss_stop_threshold",
+        # Cost model keys (RISK_MANAGEMENT §3) — Phase-6-compatible.
+        "fee_rate_entry",
+        "fee_rate_exit",
+        "expected_slippage",
+        # Constraint-snapshot freshness (RISK_MANAGEMENT §12).
+        "constraint_snapshot_ttl_seconds",
     }
 )
 
@@ -235,6 +249,9 @@ INT_KEYS = frozenset(
         "regime_filter_lookback",
         # Detector volatility knob — Phase 04 review fix (CR-01).
         "atr_period",
+        # Phase 5 D-05 additions — count-like keys (Pitfall 5).
+        "max_open_positions",
+        "constraint_snapshot_ttl_seconds",
     }
 )
 DECIMAL_KEYS = STRATEGY_KEYS - INT_KEYS

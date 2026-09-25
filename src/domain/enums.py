@@ -141,6 +141,32 @@ class RejectionReason(str, Enum):
     DATA_STALE = "DATA_STALE"
     RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
     APPROVAL_EXPIRED = "APPROVAL_EXPIRED"
+    # Phase 5 D-05 fine-grained reason codes (one-way, parity-fixture binding).
+    # Promote-or-carry decision locked in plan 05-01: enum promotion + GLOSSARY
+    # update so every downstream consumer (alerts, journal rows, Telegram payloads)
+    # reads from one vocabulary.
+    MIN_QTY_REJECT = "MIN_QTY_REJECT"
+    NOTIONAL_REJECT = "NOTIONAL_REJECT"
+    UTILIZATION_REJECT = "UTILIZATION_REJECT"
+    CLUSTER_CAP_REJECT = "CLUSTER_CAP_REJECT"
+    AGGREGATE_CAP_REJECT = "AGGREGATE_CAP_REJECT"
+    MAX_POSITIONS_REJECT = "MAX_POSITIONS_REJECT"
+    DAILY_STOP_BLOCK = "DAILY_STOP_BLOCK"
+    STALE_CONSTRAINTS = "STALE_CONSTRAINTS"
+    UNCERTAIN_ACCOUNT_STATE = "UNCERTAIN_ACCOUNT_STATE"
+
+
+class DailyState(str, Enum):
+    """GLOSSARY §8 — Daily PnL state machine (D-03).
+
+    Three-state machine: NORMAL → WARNING → DAILY_STOP. The `DAILY_STOP`
+    threshold blocks new entries; existing protective exits stay active
+    (enforced downstream — risk only emits the block + reason).
+    """
+
+    NORMAL = "NORMAL"
+    WARNING = "WARNING"
+    DAILY_STOP = "DAILY_STOP"
 
 
 # --------------------------------------------------------------------------- #
