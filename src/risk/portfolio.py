@@ -70,6 +70,44 @@ def _derive_daily_state(
     return DailyState.NORMAL
 
 
+def _extract_thresholds(
+    parameter_set: dict[str, Any],
+) -> (
+    tuple[int, Decimal, Decimal, Decimal, Decimal] | None
+):
+    """Read and type-check portfolio thresholds, fail-closed on violation.
+
+    Returns `(max_open_positions, max_aggregate_open_risk, cluster_cap,
+    daily_loss_warning_threshold, daily_loss_stop_threshold)` or `None`
+    when the parameter set is malformed. `None` means the caller must
+    emit an `UNCERTAIN_ACCOUNT_STATE` envelope — never `KeyError` (missing
+    key), never silent truncation (`int(Decimal("2.9")) == 2`), never a
+    `bool` smuggled through `isinstance(int)`.
+    """
+    try:
+        max_open_positions = parameter_set["max_open_positions"]
+        max_aggregate_open_risk = parameter_set["max_aggregate_open_risk"]
+        cluster_cap = parameter_set["cluster_cap"]
+        warning = parameter_set["daily_loss_warning_threshold"]
+        stop = parameter_set["daily_loss_stop_threshold"]
+    except KeyError:
+        return None
+    if isinstance(max_open_positions, bool) or not isinstance(
+        max_open_positions, int
+    ):
+        return None
+    for value in (max_aggregate_open_risk, cluster_cap, warning, stop):
+        if not isinstance(value, Decimal):
+            return None
+    return (
+        max_open_positions,
+        max_aggregate_open_risk,
+        cluster_cap,
+        warning,
+        stop,
+    )
+
+
 def check_portfolio(
     *,
     sized: SizedResult,
@@ -123,19 +161,24 @@ def check_portfolio(
         )
 
     # Read thresholds from the parameter set (registry-owned, never
-    # hard-coded — D-03 + D-05).
-    max_open_positions = int(parameter_set["max_open_positions"])
-    max_aggregate_open_risk = _require_decimal(
-        parameter_set["max_aggregate_open_risk"], "max_aggregate_open_risk"
-    )
-    cluster_cap = _require_decimal(parameter_set["cluster_cap"], "cluster_cap")
-    daily_loss_warning_threshold = _require_decimal(
-        parameter_set["daily_loss_warning_threshold"],
-        "daily_loss_warning_threshold",
-    )
-    daily_loss_stop_threshold = _require_decimal(
-        parameter_set["daily_loss_stop_threshold"], "daily_loss_stop_threshold"
-    )
+    # hard-coded — D-03 + D-05). Malformed sets fail closed to an
+    # UNCERTAIN_ACCOUNT_STATE envelope instead of raising KeyError,
+    # truncating non-int numerics, or leaking TypeError to the caller.
+    thresholds = _extract_thresholds(parameter_set)
+    if thresholds is None:
+        return PortfolioVerdict(
+            is_no_trade=True,
+            sized=None,
+            reason_code=RejectionReason.UNCERTAIN_ACCOUNT_STATE.value,
+            daily_state=DailyState.NORMAL,
+        )
+    (
+        max_open_positions,
+        max_aggregate_open_risk,
+        cluster_cap,
+        daily_loss_warning_threshold,
+        daily_loss_stop_threshold,
+    ) = thresholds
 
     # Sort positions deterministically (Pitfall 4 — non-deterministic
     # iteration). Sort by (symbol, position_side) so two position lists
