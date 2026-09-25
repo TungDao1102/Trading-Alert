@@ -228,8 +228,10 @@ def check_portfolio(
         )
     _require_utc_aware(constraint_observed_at_utc, "constraint_observed_at_utc")
     age = now_utc - constraint_observed_at_utc
-    if age > ttl:
+    if age > ttl or age < timedelta(0):
         # Fail-closed: stale constraint snapshot → STALE_CONSTRAINTS.
+        # Negative age (future-dated snapshot: clock skew or corrupt
+        # upstream metadata) fails closed the same way.
         return PortfolioVerdict(
             is_no_trade=True,
             sized=None,
