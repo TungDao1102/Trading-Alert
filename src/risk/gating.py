@@ -15,6 +15,7 @@ from typing import Any
 
 from src.core._decimal import _add, _div, _mul, _sub
 from src.core.types import AccountState
+from src.domain.enums import Direction
 from src.domain.trade_plan import TradePlan
 
 from .portfolio import check_portfolio
@@ -26,6 +27,7 @@ from .types import ConstraintSnapshot, OpenPosition, PortfolioVerdict
 def evaluate_risk(
     *,
     trade_plan: TradePlan,
+    candidate_position_side: str,
     account_state: AccountState,
     constraint_snapshot: ConstraintSnapshot,
     open_positions: Sequence[OpenPosition],
@@ -42,12 +44,23 @@ def evaluate_risk(
     (D-02 parity guarantee). The first NO_TRADE short-circuits with its
     reason code preserved.
 
+    `candidate_position_side` is required (no default) and must be a
+    `Direction` value (LONG/SHORT). The cluster gate only sums open
+    positions matching the candidate side, so guessing the side would
+    mis-cluster SHORT plans and wrongfully PASS them — an unknown side
+    raises instead of evaluating (fail closed).
+
     `parameter_set` carries the portfolio thresholds (cluster_cap,
     max_aggregate_open_risk, max_open_positions, daily_loss_*_threshold)
     as ABSOLUTE quote amounts — the caller is responsible for converting
     registry rates to absolute amounts before calling. This keeps the
     gate math simple and the parity fixture byte-exact.
     """
+    if candidate_position_side not in {d.value for d in Direction}:
+        raise ValueError(
+            "candidate_position_side must be a Direction value "
+            f"(LONG/SHORT), got {candidate_position_side!r} — refusing to evaluate"
+        )
     # Zone-mid entry_ref = (entry_min + entry_max) / 2 (D-02 locked,
     # pinned prec-28 so ambient context mutations cannot change the value).
     entry_ref = _div(
@@ -67,7 +80,7 @@ def evaluate_risk(
         return check_portfolio(
             sized=sized,
             candidate_symbol=constraint_snapshot.symbol,
-            candidate_position_side="LONG",  # V1: candidate side from plan; placeholder
+            candidate_position_side=candidate_position_side,
             open_positions=open_positions,
             daily_loss_quote=daily_loss_quote,
             parameter_set=parameter_set,
@@ -93,7 +106,7 @@ def evaluate_risk(
     return check_portfolio(
         sized=quantized,
         candidate_symbol=constraint_snapshot.symbol,
-        candidate_position_side="LONG",  # V1: candidate side from plan; placeholder
+        candidate_position_side=candidate_position_side,
         open_positions=open_positions,
         daily_loss_quote=daily_loss_quote,
         parameter_set=parameter_set,

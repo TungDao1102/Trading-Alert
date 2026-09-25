@@ -907,6 +907,7 @@ def _run_evaluate_risk(case_input: dict) -> PortfolioVerdict:
 
     return evaluate_risk(
         trade_plan=trade_plan,
+        candidate_position_side="LONG",
         account_state=account,
         constraint_snapshot=constraints,
         open_positions=open_positions,
