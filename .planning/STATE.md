@@ -1,19 +1,19 @@
 ---
 gsd_state_version: "1.0"
 milestone: v0.3
-current_phase: 04
-status: completed
-stopped_at: Phase 5 planning complete
-last_updated: "2026-09-25T13:17:47.723Z"
-last_activity: 2026-09-24
-last_activity_desc: Phase 04 marked complete
-state_head: 941a22ab6283b5888c6e27ea20acaeebb576abed
+current_phase: 05
+status: in_progress
+stopped_at: Phase 5 plan 1 complete
+last_updated: "2026-09-25T14:30:00.000Z"
+last_activity: 2026-09-25
+last_activity_desc: Phase 05 plan 1 (risk tracer slice) complete
+state_head: 74a04b8
 progress:
   total_phases: 10
   completed_phases: 0
   total_plans: 20
-  completed_plans: 18
-current_phase_name: pure-core-feature-strategy-planner
+  completed_plans: 19
+current_phase_name: risk-engine
 ---
 
 <!-- STATE-MD-SCHEMA:END:frontmatter -->
@@ -29,30 +29,31 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 ## Current Position
 
-Phase: 04 — COMPLETE
-Plan: 3 of 4
-Status: Phase 04 complete
-Last activity: 2026-09-24 — Phase 04 marked complete
+Phase: 05 — risk-engine (plan 1 of 2 complete)
+Plan: 1 of 2
+Status: Phase 05 plan 1 complete; plan 2 (portfolio gates) next
+Last activity: 2026-09-25 — Phase 05 plan 1 marked complete
 
-Progress: [████████░░] 80%
+Progress: [█████████░] 90%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 4 (Phase 03)
+- Total plans completed: 5 (Phase 03 + Phase 05 plan 1)
 - Average duration: ~12 min
-- Total execution time: ~50 min
+- Total execution time: ~75 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 03 | 4 | 5 | ~12 min |
+| 05 | 1 | 2 | ~25 min |
 
 **Recent Trend:**
 
-- Last 4 plans: 03-01 (tracer slice) — ~15 min, 03-02 (six entities) — ~10 min, 03-03 (registry hardening) — ~10 min, 03-04 (ORM mirror + mappers + migration) — ~15 min
+- Last 5 plans: 03-01 (tracer slice) — ~15 min, 03-02 (six entities) — ~10 min, 03-03 (registry hardening) — ~10 min, 03-04 (ORM mirror + mappers + migration) — ~15 min, 05-01 (risk tracer slice) — ~25 min
 - Trend: stable
 
 *Updated after each plan completion*
@@ -97,6 +98,13 @@ Recent decisions affecting current work:
 - [04-03]: RR gate is a hard gate returning PlanResult(is_no_trade=True, reason_code=RR_TOO_LOW) — never a downgraded TP1-only plan
 - [04-03]: PlanResult envelope: is_no_trade=True requires trade_plan=None; is_no_trade=False requires a TradePlan
 - [04-03]: Registry whitelist extended with 7 family B/C keys (D-05); 4 keys assigned to INT_KEYS, rest to DECIMAL_KEYS
+- [05-01]: D-05 RejectionReason enum promotion + GLOSSARY §9 update (one-way, locked in plan 05-01 checkpoint:decision)
+- [05-01]: D-02 utilization gate = realized_risk / allowed_risk >= 0.6 (Pitfall 2 distinguishing case pinned by parity fixture)
+- [05-01]: D-03 notional-check reference price = zone-mid entry_ref (consistent with SL-distance basis)
+- [05-01]: D-04 candidate-plan risk ADDED to cap sums in aggregate/cluster caps (Pitfall 6 — exact-cap equality PASSES)
+- [05-01]: D-05 new versioned parameter sets named baseline-v2.toml per family at strategy_version v2.0.0 (never ambient v1 edits)
+- [05-01]: D-06 src/risk/ is dependency-free (stdlib + Decimal + src/core/_decimal.py only); no Polars/pandas/NumPy/Binance SDK/SQLAlchemy/Pydantic
+- [05-01]: D-07 ConstraintSnapshot type guard rejects zero/negative step_size at construction (fail-closed at type level, not runtime)
 
 ### Pending Todos
 
@@ -122,6 +130,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-25T13:17:47.611Z
-Stopped at: Phase 5 planning complete
-Resume file: .planning/phases/05-risk-engine/05-01-PLAN.md
+Last session: 2026-09-25T14:30:00.000Z
+Stopped at: Phase 5 plan 1 complete
+Resume file: .planning/phases/05-risk-engine/05-02-PLAN.md
