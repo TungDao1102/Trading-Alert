@@ -60,7 +60,8 @@
     "tdd_mode": true,
     "ui_review": true,
     "use_worktrees": false,
-    "plan_review_convergence": true
+    "plan_review_convergence": true,
+    "_auto_chain_active": true
   },
   "ship": {
     "pr_body_sections": [

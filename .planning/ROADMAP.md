@@ -120,21 +120,27 @@ Plans:
   3. Every valid setup translates into a plan carrying entry zone, SL, TP(s), invalidation, expiry, expected RR, and plan hash
   4. No strategy family is declared a winner — all three remain hypotheses pending backtest plus out-of-sample evidence
 
-**Plans**: 4 plans
+**Plans**: 4/4 plans executed
 
 Plans:
+
+- [x] 04-01-PLAN.md
+- [x] 04-02-PLAN.md
+- [x] 04-03-PLAN.md
+- [x] 04-04-PLAN.md
+
 **Wave 1**
 
-- [ ] 04-01: Tracer trend-pullback end-to-end (src/core slice + D-06 enums + fixture skeleton)
+- [x] 04-01: Tracer trend-pullback end-to-end (src/core slice + D-06 enums + fixture skeleton)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 04-02: Feature validity hardening + determinism suites rewired to real evaluate
-- [ ] 04-03: Full planner contract + registry extension + family B/C param sets
+- [x] 04-02: Feature validity hardening + determinism suites rewired to real evaluate
+- [x] 04-03: Full planner contract + registry extension + family B/C param sets
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 04-04: Breakout-retest + range-mr slices + per-family determinism + phase gate
+- [x] 04-04: Breakout-retest + range-mr slices + per-family determinism + phase gate
 
 ### Phase 5: Risk Engine
 
@@ -148,11 +154,12 @@ Plans:
   2. Portfolio limits (max open positions, aggregate risk, correlated-cluster cap, DAILY_STOP states) are enforced, and uncertain account/risk state fails closed to NO_TRADE with no new orders
   3. Backtest, paper, and live produce identical sizing outputs for identical inputs (parity fixture green)
 
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
 
-- [ ] 05-01: TBD (derived during plan-phase)
+- [ ] 05-01-PLAN.md — Tracer sizing-plus-quantization slice with parity fixture (TDD, D-01/D-02/D-05)
+- [ ] 05-02-PLAN.md — Portfolio gates plus DAILY_STOP plus fail-closed with phase gate (TDD, D-03/D-04)
 
 ### Phase 6: Backtest Simulator + Experiment Registry
 
@@ -256,7 +263,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 1. Research Formalization | 0/TBD | Not started | - |
 | 2. Data Foundation | 0/TBD | Not started | - |
 | 3. Domain + Registry + Fixtures | 5/5 | In Progress|  |
-| 4. Pure Core (Feature + Strategy + Planner) | 0/TBD | Not started | - |
+| 4. Pure Core (Feature + Strategy + Planner) | 4/4 | In Progress|  |
 | 5. Risk Engine | 0/TBD | Not started | - |
 | 6. Backtest Simulator + Experiment Registry | 0/TBD | Not started | - |
 | 7. Paper Forward Observation | 0/TBD | Not started | - |
