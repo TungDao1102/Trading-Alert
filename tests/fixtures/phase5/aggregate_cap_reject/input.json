@@ -1,0 +1,44 @@
+{
+  "trade_plan": {
+    "trade_plan_id": "dddddddd11111111111111111111111111111111111111111111111111111111",
+    "signal_id": "dddddddd22222222222222222222222222222222222222222222222222222222",
+    "trade_plan_version": "v1",
+    "entry_model": "LIMIT_ZONE",
+    "entry_min_price": "49995.00",
+    "entry_max_price": "50005.00",
+    "stop_loss_price": "49990.00",
+    "take_profit_json": "{\"tp1\":\"51000.00\",\"tp1_role\":\"TAKE_PROFIT_1\",\"tp2\":\"52000.00\",\"tp2_role\":\"TAKE_PROFIT_2\"}",
+    "invalidation_rule_json": "{\"basis\":\"CANDLE_CLOSE\",\"level\":\"49990.00\",\"break_distance_atr\":\"20.00\"}",
+    "expiry_utc": "2026-09-19T04:00:00+00:00",
+    "expected_rr_json": "{\"tp1_rr\":\"2.0\",\"tp2_rr\":\"4.0\"}",
+    "risk_rate": "0.003",
+    "risk_budget": "30.00000",
+    "suggested_quantity": "3.000",
+    "quantity_before_rounding": "3.000",
+    "quantity_after_rounding": "3.000",
+    "quantization_decision": "DEFERRED_TO_RISK",
+    "plan_hash": "dddddddd33333333333333333333333333333333333333333333333333333333",
+    "status": "READY",
+    "created_at_utc": "2026-09-19T00:00:00+00:00"
+  },
+  "account_state": {
+    "equity": "10000.00",
+    "risk_rate": "0.003"
+  },
+  "constraint_snapshot": {
+    "symbol": "BTCUSDT",
+    "price_tick_size": "0.10",
+    "quantity_step_size": "0.001",
+    "min_quantity": "0.001",
+    "min_notional": "50",
+    "metadata_observed_at_utc": "2026-09-19T00:00:00+00:00"
+  },
+  "parameter_set_id": "baseline-v2",
+  "open_positions": [
+    {"symbol": "BNBUSDT", "position_side": "LONG", "open_risk": "71.00", "daily_pnl_contribution": "0"}
+  ],
+  "daily_loss_quote": "0",
+  "now_utc": "2026-09-19T00:00:00+00:00",
+  "ttl_seconds": "3600",
+  "modeled_costs_per_unit": "0.0"
+}
