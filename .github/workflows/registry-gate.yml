@@ -32,11 +32,13 @@ jobs:
         run: |
           set -eu
           # Every params/**/*.toml file is verified against the pinned
-          # hash in tests/fixtures/phase3/parameters.json via
+          # hashes in tests/fixtures/phase4/parameters.json via
           # verify_parameter_set (D-04/D-05 tripwire). Comparing two
           # live loads against each other is vacuous — the gate must
-          # compare against the recorded pin. TOML files with no pin
+          # compare against the recorded pins. TOML files with no pin
           # fail closed: register them before merging.
+          # NOTE: phase3/parameters.json is legacy single-pin harness-only;
+          # the gate uses the phase4 multi-set pin list.
           mapfile -t TOMLS < <(find params -name '*.toml' -not -path '*/node_modules/*' 2>/dev/null || true)
           if [ "${#TOMLS[@]}" -eq 0 ]; then
             echo "Re-hash: no params TOML files present; passes vacuously."
@@ -47,13 +49,20 @@ jobs:
           import sys
           from pathlib import Path
           from src.domain.registry import verify_parameter_set
-          pinned = json.loads(
-              Path("tests/fixtures/phase3/parameters.json").read_text()
+          pinned_doc = json.loads(
+              Path("tests/fixtures/phase4/parameters.json").read_text()
           )
+          # Canonical shape: {"parameter_sets": [...]}. Accept legacy
+          # single-object {"strategy_id": ...} for robustness.
+          if "parameter_sets" in pinned_doc:
+              entries = pinned_doc["parameter_sets"]
+          else:
+              entries = [pinned_doc]
           pinned_sets = {
-              (pinned["strategy_id"], pinned["parameter_set_id"]): pinned[
+              (e["strategy_id"], e["parameter_set_id"]): e[
                   "parameter_set_hash"
               ]
+              for e in entries
           }
           failures = []
           for toml_path in sorted(Path("params").rglob("*.toml")):
