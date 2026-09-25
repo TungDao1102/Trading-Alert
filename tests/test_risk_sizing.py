@@ -14,6 +14,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
 from src.core.types import AccountState
 from src.domain.enums import TradePlanStatus
 from src.domain.trade_plan import TradePlan
@@ -176,3 +177,21 @@ def test_size_position_byte_identical_across_runs() -> None:
     assert a.realized_risk == b.realized_risk
     assert a.reason_code == b.reason_code
     assert a.quantization_decision == b.quantization_decision
+
+
+# --------------------------------------------------------------------------- #
+# Test 5 — non-positive equity raises at the AccountState boundary (WR-09).
+# --------------------------------------------------------------------------- #
+
+
+def test_non_positive_equity_raises_at_account_boundary() -> None:
+    """WR-09: equity <= 0 raises ValueError at construction (fail closed).
+
+    No NO_TRADE envelope exists for degenerate account state — the
+    ValueError IS the fail-closed contract (no order path exists past
+    it); callers map the exception to UNCERTAIN_ACCOUNT_STATE downstream.
+    """
+    with pytest.raises(ValueError, match="equity must be > 0"):
+        AccountState(equity=Decimal("0"), risk_rate=Decimal("0.005"))
+    with pytest.raises(ValueError, match="equity must be > 0"):
+        AccountState(equity=Decimal("-100"), risk_rate=Decimal("0.005"))

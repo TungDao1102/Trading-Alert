@@ -55,6 +55,11 @@ def evaluate_risk(
     as ABSOLUTE quote amounts — callers holding raw registry rates
     convert first via `resolve_absolute_thresholds`. This keeps the
     gate math simple and the parity fixture byte-exact.
+
+    Non-positive equity never reaches this function: `AccountState`
+    construction raises `ValueError` for `equity <= 0` (fail closed, no
+    order path). Callers that must report the condition downstream map
+    the exception to an `UNCERTAIN_ACCOUNT_STATE` envelope.
     """
     if candidate_position_side not in {d.value for d in Direction}:
         raise ValueError(
