@@ -141,16 +141,6 @@ def check_portfolio(
     The candidate is NOT counted in the position count (it is not yet
     a position).
     """
-    # Short-circuit: if sizing/quantization already rejected, preserve
-    # the upstream reason code (D-02 — pipeline short-circuits).
-    if sized.is_no_trade:
-        return PortfolioVerdict(
-            is_no_trade=True,
-            sized=None,
-            reason_code=sized.reason_code,
-            daily_state=DailyState.NORMAL,
-        )
-
     # Validate inputs.
     _require_utc_aware(now_utc, "now_utc")
     candidate_risk = _require_decimal(sized.realized_risk, "sized.realized_risk")
@@ -187,16 +177,37 @@ def check_portfolio(
         open_positions, key=lambda p: (p.symbol, p.position_side)
     )
 
-    # Derive daily state from injected loss + thresholds. We need this
-    # for the verdict regardless of which gate fires (downstream
-    # consumers — Phase-8 SAFE_MODE interplay — read daily_state).
+    # Derive daily state from injected loss + thresholds BEFORE any
+    # verdict below, so no fail-closed path masks DAILY_STOP from the
+    # downstream SAFE_MODE consumers that read this field. Unknown loss
+    # cannot derive — those verdicts keep NORMAL.
+    if daily_loss_quote is None:
+        derived_state = DailyState.NORMAL
+    else:
+        derived_state = _derive_daily_state(
+            daily_loss_quote=daily_loss_quote,
+            warning_threshold_quote=daily_loss_warning_threshold,
+            stop_threshold_quote=daily_loss_stop_threshold,
+        )
+
+    # Short-circuit: if sizing/quantization already rejected, preserve
+    # the upstream reason code (D-02 — pipeline short-circuits) while
+    # carrying the derived daily state.
+    if sized.is_no_trade:
+        return PortfolioVerdict(
+            is_no_trade=True,
+            sized=None,
+            reason_code=sized.reason_code,
+            daily_state=derived_state,
+        )
+
     if daily_loss_quote is None:
         # Fail-closed: unknown daily loss → UNCERTAIN_ACCOUNT_STATE.
         return PortfolioVerdict(
             is_no_trade=True,
             sized=None,
             reason_code=RejectionReason.UNCERTAIN_ACCOUNT_STATE.value,
-            daily_state=DailyState.NORMAL,
+            daily_state=derived_state,
         )
     if not positions_reconciled:
         # Fail-closed: unreconciled positions → UNCERTAIN_ACCOUNT_STATE.
@@ -204,7 +215,7 @@ def check_portfolio(
             is_no_trade=True,
             sized=None,
             reason_code=RejectionReason.UNCERTAIN_ACCOUNT_STATE.value,
-            daily_state=DailyState.NORMAL,
+            daily_state=derived_state,
         )
     if constraint_observed_at_utc is not None:
         _require_utc_aware(constraint_observed_at_utc, "constraint_observed_at_utc")
@@ -215,7 +226,7 @@ def check_portfolio(
                 is_no_trade=True,
                 sized=None,
                 reason_code=RejectionReason.STALE_CONSTRAINTS.value,
-                daily_state=DailyState.NORMAL,
+                daily_state=derived_state,
             )
 
     # Thresholds in quote currency (registry values are rates of equity).
@@ -238,11 +249,7 @@ def check_portfolio(
     warning_threshold_quote = daily_loss_warning_threshold
     stop_threshold_quote = daily_loss_stop_threshold
 
-    daily_state = _derive_daily_state(
-        daily_loss_quote=daily_loss_quote,
-        warning_threshold_quote=warning_threshold_quote,
-        stop_threshold_quote=stop_threshold_quote,
-    )
+    daily_state = derived_state
 
     # Gate 1: cluster cap (V1 conservative rule — directionally-aligned
     # BTC/ETH/SOL/XRP counted as one cluster).
