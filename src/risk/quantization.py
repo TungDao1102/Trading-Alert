@@ -86,8 +86,10 @@ def quantize(
         )
 
     # Exact Decimal floor-division (Pitfall 2 mitigation: never round up).
+    # The `//` step count is integral; the rescale multiplies under pinned
+    # prec-28 so ambient context mutations cannot change the value.
     steps = raw_quantity // constraint_snapshot.quantity_step_size
-    rounded = steps * constraint_snapshot.quantity_step_size
+    rounded = _mul(steps, constraint_snapshot.quantity_step_size)
 
     # Gate 1: min-quantity reject.
     if rounded < constraint_snapshot.min_quantity:

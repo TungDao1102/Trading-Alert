@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from src.core._decimal import _add, _mul, _sub
+from src.core._decimal import _add, _div, _mul, _sub
 from src.core.types import AccountState
 from src.domain.trade_plan import TradePlan
 
@@ -48,8 +48,12 @@ def evaluate_risk(
     registry rates to absolute amounts before calling. This keeps the
     gate math simple and the parity fixture byte-exact.
     """
-    # Zone-mid entry_ref = (entry_min + entry_max) / 2 (D-02 locked).
-    entry_ref = (trade_plan.entry_min_price + trade_plan.entry_max_price) / Decimal("2")
+    # Zone-mid entry_ref = (entry_min + entry_max) / 2 (D-02 locked,
+    # pinned prec-28 so ambient context mutations cannot change the value).
+    entry_ref = _div(
+        _add(trade_plan.entry_min_price, trade_plan.entry_max_price),
+        Decimal("2"),
+    )
 
     sized = size_position(
         trade_plan=trade_plan,
