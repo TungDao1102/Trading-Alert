@@ -1,0 +1,7 @@
+{
+  "_comment": "Golden expectations for the opportunity retention tests. The row count for both skip and expire cases is 2 (system + opportunity pair, never one, never zero).",
+  "skip_reason_code": "SKIP_USER",
+  "expired_reason_code": "EXPIRED",
+  "row_count": 2,
+  "attributions": ["system", "opportunity"]
+}

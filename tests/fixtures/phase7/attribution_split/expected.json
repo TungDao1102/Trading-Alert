@@ -1,0 +1,20 @@
+{
+  "_comment": "Placeholder digest — updated during GREEN once assemble_paper_record is implemented. The test asserts field-level invariants (identity, attribution values, lag, epoch_id); the digest equality is a regression check.",
+  "digest": "PLACEHOLDER_DIGEST_TO_BE_FILLED_DURING_GREEN_0000000000000000000000000000000000",
+  "row_counts": {
+    "filled_simulation": 2,
+    "skipped": 2,
+    "expired": 2,
+    "no_trade": 1
+  },
+  "attributions_per_case": {
+    "filled_simulation": ["system", "user-executed-sim"],
+    "skipped": ["system", "opportunity"],
+    "expired": ["system", "opportunity"],
+    "no_trade": ["system"]
+  },
+  "skip_reason_code": "SKIP_USER",
+  "expired_reason_code": "EXPIRED",
+  "no_trade_reason_code": "DATA_STALE",
+  "approval_delay_lag_seconds": 30
+}
