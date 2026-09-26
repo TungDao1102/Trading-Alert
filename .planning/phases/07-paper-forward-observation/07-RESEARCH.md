@@ -391,20 +391,19 @@ if current.parameter_set_hash != pinned.parameter_set_hash:
 | A5 | Minimum-evidence thresholds set by researcher from actual signal frequency (IMPLEMENTATION_PLAN exit gate) | Requirements | LOW — gate definition is a research input, not a code input |
 | A6 | `uv.lock` resolves `python-telegram-bot` cleanly under Python 3.13 without forcing upgrades of pinned deps | Installation | LOW — failure surfaces at `uv add` time, before any code |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Soak-monitor mechanics: CI job vs scheduled process?**
-   - What we know: D-04 allows either; hourly-or-daily cadence suffices for a no-change proof.
-   - What's unclear: operator preference (always-on host vs CI-only repo).
-   - Recommendation: planner picks CI diff-check as default (cheaper), scheduled process only if the soak host is long-lived anyway.
-2. **Parquet extract layout for paper journal?**
-   - What we know: Phase-6 D-03 pattern (PG rows operational, Parquet analytical-canonical); `src/sql/` holds DuckDB queries.
-   - What's unclear: paper-specific partition keys (epoch/symbol/date?).
-   - Recommendation: planner mirrors the backtest extract layout + `epoch` partition; DuckDB divergence queries in `src/sql/`.
-3. **Approval-delay modeling parameters for user-executed-sim attribution?**
-   - What we know: CONTEXT requires approval-delay modeling in the sim leg; RESEARCH_PROTOCOL §105 calibrates slippage from paper/live fills.
-   - What's unclear: numeric delay distribution (fixed lag vs measured Telegram latency?).
-   - Recommendation: planner starts with a fixed, documented lag constant + reason code, flagged for Phase-10 calibration — never blocks Phase 7.
+> Resolved at plan-revision 1: each question below carries its decided outcome, embodied by the cited plan. No open questions remain.
+
+1. **Soak-monitor mechanics: CI job vs scheduled process? — RESOLVED: scheduled CI workflow by default.**
+   - Decision: the periodic invoker is a scheduled CI workflow (`.github/workflows/paper_freeze_check.yml`, hourly cron) calling the freeze check CLI; a soak-host scheduled process is the documented operator alternative when the soak host is long-lived anyway. Diff log persists append-only at `logs/paper/registry_diff.jsonl`.
+   - Embodied by: 07-04-PLAN.md freeze task (pin plus check CLI plus workflow file plus diff-log path).
+2. **Parquet extract layout for paper journal? — RESOLVED: mirror Phase-6 layout plus `epoch` partition; file extracts deferred to Phase 10.**
+   - Decision: when built, extracts mirror the Phase-6 backtest extract layout with an added `epoch` partition key (StreamEpoch `epoch_id` already carried on every paper row, so future extraction is lossless). The extract pipeline itself is explicitly deferred to Phase 10, which owns journal analytics depth; Phase-7 acceptance rests on PostgreSQL journal rows plus golden fixtures.
+   - Embodied by: 07-03-PLAN.md deferral record (epoch_id on PaperRecord, extracts deferred with rationale).
+3. **Approval-delay modeling parameters for user-executed-sim attribution? — RESOLVED: fixed documented lag constant, Phase-10 calibrates.**
+   - Decision: `APPROVAL_DELAY_LAG_SECONDS` fixed documented constant in `src/paper/attribution.py`, applied to the simulated `acted_at_utc`; calibrated against measured Telegram latency in Phase 10, never blocking Phase 7.
+   - Embodied by: 07-03-PLAN.md attribution feature plus lag test.
 
 ## Environment Availability
 
