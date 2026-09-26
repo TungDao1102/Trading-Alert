@@ -73,6 +73,7 @@ def _build_report(
     probable: Decimal = Decimal("0.1"),
     universe_tags: Mapping[str, Sequence[str]] | None = None,
     baseline_summaries: object | None = None,
+    built_at_utc: datetime | None = None,
 ) -> object:
     """Call the report builder — fails RED because the module does not exist."""
     from src.backtest.report import build
@@ -85,7 +86,11 @@ def _build_report(
         probable=probable,
         universe_tags=universe_tags,
         baseline_summaries=baseline_summaries,
+        built_at_utc=built_at_utc if built_at_utc is not None else _FIXED_BUILT_AT_UTC,
     )
+
+
+_FIXED_BUILT_AT_UTC = datetime(2026, 9, 26, 12, 0, 0, tzinfo=timezone.utc)
 
 
 # --------------------------------------------------------------------------- #
