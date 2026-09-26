@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: "07.1"
 current_phase_name: "Close gap: B1 registry-cost to backtest identity binding"
 status: executing
-stopped_at: Phase 07.1 context gathered
-last_updated: "2026-09-26T10:41:07.542Z"
+stopped_at: Completed 07.1-01-PLAN.md
+last_updated: "2026-09-26T11:13:45.402Z"
 last_activity: 2026-09-26
-last_activity_desc: Phase 07.1 planning complete
-state_head: 3725f368b278c712a78584cd788025a932ae667a
+last_activity_desc: Phase 07.1 execution started
+state_head: d6bdad4ae77bd0ac949217081d6c6997acd0e8d4
 progress:
   total_phases: 11
   completed_phases: 6
   total_plans: 25
-  completed_plans: 23
+  completed_plans: 24
 milestone_name: milestone
 ---
 
@@ -26,14 +26,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 06 — Backtest Simulator + Experiment Registry
+**Current focus:** Phase 07.1 — Close gap: B1 registry-cost to backtest identity binding
 
 ## Current Position
 
-Phase: 07.1 (Close gap: B1 registry-cost to backtest identity binding) — READY TO EXECUTE
-Plan: 3 of 3
+Phase: 07.1 (Close gap: B1 registry-cost to backtest identity binding) — EXECUTING
+Plan: 2 of 2
 Status: Ready to execute
-Last activity: 2026-09-26 — Phase 07.1 planning complete
+Last activity: 2026-09-26 — Phase 07.1 execution started
 
 Progress: [██████████] 100%
 
@@ -65,6 +65,7 @@ Progress: [██████████] 100%
 |------|----------|-------|-------|
 | Phase 06 P02 | 45min | 3 tasks | 12 files |
 | Phase 06 P03 | 45min | 3 tasks | 7 files |
+| Phase 07.1 P01 | ~15 min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -129,6 +130,11 @@ Recent decisions affecting current work:
 - [Phase 06]: [06-02] D-03 Baselines are NEW TOML files (baseline-no-trade-v1.toml minimum_rr=100; baseline-simple-trend-v1.toml looser config); runners delegate to simulator.run with the new parameter_set_id
 - [Phase 06]: [06-02] D-05 STRING_KEYS set added alongside INT_KEYS and DECIMAL_KEYS; three string-valued cost keys validated as non-empty strings; partial_fill_fraction classified as DECIMAL_KEYS
 - [Phase 06]: [06-02] D-04 Baselines filter simulator output to filled trades only (entry_kind in {ENTRY_FILLED, PARTIAL_FILL}); REJECT records are risk-rejection outcomes, not filled trades
+- [Phase 07.1]: [07.1-01] D-01 gate lives in assemble(); canonical-hash-to-hash compare against registry cost-key slice; CostModelBindingMismatch on inequality (distinct from ExperimentReproducibilityBroken)
+- [Phase 07.1]: [07.1-01] D-02 keep both representations (registry TOML + cost dict); shared assertion helper reused by assemble() — comparison logic exists exactly once
+- [Phase 07.1]: [07.1-01] D-04 six-field identity tuple byte-stable; gate only shrinks the set of assemblable inputs, never changes what a consistent input hashes to
+- [Phase 07.1]: [07.1-01] D-03 fail closed with dedicated CostModelBindingMismatch exception; absent slice keys propagate as bare KeyError from build_cost_model
+- [Phase 07.1]: [07.1-01] D-05 phase6 fixtures stay byte-identical (grandfathered); tests that call assemble() migrate to baseline-v3 (7-key set); new tests/fixtures/phase7.1/ binding fixtures
 
 ### Pending Todos
 
@@ -161,6 +167,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-26T10:12:40.247Z
-Stopped at: Phase 07.1 context gathered
-Resume file: .planning/phases/07.1-close-gap-b1-registry-cost-to-backtest-identity-binding/07.1-CONTEXT.md
+Last session: 2026-09-26T11:13:44.556Z
+Stopped at: Completed 07.1-01-PLAN.md
+Resume file: None

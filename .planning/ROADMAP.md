@@ -216,7 +216,7 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 07.1-01-PLAN.md — D-04 guard plus tracer binding slice: helper, assemble() gate, v3 sets, match fixture (wave 1)
+- [x] 07.1-01-PLAN.md — D-04 guard plus tracer binding slice: helper, assemble() gate, v3 sets, match fixture (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
