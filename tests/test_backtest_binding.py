@@ -52,11 +52,12 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from src.backtest.binding import CostModelBindingMismatch
-from src.backtest.costs import build_cost_model
+from src.backtest.costs import CostModel, build_cost_model
 from src.backtest.experiment import assemble
 
 PHASE7_1_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase7.1"
@@ -270,3 +271,124 @@ def test_binding_gate_propagates_keyerror_for_missing_slice_keys() -> None:
     cost_model = _build_cost_model(case["cost_model"])
     with pytest.raises(KeyError):
         _gate_assemble(case, cost_model=cost_model)
+
+
+# --------------------------------------------------------------------------- #
+# Beh. 7 — build_cost_model rejects non-string/empty string cost values (WR-02).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "key", ["funding_treatment", "slippage_model", "spread_fill_assumptions"]
+)
+@pytest.mark.parametrize("bad_value", [None, 123, ""])
+def test_build_cost_model_rejects_non_string_cost_values(
+    key: str, bad_value: object
+) -> None:
+    """Beh. 7: build_cost_model raises TypeError for non-string or empty
+    string-valued cost keys instead of silently coercing via str().
+
+    Per WR-02: a mistyped caller/fixture value such as
+    funding_treatment=None or 123 must fail loud at the boundary
+    (TypeError naming the field), never coerce to "None"/"123" and
+    surface downstream as a hash mismatch (CostModelBindingMismatch).
+    The base dict is the all-valid-string match-fixture spelling with
+    exactly one key mutated per case.
+    """
+    cost_dict = dict(_load_match_input()["cost_model"])
+    cost_dict[key] = bad_value
+    with pytest.raises(TypeError, match=key):
+        _build_cost_model(cost_dict)
+
+
+# --------------------------------------------------------------------------- #
+# Beh. 8 — direct-int vs builder-int cost_model_hash convergence (WR-03).
+# --------------------------------------------------------------------------- #
+
+
+def test_direct_int_cost_model_converges_with_builder_hash() -> None:
+    """Beh. 8: a directly-constructed CostModel with int numerics produces
+    the SAME cost_model_hash as build_cost_model with the same logical
+    values.
+
+    Per WR-03: CostModel.__post_init__ normalizes numeric fields via
+    object.__setattr__ so both construction paths converge on Decimal
+    before hashing. Covers all four numeric fields as int (including
+    fee_rate_entry-scale whole numbers and the partial_fill_fraction
+    upper bound 1), and asserts the stored fields are Decimal.
+    """
+    base = _load_match_input()["cost_model"]
+    int_cost = {
+        **base,
+        "fee_rate_entry": 1,
+        "fee_rate_exit": 0,
+        "expected_slippage": 0,
+        "partial_fill_fraction": 1,
+    }
+    via_builder = _build_cost_model(int_cost)
+    direct = CostModel(
+        fee_rate_entry=1,  # type: ignore[arg-type]
+        fee_rate_exit=0,  # type: ignore[arg-type]
+        funding_treatment=int_cost["funding_treatment"],
+        expected_slippage=0,  # type: ignore[arg-type]
+        slippage_model=int_cost["slippage_model"],
+        spread_fill_assumptions=int_cost["spread_fill_assumptions"],
+        partial_fill_fraction=1,  # type: ignore[arg-type]
+        cost_model_hash="",
+    )
+    assert direct.cost_model_hash == via_builder.cost_model_hash, (
+        "direct-int and builder-int construction must converge on one hash (WR-03)"
+    )
+    for fname in (
+        "fee_rate_entry",
+        "fee_rate_exit",
+        "expected_slippage",
+        "partial_fill_fraction",
+    ):
+        assert isinstance(getattr(direct, fname), Decimal), (
+            f"{fname} must be normalized to Decimal, got {type(getattr(direct, fname)).__name__}"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Beh. 9 — Decimal inputs pass through un-respelled (WR-03 byte-stability).
+# --------------------------------------------------------------------------- #
+
+
+def test_decimal_cost_inputs_hash_equal_to_string_baseline() -> None:
+    """Beh. 9: directly-constructed Decimal cost inputs hash identically to
+    the all-string build_cost_model baseline, and trailing precision is
+    preserved (no silent re-spelling).
+
+    Per WR-03 + D-04/D-12: Decimal inputs return as-is (never
+    round-tripped through str()), so Decimal("0.0002") converges with
+    the "0.0002" string baseline, while Decimal("0.00020") stays a
+    distinct spelling with a distinct hash.
+    """
+    baseline = _build_cost_model(_load_match_input()["cost_model"])
+    direct = CostModel(
+        fee_rate_entry=Decimal("0.0002"),
+        fee_rate_exit=Decimal("0.0005"),
+        funding_treatment="ADDITIVE",
+        expected_slippage=Decimal("0.0001"),
+        slippage_model="FIXED_BPS",
+        spread_fill_assumptions="FULL_FILL",
+        partial_fill_fraction=Decimal("0.5"),
+        cost_model_hash="",
+    )
+    assert direct.cost_model_hash == baseline.cost_model_hash, (
+        "Decimal inputs must pass through un-respelled to the baseline hash (WR-03)"
+    )
+    drift = CostModel(
+        fee_rate_entry=Decimal("0.00020"),
+        fee_rate_exit=Decimal("0.0005"),
+        funding_treatment="ADDITIVE",
+        expected_slippage=Decimal("0.0001"),
+        slippage_model="FIXED_BPS",
+        spread_fill_assumptions="FULL_FILL",
+        partial_fill_fraction=Decimal("0.5"),
+        cost_model_hash="",
+    )
+    assert drift.cost_model_hash != baseline.cost_model_hash, (
+        "trailing precision must stay semantically meaningful (D-04/D-12)"
+    )
