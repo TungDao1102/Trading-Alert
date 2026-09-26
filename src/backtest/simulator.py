@@ -101,10 +101,11 @@ class IntrabarOutcome:
     `coverage_note` carries the reason string for the report.
     """
 
-    exit_kind: str  # "SL" | "TP1" | "TP2" | "EOD"
+    exit_kind: str  # "SL" | "TP1" | "EOD" (single-exit scope: TP2 runner not modeled)
     price: Decimal
     fallback_applied: bool
     coverage_note: str | None
+    exit_time_utc: datetime | None  # deciding 1m candle's close; None on fallback
 
 
 # --------------------------------------------------------------------------- #
@@ -219,6 +220,7 @@ def resolve_intrabar(
             price=stop_loss,
             fallback_applied=True,
             coverage_note="1m_intrabar_missing",
+            exit_time_utc=None,
         )
     for minute in intrabar:
         if direction == "LONG":
@@ -228,6 +230,7 @@ def resolve_intrabar(
                     price=stop_loss,
                     fallback_applied=False,
                     coverage_note=None,
+                    exit_time_utc=minute.close_time_utc,
                 )
             if minute.high >= take_profit_1:
                 return IntrabarOutcome(
@@ -235,6 +238,7 @@ def resolve_intrabar(
                     price=take_profit_1,
                     fallback_applied=False,
                     coverage_note=None,
+                    exit_time_utc=minute.close_time_utc,
                 )
         else:  # SHORT
             if minute.high >= stop_loss:
@@ -243,6 +247,7 @@ def resolve_intrabar(
                     price=stop_loss,
                     fallback_applied=False,
                     coverage_note=None,
+                    exit_time_utc=minute.close_time_utc,
                 )
             if minute.low <= take_profit_1:
                 return IntrabarOutcome(
@@ -250,6 +255,7 @@ def resolve_intrabar(
                     price=take_profit_1,
                     fallback_applied=False,
                     coverage_note=None,
+                    exit_time_utc=minute.close_time_utc,
                 )
     # Neither SL nor TP touched in any 1m candle → EOD at last close.
     return IntrabarOutcome(
@@ -257,6 +263,7 @@ def resolve_intrabar(
         price=intrabar[-1].close,
         fallback_applied=False,
         coverage_note=None,
+        exit_time_utc=intrabar[-1].close_time_utc,
     )
 
 
@@ -855,12 +862,19 @@ def run(case_input: dict[str, Any]) -> dict[str, Any]:
                 take_profit_1=tp1,
                 intrabar=intrabar,
             )
-            # Build the filled record with exit fields.
+            # Build the filled record with exit fields. The exit timestamp
+            # is the deciding 1m candle's close (WR-12); only the
+            # missing-data fallback (no 1m candle to anchor to) keeps
+            # the strategy-bar close.
             filled_record = _make_filled_record(
                 entry_record=entry_record,
                 exit_kind=outcome.exit_kind,
                 exit_price=outcome.price,
-                exit_time_utc=bar.close_time_utc,
+                exit_time_utc=(
+                    outcome.exit_time_utc
+                    if outcome.exit_time_utc is not None
+                    else bar.close_time_utc
+                ),
                 coverage_note=outcome.coverage_note,
                 fallback_applied=outcome.fallback_applied,
             )
