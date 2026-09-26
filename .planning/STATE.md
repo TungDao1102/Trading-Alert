@@ -1,17 +1,18 @@
 ---
-gsd_state_version: 1.0
+gsd_state_version: "1.0"
 milestone: v0.3
-milestone_name: milestone
+current_phase: "07.1"
 status: executing
-stopped_at: Completed 06-03-PLAN.md
-last_updated: "2026-09-26T07:32:49.763Z"
+stopped_at: Phase 07.1 context gathered
+last_updated: "2026-09-26T10:12:40.351Z"
 last_activity: 2026-09-26
+state_head: 1bf2e21174a067b7aa9dc59c3a5b9e3ff5c11b39
 progress:
-  total_phases: 10
+  total_phases: 11
   completed_phases: 6
   total_plans: 23
   completed_plans: 23
-  percent: 60
+milestone_name: milestone
 ---
 
 <!-- STATE-MD-SCHEMA:END:frontmatter -->
@@ -27,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 ## Current Position
 
-Phase: 06 (Backtest Simulator + Experiment Registry) — EXECUTING
+Phase: 07.1
 Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-09-26
@@ -139,6 +140,11 @@ None yet.
 - ApprovalResult value set is a planner assumption (D-10) — user confirmation pending
 - evaluate_risk currently passes absolute amounts directly; Phase-7+ caller must convert registry rates to absolute amounts before calling
 
+### Roadmap Evolution
+
+- Phase 07.1 inserted after Phase 7: Close gap: B1 registry-cost to backtest identity binding (URGENT)
+- Phase 07.1 edited: edited fields: depends_on (Phase 7 -> Phase 6)
+
 ## Deferred Items
 
 Items acknowledged and deferred at milestone close, most recent first:
@@ -153,6 +159,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-26T07:30:07.267Z
-Stopped at: Completed 06-03-PLAN.md
-Resume file: None
+Last session: 2026-09-26T10:12:40.247Z
+Stopped at: Phase 07.1 context gathered
+Resume file: .planning/phases/07.1-close-gap-b1-registry-cost-to-backtest-identity-binding/07.1-CONTEXT.md
