@@ -200,11 +200,14 @@ Plans:
   2. Paper loop records system vs user-executed vs opportunity (skipped/expired) attribution with signal/approve/order/fill timestamps
   3. Forward observation accumulates over the 3–6-month wall-clock envelope with zero tuning on the paper stream (registry diff proves no parameter change touched the running stream)
 
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
 
-- [ ] 07-01: TBD (derived during plan-phase)
+- [ ] 07-01: Tracer closed-candle realtime tick plus feed fail-closed gates (PAPER-01)
+- [ ] 07-02: Supervisor plus REST resync plus backtest parity gate (PAPER-01)
+- [ ] 07-03: Three-way attribution journaling on existing ORM shapes (PAPER-02, TDD)
+- [ ] 07-04: Pinned-epoch freeze monitor plus SIMULATE notify plus soak readiness (PAPER-03)
 
 ### Phase 07.1: Close gap: B1 registry-cost to backtest identity binding (INSERTED)
 
