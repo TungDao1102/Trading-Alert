@@ -27,7 +27,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from src.core._decimal import _div, _q
+from src.core._decimal import _add, _div, _mul, _q, _sub
 from src.core.types import _require_utc_aware
 from src.domain.canonical import sha256_hex
 
@@ -379,8 +379,10 @@ class UncertaintyReport:
 def _decimal_mean(values: Sequence[Decimal]) -> Decimal:
     if not values:
         return Decimal("0")
-    total = sum(values, Decimal("0"))
-    return total / _q(len(values))
+    total = Decimal("0")
+    for v in values:
+        total = _add(total, _q(v))
+    return _div(total, _q(len(values)))
 
 
 def _decimal_median(values: Sequence[Decimal]) -> Decimal:
@@ -392,15 +394,18 @@ def _decimal_median(values: Sequence[Decimal]) -> Decimal:
         return sorted_v[n // 2]
     mid_lo = sorted_v[n // 2 - 1]
     mid_hi = sorted_v[n // 2]
-    return (mid_lo + mid_hi) / Decimal("2")
+    return _div(_add(mid_lo, mid_hi), Decimal("2"))
 
 
 def _decimal_pstdev(values: Sequence[Decimal]) -> Decimal:
     if len(values) < 2:
         return Decimal("0")
     mean = _decimal_mean(values)
-    sq_diffs = [(_q(v) - mean) * (_q(v) - mean) for v in values]
-    variance = sum(sq_diffs, Decimal("0")) / _q(len(values))
+    sq_diffs = [_mul(_sub(_q(v), mean), _sub(_q(v), mean)) for v in values]
+    total_sq = Decimal("0")
+    for sq in sq_diffs:
+        total_sq = _add(total_sq, sq)
+    variance = _div(total_sq, _q(len(values)))
     return variance.sqrt()
 
 
@@ -443,12 +448,14 @@ def _parse_exit_dt(trade: Mapping[str, Any]) -> datetime | None:
 def _sample_block_length(rng: random.Random, p: Decimal) -> int:
     if p <= Decimal("0") or p > Decimal("1"):
         raise ReportBuildError(f"p must be in (0, 1], got {p}")
-    q = Decimal("1") - p
+    q = _sub(Decimal("1"), p)
     k = rng.getrandbits(_RANDOM_BIT_WIDTH)
-    threshold = Decimal(k) / Decimal(2**_RANDOM_BIT_WIDTH)
+    threshold = _div(Decimal(k), Decimal(2**_RANDOM_BIT_WIDTH))
     length = 1
     while length < _MAX_BLOCK_LENGTH:
-        cdf_l = Decimal("1") - q**length
+        # `**` has no pinned helper; the base/subtrahend still route
+        # through _sub so only the power itself is ambient-context.
+        cdf_l = _sub(Decimal("1"), q**length)
         if threshold <= cdf_l:
             return length
         length += 1
@@ -487,10 +494,10 @@ def _max_drawdown(returns: Sequence[Decimal]) -> Decimal:
     cum = Decimal("0")
     max_dd = Decimal("0")
     for r in returns:
-        cum = cum + _q(r)
+        cum = _add(cum, _q(r))
         if cum > peak:
             peak = cum
-        dd = peak - cum
+        dd = _sub(peak, cum)
         if dd > max_dd:
             max_dd = dd
     return max_dd
@@ -530,12 +537,12 @@ def _quantile(values: Sequence[Decimal], q: Decimal) -> Decimal:
     if q >= Decimal("1"):
         return sorted_v[-1]
     last_idx = len(sorted_v) - 1
-    idx_float = q * _q(last_idx)
+    idx_float = _mul(q, _q(last_idx))
     idx_int = int(idx_float)
-    frac = idx_float - _q(idx_int)
+    frac = _sub(idx_float, _q(idx_int))
     lo_idx = max(0, min(idx_int, last_idx))
     hi_idx = max(0, min(idx_int + 1, last_idx))
-    return sorted_v[lo_idx] + (sorted_v[hi_idx] - sorted_v[lo_idx]) * frac
+    return _add(sorted_v[lo_idx], _mul(_sub(sorted_v[hi_idx], sorted_v[lo_idx]), frac))
 
 
 def build(
@@ -730,10 +737,10 @@ def build(
     simple_trend = baseline_summaries.simple_trend if baseline_summaries else None
     delta_no_trade: Decimal | None = None
     if candidate_mean is not None and no_trade is not None and no_trade.mean_r is not None:
-        delta_no_trade = candidate_mean - no_trade.mean_r
+        delta_no_trade = _sub(candidate_mean, no_trade.mean_r)
     delta_simple_trend: Decimal | None = None
     if candidate_mean is not None and simple_trend is not None and simple_trend.mean_r is not None:
-        delta_simple_trend = candidate_mean - simple_trend.mean_r
+        delta_simple_trend = _sub(candidate_mean, simple_trend.mean_r)
     baselines = BaselineComparison(
         candidate_trade_count=n_trades,
         candidate_mean_r=candidate_mean,
