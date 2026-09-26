@@ -57,6 +57,36 @@ def _require_non_empty(value: str, field_name: str) -> None:
         raise ValueError(f"{field_name} must be a non-empty string")
 
 
+def _coerce_money(value: object, field_name: str) -> Decimal:
+    """Coerce a money/rate JSON field to Decimal, fail-closed (D-12).
+
+    JSON numbers decode as Python float/int; a float (e.g. `1.1`)
+    would inject binary noise via `Decimal(1.1000000000000000888…)`,
+    so floats are REJECTED, never coerced. Decimal passes through,
+    int is exact, str keeps its spelling.
+    """
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool):
+        raise TypeError(f"{field_name} must be Decimal/str/int, got bool")
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, str):
+        return Decimal(value)
+    raise TypeError(
+        f"{field_name} must be Decimal/str/int, got {type(value).__name__}"
+    )
+
+
+def _parse_utc_aware(raw: object, field_name: str) -> datetime:
+    """Parse an ISO string into a UTC-aware datetime, fail-closed."""
+    if not isinstance(raw, str):
+        raise TypeError(f"{field_name} must be ISO str, got {type(raw).__name__}")
+    value = datetime.fromisoformat(raw)
+    _require_utc_aware(value, field_name)
+    return value
+
+
 # --------------------------------------------------------------------------- #
 # IntrabarOutcome — frozen result of 1m intrabar resolution.
 # --------------------------------------------------------------------------- #
@@ -237,34 +267,39 @@ def resolve_intrabar(
 
 def _parse_candle(row: dict[str, Any]) -> Candle:
     """Build a Candle from a JSON-decoded dict."""
+    _require_non_empty(str(row["symbol"]), "symbol")
+    open_time_utc = _parse_utc_aware(row["open_time_utc"], "open_time_utc")
+    close_time_utc = _parse_utc_aware(row["close_time_utc"], "close_time_utc")
     return Candle(
         symbol=row["symbol"],
         interval=row["interval"],
-        open_time_utc=datetime.fromisoformat(row["open_time_utc"]),
-        close_time_utc=datetime.fromisoformat(row["close_time_utc"]),
-        open=Decimal(row["open"]),
-        high=Decimal(row["high"]),
-        low=Decimal(row["low"]),
-        close=Decimal(row["close"]),
-        volume=Decimal(row["volume"]),
+        open_time_utc=open_time_utc,
+        close_time_utc=close_time_utc,
+        open=_coerce_money(row["open"], "open"),
+        high=_coerce_money(row["high"], "high"),
+        low=_coerce_money(row["low"], "low"),
+        close=_coerce_money(row["close"], "close"),
+        volume=_coerce_money(row["volume"], "volume"),
     )
 
 
 def _parse_account_state(d: dict[str, Any]) -> AccountState:
     return AccountState(
-        equity=Decimal(d["equity"]),
-        risk_rate=Decimal(d["risk_rate"]),
+        equity=_coerce_money(d["equity"], "equity"),
+        risk_rate=_coerce_money(d["risk_rate"], "risk_rate"),
     )
 
 
 def _parse_constraint_snapshot(d: dict[str, Any]) -> ConstraintSnapshot:
     return ConstraintSnapshot(
         symbol=d["symbol"],
-        price_tick_size=Decimal(d["price_tick_size"]),
-        quantity_step_size=Decimal(d["quantity_step_size"]),
-        min_quantity=Decimal(d["min_quantity"]),
-        min_notional=Decimal(d["min_notional"]),
-        metadata_observed_at_utc=datetime.fromisoformat(d["metadata_observed_at_utc"]),
+        price_tick_size=_coerce_money(d["price_tick_size"], "price_tick_size"),
+        quantity_step_size=_coerce_money(d["quantity_step_size"], "quantity_step_size"),
+        min_quantity=_coerce_money(d["min_quantity"], "min_quantity"),
+        min_notional=_coerce_money(d["min_notional"], "min_notional"),
+        metadata_observed_at_utc=_parse_utc_aware(
+            d["metadata_observed_at_utc"], "metadata_observed_at_utc"
+        ),
     )
 
 
@@ -273,8 +308,10 @@ def _parse_open_positions(rows: list[dict[str, Any]]) -> list[OpenPosition]:
         OpenPosition(
             symbol=r["symbol"],
             position_side=r["position_side"],
-            open_risk=Decimal(r["open_risk"]),
-            daily_pnl_contribution=Decimal(r.get("daily_pnl_contribution", "0")),
+            open_risk=_coerce_money(r["open_risk"], "open_risk"),
+            daily_pnl_contribution=_coerce_money(
+                r.get("daily_pnl_contribution", "0"), "daily_pnl_contribution"
+            ),
         )
         for r in rows
     ]
@@ -668,8 +705,8 @@ def run(case_input: dict[str, Any]) -> dict[str, Any]:
     constraint_snapshot = _parse_constraint_snapshot(case_input["constraint_snapshot"])
     cost_model = build_cost_model(case_input["cost_model"])
     open_positions = _parse_open_positions(case_input["open_positions"])
-    daily_loss_quote = Decimal(case_input["daily_loss_quote"])
-    now_utc = datetime.fromisoformat(case_input["now_utc"])
+    daily_loss_quote = _coerce_money(case_input["daily_loss_quote"], "daily_loss_quote")
+    now_utc = _parse_utc_aware(case_input["now_utc"], "now_utc")
     ttl = timedelta(seconds=int(case_input["ttl_seconds"]))
 
     # WR: the simulator's wall-clock for the expiry gate is the fixture's
