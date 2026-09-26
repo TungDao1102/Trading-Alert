@@ -173,7 +173,7 @@ Plans:
   2. Every experiment reproduces from dataset + strategy + parameter set + cost + execution versions and is compared against no-trade and simple-trend baselines
   3. Reports show trade counts and slices (symbol/period/regime/version), R distribution, bootstrap intervals, and parameter-plateau analysis — never a single headline number — and no winner is declared without out-of-sample confirmation
 
-**Plans**: 3 plans
+**Plans**: 2/3 plans executed
 
 Plans:
 **Wave 1**
@@ -182,7 +182,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 06-02-PLAN.md — Experiment registry with six-field identity, cost-key extension, same-engine baselines (TDD)
+- [x] 06-02-PLAN.md — Experiment registry with six-field identity, cost-key extension, same-engine baselines (TDD)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -274,7 +274,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 3. Domain + Registry + Fixtures | 5/5 | In Progress|  |
 | 4. Pure Core (Feature + Strategy + Planner) | 4/4 | In Progress|  |
 | 5. Risk Engine | 2/2 | In Progress|  |
-| 6. Backtest Simulator + Experiment Registry | 0/TBD | Not started | - |
+| 6. Backtest Simulator + Experiment Registry | 2/3 | In Progress|  |
 | 7. Paper Forward Observation | 0/TBD | Not started | - |
 | 8. Approval + Reconciliation Hardening | 0/TBD | Not started | - |
 | 9. Live Execution Rollout | 0/TBD | Not started | - |
