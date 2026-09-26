@@ -203,10 +203,17 @@ Plans:
 **Plans**: 4 plans
 
 Plans:
+**Wave 1**
 
 - [ ] 07-01: Tracer closed-candle realtime tick plus feed fail-closed gates (PAPER-01)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 07-02: Supervisor plus REST resync plus backtest parity gate (PAPER-01)
 - [ ] 07-03: Three-way attribution journaling on existing ORM shapes (PAPER-02, TDD)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 07-04: Pinned-epoch freeze monitor plus SIMULATE notify plus soak readiness (PAPER-03)
 
 ### Phase 07.1: Close gap: B1 registry-cost to backtest identity binding (INSERTED)
