@@ -661,8 +661,11 @@ def build(
 
     observed_dd = _max_drawdown(r_values)
     if resampled_means:
+        # WR-06: the drawdown stage runs on seed + 1, not the same seed
+        # as the expectancy bootstrap — sharing one stream couples the
+        # drawdown distribution to the mean resample deterministically.
         dd_resamples = _resample_drawdowns(
-            r_values, seed=bootstrap_seed, n_resamples=resamples, p=probable
+            r_values, seed=bootstrap_seed + 1, n_resamples=resamples, p=probable
         )
         dd_p05 = _quantile(dd_resamples, Decimal("0.05"))
         dd_p50 = _quantile(dd_resamples, Decimal("0.50"))
