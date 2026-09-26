@@ -22,13 +22,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from src.core.types import _require_utc_aware
 from src.domain.canonical import sha256_hex
 from src.domain.registry import load_parameter_set
 
-from .costs import CostModel
+from .costs import CostModel, build_cost_model
 from .simulator import TradeRecord
 from .simulator import run as simulator_run
 
@@ -237,6 +238,110 @@ def assemble(
 # reproduce — re-run simulator.run with the recorded tuple.
 # --------------------------------------------------------------------------- #
 
+_DECIMAL_TRADE_FIELDS: tuple[str, ...] = (
+    "entry_price",
+    "quantity",
+    "exit_price",
+    "realized_pnl",
+    "realized_risk",
+    "gross_pnl",
+    "entry_fee",
+    "exit_fee",
+    "funding_amount",
+    "slippage_amount",
+    "modeled_costs_per_unit",
+)
+
+_DATETIME_TRADE_FIELDS: tuple[str, ...] = ("entry_time_utc", "exit_time_utc")
+
+
+def _coerce_trade_decimal(value: object, field_name: str) -> Decimal | None:
+    """Parse a trade-dict money field back to Decimal (fail-closed)."""
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool):
+        raise ExperimentReproducibilityBroken(
+            f"trade field {field_name!r} must be Decimal/str/int/None, got bool"
+        )
+    if isinstance(value, (str, int)):
+        return Decimal(str(value))
+    if isinstance(value, float):
+        # Shortest-repr round-trip keeps "1.1" exact; raw binary noise
+        # never enters (matches the simulator WR-14 boundary rule).
+        return Decimal(str(value))
+    raise ExperimentReproducibilityBroken(
+        f"trade field {field_name!r} has unparseable type {type(value).__name__}"
+    )
+
+
+def _coerce_trade_datetime(value: object, field_name: str) -> datetime | None:
+    """Parse a trade-dict timestamp back to UTC-aware datetime (fail-closed)."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        _require_utc_aware(value, field_name)
+        return value
+    if isinstance(value, str):
+        parsed = datetime.fromisoformat(value)
+        _require_utc_aware(parsed, field_name)
+        return parsed
+    raise ExperimentReproducibilityBroken(
+        f"trade field {field_name!r} has unparseable type {type(value).__name__}"
+    )
+
+
+def _trade_from_dict(t: dict[str, Any]) -> TradeRecord:
+    """Rebuild a TradeRecord from `to_dict()` output with typed fields.
+
+    CR-03: `TradeRecord(**t)` left Decimals stringified and datetimes
+    as ISO strings, corrupting the typed record. Every money/timestamp
+    field is parsed back before construction.
+    """
+    data = dict(t)
+    for fname in _DECIMAL_TRADE_FIELDS:
+        data[fname] = _coerce_trade_decimal(data.get(fname), fname)
+    for fname in _DATETIME_TRADE_FIELDS:
+        data[fname] = _coerce_trade_datetime(data.get(fname), fname)
+    return TradeRecord(**data)
+
+
+def _check_inputs_bind_record(
+    record: ExperimentRecord, simulator_inputs: dict[str, Any]
+) -> None:
+    """Fail closed unless the inputs reproduce the record's identity.
+
+    CR-03: reproduce must run the RECORDED tuple, not whatever dict it
+    is handed. The registry parameter set (hash), the fixture
+    strategy_version, and the cost model hash must all match the
+    record; otherwise raise ExperimentReproducibilityBroken.
+    """
+    mismatches: list[str] = []
+    if simulator_inputs.get("parameter_set_id") != record.parameter_set_id:
+        mismatches.append(
+            f"parameter_set_id {simulator_inputs.get('parameter_set_id')!r} "
+            f"!= recorded {record.parameter_set_id!r}"
+        )
+    if simulator_inputs.get("strategy_version") != record.strategy_version:
+        mismatches.append(
+            f"strategy_version {simulator_inputs.get('strategy_version')!r} "
+            f"!= recorded {record.strategy_version!r}"
+        )
+    parameter_set = load_parameter_set(
+        simulator_inputs["strategy_id"], simulator_inputs["parameter_set_id"]
+    )
+    if parameter_set.parameter_set_hash != record.parameter_set_hash:
+        mismatches.append("parameter_set_hash != recorded parameter_set_hash")
+    cost_model = build_cost_model(simulator_inputs["cost_model"])
+    if cost_model.cost_model_hash != record.cost_model_hash:
+        mismatches.append("cost_model_hash != recorded cost_model_hash")
+    if mismatches:
+        raise ExperimentReproducibilityBroken(
+            "simulator_inputs do not bind to the recorded experiment: "
+            + "; ".join(mismatches)
+        )
+
 
 def reproduce(
     record: ExperimentRecord,
@@ -246,18 +351,39 @@ def reproduce(
     """Re-run the simulator with the recorded tuple.
 
     Per D-03: reproduction = re-running the recorded six-field tuple
-    yields byte-identical trade lists. With empty `simulator_inputs`,
+    yields byte-identical trade lists. Inputs are checked against the
+    record's identity first (fail closed on mismatch); rebuilt trades
+    carry typed Decimal/datetime fields. With empty `simulator_inputs`,
     returns an empty list (deterministic, no candles to replay).
     """
     if not simulator_inputs:
         return []
+    _check_inputs_bind_record(record, simulator_inputs)
     result = simulator_run(simulator_inputs)
-    return [TradeRecord(**t) for t in result["trades"]]
+    return [_trade_from_dict(t) for t in result["trades"]]
 
 
 # --------------------------------------------------------------------------- #
 # verify_experiment — runtime tripwire for reproducibility.
 # --------------------------------------------------------------------------- #
+
+
+def _stored_trades_digest(record: ExperimentRecord) -> str | None:
+    """Return the persisted trades digest, if the record carries one.
+
+    `assemble()` cannot know the trade list (it never runs the
+    simulator), so the digest is optional: callers that persist
+    `result_summary_json={"trades_digest": ...}` after a run get
+    cross-version drift detection in `verify_experiment`.
+    """
+    import json
+
+    try:
+        summary = json.loads(record.result_summary_json)
+    except (ValueError, TypeError):
+        return None
+    digest = summary.get("trades_digest") if isinstance(summary, dict) else None
+    return digest if isinstance(digest, str) and digest != "" else None
 
 
 def verify_experiment(
@@ -268,12 +394,19 @@ def verify_experiment(
     """Return None when reproducible; raise ExperimentReproducibilityBroken on drift.
 
     Per D-03: verify_experiment is the runtime tripwire for
-    reproducibility. Two reproduce() calls with the same inputs must
-    yield byte-identical trade lists.
+    reproducibility. Inputs are bound to the record (fail closed on
+    mismatch); the reproduce digest is compared against the record's
+    stored `trades_digest` when present (cross-version drift), and two
+    reproduce() runs must always agree (determinism).
     """
     trades_a = reproduce(record, simulator_inputs=simulator_inputs)
-    trades_b = reproduce(record, simulator_inputs=simulator_inputs)
     digest_a = sha256_hex({"trades": [t.to_dict() for t in trades_a]})
+    stored = _stored_trades_digest(record)
+    if stored is not None and digest_a != stored:
+        raise ExperimentReproducibilityBroken(
+            f"reproduce digest {digest_a} != recorded trades_digest {stored}"
+        )
+    trades_b = reproduce(record, simulator_inputs=simulator_inputs)
     digest_b = sha256_hex({"trades": [t.to_dict() for t in trades_b]})
     if digest_a != digest_b:
         raise ExperimentReproducibilityBroken(f"reproduce digests differ: {digest_a} != {digest_b}")
@@ -306,7 +439,7 @@ def baseline_no_trade(case_input: dict[str, Any]) -> list[TradeRecord]:
     (or equivalent with minimum_rr=100).
     """
     result = simulator_run(case_input)
-    trades = [TradeRecord(**t) for t in result["trades"]]
+    trades = [_trade_from_dict(t) for t in result["trades"]]
     return _filled_trades(trades)
 
 
@@ -321,7 +454,7 @@ def baseline_simple_trend(case_input: dict[str, Any]) -> list[TradeRecord]:
     (or equivalent with looser config).
     """
     result = simulator_run(case_input)
-    trades = [TradeRecord(**t) for t in result["trades"]]
+    trades = [_trade_from_dict(t) for t in result["trades"]]
     return _filled_trades(trades)
 
 
