@@ -211,7 +211,7 @@ Plans:
 **Goal:** Only registry-consistent cost models are assemblable into experiment records — mismatched pairs raise fail-closed, consistent pairs keep byte-identical IDs.
 **Requirements**: BKTS-02
 **Depends on:** Phase 6
-**Plans:** 2/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 **Wave 1**
