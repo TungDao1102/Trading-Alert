@@ -117,12 +117,15 @@ class CostModel:
             value = getattr(self, fname)
             if not isinstance(value, str) or value == "":
                 raise ValueError(f"{fname} must be a non-empty string")
-        # Compute cost_model_hash if not provided.
+        # Compute cost_model_hash if not provided; VERIFY it if provided
+        # (CR-09): a non-empty hash copied from different cost assumptions
+        # must fail closed, never silently poison experiment identity.
+        expected_hash = sha256_hex({k: getattr(self, k) for k in COST_KEYS})
         if self.cost_model_hash == "":
-            object.__setattr__(
-                self,
-                "cost_model_hash",
-                sha256_hex({k: getattr(self, k) for k in COST_KEYS}),
+            object.__setattr__(self, "cost_model_hash", expected_hash)
+        elif self.cost_model_hash != expected_hash:
+            raise ValueError(
+                f"cost_model_hash mismatch: {self.cost_model_hash!r} != {expected_hash!r}"
             )
 
 
