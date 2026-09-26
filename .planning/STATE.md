@@ -1,18 +1,18 @@
 ---
 gsd_state_version: "1.0"
 milestone: v0.3
-current_phase: 05
-current_phase_name: risk-engine
-status: in_progress
+current_phase: 06
+current_phase_name: backtest-simulator-experiment-registry
+status: executing
 stopped_at: Phase 6 context gathered
-last_updated: "2026-09-26T03:29:06.788Z"
+last_updated: "2026-09-26T03:55:44.596Z"
 last_activity: 2026-09-25
 last_activity_desc: Phase 05 plan 2 (portfolio gates + DAILY_STOP + fail-closed) complete
-state_head: f2853adc8a346a30ddf071b5f45bfd04362ad073
+state_head: 76daad0c43fe9cf15868eeebc000230ec87d920b
 progress:
   total_phases: 10
   completed_phases: 0
-  total_plans: 20
+  total_plans: 23
   completed_plans: 20
 ---
 
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 ## Current Position
 
-Phase: 05 — risk-engine (plan 2 of 2 complete)
+Phase: 06 (backtest-simulator-experiment-registry) — READY TO EXECUTE
 Plan: 2 of 2
-Status: Phase 05 complete; Phase 6 (backtest) next
+Status: Ready to execute
 Last activity: 2026-09-25 — Phase 05 plan 2 marked complete
 
 Progress: [█████████░] 90%
