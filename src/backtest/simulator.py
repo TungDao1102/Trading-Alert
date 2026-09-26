@@ -11,6 +11,7 @@ The module imports NOTHING from Polars/pandas/NumPy/Binance SDK/
 SQLAlchemy/Pydantic — stdlib + Decimal + `src/core/_decimal.py` only,
 mirroring the Phase-4 D-10 / Phase-5 D-05 purity precedent.
 """
+
 from __future__ import annotations
 
 import json
@@ -25,7 +26,6 @@ from src.core.planner import plan
 from src.core.strategy import evaluate
 from src.core.types import AccountState, Candle, MarketSnapshot
 from src.domain.canonical import sha256_hex
-from src.domain.enums import Direction, RejectionReason
 from src.domain.registry import ParameterSet, load_parameter_set
 from src.domain.trade_plan import TradePlan
 from src.risk.gating import evaluate_risk
@@ -34,7 +34,6 @@ from src.risk.types import ConstraintSnapshot, OpenPosition
 
 from .costs import CostModel, build_cost_model, modeled_costs_per_unit
 
-
 # --------------------------------------------------------------------------- #
 # Validation helpers — local copies (D-12 fail-closed).
 # --------------------------------------------------------------------------- #
@@ -42,9 +41,7 @@ from .costs import CostModel, build_cost_model, modeled_costs_per_unit
 
 def _require_decimal(value: object, field_name: str) -> Decimal:
     if not isinstance(value, Decimal):
-        raise TypeError(
-            f"{field_name} must be Decimal, got {type(value).__name__}"
-        )
+        raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
     return value
 
 
@@ -52,9 +49,7 @@ def _require_utc_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     if value.utcoffset() != timedelta(0):
-        raise ValueError(
-            f"{field_name} must be UTC, got offset {value.utcoffset()}"
-        )
+        raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
 
 
 def _require_non_empty(value: str, field_name: str) -> None:
@@ -124,9 +119,9 @@ class TradeRecord:
     outcome_kind: str  # "OK" | "REJECT"
     reason_code: str  # canonical RejectionReason value or "OK"
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Project to a canonical-JSON-safe dict for hashing."""
-        out: dict = {}
+        out: dict[str, Any] = {}
         for k, v in self.__dict__.items():
             if isinstance(v, Decimal):
                 out[k] = str(v)
@@ -177,9 +172,7 @@ def resolve_intrabar(
     exit is "EOD" at the last 1m candle's close.
     """
     if direction not in {"LONG", "SHORT"}:
-        raise ValueError(
-            f"direction must be LONG or SHORT, got {direction!r}"
-        )
+        raise ValueError(f"direction must be LONG or SHORT, got {direction!r}")
     if intrabar is None:
         # Phase-2 D-09 flag-never-fabricate: conservative fallback,
         # log the flag on the trade record, never silent.
@@ -234,7 +227,7 @@ def resolve_intrabar(
 # --------------------------------------------------------------------------- #
 
 
-def _parse_candle(row: dict) -> Candle:
+def _parse_candle(row: dict[str, Any]) -> Candle:
     """Build a Candle from a JSON-decoded dict."""
     return Candle(
         symbol=row["symbol"],
@@ -249,27 +242,25 @@ def _parse_candle(row: dict) -> Candle:
     )
 
 
-def _parse_account_state(d: dict) -> AccountState:
+def _parse_account_state(d: dict[str, Any]) -> AccountState:
     return AccountState(
         equity=Decimal(d["equity"]),
         risk_rate=Decimal(d["risk_rate"]),
     )
 
 
-def _parse_constraint_snapshot(d: dict) -> ConstraintSnapshot:
+def _parse_constraint_snapshot(d: dict[str, Any]) -> ConstraintSnapshot:
     return ConstraintSnapshot(
         symbol=d["symbol"],
         price_tick_size=Decimal(d["price_tick_size"]),
         quantity_step_size=Decimal(d["quantity_step_size"]),
         min_quantity=Decimal(d["min_quantity"]),
         min_notional=Decimal(d["min_notional"]),
-        metadata_observed_at_utc=datetime.fromisoformat(
-            d["metadata_observed_at_utc"]
-        ),
+        metadata_observed_at_utc=datetime.fromisoformat(d["metadata_observed_at_utc"]),
     )
 
 
-def _parse_open_positions(rows: list[dict]) -> list[OpenPosition]:
+def _parse_open_positions(rows: list[dict[str, Any]]) -> list[OpenPosition]:
     return [
         OpenPosition(
             symbol=r["symbol"],
@@ -281,7 +272,7 @@ def _parse_open_positions(rows: list[dict]) -> list[OpenPosition]:
     ]
 
 
-def _parse_intrabar_map(d: dict) -> dict[str, list[Candle] | None]:
+def _parse_intrabar_map(d: dict[str, Any]) -> dict[str, list[Candle] | None]:
     """Parse the intrabar_1m_map: keys are 'SYMBOL|ISO_CLOSE_TIME'."""
     out: dict[str, list[Candle] | None] = {}
     for key, value in d.items():
@@ -395,10 +386,7 @@ def _resolve_entry(
             )
 
     # Check zone touch: bar range must bracket the entry zone.
-    zone_touched = (
-        bar.high >= trade_plan.entry_min_price
-        and bar.low <= trade_plan.entry_max_price
-    )
+    zone_touched = bar.high >= trade_plan.entry_min_price and bar.low <= trade_plan.entry_max_price
     if not zone_touched:
         # Bar didn't touch the zone at all.
         return _make_record(
@@ -457,9 +445,7 @@ def _resolve_entry(
             direction=direction,
         )
     entry_kind = (
-        "PARTIAL_FILL"
-        if cost_model.partial_fill_fraction < Decimal("1")
-        else "ENTRY_FILLED"
+        "PARTIAL_FILL" if cost_model.partial_fill_fraction < Decimal("1") else "ENTRY_FILLED"
     )
     return _make_record(
         trade_plan=trade_plan,
@@ -631,7 +617,7 @@ def _apply_costs(
 # --------------------------------------------------------------------------- #
 
 
-def run(case_input: dict) -> dict:
+def run(case_input: dict[str, Any]) -> dict[str, Any]:
     """Run the backtest simulator on a fixture input dict.
 
     Returns a dict with keys: `trades` (list of TradeRecord dicts),
@@ -646,9 +632,7 @@ def run(case_input: dict) -> dict:
     context_bars = [_parse_candle(r) for r in case_input["context_bars"]]
     intrabar_map = _parse_intrabar_map(case_input["intrabar_1m_map"])
     account_state = _parse_account_state(case_input["account_state"])
-    constraint_snapshot = _parse_constraint_snapshot(
-        case_input["constraint_snapshot"]
-    )
+    constraint_snapshot = _parse_constraint_snapshot(case_input["constraint_snapshot"])
     cost_model = build_cost_model(case_input["cost_model"])
     open_positions = _parse_open_positions(case_input["open_positions"])
     daily_loss_quote = Decimal(case_input["daily_loss_quote"])

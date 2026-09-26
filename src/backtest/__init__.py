@@ -8,6 +8,7 @@ third-party dependency here must first lift D-05.
 
 This barrel re-exports the public symbols. No logic lives here.
 """
+
 from __future__ import annotations
 
 from .costs import CostModel, build_cost_model, modeled_costs_per_unit

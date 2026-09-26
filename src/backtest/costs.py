@@ -11,10 +11,12 @@ The module imports NOTHING from Polars/pandas/NumPy/Binance SDK/
 SQLAlchemy/Pydantic — stdlib + Decimal + `src/core/_decimal.py` only,
 mirroring the Phase-4 D-10 / Phase-5 D-05 purity precedent.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
 from src.core._decimal import _add
 from src.domain.canonical import sha256_hex
@@ -36,9 +38,7 @@ COST_KEYS: tuple[str, ...] = (
 def _require_decimal(value: object, field_name: str) -> Decimal:
     """Reject non-Decimal values for money/rate fields (D-12)."""
     if not isinstance(value, Decimal):
-        raise TypeError(
-            f"{field_name} must be Decimal, got {type(value).__name__}"
-        )
+        raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
     return value
 
 
@@ -48,14 +48,10 @@ def _require_non_negative(value: Decimal, field_name: str) -> None:
         raise ValueError(f"{field_name} must be >= 0, got {value}")
 
 
-def _require_in_range(
-    value: Decimal, field_name: str, lo: Decimal, hi: Decimal
-) -> None:
+def _require_in_range(value: Decimal, field_name: str, lo: Decimal, hi: Decimal) -> None:
     """Reject Decimals outside [lo, hi]."""
     if value < lo or value > hi:
-        raise ValueError(
-            f"{field_name} must be in [{lo}, {hi}], got {value}"
-        )
+        raise ValueError(f"{field_name} must be in [{lo}, {hi}], got {value}")
 
 
 # --------------------------------------------------------------------------- #
@@ -94,9 +90,7 @@ class CostModel:
             "fee_rate_exit",
             "expected_slippage",
         ):
-            _require_non_negative(
-                Decimal(getattr(self, fname)), fname
-            )
+            _require_non_negative(Decimal(getattr(self, fname)), fname)
         _require_in_range(
             self.partial_fill_fraction,
             "partial_fill_fraction",
@@ -121,7 +115,7 @@ class CostModel:
 # --------------------------------------------------------------------------- #
 
 
-def build_cost_model(cost_dict: dict) -> CostModel:
+def build_cost_model(cost_dict: dict[str, Any]) -> CostModel:
     """Build a CostModel from a dict of cost keys.
 
     Absent keys raise KeyError (fail closed, never silent defaults).
@@ -161,9 +155,7 @@ def modeled_costs_per_unit(
     so it folds into the per-unit cost).
     """
     if side not in {"LONG", "SHORT"}:
-        raise ValueError(
-            f"side must be LONG or SHORT, got {side!r}"
-        )
+        raise ValueError(f"side must be LONG or SHORT, got {side!r}")
     return _add(
         _add(cost_model.fee_rate_entry, cost_model.fee_rate_exit),
         cost_model.expected_slippage,

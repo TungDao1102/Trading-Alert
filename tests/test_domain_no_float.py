@@ -42,6 +42,12 @@ SCANNED_FILES = (
     "src/risk/gating.py",
     # Phase 5 plan 05-02 — portfolio gates (D-03/D-04).
     "src/risk/portfolio.py",
+    # Phase 6 plan 06-03 — pure backtest package (D-05).
+    "src/backtest/__init__.py",
+    "src/backtest/simulator.py",
+    "src/backtest/costs.py",
+    "src/backtest/experiment.py",
+    "src/backtest/report.py",
 )
 
 

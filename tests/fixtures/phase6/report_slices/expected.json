@@ -1,4 +1,4 @@
 {
-  "_doc": "Phase 6 plan 06-03 report_slices expected digest (GREEN phase). EXPECTED_REPORT_DIGEST is the canonical sha256 of the UncertaintyReport built from input.json with experiment_id='0'*64, built_at_utc=2026-09-26T12:00:00Z, bootstrap_seed=42, resamples=10000, probable=0.1, universe_tags as in input.json. Per D-04, the digest pins every section so any undeclared semantic change fails the acceptance gate.",
-  "EXPECTED_REPORT_DIGEST": "e7f1955025e346a36e0b026de109bd8d00b95a6b8e153423ee91d20b39df0366"
+  "_doc": "Phase 6 plan 06-03 report_slices expected digest (REFACTOR phase). EXPECTED_REPORT_DIGEST is the canonical sha256 of the UncertaintyReport built from input.json with experiment_id='0'*64, built_at_utc=2026-09-26T12:00:00Z, bootstrap_seed=42, resamples=10000, probable=0.1, universe_tags as in input.json. The refactor replaced statistics.mean/median/pstdev (float-returning) with Decimal-only helpers, so the digest changed. Per D-04, the digest pins every section so any undeclared semantic change fails the acceptance gate.",
+  "EXPECTED_REPORT_DIGEST": "864aab053fdbf82a435ab56c381f544f1ba3c08281ea249d3d97e9b3f033ee91"
 }

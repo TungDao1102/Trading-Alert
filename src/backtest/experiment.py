@@ -16,6 +16,7 @@ The module imports NOTHING from Polars/pandas/NumPy/Binance SDK/
 SQLAlchemy/Pydantic — stdlib + Decimal + `src/core/_decimal.py` only,
 mirroring the Phase-4 D-10 / Phase-5 D-05 purity precedent.
 """
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -28,8 +29,8 @@ from src.domain.canonical import sha256_hex
 from src.domain.registry import load_parameter_set
 
 from .costs import CostModel
-from .simulator import TradeRecord, run as simulator_run
-
+from .simulator import TradeRecord
+from .simulator import run as simulator_run
 
 # --------------------------------------------------------------------------- #
 # Exceptions.
@@ -56,9 +57,7 @@ class ExperimentReproducibilityBroken(Exception):
 # --------------------------------------------------------------------------- #
 
 
-_RUN_TYPES: frozenset[str] = frozenset(
-    {"CANDIDATE", "BASELINE_NO_TRADE", "BASELINE_SIMPLE_TREND"}
-)
+_RUN_TYPES: frozenset[str] = frozenset({"CANDIDATE", "BASELINE_NO_TRADE", "BASELINE_SIMPLE_TREND"})
 
 
 # --------------------------------------------------------------------------- #
@@ -130,28 +129,21 @@ class ExperimentRecord:
         ):
             value = getattr(self, fname)
             if not isinstance(value, str) or value == "":
-                raise IncompleteExperimentRecord(
-                    f"{fname} must be a non-empty string"
-                )
+                raise IncompleteExperimentRecord(f"{fname} must be a non-empty string")
             _require_64_hex(value, fname)
         for fname in ("strategy_version", "code_version"):
             value = getattr(self, fname)
             if not isinstance(value, str) or value == "":
-                raise IncompleteExperimentRecord(
-                    f"{fname} must be a non-empty string"
-                )
+                raise IncompleteExperimentRecord(f"{fname} must be a non-empty string")
         _require_non_empty_str(self.parameter_set_id, "parameter_set_id")
         if self.run_type not in _RUN_TYPES:
             raise IncompleteExperimentRecord(
-                f"run_type must be one of {sorted(_RUN_TYPES)}, "
-                f"got {self.run_type!r}"
+                f"run_type must be one of {sorted(_RUN_TYPES)}, got {self.run_type!r}"
             )
         _require_utc_aware(self.time_range_start_utc, "time_range_start_utc")
         _require_utc_aware(self.time_range_end_utc, "time_range_end_utc")
         if self.time_range_end_utc <= self.time_range_start_utc:
-            raise IncompleteExperimentRecord(
-                "time_range_end_utc must be > time_range_start_utc"
-            )
+            raise IncompleteExperimentRecord("time_range_end_utc must be > time_range_start_utc")
 
 
 # --------------------------------------------------------------------------- #
@@ -279,9 +271,7 @@ def verify_experiment(
     digest_a = sha256_hex({"trades": [t.to_dict() for t in trades_a]})
     digest_b = sha256_hex({"trades": [t.to_dict() for t in trades_b]})
     if digest_a != digest_b:
-        raise ExperimentReproducibilityBroken(
-            f"reproduce digests differ: {digest_a} != {digest_b}"
-        )
+        raise ExperimentReproducibilityBroken(f"reproduce digests differ: {digest_a} != {digest_b}")
     return None
 
 
