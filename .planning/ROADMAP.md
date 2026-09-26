@@ -211,11 +211,12 @@ Plans:
 **Goal:** Only registry-consistent cost models are assemblable into experiment records — mismatched pairs raise fail-closed, consistent pairs keep byte-identical IDs.
 **Requirements**: BKTS-02
 **Depends on:** Phase 6
-**Plans:** 1 plan
+**Plans:** 2 plans
 
 Plans:
 
-- [ ] 07.1-01-PLAN.md — Registry-cost binding gate in assemble() with v3 sets, phase7.1 fixtures, and test migration
+- [ ] 07.1-01-PLAN.md — D-04 guard plus tracer binding slice: helper, assemble() gate, v3 sets, match fixture (wave 1)
+- [ ] 07.1-02-PLAN.md — Refusal coverage plus v3 test migration plus static gates (wave 2, blocked on 07.1-01)
 
 ### Phase 8: Approval + Reconciliation Hardening
 
