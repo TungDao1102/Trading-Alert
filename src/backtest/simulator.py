@@ -339,6 +339,8 @@ def _resolve_entry(
             fallback_applied=False,
             outcome_kind="OK",
             reason_code="OK",
+            symbol=bar.symbol,
+            bar_close_time_utc=bar.close_time_utc,
             direction=direction,
         )
 
@@ -365,6 +367,8 @@ def _resolve_entry(
                 fallback_applied=False,
                 outcome_kind="OK",
                 reason_code="OK",
+                symbol=bar.symbol,
+                bar_close_time_utc=bar.close_time_utc,
                 direction=direction,
             )
     else:  # SHORT
@@ -390,6 +394,8 @@ def _resolve_entry(
                 fallback_applied=False,
                 outcome_kind="OK",
                 reason_code="OK",
+                symbol=bar.symbol,
+                bar_close_time_utc=bar.close_time_utc,
                 direction=direction,
             )
 
@@ -418,6 +424,8 @@ def _resolve_entry(
             fallback_applied=False,
             outcome_kind="OK",
             reason_code="OK",
+            symbol=bar.symbol,
+            bar_close_time_utc=bar.close_time_utc,
             direction=direction,
         )
 
@@ -450,6 +458,8 @@ def _resolve_entry(
             fallback_applied=False,
             outcome_kind="OK",
             reason_code="OK",
+            symbol=bar.symbol,
+            bar_close_time_utc=bar.close_time_utc,
             direction=direction,
         )
     entry_kind = (
@@ -476,6 +486,8 @@ def _resolve_entry(
         fallback_applied=False,
         outcome_kind="OK",
         reason_code="OK",
+        symbol=bar.symbol,
+        bar_close_time_utc=bar.close_time_utc,
         direction=direction,
     )
 
@@ -483,6 +495,8 @@ def _resolve_entry(
 def _make_record(
     *,
     trade_plan: TradePlan,
+    symbol: str,
+    bar_close_time_utc: datetime,
     entry_kind: str,
     entry_price: Decimal | None,
     entry_time_utc: datetime | None,
@@ -504,11 +518,22 @@ def _make_record(
     reason_code: str,
     direction: str,
 ) -> TradeRecord:
-    """Build a TradeRecord with a deterministic trade_id."""
+    """Build a TradeRecord with a deterministic trade_id.
+
+    The ID binds symbol + bar close time + quantity alongside the
+    plan/price/kind fields, so two fills of the same plan at different
+    fractions, or the same plan on different bars, never collide.
+    `symbol` is an explicit caller parameter (never a placeholder).
+    """
+    _require_non_empty(symbol, "symbol")
+    _require_utc_aware(bar_close_time_utc, "bar_close_time_utc")
     payload = {
         "trade_plan_id": trade_plan.trade_plan_id,
+        "symbol": symbol,
+        "bar_close_time_utc": bar_close_time_utc,
         "entry_kind": entry_kind,
         "entry_price": entry_price,
+        "quantity": quantity,
         "exit_kind": exit_kind,
         "exit_price": exit_price,
         "outcome_kind": outcome_kind,
@@ -521,7 +546,7 @@ def _make_record(
         trade_plan_id=trade_plan.trade_plan_id,
         strategy_version=trade_plan.trade_plan_version,
         parameter_set_hash=trade_plan.plan_hash,  # placeholder; overwritten below
-        symbol=trade_plan.entry_min_price.__class__.__name__,  # placeholder
+        symbol=symbol,
         direction=direction,
         entry_kind=entry_kind,
         entry_price=entry_price,
