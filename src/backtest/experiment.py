@@ -199,12 +199,17 @@ def assemble(
     universe_hash = _universe_hash(universe)
 
     # Build the experiment_id via sha256_hex over the identity payload.
+    # CR-06: run_type and strategy_id are identity — a CANDIDATE and a
+    # BASELINE_NO_TRADE over identical inputs (or two strategies sharing
+    # a version string) must never share an experiment_id.
     identity_payload = {
+        "strategy_id": strategy_id,
         "strategy_version": strategy_version,
         "parameter_set_hash": parameter_set.parameter_set_hash,
         "data_snapshot_id": data_snapshot_id,
         "code_version": code_version,
         "cost_model_hash": cost_model.cost_model_hash,
+        "run_type": run_type,
         "time_range_start_utc": time_range_start_utc,
         "time_range_end_utc": time_range_end_utc,
         "universe_hash": universe_hash,
