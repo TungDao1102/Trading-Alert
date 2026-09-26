@@ -214,8 +214,12 @@ Plans:
 **Plans:** 2 plans
 
 Plans:
+**Wave 1**
 
 - [ ] 07.1-01-PLAN.md — D-04 guard plus tracer binding slice: helper, assemble() gate, v3 sets, match fixture (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 07.1-02-PLAN.md — Refusal coverage plus v3 test migration plus static gates (wave 2, blocked on 07.1-01)
 
 ### Phase 8: Approval + Reconciliation Hardening
