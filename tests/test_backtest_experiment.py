@@ -537,3 +537,285 @@ def test_universe_order_stability() -> None:
     assert record_a.experiment_id == record_b.experiment_id == record_c.experiment_id, (
         "experiment_id must be stable across universe orderings"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Nyquist gap-fill (review-fix iteration 1): CR-03a/b/c, CR-05..CR-11.
+# --------------------------------------------------------------------------- #
+
+
+def _assemble_gap_record(*, cost_dict: dict, run_type: str = "CANDIDATE",
+                         strategy_id: str = "trend-pullback",
+                         parameter_set_id: str = "baseline-v2",
+                         result_summary_json: str = "{}"):
+    """Assemble a record bound to registry params + the given cost dict."""
+    from src.backtest.experiment import assemble
+
+    return assemble(
+        parameter_set_id=parameter_set_id,
+        strategy_id=strategy_id,
+        strategy_version="v2.0.0",
+        data_snapshot_id="1" * 64,
+        code_version="gap-test",
+        cost_model=_build_cost_model(cost_dict),
+        time_range_start_utc=datetime.fromisoformat("2026-09-01T00:00:00+00:00"),
+        time_range_end_utc=datetime.fromisoformat("2026-09-11T10:00:00+00:00"),
+        universe=["BTCUSDT"],
+        run_type=run_type,
+        notes="nyquist gap test",
+        result_summary_json=result_summary_json,
+    )
+
+
+def _gap_cost_dict() -> dict:
+    return {
+        "fee_rate_entry": "0.0002",
+        "fee_rate_exit": "0.0005",
+        "funding_treatment": "ADDITIVE",
+        "expected_slippage": "0.0001",
+        "slippage_model": "FIXED_BPS",
+        "spread_fill_assumptions": "FULL_FILL",
+        "partial_fill_fraction": "1.0",
+    }
+
+
+def _gap_simulator_inputs(cost_dict: dict) -> dict:
+    return {
+        "strategy_id": "trend-pullback",
+        "parameter_set_id": "baseline-v2",
+        "strategy_version": "v2.0.0",
+        "cost_model": dict(cost_dict),
+    }
+
+
+def test_cr03a_reproduce_rejects_mismatched_simulator_inputs() -> None:
+    """CR-03a: reproduce() rejects inputs mismatched to the record."""
+    from src.backtest.experiment import (
+        ExperimentReproducibilityBroken,
+        reproduce,
+    )
+
+    cost = _gap_cost_dict()
+    record = _assemble_gap_record(cost_dict=cost)
+    good = _gap_simulator_inputs(cost)
+
+    bad_set = dict(good, parameter_set_id="baseline-no-trade-v1")
+    with pytest.raises(ExperimentReproducibilityBroken):
+        reproduce(record, simulator_inputs=bad_set)
+
+    bad_version = dict(good, strategy_version="v9.9.9")
+    with pytest.raises(ExperimentReproducibilityBroken):
+        reproduce(record, simulator_inputs=bad_version)
+
+    bad_cost = dict(good, cost_model=dict(cost, fee_rate_entry="0.0099"))
+    with pytest.raises(ExperimentReproducibilityBroken):
+        reproduce(record, simulator_inputs=bad_cost)
+
+
+def test_cr03b_reproduced_trades_carry_typed_decimal_datetime_fields() -> None:
+    """CR-03b: reproduced TradeRecords hold typed Decimal/datetime fields."""
+    from src.backtest.experiment import assemble, reproduce
+
+    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    record = assemble(
+        parameter_set_id=case["parameter_set_id"],
+        strategy_id=case["strategy_id"],
+        strategy_version=case["strategy_version"],
+        data_snapshot_id="2" * 64,
+        code_version="gap-test-cr03b",
+        cost_model=_build_cost_model(case["cost_model"]),
+        time_range_start_utc=datetime.fromisoformat("2026-09-01T00:00:00+00:00"),
+        time_range_end_utc=datetime.fromisoformat("2026-09-11T10:00:00+00:00"),
+        universe=["BTCUSDT"],
+        run_type="BASELINE_SIMPLE_TREND",
+        notes="nyquist cr03b",
+    )
+    trades = reproduce(record, simulator_inputs=case)
+    assert len(trades) >= 1, "simple-trend baseline must yield filled trades"
+    decimal_fields = (
+        "entry_price", "quantity", "exit_price", "realized_pnl",
+        "realized_risk", "gross_pnl", "entry_fee", "exit_fee",
+        "funding_amount", "slippage_amount", "modeled_costs_per_unit",
+    )
+    for trade in trades:
+        for fname in decimal_fields:
+            value = getattr(trade, fname)
+            assert value is None or isinstance(value, Decimal), (
+                f"{fname} must be Decimal|None, got {type(value).__name__} "
+                f"({value!r}) — stringified rebuild corrupts types"
+            )
+        for fname in ("entry_time_utc", "exit_time_utc"):
+            value = getattr(trade, fname)
+            assert value is None or isinstance(value, datetime), (
+                f"{fname} must be datetime|None, got {type(value).__name__}"
+            )
+        assert not isinstance(trade.entry_price, str)
+        assert not isinstance(trade.exit_time_utc, str)
+
+
+def test_cr03c_verify_experiment_detects_engine_drift_vs_stored_digest() -> None:
+    """CR-03c: verify_experiment detects drift vs the stored result digest."""
+    import json
+
+    from src.backtest.experiment import (
+        ExperimentReproducibilityBroken,
+        verify_experiment,
+    )
+
+    cost = _gap_cost_dict()
+    # No stored digest: empty-input determinism check passes.
+    record = _assemble_gap_record(cost_dict=cost)
+    assert verify_experiment(record, simulator_inputs={}) is None
+
+    # Forged stored digest: drift detected.
+    forged = _assemble_gap_record(
+        cost_dict=cost,
+        result_summary_json=json.dumps({"trades_digest": "f" * 64}),
+    )
+    with pytest.raises(ExperimentReproducibilityBroken):
+        verify_experiment(forged, simulator_inputs={})
+
+    # Matching stored digest: accepted.
+    matching_digest = sha256_hex({"trades": []})
+    matching = _assemble_gap_record(
+        cost_dict=cost,
+        result_summary_json=json.dumps({"trades_digest": matching_digest}),
+    )
+    assert verify_experiment(matching, simulator_inputs={}) is None
+
+
+def test_cr05_decimal_inputs_hash_identically_to_string_inputs() -> None:
+    """CR-05: Decimal cost inputs hash identically to their string spellings."""
+    from src.backtest.costs import build_cost_model
+
+    string_cost = _gap_cost_dict()
+    decimal_cost = {
+        key: (Decimal(value) if key not in {
+            "funding_treatment", "slippage_model", "spread_fill_assumptions",
+        } else value)
+        for key, value in string_cost.items()
+    }
+    assert build_cost_model(decimal_cost).cost_model_hash == (
+        build_cost_model(string_cost).cost_model_hash
+    ), "Decimal inputs must never round-trip through str() before hashing"
+
+    # Trailing precision still disciplines string spellings.
+    trailing = dict(string_cost, fee_rate_entry="0.00020")
+    trimmed = dict(string_cost, fee_rate_entry="0.0002")
+    assert build_cost_model(trailing).cost_model_hash != (
+        build_cost_model(trimmed).cost_model_hash
+    )
+    # And the trailing-zero Decimal binds to its own spelling.
+    assert build_cost_model(
+        dict(decimal_cost, fee_rate_entry=Decimal("0.00020"))
+    ).cost_model_hash == build_cost_model(trailing).cost_model_hash
+
+
+def test_cr06_experiment_id_differs_across_run_type_and_strategy_id() -> None:
+    """CR-06: experiment_id binds run_type and strategy_id (no collisions)."""
+    cost = _gap_cost_dict()
+    candidate = _assemble_gap_record(cost_dict=cost, run_type="CANDIDATE")
+    baseline = _assemble_gap_record(cost_dict=cost, run_type="BASELINE_NO_TRADE")
+    assert candidate.experiment_id != baseline.experiment_id, (
+        "CANDIDATE vs BASELINE_NO_TRADE over identical inputs must differ"
+    )
+
+    trend = _assemble_gap_record(cost_dict=cost, strategy_id="trend-pullback")
+    breakout = _assemble_gap_record(
+        cost_dict=cost,
+        strategy_id="breakout-retest",
+        parameter_set_id="baseline-v2",
+    )
+    assert trend.experiment_id != breakout.experiment_id, (
+        "two strategies sharing a version string must never share experiment_id"
+    )
+
+
+def test_cr07_baselines_enforce_degenerated_minimum_rr() -> None:
+    """CR-07: baseline runners fail closed on non-degenerated candidate params."""
+    from src.backtest.experiment import baseline_no_trade, baseline_simple_trend
+
+    candidate = _load_input(PHASE6_FIXTURES_DIR / "intrabar_both_touched")
+    with pytest.raises(ValueError, match="minimum_rr"):
+        baseline_no_trade(candidate)
+
+    no_trade_case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "no_trade")
+    with pytest.raises(ValueError, match="minimum_rr"):
+        baseline_simple_trend(no_trade_case)
+
+
+def test_cr09_forged_cost_model_hash_rejected_at_assembly() -> None:
+    """CR-09: a forged cost_model_hash inconsistent with params is rejected."""
+    from src.backtest.costs import CostModel, build_cost_model
+
+    good = build_cost_model(_gap_cost_dict())
+    with pytest.raises(ValueError, match="mismatch"):
+        CostModel(
+            fee_rate_entry=good.fee_rate_entry,
+            fee_rate_exit=good.fee_rate_exit,
+            funding_treatment=good.funding_treatment,
+            expected_slippage=good.expected_slippage,
+            slippage_model=good.slippage_model,
+            spread_fill_assumptions=good.spread_fill_assumptions,
+            partial_fill_fraction=good.partial_fill_fraction,
+            cost_model_hash="f" * 64,
+        )
+    # The verified hash round-trips cleanly and binds the experiment record.
+    verified = CostModel(
+        fee_rate_entry=good.fee_rate_entry,
+        fee_rate_exit=good.fee_rate_exit,
+        funding_treatment=good.funding_treatment,
+        expected_slippage=good.expected_slippage,
+        slippage_model=good.slippage_model,
+        spread_fill_assumptions=good.spread_fill_assumptions,
+        partial_fill_fraction=good.partial_fill_fraction,
+        cost_model_hash=good.cost_model_hash,
+    )
+    record = _assemble_gap_record(cost_dict=_gap_cost_dict())
+    assert record.cost_model_hash == verified.cost_model_hash
+
+
+def test_cr11_baseline_tomls_carry_detector_and_cost_keys() -> None:
+    """CR-11: baseline TOMLs carry atr_period + 4 cost keys from COST_MODEL."""
+    import ast
+    from pathlib import Path
+
+    from src.domain.registry import load_parameter_set
+
+    repo_root = Path(__file__).resolve().parents[1]
+    tree = ast.parse(
+        (repo_root / "scripts" / "gen_phase6_fixtures.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    canonical: dict | None = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            getattr(target, "id", "") == "COST_MODEL" for target in node.targets
+        ):
+            canonical = ast.literal_eval(node.value)
+    assert canonical is not None, "COST_MODEL canonical source must exist"
+
+    for parameter_set_id in ("baseline-no-trade-v1", "baseline-simple-trend-v1"):
+        parameter_set = load_parameter_set("trend-pullback", parameter_set_id)
+        assert parameter_set.params["atr_period"] == 14, (
+            f"{parameter_set_id}: atr_period must match sibling baseline-v2 sets"
+        )
+        for key in (
+            "funding_treatment",
+            "slippage_model",
+            "spread_fill_assumptions",
+        ):
+            assert str(parameter_set.params[key]) == str(canonical[key]), (
+                f"{parameter_set_id}: {key}={parameter_set.params[key]!r} != "
+                f"COST_MODEL canonical {canonical[key]!r}"
+            )
+        # partial_fill_fraction: TOML whole-number rule normalizes 1.0 to
+        # int 1 while the fixture spells "1.0" — value equality binds them.
+        assert Decimal(str(parameter_set.params["partial_fill_fraction"])) == (
+            Decimal(str(canonical["partial_fill_fraction"]))
+        ), (
+            f"{parameter_set_id}: partial_fill_fraction="
+            f"{parameter_set.params['partial_fill_fraction']!r} != "
+            f"COST_MODEL canonical {canonical['partial_fill_fraction']!r}"
+        )

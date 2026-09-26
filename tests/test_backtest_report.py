@@ -507,3 +507,227 @@ def test_quarter_is_derived_deterministically_from_exit_time() -> None:
     assert quarters == ["2026-Q1", "2026-Q2"], (
         f"quarter derivation must yield [2026-Q1, 2026-Q2], got {quarters}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Nyquist gap-fill (review-fix iteration 1): CR-08, CR-12, WR-05/06/10.
+# Distinct synthetic trades/seeds — never the pinned report_slices digest.
+# --------------------------------------------------------------------------- #
+
+_GAP_SEED = 777
+
+
+def _gap_trade(trade_id: str, pnl: str, risk: str, **overrides: object) -> dict:
+    """Build one synthetic trade dict shaped for report.build()."""
+    trade: dict = {
+        "trade_id": trade_id,
+        "signal_id": "sig-gap",
+        "trade_plan_id": "plan-gap",
+        "strategy_version": "v2.0.0",
+        "parameter_set_hash": "1" * 64,
+        "symbol": "BTCUSDT",
+        "direction": "LONG",
+        "entry_kind": "ENTRY_FILLED",
+        "entry_price": "100.00",
+        "entry_time_utc": "2026-01-15T10:00:00+00:00",
+        "quantity": "0.1",
+        "exit_kind": "TP1",
+        "exit_price": "101.00",
+        "exit_time_utc": "2026-01-15T11:00:00+00:00",
+        "realized_pnl": pnl,
+        "realized_risk": risk,
+        "gross_pnl": pnl,
+        "entry_fee": "0.001",
+        "exit_fee": "0.001",
+        "funding_amount": "0",
+        "slippage_amount": "0.0001",
+        "modeled_costs_per_unit": "0.0008",
+        "coverage_note": None,
+        "fallback_applied": False,
+        "outcome_kind": "OK",
+        "reason_code": "OK",
+        "regime": "TREND_UP",
+        "parameter_region": "region_a",
+    }
+    trade.update(overrides)
+    return trade
+
+
+def _gap_trades_four() -> list:
+    """Four synthetic trades with R = 5, -2, 3, 0 (distinct seed domain)."""
+    return [
+        _gap_trade("gap-t1", "0.50", "0.10"),
+        _gap_trade("gap-t2", "-0.20", "0.10"),
+        _gap_trade("gap-t3", "0.30", "0.10"),
+        _gap_trade("gap-t4", "0", "0.20"),
+    ]
+
+
+def test_cr08_build_requires_explicit_built_at_utc() -> None:
+    """CR-08: build() requires explicit built_at_utc (missing/None/naive fail)."""
+    from src.backtest.report import ReportBuildError, build
+
+    record = _make_experiment_record()
+    trades = _gap_trades_four()[:2]
+
+    with pytest.raises(TypeError):
+        build(  # type: ignore[call-arg]
+            experiment_record=record,
+            trade_records=trades,
+            bootstrap_seed=_GAP_SEED,
+        )
+    with pytest.raises(Exception):
+        build(
+            experiment_record=record,
+            trade_records=trades,
+            bootstrap_seed=_GAP_SEED,
+            built_at_utc=None,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError):
+        build(
+            experiment_record=record,
+            trade_records=trades,
+            bootstrap_seed=_GAP_SEED,
+            built_at_utc=datetime(2026, 9, 26, 12, 0, 0),
+        )
+
+
+def test_cr12_build_rejects_zero_resamples_and_invalid_probable() -> None:
+    """CR-12: resamples=0 / invalid probable fail closed (no bogus [0,0])."""
+    from src.backtest.report import ReportBuildError
+
+    record = _make_experiment_record()
+    trades = _gap_trades_four()
+
+    for bad_resamples in (0, 50, True, "100"):
+        with pytest.raises(ReportBuildError):
+            _build_report(
+                experiment_record=record,
+                trade_records=trades,
+                bootstrap_seed=_GAP_SEED,
+                resamples=bad_resamples,  # type: ignore[arg-type]
+            )
+    for bad_probable in (
+        Decimal("0"),
+        Decimal("-0.1"),
+        Decimal("1.5"),
+        0.1,
+    ):
+        with pytest.raises(ReportBuildError):
+            _build_report(
+                experiment_record=record,
+                trade_records=trades,
+                bootstrap_seed=_GAP_SEED,
+                resamples=100,
+                probable=bad_probable,  # type: ignore[arg-type]
+            )
+    valid = _build_report(
+        experiment_record=record,
+        trade_records=trades,
+        bootstrap_seed=_GAP_SEED,
+        resamples=100,
+    )
+    assert valid.expectancy_interval is not None, (
+        "minimum valid resamples=100 must yield an interval"
+    )
+
+
+def test_wr05_non_extreme_coverage_percent_is_exact() -> None:
+    """WR-05: 2/3 coverage reports the exact quotient, never truncated 66."""
+    from src.core._decimal import _div, _q
+
+    record = _make_experiment_record()
+    trades = [
+        _gap_trade("gap-c1", "0.50", "0.10"),
+        _gap_trade("gap-c2", "0.30", "0.10"),
+        _gap_trade(
+            "gap-c3",
+            "-0.20",
+            "0.10",
+            fallback_applied=True,
+            coverage_note="1m_intrabar_missing",
+        ),
+    ]
+    report = _build_report(
+        experiment_record=record,
+        trade_records=trades,
+        bootstrap_seed=_GAP_SEED,
+        resamples=100,
+    )
+    assert report.intrabar_coverage.percent != Decimal("66"), (
+        f"integer-truncated 66 must never appear, got "
+        f"{report.intrabar_coverage.percent}"
+    )
+    assert report.intrabar_coverage.percent == _div(_q(200), _q(3)), (
+        f"2/3 coverage must be exact, got {report.intrabar_coverage.percent}"
+    )
+
+
+def test_wr06_bootstrap_and_drawdown_use_decoupled_rng_streams() -> None:
+    """WR-06: drawdown resamples run on seed+1, decoupled from bootstrap means."""
+    from src.backtest.report import (
+        _quantile,
+        _resample_drawdowns,
+        _stationary_block_bootstrap_means,
+    )
+
+    record = _make_experiment_record()
+    trades = _gap_trades_four()
+    report = _build_report(
+        experiment_record=record,
+        trade_records=trades,
+        bootstrap_seed=_GAP_SEED,
+        resamples=100,
+    )
+    r_values = [Decimal("5"), Decimal("-2"), Decimal("3"), Decimal("0")]
+
+    means = _stationary_block_bootstrap_means(
+        r_values, seed=_GAP_SEED, n_resamples=100, p=Decimal("0.1")
+    )
+    assert report.expectancy_interval is not None
+    assert report.expectancy_interval.lower == _quantile(
+        means, Decimal("0.025")
+    ), "expectancy bootstrap must run on the recorded seed"
+
+    drawdowns_plus_one = _resample_drawdowns(
+        r_values, seed=_GAP_SEED + 1, n_resamples=100, p=Decimal("0.1")
+    )
+    assert report.drawdown_distribution.resampled_p50_max_drawdown == _quantile(
+        drawdowns_plus_one, Decimal("0.50")
+    ), "drawdown stage must run on seed+1, not the shared seed stream"
+
+    drawdowns_same_seed = _resample_drawdowns(
+        r_values, seed=_GAP_SEED, n_resamples=100, p=Decimal("0.1")
+    )
+    assert drawdowns_same_seed != drawdowns_plus_one, (
+        "test premise: seeds 777/778 must diverge on this data"
+    )
+
+
+def test_wr10_risk_zero_trades_counted_and_surfaced_in_note() -> None:
+    """WR-10: risk-zero trades are counted and surfaced in the data note."""
+    record = _make_experiment_record()
+    trades = [
+        _gap_trade("gap-z1", "0.50", "0.10"),
+        _gap_trade("gap-z2", "0.00", "0"),
+    ]
+    report = _build_report(
+        experiment_record=record,
+        trade_records=trades,
+        bootstrap_seed=_GAP_SEED,
+        resamples=100,
+    )
+    assert report.counts.trade_count == 2
+    counted = (
+        report.r_distribution.win_count
+        + report.r_distribution.loss_count
+        + report.r_distribution.zero_r_count
+    )
+    assert counted == 1, (
+        "only the risk-bearing trade enters the R distribution"
+    )
+    assert report.insufficient_data_note is not None
+    assert "1 trade(s) excluded from the R distribution" in (
+        report.insufficient_data_note
+    ), f"risk-zero exclusion must be surfaced, got {report.insufficient_data_note!r}"
+    assert "realized_risk=0" in report.insufficient_data_note

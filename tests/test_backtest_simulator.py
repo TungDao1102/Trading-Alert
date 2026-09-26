@@ -423,3 +423,161 @@ def test_phase6_fixtures_exist() -> None:
     assert expected_cases.issubset(actual_cases), (
         f"missing phase6 cases: {expected_cases - actual_cases}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Nyquist gap-fill (review-fix iteration 1): CR-01, CR-02, CR-10, WR-14.
+# --------------------------------------------------------------------------- #
+
+
+def test_cr01_empty_intrabar_list_resolves_sl_first_fallback() -> None:
+    """CR-01: empty intrabar [] resolves SL-first fallback with fallback_applied=True.
+
+    An empty 1m payload (valid JSON, zero candles) is the most likely
+    real-world shape of "no coverage" and must behave exactly like None:
+    SL-first fallback, never IndexError. Only None was tested before.
+    """
+    from src.backtest.simulator import resolve_intrabar
+
+    for direction in ("LONG", "SHORT"):
+        for intrabar in ([], None):
+            outcome = resolve_intrabar(
+                direction=direction,
+                stop_loss=Decimal("121.40"),
+                take_profit_1=Decimal("125.00"),
+                intrabar=intrabar,  # type: ignore[arg-type]
+            )
+            assert outcome.exit_kind == "SL", (
+                f"{direction} intrabar={intrabar!r}: expected SL-first fallback, "
+                f"got {outcome.exit_kind!r}"
+            )
+            assert outcome.fallback_applied is True, (
+                f"{direction} intrabar={intrabar!r}: fallback_applied must be True"
+            )
+            assert outcome.coverage_note == "1m_intrabar_missing"
+
+
+def test_cr02_trade_id_unique_across_bar_time_symbol_quantity() -> None:
+    """CR-02: trade_id binds bar time, symbol, and quantity; symbol is explicit.
+
+    Two fills of the same plan at different partial-fill fractions shared
+    one trade_id before the fix. The payload must bind symbol +
+    bar_close_time_utc + quantity, and symbol must be an explicit caller
+    parameter (no "Decimal" placeholder).
+    """
+    import inspect
+    from datetime import timezone
+    from types import SimpleNamespace
+
+    from src.backtest.simulator import _make_record, run
+
+    # Structural pin: symbol and bar_close_time_utc are required keyword-only.
+    sig = inspect.signature(_make_record)
+    for required in ("symbol", "bar_close_time_utc"):
+        param = sig.parameters[required]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY
+        assert param.default is inspect.Parameter.empty, (
+            f"_make_record({required}) must be required, never defaulted"
+        )
+
+    plan = SimpleNamespace(
+        trade_plan_id="plan-gap-cr02",
+        signal_id="sig-gap-cr02",
+        trade_plan_version="v2.0.0",
+        plan_hash="0" * 64,
+    )
+    bar_close_a = datetime(2026, 9, 11, 9, 0, 0, tzinfo=timezone.utc)
+    bar_close_b = datetime(2026, 9, 11, 10, 0, 0, tzinfo=timezone.utc)
+
+    def _rec(symbol: str, bar_close: datetime, quantity: str) -> str:
+        return _make_record(
+            trade_plan=plan,  # type: ignore[arg-type]
+            symbol=symbol,
+            bar_close_time_utc=bar_close,
+            entry_kind="ENTRY_FILLED",
+            entry_price=Decimal("121.50"),
+            entry_time_utc=bar_close,
+            quantity=Decimal(quantity),
+            exit_kind="SL",
+            exit_price=Decimal("121.40"),
+            exit_time_utc=bar_close,
+            realized_pnl=Decimal("-0.05"),
+            realized_risk=Decimal("0.10"),
+            gross_pnl=Decimal("-0.05"),
+            entry_fee=Decimal("0.001"),
+            exit_fee=Decimal("0.001"),
+            funding_amount=Decimal("0"),
+            slippage_amount=Decimal("0.0001"),
+            modeled_costs_per_unit=Decimal("0.0008"),
+            coverage_note=None,
+            fallback_applied=False,
+            outcome_kind="OK",
+            reason_code="OK",
+            direction="LONG",
+        ).trade_id
+
+    base = _rec("BTCUSDT", bar_close_a, "0.5")
+    assert _rec("BTCUSDT", bar_close_a, "0.9") != base, (
+        "quantity-only variation must change trade_id (fraction collision)"
+    )
+    assert _rec("ETHUSDT", bar_close_a, "0.5") != base, (
+        "symbol-only variation must change trade_id"
+    )
+    assert _rec("BTCUSDT", bar_close_b, "0.5") != base, (
+        "bar-time-only variation must change trade_id"
+    )
+    assert _rec("BTCUSDT", bar_close_a, "0.5") == base, (
+        "identical inputs must re-hash identically"
+    )
+
+    # End-to-end anchor: the same plan filled at fraction 1.0 vs 0.5
+    # yields different trade_ids on the same bar.
+    case_dir = PHASE6_FIXTURES_DIR / "limit_partial_fill"
+    full_input = _load_input(case_dir)
+    full_input["cost_model"] = dict(
+        full_input["cost_model"], partial_fill_fraction="1.0"
+    )
+    partial_input = _load_input(case_dir)
+    full_id = run(full_input)["trades"][0]["trade_id"]
+    partial_id = run(partial_input)["trades"][0]["trade_id"]
+    assert full_id != partial_id, (
+        "full vs partial fill of the same plan must not share a trade_id"
+    )
+
+
+def test_cr10_fixture_strategy_version_bound_to_registry() -> None:
+    """CR-10: fixture strategy_version diverging from the registry fails closed.
+
+    A fixture claiming v9.9.9 replayed against registry v2.0.0 must raise
+    instead of replaying under a hybrid identity.
+    """
+    from src.backtest.simulator import run
+
+    case_input = _load_input(PHASE6_FIXTURES_DIR / "intrabar_both_touched")
+    case_input["strategy_version"] = "v9.9.9"
+    with pytest.raises(ValueError, match="strategy_version"):
+        run(case_input)
+
+
+def test_wr14_float_json_numbers_and_naive_datetimes_rejected() -> None:
+    """WR-14: float-typed JSON numbers and naive datetimes fail closed at parse."""
+    import copy
+
+    from src.backtest.simulator import run
+
+    base = _load_input(PHASE6_FIXTURES_DIR / "intrabar_both_touched")
+
+    float_price = copy.deepcopy(base)
+    float_price["strategy_bars"][0]["open"] = 1.1
+    with pytest.raises(TypeError):
+        run(float_price)
+
+    naive_dt = copy.deepcopy(base)
+    naive_dt["strategy_bars"][0]["close_time_utc"] = "2026-09-11T10:00:00"
+    with pytest.raises(ValueError):
+        run(naive_dt)
+
+    float_account = copy.deepcopy(base)
+    float_account["account_state"]["equity"] = 10000.00
+    with pytest.raises(TypeError):
+        run(float_account)
