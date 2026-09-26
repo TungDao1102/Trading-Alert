@@ -23,7 +23,7 @@ import random
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -543,14 +543,34 @@ def build(
     experiment_record: Any,
     trade_records: Sequence[Mapping[str, Any]],
     bootstrap_seed: int,
+    built_at_utc: datetime,
     resamples: int = 10000,
     probable: Decimal = Decimal("0.1"),
     universe_tags: Mapping[str, Sequence[str]] | None = None,
     baseline_summaries: BaselineSummaries | None = None,
-    built_at_utc: datetime | None = None,
 ) -> UncertaintyReport:
-    if built_at_utc is None:
-        built_at_utc = datetime.now(UTC)
+    """Build the uncertainty-first report (fail-closed on bad inputs).
+
+    CR-08: `built_at_utc` is a REQUIRED explicit input — it enters the
+    report digest, so a wall-clock default would make rebuilds
+    non-reproducible. Callers pass a pinned timestamp (tests) or the
+    experiment's recorded build time. `resamples`/`probable` are
+    validated upfront (CR-12): a zero-resample "interval" would be a
+    confident-looking [0, 0] lie over real data.
+    """
+    _require_utc_aware(built_at_utc, "built_at_utc")
+    if (
+        not isinstance(resamples, int)
+        or isinstance(resamples, bool)
+        or resamples < 100
+    ):
+        raise ReportBuildError(f"resamples must be int >= 100, got {resamples!r}")
+    if not isinstance(probable, Decimal):
+        raise ReportBuildError(
+            f"probable must be Decimal in (0, 1], got {type(probable).__name__}"
+        )
+    if not (Decimal("0") < probable <= Decimal("1")):
+        raise ReportBuildError(f"probable must be in (0, 1], got {probable}")
 
     r_values: list[Decimal] = []
     annotated: list[tuple[Mapping[str, Any], Decimal]] = []
