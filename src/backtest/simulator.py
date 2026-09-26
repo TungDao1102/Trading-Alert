@@ -170,12 +170,20 @@ def resolve_intrabar(
     The 1m sequence is walked in order; the first 1m candle that
     touches SL or TP1 determines the exit. If neither is touched, the
     exit is "EOD" at the last 1m candle's close.
+
+    NOTE (single-exit scope): the planner emits a TP1/TP2 ladder, but
+    this simulator models one exit per fill. The first profit target
+    (TP1) is the realized exit; the TP2 runner leg is NOT modeled —
+    exits at TP1 are conservative (profit taken at the nearer target).
+    `exit_kind` is therefore one of "SL" | "TP1" | "EOD".
     """
     if direction not in {"LONG", "SHORT"}:
         raise ValueError(f"direction must be LONG or SHORT, got {direction!r}")
-    if intrabar is None:
+    if intrabar is None or len(intrabar) == 0:
         # Phase-2 D-09 flag-never-fabricate: conservative fallback,
-        # log the flag on the trade record, never silent.
+        # log the flag on the trade record, never silent. An empty 1m
+        # payload (valid JSON, zero candles) is "no coverage" exactly
+        # like a missing payload — SL-first fallback, never IndexError.
         return IntrabarOutcome(
             exit_kind="SL",
             price=stop_loss,
