@@ -209,7 +209,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 07-02: Supervisor plus REST resync plus backtest parity gate (PAPER-01)
+- [x] 07-02: Supervisor plus REST resync plus backtest parity gate (PAPER-01)
 - [ ] 07-03: Three-way attribution journaling on existing ORM shapes (PAPER-02, TDD)
 
 **Wave 3** *(blocked on Wave 2 completion)*

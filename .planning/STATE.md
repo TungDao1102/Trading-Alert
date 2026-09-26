@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 07
 current_phase_name: Paper Forward Observation
 status: executing
-stopped_at: Completed 07-01-PLAN.md
-last_updated: "2026-09-26T22:30:00.000Z"
-last_activity: 2026-09-26
-last_activity_desc: Phase 07 plan 01 (paper closed-candle tracer slice) executed
-state_head: 7f3bd10
+stopped_at: Completed 07-02-PLAN.md
+last_updated: "2026-09-27T00:00:00.000Z"
+last_activity: 2026-09-27
+last_activity_desc: Phase 07 plan 02 (paper reconnect/resync + parity gate) executed
+state_head: 821f835
 progress:
   total_phases: 11
   completed_phases: 6
   total_plans: 29
-  completed_plans: 26
+  completed_plans: 27
 milestone_name: milestone
 ---
 
@@ -33,9 +33,9 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 Phase: 07 (Paper Forward Observation) — EXECUTING
 Plan: 2 of 4
 Status: Executing Phase 07
-Last activity: 2026-09-26 — Phase 07 plan 01 (paper closed-candle tracer slice) executed
+Last activity: 2026-09-27 — Phase 07 plan 02 (paper reconnect/resync + parity gate) executed
 
-Progress: [██░░░░░░░░] 20%
+Progress: [███░░░░░░░] 30%
 
 ## Performance Metrics
 
@@ -69,6 +69,7 @@ Progress: [██░░░░░░░░] 20%
 | Phase 07.1 P01 | ~15 min | 2 tasks | 9 files |
 | Phase 07.1 P02 | ~10 min | 2 tasks | 4 files |
 | Phase 07 P01 | ~45 min | 3 tasks | 10 files |
+| Phase 07 P02 | ~30 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -144,6 +145,12 @@ Recent decisions affecting current work:
 - [Phase 07]: [07-01] D-03 feature-validity gate short-circuits the whole loop when either stream lacks EMA200 warmup; feed-freshness gate is per-event (not latched) so a fresh event after a stale one resumes evaluation without restart
 - [Phase 07]: [07-01] D-04 SDK WS surface isolated to src/adapters/paper_ws.py; src/paper/loop.py imports nothing from Polars/pandas/NumPy/Binance SDK/SQLAlchemy/Pydantic — stdlib + Decimal + src/core/_decimal.py only
 - [Phase 07]: [07-01] D-05 STALENESS_THRESHOLD_SECONDS=60 (1H cadence) and WARMUP_MIN_BARS=200 (EMA200) exported as module constants for tests and downstream consumers
+- [Phase 07]: [07-02] D-01 resync drops forming candles (x=False or close_time_utc > now_utc) before the open_time_utc diff — never synthesizes; unrecoverable windows stay explicit gap records matching CollectorGap shape
+- [Phase 07]: [07-02] D-02 24h server-initiated rotation triggers on_disconnect(scheduled=True) — NO reconnect attempt (WS still connected), only resubscribe + resync from last-seen close; only unsolicited drops get the bounded reconnect path
+- [Phase 07]: [07-02] D-03 parity gate is a divergence tripwire — replay helper builds paper loop inputs from strategy_bars bar by bar; projection reduces both outputs to (signal_id, reason_code) tuples; any divergence is an engine incident fixed in the shared engine, never at the paper call site
+- [Phase 07]: [07-02] D-04 prefix-invariance test guards D-02 determinism — verdict for bar N must depend only on bars [0..N]; appending a post-horizon bar must not change earlier verdicts
+- [Phase 07]: [07-02] D-05 src/paper/resync.py and src/paper/supervisor.py import only stdlib + tenacity + structlog + sibling modules; no Polars/pandas/NumPy/Binance SDK/SQLAlchemy/Pydantic leaks
+- [Phase 07]: [07-02] FLAGGED ASSUMPTION (PAPER-01 unclassified): bounded-retry ceilings (RESYNC_MAX_ATTEMPTS=7, RESYNC_MAX_DELAY_SECONDS=120, SUPERVISOR_MAX_ATTEMPTS=7, SUPERVISOR_MAX_DELAY_SECONDS=120) are module-level named constants; operator tunes them only before a soak epoch starts, never mid-epoch
 
 ### Pending Todos
 
@@ -176,6 +183,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-26T22:30:00.000Z
-Stopped at: Completed 07-01-PLAN.md
-Resume file: .planning/phases/07-paper-forward-observation/07-02-PLAN.md
+Last session: 2026-09-27T00:00:00.000Z
+Stopped at: Completed 07-02-PLAN.md
+Resume file: .planning/phases/07-paper-forward-observation/07-03-PLAN.md
