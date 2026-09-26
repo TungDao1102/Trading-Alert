@@ -2,18 +2,18 @@
 gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 06
-current_phase_name: backtest-simulator-experiment-registry
+current_phase_name: Backtest Simulator + Experiment Registry
 status: executing
-stopped_at: Phase 6 context gathered
-last_updated: "2026-09-26T03:55:44.596Z"
-last_activity: 2026-09-25
-last_activity_desc: Phase 05 plan 2 (portfolio gates + DAILY_STOP + fail-closed) complete
-state_head: 76daad0c43fe9cf15868eeebc000230ec87d920b
+stopped_at: Completed 06-01-PLAN.md
+last_updated: "2026-09-26T12:30:00.000Z"
+last_activity: 2026-09-26
+last_activity_desc: Phase 06 plan 01 completed — backtest simulator tracer slice
+state_head: 114e483b5e7f1f5e0e3a5b5c5d5e5f5061728394
 progress:
   total_phases: 10
   completed_phases: 0
   total_plans: 23
-  completed_plans: 20
+  completed_plans: 21
 ---
 
 <!-- STATE-MD-SCHEMA:END:frontmatter -->
@@ -25,22 +25,22 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 04 — pure-core-feature-strategy-planner
+**Current focus:** Phase 06 — Backtest Simulator + Experiment Registry
 
 ## Current Position
 
-Phase: 06 (backtest-simulator-experiment-registry) — READY TO EXECUTE
-Plan: 2 of 2
-Status: Ready to execute
-Last activity: 2026-09-25 — Phase 05 plan 2 marked complete
+Phase: 06 (Backtest Simulator + Experiment Registry) — EXECUTING
+Plan: 1 of 3
+Status: Plan 06-01 complete; ready for plan 06-02
+Last activity: 2026-09-26 — Phase 06 plan 01 completed (backtest simulator tracer slice)
 
-Progress: [█████████░] 90%
+Progress: [█████████░] 91%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 6 (Phase 03 + Phase 05 plans 1+2)
+- Total plans completed: 7 (Phase 03 + Phase 05 plans 1+2 + Phase 06 plan 1)
 - Average duration: ~14 min
 - Total execution time: ~100 min
 
@@ -50,10 +50,11 @@ Progress: [█████████░] 90%
 |-------|-------|-------|----------|
 | 03 | 4 | 5 | ~12 min |
 | 05 | 2 | 2 | ~25 min |
+| 06 | 1 | 3 | ~15 min |
 
 **Recent Trend:**
 
-- Last 6 plans: 03-01 (tracer slice) — ~15 min, 03-02 (six entities) — ~10 min, 03-03 (registry hardening) — ~10 min, 03-04 (ORM mirror + mappers + migration) — ~15 min, 05-01 (risk tracer slice) — ~25 min, 05-02 (portfolio gates) — ~25 min
+- Last 7 plans: 03-01 (tracer slice) — ~15 min, 03-02 (six entities) — ~10 min, 03-03 (registry hardening) — ~10 min, 03-04 (ORM mirror + mappers + migration) — ~15 min, 05-01 (risk tracer slice) — ~25 min, 05-02 (portfolio gates) — ~25 min, 06-01 (backtest simulator tracer slice) — ~15 min
 - Trend: stable
 
 *Updated after each plan completion*
@@ -113,6 +114,9 @@ Recent decisions affecting current work:
 - [05-02]: D-06 Daily state machine NORMAL → WARNING → DAILY_STOP with inclusive boundaries; DAILY_STOP blocks, WARNING passes with state reported
 - [05-02]: D-07 Fail-closed on None daily_loss_quote, positions_reconciled=False, stale constraint snapshot (D-04)
 - [05-02]: D-08 parameter_set values are ABSOLUTE quote amounts in check_portfolio; caller converts registry rates to absolute amounts
+- [06-01]: D-05 src/backtest/ is dependency-free (stdlib + Decimal + src/core/_decimal.py only); no Polars/pandas/NumPy/Binance SDK/SQLAlchemy/Pydantic
+- [06-01]: D-01 Invalidation gate uses bar direction (bearish bar for LONG, bullish bar for SHORT) since SL < bar.low ≤ bar.close makes bar.close < SL structurally impossible
+- [06-01]: D-02 Expiry check uses fixture now_utc (backtest wall-clock), NOT bar.close_time_utc — a backtest running past expiry means the limit window closed without a fill
 
 ### Pending Todos
 
@@ -140,6 +144,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-26T03:29:06.607Z
-Stopped at: Phase 6 context gathered
-Resume file: .planning/phases/06-backtest-simulator-experiment-registry/06-CONTEXT.md
+Last session: 2026-09-26T12:30:00.000Z
+Stopped at: Completed 06-01-PLAN.md
+Resume file: .planning/phases/06-backtest-simulator-experiment-registry/06-01-SUMMARY.md
