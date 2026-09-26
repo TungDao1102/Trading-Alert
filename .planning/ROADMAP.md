@@ -18,7 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 3: Domain + Registry + Fixtures** - Seven entities, versioned params, golden-fixture harness
 - [ ] **Phase 4: Pure Core (Feature + Strategy + Planner)** - Deterministic signals and trade plans from closed candles
 - [ ] **Phase 5: Risk Engine** - Identical sizing/quantization/portfolio caps in every mode
-- [ ] **Phase 6: Backtest Simulator + Experiment Registry** - 1m intrabar parity engine with uncertainty-first reports
+- [x] **Phase 6: Backtest Simulator + Experiment Registry** - 1m intrabar parity engine with uncertainty-first reports (completed 2026-09-26)
 - [ ] **Phase 7: Paper Forward Observation** - WS realtime loop, three-way attribution, no tuning on paper
 - [ ] **Phase 8: Approval + Reconciliation Hardening** - Idempotent Telegram approvals, orphan sweeper, SAFE_MODE rehearsed
 - [ ] **Phase 9: Live Execution Rollout** - LIMIT-zone entries, Algo protective exits, smallest capital
@@ -186,7 +186,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 06-03-PLAN.md — Uncertainty-first report with seeded bootstrap, no-float guard, phase gate (TDD)
+- [x] 06-03-PLAN.md — Uncertainty-first report with seeded bootstrap, no-float guard, phase gate (TDD)
 
 ### Phase 7: Paper Forward Observation
 
@@ -274,7 +274,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 3. Domain + Registry + Fixtures | 5/5 | In Progress|  |
 | 4. Pure Core (Feature + Strategy + Planner) | 4/4 | In Progress|  |
 | 5. Risk Engine | 2/2 | In Progress|  |
-| 6. Backtest Simulator + Experiment Registry | 2/3 | In Progress|  |
+| 6. Backtest Simulator + Experiment Registry | 3/3 | Complete   | 2026-09-26 |
 | 7. Paper Forward Observation | 0/TBD | Not started | - |
 | 8. Approval + Reconciliation Hardening | 0/TBD | Not started | - |
 | 9. Live Execution Rollout | 0/TBD | Not started | - |
