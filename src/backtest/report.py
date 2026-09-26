@@ -421,6 +421,22 @@ def _r_multiple(trade: Mapping[str, Any]) -> Decimal | None:
     return _div(pnl, risk)
 
 
+def _has_zero_risk(trade: Mapping[str, Any]) -> bool:
+    """True when the trade carries an explicit realized_risk of zero.
+
+    WR-10: `_r_multiple` drops these from the R distribution while
+    `counts.trade_count` keeps them — the exclusion must be counted
+    and surfaced, never silent.
+    """
+    risk_raw = trade.get("realized_risk")
+    if risk_raw is None:
+        return False
+    try:
+        return _q(risk_raw) == Decimal("0")
+    except (TypeError, ValueError, ArithmeticError):
+        return False
+
+
 def _quarter(exit_time_utc: datetime | None) -> str:
     if exit_time_utc is None:
         return "UNKNOWN"
@@ -581,11 +597,14 @@ def build(
 
     r_values: list[Decimal] = []
     annotated: list[tuple[Mapping[str, Any], Decimal]] = []
+    risk_zero_excluded = 0
     for trade in trade_records:
         r = _r_multiple(trade)
         if r is not None:
             r_values.append(r)
             annotated.append((trade, r))
+        elif _has_zero_risk(trade):
+            risk_zero_excluded += 1
 
     n_trades = len(trade_records)
     n_r = len(r_values)
@@ -664,6 +683,17 @@ def build(
             se_diagnostic=se_diagnostic,
             n_resamples=resamples,
             seed=bootstrap_seed,
+        )
+
+    # WR-10: risk-zero trades are counted in trade_count but excluded
+    # from the R distribution — say so on the report, never silently.
+    if risk_zero_excluded:
+        zero_note = (
+            f"{risk_zero_excluded} trade(s) excluded from the R distribution "
+            "(realized_risk=0)"
+        )
+        insufficient_note = (
+            f"{insufficient_note}; {zero_note}" if insufficient_note else zero_note
         )
 
     observed_dd = _max_drawdown(r_values)
