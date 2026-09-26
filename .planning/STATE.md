@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: "07.1"
 current_phase_name: "Close gap: B1 registry-cost to backtest identity binding"
-status: executing
-stopped_at: Completed 07.1-01-PLAN.md
-last_updated: "2026-09-26T11:13:45.402Z"
+status: verifying
+stopped_at: Completed 07.1-02-PLAN.md
+last_updated: "2026-09-26T11:44:18.605Z"
 last_activity: 2026-09-26
-last_activity_desc: Phase 07.1 execution started
-state_head: d6bdad4ae77bd0ac949217081d6c6997acd0e8d4
+last_activity_desc: Phase 07.1 plan 02 complete — refusal coverage + v3 migration verified
+state_head: f9bc14ec44f59469d222228b36d86d4cf86d9240
 progress:
   total_phases: 11
   completed_phases: 6
   total_plans: 25
-  completed_plans: 24
+  completed_plans: 25
 milestone_name: milestone
 ---
 
@@ -32,7 +32,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 Phase: 07.1 (Close gap: B1 registry-cost to backtest identity binding) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-09-26 — Phase 07.1 execution started
 
 Progress: [██████████] 100%
@@ -66,6 +66,8 @@ Progress: [██████████] 100%
 | Phase 06 P02 | 45min | 3 tasks | 12 files |
 | Phase 06 P03 | 45min | 3 tasks | 7 files |
 | Phase 07.1 P01 | ~15 min | 2 tasks | 9 files |
+| Phase 07.1 P02 | ~10 min | 2 tasks | 4 files |
+| Phase 07.1 P02 | ~10 min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -135,6 +137,7 @@ Recent decisions affecting current work:
 - [Phase 07.1]: [07.1-01] D-04 six-field identity tuple byte-stable; gate only shrinks the set of assemblable inputs, never changes what a consistent input hashes to
 - [Phase 07.1]: [07.1-01] D-03 fail closed with dedicated CostModelBindingMismatch exception; absent slice keys propagate as bare KeyError from build_cost_model
 - [Phase 07.1]: [07.1-01] D-05 phase6 fixtures stay byte-identical (grandfathered); tests that call assemble() migrate to baseline-v3 (7-key set); new tests/fixtures/phase7.1/ binding fixtures
+- [Phase 07.1]: [07.1-02] D-05 grandfather log in test module header documents phase6 audit verdict (8 missing-keys + 2 spelling); bare KeyError propagates from build_cost_model for missing slice keys (never translated, never skipped, never ExperimentReproducibilityBroken); comparison is hash-string only (never Decimal value equality)
 
 ### Pending Todos
 
@@ -167,6 +170,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-26T11:13:44.556Z
-Stopped at: Completed 07.1-01-PLAN.md
+Last session: 2026-09-26T11:44:18.514Z
+Stopped at: Completed 07.1-02-PLAN.md
 Resume file: None

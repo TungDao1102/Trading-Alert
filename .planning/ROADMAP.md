@@ -211,7 +211,7 @@ Plans:
 **Goal:** Only registry-consistent cost models are assemblable into experiment records — mismatched pairs raise fail-closed, consistent pairs keep byte-identical IDs.
 **Requirements**: BKTS-02
 **Depends on:** Phase 6
-**Plans:** 2 plans
+**Plans:** 2/2 plans executed
 
 Plans:
 **Wave 1**
@@ -220,7 +220,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 07.1-02-PLAN.md — Refusal coverage plus v3 test migration plus static gates (wave 2, blocked on 07.1-01)
+- [x] 07.1-02-PLAN.md — Refusal coverage plus v3 test migration plus static gates (wave 2, blocked on 07.1-01)
 
 ### Phase 8: Approval + Reconciliation Hardening
 
