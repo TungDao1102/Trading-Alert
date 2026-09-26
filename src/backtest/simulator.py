@@ -119,7 +119,9 @@ class TradeRecord:
 
     `entry_kind` is one of: "ENTRY_FILLED", "PARTIAL_FILL", "TOUCH_NO_FILL",
     "EXPIRED", "INVALIDATION_CANCEL". `exit_kind` is one of: "SL", "TP1",
-    "TP2", "EOD", or None if the trade never filled. `outcome_kind` is
+    "EOD", or None if the trade never filled. Single-exit scope: the
+    planner's TP2 runner leg is not modeled — a fill exits wholly at the
+    first touched level (TP1), which is conservative. `outcome_kind` is
     "OK" for filled trades, "REJECT" for risk-rejected plans.
     """
 
