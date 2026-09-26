@@ -95,6 +95,16 @@ STRATEGY_KEYS = frozenset(
         "fee_rate_entry",
         "fee_rate_exit",
         "expected_slippage",
+        # Phase 6 plan 06-02 — extended cost-model keys (D-02 + Pitfall 7).
+        # These keys were previously absent from the whitelist; cost
+        # assumptions lived in code constants and two experiments with
+        # different constants shared a costModelHash. Adding them to
+        # STRATEGY_KEYS makes unknown cost keys fail closed exactly like
+        # unknown strategy keys.
+        "funding_treatment",
+        "slippage_model",
+        "spread_fill_assumptions",
+        "partial_fill_fraction",
         # Constraint-snapshot freshness (RISK_MANAGEMENT §12).
         "constraint_snapshot_ttl_seconds",
     }
@@ -254,7 +264,18 @@ INT_KEYS = frozenset(
         "constraint_snapshot_ttl_seconds",
     }
 )
-DECIMAL_KEYS = STRATEGY_KEYS - INT_KEYS
+# Phase 6 plan 06-02 — string-valued cost-model keys (D-02 + Pitfall 7).
+# These keys carry model-assumption identifiers (funding mode, slippage
+# model, spread assumptions) rather than numeric values. They are
+# validated as non-empty strings at load time.
+STRING_KEYS = frozenset(
+    {
+        "funding_treatment",
+        "slippage_model",
+        "spread_fill_assumptions",
+    }
+)
+DECIMAL_KEYS = STRATEGY_KEYS - INT_KEYS - STRING_KEYS
 
 
 def _check_param_types(params: dict[str, Any], path: Path) -> None:
@@ -268,6 +289,12 @@ def _check_param_types(params: dict[str, Any], path: Path) -> None:
             if not isinstance(value, int):
                 raise StrategyKeyOutsideRegistry(
                     f"{path}: parameter {key!r} must be int, "
+                    f"got {type(value).__name__}"
+                )
+        elif key in STRING_KEYS:
+            if not isinstance(value, str) or value == "":
+                raise StrategyKeyOutsideRegistry(
+                    f"{path}: parameter {key!r} must be a non-empty string, "
                     f"got {type(value).__name__}"
                 )
         elif key in DECIMAL_KEYS:

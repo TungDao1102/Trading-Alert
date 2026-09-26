@@ -11,6 +11,16 @@ This barrel re-exports the public symbols. No logic lives here.
 from __future__ import annotations
 
 from .costs import CostModel, build_cost_model, modeled_costs_per_unit
+from .experiment import (
+    ExperimentRecord,
+    ExperimentReproducibilityBroken,
+    IncompleteExperimentRecord,
+    assemble,
+    baseline_no_trade,
+    baseline_simple_trend,
+    reproduce,
+    verify_experiment,
+)
 from .simulator import (
     IntrabarOutcome,
     SimulatorResult,
@@ -22,12 +32,21 @@ from .simulator import (
 __all__ = [
     # Types
     "CostModel",
+    "ExperimentRecord",
     "IntrabarOutcome",
     "SimulatorResult",
     "TradeRecord",
+    # Exceptions
+    "ExperimentReproducibilityBroken",
+    "IncompleteExperimentRecord",
     # Services
+    "assemble",
+    "baseline_no_trade",
+    "baseline_simple_trend",
     "build_cost_model",
     "modeled_costs_per_unit",
+    "reproduce",
     "resolve_intrabar",
     "run",
+    "verify_experiment",
 ]
