@@ -690,13 +690,17 @@ def run(case_input: dict[str, Any]) -> dict[str, Any]:
 
     # Sort strategy bars by (close_time_utc, symbol) for deterministic iteration.
     sorted_bars = sorted(strategy_bars, key=lambda b: (b.close_time_utc, b.symbol))
+    # Sort once up front so every closed-context slice is time-ordered too.
+    sorted_context = sorted(context_bars, key=lambda c: (c.close_time_utc, c.symbol))
 
     trades: list[TradeRecord] = []
 
-    for bar in sorted_bars:
-        # Build MarketSnapshot with closed candles only (D-02).
-        closed_setup = [c for c in strategy_bars if c.close_time_utc <= bar.close_time_utc]
-        closed_context = [c for c in context_bars if c.close_time_utc <= bar.close_time_utc]
+    for idx, bar in enumerate(sorted_bars):
+        # Build MarketSnapshot with closed candles only (D-02). Slice by
+        # index into the SORTED lists so out-of-order fixture input still
+        # yields time-ordered, prefix-invariant snapshots.
+        closed_setup = sorted_bars[: idx + 1]
+        closed_context = [c for c in sorted_context if c.close_time_utc <= bar.close_time_utc]
         snapshot = MarketSnapshot(
             symbol=bar.symbol,
             setup_candles=closed_setup,
