@@ -40,3 +40,15 @@ fee_rate_entry = 0.0002
 fee_rate_exit = 0.0005
 expected_slippage = 0.0001
 constraint_snapshot_ttl_seconds = 3600
+
+# Detector volatility knob (Phase 6 review CR-11). compute_features reads
+# atr_period; value matches the sibling baseline-v2 sets (14).
+atr_period = 14
+
+# Phase 6 extended cost-model keys (D-02 + Pitfall 7, review WR-04).
+# Values match the canonical COST_MODEL in scripts/gen_phase6_fixtures.py,
+# which is the runtime source the simulator hashes into cost_model_hash.
+funding_treatment = "ADDITIVE"
+slippage_model = "FIXED_BPS"
+spread_fill_assumptions = "FULL_FILL"
+partial_fill_fraction = 1.0
