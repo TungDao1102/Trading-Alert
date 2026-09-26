@@ -210,7 +210,7 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 
 - [x] 07-02: Supervisor plus REST resync plus backtest parity gate (PAPER-01)
-- [ ] 07-03: Three-way attribution journaling on existing ORM shapes (PAPER-02, TDD)
+- [x] 07-03: Three-way attribution journaling on existing ORM shapes (PAPER-02, TDD)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -301,7 +301,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 4. Pure Core (Feature + Strategy + Planner) | 4/4 | In Progress|  |
 | 5. Risk Engine | 2/2 | In Progress|  |
 | 6. Backtest Simulator + Experiment Registry | 3/3 | Complete   | 2026-09-26 |
-| 7. Paper Forward Observation | 0/TBD | Not started | - |
+| 7. Paper Forward Observation | 3/4 | In Progress | - |
 | 8. Approval + Reconciliation Hardening | 0/TBD | Not started | - |
 | 9. Live Execution Rollout | 0/TBD | Not started | - |
 | 10. Journal Depth + Kill-Gate Operations | 0/TBD | Not started | - |
