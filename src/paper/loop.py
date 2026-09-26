@@ -160,6 +160,21 @@ def _trade_plan_to_dict(plan_obj: TradePlan) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+# Feed-freshness threshold (seconds). A WS kline event whose
+# close_time_utc is older than this many seconds relative to now_utc
+# is rejected as DATA_STALE before the engine chain runs. Default 60s
+# matches the 1H cadence: a 1H candle that closed more than 60s ago
+# is stale (the next 1H close is imminent). Exported for tests and
+# downstream consumers (PATTERNS §Gates: explicit, exported).
+STALENESS_THRESHOLD_SECONDS: int = 60
+
+# Minimum closed bars required on each stream for the EMA200 warmup
+# to clear. Below this, the feature layer emits WARMUP_INSUFFICIENT
+# for every required feature; the paper loop short-circuits with the
+# same reason code BEFORE evaluate() runs.
+WARMUP_MIN_BARS: int = 200
+
+
 def _is_closed_event(event: dict[str, Any], now_utc: datetime) -> bool:
     """Double gate: x=True AND close_time_utc <= now_utc.
 
@@ -199,6 +214,51 @@ def _event_to_candle(event: dict[str, Any], symbol: str) -> Candle:
         close=Decimal(str(event["c"])),
         volume=Decimal(str(event["v"])),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Feed gates — pre-engine fail-closed checks (D-02 / PATTERNS §Gates).
+# --------------------------------------------------------------------------- #
+
+
+def check_feature_validity(
+    warmed_up_1h: list[Candle],
+    warmed_up_4h: list[Candle],
+) -> str | None:
+    """Pre-engine warmup check. Returns the rejection reason code or None.
+
+    Per D-02 fail-closed: if either stream has fewer closed bars than
+    the EMA200 warmup window, the paper loop MUST NOT invoke evaluate().
+    The engine would emit WARMUP_INSUFFICIENT anyway (the feature layer
+    marks every required feature invalid), but firing the gate here
+    short-circuits the chain so the rejection reason code is unambiguous
+    (stage="feed_gate") and no compute_features work is wasted.
+    """
+    if len(warmed_up_1h) < WARMUP_MIN_BARS:
+        return "WARMUP_INSUFFICIENT"
+    if len(warmed_up_4h) < WARMUP_MIN_BARS:
+        return "WARMUP_INSUFFICIENT"
+    return None
+
+
+def check_feed_freshness(
+    event: dict[str, Any],
+    now_utc: datetime,
+) -> str | None:
+    """Pre-engine staleness check. Returns the rejection reason code or None.
+
+    Per D-02 fail-closed: a WS kline event whose close_time_utc is older
+    than STALENESS_THRESHOLD_SECONDS relative to now_utc is rejected as
+    DATA_STALE before the engine chain runs. The gate is per-event (not
+    latched), so a fresh event after a stale event resumes evaluation
+    without restart.
+    """
+    close_ms = int(event["T"])
+    close_utc = datetime.fromtimestamp(close_ms / 1000, tz=now_utc.tzinfo)
+    gap_seconds = (now_utc - close_utc).total_seconds()
+    if gap_seconds > STALENESS_THRESHOLD_SECONDS:
+        return "DATA_STALE"
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -254,6 +314,13 @@ def run_paper_tick(case_input: dict[str, Any]) -> dict[str, Any]:
     sorted_1h = sorted(warmed_up_1h, key=lambda c: c.close_time_utc)
     sorted_4h = sorted(warmed_up_4h, key=lambda c: c.close_time_utc)
 
+    # Pre-engine feature-validity gate (D-02 fail-closed). If either
+    # stream lacks the EMA200 warmup window, every event in this
+    # feed sequence will be rejected — we short-circuit the whole
+    # loop with a single feed_gate record (matches the gate contract:
+    # the engine chain is never invoked with insufficient data).
+    warmup_reject = check_feature_validity(sorted_1h, sorted_4h)
+
     signals: list[dict[str, Any]] = []
     trade_plans: list[dict[str, Any]] = []
     no_trade_records: list[dict[str, Any]] = []
@@ -265,6 +332,36 @@ def run_paper_tick(case_input: dict[str, Any]) -> dict[str, Any]:
             feed_events_dropped += 1
             continue
         feed_events_processed += 1
+
+        # Pre-engine feature-validity gate — fires once for every
+        # event when the warmed-up history is insufficient. Each
+        # event is rejected individually so the per-bar audit trail
+        # in no_trade_records carries the exact close_time_utc.
+        if warmup_reject is not None:
+            closed_candle = _event_to_candle(event, symbol)
+            no_trade_records.append(
+                {
+                    "reason_code": warmup_reject,
+                    "bar_close_utc": closed_candle.close_time_utc.isoformat(),
+                    "stage": "feed_gate",
+                }
+            )
+            continue
+
+        # Pre-engine feed-freshness gate (D-02 fail-closed). Per-event,
+        # not latched — a fresh event after a stale one resumes
+        # evaluation without restart.
+        stale_reject = check_feed_freshness(event, now_utc)
+        if stale_reject is not None:
+            closed_candle = _event_to_candle(event, symbol)
+            no_trade_records.append(
+                {
+                    "reason_code": stale_reject,
+                    "bar_close_utc": closed_candle.close_time_utc.isoformat(),
+                    "stage": "feed_gate",
+                }
+            )
+            continue
 
         # Build the closed candle from the WS event.
         closed_candle = _event_to_candle(event, symbol)
@@ -377,4 +474,4 @@ def run_paper_tick(case_input: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-__all__ = ["run_paper_tick"]
+__all__ = ["run_paper_tick", "STALENESS_THRESHOLD_SECONDS", "WARMUP_MIN_BARS"]

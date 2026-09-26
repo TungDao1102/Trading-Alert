@@ -1,0 +1,115 @@
+{
+  "strategy_id": "trend-pullback",
+  "strategy_version": "v2.0.0",
+  "parameter_set_id": "baseline-v3",
+  "symbol": "BTCUSDT",
+  "now_utc": "2026-09-19T10:00:00+00:00",
+  "ttl_seconds": 3600,
+  "account_state": {
+    "equity": "10000.00",
+    "risk_rate": "0.005"
+  },
+  "constraint_snapshot": {
+    "metadata_observed_at_utc": "2026-09-19T09:55:00+00:00",
+    "min_notional": "50",
+    "min_quantity": "0.001",
+    "price_tick_size": "0.10",
+    "quantity_step_size": "0.001",
+    "symbol": "BTCUSDT"
+  },
+  "cost_model": {
+    "fee_rate_entry": "0.0002",
+    "fee_rate_exit": "0.0005",
+    "funding_treatment": "ADDITIVE",
+    "expected_slippage": "0.0001",
+    "slippage_model": "FIXED_BPS",
+    "spread_fill_assumptions": "FULL_FILL",
+    "partial_fill_fraction": "0.5"
+  },
+  "open_positions": [],
+  "daily_loss_quote": "0",
+  "warmed_up_1h": [
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1h",
+      "open_time_utc": "2026-09-19T05:00:00+00:00",
+      "close_time_utc": "2026-09-19T05:59:59+00:00",
+      "open": "100.05",
+      "high": "100.18",
+      "low": "100.00",
+      "close": "100.10",
+      "volume": "1.0"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1h",
+      "open_time_utc": "2026-09-19T06:00:00+00:00",
+      "close_time_utc": "2026-09-19T06:59:59+00:00",
+      "open": "100.15",
+      "high": "100.28",
+      "low": "100.10",
+      "close": "100.20",
+      "volume": "1.0"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1h",
+      "open_time_utc": "2026-09-19T07:00:00+00:00",
+      "close_time_utc": "2026-09-19T07:59:59+00:00",
+      "open": "100.25",
+      "high": "100.38",
+      "low": "100.20",
+      "close": "100.30",
+      "volume": "1.0"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1h",
+      "open_time_utc": "2026-09-19T08:00:00+00:00",
+      "close_time_utc": "2026-09-19T08:59:59+00:00",
+      "open": "100.35",
+      "high": "100.48",
+      "low": "100.30",
+      "close": "100.40",
+      "volume": "1.0"
+    }
+  ],
+  "warmed_up_4h": [
+    {
+      "symbol": "BTCUSDT",
+      "interval": "4h",
+      "open_time_utc": "2026-09-19T01:00:00+00:00",
+      "close_time_utc": "2026-09-19T04:59:59+00:00",
+      "open": "100.20",
+      "high": "100.72",
+      "low": "100.10",
+      "close": "100.40",
+      "volume": "1.0"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "4h",
+      "open_time_utc": "2026-09-19T05:00:00+00:00",
+      "close_time_utc": "2026-09-19T08:59:59+00:00",
+      "open": "100.60",
+      "high": "101.12",
+      "low": "100.50",
+      "close": "100.80",
+      "volume": "1.0"
+    }
+  ],
+  "feed_events": [
+    {
+      "t": 1789808400000,
+      "T": 1789811999000,
+      "o": "100.45",
+      "h": "100.58",
+      "l": "100.40",
+      "c": "100.50",
+      "v": "1.0",
+      "n": 100,
+      "x": true,
+      "q": "1.0"
+    }
+  ]
+}
