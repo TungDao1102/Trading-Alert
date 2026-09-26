@@ -70,6 +70,19 @@ def _require_in_range(value: Decimal, field_name: str, lo: Decimal, hi: Decimal)
         raise ValueError(f"{field_name} must be in [{lo}, {hi}], got {value}")
 
 
+def _require_cost_str(value: object, field_name: str) -> str:
+    """Require a non-empty string for string-valued cost keys (WR-02).
+
+    Fail-closed at the boundary: mistyped fixture/caller values such as
+    ``None`` or ``123`` raise ``TypeError`` here instead of being silently
+    coerced via ``str(...)`` into ``"None"``/``"123"`` and surfacing
+    downstream as a hash mismatch.
+    """
+    if not isinstance(value, str) or value == "":
+        raise TypeError(f"{field_name} must be a non-empty string, got {value!r}")
+    return value
+
+
 # --------------------------------------------------------------------------- #
 # CostModel — frozen value object with computed cost_model_hash.
 # --------------------------------------------------------------------------- #
@@ -144,12 +157,18 @@ def build_cost_model(cost_dict: dict[str, Any]) -> CostModel:
     return CostModel(
         fee_rate_entry=_coerce_decimal(cost_dict["fee_rate_entry"], "fee_rate_entry"),
         fee_rate_exit=_coerce_decimal(cost_dict["fee_rate_exit"], "fee_rate_exit"),
-        funding_treatment=str(cost_dict["funding_treatment"]),
+        funding_treatment=_require_cost_str(
+            cost_dict["funding_treatment"], "funding_treatment"
+        ),
         expected_slippage=_coerce_decimal(
             cost_dict["expected_slippage"], "expected_slippage"
         ),
-        slippage_model=str(cost_dict["slippage_model"]),
-        spread_fill_assumptions=str(cost_dict["spread_fill_assumptions"]),
+        slippage_model=_require_cost_str(
+            cost_dict["slippage_model"], "slippage_model"
+        ),
+        spread_fill_assumptions=_require_cost_str(
+            cost_dict["spread_fill_assumptions"], "spread_fill_assumptions"
+        ),
         partial_fill_fraction=_coerce_decimal(
             cost_dict["partial_fill_fraction"], "partial_fill_fraction"
         ),
