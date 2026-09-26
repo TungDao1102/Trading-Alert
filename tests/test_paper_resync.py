@@ -259,6 +259,168 @@ def test_forming_candle_in_page_is_dropped_before_use() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Test 4 — rotation is treated as scheduled (no reconnect, no outage gap).
+# --------------------------------------------------------------------------- #
+
+
+def test_rotation_treated_as_scheduled_resubscribes_and_backfills() -> None:
+    """Beh. 4: on_disconnect(scheduled=True) resubscribes + backfills.
+
+    Per D-01: the 24h server-initiated rotation is scheduled, not an
+    outage. The supervisor must resubscribe all pairs and backfill
+    from the last-seen close per pair, but MUST NOT attempt a
+    reconnect (the WS is still connected, just rotating) and MUST
+    NOT journal an outage-class gap.
+    """
+    import asyncio
+
+    from src.paper.supervisor import PaperSupervisor
+
+    ws = _FakeWsAdapter()
+    rest = _FakeRestAdapter()
+    dispatched: list[Any] = []
+    now = datetime(2026, 9, 19, 13, 0, tzinfo=UTC)
+
+    supervisor = PaperSupervisor(
+        ws_adapter=ws,
+        rest_adapter=rest,
+        on_closed_candle=lambda k: dispatched.append(k),
+        symbols=("BTCUSDT", "ETHUSDT"),
+        intervals=("1h",),
+        clock=lambda: now,
+    )
+    supervisor.start()
+    # Simulate that we've seen closes for both pairs.
+    supervisor.record_close("BTCUSDT", "1h", datetime(2026, 9, 19, 10, 0, tzinfo=UTC))
+    supervisor.record_close("ETHUSDT", "1h", datetime(2026, 9, 19, 10, 0, tzinfo=UTC))
+
+    # Reset call counters after start.
+    initial_subscribe_count = len(ws.subscribe_calls)
+    initial_reconnect_count = len(ws.reconnect_calls)
+    initial_klines_count = len(rest.klines_calls)
+
+    asyncio.run(supervisor.on_disconnect(scheduled=True))
+
+    # No reconnect attempt (rotation is scheduled).
+    assert len(ws.reconnect_calls) == initial_reconnect_count, (
+        f"rotation must not trigger reconnect, got {len(ws.reconnect_calls)} calls"
+    )
+    # All pairs resubscribed (start was called again).
+    assert len(ws.subscribe_calls) == initial_subscribe_count + 2, (
+        f"expected 2 resubscribes, got {len(ws.subscribe_calls) - initial_subscribe_count}"
+    )
+    # Backfill called for each pair with the last-seen close.
+    assert len(rest.klines_calls) == initial_klines_count + 2, (
+        f"expected 2 backfill calls, got {len(rest.klines_calls) - initial_klines_count}"
+    )
+    for call in rest.klines_calls[initial_klines_count:]:
+        assert call[2] == int(datetime(2026, 9, 19, 10, 0, tzinfo=UTC).timestamp() * 1000)
+
+
+# --------------------------------------------------------------------------- #
+# Test 5 — unsolicited disconnect triggers reconnect + resubscribe + backfill.
+# --------------------------------------------------------------------------- #
+
+
+def test_unsolicited_disconnect_reconnects_and_resyncs() -> None:
+    """Beh. 5: on_disconnect(scheduled=False) reconnects + resyncs.
+
+    Per D-01: an unsolicited drop is an outage. The supervisor must
+    attempt a tenacity-bounded reconnect, resubscribe all pairs, and
+    backfill from the last-seen close per pair.
+    """
+    import asyncio
+
+    from src.paper.supervisor import PaperSupervisor
+
+    ws = _FakeWsAdapter()
+    rest = _FakeRestAdapter()
+    dispatched: list[Any] = []
+    now = datetime(2026, 9, 19, 13, 0, tzinfo=UTC)
+
+    supervisor = PaperSupervisor(
+        ws_adapter=ws,
+        rest_adapter=rest,
+        on_closed_candle=lambda k: dispatched.append(k),
+        symbols=("BTCUSDT", "ETHUSDT"),
+        intervals=("1h",),
+        clock=lambda: now,
+    )
+    supervisor.start()
+    supervisor.record_close("BTCUSDT", "1h", datetime(2026, 9, 19, 10, 0, tzinfo=UTC))
+    supervisor.record_close("ETHUSDT", "1h", datetime(2026, 9, 19, 10, 0, tzinfo=UTC))
+
+    initial_reconnect_count = len(ws.reconnect_calls)
+    initial_subscribe_count = len(ws.subscribe_calls)
+    initial_klines_count = len(rest.klines_calls)
+
+    asyncio.run(supervisor.on_disconnect(scheduled=False))
+
+    # Reconnect attempted for each existing handle.
+    assert len(ws.reconnect_calls) > initial_reconnect_count, (
+        f"unsolicited drop must trigger reconnect, got {len(ws.reconnect_calls)} calls"
+    )
+    # All pairs resubscribed.
+    assert len(ws.subscribe_calls) > initial_subscribe_count, (
+        f"expected resubscribes after reconnect, got {len(ws.subscribe_calls)}"
+    )
+    # Backfill called for each pair.
+    assert len(rest.klines_calls) == initial_klines_count + 2, (
+        f"expected 2 backfill calls, got {len(rest.klines_calls) - initial_klines_count}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Test 6 — per-symbol isolation: one bad symbol does not block healthy ones.
+# --------------------------------------------------------------------------- #
+
+
+def test_one_bad_symbol_does_not_block_healthy_symbols() -> None:
+    """Beh. 6: a failing pair journals its gap; healthy pairs still dispatch.
+
+    Per D-01: per-symbol try-except isolation. If one symbol's backfill
+    raises, the supervisor journals a gap for that symbol and continues
+    with the remaining pairs. Healthy symbols' closes are still
+    dispatched to the loop callback.
+    """
+    import asyncio
+
+    from src.paper.supervisor import PaperSupervisor
+
+    ws = _FakeWsAdapter()
+    # Configure the REST adapter to raise for BTCUSDT but succeed for ETHUSDT.
+    rest = _FakeRestAdapter(
+        responses={
+            ("BTCUSDT", "1h"): RuntimeError("adapter_error: simulated outage"),
+            ("ETHUSDT", "1h"): [],
+        }
+    )
+    dispatched: list[Any] = []
+    now = datetime(2026, 9, 19, 13, 0, tzinfo=UTC)
+
+    supervisor = PaperSupervisor(
+        ws_adapter=ws,
+        rest_adapter=rest,
+        on_closed_candle=lambda k: dispatched.append(k),
+        symbols=("BTCUSDT", "ETHUSDT"),
+        intervals=("1h",),
+        clock=lambda: now,
+    )
+    supervisor.start()
+    supervisor.record_close("BTCUSDT", "1h", datetime(2026, 9, 19, 10, 0, tzinfo=UTC))
+    supervisor.record_close("ETHUSDT", "1h", datetime(2026, 9, 19, 10, 0, tzinfo=UTC))
+
+    # The supervisor must not raise even though BTCUSDT's backfill fails.
+    asyncio.run(supervisor.on_disconnect(scheduled=True))
+
+    # Both pairs were attempted (per-symbol isolation).
+    btc_calls = [c for c in rest.klines_calls if c[0] == "BTCUSDT"]
+    eth_calls = [c for c in rest.klines_calls if c[0] == "ETHUSDT"]
+    assert len(btc_calls) >= 1, "BTCUSDT backfill must be attempted"
+    assert len(eth_calls) >= 1, "ETHUSDT backfill must be attempted"
+
+
+# --------------------------------------------------------------------------- #
 # Helpers.
 # --------------------------------------------------------------------------- #
 
@@ -278,3 +440,65 @@ def _run(func: Any, adapter: Any, symbol: str, interval: str,
         )
 
     return asyncio.run(_call())
+
+
+class _FakeWsAdapter:
+    """Fake WS adapter for supervisor tests.
+
+    Records subscribe/reconnect/close calls. Returns sentinel handles.
+    """
+
+    def __init__(self) -> None:
+        self.subscribe_calls: list[tuple[str, str]] = []
+        self.reconnect_calls: list[Any] = []
+        self.close_calls: list[Any] = []
+
+    def subscribe(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        on_kline: Any,
+        stream_id: str | None = None,
+    ) -> Any:
+        self.subscribe_calls.append((symbol, interval))
+        return object()  # sentinel handle
+
+    def reconnect(self, handle: Any) -> None:
+        self.reconnect_calls.append(handle)
+
+    def close(self, handle: Any) -> None:
+        self.close_calls.append(handle)
+
+
+class _FakeRestAdapter:
+    """Fake REST adapter for supervisor tests.
+
+    Configures per-(symbol, interval) responses. Each response is
+    either a list of Klines or an Exception to raise.
+    """
+
+    def __init__(
+        self,
+        *,
+        responses: dict[tuple[str, str], list[Any] | Exception] | None = None,
+    ) -> None:
+        self._responses = responses or {}
+        self.klines_calls: list[tuple[str, str, int | None, int | None, int]] = []
+
+    async def klines(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 1500,
+    ) -> list[Any]:
+        self.klines_calls.append((symbol, interval, start_ms, end_ms, limit))
+        key = (symbol, interval)
+        if key in self._responses:
+            response = self._responses[key]
+            if isinstance(response, Exception):
+                raise response
+            return response
+        return []
