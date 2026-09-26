@@ -370,6 +370,7 @@ def write_intrabar_both_touched() -> None:
         intrabar_value=_make_1m_intrabar_long_both_touched(),
     )
     path = FIXTURE_ROOT / "intrabar_both_touched" / "input.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
@@ -385,6 +386,7 @@ def write_intrabar_both_touched_short() -> None:
         intrabar_value=_make_1m_intrabar_short_both_touched(),
     )
     path = FIXTURE_ROOT / "intrabar_both_touched_short" / "input.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
@@ -400,6 +402,7 @@ def write_intrabar_missing_fallback() -> None:
         intrabar_value=None,
     )
     path = FIXTURE_ROOT / "intrabar_missing_fallback" / "input.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
@@ -432,6 +435,7 @@ def write_limit_touch_no_fill() -> None:
         "ttl_seconds": TTL_SECONDS,
     }
     path = FIXTURE_ROOT / "limit_touch_no_fill" / "input.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
@@ -458,6 +462,7 @@ def write_limit_partial_fill() -> None:
         "ttl_seconds": TTL_SECONDS,
     }
     path = FIXTURE_ROOT / "limit_partial_fill" / "input.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
@@ -489,6 +494,7 @@ def write_limit_expiry() -> list[dict]:
         "ttl_seconds": TTL_SECONDS,
     }
     path = FIXTURE_ROOT / "limit_expiry" / "input.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return bars
 
@@ -533,6 +539,7 @@ def write_invalidation_cancels_entry() -> None:
         "ttl_seconds": TTL_SECONDS,
     }
     path = FIXTURE_ROOT / "invalidation_cancels_entry" / "input.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
