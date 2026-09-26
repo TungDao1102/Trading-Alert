@@ -1,0 +1,10 @@
+{
+  "outcome_digest": "efe70227cdc0f9bdabb2869ab43c235ba60ccce24b42dc6885085f875881ca43",
+  "outcome_summary": {
+    "feed_events_dropped": 1,
+    "feed_events_processed": 1,
+    "no_trade_records_count": 1,
+    "signals_count": 0,
+    "trade_plans_count": 0
+  }
+}
