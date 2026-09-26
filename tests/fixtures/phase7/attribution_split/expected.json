@@ -1,6 +1,6 @@
 {
-  "_comment": "Placeholder digest — updated during GREEN once assemble_paper_record is implemented. The test asserts field-level invariants (identity, attribution values, lag, epoch_id); the digest equality is a regression check.",
-  "digest": "PLACEHOLDER_DIGEST_TO_BE_FILLED_DURING_GREEN_0000000000000000000000000000000000",
+  "_comment": "Pinned digest computed during GREEN phase. The test asserts field-level invariants (identity, attribution values, lag, epoch_id); the digest equality is a regression check.",
+  "digest": "f17b3445673ef09b987c4d76fc0de598e4d0a375ef4750717743429441dacfcd",
   "row_counts": {
     "filled_simulation": 2,
     "skipped": 2,
