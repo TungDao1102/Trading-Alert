@@ -25,13 +25,10 @@ outcome matches the expected counts and gap-record shape.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-
-import pytest
 
 PHASE7_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase7"
 
