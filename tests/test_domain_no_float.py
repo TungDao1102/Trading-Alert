@@ -54,6 +54,9 @@ SCANNED_FILES = (
     "src/paper/__init__.py",
     "src/paper/loop.py",
     "src/adapters/paper_ws.py",
+    # Phase 7 plan 07-03 — paper attribution vocabulary + record assembly (D-03 purity).
+    "src/paper/attribution.py",
+    "src/paper/journal.py",
 )
 
 

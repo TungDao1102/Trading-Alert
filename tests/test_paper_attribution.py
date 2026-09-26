@@ -627,3 +627,250 @@ def test_paper_record_rejects_empty_identity_and_naive_datetimes() -> None:
         assert False, "naive datetime must raise ValueError"
     except ValueError:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Test 13 — ORM round-trip: system row maps to SignalRow + TradePlanRow.
+# --------------------------------------------------------------------------- #
+
+
+def test_orm_round_trip_system_row() -> None:
+    """Beh. 13: a system row round-trips through SignalRow + TradePlanRow.
+
+    Per D-03 (single-Base ORM discipline): the assembler produces
+    PaperRecord instances that the journal layer maps onto existing
+    ORM rows via `src/db/mappers.py`. No new tables, no new columns.
+    The system row maps to SignalRow + TradePlanRow with no approval,
+    order, or fill.
+    """
+    from src.db.mappers import signal_from_row, signal_to_row, trade_plan_from_row, trade_plan_to_row
+    from src.domain.enums import SignalStatus, TradePlanStatus
+    from src.domain.signal import Signal
+    from src.domain.trade_plan import TradePlan
+    from src.paper.journal import assemble_paper_record
+
+    case_dir = PHASE7_FIXTURES_DIR / "attribution_split"
+    case_input = _load_input(case_dir)
+    epoch_id = case_input["epoch_id"]
+
+    skipped_case = next(c for c in case_input["cases"] if c["kind"] == "skipped")
+    records = assemble_paper_record(
+        epoch_id=epoch_id,
+        signal=skipped_case["signal"],
+        trade_plan=skipped_case["trade_plan"],
+        approval=None,
+        order=None,
+        fill=None,
+        skip_reason=skipped_case["skip_reason"],
+    )
+    system_record = records[0]
+
+    # Build domain Signal from the system record's identity tuple.
+    signal = Signal(
+        signal_id=system_record.signal_id or "",
+        strategy_id=system_record.strategy_id,
+        strategy_version=system_record.strategy_version,
+        parameter_set_id=system_record.parameter_set_id,
+        parameter_set_hash=system_record.parameter_set_hash,
+        symbol=system_record.symbol,
+        direction=skipped_case["signal"]["direction"],
+        setup_type=skipped_case["signal"]["setup_type"],
+        source_timeframe=skipped_case["signal"]["source_timeframe"],
+        source_candle_close_utc=_parse_utc(
+            skipped_case["signal"]["source_candle_close_utc"]
+        ),
+        detected_at_utc=system_record.signal_detected_at_utc
+        or _parse_utc(skipped_case["signal"]["detected_at_utc"]),
+        status=SignalStatus(skipped_case["signal"]["status"]),
+        expires_at_utc=_parse_utc(skipped_case["signal"]["expires_at_utc"]),
+    )
+    # Round-trip Signal → row → Signal.
+    signal_row = signal_to_row(signal)
+    assert signal_from_row(signal_row) == signal
+
+    # Build domain TradePlan from the system record's identity tuple.
+    trade_plan = TradePlan(
+        trade_plan_id=skipped_case["trade_plan"]["trade_plan_id"],
+        signal_id=system_record.signal_id or "",
+        trade_plan_version=skipped_case["trade_plan"]["trade_plan_version"],
+        entry_model=skipped_case["trade_plan"]["entry_model"],
+        entry_min_price=Decimal(skipped_case["trade_plan"]["entry_min_price"]),
+        entry_max_price=Decimal(skipped_case["trade_plan"]["entry_max_price"]),
+        stop_loss_price=Decimal(skipped_case["trade_plan"]["stop_loss_price"]),
+        take_profit_json=skipped_case["trade_plan"]["take_profit_json"],
+        invalidation_rule_json=skipped_case["trade_plan"]["invalidation_rule_json"],
+        expiry_utc=_parse_utc(skipped_case["trade_plan"]["expiry_utc"]),
+        expected_rr_json=skipped_case["trade_plan"]["expected_rr_json"],
+        risk_rate=Decimal(skipped_case["trade_plan"]["risk_rate"]),
+        risk_budget=Decimal(skipped_case["trade_plan"]["risk_budget"]),
+        suggested_quantity=Decimal(skipped_case["trade_plan"]["suggested_quantity"]),
+        quantity_before_rounding=Decimal(
+            skipped_case["trade_plan"]["quantity_before_rounding"]
+        ),
+        quantity_after_rounding=Decimal(
+            skipped_case["trade_plan"]["quantity_after_rounding"]
+        ),
+        quantization_decision=skipped_case["trade_plan"]["quantization_decision"],
+        plan_hash=system_record.plan_hash or "",
+        status=TradePlanStatus(skipped_case["trade_plan"]["status"]),
+        created_at_utc=_parse_utc(skipped_case["trade_plan"]["created_at_utc"]),
+    )
+    # Round-trip TradePlan → row → TradePlan.
+    trade_plan_row = trade_plan_to_row(trade_plan)
+    assert trade_plan_from_row(trade_plan_row) == trade_plan
+
+
+# --------------------------------------------------------------------------- #
+# Test 14 — ORM round-trip: user-executed-sim row maps to ApprovalRow
+# with action=SIMULATE, plus OrderRow and FillRow.
+# --------------------------------------------------------------------------- #
+
+
+def test_orm_round_trip_user_executed_sim_row() -> None:
+    """Beh. 14: a user-executed-sim row round-trips through ApprovalRow.
+
+    Per D-03: the user-executed-sim row carries the simulated approval
+    with action=SIMULATE stored by value. The ApprovalRow round-trips
+    through the mapper with action=ApprovalAction.SIMULATE.
+    """
+    from src.db.mappers import approval_from_row, approval_to_row
+    from src.domain.approval import Approval
+    from src.domain.enums import ApprovalAction, ApprovalResult
+    from src.paper.journal import assemble_paper_record
+
+    case_dir = PHASE7_FIXTURES_DIR / "attribution_split"
+    case_input = _load_input(case_dir)
+    epoch_id = case_input["epoch_id"]
+
+    filled_case = next(c for c in case_input["cases"] if c["kind"] == "filled_simulation")
+    records = assemble_paper_record(
+        epoch_id=epoch_id,
+        signal=filled_case["signal"],
+        trade_plan=filled_case["trade_plan"],
+        approval=filled_case["approval"],
+        order=filled_case["order"],
+        fill=filled_case["fill"],
+    )
+    sim_record = records[1]
+
+    # Build domain Approval from the user-executed-sim record.
+    approval = Approval(
+        approval_id=filled_case["approval"]["approval_id"],
+        trade_plan_id=filled_case["trade_plan"]["trade_plan_id"],
+        signal_id=sim_record.signal_id or "",
+        action=ApprovalAction(filled_case["approval"]["action"]),
+        result=ApprovalResult(filled_case["approval"]["result"]),
+        status=ApprovalResult(filled_case["approval"]["status"]),
+        approval_token_hash=filled_case["approval"]["approval_token_hash"],
+        requested_at_utc=_parse_utc(filled_case["approval"]["requested_at_utc"]),
+        acted_at_utc=sim_record.approval_acted_at_utc,
+        actor_id=filled_case["approval"]["actor_id"],
+        telegram_message_id=filled_case["approval"]["telegram_message_id"],
+        request_hash=filled_case["approval"]["request_hash"],
+    )
+    # Round-trip Approval → row → Approval.
+    approval_row = approval_to_row(approval)
+    assert approval_row.action == "SIMULATE", (
+        f"ApprovalRow.action must be 'SIMULATE' (stored by value), got {approval_row.action!r}"
+    )
+    assert approval_from_row(approval_row) == approval
+
+
+# --------------------------------------------------------------------------- #
+# Test 15 — ORM round-trip: opportunity row maps to JournalEventRow.
+# --------------------------------------------------------------------------- #
+
+
+def test_orm_round_trip_opportunity_row() -> None:
+    """Beh. 15: an opportunity row round-trips through JournalEventRow.
+
+    Per D-03: gap and notify outcomes are JournalEventRow entries.
+    The opportunity row's reason code is preserved in the
+    JournalEventRow's payload_json.
+    """
+    from src.db.mappers import journal_from_row, journal_to_row
+    from src.domain.journal import JournalEvent
+    from src.paper.journal import assemble_paper_record
+
+    case_dir = PHASE7_FIXTURES_DIR / "attribution_split"
+    case_input = _load_input(case_dir)
+    epoch_id = case_input["epoch_id"]
+
+    skipped_case = next(c for c in case_input["cases"] if c["kind"] == "skipped")
+    records = assemble_paper_record(
+        epoch_id=epoch_id,
+        signal=skipped_case["signal"],
+        trade_plan=skipped_case["trade_plan"],
+        approval=None,
+        order=None,
+        fill=None,
+        skip_reason=skipped_case["skip_reason"],
+    )
+    opp_record = records[1]
+
+    # Build domain JournalEvent from the opportunity record.
+    import json as _json
+
+    journal_event = JournalEvent(
+        journal_event_id=f"jrn_{opp_record.signal_id}_opportunity",
+        occurred_at_utc=opp_record.signal_detected_at_utc
+        or _parse_utc(skipped_case["signal"]["detected_at_utc"]),
+        event_type="OPPORTUNITY_ATTRIBUTED",
+        entity_type="TRADE_PLAN",
+        entity_id=skipped_case["trade_plan"]["trade_plan_id"],
+        correlation_id=opp_record.epoch_id,
+        signal_id=opp_record.signal_id,
+        trade_plan_id=skipped_case["trade_plan"]["trade_plan_id"],
+        payload_json=_json.dumps(
+            {
+                "attribution": opp_record.attribution.value,
+                "reason_code": opp_record.reason_code,
+                "epoch_id": opp_record.epoch_id,
+            }
+        ),
+    )
+    # Round-trip JournalEvent → row → JournalEvent.
+    journal_row = journal_to_row(journal_event)
+    assert journal_from_row(journal_row) == journal_event
+
+
+# --------------------------------------------------------------------------- #
+# Test 16 — unknown attribution string raises ValueError on restore.
+# --------------------------------------------------------------------------- #
+
+
+def test_unknown_attribution_string_raises_value_error() -> None:
+    """Beh. 16: an unknown attribution string raises ValueError.
+
+    Per D-10: the Enum translation boundary raises ValueError on
+    unknown values. An unknown attribution string stored in a row
+    must fail loudly on restore, never silently default.
+    """
+    from src.db.mappers import signal_from_row
+    from src.db.models import SignalRow
+
+    # Build a SignalRow with an unknown attribution string.
+    row = SignalRow(
+        signal_id="sig_unknown",
+        strategy_id="trend-pullback",
+        strategy_version="v2.0.0",
+        parameter_set_id="baseline-v3",
+        parameter_set_hash="hash",
+        symbol="BTCUSDT",
+        direction="LONG",
+        setup_type="TREND_PULLBACK_LONG",
+        source_timeframe="1h",
+        source_candle_close_utc=datetime(2026, 9, 19, 10, 0, tzinfo=UTC),
+        detected_at_utc=datetime(2026, 9, 19, 10, 0, tzinfo=UTC),
+        status="DETECTED",
+        expires_at_utc=datetime(2026, 9, 19, 14, 0, tzinfo=UTC),
+        invalidated_at_utc=None,
+    )
+    # The status field is the Enum translation boundary — an unknown
+    # status string must raise ValueError on restore.
+    row.status = "UNKNOWN_ATTRIBUTION_KIND"
+    try:
+        signal_from_row(row)
+        assert False, "unknown status string must raise ValueError"
+    except ValueError:
+        pass

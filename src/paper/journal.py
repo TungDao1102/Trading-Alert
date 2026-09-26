@@ -30,7 +30,6 @@ from src.domain.canonical import sha256_hex
 
 from .attribution import APPROVAL_DELAY_LAG_SECONDS, AttributionKind
 
-
 # --------------------------------------------------------------------------- #
 # Validation helpers — local copies (D-12 fail-closed).
 # --------------------------------------------------------------------------- #
