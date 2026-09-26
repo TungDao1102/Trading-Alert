@@ -206,6 +206,17 @@ Plans:
 
 - [ ] 07-01: TBD (derived during plan-phase)
 
+### Phase 07.1: Close gap: B1 registry-cost to backtest identity binding (INSERTED)
+
+**Goal:** Only registry-consistent cost models are assemblable into experiment records — mismatched pairs raise fail-closed, consistent pairs keep byte-identical IDs.
+**Requirements**: BKTS-02
+**Depends on:** Phase 6
+**Plans:** 1 plan
+
+Plans:
+
+- [ ] 07.1-01-PLAN.md — Registry-cost binding gate in assemble() with v3 sets, phase7.1 fixtures, and test migration
+
 ### Phase 8: Approval + Reconciliation Hardening
 
 **Goal**: Human control and exchange-truth safety land before any live order exists — much of it built during the paper soak.
