@@ -35,11 +35,27 @@ COST_KEYS: tuple[str, ...] = (
 )
 
 
-def _require_decimal(value: object, field_name: str) -> Decimal:
-    """Reject non-Decimal values for money/rate fields (D-12)."""
-    if not isinstance(value, Decimal):
-        raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
-    return value
+def _coerce_decimal(value: object, field_name: str) -> Decimal:
+    """Coerce a money/rate field to Decimal without losing precision (D-12).
+
+    A `Decimal` input is returned AS-IS — never round-tripped through
+    `str()`, which would drop trailing precision (`Decimal("0.00020")`
+    → `"0.0002"` → a different `cost_model_hash`). String inputs keep
+    their exact spelling (`Decimal("0.00020")` stays `"0.00020"`).
+    Plain ints are exact. Bools and floats are rejected fail-closed:
+    bool is not a rate, and float carries binary noise.
+    """
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool):
+        raise TypeError(f"{field_name} must be Decimal/str/int, got bool")
+    if isinstance(value, str):
+        return Decimal(value)
+    if isinstance(value, int):
+        return Decimal(value)
+    raise TypeError(
+        f"{field_name} must be Decimal/str/int, got {type(value).__name__}"
+    )
 
 
 def _require_non_negative(value: Decimal, field_name: str) -> None:
@@ -84,7 +100,7 @@ class CostModel:
             "expected_slippage",
             "partial_fill_fraction",
         ):
-            _require_decimal(getattr(self, fname), fname)
+            _coerce_decimal(getattr(self, fname), fname)
         for fname in (
             "fee_rate_entry",
             "fee_rate_exit",
@@ -123,13 +139,17 @@ def build_cost_model(cost_dict: dict[str, Any]) -> CostModel:
     from a fixture's `cost_model` field.
     """
     return CostModel(
-        fee_rate_entry=Decimal(str(cost_dict["fee_rate_entry"])),
-        fee_rate_exit=Decimal(str(cost_dict["fee_rate_exit"])),
+        fee_rate_entry=_coerce_decimal(cost_dict["fee_rate_entry"], "fee_rate_entry"),
+        fee_rate_exit=_coerce_decimal(cost_dict["fee_rate_exit"], "fee_rate_exit"),
         funding_treatment=str(cost_dict["funding_treatment"]),
-        expected_slippage=Decimal(str(cost_dict["expected_slippage"])),
+        expected_slippage=_coerce_decimal(
+            cost_dict["expected_slippage"], "expected_slippage"
+        ),
         slippage_model=str(cost_dict["slippage_model"]),
         spread_fill_assumptions=str(cost_dict["spread_fill_assumptions"]),
-        partial_fill_fraction=Decimal(str(cost_dict["partial_fill_fraction"])),
+        partial_fill_fraction=_coerce_decimal(
+            cost_dict["partial_fill_fraction"], "partial_fill_fraction"
+        ),
         cost_model_hash="",
     )
 
