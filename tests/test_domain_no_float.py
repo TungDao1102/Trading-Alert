@@ -50,6 +50,10 @@ SCANNED_FILES = (
     "src/backtest/report.py",
     # Phase 7.1 plan 07.1-01 — registry↔cost binding helper (D-05 purity).
     "src/backtest/binding.py",
+    # Phase 7 plan 07-01 — pure paper-loop tracer (D-02 purity).
+    "src/paper/__init__.py",
+    "src/paper/loop.py",
+    "src/adapters/paper_ws.py",
 )
 
 
