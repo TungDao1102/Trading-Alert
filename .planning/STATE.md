@@ -1,19 +1,19 @@
 ---
 gsd_state_version: "1.0"
 milestone: v0.3
-current_phase: 7
+current_phase: 07
 current_phase_name: Paper Forward Observation
 status: executing
-stopped_at: Phase 7 context gathered
-last_updated: "2026-09-26T14:54:50.194Z"
+stopped_at: Completed 07-01-PLAN.md
+last_updated: "2026-09-26T22:30:00.000Z"
 last_activity: 2026-09-26
-last_activity_desc: Phase 07.1 complete, transitioned to Phase 2
-state_head: fd80ded2513ea8173a668d5cb551540ad3275a13
+last_activity_desc: Phase 07 plan 01 (paper closed-candle tracer slice) executed
+state_head: 7f3bd10
 progress:
   total_phases: 11
   completed_phases: 6
   total_plans: 29
-  completed_plans: 25
+  completed_plans: 26
 milestone_name: milestone
 ---
 
@@ -26,16 +26,16 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 07.1 — Close gap: B1 registry-cost to backtest identity binding
+**Current focus:** Phase 07 — Paper Forward Observation
 
 ## Current Position
 
-Phase: 7 (Paper Forward Observation) — READY TO EXECUTE
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-09-26 — Phase 07.1 complete, transitioned to Phase 2
+Phase: 07 (Paper Forward Observation) — EXECUTING
+Plan: 2 of 4
+Status: Executing Phase 07
+Last activity: 2026-09-26 — Phase 07 plan 01 (paper closed-candle tracer slice) executed
 
-Progress: [█░░░░░░░░░] 10%
+Progress: [██░░░░░░░░] 20%
 
 ## Performance Metrics
 
@@ -68,7 +68,7 @@ Progress: [█░░░░░░░░░] 10%
 | Phase 06 P03 | 45min | 3 tasks | 7 files |
 | Phase 07.1 P01 | ~15 min | 2 tasks | 9 files |
 | Phase 07.1 P02 | ~10 min | 2 tasks | 4 files |
-| Phase 07.1 P02 | ~10 min | 2 tasks | 4 files |
+| Phase 07 P01 | ~45 min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -139,6 +139,11 @@ Recent decisions affecting current work:
 - [Phase 07.1]: [07.1-01] D-03 fail closed with dedicated CostModelBindingMismatch exception; absent slice keys propagate as bare KeyError from build_cost_model
 - [Phase 07.1]: [07.1-01] D-05 phase6 fixtures stay byte-identical (grandfathered); tests that call assemble() migrate to baseline-v3 (7-key set); new tests/fixtures/phase7.1/ binding fixtures
 - [Phase 07.1]: [07.1-02] D-05 grandfather log in test module header documents phase6 audit verdict (8 missing-keys + 2 spelling); bare KeyError propagates from build_cost_model for missing slice keys (never translated, never skipped, never ExperimentReproducibilityBroken); comparison is hash-string only (never Decimal value equality)
+- [Phase 07]: [07-01] D-01 paper loop is the realtime mirror of the backtest — identical evaluate→plan→evaluate_risk chain, no paper-local setup logic, no simplified sizing, no cost-free path
+- [Phase 07]: [07-01] D-02 double closed-candle gate is structural (x=True AND close_time_utc <= now_utc), not a log warning; forming updates and future-close markers MUST NOT reach evaluate
+- [Phase 07]: [07-01] D-03 feature-validity gate short-circuits the whole loop when either stream lacks EMA200 warmup; feed-freshness gate is per-event (not latched) so a fresh event after a stale one resumes evaluation without restart
+- [Phase 07]: [07-01] D-04 SDK WS surface isolated to src/adapters/paper_ws.py; src/paper/loop.py imports nothing from Polars/pandas/NumPy/Binance SDK/SQLAlchemy/Pydantic — stdlib + Decimal + src/core/_decimal.py only
+- [Phase 07]: [07-01] D-05 STALENESS_THRESHOLD_SECONDS=60 (1H cadence) and WARMUP_MIN_BARS=200 (EMA200) exported as module constants for tests and downstream consumers
 
 ### Pending Todos
 
@@ -171,6 +176,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-26T14:16:57.950Z
-Stopped at: Phase 7 context gathered
-Resume file: .planning/phases/07-paper-forward-observation/07-CONTEXT.md
+Last session: 2026-09-26T22:30:00.000Z
+Stopped at: Completed 07-01-PLAN.md
+Resume file: .planning/phases/07-paper-forward-observation/07-02-PLAN.md

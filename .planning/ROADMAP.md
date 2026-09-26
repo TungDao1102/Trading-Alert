@@ -205,7 +205,7 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 07-01: Tracer closed-candle realtime tick plus feed fail-closed gates (PAPER-01)
+- [x] 07-01: Tracer closed-candle realtime tick plus feed fail-closed gates (PAPER-01)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
