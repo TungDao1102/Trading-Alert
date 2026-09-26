@@ -718,6 +718,15 @@ def run(case_input: dict[str, Any]) -> dict[str, Any]:
 
     # Load the parameter set from the registry.
     parameter_set = load_parameter_set(strategy_id, parameter_set_id)
+    # CR-10: the fixture's strategy_version must match the registry's —
+    # otherwise the six-field identity would attest to a combination
+    # that was never versioned together. Fail closed on divergence.
+    if parameter_set.strategy_version != strategy_version:
+        raise ValueError(
+            f"fixture strategy_version={strategy_version!r} != "
+            f"registry strategy_version={parameter_set.strategy_version!r} "
+            f"for {strategy_id}/{parameter_set_id}"
+        )
 
     # Resolve absolute thresholds for the portfolio gate.
     absolute_thresholds = resolve_absolute_thresholds(
