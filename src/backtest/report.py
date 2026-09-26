@@ -800,7 +800,9 @@ def build(
     if n_trades == 0:
         coverage_pct = Decimal("100")
     else:
-        coverage_pct = _q((n_trades - fallback_count) * 100 // n_trades)
+        # WR-05: exact Decimal division under the pinned context — the
+        # old integer `//` floored e.g. 2/3 coverage to 66.
+        coverage_pct = _div(_q((n_trades - fallback_count) * 100), _q(n_trades))
     intrabar = IntrabarCoverage(
         percent=coverage_pct,
         fallback_count=fallback_count,
