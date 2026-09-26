@@ -193,6 +193,11 @@ def assemble(
         UnregisteredParameterSet: parameter_set_id not in registry.
         IncompleteExperimentRecord: any identity field missing or
             malformed.
+        CostModelBindingMismatch: caller-supplied cost_model hash differs
+            from the registry-derived slice (assembly refusal, D-03).
+        KeyError: registry set lacks one of the seven COST_KEYS
+            (pre-7-key sets such as baseline-v2; fail closed, never
+            translated — D-02/D-05).
     """
     # Load the parameter set from the registry (fail closed).
     parameter_set = load_parameter_set(strategy_id, parameter_set_id)
