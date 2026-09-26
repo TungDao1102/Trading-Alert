@@ -369,3 +369,171 @@ def test_verify_experiment_returns_none_when_reproducible() -> None:
     assert result is None, (
         f"verify_experiment must return None when reproducible, got {result!r}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Test 9 — empty-input handling: zero strategy bars yields a valid record.
+# --------------------------------------------------------------------------- #
+
+
+def test_empty_input_yields_valid_record_with_zero_trades() -> None:
+    """Beh. 9: zero strategy bars yields a valid ExperimentRecord with
+    trade_count zero plus an empty trade list (REFACTOR task).
+
+    Per D-03: the experiment record is valid even when the simulator
+    produces no trades. The empty-input case must not raise.
+    """
+    from src.backtest.experiment import assemble, reproduce
+
+    case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
+    case_input = _load_input(case_dir)
+    cost_model = _build_cost_model(case_input["cost_model"])
+
+    record = assemble(
+        parameter_set_id=case_input["parameter_set_id"],
+        strategy_id=case_input["strategy_id"],
+        strategy_version=case_input["strategy_version"],
+        data_snapshot_id=case_input["data_snapshot_id"],
+        code_version=case_input["code_version"],
+        cost_model=cost_model,
+        time_range_start_utc=datetime.fromisoformat(
+            case_input["time_range_start_utc"]
+        ),
+        time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
+        universe=case_input["universe"],
+        run_type=case_input["run_type"],
+        notes=case_input["notes"],
+    )
+
+    # Empty simulator_inputs (no candles) → empty trade list, no exception.
+    trades = reproduce(record, simulator_inputs={})
+    assert trades == [], (
+        f"empty input must yield empty trade list, got {len(trades)} trades"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Test 10 — run-twice record-stability: identical experiment_id across reruns.
+# --------------------------------------------------------------------------- #
+
+
+def test_run_twice_record_stability() -> None:
+    """Beh. 10: two assemble() calls with the same inputs produce
+    identical experiment_id (REFACTOR task).
+
+    Per D-03: experiment_id is stable across reruns. The canonicalizer
+    sorts dict keys before hashing, so the order in which inputs are
+    provided does not affect the digest.
+    """
+    from src.backtest.experiment import assemble
+
+    case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
+    case_input = _load_input(case_dir)
+    cost_model = _build_cost_model(case_input["cost_model"])
+
+    record_a = assemble(
+        parameter_set_id=case_input["parameter_set_id"],
+        strategy_id=case_input["strategy_id"],
+        strategy_version=case_input["strategy_version"],
+        data_snapshot_id=case_input["data_snapshot_id"],
+        code_version=case_input["code_version"],
+        cost_model=cost_model,
+        time_range_start_utc=datetime.fromisoformat(
+            case_input["time_range_start_utc"]
+        ),
+        time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
+        universe=case_input["universe"],
+        run_type=case_input["run_type"],
+        notes=case_input["notes"],
+    )
+    record_b = assemble(
+        parameter_set_id=case_input["parameter_set_id"],
+        strategy_id=case_input["strategy_id"],
+        strategy_version=case_input["strategy_version"],
+        data_snapshot_id=case_input["data_snapshot_id"],
+        code_version=case_input["code_version"],
+        cost_model=cost_model,
+        time_range_start_utc=datetime.fromisoformat(
+            case_input["time_range_start_utc"]
+        ),
+        time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
+        universe=case_input["universe"],
+        run_type=case_input["run_type"],
+        notes=case_input["notes"],
+    )
+    assert record_a.experiment_id == record_b.experiment_id, (
+        "experiment_id must be stable across reruns"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Test 11 — universe-order stability: input order cannot change identity.
+# --------------------------------------------------------------------------- #
+
+
+def test_universe_order_stability() -> None:
+    """Beh. 11: universe_hash sorts the symbol list before hashing so
+    input order cannot change identity (REFACTOR task).
+
+    Per D-03: the universe hash must be stable across input orderings.
+    Symbols are sorted alphabetically before hashing.
+    """
+    from src.backtest.experiment import assemble
+
+    case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
+    case_input = _load_input(case_dir)
+    cost_model = _build_cost_model(case_input["cost_model"])
+
+    # Same universe in different orders.
+    universe_a = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    universe_b = ["SOLUSDT", "BTCUSDT", "ETHUSDT"]
+    universe_c = ["ETHUSDT", "SOLUSDT", "BTCUSDT"]
+
+    record_a = assemble(
+        parameter_set_id=case_input["parameter_set_id"],
+        strategy_id=case_input["strategy_id"],
+        strategy_version=case_input["strategy_version"],
+        data_snapshot_id=case_input["data_snapshot_id"],
+        code_version=case_input["code_version"],
+        cost_model=cost_model,
+        time_range_start_utc=datetime.fromisoformat(
+            case_input["time_range_start_utc"]
+        ),
+        time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
+        universe=universe_a,
+        run_type=case_input["run_type"],
+        notes=case_input["notes"],
+    )
+    record_b = assemble(
+        parameter_set_id=case_input["parameter_set_id"],
+        strategy_id=case_input["strategy_id"],
+        strategy_version=case_input["strategy_version"],
+        data_snapshot_id=case_input["data_snapshot_id"],
+        code_version=case_input["code_version"],
+        cost_model=cost_model,
+        time_range_start_utc=datetime.fromisoformat(
+            case_input["time_range_start_utc"]
+        ),
+        time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
+        universe=universe_b,
+        run_type=case_input["run_type"],
+        notes=case_input["notes"],
+    )
+    record_c = assemble(
+        parameter_set_id=case_input["parameter_set_id"],
+        strategy_id=case_input["strategy_id"],
+        strategy_version=case_input["strategy_version"],
+        data_snapshot_id=case_input["data_snapshot_id"],
+        code_version=case_input["code_version"],
+        cost_model=cost_model,
+        time_range_start_utc=datetime.fromisoformat(
+            case_input["time_range_start_utc"]
+        ),
+        time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
+        universe=universe_c,
+        run_type=case_input["run_type"],
+        notes=case_input["notes"],
+    )
+    assert record_a.experiment_id == record_b.experiment_id == record_c.experiment_id, (
+        "experiment_id must be stable across universe orderings"
+    )

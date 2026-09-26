@@ -20,9 +20,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
+from src.core.types import _require_utc_aware
 from src.domain.canonical import sha256_hex
 from src.domain.registry import load_parameter_set
 
@@ -61,17 +62,9 @@ _RUN_TYPES: frozenset[str] = frozenset(
 
 
 # --------------------------------------------------------------------------- #
-# Validation helpers — local copies (D-12 fail-closed).
+# Validation helpers — _require_utc_aware delegated to src/core/types.py
+# (shared helper, D-12 fail-closed). The other two are experiment-specific.
 # --------------------------------------------------------------------------- #
-
-
-def _require_utc_aware(value: datetime, field_name: str) -> None:
-    if value.tzinfo is None:
-        raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
-    if value.utcoffset() != timedelta(0):
-        raise ValueError(
-            f"{field_name} must be UTC, got offset {value.utcoffset()}"
-        )
 
 
 def _require_non_empty_str(value: str, field_name: str) -> None:
