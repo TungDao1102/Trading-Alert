@@ -1,0 +1,44 @@
+# params/trend-pullback/baseline-simple-trend-v1.toml
+#
+# Phase 6 plan 06-02 — simple-trend baseline parameter set.
+#
+# Per D-03 + BACKTEST_SPEC §9: every candidate experiment is compared
+# against declared baselines (no-trade + simple-trend at minimum). The
+# simple-trend baseline uses a looser `minimum_rr` and a single-condition
+# trend filter (zone_tolerance_atr widened) so the simulator emits a
+# deterministic single-direction trade list.
+#
+# Per D-04: this file is the source of truth for the parameter set.
+# Once referenced by a backtest/alert/order plan, its hash is permanent.
+# Do not mutate — create a new parameter set + bump strategy version.
+
+schema_version = 1
+
+[strategy]
+strategy_id = "trend-pullback"
+strategy_version = "v2.0.0"
+
+[parameters]
+# Inherited from baseline-v2.
+swing_lookback = 20
+# Widened zone tolerance — single-condition trend filter (looser zone).
+zone_tolerance_atr = 1.0
+breakout_confirmation_bars = 3
+entry_buffer_atr = 0.1
+sl_buffer_atr = 0.2
+# Looser RR gate — most plans pass.
+minimum_rr = 0.5
+signal_expiry_hours = 4
+risk_rate = 0.005
+minimum_risk_utilization_after_rounding = 0.6
+
+# Phase 5 D-05 additions.
+max_open_positions = 2
+max_aggregate_open_risk = 0.01
+cluster_cap = 0.005
+daily_loss_warning_threshold = 0.005
+daily_loss_stop_threshold = 0.01
+fee_rate_entry = 0.0002
+fee_rate_exit = 0.0005
+expected_slippage = 0.0001
+constraint_snapshot_ttl_seconds = 3600

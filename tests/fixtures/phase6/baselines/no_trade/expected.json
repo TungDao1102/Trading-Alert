@@ -1,0 +1,6 @@
+{
+  "trades": [],
+  "trade_count": 0,
+  "run_type": "BASELINE_NO_TRADE",
+  "notes": "Phase 6 plan 06-02 no-trade baseline fixture (RED phase). minimum_rr=100 forces every plan to fail the RR gate; no filled trades."
+}

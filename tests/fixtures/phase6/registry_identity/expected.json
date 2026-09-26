@@ -1,0 +1,15 @@
+{
+  "experiment_id": "PLACEHOLDER_FILLED_AT_GREEN",
+  "strategy_version": "v2.0.0",
+  "parameter_set_id": "baseline-v2",
+  "parameter_set_hash": "PLACEHOLDER_FILLED_AT_GREEN",
+  "data_snapshot_id": "0000000000000000000000000000000000000000000000000000000000000000",
+  "code_version": "06-02-red",
+  "cost_model_hash": "PLACEHOLDER_FILLED_AT_GREEN",
+  "time_range_start_utc": "2026-09-01T00:00:00+00:00",
+  "time_range_end_utc": "2026-09-11T10:00:00+00:00",
+  "universe_hash": "PLACEHOLDER_FILLED_AT_GREEN",
+  "run_type": "CANDIDATE",
+  "result_summary_json": "{}",
+  "notes": "Phase 6 plan 06-02 registry identity fixture (RED phase)."
+}
