@@ -38,7 +38,7 @@ from typing import Any
 
 from .canonical import sha256_hex
 
-REGISTRY_ROOT = Path("params")
+REGISTRY_ROOT = Path(__file__).resolve().parents[2] / "params"
 SCHEMA_VERSION = 1
 
 # Registry path segments are restricted to this charset so
