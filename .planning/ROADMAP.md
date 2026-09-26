@@ -173,11 +173,13 @@ Plans:
   2. Every experiment reproduces from dataset + strategy + parameter set + cost + execution versions and is compared against no-trade and simple-trend baselines
   3. Reports show trade counts and slices (symbol/period/regime/version), R distribution, bootstrap intervals, and parameter-plateau analysis — never a single headline number — and no winner is declared without out-of-sample confirmation
 
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
 
-- [ ] 06-01: TBD (derived during plan-phase)
+- [ ] 06-01-PLAN.md — Tracer intrabar-plus-costs parity slice (costs, simulator core, limit model, parity gates)
+- [ ] 06-02-PLAN.md — Experiment registry with six-field identity, cost-key extension, same-engine baselines (TDD)
+- [ ] 06-03-PLAN.md — Uncertainty-first report with seeded bootstrap, no-float guard, phase gate (TDD)
 
 ### Phase 7: Paper Forward Observation
 
