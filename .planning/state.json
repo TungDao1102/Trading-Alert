@@ -26,12 +26,12 @@
     {
       "number": "5",
       "name": "Risk Engine",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "6",
       "name": "Backtest Simulator + Experiment Registry",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "7",
@@ -55,9 +55,9 @@
     }
   ],
   "next": {
-    "command": "/gsd:progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd:progress --next",
+    "label": "Advance to the next step",
+    "reason": "Phase 06 of 10 · executing"
   },
-  "updated_at": "2026-09-24T15:16:32.722Z"
+  "updated_at": "2026-09-26T06:21:17.418Z"
 }

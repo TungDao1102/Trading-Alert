@@ -61,7 +61,7 @@
     "ui_review": true,
     "use_worktrees": false,
     "plan_review_convergence": true,
-    "_auto_chain_active": false
+    "_auto_chain_active": true
   },
   "ship": {
     "pr_body_sections": [
