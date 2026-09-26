@@ -1,0 +1,61 @@
+# params/breakout-retest/baseline-v3.toml
+#
+# Phase 7.1 — registry↔cost binding candidate set (plan 07.1-01).
+#
+# Per D-04: this file is the source of truth for the parameter set.
+# Once referenced by a backtest/alert/order plan, its hash is permanent.
+# Do not mutate — create a new parameter set + bump strategy version.
+#
+# Per Phase 7.1 D-02 + D-04: baseline-v3 ships all 7 COST_KEYS so the
+# binding gate (assert_cost_model_binds_registry) can build_cost_model
+# over the registry slice. baseline-v2 cannot bind (only 3 keys) and
+# remains grandfathered for phase6 fixtures. baseline-v3 mirrors
+# baseline-v2's non-cost params exactly — binding-only banner holds
+# (A3: diff v3 vs v2 before shipping; any non-cost drift changes
+# strategy behavior).
+
+schema_version = 1
+
+[strategy]
+strategy_id = "breakout-retest"
+strategy_version = "v2.0.0"
+
+[parameters]
+# Inherited from baseline-v2 (non-cost params unchanged).
+swing_lookback = 20
+zone_tolerance_atr = 0.5
+breakout_confirmation_bars = 3
+entry_buffer_atr = 0.1
+sl_buffer_atr = 0.2
+minimum_rr = 2.0
+signal_expiry_hours = 4
+risk_rate = 0.005
+minimum_risk_utilization_after_rounding = 0.6
+# Family B keys (added in plan 04-03, D-05).
+retest_window_bars = 5
+retest_depth_atr = 0.3
+breakout_volume_threshold = 1.5
+atr_period = 14
+
+# Phase 5 D-05 additions (mirror baseline-v2 exactly).
+max_open_positions = 2
+max_aggregate_open_risk = 0.01
+cluster_cap = 0.005
+daily_loss_warning_threshold = 0.005
+daily_loss_stop_threshold = 0.01
+# Cost model keys (RISK_MANAGEMENT §3) — Phase-6-compatible.
+fee_rate_entry = 0.0002
+fee_rate_exit = 0.0005
+expected_slippage = 0.0001
+# Constraint-snapshot freshness (RISK_MANAGEMENT §12).
+constraint_snapshot_ttl_seconds = 3600
+
+# Phase 7.1 D-02 + Pitfall 7 — extended cost-model keys (all 7 COST_KEYS).
+# Values match the canonical COST_MODEL in scripts/gen_phase6_fixtures.py.
+funding_treatment = "ADDITIVE"
+slippage_model = "FIXED_BPS"
+spread_fill_assumptions = "FULL_FILL"
+# Fractional value (NOT 1.0) to dodge the whole-number-trap (Pitfall 1):
+# _normalize_value converts TOML 0.5 → Decimal("0.5"), so the registry
+# slice hashes consistently with fixture dict spelling "0.5".
+partial_fill_fraction = 0.5

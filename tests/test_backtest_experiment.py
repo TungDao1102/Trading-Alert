@@ -45,6 +45,25 @@ def _build_cost_model(cost_dict: dict):
     return build_cost_model(cost_dict)
 
 
+def _v3_case_input(case_dir: Path) -> dict:
+    """Load a phase6 fixture and rebind it to the v3 registry set.
+
+    Per Phase 7.1 D-05: phase6 fixtures stay byte-identical (NOT
+    regenerated), but tests that call assemble() must migrate to a
+    7-key registry set. baseline-v3 ships all 7 COST_KEYS; baseline-v2
+    only has 3 and now raises KeyError at the gate (correct behavior).
+    The cost_model dict is also rebinding partial_fill_fraction from
+    "1.0" (phase6 spelling) to "0.5" (v3 TOML spelling) so the
+    registry slice and the fixture dict hash identically.
+    """
+    case: dict = _load_input(case_dir)
+    case["parameter_set_id"] = "baseline-v3"
+    cost_model: dict = dict(case["cost_model"])
+    cost_model["partial_fill_fraction"] = "0.5"
+    case["cost_model"] = cost_model
+    return case
+
+
 # --------------------------------------------------------------------------- #
 # Test 1 — assemble with complete inputs returns stable 64-hex identity.
 # --------------------------------------------------------------------------- #
@@ -61,7 +80,7 @@ def test_experiment_assemble_stable_64_hex_identity() -> None:
     from src.backtest.experiment import assemble
 
     case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
-    case_input = _load_input(case_dir)
+    case_input = _v3_case_input(case_dir)
     cost_model = _build_cost_model(case_input["cost_model"])
 
     record_a = assemble(
@@ -129,7 +148,7 @@ def test_experiment_assemble_missing_field_raises() -> None:
     from src.backtest.experiment import IncompleteExperimentRecord, assemble
 
     case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
-    case_input = _load_input(case_dir)
+    case_input = _v3_case_input(case_dir)
     cost_model = _build_cost_model(case_input["cost_model"])
 
     # Missing data_snapshot_id.
@@ -168,7 +187,7 @@ def test_experiment_reproduce_byte_identical() -> None:
     from src.backtest.experiment import assemble, reproduce
 
     case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
-    case_input = _load_input(case_dir)
+    case_input = _v3_case_input(case_dir)
     cost_model = _build_cost_model(case_input["cost_model"])
 
     record = assemble(
@@ -345,7 +364,7 @@ def test_verify_experiment_returns_none_when_reproducible() -> None:
     from src.backtest.experiment import assemble, verify_experiment
 
     case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
-    case_input = _load_input(case_dir)
+    case_input = _v3_case_input(case_dir)
     cost_model = _build_cost_model(case_input["cost_model"])
 
     record = assemble(
@@ -386,7 +405,7 @@ def test_empty_input_yields_valid_record_with_zero_trades() -> None:
     from src.backtest.experiment import assemble, reproduce
 
     case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
-    case_input = _load_input(case_dir)
+    case_input = _v3_case_input(case_dir)
     cost_model = _build_cost_model(case_input["cost_model"])
 
     record = assemble(
@@ -428,7 +447,7 @@ def test_run_twice_record_stability() -> None:
     from src.backtest.experiment import assemble
 
     case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
-    case_input = _load_input(case_dir)
+    case_input = _v3_case_input(case_dir)
     cost_model = _build_cost_model(case_input["cost_model"])
 
     record_a = assemble(
@@ -481,7 +500,7 @@ def test_universe_order_stability() -> None:
     from src.backtest.experiment import assemble
 
     case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
-    case_input = _load_input(case_dir)
+    case_input = _v3_case_input(case_dir)
     cost_model = _build_cost_model(case_input["cost_model"])
 
     # Same universe in different orders.
@@ -546,9 +565,15 @@ def test_universe_order_stability() -> None:
 
 def _assemble_gap_record(*, cost_dict: dict, run_type: str = "CANDIDATE",
                          strategy_id: str = "trend-pullback",
-                         parameter_set_id: str = "baseline-v2",
+                         parameter_set_id: str = "baseline-v3",
                          result_summary_json: str = "{}"):
-    """Assemble a record bound to registry params + the given cost dict."""
+    """Assemble a record bound to registry params + the given cost dict.
+
+    Per Phase 7.1 D-05: assemble() now requires a 7-key registry set.
+    baseline-v3 ships all 7 keys; baseline-v2 only has 3 and now raises
+    KeyError at the gate (correct behavior — see fixture audit table).
+    Phase6 fixtures themselves remain grandfathered (NOT regenerated).
+    """
     from src.backtest.experiment import assemble
 
     return assemble(
@@ -575,14 +600,14 @@ def _gap_cost_dict() -> dict:
         "expected_slippage": "0.0001",
         "slippage_model": "FIXED_BPS",
         "spread_fill_assumptions": "FULL_FILL",
-        "partial_fill_fraction": "1.0",
+        "partial_fill_fraction": "0.5",
     }
 
 
 def _gap_simulator_inputs(cost_dict: dict) -> dict:
     return {
         "strategy_id": "trend-pullback",
-        "parameter_set_id": "baseline-v2",
+        "parameter_set_id": "baseline-v3",
         "strategy_version": "v2.0.0",
         "cost_model": dict(cost_dict),
     }
@@ -617,20 +642,28 @@ def test_cr03b_reproduced_trades_carry_typed_decimal_datetime_fields() -> None:
     from src.backtest.experiment import assemble, reproduce
 
     case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    # Per Phase 7.1 D-05: rebind to baseline-v3 (7-key set) and fix the
+    # partial_fill_fraction spelling so the gate passes. The fixture's
+    # candles/constraint_snapshot are still valid for the v3 set.
+    case = dict(case)
+    case["parameter_set_id"] = "baseline-v3"
+    cost_model_dict: dict = dict(case["cost_model"])
+    cost_model_dict["partial_fill_fraction"] = "0.5"
     record = assemble(
         parameter_set_id=case["parameter_set_id"],
         strategy_id=case["strategy_id"],
         strategy_version=case["strategy_version"],
         data_snapshot_id="2" * 64,
         code_version="gap-test-cr03b",
-        cost_model=_build_cost_model(case["cost_model"]),
+        cost_model=_build_cost_model(cost_model_dict),
         time_range_start_utc=datetime.fromisoformat("2026-09-01T00:00:00+00:00"),
         time_range_end_utc=datetime.fromisoformat("2026-09-11T10:00:00+00:00"),
         universe=["BTCUSDT"],
         run_type="BASELINE_SIMPLE_TREND",
         notes="nyquist cr03b",
     )
-    trades = reproduce(record, simulator_inputs=case)
+    sim_inputs = dict(case, cost_model=cost_model_dict)
+    trades = reproduce(record, simulator_inputs=sim_inputs)
     assert len(trades) >= 1, "simple-trend baseline must yield filled trades"
     decimal_fields = (
         "entry_price", "quantity", "exit_price", "realized_pnl",
@@ -724,7 +757,7 @@ def test_cr06_experiment_id_differs_across_run_type_and_strategy_id() -> None:
     breakout = _assemble_gap_record(
         cost_dict=cost,
         strategy_id="breakout-retest",
-        parameter_set_id="baseline-v2",
+        parameter_set_id="baseline-v3",
     )
     assert trend.experiment_id != breakout.experiment_id, (
         "two strategies sharing a version string must never share experiment_id"

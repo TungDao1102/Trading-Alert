@@ -11,6 +11,7 @@ This barrel re-exports the public symbols. No logic lives here.
 
 from __future__ import annotations
 
+from .binding import CostModelBindingMismatch, assert_cost_model_binds_registry
 from .costs import CostModel, build_cost_model, modeled_costs_per_unit
 from .experiment import (
     ExperimentRecord,
@@ -38,9 +39,11 @@ __all__ = [
     "SimulatorResult",
     "TradeRecord",
     # Exceptions
+    "CostModelBindingMismatch",
     "ExperimentReproducibilityBroken",
     "IncompleteExperimentRecord",
     # Services
+    "assert_cost_model_binds_registry",
     "assemble",
     "baseline_no_trade",
     "baseline_simple_trend",

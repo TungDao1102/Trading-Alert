@@ -48,6 +48,8 @@ SCANNED_FILES = (
     "src/backtest/costs.py",
     "src/backtest/experiment.py",
     "src/backtest/report.py",
+    # Phase 7.1 plan 07.1-01 — registry↔cost binding helper (D-05 purity).
+    "src/backtest/binding.py",
 )
 
 

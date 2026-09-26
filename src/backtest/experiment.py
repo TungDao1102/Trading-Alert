@@ -29,6 +29,7 @@ from src.core.types import _require_utc_aware
 from src.domain.canonical import sha256_hex
 from src.domain.registry import load_parameter_set
 
+from .binding import assert_cost_model_binds_registry
 from .costs import CostModel, build_cost_model
 from .simulator import TradeRecord
 from .simulator import run as simulator_run
@@ -195,6 +196,11 @@ def assemble(
     """
     # Load the parameter set from the registry (fail closed).
     parameter_set = load_parameter_set(strategy_id, parameter_set_id)
+
+    # D-01 gate: registry cost slice is the authority (D-02). Sits
+    # strictly before identity_payload so no record exists on the
+    # mismatch path; never appears in the payload (D-04 byte-stability).
+    assert_cost_model_binds_registry(parameter_set, cost_model)
 
     # Build the universe hash (sorted for order-stability).
     universe_hash = _universe_hash(universe)
