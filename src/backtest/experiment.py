@@ -418,6 +418,41 @@ def verify_experiment(
 # --------------------------------------------------------------------------- #
 
 
+def _require_baseline_params(
+    case_input: dict[str, Any],
+    *,
+    kind: str,
+) -> None:
+    """Fail closed unless the case references a degenerated baseline set.
+
+    CR-07: the baseline docstrings promise degenerated parameters, but
+    the bodies never checked. Passing candidate params to
+    `baseline_no_trade` would return filled trades mislabeled as a
+    baseline. The registry set behind the case must satisfy the
+    kind-specific bound: no-trade needs `minimum_rr >= 100` (every plan
+    fails the RR gate); simple-trend needs `minimum_rr < 2` (looser
+    than the candidate gate).
+    """
+    parameter_set = load_parameter_set(
+        case_input["strategy_id"], case_input["parameter_set_id"]
+    )
+    minimum_rr = Decimal(str(parameter_set.params["minimum_rr"]))
+    if kind == "no_trade":
+        if minimum_rr < Decimal("100"):
+            raise ValueError(
+                f"baseline_no_trade requires minimum_rr >= 100, got {minimum_rr} "
+                f"for {parameter_set.strategy_id}/{parameter_set.parameter_set_id}"
+            )
+    elif kind == "simple_trend":
+        if minimum_rr >= Decimal("2"):
+            raise ValueError(
+                f"baseline_simple_trend requires minimum_rr < 2, got {minimum_rr} "
+                f"for {parameter_set.strategy_id}/{parameter_set.parameter_set_id}"
+            )
+    else:  # pragma: no cover — internal misuse, never user input.
+        raise ValueError(f"unknown baseline kind {kind!r}")
+
+
 def _filled_trades(trades: list[TradeRecord]) -> list[TradeRecord]:
     """Filter to filled trades only (ENTRY_FILLED + PARTIAL_FILL).
 
@@ -438,6 +473,7 @@ def baseline_no_trade(case_input: dict[str, Any]) -> list[TradeRecord]:
     The case_input must reference `parameter_set_id="baseline-no-trade-v1"`
     (or equivalent with minimum_rr=100).
     """
+    _require_baseline_params(case_input, kind="no_trade")
     result = simulator_run(case_input)
     trades = [_trade_from_dict(t) for t in result["trades"]]
     return _filled_trades(trades)
@@ -453,6 +489,7 @@ def baseline_simple_trend(case_input: dict[str, Any]) -> list[TradeRecord]:
     The case_input must reference `parameter_set_id="baseline-simple-trend-v1"`
     (or equivalent with looser config).
     """
+    _require_baseline_params(case_input, kind="simple_trend")
     result = simulator_run(case_input)
     trades = [_trade_from_dict(t) for t in result["trades"]]
     return _filled_trades(trades)
