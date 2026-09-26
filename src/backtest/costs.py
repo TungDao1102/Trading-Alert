@@ -113,7 +113,7 @@ class CostModel:
             "expected_slippage",
             "partial_fill_fraction",
         ):
-            _coerce_decimal(getattr(self, fname), fname)
+            object.__setattr__(self, fname, _coerce_decimal(getattr(self, fname), fname))
         for fname in (
             "fee_rate_entry",
             "fee_rate_exit",
