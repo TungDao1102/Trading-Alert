@@ -14,12 +14,14 @@ ValueError on unknown — D-10).
 
 from __future__ import annotations
 
+from src.approval.mapping import ShortIdMapping
 from src.db.models import (
     ApprovalRow,
     FillRow,
     JournalEventRow,
     OrderRow,
     PositionRow,
+    ShortIdMappingRow,
     SignalRow,
     TradePlanRow,
 )
@@ -426,4 +428,42 @@ __all__ = [
     "position_from_row",
     "journal_to_row",
     "journal_from_row",
+    "short_id_mapping_to_row",
+    "short_id_mapping_from_row",
 ]
+
+
+# ---------- ShortIdMapping ---------------------------------------------------
+
+
+def short_id_mapping_to_row(m: ShortIdMapping) -> ShortIdMappingRow:
+    """Convert a domain ShortIdMapping to its ORM row representation.
+
+    Per D-02: the row carries the deterministic short_id (PK), the
+    full signal_id and trade_plan_id, and the UTC-aware created_at_utc.
+    No enum translation needed — all four fields are plain strings
+    or UTC-aware datetimes, matching the rest of the mappers'
+    "round-trippable" contract.
+    """
+    return ShortIdMappingRow(
+        short_id=m.short_id,
+        signal_id=m.signal_id,
+        trade_plan_id=m.trade_plan_id,
+        created_at_utc=m.created_at_utc,
+    )
+
+
+def short_id_mapping_from_row(r: ShortIdMappingRow) -> ShortIdMapping:
+    """Convert an ORM ShortIdMappingRow back to a domain ShortIdMapping.
+
+    Round-trip contract: `short_id_mapping_from_row(short_id_mapping_to_row(m))
+    == m`. The validator on `ShortIdMapping.__post_init__` runs again on
+    construction, so any future drift in `created_at_utc` timezone
+    awareness fails loudly at the type boundary.
+    """
+    return ShortIdMapping(
+        short_id=r.short_id,
+        signal_id=r.signal_id,
+        trade_plan_id=r.trade_plan_id,
+        created_at_utc=r.created_at_utc,
+    )

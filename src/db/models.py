@@ -79,9 +79,7 @@ class SymbolMetadata(Base):
     price_tick_size: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     quantity_step_size: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     min_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
-    max_quantity: Mapped[Decimal | None] = mapped_column(
-        Numeric(38, 18), nullable=True
-    )
+    max_quantity: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
     min_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
 
     # JSON-as-text blobs keep the schema portable across PG versions; the
@@ -111,12 +109,8 @@ class CollectorWatermark(Base):
 
     symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
     data_class: Mapped[str] = mapped_column(String(16), primary_key=True)
-    last_tick_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    updated_at_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    last_tick_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 # ---------- collector_gaps ---------------------------------------------------
@@ -142,16 +136,10 @@ class CollectorGap(Base):
 
     symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
     data_class: Mapped[str] = mapped_column(String(16), primary_key=True)
-    expected_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), primary_key=True
-    )
-    observed_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    expected_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    observed_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     reason: Mapped[str] = mapped_column(String(256), nullable=False)
-    recorded_at_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    recorded_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 # ---------- coverage_windows --------------------------------------------------
@@ -179,9 +167,7 @@ class CoverageWindow(Base):
         DateTime(timezone=True), nullable=True
     )
     status_history_json: Mapped[str] = mapped_column(String, nullable=False)
-    updated_at_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 # ---------- signals (Phase 3, plan 03-01) ------------------------------------
@@ -209,13 +195,9 @@ class SignalRow(Base):
     source_candle_close_utc: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
-    detected_at_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    detected_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
-    expires_at_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    expires_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     invalidated_at_utc: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -243,25 +225,17 @@ class TradePlanRow(Base):
     stop_loss_price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     take_profit_json: Mapped[str] = mapped_column(String, nullable=False)
     invalidation_rule_json: Mapped[str] = mapped_column(String, nullable=False)
-    expiry_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    expiry_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expected_rr_json: Mapped[str] = mapped_column(String, nullable=False)
     risk_rate: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     risk_budget: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     suggested_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
-    quantity_before_rounding: Mapped[Decimal] = mapped_column(
-        Numeric(38, 18), nullable=False
-    )
-    quantity_after_rounding: Mapped[Decimal] = mapped_column(
-        Numeric(38, 18), nullable=False
-    )
+    quantity_before_rounding: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    quantity_after_rounding: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     quantization_decision: Mapped[str] = mapped_column(String(32), nullable=False)
     plan_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
-    created_at_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    created_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 # ---------- approvals (Phase 3, plan 03-04) ---------------------------------
@@ -286,16 +260,10 @@ class ApprovalRow(Base):
     result: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     approval_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    requested_at_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    acted_at_utc: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    requested_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    acted_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     actor_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    telegram_message_id: Mapped[str | None] = mapped_column(
-        String(64), nullable=True
-    )
+    telegram_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
@@ -335,15 +303,9 @@ class OrderRow(Base):
     algo_client_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     exchange_status: Mapped[str] = mapped_column(String(32), nullable=False)
     local_status: Mapped[str] = mapped_column(String(16), nullable=False)
-    submitted_at_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    updated_at_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    canceled_at_utc: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    submitted_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    canceled_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 # ---------- fills (Phase 3, plan 03-04) --------------------------------------
@@ -360,9 +322,7 @@ class FillRow(Base):
 
     __tablename__ = "fills"
     __table_args__ = (
-        UniqueConstraint(
-            "order_id", "exchange_trade_id", name="uq_fills_order_trade"
-        ),
+        UniqueConstraint("order_id", "exchange_trade_id", name="uq_fills_order_trade"),
     )
 
     fill_id: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -377,9 +337,7 @@ class FillRow(Base):
     commission: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     commission_asset: Mapped[str] = mapped_column(String(16), nullable=False)
     realized_pnl: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
-    fill_time_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    fill_time_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     is_maker: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
 
@@ -405,15 +363,9 @@ class PositionRow(Base):
     break_even_price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     unrealized_pnl: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     realized_pnl: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
-    opened_at_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    updated_at_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    closed_at_utc: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    opened_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
 
 
@@ -432,9 +384,7 @@ class JournalEventRow(Base):
     __tablename__ = "journal_events"
 
     journal_event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    occurred_at_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    occurred_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
     entity_id: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -445,9 +395,37 @@ class JournalEventRow(Base):
     order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     position_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     payload_json: Mapped[str] = mapped_column(String, nullable=False)
-    created_at_utc: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    created_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# ---------- short_id_mapping (Phase 8, plan 08-02) ----------------------------
+
+
+class ShortIdMappingRow(Base):
+    """Server-side short→full id mapping (D-02, 08-02).
+
+    Telegram `callback_data` is capped at 64 bytes. The Phase-7 sender
+    embedded a 32-hex-char prefix (`sha256(signal_id)[:32]`) inside
+    the callback payload. Phase 8 binds real handlers, so the
+    receiver must reverse the mapping deterministically across
+    process restarts.
+
+    PK is the deterministic `short_id`. The full `signal_id` and
+    `trade_plan_id` are non-nullable. `created_at_utc` is UTC-aware
+    (TIMESTAMPTZ at the PG boundary) and non-nullable. The receiver
+    persists this row in the SAME transaction as the Approval row
+    transition (atomic write — never in a separate commit).
+
+    No auto-increment anywhere (D-03). The row exists on the single
+    existing `Base`; no second declarative base is introduced.
+    """
+
+    __tablename__ = "short_id_mapping"
+
+    short_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    signal_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    trade_plan_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 # ---------- engine factory ---------------------------------------------------
@@ -475,9 +453,7 @@ def make_engine(database_url: str) -> AsyncEngine:
             "(expected postgresql+psycopg:// or postgresql+asyncpg://)"
         )
     if database_url not in _ENGINE_CACHE:
-        _ENGINE_CACHE[database_url] = create_async_engine(
-            database_url, future=True, echo=False
-        )
+        _ENGINE_CACHE[database_url] = create_async_engine(database_url, future=True, echo=False)
     return _ENGINE_CACHE[database_url]
 
 
