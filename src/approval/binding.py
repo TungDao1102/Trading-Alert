@@ -50,6 +50,14 @@ class Callback:
     the Approval row. The remaining fields carry the plan identity
     tuple and the chat authorization.
 
+    `action` carries the human's decision from the pressed button
+    (APPROVE vs SKIP_*). CR-01: the pressed button must determine the
+    outcome — the resolver maps the callback's action, not the stored
+    row's action, and rejects a stored/callback mismatch explicitly.
+    `None` preserves backward compatibility for callers that have not
+    yet threaded the button kind through (they fall back to the stored
+    row's action).
+
     All fields are validated non-empty strings / ints / UTC-aware
     datetimes. The chat gate runs before any state lookup (D-01).
     """
@@ -61,6 +69,7 @@ class Callback:
     parameter_set_id: str
     parameter_set_hash: str
     callback_at_utc: datetime
+    action: ApprovalAction | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.raw_token, str) or self.raw_token == "":
@@ -86,6 +95,10 @@ class Callback:
         ):
             raise ValueError("parameter_set_hash must be a 64-char string")
         _require_utc_aware(self.callback_at_utc, "callback_at_utc")
+        if self.action is not None and not isinstance(self.action, ApprovalAction):
+            raise TypeError(
+                f"action must be ApprovalAction, got {type(self.action).__name__}"
+            )
 
 
 @dataclass(frozen=True)

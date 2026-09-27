@@ -58,7 +58,7 @@ from src.approval.binding import ApprovalRejected, Callback
 from src.approval.mapping import ShortIdMapping, make_short_id_mapping
 from src.approval.replay import resolve_callback
 from src.domain.approval import Approval
-from src.domain.enums import RejectionReason
+from src.domain.enums import ApprovalAction, RejectionReason
 from src.domain.journal import JournalEvent
 from telegram import InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -109,6 +109,12 @@ class CallbackKind(str, Enum):
     APPROVE = "APPROVE"
     SKIP = "SKIP"
     SIMULATE_RECORDED = "SIMULATE_RECORDED"
+
+
+def _callback_kind_to_action(kind: CallbackKind) -> ApprovalAction:
+    if kind == CallbackKind.APPROVE:
+        return ApprovalAction.APPROVE
+    return ApprovalAction.SKIP_USER
 
 
 @dataclass(frozen=True)
@@ -334,6 +340,7 @@ def dispatch_callback(
         parameter_set_id=binding_context["parameter_set_id"],
         parameter_set_hash=binding_context["parameter_set_hash"],
         callback_at_utc=callback_at_utc,
+        action=_callback_kind_to_action(parsed.kind),
     )
 
     # Build a wrapper save_atomic that includes the mapping row on

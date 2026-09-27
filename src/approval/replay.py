@@ -34,7 +34,7 @@ from src.approval.binding import (
     check_binding_full,
 )
 from src.approval.tokens import token_hash_of
-from src.domain.enums import ApprovalResult
+from src.domain.enums import ApprovalAction, ApprovalResult, RejectionReason
 
 if TYPE_CHECKING:
     from src.domain.approval import Approval
@@ -97,8 +97,6 @@ def resolve_callback(
     # must never touch the approval row. We check the chat gate here
     # before hashing the token or looking up the approval.
     if callback.chat_id != authorized_chat_id:
-        from src.domain.enums import RejectionReason
-
         raise ApprovalRejected(
             reason_code=RejectionReason.INVALIDATED,
             message="wrong chat id",
@@ -113,8 +111,6 @@ def resolve_callback(
     # gate on a non-existent approval.
     approval = lookup_by_token_hash(token_hash)
     if approval is None:
-        from src.domain.enums import RejectionReason
-
         raise ApprovalRejected(
             reason_code=RejectionReason.INVALIDATED,
             message="approval not found for token hash",
@@ -153,8 +149,32 @@ def resolve_callback(
         # Approval __post_init__ rejects it.
         pass  # fall through to transition
 
-    # PENDING -> decided transition. Map the action to the result.
-    new_result = action_to_result(approval.action)
+    # PENDING -> decided transition. CR-01: the pressed button
+    # (callback.action) determines the outcome — never the stored row.
+    # A stored-action/callback-action mismatch is an explicit reject
+    # (fail closed). WR-31: SIMULATE never transitions approval state.
+    if approval.action == ApprovalAction.SIMULATE:
+        raise ApprovalRejected(
+            reason_code=RejectionReason.INVALIDATED,
+            message="SIMULATE never transitions approval state",
+        )
+    deciding_action = callback.action if callback.action is not None else approval.action
+    if deciding_action == ApprovalAction.SIMULATE:
+        raise ApprovalRejected(
+            reason_code=RejectionReason.INVALIDATED,
+            message="SIMULATE never transitions approval state",
+        )
+    if callback.action is not None and callback.action != approval.action:
+        raise ApprovalRejected(
+            reason_code=RejectionReason.INVALIDATED,
+            message="callback action != approval action",
+        )
+    new_result = action_to_result(deciding_action)
+    if new_result == ApprovalResult.PENDING:
+        raise ApprovalRejected(
+            reason_code=RejectionReason.INVALIDATED,
+            message=f"callback action {deciding_action.value} maps to PENDING — no transition",
+        )
     new_approval = replace(
         approval,
         result=new_result,
