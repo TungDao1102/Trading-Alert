@@ -215,18 +215,34 @@ class PaperSupervisor:
     # Internal: resubscribe + backfill with per-symbol isolation.
     # ------------------------------------------------------------------ #
 
-    async def _resubscribe_and_backfill(self, *, journal_outage_gaps: bool) -> None:
-        """Close existing handles, resubscribe, and backfill each pair."""
+    async def _resubscribe_and_backfill(
+        self, *, journal_outage_gaps: bool
+    ) -> dict[tuple[str, str], list[RestKline]]:
+        """Close existing handles, resubscribe, and backfill each pair.
+
+        Returns the backfilled closes per (symbol, interval) pair
+        (CR-03: log-only backfill dropped closes on the floor — the
+        caller feeds these into the loop's feed_events path). Pairs
+        with no prior close contribute no entry.
+        """
         self._close_all_handles()
         self.start()
 
+        backfilled: dict[tuple[str, str], list[RestKline]] = {}
         now = self._clock()
         for symbol in self._symbols:
             for interval in self._intervals:
                 last = self._last_close.get((symbol, interval))
                 if last is None:
                     # No prior close recorded for this pair — nothing
-                    # to backfill. Skip silently.
+                    # to backfill. Loud (not silent): a missing last
+                    # after start() means the dispatch path never
+                    # recorded a close for this pair.
+                    log.error(
+                        "paper.supervisor.no_last_close",
+                        symbol=symbol,
+                        interval=interval,
+                    )
                     continue
                 try:
                     closes, gaps = await backfill_missed_closes(
@@ -259,9 +275,9 @@ class PaperSupervisor:
                     )
                 # Backfilled closes are REST klines (not WS klines);
                 # the paper loop's run_paper_tick consumes them via
-                # its feed_events path, not the WS callback. The
-                # supervisor's job is to surface them in the log so
-                # the journal layer can persist them.
+                # its feed_events path, not the WS callback. Return
+                # them per pair so the caller can persist and dispatch
+                # them (CR-03) instead of dropping them on the floor.
                 if closes:
                     log.info(
                         "paper.supervisor.backfilled",
@@ -269,6 +285,8 @@ class PaperSupervisor:
                         interval=interval,
                         closes=len(closes),
                     )
+                    backfilled[(symbol, interval)] = closes
+        return backfilled
 
     def _close_all_handles(self) -> None:
         """Close every WS handle we own."""
