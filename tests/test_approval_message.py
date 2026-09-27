@@ -908,6 +908,90 @@ def test_dispatch_callback_replay_returns_existing_approval() -> None:
     assert saved == []
 
 
+def test_dispatch_callback_skip_on_approve_plan_invalidates() -> None:
+    """CR-01 regression: a SKIP press on an APPROVE-action plan must NOT
+    approve it — the pressed button determines the outcome, and a
+    stored-action/callback-action conflict fails closed with INVALIDATED.
+    """
+    from src.adapters.telegram_callbacks import (
+        CallbackKind,
+        ParsedCallback,
+        dispatch_callback,
+    )
+    from src.approval.mapping import derive_short_id
+    from src.approval.tokens import issue_one_time_token, token_hash_of
+    from src.domain.approval import Approval
+    from src.domain.enums import ApprovalAction, ApprovalResult, RejectionReason
+
+    signal_id = "sig_test_0000000000000000000000000000000000000000000000000000"
+    trade_plan_id = "tp_test_0000000000000000000000000000000000000000000000000000"
+    raw_token = issue_one_time_token()
+    token_hash = token_hash_of(raw_token)
+    plan_hash = "0" * 64
+
+    pending = Approval(
+        approval_id="appr_test_0000000000000000000000000000000000000000000000000000",
+        trade_plan_id=trade_plan_id,
+        signal_id=signal_id,
+        action=ApprovalAction.APPROVE,
+        result=ApprovalResult.PENDING,
+        status=ApprovalResult.PENDING,
+        approval_token_hash=token_hash,
+        requested_at_utc=datetime(2026, 9, 19, 12, 0, tzinfo=UTC),
+        acted_at_utc=None,
+        actor_id="",
+        telegram_message_id=None,
+        request_hash=plan_hash,
+    )
+
+    short_id = derive_short_id(signal_id)
+    parsed = ParsedCallback(
+        raw="SKP:" + short_id,
+        kind=CallbackKind.SKIP,
+        short_id=short_id,
+    )
+    saved: list[tuple[Any, Any]] = []
+
+    def _journal(event: Any) -> None:
+        pass
+
+    def _lookup_short(sid: str) -> tuple[str, str] | None:
+        return (signal_id, trade_plan_id)
+
+    def _lookup_token(th: str) -> Any:
+        return pending
+
+    def _save(approval: Any, mapping: Any) -> None:
+        saved.append((approval, mapping))
+
+    result = dispatch_callback(
+        parsed,
+        callback_chat_id=123,
+        authorized_chat_id=123,
+        callback_at_utc=datetime(2026, 9, 19, 13, 0, tzinfo=UTC),
+        raw_token=raw_token,
+        correlation_id="cb:test",
+        journal_receipt=_journal,
+        lookup_by_short_id=_lookup_short,
+        lookup_by_token_hash=_lookup_token,
+        save_atomic=_save,
+        now_utc=datetime(2026, 9, 19, 13, 0, tzinfo=UTC),
+        binding_context={
+            "plan_hash": plan_hash,
+            "strategy_version": "v1.0.0",
+            "parameter_set_id": "ps-1",
+            "parameter_set_hash": "1" * 64,
+            "expiry_utc": datetime(2026, 9, 19, 14, 0, tzinfo=UTC),
+        },
+    )
+
+    assert result.ok is False
+    assert result.reason_code == RejectionReason.INVALIDATED
+    assert saved == []
+    assert pending.status == ApprovalResult.PENDING
+    assert pending.acted_at_utc is None
+
+
 def test_dispatch_callback_binding_gate_failure_returns_reason_code() -> None:
     """Beh. 8i: a binding-gate failure (e.g. APPROVAL_EXPIRED) is
     surfaced as ok=False with the canonical RejectionReason.
