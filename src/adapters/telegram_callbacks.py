@@ -60,13 +60,11 @@ from src.approval.replay import resolve_callback
 from src.domain.approval import Approval
 from src.domain.enums import ApprovalAction, RejectionReason
 from src.domain.journal import JournalEvent
-from telegram import InlineKeyboardMarkup, Update
-from telegram.ext import (
-    Application,
-    ApplicationBuilder,
-    CallbackQueryHandler,
-    ContextTypes,
-)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from telegram import InlineKeyboardMarkup, Update
+    from telegram.ext import Application, ContextTypes
 
 log = logging.getLogger(__name__)
 
@@ -730,6 +728,8 @@ def build_application(
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN must be a non-empty string")
 
+    from telegram.ext import ApplicationBuilder, CallbackQueryHandler
+
     async def _handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> DispatchResult:
         return await on_callback(
             update,
@@ -773,7 +773,14 @@ __all__ = [
 
 
 # Re-export the InlineKeyboardMarkup type for the test surface
-# without making this module import `python-telegram-bot` types at
-# the top of the file (the imports above are guarded by the PTB
-# runtime; tests that never call build_application never hit them).
+# via a lazy lookup so importing this module never requires
+# `python-telegram-bot` (pure surfaces stay independently usable).
 __all__ += ["InlineKeyboardMarkup"]
+
+
+def __getattr__(name: str) -> Any:
+    if name == "InlineKeyboardMarkup":
+        from telegram import InlineKeyboardMarkup as _Markup
+
+        return _Markup
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

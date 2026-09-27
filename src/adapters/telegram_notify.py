@@ -32,9 +32,10 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+if TYPE_CHECKING:
+    from telegram import InlineKeyboardMarkup
 
 
 class TelegramBot(Protocol):
@@ -113,6 +114,8 @@ def build_simulate_keyboard(signal_id: str) -> InlineKeyboardMarkup:
             raise ValueError(
                 f"callback_data exceeds 64 bytes: {len(payload.encode('utf-8'))} bytes"
             )
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
     return InlineKeyboardMarkup(
         [
             [
@@ -181,6 +184,8 @@ def build_approve_keyboard(signal_id: str) -> InlineKeyboardMarkup:
     a time.
     """
     apr_data = _short_signal_id_with_prefix(signal_id, APR_PREFIX)
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
     return InlineKeyboardMarkup([[InlineKeyboardButton("APPROVE", callback_data=apr_data)]])
 
 
@@ -193,6 +198,8 @@ def build_skip_keyboard(signal_id: str) -> InlineKeyboardMarkup:
     limit. The keyboard carries exactly one button labeled SKIP.
     """
     skp_data = _short_signal_id_with_prefix(signal_id, SKP_PREFIX)
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
     return InlineKeyboardMarkup([[InlineKeyboardButton("SKIP", callback_data=skp_data)]])
 
 
