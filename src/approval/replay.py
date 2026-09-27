@@ -45,6 +45,26 @@ if TYPE_CHECKING:
 LookupByTokenHash = Callable[[str], "Approval | None"]
 SaveApproval = Callable[["Approval"], None]
 
+# Per-token in-process locks: two concurrent `resolve_callback` calls
+# for the same token hash serialize on the token's lock so only one
+# performs the PENDING->decided transition. Cross-process races still
+# need a conditional write (UPDATE ... WHERE status='PENDING') at the
+# store layer — the receiver treats a 0-row conditional update as
+# replay-return-existing.
+import threading as _threading
+
+_TOKEN_LOCKS: dict[str, _threading.Lock] = {}
+_TOKEN_LOCKS_GUARD = _threading.Lock()
+
+
+def _lock_for_token(token_hash: str) -> _threading.Lock:
+    with _TOKEN_LOCKS_GUARD:
+        lock = _TOKEN_LOCKS.get(token_hash)
+        if lock is None:
+            lock = _threading.Lock()
+            _TOKEN_LOCKS[token_hash] = lock
+        return lock
+
 
 def resolve_callback(
     callback: Callback,
@@ -105,6 +125,34 @@ def resolve_callback(
     # Hash the raw token to get the idempotency key.
     token_hash = token_hash_of(callback.raw_token)
 
+    with _lock_for_token(token_hash):
+        return _resolve_locked(
+            callback=callback,
+            token_hash=token_hash,
+            lookup_by_token_hash=lookup_by_token_hash,
+            save=save,
+            authorized_chat_id=authorized_chat_id,
+            expiry_utc=expiry_utc,
+            approval_strategy_version=approval_strategy_version,
+            approval_parameter_set_id=approval_parameter_set_id,
+            approval_parameter_set_hash=approval_parameter_set_hash,
+            effective_now=effective_now,
+        )
+
+
+def _resolve_locked(
+    *,
+    callback: Callback,
+    token_hash: str,
+    lookup_by_token_hash: LookupByTokenHash,
+    save: SaveApproval,
+    authorized_chat_id: int,
+    expiry_utc: datetime,
+    approval_strategy_version: str,
+    approval_parameter_set_id: str,
+    approval_parameter_set_hash: str,
+    effective_now: datetime,
+) -> Approval:
     # Look up the approval by token hash. A wrong token (lookup returns
     # None) is rejected — the binding gate's token gate would also
     # catch this, but we reject early to avoid running the rest of the
