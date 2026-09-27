@@ -1,0 +1,8 @@
+{
+  "transitions_count": 1,
+  "final_status": "APPROVED",
+  "final_result": "APPROVED",
+  "acted_at_utc": "2026-09-19T10:30:00+00:00",
+  "approval_token_hash": "23ee06e9c72aca106698a9ae20b7d6ddf475966ba21726cabeb0d793d51c5cc1",
+  "replay_returns_existing": true
+}

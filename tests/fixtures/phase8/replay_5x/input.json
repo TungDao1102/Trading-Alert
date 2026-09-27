@@ -1,0 +1,17 @@
+{
+  "approval_id": "apprv_5x_replay_001",
+  "trade_plan_id": "tp_5x_replay_001",
+  "signal_id": "sig_5x_replay_001",
+  "chat_id": 123456789,
+  "action": "APPROVE",
+  "raw_token": "raw_token_5x_replay_001_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "token_hash": "23ee06e9c72aca106698a9ae20b7d6ddf475966ba21726cabeb0d793d51c5cc1",
+  "plan_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "strategy_version": "v2.0.0",
+  "parameter_set_id": "baseline-v3",
+  "parameter_set_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+  "requested_at_utc": "2026-09-19T10:00:00+00:00",
+  "expiry_utc": "2026-09-19T11:00:00+00:00",
+  "callback_at_utc": "2026-09-19T10:30:00+00:00",
+  "replay_count": 5
+}
