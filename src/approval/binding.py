@@ -136,7 +136,7 @@ def action_to_result(action: ApprovalAction) -> ApprovalResult:
 def check_binding_full(
     *,
     callback: Callback,
-    approval: "Approval",
+    approval: Approval,
     authorized_chat_id: int,
     now_utc: datetime,
     expiry_utc: datetime,

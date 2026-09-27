@@ -121,6 +121,9 @@ def _make_callback(case_input: dict[str, Any]) -> Any:
     )
 
 
+# Module-level import for ApprovalRejected (used in pytest.raises).
+from src.approval.binding import ApprovalRejected  # noqa: E402
+
 # --------------------------------------------------------------------------- #
 # Beh. 1 — token primitives: issue, hash, verify.
 # --------------------------------------------------------------------------- #
@@ -433,7 +436,7 @@ def test_resolve_callback_wrong_chat_rejected_before_state_lookup() -> None:
         store[approval.approval_token_hash] = approval
         transitions.append(approval)
 
-    with pytest.raises(Exception):
+    with pytest.raises(ApprovalRejected):
         resolve_callback(
             callback=wrong_chat_callback,
             lookup_by_token_hash=_lookup,
@@ -485,7 +488,7 @@ def test_resolve_callback_wrong_token_rejected() -> None:
         store[approval.approval_token_hash] = approval
         transitions.append(approval)
 
-    with pytest.raises(Exception):
+    with pytest.raises(ApprovalRejected):
         resolve_callback(
             callback=wrong_token_callback,
             lookup_by_token_hash=_lookup,
@@ -657,7 +660,7 @@ def test_no_synonym_reason_strings_in_src_approval() -> None:
     suspicious: list[str] = []
     for py_file in approval_dir.glob("*.py"):
         text = py_file.read_text(encoding="utf-8")
-        for line_num, line in enumerate(text.splitlines(), start=1):
+        for _line_num, line in enumerate(text.splitlines(), start=1):
             stripped = line.strip()
             # Skip comment-only lines and docstrings.
             if stripped.startswith("#"):

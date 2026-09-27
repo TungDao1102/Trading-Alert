@@ -57,7 +57,7 @@ def resolve_callback(
     approval_parameter_set_id: str,
     approval_parameter_set_hash: str,
     now_utc: datetime | None = None,
-) -> "Approval":
+) -> Approval:
     """Resolve a Telegram callback to an existing or transitioned approval.
 
     Per D-01: the token hash is the idempotency key. A callback is
