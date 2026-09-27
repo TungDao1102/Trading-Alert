@@ -38,10 +38,11 @@ Public surface (the only symbols downstream code uses):
     entry, and writes the new pinned state on rollover. Exits 0 on
     success, non-zero on missing state.
 
-The module imports nothing from Polars/pandas/NumPy/Binance SDK/
-SQLAlchemy/Pydantic — stdlib + `src/core/_decimal.py` only, mirroring
-the Phase-4 D-10 / Phase-5 D-05 / Phase-6 D-05 / Phase-7.1 D-05
-purity precedent.
+The module owns the freeze-monitor slice: registry reads go through
+`src/domain/registry.py`, cost-key binding through `src/backtest/`
+(mirroring the 07.1 binding gate), canonical digests through
+`src/domain/canonical.py`. No WS/Telegram/ORM/frame types enter this
+module; only these named sibling surfaces do.
 
 FLAGGED ASSUMPTION (PAPER-03 unclassified): the freeze-monitor tick
 cadence (hourly or daily) and the minimum-evidence signal-frequency
@@ -59,6 +60,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+import structlog
+
 from src.backtest.binding import assert_cost_model_binds_registry
 from src.backtest.costs import COST_KEYS, CostModel, build_cost_model
 from src.domain.canonical import sha256_hex
@@ -67,6 +70,8 @@ from src.domain.registry import (
     ParameterSet,
     _parse_and_validate,
 )
+
+log = structlog.get_logger()
 
 # --------------------------------------------------------------------------- #
 # StreamEpoch — pinned parameter set epoch.
@@ -97,8 +102,13 @@ class StreamEpoch:
     evidence_claim_open: bool = True
 
     def __post_init__(self) -> None:
-        if not isinstance(self.epoch_id, str) or self.epoch_id == "":
-            raise ValueError("epoch_id must be a non-empty string")
+        if not isinstance(self.epoch_id, str) or len(self.epoch_id) != 64:
+            raise ValueError(
+                "epoch_id must be a 64-hex SHA256 string, "
+                f"got len={len(self.epoch_id) if isinstance(self.epoch_id, str) else '?'}"
+            )
+        if not all(c in "0123456789abcdef" for c in self.epoch_id):
+            raise ValueError("epoch_id must be lowercase hex")
         if not isinstance(self.strategy_id, str) or self.strategy_id == "":
             raise ValueError("strategy_id must be a non-empty string")
         if not isinstance(self.parameter_set_id, str) or self.parameter_set_id == "":
@@ -200,6 +210,37 @@ class FreezeCheckOutcome:
 # --------------------------------------------------------------------------- #
 
 
+def _require_utc_aware(value: datetime, field_name: str) -> None:
+    """Reject naive datetimes loudly (WR-07)."""
+    if value.tzinfo is None:
+        raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
+
+
+def _canonical_parameter_set_hash(
+    *,
+    strategy_id: str,
+    strategy_version: str,
+    parameter_set_id: str,
+    parameters: dict[str, object],
+) -> str:
+    """Single canonical hash construction for parameter sets (WR-07).
+
+    Both the pin path (`_load_parameter_set_with_root`) and the check
+    path (`_recompute_parameter_set_hash`) build the registry hash
+    here, so a future field added in one place cannot silently drift
+    from the other and convert every clean tick into a phantom
+    REGISTRY_DIFF rollover.
+    """
+    return sha256_hex(
+        {
+            "strategy_id": strategy_id,
+            "strategy_version": strategy_version,
+            "parameter_set_id": parameter_set_id,
+            "parameters": parameters,
+        }
+    )
+
+
 def _make_epoch_id(
     *,
     strategy_id: str,
@@ -214,6 +255,7 @@ def _make_epoch_id(
     against the same registry get identical epoch_ids (prefix-
     invariance, D-02 determinism).
     """
+    _require_utc_aware(opened_at_utc, "opened_at_utc")
     return sha256_hex(
         {
             "strategy_id": strategy_id,
@@ -245,13 +287,11 @@ def _recompute_parameter_set_hash(
     strategy_version, normalized_params = _parse_and_validate(
         text, path, strategy_id, parameter_set_id
     )
-    return sha256_hex(
-        {
-            "strategy_id": strategy_id,
-            "strategy_version": strategy_version,
-            "parameter_set_id": parameter_set_id,
-            "parameters": normalized_params,
-        }
+    return _canonical_parameter_set_hash(
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        parameter_set_id=parameter_set_id,
+        parameters=normalized_params,
     )
 
 
@@ -279,13 +319,11 @@ def _load_parameter_set_with_root(
         text, path, strategy_id, parameter_set_id
     )
 
-    parameter_set_hash = sha256_hex(
-        {
-            "strategy_id": strategy_id,
-            "strategy_version": strategy_version,
-            "parameter_set_id": parameter_set_id,
-            "parameters": normalized_params,
-        }
+    parameter_set_hash = _canonical_parameter_set_hash(
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        parameter_set_id=parameter_set_id,
+        parameters=normalized_params,
     )
     return ParameterSet(
         strategy_id=strategy_id,
@@ -333,7 +371,9 @@ def pin_stream_epoch(
             bind the registry (per 07.1 D-01).
         KeyError: missing cost-slice keys in the registry (fail
             closed, never translated — 07.1 D-02).
+        ValueError: naive opened_at_utc (WR-07).
     """
+    _require_utc_aware(opened_at_utc, "opened_at_utc")
     root = registry_root if registry_root is not None else REGISTRY_ROOT
     parameter_set = _load_parameter_set_with_root(strategy_id, parameter_set_id, root)
 
@@ -549,16 +589,35 @@ def run_check_cli(
     registry, appends one JSONL entry to `diff_log_path`, and on
     rollover writes the new pinned state.
 
+    The CLI's `--strategy-id/--parameter-set-id` must match the pinned
+    file (WR-15): checking pair B against pair A's state is a silent
+    wrong-answer success without this gate.
+
     Returns:
-        0 on success (clean tick or rollover).
+        0 on a clean tick.
+        3 on a REGISTRY_DIFF rollover (CR-06: distinct from success
+          so the workflow can page/alert instead of reporting green).
         2 if the pinned state file is missing (soak not started yet
           or the state file was deleted).
-        1 on any other error.
+        1 on any other error (including a strategy-id mismatch).
     """
     try:
         pinned_epoch = load_pinned_state(pinned_state_path)
     except FileNotFoundError:
         return 2
+
+    if (
+        strategy_id != pinned_epoch.strategy_id
+        or parameter_set_id != pinned_epoch.parameter_set_id
+    ):
+        log.error(
+            "paper.freeze.cli_id_mismatch",
+            cli_strategy_id=strategy_id,
+            cli_parameter_set_id=parameter_set_id,
+            pinned_strategy_id=pinned_epoch.strategy_id,
+            pinned_parameter_set_id=pinned_epoch.parameter_set_id,
+        )
+        return 1
 
     outcome = check_registry_unchanged(
         pinned_epoch,
@@ -571,6 +630,7 @@ def run_check_cli(
     # checks against the new hash.
     if outcome.halted:
         write_pinned_state(outcome.current_epoch, pinned_state_path)
+        return 3
 
     return 0
 
