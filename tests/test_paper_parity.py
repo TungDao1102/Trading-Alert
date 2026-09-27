@@ -113,6 +113,14 @@ def _project_paper_verdicts(
     Only includes records where a signal was produced (signal_id is
     not None). This matches the simulator's behavior of skipping
     strategy NO_TRADE bars (no trade record emitted).
+
+    Known limitation (WR-10): strategy-stage NO_TRADEs (no signal
+    emitted — the common case) are excluded here, so this projection
+    alone is vacuous for the strategy decision itself. Use
+    `_project_paper_verdicts_full` for the per-bar audit trail; full
+    cross-side strategy parity needs per-bar simulator outcomes (the
+    simulator emits trades only — engine work, not a paper-call-site
+    fix).
     """
     verdicts: list[tuple[str, str]] = []
     for outcome in paper_outcomes:
@@ -121,6 +129,33 @@ def _project_paper_verdicts(
             if signal_id is not None:
                 verdicts.append((signal_id, record["reason_code"]))
     return sorted(verdicts)
+
+
+def _project_paper_verdicts_full(
+    paper_outcomes: list[dict[str, Any]],
+) -> list[tuple[str, str | None, str, str]]:
+    """Project ALL paper records to per-bar verdict tuples (WR-10).
+
+    Returns one `(bar_close_utc, signal_id_or_None, reason_code,
+    stage)` tuple per record, in replay order (sequence matters — no
+    sorting). Strategy-stage NO_TRADEs and feed-gate rejections
+    (WARMUP_INSUFFICIENT/DATA_STALE, which carry no signal_id) are
+    included: paper and backtest can no longer "agree" by both
+    emitting nothing-projected while disagreeing on every setup
+    signal.
+    """
+    verdicts: list[tuple[str, str | None, str, str]] = []
+    for outcome in paper_outcomes:
+        for record in outcome["no_trade_records"]:
+            verdicts.append(
+                (
+                    record["bar_close_utc"],
+                    record.get("signal_id"),
+                    record["reason_code"],
+                    record["stage"],
+                )
+            )
+    return verdicts
 
 
 def _project_simulator_verdicts(
@@ -235,4 +270,43 @@ def test_paper_replay_is_prefix_invariant() -> None:
     # And the full digest must match the pinned expected digest.
     assert full_digest == expected["digest"], (
         f"full digest {full_digest} != expected {expected['digest']}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Test 3 — full per-bar projection covers every replayed bar (WR-10).
+# --------------------------------------------------------------------------- #
+
+
+def test_paper_full_projection_covers_every_bar() -> None:
+    """Beh. 3: the full projection includes signal-less records.
+
+    Per WR-10: the signal-only projection is vacuous for the strategy
+    decision (both sides can "match" by projecting nothing). The full
+    per-bar projection must carry exactly one entry per replayed bar —
+    including feed-gate rejections and strategy-stage NO_TRADEs that
+    carry no signal_id — so a strategy-stage divergence can never
+    again hide behind an empty projection.
+    """
+    case_input = json.loads((PARITY_FIXTURE_DIR / "input.json").read_text())
+
+    paper_outcomes = _replay_paper_through_bars(case_input)
+    full = _project_paper_verdicts_full(paper_outcomes)
+
+    strategy_bars = case_input["strategy_bars"]
+    assert len(full) == len(strategy_bars), (
+        f"full projection must cover every bar: {len(full)} != {len(strategy_bars)}"
+    )
+    for (bar_close_utc, _signal_id, _reason_code, stage), bar in zip(full, strategy_bars):
+        assert bar_close_utc == bar["close_time_utc"], (
+            f"projection order must follow replay order: {bar_close_utc} != {bar['close_time_utc']}"
+        )
+        assert stage in ("feed_gate", "strategy", "planner", "risk", "risk_passed"), (
+            f"unknown stage {stage!r}"
+        )
+    # The signal-less records must actually be present (the property
+    # the old projection dropped): at least one entry without a
+    # signal_id, otherwise this test is vacuous too.
+    assert any(signal_id is None for (_, signal_id, _, _) in full), (
+        "full projection must include signal-less records"
     )
