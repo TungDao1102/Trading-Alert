@@ -762,6 +762,7 @@ def make_manual_close_drill(
     local_intent: dict[str, Any],
     truth: dict[str, Any],
     position_verifier: Callable[..., Any],
+    compare_fn: Callable[..., Any] | None = None,
 ) -> DrillDeclaration:
     """Build the MANUAL_CLOSE drill (§12 Manual close).
 
@@ -781,10 +782,13 @@ def make_manual_close_drill(
             keys.
         position_verifier: Caller-supplied function returning the
             current position amount for a symbol.
+        compare_fn: The 08-04 `compare` function. Defaults to the
+            canonical compare; inject a sentinel in tests to verify
+            the drill exercises the configured function.
     """
-    import asyncio
+    if compare_fn is None:
+        from src.reconcile.compare import compare as compare_fn
 
-    from src.reconcile.compare import compare as _compare_default
 
     def inject() -> str:
         return "operator-initiated manual close + orphan protective"
@@ -792,7 +796,7 @@ def make_manual_close_drill(
     def assert_outcome(journal: DrillLog, context: dict[str, Any]) -> str:
         # Build a diff against the post-manual-close truth (the local
         # algo protective survives the manual close as an orphan).
-        diff = _compare_default(
+        diff = compare_fn(
             local_open_orders=local_intent["open_orders"],
             local_open_algos=local_intent["open_algos"],
             local_open_positions=local_intent["open_positions"],
