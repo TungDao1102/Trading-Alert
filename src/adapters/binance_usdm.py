@@ -954,9 +954,7 @@ def _row_to_open_order_snapshot(
         order_type=item.type or "",
         time_in_force=item.time_in_force or "",
         status=item.status or "",
-        quantity=Decimal(str(item.orig_qty))
-        if item.orig_qty is not None
-        else Decimal("0"),
+        quantity=_require_quantity(item.orig_qty, "orig_qty"),
         price=Decimal(str(item.price)) if item.price is not None else None,
         stop_price=(
             Decimal(str(item.stop_price))
@@ -967,9 +965,7 @@ def _row_to_open_order_snapshot(
         close_position=bool(item.close_position) if item.close_position is not None else False,
         working_type=item.working_type,
         price_protect=item.price_protect,
-        update_time_utc=_ms_to_utc(int(item.update_time))
-        if item.update_time is not None
-        else _epoch_utc(),
+        update_time_utc=_require_update_time_utc(item.update_time),
     )
 
 
@@ -999,9 +995,7 @@ def _row_to_open_algo_order_snapshot(
         position_side=item.position_side or "",
         time_in_force=item.time_in_force or "",
         algo_status=item.algo_status or "",
-        quantity=Decimal(str(item.quantity))
-        if item.quantity is not None
-        else Decimal("0"),
+        quantity=_require_quantity(item.quantity, "quantity"),
         trigger_price=(
             Decimal(str(item.trigger_price))
             if item.trigger_price is not None
@@ -1016,9 +1010,7 @@ def _row_to_open_algo_order_snapshot(
         working_type=item.working_type,
         close_position=bool(item.close_position) if item.close_position is not None else False,
         reduce_only=bool(item.reduce_only) if item.reduce_only is not None else False,
-        update_time_utc=_ms_to_utc(int(item.update_time))
-        if item.update_time is not None
-        else _epoch_utc(),
+        update_time_utc=_require_update_time_utc(item.update_time),
     )
 
 
@@ -1065,9 +1057,7 @@ def _row_to_position_snapshot(
             else None
         ),
         margin_asset=item.margin_asset or "",
-        update_time_utc=_ms_to_utc(int(item.update_time))
-        if item.update_time is not None
-        else _epoch_utc(),
+        update_time_utc=_require_update_time_utc(item.update_time),
     )
 
 
@@ -1084,6 +1074,18 @@ def _algo_order_to_probe(
         if raw.update_time is not None
         else None,
     )
+
+
+def _require_quantity(value: Any, field_name: str) -> Decimal:
+    if value is None:
+        raise ValueError(f"snapshot row missing {field_name}: refusing to fabricate zero")
+    return Decimal(str(value))
+
+
+def _require_update_time_utc(value: Any) -> datetime:
+    if value is None:
+        raise ValueError("snapshot row missing update_time: refusing to fabricate epoch-0")
+    return _ms_to_utc(int(value))
 
 
 def _epoch_utc() -> datetime:
