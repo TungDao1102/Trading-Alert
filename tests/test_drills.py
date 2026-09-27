@@ -38,6 +38,12 @@ import pytest
 PHASE8_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase8"
 DRILL_LOG_FIXTURE_DIR = PHASE8_FIXTURES_DIR / "drill_log"
 
+# Registry of every fake adapter built by
+# `_build_all_drill_declarations` for the latest call. The
+# no-place-order runtime test reads this registry because the fakes
+# are otherwise function-local and inaccessible.
+BUILT_DRILL_ADAPTERS: list[Any] = []
+
 
 # --------------------------------------------------------------------------- #
 # Helpers — fakes shared across the drill tests.
@@ -164,11 +170,17 @@ class _FakeReconcileAdapter:
 
     async def place_order(self, **_kwargs: Any) -> None:
         """The reconciler must NEVER place a new order (D-03)."""
+        import logging
+
+        logging.getLogger(__name__).error("place_order called on drill fake")
         self.place_order_calls += 1
         raise AssertionError("reconciler must never place a new order — query/cancel only")
 
     async def place_algo_order(self, **_kwargs: Any) -> None:
         """The reconciler must NEVER place a new algo order (D-03)."""
+        import logging
+
+        logging.getLogger(__name__).error("place_algo_order called on drill fake")
         self.place_order_calls += 1
         raise AssertionError("reconciler must never place a new algo order — query/cancel only")
 
@@ -730,6 +742,18 @@ def _build_all_drill_declarations(
         "manual_close": manual_close_drill,
         "restore": restore_drill,
     }
+    BUILT_DRILL_ADAPTERS.clear()
+    BUILT_DRILL_ADAPTERS.extend(
+        [
+            unprotected_adapter,
+            orphan_adapter,
+            api_down_adapter,
+            stale_feed_adapter,
+            db_failure_adapter,
+            manual_close_adapter,
+            restore_adapter,
+        ]
+    )
     return tuple(by_name[name] for name in DRILL_NAMES)
 
 
@@ -960,13 +984,13 @@ def test_no_place_order_invariant_across_all_drills() -> None:
         now_utc_sequence=now_utc_sequence,
     )
 
-    # The static guard at the end of this file asserts the source-
-    # level invariant. The runtime check below is a belt-and-braces
-    # assertion: no fake adapter in the drill suite ever received a
-    # place-order call.
-    # (The fakes are constructed inside _build_all_drill_declarations
-    # and are not directly accessible here; the static guard is the
-    # authoritative check.)
+    # Runtime check: no fake adapter in the drill suite ever received
+    # a place-order call.
+    assert len(BUILT_DRILL_ADAPTERS) > 0, "expected the drill builder to register fake adapters"
+    for adapter in BUILT_DRILL_ADAPTERS:
+        assert adapter.place_order_calls == 0, (
+            f"place-order invariant violated: {adapter.place_order_calls} calls"
+        )
 
 
 # --------------------------------------------------------------------------- #
