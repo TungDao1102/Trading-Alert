@@ -1,0 +1,53 @@
+{
+  "description": "Golden ordered drill log for the Phase 8 RUNBOOK drill rehearsal (plan 08-05). Pins the eight-outcome sequence: drill names, fault strings, outcome strings, UTC timestamps, and RUNBOOK section references. A missing drill or a reordered entry fails the suite.",
+  "drill_names": [
+    "unprotected",
+    "orphan",
+    "duplicate",
+    "api_down",
+    "stale_feed",
+    "db_failure",
+    "manual_close",
+    "restore"
+  ],
+  "outcomes": [
+    "safe_mode_entered",
+    "orphan_swept",
+    "replay_one_transition",
+    "safe_mode_entered",
+    "safe_mode_entered",
+    "safe_mode_entered",
+    "orphan_swept",
+    "restore_clean_exit"
+  ],
+  "faults": [
+    "local ENTRY + position but no SL protective (ENTRY_WITHOUT_PROTECTIVE)",
+    "local algo protective with no matching local position and no exchange position (ORPHAN_PROTECTIVE)",
+    "5x replay of same APPROVE callback",
+    "Binance API raised transient error on signed order path",
+    "market feed freshness below configured threshold",
+    "database write raised transient error",
+    "operator-initiated manual close + orphan protective",
+    "stale three-source compare forcing SAFE_MODE enter"
+  ],
+  "occurred_at_utc": [
+    "2026-09-19T12:00:00+00:00",
+    "2026-09-19T12:00:01+00:00",
+    "2026-09-19T12:00:02+00:00",
+    "2026-09-19T12:00:03+00:00",
+    "2026-09-19T12:00:04+00:00",
+    "2026-09-19T12:00:05+00:00",
+    "2026-09-19T12:00:06+00:00",
+    "2026-09-19T12:00:07+00:00"
+  ],
+  "runbook_sections": [
+    "§3 Position without confirmed stop",
+    "§4 Orphan protective orders",
+    "§5 Suspected duplicate approval/order",
+    "§10 Binance API degradation",
+    "§7 Market feed stale",
+    "§9 Database failure",
+    "§12 Manual close",
+    "restore path (only SAFE_MODE exit)"
+  ]
+}
