@@ -285,10 +285,21 @@ def compare(
         has_position = has_local_position or has_exchange_position
 
         if is_protective and not has_position:
-            # Orphan protective: the algo still exists in local
-            # intent but there is no position to protect. The
-            # sweeper's authoritative position-zero verification is
-            # the next gate before the cancel call.
+            if truth_algo_by_client_id.get(client_algo_id) is None:
+                divergences.append(
+                    Divergence(
+                        kind=DIVERGENCE_KIND_UNSYNCED_ALGO,
+                        symbol=symbol,
+                        order_role=order_role,
+                        client_order_id=None,
+                        client_algo_id=client_algo_id,
+                        reason=(
+                            "local algo protective with no matching "
+                            "exchange algo and no position to protect"
+                        ),
+                    )
+                )
+                continue
             divergences.append(
                 Divergence(
                     kind=DIVERGENCE_KIND_ORPHAN_PROTECTIVE,
