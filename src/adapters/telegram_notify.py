@@ -19,6 +19,7 @@ labels stay verbatim today because downstream code reads them.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Protocol
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -64,6 +65,19 @@ async def send_simulate(
     )
 
 
+def _short_signal_id(signal_id: str) -> str:
+    """Compress a signal id to 32 hex chars (CR-05).
+
+    Telegram enforces a 64-byte limit on `callback_data`; real signal
+    ids already exceed it with the `SIM:`/`SKIP:` prefix. The sha256
+    prefix is deterministic (same signal id → same short id) so
+    duplicate sends stay idempotent. Phase-7 callbacks are inert
+    labels (no inbound dispatch); Phase 8 must keep a short→full
+    mapping when it binds real handlers.
+    """
+    return hashlib.sha256(signal_id.encode("utf-8")).hexdigest()[:32]
+
+
 def build_simulate_keyboard(signal_id: str) -> InlineKeyboardMarkup:
     """Build the SIMULATE keyboard with inert callback labels.
 
@@ -75,15 +89,23 @@ def build_simulate_keyboard(signal_id: str) -> InlineKeyboardMarkup:
     The keyboard carries exactly two buttons: a SIMULATE-recorded
     marker and a SKIP (Phase 8) marker. The operator sees both
     buttons but neither performs an action today.
+
+    `callback_data` stays within Telegram's 64-byte limit via
+    `_short_signal_id` (CR-05).
     """
+    short = _short_signal_id(signal_id)
+    sim_data = f"SIM:{short}"
+    skip_data = f"SKIP:{short}"
+    assert len(sim_data.encode("utf-8")) <= 64
+    assert len(skip_data.encode("utf-8")) <= 64
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "SIMULATE-recorded", callback_data=f"SIM:{signal_id}"
+                    "SIMULATE-recorded", callback_data=sim_data
                 ),
                 InlineKeyboardButton(
-                    "SKIP (Phase 8)", callback_data=f"SKIP:{signal_id}"
+                    "SKIP (Phase 8)", callback_data=skip_data
                 ),
             ]
         ]
