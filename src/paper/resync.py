@@ -16,7 +16,7 @@ surface stays behind `src/adapters/binance_usdm.py`.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Protocol
 
 import structlog
@@ -72,6 +72,19 @@ class AdapterLike(Protocol):
 # --------------------------------------------------------------------------- #
 # Helpers.
 # --------------------------------------------------------------------------- #
+
+_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _datetime_to_ms(value: datetime) -> int:
+    """Convert a tz-aware datetime to integer millisecond epoch (WR-01).
+
+    Uses exact integer timedelta arithmetic — never `timestamp() * 1000`,
+    whose binary-float round-trip loses sub-millisecond precision on
+    large epoch values and escapes the no-float AST guard.
+    """
+    delta = value.astimezone(timezone.utc) - _EPOCH_UTC
+    return (delta.days * 86400 + delta.seconds) * 1000 + delta.microseconds // 1000
 
 
 def _data_class_for(interval: str) -> str:
@@ -152,8 +165,8 @@ async def backfill_missed_closes(
     now_utc = now_utc.astimezone(UTC)
 
     step_ms = interval_ms(interval)
-    start_ms = int(last_close_utc.timestamp() * 1000)
-    now_ms = int(now_utc.timestamp() * 1000)
+    start_ms = _datetime_to_ms(last_close_utc)
+    now_ms = _datetime_to_ms(now_utc)
 
     # Bounded retry: cap attempts AND wall-clock, then fail closed.
     # Retry transient faults only — programming errors (ValueError,
@@ -204,7 +217,7 @@ async def backfill_missed_closes(
         raw_page.extend(page)
         if len(page) < 1500:
             break
-        last_open_ms = int(page[-1].open_time_utc.timestamp() * 1000)
+        last_open_ms = _datetime_to_ms(page[-1].open_time_utc)
         cursor_ms = last_open_ms + step_ms
         if cursor_ms > now_ms:
             break
