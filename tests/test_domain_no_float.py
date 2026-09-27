@@ -57,6 +57,8 @@ SCANNED_FILES = (
     # Phase 7 plan 07-03 — paper attribution vocabulary + record assembly (D-03 purity).
     "src/paper/attribution.py",
     "src/paper/journal.py",
+    # Phase 7 plan 07-04 — paper freeze monitor (D-04 purity).
+    "src/paper/freeze.py",
 )
 
 

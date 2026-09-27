@@ -1,0 +1,61 @@
+# Paper freeze monitor — hourly soak-host cron (Phase 7, plan 07-04).
+#
+# Per D-04: the soak pins its registry version at start and re-reads
+# the registry on every monitor tick. A diff against the pinned set
+# halts the stream's evidence claim and opens a new epoch. The diff
+# log (logs/paper/registry_diff.jsonl) is the PAPER-03 acceptance
+# artifact.
+#
+# This workflow is the scheduled CI invoker (hourly). It calls the
+# freeze check CLI with the diff-log path. The CLI loads the pinned
+# state from logs/paper/pinned_epoch.json (operator-managed) and
+# appends one JSONL line per tick. On rollover the CLI writes a new
+# pinned-state file so the next tick checks against the new hash.
+#
+# Operator alternative: a soak-host scheduled process (cron, systemd
+# timer, etc.) calling the same CLI. Either satisfies D-04; CI is
+# cheaper, a process is more immediate.
+
+name: Paper Freeze Check
+
+on:
+  schedule:
+    # Hourly. Cadence is at researcher discretion (FLAGGED ASSUMPTION,
+    # PAPER-03 unclassified). Hourly is plenty for a no-change proof.
+    - cron: "0 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  freeze-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Run freeze check
+        env:
+          PAPER_REGISTRY_ROOT: ${{ github.workspace }}/params
+          PAPER_PINNED_STATE: ${{ github.workspace }}/logs/paper/pinned_epoch.json
+          PAPER_DIFF_LOG: ${{ github.workspace }}/logs/paper/registry_diff.jsonl
+        run: |
+          mkdir -p "$(dirname "$PAPER_DIFF_LOG")"
+          uv run python -m src.paper.freeze \
+            --check \
+            --strategy-id trend-pullback \
+            --parameter-set-id baseline-v3 \
+            --diff-log "$PAPER_DIFF_LOG" \
+            --pinned-state "$PAPER_PINNED_STATE" \
+            --registry-root "$PAPER_REGISTRY_ROOT"

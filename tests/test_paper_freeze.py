@@ -265,7 +265,7 @@ def test_check_registry_unchanged_opens_new_epoch_on_diff(tmp_path: Path) -> Non
     expected = _load_expected(case_dir)
 
     # Copy the real registry into a tmp root so we can mutate it.
-    real_registry_root = Path(__file__).resolve().parents[2] / "params"
+    real_registry_root = Path(__file__).resolve().parents[1] / "params"
     tmp_registry_root = tmp_path / "params"
     _copy_registry_to(tmp_registry_root, real_registry_root)
 
@@ -385,7 +385,7 @@ def test_cli_check_appends_clean_diff_log_entry(tmp_path: Path) -> None:
 
     # Copy the real registry into a tmp root so the CLI uses a stable
     # registry state.
-    real_registry_root = Path(__file__).resolve().parents[2] / "params"
+    real_registry_root = Path(__file__).resolve().parents[1] / "params"
     tmp_registry_root = tmp_path / "params"
     _copy_registry_to(tmp_registry_root, real_registry_root)
 
@@ -393,6 +393,7 @@ def test_cli_check_appends_clean_diff_log_entry(tmp_path: Path) -> None:
     pinned_state_path = tmp_path / "pinned_epoch.json"
     pinned_state = {
         "epoch_id": "0" * 64,
+        "strategy_id": case_input["strategy_id"],
         "parameter_set_id": case_input["parameter_set_id"],
         "parameter_set_hash": "0" * 64,
         "opened_at_utc": case_input["opened_at_utc"],
