@@ -325,23 +325,33 @@ def dispatch_callback(
     signal_id, trade_plan_id = mapping
 
     # Gate 5: build the Callback payload and delegate to replay.
+    # Stale buttons after a re-plan are a normal operator flow — a
+    # missing context or malformed payload maps to INVALIDATED, never
+    # an unhandled ValueError/KeyError out of the PTB handler.
     if binding_context is None:
-        raise ValueError(
-            "binding_context is required for APR/SKP dispatch "
-            "(authorized_chat_id, expiry_utc, strategy_version, "
-            "parameter_set_id, parameter_set_hash)"
+        return DispatchResult(
+            ok=False,
+            kind=parsed.kind,
+            reason_code=RejectionReason.INVALIDATED,
         )
 
-    callback = Callback(
-        raw_token=raw_token,
-        chat_id=callback_chat_id,
-        plan_hash=binding_context["plan_hash"],
-        strategy_version=binding_context["strategy_version"],
-        parameter_set_id=binding_context["parameter_set_id"],
-        parameter_set_hash=binding_context["parameter_set_hash"],
-        callback_at_utc=callback_at_utc,
-        action=_callback_kind_to_action(parsed.kind),
-    )
+    try:
+        callback = Callback(
+            raw_token=raw_token,
+            chat_id=callback_chat_id,
+            plan_hash=binding_context["plan_hash"],
+            strategy_version=binding_context["strategy_version"],
+            parameter_set_id=binding_context["parameter_set_id"],
+            parameter_set_hash=binding_context["parameter_set_hash"],
+            callback_at_utc=callback_at_utc,
+            action=_callback_kind_to_action(parsed.kind),
+        )
+    except (ValueError, KeyError, TypeError):
+        return DispatchResult(
+            ok=False,
+            kind=parsed.kind,
+            reason_code=RejectionReason.INVALIDATED,
+        )
 
     # Build a wrapper save_atomic that includes the mapping row on
     # the first transition. The replay layer calls save(new_approval)
@@ -381,6 +391,12 @@ def dispatch_callback(
             ok=False,
             kind=parsed.kind,
             reason_code=exc.reason_code,
+        )
+    except (ValueError, KeyError, TypeError):
+        return DispatchResult(
+            ok=False,
+            kind=parsed.kind,
+            reason_code=RejectionReason.INVALIDATED,
         )
 
     return DispatchResult(ok=True, kind=parsed.kind, approval=approval)
