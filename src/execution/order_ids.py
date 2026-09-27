@@ -52,13 +52,18 @@ _ALGO_PLAN_SLICE_LEN = 31
 
 
 def _require_plan_hash(plan_hash: object) -> str:
-    """Validate plan_hash is a non-empty string (D-12 boundary)."""
+    """Validate plan_hash is a 64-char lowercase hex string (D-12 boundary)."""
     if not isinstance(plan_hash, str):
         raise TypeError(
             f"plan_hash must be str, got {type(plan_hash).__name__}"
         )
     if plan_hash == "":
         raise ValueError("plan_hash must be a non-empty string")
+    if len(plan_hash) != 64 or any(c not in "0123456789abcdef" for c in plan_hash):
+        raise ValueError(
+            "plan_hash must be a 64-char lowercase hex string "
+            f"(SHA-256 identity), got {plan_hash!r}"
+        )
     return plan_hash
 
 
