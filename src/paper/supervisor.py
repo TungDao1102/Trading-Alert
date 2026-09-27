@@ -217,18 +217,21 @@ class PaperSupervisor:
 
     async def _resubscribe_and_backfill(
         self, *, journal_outage_gaps: bool
-    ) -> dict[tuple[str, str], list[RestKline]]:
+    ) -> tuple[dict[tuple[str, str], list[RestKline]], list[dict[str, Any]]]:
         """Close existing handles, resubscribe, and backfill each pair.
 
         Returns the backfilled closes per (symbol, interval) pair
         (CR-03: log-only backfill dropped closes on the floor — the
-        caller feeds these into the loop's feed_events path). Pairs
-        with no prior close contribute no entry.
+        caller feeds these into the loop's feed_events path), plus
+        the outage gaps for pairs whose backfill raised (WR-09: the
+        failing pair journals its gap instead of leaving an invisible
+        hole). Pairs with no prior close contribute no entry.
         """
         self._close_all_handles()
         self.start()
 
         backfilled: dict[tuple[str, str], list[RestKline]] = {}
+        outage_gaps: list[dict[str, Any]] = []
         now = self._clock()
         for symbol in self._symbols:
             for interval in self._intervals:
@@ -255,6 +258,17 @@ class PaperSupervisor:
                 except Exception as exc:
                     # Per-symbol isolation: one failing pair journals
                     # its gap and the remaining pairs still dispatch.
+                    # Build the gap dict in the CollectorGap shape so
+                    # the hole is visible to the journal (WR-09), not
+                    # just a log line.
+                    gap = {
+                        "symbol": symbol,
+                        "data_class": f"paper-{interval}",
+                        "expected_utc": last,
+                        "observed_utc": now,
+                        "reason": f"backfill_exception:{type(exc).__name__}",
+                    }
+                    outage_gaps.append(gap)
                     if journal_outage_gaps:
                         log.warning(
                             "paper.supervisor.backfill_failed",
@@ -286,7 +300,7 @@ class PaperSupervisor:
                         closes=len(closes),
                     )
                     backfilled[(symbol, interval)] = closes
-        return backfilled
+        return backfilled, outage_gaps
 
     def _close_all_handles(self) -> None:
         """Close every WS handle we own."""
