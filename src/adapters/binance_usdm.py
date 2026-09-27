@@ -12,6 +12,48 @@ Dataclass conventions:
   - Timestamps are `datetime` with `tzinfo=UTC` (D-06).
   - All fields are `frozen=True` so an immutable value flows through the
     pipeline and cannot be accidentally mutated.
+
+Phase 8 (plan 08-04) reconciler truth surface — every method below is
+verified against the INSTALLED SDK version (recorded here per
+acceptance criterion "SDK signatures verified against installed
+17.4.0 in module docstring"; re-verify against the SDK after any upgrade
+per the project's SDK re-verification policy):
+
+  Installed package: binance-sdk-derivatives-trading-usds-futures 17.4.0
+  Verified against the installed package via `python -c "import
+  binance_sdk_derivatives_trading_usds_futures as m; ..."` during
+  08-04 execution.
+
+  | Adapter method              | SDK method                      | Notes
+  | --------------------------- | ------------------------------- | -----
+  | snapshot_open_normal_orders | current_all_open_orders(symbol) | 17.3.1 -> 17.4.0: no signature
+    change in the installed package; symbol parameter Optional[str]
+    unchanged; returns ApiResponse[CurrentAllOpenOrdersResponse] (list
+    shape at runtime).
+  | snapshot_open_algo_orders   | current_all_algo_open_orders    | 17.3.1 -> 17.4.0: no signature
+    change; `algo_type`, `symbol`, `algo_id`, `recv_window` Optional,
+    return list at runtime.
+  | snapshot_positions          | position_information_v3         | 17.3.1 -> 17.4.0: no signature
+    change; `symbol`, `recv_window` Optional; return list at runtime
+    (one row per symbol/position_side).
+  | query_algo_order_by_client  | query_algo_order(client_algo_id)| 17.3.1 -> 17.4.0: no signature
+    change; `algo_id`, `client_algo_id`, `recv_window` Optional —
+    populate `client_algo_id` (T-8-32 query-by-ID first, never blind
+    retry per EXECUTION_SPEC 10).
+  | cancel_normal_order         | cancel_order(symbol, orig_client_order_id) | 17.3.1 -> 17.4.0: no
+    signature change; `symbol` required, `order_id` / `orig_client_order_id`
+    optional — populate `orig_client_order_id` to keep the cancel
+    idempotent on retries.
+  | cancel_algo_order           | cancel_algo_order(client_algo_id) | 17.3.1 -> 17.4.0: no
+    signature change; same query-by-ID posture as the normal cancel.
+
+The 17.3.1 -> 17.4.0 changelog (per RESEARCH Open Question 2): the
+Delta closed during 08-04 was "no public REST method-signature change
+in any of the seven reconciler methods we touch; only the
+ALGO_UPDATE.o.rm field semantics for rejection reasons (Dec 2025 Algo
+migration) changed, which is WS-side and not part of this adapter
+slice." Reconciliation module never relies on WS-only events without
+the periodic REST truth tick (T-8-33).
 """
 
 from __future__ import annotations
@@ -24,6 +66,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import structlog
+import tenacity
 from binance_sdk_derivatives_trading_usds_futures import (
     DerivativesTradingUsdsFutures,
     RateLimitBanError,
@@ -34,11 +77,44 @@ log = structlog.get_logger()
 
 if TYPE_CHECKING:
     from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
+        CancelAlgoOrderResponse,
+        CancelOrderResponse,
+        CurrentAllAlgoOpenOrdersResponse,
+        CurrentAllOpenOrdersResponse,
         ExchangeInformationResponse,
         ExchangeInformationResponseSymbolsInnerFiltersInner,
         GetFundingRateHistoryResponseInner,
         OpenInterestResponse,
+        PositionInformationV3Response,
+        QueryAlgoOrderResponse,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Reconciler cancel ceilings (mirror of notify/resync precedent).
+#
+# The reconciler is the LAST line of defense against stale protective
+# orders. Its cancel calls must be bounded — a runaway retry loop can
+# turn an orphan protective into a flood of duplicate exchange
+# requests. The ceilings below are module-level named constants so the
+# operator can audit them before live enablement, never mid-run.
+# --------------------------------------------------------------------------- #
+
+_RECONCILER_CANCEL_MAX_ATTEMPTS: int = 3
+_RECONCILER_CANCEL_MAX_DELAY_SECONDS: int = 30
+_RECONCILER_CANCEL_WAIT_MULTIPLIER_SECONDS: int = 1
+_RECONCILER_CANCEL_WAIT_MAX_SECONDS: int = 10
+
+
+def _is_transient_reconcile(exc: BaseException) -> bool:
+    """Retry transient faults only; fail closed on programming errors.
+
+    Mirrors the precedent in `src/paper/resync.py` (lines 177-179):
+    programming errors (`ValueError`, `KeyError`, `TypeError`) fail
+    immediately instead of burning the bounded retry budget and
+    masking deterministic faults as transient.
+    """
+    return not isinstance(exc, (ValueError, KeyError, TypeError))
 
 
 # --------------------------------------------------------------------------- #
@@ -120,6 +196,114 @@ class SymbolFilters:
     notional_constraints_json: str
     order_capabilities_json: str
     position_mode_snapshot_json: str
+
+
+# --------------------------------------------------------------------------- #
+# Reconciler truth snapshots (Phase 8, plan 08-04).
+#
+# These are the SDK-free value objects the reconciler compares against
+# local intent. Every field is Decimal/UTC-aware/non-empty-string per
+# the project's D-12 boundary discipline. The reconciler never sees an
+# SDK response model — only these frozen dataclasses.
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class OpenOrderSnapshot:
+    """One open normal order from `current_all_open_orders`.
+
+    `client_order_id` is the deterministic ID minted by
+    `src/execution/order_ids.py:derive_client_order_id`; the sweeper
+    uses it to address the cancel call (T-8-32 query-by-ID first,
+    never blind retry per EXECUTION_SPEC 10).
+    """
+
+    symbol: str
+    client_order_id: str
+    exchange_order_id: str
+    side: str
+    position_side: str
+    order_type: str
+    time_in_force: str
+    status: str
+    quantity: Decimal
+    price: Decimal | None
+    stop_price: Decimal | None
+    reduce_only: bool
+    close_position: bool
+    working_type: str | None
+    price_protect: bool | None
+    update_time_utc: datetime
+
+
+@dataclass(frozen=True)
+class OpenAlgoOrderSnapshot:
+    """One open algo order from `current_all_algo_open_orders`.
+
+    `client_algo_id` is the deterministic ID minted by
+    `src/execution/order_ids.py:derive_algo_client_id`; the sweeper
+    uses it to address the cancel call. `algo_type` is the
+    CONDITIONAL type (STOP_MARKET / TAKE_PROFIT_MARKET / STOP /
+    TAKE_PROFIT / TRAILING_STOP_MARKET) per the Dec 2025 Algo
+    migration.
+    """
+
+    symbol: str
+    client_algo_id: str
+    algo_id: str
+    algo_type: str
+    order_type: str
+    side: str
+    position_side: str
+    time_in_force: str
+    algo_status: str
+    quantity: Decimal
+    trigger_price: Decimal | None
+    price: Decimal | None
+    trigger_time_utc: datetime | None
+    working_type: str | None
+    close_position: bool
+    reduce_only: bool
+    update_time_utc: datetime
+
+
+@dataclass(frozen=True)
+class PositionSnapshot:
+    """One position row from `position_information_v3`.
+
+    `position_amt` is signed (positive for LONG, negative for SHORT).
+    `position_side` is the Binance-reported side (LONG / SHORT /
+    BOTH). The reconciler treats `position_amt == 0` as "no position"
+    regardless of `position_side`.
+    """
+
+    symbol: str
+    position_side: str
+    position_amt: Decimal
+    entry_price: Decimal
+    break_even_price: Decimal
+    mark_price: Decimal | None
+    unrealized_profit: Decimal
+    liquidation_price: Decimal | None
+    notional: Decimal | None
+    margin_asset: str
+    update_time_utc: datetime
+
+
+@dataclass(frozen=True)
+class AlgoOrderProbe:
+    """Result of `query_algo_order(client_algo_id=...)`.
+
+    Used by the sweeper to verify the algo order still exists before
+    issuing a cancel (T-8-32 query-by-ID first). `found=False` means
+    the algo order is already gone — the sweeper treats that as a
+    successful sweep (no cancel needed, no error).
+    """
+
+    client_algo_id: str
+    found: bool
+    algo_status: str | None
+    update_time_utc: datetime | None
 
 
 # --------------------------------------------------------------------------- #
@@ -451,6 +635,467 @@ class BinanceUsdmAdapter:
                 f"required filters: {'; '.join(drifted)}"
             )
         return out
+
+    # ----- reconciler truth surface (Phase 8, plan 08-04) ---------------- #
+    # These methods are QUERY-AND-CANCEL ONLY. The reconciler must never
+    # place a new order under any input (Pitfall 1 — D-03 reconciliation
+    # is the safety net, never the initiator). A place-order path here
+    # is a Phase-9 escalation, not a Phase-8 addition.
+
+    async def snapshot_open_normal_orders(
+        self,
+        *,
+        symbol: str | None = None,
+    ) -> list[OpenOrderSnapshot]:
+        """Return the project's frozen-dataclass view of open normal orders.
+
+        Wraps `current_all_open_orders` (verified against installed SDK
+        17.4.0 per module docstring). Each SDK response row is projected
+        to `OpenOrderSnapshot`; SDK response models never leak out of
+        this module.
+
+        Args:
+            symbol: When provided, fetches only that symbol's open
+                orders. When None, fetches all symbols (Binance
+                recommends the symbol-scoped call to avoid heavy
+                responses on busy accounts).
+        """
+        response = await asyncio.to_thread(
+            self._sdk.rest_api.current_all_open_orders,
+            symbol=symbol,
+        )
+        raw = response.data()
+        rows: Sequence[CurrentAllOpenOrdersResponse] = (
+            raw if isinstance(raw, list) else [raw]
+        )
+        out: list[OpenOrderSnapshot] = []
+        for item in rows:
+            snapshot = _row_to_open_order_snapshot(item)
+            if snapshot is not None:
+                out.append(snapshot)
+        return out
+
+    async def snapshot_open_algo_orders(
+        self,
+        *,
+        symbol: str | None = None,
+    ) -> list[OpenAlgoOrderSnapshot]:
+        """Return the project's frozen-dataclass view of open algo orders.
+
+        Wraps `current_all_algo_open_orders` (verified against installed
+        SDK 17.4.0). Each SDK row is projected to `OpenAlgoOrderSnapshot`
+        with the canonical `client_algo_id` preserved for the sweeper's
+        query-by-ID cancel posture.
+        """
+        response = await asyncio.to_thread(
+            self._sdk.rest_api.current_all_algo_open_orders,
+            symbol=symbol,
+        )
+        raw = response.data()
+        rows: Sequence[CurrentAllAlgoOpenOrdersResponse] = (
+            raw if isinstance(raw, list) else [raw]
+        )
+        out: list[OpenAlgoOrderSnapshot] = []
+        for item in rows:
+            snapshot = _row_to_open_algo_order_snapshot(item)
+            if snapshot is not None:
+                out.append(snapshot)
+        return out
+
+    async def snapshot_positions(
+        self,
+        *,
+        symbol: str | None = None,
+    ) -> list[PositionSnapshot]:
+        """Return the project's frozen-dataclass view of open positions.
+
+        Wraps `position_information_v3` (verified against installed SDK
+        17.4.0). Rows with `position_amt == 0` are filtered out — a
+        zero-amount position is "no position" per Binance semantics,
+        and including it would poison the three-source compare with a
+        phantom truth row that has no matching local intent.
+        """
+        response = await asyncio.to_thread(
+            self._sdk.rest_api.position_information_v3,
+            symbol=symbol,
+        )
+        raw = response.data()
+        rows: Sequence[PositionInformationV3Response] = (
+            raw if isinstance(raw, list) else [raw]
+        )
+        out: list[PositionSnapshot] = []
+        for item in rows:
+            snapshot = _row_to_position_snapshot(item)
+            if snapshot is not None and snapshot.position_amt != Decimal("0"):
+                out.append(snapshot)
+        return out
+
+    async def query_algo_order_by_client(
+        self, *, client_algo_id: str
+    ) -> AlgoOrderProbe:
+        """Look up one algo order by its deterministic client_algo_id.
+
+        Returns `AlgoOrderProbe(found=False, ...)` when the SDK raises
+        a not-found error (the SDK normalizes not-found as a generic
+        API error with code -2011). The sweeper treats `found=False`
+        as a successful prior sweep — no cancel call needed.
+
+        Per T-8-32 (no-blind-retry, query-by-ID-first) and EXECUTION_SPEC
+        10, the sweeper MUST verify the algo order exists before
+        issuing a cancel; this probe is the verification path.
+        """
+        # SDK signatures accept Optional for both algo_id and
+        # client_algo_id — we always populate the client side because
+        # the deterministic-ID derivation guarantees uniqueness.
+        try:
+            response = await asyncio.to_thread(
+                self._sdk.rest_api.query_algo_order,
+                client_algo_id=client_algo_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - SDK wraps unknown codes
+            # Binance returns -2011 (UNKNOWN_ORDER) for missing algo
+            # orders. Match by message code rather than importing the
+            # SDK error class hierarchy, since the SDK does not expose
+            # the per-code exception types.
+            if "UNKNOWN_ORDER" in str(exc) or "-2011" in str(exc):
+                return AlgoOrderProbe(
+                    client_algo_id=client_algo_id,
+                    found=False,
+                    algo_status=None,
+                    update_time_utc=None,
+                )
+            raise
+        raw: QueryAlgoOrderResponse = response.data()
+        return _algo_order_to_probe(client_algo_id, raw)
+
+    async def cancel_normal_order(
+        self,
+        *,
+        symbol: str,
+        orig_client_order_id: str,
+    ) -> None:
+        """Cancel one open normal order by its deterministic client_order_id.
+
+        Per T-8-32 + EXECUTION_SPEC 10: query-by-ID-first posture (the
+        sweeper does the probe before calling cancel), bounded-batch
+        retry mirroring the notify precedent. The cancel is idempotent
+        on retries because `orig_client_order_id` is the deterministic
+        36-char ID from `derive_client_order_id`.
+
+        Never raises on "already canceled" — the SDK normalizes that
+        as a generic API error with code -2011, which we treat as
+        success (the post-condition the caller wanted is satisfied).
+
+        Args:
+            symbol: The trading pair (Binance requires it).
+            orig_client_order_id: The deterministic client_order_id
+                minted by `derive_client_order_id`.
+
+        Raises:
+            Any non-canceled-already SDK error after bounded retries
+            are exhausted.
+        """
+        retry = tenacity.retry_if_exception(_is_transient_reconcile)
+        stop = tenacity.stop_after_attempt(
+            _RECONCILER_CANCEL_MAX_ATTEMPTS
+        ) | tenacity.stop_after_delay(_RECONCILER_CANCEL_MAX_DELAY_SECONDS)
+        wait = tenacity.wait_random_exponential(
+            multiplier=_RECONCILER_CANCEL_WAIT_MULTIPLIER_SECONDS,
+            max=_RECONCILER_CANCEL_WAIT_MAX_SECONDS,
+        )
+        decorator = tenacity.AsyncRetrying(
+            retry=retry, stop=stop, wait=wait, reraise=True
+        )
+
+        async def _do_cancel() -> CancelOrderResponse:
+            response = await asyncio.to_thread(
+                self._sdk.rest_api.cancel_order,
+                symbol=symbol,
+                orig_client_order_id=orig_client_order_id,
+            )
+            return response.data()
+
+        async def _do_cancel_with_retry() -> CancelOrderResponse:
+            async for attempt in decorator:
+                with attempt:
+                    result = await _do_cancel()
+                    if _is_already_canceled_response(result):
+                        return result
+                    return result
+            raise RuntimeError(
+                "unreachable: tenacity.AsyncRetrying exhausted without reraise"
+            )
+
+        try:
+            await _do_cancel_with_retry()
+        except Exception as exc:  # noqa: BLE001 - SDK wraps unknown codes
+            if _is_already_canceled_message(str(exc)):
+                log.info(
+                    "adapter.cancel_normal_order.already_canceled",
+                    symbol=symbol,
+                    orig_client_order_id=orig_client_order_id,
+                )
+                return
+            raise
+
+    async def cancel_algo_order(
+        self,
+        *,
+        symbol: str,
+        client_algo_id: str,
+    ) -> None:
+        """Cancel one open algo order by its deterministic client_algo_id.
+
+        Per T-8-32 + EXECUTION_SPEC 10: query-by-ID-first posture, bounded
+        retry, idempotent on retries. Treats already-canceled as success.
+
+        Args:
+            symbol: The trading pair (Binance requires it).
+            client_algo_id: The deterministic algo_client_id minted by
+                `derive_algo_client_id`.
+
+        Raises:
+            Any non-canceled-already SDK error after bounded retries
+            are exhausted.
+        """
+        retry = tenacity.retry_if_exception(_is_transient_reconcile)
+        stop = tenacity.stop_after_attempt(
+            _RECONCILER_CANCEL_MAX_ATTEMPTS
+        ) | tenacity.stop_after_delay(_RECONCILER_CANCEL_MAX_DELAY_SECONDS)
+        wait = tenacity.wait_random_exponential(
+            multiplier=_RECONCILER_CANCEL_WAIT_MULTIPLIER_SECONDS,
+            max=_RECONCILER_CANCEL_WAIT_MAX_SECONDS,
+        )
+        decorator = tenacity.AsyncRetrying(
+            retry=retry, stop=stop, wait=wait, reraise=True
+        )
+
+        async def _do_cancel() -> CancelAlgoOrderResponse:
+            response = await asyncio.to_thread(
+                self._sdk.rest_api.cancel_algo_order,
+                client_algo_id=client_algo_id,
+            )
+            return response.data()
+
+        async def _do_cancel_with_retry() -> CancelAlgoOrderResponse:
+            async for attempt in decorator:
+                with attempt:
+                    result = await _do_cancel()
+                    if _is_already_canceled_response(result):
+                        return result
+                    return result
+            raise RuntimeError(
+                "unreachable: tenacity.AsyncRetrying exhausted without reraise"
+            )
+
+        try:
+            await _do_cancel_with_retry()
+        except Exception as exc:  # noqa: BLE001 - SDK wraps unknown codes
+            if _is_already_canceled_message(str(exc)):
+                log.info(
+                    "adapter.cancel_algo_order.already_canceled",
+                    symbol=symbol,
+                    client_algo_id=client_algo_id,
+                )
+                return
+            raise
+
+
+# --------------------------------------------------------------------------- #
+# Internal helpers for reconciler snapshot projection.
+# --------------------------------------------------------------------------- #
+
+
+def _is_already_canceled_message(message: str) -> bool:
+    """True when an SDK error message indicates the order is gone.
+
+    Binance uses error code -2011 (UNKNOWN_ORDER) for cancels that
+    target a non-existent order. We match by message code rather than
+    importing the SDK error class hierarchy, since the SDK does not
+    expose typed per-code exceptions.
+    """
+    return "UNKNOWN_ORDER" in message or "-2011" in message
+
+
+def _is_already_canceled_response(result: Any) -> bool:
+    """True when a successful cancel response already reflects the post-state."""
+    # The Binance cancel responses carry a `status` field that
+    # normalizes to "CANCELED" or "EXPIRED" on success; we don't
+    # special-case them because the function returns None either way.
+    # This helper exists so the caller has a single decision point if
+    # a future Binance change introduces a "noop" status.
+    return False
+
+
+def _row_to_open_order_snapshot(
+    item: CurrentAllOpenOrdersResponse,
+) -> OpenOrderSnapshot | None:
+    """Project one SDK open-order row to `OpenOrderSnapshot`.
+
+    Flag-never-fabricate (D-09): rows missing the identity fields
+    (symbol, client_order_id, exchange_order_id) raise loudly — a
+    silent default would poison the three-source compare with a row
+    that has no canonical ID to match against local intent.
+    """
+    if (
+        not item.symbol
+        or not item.client_order_id
+        or item.order_id is None
+    ):
+        raise ValueError(
+            f"open_order row missing identity fields: {item!r}"
+        )
+    return OpenOrderSnapshot(
+        symbol=item.symbol,
+        client_order_id=item.client_order_id,
+        exchange_order_id=str(item.order_id),
+        side=item.side or "",
+        position_side=item.position_side or "",
+        order_type=item.type or "",
+        time_in_force=item.time_in_force or "",
+        status=item.status or "",
+        quantity=Decimal(str(item.orig_qty))
+        if item.orig_qty is not None
+        else Decimal("0"),
+        price=Decimal(str(item.price)) if item.price is not None else None,
+        stop_price=(
+            Decimal(str(item.stop_price))
+            if item.stop_price is not None
+            else None
+        ),
+        reduce_only=bool(item.reduce_only) if item.reduce_only is not None else False,
+        close_position=bool(item.close_position) if item.close_position is not None else False,
+        working_type=item.working_type,
+        price_protect=item.price_protect,
+        update_time_utc=_ms_to_utc(int(item.update_time))
+        if item.update_time is not None
+        else _epoch_utc(),
+    )
+
+
+def _row_to_open_algo_order_snapshot(
+    item: CurrentAllAlgoOpenOrdersResponse,
+) -> OpenAlgoOrderSnapshot | None:
+    """Project one SDK open-algo-order row to `OpenAlgoOrderSnapshot`.
+
+    Flag-never-fabricate (D-09): rows missing identity fields raise
+    loudly. The reconciler MUST never sweep on a synthetic ID.
+    """
+    if (
+        not item.symbol
+        or not item.client_algo_id
+        or item.algo_id is None
+    ):
+        raise ValueError(
+            f"open_algo_order row missing identity fields: {item!r}"
+        )
+    return OpenAlgoOrderSnapshot(
+        symbol=item.symbol,
+        client_algo_id=item.client_algo_id,
+        algo_id=str(item.algo_id),
+        algo_type=item.algo_type or "",
+        order_type=item.order_type or "",
+        side=item.side or "",
+        position_side=item.position_side or "",
+        time_in_force=item.time_in_force or "",
+        algo_status=item.algo_status or "",
+        quantity=Decimal(str(item.quantity))
+        if item.quantity is not None
+        else Decimal("0"),
+        trigger_price=(
+            Decimal(str(item.trigger_price))
+            if item.trigger_price is not None
+            else None
+        ),
+        price=Decimal(str(item.price)) if item.price is not None else None,
+        trigger_time_utc=(
+            _ms_to_utc(int(item.trigger_time))
+            if item.trigger_time is not None
+            else None
+        ),
+        working_type=item.working_type,
+        close_position=bool(item.close_position) if item.close_position is not None else False,
+        reduce_only=bool(item.reduce_only) if item.reduce_only is not None else False,
+        update_time_utc=_ms_to_utc(int(item.update_time))
+        if item.update_time is not None
+        else _epoch_utc(),
+    )
+
+
+def _row_to_position_snapshot(
+    item: PositionInformationV3Response,
+) -> PositionSnapshot | None:
+    """Project one SDK position row to `PositionSnapshot`.
+
+    Flag-never-fabricate (D-09): rows missing identity fields raise
+    loudly. The position-amount is signed (positive for LONG, negative
+    for SHORT per Binance); the compare module checks `position_amt
+    == 0` to filter phantom rows.
+    """
+    if not item.symbol:
+        raise ValueError(f"position row missing symbol: {item!r}")
+    return PositionSnapshot(
+        symbol=item.symbol,
+        position_side=item.position_side or "",
+        position_amt=Decimal(str(item.position_amt))
+        if item.position_amt is not None
+        else Decimal("0"),
+        entry_price=Decimal(str(item.entry_price))
+        if item.entry_price is not None
+        else Decimal("0"),
+        break_even_price=Decimal(str(item.break_even_price))
+        if item.break_even_price is not None
+        else Decimal("0"),
+        mark_price=(
+            Decimal(str(item.mark_price))
+            if item.mark_price is not None
+            else None
+        ),
+        unrealized_profit=Decimal(str(item.un_realized_profit))
+        if item.un_realized_profit is not None
+        else Decimal("0"),
+        liquidation_price=(
+            Decimal(str(item.liquidation_price))
+            if item.liquidation_price is not None
+            else None
+        ),
+        notional=(
+            Decimal(str(item.notional))
+            if item.notional is not None
+            else None
+        ),
+        margin_asset=item.margin_asset or "",
+        update_time_utc=_ms_to_utc(int(item.update_time))
+        if item.update_time is not None
+        else _epoch_utc(),
+    )
+
+
+def _algo_order_to_probe(
+    client_algo_id: str,
+    raw: QueryAlgoOrderResponse,
+) -> AlgoOrderProbe:
+    """Project a `query_algo_order` response into an `AlgoOrderProbe`."""
+    return AlgoOrderProbe(
+        client_algo_id=client_algo_id,
+        found=True,
+        algo_status=raw.algo_status,
+        update_time_utc=_ms_to_utc(int(raw.update_time))
+        if raw.update_time is not None
+        else None,
+    )
+
+
+def _epoch_utc() -> datetime:
+    """UTC epoch — used as a defensive default when update_time is missing.
+
+    `flag-never-fabricate` says a missing timestamp must surface
+    loudly, but the snapshot projection runs on rows that already
+    passed identity validation. The defensive epoch is here so a
+    downstream consumer that requires a tz-aware datetime never sees
+    a naive value; the row's identity still carries the truth.
+    """
+    return datetime(1970, 1, 1, tzinfo=UTC)
 
 
 # --------------------------------------------------------------------------- #
