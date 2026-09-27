@@ -117,6 +117,12 @@ def _is_transient_reconcile(exc: BaseException) -> bool:
     return not isinstance(exc, (ValueError, KeyError, TypeError))
 
 
+def _cancel_retry_predicate(exc: BaseException) -> bool:
+    if _is_already_canceled_message(str(exc)):
+        return False
+    return _is_transient_reconcile(exc)
+
+
 # --------------------------------------------------------------------------- #
 # Frozen domain dataclasses — the public contract of the adapter.
 # --------------------------------------------------------------------------- #
@@ -795,7 +801,7 @@ class BinanceUsdmAdapter:
             Any non-canceled-already SDK error after bounded retries
             are exhausted.
         """
-        retry = tenacity.retry_if_exception(_is_transient_reconcile)
+        retry = tenacity.retry_if_exception(_cancel_retry_predicate)
         stop = tenacity.stop_after_attempt(
             _RECONCILER_CANCEL_MAX_ATTEMPTS
         ) | tenacity.stop_after_delay(_RECONCILER_CANCEL_MAX_DELAY_SECONDS)
@@ -858,7 +864,7 @@ class BinanceUsdmAdapter:
             Any non-canceled-already SDK error after bounded retries
             are exhausted.
         """
-        retry = tenacity.retry_if_exception(_is_transient_reconcile)
+        retry = tenacity.retry_if_exception(_cancel_retry_predicate)
         stop = tenacity.stop_after_attempt(
             _RECONCILER_CANCEL_MAX_ATTEMPTS
         ) | tenacity.stop_after_delay(_RECONCILER_CANCEL_MAX_DELAY_SECONDS)
