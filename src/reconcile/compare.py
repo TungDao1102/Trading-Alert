@@ -235,24 +235,50 @@ def compare(
     # Index local intent by canonical identifier for the reverse check.
     local_normal_by_client_id: dict[str, Any] = {}
     for entry in local_open_orders:
-        if not _is_local_intent_open(entry):
+        try:
+            is_open = _is_local_intent_open(entry)
+        except ValueError:
+            is_open = True
+        if not is_open:
             continue
         client_order_id = _get_field(entry, "client_order_id")
-        if client_order_id is None:
-            raise ValueError(
-                f"local order intent missing client_order_id: {entry!r}"
+        if not isinstance(client_order_id, str) or client_order_id == "":
+            _sym = _get_field(entry, "symbol")
+            divergences.append(
+                Divergence(
+                    kind=DIVERGENCE_KIND_UNSYNCED_NORMAL,
+                    symbol=_sym if isinstance(_sym, str) and _sym else "UNKNOWN",
+                    order_role=_get_field(entry, "order_role") or "UNKNOWN",
+                    client_order_id=None,
+                    client_algo_id=None,
+                    reason="local intent missing identity field",
+                )
             )
+            continue
         local_normal_by_client_id[client_order_id] = entry
 
     local_algo_by_client_id: dict[str, Any] = {}
     for entry in local_open_algos:
-        if not _is_local_intent_open(entry):
+        try:
+            is_open = _is_local_intent_open(entry)
+        except ValueError:
+            is_open = True
+        if not is_open:
             continue
         client_algo_id = _get_field(entry, "client_algo_id")
-        if client_algo_id is None:
-            raise ValueError(
-                f"local algo intent missing client_algo_id: {entry!r}"
+        if not isinstance(client_algo_id, str) or client_algo_id == "":
+            _sym = _get_field(entry, "symbol")
+            divergences.append(
+                Divergence(
+                    kind=DIVERGENCE_KIND_UNSYNCED_ALGO,
+                    symbol=_sym if isinstance(_sym, str) and _sym else "UNKNOWN",
+                    order_role=_get_field(entry, "order_role") or "UNKNOWN",
+                    client_order_id=None,
+                    client_algo_id=None,
+                    reason="local intent missing identity field",
+                )
             )
+            continue
         local_algo_by_client_id[client_algo_id] = entry
 
     local_position_keys: set[tuple[str, Any]] = set()
