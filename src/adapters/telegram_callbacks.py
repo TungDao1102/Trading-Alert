@@ -349,9 +349,6 @@ def dispatch_callback(
     signal_id, trade_plan_id = mapping
 
     # Gate 5: build the Callback payload and delegate to replay.
-    # Stale buttons after a re-plan are a normal operator flow — a
-    # missing context or malformed payload maps to INVALIDATED, never
-    # an unhandled ValueError/KeyError out of the PTB handler.
     if binding_context is None:
         _journal_outcome(
             journal_receipt,
@@ -438,7 +435,7 @@ def dispatch_callback(
             approval_strategy_version=binding_context["strategy_version"],
             approval_parameter_set_id=binding_context["parameter_set_id"],
             approval_parameter_set_hash=binding_context["parameter_set_hash"],
-            now_utc=now_utc,
+            now_utc=now_utc if now_utc is not None else datetime.now(UTC),
         )
     except ApprovalRejected as exc:
         _journal_outcome(
