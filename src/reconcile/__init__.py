@@ -22,6 +22,7 @@ The adapter is consumed via Protocol-typed surfaces; only
 from __future__ import annotations
 
 from .compare import (
+    DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE,
     DIVERGENCE_KIND_ORPHAN_PROTECTIVE,
     DIVERGENCE_KIND_UNSYNCED_ALGO,
     DIVERGENCE_KIND_UNSYNCED_NORMAL,
@@ -43,6 +44,7 @@ __all__ = [
     "CompareDiff",
     "Divergence",
     "DIVERGENCE_KIND_ORPHAN_PROTECTIVE",
+    "DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE",
     "DIVERGENCE_KIND_UNSYNCED_ALGO",
     "DIVERGENCE_KIND_UNSYNCED_POSITION",
     "DIVERGENCE_KIND_UNSYNCED_NORMAL",
