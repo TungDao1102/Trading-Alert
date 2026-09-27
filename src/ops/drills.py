@@ -821,8 +821,8 @@ def make_manual_close_drill(
 def make_restore_drill(
     *,
     safe_mode_controller: Any,
+    now_utc: datetime,
     enter_reason: str = "INITIAL_SAFE_MODE",
-    now_utc: datetime | None = None,
 ) -> DrillDeclaration:
     """Build the RESTORE drill (clean restore — the only SAFE_MODE exit).
 
@@ -845,10 +845,9 @@ def make_restore_drill(
         return _RESTORE_FAULT
 
     def assert_outcome(journal: DrillLog, context: dict[str, Any]) -> str:
-        _now = now_utc if now_utc is not None else datetime.now(UTC)
-        _require_now_utc_utc(_now, "now_utc")
+        _require_now_utc_utc(now_utc, "now_utc")
         # Step 1: enter SAFE_MODE on a stale compare.
-        safe_mode_controller.enter_safe_mode(reason=enter_reason, now_utc=_now)
+        safe_mode_controller.enter_safe_mode(reason=enter_reason, now_utc=now_utc)
         if not safe_mode_controller.in_safe_mode:
             raise AssertionError("restore drill: expected controller in SAFE_MODE after enter")
         # Step 2: exit SAFE_MODE via the controller's exit path. The
