@@ -117,6 +117,7 @@ class PaperSupervisor:
         self._clock = clock if clock is not None else (lambda: datetime.now(UTC))
         self._last_close: dict[tuple[str, str], datetime] = {}
         self._handles: list[tuple[str, str, Any]] = []
+        self._close_failures: int = 0
 
     def record_close(
         self, symbol: str, interval: str, close_time_utc: datetime
@@ -130,7 +131,18 @@ class PaperSupervisor:
         self._last_close[(symbol, interval)] = close_time_utc
 
     def start(self) -> None:
-        """Subscribe to all symbol-interval pairs + register dispatch."""
+        """Subscribe to all symbol-interval pairs + register dispatch.
+
+        Idempotent guard (WR-08): a second start() without stop()
+        would double-subscribe every pair (two callbacks per close).
+        Restart flows go through _resubscribe_and_backfill (which
+        closes first); an explicit double-start raises loudly.
+        """
+        if self._handles:
+            raise RuntimeError(
+                "PaperSupervisor.start() called twice without stop(); "
+                "restart via _resubscribe_and_backfill only"
+            )
         for symbol in self._symbols:
             for interval in self._intervals:
                 handle = self._ws.subscribe(
@@ -304,16 +316,25 @@ class PaperSupervisor:
 
     def _close_all_handles(self) -> None:
         """Close every WS handle we own."""
-        for _symbol, _interval, handle in self._handles:
+        for symbol, interval, handle in self._handles:
             try:
                 self._ws.close(handle)
             except Exception:
                 # A failed close is logged but does not propagate —
-                # the supervisor must survive a wedged handle.
+                # the supervisor must survive a wedged handle. The
+                # symbol/interval pair plus a consecutive-failure
+                # count make repeated rotation failures
+                # distinguishable from one-offs (WR-08).
+                self._close_failures += 1
                 log.warning(
                     "paper.supervisor.close_failed",
+                    symbol=symbol,
+                    interval=interval,
                     handle_id=id(handle),
+                    consecutive_close_failures=self._close_failures,
                 )
+                continue
+        self._close_failures = 0
         self._handles.clear()
 
 
