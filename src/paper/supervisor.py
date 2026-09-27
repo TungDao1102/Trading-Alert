@@ -169,7 +169,16 @@ class PaperSupervisor:
         pairs still dispatch.
         """
         if not scheduled:
-            await self._reconnect_with_retry()
+            try:
+                await self._reconnect_with_retry()
+            except Exception as exc:
+                # Reconnect exhaustion must not skip backfill (CR-02):
+                # the unrecoverable-WS case is exactly when REST
+                # backfill matters most. Record and fall through.
+                log.error(
+                    "paper.supervisor.reconnect_exhausted",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
         await self._resubscribe_and_backfill(journal_outage_gaps=not scheduled)
 
     def stop(self) -> None:
