@@ -45,13 +45,29 @@ jobs:
       - name: Sync dependencies
         run: uv sync --frozen
 
+      # CR-06: the runner is ephemeral and logs/ is gitignored, so the
+      # pinned state and the diff-log artifact must be persisted outside
+      # the checkout — restore the state cache before the tick, save it
+      # after, and always upload the diff log (the PAPER-03 acceptance
+      # artifact). Without this every hourly run starts with no pinned
+      # state (exit 2) and proves nothing.
+      - name: Restore freeze state
+        uses: actions/cache/restore@v4
+        with:
+          path: logs/paper
+          key: paper-freeze-state
+          restore-keys: |
+            paper-freeze-
+
       - name: Run freeze check
+        id: freeze
         env:
           PAPER_REGISTRY_ROOT: ${{ github.workspace }}/params
           PAPER_PINNED_STATE: ${{ github.workspace }}/logs/paper/pinned_epoch.json
           PAPER_DIFF_LOG: ${{ github.workspace }}/logs/paper/registry_diff.jsonl
         run: |
           mkdir -p "$(dirname "$PAPER_DIFF_LOG")"
+          set +e
           uv run python -m src.paper.freeze \
             --check \
             --strategy-id trend-pullback \
@@ -59,3 +75,34 @@ jobs:
             --diff-log "$PAPER_DIFF_LOG" \
             --pinned-state "$PAPER_PINNED_STATE" \
             --registry-root "$PAPER_REGISTRY_ROOT"
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload diff log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: registry-diff-${{ github.run_id }}
+          path: logs/paper/registry_diff.jsonl
+          if-no-files-found: warn
+
+      - name: Save freeze state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: logs/paper
+          key: paper-freeze-${{ github.run_id }}
+
+      # CR-06: run_check_cli returns 3 on a REGISTRY_DIFF rollover —
+      # fail the workflow loudly instead of reporting green.
+      - name: Alert on registry rollover
+        if: steps.freeze.outputs.exit_code == '3'
+        run: |
+          echo "::error::REGISTRY_DIFF rollover detected — evidence claim halted, new epoch opened. See the registry-diff artifact."
+          exit 1
+
+      - name: Fail on check errors
+        if: steps.freeze.outputs.exit_code != '0' && steps.freeze.outputs.exit_code != '3'
+        run: |
+          echo "::error::Freeze check exited with code ${{ steps.freeze.outputs.exit_code }} (2 = missing pinned state, 1 = error)."
+          exit 1
