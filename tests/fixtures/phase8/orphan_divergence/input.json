@@ -1,0 +1,72 @@
+{
+  "scenario": "orphan_protective",
+  "description": "Local intent has a STOP_LOSS algo protective for BTCUSDT, but no matching local position and no exchange position. The reconciler must classify this as ORPHAN_PROTECTIVE divergence and the sweeper must cancel the algo order after authoritative position-zero verification.",
+  "local_intent": {
+    "open_orders": [
+      {
+        "client_order_id": "x-11111111111111111111111111111111EN",
+        "symbol": "BTCUSDT",
+        "order_role": "ENTRY",
+        "status": "NEW"
+      }
+    ],
+    "open_algos": [
+      {
+        "client_algo_id": "xa-1111111111111111111111111111111SL",
+        "symbol": "BTCUSDT",
+        "order_role": "STOP_LOSS",
+        "status": "NEW"
+      }
+    ],
+    "open_positions": []
+  },
+  "exchange_truth": {
+    "normal_orders": [
+      {
+        "symbol": "BTCUSDT",
+        "client_order_id": "x-11111111111111111111111111111111EN",
+        "exchange_order_id": "100001",
+        "side": "BUY",
+        "position_side": "LONG",
+        "order_type": "LIMIT",
+        "time_in_force": "GTC",
+        "status": "NEW",
+        "quantity": "0.010",
+        "price": "50000.00",
+        "stop_price": null,
+        "reduce_only": false,
+        "close_position": false,
+        "working_type": null,
+        "price_protect": null,
+        "update_time_utc": "2026-09-19T10:00:00+00:00"
+      }
+    ],
+    "algo_orders": [
+      {
+        "symbol": "BTCUSDT",
+        "client_algo_id": "xa-1111111111111111111111111111111SL",
+        "algo_id": "200001",
+        "algo_type": "CONDITIONAL",
+        "order_type": "STOP_MARKET",
+        "side": "SELL",
+        "position_side": "LONG",
+        "time_in_force": "GTC",
+        "algo_status": "NEW",
+        "quantity": "0.010",
+        "trigger_price": "49000.00",
+        "price": null,
+        "trigger_time_utc": null,
+        "working_type": "CONTRACT_PRICE",
+        "close_position": false,
+        "reduce_only": true,
+        "update_time_utc": "2026-09-19T10:00:00+00:00"
+      }
+    ],
+    "positions": []
+  },
+  "position_verification": {
+    "consecutive_zero_reads": 2,
+    "first_read_position_amt": "0",
+    "second_read_position_amt": "0"
+  }
+}

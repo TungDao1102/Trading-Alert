@@ -1,0 +1,54 @@
+{
+  "scenario": "orphan_protective",
+  "compare_result": {
+    "agreement": false,
+    "divergences": [
+      {
+        "kind": "ORPHAN_PROTECTIVE",
+        "symbol": "BTCUSDT",
+        "client_algo_id": "xa-1111111111111111111111111111111SL",
+        "order_role": "STOP_LOSS",
+        "reason": "local algo protective with no matching local position and no exchange position"
+      }
+    ]
+  },
+  "sweep_result": {
+    "swept_count": 1,
+    "cancelled": [
+      {
+        "symbol": "BTCUSDT",
+        "client_algo_id": "xa-1111111111111111111111111111111SL"
+      }
+    ],
+    "skipped": [],
+    "journal_events": [
+      {
+        "event_type": "ORPHAN_SWEEP",
+        "entity_type": "OpenAlgoOrder",
+        "entity_id": "xa-1111111111111111111111111111111SL",
+        "pre_image_keys": [
+          "symbol",
+          "client_algo_id",
+          "algo_id",
+          "algo_type",
+          "order_type",
+          "side",
+          "position_side",
+          "algo_status",
+          "quantity",
+          "trigger_price",
+          "reduce_only"
+        ],
+        "post_image_keys": [
+          "cancelled",
+          "cancelled_at_utc"
+        ]
+      }
+    ],
+    "rescan_clean": true
+  },
+  "no_place_order_invariant": {
+    "place_order_calls": 0,
+    "cancel_calls": 1
+  }
+}
