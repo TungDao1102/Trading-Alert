@@ -312,3 +312,241 @@ def test_role_codes_covers_exactly_the_order_role_vocabulary() -> None:
     assert len(set(ROLE_CODES.values())) == len(ROLE_CODES), (
         f"ROLE_CODES values collide: {ROLE_CODES}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Beh. 8 — retry: same call twice yields byte-identical IDs.
+# --------------------------------------------------------------------------- #
+
+
+def test_retry_same_call_twice_yields_byte_identical_ids() -> None:
+    """Beh. 8 (retry): calling derive twice for the same inputs yields
+    byte-identical IDs.
+
+    Per D-04: a retry of an order-submission path must reuse the
+    exchange-deduped identifier. The derivation must be a pure function
+    of (plan_hash, role) so two calls produce the same string.
+    """
+    from src.execution.order_ids import (
+        derive_algo_client_id,
+        derive_client_order_id,
+    )
+
+    case = _load_input()
+    expected = _load_expected()
+
+    for role in case["roles"]:
+        cid_first = derive_client_order_id(
+            plan_hash=case["plan_hash"], role=role
+        )
+        cid_second = derive_client_order_id(
+            plan_hash=case["plan_hash"], role=role
+        )
+        assert cid_first.encode("utf-8") == cid_second.encode("utf-8"), (
+            f"retry produced different client_order_id for {role}: "
+            f"{cid_first!r} vs {cid_second!r}"
+        )
+        assert cid_first == expected["client_order_ids"][role]
+
+        aid_first = derive_algo_client_id(
+            plan_hash=case["plan_hash"], role=role
+        )
+        aid_second = derive_algo_client_id(
+            plan_hash=case["plan_hash"], role=role
+        )
+        assert aid_first.encode("utf-8") == aid_second.encode("utf-8"), (
+            f"retry produced different algo_client_id for {role}: "
+            f"{aid_first!r} vs {aid_second!r}"
+        )
+        assert aid_first == expected["algo_client_ids"][role]
+
+
+# --------------------------------------------------------------------------- #
+# Beh. 9 — restart: reimporting the module yields byte-identical IDs.
+# --------------------------------------------------------------------------- #
+
+
+def test_restart_reimport_yields_byte_identical_ids() -> None:
+    """Beh. 9 (restart): reloading the module via importlib.reload
+    yields byte-identical IDs for the same inputs.
+
+    Per D-04: the derivation must survive a process restart. The
+    reload simulates a fresh process import (no cached state).
+    """
+    import importlib
+
+    import src.execution.order_ids as order_ids_mod
+
+    case = _load_input()
+    expected = _load_expected()
+
+    cid_before = {
+        role: order_ids_mod.derive_client_order_id(
+            plan_hash=case["plan_hash"], role=role
+        )
+        for role in case["roles"]
+    }
+
+    importlib.reload(order_ids_mod)
+
+    cid_after = {
+        role: order_ids_mod.derive_client_order_id(
+            plan_hash=case["plan_hash"], role=role
+        )
+        for role in case["roles"]
+    }
+
+    for role in case["roles"]:
+        assert cid_before[role].encode("utf-8") == cid_after[role].encode(
+            "utf-8"
+        ), (
+            f"restart produced different client_order_id for {role}: "
+            f"before={cid_before[role]!r}, after={cid_after[role]!r}"
+        )
+        assert cid_after[role] == expected["client_order_ids"][role]
+
+
+# --------------------------------------------------------------------------- #
+# Beh. 10 — replay: interleaving other plans does not perturb IDs.
+# --------------------------------------------------------------------------- #
+
+
+def test_replay_interleaving_other_plans_does_not_perturb_ids() -> None:
+    """Beh. 10 (replay): interleaving derivations for other plans does
+    not perturb the IDs for the target plan.
+
+    Per D-04: the derivation must be a pure function of (plan_hash,
+    role). The order in which the process derives IDs for other plans
+    must not affect the IDs for this plan.
+    """
+    from src.execution.order_ids import (
+        derive_algo_client_id,
+        derive_client_order_id,
+    )
+
+    case = _load_input()
+    expected = _load_expected()
+
+    target_hash = case["plan_hash"]
+    other_hashes = [
+        f"{i:064x}" for i in range(2, 6)
+    ]
+    assert target_hash not in other_hashes
+
+    target_cid = derive_client_order_id(
+        plan_hash=target_hash, role="ENTRY"
+    )
+    target_aid = derive_algo_client_id(
+        plan_hash=target_hash, role="ENTRY"
+    )
+
+    for _ in range(3):
+        for other_hash in other_hashes:
+            for role in case["roles"]:
+                derive_client_order_id(
+                    plan_hash=other_hash, role=role
+                )
+                derive_algo_client_id(
+                    plan_hash=other_hash, role=role
+                )
+
+        replay_cid = derive_client_order_id(
+            plan_hash=target_hash, role="ENTRY"
+        )
+        replay_aid = derive_algo_client_id(
+            plan_hash=target_hash, role="ENTRY"
+        )
+        assert replay_cid.encode("utf-8") == target_cid.encode("utf-8"), (
+            f"replay diverged for client_order_id: "
+            f"original={target_cid!r}, replay={replay_cid!r}"
+        )
+        assert replay_aid.encode("utf-8") == target_aid.encode("utf-8"), (
+            f"replay diverged for algo_client_id: "
+            f"original={target_aid!r}, replay={replay_aid!r}"
+        )
+        assert replay_cid == expected["client_order_ids"]["ENTRY"]
+        assert replay_aid == expected["algo_client_ids"]["ENTRY"]
+
+
+# --------------------------------------------------------------------------- #
+# Beh. 11 — static gates: no forbidden imports in src/execution/order_ids.py.
+# --------------------------------------------------------------------------- #
+
+
+def test_no_forbidden_imports_in_src_execution_order_ids() -> None:
+    """Beh. 11 (static gate): src/execution/order_ids.py does not import
+    float, telegram, binance_sdk, sqlalchemy, pydantic, polars, or
+    structlog. The derivation is stdlib + src/domain/enums.py only.
+    """
+    import re
+    from pathlib import Path
+
+    source = Path("src/execution/order_ids.py").read_text(encoding="utf-8")
+
+    forbidden_patterns = [
+        r"\bfloat\s*\(",
+        r"\bimport\s+telegram\b",
+        r"\bfrom\s+telegram\b",
+        r"\bimport\s+binance_sdk\b",
+        r"\bfrom\s+binance_sdk\b",
+        r"\bimport\s+sqlalchemy\b",
+        r"\bfrom\s+sqlalchemy\b",
+        r"\bimport\s+pydantic\b",
+        r"\bfrom\s+pydantic\b",
+        r"\bimport\s+polars\b",
+        r"\bfrom\s+polars\b",
+        r"\bimport\s+structlog\b",
+        r"\bfrom\s+structlog\b",
+    ]
+
+    for pattern in forbidden_patterns:
+        match = re.search(pattern, source)
+        assert match is None, (
+            f"forbidden import/usage in src/execution/order_ids.py: "
+            f"pattern={pattern!r}, match={match.group(0)!r}"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Beh. 12 — pinned ID shape: 36 chars, Binance client-order-ID rule.
+# --------------------------------------------------------------------------- #
+
+
+def test_pinned_id_shape_matches_binance_client_order_id_rule() -> None:
+    """Beh. 12 (static gate): the pinned ID shape matches the Binance
+    client-order-ID rule (<= 36 chars, ASCII alnum + hyphen/underscore).
+
+    The Binance documentation states the client_order_id (and
+    algo_client_id) for USDⓈ-M Futures must be <= 36 characters and
+    ASCII alphanumeric plus hyphen/underscore. Our derivation produces
+    exactly 36 chars using only [0-9a-f-] plus uppercase role codes.
+    """
+    import re
+
+    from src.execution.order_ids import (
+        derive_algo_client_id,
+        derive_client_order_id,
+    )
+
+    case = _load_input()
+    expected = _load_expected()
+
+    assert expected["id_length"] == 36, (
+        f"fixture id_length drifted from 36: {expected['id_length']}"
+    )
+
+    binance_pattern = re.compile(r"^[A-Za-z0-9_-]{1,36}$")
+
+    for role in case["roles"]:
+        cid = derive_client_order_id(
+            plan_hash=case["plan_hash"], role=role
+        )
+        aid = derive_algo_client_id(
+            plan_hash=case["plan_hash"], role=role
+        )
+        assert binance_pattern.match(cid), (
+            f"client_order_id for {role} fails Binance rule: {cid!r}"
+        )
+        assert binance_pattern.match(aid), (
+            f"algo_client_id for {role} fails Binance rule: {aid!r}"
+        )
