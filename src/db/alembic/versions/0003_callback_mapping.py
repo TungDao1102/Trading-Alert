@@ -7,6 +7,13 @@ by the binding-gate replay path. The receiver persists this row in
 the SAME transaction as the Approval row transition (atomic write;
 never in a separate commit).
 
+Retention contract: rows live until their approval is decided and
+past expiry, then a scheduled purge deletes mappings whose approval
+is decided/expired. No FK to `trade_plans` (the mapping must survive
+plan supersede for audit replay); the `(signal_id, trade_plan_id)`
+unique guard rejects a divergent re-binding of an already-mapped
+pair so re-plans fail closed instead of silently rebinding.
+
 Conventions (same as 0001_baseline.py + 0002_domain_registry.py):
   - All timestamps TIMESTAMPTZ (UTC).
   - PK is a content-hash / deterministic id; no auto-increment
@@ -53,9 +60,16 @@ def upgrade() -> None:
         ["trade_plan_id"],
         unique=False,
     )
+    op.create_index(
+        "uq_short_id_mapping_signal_trade_plan",
+        "short_id_mapping",
+        ["signal_id", "trade_plan_id"],
+        unique=True,
+    )
 
 
 def downgrade() -> None:
+    op.drop_index("uq_short_id_mapping_signal_trade_plan", table_name="short_id_mapping")
     op.drop_index("ix_short_id_mapping_trade_plan_id", table_name="short_id_mapping")
     op.drop_index("ix_short_id_mapping_signal_id", table_name="short_id_mapping")
     op.drop_table("short_id_mapping")
