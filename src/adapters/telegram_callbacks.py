@@ -514,7 +514,7 @@ def _build_callback_receipt(
         "received_at_utc": callback_at_utc.astimezone(UTC).isoformat(),
     }
     return JournalEvent(
-        journal_event_id=f"cb-receipt:{parsed.short_id}:{correlation_id}",
+        journal_event_id=f"cb-receipt:{correlation_id}",
         occurred_at_utc=callback_at_utc,
         event_type=EVENT_TYPE_CALLBACK_RECEIVED,
         entity_type="Approval",
@@ -552,7 +552,7 @@ def _build_chat_reject_receipt(
         "received_at_utc": callback_at_utc.astimezone(UTC).isoformat(),
     }
     return JournalEvent(
-        journal_event_id=f"cb-reject:{parsed.short_id}:{correlation_id}",
+        journal_event_id=f"cb-reject:{correlation_id}",
         occurred_at_utc=callback_at_utc,
         event_type=EVENT_TYPE_CALLBACK_RECEIVED,
         entity_type="Approval",
@@ -646,8 +646,11 @@ async def on_callback(
         raise ValueError("update.effective_chat must not be None")
     callback_chat_id = int(chat.id)
 
+    import uuid
+
     callback_at_utc = datetime.now(UTC)
-    correlation_id = f"cb:{parsed.short_id}:{int(callback_at_utc.timestamp())}"
+    ms = int(callback_at_utc.timestamp() * 1000)
+    correlation_id = f"cb:{parsed.short_id}:{ms}:{uuid.uuid4().hex[:8]}"
 
     if not authorized_chat_gate(
         callback_chat_id=callback_chat_id,
