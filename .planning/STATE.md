@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 07
 current_phase_name: Paper Forward Observation
 status: executing
-stopped_at: Completed 07-03-PLAN.md
-last_updated: "2026-09-27T00:00:00.000Z"
+stopped_at: Completed 07-04-PLAN.md
+last_updated: "2026-09-27T09:30:00.000Z"
 last_activity: 2026-09-27
-last_activity_desc: Phase 07 plan 03 (paper three-way attribution journaling) executed
-state_head: abf8729
+last_activity_desc: Phase 07 plan 04 (pinned-epoch freeze monitor + SIMULATE notify + soak readiness) executed
+state_head: 572bc40e6d8cdc7a8f249fc1682637ec300e98ef
 progress:
   total_phases: 11
   completed_phases: 6
   total_plans: 29
-  completed_plans: 28
+  completed_plans: 29
 milestone_name: milestone
 ---
 
@@ -31,9 +31,9 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 07 (Paper Forward Observation) — EXECUTING
-Plan: 3 of 4
-Status: Executing Phase 07
-Last activity: 2026-09-27 — Phase 07 plan 03 (paper three-way attribution journaling) executed
+Plan: 4 of 4
+Status: Phase 7 complete; WS-connect gap BLOCKED-follow-up before soak can start
+Last activity: 2026-09-27 — Phase 07 plan 04 (pinned-epoch freeze monitor + SIMULATE notify + soak readiness) executed
 
 Progress: [████████░░░] 75%
 
@@ -151,10 +151,15 @@ Recent decisions affecting current work:
 - [Phase 07]: [07-02] D-04 prefix-invariance test guards D-02 determinism — verdict for bar N must depend only on bars [0..N]; appending a post-horizon bar must not change earlier verdicts
 - [Phase 07]: [07-02] D-05 src/paper/resync.py and src/paper/supervisor.py import only stdlib + tenacity + structlog + sibling modules; no Polars/pandas/NumPy/Binance SDK/SQLAlchemy/Pydantic leaks
 - [Phase 07]: [07-02] FLAGGED ASSUMPTION (PAPER-01 unclassified): bounded-retry ceilings (RESYNC_MAX_ATTEMPTS=7, RESYNC_MAX_DELAY_SECONDS=120, SUPERVISOR_MAX_ATTEMPTS=7, SUPERVISOR_MAX_DELAY_SECONDS=120) are module-level named constants; operator tunes them only before a soak epoch starts, never mid-epoch
+- [Phase 07]: [07-04] D-04 frozen: pin_stream_epoch fails closed on CostModelBindingMismatch; check_registry_unchanged re-hashes without rewriting old pinned hashes; pinned hash string is append-only history (per epoch_id)
+- [Phase 07]: [07-04] D-05 frozen: SIMULATE-notify is journal-first send-only with bounded tenacity retry (NOTIFY_MAX_ATTEMPTS=3, NOTIFY_MAX_DELAY_SECONDS=30); callbacks are inert labels (SIMULATE-recorded / SKIP (Phase 8)); never auto-approves on notification failure
+- [Phase 07]: [07-04] Telegram isolation: only src/adapters/telegram_notify.py imports python-telegram-bot; src/paper/notify.py consumes a Protocol-typed TelegramBot with test-injected fake
+- [Phase 07]: [07-04] FLAGGED ASSUMPTION (PAPER-03 unclassified): freeze-monitor tick cadence (hourly cron) and minimum-evidence signal-frequency gate are researcher-set values recorded in the soak log, not code defaults
+- [Phase 07]: [07-04] BLOCKED-FOLLOW-UP: PaperWsAdapter + PaperSupervisor have no SDK connect path wired (0 live events in 30s); Wave 1/2 tests use injected fakes. Soak must NOT start until live WS smoke passes. Routed to executor as separate plan.
 
 ### Pending Todos
 
-None yet.
+- WS-connect gap fix (PaperWsAdapter + PaperSupervisor SDK connect path proven live) — blocks soak start
 
 ### Blockers/Concerns
 
@@ -163,6 +168,7 @@ None yet.
 - Algo-Order field details MEDIUM confidence — re-verify against current Binance docs before Phase 9 wiring
 - ApprovalResult value set is a planner assumption (D-10) — user confirmation pending
 - evaluate_risk currently passes absolute amounts directly; Phase-7+ caller must convert registry rates to absolute amounts before calling
+- WS-connect gap (07-04 follow-up) blocks soak start; Phase 8 construction can proceed in parallel
 
 ### Roadmap Evolution
 
@@ -183,6 +189,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-27T00:00:00.000Z
-Stopped at: Completed 07-02-PLAN.md
-Resume file: .planning/phases/07-paper-forward-observation/07-03-PLAN.md
+Last session: 2026-09-27T09:30:00.000Z
+Stopped at: Completed 07-04-PLAN.md
+Resume file: .planning/phases/07-paper-forward-observation/07-04-SUMMARY.md
