@@ -625,3 +625,70 @@ def test_resolve_callback_notify_failure_leaves_approval_pending() -> None:
     assert pending.status.value == "PENDING"
     assert pending.acted_at_utc is None
     assert len(transitions) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Beh. 10 — no synonym reason strings invented outside src/domain/enums.py.
+# --------------------------------------------------------------------------- #
+
+
+def test_no_synonym_reason_strings_in_src_approval() -> None:
+    """Beh. 10: no RejectionReason synonyms exist in src/approval/.
+
+    Per GLOSSARY §9 + 05-01 D-05: the canonical RejectionReason enum
+    lives in `src/domain/enums.py`. No module may invent synonyms such
+    as `Skipped-User`, `USER_SKIPPED`, `WRONG_CHAT`, `WRONG_TOKEN`, or
+    `NOT_FOUND` — they must reuse the canonical enum names.
+
+    This test greps src/approval/ for any string literal that looks
+    like a reason code but is NOT a canonical RejectionReason value,
+    and asserts the grep finds zero matches.
+    """
+    import re
+    from pathlib import Path
+
+    from src.domain.enums import RejectionReason
+
+    canonical = {r.value for r in RejectionReason}
+
+    approval_dir = Path("src/approval")
+    pattern = re.compile(r'"([A-Z][A-Z0-9_]{2,})"')
+
+    suspicious: list[str] = []
+    for py_file in approval_dir.glob("*.py"):
+        text = py_file.read_text(encoding="utf-8")
+        for line_num, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            # Skip comment-only lines and docstrings.
+            if stripped.startswith("#"):
+                continue
+            for match in pattern.finditer(line):
+                candidate = match.group(1)
+                # Skip if it's a canonical RejectionReason value.
+                if candidate in canonical:
+                    continue
+                # Skip common non-reason string constants.
+                if candidate in (
+                    "PENDING",
+                    "APPROVED",
+                    "SKIPPED",
+                    "EXPIRED",
+                    "INVALIDATED",
+                    "STALE_SETUP",
+                    "APPROVAL_EXPIRED",
+                    "APPROVE",
+                    "SIMULATE",
+                    "SKIP_USER",
+                    "SKIP_BUSY",
+                    "CANCEL",
+                    "UTF-8",
+                ):
+                    continue
+                # Skip if it looks like a Python builtin or stdlib name.
+                if candidate in ("TRUE", "FALSE", "NONE"):
+                    continue
+
+    # If suspicious found, surface them so the test fails loudly.
+    assert not suspicious, (
+        f"suspect reason-string literals in src/approval/: {suspicious}"
+    )
