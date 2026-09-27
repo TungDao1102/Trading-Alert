@@ -510,10 +510,28 @@ async def on_callback(
     callback_at_utc = datetime.now(UTC)
     correlation_id = f"cb:{parsed.short_id}:{int(callback_at_utc.timestamp())}"
 
-    # Resolve the binding context for this short id (signal_id,
-    # trade_plan_id, plan_hash, etc.). Returns None if the short id
-    # is unknown — the chat gate still runs first, so an unknown
-    # short id does not leak via the chat reply.
+    if not authorized_chat_gate(
+        callback_chat_id=callback_chat_id,
+        authorized_chat_id=authorized_chat_id,
+    ):
+        result = dispatch(
+            parsed,
+            callback_chat_id=callback_chat_id,
+            authorized_chat_id=authorized_chat_id,
+            callback_at_utc=callback_at_utc,
+            raw_token="",
+            correlation_id=correlation_id,
+            binding_context=None,
+        )
+
+        if reply_text_fn is not None:
+            text = _render_outcome_text(result, parsed)
+            chat_id = getattr(query.message, "chat_id", None)
+            if chat_id is not None:
+                await reply_text_fn(int(chat_id), text)
+
+        return result
+
     binding = binding_context_resolver(parsed.short_id)
     raw_token = ""
     if binding is not None:
