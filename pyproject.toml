@@ -28,6 +28,7 @@ dependencies = [
   "tzdata",
   # Async / HTTP plumbing for the edge (webhook/health later; keep floor in lockfile)
   "httpx>=0.28,<1",
+  "python-telegram-bot>=22.8,<23",
 ]
 
 [project.optional-dependencies]
