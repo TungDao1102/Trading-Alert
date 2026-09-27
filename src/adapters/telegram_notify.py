@@ -108,8 +108,11 @@ def build_simulate_keyboard(signal_id: str) -> InlineKeyboardMarkup:
     short = _short_signal_id(signal_id)
     sim_data = f"SIM:{short}"
     skip_data = f"SKIP:{short}"
-    assert len(sim_data.encode("utf-8")) <= 64
-    assert len(skip_data.encode("utf-8")) <= 64
+    for payload in (sim_data, skip_data):
+        if len(payload.encode("utf-8")) > 64:
+            raise ValueError(
+                f"callback_data exceeds 64 bytes: {len(payload.encode('utf-8'))} bytes"
+            )
     return InlineKeyboardMarkup(
         [
             [
