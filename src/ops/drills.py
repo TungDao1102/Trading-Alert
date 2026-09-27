@@ -238,6 +238,18 @@ class DrillLog:
 _ZERO_TIMEDELTA = timedelta(0)
 
 
+def _run_coro(coro: Any) -> Any:
+    import asyncio
+    import concurrent.futures
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
 def run_drill(
     declaration: DrillDeclaration,
     *,
@@ -533,7 +545,7 @@ def make_orphan_drill(
         # Enter SAFE_MODE on the divergence (matches the reconciler tick).
         safe_mode_controller.enter_safe_mode(reason="ORPHAN_PROTECTIVE")
         # Sweep the orphan protectives.
-        outcome = asyncio.run(sweeper.sweep(diff, position_verifier=position_verifier))
+        outcome = _run_coro(sweeper.sweep(diff, position_verifier=position_verifier))
         if outcome.swept_count == 0:
             raise AssertionError("orphan drill: expected sweeper to cancel at least one orphan")
         if len(outcome.skipped) > 0:
@@ -794,7 +806,7 @@ def make_manual_close_drill(
         if len(diff.orphan_protectives) == 0:
             raise AssertionError("manual_close drill: expected orphan_protectives list populated")
         safe_mode_controller.enter_safe_mode(reason="MANUAL_CLOSE")
-        outcome = asyncio.run(sweeper.sweep(diff, position_verifier=position_verifier))
+        outcome = _run_coro(sweeper.sweep(diff, position_verifier=position_verifier))
         if outcome.swept_count == 0:
             raise AssertionError("manual_close drill: expected sweeper to cancel the orphan")
         return OUTCOME_ORPHAN_SWEPTED
@@ -846,7 +858,7 @@ def make_restore_drill(
 
         # The exit path is async; tests inject a clean adapter so the
         # controller's compare yields agreement=True.
-        exited = asyncio.run(safe_mode_controller.exit_safe_mode())
+        exited = _run_coro(safe_mode_controller.exit_safe_mode())
         if not exited:
             raise AssertionError("restore drill: expected exit_safe_mode to return True")
         if safe_mode_controller.in_safe_mode:
