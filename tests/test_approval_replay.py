@@ -660,7 +660,7 @@ def test_no_synonym_reason_strings_in_src_approval() -> None:
     suspicious: list[str] = []
     for py_file in approval_dir.glob("*.py"):
         text = py_file.read_text(encoding="utf-8")
-        for _line_num, line in enumerate(text.splitlines(), start=1):
+        for line_num, line in enumerate(text.splitlines(), start=1):
             stripped = line.strip()
             # Skip comment-only lines and docstrings.
             if stripped.startswith("#"):
@@ -690,6 +690,7 @@ def test_no_synonym_reason_strings_in_src_approval() -> None:
                 # Skip if it looks like a Python builtin or stdlib name.
                 if candidate in ("TRUE", "FALSE", "NONE"):
                     continue
+                suspicious.append(f"{py_file.name}:{line_num}:{candidate}")
 
     # If suspicious found, surface them so the test fails loudly.
     assert not suspicious, (
