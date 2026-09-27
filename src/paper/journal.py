@@ -23,7 +23,7 @@ extraction loses nothing.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from src.domain.canonical import sha256_hex
@@ -127,7 +127,7 @@ def _parse_utc(raw: str | None) -> datetime | None:
     value = datetime.fromisoformat(raw)
     if value.tzinfo is None:
         raise ValueError(f"naive datetime in fixture: {raw!r}")
-    return value.astimezone(tz=__import__("datetime").UTC)
+    return value.astimezone(tz=UTC)
 
 
 def _identity_from_signal(signal: dict[str, Any]) -> dict[str, str]:
@@ -212,14 +212,41 @@ def assemble_paper_record(
     }
 
     signal_detected_at_utc = _parse_utc(signal["detected_at_utc"])
-    assert signal_detected_at_utc is not None  # _parse_utc returns None only for None input
+    if signal_detected_at_utc is None:
+        raise ValueError("signal['detected_at_utc'] must be present")
+
+    # Outcome-shape validation (WR-05): ambiguous or partial inputs
+    # fail loudly with dedicated messages instead of falling through
+    # to the generic case-mismatch error.
+    if skip_reason is not None and expired_at_utc is not None:
+        raise ValueError(
+            "ambiguous outcome: skip_reason and expired_at_utc both set"
+        )
+    if skip_reason is not None and not skip_reason:
+        raise ValueError("skip_reason must be a non-empty string")
 
     # Case 1: filled in simulation — system + user-executed-sim.
     if approval is not None and order is not None and fill is not None:
+        if skip_reason is not None or expired_at_utc is not None:
+            raise ValueError(
+                "ambiguous outcome: filled legs with skip_reason/expired_at_utc set"
+            )
         # The simulated approval acted_at_utc equals signal time + lag.
         simulated_acted_at_utc = signal_detected_at_utc + timedelta(
             seconds=APPROVAL_DELAY_LAG_SECONDS
         )
+        # Cross-check a caller-supplied approval timestamp (WR-05a):
+        # silently ignoring a disagreeing acted_at_utc hides caller
+        # confusion about who owns approval timing (the assembler does).
+        raw_acted = approval.get("acted_at_utc")
+        if raw_acted is not None:
+            caller_acted = _parse_utc(raw_acted)
+            if caller_acted != simulated_acted_at_utc:
+                raise ValueError(
+                    "approval['acted_at_utc'] disagrees with the simulated "
+                    f"signal+lag time: {raw_acted!r} != "
+                    f"{simulated_acted_at_utc.isoformat()}"
+                )
         order_submitted_at_utc = _parse_utc(order["submitted_at_utc"])
         fill_time_utc = _parse_utc(fill["fill_time_utc"])
 
@@ -335,7 +362,14 @@ def assemble_paper_record(
         )
         return [system_row, opportunity_row]
 
-    # No valid case matched — fail closed.
+    # No valid case matched — fail closed. A partial leg (some of
+    # approval/order/fill present without skip/expired) gets its own
+    # PARTIAL_LEG rejection instead of the generic message (WR-05b).
+    if approval is not None or order is not None or fill is not None:
+        raise ValueError(
+            "PARTIAL_LEG: approval/order/fill must be all present (filled) "
+            "or all absent with skip_reason/expired_at_utc"
+        )
     raise ValueError(
         "assemble_paper_record requires either (approval + order + fill) "
         "for filled simulation, skip_reason for skipped, or expired_at_utc "
@@ -364,8 +398,12 @@ def assemble_no_trade_record(
     Per D-03: a NO_TRADE outcome (no signal emitted) yields a single
     `system` row with the reason code and no SignalId/plan hash. The
     row carries the epoch_id and the canonical identity tuple (minus
-    SignalId/plan hash which don't exist for a NO_TRADE).
+    SignalId/plan hash which don't exist for a NO_TRADE). Empty reason
+    codes are rejected (WR-05d) — an opportunity/NO_TRADE row without
+    a reason is an audit hole.
     """
+    if not reason_code:
+        raise ValueError("reason_code must be a non-empty string")
     return PaperRecord(
         attribution=AttributionKind.SYSTEM,
         epoch_id=epoch_id,
