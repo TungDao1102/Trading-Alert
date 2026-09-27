@@ -604,9 +604,10 @@ def test_dispatch_callback_chat_gate_runs_before_state_lookup() -> None:
     assert lookup_short_called is False
     assert lookup_token_called is False
     assert save_called is False
-    # The rejection was journaled.
-    assert len(journal_calls) == 1
+    # Both the reject receipt and the REJECTED outcome were journaled.
+    assert len(journal_calls) == 2
     assert journal_calls[0].event_type == "CALLBACK_RECEIVED"
+    assert journal_calls[1].event_type == "CALLBACK_REJECTED"
 
 
 def test_dispatch_callback_journal_first_receipt_before_resolve() -> None:
