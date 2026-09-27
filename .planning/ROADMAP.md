@@ -255,11 +255,18 @@ Plans:
 **Plans**: 5 plans
 
 Plans:
+**Wave 1**
 
 - [ ] 08-01: Tracer approval binding slice — tokens, binding, replay with 5x-replay proof (APRV-02, TDD, D-01)
-- [ ] 08-02: APPROVE/SKIP message plus PTB callback receiver plus short-id mapping migration (APRV-01, D-02)
 - [ ] 08-03: Deterministic plan-hash plus role order IDs with retry/restart/replay proof (EXEC-03, TDD, D-04)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 08-02: APPROVE/SKIP message plus PTB callback receiver plus short-id mapping migration (APRV-01, D-02)
 - [ ] 08-04: Three-source reconciler plus cancel-only sweeper plus SAFE_MODE (EXEC-02, D-03)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 08-05: RUNBOOK 8-drill harness plus journaled drill log plus phase gate (OPS-01, D-05)
 
 ### Phase 9: Live Execution Rollout
