@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 8
 current_phase_name: Approval + Reconciliation Hardening
 status: executing
-stopped_at: Completed 08-01-PLAN.md
-last_updated: "2026-09-27T11:51:54.489Z"
+stopped_at: Completed 08-03-PLAN.md
+last_updated: "2026-09-27T12:30:00.000Z"
 last_activity: 2026-09-27
-last_activity_desc: Phase 8 execution started
-state_head: 400e4d6eb1a21ba2bcdfe2b7fad89ada44f3db5c
+last_activity_desc: Phase 8 plan 03 completed — deterministic order IDs
+state_head: 5b1ae1c
 progress:
   total_phases: 11
   completed_phases: 6
   total_plans: 34
-  completed_plans: 30
+  completed_plans: 31
 milestone_name: milestone
 ---
 
@@ -31,9 +31,9 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 8 (Approval + Reconciliation Hardening) — EXECUTING
-Plan: 2 of 5
+Plan: 3 of 5
 Status: Ready to execute
-Last activity: 2026-09-27 — Phase 8 execution started
+Last activity: 2026-09-27 — Phase 8 plan 03 completed (deterministic order IDs)
 
 Progress: [████████░░░] 75%
 
@@ -71,6 +71,7 @@ Progress: [████████░░░] 75%
 | Phase 07 P01 | ~45 min | 3 tasks | 10 files |
 | Phase 07 P02 | ~30 min | 3 tasks | 8 files |
 | Phase 08 P01 | ~15 min | 3 tasks | 7 files |
+| Phase 08 P03 | ~10 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -162,6 +163,13 @@ Recent decisions affecting current work:
 - [Phase 8]: [08-01] D-03 constant-time compare via hmac.compare_digest prevents timing attacks on token verification
 - [Phase 8]: [08-01] D-04 expiry boundary inclusive: now_utc >= expiry_utc is expired; one second before expiry is still approvable
 - [Phase 8]: [08-01] D-05 src/approval/ is dependency-free (stdlib + src/domain/* only); no telegram, binance_sdk, sqlalchemy, pydantic, polars imports; zero float( usage for money/qty/price fields
+- [Phase 8]: [08-03] D-01 ROLE_CODES maps exactly the OrderRole vocabulary (ENTRY, STOP_LOSS, TAKE_PROFIT_1, TAKE_PROFIT_2) to distinct 2-char codes (EN, SL, T1, T2); the table is the only place role-code literals appear
+- [Phase 8]: [08-03] D-02 derive_client_order_id and derive_algo_client_id are pure functions of (plan_hash, role) using stdlib only — no float, no locale-dependent string conversion
+- [Phase 8]: [08-03] D-03 Pinned ID shape: client_order_id = 'x-' (2) + plan_hash[:32] (32) + role_code (2) = 36 chars; algo_client_id = 'xa-' (3) + plan_hash[:31] (31) + role_code (2) = 36 chars
+- [Phase 8]: [08-03] D-04 Charset is a strict subset of the Binance client-order-ID rule (<=36 chars, ASCII alnum + hyphen/underscore): [0-9a-f-] plus uppercase role codes
+- [Phase 8]: [08-03] D-05 Unknown role raises ValueError with the canonical vocabulary listed in the message — no fallback code, no silent default
+- [Phase 8]: [08-03] D-06 plan_hash slice is the first N hex chars of the canonical 64-char SHA-256 plan hash — deterministic across processes and Python versions
+- [Phase 8]: [08-03] D-07 Retry/restart/replay determinism proven: same call twice, importlib.reload, and interleaving other plans all yield byte-identical IDs
 
 ### Pending Todos
 
@@ -195,6 +203,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-27T11:51:54.390Z
-Stopped at: Completed 08-01-PLAN.md
+Last session: 2026-09-27T12:30:00.000Z
+Stopped at: Completed 08-03-PLAN.md
 Resume file: None

@@ -252,20 +252,20 @@ Plans:
   4. Retries, restarts, and replayed events never create duplicate entry orders (deterministic client/algo order identifiers verified)
   5. RUNBOOK failure drills (unprotected/orphan/duplicate/API-down/stale-feed/DB-failure/manual-close/restore) are rehearsed and logged; SAFE_MODE blocks new entries while monitoring and reconciliation continue
 
-**Plans**: 1/5 plans executed
+**Plans**: 2/5 plans executed
 
 Plans:
 
 - [x] 08-01-PLAN.md
 - [ ] 08-02-PLAN.md
-- [ ] 08-03-PLAN.md
+- [x] 08-03-PLAN.md
 - [ ] 08-04-PLAN.md
 - [ ] 08-05-PLAN.md
 
 **Wave 1**
 
 - [x] 08-01: Tracer approval binding slice — tokens, binding, replay with 5x-replay proof (APRV-02, TDD, D-01)
-- [ ] 08-03: Deterministic plan-hash plus role order IDs with retry/restart/replay proof (EXEC-03, TDD, D-04)
+- [x] 08-03: Deterministic plan-hash plus role order IDs with retry/restart/replay proof (EXEC-03, TDD, D-04)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -326,6 +326,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 5. Risk Engine | 2/2 | In Progress|  |
 | 6. Backtest Simulator + Experiment Registry | 3/3 | Complete   | 2026-09-26 |
 | 7. Paper Forward Observation | 4/4 | In Progress|  |
-| 8. Approval + Reconciliation Hardening | 1/5 | In Progress|  |
+| 8. Approval + Reconciliation Hardening | 2/5 | In Progress|  |
 | 9. Live Execution Rollout | 0/TBD | Not started | - |
 | 10. Journal Depth + Kill-Gate Operations | 0/TBD | Not started | - |
