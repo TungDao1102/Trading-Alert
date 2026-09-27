@@ -76,7 +76,7 @@ ignore = [
 [tool.mypy]
 python_version = "3.13"
 strict = true
-files = ["src"]
+# mypy accepts no files option; pass scope on the command line (e.g. mypy src).
 ignore_missing_imports = false
 warn_unused_ignores = true
 warn_return_any = true
