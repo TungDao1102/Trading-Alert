@@ -13,10 +13,10 @@ distinguishes:
     try-except isolation: one failing pair journals its gap while
     healthy pairs still dispatch.
 
-The module imports only stdlib + tenacity + structlog + sibling
-modules (per the plan's purity contract for this slice). The WS
-surface stays behind `src/adapters/paper_ws.py`; the REST adapter
-surface stays behind `src/adapters/binance_usdm.py`.
+The module owns the WS lifecycle behind `src/adapters/paper_ws.py`
+and the REST backfill surface behind `src/adapters/binance_usdm.py`
+(SDK response types enter only as `Kline` values; the supervisor
+never imports the SDK directly).
 """
 
 from __future__ import annotations
