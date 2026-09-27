@@ -51,7 +51,7 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 ### Approval
 
-- [ ] **APRV-01**: User receives Telegram alerts (SIMULATE/APPROVE/SKIP) carrying symbol, direction, setup, entry, SL, TP(s), RR, risk, expiry, invalidation, exposure, and reason codes
+- [x] **APRV-01**: User receives Telegram alerts (SIMULATE/APPROVE/SKIP) carrying symbol, direction, setup, entry, SL, TP(s), RR, risk, expiry, invalidation, exposure, and reason codes
 - [x] **APRV-02**: Approval is bound to SignalId + strategy version + plan hash + expiry + authorized chat + one-time token, idempotent across at-least-once callback replays, with no auto-approve on notification failure
 
 ### Execution & Safety
@@ -122,7 +122,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PAPER-01 | Phase 7 | Pending |
 | PAPER-02 | Phase 7 | Pending |
 | PAPER-03 | Phase 7 | Pending |
-| APRV-01 | Phase 8 | Pending |
+| APRV-01 | Phase 8 | Complete |
 | APRV-02 | Phase 8 | Complete |
 | EXEC-01 | Phase 9 | Pending |
 | EXEC-02 | Phase 8 | Pending |

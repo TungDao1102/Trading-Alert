@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 8
 current_phase_name: Approval + Reconciliation Hardening
 status: executing
-stopped_at: Completed 08-04-PLAN.md
-last_updated: "2026-09-27T13:30:00.000Z"
+stopped_at: Completed 08-02-PLAN.md (live-tap gate outstanding)
+last_updated: "2026-09-27T14:36:10.987Z"
 last_activity: 2026-09-27
 last_activity_desc: Phase 8 plan 04 completed — three-source reconciler + sweeper + SAFE_MODE
-state_head: 955d5c5
+state_head: 166276f12eff4e8fb6e912cdf117a25fe589350a
 progress:
   total_phases: 11
   completed_phases: 6
   total_plans: 34
-  completed_plans: 32
+  completed_plans: 33
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 8 (Approval + Reconciliation Hardening) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Status: Ready to execute next plan
 Last activity: 2026-09-27 — Phase 8 plan 04 completed (three-source reconciler + sweeper + SAFE_MODE)
 
@@ -73,6 +73,7 @@ Progress: [█████████░░] 80%
 | Phase 08 P01 | ~15 min | 3 tasks | 7 files |
 | Phase 08 P03 | ~10 min | 2 tasks | 5 files |
 | Phase 08 P04 | ~25 min | 3 tasks | 8 files |
+| Phase 8 P2 | ~25 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -183,6 +184,9 @@ Recent decisions affecting current work:
 - [Phase 8]: [08-04] D-10 Bounded-tenacity cancel ceilings (RECONCILER_CANCEL_MAX_ATTEMPTS=3, RECONCILER_CANCEL_MAX_DELAY_SECONDS=30) mirror the notify/resync precedent; transient-only retry filter
 - [Phase 8]: [08-04] D-11 Already-canceled-as-success posture: SDK error code -2011 (UNKNOWN_ORDER) on cancel is treated as success because the post-condition is satisfied
 - [Phase 8]: [08-04] D-12 Zero-amount positions filtered out of snapshot_positions: Binance semantics is position_amt == 0 means no position
+- [Phase 8]: [08-02] D-08-02-01 format_approve is PTB-free and mirrors format_simulate posture; lives in telegram_notify.py so paper-core can reuse it without adapter violation
+- [Phase 8]: [08-02] D-08-02-06 receiver persists ShortIdMappingRow in the SAME transaction as the Approval row transition via injected save_atomic(approval, mapping); replay paths pass mapping=None
+- [Phase 8]: [08-02] D-08-02-10 LIVE-TAP GATE PENDING: TELEGRAM_BOT_TOKEN + TELEGRAM_AUTHORIZED_CHAT_ID not provisioned in this environment; operator must run real APPROVE + SKIP tap + unknown-chat rejection before plan 08-02 can be marked complete
 
 ### Pending Todos
 
@@ -196,6 +200,7 @@ Recent decisions affecting current work:
 - ApprovalResult value set is a planner assumption (D-10) — user confirmation pending
 - evaluate_risk currently passes absolute amounts directly; Phase-7+ caller must convert registry rates to absolute amounts before calling
 - WS-connect gap (07-04 follow-up) blocks soak start; Phase 8 construction can proceed in parallel
+- 08-02 LIVE-TAP GATE: TELEGRAM_BOT_TOKEN + TELEGRAM_AUTHORIZED_CHAT_ID must be provisioned and a real APPROVE/SKIP tap + unknown-chat rejection must be operator-confirmed before plan 08-02 can be marked status: complete (currently halted)
 
 ### Roadmap Evolution
 
@@ -216,6 +221,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-27T13:30:00.000Z
-Stopped at: Completed 08-04-PLAN.md
+Last session: 2026-09-27T14:34:21.147Z
+Stopped at: Completed 08-02-PLAN.md (live-tap gate outstanding)
 Resume file: None
