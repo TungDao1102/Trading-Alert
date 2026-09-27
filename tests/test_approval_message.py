@@ -761,10 +761,13 @@ def test_dispatch_callback_atomic_write_passes_mapping_to_save() -> None:
         request_hash=plan_hash,
     )
 
+    from src.approval.mapping import derive_short_id
+
+    short_id = derive_short_id(signal_id)
     parsed = ParsedCallback(
-        raw="APR:" + "a" * 32,
+        raw="APR:" + short_id,
         kind=CallbackKind.APPROVE,
-        short_id="a" * 32,
+        short_id=short_id,
     )
     saved: list[tuple[Any, Any]] = []
 
@@ -791,6 +794,7 @@ def test_dispatch_callback_atomic_write_passes_mapping_to_save() -> None:
         lookup_by_short_id=_lookup_short,
         lookup_by_token_hash=_lookup_token,
         save_atomic=_save,
+        now_utc=datetime(2026, 9, 19, 13, 0, tzinfo=UTC),
         binding_context={
             "plan_hash": plan_hash,
             "strategy_version": strategy_version,
@@ -813,8 +817,6 @@ def test_dispatch_callback_atomic_write_passes_mapping_to_save() -> None:
     assert saved_mapping.trade_plan_id == trade_plan_id
     # The mapping's short_id is the deterministic sha256 prefix of
     # the signal_id (D-02), not the literal callback_data short_id.
-    from src.approval.mapping import derive_short_id
-
     assert saved_mapping.short_id == derive_short_id(signal_id)
 
 
@@ -857,10 +859,13 @@ def test_dispatch_callback_replay_returns_existing_approval() -> None:
         request_hash=plan_hash,
     )
 
+    from src.approval.mapping import derive_short_id
+
+    short_id = derive_short_id(signal_id)
     parsed = ParsedCallback(
-        raw="APR:" + "a" * 32,
+        raw="APR:" + short_id,
         kind=CallbackKind.APPROVE,
-        short_id="a" * 32,
+        short_id=short_id,
     )
     saved: list[tuple[Any, Any]] = []
 
@@ -887,6 +892,7 @@ def test_dispatch_callback_replay_returns_existing_approval() -> None:
         lookup_by_short_id=_lookup_short,
         lookup_by_token_hash=_lookup_token,
         save_atomic=_save,
+        now_utc=datetime(2026, 9, 19, 13, 0, tzinfo=UTC),
         binding_context={
             "plan_hash": plan_hash,
             "strategy_version": "v1.0.0",
@@ -940,10 +946,13 @@ def test_dispatch_callback_binding_gate_failure_returns_reason_code() -> None:
         request_hash=plan_hash,
     )
 
+    from src.approval.mapping import derive_short_id
+
+    short_id = derive_short_id(signal_id)
     parsed = ParsedCallback(
-        raw="APR:" + "a" * 32,
+        raw="APR:" + short_id,
         kind=CallbackKind.APPROVE,
-        short_id="a" * 32,
+        short_id=short_id,
     )
 
     def _journal(event: Any) -> None:
