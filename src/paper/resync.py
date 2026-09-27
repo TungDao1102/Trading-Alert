@@ -8,8 +8,9 @@ not return — holes stay holes, and the journal layer persists them
 without a parallel table (gap dicts reuse the `CollectorGap` field
 shape: symbol, data_class, expected_utc, observed_utc, reason).
 
-The module imports only stdlib + tenacity + structlog + sibling
-modules (per the plan's purity contract for this slice). The WS
+The module is the adapter-surface owner for REST backfill: SDK response
+types enter only as `Kline` values via `src/adapters/binance_usdm.py`,
+and interval arithmetic reuses `src/data/backfill.py`. The WS
 surface stays behind `src/adapters/paper_ws.py`; the REST adapter
 surface stays behind `src/adapters/binance_usdm.py`.
 """
