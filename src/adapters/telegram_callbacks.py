@@ -525,10 +525,9 @@ async def on_callback(
         )
 
         if reply_text_fn is not None:
-            text = _render_outcome_text(result, parsed)
             chat_id = getattr(query.message, "chat_id", None)
             if chat_id is not None:
-                await reply_text_fn(int(chat_id), text)
+                await reply_text_fn(int(chat_id), "Rejected")
 
         return result
 
