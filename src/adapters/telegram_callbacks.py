@@ -294,6 +294,14 @@ def dispatch_callback(
             correlation_id=correlation_id,
         )
         journal_receipt(receipt)
+        _journal_outcome(
+            journal_receipt,
+            parsed=parsed,
+            ok=False,
+            reason_code=RejectionReason.INVALIDATED,
+            callback_at_utc=callback_at_utc,
+            correlation_id=correlation_id,
+        )
         return DispatchResult(
             ok=False,
             kind=parsed.kind,
@@ -312,11 +320,27 @@ def dispatch_callback(
     # SIMULATE-only buttons do NOT advance approval state (D-02 +
     # 08-01 D-11). Record the receipt, return early.
     if parsed.kind == CallbackKind.SIMULATE_RECORDED:
+        _journal_outcome(
+            journal_receipt,
+            parsed=parsed,
+            ok=True,
+            reason_code=None,
+            callback_at_utc=callback_at_utc,
+            correlation_id=correlation_id,
+        )
         return DispatchResult(ok=True, kind=parsed.kind)
 
     # Gate 4: short-id mapping lookup.
     mapping = lookup_by_short_id(parsed.short_id)
     if mapping is None:
+        _journal_outcome(
+            journal_receipt,
+            parsed=parsed,
+            ok=False,
+            reason_code=RejectionReason.INVALIDATED,
+            callback_at_utc=callback_at_utc,
+            correlation_id=correlation_id,
+        )
         return DispatchResult(
             ok=False,
             kind=parsed.kind,
@@ -329,6 +353,14 @@ def dispatch_callback(
     # missing context or malformed payload maps to INVALIDATED, never
     # an unhandled ValueError/KeyError out of the PTB handler.
     if binding_context is None:
+        _journal_outcome(
+            journal_receipt,
+            parsed=parsed,
+            ok=False,
+            reason_code=RejectionReason.INVALIDATED,
+            callback_at_utc=callback_at_utc,
+            correlation_id=correlation_id,
+        )
         return DispatchResult(
             ok=False,
             kind=parsed.kind,
@@ -347,6 +379,14 @@ def dispatch_callback(
             action=_callback_kind_to_action(parsed.kind),
         )
     except (ValueError, KeyError, TypeError):
+        _journal_outcome(
+            journal_receipt,
+            parsed=parsed,
+            ok=False,
+            reason_code=RejectionReason.INVALIDATED,
+            callback_at_utc=callback_at_utc,
+            correlation_id=correlation_id,
+        )
         return DispatchResult(
             ok=False,
             kind=parsed.kind,
@@ -387,18 +427,42 @@ def dispatch_callback(
             now_utc=now_utc,
         )
     except ApprovalRejected as exc:
+        _journal_outcome(
+            journal_receipt,
+            parsed=parsed,
+            ok=False,
+            reason_code=exc.reason_code,
+            callback_at_utc=callback_at_utc,
+            correlation_id=correlation_id,
+        )
         return DispatchResult(
             ok=False,
             kind=parsed.kind,
             reason_code=exc.reason_code,
         )
     except (ValueError, KeyError, TypeError):
+        _journal_outcome(
+            journal_receipt,
+            parsed=parsed,
+            ok=False,
+            reason_code=RejectionReason.INVALIDATED,
+            callback_at_utc=callback_at_utc,
+            correlation_id=correlation_id,
+        )
         return DispatchResult(
             ok=False,
             kind=parsed.kind,
             reason_code=RejectionReason.INVALIDATED,
         )
 
+    _journal_outcome(
+        journal_receipt,
+        parsed=parsed,
+        ok=True,
+        reason_code=None,
+        callback_at_utc=callback_at_utc,
+        correlation_id=correlation_id,
+    )
     return DispatchResult(ok=True, kind=parsed.kind, approval=approval)
 
 
@@ -470,6 +534,40 @@ def _build_chat_reject_receipt(
         entity_id=f"short:{parsed.short_id}",
         correlation_id=correlation_id,
         payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _journal_outcome(
+    journal_receipt: JournalReceipt,
+    *,
+    parsed: ParsedCallback,
+    ok: bool,
+    reason_code: RejectionReason | None,
+    callback_at_utc: datetime,
+    correlation_id: str,
+) -> None:
+    import uuid
+
+    event_type = EVENT_TYPE_CALLBACK_RESOLVED if ok else EVENT_TYPE_CALLBACK_REJECTED
+    suffix = uuid.uuid4().hex[:8]
+    ms = int(callback_at_utc.timestamp() * 1000)
+    payload = {
+        "short_id": parsed.short_id,
+        "kind": parsed.kind.value,
+        "ok": ok,
+        "reason_code": reason_code.value if reason_code is not None else None,
+        "correlation_id": correlation_id,
+    }
+    journal_receipt(
+        JournalEvent(
+            journal_event_id=f"cb-outcome:{parsed.short_id}:{ms}:{suffix}",
+            occurred_at_utc=callback_at_utc,
+            event_type=event_type,
+            entity_type="Approval",
+            entity_id=f"short:{parsed.short_id}",
+            correlation_id=correlation_id,
+            payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        )
     )
 
 
