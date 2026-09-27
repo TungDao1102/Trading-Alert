@@ -48,17 +48,21 @@ from typing import Any
 from tenacity import (
     AsyncRetrying,
     RetryError,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     stop_after_delay,
     wait_random_exponential,
 )
+
+import structlog
 
 from src.adapters.telegram_notify import (
     TelegramBot,
     build_simulate_keyboard,
     send_simulate,
 )
+
+log = structlog.get_logger()
 
 # --------------------------------------------------------------------------- #
 # NotifyOutcome — what the caller journals after each send.
@@ -146,7 +150,32 @@ def format_simulate(
     The text is byte-stable: same inputs produce the same output
     (D-02 determinism). The format is a multi-line string with one
     field per line for operator readability.
+
+    Fail-closed validation (WR-11): naive datetimes, empty TP lists,
+    inverted entry bounds, and empty symbol/direction/setup raise
+    ValueError loudly — a malformed message must never render with a
+    wrong expiry or an empty TP section.
     """
+    if not symbol:
+        raise ValueError("symbol must be a non-empty string")
+    if not direction:
+        raise ValueError("direction must be a non-empty string")
+    if not setup:
+        raise ValueError("setup must be a non-empty string")
+    if entry_min > entry_max:
+        raise ValueError(
+            f"entry_min ({entry_min}) must be <= entry_max ({entry_max})"
+        )
+    if not take_profits:
+        raise ValueError("take_profits must be a non-empty list")
+    for field_name, value in (
+        ("expiry_utc", expiry_utc),
+        ("detected_at_utc", detected_at_utc),
+    ):
+        if not isinstance(value, datetime):
+            raise TypeError(f"{field_name} must be datetime, got {type(value).__name__}")
+        if value.tzinfo is None:
+            raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     tp_lines = "\n".join(
         f"  TP{idx + 1}: {price} ({fraction})"
         for idx, (price, fraction) in enumerate(take_profits)
@@ -192,6 +221,13 @@ async def notify_simulate(
     journaled via `on_outcome`, and the function returns normally
     with a `FAILED` outcome.
 
+    Contract on malformed payloads (CR-07): missing keys or invalid
+    values (ValueError/KeyError/TypeError from `format_simulate`)
+    yield a `FAILED` outcome with `attempts=0` — never a raise, never
+    a retry. `on_outcome` itself never triggers a resend: it runs
+    outside the tenacity attempt, and its own exceptions are logged,
+    never retried.
+
     Args:
         bot: The Telegram bot (injected; tests use a fake).
         chat_id: The authorized chat id (operator-provisioned).
@@ -202,25 +238,39 @@ async def notify_simulate(
     Returns:
         The NotifyOutcome (also passed to `on_outcome`).
     """
-    text = format_simulate(
-        symbol=payload["symbol"],
-        direction=payload["direction"],
-        setup=payload["setup"],
-        entry_min=payload["entry_min"],
-        entry_max=payload["entry_max"],
-        stop_loss=payload["stop_loss"],
-        take_profits=payload["take_profits"],
-        rr=payload["rr"],
-        risk_pct=payload["risk_pct"],
-        expiry_utc=payload["expiry_utc"],
-        invalidation=payload["invalidation"],
-        exposure_quote=payload["exposure_quote"],
-        reason_codes=payload["reason_codes"],
-        signal_id=payload["signal_id"],
-        detected_at_utc=payload["detected_at_utc"],
-    )
-    keyboard = build_simulate_keyboard(payload["signal_id"])
-    signal_id = payload["signal_id"]
+
+    try:
+        text = format_simulate(
+            symbol=payload["symbol"],
+            direction=payload["direction"],
+            setup=payload["setup"],
+            entry_min=payload["entry_min"],
+            entry_max=payload["entry_max"],
+            stop_loss=payload["stop_loss"],
+            take_profits=payload["take_profits"],
+            rr=payload["rr"],
+            risk_pct=payload["risk_pct"],
+            expiry_utc=payload["expiry_utc"],
+            invalidation=payload["invalidation"],
+            exposure_quote=payload["exposure_quote"],
+            reason_codes=payload["reason_codes"],
+            signal_id=payload["signal_id"],
+            detected_at_utc=payload["detected_at_utc"],
+        )
+        keyboard = build_simulate_keyboard(payload["signal_id"])
+        signal_id = payload["signal_id"]
+    except (KeyError, ValueError, TypeError) as exc:
+        outcome = NotifyOutcome(
+            kind=NotifyOutcomeKind.FAILED,
+            signal_id=str(payload.get("signal_id", "")),
+            error_class=type(exc).__name__,
+            attempts=0,
+        )
+        try:
+            on_outcome(outcome)
+        except Exception:
+            log.exception("paper.notify.on_outcome_failed")
+        return outcome
 
     attempts = 0
     last_error: Exception | None = None
@@ -234,7 +284,12 @@ async def notify_simulate(
                 multiplier=NOTIFY_WAIT_MULTIPLIER_SECONDS,
                 max=NOTIFY_WAIT_MAX_SECONDS,
             ),
-            retry=retry_if_exception_type(Exception),
+            # Transient faults only (WR-02): programming errors
+            # (ValueError/KeyError/TypeError) fail immediately
+            # instead of burning the retry budget.
+            retry=retry_if_exception(
+                lambda e: not isinstance(e, (ValueError, KeyError, TypeError))
+            ),
             reraise=True,
         ):
             with attempt:
@@ -245,28 +300,39 @@ async def notify_simulate(
                     text=text,
                     keyboard=keyboard,
                 )
-                outcome = NotifyOutcome(
-                    kind=NotifyOutcomeKind.SENT,
-                    signal_id=signal_id,
-                    error_class="",
-                    attempts=attempts,
-                )
-                on_outcome(outcome)
-                return outcome
     except RetryError as exc:
-        last_error = exc
+        # Unwrap to the root cause (WR-12): the tenacity wrapper
+        # class is useless for triage; journal the real error.
+        attempt_exc = exc.last_attempt.exception() if exc.last_attempt else None
+        last_error = attempt_exc if isinstance(attempt_exc, Exception) else exc
     except Exception as exc:
         last_error = exc
+
+    if last_error is None:
+        outcome = NotifyOutcome(
+            kind=NotifyOutcomeKind.SENT,
+            signal_id=signal_id,
+            error_class="",
+            attempts=attempts,
+        )
+        try:
+            on_outcome(outcome)
+        except Exception:
+            log.exception("paper.notify.on_outcome_failed")
+        return outcome
 
     # Send failed after the bounded retry budget. Journal the outcome
     # and return normally — never raise into the loop.
     outcome = NotifyOutcome(
         kind=NotifyOutcomeKind.FAILED,
         signal_id=signal_id,
-        error_class=type(last_error).__name__ if last_error is not None else "Unknown",
+        error_class=type(last_error).__name__,
         attempts=attempts,
     )
-    on_outcome(outcome)
+    try:
+        on_outcome(outcome)
+    except Exception:
+        log.exception("paper.notify.on_outcome_failed")
     return outcome
 
 
