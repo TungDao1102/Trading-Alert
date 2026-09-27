@@ -255,13 +255,14 @@ def compare(
             )
         local_algo_by_client_id[client_algo_id] = entry
 
-    local_position_keys: set[tuple[str, str]] = {
-        (
-            _get_field(p, "symbol"),
-            _get_field(p, "position_side"),
-        )
-        for p in local_open_positions
-    }
+    local_position_keys: set[tuple[str, Any]] = set()
+    for p in local_open_positions:
+        if _is_zero_like(_get_field(p, "position_amt")):
+            continue
+        _sym = _get_field(p, "symbol")
+        if not isinstance(_sym, str) or _sym == "":
+            continue
+        local_position_keys.add((_sym, _get_field(p, "position_side")))
 
     # Pass 1 — for each local algo intent, classify it.
     for algo_intent in local_algo_by_client_id.values():
@@ -269,15 +270,18 @@ def compare(
         symbol = _get_field(algo_intent, "symbol")
         order_role = _get_field(algo_intent, "order_role")
         is_protective = _is_protective_role(order_role)
+        algo_side = _get_field(algo_intent, "position_side")
 
-        # Determine whether any position exists for this symbol
-        # (local or exchange). A protective with no position is an
-        # orphan protective regardless of whether the algo itself
-        # still matches the exchange truth — the algo is supposed
-        # to protect a position, and there is no position to
-        # protect.
-        has_local_position = any(k[0] == symbol for k in local_position_keys)
-        has_exchange_position = any(p.symbol == symbol for p in truth_positions)
+        if algo_side:
+            has_local_position = (symbol, algo_side) in local_position_keys
+        else:
+            has_local_position = any(k[0] == symbol for k in local_position_keys)
+        has_exchange_position = any(
+            _get_field(p, "symbol") == symbol
+            and (not algo_side or _get_field(p, "position_side") == algo_side)
+            and not _is_zero_like(_get_field(p, "position_amt"))
+            for p in truth_positions
+        )
         has_position = has_local_position or has_exchange_position
 
         if is_protective and not has_position:
@@ -342,6 +346,11 @@ def compare(
         has_protective = any(
             _get_field(a, "symbol") == pos_symbol
             and _is_protective_role(_get_field(a, "order_role"))
+            and (
+                not pos_side
+                or not _get_field(a, "position_side")
+                or _get_field(a, "position_side") == pos_side
+            )
             for a in local_algo_by_client_id.values()
         )
         if not has_protective:
@@ -407,12 +416,14 @@ def compare(
 
     # Pass 3 — for each exchange position, check it has a local match.
     for truth_pos in truth_positions:
-        key = (truth_pos.symbol, truth_pos.position_side)
+        if _is_zero_like(_get_field(truth_pos, "position_amt")):
+            continue
+        key = (_get_field(truth_pos, "symbol"), _get_field(truth_pos, "position_side"))
         if key not in local_position_keys:
             divergences.append(
                 Divergence(
                     kind=DIVERGENCE_KIND_UNSYNCED_POSITION,
-                    symbol=truth_pos.symbol,
+                    symbol=_get_field(truth_pos, "symbol"),
                     order_role="N/A",
                     client_order_id=None,
                     client_algo_id=None,
