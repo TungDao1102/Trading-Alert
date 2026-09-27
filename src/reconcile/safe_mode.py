@@ -244,6 +244,7 @@ class SafeModeController:
         local_open_orders: list[Any] | None = None,
         local_open_algos: list[Any] | None = None,
         local_open_positions: list[Any] | None = None,
+        local_intent_fn: Callable[[], tuple[list[Any], list[Any], list[Any]]] | None = None,
         now_utc: datetime | None = None,
     ) -> bool:
         """Exit SAFE_MODE only after a fresh clean three-source compare.
@@ -258,6 +259,11 @@ class SafeModeController:
             local_open_algos: The current local open-algo intent.
             local_open_positions: The current local open-position
                 intent.
+            local_intent_fn: Optional zero-arg callable returning
+                `(orders, algos, positions)` fetched at exit time
+                (same tick as the truth fetch). When supplied it
+                takes precedence over the list arguments, so a stale
+                caller snapshot cannot produce a vacuous clean exit.
             now_utc: The current UTC-aware datetime. If None, uses
                 `datetime.now(UTC)`.
 
@@ -273,6 +279,9 @@ class SafeModeController:
             raise ValueError("now_utc must be UTC-aware")
         if effective_now.utcoffset() != _ZERO_TIMEDELTA:
             raise ValueError("now_utc must be UTC, not offset-aware")
+
+        if local_intent_fn is not None:
+            local_open_orders, local_open_algos, local_open_positions = local_intent_fn()
 
         # Re-fetch the three truth snapshots.
         truth_normal = await self._adapter.snapshot_open_normal_orders()
