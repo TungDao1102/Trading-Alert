@@ -385,29 +385,12 @@ def compare(
         symbol = _get_field(order_intent, "symbol")
         order_role = _get_field(order_intent, "order_role")
         truth_normal = truth_normal_by_client_id.get(client_order_id)
-        if truth_normal is None:
-            divergences.append(
-                Divergence(
-                    kind=DIVERGENCE_KIND_UNSYNCED_NORMAL,
-                    symbol=symbol,
-                    order_role=order_role,
-                    client_order_id=client_order_id,
-                    client_algo_id=None,
-                    reason=(
-                        "local normal order with no matching exchange "
-                        "order (cancel or external fill?)"
-                    ),
-                )
-            )
-            continue
 
-        # ENTRY_WITHOUT_PROTECTIVE: a local ENTRY with no matching
-        # algo protective for the same symbol. This drives SAFE_MODE
-        # but the sweeper never places rescue protection (Pitfall 1).
         if order_role == OrderRole.ENTRY.value:
             has_protective = any(
                 _get_field(a, "symbol") == symbol
                 and _is_protective_role(_get_field(a, "order_role"))
+                and _get_field(a, "client_algo_id") in truth_algo_by_client_id
                 for a in local_algo_by_client_id.values()
             )
             if not has_protective:
@@ -424,6 +407,22 @@ def compare(
                         ),
                     )
                 )
+
+        if truth_normal is None:
+            divergences.append(
+                Divergence(
+                    kind=DIVERGENCE_KIND_UNSYNCED_NORMAL,
+                    symbol=symbol,
+                    order_role=order_role,
+                    client_order_id=client_order_id,
+                    client_algo_id=None,
+                    reason=(
+                        "local normal order with no matching exchange "
+                        "order (cancel or external fill?)"
+                    ),
+                )
+            )
+            continue
 
     # Pass 3 — for each exchange position, check it has a local match.
     for truth_pos in truth_positions:
