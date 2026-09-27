@@ -124,9 +124,7 @@ class _FakeBot:
         text: str,
         reply_markup: Any,
     ) -> object:
-        self.calls.append(
-            {"chat_id": chat_id, "text": text, "reply_markup": reply_markup}
-        )
+        self.calls.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
         if self.raise_on_send is not None:
             raise self.raise_on_send
         return {"message_id": 1}
@@ -227,8 +225,7 @@ def test_no_application_poller_in_paper_package() -> None:
             f"(poller is Phase 8+): {py_file}"
         )
         assert "telegram.ext" not in text, (
-            f"paper package must not import telegram.ext (poller is "
-            f"Phase 8+): {py_file}"
+            f"paper package must not import telegram.ext (poller is Phase 8+): {py_file}"
         )
 
 
@@ -256,18 +253,18 @@ def test_no_inbound_handler_can_mutate_approval_state() -> None:
         "build_simulate_keyboard",
     }
     unexpected = defined_functions - allowed_callables
-    assert not unexpected, (
-        f"unexpected functions in paper.notify: {unexpected}"
-    )
+    assert not unexpected, f"unexpected functions in paper.notify: {unexpected}"
 
 
 def test_telegram_adapter_is_the_only_telegram_importer() -> None:
-    """Beh. 3c: the Telegram adapter is the only module that imports
+    """Beh. 3c: the Telegram adapters are the only modules that import
     `python-telegram-bot`.
 
-    Per D-05 + RESEARCH §Pattern 3: the adapter is the ONLY module
-    allowed to import the Telegram SDK. Downstream consumers receive
-    frozen dataclass instances or the `TelegramBot` Protocol.
+    Per D-05 + RESEARCH §Pattern 3: the adapters are the ONLY modules
+    allowed to import the Telegram SDK. The send-side lives in
+    `telegram_notify.py`; the callback-side lives in
+    `telegram_callbacks.py`. Downstream consumers receive frozen
+    dataclass instances or the `TelegramBot` Protocol.
     """
     src_dir = Path(__file__).resolve().parents[1] / "src"
     importers: list[Path] = []
@@ -275,6 +272,8 @@ def test_telegram_adapter_is_the_only_telegram_importer() -> None:
         text = py_file.read_text(encoding="utf-8")
         if "from telegram import" in text or "import telegram" in text:
             importers.append(py_file)
+    importers.sort()
     assert importers == [
-        src_dir / "adapters" / "telegram_notify.py"
-    ], f"only src/adapters/telegram_notify.py may import telegram; found: {importers}"
+        src_dir / "adapters" / "telegram_callbacks.py",
+        src_dir / "adapters" / "telegram_notify.py",
+    ], f"only the two telegram adapters may import telegram; found: {importers}"

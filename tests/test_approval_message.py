@@ -227,12 +227,14 @@ def test_simulate_keyboard_callback_data_byte_identical() -> None:
 
 
 def test_telegram_adapter_is_the_only_telegram_importer() -> None:
-    """Beh. 4: the Telegram adapter is the only module that imports
+    """Beh. 4: the Telegram adapters are the only modules that import
     `python-telegram-bot`.
 
-    Per D-02 + RESEARCH §Pattern 3: the adapter is the ONLY module
-    allowed to import the Telegram SDK. Downstream consumers receive
-    frozen dataclass instances or the `TelegramBot` Protocol.
+    Per D-02 + RESEARCH §Pattern 3: the adapters are the ONLY modules
+    allowed to import the Telegram SDK. The send-side lives in
+    `telegram_notify.py`; the callback-side lives in
+    `telegram_callbacks.py`. Downstream consumers receive frozen
+    dataclass instances or the `TelegramBot` Protocol.
     """
     from pathlib import Path
 
@@ -242,9 +244,11 @@ def test_telegram_adapter_is_the_only_telegram_importer() -> None:
         text = py_file.read_text(encoding="utf-8")
         if "from telegram import" in text or "import telegram" in text:
             importers.append(py_file)
-    assert importers == [src_dir / "adapters" / "telegram_notify.py"], (
-        f"only src/adapters/telegram_notify.py may import telegram; found: {importers}"
-    )
+    importers.sort()
+    assert importers == [
+        src_dir / "adapters" / "telegram_callbacks.py",
+        src_dir / "adapters" / "telegram_notify.py",
+    ], f"only the two telegram adapters may import telegram; found: {importers}"
 
 
 # --------------------------------------------------------------------------- #
@@ -471,3 +475,531 @@ def test_approval_mapping_module_is_dependency_free() -> None:
     ]
     hits = [p.pattern for p in forbidden_patterns if p.search(text)]
     assert not hits, f"src/approval/mapping.py must not import forbidden packages; hits: {hits}"
+
+
+# --------------------------------------------------------------------------- #
+# Beh. 8 — callback receiver: parse, chat gate, journal-first, dispatch.
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_callback_data_accepts_apr_skp_sim_skip_prefixes() -> None:
+    """Beh. 8a: parse_callback_data accepts APR/SKP/SIM/SKIP prefixes
+    with a 32-hex short id.
+
+    Per D-02: the four prefixes are the canonical Phase-7/Phase-8
+    wire format. SIM/SKIP remain the inert Phase-7 labels and
+    resolve to SIMULATE_RECORDED so the receiver never advances
+    approval state in response to a SIMULATE-only button.
+    """
+    from src.adapters.telegram_callbacks import (
+        CallbackKind,
+        parse_callback_data,
+    )
+
+    short = "a" * 32
+    assert parse_callback_data(f"APR:{short}").kind == CallbackKind.APPROVE
+    assert parse_callback_data(f"SKP:{short}").kind == CallbackKind.SKIP
+    assert parse_callback_data(f"SIM:{short}").kind == CallbackKind.SIMULATE_RECORDED
+    assert parse_callback_data(f"SKIP:{short}").kind == CallbackKind.SIMULATE_RECORDED
+
+
+def test_parse_callback_data_rejects_malformed_payloads() -> None:
+    """Beh. 8b: parse_callback_data rejects malformed payloads
+    (wrong prefix, wrong short_id shape, wrong byte length).
+
+    Per D-02: the receiver rejects any callback_data that does not
+    parse strictly BEFORE touching any approval state.
+    """
+    from src.adapters.telegram_callbacks import parse_callback_data
+
+    # Empty payload.
+    with pytest.raises(ValueError, match="non-empty"):
+        parse_callback_data("")
+    # Unknown prefix.
+    with pytest.raises(ValueError, match="no recognized prefix"):
+        parse_callback_data("BAD:" + "a" * 32)
+    # Short id too short.
+    with pytest.raises(ValueError, match="32 hex chars"):
+        parse_callback_data("APR:abc")
+    # Short id too long.
+    with pytest.raises(ValueError, match="32 hex chars"):
+        parse_callback_data("APR:" + "a" * 33)
+    # Non-hex chars.
+    with pytest.raises(ValueError, match="lowercase hex"):
+        parse_callback_data("APR:" + "Z" * 32)
+    # Exceeds 64-byte ceiling.
+    with pytest.raises(ValueError, match="exceeds 64 bytes"):
+        parse_callback_data("APR:" + "a" * 100)
+
+
+def test_authorized_chat_gate_runs_before_state_lookup() -> None:
+    """Beh. 8c: authorized_chat_gate returns False for unknown chats
+    and True for the authorized chat.
+
+    Per D-02 + 08-01 D-01: the chat gate runs BEFORE any state
+    lookup. An unknown chat must never touch the approval row.
+    """
+    from src.adapters.telegram_callbacks import authorized_chat_gate
+
+    assert authorized_chat_gate(callback_chat_id=123, authorized_chat_id=123) is True
+    assert authorized_chat_gate(callback_chat_id=999, authorized_chat_id=123) is False
+
+
+def test_dispatch_callback_chat_gate_runs_before_state_lookup() -> None:
+    """Beh. 8d: dispatch_callback runs the chat gate BEFORE any state
+    lookup. An unknown chat is journaled and returns ok=False with
+    reason_code=INVALIDATED — no mapping lookup, no token hash, no
+    replay.
+    """
+    from src.adapters.telegram_callbacks import (
+        CallbackKind,
+        ParsedCallback,
+        dispatch_callback,
+    )
+    from src.domain.enums import RejectionReason
+
+    parsed = ParsedCallback(
+        raw="APR:" + "a" * 32,
+        kind=CallbackKind.APPROVE,
+        short_id="a" * 32,
+    )
+    journal_calls: list[Any] = []
+    lookup_short_called = False
+    lookup_token_called = False
+    save_called = False
+
+    def _journal(event: Any) -> None:
+        journal_calls.append(event)
+
+    def _lookup_short(short_id: str) -> tuple[str, str] | None:
+        nonlocal lookup_short_called
+        lookup_short_called = True
+        return None
+
+    def _lookup_token(token_hash: str) -> Any:
+        nonlocal lookup_token_called
+        lookup_token_called = True
+        return None
+
+    def _save(approval: Any, mapping: Any) -> None:
+        nonlocal save_called
+        save_called = True
+
+    result = dispatch_callback(
+        parsed,
+        callback_chat_id=999,  # wrong chat
+        authorized_chat_id=123,
+        callback_at_utc=datetime(2026, 9, 19, 13, 0, tzinfo=UTC),
+        raw_token="",
+        correlation_id="cb:test",
+        journal_receipt=_journal,
+        lookup_by_short_id=_lookup_short,
+        lookup_by_token_hash=_lookup_token,
+        save_atomic=_save,
+    )
+
+    assert result.ok is False
+    assert result.reason_code == RejectionReason.INVALIDATED
+    # Chat gate ran first — no state lookup, no save.
+    assert lookup_short_called is False
+    assert lookup_token_called is False
+    assert save_called is False
+    # The rejection was journaled.
+    assert len(journal_calls) == 1
+    assert journal_calls[0].event_type == "CALLBACK_RECEIVED"
+
+
+def test_dispatch_callback_journal_first_receipt_before_resolve() -> None:
+    """Beh. 8e: dispatch_callback journals the receipt BEFORE the
+    mapping lookup and resolve_callback run.
+
+    Per D-02 + T-8-12: journal-first ordering — every callback
+    receipt lands as a JournalEvent before resolve_callback runs.
+    """
+    from src.adapters.telegram_callbacks import (
+        CallbackKind,
+        ParsedCallback,
+        dispatch_callback,
+    )
+
+    parsed = ParsedCallback(
+        raw="APR:" + "a" * 32,
+        kind=CallbackKind.APPROVE,
+        short_id="a" * 32,
+    )
+    events: list[str] = []
+
+    def _journal(event: Any) -> None:
+        events.append("journal:" + event.event_type)
+
+    def _lookup_short(short_id: str) -> tuple[str, str] | None:
+        events.append("lookup_short")
+        return None  # unknown short id
+
+    def _lookup_token(token_hash: str) -> Any:
+        events.append("lookup_token")
+        return None
+
+    def _save(approval: Any, mapping: Any) -> None:
+        events.append("save")
+
+    dispatch_callback(
+        parsed,
+        callback_chat_id=123,
+        authorized_chat_id=123,
+        callback_at_utc=datetime(2026, 9, 19, 13, 0, tzinfo=UTC),
+        raw_token="",
+        correlation_id="cb:test",
+        journal_receipt=_journal,
+        lookup_by_short_id=_lookup_short,
+        lookup_by_token_hash=_lookup_token,
+        save_atomic=_save,
+    )
+
+    # The journal receipt ran BEFORE the short-id lookup.
+    assert events[0] == "journal:CALLBACK_RECEIVED"
+    assert "lookup_short" in events
+    # The journal receipt is the first event in the sequence.
+    assert events.index("journal:CALLBACK_RECEIVED") < events.index("lookup_short")
+
+
+def test_dispatch_callback_simulate_recorded_does_not_advance_state() -> None:
+    """Beh. 8f: a SIMULATE_RECORDED callback journals the receipt but
+    does NOT advance approval state (D-02 + 08-01 D-11).
+
+    The SIMULATE-only buttons are inert labels in Phase 7; the
+    receiver must not call resolve_callback for them.
+    """
+    from src.adapters.telegram_callbacks import (
+        CallbackKind,
+        ParsedCallback,
+        dispatch_callback,
+    )
+
+    parsed = ParsedCallback(
+        raw="SIM:" + "a" * 32,
+        kind=CallbackKind.SIMULATE_RECORDED,
+        short_id="a" * 32,
+    )
+    events: list[str] = []
+
+    def _journal(event: Any) -> None:
+        events.append("journal")
+
+    def _lookup_short(short_id: str) -> tuple[str, str] | None:
+        events.append("lookup_short")
+        return ("sig_x", "tp_x")
+
+    def _lookup_token(token_hash: str) -> Any:
+        events.append("lookup_token")
+        return None
+
+    def _save(approval: Any, mapping: Any) -> None:
+        events.append("save")
+
+    result = dispatch_callback(
+        parsed,
+        callback_chat_id=123,
+        authorized_chat_id=123,
+        callback_at_utc=datetime(2026, 9, 19, 13, 0, tzinfo=UTC),
+        raw_token="",
+        correlation_id="cb:test",
+        journal_receipt=_journal,
+        lookup_by_short_id=_lookup_short,
+        lookup_by_token_hash=_lookup_token,
+        save_atomic=_save,
+    )
+
+    # The receipt was journaled but no state lookup or save ran.
+    assert result.ok is True
+    assert result.approval is None
+    assert events == ["journal"]
+
+
+def test_dispatch_callback_atomic_write_passes_mapping_to_save() -> None:
+    """Beh. 8g: dispatch_callback passes the ShortIdMapping to
+    save_atomic so the mapping row is persisted in the SAME
+    transaction as the Approval row transition.
+
+    Per D-02 key-link: the receiver owns the atomic write. The
+    injected save_atomic callable receives both the new Approval
+    and the freshly-built ShortIdMapping; the caller decides
+    whether to insert the mapping (replay paths pass None).
+    """
+    from src.adapters.telegram_callbacks import (
+        CallbackKind,
+        ParsedCallback,
+        dispatch_callback,
+    )
+    from src.approval.tokens import issue_one_time_token, token_hash_of
+    from src.domain.approval import Approval
+    from src.domain.enums import ApprovalAction, ApprovalResult
+
+    signal_id = "sig_test_0000000000000000000000000000000000000000000000000000"
+    trade_plan_id = "tp_test_0000000000000000000000000000000000000000000000000000"
+    raw_token = issue_one_time_token()
+    token_hash = token_hash_of(raw_token)
+    plan_hash = "0" * 64
+    strategy_version = "v1.0.0"
+    parameter_set_id = "ps-1"
+    parameter_set_hash = "1" * 64
+
+    pending = Approval(
+        approval_id="appr_test_0000000000000000000000000000000000000000000000000000",
+        trade_plan_id=trade_plan_id,
+        signal_id=signal_id,
+        action=ApprovalAction.APPROVE,
+        result=ApprovalResult.PENDING,
+        status=ApprovalResult.PENDING,
+        approval_token_hash=token_hash,
+        requested_at_utc=datetime(2026, 9, 19, 12, 0, tzinfo=UTC),
+        acted_at_utc=None,
+        actor_id="",
+        telegram_message_id=None,
+        request_hash=plan_hash,
+    )
+
+    parsed = ParsedCallback(
+        raw="APR:" + "a" * 32,
+        kind=CallbackKind.APPROVE,
+        short_id="a" * 32,
+    )
+    saved: list[tuple[Any, Any]] = []
+
+    def _journal(event: Any) -> None:
+        pass
+
+    def _lookup_short(short_id: str) -> tuple[str, str] | None:
+        return (signal_id, trade_plan_id)
+
+    def _lookup_token(th: str) -> Any:
+        return pending
+
+    def _save(approval: Any, mapping: Any) -> None:
+        saved.append((approval, mapping))
+
+    result = dispatch_callback(
+        parsed,
+        callback_chat_id=123,
+        authorized_chat_id=123,
+        callback_at_utc=datetime(2026, 9, 19, 13, 0, tzinfo=UTC),
+        raw_token=raw_token,
+        correlation_id="cb:test",
+        journal_receipt=_journal,
+        lookup_by_short_id=_lookup_short,
+        lookup_by_token_hash=_lookup_token,
+        save_atomic=_save,
+        binding_context={
+            "plan_hash": plan_hash,
+            "strategy_version": strategy_version,
+            "parameter_set_id": parameter_set_id,
+            "parameter_set_hash": parameter_set_hash,
+            "expiry_utc": datetime(2026, 9, 19, 14, 0, tzinfo=UTC),
+        },
+    )
+
+    assert result.ok is True
+    assert result.approval is not None
+    assert result.approval.status == ApprovalResult.APPROVED
+    # The save_atomic callable received BOTH the new approval AND
+    # the freshly-built mapping — atomic write contract.
+    assert len(saved) == 1
+    saved_approval, saved_mapping = saved[0]
+    assert saved_approval.status == ApprovalResult.APPROVED
+    assert saved_mapping is not None
+    assert saved_mapping.signal_id == signal_id
+    assert saved_mapping.trade_plan_id == trade_plan_id
+    # The mapping's short_id is the deterministic sha256 prefix of
+    # the signal_id (D-02), not the literal callback_data short_id.
+    from src.approval.mapping import derive_short_id
+
+    assert saved_mapping.short_id == derive_short_id(signal_id)
+
+
+def test_dispatch_callback_replay_returns_existing_approval() -> None:
+    """Beh. 8h: a replay of an already-decided approval returns the
+    existing approval without a new save (08-01 D-01 replay-to-existing).
+
+    The mapping row is NOT re-inserted on replay — the atomic write
+    callable receives mapping=None because the mapping already
+    exists from the first transition.
+    """
+    from src.adapters.telegram_callbacks import (
+        CallbackKind,
+        ParsedCallback,
+        dispatch_callback,
+    )
+    from src.approval.tokens import issue_one_time_token, token_hash_of
+    from src.domain.approval import Approval
+    from src.domain.enums import ApprovalAction, ApprovalResult
+
+    signal_id = "sig_test_0000000000000000000000000000000000000000000000000000"
+    trade_plan_id = "tp_test_0000000000000000000000000000000000000000000000000000"
+    raw_token = issue_one_time_token()
+    token_hash = token_hash_of(raw_token)
+    plan_hash = "0" * 64
+
+    # Already-decided approval (APPROVED with acted_at_utc set).
+    decided = Approval(
+        approval_id="appr_test_0000000000000000000000000000000000000000000000000000",
+        trade_plan_id=trade_plan_id,
+        signal_id=signal_id,
+        action=ApprovalAction.APPROVE,
+        result=ApprovalResult.APPROVED,
+        status=ApprovalResult.APPROVED,
+        approval_token_hash=token_hash,
+        requested_at_utc=datetime(2026, 9, 19, 12, 0, tzinfo=UTC),
+        acted_at_utc=datetime(2026, 9, 19, 12, 30, tzinfo=UTC),
+        actor_id="",
+        telegram_message_id=None,
+        request_hash=plan_hash,
+    )
+
+    parsed = ParsedCallback(
+        raw="APR:" + "a" * 32,
+        kind=CallbackKind.APPROVE,
+        short_id="a" * 32,
+    )
+    saved: list[tuple[Any, Any]] = []
+
+    def _journal(event: Any) -> None:
+        pass
+
+    def _lookup_short(short_id: str) -> tuple[str, str] | None:
+        return (signal_id, trade_plan_id)
+
+    def _lookup_token(th: str) -> Any:
+        return decided
+
+    def _save(approval: Any, mapping: Any) -> None:
+        saved.append((approval, mapping))
+
+    result = dispatch_callback(
+        parsed,
+        callback_chat_id=123,
+        authorized_chat_id=123,
+        callback_at_utc=datetime(2026, 9, 19, 13, 0, tzinfo=UTC),
+        raw_token=raw_token,
+        correlation_id="cb:test",
+        journal_receipt=_journal,
+        lookup_by_short_id=_lookup_short,
+        lookup_by_token_hash=_lookup_token,
+        save_atomic=_save,
+        binding_context={
+            "plan_hash": plan_hash,
+            "strategy_version": "v1.0.0",
+            "parameter_set_id": "ps-1",
+            "parameter_set_hash": "1" * 64,
+            "expiry_utc": datetime(2026, 9, 19, 14, 0, tzinfo=UTC),
+        },
+    )
+
+    # Replay returns the existing approval without a new save.
+    assert result.ok is True
+    assert result.approval is decided
+    assert saved == []
+
+
+def test_dispatch_callback_binding_gate_failure_returns_reason_code() -> None:
+    """Beh. 8i: a binding-gate failure (e.g. APPROVAL_EXPIRED) is
+    surfaced as ok=False with the canonical RejectionReason.
+
+    The receiver never re-implements the binding gate — it
+    delegates to resolve_callback and translates ApprovalRejected
+    into a DispatchResult.
+    """
+    from src.adapters.telegram_callbacks import (
+        CallbackKind,
+        ParsedCallback,
+        dispatch_callback,
+    )
+    from src.approval.tokens import issue_one_time_token, token_hash_of
+    from src.domain.approval import Approval
+    from src.domain.enums import ApprovalAction, ApprovalResult, RejectionReason
+
+    signal_id = "sig_test_0000000000000000000000000000000000000000000000000000"
+    trade_plan_id = "tp_test_0000000000000000000000000000000000000000000000000000"
+    raw_token = issue_one_time_token()
+    token_hash = token_hash_of(raw_token)
+    plan_hash = "0" * 64
+
+    pending = Approval(
+        approval_id="appr_test_0000000000000000000000000000000000000000000000000000",
+        trade_plan_id=trade_plan_id,
+        signal_id=signal_id,
+        action=ApprovalAction.APPROVE,
+        result=ApprovalResult.PENDING,
+        status=ApprovalResult.PENDING,
+        approval_token_hash=token_hash,
+        requested_at_utc=datetime(2026, 9, 19, 12, 0, tzinfo=UTC),
+        acted_at_utc=None,
+        actor_id="",
+        telegram_message_id=None,
+        request_hash=plan_hash,
+    )
+
+    parsed = ParsedCallback(
+        raw="APR:" + "a" * 32,
+        kind=CallbackKind.APPROVE,
+        short_id="a" * 32,
+    )
+
+    def _journal(event: Any) -> None:
+        pass
+
+    def _lookup_short(short_id: str) -> tuple[str, str] | None:
+        return (signal_id, trade_plan_id)
+
+    def _lookup_token(th: str) -> Any:
+        return pending
+
+    def _save(approval: Any, mapping: Any) -> None:
+        raise AssertionError("save must not be called on a binding-gate failure")
+
+    # now_utc is past expiry_utc -> APPROVAL_EXPIRED.
+    result = dispatch_callback(
+        parsed,
+        callback_chat_id=123,
+        authorized_chat_id=123,
+        callback_at_utc=datetime(2026, 9, 19, 13, 0, tzinfo=UTC),
+        raw_token=raw_token,
+        correlation_id="cb:test",
+        journal_receipt=_journal,
+        lookup_by_short_id=_lookup_short,
+        lookup_by_token_hash=_lookup_token,
+        save_atomic=_save,
+        now_utc=datetime(2026, 9, 19, 15, 0, tzinfo=UTC),  # past expiry
+        binding_context={
+            "plan_hash": plan_hash,
+            "strategy_version": "v1.0.0",
+            "parameter_set_id": "ps-1",
+            "parameter_set_hash": "1" * 64,
+            "expiry_utc": datetime(2026, 9, 19, 14, 0, tzinfo=UTC),
+        },
+    )
+
+    assert result.ok is False
+    assert result.reason_code == RejectionReason.APPROVAL_EXPIRED
+
+
+def test_telegram_callbacks_adapter_is_the_only_ptb_application_importer() -> None:
+    """Beh. 8j: src/adapters/telegram_callbacks.py is the only module
+    that imports `telegram.ext.Application` (the PTB poller class).
+
+    Per D-02 + RESEARCH §Pattern 3: the adapter is the ONLY module
+    allowed to import the Telegram SDK for the callback side. The
+    send-side lives in telegram_notify.py. Downstream consumers
+    receive frozen dataclass instances or the TelegramBot Protocol.
+    """
+    from pathlib import Path
+
+    src_dir = Path(__file__).resolve().parents[1] / "src"
+    importers: list[Path] = []
+    for py_file in src_dir.rglob("*.py"):
+        text = py_file.read_text(encoding="utf-8")
+        if "telegram.ext" in text or "from telegram.ext" in text:
+            importers.append(py_file)
+    importers.sort()
+    assert importers == [src_dir / "adapters" / "telegram_callbacks.py"], (
+        f"only src/adapters/telegram_callbacks.py may import telegram.ext; found: {importers}"
+    )
