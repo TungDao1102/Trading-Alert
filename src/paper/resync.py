@@ -156,7 +156,14 @@ async def backfill_missed_closes(
     now_ms = int(now_utc.timestamp() * 1000)
 
     # Bounded retry: cap attempts AND wall-clock, then fail closed.
-    retry = tenacity.retry_if_exception(lambda _e: True)
+    # Retry transient faults only — programming errors (ValueError,
+    # KeyError, TypeError) fail immediately instead of burning the
+    # 120 s budget and masking deterministic faults as transient
+    # (WR-02; mirrors src/data/backfill.py fetch_page_with_retry).
+    def _is_transient(exc: BaseException) -> bool:
+        return not isinstance(exc, (ValueError, KeyError, TypeError))
+
+    retry = tenacity.retry_if_exception(_is_transient)
     stop = tenacity.stop_after_attempt(RESYNC_MAX_ATTEMPTS) | tenacity.stop_after_delay(
         RESYNC_MAX_DELAY_SECONDS
     )
