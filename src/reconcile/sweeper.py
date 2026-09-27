@@ -196,36 +196,72 @@ class OrphanSweeper:
             # exists before issuing the cancel. A not-found probe
             # is treated as a successful prior sweep (no cancel
             # needed, no error).
-            probe = await self._adapter.query_algo_order_by_client(
-                client_algo_id=client_algo_id
-            )
+            try:
+                probe = await self._adapter.query_algo_order_by_client(
+                    client_algo_id=client_algo_id
+                )
+            except Exception as exc:
+                self._journal.record(
+                    self._build_failure_event(
+                        symbol=symbol,
+                        client_algo_id=client_algo_id,
+                        reason=f"probe_failed: {type(exc).__name__}: {exc}",
+                        now_utc=effective_now,
+                    )
+                )
+                skipped.append(
+                    SweepSkip(
+                        symbol=symbol,
+                        client_algo_id=client_algo_id,
+                        reason=f"probe_failed: {type(exc).__name__}",
+                    )
+                )
+                continue
             if not getattr(probe, "found", False):
                 # Already gone — treat as success.
                 cancelled.append((symbol, client_algo_id))
                 continue
 
-            # Journal the pre-image BEFORE the cancel (D-05 extended).
-            pre_event = self._build_pre_image_event(
-                symbol=symbol,
-                client_algo_id=client_algo_id,
-                probe=probe,
-                now_utc=effective_now,
-            )
-            self._journal.record(pre_event)
+            try:
+                # Journal the pre-image BEFORE the cancel (D-05 extended).
+                pre_event = self._build_pre_image_event(
+                    symbol=symbol,
+                    client_algo_id=client_algo_id,
+                    probe=probe,
+                    now_utc=effective_now,
+                )
+                self._journal.record(pre_event)
 
-            # Issue the cancel.
-            await self._adapter.cancel_algo_order(
-                symbol=symbol,
-                client_algo_id=client_algo_id,
-            )
+                # Issue the cancel.
+                await self._adapter.cancel_algo_order(
+                    symbol=symbol,
+                    client_algo_id=client_algo_id,
+                )
 
-            # Journal the post-image AFTER the cancel.
-            post_event = self._build_post_image_event(
-                symbol=symbol,
-                client_algo_id=client_algo_id,
-                now_utc=effective_now,
-            )
-            self._journal.record(post_event)
+                # Journal the post-image AFTER the cancel.
+                post_event = self._build_post_image_event(
+                    symbol=symbol,
+                    client_algo_id=client_algo_id,
+                    now_utc=effective_now,
+                )
+                self._journal.record(post_event)
+            except Exception as exc:
+                self._journal.record(
+                    self._build_failure_event(
+                        symbol=symbol,
+                        client_algo_id=client_algo_id,
+                        reason=f"cancel_failed: {type(exc).__name__}: {exc}",
+                        now_utc=effective_now,
+                    )
+                )
+                skipped.append(
+                    SweepSkip(
+                        symbol=symbol,
+                        client_algo_id=client_algo_id,
+                        reason=f"cancel_failed: {type(exc).__name__}",
+                    )
+                )
+                continue
 
             cancelled.append((symbol, client_algo_id))
 
@@ -256,6 +292,34 @@ class OrphanSweeper:
         return JournalEvent(
             journal_event_id=(
                 f"orphan_sweep_pre_{client_algo_id}_"
+                f"{int(now_utc.timestamp() * 1000)}"
+            ),
+            occurred_at_utc=now_utc,
+            event_type="ORPHAN_SWEEP",
+            entity_type="OpenAlgoOrder",
+            entity_id=client_algo_id,
+            correlation_id="reconcile_orphan_sweep",
+            payload_json=_build_payload_json(payload),
+        )
+
+    def _build_failure_event(
+        self,
+        *,
+        symbol: str,
+        client_algo_id: str,
+        reason: str,
+        now_utc: datetime,
+    ) -> JournalEvent:
+        payload = {
+            "symbol": symbol,
+            "client_algo_id": client_algo_id,
+            "cancelled": False,
+            "reason": reason,
+            "phase": "sweep_failed",
+        }
+        return JournalEvent(
+            journal_event_id=(
+                f"orphan_sweep_failed_{client_algo_id}_"
                 f"{int(now_utc.timestamp() * 1000)}"
             ),
             occurred_at_utc=now_utc,
