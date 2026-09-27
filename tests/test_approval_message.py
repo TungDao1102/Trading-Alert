@@ -685,7 +685,7 @@ def test_dispatch_callback_simulate_recorded_does_not_advance_state() -> None:
     events: list[str] = []
 
     def _journal(event: Any) -> None:
-        events.append("journal")
+        events.append("journal:" + event.event_type)
 
     def _lookup_short(short_id: str) -> tuple[str, str] | None:
         events.append("lookup_short")
@@ -711,10 +711,11 @@ def test_dispatch_callback_simulate_recorded_does_not_advance_state() -> None:
         save_atomic=_save,
     )
 
-    # The receipt was journaled but no state lookup or save ran.
+    # The receipt and the RESOLVED outcome were journaled, but no
+    # state lookup or save ran.
     assert result.ok is True
     assert result.approval is None
-    assert events == ["journal"]
+    assert events == ["journal:CALLBACK_RECEIVED", "journal:CALLBACK_RESOLVED"]
 
 
 def test_dispatch_callback_atomic_write_passes_mapping_to_save() -> None:
