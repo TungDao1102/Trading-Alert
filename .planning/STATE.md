@@ -1,20 +1,17 @@
 ---
-gsd_state_version: "1.0"
+gsd_state_version: 1.0
 milestone: v0.3
-current_phase: 8
-current_phase_name: Approval + Reconciliation Hardening
-status: executing
-stopped_at: Completed 08-02-PLAN.md (live-tap gate outstanding)
-last_updated: "2026-09-27T14:36:10.987Z"
+milestone_name: milestone
+status: verifying
+stopped_at: Completed 08-05-PLAN.md (RUNBOOK drill rehearsal harness + journaled drill log)
+last_updated: "2026-09-27T15:36:21.885Z"
 last_activity: 2026-09-27
-last_activity_desc: Phase 8 plan 04 completed — three-source reconciler + sweeper + SAFE_MODE
-state_head: 166276f12eff4e8fb6e912cdf117a25fe589350a
 progress:
   total_phases: 11
-  completed_phases: 6
+  completed_phases: 9
   total_plans: 34
-  completed_plans: 33
-milestone_name: milestone
+  completed_plans: 34
+  percent: 82
 ---
 
 <!-- STATE-MD-SCHEMA:END:frontmatter -->
@@ -32,10 +29,10 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 Phase: 8 (Approval + Reconciliation Hardening) — EXECUTING
 Plan: 5 of 5
-Status: Ready to execute next plan
-Last activity: 2026-09-27 — Phase 8 plan 04 completed (three-source reconciler + sweeper + SAFE_MODE)
+Status: Phase complete — ready for verification
+Last activity: 2026-09-27
 
-Progress: [█████████░░] 80%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -74,6 +71,7 @@ Progress: [█████████░░] 80%
 | Phase 08 P03 | ~10 min | 2 tasks | 5 files |
 | Phase 08 P04 | ~25 min | 3 tasks | 8 files |
 | Phase 8 P2 | ~25 min | 3 tasks | 8 files |
+| Phase 8 P05 | ~15 min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -187,6 +185,10 @@ Recent decisions affecting current work:
 - [Phase 8]: [08-02] D-08-02-01 format_approve is PTB-free and mirrors format_simulate posture; lives in telegram_notify.py so paper-core can reuse it without adapter violation
 - [Phase 8]: [08-02] D-08-02-06 receiver persists ShortIdMappingRow in the SAME transaction as the Approval row transition via injected save_atomic(approval, mapping); replay paths pass mapping=None
 - [Phase 8]: [08-02] D-08-02-10 LIVE-TAP GATE PENDING: TELEGRAM_BOT_TOKEN + TELEGRAM_AUTHORIZED_CHAT_ID not provisioned in this environment; operator must run real APPROVE + SKIP tap + unknown-chat rejection before plan 08-02 can be marked complete
+- [Phase 8]: [08-05] D-01 Canonical 8-drill vocabulary pinned in DRILL_NAMES tuple (unprotected, orphan, duplicate, api_down, stale_feed, db_failure, manual_close, restore); tuple order is part of the acceptance contract
+- [Phase 8]: [08-05] D-02 Drill harness drives 08-01 approval core, 08-02 receiver seam, and 08-04 reconciler/sweeper/SAFE_MODE through Protocol-typed surfaces; tests inject fakes; no Binance SDK or PTB leakage
+- [Phase 8]: [08-05] D-03 Double-run determinism: caller-supplied now_utc sequence (never wall-clock); repeat runs produce byte-identical ordered outcome names and payloads
+- [Phase 8]: [08-05] D-04 SAFE_MODE exit rehearsed only through the restore drill (Pitfall 4: a boolean flip without both a clean compare AND a journaled restore event is rejected)
 
 ### Pending Todos
 
@@ -221,6 +223,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-27T14:34:21.147Z
-Stopped at: Completed 08-02-PLAN.md (live-tap gate outstanding)
+Last session: 2026-09-27T15:36:21.866Z
+Stopped at: Completed 08-05-PLAN.md (RUNBOOK drill rehearsal harness + journaled drill log)
 Resume file: None

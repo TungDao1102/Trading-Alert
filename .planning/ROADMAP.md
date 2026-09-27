@@ -20,7 +20,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 5: Risk Engine** - Identical sizing/quantization/portfolio caps in every mode
 - [x] **Phase 6: Backtest Simulator + Experiment Registry** - 1m intrabar parity engine with uncertainty-first reports (completed 2026-09-26)
 - [ ] **Phase 7: Paper Forward Observation** - WS realtime loop, three-way attribution, no tuning on paper
-- [ ] **Phase 8: Approval + Reconciliation Hardening** - Idempotent Telegram approvals, orphan sweeper, SAFE_MODE rehearsed
+- [x] **Phase 8: Approval + Reconciliation Hardening** - Idempotent Telegram approvals, orphan sweeper, SAFE_MODE rehearsed (completed 2026-09-27)
 - [ ] **Phase 9: Live Execution Rollout** - LIMIT-zone entries, Algo protective exits, smallest capital
 - [ ] **Phase 10: Journal Depth + Kill-Gate Operations** - MFE/MAE analytics and the 3-families/6-months stop rule
 
@@ -260,7 +260,7 @@ Plans:
 - [x] 08-02-PLAN.md
 - [x] 08-03-PLAN.md
 - [x] 08-04-PLAN.md
-- [ ] 08-05-PLAN.md
+- [x] 08-05-PLAN.md
 
 **Wave 1**
 
@@ -269,7 +269,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 08-02: APPROVE/SKIP message plus PTB callback receiver plus short-id mapping migration (APRV-01, D-02)
+- [x] 08-02: APPROVE/SKIP message plus PTB callback receiver plus short-id mapping migration (APRV-01, D-02)
 - [x] 08-04: Three-source reconciler plus cancel-only sweeper plus SAFE_MODE (EXEC-02, D-03)
 
 **Wave 3** *(blocked on Wave 2 completion)*
@@ -326,6 +326,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 5. Risk Engine | 2/2 | In Progress|  |
 | 6. Backtest Simulator + Experiment Registry | 3/3 | Complete   | 2026-09-26 |
 | 7. Paper Forward Observation | 4/4 | In Progress|  |
-| 8. Approval + Reconciliation Hardening | 4/5 | In Progress|  |
+| 8. Approval + Reconciliation Hardening | 5/5 | Complete   | 2026-09-27 |
 | 9. Live Execution Rollout | 0/TBD | Not started | - |
 | 10. Journal Depth + Kill-Gate Operations | 0/TBD | Not started | - |
