@@ -16,7 +16,7 @@ precedent. The WS surface lives behind `src/adapters/paper_ws.py`
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -175,37 +175,74 @@ STALENESS_THRESHOLD_SECONDS: int = 60
 WARMUP_MIN_BARS: int = 200
 
 
+def _ms_to_utc(ms: int) -> datetime:
+    """Convert integer millisecond epoch to tz-aware UTC (WR-01).
+
+    Exact timedelta arithmetic — never `ms / 1000` float division,
+    which loses sub-millisecond precision on large epochs and
+    escapes the no-float AST guard.
+    """
+    return datetime(1970, 1, 1, tzinfo=UTC) + timedelta(milliseconds=ms)
+
+
+def _parse_event_close(event: dict[str, Any]) -> datetime:
+    """Parse and validate a WS event's close time, UTC-anchored (WR-14).
+
+    Single owner of the `event["T"]` parse (previously parsed three
+    times per event with bare KeyError/ValueError). Missing or
+    non-numeric `T` raises ValueError with an explicit message;
+    conversion is anchored to UTC, never to the caller's tz.
+    """
+    try:
+        close_ms = int(event["T"])
+    except KeyError as exc:
+        raise ValueError("event missing 'T' (close-time ms)") from exc
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"event 'T' is not numeric: {event.get('T')!r}") from exc
+    return _ms_to_utc(close_ms)
+
+
 def _is_closed_event(event: dict[str, Any], now_utc: datetime) -> bool:
     """Double gate: x=True AND close_time_utc <= now_utc.
 
     Per D-01: a WS kline event with `x=False` (forming update) MUST
     NOT reach evaluate. An event with `x=True` but `close_time_utc >
     now_utc` (future-close marker) MUST NOT reach evaluate. The gate
-    is structural, not a log warning.
+    is structural, not a log warning. Malformed events (missing `x`
+    defaults False; unparsable `T`) are dropped, counted with the
+    gated drops.
     """
     if not event.get("x", False):
         return False
-    close_ms = int(event["T"])
-    close_utc = datetime.fromtimestamp(close_ms / 1000, tz=now_utc.tzinfo)
+    try:
+        close_utc = _parse_event_close(event)
+    except ValueError:
+        return False
     return close_utc <= now_utc
 
 
-def _event_to_candle(event: dict[str, Any], symbol: str) -> Candle:
+def _event_to_candle(event: dict[str, Any], symbol: str, interval: str = "1h") -> Candle:
     """Project a WS kline event payload to a Candle.
 
     The WS payload uses Binance wire-format fields (t/T/o/h/l/c/v/n/x/q);
     the Candle uses the project's canonical field names. Decimal
     prices/quantities, UTC-aware datetimes.
-    """
-    from datetime import UTC
 
-    open_ms = int(event["t"])
-    close_ms = int(event["T"])
-    open_utc = datetime.fromtimestamp(open_ms / 1000, tz=UTC)
-    close_utc = datetime.fromtimestamp(close_ms / 1000, tz=UTC)
+    `interval` is explicit per event (CR-08): the caller passes
+    `event.get("interval", "1h")` so a 4h close is never mislabeled
+    as a 1h bar. Only "1h"/"4h" are accepted (fail-closed).
+    """
+    if interval not in ("1h", "4h"):
+        raise ValueError(f"unsupported event interval {interval!r}; expected '1h' or '4h'")
+    try:
+        open_ms = int(event["t"])
+    except KeyError as exc:
+        raise ValueError("event missing 't' (open-time ms)") from exc
+    open_utc = _ms_to_utc(open_ms)
+    close_utc = _parse_event_close(event)
     return Candle(
         symbol=symbol,
-        interval="1h",
+        interval=interval,
         open_time_utc=open_utc,
         close_time_utc=close_utc,
         open=Decimal(str(event["o"])),
@@ -251,10 +288,10 @@ def check_feed_freshness(
     than STALENESS_THRESHOLD_SECONDS relative to now_utc is rejected as
     DATA_STALE before the engine chain runs. The gate is per-event (not
     latched), so a fresh event after a stale event resumes evaluation
-    without restart.
+    without restart. Malformed events propagate ValueError (fail-closed,
+    never silently fresh).
     """
-    close_ms = int(event["T"])
-    close_utc = datetime.fromtimestamp(close_ms / 1000, tz=now_utc.tzinfo)
+    close_utc = _parse_event_close(event)
     gap_seconds = (now_utc - close_utc).total_seconds()
     if gap_seconds > STALENESS_THRESHOLD_SECONDS:
         return "DATA_STALE"
@@ -327,33 +364,27 @@ def run_paper_tick(case_input: dict[str, Any]) -> dict[str, Any]:
     feed_events_processed = 0
     feed_events_dropped = 0
 
+    # Open times already in warmed history (WR-04 dedup seed); extended
+    # with each accepted 1h close so re-delivered bars in the same call
+    # are rejected as DUPLICATE_BAR instead of re-entering evaluate().
+    seen_open_times = {c.open_time_utc for c in sorted_1h}
+    # 4h closes accepted during this call extend the context window for
+    # later 1h events (CR-08: 4h updates context only).
+    extra_context: list[Candle] = []
+
     for event in feed_events:
         if not _is_closed_event(event, now_utc):
             feed_events_dropped += 1
             continue
         feed_events_processed += 1
+        interval = event.get("interval", "1h")
 
-        # Pre-engine feature-validity gate — fires once for every
-        # event when the warmed-up history is insufficient. Each
-        # event is rejected individually so the per-bar audit trail
-        # in no_trade_records carries the exact close_time_utc.
-        if warmup_reject is not None:
-            closed_candle = _event_to_candle(event, symbol)
-            no_trade_records.append(
-                {
-                    "reason_code": warmup_reject,
-                    "bar_close_utc": closed_candle.close_time_utc.isoformat(),
-                    "stage": "feed_gate",
-                }
-            )
-            continue
-
-        # Pre-engine feed-freshness gate (D-02 fail-closed). Per-event,
-        # not latched — a fresh event after a stale one resumes
-        # evaluation without restart.
+        # Pre-engine feed-freshness gate FIRST (WR-03: the liveness
+        # signal wins — a stale feed must report DATA_STALE even when
+        # the stream is also under-warmed).
         stale_reject = check_feed_freshness(event, now_utc)
         if stale_reject is not None:
-            closed_candle = _event_to_candle(event, symbol)
+            closed_candle = _event_to_candle(event, symbol, interval)
             no_trade_records.append(
                 {
                     "reason_code": stale_reject,
@@ -363,13 +394,61 @@ def run_paper_tick(case_input: dict[str, Any]) -> dict[str, Any]:
             )
             continue
 
+        # Pre-engine feature-validity gate — fires once for every
+        # event when the warmed-up history is insufficient. Each
+        # event is rejected individually so the per-bar audit trail
+        # in no_trade_records carries the exact close_time_utc.
+        if warmup_reject is not None:
+            closed_candle = _event_to_candle(event, symbol, interval)
+            no_trade_records.append(
+                {
+                    "reason_code": warmup_reject,
+                    "bar_close_utc": closed_candle.close_time_utc.isoformat(),
+                    "stage": "feed_gate",
+                }
+            )
+            continue
+
+        # 4h closes update context only (CR-08) — never appended to
+        # the 1h setup series that feeds EMA/signal evaluation.
+        if interval == "4h":
+            context_candle = _event_to_candle(event, symbol, "4h")
+            extra_context.append(context_candle)
+            no_trade_records.append(
+                {
+                    "reason_code": "CONTEXT_BAR",
+                    "bar_close_utc": context_candle.close_time_utc.isoformat(),
+                    "stage": "feed_gate",
+                }
+            )
+            continue
+
         # Build the closed candle from the WS event.
-        closed_candle = _event_to_candle(event, symbol)
+        closed_candle = _event_to_candle(event, symbol, "1h")
+
+        # Re-delivered bars are not re-evaluated (WR-04): after a
+        # reconnect, REST backfill or a WS duplicate can re-deliver an
+        # open_time already in warmed history.
+        if closed_candle.open_time_utc in seen_open_times:
+            no_trade_records.append(
+                {
+                    "reason_code": "DUPLICATE_BAR",
+                    "bar_close_utc": closed_candle.close_time_utc.isoformat(),
+                    "stage": "feed_gate",
+                }
+            )
+            continue
+        seen_open_times.add(closed_candle.open_time_utc)
 
         # Build the snapshot: closed 1H bars (warmed-up + this event) +
-        # closed 4H context bars (warmed-up, filtered to <= event close).
+        # closed 4H context bars (warmed-up + this call's 4h closes,
+        # filtered to <= event close).
         closed_setup = sorted_1h + [closed_candle]
-        closed_context = [c for c in sorted_4h if c.close_time_utc <= closed_candle.close_time_utc]
+        closed_context = [
+            c
+            for c in sorted_4h + extra_context
+            if c.close_time_utc <= closed_candle.close_time_utc
+        ]
         snapshot = MarketSnapshot(
             symbol=symbol,
             setup_candles=closed_setup,
