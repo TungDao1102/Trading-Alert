@@ -402,6 +402,20 @@ def dispatch_callback(
         trade_plan_id=trade_plan_id,
         created_at_utc=callback_at_utc,
     )
+    if new_mapping.short_id != parsed.short_id:
+        _journal_outcome(
+            journal_receipt,
+            parsed=parsed,
+            ok=False,
+            reason_code=RejectionReason.INVALIDATED,
+            callback_at_utc=callback_at_utc,
+            correlation_id=correlation_id,
+        )
+        return DispatchResult(
+            ok=False,
+            kind=parsed.kind,
+            reason_code=RejectionReason.INVALIDATED,
+        )
 
     def _atomic_save(approval: Approval) -> None:
         # The mapping is persisted alongside the approval row
@@ -441,6 +455,20 @@ def dispatch_callback(
             reason_code=exc.reason_code,
         )
     except (ValueError, KeyError, TypeError):
+        _journal_outcome(
+            journal_receipt,
+            parsed=parsed,
+            ok=False,
+            reason_code=RejectionReason.INVALIDATED,
+            callback_at_utc=callback_at_utc,
+            correlation_id=correlation_id,
+        )
+        return DispatchResult(
+            ok=False,
+            kind=parsed.kind,
+            reason_code=RejectionReason.INVALIDATED,
+        )
+    except Exception:
         _journal_outcome(
             journal_receipt,
             parsed=parsed,
