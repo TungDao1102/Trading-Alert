@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 8
 current_phase_name: Approval + Reconciliation Hardening
 status: executing
-stopped_at: Phase 8 context gathered
-last_updated: "2026-09-27T11:04:49.266Z"
+stopped_at: Completed 08-01-PLAN.md
+last_updated: "2026-09-27T11:51:54.489Z"
 last_activity: 2026-09-27
-last_activity_desc: Phase 07 plan 04 (pinned-epoch freeze monitor + SIMULATE notify + soak readiness) executed
-state_head: 2a26c478a06604daefef6b6ba64a24a23d44514a
+last_activity_desc: Phase 8 execution started
+state_head: 400e4d6eb1a21ba2bcdfe2b7fad89ada44f3db5c
 progress:
   total_phases: 11
   completed_phases: 6
   total_plans: 34
-  completed_plans: 29
+  completed_plans: 30
 milestone_name: milestone
 ---
 
@@ -26,14 +26,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 07 — Paper Forward Observation
+**Current focus:** Phase 8 — Approval + Reconciliation Hardening
 
 ## Current Position
 
-Phase: 8 (Approval + Reconciliation Hardening) — READY TO EXECUTE
-Plan: 4 of 4
+Phase: 8 (Approval + Reconciliation Hardening) — EXECUTING
+Plan: 2 of 5
 Status: Ready to execute
-Last activity: 2026-09-27 — Phase 07 plan 04 (pinned-epoch freeze monitor + SIMULATE notify + soak readiness) executed
+Last activity: 2026-09-27 — Phase 8 execution started
 
 Progress: [████████░░░] 75%
 
@@ -70,6 +70,7 @@ Progress: [████████░░░] 75%
 | Phase 07.1 P02 | ~10 min | 2 tasks | 4 files |
 | Phase 07 P01 | ~45 min | 3 tasks | 10 files |
 | Phase 07 P02 | ~30 min | 3 tasks | 8 files |
+| Phase 08 P01 | ~15 min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -156,6 +157,11 @@ Recent decisions affecting current work:
 - [Phase 07]: [07-04] Telegram isolation: only src/adapters/telegram_notify.py imports python-telegram-bot; src/paper/notify.py consumes a Protocol-typed TelegramBot with test-injected fake
 - [Phase 07]: [07-04] FLAGGED ASSUMPTION (PAPER-03 unclassified): freeze-monitor tick cadence (hourly cron) and minimum-evidence signal-frequency gate are researcher-set values recorded in the soak log, not code defaults
 - [Phase 07]: [07-04] BLOCKED-FOLLOW-UP: PaperWsAdapter + PaperSupervisor have no SDK connect path wired (0 live events in 30s); Wave 1/2 tests use injected fakes. Soak must NOT start until live WS smoke passes. Routed to executor as separate plan.
+- [Phase 8]: [08-01] D-01 fixed gate order enforced: chat -> expiry -> plan-hash -> version/parameter-set -> token; chat gate runs BEFORE any state lookup (security-critical invariant)
+- [Phase 8]: [08-01] D-02 token-hash is the idempotency key; raw token never persisted or logged; SHA-256 hex form stored on Approval.approval_token_hash
+- [Phase 8]: [08-01] D-03 constant-time compare via hmac.compare_digest prevents timing attacks on token verification
+- [Phase 8]: [08-01] D-04 expiry boundary inclusive: now_utc >= expiry_utc is expired; one second before expiry is still approvable
+- [Phase 8]: [08-01] D-05 src/approval/ is dependency-free (stdlib + src/domain/* only); no telegram, binance_sdk, sqlalchemy, pydantic, polars imports; zero float( usage for money/qty/price fields
 
 ### Pending Todos
 
@@ -189,6 +195,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-27T10:35:09.376Z
-Stopped at: Phase 8 context gathered
-Resume file: .planning/phases/08-approval-reconciliation-hardening/08-CONTEXT.md
+Last session: 2026-09-27T11:51:54.390Z
+Stopped at: Completed 08-01-PLAN.md
+Resume file: None
