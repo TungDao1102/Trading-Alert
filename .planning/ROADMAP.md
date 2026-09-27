@@ -252,14 +252,14 @@ Plans:
   4. Retries, restarts, and replayed events never create duplicate entry orders (deterministic client/algo order identifiers verified)
   5. RUNBOOK failure drills (unprotected/orphan/duplicate/API-down/stale-feed/DB-failure/manual-close/restore) are rehearsed and logged; SAFE_MODE blocks new entries while monitoring and reconciliation continue
 
-**Plans**: 2/5 plans executed
+**Plans**: 3/5 plans executed
 
 Plans:
 
 - [x] 08-01-PLAN.md
 - [ ] 08-02-PLAN.md
 - [x] 08-03-PLAN.md
-- [ ] 08-04-PLAN.md
+- [x] 08-04-PLAN.md
 - [ ] 08-05-PLAN.md
 
 **Wave 1**
@@ -270,7 +270,7 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 
 - [ ] 08-02: APPROVE/SKIP message plus PTB callback receiver plus short-id mapping migration (APRV-01, D-02)
-- [ ] 08-04: Three-source reconciler plus cancel-only sweeper plus SAFE_MODE (EXEC-02, D-03)
+- [x] 08-04: Three-source reconciler plus cancel-only sweeper plus SAFE_MODE (EXEC-02, D-03)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 

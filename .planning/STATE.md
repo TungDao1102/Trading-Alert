@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 8
 current_phase_name: Approval + Reconciliation Hardening
 status: executing
-stopped_at: Completed 08-03-PLAN.md
-last_updated: "2026-09-27T12:30:00.000Z"
+stopped_at: Completed 08-04-PLAN.md
+last_updated: "2026-09-27T13:30:00.000Z"
 last_activity: 2026-09-27
-last_activity_desc: Phase 8 plan 03 completed — deterministic order IDs
-state_head: 5b1ae1c
+last_activity_desc: Phase 8 plan 04 completed — three-source reconciler + sweeper + SAFE_MODE
+state_head: 955d5c5
 progress:
   total_phases: 11
   completed_phases: 6
   total_plans: 34
-  completed_plans: 31
+  completed_plans: 32
 milestone_name: milestone
 ---
 
@@ -31,11 +31,11 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 8 (Approval + Reconciliation Hardening) — EXECUTING
-Plan: 3 of 5
-Status: Ready to execute
-Last activity: 2026-09-27 — Phase 8 plan 03 completed (deterministic order IDs)
+Plan: 4 of 5
+Status: Ready to execute next plan
+Last activity: 2026-09-27 — Phase 8 plan 04 completed (three-source reconciler + sweeper + SAFE_MODE)
 
-Progress: [████████░░░] 75%
+Progress: [█████████░░] 80%
 
 ## Performance Metrics
 
@@ -72,6 +72,7 @@ Progress: [████████░░░] 75%
 | Phase 07 P02 | ~30 min | 3 tasks | 8 files |
 | Phase 08 P01 | ~15 min | 3 tasks | 7 files |
 | Phase 08 P03 | ~10 min | 2 tasks | 5 files |
+| Phase 08 P04 | ~25 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -170,6 +171,18 @@ Recent decisions affecting current work:
 - [Phase 8]: [08-03] D-05 Unknown role raises ValueError with the canonical vocabulary listed in the message — no fallback code, no silent default
 - [Phase 8]: [08-03] D-06 plan_hash slice is the first N hex chars of the canonical 64-char SHA-256 plan hash — deterministic across processes and Python versions
 - [Phase 8]: [08-03] D-07 Retry/restart/replay determinism proven: same call twice, importlib.reload, and interleaving other plans all yield byte-identical IDs
+- [Phase 8]: [08-04] D-01 Five divergence kinds: ORPHAN_PROTECTIVE (sweeper target), ENTRY_WITHOUT_PROTECTIVE (SAFE_MODE trigger, never swept), UNSYNCED_NORMAL, UNSYNCED_ALGO, UNSYNCED_POSITION (each drives SAFE_MODE without cancel)
+- [Phase 8]: [08-04] D-02 ORPHAN_PROTECTIVE classification: local algo protective (SL/TP1/TP2) with no matching local position AND no exchange position — regardless of whether the algo still matches the exchange truth
+- [Phase 8]: [08-04] D-03 Sweeper requires authoritative position-zero verification (T-8-30): two consecutive zero reads from the position_verifier callable; a single non-zero read blocks the cancel
+- [Phase 8]: [08-04] D-04 Sweeper uses query-by-ID-first posture (T-8-32): query_algo_order_by_client probe before cancel; not-found probe is treated as a successful prior sweep
+- [Phase 8]: [08-04] D-05 Sweeper journals pre-image BEFORE the cancel call and post-image AFTER (D-05 extended journal-first ordering); the audit trail is the safety net
+- [Phase 8]: [08-04] D-06 SAFE_MODE enters on any divergence (idempotent re-entry); exits only on a fresh clean three-source compare PLUS a journaled SAFE_MODE_EXIT event (Pitfall 4)
+- [Phase 8]: [08-04] D-07 SAFE_MODE_TICK_SECONDS=60 with operator-tunable-before-soak semantics (FLAGGED ASSUMPTION, RECON-01 unclassified); 60s per RESEARCH A2
+- [Phase 8]: [08-04] D-08 Adapter extension is the only module importing the Binance SDK for reconciliation calls; src/reconcile/ consumes Protocol-typed surfaces
+- [Phase 8]: [08-04] D-09 SDK 17.3.1 -> 17.4.0 delta (per RESEARCH Open Question 2 closed): no public REST method-signature change in any of the seven reconciler methods; ALGO_UPDATE.o.rm field semantics change is WS-side and out of scope
+- [Phase 8]: [08-04] D-10 Bounded-tenacity cancel ceilings (RECONCILER_CANCEL_MAX_ATTEMPTS=3, RECONCILER_CANCEL_MAX_DELAY_SECONDS=30) mirror the notify/resync precedent; transient-only retry filter
+- [Phase 8]: [08-04] D-11 Already-canceled-as-success posture: SDK error code -2011 (UNKNOWN_ORDER) on cancel is treated as success because the post-condition is satisfied
+- [Phase 8]: [08-04] D-12 Zero-amount positions filtered out of snapshot_positions: Binance semantics is position_amt == 0 means no position
 
 ### Pending Todos
 
@@ -203,6 +216,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-27T12:30:00.000Z
-Stopped at: Completed 08-03-PLAN.md
+Last session: 2026-09-27T13:30:00.000Z
+Stopped at: Completed 08-04-PLAN.md
 Resume file: None
