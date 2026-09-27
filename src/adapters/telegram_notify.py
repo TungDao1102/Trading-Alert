@@ -254,6 +254,29 @@ def format_approve(
         raise ValueError(f"entry_min ({entry_min}) must be <= entry_max ({entry_max})")
     if not take_profits:
         raise ValueError("take_profits must be a non-empty list")
+    if not isinstance(stop_loss, Decimal) or stop_loss <= 0:
+        raise ValueError(f"stop_loss must be a positive Decimal, got {stop_loss!r}")
+    for field_name, value in (
+        ("rr", rr),
+        ("risk_pct", risk_pct),
+        ("exposure_quote", exposure_quote),
+    ):
+        if not isinstance(value, Decimal) or value < 0:
+            raise ValueError(f"{field_name} must be a non-negative Decimal, got {value!r}")
+    for idx, (price, fraction) in enumerate(take_profits):
+        if not isinstance(price, Decimal) or price <= 0:
+            raise ValueError(f"take_profits[{idx}].price must be a positive Decimal, got {price!r}")
+        if not isinstance(fraction, Decimal) or not (Decimal(0) < fraction <= Decimal(1)):
+            raise ValueError(
+                f"take_profits[{idx}].fraction must be a Decimal in (0, 1], got {fraction!r}"
+            )
+    if not isinstance(invalidation, str) or invalidation == "":
+        raise ValueError("invalidation must be a non-empty string")
+    if not isinstance(reason_codes, list) or not all(isinstance(r, str) for r in reason_codes):
+        raise ValueError("reason_codes must be a list[str]")
+    for code in reason_codes:
+        if "\n" in code or "\r" in code:
+            raise ValueError(f"reason_codes entry must not contain newlines: {code!r}")
     for field_name, value in (
         ("expiry_utc", expiry_utc),
         ("detected_at_utc", detected_at_utc),
