@@ -21,6 +21,10 @@ backup/
 # Allow source-tree packages named "data" (src/data/...)
 !src/data/
 
+# Paper soak runtime state — diff log + pinned state are append-only
+# runtime state, not source files (D-04)
+logs/
+
 # Test artefacts
 .pytest_cache/
 .mypy_cache/
