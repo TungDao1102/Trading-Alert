@@ -316,6 +316,49 @@ def compare(
                 )
             )
 
+    # Pass 1b — for each local position intent with non-zero amount,
+    # require at least one open protective (local algo intent in an
+    # open status) for the same symbol. A filled ENTRY leaves local
+    # intent as a position row only, so a position with zero
+    # protective algos must diverge — never read as clean.
+    for local_pos in local_open_positions:
+        position_amt = _get_field(local_pos, "position_amt")
+        if _is_zero_like(position_amt):
+            continue
+        pos_symbol = _get_field(local_pos, "symbol")
+        if not isinstance(pos_symbol, str) or pos_symbol == "":
+            divergences.append(
+                Divergence(
+                    kind=DIVERGENCE_KIND_UNSYNCED_POSITION,
+                    symbol="UNKNOWN",
+                    order_role="POSITION",
+                    client_order_id=None,
+                    client_algo_id=None,
+                    reason="local position intent missing symbol",
+                )
+            )
+            continue
+        pos_side = _get_field(local_pos, "position_side")
+        has_protective = any(
+            _get_field(a, "symbol") == pos_symbol
+            and _is_protective_role(_get_field(a, "order_role"))
+            for a in local_algo_by_client_id.values()
+        )
+        if not has_protective:
+            divergences.append(
+                Divergence(
+                    kind=DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE,
+                    symbol=pos_symbol,
+                    order_role=pos_side if isinstance(pos_side, str) and pos_side else "POSITION",
+                    client_order_id=None,
+                    client_algo_id=None,
+                    reason=(
+                        "local position with no protective algo "
+                        "for the same symbol"
+                    ),
+                )
+            )
+
     # Pass 2 — for each local normal order intent, classify it.
     for order_intent in local_normal_by_client_id.values():
         client_order_id = _get_field(order_intent, "client_order_id")
@@ -418,6 +461,15 @@ _PROTECTIVE_ROLES: frozenset[str] = frozenset(
         OrderRole.TAKE_PROFIT_2.value,
     }
 )
+
+
+def _is_zero_like(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        return value == 0
+    except TypeError:
+        return False
 
 
 def _is_protective_role(order_role: str) -> bool:
