@@ -152,6 +152,7 @@ async def backfill_missed_closes(
 
     step_ms = interval_ms(interval)
     start_ms = int(last_close_utc.timestamp() * 1000)
+    now_ms = int(now_utc.timestamp() * 1000)
 
     # Bounded retry: cap attempts AND wall-clock, then fail closed.
     retry = tenacity.retry_if_exception(lambda _e: True)
@@ -164,18 +165,50 @@ async def backfill_missed_closes(
     )
     decorator = tenacity.AsyncRetrying(retry=retry, stop=stop, wait=wait, reraise=True)
 
-    async def _fetch() -> list[Kline]:
+    async def _fetch_page(cursor_ms: int) -> list[Kline]:
         return await adapter.klines(
             symbol=symbol,
             interval=interval,
-            start_ms=start_ms,
+            start_ms=cursor_ms,
             limit=1500,
         )
 
+    async def _fetch_page_with_retry(cursor_ms: int) -> list[Kline]:
+        async for attempt in decorator:
+            with attempt:
+                return await _fetch_page(cursor_ms)
+        raise RuntimeError("unreachable: tenacity.AsyncRetrying exhausted without reraise")
+
+    # Page until the returned page no longer advances toward now_utc
+    # (CR-01): a single 1500-row page silently truncates any outage
+    # longer than 1500 intervals. Each full page advances the cursor
+    # past the last returned open_time; a short page (or an empty
+    # page, or a cursor past now) ends the walk. A page-count cap
+    # keeps a misbehaving adapter from spinning forever — hitting it
+    # is journaled as a truncated backfill, never silent coverage.
     raw_page: list[Kline] = []
-    async for attempt in decorator:
-        with attempt:
-            raw_page = await _fetch()
+    cursor_ms = start_ms
+    truncated = False
+    for _ in range(200):
+        page = await _fetch_page_with_retry(cursor_ms)
+        if not page:
+            break
+        raw_page.extend(page)
+        if len(page) < 1500:
+            break
+        last_open_ms = int(page[-1].open_time_utc.timestamp() * 1000)
+        cursor_ms = last_open_ms + step_ms
+        if cursor_ms > now_ms:
+            break
+    else:
+        truncated = True
+        log.warning(
+            "paper.resync.truncated",
+            symbol=symbol,
+            interval=interval,
+            pages=200,
+            closes=len(raw_page),
+        )
 
     # Drop forming candles: anything whose close_time is in the future
     # relative to now_utc (Pitfall 1 — no future-bar leakage / repaint).
