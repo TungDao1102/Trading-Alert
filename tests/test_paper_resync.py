@@ -253,9 +253,11 @@ def test_forming_candle_in_page_is_dropped_before_use() -> None:
     # Only the closed candle survives; the forming one is dropped.
     assert len(closes) == 1, f"expected 1 close (forming dropped), got {len(closes)}"
     assert closes[0].close_time_utc == closed_close
-    # No gap for the dropped forming candle — it was never expected to
-    # be closed at now_utc.
-    assert len(gaps) == 0, f"forming candle must not produce a gap, got {gaps}"
+    # The dropped forming candle leaves a visible hole: the 11:00 slot
+    # contributes no close, so exactly one forming_at_observed_time gap
+    # is journaled (CR-09 — never silent coverage).
+    assert len(gaps) == 1, f"forming slot must produce one gap, got {gaps}"
+    assert gaps[0]["reason"] == "forming_at_observed_time"
 
 
 # --------------------------------------------------------------------------- #

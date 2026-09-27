@@ -98,9 +98,10 @@ def _expected_open_times(
     Returns an empty list when `last_close_utc + step_ms > now_utc`
     (no missed closes to backfill).
 
-    The diff uses open_time (not close_time) so a forming candle at
-    the expected open_time covers the slot — the exchange has data
-    for that window, it's just not closed yet.
+    The diff uses open_time (not close_time) so each expected slot maps
+    to exactly one exchange row; the caller diffs against CLOSED rows
+    only, so a slot whose row is still forming is reported as a
+    forming_at_observed_time gap, never as silent coverage.
     """
     step = timedelta(milliseconds=step_ms)
     out: list[datetime] = []
@@ -217,23 +218,30 @@ async def backfill_missed_closes(
     # Sort by close_time_utc for deterministic downstream consumption.
     closed.sort(key=lambda k: k.close_time_utc)
 
-    # Build the contiguous expectation and diff against actual open_times.
-    # A forming candle at the expected open_time covers the slot — the
-    # exchange has data for that window, it's just not closed yet, so
-    # we use open_time (not close_time) for the diff.
+    # Build the contiguous expectation and diff against CLOSED rows
+    # only (CR-09): a slot whose only exchange row is still forming
+    # contributes no close, so diffing against raw_page would mark it
+    # "covered" while downstream sees a missing bar. Slots present in
+    # the raw page but absent from closed get an explicit
+    # forming_at_observed_time gap (retryable) rather than silence.
     expected_open_times = _expected_open_times(last_close_utc, now_utc, step_ms)
-    actual_open_times = {k.open_time_utc for k in raw_page}
+    closed_open_times = {k.open_time_utc for k in closed}
+    raw_open_times = {k.open_time_utc for k in raw_page}
     gaps: list[dict[str, Any]] = []
     for expected_open in expected_open_times:
-        if expected_open not in actual_open_times:
+        if expected_open not in closed_open_times:
             expected_close = expected_open + timedelta(milliseconds=step_ms)
+            if expected_open in raw_open_times:
+                reason = "forming_at_observed_time"
+            else:
+                reason = "exchange_returned_no_candle_for_expected_close"
             gaps.append(
                 {
                     "symbol": symbol,
                     "data_class": _data_class_for(interval),
                     "expected_utc": expected_close,
                     "observed_utc": now_utc,
-                    "reason": "exchange_returned_no_candle_for_expected_close",
+                    "reason": reason,
                 }
             )
 
