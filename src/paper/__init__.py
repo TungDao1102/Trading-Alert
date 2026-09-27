@@ -26,17 +26,35 @@ from .journal import (
     paper_records_digest,
 )
 from .loop import run_paper_tick
+from .notify import (
+    NOTIFY_MAX_ATTEMPTS,
+    NOTIFY_MAX_DELAY_SECONDS,
+    NOTIFY_WAIT_MAX_SECONDS,
+    NOTIFY_WAIT_MULTIPLIER_SECONDS,
+    NotifyOutcome,
+    NotifyOutcomeKind,
+    format_simulate,
+    notify_simulate,
+)
 
 __all__ = [
     "APPROVAL_DELAY_LAG_SECONDS",
     "AttributionKind",
     "DiffLogEntry",
     "FreezeCheckOutcome",
+    "NOTIFY_MAX_ATTEMPTS",
+    "NOTIFY_MAX_DELAY_SECONDS",
+    "NOTIFY_WAIT_MAX_SECONDS",
+    "NOTIFY_WAIT_MULTIPLIER_SECONDS",
+    "NotifyOutcome",
+    "NotifyOutcomeKind",
     "PaperRecord",
     "StreamEpoch",
     "assemble_no_trade_record",
     "assemble_paper_record",
     "check_registry_unchanged",
+    "format_simulate",
+    "notify_simulate",
     "paper_records_digest",
     "pin_stream_epoch",
     "run_paper_tick",

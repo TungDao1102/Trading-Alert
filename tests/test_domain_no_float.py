@@ -59,6 +59,8 @@ SCANNED_FILES = (
     "src/paper/journal.py",
     # Phase 7 plan 07-04 — paper freeze monitor (D-04 purity).
     "src/paper/freeze.py",
+    # Phase 7 plan 07-04 — paper SIMULATE notify (D-05 purity).
+    "src/paper/notify.py",
 )
 
 
