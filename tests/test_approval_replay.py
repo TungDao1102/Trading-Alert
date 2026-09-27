@@ -687,6 +687,10 @@ def test_no_synonym_reason_strings_in_src_approval() -> None:
                     "UTF-8",
                 ):
                     continue
+                # Skip module export names (e.g. __all__ entries) — they
+                # are vocabulary, not reason codes.
+                if candidate in ("SHORT_ID_LENGTH",):
+                    continue
                 # Skip if it looks like a Python builtin or stdlib name.
                 if candidate in ("TRUE", "FALSE", "NONE"):
                     continue
