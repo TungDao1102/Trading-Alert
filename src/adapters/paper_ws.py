@@ -23,10 +23,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+import structlog
 from binance_common.configuration import ConfigurationWebSocketStreams
 from binance_sdk_derivatives_trading_usds_futures.websocket_streams import (
     DerivativesTradingUsdsFuturesWebSocketStreams,
@@ -34,6 +35,8 @@ from binance_sdk_derivatives_trading_usds_futures.websocket_streams import (
 from binance_sdk_derivatives_trading_usds_futures.websocket_streams.models.enums import (
     KlineCandlestickStreamsIntervalEnum,
 )
+
+log = structlog.get_logger()
 
 # --------------------------------------------------------------------------- #
 # Frozen domain dataclass — the public contract of the adapter.
@@ -71,8 +74,11 @@ class Kline:
 
 
 def _ms_to_utc(ms: int) -> datetime:
-    """Convert a millisecond Unix epoch to a tz-aware UTC datetime."""
-    return datetime.fromtimestamp(ms / 1000, tz=UTC)
+    """Convert a millisecond Unix epoch to a tz-aware UTC datetime.
+
+    Exact timedelta arithmetic (WR-01) — never float division.
+    """
+    return datetime(1970, 1, 1, tzinfo=UTC) + timedelta(milliseconds=ms)
 
 
 def _normalize_kline_payload(
@@ -158,30 +164,115 @@ class PaperWsAdapter:
         )
 
         def _on_message(message: Any) -> None:
-            payload = _extract_kline_payload(message)
-            if payload is None:
+            # Hardened dispatch (CR-04): one malformed payload must
+            # never propagate into the SDK dispatch thread and kill
+            # the stream, and unknown envelopes must be logged, never
+            # silently dropped.
+            try:
+                payload = _extract_kline_payload(message)
+            except Exception as exc:
+                log.warning(
+                    "paper_ws.extract_failed",
+                    error=repr(exc),
+                    message_type=type(message).__name__,
+                )
                 return
-            kline = _normalize_kline_payload(symbol, interval, payload)
+            if payload is None:
+                log.warning(
+                    "paper_ws.unknown_envelope",
+                    message_type=type(message).__name__,
+                )
+                return
+            try:
+                kline = _normalize_kline_payload(symbol, interval, payload)
+            except (KeyError, TypeError, ValueError) as exc:
+                log.warning(
+                    "paper_ws.normalize_failed",
+                    error=repr(exc),
+                )
+                return
             on_kline(kline)
 
         if hasattr(handle, "on_message"):
             handle.on_message(_on_message)
+        else:
+            # Fail loud (CR-04): returning a handle with no dispatch
+            # registered is a silent dead subscription. The installed
+            # SDK's RequestStreamHandle exposes on()/unsubscribe();
+            # wiring dispatch onto it is pre-soak work — until then,
+            # refuse loudly rather than stream into the void.
+            log.error(
+                "paper_ws.dispatch_unsupported",
+                handle_type=type(handle).__name__,
+            )
+            raise RuntimeError(
+                f"WS handle {type(handle).__name__} has no on_message; "
+                "dispatch unwired (pre-soak wiring required)"
+            )
         return handle
 
+    def connect(self) -> Any:
+        """Open the underlying WS connection (CR-04 connect path).
+
+        Delegates to the SDK client's `create_connection()` entrypoint
+        (verified on the installed
+        `binance-sdk-derivatives-trading-usds-futures` streams client).
+        Raises loudly when the client exposes no connection entrypoint.
+        Full subscribe-against-live-connection smoke verification stays
+        pre-soak work (the known BLOCKED gap) — this method makes the
+        path explicit instead of absent.
+        """
+        for entry in ("create_connection", "init_connection", "connect"):
+            factory = getattr(self._ws, entry, None)
+            if callable(factory):
+                return factory()
+        log.error(
+            "paper_ws.connect_unsupported",
+            client_type=type(self._ws).__name__,
+        )
+        raise RuntimeError(
+            f"WS client {type(self._ws).__name__} exposes no connection entrypoint"
+        )
+
     def reconnect(self, handle: Any) -> None:
-        """Delegate reconnect to the SDK handle."""
+        """Delegate reconnect to the SDK handle (fail-loud, CR-04)."""
         if hasattr(handle, "reconnect"):
             handle.reconnect()
+        else:
+            log.error(
+                "paper_ws.reconnect_unsupported",
+                handle_type=type(handle).__name__,
+            )
+            raise RuntimeError(
+                f"WS handle {type(handle).__name__} has no reconnect; "
+                "rotation impossible"
+            )
 
     def schedule_reconnect(self, handle: Any) -> None:
-        """Delegate schedule_reconnect to the SDK handle."""
+        """Delegate schedule_reconnect to the SDK handle (fail-loud)."""
         if hasattr(handle, "schedule_reconnect"):
             handle.schedule_reconnect()
+        else:
+            log.error(
+                "paper_ws.schedule_reconnect_unsupported",
+                handle_type=type(handle).__name__,
+            )
+            raise RuntimeError(
+                f"WS handle {type(handle).__name__} has no schedule_reconnect"
+            )
 
     def close(self, handle: Any) -> None:
-        """Close the stream handle."""
+        """Close the stream handle (fail-loud, CR-04)."""
         if hasattr(handle, "close"):
             handle.close()
+        else:
+            log.error(
+                "paper_ws.close_unsupported",
+                handle_type=type(handle).__name__,
+            )
+            raise RuntimeError(
+                f"WS handle {type(handle).__name__} has no close"
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -217,21 +308,58 @@ def _interval_to_enum(interval: str) -> KlineCandlestickStreamsIntervalEnum:
     return enum_value
 
 
+def _as_dict(value: Any) -> dict[str, Any] | None:
+    """Coerce an SDK model to a plain dict, or None if impossible.
+
+    The SDK may deliver response objects with attributes instead of
+    raw dicts (CR-04) — support `dict` passthrough, `to_dict()` /
+    `model_dump()` carriers, and `__dict__` attribute bags.
+    """
+    if isinstance(value, dict):
+        return value
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        try:
+            result = to_dict()
+        except Exception:
+            return None
+        return result if isinstance(result, dict) else None
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            result = model_dump()
+        except Exception:
+            return None
+        return result if isinstance(result, dict) else None
+    bag = getattr(value, "__dict__", None)
+    if isinstance(bag, dict) and bag:
+        return dict(bag)
+    return None
+
+
 def _extract_kline_payload(message: Any) -> dict[str, Any] | None:
     """Extract the kline payload from a WS message.
 
     The SDK wraps kline events in a `{stream, data}` envelope; the
     `data` field carries the kline payload. This helper unwraps the
     envelope and returns the kline dict, or None if the message is
-    not a kline event.
+    not a kline event. Attribute-style SDK models are coerced via
+    `_as_dict` so they are never silently dropped (CR-04). Bare
+    kline-shaped dicts (wire fields, no envelope) are accepted; any
+    other shape returns None and the caller logs the envelope type.
     """
-    if isinstance(message, dict):
-        if "data" in message and isinstance(message["data"], dict):
-            kline = message["data"].get("k")
-            if isinstance(kline, dict):
-                return kline
-        if "k" in message and isinstance(message["k"], dict):
-            return message["k"]
+    envelope = _as_dict(message)
+    if envelope is None:
+        return None
+    if "data" in envelope:
+        data_dict = _as_dict(envelope["data"])
+        if data_dict is None:
+            return None
+        return _as_dict(data_dict.get("k"))
+    if "k" in envelope:
+        return _as_dict(envelope["k"])
+    if "t" in envelope and "T" in envelope:
+        return envelope
     return None
 
 
