@@ -651,8 +651,7 @@ def make_api_down_drill(
     def assert_outcome(journal: DrillLog, context: dict[str, Any]) -> str:
         try:
             api_call()
-        except Exception:
-            # Transient error swallowed — SAFE_MODE is the response.
+        except RuntimeError:
             pass
         else:
             raise AssertionError("api_down drill: expected api_call to raise transient error")
@@ -737,7 +736,7 @@ def make_db_failure_drill(
     def assert_outcome(journal: DrillLog, context: dict[str, Any]) -> str:
         try:
             db_write()
-        except Exception:
+        except RuntimeError:
             pass
         else:
             raise AssertionError("db_failure drill: expected db_write to raise transient error")
