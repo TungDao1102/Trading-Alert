@@ -146,6 +146,7 @@ class OrphanSweeper:
         diff: Any,
         *,
         position_verifier: PositionVerifier,
+        now_utc: datetime | None = None,
     ) -> SweepOutcome:
         """Sweep the orphan protectives in `diff`.
 
@@ -154,7 +155,12 @@ class OrphanSweeper:
             position_verifier: Caller-supplied function that returns
                 the current position amount for a symbol. The
                 sweeper calls it twice per orphan (consecutive zero
-                reads required).
+                reads required). May be sync or async — a coroutine
+                result is awaited.
+            now_utc: Per-sweep timestamp. Resolved inside `sweep`
+                (never pinned at construction for long-lived
+                sweepers): explicit value wins, else the constructor
+                test hook, else `datetime.now(UTC)`.
 
         Returns:
             A `SweepOutcome` carrying the cancelled and skipped
@@ -162,9 +168,12 @@ class OrphanSweeper:
             failure — it journals the failure and continues with
             the next orphan.
         """
-        effective_now = (
-            self._now_utc if self._now_utc is not None else datetime.now(UTC)
-        )
+        if now_utc is not None:
+            effective_now = now_utc
+        elif self._now_utc is not None:
+            effective_now = self._now_utc
+        else:
+            effective_now = datetime.now(UTC)
         if effective_now.tzinfo is None:
             raise ValueError("now_utc must be UTC-aware")
         if effective_now.utcoffset() != _ZERO_TIMEDELTA:
@@ -183,6 +192,10 @@ class OrphanSweeper:
             # read blocks the cancel (transient gap protection).
             first_read = position_verifier(symbol=symbol)
             second_read = position_verifier(symbol=symbol)
+            if _is_awaitable(first_read):
+                first_read = await first_read
+            if _is_awaitable(second_read):
+                second_read = await second_read
             if not (_is_zero_like(first_read) and _is_zero_like(second_read)):
                 skip_reason = (
                     f"transient_position_gap: first_read={first_read!r} "
@@ -379,6 +392,12 @@ class OrphanSweeper:
 # --------------------------------------------------------------------------- #
 
 _ZERO_TIMEDELTA = timedelta(0)
+
+
+def _is_awaitable(value: Any) -> bool:
+    import inspect
+
+    return inspect.isawaitable(value)
 
 
 def _is_zero_like(value: Any) -> bool:
