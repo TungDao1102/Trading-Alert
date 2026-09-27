@@ -208,26 +208,41 @@ class DrillLog:
     `SAFE_MODE_ENTER`, `ORPHAN_SWEEP` from the underlying system).
     The golden fixture pins the union: every DRILL_OUTCOME plus the
     key side-events.
+
+    Single-writer only: `run_all_drills` is the sole writer in
+    sequential runs. A lock guards `record`/`reset` so concurrent
+    `run_drill` calls cannot interleave or drop rows silently, and a
+    monotonically increasing sequence number pins dispatch order.
     """
 
     def __init__(self) -> None:
+        import threading
+
         self.events: list[JournalEvent] = []
+        self._lock = threading.Lock()
+        self._sequence = 0
 
     def record(self, event: JournalEvent) -> None:
         """Record a JournalEvent into the log (append-only)."""
-        self.events.append(event)
+        with self._lock:
+            self._sequence += 1
+            self.events.append(event)
 
     def drill_outcome_events(self) -> tuple[JournalEvent, ...]:
         """Return just the DRILL_OUTCOME events (one per drill)."""
-        return tuple(e for e in self.events if e.event_type == "DRILL_OUTCOME")
+        with self._lock:
+            return tuple(e for e in self.events if e.event_type == "DRILL_OUTCOME")
 
     def ordered_drill_outcomes(self) -> tuple[str, ...]:
         """Return the ordered drill names emitted as DRILL_OUTCOME."""
-        return tuple(e.entity_id for e in self.events if e.event_type == "DRILL_OUTCOME")
+        with self._lock:
+            return tuple(e.entity_id for e in self.events if e.event_type == "DRILL_OUTCOME")
 
     def reset(self) -> None:
         """Clear the log (for repeat-run determinism tests)."""
-        self.events = []
+        with self._lock:
+            self.events = []
+            self._sequence = 0
 
 
 # --------------------------------------------------------------------------- #
