@@ -97,11 +97,15 @@ class SweepOutcome:
     `cancelled` is the list of `(symbol, client_algo_id)` tuples
     that were successfully cancelled. `skipped` is the list of
     `SweepSkip` records for orphans the sweeper refused to act on.
+    `already_gone` lists orphans whose probe returned `found=False`
+    (already absent on the exchange — no cancel issued, counted
+    separately from real cancels).
     """
 
     swept_count: int
     cancelled: tuple[tuple[str, str], ...]
     skipped: tuple[SweepSkip, ...]
+    already_gone: tuple[tuple[str, str], ...] = ()
 
 
 # --------------------------------------------------------------------------- #
@@ -168,6 +172,7 @@ class OrphanSweeper:
 
         cancelled: list[tuple[str, str]] = []
         skipped: list[SweepSkip] = []
+        already_gone: list[tuple[str, str]] = []
 
         for orphan in diff.orphan_protectives:
             symbol = orphan.symbol
@@ -218,8 +223,16 @@ class OrphanSweeper:
                 )
                 continue
             if not getattr(probe, "found", False):
-                # Already gone — treat as success.
-                cancelled.append((symbol, client_algo_id))
+                self._journal.record(
+                    self._build_failure_event(
+                        symbol=symbol,
+                        client_algo_id=client_algo_id,
+                        reason="already_gone_no_cancel_needed",
+                        now_utc=effective_now,
+                        phase="already_gone",
+                    )
+                )
+                already_gone.append((symbol, client_algo_id))
                 continue
 
             try:
@@ -269,6 +282,7 @@ class OrphanSweeper:
             swept_count=len(cancelled),
             cancelled=tuple(cancelled),
             skipped=tuple(skipped),
+            already_gone=tuple(already_gone),
         )
 
     # ----- internal helpers ---------------------------------------------- #
@@ -309,13 +323,14 @@ class OrphanSweeper:
         client_algo_id: str,
         reason: str,
         now_utc: datetime,
+        phase: str = "sweep_failed",
     ) -> JournalEvent:
         payload = {
             "symbol": symbol,
             "client_algo_id": client_algo_id,
             "cancelled": False,
             "reason": reason,
-            "phase": "sweep_failed",
+            "phase": phase,
         }
         return JournalEvent(
             journal_event_id=(
