@@ -297,7 +297,9 @@ def test_paper_full_projection_covers_every_bar() -> None:
     assert len(full) == len(strategy_bars), (
         f"full projection must cover every bar: {len(full)} != {len(strategy_bars)}"
     )
-    for (bar_close_utc, _signal_id, _reason_code, stage), bar in zip(full, strategy_bars):
+    for (bar_close_utc, _signal_id, _reason_code, stage), bar in zip(
+        full, strategy_bars, strict=True
+    ):
         assert bar_close_utc == bar["close_time_utc"], (
             f"projection order must follow replay order: {bar_close_utc} != {bar['close_time_utc']}"
         )

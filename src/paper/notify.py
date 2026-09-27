@@ -45,6 +45,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
+import structlog
 from tenacity import (
     AsyncRetrying,
     RetryError,
@@ -53,8 +54,6 @@ from tenacity import (
     stop_after_delay,
     wait_random_exponential,
 )
-
-import structlog
 
 from src.adapters.telegram_notify import (
     TelegramBot,

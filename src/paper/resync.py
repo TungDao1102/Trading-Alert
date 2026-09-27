@@ -17,7 +17,7 @@ surface stays behind `src/adapters/binance_usdm.py`.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 import structlog
@@ -74,7 +74,7 @@ class AdapterLike(Protocol):
 # Helpers.
 # --------------------------------------------------------------------------- #
 
-_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 def _datetime_to_ms(value: datetime) -> int:
@@ -84,7 +84,7 @@ def _datetime_to_ms(value: datetime) -> int:
     whose binary-float round-trip loses sub-millisecond precision on
     large epoch values and escapes the no-float AST guard.
     """
-    delta = value.astimezone(timezone.utc) - _EPOCH_UTC
+    delta = value.astimezone(UTC) - _EPOCH_UTC
     return (delta.days * 86400 + delta.seconds) * 1000 + delta.microseconds // 1000
 
 
@@ -210,7 +210,6 @@ async def backfill_missed_closes(
     # is journaled as a truncated backfill, never silent coverage.
     raw_page: list[Kline] = []
     cursor_ms = start_ms
-    truncated = False
     for _ in range(200):
         page = await _fetch_page_with_retry(cursor_ms)
         if not page:
@@ -223,7 +222,6 @@ async def backfill_missed_closes(
         if cursor_ms > now_ms:
             break
     else:
-        truncated = True
         log.warning(
             "paper.resync.truncated",
             symbol=symbol,
