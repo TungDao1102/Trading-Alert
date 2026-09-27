@@ -1,0 +1,9 @@
+{
+  "parameter_set_id": "baseline-v3",
+  "evidence_claim_open_epoch1": true,
+  "evidence_claim_open_halted": false,
+  "evidence_claim_open_epoch2": true,
+  "diff_outcome": "REGISTRY_DIFF",
+  "halted_reason": "REGISTRY_DIFF",
+  "halted": true
+}

@@ -1,0 +1,8 @@
+{
+  "strategy_id": "trend-pullback",
+  "parameter_set_id": "baseline-v3",
+  "opened_at_utc_epoch1": "2026-09-19T10:00:00+00:00",
+  "now_utc_epoch2": "2026-09-19T11:00:00+00:00",
+  "mutated_key": "fee_rate_entry",
+  "mutated_value": "0.0003"
+}
