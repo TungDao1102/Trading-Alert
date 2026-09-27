@@ -90,14 +90,22 @@ class SafeModeVerdict:
 
     `is_no_trade=True` carries `RECONCILIATION_REQUIRED` in
     `reason_code` (the canonical RejectionReason for SAFE_MODE
-    blocks). `is_no_trade=False` means the system is not in
-    SAFE_MODE and the caller may proceed with the risk pipeline.
+    blocks). `is_no_trade=False` is the PASS verdict with
+    `reason_code=None` — never a RejectionReason, so a pass cannot be
+    confused with a rejection.
     """
 
     is_no_trade: bool
-    reason_code: str
+    reason_code: str | None
 
     def __post_init__(self) -> None:
+        if self.reason_code is None:
+            if self.is_no_trade:
+                raise ValueError(
+                    "SafeModeVerdict: is_no_trade=True requires "
+                    "RECONCILIATION_REQUIRED"
+                )
+            return
         if self.reason_code not in {r.value for r in RejectionReason}:
             raise ValueError(
                 f"SafeModeVerdict: unknown reason_code {self.reason_code!r}"
@@ -218,7 +226,7 @@ class SafeModeController:
         Returns:
             `SafeModeVerdict(is_no_trade=True, reason_code=
             RECONCILIATION_REQUIRED)` when in SAFE_MODE; otherwise
-            `SafeModeVerdict(is_no_trade=False, reason_code=OK)`.
+            `SafeModeVerdict(is_no_trade=False, reason_code=None)` (PASS).
         """
         if self._in_safe_mode:
             return SafeModeVerdict(
@@ -227,7 +235,7 @@ class SafeModeController:
             )
         return SafeModeVerdict(
             is_no_trade=False,
-            reason_code="OK",
+            reason_code=None,
         )
 
     async def exit_safe_mode(
