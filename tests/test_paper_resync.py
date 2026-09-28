@@ -30,7 +30,27 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import pytest
+import tenacity
+
 PHASE7_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase7"
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_sleep(monkeypatch: Any) -> None:
+    """Bypass production retry sleeps (Group A option 1).
+
+    The resync backfill path (7 attempts, exponential backoff) sleeps
+    ~40-50s when the adapter raises a transient error. Unit tests must
+    assert the per-symbol isolation logic without burning the
+    production sleep budget.
+    """
+    monkeypatch.setattr(
+        tenacity,
+        "wait_random_exponential",
+        lambda *args, **kwargs: tenacity.wait_none(),
+        raising=True,
+    )
 
 
 def _load_input(case_dir: Path) -> dict[str, Any]:

@@ -22,6 +22,27 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+import pytest
+import tenacity
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_sleep(monkeypatch: Any) -> None:
+    """Bypass production retry sleeps (Group A option 1).
+
+    The supervisor reconnect path (7 attempts, exponential backoff)
+    and the resync backfill path (7 attempts, exponential backoff)
+    sleep ~30-50s on the failing path. Unit tests must assert the
+    fail-closed logic (reconnect attempted, backfill still runs, gap
+    journaled) without burning the production sleep budget.
+    """
+    monkeypatch.setattr(
+        tenacity,
+        "wait_random_exponential",
+        lambda *args, **kwargs: tenacity.wait_none(),
+        raising=True,
+    )
+
 
 def _make_rest_kline(
     symbol: str, interval: str, open_utc: datetime, close_utc: datetime
