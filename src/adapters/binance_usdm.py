@@ -1002,9 +1002,12 @@ class BinanceUsdmAdapter:
         """Place a LIMIT entry order via `new_order`.
 
         Per D-01: entry is a LIMIT-zone order on the normal order
-        endpoint. The SDK accepts `quantity` and `price` as `float`;
-        we convert via `float(str(quantized))` at the boundary so the
-        execution core never sees float (D-05 purity).
+        endpoint. The SDK 17.4.0 signature annotates `quantity` and
+        `price` as `Optional[float]`, but the implementation just
+        forwards the value through `urlencode` — Decimal is accepted
+        and serialized with full precision (no float roundoff). We
+        pass the Decimal through directly so the execution core never
+        sees float (D-05 purity).
 
         Args:
             symbol: The trading pair (e.g. "BTCUSDT").
@@ -1050,8 +1053,8 @@ class BinanceUsdmAdapter:
                 type=NewOrderTypeEnum.LIMIT,
                 position_side=position_side,
                 time_in_force=NewOrderTimeInForceEnum(time_in_force),
-                quantity=float(str(quantity)),
-                price=float(str(price)),
+                quantity=quantity,
+                price=price,
                 new_client_order_id=new_client_order_id,
             )
             return response.data()
@@ -1143,11 +1146,11 @@ class BinanceUsdmAdapter:
                 side=NewAlgoOrderSideEnum(side),
                 type=NewAlgoOrderTypeEnum(type),
                 position_side=position_side,
-                trigger_price=float(str(trigger_price)),
+                trigger_price=trigger_price,
                 close_position=NewAlgoOrderClosePositionEnum.TRUE
                 if close_position
                 else NewAlgoOrderClosePositionEnum.FALSE,
-                quantity=float(str(quantity)) if quantity is not None else None,
+                quantity=quantity if quantity is not None else None,
                 working_type=NewAlgoOrderWorkingTypeEnum(working_type),
                 client_algo_id=client_algo_id,
             )
