@@ -75,6 +75,8 @@ def _coerce_decimal(value: object, field_name: str) -> Decimal:
 
 def _build_fill_events(case_input: dict[str, Any]) -> list[Any]:
     """Build fill event objects from the fixture input."""
+    from datetime import datetime
+
     from src.execution.fill_monitor import FillEvent
 
     events = []
@@ -88,7 +90,7 @@ def _build_fill_events(case_input: dict[str, Any]) -> list[Any]:
                 position_side=fe["position_side"],
                 fill_price=_coerce_decimal(fe["fill_price"], "fill_price"),
                 fill_quantity=_coerce_decimal(fe["fill_quantity"], "fill_quantity"),
-                fill_time_utc=fe["fill_time_utc"],
+                fill_time_utc=datetime.fromisoformat(fe["fill_time_utc"]),
             )
         )
     return events
@@ -142,7 +144,9 @@ def test_out_of_order_fills_fold_to_same_view_as_in_order() -> None:
 
     # Fills are sorted deterministically by (order_id, exchange_trade_id).
     assert len(result.fills) == len(expected["folded_position_view"]["fills"])
-    for actual, exp in zip(result.fills, expected["folded_position_view"]["fills"]):
+    for actual, exp in zip(
+        result.fills, expected["folded_position_view"]["fills"], strict=True
+    ):
         assert actual["order_id"] == exp["order_id"]
         assert actual["exchange_trade_id"] == exp["exchange_trade_id"]
         assert actual["fill_price"] == _coerce_decimal(exp["fill_price"], "fill_price")
@@ -211,7 +215,7 @@ def test_folded_view_sorts_deterministically() -> None:
     # Byte-identical: same fill_count, same fills in same order.
     assert result1.fill_count == result2.fill_count
     assert len(result1.fills) == len(result2.fills)
-    for f1, f2 in zip(result1.fills, result2.fills):
+    for f1, f2 in zip(result1.fills, result2.fills, strict=True):
         assert f1 == f2, f"non-deterministic fold: {f1} != {f2}"
 
     # The fills are sorted by (order_id, exchange_trade_id).
@@ -236,7 +240,9 @@ def test_entry_without_protective_yields_divergence() -> None:
     """Beh. 4: entry fills with no protective attached yield
     ENTRY_WITHOUT_PROTECTIVE divergence for the reconciler path.
     """
-    from src.execution.fill_monitor import fold_fills, FillEvent
+    from datetime import datetime
+
+    from src.execution.fill_monitor import FillEvent, fold_fills
 
     # Build a fill event with no protective attached.
     fill_event = FillEvent(
@@ -247,7 +253,7 @@ def test_entry_without_protective_yields_divergence() -> None:
         position_side="BOTH",
         fill_price=Decimal("100.00"),
         fill_quantity=Decimal("0.500"),
-        fill_time_utc="2026-09-19T10:30:00+00:00",
+        fill_time_utc=datetime.fromisoformat("2026-09-19T10:30:00+00:00"),
     )
 
     from src.execution.fill_monitor import CurrentPositionView

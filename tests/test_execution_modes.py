@@ -29,8 +29,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 PHASE9_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase9"
 MODE_BRANCHES_DIR = PHASE9_FIXTURES_DIR / "mode_branches"
 
@@ -79,10 +77,18 @@ def _build_protective_template(case_input: dict[str, Any]) -> Any:
 
     pt = case_input["protective_template"]
     return ProtectiveTemplate(
-        stop_loss_trigger_price=_coerce_decimal(pt["stop_loss_trigger_price"], "stop_loss_trigger_price"),
-        tp1_trigger_price=_coerce_decimal(pt["tp1_trigger_price"], "tp1_trigger_price"),
-        tp2_trigger_price=_coerce_decimal(pt["tp2_trigger_price"], "tp2_trigger_price"),
-        tp1_quantity_fraction=_coerce_decimal(pt["tp1_quantity_fraction"], "tp1_quantity_fraction"),
+        stop_loss_trigger_price=_coerce_decimal(
+            pt["stop_loss_trigger_price"], "stop_loss_trigger_price"
+        ),
+        tp1_trigger_price=_coerce_decimal(
+            pt["tp1_trigger_price"], "tp1_trigger_price"
+        ),
+        tp2_trigger_price=_coerce_decimal(
+            pt["tp2_trigger_price"], "tp2_trigger_price"
+        ),
+        tp1_quantity_fraction=_coerce_decimal(
+            pt["tp1_quantity_fraction"], "tp1_quantity_fraction"
+        ),
     )
 
 
