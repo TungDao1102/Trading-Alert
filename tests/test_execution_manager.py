@@ -30,13 +30,10 @@ sequence byte-for-byte.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-
-import pytest
 
 PHASE9_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase9"
 PLACEMENT_FIXTURE_DIR = PHASE9_FIXTURES_DIR / "placement_sequences"
@@ -48,15 +45,11 @@ PLACEMENT_FIXTURE_DIR = PHASE9_FIXTURES_DIR / "placement_sequences"
 
 
 def _load_input() -> dict[str, Any]:
-    return json.loads(
-        (PLACEMENT_FIXTURE_DIR / "input.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PLACEMENT_FIXTURE_DIR / "input.json").read_text(encoding="utf-8"))
 
 
 def _load_expected() -> dict[str, Any]:
-    return json.loads(
-        (PLACEMENT_FIXTURE_DIR / "expected.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PLACEMENT_FIXTURE_DIR / "expected.json").read_text(encoding="utf-8"))
 
 
 def _parse_utc(raw: str) -> datetime:
@@ -140,8 +133,8 @@ class FakeExecutionAdapter:
 
 def _build_approved_plan(case_input: dict[str, Any]) -> Any:
     """Build a TradePlan from the fixture input."""
-    from src.domain.trade_plan import TradePlan
     from src.domain.enums import TradePlanStatus
+    from src.domain.trade_plan import TradePlan
 
     return TradePlan(
         trade_plan_id=case_input["trade_plan_id"],
@@ -157,9 +150,7 @@ def _build_approved_plan(case_input: dict[str, Any]) -> Any:
         expected_rr_json=case_input["expected_rr_json"],
         risk_rate=_coerce_decimal(case_input["risk_rate"], "risk_rate"),
         risk_budget=_coerce_decimal(case_input["risk_budget"], "risk_budget"),
-        suggested_quantity=_coerce_decimal(
-            case_input["suggested_quantity"], "suggested_quantity"
-        ),
+        suggested_quantity=_coerce_decimal(case_input["suggested_quantity"], "suggested_quantity"),
         quantity_before_rounding=_coerce_decimal(
             case_input["quantity_before_rounding"], "quantity_before_rounding"
         ),
@@ -215,17 +206,11 @@ def _build_constraint_snapshot(case_input: dict[str, Any]) -> Any:
 
     return ConstraintSnapshot(
         symbol=case_input["symbol"],
-        price_tick_size=_coerce_decimal(
-            case_input["price_tick_size"], "price_tick_size"
-        ),
-        quantity_step_size=_coerce_decimal(
-            case_input["quantity_step_size"], "quantity_step_size"
-        ),
+        price_tick_size=_coerce_decimal(case_input["price_tick_size"], "price_tick_size"),
+        quantity_step_size=_coerce_decimal(case_input["quantity_step_size"], "quantity_step_size"),
         min_quantity=_coerce_decimal(case_input["min_quantity"], "min_quantity"),
         min_notional=_coerce_decimal(case_input["min_notional"], "min_notional"),
-        metadata_observed_at_utc=_parse_utc(
-            case_input["metadata_observed_at_utc"]
-        ),
+        metadata_observed_at_utc=_parse_utc(case_input["metadata_observed_at_utc"]),
     )
 
 
@@ -273,9 +258,7 @@ def _build_risk_kwargs(case_input: dict[str, Any]) -> dict[str, Any]:
         "account_state": _build_account_state(case_input),
         "constraint_snapshot": _build_constraint_snapshot(case_input),
         "open_positions": _build_open_positions(case_input),
-        "daily_loss_quote": _coerce_decimal(
-            case_input["daily_loss_quote"], "daily_loss_quote"
-        ),
+        "daily_loss_quote": _coerce_decimal(case_input["daily_loss_quote"], "daily_loss_quote"),
         "now_utc": _parse_utc(case_input["now_utc"]),
         "ttl": timedelta(seconds=int(case_input["ttl_seconds"])),
         "modeled_costs_per_unit": _coerce_decimal(
@@ -325,9 +308,7 @@ def test_happy_path_places_one_entry_and_one_sl_leg() -> None:
     )
 
     # Outcome is a PASS with the expected reason code.
-    assert outcome.is_no_trade is False, (
-        f"expected PASS, got NO_TRADE: {outcome.reason_code}"
-    )
+    assert outcome.is_no_trade is False, f"expected PASS, got NO_TRADE: {outcome.reason_code}"
     assert outcome.reason_code == expected["outcome_reason_code"]
 
     # Exactly 2 adapter calls: 1 entry + 1 SL.
@@ -486,7 +467,7 @@ def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
     adapter._entry_response = None  # type: ignore[attr-defined]
     adapter._query_response = {"found": True, "order_id": "12345"}  # type: ignore[attr-defined]
 
-    outcome = execute_approved_plan(
+    execute_approved_plan(
         callback=callback,
         approval=approval,
         authorized_chat_id=case_input["chat_id"],
@@ -508,14 +489,10 @@ def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
     # Query must come after the initial place_entry.
     entry_idx = method_sequence.index("place_entry")
     query_idx = method_sequence.index("query_order_by_client")
-    assert query_idx > entry_idx, (
-        f"query must come after initial place_entry: {method_sequence}"
-    )
+    assert query_idx > entry_idx, f"query must come after initial place_entry: {method_sequence}"
     # No retry place_entry after the query (probe found the order).
     entry_count = method_sequence.count("place_entry")
-    assert entry_count == 1, (
-        f"probe found order → no retry, got {entry_count} place_entry calls"
-    )
+    assert entry_count == 1, f"probe found order → no retry, got {entry_count} place_entry calls"
 
 
 # --------------------------------------------------------------------------- #
@@ -587,8 +564,7 @@ def test_execution_core_does_not_import_binance_sdk() -> None:
         for pattern in forbidden_patterns:
             match = re.search(pattern, source)
             assert match is None, (
-                f"forbidden import in {module_path}: "
-                f"pattern={pattern!r}, match={match.group(0)!r}"
+                f"forbidden import in {module_path}: pattern={pattern!r}, match={match.group(0)!r}"
             )
 
 
@@ -611,6 +587,4 @@ def test_execution_core_has_no_float_in_placement_math() -> None:
         source = module_path.read_text(encoding="utf-8")
         # float() is only allowed at the adapter boundary, not in core.
         match = re.search(r"\bfloat\s*\(", source)
-        assert match is None, (
-            f"float() found in {module_path}: {match.group(0)!r}"
-        )
+        assert match is None, f"float() found in {module_path}: {match.group(0)!r}"

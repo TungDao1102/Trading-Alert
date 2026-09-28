@@ -25,7 +25,6 @@ from src.execution.order_ids import derive_algo_client_id, derive_client_order_i
 from src.execution.placement import derive_limit_price, derive_sl_trigger_price
 from src.risk.gating import evaluate_risk
 
-
 # --------------------------------------------------------------------------- #
 # Protocol-typed adapter surface — the manager never imports the SDK.
 # --------------------------------------------------------------------------- #
@@ -70,9 +69,7 @@ class ExecutionOutcome:
             raise ValueError("reason_code must be a non-empty string")
         if self.is_no_trade:
             if self.reason_code == "OK":
-                raise ValueError(
-                    "ExecutionOutcome: is_no_trade=True requires reason_code != 'OK'"
-                )
+                raise ValueError("ExecutionOutcome: is_no_trade=True requires reason_code != 'OK'")
         else:
             if self.reason_code != "OK":
                 raise ValueError(
@@ -173,9 +170,7 @@ def execute_approved_plan(
         entry_min_price=trade_plan.entry_min_price,
         entry_max_price=trade_plan.entry_max_price,
     )
-    sl_trigger_price = derive_sl_trigger_price(
-        stop_loss_price=trade_plan.stop_loss_price
-    )
+    sl_trigger_price = derive_sl_trigger_price(stop_loss_price=trade_plan.stop_loss_price)
 
     # The quantized quantity from the risk verdict.
     assert verdict.sized is not None

@@ -5,6 +5,8 @@
 **Rule:** Full API coverage by default. Every placement-relevant capability is INTEGRATE or OPT-OUT with a one-line reason.
 Executor task in 09-01 re-verifies each INTEGRATE row against the installed SDK signatures at implementation time (D-01) and updates this file on any delta.
 
+**Re-verified 2026-09-28 (09-01 execution):** Rows 1, 2, 4, 5, 8 re-verified against installed SDK 17.4.0 via introspection (`python -c "import binance_sdk_derivatives_trading_usds_futures as m; ..."`). No signature delta — all four placement methods (`new_order`, `new_algo_order`, `query_order`, `get_current_position_mode`) and the existing `query_algo_order` retain their 17.3.1 signatures. Adapter docstring table updated with the four new rows.
+
 | # | Capability (SDK method / endpoint) | Disposition | Reason / Plan |
 |---|------------------------------------|-------------|---------------|
 | 1 | `new_order` LIMIT entries (`POST /fapi/v1/order`, GTC, deterministic `x-` client ID) | INTEGRATE | Core D-01 entry path — 09-01 tracer |

@@ -72,6 +72,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B011"]  # asserts are fine in tests
+"src/adapters/binance_usdm.py" = ["E501"]  # SDK signature table in docstring is inherently long
 
 [tool.mypy]
 python_version = "3.13"
