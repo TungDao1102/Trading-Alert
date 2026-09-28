@@ -1,0 +1,9 @@
+{
+  "reason_code": "STALE_CONSTRAINTS",
+  "is_no_trade": true,
+  "gate": "stale_constraints",
+  "metadata_observed_at_utc": "2026-09-19T08:00:00+00:00",
+  "now_utc": "2026-09-19T10:30:00+00:00",
+  "ttl_seconds": 3600,
+  "adapter_place_calls": 0
+}

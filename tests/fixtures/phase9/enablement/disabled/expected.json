@@ -1,0 +1,7 @@
+{
+  "reason_code": "DISABLED",
+  "is_no_trade": true,
+  "gate": "enablement",
+  "live_orders_disabled": true,
+  "adapter_place_calls": 0
+}

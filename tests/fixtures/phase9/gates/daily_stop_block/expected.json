@@ -1,0 +1,7 @@
+{
+  "reason_code": "DAILY_STOP_BLOCK",
+  "is_no_trade": true,
+  "gate": "daily_stop",
+  "daily_state": "DAILY_STOP",
+  "adapter_place_calls": 0
+}

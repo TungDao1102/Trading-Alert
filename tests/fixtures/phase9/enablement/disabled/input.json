@@ -1,0 +1,36 @@
+{
+  "symbol": "BTCUSDT",
+  "now_utc": "2026-09-19T10:30:00+00:00",
+  "ttl_seconds": 3600,
+  "open_algo_count": 5,
+  "planned_leg_count": 3,
+  "constraint_snapshot": {
+    "symbol": "BTCUSDT",
+    "price_tick_size": "0.01",
+    "quantity_step_size": "0.001",
+    "min_quantity": "0.001",
+    "min_notional": "5.00",
+    "metadata_observed_at_utc": "2026-09-19T10:00:00+00:00"
+  },
+  "reconciled_positions": [],
+  "daily_loss_quote": null,
+  "positions_reconciled": false,
+  "candidate_symbol": "BTCUSDT",
+  "candidate_position_side": "LONG",
+  "sized": {
+    "is_no_trade": false,
+    "quantity": "0.500",
+    "quantity_before_rounding": "0.500",
+    "quantity_after_rounding": "0.500",
+    "quantization_decision": "ACCEPTED",
+    "realized_risk": "10.00",
+    "reason_code": "OK"
+  },
+  "parameter_set": {
+    "cluster_cap": "100.00",
+    "max_aggregate_open_risk": "200.00",
+    "max_open_positions": 3,
+    "daily_loss_warning_threshold": "5.00",
+    "daily_loss_stop_threshold": "10.00"
+  }
+}

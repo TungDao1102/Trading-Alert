@@ -1,0 +1,10 @@
+{
+  "reason_code": "EXCHANGE_CONSTRAINT",
+  "is_no_trade": true,
+  "gate": "headroom",
+  "open_algo_count": 198,
+  "planned_leg_count": 3,
+  "headroom_limit": 200,
+  "headroom_margin": 0,
+  "adapter_place_calls": 0
+}
