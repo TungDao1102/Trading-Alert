@@ -1,0 +1,22 @@
+{
+  "case": "hedge_full_fill",
+  "symbol": "BTCUSDT",
+  "position_mode": "HEDGE",
+  "candidate_position_side": "LONG",
+  "filled_quantity": "0.500",
+  "protective_template": {
+    "stop_loss_trigger_price": "98.00",
+    "tp1_trigger_price": "106.00",
+    "tp2_trigger_price": "110.00",
+    "tp1_quantity_fraction": "0.5"
+  },
+  "constraint_snapshot": {
+    "symbol": "BTCUSDT",
+    "price_tick_size": "0.01",
+    "quantity_step_size": "0.001",
+    "min_quantity": "0.001",
+    "min_notional": "5.00",
+    "metadata_observed_at_utc": "2026-09-19T10:00:00+00:00"
+  },
+  "now_utc": "2026-09-19T10:30:00+00:00"
+}

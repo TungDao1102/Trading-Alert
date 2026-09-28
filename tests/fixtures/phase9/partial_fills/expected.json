@@ -1,0 +1,34 @@
+{
+  "case": "partial_fills_out_of_order_replayed",
+  "folded_position_view": {
+    "symbol": "BTCUSDT",
+    "position_side": "BOTH",
+    "position_amt": "0.500",
+    "filled_quantity": "0.500",
+    "fill_count": 3,
+    "fills": [
+      {
+        "order_id": "ord_001",
+        "exchange_trade_id": "trade_001",
+        "fill_price": "100.00",
+        "fill_quantity": "0.100",
+        "fill_time_utc": "2026-09-19T10:30:01+00:00"
+      },
+      {
+        "order_id": "ord_001",
+        "exchange_trade_id": "trade_002",
+        "fill_price": "100.50",
+        "fill_quantity": "0.200",
+        "fill_time_utc": "2026-09-19T10:30:05+00:00"
+      },
+      {
+        "order_id": "ord_001",
+        "exchange_trade_id": "trade_003",
+        "fill_price": "101.00",
+        "fill_quantity": "0.200",
+        "fill_time_utc": "2026-09-19T10:30:10+00:00"
+      }
+    ]
+  },
+  "divergences": []
+}

@@ -1,0 +1,38 @@
+{
+  "case": "hedge_full_fill",
+  "is_no_trade": false,
+  "reason_code": "OK",
+  "sl_leg": {
+    "side": "SELL",
+    "position_side": "LONG",
+    "algo_type": "CONDITIONAL",
+    "type": "STOP_MARKET",
+    "trigger_price": "98.00",
+    "close_position": true,
+    "quantity": null,
+    "reduce_only": null,
+    "working_type": "MARK_PRICE"
+  },
+  "tp1_leg": {
+    "side": "SELL",
+    "position_side": "LONG",
+    "algo_type": "CONDITIONAL",
+    "type": "TAKE_PROFIT_MARKET",
+    "trigger_price": "106.00",
+    "close_position": false,
+    "quantity": "0.250",
+    "reduce_only": null,
+    "working_type": "MARK_PRICE"
+  },
+  "tp2_leg": {
+    "side": "SELL",
+    "position_side": "LONG",
+    "algo_type": "CONDITIONAL",
+    "type": "TAKE_PROFIT_MARKET",
+    "trigger_price": "110.00",
+    "close_position": true,
+    "quantity": null,
+    "reduce_only": null,
+    "working_type": "MARK_PRICE"
+  }
+}
