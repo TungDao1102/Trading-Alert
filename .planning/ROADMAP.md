@@ -288,11 +288,14 @@ Plans:
   2. Live constraints are revalidated from exchangeInfo at placement time and DAILY_STOP is enforced against live state
   3. Live credentials use no-withdrawal keys with IP allowlisting, secrets live off-source, logs are structured and secret-free, and health checks are green — first orders only on smallest capital in the live-5 universe
 
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
 
-- [ ] 09-01: TBD (derived during plan-phase)
+- [ ] 09-01-PLAN.md — Tracer approved-plan to LIMIT entry plus one CONDITIONAL SL leg on fake adapter with deterministic IDs plus SDK re-verification and COVERAGE update (EXEC-01, D-01/D-05, one-way decision gate)
+- [ ] 09-02-PLAN.md — Mode-correct protective sizing to filled quantity plus idempotent fill folding, one-way and hedge branches (EXEC-01 TDD, D-02)
+- [ ] 09-03-PLAN.md — Placement-time revalidation plus headroom plus reconciled-state portfolio gates plus default-disabled enablement (EXEC-01 + OPS-02 TDD, D-03/D-04)
+- [ ] 09-04-PLAN.md — Health probes plus protective confirmation plus expiry wiring plus testnet rehearsal and credential/LIVE-TAP blocking checkpoints (EXEC-01 + OPS-02, D-04)
 
 ### Phase 10: Journal Depth + Kill-Gate Operations
 
