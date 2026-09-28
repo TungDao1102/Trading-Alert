@@ -1,0 +1,7 @@
+{
+  "plan_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+  "outcome_reason_code": "OK",
+  "method_sequence": ["place_entry", "place_algo_protective"],
+  "entry_client_order_id": "x-33333333333333333333333333333333EN",
+  "sl_algo_client_id": "xa-3333333333333333333333333333333SL"
+}
