@@ -195,6 +195,7 @@ async def execute_approved_plan(
     adapter: ExecutionAdapter,
     risk_kwargs: dict[str, Any],
     safe_mode_controller: Any,
+    journal: Any,
     enablement: Any | None = None,
     gate_kwargs: dict[str, Any] | None = None,
 ) -> ExecutionOutcome:
@@ -229,7 +230,11 @@ async def execute_approved_plan(
             minimum_risk_utilization_after_rounding, parameter_set).
         safe_mode_controller: Required `SafeModeController`-like object.
             An entry whose exchange state cannot be determined forces
-            SAFE_MODE (EXECUTION_SPEC §10 no-blind-recovery).
+            SAFE_MODE (EXECUTION_SPEC §10 no-blind-recovery), and an
+            acknowledged entry without a confirmed SL forces SAFE_MODE
+            (ENTRY_WITHOUT_PROTECTIVE).
+        journal: The journal layer (duck-typed `.record(event)`) used
+            for the journal-first cancel of an unprotected entry.
         enablement: Optional `LiveEnablementController` for the
             LIVE_ORDERS_DISABLED gate. When None, the gate is skipped
             (backtest/paper compatibility).
@@ -298,12 +303,10 @@ async def execute_approved_plan(
     constraint_snapshot = risk_kwargs["constraint_snapshot"]
     _require_live5_symbol(constraint_snapshot.symbol)
 
-    # Derive deterministic IDs from the plan hash.
+    # Derive the deterministic entry ID from the plan hash (the SL's `xa-`
+    # id is derived inside `_place_protective_leg`).
     entry_client_order_id = derive_client_order_id(
         plan_hash=trade_plan.plan_hash, role=OrderRole.ENTRY.value
-    )
-    sl_algo_client_id = derive_algo_client_id(
-        plan_hash=trade_plan.plan_hash, role=OrderRole.STOP_LOSS.value
     )
 
     # Derive placement prices (Decimal-only).
@@ -355,19 +358,51 @@ async def execute_approved_plan(
             is_no_trade=True, reason_code=RejectionReason.EXCHANGE_CONSTRAINT.value
         )
 
-    # Place the SL protective leg (CONDITIONAL, STOP_MARKET, close_position).
-    await adapter.place_algo_protective(
+    # Place the entry-time SL protective leg (CONDITIONAL, STOP_MARKET,
+    # close_position) — the pre-fill safety net. TP1/TP2 are sized to the
+    # ACTUAL filled quantity and attached by `attach_protectives_to_fill`
+    # once fills arrive; that path adopts this SL by its deterministic id
+    # instead of duplicating it (CR-04).
+    #
+    # 09-REVIEW CR-05: the SL result is CHECKED with the same
+    # query-first confirmation logic as attach. OK is returned only when
+    # both the entry identity and the SL are confirmed.
+    sl_confirmed, _sl_failure = await _place_protective_leg(
+        adapter=adapter,
         symbol=constraint_snapshot.symbol,
-        side=sl_side,
-        algo_type="CONDITIONAL",
-        type="STOP_MARKET",
-        position_side="BOTH",
-        trigger_price=sl_trigger_price,
-        close_position=True,
-        quantity=None,
-        working_type="MARK_PRICE",
-        client_algo_id=sl_algo_client_id,
+        plan_hash=trade_plan.plan_hash,
+        role=OrderRole.STOP_LOSS.value,
+        leg={
+            "side": sl_side,
+            "algo_type": "CONDITIONAL",
+            "type": "STOP_MARKET",
+            "position_side": "BOTH",
+            "trigger_price": sl_trigger_price,
+            "close_position": True,
+            "quantity": None,
+            "working_type": "MARK_PRICE",
+        },
     )
+    if not sl_confirmed:
+        # The entry was acknowledged (or found) but has no confirmed stop:
+        # block new entries FIRST, then cancel the entry by its
+        # deterministic id (journal-first). The cancel's own failure is
+        # journaled inside `expire_pending_entry` and must not mask the
+        # NO_TRADE outcome — SAFE_MODE is already in force and
+        # reconciliation resolves any residual exposure.
+        safe_mode_controller.enter_safe_mode(reason=_ENTRY_WITHOUT_PROTECTIVE, now_utc=now_utc)
+        try:
+            await expire_pending_entry(
+                plan_hash=trade_plan.plan_hash,
+                symbol=constraint_snapshot.symbol,
+                adapter=adapter,
+                journal=journal,
+                now_utc=now_utc,
+                trigger_reason="protective_unconfirmed",
+            )
+        except Exception:  # noqa: BLE001, S110 — journaled in expire_pending_entry
+            pass
+        return ExecutionOutcome(is_no_trade=True, reason_code=_ENTRY_WITHOUT_PROTECTIVE)
 
     return ExecutionOutcome(is_no_trade=False, reason_code="OK")
 
@@ -768,6 +803,9 @@ _EXPIRY_TRIGGERS: frozenset[str] = frozenset(
         "superseded_plan",
         "mode_change",
         "operator_close",
+        # 09-REVIEW CR-05: the entry was acknowledged but its entry-time
+        # SL could not be confirmed — the entry is canceled fail-closed.
+        "protective_unconfirmed",
     }
 )
 

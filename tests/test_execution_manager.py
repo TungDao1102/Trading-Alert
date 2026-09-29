@@ -113,6 +113,8 @@ class FakeExecutionAdapter:
         self.entry_exceptions: list[BaseException] = []
         self.query_exceptions: list[BaseException] = []
         self.query_responses: list[Any] = []
+        # Simulated exchange algo state (client_algo_id -> algo_status).
+        self.existing_algo_status: dict[str, str] = {}
 
     @staticmethod
     def _bind_real(method_name: str, kwargs: dict[str, Any]) -> None:
@@ -136,6 +138,24 @@ class FakeExecutionAdapter:
         self.calls.append({"method": "place_algo_protective", "kwargs": dict(kwargs)})
         return self._algo_response
 
+    async def query_algo_order_by_client(self, **kwargs: Any) -> Any:
+        from src.adapters.binance_usdm import AlgoOrderProbe
+
+        self._bind_real("query_algo_order_by_client", kwargs)
+        self.calls.append({"method": "query_algo_order_by_client", "kwargs": dict(kwargs)})
+        status = self.existing_algo_status.get(kwargs["client_algo_id"])
+        return AlgoOrderProbe(
+            client_algo_id=kwargs["client_algo_id"],
+            found=status is not None,
+            algo_status=status,
+            update_time_utc=None,
+        )
+
+    async def cancel_normal_order(self, **kwargs: Any) -> Any:
+        self._bind_real("cancel_normal_order", kwargs)
+        self.calls.append({"method": "cancel_normal_order", "kwargs": dict(kwargs)})
+        return None
+
     async def query_order_by_client(self, **kwargs: Any) -> Any:
         self._bind_real("query_order_by_client", kwargs)
         self.calls.append({"method": "query_order_by_client", "kwargs": dict(kwargs)})
@@ -148,6 +168,16 @@ class FakeExecutionAdapter:
     async def get_position_mode(self) -> str:
         self.calls.append({"method": "get_position_mode", "kwargs": {}})
         return self._position_mode
+
+
+class FakeJournal:
+    """In-memory journal recording every event."""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    def record(self, event: Any) -> None:
+        self.events.append(event)
 
 
 class RecordingSafeModeController:
@@ -175,7 +205,10 @@ def _live_wiring(**overrides: Any) -> dict[str, Any]:
     09-REVIEW CR-07/CR-09: SAFE_MODE (and the other live gates) are
     required arguments — tests wire recording doubles explicitly.
     """
-    wiring: dict[str, Any] = {"safe_mode_controller": RecordingSafeModeController()}
+    wiring: dict[str, Any] = {
+        "safe_mode_controller": RecordingSafeModeController(),
+        "journal": FakeJournal(),
+    }
     wiring.update(overrides)
     return wiring
 
@@ -366,7 +399,7 @@ async def test_happy_path_places_one_entry_and_one_sl_leg() -> None:
     assert outcome.is_no_trade is False, f"expected PASS, got NO_TRADE: {outcome.reason_code}"
     assert outcome.reason_code == expected["outcome_reason_code"]
 
-    # Exactly 2 adapter calls: 1 entry + 1 SL.
+    # 1 entry + SL probe-by-id (CR-04/CR-05) + 1 SL placement.
     method_sequence = [c["method"] for c in adapter.calls]
     assert method_sequence == expected["method_sequence"], (
         f"adapter call sequence mismatch: got {method_sequence}, "
@@ -391,7 +424,7 @@ async def test_happy_path_places_one_entry_and_one_sl_leg() -> None:
     assert entry_kwargs["new_client_order_id"] == expected["entry_client_order_id"]
 
     # SL call: CONDITIONAL, STOP_MARKET, close_position True, xa- SL id.
-    sl_call = adapter.calls[1]
+    sl_call = next(c for c in adapter.calls if c["method"] == "place_algo_protective")
     assert sl_call["method"] == "place_algo_protective"
     sl_kwargs = sl_call["kwargs"]
     assert sl_kwargs["symbol"] == case_input["symbol"]
@@ -615,6 +648,7 @@ async def test_definitive_absence_allows_exactly_one_retry() -> None:
         "place_entry",
         "query_order_by_client",
         "place_entry",
+        "query_algo_order_by_client",
         "place_algo_protective",
     ]
 
@@ -738,7 +772,7 @@ async def test_golden_fixture_adapter_call_sequence_matches_expected() -> None:
     assert entry_call["kwargs"]["new_client_order_id"] == expected["entry_client_order_id"]
 
     # SL algo_client_id matches the deterministic derivation.
-    sl_call = adapter.calls[1]
+    sl_call = next(c for c in adapter.calls if c["method"] == "place_algo_protective")
     assert sl_call["kwargs"]["client_algo_id"] == expected["sl_algo_client_id"]
 
 
@@ -804,3 +838,56 @@ def test_execution_core_has_no_float_in_placement_math() -> None:
         # float() is only allowed at the adapter boundary, not in core.
         match = re.search(r"\bfloat\s*\(", source)
         assert match is None, f"float() found in {module_path}: {match.group(0)!r}"
+
+
+# --------------------------------------------------------------------------- #
+# 09-REVIEW CR-05 — the entry-time SL result is checked; failure fails closed.
+# --------------------------------------------------------------------------- #
+
+
+async def test_rejected_sl_cancels_entry_and_forces_safe_mode() -> None:
+    """CR-05: an acknowledged entry whose SL is REJECTED is not OK — the
+    entry is canceled by its deterministic id (journal-first), SAFE_MODE
+    is entered, and the outcome is ENTRY_WITHOUT_PROTECTIVE."""
+    adapter = FakeExecutionAdapter(algo_response={"algo_status": "REJECTED"})
+    safe_mode_controller = RecordingSafeModeController()
+    journal = FakeJournal()
+
+    outcome = await _run_plan(
+        adapter, safe_mode_controller=safe_mode_controller, journal=journal
+    )
+
+    assert outcome.is_no_trade is True
+    assert outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
+    assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
+    cancel_calls = [c for c in adapter.calls if c["method"] == "cancel_normal_order"]
+    assert cancel_calls == [
+        {
+            "method": "cancel_normal_order",
+            "kwargs": {
+                "symbol": "BTCUSDT",
+                "orig_client_order_id": "x-33333333333333333333333333333333EN",
+            },
+        }
+    ]
+    phases = [json.loads(e.payload_json)["phase"] for e in journal.events]
+    assert phases == ["pre_cancel", "post_cancel"]
+
+
+async def test_raising_sl_after_entry_ack_fails_closed() -> None:
+    """CR-05: an SL placement EXCEPTION after the entry was acknowledged
+    never escapes with a resting, unprotected entry on the book."""
+
+    class _SlRaises(FakeExecutionAdapter):
+        async def place_algo_protective(self, **kwargs: Any) -> Any:
+            await super().place_algo_protective(**kwargs)
+            raise TimeoutError("SL placement timeout")
+
+    adapter = _SlRaises()
+    safe_mode_controller = RecordingSafeModeController()
+
+    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode_controller)
+
+    assert outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
+    assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
+    assert [c["method"] for c in adapter.calls][-1] == "cancel_normal_order"
