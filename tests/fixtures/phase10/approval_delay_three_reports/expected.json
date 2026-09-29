@@ -24,6 +24,6 @@
     },
     "synthetic_lag_seconds": 30,
     "synthetic_lag_label": "SYNTHETIC LAG (APPROVAL_DELAY_LAG_SECONDS=30)",
-    "section_digest": "PIN-AFTER-GREEN"
+    "section_digest": "d2b9f37e0c178d4b0b3a7c2fb92b44884721cf5ca98c85b122ed55cfabf94b87"
   }
 }
