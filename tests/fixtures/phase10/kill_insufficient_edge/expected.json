@@ -1,0 +1,24 @@
+{
+  "state": "INSUFFICIENT_EDGE",
+  "families_tested": 3,
+  "families_budget_met": true,
+  "months_budget_met": true,
+  "whole_months": 6,
+  "extra_days": 13,
+  "months_elapsed": "6.4333",
+  "earliest_terminal_utc": "2027-03-19T00:00:00+00:00",
+  "any_pass": false,
+  "pass_count": 0,
+  "sticky": false,
+  "independent_family_ids": [
+    "breakout-retest",
+    "range-mr",
+    "trend-pullback"
+  ],
+  "non_independent_family_ids": [],
+  "decision_refs": [
+    "DEC-2026-11-fail-breakout-retest",
+    "DEC-2026-11-fail-range-mr",
+    "DEC-2026-11-fail-trend-pullback"
+  ]
+}

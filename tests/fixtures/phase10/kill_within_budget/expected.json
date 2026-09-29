@@ -1,0 +1,21 @@
+{
+  "state": "WITHIN_BUDGET",
+  "families_tested": 2,
+  "families_budget_met": false,
+  "months_budget_met": true,
+  "whole_months": 6,
+  "extra_days": 13,
+  "any_pass": false,
+  "pass_count": 0,
+  "sticky": false,
+  "independent_family_ids": [
+    "breakout-retest",
+    "range-mr",
+    "trend-pullback"
+  ],
+  "non_independent_family_ids": [],
+  "decision_refs": [
+    "DEC-2026-11-fail-breakout-retest",
+    "DEC-2026-11-fail-trend-pullback"
+  ]
+}
