@@ -76,6 +76,7 @@ def test_tracer_core_metrics_and_symbol_slice() -> None:
         assert row.n_r_valued == want_row["n_r_valued"], row.key
         assert row.low_n is want_row["low_n"], row.key
     assert HEX64.match(section.digest())
+    assert table.digest() == sym["digest"]
 
 
 def test_tracer_all_row_equals_core_metrics_field_by_field() -> None:

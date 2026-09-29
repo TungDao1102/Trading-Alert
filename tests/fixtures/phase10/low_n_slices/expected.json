@@ -15,6 +15,8 @@
       "interval_absent": false
     },
     "symbol_table": {
+      "digest": "be9a776bc93519d2a2ded04881edf7b0e2c7cbff258c9fd4f6526c399d609d1d",
+      "digest_params": "base_seed=20260929 resamples=100 evidence=BACKTEST",
       "slice_count": 3,
       "total_n": 7,
       "rows": [
