@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 10
 current_phase_name: Journal Depth + Kill-Gate Operations
-status: executing
-stopped_at: Completed 10-11-PLAN.md
-last_updated: "2026-09-29T08:24:01.483Z"
+status: verifying
+stopped_at: Completed 10-12-PLAN.md
+last_updated: "2026-09-29T08:42:56.000Z"
 last_activity: 2026-09-29
 last_activity_desc: Phase 10 execution started
-state_head: 504abaf5d10aaafb478fce2297445ed1e6050fd1
+state_head: 9562bb498bec85eca51f5905e668eabb82860850
 progress:
   total_phases: 11
   completed_phases: 9
   total_plans: 50
-  completed_plans: 48
+  completed_plans: 49
 milestone_name: milestone
 ---
 
@@ -32,7 +32,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 Phase: 10 (Journal Depth + Kill-Gate Operations) — EXECUTING
 Plan: 12 of 12
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-09-29 — Phase 10 execution started
 
 Progress: [██████████] 100%
@@ -87,6 +87,7 @@ Progress: [██████████] 100%
 | Phase 10 P09 | 13 min | 3 tasks | 7 files |
 | Phase 10 P10 | 14 min | 2 tasks | 6 files |
 | Phase 10 P11 | 35 min | 3 tasks | 7 files |
+| Phase 10 P12 | 13 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -231,6 +232,9 @@ Recent decisions affecting current work:
 - [Phase 10]: 10-11: Live-5 line built from sorted LIVE5_SYMBOLS (single source) instead of a second hard-coded order
 - [Phase 10]: 10-11: verify_render recomputes the report digest only when given the report; without it it checks the Markdown SHA-256 and header/sidecar digest agreement
 - [Phase 10]: 10-11: Telegram pointer is a formatter only; no send wired (notify Protocol is inline-keyboard only, plain-text send deferred per D-04)
+- [Phase 10]: 10-12: report CLI is read-only by construction; the only write is one guarded, idempotent KILL_GATE_EVALUATION append via --record after both files exist — D-03/D-05: journal append stays an explicit separate step; ON CONFLICT DO NOTHING on the content-hash id makes replays no-ops
+- [Phase 10]: 10-12: database failures surface as exception type names only; DATABASE_URL is read once and passed only to the session factory — RESEARCH V7: no credential or request text in stdout, stderr, reports or sidecars
+- [Phase 10]: 10-12: CLI runs asyncio on SelectorEventLoop on Windows and disposes the engine per run — psycopg async cannot use the Proactor loop; read and record use separate asyncio.run calls
 
 ### Pending Todos
 
@@ -266,6 +270,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-29T08:24:01.298Z
-Stopped at: Completed 10-11-PLAN.md
+Last session: 2026-09-29T08:42:38.553Z
+Stopped at: Completed 10-12-PLAN.md
 Resume file: None

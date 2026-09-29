@@ -62,10 +62,10 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 ### Journal & Operations
 
-- [ ] **JRN-01**: Journal/analytics reports MFE/MAE, execution-quality latencies, approval-delay impact, and robustness slices without hiding the full report
+- [x] **JRN-01**: Journal/analytics reports MFE/MAE, execution-quality latencies, approval-delay impact, and robustness slices without hiding the full report
 - [x] **OPS-01**: SAFE_MODE blocks new entries while monitoring continues, and the RUNBOOK (unprotected/orphan/duplicate/API-down/stale-feed/DB-failure/manual-close/restore) is rehearsed before live enablement
 - [ ] **OPS-02**: Live credentials use no-withdrawal keys, IP allowlisting, off-source secret storage, and structured secret-free logging with health checks
-- [ ] **GOV-01**: Kill-gate dashboard tracks the 3-families / 6-months budget and preserves NO_TRADE / INSUFFICIENT EDGE as a valid terminal outcome
+- [x] **GOV-01**: Kill-gate dashboard tracks the 3-families / 6-months budget and preserves NO_TRADE / INSUFFICIENT EDGE as a valid terminal outcome
 
 ## v2 Requirements
 
@@ -127,10 +127,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | EXEC-01 | Phase 9 | Pending |
 | EXEC-02 | Phase 8 | Pending |
 | EXEC-03 | Phase 8 | Pending |
-| JRN-01 | Phase 10 | Pending |
+| JRN-01 | Phase 10 | Complete |
 | OPS-01 | Phase 8 | Complete |
 | OPS-02 | Phase 9 | Pending |
-| GOV-01 | Phase 10 | Pending |
+| GOV-01 | Phase 10 | Complete |
 
 **Coverage:**
 
