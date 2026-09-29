@@ -1,0 +1,7 @@
+{
+  "description": "Composite report pins. report_digest is added after the numeric assertions pass (GREEN).",
+  "evidence_kinds": ["BACKTEST", "PAPER", "LIVE"],
+  "backtest_core_n": 2,
+  "backtest_mean_r": "0.8",
+  "paper_no_trade_total": 2
+}
