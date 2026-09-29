@@ -33,6 +33,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 PHASE9_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase9"
 ATTACH_FIXTURES_DIR = PHASE9_FIXTURES_DIR / "attach"
 
@@ -78,6 +80,33 @@ def _build_current_position_view(case_input: dict[str, Any]) -> Any:
         position_side=cpv["position_side"],
         position_amt=_coerce_decimal(cpv["position_amt"], "position_amt"),
     )
+
+
+def _build_fill_events(case_input: dict[str, Any]) -> list[Any]:
+    """Build `FillEvent` objects from the fixture's fill_events list.
+
+    `fold_fills` only sums `fill_quantity` when it is a `Decimal`
+    instance (D-12 boundary discipline) — raw JSON dicts carry string
+    values, so the fixture must be converted through `FillEvent`
+    (mirrors `tests/test_execution_partials.py:_build_fill_events`).
+    """
+    from src.execution.fill_monitor import FillEvent
+
+    events: list[Any] = []
+    for fe in case_input["fill_events"]:
+        events.append(
+            FillEvent(
+                order_id=fe["order_id"],
+                exchange_trade_id=fe["exchange_trade_id"],
+                symbol=fe["symbol"],
+                side=fe["side"],
+                position_side=fe["position_side"],
+                fill_price=_coerce_decimal(fe["fill_price"], "fill_price"),
+                fill_quantity=_coerce_decimal(fe["fill_quantity"], "fill_quantity"),
+                fill_time_utc=_parse_utc(fe["fill_time_utc"]),
+            )
+        )
+    return events
 
 
 def _build_protective_template(case_input: dict[str, Any]) -> Any:
@@ -156,7 +185,7 @@ def test_partial_fill_replayed_fills_fold_and_attach_once() -> None:
 
     outcome = asyncio.run(
         attach_protectives_to_fill(
-            fill_events=case_input["fill_events"],
+            fill_events=_build_fill_events(case_input),
             current_position_view=current_view,
             has_protective=False,
             protective_template=protective_template,
@@ -218,7 +247,9 @@ def test_unconfirmed_sl_leg_yields_entry_without_protective_with_zero_rescue() -
     case_input = _load_input()
     expected = _load_expected()
 
-    adapter = FakeExecutionAdapter(reject_client_algo_ids=frozenset({expected["sl_algo_client_id"]}))
+    adapter = FakeExecutionAdapter(
+        reject_client_algo_ids=frozenset({expected["sl_algo_client_id"]})
+    )
     current_view = _build_current_position_view(case_input)
     protective_template = _build_protective_template(case_input)
     constraint_snapshot = _build_constraint_snapshot(case_input)
@@ -234,7 +265,7 @@ def test_unconfirmed_sl_leg_yields_entry_without_protective_with_zero_rescue() -
 
     outcome = asyncio.run(
         attach_protectives_to_fill(
-            fill_events=case_input["fill_events"],
+            fill_events=_build_fill_events(case_input),
             current_position_view=current_view,
             has_protective=False,
             protective_template=protective_template,
@@ -272,8 +303,6 @@ def test_non_live5_symbol_raises_before_any_adapter_call() -> None:
     """Beh. 3: a non-live-5 symbol raises ValueError before any
     adapter call.
     """
-    import pytest
-
     from src.execution.manager import attach_protectives_to_fill
 
     case_input = _load_input()
@@ -296,7 +325,7 @@ def test_non_live5_symbol_raises_before_any_adapter_call() -> None:
     with pytest.raises(ValueError, match="live-5"):
         asyncio.run(
             attach_protectives_to_fill(
-                fill_events=case_input["fill_events"],
+                fill_events=_build_fill_events(case_input),
                 current_position_view=current_view,
                 has_protective=False,
                 protective_template=protective_template,
