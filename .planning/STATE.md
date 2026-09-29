@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 10
 current_phase_name: Journal Depth + Kill-Gate Operations
 status: executing
-stopped_at: Completed 10-01-PLAN.md
-last_updated: "2026-09-29T06:11:05.650Z"
+stopped_at: Completed 10-02-PLAN.md
+last_updated: "2026-09-29T06:15:26.069Z"
 last_activity: 2026-09-29
 last_activity_desc: Phase 10 execution started
-state_head: cca560934c6d0fe77f358f56225de3468662682c
+state_head: f85f4b58774073fb9781d964d6e1037d360b6015
 progress:
   total_phases: 11
   completed_phases: 9
   total_plans: 50
-  completed_plans: 38
+  completed_plans: 39
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 10 (Journal Depth + Kill-Gate Operations) — EXECUTING
-Plan: 2 of 12
+Plan: 3 of 12
 Status: Ready to execute
 Last activity: 2026-09-29 — Phase 10 execution started
 
@@ -77,6 +77,7 @@ Progress: [██████████] 100%
 | Phase 8 P05 | ~15 min | 2 tasks | 4 files |
 | Phase 09 P04 | ~50min | 2 tasks | 11 files |
 | Phase 10 P01 | 18min | 3 tasks | 23 files |
+| Phase 10 P02 | 12 min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -203,6 +204,8 @@ Recent decisions affecting current work:
 - [Phase 10]: Estimate carries n and n_valued; interval_absent is an explicit marker when n_valued < 2, otherwise a seeded Phase-6 stationary-block-bootstrap interval
 - [Phase 10]: ExcursionSection seed ordinals: measures 0-6 in EXCURSION_MEASURES order, diagnostics 7-9; per_trade sorted by trade_id, bootstrap input in (exit_time, trade_id) order
 - [Phase 10]: Analytics reuses Phase-6 private report helpers intentionally (RESEARCH P7), guarded by fixture digests; time arithmetic uses integer microseconds, never total_seconds
+- [Phase 10]: D030: D013 firing rule (>=3 independently specified families AND >=6 calendar months since freeze AND none passing) recorded as new decision + protocol v1.0.1 clarification; Status/Frozen-on/D029 untouched; amendment class flagged for user confirmation
+- [Phase 10]: KillGateState (WITHIN_BUDGET, PASSING_CANDIDATE, INSUFFICIENT_EDGE) lives in src/domain/enums.py, GLOSSARY 8.2 canonical
 
 ### Pending Todos
 
@@ -238,6 +241,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-29T06:11:05.515Z
-Stopped at: Completed 10-01-PLAN.md
+Last session: 2026-09-29T06:15:25.093Z
+Stopped at: Completed 10-02-PLAN.md
 Resume file: None
