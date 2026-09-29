@@ -82,7 +82,7 @@ class ExecutionAdapter(Protocol):
 
     async def query_algo_order_by_client(self, *, client_algo_id: str) -> Any: ...
 
-    async def get_position_mode(self) -> str: ...
+    async def get_position_mode(self) -> Any: ...
 
     async def cancel_normal_order(self, *, symbol: str, orig_client_order_id: str) -> Any: ...
 
@@ -118,6 +118,30 @@ class ExecutionOutcome:
                     f"ExecutionOutcome: is_no_trade=False requires reason_code='OK', "
                     f"got {self.reason_code!r}"
                 )
+
+
+# --------------------------------------------------------------------------- #
+# Position-mode mapping (09-REVIEW WR-02).
+# --------------------------------------------------------------------------- #
+
+POSITION_MODE_ONE_WAY = "ONE_WAY"
+POSITION_MODE_HEDGE = "HEDGE"
+
+
+def resolve_position_mode(result: Any) -> str:
+    """Map the adapter's `PositionModeResult` to "ONE_WAY" / "HEDGE".
+
+    The single mapping point between the adapter's
+    `dual_side_position: bool` (True = hedge) and the execution core's
+    mode vocabulary. Anything that is not a literal bool raises — an
+    unknown account mode must never be guessed.
+    """
+    dual_side_position = _get_attr_or_key(result, "dual_side_position")
+    if not isinstance(dual_side_position, bool):
+        raise ValueError(
+            f"resolve_position_mode: dual_side_position must be bool, got {dual_side_position!r}"
+        )
+    return POSITION_MODE_HEDGE if dual_side_position else POSITION_MODE_ONE_WAY
 
 
 # --------------------------------------------------------------------------- #
@@ -426,6 +450,18 @@ async def execute_approved_plan(
     entry_side = "BUY" if candidate_side == "LONG" else "SELL"
     sl_side = "SELL" if candidate_side == "LONG" else "BUY"
 
+    # 09-REVIEW WR-02: position mode is re-detected at placement time
+    # (D-02) — never assumed. One-way sends positionSide=BOTH; hedge mode
+    # requires LONG/SHORT on the entry AND every protective leg. An
+    # undeterminable mode fails closed before any order.
+    try:
+        position_mode = resolve_position_mode(await adapter.get_position_mode())
+    except Exception:  # noqa: BLE001 — unknown account mode → no order
+        return ExecutionOutcome(
+            is_no_trade=True, reason_code=RejectionReason.UNCERTAIN_ACCOUNT_STATE.value
+        )
+    order_position_side = "BOTH" if position_mode == POSITION_MODE_ONE_WAY else candidate_side
+
     # Place the entry (LIMIT, GTC).
     # 09-REVIEW CR-06: every adapter call is awaited on the caller's
     # running event loop (python-telegram-bot / FastAPI). No nested
@@ -436,7 +472,7 @@ async def execute_approved_plan(
         entry_kwargs={
             "symbol": constraint_snapshot.symbol,
             "side": entry_side,
-            "position_side": "BOTH",  # one-way mode (09-01 tracer scope)
+            "position_side": order_position_side,
             "time_in_force": "GTC",
             "quantity": quantity,
             "price": limit_price,
@@ -476,7 +512,7 @@ async def execute_approved_plan(
             "side": sl_side,
             "algo_type": "CONDITIONAL",
             "type": "STOP_MARKET",
-            "position_side": "BOTH",
+            "position_side": order_position_side,
             "trigger_price": sl_trigger_price,
             "close_position": True,
             "quantity": None,
@@ -775,7 +811,9 @@ async def attach_protectives_to_fill(
             before this fold (forwarded to `fold_fills`).
         protective_template: The protective levels + TP1 split.
         constraint_snapshot: The exchangeInfo-derived constraints.
-        position_mode: "ONE_WAY" or "HEDGE".
+        position_mode: "ONE_WAY" or "HEDGE" — derive it from a fresh
+            `adapter.get_position_mode()` via `resolve_position_mode`
+            (the single PositionModeResult mapping point).
         candidate_position_side: "LONG" or "SHORT".
         plan_hash: The 64-char SHA-256 plan hash (deterministic ID
             derivation).
@@ -1240,6 +1278,9 @@ async def emergency_manual_close(
 
 
 __all__ = [
+    "POSITION_MODE_HEDGE",
+    "POSITION_MODE_ONE_WAY",
+    "resolve_position_mode",
     "ExecutionAdapter",
     "ExecutionOutcome",
     "execute_approved_plan",

@@ -165,9 +165,14 @@ class FakeExecutionAdapter:
             return self.query_responses.pop(0)
         return self._query_response
 
-    async def get_position_mode(self) -> str:
+    async def get_position_mode(self) -> Any:
+        from src.adapters.binance_usdm import PositionModeResult
+
         self.calls.append({"method": "get_position_mode", "kwargs": {}})
-        return self._position_mode
+        if self._position_mode not in ("ONE_WAY", "HEDGE"):
+            raise RuntimeError("position mode unavailable")
+        # The REAL adapter returns a PositionModeResult, not a string.
+        return PositionModeResult(dual_side_position=self._position_mode == "HEDGE")
 
 
 class FakeJournal:
@@ -443,8 +448,7 @@ async def test_happy_path_places_one_entry_and_one_sl_leg() -> None:
     )
 
     # Entry call: LIMIT, GTC, x- EN id, quantized qty, zone-mid price.
-    entry_call = adapter.calls[0]
-    assert entry_call["method"] == "place_entry"
+    entry_call = next(c for c in adapter.calls if c["method"] == "place_entry")
     entry_kwargs = entry_call["kwargs"]
     assert entry_kwargs["symbol"] == case_input["symbol"]
     assert entry_kwargs["side"] == case_input["side"]
@@ -681,6 +685,7 @@ async def test_definitive_absence_allows_exactly_one_retry() -> None:
 
     assert outcome.is_no_trade is False
     assert [c["method"] for c in adapter.calls] == [
+        "get_position_mode",
         "place_entry",
         "query_order_by_client",
         "place_entry",
@@ -701,7 +706,11 @@ async def test_probe_failure_fails_closed_to_safe_mode_without_retry_or_sl() -> 
 
     assert outcome.is_no_trade is True
     assert outcome.reason_code == "RECONCILIATION_REQUIRED"
-    assert [c["method"] for c in adapter.calls] == ["place_entry", "query_order_by_client"]
+    assert [c["method"] for c in adapter.calls] == [
+        "get_position_mode",
+        "place_entry",
+        "query_order_by_client",
+    ]
     assert safe_mode_controller.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
 
 
@@ -804,7 +813,7 @@ async def test_golden_fixture_adapter_call_sequence_matches_expected() -> None:
     assert method_sequence == expected["method_sequence"]
 
     # Entry client_order_id matches the deterministic derivation.
-    entry_call = adapter.calls[0]
+    entry_call = next(c for c in adapter.calls if c["method"] == "place_entry")
     assert entry_call["kwargs"]["new_client_order_id"] == expected["entry_client_order_id"]
 
     # SL algo_client_id matches the deterministic derivation.
@@ -1120,3 +1129,43 @@ async def test_odd_tick_zone_mid_is_floored_for_a_buy_limit() -> None:
     assert outcome.is_no_trade is False, outcome
     entry_call = next(c for c in adapter.calls if c["method"] == "place_entry")
     assert entry_call["kwargs"]["price"] == Decimal("100.01")
+
+
+# --------------------------------------------------------------------------- #
+# 09-REVIEW WR-02 — position mode is detected at placement time.
+# --------------------------------------------------------------------------- #
+
+
+async def test_hedge_mode_sends_explicit_position_side_on_entry_and_sl() -> None:
+    """WR-02: hedge accounts need positionSide LONG/SHORT everywhere."""
+    adapter = FakeExecutionAdapter(position_mode="HEDGE")
+    outcome = await _run_plan(adapter)
+
+    assert outcome.is_no_trade is False
+    assert adapter.calls[0]["method"] == "get_position_mode"
+    entry = next(c for c in adapter.calls if c["method"] == "place_entry")
+    sl = next(c for c in adapter.calls if c["method"] == "place_algo_protective")
+    assert entry["kwargs"]["position_side"] == "LONG"
+    assert sl["kwargs"]["position_side"] == "LONG"
+
+
+async def test_undeterminable_position_mode_fails_closed_before_any_order() -> None:
+    """WR-02: an account-mode query failure never defaults to BOTH."""
+    adapter = FakeExecutionAdapter(position_mode="UNKNOWN")
+    outcome = await _run_plan(adapter)
+
+    assert outcome.is_no_trade is True
+    assert outcome.reason_code == "UNCERTAIN_ACCOUNT_STATE"
+    assert [c["method"] for c in adapter.calls] == ["get_position_mode"]
+
+
+def test_resolve_position_mode_maps_only_real_bools() -> None:
+    import pytest
+    from src.adapters.binance_usdm import PositionModeResult
+    from src.execution.manager import resolve_position_mode
+
+    assert resolve_position_mode(PositionModeResult(dual_side_position=True)) == "HEDGE"
+    assert resolve_position_mode(PositionModeResult(dual_side_position=False)) == "ONE_WAY"
+    for bad in ("ONE_WAY", None, {"dual_side_position": "true"}):
+        with pytest.raises(ValueError):
+            resolve_position_mode(bad)
