@@ -9,7 +9,13 @@ whitespace; the caller writes it with `newline="\\n"`.
 
 from __future__ import annotations
 
-from src.analytics.render_common import SECTION_TITLES, TRUNCATION_MARKER, RenderError
+from src.analytics.render_common import (
+    DISPLAY_TZ_NAME,
+    SECTION_TITLES,
+    TRUNCATION_MARKER,
+    RenderError,
+    md_cell,
+)
 from src.analytics.render_killgate import (
     render_header,
     render_section_evidence_overview,
@@ -27,9 +33,16 @@ from src.analytics.render_metrics import (
 )
 from src.analytics.report import JournalDepthReport
 
-__all__ = ["REPORT_TITLE", "SECTION_TITLES", "render_markdown"]
+__all__ = [
+    "REPORT_TITLE",
+    "SECTION_TITLES",
+    "render_markdown",
+    "render_telegram_pointer",
+    "report_file_stem",
+]
 
 REPORT_TITLE = "Journal Depth + Kill-Gate Report"
+_STEM_DIGEST_CHARS = 12
 
 
 def _check_byte_rules(text: str) -> None:
@@ -72,3 +85,29 @@ def render_markdown(report: JournalDepthReport) -> str:
     text = "\n".join(lines) + "\n"
     _check_byte_rules(text)
     return text
+
+
+def report_file_stem(report: JournalDepthReport) -> str:
+    """`journal-depth-<YYYYMMDDTHHMMSSZ>-<digest12>` from the injected as-of and the digest."""
+    moment = report.as_of_utc
+    compact = (
+        f"{moment.year:04d}{moment.month:02d}{moment.day:02d}"
+        f"T{moment.hour:02d}{moment.minute:02d}{moment.second:02d}Z"
+    )
+    return f"journal-depth-{compact}-{report.digest()[:_STEM_DIGEST_CHARS]}"
+
+
+def render_telegram_pointer(report: JournalDepthReport, file_name: str) -> str:
+    """Plain-text pointer to a generated report. Formatter only: no send is wired to it.
+
+    The text names the kill-gate state, a digest prefix and the file name, and says it is not a
+    decision or approval. It carries no buttons, callback data or approval wording, so it can
+    never act as a decision surface. The existing notify Protocol only sends inline-keyboard
+    messages, so a plain-text send needs a new adapter helper, which is deferred (D-04).
+    """
+    return (
+        f"Journal depth report ready. Kill gate: {report.kill_gate.verdict.state.value}. "
+        f"Digest {report.digest()[:_STEM_DIGEST_CHARS]}. File: {md_cell(file_name)}. "
+        "Open the report to read it; this message is not a decision or approval.\n"
+        f"Display: {DISPLAY_TZ_NAME} (UTC internally)"
+    )

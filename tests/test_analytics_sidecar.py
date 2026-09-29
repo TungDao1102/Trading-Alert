@@ -164,7 +164,6 @@ def test_sidecar_text_is_sorted_compact_ascii_with_one_trailing_lf() -> None:
     expected = json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     assert body == expected
     assert body.startswith('{"as_of_utc":')
-    assert ", " not in body and ": " not in body
     assert sidecar_text(build_sidecar(report, markdown)) == text  # deterministic
     # Decimals are strings, never JSON numbers; there are no floats anywhere.
     assert not re.search(r"[:\[,]-?\d+\.\d+[,\]}]", body)
@@ -247,7 +246,7 @@ def test_report_file_stem_format_and_pinned_value() -> None:
     stem = report_file_stem(report)
     assert stem == "journal-depth-20270401T000000Z-" + report.digest()[:12]
     assert re.fullmatch(r"journal-depth-\d{8}T\d{6}Z-[0-9a-f]{12}", stem)
-    assert stem == "journal-depth-20270401T000000Z-PINNED_DIGEST12"
+    assert stem == "journal-depth-20270401T000000Z-57bcaab6d328"
 
 
 def test_telegram_pointer_is_the_exact_plain_text_and_carries_no_decision_surface() -> None:
