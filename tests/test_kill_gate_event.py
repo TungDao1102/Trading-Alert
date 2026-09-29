@@ -19,8 +19,8 @@ from src.analytics.killgate import (
     record_kill_gate_evaluation,
 )
 
-from tests.phase10_helpers import load_expected, parse_utc
-from tests.test_kill_gate_state import evaluate_case
+from tests.phase10_helpers import load_expected, load_input, parse_utc
+from tests.test_kill_gate_state import evaluate_at, evaluate_case
 
 PAYLOAD_KEYS = frozenset(
     {
@@ -139,3 +139,56 @@ def test_tracer_within_budget_event_key_set_is_constant() -> None:
     assert payload["families_tested"] == 2
     assert payload["families_budget_met"] is False
     assert event.occurred_at_utc == parse_utc("2027-04-01T00:00:00+00:00")
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: every fixture verdict yields a constant-key, secret-free, pinned event.
+# --------------------------------------------------------------------------- #
+
+ALL_CASES = (
+    "kill_within_budget",
+    "kill_passing_candidate",
+    "kill_insufficient_edge",
+    "kill_clock_boundary",
+)
+FORBIDDEN_SUBSTRINGS = ("key", "secret", "token", "signature")
+
+
+def test_payload_is_secret_free_for_every_fixture_verdict() -> None:
+    for case in ALL_CASES:
+        event = build_kill_gate_event(evaluate_case(case))
+        lowered = event.payload_json.lower()
+        for forbidden in FORBIDDEN_SUBSTRINGS:
+            assert forbidden not in lowered, (case, forbidden)
+        assert set(json.loads(event.payload_json)) == PAYLOAD_KEYS, case
+        for text_field in ("traceback", "exception", "error"):
+            assert text_field not in lowered, (case, text_field)
+
+
+def test_passing_candidate_event_pins_digests_and_carries_the_pass_reference() -> None:
+    verdict = evaluate_case("kill_passing_candidate")
+    event = build_kill_gate_event(verdict)
+    expected = load_expected("kill_passing_candidate")
+    payload = json.loads(event.payload_json)
+    assert payload["state"] == "PASSING_CANDIDATE"
+    assert payload["pass_count"] == 1
+    assert "DEC-2026-11-pass-breakout-retest" in payload["decision_refs"]
+    assert verdict.evidence_digest == expected["evidence_digest"]
+    assert verdict.digest() == expected["verdict_digest"]
+    assert event.journal_event_id == expected["journal_event_id"]
+
+
+def test_boundary_events_are_distinct_and_pinned() -> None:
+    expected = load_expected("kill_clock_boundary")
+    data = load_input("kill_clock_boundary")
+    before = build_kill_gate_event(
+        evaluate_at("kill_clock_boundary", data["evaluated_at_utc_before"])
+    )
+    at = build_kill_gate_event(evaluate_case("kill_clock_boundary"))
+    assert before.journal_event_id != at.journal_event_id
+    assert before.journal_event_id == expected["before"]["journal_event_id"]
+    assert at.journal_event_id == expected["at"]["journal_event_id"]
+    assert json.loads(before.payload_json)["state"] == "WITHIN_BUDGET"
+    assert json.loads(at.payload_json)["state"] == "INSUFFICIENT_EDGE"
+    assert before.occurred_at_utc == parse_utc("2027-03-18T23:59:59+00:00")
+    assert at.occurred_at_utc == parse_utc("2027-03-19T00:00:00+00:00")

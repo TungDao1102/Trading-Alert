@@ -1,0 +1,99 @@
+{
+  "clock": {
+    "start_utc": "2026-09-19T00:00:00+00:00",
+    "source": "docs/research/RESEARCH_PROTOCOL.md header: Frozen on",
+    "freeze_commit": "281ccd0894ea35717cc741788b6133cfb202af82",
+    "commit_author_date": "2026-09-19T14:08:12+07:00"
+  },
+  "evaluated_at_utc": "2027-04-01T00:00:00+00:00",
+  "families": [
+    {
+      "family_id": "trend-pullback",
+      "sheet_sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "sheet_slots_present": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "candidate_param_set_hashes": [
+        "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+      ],
+      "experiment_ids": [
+        "exp-tp-dev-1",
+        "exp-tp-val-1"
+      ],
+      "status": "TESTED_FAIL",
+      "decision_ref": "DEC-2026-11-fail-trend-pullback",
+      "decided_at_utc": "2026-11-15T00:00:00+00:00",
+      "development_experiment_ids": [
+        "exp-tp-dev-1"
+      ],
+      "validation_experiment_ids": [
+        "exp-tp-val-1"
+      ]
+    },
+    {
+      "family_id": "breakout-retest",
+      "sheet_sha256": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+      "sheet_slots_present": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "candidate_param_set_hashes": [
+        "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+      ],
+      "experiment_ids": [
+        "exp-br-dev-1",
+        "exp-br-val-1"
+      ],
+      "status": "TESTED_PASS",
+      "decision_ref": "DEC-2026-11-pass-breakout-retest",
+      "decided_at_utc": "2026-11-15T00:00:00+00:00",
+      "development_experiment_ids": [
+        "exp-br-dev-1"
+      ],
+      "validation_experiment_ids": [
+        "exp-br-val-1"
+      ]
+    },
+    {
+      "family_id": "range-mr",
+      "sheet_sha256": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+      "sheet_slots_present": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "candidate_param_set_hashes": [
+        "b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3"
+      ],
+      "experiment_ids": [
+        "exp-mr-dev-1",
+        "exp-mr-val-1"
+      ],
+      "status": "TESTED_FAIL",
+      "decision_ref": "DEC-2026-11-fail-range-mr",
+      "decided_at_utc": "2026-11-15T00:00:00+00:00",
+      "development_experiment_ids": [
+        "exp-mr-dev-1"
+      ],
+      "validation_experiment_ids": [
+        "exp-mr-val-1"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "before": {
+    "evaluated_at_utc": "2027-03-18T23:59:59+00:00",
+    "state": "WITHIN_BUDGET",
+    "months_budget_met": false,
+    "families_budget_met": true,
+    "whole_months": 5,
+    "extra_days": 27,
+    "months_elapsed": "5.9000"
+  },
+  "at": {
+    "evaluated_at_utc": "2027-03-19T00:00:00+00:00",
+    "state": "INSUFFICIENT_EDGE",
+    "months_budget_met": true,
+    "families_budget_met": true,
+    "whole_months": 6,
+    "extra_days": 0,
+    "months_elapsed": "6.0000"
+  }
+}
