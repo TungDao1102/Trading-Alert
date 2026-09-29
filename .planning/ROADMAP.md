@@ -404,3 +404,33 @@ Plans:
 
 Plans:
 - [ ] TBD (promote with /gsd-review-backlog when ready)
+
+### Phase 999.5: Fix fee units in sizing + use the account's real commission rate (BACKLOG)
+
+**Goal:** Sizing includes trading costs in quote currency, and live costs reflect the account's actual maker/taker rate. BUG (confirmed 2026-09-29): `modeled_costs_per_unit` (`src/backtest/costs.py:184`) returns the rate sum `fee_rate_entry + fee_rate_exit + expected_slippage` (e.g. 0.0008), but `size_position` (`src/risk/sizing.py:60`) adds it to an SL distance in quote currency (e.g. 600 USDT/BTC), so costs are effectively ignored (600.0008 instead of ~648) and SL losses exceed `risk_rate` by roughly the cost share. Shared by backtest, paper and live. Fix: multiply by entry reference price (entry fee on entry, exit fee on SL price), with a regression test; golden fixtures and experiment hashes will change and must be regenerated deliberately. Second part: read the per-symbol rate from `GET /fapi/v1/commissionRate` (SDK `user_commission_rate`, fields `makerCommissionRate`/`takerCommissionRate`, verified in SDK 17.4.0) so USDC promotions, VIP tiers and BNB discounts are reflected; if unavailable, fall back to the versioned parameter-set fees (conservative), never to zero. Keep backtest on versioned fees for determinism.
+**Requirements:** TBD (touches RISK-01, BKTS-01, DOMN-02)
+**Plans:** 0 plans
+**Source:** 2026-09-29 capability review after v0.3 audit
+
+Plans:
+- [ ] TBD (promote with /gsd-review-backlog when ready)
+
+### Phase 999.6: Money amounts in SIMULATE/APPROVE notifications (BACKLOG)
+
+**Goal:** Every Telegram SIMULATE/APPROVE message shows, in addition to entry/SL/TPs/R:R/risk %: quantity, notional (USDT), margin required at the configured leverage, estimated loss at SL and estimated profit at each TP in USDT, both gross and net of modeled fees/slippage (labelled "estimate"), plus the equity figure the sizing used and its source/timestamp. Today `format_approve` (`src/adapters/telegram_notify.py:211`) and `format_simulate` (`src/paper/notify.py:122`) show prices, R:R, `risk_pct` and `exposure_quote` only — no quantity or dollar P/L. Values come from the same risk pipeline output (`SizedResult`), never recomputed in the renderer; if sizing is NO_TRADE the message says so with the reason code. Depends on 999.1 (real equity) and 999.5 (correct costs).
+**Requirements:** TBD (touches APRV-01, PAPER-02)
+**Plans:** 0 plans
+**Source:** 2026-09-29 user request
+
+Plans:
+- [ ] TBD (promote with /gsd-review-backlog when ready)
+
+### Phase 999.7: Pre-placement available-margin check (BACKLOG)
+
+**Goal:** Before placing an entry, confirm `availableBalance` (from `GET /fapi/v3/account` or `/fapi/v3/balance`) covers the initial margin of the new order at its leverage plus fees; otherwise NO_TRADE with an explicit reason instead of letting Binance reject the order. No such check exists in `src/` today. Relevant for small accounts (e.g. 500 USDT) running `max_open_positions = 2`: two isolated positions fit easily at modest leverage, but not at 1x when combined notional exceeds equity. Pairs with 999.2 (leverage/margin type) and 999.1 (equity).
+**Requirements:** TBD (touches RISK-02, EXEC-01)
+**Plans:** 0 plans
+**Source:** 2026-09-29 capability review after v0.3 audit
+
+Plans:
+- [ ] TBD (promote with /gsd-review-backlog when ready)
