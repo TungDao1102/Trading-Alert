@@ -19,8 +19,9 @@ never redefined or modified here), so a PAPER section carries the SYNTHETIC LAG
 label and is never presented as measured latency (RESEARCH P2, D-05).
 
 The signal->approve delay-bucket table (<1m, 1-5m, 5-30m, >=30m; bin edges are a
-documented display default, RESEARCH A2) is computed from LIVE rows ONLY. PAPER
-and BACKTEST evidence never produce buckets. The measured live signal->approve
+documented display default, RESEARCH A2) is computed from approved (USER_EXECUTED)
+LIVE rows ONLY; skipped / expired signals have no approval time and are never bucketed.
+PAPER and BACKTEST evidence never produce buckets. The measured live signal->approve
 distribution is reported as calibration evidence while the paper constant stays
 unchanged (RESEARCH Open Question 4).
 
@@ -293,22 +294,24 @@ def _build_block(
 def _build_delay(
     ordered: Sequence[LifecycleRecord],
     realized: Mapping[str, Decimal],
-    hypothetical: Mapping[str, Decimal],
     *,
     base_seed: int,
     resamples: int,
 ) -> tuple[tuple[DelayBucketRow, ...], DistStat, tuple[tuple[str, int], ...]]:
     """LIVE delay buckets + measured signal->approve distribution + excluded counts.
 
-    Only USER_EXECUTED / OPPORTUNITY records with an approval action time enter.
-    A missing signal time is UNMATCHED_JOIN and a negative delay is
-    NEGATIVE_INTERVAL; both are counted and excluded, never bucketed or imputed.
+    Only USER_EXECUTED records with an approval action time enter: the table measures
+    signal->approve, and a skipped or expired (OPPORTUNITY) signal is never "approved"
+    (the live normalizer sets `approved_at_utc` for APPROVED decisions only). OPPORTUNITY
+    signals are reported in the OPPORTUNITY block, not here. A missing signal time is
+    UNMATCHED_JOIN and a negative delay is NEGATIVE_INTERVAL; both are counted and
+    excluded, never bucketed or imputed.
     """
     per_bucket: dict[DelayBucket, list[_Resolved]] = {bucket: [] for bucket in _BUCKET_ORDER}
     delays: list[Decimal] = []
     excluded: dict[str, int] = {}
     for record in ordered:
-        if record.path is LifecyclePath.SYSTEM_ONLY or record.approved_at_utc is None:
+        if record.path is not LifecyclePath.USER_EXECUTED or record.approved_at_utc is None:
             continue
         if record.signal_detected_at_utc is None:
             reason = IncompleteReason.UNMATCHED_JOIN.value
@@ -321,10 +324,7 @@ def _build_delay(
             excluded[reason] = excluded.get(reason, 0) + 1
             continue
         delays.append(delay)
-        if record.path is LifecyclePath.USER_EXECUTED:
-            per_bucket[bucket].append(_resolve_user(record, realized))
-        else:
-            per_bucket[bucket].append(_resolve_opportunity(record, hypothetical))
+        per_bucket[bucket].append(_resolve_user(record, realized))
     rows: list[DelayBucketRow] = []
     for index, bucket in enumerate(_BUCKET_ORDER):
         resolved = per_bucket[bucket]
@@ -413,7 +413,6 @@ def build_approval_delay(
         buckets, measured_delay, delay_incomplete = _build_delay(
             ordered,
             realized_r_by_signal,
-            hypothetical_r_by_signal,
             base_seed=base_seed,
             resamples=resamples,
         )

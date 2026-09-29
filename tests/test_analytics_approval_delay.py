@@ -371,6 +371,43 @@ def test_measured_delay_uses_approved_live_rows_only() -> None:
     assert section.measured_delay.n == 6
 
 
+def test_delay_buckets_hold_approved_signals_only() -> None:
+    """WR-08: the signal->approve table covers approvals; a skip is never "approved".
+
+    Even a hand-built OPPORTUNITY record that carries an approval-like time stays out of the
+    buckets and the measured distribution (the live normalizer never produces one).
+    """
+    approved = make_lifecycle_record(
+        source_id="APP",
+        signal_id="APP",
+        path=LifecyclePath.USER_EXECUTED,
+        approval_result=ApprovalResult.APPROVED,
+        signal_detected_at_utc="2026-03-03T08:00:00+00:00",
+        approved_at_utc="2026-03-03T08:00:30+00:00",
+    )
+    skipped = make_lifecycle_record(
+        source_id="SKIP",
+        signal_id="SKIP",
+        path=LifecyclePath.OPPORTUNITY,
+        approval_result=ApprovalResult.SKIPPED,
+        signal_detected_at_utc="2026-03-03T09:00:00+00:00",
+        approved_at_utc="2026-03-03T09:10:00+00:00",
+        reason_code="SKIPPED_USER",
+    )
+    section = build_approval_delay(
+        [approved, skipped],
+        evidence=EvidenceKind.LIVE,
+        realized_r_by_signal={"APP": D("1.0")},
+        hypothetical_r_by_signal={"SKIP": D("2.0")},
+        base_seed=SEED,
+        resamples=RESAMPLES,
+    )
+    assert [row.n for row in section.buckets] == [1, 0, 0, 0]
+    assert section.measured_delay is not None
+    assert section.measured_delay.n == 1
+    assert section.opportunity.n_signals == 1
+
+
 def test_paper_constant_is_unchanged() -> None:
     assert APPROVAL_DELAY_LAG_SECONDS == 30
     text = PAPER_ATTRIBUTION_SRC.read_text(encoding="utf-8")
