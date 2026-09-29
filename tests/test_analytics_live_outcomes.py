@@ -330,8 +330,7 @@ def test_plan_without_signal_is_unmatched_join() -> None:
 def test_non_positive_fill_quantity_fails_closed_as_malformed() -> None:
     rows = _Rows()
     bad = [
-        replace(f, fill_quantity=Decimal("-1.0")) if f.fill_id == "F-B2" else f
-        for f in rows.fills
+        replace(f, fill_quantity=Decimal("-1.0")) if f.fill_id == "F-B2" else f for f in rows.fills
     ]
     result = rows.run(fills=bad)
     assert "PLAN-B" not in _by_trade(result)
