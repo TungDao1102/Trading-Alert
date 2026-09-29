@@ -1,0 +1,74 @@
+{
+  "n_records": 2,
+  "lifecycle": [
+    {
+      "signal_id": "SIG-A",
+      "path": "USER_EXECUTED",
+      "approval_result": "APPROVED",
+      "synthetic_lag": true,
+      "reason_code": ""
+    },
+    {
+      "signal_id": "SIG-B",
+      "path": "OPPORTUNITY",
+      "approval_result": "SKIPPED",
+      "synthetic_lag": false,
+      "reason_code": "SKIPPED_USER"
+    }
+  ],
+  "legs": [
+    {
+      "leg": "SIGNAL_TO_SEEN",
+      "n_measured": 0,
+      "incomplete": [
+        [
+          "NO_SEEN_TIMESTAMP",
+          2
+        ]
+      ],
+      "mean": null
+    },
+    {
+      "leg": "SIGNAL_TO_DELIVERY",
+      "n_measured": 0,
+      "incomplete": [
+        [
+          "NOT_MEASURED_FOR_EVIDENCE",
+          2
+        ]
+      ],
+      "mean": null
+    },
+    {
+      "leg": "DELIVERY_TO_APPROVED",
+      "n_measured": 0,
+      "incomplete": [
+        [
+          "NOT_MEASURED_FOR_EVIDENCE",
+          1
+        ]
+      ],
+      "mean": null
+    },
+    {
+      "leg": "SIGNAL_TO_APPROVED",
+      "n_measured": 1,
+      "incomplete": [],
+      "mean": "30"
+    },
+    {
+      "leg": "APPROVED_TO_ORDER",
+      "n_measured": 1,
+      "incomplete": [],
+      "mean": "1"
+    },
+    {
+      "leg": "ORDER_TO_FILL",
+      "n_measured": 1,
+      "incomplete": [],
+      "mean": "420"
+    }
+  ],
+  "synthetic_lag_seconds": 30,
+  "section_digest": "PENDING_GREEN"
+}
