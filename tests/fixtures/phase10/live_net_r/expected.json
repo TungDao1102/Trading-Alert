@@ -1,0 +1,106 @@
+{
+  "verified_true": {
+    "outcomes": [
+      {
+        "trade_id": "PLAN-A",
+        "signal_id": "SIG-A",
+        "direction": "LONG",
+        "entry_price": "100.50",
+        "quantity": "2",
+        "exit_price": "104.00",
+        "exit_kind": "TP1",
+        "entry_time_utc": "2026-04-01T08:05:00+00:00",
+        "exit_time_utc": "2026-04-01T12:00:00+00:00",
+        "realized_pnl": "6.70",
+        "realized_risk": "10.00",
+        "r": "0.67"
+      },
+      {
+        "trade_id": "PLAN-B",
+        "signal_id": "SIG-B",
+        "direction": "LONG",
+        "entry_price": "200.00",
+        "quantity": "1",
+        "exit_price": null,
+        "exit_kind": null,
+        "entry_time_utc": "2026-04-01T09:05:00+00:00",
+        "exit_time_utc": null,
+        "realized_pnl": null,
+        "realized_risk": "8.00",
+        "r": null
+      },
+      {
+        "trade_id": "PLAN-C",
+        "signal_id": "SIG-C",
+        "direction": "SHORT",
+        "entry_price": "50.00",
+        "quantity": "1",
+        "exit_price": "51.00",
+        "exit_kind": "SL",
+        "entry_time_utc": "2026-04-01T10:05:00+00:00",
+        "exit_time_utc": "2026-04-01T13:00:00+00:00",
+        "realized_pnl": null,
+        "realized_risk": "5.00",
+        "r": null
+      }
+    ],
+    "incomplete": [
+      ["SIG-B", "OPEN_POSITION"],
+      ["SIG-C", "COMMISSION_ASSET_NOT_QUOTE"]
+    ],
+    "result_digest": "PIN-AFTER-GREEN"
+  },
+  "verified_false": {
+    "outcomes": [
+      {
+        "trade_id": "PLAN-A",
+        "signal_id": "SIG-A",
+        "direction": "LONG",
+        "entry_price": "100.50",
+        "quantity": "2",
+        "exit_price": "104.00",
+        "exit_kind": "TP1",
+        "entry_time_utc": "2026-04-01T08:05:00+00:00",
+        "exit_time_utc": "2026-04-01T12:00:00+00:00",
+        "realized_pnl": null,
+        "realized_risk": "10.00",
+        "r": null
+      },
+      {
+        "trade_id": "PLAN-B",
+        "signal_id": "SIG-B",
+        "direction": "LONG",
+        "entry_price": "200.00",
+        "quantity": "1",
+        "exit_price": null,
+        "exit_kind": null,
+        "entry_time_utc": "2026-04-01T09:05:00+00:00",
+        "exit_time_utc": null,
+        "realized_pnl": null,
+        "realized_risk": "8.00",
+        "r": null
+      },
+      {
+        "trade_id": "PLAN-C",
+        "signal_id": "SIG-C",
+        "direction": "SHORT",
+        "entry_price": "50.00",
+        "quantity": "1",
+        "exit_price": "51.00",
+        "exit_kind": "SL",
+        "entry_time_utc": "2026-04-01T10:05:00+00:00",
+        "exit_time_utc": "2026-04-01T13:00:00+00:00",
+        "realized_pnl": null,
+        "realized_risk": "5.00",
+        "r": null
+      }
+    ],
+    "incomplete": [
+      ["SIG-A", "UNVERIFIED_EXCHANGE_SEMANTICS"],
+      ["SIG-B", "OPEN_POSITION"],
+      ["SIG-C", "COMMISSION_ASSET_NOT_QUOTE"],
+      ["SIG-C", "UNVERIFIED_EXCHANGE_SEMANTICS"]
+    ],
+    "result_digest": "PIN-AFTER-GREEN"
+  }
+}
