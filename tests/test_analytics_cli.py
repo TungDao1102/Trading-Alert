@@ -424,6 +424,47 @@ def test_the_universe_flag_changes_the_research_universe_provenance(
     assert digest_a != digest_b
 
 
+def _universe_status(out: str) -> str:
+    status: str = _sidecar_of(out)["report"]["provenance"]["research_universe_status"]
+    return status
+
+
+def test_research_universe_is_verified_against_the_experiment_universe_hash(
+    env: _Env, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """WR-07: the recorded ExperimentRecord.universe_hash is actually checked."""
+    code, out, err = _run(capsys, env.argv())
+    assert code == 0, err
+    assert _universe_status(out) == "VERIFIED"
+
+    universe = tmp_path / "universe.json"
+    universe.write_text('["BTCUSDT"]', encoding="utf-8")
+    code, out, err = _run(capsys, env.argv("--universe", str(universe)))
+    assert code == 0, err
+    assert _universe_status(out) == "UNVERIFIED_UNIVERSE"
+
+
+def test_candidate_experiments_on_different_universes_are_unverified(
+    env: _Env, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    first = _candidate_experiment("trend-pullback", "u1")
+    second = _candidate_experiment("trend-pullback", "u2")
+    second["experiment"]["universe_hash"] = hashlib.sha256(b"another-universe").hexdigest()
+    env.evidence = _write_evidence(tmp_path / "mixed-universe.json", [first, second])
+    code, out, err = _run(capsys, env.argv())
+    assert code == 0, err
+    assert _universe_status(out) == "UNVERIFIED_UNIVERSE"
+
+
+def test_without_candidate_experiments_the_universe_check_is_not_applicable(
+    env: _Env, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    env.evidence = _write_evidence(tmp_path / "no-experiments.json", [])
+    code, out, err = _run(capsys, env.argv())
+    assert code == 0, err
+    assert _universe_status(out) == "NOT_APPLICABLE"
+
+
 def test_the_seed_and_resamples_flags_are_echoed_in_the_sidecar(
     env: _Env, capsys: pytest.CaptureFixture[str]
 ) -> None:

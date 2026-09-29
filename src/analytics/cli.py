@@ -111,6 +111,7 @@ from src.paper.journal import PaperRecord
 
 __all__ = ["CliArgs", "main", "parse_args"]
 
+_CANDIDATE_RUN_TYPE = "CANDIDATE"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_DECISIONS = _REPO_ROOT / "docs" / "research" / "kill_gate_decisions.json"
 _DEFAULT_RAW_ROOT = _REPO_ROOT / "data" / "raw"
@@ -334,6 +335,25 @@ def _research_symbols(args: CliArgs, evidence: EvidenceFile | None) -> tuple[str
     return () if evidence is None else evidence.research_universe
 
 
+# Never a SHA-256 hex digest, so it can never verify: CANDIDATE experiments that were run on
+# different universes leave the research universe UNVERIFIED_UNIVERSE (WR-07).
+_MIXED_UNIVERSE_HASH = "mixed-experiment-universes"
+
+
+def _expected_universe_hash(entries: Sequence[BacktestEvidence]) -> str | None:
+    """The universe hash recorded by the CANDIDATE experiments (None without any)."""
+    hashes = sorted(
+        {
+            entry.experiment.universe_hash
+            for entry in entries
+            if entry.experiment.run_type == _CANDIDATE_RUN_TYPE
+        }
+    )
+    if not hashes:
+        return None
+    return hashes[0] if len(hashes) == 1 else _MIXED_UNIVERSE_HASH
+
+
 def _merge_resets(
     from_file: Sequence[ResetRecord], events: Sequence[JournalEvent]
 ) -> tuple[ResetRecord, ...]:
@@ -402,6 +422,7 @@ def _build_inputs(args: CliArgs, as_of: datetime, database: _DatabaseData | None
         ),
         clock=clock_start_from_protocol(read_protocol_text(_REPO_ROOT)),
         research_symbols=_research_symbols(args, evidence),
+        expected_universe_hash=_expected_universe_hash(entries),
         journal_events=events,
         families=scan.families,
         family_gate_facts=dict(scan.gate_facts),
