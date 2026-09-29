@@ -152,11 +152,17 @@ class FoldedPositionView:
 # --------------------------------------------------------------------------- #
 
 
+_SIDE_SIGN: dict[str, Decimal] = {"BUY": Decimal("1"), "SELL": Decimal("-1")}
+
+
 def fold_fills(
     *,
     fill_events: Sequence[Any],
     current_position_view: CurrentPositionView,
     has_protective: bool = True,
+    expected_symbol: str | None = None,
+    expected_side: str | None = None,
+    expected_order_id: str | None = None,
 ) -> FoldedPositionView:
     """Fold fill events idempotently to a single position view.
 
@@ -179,10 +185,25 @@ def fold_fills(
         has_protective: Whether a protective is attached to the entry.
             If False, the monitor surfaces ENTRY_WITHOUT_PROTECTIVE
             divergence. Default True (protective attached).
+        expected_symbol: When given, every event must be for this symbol.
+        expected_side: When given ("BUY"/"SELL"), every event must be on
+            this side — an exit fill (e.g. a TP1 SELL against a LONG
+            entry) can never inflate the entry's filled quantity.
+        expected_order_id: When given, every event must belong to this
+            order id.
 
     Returns:
         A `FoldedPositionView` with the folded position, sorted fills,
         and any divergences.
+
+    Raises:
+        ValueError: an event is missing its identity (`order_id` /
+            `exchange_trade_id`), carries an unknown side, or does not
+            match an `expected_*` filter (09-REVIEW WR-04 — flag, never
+            fabricate: a malformed or foreign fill is never silently
+            skipped or summed).
+        TypeError: an event's `fill_quantity` is not a `Decimal` (e.g. a
+            raw WS string) — never silently dropped from the sum.
     """
     # Index fills by (order_id, exchange_trade_id) for idempotent dedup.
     unique_fills: dict[tuple[str, str], dict[str, Any]] = {}
@@ -191,9 +212,29 @@ def fold_fills(
         order_id = _get_field(event, "order_id")
         exchange_trade_id = _get_field(event, "exchange_trade_id")
         if not isinstance(order_id, str) or order_id == "":
-            continue
+            raise ValueError(f"fold_fills: fill event missing order_id: {event!r}")
         if not isinstance(exchange_trade_id, str) or exchange_trade_id == "":
-            continue
+            raise ValueError(f"fold_fills: fill event missing exchange_trade_id: {event!r}")
+        symbol = _get_field(event, "symbol")
+        side = _get_field(event, "side")
+        fill_quantity = _get_field(event, "fill_quantity")
+        if not isinstance(fill_quantity, Decimal):
+            raise TypeError(
+                f"fold_fills: fill_quantity must be Decimal, got "
+                f"{type(fill_quantity).__name__} ({order_id}/{exchange_trade_id})"
+            )
+        if side not in _SIDE_SIGN:
+            raise ValueError(f"fold_fills: unknown fill side {side!r} ({order_id})")
+        if expected_symbol is not None and symbol != expected_symbol:
+            raise ValueError(
+                f"fold_fills: fill symbol {symbol!r} != expected {expected_symbol!r}"
+            )
+        if expected_side is not None and side != expected_side:
+            raise ValueError(f"fold_fills: fill side {side!r} != expected {expected_side!r}")
+        if expected_order_id is not None and order_id != expected_order_id:
+            raise ValueError(
+                f"fold_fills: fill order_id {order_id!r} != expected {expected_order_id!r}"
+            )
         key = (order_id, exchange_trade_id)
         if key in unique_fills:
             # Replayed event — skip (idempotent).
@@ -201,11 +242,11 @@ def fold_fills(
         unique_fills[key] = {
             "order_id": order_id,
             "exchange_trade_id": exchange_trade_id,
-            "symbol": _get_field(event, "symbol") or "",
-            "side": _get_field(event, "side") or "",
+            "symbol": symbol or "",
+            "side": side,
             "position_side": _get_field(event, "position_side") or "",
             "fill_price": _get_field(event, "fill_price"),
-            "fill_quantity": _get_field(event, "fill_quantity"),
+            "fill_quantity": fill_quantity,
             "fill_time_utc": _get_field(event, "fill_time_utc"),
         }
 
@@ -219,14 +260,17 @@ def fold_fills(
         ),
     )
 
-    # Compute filled_quantity as the sum of all unique fill quantities.
+    # `filled_quantity` is the unsigned sum of all unique fill quantities;
+    # the position amount moves by the SIGNED quantity (Binance position
+    # amounts are negative for SHORT — a SELL fill decreases it).
     filled_quantity = Decimal("0")
+    signed_delta = Decimal("0")
     for f in sorted_fills:
         qty = f["fill_quantity"]
-        if isinstance(qty, Decimal):
-            filled_quantity = filled_quantity + qty
+        filled_quantity = filled_quantity + qty
+        signed_delta = signed_delta + _SIDE_SIGN[f["side"]] * qty
 
-    new_position_amt = current_position_view.position_amt + filled_quantity
+    new_position_amt = current_position_view.position_amt + signed_delta
 
     divergences: list[dict[str, Any]] = []
     if not has_protective and len(sorted_fills) > 0:

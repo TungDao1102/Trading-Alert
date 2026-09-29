@@ -233,7 +233,6 @@ def test_partial_fill_replayed_fills_fold_and_attach_once() -> None:
         attach_protectives_to_fill(
             fill_events=_build_fill_events(case_input),
             current_position_view=current_view,
-            has_protective=False,
             protective_template=protective_template,
             constraint_snapshot=constraint_snapshot,
             position_mode=case_input["position_mode"],
@@ -307,7 +306,6 @@ def test_unconfirmed_sl_leg_yields_entry_without_protective_with_zero_rescue() -
         attach_protectives_to_fill(
             fill_events=_build_fill_events(case_input),
             current_position_view=current_view,
-            has_protective=False,
             protective_template=protective_template,
             constraint_snapshot=constraint_snapshot,
             position_mode=case_input["position_mode"],
@@ -367,7 +365,6 @@ def test_non_live5_symbol_raises_before_any_adapter_call() -> None:
             attach_protectives_to_fill(
                 fill_events=_build_fill_events(case_input),
                 current_position_view=current_view,
-                has_protective=False,
                 protective_template=protective_template,
                 constraint_snapshot=non_live5_snapshot,
                 position_mode=case_input["position_mode"],
@@ -395,7 +392,6 @@ def _attach(adapter: Any, safe_mode_controller: Any) -> Any:
         attach_protectives_to_fill(
             fill_events=_build_fill_events(case_input),
             current_position_view=_build_current_position_view(case_input),
-            has_protective=False,
             protective_template=_build_protective_template(case_input),
             constraint_snapshot=_build_constraint_snapshot(case_input),
             position_mode=case_input["position_mode"],
@@ -463,7 +459,6 @@ def test_unsizeable_tp1_still_places_sl_first_and_holds_entry_without_protective
         attach_protectives_to_fill(
             fill_events=[tiny_fill],
             current_position_view=_build_current_position_view(case_input),
-            has_protective=False,
             protective_template=_build_protective_template(case_input),
             constraint_snapshot=_build_constraint_snapshot(case_input),
             position_mode=case_input["position_mode"],
@@ -661,5 +656,50 @@ def test_rejected_dataclass_response_holds_entry_without_protective() -> None:
 
     assert outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
     assert outcome.placed_legs == ()
+    assert len(adapter.calls) == 1
+    assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
+
+
+def test_foreign_fill_in_stream_still_places_sl_and_holds() -> None:
+    """WR-04: an exit-side (TP1 SELL) fill mixed into a LONG entry stream
+    is never summed into the entry quantity; attach places the close-all
+    SL and holds ENTRY_WITHOUT_PROTECTIVE + SAFE_MODE."""
+    from src.execution.fill_monitor import FillEvent
+    from src.execution.manager import attach_protectives_to_fill
+
+    case_input = _load_input()
+    events = _build_fill_events(case_input) + [
+        FillEvent(
+            order_id="ord_tp1_exit",
+            exchange_trade_id="trade_tp1",
+            symbol="BTCUSDT",
+            side="SELL",
+            position_side="BOTH",
+            fill_price=Decimal("106.00"),
+            fill_quantity=Decimal("0.150"),
+            fill_time_utc=_parse_utc("2026-09-19T10:29:50+00:00"),
+        )
+    ]
+    adapter = FakeExecutionAdapter()
+    safe_mode_controller = _RecordingSafeModeController()
+
+    outcome = asyncio.run(
+        attach_protectives_to_fill(
+            fill_events=events,
+            current_position_view=_build_current_position_view(case_input),
+            protective_template=_build_protective_template(case_input),
+            constraint_snapshot=_build_constraint_snapshot(case_input),
+            position_mode=case_input["position_mode"],
+            candidate_position_side=case_input["candidate_position_side"],
+            plan_hash=case_input["plan_hash"],
+            adapter=adapter,
+            now_utc=_parse_utc(case_input["now_utc"]),
+            safe_mode_controller=safe_mode_controller,
+        )
+    )
+
+    assert outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
+    assert outcome.placed_legs == ("STOP_LOSS",)
+    assert outcome.failure_detail == "fill fold: ValueError"
     assert len(adapter.calls) == 1
     assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]

@@ -764,7 +764,6 @@ async def attach_protectives_to_fill(
     *,
     fill_events: Sequence[Any],
     current_position_view: CurrentPositionView,
-    has_protective: bool,
     protective_template: ProtectiveTemplate,
     constraint_snapshot: ConstraintSnapshot,
     position_mode: str,
@@ -783,7 +782,11 @@ async def attach_protectives_to_fill(
     reordered):
 
       1. `fold_fills` — idempotent fold of `fill_events` (replayed or
-         out-of-order events collapse to one filled quantity).
+         out-of-order events collapse to one filled quantity), filtered
+         to this symbol and the ENTRY side (an exit fill can never
+         inflate the entry quantity). A malformed / foreign fill stream
+         cannot be sized: the close-all SL is still placed and the
+         outcome holds ENTRY_WITHOUT_PROTECTIVE + SAFE_MODE (WR-04).
       2. `size_protectives_to_filled_qty` — mode-correct SL/TP1/TP2
          leg parameters sized to the folded filled quantity.
       3. Per-leg query-by-ID (`adapter.query_algo_order_by_client`),
@@ -805,8 +808,6 @@ async def attach_protectives_to_fill(
         fill_events: The fill events to fold (see `fold_fills`).
         current_position_view: The current position view before this
             fold (see `fold_fills`).
-        has_protective: Whether a protective was already attached
-            before this fold (forwarded to `fold_fills`).
         protective_template: The protective levels + TP1 split.
         constraint_snapshot: The exchangeInfo-derived constraints.
         position_mode: "ONE_WAY" or "HEDGE" — derive it from a fresh
@@ -827,30 +828,11 @@ async def attach_protectives_to_fill(
     _require_live5_symbol(constraint_snapshot.symbol)
     _require_safe_mode_controller(safe_mode_controller, "attach_protectives_to_fill")
 
-    folded = fold_fills(
-        fill_events=fill_events,
-        current_position_view=current_position_view,
-        has_protective=has_protective,
-    )
-    if folded.filled_quantity <= Decimal("0"):
-        return AttachOutcome(
-            is_no_trade=True, reason_code="NO_FILL", sized=None, placed_legs=()
-        )
-
-    sizing = size_protectives_to_filled_qty(
-        filled_quantity=folded.filled_quantity,
-        protective_template=protective_template,
-        constraint_snapshot=constraint_snapshot,
-        position_mode=position_mode,
-        candidate_position_side=candidate_position_side,
-    )
-    if sizing.is_no_trade:
-        # 09-REVIEW CR-03: TP1 is un-sizeable (min-qty / min-notional),
-        # but a fill EXISTS. The close-all SL does not depend on quantity,
-        # so it is always placed first; the missing TP legs then hold
-        # ENTRY_WITHOUT_PROTECTIVE + SAFE_MODE (never a plain sizing
-        # reason code while a live fill may have no stop). The rejected
-        # sizing is carried in `sized` so its reason code stays auditable.
+    async def _sl_only_then_hold(sized: ProtectiveSizing | None, detail: str) -> AttachOutcome:
+        # The close-all SL does not depend on quantity, so it is always
+        # placed (or adopted) first; the missing legs then hold
+        # ENTRY_WITHOUT_PROTECTIVE + SAFE_MODE — never a plain reason code
+        # while a live fill may have no stop.
         sl_leg = build_sl_leg(
             protective_template=protective_template,
             position_mode=position_mode,
@@ -873,13 +855,42 @@ async def attach_protectives_to_fill(
         return AttachOutcome(
             is_no_trade=True,
             reason_code=_ENTRY_WITHOUT_PROTECTIVE,
-            sized=sizing,
+            sized=sized,
             placed_legs=placed,
-            failure_detail=(
-                sl_failure
-                if sl_failure is not None
-                else f"{OrderRole.TAKE_PROFIT_1.value} sizing: {sizing.reason_code}"
-            ),
+            failure_detail=sl_failure if sl_failure is not None else detail,
+        )
+
+    # 09-REVIEW WR-04: only this symbol's ENTRY-side fills are folded. The
+    # fold RAISES on malformed / foreign events instead of skipping them;
+    # that is surfaced as an unprotected fill, never as a bare exception.
+    entry_side = "BUY" if candidate_position_side == "LONG" else "SELL"
+    try:
+        folded = fold_fills(
+            fill_events=fill_events,
+            current_position_view=current_position_view,
+            expected_symbol=constraint_snapshot.symbol,
+            expected_side=entry_side,
+        )
+    except (TypeError, ValueError) as exc:
+        return await _sl_only_then_hold(None, f"fill fold: {type(exc).__name__}")
+    if folded.filled_quantity <= Decimal("0"):
+        return AttachOutcome(
+            is_no_trade=True, reason_code="NO_FILL", sized=None, placed_legs=()
+        )
+
+    sizing = size_protectives_to_filled_qty(
+        filled_quantity=folded.filled_quantity,
+        protective_template=protective_template,
+        constraint_snapshot=constraint_snapshot,
+        position_mode=position_mode,
+        candidate_position_side=candidate_position_side,
+    )
+    if sizing.is_no_trade:
+        # 09-REVIEW CR-03: TP1 is un-sizeable (min-qty / min-notional),
+        # but a fill EXISTS — SL first, then hold. The rejected sizing is
+        # carried in `sized` so its reason code stays auditable.
+        return await _sl_only_then_hold(
+            sizing, f"{OrderRole.TAKE_PROFIT_1.value} sizing: {sizing.reason_code}"
         )
 
     confirmed_roles: list[str] = []

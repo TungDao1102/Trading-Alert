@@ -307,3 +307,93 @@ def test_fill_monitor_module_purity() -> None:
         assert match is None, (
             f"forbidden import in {module_path}: pattern={pattern!r}, match={match.group(0)!r}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# 09-REVIEW WR-04 — flag, never fabricate: foreign / malformed fills raise.
+# --------------------------------------------------------------------------- #
+
+
+def _fill(**overrides: Any) -> Any:
+    from datetime import datetime
+
+    from src.execution.fill_monitor import FillEvent
+
+    fields: dict[str, Any] = {
+        "order_id": "ord_001",
+        "exchange_trade_id": "trade_001",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "position_side": "BOTH",
+        "fill_price": Decimal("100.00"),
+        "fill_quantity": Decimal("0.100"),
+        "fill_time_utc": datetime.fromisoformat("2026-09-19T10:30:01+00:00"),
+    }
+    fields.update(overrides)
+    return FillEvent(**fields)
+
+
+def _flat_view(position_amt: str = "0.000") -> Any:
+    from src.execution.fill_monitor import CurrentPositionView
+
+    return CurrentPositionView(
+        symbol="BTCUSDT", position_side="BOTH", position_amt=Decimal(position_amt)
+    )
+
+
+def test_exit_side_fill_is_rejected_not_summed() -> None:
+    from src.execution.fill_monitor import fold_fills
+
+    events = [_fill(), _fill(exchange_trade_id="trade_tp1", side="SELL")]
+    with pytest.raises(ValueError, match="side"):
+        fold_fills(
+            fill_events=events,
+            current_position_view=_flat_view(),
+            expected_symbol="BTCUSDT",
+            expected_side="BUY",
+        )
+
+
+def test_foreign_symbol_or_order_fill_is_rejected() -> None:
+    from src.execution.fill_monitor import fold_fills
+
+    with pytest.raises(ValueError, match="symbol"):
+        fold_fills(
+            fill_events=[_fill(symbol="ETHUSDT")],
+            current_position_view=_flat_view(),
+            expected_symbol="BTCUSDT",
+        )
+    with pytest.raises(ValueError, match="order_id"):
+        fold_fills(
+            fill_events=[_fill(order_id="ord_other")],
+            current_position_view=_flat_view(),
+            expected_order_id="ord_001",
+        )
+
+
+def test_raw_string_quantity_and_missing_identity_raise() -> None:
+    from src.execution.fill_monitor import fold_fills
+
+    raw_ws_event = {
+        "order_id": "ord_001",
+        "exchange_trade_id": "trade_001",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "fill_quantity": "0.100",
+    }
+    with pytest.raises(TypeError, match="Decimal"):
+        fold_fills(fill_events=[raw_ws_event], current_position_view=_flat_view())
+    missing_id = dict(raw_ws_event, exchange_trade_id="", fill_quantity=Decimal("0.1"))
+    with pytest.raises(ValueError, match="exchange_trade_id"):
+        fold_fills(fill_events=[missing_id], current_position_view=_flat_view())
+
+
+def test_short_fills_decrease_the_signed_position_amount() -> None:
+    from src.execution.fill_monitor import fold_fills
+
+    result = fold_fills(
+        fill_events=[_fill(side="SELL", fill_quantity=Decimal("0.200"))],
+        current_position_view=_flat_view("-0.100"),
+    )
+    assert result.filled_quantity == Decimal("0.200")
+    assert result.position_amt == Decimal("-0.300")
