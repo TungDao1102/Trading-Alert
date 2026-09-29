@@ -14,6 +14,7 @@ from src.analytics.render_killgate import (
     render_section_evidence_overview,
     render_section_kill_gate,
 )
+from src.analytics.render_metrics import render_section_dual_universe, render_section_full_report
 from src.analytics.report import JournalDepthReport
 
 __all__ = ["REPORT_TITLE", "SECTION_TITLES", "render_markdown"]
@@ -33,11 +34,13 @@ def _check_byte_rules(text: str) -> None:
 
 
 def render_markdown(report: JournalDepthReport) -> str:
-    """Render the report; sections 3-10 slot in here as their renderers land."""
+    """Render the report; sections 5-10 slot in here as their renderers land."""
     lines = [f"# {REPORT_TITLE}", "", *render_header(report)]
     sections = (
         render_section_kill_gate(report),
         render_section_evidence_overview(report),
+        render_section_full_report(report),
+        render_section_dual_universe(report),
     )
     for section in sections:
         lines.extend(["", "---", "", *section])
