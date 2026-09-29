@@ -33,20 +33,19 @@ from src.adapters.analytics_files import (
     read_protocol_text,
     scan_family_facts,
 )
-from src.analytics.killgate import ResetRecord
-from src.analytics.types import OutcomeContext
-from src.domain.canonical import sha256_hex
-from src.paper.attribution import AttributionKind
 from src.analytics.clock import clock_start_from_protocol
 from src.analytics.family import (
     REQUIRED_SLOTS,
     FamilyStatus,
     independent_family_ids,
 )
-from src.analytics.killgate import evaluate
+from src.analytics.killgate import ResetRecord, evaluate
+from src.analytics.types import OutcomeContext
 from src.backtest.experiment import ExperimentRecord
+from src.domain.canonical import sha256_hex
 from src.domain.enums import KillGateState
 from src.domain.registry import load_parameter_set
+from src.paper.attribution import AttributionKind
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SHEETS_ROOT = REPO_ROOT / "docs" / "research" / "families"
@@ -192,9 +191,7 @@ def test_scan_partial_slots_break_independence(tmp_path: Path) -> None:
 
 def test_scan_duplicate_sheet_content_breaks_the_later_family(tmp_path: Path) -> None:
     _copy_sheets(tmp_path, skip=("trend-pullback",))
-    (tmp_path / "trend-pullback.md").write_bytes(
-        (SHEETS_ROOT / "range-mr.md").read_bytes()
-    )
+    (tmp_path / "trend-pullback.md").write_bytes((SHEETS_ROOT / "range-mr.md").read_bytes())
     scan = _scan(sheets_root=tmp_path)
     assert _family(scan, "range-mr").sheet_sha256 == _family(scan, "trend-pullback").sheet_sha256
     independent, non_independent = independent_family_ids(scan.families)
@@ -504,9 +501,7 @@ def test_decisions_unknown_status_fails_closed(tmp_path: Path) -> None:
         "validation_experiment_ids",
     ],
 )
-def test_decisions_tested_without_required_field_fails_closed(
-    tmp_path: Path, field: str
-) -> None:
+def test_decisions_tested_without_required_field_fails_closed(tmp_path: Path, field: str) -> None:
     def mutate(doc: dict[str, Any]) -> None:
         entry = doc["families"][0]
         entry[field] = [] if field.endswith("_ids") else None

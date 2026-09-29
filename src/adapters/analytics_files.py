@@ -13,11 +13,14 @@ No network, no exchange access, no database, no float.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Any
 
 from src.analytics.family import (
     FamilyEvidence,
@@ -26,19 +29,29 @@ from src.analytics.family import (
 )
 from src.analytics.gates import FamilyGateFacts
 from src.analytics.killgate import ResetRecord
-from src.backtest.experiment import ExperimentRecord
+from src.analytics.types import OutcomeContext
+from src.backtest.experiment import ExperimentRecord, _trade_from_dict
+from src.backtest.simulator import TradeRecord
 from src.domain.registry import REGISTRY_ROOT, load_parameter_set
+from src.paper.attribution import AttributionKind
+from src.paper.journal import PaperRecord
 
 __all__ = [
     "REPORTS_ROOT",
+    "BacktestEvidence",
     "DecisionsFile",
     "DecisionsFileError",
+    "EvidenceFile",
     "EvidenceFileError",
     "ExperimentFlags",
     "FamilyDecision",
     "FamilyScan",
     "PathConfinementError",
     "RecordedTerminal",
+    "confine_output_dir",
+    "load_decisions_file",
+    "load_evidence_file",
+    "load_universe_file",
     "read_protocol_text",
     "scan_family_facts",
 ]
@@ -48,6 +61,39 @@ REPORTS_ROOT = Path("data") / "reports"
 _PROTOCOL_RELATIVE = Path("docs") / "research" / "RESEARCH_PROTOCOL.md"
 _SLOT_HEADING = re.compile(r"^## ([1-7])\.", re.MULTILINE)
 _CANDIDATE_RUN_TYPE = "CANDIDATE"
+
+EVIDENCE_SCHEMA = "analytics-evidence/1"
+DECISIONS_SCHEMA = "kill-gate-decisions/1"
+_SYMBOL = re.compile(r"[A-Z0-9]{5,20}")
+_TRADE_DECIMAL_FIELDS = (
+    "entry_price",
+    "quantity",
+    "exit_price",
+    "realized_pnl",
+    "realized_risk",
+    "gross_pnl",
+    "entry_fee",
+    "exit_fee",
+    "funding_amount",
+    "slippage_amount",
+    "modeled_costs_per_unit",
+)
+_TRADE_DATETIME_FIELDS = ("entry_time_utc", "exit_time_utc")
+_PAPER_DATETIME_FIELDS = (
+    "signal_detected_at_utc",
+    "approval_acted_at_utc",
+    "order_submitted_at_utc",
+    "fill_time_utc",
+)
+_FAMILY_DECISION_KEYS = (
+    "family_id",
+    "status",
+    "decision_ref",
+    "decided_at_utc",
+    "development_experiment_ids",
+    "validation_experiment_ids",
+)
+_TERMINAL_KEYS = ("state", "decision_ref", "recorded_at_utc", "families_at_record")
 
 
 class EvidenceFileError(ValueError):
@@ -244,9 +290,7 @@ def scan_family_facts(
                     uncertainty_report_present=any(
                         flag.has_uncertainty_report for flag in family_flags
                     ),
-                    baseline_compared=any(
-                        flag.baseline_summaries_present for flag in family_flags
-                    ),
+                    baseline_compared=any(flag.baseline_summaries_present for flag in family_flags),
                     tested=evidence.status is not FamilyStatus.NOT_TESTED,
                 ),
             )
@@ -257,3 +301,387 @@ def scan_family_facts(
         gate_facts=tuple(facts),
         unknown_experiment_ids=tuple(sorted(unknown)),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Evidence file (schema analytics-evidence/1)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class BacktestEvidence:
+    """One backtest experiment with its trades, descriptive contexts and recorded flags."""
+
+    experiment: ExperimentRecord
+    trades: tuple[TradeRecord, ...]
+    contexts: Mapping[str, OutcomeContext]
+    flags: ExperimentFlags
+
+
+@dataclass(frozen=True)
+class EvidenceFile:
+    """Typed view of an analytics evidence file."""
+
+    backtest: tuple[BacktestEvidence, ...]
+    paper: tuple[PaperRecord, ...]
+    research_universe: tuple[str, ...]
+
+
+def _reject_constant(_name: str) -> Any:
+    raise ValueError("non-finite JSON constant")
+
+
+def _read_json(path: Path, error: type[ValueError], label: str) -> Any:
+    """Load JSON from a file; unreadable or malformed input fails closed (no contents echoed)."""
+    try:
+        return json.loads(Path(path).read_bytes().decode("utf-8"), parse_constant=_reject_constant)
+    except (OSError, ValueError):
+        raise error(f"{label} file is unreadable or not valid JSON") from None
+
+
+def _read_json_object(path: Path, error: type[ValueError], label: str) -> dict[str, Any]:
+    loaded = _read_json(path, error, label)
+    if not isinstance(loaded, dict):
+        raise error(f"{label} file must contain a JSON object")
+    return loaded
+
+
+def _require_key(doc: Mapping[str, Any], key: str, error: type[ValueError], where: str) -> Any:
+    if key not in doc:
+        raise error(f"{where}: missing required key {key!r}")
+    return doc[key]
+
+
+def _require_str(value: Any, key: str, error: type[ValueError], where: str) -> str:
+    if not isinstance(value, str) or value.strip() == "":
+        raise error(f"{where}: {key!r} must be a non-empty string")
+    return value
+
+
+def _parse_utc(value: Any, key: str, error: type[ValueError], where: str) -> datetime:
+    if not isinstance(value, str):
+        raise error(f"{where}: {key!r} must be an ISO-8601 string")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise error(f"{where}: {key!r} is not a valid ISO-8601 datetime") from None
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise error(f"{where}: {key!r} must be a UTC-aware datetime")
+    return parsed
+
+
+def _parse_decimal(value: Any, key: str, error: type[ValueError], where: str) -> Decimal:
+    if not isinstance(value, str):
+        raise error(f"{where}: {key!r} must be a decimal string")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation:
+        raise error(f"{where}: {key!r} is not a valid decimal") from None
+    if not parsed.is_finite():
+        raise error(f"{where}: {key!r} must be finite")
+    return parsed
+
+
+def _parse_symbols(value: Any, where: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise EvidenceFileError(f"{where}: 'research_universe' must be a list of symbols")
+    symbols: set[str] = set()
+    for symbol in value:
+        if not isinstance(symbol, str) or _SYMBOL.fullmatch(symbol) is None:
+            raise EvidenceFileError(f"{where}: invalid symbol entry (expected [A-Z0-9]{{5,20}})")
+        symbols.add(symbol)
+    return tuple(sorted(symbols))
+
+
+def _check_trade_fields(trade: Mapping[str, Any], where: str) -> None:
+    """Validate every money / timestamp field before the shared trade parser runs."""
+    for name in _TRADE_DECIMAL_FIELDS:
+        raw = trade.get(name)
+        if raw is not None:
+            _parse_decimal(raw, name, EvidenceFileError, where)
+    for name in _TRADE_DATETIME_FIELDS:
+        raw = trade.get(name)
+        if raw is not None:
+            _parse_utc(raw, name, EvidenceFileError, where)
+
+
+def _load_trades(raw_trades: Any, where: str) -> tuple[TradeRecord, ...]:
+    if not isinstance(raw_trades, list):
+        raise EvidenceFileError(f"{where}: 'trades' must be a list")
+    trades: list[TradeRecord] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(raw_trades):
+        item = f"{where}.trades[{index}]"
+        if not isinstance(raw, dict):
+            raise EvidenceFileError(f"{item}: must be an object")
+        _check_trade_fields(raw, item)
+        try:
+            trade = _trade_from_dict(raw)
+        except Exception as exc:  # foreign constructor: wrap, never echo values
+            raise EvidenceFileError(
+                f"{item}: invalid trade record ({type(exc).__name__})"
+            ) from None
+        if trade.trade_id in seen:
+            raise EvidenceFileError(f"{where}: duplicate trade_id within one backtest entry")
+        seen.add(trade.trade_id)
+        trades.append(trade)
+    return tuple(trades)
+
+
+def _load_contexts(raw: Any, where: str) -> dict[str, OutcomeContext]:
+    if not isinstance(raw, dict):
+        raise EvidenceFileError(f"{where}: 'contexts' must be an object")
+    contexts: dict[str, OutcomeContext] = {}
+    for trade_id in sorted(raw):
+        entry = raw[trade_id]
+        item = f"{where}.contexts[{trade_id!r}]"
+        if not isinstance(entry, dict):
+            raise EvidenceFileError(f"{item}: must be an object")
+        price = entry.get("intended_entry_price")
+        for name in ("regime", "vol_regime"):
+            if entry.get(name) is not None and not isinstance(entry[name], str):
+                raise EvidenceFileError(f"{item}: {name!r} must be a string or null")
+        contexts[trade_id] = OutcomeContext(
+            intended_entry_price=(
+                None
+                if price is None
+                else _parse_decimal(price, "intended_entry_price", EvidenceFileError, item)
+            ),
+            regime=entry.get("regime"),
+            vol_regime=entry.get("vol_regime"),
+        )
+    return contexts
+
+
+def _load_flags(raw: Any, where: str) -> ExperimentFlags:
+    if not isinstance(raw, dict):
+        raise EvidenceFileError(f"{where}: 'flags' must be an object")
+    repro = raw.get("reproducibility_verified")
+    if repro is not None and not isinstance(repro, bool):
+        raise EvidenceFileError(f"{where}: 'reproducibility_verified' must be a bool or null")
+    for name in ("has_uncertainty_report", "baseline_summaries_present"):
+        if not isinstance(raw.get(name), bool):
+            raise EvidenceFileError(f"{where}: {name!r} must be a bool")
+    return ExperimentFlags(
+        reproducibility_verified=repro,
+        has_uncertainty_report=raw["has_uncertainty_report"],
+        baseline_summaries_present=raw["baseline_summaries_present"],
+    )
+
+
+def _load_experiment(raw: Any, where: str) -> ExperimentRecord:
+    if not isinstance(raw, dict):
+        raise EvidenceFileError(f"{where}: 'experiment' must be an object")
+    fields = dict(raw)
+    for name in ("time_range_start_utc", "time_range_end_utc"):
+        fields[name] = _parse_utc(
+            _require_key(raw, name, EvidenceFileError, f"{where}.experiment"),
+            name,
+            EvidenceFileError,
+            f"{where}.experiment",
+        )
+    try:
+        return ExperimentRecord(**fields)
+    except Exception as exc:  # IncompleteExperimentRecord / TypeError / ValueError
+        raise EvidenceFileError(
+            f"{where}: invalid experiment record ({type(exc).__name__})"
+        ) from None
+
+
+def _load_backtest_entry(raw: Any, index: int) -> BacktestEvidence:
+    where = f"backtest[{index}]"
+    if not isinstance(raw, dict):
+        raise EvidenceFileError(f"{where}: must be an object")
+    experiment = _load_experiment(_require_key(raw, "experiment", EvidenceFileError, where), where)
+    return BacktestEvidence(
+        experiment=experiment,
+        trades=_load_trades(_require_key(raw, "trades", EvidenceFileError, where), where),
+        contexts=_load_contexts(_require_key(raw, "contexts", EvidenceFileError, where), where),
+        flags=_load_flags(_require_key(raw, "flags", EvidenceFileError, where), where),
+    )
+
+
+def _load_paper_record(raw: Any, index: int) -> PaperRecord:
+    where = f"paper[{index}]"
+    if not isinstance(raw, dict):
+        raise EvidenceFileError(f"{where}: must be an object")
+    fields = dict(raw)
+    attribution = _require_key(raw, "attribution", EvidenceFileError, where)
+    try:
+        fields["attribution"] = AttributionKind(attribution)
+    except ValueError:
+        raise EvidenceFileError(f"{where}: unknown 'attribution' value") from None
+    for name in _PAPER_DATETIME_FIELDS:
+        value = _require_key(raw, name, EvidenceFileError, where)
+        fields[name] = None if value is None else _parse_utc(value, name, EvidenceFileError, where)
+    try:
+        return PaperRecord(**fields)
+    except Exception as exc:  # missing/extra field or identity validation failure
+        raise EvidenceFileError(f"{where}: invalid paper record ({type(exc).__name__})") from None
+
+
+def load_evidence_file(path: Path) -> EvidenceFile:
+    """Load an `analytics-evidence/1` file fail-closed into typed objects (T-10-30/31)."""
+    doc = _read_json_object(path, EvidenceFileError, "evidence")
+    if doc.get("schema") != EVIDENCE_SCHEMA:
+        raise EvidenceFileError(f"schema must be {EVIDENCE_SCHEMA!r}")
+    where = "evidence"
+    raw_backtest = _require_key(doc, "backtest", EvidenceFileError, where)
+    raw_paper = _require_key(doc, "paper", EvidenceFileError, where)
+    raw_universe = _require_key(doc, "research_universe", EvidenceFileError, where)
+    if not isinstance(raw_backtest, list):
+        raise EvidenceFileError("evidence: 'backtest' must be a list")
+    if not isinstance(raw_paper, list):
+        raise EvidenceFileError("evidence: 'paper' must be a list")
+    return EvidenceFile(
+        backtest=tuple(_load_backtest_entry(raw, i) for i, raw in enumerate(raw_backtest)),
+        paper=tuple(_load_paper_record(raw, i) for i, raw in enumerate(raw_paper)),
+        research_universe=_parse_symbols(raw_universe, where),
+    )
+
+
+def load_universe_file(path: Path) -> tuple[str, ...]:
+    """Load a research-universe file (array or {"research_universe": [...]}), sorted unique."""
+    loaded = _read_json(path, EvidenceFileError, "universe")
+    if isinstance(loaded, dict):
+        if "research_universe" not in loaded:
+            raise EvidenceFileError("universe: missing required key 'research_universe'")
+        loaded = loaded["research_universe"]
+    return _parse_symbols(loaded, "universe")
+
+
+# --------------------------------------------------------------------------- #
+# Decisions file (schema kill-gate-decisions/1)
+# --------------------------------------------------------------------------- #
+
+
+def _id_list(raw: Any, key: str, where: str, *, required: bool) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        raise DecisionsFileError(f"{where}: {key!r} must be a list")
+    if required and not raw:
+        raise DecisionsFileError(f"{where}: {key!r} must be non-empty for a TESTED_* status")
+    for item in raw:
+        _require_str(item, key, DecisionsFileError, where)
+    return tuple(raw)
+
+
+def _load_family_decision(raw: Any, index: int) -> FamilyDecision:
+    where = f"families[{index}]"
+    if not isinstance(raw, dict):
+        raise DecisionsFileError(f"{where}: must be an object")
+    for key in _FAMILY_DECISION_KEYS:
+        _require_key(raw, key, DecisionsFileError, where)
+    family_id = _require_str(raw["family_id"], "family_id", DecisionsFileError, where)
+    try:
+        status = FamilyStatus(raw["status"])
+    except ValueError:
+        raise DecisionsFileError(f"{where}: 'status' is not a recognized status") from None
+    tested = status is not FamilyStatus.NOT_TESTED
+    decision_ref = raw["decision_ref"]
+    if tested or decision_ref is not None:
+        decision_ref = _require_str(decision_ref, "decision_ref", DecisionsFileError, where)
+    decided_raw = raw["decided_at_utc"]
+    decided_at = (
+        None
+        if decided_raw is None and not tested
+        else _parse_utc(decided_raw, "decided_at_utc", DecisionsFileError, where)
+    )
+    return FamilyDecision(
+        family_id=family_id,
+        status=status,
+        decision_ref=decision_ref,
+        decided_at_utc=decided_at,
+        development_experiment_ids=_id_list(
+            raw["development_experiment_ids"], "development_experiment_ids", where, required=tested
+        ),
+        validation_experiment_ids=_id_list(
+            raw["validation_experiment_ids"], "validation_experiment_ids", where, required=tested
+        ),
+    )
+
+
+def _load_reset(raw: Any, index: int) -> ResetRecord:
+    where = f"resets[{index}]"
+    if not isinstance(raw, dict):
+        raise DecisionsFileError(f"{where}: must be an object")
+    operator_id = _require_key(raw, "operator_id", DecisionsFileError, where)
+    decision_ref = _require_key(raw, "decision_ref", DecisionsFileError, where)
+    occurred = _require_key(raw, "occurred_at_utc", DecisionsFileError, where)
+    return ResetRecord(
+        operator_id=_require_str(operator_id, "operator_id", DecisionsFileError, where),
+        decision_ref=_require_str(decision_ref, "decision_ref", DecisionsFileError, where),
+        occurred_at_utc=_parse_utc(occurred, "occurred_at_utc", DecisionsFileError, where),
+    )
+
+
+def _load_terminal(raw: Any) -> RecordedTerminal | None:
+    if raw is None:
+        return None
+    where = "recorded_terminal"
+    if not isinstance(raw, dict):
+        raise DecisionsFileError(f"{where}: must be an object or null")
+    for key in _TERMINAL_KEYS:
+        _require_key(raw, key, DecisionsFileError, where)
+    if raw["state"] != "INSUFFICIENT_EDGE":
+        raise DecisionsFileError(f"{where}: 'state' must be INSUFFICIENT_EDGE")
+    families = raw["families_at_record"]
+    if not isinstance(families, list) or any(not isinstance(item, str) for item in families):
+        raise DecisionsFileError(f"{where}: 'families_at_record' must be a list of strings")
+    return RecordedTerminal(
+        state="INSUFFICIENT_EDGE",
+        decision_ref=_require_str(raw["decision_ref"], "decision_ref", DecisionsFileError, where),
+        recorded_at_utc=_require_str(
+            raw["recorded_at_utc"], "recorded_at_utc", DecisionsFileError, where
+        ),
+        families_at_record=tuple(families),
+    )
+
+
+def load_decisions_file(path: Path) -> DecisionsFile:
+    """Load a `kill-gate-decisions/1` record fail-closed (D-03: pass/fail is a human input)."""
+    doc = _read_json_object(path, DecisionsFileError, "decisions")
+    if doc.get("schema") != DECISIONS_SCHEMA:
+        raise DecisionsFileError(f"schema must be {DECISIONS_SCHEMA!r}")
+    raw_families = _require_key(doc, "families", DecisionsFileError, "decisions")
+    raw_resets = _require_key(doc, "resets", DecisionsFileError, "decisions")
+    raw_terminal = _require_key(doc, "recorded_terminal", DecisionsFileError, "decisions")
+    if not isinstance(raw_families, list):
+        raise DecisionsFileError("decisions: 'families' must be a list")
+    if not isinstance(raw_resets, list):
+        raise DecisionsFileError("decisions: 'resets' must be a list")
+    families = sorted(
+        (_load_family_decision(raw, i) for i, raw in enumerate(raw_families)),
+        key=lambda decision: decision.family_id,
+    )
+    if len({decision.family_id for decision in families}) != len(families):
+        raise DecisionsFileError("families: duplicate 'family_id'")
+    resets = sorted(
+        (_load_reset(raw, i) for i, raw in enumerate(raw_resets)),
+        key=lambda reset: (reset.occurred_at_utc, reset.decision_ref),
+    )
+    return DecisionsFile(
+        families=tuple(families),
+        resets=tuple(resets),
+        recorded_terminal=_load_terminal(raw_terminal),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Output confinement
+# --------------------------------------------------------------------------- #
+
+
+def confine_output_dir(requested: Path | None, reports_root: Path = REPORTS_ROOT) -> Path:
+    """Return `requested` resolved, only if it equals or lies inside `reports_root`.
+
+    `..` segments, absolute escapes and symlink escapes all resolve outside the root and are
+    refused (T-10-29). The default (`requested is None`) is the reports root itself; the
+    caller creates directories lazily after this check.
+    """
+    if requested is None:
+        return reports_root
+    root = reports_root.resolve()
+    target = Path(requested).resolve()
+    if target != root and not target.is_relative_to(root):
+        raise PathConfinementError("output directory resolves outside the reports root")
+    return target
