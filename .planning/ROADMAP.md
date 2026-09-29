@@ -362,3 +362,45 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 8. Approval + Reconciliation Hardening | 5/5 | Complete   | 2026-09-27 |
 | 9. Live Execution Rollout | 4/4 | In Progress|  |
 | 10. Journal Depth + Kill-Gate Operations | 12/12 | In Progress|  |
+
+## Backlog
+
+### Phase 999.1: Read account equity and daily PnL from Binance (BACKLOG)
+
+**Goal:** Sizing and DAILY_STOP use Binance-canonical equity and daily realized loss, never a caller-supplied constant. Today `AccountState.equity` and `daily_loss_quote` are injected by the caller and no adapter method reads account balance (tests hard-code `equity=10000.00`). Read equity from the USD-M account endpoint + user-data stream (re-verify endpoints against current Binance docs); if equity is unknown or stale, NO_TRADE / fail closed. Do not derive equity by summing own PnL.
+**Requirements:** TBD (touches RISK-01, RISK-02, EXEC-01, OPS-02)
+**Plans:** 0 plans
+**Source:** 2026-09-29 capability review after v0.3 audit
+
+Plans:
+- [ ] TBD (promote with /gsd-review-backlog when ready)
+
+### Phase 999.2: Explicit leverage + margin type and liquidation-vs-SL guard (BACKLOG)
+
+**Goal:** Before any entry, leverage and margin type (isolated/cross) are set explicitly per symbol from a versioned parameter, and the order is refused (NO_TRADE) unless the projected liquidation price lies strictly beyond the SL. Today nothing in `src/` sets leverage or margin type (grep "leverage" hits only a docstring), so orders inherit whatever the Binance account has configured and could liquidate before the SL triggers. Leverage brackets / maintenance margin come from exchange data, never hard-coded.
+**Requirements:** TBD (touches RISK-01, EXEC-01, EXEC-02)
+**Plans:** 0 plans
+**Source:** 2026-09-29 capability review after v0.3 audit
+
+Plans:
+- [ ] TBD (promote with /gsd-review-backlog when ready)
+
+### Phase 999.3: Pre-placement live-price check against SL and entry zone (BACKLOG)
+
+**Goal:** Between APPROVE and placement (plan valid up to `signal_expiry_hours`, 4h in baseline-v3), confirm the current mark/last price has not crossed the SL or left the entry zone in a way that would make the LIMIT entry fill instantly into an immediately-triggered SL. Existing gates cover expiry (APPROVAL_EXPIRED), plan hash (STALE_SETUP), invalidation, one-time token replay and stale constraints (STALE_CONSTRAINTS), but a live-price-vs-SL check was not confirmed in `execute_approved_plan`. Verify first; if absent, add a fail-closed gate with its own RejectionReason.
+**Requirements:** TBD (touches APRV-01, EXEC-01, EXEC-02)
+**Plans:** 0 plans
+**Source:** 2026-09-29 capability review after v0.3 audit
+
+Plans:
+- [ ] TBD (promote with /gsd-review-backlog when ready)
+
+### Phase 999.4: Configurable quote asset (USDT hard-coding removal, USDC readiness) (BACKLOG)
+
+**Goal:** Quote/margin asset becomes configuration instead of a constant, so a USDC pair (e.g. BTCUSDC for lower fees) can be evaluated deliberately. Hard-coded today: `LIVE_5` in `src/data/backfill.py:549` and `src/backtest/report.py:34`, `QUOTE_ASSET = "USDT"` in `src/analytics/live_outcomes.py:65`; fees are pinned per parameter set (`fee_rate_entry`/`fee_rate_exit`). Switching an instrument requires a DECISIONS.md entry (frozen research protocol / universe change), new data collection, a new versioned parameter set with current Binance fees, and re-backtesting — USDT evidence does not transfer.
+**Requirements:** TBD (touches DATA-01, DOMN-02, BKTS-02, JRN-01)
+**Plans:** 0 plans
+**Source:** 2026-09-29 capability review after v0.3 audit
+
+Plans:
+- [ ] TBD (promote with /gsd-review-backlog when ready)
