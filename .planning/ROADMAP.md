@@ -315,12 +315,35 @@ Plans:
   1. Journal/analytics reports MFE/MAE, execution-quality latencies, approval-delay impact, and robustness slices without hiding the full report
   2. Kill-gate dashboard tracks the 3-families / 6-months budget with live-5 vs research-universe slices, and NO_TRADE / INSUFFICIENT EDGE is recordable as a valid terminal outcome
 
-**Plans**: TBD
+**Plans:** 12 plans
 **UI hint**: yes
 
 Plans:
+**Wave 1**
+- [ ] 10-01-PLAN.md — Tracer: MFE/MAE end to end on backtest evidence (types, stats wrappers, excursion, digest) plus purity/typing/determinism guards (JRN-01, D-01, D-02)
+- [ ] 10-02-PLAN.md — D013 AND/OR reconciliation as D030 plus protocol v1.0.1 clarification, KillGateState enum and GLOSSARY 8.2, doc tripwire (GOV-01, D-03)
 
-- [ ] 10-01: TBD (derived during plan-phase)
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 10-03-PLAN.md — Execution quality: lifecycle normalizers (paper/backtest/live) and latency legs, fill %, expiry rate, entry deviation (JRN-01, D-02)
+- [ ] 10-04-PLAN.md — Robustness slices (8 dimensions, ALL row first), dual-universe view, NO_TRADE by reason category (JRN-01, GOV-01, D-02, D-04)
+- [ ] 10-05-PLAN.md — Kill-gate evaluator tracer: D013 state machine, family independence facts, KILL_GATE_EVALUATION event; pre-approved one-way decision checkpoint (GOV-01, D-03)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 10-06-PLAN.md — Approval-delay impact (System/User/Opportunity, LIVE-only buckets) and live net-R normalizer behind verified exchange semantics (JRN-01, D-02)
+- [ ] 10-07-PLAN.md — Sticky terminal + human reset, clock-start parser, gate cells, enable() refusal on INSUFFICIENT_EDGE, registration tripwire (GOV-01, D-03)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 10-08-PLAN.md — Composed JournalDepthReport: per-kind blocks, provenance, INCOMPLETE ledger, kill-gate section, unpooled evidence (JRN-01, GOV-01, D-01, D-05)
+- [ ] 10-09-PLAN.md — Edge adapters: family/evidence/decision loaders, path confinement, SELECT-only journal/entity/candle readers, guarded idempotent append (JRN-01, GOV-01, D-05)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 10-10-PLAN.md — Renderer part 1: formatting/escaping primitives, header, Kill Gate view, Evidence Overview (JRN-01, GOV-01, D-04)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 10-11-PLAN.md — Renderer part 2: sections 3-10, JSON sidecar with digest verification, Telegram pointer text, governance scans (JRN-01, GOV-01, D-04)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 10-12-PLAN.md — CLI + PowerShell wrapper, explicit idempotent --record, closing purity/determinism/regression guards (JRN-01, GOV-01, D-04)
 
 ## Progress
 
