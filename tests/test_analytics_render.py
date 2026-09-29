@@ -1,0 +1,363 @@
+"""Offline report renderer tests: governance half (Phase 10, plan 10-10, D-04, GOV-01, JRN-01).
+
+RED first: authored before `src/analytics/render_common.py`, `render_killgate.py` and
+`render.py` exist. The renderer is a pure function of `JournalDepthReport`; every string,
+format and escape rule is pinned by `10-UI-SPEC.md`. Fixture: `report_composite`
+(INSUFFICIENT_EDGE verdict, LIVE evidence empty).
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+
+import pytest
+from src.analytics.family import FamilyStatus
+from src.analytics.killgate import PriorEvaluation, ResetRecord
+from src.analytics.render import render_markdown
+from src.analytics.render_common import (
+    DISPLAY_TZ_NAME,
+    MAX_CELL_CHARS,
+    NO_DATA,
+    TRUNCATION_MARKER,
+    fmt_bps,
+    fmt_display,
+    fmt_estimate,
+    fmt_int,
+    fmt_months,
+    fmt_pct,
+    fmt_price,
+    fmt_r,
+    fmt_seconds,
+    fmt_utc,
+    md_cell,
+    md_cell_truncated,
+    md_table,
+)
+from src.analytics.render_killgate import STATE_SENTENCES, render_header
+from src.analytics.types import AnalyticsInputError, Estimate
+from src.domain.enums import KillGateState
+
+from tests.phase10_helpers import parse_utc
+from tests.test_analytics_report import build_report_inputs
+
+CASE_AS_OF = "2027-04-01T00:00:00+00:00"
+
+
+def make_report(**changes):  # type: ignore[no-untyped-def]
+    """Build the composite report, optionally replacing ReportInputs fields."""
+    from src.analytics.report import build_journal_depth_report
+
+    inputs = build_report_inputs()
+    if changes:
+        inputs = dataclasses.replace(inputs, **changes)
+    return build_journal_depth_report(inputs, base_seed=20260929, resamples=100)
+
+
+def render_lines(report) -> list[str]:  # type: ignore[no-untyped-def]
+    return render_markdown(report).split("\n")
+
+
+# --------------------------------------------------------------------------- #
+# Primitives
+# --------------------------------------------------------------------------- #
+
+
+def test_primitives_md_cell_escapes_pipe_backtick_angle_newline_and_controls() -> None:
+    assert md_cell("a|b") == "a\\|b"
+    assert md_cell("a`b") == "a'b"
+    assert md_cell("<b>x</b>") == "&lt;b&gt;x&lt;/b&gt;"
+    assert md_cell("a\nb\r\nc\td") == "a b  c d"
+    assert md_cell("a\x00b\x07c\x7fd") == "abcd"
+    assert md_cell("plain text 123") == "plain text 123"
+    assert md_cell("  padded  ") == "padded"
+    assert md_cell("") == ""
+
+
+def test_primitives_md_cell_backslash_cannot_defeat_the_pipe_escape() -> None:
+    # A raw backslash before a pipe must not turn "\|" into an escaped backslash + bare pipe.
+    assert md_cell("a\\|b") == "a\\\\\\|b"
+    assert md_cell("a\\b") == "a\\\\b"
+
+
+def test_primitives_md_cell_strips_unicode_format_and_line_separator_characters() -> None:
+    assert md_cell("a‮b") == "ab"  # bidi override
+    assert md_cell("a​b") == "ab"  # zero-width space
+    assert md_cell("a b c") == "a b c"
+    assert md_cell("a\x85b") == "ab"  # C1 control
+
+
+def test_primitives_md_cell_truncates_at_200_chars_with_marker() -> None:
+    text = "x" * 300
+    out = md_cell(text)
+    assert out == "x" * MAX_CELL_CHARS + TRUNCATION_MARKER
+    assert TRUNCATION_MARKER == "...[truncated]"
+    assert MAX_CELL_CHARS == 200
+    assert md_cell_truncated(text) is True
+    assert md_cell_truncated("x" * 200) is False
+    assert md_cell("x" * 200) == "x" * 200
+    # Escaping never splits an escape sequence at the cut.
+    pipes = "|" * 300
+    assert md_cell(pipes) == "\\|" * 200 + TRUNCATION_MARKER
+
+
+def test_primitives_number_formats_exponent_and_negative_zero() -> None:
+    assert fmt_r(Decimal("-0.00001")) == "0.0000"
+    assert fmt_r(Decimal("1E+1")) == "10.0000"
+    assert fmt_r(Decimal("0.80")) == "0.8000"
+    assert fmt_r(Decimal("0.00005")) == "0.0000"  # half-even tie to even
+    assert fmt_r(Decimal("0.00015")) == "0.0002"
+    assert fmt_r(Decimal("-1.5")) == "-1.5000"
+    assert fmt_r(None) == NO_DATA == "no data"
+    assert fmt_pct(Decimal("87.5")) == "87.50%"
+    assert fmt_pct(Decimal("-0.001")) == "0.00%"
+    assert fmt_seconds(Decimal("12.25")) == "12.2"
+    assert fmt_seconds(Decimal("12.35")) == "12.4"
+    assert fmt_bps(Decimal("1.005")) == "1.00"
+    assert fmt_bps(Decimal("-0.001")) == "0.00"
+    assert fmt_months(Decimal("6.4333")) == "6.4"
+    assert fmt_months(Decimal("3")) == "3.0"
+    assert fmt_price(Decimal("1E+1")) == "10"
+    assert fmt_price(Decimal("0.00010")) == "0.00010"
+    assert fmt_price(Decimal("-0.00")) == "0.00"
+    assert fmt_price(None) == "no data"
+    assert fmt_int(12) == "12"
+    assert fmt_int(0) == "0"
+    assert fmt_int(None) == "no data"
+    with pytest.raises(AnalyticsInputError):
+        fmt_r(Decimal("NaN"))
+    with pytest.raises(AnalyticsInputError):
+        fmt_r(1)  # type: ignore[arg-type]
+    with pytest.raises(AnalyticsInputError):
+        fmt_int(True)
+
+
+def test_primitives_fmt_estimate_for_zero_one_and_many() -> None:
+    many = Estimate(
+        value=Decimal("0.8"),
+        lo=Decimal("0.5"),
+        hi=Decimal("1.1"),
+        n=2,
+        n_valued=2,
+        interval_absent=False,
+    )
+    assert fmt_estimate(many, fmt_r) == "0.8000 [0.5000, 1.1000] n=2"
+    one = Estimate(value=Decimal("0.8"), lo=None, hi=None, n=1, n_valued=1, interval_absent=True)
+    assert fmt_estimate(one, fmt_r) == "0.8000 [interval absent] n=1"
+    none = Estimate(value=None, lo=None, hi=None, n=0, n_valued=0, interval_absent=True)
+    assert fmt_estimate(none, fmt_r) == "no data"
+    partial = Estimate(
+        value=Decimal("0.8"),
+        lo=Decimal("0.5"),
+        hi=Decimal("1.1"),
+        n=3,
+        n_valued=2,
+        interval_absent=False,
+    )
+    assert fmt_estimate(partial, fmt_r) == "0.8000 [0.5000, 1.1000] n=2"
+
+
+def test_primitives_utc_and_display_time() -> None:
+    moment = parse_utc("2027-04-01T00:00:00+00:00")
+    assert fmt_utc(moment) == "2027-04-01T00:00:00+00:00"
+    assert fmt_display(moment) == "2027-04-01 07:00:00 +07:00"
+    assert DISPLAY_TZ_NAME == "Asia/Ho_Chi_Minh"
+    late = parse_utc("2027-04-01T20:30:59+00:00")
+    assert fmt_display(late) == "2027-04-02 03:30:59 +07:00"
+    with pytest.raises(AnalyticsInputError):
+        fmt_utc(datetime(2027, 4, 1))
+    with pytest.raises(AnalyticsInputError):
+        fmt_display(datetime(2027, 4, 1))
+    with pytest.raises(AnalyticsInputError):
+        fmt_display(datetime(2027, 4, 1, tzinfo=timezone(timedelta(hours=7))))
+
+
+def test_primitives_md_table_alignment_and_pre_escaped_cells() -> None:
+    lines = md_table(["A", "B"], [":---", "---:"], [["x", "1"], ["y\\|z", "22"]])
+    assert lines == [
+        "| A | B |",
+        "| :--- | ---: |",
+        "| x | 1 |",
+        "| y\\|z | 22 |",
+    ]
+    with pytest.raises(AnalyticsInputError):
+        md_table(["A"], [":---"], [["a|b"]])  # unescaped pipe
+    with pytest.raises(AnalyticsInputError):
+        md_table(["A"], [":---"], [["a\nb"]])
+    with pytest.raises(AnalyticsInputError):
+        md_table(["A", "B"], [":---", ":---"], [["only"]])
+    with pytest.raises(AnalyticsInputError):
+        md_table(["A"], ["---"], [["x"]])
+    with pytest.raises(AnalyticsInputError):
+        md_table(["A"], [":---"], [[1]])  # type: ignore[list-item]
+
+
+# --------------------------------------------------------------------------- #
+# Header
+# --------------------------------------------------------------------------- #
+
+
+def test_header_table_rows_in_the_exact_ui_spec_order() -> None:
+    report = make_report()
+    lines = render_header(report)
+    assert lines == [
+        "| Field | Value |",
+        "| :--- | :--- |",
+        f"| Report digest | sha256:{report.digest()} |",
+        "| As of (UTC) | 2027-04-01T00:00:00+00:00 |",
+        "| As of (display) | 2027-04-01 07:00:00 +07:00 (Asia/Ho_Chi_Minh) |",
+        "| Timezone note | Stored and computed values are UTC. Display times are "
+        "Asia/Ho_Chi_Minh (UTC+07:00, no DST). |",
+        "| Generator | src.analytics.cli + analytics-schema/1 |",
+        "| Read-only statement | This report is read-only. It never changes parameters, "
+        "orders, or approvals, and it never enables live trading. |",
+        "| Kill gate state | INSUFFICIENT_EDGE |",
+        "| Live orders | LIVE_ORDERS_DISABLED |",
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Banner
+# --------------------------------------------------------------------------- #
+
+INSUFFICIENT_SENTENCE = (
+    "NO_TRADE / INSUFFICIENT EDGE. Three or more independently specified families were "
+    "tested under the frozen methodology, at least six months have elapsed, and none "
+    "passed. This is a valid terminal outcome, not an error. Live trading stays disabled "
+    "and new strategy families are not registered until a new evidence-backed question is "
+    "approved by an explicit human decision record."
+)
+
+
+def test_banner_insufficient_edge_is_calm_terminal_and_exact() -> None:
+    lines = render_lines(make_report())
+    banner = "> **KILL GATE STATE: INSUFFICIENT_EDGE TERMINAL** — " + INSUFFICIENT_SENTENCE
+    assert banner in lines
+    assert STATE_SENTENCES[KillGateState.INSUFFICIENT_EDGE] == INSUFFICIENT_SENTENCE
+    assert lines.index("## 1. Kill Gate") + 2 == lines.index(banner)
+    # Same visual weight as every other state: a plain bold banner, no alarm styling.
+    assert "> **KILL GATE STATE: INSUFFICIENT_EDGE" in banner
+    assert "ERROR" not in banner.upper().replace("NOT AN ERROR", "")
+
+
+def test_banner_within_budget_and_passing_candidate_sentences_are_filled() -> None:
+    early = make_report(as_of_utc=parse_utc("2026-12-19T00:00:00+00:00"))
+    lines = render_lines(early)
+    assert (
+        "> **KILL GATE STATE: WITHIN_BUDGET** — Research budget is not exhausted "
+        "(3 of 3 families tested, 3.0 of 6 months elapsed). Keep researching. "
+        "Live trading stays disabled." in lines
+    )
+    assert not any(line.startswith("> **KILL GATE STATE: WITHIN_BUDGET TERMINAL") for line in lines)
+    base = build_report_inputs()
+    families = tuple(
+        dataclasses.replace(
+            family, status=FamilyStatus.TESTED_PASS, decision_ref="DEC-2026-11-pass-range-mr"
+        )
+        if family.family_id == "range-mr"
+        else family
+        for family in base.families
+    )
+    passing = make_report(families=families)
+    plines = render_lines(passing)
+    assert (
+        "> **KILL GATE STATE: PASSING_CANDIDATE** — A family has a recorded passing "
+        "decision (DEC-2026-11-pass-range-mr). This records that evidence exists. It does "
+        "not authorize live trading; a separate decision record is required." in plines
+    )
+
+
+def test_banner_sticky_terminal_and_reset_event_lines() -> None:
+    prior = PriorEvaluation(
+        state=KillGateState.INSUFFICIENT_EDGE,
+        evaluated_at_utc=parse_utc("2027-03-01T00:00:00+00:00"),
+    )
+    sticky = render_lines(make_report(prior_evaluations=(prior,)))
+    note = (
+        "This outcome does not clear itself. Only a recorded human decision "
+        "(operator, decision reference) can reopen research."
+    )
+    assert note in sticky
+    assert not any(line.startswith("Reopened by decision") for line in sticky)
+    reset = ResetRecord(
+        operator_id="op|1",
+        decision_ref="DEC-2027-03-reopen",
+        occurred_at_utc=parse_utc("2027-03-15T00:00:00+00:00"),
+    )
+    reopened = render_lines(make_report(prior_evaluations=(prior,), resets=(reset,)))
+    assert note not in reopened
+    assert (
+        "Reopened by decision DEC-2027-03-reopen (operator op\\|1) at 2027-03-15 07:00:00 +07:00."
+        in reopened
+    )
+    plain = render_lines(make_report())
+    assert note not in plain
+    assert not any(line.startswith("Reopened by decision") for line in plain)
+
+
+# --------------------------------------------------------------------------- #
+# Budget and clock
+# --------------------------------------------------------------------------- #
+
+
+def test_budget_table_rows_and_rule_sentence() -> None:
+    lines = render_lines(make_report())
+    start = lines.index("| Budget | Required | Actual | Status |")
+    assert lines[start : start + 5] == [
+        "| Budget | Required | Actual | Status |",
+        "| :--- | :--- | ---: | :--- |",
+        "| Independently specified families tested | 3 | 3 | MET |",
+        "| Research months elapsed | 6 calendar months | 6.4 (6 calendar months + 13 days) | MET |",
+        "| Any family passing acceptance | none required | 0 | informational |",
+    ]
+    assert lines[start + 5] == ""
+    assert (
+        lines[start + 6]
+        == "INSUFFICIENT_EDGE requires BOTH budgets met AND no passing family (D013)."
+    )
+    early = render_lines(make_report(as_of_utc=parse_utc("2026-12-19T00:00:00+00:00")))
+    assert (
+        "| Research months elapsed | 6 calendar months | 3.0 (3 calendar months + 0 days) "
+        "| NOT_MET |" in early
+    )
+
+
+def test_clock_provenance_table_and_earliest_note() -> None:
+    lines = render_lines(make_report())
+    start = lines.index("| Field | Value |", lines.index("## 1. Kill Gate"))
+    assert lines[start : start + 9] == [
+        "| Field | Value |",
+        "| :--- | :--- |",
+        "| Research clock start (UTC) | 2026-09-19T00:00:00+00:00 |",
+        "| Source | docs/research/RESEARCH_PROTOCOL.md header: Frozen on |",
+        "| Freeze commit | 281ccd0894ea35717cc741788b6133cfb202af82 |",
+        "| Commit author date | 2026-09-19T14:08:12+07:00 |",
+        "| Earliest possible INSUFFICIENT_EDGE (UTC) | 2027-03-19T00:00:00+00:00 |",
+        "| Evaluated at (UTC) | 2027-04-01T00:00:00+00:00 |",
+        "| Evaluated at (display) | 2027-04-01 07:00:00 +07:00 |",
+    ]
+    assert not any(line.startswith("Earliest possible INSUFFICIENT_EDGE:") for line in lines)
+    early = render_lines(make_report(as_of_utc=parse_utc("2026-12-19T00:00:00+00:00")))
+    assert "Earliest possible INSUFFICIENT_EDGE: 2027-03-19." in early
+
+
+# --------------------------------------------------------------------------- #
+# Tracer: whole-document byte rules
+# --------------------------------------------------------------------------- #
+
+
+def test_tracer_document_is_lf_only_single_trailing_lf_and_ascii_but_the_banner_dash() -> None:
+    text = render_markdown(make_report())
+    assert text.startswith("# Journal Depth + Kill-Gate Report\n\n| Field | Value |\n")
+    assert "\r" not in text
+    assert text.endswith("\n") and not text.endswith("\n\n")
+    for number, line in enumerate(text.split("\n")[:-1], start=1):
+        assert line == line.rstrip(), f"trailing whitespace on line {number}: {line!r}"
+        for char in line:
+            if ord(char) > 127:
+                assert char == "—", f"unexpected non-ASCII {char!r} on line {number}"
+                assert line.startswith("> **KILL GATE STATE"), line
+    assert "\n\n---\n\n## 1. Kill Gate\n\n> **KILL GATE STATE: " in text
+    assert not text.startswith("﻿")
+    assert render_markdown(make_report()) == text  # deterministic
