@@ -9,13 +9,19 @@ format and escape rule is pinned by `10-UI-SPEC.md`. Fixture: `report_composite`
 from __future__ import annotations
 
 import dataclasses
+import os
+import re
+import socket
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from src.analytics.family import FamilyStatus
+from src.analytics.gates import GATE_IDS, GATE_LABELS
 from src.analytics.killgate import PriorEvaluation, ResetRecord
-from src.analytics.render import render_markdown
+from src.analytics.no_trade import NoTradeCategory, NoTradeRow
+from src.analytics.render import SECTION_TITLES, render_markdown
 from src.analytics.render_common import (
     DISPLAY_TZ_NAME,
     MAX_CELL_CHARS,
@@ -36,7 +42,7 @@ from src.analytics.render_common import (
     md_table,
 )
 from src.analytics.render_killgate import STATE_SENTENCES, render_header
-from src.analytics.types import AnalyticsInputError, Estimate
+from src.analytics.types import AnalyticsInputError, Estimate, EvidenceKind
 from src.domain.enums import KillGateState
 
 from tests.phase10_helpers import parse_utc
@@ -82,9 +88,9 @@ def test_primitives_md_cell_backslash_cannot_defeat_the_pipe_escape() -> None:
 
 
 def test_primitives_md_cell_strips_unicode_format_and_line_separator_characters() -> None:
-    assert md_cell("a‮b") == "ab"  # bidi override
-    assert md_cell("a​b") == "ab"  # zero-width space
-    assert md_cell("a b c") == "a b c"
+    assert md_cell("a\u202eb") == "ab"  # bidi override
+    assert md_cell("a\u200bb") == "ab"  # zero-width space
+    assert md_cell("a\u2028b\u2029c") == "a b c"
     assert md_cell("a\x85b") == "ab"  # C1 control
 
 
@@ -232,7 +238,7 @@ INSUFFICIENT_SENTENCE = (
 
 def test_banner_insufficient_edge_is_calm_terminal_and_exact() -> None:
     lines = render_lines(make_report())
-    banner = "> **KILL GATE STATE: INSUFFICIENT_EDGE TERMINAL** — " + INSUFFICIENT_SENTENCE
+    banner = "> **KILL GATE STATE: INSUFFICIENT_EDGE TERMINAL** \u2014 " + INSUFFICIENT_SENTENCE
     assert banner in lines
     assert STATE_SENTENCES[KillGateState.INSUFFICIENT_EDGE] == INSUFFICIENT_SENTENCE
     assert lines.index("## 1. Kill Gate") + 2 == lines.index(banner)
@@ -245,7 +251,7 @@ def test_banner_within_budget_and_passing_candidate_sentences_are_filled() -> No
     early = make_report(as_of_utc=parse_utc("2026-12-19T00:00:00+00:00"))
     lines = render_lines(early)
     assert (
-        "> **KILL GATE STATE: WITHIN_BUDGET** — Research budget is not exhausted "
+        "> **KILL GATE STATE: WITHIN_BUDGET** \u2014 Research budget is not exhausted "
         "(3 of 3 families tested, 3.0 of 6 months elapsed). Keep researching. "
         "Live trading stays disabled." in lines
     )
@@ -262,7 +268,7 @@ def test_banner_within_budget_and_passing_candidate_sentences_are_filled() -> No
     passing = make_report(families=families)
     plines = render_lines(passing)
     assert (
-        "> **KILL GATE STATE: PASSING_CANDIDATE** — A family has a recorded passing "
+        "> **KILL GATE STATE: PASSING_CANDIDATE** \u2014 A family has a recorded passing "
         "decision (DEC-2026-11-pass-range-mr). This records that evidence exists. It does "
         "not authorize live trading; a separate decision record is required." in plines
     )
@@ -356,8 +362,368 @@ def test_tracer_document_is_lf_only_single_trailing_lf_and_ascii_but_the_banner_
         assert line == line.rstrip(), f"trailing whitespace on line {number}: {line!r}"
         for char in line:
             if ord(char) > 127:
-                assert char == "—", f"unexpected non-ASCII {char!r} on line {number}"
+                assert char == "\u2014", f"unexpected non-ASCII {char!r} on line {number}"
                 assert line.startswith("> **KILL GATE STATE"), line
     assert "\n\n---\n\n## 1. Kill Gate\n\n> **KILL GATE STATE: " in text
-    assert not text.startswith("﻿")
+    assert not text.startswith("\ufeff")
     assert render_markdown(make_report()) == text  # deterministic
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: family matrices, NO_TRADE by category, decisions, enablement, Section 2
+# --------------------------------------------------------------------------- #
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+GOLDEN_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "phase10"
+    / "render_golden"
+    / "expected_sections_0_2.md"
+)
+RESERVED_WORDS = (
+    "winner",
+    "best",
+    "recommend",
+    "optimize",
+    "tune",
+    "improve",
+    "profitable",
+    "edge found",
+    "should",
+)
+_RESERVED_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(word) for word in RESERVED_WORDS) + r")\w*", re.IGNORECASE
+)
+BACKSLASH = chr(92)
+
+
+def find_reserved(text: str) -> list[str]:
+    """Reserved words (case-insensitive, at a word start) found in `text`."""
+    return [match.group(0) for match in _RESERVED_PATTERN.finditer(text)]
+
+
+def table_after(lines: list[str], heading: str) -> list[str]:
+    """The pipe-table lines that follow `heading` (first table only)."""
+    start = lines.index(heading) + 1
+    while not lines[start].startswith("|"):
+        start += 1
+    end = start
+    while end < len(lines) and lines[end].startswith("|"):
+        end += 1
+    return lines[start:end]
+
+
+def unescaped_pipes(line: str) -> int:
+    count = 0
+    index = 0
+    while index < len(line):
+        if line[index] == BACKSLASH:
+            index += 2
+            continue
+        if line[index] == "|":
+            count += 1
+        index += 1
+    return count
+
+
+def with_range_mr_passing():  # type: ignore[no-untyped-def]
+    base = build_report_inputs()
+    families = tuple(
+        dataclasses.replace(
+            family, status=FamilyStatus.TESTED_PASS, decision_ref="DEC-2026-11-pass-range-mr"
+        )
+        if family.family_id == "range-mr"
+        else family
+        for family in base.families
+    )
+    return make_report(families=families)
+
+
+def test_k2a_family_matrix_columns_rows_and_shared_component_note() -> None:
+    lines = render_lines(make_report())
+    table = table_after(lines, "### 1.3 Family acceptance")
+    assert table == [
+        "| Family | Independent | Sheet hash (12) | Param sets | Experiments | Status "
+        "| Decision ref | Universe |",
+        "| :--- | :--- | :--- | ---: | ---: | :--- | :--- | :--- |",
+        "| trend-pullback | YES | a1a1a1a1a1a1 | 2 | 2 | TESTED_FAIL "
+        "| DEC-2026-11-fail-trend-pullback | Live-5 n=2 / Research n=2 |",
+        "| breakout-retest | YES | a2a2a2a2a2a2 | 1 | 2 | TESTED_FAIL "
+        "| DEC-2026-11-fail-breakout-retest | no data |",
+        "| range-mr | YES | a3a3a3a3a3a3 | 1 | 2 | TESTED_FAIL "
+        "| DEC-2026-11-fail-range-mr | no data |",
+    ]
+    note = (
+        "Families A and C share the regime detector; B reuses the 4H direction gate. "
+        "Shown for transparency; independence is decided by the registry test, not this note."
+    )
+    end = lines.index(table[-1]) + 1
+    assert lines[end] == "" and lines[end + 1] == note
+
+
+def test_k2a_missing_unknown_and_empty_cells() -> None:
+    report = make_report()
+    kill_gate = report.kill_gate
+    broken = dataclasses.replace(
+        kill_gate.families[0], decision_ref=None, sheet_sha256=None, independent=False
+    )
+    untested = dataclasses.replace(
+        kill_gate.families[1], status="NOT_TESTED", decision_ref=None, independent=False
+    )
+    patched = dataclasses.replace(
+        report,
+        kill_gate=dataclasses.replace(
+            kill_gate, families=(broken, untested, *kill_gate.families[2:])
+        ),
+    )
+    table = table_after(render_lines(patched), "### 1.3 Family acceptance")
+    assert table[2].startswith(
+        "| trend-pullback | UNKNOWN | MISSING | 2 | 2 | TESTED_FAIL | MISSING |"
+    )
+    assert table[3].startswith("| breakout-retest | NO | a2a2a2a2a2a2 | 1 | 2 | NOT_TESTED | - |")
+
+
+def test_k2b_gate_matrix_has_eleven_columns_and_only_the_four_cell_tokens() -> None:
+    lines = render_lines(make_report())
+    table = table_after(lines, "### 1.4 Family gate matrix")
+    assert table[0] == "| Family | " + " | ".join(GATE_IDS) + " |"
+    assert len(GATE_IDS) == 10
+    allowed = {"MET", "NOT_MET", "PENDING_THRESHOLD_TBD", "NOT_EVALUATED"}
+    assert len(table) == 2 + 3
+    for row in table[2:]:
+        cells = [cell.strip() for cell in row.strip("|").split("|")]
+        assert len(cells) == 11
+        gates = dict(zip(GATE_IDS, cells[1:], strict=True))
+        assert set(gates.values()) <= allowed
+        for gate_id in ("G04", "G05", "G06", "G09"):
+            assert gates[gate_id] == "PENDING_THRESHOLD_TBD"
+        assert gates["G01"] == gates["G02"] == "NOT_EVALUATED"
+    legend = ", ".join(f"{gate_id} {GATE_LABELS[gate_id]}" for gate_id in GATE_IDS)
+    assert legend.startswith("G01 Deterministic rules, G02 No material look-ahead,")
+    assert legend.endswith("G09 No single-point dependence, G10 Baseline-compared")
+    assert lines[lines.index(table[-1]) + 2] == legend
+
+
+def test_k3_no_trade_tables_fixed_row_order_and_no_data_columns() -> None:
+    lines = render_lines(make_report())
+    headings = [
+        "### 1.5 NO_TRADE by reason category (BACKTEST)",
+        "### 1.6 NO_TRADE by reason category (PAPER)",
+        "### 1.7 NO_TRADE by reason category (LIVE)",
+    ]
+    for heading, kind in zip(headings, ("BACKTEST", "PAPER", "LIVE"), strict=True):
+        assert heading in lines
+        assert lines[lines.index(heading) + 2] == f"*Evidence: {kind}*"
+    labels = [
+        "regime filter",
+        "RR floor",
+        "open-position conflict",
+        "data unavailability",
+        "kill-gate trip",
+        "UNMAPPED",
+        "**Total**",
+    ]
+    paper = table_after(lines, headings[1])
+    assert paper[0] == "| Reason category | Live-5 n | Research n | All n |"
+    assert paper[1] == "| :--- | ---: | ---: | ---: |"
+    assert [row.split("|")[1].strip() for row in paper[2:]] == labels
+    assert paper[-1] == "| **Total** | 2 | 2 | 2 |"
+    for row in paper[2:]:
+        assert "no data" not in row
+    # BACKTEST and LIVE have no NO_TRADE rows: every cell of every empty column is no data.
+    for heading in (headings[0], headings[2]):
+        table = table_after(lines, heading)
+        assert [row.split("|")[1].strip() for row in table[2:]] == labels
+        for row in table[2:]:
+            assert row.endswith("| no data | no data | no data |")
+
+
+def test_k3_empty_live5_column_renders_no_data_while_other_columns_show_counts() -> None:
+    report = make_report()
+    kill_gate = report.kill_gate
+    paper = kill_gate.no_trade[1]
+    rows = tuple(
+        NoTradeRow(category=row.category, live5_n=0, research_n=row.research_n, all_n=row.all_n)
+        for row in paper.rows
+    )
+    total = NoTradeRow(
+        category=None,
+        live5_n=0,
+        research_n=paper.total.research_n,
+        all_n=paper.total.all_n,
+    )
+    new_paper = dataclasses.replace(paper, rows=rows, total=total)
+    patched = dataclasses.replace(
+        report,
+        kill_gate=dataclasses.replace(
+            kill_gate, no_trade=(kill_gate.no_trade[0], new_paper, kill_gate.no_trade[2])
+        ),
+    )
+    table = table_after(render_lines(patched), "### 1.6 NO_TRADE by reason category (PAPER)")
+    body = table[2:]
+    assert len(body) == 7
+    assert any(row.startswith("| UNMAPPED |") for row in body)
+    assert body[-1] == "| **Total** | no data | 2 | 2 |"
+    for row in body:
+        assert row.split("|")[2].strip() == "no data"
+    assert NoTradeCategory.UNMAPPED.value == "UNMAPPED"
+
+
+def test_decision_references_bullets_and_empty_sentence() -> None:
+    lines = render_lines(make_report())
+    start = lines.index("### 1.8 Decision references")
+    assert lines[start + 2 : start + 5] == [
+        "- DEC-2026-11-fail-breakout-retest",
+        "- DEC-2026-11-fail-range-mr",
+        "- DEC-2026-11-fail-trend-pullback",
+    ]
+    base = build_report_inputs()
+    untested = tuple(
+        dataclasses.replace(
+            family,
+            status=FamilyStatus.NOT_TESTED,
+            decision_ref=None,
+            decided_at_utc=None,
+            development_experiment_ids=(),
+            validation_experiment_ids=(),
+        )
+        for family in base.families
+    )
+    empty = render_lines(make_report(families=untested))
+    at = empty.index("### 1.8 Decision references")
+    assert empty[at + 2] == "No recorded family decisions."
+
+
+def test_enablement_effect_sentence_per_state_and_the_fixed_closing_line() -> None:
+    closing = "Live trading is never enabled by this report."
+    operator_sentence = (
+        "Live enablement remains an explicit operator action with a passing health verdict."
+    )
+    lines = render_lines(make_report())
+    at = lines.index("### 1.9 Enablement effect")
+    assert lines[at + 2] == (
+        "New strategy families are not registered and live enablement is refused until an "
+        "explicit human decision record clears this state."
+    )
+    assert lines[at + 3 : at + 5] == ["", closing]
+    early = render_lines(make_report(as_of_utc=parse_utc("2026-12-19T00:00:00+00:00")))
+    at = early.index("### 1.9 Enablement effect")
+    assert early[at + 2] == operator_sentence
+    assert early[at + 4] == closing
+    passing = render_lines(with_range_mr_passing())
+    at = passing.index("### 1.9 Enablement effect")
+    assert passing[at + 2] == operator_sentence
+    assert passing[at + 4] == closing
+
+
+def test_evidence_overview_rows_caption_and_live_sentence() -> None:
+    report = make_report()
+    lines = render_lines(report)
+    assert lines[lines.index("## 2. Evidence Overview") + 2] == (
+        "*Evidence: BACKTEST | PAPER | LIVE (separate rows, not pooled)*"
+    )
+    table = table_after(lines, "## 2. Evidence Overview")
+    assert table == [
+        "| Evidence | Has data | Outcomes (n) | Lifecycle records | NO_TRADE rows | INCOMPLETE |",
+        "| :--- | :--- | ---: | ---: | ---: | ---: |",
+        "| BACKTEST | YES | 2 | 2 | 0 | 15 |",
+        "| PAPER | YES | 0 | 2 | 2 | 10 |",
+        "| LIVE | NO | 0 | 0 | 0 | 0 |",
+    ]
+    sentence = (
+        "No LIVE evidence rows exist yet. Backtest and paper sections are complete; "
+        "live-5 sections populate when live journal rows appear."
+    )
+    assert lines[lines.index(table[-1]) + 2] == sentence
+    for kind, expected in ((EvidenceKind.BACKTEST, 15), (EvidenceKind.PAPER, 10)):
+        total = sum(e.count for e in report.incomplete_ledger if e.evidence is kind)
+        assert total == expected
+
+
+def test_sections_are_composed_in_the_fixed_order_with_the_h2_spacing_rule() -> None:
+    assert SECTION_TITLES == (
+        "1. Kill Gate",
+        "2. Evidence Overview",
+        "3. Full Report (unsliced)",
+        "4. Dual Universe: Live-5 vs Research",
+        "5. Approval-Delay Impact",
+        "6. Execution Quality",
+        "7. MFE / MAE",
+        "8. Robustness Slices",
+        "9. Incomplete and Excluded Inputs",
+        "10. Provenance",
+    )
+    lines = render_lines(make_report())
+    h2 = [line for line in lines if line.startswith("## ")]
+    assert h2 == ["## 1. Kill Gate", "## 2. Evidence Overview"]
+    for heading in h2:
+        at = lines.index(heading)
+        assert lines[at - 3 : at] == ["", "---", ""]
+        assert lines[at + 1] == ""
+
+
+HOSTILE_ID = "fam|`<b>x</b>`\nrow" + "y" * 300
+HOSTILE_REF = "DEC|`<script>alert(1)</script>`\r\nnext" + chr(7)
+
+
+def test_hostile_strings_cannot_break_tables_or_inject_markup() -> None:
+    base = build_report_inputs()
+    families = (
+        dataclasses.replace(base.families[0], family_id=HOSTILE_ID, decision_ref=HOSTILE_REF),
+        *base.families[1:],
+    )
+    report = make_report(families=families, family_gate_facts={})
+    text = render_markdown(report)
+    assert "<b>" not in text and "<script>" not in text
+    assert "`" not in text
+    assert chr(7) not in text
+    assert "...[truncated]" in text
+    lines = text.split("\n")
+    header_pipes: dict[int, int] = {}
+    block_start = 0
+    for number, line in enumerate(lines):
+        if line.startswith("|"):
+            if number == 0 or not lines[number - 1].startswith("|"):
+                block_start = number
+                header_pipes[block_start] = unescaped_pipes(line)
+            assert unescaped_pipes(line) == header_pipes[block_start], line
+    assert any("&lt;b&gt;" in line for line in lines), "hostile id must render, escaped"
+    assert any(line.startswith("- DEC" + BACKSLASH + "|") for line in lines)
+
+
+def test_reserved_vocabulary_scan_finds_none_and_detects_an_injected_word() -> None:
+    assert find_reserved("This is the BEST result") == ["BEST"]
+    assert find_reserved("Recommended and optimized to improve; should tune") != []
+    assert find_reserved("an edge found here") != []
+    assert find_reserved("Baseline-compared INSUFFICIENT_EDGE not an error") == []
+    early = make_report(as_of_utc=parse_utc("2026-12-19T00:00:00+00:00"))
+    for report in (make_report(), early, with_range_mr_passing()):
+        text = render_markdown(report)
+        assert find_reserved(text) == []
+        assert find_reserved(text + "\nThe best family") != []
+    for sentence in STATE_SENTENCES.values():
+        assert find_reserved(sentence) == []
+
+
+def test_render_sources_contain_no_advisory_wording() -> None:
+    for name in ("render_killgate.py", "render_common.py", "render.py"):
+        source = (REPO_ROOT / "src" / "analytics" / name).read_text(encoding="utf-8")
+        assert find_reserved(source) == [], name
+
+
+def test_output_carries_no_ambient_state() -> None:
+    text = render_markdown(make_report())
+    host = socket.gethostname()
+    assert len(host) < 4 or host.lower() not in text.lower()
+    assert os.getcwd() not in text
+    assert str(REPO_ROOT) not in text
+    assert "C:" + BACKSLASH not in text and "/Users/" not in text
+
+
+def test_golden_sections_0_2_is_byte_exact() -> None:
+    expected = GOLDEN_PATH.read_bytes()
+    assert render_markdown(make_report()).encode("utf-8") == expected
+    assert b"\r" not in expected
+    assert expected.endswith(b"\n") and not expected.endswith(b"\n\n")
+    assert not expected.startswith(bytes([0xEF, 0xBB, 0xBF]))
