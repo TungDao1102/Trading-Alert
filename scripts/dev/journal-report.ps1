@@ -11,7 +11,8 @@
 #   -AsOf <ISO-8601 with UTC offset>  report instant; omitted = the clock is read once at the edge
 #   -OutDir <path>                    output directory (must stay under data/reports)
 #   -Universe <path>                  research-universe file
-#   -Evidence <path>                  analytics evidence file (backtest + paper records)
+#   -Evidence <path>                  analytics evidence file (backtest + paper records); required
+#                                     with -Record and whenever a family decision is TESTED_*
 #   -Decisions <path>                 human decision record (default docs/research/kill_gate_decisions.json)
 #   -RawRoot <path>                   1m candle store root (default data/raw)
 #   -Record                           append ONE KILL_GATE_EVALUATION journal event (idempotent);
@@ -25,7 +26,7 @@
 #
 # Usage:
 #   scripts/dev/journal-report.ps1 -NoDb -AsOf 2027-04-01T00:00:00+00:00 -Evidence <file>
-#   scripts/dev/journal-report.ps1 -Record
+#   scripts/dev/journal-report.ps1 -Record -Evidence <file>
 
 [CmdletBinding()]
 param(

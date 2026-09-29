@@ -56,7 +56,7 @@ from src.adapters.analytics_store import (
     read_live_rows,
 )
 from src.analytics.clock import clock_start_from_protocol
-from src.analytics.family import KillGateInputError
+from src.analytics.family import FamilyStatus, KillGateInputError
 from src.analytics.inputs import normalize_backtest
 from src.analytics.killgate import (
     KILL_GATE_EVENT_TYPE,
@@ -389,6 +389,12 @@ def _merge_priors(
 
 def _build_inputs(args: CliArgs, as_of: datetime, database: _DatabaseData | None) -> ReportInputs:
     decisions: DecisionsFile = load_decisions_file(args.decisions)
+    if args.evidence is None and any(
+        decision.status is not FamilyStatus.NOT_TESTED for decision in decisions.families
+    ):
+        raise AnalyticsInputError(
+            "recorded TESTED_* family decisions cite experiments; pass --evidence with them"
+        )
     evidence = None if args.evidence is None else load_evidence_file(args.evidence)
     entries = () if evidence is None else evidence.backtest
     scan = scan_family_facts(
@@ -670,6 +676,9 @@ def _run(args: CliArgs, now_fn: ClockFn | None, session_factory_fn: SessionFacto
     database_url = _database_url(args)
     if args.record and database_url is None:
         raise _UsageError("--record requires a database (DATABASE_URL set and --no-db absent)")
+    if args.record and args.evidence is None:
+        # WR-09: a journaled verdict must be derived from the evidence the decisions cite.
+        raise _UsageError("--record requires --evidence (the analytics evidence file)")
     factory_fn = make_session_factory if session_factory_fn is None else session_factory_fn
     as_of = _resolve_as_of(args, now_fn)
     out_dir = confine_output_dir(args.out_dir, args.reports_root).resolve()

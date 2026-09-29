@@ -983,6 +983,54 @@ def test_committed_recorded_terminal_is_cleared_by_a_later_recorded_reset(
     assert _stdout_lines(out)[3] == "Kill gate: WITHIN_BUDGET"
 
 
+def test_record_without_an_evidence_file_exits_two_and_writes_nothing(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WR-09: a recorded verdict is always derived from the evidence the decisions cite."""
+    store = _FakeStore()
+    argv = [item for item in env.argv("--record") if item != str(env.evidence)]
+    argv.remove("--evidence")
+    monkeypatch.setenv("DATABASE_URL", DATABASE_URL)
+    code, out, err = _run(
+        capsys,
+        argv,
+        session_factory_fn=_FakeFactory(store).factory_fn,
+        now_fn=lambda: RECORD_NOW,
+    )
+    assert code == 2
+    assert out == ""
+    assert "--record requires --evidence" in err
+    assert store.inserts() == []
+    assert env.files() == []
+
+
+def test_tested_decisions_without_an_evidence_file_fail_with_a_clear_reason(
+    env: _Env, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    development = _candidate_experiment("trend-pullback", "dev")
+    validation = _candidate_experiment("trend-pullback", "val")
+    env.decisions = _decisions_file(
+        tmp_path,
+        [
+            {
+                "family_id": "trend-pullback",
+                "status": "TESTED_FAIL",
+                "decision_ref": "DEC-TEST-trend",
+                "decided_at_utc": "2026-12-01T00:00:00+00:00",
+                "development_experiment_ids": [development["experiment"]["experiment_id"]],
+                "validation_experiment_ids": [validation["experiment"]["experiment_id"]],
+            }
+        ],
+    )
+    argv = [item for item in env.argv() if item != str(env.evidence)]
+    argv.remove("--evidence")
+    code, out, err = _run(capsys, argv)
+    assert code == 1
+    assert out == ""
+    assert "--evidence" in err
+    assert env.files() == []
+
+
 def test_record_refuses_a_future_as_of_and_writes_nothing(
     env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
