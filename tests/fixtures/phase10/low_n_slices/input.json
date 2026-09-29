@@ -1,0 +1,12 @@
+{
+  "description": "Tracer set: 6 filled BACKTEST outcomes (BTC 3, ETH 2, SOL 1) plus one TOUCH_NO_FILL BTC outcome. Rows are deliberately NOT in symbol or exit-time order. Global R sequence in exit-time order: 1.0 (BTC), -1.0 (BTC), 0.5 (ETH), 2.0 (BTC), -0.5 (ETH), 1.5 (SOL).",
+  "tracer_outcomes": [
+    {"trade_id": "T6", "symbol": "SOLUSDT", "direction": "LONG", "entry_time_utc": "2026-01-10T08:00:00+00:00", "exit_time_utc": "2026-01-10T12:00:00+00:00", "exit_kind": "TP1", "realized_pnl": "15", "realized_risk": "10"},
+    {"trade_id": "T3", "symbol": "ETHUSDT", "direction": "LONG", "entry_time_utc": "2026-01-07T08:00:00+00:00", "exit_time_utc": "2026-01-07T12:00:00+00:00", "exit_kind": "TP1", "realized_pnl": "5", "realized_risk": "10"},
+    {"trade_id": "T1", "symbol": "BTCUSDT", "direction": "LONG", "entry_time_utc": "2026-01-05T08:00:00+00:00", "exit_time_utc": "2026-01-05T12:00:00+00:00", "exit_kind": "TP1", "realized_pnl": "10", "realized_risk": "10"},
+    {"trade_id": "T7", "symbol": "BTCUSDT", "direction": "LONG", "entry_kind": "TOUCH_NO_FILL"},
+    {"trade_id": "T5", "symbol": "ETHUSDT", "direction": "SHORT", "entry_time_utc": "2026-01-09T08:00:00+00:00", "exit_time_utc": "2026-01-09T12:00:00+00:00", "exit_kind": "SL", "realized_pnl": "-5", "realized_risk": "10"},
+    {"trade_id": "T4", "symbol": "BTCUSDT", "direction": "LONG", "entry_time_utc": "2026-01-08T08:00:00+00:00", "exit_time_utc": "2026-01-08T12:00:00+00:00", "exit_kind": "TP2", "realized_pnl": "20", "realized_risk": "10"},
+    {"trade_id": "T2", "symbol": "BTCUSDT", "direction": "SHORT", "entry_time_utc": "2026-01-06T08:00:00+00:00", "exit_time_utc": "2026-01-06T12:00:00+00:00", "exit_kind": "SL", "realized_pnl": "-10", "realized_risk": "10"}
+  ]
+}

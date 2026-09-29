@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from src.analytics.lifecycle import LifecyclePath, LifecycleRecord
-from src.analytics.types import EvidenceKind
+from src.analytics.types import EvidenceKind, TradeOutcome
 from src.backtest.simulator import TradeRecord
 from src.core.types import Candle
 from src.paper.attribution import AttributionKind
@@ -190,3 +190,61 @@ def make_lifecycle_record(**overrides: Any) -> LifecycleRecord:
         else:
             fields[name] = value
     return LifecycleRecord(**fields)
+
+
+_OUTCOME_DEFAULTS: dict[str, Any] = {
+    "evidence": EvidenceKind.BACKTEST,
+    "trade_id": "T-DEFAULT",
+    "signal_id": None,
+    "strategy_version": "v2.0.0",
+    "parameter_set_hash": "a" * 64,
+    "symbol": "BTCUSDT",
+    "direction": "LONG",
+    "entry_kind": "ENTRY_FILLED",
+    "entry_price": None,
+    "entry_time_utc": None,
+    "exit_kind": None,
+    "exit_price": None,
+    "exit_time_utc": None,
+    "quantity": None,
+    "realized_pnl": None,
+    "realized_risk": None,
+    "fallback_applied": False,
+    "intended_entry_price": None,
+    "regime": None,
+    "vol_regime": None,
+    "coverage_note": None,
+}
+_OUTCOME_DECIMALS = frozenset(
+    {
+        "entry_price",
+        "exit_price",
+        "quantity",
+        "realized_pnl",
+        "realized_risk",
+        "intended_entry_price",
+    }
+)
+
+
+def make_outcome(**overrides: Any) -> TradeOutcome:
+    """Build a TradeOutcome from JSON scalars (Decimals/datetimes/evidence parsed)."""
+    fields: dict[str, Any] = dict(_OUTCOME_DEFAULTS)
+    unknown = set(overrides) - set(fields)
+    if unknown:
+        raise KeyError(f"unknown TradeOutcome fields: {sorted(unknown)}")
+    for name, value in overrides.items():
+        if value is not None and name in _OUTCOME_DECIMALS:
+            fields[name] = D(value)
+        elif value is not None and name in _DATETIME_FIELDS:
+            fields[name] = parse_utc(value)
+        elif name == "evidence" and isinstance(value, str):
+            fields[name] = EvidenceKind(value)
+        else:
+            fields[name] = value
+    return TradeOutcome(**fields)
+
+
+def make_outcomes(rows: list[dict[str, Any]], **shared: Any) -> list[TradeOutcome]:
+    """Build outcomes from fixture rows; `shared` overrides apply under each row."""
+    return [make_outcome(**{**shared, **row}) for row in rows]

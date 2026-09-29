@@ -1,0 +1,27 @@
+{
+  "tracer": {
+    "all": {
+      "n": 7,
+      "n_r_valued": 6,
+      "zero_risk_excluded": 0,
+      "incomplete": 1,
+      "mean_r_numerator": "3.5",
+      "mean_r_denominator": 6,
+      "win_rate_numerator": 4,
+      "win_rate_denominator": 6,
+      "max_drawdown_r": "1",
+      "loss_streak_max": 1,
+      "low_n": true,
+      "interval_absent": false
+    },
+    "symbol_table": {
+      "slice_count": 3,
+      "total_n": 7,
+      "rows": [
+        {"key": "BTCUSDT", "n": 4, "n_r_valued": 3, "low_n": true},
+        {"key": "ETHUSDT", "n": 2, "n_r_valued": 2, "low_n": true},
+        {"key": "SOLUSDT", "n": 1, "n_r_valued": 1, "low_n": true}
+      ]
+    }
+  }
+}
