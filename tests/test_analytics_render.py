@@ -20,6 +20,7 @@ import pytest
 from src.analytics.family import FamilyStatus
 from src.analytics.gates import GATE_IDS, GATE_LABELS
 from src.analytics.killgate import PriorEvaluation, ResetRecord
+from src.analytics.lifecycle import LifecyclePath
 from src.analytics.no_trade import NoTradeCategory, NoTradeRow
 from src.analytics.render import SECTION_TITLES, render_markdown
 from src.analytics.render_common import (
@@ -42,10 +43,11 @@ from src.analytics.render_common import (
     md_table,
 )
 from src.analytics.render_killgate import STATE_SENTENCES, render_header
+from src.analytics.report import EvidenceInputs, IncompleteEntry
 from src.analytics.types import AnalyticsInputError, Estimate, EvidenceKind
-from src.domain.enums import KillGateState
+from src.domain.enums import ApprovalResult, KillGateState
 
-from tests.phase10_helpers import parse_utc
+from tests.phase10_helpers import make_lifecycle_record, parse_utc
 from tests.test_analytics_report import build_report_inputs
 
 CASE_AS_OF = "2027-04-01T00:00:00+00:00"
@@ -962,3 +964,451 @@ def test_tracer_sections_3_and_4() -> None:
             assert ESTIMATE_SHAPE.match(cell), line
     assert find_reserved("\n".join(body_lines)) == []
     assert render_markdown(make_report()) == text
+
+
+# --------------------------------------------------------------------------- #
+# Plan 10-11 Task 2: Sections 5-10 and the full Markdown golden
+# --------------------------------------------------------------------------- #
+
+FULL_GOLDEN_PATH = GOLDEN_PATH.parent / "expected.md"
+DELAY_TITLE = "5. Approval-Delay Impact"
+EXEC_TITLE = "6. Execution Quality"
+EXCURSION_TITLE = "7. MFE / MAE"
+SLICES_TITLE = "8. Robustness Slices"
+INCOMPLETE_TITLE = "9. Incomplete and Excluded Inputs"
+PROVENANCE_TITLE = "10. Provenance"
+
+E1_LABELS = (
+    "Signal created -> seen",
+    "Signal created -> delivery requested (proxy)",
+    "Delivery requested -> approved",
+    "Signal created -> approved",
+    "Approved -> order placed",
+    "Order placed -> filled (wait-to-fill)",
+    "Fill %",
+    "Expiry without fill rate",
+    "Entry deviation (price, signed; positive = worse)",
+    "Entry deviation (bps of intended)",
+)
+X1_LABELS = (
+    "MFE (price)",
+    "MAE (price)",
+    "MFE (R)",
+    "MAE (R)",
+    "Time to MFE",
+    "Time to MAE",
+    "Holding duration",
+)
+DIAGNOSTIC_HEADINGS = (
+    "MFE (R) of stop-loss exits",
+    "MAE (R) of take-profit exits",
+    "MFE (R) vs realized R (give-back)",
+    "Holding duration distribution",
+)
+SLICE_H3 = (
+    "8.1 Symbol",
+    "8.2 Month",
+    "8.3 Quarter",
+    "8.4 Session",
+    "8.5 Direction (long/short)",
+    "8.6 Volatility regime",
+    "8.7 Trend/range regime",
+    "8.8 Strategy version",
+)
+S1_HEADER = (
+    "| Slice key | n | R-valued n | Mean R [interval] | Win rate | Expectancy (R) "
+    "| Low-n | Evidence |"
+)
+SEEN_SENTENCE = (
+    "INCOMPLETE (NO_SEEN_TIMESTAMP): no read-receipt is journaled. "
+    "Only delivery-request time is available as a proxy."
+)
+
+
+def with_live_lifecycle():  # type: ignore[no-untyped-def]
+    """The composite report plus LIVE lifecycle rows spanning three delay buckets."""
+
+    def record(name: str, approved: str):  # type: ignore[no-untyped-def]
+        return make_lifecycle_record(
+            source_id=name,
+            signal_id=name,
+            path=LifecyclePath.USER_EXECUTED,
+            approval_result=ApprovalResult.APPROVED,
+            signal_detected_at_utc="2026-01-05T10:00:00+00:00",
+            delivery_requested_at_utc="2026-01-05T10:00:02+00:00",
+            approved_at_utc=approved,
+        )
+
+    lifecycle = (
+        record("LIVE-A", "2026-01-05T10:00:20+00:00"),
+        record("LIVE-B", "2026-01-05T10:02:00+00:00"),
+        record("LIVE-C", "2026-01-05T10:10:00+00:00"),
+    )
+    return make_report(live=EvidenceInputs(kind=EvidenceKind.LIVE, lifecycle=lifecycle))
+
+
+def test_section5_per_kind_tables_rows_and_closing_sentence() -> None:
+    lines = section_lines(render_markdown(make_report()), DELAY_TITLE)
+    assert lines[0] == "## 5. Approval-Delay Impact"
+    headings = [line for line in lines if line.startswith("### ")]
+    assert headings == [f"### 5.{index} {kind}" for index, kind in enumerate(KINDS, start=1)]
+    header = (
+        "| Metric | System (all valid signals) | User execution (approved only) "
+        "| Opportunity (skipped/expired) |"
+    )
+    assert lines.count(header) == 3
+    rows = {row[0]: row for row in data_rows(table_after(lines, "### 5.1 BACKTEST"))}
+    assert list(rows) == ["Signals (n)", "Mean R", "Expectancy (R)", "Win rate", "INCOMPLETE"]
+    assert rows["Signals (n)"] == ["Signals (n)", "2", "0", "0"]
+    assert rows["Mean R"][1] == "0.8000 [0.8000, 0.8000] n=2"
+    assert rows["Mean R"][2] == rows["Mean R"][3] == "no data"
+    assert rows["Expectancy (R)"][1] == "0.8000"
+    assert rows["Win rate"][1] == "1.0000"
+    assert rows["INCOMPLETE"][1:] == ["0", "0", "0"]
+    assert lines[-1] == "Differences between columns describe selection and timing effects only."
+    for index, kind in enumerate(KINDS, start=1):
+        at = lines.index(f"### 5.{index} {kind}")
+        assert lines[at + 2] == f"*Evidence: {kind}*"
+
+
+def test_section5_paper_carries_synthetic_lag_label_and_no_bucket_table() -> None:
+    lines = section_lines(render_markdown(make_report()), DELAY_TITLE)
+    label = "SYNTHETIC LAG (APPROVAL_DELAY_LAG_SECONDS=30)"
+    assert lines.count(label) == 1
+    paper = lines[lines.index("### 5.2 PAPER") : lines.index("### 5.3 LIVE")]
+    assert label in paper
+    assert not any(line.startswith("| Signal-to-approve bucket") for line in paper)
+    rows = {row[0]: row for row in data_rows(table_after(lines, "### 5.2 PAPER"))}
+    assert rows["Mean R"][1] == "INCOMPLETE (no hypothetical outcome)"
+    assert rows["Mean R"][3] == "INCOMPLETE (no hypothetical outcome)"
+    assert rows["Mean R"][2] == "INCOMPLETE (NO_PAPER_OUTCOME)"
+    assert rows["INCOMPLETE"][1] == "2 (NO_HYPOTHETICAL_OUTCOME: 1; NO_PAPER_OUTCOME: 1)"
+    assert rows["INCOMPLETE"][3] == "1 (NO_HYPOTHETICAL_OUTCOME: 1)"
+    backtest = lines[lines.index("### 5.1 BACKTEST") : lines.index("### 5.2 PAPER")]
+    assert not any(line.startswith("| Signal-to-approve bucket") for line in backtest)
+
+
+def test_section5_live_prints_four_bucket_rows_in_fixed_order_and_distribution_line() -> None:
+    lines = section_lines(render_markdown(with_live_lifecycle()), DELAY_TITLE)
+    live = lines[lines.index("### 5.3 LIVE") :]
+    at = live.index("| Signal-to-approve bucket | n | Mean R | Low-n |")
+    table = live[at:]
+    table = table[: next(i for i, line in enumerate(table) if not line.startswith("|"))]
+    assert table[1] == "| :--- | ---: | :--- | :--- |"
+    rows = data_rows(table)
+    assert [row[0] for row in rows] == ["<1m", "1-5m", "5-30m", ">=30m"]
+    assert [row[1] for row in rows] == ["1", "1", "1", "0"]
+    assert all(row[3] == "LOW_N" for row in rows)
+    assert rows[3][2] == "no data"
+    assert any(line.startswith("Measured signal-to-approve distribution: n=3") for line in live)
+    assert not any("SYNTHETIC LAG" in line for line in live)
+
+
+def test_section6_row_labels_units_seen_sentence_and_rate_rows() -> None:
+    lines = section_lines(render_markdown(make_report()), EXEC_TITLE)
+    assert lines[0] == "## 6. Execution Quality"
+    header = "| Leg / metric | n measured | n INCOMPLETE | Mean | Median | p90 | Unit |"
+    assert lines.count(header) == 3
+    assert lines.count(SEEN_SENTENCE) == 1
+    first_table_end = lines.index("### 6.2 PAPER")
+    assert SEEN_SENTENCE in lines[:first_table_end]
+    for index, kind in enumerate(KINDS, start=1):
+        rows = data_rows(table_after(lines, f"### 6.{index} {kind}"))
+        assert [row[0] for row in rows] == list(E1_LABELS)
+        assert [row[6] for row in rows] == ["s"] * 6 + ["%", "%", "price", "bps"]
+        assert rows[0][4:6] == ["INCOMPLETE", "INCOMPLETE"]
+        assert rows[0][3] == "INCOMPLETE (NO_SEEN_TIMESTAMP)"
+    backtest = {row[0]: row for row in data_rows(table_after(lines, "### 6.1 BACKTEST"))}
+    assert backtest["Signal created -> delivery requested (proxy)"][1:4] == [
+        "0",
+        "2",
+        "INCOMPLETE (NOT_MEASURED_FOR_EVIDENCE)",
+    ]
+    assert backtest["Fill %"] == ["Fill %", "2", "-", "100.00%", "-", "-", "%"]
+    assert backtest["Expiry without fill rate"][3] == "0.00%"
+    assert backtest["Entry deviation (price, signed; positive = worse)"][3] == (
+        "INCOMPLETE (NO_INTENDED_PRICE)"
+    )
+    paper = {row[0]: row for row in data_rows(table_after(lines, "### 6.2 PAPER"))}
+    assert paper["Signal created -> approved"] == [
+        "Signal created -> approved",
+        "1",
+        "0",
+        "30.0 [interval absent] n=1",
+        "30.0",
+        "30.0",
+        "s",
+    ]
+    assert paper["Order placed -> filled (wait-to-fill)"][4] == "420.0"
+    live = {row[0]: row for row in data_rows(table_after(lines, "### 6.3 LIVE"))}
+    assert live["Fill %"][3] == "no data"
+    assert live["Signal created -> approved"][3] == "no data"
+    assert lines.count("SYNTHETIC LAG (APPROVAL_DELAY_LAG_SECONDS=30)") == 1
+
+
+def test_section7_rows_units_diagnostic_tables_and_fixed_lines() -> None:
+    lines = section_lines(render_markdown(make_report()), EXCURSION_TITLE)
+    assert lines[0] == "## 7. MFE / MAE"
+    header = "| Measure | n | Mean | Median | p90 | Unit | Low-n |"
+    assert lines.count(header) == 3
+    rows = {row[0]: row for row in data_rows(table_after(lines, "### 7.1 BACKTEST"))}
+    assert list(rows) == list(X1_LABELS)
+    assert [rows[label][5] for label in X1_LABELS] == ["price", "price", "R", "R", "s", "s", "s"]
+    assert rows["MFE (price)"][1] == "2"
+    assert rows["MFE (price)"][3:5] == ["2.90", "4.580"]
+    assert rows["MFE (price)"][2].startswith("2.90 [")
+    assert rows["MFE (R)"][3:5] == ["0.5800", "0.9160"]
+    assert rows["Time to MFE"][3:5] == ["45.0", "81.0"]
+    assert rows["Holding duration"][3:5] == ["160.0", "160.0"]
+    assert all(rows[label][6] == "LOW_N" for label in X1_LABELS)
+    paper = {row[0]: row for row in data_rows(table_after(lines, "### 7.2 PAPER"))}
+    assert paper["MFE (price)"][1:5] == ["0", "no data", "no data", "no data"]
+    for heading in DIAGNOSTIC_HEADINGS:
+        first_cell = [line for line in lines if line.startswith(f"| {heading} |")]
+        assert len(first_cell) == 3, heading
+    diag = data_rows(table_after(lines, "### 7.1 BACKTEST"))
+    assert len(diag) == 7
+    assert "Window: entry minute through exit minute, inclusive, 1m high/low. " in "\n".join(lines)
+    assert (
+        lines.count(
+            "These distributions are descriptive. They imply no change to take-profit, "
+            "stop-loss, entry, or holding rules."
+        )
+        == 1
+    )
+
+
+def test_section8_eight_dimension_tables_each_led_by_the_all_row_per_kind() -> None:
+    lines = section_lines(render_markdown(make_report()), SLICES_TITLE)
+    assert lines[0] == "## 8. Robustness Slices"
+    assert lines[2] == (
+        "Every slice table starts with the unsliced ALL row. "
+        "Slices are ordered by key, never by result."
+    )
+    headings = [line for line in lines if line.startswith("### ")]
+    assert headings == [f"### {title}" for title in SLICE_H3]
+    assert lines.count(S1_HEADER) == 8
+    symbol = lines[lines.index("### 8.1 Symbol") :]
+    assert symbol[2] == "(BACKTEST 2 slices, n=2; PAPER 0 slices, n=0; LIVE 0 slices, n=0)"
+    assert symbol[4] == "*Evidence: BACKTEST | PAPER | LIVE (separate rows, not pooled)*"
+    for title in SLICE_H3:
+        rows = data_rows(table_after(lines, f"### {title}"))
+        assert rows[0][0] == "ALL (unsliced)" and rows[0][7] == "BACKTEST"
+        kinds = [row[7] for row in rows]
+        assert kinds == sorted(kinds, key=KINDS.index)
+        for kind in KINDS:
+            group = [row for row in rows if row[7] == kind]
+            assert group[0][0] == "ALL (unsliced)"
+    rows = data_rows(table_after(lines, "### 8.1 Symbol"))
+    assert [row[0] for row in rows] == [
+        "ALL (unsliced)",
+        "BTCUSDT",
+        "ETHUSDT",
+        "ALL (unsliced)",
+        "ALL (unsliced)",
+    ]
+    assert rows[0] == [
+        "ALL (unsliced)",
+        "2",
+        "2",
+        "0.8000 [0.8000, 0.8000] n=2",
+        "1.0000",
+        "0.8000",
+        "LOW_N",
+        "BACKTEST",
+    ]
+    assert rows[3] == [
+        "ALL (unsliced)",
+        "0",
+        "0",
+        "no data",
+        "no data",
+        "no data",
+        "LOW_N",
+        "PAPER",
+    ]
+    session = lines[lines.index("### 8.4 Session") :]
+    assert "Session bands (UTC hour of entry time): ASIA 00-08, EUROPE 08-16, US 16-24" in session
+    volatility = lines[lines.index("### 8.6 Volatility regime") :]
+    assert "Volatility regime is UNKNOWN until a derivation lands." in volatility
+    assert lines[-1] == LOW_N_LEGEND_TEXT
+    vol_rows = data_rows(table_after(lines, "### 8.6 Volatility regime"))
+    assert [row[0] for row in vol_rows][:2] == ["ALL (unsliced)", "UNKNOWN"]
+
+
+def test_section8_slices_are_ordered_by_key_low_n_rows_stay_and_nothing_is_emphasised() -> None:
+    outcomes = base_outcomes()
+    extra = dataclasses.replace(outcomes[0], trade_id="T-ADA", symbol="ADAUSDT")
+    lines = section_lines(render_markdown(with_backtest_outcomes([*outcomes, extra])), SLICES_TITLE)
+    rows = data_rows(table_after(lines, "### 8.1 Symbol"))
+    backtest = [row for row in rows if row[7] == "BACKTEST"]
+    assert [row[0] for row in backtest] == ["ALL (unsliced)", "ADAUSDT", "BTCUSDT", "ETHUSDT"]
+    assert all(row[6] == "LOW_N" for row in backtest)
+    assert not any("**" in line for line in lines)
+    heading_count = "### 8.1 Symbol"
+    assert "(BACKTEST 3 slices, n=3;" in lines[lines.index(heading_count) + 2]
+
+
+def test_section9_ledger_rows_zero_risk_and_rejected_row_copy() -> None:
+    report = make_report()
+    lines = section_lines(render_markdown(report), INCOMPLETE_TITLE)
+    assert lines[0] == "## 9. Incomplete and Excluded Inputs"
+    header = "| Evidence | Input | Reason | Count |"
+    rows = data_rows(table_after(lines, "## 9. Incomplete and Excluded Inputs"))
+    assert lines.count(header) == 1
+    expected = [
+        [entry.evidence.value, entry.input_name, entry.reason, str(entry.count)]
+        for entry in report.incomplete_ledger
+    ]
+    assert rows[: len(expected)] == expected
+    assert any(row[2] == "MALFORMED_ROW" for row in rows)
+    tail = "rows rejected (MALFORMED_ROW). The report was produced without them. "
+    rejected = [line for line in lines if tail in line]
+    assert rejected == [
+        "adapter.rejected_rows: 1 rows rejected (MALFORMED_ROW). "
+        "The report was produced without them. Fix the input and regenerate."
+    ]
+    assert "No incomplete or excluded inputs." not in lines
+    assert not any(line.startswith("Unmatched:") for line in lines)
+
+
+def test_section9_empty_ledger_unmatched_sentence_and_zero_risk_rows() -> None:
+
+    report = make_report()
+    empty = dataclasses.replace(report, incomplete_ledger=())
+    lines = section_lines(render_markdown(empty), INCOMPLETE_TITLE)
+    assert "No incomplete or excluded inputs." in lines
+    assert not any(line.startswith("| Evidence |") for line in lines)
+    entries = (
+        IncompleteEntry(EvidenceKind.BACKTEST, "core_metrics", "ZERO_RISK", 2),
+        IncompleteEntry(EvidenceKind.LIVE, "lifecycle.join", "UNMATCHED_JOIN", 3),
+        IncompleteEntry(EvidenceKind.LIVE, "lifecycle.join_b", "UNMATCHED_JOIN", 4),
+    )
+    lines = section_lines(
+        render_markdown(dataclasses.replace(report, incomplete_ledger=entries)), INCOMPLETE_TITLE
+    )
+    rows = data_rows(table_after(lines, "## 9. Incomplete and Excluded Inputs"))
+    assert rows == [
+        ["BACKTEST", "core_metrics", "ZERO_RISK", "2"],
+        ["LIVE", "lifecycle.join", "UNMATCHED_JOIN", "3"],
+        ["LIVE", "lifecycle.join_b", "UNMATCHED_JOIN", "4"],
+    ]
+    unmatched = (
+        "Unmatched: 7 rows could not be joined to a signal or order. They are counted, not dropped."
+    )
+    assert lines.count(unmatched) == 1
+    assert "No incomplete or excluded inputs." not in lines
+
+
+def test_section9_counts_md_cell_truncations_as_a_render_row() -> None:
+    long_ref = "x" * 300
+    base = build_report_inputs()
+    families = tuple(
+        dataclasses.replace(family, status=FamilyStatus.TESTED_PASS, decision_ref=long_ref)
+        if family.family_id == "range-mr"
+        else family
+        for family in base.families
+    )
+    text = render_markdown(make_report(families=families))
+    marker_count = text.count(TRUNCATION_MARKER)
+    assert marker_count >= 1
+    lines = section_lines(text, INCOMPLETE_TITLE)
+    rows = data_rows(table_after(lines, "## 9. Incomplete and Excluded Inputs"))
+    assert ["-", "render", "TEXT_TRUNCATED", str(marker_count)] in rows
+    clean = section_lines(render_markdown(make_report()), INCOMPLETE_TITLE)
+    assert "TEXT_TRUNCATED" not in "\n".join(clean)
+
+
+def test_section10_field_order_hash_prefixes_and_experiment_sub_rows() -> None:
+    report = make_report()
+    lines = section_lines(render_markdown(report), PROVENANCE_TITLE)
+    assert lines[0] == "## 10. Provenance"
+    rows = data_rows(table_after(lines, "## 10. Provenance"))
+    assert [row[0] for row in rows] == [
+        "strategyVersion",
+        "parameterSetId",
+        "parameterSetHash",
+        "experiment identity (BACKTEST)",
+        "universe hash",
+        "dataset/version identifiers",
+        "epoch_id (paper)",
+        "APPROVAL_DELAY_LAG_SECONDS",
+        "LOW_N_THRESHOLD",
+        "resamples",
+        "base_seed",
+        "slice vocabulary version",
+        "session bands",
+        "evidence kinds present",
+    ]
+    values = {row[0]: row[1] for row in rows}
+    provenance = report.provenance
+    assert values["strategyVersion"] == "v2.0.0"
+    assert values["parameterSetHash"] == "a" * 12
+    experiment = provenance.experiments[0]
+    assert values["experiment identity (BACKTEST)"] == (
+        f"experiment_id={experiment.experiment_id[:12]}; "
+        f"strategy_version={experiment.strategy_version}; "
+        f"parameter_set_id={experiment.parameter_set_id}; "
+        f"parameter_set_hash={experiment.parameter_set_hash[:12]}; "
+        f"data_snapshot_id={experiment.data_snapshot_id[:12]}; "
+        f"code_version={experiment.code_version}; "
+        f"cost_model_hash={experiment.cost_model_hash[:12]}"
+    )
+    assert values["universe hash"] == f"{provenance.research_universe_hash[:12]} (VERIFIED)"
+    assert values["APPROVAL_DELAY_LAG_SECONDS"] == "30"
+    assert values["LOW_N_THRESHOLD"] == "30"
+    assert values["resamples"] == "100"
+    assert values["base_seed"] == "20260929"
+    assert values["slice vocabulary version"] == "slices/1"
+    assert values["session bands"] == "ASIA 00-08, EUROPE 08-16, US 16-24"
+    assert values["evidence kinds present"] == "BACKTEST, PAPER"
+    assert len(experiment.experiment_id) == 64
+    assert experiment.experiment_id not in "\n".join(lines)
+
+
+def test_full_document_has_all_ten_sections_in_order_and_every_section_renders_when_empty() -> None:
+
+    text = render_markdown(make_report())
+    positions = [text.index(f"## {title}") for title in SECTION_TITLES]
+    assert positions == sorted(positions)
+    lines = text.split("\n")
+    h2 = [line for line in lines if line.startswith("## ")]
+    assert h2 == [f"## {title}" for title in SECTION_TITLES]
+    for heading in h2:
+        at = lines.index(heading)
+        assert lines[at - 3 : at] == ["", "---", ""]
+        assert lines[at + 1] == ""
+    empty = make_report(
+        backtest=EvidenceInputs(kind=EvidenceKind.BACKTEST),
+        paper=EvidenceInputs(kind=EvidenceKind.PAPER),
+        live=EvidenceInputs(kind=EvidenceKind.LIVE),
+    )
+    empty_text = render_markdown(empty)
+    assert [line for line in empty_text.split("\n") if line.startswith("## ")] == h2
+    assert "No incomplete or excluded inputs." in empty_text
+
+
+def test_full_document_governance_scans() -> None:
+    for report in (make_report(), with_live_lifecycle()):
+        text = render_markdown(report)
+        assert find_reserved(text) == []
+        assert "\r" not in text
+        metric_lines: list[str] = []
+        for title in SECTION_TITLES[2:]:
+            metric_lines.extend(section_lines(text, title))
+        assert not any("**" in line for line in metric_lines)  # no favorability emphasis
+        for line in text.split("\n"):
+            assert line == line.rstrip()
+            if line.startswith("| "):
+                assert unescaped_pipes(line) >= 2
+
+
+def test_full_document_golden_is_byte_exact() -> None:
+    expected = FULL_GOLDEN_PATH.read_bytes()
+    assert render_markdown(make_report()).encode("utf-8") == expected
+    assert b"\r" not in expected
+    assert expected.endswith(b"\n") and not expected.endswith(b"\n\n")
+    assert not expected.startswith(bytes([0xEF, 0xBB, 0xBF]))
+    lines = expected.decode("utf-8").split("\n")
+    h2 = [line for line in lines if line.startswith("## ")]
+    assert h2 == [f"## {title}" for title in SECTION_TITLES]
