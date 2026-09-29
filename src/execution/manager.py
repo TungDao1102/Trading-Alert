@@ -362,10 +362,24 @@ class ProtectiveConfirmationVerdict:
             )
 
 
+def _require_safe_mode_controller(safe_mode_controller: Any, caller: str) -> None:
+    """Fail closed when no SAFE_MODE controller is wired (09-REVIEW CR-02).
+
+    A missing controller would silently drop the ENTRY_WITHOUT_PROTECTIVE
+    signal on the most safety-critical path, so it is a programming
+    error, raised before any adapter call.
+    """
+    if safe_mode_controller is None:
+        raise ValueError(
+            f"{caller}: safe_mode_controller is required (fail closed — an "
+            "unprotected entry must always be able to force SAFE_MODE)"
+        )
+
+
 def require_protective_confirmation(
     *,
     confirmed_roles: frozenset[str],
-    safe_mode_controller: Any | None,
+    safe_mode_controller: Any,
     now_utc: datetime,
 ) -> ProtectiveConfirmationVerdict:
     """Hold ENTRY_WITHOUT_PROTECTIVE when SL/TP1/TP2 are not all confirmed.
@@ -378,10 +392,10 @@ def require_protective_confirmation(
     Args:
         confirmed_roles: The set of `OrderRole` values confirmed on the
             exchange (e.g. `{"STOP_LOSS", "TAKE_PROFIT_1"}`).
-        safe_mode_controller: Optional `SafeModeController`-like object
+        safe_mode_controller: Required `SafeModeController`-like object
             (Protocol-typed via duck typing: only `enter_safe_mode` is
-            called). When None, SAFE_MODE composition is skipped
-            (unit-test / backtest compatibility).
+            called). `None` raises ValueError (fail closed — the
+            ENTRY_WITHOUT_PROTECTIVE signal must never be dropped).
         now_utc: The current UTC-aware datetime (injected, never the
             wall clock).
 
@@ -391,12 +405,10 @@ def require_protective_confirmation(
         `ProtectiveConfirmationVerdict(is_no_trade=True,
         reason_code="ENTRY_WITHOUT_PROTECTIVE")`.
     """
+    _require_safe_mode_controller(safe_mode_controller, "require_protective_confirmation")
     if _REQUIRED_PROTECTIVE_ROLES.issubset(confirmed_roles):
         return ProtectiveConfirmationVerdict(is_no_trade=False, reason_code="OK")
-    if safe_mode_controller is not None:
-        safe_mode_controller.enter_safe_mode(
-            reason=_ENTRY_WITHOUT_PROTECTIVE, now_utc=now_utc
-        )
+    safe_mode_controller.enter_safe_mode(reason=_ENTRY_WITHOUT_PROTECTIVE, now_utc=now_utc)
     return ProtectiveConfirmationVerdict(
         is_no_trade=True, reason_code=_ENTRY_WITHOUT_PROTECTIVE
     )
@@ -428,13 +440,16 @@ class AttachOutcome:
     `sized` is the `ProtectiveSizing` used to place the legs (None when
     rejected before sizing succeeded). `placed_legs` lists the
     `OrderRole` values successfully confirmed on the exchange, in the
-    order they were placed.
+    order they were placed. `failure_detail` names the leg role and the
+    exception type when a leg placement raised (audit trail — never the
+    exception message, which may carry request material).
     """
 
     is_no_trade: bool
     reason_code: str
     sized: ProtectiveSizing | None
     placed_legs: tuple[str, ...]
+    failure_detail: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.reason_code, str) or self.reason_code == "":
@@ -461,7 +476,7 @@ async def attach_protectives_to_fill(
     plan_hash: str,
     adapter: ExecutionAdapter,
     now_utc: datetime,
-    safe_mode_controller: Any | None = None,
+    safe_mode_controller: Any,
 ) -> AttachOutcome:
     """Fold entry fills, size protectives to filled qty, place + confirm.
 
@@ -477,9 +492,11 @@ async def attach_protectives_to_fill(
          leg parameters sized to the folded filled quantity.
       3. Per-leg `adapter.place_algo_protective` with a deterministic
          `xa-` algo client id (SL, then TP1, then TP2 — never
-         reordered). Confirmation failure on any leg holds
-         `ENTRY_WITHOUT_PROTECTIVE` immediately — no further legs are
-         attempted and no rescue placement is ever issued (D-02).
+         reordered). Confirmation failure on any leg — including an
+         adapter EXCEPTION (timeout, rejection, duplicate id, identity-
+         less response) — holds `ENTRY_WITHOUT_PROTECTIVE` immediately
+         and forces SAFE_MODE; no further legs are attempted and no
+         rescue placement is ever issued (D-02).
 
     Args:
         fill_events: The fill events to fold (see `fold_fills`).
@@ -495,13 +512,15 @@ async def attach_protectives_to_fill(
             derivation).
         adapter: The Protocol-typed adapter surface.
         now_utc: The current UTC-aware datetime (injected).
-        safe_mode_controller: Optional `SafeModeController`-like
-            object for the ENTRY_WITHOUT_PROTECTIVE composition.
+        safe_mode_controller: Required `SafeModeController`-like object
+            for the ENTRY_WITHOUT_PROTECTIVE composition (None raises
+            ValueError before any adapter call — fail closed).
 
     Returns:
         An `AttachOutcome` with the fold+size+place+confirm result.
     """
     _require_live5_symbol(constraint_snapshot.symbol)
+    _require_safe_mode_controller(safe_mode_controller, "attach_protectives_to_fill")
 
     folded = fold_fills(
         fill_events=fill_events,
@@ -539,11 +558,20 @@ async def attach_protectives_to_fill(
     for role, leg in role_leg_pairs:
         assert leg is not None  # sizing.is_no_trade is False: all legs populated
         client_algo_id = derive_algo_client_id(plan_hash=plan_hash, role=role)
-        response = await adapter.place_algo_protective(
-            symbol=constraint_snapshot.symbol,
-            client_algo_id=client_algo_id,
-            **leg,
-        )
+        failure_detail: str | None = None
+        try:
+            response = await adapter.place_algo_protective(
+                symbol=constraint_snapshot.symbol,
+                client_algo_id=client_algo_id,
+                **leg,
+            )
+        except Exception as exc:  # noqa: BLE001 — any adapter failure is an unconfirmed leg
+            # Fail closed (09-REVIEW CR-02): an exception is NOT a
+            # confirmation. Treat it exactly like an unconfirmed response
+            # so SAFE_MODE is always entered and the caller always gets
+            # an AttachOutcome instead of a bare exception.
+            response = None
+            failure_detail = f"{role}: {type(exc).__name__}"
         if not _is_leg_confirmed(response):
             # Unconfirmed leg: hold ENTRY_WITHOUT_PROTECTIVE immediately.
             # No further legs are attempted; no rescue placement is
@@ -558,6 +586,7 @@ async def attach_protectives_to_fill(
                 reason_code=_ENTRY_WITHOUT_PROTECTIVE,
                 sized=sizing,
                 placed_legs=tuple(confirmed_roles),
+                failure_detail=failure_detail,
             )
         confirmed_roles.append(role)
 

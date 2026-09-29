@@ -170,6 +170,16 @@ class FakeExecutionAdapter:
         return {"algo_id": f"algo_{kwargs.get('client_algo_id')}", "algo_status": "NEW"}
 
 
+class _RecordingSafeModeController:
+    """Records every SAFE_MODE entry (duck-typed SafeModeController)."""
+
+    def __init__(self) -> None:
+        self.entered_reasons: list[str] = []
+
+    def enter_safe_mode(self, *, reason: str, now_utc: Any = None) -> None:
+        self.entered_reasons.append(reason)
+
+
 # --------------------------------------------------------------------------- #
 # Beh. 1 — partial-fill sizing to filled qty plus replayed-fill single attach.
 # --------------------------------------------------------------------------- #
@@ -202,6 +212,7 @@ def test_partial_fill_replayed_fills_fold_and_attach_once() -> None:
             plan_hash=case_input["plan_hash"],
             adapter=adapter,
             now_utc=_parse_utc(case_input["now_utc"]),
+            safe_mode_controller=_RecordingSafeModeController(),
         )
     )
 
@@ -260,13 +271,6 @@ def test_unconfirmed_sl_leg_yields_entry_without_protective_with_zero_rescue() -
     current_view = _build_current_position_view(case_input)
     protective_template = _build_protective_template(case_input)
     constraint_snapshot = _build_constraint_snapshot(case_input)
-
-    class _RecordingSafeModeController:
-        def __init__(self) -> None:
-            self.entered_reasons: list[str] = []
-
-        def enter_safe_mode(self, *, reason: str, now_utc: Any = None) -> None:
-            self.entered_reasons.append(reason)
 
     safe_mode_controller = _RecordingSafeModeController()
 
@@ -342,9 +346,72 @@ def test_non_live5_symbol_raises_before_any_adapter_call() -> None:
                 plan_hash=case_input["plan_hash"],
                 adapter=adapter,
                 now_utc=_parse_utc(case_input["now_utc"]),
+                safe_mode_controller=_RecordingSafeModeController(),
             )
         )
 
+    assert adapter.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# 09-REVIEW CR-02 — adapter exceptions are unconfirmed legs; SAFE_MODE required.
+# --------------------------------------------------------------------------- #
+
+
+def _attach(adapter: Any, safe_mode_controller: Any) -> Any:
+    from src.execution.manager import attach_protectives_to_fill
+
+    case_input = _load_input()
+    return asyncio.run(
+        attach_protectives_to_fill(
+            fill_events=_build_fill_events(case_input),
+            current_position_view=_build_current_position_view(case_input),
+            has_protective=False,
+            protective_template=_build_protective_template(case_input),
+            constraint_snapshot=_build_constraint_snapshot(case_input),
+            position_mode=case_input["position_mode"],
+            candidate_position_side=case_input["candidate_position_side"],
+            plan_hash=case_input["plan_hash"],
+            adapter=adapter,
+            now_utc=_parse_utc(case_input["now_utc"]),
+            safe_mode_controller=safe_mode_controller,
+        )
+    )
+
+
+def test_adapter_exception_on_tp1_forces_safe_mode_and_stops() -> None:
+    """CR-02: an adapter EXCEPTION on TP1 (after a confirmed SL) is an
+    unconfirmed leg — ENTRY_WITHOUT_PROTECTIVE + SAFE_MODE, TP2 never
+    attempted, no exception escapes."""
+    expected = _load_expected()
+
+    class _RaisingAdapter(FakeExecutionAdapter):
+        async def place_algo_protective(self, **kwargs: Any) -> Any:
+            if kwargs.get("client_algo_id") == expected["tp1_algo_client_id"]:
+                self.calls.append({"method": "place_algo_protective", "kwargs": dict(kwargs)})
+                raise TimeoutError("simulated read timeout")
+            return await super().place_algo_protective(**kwargs)
+
+    adapter = _RaisingAdapter()
+    safe_mode_controller = _RecordingSafeModeController()
+    outcome = _attach(adapter, safe_mode_controller)
+
+    assert outcome.is_no_trade is True
+    assert outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
+    assert outcome.placed_legs == ("STOP_LOSS",)
+    assert outcome.failure_detail == "TAKE_PROFIT_1: TimeoutError"
+    assert [c["kwargs"]["client_algo_id"] for c in adapter.calls] == [
+        expected["sl_algo_client_id"],
+        expected["tp1_algo_client_id"],
+    ]
+    assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
+
+
+def test_missing_safe_mode_controller_raises_before_any_adapter_call() -> None:
+    """CR-02: `safe_mode_controller=None` fails closed before any order."""
+    adapter = FakeExecutionAdapter()
+    with pytest.raises(ValueError, match="safe_mode_controller is required"):
+        _attach(adapter, None)
     assert adapter.calls == []
 
 
