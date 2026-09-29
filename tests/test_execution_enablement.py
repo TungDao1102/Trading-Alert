@@ -270,3 +270,25 @@ def test_enable_refuses_failing_missing_or_partial_health() -> None:
             )
         assert controller.is_disabled is True
         assert journal.events == []
+
+
+def test_journal_payload_records_the_post_transition_state() -> None:
+    """WR-10: LIVE_ORDERS_ENABLED carries live_orders_disabled=false (the
+    state it establishes) and the prior state explicitly."""
+    from src.execution.enablement import LiveEnablementController
+
+    journal = FakeJournal()
+    controller = LiveEnablementController(journal=journal)
+    now = datetime(2026, 9, 29, 10, 30, 0, tzinfo=UTC)
+    controller.enable(
+        operator_id="operator_alpha", now_utc=now, health_verdict=_passing_health_verdict()
+    )
+    controller.disable(operator_id="operator_alpha", now_utc=now)
+
+    enabled, disabled = (json.loads(e.payload_json) for e in journal.events)
+    assert journal.events[0].event_type == "LIVE_ORDERS_ENABLED"
+    assert enabled["live_orders_disabled"] is False
+    assert enabled["live_orders_disabled_before"] is True
+    assert journal.events[1].event_type == "LIVE_ORDERS_DISABLED"
+    assert disabled["live_orders_disabled"] is True
+    assert disabled["live_orders_disabled_before"] is False

@@ -182,6 +182,7 @@ class LiveEnablementController:
             event_type="LIVE_ORDERS_ENABLED",
             operator_id=operator_id,
             now_utc=now_utc,
+            disabled_after=False,
         )
         self._disabled = False
         self._enabled_at_utc = now_utc
@@ -206,6 +207,7 @@ class LiveEnablementController:
             event_type="LIVE_ORDERS_DISABLED",
             operator_id=operator_id,
             now_utc=now_utc,
+            disabled_after=True,
         )
         self._disabled = True
         self._enabled_at_utc = None
@@ -214,17 +216,23 @@ class LiveEnablementController:
     # ----- internal helpers ---------------------------------------------- #
 
     def _journal_enablement_event(
-        self, *, event_type: str, operator_id: str, now_utc: datetime
+        self, *, event_type: str, operator_id: str, now_utc: datetime, disabled_after: bool
     ) -> None:
         """Record one enable/disable transition as a JournalEvent.
 
         The journal layer is the audit trail; the controller never
-        mutates state without journaling first (D-05 extended).
+        mutates state without journaling first (D-05 extended). Because
+        the event is written BEFORE the flag flips, the payload carries
+        the TARGET state explicitly (`live_orders_disabled`, the state
+        after this transition) plus the prior state
+        (`live_orders_disabled_before`) — 09-REVIEW WR-10: the record
+        never contradicts its own event type.
         """
         payload_json = json.dumps(
             {
                 "operator_id": operator_id,
-                "live_orders_disabled": self._disabled,
+                "live_orders_disabled": disabled_after,
+                "live_orders_disabled_before": self._disabled,
             },
             separators=(",", ":"),
         )
