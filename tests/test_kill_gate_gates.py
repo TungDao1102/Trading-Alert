@@ -79,7 +79,7 @@ def test_untested_family_with_no_facts_is_all_not_evaluated_or_pending() -> None
 
 
 def test_tested_family_without_evidence_is_not_met_on_machine_derivable_gates() -> None:
-    by_id = dict(derive_gate_cells(_facts(tested=True)))
+    by_id = dict(derive_gate_cells(_facts(repro=False, tested=True)))
     for gate_id in ("G03", "G07", "G08", "G10"):
         assert by_id[gate_id] is GateCell.NOT_MET, gate_id
     assert by_id["G01"] is GateCell.NOT_EVALUATED

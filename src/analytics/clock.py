@@ -10,12 +10,27 @@ No wall-clock reads: every instant is an injected argument (D-01).
 from __future__ import annotations
 
 import calendar
+import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
+from src.analytics.family import KillGateInputError
 from src.domain.canonical import sha256_hex
 
 REQUIRED_MONTHS = 6
+
+# The exact `grep -E` regex of the research-gate CI (.github/workflows/research-gate.yml,
+# Witness 1) with the date wrapped in one capture group. A test extracts the CI text and
+# asserts identity, so the clock start is what CI reads (T-10-23).
+FROZEN_ON_PATTERN = re.compile(
+    r"^>\s*\*\*Frozen on:\*\*\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", re.MULTILINE
+)
+
+# Freeze-commit provenance, verified from git at plan time (D-03: not assumed):
+#   git show -s --format=%H%n%aI 281ccd0
+PROTOCOL_FREEZE_COMMIT = "281ccd0894ea35717cc741788b6133cfb202af82"
+PROTOCOL_FREEZE_COMMIT_AUTHOR_DATE = "2026-09-19T14:08:12+07:00"
+PROTOCOL_CLOCK_SOURCE = "docs/research/RESEARCH_PROTOCOL.md header: Frozen on"
 
 _ONE_DAY = timedelta(days=1)
 
@@ -89,3 +104,32 @@ class ClockStart:
 
     def digest(self) -> str:
         return sha256_hex(self.as_payload())
+
+
+def parse_frozen_on(protocol_text: str) -> datetime:
+    """Parse the protocol header's Frozen-on date as 00:00Z of that day (pure, no I/O).
+
+    Raises `KillGateInputError` when the line is absent or the date is impossible.
+    """
+    match = FROZEN_ON_PATTERN.search(protocol_text)
+    if match is None:
+        raise KillGateInputError("protocol text has no 'Frozen on' header line")
+    try:
+        return datetime.fromisoformat(match.group(1)).replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise KillGateInputError(f"invalid Frozen-on date: {match.group(1)}") from exc
+
+
+def clock_start_from_protocol(
+    protocol_text: str,
+    *,
+    freeze_commit: str = PROTOCOL_FREEZE_COMMIT,
+    commit_author_date: str = PROTOCOL_FREEZE_COMMIT_AUTHOR_DATE,
+) -> ClockStart:
+    """Research-clock start from the frozen protocol header, with freeze-commit provenance."""
+    return ClockStart(
+        start_utc=parse_frozen_on(protocol_text),
+        source=PROTOCOL_CLOCK_SOURCE,
+        freeze_commit=freeze_commit,
+        commit_author_date=commit_author_date,
+    )

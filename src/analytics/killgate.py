@@ -65,6 +65,7 @@ __all__ = [
     "prior_from_event",
     "priors_from_events",
     "record_kill_gate_evaluation",
+    "registration_allowed",
     "reset_from_event",
     "resets_from_events",
 ]
@@ -325,6 +326,17 @@ def build_question_approved_event(
         correlation_id=KILL_GATE_CORRELATION_ID,
         payload_json=payload_json,
     )
+
+
+def registration_allowed(state: KillGateState) -> bool:
+    """False only for the terminal INSUFFICIENT_EDGE state (D-03: no new family registration).
+
+    Pure predicate; the CI tripwire (tests/test_kill_gate_registration.py) enforces it against
+    the committed decision record because CI cannot read the journal.
+    """
+    if not isinstance(state, KillGateState):
+        raise TypeError("registration_allowed requires a KillGateState")
+    return state is not KillGateState.INSUFFICIENT_EDGE
 
 
 def _evidence_row(family: FamilyEvidence, *, independent: bool, counted: bool) -> dict[str, Any]:
