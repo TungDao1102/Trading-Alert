@@ -1081,13 +1081,21 @@ class BinanceUsdmAdapter:
         quantity: Decimal | None,
         working_type: str,
         client_algo_id: str,
+        reduce_only: bool | None = None,
     ) -> AlgoPlacementResult:
         """Place a CONDITIONAL algo protective order via `new_algo_order`.
 
         Per D-01: protective exits go through `POST /fapi/v1/algoOrder`
         with `algoType=CONDITIONAL`. The adapter asserts that
-        `close_position=True` is mutually exclusive with `quantity`
-        (Pitfall 2 — Binance rejects the combination).
+        `close_position=True` is mutually exclusive with `quantity` and
+        `reduce_only` (Pitfall 2 — Binance rejects the combination), and
+        that a non-close leg carries an explicit quantity.
+
+        `reduce_only=True` is forwarded to the SDK as
+        `NewAlgoOrderReduceOnlyEnum.TRUE` (one-way partial-TP legs, so a
+        late TP1 trigger can never open a reverse position). `None` /
+        `False` omit the parameter (hedge mode — reduceOnly is omitted
+        everywhere per EXECUTION_SPEC §5).
 
         Args:
             symbol: The trading pair.
@@ -1101,13 +1109,16 @@ class BinanceUsdmAdapter:
             working_type: "MARK_PRICE" or "CONTRACT_PRICE".
             client_algo_id: The deterministic 36-char algo_client_id
                 from `derive_algo_client_id`.
+            reduce_only: True to send `reduceOnly=true` (one-way
+                explicit-quantity legs); None/False omits the parameter.
 
         Returns:
             An `AlgoPlacementResult` with the exchange-assigned algo_id
             and the projected response fields.
 
         Raises:
-            ValueError: close_position=True with quantity is invalid.
+            ValueError: close_position=True with quantity/reduce_only, or
+                close_position=False without a quantity.
             Any SDK error after bounded retries are exhausted.
         """
         from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
@@ -1116,17 +1127,24 @@ class BinanceUsdmAdapter:
         from binance_sdk_derivatives_trading_usds_futures.rest_api.models.enums import (
             NewAlgoOrderAlgoTypeEnum,
             NewAlgoOrderClosePositionEnum,
+            NewAlgoOrderReduceOnlyEnum,
             NewAlgoOrderSideEnum,
             NewAlgoOrderTypeEnum,
             NewAlgoOrderWorkingTypeEnum,
         )
 
-        # Pitfall 2: closePosition=true is mutually exclusive with quantity.
-        if close_position and quantity is not None:
+        # Pitfall 2: closePosition=true is mutually exclusive with
+        # quantity and reduceOnly.
+        if close_position and (quantity is not None or reduce_only):
             raise ValueError(
                 "place_algo_protective: close_position=True is mutually "
-                "exclusive with quantity (Binance rejects the combination)"
+                "exclusive with quantity/reduce_only (Binance rejects the combination)"
             )
+        if not close_position and quantity is None:
+            raise ValueError(
+                "place_algo_protective: close_position=False requires an explicit quantity"
+            )
+        reduce_only_param = NewAlgoOrderReduceOnlyEnum.TRUE if reduce_only else None
 
         retry = tenacity.retry_if_exception(_is_transient_reconcile)
         stop = tenacity.stop_after_attempt(_PLACEMENT_MAX_ATTEMPTS) | tenacity.stop_after_delay(
@@ -1152,6 +1170,7 @@ class BinanceUsdmAdapter:
                 else NewAlgoOrderClosePositionEnum.FALSE,
                 quantity=quantity if quantity is not None else None,
                 working_type=NewAlgoOrderWorkingTypeEnum(working_type),
+                reduce_only=reduce_only_param,
                 client_algo_id=client_algo_id,
             )
             return response.data()

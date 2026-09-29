@@ -157,6 +157,13 @@ class FakeExecutionAdapter:
         self._reject_client_algo_ids = reject_client_algo_ids
 
     async def place_algo_protective(self, **kwargs: Any) -> Any:
+        # Contract guard (09-REVIEW CR-01): the manager's kwargs must bind
+        # against the REAL adapter signature, not just this `**kwargs` fake.
+        import inspect
+
+        from src.adapters.binance_usdm import BinanceUsdmAdapter
+
+        inspect.signature(BinanceUsdmAdapter.place_algo_protective).bind(None, **kwargs)
         self.calls.append({"method": "place_algo_protective", "kwargs": dict(kwargs)})
         if kwargs.get("client_algo_id") in self._reject_client_algo_ids:
             return {"algo_status": "REJECTED"}
