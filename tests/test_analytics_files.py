@@ -199,6 +199,21 @@ def test_scan_duplicate_sheet_content_breaks_the_later_family(tmp_path: Path) ->
     assert independent == ("breakout-retest", "range-mr")
 
 
+def test_scan_sheet_hash_is_independent_of_line_endings(tmp_path: Path) -> None:
+    lf_root = tmp_path / "lf"
+    crlf_root = tmp_path / "crlf"
+    _copy_sheets(lf_root)
+    crlf_root.mkdir()
+    for family_id in _FAMILIES:
+        content = (lf_root / f"{family_id}.md").read_bytes().replace(b"\r\n", b"\n")
+        (lf_root / f"{family_id}.md").write_bytes(content)
+        (crlf_root / f"{family_id}.md").write_bytes(content.replace(b"\n", b"\r\n"))
+    lf_hashes = [f.sheet_sha256 for f in _scan(sheets_root=lf_root).families]
+    crlf_scan = _scan(sheets_root=crlf_root)
+    assert lf_hashes == [f.sheet_sha256 for f in crlf_scan.families]
+    assert [f.sheet_slots_present for f in crlf_scan.families] == [REQUIRED_SLOTS] * 3
+
+
 def test_scan_candidate_experiments_map_by_parameter_set_hash() -> None:
     trend_v1 = load_parameter_set("trend-pullback", "baseline-v1").parameter_set_hash
     range_v1 = load_parameter_set("range-mr", "baseline-v1").parameter_set_hash

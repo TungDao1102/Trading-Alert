@@ -184,11 +184,17 @@ def _candidate_hashes(family_id: str) -> tuple[str, ...]:
 
 
 def _sheet_facts(sheets_root: Path, family_id: str) -> tuple[str | None, tuple[int, ...]]:
-    """(sha256 hex of the sheet bytes, sorted unique 7-slot heading numbers)."""
+    """(sha256 hex of the sheet content, sorted unique 7-slot heading numbers).
+
+    Line endings are normalized (CRLF to LF) before hashing so the digest equals the
+    committed blob content on every checkout (git autocrlf on Windows rewrites the working
+    copy); otherwise the sheet hash, and every evidence digest built on it, would differ
+    across machines.
+    """
     sheet = sheets_root / f"{family_id}.md"
     if not sheet.is_file():
         return None, ()
-    raw = sheet.read_bytes()
+    raw = sheet.read_bytes().replace(b"\r\n", b"\n")
     text = raw.decode("utf-8", errors="replace")
     slots = sorted({int(match) for match in _SLOT_HEADING.findall(text)})
     return hashlib.sha256(raw).hexdigest(), tuple(slots)
