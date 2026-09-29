@@ -189,9 +189,11 @@ def test_select_stmt_orders_by_the_total_key() -> None:
 
 
 def test_select_stmt_filters_event_types() -> None:
-    sql = str(select_journal_events_stmt(event_types=[KGE, "ENTRY_EXPIRY"]).compile(
-        dialect=sqlite.dialect()
-    ))
+    sql = str(
+        select_journal_events_stmt(event_types=[KGE, "ENTRY_EXPIRY"]).compile(
+            dialect=sqlite.dialect()
+        )
+    )
     assert "event_type IN" in sql
 
 
@@ -289,9 +291,7 @@ async def test_read_live_rows_issues_six_selects_and_counts_rejects() -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize(
-    ("dialect", "module"), [("postgresql", postgresql), ("sqlite", sqlite)]
-)
+@pytest.mark.parametrize(("dialect", "module"), [("postgresql", postgresql), ("sqlite", sqlite)])
 def test_append_stmt_is_on_conflict_do_nothing(dialect: str, module: Any) -> None:
     stmt = build_append_stmt(_event(), dialect)
     sql = str(stmt.compile(dialect=module.dialect()))
