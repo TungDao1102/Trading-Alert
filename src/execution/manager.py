@@ -256,6 +256,13 @@ def _check_approval_authorizes_plan(
     return None
 
 
+# The live-state gate inputs the caller supplies (WR-05); everything else
+# the placement gates judge is derived from the risk inputs/verdict.
+_GATE_KWARG_KEYS: frozenset[str] = frozenset(
+    {"open_algo_count", "planned_leg_count", "positions_reconciled"}
+)
+
+
 # --------------------------------------------------------------------------- #
 # Public entry point — execute_approved_plan.
 # --------------------------------------------------------------------------- #
@@ -290,8 +297,9 @@ async def execute_approved_plan(
       1. Approval binding (chat→expiry→hash→version→token).
       2. Enablement guard (LIVE_ORDERS_DISABLED → DISABLED).
       3. SAFE_MODE guard (`guard_new_entries` → RECONCILIATION_REQUIRED).
-      4. Placement-time gates (headroom, stale, uncertain, portfolio).
-      5. Risk pipeline (evaluate_risk with the identical Phase-5 inputs).
+      4. Risk pipeline (evaluate_risk with the identical Phase-5 inputs).
+      5. Placement-time gates (headroom, stale, uncertain, portfolio),
+         evaluated on the risk verdict's own `sized` (WR-05).
       6. Adapter placement (place_entry then place_algo_protective).
 
     This function exists ONLY to place real orders, so every live-safety
@@ -322,11 +330,15 @@ async def execute_approved_plan(
             for the journal-first cancel of an unprotected entry.
         enablement: Required `LiveEnablementController` for the
             LIVE_ORDERS_DISABLED gate (None raises ValueError).
-        gate_kwargs: Required kwargs for `decide_placement`
-            (open_algo_count, planned_leg_count, reconciled_positions,
-            positions_reconciled, sized, candidate_symbol,
-            candidate_position_side, parameter_set) — None raises
-            ValueError.
+        gate_kwargs: Required live-state inputs for `decide_placement`
+            that the risk inputs do not carry — exactly
+            `open_algo_count`, `planned_leg_count` and
+            `positions_reconciled` (None or any other key raises
+            ValueError). Everything else the gates judge (sized result,
+            constraint snapshot, symbol, side, positions, daily loss,
+            TTL, parameter set) is taken from `risk_kwargs` / the risk
+            verdict and the single `now_utc` (09-REVIEW WR-05), so the
+            gates can never judge a different order than the one placed.
 
     Returns:
         An `ExecutionOutcome` with `is_no_trade` and `reason_code`.
@@ -336,6 +348,16 @@ async def execute_approved_plan(
         raise ValueError("execute_approved_plan: enablement is required (fail closed)")
     if gate_kwargs is None:
         raise ValueError("execute_approved_plan: gate_kwargs is required (fail closed)")
+    if set(gate_kwargs) != _GATE_KWARG_KEYS:
+        raise ValueError(
+            f"execute_approved_plan: gate_kwargs keys must be exactly "
+            f"{sorted(_GATE_KWARG_KEYS)}, got {sorted(gate_kwargs)}"
+        )
+    if risk_kwargs.get("now_utc") != now_utc:
+        raise ValueError(
+            "execute_approved_plan: risk_kwargs['now_utc'] must equal now_utc "
+            "(one clock for binding, risk and gates)"
+        )
 
     # Gate 1: approval binding (chat→expiry→hash→version→token).
     binding = check_binding_full(
@@ -392,22 +414,41 @@ async def execute_approved_plan(
             or RejectionReason.RECONCILIATION_REQUIRED.value,
         )
 
-    # Gate 4: placement-time gates (headroom, stale, uncertain, portfolio).
-    from src.execution.gates import decide_placement
-
-    gate_verdict = decide_placement(**gate_kwargs)
-    if gate_verdict.is_no_trade:
-        return ExecutionOutcome(
-            is_no_trade=True,
-            reason_code=gate_verdict.reason_code,
-        )
-
-    # Gate 5: risk pipeline (identical Phase-5 call).
+    # Gate 4: risk pipeline (identical Phase-5 call).
     verdict = evaluate_risk(**risk_kwargs)
     if verdict.is_no_trade:
         return ExecutionOutcome(
             is_no_trade=True,
             reason_code=verdict.reason_code,
+        )
+    sized = verdict.sized
+    if sized is None or sized.quantity is None:  # PASS verdict always carries a sized qty
+        raise RuntimeError("execute_approved_plan: PASS risk verdict without a sized quantity")
+
+    # Gate 5: placement-time gates (headroom, stale, uncertain, portfolio)
+    # judged on EXACTLY what will be placed (09-REVIEW WR-05): the risk
+    # verdict's own `sized`, the same constraint snapshot / symbol / side /
+    # parameter set / position set, and the manager's single `now_utc`.
+    from src.execution.gates import decide_placement
+
+    gate_verdict = decide_placement(
+        constraint_snapshot=risk_kwargs["constraint_snapshot"],
+        open_algo_count=gate_kwargs["open_algo_count"],
+        planned_leg_count=gate_kwargs["planned_leg_count"],
+        reconciled_positions=risk_kwargs["open_positions"],
+        daily_loss_quote=risk_kwargs["daily_loss_quote"],
+        positions_reconciled=gate_kwargs["positions_reconciled"],
+        now_utc=now_utc,
+        ttl=risk_kwargs["ttl"],
+        sized=sized,
+        candidate_symbol=risk_kwargs["constraint_snapshot"].symbol,
+        candidate_position_side=risk_kwargs["candidate_position_side"],
+        parameter_set=risk_kwargs["parameter_set"],
+    )
+    if gate_verdict.is_no_trade:
+        return ExecutionOutcome(
+            is_no_trade=True,
+            reason_code=gate_verdict.reason_code,
         )
 
     # Gate 6: adapter placement (place_entry then place_algo_protective).
@@ -442,9 +483,7 @@ async def execute_approved_plan(
     )
 
     # The quantized quantity from the risk verdict.
-    assert verdict.sized is not None
-    assert verdict.sized.quantity is not None
-    quantity: Decimal = verdict.sized.quantity
+    quantity: Decimal = sized.quantity
 
     # Determine side from the candidate position side.
     entry_side = "BUY" if candidate_side == "LONG" else "SELL"

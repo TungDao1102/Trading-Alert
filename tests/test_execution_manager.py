@@ -232,23 +232,15 @@ def _enabled_controller() -> Any:
 
 
 def _build_gate_kwargs(case_input: dict[str, Any], **overrides: Any) -> dict[str, Any]:
-    """`decide_placement` kwargs for the golden fixture (all gates PASS)."""
-    from src.risk.gating import evaluate_risk
+    """The live-state `decide_placement` inputs (all gates PASS).
 
-    risk_kwargs = _build_risk_kwargs(case_input)
+    09-REVIEW WR-05: everything else the gates judge is derived by the
+    manager from the risk inputs / verdict.
+    """
     gate_kwargs: dict[str, Any] = {
-        "constraint_snapshot": risk_kwargs["constraint_snapshot"],
         "open_algo_count": 0,
         "planned_leg_count": 4,
-        "reconciled_positions": risk_kwargs["open_positions"],
-        "daily_loss_quote": risk_kwargs["daily_loss_quote"],
         "positions_reconciled": True,
-        "now_utc": risk_kwargs["now_utc"],
-        "ttl": risk_kwargs["ttl"],
-        "sized": evaluate_risk(**risk_kwargs).sized,
-        "candidate_symbol": case_input["symbol"],
-        "candidate_position_side": case_input["candidate_position_side"],
-        "parameter_set": risk_kwargs["parameter_set"],
     }
     gate_kwargs.update(overrides)
     return gate_kwargs
@@ -499,6 +491,7 @@ async def test_stale_plan_yields_no_adapter_calls_and_unapprovable_outcome() -> 
 
     # now_utc is past expiry_utc → APPROVAL_EXPIRED.
     past_now = _parse_utc(case_input["expiry_utc"]) + timedelta(seconds=1)
+    risk_kwargs["now_utc"] = past_now  # one clock (09-REVIEW WR-05)
 
     outcome = await execute_approved_plan(
         callback=callback,
@@ -1169,3 +1162,46 @@ def test_resolve_position_mode_maps_only_real_bools() -> None:
     for bad in ("ONE_WAY", None, {"dual_side_position": "true"}):
         with pytest.raises(ValueError):
             resolve_position_mode(bad)
+
+
+# --------------------------------------------------------------------------- #
+# 09-REVIEW WR-05 — gates judge exactly what is placed, on one clock.
+# --------------------------------------------------------------------------- #
+
+
+async def test_headroom_gate_uses_the_managers_inputs() -> None:
+    """WR-05: headroom exhaustion rejects before any order."""
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter, gate_kwargs=_build_gate_kwargs(_load_input(), open_algo_count=196)
+    )
+    assert outcome.reason_code == "EXCHANGE_CONSTRAINT"
+    assert adapter.calls == []
+
+
+async def test_caller_cannot_inject_a_foreign_sized_result_or_snapshot() -> None:
+    """WR-05: `sized` / `constraint_snapshot` / `now_utc` are derived,
+    never caller-supplied gate inputs."""
+    import pytest
+
+    adapter = FakeExecutionAdapter()
+    with pytest.raises(ValueError, match="gate_kwargs keys"):
+        await _run_plan(
+            adapter, gate_kwargs=_build_gate_kwargs(_load_input(), sized=object())
+        )
+    assert adapter.calls == []
+
+
+async def test_mismatched_risk_clock_raises() -> None:
+    """WR-05: risk and gates must run on the manager's single now_utc."""
+    from datetime import timedelta
+
+    import pytest
+
+    case_input = _load_input()
+    risk_kwargs = _build_risk_kwargs(case_input)
+    risk_kwargs["now_utc"] = risk_kwargs["now_utc"] - timedelta(minutes=5)
+    adapter = FakeExecutionAdapter()
+    with pytest.raises(ValueError, match="now_utc"):
+        await _run_plan(adapter, risk_kwargs=risk_kwargs)
+    assert adapter.calls == []
