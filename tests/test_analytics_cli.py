@@ -13,13 +13,22 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.sql import Select
+from sqlalchemy.sql.dml import Insert
 from src.adapters.binance_usdm import Kline
 from src.analytics.cli import main
 from src.data.store import publish_batch
+from src.db.mappers import journal_to_row, signal_to_row
+from src.db.models import JournalEventRow, SignalRow
+from src.domain.enums import SignalStatus
+from src.domain.journal import JournalEvent, content_hash_event_id
 from src.domain.registry import load_parameter_set
+from src.domain.signal import Signal
 
 REPO = Path(__file__).resolve().parents[1]
 EVIDENCE_FIXTURE = REPO / "tests" / "fixtures" / "phase10" / "loaders" / "evidence_sample.json"
@@ -414,3 +423,405 @@ def test_terminal_state_exits_zero_with_the_calm_banner(
     markdown = Path(lines[0].removeprefix("Report: ")).read_text(encoding="utf-8")
     assert "NO_TRADE / INSUFFICIENT EDGE." in markdown
     assert "This is a valid terminal outcome, not an error." in markdown
+
+
+# --------------------------------------------------------------------------- #
+# Read-only database path and the explicit --record step (plan 10-12, task 2)
+# --------------------------------------------------------------------------- #
+
+DATABASE_URL = "postgresql+psycopg://trader:s3cr3t-pw@db.internal.example:5432/trading"
+KGE = "KILL_GATE_EVALUATION"
+RESET_EVENT = "KILL_GATE_QUESTION_APPROVED"
+_JOURNAL_COLUMNS = tuple(JournalEventRow.__table__.columns.keys())
+
+
+def _journal_event(
+    event_type: str, at: str, payload: dict[str, str], entity_id: str = "KILL_GATE_D013"
+) -> JournalEvent:
+    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    moment = datetime.fromisoformat(at)
+    return JournalEvent(
+        journal_event_id=content_hash_event_id(
+            prefix="test",
+            event_type=event_type,
+            entity_id=entity_id,
+            occurred_at_utc=moment,
+            payload_json=payload_json,
+        ),
+        occurred_at_utc=moment,
+        event_type=event_type,
+        entity_type="KillGate",
+        entity_id=entity_id,
+        correlation_id="test_correlation",
+        payload_json=payload_json,
+    )
+
+
+def _live_signal(signal_id: str = "SIG-LIVE-1") -> Signal:
+    return Signal(
+        signal_id=signal_id,
+        strategy_id="trend-pullback",
+        strategy_version="v2.0.0",
+        parameter_set_id="baseline-v1",
+        parameter_set_hash="b" * 64,
+        symbol="BTCUSDT",
+        direction="LONG",
+        setup_type="pullback",
+        source_timeframe="1h",
+        source_candle_close_utc=datetime(2027, 3, 1, 12, 0, tzinfo=UTC),
+        detected_at_utc=datetime(2027, 3, 1, 12, 5, tzinfo=UTC),
+        status=SignalStatus.DETECTED,
+        expires_at_utc=datetime(2027, 3, 1, 16, 0, tzinfo=UTC),
+        invalidated_at_utc=None,
+    )
+
+
+class _Result:
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+
+    def scalars(self) -> _Result:
+        return self
+
+    def all(self) -> list[Any]:
+        return list(self._rows)
+
+
+class _FakeStore:
+    """In-memory stand-in for the database: canned rows, every statement recorded."""
+
+    def __init__(self) -> None:
+        self.journal: list[JournalEventRow] = []
+        self.signals: list[Any] = []
+        self.statements: list[Any] = []
+        self.commits = 0
+        self.fail_reads: Exception | None = None
+        self.fail_inserts: Exception | None = None
+
+    def add_events(self, *events: JournalEvent) -> None:
+        self.journal.extend(journal_to_row(event) for event in events)
+
+    def rows_for(self, entity: Any) -> list[Any]:
+        if entity is JournalEventRow:
+            return self.journal
+        if entity is SignalRow:
+            return self.signals
+        return []
+
+    def inserts(self) -> list[Insert]:
+        return [item for item in self.statements if isinstance(item, Insert)]
+
+    def kill_gate_ids(self) -> list[str]:
+        return [row.journal_event_id for row in self.journal if row.event_type == KGE]
+
+
+class _FakeSession:
+    def __init__(self, store: _FakeStore) -> None:
+        self.store = store
+
+    def get_bind(self) -> Any:
+        return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+    async def execute(self, statement: Any) -> _Result:
+        self.store.statements.append(statement)
+        if isinstance(statement, Insert):
+            if self.store.fail_inserts is not None:
+                raise self.store.fail_inserts
+            params = statement.compile(dialect=postgresql.dialect()).params
+            if params["journal_event_id"] not in {r.journal_event_id for r in self.store.journal}:
+                self.store.journal.append(
+                    JournalEventRow(**{name: params[name] for name in _JOURNAL_COLUMNS})
+                )
+            return _Result([])
+        if self.store.fail_reads is not None:
+            raise self.store.fail_reads
+        return _Result(list(self.store.rows_for(statement.column_descriptions[0]["entity"])))
+
+    async def commit(self) -> None:
+        self.store.commits += 1
+
+
+class _FakeSessionContext:
+    def __init__(self, store: _FakeStore) -> None:
+        self._store = store
+
+    async def __aenter__(self) -> _FakeSession:
+        return _FakeSession(self._store)
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+
+class _FakeFactory:
+    def __init__(self, store: _FakeStore) -> None:
+        self.store = store
+        self.urls: list[str] = []
+
+    def factory_fn(self, url: str) -> Any:
+        self.urls.append(url)
+        return lambda: _FakeSessionContext(self.store)
+
+
+def _db_run(
+    env: _Env,
+    fake: _FakeFactory,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    *extra: str,
+    as_of: str | None = AS_OF,
+) -> tuple[int, str, str]:
+    monkeypatch.setenv("DATABASE_URL", DATABASE_URL)
+    return _run(capsys, env.argv(*extra, as_of=as_of), session_factory_fn=fake.factory_fn)
+
+
+def _sidecar_of(out: str) -> dict[str, Any]:
+    path = Path(_stdout_lines(out)[1].removeprefix("Sidecar: "))
+    loaded: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return loaded
+
+
+def _assert_no_secret_anywhere(env: _Env, out: str, err: str) -> None:
+    for secret in (DATABASE_URL, "s3cr3t-pw", "db.internal.example"):
+        assert secret not in out
+        assert secret not in err
+        for path in env.files():
+            assert secret not in path.read_text(encoding="utf-8")
+
+
+def _terminal_prior() -> JournalEvent:
+    return _journal_event(
+        KGE,
+        "2027-03-25T00:00:00+00:00",
+        {"state": "INSUFFICIENT_EDGE", "evaluated_at_utc": "2027-03-25T00:00:00+00:00"},
+    )
+
+
+def test_db_rows_populate_the_live_block_and_the_posture(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _FakeStore()
+    store.signals.append(signal_to_row(_live_signal()))
+    store.add_events(
+        _journal_event("LIVE_ORDERS_ENABLED", "2027-03-01T00:00:00+00:00", {}, "LIVE_ORDERS"),
+        _journal_event("LIVE_ORDERS_DISABLED", "2027-03-02T00:00:00+00:00", {}, "LIVE_ORDERS"),
+    )
+    fake = _FakeFactory(store)
+    code, out, err = _db_run(env, fake, capsys, monkeypatch)
+    assert code == 0, err
+    assert len(_stdout_lines(out)) == 4
+    report = _sidecar_of(out)["report"]
+    assert report["live_posture"] == "LIVE_ORDERS_DISABLED"
+    live = next(block for block in report["evidence"] if block["kind"] == "LIVE")
+    assert live["has_data"] is True
+    assert fake.urls == [DATABASE_URL]
+    _assert_no_secret_anywhere(env, out, err)
+
+
+def test_db_report_path_executes_only_select_statements(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _FakeStore()
+    store.signals.append(signal_to_row(_live_signal()))
+    code, _, err = _db_run(env, _FakeFactory(store), capsys, monkeypatch)
+    assert code == 0, err
+    assert store.statements
+    assert all(isinstance(statement, Select) for statement in store.statements)
+    assert store.inserts() == []
+    assert store.commits == 0
+
+
+def test_db_without_rows_reports_an_unknown_posture_and_empty_live_block(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, out, err = _db_run(env, _FakeFactory(_FakeStore()), capsys, monkeypatch)
+    assert code == 0, err
+    report = _sidecar_of(out)["report"]
+    assert report["live_posture"] == "UNKNOWN"
+    live = next(block for block in report["evidence"] if block["kind"] == "LIVE")
+    assert live["has_data"] is False
+
+
+def test_db_prior_terminal_evaluation_keeps_the_state_sticky(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _FakeStore()
+    store.add_events(_terminal_prior())
+    code, out, err = _db_run(env, _FakeFactory(store), capsys, monkeypatch)
+    assert code == 0, err
+    assert _stdout_lines(out)[3] == "Kill gate: INSUFFICIENT_EDGE"
+
+
+def test_db_reset_event_reopens_research_after_a_prior_terminal(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _FakeStore()
+    store.add_events(
+        _terminal_prior(),
+        _journal_event(
+            RESET_EVENT,
+            "2027-03-28T00:00:00+00:00",
+            {"operator_id": "op-db", "decision_ref": "DEC-DB-RESET"},
+        ),
+    )
+    code, out, err = _db_run(env, _FakeFactory(store), capsys, monkeypatch)
+    assert code == 0, err
+    lines = _stdout_lines(out)
+    assert lines[3] == "Kill gate: WITHIN_BUDGET"
+    assert "DEC-DB-RESET" in Path(lines[0].removeprefix("Report: ")).read_text(encoding="utf-8")
+
+
+def test_db_and_decisions_file_resets_are_merged_and_deduplicated(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reset = {
+        "operator_id": "op-both",
+        "decision_ref": "DEC-BOTH-RESET",
+        "occurred_at_utc": "2027-03-28T00:00:00+00:00",
+    }
+    env.decisions.write_text(
+        json.dumps(
+            {
+                "schema": "kill-gate-decisions/1",
+                "families": [],
+                "resets": [reset],
+                "recorded_terminal": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = _FakeStore()
+    store.add_events(
+        _terminal_prior(),
+        _journal_event(
+            RESET_EVENT,
+            "2027-03-28T00:00:00+00:00",
+            {"operator_id": "op-both", "decision_ref": "DEC-BOTH-RESET"},
+        ),
+    )
+    code, out, err = _db_run(env, _FakeFactory(store), capsys, monkeypatch)
+    assert code == 0, err
+    assert _stdout_lines(out)[3] == "Kill gate: WITHIN_BUDGET"
+
+
+def test_db_failure_exits_one_with_only_the_exception_type(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _FakeStore()
+    store.fail_reads = RuntimeError(f"cannot connect to {DATABASE_URL} password=s3cr3t-pw")
+    code, out, err = _db_run(env, _FakeFactory(store), capsys, monkeypatch)
+    assert code == 1
+    assert out == ""
+    assert err.startswith("Report not produced: database read failed (RuntimeError). ")
+    assert err.rstrip("\n").endswith(COPY_TAIL)
+    _assert_no_secret_anywhere(env, out, err)
+    assert env.files() == []
+
+
+def test_db_factory_failure_never_echoes_the_database_url(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "not-an-async-url-carrying-s3cr3t-pw")
+    code, out, err = _run(capsys, env.argv())
+    assert code == 1
+    assert "database read failed (ValueError)" in err
+    assert "s3cr3t-pw" not in out + err
+    assert env.files() == []
+
+
+def test_no_db_flag_ignores_the_environment_url(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeFactory(_FakeStore())
+    monkeypatch.setenv("DATABASE_URL", DATABASE_URL)
+    code, _, err = _run(capsys, env.argv("--no-db"), session_factory_fn=fake.factory_fn)
+    assert code == 0, err
+    assert fake.urls == []
+    assert fake.store.statements == []
+
+
+def test_record_appends_one_kill_gate_evaluation_and_prints_the_confirmation(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _FakeStore()
+    store.signals.append(signal_to_row(_live_signal()))
+    code, out, err = _db_run(env, _FakeFactory(store), capsys, monkeypatch, "--record")
+    assert code == 0, err
+    lines = _stdout_lines(out)
+    assert len(lines) == 5
+    assert lines[3] == "Kill gate: WITHIN_BUDGET"
+    (event_id,) = store.kill_gate_ids()
+    assert lines[4] == (
+        f"Recorded KILL_GATE_EVALUATION {event_id} (state WITHIN_BUDGET). "
+        "Replaying the same inputs is a no-op."
+    )
+    inserts = store.inserts()
+    assert len(inserts) == 1
+    params = inserts[0].compile(dialect=postgresql.dialect()).params
+    assert params["event_type"] == KGE
+    assert all(isinstance(item, Select) for item in store.statements if item is not inserts[0])
+    _assert_no_secret_anywhere(env, out, err)
+
+
+def test_record_is_idempotent_for_the_same_inputs_and_as_of(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _FakeStore()
+    fake = _FakeFactory(store)
+    code_a, out_a, err_a = _db_run(env, fake, capsys, monkeypatch, "--record")
+    assert code_a == 0, err_a
+    code_b, out_b, err_b = _db_run(env, fake, capsys, monkeypatch, "--record")
+    assert code_b == 0, err_b
+    assert _stdout_lines(out_a)[4] == _stdout_lines(out_b)[4]
+    assert len(store.kill_gate_ids()) == 1
+    assert len(store.inserts()) == 2
+    assert out_a == out_b
+
+
+def test_record_of_a_terminal_state_prints_the_human_commit_reminder(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _FakeStore()
+    store.add_events(_terminal_prior())
+    code, out, err = _db_run(env, _FakeFactory(store), capsys, monkeypatch, "--record")
+    assert code == 0, err
+    assert "(state INSUFFICIENT_EDGE)" in out
+    assert "kill_gate_decisions.json" in out
+    assert "recorded_terminal" in out
+
+
+def test_record_without_a_database_url_exits_two_and_writes_nothing(
+    env: _Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = _run(capsys, env.argv("--record"))
+    assert code == 2
+    assert out == ""
+    assert "--record" in err
+    assert env.files() == []
+
+
+def test_record_with_the_no_db_flag_exits_two_and_writes_nothing(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeFactory(_FakeStore())
+    monkeypatch.setenv("DATABASE_URL", DATABASE_URL)
+    code, out, err = _run(
+        capsys, env.argv("--record", "--no-db"), session_factory_fn=fake.factory_fn
+    )
+    assert code == 2
+    assert out == ""
+    assert "--record" in err
+    assert fake.urls == []
+    assert env.files() == []
+
+
+def test_record_failure_keeps_the_files_and_reports_only_the_exception_type(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _FakeStore()
+    store.fail_inserts = RuntimeError(f"write failed for {DATABASE_URL}")
+    code, out, err = _db_run(env, _FakeFactory(store), capsys, monkeypatch, "--record")
+    assert code == 1
+    assert err.strip() == "Record failed: RuntimeError."
+    assert len(_stdout_lines(out)) == 4
+    assert len(env.files()) == 2
+    _assert_no_secret_anywhere(env, out, err)
