@@ -1,0 +1,43 @@
+{
+  "steps": [
+    {
+      "name": "terminal",
+      "state": "INSUFFICIENT_EDGE",
+      "sticky": false,
+      "prior_terminal_count": 0,
+      "families_tested": 3,
+      "any_pass": false,
+      "cycle_start_utc": "2026-09-19T00:00:00+00:00",
+      "earliest_terminal_utc": "2027-03-19T00:00:00+00:00",
+      "reopened_by_decision_ref": null,
+      "reopened_by_operator_id": null,
+      "reopened_at_utc": null
+    },
+    {
+      "name": "sticky_despite_new_pass",
+      "state": "INSUFFICIENT_EDGE",
+      "sticky": true,
+      "prior_terminal_count": 1,
+      "families_tested": 4,
+      "any_pass": true,
+      "cycle_start_utc": "2026-09-19T00:00:00+00:00",
+      "earliest_terminal_utc": "2027-03-19T00:00:00+00:00",
+      "reopened_by_decision_ref": null,
+      "reopened_by_operator_id": null,
+      "reopened_at_utc": null
+    },
+    {
+      "name": "reopened",
+      "state": "WITHIN_BUDGET",
+      "sticky": false,
+      "prior_terminal_count": 2,
+      "families_tested": 0,
+      "any_pass": false,
+      "cycle_start_utc": "2027-06-01T00:00:00+00:00",
+      "earliest_terminal_utc": "2027-12-01T00:00:00+00:00",
+      "reopened_by_decision_ref": "DEC-2027-06-new-question",
+      "reopened_by_operator_id": "operator_alpha",
+      "reopened_at_utc": "2027-06-01T00:00:00+00:00"
+    }
+  ]
+}

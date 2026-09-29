@@ -1,0 +1,129 @@
+{
+  "clock": {
+    "start_utc": "2026-09-19T00:00:00+00:00",
+    "source": "docs/research/RESEARCH_PROTOCOL.md header: Frozen on",
+    "freeze_commit": "281ccd0894ea35717cc741788b6133cfb202af82",
+    "commit_author_date": "2026-09-19T14:08:12+07:00"
+  },
+  "families": [
+    {
+      "family_id": "trend-pullback",
+      "sheet_sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "sheet_slots_present": [1, 2, 3, 4, 5, 6, 7],
+      "candidate_param_set_hashes": [
+        "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+      ],
+      "experiment_ids": ["exp-tp-dev-1", "exp-tp-val-1"],
+      "status": "TESTED_FAIL",
+      "decision_ref": "DEC-2026-11-fail-trend-pullback",
+      "decided_at_utc": "2026-11-15T00:00:00+00:00",
+      "development_experiment_ids": ["exp-tp-dev-1"],
+      "validation_experiment_ids": ["exp-tp-val-1"]
+    },
+    {
+      "family_id": "breakout-retest",
+      "sheet_sha256": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+      "sheet_slots_present": [1, 2, 3, 4, 5, 6, 7],
+      "candidate_param_set_hashes": [
+        "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+      ],
+      "experiment_ids": ["exp-br-dev-1", "exp-br-val-1"],
+      "status": "TESTED_FAIL",
+      "decision_ref": "DEC-2026-11-fail-breakout-retest",
+      "decided_at_utc": "2026-11-15T00:00:00+00:00",
+      "development_experiment_ids": ["exp-br-dev-1"],
+      "validation_experiment_ids": ["exp-br-val-1"]
+    },
+    {
+      "family_id": "range-mr",
+      "sheet_sha256": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+      "sheet_slots_present": [1, 2, 3, 4, 5, 6, 7],
+      "candidate_param_set_hashes": [
+        "b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3"
+      ],
+      "experiment_ids": ["exp-mr-dev-1", "exp-mr-val-1"],
+      "status": "TESTED_FAIL",
+      "decision_ref": "DEC-2026-11-fail-range-mr",
+      "decided_at_utc": "2026-11-15T00:00:00+00:00",
+      "development_experiment_ids": ["exp-mr-dev-1"],
+      "validation_experiment_ids": ["exp-mr-val-1"]
+    },
+    {
+      "family_id": "carry-basis",
+      "sheet_sha256": "a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4",
+      "sheet_slots_present": [1, 2, 3, 4, 5, 6, 7],
+      "candidate_param_set_hashes": [
+        "b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4"
+      ],
+      "experiment_ids": ["exp-cb-dev-1", "exp-cb-val-1"],
+      "status": "TESTED_PASS",
+      "decision_ref": "DEC-2027-04-pass-carry-basis",
+      "decided_at_utc": "2027-04-15T00:00:00+00:00",
+      "development_experiment_ids": ["exp-cb-dev-1"],
+      "validation_experiment_ids": ["exp-cb-val-1"]
+    }
+  ],
+  "steps": [
+    {
+      "name": "terminal",
+      "evaluated_at_utc": "2027-04-01T00:00:00+00:00",
+      "family_ids": ["trend-pullback", "breakout-retest", "range-mr"],
+      "reset": null
+    },
+    {
+      "name": "sticky_despite_new_pass",
+      "evaluated_at_utc": "2027-05-01T00:00:00+00:00",
+      "family_ids": ["trend-pullback", "breakout-retest", "range-mr", "carry-basis"],
+      "reset": null
+    },
+    {
+      "name": "reopened",
+      "evaluated_at_utc": "2027-06-02T00:00:00+00:00",
+      "family_ids": ["trend-pullback", "breakout-retest", "range-mr", "carry-basis"],
+      "reset": {
+        "operator_id": "operator_alpha",
+        "decision_ref": "DEC-2027-06-new-question",
+        "occurred_at_utc": "2027-06-01T00:00:00+00:00"
+      }
+    }
+  ],
+  "ignored_reset_cases": [
+    {
+      "name": "reset_before_first_terminal",
+      "evaluated_at_utc": "2027-05-01T00:00:00+00:00",
+      "reset": {
+        "operator_id": "operator_alpha",
+        "decision_ref": "DEC-2027-03-too-early",
+        "occurred_at_utc": "2027-03-01T00:00:00+00:00"
+      }
+    },
+    {
+      "name": "reset_with_empty_operator_id",
+      "evaluated_at_utc": "2027-06-02T00:00:00+00:00",
+      "reset": {
+        "operator_id": "",
+        "decision_ref": "DEC-2027-06-no-operator",
+        "occurred_at_utc": "2027-06-01T00:00:00+00:00"
+      }
+    },
+    {
+      "name": "reset_with_empty_decision_ref",
+      "evaluated_at_utc": "2027-06-02T00:00:00+00:00",
+      "reset": {
+        "operator_id": "operator_alpha",
+        "decision_ref": "",
+        "occurred_at_utc": "2027-06-01T00:00:00+00:00"
+      }
+    },
+    {
+      "name": "reset_later_than_evaluated_at",
+      "evaluated_at_utc": "2027-05-01T00:00:00+00:00",
+      "reset": {
+        "operator_id": "operator_alpha",
+        "decision_ref": "DEC-2027-06-future",
+        "occurred_at_utc": "2027-06-01T00:00:00+00:00"
+      }
+    }
+  ]
+}
