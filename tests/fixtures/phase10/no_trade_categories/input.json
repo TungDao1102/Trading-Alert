@@ -1,0 +1,56 @@
+{
+  "description": "PAPER NO_TRADE records: one per mapped category plus an unrecognized code (UNMAPPED). Research symbols = live-5 plus ADAUSDT.",
+  "evidence": "PAPER",
+  "research_symbols": [
+    "XRPUSDT",
+    "ADAUSDT",
+    "SOLUSDT",
+    "ETHUSDT",
+    "BTCUSDT",
+    "BNBUSDT"
+  ],
+  "records": [
+    {
+      "evidence": "PAPER",
+      "source_id": "N1",
+      "symbol": "BTCUSDT",
+      "reason_code": "NO_TRADE_REGIME"
+    },
+    {
+      "evidence": "PAPER",
+      "source_id": "N2",
+      "symbol": "ADAUSDT",
+      "reason_code": "NO_TRADE_REGIME"
+    },
+    {
+      "evidence": "PAPER",
+      "source_id": "N3",
+      "symbol": "ETHUSDT",
+      "reason_code": "RR_TOO_LOW"
+    },
+    {
+      "evidence": "PAPER",
+      "source_id": "N4",
+      "symbol": "SOLUSDT",
+      "reason_code": "MAX_POSITIONS_REJECT"
+    },
+    {
+      "evidence": "PAPER",
+      "source_id": "N5",
+      "symbol": "BTCUSDT",
+      "reason_code": "DATA_STALE"
+    },
+    {
+      "evidence": "PAPER",
+      "source_id": "N6",
+      "symbol": "XRPUSDT",
+      "reason_code": "INSUFFICIENT_EDGE"
+    },
+    {
+      "evidence": "PAPER",
+      "source_id": "N7",
+      "symbol": "BNBUSDT",
+      "reason_code": "SOMETHING_NEW_UNRECOGNIZED"
+    }
+  ]
+}

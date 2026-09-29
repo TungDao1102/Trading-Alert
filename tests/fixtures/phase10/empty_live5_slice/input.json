@@ -1,0 +1,41 @@
+{
+  "description": "Research-universe outcomes exist only on non-live-5 symbols (ADAUSDT, LINKUSDT): the live-5 slice is EMPTY and must render as explicit no data.",
+  "evidence": "BACKTEST",
+  "research_symbols": [
+    "LINKUSDT",
+    "ADAUSDT"
+  ],
+  "expected_universe_hash": "6dd50ce3deaffb48dd33f96031dcb76ab475d9625927984fca1154dacecf6df8",
+  "outcomes": [
+    {
+      "trade_id": "U2",
+      "symbol": "LINKUSDT",
+      "direction": "LONG",
+      "entry_time_utc": "2026-02-03T08:00:00+00:00",
+      "exit_time_utc": "2026-02-03T12:00:00+00:00",
+      "exit_kind": "TP1",
+      "realized_pnl": "20",
+      "realized_risk": "10"
+    },
+    {
+      "trade_id": "U1",
+      "symbol": "ADAUSDT",
+      "direction": "LONG",
+      "entry_time_utc": "2026-02-01T08:00:00+00:00",
+      "exit_time_utc": "2026-02-01T12:00:00+00:00",
+      "exit_kind": "TP1",
+      "realized_pnl": "10",
+      "realized_risk": "10"
+    },
+    {
+      "trade_id": "U3",
+      "symbol": "ADAUSDT",
+      "direction": "SHORT",
+      "entry_time_utc": "2026-02-02T08:00:00+00:00",
+      "exit_time_utc": "2026-02-02T12:00:00+00:00",
+      "exit_kind": "SL",
+      "realized_pnl": "-5",
+      "realized_risk": "10"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "live5_empty": true,
+  "live5": {
+    "n": 0,
+    "n_r_valued": 0,
+    "mean_r": null
+  },
+  "research": {
+    "n": 3,
+    "n_r_valued": 3,
+    "mean_r": [
+      "2.5",
+      "3"
+    ]
+  },
+  "universe_status": "VERIFIED",
+  "weak_live_universe_rejection": false,
+  "research_symbols_sorted": [
+    "ADAUSDT",
+    "LINKUSDT"
+  ]
+}

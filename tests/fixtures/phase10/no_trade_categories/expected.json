@@ -1,0 +1,54 @@
+{
+  "rows": [
+    {
+      "category": "REGIME_FILTER",
+      "live5_n": 1,
+      "research_n": 2,
+      "all_n": 2
+    },
+    {
+      "category": "RR_FLOOR",
+      "live5_n": 1,
+      "research_n": 1,
+      "all_n": 1
+    },
+    {
+      "category": "OPEN_POSITION_CONFLICT",
+      "live5_n": 1,
+      "research_n": 1,
+      "all_n": 1
+    },
+    {
+      "category": "DATA_UNAVAILABILITY",
+      "live5_n": 1,
+      "research_n": 1,
+      "all_n": 1
+    },
+    {
+      "category": "KILL_GATE_TRIP",
+      "live5_n": 1,
+      "research_n": 1,
+      "all_n": 1
+    },
+    {
+      "category": "UNMAPPED",
+      "live5_n": 1,
+      "research_n": 1,
+      "all_n": 1
+    }
+  ],
+  "total": {
+    "live5_n": 6,
+    "research_n": 7,
+    "all_n": 7
+  },
+  "research_symbols_sorted": [
+    "ADAUSDT",
+    "BNBUSDT",
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "XRPUSDT"
+  ],
+  "section_digest": null
+}
