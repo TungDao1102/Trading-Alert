@@ -11,9 +11,42 @@ deferred to Phase 4.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+
+
+def content_hash_event_id(
+    *,
+    prefix: str,
+    event_type: str,
+    entity_id: str,
+    occurred_at_utc: datetime,
+    payload_json: str,
+) -> str:
+    """Deterministic content-hash `journal_event_id` (DATA_MODEL PK contract).
+
+    `journal_events.journal_event_id` is documented as a content hash.
+    Ids built from `(name, millisecond)` alone collide whenever two
+    DIFFERENT events share an injected timestamp (e.g. a PASS and a FAIL
+    run of the same probe) — an integrity error, or a silently dropped
+    event under upsert semantics (09-REVIEW WR-09). Hashing the full
+    content keeps ids deterministic (same inputs → same id, replay-safe)
+    while distinct events always get distinct ids. Byte-identical events
+    intentionally map to the same id (they carry no new information).
+
+    Returns `"{prefix}_{sha256-hex}"` (prefix + 65 chars, within the
+    128-char column).
+    """
+    _require_non_empty(prefix, "prefix")
+    _require_utc_aware(occurred_at_utc, "occurred_at_utc")
+    material = json.dumps(
+        [event_type, entity_id, occurred_at_utc.isoformat(), payload_json],
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return f"{prefix}_{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
 
 
 def _require_non_empty(value: str, field_name: str) -> None:

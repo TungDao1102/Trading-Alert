@@ -23,7 +23,7 @@ from typing import Any, Protocol
 from src.approval.binding import check_binding_full
 from src.domain.approval import Approval
 from src.domain.enums import ApprovalAction, ApprovalResult, OrderRole, RejectionReason
-from src.domain.journal import JournalEvent
+from src.domain.journal import JournalEvent, content_hash_event_id
 from src.execution.fill_monitor import CurrentPositionView, fold_fills
 from src.execution.order_ids import derive_algo_client_id, derive_client_order_id
 from src.execution.placement import (
@@ -1024,16 +1024,22 @@ def _build_cancel_event(
     }
     if error_type is not None:
         payload["error_type"] = error_type
+    payload_json = json.dumps(payload, separators=(",", ":"))
     return JournalEvent(
-        journal_event_id=(
-            f"{event_type.lower()}_{phase}_{identifier}_{int(now_utc.timestamp() * 1000)}"
+        # 09-REVIEW WR-09: content-hash id (no same-millisecond PK collision).
+        journal_event_id=content_hash_event_id(
+            prefix=event_type.lower(),
+            event_type=event_type,
+            entity_id=identifier,
+            occurred_at_utc=now_utc,
+            payload_json=payload_json,
         ),
         occurred_at_utc=now_utc,
         event_type=event_type,
         entity_type=entity_type,
         entity_id=identifier,
         correlation_id=f"execution_{event_type.lower()}",
-        payload_json=json.dumps(payload, separators=(",", ":")),
+        payload_json=payload_json,
     )
 
 

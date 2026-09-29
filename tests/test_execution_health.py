@@ -382,3 +382,47 @@ def test_hand_built_partial_pass_verdict_is_rejected() -> None:
             reason_code="OK",
             results=(check_ws_connection_state(connected=True, now_utc=NOW_UTC, journal=journal),),
         )
+
+
+# --------------------------------------------------------------------------- #
+# 09-REVIEW WR-09 — journal ids are content hashes (no same-ms PK collision).
+# --------------------------------------------------------------------------- #
+
+
+def test_same_probe_same_timestamp_different_result_gets_distinct_ids() -> None:
+    from src.ops.health import check_ws_connection_state
+
+    journal = FakeJournal()
+    check_ws_connection_state(connected=True, now_utc=NOW_UTC, journal=journal)
+    check_ws_connection_state(connected=False, now_utc=NOW_UTC, journal=journal)
+    ids = [e.journal_event_id for e in journal.events]
+    assert len(set(ids)) == 2
+    assert all(i.startswith("health_check_") and len(i) <= 128 for i in ids)
+
+
+def test_journal_ids_are_deterministic_for_identical_content() -> None:
+    from src.ops.health import check_ws_connection_state
+
+    first, second = FakeJournal(), FakeJournal()
+    check_ws_connection_state(connected=True, now_utc=NOW_UTC, journal=first)
+    check_ws_connection_state(connected=True, now_utc=NOW_UTC, journal=second)
+    assert first.events[0].journal_event_id == second.events[0].journal_event_id
+
+
+def test_enable_then_disable_in_same_millisecond_get_distinct_ids() -> None:
+    from src.execution.enablement import LiveEnablementController
+    from src.ops.health import ALL_CHECK_NAMES, HealthCheckResult, run_health_checks
+
+    verdict = run_health_checks(
+        results=[
+            HealthCheckResult(check_name=n, status="PASS", detail="ok", observed_at_utc=NOW_UTC)
+            for n in ALL_CHECK_NAMES
+        ]
+    )
+    journal = FakeJournal()
+    controller = LiveEnablementController(journal=journal)
+    controller.enable(operator_id="op", now_utc=NOW_UTC, health_verdict=verdict)
+    controller.disable(operator_id="op", now_utc=NOW_UTC)
+    controller.disable(operator_id="op", now_utc=NOW_UTC)
+    ids = [e.journal_event_id for e in journal.events]
+    assert len(set(ids)) == 3

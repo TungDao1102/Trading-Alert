@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 
-from src.domain.journal import JournalEvent
+from src.domain.journal import JournalEvent, content_hash_event_id
 
 # --------------------------------------------------------------------------- #
 # Status vocabulary — the only three values a probe may report.
@@ -227,14 +227,23 @@ def _record_health_check_event(
     detail: str,
     now_utc: datetime,
 ) -> None:
+    payload_json = _build_payload_json(check_name, status, detail)
     event = JournalEvent(
-        journal_event_id=f"health_check_{check_name}_{int(now_utc.timestamp() * 1000)}",
+        # 09-REVIEW WR-09: content-hash id — two different results of the
+        # same probe at the same injected `now_utc` never collide.
+        journal_event_id=content_hash_event_id(
+            prefix="health_check",
+            event_type="HEALTH_CHECK",
+            entity_id=check_name,
+            occurred_at_utc=now_utc,
+            payload_json=payload_json,
+        ),
         occurred_at_utc=now_utc,
         event_type="HEALTH_CHECK",
         entity_type="HealthProbe",
         entity_id=check_name,
         correlation_id="execution_health",
-        payload_json=_build_payload_json(check_name, status, detail),
+        payload_json=payload_json,
     )
     journal.record(event)
 

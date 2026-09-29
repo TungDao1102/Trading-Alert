@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
-from src.domain.journal import JournalEvent
+from src.domain.journal import JournalEvent, content_hash_event_id
 
 # --------------------------------------------------------------------------- #
 # Reason code constants — enablement-specific vocabulary.
@@ -221,22 +221,28 @@ class LiveEnablementController:
         The journal layer is the audit trail; the controller never
         mutates state without journaling first (D-05 extended).
         """
+        payload_json = json.dumps(
+            {
+                "operator_id": operator_id,
+                "live_orders_disabled": self._disabled,
+            },
+            separators=(",", ":"),
+        )
         event = JournalEvent(
-            journal_event_id=(
-                f"enablement_{event_type.lower()}_{int(now_utc.timestamp() * 1000)}"
+            # 09-REVIEW WR-09: content-hash id (no same-millisecond PK collision).
+            journal_event_id=content_hash_event_id(
+                prefix="enablement",
+                event_type=event_type,
+                entity_id="LIVE_ORDERS_DISABLED",
+                occurred_at_utc=now_utc,
+                payload_json=payload_json,
             ),
             occurred_at_utc=now_utc,
             event_type=event_type,
             entity_type="LiveEnablement",
             entity_id="LIVE_ORDERS_DISABLED",
             correlation_id="execution_enablement",
-            payload_json=json.dumps(
-                {
-                    "operator_id": operator_id,
-                    "live_orders_disabled": self._disabled,
-                },
-                separators=(",", ":"),
-            ),
+            payload_json=payload_json,
         )
         self._journal.record(event)
 
