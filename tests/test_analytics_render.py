@@ -1414,3 +1414,49 @@ def test_full_document_golden_is_byte_exact() -> None:
     lines = expected.decode("utf-8").split("\n")
     h2 = [line for line in lines if line.startswith("## ")]
     assert h2 == [f"## {title}" for title in SECTION_TITLES]
+
+
+# --------------------------------------------------------------------------- #
+# Governance scan helpers (shared with tests/test_analytics_sidecar.py)
+# --------------------------------------------------------------------------- #
+
+# Legitimate identifier field names that contain a secret-like substring. Explicit and tiny:
+# `key` is the slice-row field (the slice key, for example a symbol or month).
+SECRET_FRAGMENTS = ("key", "secret", "token", "signature")
+ALLOWED_SECRET_LIKE = frozenset({'"key"'})
+# The UI-SPEC column name of the slice tables; the only secret-like word in the Markdown.
+ALLOWED_MARKDOWN_PHRASES = ("Slice key", "ordered by key")
+ABSOLUTE_PATHS = (
+    re.compile(r"[A-Za-z]:[\\/]"),
+    re.compile(r"(^|[\s\"'(=])/(home|Users|tmp|var|etc|root|mnt)/"),
+)
+HOSTNAME_LIKE = re.compile(
+    r"\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:com|net|org|io|dev|local|lan|internal|localhost)\b"
+    r"|\blocalhost\b",
+    re.IGNORECASE,
+)
+
+
+def secret_like_hits(text: str) -> set[str]:
+    hits: set[str] = set()
+    for fragment in SECRET_FRAGMENTS:
+        for match in re.finditer(fragment, text, re.IGNORECASE):
+            token_start = text.rfind('"', 0, match.start())
+            token_end = text.find('"', match.end())
+            if token_start != -1 and token_end != -1:
+                hits.add(text[token_start : token_end + 1].lower())
+            else:
+                hits.add(fragment)
+    return hits
+
+
+def test_full_document_has_no_secret_like_words_absolute_paths_or_hostnames() -> None:
+    for report in (make_report(), with_live_lifecycle()):
+        text = render_markdown(report)
+        scanned = text
+        for phrase in ALLOWED_MARKDOWN_PHRASES:
+            scanned = scanned.replace(phrase, "")
+        assert secret_like_hits(scanned) == set()
+        for pattern in ABSOLUTE_PATHS:
+            assert pattern.search(text) is None, pattern.pattern
+        assert HOSTNAME_LIKE.search(text) is None
