@@ -13,6 +13,7 @@ import asyncio
 import inspect
 import os
 import random
+import sys
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -22,6 +23,7 @@ from typing import Any
 import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.sql import Select
 from src.adapters import analytics_store
@@ -526,6 +528,36 @@ def test_read_candles_counts_an_unreadable_partition_as_rejected(tmp_path: Path)
 # --------------------------------------------------------------------------- #
 
 
+# psycopg's async mode cannot run on the Windows default (Proactor) event loop.
+_LOOP_FACTORY = asyncio.SelectorEventLoop if sys.platform == "win32" else None
+
+
+def _is_throwaway_database(url: str) -> bool:
+    """True only for a database whose name ends in `_test` (the test drops every table)."""
+    try:
+        name = make_url(url).database
+    except Exception:
+        return False
+    return isinstance(name, str) and name.endswith("_test")
+
+
+@pytest.mark.parametrize(
+    ("url", "allowed"),
+    [
+        ("postgresql+psycopg://u:p@localhost:5432/trading_test", True),
+        ("postgresql+psycopg://u:p@localhost:5432/trading", False),
+        ("postgresql+psycopg://u:p@localhost:5432/test_trading", False),
+        ("postgresql+psycopg://u:p@localhost:5432/", False),
+        ("not a url", False),
+    ],
+)
+def test_pg_integration_only_runs_against_a_throwaway_test_database(
+    url: str, allowed: bool
+) -> None:
+    """WR-14: TEST_DATABASE_URL pointing at a dev/operational database is refused."""
+    assert _is_throwaway_database(url) is allowed
+
+
 @pytest.mark.skipif(
     not os.environ.get("TEST_DATABASE_URL"),
     reason="live-PG analytics store test requires TEST_DATABASE_URL",
@@ -534,6 +566,11 @@ def test_pg_append_and_reread_one_kill_gate_event() -> None:
     from src.db.models import dispose_engine, make_session_factory
 
     url = os.environ["TEST_DATABASE_URL"]
+    if not _is_throwaway_database(url):
+        pytest.fail(
+            "TEST_DATABASE_URL must name a throwaway database ending in '_test': "
+            "this test creates and then drops every table"
+        )
     sync_engine = create_engine(url)
     Base.metadata.create_all(sync_engine)
     event = _event(entity_id="KILL_GATE_PG_TEST")
@@ -549,7 +586,7 @@ def test_pg_append_and_reread_one_kill_gate_event() -> None:
             await dispose_engine(url)
 
     try:
-        result = asyncio.run(scenario())
+        result = asyncio.run(scenario(), loop_factory=_LOOP_FACTORY)
         assert [e.journal_event_id for e in result.events] == [event.journal_event_id]
         assert result.rejected == 0
     finally:
