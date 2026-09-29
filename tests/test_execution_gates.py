@@ -111,8 +111,12 @@ def _build_sized(case_input: dict[str, Any]) -> Any:
     return SizedResult(
         is_no_trade=s["is_no_trade"],
         quantity=_coerce_decimal(s["quantity"], "quantity") if s["quantity"] is not None else None,
-        quantity_before_rounding=_coerce_decimal(s["quantity_before_rounding"], "quantity_before_rounding"),
-        quantity_after_rounding=_coerce_decimal(s["quantity_after_rounding"], "quantity_after_rounding"),
+        quantity_before_rounding=_coerce_decimal(
+            s["quantity_before_rounding"], "quantity_before_rounding"
+        ),
+        quantity_after_rounding=_coerce_decimal(
+            s["quantity_after_rounding"], "quantity_after_rounding"
+        ),
         quantization_decision=s["quantization_decision"],
         realized_risk=_coerce_decimal(s["realized_risk"], "realized_risk"),
         reason_code=s["reason_code"],

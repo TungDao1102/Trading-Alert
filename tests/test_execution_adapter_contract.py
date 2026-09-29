@@ -189,3 +189,26 @@ async def test_non_close_leg_without_quantity_is_rejected() -> None:
             reduce_only=True,
         )
     assert rest.new_algo_order_calls == []
+
+
+@pytest.mark.asyncio
+async def test_decimals_reach_the_sdk_as_fixed_point_strings() -> None:
+    """WR-11 / IN-02: no raw Decimal (and no exponent notation) at the
+    SDK edge — prices/quantities are fixed-point strings."""
+    adapter, rest = _adapter()
+    await adapter.place_algo_protective(
+        symbol="BTCUSDT",
+        side="SELL",
+        algo_type="CONDITIONAL",
+        type="TAKE_PROFIT_MARKET",
+        position_side="BOTH",
+        trigger_price=Decimal("1.06E+2"),
+        close_position=False,
+        quantity=Decimal("1E-3"),
+        working_type="MARK_PRICE",
+        client_algo_id=_T1_ID,
+        reduce_only=True,
+    )
+    wire = rest.new_algo_order_calls[0]
+    assert wire["trigger_price"] == "106"
+    assert wire["quantity"] == "0.001"

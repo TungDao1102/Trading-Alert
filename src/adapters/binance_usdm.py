@@ -423,6 +423,27 @@ class PositionModeResult:
 # --------------------------------------------------------------------------- #
 
 
+def _decimal_to_wire(value: Decimal) -> Any:
+    """Convert an exchange-sensitive Decimal to its exact wire string.
+
+    09-REVIEW WR-11 / IN-02: the SDK annotates prices/quantities as
+    `float`, but serializes every non-float value with `str()` into the
+    signed query string. Passing a raw `Decimal` breaks mypy strict and
+    can emit exponent notation (`str(Decimal("1E-8"))` → "1E-8",
+    `str(Decimal("1E+1"))` → "1E+1"), which Binance rejects. Fixed-point
+    formatting (`format(value, "f")`) is the exact, float-free wire form.
+
+    Typed `Any` (not `str`) on purpose: the one place the project's
+    Decimal crosses the SDK's float-annotated boundary, without a
+    `type: ignore` at every call site.
+    """
+    if not isinstance(value, Decimal):
+        raise TypeError(f"_decimal_to_wire expects Decimal, got {type(value).__name__}")
+    if not value.is_finite():
+        raise ValueError(f"_decimal_to_wire: non-finite value {value!r}")
+    return format(value, "f")
+
+
 def _ms_to_utc(ms: int) -> datetime:
     """Convert a millisecond Unix epoch to a tz-aware UTC datetime."""
     return datetime.fromtimestamp(ms / 1000, tz=UTC)
@@ -1046,8 +1067,8 @@ class BinanceUsdmAdapter:
             type=NewOrderTypeEnum.LIMIT,
             position_side=position_side,
             time_in_force=NewOrderTimeInForceEnum(time_in_force),
-            quantity=quantity,
-            price=price,
+            quantity=_decimal_to_wire(quantity),
+            price=_decimal_to_wire(price),
             new_client_order_id=new_client_order_id,
         )
         result: NewOrderResponse = response.data()
@@ -1143,11 +1164,11 @@ class BinanceUsdmAdapter:
             side=NewAlgoOrderSideEnum(side),
             type=NewAlgoOrderTypeEnum(type),
             position_side=position_side,
-            trigger_price=trigger_price,
+            trigger_price=_decimal_to_wire(trigger_price),
             close_position=NewAlgoOrderClosePositionEnum.TRUE
             if close_position
             else NewAlgoOrderClosePositionEnum.FALSE,
-            quantity=quantity if quantity is not None else None,
+            quantity=_decimal_to_wire(quantity) if quantity is not None else None,
             working_type=NewAlgoOrderWorkingTypeEnum(working_type),
             reduce_only=reduce_only_param,
             client_algo_id=client_algo_id,
