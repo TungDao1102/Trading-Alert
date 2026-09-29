@@ -61,6 +61,33 @@ SCANNED_FILES = (
     "src/paper/freeze.py",
     # Phase 7 plan 07-04 — paper SIMULATE notify (D-05 purity).
     "src/paper/notify.py",
+    # Phase 10 - pure analytics core (D-01/D-05 purity). The CLI edge (cli.py) and the two
+    # analytics adapters are float/clock-guarded by tests/test_analytics_edge_guards.py, which
+    # also fails if a pure module is missing from this list.
+    "src/analytics/__init__.py",
+    "src/analytics/approval_delay.py",
+    "src/analytics/clock.py",
+    "src/analytics/core_metrics.py",
+    "src/analytics/excursion.py",
+    "src/analytics/family.py",
+    "src/analytics/gates.py",
+    "src/analytics/inputs.py",
+    "src/analytics/killgate.py",
+    "src/analytics/latency.py",
+    "src/analytics/lifecycle.py",
+    "src/analytics/live_outcomes.py",
+    "src/analytics/no_trade.py",
+    "src/analytics/provenance.py",
+    "src/analytics/render.py",
+    "src/analytics/render_common.py",
+    "src/analytics/render_killgate.py",
+    "src/analytics/render_metrics.py",
+    "src/analytics/render_sidecar.py",
+    "src/analytics/report.py",
+    "src/analytics/slices.py",
+    "src/analytics/stats.py",
+    "src/analytics/types.py",
+    "src/analytics/universe.py",
 )
 
 
