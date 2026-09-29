@@ -1,7 +1,7 @@
 ---
 phase: "10"
 slug: "journal-depth-kill-gate-operations"
-status: draft
+status: approved
 shadcn_initialized: false
 preset: none
 created: "2026-09-29"
@@ -130,7 +130,7 @@ Global table rules (apply to every table):
 - Alignment: text columns left (`:---`), numeric columns right (`---:`).
 - Column order is fixed by this contract; a column is never dropped for empty data (cell shows `no data` or `INCOMPLETE`, see Copywriting).
 - Row order is always a documented stable key order, NEVER favorability (D-02). `UNKNOWN` and `INCOMPLETE` rows are pinned last, in that order.
-- Max 9 columns per table `[default]`; wider data is split into two tables sharing the row key.
+- Max 9 columns per table `[default]`; wider data is split into two tables sharing the row key. Sole exception: K-2b (Family + G01..G10 = 11 columns) stays one table so the gate matrix reads as a single grid; its legibility is the backstop check below.
 - Every point estimate cell is rendered as `<value> [<lo>, <hi>] n=<n>` (Phase-6 bootstrap interval + sample size). When an interval is not computable (`n_r_valued < 2`) the cell is `<value> [interval absent] n=<n>`. A bare number is a contract violation.
 - Every table caption is the preceding H3/H2 plus a one-line italic `Evidence: BACKTEST|PAPER|LIVE` (or `Evidence: BACKTEST | PAPER | LIVE (separate rows, not pooled)`).
 
@@ -167,7 +167,7 @@ Three reports side by side per metric block (METRICS §3):
 - Rows: `Signals (n)`, `Mean R`, `Expectancy (R)`, `Win rate`, `INCOMPLETE`. Opportunity hypothetical-outcome cells are `INCOMPLETE (no hypothetical outcome)` unless a simulator adapter supplied one.
 - Followed by delay-bucket table `Signal-to-approve bucket | n | Mean R | Low-n`, buckets in fixed order `<1m`, `1-5m`, `5-30m`, `>=30m` `[default, RESEARCH A2]`, LIVE rows only.
 - PAPER evidence rows carry the label `SYNTHETIC LAG (APPROVAL_DELAY_LAG_SECONDS=30)`; paper delay is never rendered as a measured latency and never appears in the bucket table (RESEARCH P2).
-- Descriptive sentence, fixed: `Differences between columns describe selection and timing effects. They are not recommendations.`
+- Descriptive sentence, fixed: `Differences between columns describe selection and timing effects only.`
 
 ### E-1 Execution quality (Section 6)
 
@@ -199,7 +199,7 @@ Rows in fixed order: `MFE (price)`, `MAE (price)`, `MFE (R)`, `MAE (R)`, `Time t
 - `MFE (R) vs realized R (give-back)`
 - `Holding duration distribution`
 
-A fixed footer sentence under Section 7: `These distributions are descriptive. They do not recommend any change to take-profit, stop-loss, entry, or holding rules.` MFE/MAE window convention line (RESEARCH A6): `Window: entry minute through exit minute, inclusive, 1m high/low. Trades without 1m coverage are counted as INCOMPLETE.`
+A fixed footer sentence under Section 7: `These distributions are descriptive. They imply no change to take-profit, stop-loss, entry, or holding rules.` MFE/MAE window convention line (RESEARCH A6): `Window: entry minute through exit minute, inclusive, 1m high/low. Trades without 1m coverage are counted as INCOMPLETE.`
 
 ### S-1 Robustness slice (Section 8, one table per dimension)
 
@@ -355,7 +355,7 @@ There is no CTA (the report is read-only). The report's "actions" are the CLI fl
 | Reset event present | `Reopened by decision <decision_ref> (operator <operator_id>) at <display time>.` |
 | Clock-not-reached note | `Earliest possible INSUFFICIENT_EDGE: <UTC date>.` |
 | Slice note | `Every slice table starts with the unsliced ALL row. Slices are ordered by key, never by result.` |
-| Descriptive-only note (Section 3 header) | `All figures are descriptive and carry uncertainty. Nothing here changes parameters, ranks a winner, or recommends a change.` |
+| Descriptive-only note (Section 3 header) | `All figures are descriptive and carry uncertainty. Nothing here changes parameters or ranks strategy families.` |
 | Telegram pointer (optional, plain text, no buttons) | `Journal depth report ready. Kill gate: <STATE>. Digest <first 12 hex>. File: <file name>. Open the report to read it; this message is not a decision or approval.` (display time line: `Display: Asia/Ho_Chi_Minh (UTC internally)`, matching existing notify convention) |
 
 Reserved vocabulary rule: the words `winner`, `best`, `recommend`, `optimize`, `tune`, `improve`, `should` (as advice), `profitable`, `edge found` never appear in report copy; a render test greps for them `[default]`.
@@ -411,9 +411,9 @@ Applicable state considerations resolved: 9 covered, 2 backstop, 1 unresolved.
 | populated | Full report + every slice | ✅ covered | Full report (Section 3) is first among the analytic sections and every S-1 table leads with `ALL (unsliced)` |
 | error | Malformed journal `payload_json`, unreadable candle file | ✅ covered | Row-level rejection is counted in Section 9 (Copywriting error state); report still renders; generation failure exits 1 with the stderr copy |
 | loading | (none) | ✅ covered | Not applicable: static offline artifact, no async rendering states |
-| overflow | Long reason codes / notes / many symbols | ✅ covered | `md_cell()` truncation at 200 chars with marker; symbol lists sorted and wrapped only by the viewer; tables capped at 9 columns |
+| overflow | Long reason codes / notes / many symbols | ✅ covered | `md_cell()` truncation at 200 chars with marker; symbol lists sorted and wrapped only by the viewer; tables capped at 9 columns (K-2b excepted) |
 | long-text | Decision references, family notes | ✅ covered | Same `md_cell()` rule; full text stays in the JSON sidecar |
-| overflow | Very wide Markdown tables in narrow viewers | 🧪 backstop | Visual check that K-2b (12 columns incl. gates) and S-1 stay legible in a plain terminal; lifts as `{ statement, verification: backstop }` |
+| overflow | Very wide Markdown tables in narrow viewers | 🧪 backstop | Visual check that K-2b (11 columns incl. gates) and S-1 stay legible in a plain terminal; lifts as `{ statement, verification: backstop }` |
 | long-text | Rendering identity across Windows/Linux viewers | 🧪 backstop | Byte-identical golden test covers bytes; viewer rendering is a manual check |
 | overflow | Report size with very many slices/months on long histories | ⚠ unresolved | No cap on slice-row count is specified; planner treats as assumption (rows are never dropped, so long histories produce long reports) |
 
@@ -454,4 +454,4 @@ Tokens `KillGateState` values (`WITHIN_BUDGET`, `PASSING_CANDIDATE`, `INSUFFICIE
 - [ ] Dimension 6 Registry Safety: PASS
 - [ ] Dimension 7 Inventory Provenance: PASS
 
-**Approval:** pending
+**Approval:** approved 2026-09-29 (gsd-ui-checker VERIFIED; FLAGs on reserved vocabulary and K-2b width resolved)
