@@ -152,9 +152,33 @@ class FakeExecutionAdapter:
     unconfirmed leg) instead of the default accepted response.
     """
 
-    def __init__(self, *, reject_client_algo_ids: frozenset[str] = frozenset()) -> None:
+    def __init__(
+        self,
+        *,
+        reject_client_algo_ids: frozenset[str] = frozenset(),
+        existing_algo_status: dict[str, str] | None = None,
+    ) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.probes: list[str] = []
         self._reject_client_algo_ids = reject_client_algo_ids
+        # Simulated exchange state: client_algo_id -> algo_status.
+        self.exchange_algo_status: dict[str, str] = dict(existing_algo_status or {})
+
+    async def query_algo_order_by_client(self, **kwargs: Any) -> Any:
+        import inspect
+
+        from src.adapters.binance_usdm import AlgoOrderProbe, BinanceUsdmAdapter
+
+        inspect.signature(BinanceUsdmAdapter.query_algo_order_by_client).bind(None, **kwargs)
+        client_algo_id = kwargs["client_algo_id"]
+        self.probes.append(client_algo_id)
+        status = self.exchange_algo_status.get(client_algo_id)
+        return AlgoOrderProbe(
+            client_algo_id=client_algo_id,
+            found=status is not None,
+            algo_status=status,
+            update_time_utc=None,
+        )
 
     async def place_algo_protective(self, **kwargs: Any) -> Any:
         # Contract guard (09-REVIEW CR-01): the manager's kwargs must bind
@@ -165,9 +189,14 @@ class FakeExecutionAdapter:
 
         inspect.signature(BinanceUsdmAdapter.place_algo_protective).bind(None, **kwargs)
         self.calls.append({"method": "place_algo_protective", "kwargs": dict(kwargs)})
-        if kwargs.get("client_algo_id") in self._reject_client_algo_ids:
+        client_algo_id = kwargs.get("client_algo_id")
+        if client_algo_id in self._reject_client_algo_ids:
             return {"algo_status": "REJECTED"}
-        return {"algo_id": f"algo_{kwargs.get('client_algo_id')}", "algo_status": "NEW"}
+        if client_algo_id in self.exchange_algo_status:
+            # Binance dedups clientAlgoId among open orders.
+            raise RuntimeError("duplicate clientAlgoId")
+        self.exchange_algo_status[str(client_algo_id)] = "NEW"
+        return {"algo_id": f"algo_{client_algo_id}", "algo_status": "NEW"}
 
 
 class _RecordingSafeModeController:
@@ -456,6 +485,80 @@ def test_unsizeable_tp1_still_places_sl_first_and_holds_entry_without_protective
     assert sl_kwargs["client_algo_id"] == expected["sl_algo_client_id"]
     assert sl_kwargs["close_position"] is True
     assert sl_kwargs["quantity"] is None
+    assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
+
+
+# --------------------------------------------------------------------------- #
+# 09-REVIEW CR-04 — deterministic-ID reuse: query-by-ID first, never duplicate.
+# --------------------------------------------------------------------------- #
+
+
+def test_entry_time_sl_is_adopted_not_duplicated() -> None:
+    """CR-04: the SL placed by `execute_approved_plan` shares the attach
+    SL's deterministic id. Attach adopts it (probe finds it active) and
+    only places TP1/TP2 — no duplicate clientAlgoId submission."""
+    expected = _load_expected()
+    adapter = FakeExecutionAdapter(
+        existing_algo_status={expected["sl_algo_client_id"]: "NEW"}
+    )
+    safe_mode_controller = _RecordingSafeModeController()
+    outcome = _attach(adapter, safe_mode_controller)
+
+    assert outcome.is_no_trade is False, outcome
+    assert outcome.placed_legs == ("STOP_LOSS", "TAKE_PROFIT_1", "TAKE_PROFIT_2")
+    assert [c["kwargs"]["client_algo_id"] for c in adapter.calls] == [
+        expected["tp1_algo_client_id"],
+        expected["tp2_algo_client_id"],
+    ]
+    assert safe_mode_controller.entered_reasons == []
+
+
+def test_second_attach_call_for_same_plan_places_nothing_new() -> None:
+    """CR-04: a second attach invocation (more fill events) must not
+    re-submit the three deterministic ids."""
+    adapter = FakeExecutionAdapter()
+    first = _attach(adapter, _RecordingSafeModeController())
+    assert first.is_no_trade is False
+    assert len(adapter.calls) == 3
+
+    safe_mode_controller = _RecordingSafeModeController()
+    second = _attach(adapter, safe_mode_controller)
+    assert second.is_no_trade is False, second
+    assert len(adapter.calls) == 3, "second attach must not duplicate any leg"
+    assert safe_mode_controller.entered_reasons == []
+
+
+def test_existing_non_active_leg_is_unconfirmed_and_never_re_placed() -> None:
+    """CR-04: an existing SL in a non-active state (e.g. CANCELED) is not
+    protection; attach holds ENTRY_WITHOUT_PROTECTIVE and places no
+    rescue order."""
+    expected = _load_expected()
+    adapter = FakeExecutionAdapter(
+        existing_algo_status={expected["sl_algo_client_id"]: "CANCELED"}
+    )
+    safe_mode_controller = _RecordingSafeModeController()
+    outcome = _attach(adapter, safe_mode_controller)
+
+    assert outcome.is_no_trade is True
+    assert outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
+    assert outcome.placed_legs == ()
+    assert adapter.calls == []
+    assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
+
+
+def test_probe_failure_fails_closed_without_placement() -> None:
+    """CR-04: an unknown probe outcome (probe raises) is unconfirmed."""
+    class _ProbeRaises(FakeExecutionAdapter):
+        async def query_algo_order_by_client(self, **kwargs: Any) -> Any:
+            raise TimeoutError("probe timeout")
+
+    adapter = _ProbeRaises()
+    safe_mode_controller = _RecordingSafeModeController()
+    outcome = _attach(adapter, safe_mode_controller)
+
+    assert outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
+    assert outcome.failure_detail == "STOP_LOSS: probe TimeoutError"
+    assert adapter.calls == []
     assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
 
 

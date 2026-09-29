@@ -77,6 +77,8 @@ class ExecutionAdapter(Protocol):
 
     async def query_order_by_client(self, **kwargs: Any) -> Any: ...
 
+    async def query_algo_order_by_client(self, *, client_algo_id: str) -> Any: ...
+
     async def get_position_mode(self) -> str: ...
 
     async def cancel_order(self, *, symbol: str, client_order_id: str) -> Any: ...
@@ -415,6 +417,22 @@ def require_protective_confirmation(
     )
 
 
+# Algo-order statuses that count as "exists and active" (EXECUTION_SPEC §6).
+# Allow-list, fail closed: anything else (TRIGGERED, FINISHED, CANCELED,
+# REJECTED, EXPIRED, "" …) is unconfirmed. "NEW" is the only status the
+# repo's recorded fixtures carry for a live untriggered algo order; any
+# additional active state must be re-verified against current Binance
+# Algo-order docs before it is added here.
+_ACTIVE_ALGO_STATUSES: frozenset[str] = frozenset({"NEW"})
+
+
+def _get_attr_or_key(obj: Any, name: str) -> Any:
+    """Read `name` from a dataclass-style object or a dict-style payload."""
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
 def _is_leg_confirmed(response: Any) -> bool:
     """True when a `place_algo_protective` response confirms the leg.
 
@@ -450,6 +468,29 @@ async def _place_protective_leg(
     material).
     """
     client_algo_id = derive_algo_client_id(plan_hash=plan_hash, role=role)
+
+    # 09-REVIEW CR-04: query-by-ID FIRST. The deterministic `xa-` id is
+    # shared with the entry-time SL placed by `execute_approved_plan` and
+    # with every later attach call for the same plan (partial fills
+    # arrive incrementally). Binance only dedups clientAlgoId among OPEN
+    # orders, so re-placing an existing leg is rejected as a duplicate.
+    # An existing ACTIVE leg is therefore adopted as confirmed (single
+    # owner, no duplicate); an existing NON-active leg (triggered /
+    # canceled / expired) is unconfirmed and never re-placed (no rescue
+    # placement, D-02); an unknown probe outcome fails closed.
+    try:
+        probe = await adapter.query_algo_order_by_client(client_algo_id=client_algo_id)
+    except Exception as exc:  # noqa: BLE001 — unknown existence is unconfirmed
+        return (False, f"{role}: probe {type(exc).__name__}")
+    probe_found = _get_attr_or_key(probe, "found")
+    if probe_found is True:
+        status = _get_attr_or_key(probe, "algo_status")
+        if status in _ACTIVE_ALGO_STATUSES:
+            return (True, None)
+        return (False, f"{role}: existing leg status {status!r}")
+    if probe_found is not False:
+        return (False, f"{role}: probe outcome unknown")
+
     try:
         response = await adapter.place_algo_protective(
             symbol=symbol,
@@ -524,9 +565,16 @@ async def attach_protectives_to_fill(
          out-of-order events collapse to one filled quantity).
       2. `size_protectives_to_filled_qty` — mode-correct SL/TP1/TP2
          leg parameters sized to the folded filled quantity.
-      3. Per-leg `adapter.place_algo_protective` with a deterministic
-         `xa-` algo client id (SL, then TP1, then TP2 — never
-         reordered). Confirmation failure on any leg — including an
+      3. Per-leg query-by-ID (`adapter.query_algo_order_by_client`),
+         then `adapter.place_algo_protective` only when the leg does not
+         exist yet, with a deterministic `xa-` algo client id (SL, then
+         TP1, then TP2 — never reordered). An existing ACTIVE leg (e.g.
+         the entry-time SL, or a leg from an earlier attach call for the
+         same plan) is adopted, never duplicated. NOTE: an existing TP1
+         keeps the size of the fill it was first attached to; resizing
+         TP1 on later partial fills (cancel-then-replace with a
+         versioned id) is a pending design decision (09-REVIEW CR-04).
+         Confirmation failure on any leg — including an
          adapter EXCEPTION (timeout, rejection, duplicate id, identity-
          less response) — holds `ENTRY_WITHOUT_PROTECTIVE` immediately
          and forces SAFE_MODE; no further legs are attempted and no
