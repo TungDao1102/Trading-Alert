@@ -105,6 +105,11 @@ class ExcursionSection:
     incomplete: tuple[tuple[str, int], ...]
     n_zero_risk_excluded: int
     measure_stats: tuple[DistStat, ...]  # EXCURSION_MEASURES order
+    # METRICS section 6 diagnostic questions, descriptive distributions only. The
+    # fourth question (holding duration) is the `holding` measure above.
+    mfe_r_of_sl_exits: DistStat
+    mae_r_of_tp_exits: DistStat
+    give_back: DistStat
     window_convention: str
     base_seed: int
     resamples: int
@@ -128,6 +133,11 @@ class ExcursionSection:
                 "measures": {
                     name: stat.digest()
                     for name, stat in zip(EXCURSION_MEASURES, self.measure_stats, strict=True)
+                },
+                "diagnostics": {
+                    "mfe_r_of_sl_exits": self.mfe_r_of_sl_exits.digest(),
+                    "mae_r_of_tp_exits": self.mae_r_of_tp_exits.digest(),
+                    "give_back": self.give_back.digest(),
                 },
                 "per_trade": [trade.digest() for trade in self.per_trade],
             }
@@ -303,6 +313,33 @@ def build_excursion_section(
         )
         for ordinal, name in enumerate(EXCURSION_MEASURES)
     )
+    # Diagnostics get distinct deterministic seeds after the measure ordinals.
+    diag_base = len(EXCURSION_MEASURES)
+    sl_excursions = [e for e in excursions if e.exit_kind == "SL"]
+    tp_excursions = [e for e in excursions if e.exit_kind == "TP1"]
+    give_back_values = [
+        _sub(e.mfe_r, e.realized_r)
+        for e in excursions
+        if e.mfe_r is not None and e.realized_r is not None
+    ]
+    mfe_r_of_sl_exits = dist_stat(
+        _values([e.mfe_r for e in sl_excursions]),
+        seed=seed_for(base_seed, diag_base),
+        resamples=resamples,
+        n=len(sl_excursions),
+    )
+    mae_r_of_tp_exits = dist_stat(
+        _values([e.mae_r for e in tp_excursions]),
+        seed=seed_for(base_seed, diag_base + 1),
+        resamples=resamples,
+        n=len(tp_excursions),
+    )
+    give_back = dist_stat(
+        give_back_values,
+        seed=seed_for(base_seed, diag_base + 2),
+        resamples=resamples,
+        n=n_measured,
+    )
     return ExcursionSection(
         evidence=evidence,
         n_outcomes=len(ordered),
@@ -310,6 +347,9 @@ def build_excursion_section(
         incomplete=incomplete,
         n_zero_risk_excluded=sum(1 for e in excursions if e.r_excluded_zero_risk),
         measure_stats=measure_stats,
+        mfe_r_of_sl_exits=mfe_r_of_sl_exits,
+        mae_r_of_tp_exits=mae_r_of_tp_exits,
+        give_back=give_back,
         window_convention=EXCURSION_WINDOW_CONVENTION,
         base_seed=base_seed,
         resamples=resamples,
