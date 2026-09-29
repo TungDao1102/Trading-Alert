@@ -1,0 +1,51 @@
+{
+  "paper": {
+    "evidence": "PAPER",
+    "records": [
+      {
+        "source_id": "SIG-A",
+        "signal_id": "SIG-A",
+        "path": "USER_EXECUTED",
+        "approval_result": "APPROVED",
+        "signal_detected_at_utc": "2026-02-02T08:00:00+00:00",
+        "approved_at_utc": "2026-02-02T08:00:30+00:00",
+        "synthetic_lag": true,
+        "reason_code": ""
+      },
+      {
+        "source_id": "SIG-B",
+        "signal_id": "SIG-B",
+        "path": "USER_EXECUTED",
+        "approval_result": "APPROVED",
+        "signal_detected_at_utc": "2026-02-02T10:00:00+00:00",
+        "approved_at_utc": "2026-02-02T10:00:30+00:00",
+        "synthetic_lag": true,
+        "reason_code": ""
+      },
+      {
+        "source_id": "SIG-C",
+        "signal_id": "SIG-C",
+        "path": "OPPORTUNITY",
+        "approval_result": "SKIPPED",
+        "signal_detected_at_utc": "2026-02-02T12:00:00+00:00",
+        "reason_code": "SKIPPED_USER"
+      },
+      {
+        "source_id": "SIG-D",
+        "signal_id": "SIG-D",
+        "path": "OPPORTUNITY",
+        "approval_result": "EXPIRED",
+        "signal_detected_at_utc": "2026-02-02T14:00:00+00:00",
+        "reason_code": "EXPIRED"
+      },
+      {
+        "source_id": "SIG-E",
+        "signal_id": "SIG-E",
+        "path": "SYSTEM_ONLY",
+        "signal_detected_at_utc": "2026-02-02T16:00:00+00:00"
+      }
+    ],
+    "realized_r_by_signal": {"SIG-A": "1.0", "SIG-B": "-0.5"},
+    "hypothetical_r_by_signal": {"SIG-C": "2.0"}
+  }
+}

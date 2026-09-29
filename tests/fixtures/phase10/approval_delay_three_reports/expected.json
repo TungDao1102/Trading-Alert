@@ -1,0 +1,29 @@
+{
+  "paper": {
+    "system": {
+      "n_signals": 5,
+      "n_r_valued": 3,
+      "incomplete": [["NO_HYPOTHETICAL_OUTCOME", 1], ["NO_PAPER_OUTCOME", 1]],
+      "hypothetical_used": true
+    },
+    "user_execution": {
+      "n_signals": 2,
+      "n_r_valued": 2,
+      "mean_r": "0.25",
+      "win_rate": "0.5",
+      "incomplete": [],
+      "hypothetical_used": false,
+      "interval_absent": false
+    },
+    "opportunity": {
+      "n_signals": 2,
+      "n_r_valued": 1,
+      "incomplete": [["NO_HYPOTHETICAL_OUTCOME", 1]],
+      "hypothetical_used": true,
+      "interval_absent": true
+    },
+    "synthetic_lag_seconds": 30,
+    "synthetic_lag_label": "SYNTHETIC LAG (APPROVAL_DELAY_LAG_SECONDS=30)",
+    "section_digest": "PIN-AFTER-GREEN"
+  }
+}
