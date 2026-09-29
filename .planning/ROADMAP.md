@@ -315,7 +315,7 @@ Plans:
   1. Journal/analytics reports MFE/MAE, execution-quality latencies, approval-delay impact, and robustness slices without hiding the full report
   2. Kill-gate dashboard tracks the 3-families / 6-months budget with live-5 vs research-universe slices, and NO_TRADE / INSUFFICIENT EDGE is recordable as a valid terminal outcome
 
-**Plans:** 10/12 plans executed
+**Plans:** 11/12 plans executed
 **UI hint**: yes
 
 Plans:
@@ -340,7 +340,7 @@ Plans:
 - [x] 10-10-PLAN.md — Renderer part 1: formatting/escaping primitives, header, Kill Gate view, Evidence Overview (JRN-01, GOV-01, D-04)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 10-11-PLAN.md — Renderer part 2: sections 3-10, JSON sidecar with digest verification, Telegram pointer text, governance scans (JRN-01, GOV-01, D-04)
+- [x] 10-11-PLAN.md — Renderer part 2: sections 3-10, JSON sidecar with digest verification, Telegram pointer text, governance scans (JRN-01, GOV-01, D-04)
 
 **Wave 7** *(blocked on Wave 6 completion)*
 - [ ] 10-12-PLAN.md — CLI + PowerShell wrapper, explicit idempotent --record, closing purity/determinism/regression guards (JRN-01, GOV-01, D-04)
@@ -361,4 +361,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 7. Paper Forward Observation | 4/4 | In Progress|  |
 | 8. Approval + Reconciliation Hardening | 5/5 | Complete   | 2026-09-27 |
 | 9. Live Execution Rollout | 4/4 | In Progress|  |
-| 10. Journal Depth + Kill-Gate Operations | 10/12 | In Progress|  |
+| 10. Journal Depth + Kill-Gate Operations | 11/12 | In Progress|  |
