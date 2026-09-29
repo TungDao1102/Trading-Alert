@@ -40,6 +40,8 @@ REPO = Path(__file__).resolve().parents[1]
 EVIDENCE_FIXTURE = REPO / "tests" / "fixtures" / "phase10" / "loaders" / "evidence_sample.json"
 AS_OF = "2027-04-01T00:00:00+00:00"
 FAMILIES = ("breakout-retest", "range-mr", "trend-pullback")
+# The injected edge clock for --record runs: one hour after AS_OF (never the real clock).
+RECORD_NOW = datetime(2027, 4, 1, 1, 0, tzinfo=UTC)
 COPY_TAIL = "No file was written. Fix the cause and re-run journal-report.ps1 with the same -AsOf."
 
 
@@ -626,9 +628,15 @@ def _db_run(
     monkeypatch: pytest.MonkeyPatch,
     *extra: str,
     as_of: str | None = AS_OF,
+    now: datetime = RECORD_NOW,
 ) -> tuple[int, str, str]:
     monkeypatch.setenv("DATABASE_URL", DATABASE_URL)
-    return _run(capsys, env.argv(*extra, as_of=as_of), session_factory_fn=fake.factory_fn)
+    return _run(
+        capsys,
+        env.argv(*extra, as_of=as_of),
+        session_factory_fn=fake.factory_fn,
+        now_fn=lambda: now,
+    )
 
 
 def _sidecar_of(out: str) -> dict[str, Any]:
@@ -932,6 +940,63 @@ def test_committed_recorded_terminal_is_cleared_by_a_later_recorded_reset(
     code, out, err = _run(capsys, env.argv("--no-db"))
     assert code == 0, err
     assert _stdout_lines(out)[3] == "Kill gate: WITHIN_BUDGET"
+
+
+def test_record_refuses_a_future_as_of_and_writes_nothing(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WR-04: the journal never receives an evaluation instant later than the edge clock."""
+    store = _FakeStore()
+    code, out, err = _db_run(
+        env,
+        _FakeFactory(store),
+        capsys,
+        monkeypatch,
+        "--record",
+        as_of="2030-01-01T00:00:00+00:00",
+    )
+    assert code == 2
+    assert out == ""
+    assert "--as-of" in err
+    assert "--record" in err
+    assert store.inserts() == []
+    assert env.files() == []
+
+
+def test_record_accepts_an_as_of_equal_to_the_edge_clock(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _FakeStore()
+    code, _, err = _db_run(
+        env,
+        _FakeFactory(store),
+        capsys,
+        monkeypatch,
+        "--record",
+        now=datetime(2027, 4, 1, tzinfo=UTC),
+    )
+    assert code == 0, err
+    assert len(store.kill_gate_ids()) == 1
+
+
+def test_record_reads_the_clock_once_to_check_an_explicit_as_of(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[int] = []
+
+    def counting_clock() -> datetime:
+        calls.append(1)
+        return RECORD_NOW
+
+    monkeypatch.setenv("DATABASE_URL", DATABASE_URL)
+    code, _, err = _run(
+        capsys,
+        env.argv("--record"),
+        session_factory_fn=_FakeFactory(_FakeStore()).factory_fn,
+        now_fn=counting_clock,
+    )
+    assert code == 0, err
+    assert len(calls) == 1
 
 
 def test_record_failure_keeps_the_files_and_reports_only_the_exception_type(

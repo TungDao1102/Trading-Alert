@@ -11,8 +11,9 @@ Contract (UI-SPEC Interaction Contract):
   `Digest: sha256:<64 hex>` and `Kill gate: <STATE>`; exit 0, also for a terminal
   INSUFFICIENT_EDGE (a valid outcome, never an error).
 - exit 1: the report could not be produced (nothing is written); exit 2: invalid arguments.
-- The wall clock is read at most once, only when `--as-of` is omitted, inside
-  `_resolve_as_of`. Every other instant is an injected argument.
+- The wall clock is read at most once, inside `_resolve_as_of`: when `--as-of` is omitted,
+  or with `--record` to refuse an `--as-of` in the future. Every other instant is an
+  injected argument.
 - No network, no exchange access, no Telegram send, no float. Error output carries names and
   exception types only, never file contents or credentials.
 """
@@ -219,11 +220,21 @@ def parse_args(argv: Sequence[str] | None = None) -> CliArgs:
 
 
 def _resolve_as_of(args: CliArgs, now_fn: ClockFn | None) -> datetime:
-    """The report instant: `--as-of`, else the one wall-clock read of the whole program."""
-    if args.as_of is not None:
+    """The report instant: `--as-of`, else the one wall-clock read of the whole program.
+
+    With `--record` the clock is also read (once) when `--as-of` is given, and an `--as-of`
+    later than that reading is refused (WR-04): the append-only journal must never receive an
+    evaluation instant that has not happened yet. An earlier `--as-of` stays allowed so a
+    replay of the same inputs remains an idempotent no-op.
+    """
+    if args.as_of is not None and not args.record:
         return args.as_of
-    moment = now_fn() if now_fn is not None else datetime.now(UTC)
-    return moment.astimezone(UTC).replace(microsecond=0)
+    moment = (now_fn() if now_fn is not None else datetime.now(UTC)).astimezone(UTC)
+    if args.as_of is None:
+        return moment.replace(microsecond=0)
+    if args.as_of > moment:
+        raise _UsageError("--record refuses an --as-of later than the current time")
+    return args.as_of
 
 
 # --------------------------------------------------------------------------- #

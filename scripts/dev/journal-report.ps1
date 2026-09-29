@@ -15,7 +15,8 @@
 #   -Decisions <path>                 human decision record (default docs/research/kill_gate_decisions.json)
 #   -RawRoot <path>                   1m candle store root (default data/raw)
 #   -Record                           append ONE KILL_GATE_EVALUATION journal event (idempotent);
-#                                     -Record is the only write besides the two report files
+#                                     -Record is the only write besides the two report files;
+#                                     with -Record an -AsOf later than the current time is refused
 #   -NoDb                             never read a database, even when one is configured
 #
 # Exit codes: 0 report produced (also for a terminal INSUFFICIENT_EDGE state), 1 report could
