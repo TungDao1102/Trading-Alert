@@ -169,6 +169,27 @@ class DailyState(str, Enum):
     DAILY_STOP = "DAILY_STOP"
 
 
+class KillGateState(str, Enum):
+    """GLOSSARY section 8.2 - Research kill-gate state (Phase 10 D-03, D030).
+
+    Defined here (not in analytics) so execution enablement can import it
+    without importing the analytics package (D016: GLOSSARY is the only
+    source of truth for statuses).
+
+    - WITHIN_BUDGET: fewer than 3 independently specified families tested OR
+      fewer than 6 calendar months elapsed - keep researching.
+    - PASSING_CANDIDATE: a family holds a recorded passing decision; evidence
+      exists; does NOT authorize live.
+    - INSUFFICIENT_EDGE: terminal; at least 3 families tested AND at least 6
+      months elapsed AND none passing. A valid outcome; keeps live disabled
+      and never auto-clears.
+    """
+
+    WITHIN_BUDGET = "WITHIN_BUDGET"
+    PASSING_CANDIDATE = "PASSING_CANDIDATE"
+    INSUFFICIENT_EDGE = "INSUFFICIENT_EDGE"
+
+
 # --------------------------------------------------------------------------- #
 # Phase 4 plan 04-01 (D-06) — promoted enums.
 # --------------------------------------------------------------------------- #

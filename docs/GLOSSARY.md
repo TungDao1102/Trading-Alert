@@ -135,6 +135,18 @@ DAILY_STOP
 `WARNING` — warning threshold reached but stop threshold not yet; new entries still permitted (alert fires).
 `DAILY_STOP` — stop threshold reached; no new entries, existing protective exits remain active.
 
+### 8.2 Canonical KillGateState (Phase 10, D-03)
+
+```text
+WITHIN_BUDGET
+PASSING_CANDIDATE
+INSUFFICIENT_EDGE
+```
+
+`WITHIN_BUDGET` — fewer than three independently specified families tested, or fewer than six calendar months elapsed since the protocol freeze; keep researching.
+`PASSING_CANDIDATE` — a family holds a recorded passing decision; evidence exists; does not authorize live trading.
+`INSUFFICIENT_EDGE` — terminal: at least three families tested, at least six months elapsed, and none passing (D013, D030). A valid outcome; keeps live disabled, blocks new strategy-family registration and never clears itself.
+
 ## 9. Canonical rejection reasons
 
 ```text
