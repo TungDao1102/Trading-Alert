@@ -1,6 +1,6 @@
 # Research Protocol (Frozen)
 
-> **Protocol version:** v1.0.0
+> **Protocol version:** v1.0.1
 > **Status:** FROZEN
 > **Frozen on:** 2026-09-19
 > **Supersedes:** none
@@ -227,11 +227,13 @@ Every experiment record includes:
 
 > **Source:** `docs/DECISIONS.md` D013 (≥3 independently specified families AND ≥6 months research; else stop adding complexity, keep live disabled, classify as research/journal platform; NO_TRADE valid).
 
-The kill gate fires if:
+The kill gate fires only when **all three** conditions hold:
 
-- fewer than three **independently specified** candidate families have completed backtest + out-of-sample evidence, **or**
-- fewer than six months of research effort have been invested across those families, **or**
-- any family fails the 10 acceptance gates materially.
+- at least three **independently specified** candidate families have been tested under the frozen methodology (backtest + out-of-sample evidence), **and**
+- at least six calendar months have elapsed since the protocol freeze date (the header `Frozen on` date, taken at 00:00Z), **and**
+- no family holds a recorded passing decision.
+
+"Independently specified" means a distinct `strategy_id`, a 7-slot family sheet, a distinct sheet content hash and distinct registered parameter-set hashes (baselines excluded). Until all three hold the state is WITHIN_BUDGET (keep researching) or PASSING_CANDIDATE (a family holds a recorded passing decision; this does not authorize live). Because numeric acceptance thresholds remain TBD, a family's passing status is a recorded human decision with a decision reference, never computed. This wording conforms the section to D013 and is recorded as D030 (protocol v1.0.1, clarification only; see the Amendment log).
 
 When the kill gate fires, the project stops adding complexity, keeps live execution disabled, classifies the artifact as research/journal infrastructure, and continues to log NO_TRADE outcomes. NO_TRADE is a valid outcome of the kill gate; a forced green light is not.
 
@@ -371,3 +373,7 @@ Until all three land, the doc is `DRAFT` in effect, regardless of what the heade
 ### Living-draft firewall (operational)
 
 `docs/research/TRADING_STRATEGY_RESEARCH.md` is the only place new candidate ideas and open questions are first recorded. The protocol doc is updated only via the amendment procedure above. When a future research-gate CI workflow is in place, the workflow reads the protocol `Status:` line, the corresponding DECISIONS row, and the DOC_STATUS entry on every PR; any disagreement (e.g. header says FROZEN but no DECISIONS row exists) fails the gate.
+
+### Amendment log
+
+- **v1.0.1 — 2026-09-29 — D030 (clarification).** Wording-only correction of the "Kill gate D013" firing rule to conform to D013 (fires only when at least three independently specified families were tested AND at least six calendar months elapsed since the freeze AND none holds a recorded passing decision); the earlier disjunctive shortfall list contradicted D013 and is removed. No dataset split, cost model, execution assumption, acceptance gate, threshold or numeric value changed. `Status`, `Frozen on` and `Supersedes` are unchanged.
