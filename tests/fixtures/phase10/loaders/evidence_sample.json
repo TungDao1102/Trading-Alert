@@ -1,0 +1,132 @@
+{
+  "backtest": [
+    {
+      "contexts": {
+        "T-1": {
+          "intended_entry_price": "100.00",
+          "regime": "TREND",
+          "vol_regime": null
+        }
+      },
+      "experiment": {
+        "code_version": "fixture-code-1",
+        "cost_model_hash": "41c8dcc0be7905c5a70026d7940bd08086f19bdd653f92ead89a8ed6d0b85a5f",
+        "data_snapshot_id": "d9747814efcd7ff63883b91abd8a3fc22c8367a3a68387077d0e57bfcaa90cc0",
+        "experiment_id": "71d98aa164245e359daaba5f1f69ecbdb71f348eb27c64e8d0918a1726b5ff2c",
+        "notes": "",
+        "parameter_set_hash": "e1579900b1be20b8a6db76c554255cbec8125d5d317f6df7dadd5de78d2afae5",
+        "parameter_set_id": "baseline-v1",
+        "result_summary_json": "{}",
+        "run_type": "CANDIDATE",
+        "strategy_version": "v2.0.0",
+        "time_range_end_utc": "2026-03-01T00:00:00+00:00",
+        "time_range_start_utc": "2026-01-01T00:00:00+00:00",
+        "universe_hash": "5bc630979b7879cc1365464f4a029bcca8d72020af05065f5b34313b79c59431"
+      },
+      "flags": {
+        "baseline_summaries_present": true,
+        "has_uncertainty_report": false,
+        "reproducibility_verified": true
+      },
+      "trades": [
+        {
+          "coverage_note": null,
+          "direction": "LONG",
+          "entry_fee": "0.25",
+          "entry_kind": "ENTRY_FILLED",
+          "entry_price": "100.00",
+          "entry_time_utc": "2026-01-05T10:00:00+00:00",
+          "exit_fee": "0.25",
+          "exit_kind": "TP1",
+          "exit_price": "110.00",
+          "exit_time_utc": "2026-01-05T14:00:00+00:00",
+          "fallback_applied": false,
+          "funding_amount": "0",
+          "gross_pnl": "10.00",
+          "modeled_costs_per_unit": "0.50",
+          "outcome_kind": "OK",
+          "parameter_set_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "quantity": "1",
+          "realized_pnl": "9.50",
+          "realized_risk": "5.00",
+          "reason_code": "OK",
+          "signal_id": "SIG-1",
+          "slippage_amount": "0",
+          "strategy_version": "v2.0.0",
+          "symbol": "BTCUSDT",
+          "trade_id": "T-1",
+          "trade_plan_id": "PLAN-1"
+        },
+        {
+          "coverage_note": null,
+          "direction": "SHORT",
+          "entry_fee": null,
+          "entry_kind": "TOUCH_NO_FILL",
+          "entry_price": null,
+          "entry_time_utc": null,
+          "exit_fee": null,
+          "exit_kind": null,
+          "exit_price": null,
+          "exit_time_utc": null,
+          "fallback_applied": false,
+          "funding_amount": null,
+          "gross_pnl": null,
+          "modeled_costs_per_unit": null,
+          "outcome_kind": "REJECT",
+          "parameter_set_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "quantity": null,
+          "realized_pnl": null,
+          "realized_risk": null,
+          "reason_code": "RISK_REJECT_MIN_NOTIONAL",
+          "signal_id": "SIG-2",
+          "slippage_amount": null,
+          "strategy_version": "v2.0.0",
+          "symbol": "ETHUSDT",
+          "trade_id": "T-2",
+          "trade_plan_id": "PLAN-2"
+        }
+      ]
+    }
+  ],
+  "paper": [
+    {
+      "approval_acted_at_utc": "2026-02-01T08:00:30+00:00",
+      "attribution": "system",
+      "epoch_id": "epoch-1",
+      "experiment_id": "71d98aa164245e359daaba5f1f69ecbdb71f348eb27c64e8d0918a1726b5ff2c",
+      "fill_time_utc": "2026-02-01T09:00:00+00:00",
+      "order_submitted_at_utc": "2026-02-01T08:00:31+00:00",
+      "parameter_set_hash": "e1579900b1be20b8a6db76c554255cbec8125d5d317f6df7dadd5de78d2afae5",
+      "parameter_set_id": "baseline-v1",
+      "plan_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "reason_code": "",
+      "signal_detected_at_utc": "2026-02-01T08:00:00+00:00",
+      "signal_id": "SIG-P1",
+      "strategy_id": "trend-pullback",
+      "strategy_version": "v2.0.0",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "approval_acted_at_utc": null,
+      "attribution": "opportunity",
+      "epoch_id": "epoch-1",
+      "experiment_id": "71d98aa164245e359daaba5f1f69ecbdb71f348eb27c64e8d0918a1726b5ff2c",
+      "fill_time_utc": null,
+      "order_submitted_at_utc": null,
+      "parameter_set_hash": "e1579900b1be20b8a6db76c554255cbec8125d5d317f6df7dadd5de78d2afae5",
+      "parameter_set_id": "baseline-v1",
+      "plan_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "reason_code": "EXPIRED",
+      "signal_detected_at_utc": "2026-02-02T08:00:00+00:00",
+      "signal_id": "SIG-P2",
+      "strategy_id": "trend-pullback",
+      "strategy_version": "v2.0.0",
+      "symbol": "BTCUSDT"
+    }
+  ],
+  "research_universe": [
+    "BTCUSDT",
+    "ETHUSDT"
+  ],
+  "schema": "analytics-evidence/1"
+}

@@ -7,18 +7,36 @@ flag, and the pure evaluator runs end to end against the committed repo.
 
 from __future__ import annotations
 
+import copy
+import json
+import os
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import pytest
 from src.adapters.analytics_files import (
+    REPORTS_ROOT,
     DecisionsFile,
+    DecisionsFileError,
+    EvidenceFile,
+    EvidenceFileError,
     ExperimentFlags,
     FamilyDecision,
     FamilyScan,
+    PathConfinementError,
+    confine_output_dir,
+    load_decisions_file,
+    load_evidence_file,
+    load_universe_file,
     read_protocol_text,
     scan_family_facts,
 )
+from src.analytics.killgate import ResetRecord
+from src.analytics.types import OutcomeContext
+from src.domain.canonical import sha256_hex
+from src.paper.attribution import AttributionKind
 from src.analytics.clock import clock_start_from_protocol
 from src.analytics.family import (
     REQUIRED_SLOTS,
@@ -274,3 +292,352 @@ def test_scan_missing_flags_default_to_none_reproducibility_and_false_others() -
     assert facts.reproducibility_verified is None
     assert facts.uncertainty_report_present is False
     assert facts.baseline_compared is False
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 - evidence / decisions / universe loaders (fail closed) and confinement
+# --------------------------------------------------------------------------- #
+
+LOADERS = REPO_ROOT / "tests" / "fixtures" / "phase10" / "loaders"
+EVIDENCE_SAMPLE = LOADERS / "evidence_sample.json"
+DECISIONS_SAMPLE = LOADERS / "decisions_sample.json"
+UNIVERSE_SAMPLE = LOADERS / "universe_sample.json"
+COMMITTED_DECISIONS = REPO_ROOT / "docs" / "research" / "kill_gate_decisions.json"
+
+
+def _sample(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write(tmp_path: Path, doc: Any, name: str = "input.json") -> Path:
+    target = tmp_path / name
+    target.write_text(json.dumps(doc), encoding="utf-8")
+    return target
+
+
+def _evidence_with(tmp_path: Path, mutate: Any) -> Path:
+    doc = copy.deepcopy(_sample(EVIDENCE_SAMPLE))
+    mutate(doc)
+    return _write(tmp_path, doc)
+
+
+def _decisions_with(tmp_path: Path, mutate: Any) -> Path:
+    doc = copy.deepcopy(_sample(DECISIONS_SAMPLE))
+    mutate(doc)
+    return _write(tmp_path, doc)
+
+
+def test_evidence_sample_loads_into_typed_objects() -> None:
+    evidence = load_evidence_file(EVIDENCE_SAMPLE)
+    assert isinstance(evidence, EvidenceFile)
+    assert len(evidence.backtest) == 1
+    entry = evidence.backtest[0]
+    assert entry.experiment.run_type == "CANDIDATE"
+    assert entry.experiment.time_range_start_utc.tzinfo is not None
+    assert [t.trade_id for t in entry.trades] == ["T-1", "T-2"]
+    assert entry.trades[0].entry_price == Decimal("100.00")
+    assert isinstance(entry.trades[0].entry_time_utc, datetime)
+    assert entry.trades[1].outcome_kind == "REJECT"
+    assert entry.contexts["T-1"] == OutcomeContext(
+        intended_entry_price=Decimal("100.00"), regime="TREND", vol_regime=None
+    )
+    assert entry.flags == ExperimentFlags(
+        reproducibility_verified=True,
+        has_uncertainty_report=False,
+        baseline_summaries_present=True,
+    )
+    assert [record.attribution for record in evidence.paper] == [
+        AttributionKind.SYSTEM,
+        AttributionKind.OPPORTUNITY,
+    ]
+    assert evidence.paper[1].approval_acted_at_utc is None
+    assert evidence.research_universe == ("BTCUSDT", "ETHUSDT")
+
+
+def test_evidence_sample_universe_hash_matches_the_sorted_universe() -> None:
+    evidence = load_evidence_file(EVIDENCE_SAMPLE)
+    expected = sha256_hex({"universe": sorted(evidence.research_universe)})
+    assert evidence.backtest[0].experiment.universe_hash == expected
+
+
+def test_evidence_fixture_files_avoid_research_gate_tripwires() -> None:
+    for path in LOADERS.glob("*.json"):
+        assert not path.name.startswith(("experiment", "backtest"))
+        assert '"parameters"' not in path.read_text(encoding="utf-8")
+
+
+def test_evidence_wrong_schema_fails_closed(tmp_path: Path) -> None:
+    path = _evidence_with(tmp_path, lambda doc: doc.update(schema="analytics-evidence/2"))
+    with pytest.raises(EvidenceFileError, match="schema"):
+        load_evidence_file(path)
+
+
+def test_evidence_missing_top_level_key_fails_closed(tmp_path: Path) -> None:
+    path = _evidence_with(tmp_path, lambda doc: doc.pop("paper"))
+    with pytest.raises(EvidenceFileError, match="paper"):
+        load_evidence_file(path)
+
+
+def test_evidence_unparseable_decimal_names_the_field_not_the_value(tmp_path: Path) -> None:
+    secret = "postgresql://user:hunter2@host/db"
+
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["backtest"][0]["trades"][0]["entry_price"] = secret
+
+    with pytest.raises(EvidenceFileError, match="entry_price") as info:
+        load_evidence_file(_evidence_with(tmp_path, mutate))
+    assert secret not in str(info.value)
+    assert "hunter2" not in str(info.value)
+
+
+def test_evidence_naive_datetime_fails_closed(tmp_path: Path) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["backtest"][0]["trades"][0]["entry_time_utc"] = "2026-01-05T10:00:00"
+
+    with pytest.raises(EvidenceFileError, match="entry_time_utc"):
+        load_evidence_file(_evidence_with(tmp_path, mutate))
+
+
+def test_evidence_non_utc_datetime_fails_closed(tmp_path: Path) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["paper"][0]["signal_detected_at_utc"] = "2026-02-01T08:00:00+07:00"
+
+    with pytest.raises(EvidenceFileError, match="signal_detected_at_utc"):
+        load_evidence_file(_evidence_with(tmp_path, mutate))
+
+
+def test_evidence_unknown_attribution_fails_closed(tmp_path: Path) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["paper"][0]["attribution"] = "mystery"
+
+    with pytest.raises(EvidenceFileError, match="attribution"):
+        load_evidence_file(_evidence_with(tmp_path, mutate))
+
+
+def test_evidence_experiment_construction_error_is_wrapped(tmp_path: Path) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["backtest"][0]["experiment"]["run_type"] = "LIVE"
+
+    with pytest.raises(EvidenceFileError, match="experiment"):
+        load_evidence_file(_evidence_with(tmp_path, mutate))
+
+
+def test_evidence_paper_construction_error_is_wrapped(tmp_path: Path) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["paper"][0]["epoch_id"] = ""
+
+    with pytest.raises(EvidenceFileError, match="paper"):
+        load_evidence_file(_evidence_with(tmp_path, mutate))
+
+
+def test_evidence_duplicate_trade_id_fails_closed(tmp_path: Path) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["backtest"][0]["trades"][1]["trade_id"] = "T-1"
+
+    with pytest.raises(EvidenceFileError, match="trade_id"):
+        load_evidence_file(_evidence_with(tmp_path, mutate))
+
+
+def test_evidence_unreadable_or_non_json_file_fails_closed(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    with pytest.raises(EvidenceFileError):
+        load_evidence_file(bad)
+    with pytest.raises(EvidenceFileError):
+        load_evidence_file(tmp_path / "missing.json")
+
+
+def test_decisions_sample_loads_sorted_and_typed() -> None:
+    decisions = load_decisions_file(DECISIONS_SAMPLE)
+    assert isinstance(decisions, DecisionsFile)
+    assert [d.family_id for d in decisions.families] == ["trend-pullback"]
+    assert decisions.families[0].status is FamilyStatus.TESTED_FAIL
+    assert decisions.families[0].decided_at_utc == datetime(2026, 3, 15, tzinfo=UTC)
+    assert decisions.resets == (
+        ResetRecord(
+            operator_id="op-fixture",
+            decision_ref="DEC-FIXTURE-reset-a",
+            occurred_at_utc=datetime(2026, 4, 1, tzinfo=UTC),
+        ),
+        ResetRecord(
+            operator_id="op-fixture",
+            decision_ref="DEC-FIXTURE-reset-b",
+            occurred_at_utc=datetime(2026, 5, 2, tzinfo=UTC),
+        ),
+    )
+    assert decisions.recorded_terminal is not None
+    assert decisions.recorded_terminal.state == "INSUFFICIENT_EDGE"
+    assert decisions.recorded_terminal.families_at_record == (
+        "breakout-retest",
+        "range-mr",
+        "trend-pullback",
+    )
+
+
+def test_committed_decision_record_loads_empty() -> None:
+    decisions = load_decisions_file(COMMITTED_DECISIONS)
+    assert decisions.families == ()
+    assert decisions.resets == ()
+    assert decisions.recorded_terminal is None
+
+
+def test_decisions_wrong_schema_fails_closed(tmp_path: Path) -> None:
+    path = _decisions_with(tmp_path, lambda doc: doc.update(schema="kill-gate-decisions/9"))
+    with pytest.raises(DecisionsFileError, match="schema"):
+        load_decisions_file(path)
+
+
+def test_decisions_unknown_status_fails_closed(tmp_path: Path) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["families"][0]["status"] = "PASSED"
+
+    with pytest.raises(DecisionsFileError, match="status"):
+        load_decisions_file(_decisions_with(tmp_path, mutate))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "decision_ref",
+        "decided_at_utc",
+        "development_experiment_ids",
+        "validation_experiment_ids",
+    ],
+)
+def test_decisions_tested_without_required_field_fails_closed(
+    tmp_path: Path, field: str
+) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        entry = doc["families"][0]
+        entry[field] = [] if field.endswith("_ids") else None
+
+    with pytest.raises(DecisionsFileError, match=field):
+        load_decisions_file(_decisions_with(tmp_path, mutate))
+
+
+def test_decisions_tested_with_blank_decision_ref_fails_closed(tmp_path: Path) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["families"][0]["decision_ref"] = "   "
+
+    with pytest.raises(DecisionsFileError, match="decision_ref"):
+        load_decisions_file(_decisions_with(tmp_path, mutate))
+
+
+def test_decisions_reset_without_operator_id_fails_closed(tmp_path: Path) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["resets"][0]["operator_id"] = ""
+
+    with pytest.raises(DecisionsFileError, match="operator_id"):
+        load_decisions_file(_decisions_with(tmp_path, mutate))
+
+
+def test_decisions_reset_without_decision_ref_fails_closed(tmp_path: Path) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        del doc["resets"][0]["decision_ref"]
+
+    with pytest.raises(DecisionsFileError, match="decision_ref"):
+        load_decisions_file(_decisions_with(tmp_path, mutate))
+
+
+def test_decisions_recorded_terminal_state_must_be_insufficient_edge(tmp_path: Path) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["recorded_terminal"]["state"] = "WITHIN_BUDGET"
+
+    with pytest.raises(DecisionsFileError, match="state"):
+        load_decisions_file(_decisions_with(tmp_path, mutate))
+
+
+def test_decisions_naive_datetime_fails_closed(tmp_path: Path) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["families"][0]["decided_at_utc"] = "2026-03-15T00:00:00"
+
+    with pytest.raises(DecisionsFileError, match="decided_at_utc"):
+        load_decisions_file(_decisions_with(tmp_path, mutate))
+
+
+def test_decisions_not_tested_entry_needs_no_decision_fields(tmp_path: Path) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["families"] = [
+            {
+                "family_id": "range-mr",
+                "status": "NOT_TESTED",
+                "decision_ref": None,
+                "decided_at_utc": None,
+                "development_experiment_ids": [],
+                "validation_experiment_ids": [],
+            }
+        ]
+
+    decisions = load_decisions_file(_decisions_with(tmp_path, mutate))
+    assert decisions.families[0].status is FamilyStatus.NOT_TESTED
+
+
+def test_universe_sample_is_sorted_and_deduplicated() -> None:
+    assert load_universe_file(UNIVERSE_SAMPLE) == ("BTCUSDT", "ETHUSDT")
+
+
+def test_universe_accepts_a_bare_array_and_an_empty_universe(tmp_path: Path) -> None:
+    assert load_universe_file(_write(tmp_path, ["SOLUSDT", "BNBUSDT"])) == ("BNBUSDT", "SOLUSDT")
+    assert load_universe_file(_write(tmp_path, {"research_universe": []}, "e.json")) == ()
+
+
+@pytest.mark.parametrize("bad", ["btcusdt", "BTC", "BTC/USDT", "A" * 21, 5])
+def test_universe_invalid_symbol_fails_closed(tmp_path: Path, bad: Any) -> None:
+    with pytest.raises(EvidenceFileError, match="symbol"):
+        load_universe_file(_write(tmp_path, {"research_universe": [bad]}))
+
+
+def test_universe_wrong_shape_fails_closed(tmp_path: Path) -> None:
+    with pytest.raises(EvidenceFileError, match="research_universe"):
+        load_universe_file(_write(tmp_path, {"other": []}))
+
+
+def test_confine_default_is_the_reports_root() -> None:
+    assert confine_output_dir(None) == REPORTS_ROOT
+    assert REPORTS_ROOT == Path("data") / "reports"
+
+
+def test_confine_accepts_the_root_and_paths_inside_it(tmp_path: Path) -> None:
+    root = tmp_path / "reports"
+    root.mkdir()
+    assert confine_output_dir(root, reports_root=root) == root.resolve()
+    inside = root / "run-1" / "nested"
+    assert confine_output_dir(inside, reports_root=root) == inside.resolve()
+
+
+def test_confine_rejects_dotdot_traversal(tmp_path: Path) -> None:
+    root = tmp_path / "reports"
+    root.mkdir()
+    with pytest.raises(PathConfinementError):
+        confine_output_dir(root / ".." / "elsewhere", reports_root=root)
+    with pytest.raises(PathConfinementError):
+        confine_output_dir(root / "run" / ".." / ".." / "x", reports_root=root)
+
+
+def test_confine_rejects_absolute_path_outside_the_root(tmp_path: Path) -> None:
+    root = tmp_path / "reports"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    with pytest.raises(PathConfinementError):
+        confine_output_dir(outside, reports_root=root)
+
+
+def test_confine_rejects_sibling_with_shared_name_prefix(tmp_path: Path) -> None:
+    root = tmp_path / "reports"
+    root.mkdir()
+    with pytest.raises(PathConfinementError):
+        confine_output_dir(tmp_path / "reports-evil", reports_root=root)
+
+
+def test_confine_rejects_symlink_escape(tmp_path: Path) -> None:
+    root = tmp_path / "reports"
+    root.mkdir()
+    target = tmp_path / "outside"
+    target.mkdir()
+    link = root / "link"
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable on this platform: {type(exc).__name__}")
+    with pytest.raises(PathConfinementError):
+        confine_output_dir(link / "run", reports_root=root)

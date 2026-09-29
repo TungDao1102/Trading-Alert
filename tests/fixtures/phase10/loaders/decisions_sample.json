@@ -1,0 +1,39 @@
+{
+  "families": [
+    {
+      "decided_at_utc": "2026-03-15T00:00:00+00:00",
+      "decision_ref": "DEC-FIXTURE-trend-fail",
+      "development_experiment_ids": [
+        "71d98aa164245e359daaba5f1f69ecbdb71f348eb27c64e8d0918a1726b5ff2c"
+      ],
+      "family_id": "trend-pullback",
+      "status": "TESTED_FAIL",
+      "validation_experiment_ids": [
+        "71d98aa164245e359daaba5f1f69ecbdb71f348eb27c64e8d0918a1726b5ff2c"
+      ]
+    }
+  ],
+  "recorded_terminal": {
+    "decision_ref": "DEC-FIXTURE-terminal",
+    "families_at_record": [
+      "breakout-retest",
+      "range-mr",
+      "trend-pullback"
+    ],
+    "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+    "state": "INSUFFICIENT_EDGE"
+  },
+  "resets": [
+    {
+      "decision_ref": "DEC-FIXTURE-reset-b",
+      "occurred_at_utc": "2026-05-02T00:00:00+00:00",
+      "operator_id": "op-fixture"
+    },
+    {
+      "decision_ref": "DEC-FIXTURE-reset-a",
+      "occurred_at_utc": "2026-04-01T00:00:00+00:00",
+      "operator_id": "op-fixture"
+    }
+  ],
+  "schema": "kill-gate-decisions/1"
+}
