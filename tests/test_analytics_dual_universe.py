@@ -69,6 +69,7 @@ def test_empty_live5_slice_is_explicit_no_data_and_universe_verified() -> None:
     assert view.weak_live_universe_rejection is expected["weak_live_universe_rejection"] is False
     assert HEX64.match(view.universe_hash)
     assert HEX64.match(view.digest())
+    assert view.digest() == expected["view_digest"]
 
 
 def test_unverified_universe_when_expected_hash_is_wrong() -> None:

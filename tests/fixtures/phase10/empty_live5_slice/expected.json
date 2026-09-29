@@ -18,5 +18,7 @@
   "research_symbols_sorted": [
     "ADAUSDT",
     "LINKUSDT"
-  ]
+  ],
+  "view_digest": "50167f3d9c10fb0b8277691dd337f12ed62bc2258bf967ceb407b4ddbd46d54a",
+  "view_digest_params": "base_seed=20260929 resamples=100 evidence=BACKTEST"
 }

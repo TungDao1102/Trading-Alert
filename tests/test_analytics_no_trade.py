@@ -99,6 +99,7 @@ def test_count_by_category_matches_fixture_with_unmapped_and_total() -> None:
     assert sum(row.all_n for row in section.rows) == total.all_n
     assert section.research_symbols == tuple(expected["research_symbols_sorted"])
     assert HEX64.match(section.digest())
+    assert section.digest() == expected["section_digest"]
 
 
 def test_unmapped_is_counted_never_dropped() -> None:
