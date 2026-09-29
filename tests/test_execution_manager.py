@@ -277,7 +277,7 @@ def _build_risk_kwargs(case_input: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-def test_happy_path_places_one_entry_and_one_sl_leg() -> None:
+async def test_happy_path_places_one_entry_and_one_sl_leg() -> None:
     """Beh. 1: an approved in-date plan with PASS risk verdict yields
     exactly one `place_entry` call (LIMIT, GTC, quantized qty,
     zone-derived limit price, x- EN id) followed by one
@@ -294,7 +294,7 @@ def test_happy_path_places_one_entry_and_one_sl_leg() -> None:
     approval = _build_approval(case_input)
     risk_kwargs = _build_risk_kwargs(case_input)
 
-    outcome = execute_approved_plan(
+    outcome = await execute_approved_plan(
         callback=callback,
         approval=approval,
         authorized_chat_id=case_input["chat_id"],
@@ -357,7 +357,7 @@ def test_happy_path_places_one_entry_and_one_sl_leg() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_stale_plan_yields_no_adapter_calls_and_unapprovable_outcome() -> None:
+async def test_stale_plan_yields_no_adapter_calls_and_unapprovable_outcome() -> None:
     """Beh. 2: a stale/expired plan yields no adapter calls and an
     UNAPPROVABLE outcome with reason code APPROVAL_EXPIRED.
     """
@@ -372,7 +372,7 @@ def test_stale_plan_yields_no_adapter_calls_and_unapprovable_outcome() -> None:
     # now_utc is past expiry_utc → APPROVAL_EXPIRED.
     past_now = _parse_utc(case_input["expiry_utc"]) + timedelta(seconds=1)
 
-    outcome = execute_approved_plan(
+    outcome = await execute_approved_plan(
         callback=callback,
         approval=approval,
         authorized_chat_id=case_input["chat_id"],
@@ -400,7 +400,7 @@ def test_stale_plan_yields_no_adapter_calls_and_unapprovable_outcome() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_risk_no_trade_yields_no_adapter_calls_and_preserves_reason_code() -> None:
+async def test_risk_no_trade_yields_no_adapter_calls_and_preserves_reason_code() -> None:
     """Beh. 3: a risk NO_TRADE verdict yields no adapter calls and the
     risk reason code is preserved byte-identically.
     """
@@ -420,7 +420,7 @@ def test_risk_no_trade_yields_no_adapter_calls_and_preserves_reason_code() -> No
         risk_rate=risk_kwargs["account_state"].risk_rate,
     )
 
-    outcome = execute_approved_plan(
+    outcome = await execute_approved_plan(
         callback=callback,
         approval=approval,
         authorized_chat_id=case_input["chat_id"],
@@ -449,7 +449,7 @@ def test_risk_no_trade_yields_no_adapter_calls_and_preserves_reason_code() -> No
 # --------------------------------------------------------------------------- #
 
 
-def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
+async def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
     """Beh. 4: an ambiguous `place_entry` response triggers
     `query_order_by_client` first; retry occurs only when the probe
     confirms absence.
@@ -467,7 +467,7 @@ def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
     adapter._entry_response = None  # type: ignore[attr-defined]
     adapter._query_response = {"found": True, "order_id": "12345"}  # type: ignore[attr-defined]
 
-    execute_approved_plan(
+    await execute_approved_plan(
         callback=callback,
         approval=approval,
         authorized_chat_id=case_input["chat_id"],
@@ -500,7 +500,7 @@ def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_golden_fixture_adapter_call_sequence_matches_expected() -> None:
+async def test_golden_fixture_adapter_call_sequence_matches_expected() -> None:
     """Beh. 5: the golden fixture's expected adapter call sequence
     matches the actual recorded sequence byte-for-byte.
     """
@@ -514,7 +514,7 @@ def test_golden_fixture_adapter_call_sequence_matches_expected() -> None:
     approval = _build_approval(case_input)
     risk_kwargs = _build_risk_kwargs(case_input)
 
-    execute_approved_plan(
+    await execute_approved_plan(
         callback=callback,
         approval=approval,
         authorized_chat_id=case_input["chat_id"],
@@ -538,6 +538,20 @@ def test_golden_fixture_adapter_call_sequence_matches_expected() -> None:
     # SL algo_client_id matches the deterministic derivation.
     sl_call = adapter.calls[1]
     assert sl_call["kwargs"]["client_algo_id"] == expected["sl_algo_client_id"]
+
+
+def test_execute_approved_plan_is_a_coroutine_function() -> None:
+    """09-REVIEW CR-06: the manager is awaited on the caller's running
+    loop (PTB / FastAPI); it must never call `asyncio.run` itself."""
+    import inspect
+
+    from src.execution import manager
+
+    assert inspect.iscoroutinefunction(manager.execute_approved_plan)
+    source = (Path(__file__).parents[1] / "src" / "execution" / "manager.py").read_text(
+        encoding="utf-8"
+    )
+    assert "asyncio.run(" not in source
 
 
 # --------------------------------------------------------------------------- #

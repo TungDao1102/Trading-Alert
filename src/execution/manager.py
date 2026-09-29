@@ -122,7 +122,7 @@ class ExecutionOutcome:
 # --------------------------------------------------------------------------- #
 
 
-def execute_approved_plan(
+async def execute_approved_plan(
     *,
     callback: Any,
     approval: Approval,
@@ -258,63 +258,55 @@ def execute_approved_plan(
     sl_side = "SELL" if candidate_side == "LONG" else "BUY"
 
     # Place the entry (LIMIT, GTC).
-    # The adapter is async; we use asyncio.run only if no loop is running.
-    # In production, the caller wraps this in an async context.
-    import asyncio
-
-    entry_response = asyncio.run(
-        adapter.place_entry(
-            symbol=constraint_snapshot.symbol,
-            side=entry_side,
-            position_side="BOTH",  # one-way mode (09-01 tracer scope)
-            time_in_force="GTC",
-            quantity=quantity,
-            price=limit_price,
-            new_client_order_id=entry_client_order_id,
-        )
+    # 09-REVIEW CR-06: every adapter call is awaited on the caller's
+    # running event loop (python-telegram-bot / FastAPI). No nested
+    # `asyncio.run` — it raises inside a running loop and would tear
+    # down loop-bound adapter resources between the entry and the SL.
+    entry_response = await adapter.place_entry(
+        symbol=constraint_snapshot.symbol,
+        side=entry_side,
+        position_side="BOTH",  # one-way mode (09-01 tracer scope)
+        time_in_force="GTC",
+        quantity=quantity,
+        price=limit_price,
+        new_client_order_id=entry_client_order_id,
     )
 
     # No-blind-recovery: if the entry response is ambiguous (None or
     # missing identity), probe by deterministic client_order_id first.
     # Retry only if the probe confirms absence.
     if entry_response is None:
-        probe = asyncio.run(
-            adapter.query_order_by_client(
-                symbol=constraint_snapshot.symbol,
-                orig_client_order_id=entry_client_order_id,
-            )
+        probe = await adapter.query_order_by_client(
+            symbol=constraint_snapshot.symbol,
+            orig_client_order_id=entry_client_order_id,
         )
         if probe is not None and probe.get("found", False):
             # Order exists on exchange — no retry needed.
             pass
         else:
             # Probe confirms absence — retry the entry.
-            entry_response = asyncio.run(
-                adapter.place_entry(
-                    symbol=constraint_snapshot.symbol,
-                    side=entry_side,
-                    position_side="BOTH",
-                    time_in_force="GTC",
-                    quantity=quantity,
-                    price=limit_price,
-                    new_client_order_id=entry_client_order_id,
-                )
+            entry_response = await adapter.place_entry(
+                symbol=constraint_snapshot.symbol,
+                side=entry_side,
+                position_side="BOTH",
+                time_in_force="GTC",
+                quantity=quantity,
+                price=limit_price,
+                new_client_order_id=entry_client_order_id,
             )
 
     # Place the SL protective leg (CONDITIONAL, STOP_MARKET, close_position).
-    asyncio.run(
-        adapter.place_algo_protective(
-            symbol=constraint_snapshot.symbol,
-            side=sl_side,
-            algo_type="CONDITIONAL",
-            type="STOP_MARKET",
-            position_side="BOTH",
-            trigger_price=sl_trigger_price,
-            close_position=True,
-            quantity=None,
-            working_type="MARK_PRICE",
-            client_algo_id=sl_algo_client_id,
-        )
+    await adapter.place_algo_protective(
+        symbol=constraint_snapshot.symbol,
+        side=sl_side,
+        algo_type="CONDITIONAL",
+        type="STOP_MARKET",
+        position_side="BOTH",
+        trigger_price=sl_trigger_price,
+        close_position=True,
+        quantity=None,
+        working_type="MARK_PRICE",
+        client_algo_id=sl_algo_client_id,
     )
 
     return ExecutionOutcome(is_no_trade=False, reason_code="OK")
