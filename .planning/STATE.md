@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 10
 current_phase_name: Journal Depth + Kill-Gate Operations
 status: executing
-stopped_at: Completed 10-07-PLAN.md
-last_updated: "2026-09-29T07:13:36.228Z"
+stopped_at: Completed 10-08-PLAN.md
+last_updated: "2026-09-29T07:30:24.578Z"
 last_activity: 2026-09-29
 last_activity_desc: Phase 10 execution started
-state_head: d0f2a47a8a8ec9e13cf17cc69ea111afc32978d0
+state_head: 4243d8958d761117374055d13e89cc14dfab0a87
 progress:
   total_phases: 11
   completed_phases: 9
   total_plans: 50
-  completed_plans: 44
+  completed_plans: 45
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 10 (Journal Depth + Kill-Gate Operations) — EXECUTING
-Plan: 8 of 12
+Plan: 9 of 12
 Status: Ready to execute
 Last activity: 2026-09-29 — Phase 10 execution started
 
@@ -83,6 +83,7 @@ Progress: [██████████] 100%
 | Phase 10 P05 | 5 min | 3 tasks | 14 files |
 | Phase 10 P06 | 11 min | 3 tasks | 8 files |
 | Phase 10 P07 | 12 min | 3 tasks | 18 files |
+| Phase 10 P08 | 12 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -220,6 +221,7 @@ Recent decisions affecting current work:
 - [Phase 10]: 10-06: approval-delay reports are descriptive only; delay buckets and measured_delay are LIVE-only, PAPER keeps the SYNTHETIC LAG label and APPROVAL_DELAY_LAG_SECONDS is unchanged — D-02 / RESEARCH P2, Open Question 4
 - [Phase 10]: 10-07: Post-reset kill-gate semantics (FLAGGED PLANNER DECISION, D013 silent): cycle clock restarts at the latest valid reset time, only decisions dated on/after it count, reopening decision_ref/operator recorded; INSUFFICIENT_EDGE sticky until an explicit human KILL_GATE_QUESTION_APPROVED after the latest terminal — D-03 never auto-clears; evaluator only reads resets, never writes or infers them
 - [Phase 10]: 10-07: enable() requires an evaluated kill_gate_state and refuses INSUFFICIENT_EDGE/non-KillGateState before any journal write; registration blocked in CI via docs/research/kill_gate_decisions.json recorded_terminal tripwire; enable journal payload unchanged — Phase 9 D-04 + Phase 10 D-03 fail-closed; CI cannot read the journal
+- [Phase 10]: 10-08: ReportInputs.clock is required; provenance keeps per-kind identity (by_evidence) and tags experiments by evidence slot; family gate facts for unknown families raise; posture tie ordering follows the plan total key (ENABLED after DISABLED at the same instant, display-only)
 
 ### Pending Todos
 
@@ -255,6 +257,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-29T07:13:36.084Z
-Stopped at: Completed 10-07-PLAN.md
+Last session: 2026-09-29T07:30:24.381Z
+Stopped at: Completed 10-08-PLAN.md
 Resume file: None
