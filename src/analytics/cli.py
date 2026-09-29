@@ -20,13 +20,16 @@ Contract (UI-SPEC Interaction Contract):
 from __future__ import annotations
 
 import argparse
+import asyncio
+import contextlib
+import os
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from src.adapters.analytics_files import (
     REPORTS_ROOT,
@@ -43,16 +46,37 @@ from src.adapters.analytics_files import (
     read_protocol_text,
     scan_family_facts,
 )
-from src.adapters.analytics_store import read_candles
+from src.adapters.analytics_store import (
+    LiveRows,
+    append_kill_gate_event,
+    read_candles,
+    read_journal_events,
+    read_live_rows,
+)
 from src.analytics.clock import clock_start_from_protocol
 from src.analytics.family import KillGateInputError
 from src.analytics.inputs import normalize_backtest
-from src.analytics.lifecycle import normalize_backtest_lifecycle, normalize_paper_lifecycle
+from src.analytics.killgate import (
+    KILL_GATE_EVENT_TYPE,
+    QUESTION_APPROVED_EVENT_TYPE,
+    ResetRecord,
+    build_kill_gate_event,
+    priors_from_events,
+    resets_from_events,
+)
+from src.analytics.lifecycle import (
+    normalize_backtest_lifecycle,
+    normalize_live_lifecycle,
+    normalize_paper_lifecycle,
+)
+from src.analytics.live_outcomes import normalize_live_outcomes
 from src.analytics.no_trade import no_trade_from_paper
 from src.analytics.render import render_markdown, report_file_stem
 from src.analytics.render_common import RenderError
 from src.analytics.render_sidecar import build_sidecar, sidecar_text, verify_render
 from src.analytics.report import (
+    LIVE_ORDERS_DISABLED_EVENT,
+    LIVE_ORDERS_ENABLED_EVENT,
     EvidenceInputs,
     InputNote,
     JournalDepthReport,
@@ -71,6 +95,9 @@ from src.analytics.types import (
 )
 from src.backtest.simulator import TradeRecord
 from src.core.types import Candle
+from src.db.models import make_session_factory, session_scope
+from src.domain.enums import KillGateState
+from src.domain.journal import JournalEvent
 from src.paper.journal import PaperRecord
 
 __all__ = ["CliArgs", "main", "parse_args"]
@@ -226,6 +253,16 @@ def _candles_for(
     return candles, tuple(notes)
 
 
+def _realized_r_by_signal(outcomes: Sequence[TradeOutcome]) -> dict[str, Decimal]:
+    """R multiple per signal for the outcomes that carry a usable risk value."""
+    realized: dict[str, Decimal] = {}
+    for outcome in outcomes:
+        value = r_value(outcome.realized_pnl, outcome.realized_risk)
+        if outcome.signal_id is not None and value is not None:
+            realized[outcome.signal_id] = value
+    return realized
+
+
 def _backtest_inputs(entries: Sequence[BacktestEvidence], raw_root: Path) -> EvidenceInputs:
     ordered = sorted(entries, key=lambda entry: entry.experiment.experiment_id)
     experiment_ids = [entry.experiment.experiment_id for entry in ordered]
@@ -244,11 +281,6 @@ def _backtest_inputs(entries: Sequence[BacktestEvidence], raw_root: Path) -> Evi
             trades.append(trade)
         contexts.update(entry.contexts)
     normalized = normalize_backtest(trades, contexts)
-    realized_r: dict[str, Decimal] = {}
-    for outcome in normalized.outcomes:
-        value = r_value(outcome.realized_pnl, outcome.realized_risk)
-        if outcome.signal_id is not None and value is not None:
-            realized_r[outcome.signal_id] = value
     candles, notes = _candles_for(normalized.outcomes, raw_root)
     return EvidenceInputs(
         kind=EvidenceKind.BACKTEST,
@@ -256,7 +288,7 @@ def _backtest_inputs(entries: Sequence[BacktestEvidence], raw_root: Path) -> Evi
         lifecycle=normalize_backtest_lifecycle(normalized.outcomes),
         no_trades=normalized.rejects,
         candles_by_symbol=candles,
-        realized_r_by_signal=realized_r,
+        realized_r_by_signal=_realized_r_by_signal(normalized.outcomes),
         experiments=tuple(entry.experiment for entry in ordered),
         notes=notes,
     )
@@ -277,7 +309,18 @@ def _research_symbols(args: CliArgs, evidence: EvidenceFile | None) -> tuple[str
     return () if evidence is None else evidence.research_universe
 
 
-def _build_inputs(args: CliArgs, as_of: datetime) -> ReportInputs:
+def _merge_resets(
+    from_file: Sequence[ResetRecord], events: Sequence[JournalEvent]
+) -> tuple[ResetRecord, ...]:
+    """Decision-file resets plus journal resets, de-duplicated and in a total order."""
+    merged = {
+        (reset.occurred_at_utc, reset.operator_id, reset.decision_ref): reset
+        for reset in (*from_file, *resets_from_events(events))
+    }
+    return tuple(merged[key] for key in sorted(merged))
+
+
+def _build_inputs(args: CliArgs, as_of: datetime, database: _DatabaseData | None) -> ReportInputs:
     decisions: DecisionsFile = load_decisions_file(args.decisions)
     evidence = None if args.evidence is None else load_evidence_file(args.evidence)
     entries = () if evidence is None else evidence.backtest
@@ -287,16 +330,146 @@ def _build_inputs(args: CliArgs, as_of: datetime) -> ReportInputs:
         experiments=tuple(entry.experiment for entry in entries),
         flags_by_experiment={entry.experiment.experiment_id: entry.flags for entry in entries},
     )
+    events: tuple[JournalEvent, ...] = () if database is None else database.journal_events
     return ReportInputs(
         as_of_utc=as_of,
         backtest=_backtest_inputs(entries, args.raw_root),
         paper=_paper_inputs(() if evidence is None else evidence.paper),
-        live=EvidenceInputs(kind=EvidenceKind.LIVE),
+        live=(
+            EvidenceInputs(kind=EvidenceKind.LIVE)
+            if database is None
+            else _live_inputs(database, args.raw_root)
+        ),
         clock=clock_start_from_protocol(read_protocol_text(_REPO_ROOT)),
         research_symbols=_research_symbols(args, evidence),
+        journal_events=events,
         families=scan.families,
         family_gate_facts=dict(scan.gate_facts),
-        resets=decisions.resets,
+        prior_evaluations=priors_from_events(events),
+        resets=_merge_resets(decisions.resets, events),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Database access: SELECT-only reads, plus the single explicit record step
+# --------------------------------------------------------------------------- #
+
+SessionFactoryFn = Callable[[str], Any]
+
+_ENTRY_EXPIRY_EVENT_TYPE = "ENTRY_EXPIRY"
+_JOURNAL_EVENT_TYPES = (
+    LIVE_ORDERS_ENABLED_EVENT,
+    LIVE_ORDERS_DISABLED_EVENT,
+    _ENTRY_EXPIRY_EVENT_TYPE,
+    KILL_GATE_EVENT_TYPE,
+    QUESTION_APPROVED_EVENT_TYPE,
+)
+# psycopg's async mode cannot run on the Windows default (Proactor) event loop.
+_LOOP_FACTORY = asyncio.SelectorEventLoop if sys.platform == "win32" else None
+
+
+class _DatabaseReadError(Exception):
+    """A database read failed; the message is the exception type name only."""
+
+
+class _RecordError(Exception):
+    """The KILL_GATE_EVALUATION append failed; the message is the exception type name only."""
+
+
+@dataclass(frozen=True)
+class _DatabaseData:
+    journal_events: tuple[JournalEvent, ...]
+    journal_rejected: int
+    live: LiveRows
+
+
+async def _dispose_bind(factory: Any) -> None:
+    kwargs = getattr(factory, "kw", None)
+    bind = kwargs.get("bind") if isinstance(kwargs, dict) else None
+    dispose = getattr(bind, "dispose", None)
+    if dispose is not None:
+        with contextlib.suppress(Exception):  # cleanup only; never masks the real outcome
+            await dispose()
+
+
+async def _with_session[T](
+    url: str, factory_fn: SessionFactoryFn, action: Callable[[Any], Awaitable[T]]
+) -> T:
+    factory = factory_fn(url)
+    try:
+        async with session_scope(factory) as session:
+            return await action(session)
+    finally:
+        await _dispose_bind(factory)
+
+
+async def _read_all(session: Any) -> _DatabaseData:
+    journal = await read_journal_events(session, event_types=_JOURNAL_EVENT_TYPES)
+    live = await read_live_rows(session)
+    return _DatabaseData(journal.events, journal.rejected, live)
+
+
+def _read_database(url: str, factory_fn: SessionFactoryFn) -> _DatabaseData:
+    """Read journal events and live rows; any failure is reduced to its exception type name."""
+    try:
+        return asyncio.run(_with_session(url, factory_fn, _read_all), loop_factory=_LOOP_FACTORY)
+    except Exception as exc:
+        raise _DatabaseReadError(type(exc).__name__) from None
+
+
+def _record_evaluation(url: str, factory_fn: SessionFactoryFn, event: JournalEvent) -> None:
+    async def append(session: Any) -> None:
+        await append_kill_gate_event(session, event)
+
+    try:
+        asyncio.run(_with_session(url, factory_fn, append), loop_factory=_LOOP_FACTORY)
+    except Exception as exc:
+        raise _RecordError(type(exc).__name__) from None
+
+
+def _live_inputs(database: _DatabaseData, raw_root: Path) -> EvidenceInputs:
+    """LIVE evidence from the read rows; join and reject counts go to the INCOMPLETE ledger."""
+    rows = database.live
+    expiry_events = [
+        event for event in database.journal_events if event.event_type == _ENTRY_EXPIRY_EVENT_TYPE
+    ]
+    lifecycle = normalize_live_lifecycle(
+        rows.signals, rows.approvals, rows.orders, rows.fills, expiry_events
+    )
+    outcomes = normalize_live_outcomes(rows.signals, rows.plans, rows.orders, rows.fills)
+    candles, candle_notes = _candles_for(outcomes.outcomes, raw_root)
+    notes: list[InputNote] = list(candle_notes)
+    notes.extend(
+        InputNote(join.name, "UNMATCHED_JOIN", join.unmatched)
+        for join in lifecycle.joins
+        if join.unmatched > 0
+    )
+    notes.extend(
+        InputNote("live_lifecycle", reason, count)
+        for reason, count in lifecycle.rejected
+        if count > 0
+    )
+    notes.extend(
+        InputNote(f"live_rows:{table}", "MALFORMED_ROW", count)
+        for table, count in rows.rejected
+        if count > 0
+    )
+    if database.journal_rejected > 0:
+        notes.append(InputNote("journal_events", "MALFORMED_ROW", database.journal_rejected))
+    incomplete_counts: dict[str, int] = {}
+    for _signal_id, reason in outcomes.incomplete:
+        incomplete_counts[reason.value] = incomplete_counts.get(reason.value, 0) + 1
+    notes.extend(
+        InputNote("live_outcomes", reason, incomplete_counts[reason])
+        for reason in sorted(incomplete_counts)
+    )
+    return EvidenceInputs(
+        kind=EvidenceKind.LIVE,
+        outcomes=outcomes.outcomes,
+        lifecycle=lifecycle.records,
+        candles_by_symbol=candles,
+        realized_r_by_signal=_realized_r_by_signal(outcomes.outcomes),
+        notes=tuple(notes),
     )
 
 
@@ -342,6 +515,7 @@ _EXPECTED_FAILURES = (
     KillGateInputError,
     RenderError,
     _RenderVerificationError,
+    _DatabaseReadError,
     OSError,
 )
 
@@ -352,6 +526,8 @@ def _reason(exc: Exception) -> str:
         return f"file access failed ({type(exc).__name__})"
     if isinstance(exc, _RenderVerificationError):
         return f"rendered output failed verification ({exc})"
+    if isinstance(exc, _DatabaseReadError):
+        return f"database read failed ({exc})"
     return " ".join(str(exc).split()).rstrip(".")
 
 
@@ -360,13 +536,48 @@ def _fail(reason: str) -> int:
     return 1
 
 
-def _run(args: CliArgs, now_fn: ClockFn | None) -> int:
-    if args.record:
+_RECORD_REMINDER = (
+    "Reminder: a human must commit recorded_terminal in docs/research/kill_gate_decisions.json "
+    "for the CI registration tripwire; this CLI never edits that file."
+)
+
+
+def _database_url(args: CliArgs) -> str | None:
+    """DATABASE_URL (read once from the environment) unless --no-db; blank counts as absent."""
+    if args.no_db:
+        return None
+    url = os.environ.get("DATABASE_URL", "")
+    return url if url.strip() != "" else None
+
+
+def _record_step(url: str, factory_fn: SessionFactoryFn, report: JournalDepthReport) -> int:
+    """The single write: append one content-hash KILL_GATE_EVALUATION (idempotent on replay)."""
+    event = build_kill_gate_event(report.kill_gate.verdict)
+    try:
+        _record_evaluation(url, factory_fn, event)
+    except _RecordError as exc:
+        print(f"Record failed: {exc}.", file=sys.stderr)
+        return 1
+    state = report.kill_gate.verdict.state
+    print(
+        f"Recorded KILL_GATE_EVALUATION {event.journal_event_id} (state {state.value}). "
+        "Replaying the same inputs is a no-op."
+    )
+    if state is KillGateState.INSUFFICIENT_EDGE:
+        print(_RECORD_REMINDER)
+    return 0
+
+
+def _run(args: CliArgs, now_fn: ClockFn | None, session_factory_fn: SessionFactoryFn | None) -> int:
+    database_url = _database_url(args)
+    if args.record and database_url is None:
         raise _UsageError("--record requires a database (DATABASE_URL set and --no-db absent)")
+    factory_fn = make_session_factory if session_factory_fn is None else session_factory_fn
     as_of = _resolve_as_of(args, now_fn)
     out_dir = confine_output_dir(args.out_dir, args.reports_root).resolve()
+    database = None if database_url is None else _read_database(database_url, factory_fn)
     report = build_journal_depth_report(
-        _build_inputs(args, as_of), base_seed=args.seed, resamples=args.resamples
+        _build_inputs(args, as_of, database), base_seed=args.seed, resamples=args.resamples
     )
     stem, markdown, sidecar = _render_pair(report)
     report_path, sidecar_path = _write_pair(out_dir, stem, markdown, sidecar)
@@ -374,6 +585,8 @@ def _run(args: CliArgs, now_fn: ClockFn | None) -> int:
     print(f"Sidecar: {sidecar_path}")
     print(f"Digest: sha256:{report.digest()}")
     print(f"Kill gate: {report.kill_gate.verdict.state.value}")
+    if args.record and database_url is not None:
+        return _record_step(database_url, factory_fn, report)
     return 0
 
 
@@ -381,13 +594,12 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     now_fn: ClockFn | None = None,
-    session_factory_fn: Callable[[str], object] | None = None,
+    session_factory_fn: SessionFactoryFn | None = None,
 ) -> int:
     """Run the CLI; returns the process exit code (0 produced, 1 not produced, 2 usage)."""
-    del session_factory_fn  # wired to the read-only database branch by the next task
     try:
         args = parse_args(argv)
-        return _run(args, now_fn)
+        return _run(args, now_fn, session_factory_fn)
     except SystemExit as exc:  # argparse --help
         return exc.code if isinstance(exc.code, int) else 2
     except _UsageError as exc:
