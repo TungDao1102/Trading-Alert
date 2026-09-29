@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 10
 current_phase_name: Journal Depth + Kill-Gate Operations
 status: executing
-stopped_at: Phase 10 UI-SPEC approved
-last_updated: "2026-09-29T05:55:18.186Z"
+stopped_at: Completed 10-01-PLAN.md
+last_updated: "2026-09-29T06:11:05.650Z"
 last_activity: 2026-09-29
-last_activity_desc: Phase 09 Plan 04 tasks 1-2 complete; BLOCKED at task 3 human checkpoint
-state_head: d8333980eb21225490b6e22f74a9934e5b60de58
+last_activity_desc: Phase 10 execution started
+state_head: cca560934c6d0fe77f358f56225de3468662682c
 progress:
   total_phases: 11
   completed_phases: 9
   total_plans: 50
-  completed_plans: 37
+  completed_plans: 38
 milestone_name: milestone
 ---
 
@@ -26,14 +26,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 09 — Live Execution Rollout
+**Current focus:** Phase 10 — Journal Depth + Kill-Gate Operations
 
 ## Current Position
 
-Phase: 10 (Journal Depth + Kill-Gate Operations) — READY TO EXECUTE
-Plan: 4 of 4 — BLOCKED at task 3 (gate=blocking-human testnet/credential/LIVE-TAP checkpoint)
+Phase: 10 (Journal Depth + Kill-Gate Operations) — EXECUTING
+Plan: 2 of 12
 Status: Ready to execute
-Last activity: 2026-09-29 — Phase 09 Plan 04 tasks 1-2 complete; BLOCKED at task 3 human checkpoint
+Last activity: 2026-09-29 — Phase 10 execution started
 
 Progress: [██████████] 100%
 
@@ -76,6 +76,7 @@ Progress: [██████████] 100%
 | Phase 8 P2 | ~25 min | 3 tasks | 8 files |
 | Phase 8 P05 | ~15 min | 2 tasks | 4 files |
 | Phase 09 P04 | ~50min | 2 tasks | 11 files |
+| Phase 10 P01 | 18min | 3 tasks | 23 files |
 
 ## Accumulated Context
 
@@ -198,6 +199,10 @@ Recent decisions affecting current work:
 - [Phase 09]: [09-04] attach_protectives_to_fill places SL then TP1 then TP2 in fixed order; unconfirmed leg halts immediately with zero rescue placement
 - [Phase 09]: [09-04] LIVE5_SYMBOLS scope guard raises ValueError before any adapter call across execute_approved_plan, attach, expiry, cancel, and emergency-close paths
 - [Phase 09]: [09-04] Task 3 (testnet plus credential plus LIVE-TAP GATE) is gate=blocking-human — plan BLOCKED pending operator attestation; no live order exists
+- [Phase 10]: Evidence kinds are never pooled and every TradeOutcome carries strategy_version + parameter_set_hash (analytics core types)
+- [Phase 10]: Estimate carries n and n_valued; interval_absent is an explicit marker when n_valued < 2, otherwise a seeded Phase-6 stationary-block-bootstrap interval
+- [Phase 10]: ExcursionSection seed ordinals: measures 0-6 in EXCURSION_MEASURES order, diagnostics 7-9; per_trade sorted by trade_id, bootstrap input in (exit_time, trade_id) order
+- [Phase 10]: Analytics reuses Phase-6 private report helpers intentionally (RESEARCH P7), guarded by fixture digests; time arithmetic uses integer microseconds, never total_seconds
 
 ### Pending Todos
 
@@ -233,6 +238,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-29T05:10:53.464Z
-Stopped at: Phase 10 UI-SPEC approved
-Resume file: .planning/phases/10-journal-depth-kill-gate-operations/10-UI-SPEC.md
+Last session: 2026-09-29T06:11:05.515Z
+Stopped at: Completed 10-01-PLAN.md
+Resume file: None
