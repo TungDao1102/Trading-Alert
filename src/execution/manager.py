@@ -196,10 +196,10 @@ async def execute_approved_plan(
     risk_kwargs: dict[str, Any],
     safe_mode_controller: Any,
     journal: Any,
-    enablement: Any | None = None,
-    gate_kwargs: dict[str, Any] | None = None,
+    enablement: Any,
+    gate_kwargs: dict[str, Any],
 ) -> ExecutionOutcome:
-    """Run the fixed-order pipeline: binding → enablement → gates → risk → place.
+    """Run the fixed-order pipeline: binding → enablement → SAFE_MODE → gates → risk → place.
 
     Per D-01/D-03/D-04/D-05: the manager is a pure function of inputs
     plus injected `now_utc`. It never reads the wall clock, never
@@ -210,9 +210,15 @@ async def execute_approved_plan(
     Gate order (fixed, never reordered):
       1. Approval binding (chat→expiry→hash→version→token).
       2. Enablement guard (LIVE_ORDERS_DISABLED → DISABLED).
-      3. Placement-time gates (headroom, stale, uncertain, portfolio).
-      4. Risk pipeline (evaluate_risk with the identical Phase-5 inputs).
-      5. Adapter placement (place_entry then place_algo_protective).
+      3. SAFE_MODE guard (`guard_new_entries` → RECONCILIATION_REQUIRED).
+      4. Placement-time gates (headroom, stale, uncertain, portfolio).
+      5. Risk pipeline (evaluate_risk with the identical Phase-5 inputs).
+      6. Adapter placement (place_entry then place_algo_protective).
+
+    This function exists ONLY to place real orders, so every live-safety
+    gate is REQUIRED (09-REVIEW CR-07): there is no `None` default that
+    skips enablement, SAFE_MODE, or the placement-time gates (which carry
+    the reconciliation check). Backtest/paper use their own entry points.
 
     Args:
         callback: The Telegram callback payload (from Phase-8 binding).
@@ -235,19 +241,22 @@ async def execute_approved_plan(
             (ENTRY_WITHOUT_PROTECTIVE).
         journal: The journal layer (duck-typed `.record(event)`) used
             for the journal-first cancel of an unprotected entry.
-        enablement: Optional `LiveEnablementController` for the
-            LIVE_ORDERS_DISABLED gate. When None, the gate is skipped
-            (backtest/paper compatibility).
-        gate_kwargs: Optional kwargs for `decide_placement`
+        enablement: Required `LiveEnablementController` for the
+            LIVE_ORDERS_DISABLED gate (None raises ValueError).
+        gate_kwargs: Required kwargs for `decide_placement`
             (open_algo_count, planned_leg_count, reconciled_positions,
             positions_reconciled, sized, candidate_symbol,
-            candidate_position_side, parameter_set). When None, the
-            gate is skipped (backtest/paper compatibility).
+            candidate_position_side, parameter_set) — None raises
+            ValueError.
 
     Returns:
         An `ExecutionOutcome` with `is_no_trade` and `reason_code`.
     """
     _require_safe_mode_controller(safe_mode_controller, "execute_approved_plan")
+    if enablement is None:
+        raise ValueError("execute_approved_plan: enablement is required (fail closed)")
+    if gate_kwargs is None:
+        raise ValueError("execute_approved_plan: gate_kwargs is required (fail closed)")
 
     # Gate 1: approval binding (chat→expiry→hash→version→token).
     binding = check_binding_full(
@@ -269,28 +278,39 @@ async def execute_approved_plan(
         )
 
     # Gate 2: enablement guard (LIVE_ORDERS_DISABLED → DISABLED).
-    if enablement is not None:
-        enablement_verdict = enablement.guard_placement(
-            plan_hash=approval.trade_plan_id,
+    enablement_verdict = enablement.guard_placement(
+        plan_hash=approval.trade_plan_id,
+    )
+    if enablement_verdict.is_no_trade:
+        return ExecutionOutcome(
+            is_no_trade=True,
+            reason_code=enablement_verdict.reason_code or "DISABLED",
         )
-        if enablement_verdict.is_no_trade:
-            return ExecutionOutcome(
-                is_no_trade=True,
-                reason_code=enablement_verdict.reason_code or "DISABLED",
-            )
 
-    # Gate 3: placement-time gates (headroom, stale, uncertain, portfolio).
-    if gate_kwargs is not None:
-        from src.execution.gates import decide_placement
+    # Gate 3: SAFE_MODE guard (09-REVIEW CR-07) — SAFE_MODE blocks new
+    # entries even when live orders are still enabled (e.g. right after
+    # an ENTRY_WITHOUT_PROTECTIVE divergence).
+    safe_mode_verdict = safe_mode_controller.guard_new_entries(
+        trade_plan=risk_kwargs["trade_plan"]
+    )
+    if safe_mode_verdict.is_no_trade:
+        return ExecutionOutcome(
+            is_no_trade=True,
+            reason_code=safe_mode_verdict.reason_code
+            or RejectionReason.RECONCILIATION_REQUIRED.value,
+        )
 
-        gate_verdict = decide_placement(**gate_kwargs)
-        if gate_verdict.is_no_trade:
-            return ExecutionOutcome(
-                is_no_trade=True,
-                reason_code=gate_verdict.reason_code,
-            )
+    # Gate 4: placement-time gates (headroom, stale, uncertain, portfolio).
+    from src.execution.gates import decide_placement
 
-    # Gate 4: risk pipeline (identical Phase-5 call).
+    gate_verdict = decide_placement(**gate_kwargs)
+    if gate_verdict.is_no_trade:
+        return ExecutionOutcome(
+            is_no_trade=True,
+            reason_code=gate_verdict.reason_code,
+        )
+
+    # Gate 5: risk pipeline (identical Phase-5 call).
     verdict = evaluate_risk(**risk_kwargs)
     if verdict.is_no_trade:
         return ExecutionOutcome(
@@ -298,7 +318,7 @@ async def execute_approved_plan(
             reason_code=verdict.reason_code,
         )
 
-    # Gate 5: adapter placement (place_entry then place_algo_protective).
+    # Gate 6: adapter placement (place_entry then place_algo_protective).
     trade_plan = risk_kwargs["trade_plan"]
     constraint_snapshot = risk_kwargs["constraint_snapshot"]
     _require_live5_symbol(constraint_snapshot.symbol)

@@ -208,9 +208,45 @@ def _live_wiring(**overrides: Any) -> dict[str, Any]:
     wiring: dict[str, Any] = {
         "safe_mode_controller": RecordingSafeModeController(),
         "journal": FakeJournal(),
+        "enablement": _enabled_controller(),
+        "gate_kwargs": _build_gate_kwargs(_load_input()),
     }
     wiring.update(overrides)
     return wiring
+
+
+def _enabled_controller() -> Any:
+    """A real `LiveEnablementController`, explicitly operator-enabled."""
+    from src.execution.enablement import LiveEnablementController
+
+    controller = LiveEnablementController(journal=FakeJournal())
+    controller.enable(
+        operator_id="operator_alpha", now_utc=datetime(2026, 9, 19, 10, 0, tzinfo=UTC)
+    )
+    return controller
+
+
+def _build_gate_kwargs(case_input: dict[str, Any], **overrides: Any) -> dict[str, Any]:
+    """`decide_placement` kwargs for the golden fixture (all gates PASS)."""
+    from src.risk.gating import evaluate_risk
+
+    risk_kwargs = _build_risk_kwargs(case_input)
+    gate_kwargs: dict[str, Any] = {
+        "constraint_snapshot": risk_kwargs["constraint_snapshot"],
+        "open_algo_count": 0,
+        "planned_leg_count": 4,
+        "reconciled_positions": risk_kwargs["open_positions"],
+        "daily_loss_quote": risk_kwargs["daily_loss_quote"],
+        "positions_reconciled": True,
+        "now_utc": risk_kwargs["now_utc"],
+        "ttl": risk_kwargs["ttl"],
+        "sized": evaluate_risk(**risk_kwargs).sized,
+        "candidate_symbol": case_input["symbol"],
+        "candidate_position_side": case_input["candidate_position_side"],
+        "parameter_set": risk_kwargs["parameter_set"],
+    }
+    gate_kwargs.update(overrides)
+    return gate_kwargs
 
 
 # --------------------------------------------------------------------------- #
@@ -891,3 +927,80 @@ async def test_raising_sl_after_entry_ack_fails_closed() -> None:
     assert outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
     assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
     assert [c["method"] for c in adapter.calls][-1] == "cancel_normal_order"
+
+
+# --------------------------------------------------------------------------- #
+# 09-REVIEW CR-07 — enablement, SAFE_MODE and placement gates are mandatory.
+# --------------------------------------------------------------------------- #
+
+
+async def test_disabled_live_orders_block_placement() -> None:
+    """CR-07: a default (disabled) controller blocks before any order."""
+    from src.execution.enablement import LiveEnablementController
+
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter, enablement=LiveEnablementController(journal=FakeJournal())
+    )
+    assert outcome.is_no_trade is True
+    assert outcome.reason_code == "DISABLED"
+    assert adapter.calls == []
+
+
+async def test_safe_mode_blocks_new_entries_even_when_enabled() -> None:
+    """CR-07: SAFE_MODE (e.g. after ENTRY_WITHOUT_PROTECTIVE) blocks the
+    next approved plan even though live orders are still enabled."""
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter, safe_mode_controller=RecordingSafeModeController(in_safe_mode=True)
+    )
+    assert outcome.is_no_trade is True
+    assert outcome.reason_code == "RECONCILIATION_REQUIRED"
+    assert adapter.calls == []
+
+
+async def test_real_safe_mode_controller_blocks_after_entering_safe_mode() -> None:
+    """CR-07: the real `SafeModeController.guard_new_entries` is consulted."""
+    from src.reconcile.safe_mode import SafeModeController
+
+    class _NoOpTruth:
+        async def snapshot_open_normal_orders(self, *, symbol: Any = None) -> list[Any]:
+            return []
+
+        async def snapshot_open_algo_orders(self, *, symbol: Any = None) -> list[Any]:
+            return []
+
+        async def snapshot_positions(self, *, symbol: Any = None) -> list[Any]:
+            return []
+
+    controller = SafeModeController(adapter=_NoOpTruth(), journal=FakeJournal())
+    controller.enter_safe_mode(
+        reason="ENTRY_WITHOUT_PROTECTIVE", now_utc=datetime(2026, 9, 19, 10, 0, tzinfo=UTC)
+    )
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(adapter, safe_mode_controller=controller)
+    assert outcome.reason_code == "RECONCILIATION_REQUIRED"
+    assert adapter.calls == []
+
+
+async def test_unreconciled_positions_block_placement() -> None:
+    """CR-07: reconciliation is always checked (gates are mandatory)."""
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter,
+        gate_kwargs=_build_gate_kwargs(_load_input(), positions_reconciled=False),
+    )
+    assert outcome.is_no_trade is True
+    assert outcome.reason_code == "UNCERTAIN_ACCOUNT_STATE"
+    assert adapter.calls == []
+
+
+async def test_missing_live_gates_raise_before_any_adapter_call() -> None:
+    """CR-07: `None` enablement / gate inputs are programming errors."""
+    import pytest
+
+    for override in ({"enablement": None}, {"gate_kwargs": None}):
+        adapter = FakeExecutionAdapter()
+        with pytest.raises(ValueError, match="is required"):
+            await _run_plan(adapter, **override)
+        assert adapter.calls == []
