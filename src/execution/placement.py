@@ -160,6 +160,64 @@ def derive_sl_trigger_price(*, stop_loss_price: Decimal) -> Decimal:
     return stop_loss_price
 
 
+# Price rounding directions for `quantize_price`.
+PRICE_ROUND_DOWN = "DOWN"
+PRICE_ROUND_UP = "UP"
+
+
+def quantize_price(*, price: Decimal, price_tick_size: Decimal, direction: str) -> Decimal:
+    """Snap `price` onto the exchange tick grid in an explicit direction.
+
+    Binance rejects prices that are not a multiple of the symbol's
+    `PRICE_FILTER.tickSize` (09-REVIEW WR-01). A zone mid such as
+    (100.01 + 100.02) / 2 = 100.015 is half a tick off, so every price
+    sent to the exchange is snapped here — never silently rounded
+    half-even. Exact Decimal integer division; no float.
+
+    Args:
+        price: The positive Decimal price to snap.
+        price_tick_size: The positive exchangeInfo tick size.
+        direction: `PRICE_ROUND_DOWN` (floor) or `PRICE_ROUND_UP` (ceil).
+
+    Returns:
+        The largest on-grid price <= `price` (DOWN) or the smallest
+        on-grid price >= `price` (UP). An on-grid price is unchanged.
+    """
+    if not isinstance(price, Decimal) or not isinstance(price_tick_size, Decimal):
+        raise TypeError("quantize_price: price and price_tick_size must be Decimal")
+    if price <= Decimal("0") or price_tick_size <= Decimal("0"):
+        raise ValueError("quantize_price: price and price_tick_size must be positive")
+    if direction not in (PRICE_ROUND_DOWN, PRICE_ROUND_UP):
+        raise ValueError(f"quantize_price: unknown direction {direction!r}")
+    steps = price // price_tick_size  # positive operands: truncation == floor
+    floored = _mul(steps, price_tick_size)
+    if direction == PRICE_ROUND_UP and floored != price:
+        return _add(floored, price_tick_size)
+    return floored
+
+
+def entry_limit_rounding(*, candidate_position_side: str) -> str:
+    """Conservative LIMIT rounding: BUY floors, SELL ceils (never pay up)."""
+    return PRICE_ROUND_DOWN if candidate_position_side == _LONG else PRICE_ROUND_UP
+
+
+def sl_trigger_rounding(*, candidate_position_side: str) -> str:
+    """SL triggers round TOWARD the entry (LONG up, SHORT down).
+
+    A tighter stop by at most one tick means the realized risk never
+    exceeds the risk the position was sized for.
+    """
+    return PRICE_ROUND_UP if candidate_position_side == _LONG else PRICE_ROUND_DOWN
+
+
+def tp_trigger_rounding(*, candidate_position_side: str) -> str:
+    """TP triggers round TOWARD the entry (LONG down, SHORT up).
+
+    The target is reached no later than planned (at most one tick early).
+    """
+    return PRICE_ROUND_DOWN if candidate_position_side == _LONG else PRICE_ROUND_UP
+
+
 def quantize_protective_qty(
     *,
     raw_quantity: Decimal,
@@ -222,6 +280,7 @@ def build_sl_leg(
     protective_template: ProtectiveTemplate,
     position_mode: str,
     candidate_position_side: str,
+    price_tick_size: Decimal,
 ) -> dict[str, Any]:
     """Build the close-all SL leg, independent of any quantity sizing.
 
@@ -235,6 +294,8 @@ def build_sl_leg(
         protective_template: The protective levels (SL trigger used).
         position_mode: "ONE_WAY" or "HEDGE".
         candidate_position_side: "LONG" or "SHORT".
+        price_tick_size: The exchangeInfo tick size — the trigger is
+            snapped onto the tick grid toward the entry (WR-01).
 
     Returns:
         The mode-correct SL leg dict (same keys as every sized leg).
@@ -253,7 +314,11 @@ def build_sl_leg(
         "position_side": _BOTH if position_mode == _ONE_WAY else candidate_position_side,
         "algo_type": "CONDITIONAL",
         "type": "STOP_MARKET",
-        "trigger_price": protective_template.stop_loss_trigger_price,
+        "trigger_price": quantize_price(
+            price=protective_template.stop_loss_trigger_price,
+            price_tick_size=price_tick_size,
+            direction=sl_trigger_rounding(candidate_position_side=candidate_position_side),
+        ),
         "close_position": True,
         "quantity": None,
         "reduce_only": None,
@@ -315,12 +380,25 @@ def size_protectives_to_filled_qty(
     else:
         leg_position_side = candidate_position_side
 
+    # Snap TP triggers onto the tick grid toward the entry (WR-01).
+    tp_rounding = tp_trigger_rounding(candidate_position_side=candidate_position_side)
+    tp1_trigger = quantize_price(
+        price=protective_template.tp1_trigger_price,
+        price_tick_size=constraint_snapshot.price_tick_size,
+        direction=tp_rounding,
+    )
+    tp2_trigger = quantize_price(
+        price=protective_template.tp2_trigger_price,
+        price_tick_size=constraint_snapshot.price_tick_size,
+        direction=tp_rounding,
+    )
+
     # Compute TP1 quantity: filled_qty * tp1_fraction, floored to stepSize.
     raw_tp1_qty = _mul(filled_quantity, protective_template.tp1_quantity_fraction)
     tp1_qty, tp1_reject = quantize_protective_qty(
         raw_quantity=raw_tp1_qty,
         constraint_snapshot=constraint_snapshot,
-        reference_price=protective_template.tp1_trigger_price,
+        reference_price=tp1_trigger,
     )
     if tp1_reject is not None:
         return ProtectiveSizing(
@@ -337,6 +415,7 @@ def size_protectives_to_filled_qty(
         protective_template=protective_template,
         position_mode=position_mode,
         candidate_position_side=candidate_position_side,
+        price_tick_size=constraint_snapshot.price_tick_size,
     )
 
     # Build the TP1 leg (explicit qty, reduce_only per mode).
@@ -351,7 +430,7 @@ def size_protectives_to_filled_qty(
         "position_side": leg_position_side,
         "algo_type": "CONDITIONAL",
         "type": "TAKE_PROFIT_MARKET",
-        "trigger_price": protective_template.tp1_trigger_price,
+        "trigger_price": tp1_trigger,
         "close_position": False,
         "quantity": tp1_qty,
         "reduce_only": tp1_reduce_only,
@@ -364,7 +443,7 @@ def size_protectives_to_filled_qty(
         "position_side": leg_position_side,
         "algo_type": "CONDITIONAL",
         "type": "TAKE_PROFIT_MARKET",
-        "trigger_price": protective_template.tp2_trigger_price,
+        "trigger_price": tp2_trigger,
         "close_position": True,
         "quantity": None,
         "reduce_only": None,
@@ -381,7 +460,13 @@ def size_protectives_to_filled_qty(
 
 
 __all__ = [
+    "PRICE_ROUND_DOWN",
+    "PRICE_ROUND_UP",
     "build_sl_leg",
+    "entry_limit_rounding",
+    "quantize_price",
+    "sl_trigger_rounding",
+    "tp_trigger_rounding",
     "derive_limit_price",
     "derive_sl_trigger_price",
     "quantize_protective_qty",

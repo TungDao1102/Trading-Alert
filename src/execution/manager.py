@@ -32,7 +32,10 @@ from src.execution.placement import (
     build_sl_leg,
     derive_limit_price,
     derive_sl_trigger_price,
+    entry_limit_rounding,
+    quantize_price,
     size_protectives_to_filled_qty,
+    sl_trigger_rounding,
 )
 from src.risk.gating import evaluate_risk
 from src.risk.types import ConstraintSnapshot
@@ -394,12 +397,25 @@ async def execute_approved_plan(
         plan_hash=trade_plan.plan_hash, role=OrderRole.ENTRY.value
     )
 
-    # Derive placement prices (Decimal-only).
-    limit_price = derive_limit_price(
-        entry_min_price=trade_plan.entry_min_price,
-        entry_max_price=trade_plan.entry_max_price,
+    # Derive placement prices (Decimal-only), snapped onto the exchange
+    # tick grid (09-REVIEW WR-01): a zone mid can be half a tick off and
+    # Binance rejects off-grid prices. BUY limits floor / SELL limits ceil
+    # (never pay up); the SL trigger rounds toward the entry (tighter stop,
+    # realized risk never exceeds the sized risk).
+    candidate_side = risk_kwargs["candidate_position_side"]
+    limit_price = quantize_price(
+        price=derive_limit_price(
+            entry_min_price=trade_plan.entry_min_price,
+            entry_max_price=trade_plan.entry_max_price,
+        ),
+        price_tick_size=constraint_snapshot.price_tick_size,
+        direction=entry_limit_rounding(candidate_position_side=candidate_side),
     )
-    sl_trigger_price = derive_sl_trigger_price(stop_loss_price=trade_plan.stop_loss_price)
+    sl_trigger_price = quantize_price(
+        price=derive_sl_trigger_price(stop_loss_price=trade_plan.stop_loss_price),
+        price_tick_size=constraint_snapshot.price_tick_size,
+        direction=sl_trigger_rounding(candidate_position_side=candidate_side),
+    )
 
     # The quantized quantity from the risk verdict.
     assert verdict.sized is not None
@@ -407,7 +423,6 @@ async def execute_approved_plan(
     quantity: Decimal = verdict.sized.quantity
 
     # Determine side from the candidate position side.
-    candidate_side = risk_kwargs["candidate_position_side"]
     entry_side = "BUY" if candidate_side == "LONG" else "SELL"
     sl_side = "SELL" if candidate_side == "LONG" else "BUY"
 
@@ -804,6 +819,7 @@ async def attach_protectives_to_fill(
             protective_template=protective_template,
             position_mode=position_mode,
             candidate_position_side=candidate_position_side,
+            price_tick_size=constraint_snapshot.price_tick_size,
         )
         sl_confirmed, sl_failure = await _place_protective_leg(
             adapter=adapter,
