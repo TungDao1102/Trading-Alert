@@ -394,6 +394,24 @@ def test_the_seed_and_resamples_flags_are_echoed_in_the_sidecar(
     assert report["base_seed"] == 7
 
 
+def test_unmapped_candidate_experiments_are_counted_in_the_incomplete_ledger(
+    env: _Env, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """WR-02: a CANDIDATE run matching no registered family is counted, never dropped."""
+    unmapped = _candidate_experiment("trend-pullback", "unmapped")
+    unmapped["experiment"]["parameter_set_hash"] = "9" * 64
+    env.evidence = _write_evidence(tmp_path / "unmapped-evidence.json", [unmapped])
+    code, out, err = _run(capsys, env.argv())
+    assert code == 0, err
+    ledger = _sidecar_of(out)["report"]["incomplete_ledger"]
+    assert {
+        "evidence": "BACKTEST",
+        "input_name": "family_scan:unknown_experiments",
+        "reason": "UNMATCHED_JOIN",
+        "count": 1,
+    } in ledger
+
+
 def test_terminal_state_exits_zero_with_the_calm_banner(
     env: _Env, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:

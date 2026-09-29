@@ -264,7 +264,11 @@ def _realized_r_by_signal(outcomes: Sequence[TradeOutcome]) -> dict[str, Decimal
     return realized
 
 
-def _backtest_inputs(entries: Sequence[BacktestEvidence], raw_root: Path) -> EvidenceInputs:
+def _backtest_inputs(
+    entries: Sequence[BacktestEvidence],
+    raw_root: Path,
+    extra_notes: Sequence[InputNote] = (),
+) -> EvidenceInputs:
     ordered = sorted(entries, key=lambda entry: entry.experiment.experiment_id)
     experiment_ids = [entry.experiment.experiment_id for entry in ordered]
     if len(set(experiment_ids)) != len(experiment_ids):
@@ -291,7 +295,7 @@ def _backtest_inputs(entries: Sequence[BacktestEvidence], raw_root: Path) -> Evi
         candles_by_symbol=candles,
         realized_r_by_signal=_realized_r_by_signal(normalized.outcomes),
         experiments=tuple(entry.experiment for entry in ordered),
-        notes=notes,
+        notes=(*notes, *extra_notes),
     )
 
 
@@ -354,9 +358,22 @@ def _build_inputs(args: CliArgs, as_of: datetime, database: _DatabaseData | None
         flags_by_experiment={entry.experiment.experiment_id: entry.flags for entry in entries},
     )
     events: tuple[JournalEvent, ...] = () if database is None else database.journal_events
+    # WR-02: CANDIDATE runs whose parameter-set hash matches no registered family are
+    # counted in the INCOMPLETE ledger, never silently skipped.
+    scan_notes = (
+        (
+            InputNote(
+                "family_scan:unknown_experiments",
+                "UNMATCHED_JOIN",
+                len(scan.unknown_experiment_ids),
+            ),
+        )
+        if scan.unknown_experiment_ids
+        else ()
+    )
     return ReportInputs(
         as_of_utc=as_of,
-        backtest=_backtest_inputs(entries, args.raw_root),
+        backtest=_backtest_inputs(entries, args.raw_root, scan_notes),
         paper=_paper_inputs(() if evidence is None else evidence.paper),
         live=(
             EvidenceInputs(kind=EvidenceKind.LIVE)
