@@ -418,7 +418,9 @@ def _check_trade_fields(trade: Mapping[str, Any], where: str) -> None:
     for name in _TRADE_DECIMAL_FIELDS:
         raw = trade.get(name)
         if raw is not None:
-            _parse_decimal(raw, name, EvidenceFileError, where)
+            value = _parse_decimal(raw, name, EvidenceFileError, where)
+            if name == "realized_risk" and value < 0:
+                raise EvidenceFileError(f"{where}: 'realized_risk' must not be negative")
     for name in _TRADE_DATETIME_FIELDS:
         raw = trade.get(name)
         if raw is not None:

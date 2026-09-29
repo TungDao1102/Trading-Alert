@@ -132,3 +132,21 @@ def test_invalid_direction_and_duplicate_trade_ids_fail_closed() -> None:
         normalize_backtest(
             [make_trade_record(trade_id="T-DUP"), make_trade_record(trade_id="T-DUP")]
         )
+
+
+@pytest.mark.parametrize("risk", ["-1", "-0.01"])
+def test_negative_realized_risk_fails_closed(risk: str) -> None:
+    """WR-15: a negative risk would flip the sign of R in the core metrics; refuse it."""
+    with pytest.raises(AnalyticsInputError, match="realized_risk"):
+        normalize_backtest([make_trade_record(trade_id="T-NEG", realized_risk=risk)])
+
+
+def test_zero_and_positive_realized_risk_are_still_accepted() -> None:
+    outcomes = normalize_backtest(
+        [
+            make_trade_record(trade_id="T-ZERO", realized_risk="0"),
+            make_trade_record(trade_id="T-POS", realized_risk="10"),
+        ]
+    ).outcomes
+    risk_by_id = {outcome.trade_id: outcome.realized_risk for outcome in outcomes}
+    assert risk_by_id == {"T-ZERO": D("0"), "T-POS": D("10")}

@@ -137,6 +137,11 @@ class TradeOutcome:
         _optional_decimal(self.quantity, "quantity")
         _optional_decimal(self.realized_pnl, "realized_pnl")
         _optional_decimal(self.realized_risk, "realized_risk")
+        # WR-15: risk is a magnitude. A negative value would flip the sign of R in the core
+        # metrics (a loss would count as a win) while the excursion engine calls the same
+        # row MALFORMED_ROW, so it is refused outright (fail closed, never repaired).
+        if self.realized_risk is not None and self.realized_risk < 0:
+            raise AnalyticsInputError("realized_risk must not be negative")
         _optional_decimal(self.intended_entry_price, "intended_entry_price")
         _optional_utc(self.entry_time_utc, "entry_time_utc")
         _optional_utc(self.exit_time_utc, "exit_time_utc")

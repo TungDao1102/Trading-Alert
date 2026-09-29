@@ -424,6 +424,16 @@ def test_evidence_unparseable_decimal_names_the_field_not_the_value(tmp_path: Pa
     assert "hunter2" not in str(info.value)
 
 
+def test_evidence_negative_realized_risk_fails_closed(tmp_path: Path) -> None:
+    """WR-15: risk is a magnitude; a negative value is malformed, never an R sign flip."""
+
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["backtest"][0]["trades"][0]["realized_risk"] = "-10.00"
+
+    with pytest.raises(EvidenceFileError, match="realized_risk"):
+        load_evidence_file(_evidence_with(tmp_path, mutate))
+
+
 def test_evidence_naive_datetime_fails_closed(tmp_path: Path) -> None:
     def mutate(doc: dict[str, Any]) -> None:
         doc["backtest"][0]["trades"][0]["entry_time_utc"] = "2026-01-05T10:00:00"
