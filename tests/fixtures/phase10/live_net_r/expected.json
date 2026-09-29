@@ -48,7 +48,7 @@
       ["SIG-B", "OPEN_POSITION"],
       ["SIG-C", "COMMISSION_ASSET_NOT_QUOTE"]
     ],
-    "result_digest": "PIN-AFTER-GREEN"
+    "result_digest": "38237ebd88234e926f5c3a0bef2a16286847018436abd757e2209df2f18838aa"
   },
   "verified_false": {
     "outcomes": [
@@ -101,6 +101,6 @@
       ["SIG-C", "COMMISSION_ASSET_NOT_QUOTE"],
       ["SIG-C", "UNVERIFIED_EXCHANGE_SEMANTICS"]
     ],
-    "result_digest": "PIN-AFTER-GREEN"
+    "result_digest": "bbacc5ac38b3c153b9f325e3c42f4e1c55b139b279edc082063a82f02091c523"
   }
 }
