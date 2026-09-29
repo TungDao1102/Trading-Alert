@@ -20,7 +20,7 @@ from decimal import Decimal
 from typing import Any
 
 from src.domain.enums import DailyState, RejectionReason
-from src.risk.portfolio import check_portfolio
+from src.risk.portfolio import check_portfolio, derive_daily_state
 from src.risk.types import ConstraintSnapshot, OpenPosition, SizedResult
 
 # --------------------------------------------------------------------------- #
@@ -29,6 +29,13 @@ from src.risk.types import ConstraintSnapshot, OpenPosition, SizedResult
 # Per D-03: headroom equality (count + legs == 200) is assumed reject to keep
 # operational headroom. The check is `count + legs >= 200` so the boundary
 # case (exactly 200) also rejects.
+#
+# KNOWN GAP (09-REVIEW WR-06): AGENTS.md requires this limit to be detected
+# dynamically (exchangeInfo `MAX_NUM_ALGO_ORDERS` per symbol), not
+# hard-coded. The adapter's `SymbolFilters` / `ConstraintSnapshot` do not
+# carry that filter yet; sourcing it needs a snapshot-schema change plus a
+# re-verification of the filter against current Binance docs. Until then
+# this literal is the conservative fallback.
 # --------------------------------------------------------------------------- #
 
 HEADROOM_LIMIT: int = 200
@@ -145,6 +152,20 @@ def decide_placement(
     Returns:
         A `PlacementGateVerdict` with the gate outcome.
     """
+    # 09-REVIEW WR-06: corrupt counts fail loudly (a negative count would
+    # silently widen the headroom), and the daily state is derived BEFORE
+    # any early return so no fail-closed gate masks DAILY_STOP from the
+    # downstream SAFE_MODE consumers (mirrors `check_portfolio`).
+    for name, count in (
+        ("open_algo_count", open_algo_count),
+        ("planned_leg_count", planned_leg_count),
+    ):
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError(f"decide_placement: {name} must be an int >= 0, got {count!r}")
+    daily_state = derive_daily_state(
+        daily_loss_quote=daily_loss_quote, parameter_set=parameter_set
+    )
+
     # Gate 1: exchangeInfo revalidation.
     # ConstraintSnapshot.__post_init__ already validates positive values,
     # but we re-check here as a fail-closed guard against any future
@@ -159,7 +180,7 @@ def decide_placement(
             is_no_trade=True,
             reason_code=RejectionReason.EXCHANGE_CONSTRAINT.value,
             sized=None,
-            daily_state=DailyState.NORMAL,
+            daily_state=daily_state,
         )
 
     # Gate 2: headroom check.
@@ -170,7 +191,7 @@ def decide_placement(
             is_no_trade=True,
             reason_code=RejectionReason.EXCHANGE_CONSTRAINT.value,
             sized=None,
-            daily_state=DailyState.NORMAL,
+            daily_state=daily_state,
         )
 
     # Gate 3: stale constraints.
@@ -183,7 +204,7 @@ def decide_placement(
             is_no_trade=True,
             reason_code=RejectionReason.STALE_CONSTRAINTS.value,
             sized=None,
-            daily_state=DailyState.NORMAL,
+            daily_state=daily_state,
         )
 
     # Gate 4: uncertain account state.
@@ -193,7 +214,7 @@ def decide_placement(
             is_no_trade=True,
             reason_code=RejectionReason.UNCERTAIN_ACCOUNT_STATE.value,
             sized=None,
-            daily_state=DailyState.NORMAL,
+            daily_state=daily_state,
         )
 
     # Gate 5: portfolio enforcement via check_portfolio.

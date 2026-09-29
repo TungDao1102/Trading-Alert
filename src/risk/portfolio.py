@@ -149,6 +149,31 @@ def _extract_thresholds(
     )
 
 
+def derive_daily_state(
+    *,
+    daily_loss_quote: Decimal | None,
+    parameter_set: dict[str, Any],
+) -> DailyState:
+    """Public daily-state derivation for gates that run before `check_portfolio`.
+
+    Same rule `check_portfolio` applies before any verdict: unknown loss
+    or a malformed parameter set cannot derive and yields NORMAL (the
+    caller's own fail-closed gate then rejects); otherwise the inclusive
+    WARNING / DAILY_STOP boundaries apply. Lets upstream fail-closed
+    gates carry DAILY_STOP instead of masking it (09-REVIEW WR-06).
+    """
+    if daily_loss_quote is None:
+        return DailyState.NORMAL
+    thresholds = _extract_thresholds(parameter_set)
+    if thresholds is None:
+        return DailyState.NORMAL
+    return _derive_daily_state(
+        daily_loss_quote=daily_loss_quote,
+        warning_threshold_quote=thresholds[3],
+        stop_threshold_quote=thresholds[4],
+    )
+
+
 def check_portfolio(
     *,
     sized: SizedResult,
@@ -350,4 +375,9 @@ def check_portfolio(
     )
 
 
-__all__ = ["check_portfolio", "resolve_absolute_thresholds", "CLUSTER_SYMBOLS"]
+__all__ = [
+    "check_portfolio",
+    "derive_daily_state",
+    "resolve_absolute_thresholds",
+    "CLUSTER_SYMBOLS",
+]

@@ -502,3 +502,51 @@ def test_all_pass_yields_proceed_with_reconciled_set() -> None:
         f"expected PASS, got NO_TRADE: {verdict.reason_code}"
     )
     assert verdict.reason_code == "OK"
+
+
+# --------------------------------------------------------------------------- #
+# 09-REVIEW WR-06 — counts validated; DAILY_STOP never masked by early gates.
+# --------------------------------------------------------------------------- #
+
+
+def _decide(case_dir: Path, **overrides: Any) -> Any:
+    from src.execution.gates import decide_placement
+
+    case_input = _load_input(case_dir)
+    kwargs: dict[str, Any] = {
+        "constraint_snapshot": _build_constraint_snapshot(case_input),
+        "open_algo_count": case_input["open_algo_count"],
+        "planned_leg_count": case_input["planned_leg_count"],
+        "reconciled_positions": _build_reconciled_positions(case_input),
+        "daily_loss_quote": _coerce_decimal(case_input["daily_loss_quote"], "daily_loss_quote"),
+        "positions_reconciled": case_input["positions_reconciled"],
+        "now_utc": _parse_utc(case_input["now_utc"]),
+        "ttl": timedelta(seconds=int(case_input["ttl_seconds"])),
+        "sized": _build_sized(case_input),
+        "candidate_symbol": case_input["candidate_symbol"],
+        "candidate_position_side": case_input["candidate_position_side"],
+        "parameter_set": _build_parameter_set(case_input),
+    }
+    kwargs.update(overrides)
+    return decide_placement(**kwargs)
+
+
+def test_negative_or_non_int_counts_raise() -> None:
+    import pytest
+
+    case_dir = GATES_FIXTURES_DIR / "daily_stop_block"
+    for override in (
+        {"open_algo_count": -5},
+        {"planned_leg_count": -1},
+        {"open_algo_count": True},
+    ):
+        with pytest.raises(ValueError, match="must be an int >= 0"):
+            _decide(case_dir, **override)
+
+
+def test_early_reject_still_reports_daily_stop_state() -> None:
+    """WR-06: a headroom reject at the daily-stop threshold carries
+    DAILY_STOP (not NORMAL) for downstream SAFE_MODE consumers."""
+    verdict = _decide(GATES_FIXTURES_DIR / "daily_stop_block", open_algo_count=199)
+    assert verdict.reason_code == "EXCHANGE_CONSTRAINT"
+    assert verdict.daily_state.value == "DAILY_STOP"
