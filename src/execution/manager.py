@@ -81,7 +81,7 @@ class ExecutionAdapter(Protocol):
 
     async def get_position_mode(self) -> str: ...
 
-    async def cancel_order(self, *, symbol: str, client_order_id: str) -> Any: ...
+    async def cancel_normal_order(self, *, symbol: str, orig_client_order_id: str) -> Any: ...
 
     async def cancel_algo_order(self, *, symbol: str, client_algo_id: str) -> Any: ...
 
@@ -781,19 +781,24 @@ def _build_cancel_event(
     trigger_reason: str,
     phase: str,
     now_utc: datetime,
+    error_type: str | None = None,
 ) -> JournalEvent:
     """Build one pre/post-cancel JournalEvent (journal-first pattern).
 
     Mirrors `src/reconcile/sweeper.py`'s pre-image-before / post-image-
     after pattern: the caller journals this event, THEN issues the
-    cancel call, THEN journals the post-image twin.
+    cancel call, THEN journals the post-image twin (or a
+    `cancel_failed` twin carrying the exception TYPE — never its message,
+    which may carry request material).
     """
-    payload = {
+    payload: dict[str, str] = {
         "symbol": symbol,
         "identifier": identifier,
         "trigger_reason": trigger_reason,
         "phase": phase,
     }
+    if error_type is not None:
+        payload["error_type"] = error_type
     return JournalEvent(
         journal_event_id=(
             f"{event_type.lower()}_{phase}_{identifier}_{int(now_utc.timestamp() * 1000)}"
@@ -822,7 +827,13 @@ async def expire_pending_entry(
     five triggers — expiry time, invalidation, superseded plan, mode
     change, or operator close. Journals the pre-image BEFORE the cancel
     call and the post-image AFTER (journal-first pattern, D-05
-    extended).
+    extended). A failing cancel journals a `cancel_failed` event and
+    re-raises (never silently swallowed).
+
+    The cancel goes through the adapter's real
+    `cancel_normal_order(*, symbol, orig_client_order_id)` surface
+    (09-REVIEW CR-10), which already treats "already canceled" as
+    success.
 
     Args:
         plan_hash: The 64-char SHA-256 plan hash.
@@ -837,6 +848,7 @@ async def expire_pending_entry(
     Raises:
         ValueError: `symbol` is not in the live-5 universe, or
             `trigger_reason` is not a canonical trigger.
+        Exception: the adapter cancel error (after journaling it).
     """
     _require_live5_symbol(symbol)
     if trigger_reason not in _EXPIRY_TRIGGERS:
@@ -857,7 +869,22 @@ async def expire_pending_entry(
             now_utc=now_utc,
         )
     )
-    await adapter.cancel_order(symbol=symbol, client_order_id=client_order_id)
+    try:
+        await adapter.cancel_normal_order(symbol=symbol, orig_client_order_id=client_order_id)
+    except Exception as exc:
+        journal.record(
+            _build_cancel_event(
+                event_type="ENTRY_EXPIRY",
+                entity_type="Order",
+                identifier=client_order_id,
+                symbol=symbol,
+                trigger_reason=trigger_reason,
+                phase="cancel_failed",
+                now_utc=now_utc,
+                error_type=type(exc).__name__,
+            )
+        )
+        raise
     journal.record(
         _build_cancel_event(
             event_type="ENTRY_EXPIRY",
@@ -886,6 +913,11 @@ async def cancel_untriggered_protectives(
     time in SL → TP1 → TP2 order, journaling the pre-image BEFORE and
     the post-image AFTER each cancel call (journal-first pattern).
 
+    Per-leg isolation (09-REVIEW CR-10): one failing cancel never leaves
+    the remaining legs live — every leg is attempted, each failure is
+    journaled as `cancel_failed`, and all failures are raised together
+    as an `ExceptionGroup` after the last leg.
+
     Args:
         plan_hash: The 64-char SHA-256 plan hash.
         symbol: The live-5 symbol (raises before any adapter call if
@@ -893,8 +925,13 @@ async def cancel_untriggered_protectives(
         adapter: The Protocol-typed adapter surface.
         journal: The journal layer (duck-typed `.record(event)`).
         now_utc: The current UTC-aware datetime (injected).
+
+    Raises:
+        ExceptionGroup: one or more leg cancels failed (all legs were
+            still attempted).
     """
     _require_live5_symbol(symbol)
+    errors: list[Exception] = []
     for role in (
         OrderRole.STOP_LOSS.value,
         OrderRole.TAKE_PROFIT_1.value,
@@ -912,7 +949,23 @@ async def cancel_untriggered_protectives(
                 now_utc=now_utc,
             )
         )
-        await adapter.cancel_algo_order(symbol=symbol, client_algo_id=client_algo_id)
+        try:
+            await adapter.cancel_algo_order(symbol=symbol, client_algo_id=client_algo_id)
+        except Exception as exc:  # noqa: BLE001 — isolate, journal, raise as group
+            errors.append(exc)
+            journal.record(
+                _build_cancel_event(
+                    event_type="PROTECTIVE_CANCEL",
+                    entity_type="OpenAlgoOrder",
+                    identifier=client_algo_id,
+                    symbol=symbol,
+                    trigger_reason=role,
+                    phase="cancel_failed",
+                    now_utc=now_utc,
+                    error_type=type(exc).__name__,
+                )
+            )
+            continue
         journal.record(
             _build_cancel_event(
                 event_type="PROTECTIVE_CANCEL",
@@ -924,6 +977,8 @@ async def cancel_untriggered_protectives(
                 now_utc=now_utc,
             )
         )
+    if errors:
+        raise ExceptionGroup("cancel_untriggered_protectives: cancel incomplete", errors)
 
 
 # --------------------------------------------------------------------------- #
@@ -958,16 +1013,22 @@ async def emergency_manual_close(
     pending strategy orders, disable new live orders, close strategy-
     generated positions per explicit operator action, and switch to
     SAFE_MODE. This function runs all four, in fixed order (never
-    reordered):
+    reordered) — BLOCKING FIRST (09-REVIEW CR-10), so no cancel failure
+    can ever leave new entries enabled:
 
-      1. `expire_pending_entry` (trigger_reason="operator_close") —
-         cancel the pending LIMIT entry, if any.
-      2. `cancel_untriggered_protectives` — cancel the SL/TP1/TP2 algo
-         legs, if any.
-      3. `enablement.disable(...)` — flip `LIVE_ORDERS_DISABLED` back
+      1. `enablement.disable(...)` — flip `LIVE_ORDERS_DISABLED` back
          to true (journal-first, per `LiveEnablementController`).
-      4. `safe_mode_freeze(...)` — enter SAFE_MODE so monitoring and
+      2. `safe_mode_freeze(...)` — enter SAFE_MODE so monitoring and
          reconciliation continue while entries stay blocked.
+      3. `expire_pending_entry` (trigger_reason="operator_close") —
+         cancel the pending LIMIT entry, if any.
+      4. `cancel_untriggered_protectives` — cancel the SL/TP1/TP2 algo
+         legs, if any.
+
+    Every step is isolated: a failure in any step never prevents the
+    later steps from running. All failures are raised together as one
+    `ExceptionGroup` after the full sequence ran (each cancel failure is
+    also journaled by the step itself).
 
     Closing the strategy-generated POSITION itself (vs. its pending
     orders) is an operator-directed exchange action outside this
@@ -990,29 +1051,53 @@ async def emergency_manual_close(
         operator_id: The operator id performing the manual close
             (audit-trail discipline — never empty).
         now_utc: The current UTC-aware datetime (injected).
+
+    Raises:
+        ExceptionGroup: one or more steps failed (every step was still
+            attempted, blocking steps first).
     """
     _require_live5_symbol(symbol)
-    await expire_pending_entry(
-        plan_hash=plan_hash,
-        symbol=symbol,
-        adapter=adapter,
-        journal=journal,
-        now_utc=now_utc,
-        trigger_reason="operator_close",
-    )
-    await cancel_untriggered_protectives(
-        plan_hash=plan_hash,
-        symbol=symbol,
-        adapter=adapter,
-        journal=journal,
-        now_utc=now_utc,
-    )
-    enablement.disable(operator_id=operator_id, now_utc=now_utc)
-    safe_mode_freeze(
-        safe_mode_controller=safe_mode_controller,
-        reason="MANUAL_CLOSE",
-        now_utc=now_utc,
-    )
+    errors: list[Exception] = []
+
+    # Steps 1-2: block new entries FIRST.
+    try:
+        enablement.disable(operator_id=operator_id, now_utc=now_utc)
+    except Exception as exc:  # noqa: BLE001 — isolate; SAFE_MODE must still run
+        errors.append(exc)
+    try:
+        safe_mode_freeze(
+            safe_mode_controller=safe_mode_controller,
+            reason="MANUAL_CLOSE",
+            now_utc=now_utc,
+        )
+    except Exception as exc:  # noqa: BLE001 — isolate; cancels must still run
+        errors.append(exc)
+
+    # Steps 3-4: cancel pending strategy orders, each step isolated.
+    try:
+        await expire_pending_entry(
+            plan_hash=plan_hash,
+            symbol=symbol,
+            adapter=adapter,
+            journal=journal,
+            now_utc=now_utc,
+            trigger_reason="operator_close",
+        )
+    except Exception as exc:  # noqa: BLE001 — isolate; protectives must still be canceled
+        errors.append(exc)
+    try:
+        await cancel_untriggered_protectives(
+            plan_hash=plan_hash,
+            symbol=symbol,
+            adapter=adapter,
+            journal=journal,
+            now_utc=now_utc,
+        )
+    except Exception as exc:  # noqa: BLE001 — collected below
+        errors.append(exc)
+
+    if errors:
+        raise ExceptionGroup("emergency_manual_close: sequence incomplete", errors)
 
 
 __all__ = [
