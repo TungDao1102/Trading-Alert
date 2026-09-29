@@ -64,7 +64,9 @@ from src.analytics.killgate import (
     PriorEvaluation,
     ResetRecord,
     build_kill_gate_event,
+    prior_from_event,
     priors_from_events,
+    reset_from_event,
     resets_from_events,
 )
 from src.analytics.lifecycle import (
@@ -365,6 +367,33 @@ def _merge_resets(
     return tuple(merged[key] for key in sorted(merged))
 
 
+def _require_parseable_evaluations(events: Sequence[JournalEvent]) -> None:
+    """Fail closed on a KILL_GATE_EVALUATION event that cannot be parsed (WR-11).
+
+    Such an event may have been a terminal INSUFFICIENT_EDGE; dropping it would silently
+    clear the sticky state, so the report is not produced until the journal is repaired.
+    """
+    unparseable = sum(
+        1
+        for event in events
+        if event.event_type == KILL_GATE_EVENT_TYPE and prior_from_event(event) is None
+    )
+    if unparseable > 0:
+        raise AnalyticsInputError(
+            f"{unparseable} {KILL_GATE_EVENT_TYPE} journal event(s) cannot be parsed; "
+            "the sticky kill-gate state cannot be verified"
+        )
+
+
+def _unparseable_reset_count(events: Sequence[JournalEvent]) -> int:
+    """Reset events that cannot be parsed (dropping one keeps the gate sticky: counted only)."""
+    return sum(
+        1
+        for event in events
+        if event.event_type == QUESTION_APPROVED_EVENT_TYPE and reset_from_event(event) is None
+    )
+
+
 def _merge_priors(
     decisions: DecisionsFile, events: Sequence[JournalEvent]
 ) -> tuple[PriorEvaluation, ...]:
@@ -404,6 +433,7 @@ def _build_inputs(args: CliArgs, as_of: datetime, database: _DatabaseData | None
         flags_by_experiment={entry.experiment.experiment_id: entry.flags for entry in entries},
     )
     events: tuple[JournalEvent, ...] = () if database is None else database.journal_events
+    _require_parseable_evaluations(events)
     # WR-02: CANDIDATE runs whose parameter-set hash matches no registered family are
     # counted in the INCOMPLETE ledger, never silently skipped.
     scan_notes = (
@@ -543,6 +573,15 @@ def _live_inputs(database: _DatabaseData, raw_root: Path) -> EvidenceInputs:
     )
     if database.journal_rejected > 0:
         notes.append(InputNote("journal_events", "MALFORMED_ROW", database.journal_rejected))
+    unparseable_resets = _unparseable_reset_count(database.journal_events)
+    if unparseable_resets > 0:
+        notes.append(
+            InputNote(
+                f"journal_events:{QUESTION_APPROVED_EVENT_TYPE}",
+                "MALFORMED_ROW",
+                unparseable_resets,
+            )
+        )
     incomplete_counts: dict[str, int] = {}
     for _signal_id, reason in outcomes.incomplete:
         incomplete_counts[reason.value] = incomplete_counts.get(reason.value, 0) + 1

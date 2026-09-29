@@ -809,6 +809,50 @@ def test_db_and_decisions_file_resets_are_merged_and_deduplicated(
     assert _stdout_lines(out)[3] == "Kill gate: WITHIN_BUDGET"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"state": "NOT_A_STATE", "evaluated_at_utc": "2027-03-25T00:00:00+00:00"},
+        {"state": "INSUFFICIENT_EDGE", "evaluated_at_utc": "2027-03-25T00:00:00"},
+        {"evaluated_at_utc": "2027-03-25T00:00:00+00:00"},
+    ],
+)
+def test_db_unparseable_kill_gate_evaluation_fails_closed(
+    env: _Env,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, str],
+) -> None:
+    """WR-11: a corrupted (possibly terminal) evaluation never silently disappears."""
+    store = _FakeStore()
+    store.add_events(_journal_event(KGE, "2027-03-25T00:00:00+00:00", payload))
+    code, out, err = _db_run(env, _FakeFactory(store), capsys, monkeypatch)
+    assert code == 1
+    assert out == ""
+    assert "KILL_GATE_EVALUATION" in err
+    assert env.files() == []
+
+
+def test_db_unparseable_reset_event_is_counted_in_the_ledger(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _FakeStore()
+    store.add_events(
+        _terminal_prior(),
+        _journal_event(RESET_EVENT, "2027-03-28T00:00:00+00:00", {"operator_id": "op-db"}),
+    )
+    code, out, err = _db_run(env, _FakeFactory(store), capsys, monkeypatch)
+    assert code == 0, err
+    assert _stdout_lines(out)[3] == "Kill gate: INSUFFICIENT_EDGE"
+    ledger = _sidecar_of(out)["report"]["incomplete_ledger"]
+    assert {
+        "evidence": "LIVE",
+        "input_name": "journal_events:KILL_GATE_QUESTION_APPROVED",
+        "reason": "MALFORMED_ROW",
+        "count": 1,
+    } in ledger
+
+
 def test_db_failure_exits_one_with_only_the_exception_type(
     env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
