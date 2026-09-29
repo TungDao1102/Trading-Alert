@@ -11,7 +11,10 @@
       "earliest_terminal_utc": "2027-03-19T00:00:00+00:00",
       "reopened_by_decision_ref": null,
       "reopened_by_operator_id": null,
-      "reopened_at_utc": null
+      "reopened_at_utc": null,
+      "verdict_digest": "30ae02e72907e0af904151faaef42f625851020685e08351badba7815ca630a9",
+      "evidence_digest": "cdb7decc176edf72e9f2d2ba7235ea3e146a6f66b6f1a1e8e866b4af14e29f7f",
+      "journal_event_id": "kill_gate_478fbb32017142b1e2e5bcf657ad52184268d7a4a6f91e5f173b6fce458c72ed"
     },
     {
       "name": "sticky_despite_new_pass",
@@ -24,7 +27,10 @@
       "earliest_terminal_utc": "2027-03-19T00:00:00+00:00",
       "reopened_by_decision_ref": null,
       "reopened_by_operator_id": null,
-      "reopened_at_utc": null
+      "reopened_at_utc": null,
+      "verdict_digest": "533c7c1f54d27fce02374dc968e61b449cf4ce86f7d004e6c4bcfe36793509b5",
+      "evidence_digest": "cb0cdaa46ef17f5eb80dbb954619d44fb9d95c1c847d0144d9dda6caa3ed729f",
+      "journal_event_id": "kill_gate_347097a0e49fa3d67bcc6a7a98775f677b32196aab3e0e738ab83b674681666d"
     },
     {
       "name": "reopened",
@@ -37,7 +43,10 @@
       "earliest_terminal_utc": "2027-12-01T00:00:00+00:00",
       "reopened_by_decision_ref": "DEC-2027-06-new-question",
       "reopened_by_operator_id": "operator_alpha",
-      "reopened_at_utc": "2027-06-01T00:00:00+00:00"
+      "reopened_at_utc": "2027-06-01T00:00:00+00:00",
+      "verdict_digest": "593f284308b29c1332aa411c54d1b9ff142a0e2d21e56df33016e1ab41643191",
+      "evidence_digest": "9a1dff5bac327f4b4696dc0bf5313a1af5cb3e5b8659bc1efcbe7b1842dfbfd9",
+      "journal_event_id": "kill_gate_c4de0e00247d005286656e680c6e38b5dc6ff241acc32845fa7ba3515bd1965a"
     }
   ]
 }

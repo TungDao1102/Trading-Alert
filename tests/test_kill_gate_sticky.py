@@ -338,7 +338,7 @@ def _event_with(payload_json: str, event_type: str = "KILL_GATE_EVALUATION") -> 
 @pytest.mark.parametrize(
     "payload_json",
     [
-        "not json",
+        "",
         "[]",
         "{}",
         '{"state": "NOPE", "evaluated_at_utc": "2027-04-01T00:00:00+00:00"}',
@@ -355,7 +355,7 @@ def test_prior_from_event_returns_none_for_malformed_payloads(payload_json: str)
 
 @pytest.mark.parametrize(
     "payload_json",
-    ["not json", "[]", "{}", '{"operator_id": 3, "decision_ref": "d"}', '{"operator_id": "o"}'],
+    ["", "[]", "{}", '{"operator_id": 3, "decision_ref": "d"}', '{"operator_id": "o"}'],
 )
 def test_reset_from_event_returns_none_for_malformed_payloads(payload_json: str) -> None:
     assert reset_from_event(_event_with(payload_json, QUESTION_APPROVED_EVENT_TYPE)) is None
