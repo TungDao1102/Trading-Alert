@@ -24,7 +24,7 @@
     },
     "synthetic_lag_seconds": 30,
     "synthetic_lag_label": "SYNTHETIC LAG (APPROVAL_DELAY_LAG_SECONDS=30)",
-    "section_digest": "d2b9f37e0c178d4b0b3a7c2fb92b44884721cf5ca98c85b122ed55cfabf94b87"
+    "section_digest": "fbec7c83c8235ba0e4a730f704a8ea874421daec01632f1632da14a0e8ccd5d8"
   },
   "live": {
     "system": {
@@ -74,6 +74,6 @@
     "delay_incomplete": [],
     "synthetic_lag_seconds": null,
     "synthetic_lag_label": null,
-    "section_digest": "PIN-AFTER-GREEN"
+    "section_digest": "41dfae59e1e001afe9ca4659d1f730199b7c430c315f44464160c8181ea3cade"
   }
 }

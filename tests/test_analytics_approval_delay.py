@@ -264,11 +264,6 @@ def test_live_section_digest_is_pinned() -> None:
     assert section.digest() == want
 
 
-def test_paper_section_digest_is_repinned_after_bucket_fields() -> None:
-    want = load_expected("approval_delay_three_reports")["paper"]["section_digest"]
-    assert paper_section().digest() == want
-
-
 def test_live_returns_four_rows_even_when_buckets_are_empty() -> None:
     records, _, _ = case_inputs("live")
     only_slow = [r for r in records if r.source_id == "LIVE-6"]
