@@ -99,6 +99,12 @@ from src.core.types import Candle
 from src.db.models import make_session_factory, session_scope
 from src.domain.enums import KillGateState
 from src.domain.journal import JournalEvent
+from src.domain.registry import (
+    ParameterSetMutated,
+    RegistrySchemaMismatch,
+    StrategyKeyOutsideRegistry,
+    UnregisteredParameterSet,
+)
 from src.paper.journal import PaperRecord
 
 __all__ = ["CliArgs", "main", "parse_args"]
@@ -547,28 +553,45 @@ def _write_pair(out_dir: Path, stem: str, markdown: bytes, sidecar: bytes) -> tu
 # Entry point
 # --------------------------------------------------------------------------- #
 
-_EXPECTED_FAILURES = (
+# Project-owned failures whose messages are fixed, name-only text (safe to print).
+_MESSAGE_FAILURES = (
     EvidenceFileError,
     DecisionsFileError,
     PathConfinementError,
     AnalyticsInputError,
     KillGateInputError,
     RenderError,
+)
+# Foreign failures whose messages may carry file paths or contents: reported by type name
+# only (WR-03). ValueError is the last resort (UnicodeDecodeError, TOMLDecodeError, the
+# clock's UTC checks) so no input failure escapes `main` as a raw traceback.
+_NAME_ONLY_FAILURES = (
+    UnregisteredParameterSet,
+    ParameterSetMutated,
+    RegistrySchemaMismatch,
+    StrategyKeyOutsideRegistry,
+    ValueError,
+)
+_EXPECTED_FAILURES = (
+    *_MESSAGE_FAILURES,
     _RenderVerificationError,
     _DatabaseReadError,
     OSError,
+    *_NAME_ONLY_FAILURES,
 )
 
 
 def _reason(exc: Exception) -> str:
-    """One-line failure reason; file-system errors are reduced to their type name."""
+    """One-line failure reason; file-system and foreign errors are reduced to a type name."""
     if isinstance(exc, OSError):
         return f"file access failed ({type(exc).__name__})"
     if isinstance(exc, _RenderVerificationError):
         return f"rendered output failed verification ({exc})"
     if isinstance(exc, _DatabaseReadError):
         return f"database read failed ({exc})"
-    return " ".join(str(exc).split()).rstrip(".")
+    if isinstance(exc, _MESSAGE_FAILURES):
+        return " ".join(str(exc).split()).rstrip(".")
+    return f"input could not be read ({type(exc).__name__})"
 
 
 def _fail(reason: str) -> int:

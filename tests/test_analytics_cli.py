@@ -27,7 +27,13 @@ from src.db.mappers import journal_to_row, signal_to_row
 from src.db.models import JournalEventRow, SignalRow
 from src.domain.enums import SignalStatus
 from src.domain.journal import JournalEvent, content_hash_event_id
-from src.domain.registry import load_parameter_set
+from src.domain.registry import (
+    ParameterSetMutated,
+    RegistrySchemaMismatch,
+    StrategyKeyOutsideRegistry,
+    UnregisteredParameterSet,
+    load_parameter_set,
+)
 from src.domain.signal import Signal
 
 REPO = Path(__file__).resolve().parents[1]
@@ -356,6 +362,39 @@ def test_duplicate_trade_id_across_experiments_exits_one(
     code, _, err = _run(capsys, env.argv())
     assert code == 1
     assert "duplicate trade_id" in err
+    assert env.files() == []
+
+
+@pytest.mark.parametrize(
+    ("target", "exc"),
+    [
+        ("scan_family_facts", RegistrySchemaMismatch("C:/secret/params/x/baseline-v1.toml: bad")),
+        ("scan_family_facts", StrategyKeyOutsideRegistry("C:/secret/params/x.toml: key")),
+        ("scan_family_facts", UnregisteredParameterSet("secret-family/secret-set")),
+        ("scan_family_facts", ParameterSetMutated("C:/secret/params/x.toml: hash")),
+        ("read_protocol_text", UnicodeDecodeError("utf-8", b"\xff", 0, 1, "secret-detail")),
+        ("clock_start_from_protocol", ValueError("secret-detail from the clock")),
+    ],
+)
+def test_unexpected_input_failures_exit_one_with_the_exception_type_only(
+    env: _Env,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    exc: Exception,
+) -> None:
+    """WR-03: registry / decode / value failures keep the exit-1 name-only contract."""
+
+    def boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise exc
+
+    monkeypatch.setattr(f"src.analytics.cli.{target}", boom)
+    code, out, err = _run(capsys, env.argv())
+    assert code == 1
+    assert out == ""
+    assert err.startswith(f"Report not produced: input could not be read ({type(exc).__name__})")
+    assert err.rstrip("\n").endswith(COPY_TAIL)
+    assert "secret" not in err
     assert env.files() == []
 
 
