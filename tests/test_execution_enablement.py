@@ -63,6 +63,21 @@ class FakeJournal:
         self.events.append(event)
 
 
+def _passing_health_verdict() -> Any:
+    """A complete, all-PASS `HealthVerdict` (09-REVIEW WR-08)."""
+    from src.ops.health import ALL_CHECK_NAMES, HealthCheckResult, run_health_checks
+
+    observed = datetime(2026, 9, 19, 10, 0, tzinfo=UTC)
+    return run_health_checks(
+        results=[
+            HealthCheckResult(
+                check_name=name, status="PASS", detail="ok", observed_at_utc=observed
+            )
+            for name in ALL_CHECK_NAMES
+        ]
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Beh. 1 — default-disabled blocks placement.
 # --------------------------------------------------------------------------- #
@@ -103,6 +118,7 @@ def test_explicit_enable_allows_placement() -> None:
     controller.enable(
         operator_id=case_input["operator_id"],
         now_utc=_parse_utc(case_input["enable_at_utc"]),
+        health_verdict=_passing_health_verdict(),
     )
 
     assert controller.is_disabled is False
@@ -137,6 +153,7 @@ def test_emergency_manual_close_plus_safe_mode_blocks_new_entries() -> None:
     controller.enable(
         operator_id=case_input["operator_id"],
         now_utc=_parse_utc(case_input["enable_at_utc"]),
+        health_verdict=_passing_health_verdict(),
     )
     assert controller.is_disabled is False  # sanity: was enabled first
 
@@ -193,7 +210,9 @@ def test_secret_free_log_scan_across_enablement_and_health_events() -> None:
     journal = FakeJournal()
 
     controller = LiveEnablementController(journal=journal)
-    controller.enable(operator_id="operator_alpha", now_utc=now)
+    controller.enable(
+        operator_id="operator_alpha", now_utc=now, health_verdict=_passing_health_verdict()
+    )
     controller.disable(operator_id="operator_alpha", now_utc=now + timedelta(minutes=1))
 
     check_market_feed_freshness(
@@ -219,3 +238,35 @@ def test_secret_free_log_scan_across_enablement_and_health_events() -> None:
                 f"forbidden substring {substring!r} found in journal event "
                 f"{event.journal_event_id!r}: {haystack!r}"
             )
+
+
+# --------------------------------------------------------------------------- #
+# 09-REVIEW WR-08 — RED or unevaluated health blocks enablement.
+# --------------------------------------------------------------------------- #
+
+
+def test_enable_refuses_failing_missing_or_partial_health() -> None:
+    import pytest
+    from src.execution.enablement import LiveEnablementController
+    from src.ops.health import ALL_CHECK_NAMES, HealthCheckResult, run_health_checks
+
+    observed = datetime(2026, 9, 19, 10, 0, tzinfo=UTC)
+
+    def _result(name: str, status: str = "PASS") -> Any:
+        return HealthCheckResult(
+            check_name=name, status=status, detail="x", observed_at_utc=observed
+        )
+
+    failing = run_health_checks(
+        results=[_result(n, "FAIL" if i == 0 else "PASS") for i, n in enumerate(ALL_CHECK_NAMES)]
+    )
+    partial = run_health_checks(results=[_result(ALL_CHECK_NAMES[2])])
+    for verdict in (failing, partial, None):
+        journal = FakeJournal()
+        controller = LiveEnablementController(journal=journal)
+        with pytest.raises(ValueError, match="passing health verdict"):
+            controller.enable(
+                operator_id="operator_alpha", now_utc=observed, health_verdict=verdict
+            )
+        assert controller.is_disabled is True
+        assert journal.events == []

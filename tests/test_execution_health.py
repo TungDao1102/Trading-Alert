@@ -340,3 +340,45 @@ def test_health_module_purity() -> None:
         assert match is None, (
             f"forbidden import in {module_path}: pattern={pattern!r}, match={match.group(0)!r}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# 09-REVIEW WR-08 — incomplete / duplicated probe sets never aggregate to OK.
+# --------------------------------------------------------------------------- #
+
+
+def test_partial_probe_set_is_health_check_failed() -> None:
+    """WR-08: a lone PASS probe is not a healthy system."""
+    from src.ops.health import check_ws_connection_state, run_health_checks
+
+    journal = FakeJournal()
+    verdict = run_health_checks(
+        results=[check_ws_connection_state(connected=True, now_utc=NOW_UTC, journal=journal)]
+    )
+    assert verdict.is_no_trade is True
+    assert verdict.reason_code == "HEALTH_CHECK_FAILED"
+
+
+def test_duplicated_probe_masking_a_missing_one_is_health_check_failed() -> None:
+    """WR-08: nine probes + a duplicate WS PASS (Telegram never ran)."""
+    from src.ops.health import check_ws_connection_state, run_health_checks
+
+    journal = FakeJournal()
+    results = _run_all_probes_passing(journal)
+    results.append(check_ws_connection_state(connected=True, now_utc=NOW_UTC, journal=journal))
+    assert len(results) == 10
+    verdict = run_health_checks(results=results)
+    assert verdict.is_no_trade is True
+
+
+def test_hand_built_partial_pass_verdict_is_rejected() -> None:
+    """WR-08: a PASS HealthVerdict must be structurally complete."""
+    from src.ops.health import HealthVerdict, check_ws_connection_state
+
+    journal = FakeJournal()
+    with pytest.raises(ValueError, match="PASS verdict requires"):
+        HealthVerdict(
+            is_no_trade=False,
+            reason_code="OK",
+            results=(check_ws_connection_state(connected=True, now_utc=NOW_UTC, journal=journal),),
+        )

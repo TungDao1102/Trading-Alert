@@ -149,10 +149,15 @@ class HealthCheckResult:
 class HealthVerdict:
     """Aggregate verdict over a full `run_health_checks(...)` call.
 
-    `is_no_trade=True` iff any probe result reports `STATUS_FAIL`
-    (fail-closed: RED health blocks enablement, per D-04 precedent).
+    `is_no_trade=True` iff any probe result reports `STATUS_FAIL`, or
+    the probe set is incomplete / has duplicates (fail-closed: RED or
+    unevaluated health blocks enablement, per D-04 precedent).
     `reason_code` is `"HEALTH_CHECK_FAILED"` on fail, `"OK"` on pass.
     `results` preserves the input order for audit-trail readability.
+
+    A PASS verdict is structurally complete (09-REVIEW WR-08): it must
+    carry exactly one result per `ALL_CHECK_NAMES` entry and no FAIL —
+    so a hand-built or partial "OK" verdict cannot unlock enablement.
     """
 
     is_no_trade: bool
@@ -171,11 +176,26 @@ class HealthVerdict:
             raise ValueError(
                 "HealthVerdict: is_no_trade=False requires reason_code='OK'"
             )
+        if not self.is_no_trade and not _is_complete_passing_set(self.results):
+            raise ValueError(
+                "HealthVerdict: a PASS verdict requires exactly one non-FAIL "
+                "result per ALL_CHECK_NAMES entry"
+            )
 
 
 # --------------------------------------------------------------------------- #
 # Internal helpers.
 # --------------------------------------------------------------------------- #
+
+
+def _is_complete_passing_set(results: Sequence[HealthCheckResult]) -> bool:
+    """True iff every canonical check ran exactly once and none FAILED."""
+    names = [r.check_name for r in results]
+    return (
+        len(names) == len(ALL_CHECK_NAMES)
+        and set(names) == set(ALL_CHECK_NAMES)
+        and all(r.status != STATUS_FAIL for r in results)
+    )
 
 
 def _require_utc_aware(value: datetime, field_name: str) -> None:
@@ -571,25 +591,27 @@ def check_orphaned_orders(
 
 
 def run_health_checks(*, results: Sequence[HealthCheckResult]) -> HealthVerdict:
-    """Aggregate probe results: any FAIL blocks enablement (fail-closed).
+    """Aggregate probe results: any FAIL or gap blocks enablement (fail-closed).
 
     Args:
-        results: The ten (or fewer, in a partial rehearsal) probe
-            results to aggregate. Order is preserved for audit-trail
-            readability.
+        results: The probe results to aggregate. Order is preserved for
+            audit-trail readability.
 
     Returns:
         A `HealthVerdict` with `is_no_trade=True` and
-        `reason_code="HEALTH_CHECK_FAILED"` iff any result reports
-        `STATUS_FAIL`; otherwise `is_no_trade=False` and
-        `reason_code="OK"`.
+        `reason_code="HEALTH_CHECK_FAILED"` when any result reports
+        `STATUS_FAIL`, OR when the set is not exactly one result per
+        `ALL_CHECK_NAMES` entry (a missing or duplicated probe means the
+        health state was not fully evaluated — 09-REVIEW WR-08);
+        otherwise `is_no_trade=False` and `reason_code="OK"`.
+        `STATUS_DEGRADED` does not block (unchanged policy).
     """
     if len(results) == 0:
         raise ValueError("run_health_checks: results must be non-empty")
-    any_fail = any(r.status == STATUS_FAIL for r in results)
+    passing = _is_complete_passing_set(results)
     return HealthVerdict(
-        is_no_trade=any_fail,
-        reason_code="HEALTH_CHECK_FAILED" if any_fail else "OK",
+        is_no_trade=not passing,
+        reason_code="OK" if passing else "HEALTH_CHECK_FAILED",
         results=tuple(results),
     )
 

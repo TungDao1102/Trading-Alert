@@ -143,19 +143,39 @@ class LiveEnablementController:
             reason_code=None,
         )
 
-    def enable(self, *, operator_id: str, now_utc: datetime) -> None:
+    def enable(self, *, operator_id: str, now_utc: datetime, health_verdict: Any) -> None:
         """Enable live orders. Journals the transition before flipping the flag.
 
         Per D-04: only an explicit operator enable with journaled id
         plus timestamp flips the flag. The journal event is recorded
         BEFORE the flag flips (journal-first pattern).
 
+        09-REVIEW WR-08: RED (or unevaluated) health blocks enablement.
+        `health_verdict` must be a passing `src.ops.health.HealthVerdict`
+        (from `run_health_checks`, structurally complete: one non-FAIL
+        result per canonical probe); anything else raises before the
+        journal event and the flag stays disabled.
+
         Args:
             operator_id: The operator id enabling live orders.
             now_utc: The current UTC-aware datetime.
+            health_verdict: The aggregate health verdict for this enable.
+
+        Raises:
+            ValueError: invalid operator id / timestamp, or a health
+                verdict that is missing or not passing.
         """
         _validate_operator_id(operator_id)
         _validate_utc_aware(now_utc)
+        if (
+            health_verdict is None
+            or getattr(health_verdict, "is_no_trade", True) is not False
+            or getattr(health_verdict, "reason_code", None) != "OK"
+        ):
+            raise ValueError(
+                "enable: a passing health verdict is required (RED or "
+                "unevaluated health blocks live enablement)"
+            )
 
         # Journal first, then flip the flag.
         self._journal_enablement_event(

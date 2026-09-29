@@ -220,13 +220,30 @@ def _live_wiring(**overrides: Any) -> dict[str, Any]:
     return wiring
 
 
+def _passing_health_verdict() -> Any:
+    """A complete, all-PASS `HealthVerdict` (09-REVIEW WR-08)."""
+    from src.ops.health import ALL_CHECK_NAMES, HealthCheckResult, run_health_checks
+
+    observed = datetime(2026, 9, 19, 10, 0, tzinfo=UTC)
+    return run_health_checks(
+        results=[
+            HealthCheckResult(
+                check_name=name, status="PASS", detail="ok", observed_at_utc=observed
+            )
+            for name in ALL_CHECK_NAMES
+        ]
+    )
+
+
 def _enabled_controller() -> Any:
     """A real `LiveEnablementController`, explicitly operator-enabled."""
     from src.execution.enablement import LiveEnablementController
 
     controller = LiveEnablementController(journal=FakeJournal())
     controller.enable(
-        operator_id="operator_alpha", now_utc=datetime(2026, 9, 19, 10, 0, tzinfo=UTC)
+        operator_id="operator_alpha",
+        now_utc=datetime(2026, 9, 19, 10, 0, tzinfo=UTC),
+        health_verdict=_passing_health_verdict(),
     )
     return controller
 
