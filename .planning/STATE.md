@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 10
 current_phase_name: Journal Depth + Kill-Gate Operations
 status: executing
-stopped_at: Completed 10-04-PLAN.md
-last_updated: "2026-09-29T06:39:02.457Z"
+stopped_at: Completed 10-05-PLAN.md
+last_updated: "2026-09-29T06:47:25.192Z"
 last_activity: 2026-09-29
 last_activity_desc: Phase 10 execution started
-state_head: 73c2f49bb8c06cf78608049c87cca90c0b9e578e
+state_head: 9c7b8e360075ba0f4b38a6957b613bf64d836b4e
 progress:
   total_phases: 11
   completed_phases: 9
   total_plans: 50
-  completed_plans: 41
+  completed_plans: 42
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 10 (Journal Depth + Kill-Gate Operations) — EXECUTING
-Plan: 5 of 12
+Plan: 6 of 12
 Status: Ready to execute
 Last activity: 2026-09-29 — Phase 10 execution started
 
@@ -80,6 +80,7 @@ Progress: [██████████] 100%
 | Phase 10 P02 | 12 min | 2 tasks | 7 files |
 | Phase 10 P03 | 12 min | 3 tasks | 8 files |
 | Phase 10 P04 | 27min | 3 tasks | 14 files |
+| Phase 10 P05 | 5 min | 3 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -212,6 +213,7 @@ Recent decisions affecting current work:
 - [Phase 10]: 10-03: paper sections carry synthetic_lag_seconds (imported APPROVAL_DELAY_LAG_SECONDS); SIGNAL_TO_SEEN is always INCOMPLETE(NO_SEEN_TIMESTAMP); Approval.requested_at_utc is a delivery-request proxy — No seen timestamp is journaled and paper approval time is a constant; honesty over imputation (D-02, RESEARCH P1/P2)
 - [Phase 10]: 10-04: slice time bases pinned - month/quarter from exit time, session from entry-time UTC bands ASIA 00-08/EUROPE 08-16/US 16-24; missing basis time -> INCOMPLETE, absent tag -> UNKNOWN (D-02, flagged A1/A4)
 - [Phase 10]: 10-04: R-valued requires R and an exit time; low_n is a display flag on n_r_valued only, never an acceptance gate; NO_TRADE reason-to-category mapping is a documented assumption with UNMAPPED counted
+- [Phase 10]: 10-05: kill-gate decision checkpoint auto-approved (pre-approved by locked CONTEXT D-03, option-deterministic-journaled); KILL_GATE_EVALUATION contract fixed one-way: 24-key constant payload, id prefix kill_gate, entity KILL_GATE_D013, reopen/sticky fields present from plan 05 — Only counted families (independent, TESTED_*, decided_at >= cycle start) drive the verdict; TESTED_* is constructible only from a recorded decision_ref plus Development/Validation experiment ids; evaluator never compares metrics to thresholds
 
 ### Pending Todos
 
@@ -247,6 +249,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-29T06:38:53.459Z
-Stopped at: Completed 10-04-PLAN.md
+Last session: 2026-09-29T06:47:16.840Z
+Stopped at: Completed 10-05-PLAN.md
 Resume file: None
