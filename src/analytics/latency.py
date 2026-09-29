@@ -22,20 +22,23 @@ from decimal import Decimal
 from enum import Enum
 
 from src.analytics.lifecycle import LifecycleRecord
-from src.analytics.stats import dist_stat, seconds_between, seed_for
+from src.analytics.stats import dist_stat, percent, seconds_between, seed_for
 from src.analytics.types import (
     DEFAULT_BASE_SEED,
     DEFAULT_RESAMPLES,
     AnalyticsInputError,
+    DistStat,
     Estimate,
     EvidenceKind,
     IncompleteReason,
 )
+from src.core._decimal import _div, _mul, _sub
 from src.domain.canonical import sha256_hex
 from src.domain.enums import ApprovalResult
 from src.paper.attribution import APPROVAL_DELAY_LAG_SECONDS
 
 _ZERO = Decimal(0)
+_BPS_FACTOR = Decimal(10000)
 _UNIT_SECONDS = "s"
 
 
@@ -51,6 +54,9 @@ class Leg(str, Enum):
 
 
 _LEG_ORDER: tuple[Leg, ...] = tuple(Leg)
+# Seed ordinals: legs use 0-5, the deviation distributions follow.
+_PRICE_DEVIATION_ORDINAL = len(_LEG_ORDER)
+_BPS_DEVIATION_ORDINAL = len(_LEG_ORDER) + 1
 
 
 @dataclass(frozen=True)
@@ -80,12 +86,53 @@ class LegStat:
 
 
 @dataclass(frozen=True)
+class RateStat:
+    """A rate as numerator/denominator plus an exact percentage (None if den == 0)."""
+
+    name: str
+    numerator: int
+    denominator: int
+    pct: Decimal | None
+
+    def digest(self) -> str:
+        return sha256_hex(
+            {
+                "name": self.name,
+                "numerator": self.numerator,
+                "denominator": self.denominator,
+                "pct": self.pct,
+            }
+        )
+
+
+@dataclass(frozen=True)
+class DeviationStat:
+    """Signed intended-vs-actual entry deviation (positive = worse for the trader)."""
+
+    price: DistStat
+    bps: DistStat
+    incomplete: tuple[tuple[str, int], ...]
+
+    def digest(self) -> str:
+        return sha256_hex(
+            {
+                "price": self.price.digest(),
+                "bps": self.bps.digest(),
+                "incomplete": [[reason, count] for reason, count in self.incomplete],
+            }
+        )
+
+
+@dataclass(frozen=True)
 class ExecutionQualitySection:
     """Digest-stamped execution-quality section for exactly one EvidenceKind."""
 
     evidence: EvidenceKind
     n_records: int
     legs: tuple[LegStat, ...]  # Leg order
+    fill_rate: RateStat
+    expiry_rate: RateStat
+    deviation: DeviationStat
     synthetic_lag_seconds: int | None
     base_seed: int
     resamples: int
@@ -100,6 +147,9 @@ class ExecutionQualitySection:
                 "evidence": self.evidence,
                 "n_records": self.n_records,
                 "legs": [stat.digest() for stat in self.legs],
+                "fill_rate": self.fill_rate.digest(),
+                "expiry_rate": self.expiry_rate.digest(),
+                "deviation": self.deviation.digest(),
                 "synthetic_lag_seconds": self.synthetic_lag_seconds,
                 "base_seed": self.base_seed,
                 "resamples": self.resamples,
@@ -205,6 +255,81 @@ def _build_leg(
     )
 
 
+def _has_entry_order(record: LifecycleRecord) -> bool:
+    """An entry order exists: submitted (paper/live) or a known fill outcome (backtest)."""
+    if record.evidence is EvidenceKind.BACKTEST:
+        return record.entry_filled is not None
+    return record.order_submitted_at_utc is not None
+
+
+def _is_filled(record: LifecycleRecord) -> bool:
+    if record.entry_filled is not None:
+        return record.entry_filled
+    return record.fill_time_utc is not None
+
+
+def _rate(name: str, numerator: int, denominator: int) -> RateStat:
+    return RateStat(
+        name=name,
+        numerator=numerator,
+        denominator=denominator,
+        pct=percent(numerator, denominator),
+    )
+
+
+def _signed_deviation(record: LifecycleRecord) -> tuple[Decimal, Decimal] | IncompleteReason:
+    """(price deviation, bps of intended) with positive = worse, or why it is INCOMPLETE."""
+    if record.evidence is EvidenceKind.PAPER:
+        return IncompleteReason.NOT_MEASURED_FOR_EVIDENCE
+    intended = record.intended_entry_price
+    actual = record.actual_entry_price
+    if intended is None or intended == _ZERO:
+        return IncompleteReason.NO_INTENDED_PRICE
+    if actual is None:
+        return IncompleteReason.NO_FILL_EVENT
+    if record.direction == "LONG":
+        deviation = _sub(actual, intended)
+    elif record.direction == "SHORT":
+        deviation = _sub(intended, actual)
+    else:
+        return IncompleteReason.MALFORMED_ROW
+    return deviation, _mul(_div(deviation, intended), _BPS_FACTOR)
+
+
+def _build_deviation(
+    records: Sequence[LifecycleRecord], *, base_seed: int, resamples: int
+) -> DeviationStat:
+    prices: list[Decimal] = []
+    bps_values: list[Decimal] = []
+    counts: dict[str, int] = {}
+    applicable = 0
+    for record in records:
+        if not _has_entry_order(record):
+            continue
+        applicable += 1
+        result = _signed_deviation(record)
+        if isinstance(result, IncompleteReason):
+            counts[result.value] = counts.get(result.value, 0) + 1
+        else:
+            prices.append(result[0])
+            bps_values.append(result[1])
+    return DeviationStat(
+        price=dist_stat(
+            prices,
+            seed=seed_for(base_seed, _PRICE_DEVIATION_ORDINAL),
+            resamples=resamples,
+            n=applicable,
+        ),
+        bps=dist_stat(
+            bps_values,
+            seed=seed_for(base_seed, _BPS_DEVIATION_ORDINAL),
+            resamples=resamples,
+            n=applicable,
+        ),
+        incomplete=tuple(sorted(counts.items())),
+    )
+
+
 def build_execution_quality(
     records: Sequence[LifecycleRecord],
     *,
@@ -223,10 +348,21 @@ def build_execution_quality(
     legs = tuple(
         _build_leg(leg, ordered, base_seed=base_seed, resamples=resamples) for leg in _LEG_ORDER
     )
+    entry_orders = [record for record in ordered if _has_entry_order(record)]
+    fill_rate = _rate("fill_rate", sum(1 for r in entry_orders if _is_filled(r)), len(entry_orders))
+    expiry_rate = _rate(
+        "expiry_without_fill_rate",
+        sum(1 for r in entry_orders if r.expired_without_fill is True),
+        len(entry_orders),
+    )
+    deviation = _build_deviation(ordered, base_seed=base_seed, resamples=resamples)
     return ExecutionQualitySection(
         evidence=evidence,
         n_records=len(ordered),
         legs=legs,
+        fill_rate=fill_rate,
+        expiry_rate=expiry_rate,
+        deviation=deviation,
         synthetic_lag_seconds=(
             APPROVAL_DELAY_LAG_SECONDS if evidence is EvidenceKind.PAPER else None
         ),

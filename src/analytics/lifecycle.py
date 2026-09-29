@@ -21,6 +21,7 @@ from enum import Enum
 from src.analytics.types import (
     AnalyticsInputError,
     EvidenceKind,
+    TradeOutcome,
     _optional_decimal,
     _optional_utc,
     _require_non_empty,
@@ -32,6 +33,8 @@ from src.paper.journal import PaperRecord
 
 _DIRECTIONS = frozenset({"LONG", "SHORT"})
 _EXPIRED_REASON = "EXPIRED"
+_BACKTEST_FILLED_KINDS = frozenset({"ENTRY_FILLED", "PARTIAL_FILL"})
+_BACKTEST_UNFILLED_KINDS = frozenset({"TOUCH_NO_FILL", "EXPIRED", "INVALIDATION_CANCEL"})
 
 
 class LifecyclePath(str, Enum):
@@ -217,3 +220,63 @@ def normalize_paper_lifecycle(records: Sequence[PaperRecord]) -> tuple[Lifecycle
             continue
         groups.setdefault(record.signal_id, []).append(record)
     return tuple(_normalize_paper_group(sid, groups[sid]) for sid in sorted(groups))
+
+
+def _normalize_backtest_outcome(outcome: TradeOutcome) -> LifecycleRecord:
+    kind = outcome.entry_kind
+    entry_filled: bool | None
+    if kind is None:
+        entry_filled = None
+    elif kind in _BACKTEST_FILLED_KINDS:
+        entry_filled = True
+    elif kind in _BACKTEST_UNFILLED_KINDS:
+        entry_filled = False
+    else:
+        raise AnalyticsInputError(
+            f"unknown backtest entry_kind {kind!r} for trade {outcome.trade_id!r}"
+        )
+    return LifecycleRecord(
+        evidence=EvidenceKind.BACKTEST,
+        source_id=outcome.trade_id,
+        signal_id=outcome.signal_id,
+        symbol=outcome.symbol,
+        strategy_version=outcome.strategy_version,
+        direction=outcome.direction,
+        path=LifecyclePath.SYSTEM_ONLY,
+        approval_result=None,
+        signal_detected_at_utc=None,
+        delivery_requested_at_utc=None,
+        approved_at_utc=None,
+        order_submitted_at_utc=None,
+        fill_time_utc=None,
+        intended_entry_price=outcome.intended_entry_price,
+        actual_entry_price=outcome.entry_price if entry_filled else None,
+        entry_filled=entry_filled,
+        expired_without_fill=None if kind is None else kind == "EXPIRED",
+        reason_code="",
+        synthetic_lag=False,
+        epoch_id=None,
+    )
+
+
+def normalize_backtest_lifecycle(
+    outcomes: Sequence[TradeOutcome],
+) -> tuple[LifecycleRecord, ...]:
+    """Backtest outcomes -> LifecycleRecords sorted by trade_id (all timestamps None).
+
+    `entry_filled` is True for ENTRY_FILLED / PARTIAL_FILL and False for
+    TOUCH_NO_FILL / EXPIRED / INVALIDATION_CANCEL; `expired_without_fill` is True
+    only for EXPIRED. An unknown entry_kind or a duplicate trade_id fails closed.
+    """
+    records: list[LifecycleRecord] = []
+    seen: set[str] = set()
+    for outcome in sorted(outcomes, key=lambda item: item.trade_id):
+        if outcome.evidence is not EvidenceKind.BACKTEST:
+            raise AnalyticsInputError(
+                f"trade {outcome.trade_id!r} is {outcome.evidence.value}, expected BACKTEST"
+            )
+        if outcome.trade_id in seen:
+            raise AnalyticsInputError(f"duplicate trade_id {outcome.trade_id!r}")
+        seen.add(outcome.trade_id)
+        records.append(_normalize_backtest_outcome(outcome))
+    return tuple(records)
