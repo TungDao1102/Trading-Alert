@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 10
 current_phase_name: Journal Depth + Kill-Gate Operations
 status: executing
-stopped_at: Completed 10-08-PLAN.md
-last_updated: "2026-09-29T07:30:24.578Z"
+stopped_at: Completed 10-09-PLAN.md
+last_updated: "2026-09-29T07:48:03.746Z"
 last_activity: 2026-09-29
 last_activity_desc: Phase 10 execution started
-state_head: 4243d8958d761117374055d13e89cc14dfab0a87
+state_head: a11854ce89e342a92894cc4d6f2bc31e49d5a657
 progress:
   total_phases: 11
   completed_phases: 9
   total_plans: 50
-  completed_plans: 45
+  completed_plans: 46
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 10 (Journal Depth + Kill-Gate Operations) — EXECUTING
-Plan: 9 of 12
+Plan: 10 of 12
 Status: Ready to execute
 Last activity: 2026-09-29 — Phase 10 execution started
 
@@ -84,6 +84,7 @@ Progress: [██████████] 100%
 | Phase 10 P06 | 11 min | 3 tasks | 8 files |
 | Phase 10 P07 | 12 min | 3 tasks | 18 files |
 | Phase 10 P08 | 12 min | 3 tasks | 6 files |
+| Phase 10 P09 | 13 min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -222,6 +223,7 @@ Recent decisions affecting current work:
 - [Phase 10]: 10-07: Post-reset kill-gate semantics (FLAGGED PLANNER DECISION, D013 silent): cycle clock restarts at the latest valid reset time, only decisions dated on/after it count, reopening decision_ref/operator recorded; INSUFFICIENT_EDGE sticky until an explicit human KILL_GATE_QUESTION_APPROVED after the latest terminal — D-03 never auto-clears; evaluator only reads resets, never writes or infers them
 - [Phase 10]: 10-07: enable() requires an evaluated kill_gate_state and refuses INSUFFICIENT_EDGE/non-KillGateState before any journal write; registration blocked in CI via docs/research/kill_gate_decisions.json recorded_terminal tripwire; enable journal payload unchanged — Phase 9 D-04 + Phase 10 D-03 fail-closed; CI cannot read the journal
 - [Phase 10]: 10-08: ReportInputs.clock is required; provenance keeps per-kind identity (by_evidence) and tags experiments by evidence slot; family gate facts for unknown families raise; posture tie ordering follows the plan total key (ENABLED after DISABLED at the same instant, display-only)
+- [Phase 10]: 10-09: family sheet hash normalizes CRLF to LF so digests match the committed blob across checkouts; unknown CANDIDATE parameter_set_hashes are listed in unknown_experiment_ids, never guessed onto a family; the only analytics write is one ON CONFLICT DO NOTHING KILL_GATE_EVALUATION append — Determinism across Windows autocrlf and CI checkouts; fail-closed family mapping (D-03); SELECT-only reader (T-10-28)
 
 ### Pending Todos
 
@@ -257,6 +259,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-29T07:30:24.381Z
-Stopped at: Completed 10-08-PLAN.md
+Last session: 2026-09-29T07:48:03.593Z
+Stopped at: Completed 10-09-PLAN.md
 Resume file: None
