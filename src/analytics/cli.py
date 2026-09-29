@@ -10,7 +10,8 @@ Contract (UI-SPEC Interaction Contract):
 - stdout on success is exactly four lines: `Report: <path>`, `Sidecar: <path>`,
   `Digest: sha256:<64 hex>` and `Kill gate: <STATE>`; exit 0, also for a terminal
   INSUFFICIENT_EDGE (a valid outcome, never an error).
-- exit 1: the report could not be produced (nothing is written); exit 2: invalid arguments.
+- exit 1: the report could not be produced (nothing is written); exit 2: invalid arguments;
+  exit 3: the report pair was written and printed but the `--record` append failed.
 - The wall clock is read at most once, inside `_resolve_as_of`: when `--as-of` is omitted,
   or with `--record` to refuse an `--as-of` in the future. Every other instant is an
   injected argument.
@@ -115,6 +116,8 @@ _DEFAULT_DECISIONS = _REPO_ROOT / "docs" / "research" / "kill_gate_decisions.jso
 _DEFAULT_RAW_ROOT = _REPO_ROOT / "data" / "raw"
 _DEFAULT_REPORTS_ROOT = _REPO_ROOT / REPORTS_ROOT
 _SHEETS_ROOT = _REPO_ROOT / "docs" / "research" / "families"
+
+_EXIT_RECORD_FAILED = 3
 
 _FAILURE_TAIL = (
     "No file was written. Fix the cause and re-run journal-report.ps1 with the same -AsOf."
@@ -631,7 +634,7 @@ def _record_step(url: str, factory_fn: SessionFactoryFn, report: JournalDepthRep
         _record_evaluation(url, factory_fn, event)
     except _RecordError as exc:
         print(f"Record failed: {exc}.", file=sys.stderr)
-        return 1
+        return _EXIT_RECORD_FAILED  # the report exists; only the journal append failed
     state = report.kill_gate.verdict.state
     print(
         f"Recorded KILL_GATE_EVALUATION {event.journal_event_id} (state {state.value}). "
@@ -670,7 +673,7 @@ def main(
     now_fn: ClockFn | None = None,
     session_factory_fn: SessionFactoryFn | None = None,
 ) -> int:
-    """Run the CLI; returns the process exit code (0 produced, 1 not produced, 2 usage)."""
+    """Run the CLI; returns the exit code (0 produced, 1 not produced, 2 usage, 3 record failed)."""
     try:
         args = parse_args(argv)
         return _run(args, now_fn, session_factory_fn)

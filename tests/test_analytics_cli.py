@@ -1,7 +1,7 @@
 """End-to-end tests for the analytics CLI (Phase 10, plan 10-12, D-01, D-03, D-04, D-05).
 
 The CLI is the single edge that composes the two adapters and the pure core: files in,
-Markdown plus JSON sidecar out, four stdout lines, exit codes 0/1/2. Tests call `main` with
+Markdown plus JSON sidecar out, four stdout lines, exit codes 0/1/2/3. Tests call `main` with
 argv lists and capture output through capsys (subprocess-free); every output root is a
 tmp_path (`--reports-root`), so nothing is ever written under the repository.
 """
@@ -1005,7 +1005,8 @@ def test_record_failure_keeps_the_files_and_reports_only_the_exception_type(
     store = _FakeStore()
     store.fail_inserts = RuntimeError(f"write failed for {DATABASE_URL}")
     code, out, err = _db_run(env, _FakeFactory(store), capsys, monkeypatch, "--record")
-    assert code == 1
+    # WR-05: exit 3 = report produced, record failed (exit 1 promises nothing was written).
+    assert code == 3
     assert err.strip() == "Record failed: RuntimeError."
     assert len(_stdout_lines(out)) == 4
     assert len(env.files()) == 2

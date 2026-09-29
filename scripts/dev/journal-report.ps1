@@ -20,7 +20,8 @@
 #   -NoDb                             never read a database, even when one is configured
 #
 # Exit codes: 0 report produced (also for a terminal INSUFFICIENT_EDGE state), 1 report could
-# not be produced (nothing written), 2 invalid arguments.
+# not be produced (nothing written), 2 invalid arguments, 3 report produced but the -Record
+# journal append failed (re-run with the same -AsOf to retry; the append is idempotent).
 #
 # Usage:
 #   scripts/dev/journal-report.ps1 -NoDb -AsOf 2027-04-01T00:00:00+00:00 -Evidence <file>
