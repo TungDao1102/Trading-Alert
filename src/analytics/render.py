@@ -9,7 +9,11 @@ endings, one trailing LF and no trailing whitespace; the caller writes it with `
 from __future__ import annotations
 
 from src.analytics.render_common import SECTION_TITLES, RenderError
-from src.analytics.render_killgate import render_header, render_section_kill_gate
+from src.analytics.render_killgate import (
+    render_header,
+    render_section_evidence_overview,
+    render_section_kill_gate,
+)
 from src.analytics.report import JournalDepthReport
 
 __all__ = ["REPORT_TITLE", "SECTION_TITLES", "render_markdown"]
@@ -29,9 +33,13 @@ def _check_byte_rules(text: str) -> None:
 
 
 def render_markdown(report: JournalDepthReport) -> str:
-    """Render the report; sections without a renderer yet are simply not emitted."""
+    """Render the report; sections 3-10 slot in here as their renderers land."""
     lines = [f"# {REPORT_TITLE}", "", *render_header(report)]
-    for section in (render_section_kill_gate(report),):
+    sections = (
+        render_section_kill_gate(report),
+        render_section_evidence_overview(report),
+    )
+    for section in sections:
         lines.extend(["", "---", "", *section])
     text = "\n".join(lines) + "\n"
     _check_byte_rules(text)

@@ -1,4 +1,4 @@
-"""Governance half of the offline report: header and the Kill Gate section (Phase 10, plan 10-10).
+"""Governance half of the offline report: header, Kill Gate and Evidence Overview (plan 10-10).
 
 Pure functions of a `JournalDepthReport` returning lines of Markdown. Wording, table columns
 and formats follow `10-UI-SPEC.md`. INSUFFICIENT_EDGE is presented as a calm, valid terminal
@@ -11,13 +11,16 @@ from __future__ import annotations
 
 from types import MappingProxyType
 
+from src.analytics.gates import GATE_IDS, GATE_LABELS
 from src.analytics.killgate import KillGateVerdict
+from src.analytics.no_trade import NoTradeCategory, NoTradeRow, NoTradeSection
 from src.analytics.render_common import (
     DISPLAY_TZ_NAME,
     NO_DATA,
     READ_ONLY_STATEMENT,
     SECTION_TITLES,
     TIMEZONE_NOTE,
+    evidence_caption,
     fmt_display,
     fmt_int,
     fmt_months,
@@ -26,20 +29,23 @@ from src.analytics.render_common import (
     md_cell,
     md_table,
 )
-from src.analytics.report import JournalDepthReport
-from src.analytics.types import ANALYTICS_SCHEMA_VERSION
+from src.analytics.report import EVIDENCE_ORDER, FamilyGateRow, JournalDepthReport
+from src.analytics.types import ANALYTICS_SCHEMA_VERSION, AnalyticsInputError, EvidenceKind
 from src.domain.enums import KillGateState
 
 __all__ = [
+    "ENABLEMENT_CLOSING",
     "GENERATOR_NAME",
     "STATE_SENTENCES",
     "STICKY_NOTE",
     "render_header",
+    "render_section_evidence_overview",
     "render_section_kill_gate",
 ]
 
 GENERATOR_NAME = "src.analytics.cli"
-_EM_DASH = "—"
+# The em dash is the one non-ASCII character permitted, and only inside the banner line.
+_EM_DASH = chr(0x2014)
 
 # One fixed sentence per state (UI-SPEC Copywriting Contract). The first two carry
 # placeholders filled by `_banner`; the terminal sentence is fully fixed.
@@ -69,6 +75,42 @@ STICKY_NOTE = (
     "(operator, decision reference) can reopen research."
 )
 BUDGET_RULE_SENTENCE = "INSUFFICIENT_EDGE requires BOTH budgets met AND no passing family (D013)."
+SHARED_COMPONENT_NOTE = (
+    "Families A and C share the regime detector; B reuses the 4H direction gate. "
+    "Shown for transparency; independence is decided by the registry test, not this note."
+)
+NO_DECISION_REFS = "No recorded family decisions."
+ENABLEMENT_CLOSING = "Live trading is never enabled by this report."
+_OPERATOR_ENABLEMENT = (
+    "Live enablement remains an explicit operator action with a passing health verdict."
+)
+ENABLEMENT_EFFECT: MappingProxyType[KillGateState, str] = MappingProxyType(
+    {
+        KillGateState.WITHIN_BUDGET: _OPERATOR_ENABLEMENT,
+        KillGateState.PASSING_CANDIDATE: _OPERATOR_ENABLEMENT,
+        KillGateState.INSUFFICIENT_EDGE: (
+            "New strategy families are not registered and live enablement is refused until "
+            "an explicit human decision record clears this state."
+        ),
+    }
+)
+LIVE_ROWS_ABSENT = (
+    "No LIVE evidence rows exist yet. Backtest and paper sections are complete; "
+    "live-5 sections populate when live journal rows appear."
+)
+
+_TESTED_STATUSES = frozenset({"TESTED_FAIL", "TESTED_PASS"})
+_MISSING = "MISSING"
+_NO_TRADE_LABELS: MappingProxyType[NoTradeCategory, str] = MappingProxyType(
+    {
+        NoTradeCategory.REGIME_FILTER: "regime filter",
+        NoTradeCategory.RR_FLOOR: "RR floor",
+        NoTradeCategory.OPEN_POSITION_CONFLICT: "open-position conflict",
+        NoTradeCategory.DATA_UNAVAILABILITY: "data unavailability",
+        NoTradeCategory.KILL_GATE_TRIP: "kill-gate trip",
+        NoTradeCategory.UNMAPPED: "UNMAPPED",
+    }
+)
 
 
 def render_header(report: JournalDepthReport) -> list[str]:
@@ -172,9 +214,115 @@ def _reopened_line(verdict: KillGateVerdict) -> list[str]:
     ]
 
 
+def _independent_cell(row: FamilyGateRow) -> str:
+    if row.independent:
+        return "YES"
+    return "UNKNOWN" if row.sheet_sha256 is None else "NO"
+
+
+def _decision_cell(row: FamilyGateRow) -> str:
+    cell = "" if row.decision_ref is None else md_cell(row.decision_ref)
+    if cell:
+        return cell
+    return _MISSING if row.status in _TESTED_STATUSES else "-"
+
+
+def _universe_cell(row: FamilyGateRow) -> str:
+    if row.live5_n == 0 and row.research_n == 0:
+        return NO_DATA
+    return f"Live-5 n={fmt_int(row.live5_n)} / Research n={fmt_int(row.research_n)}"
+
+
+def _family_table(families: tuple[FamilyGateRow, ...]) -> list[str]:
+    headers = [
+        "Family",
+        "Independent",
+        "Sheet hash (12)",
+        "Param sets",
+        "Experiments",
+        "Status",
+        "Decision ref",
+        "Universe",
+    ]
+    aligns = [":---", ":---", ":---", "---:", "---:", ":---", ":---", ":---"]
+    rows = [
+        [
+            md_cell(row.family_id),
+            _independent_cell(row),
+            _MISSING if row.sheet_sha256 is None else md_cell(row.sheet_sha256[:12]),
+            fmt_int(row.param_set_count),
+            fmt_int(row.experiment_count),
+            md_cell(row.status),
+            _decision_cell(row),
+            _universe_cell(row),
+        ]
+        for row in families
+    ]
+    return md_table(headers, aligns, rows)
+
+
+def _gate_matrix(families: tuple[FamilyGateRow, ...]) -> list[str]:
+    headers = ["Family", *GATE_IDS]
+    aligns = [":---"] * len(headers)
+    rows: list[list[str]] = []
+    for row in families:
+        cells = dict(row.cells)
+        gate_cells = [
+            cells[gate_id].value if gate_id in cells else "NOT_EVALUATED" for gate_id in GATE_IDS
+        ]
+        rows.append([md_cell(row.family_id), *gate_cells])
+    return md_table(headers, aligns, rows)
+
+
+def _gate_legend() -> str:
+    return ", ".join(f"{gate_id} {GATE_LABELS[gate_id]}" for gate_id in GATE_IDS)
+
+
+def _count_cell(value: int, column_empty: bool) -> str:
+    return NO_DATA if column_empty else fmt_int(value)
+
+
+def _no_trade_table(section: NoTradeSection) -> list[str]:
+    by_category = {row.category: row for row in section.rows}
+    live_empty = section.total.live5_n == 0
+    research_empty = section.total.research_n == 0
+    all_empty = section.total.all_n == 0
+
+    def line(label: str, row: NoTradeRow) -> list[str]:
+        return [
+            label,
+            _count_cell(row.live5_n, live_empty),
+            _count_cell(row.research_n, research_empty),
+            _count_cell(row.all_n, all_empty),
+        ]
+
+    rows: list[list[str]] = []
+    for category in NoTradeCategory:
+        row = by_category.get(category)
+        if row is None:
+            raise AnalyticsInputError(f"NO_TRADE section has no row for {category.value}")
+        rows.append(line(_NO_TRADE_LABELS[category], row))
+    rows.append(line("**Total**", section.total))
+    return md_table(
+        ["Reason category", "Live-5 n", "Research n", "All n"],
+        [":---", "---:", "---:", "---:"],
+        rows,
+    )
+
+
+def _decision_reference_lines(refs: tuple[str, ...]) -> list[str]:
+    if not refs:
+        return [NO_DECISION_REFS]
+    return [f"- {md_cell(ref) or _MISSING}" for ref in sorted(set(refs))]
+
+
 def render_section_kill_gate(report: JournalDepthReport) -> list[str]:
-    """`## 1. Kill Gate`: banner, budget progress and clock provenance."""
-    verdict = report.kill_gate.verdict
+    """`## 1. Kill Gate`: banner, budget, clock, family matrices, NO_TRADE, decisions, effect."""
+    kill_gate = report.kill_gate
+    verdict = kill_gate.verdict
+    no_trade_sections = sorted(
+        kill_gate.no_trade, key=lambda item: EVIDENCE_ORDER.index(item.evidence)
+    )
     blocks: list[list[str]] = [
         [f"## {SECTION_TITLES[0]}"],
         [_banner(verdict)],
@@ -186,5 +334,74 @@ def render_section_kill_gate(report: JournalDepthReport) -> list[str]:
         ["### 1.2 Clock provenance"],
         _clock_table(verdict),
         _earliest_note(verdict),
+        ["### 1.3 Family acceptance"],
+        _family_table(kill_gate.families),
+        [SHARED_COMPONENT_NOTE],
+        ["### 1.4 Family gate matrix"],
+        _gate_matrix(kill_gate.families),
+        [_gate_legend()],
     ]
+    index = 5
+    for section in no_trade_sections:
+        blocks.extend(
+            [
+                [f"### 1.{index} NO_TRADE by reason category ({section.evidence.value})"],
+                [evidence_caption(section.evidence)],
+                _no_trade_table(section),
+            ]
+        )
+        index += 1
+    blocks.extend(
+        [
+            [f"### 1.{index} Decision references"],
+            _decision_reference_lines(kill_gate.decision_refs),
+            [f"### 1.{index + 1} Enablement effect"],
+            [ENABLEMENT_EFFECT[verdict.state]],
+            [ENABLEMENT_CLOSING],
+        ]
+    )
     return join_blocks(blocks)
+
+
+def render_section_evidence_overview(report: JournalDepthReport) -> list[str]:
+    """`## 2. Evidence Overview`: one row per evidence kind, never pooled."""
+    blocks_by_kind = {block.kind: block for block in report.evidence}
+    incomplete_totals: dict[EvidenceKind, int] = {kind: 0 for kind in EVIDENCE_ORDER}
+    for entry in report.incomplete_ledger:
+        incomplete_totals[entry.evidence] += entry.count
+    rows: list[list[str]] = []
+    for kind in EVIDENCE_ORDER:
+        block = blocks_by_kind.get(kind)
+        if block is None:
+            raise AnalyticsInputError(f"report has no {kind.value} evidence block")
+        rows.append(
+            [
+                kind.value,
+                "YES" if block.has_data else "NO",
+                fmt_int(block.core.n),
+                fmt_int(block.execution_quality.n_records),
+                fmt_int(block.no_trade.total.all_n),
+                fmt_int(incomplete_totals[kind]),
+            ]
+        )
+    table = md_table(
+        [
+            "Evidence",
+            "Has data",
+            "Outcomes (n)",
+            "Lifecycle records",
+            "NO_TRADE rows",
+            "INCOMPLETE",
+        ],
+        [":---", ":---", "---:", "---:", "---:", "---:"],
+        rows,
+    )
+    live_block = blocks_by_kind[EvidenceKind.LIVE]
+    return join_blocks(
+        [
+            [f"## {SECTION_TITLES[1]}"],
+            [evidence_caption()],
+            table,
+            [] if live_block.has_data else [LIVE_ROWS_ABSENT],
+        ]
+    )
