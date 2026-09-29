@@ -1004,3 +1004,92 @@ async def test_missing_live_gates_raise_before_any_adapter_call() -> None:
         with pytest.raises(ValueError, match="is required"):
             await _run_plan(adapter, **override)
         assert adapter.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# 09-REVIEW CR-08 — the approval must be an APPROVE for THIS plan.
+# --------------------------------------------------------------------------- #
+
+
+async def test_skip_approval_row_with_valid_token_never_places() -> None:
+    """CR-08: a SKIP/SKIPPED approval row that binds OK is not an
+    authorization to trade."""
+    import dataclasses
+
+    from src.domain.enums import ApprovalAction, ApprovalResult
+
+    approval = dataclasses.replace(
+        _build_approval(_load_input()),
+        action=ApprovalAction.SKIP_USER,
+        result=ApprovalResult.SKIPPED,
+        status=ApprovalResult.SKIPPED,
+    )
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(adapter, approval=approval)
+    assert outcome.is_no_trade is True
+    assert outcome.reason_code == "INVALIDATED"
+    assert adapter.calls == []
+
+
+async def test_pending_approval_never_places() -> None:
+    """CR-08: an APPROVE row that has not resolved to APPROVED is rejected."""
+    import dataclasses
+
+    from src.domain.enums import ApprovalResult
+
+    approval = dataclasses.replace(
+        _build_approval(_load_input()),
+        result=ApprovalResult.PENDING,
+        status=ApprovalResult.PENDING,
+        acted_at_utc=None,
+    )
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(adapter, approval=approval)
+    assert outcome.reason_code == "INVALIDATED"
+    assert adapter.calls == []
+
+
+async def test_skip_button_callback_never_places() -> None:
+    """CR-08: the pressed button (callback.action) must be APPROVE."""
+    import dataclasses
+
+    from src.domain.enums import ApprovalAction
+
+    callback = dataclasses.replace(
+        _build_callback(_load_input()), action=ApprovalAction.SKIP_BUSY
+    )
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(adapter, callback=callback)
+    assert outcome.reason_code == "INVALIDATED"
+    assert adapter.calls == []
+
+
+async def test_executed_plan_must_be_the_approved_plan() -> None:
+    """CR-08: a different plan (hash or id) under a valid approval is
+    STALE_SETUP — its hash would otherwise mint the order ids."""
+    import dataclasses
+
+    case_input = _load_input()
+    for field, value in (
+        ("plan_hash", "4" * 64),
+        ("trade_plan_id", "tp_some_other_plan"),
+    ):
+        risk_kwargs = _build_risk_kwargs(case_input)
+        risk_kwargs["trade_plan"] = dataclasses.replace(risk_kwargs["trade_plan"], **{field: value})
+        adapter = FakeExecutionAdapter()
+        outcome = await _run_plan(adapter, risk_kwargs=risk_kwargs)
+        assert outcome.reason_code == "STALE_SETUP", field
+        assert adapter.calls == [], field
+
+
+async def test_fresher_caller_expiry_cannot_revive_a_stale_plan() -> None:
+    """CR-08: the binding's expiry must be the plan's own expiry_utc."""
+    from datetime import timedelta
+
+    case_input = _load_input()
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter, expiry_utc=_parse_utc(case_input["expiry_utc"]) + timedelta(hours=6)
+    )
+    assert outcome.reason_code == "STALE_SETUP"
+    assert adapter.calls == []

@@ -22,7 +22,7 @@ from typing import Any, Protocol
 
 from src.approval.binding import check_binding_full
 from src.domain.approval import Approval
-from src.domain.enums import OrderRole, RejectionReason
+from src.domain.enums import ApprovalAction, ApprovalResult, OrderRole, RejectionReason
 from src.domain.journal import JournalEvent
 from src.execution.fill_monitor import CurrentPositionView, fold_fills
 from src.execution.order_ids import derive_algo_client_id, derive_client_order_id
@@ -178,6 +178,58 @@ async def _place_entry_no_blind_retry(
 
 
 # --------------------------------------------------------------------------- #
+# Approval → plan authorization (09-REVIEW CR-08).
+# --------------------------------------------------------------------------- #
+
+
+def _check_approval_authorizes_plan(
+    *,
+    callback: Any,
+    approval: Approval,
+    trade_plan: Any,
+    expiry_utc: datetime,
+) -> ExecutionOutcome | None:
+    """Return a NO_TRADE outcome unless `approval` authorizes `trade_plan`.
+
+    `check_binding_full` (Phase 8) validates chat / expiry / hash /
+    version / token, but not the decision itself nor the identity of the
+    plan the manager is about to place. This check closes both gaps:
+
+      1. Decision: the approval row must be an APPROVE whose `result`
+         AND `status` are APPROVED, and the pressed button (when the
+         callback carries it) must be APPROVE. Anything else (SKIP /
+         CANCEL / PENDING / REJECTED rows with a valid token) →
+         INVALIDATED.
+      2. Plan identity: the executed plan's `plan_hash` must equal the
+         callback's and the approval's `request_hash`, its
+         `trade_plan_id` must equal the approval's, and the expiry the
+         binding was checked against must be the plan's OWN
+         `expiry_utc` (never a fresher caller-supplied value) →
+         otherwise STALE_SETUP.
+
+    NOTE: consuming the approval (so an at-least-once Telegram replay
+    re-plays the persisted outcome instead of re-running the pipeline)
+    needs persisted execution state and is NOT handled here.
+    """
+    callback_action = getattr(callback, "action", None)
+    if (
+        approval.action != ApprovalAction.APPROVE
+        or approval.result != ApprovalResult.APPROVED
+        or approval.status != ApprovalResult.APPROVED
+        or (callback_action is not None and callback_action != ApprovalAction.APPROVE)
+    ):
+        return ExecutionOutcome(is_no_trade=True, reason_code=RejectionReason.INVALIDATED.value)
+    if (
+        trade_plan.plan_hash != callback.plan_hash
+        or trade_plan.plan_hash != approval.request_hash
+        or trade_plan.trade_plan_id != approval.trade_plan_id
+        or trade_plan.expiry_utc != expiry_utc
+    ):
+        return ExecutionOutcome(is_no_trade=True, reason_code=RejectionReason.STALE_SETUP.value)
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Public entry point — execute_approved_plan.
 # --------------------------------------------------------------------------- #
 
@@ -276,6 +328,19 @@ async def execute_approved_plan(
             if binding.reason_code is not None
             else RejectionReason.INVALIDATED.value,
         )
+
+    # Gate 1b (09-REVIEW CR-08): the binding proves the callback belongs
+    # to this approval row; it does NOT prove the row is an APPROVE that
+    # resolved to APPROVED, nor that the plan about to be executed is the
+    # plan that was approved. Both are checked before any order.
+    approval_verdict = _check_approval_authorizes_plan(
+        callback=callback,
+        approval=approval,
+        trade_plan=risk_kwargs["trade_plan"],
+        expiry_utc=expiry_utc,
+    )
+    if approval_verdict is not None:
+        return approval_verdict
 
     # Gate 2: enablement guard (LIVE_ORDERS_DISABLED → DISABLED).
     enablement_verdict = enablement.guard_placement(
