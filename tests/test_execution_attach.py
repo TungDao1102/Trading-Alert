@@ -600,3 +600,66 @@ def test_manager_module_does_not_import_binance_sdk() -> None:
         assert match is None, (
             f"forbidden import in {module_path}: pattern={pattern!r}, match={match.group(0)!r}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# 09-REVIEW WR-03 — confirmation reads the REAL dataclass; allow-list only.
+# --------------------------------------------------------------------------- #
+
+
+def _algo_result(status: str) -> Any:
+    from src.adapters.binance_usdm import AlgoPlacementResult
+
+    return AlgoPlacementResult(
+        symbol="BTCUSDT",
+        client_algo_id="xa-194547b9a1659419ecfa4a736a3deceSL",
+        algo_id="1",
+        algo_type="CONDITIONAL",
+        order_type="STOP_MARKET",
+        side="SELL",
+        position_side="BOTH",
+        algo_status=status,
+        trigger_price=Decimal("98.00"),
+        close_position=True,
+        working_type="MARK_PRICE",
+        update_time_utc=_parse_utc("2026-09-19T10:30:00+00:00"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "confirmed"),
+    [
+        ("NEW", True),
+        ("REJECTED", False),
+        ("EXPIRED", False),
+        ("CANCELED", False),
+        ("TRIGGERED", False),
+        ("", False),
+    ],
+)
+def test_leg_confirmation_reads_real_dataclass_with_allow_list(
+    status: str, confirmed: bool
+) -> None:
+    from src.execution.manager import _is_leg_confirmed
+
+    assert _is_leg_confirmed(_algo_result(status)) is confirmed
+    assert _is_leg_confirmed({"algo_status": status}) is confirmed
+
+
+def test_rejected_dataclass_response_holds_entry_without_protective() -> None:
+    """WR-03: a REJECTED `AlgoPlacementResult` (the real adapter's return
+    type) is not protection."""
+
+    class _DataclassAdapter(FakeExecutionAdapter):
+        async def place_algo_protective(self, **kwargs: Any) -> Any:
+            await super().place_algo_protective(**kwargs)
+            return _algo_result("REJECTED")
+
+    adapter = _DataclassAdapter()
+    safe_mode_controller = _RecordingSafeModeController()
+    outcome = _attach(adapter, safe_mode_controller)
+
+    assert outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
+    assert outcome.placed_legs == ()
+    assert len(adapter.calls) == 1
+    assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]

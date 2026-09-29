@@ -659,18 +659,16 @@ def _get_attr_or_key(obj: Any, name: str) -> Any:
 def _is_leg_confirmed(response: Any) -> bool:
     """True when a `place_algo_protective` response confirms the leg.
 
-    A `None` response, or a dict-shaped response carrying a rejected/
-    expired/canceled `algo_status`, is treated as unconfirmed
-    (fail-closed — never assume protection exists).
+    09-REVIEW WR-03: the real adapter returns an `AlgoPlacementResult`
+    DATACLASS (and maps a missing status to ""), so `algo_status` is read
+    by attribute OR key, and confirmation is an ALLOW-list
+    (`_ACTIVE_ALGO_STATUSES`): `None`, "", REJECTED, EXPIRED, CANCELED,
+    TRIGGERED, any unknown value — all unconfirmed (fail closed, never
+    assume protection exists).
     """
     if response is None:
         return False
-    if isinstance(response, dict):
-        status = response.get("algo_status")
-        if status in (None, "REJECTED", "EXPIRED", "CANCELED"):
-            return False
-        return True
-    return True
+    return _get_attr_or_key(response, "algo_status") in _ACTIVE_ALGO_STATUSES
 
 
 async def _place_protective_leg(
