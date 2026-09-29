@@ -23,6 +23,13 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 8: Approval + Reconciliation Hardening** - Idempotent Telegram approvals, orphan sweeper, SAFE_MODE rehearsed (completed 2026-09-27)
 - [ ] **Phase 9: Live Execution Rollout** - LIMIT-zone entries, Algo protective exits, smallest capital
 - [ ] **Phase 10: Journal Depth + Kill-Gate Operations** - MFE/MAE analytics and the 3-families/6-months stop rule
+- [ ] **Phase 11: Fix fee units in sizing + use the account's real commission rate** - promoted from backlog 999.5
+- [ ] **Phase 12: Read account equity and daily PnL from Binance** - promoted from backlog 999.1
+- [ ] **Phase 13: Explicit leverage + margin type and liquidation-vs-SL guard** - promoted from backlog 999.2
+- [ ] **Phase 14: Pre-placement available-margin check** - promoted from backlog 999.7
+- [ ] **Phase 15: Pre-placement live-price check against SL and entry zone** - promoted from backlog 999.3
+- [ ] **Phase 16: Money amounts in SIMULATE/APPROVE notifications** - promoted from backlog 999.6
+- [ ] **Phase 17: Configurable quote asset (USDT hard-coding removal, USDC readiness)** - promoted from backlog 999.4
 
 ## Phase Details
 
@@ -345,10 +352,87 @@ Plans:
 **Wave 7** *(blocked on Wave 6 completion)*
 - [x] 10-12-PLAN.md — CLI + PowerShell wrapper, explicit idempotent --record, closing purity/determinism/regression guards (JRN-01, GOV-01, D-04)
 
+### Phase 11: Fix fee units in sizing + use the account's real commission rate
+
+**Goal**: Sizing includes trading costs in quote currency, and live costs reflect the account's actual maker/taker rate. BUG (confirmed 2026-09-29): `modeled_costs_per_unit` (`src/backtest/costs.py:184`) returns the rate sum `fee_rate_entry + fee_rate_exit + expected_slippage` (e.g. 0.0008), but `size_position` (`src/risk/sizing.py:60`) adds it to an SL distance in quote currency (e.g. 600 USDT/BTC), so costs are effectively ignored (600.0008 instead of ~648) and SL losses exceed `risk_rate` by roughly the cost share. Shared by backtest, paper and live. Fix: multiply by entry reference price (entry fee on entry, exit fee on SL price), with a regression test; golden fixtures and experiment hashes will change and must be regenerated deliberately. Second part: read the per-symbol rate from `GET /fapi/v1/commissionRate` (SDK `user_commission_rate`, fields `makerCommissionRate`/`takerCommissionRate`, verified in SDK 17.4.0) so USDC promotions, VIP tiers and BNB discounts are reflected; if unavailable, fall back to the versioned parameter-set fees (conservative), never to zero. Keep backtest on versioned fees for determinism.
+**Depends on**: Phase 10
+**Requirements**: TBD (touches RISK-01, BKTS-01, DOMN-02)
+**Promoted from**: backlog 999.5 (2026-09-29)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 11 to break down)
+
+### Phase 12: Read account equity and daily PnL from Binance
+
+**Goal**: Sizing and DAILY_STOP use Binance-canonical equity and daily realized loss, never a caller-supplied constant. Today `AccountState.equity` and `daily_loss_quote` are injected by the caller and no adapter method reads account balance (tests hard-code `equity=10000.00`). Read equity from the USD-M account endpoint + user-data stream (re-verify endpoints against current Binance docs); if equity is unknown or stale, NO_TRADE / fail closed. Do not derive equity by summing own PnL.
+**Depends on**: Phase 11
+**Requirements**: TBD (touches RISK-01, RISK-02, EXEC-01, OPS-02)
+**Promoted from**: backlog 999.1 (2026-09-29)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 12 to break down)
+
+### Phase 13: Explicit leverage + margin type and liquidation-vs-SL guard
+
+**Goal**: Before any entry, leverage and margin type (isolated/cross) are set explicitly per symbol from a versioned parameter, and the order is refused (NO_TRADE) unless the projected liquidation price lies strictly beyond the SL. Today nothing in `src/` sets leverage or margin type (grep "leverage" hits only a docstring), so orders inherit whatever the Binance account has configured and could liquidate before the SL triggers. Leverage brackets / maintenance margin come from exchange data, never hard-coded.
+**Depends on**: Phase 12
+**Requirements**: TBD (touches RISK-01, EXEC-01, EXEC-02)
+**Promoted from**: backlog 999.2 (2026-09-29)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 13 to break down)
+
+### Phase 14: Pre-placement available-margin check
+
+**Goal**: Before placing an entry, confirm `availableBalance` (from `GET /fapi/v3/account` or `/fapi/v3/balance`) covers the initial margin of the new order at its leverage plus fees; otherwise NO_TRADE with an explicit reason instead of letting Binance reject the order. No such check exists in `src/` today. Relevant for small accounts (e.g. 500 USDT) running `max_open_positions = 2`: two isolated positions fit easily at modest leverage, but not at 1x when combined notional exceeds equity. Pairs with 999.2 (leverage/margin type) and 999.1 (equity).
+**Depends on**: Phase 12, Phase 13
+**Requirements**: TBD (touches RISK-02, EXEC-01)
+**Promoted from**: backlog 999.7 (2026-09-29)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 14 to break down)
+
+### Phase 15: Pre-placement live-price check against SL and entry zone
+
+**Goal**: Between APPROVE and placement (plan valid up to `signal_expiry_hours`, 4h in baseline-v3), confirm the current mark/last price has not crossed the SL or left the entry zone in a way that would make the LIMIT entry fill instantly into an immediately-triggered SL. Existing gates cover expiry (APPROVAL_EXPIRED), plan hash (STALE_SETUP), invalidation, one-time token replay and stale constraints (STALE_CONSTRAINTS), but a live-price-vs-SL check was not confirmed in `execute_approved_plan`. Verify first; if absent, add a fail-closed gate with its own RejectionReason.
+**Depends on**: Phase 12
+**Requirements**: TBD (touches APRV-01, EXEC-01, EXEC-02)
+**Promoted from**: backlog 999.3 (2026-09-29)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 15 to break down)
+
+### Phase 16: Money amounts in SIMULATE/APPROVE notifications
+
+**Goal**: Every Telegram SIMULATE/APPROVE message shows, in addition to entry/SL/TPs/R:R/risk %: quantity, notional (USDT), margin required at the configured leverage, estimated loss at SL and estimated profit at each TP in USDT, both gross and net of modeled fees/slippage (labelled "estimate"), plus the equity figure the sizing used and its source/timestamp. Today `format_approve` (`src/adapters/telegram_notify.py:211`) and `format_simulate` (`src/paper/notify.py:122`) show prices, R:R, `risk_pct` and `exposure_quote` only — no quantity or dollar P/L. Values come from the same risk pipeline output (`SizedResult`), never recomputed in the renderer; if sizing is NO_TRADE the message says so with the reason code. Depends on 999.1 (real equity) and 999.5 (correct costs).
+**Depends on**: Phase 11, Phase 12, Phase 13
+**Requirements**: TBD (touches APRV-01, PAPER-02)
+**Promoted from**: backlog 999.6 (2026-09-29)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 16 to break down)
+
+### Phase 17: Configurable quote asset (USDT hard-coding removal, USDC readiness)
+
+**Goal**: Quote/margin asset becomes configuration instead of a constant, so a USDC pair (e.g. BTCUSDC for lower fees) can be evaluated deliberately. Hard-coded today: `LIVE_5` in `src/data/backfill.py:549` and `src/backtest/report.py:34`, `QUOTE_ASSET = "USDT"` in `src/analytics/live_outcomes.py:65`; fees are pinned per parameter set (`fee_rate_entry`/`fee_rate_exit`). Switching an instrument requires a DECISIONS.md entry (frozen research protocol / universe change), new data collection, a new versioned parameter set with current Binance fees, and re-backtesting — USDT evidence does not transfer.
+**Depends on**: Phase 11
+**Requirements**: TBD (touches DATA-01, DOMN-02, BKTS-02, JRN-01)
+**Promoted from**: backlog 999.4 (2026-09-29)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 17 to break down)
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 (Phase 8 construction may overlap the Phase 7 paper soak; Phase 8 enablement gates on paper evidence)
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17 (Phase 8 construction may overlap the Phase 7 paper soak; Phase 8 enablement gates on paper evidence)
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -362,75 +446,10 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 8. Approval + Reconciliation Hardening | 5/5 | Complete   | 2026-09-27 |
 | 9. Live Execution Rollout | 4/4 | In Progress|  |
 | 10. Journal Depth + Kill-Gate Operations | 12/12 | In Progress|  |
-
-## Backlog
-
-### Phase 999.1: Read account equity and daily PnL from Binance (BACKLOG)
-
-**Goal:** Sizing and DAILY_STOP use Binance-canonical equity and daily realized loss, never a caller-supplied constant. Today `AccountState.equity` and `daily_loss_quote` are injected by the caller and no adapter method reads account balance (tests hard-code `equity=10000.00`). Read equity from the USD-M account endpoint + user-data stream (re-verify endpoints against current Binance docs); if equity is unknown or stale, NO_TRADE / fail closed. Do not derive equity by summing own PnL.
-**Requirements:** TBD (touches RISK-01, RISK-02, EXEC-01, OPS-02)
-**Plans:** 0 plans
-**Source:** 2026-09-29 capability review after v0.3 audit
-
-Plans:
-- [ ] TBD (promote with /gsd-review-backlog when ready)
-
-### Phase 999.2: Explicit leverage + margin type and liquidation-vs-SL guard (BACKLOG)
-
-**Goal:** Before any entry, leverage and margin type (isolated/cross) are set explicitly per symbol from a versioned parameter, and the order is refused (NO_TRADE) unless the projected liquidation price lies strictly beyond the SL. Today nothing in `src/` sets leverage or margin type (grep "leverage" hits only a docstring), so orders inherit whatever the Binance account has configured and could liquidate before the SL triggers. Leverage brackets / maintenance margin come from exchange data, never hard-coded.
-**Requirements:** TBD (touches RISK-01, EXEC-01, EXEC-02)
-**Plans:** 0 plans
-**Source:** 2026-09-29 capability review after v0.3 audit
-
-Plans:
-- [ ] TBD (promote with /gsd-review-backlog when ready)
-
-### Phase 999.3: Pre-placement live-price check against SL and entry zone (BACKLOG)
-
-**Goal:** Between APPROVE and placement (plan valid up to `signal_expiry_hours`, 4h in baseline-v3), confirm the current mark/last price has not crossed the SL or left the entry zone in a way that would make the LIMIT entry fill instantly into an immediately-triggered SL. Existing gates cover expiry (APPROVAL_EXPIRED), plan hash (STALE_SETUP), invalidation, one-time token replay and stale constraints (STALE_CONSTRAINTS), but a live-price-vs-SL check was not confirmed in `execute_approved_plan`. Verify first; if absent, add a fail-closed gate with its own RejectionReason.
-**Requirements:** TBD (touches APRV-01, EXEC-01, EXEC-02)
-**Plans:** 0 plans
-**Source:** 2026-09-29 capability review after v0.3 audit
-
-Plans:
-- [ ] TBD (promote with /gsd-review-backlog when ready)
-
-### Phase 999.4: Configurable quote asset (USDT hard-coding removal, USDC readiness) (BACKLOG)
-
-**Goal:** Quote/margin asset becomes configuration instead of a constant, so a USDC pair (e.g. BTCUSDC for lower fees) can be evaluated deliberately. Hard-coded today: `LIVE_5` in `src/data/backfill.py:549` and `src/backtest/report.py:34`, `QUOTE_ASSET = "USDT"` in `src/analytics/live_outcomes.py:65`; fees are pinned per parameter set (`fee_rate_entry`/`fee_rate_exit`). Switching an instrument requires a DECISIONS.md entry (frozen research protocol / universe change), new data collection, a new versioned parameter set with current Binance fees, and re-backtesting — USDT evidence does not transfer.
-**Requirements:** TBD (touches DATA-01, DOMN-02, BKTS-02, JRN-01)
-**Plans:** 0 plans
-**Source:** 2026-09-29 capability review after v0.3 audit
-
-Plans:
-- [ ] TBD (promote with /gsd-review-backlog when ready)
-
-### Phase 999.5: Fix fee units in sizing + use the account's real commission rate (BACKLOG)
-
-**Goal:** Sizing includes trading costs in quote currency, and live costs reflect the account's actual maker/taker rate. BUG (confirmed 2026-09-29): `modeled_costs_per_unit` (`src/backtest/costs.py:184`) returns the rate sum `fee_rate_entry + fee_rate_exit + expected_slippage` (e.g. 0.0008), but `size_position` (`src/risk/sizing.py:60`) adds it to an SL distance in quote currency (e.g. 600 USDT/BTC), so costs are effectively ignored (600.0008 instead of ~648) and SL losses exceed `risk_rate` by roughly the cost share. Shared by backtest, paper and live. Fix: multiply by entry reference price (entry fee on entry, exit fee on SL price), with a regression test; golden fixtures and experiment hashes will change and must be regenerated deliberately. Second part: read the per-symbol rate from `GET /fapi/v1/commissionRate` (SDK `user_commission_rate`, fields `makerCommissionRate`/`takerCommissionRate`, verified in SDK 17.4.0) so USDC promotions, VIP tiers and BNB discounts are reflected; if unavailable, fall back to the versioned parameter-set fees (conservative), never to zero. Keep backtest on versioned fees for determinism.
-**Requirements:** TBD (touches RISK-01, BKTS-01, DOMN-02)
-**Plans:** 0 plans
-**Source:** 2026-09-29 capability review after v0.3 audit
-
-Plans:
-- [ ] TBD (promote with /gsd-review-backlog when ready)
-
-### Phase 999.6: Money amounts in SIMULATE/APPROVE notifications (BACKLOG)
-
-**Goal:** Every Telegram SIMULATE/APPROVE message shows, in addition to entry/SL/TPs/R:R/risk %: quantity, notional (USDT), margin required at the configured leverage, estimated loss at SL and estimated profit at each TP in USDT, both gross and net of modeled fees/slippage (labelled "estimate"), plus the equity figure the sizing used and its source/timestamp. Today `format_approve` (`src/adapters/telegram_notify.py:211`) and `format_simulate` (`src/paper/notify.py:122`) show prices, R:R, `risk_pct` and `exposure_quote` only — no quantity or dollar P/L. Values come from the same risk pipeline output (`SizedResult`), never recomputed in the renderer; if sizing is NO_TRADE the message says so with the reason code. Depends on 999.1 (real equity) and 999.5 (correct costs).
-**Requirements:** TBD (touches APRV-01, PAPER-02)
-**Plans:** 0 plans
-**Source:** 2026-09-29 user request
-
-Plans:
-- [ ] TBD (promote with /gsd-review-backlog when ready)
-
-### Phase 999.7: Pre-placement available-margin check (BACKLOG)
-
-**Goal:** Before placing an entry, confirm `availableBalance` (from `GET /fapi/v3/account` or `/fapi/v3/balance`) covers the initial margin of the new order at its leverage plus fees; otherwise NO_TRADE with an explicit reason instead of letting Binance reject the order. No such check exists in `src/` today. Relevant for small accounts (e.g. 500 USDT) running `max_open_positions = 2`: two isolated positions fit easily at modest leverage, but not at 1x when combined notional exceeds equity. Pairs with 999.2 (leverage/margin type) and 999.1 (equity).
-**Requirements:** TBD (touches RISK-02, EXEC-01)
-**Plans:** 0 plans
-**Source:** 2026-09-29 capability review after v0.3 audit
-
-Plans:
-- [ ] TBD (promote with /gsd-review-backlog when ready)
+| 11. Fix fee units in sizing + use the account's real commission rate | 0/TBD | Not started | - |
+| 12. Read account equity and daily PnL from Binance | 0/TBD | Not started | - |
+| 13. Explicit leverage + margin type and liquidation-vs-SL guard | 0/TBD | Not started | - |
+| 14. Pre-placement available-margin check | 0/TBD | Not started | - |
+| 15. Pre-placement live-price check against SL and entry zone | 0/TBD | Not started | - |
+| 16. Money amounts in SIMULATE/APPROVE notifications | 0/TBD | Not started | - |
+| 17. Configurable quote asset (USDT hard-coding removal, USDC readiness) | 0/TBD | Not started | - |
