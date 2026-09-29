@@ -1,0 +1,145 @@
+{
+  "signals": [
+    {
+      "signal_id": "SIG-L1",
+      "direction": "LONG",
+      "detected_at_utc": "2026-02-04T10:00:00+00:00"
+    },
+    {
+      "signal_id": "SIG-L2",
+      "direction": "SHORT",
+      "detected_at_utc": "2026-02-04T11:00:00+00:00"
+    },
+    {
+      "signal_id": "SIG-L3",
+      "direction": "LONG",
+      "detected_at_utc": "2026-02-04T12:00:00+00:00"
+    },
+    {
+      "signal_id": "SIG-L4",
+      "direction": "LONG",
+      "detected_at_utc": "2026-02-04T13:00:00+00:00"
+    }
+  ],
+  "approvals": [
+    {
+      "approval_id": "AP-1",
+      "trade_plan_id": "PLAN-1",
+      "signal_id": "SIG-L1",
+      "action": "APPROVE",
+      "result": "APPROVED",
+      "requested_at_utc": "2026-02-04T10:00:05+00:00",
+      "acted_at_utc": "2026-02-04T10:00:20+00:00"
+    },
+    {
+      "approval_id": "AP-2",
+      "trade_plan_id": "PLAN-2",
+      "signal_id": "SIG-L2",
+      "action": "APPROVE",
+      "result": "APPROVED",
+      "requested_at_utc": "2026-02-04T11:00:03+00:00",
+      "acted_at_utc": "2026-02-04T11:00:30+00:00"
+    },
+    {
+      "approval_id": "AP-3",
+      "trade_plan_id": "PLAN-3",
+      "signal_id": "SIG-L3",
+      "action": "SKIP_USER",
+      "result": "SKIPPED",
+      "requested_at_utc": "2026-02-04T12:00:04+00:00",
+      "acted_at_utc": "2026-02-04T12:01:00+00:00"
+    },
+    {
+      "approval_id": "AP-X",
+      "trade_plan_id": "PLAN-X",
+      "signal_id": "SIG-MISSING",
+      "action": "APPROVE",
+      "result": "PENDING",
+      "requested_at_utc": "2026-02-04T14:00:00+00:00",
+      "acted_at_utc": null
+    }
+  ],
+  "orders": [
+    {
+      "order_id": "O-1",
+      "order_role": "ENTRY",
+      "trade_plan_id": "PLAN-1",
+      "client_order_id": "CID-1",
+      "price": "100",
+      "submitted_at_utc": "2026-02-04T10:00:21+00:00"
+    },
+    {
+      "order_id": "O-SL",
+      "order_role": "STOP_LOSS",
+      "trade_plan_id": "PLAN-1",
+      "client_order_id": "CID-SL",
+      "price": "95",
+      "submitted_at_utc": "2026-02-04T10:00:22+00:00"
+    },
+    {
+      "order_id": "O-2",
+      "order_role": "ENTRY",
+      "trade_plan_id": "PLAN-2",
+      "client_order_id": "CID-2",
+      "price": "200",
+      "submitted_at_utc": "2026-02-04T11:00:31+00:00"
+    },
+    {
+      "order_id": "O-3",
+      "order_role": "ENTRY",
+      "trade_plan_id": "PLAN-NONE",
+      "client_order_id": "CID-3",
+      "price": "300",
+      "submitted_at_utc": "2026-02-04T16:00:00+00:00"
+    }
+  ],
+  "fills": [
+    {
+      "fill_id": "F-1A",
+      "order_id": "O-1",
+      "fill_price": "100.1",
+      "fill_quantity": "0.5",
+      "fill_time_utc": "2026-02-04T10:06:21+00:00"
+    },
+    {
+      "fill_id": "F-1B",
+      "order_id": "O-1",
+      "fill_price": "100.3",
+      "fill_quantity": "0.5",
+      "fill_time_utc": "2026-02-04T10:06:40+00:00"
+    },
+    {
+      "fill_id": "F-ORPHAN",
+      "order_id": "O-GHOST",
+      "fill_price": "50",
+      "fill_quantity": "1",
+      "fill_time_utc": "2026-02-04T17:00:00+00:00"
+    }
+  ],
+  "events": [
+    {
+      "journal_event_id": "EV-1",
+      "entity_id": "CID-2",
+      "payload_json": "{\"symbol\":\"BTCUSDT\",\"identifier\":\"CID-2\",\"trigger_reason\":\"expiry_time\",\"phase\":\"pre_cancel\"}",
+      "occurred_at_utc": "2026-02-04T11:15:00+00:00"
+    },
+    {
+      "journal_event_id": "EV-2",
+      "entity_id": "CID-2",
+      "payload_json": "{\"symbol\":\"BTCUSDT\",\"identifier\":\"CID-2\",\"trigger_reason\":\"expiry_time\",\"phase\":\"post_cancel\"}",
+      "occurred_at_utc": "2026-02-04T11:15:01+00:00"
+    },
+    {
+      "journal_event_id": "EV-3",
+      "entity_id": "CID-UNKNOWN",
+      "payload_json": "{\"symbol\":\"BTCUSDT\",\"identifier\":\"CID-UNKNOWN\",\"trigger_reason\":\"expiry_time\",\"phase\":\"post_cancel\"}",
+      "occurred_at_utc": "2026-02-04T18:00:00+00:00"
+    },
+    {
+      "journal_event_id": "EV-4",
+      "entity_id": "CID-9",
+      "payload_json": "{\"symbol\": \"BTCUSDT\"}",
+      "occurred_at_utc": "2026-02-04T15:00:00+00:00"
+    }
+  ]
+}

@@ -1,0 +1,152 @@
+{
+  "records": [
+    {
+      "signal_id": "SIG-L1",
+      "path": "USER_EXECUTED",
+      "approval_result": "APPROVED",
+      "direction": "LONG",
+      "reason_code": "",
+      "entry_filled": true,
+      "expired_without_fill": false,
+      "intended_entry_price": "100",
+      "actual_entry_price": "100.2",
+      "wait_to_fill_s": "360"
+    },
+    {
+      "signal_id": "SIG-L2",
+      "path": "USER_EXECUTED",
+      "approval_result": "APPROVED",
+      "direction": "SHORT",
+      "reason_code": "",
+      "entry_filled": false,
+      "expired_without_fill": true,
+      "intended_entry_price": "200",
+      "actual_entry_price": null,
+      "wait_to_fill_s": null
+    },
+    {
+      "signal_id": "SIG-L3",
+      "path": "OPPORTUNITY",
+      "approval_result": "SKIPPED",
+      "direction": "LONG",
+      "reason_code": "SKIP_USER",
+      "entry_filled": null,
+      "expired_without_fill": null,
+      "intended_entry_price": null,
+      "actual_entry_price": null,
+      "wait_to_fill_s": null
+    },
+    {
+      "signal_id": "SIG-L4",
+      "path": "SYSTEM_ONLY",
+      "approval_result": null,
+      "direction": "LONG",
+      "reason_code": "",
+      "entry_filled": null,
+      "expired_without_fill": null,
+      "intended_entry_price": null,
+      "actual_entry_price": null,
+      "wait_to_fill_s": null
+    }
+  ],
+  "joins": [
+    {
+      "name": "approval->signal",
+      "matched": 3,
+      "unmatched": 1
+    },
+    {
+      "name": "entry_order->approval",
+      "matched": 2,
+      "unmatched": 1
+    },
+    {
+      "name": "fill->order",
+      "matched": 2,
+      "unmatched": 1
+    },
+    {
+      "name": "expiry_event->order",
+      "matched": 1,
+      "unmatched": 1
+    }
+  ],
+  "rejected": [
+    [
+      "MALFORMED_ROW",
+      1
+    ]
+  ],
+  "section": {
+    "n_records": 4,
+    "legs": {
+      "SIGNAL_TO_SEEN": {
+        "n_measured": 0,
+        "incomplete": [
+          [
+            "NO_SEEN_TIMESTAMP",
+            4
+          ]
+        ],
+        "mean": null
+      },
+      "SIGNAL_TO_DELIVERY": {
+        "n_measured": 3,
+        "incomplete": [
+          [
+            "NO_APPROVAL",
+            1
+          ]
+        ],
+        "mean": "4"
+      },
+      "DELIVERY_TO_APPROVED": {
+        "n_measured": 2,
+        "incomplete": [],
+        "mean": "21"
+      },
+      "SIGNAL_TO_APPROVED": {
+        "n_measured": 2,
+        "incomplete": [],
+        "mean": "25"
+      },
+      "APPROVED_TO_ORDER": {
+        "n_measured": 2,
+        "incomplete": [],
+        "mean": "1"
+      },
+      "ORDER_TO_FILL": {
+        "n_measured": 1,
+        "incomplete": [
+          [
+            "NO_FILL_EVENT",
+            1
+          ]
+        ],
+        "mean": "360"
+      }
+    },
+    "fill_rate": {
+      "numerator": 1,
+      "denominator": 2,
+      "pct": "50"
+    },
+    "expiry_rate": {
+      "numerator": 1,
+      "denominator": 2,
+      "pct": "50"
+    },
+    "deviation": {
+      "n_measured": 1,
+      "mean_price": "0.2",
+      "mean_bps": "20",
+      "incomplete": [
+        [
+          "NO_FILL_EVENT",
+          1
+        ]
+      ]
+    },
+    "synthetic_lag_seconds": null
+  }
+}
