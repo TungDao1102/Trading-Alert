@@ -19,6 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DECISIONS = REPO_ROOT / "docs" / "DECISIONS.md"
 PROTOCOL = REPO_ROOT / "docs" / "research" / "RESEARCH_PROTOCOL.md"
 DOC_STATUS = REPO_ROOT / "docs" / "DOC_STATUS.md"
+GLOSSARY = REPO_ROOT / "docs" / "GLOSSARY.md"
 
 FREEZE_COMMIT = "281ccd0894ea35717cc741788b6133cfb202af82"
 
@@ -120,3 +121,19 @@ def test_doc_status_line_not_pending() -> None:
     assert "D030" in index_lines[0]
     for ln in lines:
         assert not W2_PENDING.search(ln), f"pending marker on DOC_STATUS line: {ln!r}"
+
+
+def test_glossary_tokens_match_enum() -> None:
+    """GLOSSARY section 8.2 lists exactly the KillGateState values (no synonyms)."""
+    from src.domain.enums import KillGateState
+
+    text = _read(GLOSSARY)
+    heading = "### 8.2 Canonical KillGateState (Phase 10, D-03)"
+    assert heading in text, "GLOSSARY section 8.2 missing"
+    body = text[text.index(heading) + len(heading) :].split("\n## ", 1)[0]
+    block = re.search(r"```text\n(.*?)```", body, re.DOTALL)
+    assert block is not None, "GLOSSARY 8.2 must carry a fenced token block"
+    tokens = [ln.strip() for ln in block.group(1).splitlines() if ln.strip()]
+    assert len(tokens) == 3
+    assert set(tokens) == {m.value for m in KillGateState}
+    assert "D030" in body

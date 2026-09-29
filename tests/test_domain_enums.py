@@ -405,3 +405,24 @@ def test_signal_constructs_with_direction_enum() -> None:
     assert sig.direction == "LONG"
     assert sig.setup_type == "TREND_PULLBACK_LONG"
     assert sig.source_timeframe == "1h"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 10 plan 10-02 (D-03, D030) — KillGateState, GLOSSARY §8.2.
+# --------------------------------------------------------------------------- #
+
+
+def test_kill_gate_state_values_match_glossary_8_2() -> None:
+    """KillGateState is exactly the three GLOSSARY §8.2 tokens, value == name."""
+    from src.domain.enums import KillGateState
+
+    assert {m.value for m in KillGateState} == {
+        "WITHIN_BUDGET",
+        "PASSING_CANDIDATE",
+        "INSUFFICIENT_EDGE",
+    }
+    assert all(m.value == m.name for m in KillGateState)
+    assert KillGateState("WITHIN_BUDGET") is KillGateState.WITHIN_BUDGET
+    assert KillGateState.INSUFFICIENT_EDGE == "INSUFFICIENT_EDGE"
+    with pytest.raises(ValueError):
+        KillGateState("NOT_A_STATE")
