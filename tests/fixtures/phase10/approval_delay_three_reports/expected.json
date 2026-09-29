@@ -25,5 +25,55 @@
     "synthetic_lag_seconds": 30,
     "synthetic_lag_label": "SYNTHETIC LAG (APPROVAL_DELAY_LAG_SECONDS=30)",
     "section_digest": "d2b9f37e0c178d4b0b3a7c2fb92b44884721cf5ca98c85b122ed55cfabf94b87"
+  },
+  "live": {
+    "system": {
+      "n_signals": 7,
+      "n_r_valued": 6,
+      "incomplete": [["OPEN_POSITION", 1]],
+      "hypothetical_used": true
+    },
+    "user_execution": {
+      "n_signals": 6,
+      "n_r_valued": 5,
+      "mean_r": "0.4",
+      "win_rate": "0.6",
+      "incomplete": [["OPEN_POSITION", 1]],
+      "hypothetical_used": false,
+      "interval_absent": false
+    },
+    "opportunity": {
+      "n_signals": 1,
+      "n_r_valued": 1,
+      "mean_r": "1.5",
+      "win_rate": "1",
+      "incomplete": [],
+      "hypothetical_used": true,
+      "interval_absent": true
+    },
+    "buckets": [
+      {"bucket": "<1m", "n": 1, "n_r_valued": 1, "mean_r": "1.0", "low_n": true, "incomplete": []},
+      {"bucket": "1-5m", "n": 2, "n_r_valued": 2, "mean_r": "-0.25", "low_n": true, "incomplete": []},
+      {
+        "bucket": "5-30m",
+        "n": 2,
+        "n_r_valued": 1,
+        "mean_r": "2.0",
+        "low_n": true,
+        "incomplete": [["OPEN_POSITION", 1]]
+      },
+      {"bucket": ">=30m", "n": 1, "n_r_valued": 1, "mean_r": "-0.5", "low_n": true, "incomplete": []}
+    ],
+    "measured_delay": {
+      "n": 6,
+      "median": "299.5",
+      "minimum": "30",
+      "maximum": "1800",
+      "mean_sum_over_n": ["4318", "6"]
+    },
+    "delay_incomplete": [],
+    "synthetic_lag_seconds": null,
+    "synthetic_lag_label": null,
+    "section_digest": "PIN-AFTER-GREEN"
   }
 }
