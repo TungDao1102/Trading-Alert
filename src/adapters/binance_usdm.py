@@ -113,19 +113,17 @@ _RECONCILER_CANCEL_WAIT_MAX_SECONDS: int = 10
 
 
 # --------------------------------------------------------------------------- #
-# Placement retry ceilings (Phase 9, plan 09-01).
+# Placement is NEVER retried inside the adapter (09-REVIEW CR-09).
 #
-# Placement calls are the FIRST line of defense — a runaway retry loop
-# can duplicate orders on the exchange. The ceilings below mirror the
-# reconciler precedent: bounded attempts, bounded delay, transient-only
-# predicate. Programming errors (ValueError, KeyError, TypeError) fail
-# immediately instead of burning the retry budget.
+# Placement calls are the FIRST line of defense. Binance dedups
+# `newClientOrderId` / `clientAlgoId` only among OPEN orders, so an
+# adapter-level retry after an ambiguous failure (timeout, 5xx
+# "execution status unknown") can duplicate an order whose first attempt
+# was accepted and filled, and non-transient 4xx rejections would be
+# re-sent for nothing. `place_entry` / `place_algo_protective` make one
+# attempt and surface every failure; the execution manager probes by the
+# deterministic client id (EXECUTION_SPEC §10) and decides.
 # --------------------------------------------------------------------------- #
-
-_PLACEMENT_MAX_ATTEMPTS: int = 3
-_PLACEMENT_MAX_DELAY_SECONDS: int = 30
-_PLACEMENT_WAIT_MULTIPLIER_SECONDS: int = 1
-_PLACEMENT_WAIT_MAX_SECONDS: int = 10
 
 
 def _is_transient_reconcile(exc: BaseException) -> bool:
@@ -1024,7 +1022,13 @@ class BinanceUsdmAdapter:
             and the projected response fields.
 
         Raises:
-            Any SDK error after bounded retries are exhausted.
+            Any SDK error from the SINGLE attempt. Placement is never
+            retried here (EXECUTION_SPEC §10, 09-REVIEW CR-09): Binance
+            dedups `newClientOrderId` only among OPEN orders, so a blind
+            retry after an ambiguous failure (timeout / 5xx "execution
+            status unknown") can double a position whose first attempt
+            was accepted and filled. The execution manager probes by the
+            deterministic client id and decides.
         """
         from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
             NewOrderResponse,
@@ -1035,37 +1039,18 @@ class BinanceUsdmAdapter:
             NewOrderTypeEnum,
         )
 
-        retry = tenacity.retry_if_exception(_is_transient_reconcile)
-        stop = tenacity.stop_after_attempt(_PLACEMENT_MAX_ATTEMPTS) | tenacity.stop_after_delay(
-            _PLACEMENT_MAX_DELAY_SECONDS
+        response = await asyncio.to_thread(
+            self._sdk.rest_api.new_order,
+            symbol=symbol,
+            side=NewOrderSideEnum(side),
+            type=NewOrderTypeEnum.LIMIT,
+            position_side=position_side,
+            time_in_force=NewOrderTimeInForceEnum(time_in_force),
+            quantity=quantity,
+            price=price,
+            new_client_order_id=new_client_order_id,
         )
-        wait = tenacity.wait_random_exponential(
-            multiplier=_PLACEMENT_WAIT_MULTIPLIER_SECONDS,
-            max=_PLACEMENT_WAIT_MAX_SECONDS,
-        )
-        decorator = tenacity.AsyncRetrying(retry=retry, stop=stop, wait=wait, reraise=True)
-
-        async def _do_place() -> NewOrderResponse:
-            response = await asyncio.to_thread(
-                self._sdk.rest_api.new_order,
-                symbol=symbol,
-                side=NewOrderSideEnum(side),
-                type=NewOrderTypeEnum.LIMIT,
-                position_side=position_side,
-                time_in_force=NewOrderTimeInForceEnum(time_in_force),
-                quantity=quantity,
-                price=price,
-                new_client_order_id=new_client_order_id,
-            )
-            return response.data()
-
-        async def _do_place_with_retry() -> NewOrderResponse:
-            async for attempt in decorator:
-                with attempt:
-                    return await _do_place()
-            raise RuntimeError("unreachable: tenacity.AsyncRetrying exhausted without reraise")
-
-        result = await _do_place_with_retry()
+        result: NewOrderResponse = response.data()
         return _new_order_to_entry_result(result)
 
     async def place_algo_protective(
@@ -1119,7 +1104,7 @@ class BinanceUsdmAdapter:
         Raises:
             ValueError: close_position=True with quantity/reduce_only, or
                 close_position=False without a quantity.
-            Any SDK error after bounded retries are exhausted.
+            Any SDK error from the single (never retried) attempt.
         """
         from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
             NewAlgoOrderResponse,
@@ -1146,42 +1131,28 @@ class BinanceUsdmAdapter:
             )
         reduce_only_param = NewAlgoOrderReduceOnlyEnum.TRUE if reduce_only else None
 
-        retry = tenacity.retry_if_exception(_is_transient_reconcile)
-        stop = tenacity.stop_after_attempt(_PLACEMENT_MAX_ATTEMPTS) | tenacity.stop_after_delay(
-            _PLACEMENT_MAX_DELAY_SECONDS
+        # Single attempt — never retried here (EXECUTION_SPEC §10,
+        # 09-REVIEW CR-09): clientAlgoId is unique only among OPEN algo
+        # orders, so a blind retry is either rejected as a duplicate (the
+        # first attempt exists) or silently duplicates a leg (the first
+        # attempt already triggered). The manager probes by id instead.
+        response = await asyncio.to_thread(
+            self._sdk.rest_api.new_algo_order,
+            algo_type=NewAlgoOrderAlgoTypeEnum(algo_type),
+            symbol=symbol,
+            side=NewAlgoOrderSideEnum(side),
+            type=NewAlgoOrderTypeEnum(type),
+            position_side=position_side,
+            trigger_price=trigger_price,
+            close_position=NewAlgoOrderClosePositionEnum.TRUE
+            if close_position
+            else NewAlgoOrderClosePositionEnum.FALSE,
+            quantity=quantity if quantity is not None else None,
+            working_type=NewAlgoOrderWorkingTypeEnum(working_type),
+            reduce_only=reduce_only_param,
+            client_algo_id=client_algo_id,
         )
-        wait = tenacity.wait_random_exponential(
-            multiplier=_PLACEMENT_WAIT_MULTIPLIER_SECONDS,
-            max=_PLACEMENT_WAIT_MAX_SECONDS,
-        )
-        decorator = tenacity.AsyncRetrying(retry=retry, stop=stop, wait=wait, reraise=True)
-
-        async def _do_place() -> NewAlgoOrderResponse:
-            response = await asyncio.to_thread(
-                self._sdk.rest_api.new_algo_order,
-                algo_type=NewAlgoOrderAlgoTypeEnum(algo_type),
-                symbol=symbol,
-                side=NewAlgoOrderSideEnum(side),
-                type=NewAlgoOrderTypeEnum(type),
-                position_side=position_side,
-                trigger_price=trigger_price,
-                close_position=NewAlgoOrderClosePositionEnum.TRUE
-                if close_position
-                else NewAlgoOrderClosePositionEnum.FALSE,
-                quantity=quantity if quantity is not None else None,
-                working_type=NewAlgoOrderWorkingTypeEnum(working_type),
-                reduce_only=reduce_only_param,
-                client_algo_id=client_algo_id,
-            )
-            return response.data()
-
-        async def _do_place_with_retry() -> NewAlgoOrderResponse:
-            async for attempt in decorator:
-                with attempt:
-                    return await _do_place()
-            raise RuntimeError("unreachable: tenacity.AsyncRetrying exhausted without reraise")
-
-        result = await _do_place_with_retry()
+        result: NewAlgoOrderResponse = response.data()
         return _new_algo_order_to_algo_result(result)
 
     async def query_order_by_client(
@@ -1216,6 +1187,14 @@ class BinanceUsdmAdapter:
                 orig_client_order_id=orig_client_order_id,
             )
         except Exception as exc:  # noqa: BLE001 - SDK wraps unknown codes
+            # Only the already-mapped -2011 / UNKNOWN_ORDER form is treated
+            # as a definitive "not found". Any other error (including a
+            # query-order not-found code such as -2013 NO_SUCH_ORDER, which
+            # must be re-verified against the current Binance error-code
+            # docs before it is mapped here) RAISES, and the execution
+            # manager treats a raising probe as UNKNOWN -> SAFE_MODE (fail
+            # closed, 09-REVIEW CR-09). Mapping a code to not-found enables
+            # a retry, so a wrong mapping would risk a duplicate order.
             if "UNKNOWN_ORDER" in str(exc) or "-2011" in str(exc):
                 return OrderProbe(
                     client_order_id=orig_client_order_id,

@@ -108,22 +108,76 @@ class FakeExecutionAdapter:
         )
         self._query_response = query_response
         self._position_mode = position_mode
+        # Exceptions raised by successive `place_entry` / probe calls
+        # (popped front-first); empty means "return the canned response".
+        self.entry_exceptions: list[BaseException] = []
+        self.query_exceptions: list[BaseException] = []
+        self.query_responses: list[Any] = []
+
+    @staticmethod
+    def _bind_real(method_name: str, kwargs: dict[str, Any]) -> None:
+        """Contract guard (09-REVIEW WR-12): kwargs must bind against the
+        REAL `BinanceUsdmAdapter` method signature."""
+        import inspect
+
+        from src.adapters.binance_usdm import BinanceUsdmAdapter
+
+        inspect.signature(getattr(BinanceUsdmAdapter, method_name)).bind(None, **kwargs)
 
     async def place_entry(self, **kwargs: Any) -> Any:
+        self._bind_real("place_entry", kwargs)
         self.calls.append({"method": "place_entry", "kwargs": dict(kwargs)})
+        if self.entry_exceptions:
+            raise self.entry_exceptions.pop(0)
         return self._entry_response
 
     async def place_algo_protective(self, **kwargs: Any) -> Any:
+        self._bind_real("place_algo_protective", kwargs)
         self.calls.append({"method": "place_algo_protective", "kwargs": dict(kwargs)})
         return self._algo_response
 
     async def query_order_by_client(self, **kwargs: Any) -> Any:
+        self._bind_real("query_order_by_client", kwargs)
         self.calls.append({"method": "query_order_by_client", "kwargs": dict(kwargs)})
+        if self.query_exceptions:
+            raise self.query_exceptions.pop(0)
+        if self.query_responses:
+            return self.query_responses.pop(0)
         return self._query_response
 
     async def get_position_mode(self) -> str:
         self.calls.append({"method": "get_position_mode", "kwargs": {}})
         return self._position_mode
+
+
+class RecordingSafeModeController:
+    """Duck-typed SafeModeController recording every SAFE_MODE entry."""
+
+    def __init__(self, *, in_safe_mode: bool = False) -> None:
+        self.entered_reasons: list[str] = []
+        self.in_safe_mode = in_safe_mode
+
+    def enter_safe_mode(self, *, reason: str, now_utc: Any = None) -> None:
+        self.entered_reasons.append(reason)
+        self.in_safe_mode = True
+
+    def guard_new_entries(self, trade_plan: Any) -> Any:
+        from src.reconcile.safe_mode import SafeModeVerdict
+
+        if self.in_safe_mode:
+            return SafeModeVerdict(is_no_trade=True, reason_code="RECONCILIATION_REQUIRED")
+        return SafeModeVerdict(is_no_trade=False, reason_code=None)
+
+
+def _live_wiring(**overrides: Any) -> dict[str, Any]:
+    """The required live-safety collaborators for `execute_approved_plan`.
+
+    09-REVIEW CR-07/CR-09: SAFE_MODE (and the other live gates) are
+    required arguments — tests wire recording doubles explicitly.
+    """
+    wiring: dict[str, Any] = {"safe_mode_controller": RecordingSafeModeController()}
+    wiring.update(overrides)
+    return wiring
 
 
 # --------------------------------------------------------------------------- #
@@ -305,6 +359,7 @@ async def test_happy_path_places_one_entry_and_one_sl_leg() -> None:
         now_utc=_parse_utc(case_input["now_utc"]),
         adapter=adapter,
         risk_kwargs=risk_kwargs,
+        **_live_wiring(),
     )
 
     # Outcome is a PASS with the expected reason code.
@@ -383,6 +438,7 @@ async def test_stale_plan_yields_no_adapter_calls_and_unapprovable_outcome() -> 
         now_utc=past_now,
         adapter=adapter,
         risk_kwargs=risk_kwargs,
+        **_live_wiring(),
     )
 
     # Outcome is NO_TRADE with APPROVAL_EXPIRED.
@@ -431,6 +487,7 @@ async def test_risk_no_trade_yields_no_adapter_calls_and_preserves_reason_code()
         now_utc=_parse_utc(case_input["now_utc"]),
         adapter=adapter,
         risk_kwargs=risk_kwargs,
+        **_live_wiring(),
     )
 
     # Outcome is NO_TRADE with a risk reason code (not APPROVAL_EXPIRED).
@@ -462,10 +519,19 @@ async def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
     approval = _build_approval(case_input)
     risk_kwargs = _build_risk_kwargs(case_input)
 
-    # Simulate ambiguous response: place_entry returns None (ambiguous),
-    # query_order_by_client returns a "found" probe (order exists).
-    adapter._entry_response = None  # type: ignore[attr-defined]
-    adapter._query_response = {"found": True, "order_id": "12345"}  # type: ignore[attr-defined]
+    # Simulate an ambiguous placement the way the REAL adapter surfaces it
+    # (it raises; it never returns None), and a probe returning the REAL
+    # `OrderProbe` dataclass (attribute access, not dict `.get`).
+    from src.adapters.binance_usdm import OrderProbe
+
+    adapter.entry_exceptions.append(TimeoutError("read timeout — status unknown"))
+    adapter._query_response = OrderProbe(  # type: ignore[attr-defined]
+        client_order_id="x-33333333333333333333333333333333EN",
+        found=True,
+        order_id="12345",
+        status="NEW",
+        update_time_utc=None,
+    )
 
     await execute_approved_plan(
         callback=callback,
@@ -478,6 +544,7 @@ async def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
         now_utc=_parse_utc(case_input["now_utc"]),
         adapter=adapter,
         risk_kwargs=risk_kwargs,
+        **_live_wiring(),
     )
 
     # The manager should have called query_order_by_client before any
@@ -493,6 +560,140 @@ async def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
     # No retry place_entry after the query (probe found the order).
     entry_count = method_sequence.count("place_entry")
     assert entry_count == 1, f"probe found order → no retry, got {entry_count} place_entry calls"
+
+
+# --------------------------------------------------------------------------- #
+# 09-REVIEW CR-09 — no blind retry; probe outcome decides; unknown fails closed.
+# --------------------------------------------------------------------------- #
+
+
+async def _run_plan(adapter: FakeExecutionAdapter, **overrides: Any) -> Any:
+    """Run `execute_approved_plan` on the golden fixture with overrides."""
+    from src.execution.manager import execute_approved_plan
+
+    case_input = _load_input()
+    kwargs: dict[str, Any] = {
+        "callback": _build_callback(case_input),
+        "approval": _build_approval(case_input),
+        "authorized_chat_id": case_input["chat_id"],
+        "expiry_utc": _parse_utc(case_input["expiry_utc"]),
+        "approval_strategy_version": case_input["strategy_version"],
+        "approval_parameter_set_id": case_input["parameter_set_id"],
+        "approval_parameter_set_hash": case_input["parameter_set_hash"],
+        "now_utc": _parse_utc(case_input["now_utc"]),
+        "adapter": adapter,
+        "risk_kwargs": _build_risk_kwargs(case_input),
+        **_live_wiring(),
+    }
+    kwargs.update(overrides)
+    return await execute_approved_plan(**kwargs)
+
+
+def _probe(found: bool) -> Any:
+    from src.adapters.binance_usdm import OrderProbe
+
+    return OrderProbe(
+        client_order_id="x-33333333333333333333333333333333EN",
+        found=found,
+        order_id="12345" if found else None,
+        status="NEW" if found else None,
+        update_time_utc=None,
+    )
+
+
+async def test_definitive_absence_allows_exactly_one_retry() -> None:
+    """CR-09: an ambiguous entry followed by a DEFINITIVE `found=False`
+    probe retries once; the retry's ack proceeds to the SL."""
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.append(TimeoutError("status unknown"))
+    adapter.query_responses.append(_probe(found=False))
+
+    outcome = await _run_plan(adapter)
+
+    assert outcome.is_no_trade is False
+    assert [c["method"] for c in adapter.calls] == [
+        "place_entry",
+        "query_order_by_client",
+        "place_entry",
+        "place_algo_protective",
+    ]
+
+
+async def test_probe_failure_fails_closed_to_safe_mode_without_retry_or_sl() -> None:
+    """CR-09: a probe that raises (unknown existence) must NOT be treated
+    as absence — no retry, no SL, SAFE_MODE, RECONCILIATION_REQUIRED."""
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.append(TimeoutError("status unknown"))
+    adapter.query_exceptions.append(RuntimeError("-2013 Order does not exist"))
+    safe_mode_controller = RecordingSafeModeController()
+
+    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode_controller)
+
+    assert outcome.is_no_trade is True
+    assert outcome.reason_code == "RECONCILIATION_REQUIRED"
+    assert [c["method"] for c in adapter.calls] == ["place_entry", "query_order_by_client"]
+    assert safe_mode_controller.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
+
+
+async def test_indeterminate_probe_is_unknown_not_absent() -> None:
+    """CR-09: a `None` probe is unknown (fail closed), never 'absent'."""
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.append(TimeoutError("status unknown"))
+    safe_mode_controller = RecordingSafeModeController()
+
+    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode_controller)
+
+    assert outcome.reason_code == "RECONCILIATION_REQUIRED"
+    assert [c["method"] for c in adapter.calls].count("place_entry") == 1
+    assert safe_mode_controller.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
+
+
+async def test_repeated_definitive_absence_is_bounded_no_trade() -> None:
+    """CR-09: at most two entry attempts; both absent → NO_TRADE, no SL."""
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.extend([RuntimeError("-2019"), RuntimeError("-2019")])
+    adapter.query_responses.extend([_probe(found=False), _probe(found=False)])
+    safe_mode_controller = RecordingSafeModeController()
+
+    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode_controller)
+
+    assert outcome.is_no_trade is True
+    assert outcome.reason_code == "EXCHANGE_CONSTRAINT"
+    methods = [c["method"] for c in adapter.calls]
+    assert methods.count("place_entry") == 2
+    assert "place_algo_protective" not in methods
+    assert safe_mode_controller.entered_reasons == []
+
+
+async def test_real_adapter_place_entry_makes_a_single_attempt() -> None:
+    """CR-09: the adapter never retries placement itself — a transient
+    failure surfaces after exactly one SDK call."""
+    from types import SimpleNamespace
+
+    import pytest
+    from src.adapters.binance_usdm import BinanceUsdmAdapter
+
+    class _Rest:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def new_order(self, **kwargs: Any) -> Any:
+            self.calls += 1
+            raise TimeoutError("read timeout")
+
+    rest = _Rest()
+    adapter = BinanceUsdmAdapter(sdk_client=SimpleNamespace(rest_api=rest))  # type: ignore[arg-type]
+    with pytest.raises(TimeoutError):
+        await adapter.place_entry(
+            symbol="BTCUSDT",
+            side="BUY",
+            position_side="BOTH",
+            time_in_force="GTC",
+            quantity=Decimal("0.100"),
+            price=Decimal("101.00"),
+            new_client_order_id="x-33333333333333333333333333333333EN",
+        )
+    assert rest.calls == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -525,6 +726,7 @@ async def test_golden_fixture_adapter_call_sequence_matches_expected() -> None:
         now_utc=_parse_utc(case_input["now_utc"]),
         adapter=adapter,
         risk_kwargs=risk_kwargs,
+        **_live_wiring(),
     )
 
     # Method sequence matches.

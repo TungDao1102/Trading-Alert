@@ -75,7 +75,7 @@ class ExecutionAdapter(Protocol):
 
     async def place_algo_protective(self, **kwargs: Any) -> Any: ...
 
-    async def query_order_by_client(self, **kwargs: Any) -> Any: ...
+    async def query_order_by_client(self, *, symbol: str, orig_client_order_id: str) -> Any: ...
 
     async def query_algo_order_by_client(self, *, client_algo_id: str) -> Any: ...
 
@@ -118,6 +118,66 @@ class ExecutionOutcome:
 
 
 # --------------------------------------------------------------------------- #
+# No-blind-recovery entry placement (EXECUTION_SPEC §10, 09-REVIEW CR-09).
+# --------------------------------------------------------------------------- #
+
+_ENTRY_STATE_PLACED = "ENTRY_PLACED"
+_ENTRY_STATE_EXISTS = "ENTRY_EXISTS"
+_ENTRY_STATE_ABSENT = "ENTRY_ABSENT"
+_ENTRY_STATE_UNKNOWN = "ENTRY_STATE_UNKNOWN"
+
+# Total `place_entry` attempts. A retry happens ONLY after a probe by the
+# deterministic client id DEFINITIVELY reports the order absent
+# (`found is False`); the adapter itself never retries placement.
+_ENTRY_MAX_ATTEMPTS: int = 2
+
+
+async def _place_entry_no_blind_retry(
+    *,
+    adapter: ExecutionAdapter,
+    entry_kwargs: dict[str, Any],
+) -> str:
+    """Place the entry; on ANY ambiguity probe by client id before retrying.
+
+    Returns one of:
+      - `ENTRY_PLACED`  — the adapter acknowledged the order.
+      - `ENTRY_EXISTS`  — placement was ambiguous but the probe found it.
+      - `ENTRY_ABSENT`  — every attempt was ambiguous and every probe
+        DEFINITIVELY reported absence (no exposure exists).
+      - `ENTRY_STATE_UNKNOWN` — a probe raised or returned an
+        indeterminate result (fail closed: caller enters SAFE_MODE).
+
+    An exception from `place_entry` (timeout, 5xx, rejection, identity-
+    less response) and a `None` response are both ambiguous: the order
+    may have been accepted. The probe reads `found` by ATTRIBUTE (the
+    real adapter returns an `OrderProbe` dataclass) — anything other
+    than a literal `True`/`False` is unknown.
+    """
+    client_order_id = entry_kwargs["new_client_order_id"]
+    for _attempt in range(_ENTRY_MAX_ATTEMPTS):
+        try:
+            response = await adapter.place_entry(**entry_kwargs)
+        except Exception:  # noqa: BLE001 — ambiguous: probe decides
+            response = None
+        if response is not None:
+            return _ENTRY_STATE_PLACED
+        try:
+            probe = await adapter.query_order_by_client(
+                symbol=entry_kwargs["symbol"],
+                orig_client_order_id=client_order_id,
+            )
+        except Exception:  # noqa: BLE001 — unknown existence fails closed
+            return _ENTRY_STATE_UNKNOWN
+        found = _get_attr_or_key(probe, "found")
+        if found is True:
+            return _ENTRY_STATE_EXISTS
+        if found is not False:
+            return _ENTRY_STATE_UNKNOWN
+        # Definitive absence: the next loop iteration may retry.
+    return _ENTRY_STATE_ABSENT
+
+
+# --------------------------------------------------------------------------- #
 # Public entry point — execute_approved_plan.
 # --------------------------------------------------------------------------- #
 
@@ -134,6 +194,7 @@ async def execute_approved_plan(
     now_utc: datetime,
     adapter: ExecutionAdapter,
     risk_kwargs: dict[str, Any],
+    safe_mode_controller: Any,
     enablement: Any | None = None,
     gate_kwargs: dict[str, Any] | None = None,
 ) -> ExecutionOutcome:
@@ -166,6 +227,9 @@ async def execute_approved_plan(
             account_state, constraint_snapshot, open_positions,
             daily_loss_quote, ttl, modeled_costs_per_unit,
             minimum_risk_utilization_after_rounding, parameter_set).
+        safe_mode_controller: Required `SafeModeController`-like object.
+            An entry whose exchange state cannot be determined forces
+            SAFE_MODE (EXECUTION_SPEC §10 no-blind-recovery).
         enablement: Optional `LiveEnablementController` for the
             LIVE_ORDERS_DISABLED gate. When None, the gate is skipped
             (backtest/paper compatibility).
@@ -178,6 +242,8 @@ async def execute_approved_plan(
     Returns:
         An `ExecutionOutcome` with `is_no_trade` and `reason_code`.
     """
+    _require_safe_mode_controller(safe_mode_controller, "execute_approved_plan")
+
     # Gate 1: approval binding (chat→expiry→hash→version→token).
     binding = check_binding_full(
         callback=callback,
@@ -262,38 +328,32 @@ async def execute_approved_plan(
     # running event loop (python-telegram-bot / FastAPI). No nested
     # `asyncio.run` — it raises inside a running loop and would tear
     # down loop-bound adapter resources between the entry and the SL.
-    entry_response = await adapter.place_entry(
-        symbol=constraint_snapshot.symbol,
-        side=entry_side,
-        position_side="BOTH",  # one-way mode (09-01 tracer scope)
-        time_in_force="GTC",
-        quantity=quantity,
-        price=limit_price,
-        new_client_order_id=entry_client_order_id,
+    entry_state = await _place_entry_no_blind_retry(
+        adapter=adapter,
+        entry_kwargs={
+            "symbol": constraint_snapshot.symbol,
+            "side": entry_side,
+            "position_side": "BOTH",  # one-way mode (09-01 tracer scope)
+            "time_in_force": "GTC",
+            "quantity": quantity,
+            "price": limit_price,
+            "new_client_order_id": entry_client_order_id,
+        },
     )
-
-    # No-blind-recovery: if the entry response is ambiguous (None or
-    # missing identity), probe by deterministic client_order_id first.
-    # Retry only if the probe confirms absence.
-    if entry_response is None:
-        probe = await adapter.query_order_by_client(
-            symbol=constraint_snapshot.symbol,
-            orig_client_order_id=entry_client_order_id,
+    if entry_state == _ENTRY_STATE_UNKNOWN:
+        # Fail closed: the entry may or may not exist on the exchange and
+        # the probe could not tell. No SL, no retry — SAFE_MODE blocks new
+        # entries while reconciliation resolves the truth.
+        safe_mode_controller.enter_safe_mode(reason=_ENTRY_STATE_UNKNOWN, now_utc=now_utc)
+        return ExecutionOutcome(
+            is_no_trade=True, reason_code=RejectionReason.RECONCILIATION_REQUIRED.value
         )
-        if probe is not None and probe.get("found", False):
-            # Order exists on exchange — no retry needed.
-            pass
-        else:
-            # Probe confirms absence — retry the entry.
-            entry_response = await adapter.place_entry(
-                symbol=constraint_snapshot.symbol,
-                side=entry_side,
-                position_side="BOTH",
-                time_in_force="GTC",
-                quantity=quantity,
-                price=limit_price,
-                new_client_order_id=entry_client_order_id,
-            )
+    if entry_state == _ENTRY_STATE_ABSENT:
+        # Definitively not on the exchange after bounded attempts — no
+        # exposure exists, so NO_TRADE without SAFE_MODE.
+        return ExecutionOutcome(
+            is_no_trade=True, reason_code=RejectionReason.EXCHANGE_CONSTRAINT.value
+        )
 
     # Place the SL protective leg (CONDITIONAL, STOP_MARKET, close_position).
     await adapter.place_algo_protective(
