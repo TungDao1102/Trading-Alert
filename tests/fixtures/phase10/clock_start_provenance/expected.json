@@ -1,0 +1,7 @@
+{
+  "start_utc": "2026-09-19T00:00:00+00:00",
+  "source": "docs/research/RESEARCH_PROTOCOL.md header: Frozen on",
+  "freeze_commit": "281ccd0894ea35717cc741788b6133cfb202af82",
+  "commit_author_date": "2026-09-19T14:08:12+07:00",
+  "earliest_terminal_utc": "2027-03-19T00:00:00+00:00"
+}
