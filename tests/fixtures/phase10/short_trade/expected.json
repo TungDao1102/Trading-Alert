@@ -1,0 +1,11 @@
+{
+  "mfe_price": "0.80",
+  "mae_price": "5.00",
+  "mfe_r": "0.16",
+  "mae_r": "1",
+  "time_to_mfe_s": "0",
+  "time_to_mae_s": "90",
+  "holding_s": "160",
+  "realized_r": "0.8",
+  "incomplete_reason": null
+}

@@ -1,0 +1,20 @@
+{
+  "trades": {
+    "T-NOFILL-1": {"incomplete_reason": "NO_FILL_EVENT"},
+    "T-FALLBACK-1": {"incomplete_reason": "FALLBACK_APPLIED"},
+    "T-NORISK-1": {
+      "incomplete_reason": null,
+      "mfe_price": "5.00",
+      "mae_price": "0.80",
+      "mfe_r": null,
+      "mae_r": null,
+      "r_excluded_zero_risk": false
+    }
+  },
+  "section": {
+    "n_outcomes": 3,
+    "n_measured": 1,
+    "n_zero_risk_excluded": 0,
+    "incomplete": [["FALLBACK_APPLIED", 1], ["NO_FILL_EVENT", 1]]
+  }
+}

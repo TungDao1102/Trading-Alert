@@ -1,0 +1,13 @@
+{
+  "mfe_price": "5.00",
+  "mae_price": "0.80",
+  "mfe_r": null,
+  "mae_r": null,
+  "realized_r": null,
+  "r_excluded_zero_risk": true,
+  "section": {
+    "n_outcomes": 1,
+    "n_measured": 1,
+    "n_zero_risk_excluded": 1
+  }
+}

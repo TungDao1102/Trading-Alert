@@ -1,0 +1,8 @@
+{
+  "incomplete_reason": "NO_1M_COVERAGE",
+  "section": {
+    "n_outcomes": 1,
+    "n_measured": 0,
+    "incomplete": [["NO_1M_COVERAGE", 1]]
+  }
+}

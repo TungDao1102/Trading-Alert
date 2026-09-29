@@ -1,0 +1,28 @@
+{
+  "trade": {
+    "trade_id": "T-NO1M-1",
+    "signal_id": "SIG-NO1M-1",
+    "trade_plan_id": "PLAN-NO1M-1",
+    "strategy_version": "v2.0.0",
+    "parameter_set_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "symbol": "BTCUSDT",
+    "direction": "LONG",
+    "entry_kind": "ENTRY_FILLED",
+    "entry_price": "100.00",
+    "entry_time_utc": "2026-01-05T10:00:30+00:00",
+    "quantity": "2",
+    "exit_kind": "TP1",
+    "exit_price": "104.00",
+    "exit_time_utc": "2026-01-05T10:03:10+00:00",
+    "realized_pnl": "8.00",
+    "realized_risk": "10.00",
+    "fallback_applied": false,
+    "outcome_kind": "OK",
+    "reason_code": "OK"
+  },
+  "candles": [
+    {"symbol": "BTCUSDT", "open_time_utc": "2026-01-05T10:00:00+00:00", "high": "101.50", "low": "99.20"},
+    {"symbol": "BTCUSDT", "open_time_utc": "2026-01-05T10:01:00+00:00", "high": "102.00", "low": "100.10"},
+    {"symbol": "BTCUSDT", "open_time_utc": "2026-01-05T10:03:00+00:00", "high": "104.40", "low": "103.00"}
+  ]
+}
