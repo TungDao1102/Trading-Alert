@@ -19,6 +19,7 @@ from src.analytics.clock import ClockStart, earliest_terminal_utc
 from src.analytics.family import FamilyEvidence, FamilyStatus
 from src.analytics.killgate import KillGateVerdict, evaluate
 from src.domain.enums import KillGateState
+
 from tests.phase10_helpers import load_expected, load_input, parse_utc
 
 

@@ -17,5 +17,8 @@
   "decision_refs": [
     "DEC-2026-11-fail-breakout-retest",
     "DEC-2026-11-fail-trend-pullback"
-  ]
+  ],
+  "evidence_digest": "771b2a99a566d993977f72b52f0bf2f539524a1a1d2b08643d32483f2ad4873b",
+  "verdict_digest": "5f71a46961e6de7600869b63185e559e891b8009ad69c3c44b6be059a91ae1ad",
+  "journal_event_id": "kill_gate_89c7f86fb8ef363d82fc56c7e6acb9835de73bf02904f92fb50e1a8f8e6a4658"
 }

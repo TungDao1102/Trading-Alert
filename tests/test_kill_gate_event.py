@@ -18,6 +18,7 @@ from src.analytics.killgate import (
     build_kill_gate_event,
     record_kill_gate_evaluation,
 )
+
 from tests.phase10_helpers import load_expected, parse_utc
 from tests.test_kill_gate_state import evaluate_case
 
