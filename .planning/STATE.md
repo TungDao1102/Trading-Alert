@@ -2,18 +2,18 @@
 gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 09
-current_phase_name: live-execution-rollout
+current_phase_name: Live Execution Rollout
 status: executing
-stopped_at: Phase 9 context gathered
-last_updated: "2026-09-28T13:13:56.570Z"
-last_activity: 2026-09-28
-last_activity_desc: Phase 09 planning complete
-state_head: 812e11fbccd45ae16d12de9c78a96887dfa01425
+stopped_at: "Phase 09 Plan 04: tasks 1-2 complete; BLOCKED at task 3 (gate=blocking-human testnet/credential/LIVE-TAP checkpoint)"
+last_updated: "2026-09-29T02:40:44.639Z"
+last_activity: 2026-09-29
+last_activity_desc: "Phase 09 Plan 04 tasks 1-2 complete; BLOCKED at task 3 human checkpoint"
+state_head: 07f90d63888357e59ca4d2feaa47d792baa92cf5
 progress:
   total_phases: 11
   completed_phases: 9
   total_plans: 38
-  completed_plans: 34
+  completed_plans: 37
 milestone_name: milestone
 ---
 
@@ -26,14 +26,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 8 — Approval + Reconciliation Hardening
+**Current focus:** Phase 09 — Live Execution Rollout
 
 ## Current Position
 
-Phase: 09 (live-execution-rollout) — READY TO EXECUTE
-Plan: 5 of 5
-Status: Ready to execute
-Last activity: 2026-09-28 — Phase 09 planning complete
+Phase: 09 (Live Execution Rollout) — EXECUTING
+Plan: 4 of 4 — BLOCKED at task 3 (gate=blocking-human testnet/credential/LIVE-TAP checkpoint)
+Status: Executing Phase 09
+Last activity: 2026-09-29 — Phase 09 Plan 04 tasks 1-2 complete; BLOCKED at task 3 human checkpoint
 
 Progress: [██████████] 100%
 
@@ -75,6 +75,7 @@ Progress: [██████████] 100%
 | Phase 08 P04 | ~25 min | 3 tasks | 8 files |
 | Phase 8 P2 | ~25 min | 3 tasks | 8 files |
 | Phase 8 P05 | ~15 min | 2 tasks | 4 files |
+| Phase 09 P04 | ~50min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -192,6 +193,11 @@ Recent decisions affecting current work:
 - [Phase 8]: [08-05] D-02 Drill harness drives 08-01 approval core, 08-02 receiver seam, and 08-04 reconciler/sweeper/SAFE_MODE through Protocol-typed surfaces; tests inject fakes; no Binance SDK or PTB leakage
 - [Phase 8]: [08-05] D-03 Double-run determinism: caller-supplied now_utc sequence (never wall-clock); repeat runs produce byte-identical ordered outcome names and payloads
 - [Phase 8]: [08-05] D-04 SAFE_MODE exit rehearsed only through the restore drill (Pitfall 4: a boolean flip without both a clean compare AND a journaled restore event is rejected)
+- [Phase 09]: [09-04] health.py: ten fail-closed probes journal HEALTH_CHECK; any FAIL blocks enablement via run_health_checks aggregate
+- [Phase 09]: [09-04] require_protective_confirmation is single source of truth for SL/TP1/TP2 confirmed check; composes with SafeModeController on any gap, never places rescue protection
+- [Phase 09]: [09-04] attach_protectives_to_fill places SL then TP1 then TP2 in fixed order; unconfirmed leg halts immediately with zero rescue placement
+- [Phase 09]: [09-04] LIVE5_SYMBOLS scope guard raises ValueError before any adapter call across execute_approved_plan, attach, expiry, cancel, and emergency-close paths
+- [Phase 09]: [09-04] Task 3 (testnet plus credential plus LIVE-TAP GATE) is gate=blocking-human — plan BLOCKED pending operator attestation; no live order exists
 
 ### Pending Todos
 
@@ -206,6 +212,7 @@ Recent decisions affecting current work:
 - evaluate_risk currently passes absolute amounts directly; Phase-7+ caller must convert registry rates to absolute amounts before calling
 - WS-connect gap (07-04 follow-up) blocks soak start; Phase 8 construction can proceed in parallel
 - 08-02 LIVE-TAP GATE: TELEGRAM_BOT_TOKEN + TELEGRAM_AUTHORIZED_CHAT_ID must be provisioned and a real APPROVE/SKIP tap + unknown-chat rejection must be operator-confirmed before plan 08-02 can be marked status: complete (currently halted)
+- Phase 09 Plan 04 task 3 (testnet rehearsal plus credential provisioning plus LIVE-TAP clearance GATE) is gate=blocking-human and cannot be executed or fabricated by the executor — awaiting operator attestation with real testnet order ids, RESEARCH A1 verdict, credential provisioning confirmation, and Telegram APPROVE/SKIP/unknown-chat tap evidence
 
 ### Roadmap Evolution
 
@@ -226,6 +233,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-28T12:21:32.119Z
-Stopped at: Phase 9 context gathered
-Resume file: .planning/phases/09-live-execution-rollout/09-CONTEXT.md
+Last session: 2026-09-29T02:40:44.484Z
+Stopped at: Phase 09 Plan 04: tasks 1-2 complete; BLOCKED at task 3 (gate=blocking-human testnet/credential/LIVE-TAP checkpoint)
+Resume file: .planning/phases/09-live-execution-rollout/09-04-PLAN.md
