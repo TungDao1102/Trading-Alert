@@ -31,17 +31,17 @@
     {
       "number": "6",
       "name": "Backtest Simulator + Experiment Registry",
-      "status": "in_progress"
+      "status": "complete"
     },
     {
       "number": "7",
       "name": "Paper Forward Observation",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "8",
       "name": "Approval + Reconciliation Hardening",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "9",
@@ -57,7 +57,7 @@
   "next": {
     "command": "/gsd:progress --next",
     "label": "Advance to the next step",
-    "reason": "Phase 06 of 10 · executing"
+    "reason": "Phase 09 of 11 · executing"
   },
-  "updated_at": "2026-09-26T06:21:17.418Z"
+  "updated_at": "2026-09-29T02:07:48.249Z"
 }
