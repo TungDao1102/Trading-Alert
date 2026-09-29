@@ -1,0 +1,416 @@
+"""End-to-end tests for the analytics CLI (Phase 10, plan 10-12, D-01, D-03, D-04, D-05).
+
+The CLI is the single edge that composes the two adapters and the pure core: files in,
+Markdown plus JSON sidecar out, four stdout lines, exit codes 0/1/2. Tests call `main` with
+argv lists and capture output through capsys (subprocess-free); every output root is a
+tmp_path (`--reports-root`), so nothing is ever written under the repository.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+import pytest
+from src.adapters.binance_usdm import Kline
+from src.analytics.cli import main
+from src.data.store import publish_batch
+from src.domain.registry import load_parameter_set
+
+REPO = Path(__file__).resolve().parents[1]
+EVIDENCE_FIXTURE = REPO / "tests" / "fixtures" / "phase10" / "loaders" / "evidence_sample.json"
+AS_OF = "2027-04-01T00:00:00+00:00"
+FAMILIES = ("breakout-retest", "range-mr", "trend-pullback")
+COPY_TAIL = "No file was written. Fix the cause and re-run journal-report.ps1 with the same -AsOf."
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The developer shell may export DATABASE_URL; tests must never reach a real database."""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+
+def _decisions_file(tmp_path: Path, families: list[dict[str, Any]] | None = None) -> Path:
+    path = tmp_path / "decisions.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "kill-gate-decisions/1",
+                "families": families or [],
+                "resets": [],
+                "recorded_terminal": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _publish_candles(raw_root: Path) -> None:
+    """1m BTCUSDT candles covering the fixture trade T-1 (2026-01-05 10:00 to 14:00 UTC)."""
+    start = datetime(2026, 1, 5, 10, 0, tzinfo=UTC)
+    klines = [
+        Kline(
+            symbol="BTCUSDT",
+            interval="1m",
+            open_time_utc=start + timedelta(minutes=i),
+            close_time_utc=start + timedelta(minutes=i, seconds=59),
+            open=Decimal("100.00"),
+            high=Decimal("111.00") if i == 200 else Decimal("101.00"),
+            low=Decimal("99.00") if i == 100 else Decimal("100.00"),
+            close=Decimal("100.00"),
+            volume=Decimal("1"),
+            quote_volume=Decimal("1"),
+            trade_count=1,
+        )
+        for i in range(241)
+    ]
+    publish_batch(klines, interval="1m", symbol="BTCUSDT", raw_root=raw_root)
+
+
+class _Env:
+    def __init__(self, tmp_path: Path) -> None:
+        self.tmp_path = tmp_path
+        self.reports_root = tmp_path / "reports"
+        self.raw_root = tmp_path / "raw"
+        self.decisions = _decisions_file(tmp_path)
+        self.evidence = EVIDENCE_FIXTURE
+        _publish_candles(self.raw_root)
+
+    def argv(self, *extra: str, as_of: str | None = AS_OF) -> list[str]:
+        base = [
+            "--evidence",
+            str(self.evidence),
+            "--decisions",
+            str(self.decisions),
+            "--raw-root",
+            str(self.raw_root),
+            "--reports-root",
+            str(self.reports_root),
+        ]
+        if as_of is not None:
+            base = ["--as-of", as_of, *base]
+        return [*base, *extra]
+
+    def files(self) -> list[Path]:
+        if not self.reports_root.exists():
+            return []
+        return sorted(path for path in self.reports_root.rglob("*") if path.is_file())
+
+
+@pytest.fixture
+def env(tmp_path: Path) -> _Env:
+    return _Env(tmp_path)
+
+
+def _run(
+    capsys: pytest.CaptureFixture[str], argv: list[str], **kwargs: Any
+) -> tuple[int, str, str]:
+    capsys.readouterr()
+    code = main(argv, **kwargs)
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def _stdout_lines(out: str) -> list[str]:
+    return out.splitlines()
+
+
+def _write_evidence(path: Path, backtest: list[dict[str, Any]]) -> Path:
+    document = json.loads(EVIDENCE_FIXTURE.read_text(encoding="utf-8"))
+    document["backtest"] = backtest
+    document["paper"] = []
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+def _candidate_experiment(family: str, role: str) -> dict[str, Any]:
+    template = json.loads(EVIDENCE_FIXTURE.read_text(encoding="utf-8"))["backtest"][0]
+    experiment = dict(template["experiment"])
+    experiment["experiment_id"] = hashlib.sha256(f"exp-{family}-{role}".encode()).hexdigest()
+    experiment["parameter_set_hash"] = load_parameter_set(family, "baseline-v1").parameter_set_hash
+    experiment["parameter_set_id"] = "baseline-v1"
+    experiment["run_type"] = "CANDIDATE"
+    return {
+        "experiment": experiment,
+        "trades": [],
+        "contexts": {},
+        "flags": dict(template["flags"]),
+    }
+
+
+def test_tracer_cli_end_to_end(env: _Env, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, err = _run(capsys, env.argv())
+    assert code == 0, err
+    assert err == ""
+    lines = _stdout_lines(out)
+    assert len(lines) == 4
+    assert lines[0].startswith("Report: ")
+    assert lines[1].startswith("Sidecar: ")
+    assert lines[2].startswith("Digest: sha256:")
+    assert lines[3] == "Kill gate: WITHIN_BUDGET"
+
+    report_path = Path(lines[0].removeprefix("Report: "))
+    sidecar_path = Path(lines[1].removeprefix("Sidecar: "))
+    assert report_path.is_file()
+    assert sidecar_path.is_file()
+    assert report_path.suffix == ".md"
+    assert sidecar_path.suffix == ".json"
+    assert report_path.stem == sidecar_path.stem
+    assert report_path.stem.startswith("journal-depth-20270401T000000Z-")
+    assert report_path.parent == env.reports_root.resolve()
+
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert lines[2] == "Digest: sha256:" + sidecar["report_digest"]
+    assert report_path.stem.endswith(sidecar["report_digest"][:12])
+    assert sidecar["markdown_sha256"] == hashlib.sha256(report_path.read_bytes()).hexdigest()
+    markdown = report_path.read_text(encoding="utf-8")
+    assert "# Journal Depth + Kill-Gate Report" in markdown
+    assert "2027-04-01" in markdown
+
+
+def test_output_directory_holds_exactly_two_files(
+    env: _Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, err = _run(capsys, env.argv())
+    assert code == 0, err
+    files = env.files()
+    assert sorted(path.suffix for path in files) == [".json", ".md"]
+
+
+def test_files_are_byte_identical_across_two_runs_and_names_are_stable(
+    env: _Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code_a, out_a, err_a = _run(capsys, env.argv())
+    assert code_a == 0, err_a
+    first = {path.name: path.read_bytes() for path in env.files()}
+    code_b, out_b, err_b = _run(capsys, env.argv())
+    assert code_b == 0, err_b
+    second = {path.name: path.read_bytes() for path in env.files()}
+    assert first == second
+    assert len(first) == 2
+    assert out_a == out_b
+
+
+def test_a_different_as_of_yields_different_file_names(
+    env: _Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code_a, _, err_a = _run(capsys, env.argv(as_of="2027-04-01T00:00:00+00:00"))
+    assert code_a == 0, err_a
+    names_a = {path.name for path in env.files()}
+    code_b, _, err_b = _run(capsys, env.argv(as_of="2027-04-02T00:00:00+00:00"))
+    assert code_b == 0, err_b
+    names_both = {path.name for path in env.files()}
+    assert len(names_both) == 4
+    assert names_a < names_both
+
+
+def test_output_bytes_are_utf8_lf_without_carriage_returns(
+    env: _Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, err = _run(capsys, env.argv())
+    assert code == 0, err
+    for path in env.files():
+        data = path.read_bytes()
+        assert b"\r" not in data
+        assert data.endswith(b"\n")
+        assert not data.startswith(b"\xef\xbb\xbf")
+        data.decode("utf-8")
+
+
+def test_clock_is_never_read_when_as_of_is_given(
+    env: _Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def exploding_clock() -> datetime:
+        raise AssertionError("the wall clock must not be read when --as-of is given")
+
+    code, _, err = _run(capsys, env.argv(), now_fn=exploding_clock)
+    assert code == 0, err
+
+
+def test_clock_is_read_exactly_once_when_as_of_is_omitted(
+    env: _Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[int] = []
+
+    def fixed_clock() -> datetime:
+        calls.append(1)
+        return datetime(2027, 4, 1, 12, 30, 45, 987654, tzinfo=UTC)
+
+    code, out, err = _run(capsys, env.argv(as_of=None), now_fn=fixed_clock)
+    assert code == 0, err
+    assert len(calls) == 1
+    report_path = Path(_stdout_lines(out)[0].removeprefix("Report: "))
+    assert report_path.stem.startswith("journal-depth-20270401T123045Z-")
+    markdown = report_path.read_text(encoding="utf-8")
+    assert "2027-04-01T12:30:45+00:00" in markdown
+    assert "987654" not in markdown
+
+
+def test_naive_as_of_exits_two_and_writes_nothing(
+    env: _Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = _run(capsys, env.argv(as_of="2027-04-01T00:00:00"))
+    assert code == 2
+    assert out == ""
+    assert "as-of" in err
+    assert env.files() == []
+
+
+def test_unparseable_as_of_exits_two_and_writes_nothing(
+    env: _Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, err = _run(capsys, env.argv(as_of="not-a-timestamp"))
+    assert code == 2
+    assert "as-of" in err
+    assert env.files() == []
+
+
+def test_resamples_below_the_minimum_exits_two(
+    env: _Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, err = _run(capsys, env.argv("--resamples", "50"))
+    assert code == 2
+    assert "resamples" in err
+    assert env.files() == []
+
+
+def test_unknown_flag_exits_two(env: _Env, capsys: pytest.CaptureFixture[str]) -> None:
+    code, _, err = _run(capsys, env.argv("--not-a-flag"))
+    assert code == 2
+    assert err != ""
+    assert env.files() == []
+
+
+def test_malformed_evidence_exits_one_with_the_copy_and_writes_no_files(
+    env: _Env, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    broken = tmp_path / "broken-evidence.json"
+    broken.write_text('{"schema": "analytics-evidence/1", "backtest": 5}', encoding="utf-8")
+    env.evidence = broken
+    code, out, err = _run(capsys, env.argv())
+    assert code == 1
+    assert out == ""
+    assert err.startswith("Report not produced: ")
+    assert err.rstrip("\n").endswith(COPY_TAIL)
+    assert env.files() == []
+
+
+def test_missing_evidence_file_exits_one_without_leaking_the_path(
+    env: _Env, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    env.evidence = tmp_path / "nope" / "missing.json"
+    code, _, err = _run(capsys, env.argv())
+    assert code == 1
+    assert err.startswith("Report not produced: ")
+    assert env.files() == []
+
+
+def test_out_dir_escape_exits_one_and_writes_nothing(
+    env: _Env, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    escape = tmp_path / "reports" / ".." / "outside"
+    code, out, err = _run(capsys, env.argv("--out-dir", str(escape)))
+    assert code == 1
+    assert out == ""
+    assert err.startswith("Report not produced: ")
+    assert not (tmp_path / "outside").exists()
+    assert env.files() == []
+
+
+def test_out_dir_inside_the_root_is_created_and_used(
+    env: _Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = env.reports_root / "nested" / "run"
+    code, out, err = _run(capsys, env.argv("--out-dir", str(target)))
+    assert code == 0, err
+    report_path = Path(_stdout_lines(out)[0].removeprefix("Report: "))
+    assert report_path.parent == target.resolve()
+    assert len(env.files()) == 2
+
+
+def test_duplicate_trade_id_across_experiments_exits_one(
+    env: _Env, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    document = json.loads(EVIDENCE_FIXTURE.read_text(encoding="utf-8"))
+    first = document["backtest"][0]
+    second = json.loads(json.dumps(first))
+    second["experiment"]["experiment_id"] = hashlib.sha256(b"other-experiment").hexdigest()
+    document["backtest"] = [first, second]
+    path = tmp_path / "duplicate-trades.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    env.evidence = path
+    code, _, err = _run(capsys, env.argv())
+    assert code == 1
+    assert "duplicate trade_id" in err
+    assert env.files() == []
+
+
+def test_a_missing_candle_store_still_produces_a_report(
+    env: _Env, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    env.raw_root = tmp_path / "no-such-raw-root"
+    code, out, err = _run(capsys, env.argv())
+    assert code == 0, err
+    report_path = Path(_stdout_lines(out)[0].removeprefix("Report: "))
+    assert "NO_1M_COVERAGE" in report_path.read_text(encoding="utf-8")
+
+
+def test_the_universe_flag_changes_the_research_universe_provenance(
+    env: _Env, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    code_a, out_a, err_a = _run(capsys, env.argv())
+    assert code_a == 0, err_a
+    universe = tmp_path / "universe.json"
+    universe.write_text('["BTCUSDT"]', encoding="utf-8")
+    code_b, out_b, err_b = _run(capsys, env.argv("--universe", str(universe)))
+    assert code_b == 0, err_b
+    digest_a = _stdout_lines(out_a)[2]
+    digest_b = _stdout_lines(out_b)[2]
+    assert digest_a != digest_b
+
+
+def test_the_seed_and_resamples_flags_are_echoed_in_the_sidecar(
+    env: _Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = _run(capsys, env.argv("--resamples", "200", "--seed", "7"))
+    assert code == 0, err
+    sidecar_path = Path(_stdout_lines(out)[1].removeprefix("Sidecar: "))
+    report = json.loads(sidecar_path.read_text(encoding="utf-8"))["report"]
+    assert report["resamples"] == 200
+    assert report["base_seed"] == 7
+
+
+def test_terminal_state_exits_zero_with_the_calm_banner(
+    env: _Env, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    backtest: list[dict[str, Any]] = []
+    decisions: list[dict[str, Any]] = []
+    for family in FAMILIES:
+        development = _candidate_experiment(family, "dev")
+        validation = _candidate_experiment(family, "val")
+        backtest.extend([development, validation])
+        decisions.append(
+            {
+                "family_id": family,
+                "status": "TESTED_FAIL",
+                "decision_ref": f"DEC-TEST-{family}",
+                "decided_at_utc": "2026-12-01T00:00:00+00:00",
+                "development_experiment_ids": [development["experiment"]["experiment_id"]],
+                "validation_experiment_ids": [validation["experiment"]["experiment_id"]],
+            }
+        )
+    env.evidence = _write_evidence(tmp_path / "terminal-evidence.json", backtest)
+    env.decisions = _decisions_file(tmp_path, decisions)
+
+    code, out, err = _run(capsys, env.argv(as_of="2027-04-01T00:00:00+00:00"))
+    assert code == 0, err
+    lines = _stdout_lines(out)
+    assert lines[3] == "Kill gate: INSUFFICIENT_EDGE"
+    markdown = Path(lines[0].removeprefix("Report: ")).read_text(encoding="utf-8")
+    assert "NO_TRADE / INSUFFICIENT EDGE." in markdown
+    assert "This is a valid terminal outcome, not an error." in markdown
