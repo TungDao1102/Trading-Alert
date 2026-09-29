@@ -1,0 +1,72 @@
+{
+  "records": [
+    {
+      "attribution": "system",
+      "epoch_id": "EPOCH-1",
+      "strategy_id": "trend-pullback",
+      "strategy_version": "v2.0.0",
+      "parameter_set_id": "PS-1",
+      "parameter_set_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "experiment_id": "EXP-1",
+      "symbol": "ETHUSDT",
+      "signal_id": "SIG-E",
+      "plan_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "reason_code": "",
+      "signal_detected_at_utc": "2026-02-03T12:00:00+00:00",
+      "approval_acted_at_utc": null,
+      "order_submitted_at_utc": null,
+      "fill_time_utc": null
+    },
+    {
+      "attribution": "opportunity",
+      "epoch_id": "EPOCH-1",
+      "strategy_id": "trend-pullback",
+      "strategy_version": "v2.0.0",
+      "parameter_set_id": "PS-1",
+      "parameter_set_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "experiment_id": "EXP-1",
+      "symbol": "ETHUSDT",
+      "signal_id": "SIG-E",
+      "plan_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "reason_code": "EXPIRED",
+      "signal_detected_at_utc": "2026-02-03T12:00:00+00:00",
+      "approval_acted_at_utc": null,
+      "order_submitted_at_utc": null,
+      "fill_time_utc": null
+    },
+    {
+      "attribution": "opportunity",
+      "epoch_id": "EPOCH-1",
+      "strategy_id": "trend-pullback",
+      "strategy_version": "v2.0.0",
+      "parameter_set_id": "PS-1",
+      "parameter_set_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "experiment_id": "EXP-1",
+      "symbol": "ETHUSDT",
+      "signal_id": "SIG-S",
+      "plan_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "reason_code": "SKIPPED_USER",
+      "signal_detected_at_utc": "2026-02-03T10:00:00+00:00",
+      "approval_acted_at_utc": null,
+      "order_submitted_at_utc": null,
+      "fill_time_utc": null
+    },
+    {
+      "attribution": "system",
+      "epoch_id": "EPOCH-1",
+      "strategy_id": "trend-pullback",
+      "strategy_version": "v2.0.0",
+      "parameter_set_id": "PS-1",
+      "parameter_set_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "experiment_id": "EXP-1",
+      "symbol": "ETHUSDT",
+      "signal_id": "SIG-S",
+      "plan_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "reason_code": "",
+      "signal_detected_at_utc": "2026-02-03T10:00:00+00:00",
+      "approval_acted_at_utc": null,
+      "order_submitted_at_utc": null,
+      "fill_time_utc": null
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "n_records": 2,
+  "lifecycle": [
+    {
+      "signal_id": "SIG-E",
+      "path": "OPPORTUNITY",
+      "approval_result": "EXPIRED",
+      "reason_code": "EXPIRED"
+    },
+    {
+      "signal_id": "SIG-S",
+      "path": "OPPORTUNITY",
+      "approval_result": "SKIPPED",
+      "reason_code": "SKIPPED_USER"
+    }
+  ],
+  "seen_incomplete": [
+    [
+      "NO_SEEN_TIMESTAMP",
+      2
+    ]
+  ],
+  "downstream_legs_n_measured": 0,
+  "downstream_legs_incomplete": [],
+  "fill_rate": {
+    "numerator": 0,
+    "denominator": 0,
+    "pct": null
+  },
+  "expiry_rate": {
+    "numerator": 0,
+    "denominator": 0,
+    "pct": null
+  }
+}

@@ -13,8 +13,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from src.analytics.lifecycle import LifecyclePath, LifecycleRecord
+from src.analytics.types import EvidenceKind
 from src.backtest.simulator import TradeRecord
 from src.core.types import Candle
+from src.paper.attribution import AttributionKind
+from src.paper.journal import PaperRecord
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase10"
 
@@ -134,3 +138,55 @@ def make_trade_record(**overrides: Any) -> TradeRecord:
         else:
             fields[name] = value
     return TradeRecord(**fields)
+
+
+def make_paper_record(row: dict[str, Any]) -> PaperRecord:
+    """Build a PaperRecord from a fixture row (attribution/ISO times parsed)."""
+    fields = dict(row)
+    fields["attribution"] = AttributionKind(fields["attribution"])
+    for name in (
+        "signal_detected_at_utc",
+        "approval_acted_at_utc",
+        "order_submitted_at_utc",
+        "fill_time_utc",
+    ):
+        raw = fields[name]
+        fields[name] = None if raw is None else parse_utc(raw)
+    return PaperRecord(**fields)
+
+
+def make_lifecycle_record(**overrides: Any) -> LifecycleRecord:
+    """Build a LifecycleRecord; ISO strings become UTC datetimes, prices Decimals."""
+    fields: dict[str, Any] = {
+        "evidence": EvidenceKind.LIVE,
+        "source_id": "SIG-DEFAULT",
+        "signal_id": "SIG-DEFAULT",
+        "symbol": "BTCUSDT",
+        "strategy_version": "v2.0.0",
+        "direction": "LONG",
+        "path": LifecyclePath.SYSTEM_ONLY,
+        "approval_result": None,
+        "signal_detected_at_utc": None,
+        "delivery_requested_at_utc": None,
+        "approved_at_utc": None,
+        "order_submitted_at_utc": None,
+        "fill_time_utc": None,
+        "intended_entry_price": None,
+        "actual_entry_price": None,
+        "entry_filled": None,
+        "expired_without_fill": None,
+        "reason_code": "",
+        "synthetic_lag": False,
+        "epoch_id": None,
+    }
+    unknown = set(overrides) - set(fields)
+    if unknown:
+        raise KeyError(f"unknown LifecycleRecord fields: {sorted(unknown)}")
+    for name, value in overrides.items():
+        if isinstance(value, str) and name.endswith("_utc"):
+            fields[name] = parse_utc(value)
+        elif isinstance(value, str) and name.endswith("_entry_price"):
+            fields[name] = D(value)
+        else:
+            fields[name] = value
+    return LifecycleRecord(**fields)

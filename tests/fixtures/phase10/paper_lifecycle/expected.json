@@ -70,5 +70,24 @@
     }
   ],
   "synthetic_lag_seconds": 30,
-  "section_digest": "455aa7178f893c5e1c76adccf3a9f46b250099df42e027013123be1926d8e44e"
+  "section_digest": "455aa7178f893c5e1c76adccf3a9f46b250099df42e027013123be1926d8e44e",
+  "fill_rate": {
+    "numerator": 1,
+    "denominator": 1,
+    "pct": "100"
+  },
+  "expiry_rate": {
+    "numerator": 0,
+    "denominator": 1,
+    "pct": "0"
+  },
+  "deviation": {
+    "n_measured": 0,
+    "incomplete": [
+      [
+        "NOT_MEASURED_FOR_EVIDENCE",
+        1
+      ]
+    ]
+  }
 }
