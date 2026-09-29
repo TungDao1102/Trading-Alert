@@ -229,9 +229,18 @@ def scan_family_facts(
     whose parameter_set_hash equals one of a family's candidate hashes are mapped to that
     family; a CANDIDATE with any other hash is reported in `unknown_experiment_ids` and is
     never guessed onto a family. Baseline-run experiments are excluded without being listed.
+    A recorded decision whose family_id matches no registry directory raises
+    `DecisionsFileError` (fail closed: a human decision input is never dropped).
     """
     decision_by_family = {decision.family_id: decision for decision in decisions.families}
     candidate_hashes = {family_id: _candidate_hashes(family_id) for family_id in _family_ids()}
+    # A recorded human decision whose family_id matches no registry directory (typo, rename)
+    # must never vanish silently: that would hide a recorded pass or a recorded fail.
+    unknown_decisions = sorted(set(decision_by_family) - set(candidate_hashes))
+    if unknown_decisions:
+        raise DecisionsFileError(
+            f"families: decisions for unregistered family ids {unknown_decisions}"
+        )
     hash_to_family: dict[str, str] = {}
     for family_id, hashes in candidate_hashes.items():
         for param_hash in hashes:

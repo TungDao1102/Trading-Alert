@@ -297,6 +297,28 @@ def test_scan_flags_feed_gate_facts_and_decisions_set_status() -> None:
     assert facts.baseline_compared is True
 
 
+@pytest.mark.parametrize("family_id", ["trend_pullback", "Trend-Pullback", "retired-family"])
+def test_scan_decision_for_an_unregistered_family_fails_closed(family_id: str) -> None:
+    """CR-02: a recorded decision matching no params/ directory is never silently dropped."""
+    decisions = DecisionsFile(
+        families=(
+            FamilyDecision(
+                family_id=family_id,
+                status=FamilyStatus.TESTED_PASS,
+                decision_ref="DEC-typo",
+                decided_at_utc=datetime(2026, 12, 1, tzinfo=UTC),
+                development_experiment_ids=("5" * 64,),
+                validation_experiment_ids=("6" * 64,),
+            ),
+        ),
+        resets=(),
+        recorded_terminal=None,
+    )
+    with pytest.raises(DecisionsFileError, match="unregistered family") as info:
+        _scan(decisions=decisions)
+    assert family_id in str(info.value)
+
+
 def test_scan_missing_flags_default_to_none_reproducibility_and_false_others() -> None:
     trend_v1 = load_parameter_set("trend-pullback", "baseline-v1").parameter_set_hash
     scan = _scan(experiments=(_experiment("7", parameter_set_hash=trend_v1),))
