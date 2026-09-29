@@ -29,6 +29,7 @@ from src.execution.order_ids import derive_algo_client_id, derive_client_order_i
 from src.execution.placement import (
     ProtectiveSizing,
     ProtectiveTemplate,
+    build_sl_leg,
     derive_limit_price,
     derive_sl_trigger_price,
     size_protectives_to_filled_qty,
@@ -431,18 +432,51 @@ def _is_leg_confirmed(response: Any) -> bool:
     return True
 
 
+async def _place_protective_leg(
+    *,
+    adapter: ExecutionAdapter,
+    symbol: str,
+    plan_hash: str,
+    role: str,
+    leg: dict[str, Any],
+) -> tuple[bool, str | None]:
+    """Place one protective leg; return `(confirmed, failure_detail)`.
+
+    Fail closed (09-REVIEW CR-02): an adapter exception is NOT a
+    confirmation. It is treated exactly like an unconfirmed response so
+    the caller always enters SAFE_MODE and returns an `AttachOutcome`
+    instead of a bare exception. `failure_detail` records the role and
+    exception TYPE only (never the message, which may carry request
+    material).
+    """
+    client_algo_id = derive_algo_client_id(plan_hash=plan_hash, role=role)
+    try:
+        response = await adapter.place_algo_protective(
+            symbol=symbol,
+            client_algo_id=client_algo_id,
+            **leg,
+        )
+    except Exception as exc:  # noqa: BLE001 — any adapter failure is an unconfirmed leg
+        return (False, f"{role}: {type(exc).__name__}")
+    return (_is_leg_confirmed(response), None)
+
+
 @dataclass(frozen=True)
 class AttachOutcome:
     """Result of `attach_protectives_to_fill(...)`.
 
-    `is_no_trade=True` carries `NO_FILL`, a `ProtectiveSizing` rejection
-    reason code, or `ENTRY_WITHOUT_PROTECTIVE` in `reason_code`.
-    `sized` is the `ProtectiveSizing` used to place the legs (None when
-    rejected before sizing succeeded). `placed_legs` lists the
-    `OrderRole` values successfully confirmed on the exchange, in the
-    order they were placed. `failure_detail` names the leg role and the
-    exception type when a leg placement raised (audit trail — never the
-    exception message, which may carry request material).
+    `is_no_trade=True` carries `NO_FILL` or `ENTRY_WITHOUT_PROTECTIVE`
+    in `reason_code` — a fill that could not be fully protected is
+    ALWAYS reported as ENTRY_WITHOUT_PROTECTIVE (09-REVIEW CR-03), even
+    when the root cause is a TP sizing rejection.
+    `sized` is the `ProtectiveSizing` used to place the legs; when TP
+    sizing was rejected it is the rejected sizing (its `reason_code`
+    carries MIN_QTY_REJECT / NOTIONAL_REJECT / EXCHANGE_CONSTRAINT).
+    `placed_legs` lists the `OrderRole` values successfully confirmed on
+    the exchange, in the order they were placed. `failure_detail` names
+    the leg role and the exception type when a leg placement raised, or
+    the TP sizing rejection (audit trail — never the exception message,
+    which may carry request material).
     """
 
     is_no_trade: bool
@@ -540,13 +574,40 @@ async def attach_protectives_to_fill(
         candidate_position_side=candidate_position_side,
     )
     if sizing.is_no_trade:
+        # 09-REVIEW CR-03: TP1 is un-sizeable (min-qty / min-notional),
+        # but a fill EXISTS. The close-all SL does not depend on quantity,
+        # so it is always placed first; the missing TP legs then hold
+        # ENTRY_WITHOUT_PROTECTIVE + SAFE_MODE (never a plain sizing
+        # reason code while a live fill may have no stop). The rejected
+        # sizing is carried in `sized` so its reason code stays auditable.
+        sl_leg = build_sl_leg(
+            protective_template=protective_template,
+            position_mode=position_mode,
+            candidate_position_side=candidate_position_side,
+        )
+        sl_confirmed, sl_failure = await _place_protective_leg(
+            adapter=adapter,
+            symbol=constraint_snapshot.symbol,
+            plan_hash=plan_hash,
+            role=OrderRole.STOP_LOSS.value,
+            leg=sl_leg,
+        )
+        placed = (OrderRole.STOP_LOSS.value,) if sl_confirmed else ()
         require_protective_confirmation(
-            confirmed_roles=frozenset(),
+            confirmed_roles=frozenset(placed),
             safe_mode_controller=safe_mode_controller,
             now_utc=now_utc,
         )
         return AttachOutcome(
-            is_no_trade=True, reason_code=sizing.reason_code, sized=None, placed_legs=()
+            is_no_trade=True,
+            reason_code=_ENTRY_WITHOUT_PROTECTIVE,
+            sized=sizing,
+            placed_legs=placed,
+            failure_detail=(
+                sl_failure
+                if sl_failure is not None
+                else f"{OrderRole.TAKE_PROFIT_1.value} sizing: {sizing.reason_code}"
+            ),
         )
 
     confirmed_roles: list[str] = []
@@ -556,23 +617,16 @@ async def attach_protectives_to_fill(
         (OrderRole.TAKE_PROFIT_2.value, sizing.tp2_leg),
     )
     for role, leg in role_leg_pairs:
-        assert leg is not None  # sizing.is_no_trade is False: all legs populated
-        client_algo_id = derive_algo_client_id(plan_hash=plan_hash, role=role)
-        failure_detail: str | None = None
-        try:
-            response = await adapter.place_algo_protective(
-                symbol=constraint_snapshot.symbol,
-                client_algo_id=client_algo_id,
-                **leg,
-            )
-        except Exception as exc:  # noqa: BLE001 — any adapter failure is an unconfirmed leg
-            # Fail closed (09-REVIEW CR-02): an exception is NOT a
-            # confirmation. Treat it exactly like an unconfirmed response
-            # so SAFE_MODE is always entered and the caller always gets
-            # an AttachOutcome instead of a bare exception.
-            response = None
-            failure_detail = f"{role}: {type(exc).__name__}"
-        if not _is_leg_confirmed(response):
+        if leg is None:  # unreachable: sizing.is_no_trade is False
+            raise RuntimeError(f"attach_protectives_to_fill: {role} leg missing from sizing")
+        confirmed, failure_detail = await _place_protective_leg(
+            adapter=adapter,
+            symbol=constraint_snapshot.symbol,
+            plan_hash=plan_hash,
+            role=role,
+            leg=leg,
+        )
+        if not confirmed:
             # Unconfirmed leg: hold ENTRY_WITHOUT_PROTECTIVE immediately.
             # No further legs are attempted; no rescue placement is
             # ever issued (D-02) — the sweeper stays cancel-only.

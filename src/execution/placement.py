@@ -217,6 +217,50 @@ def quantize_protective_qty(
     return (rounded, None)
 
 
+def build_sl_leg(
+    *,
+    protective_template: ProtectiveTemplate,
+    position_mode: str,
+    candidate_position_side: str,
+) -> dict[str, Any]:
+    """Build the close-all SL leg, independent of any quantity sizing.
+
+    The SL is `closePosition=true` (no quantity), so it never depends on
+    the filled quantity or on TP sizing. The attach path places it FIRST
+    even when TP1 is un-sizeable (09-REVIEW CR-03) — a filled position
+    must never be left without a stop because a take-profit leg failed
+    the min-qty/min-notional gates.
+
+    Args:
+        protective_template: The protective levels (SL trigger used).
+        position_mode: "ONE_WAY" or "HEDGE".
+        candidate_position_side: "LONG" or "SHORT".
+
+    Returns:
+        The mode-correct SL leg dict (same keys as every sized leg).
+    """
+    if position_mode not in (_ONE_WAY, _HEDGE):
+        raise ValueError(
+            f"position_mode must be {_ONE_WAY!r} or {_HEDGE!r}, got {position_mode!r}"
+        )
+    if candidate_position_side not in (_LONG, _SHORT):
+        raise ValueError(
+            f"candidate_position_side must be {_LONG!r} or {_SHORT!r}, "
+            f"got {candidate_position_side!r}"
+        )
+    return {
+        "side": "SELL" if candidate_position_side == _LONG else "BUY",
+        "position_side": _BOTH if position_mode == _ONE_WAY else candidate_position_side,
+        "algo_type": "CONDITIONAL",
+        "type": "STOP_MARKET",
+        "trigger_price": protective_template.stop_loss_trigger_price,
+        "close_position": True,
+        "quantity": None,
+        "reduce_only": None,
+        "working_type": "MARK_PRICE",
+    }
+
+
 def size_protectives_to_filled_qty(
     *,
     filled_quantity: Decimal,
@@ -287,18 +331,13 @@ def size_protectives_to_filled_qty(
             tp2_leg=None,
         )
 
-    # Build the SL leg (close-all, no quantity).
-    sl_leg: dict[str, Any] = {
-        "side": protective_side,
-        "position_side": leg_position_side,
-        "algo_type": "CONDITIONAL",
-        "type": "STOP_MARKET",
-        "trigger_price": protective_template.stop_loss_trigger_price,
-        "close_position": True,
-        "quantity": None,
-        "reduce_only": None,
-        "working_type": "MARK_PRICE",
-    }
+    # Build the SL leg (close-all, no quantity) — single source of truth
+    # shared with the attach path's SL-first fallback (CR-03).
+    sl_leg = build_sl_leg(
+        protective_template=protective_template,
+        position_mode=position_mode,
+        candidate_position_side=candidate_position_side,
+    )
 
     # Build the TP1 leg (explicit qty, reduce_only per mode).
     if position_mode == _ONE_WAY:
@@ -342,6 +381,7 @@ def size_protectives_to_filled_qty(
 
 
 __all__ = [
+    "build_sl_leg",
     "derive_limit_price",
     "derive_sl_trigger_price",
     "quantize_protective_qty",

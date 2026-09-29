@@ -407,6 +407,58 @@ def test_adapter_exception_on_tp1_forces_safe_mode_and_stops() -> None:
     assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
 
 
+def test_unsizeable_tp1_still_places_sl_first_and_holds_entry_without_protective() -> None:
+    """CR-03: a first partial fill of 0.001 BTC with a 0.5 TP1 fraction
+    floors TP1 to 0 (MIN_QTY_REJECT). The close-all SL must still be
+    placed; the outcome is ENTRY_WITHOUT_PROTECTIVE (never a bare sizing
+    reason code) and SAFE_MODE is entered for the missing TP legs."""
+    from src.execution.fill_monitor import FillEvent
+    from src.execution.manager import attach_protectives_to_fill
+
+    case_input = _load_input()
+    expected = _load_expected()
+    tiny_fill = FillEvent(
+        order_id="ord_entry_001",
+        exchange_trade_id="trade_tiny_001",
+        symbol="BTCUSDT",
+        side="BUY",
+        position_side="BOTH",
+        fill_price=Decimal("100.00"),
+        fill_quantity=Decimal("0.001"),
+        fill_time_utc=_parse_utc("2026-09-19T10:29:00+00:00"),
+    )
+    adapter = FakeExecutionAdapter()
+    safe_mode_controller = _RecordingSafeModeController()
+
+    outcome = asyncio.run(
+        attach_protectives_to_fill(
+            fill_events=[tiny_fill],
+            current_position_view=_build_current_position_view(case_input),
+            has_protective=False,
+            protective_template=_build_protective_template(case_input),
+            constraint_snapshot=_build_constraint_snapshot(case_input),
+            position_mode=case_input["position_mode"],
+            candidate_position_side=case_input["candidate_position_side"],
+            plan_hash=case_input["plan_hash"],
+            adapter=adapter,
+            now_utc=_parse_utc(case_input["now_utc"]),
+            safe_mode_controller=safe_mode_controller,
+        )
+    )
+
+    assert outcome.is_no_trade is True
+    assert outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
+    assert outcome.placed_legs == ("STOP_LOSS",)
+    assert outcome.sized is not None and outcome.sized.reason_code == "MIN_QTY_REJECT"
+    assert outcome.failure_detail == "TAKE_PROFIT_1 sizing: MIN_QTY_REJECT"
+    assert len(adapter.calls) == 1
+    sl_kwargs = adapter.calls[0]["kwargs"]
+    assert sl_kwargs["client_algo_id"] == expected["sl_algo_client_id"]
+    assert sl_kwargs["close_position"] is True
+    assert sl_kwargs["quantity"] is None
+    assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
+
+
 def test_missing_safe_mode_controller_raises_before_any_adapter_call() -> None:
     """CR-02: `safe_mode_controller=None` fails closed before any order."""
     adapter = FakeExecutionAdapter()
