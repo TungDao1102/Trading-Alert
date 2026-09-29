@@ -9,7 +9,6 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-
 from src.analytics.excursion import build_excursion_section, compute_trade_excursion
 from src.analytics.inputs import normalize_backtest
 from src.analytics.types import (
@@ -18,6 +17,7 @@ from src.analytics.types import (
     IncompleteReason,
     OutcomeContext,
 )
+
 from tests.phase10_helpers import D, load_expected, load_input, make_candles, make_trade_record
 
 

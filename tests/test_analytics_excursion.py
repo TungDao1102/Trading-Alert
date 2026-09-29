@@ -11,7 +11,6 @@ import re
 from decimal import Decimal
 
 import pytest
-
 from src.analytics.excursion import (
     ExcursionSection,
     TradeExcursion,
@@ -21,6 +20,7 @@ from src.analytics.excursion import (
 from src.analytics.inputs import normalize_backtest
 from src.analytics.types import AnalyticsInputError, EvidenceKind, TradeOutcome
 from src.core.types import Candle
+
 from tests.phase10_helpers import D, load_expected, load_input, make_candles, make_trade_record
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")

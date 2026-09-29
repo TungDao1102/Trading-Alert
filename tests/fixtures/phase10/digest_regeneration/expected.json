@@ -1,0 +1,21 @@
+{
+  "trades": {
+    "T-DR-2": {
+      "mfe_price": "3.30",
+      "mae_price": "0.60",
+      "mfe_r": "3.3",
+      "mae_r": "0.6",
+      "time_to_mfe_s": "105",
+      "time_to_mae_s": "45",
+      "holding_s": "145"
+    }
+  },
+  "section": {
+    "n_outcomes": 3,
+    "n_measured": 2,
+    "incomplete": [["NO_FILL_EVENT", 1]]
+  },
+  "base_seed": 20260929,
+  "resamples": 100,
+  "section_digest": ""
+}
