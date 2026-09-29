@@ -337,7 +337,7 @@
         ]
       }
     },
-    "section_digest": null,
+    "section_digest": "285c617f877c5e8edb54cc51e7df4987b87db3e464ce0759d4acbe3fe1532287",
     "section_digest_params": "base_seed=20260929 resamples=100 evidence=BACKTEST"
   }
 }

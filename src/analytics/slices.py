@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
 
@@ -83,6 +84,11 @@ class SliceTable:
     slice_count: int
     total_n: int
 
+    @property
+    def display_rows(self) -> tuple[SliceRow, ...]:
+        """ALL row first, then the slice rows in stable key order (D-02)."""
+        return (self.all_row, *self.rows)
+
     def digest(self) -> str:
         return sha256_hex(
             {
@@ -144,6 +150,22 @@ def _row(key: str, metrics: CoreMetrics) -> SliceRow:
     )
 
 
+_SESSION_ORDER = {label: index for index, (label, _, _) in enumerate(SESSION_BANDS)}
+_DIRECTION_ORDER = {"LONG": 0, "SHORT": 1}
+
+
+def _label_order(dimension: SliceDimension, label: str) -> tuple[int, str]:
+    """Total order key: session by band, direction LONG then SHORT, all else A-Z.
+
+    month/quarter labels (YYYY-MM, YYYY-Qn) are zero-padded so A-Z is chronological.
+    """
+    if dimension is SliceDimension.SESSION:
+        return (_SESSION_ORDER[label], label)
+    if dimension is SliceDimension.DIRECTION:
+        return (_DIRECTION_ORDER[label], label)
+    return (0, label)
+
+
 def _build_table(
     dimension: SliceDimension,
     outcomes: Sequence[TradeOutcome],
@@ -154,13 +176,16 @@ def _build_table(
 ) -> SliceTable:
     """Generic builder: ALL row (ordinal 0), then keyed rows, UNKNOWN, INCOMPLETE.
 
-    Ordering is by the label's plain ascending string order - a documented stable
-    key, never a metric value. Rows take bootstrap ordinals 1..k in display order.
+    Ordering is an explicit documented total key per dimension (`_label_order`) -
+    never a metric value. Rows take bootstrap ordinals 1..k in display order.
     """
     groups: dict[str, list[TradeOutcome]] = {}
     for outcome in outcomes:
         groups.setdefault(key_fn(outcome), []).append(outcome)
-    ordered = sorted(key for key in groups if key not in (UNKNOWN_KEY, INCOMPLETE_KEY))
+    ordered = sorted(
+        (key for key in groups if key not in (UNKNOWN_KEY, INCOMPLETE_KEY)),
+        key=lambda label: _label_order(dimension, label),
+    )
     for bucket in (UNKNOWN_KEY, INCOMPLETE_KEY):
         if bucket in groups:
             ordered.append(bucket)
@@ -186,11 +211,81 @@ def _build_table(
     )
 
 
+def session_for(entry_time_utc: datetime) -> str:
+    """Session band of a UTC entry time: start-inclusive, end-exclusive hour bands."""
+    if not isinstance(entry_time_utc, datetime) or entry_time_utc.tzinfo is None:
+        raise AnalyticsInputError("entry_time_utc must be a UTC-aware datetime")
+    hour = entry_time_utc.astimezone(UTC).hour
+    for label, start, end in SESSION_BANDS:
+        if start <= hour < end:
+            return label
+    raise AnalyticsInputError(f"hour {hour} is outside every session band")
+
+
 def _symbol_key(outcome: TradeOutcome) -> str:
     return outcome.symbol
 
 
-_KEY_FUNCTIONS: tuple[tuple[SliceDimension, KeyFn], ...] = ((SliceDimension.SYMBOL, _symbol_key),)
+def _month_key(outcome: TradeOutcome) -> str:
+    """Month from EXIT time (reconciles with Phase-6 quarters); no exit -> INCOMPLETE."""
+    exit_time = outcome.exit_time_utc
+    if exit_time is None:
+        return INCOMPLETE_KEY
+    return f"{exit_time.year:04d}-{exit_time.month:02d}"
+
+
+def _quarter_key(outcome: TradeOutcome) -> str:
+    """Quarter from EXIT time, formatted YYYY-Qn; no exit -> INCOMPLETE."""
+    exit_time = outcome.exit_time_utc
+    if exit_time is None:
+        return INCOMPLETE_KEY
+    return f"{exit_time.year:04d}-Q{(exit_time.month - 1) // 3 + 1}"
+
+
+def _session_key(outcome: TradeOutcome) -> str:
+    """Session from the UTC hour of ENTRY time; no entry -> INCOMPLETE."""
+    if outcome.entry_time_utc is None:
+        return INCOMPLETE_KEY
+    return session_for(outcome.entry_time_utc)
+
+
+def _direction_key(outcome: TradeOutcome) -> str:
+    return outcome.direction
+
+
+def _tag_or_unknown(tag: str | None) -> str:
+    return tag if tag else UNKNOWN_KEY
+
+
+def _volatility_key(outcome: TradeOutcome) -> str:
+    return _tag_or_unknown(outcome.vol_regime)
+
+
+# Assumption A4 (flagged): the trend/range slice maps the 4H EMA-gate tags.
+_TREND_RANGE_BY_TAG = {"BULLISH": "TREND", "BEARISH": "TREND", "NEUTRAL": "RANGE"}
+
+
+def _trend_range_key(outcome: TradeOutcome) -> str:
+    tag = outcome.regime
+    if not tag:
+        return UNKNOWN_KEY
+    return _TREND_RANGE_BY_TAG.get(tag, tag)
+
+
+def _strategy_version_key(outcome: TradeOutcome) -> str:
+    return outcome.strategy_version
+
+
+_KEY_FUNCTIONS: tuple[tuple[SliceDimension, KeyFn], ...] = (
+    (SliceDimension.SYMBOL, _symbol_key),
+    (SliceDimension.MONTH, _month_key),
+    (SliceDimension.QUARTER, _quarter_key),
+    (SliceDimension.SESSION, _session_key),
+    (SliceDimension.DIRECTION, _direction_key),
+    (SliceDimension.VOLATILITY_REGIME, _volatility_key),
+    (SliceDimension.TREND_RANGE_REGIME, _trend_range_key),
+    (SliceDimension.STRATEGY_VERSION, _strategy_version_key),
+)
 
 
 def build_slices(
