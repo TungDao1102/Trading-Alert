@@ -18,5 +18,8 @@
     "DEC-2026-11-fail-range-mr",
     "DEC-2026-11-fail-trend-pullback",
     "DEC-2026-11-pass-breakout-retest"
-  ]
+  ],
+  "evidence_digest": "d50e8684788310f454d54fa29eec3183c9ccd4db403d526a1e7742875b9f44a1",
+  "verdict_digest": "c3af19362dc96e8e8fc88991e2f4dd08d75b52361b44c82fded92869acf8e516",
+  "journal_event_id": "kill_gate_dec370b4a7db40868520381773b2ca77f284dccbd4921c9ce9ca0873cf1bdfda"
 }

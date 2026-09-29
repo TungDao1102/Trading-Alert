@@ -6,7 +6,10 @@
     "families_budget_met": true,
     "whole_months": 5,
     "extra_days": 27,
-    "months_elapsed": "5.9000"
+    "months_elapsed": "5.9000",
+    "evidence_digest": "c8254915525044d607588dc5cebc47209032f312e87f22070cd0c16f37a532de",
+    "verdict_digest": "cd4cef4d21f2c72dbcfa399e2cb57e851f5db873275ae56ad8b4aadb7beb01ed",
+    "journal_event_id": "kill_gate_6d44ca7aebf3de1688108db08a3e5a43c64f0452b242c74fc2425277992c831e"
   },
   "at": {
     "evaluated_at_utc": "2027-03-19T00:00:00+00:00",
@@ -15,6 +18,9 @@
     "families_budget_met": true,
     "whole_months": 6,
     "extra_days": 0,
-    "months_elapsed": "6.0000"
+    "months_elapsed": "6.0000",
+    "evidence_digest": "fe37018aebdf8104a0a027fecbc9b03c6407cb2e790f0d0547e70b9d4a56c3c7",
+    "verdict_digest": "6b9f46865afd57864a52ef7acf47116f37d1d5c4bdcd2a17c62a92895e85d2f7",
+    "journal_event_id": "kill_gate_7dd0034983b9b643743b45d688022d312b4b79ea1ab2d67fcbe336b5b0574ae2"
   }
 }
