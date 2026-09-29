@@ -7,20 +7,31 @@ never pooled), stamped with a single digest. Fixture: `tests/fixtures/phase10/re
 
 from __future__ import annotations
 
+import dataclasses
+import random
 import re
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from src.analytics.clock import ClockStart
+from src.analytics.family import FamilyEvidence, FamilyStatus
+from src.analytics.gates import FamilyGateFacts, GateCell
 from src.analytics.inputs import normalize_backtest
 from src.analytics.lifecycle import normalize_backtest_lifecycle, normalize_paper_lifecycle
 from src.analytics.no_trade import no_trade_from_paper
 from src.analytics.report import (
     EvidenceBlock,
     EvidenceInputs,
+    FamilyGateRow,
+    IncompleteEntry,
+    InputNote,
+    KillGateSection,
     ReportInputs,
     build_evidence_block,
     build_journal_depth_report,
+    build_kill_gate_section,
+    live_posture_from_events,
 )
 from src.analytics.stats import r_value
 from src.analytics.types import (
@@ -28,7 +39,11 @@ from src.analytics.types import (
     MIN_RESAMPLES,
     AnalyticsInputError,
     EvidenceKind,
+    IncompleteReason,
 )
+from src.backtest.experiment import ExperimentRecord
+from src.domain.enums import KillGateState
+from src.domain.journal import JournalEvent
 
 from tests.phase10_helpers import (
     load_expected,
@@ -72,7 +87,41 @@ def build_backtest_inputs(raw: dict[str, Any]) -> EvidenceInputs:
         no_trades=normalized.rejects,
         candles_by_symbol=candles_by_symbol,
         realized_r_by_signal=realized,
+        experiments=tuple(build_experiment(item) for item in raw.get("experiments", [])),
+        notes=tuple(
+            InputNote(item["input_name"], item["reason"], item["count"])
+            for item in raw.get("notes", [])
+        ),
     )
+
+
+def build_experiment(raw: dict[str, Any]) -> ExperimentRecord:
+    fields = dict(raw)
+    for name in ("time_range_start_utc", "time_range_end_utc"):
+        fields[name] = parse_utc(fields[name])
+    return ExperimentRecord(**fields)
+
+
+def build_family(raw: dict[str, Any]) -> FamilyEvidence:
+    decided = raw["decided_at_utc"]
+    return FamilyEvidence(
+        family_id=raw["family_id"],
+        sheet_sha256=raw["sheet_sha256"],
+        sheet_slots_present=tuple(raw["sheet_slots_present"]),
+        candidate_param_set_hashes=tuple(raw["candidate_param_set_hashes"]),
+        experiment_ids=tuple(raw["experiment_ids"]),
+        status=FamilyStatus(raw["status"]),
+        decision_ref=raw["decision_ref"],
+        decided_at_utc=None if decided is None else parse_utc(decided),
+        development_experiment_ids=tuple(raw["development_experiment_ids"]),
+        validation_experiment_ids=tuple(raw["validation_experiment_ids"]),
+    )
+
+
+def build_event(raw: dict[str, Any]) -> JournalEvent:
+    fields = dict(raw)
+    fields["occurred_at_utc"] = parse_utc(fields["occurred_at_utc"])
+    return JournalEvent(**fields)
 
 
 def build_paper_inputs(raw: dict[str, Any]) -> EvidenceInputs:
@@ -93,7 +142,14 @@ def build_report_inputs(case: str = CASE) -> ReportInputs:
         paper=build_paper_inputs(data["paper"]),
         live=EvidenceInputs(kind=EvidenceKind.LIVE),
         research_symbols=tuple(data["research_symbols"]),
+        expected_universe_hash=data.get("expected_universe_hash"),
         clock=build_clock(data["clock"]),
+        journal_events=tuple(build_event(item) for item in data.get("journal_events", [])),
+        families=tuple(build_family(item) for item in data.get("families", [])),
+        family_gate_facts={
+            family_id: FamilyGateFacts(tested=False, **facts)
+            for family_id, facts in data.get("family_gate_facts", {}).items()
+        },
     )
 
 
@@ -203,3 +259,233 @@ def test_report_inputs_reject_a_mis_slotted_evidence_kind() -> None:
             research_symbols=(),
             clock=build_clock(data["clock"]),
         )
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: live posture, kill-gate section, INCOMPLETE ledger, provenance in the report
+# --------------------------------------------------------------------------- #
+
+KILL_FAMILY_ORDER = ["trend-pullback", "breakout-retest", "range-mr"]
+JUDGEMENT_GATES = ("G04", "G05", "G06", "G09")
+
+
+def _posture_event(event_type: str, at: str, event_id: str) -> JournalEvent:
+    return JournalEvent(
+        journal_event_id=event_id,
+        occurred_at_utc=parse_utc(at),
+        event_type=event_type,
+        entity_type="LiveEnablement",
+        entity_id="LIVE_ORDERS_DISABLED",
+        correlation_id="execution_enablement",
+        payload_json="",
+    )
+
+
+def test_live_posture_is_disabled_for_the_fixture_and_unknown_when_empty() -> None:
+    inputs = build_report_inputs()
+    assert live_posture_from_events(inputs.journal_events) == "LIVE_ORDERS_DISABLED"
+    assert live_posture_from_events(()) == "UNKNOWN"
+    assert build_report().live_posture == "LIVE_ORDERS_DISABLED"
+
+
+def test_live_posture_takes_the_latest_event_and_ignores_other_event_types() -> None:
+    events = [
+        _posture_event("LIVE_ORDERS_DISABLED", "2027-01-01T00:00:00+00:00", "a"),
+        _posture_event("LIVE_ORDERS_ENABLED", "2027-02-01T00:00:00+00:00", "b"),
+        _posture_event("KILL_GATE_EVALUATION", "2027-03-01T00:00:00+00:00", "c"),
+    ]
+    assert live_posture_from_events(events) == "LIVE_ORDERS_ENABLED"
+    events.append(_posture_event("LIVE_ORDERS_DISABLED", "2027-02-15T00:00:00+00:00", "d"))
+    assert live_posture_from_events(events) == "LIVE_ORDERS_DISABLED"
+
+
+def test_live_posture_is_unchanged_under_shuffled_events() -> None:
+    events = [
+        _posture_event("LIVE_ORDERS_DISABLED", "2027-01-01T00:00:00+00:00", "a"),
+        _posture_event("LIVE_ORDERS_ENABLED", "2027-02-01T00:00:00+00:00", "b"),
+        _posture_event("LIVE_ORDERS_DISABLED", "2027-02-01T00:00:00+00:00", "c"),
+        _posture_event("LIVE_ORDERS_ENABLED", "2027-01-15T00:00:00+00:00", "d"),
+    ]
+    baseline = live_posture_from_events(events)
+    for seed in range(8):
+        shuffled = list(events)
+        random.Random(seed).shuffle(shuffled)
+        assert live_posture_from_events(shuffled) == baseline
+
+
+def test_live_posture_helper_does_not_touch_enablement_code() -> None:
+    import ast
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent.parent / "src/analytics/report.py").read_text(
+        encoding="utf-8"
+    )
+    imported = {
+        node.module or ""
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.ImportFrom)
+    }
+    assert not any(module.startswith("src.execution") for module in imported)
+
+
+def test_kill_gate_section_carries_the_verdict_and_ordered_family_rows() -> None:
+    report = build_report()
+    section = report.kill_gate
+    assert isinstance(section, KillGateSection)
+    assert section.verdict.state is KillGateState.INSUFFICIENT_EDGE
+    assert section.verdict.evaluated_at_utc == report.as_of_utc
+    assert [row.family_id for row in section.families] == KILL_FAMILY_ORDER
+    assert all(isinstance(row, FamilyGateRow) for row in section.families)
+    assert list(section.decision_refs) == sorted(set(section.decision_refs))
+    assert len(section.decision_refs) == 3
+    for row in section.families:
+        assert row.status == "TESTED_FAIL"
+        cells = dict(row.cells)
+        assert list(cells) == [f"G{n:02d}" for n in range(1, 11)]
+        for gate in JUDGEMENT_GATES:
+            assert cells[gate] is GateCell.PENDING_THRESHOLD_TBD
+        assert cells["G01"] is GateCell.NOT_EVALUATED
+    trend = section.families[0]
+    assert dict(trend.cells)["G03"] is GateCell.MET
+    assert dict(trend.cells)["G07"] is GateCell.MET
+    assert dict(section.families[1].cells)["G08"] is GateCell.NOT_MET
+    # A family with no recorded facts never gets a fabricated pass.
+    range_cells = dict(section.families[2].cells)
+    assert range_cells["G03"] is GateCell.NOT_MET
+    assert range_cells["G10"] is GateCell.NOT_MET
+    # Dual-universe counts: both backtest trades carry the trend-pullback candidate hash.
+    assert (trend.live5_n, trend.research_n) == (2, 2)
+    assert (section.families[1].live5_n, section.families[1].research_n) == (0, 0)
+    assert [block.evidence for block in section.no_trade] == [
+        EvidenceKind.BACKTEST,
+        EvidenceKind.PAPER,
+        EvidenceKind.LIVE,
+    ]
+
+
+def _untested_family(family_id: str, hash_char: str) -> FamilyEvidence:
+    return FamilyEvidence(
+        family_id=family_id,
+        sheet_sha256=None,
+        sheet_slots_present=(),
+        candidate_param_set_hashes=(hash_char * 64,),
+        experiment_ids=(),
+        status=FamilyStatus.NOT_TESTED,
+        decision_ref=None,
+        decided_at_utc=None,
+        development_experiment_ids=(),
+        validation_experiment_ids=(),
+    )
+
+
+def test_family_rows_put_the_three_fixed_families_first_then_others_alphabetically() -> None:
+    inputs = build_report_inputs()
+    extras = (_untested_family("zeta-x", "e"), _untested_family("alpha-x", "f"))
+    shuffled = (extras[0], *reversed(inputs.families), extras[1])
+    report = build_journal_depth_report(
+        dataclasses.replace(inputs, families=shuffled), base_seed=1, resamples=MIN_RESAMPLES
+    )
+    assert [row.family_id for row in report.kill_gate.families] == [
+        *KILL_FAMILY_ORDER,
+        "alpha-x",
+        "zeta-x",
+    ]
+    untested = report.kill_gate.families[3]
+    assert untested.status == "NOT_TESTED"
+    assert untested.independent is False
+    assert all(cell is not GateCell.MET for _, cell in untested.cells)
+
+
+def test_build_kill_gate_section_rejects_non_backtest_outcomes() -> None:
+    inputs = build_report_inputs()
+    report = build_report()
+    with pytest.raises(AnalyticsInputError):
+        build_kill_gate_section(
+            report.kill_gate.verdict,
+            inputs.families,
+            inputs.family_gate_facts,
+            [block.no_trade for block in report.evidence],
+            [make_outcome(evidence="PAPER", trade_id="P-1")],
+            inputs.research_symbols,
+        )
+
+
+def test_incomplete_ledger_is_sorted_omits_zero_and_surfaces_notes_and_zero_risk() -> None:
+    inputs = build_report_inputs()
+    zero_risk_trade = make_trade_record(
+        trade_id="T-ZERO-RISK",
+        signal_id="SIG-ZERO-RISK",
+        entry_price="100.00",
+        entry_time_utc="2026-01-05T10:00:30+00:00",
+        quantity="1",
+        exit_kind="TP1",
+        exit_price="101.00",
+        exit_time_utc="2026-01-05T10:03:10+00:00",
+        realized_pnl="1.00",
+        realized_risk="0",
+    )
+    extra = normalize_backtest([zero_risk_trade]).outcomes
+    backtest = dataclasses.replace(inputs.backtest, outcomes=(*inputs.backtest.outcomes, *extra))
+    report = build_journal_depth_report(
+        dataclasses.replace(inputs, backtest=backtest), base_seed=1, resamples=MIN_RESAMPLES
+    )
+    ledger = report.incomplete_ledger
+    assert all(isinstance(entry, IncompleteEntry) for entry in ledger)
+    assert all(entry.count > 0 for entry in ledger)
+    order = {EvidenceKind.BACKTEST: 0, EvidenceKind.PAPER: 1, EvidenceKind.LIVE: 2}
+    keys = [(order[entry.evidence], entry.input_name, entry.reason) for entry in ledger]
+    assert keys == sorted(keys)
+    assert len(set(keys)) == len(keys)
+    rejected = [entry for entry in ledger if entry.input_name == "adapter.rejected_rows"]
+    assert [(e.evidence, e.reason, e.count) for e in rejected] == [
+        (EvidenceKind.BACKTEST, "MALFORMED_ROW", 1)
+    ]
+    zero_risk = [entry for entry in ledger if entry.reason == "ZERO_RISK"]
+    assert zero_risk and all(entry.evidence is EvidenceKind.BACKTEST for entry in zero_risk)
+    assert ("core_metrics", 1) in [(entry.input_name, entry.count) for entry in zero_risk]
+    allowed = {reason.value for reason in IncompleteReason} | {"ZERO_RISK", "NOT_R_VALUED"}
+    assert {entry.reason for entry in ledger} <= allowed
+
+
+def test_incomplete_ledger_has_no_entries_for_a_clean_empty_report() -> None:
+    inputs = build_report_inputs()
+    empty = dataclasses.replace(
+        inputs,
+        backtest=EvidenceInputs(kind=EvidenceKind.BACKTEST),
+        paper=EvidenceInputs(kind=EvidenceKind.PAPER),
+    )
+    report = build_journal_depth_report(empty, base_seed=1, resamples=MIN_RESAMPLES)
+    assert report.incomplete_ledger == ()
+
+
+def test_input_note_rejects_free_text_and_unknown_reasons() -> None:
+    with pytest.raises(AnalyticsInputError):
+        InputNote("adapter.rejected_rows", "some free text reason", 1)
+    with pytest.raises(AnalyticsInputError):
+        InputNote("free text name!", "MALFORMED_ROW", 1)
+    with pytest.raises(AnalyticsInputError):
+        InputNote("adapter.rejected_rows", "MALFORMED_ROW", -1)
+
+
+def test_report_digest_covers_kill_gate_ledger_posture_and_provenance() -> None:
+    base = build_report()
+    inputs = build_report_inputs()
+    no_events = build_journal_depth_report(
+        dataclasses.replace(inputs, journal_events=()), base_seed=base.base_seed, resamples=100
+    )
+    assert no_events.live_posture == "UNKNOWN"
+    assert no_events.digest() != base.digest()
+    no_note = build_journal_depth_report(
+        dataclasses.replace(inputs, backtest=dataclasses.replace(inputs.backtest, notes=())),
+        base_seed=base.base_seed,
+        resamples=100,
+    )
+    assert no_note.digest() != base.digest()
+    earlier = build_journal_depth_report(
+        dataclasses.replace(inputs, as_of_utc=datetime(2026, 12, 1, tzinfo=UTC)),
+        base_seed=base.base_seed,
+        resamples=100,
+    )
+    assert earlier.kill_gate.verdict.state is KillGateState.WITHIN_BUDGET
+    assert earlier.digest() != base.digest()
+    assert base.provenance.research_universe_status == "VERIFIED"

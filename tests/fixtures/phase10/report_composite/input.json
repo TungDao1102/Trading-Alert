@@ -111,6 +111,30 @@
         "high": "104.40",
         "low": "103.00"
       }
+    ],
+    "notes": [
+      {
+        "input_name": "adapter.rejected_rows",
+        "reason": "MALFORMED_ROW",
+        "count": 1
+      }
+    ],
+    "experiments": [
+      {
+        "experiment_id": "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
+        "strategy_version": "v2.0.0",
+        "parameter_set_id": "PS-1",
+        "parameter_set_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "data_snapshot_id": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+        "code_version": "code-abc123",
+        "cost_model_hash": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+        "time_range_start_utc": "2026-01-01T00:00:00+00:00",
+        "time_range_end_utc": "2026-06-01T00:00:00+00:00",
+        "universe_hash": "760c0431a63a3b11764b7d23bd0b658d2187ae55c766acf86da1643cbf07da9d",
+        "run_type": "CANDIDATE",
+        "result_summary_json": "{}",
+        "notes": ""
+      }
     ]
   },
   "paper": {
@@ -219,5 +243,121 @@
       }
     ]
   },
-  "live": {}
+  "live": {},
+  "families": [
+    {
+      "family_id": "trend-pullback",
+      "sheet_sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "sheet_slots_present": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "candidate_param_set_hashes": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+      ],
+      "experiment_ids": [
+        "exp-tp-dev-1",
+        "exp-tp-val-1"
+      ],
+      "status": "TESTED_FAIL",
+      "decision_ref": "DEC-2026-11-fail-trend-pullback",
+      "decided_at_utc": "2026-11-15T00:00:00+00:00",
+      "development_experiment_ids": [
+        "exp-tp-dev-1"
+      ],
+      "validation_experiment_ids": [
+        "exp-tp-val-1"
+      ]
+    },
+    {
+      "family_id": "breakout-retest",
+      "sheet_sha256": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+      "sheet_slots_present": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "candidate_param_set_hashes": [
+        "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+      ],
+      "experiment_ids": [
+        "exp-br-dev-1",
+        "exp-br-val-1"
+      ],
+      "status": "TESTED_FAIL",
+      "decision_ref": "DEC-2026-11-fail-breakout-retest",
+      "decided_at_utc": "2026-11-15T00:00:00+00:00",
+      "development_experiment_ids": [
+        "exp-br-dev-1"
+      ],
+      "validation_experiment_ids": [
+        "exp-br-val-1"
+      ]
+    },
+    {
+      "family_id": "range-mr",
+      "sheet_sha256": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+      "sheet_slots_present": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "candidate_param_set_hashes": [
+        "b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3"
+      ],
+      "experiment_ids": [
+        "exp-mr-dev-1",
+        "exp-mr-val-1"
+      ],
+      "status": "TESTED_FAIL",
+      "decision_ref": "DEC-2026-11-fail-range-mr",
+      "decided_at_utc": "2026-11-15T00:00:00+00:00",
+      "development_experiment_ids": [
+        "exp-mr-dev-1"
+      ],
+      "validation_experiment_ids": [
+        "exp-mr-val-1"
+      ]
+    }
+  ],
+  "family_gate_facts": {
+    "trend-pullback": {
+      "cost_model_hash_present": true,
+      "reproducibility_verified": true,
+      "uncertainty_report_present": true,
+      "baseline_compared": true
+    },
+    "breakout-retest": {
+      "cost_model_hash_present": true,
+      "reproducibility_verified": null,
+      "uncertainty_report_present": false,
+      "baseline_compared": false
+    }
+  },
+  "journal_events": [
+    {
+      "journal_event_id": "enablement-fixture-1",
+      "occurred_at_utc": "2027-03-01T12:00:00+00:00",
+      "event_type": "LIVE_ORDERS_DISABLED",
+      "entity_type": "LiveEnablement",
+      "entity_id": "LIVE_ORDERS_DISABLED",
+      "correlation_id": "execution_enablement",
+      "payload_json": "{\"live_orders_disabled\":true,\"live_orders_disabled_before\":false}"
+    }
+  ],
+  "expected_universe_hash": "760c0431a63a3b11764b7d23bd0b658d2187ae55c766acf86da1643cbf07da9d"
 }
