@@ -1,0 +1,18 @@
+{
+  "mfe_price": "5.00",
+  "mae_price": "0.80",
+  "mfe_r": "1",
+  "mae_r": "0.16",
+  "time_to_mfe_s": "90",
+  "time_to_mae_s": "0",
+  "holding_s": "160",
+  "realized_r": "0.8",
+  "incomplete_reason": null,
+  "section": {
+    "evidence": "BACKTEST",
+    "n_outcomes": 1,
+    "n_measured": 1,
+    "n_zero_risk_excluded": 0
+  },
+  "section_digest": ""
+}
