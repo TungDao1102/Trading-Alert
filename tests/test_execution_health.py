@@ -31,6 +31,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from src.domain.enums import KillGateState
 
 NOW_UTC = datetime(2026, 9, 29, 10, 30, 0, tzinfo=UTC)
 
@@ -421,7 +422,12 @@ def test_enable_then_disable_in_same_millisecond_get_distinct_ids() -> None:
     )
     journal = FakeJournal()
     controller = LiveEnablementController(journal=journal)
-    controller.enable(operator_id="op", now_utc=NOW_UTC, health_verdict=verdict)
+    controller.enable(
+        operator_id="op",
+        now_utc=NOW_UTC,
+        health_verdict=verdict,
+        kill_gate_state=KillGateState.WITHIN_BUDGET,
+    )
     controller.disable(operator_id="op", now_utc=NOW_UTC)
     controller.disable(operator_id="op", now_utc=NOW_UTC)
     ids = [e.journal_event_id for e in journal.events]

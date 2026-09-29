@@ -29,6 +29,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from src.domain.enums import KillGateState
+
 PHASE9_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase9"
 ENABLEMENT_FIXTURES_DIR = PHASE9_FIXTURES_DIR / "enablement"
 
@@ -119,6 +121,7 @@ def test_explicit_enable_allows_placement() -> None:
         operator_id=case_input["operator_id"],
         now_utc=_parse_utc(case_input["enable_at_utc"]),
         health_verdict=_passing_health_verdict(),
+        kill_gate_state=KillGateState.WITHIN_BUDGET,
     )
 
     assert controller.is_disabled is False
@@ -154,6 +157,7 @@ def test_emergency_manual_close_plus_safe_mode_blocks_new_entries() -> None:
         operator_id=case_input["operator_id"],
         now_utc=_parse_utc(case_input["enable_at_utc"]),
         health_verdict=_passing_health_verdict(),
+        kill_gate_state=KillGateState.WITHIN_BUDGET,
     )
     assert controller.is_disabled is False  # sanity: was enabled first
 
@@ -211,7 +215,10 @@ def test_secret_free_log_scan_across_enablement_and_health_events() -> None:
 
     controller = LiveEnablementController(journal=journal)
     controller.enable(
-        operator_id="operator_alpha", now_utc=now, health_verdict=_passing_health_verdict()
+        operator_id="operator_alpha",
+        now_utc=now,
+        health_verdict=_passing_health_verdict(),
+        kill_gate_state=KillGateState.WITHIN_BUDGET,
     )
     controller.disable(operator_id="operator_alpha", now_utc=now + timedelta(minutes=1))
 
@@ -266,7 +273,10 @@ def test_enable_refuses_failing_missing_or_partial_health() -> None:
         controller = LiveEnablementController(journal=journal)
         with pytest.raises(ValueError, match="passing health verdict"):
             controller.enable(
-                operator_id="operator_alpha", now_utc=observed, health_verdict=verdict
+                operator_id="operator_alpha",
+                now_utc=observed,
+                health_verdict=verdict,
+                kill_gate_state=KillGateState.WITHIN_BUDGET,
             )
         assert controller.is_disabled is True
         assert journal.events == []
@@ -281,7 +291,10 @@ def test_journal_payload_records_the_post_transition_state() -> None:
     controller = LiveEnablementController(journal=journal)
     now = datetime(2026, 9, 29, 10, 30, 0, tzinfo=UTC)
     controller.enable(
-        operator_id="operator_alpha", now_utc=now, health_verdict=_passing_health_verdict()
+        operator_id="operator_alpha",
+        now_utc=now,
+        health_verdict=_passing_health_verdict(),
+        kill_gate_state=KillGateState.WITHIN_BUDGET,
     )
     controller.disable(operator_id="operator_alpha", now_utc=now)
 
@@ -292,3 +305,112 @@ def test_journal_payload_records_the_post_transition_state() -> None:
     assert journal.events[1].event_type == "LIVE_ORDERS_DISABLED"
     assert disabled["live_orders_disabled"] is True
     assert disabled["live_orders_disabled_before"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Phase 10 D-03 — the terminal kill-gate state refuses enablement before any side effect.
+# --------------------------------------------------------------------------- #
+
+
+def test_enable_refuses_insufficient_edge_before_journal_or_flag() -> None:
+    import pytest
+    from src.execution.enablement import LiveEnablementController
+
+    now = datetime(2026, 9, 29, 10, 30, 0, tzinfo=UTC)
+    journal = FakeJournal()
+    controller = LiveEnablementController(journal=journal)
+    with pytest.raises(ValueError, match="INSUFFICIENT_EDGE"):
+        controller.enable(
+            operator_id="operator_alpha",
+            now_utc=now,
+            health_verdict=_passing_health_verdict(),
+            kill_gate_state=KillGateState.INSUFFICIENT_EDGE,
+        )
+    assert controller.is_disabled is True
+    assert journal.events == []
+
+
+def test_enable_refuses_unevaluated_or_non_state_kill_gate_values() -> None:
+    import pytest
+    from src.execution.enablement import LiveEnablementController
+
+    now = datetime(2026, 9, 29, 10, 30, 0, tzinfo=UTC)
+    for bad in (None, "INSUFFICIENT_EDGE", "WITHIN_BUDGET", 3):
+        journal = FakeJournal()
+        controller = LiveEnablementController(journal=journal)
+        with pytest.raises(ValueError, match="evaluated kill-gate state"):
+            controller.enable(
+                operator_id="operator_alpha",
+                now_utc=now,
+                health_verdict=_passing_health_verdict(),
+                kill_gate_state=bad,  # type: ignore[arg-type]
+            )
+        assert controller.is_disabled is True
+        assert journal.events == []
+
+
+def test_enable_permits_within_budget_and_passing_candidate() -> None:
+    from src.execution.enablement import LiveEnablementController
+
+    now = datetime(2026, 9, 29, 10, 30, 0, tzinfo=UTC)
+    for state in (KillGateState.WITHIN_BUDGET, KillGateState.PASSING_CANDIDATE):
+        journal = FakeJournal()
+        controller = LiveEnablementController(journal=journal)
+        controller.enable(
+            operator_id="operator_alpha",
+            now_utc=now,
+            health_verdict=_passing_health_verdict(),
+            kill_gate_state=state,
+        )
+        assert controller.is_disabled is False
+        assert [e.event_type for e in journal.events] == ["LIVE_ORDERS_ENABLED"]
+
+
+def test_enable_still_validates_operator_and_health_before_the_kill_gate() -> None:
+    import pytest
+    from src.execution.enablement import LiveEnablementController
+
+    now = datetime(2026, 9, 29, 10, 30, 0, tzinfo=UTC)
+    controller = LiveEnablementController(journal=FakeJournal())
+    with pytest.raises(ValueError, match="passing health verdict"):
+        controller.enable(
+            operator_id="operator_alpha",
+            now_utc=now,
+            health_verdict=None,
+            kill_gate_state=KillGateState.INSUFFICIENT_EDGE,
+        )
+
+
+def test_enable_journal_payload_key_set_is_unchanged_by_the_kill_gate_gate() -> None:
+    from src.execution.enablement import LiveEnablementController
+
+    journal = FakeJournal()
+    controller = LiveEnablementController(journal=journal)
+    controller.enable(
+        operator_id="operator_alpha",
+        now_utc=datetime(2026, 9, 29, 10, 30, 0, tzinfo=UTC),
+        health_verdict=_passing_health_verdict(),
+        kill_gate_state=KillGateState.WITHIN_BUDGET,
+    )
+    payload = json.loads(journal.events[0].payload_json)
+    assert set(payload) == {"operator_id", "live_orders_disabled", "live_orders_disabled_before"}
+    assert "KillGate" not in journal.events[0].payload_json
+    assert "kill_gate" not in journal.events[0].payload_json
+
+
+def test_enablement_module_imports_no_analytics_or_heavy_dependencies() -> None:
+    import ast
+
+    source = (Path(__file__).parent.parent / "src" / "execution" / "enablement.py").read_text(
+        encoding="utf-8"
+    )
+    imported: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            imported.add(node.module)
+    assert "src.domain.enums" in imported
+    for name in imported:
+        assert not name.startswith("src.analytics"), name
+        assert name.split(".")[0] not in {"sqlalchemy", "pydantic", "polars", "binance_sdk"}, name

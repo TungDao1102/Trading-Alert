@@ -35,6 +35,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from src.domain.enums import KillGateState
+
 PHASE9_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase9"
 PLACEMENT_FIXTURE_DIR = PHASE9_FIXTURES_DIR / "placement_sequences"
 
@@ -244,6 +246,7 @@ def _enabled_controller() -> Any:
         operator_id="operator_alpha",
         now_utc=datetime(2026, 9, 19, 10, 0, tzinfo=UTC),
         health_verdict=_passing_health_verdict(),
+        kill_gate_state=KillGateState.WITHIN_BUDGET,
     )
     return controller
 
