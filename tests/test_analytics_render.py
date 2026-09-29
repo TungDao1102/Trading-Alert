@@ -656,7 +656,8 @@ def test_sections_are_composed_in_the_fixed_order_with_the_h2_spacing_rule() -> 
     )
     lines = render_lines(make_report())
     h2 = [line for line in lines if line.startswith("## ")]
-    assert h2 == ["## 1. Kill Gate", "## 2. Evidence Overview"]
+    assert len(h2) >= 2
+    assert h2 == [f"## {title}" for title in SECTION_TITLES[: len(h2)]]
     for heading in h2:
         at = lines.index(heading)
         assert lines[at - 3 : at] == ["", "---", ""]
@@ -721,9 +722,243 @@ def test_output_carries_no_ambient_state() -> None:
     assert "C:" + BACKSLASH not in text and "/Users/" not in text
 
 
-def test_golden_sections_0_2_is_byte_exact() -> None:
+def test_golden_sections_0_2_is_a_byte_exact_prefix_of_the_full_document() -> None:
     expected = GOLDEN_PATH.read_bytes()
-    assert render_markdown(make_report()).encode("utf-8") == expected
+    document = render_markdown(make_report()).encode("utf-8")
+    assert document.startswith(expected[:-1])
+    separator = b"\n\n---\n\n## 3. Full Report (unsliced)\n"
+    assert document[len(expected) - 1 :].startswith(separator)
     assert b"\r" not in expected
     assert expected.endswith(b"\n") and not expected.endswith(b"\n\n")
     assert not expected.startswith(bytes([0xEF, 0xBB, 0xBF]))
+
+
+# --------------------------------------------------------------------------- #
+# Plan 10-11 Task 1 (tracer): Sections 3 (full report) and 4 (dual universe)
+# --------------------------------------------------------------------------- #
+
+M1_LABELS = (
+    "Trades (n)",
+    "R-valued trades",
+    "Zero-risk excluded",
+    "INCOMPLETE",
+    "Mean R",
+    "Median R",
+    "Win rate",
+    "Expectancy (R)",
+    "Max drawdown (R)",
+    "Loss streak (max)",
+)
+KINDS = ("BACKTEST", "PAPER", "LIVE")
+LOW_N_LEGEND_TEXT = "LOW_N: n < 30. Flag only; not an acceptance threshold. The row is not hidden."
+ESTIMATE_SHAPE = re.compile(
+    r"^(?:no data|-?\d+\.\d{4} \[(?:-?\d+\.\d{4}, -?\d+\.\d{4}|interval absent)\] n=\d+)$"
+)
+FULL_TITLE = "3. Full Report (unsliced)"
+DUAL_TITLE = "4. Dual Universe: Live-5 vs Research"
+
+
+def section_lines(text: str, title: str) -> list[str]:
+    """The lines of one H2 section (heading through the line before the next H2)."""
+    lines = text.split("\n")
+    start = lines.index(f"## {title}")
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")),
+        len(lines),
+    )
+    return lines[start:end]
+
+
+def split_cells(line: str) -> list[str]:
+    assert line.startswith("| ") and line.endswith(" |"), line
+    return line[2:-2].split(" | ")
+
+
+def data_rows(table: list[str]) -> list[list[str]]:
+    return [split_cells(line) for line in table[2:]]
+
+
+def with_backtest_outcomes(outcomes):  # type: ignore[no-untyped-def]
+    base = build_report_inputs()
+    return make_report(backtest=dataclasses.replace(base.backtest, outcomes=tuple(outcomes)))
+
+
+def base_outcomes():  # type: ignore[no-untyped-def]
+    return list(build_report_inputs().backtest.outcomes)
+
+
+def m1_rows(text: str, title: str, heading: str) -> dict[str, list[str]]:
+    rows = data_rows(table_after(section_lines(text, title), heading))
+    return {row[0]: row for row in rows}
+
+
+def test_section3_heading_note_and_per_kind_headings_and_captions() -> None:
+    text = render_markdown(make_report())
+    lines = section_lines(text, FULL_TITLE)
+    assert lines[0] == "## 3. Full Report (unsliced)"
+    assert lines[2] == (
+        "All figures are descriptive and carry uncertainty. "
+        "Nothing here changes parameters or ranks strategy families."
+    )
+    headings = [line for line in lines if line.startswith("### ")]
+    assert headings == [f"### 3.{index} {kind}" for index, kind in enumerate(KINDS, start=1)]
+    for index, kind in enumerate(KINDS, start=1):
+        at = lines.index(f"### 3.{index} {kind}")
+        assert lines[at + 2] == f"*Evidence: {kind}*"
+    header = "| Metric | Value | n | Low-n | Note |"
+    assert lines.count(header) == 3
+    assert lines[lines.index(header) + 1] == "| :--- | :--- | ---: | :--- | :--- |"
+
+
+def test_section3_full_report_m1_row_labels_in_exact_order_for_every_kind() -> None:
+    lines = section_lines(render_markdown(make_report()), FULL_TITLE)
+    for index, kind in enumerate(KINDS, start=1):
+        rows = data_rows(table_after(lines, f"### 3.{index} {kind}"))
+        assert [row[0] for row in rows] == list(M1_LABELS)
+        assert all(len(row) == 5 for row in rows)
+
+
+def test_section3_backtest_values_match_core_metrics_and_low_n_flags() -> None:
+    report = make_report()
+    rows = m1_rows(render_markdown(report), FULL_TITLE, "### 3.1 BACKTEST")
+    assert rows["Trades (n)"] == ["Trades (n)", "2", "2", "", ""]
+    assert rows["R-valued trades"][1:3] == ["2", "2"]
+    assert rows["Zero-risk excluded"][1] == "0"
+    assert rows["INCOMPLETE"][1] == "0"
+    assert rows["Mean R"][1] == "0.8000 [0.8000, 0.8000] n=2"
+    assert rows["Mean R"][2] == "2"
+    assert rows["Median R"][1] == "0.8000"
+    assert rows["Win rate"][1] == "1.0000"
+    assert rows["Expectancy (R)"][1] == "0.8000"
+    assert rows["Max drawdown (R)"][1] == "0.0000"
+    assert rows["Loss streak (max)"][1] == "0"
+    assert report.evidence[0].core.low_n is True
+    for label in ("Mean R", "Median R", "Win rate", "Expectancy (R)", "Max drawdown (R)"):
+        assert rows[label][3] == "LOW_N"
+    for label in ("Trades (n)", "R-valued trades", "Zero-risk excluded", "INCOMPLETE"):
+        assert rows[label][3] == ""
+
+
+def test_section3_estimate_cell_shapes_for_n0_n1_and_n2() -> None:
+    outcomes = base_outcomes()
+    two = render_markdown(with_backtest_outcomes(outcomes))
+    one = render_markdown(with_backtest_outcomes(outcomes[:1]))
+    zero = render_markdown(with_backtest_outcomes([]))
+    heading = "### 3.1 BACKTEST"
+    assert m1_rows(two, FULL_TITLE, heading)["Mean R"][1] == "0.8000 [0.8000, 0.8000] n=2"
+    assert m1_rows(two, FULL_TITLE, heading)["Mean R"][4] == ""
+    assert m1_rows(one, FULL_TITLE, heading)["Mean R"][1] == "0.8000 [interval absent] n=1"
+    assert (
+        m1_rows(one, FULL_TITLE, heading)["Mean R"][4]
+        == "interval absent (fewer than 2 R-valued trades)"
+    )
+    assert m1_rows(zero, FULL_TITLE, heading)["Mean R"][1] == "no data"
+    for text in (two, one, zero):
+        assert ESTIMATE_SHAPE.match(m1_rows(text, FULL_TITLE, heading)["Mean R"][1])
+
+
+def test_section3_zero_risk_sentence_low_n_legend_and_empty_kind_sentence() -> None:
+    outcomes = base_outcomes()
+    zero_risk = dataclasses.replace(outcomes[1], realized_risk=Decimal("0"))
+    text = render_markdown(with_backtest_outcomes([outcomes[0], zero_risk]))
+    lines = section_lines(text, FULL_TITLE)
+    rows = m1_rows(text, FULL_TITLE, "### 3.1 BACKTEST")
+    assert rows["Zero-risk excluded"][1] == "1"
+    assert rows["Trades (n)"][1] == "2"
+    assert rows["R-valued trades"][1] == "1"
+    sentence = (
+        "Zero-risk excluded: 1. These trades have no defined R and are counted here, not dropped."
+    )
+    assert lines.count(sentence) == 1
+    normal = section_lines(render_markdown(make_report()), FULL_TITLE)
+    assert not any(line.startswith("Zero-risk excluded:") for line in normal)
+    assert LOW_N_LEGEND_TEXT in normal
+    live = "No LIVE rows exist for this evidence kind. Nothing is imputed, hidden, or pooled."
+    assert live in normal
+    assert live.replace("LIVE", "BACKTEST") not in normal
+
+
+def test_section4_dual_universe_symbol_lines_and_columns() -> None:
+    report = make_report()
+    lines = section_lines(render_markdown(report), DUAL_TITLE)
+    assert lines[0] == "## 4. Dual Universe: Live-5 vs Research"
+    assert "Live-5: BNBUSDT, BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT" in lines
+    view = report.evidence[0].dual_universe
+    assert (
+        "Research universe: ADAUSDT, BNBUSDT, BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT "
+        f"(universe hash {view.universe_hash[:12]}; VERIFIED)"
+    ) in lines
+    headings = [line for line in lines if line.startswith("### ")]
+    assert headings == [f"### 4.{index} {kind}" for index, kind in enumerate(KINDS, start=1)]
+    header = (
+        "| Metric | Live-5 value | Live-5 n | Research value | Research n "
+        "| Low-n (Live-5 / Research) |"
+    )
+    assert lines.count(header) == 3
+    for index, kind in enumerate(KINDS, start=1):
+        at = lines.index(f"### 4.{index} {kind}")
+        assert lines[at + 2] == f"*Evidence: {kind}*"
+        rows = data_rows(table_after(lines, f"### 4.{index} {kind}"))
+        assert [row[0] for row in rows] == list(M1_LABELS)
+
+
+def test_section4_backtest_values_equal_section3_for_the_same_metric_block() -> None:
+    text = render_markdown(make_report())
+    full = m1_rows(text, FULL_TITLE, "### 3.1 BACKTEST")
+    dual = m1_rows(text, DUAL_TITLE, "### 4.1 BACKTEST")
+    # Both universes hold the same two trades in the composite fixture.
+    for label in M1_LABELS:
+        assert dual[label][1] == dual[label][3]
+        assert dual[label][2] == dual[label][4]
+    for label in ("Mean R", "Median R", "Win rate", "Expectancy (R)", "Max drawdown (R)"):
+        assert dual[label][1] == full[label][1]
+        assert dual[label][5] == "LOW_N / LOW_N"
+    assert dual["Trades (n)"][5] == "- / -"
+    assert dual["Trades (n)"][1] == full["Trades (n)"][1] == "2"
+
+
+def test_section4_empty_live5_cells_note_and_zero_n() -> None:
+    lines = section_lines(render_markdown(make_report()), DUAL_TITLE)
+    note = "Live-5 slice has no rows for this evidence kind. Nothing is imputed or hidden."
+    assert lines.count(note) == 2  # PAPER and LIVE only; BACKTEST has live-5 rows
+    for index, kind in ((2, "PAPER"), (3, "LIVE")):
+        for row in data_rows(table_after(lines, f"### 4.{index} {kind}")):
+            assert row[1] == "no data" and row[2] == "0", row
+            assert row[3] == "no data" and row[4] == "0", row
+    backtest = lines.index("### 4.1 BACKTEST")
+    assert note not in lines[backtest : lines.index("### 4.2 PAPER")]
+
+
+def test_section4_weak_live_universe_line_only_when_flagged() -> None:
+    outcomes = base_outcomes()
+    losing = dataclasses.replace(outcomes[0], realized_pnl=Decimal("-8.00"))
+    ada_1 = dataclasses.replace(outcomes[1], trade_id="T-ADA-1", symbol="ADAUSDT")
+    ada_2 = dataclasses.replace(outcomes[1], trade_id="T-ADA-2", symbol="ADAUSDT")
+    report = with_backtest_outcomes([losing, ada_1, ada_2])
+    assert report.evidence[0].dual_universe.weak_live_universe_rejection is True
+    weak = (
+        "Weak live-5 universe: research-universe results alone do not support acceptance "
+        "(BACKTEST_SPEC section 10.1)."
+    )
+    lines = section_lines(render_markdown(report), DUAL_TITLE)
+    assert lines.count(weak) == 1
+    plain = section_lines(render_markdown(make_report()), DUAL_TITLE)
+    assert weak not in plain
+
+
+def test_tracer_sections_3_and_4() -> None:
+    text = render_markdown(make_report())
+    order = [text.index(f"## {title}") for title in SECTION_TITLES[:4]]
+    assert order == sorted(order)
+    assert text.index("## 3. Full Report (unsliced)") > text.index("## 2. Evidence Overview")
+    # No bare estimate: every Mean R cell in sections 3 and 4 has the estimate shape.
+    body_lines = section_lines(text, FULL_TITLE) + section_lines(text, DUAL_TITLE)
+    mean_lines = [line for line in body_lines if line.startswith("| Mean R |")]
+    assert len(mean_lines) == 6
+    for line in mean_lines:
+        cells = split_cells(line)
+        value_cells = [cells[1]] if len(cells) == 5 else [cells[1], cells[3]]
+        for cell in value_cells:
+            assert ESTIMATE_SHAPE.match(cell), line
+    assert find_reserved("\n".join(body_lines)) == []
+    assert render_markdown(make_report()) == text
