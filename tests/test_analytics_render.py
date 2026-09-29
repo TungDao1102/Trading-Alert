@@ -768,6 +768,8 @@ def section_lines(text: str, title: str) -> list[str]:
         (index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")),
         len(lines),
     )
+    while lines[end - 1] in ("", "---"):  # the H2 spacing rule belongs to no section
+        end -= 1
     return lines[start:end]
 
 
