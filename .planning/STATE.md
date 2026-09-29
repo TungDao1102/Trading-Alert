@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 10
 current_phase_name: Journal Depth + Kill-Gate Operations
 status: executing
-stopped_at: Completed 10-02-PLAN.md
-last_updated: "2026-09-29T06:15:26.069Z"
+stopped_at: Completed 10-03-PLAN.md
+last_updated: "2026-09-29T06:27:22.665Z"
 last_activity: 2026-09-29
 last_activity_desc: Phase 10 execution started
-state_head: f85f4b58774073fb9781d964d6e1037d360b6015
+state_head: b524aba00c2a00aa978de6003d7bdbbeb2aaab29
 progress:
   total_phases: 11
   completed_phases: 9
   total_plans: 50
-  completed_plans: 39
+  completed_plans: 40
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 10 (Journal Depth + Kill-Gate Operations) — EXECUTING
-Plan: 3 of 12
+Plan: 4 of 12
 Status: Ready to execute
 Last activity: 2026-09-29 — Phase 10 execution started
 
@@ -78,6 +78,7 @@ Progress: [██████████] 100%
 | Phase 09 P04 | ~50min | 2 tasks | 11 files |
 | Phase 10 P01 | 18min | 3 tasks | 23 files |
 | Phase 10 P02 | 12 min | 2 tasks | 7 files |
+| Phase 10 P03 | 12 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -206,6 +207,8 @@ Recent decisions affecting current work:
 - [Phase 10]: Analytics reuses Phase-6 private report helpers intentionally (RESEARCH P7), guarded by fixture digests; time arithmetic uses integer microseconds, never total_seconds
 - [Phase 10]: D030: D013 firing rule (>=3 independently specified families AND >=6 calendar months since freeze AND none passing) recorded as new decision + protocol v1.0.1 clarification; Status/Frozen-on/D029 untouched; amendment class flagged for user confirmation
 - [Phase 10]: KillGateState (WITHIN_BUDGET, PASSING_CANDIDATE, INSUFFICIENT_EDGE) lives in src/domain/enums.py, GLOSSARY 8.2 canonical
+- [Phase 10]: 10-03: approved_at_utc for live records is set only for APPROVED approvals; SKIPPED/EXPIRED acted_at is never an approval time — Prevents mislabelled skip times polluting DELIVERY_TO_APPROVED/SIGNAL_TO_APPROVED legs (T-10-07)
+- [Phase 10]: 10-03: paper sections carry synthetic_lag_seconds (imported APPROVAL_DELAY_LAG_SECONDS); SIGNAL_TO_SEEN is always INCOMPLETE(NO_SEEN_TIMESTAMP); Approval.requested_at_utc is a delivery-request proxy — No seen timestamp is journaled and paper approval time is a constant; honesty over imputation (D-02, RESEARCH P1/P2)
 
 ### Pending Todos
 
@@ -241,6 +244,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-29T06:15:25.093Z
-Stopped at: Completed 10-02-PLAN.md
+Last session: 2026-09-29T06:27:22.524Z
+Stopped at: Completed 10-03-PLAN.md
 Resume file: None
