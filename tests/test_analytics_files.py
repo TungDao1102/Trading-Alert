@@ -557,6 +557,24 @@ def test_decisions_recorded_terminal_state_must_be_insufficient_edge(tmp_path: P
         load_decisions_file(_decisions_with(tmp_path, mutate))
 
 
+def test_decisions_recorded_terminal_timestamp_is_parsed_as_utc() -> None:
+    """CR-01: the committed terminal mirror carries a real UTC instant, not free text."""
+    terminal = load_decisions_file(DECISIONS_SAMPLE).recorded_terminal
+    assert terminal is not None
+    assert terminal.recorded_at_utc == datetime(2026, 4, 1, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("bad", ["2026-04-01T00:00:00", "2026-04-01T07:00:00+07:00", "soon"])
+def test_decisions_recorded_terminal_non_utc_timestamp_fails_closed(
+    tmp_path: Path, bad: str
+) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["recorded_terminal"]["recorded_at_utc"] = bad
+
+    with pytest.raises(DecisionsFileError, match="recorded_at_utc"):
+        load_decisions_file(_decisions_with(tmp_path, mutate))
+
+
 def test_decisions_naive_datetime_fails_closed(tmp_path: Path) -> None:
     def mutate(doc: dict[str, Any]) -> None:
         doc["families"][0]["decided_at_utc"] = "2026-03-15T00:00:00"

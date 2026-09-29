@@ -122,11 +122,16 @@ class FamilyDecision:
 
 @dataclass(frozen=True)
 class RecordedTerminal:
-    """The committed mirror of a recorded INSUFFICIENT_EDGE outcome (D-03 tripwire input)."""
+    """The committed mirror of a recorded INSUFFICIENT_EDGE outcome (D-03).
+
+    It feeds the CI registration tripwire and, as a prior terminal evaluation at
+    `recorded_at_utc`, the sticky kill-gate state of every report run, so a run without a
+    database (or with a journal that lost the event) still cannot clear the terminal.
+    """
 
     state: str
     decision_ref: str
-    recorded_at_utc: str
+    recorded_at_utc: datetime
     families_at_record: tuple[str, ...]
 
 
@@ -636,7 +641,7 @@ def _load_terminal(raw: Any) -> RecordedTerminal | None:
     return RecordedTerminal(
         state="INSUFFICIENT_EDGE",
         decision_ref=_require_str(raw["decision_ref"], "decision_ref", DecisionsFileError, where),
-        recorded_at_utc=_require_str(
+        recorded_at_utc=_parse_utc(
             raw["recorded_at_utc"], "recorded_at_utc", DecisionsFileError, where
         ),
         families_at_record=tuple(families),

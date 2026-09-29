@@ -59,6 +59,7 @@ from src.analytics.inputs import normalize_backtest
 from src.analytics.killgate import (
     KILL_GATE_EVENT_TYPE,
     QUESTION_APPROVED_EVENT_TYPE,
+    PriorEvaluation,
     ResetRecord,
     build_kill_gate_event,
     priors_from_events,
@@ -320,6 +321,28 @@ def _merge_resets(
     return tuple(merged[key] for key in sorted(merged))
 
 
+def _merge_priors(
+    decisions: DecisionsFile, events: Sequence[JournalEvent]
+) -> tuple[PriorEvaluation, ...]:
+    """Journal priors plus the committed `recorded_terminal` mirror, de-duplicated (CR-01).
+
+    The committed mirror counts as a prior INSUFFICIENT_EDGE evaluation at its recorded
+    instant, so a run without a database (`--no-db`, DATABASE_URL unset, or a journal that
+    lost the event) still keeps the terminal sticky until a recorded human reset follows it.
+    """
+    file_priors: tuple[PriorEvaluation, ...] = ()
+    terminal = decisions.recorded_terminal
+    if terminal is not None:
+        file_priors = (
+            PriorEvaluation(
+                state=KillGateState.INSUFFICIENT_EDGE,
+                evaluated_at_utc=terminal.recorded_at_utc,
+            ),
+        )
+    merged = {*priors_from_events(events), *file_priors}
+    return tuple(sorted(merged, key=lambda prior: (prior.evaluated_at_utc, prior.state.value)))
+
+
 def _build_inputs(args: CliArgs, as_of: datetime, database: _DatabaseData | None) -> ReportInputs:
     decisions: DecisionsFile = load_decisions_file(args.decisions)
     evidence = None if args.evidence is None else load_evidence_file(args.evidence)
@@ -345,7 +368,7 @@ def _build_inputs(args: CliArgs, as_of: datetime, database: _DatabaseData | None
         journal_events=events,
         families=scan.families,
         family_gate_facts=dict(scan.gate_facts),
-        prior_evaluations=priors_from_events(events),
+        prior_evaluations=_merge_priors(decisions, events),
         resets=_merge_resets(decisions.resets, events),
     )
 

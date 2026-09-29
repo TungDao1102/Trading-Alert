@@ -814,6 +814,69 @@ def test_record_with_the_no_db_flag_exits_two_and_writes_nothing(
     assert env.files() == []
 
 
+def _decisions_doc(
+    *,
+    families: list[dict[str, Any]] | None = None,
+    resets: list[dict[str, Any]] | None = None,
+    recorded_terminal: dict[str, Any] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "schema": "kill-gate-decisions/1",
+            "families": families or [],
+            "resets": resets or [],
+            "recorded_terminal": recorded_terminal,
+        }
+    )
+
+
+_COMMITTED_TERMINAL = {
+    "state": "INSUFFICIENT_EDGE",
+    "decision_ref": "DEC-TEST-terminal",
+    "recorded_at_utc": "2027-03-25T00:00:00+00:00",
+    "families_at_record": list(FAMILIES),
+}
+
+
+def test_committed_recorded_terminal_keeps_the_state_sticky_without_a_database(
+    env: _Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """CR-01: the committed mirror alone keeps INSUFFICIENT_EDGE sticky (no DB, --no-db)."""
+    env.decisions.write_text(_decisions_doc(recorded_terminal=_COMMITTED_TERMINAL), "utf-8")
+    code, out, err = _run(capsys, env.argv("--no-db"))
+    assert code == 0, err
+    assert _stdout_lines(out)[3] == "Kill gate: INSUFFICIENT_EDGE"
+
+
+def test_committed_recorded_terminal_and_the_same_db_event_are_deduplicated(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env.decisions.write_text(_decisions_doc(recorded_terminal=_COMMITTED_TERMINAL), "utf-8")
+    store = _FakeStore()
+    store.add_events(_terminal_prior())
+    code, out, err = _db_run(env, _FakeFactory(store), capsys, monkeypatch)
+    assert code == 0, err
+    assert _stdout_lines(out)[3] == "Kill gate: INSUFFICIENT_EDGE"
+    verdict = _sidecar_of(out)["report"]["kill_gate"]["verdict"]
+    assert verdict["prior_terminal_count"] == 1
+
+
+def test_committed_recorded_terminal_is_cleared_by_a_later_recorded_reset(
+    env: _Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reset = {
+        "operator_id": "op-file",
+        "decision_ref": "DEC-FILE-RESET",
+        "occurred_at_utc": "2027-03-28T00:00:00+00:00",
+    }
+    env.decisions.write_text(
+        _decisions_doc(resets=[reset], recorded_terminal=_COMMITTED_TERMINAL), "utf-8"
+    )
+    code, out, err = _run(capsys, env.argv("--no-db"))
+    assert code == 0, err
+    assert _stdout_lines(out)[3] == "Kill gate: WITHIN_BUDGET"
+
+
 def test_record_failure_keeps_the_files_and_reports_only_the_exception_type(
     env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
