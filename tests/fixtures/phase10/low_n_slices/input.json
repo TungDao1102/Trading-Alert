@@ -1,12 +1,164 @@
 {
   "description": "Tracer set: 6 filled BACKTEST outcomes (BTC 3, ETH 2, SOL 1) plus one TOUCH_NO_FILL BTC outcome. Rows are deliberately NOT in symbol or exit-time order. Global R sequence in exit-time order: 1.0 (BTC), -1.0 (BTC), 0.5 (ETH), 2.0 (BTC), -0.5 (ETH), 1.5 (SOL).",
   "tracer_outcomes": [
-    {"trade_id": "T6", "symbol": "SOLUSDT", "direction": "LONG", "entry_time_utc": "2026-01-10T08:00:00+00:00", "exit_time_utc": "2026-01-10T12:00:00+00:00", "exit_kind": "TP1", "realized_pnl": "15", "realized_risk": "10"},
-    {"trade_id": "T3", "symbol": "ETHUSDT", "direction": "LONG", "entry_time_utc": "2026-01-07T08:00:00+00:00", "exit_time_utc": "2026-01-07T12:00:00+00:00", "exit_kind": "TP1", "realized_pnl": "5", "realized_risk": "10"},
-    {"trade_id": "T1", "symbol": "BTCUSDT", "direction": "LONG", "entry_time_utc": "2026-01-05T08:00:00+00:00", "exit_time_utc": "2026-01-05T12:00:00+00:00", "exit_kind": "TP1", "realized_pnl": "10", "realized_risk": "10"},
-    {"trade_id": "T7", "symbol": "BTCUSDT", "direction": "LONG", "entry_kind": "TOUCH_NO_FILL"},
-    {"trade_id": "T5", "symbol": "ETHUSDT", "direction": "SHORT", "entry_time_utc": "2026-01-09T08:00:00+00:00", "exit_time_utc": "2026-01-09T12:00:00+00:00", "exit_kind": "SL", "realized_pnl": "-5", "realized_risk": "10"},
-    {"trade_id": "T4", "symbol": "BTCUSDT", "direction": "LONG", "entry_time_utc": "2026-01-08T08:00:00+00:00", "exit_time_utc": "2026-01-08T12:00:00+00:00", "exit_kind": "TP2", "realized_pnl": "20", "realized_risk": "10"},
-    {"trade_id": "T2", "symbol": "BTCUSDT", "direction": "SHORT", "entry_time_utc": "2026-01-06T08:00:00+00:00", "exit_time_utc": "2026-01-06T12:00:00+00:00", "exit_kind": "SL", "realized_pnl": "-10", "realized_risk": "10"}
+    {
+      "trade_id": "T6",
+      "symbol": "SOLUSDT",
+      "direction": "LONG",
+      "entry_time_utc": "2026-01-10T08:00:00+00:00",
+      "exit_time_utc": "2026-01-10T12:00:00+00:00",
+      "exit_kind": "TP1",
+      "realized_pnl": "15",
+      "realized_risk": "10"
+    },
+    {
+      "trade_id": "T3",
+      "symbol": "ETHUSDT",
+      "direction": "LONG",
+      "entry_time_utc": "2026-01-07T08:00:00+00:00",
+      "exit_time_utc": "2026-01-07T12:00:00+00:00",
+      "exit_kind": "TP1",
+      "realized_pnl": "5",
+      "realized_risk": "10"
+    },
+    {
+      "trade_id": "T1",
+      "symbol": "BTCUSDT",
+      "direction": "LONG",
+      "entry_time_utc": "2026-01-05T08:00:00+00:00",
+      "exit_time_utc": "2026-01-05T12:00:00+00:00",
+      "exit_kind": "TP1",
+      "realized_pnl": "10",
+      "realized_risk": "10"
+    },
+    {
+      "trade_id": "T7",
+      "symbol": "BTCUSDT",
+      "direction": "LONG",
+      "entry_kind": "TOUCH_NO_FILL"
+    },
+    {
+      "trade_id": "T5",
+      "symbol": "ETHUSDT",
+      "direction": "SHORT",
+      "entry_time_utc": "2026-01-09T08:00:00+00:00",
+      "exit_time_utc": "2026-01-09T12:00:00+00:00",
+      "exit_kind": "SL",
+      "realized_pnl": "-5",
+      "realized_risk": "10"
+    },
+    {
+      "trade_id": "T4",
+      "symbol": "BTCUSDT",
+      "direction": "LONG",
+      "entry_time_utc": "2026-01-08T08:00:00+00:00",
+      "exit_time_utc": "2026-01-08T12:00:00+00:00",
+      "exit_kind": "TP2",
+      "realized_pnl": "20",
+      "realized_risk": "10"
+    },
+    {
+      "trade_id": "T2",
+      "symbol": "BTCUSDT",
+      "direction": "SHORT",
+      "entry_time_utc": "2026-01-06T08:00:00+00:00",
+      "exit_time_utc": "2026-01-06T12:00:00+00:00",
+      "exit_kind": "SL",
+      "realized_pnl": "-10",
+      "realized_risk": "10"
+    }
+  ],
+  "full_outcomes_description": "Task 2 set (8 outcomes, shuffled): R by exit time F1 -1.0 (Mar), F2 -0.5 (Mar), F3 0.5 (exit 2026-04-01, entered in March), F4 1.0, F5 2.0, F6 1.5 (Apr); F7 no fill (no times); F8 open (entry, no exit, no R). Entries at 00:00:00, 07:59:59, 08:00:00, 15:59:59, 16:00:00, 23:59:59 UTC.",
+  "full_outcomes": [
+    {
+      "trade_id": "F5",
+      "symbol": "SOLUSDT",
+      "direction": "SHORT",
+      "strategy_version": "v2.1.0",
+      "entry_time_utc": "2026-04-10T07:59:59+00:00",
+      "exit_time_utc": "2026-04-10T09:00:00+00:00",
+      "exit_kind": "TP1",
+      "realized_pnl": "20",
+      "realized_risk": "10",
+      "regime": "BEARISH"
+    },
+    {
+      "trade_id": "F1",
+      "symbol": "BTCUSDT",
+      "direction": "LONG",
+      "strategy_version": "v2.0.0",
+      "entry_time_utc": "2026-03-10T00:00:00+00:00",
+      "exit_time_utc": "2026-03-10T05:00:00+00:00",
+      "exit_kind": "SL",
+      "realized_pnl": "-10",
+      "realized_risk": "10",
+      "regime": "BULLISH",
+      "vol_regime": "HIGH"
+    },
+    {
+      "trade_id": "F8",
+      "symbol": "XRPUSDT",
+      "direction": "LONG",
+      "strategy_version": "v2.1.0",
+      "entry_time_utc": "2026-04-20T12:00:00+00:00"
+    },
+    {
+      "trade_id": "F3",
+      "symbol": "ETHUSDT",
+      "direction": "LONG",
+      "strategy_version": "v2.0.0",
+      "entry_time_utc": "2026-03-31T16:00:00+00:00",
+      "exit_time_utc": "2026-04-01T02:00:00+00:00",
+      "exit_kind": "TP1",
+      "realized_pnl": "5",
+      "realized_risk": "10",
+      "regime": "NEUTRAL",
+      "vol_regime": "LOW"
+    },
+    {
+      "trade_id": "F7",
+      "symbol": "BTCUSDT",
+      "direction": "LONG",
+      "strategy_version": "v2.0.0",
+      "entry_kind": "TOUCH_NO_FILL"
+    },
+    {
+      "trade_id": "F6",
+      "symbol": "SOLUSDT",
+      "direction": "LONG",
+      "strategy_version": "v2.1.0",
+      "entry_time_utc": "2026-04-15T15:59:59+00:00",
+      "exit_time_utc": "2026-04-15T18:00:00+00:00",
+      "exit_kind": "TP1",
+      "realized_pnl": "15",
+      "realized_risk": "10",
+      "regime": "CHOP"
+    },
+    {
+      "trade_id": "F2",
+      "symbol": "BTCUSDT",
+      "direction": "SHORT",
+      "strategy_version": "v2.0.0",
+      "entry_time_utc": "2026-03-20T08:00:00+00:00",
+      "exit_time_utc": "2026-03-20T12:00:00+00:00",
+      "exit_kind": "SL",
+      "realized_pnl": "-5",
+      "realized_risk": "10",
+      "regime": "BEARISH",
+      "vol_regime": "HIGH"
+    },
+    {
+      "trade_id": "F4",
+      "symbol": "ETHUSDT",
+      "direction": "LONG",
+      "strategy_version": "v2.1.0",
+      "entry_time_utc": "2026-04-05T23:59:59+00:00",
+      "exit_time_utc": "2026-04-06T03:00:00+00:00",
+      "exit_kind": "TP1",
+      "realized_pnl": "10",
+      "realized_risk": "10",
+      "regime": "BULLISH",
+      "vol_regime": "LOW"
+    }
   ]
 }

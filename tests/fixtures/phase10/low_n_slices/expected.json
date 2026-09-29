@@ -20,10 +20,324 @@
       "slice_count": 3,
       "total_n": 7,
       "rows": [
-        {"key": "BTCUSDT", "n": 4, "n_r_valued": 3, "low_n": true},
-        {"key": "ETHUSDT", "n": 2, "n_r_valued": 2, "low_n": true},
-        {"key": "SOLUSDT", "n": 1, "n_r_valued": 1, "low_n": true}
+        {
+          "key": "BTCUSDT",
+          "n": 4,
+          "n_r_valued": 3,
+          "low_n": true
+        },
+        {
+          "key": "ETHUSDT",
+          "n": 2,
+          "n_r_valued": 2,
+          "low_n": true
+        },
+        {
+          "key": "SOLUSDT",
+          "n": 1,
+          "n_r_valued": 1,
+          "low_n": true
+        }
       ]
     }
+  },
+  "full": {
+    "description": "Hand-computed from full_outcomes. mean_r is [numerator, denominator] (exact Decimal division) or null.",
+    "all": {
+      "n": 8,
+      "n_r_valued": 6,
+      "incomplete": 2,
+      "mean_r": [
+        "3.5",
+        "6"
+      ]
+    },
+    "dimensions": {
+      "symbol": {
+        "slice_count": 4,
+        "total_n": 8,
+        "rows": [
+          {
+            "key": "BTCUSDT",
+            "n": 3,
+            "n_r_valued": 2,
+            "incomplete": 1,
+            "mean_r": [
+              "-1.5",
+              "2"
+            ]
+          },
+          {
+            "key": "ETHUSDT",
+            "n": 2,
+            "n_r_valued": 2,
+            "incomplete": 0,
+            "mean_r": [
+              "1.5",
+              "2"
+            ]
+          },
+          {
+            "key": "SOLUSDT",
+            "n": 2,
+            "n_r_valued": 2,
+            "incomplete": 0,
+            "mean_r": [
+              "3.5",
+              "2"
+            ]
+          },
+          {
+            "key": "XRPUSDT",
+            "n": 1,
+            "n_r_valued": 0,
+            "incomplete": 1,
+            "mean_r": null
+          }
+        ]
+      },
+      "month": {
+        "slice_count": 3,
+        "total_n": 8,
+        "rows": [
+          {
+            "key": "2026-03",
+            "n": 2,
+            "n_r_valued": 2,
+            "incomplete": 0,
+            "mean_r": [
+              "-1.5",
+              "2"
+            ]
+          },
+          {
+            "key": "2026-04",
+            "n": 4,
+            "n_r_valued": 4,
+            "incomplete": 0,
+            "mean_r": [
+              "5",
+              "4"
+            ]
+          },
+          {
+            "key": "INCOMPLETE",
+            "n": 2,
+            "n_r_valued": 0,
+            "incomplete": 2,
+            "mean_r": null
+          }
+        ]
+      },
+      "quarter": {
+        "slice_count": 3,
+        "total_n": 8,
+        "rows": [
+          {
+            "key": "2026-Q1",
+            "n": 2,
+            "n_r_valued": 2,
+            "incomplete": 0,
+            "mean_r": [
+              "-1.5",
+              "2"
+            ]
+          },
+          {
+            "key": "2026-Q2",
+            "n": 4,
+            "n_r_valued": 4,
+            "incomplete": 0,
+            "mean_r": [
+              "5",
+              "4"
+            ]
+          },
+          {
+            "key": "INCOMPLETE",
+            "n": 2,
+            "n_r_valued": 0,
+            "incomplete": 2,
+            "mean_r": null
+          }
+        ]
+      },
+      "session": {
+        "slice_count": 4,
+        "total_n": 8,
+        "rows": [
+          {
+            "key": "ASIA",
+            "n": 2,
+            "n_r_valued": 2,
+            "incomplete": 0,
+            "mean_r": [
+              "1",
+              "2"
+            ]
+          },
+          {
+            "key": "EUROPE",
+            "n": 3,
+            "n_r_valued": 2,
+            "incomplete": 1,
+            "mean_r": [
+              "1",
+              "2"
+            ]
+          },
+          {
+            "key": "US",
+            "n": 2,
+            "n_r_valued": 2,
+            "incomplete": 0,
+            "mean_r": [
+              "1.5",
+              "2"
+            ]
+          },
+          {
+            "key": "INCOMPLETE",
+            "n": 1,
+            "n_r_valued": 0,
+            "incomplete": 1,
+            "mean_r": null
+          }
+        ]
+      },
+      "direction": {
+        "slice_count": 2,
+        "total_n": 8,
+        "rows": [
+          {
+            "key": "LONG",
+            "n": 6,
+            "n_r_valued": 4,
+            "incomplete": 2,
+            "mean_r": [
+              "2",
+              "4"
+            ]
+          },
+          {
+            "key": "SHORT",
+            "n": 2,
+            "n_r_valued": 2,
+            "incomplete": 0,
+            "mean_r": [
+              "1.5",
+              "2"
+            ]
+          }
+        ]
+      },
+      "volatility_regime": {
+        "slice_count": 3,
+        "total_n": 8,
+        "rows": [
+          {
+            "key": "HIGH",
+            "n": 2,
+            "n_r_valued": 2,
+            "incomplete": 0,
+            "mean_r": [
+              "-1.5",
+              "2"
+            ]
+          },
+          {
+            "key": "LOW",
+            "n": 2,
+            "n_r_valued": 2,
+            "incomplete": 0,
+            "mean_r": [
+              "1.5",
+              "2"
+            ]
+          },
+          {
+            "key": "UNKNOWN",
+            "n": 4,
+            "n_r_valued": 2,
+            "incomplete": 2,
+            "mean_r": [
+              "3.5",
+              "2"
+            ]
+          }
+        ]
+      },
+      "trend_range_regime": {
+        "slice_count": 4,
+        "total_n": 8,
+        "rows": [
+          {
+            "key": "CHOP",
+            "n": 1,
+            "n_r_valued": 1,
+            "incomplete": 0,
+            "mean_r": [
+              "1.5",
+              "1"
+            ]
+          },
+          {
+            "key": "RANGE",
+            "n": 1,
+            "n_r_valued": 1,
+            "incomplete": 0,
+            "mean_r": [
+              "0.5",
+              "1"
+            ]
+          },
+          {
+            "key": "TREND",
+            "n": 4,
+            "n_r_valued": 4,
+            "incomplete": 0,
+            "mean_r": [
+              "1.5",
+              "4"
+            ]
+          },
+          {
+            "key": "UNKNOWN",
+            "n": 2,
+            "n_r_valued": 0,
+            "incomplete": 2,
+            "mean_r": null
+          }
+        ]
+      },
+      "strategy_version": {
+        "slice_count": 2,
+        "total_n": 8,
+        "rows": [
+          {
+            "key": "v2.0.0",
+            "n": 4,
+            "n_r_valued": 3,
+            "incomplete": 1,
+            "mean_r": [
+              "-1",
+              "3"
+            ]
+          },
+          {
+            "key": "v2.1.0",
+            "n": 4,
+            "n_r_valued": 3,
+            "incomplete": 1,
+            "mean_r": [
+              "4.5",
+              "3"
+            ]
+          }
+        ]
+      }
+    },
+    "section_digest": null,
+    "section_digest_params": "base_seed=20260929 resamples=100 evidence=BACKTEST"
   }
 }
