@@ -17,7 +17,14 @@ from src.analytics.slices import SESSION_BANDS, SLICE_VOCABULARY_VERSION
 from src.analytics.types import LOW_N_THRESHOLD, MIN_RESAMPLES, EvidenceKind
 
 from tests.phase10_helpers import load_input
-from tests.test_analytics_report import build_report, build_report_inputs
+from tests.test_analytics_report import (
+    _shuffle_inputs,
+    assert_no_pooled_fields,
+    build_report,
+    build_report_inputs,
+    plain,
+    secret_hits,
+)
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 SIX_IDENTITY_FIELDS = (
@@ -101,3 +108,16 @@ def test_provenance_digest_is_stable_and_sensitive() -> None:
     other = build_provenance(build_report_inputs(), base_seed=1, resamples=MIN_RESAMPLES)
     assert other.digest() != block.digest()
     assert build_report().provenance.digest() == block.digest()
+
+
+def test_provenance_is_order_independent_and_secret_free() -> None:
+    inputs = build_report_inputs()
+    seed = load_input("report_composite")["base_seed"]
+    base = build_provenance(inputs, base_seed=seed, resamples=MIN_RESAMPLES)
+    for shuffle_seed in range(4):
+        shuffled = build_provenance(
+            _shuffle_inputs(inputs, shuffle_seed), base_seed=seed, resamples=MIN_RESAMPLES
+        )
+        assert shuffled == base
+    assert secret_hits(plain(base)) == []
+    assert_no_pooled_fields(base, "provenance")

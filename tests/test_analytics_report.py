@@ -8,13 +8,20 @@ never pooled), stamped with a single digest. Fixture: `tests/fixtures/phase10/re
 from __future__ import annotations
 
 import dataclasses
+import json
 import random
 import re
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from src.analytics.clock import ClockStart
+from src.analytics.approval_delay import SYNTHETIC_LAG_LABEL
+from src.analytics.clock import (
+    PROTOCOL_CLOCK_SOURCE,
+    PROTOCOL_FREEZE_COMMIT_AUTHOR_DATE,
+    ClockStart,
+)
+from src.analytics.excursion import EXCURSION_WINDOW_CONVENTION
 from src.analytics.family import FamilyEvidence, FamilyStatus
 from src.analytics.gates import FamilyGateFacts, GateCell
 from src.analytics.inputs import normalize_backtest
@@ -26,6 +33,7 @@ from src.analytics.report import (
     FamilyGateRow,
     IncompleteEntry,
     InputNote,
+    JournalDepthReport,
     KillGateSection,
     ReportInputs,
     build_evidence_block,
@@ -40,8 +48,10 @@ from src.analytics.types import (
     AnalyticsInputError,
     EvidenceKind,
     IncompleteReason,
+    NoTradeRecord,
 )
 from src.backtest.experiment import ExperimentRecord
+from src.domain.canonical import canonical_scalars
 from src.domain.enums import KillGateState
 from src.domain.journal import JournalEvent
 
@@ -489,3 +499,256 @@ def test_report_digest_covers_kill_gate_ledger_posture_and_provenance() -> None:
     assert earlier.kill_gate.verdict.state is KillGateState.WITHIN_BUDGET
     assert earlier.digest() != base.digest()
     assert base.provenance.research_universe_status == "VERIFIED"
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: evidence separation, determinism and secret-posture guards (D-05, D-01)
+# --------------------------------------------------------------------------- #
+
+FORBIDDEN_POOLED_NAME_PARTS = ("pooled", "combined", "aggregate", "blended", "merged", "overall")
+SECRET_SUBSTRINGS = ("key", "secret", "token", "signature")
+# The only field name that legitimately contains a secret-looking substring: the slice-row
+# label (`SliceRow.key`, e.g. "BTCUSDT" or "2026-Q1"). Values get no allowance at all.
+ALLOWED_SECRET_LOOKING_FIELD_NAMES = frozenset({"key"})
+# Fixed constant sentences (module constants / protocol header), the only strings that may
+# contain whitespace; everything else in the report must be an id, enum value or count.
+FIXED_SENTENCES = frozenset(
+    {
+        EXCURSION_WINDOW_CONVENTION,
+        SYNTHETIC_LAG_LABEL,
+        PROTOCOL_CLOCK_SOURCE,
+        PROTOCOL_FREEZE_COMMIT_AUTHOR_DATE,
+    }
+)
+
+
+def assert_no_pooled_fields(node: object, path: str = "report") -> None:
+    """Walk a dataclass tree; fail on any field whose name implies a cross-kind aggregate."""
+    if dataclasses.is_dataclass(node) and not isinstance(node, type):
+        for spec in dataclasses.fields(node):
+            lowered = spec.name.lower()
+            for part in FORBIDDEN_POOLED_NAME_PARTS:
+                assert part not in lowered, f"pooled-looking field {path}.{spec.name}"
+            assert_no_pooled_fields(getattr(node, spec.name), f"{path}.{spec.name}")
+    elif isinstance(node, (tuple, list)):
+        for index, item in enumerate(node):
+            assert_no_pooled_fields(item, f"{path}[{index}]")
+
+
+def plain(node: object) -> object:
+    """JSON-safe plain form of a report tree (canonical scalars, no float allowed)."""
+    return canonical_scalars(dataclasses.asdict(node))  # type: ignore[call-overload]
+
+
+def secret_hits(node: object) -> list[str]:
+    """Secret-looking substrings in field names (minus the allow-list) and in any value."""
+    hits: list[str] = []
+    if isinstance(node, dict):
+        for name, value in node.items():
+            lowered = str(name).lower()
+            if name not in ALLOWED_SECRET_LOOKING_FIELD_NAMES:
+                hits.extend(f"name:{name}" for needle in SECRET_SUBSTRINGS if needle in lowered)
+            hits.extend(secret_hits(value))
+    elif isinstance(node, list):
+        for value in node:
+            hits.extend(secret_hits(value))
+    elif isinstance(node, str):
+        lowered = node.lower()
+        hits.extend(f"value:{node}" for needle in SECRET_SUBSTRINGS if needle in lowered)
+    return hits
+
+
+def string_leaves(node: object) -> list[str]:
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, dict):
+        return [leaf for value in node.values() for leaf in string_leaves(value)]
+    if isinstance(node, list):
+        return [leaf for value in node for leaf in string_leaves(value)]
+    return []
+
+
+def test_structural_no_pooling_of_evidence_kinds() -> None:
+    report = build_report()
+    names = [spec.name for spec in dataclasses.fields(JournalDepthReport)]
+    assert not [n for n in names if any(p in n.lower() for p in FORBIDDEN_POOLED_NAME_PARTS)]
+    assert len(report.evidence) == 3
+    assert all(isinstance(block, EvidenceBlock) for block in report.evidence)
+    assert [block.kind for block in report.evidence] == [
+        EvidenceKind.BACKTEST,
+        EvidenceKind.PAPER,
+        EvidenceKind.LIVE,
+    ]
+    assert_no_pooled_fields(report)
+
+
+def test_no_pooling_mutation_self_check_catches_a_synthetic_pooled_dataclass() -> None:
+    pooled_report = dataclasses.make_dataclass(
+        "PooledReport", [("evidence", tuple), ("pooled_core", int)]
+    )(evidence=(), pooled_core=1)
+    with pytest.raises(AssertionError, match="pooled-looking field"):
+        assert_no_pooled_fields(pooled_report)
+    nested = dataclasses.make_dataclass("Wrapper", [("blocks", tuple)])(
+        blocks=(dataclasses.make_dataclass("Inner", [("all_kinds_aggregate", int)])(1),)
+    )
+    with pytest.raises(AssertionError, match="pooled-looking field"):
+        assert_no_pooled_fields(nested)
+
+
+def test_each_block_counts_only_its_own_kind_and_blocks_sum_to_the_input_total() -> None:
+    def outcome(evidence: str, trade_id: str, exit_minute: int) -> Any:
+        return make_outcome(
+            evidence=evidence,
+            trade_id=trade_id,
+            signal_id=f"SIG-{trade_id}",
+            entry_price="100",
+            entry_time_utc="2026-01-05T10:00:30+00:00",
+            exit_price="101",
+            exit_time_utc=f"2026-01-05T10:{exit_minute:02d}:00+00:00",
+            quantity="1",
+            realized_pnl="1",
+            realized_risk="1",
+        )
+
+    inputs = build_report_inputs()
+    backtest = tuple(outcome("BACKTEST", f"B{i}", 10 + i) for i in range(2))
+    paper = (outcome("PAPER", "P0", 20),)
+    live = tuple(outcome("LIVE", f"L{i}", 30 + i) for i in range(3))
+    mixed = dataclasses.replace(
+        inputs,
+        backtest=EvidenceInputs(kind=EvidenceKind.BACKTEST, outcomes=backtest),
+        paper=EvidenceInputs(kind=EvidenceKind.PAPER, outcomes=paper),
+        live=EvidenceInputs(kind=EvidenceKind.LIVE, outcomes=live),
+    )
+    report = build_journal_depth_report(mixed, base_seed=1, resamples=MIN_RESAMPLES)
+    counts = [block.core.n for block in report.evidence]
+    assert counts == [2, 1, 3]
+    assert sum(counts) == len(backtest) + len(paper) + len(live)
+    assert [block.excursion.n_outcomes for block in report.evidence] == counts
+    assert [block.slices.tables[0].total_n for block in report.evidence] == counts
+    assert_no_pooled_fields(report)
+
+
+def test_changing_only_paper_inputs_changes_only_the_paper_block() -> None:
+    base = build_report()
+    inputs = build_report_inputs()
+    extra_no_trade = NoTradeRecord(
+        evidence=EvidenceKind.PAPER, symbol="SOLUSDT", reason_code="RR_TOO_LOW", source_id="N-EXTRA"
+    )
+    changed = dataclasses.replace(
+        inputs,
+        paper=dataclasses.replace(
+            inputs.paper, no_trades=(*inputs.paper.no_trades, extra_no_trade)
+        ),
+    )
+    other = build_journal_depth_report(changed, base_seed=base.base_seed, resamples=MIN_RESAMPLES)
+    assert other.evidence[0].digest() == base.evidence[0].digest()
+    assert other.evidence[2].digest() == base.evidence[2].digest()
+    assert other.evidence[1].digest() != base.evidence[1].digest()
+    assert other.digest() != base.digest()
+
+
+def _shuffled(items: tuple[Any, ...], seed: int) -> tuple[Any, ...]:
+    listed = list(items)
+    random.Random(seed).shuffle(listed)
+    return tuple(listed)
+
+
+def _reversed_mapping(mapping: Any) -> dict[Any, Any]:
+    return {key: mapping[key] for key in reversed(sorted(mapping))}
+
+
+def _shuffle_inputs(inputs: ReportInputs, seed: int) -> ReportInputs:
+    def shuffle_evidence(item: EvidenceInputs) -> EvidenceInputs:
+        return dataclasses.replace(
+            item,
+            outcomes=_shuffled(item.outcomes, seed),
+            lifecycle=_shuffled(item.lifecycle, seed + 1),
+            no_trades=_shuffled(item.no_trades, seed + 2),
+            experiments=_shuffled(item.experiments, seed + 3),
+            notes=_shuffled(item.notes, seed + 4),
+            candles_by_symbol=_reversed_mapping(item.candles_by_symbol),
+            realized_r_by_signal=_reversed_mapping(item.realized_r_by_signal),
+        )
+
+    return dataclasses.replace(
+        inputs,
+        backtest=shuffle_evidence(inputs.backtest),
+        paper=shuffle_evidence(inputs.paper),
+        live=shuffle_evidence(inputs.live),
+        journal_events=_shuffled(inputs.journal_events, seed + 5),
+        families=_shuffled(inputs.families, seed + 6),
+        family_gate_facts=_reversed_mapping(inputs.family_gate_facts),
+        research_symbols=_shuffled(inputs.research_symbols, seed + 7),
+    )
+
+
+def test_report_digest_is_reproducible_and_input_order_independent() -> None:
+    inputs = build_report_inputs()
+    seed = load_input(CASE)["base_seed"]
+    base = build_journal_depth_report(inputs, base_seed=seed, resamples=MIN_RESAMPLES)
+    again = build_journal_depth_report(inputs, base_seed=seed, resamples=MIN_RESAMPLES)
+    assert base.digest() == again.digest() == load_expected(CASE)["report_digest"]
+    for shuffle_seed in range(4):
+        shuffled = build_journal_depth_report(
+            _shuffle_inputs(inputs, shuffle_seed), base_seed=seed, resamples=MIN_RESAMPLES
+        )
+        assert shuffled.digest() == base.digest()
+        assert shuffled == base
+
+
+def test_report_digest_changes_with_seed_resamples_and_as_of() -> None:
+    inputs = build_report_inputs()
+    seed = load_input(CASE)["base_seed"]
+    base = build_journal_depth_report(inputs, base_seed=seed, resamples=MIN_RESAMPLES)
+    other_seed = build_journal_depth_report(inputs, base_seed=seed + 1, resamples=MIN_RESAMPLES)
+    other_resamples = build_journal_depth_report(inputs, base_seed=seed, resamples=150)
+    other_as_of = build_journal_depth_report(
+        dataclasses.replace(inputs, as_of_utc=datetime(2027, 4, 2, tzinfo=UTC)),
+        base_seed=seed,
+        resamples=MIN_RESAMPLES,
+    )
+    digests = {base.digest(), other_seed.digest(), other_resamples.digest(), other_as_of.digest()}
+    assert len(digests) == 4
+
+
+def test_report_has_no_secret_substrings_outside_the_documented_allow_list() -> None:
+    assert secret_hits(plain(build_report())) == []
+
+
+def test_secret_scan_mutation_self_check() -> None:
+    assert secret_hits({"api_secret": "x"}) != []
+    assert secret_hits({"note": "my-Token-1"}) != []
+    assert secret_hits({"key": "BTCUSDT"}) == []
+    assert secret_hits({"key": "apikey123"}) != []
+    assert secret_hits({"nested": [{"Signature": 1}]}) != []
+
+
+def test_report_carries_no_journal_payload_or_free_text() -> None:
+    inputs = build_report_inputs()
+    marker = "PAYLOAD_LEAK_MARKER"
+    leaking = JournalEvent(
+        journal_event_id="enablement-leak-1",
+        occurred_at_utc=parse_utc("2027-03-15T00:00:00+00:00"),
+        event_type="LIVE_ORDERS_ENABLED",
+        entity_type="LiveEnablement",
+        entity_id="LIVE_ORDERS_DISABLED",
+        correlation_id="execution_enablement",
+        payload_json=json.dumps({"operator_id": marker}),
+    )
+    report = build_journal_depth_report(
+        dataclasses.replace(inputs, journal_events=(*inputs.journal_events, leaking)),
+        base_seed=1,
+        resamples=MIN_RESAMPLES,
+    )
+    assert report.live_posture == "LIVE_ORDERS_ENABLED"
+    tree = plain(report)
+    dump = json.dumps(tree, sort_keys=True)
+    assert marker not in dump
+    assert "Traceback" not in dump
+    spaced = [
+        leaf
+        for leaf in string_leaves(tree)
+        if any(ch.isspace() for ch in leaf) and leaf not in FIXED_SENTENCES
+    ]
+    assert spaced == [], f"free-text-looking strings in the report: {spaced}"
