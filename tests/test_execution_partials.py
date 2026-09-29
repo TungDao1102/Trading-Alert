@@ -288,9 +288,10 @@ def test_fill_monitor_module_purity() -> None:
     import re
     from pathlib import Path
 
-    module_path = Path("src/execution/fill_monitor.py")
-    if not module_path.exists():
-        pytest.skip("fill_monitor.py not yet created (RED phase)")
+    module_path = Path(__file__).resolve().parents[1] / "src" / "execution" / "fill_monitor.py"
+    # 09-REVIEW WR-12: a missing module must FAIL the purity test, never
+    # skip it (a silent skip is a false green).
+    assert module_path.is_file(), f"purity target missing: {module_path}"
     source = module_path.read_text(encoding="utf-8")
     forbidden_patterns = [
         r"\bimport\s+binance_sdk\b",

@@ -321,7 +321,7 @@ def test_health_module_purity() -> None:
     import re
     from pathlib import Path
 
-    module_path = Path("src/ops/health.py")
+    module_path = Path(__file__).resolve().parents[1] / "src" / "ops" / "health.py"
     source = module_path.read_text(encoding="utf-8")
     forbidden_patterns = [
         r"\bimport\s+binance_sdk\b",

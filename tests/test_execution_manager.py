@@ -858,8 +858,8 @@ def test_execution_core_does_not_import_binance_sdk() -> None:
     from pathlib import Path
 
     for module_path in (
-        Path("src/execution/manager.py"),
-        Path("src/execution/placement.py"),
+        Path(__file__).resolve().parents[1] / "src" / "execution" / "manager.py",
+        Path(__file__).resolve().parents[1] / "src" / "execution" / "placement.py",
     ):
         source = module_path.read_text(encoding="utf-8")
         forbidden_patterns = [
@@ -886,8 +886,8 @@ def test_execution_core_has_no_float_in_placement_math() -> None:
     from pathlib import Path
 
     for module_path in (
-        Path("src/execution/manager.py"),
-        Path("src/execution/placement.py"),
+        Path(__file__).resolve().parents[1] / "src" / "execution" / "manager.py",
+        Path(__file__).resolve().parents[1] / "src" / "execution" / "placement.py",
     ):
         source = module_path.read_text(encoding="utf-8")
         # float() is only allowed at the adapter boundary, not in core.

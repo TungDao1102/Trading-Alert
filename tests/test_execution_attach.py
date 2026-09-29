@@ -577,7 +577,7 @@ def test_manager_module_has_no_float_in_new_attach_code() -> None:
     """
     import re
 
-    module_path = Path("src/execution/manager.py")
+    module_path = Path(__file__).resolve().parents[1] / "src" / "execution" / "manager.py"
     source = module_path.read_text(encoding="utf-8")
     match = re.search(r"\bfloat\s*\(", source)
     assert match is None, f"float() found in {module_path}: {match.group(0)!r}"
@@ -587,7 +587,7 @@ def test_manager_module_does_not_import_binance_sdk() -> None:
     """Beh. 5: src/execution/manager.py does not import the Binance SDK."""
     import re
 
-    module_path = Path("src/execution/manager.py")
+    module_path = Path(__file__).resolve().parents[1] / "src" / "execution" / "manager.py"
     source = module_path.read_text(encoding="utf-8")
     forbidden_patterns = [r"\bimport\s+binance_sdk\b", r"\bfrom\s+binance_sdk\b"]
     for pattern in forbidden_patterns:
