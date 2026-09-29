@@ -1,0 +1,6 @@
+{
+  "enablement_is_no_trade": true,
+  "enablement_reason_code": "DISABLED",
+  "safe_mode_is_no_trade": true,
+  "safe_mode_reason_code": "RECONCILIATION_REQUIRED"
+}
