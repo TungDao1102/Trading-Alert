@@ -6,8 +6,8 @@ requires an explicit operator enable step. The controller owns the
 flipping the flag (journal-first pattern mirroring `SafeModeController`),
 and exposes `guard_placement` returning an `EnablementVerdict`.
 
-The module is dependency-free: stdlib + `src/domain/journal.py` only.
-No Binance SDK, no SQLAlchemy, no Pydantic, no Polars.
+The module is dependency-free: stdlib + `src/domain/journal.py` + `src/domain/enums.py`.
+No analytics import, no Binance SDK, no SQLAlchemy, no Pydantic, no Polars.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
+from src.domain.enums import KillGateState
 from src.domain.journal import JournalEvent, content_hash_event_id
 
 # --------------------------------------------------------------------------- #
@@ -143,7 +144,14 @@ class LiveEnablementController:
             reason_code=None,
         )
 
-    def enable(self, *, operator_id: str, now_utc: datetime, health_verdict: Any) -> None:
+    def enable(
+        self,
+        *,
+        operator_id: str,
+        now_utc: datetime,
+        health_verdict: Any,
+        kill_gate_state: KillGateState,
+    ) -> None:
         """Enable live orders. Journals the transition before flipping the flag.
 
         Per D-04: only an explicit operator enable with journaled id
@@ -160,10 +168,22 @@ class LiveEnablementController:
             operator_id: The operator id enabling live orders.
             now_utc: The current UTC-aware datetime.
             health_verdict: The aggregate health verdict for this enable.
+            kill_gate_state: The EVALUATED research kill-gate state (Phase 10 D-03).
+
+        Kill-gate contract (Phase 10 D-03): `INSUFFICIENT_EDGE` is terminal and never
+        auto-clears; it refuses enablement BEFORE any journal write or flag flip, so
+        live stays disabled until an explicit human decision record clears it. A value
+        that is not a `KillGateState` (unevaluated, None, a plain string) is refused the
+        same way. `PASSING_CANDIDATE` only records that evidence exists and NEVER
+        authorizes live trading by itself: a separate human decision record is a process
+        requirement, and the explicit operator plus passing-health requirements still
+        apply. The kill-gate state is deliberately not added to the enable journal
+        payload (the Phase 9 event vocabulary is unchanged).
 
         Raises:
-            ValueError: invalid operator id / timestamp, or a health
-                verdict that is missing or not passing.
+            ValueError: invalid operator id / timestamp, a health
+                verdict that is missing or not passing, or a kill-gate state that is
+                unevaluated or INSUFFICIENT_EDGE.
         """
         _validate_operator_id(operator_id)
         _validate_utc_aware(now_utc)
@@ -175,6 +195,16 @@ class LiveEnablementController:
             raise ValueError(
                 "enable: a passing health verdict is required (RED or "
                 "unevaluated health blocks live enablement)"
+            )
+        if not isinstance(kill_gate_state, KillGateState):
+            raise ValueError(
+                "enable: an evaluated kill-gate state is required (unevaluated or "
+                "non-KillGateState value blocks live enablement)"
+            )
+        if kill_gate_state is KillGateState.INSUFFICIENT_EDGE:
+            raise ValueError(
+                "enable: the kill gate is INSUFFICIENT_EDGE terminal; live stays disabled "
+                "until an explicit human decision record clears it"
             )
 
         # Journal first, then flip the flag.
