@@ -17,6 +17,7 @@ fail until `src/data/metadata.py` is implemented.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -322,3 +323,90 @@ def test_unknown_symbols_outside_live5_are_ignored(session: Session) -> None:
     )
     assert inserted == 3
     assert {r.symbol for r in cap.added} == {"BTCUSDT", "ETHUSDT", "BNBUSDT"}
+
+
+# --------------------------------------------------------------------------- #
+# Phase 13 (D-10, D-29): delisted / non-TRADING research symbols, width guard.
+# --------------------------------------------------------------------------- #
+
+
+def _variant(symbol: str, **overrides: object) -> SymbolFilters:
+    return dataclasses.replace(_mk_filters(symbol), **overrides)  # type: ignore[arg-type]
+
+
+def _research_filters() -> list[SymbolFilters]:
+    return [
+        _variant(
+            "FTTUSDT",
+            status="SETTLING",
+            delivery_date_ms=1_668_398_400_000,
+        ),
+        _variant("NEWUSDT", status="PENDING_TRADING"),
+        _variant("BTCUSDT"),
+        # 17 characters: longer than symbol_metadata.contract_type (String(16)).
+        _variant("XAUUSDT", contract_type="TRADIFI_PERPETUAL"),
+    ]
+
+
+def test_refresh_inserts_rows_for_settling_and_pending_symbols(session: Session) -> None:
+    """D-10: delisted / non-TRADING universe symbols get versioned INSERT rows."""
+    universe = {"FTTUSDT", "NEWUSDT", "BTCUSDT"}
+    cap = CapturingSession(session)
+    first = datetime(2026, 9, 30, 1, 0, tzinfo=UTC)
+    second = datetime(2026, 9, 30, 1, 5, tzinfo=UTC)
+
+    assert refresh_symbol_metadata(
+        cap, _research_filters(), observed_at=first, universe=universe
+    ) == 3
+    statuses = {r.symbol: r.status for r in cap.added}
+    assert statuses == {
+        "FTTUSDT": "SETTLING",
+        "NEWUSDT": "PENDING_TRADING",
+        "BTCUSDT": "TRADING",
+    }
+
+    assert refresh_symbol_metadata(
+        cap, _research_filters(), observed_at=second, universe=universe
+    ) == 3
+    rows = session.execute(select(SymbolMetadata)).scalars().all()
+    assert len(rows) == 6  # three new versions, none of the first ones updated
+    assert sorted({r.metadata_observed_at_utc.replace(tzinfo=UTC) for r in rows}) == [
+        first,
+        second,
+    ]
+    assert "XAUUSDT" not in {r.symbol for r in rows}
+
+
+def test_tradifi_contract_type_filtered_by_universe(session: Session) -> None:
+    """A 17-character contract type is harmless while its symbol is outside the universe."""
+    cap = CapturingSession(session)
+
+    inserted = refresh_symbol_metadata(
+        cap,
+        _research_filters(),
+        observed_at=datetime(2026, 9, 30, tzinfo=UTC),
+        universe={"BTCUSDT"},
+    )
+
+    assert inserted == 1
+    assert {r.symbol for r in cap.added} == {"BTCUSDT"}
+
+
+@pytest.mark.parametrize("field", ["contract_type", "status"])
+def test_overlong_metadata_text_raises_not_truncates(session: Session, field: str) -> None:
+    """A universe row wider than String(16) raises and nothing is committed (T-13-30)."""
+    overlong = "TRADIFI_PERPETUAL"  # 17 characters
+    assert len(overlong) > 16
+    filters = [_variant("BTCUSDT"), _variant("XAUUSDT", **{field: overlong})]
+    cap = CapturingSession(session)
+
+    with pytest.raises(ValueError, match=rf"XAUUSDT.*{field}"):
+        refresh_symbol_metadata(
+            cap,
+            filters,
+            observed_at=datetime(2026, 9, 30, tzinfo=UTC),
+            universe={"BTCUSDT", "XAUUSDT"},
+        )
+
+    assert cap.added == []
+    assert session.execute(select(SymbolMetadata)).scalars().all() == []

@@ -768,3 +768,67 @@ def test_main_dry_run_needs_no_database(
     assert "DRY-RUN" in out
     assert adapter.calls == ["exchange_info"]
     assert not (tmp_path / "raw").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Task 3 - metadata for the resolved universe, symbols missing from exchangeInfo.
+# --------------------------------------------------------------------------- #
+
+
+async def test_cli_always_passes_universe_to_metadata(
+    tmp_path: Path, session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.data import backfill_cli
+
+    captured: dict[str, Any] = {}
+
+    def _spy(
+        sess: Session,
+        filters: Sequence[SymbolFilters],
+        *,
+        observed_at: datetime | None = None,
+        universe: Any = None,
+    ) -> int:
+        captured["universe"] = universe
+        captured["filters"] = [f.symbol for f in filters]
+        return 0
+
+    monkeypatch.setattr(backfill_cli, "refresh_symbol_metadata", _spy)
+    adapter = FakeAdapter([_filters("BTCUSDT"), _filters("ETHUSDT")], session=session)
+
+    await backfill_cli.run_backfill(
+        _config(tmp_path, symbols=["BTCUSDT"], depth_months={"1h": 1}),
+        adapter=adapter,
+        session=session,
+        clock=_clock(),
+    )
+
+    # The universe is never None (an unfiltered refresh would insert the whole
+    # exchange, including 17-character contract types), and it is exactly the
+    # resolved symbol set even though exchangeInfo returned more symbols.
+    assert captured["universe"] is not None
+    assert set(captured["universe"]) == {"BTCUSDT"}
+    assert captured["filters"] == ["BTCUSDT", "ETHUSDT"]
+
+
+async def test_missing_symbols_are_reported(tmp_path: Path, session: Session) -> None:
+    from src.data.backfill_cli import run_backfill
+
+    adapter = FakeAdapter([_filters("BTCUSDT")], session=session)
+    lines: list[str] = []
+
+    report = await run_backfill(
+        _config(tmp_path, symbols=["BTCUSDT", "GONEUSDT"], depth_months={"1h": 1}),
+        adapter=adapter,
+        session=session,
+        clock=_clock(),
+        emit=lines.append,
+    )
+
+    assert report.missing_from_exchange_info == ("GONEUSDT",)
+    assert any("missing from exchangeInfo" in line and "GONEUSDT" in line for line in lines)
+    # A symbol exchangeInfo does not know has no window and is never fetched.
+    assert {r[0] for r in adapter.kline_requests} == {"BTCUSDT"}
+    gone = [w for w in report.windows if w.symbol == "GONEUSDT"]
+    assert gone and all(not w.has_window for w in gone)
+    assert report.metadata_rows == 1
