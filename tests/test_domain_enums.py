@@ -13,6 +13,9 @@ SetupType, SourceTimeframe, EntryModel, OrderRole, QuantizationDecision.
 
 from __future__ import annotations
 
+from decimal import Decimal
+from pathlib import Path
+
 import pytest
 from src.domain import (
     Direction,
@@ -24,6 +27,7 @@ from src.domain import (
 )
 from src.domain.enums import (
     ApprovalAction,
+    DailyState,
     OrderStatus,
     PositionStatus,
     RejectionReason,
@@ -32,6 +36,9 @@ from src.domain.enums import (
     TradePlanStatus,
     TradeStatus,
 )
+from src.risk.types import PortfolioVerdict, SizedResult
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # --------------------------------------------------------------------------- #
 # Test 1 — SignalStatus values match GLOSSARY §2 verbatim.
@@ -187,27 +194,23 @@ def test_system_mode_values_match_glossary_section_8() -> None:
 
 
 def test_rejection_reason_values_match_glossary_section_9() -> None:
-    """Beh. 8: RejectionReason enum values are exactly the GLOSSARY §9 set.
+    """Beh. 8: RejectionReason enum values are exactly the GLOSSARY section 9.1 set.
 
-    GLOSSARY §9 (verbatim, including Phase 5 D-05 fine-grained additions):
-        NO_TRADE_REGIME, RR_TOO_LOW, STALE_SETUP, INVALIDATED, RISK_LIMIT,
-        CORRELATED_RISK_LIMIT, DAILY_STOP, QUANTIZATION_REJECT,
-        MIN_NOTIONAL_REJECT, INSUFFICIENT_MARGIN, EXCHANGE_CONSTRAINT,
-        DATA_STALE, RECONCILIATION_REQUIRED, APPROVAL_EXPIRED,
-        MIN_QTY_REJECT, NOTIONAL_REJECT, UTILIZATION_REJECT,
-        CLUSTER_CAP_REJECT, AGGREGATE_CAP_REJECT, MAX_POSITIONS_REJECT,
-        DAILY_STOP_BLOCK, STALE_CONSTRAINTS, UNCERTAIN_ACCOUNT_STATE
+    GLOSSARY section 9.1 (20 canonical codes; the five deprecated aliases were
+    removed in Phase 12, D-09, and are recorded in section 9.2):
+        NO_TRADE_REGIME, RR_TOO_LOW, STALE_SETUP, INVALIDATED,
+        INSUFFICIENT_MARGIN, EXCHANGE_CONSTRAINT, DATA_STALE,
+        RECONCILIATION_REQUIRED, APPROVAL_EXPIRED, MIN_QTY_REJECT,
+        NOTIONAL_REJECT, UTILIZATION_REJECT, CLUSTER_CAP_REJECT,
+        AGGREGATE_CAP_REJECT, MAX_POSITIONS_REJECT, DAILY_STOP_BLOCK,
+        STALE_CONSTRAINTS, UNCERTAIN_ACCOUNT_STATE, STOP_TOO_TIGHT,
+        COST_TO_RISK_EXCEEDED
     """
     expected = {
         "NO_TRADE_REGIME",
         "RR_TOO_LOW",
         "STALE_SETUP",
         "INVALIDATED",
-        "RISK_LIMIT",
-        "CORRELATED_RISK_LIMIT",
-        "DAILY_STOP",
-        "QUANTIZATION_REJECT",
-        "MIN_NOTIONAL_REJECT",
         "INSUFFICIENT_MARGIN",
         "EXCHANGE_CONSTRAINT",
         "DATA_STALE",
@@ -223,9 +226,87 @@ def test_rejection_reason_values_match_glossary_section_9() -> None:
         "DAILY_STOP_BLOCK",
         "STALE_CONSTRAINTS",
         "UNCERTAIN_ACCOUNT_STATE",
+        # Phase 12 D-08 cost-guard codes.
+        "STOP_TOO_TIGHT",
+        "COST_TO_RISK_EXCEEDED",
     }
     actual = {member.value for member in RejectionReason}
     assert actual == expected
+    assert len(RejectionReason) == 20
+
+
+@pytest.mark.parametrize(
+    "retired",
+    [
+        "RISK_LIMIT",
+        "CORRELATED_RISK_LIMIT",
+        "DAILY_STOP",
+        "QUANTIZATION_REJECT",
+        "MIN_NOTIONAL_REJECT",
+    ],
+)
+def test_retired_rejection_aliases_are_not_enum_values(retired: str) -> None:
+    """Phase 12 D-09: the five deprecated aliases are gone from RejectionReason."""
+    assert retired not in {member.value for member in RejectionReason}
+    assert not hasattr(RejectionReason, retired)
+
+
+def test_daily_state_daily_stop_survives_alias_removal() -> None:
+    """DAILY_STOP stays a valid DailyState value (GLOSSARY section 8.1)."""
+    assert DailyState.DAILY_STOP.value == "DAILY_STOP"
+
+
+def _reject_sized(reason_code: str) -> SizedResult:
+    return SizedResult(
+        is_no_trade=True,
+        quantity=None,
+        quantity_before_rounding=Decimal("0"),
+        quantity_after_rounding=Decimal("0"),
+        quantization_decision="REJECTED",
+        realized_risk=Decimal("0"),
+        reason_code=reason_code,
+    )
+
+
+@pytest.mark.parametrize("code", ["STOP_TOO_TIGHT", "COST_TO_RISK_EXCEEDED"])
+def test_sized_result_accepts_new_cost_guard_codes(code: str) -> None:
+    """Phase 12 D-08: SizedResult validates against the enum-derived vocabulary."""
+    result = _reject_sized(code)
+    assert result.reason_code == code
+    assert result.is_no_trade is True
+    assert result.quantity is None
+
+
+def test_sized_result_rejects_invented_reason_code() -> None:
+    with pytest.raises(ValueError):
+        _reject_sized("STOP_TOO_CLOSE")
+
+
+@pytest.mark.parametrize("code", ["STOP_TOO_TIGHT", "COST_TO_RISK_EXCEEDED"])
+def test_portfolio_verdict_accepts_new_cost_guard_codes(code: str) -> None:
+    verdict = PortfolioVerdict(
+        is_no_trade=True, sized=None, reason_code=code, daily_state=DailyState.NORMAL
+    )
+    assert verdict.reason_code == code
+    with pytest.raises(ValueError):
+        PortfolioVerdict(
+            is_no_trade=True,
+            sized=None,
+            reason_code="STOP_TOO_CLOSE",
+            daily_state=DailyState.NORMAL,
+        )
+
+
+def test_glossary_section_9_1_block_equals_enum() -> None:
+    """The GLOSSARY 9.1 text block parses to the same 20 tokens as the enum."""
+    lines = (_REPO_ROOT / "docs" / "GLOSSARY.md").read_text(encoding="utf-8").splitlines()
+    start = lines.index("### 9.1 Canonical codes")
+    fence = "`" * 3
+    open_idx = lines.index(fence + "text", start)
+    close_idx = lines.index(fence, open_idx + 1)
+    tokens = [line.strip() for line in lines[open_idx + 1 : close_idx] if line.strip()]
+    assert len(tokens) == len(set(tokens)) == 20
+    assert set(tokens) == {member.value for member in RejectionReason}
 
 
 # --------------------------------------------------------------------------- #
