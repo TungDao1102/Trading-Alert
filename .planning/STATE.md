@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 12
 current_phase_name: fee-cost-model-correctness
 status: executing
-stopped_at: Completed 12-06-PLAN.md
-last_updated: "2026-09-30T09:26:56.137Z"
+stopped_at: Completed 12-07-PLAN.md
+last_updated: "2026-09-30T09:36:41.571Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 11 execution started
-state_head: 0c2ddd63e94b3143c1ac7afc2c962d8d4520cb47
+state_head: b94f555025b7430e5df2d09c6cc279e33edb4228
 progress:
   total_phases: 28
   completed_phases: 2
   total_plans: 69
-  completed_plans: 63
+  completed_plans: 64
 milestone_name: milestone
 ---
 
@@ -102,6 +102,7 @@ Progress: [██████████] 100%
 | Phase 12 P04 | 25 min | 2 tasks | 15 files |
 | Phase 12 P05 | 25 min | 3 tasks | 6 files |
 | Phase 12 P06 | 25 min | 2 tasks | 6 files |
+| Phase 12 P07 | 25min | 3 tasks | 19 files |
 
 ## Accumulated Context
 
@@ -264,6 +265,7 @@ Recent decisions affecting current work:
 - [Phase 12]: 12-04: Phase 6 fixtures regenerated with BAR_HALF_RANGE 0.80 (stops about 1.1 percent) on baseline-v5 / v3 sets; guard clearance pre-flight uses independent literal arithmetic
 - [Phase 12]: 12-05: adapter keeps its own 0.01 commission-rate ceiling (imports nothing from src); commissionRate SOURCES row stays MEDIUM (official page not read directly)
 - [Phase 12]: 12-06: risk sizing entry is the adverse zone edge (LONG entry_max, SHORT entry_min); zone mid stays the quantizer notional reference (supersedes Phase 5 D-02 for sizing; DECISIONS D046 by 12-11)
+- [Phase 12]: 12-07: Phase 5 portfolio test helper runs shared size_and_quantize; candidate risks hand-derived in DERIVATIONS.md
 
 ### Pending Todos
 
@@ -308,6 +310,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T09:26:55.929Z
-Stopped at: Completed 12-06-PLAN.md
+Last session: 2026-09-30T09:36:41.347Z
+Stopped at: Completed 12-07-PLAN.md
 Resume file: None
