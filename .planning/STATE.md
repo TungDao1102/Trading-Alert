@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 13
 current_phase_name: research-data-foundation-fixes
 status: executing
-stopped_at: Completed 13-02-PLAN.md
-last_updated: "2026-09-30T13:39:44.901Z"
+stopped_at: Completed 13-03-PLAN.md
+last_updated: "2026-09-30T13:46:09.834Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 13 execution started
-state_head: 9fd624e9cb3f56cd9a6a5872e04b4f3d6a2faaca
+state_head: 94a0f757898c86eff38df6989f3697a9a58f0c66
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 82
-  completed_plans: 70
+  completed_plans: 71
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 13 (research-data-foundation-fixes) — EXECUTING
-Plan: 3 of 13
+Plan: 4 of 13
 Status: Ready to execute
 Last activity: 2026-09-30 — Phase 13 execution started
 
@@ -110,6 +110,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 12 P11 | 35min | 3 tasks | 6 files |
 | Phase 13 P01 | 21 min | 3 tasks | 9 files |
 | Phase 13 P02 | 15 min | 3 tasks | 8 files |
+| Phase 13 P03 | 15 min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -282,6 +283,7 @@ Recent decisions affecting current work:
 - [Phase 13]: 13-01: collect list is an operational input (no FROZEN semantics, no hash, not under params/); proposer keeps only TRADING PERPETUAL USDT, ranks by Decimal quoteVolume with symbol tie-break
 - [Phase 13]: 13-02: backfill publishes only whole closed UTC days (effective end = min(end_ms, current UTC day start)); partial days held and counted, terminal_end only for a closed past end
 - [Phase 13]: 13-02: Parquet publish is atomic (same-dir tmp, fsync, exists check, bounded os.replace retry); zero-trade bars accepted as telemetry; more than 8 fractional digits or non-finite Decimal is a structural reject
+- [Phase 13]: 13-03: supervisor verification backfill skips pairs whose first pass raised; last-close cursor is monotonic via lock-guarded _advance_last_close gating WS dispatch and backfill
 
 ### Pending Todos
 
@@ -327,6 +329,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T13:39:44.646Z
-Stopped at: Completed 13-02-PLAN.md
+Last session: 2026-09-30T13:46:09.583Z
+Stopped at: Completed 13-03-PLAN.md
 Resume file: None
