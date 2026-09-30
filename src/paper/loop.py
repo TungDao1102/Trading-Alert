@@ -20,7 +20,11 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from src.backtest.costs import build_cost_model, modeled_costs_per_unit
+from src.backtest.costs import (
+    build_cost_model,
+    cost_rates_from_model,
+    guard_rates_from_params,
+)
 from src.core.planner import plan
 from src.core.strategy import evaluate
 from src.core.types import (
@@ -501,9 +505,9 @@ def run_paper_tick(case_input: dict[str, Any]) -> dict[str, Any]:
         trade_plans.append(_trade_plan_to_dict(trade_plan))
 
         # Risk pipeline.
-        modeled_costs = modeled_costs_per_unit(
-            cost_model=cost_model,
-            side=signal.direction,
+        cost_rates = cost_rates_from_model(cost_model)
+        min_stop_distance_rate, max_cost_to_risk = guard_rates_from_params(
+            parameter_set.params
         )
         verdict = evaluate_risk(
             trade_plan=trade_plan,
@@ -514,7 +518,9 @@ def run_paper_tick(case_input: dict[str, Any]) -> dict[str, Any]:
             daily_loss_quote=daily_loss_quote,
             now_utc=closed_candle.close_time_utc,
             ttl=ttl,
-            modeled_costs_per_unit=modeled_costs,
+            cost_rates=cost_rates,
+            min_stop_distance_rate=min_stop_distance_rate,
+            max_cost_to_risk=max_cost_to_risk,
             minimum_risk_utilization_after_rounding=Decimal(
                 str(parameter_set.params["minimum_risk_utilization_after_rounding"])
             ),

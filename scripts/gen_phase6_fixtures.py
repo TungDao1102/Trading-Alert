@@ -28,6 +28,7 @@ from decimal import Decimal
 from pathlib import Path
 
 FIXTURE_ROOT = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "phase6"
+PHASE7_FIXTURE_ROOT = FIXTURE_ROOT.parent / "phase7"
 SYMBOL = "BTCUSDT"
 
 # 1H bar half-range (high = close + half, low = close - half) for bars
@@ -397,6 +398,29 @@ def write_intrabar_both_touched() -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def write_parity_overlapping_history() -> None:
+    """Phase 7 backtest-to-paper parity input: the LONG both-touched payload (12-09).
+
+    A copy of the `intrabar_both_touched` payload (baseline-v5 identity and
+    the eight-key cost dict) written under the Phase 7 fixture root, so the
+    parity fixture stays on the same registry set as the Phase 6 fixtures.
+    `expected.json` (digest and the documentary hashes) is pinned by hand from
+    the simulator output and asserted by tests/test_paper_parity.py.
+    """
+    bars = _make_1h_candles_long_setup()
+    context = _make_4h_context_bars_long()
+    key = SYMBOL + "|" + _trigger_bar_close_key()
+    payload = _build_input(
+        strategy_bars=bars,
+        context_bars=context,
+        intrabar_key=key,
+        intrabar_value=_make_1m_intrabar_long_both_touched(),
+    )
+    path = PHASE7_FIXTURE_ROOT / "parity_overlapping_history" / "input.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
 def _write_baseline(case_name: str, parameter_set_id: str) -> None:
     """Baseline fixture: the LONG both-touched payload on a degenerated set."""
     bars = _make_1h_candles_long_setup()
@@ -596,6 +620,7 @@ def write_invalidation_cancels_entry() -> None:
 def main() -> None:
     FIXTURE_ROOT.mkdir(parents=True, exist_ok=True)
     write_intrabar_both_touched()
+    write_parity_overlapping_history()
     write_intrabar_both_touched_short()
     write_intrabar_missing_fallback()
     write_limit_touch_no_fill()
