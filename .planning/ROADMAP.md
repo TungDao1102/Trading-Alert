@@ -45,7 +45,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 9: Live Execution Rollout** - LIMIT-zone entries, Algo protective exits, smallest capital
 - [ ] **Phase 10: Journal Depth + Kill-Gate Operations** - MFE/MAE analytics and the 3-families/6-months stop rule
 - [ ] **Phase 11: Decision Alignment (docs + params)** - Apply D031–D039 to canonical docs and parameter sets; protocol v1.1.0 pre-registration
-- [ ] **Phase 12: Fee + Cost Model Correctness** - Costs in quote currency everywhere, taker entry, exit slippage, real commission rate (was Phase 11)
+- [x] **Phase 12: Fee + Cost Model Correctness** - Costs in quote currency everywhere, taker entry, exit slippage, real commission rate (was Phase 11) (completed 2026-09-30)
 - [ ] **Phase 13: Research Data Foundation Fixes + VPS Collector Deployment** - Collector live on the single VPS (D042), history depth, point-in-time universe, mark-price klines, backfill robustness, Parquet→backtest builder
 - [ ] **Phase 14: Backtest Simulator Causality Rewrite** - Fills only after the signal bar, multi-bar holding, TP1/TP2 ladder, funding, mark-price triggers
 - [ ] **Phase 15: Strategy Geometry Correction** - Trend-pullback SL outside zone, confirmed pivots, min stop distance; families match their sheets
@@ -444,7 +444,7 @@ This absorbs the confirmed bug from former Phase 11:
 
 **Audit refs**: F-001, F-801, F-601, F-306, F-002, F-962, F-005, F-028
 
-**Plans:** 11/11 plans executed
+**Plans:** 11/11 plans complete
 
 Plans:
 **Wave 1**
@@ -886,7 +886,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 9. Live Execution Rollout | 4/4 | In Progress|  |
 | 10. Journal Depth + Kill-Gate Operations | 12/12 | In Progress|  |
 | 11. Decision Alignment (docs + params) | 8/8 | In Progress|  |
-| 12. Fee + Cost Model Correctness | 11/11 | In Progress|  |
+| 12. Fee + Cost Model Correctness | 11/11 | Complete    | 2026-09-30 |
 | 13. Research Data Foundation Fixes + VPS Collector Deployment | 0/TBD | Not started | - |
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
