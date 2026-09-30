@@ -12,8 +12,17 @@ Wire-format rules enforced here:
   - Observed-at is supplied by the caller; `datetime.now(UTC)` is the
     fallback for production callers and the injected clock for tests.
   - Optional `universe` parameter restricts which symbols are inserted.
-    Useful for the live-5 V1 bootstrap (D-01). Symbols not in the
-    universe are silently skipped — they do NOT cause a failure.
+    Callers pass one (D-29): the backfill CLI always passes its resolved
+    research universe, so exotic contract types outside it (for example
+    `TRADIFI_PERPETUAL`, 17 characters) never reach the table. Symbols not
+    in the universe are silently skipped — they do NOT cause a failure.
+  - Delisted and non-TRADING universe symbols (SETTLING, PENDING_TRADING,
+    ...) present in exchangeInfo are inserted as ordinary versioned rows
+    with their status preserved (D-10); history is never updated in place.
+  - `contract_type` and `status` are String(16) columns. SQLite ignores the
+    width and PostgreSQL rejects an overflow only at flush, so the width is
+    checked here and an overlong universe row raises instead of being
+    truncated (fail closed, T-13-30). No column is widened (no migration).
 
 This module is the only writer of `symbol_metadata`; downstream consumers
 pin `metadata_observed_at_utc <= dataset_date` to reconstruct the rules
@@ -33,6 +42,18 @@ from src.db.models import SymbolMetadata
 if TYPE_CHECKING:
     pass
 
+# Width of the `symbol_metadata.contract_type` and `.status` columns
+# (String(16), src/db/models.py). A longer value is never truncated.
+METADATA_TEXT_MAX_LEN = 16
+
+
+class MetadataWidthError(ValueError):
+    """A universe row's text field is wider than its String(16) column.
+
+    The message names the symbol, field and length only, never a value that
+    could be mistaken for a credential, so callers may print it.
+    """
+
 
 def refresh_symbol_metadata(
     session: Session,
@@ -51,18 +72,34 @@ def refresh_symbol_metadata(
         filters: ExchangeInfo projections (one per symbol) from the adapter.
         observed_at: PK timestamp for the version. `None` means now (UTC).
         universe: Optional set of symbols to insert. Anything outside this
-            set is silently skipped (no error). `None` inserts everything.
+            set is silently skipped (no error). `None` inserts everything;
+            callers should pass one (D-29).
 
     Returns:
         Number of rows inserted (i.e. `len(filters)` after universe
         filtering).
+
+    Raises:
+        MetadataWidthError: a selected row's `contract_type` or `status` is
+            longer than `METADATA_TEXT_MAX_LEN`; nothing is inserted.
     """
     when = observed_at if observed_at is not None else datetime.now(UTC)
     universe_set = set(universe) if universe is not None else None
+    selected = [
+        f for f in filters if universe_set is None or f.symbol in universe_set
+    ]
+    # Validate every selected row BEFORE any session.add so a violation leaves
+    # nothing pending: roll back and raise, never truncate (fail closed).
+    for f in selected:
+        for field_name, text in (("contract_type", f.contract_type), ("status", f.status)):
+            if len(text) > METADATA_TEXT_MAX_LEN:
+                session.rollback()
+                raise MetadataWidthError(
+                    f"{f.symbol}: {field_name} is {len(text)} characters, longer than "
+                    f"the {METADATA_TEXT_MAX_LEN}-character column; refusing to truncate"
+                )
     inserted = 0
-    for f in filters:
-        if universe_set is not None and f.symbol not in universe_set:
-            continue
+    for f in selected:
         session.add(
             SymbolMetadata(
                 symbol=f.symbol,

@@ -832,3 +832,43 @@ async def test_missing_symbols_are_reported(tmp_path: Path, session: Session) ->
     gone = [w for w in report.windows if w.symbol == "GONEUSDT"]
     assert gone and all(not w.has_window for w in gone)
     assert report.metadata_rows == 1
+
+
+def test_failure_prints_type_name_never_the_database_url(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-13-31: an error whose message embeds the URL must not reach the output."""
+    from src.data import backfill_cli
+
+    url = _sqlite_url(tmp_path)
+    secret_url = f"{url}?password=hunter2-secret"
+
+    def _leaky(*args: Any, **kwargs: Any) -> int:
+        raise RuntimeError(f"connection to {secret_url} failed")
+
+    adapter = FakeAdapter([_filters("BTCUSDT")])
+    monkeypatch.setattr(backfill_cli, "BinanceUsdmAdapter", lambda: adapter)
+    monkeypatch.setattr(backfill_cli, "_utc_now", _clock())
+    monkeypatch.setattr(backfill_cli, "refresh_symbol_metadata", _leaky)
+    manifest = _write_manifest(tmp_path / "manifest.toml")
+    collect = _write_collect_list(tmp_path / "collect.toml")
+
+    rc = backfill_cli.main(
+        [
+            "--symbols", "BTCUSDT",
+            "--intervals", "1h",
+            "--datasets", "trade",
+            "--database-url", secret_url,
+            "--raw-root", str(tmp_path / "raw"),
+            "--manifest", str(manifest),
+            "--collect-list", str(collect),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "hunter2-secret" not in captured.out + captured.err
+    assert "backfill: failed (RuntimeError)" in captured.err
+    assert adapter.kline_requests == []

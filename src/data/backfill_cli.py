@@ -65,7 +65,7 @@ from src.data.collect_list import (
     load_collect_list,
 )
 from src.data.collector import _make_sync_engine
-from src.data.metadata import refresh_symbol_metadata
+from src.data.metadata import MetadataWidthError, refresh_symbol_metadata
 from src.data.store import DEFAULT_RAW_ROOT
 
 log = structlog.get_logger()
@@ -682,6 +682,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except BackfillConfigError as exc:
         print(f"backfill: {exc}", file=sys.stderr)
         return 2
+    except MetadataWidthError as exc:
+        # Names the symbol and field only; safe to print.
+        print(f"backfill: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:
         # Type name only: a database error message can embed the connection URL.
         print(f"backfill: failed ({type(exc).__name__})", file=sys.stderr)
