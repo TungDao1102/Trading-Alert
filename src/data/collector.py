@@ -59,7 +59,12 @@ from src.adapters.binance_usdm import (
     FundingTick,
     OiSnapshot,
 )
-from src.data.backfill import LIVE_5
+from src.data.collect_list import (
+    DEFAULT_COLLECT_LIST_PATH,
+    SYMBOL_RE,
+    CollectListError,
+    load_collect_list,
+)
 from src.db.models import TICK_WIDE_SYMBOL, CollectorGap, CollectorWatermark
 
 log = structlog.get_logger()
@@ -824,8 +829,18 @@ def _parse_collector_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--universe",
         nargs="+",
-        default=list(LIVE_5),
-        help="Symbols to poll (default: live-5).",
+        default=None,
+        help="Explicit symbol override (default: the collect list).",
+    )
+    parser.add_argument(
+        "--collect-list",
+        type=Path,
+        default=DEFAULT_COLLECT_LIST_PATH,
+        help=(
+            "Collect list TOML naming the symbols to poll: live-5 union the "
+            "top 15 TRADING USDT perpetuals by 24h volume (D-01, D-02; "
+            f"default: {DEFAULT_COLLECT_LIST_PATH.as_posix()})."
+        ),
     )
     parser.add_argument(
         "--raw-root",
@@ -859,10 +874,34 @@ def _parse_collector_args(argv: Sequence[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _resolve_universe(args: argparse.Namespace) -> list[str]:
+    """Resolve the polled symbols: explicit `--universe`, else the collect list.
+
+    Raises `CollectListError` on any defect. There is deliberately no
+    fallback to the live-5 (T-13-02): a broken list must stop the collector,
+    not silently shrink OI collection.
+    """
+    explicit: list[str] | None = args.universe
+    if explicit is not None:
+        for sym in explicit:
+            if not SYMBOL_RE.match(sym):
+                raise CollectListError(
+                    f"--universe symbol {sym!r} must match {SYMBOL_RE.pattern}"
+                )
+        if not explicit:
+            raise CollectListError("--universe is empty; refusing to collect nothing")
+        return list(explicit)
+    return list(load_collect_list(args.collect_list).symbols)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the collector: loop (default), one tick (`--once`), or probe."""
     args = _parse_collector_args(argv)
-    universe: list[str] = list(args.universe) or list(LIVE_5)
+    try:
+        universe = _resolve_universe(args)
+    except CollectListError as exc:
+        print(f"collector: collect list error: {exc}", file=sys.stderr)
+        return 1 if args.healthcheck else 2
     raw_root = Path(args.raw_root)
     cadence: float = float(args.cadence_seconds)
     if args.healthcheck:
