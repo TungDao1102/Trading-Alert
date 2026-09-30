@@ -1,8 +1,9 @@
 """Tests for the registry↔cost binding gate (Phase 7.1, D-01/D-02/D-03).
 
 Per D-05: match-case fixtures must hash against the registry slice;
-mismatch cases (wrong fee, wrong string, precision drift) raise
-CostModelBindingMismatch. Phase6 fixtures are grandfathered per D-05
+mismatch cases (wrong fee, wrong string) raise CostModelBindingMismatch;
+an equivalent numeric spelling (the former "precision drift" case) now
+binds because cost identity is canonical numeric text (Phase 12, D-15). Phase6 fixtures are grandfathered per D-05
 and are NOT used here.
 
 This module is the GREEN phase of the Phase 7.1 binding gate — it pins
@@ -207,25 +208,25 @@ def test_binding_gate_rejects_wrong_funding_treatment() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Beh. 5 — trailing-precision drift raises CostModelBindingMismatch (D-04/D-12).
+# Beh. 5 — equivalent numeric spelling binds (D-15); genuine change refused.
 # --------------------------------------------------------------------------- #
 
 
-def test_binding_gate_rejects_precision_drift() -> None:
+def test_binding_gate_accepts_equivalent_spelling() -> None:
     """Beh. 5: a fixture with fee_rate_entry "0.00020" vs registry
-    "0.0002" raises CostModelBindingMismatch (trailing-precision
-    discipline, D-04/D-12).
+    "0.0002" now binds (D-15 canonical numeric text).
 
-    Per D-04/D-12: Decimal → str() preserving full precision.
-    Decimal("0.00020") stays "0.00020", never "0.0002" — the
-    trailing precision is semantically meaningful for exchange-
-    sensitive values and must not be silently normalized by the gate.
-    Comparison is hash-string only (never value equality).
+    Supersedes the Phase 7.1 D-04/D-12 trailing-precision refusal: cost
+    identity is the value, so an equivalent spelling must not fail a
+    correct binding (F-608). A genuine value change is still refused by
+    test_binding_gate_rejects_wrong_fee_rate (the wrong_fee case).
+    Comparison stays hash-string only.
     """
     case = _load_case_input("precision_drift")
     cost_model = _build_cost_model(case["cost_model"])
-    with pytest.raises(CostModelBindingMismatch):
-        _gate_assemble(case, cost_model=cost_model)
+    record = _gate_assemble(case, cost_model=cost_model)
+    match_model = _build_cost_model(_load_match_input()["cost_model"])
+    assert record.cost_model_hash == match_model.cost_model_hash
 
 
 # --------------------------------------------------------------------------- #
@@ -357,13 +358,12 @@ def test_direct_int_cost_model_converges_with_builder_hash() -> None:
 
 def test_decimal_cost_inputs_hash_equal_to_string_baseline() -> None:
     """Beh. 9: directly-constructed Decimal cost inputs hash identically to
-    the all-string build_cost_model baseline, and trailing precision is
-    preserved (no silent re-spelling).
+    the all-string build_cost_model baseline, and equivalent spellings
+    converge.
 
-    Per WR-03 + D-04/D-12: Decimal inputs return as-is (never
-    round-tripped through str()), so Decimal("0.0002") converges with
-    the "0.0002" string baseline, while Decimal("0.00020") stays a
-    distinct spelling with a distinct hash.
+    Per WR-03 + D-15: Decimal inputs are coerced without a str() round
+    trip, and the hash uses canonical numeric text, so Decimal("0.0002"),
+    "0.0002" and Decimal("0.00020") all converge on one hash.
     """
     baseline = _build_cost_model(_load_match_input()["cost_model"])
     direct = CostModel(
@@ -389,6 +389,6 @@ def test_decimal_cost_inputs_hash_equal_to_string_baseline() -> None:
         partial_fill_fraction=Decimal("0.5"),
         cost_model_hash="",
     )
-    assert drift.cost_model_hash != baseline.cost_model_hash, (
-        "trailing precision must stay semantically meaningful (D-04/D-12)"
+    assert drift.cost_model_hash == baseline.cost_model_hash, (
+        "equivalent spellings must converge on one cost hash (D-15)"
     )

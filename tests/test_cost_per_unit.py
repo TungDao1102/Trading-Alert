@@ -373,3 +373,315 @@ def test_old_modeled_costs_per_unit_untouched() -> None:
 
     model = build_cost_model(dict(_SEVEN))
     assert modeled_costs_per_unit(cost_model=model, side="LONG") == Decimal("0.0011")
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 - canonical cost-hash text (D-15), cost_slice, binding and freeze.
+# --------------------------------------------------------------------------- #
+
+# cost_model_hash of every existing registry set over its seven-key slice.
+# Literal constants (never recomputed from the code under test): none of these
+# may move when the canonical text rule lands.
+LEGACY_COST_HASHES = {
+    ("trend-pullback", "baseline-v3"): (
+        "12c05d5f406196af7a53ebeb76b865bfc14dd955c0527629511404eaf631d9f2"
+    ),
+    ("trend-pullback", "baseline-v4"): (
+        "e18ce00931314a670dab22a4f0bd704c75d36c5d736c0c8ca04713050bb704d8"
+    ),
+    ("breakout-retest", "baseline-v4"): (
+        "e18ce00931314a670dab22a4f0bd704c75d36c5d736c0c8ca04713050bb704d8"
+    ),
+    ("range-mr", "baseline-v4"): (
+        "e18ce00931314a670dab22a4f0bd704c75d36c5d736c0c8ca04713050bb704d8"
+    ),
+    ("trend-pullback", "baseline-no-trade-v2"): (
+        "e18ce00931314a670dab22a4f0bd704c75d36c5d736c0c8ca04713050bb704d8"
+    ),
+    ("trend-pullback", "baseline-simple-trend-v2"): (
+        "e18ce00931314a670dab22a4f0bd704c75d36c5d736c0c8ca04713050bb704d8"
+    ),
+    ("trend-pullback", "baseline-no-trade-v1"): (
+        "98d177271d961ad6c15d26523866de60e771d0dccf45f1cfdfe92ed17deca80e"
+    ),
+    ("trend-pullback", "baseline-simple-trend-v1"): (
+        "98d177271d961ad6c15d26523866de60e771d0dccf45f1cfdfe92ed17deca80e"
+    ),
+}
+
+V5_SETS = (
+    ("trend-pullback", "baseline-v5"),
+    ("breakout-retest", "baseline-v5"),
+    ("range-mr", "baseline-v5"),
+    ("trend-pullback", "baseline-no-trade-v3"),
+    ("trend-pullback", "baseline-simple-trend-v3"),
+)
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        (Decimal("0"), "0"),
+        (Decimal("0.0"), "0"),
+        (Decimal("0.000"), "0"),
+        (Decimal("-0"), "0"),
+        (Decimal("-0.00"), "0"),
+        (Decimal("1"), "1"),
+        (Decimal("1.0"), "1"),
+        (Decimal("1.00"), "1"),
+        (Decimal("0.00020"), "0.0002"),
+        (Decimal("0.0002"), "0.0002"),
+        (Decimal("100"), "100"),
+        (Decimal("1E+2"), "100"),
+        (Decimal("1.5E-3"), "0.0015"),
+        (Decimal("0.5"), "0.5"),
+    ],
+)
+def test_canonical_decimal_text(value: Decimal, text: str) -> None:
+    from src.backtest.costs import _canonical_decimal_text
+
+    assert _canonical_decimal_text(value) == text
+
+
+def _cost(**overrides: object) -> dict[str, object]:
+    return {**_SEVEN, **overrides}
+
+
+def test_fee_spellings_hash_equal() -> None:
+    from src.backtest.costs import build_cost_model
+
+    spellings = ("0.0005", "0.00050", Decimal("0.00050"), Decimal("0.0005"))
+    hashes = {
+        build_cost_model(_cost(fee_rate_entry=s)).cost_model_hash for s in spellings
+    }
+    assert len(hashes) == 1
+
+
+def test_partial_fill_fraction_one_spellings_hash_equal() -> None:
+    from src.backtest.costs import build_cost_model
+
+    hashes = {
+        build_cost_model(_cost(partial_fill_fraction=s)).cost_model_hash
+        for s in ("1", "1.0", 1, Decimal("1.00"), Decimal("1"))
+    }
+    assert len(hashes) == 1
+
+
+def test_zero_spellings_hash_equal() -> None:
+    from src.backtest.costs import build_cost_model
+
+    hashes = {
+        build_cost_model(_cost(fee_rate_exit=s)).cost_model_hash
+        for s in ("0", "0.0", 0, Decimal("0"), Decimal("0.000"))
+    }
+    assert len(hashes) == 1
+
+
+def test_genuine_change_still_changes_hash() -> None:
+    from src.backtest.costs import build_cost_model
+
+    base = build_cost_model(_cost()).cost_model_hash
+    assert build_cost_model(_cost(fee_rate_entry="0.0006")).cost_model_hash != base
+    assert build_cost_model(_cost(funding_treatment="PRO_RATA")).cost_model_hash != base
+    assert build_cost_model(_cost(partial_fill_fraction="0.5")).cost_model_hash != base
+
+
+def test_exit_slippage_spellings_hash_equal() -> None:
+    from src.backtest.costs import build_cost_model
+
+    a = build_cost_model(_cost(exit_slippage_rate="0.0003")).cost_model_hash
+    b = build_cost_model(_cost(exit_slippage_rate="0.00030")).cost_model_hash
+    c = build_cost_model(_cost(exit_slippage_rate=Decimal("0.00030"))).cost_model_hash
+    assert a == b == c
+
+
+@pytest.mark.parametrize(("strategy_id", "set_id"), sorted(LEGACY_COST_HASHES))
+def test_legacy_registry_cost_hashes_do_not_move(strategy_id: str, set_id: str) -> None:
+    from src.backtest.costs import build_cost_model, cost_slice
+    from src.domain.registry import load_parameter_set
+
+    params = load_parameter_set(strategy_id, set_id).params
+    model = build_cost_model(cost_slice(params))
+    assert model.exit_slippage_rate is None
+    assert model.cost_model_hash == LEGACY_COST_HASHES[(strategy_id, set_id)]
+
+
+def test_supplied_hash_verified_against_canonical_hash() -> None:
+    from src.backtest.costs import CostModel, build_cost_model
+
+    good7 = build_cost_model(_cost())
+    good8 = build_cost_model(_cost(exit_slippage_rate="0.0003"))
+    for good in (good7, good8):
+        kwargs: dict[str, object] = {
+            "fee_rate_entry": good.fee_rate_entry,
+            "fee_rate_exit": good.fee_rate_exit,
+            "funding_treatment": good.funding_treatment,
+            "expected_slippage": good.expected_slippage,
+            "slippage_model": good.slippage_model,
+            "spread_fill_assumptions": good.spread_fill_assumptions,
+            "partial_fill_fraction": good.partial_fill_fraction,
+            "exit_slippage_rate": good.exit_slippage_rate,
+        }
+        with pytest.raises(ValueError, match="mismatch"):
+            CostModel(cost_model_hash="f" * 64, **kwargs)  # type: ignore[arg-type]
+        ok = CostModel(cost_model_hash=good.cost_model_hash, **kwargs)  # type: ignore[arg-type]
+        assert ok.cost_model_hash == good.cost_model_hash
+
+
+def test_cost_slice_legacy_set_is_seven_keys() -> None:
+    from src.backtest.costs import COST_KEYS, cost_slice
+    from src.domain.registry import load_parameter_set
+
+    params = load_parameter_set("trend-pullback", "baseline-v4").params
+    assert tuple(sorted(cost_slice(params))) == tuple(sorted(COST_KEYS))
+
+
+def test_cost_slice_v5_set_adds_exit_slippage() -> None:
+    from src.backtest.costs import COST_KEYS, cost_slice
+    from src.domain.registry import load_parameter_set
+
+    params = load_parameter_set("trend-pullback", "baseline-v5").params
+    sliced = cost_slice(params)
+    assert set(sliced) == {*COST_KEYS, "exit_slippage_rate"}
+    assert Decimal(str(sliced["exit_slippage_rate"])) == Decimal("0.0003")
+
+
+def test_cost_slice_missing_required_key_raises_bare_key_error() -> None:
+    from src.backtest.costs import cost_slice
+    from src.domain.registry import load_parameter_set
+
+    params = load_parameter_set("trend-pullback", "baseline-v2").params
+    with pytest.raises(KeyError):
+        cost_slice(params)
+
+
+def test_cost_keys_tuple_unchanged() -> None:
+    from src.backtest.costs import COST_KEYS
+
+    assert len(COST_KEYS) == 7
+    assert "exit_slippage_rate" not in COST_KEYS
+
+
+@pytest.mark.parametrize(("strategy_id", "set_id"), V5_SETS)
+def test_v5_slice_hashes_over_eight_keys(strategy_id: str, set_id: str) -> None:
+    from src.backtest.costs import build_cost_model, cost_slice
+    from src.domain.registry import load_parameter_set
+
+    params = load_parameter_set(strategy_id, set_id).params
+    model = build_cost_model(cost_slice(params))
+    assert model.exit_slippage_rate == Decimal("0.0003")
+    legacy_hash = LEGACY_COST_HASHES[("trend-pullback", "baseline-v4")]
+    assert model.cost_model_hash != legacy_hash
+
+
+def test_v5_sets_share_one_cost_hash() -> None:
+    from src.backtest.costs import build_cost_model, cost_slice
+    from src.domain.registry import load_parameter_set
+
+    hashes = {
+        build_cost_model(cost_slice(load_parameter_set(s, p).params)).cost_model_hash
+        for s, p in V5_SETS
+    }
+    assert len(hashes) == 1
+
+
+def _v5_cost_dict() -> dict[str, object]:
+    from src.backtest.costs import cost_slice
+    from src.domain.registry import load_parameter_set
+
+    return dict(cost_slice(load_parameter_set("trend-pullback", "baseline-v5").params))
+
+
+def _assemble_v5(cost_model: object) -> object:
+    from datetime import UTC, datetime
+
+    from src.backtest.experiment import assemble
+
+    return assemble(
+        parameter_set_id="baseline-v5",
+        strategy_id="trend-pullback",
+        strategy_version="v4.0.0",
+        data_snapshot_id="1" * 64,
+        code_version="12-03",
+        cost_model=cost_model,  # type: ignore[arg-type]
+        time_range_start_utc=datetime(2026, 9, 1, tzinfo=UTC),
+        time_range_end_utc=datetime(2026, 9, 11, tzinfo=UTC),
+        universe=["BTCUSDT"],
+        run_type="CANDIDATE",
+        notes="12-03 v5 binding",
+    )
+
+
+def test_binding_v5_set_accepts_matching_eight_key_model() -> None:
+    from src.backtest.costs import build_cost_model
+
+    record = _assemble_v5(build_cost_model(_v5_cost_dict()))
+    assert len(record.cost_model_hash) == 64  # type: ignore[attr-defined]
+
+
+def test_binding_v5_set_refuses_seven_key_model() -> None:
+    from src.backtest.binding import CostModelBindingMismatch
+    from src.backtest.costs import build_cost_model
+
+    seven = {k: v for k, v in _v5_cost_dict().items() if k != "exit_slippage_rate"}
+    with pytest.raises(CostModelBindingMismatch):
+        _assemble_v5(build_cost_model(seven))
+
+
+def test_binding_v5_set_refuses_disagreeing_exit_slippage() -> None:
+    from src.backtest.binding import CostModelBindingMismatch
+    from src.backtest.costs import build_cost_model
+
+    other = {**_v5_cost_dict(), "exit_slippage_rate": "0.0004"}
+    with pytest.raises(CostModelBindingMismatch):
+        _assemble_v5(build_cost_model(other))
+
+
+def test_binding_legacy_set_with_seven_key_model_unchanged() -> None:
+    from datetime import UTC, datetime
+
+    from src.backtest.costs import build_cost_model, cost_slice
+    from src.backtest.experiment import assemble
+    from src.domain.registry import load_parameter_set
+
+    params = load_parameter_set("trend-pullback", "baseline-v4").params
+    record = assemble(
+        parameter_set_id="baseline-v4",
+        strategy_id="trend-pullback",
+        strategy_version="v3.0.0",
+        data_snapshot_id="1" * 64,
+        code_version="12-03",
+        cost_model=build_cost_model(cost_slice(params)),
+        time_range_start_utc=datetime(2026, 9, 1, tzinfo=UTC),
+        time_range_end_utc=datetime(2026, 9, 11, tzinfo=UTC),
+        universe=["BTCUSDT"],
+        run_type="CANDIDATE",
+        notes="12-03 legacy binding",
+    )
+    assert record.cost_model_hash == LEGACY_COST_HASHES[("trend-pullback", "baseline-v4")]
+
+
+def test_freeze_v5_set_pins_and_refuses_seven_key_model() -> None:
+    from datetime import UTC, datetime
+
+    from src.backtest.binding import CostModelBindingMismatch
+    from src.backtest.costs import build_cost_model
+    from src.paper.freeze import pin_stream_epoch
+
+    opened = datetime(2026, 9, 19, 10, 0, tzinfo=UTC)
+    epoch = pin_stream_epoch(
+        strategy_id="trend-pullback",
+        parameter_set_id="baseline-v5",
+        opened_at_utc=opened,
+        cost_model=build_cost_model(_v5_cost_dict()),
+    )
+    assert epoch.parameter_set_id == "baseline-v5"
+
+    seven = {k: v for k, v in _v5_cost_dict().items() if k != "exit_slippage_rate"}
+    with pytest.raises(CostModelBindingMismatch):
+        pin_stream_epoch(
+            strategy_id="trend-pullback",
+            parameter_set_id="baseline-v5",
+            opened_at_utc=opened,
+            cost_model=build_cost_model(seven),
+        )

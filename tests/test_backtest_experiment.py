@@ -307,17 +307,19 @@ def test_baseline_simple_trend_returns_single_direction() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Test 7 — costModelHash differs between fee_rate_entry 0.00020 vs 0.0002.
+# Test 7 — costModelHash is spelling-independent, value-sensitive (D-15).
 # --------------------------------------------------------------------------- #
 
 
 def test_cost_model_hash_precision_discipline() -> None:
-    """Beh. 7: costModelHash differs between fee_rate_entry 0.00020 vs
-    0.0002 (trailing-precision discipline, D-12).
+    """Beh. 7: costModelHash is identical for equivalent spellings
+    (fee_rate_entry 0.00020 vs 0.0002) and differs for a genuine value
+    change (D-15 canonical numeric text).
 
-    Per D-12: Decimal → str() preserving full precision. Decimal("0.00020")
-    stays "0.00020", never "0.0002". This is documented design — trailing
-    precision is semantically meaningful for exchange-sensitive values.
+    Supersedes the Phase 6 D-12 trailing-precision rule: cost identity is
+    the VALUE, not its spelling, so a fixture spelling can never make a
+    correct registry binding fail (F-608). Registry parameter_set_hash keeps
+    trailing precision; only the cost hash canonicalizes.
     """
     from src.backtest.costs import build_cost_model
 
@@ -343,8 +345,22 @@ def test_cost_model_hash_precision_discipline() -> None:
             "partial_fill_fraction": "1.0",
         }
     )
-    assert cost_a.cost_model_hash != cost_b.cost_model_hash, (
-        "costModelHash must differ between fee_rate_entry 0.00020 vs 0.0002"
+    assert cost_a.cost_model_hash == cost_b.cost_model_hash, (
+        "costModelHash must be equal for equivalent spellings 0.00020 vs 0.0002"
+    )
+    cost_c = build_cost_model(
+        {
+            "fee_rate_entry": "0.0003",
+            "fee_rate_exit": "0.0005",
+            "funding_treatment": "ADDITIVE",
+            "expected_slippage": "0.0001",
+            "slippage_model": "FIXED_BPS",
+            "spread_fill_assumptions": "FULL_FILL",
+            "partial_fill_fraction": "1.0",
+        }
+    )
+    assert cost_a.cost_model_hash != cost_c.cost_model_hash, (
+        "costModelHash must differ for a genuine value change"
     )
 
 
@@ -732,16 +748,19 @@ def test_cr05_decimal_inputs_hash_identically_to_string_inputs() -> None:
         build_cost_model(string_cost).cost_model_hash
     ), "Decimal inputs must never round-trip through str() before hashing"
 
-    # Trailing precision still disciplines string spellings.
+    # Equivalent spellings hash equally (D-15); a genuine change still differs.
     trailing = dict(string_cost, fee_rate_entry="0.00020")
     trimmed = dict(string_cost, fee_rate_entry="0.0002")
-    assert build_cost_model(trailing).cost_model_hash != (
+    assert build_cost_model(trailing).cost_model_hash == (
         build_cost_model(trimmed).cost_model_hash
     )
-    # And the trailing-zero Decimal binds to its own spelling.
     assert build_cost_model(
         dict(decimal_cost, fee_rate_entry=Decimal("0.00020"))
     ).cost_model_hash == build_cost_model(trailing).cost_model_hash
+    changed = dict(string_cost, fee_rate_entry="0.0003")
+    assert build_cost_model(changed).cost_model_hash != (
+        build_cost_model(trimmed).cost_model_hash
+    )
 
 
 def test_cr06_experiment_id_differs_across_run_type_and_strategy_id() -> None:
