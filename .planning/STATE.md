@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 11
 current_phase_name: decision-alignment
 status: executing
-stopped_at: Phase 11 context gathered
-last_updated: "2026-09-30T03:50:39.870Z"
+stopped_at: Completed 11-01-PLAN.md
+last_updated: "2026-09-30T04:04:47.338Z"
 last_activity: 2026-09-30
-last_activity_desc: Phase 10 execution started
-state_head: a695489bcd45171c78fc6c299d68a0ecc8ff45e1
+last_activity_desc: Phase 11 execution started
+state_head: 0c79a3a5a22d1492efaf19b9a027c9a364813321
 progress:
   total_phases: 28
   completed_phases: 2
   total_plans: 58
-  completed_plans: 49
+  completed_plans: 50
 milestone_name: milestone
 ---
 
@@ -26,14 +26,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 10 — Journal Depth + Kill-Gate Operations
+**Current focus:** Phase 11 — decision-alignment
 
 ## Current Position
 
-Phase: 11 (decision-alignment) — READY TO EXECUTE
-Plan: 12 of 12
+Phase: 11 (decision-alignment) — EXECUTING
+Plan: 2 of 8
 Status: Ready to execute
-Last activity: 2026-09-30 - Completed quick task 260930-d0b: D042 single-VPS deployment; VPS hardening pulled into Phase 13
+Last activity: 2026-09-30 — Phase 11 execution started
 
 Progress: [██████████] 100%
 
@@ -88,6 +88,7 @@ Progress: [██████████] 100%
 | Phase 10 P10 | 14 min | 2 tasks | 6 files |
 | Phase 10 P11 | 35 min | 3 tasks | 7 files |
 | Phase 10 P12 | 13 min | 3 tasks | 6 files |
+| Phase 11 P01 | 30 min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -235,6 +236,7 @@ Recent decisions affecting current work:
 - [Phase 10]: 10-12: report CLI is read-only by construction; the only write is one guarded, idempotent KILL_GATE_EVALUATION append via --record after both files exist — D-03/D-05: journal append stays an explicit separate step; ON CONFLICT DO NOTHING on the content-hash id makes replays no-ops
 - [Phase 10]: 10-12: database failures surface as exception type names only; DATABASE_URL is read once and passed only to the session factory — RESEARCH V7: no credential or request text in stdout, stderr, reports or sidecars
 - [Phase 10]: 10-12: CLI runs asyncio on SelectorEventLoop on Windows and disposes the engine per run — psycopg async cannot use the Proactor loop; read and record use separate asyncio.run calls
+- [Phase 11]: D043: research protocol v1.1.0 frozen with D032 pre-registration (100/30 trade floor, N=25 Holm-Bonferroni per family, last-20% single-use holdout); Frozen-on unchanged so the D013 clock is not restarted
 
 ### Pending Todos
 
@@ -279,6 +281,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T02:54:17.519Z
-Stopped at: Phase 11 context gathered
-Resume file: .planning/phases/11-decision-alignment/11-CONTEXT.md
+Last session: 2026-09-30T04:04:47.116Z
+Stopped at: Completed 11-01-PLAN.md
+Resume file: None
