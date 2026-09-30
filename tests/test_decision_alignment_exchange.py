@@ -232,3 +232,107 @@ def test_event_algo_order_update_row_states_method_and_reconfirmation() -> None:
     assert "SDK model" in normalised
     assert "official page could not be retrieved" in normalised
     assert "re-confirmation" in normalised
+
+
+# --------------------------------------------------------------------------- Task 3
+
+BINANCE = "docs/integration/BINANCE.md"
+ARCHITECTURE = "docs/architecture/ARCHITECTURE.md"
+RESEARCH = "docs/research/TRADING_STRATEGY_RESEARCH.md"
+SEC_OPS = "docs/operations/SECURITY_AND_OPERATIONS.md"
+
+
+def _docs() -> dict[str, str]:
+    return {
+        p.relative_to(REPO_ROOT).as_posix(): p.read_text(encoding="utf-8")
+        for p in sorted((REPO_ROOT / "docs").rglob("*.md"))
+    }
+
+
+def test_binance_doc_positive() -> None:
+    name, ok, detail = exchange.check_binance_doc(_read(BINANCE))
+    assert ok, detail
+    assert name == "EX-07"
+
+
+def test_binance_doc_rejects_pre_change_text() -> None:
+    _, ok, detail = exchange.check_binance_doc(_old(BINANCE))
+    assert not ok
+    assert "MARKET_LOT_SIZE" in detail
+    assert "/private" in detail
+
+
+@pytest.mark.parametrize(
+    ("number", "phrase"),
+    [(n, p) for n, phrases in exchange.BINANCE_SECTION_PHRASES.items() for p in phrases],
+)
+def test_binance_doc_requires_each_section_phrase(number: int, phrase: str) -> None:
+    text = _read(BINANCE).replace("`", "")
+    body = exchange._section(text, number)
+    mutated = text.replace(body, body.replace(phrase, "REDACTED"))
+    _, ok, detail = exchange.check_binance_doc(mutated)
+    assert not ok
+    assert f"section {number}: {phrase}" in detail
+
+
+def test_binance_doc_requires_three_verify_markers() -> None:
+    text = _read(BINANCE).replace("erify against current Binance docs", "erify elsewhere")
+    _, ok, detail = exchange.check_binance_doc(text)
+    assert not ok
+    assert "verify against current Binance docs" in detail
+
+
+def test_binance_doc_states_audit_claims_as_unverified() -> None:
+    body = exchange.normalise(exchange._section(_read(BINANCE), 7))
+    assert "Unverified audit claims (F-056)" in body
+    assert "Phase 19" in body
+
+
+def test_no_coin_futures_links_positive() -> None:
+    name, ok, detail = exchange.check_no_coin_futures_links(_docs())
+    assert ok, detail
+    assert name == "EX-08"
+
+
+def test_no_coin_futures_links_rejects_pre_change_docs() -> None:
+    old = {rel: _old(rel) for rel in (ARCHITECTURE, RESEARCH, SOURCES, SEC_OPS)}
+    _, ok, detail = exchange.check_no_coin_futures_links(old)
+    assert not ok
+    for rel in (ARCHITECTURE, RESEARCH, SOURCES):
+        assert rel in detail
+
+
+def test_no_coin_futures_links_rejects_injected_link() -> None:
+    docs = _docs()
+    docs[BINANCE] += (
+        "\n[x](https://developers.binance.com/docs/derivatives-trading-coin-futures/y)\n"
+    )
+    _, ok, detail = exchange.check_no_coin_futures_links(docs)
+    assert not ok
+    assert BINANCE in detail
+
+
+def test_remaining_citations_use_registered_usdm_urls() -> None:
+    sources = _read(SOURCES)
+    for rel in (ARCHITECTURE, RESEARCH):
+        urls = [u for u in exchange.cited_urls(_read(rel)) if "usds-margined-futures" in u]
+        assert urls, rel
+    registered, _ = exchange.registered_urls(sources)
+    assert (
+        "https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Connect"
+        in registered
+    )
+    assert (
+        "https://developers.binance.com/docs/derivatives/usds-margined-futures/user-data-streams"
+        in registered
+    )
+
+
+def test_architecture_keeps_the_24_hour_verify_marker() -> None:
+    line = next(
+        exchange.normalise(ln)
+        for ln in _read(ARCHITECTURE).splitlines()
+        if "24-hour lifetime" in ln
+    )
+    assert "believed to" in line
+    assert "verify against current Binance docs before implementation" in line

@@ -184,4 +184,4 @@ Every signal, order, and position should have an explicit lifecycle. Avoid deriv
 
 ## 6. Realtime principle
 
-Use WebSocket for realtime market/user events and REST for bootstrap, reconciliation, and operations. Binance currently documents a 24-hour lifetime for a single market-data WebSocket connection and recommends user-data WebSocket updates for order/position state during volatile conditions. [Binance WebSocket market streams](https://developers.binance.com/en/docs/products/derivatives-trading-coin-futures/websocket-market-streams/Connect)
+Use WebSocket for realtime market/user events and REST for bootstrap, reconciliation, and operations. Binance is believed to document a 24-hour lifetime for a single market-data WebSocket connection and to recommend user-data WebSocket updates for order/position state during volatile conditions; this was not confirmed on a fetched page on 2026-09-30, so verify against current Binance docs before implementation. [Binance WebSocket market streams](https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Connect)

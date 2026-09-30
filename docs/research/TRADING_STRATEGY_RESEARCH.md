@@ -1069,7 +1069,7 @@ Binance là canonical source cho:
 - Positions.
 - Fill status.
 
-Binance khuyến nghị ưu tiên user-data WebSocket khi theo dõi order/position vì REST có thể có query delay trong điều kiện biến động; user-data stream cũng có yêu cầu keepalive/reconnect cần đưa vào production design. [Binance – User Data Streams](https://developers.binance.com/en/docs/products/derivatives-trading-coin-futures/user-data-streams)
+Binance khuyến nghị ưu tiên user-data WebSocket khi theo dõi order/position vì REST có thể có query delay trong điều kiện biến động; user-data stream cũng có yêu cầu keepalive/reconnect cần đưa vào production design. [Binance – User Data Streams](https://developers.binance.com/docs/derivatives/usds-margined-futures/user-data-streams)
 
 ---
 

@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCS_DIR = REPO_ROOT / "docs"
 EXECUTION_SPEC_PATH = DOCS_DIR / "trading" / "EXECUTION_SPEC.md"
 SOURCES_PATH = DOCS_DIR / "SOURCES.md"
+BINANCE_PATH = DOCS_DIR / "integration" / "BINANCE.md"
 
 Gate = tuple[str, bool, str]
 
@@ -249,6 +250,44 @@ def check_sources(text: str) -> Gate:
     return _verdict("EX-06a", missing, [])
 
 
+# --------------------------------------------------------------------------- EX-07
+
+VERIFY_MARKER = "verify against current Binance docs"
+VERIFY_MARKER_MINIMUM = 3
+
+BINANCE_SECTION_PHRASES: dict[int, tuple[str, ...]] = {
+    3: ("/public", "/market", "/private", "listenKey", "2026-04-23", "F-053"),
+    5: ("/private", "listenKey"),
+    6: ("MARK_PRICE", "CONTRACT_PRICE", "D037"),
+    7: ("MARKET_LOT_SIZE", "PERCENT_PRICE", "unverified", "F-056"),
+    9: ("EXECUTION_SPEC.md section 6.1", "account-wide"),
+}
+
+
+def check_binance_doc(text: str) -> Gate:
+    """BINANCE.md: WebSocket split, workingType default, market filters, verify markers."""
+    missing: list[str] = []
+    for number, phrases in BINANCE_SECTION_PHRASES.items():
+        missing.extend(f"section {number}: {p}" for p in _missing(_section(text, number), phrases))
+    count = normalise(text).count(VERIFY_MARKER)
+    if count < VERIFY_MARKER_MINIMUM:
+        missing.append(f"'{VERIFY_MARKER}' x{VERIFY_MARKER_MINIMUM} (found {count})")
+    return _verdict("EX-07", missing, [])
+
+
+# --------------------------------------------------------------------------- EX-08
+
+COIN_FUTURES_MARKER = "derivatives-trading-coin-futures"
+
+
+def check_no_coin_futures_links(texts: dict[str, str]) -> Gate:
+    """No document under docs/ cites a coin-futures path for a USD-M statement (F-057)."""
+    offenders = sorted(name for name, body in texts.items() if COIN_FUTURES_MARKER in body)
+    if offenders:
+        return ("EX-08", False, "coin-futures citation in: " + "; ".join(offenders))
+    return ("EX-08", True, "ok")
+
+
 # --------------------------------------------------------------------------- run
 
 
@@ -268,6 +307,13 @@ def run() -> list[Gate]:
         check_emergency_controls(spec),
         check_source_register(spec, sources),
         check_sources(sources),
+        check_binance_doc(_read(BINANCE_PATH)),
+        check_no_coin_futures_links(
+            {
+                path.relative_to(REPO_ROOT).as_posix(): _read(path)
+                for path in sorted(DOCS_DIR.rglob("*.md"))
+            }
+        ),
     ]
 
 
