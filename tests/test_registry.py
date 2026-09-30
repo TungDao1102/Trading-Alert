@@ -1066,6 +1066,8 @@ _PHASE12_FROZEN = {
 
 _V5_SETS = (
     ("trend-pullback", "baseline-v4", "baseline-v5"),
+    ("breakout-retest", "baseline-v4", "baseline-v5"),
+    ("range-mr", "baseline-v4", "baseline-v5"),
 )
 
 
