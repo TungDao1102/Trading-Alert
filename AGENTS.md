@@ -74,7 +74,7 @@ A deterministic, reproducible Binance Futures trading research and semi-automate
 
 | Library | Version | Purpose | When to Use |
 |---------|---------|---------|-------------|
-| FastAPI | >= 0.141, < 0.150 (0.141.1 released 2026-07-29) | TradingView webhooks (HMAC-checked), Telegram callback receiver (optional), `/healthz` | Edge-only: the strategy engine must not import FastAPI. Pydantic-v2-native request validation gives signature/body checks almost free. Keep the surface minimal: webhook in, health out |
+| FastAPI | >= 0.141, < 0.150 (0.141.1 released 2026-07-29) | TradingView webhooks (secret URL path + source-IP allow-list; TradingView cannot sign requests), Telegram callback receiver (optional), `/healthz` | Edge-only: the strategy engine must not import FastAPI. Pydantic-v2-native request validation gives signature/body checks almost free. Keep the surface minimal: webhook in, health out |
 | uvicorn | >= 0.52, < 0.60 (0.52.4 released 2026-08-19) | ASGI server for the FastAPI edge | `uvicorn[standard]` (uvloop + httptools) on Linux/Docker; plain uvicorn on Windows dev. Single-worker suffices for webhook/health volume |
 | httpx | 0.28.x stable (0.28.1; 1.0 is dev pre-release — do NOT take) | Async HTTP client for any direct REST needs + test mocking via respx/pytest-httpx | If the official SDK covers the endpoint, the SDK owns the wire. httpx is for gaps, health probes, and Telegram-adjacent calls. MEDIUM confidence on patch |
 
