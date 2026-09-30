@@ -14,3 +14,10 @@
   expects it under Phase 13. Unrelated to 13-01 (no `.planning/` requirement text or
   `scripts/decision_alignment` file was touched). Owner: whoever reconciles ROADMAP/REQUIREMENTS
   with the decision-alignment gate (likely Phase 13.1 planning).
+
+## Found during 13-03 execution (2026-09-30)
+
+- `.venv/Scripts/python -m mypy src/paper/supervisor.py` reports
+  `src/adapters/telegram_notify.py:287: error: Incompatible types in assignment (expression has
+  type "datetime", variable has type "Decimal")` (pulled in transitively). `src/paper/supervisor.py`
+  itself is clean. Pre-existing, unrelated to 13-03; not touched.
