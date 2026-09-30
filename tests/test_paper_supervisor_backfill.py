@@ -442,3 +442,224 @@ def test_record_close_never_moves_backwards() -> None:
     supervisor.record_close("BTCUSDT", "1h", _T0 + _HOUR)
 
     assert supervisor._last_close[("BTCUSDT", "1h")] == later
+
+
+# --------------------------------------------------------------------------- #
+# Plan 13-03 Task 2 (D-28): verification pass + monotonic WS guard.
+# --------------------------------------------------------------------------- #
+
+
+class _SequencedRestAdapter(_FakeRestAdapter):
+    """REST fake whose Nth klines call returns responses[N] (last repeats)."""
+
+    def __init__(
+        self,
+        responses: list[list[Any] | Exception],
+        *,
+        calls: list[tuple[Any, ...]] | None = None,
+    ) -> None:
+        super().__init__(calls=calls)
+        self._responses = responses
+
+    async def klines(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 1500,
+    ) -> list[Any]:
+        index = min(len(self.klines_calls), len(self._responses) - 1)
+        self.klines_calls.append((symbol, interval))
+        self.calls.append(("klines", symbol, interval, start_ms))
+        response = self._responses[index]
+        if isinstance(response, Exception):
+            raise response
+        return list(response)
+
+
+def _two_pass_supervisor(
+    rest: _FakeRestAdapter, ws: _FakeWsAdapter, clock_values: list[datetime]
+) -> Any:
+    from src.paper.supervisor import PaperSupervisor
+
+    values = iter(clock_values)
+    supervisor = PaperSupervisor(
+        ws_adapter=ws,  # type: ignore[arg-type]
+        rest_adapter=rest,  # type: ignore[arg-type]
+        on_closed_candle=lambda _k: None,
+        symbols=("BTCUSDT",),
+        intervals=("1h",),
+        clock=lambda: next(values),
+    )
+    supervisor.start()
+    supervisor.record_close("BTCUSDT", "1h", _T0)
+    ws.calls.clear()
+    return supervisor
+
+
+def test_verification_pass_picks_up_bar_closed_in_seam() -> None:
+    """A bar closing between the first backfill and the WS attach is kept."""
+    t1 = _T0 + 3 * _HOUR
+    t2 = t1 + _HOUR
+    bars = _three_bars()
+    seam_bar = _make_rest_kline("BTCUSDT", "1h", t1, t2)
+    calls: list[tuple[Any, ...]] = []
+    ws = _FakeWsAdapter(calls=calls)
+    # First call: bars closing up to t1. Second call (verification): the
+    # last bar again plus one extra bar that closed at t2.
+    rest = _SequencedRestAdapter([bars, [bars[-1], seam_bar]], calls=calls)
+    supervisor = _two_pass_supervisor(rest, ws, [t1, t2])
+
+    backfilled, _gaps = asyncio.run(
+        supervisor._resubscribe_and_backfill(journal_outage_gaps=False)
+    )
+
+    returned = backfilled[("BTCUSDT", "1h")]
+    closes = [k.close_time_utc for k in returned]
+    assert closes == [_T0 + _HOUR, _T0 + 2 * _HOUR, t1, t2], (
+        "every bar exactly once, in close order, ending with the seam bar"
+    )
+    klines = _indices(calls, "klines")
+    subscribes = _indices(calls, "subscribe")
+    assert len(klines) == 2, "one first-pass and one verification klines call"
+    assert klines[0] < min(subscribes) < klines[1], (
+        "verification pass must run after the subscribe entries"
+    )
+    assert supervisor._last_close[("BTCUSDT", "1h")] == t2
+
+
+def test_same_bar_from_both_passes_returned_once() -> None:
+    """A REST fake ignoring start_ms cannot produce a duplicate bar."""
+    t1 = _T0 + 3 * _HOUR
+    calls: list[tuple[Any, ...]] = []
+    ws = _FakeWsAdapter(calls=calls)
+    rest = _FakeRestAdapter(pages={("BTCUSDT", "1h"): _three_bars()}, calls=calls)
+    supervisor = _two_pass_supervisor(rest, ws, [t1, t1])
+
+    backfilled, _gaps = asyncio.run(
+        supervisor._resubscribe_and_backfill(journal_outage_gaps=False)
+    )
+
+    assert len(rest.klines_calls) == 2, "both passes ran"
+    closes = [k.close_time_utc for k in backfilled[("BTCUSDT", "1h")]]
+    assert closes == [_T0 + _HOUR, _T0 + 2 * _HOUR, _T0 + 3 * _HOUR]
+    assert len(set(closes)) == len(closes)
+
+
+def _ws_kline(close_utc: datetime, *, is_closed: bool = True) -> Any:
+    from src.adapters.paper_ws import Kline as WsKline
+
+    return WsKline(
+        symbol="BTCUSDT",
+        interval="1h",
+        open_time_utc=close_utc - _HOUR,
+        close_time_utc=close_utc,
+        open=Decimal("1"),
+        high=Decimal("1"),
+        low=Decimal("1"),
+        close=Decimal("1"),
+        volume=Decimal("1"),
+        quote_volume=Decimal("1"),
+        trade_count=1,
+        is_closed=is_closed,
+    )
+
+
+def test_ws_duplicate_of_backfilled_close_is_not_dispatched(
+    monkeypatch: Any,
+) -> None:
+    """The WS handler drops a closed kline at or before the last close."""
+    import src.paper.supervisor as supervisor_mod
+    from src.paper.supervisor import PaperSupervisor
+
+    events: list[str] = []
+    real_log = supervisor_mod.log
+
+    class _SpyLog:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(real_log, name)
+
+        def info(self, event: str, *args: Any, **kwargs: Any) -> Any:
+            events.append(event)
+            return real_log.info(event, *args, **kwargs)
+
+        def warning(self, event: str, *args: Any, **kwargs: Any) -> Any:
+            events.append(event)
+            return real_log.warning(event, *args, **kwargs)
+
+    monkeypatch.setattr(supervisor_mod, "log", _SpyLog())
+
+    dispatched: list[Any] = []
+    supervisor = PaperSupervisor(
+        ws_adapter=_FakeWsAdapter(),  # type: ignore[arg-type]
+        rest_adapter=_FakeRestAdapter(),  # type: ignore[arg-type]
+        on_closed_candle=dispatched.append,
+        symbols=("BTCUSDT",),
+        intervals=("1h",),
+        clock=lambda: _T0 + 6 * _HOUR,
+    )
+    supervisor.start()
+    last = _T0 + 3 * _HOUR
+    supervisor.record_close("BTCUSDT", "1h", last)
+    handler = supervisor._make_kline_handler("BTCUSDT", "1h")
+
+    handler(_ws_kline(last))
+    assert dispatched == [], "close equal to the last close is a duplicate"
+    assert "paper.supervisor.duplicate_close_dropped" in events
+
+    handler(_ws_kline(last - _HOUR))
+    assert dispatched == [], "an older close is stale"
+
+    handler(_ws_kline(last + 2 * _HOUR, is_closed=False))
+    assert dispatched == [], "forming klines are ignored"
+
+    handler(_ws_kline(last + _HOUR))
+    assert len(dispatched) == 1
+    assert dispatched[0].close_time_utc == last + _HOUR
+    assert supervisor._last_close[("BTCUSDT", "1h")] == last + _HOUR
+
+
+def test_advance_last_close_is_atomic_under_threads() -> None:
+    """32 concurrent claims of the same bar produce exactly one True."""
+    import threading
+
+    supervisor, _ws, _rest, _calls = _seam_setup()
+    close = _T0 + 5 * _HOUR
+    barrier = threading.Barrier(32)
+    results: list[bool] = []
+    results_lock = threading.Lock()
+
+    def _claim() -> None:
+        barrier.wait()
+        won = supervisor._advance_last_close("BTCUSDT", "1h", close)
+        with results_lock:
+            results.append(won)
+
+    threads = [threading.Thread(target=_claim) for _ in range(32)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(results) == 32
+    assert results.count(True) == 1
+    assert supervisor._last_close[("BTCUSDT", "1h")] == close
+
+
+def test_verification_failure_keeps_first_pass_closes() -> None:
+    """A verification-pass exception adds a gap and keeps first-pass closes."""
+    t1 = _T0 + 3 * _HOUR
+    calls: list[tuple[Any, ...]] = []
+    ws = _FakeWsAdapter(calls=calls)
+    rest = _SequencedRestAdapter([_three_bars(), RuntimeError("verify down")], calls=calls)
+    supervisor = _two_pass_supervisor(rest, ws, [t1, t1 + _HOUR])
+
+    backfilled, outage_gaps = asyncio.run(
+        supervisor._resubscribe_and_backfill(journal_outage_gaps=True)
+    )
+
+    assert len(backfilled[("BTCUSDT", "1h")]) == 3
+    assert len(outage_gaps) == 1
+    assert outage_gaps[0]["reason"].startswith("verify_backfill_exception:")
+    assert _indices(calls, "subscribe"), "the pair is still resubscribed"
