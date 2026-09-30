@@ -52,6 +52,17 @@ def test_au01_au02_au03_pass_on_real_repository() -> None:
         assert gates[name][0], f"{name}: {gates[name][1]}"
 
 
+def test_run_skips_planning_gates_when_planning_files_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(authority, "STACK_PATH", REPO_ROOT / "nope" / "STACK.md")
+    results = {name: (ok, detail) for name, ok, detail in authority.run()}
+    assert len(results) == 6
+    for name in ("AU-03", "AU-04", "AU-05"):
+        assert results[name][0] and results[name][1].startswith("SKIP")
+    assert results["AU-01"] == (True, "ok")
+
+
 def test_run_returns_named_triples() -> None:
     for name, ok, detail in authority.run():
         assert name.startswith("AU-")
@@ -79,6 +90,18 @@ def test_au01_fails_when_claim_is_wrapped_in_emphasis() -> None:
 def test_au01_allows_the_word_hmac_alone() -> None:
     text = "TradingView cannot sign requests, so HMAC verification is not available."
     assert authority.check_no_hmac_claim({"x.md": text})[1]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "TradingView webhooks are HMAC-verified.",
+        "The webhook body is HMAC checked on arrival.",
+        "Every TradingView alert carries an HMAC signature check.",
+    ],
+)
+def test_au01_fails_on_hmac_variant_spellings(text: str) -> None:
+    assert not authority.check_no_hmac_claim({"x.md": text})[1]
 
 
 def test_au02_positive_on_amended_tradingview() -> None:

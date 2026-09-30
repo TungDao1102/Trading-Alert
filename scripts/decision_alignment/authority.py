@@ -32,6 +32,14 @@ Gate = tuple[str, bool, str]
 
 HMAC_CLAIM = "HMAC-checked"
 
+# Variant spellings of the same false promise ("HMAC verified", "HMAC signature check",
+# ...). A sentence that negates the claim ("HMAC signature is not available") is the
+# correct statement and is not flagged; only the exact legacy phrase is flagged always.
+HMAC_VARIANT = re.compile(
+    r"HMAC[- ]?(?:checks?|checked|verif\w*|signatures?|signed)", flags=re.IGNORECASE
+)
+_NEGATION = re.compile(r"\b(?:not|cannot|no|never|without|unavailable)\b|n't", flags=re.IGNORECASE)
+
 TRADINGVIEW_PHRASES = (
     "cannot sign",
     "secret path segment",
@@ -97,9 +105,19 @@ def _read(path: Path) -> str:
 # --------------------------------------------------------------------------- AU-01
 
 
+def _hmac_claim_in(text: str) -> bool:
+    flat = normalise(text)
+    if HMAC_CLAIM in flat:
+        return True
+    for sentence in re.split(r"(?<=[.;])\s+", flat):
+        if HMAC_VARIANT.search(sentence) and not _NEGATION.search(sentence):
+            return True
+    return False
+
+
 def check_no_hmac_claim(files: dict[str, str]) -> Gate:
     """AU-01: no scanned file promises that TradingView webhooks are HMAC-checked."""
-    hits = [label for label, text in sorted(files.items()) if HMAC_CLAIM in normalise(text)]
+    hits = [label for label, text in sorted(files.items()) if _hmac_claim_in(text)]
     if hits:
         return ("AU-01", False, "HMAC-checked claim in: " + ", ".join(hits))
     return ("AU-01", True, "ok")
@@ -231,11 +249,24 @@ def _scanned_docs() -> dict[str, str]:
 
 def run() -> list[Gate]:
     """Evaluate every gate against the real repository documents."""
-    stack = _read(STACK_PATH)
     agents = _read(AGENTS_PATH)
-    project = _read(PROJECT_PATH)
     scanned = _scanned_docs()
     scanned["AGENTS.md"] = agents
+    missing = [p for p in (STACK_PATH, PROJECT_PATH) if not p.is_file()]
+    if missing:
+        # .planning/ is archived by milestone completion and filtered out of PR branches:
+        # the docs-only gates still run, the .planning-dependent ones report an explicit SKIP.
+        detail = "SKIP: " + ", ".join(p.name for p in missing) + " not present"
+        return [
+            check_no_hmac_claim(scanned),
+            check_tradingview_scheme(_read(TRADINGVIEW_PATH)),
+            ("AU-03", True, detail),
+            ("AU-04", True, detail),
+            ("AU-05", True, detail),
+            check_no_old_order({"AGENTS.md": agents}),
+        ]
+    stack = _read(STACK_PATH)
+    project = _read(PROJECT_PATH)
     scanned[".planning/research/STACK.md"] = stack
     scanned[".planning/PROJECT.md"] = project
     return [
