@@ -68,8 +68,8 @@ def test_referenced_codes_are_the_seventeen_expected() -> None:
 
 def test_real_glossary_split_is_18_plus_5_equals_23() -> None:
     parsed = bk.parse_glossary_sections(_read(GLOSSARY))
-    assert len(parsed["canonical"]) == 18  # type: ignore[arg-type]
-    assert len(parsed["aliases"]) == 5  # type: ignore[arg-type]
+    assert len(parsed["canonical"]) == 18
+    assert len(parsed["aliases"]) == 5
     assert len(ENUM_VALUES) == 23
 
 

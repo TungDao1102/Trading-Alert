@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GLOSSARY_PATH = REPO_ROOT / "docs" / "GLOSSARY.md"
@@ -92,7 +93,7 @@ def _table_first_cells(section: str) -> list[str]:
 # --------------------------------------------------------------------------- GLOSSARY
 
 
-def parse_glossary_sections(text: str) -> dict[str, object]:
+def parse_glossary_sections(text: str) -> dict[str, Any]:
     """Extract the parts of GLOSSARY sections 8.2, 9 and 10 the GL gates inspect."""
     sec9 = _slice(text, r"^## 9\.[^\n]*\n", r"^## \d+\.")
     sec91 = _slice(sec9, r"^### 9\.1[^\n]*\n", r"^### 9\.\d")
@@ -119,10 +120,10 @@ def check_glossary(
 ) -> list[Gate]:
     """Gates GL-01..GL-06 over GLOSSARY text and the code-derived sets."""
     parsed = parse_glossary_sections(text)
-    canonical = list(parsed["canonical"])  # type: ignore[arg-type]
-    aliases = list(parsed["aliases"])  # type: ignore[arg-type]
+    canonical = list(parsed["canonical"])
+    aliases = list(parsed["aliases"])
     plain = str(parsed["plain"])
-    approval = list(parsed["approval"])  # type: ignore[arg-type]
+    approval = list(parsed["approval"])
     gates: list[Gate] = []
 
     # GL-01 canonical block: unique tokens, none of the five aliases.
@@ -189,7 +190,7 @@ def check_glossary(
     )
 
     # GL-06 section 8.2 heading and 3-token block unchanged.
-    kill = list(parsed["kill_tokens"])  # type: ignore[arg-type]
+    kill = list(parsed["kill_tokens"])
     ok06 = bool(parsed["has_82_heading"]) and tuple(kill) == KILL_GATE_TOKENS
     gates.append(("GL-06", ok06, "ok" if ok06 else f"section 8.2 heading/tokens changed: {kill}"))
     return gates
