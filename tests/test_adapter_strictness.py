@@ -12,13 +12,24 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from binance_sdk_derivatives_trading_usds_futures import (
+    BadRequestError,
+    TooManyRequestsError,
+)
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
+    CheckServerTimeResponse,
     ExchangeInformationResponse,
     ExchangeInformationResponseSymbolsInner,
     ExchangeInformationResponseSymbolsInnerFiltersInner,
+    GetFundingRateHistoryResponseInner,
     UserCommissionRateResponse,
 )
-from src.adapters.binance_usdm import BinanceUsdmAdapter, CommissionRates
+from src.adapters.binance_usdm import (
+    INVALID_SYMBOL_CODE,
+    BinanceUsdmAdapter,
+    CommissionRates,
+    is_invalid_symbol_error,
+)
 
 
 def _price_filter(tick_size: str | None) -> Any:
@@ -48,15 +59,18 @@ def _symbol(
     filters: list[Any],
     *,
     symbol: str | None = "BTCUSDT",
+    delivery_date: int | None = None,
+    status: str = "TRADING",
 ) -> Any:
     return ExchangeInformationResponseSymbolsInner(
         symbol=symbol,
         contract_type="PERPETUAL",
-        status="TRADING",
+        status=status,
         base_asset="BTC",
         quote_asset="USDT",
         margin_asset="USDT",
         filters=filters,
+        delivery_date=delivery_date,
     )
 
 
@@ -75,12 +89,29 @@ class _FakeRest:
         oi_rows: Any = None,
         commission: Any = None,
         commission_error: Exception | None = None,
+        funding_rows: Any = None,
+        server_time: Any = None,
     ) -> None:
         self._info = info
         self._oi_rows = oi_rows or []
         self._commission = commission
         self._commission_error = commission_error
+        self._funding_rows = funding_rows if funding_rows is not None else []
+        self._server_time = server_time
         self.commission_calls: list[tuple[str, int | None]] = []
+
+    def get_funding_rate_history(
+        self,
+        *,
+        symbol: str | None = None,
+        start_time: int | None = None,
+        end_time: int | None = None,
+        limit: int | None = None,
+    ) -> _FakeResponse:
+        return _FakeResponse(self._funding_rows)
+
+    def check_server_time(self) -> _FakeResponse:
+        return _FakeResponse(self._server_time)
 
     def user_commission_rate(self, symbol: str, recv_window: int | None = None) -> _FakeResponse:
         self.commission_calls.append((symbol, recv_window))
@@ -277,3 +308,93 @@ def test_user_commission_rate_propagates_sdk_exception() -> None:
     with pytest.raises(RuntimeError, match="sdk down"):
         asyncio.run(adapter.user_commission_rate("BTCUSDT"))
     assert len(rest.commission_calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Phase 13 plan 04: adapter facts for historical data (D-08, D-25, D-26, Pitfall 9).
+# --------------------------------------------------------------------------- #
+
+
+def test_exchange_info_exposes_delivery_date() -> None:
+    """deliveryDate flows to SymbolFilters.delivery_date_ms unchanged (D-26)."""
+    filters = [_price_filter("0.01"), _lot_filter(), _notional_filter()]
+    adapter = _adapter_with_info(
+        [
+            _symbol(filters, symbol="FTTUSDT", delivery_date=1668398400000, status="SETTLING"),
+            _symbol(filters, symbol="ETHUSDT"),
+            _symbol(filters, symbol="BTCUSDT", delivery_date=4133404800000),
+        ]
+    )
+    out = {f.symbol: f for f in asyncio.run(adapter.exchange_info())}
+    assert out["FTTUSDT"].delivery_date_ms == 1668398400000
+    assert out["ETHUSDT"].delivery_date_ms is None
+    # The perpetual sentinel is passed through; consumers decide what is past.
+    assert out["BTCUSDT"].delivery_date_ms == 4133404800000
+
+
+def _funding_row(mark_price: str | None, *, rate: str | None = "0.0001", ts: int | None = 1) -> Any:
+    return GetFundingRateHistoryResponseInner(
+        symbol="BTCUSDT",
+        funding_rate=rate,
+        funding_time=ts,
+        mark_price=mark_price,
+    )
+
+
+def _funding_adapter(rows: list[Any]) -> BinanceUsdmAdapter:
+    sdk = _FakeSdk(_FakeRest(funding_rows=rows))
+    return BinanceUsdmAdapter(sdk_client=sdk)  # type: ignore[arg-type]
+
+
+def test_funding_row_with_empty_mark_price_parses_as_none() -> None:
+    """Historical funding rows carry markPrice "" (Pitfall 9); never fabricated as 0."""
+    adapter = _funding_adapter(
+        [
+            _funding_row(""),
+            _funding_row(None, ts=2),
+            _funding_row("83751.55144203", ts=3),
+        ]
+    )
+    ticks = asyncio.run(adapter.funding_rate("BTCUSDT"))
+    assert [t.mark_price for t in ticks] == [None, None, Decimal("83751.55144203")]
+
+
+def test_funding_row_with_malformed_mark_price_still_raises() -> None:
+    adapter = _funding_adapter([_funding_row("abc")])
+    with pytest.raises(Exception, match="abc|Invalid|invalid"):
+        asyncio.run(adapter.funding_rate("BTCUSDT"))
+
+
+@pytest.mark.parametrize(
+    "row",
+    [_funding_row("1.0", rate=None), _funding_row("1.0", ts=None)],
+)
+def test_funding_row_missing_rate_or_time_still_raises(row: Any) -> None:
+    adapter = _funding_adapter([row])
+    with pytest.raises(ValueError, match="missing fields"):
+        asyncio.run(adapter.funding_rate("BTCUSDT"))
+
+
+def test_server_time_returns_utc_datetime() -> None:
+    from datetime import UTC, datetime
+
+    sdk = _FakeSdk(_FakeRest(server_time=CheckServerTimeResponse(server_time=1790770020000)))
+    adapter = BinanceUsdmAdapter(sdk_client=sdk)  # type: ignore[arg-type]
+    got = asyncio.run(adapter.server_time())
+    assert got == datetime.fromtimestamp(1790770020, tz=UTC)
+    assert got.tzinfo is not None
+
+
+def test_server_time_missing_value_raises() -> None:
+    sdk = _FakeSdk(_FakeRest(server_time=CheckServerTimeResponse(server_time=None)))
+    adapter = BinanceUsdmAdapter(sdk_client=sdk)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="server_time"):
+        asyncio.run(adapter.server_time())
+
+
+def test_invalid_symbol_predicate() -> None:
+    assert INVALID_SYMBOL_CODE == -1121
+    assert is_invalid_symbol_error(BadRequestError(error_message="Invalid symbol.", status_code=-1121))
+    assert not is_invalid_symbol_error(BadRequestError(error_message="x", status_code=-1100))
+    assert not is_invalid_symbol_error(ValueError("x"))
+    assert not is_invalid_symbol_error(TooManyRequestsError(error_message="slow", status_code=429))
