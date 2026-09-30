@@ -197,3 +197,33 @@ These use the happy_path_long geometry (zone 49900-50100, stop 49000, equity
 - stale_constraints: constraint metadata observed at 2026-09-18T22:59:59, more
   than the freshness window before now (2026-09-19T00:00:00) -> STALE_CONSTRAINTS.
 - uncertain_account_state: daily_loss_quote null -> UNCERTAIN_ACCOUNT_STATE.
+
+## Hand-built portfolio candidates (tests/test_risk_portfolio.py)
+
+The portfolio-gate unit tests feed `check_portfolio` a candidate produced by the
+shared pipeline. All use LONG, zone 49995-50005, stop 49555, equity 10000, so
+sizing entry 50005, stop distance 450, cost per unit
+50005 x 0.0006 + 49555 x 0.0008 = 30.003 + 39.644 = 69.647 and
+risk_per_unit = 519.647 (stop rate 0.8999 percent, cost ratio 0.13403: both
+guards pass). Only the risk_rate changes:
+
+| risk_rate | allowed_risk | raw quantity | floored (0.001) | realized_risk = quantity x 519.647 |
+|-----------|--------------|--------------|-----------------|------------------------------------|
+| 0.003 | 30 | 0.05773149849801884740987631989 | 0.057 | 29.619879 |
+| 0.002 | 20 | 0.03848766566534589827325087992 | 0.038 | 19.746586 |
+| 0.001 | 10 | 0.01924383283267294913662543996 | 0.019 | 9.873293 |
+| 0.0005 | 5 | 0.009621916416336474568312719981 | 0.009 | 4.676823 |
+
+Exact-boundary tests derive their open risk from these figures:
+
+- cluster cap 50: 50 - 19.746586 = 30.253414 (ETHUSDT open risk that lands the
+  sum exactly on the cap and passes).
+- aggregate cap 100: 100 - 29.619879 = 70.380121 (BNBUSDT open risk).
+
+Zero stop distance: LONG stop 50100 equals the sizing entry (entry_max), so
+stop distance = 0 and the pipeline fails closed with EXCHANGE_CONSTRAINT before
+any guard runs.
+
+Too-tight stop (flow-through test): LONG, zone 49995-50005, stop 49955, sizing
+entry 50005, stop distance 50, stop rate 50 / 50005 = 0.0009999 (0.09999
+percent), below min_stop_distance_rate 0.003 -> STOP_TOO_TIGHT.

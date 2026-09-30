@@ -25,9 +25,9 @@ from src.core.types import AccountState
 from src.domain.canonical import sha256_hex
 from src.domain.enums import DailyState, TradePlanStatus
 from src.domain.trade_plan import TradePlan
+from src.risk.cost_rates import CostRates
+from src.risk.gating import size_and_quantize
 from src.risk.portfolio import PortfolioVerdict, check_portfolio, resolve_absolute_thresholds
-from src.risk.quantization import quantize
-from src.risk.sizing import size_position
 from src.risk.types import (
     ConstraintSnapshot,
     OpenPosition,
@@ -60,6 +60,40 @@ PARAMETERS: dict[str, Any] = {
     "risk_rate": Decimal("0.005"),
     "minimum_risk_utilization_after_rounding": Decimal("0.6"),
 }
+
+# Cost model inputs for the shared pipeline (plan 12-07). Literal rates, so the
+# cost per unit is produced by the pipeline from these, never hand-typed.
+COST_RATES = CostRates(
+    fee_rate_entry=Decimal("0.0005"),
+    entry_slippage_rate=Decimal("0.0001"),
+    fee_rate_exit=Decimal("0.0005"),
+    exit_slippage_rate=Decimal("0.0003"),
+    fee_source="PARAMETER",
+)
+MIN_STOP_DISTANCE_RATE = Decimal("0.003")
+MAX_COST_TO_RISK = Decimal("0.15")
+MIN_RISK_UTILIZATION = Decimal("0.6")
+
+
+def _pipeline_kwargs() -> dict[str, Any]:
+    """The cost/guard/utilization inputs every pipeline call in this file shares."""
+    return {
+        "cost_rates": COST_RATES,
+        "min_stop_distance_rate": MIN_STOP_DISTANCE_RATE,
+        "max_cost_to_risk": MAX_COST_TO_RISK,
+        "minimum_risk_utilization_after_rounding": MIN_RISK_UTILIZATION,
+    }
+
+
+# Guard-clearing geometry for the portfolio-gate tests (hand-derived in
+# tests/fixtures/phase5/DERIVATIONS.md): LONG, zone 49995-50005, stop 49555
+# (stop rate 0.8999 percent, cost ratio 0.13403), sizing entry 50005, cost per
+# unit 69.647, risk_per_unit 519.647. Candidate realized risk by risk_rate:
+#   0.003  -> quantity 0.057 -> 29.619879
+#   0.002  -> quantity 0.038 -> 19.746586
+#   0.001  -> quantity 0.019 -> 9.873293
+#   0.0005 -> quantity 0.009 -> 4.676823
+WIDE_STOP = "49555.00"
 
 TTL_SECONDS = 3600
 FROZEN_NOW = datetime(2026, 9, 19, tzinfo=UTC)
@@ -149,11 +183,10 @@ def _size_and_quantize(
     stop_loss: str = "49000.00",
     entry_min: str = "49900.00",
     entry_max: str = "50100.00",
-    costs: str = "1.0",
     symbol: str = "BTCUSDT",
     metadata_observed_at_utc: datetime | None = None,
 ) -> SizedResult:
-    """Run size_position + quantize and return the final SizedResult."""
+    """Run the shared size + guards + quantize step (LONG) and return the SizedResult."""
     plan = _mk_trade_plan(
         symbol=symbol,
         entry_min=entry_min,
@@ -162,29 +195,14 @@ def _size_and_quantize(
         risk_rate=risk_rate,
         risk_budget=str(Decimal(equity) * Decimal(risk_rate)),
     )
-    account = _mk_account_state(equity=equity, risk_rate=risk_rate)
-    constraints = _mk_constraints(
-        symbol=symbol, metadata_observed_at_utc=metadata_observed_at_utc
-    )
-    entry_ref = (Decimal(entry_min) + Decimal(entry_max)) / Decimal("2")
-    sized = size_position(
+    return size_and_quantize(
         trade_plan=plan,
-        account_state=account,
-        entry_ref=entry_ref,
-        modeled_costs_per_unit=Decimal(costs),
-    )
-    if sized.is_no_trade:
-        return sized
-    allowed_risk = Decimal(equity) * Decimal(risk_rate)
-    sl_distance = abs(entry_ref - Decimal(stop_loss))
-    risk_per_unit = sl_distance + Decimal(costs)
-    return quantize(
-        sized=sized,
-        constraint_snapshot=constraints,
-        allowed_risk=allowed_risk,
-        risk_per_unit=risk_per_unit,
-        minimum_risk_utilization_after_rounding=Decimal("0.6"),
-        reference_price=entry_ref,
+        candidate_position_side="LONG",
+        account_state=_mk_account_state(equity=equity, risk_rate=risk_rate),
+        constraint_snapshot=_mk_constraints(
+            symbol=symbol, metadata_observed_at_utc=metadata_observed_at_utc
+        ),
+        **_pipeline_kwargs(),
     )
 
 
@@ -201,19 +219,19 @@ def test_cluster_cap_exact_pass() -> None:
     REJECT).
     """
     # equity=10000, cluster_cap=0.005 → cluster_cap_quote = 50 USDT.
-    # ETHUSDT LONG open_risk = 30, BTCUSDT candidate risk = 20 → 30+20=50.
+    # ETHUSDT LONG open_risk = 30.253414, BTCUSDT candidate risk = 19.746586
+    # (quantity 0.038 x 519.647) → 30.253414 + 19.746586 = 50.
     sized = _size_and_quantize(
         equity="10000.00",
-        risk_rate="0.002",  # allowed_risk = 20
-        stop_loss="49990.00",
+        risk_rate="0.002",  # allowed_risk = 20 (quantity 0.038)
+        stop_loss=WIDE_STOP,
         entry_min="49995.00",
         entry_max="50005.00",
-        costs="0.0",
     )
     assert sized.is_no_trade is False
-    assert sized.realized_risk == Decimal("20")
+    assert sized.realized_risk == Decimal("19.746586")
 
-    open_positions = [_mk_open_position("ETHUSDT", "LONG", "30.00")]
+    open_positions = [_mk_open_position("ETHUSDT", "LONG", "30.253414")]
     verdict = check_portfolio(
         sized=sized,
         candidate_symbol="BTCUSDT",
@@ -242,17 +260,16 @@ def test_cluster_cap_one_ulp_over_rejects() -> None:
     Per D-03: first failing gate determines the reason code.
     """
     # equity=10000, cluster_cap_quote = 50 USDT.
-    # ETHUSDT LONG open_risk = 21, BTCUSDT candidate risk = 30 → 21+30=51 > 50.
+    # ETHUSDT LONG open_risk = 21, BTCUSDT candidate risk = 29.619879 → 50.619879 > 50.
     sized = _size_and_quantize(
         equity="10000.00",
-        risk_rate="0.003",  # allowed_risk = 30
-        stop_loss="49990.00",
+        risk_rate="0.003",  # allowed_risk = 30 (quantity 0.057)
+        stop_loss=WIDE_STOP,
         entry_min="49995.00",
         entry_max="50005.00",
-        costs="0.0",
     )
     assert sized.is_no_trade is False
-    assert sized.realized_risk == Decimal("30")
+    assert sized.realized_risk == Decimal("29.619879")
 
     open_positions = [_mk_open_position("ETHUSDT", "LONG", "21.00")]
     verdict = check_portfolio(
@@ -280,19 +297,19 @@ def test_cluster_cap_one_ulp_over_rejects() -> None:
 def test_aggregate_cap_exact_pass() -> None:
     """Beh. 1c: open_risk + candidate_risk == max_aggregate_open_risk → PASS."""
     # equity=10000, max_aggregate_open_risk=0.01 → cap_quote = 100 USDT.
-    # BNBUSDT (NOT in cluster) open_risk = 70, BTCUSDT candidate risk = 30 → 100.
+    # BNBUSDT (NOT in cluster) open_risk = 70.380121, BTCUSDT candidate risk =
+    # 29.619879 (quantity 0.057 x 519.647) → 100.
     sized = _size_and_quantize(
         equity="10000.00",
-        risk_rate="0.003",  # allowed_risk = 30
-        stop_loss="49990.00",
+        risk_rate="0.003",  # allowed_risk = 30 (quantity 0.057)
+        stop_loss=WIDE_STOP,
         entry_min="49995.00",
         entry_max="50005.00",
-        costs="0.0",
     )
     assert sized.is_no_trade is False
-    assert sized.realized_risk == Decimal("30")
+    assert sized.realized_risk == Decimal("29.619879")
 
-    open_positions = [_mk_open_position("BNBUSDT", "LONG", "70.00")]
+    open_positions = [_mk_open_position("BNBUSDT", "LONG", "70.380121")]
     verdict = check_portfolio(
         sized=sized,
         candidate_symbol="BTCUSDT",
@@ -316,17 +333,16 @@ def test_aggregate_cap_exact_pass() -> None:
 
 def test_aggregate_cap_one_ulp_over_rejects() -> None:
     """Beh. 1d: open_risk + candidate_risk > max_aggregate_open_risk → REJECT."""
-    # BNBUSDT open_risk = 71, BTCUSDT candidate risk = 30 → 71+30=101 > 100.
+    # BNBUSDT open_risk = 71, BTCUSDT candidate risk = 29.619879 → 100.619879 > 100.
     sized = _size_and_quantize(
         equity="10000.00",
         risk_rate="0.003",
-        stop_loss="49990.00",
+        stop_loss=WIDE_STOP,
         entry_min="49995.00",
         entry_max="50005.00",
-        costs="0.0",
     )
     assert sized.is_no_trade is False
-    assert sized.realized_risk == Decimal("30")
+    assert sized.realized_risk == Decimal("29.619879")
 
     open_positions = [_mk_open_position("BNBUSDT", "LONG", "71.00")]
     verdict = check_portfolio(
@@ -361,20 +377,19 @@ def test_first_failure_wins_aggregate_over_cluster() -> None:
     # Cluster sum: 30 + 30 = 60 > 50 → CLUSTER_CAP_REJECT would fire first.
     # To test first-failure-wins for aggregate, we need cluster to PASS
     # but aggregate to FAIL. Use a non-cluster candidate symbol.
-    # Candidate: SOLUSDT (cluster member) with risk = 10.
-    # Cluster sum: 30 + 10 = 40 < 50 → cluster PASS.
-    # Aggregate sum: 30 + 71 + 10 = 111 > 100 → aggregate FAIL.
+    # Candidate: SOLUSDT (cluster member) with risk = 9.873293.
+    # Cluster sum: 30 + 9.873293 = 39.873293 < 50 → cluster PASS.
+    # Aggregate sum: 30 + 71 + 9.873293 = 110.873293 > 100 → aggregate FAIL.
     sized = _size_and_quantize(
         equity="10000.00",
-        risk_rate="0.001",  # allowed_risk = 10
-        stop_loss="49990.00",
+        risk_rate="0.001",  # allowed_risk = 10 (quantity 0.019)
+        stop_loss=WIDE_STOP,
         entry_min="49995.00",
         entry_max="50005.00",
-        costs="0.0",
         symbol="SOLUSDT",
     )
     assert sized.is_no_trade is False
-    assert sized.realized_risk == Decimal("10")
+    assert sized.realized_risk == Decimal("9.873293")
 
     open_positions = [
         _mk_open_position("ETHUSDT", "LONG", "30.00"),
@@ -407,17 +422,16 @@ def test_max_positions_at_limit_rejects() -> None:
     Per D-03: count OPEN positions only (candidate is not yet a position).
     """
     # 2 existing open positions (== max_open_positions = 2).
-    # Candidate risk = 5 (small, so cluster/aggregate pass).
+    # Candidate risk = 4.676823 (small, so cluster/aggregate pass).
     sized = _size_and_quantize(
         equity="10000.00",
-        risk_rate="0.0005",  # allowed_risk = 5
-        stop_loss="49990.00",
+        risk_rate="0.0005",  # allowed_risk = 5 (quantity 0.009)
+        stop_loss=WIDE_STOP,
         entry_min="49995.00",
         entry_max="50005.00",
-        costs="0.0",
     )
     assert sized.is_no_trade is False
-    assert sized.realized_risk == Decimal("5")
+    assert sized.realized_risk == Decimal("4.676823")
 
     open_positions = [
         _mk_open_position("ETHUSDT", "LONG", "10.00"),
@@ -457,7 +471,6 @@ def test_daily_stop_at_threshold_blocks() -> None:
         stop_loss="49000.00",
         entry_min="49900.00",
         entry_max="50100.00",
-        costs="1.0",
     )
     assert sized.is_no_trade is False
 
@@ -496,7 +509,6 @@ def test_warning_at_threshold_passes_with_state() -> None:
         stop_loss="49000.00",
         entry_min="49900.00",
         entry_max="50100.00",
-        costs="1.0",
     )
     assert sized.is_no_trade is False
 
@@ -664,11 +676,10 @@ def test_open_positions_order_independence() -> None:
     """
     sized = _size_and_quantize(
         equity="10000.00",
-        risk_rate="0.003",  # allowed_risk = 30
-        stop_loss="49990.00",
+        risk_rate="0.003",  # allowed_risk = 30 (quantity 0.057)
+        stop_loss=WIDE_STOP,
         entry_min="49995.00",
         entry_max="50005.00",
-        costs="0.0",
     )
     assert sized.is_no_trade is False
 
@@ -715,19 +726,18 @@ def test_candidate_risk_added_to_open_risk_sums() -> None:
     Per 05-01 checkpoint: candidate risk is included in cluster and
     aggregate sums. Equality at the cap is PASS (boundary).
     """
-    # ETHUSDT LONG open_risk = 30, BTCUSDT candidate risk = 20 → 30+20=50 = cap.
+    # ETHUSDT LONG open_risk = 30.253414, BTCUSDT candidate risk = 19.746586 → 50 = cap.
     sized = _size_and_quantize(
         equity="10000.00",
-        risk_rate="0.002",  # allowed_risk = 20
-        stop_loss="49990.00",
+        risk_rate="0.002",  # allowed_risk = 20 (quantity 0.038)
+        stop_loss=WIDE_STOP,
         entry_min="49995.00",
         entry_max="50005.00",
-        costs="0.0",
     )
     assert sized.is_no_trade is False
-    assert sized.realized_risk == Decimal("20")
+    assert sized.realized_risk == Decimal("19.746586")
 
-    open_positions = [_mk_open_position("ETHUSDT", "LONG", "30.00")]
+    open_positions = [_mk_open_position("ETHUSDT", "LONG", "30.253414")]
     verdict = check_portfolio(
         sized=sized,
         candidate_symbol="BTCUSDT",
@@ -759,10 +769,9 @@ def test_sized_no_trade_short_circuits() -> None:
     sized = _size_and_quantize(
         equity="10000.00",
         risk_rate="0.005",
-        stop_loss="50000.00",  # == entry_ref → sl_distance = 0
+        stop_loss="50100.00",  # == entry_max (LONG sizing entry) → sl_distance = 0
         entry_min="49900.00",
         entry_max="50100.00",
-        costs="1.0",
     )
     assert sized.is_no_trade is True
     assert sized.reason_code == "EXCHANGE_CONSTRAINT"
@@ -952,19 +961,30 @@ def _run_evaluate_risk(case_input: dict) -> PortfolioVerdict:
     )
     now_utc = datetime.fromisoformat(case_input["now_utc"])
     ttl = timedelta(seconds=int(case_input["ttl_seconds"]))
-    modeled_costs = Decimal(str(case_input["modeled_costs_per_unit"]))
+    cr = case_input["cost_rates"]
+    cost_rates = CostRates(
+        fee_rate_entry=Decimal(cr["fee_rate_entry"]),
+        entry_slippage_rate=Decimal(cr["entry_slippage_rate"]),
+        fee_rate_exit=Decimal(cr["fee_rate_exit"]),
+        exit_slippage_rate=Decimal(cr["exit_slippage_rate"]),
+        fee_source=cr["fee_source"],
+    )
 
     return evaluate_risk(
         trade_plan=trade_plan,
-        candidate_position_side="LONG",
+        candidate_position_side=case_input["candidate_position_side"],
         account_state=account,
         constraint_snapshot=constraints,
         open_positions=open_positions,
         daily_loss_quote=daily_loss_quote,
         now_utc=now_utc,
         ttl=ttl,
-        modeled_costs_per_unit=modeled_costs,
-        minimum_risk_utilization_after_rounding=Decimal("0.6"),
+        cost_rates=cost_rates,
+        min_stop_distance_rate=Decimal(case_input["min_stop_distance_rate"]),
+        max_cost_to_risk=Decimal(case_input["max_cost_to_risk"]),
+        minimum_risk_utilization_after_rounding=Decimal(
+            case_input["minimum_risk_utilization_after_rounding"]
+        ),
         parameter_set=PARAMETERS,
     )
 
@@ -1044,3 +1064,42 @@ def test_portfolio_case_matches_expected_json(case_name: str) -> None:
     assert sha256_hex(actual) == sha256_hex(case_expected), (
         f"parity mismatch in {case_name}: actual={actual}, expected={case_expected}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Test 21 — a too-tight stop flows through the portfolio verdict shape.
+# --------------------------------------------------------------------------- #
+
+
+def test_evaluate_risk_too_tight_stop_returns_stop_too_tight_verdict() -> None:
+    """Cost guards flow through evaluate_risk as a NO_TRADE portfolio verdict.
+
+    Hand-derived (DERIVATIONS.md, "hand-built portfolio candidates"): LONG, zone
+    49995-50005, stop 49955, sizing entry 50005, stop distance 50, stop rate
+    50 / 50005 = 0.09999 percent, below min_stop_distance_rate 0.3 percent ->
+    STOP_TOO_TIGHT, before any quantity is rounded (sized is None).
+    """
+    from src.risk.gating import evaluate_risk
+
+    verdict = evaluate_risk(
+        trade_plan=_mk_trade_plan(
+            entry_min="49995.00",
+            entry_max="50005.00",
+            stop_loss="49955.00",
+            risk_rate="0.003",
+            risk_budget="30.00000",
+        ),
+        candidate_position_side="LONG",
+        account_state=_mk_account_state(equity="10000.00", risk_rate="0.003"),
+        constraint_snapshot=_mk_constraints(),
+        open_positions=[],
+        daily_loss_quote=Decimal("0"),
+        now_utc=FROZEN_NOW,
+        ttl=timedelta(seconds=TTL_SECONDS),
+        parameter_set=PARAMETERS,
+        **_pipeline_kwargs(),
+    )
+    assert verdict.is_no_trade is True
+    assert verdict.reason_code == "STOP_TOO_TIGHT"
+    assert verdict.sized is None
+    assert verdict.daily_state == DailyState.NORMAL
