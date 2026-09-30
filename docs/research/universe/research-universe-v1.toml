@@ -16,7 +16,9 @@
 #   2. Take the top top_n contracts, including symbols delisted later.
 #   3. Fill symbols and selection_date (ISO YYYY-MM-DD) and set status = "FROZEN".
 #   4. Set content_sha256 from: python -m scripts.decision_alignment.universe <this file>
-#   5. Commit the frozen manifest before any evaluation runs.
+#   5. Set FROZEN_CONTENT_SHA256 in scripts/decision_alignment/universe.py to the same hash,
+#      in the same commit (UN-02 treats the two as independent witnesses).
+#   6. Commit the frozen manifest before any evaluation runs.
 #
 # This file lives under docs/research/universe, NOT under params/. A directory under
 # params/ would be read as a strategy family by registry-gate, the family scan and the

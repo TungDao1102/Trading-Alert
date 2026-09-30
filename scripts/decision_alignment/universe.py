@@ -15,7 +15,10 @@ Phase 13 handoff (freeze steps, in order):
   3. Fill ``symbols`` and ``selection_date`` and set ``status = "FROZEN"``.
   4. Set ``content_sha256`` to the output of
      ``python -m scripts.decision_alignment.universe <manifest path>``.
-  5. Commit the frozen manifest before any evaluation runs.
+  5. Set ``FROZEN_CONTENT_SHA256`` below to the same hash, in the same commit as the
+     manifest. UN-02 then fails on any later change to only one of the two files, so a
+     post-freeze edit of ``symbols`` (with a refreshed in-file hash) is not silent.
+  6. Commit the frozen manifest before any evaluation runs.
 
 Stdlib plus ``src.domain.canonical.sha256_hex`` only.
 """
@@ -43,6 +46,11 @@ TOP_N_MAX = 15
 SYMBOL_RE = re.compile(r"^[A-Z0-9]+USDT$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+
+# Second witness for the frozen manifest hash (WR-06). None while the manifest is DRAFT.
+# The manifest carries its own content_sha256, so on its own the file is only self-hashed;
+# this constant lives in a different file, and a freeze records the hash in both.
+FROZEN_CONTENT_SHA256: str | None = None
 
 REQUIRED_KEYS = (
     "schema",
@@ -130,6 +138,21 @@ def _check_frozen(doc: dict[str, Any], top_n_ok: bool) -> list[str]:
     return problems
 
 
+def check_second_witness(doc: dict[str, Any], witness: str | None) -> list[str]:
+    """UN-02 addition: the manifest hash must equal the independently recorded witness."""
+    status = doc.get("status")
+    stored = doc.get("content_sha256")
+    if status == "FROZEN":
+        if witness is None:
+            return ["FROZEN manifest has no FROZEN_CONTENT_SHA256 witness recorded in the gate"]
+        if stored != witness:
+            return ["manifest content_sha256 differs from FROZEN_CONTENT_SHA256 witness"]
+        return []
+    if status == "DRAFT" and witness is not None:
+        return ["FROZEN_CONTENT_SHA256 is set but the manifest is DRAFT"]
+    return []
+
+
 def _check_draft(doc: dict[str, Any]) -> list[str]:
     problems: list[str] = []
     if doc["symbols"] != []:
@@ -200,6 +223,7 @@ def run() -> list[tuple[str, bool, str]]:
             un02.append(f"hash not computable: {exc}")
     if status not in STATUSES:
         un02.append(f"unknown status {status!r}")
+    un02.extend(check_second_witness(doc, FROZEN_CONTENT_SHA256))
 
     un03: list[str] = []
     if not MANIFEST_PATH.is_relative_to(UNIVERSE_DIR):

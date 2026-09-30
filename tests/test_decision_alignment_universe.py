@@ -166,6 +166,33 @@ def test_rejects_frozen_bad_selection_date(bad: str) -> None:
     _assert_rejected(doc, "selection_date")
 
 
+def test_second_witness_accepts_matching_frozen_hash() -> None:
+    doc = _frozen()
+    assert universe.check_second_witness(doc, doc["content_sha256"]) == []
+
+
+def test_second_witness_rejects_self_hash_refresh_after_freeze() -> None:
+    doc = _frozen()
+    witness = doc["content_sha256"]
+    doc["symbols"] = [*doc["symbols"][:-1], "ZZZUSDT"]
+    doc["content_sha256"] = universe.compute_content_sha256(doc)  # in-file hash refreshed
+    assert universe.validate_manifest(doc) == []  # the self-hash alone is satisfied
+    problems = universe.check_second_witness(doc, witness)
+    assert any("differs from FROZEN_CONTENT_SHA256" in p for p in problems)
+
+
+def test_second_witness_required_when_frozen() -> None:
+    problems = universe.check_second_witness(_frozen(), None)
+    assert any("no FROZEN_CONTENT_SHA256" in p for p in problems)
+
+
+def test_second_witness_must_be_unset_while_draft() -> None:
+    doc = _frozen()
+    doc["status"] = "DRAFT"
+    assert universe.check_second_witness(doc, "a" * 64)
+    assert universe.check_second_witness(doc, None) == []
+
+
 def test_rejects_hash_mismatch() -> None:
     doc = _frozen()
     doc["content_sha256"] = "f" * 64
