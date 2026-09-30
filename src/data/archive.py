@@ -22,8 +22,9 @@ import re
 import zipfile
 import zlib
 from collections import OrderedDict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Final
+from xml.etree import ElementTree
 
 import httpx
 import structlog
@@ -32,6 +33,8 @@ from src.adapters.binance_usdm import Kline, _row_to_kline
 log = structlog.get_logger()
 
 ARCHIVE_BASE_URL: Final = "https://data.binance.vision/data/futures/um"
+# S3 bucket listing endpoint behind data.binance.vision (fixed HTTPS host).
+LISTING_BASE_URL: Final = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
 ARCHIVE_INTERVALS: Final = ("1m", "1h", "4h", "1d")
 HTTP_TIMEOUT_SECONDS: Final = 60.0
 # Download and parse caps (T-13-19). A 1m month of the busiest symbol is a few
@@ -41,6 +44,13 @@ HTTP_TIMEOUT_SECONDS: Final = 60.0
 MAX_ZIP_BYTES: Final = 32 * 1024 * 1024
 MAX_CSV_BYTES: Final = 128 * 1024 * 1024
 _MAX_CHECKSUM_BYTES: Final = 4096
+# A listing page holds at most 1,000 keys (about 0.4 MB). The longest daily 1d
+# history is roughly 6 pages of 2 keys per day, and the symbol listing is 2
+# pages, so 50 pages is generous while still bounding a runaway marker loop.
+MAX_LISTING_BYTES: Final = 4 * 1024 * 1024
+MAX_LISTING_PAGES: Final = 50
+_MONTHLY_KLINES_PREFIX: Final = "data/futures/um/monthly/klines/"
+_DAILY_KLINES_PREFIX: Final = "data/futures/um/daily/klines/"
 
 # Same shape the collect list and collector enforce (`^[A-Z0-9]+USDT$`); kept
 # as a private copy so this module has no import dependency on either.
@@ -104,14 +114,19 @@ def archive_zip_url(symbol: str, interval: str, period: str, stamp: str) -> str:
     return f"{ARCHIVE_BASE_URL}/{period}/klines/{symbol}/{interval}/{symbol}-{interval}-{stamp}.zip"
 
 
-async def _get(client: httpx.AsyncClient, url: str, cap: int) -> tuple[int, bytes]:
+async def _get(
+    client: httpx.AsyncClient,
+    url: str,
+    cap: int,
+    params: dict[str, str] | None = None,
+) -> tuple[int, bytes]:
     """GET with a hard byte cap; the body is only read for a 200 response.
 
     The cap is enforced on the declared Content-Length and again on the
     decoded bytes actually received, so it holds without the header.
     """
     try:
-        async with client.stream("GET", url) as response:
+        async with client.stream("GET", url, params=params) as response:
             if response.status_code != 200:
                 return response.status_code, b""
             declared = response.headers.get("content-length", "")
@@ -299,3 +314,113 @@ class ArchiveKlineSource:
                 return window[:limit]
             year, month = _next_month(year, month)
         return []
+
+
+def _local(tag: str) -> str:
+    """Element name without its XML namespace."""
+    return tag.rpartition("}")[2]
+
+
+def _parse_listing(body: bytes) -> tuple[list[str], list[str], bool, str | None]:
+    """(common prefixes, keys, is_truncated, next_marker) of one S3 page.
+
+    ElementTree (expat) never fetches external entities, and it runs only on a
+    size-capped body from the fixed listing host. Bodies that declare a DOCTYPE
+    or entities are rejected anyway: a bucket listing never contains either.
+    """
+    upper = body.upper()
+    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+        raise ArchiveFormatError("listing declares a DOCTYPE or entities")
+    try:
+        root = ElementTree.fromstring(body)
+    except ElementTree.ParseError as exc:
+        raise ArchiveFormatError(f"listing is not valid XML: {exc}") from exc
+    if _local(root.tag) != "ListBucketResult":
+        raise ArchiveFormatError(f"unexpected listing root {root.tag!r}")
+    prefixes: list[str] = []
+    keys: list[str] = []
+    truncated = False
+    next_marker: str | None = None
+    for child in root:
+        name = _local(child.tag)
+        if name == "CommonPrefixes":
+            prefixes += [(p.text or "") for p in child if _local(p.tag) == "Prefix"]
+        elif name == "Contents":
+            keys += [(k.text or "") for k in child if _local(k.tag) == "Key"]
+        elif name == "IsTruncated":
+            truncated = (child.text or "").strip().lower() == "true"
+        elif name == "NextMarker":
+            next_marker = (child.text or "").strip() or None
+    return prefixes, keys, truncated, next_marker
+
+
+async def _list_all(client: httpx.AsyncClient, prefix: str) -> tuple[list[str], list[str]]:
+    """Every common prefix and key under `prefix`, following marker paging."""
+    prefixes: list[str] = []
+    keys: list[str] = []
+    marker = ""
+    for _ in range(MAX_LISTING_PAGES):
+        params = {"delimiter": "/", "prefix": prefix}
+        if marker:
+            params["marker"] = marker
+        status, body = await _get(client, LISTING_BASE_URL, MAX_LISTING_BYTES, params)
+        if status != 200:
+            raise ArchiveError(f"listing {prefix!r} answered status {status}")
+        page_prefixes, page_keys, truncated, next_marker = _parse_listing(body)
+        prefixes += page_prefixes
+        keys += page_keys
+        if not truncated:
+            return prefixes, keys
+        last_seen = (page_prefixes or page_keys or [""])[-1]
+        new_marker = next_marker or last_seen
+        if not new_marker or new_marker == marker:
+            raise ArchiveError(f"listing {prefix!r} marker did not advance")
+        marker = new_marker
+    raise ArchiveError(f"listing {prefix!r} exceeded MAX_LISTING_PAGES={MAX_LISTING_PAGES}")
+
+
+async def list_archive_symbols(client: httpx.AsyncClient, *, quote: str = "USDT") -> list[str]:
+    """Sorted USDT perpetual symbols that have monthly kline archives.
+
+    Every prefix is validated against `SYMBOL_RE` before it can reach a URL or
+    a path; anything else (other quotes, quarterly `_YYMMDD` contracts,
+    hostile names) is skipped and logged, never returned.
+    """
+    if quote != "USDT":
+        raise ValueError(f"unsupported archive quote {quote!r}; only USDT is discovered")
+    prefixes, _ = await _list_all(client, _MONTHLY_KLINES_PREFIX)
+    symbols: set[str] = set()
+    skipped: list[str] = []
+    for entry in prefixes:
+        name = entry.removeprefix(_MONTHLY_KLINES_PREFIX).removesuffix("/")
+        if entry.startswith(_MONTHLY_KLINES_PREFIX) and SYMBOL_RE.match(name):
+            symbols.add(name)
+        else:
+            skipped.append(entry)
+    if skipped:
+        log.info("archive.listing_skipped", count=len(skipped), sample=skipped[:5])
+    return sorted(symbols)
+
+
+async def archive_last_day(client: httpx.AsyncClient, symbol: str) -> date | None:
+    """Latest day with a daily 1d archive zip for `symbol`, or None.
+
+    `.CHECKSUM` keys, other symbols and impossible dates are ignored. A CLI
+    uses this to cap an archive-only symbol at its last real day.
+    """
+    if not SYMBOL_RE.match(symbol):
+        raise ValueError(f"invalid archive symbol {symbol!r} (must match {SYMBOL_RE.pattern})")
+    prefix = f"{_DAILY_KLINES_PREFIX}{symbol}/1d/"
+    name = re.escape(f"{prefix}{symbol}-1d-")
+    pattern = re.compile(rf"^{name}(\d{{4}}-\d{{2}}-\d{{2}})\.zip$")
+    _, keys = await _list_all(client, prefix)
+    days: list[date] = []
+    for key in keys:
+        match = pattern.match(key)
+        if match is None or not _DAY_RE.match(match.group(1)):
+            continue
+        try:
+            days.append(date.fromisoformat(match.group(1)))
+        except ValueError:
+            continue
+    return max(days) if days else None
