@@ -447,15 +447,24 @@ This absorbs the confirmed bug from former Phase 11:
 **Plans:** 11 plans
 
 Plans:
+**Wave 1**
 - [ ] 12-01-PLAN.md — Rejection vocabulary window: STOP_TOO_TIGHT and COST_TO_RISK_EXCEEDED added, five deprecated aliases removed (GLOSSARY, enum, GL gates, tests)
 - [ ] 12-02-PLAN.md — Registry keys, unit and range guards, five v5/-v3 parameter sets at v4.0.0, pins and gate PA-07
 - [ ] 12-03-PLAN.md — CostRates and the quote-per-unit producer, presence-driven exit_slippage_rate in CostModel, canonical cost-hash text, cost_slice binding
+
+**Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 12-04-PLAN.md — Phase 6 fixtures regenerated with guard-clearing geometry on the v5 sets (before the pipeline cutover), geometry pre-flight test
 - [ ] 12-05-PLAN.md — Live commission rate: pure per-side max(parameter, account) resolver, strict adapter method, SOURCES and BINANCE records
+
+**Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 12-06-PLAN.md — Risk pipeline cutover: adverse-edge sizing, shared producer inside evaluate_risk, cost guards before quantization, recorded cost trail
+
+**Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 12-07-PLAN.md — Phase 5 fixtures and risk tests migrated with hand-derived expectations
 - [ ] 12-08-PLAN.md — Execution manager: fail-closed live cost-rate gate and Phase 9 fixture migration
 - [ ] 12-09-PLAN.md — Simulator and paper cutover: per-leg slippage with exit_slippage_rate, price-aware modeled_costs_per_unit, parity fixture regenerated
+
+**Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 12-10-PLAN.md — SL-loss property test (Decimal grid with old-formula mutation check) and cross-call-site cost parity tests
 - [ ] 12-11-PLAN.md — DECISIONS D046-D048, RISK_MANAGEMENT and CONFIGURATION amendments, final regression
 
