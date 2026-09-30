@@ -18,7 +18,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+from binance_sdk_derivatives_trading_usds_futures import BadRequestError
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 from src.adapters.binance_usdm import Kline, MarkKline, SymbolFilters
@@ -98,8 +100,15 @@ class FakeAdapter:
         data_end_ms: int | None = None,
         fail_on_kline_call: int | None = None,
         skip_days_ms: Sequence[int] = (),
+        invalid_symbols: Sequence[str] = (),
+        invalid_mark_symbols: Sequence[str] = (),
+        funding_fail_symbols: Sequence[str] = (),
     ) -> None:
         self._filters = list(filters)
+        self._invalid_symbols = frozenset(invalid_symbols)
+        self._invalid_mark_symbols = frozenset(invalid_mark_symbols)
+        self._funding_fail_symbols = frozenset(funding_fail_symbols)
+        self.funding_calls: list[tuple[str | None, int | None, int | None]] = []
         self._skip_days_ms = frozenset(skip_days_ms)
         self._session = session
         self._first_ms = first_ms or {}
@@ -138,6 +147,8 @@ class FakeAdapter:
         limit: int = 1500,
     ) -> list[Kline]:
         self.calls.append("klines")
+        if symbol in self._invalid_symbols:
+            raise BadRequestError(error_message="Invalid symbol.", status_code=-1121)
         self._kline_call_count += 1
         if self.metadata_rows_at_first_klines is None and self._session is not None:
             self.metadata_rows_at_first_klines = int(
@@ -184,6 +195,8 @@ class FakeAdapter:
         limit: int = 1500,
     ) -> list[MarkKline]:
         self.calls.append("mark_klines")
+        if symbol in self._invalid_mark_symbols:
+            raise BadRequestError(error_message="Invalid symbol.", status_code=-1121)
         step = _INTERVAL_MS[interval]
         self.mark_requests.append((symbol, interval, start_ms or 0))
         rows: list[MarkKline] = []
@@ -203,6 +216,19 @@ class FakeAdapter:
                 )
             )
         return rows
+
+
+    async def funding_rate(
+        self,
+        symbol: str | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 1000,
+    ) -> list[Any]:
+        self.funding_calls.append((symbol, start_ms, end_ms))
+        if symbol in self._funding_fail_symbols:
+            raise RuntimeError("simulated funding failure")
+        return []
 
 
 @pytest.fixture
@@ -280,6 +306,7 @@ def _config(tmp_path: Path, **overrides: Any) -> Any:
         "cursor_root": tmp_path / "cursors",
         "pace_seconds": 0.0,
         "dry_run": False,
+        "funding": False,
     }
     params.update(overrides)
     return BackfillRunConfig(**params)
@@ -827,6 +854,7 @@ async def test_missing_symbols_are_reported(tmp_path: Path, session: Session) ->
         session=session,
         clock=_clock(),
         emit=lines.append,
+        archive_client=FakeArchive({}).client(),
     )
 
     assert report.missing_from_exchange_info == ("GONEUSDT",)
@@ -1046,3 +1074,331 @@ def test_dry_run_writes_no_report_and_exits_0(
     assert rc == 0
     assert not out_path.exists()
     assert "DATASET" not in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# 13-08 Task 3 - archive fallback per symbol and the funding-history step.
+# --------------------------------------------------------------------------- #
+
+LISTING_HOST = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
+S3_NS = "http://s3.amazonaws.com/doc/2006-03-01/"
+DELIVERY_MS = _ms(2026, 8, 10, 8)
+_ARCHIVE_HEADER = (
+    "open_time,open,high,low,close,volume,close_time,quote_volume,count,"
+    "taker_buy_volume,taker_buy_quote_volume,ignore"
+)
+
+
+class FakeArchive:
+    """A mocked data.binance.vision: monthly kline zips and daily-1d listings.
+
+    `available` maps a symbol to `(first_open_ms, end_open_ms_exclusive)`; every
+    bar of every interval inside that range is served, and any other symbol is
+    a 404. No test touches the network.
+    """
+
+    def __init__(self, available: dict[str, tuple[int, int]]) -> None:
+        self.available = available
+        self.requests: list[str] = []
+
+    def client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        self.requests.append(url)
+        if url.startswith(LISTING_HOST):
+            return self._listing(request.url.params.get("prefix", ""))
+        return self._object(url)
+
+    def _listing(self, prefix: str) -> httpx.Response:
+        symbol = prefix.rstrip("/").split("/")[-2]
+        keys: list[str] = []
+        if symbol in self.available:
+            first, end = self.available[symbol]
+            day = first - first % DAY_MS
+            while day < end:
+                stamp = _dt(day).strftime("%Y-%m-%d")
+                keys.append(f"{prefix}{symbol}-1d-{stamp}.zip")
+                day += DAY_MS
+        contents = "".join(f"<Contents><Key>{k}</Key></Contents>" for k in keys)
+        body = (
+            f'<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="{S3_NS}">'
+            f"<Prefix>{prefix}</Prefix><IsTruncated>false</IsTruncated>{contents}"
+            "</ListBucketResult>"
+        )
+        return httpx.Response(200, text=body)
+
+    def _object(self, url: str) -> httpx.Response:
+        import hashlib
+        import io
+        import zipfile
+
+        checksum = url.endswith(".CHECKSUM")
+        parts = url.removesuffix(".CHECKSUM").split("/")
+        period, symbol, interval, name = parts[-5], parts[-3], parts[-2], parts[-1]
+        if period != "monthly" or symbol not in self.available:
+            return httpx.Response(404)
+        stamp = name.removesuffix(".zip").removeprefix(f"{symbol}-{interval}-")
+        year, month = int(stamp[:4]), int(stamp[5:7])
+        step = _INTERVAL_MS[interval]
+        first, end = self.available[symbol]
+        month_lo = _ms(year, month, 1)
+        month_hi = _ms(year + (month == 12), month % 12 + 1, 1)
+        opens = [
+            o
+            for o in range(-(-max(first, month_lo) // step) * step, min(end, month_hi), step)
+        ]
+        if not opens:
+            return httpx.Response(404)
+        rows = [_ARCHIVE_HEADER] + [
+            f"{o},24.2350,24.3440,24.1750,24.2350,16620.0,{o + step - 1},"
+            "403353.45570,2487,10387.1,252109.82740,0"
+            for o in opens
+        ]
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(name.removesuffix(".zip") + ".csv", "\n".join(rows) + "\n")
+        blob = buf.getvalue()
+        if checksum:
+            return httpx.Response(200, text=f"{hashlib.sha256(blob).hexdigest()}  {name}\n")
+        return httpx.Response(200, content=blob)
+
+
+def _rows_for(report: Any, dataset: str, symbol: str) -> list[Any]:
+    assert report.sufficiency is not None
+    return [
+        r for r in report.sufficiency.rows if r.dataset == dataset and r.symbol == symbol
+    ]
+
+
+async def test_invalid_symbol_uses_archive_source(tmp_path: Path, session: Session) -> None:
+    import polars as pl
+    from src.data.backfill_cli import run_backfill
+
+    fixture = _filters("FTTUSDT", status="SETTLING", delivery_ms=DELIVERY_MS)
+    adapter = FakeAdapter([fixture], session=session, invalid_symbols=["FTTUSDT"])
+    archive = FakeArchive({"FTTUSDT": (_ms(2026, 7, 1), DELIVERY_MS)})
+    lines: list[str] = []
+
+    report = await run_backfill(
+        _config(tmp_path, symbols=["FTTUSDT"], depth_months={"1h": 2}),
+        adapter=adapter,
+        session=session,
+        clock=_clock(),
+        emit=lines.append,
+        archive_client=archive.client(),
+    )
+
+    assert report.sources[("trade", "FTTUSDT")] == "ARCHIVE"
+    days = _day_dirs(tmp_path / "raw", "1h", "FTTUSDT")
+    assert days[0] == "2026-07-30"
+    assert days[-1] == "2026-08-10"
+    delivery_day = (
+        tmp_path / "raw" / "interval=1h" / "symbol=FTTUSDT" / "date=2026-08-10" / "part.parquet"
+    )
+    assert pl.read_parquet(delivery_day).height == 8
+    (row,) = _rows_for(report, "trade", "FTTUSDT")
+    assert (row.cause, row.source, row.missing_bars) == ("DELISTED_CAPPED", "ARCHIVE", 0)
+    assert report.sufficiency is not None and report.sufficiency.missing_data is False
+    assert any("FTTUSDT" in line and "ARCHIVE" in line for line in lines)
+
+
+async def test_archive_source_survives_a_complete_rerun(
+    tmp_path: Path, session: Session
+) -> None:
+    from src.data.backfill_cli import run_backfill
+
+    fixture = _filters("FTTUSDT", status="SETTLING", delivery_ms=DELIVERY_MS)
+    archive = FakeArchive({"FTTUSDT": (_ms(2026, 7, 1), DELIVERY_MS)})
+    config = _config(tmp_path, symbols=["FTTUSDT"], depth_months={"1h": 2})
+    await run_backfill(
+        config,
+        adapter=FakeAdapter([fixture], session=session, invalid_symbols=["FTTUSDT"]),
+        session=session,
+        clock=_clock(0),
+        archive_client=archive.client(),
+    )
+
+    again = FakeAdapter([fixture], session=session, invalid_symbols=["FTTUSDT"])
+    report = await run_backfill(
+        config,
+        adapter=again,
+        session=session,
+        clock=_clock(1),
+        archive_client=archive.client(),
+    )
+
+    # The store is complete, so REST is never asked; the source is remembered.
+    assert again.kline_requests == []
+    assert report.sources[("trade", "FTTUSDT")] == "ARCHIVE"
+    (row,) = _rows_for(report, "trade", "FTTUSDT")
+    assert (row.source, row.cause) == ("ARCHIVE", "DELISTED_CAPPED")
+
+
+async def test_archive_only_symbol_capped_at_last_archive_day(
+    tmp_path: Path, session: Session
+) -> None:
+    from src.data.backfill_cli import run_backfill
+
+    adapter = FakeAdapter([_filters("BTCUSDT")], session=session)
+    archive = FakeArchive({"GONEUSDT": (_ms(2026, 7, 1), _ms(2026, 8, 5, 12))})
+
+    report = await run_backfill(
+        _config(tmp_path, symbols=["BTCUSDT", "GONEUSDT"], depth_months={"1h": 2}),
+        adapter=adapter,
+        session=session,
+        clock=_clock(),
+        archive_client=archive.client(),
+    )
+
+    assert report.sources[("trade", "GONEUSDT")] == "ARCHIVE"
+    assert {r[0] for r in adapter.kline_requests} == {"BTCUSDT"}  # REST never asked
+    days = _day_dirs(tmp_path / "raw", "1h", "GONEUSDT")
+    assert days[0] == "2026-07-30"
+    assert days[-1] == "2026-08-05"  # capped at the last archive day
+    (row,) = _rows_for(report, "trade", "GONEUSDT")
+    assert row.cause == "DELISTED_CAPPED"
+    assert row.expected_end_utc == "2026-08-05T12:00:00Z"  # the last archived bar
+    assert row.missing_bars == 0
+    gone = [w for w in report.windows if w.symbol == "GONEUSDT"]
+    assert gone and gone[0].terminal is True and gone[0].end_ms == _ms(2026, 8, 6)
+
+
+def test_unavailable_symbol_exits_3(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.data import backfill_cli
+
+    archive = FakeArchive({})
+    monkeypatch.setattr(backfill_cli, "make_archive_client", archive.client)
+
+    # GONEUSDT is in neither exchangeInfo nor the archive.
+    rc = _run_main(tmp_path, monkeypatch, FakeAdapter([_filters("BTCUSDT")]), ["GONEUSDT"])
+
+    out = capsys.readouterr().out
+    assert rc == 3
+    rows = [line.split() for line in out.splitlines() if line.startswith("trade ")]
+    assert [cells[-1] for cells in rows] == ["UNAVAILABLE"]
+    assert any("prefix=" in url and "GONEUSDT" in url for url in archive.requests)
+
+
+async def test_mark_for_archive_symbol_comes_from_rest_or_is_unavailable(
+    tmp_path: Path, session: Session
+) -> None:
+    from src.data.backfill_cli import run_backfill
+
+    adapter = FakeAdapter([], session=session, invalid_mark_symbols=["BBBUSDT"])
+    archive = FakeArchive(
+        {
+            "AAAUSDT": (_ms(2026, 7, 1), _ms(2026, 8, 5, 12)),
+            "BBBUSDT": (_ms(2026, 7, 1), _ms(2026, 8, 5, 12)),
+        }
+    )
+
+    report = await run_backfill(
+        _config(
+            tmp_path,
+            symbols=["AAAUSDT", "BBBUSDT"],
+            datasets=["trade", "mark"],
+            depth_months={"1h": 2},
+        ),
+        adapter=adapter,
+        session=session,
+        clock=_clock(),
+        archive_client=archive.client(),
+    )
+
+    assert report.sources[("trade", "AAAUSDT")] == "ARCHIVE"
+    assert report.sources[("trade", "BBBUSDT")] == "ARCHIVE"
+    assert report.sources[("mark", "AAAUSDT")] == "REST"
+    assert report.sources[("mark", "BBBUSDT")] == "UNAVAILABLE"
+    (mark_a,) = _rows_for(report, "mark", "AAAUSDT")
+    (mark_b,) = _rows_for(report, "mark", "BBBUSDT")
+    assert mark_a.cause == "DELISTED_CAPPED" and mark_a.missing_bars == 0
+    assert mark_b.cause == "UNAVAILABLE"
+    # Never fabricated from trade data: BBB has trade days and no mark day.
+    assert _day_dirs(tmp_path / "raw", "1h", "BBBUSDT")
+    assert _day_dirs(tmp_path / "raw", "1h", "BBBUSDT", sub="dataset=mark_klines") == []
+    assert _day_dirs(tmp_path / "raw", "1h", "AAAUSDT", sub="dataset=mark_klines")
+    assert report.sufficiency is not None and report.sufficiency.missing_data is True
+
+
+async def test_funding_step_runs_per_symbol_within_bounds(
+    tmp_path: Path, session: Session
+) -> None:
+    from src.data.backfill_cli import run_backfill
+
+    fixtures = [
+        _filters("BTCUSDT"),
+        _filters("FTTUSDT", status="SETTLING", delivery_ms=DELIVERY_MS),
+    ]
+    adapter = FakeAdapter(fixtures, session=session, flat_from_ms={"FTTUSDT": DELIVERY_MS})
+
+    report = await run_backfill(
+        _config(tmp_path, symbols=["BTCUSDT", "FTTUSDT"], depth_months={"1h": 2}, funding=True),
+        adapter=adapter,
+        session=session,
+        clock=_clock(),
+    )
+
+    # Start at the 1h/4h dataset start; end at min(run end, delivery cap).
+    assert adapter.funding_calls == [
+        ("BTCUSDT", _ms(2026, 7, 30), _ms(2026, 9, 30)),
+        ("FTTUSDT", _ms(2026, 7, 30), DELIVERY_MS),
+    ]
+    assert report.funding is not None
+    assert report.funding.rows_per_symbol == {"BTCUSDT": 0, "FTTUSDT": 0}
+
+    skipped = FakeAdapter(fixtures, session=session)
+    await run_backfill(
+        _config(tmp_path / "skip", symbols=["BTCUSDT"], depth_months={"1h": 1}, funding=False),
+        adapter=skipped,
+        session=session,
+        clock=_clock(1),
+    )
+    assert skipped.funding_calls == []
+
+
+async def test_funding_failure_is_a_gap_row_not_a_crash(
+    tmp_path: Path, session: Session
+) -> None:
+    from src.data.backfill_cli import run_backfill
+    from src.db.models import CollectorGap
+
+    adapter = FakeAdapter(
+        [_filters("BTCUSDT"), _filters("ETHUSDT")],
+        session=session,
+        funding_fail_symbols=["BTCUSDT"],
+    )
+
+    report = await run_backfill(
+        _config(tmp_path, symbols=["BTCUSDT", "ETHUSDT"], depth_months={"1h": 1}, funding=True),
+        adapter=adapter,
+        session=session,
+        clock=_clock(),
+    )
+
+    assert [c[0] for c in adapter.funding_calls] == ["BTCUSDT", "ETHUSDT"]
+    assert report.funding is not None and report.funding.gaps_recorded == 1
+    gaps = session.execute(select(CollectorGap)).scalars().all()
+    assert [(g.symbol, g.data_class) for g in gaps] == [("BTCUSDT", "funding")]
+    assert report.sufficiency is not None  # the run still finished and reported
+
+
+def test_no_funding_flag_skips_the_step(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with_funding = FakeAdapter([_filters("BTCUSDT")])
+    assert _run_main(tmp_path, monkeypatch, with_funding, ["BTCUSDT"]) == 0
+    assert [c[0] for c in with_funding.funding_calls] == ["BTCUSDT"]
+
+    without = FakeAdapter([_filters("BTCUSDT")])
+    rc = _run_main(tmp_path, monkeypatch, without, ["BTCUSDT"], "--no-funding", minutes=1)
+    assert rc == 0
+    assert without.funding_calls == []
