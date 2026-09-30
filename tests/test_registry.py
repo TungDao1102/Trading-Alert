@@ -23,6 +23,7 @@ fail until `src/domain/registry.py` is implemented.
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -755,3 +756,160 @@ def test_baseline_v2_sets_load_with_all_d05_keys() -> None:
                 f"{family}/baseline-v2[{key}] must be Decimal, got "
                 f"{type(ps.params[key]).__name__}"
             )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 11 plan 02 - pin coverage, working_type key, D036-D038 candidate sets.
+# --------------------------------------------------------------------------- #
+
+_REPO_PARAMS = Path(__file__).resolve().parent.parent / "params"
+_PIN_FILE = Path(__file__).resolve().parent / "fixtures" / "phase4" / "parameters.json"
+
+# Hashes of the ten pre-phase-11 sets (loader output at commit 679825c). They must
+# never move: old sets are immutable (D-06, F-810).
+PRE_PHASE_11_HASHES: dict[tuple[str, str], tuple[str, str]] = {
+    ("breakout-retest", "baseline-v1"): (
+        "v1.0.0",
+        "4a8ee77ee99d390c1a4ccd86ee7259f86f319451de67d76732ee4cadc0cc1969",
+    ),
+    ("breakout-retest", "baseline-v2"): (
+        "v2.0.0",
+        "5be12f1b36b7c3e5595a93c62aec74e52ac877848bd8658ff60be2e69584ed0b",
+    ),
+    ("breakout-retest", "baseline-v3"): (
+        "v2.0.0",
+        "b36f095b49bc4342a212fa2a8607602b8f98f92e26d540b56c54897a8461a03e",
+    ),
+    ("range-mr", "baseline-v1"): (
+        "v1.0.0",
+        "060fc4470a075b97253b4cd0e787819031d019dd2b0b857aaec02e08e6066404",
+    ),
+    ("range-mr", "baseline-v2"): (
+        "v2.0.0",
+        "4249bf9934e1477736b3fb3008a0d962aaa1163047fed55227b37c973de3ed0f",
+    ),
+    ("trend-pullback", "baseline-no-trade-v1"): (
+        "v2.0.0",
+        "8f28ddc98876326b762c7ae05a749d0b0fbb4ca9d578cc817f5663bcb4f3ad0e",
+    ),
+    ("trend-pullback", "baseline-simple-trend-v1"): (
+        "v2.0.0",
+        "b99f1eaa6d3b8e15f210c7ed2db4eb5dd5823e59f0de3eb25afddf9bb1426a01",
+    ),
+    ("trend-pullback", "baseline-v1"): (
+        "v1.0.0",
+        "e1579900b1be20b8a6db76c554255cbec8125d5d317f6df7dadd5de78d2afae5",
+    ),
+    ("trend-pullback", "baseline-v2"): (
+        "v2.0.0",
+        "e3176f73eecf65cbcedce218f5316fef1ce9511efc38151c4e67e2ec00e45726",
+    ),
+    ("trend-pullback", "baseline-v3"): (
+        "v2.0.0",
+        "5205ec6a87f4665d4ae0b0ebd5f1e5fb49bbd0ea30b20842ceb4d780b4452e57",
+    ),
+}
+
+
+def test_every_params_toml_has_a_pin_that_verifies() -> None:
+    """Mirror of the registry-gate re-hash step: every TOML is pinned and verifies."""
+    doc = json.loads(_PIN_FILE.read_text(encoding="utf-8"))
+    pins = {
+        (e["strategy_id"], e["parameter_set_id"]): e["parameter_set_hash"]
+        for e in doc["parameter_sets"]
+    }
+    tomls = sorted(_REPO_PARAMS.rglob("*.toml"))
+    assert tomls, "no params TOML files found"
+    seen: set[tuple[str, str]] = set()
+    for toml_path in tomls:
+        key = (toml_path.parent.name, toml_path.stem)
+        seen.add(key)
+        assert key in pins, f"{toml_path}: no pinned hash - register it"
+        verify_parameter_set(toml_path, pins[key])
+    assert set(pins) == seen, f"pins without a file: {sorted(set(pins) - seen)}"
+    assert len(pins) == len(doc["parameter_sets"]), "duplicate pin entries"
+
+
+def test_pre_phase_11_hashes_and_versions_are_unchanged() -> None:
+    for (strategy_id, set_id), (version, digest) in PRE_PHASE_11_HASHES.items():
+        loaded = load_parameter_set(strategy_id, set_id)
+        assert loaded.strategy_version == version, (strategy_id, set_id)
+        assert loaded.parameter_set_hash == digest, (strategy_id, set_id)
+
+
+_WORKING_TYPE_HEADER = (
+    'schema_version = 1\n'
+    '[strategy]\n'
+    'strategy_id = "test-strategy"\n'
+    'strategy_version = "v1.0.0"\n'
+    '[parameters]\n'
+)
+
+
+def _load_tmp(tmp_path: Path, parameters: str) -> ParameterSet:
+    from src.domain import registry
+
+    _write_toml(tmp_path, _WORKING_TYPE_HEADER + parameters)
+    original_root = registry.REGISTRY_ROOT
+    registry.REGISTRY_ROOT = tmp_path
+    try:
+        return load_parameter_set("test-strategy", "test-set")
+    finally:
+        registry.REGISTRY_ROOT = original_root
+
+
+@pytest.mark.parametrize("value", ["MARK_PRICE", "CONTRACT_PRICE"])
+def test_working_type_accepts_documented_values(tmp_path: Path, value: str) -> None:
+    loaded = _load_tmp(tmp_path, f'working_type = "{value}"\n')
+    assert loaded.params["working_type"] == value
+
+
+@pytest.mark.parametrize(
+    "literal",
+    ['"LAST"', '""', "1", "true", '"mark_price"', '"MARK_PRICE "'],
+)
+def test_working_type_rejects_other_values(tmp_path: Path, literal: str) -> None:
+    with pytest.raises(StrategyKeyOutsideRegistry):
+        _load_tmp(tmp_path, f"working_type = {literal}\n")
+
+
+def test_set_without_working_type_still_loads(tmp_path: Path) -> None:
+    loaded = _load_tmp(tmp_path, "swing_lookback = 20\n")
+    assert "working_type" not in loaded.params
+
+
+def test_working_type_is_not_a_cost_key() -> None:
+    from src.backtest.costs import COST_KEYS
+    from src.domain.registry import STRATEGY_KEYS
+
+    assert "working_type" in STRATEGY_KEYS
+    assert "working_type" not in COST_KEYS
+
+
+_V4_SETS = (("trend-pullback", "baseline-v4"),)
+
+
+@pytest.mark.parametrize(("strategy_id", "set_id"), _V4_SETS)
+def test_v4_sets_match_d036_d038(strategy_id: str, set_id: str) -> None:
+    from src.backtest.costs import COST_KEYS, build_cost_model
+
+    loaded = load_parameter_set(strategy_id, set_id)
+    params = loaded.params
+    assert loaded.strategy_version == "v3.0.0"
+    assert params["fee_rate_entry"] == Decimal("0.0005")
+    assert params["fee_rate_exit"] == Decimal("0.0005")
+    assert params["partial_fill_fraction"] == 1
+    assert isinstance(params["partial_fill_fraction"], int)
+    assert not isinstance(params["partial_fill_fraction"], bool)
+    assert params["working_type"] == "MARK_PRICE"
+    build_cost_model({k: params[k] for k in COST_KEYS})
+
+
+def test_trend_pullback_v4_differs_from_v3_only_in_d036_d038_keys() -> None:
+    v3 = load_parameter_set("trend-pullback", "baseline-v3").params
+    v4 = load_parameter_set("trend-pullback", "baseline-v4").params
+    changed = {"fee_rate_entry", "partial_fill_fraction", "working_type"}
+    assert set(v4) - set(v3) == {"working_type"}
+    assert set(v3) <= set(v4)
+    for key in set(v3) - changed:
+        assert v3[key] == v4[key], key

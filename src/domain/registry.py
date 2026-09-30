@@ -107,8 +107,18 @@ STRATEGY_KEYS = frozenset(
         "partial_fill_fraction",
         # Constraint-snapshot freshness (RISK_MANAGEMENT §12).
         "constraint_snapshot_ttl_seconds",
+        # Phase 11 (D037): protective-trigger price source. Optional; absent in
+        # sets that predate it. Deliberately NOT a cost key (COST_KEYS in
+        # src/backtest/costs.py), so cost_model_hash is unaffected.
+        # NOTE: check_strategy_key_outside_registry now also rejects ambient
+        # config named working_type; runtime configuration must use another name.
+        "working_type",
     }
 )
+
+# Closed set of admissible working_type values (D037). Anything else, e.g. LAST,
+# fails closed at load.
+WORKING_TYPE_VALUES = frozenset({"MARK_PRICE", "CONTRACT_PRICE"})
 
 
 class UnregisteredParameterSet(Exception):
@@ -273,6 +283,7 @@ STRING_KEYS = frozenset(
         "funding_treatment",
         "slippage_model",
         "spread_fill_assumptions",
+        "working_type",
     }
 )
 DECIMAL_KEYS = STRATEGY_KEYS - INT_KEYS - STRING_KEYS
@@ -296,6 +307,11 @@ def _check_param_types(params: dict[str, Any], path: Path) -> None:
                 raise StrategyKeyOutsideRegistry(
                     f"{path}: parameter {key!r} must be a non-empty string, "
                     f"got {type(value).__name__}"
+                )
+            if key == "working_type" and value not in WORKING_TYPE_VALUES:
+                raise StrategyKeyOutsideRegistry(
+                    f"{path}: parameter 'working_type' must be one of "
+                    f"{sorted(WORKING_TYPE_VALUES)}, got {value!r}"
                 )
         elif key in DECIMAL_KEYS:
             if not isinstance(value, (int, Decimal)):

@@ -1,0 +1,59 @@
+# params/trend-pullback/baseline-v4.toml
+#
+# Phase 11 - D036-D038 aligned candidate set.
+#
+# Supersedes baseline-v3 (D036-D038), Phase 11. baseline-v3 stays byte-identical
+# for reproducing past hashes (F-810); do not mutate. New behaviour means a new
+# set and a strategy-version bump (D-04, D-06).
+#
+# Changes versus baseline-v3 (every other key, value and order is unchanged):
+#   - fee_rate_entry 0.0005 (taker): entries may fill immediately and V1 has no
+#     post-only order, so the entry leg is charged at the taker rate (D036).
+#     The 0.0005 rate is assumed equal to fee_rate_exit until Phase 12 reads
+#     the account commission rate.
+#   - partial_fill_fraction 1.0: all canonical sets assume full fills; partial
+#     or missed fills are studied as a separate sensitivity run (D038). TOML 1.0
+#     loads as int 1, so there is no whole-number hash trap.
+#   - working_type MARK_PRICE: protective triggers use the mark-price series
+#     (D037).
+
+schema_version = 1
+
+[strategy]
+strategy_id = "trend-pullback"
+strategy_version = "v3.0.0"
+
+[parameters]
+# Inherited from baseline-v3 (non-cost params unchanged).
+swing_lookback = 20
+zone_tolerance_atr = 0.5
+breakout_confirmation_bars = 3
+entry_buffer_atr = 0.1
+sl_buffer_atr = 0.2
+minimum_rr = 2.0
+signal_expiry_hours = 4
+risk_rate = 0.005
+minimum_risk_utilization_after_rounding = 0.6
+
+# Phase 5 D-05 additions (mirror baseline-v3 exactly).
+max_open_positions = 2
+max_aggregate_open_risk = 0.01          # 1.0%
+cluster_cap = 0.005                     # single-trade risk_rate
+# Daily PnL state machine (RISK_MANAGEMENT §8).
+daily_loss_warning_threshold = 0.005    # WARNING at 50% of stop
+daily_loss_stop_threshold = 0.01        # DAILY_STOP at 1.0% of equity
+# Cost model keys (RISK_MANAGEMENT §3) - Phase-6-compatible.
+fee_rate_entry = 0.0005                 # 5 bps taker (D036)
+fee_rate_exit = 0.0005                  # 5 bps taker
+expected_slippage = 0.0001              # 1 bps
+# Constraint-snapshot freshness (RISK_MANAGEMENT §12).
+constraint_snapshot_ttl_seconds = 3600  # 1 hour
+
+# Extended cost-model keys (all 7 COST_KEYS).
+funding_treatment = "ADDITIVE"
+slippage_model = "FIXED_BPS"
+spread_fill_assumptions = "FULL_FILL"
+# Full fills for canonical sets (D038); TOML 1.0 normalises to int 1.
+partial_fill_fraction = 1.0
+# Protective-trigger price source (D037). Not a cost key.
+working_type = "MARK_PRICE"

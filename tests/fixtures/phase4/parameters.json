@@ -17,6 +17,54 @@
       "parameter_set_id": "baseline-v1",
       "strategy_version": "v1.0.0",
       "parameter_set_hash": "060fc4470a075b97253b4cd0e787819031d019dd2b0b857aaec02e08e6066404"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "baseline-v2",
+      "strategy_version": "v2.0.0",
+      "parameter_set_hash": "5be12f1b36b7c3e5595a93c62aec74e52ac877848bd8658ff60be2e69584ed0b"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "baseline-v3",
+      "strategy_version": "v2.0.0",
+      "parameter_set_hash": "b36f095b49bc4342a212fa2a8607602b8f98f92e26d540b56c54897a8461a03e"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "baseline-v2",
+      "strategy_version": "v2.0.0",
+      "parameter_set_hash": "4249bf9934e1477736b3fb3008a0d962aaa1163047fed55227b37c973de3ed0f"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "baseline-no-trade-v1",
+      "strategy_version": "v2.0.0",
+      "parameter_set_hash": "8f28ddc98876326b762c7ae05a749d0b0fbb4ca9d578cc817f5663bcb4f3ad0e"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "baseline-simple-trend-v1",
+      "strategy_version": "v2.0.0",
+      "parameter_set_hash": "b99f1eaa6d3b8e15f210c7ed2db4eb5dd5823e59f0de3eb25afddf9bb1426a01"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "baseline-v2",
+      "strategy_version": "v2.0.0",
+      "parameter_set_hash": "e3176f73eecf65cbcedce218f5316fef1ce9511efc38151c4e67e2ec00e45726"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "baseline-v3",
+      "strategy_version": "v2.0.0",
+      "parameter_set_hash": "5205ec6a87f4665d4ae0b0ebd5f1e5fb49bbd0ea30b20842ceb4d780b4452e57"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "baseline-v4",
+      "strategy_version": "v3.0.0",
+      "parameter_set_hash": "9d2f436da58070a2365b515fa53dc56a07a74ee29e67fe2515d5762be298edc0"
     }
   ]
 }
