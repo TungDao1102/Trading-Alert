@@ -20,33 +20,60 @@ date; overridable by flags and printed in the run header. When the
 research-universe manifest is FROZEN its `selection_date` is the 1h/4h start
 for every symbol (D-07) and its symbols join the backfill universe.
 
-Fail-closed posture: a symbol whose delivery cannot be established, or that
-is missing from `exchangeInfo`, gets NO window and is listed in the run
-output; the archive fallback and the data-sufficiency report arrive in plan
-13-08. Nothing here prints a database URL or credential: failures print the
-exception type name only.
+  4. Falls back to the checksum-verified Binance archive, per symbol, for a
+     symbol REST no longer serves (`-1121`) or that `exchangeInfo` no longer
+     lists, capped at its delivery date or its last archive day (D-08). The
+     source of every (dataset, symbol) is recorded and printed. Mark klines
+     are only ever taken from REST: an archive-only symbol whose mark REST
+     rejects is UNAVAILABLE, never filled from trade data.
+  5. Backfills funding history over the 1h/4h dataset range for every universe
+     symbol with data (D-23); a funding failure is a gap row, not a crash.
+  6. Prints the data-sufficiency report (D-05) and, with `--report-out`, writes
+     it as canonical JSON. Exit codes: 0 ok, 1 failure, 2 usage, 3 missing data
+     (NOT_BACKFILLED, GAP, UNAVAILABLE). The trade count never sets an exit code.
+
+Fail-closed posture: a symbol whose delivery cannot be established gets NO
+window and is reported UNAVAILABLE. Nothing here prints a database URL or
+credential: failures print the exception type name only.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import os
 import sys
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
+import httpx
+import polars as pl
 import structlog
 from sqlalchemy.orm import Session, sessionmaker
-from src.adapters.binance_usdm import BinanceUsdmAdapter, SymbolFilters
+from src.adapters.binance_usdm import (
+    BinanceUsdmAdapter,
+    FundingTick,
+    SymbolFilters,
+    is_invalid_symbol_error,
+)
+from src.data.archive import (
+    ArchiveError,
+    ArchiveKlineSource,
+    archive_last_day,
+    make_archive_client,
+)
 from src.data.backfill import (
+    DAY_MS,
     DEPTH_MONTHS_DEFAULT,
     MARK_DATASET,
     TRADE_DATASET,
     BackfillConfig,
+    BackfillResult,
     CursorStore,
     DatasetSpec,
     KlineSource,
@@ -55,6 +82,7 @@ from src.data.backfill import (
     align_to_day_start_ms,
     backfill_universe,
     interval_ms,
+    latest_published_day,
     months_before,
     utc_ms,
 )
@@ -64,10 +92,18 @@ from src.data.collect_list import (
     CollectListError,
     load_collect_list,
 )
-from src.data.collector import _make_sync_engine
+from src.data.collector import (
+    AdapterLike,
+    FundingHistoryResult,
+    _make_sync_engine,
+    backfill_funding_history,
+)
 from src.data.metadata import MetadataWidthError, refresh_symbol_metadata
-from src.data.store import DEFAULT_RAW_ROOT
+from src.data.store import DEFAULT_RAW_ROOT, partition_file
 from src.data.sufficiency import (
+    SOURCE_ARCHIVE,
+    SOURCE_REST,
+    SOURCE_UNAVAILABLE,
     SufficiencyReport,
     build_sufficiency_report,
     render_report_table,
@@ -95,6 +131,11 @@ DEFAULT_MANIFEST_PATH = Path("docs") / "research" / "universe" / "research-unive
 # `interval=*` directory, so the candles_v1 glob and the builder never read it.
 CURSOR_DIR_NAME = "_cursors"
 
+# Provenance sidecar next to the cursors: symbols whose trade history came from
+# the archive. A complete re-run never asks REST again (nothing left to fetch),
+# so without this the report would lose which origin filled a symbol (T-13-45).
+SOURCES_FILE_NAME = "_sources.json"
+
 # limit-1000 pages cost weight 5: 0.25 s per page keeps a zero-latency run at
 # or below about 1,200 weight per minute, half of the 2,400/min IP budget.
 DEFAULT_PACE_SECONDS = 0.25
@@ -116,6 +157,14 @@ class BackfillAdapter(KlineSource, MarkKlineSource, Protocol):
     """The adapter surface the CLI needs: exchangeInfo plus both kline datasets."""
 
     async def exchange_info(self) -> list[SymbolFilters]: ...
+
+    async def funding_rate(
+        self,
+        symbol: str | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 1000,
+    ) -> list[FundingTick]: ...
 
 
 def _utc_now() -> datetime:
@@ -150,6 +199,7 @@ class BackfillRunConfig:
     pace_seconds: float
     dry_run: bool
     report_out: Path | None = None
+    funding: bool = True
 
 
 @dataclass(frozen=True)
@@ -189,6 +239,8 @@ class BackfillRunReport:
     missing_from_exchange_info: tuple[str, ...]
     results: dict[tuple[str, str], UniverseBootstrapResult]
     sufficiency: SufficiencyReport | None = None
+    sources: dict[tuple[str, str], str] = field(default_factory=dict)
+    funding: FundingHistoryResult | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -301,8 +353,8 @@ def _plan_key(
 ) -> tuple[int | None, int | None, bool, str]:
     """(start_ms, end_ms, terminal, cause) for one symbol and interval."""
     if filters is None:
-        # Not in exchangeInfo: the REST endpoint cannot bound the window
-        # (13-08 adds the archive fallback), so nothing is published.
+        # Not in exchangeInfo: REST cannot bound the window. `run_backfill`
+        # re-plans such a symbol from the archive (D-08) or reports it UNAVAILABLE.
         return None, None, False, DELIVERY_UNKNOWN
     onboard_ms = (
         utc_ms(filters.onboard_time_utc) if filters.onboard_time_utc is not None else None
@@ -394,6 +446,107 @@ def _window_line(w: SymbolWindow) -> str:
     return f"backfill: window {w.dataset} {w.symbol} {w.interval} none {w.cause}"
 
 
+class _ArchiveAccess:
+    """Lazy archive client, cached last-day lookups and one shared kline source."""
+
+    def __init__(self, injected: httpx.AsyncClient | None) -> None:
+        self._client = injected
+        self._owned = False
+        self._last_days: dict[str, date | None] = {}
+        self._source: ArchiveKlineSource | None = None
+
+    def client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = make_archive_client()
+            self._owned = True
+        return self._client
+
+    async def last_day(self, symbol: str) -> date | None:
+        """Latest archived day of `symbol`, or None (also when the archive errors)."""
+        if symbol not in self._last_days:
+            try:
+                self._last_days[symbol] = await archive_last_day(self.client(), symbol)
+            except ArchiveError as exc:
+                # Type name only; the symbol is reported UNAVAILABLE (fail closed).
+                log.error("backfill.archive_lookup_failed", error_type=type(exc).__name__)
+                self._last_days[symbol] = None
+        return self._last_days[symbol]
+
+    def kline_source(self, search_end_ms: int) -> ArchiveKlineSource:
+        if self._source is None:
+            self._source = ArchiveKlineSource(self.client(), search_end_ms=search_end_ms)
+        return self._source
+
+    async def aclose(self) -> None:
+        if self._owned and self._client is not None:
+            await self._client.aclose()
+
+
+def _load_archive_presets(cursor_root: Path) -> set[str]:
+    """Symbols an earlier run had to fill from the archive (unreadable file: none)."""
+    try:
+        doc = json.loads((cursor_root / SOURCES_FILE_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(doc, dict):
+        return set()
+    symbols: set[str] = set()
+    for key, value in doc.items():
+        dataset, _, symbol = str(key).partition("|")
+        if dataset == "trade" and value == SOURCE_ARCHIVE and SYMBOL_RE.match(symbol):
+            symbols.add(symbol)
+    return symbols
+
+
+def _save_archive_presets(cursor_root: Path, symbols: set[str]) -> None:
+    if not symbols:
+        return
+    doc = {f"trade|{sym}": SOURCE_ARCHIVE for sym in sorted(symbols)}
+    text = json.dumps(doc, sort_keys=True, indent=2) + "\n"
+    cursor_root.mkdir(parents=True, exist_ok=True)
+    path = cursor_root / SOURCES_FILE_NAME
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        tmp.write_bytes(text.encode("utf-8"))
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _archive_window(
+    w: SymbolWindow, *, archive_end_ms: int, run_end_ms: int, depth_start_ms_: int
+) -> SymbolWindow:
+    """Re-plan `w` for an archive-sourced symbol: capped at the last archive day.
+
+    A window that already ends earlier (a delivery date) keeps its end; one
+    without a window starts at the depth start. Any end before the run end is
+    terminal, so the partly covered last day is published.
+    """
+    has = w.has_window and w.start_ms is not None and w.end_ms is not None
+    start = w.start_ms if has and w.start_ms is not None else depth_start_ms_
+    planned_end = w.end_ms if has and w.end_ms is not None else run_end_ms
+    end = min(planned_end, archive_end_ms)
+    terminal = end < run_end_ms
+    if start >= end:
+        return replace(w, start_ms=None, end_ms=None, terminal=True, cause=DELISTED_CAPPED)
+    cause = DELISTED_CAPPED if terminal else (w.cause if has else FULL_DEPTH)
+    return replace(w, start_ms=start, end_ms=end, terminal=terminal, cause=cause)
+
+
+def _last_stored_open_ms(raw_root: Path, symbol: str, interval: str) -> int | None:
+    """Open time (epoch ms) of the last stored trade bar of one key, or None."""
+    day = latest_published_day(
+        raw_root, dataset=TRADE_DATASET, symbol=symbol, interval=interval
+    )
+    if day is None:
+        return None
+    frame = pl.read_parquet(
+        partition_file(raw_root, interval, symbol, day), columns=["open_time_utc"]
+    )
+    latest = frame["open_time_utc"].dt.epoch("ms").max()
+    return int(latest) if isinstance(latest, int) else None
+
+
 async def run_backfill(
     config: BackfillRunConfig,
     *,
@@ -401,11 +554,14 @@ async def run_backfill(
     session: Session | None,
     clock: Callable[[], datetime],
     emit: Callable[[str], None] = print,
+    archive_client: httpx.AsyncClient | None = None,
 ) -> BackfillRunReport:
-    """Metadata first, then windows, then the trade and mark backfill.
+    """Metadata first, then windows, the trade and mark backfill, funding and the report.
 
     `--dry-run` (config.dry_run) still reads exchangeInfo but writes nothing:
-    no metadata row, no cursor, no Parquet file, no klines request.
+    no metadata row, no cursor, no Parquet file, no klines request, no archive
+    request. `archive_client` is injected by tests; otherwise one is created
+    lazily (only when a symbol needs the archive) and closed at the end.
     """
     symbols = tuple(config.symbols)
     intervals = tuple(config.intervals)
@@ -420,7 +576,6 @@ async def run_backfill(
     now = clock()
     now_ms = utc_ms(now)
     run_date = now.astimezone(UTC).date()
-    run_end_ms = align_to_day_start_ms(now_ms)
     depth = {i: config.depth_months.get(i, DEPTH_MONTHS_DEFAULT[i]) for i in intervals}
 
     depth_text = ", ".join(f"{i}={m} months" for i, m in depth.items())
@@ -450,9 +605,14 @@ async def run_backfill(
         )
         emit(f"backfill: metadata rows inserted {metadata_rows}")
     if missing:
+        outcome = (
+            "no window planned"
+            if config.dry_run
+            else "no REST window; the archive is consulted"
+        )
         emit(
-            f"backfill: missing from exchangeInfo ({len(missing)}): {', '.join(missing)} "
-            "- no window planned"
+            f"backfill: missing from exchangeInfo ({len(missing)}): "
+            f"{', '.join(missing)} - {outcome}"
         )
 
     # 2. One explicit window per (dataset, symbol, interval).
@@ -480,46 +640,185 @@ async def run_backfill(
     )
     if config.dry_run:
         return report
+    assert session is not None
 
-    # 3. Backfill each dataset and interval with its own cursor namespace.
+    access = _ArchiveAccess(archive_client)
+    try:
+        return await _backfill_and_report(
+            config,
+            adapter=adapter,
+            session=session,
+            clock=clock,
+            emit=emit,
+            access=access,
+            report=report,
+            missing=missing,
+            now=now,
+        )
+    finally:
+        await access.aclose()
+
+
+async def _backfill_and_report(
+    config: BackfillRunConfig,
+    *,
+    adapter: BackfillAdapter,
+    session: Session,
+    clock: Callable[[], datetime],
+    emit: Callable[[str], None],
+    access: _ArchiveAccess,
+    report: BackfillRunReport,
+    missing: tuple[str, ...],
+    now: datetime,
+) -> BackfillRunReport:
+    """Steps 3 to 6 of `run_backfill`: sources, klines, funding, sufficiency report."""
+    symbols = tuple(config.symbols)
+    intervals = tuple(config.intervals)
+    datasets = tuple(config.datasets)
+    depth = report.depth_months
+    run_date = report.run_date
+    run_end_ms = align_to_day_start_ms(utc_ms(now))
+    windows = report.windows
+    results = report.results
+
+    def depth_of(interval: str) -> int:
+        return depth_start_ms(
+            interval,
+            run_date=run_date,
+            depth_months=depth,
+            htf_start_date=config.htf_start_date,
+        )
+
+    win_by_key: dict[tuple[str, str, str], SymbolWindow] = {
+        (w.dataset, w.symbol, w.interval): w for w in windows
+    }
+    sources: dict[tuple[str, str], str] = {}
+    archive_capped: set[tuple[str, str]] = set()  # (symbol, interval) ended by the archive
+    archived = _load_archive_presets(config.cursor_root) & set(symbols)
+
+    def adopt_archive(symbol: str, last_day: date) -> None:
+        """Route `symbol`'s trade history to the archive, capped at its last day."""
+        archive_end_ms = utc_ms(datetime(last_day.year, last_day.month, last_day.day, tzinfo=UTC))
+        archive_end_ms += DAY_MS
+        sources[("trade", symbol)] = SOURCE_ARCHIVE
+        archived.add(symbol)
+        for key, w in list(win_by_key.items()):
+            if w.symbol != symbol:
+                continue
+            planned_end = w.end_ms if w.has_window and w.end_ms is not None else run_end_ms
+            win_by_key[key] = _archive_window(
+                w,
+                archive_end_ms=archive_end_ms,
+                run_end_ms=run_end_ms,
+                depth_start_ms_=depth_of(w.interval),
+            )
+            if archive_end_ms < planned_end:
+                archive_capped.add((symbol, w.interval))
+        emit(
+            f"backfill: source trade {symbol} {SOURCE_ARCHIVE} "
+            f"(last archive day {last_day.isoformat()})"
+        )
+
+    # 3. Symbols exchangeInfo no longer lists, or an earlier run took from the archive.
+    if "trade" in datasets:
+        for symbol in sorted(set(missing) | archived):
+            last_day = await access.last_day(symbol)
+            if last_day is None:
+                archived.discard(symbol)
+                for dataset_name in datasets:
+                    sources[(dataset_name, symbol)] = SOURCE_UNAVAILABLE
+                emit(f"backfill: source {symbol} {SOURCE_UNAVAILABLE} (no REST window, no archive)")
+            else:
+                adopt_archive(symbol, last_day)
+
+    async def bootstrap(
+        source: Any,
+        w: SymbolWindow,
+        spec: DatasetSpec[Any, Any],
+        cursor_store: CursorStore,
+    ) -> UniverseBootstrapResult:
+        assert w.start_ms is not None and w.end_ms is not None
+        return await backfill_universe(
+            source,
+            symbols=(w.symbol,),
+            intervals=(w.interval,),
+            end_ms=run_end_ms,
+            raw_root=config.raw_root,
+            config=BackfillConfig(
+                interval_ms=interval_ms(w.interval),
+                page_size=PAGE_SIZE,
+                pace_seconds=config.pace_seconds,
+            ),
+            clock=clock,
+            cursor_store=cursor_store,
+            interval_start_ms={w.interval: depth_of(w.interval)},
+            start_floor_ms={w.symbol: w.start_ms},
+            end_cap_ms={w.symbol: w.end_ms},
+            dataset=spec,
+            resume_from_store=True,
+        )
+
+    # 4. Backfill each dataset and interval with its own cursor namespace, one
+    #    symbol at a time so a REST `-1121` reroutes only that symbol.
     for dataset_name in datasets:
         spec = DATASET_SPECS[dataset_name]
         cursor_store = CursorStore(config.cursor_root, dataset=spec.name)
         for interval in intervals:
             active = [
-                w
+                current
                 for w in windows
-                if w.dataset == dataset_name and w.interval == interval and w.has_window
+                if w.dataset == dataset_name and w.interval == interval
+                for current in (win_by_key[(w.dataset, w.symbol, w.interval)],)
+                if current.has_window
             ]
             if not active:
                 continue
-            start_floor = {w.symbol: w.start_ms for w in active if w.start_ms is not None}
-            end_cap = {w.symbol: w.end_ms for w in active if w.end_ms is not None}
-            interval_start = depth_start_ms(
-                interval,
-                run_date=run_date,
-                depth_months=depth,
-                htf_start_date=config.htf_start_date,
-            )
             emit(f"backfill: {dataset_name} {interval} symbols={len(active)}")
-            result = await backfill_universe(
-                adapter,
-                symbols=tuple(w.symbol for w in active),
-                intervals=(interval,),
-                end_ms=run_end_ms,
-                raw_root=config.raw_root,
-                config=BackfillConfig(
-                    interval_ms=interval_ms(interval),
-                    page_size=PAGE_SIZE,
-                    pace_seconds=config.pace_seconds,
-                ),
-                clock=clock,
-                cursor_store=cursor_store,
-                interval_start_ms={interval: interval_start},
-                start_floor_ms=start_floor,
-                end_cap_ms=end_cap,
-                dataset=spec,
-                resume_from_store=True,
+            parts: list[UniverseBootstrapResult] = []
+
+            for w in active:
+                source_name = sources.get((dataset_name, w.symbol), SOURCE_REST)
+                if source_name == SOURCE_UNAVAILABLE:
+                    continue
+                current = w
+                if source_name == SOURCE_REST:
+                    try:
+                        parts.append(await bootstrap(adapter, current, spec, cursor_store))
+                        sources.setdefault((dataset_name, w.symbol), SOURCE_REST)
+                        continue
+                    except Exception as exc:
+                        if not is_invalid_symbol_error(exc):
+                            raise
+                    # REST no longer serves the symbol (-1121, D-08).
+                    if dataset_name == "mark":
+                        sources[("mark", w.symbol)] = SOURCE_UNAVAILABLE
+                        emit(f"backfill: source mark {w.symbol} {SOURCE_UNAVAILABLE} (REST -1121)")
+                        continue
+                    last_day = await access.last_day(w.symbol)
+                    if last_day is None:
+                        sources[("trade", w.symbol)] = SOURCE_UNAVAILABLE
+                        emit(
+                            f"backfill: source trade {w.symbol} {SOURCE_UNAVAILABLE} "
+                            "(REST -1121, no archive)"
+                        )
+                        continue
+                    adopt_archive(w.symbol, last_day)
+                    current = win_by_key[(dataset_name, w.symbol, interval)]
+                    if not current.has_window:
+                        continue
+                parts.append(
+                    await bootstrap(
+                        access.kline_source(run_end_ms), current, spec, cursor_store
+                    )
+                )
+            merged_keys: dict[tuple[str, str], BackfillResult] = {}
+            for part in parts:
+                merged_keys.update(part.per_key)
+            result = UniverseBootstrapResult(
+                per_key=merged_keys,
+                total_rows=sum(part.total_rows for part in parts),
+                total_pages=sum(part.total_pages for part in parts),
+                total_rejections=sum(part.total_rejections for part in parts),
             )
             results[(dataset_name, interval)] = result
             emit(
@@ -527,25 +826,99 @@ async def run_backfill(
                 f"pages={result.total_pages} rejections={result.total_rejections}"
             )
 
-    # 4. The data-sufficiency report (D-05): what depth exists, and why any is short.
-    htf_start_ms = depth_start_ms(
-        "1h", run_date=run_date, depth_months=depth, htf_start_date=config.htf_start_date
+    # An archive-capped end is the last archive DAY; the last bar inside it is the
+    # real end of the history, so the report expects up to that bar only.
+    for symbol, interval in sorted(archive_capped):
+        last_open = _last_stored_open_ms(config.raw_root, symbol, interval)
+        if last_open is None:
+            continue
+        trimmed_end = last_open + interval_ms(interval)
+        for dataset_name in datasets:
+            key = (dataset_name, symbol, interval)
+            planned = win_by_key.get(key)
+            if (
+                planned is not None
+                and planned.has_window
+                and planned.end_ms is not None
+                and trimmed_end < planned.end_ms
+            ):
+                win_by_key[key] = replace(planned, end_ms=trimmed_end)
+
+    final_windows = tuple(win_by_key[(w.dataset, w.symbol, w.interval)] for w in windows)
+    for w in final_windows:
+        if w.has_window:
+            sources.setdefault((w.dataset, w.symbol), SOURCE_REST)
+    _save_archive_presets(
+        config.cursor_root, {s for s in archived if sources.get(("trade", s)) == SOURCE_ARCHIVE}
     )
+    for dataset_name in datasets:
+        listed = " ".join(
+            f"{sym}={src}" for (ds, sym), src in sorted(sources.items()) if ds == dataset_name
+        )
+        emit(f"backfill: sources {dataset_name} {listed}".rstrip())
+
+    # 5. Funding history over the 1h/4h dataset range (D-23).
+    htf_start_ms = depth_of("1h")
+    funding_result: FundingHistoryResult | None = None
+    if config.funding:
+        rows_per_symbol: dict[str, int] = {}
+        pages = gaps = 0
+        truncated: list[str] = []
+        for symbol in symbols:
+            own = [w for w in final_windows if w.symbol == symbol and w.has_window]
+            if not own or sources.get(("trade", symbol)) == SOURCE_UNAVAILABLE:
+                continue
+            caps = [w.end_ms for w in own if w.terminal and w.end_ms is not None]
+            funding_end_ms = min([run_end_ms, *caps])
+            if funding_end_ms <= htf_start_ms:
+                continue
+            # The walk only calls `funding_rate`; the real adapter has the full surface.
+            outcome = await backfill_funding_history(
+                cast(AdapterLike, adapter),
+                session,
+                symbols=[symbol],
+                start_ms=htf_start_ms,
+                end_ms=funding_end_ms,
+                raw_root=config.raw_root,
+                observed_utc=now,
+            )
+            rows_per_symbol.update(outcome.rows_per_symbol)
+            pages += outcome.pages
+            gaps += outcome.gaps_recorded
+            truncated.extend(outcome.truncated_symbols)
+            emit(
+                f"backfill: funding {symbol} ticks={outcome.rows_per_symbol.get(symbol, 0)} "
+                f"pages={outcome.pages} gaps={outcome.gaps_recorded}"
+            )
+        funding_result = FundingHistoryResult(
+            rows_per_symbol=rows_per_symbol,
+            pages=pages,
+            gaps_recorded=gaps,
+            truncated_symbols=tuple(truncated),
+        )
+
+    # 6. The data-sufficiency report (D-05): what depth exists, and why any is short.
     sufficiency = build_sufficiency_report(
         config.raw_root,
-        windows,
+        final_windows,
         run_date=run_date,
         depth_months=depth,
         dataset_start=datetime.fromtimestamp(htf_start_ms / 1000, tz=UTC).date(),
         dataset_end=run_date,
-        sources={},
+        sources=sources,
     )
     for line in render_report_table(sufficiency).splitlines():
         emit(line)
     if config.report_out is not None:
         write_report_json(sufficiency, config.report_out)
         emit(f"sufficiency: report written to {config.report_out.as_posix()}")
-    return replace(report, sufficiency=sufficiency)
+    return replace(
+        report,
+        windows=final_windows,
+        sufficiency=sufficiency,
+        sources=sources,
+        funding=funding_result,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -644,6 +1017,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--funding",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Backfill funding history over the 1h/4h dataset range for every universe "
+            "symbol (default: on; --no-funding skips it)."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Read exchangeInfo and print every window; write and fetch nothing.",
@@ -678,6 +1060,7 @@ def _build_config(args: argparse.Namespace) -> BackfillRunConfig:
         pace_seconds=float(args.pace_seconds),
         dry_run=bool(args.dry_run),
         report_out=Path(args.report_out) if args.report_out is not None else None,
+        funding=bool(args.funding),
     )
 
 

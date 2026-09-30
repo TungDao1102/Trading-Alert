@@ -1262,7 +1262,9 @@ async def test_archive_only_symbol_capped_at_last_archive_day(
     assert row.expected_end_utc == "2026-08-05T12:00:00Z"  # the last archived bar
     assert row.missing_bars == 0
     gone = [w for w in report.windows if w.symbol == "GONEUSDT"]
-    assert gone and gone[0].terminal is True and gone[0].end_ms == _ms(2026, 8, 6)
+    # The window was capped at the end of the last archive day, then trimmed to
+    # the last archived bar (the day's tail after a delivery holds no bars).
+    assert gone and gone[0].terminal is True and gone[0].end_ms == _ms(2026, 8, 5, 12)
 
 
 def test_unavailable_symbol_exits_3(
