@@ -1,6 +1,0 @@
-{
-  "trades": [],
-  "trade_count": 1,
-  "run_type": "BASELINE_SIMPLE_TREND",
-  "notes": "Phase 6 plan 06-02 simple-trend baseline fixture (RED phase). Looser minimum_rr + simpler trend filter; single-direction LONG trade list."
-}

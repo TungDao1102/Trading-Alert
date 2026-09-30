@@ -343,6 +343,9 @@ OPEN_POSITIONS: list[dict] = []
 DAILY_LOSS_QUOTE = "0"
 NOW_UTC = _fmt(BASE_OPEN + timedelta(hours=250))
 PARAMETER_SET_ID = "baseline-v5"
+# Degenerated baseline sets (Phase 12 cost identity, same strategy version).
+BASELINE_NO_TRADE_SET_ID = "baseline-no-trade-v3"
+BASELINE_SIMPLE_TREND_SET_ID = "baseline-simple-trend-v3"
 STRATEGY_ID = "trend-pullback"
 STRATEGY_VERSION = "v4.0.0"
 
@@ -353,12 +356,13 @@ def _build_input(
     context_bars: list[dict],
     intrabar_key: str,
     intrabar_value: list[dict] | None,
+    parameter_set_id: str = PARAMETER_SET_ID,
 ) -> dict:
     """Build the canonical input.json shape for Phase 6 cases."""
     return {
         "strategy_id": STRATEGY_ID,
         "strategy_version": STRATEGY_VERSION,
-        "parameter_set_id": PARAMETER_SET_ID,
+        "parameter_set_id": parameter_set_id,
         "strategy_bars": strategy_bars,
         "context_bars": context_bars,
         "intrabar_1m_map": {intrabar_key: intrabar_value},
@@ -391,6 +395,33 @@ def write_intrabar_both_touched() -> None:
     path = FIXTURE_ROOT / "intrabar_both_touched" / "input.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _write_baseline(case_name: str, parameter_set_id: str) -> None:
+    """Baseline fixture: the LONG both-touched payload on a degenerated set."""
+    bars = _make_1h_candles_long_setup()
+    context = _make_4h_context_bars_long()
+    key = SYMBOL + "|" + _trigger_bar_close_key()
+    payload = _build_input(
+        strategy_bars=bars,
+        context_bars=context,
+        intrabar_key=key,
+        intrabar_value=_make_1m_intrabar_long_both_touched(),
+        parameter_set_id=parameter_set_id,
+    )
+    path = FIXTURE_ROOT / "baselines" / case_name / "input.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def write_baseline_no_trade() -> None:
+    """No-trade baseline: minimum_rr=100 makes the planner reject (RR_TOO_LOW)."""
+    _write_baseline("no_trade", BASELINE_NO_TRADE_SET_ID)
+
+
+def write_baseline_simple_trend() -> None:
+    """Simple-trend baseline: looser minimum_rr, wider zone; yields a real plan."""
+    _write_baseline("simple_trend", BASELINE_SIMPLE_TREND_SET_ID)
 
 
 def write_intrabar_both_touched_short() -> None:
@@ -571,6 +602,8 @@ def main() -> None:
     write_limit_partial_fill()
     write_limit_expiry()
     write_invalidation_cancels_entry()
+    write_baseline_no_trade()
+    write_baseline_simple_trend()
     print("Phase 6 fixtures written.")
 
 

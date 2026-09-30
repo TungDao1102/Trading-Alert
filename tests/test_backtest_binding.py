@@ -47,6 +47,20 @@ ships these refusal cases as the expansion task.
 # Task 2). Baseline runner paths (baseline_no_trade, baseline_simple_trend)
 # call simulator_run directly, not assemble(), so the gate never fires
 # on those paths.
+#
+# Phase 12 update (D048): the list above is the Phase 7.1 audit verdict and
+# stays as history. Phase 12 (plan 12-04) regenerated the seven simulator
+# fixtures (intrabar_both_touched, intrabar_both_touched_short,
+# intrabar_missing_fallback, invalidation_cancels_entry, limit_expiry,
+# limit_partial_fill, limit_touch_no_fill) and the two baselines from
+# scripts/gen_phase6_fixtures.py onto the Phase 12 identity: baseline-v5 and
+# baseline-no-trade-v3 / baseline-simple-trend-v3, strategy v4.0.0, the 8-key
+# cost dict, and a realistic candle geometry (the two stale baseline
+# expected.json files had no consumer and were removed). They now bind their
+# registry sets directly, except limit_touch_no_fill and limit_partial_fill,
+# whose partial_fill_fraction is deliberately 0 / 0.5. The
+# registry_identity fixture is unchanged and stays grandfathered, and the
+# phase-7.1 binding fixtures are unaffected. No test in this file changed.
 """
 
 from __future__ import annotations
