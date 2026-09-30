@@ -36,7 +36,7 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 ### Risk
 
 - [ ] **RISK-01**: System sizes positions from equity × risk-rate ÷ SL-distance including modeled costs, floors quantity to stepSize, rejects below the utilization threshold or minimums, and uses identical logic in backtest/paper/live
-- [ ] **RISK-02**: System enforces portfolio limits (max open positions, aggregate risk, correlated-cluster cap, DAILY_STOP states) and fails closed on uncertain account/risk state
+- [x] **RISK-02**: System enforces portfolio limits (max open positions, aggregate risk, correlated-cluster cap, DAILY_STOP states) and fails closed on uncertain account/risk state
 - [ ] **RISK-03**: A live protective stop is never loosened or removed while its position is open; any stop change is explicit, logged and permitted by the strategy and execution contract; automatic re-placement restores the original plan stop-loss, never a wider one
 - [ ] **RISK-04**: The system never increases risk because of previous losses or an unmet target and never adds to a losing position (no averaging down)
 
@@ -61,7 +61,7 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 ### Execution & Safety
 
 - [ ] **EXEC-01**: Execution manager places LIMIT-zone entries and Algo-Order protective exits (re-verified against current Binance docs), supports both position modes and partial-fill protective sizing
-- [ ] **EXEC-02**: Reconciliation loop compares local state against open normal orders, open algo orders, and positions, sweeps orphan protective orders, and forces SAFE_MODE on divergence
+- [x] **EXEC-02**: Reconciliation loop compares local state against open normal orders, open algo orders, and positions, sweeps orphan protective orders, and forces SAFE_MODE on divergence
 - [ ] **EXEC-03**: Deterministic client/algo order identifiers prevent duplicate entry orders across retries, restarts, and replayed events
 - [ ] **EXEC-04**: The exact exchange constraint snapshot used for sizing, including MARKET_LOT_SIZE and PERCENT_PRICE filters, working type, margin type, leverage and equity, is persisted per trade plan and revalidated when stale
 - [ ] **EXEC-05**: The Binance user-data stream for order, algo-order, account and position events drives fills and state, with REST as fallback
@@ -128,7 +128,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STRAT-02 | Phase 4 | Pending |
 | STRAT-03 | Phase 4 | Pending |
 | RISK-01 | Phase 5 | Pending |
-| RISK-02 | Phase 5 | Pending |
+| RISK-02 | Phase 5 | Complete |
 | BKTS-01 | Phase 6 | Pending |
 | BKTS-02 | Phase 6 | Complete |
 | BKTS-03 | Phase 6 | Pending |
@@ -138,7 +138,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | APRV-01 | Phase 8 | Complete |
 | APRV-02 | Phase 8 | Complete |
 | EXEC-01 | Phase 9 | Pending |
-| EXEC-02 | Phase 8 | Pending |
+| EXEC-02 | Phase 8 | Complete |
 | EXEC-03 | Phase 8 | Pending |
 | JRN-01 | Phase 10 | Complete |
 | OPS-01 | Phase 8 | Complete |
