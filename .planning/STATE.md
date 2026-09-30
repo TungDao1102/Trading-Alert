@@ -4,7 +4,7 @@ milestone: v0.3
 current_phase: 2
 current_phase_name: Data Foundation
 status: planning
-stopped_at: Phase 12 complete, ready to plan Phase 2
+stopped_at: Phase 12 complete, ready to discuss Phase 13
 last_updated: "2026-09-30T10:46:12.439Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 12 complete, transitioned to Phase 2
@@ -27,7 +27,7 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 11 — decision-alignment
+**Current focus:** Phase 13 — research-data-foundation-fixes-vps-collector-deployment
 
 ## Current Position
 
@@ -322,5 +322,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-09-30T10:31:25.077Z
-Stopped at: Phase 12 complete, ready to plan Phase 2
+Stopped at: Phase 12 complete, ready to discuss Phase 13
 Resume file: None
