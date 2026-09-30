@@ -14,7 +14,7 @@ import pytest
 from scripts.decision_alignment import authority
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BASELINE_COMMIT = "679825c"
+BASELINE_COMMIT = "679825cf3bf75ccf0cccbe10cda7b9d23d9c58b2"
 
 STACK = ".planning/research/STACK.md"
 PROJECT = ".planning/PROJECT.md"

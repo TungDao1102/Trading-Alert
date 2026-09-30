@@ -14,7 +14,7 @@ import pytest
 from scripts.decision_alignment import ops_risk
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BASELINE_COMMIT = "679825c"
+BASELINE_COMMIT = "679825cf3bf75ccf0cccbe10cda7b9d23d9c58b2"
 
 SEC_OPS = "docs/operations/SECURITY_AND_OPERATIONS.md"
 RUNBOOK = "docs/operations/RUNBOOK.md"

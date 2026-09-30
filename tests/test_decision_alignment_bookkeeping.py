@@ -15,7 +15,7 @@ from scripts.decision_alignment import bookkeeping as bk
 from src.domain.enums import ApprovalResult, RejectionReason
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BASELINE_COMMIT = "679825c"
+BASELINE_COMMIT = "679825cf3bf75ccf0cccbe10cda7b9d23d9c58b2"
 
 GLOSSARY = "docs/GLOSSARY.md"
 
