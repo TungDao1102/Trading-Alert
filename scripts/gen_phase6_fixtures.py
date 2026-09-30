@@ -3,10 +3,19 @@
 Per D-01/D-02: each fixture drives the simulator end-to-end through
 strategy.evaluate → planner.plan → evaluate_risk. The candles are
 designed so:
-  - trend-pullback (Family A) baseline-v2 parameters produce a known setup
+  - trend-pullback (Family A) baseline-v5 parameters produce a known setup
   - 4H context confirms the regime
   - The last 1H bar is the trigger bar (touches the zone)
   - 1m intrabar data resolves the exit
+
+Phase 12 (F-002, F-608): the 1H bars carry a realistic half-range
+(BAR_HALF_RANGE = 0.80) so the ATR-derived stop sits about 1.1 percent from
+entry instead of 0.06 to 0.26 percent. That clears the minimum-stop (0.3
+percent) and cost-to-risk (0.15) guards with margin. The plan geometry is
+DERIVED by the planner from the bars; the numbers quoted in the docstrings
+below are illustrations from the planning-time prototype, and
+tests/test_phase6_fixture_geometry.py recomputes and checks them with
+independent arithmetic.
 
 This script is committed for reproducibility — re-running it regenerates
 byte-identical fixtures.
@@ -21,6 +30,11 @@ from pathlib import Path
 FIXTURE_ROOT = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "phase6"
 SYMBOL = "BTCUSDT"
 
+# 1H bar half-range (high = close + half, low = close - half) for bars
+# 0..248. Larger half-range -> larger ATR -> wider stop -> lower
+# cost-to-risk. Never tune a guard or registry value instead (Phase 12).
+BAR_HALF_RANGE = Decimal("0.80")
+
 # Base epoch for fixture candles (deterministic, stable across runs).
 BASE_OPEN = datetime(2026, 9, 1, 0, 0, 0, tzinfo=UTC)
 
@@ -33,7 +47,8 @@ def _fmt(dt: datetime) -> str:
 def _make_1h_candles_long_setup() -> list[dict]:
     """250 1H bars trending up; the last bar dips to touch the support zone.
 
-    Bars 0..248: smooth uptrend from 100.00 to 124.80 (Δ 0.10/bar).
+    Bars 0..248: smooth uptrend from 100.00 to 124.80 (Δ 0.10/bar), each bar
+    spanning close +/- BAR_HALF_RANGE.
     Bar 249 (trigger): bullish bar that dips to touch the support zone
     and closes above its open (close >= open) so the invalidation gate
     does not fire.
@@ -51,8 +66,8 @@ def _make_1h_candles_long_setup() -> list[dict]:
                     "open_time_utc": _fmt(open_t),
                     "close_time_utc": _fmt(close_t),
                     "open": f"{price:.2f}",
-                    "high": f"{price + Decimal('0.05'):.2f}",
-                    "low": f"{price - Decimal('0.05'):.2f}",
+                    "high": f"{price + BAR_HALF_RANGE:.2f}",
+                    "low": f"{price - BAR_HALF_RANGE:.2f}",
                     "close": f"{price:.2f}",
                     "volume": "1.0",
                 }
@@ -77,7 +92,8 @@ def _make_1h_candles_long_setup() -> list[dict]:
 def _make_1h_candles_short_setup() -> list[dict]:
     """250 1H bars trending down; the last bar spikes to touch the resistance zone.
 
-    Bars 0..248: smooth downtrend from 150.00 to 125.20 (Δ -0.10/bar).
+    Bars 0..248: smooth downtrend from 150.00 to 125.20 (Δ -0.10/bar), each
+    bar spanning close +/- BAR_HALF_RANGE.
     Bar 249 (trigger): bearish bar that spikes to touch the resistance
     zone and closes below its open (close <= open) so the invalidation
     gate does not fire.
@@ -95,8 +111,8 @@ def _make_1h_candles_short_setup() -> list[dict]:
                     "open_time_utc": _fmt(open_t),
                     "close_time_utc": _fmt(close_t),
                     "open": f"{price:.2f}",
-                    "high": f"{price + Decimal('0.05'):.2f}",
-                    "low": f"{price - Decimal('0.05'):.2f}",
+                    "high": f"{price + BAR_HALF_RANGE:.2f}",
+                    "low": f"{price - BAR_HALF_RANGE:.2f}",
                     "close": f"{price:.2f}",
                     "volume": "1.0",
                 }
@@ -212,9 +228,10 @@ def _make_1m_intrabar_long_both_touched() -> list[dict]:
     """60 1m candles for the LONG trigger bar; first candle hits SL before TP.
 
     Trigger bar range: low=121.50, high=125.00.
-    Plan geometry (computed by planner):
-      entry_min ≈ 121.20, entry_max ≈ 121.80, SL ≈ 121.40, TP1 ≈ 125.00.
-    1m candle 1: low=121.40 (touches SL), high=125.00 (touches TP).
+    Plan geometry is computed by the planner from BAR_HALF_RANGE bars; the
+    planning-time prototype gave entry zone 120.4586 to 122.5414, SL about
+    121.1529, TP1 about 125.60 (stop about 1.13 percent of the zone top).
+    1m candle 1: low=121.10 (below the SL), high=125.70 (above TP1).
     Per D-01 SL-first ordering: SL wins.
     """
     rows: list[dict] = []
@@ -231,8 +248,8 @@ def _make_1m_intrabar_long_both_touched() -> list[dict]:
                     "open_time_utc": _fmt(open_t),
                     "close_time_utc": _fmt(close_t),
                     "open": "121.80",
-                    "high": "125.00",
-                    "low": "121.40",
+                    "high": "125.70",
+                    "low": "121.10",
                     "close": "121.50",
                     "volume": "0.5",
                 }
@@ -259,9 +276,10 @@ def _make_1m_intrabar_short_both_touched() -> list[dict]:
     """60 1m candles for the SHORT trigger bar; first candle hits SL before TP.
 
     Trigger bar range: low=125.00, high=128.50.
-    Plan geometry (computed by planner):
-      entry_min ≈ 128.20, entry_max ≈ 128.80, SL ≈ 128.60, TP1 ≈ 125.00.
-    1m candle 1: low=125.00 (touches TP), high=128.60 (touches SL).
+    Plan geometry is computed by the planner from BAR_HALF_RANGE bars; the
+    planning-time prototype gave entry zone 127.459 to 129.541, SL about
+    128.847, TP1 about 124.40 (stop about 1.09 percent from the zone bottom).
+    1m candle 1: low=124.30 (below TP1), high=128.90 (above the SL).
     Per D-01 SL-first ordering: SL wins.
     """
     rows: list[dict] = []
@@ -277,8 +295,8 @@ def _make_1m_intrabar_short_both_touched() -> list[dict]:
                     "open_time_utc": _fmt(open_t),
                     "close_time_utc": _fmt(close_t),
                     "open": "128.20",
-                    "high": "128.60",
-                    "low": "125.00",
+                    "high": "128.90",
+                    "low": "124.30",
                     "close": "128.10",
                     "volume": "0.5",
                 }
@@ -300,7 +318,7 @@ def _make_1m_intrabar_short_both_touched() -> list[dict]:
     return rows
 
 
-# Shared base inputs for trend-pullback baseline-v2.
+# Shared base inputs for trend-pullback baseline-v5 (Phase 12 cost identity).
 ACCOUNT_STATE = {"equity": "10000.00", "risk_rate": "0.005"}
 CONSTRAINT_SNAPSHOT = {
     "symbol": SYMBOL,
@@ -311,10 +329,11 @@ CONSTRAINT_SNAPSHOT = {
     "metadata_observed_at_utc": _fmt(BASE_OPEN + timedelta(hours=249)),
 }
 COST_MODEL = {
-    "fee_rate_entry": "0.0002",
+    "fee_rate_entry": "0.0005",
     "fee_rate_exit": "0.0005",
     "funding_treatment": "ADDITIVE",
     "expected_slippage": "0.0001",
+    "exit_slippage_rate": "0.0003",
     "slippage_model": "FIXED_BPS",
     "spread_fill_assumptions": "FULL_FILL",
     "partial_fill_fraction": "1.0",
@@ -323,9 +342,9 @@ TTL_SECONDS = "3600"
 OPEN_POSITIONS: list[dict] = []
 DAILY_LOSS_QUOTE = "0"
 NOW_UTC = _fmt(BASE_OPEN + timedelta(hours=250))
-PARAMETER_SET_ID = "baseline-v2"
+PARAMETER_SET_ID = "baseline-v5"
 STRATEGY_ID = "trend-pullback"
-STRATEGY_VERSION = "v2.0.0"
+STRATEGY_VERSION = "v4.0.0"
 
 
 def _build_input(
