@@ -657,14 +657,12 @@ def test_cr03b_reproduced_trades_carry_typed_decimal_datetime_fields() -> None:
     """CR-03b: reproduced TradeRecords hold typed Decimal/datetime fields."""
     from src.backtest.experiment import assemble, reproduce
 
-    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
-    # Per Phase 7.1 D-05: rebind to baseline-v3 (7-key set) and fix the
-    # partial_fill_fraction spelling so the gate passes. The fixture's
-    # candles/constraint_snapshot are still valid for the v3 set.
-    case = dict(case)
-    case["parameter_set_id"] = "baseline-v3"
+    # Phase 12 (D048): the regenerated baseline fixture names its own v3
+    # baseline set and carries the matching 8-key cost dict, so assemble()
+    # binds it directly - no rebinding to baseline-v3 and no respelling.
+    case = dict(_load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend"))
+    assert case["parameter_set_id"] == "baseline-simple-trend-v3"
     cost_model_dict: dict = dict(case["cost_model"])
-    cost_model_dict["partial_fill_fraction"] = "0.5"
     record = assemble(
         parameter_set_id=case["parameter_set_id"],
         strategy_id=case["strategy_id"],
@@ -848,7 +846,12 @@ def test_cr11_baseline_tomls_carry_detector_and_cost_keys() -> None:
             canonical = ast.literal_eval(node.value)
     assert canonical is not None, "COST_MODEL canonical source must exist"
 
-    for parameter_set_id in ("baseline-no-trade-v1", "baseline-simple-trend-v1"):
+    for parameter_set_id in (
+        "baseline-no-trade-v1",
+        "baseline-simple-trend-v1",
+        "baseline-no-trade-v3",
+        "baseline-simple-trend-v3",
+    ):
         parameter_set = load_parameter_set("trend-pullback", parameter_set_id)
         assert parameter_set.params["atr_period"] == 14, (
             f"{parameter_set_id}: atr_period must match sibling baseline-v2 sets"
@@ -871,3 +874,18 @@ def test_cr11_baseline_tomls_carry_detector_and_cost_keys() -> None:
             f"{parameter_set.params['partial_fill_fraction']!r} != "
             f"COST_MODEL canonical {canonical['partial_fill_fraction']!r}"
         )
+        # Phase 12: the v3 baselines carry the rate keys and the stop-exit
+        # slippage rate; compare by value against the generator literal.
+        if parameter_set_id.endswith("-v3"):
+            for key in (
+                "fee_rate_entry",
+                "fee_rate_exit",
+                "expected_slippage",
+                "exit_slippage_rate",
+            ):
+                assert Decimal(str(parameter_set.params[key])) == Decimal(
+                    str(canonical[key])
+                ), (
+                    f"{parameter_set_id}: {key}={parameter_set.params[key]!r} != "
+                    f"COST_MODEL canonical {canonical[key]!r}"
+                )

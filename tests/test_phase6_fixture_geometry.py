@@ -163,6 +163,51 @@ def test_fixture_clears_both_cost_guards(name: str) -> None:
     _assert_guard_clearance(_load_case(name))
 
 
+BASELINE_SETS = {
+    "no_trade": "baseline-no-trade-v3",
+    "simple_trend": "baseline-simple-trend-v3",
+}
+
+
+@pytest.mark.parametrize("name", sorted(BASELINE_SETS))
+def test_baseline_fixture_carries_phase12_identity(name: str) -> None:
+    case = _load_case("baselines", name)
+    assert case["parameter_set_id"] == BASELINE_SETS[name]
+    assert case["strategy_version"] == "v4.0.0"
+    assert case["cost_model"] == _load_case("intrabar_both_touched")["cost_model"]
+    assert set(case["cost_model"]) == EXPECTED_COST_KEYS
+
+
+def test_simple_trend_baseline_clears_both_cost_guards() -> None:
+    stop_rate, _ = _assert_guard_clearance(_load_case("baselines", "simple_trend"))
+    # Planning-time prototype: about 1.83 percent.
+    assert stop_rate >= Decimal("0.01")
+
+
+def test_no_trade_baseline_is_rejected_by_the_planner_rr_gate() -> None:
+    _, result = _plan_for(_load_case("baselines", "no_trade"))
+    assert result.is_no_trade
+    assert result.reason_code == "RR_TOO_LOW"
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [(n,) for n in SIMULATOR_FIXTURES if n not in EXPECTED_PARTIAL_FILL]
+    + [("baselines", n) for n in sorted(BASELINE_SETS)],
+    ids=lambda p: "/".join(p),
+)
+def test_fixture_cost_dict_binds_its_registry_set(parts: tuple[str, ...]) -> None:
+    """The fixture's own cost dict binds the registry set it names (no rebinding)."""
+    from src.backtest.binding import assert_cost_model_binds_registry
+    from src.backtest.costs import build_cost_model
+
+    case = _load_case(*parts)
+    parameter_set = load_parameter_set(case["strategy_id"], case["parameter_set_id"])
+    # The two partial-fill fixtures deliberately differ from the registry
+    # (partial_fill_fraction 0 / 0.5) and are excluded from this parametrization.
+    assert_cost_model_binds_registry(parameter_set, build_cost_model(dict(case["cost_model"])))
+
+
 def test_geometry_guard_would_reject_old_tight_stops() -> None:
     """The arithmetic must fail for the pre-Phase-12 geometry (0.06 percent stop)."""
     price = Decimal("121.5")
