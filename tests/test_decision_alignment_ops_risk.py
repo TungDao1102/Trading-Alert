@@ -278,6 +278,27 @@ def test_data_model_field_outside_section_2_4_does_not_count() -> None:
     assert "equity_used" in detail
 
 
+def test_data_model_field_named_only_in_prose_does_not_count() -> None:
+    text = _read(DATA_MODEL)
+    start = text.index("### 2.4")
+    end = text.index("### 2.5")
+    section = text[start:end].replace("equity_used\n", "equity\n", 1)
+    section += "\nequity_used is not persisted in this version.\n"
+    _, ok, detail = ops_risk.check_data_model_plan_fields(text[:start] + section + text[end:])
+    assert ok is False
+    assert "equity_used" in detail
+
+
+def test_configuration_phrase_outside_section_10_does_not_count() -> None:
+    text = _read(CONFIGURATION)
+    start = text.index("## 10.")
+    outside = "fee_rate_entry appears only here, outside section 10.\n\n"
+    text = text[:start] + outside + text[start:].replace("fee_rate_entry", "fee_entry")
+    _, ok, detail = ops_risk.check_configuration(text)
+    assert ok is False
+    assert "fee_rate_entry" in detail
+
+
 def test_configuration_missing_universe_statement_fails() -> None:
     text = _read(CONFIGURATION).replace("not a parameter set", "a parameter set")
     _, ok, detail = ops_risk.check_configuration(text)

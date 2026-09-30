@@ -336,15 +336,19 @@ def _subsection(text: str, heading_prefix: str) -> str:
 
 def check_data_model_plan_fields(text: str) -> Gate:
     """DATA_MODEL section 2.4: persisted constraint snapshot and execution fields."""
-    block = _subsection(text, "2.4")
+    # Only the field list counts: the first fenced ``text`` block of section 2.4, so prose
+    # such as "constraint_snapshot_json is not persisted" cannot satisfy the gate.
+    body = _subsection(text, "2.4")
+    match = re.search(r"```text\n(.*?)```", body, flags=re.DOTALL)
+    block = match.group(1) if match else ""
     fields = {ln.split()[0] for ln in _lines(block) if ln.split()[0].isidentifier()}
     missing = [f for f in DATA_MODEL_PLAN_FIELDS if f not in fields]
     return _verdict("OR-09", missing, [])
 
 
 def check_configuration(text: str) -> Gate:
-    """CONFIGURATION: registry key guidance and section 10 cost assumptions."""
-    return _verdict("OR-10a", _missing(text, CONFIGURATION_PHRASES), [])
+    """CONFIGURATION section 10: registry key guidance and cost assumptions."""
+    return _verdict("OR-10a", _missing(_section(text, 10), CONFIGURATION_PHRASES), [])
 
 
 def check_alert_example(text: str) -> Gate:
