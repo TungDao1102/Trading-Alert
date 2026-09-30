@@ -5,9 +5,9 @@ current_phase: 10
 current_phase_name: Journal Depth + Kill-Gate Operations
 status: verifying
 stopped_at: Completed 10-12-PLAN.md
-last_updated: "2026-09-30T02:13:42.663Z"
+last_updated: "2026-09-30T02:31:50.224Z"
 last_activity: 2026-09-30
-state_head: 7a0567950c6fba7d4e21d639145ea4813dfb761c
+state_head: 2660fb67d38cb2b5f62dc785ea51be0800d9ce3c
 progress:
   total_phases: 28
   completed_phases: 2
@@ -33,7 +33,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 Phase: 10 (Journal Depth + Kill-Gate Operations) — EXECUTING
 Plan: 12 of 12
 Status: Phase complete — ready for verification
-Last activity: 2026-09-30 - Completed quick task 260930-cgi: D040 safe release path + D041 two-step Telegram confirm; Phase 25 demo test campaign
+Last activity: 2026-09-30 - Completed quick task 260930-d0b: D042 single-VPS deployment; VPS hardening pulled into Phase 13
 
 Progress: [██████████] 100%
 
@@ -258,6 +258,7 @@ Recent decisions affecting current work:
 | 260930-bku | Record user-approved audit decisions D031-D039 in docs/DECISIONS.md | 2026-09-30 | c63d507 | [260930-bku-record-user-approved-audit-decisions-d03](./quick/260930-bku-record-user-approved-audit-decisions-d03/) |
 | 260930-bvi | Import deep-audit report into .planning/audits and re-plan roadmap phases 11-26 (stay in v0.3) | 2026-09-30 | d190855 | [260930-bvi-import-deep-audit-report-and-re-plan-roa](./quick/260930-bvi-import-deep-audit-report-and-re-plan-roa/) |
 | 260930-cgi | Add D040 safe release path (SHADOW-DEMO-CANARY-LIVE) and D041 two-step Telegram confirm; insert Phase 25 demo test campaign | 2026-09-30 | 7a05679 | [260930-cgi-add-safe-release-path-and-two-step-teleg](./quick/260930-cgi-add-safe-release-path-and-two-step-teleg/) |
+| 260930-d0b | Record D042 single-VPS deployment; pull VPS hardening + collector deployment into Phase 13 | 2026-09-30 | 2660fb6 | [260930-d0b-record-single-vps-deployment-decision-d0](./quick/260930-d0b-record-single-vps-deployment-decision-d0/) |
 
 ### Roadmap Evolution
 
