@@ -2,9 +2,13 @@
 
 Fail-closed posture per DATA_PIPELINE.md §6 and ENGINEERING_PRINCIPLES.md §9:
   - Structural corruption (duplicate timestamps, impossible OHLC, timestamp
-    regressions) → reject the batch, NO overwrite.
+    regressions, negative values, more than 8 fractional digits or a
+    non-finite Decimal) → reject the batch, NO overwrite.
   - Continuity gaps (missing sequence) → publish the batch but record a
     warning; downstream coverage tracking will flag it.
+  - Zero-trade bars (volume 0, trade_count 0) are VALID: an illiquid minute is
+    real data, counted as telemetry (`zero_trade_bars`), never rejected
+    (D-15). A missing bar is still a gap, never a zero-trade bar.
 
 Inputs are plain `Kline` dataclasses projected to a Polars frame so the
 pure-function surface is testable without network or DB dependencies
@@ -15,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
 import polars as pl
 from src.adapters.binance_usdm import Kline
@@ -32,6 +37,33 @@ INTERVAL_MS: dict[str, int] = {
     "1d": 24 * 60 * 60_000,
 }
 
+# The Parquet schema stores prices/volumes as Decimal(scale=8). Polars rounds
+# (or re-scales the column) when a value carries more fractional digits, which
+# would silently change hashed, immutable data — so it is a structural reject.
+MAX_FRACTION_DIGITS = 8
+
+
+def _is_bad_decimal(value: Decimal) -> bool:
+    """True for a non-finite Decimal or one with more than 8 fractional digits."""
+    if not value.is_finite():
+        return True
+    exponent = value.as_tuple().exponent
+    return isinstance(exponent, int) and exponent < -MAX_FRACTION_DIGITS
+
+
+def _has_bad_decimal(kline: Kline) -> bool:
+    return any(
+        _is_bad_decimal(v)
+        for v in (
+            kline.open,
+            kline.high,
+            kline.low,
+            kline.close,
+            kline.volume,
+            kline.quote_volume,
+        )
+    )
+
 
 @dataclass(frozen=True)
 class QualityVerdict:
@@ -39,7 +71,9 @@ class QualityVerdict:
 
     `structural_ok` is the gate: False ⇒ caller MUST NOT publish the batch
     (D-10 fail-closed). The other counters are telemetry for the
-    coverage layer to report.
+    coverage layer to report. `zero_trade_bars` is telemetry only (D-15);
+    `bad_decimals` counts rows with a non-finite value or more than 8
+    fractional digits and DOES fail the gate.
     """
 
     structural_ok: bool
@@ -50,6 +84,8 @@ class QualityVerdict:
     negative_values: int = 0
     bad_durations: int = 0
     mixed_keys: int = 0
+    zero_trade_bars: int = 0
+    bad_decimals: int = 0
 
 
 def klines_to_frame(klines: list[Kline]) -> pl.DataFrame:
@@ -107,6 +143,22 @@ def check_batch(klines: list[Kline], interval: str) -> QualityVerdict:
         raise ValueError(
             f"unsupported interval {interval!r}; expected one of {sorted(INTERVAL_MS)}"
         )
+    # Rows with a non-finite Decimal or excess precision are a structural
+    # reject. They are counted here and excluded from every other predicate:
+    # a NaN cannot be compared (raises) or projected to a Polars Decimal
+    # column (panics), and excess precision would be silently rounded.
+    bad_decimals = sum(1 for k in klines if _has_bad_decimal(k))
+    if bad_decimals:
+        klines = [k for k in klines if not _has_bad_decimal(k)]
+        if not klines:
+            return QualityVerdict(
+                structural_ok=False,
+                duplicates=0,
+                ohlc_violations=0,
+                timestamp_regressions=0,
+                gap_count=0,
+                bad_decimals=bad_decimals,
+            )
     df = klines_to_frame(klines)
     if df.is_empty():
         return QualityVerdict(
@@ -169,8 +221,9 @@ def check_batch(klines: list[Kline], interval: str) -> QualityVerdict:
 
     # Exchange-data structural rejects (checked on the raw rows so
     # Decimal comparisons stay in Python, never in frame SQL):
-    # negative prices/volumes, non-positive trade counts, inverted
-    # close-times, and rows from more than one symbol/interval.
+    # negative prices/volumes/trade counts, inverted close-times, and rows
+    # from more than one symbol/interval. A zero trade count is NOT negative:
+    # zero-trade bars are valid data (D-15) and only counted as telemetry.
     negative_values = sum(
         1
         for k in klines
@@ -180,8 +233,9 @@ def check_batch(klines: list[Kline], interval: str) -> QualityVerdict:
         or k.close < 0
         or k.volume < 0
         or k.quote_volume < 0
-        or k.trade_count <= 0
+        or k.trade_count < 0
     )
+    zero_trade_bars = sum(1 for k in klines if k.trade_count == 0)
     bad_durations = sum(
         1 for k in klines if k.close_time_utc <= k.open_time_utc
     )
@@ -197,6 +251,7 @@ def check_batch(klines: list[Kline], interval: str) -> QualityVerdict:
         and negative_values == 0
         and bad_durations == 0
         and mixed_keys == 0
+        and bad_decimals == 0
     )
     return QualityVerdict(
         structural_ok=structural_ok,
@@ -207,4 +262,6 @@ def check_batch(klines: list[Kline], interval: str) -> QualityVerdict:
         negative_values=negative_values,
         bad_durations=bad_durations,
         mixed_keys=mixed_keys,
+        zero_trade_bars=zero_trade_bars,
+        bad_decimals=bad_decimals,
     )
