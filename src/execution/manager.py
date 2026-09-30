@@ -37,6 +37,7 @@ from src.execution.placement import (
     size_protectives_to_filled_qty,
     sl_trigger_rounding,
 )
+from src.risk.cost_rates import FEE_SOURCE_ACCOUNT_MAX, CostRates
 from src.risk.gating import evaluate_risk
 from src.risk.types import ConstraintSnapshot
 
@@ -297,10 +298,13 @@ async def execute_approved_plan(
       1. Approval binding (chat→expiry→hash→version→token).
       2. Enablement guard (LIVE_ORDERS_DISABLED → DISABLED).
       3. SAFE_MODE guard (`guard_new_entries` → RECONCILIATION_REQUIRED).
-      4. Risk pipeline (evaluate_risk with the identical Phase-5 inputs).
-      5. Placement-time gates (headroom, stale, uncertain, portfolio),
+      4. Live cost-rate gate (D-11, D-12): `cost_rates.fee_source` must be
+         ACCOUNT_MAX, else NO_TRADE UNCERTAIN_ACCOUNT_STATE before any risk
+         or adapter work.
+      5. Risk pipeline (evaluate_risk with the identical Phase-5 inputs).
+      6. Placement-time gates (headroom, stale, uncertain, portfolio),
          evaluated on the risk verdict's own `sized` (WR-05).
-      6. Adapter placement (place_entry then place_algo_protective).
+      7. Adapter placement (place_entry then place_algo_protective).
 
     This function exists ONLY to place real orders, so every live-safety
     gate is REQUIRED (09-REVIEW CR-07): there is no `None` default that
@@ -416,7 +420,28 @@ async def execute_approved_plan(
             or RejectionReason.RECONCILIATION_REQUIRED.value,
         )
 
-    # Gate 4: risk pipeline (identical Phase-5 call).
+    # Gate 4a: live cost-rate gate. Live never sizes a real order with
+    # unverified account fees and never falls back to the parameter rate
+    # (D-11, D-12): a PARAMETER source is a NO_TRADE, not a downgrade.
+    # Backtest and paper call evaluate_risk directly with PARAMETER rates.
+    if "modeled_costs_per_unit" in risk_kwargs:
+        raise TypeError(
+            "execute_approved_plan: risk_kwargs['modeled_costs_per_unit'] was "
+            "removed; pass cost_rates from resolve_live_cost_rates"
+        )
+    cost_rates = risk_kwargs.get("cost_rates")
+    if not isinstance(cost_rates, CostRates):
+        raise TypeError(
+            "execute_approved_plan: risk_kwargs['cost_rates'] must be a CostRates "
+            f"from resolve_live_cost_rates, got {type(cost_rates).__name__}"
+        )
+    if cost_rates.fee_source != FEE_SOURCE_ACCOUNT_MAX:
+        return ExecutionOutcome(
+            is_no_trade=True,
+            reason_code=RejectionReason.UNCERTAIN_ACCOUNT_STATE.value,
+        )
+
+    # Gate 4b: risk pipeline (identical Phase-5 call).
     verdict = evaluate_risk(**risk_kwargs)
     if verdict.is_no_trade:
         return ExecutionOutcome(

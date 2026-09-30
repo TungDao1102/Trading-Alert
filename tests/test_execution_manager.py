@@ -1248,3 +1248,73 @@ async def test_mismatched_risk_clock_raises() -> None:
     with pytest.raises(ValueError, match="now_utc"):
         await _run_plan(adapter, risk_kwargs=risk_kwargs)
     assert adapter.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Phase 12 (D-11, D-12) — only account-sourced rates may size a real order.
+# --------------------------------------------------------------------------- #
+
+
+async def test_parameter_fee_source_is_no_trade_before_risk_and_adapter(
+    monkeypatch: Any,
+) -> None:
+    """D-11/D-12: parameter fees never size a live order. The rate gate
+    returns UNCERTAIN_ACCOUNT_STATE before `evaluate_risk` runs, with zero
+    adapter calls (T-12-23)."""
+    import src.execution.manager as manager
+    from src.risk.cost_rates import FEE_SOURCE_PARAMETER, CostRates
+
+    def _must_not_run(**_kwargs: Any) -> Any:
+        raise AssertionError("evaluate_risk must not run for a PARAMETER fee source")
+
+    monkeypatch.setattr(manager, "evaluate_risk", _must_not_run)
+
+    risk_kwargs = _build_risk_kwargs(_load_input())
+    account_rates = risk_kwargs["cost_rates"]
+    risk_kwargs["cost_rates"] = CostRates(
+        fee_rate_entry=account_rates.fee_rate_entry,
+        entry_slippage_rate=account_rates.entry_slippage_rate,
+        fee_rate_exit=account_rates.fee_rate_exit,
+        exit_slippage_rate=account_rates.exit_slippage_rate,
+        fee_source=FEE_SOURCE_PARAMETER,
+    )
+    adapter = FakeExecutionAdapter()
+
+    outcome = await _run_plan(adapter, risk_kwargs=risk_kwargs)
+
+    assert outcome.is_no_trade is True
+    assert outcome.reason_code == "UNCERTAIN_ACCOUNT_STATE"
+    assert adapter.calls == []
+
+
+async def test_missing_or_wrong_typed_cost_rates_raises_type_error() -> None:
+    """A missing `cost_rates` key or a non-`CostRates` value (a plain dict)
+    raises TypeError before any adapter call."""
+    import pytest
+
+    missing = _build_risk_kwargs(_load_input())
+    del missing["cost_rates"]
+    adapter = FakeExecutionAdapter()
+    with pytest.raises(TypeError, match="cost_rates"):
+        await _run_plan(adapter, risk_kwargs=missing)
+    assert adapter.calls == []
+
+    wrong_type = _build_risk_kwargs(_load_input())
+    wrong_type["cost_rates"] = dict(_load_input()["cost_rates"])
+    adapter = FakeExecutionAdapter()
+    with pytest.raises(TypeError, match="resolve_live_cost_rates"):
+        await _run_plan(adapter, risk_kwargs=wrong_type)
+    assert adapter.calls == []
+
+
+async def test_legacy_modeled_costs_per_unit_keyword_raises_type_error() -> None:
+    """The removed `modeled_costs_per_unit` keyword is rejected before any
+    adapter call, even beside valid account-sourced rates."""
+    import pytest
+
+    risk_kwargs = _build_risk_kwargs(_load_input())
+    risk_kwargs["modeled_costs_per_unit"] = Decimal("0.02")
+    adapter = FakeExecutionAdapter()
+    with pytest.raises(TypeError, match="modeled_costs_per_unit"):
+        await _run_plan(adapter, risk_kwargs=risk_kwargs)
+    assert adapter.calls == []
