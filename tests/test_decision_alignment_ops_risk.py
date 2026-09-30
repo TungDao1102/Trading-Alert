@@ -239,3 +239,74 @@ def test_hard_coded_liquidation_buffer_fails() -> None:
     _, ok, detail = ops_risk.check_margin(text)
     assert ok is False
     assert "forbidden" in detail
+
+
+# --------------------------------------------------------------------------- Task 3
+
+
+def test_or09_and_or10_pass_on_real_docs() -> None:
+    gates = {name: ok for name, ok, _ in ops_risk.run()}
+    assert gates["OR-09"] is True
+    assert gates["OR-10a"] is True
+    assert gates["OR-10b"] is True
+    assert len(gates) >= 10
+
+
+@pytest.mark.parametrize(
+    ("func", "rel"),
+    [
+        ("check_data_model_plan_fields", DATA_MODEL),
+        ("check_configuration", CONFIGURATION),
+        ("check_alert_example", ALERTS),
+    ],
+)
+def test_plan_docs_positive_and_pre_change_negative(func: str, rel: str) -> None:
+    check = getattr(ops_risk, func)
+    _, ok, detail = check(_read(rel))
+    assert ok, detail
+    _, old_ok, _ = check(_old(rel))
+    assert old_ok is False
+
+
+def test_data_model_field_outside_section_2_4_does_not_count() -> None:
+    text = _read(DATA_MODEL)
+    start = text.index("### 2.4")
+    end = text.index("### 2.5")
+    stripped = text[start:end].replace("equity_used", "equity")
+    _, ok, detail = ops_risk.check_data_model_plan_fields(text[:start] + stripped + text[end:])
+    assert ok is False
+    assert "equity_used" in detail
+
+
+def test_configuration_missing_universe_statement_fails() -> None:
+    text = _read(CONFIGURATION).replace("not a parameter set", "a parameter set")
+    _, ok, detail = ops_risk.check_configuration(text)
+    assert ok is False
+    assert "not a parameter set" in detail
+
+
+def test_configuration_missing_key_guidance_fails() -> None:
+    text = _read(CONFIGURATION).replace("CONTRACT_PRICE", "LAST")
+    _, ok, detail = ops_risk.check_configuration(text)
+    assert ok is False
+    assert "CONTRACT_PRICE" in detail
+
+
+def test_alert_example_old_values_fail() -> None:
+    text = _read(ALERTS) + "\nExpected R:R: 1.8 / 3.9\nValid until: 16:00 UTC\nTP1: 105200\n"
+    _, ok, detail = ops_risk.check_alert_example(text)
+    assert ok is False
+    assert "forbidden" in detail
+
+
+def test_alert_example_arithmetic_matches_planner_geometry() -> None:
+    from decimal import Decimal
+
+    entry_mid = (Decimal(103800) + Decimal(104050)) / 2
+    risk = entry_mid - Decimal(103250)
+    tp1_leg = Decimal(105275) - entry_mid
+    assert entry_mid == Decimal(103925)
+    assert risk == Decimal(675)
+    assert tp1_leg / risk == Decimal(2)
+    assert Decimal(106625) == entry_mid + 2 * tp1_leg
+    assert (Decimal(106625) - entry_mid) / risk == Decimal(4)

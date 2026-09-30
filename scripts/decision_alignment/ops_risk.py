@@ -21,6 +21,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SEC_OPS_PATH = REPO_ROOT / "docs" / "operations" / "SECURITY_AND_OPERATIONS.md"
 RUNBOOK_PATH = REPO_ROOT / "docs" / "operations" / "RUNBOOK.md"
 RISK_PATH = REPO_ROOT / "docs" / "trading" / "RISK_MANAGEMENT.md"
+DATA_MODEL_PATH = REPO_ROOT / "docs" / "data" / "DATA_MODEL.md"
+CONFIGURATION_PATH = REPO_ROOT / "docs" / "configuration" / "CONFIGURATION.md"
+ALERTS_PATH = REPO_ROOT / "docs" / "trading" / "SIGNAL_AND_ALERTS.md"
 
 Gate = tuple[str, bool, str]
 
@@ -279,6 +282,80 @@ def check_sl_and_compensation(text: str) -> Gate:
     return _verdict("OR-08", _missing(body, SL_COMPENSATION_PHRASES), [])
 
 
+# --------------------------------------------------------------------------- OR-09, OR-10
+
+DATA_MODEL_PLAN_FIELDS = (
+    "constraint_snapshot_json",
+    "constraint_snapshot_hash",
+    "working_type",
+    "margin_type",
+    "leverage",
+    "equity_used",
+)
+
+CONFIGURATION_PHRASES = (
+    "working_type",
+    "MARK_PRICE",
+    "CONTRACT_PRICE",
+    "partial_fill_fraction",
+    "fee_rate_entry",
+    "taker",
+    "D036",
+    "D037",
+    "D038",
+    "baseline-v4",
+    "research-universe-v1.toml",
+    "not a parameter set",
+)
+
+ALERT_PHRASES = (
+    "Expected R:R: 2.0 / 4.0",
+    "TP1: 105275",
+    "TP2: 106625",
+    "Asia/Ho_Chi_Minh",
+)
+ALERT_FORBIDDEN = (
+    r"Expected R:R: 1\.8 / 3\.9",
+    r"^TP1: 105200$",
+    r"^TP2: 106000$",
+    r"Valid until: 16:00 UTC",
+)
+
+
+def _subsection(text: str, heading_prefix: str) -> str:
+    """Body of a ``### <prefix>`` subsection, up to the next ``###`` or ``##`` heading."""
+    text = text.replace("\r\n", "\n")
+    pattern = rf"^### {re.escape(heading_prefix)}[^\n]*\n"
+    match = re.search(pattern, text, flags=re.MULTILINE)
+    if match is None:
+        return ""
+    rest = text[match.end() :]
+    nxt = re.search(r"^##", rest, flags=re.MULTILINE)
+    return rest[: nxt.start()] if nxt else rest
+
+
+def check_data_model_plan_fields(text: str) -> Gate:
+    """DATA_MODEL section 2.4: persisted constraint snapshot and execution fields."""
+    block = _subsection(text, "2.4")
+    fields = {ln.split()[0] for ln in _lines(block) if ln.split()[0].isidentifier()}
+    missing = [f for f in DATA_MODEL_PLAN_FIELDS if f not in fields]
+    return _verdict("OR-09", missing, [])
+
+
+def check_configuration(text: str) -> Gate:
+    """CONFIGURATION: registry key guidance and section 10 cost assumptions."""
+    return _verdict("OR-10a", _missing(text, CONFIGURATION_PHRASES), [])
+
+
+def check_alert_example(text: str) -> Gate:
+    """SIGNAL_AND_ALERTS section 5: example satisfies minimum_rr, uses Ho Chi Minh time."""
+    return _verdict(
+        "OR-10b",
+        _missing(_section(text, 5), ALERT_PHRASES),
+        _forbidden_hits(text, ALERT_FORBIDDEN),
+    )
+
+
 # --------------------------------------------------------------------------- run
 
 
@@ -310,6 +387,9 @@ def run() -> list[Gate]:
         check_quantization(risk),
         check_snapshot(risk),
         check_sl_and_compensation(risk),
+        check_data_model_plan_fields(_read(DATA_MODEL_PATH)),
+        check_configuration(_read(CONFIGURATION_PATH)),
+        check_alert_example(_read(ALERTS_PATH)),
     ]
 
 

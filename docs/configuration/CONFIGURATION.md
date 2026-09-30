@@ -61,6 +61,8 @@ feature flags
 
 Runtime configuration may live in environment variables or secret/config stores, but must never silently modify strategy semantics.
 
+Runtime configuration must not use the name `working_type` or any other registry key name: registry keys are strategy-semantic and are rejected outside the registry (D037).
+
 ## 4. Reproducibility contract
 
 Every backtest, paper signal, alert, approval, and live order plan must be traceable to:
@@ -130,3 +132,11 @@ A narrow isolated optimum is a robustness warning; see `TRADING_STRATEGY_RESEARC
 - Strategy parameter files use a canonical JSON/YAML representation before hashing.
 - The loader must normalize numeric types and key ordering before computing `parameterSetHash`.
 - Research notebooks must load parameter sets through the same library code used by the backtest runner.
+
+## 10. Canonical cost and execution assumptions for versioned sets
+
+- `fee_rate_entry` is modeled at the taker rate for canonical sets (D036).
+- `partial_fill_fraction` is 1.0 for every canonical set; partial or missed fills are a separate sensitivity run (D038).
+- `working_type` is an optional closed-set string key, `MARK_PRICE` or `CONTRACT_PRICE`; canonical sets use `MARK_PRICE` (D037).
+- Old sets are never edited; they are superseded by new versions (`baseline-v4`, `baseline-no-trade-v2`, `baseline-simple-trend-v2`; D036-D038).
+- The point-in-time research universe manifest at `docs/research/universe/research-universe-v1.toml` is not a parameter set (D039).

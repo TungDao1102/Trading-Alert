@@ -90,11 +90,11 @@ Strategy: Trend-Pullback-v1
 
 Entry: 103800–104050
 SL: 103250
-TP1: 105200
-TP2: 106000
-Expected R:R: 1.8 / 3.9
+TP1: 105275
+TP2: 106625
+Expected R:R: 2.0 / 4.0
 Risk: 0.5%
-Valid until: 16:00 UTC
+Valid until: 23:00 Asia/Ho_Chi_Minh (UTC+7)
 
 Why:
 ✓ higher-timeframe regime valid
@@ -107,6 +107,8 @@ Why:
 ```
 
 The exact wording can change; the underlying numbers and reasons come from deterministic engine output.
+
+The numbers above are illustrative, satisfy `minimum_rr = 2.0` and come from deterministic engine output in production; times are presented in Asia/Ho_Chi_Minh (D025).
 
 ## 6. Alert quality rules
 

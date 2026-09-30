@@ -129,10 +129,18 @@ suggested_quantity
 quantity_before_rounding
 quantity_after_rounding
 quantization_decision
+constraint_snapshot_json
+constraint_snapshot_hash
+working_type
+margin_type
+leverage
+equity_used
 plan_hash
 status
 created_at_utc
 ```
+
+The fields `constraint_snapshot_json` through `equity_used` are the persisted per-plan record of the exchange constraint snapshot and execution assumptions (`RISK_MANAGEMENT.md` section 12, D035, D037). They are a Phase 17 target; state-transition validation is a separate requirement recorded by the decision-alignment bookkeeping.
 
 A signal may have zero or one active trade plan in V1. Future versions may allow plan revisions with immutable versioning.
 
