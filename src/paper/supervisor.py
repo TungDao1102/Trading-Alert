@@ -4,14 +4,20 @@ Per D-01 / D-05: the supervisor owns the WS lifecycle (subscribe,
 keepalive, 24h rotation, reconnect trigger). On disconnect it
 distinguishes:
 
-  - Scheduled 24h rotation: proactive resubscribe + REST backfill
-    from the last-seen close per pair. NO reconnect attempt (the WS
-    is still connected, just rotating). NO outage-class gap journaled.
+  - Scheduled 24h rotation: close the old handles, REST backfill from
+    the last-seen close per pair, record the backfilled closes, and only
+    then resubscribe (D-16, F-413). NO reconnect attempt (the WS is
+    still connected, just rotating). NO outage-class gap journaled.
 
   - Unsolicited drop: tenacity-bounded reconnect (same attempt and
-    delay ceilings as resync) + resubscribe + backfill. Per-symbol
-    try-except isolation: one failing pair journals its gap while
-    healthy pairs still dispatch.
+    delay ceilings as resync), then the same close -> backfill ->
+    record -> resubscribe sequence. Per-symbol try-except isolation:
+    one failing pair journals its gap while healthy pairs still
+    dispatch.
+
+The last-close state per (symbol, interval) only moves forward
+(`_advance_last_close`), so a bar is never delivered twice across the
+reconnect seam (D-28).
 
 The module owns the WS lifecycle behind `src/adapters/paper_ws.py`
 and the REST backfill surface behind `src/adapters/binance_usdm.py`
@@ -21,6 +27,7 @@ never imports the SDK directly).
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -116,6 +123,9 @@ class PaperSupervisor:
         self._intervals = intervals
         self._clock = clock if clock is not None else (lambda: datetime.now(UTC))
         self._last_close: dict[tuple[str, str], datetime] = {}
+        # Guards the check-and-set in _advance_last_close: WS callbacks run
+        # on the adapter thread while the backfill runs on the event loop.
+        self._last_close_lock = threading.Lock()
         self._handles: list[tuple[str, str, Any]] = []
         self._close_failures: int = 0
 
@@ -126,9 +136,29 @@ class PaperSupervisor:
 
         Called by the dispatch path when a closed kline arrives. The
         supervisor uses this to know where to resume backfill after
-        a rotation or disconnect.
+        a rotation or disconnect. Monotonic (D-28): an earlier or equal
+        close never moves the stored value backwards.
         """
-        self._last_close[(symbol, interval)] = close_time_utc
+        self._advance_last_close(symbol, interval, close_time_utc)
+
+    def _advance_last_close(
+        self, symbol: str, interval: str, close_time_utc: datetime
+    ) -> bool:
+        """Atomically move the pair's last close forward.
+
+        Returns True only when there is no stored close or the new close
+        is strictly later (the bar is new); False when the close is at or
+        before the stored one (a duplicate or stale bar). The check and
+        the store happen under one lock so concurrent callers cannot both
+        claim the same bar (T-13-10).
+        """
+        key = (symbol, interval)
+        with self._last_close_lock:
+            stored = self._last_close.get(key)
+            if stored is not None and close_time_utc <= stored:
+                return False
+            self._last_close[key] = close_time_utc
+            return True
 
     def start(self) -> None:
         """Subscribe to all symbol-interval pairs + register dispatch.
@@ -230,7 +260,11 @@ class PaperSupervisor:
     async def _resubscribe_and_backfill(
         self, *, journal_outage_gaps: bool
     ) -> tuple[dict[tuple[str, str], list[RestKline]], list[dict[str, Any]]]:
-        """Close existing handles, resubscribe, and backfill each pair.
+        """Close handles, backfill missed closes, then resubscribe.
+
+        Order (D-16, F-413): close the old handles, REST-backfill every
+        pair from its last close and record those closes (advancing the
+        last-close state), and only then re-attach the WS stream.
 
         Returns the backfilled closes per (symbol, interval) pair
         (CR-03: log-only backfill dropped closes on the floor — the
@@ -240,19 +274,40 @@ class PaperSupervisor:
         hole). Pairs with no prior close contribute no entry.
         """
         self._close_all_handles()
+        backfilled, outage_gaps = await self._backfill_pairs(
+            self._clock(),
+            reason_prefix="backfill_exception",
+            journal_outage_gaps=journal_outage_gaps,
+        )
         self.start()
+        return backfilled, outage_gaps
 
+    async def _backfill_pairs(
+        self,
+        now: datetime,
+        *,
+        reason_prefix: str,
+        journal_outage_gaps: bool,
+    ) -> tuple[dict[tuple[str, str], list[RestKline]], list[dict[str, Any]]]:
+        """Backfill every pair from its last close, keeping only new closes.
+
+        A close is kept only when `_advance_last_close` accepts it, in
+        close_time order, so the returned closes are strictly newer than
+        anything already delivered and the last-close state ends at the
+        latest kept bar (D-28). Per-pair try/except isolation: a raising
+        pair contributes one outage gap (`{reason_prefix}:{ExcType}`) and
+        the remaining pairs still run.
+        """
         backfilled: dict[tuple[str, str], list[RestKline]] = {}
         outage_gaps: list[dict[str, Any]] = []
-        now = self._clock()
         for symbol in self._symbols:
             for interval in self._intervals:
                 last = self._last_close.get((symbol, interval))
                 if last is None:
                     # No prior close recorded for this pair — nothing
                     # to backfill. Loud (not silent): a missing last
-                    # after start() means the dispatch path never
-                    # recorded a close for this pair.
+                    # means the dispatch path never recorded a close
+                    # for this pair.
                     log.error(
                         "paper.supervisor.no_last_close",
                         symbol=symbol,
@@ -273,14 +328,14 @@ class PaperSupervisor:
                     # Build the gap dict in the CollectorGap shape so
                     # the hole is visible to the journal (WR-09), not
                     # just a log line.
-                    gap = {
+                    outage_gap = {
                         "symbol": symbol,
                         "data_class": f"paper-{interval}",
                         "expected_utc": last,
                         "observed_utc": now,
-                        "reason": f"backfill_exception:{type(exc).__name__}",
+                        "reason": f"{reason_prefix}:{type(exc).__name__}",
                     }
-                    outage_gaps.append(gap)
+                    outage_gaps.append(outage_gap)
                     if journal_outage_gaps:
                         log.warning(
                             "paper.supervisor.backfill_failed",
@@ -301,17 +356,23 @@ class PaperSupervisor:
                     )
                 # Backfilled closes are REST klines (not WS klines);
                 # the paper loop's run_paper_tick consumes them via
-                # its feed_events path, not the WS callback. Return
-                # them per pair so the caller can persist and dispatch
-                # them (CR-03) instead of dropping them on the floor.
-                if closes:
+                # its feed_events path, not the WS callback. Keep only
+                # closes that advance the last-close state (monotonic,
+                # D-28) and return them per pair so the caller can
+                # persist and dispatch them (CR-03).
+                kept = [
+                    k
+                    for k in sorted(closes, key=lambda c: c.close_time_utc)
+                    if self._advance_last_close(symbol, interval, k.close_time_utc)
+                ]
+                if kept:
                     log.info(
                         "paper.supervisor.backfilled",
                         symbol=symbol,
                         interval=interval,
-                        closes=len(closes),
+                        closes=len(kept),
                     )
-                    backfilled[(symbol, interval)] = closes
+                    backfilled[(symbol, interval)] = kept
         return backfilled, outage_gaps
 
     def _close_all_handles(self) -> None:
