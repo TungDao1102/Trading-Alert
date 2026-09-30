@@ -9,8 +9,8 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 ### Research Formalization
 
-- [ ] **RSCH-01**: Research protocol is frozen (dataset splits, cost model, execution assumptions, acceptance methodology) before any parameter work begins
-- [ ] **RSCH-02**: Three candidate families are specified independently (Trend Pullback, Breakout+Retest, Range Mean-Reversion) with deterministic alternatives per concept (informal → machine-detectable → alternatives → bias → parameters → backtest)
+- [x] **RSCH-01**: Research protocol is frozen (dataset splits, cost model, execution assumptions, acceptance methodology) before any parameter work begins
+- [x] **RSCH-02**: Three candidate families are specified independently (Trend Pullback, Breakout+Retest, Range Mean-Reversion) with deterministic alternatives per concept (informal → machine-detectable → alternatives → bias → parameters → backtest)
 - [ ] **RSCH-03**: Core Doc contradictions are resolved with decisions recorded in DECISIONS.md (SystemMode naming, order-lifecycle APPROVED, timezone canonicalization, §12 status names, duplicate section numbers)
 
 ### Data Foundation
@@ -101,8 +101,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| RSCH-01 | Phase 1 | Pending |
-| RSCH-02 | Phase 1 | Pending |
+| RSCH-01 | Phase 1 | Complete |
+| RSCH-02 | Phase 1 | Complete |
 | RSCH-03 | Phase 1 | Pending |
 | DATA-01 | Phase 2 | Pending |
 | DATA-02 | Phase 2 | Pending |

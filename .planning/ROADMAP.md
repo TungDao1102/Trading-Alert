@@ -405,12 +405,12 @@ Plans:
 
 **Audit refs**: F-022, F-009, F-013, F-011, F-051, F-054, F-052, F-006, F-005, F-024, F-110, F-116, AMB-001…AMB-039 (report §20)
 
-**Plans:** 1/8 plans executed
+**Plans:** 2/8 plans executed
 
 Plans:
 **Wave 1**
 - [x] 11-01-PLAN.md — Protocol v1.1.0: version-bound research-gate + negative test, freeze commit (header, D043, DOC_STATUS), numeric pre-registration, single-use holdout marker (RSCH-01, RSCH-02, D-01..D-05)
-- [ ] 11-02-PLAN.md — Parameter sets: working_type registry key, baseline-v4 x3 + baseline-no-trade-v2 + baseline-simple-trend-v2, pins for all 15 sets, old files byte-locked (RSCH-01, RSCH-02, D-06..D-08, D-18)
+- [x] 11-02-PLAN.md — Parameter sets: working_type registry key, baseline-v4 x3 + baseline-no-trade-v2 + baseline-simple-trend-v2, pins for all 15 sets, old files byte-locked (RSCH-01, RSCH-02, D-06..D-08, D-18)
 - [ ] 11-03-PLAN.md — Point-in-time research universe manifest (DRAFT, docs/research/universe/) with validator and hash step for Phase 13 (RSCH-01, RSCH-02, D-09)
 - [ ] 11-04-PLAN.md — Ops/risk docs: entries-only SAFE_MODE ladder, D033 daily loss, D035 margin, canonical quantization order, constraint snapshot, plan fields, registry keys (RISK-02, OPS-01, EXEC-02, D-10..D-12)
 
@@ -866,7 +866,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 8. Approval + Reconciliation Hardening | 5/5 | Complete   | 2026-09-27 |
 | 9. Live Execution Rollout | 4/4 | In Progress|  |
 | 10. Journal Depth + Kill-Gate Operations | 12/12 | In Progress|  |
-| 11. Decision Alignment (docs + params) | 1/8 | In Progress|  |
+| 11. Decision Alignment (docs + params) | 2/8 | In Progress|  |
 | 12. Fee + Cost Model Correctness | 0/TBD | Not started | - |
 | 13. Research Data Foundation Fixes + VPS Collector Deployment | 0/TBD | Not started | - |
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |

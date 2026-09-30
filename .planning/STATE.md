@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 11
 current_phase_name: decision-alignment
 status: executing
-stopped_at: Completed 11-01-PLAN.md
-last_updated: "2026-09-30T04:04:47.338Z"
+stopped_at: Completed 11-02-PLAN.md
+last_updated: "2026-09-30T04:14:32.372Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 11 execution started
-state_head: 0c79a3a5a22d1492efaf19b9a027c9a364813321
+state_head: 3f7d196b608abdf98470641d1ef1f33925255b91
 progress:
   total_phases: 28
   completed_phases: 2
   total_plans: 58
-  completed_plans: 50
+  completed_plans: 51
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 11 (decision-alignment) — EXECUTING
-Plan: 2 of 8
+Plan: 3 of 8
 Status: Ready to execute
 Last activity: 2026-09-30 — Phase 11 execution started
 
@@ -89,6 +89,7 @@ Progress: [██████████] 100%
 | Phase 10 P11 | 35 min | 3 tasks | 7 files |
 | Phase 10 P12 | 13 min | 3 tasks | 6 files |
 | Phase 11 P01 | 30 min | 3 tasks | 10 files |
+| Phase 11 P02 | 25min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -237,6 +238,7 @@ Recent decisions affecting current work:
 - [Phase 10]: 10-12: database failures surface as exception type names only; DATABASE_URL is read once and passed only to the session factory — RESEARCH V7: no credential or request text in stdout, stderr, reports or sidecars
 - [Phase 10]: 10-12: CLI runs asyncio on SelectorEventLoop on Windows and disposes the engine per run — psycopg async cannot use the Proactor loop; read and record use separate asyncio.run calls
 - [Phase 11]: D043: research protocol v1.1.0 frozen with D032 pre-registration (100/30 trade floor, N=25 Holm-Bonferroni per family, last-20% single-use holdout); Frozen-on unchanged so the D013 clock is not restarted
+- [Phase 11]: 11-02: working_type is a closed-set registry string key (MARK_PRICE/CONTRACT_PRICE), outside COST_KEYS; D036-D038 delivered as five new v3.0.0 sets, old params files byte-locked and all 15 sets pinned
 
 ### Pending Todos
 
@@ -281,6 +283,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T04:04:47.116Z
-Stopped at: Completed 11-01-PLAN.md
+Last session: 2026-09-30T04:14:32.160Z
+Stopped at: Completed 11-02-PLAN.md
 Resume file: None
