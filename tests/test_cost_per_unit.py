@@ -368,11 +368,13 @@ def test_end_to_end_model_to_cost() -> None:
     assert got == Decimal("83.0840")
 
 
-def test_old_modeled_costs_per_unit_untouched() -> None:
+def test_old_two_argument_modeled_costs_per_unit_call_is_removed() -> None:
+    """The rate-sum call form (cost_model, side) is gone: prices are required (D-01, D-18)."""
     from src.backtest.costs import build_cost_model, modeled_costs_per_unit
 
     model = build_cost_model(dict(_SEVEN))
-    assert modeled_costs_per_unit(cost_model=model, side="LONG") == Decimal("0.0011")
+    with pytest.raises(TypeError):
+        modeled_costs_per_unit(cost_model=model, side="LONG")  # type: ignore[call-arg]
 
 
 # --------------------------------------------------------------------------- #
