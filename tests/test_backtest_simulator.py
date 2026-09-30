@@ -13,7 +13,7 @@ fail until `src/backtest/` is implemented.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -330,7 +330,7 @@ def test_cost_parity_simulator_matches_costs_module() -> None:
     Per D-02: the simulator must call the identical cost formula that
     src/risk/sizing.py consumes. A direct comparison pins the parity.
     """
-    from src.backtest.costs import build_cost_model, modeled_costs_per_unit
+    from src.backtest.costs import build_cost_model
     from src.backtest.simulator import run
 
     case_dir = PHASE6_FIXTURES_DIR / "intrabar_both_touched"
@@ -379,7 +379,6 @@ def test_no_lookahead_appending_1m_candle_changes_nothing() -> None:
     key = list(case_input["intrabar_1m_map"].keys())[0]
     intrabar = list(case_input["intrabar_1m_map"][key])
     # Add a candle at 10:01:00 (after the trigger bar's 09:59:59 close).
-    from datetime import datetime as _dt
 
     post_horizon = {
         "symbol": "BTCUSDT",
@@ -467,7 +466,6 @@ def test_cr02_trade_id_unique_across_bar_time_symbol_quantity() -> None:
     parameter (no "Decimal" placeholder).
     """
     import inspect
-    from datetime import timezone
     from types import SimpleNamespace
 
     from src.backtest.simulator import _make_record, run
@@ -487,8 +485,8 @@ def test_cr02_trade_id_unique_across_bar_time_symbol_quantity() -> None:
         trade_plan_version="v2.0.0",
         plan_hash="0" * 64,
     )
-    bar_close_a = datetime(2026, 9, 11, 9, 0, 0, tzinfo=timezone.utc)
-    bar_close_b = datetime(2026, 9, 11, 10, 0, 0, tzinfo=timezone.utc)
+    bar_close_a = datetime(2026, 9, 11, 9, 0, 0, tzinfo=UTC)
+    bar_close_b = datetime(2026, 9, 11, 10, 0, 0, tzinfo=UTC)
 
     def _rec(symbol: str, bar_close: datetime, quantity: str) -> str:
         return _make_record(
@@ -606,11 +604,10 @@ def _filled_record(
     *, direction: str, entry: str, exit_: str, quantity: str, exit_kind: str
 ):
     """Hand-built filled TradeRecord with every cost field still None."""
-    from datetime import timezone
 
     from src.backtest.simulator import TradeRecord
 
-    t = datetime(2026, 9, 11, 10, 0, 0, tzinfo=timezone.utc)
+    t = datetime(2026, 9, 11, 10, 0, 0, tzinfo=UTC)
     return TradeRecord(
         trade_id="t-oracle",
         signal_id="s-oracle",

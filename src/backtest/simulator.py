@@ -32,7 +32,12 @@ from src.risk.gating import evaluate_risk
 from src.risk.portfolio import resolve_absolute_thresholds
 from src.risk.types import ConstraintSnapshot, OpenPosition
 
-from .costs import CostModel, build_cost_model, modeled_costs_per_unit
+from .costs import (
+    CostModel,
+    build_cost_model,
+    cost_rates_from_model,
+    guard_rates_from_params,
+)
 
 # --------------------------------------------------------------------------- #
 # Validation helpers — local copies (D-12 fail-closed).
@@ -631,11 +636,39 @@ def _apply_costs(
     Returns a new TradeRecord with entry_fee, exit_fee, slippage_amount,
     gross_pnl, and realized_pnl populated. For non-filled trades, the
     cost fields remain None.
+
+    All amounts are quote currency. Fees and slippage are booked per leg as
+    `fill_price x quantity x rate` (F-306: slippage used to be booked as
+    `quantity x rate`, missing the price factor). The entry leg always uses
+    `expected_slippage`. The exit leg depends on how the position closed:
+    SL (a stop-market order) and EOD (a market-style close at the last 1m
+    close) use the worse `exit_slippage_rate`; TP1 (a resting limit) uses
+    `expected_slippage` (D-05, D-06). The EOD rate is a planning assumption
+    (D046): the end of data is a forced market close, not a resting order.
+
+    Raises:
+        ValueError: `exit_slippage_rate` is missing on a filled record's cost
+            model (legacy 7-key model), or `exit_kind` is not SL/TP1/EOD.
     """
     if trade_record.entry_price is None or trade_record.quantity is None:
         return trade_record
     if trade_record.exit_price is None:
         return trade_record
+
+    exit_slippage_rate = cost_model.exit_slippage_rate
+    if exit_slippage_rate is None:
+        raise ValueError(
+            "exit_slippage_rate is missing from the cost model: legacy 7-key "
+            "models cannot book stop-exit slippage; use baseline-v5 or later"
+        )
+    if trade_record.exit_kind in {"SL", "EOD"}:
+        exit_leg_rate = exit_slippage_rate
+    elif trade_record.exit_kind == "TP1":
+        exit_leg_rate = cost_model.expected_slippage
+    else:
+        raise ValueError(
+            f"unknown exit_kind {trade_record.exit_kind!r}: expected SL, TP1 or EOD"
+        )
 
     quantity = trade_record.quantity
     entry_price = trade_record.entry_price
@@ -650,8 +683,10 @@ def _apply_costs(
     # Fees: entry_fee = entry_price * quantity * fee_rate_entry
     entry_fee = _mul(_mul(entry_price, quantity), cost_model.fee_rate_entry)
     exit_fee = _mul(_mul(exit_price, quantity), cost_model.fee_rate_exit)
-    # Slippage: expected_slippage * quantity (in quote currency).
-    slippage = _mul(quantity, cost_model.expected_slippage)
+    # Slippage per leg: fill_price * quantity * rate (quote currency).
+    entry_slippage = _mul(_mul(entry_price, quantity), cost_model.expected_slippage)
+    exit_slippage = _mul(_mul(exit_price, quantity), exit_leg_rate)
+    slippage = _add(entry_slippage, exit_slippage)
     # Funding: ADDITIVE treatment → 0 for the tracer slice (no funding events).
     funding = Decimal("0")
 
@@ -800,9 +835,9 @@ def run(case_input: dict[str, Any]) -> dict[str, Any]:
         assert trade_plan is not None
 
         # Risk pipeline.
-        modeled_costs = modeled_costs_per_unit(
-            cost_model=cost_model,
-            side=signal.direction,
+        cost_rates = cost_rates_from_model(cost_model)
+        min_stop_distance_rate, max_cost_to_risk = guard_rates_from_params(
+            parameter_set.params
         )
         verdict = evaluate_risk(
             trade_plan=trade_plan,
@@ -813,7 +848,9 @@ def run(case_input: dict[str, Any]) -> dict[str, Any]:
             daily_loss_quote=daily_loss_quote,
             now_utc=bar.close_time_utc,
             ttl=ttl,
-            modeled_costs_per_unit=modeled_costs,
+            cost_rates=cost_rates,
+            min_stop_distance_rate=min_stop_distance_rate,
+            max_cost_to_risk=max_cost_to_risk,
             minimum_risk_utilization_after_rounding=Decimal(
                 str(parameter_set.params["minimum_risk_utilization_after_rounding"])
             ),
@@ -835,6 +872,7 @@ def run(case_input: dict[str, Any]) -> dict[str, Any]:
         sized = verdict.sized
         assert sized is not None
         assert sized.quantity is not None
+        assert sized.modeled_costs_per_unit is not None
 
         entry_record = _resolve_entry(
             trade_plan=trade_plan,
@@ -849,7 +887,7 @@ def run(case_input: dict[str, Any]) -> dict[str, Any]:
             record=entry_record,
             symbol=bar.symbol,
             parameter_set_hash=parameter_set.parameter_set_hash,
-            modeled_costs_per_unit=modeled_costs,
+            modeled_costs_per_unit=sized.modeled_costs_per_unit,
             realized_risk=sized.realized_risk,
         )
 

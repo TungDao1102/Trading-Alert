@@ -307,6 +307,31 @@ def cost_rates_from_model(cost_model: CostModel) -> CostRates:
     )
 
 
+GUARD_RATE_KEYS: tuple[str, str] = ("min_stop_distance_rate", "max_cost_to_risk")
+
+
+def guard_rates_from_params(params: Mapping[str, Any]) -> tuple[Decimal, Decimal]:
+    """Read the two cost-guard rates from a registry parameter mapping.
+
+    Returns `(min_stop_distance_rate, max_cost_to_risk)` as Decimals, in the
+    order `evaluate_risk` takes them. The simulator and the paper loop both
+    call this one helper so the guard values reach the risk pipeline from the
+    pinned registry set identically (D-19). A legacy set that predates the
+    guards (baseline-v4 and earlier) raises `ValueError` naming the missing
+    key; the guards are never defaulted (fail closed, T-12-19).
+    """
+    values: list[Decimal] = []
+    for key in GUARD_RATE_KEYS:
+        if key not in params:
+            raise ValueError(
+                f"{key} is missing from the parameter set: legacy sets cannot "
+                "size without the cost guards; use a registry set that carries "
+                "them (baseline-v5 or later)"
+            )
+        values.append(Decimal(str(params[key])))
+    return values[0], values[1]
+
+
 # --------------------------------------------------------------------------- #
 # modeled_costs_per_unit — per-unit cost formula consumed by sizing.
 # --------------------------------------------------------------------------- #
@@ -342,5 +367,6 @@ __all__ = [
     "build_cost_model",
     "cost_rates_from_model",
     "cost_slice",
+    "guard_rates_from_params",
     "modeled_costs_per_unit",
 ]
