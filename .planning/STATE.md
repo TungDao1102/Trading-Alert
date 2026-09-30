@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 12
 current_phase_name: fee-cost-model-correctness
 status: executing
-stopped_at: Completed 12-07-PLAN.md
-last_updated: "2026-09-30T09:36:41.571Z"
+stopped_at: Completed 12-08-PLAN.md
+last_updated: "2026-09-30T09:42:44.307Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 11 execution started
-state_head: b94f555025b7430e5df2d09c6cc279e33edb4228
+state_head: 5fce621ebd1092d86b31fc40a976716993e69c0a
 progress:
   total_phases: 28
   completed_phases: 2
   total_plans: 69
-  completed_plans: 64
+  completed_plans: 65
 milestone_name: milestone
 ---
 
@@ -103,6 +103,7 @@ Progress: [██████████] 100%
 | Phase 12 P05 | 25 min | 3 tasks | 6 files |
 | Phase 12 P06 | 25 min | 2 tasks | 6 files |
 | Phase 12 P07 | 25min | 3 tasks | 19 files |
+| Phase 12 P08 | 15min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -266,6 +267,7 @@ Recent decisions affecting current work:
 - [Phase 12]: 12-05: adapter keeps its own 0.01 commission-rate ceiling (imports nothing from src); commissionRate SOURCES row stays MEDIUM (official page not read directly)
 - [Phase 12]: 12-06: risk sizing entry is the adverse zone edge (LONG entry_max, SHORT entry_min); zone mid stays the quantizer notional reference (supersedes Phase 5 D-02 for sizing; DECISIONS D046 by 12-11)
 - [Phase 12]: 12-07: Phase 5 portfolio test helper runs shared size_and_quantize; candidate risks hand-derived in DERIVATIONS.md
+- [Phase 12]: 12-08: legacy modeled_costs_per_unit key rejected explicitly in the live cost-rate gate; PARAMETER fee source is NO_TRADE UNCERTAIN_ACCOUNT_STATE before evaluate_risk
 
 ### Pending Todos
 
@@ -310,6 +312,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T09:36:41.347Z
-Stopped at: Completed 12-07-PLAN.md
+Last session: 2026-09-30T09:42:44.087Z
+Stopped at: Completed 12-08-PLAN.md
 Resume file: None
