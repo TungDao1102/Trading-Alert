@@ -21,11 +21,11 @@ Actions:
 
 ```text
 1. Set SAFE_MODE.
-2. Block new live orders.
+2. Block new ENTRY orders (protective and reduce-only orders remain allowed, D034).
 3. Verify Binance positions directly.
 4. Verify open normal orders.
 5. Verify open algo/conditional orders.
-6. Verify each live position has the expected protection.
+6. Verify each live position has the expected protection; a missing protection goes to section 3.
 7. Reconcile local state.
 8. Only then consider resuming.
 ```
@@ -37,9 +37,12 @@ SAFE_MODE
 → alert immediately
 → query Binance authoritative position
 → query protective/algo orders
-→ if stop is absent, submit protection only after risk validation
-→ otherwise require explicit manual intervention
+→ if stop is absent or canceled, automatically re-place it at the original plan SL after risk validation (never wider)
+→ if the SL is rejected or not acknowledged, close the position with a reduce-only order, then send a HIGH alert
+→ manual intervention is optional, not required
 ```
+
+The automatic ladder is per D034: the operator works full-time and cannot be assumed to react within minutes.
 
 Never assume a locally stored order ID means the exchange order exists.
 
@@ -60,6 +63,8 @@ identify orphan
 ```
 
 This must run both on event-driven reconciliation and periodic sweeps.
+
+A protective stop paired with a still-working ENTRY order is not an orphan: the position is zero only because the entry has not filled yet, so the sweeper must leave that stop in place (F-401, D034).
 
 ## 5. Suspected duplicate approval/order
 
@@ -90,7 +95,7 @@ Action:
 
 ```text
 NO NEW SIGNALS
-NO NEW ORDERS
+NO NEW ENTRY ORDERS
 → reconnect/re-bootstrap
 → validate candle continuity
 → resume only after health check
@@ -114,7 +119,8 @@ reconnect
 
 ```text
 SAFE_MODE
-→ block new orders
+→ block new entry orders only
+→ a database failure must not prevent risk-reducing actions (D034)
 → preserve existing exchange-side protection
 → restore DB or switch to read-only monitoring
 → reconcile after recovery

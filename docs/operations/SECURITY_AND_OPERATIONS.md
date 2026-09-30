@@ -5,9 +5,9 @@
 - API key must not have withdrawal permission.
 - Secrets must be outside source control.
 - Prefer IP allowlisting where practical.
-- Encrypt secrets at rest.
+- Secrets live only in a permission-restricted `.env` (file mode 0600, owned by the service user), never in source control, with provider disk encryption on the VPS (D042). Application-level encryption of secrets at rest is not required in V1 (exclusion recorded in DECISIONS, D045).
 - Avoid logging API keys/signatures.
-- Webhook endpoints must be authenticated.
+- Webhook endpoints must be authenticated. TradingView cannot sign requests, so an HMAC signature is not available; V1 has no webhook endpoint, and if one is built the scheme is a secret URL path segment plus a source-IP allow-list (F-052). See `integration/TRADINGVIEW.md` section 5.
 - Separate paper/test credentials from live credentials.
 
 ## 2. Live safety
@@ -29,7 +29,7 @@ All external connections must have:
 - backoff,
 - state reconciliation.
 
-Binance market WebSocket connections currently have a 24-hour lifetime; a planned reconnect must therefore be part of normal operation. [Binance WebSocket market streams](https://developers.binance.com/en/docs/products/derivatives-trading-coin-futures/websocket-market-streams/Connect)
+Binance market WebSocket connections are believed to have a 24-hour lifetime; a planned reconnect must therefore be part of normal operation (F-057). [Binance USDⓈ-M WebSocket market streams](https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Important-WebSocket-Change-Notice) Verify the 24-hour figure against current Binance docs before implementation.
 
 ## 4. Health checks
 
@@ -56,7 +56,8 @@ High priority:
 - duplicate execution attempt;
 - stale market data;
 - exchange rejects risk-protective action;
-- API authentication failure.
+- API authentication failure;
+- daily loss WARNING and DAILY_STOP reached (D033).
 
 ## 6. Logging
 
@@ -75,11 +76,17 @@ Never log secret credentials.
 
 ## 7. SAFE_MODE
 
-When SAFE_MODE is active:
+SAFE_MODE blocks new entry orders only, meaning orders that can open or increase a position (D034). When SAFE_MODE is active:
 
-- no new live order placement;
+- Protective and reduce-only orders are always allowed, after an authoritative position query;
 - existing exchange-side protective orders remain active;
-- system continues monitoring and journaling.
+- monitoring, reconciliation and journaling continue;
+- a missing or canceled stop-loss is automatically re-placed at the original plan stop-loss, never wider (D034);
+- a stop-loss that is rejected or not acknowledged leads to a reduce-only market close, then a HIGH-priority alert (D034);
+- a database failure must not block risk-reducing actions (D034);
+- nothing depends on the operator reacting within minutes, because the operator works full-time (D034).
+
+This supersedes the earlier "no new live order placement" wording and the cancel-only reconciler decision (Phase 08 D-03 / Phase 09 D-02), per D034.
 
 ## 8. Restart behavior
 
