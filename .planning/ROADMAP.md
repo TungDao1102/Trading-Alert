@@ -444,10 +444,20 @@ This absorbs the confirmed bug from former Phase 11:
 
 **Audit refs**: F-001, F-801, F-601, F-306, F-002, F-962, F-005, F-028
 
-**Plans:** 0 plans
+**Plans:** 11 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 12 to break down)
+- [ ] 12-01-PLAN.md — Rejection vocabulary window: STOP_TOO_TIGHT and COST_TO_RISK_EXCEEDED added, five deprecated aliases removed (GLOSSARY, enum, GL gates, tests)
+- [ ] 12-02-PLAN.md — Registry keys, unit and range guards, five v5/-v3 parameter sets at v4.0.0, pins and gate PA-07
+- [ ] 12-03-PLAN.md — CostRates and the quote-per-unit producer, presence-driven exit_slippage_rate in CostModel, canonical cost-hash text, cost_slice binding
+- [ ] 12-04-PLAN.md — Phase 6 fixtures regenerated with guard-clearing geometry on the v5 sets (before the pipeline cutover), geometry pre-flight test
+- [ ] 12-05-PLAN.md — Live commission rate: pure per-side max(parameter, account) resolver, strict adapter method, SOURCES and BINANCE records
+- [ ] 12-06-PLAN.md — Risk pipeline cutover: adverse-edge sizing, shared producer inside evaluate_risk, cost guards before quantization, recorded cost trail
+- [ ] 12-07-PLAN.md — Phase 5 fixtures and risk tests migrated with hand-derived expectations
+- [ ] 12-08-PLAN.md — Execution manager: fail-closed live cost-rate gate and Phase 9 fixture migration
+- [ ] 12-09-PLAN.md — Simulator and paper cutover: per-leg slippage with exit_slippage_rate, price-aware modeled_costs_per_unit, parity fixture regenerated
+- [ ] 12-10-PLAN.md — SL-loss property test (Decimal grid with old-formula mutation check) and cross-call-site cost parity tests
+- [ ] 12-11-PLAN.md — DECISIONS D046-D048, RISK_MANAGEMENT and CONFIGURATION amendments, final regression
 
 ### Phase 13: Research Data Foundation Fixes + VPS Collector Deployment
 
