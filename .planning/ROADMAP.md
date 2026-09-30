@@ -405,10 +405,24 @@ Plans:
 
 **Audit refs**: F-022, F-009, F-013, F-011, F-051, F-054, F-052, F-006, F-005, F-024, F-110, F-116, AMB-001…AMB-039 (report §20)
 
-**Plans:** 0 plans
+**Plans:** 8 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 11 to break down)
+**Wave 1**
+- [ ] 11-01-PLAN.md — Protocol v1.1.0: version-bound research-gate + negative test, freeze commit (header, D043, DOC_STATUS), numeric pre-registration, single-use holdout marker (RSCH-01, RSCH-02, D-01..D-05)
+- [ ] 11-02-PLAN.md — Parameter sets: working_type registry key, baseline-v4 x3 + baseline-no-trade-v2 + baseline-simple-trend-v2, pins for all 15 sets, old files byte-locked (RSCH-01, RSCH-02, D-06..D-08, D-18)
+- [ ] 11-03-PLAN.md — Point-in-time research universe manifest (DRAFT, docs/research/universe/) with validator and hash step for Phase 13 (RSCH-01, RSCH-02, D-09)
+- [ ] 11-04-PLAN.md — Ops/risk docs: entries-only SAFE_MODE ladder, D033 daily loss, D035 margin, canonical quantization order, constraint snapshot, plan fields, registry keys (RISK-02, OPS-01, EXEC-02, D-10..D-12)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 11-05-PLAN.md — Exchange facts grounded in dated official sources: account-wide 200 limit, algo trigger-time semantics, WS URL split, workingType, MARKET_LOT_SIZE/PERCENT_PRICE, SOURCES.md (EXEC-02, OPS-01, RISK-02, D-13, D-14)
+- [ ] 11-06-PLAN.md — TradingView "HMAC-checked" removed (STACK.md then AGENTS.md), real webhook auth scheme, quantization order pointers in PROJECT.md/AGENTS.md (RISK-02, EXEC-02, D-12, D-13)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 11-07-PLAN.md — GLOSSARY section 9 canonical codes + ApprovalResult, 13 new REQ-IDs with traceability, DECISIONS D044/D045, DOC_STATUS log (F-110, F-116, D-15, D-16, D-19)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 11-08-PLAN.md — verify_decision_alignment.py over all gate modules, registry-gate CI wiring, phase-close full suite and validation sign-off (RSCH-01, RSCH-02, RISK-02, EXEC-02, OPS-01, D-17, D-18)
 
 ### Phase 12: Fee + Cost Model Correctness
 
