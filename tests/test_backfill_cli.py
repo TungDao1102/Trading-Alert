@@ -84,7 +84,8 @@ class FakeAdapter:
     `flat_from_ms[symbol]` on they are the synthetic flat zero-volume bars the
     exchange keeps serving after a contract's delivery (research Pitfall 1).
     `fail_on_kline_call` raises on that (1-based) trade klines call, to
-    simulate a killed run.
+    simulate a killed run. Bars whose UTC day starts at a `skip_days_ms`
+    instant are never served (a hole in the exchange history).
     """
 
     def __init__(
@@ -96,8 +97,10 @@ class FakeAdapter:
         flat_from_ms: dict[str, int] | None = None,
         data_end_ms: int | None = None,
         fail_on_kline_call: int | None = None,
+        skip_days_ms: Sequence[int] = (),
     ) -> None:
         self._filters = list(filters)
+        self._skip_days_ms = frozenset(skip_days_ms)
         self._session = session
         self._first_ms = first_ms or {}
         self._flat_from_ms = flat_from_ms or {}
@@ -116,7 +119,8 @@ class FakeAdapter:
         out: list[int] = []
         open_ms = first_open
         while len(out) < limit and open_ms < self._data_end_ms:
-            out.append(open_ms)
+            if open_ms - open_ms % DAY_MS not in self._skip_days_ms:
+                out.append(open_ms)
             open_ms += step
         return out
 
@@ -872,3 +876,165 @@ def test_failure_prints_type_name_never_the_database_url(
     assert "hunter2-secret" not in captured.out + captured.err
     assert "backfill: failed (RuntimeError)" in captured.err
     assert adapter.kline_requests == []
+
+
+# --------------------------------------------------------------------------- #
+# 13-08 Task 1 - data-sufficiency report, report file and exit codes.
+# --------------------------------------------------------------------------- #
+
+NEVER_MS = _ms(2030, 1, 1)
+
+
+def _run_main(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    adapter: FakeAdapter,
+    symbols: Sequence[str],
+    *extra: str,
+) -> int:
+    from src.data import backfill_cli
+
+    monkeypatch.setattr(backfill_cli, "BinanceUsdmAdapter", lambda: adapter)
+    monkeypatch.setattr(backfill_cli, "_utc_now", _clock())
+    manifest = _write_manifest(tmp_path / "manifest.toml")
+    collect = _write_collect_list(tmp_path / "collect.toml")
+    return backfill_cli.main(
+        [
+            "--symbols", *symbols,
+            "--intervals", "1h",
+            "--datasets", "trade",
+            "--depth-htf-months", "1",
+            "--database-url", _sqlite_url(tmp_path),
+            "--raw-root", str(tmp_path / "raw"),
+            "--cursor-root", str(tmp_path / "cursors"),
+            "--manifest", str(manifest),
+            "--collect-list", str(collect),
+            "--pace-seconds", "0",
+            *extra,
+        ]
+    )
+
+
+_SETTLED_FTT = _filters("FTTUSDT", status="SETTLING", delivery_ms=_ms(2026, 8, 10, 8))
+_ONBOARD_NEW = _filters("NEWUSDT", onboard=datetime(2026, 9, 10, 7, tzinfo=UTC))
+_PENDING_SOON = _filters(
+    "SOONUSDT",
+    status="PENDING_TRADING",
+    onboard=datetime(2026, 10, 5, tzinfo=UTC),
+    delivery_ms=FAR_FUTURE_DELIVERY_MS,
+)
+_UNKNOWN_DELIVERY = _filters("OLDUSDT", status="SETTLING", delivery_ms=None)
+
+
+@pytest.mark.parametrize(
+    ("symbol", "filters", "adapter_kwargs", "expected_rc", "expected_cause"),
+    [
+        ("BTCUSDT", _filters("BTCUSDT"), {}, 0, "OK"),
+        (
+            "NEWUSDT",
+            _ONBOARD_NEW,
+            {"first_ms": {"NEWUSDT": _ms(2026, 9, 10, 7)}},
+            0,
+            "ONBOARD_LIMITED",
+        ),
+        (
+            "FTTUSDT",
+            _SETTLED_FTT,
+            {"flat_from_ms": {"FTTUSDT": _ms(2026, 8, 10, 8)}},
+            0,
+            "DELISTED_CAPPED",
+        ),
+        ("SOONUSDT", _PENDING_SOON, {}, 0, "NO_WINDOW"),
+        ("BTCUSDT", _filters("BTCUSDT"), {"skip_days_ms": [_ms(2026, 9, 20)]}, 3, "GAP"),
+        (
+            "BTCUSDT",
+            _filters("BTCUSDT"),
+            {"first_ms": {"BTCUSDT": NEVER_MS}},
+            3,
+            "NOT_BACKFILLED",
+        ),
+        ("OLDUSDT", _UNKNOWN_DELIVERY, {}, 3, "UNAVAILABLE"),
+    ],
+)
+def test_cli_exit_code_is_3_only_for_missing_data(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    symbol: str,
+    filters: SymbolFilters,
+    adapter_kwargs: dict[str, Any],
+    expected_rc: int,
+    expected_cause: str,
+) -> None:
+    adapter = FakeAdapter([filters], **adapter_kwargs)
+
+    rc = _run_main(tmp_path, monkeypatch, adapter, [symbol])
+
+    out = capsys.readouterr().out
+    assert rc == expected_rc
+    row = next(line for line in out.splitlines() if symbol in line and "1h" in line and "trade" in line and expected_cause in line.split())
+    assert expected_cause in row.split()
+
+
+def test_report_json_is_deterministic(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.data.sufficiency import validate_report_file
+
+    out_path = tmp_path / "report.json"
+    first = _run_main(
+        tmp_path, monkeypatch, FakeAdapter([_filters("BTCUSDT")]), ["BTCUSDT"],
+        "--report-out", str(out_path),
+    )
+    first_bytes = out_path.read_bytes()
+    second = _run_main(
+        tmp_path, monkeypatch, FakeAdapter([_filters("BTCUSDT")]), ["BTCUSDT"],
+        "--report-out", str(out_path),
+    )
+
+    assert first == second == 0
+    assert out_path.read_bytes() == first_bytes
+    assert validate_report_file(out_path) == []
+
+
+def test_report_states_trade_floor_is_unmeasurable(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    from src.data.sufficiency import TRADE_FLOOR_NOTE
+
+    out_path = tmp_path / "report.json"
+    rc = _run_main(
+        tmp_path, monkeypatch, FakeAdapter([_filters("BTCUSDT")]), ["BTCUSDT"],
+        "--report-out", str(out_path),
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert TRADE_FLOOR_NOTE in out
+    assert json.loads(out_path.read_text(encoding="utf-8"))["trade_floor_note"] == TRADE_FLOOR_NOTE
+    assert "Phase 14" in out
+    assert "projected" not in out.lower()
+
+
+def test_dry_run_writes_no_report_and_exits_0(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out_path = tmp_path / "report.json"
+    rc = _run_main(
+        tmp_path, monkeypatch, FakeAdapter([_filters("BTCUSDT")]), ["BTCUSDT"],
+        "--dry-run", "--report-out", str(out_path),
+    )
+
+    assert rc == 0
+    assert not out_path.exists()
+    assert "DATASET" not in capsys.readouterr().out
