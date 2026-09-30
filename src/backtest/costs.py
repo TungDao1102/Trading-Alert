@@ -3,7 +3,9 @@
 Per D-02: costs apply from run #1 before any selection decision. The
 `CostModel` is a frozen dataclass built from registry cost keys, with
 `cost_model_hash` computed via `sha256_hex` over the sorted seven-key
-snapshot. `modeled_costs_per_unit` delegates to the same per-unit
+snapshot (eight keys when the model carries `exit_slippage_rate`, Phase 12),
+with numeric values hashed as canonical text so equivalent spellings agree
+(D-15). `modeled_costs_per_unit` delegates to the same per-unit
 formula `src/risk/sizing.py` consumes — never re-derived inside the
 simulator body.
 
@@ -14,6 +16,7 @@ mirroring the Phase-4 D-10 / Phase-5 D-05 purity precedent.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -43,6 +46,61 @@ COST_KEYS: tuple[str, ...] = (
 # a set that carries one hashes over the seven required keys plus this one; a
 # set that does not (every legacy set) keeps its byte-locked seven-key hash.
 OPTIONAL_COST_KEYS: tuple[str, ...] = ("exit_slippage_rate",)
+
+
+# Numeric cost fields hashed as canonical text (D-15); the rest are strings.
+_NUMERIC_HASH_KEYS: frozenset[str] = frozenset(
+    {
+        "fee_rate_entry",
+        "fee_rate_exit",
+        "expected_slippage",
+        "partial_fill_fraction",
+        "exit_slippage_rate",
+    }
+)
+
+
+def _canonical_decimal_text(value: Decimal) -> str:
+    """Render a Decimal as one plain (non-exponent) text form (D-15).
+
+    Zero, in any spelling including negative zero, renders as "0". Every
+    other value renders as its plain positional text with trailing zeros
+    removed, so 1, 1.0 and Decimal("1.00") all render "1", 0.00020 renders
+    "0.0002", and 100 stays "100" (never "1E+2"). Built from the digit tuple
+    so it does not depend on the ambient Decimal context precision.
+    """
+    if not value.is_finite():
+        raise ValueError(f"cost value must be finite, got {value}")
+    if value == 0:
+        return "0"
+    sign, digits, exponent = value.as_tuple()
+    assert isinstance(exponent, int)  # finite Decimal
+    mantissa = list(digits)
+    while len(mantissa) > 1 and mantissa[-1] == 0:
+        mantissa.pop()
+        exponent += 1
+    return format(Decimal((sign, tuple(mantissa), exponent)), "f")
+
+
+def _cost_hash_payload(model: CostModel) -> dict[str, str]:
+    """Build the hash payload: canonical text for numerics, strings as-is.
+
+    The seven `COST_KEYS` always participate; `exit_slippage_rate`
+    participates only when the model carries it (presence-driven, D-14
+    option B), so every legacy seven-key model keeps its byte-locked hash.
+    """
+    keys = (
+        (*COST_KEYS, *OPTIONAL_COST_KEYS)
+        if model.exit_slippage_rate is not None
+        else COST_KEYS
+    )
+    payload: dict[str, str] = {}
+    for key in keys:
+        value = getattr(model, key)
+        payload[key] = (
+            _canonical_decimal_text(value) if key in _NUMERIC_HASH_KEYS else value
+        )
+    return payload
 
 
 def _coerce_decimal(value: object, field_name: str) -> Decimal:
@@ -103,8 +161,9 @@ class CostModel:
     """Registry-parameterized cost model (D-02).
 
     `cost_model_hash` is SHA256 over the canonical JSON of the sorted
-    seven-key snapshot. Once referenced by an experiment, the hash is
-    permanent (D-03).
+    seven-key snapshot, plus `exit_slippage_rate` when present. Numeric
+    values enter the hash as canonical text (equivalent spellings agree,
+    D-15). Once referenced by an experiment, the hash is permanent (D-03).
     """
 
     fee_rate_entry: Decimal
@@ -160,12 +219,7 @@ class CostModel:
         # Compute cost_model_hash if not provided; VERIFY it if provided
         # (CR-09): a non-empty hash copied from different cost assumptions
         # must fail closed, never silently poison experiment identity.
-        hash_keys = (
-            (*COST_KEYS, *OPTIONAL_COST_KEYS)
-            if self.exit_slippage_rate is not None
-            else COST_KEYS
-        )
-        expected_hash = sha256_hex({k: getattr(self, k) for k in hash_keys})
+        expected_hash = sha256_hex(_cost_hash_payload(self))
         if self.cost_model_hash == "":
             object.__setattr__(self, "cost_model_hash", expected_hash)
         elif self.cost_model_hash != expected_hash:
@@ -177,6 +231,23 @@ class CostModel:
 # --------------------------------------------------------------------------- #
 # build_cost_model — read cost keys from a dict (fixture or ParameterSet).
 # --------------------------------------------------------------------------- #
+
+
+def cost_slice(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Slice the cost keys out of a registry parameter mapping.
+
+    Returns the seven required `COST_KEYS` plus `exit_slippage_rate` when the
+    set carries it (Phase 12 sets do; every legacy set does not). A set
+    missing a required key raises a bare `KeyError` (fail closed, never
+    defaulted): baseline-v1 and baseline-v2 take that path. This is the one
+    slice builder shared by the binding gate and the paper freeze so the
+    registry side of the cost binding is built in exactly one place.
+    """
+    sliced: dict[str, Any] = {k: params[k] for k in COST_KEYS}
+    for key in OPTIONAL_COST_KEYS:
+        if key in params:
+            sliced[key] = params[key]
+    return sliced
 
 
 def build_cost_model(cost_dict: dict[str, Any]) -> CostModel:
@@ -270,5 +341,6 @@ __all__ = [
     "CostModel",
     "build_cost_model",
     "cost_rates_from_model",
+    "cost_slice",
     "modeled_costs_per_unit",
 ]

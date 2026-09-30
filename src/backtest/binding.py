@@ -7,7 +7,7 @@ dedicated exception on hash inequality — before any record exists.
 
 Per D-02: comparison is canonical-hash-to-hash (`build_cost_model(
 registry_slice).cost_model_hash == passed.cost_model_hash`), so the
-comparison logic exists exactly once. The gate reuses `COST_KEYS` and
+comparison logic exists exactly once. The gate reuses `cost_slice` and
 `build_cost_model` from `.costs` — never re-implements hashing.
 
 Per D-03: the gate raises `CostModelBindingMismatch` (distinct from
@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from src.domain.registry import ParameterSet
 
-from .costs import COST_KEYS, CostModel, build_cost_model
+from .costs import CostModel, build_cost_model, cost_slice
 
 
 class CostModelBindingMismatch(Exception):
@@ -43,15 +43,18 @@ class CostModelBindingMismatch(Exception):
 def assert_cost_model_binds_registry(parameter_set: ParameterSet, cost_model: CostModel) -> None:
     """Return None iff `cost_model` equals the registry cost-key slice.
 
-    Builds `registry_slice = {k: parameter_set.params[k] for k in
-    COST_KEYS}`, derives the expected `CostModel` via
+    Builds `registry_slice = cost_slice(parameter_set.params)` (the seven
+    required cost keys, plus `exit_slippage_rate` when the registry set
+    carries it, so a Phase 12 set binds its stop-exit slippage rate and a
+    model missing or disagreeing on it is refused), derives the expected
+    `CostModel` via
     `build_cost_model(registry_slice)`, and compares
     `cost_model_hash` strings. Inequality raises
     `CostModelBindingMismatch` naming both hashes plus the set
     identity. Absent slice keys propagate as bare `KeyError` from
     `build_cost_model` (fail closed, never silent defaults — D-02).
     """
-    registry_slice = {k: parameter_set.params[k] for k in COST_KEYS}
+    registry_slice = cost_slice(parameter_set.params)
     expected = build_cost_model(registry_slice)
     if expected.cost_model_hash != cost_model.cost_model_hash:
         raise CostModelBindingMismatch(

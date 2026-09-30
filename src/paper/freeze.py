@@ -63,7 +63,7 @@ from pathlib import Path
 import structlog
 
 from src.backtest.binding import assert_cost_model_binds_registry
-from src.backtest.costs import COST_KEYS, CostModel, build_cost_model
+from src.backtest.costs import CostModel, build_cost_model, cost_slice
 from src.domain.canonical import sha256_hex
 from src.domain.registry import (
     REGISTRY_ROOT,
@@ -383,7 +383,7 @@ def pin_stream_epoch(
     # build is the registry-binding check — calling build_cost_model
     # on the registry slice always succeeds if the keys are present,
     # so we just call it here to surface the KeyError path.
-    registry_slice = {k: parameter_set.params[k] for k in COST_KEYS}
+    registry_slice = cost_slice(parameter_set.params)
     build_cost_model(registry_slice)
 
     # If the caller supplied a cost model, verify it binds the

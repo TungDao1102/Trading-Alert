@@ -3,8 +3,8 @@
 Per D-05: match-case fixtures must hash against the registry slice;
 mismatch cases (wrong fee, wrong string) raise CostModelBindingMismatch;
 an equivalent numeric spelling (the former "precision drift" case) now
-binds because cost identity is canonical numeric text (Phase 12, D-15). Phase6 fixtures are grandfathered per D-05
-and are NOT used here.
+binds because cost identity is canonical numeric text (Phase 12, D-15).
+Phase6 fixtures are grandfathered per D-05 and are NOT used here.
 
 This module is the GREEN phase of the Phase 7.1 binding gate — it pins
 the match-case behavior (gate accepts a registry-consistent pair and
