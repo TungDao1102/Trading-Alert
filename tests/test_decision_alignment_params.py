@@ -42,7 +42,7 @@ def test_reference_tables_cover_ten_old_and_five_new_sets() -> None:
     assert set(gate.PRE_PHASE_FILE_SHA256) == set(gate.PRE_PHASE_HASHES)
     assert len(gate.NEW_SET_IDS) == 5
     assert set(gate.NEW_SET_IDS).isdisjoint(gate.PRE_PHASE_HASHES)
-    assert len(gate.load_pins()) == 15
+    assert len(gate.load_pins()) == 16
 
 
 def test_pa01_passes_on_copy(params_copy: Path) -> None:
@@ -51,9 +51,9 @@ def test_pa01_passes_on_copy(params_copy: Path) -> None:
 
 def test_pa01_unpinned_extra_file_fails(params_copy: Path) -> None:
     src = params_copy / "range-mr" / "baseline-v4.toml"
-    shutil.copyfile(src, params_copy / "range-mr" / "baseline-v5.toml")
+    shutil.copyfile(src, params_copy / "range-mr" / "baseline-v9.toml")
     problems = gate.check_pins(params_copy, gate.load_pins())
-    assert any("range-mr/baseline-v5" in p and "no pinned hash" in p for p in problems)
+    assert any("range-mr/baseline-v9" in p and "no pinned hash" in p for p in problems)
 
 
 def test_pa01_orphan_pin_fails(params_copy: Path) -> None:

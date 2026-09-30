@@ -1,0 +1,70 @@
+# params/trend-pullback/baseline-v5.toml
+#
+# Phase 12 - fee and cost model correctness (D046) candidate set.
+#
+# Supersedes baseline-v4 (Phase 11). baseline-v4 stays byte-identical for
+# reproducing past hashes (F-810); do not mutate. New behaviour means a new
+# set and a strategy-version bump (D-04, D-06).
+#
+# Changes versus baseline-v4 (every other key, value and order is unchanged):
+#   - exit_slippage_rate 0.0003: a 3 bps stop-market exit. It is separate from
+#     the entry-side expected_slippage (0.0001) because a stop-market order
+#     fills worse than a limit order; 3 bps sits inside the audit 2-5 bps range
+#     and RESEARCH_PROTOCOL sets no numeric stress convention that overrides
+#     it. Never tuned after seeing results (D-06).
+#   - min_stop_distance_rate 0.003: a stop closer than 0.3 percent of price is
+#     rejected before sizing as STOP_TOO_TIGHT (D-07).
+#   - max_cost_to_risk 0.15: a trade whose modeled round-trip cost exceeds 15
+#     percent of its risk amount is rejected as COST_TO_RISK_EXCEEDED. At the
+#     14 bps modeled round trip this ceiling implies a minimum stop of about
+#     0.79 percent of price, which dominates the 0.3 percent floor above. The
+#     implication is recorded for ratification in D046 (D-07).
+#   - commission_rate_ttl_seconds 3600: one hour, matching
+#     constraint_snapshot_ttl_seconds, because a fee tier changes on a 30-day
+#     volume basis (D-11).
+
+schema_version = 1
+
+[strategy]
+strategy_id = "trend-pullback"
+strategy_version = "v4.0.0"
+
+[parameters]
+# Inherited from baseline-v4 (non-cost params unchanged).
+swing_lookback = 20
+zone_tolerance_atr = 0.5
+breakout_confirmation_bars = 3
+entry_buffer_atr = 0.1
+sl_buffer_atr = 0.2
+minimum_rr = 2.0
+signal_expiry_hours = 4
+risk_rate = 0.005
+minimum_risk_utilization_after_rounding = 0.6
+
+# Phase 5 D-05 additions (mirror baseline-v4 exactly).
+max_open_positions = 2
+max_aggregate_open_risk = 0.01          # 1.0%
+cluster_cap = 0.005                     # single-trade risk_rate
+# Daily PnL state machine (RISK_MANAGEMENT §8).
+daily_loss_warning_threshold = 0.005    # WARNING at 50% of stop
+daily_loss_stop_threshold = 0.01        # DAILY_STOP at 1.0% of equity
+# Cost model keys (RISK_MANAGEMENT §3) - Phase-6-compatible.
+fee_rate_entry = 0.0005                 # 5 bps taker (D036)
+fee_rate_exit = 0.0005                  # 5 bps taker
+expected_slippage = 0.0001              # 1 bps
+# Constraint-snapshot freshness (RISK_MANAGEMENT §12).
+constraint_snapshot_ttl_seconds = 3600  # 1 hour
+
+# Extended cost-model keys (all 7 COST_KEYS).
+funding_treatment = "ADDITIVE"
+slippage_model = "FIXED_BPS"
+spread_fill_assumptions = "FULL_FILL"
+# Full fills for canonical sets (D038); TOML 1.0 normalises to int 1.
+partial_fill_fraction = 1.0
+# Protective-trigger price source (D037). Not a cost key.
+working_type = "MARK_PRICE"
+# Phase 12 additions (D046).
+exit_slippage_rate = 0.0003             # 3 bps stop-market exit (D-06)
+min_stop_distance_rate = 0.003          # 0.3% of price minimum stop distance (D-07)
+max_cost_to_risk = 0.15                 # round-trip cost <= 15% of risk amount (D-07)
+commission_rate_ttl_seconds = 3600      # 1 hour commission-rate freshness (D-11)

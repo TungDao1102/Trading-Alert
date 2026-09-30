@@ -113,8 +113,31 @@ STRATEGY_KEYS = frozenset(
         # NOTE: check_strategy_key_outside_registry now also rejects ambient
         # config named working_type; runtime configuration must use another name.
         "working_type",
+        # Phase 12 (D-06, D-07, D-11). Optional: absent in sets that predate
+        # Phase 12, like working_type, so every older set keeps loading and
+        # keeps its parameter_set_hash.
+        #   exit_slippage_rate          stop-market exit slippage, separate from the
+        #                               entry-side expected_slippage (D-06). Deliberately
+        #                               NOT a member of the 7-key COST_KEYS tuple;
+        #                               plan 12-03 adds it to the cost model presence-driven.
+        #   min_stop_distance_rate      minimum stop distance as a fraction of price (D-07)
+        #   max_cost_to_risk            ceiling on round-trip cost over risk amount (D-07)
+        #   commission_rate_ttl_seconds freshness window of the account commission rate (D-11)
+        "exit_slippage_rate",
+        "min_stop_distance_rate",
+        "max_cost_to_risk",
+        "commission_rate_ttl_seconds",
     }
 )
+
+# Fee and slippage rates are decimal fractions of notional (0.0005 is 5 bps). A value
+# above this ceiling is a unit error (a fee of 2 typed for 0.0002, a percent or bps
+# figure) and is refused at load (D-04, F-028). 0.01 is 100 bps, far above any real
+# Binance fee tier or modeled slippage.
+RATE_UNIT_KEYS = frozenset(
+    {"fee_rate_entry", "fee_rate_exit", "expected_slippage", "exit_slippage_rate"}
+)
+MAX_RATE = Decimal("0.01")
 
 # Closed set of admissible working_type values (D037). Anything else, e.g. LAST or
 # CONTRACT_PRICE, fails closed at load. Only MARK_PRICE is admitted because live
@@ -275,6 +298,8 @@ INT_KEYS = frozenset(
         # Phase 5 D-05 additions — count-like keys (Pitfall 5).
         "max_open_positions",
         "constraint_snapshot_ttl_seconds",
+        # Phase 12 (D-11): commission-rate freshness window, seconds.
+        "commission_rate_ttl_seconds",
     }
 )
 # Phase 6 plan 06-02 — string-valued cost-model keys (D-02 + Pitfall 7).
@@ -290,6 +315,38 @@ STRING_KEYS = frozenset(
     }
 )
 DECIMAL_KEYS = STRATEGY_KEYS - INT_KEYS - STRING_KEYS
+
+
+def _check_value_range(key: str, value: Any, path: Path) -> None:
+    """Raise StrategyKeyOutsideRegistry on unit errors and out-of-range guard values.
+
+    Only int / Decimal values reach this point (bool and wrong types were rejected
+    by the per-type branches of `_check_param_types`).
+    """
+    number = Decimal(value)
+    if key in RATE_UNIT_KEYS:
+        if number < 0 or number > MAX_RATE:
+            raise StrategyKeyOutsideRegistry(
+                f"{path}: parameter {key!r} = {value} is a unit error: rates are "
+                f"decimal fractions within 0 and {MAX_RATE} (0.0005 is 5 bps), "
+                f"not percentages or whole numbers (F-028, D-04)"
+            )
+    elif key == "min_stop_distance_rate":
+        if not (Decimal(0) < number < Decimal(1)):
+            raise StrategyKeyOutsideRegistry(
+                f"{path}: parameter {key!r} = {value} must be within the open "
+                f"interval (0, 1) as a fraction of price (D-07)"
+            )
+    elif key == "max_cost_to_risk":
+        if not (Decimal(0) < number <= Decimal(1)):
+            raise StrategyKeyOutsideRegistry(
+                f"{path}: parameter {key!r} = {value} must be within (0, 1] as a "
+                f"fraction of the risk amount (D-07)"
+            )
+    elif key == "commission_rate_ttl_seconds" and number <= 0:
+        raise StrategyKeyOutsideRegistry(
+            f"{path}: parameter {key!r} = {value} must be greater than 0 seconds (D-11)"
+        )
 
 
 def _check_param_types(params: dict[str, Any], path: Path) -> None:
@@ -322,6 +379,8 @@ def _check_param_types(params: dict[str, Any], path: Path) -> None:
                     f"{path}: parameter {key!r} must be Decimal or int, "
                     f"got {type(value).__name__}"
                 )
+        if key in INT_KEYS or key in DECIMAL_KEYS:
+            _check_value_range(key, value, path)
 
 
 def _check_ascii_keys(params: dict[str, Any], path: Path) -> None:

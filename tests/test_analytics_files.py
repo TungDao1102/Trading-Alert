@@ -56,7 +56,7 @@ _FAMILIES = ("breakout-retest", "range-mr", "trend-pullback")
 _EXPECTED_CANDIDATE_IDS = {
     "breakout-retest": ("baseline-v1", "baseline-v2", "baseline-v3", "baseline-v4"),
     "range-mr": ("baseline-v1", "baseline-v2", "baseline-v4"),
-    "trend-pullback": ("baseline-v1", "baseline-v2", "baseline-v3", "baseline-v4"),
+    "trend-pullback": ("baseline-v1", "baseline-v2", "baseline-v3", "baseline-v4", "baseline-v5"),
 }
 _BASELINE_IDS = ("baseline-no-trade-v1", "baseline-simple-trend-v1")
 
