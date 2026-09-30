@@ -26,11 +26,14 @@ no wall clock is read.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final, Protocol
 
@@ -63,6 +66,23 @@ DEPTH_EXTENSION_NOTE: Final = (
     "Extending 1m history to 24 months through the Binance archive is a user "
     "decision to take after reading this report (D-21); the default stays 12 months."
 )
+
+# Protocol split (RESEARCH_PROTOCOL 1.1.0, D043): the first 40% of the dataset by
+# time is Development, the next 40% is four equal Validation folds, the last 20%
+# is the holdout. Edges are `start + span * percent // 100` in integer ms.
+SPLIT_PERCENTS: Final = (0, 40, 50, 60, 70, 80, 100)
+SPLIT_NAMES: Final = (
+    "development",
+    "validation_fold_1",
+    "validation_fold_2",
+    "validation_fold_3",
+    "validation_fold_4",
+    "holdout",
+)
+# A trade row whose last stored days are all flat zero-trade bars is warned about
+# (a delivered contract's synthetic tail, research Pitfall 1); it is not a failure.
+FLAT_TAIL_DAYS: Final = 3
+_ONE_MINUTE_MS: Final = 60_000
 
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 _DAY_MS: Final = 86_400_000
@@ -153,6 +173,18 @@ def _ceil_to_step(ms: int, step_ms: int) -> int:
     return -(-ms // step_ms) * step_ms
 
 
+def split_boundaries(dataset_start_ms: int, dataset_end_ms: int) -> list[tuple[str, int, int]]:
+    """The six protocol blocks (name, start_ms, end_ms) over the dataset timeline.
+
+    Contiguous, in `SPLIT_NAMES` order, covering [start, end) exactly.
+    """
+    span = dataset_end_ms - dataset_start_ms
+    if span <= 0:
+        raise ValueError("dataset end must be after dataset start")
+    edges = [dataset_start_ms + span * percent // 100 for percent in SPLIT_PERCENTS]
+    return [(name, edges[i], edges[i + 1]) for i, name in enumerate(SPLIT_NAMES)]
+
+
 def _from_ms(ms: int) -> datetime:
     return _EPOCH + timedelta(milliseconds=ms)
 
@@ -203,6 +235,27 @@ def _count_in(open_ms: pl.Series, lo_ms: int, hi_ms: int) -> int:
     return int(((open_ms >= lo_ms) & (open_ms < hi_ms)).sum())
 
 
+def _has_flat_tail(files: Sequence[Path]) -> bool:
+    """True when the last `FLAT_TAIL_DAYS` stored days hold only flat zero-trade bars."""
+    tail = list(files[-FLAT_TAIL_DAYS:])
+    if len(tail) < FLAT_TAIL_DAYS:
+        return False
+    frame = pl.read_parquet(
+        [str(p) for p in tail],
+        columns=["trade_count", "open", "high", "low", "close"],
+        hive_partitioning=False,
+    )
+    if frame.height == 0:
+        return False
+    flat = (
+        (pl.col("trade_count") == 0)
+        & (pl.col("open") == pl.col("high"))
+        & (pl.col("high") == pl.col("low"))
+        & (pl.col("low") == pl.col("close"))
+    )
+    return bool(frame.select(flat.all()).item())
+
+
 # --------------------------------------------------------------------------- #
 # Rows.
 # --------------------------------------------------------------------------- #
@@ -223,6 +276,7 @@ def _build_row(raw_root: Path, window: WindowLike, source: str | None) -> Suffic
         expected: int = 0,
         have: int = 0,
         gaps: tuple[GapRange, ...] = (),
+        flat_tail: bool = False,
     ) -> SufficiencyRow:
         return SufficiencyRow(
             dataset=window.dataset,
@@ -236,7 +290,7 @@ def _build_row(raw_root: Path, window: WindowLike, source: str | None) -> Suffic
             missing_bars=max(expected - have, 0),
             cause=cause,
             gaps=gaps,
-            flat_tail=False,
+            flat_tail=flat_tail,
         )
 
     if window.cause == "NOT_LISTED_IN_RANGE":
@@ -273,9 +327,57 @@ def _build_row(raw_root: Path, window: WindowLike, source: str | None) -> Suffic
             end_utc=_from_ms(end),
         )
     )
+    flat_tail = window.dataset == "trade" and _has_flat_tail(files)
     if gaps:
-        return row("GAP", expected=expected, have=have, gaps=gaps)
-    return row(_informational(window.cause), expected=expected, have=have)
+        return row("GAP", expected=expected, have=have, gaps=gaps, flat_tail=flat_tail)
+    return row(
+        _informational(window.cause), expected=expected, have=have, flat_tail=flat_tail
+    )
+
+
+def _split_coverage(
+    raw_root: Path,
+    windows: Sequence[WindowLike],
+    dataset_start: date,
+    dataset_end: date,
+) -> tuple[tuple[SplitCoverage, ...], bool]:
+    """1m trade coverage per protocol block, and whether depth left a block empty.
+
+    The blocks are cut on the 1h/4h dataset timeline (D-21). `expected_1m` is the
+    whole block, so a block before a symbol's 1m start shows as 0.00% instead of
+    being hidden. The extension flag is set when a block lies entirely before the
+    1m window start of a symbol that was not onboard-limited and holds no 1m bar.
+    """
+    blocks = split_boundaries(_day_start_ms(dataset_start), _day_start_ms(dataset_end))
+    lo, hi = blocks[0][1], blocks[-1][2]
+    coverage: list[SplitCoverage] = []
+    depth_limited = False
+    seen: set[str] = set()
+    for w in windows:
+        if w.dataset != "trade" or w.interval != "1m" or w.symbol in seen:
+            continue
+        seen.add(w.symbol)
+        open_ms = _open_times_ms(_day_files(raw_root, "trade", "1m", w.symbol, lo, hi))
+        for name, b_start, b_end in blocks:
+            have = _count_in(open_ms, b_start, b_end)
+            coverage.append(
+                SplitCoverage(
+                    symbol=w.symbol,
+                    block=name,
+                    start_utc=_iso(b_start),
+                    end_utc=_iso(b_end),
+                    expected_1m=expected_bar_count(b_start, b_end, _ONE_MINUTE_MS),
+                    have_1m=have,
+                )
+            )
+            if (
+                have == 0
+                and w.start_ms is not None
+                and w.cause != "ONBOARD_LIMITED"
+                and b_end <= w.start_ms
+            ):
+                depth_limited = True
+    return tuple(coverage), depth_limited
 
 
 def build_sufficiency_report(
@@ -292,6 +394,9 @@ def build_sufficiency_report(
     rows = tuple(
         _build_row(raw_root, w, sources.get((w.dataset, w.symbol))) for w in windows
     )
+    split_coverage, depth_limited = _split_coverage(
+        raw_root, windows, dataset_start, dataset_end
+    )
     return SufficiencyReport(
         schema=REPORT_SCHEMA,
         run_date=run_date,
@@ -299,9 +404,9 @@ def build_sufficiency_report(
         dataset_start=dataset_start,
         dataset_end=dataset_end,
         rows=rows,
-        split_coverage=(),
+        split_coverage=split_coverage,
         trade_floor_note=TRADE_FLOOR_NOTE,
-        depth_extension_note=None,
+        depth_extension_note=DEPTH_EXTENSION_NOTE if depth_limited else None,
         missing_data=any(r.cause in MISSING_DATA_CAUSES for r in rows),
     )
 
@@ -320,6 +425,13 @@ def _gap_dict(gap: GapRange) -> dict[str, Any]:
         "end_utc": gap.end_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "missing": gap.missing,
     }
+
+
+def _percent(have: int, expected: int) -> str:
+    """`have / expected` as a percentage with two decimals, computed in Decimal."""
+    if expected <= 0:
+        return "0.00"
+    return str((Decimal(have) * 100 / Decimal(expected)).quantize(Decimal("0.01")))
 
 
 def report_to_dict(report: SufficiencyReport) -> dict[str, Any]:
@@ -407,6 +519,26 @@ def render_report_table(report: SufficiencyReport) -> str:
                 f"  GAP {r.dataset} {r.symbol} {r.interval} "
                 f"... {len(r.gaps) - _MAX_GAPS_PRINTED} more"
             )
+    for r in report.rows:
+        if r.flat_tail:
+            lines.append(
+                f"WARNING: {r.dataset} {r.symbol} {r.interval} - the last {FLAT_TAIL_DAYS} "
+                "stored days hold only flat zero-trade bars"
+            )
+    if report.split_coverage:
+        lines.append(
+            "1m coverage by protocol split block "
+            "(40% Development, four 10% Validation folds, 20% holdout; "
+            "blocks cut on the 1h/4h dataset timeline):"
+        )
+        for c in report.split_coverage:
+            pct = _percent(c.have_1m, c.expected_1m)
+            lines.append(
+                f"  split {c.symbol} {c.block} {c.start_utc}..{c.end_utc} "
+                f"expected {c.expected_1m} have {c.have_1m} ({pct}%)"
+            )
+    if report.depth_extension_note is not None:
+        lines.append(f"NOTE: {report.depth_extension_note}")
     lines.append(f"NOTE: {report.trade_floor_note}")
     return "\n".join(lines)
 
@@ -487,6 +619,16 @@ def validate_report_file(path: Path) -> list[str]:
             problems.append(f"rows[{index}] bar counts must be integers")
         elif missing != max(expected - have, 0):
             problems.append(f"rows[{index}] missing_bars is not expected_bars - have_bars")
+    split = doc.get("split_coverage")
+    if not isinstance(split, list):
+        problems.append("split_coverage must be a list")
+    else:
+        keys = ("symbol", "block", "start_utc", "end_utc", "expected_1m", "have_1m")
+        for index, item in enumerate(split):
+            if not isinstance(item, dict) or any(k not in item for k in keys):
+                problems.append(f"split_coverage[{index}] lacks required keys")
+            elif item["block"] not in SPLIT_NAMES:
+                problems.append(f"split_coverage[{index}] has unknown block {item['block']!r}")
     if rows and doc.get("missing_data") is not any_missing:
         problems.append("missing_data does not match the row causes")
     if doc.get("trade_floor_note") != TRADE_FLOOR_NOTE:
@@ -495,3 +637,37 @@ def validate_report_file(path: Path) -> list[str]:
     if note is not None and note != DEPTH_EXTENSION_NOTE:
         problems.append("depth_extension_note is not the D-21 statement")
     return problems
+
+
+# --------------------------------------------------------------------------- #
+# CLI: `python -m src.data.sufficiency validate <report.json>`.
+# --------------------------------------------------------------------------- #
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Validate a written report: exit 0 valid, 1 invalid, 2 usage."""
+    parser = argparse.ArgumentParser(
+        prog="python -m src.data.sufficiency",
+        description=(
+            "Data-sufficiency report tools. The report itself is produced by "
+            "`python -m src.data.backfill_cli --report-out PATH`."
+        ),
+    )
+    sub = parser.add_subparsers(dest="command")
+    validate = sub.add_parser("validate", help="Validate a written data-sufficiency report.")
+    validate.add_argument("path", type=Path, help="Report JSON written by --report-out.")
+    args = parser.parse_args(argv)
+    if args.command != "validate":
+        parser.print_help(sys.stderr)
+        return 2
+    problems = validate_report_file(args.path)
+    if problems:
+        for problem in problems:
+            print(f"sufficiency: INVALID {args.path.as_posix()}: {problem}", file=sys.stderr)
+        return 1
+    print(f"sufficiency: {args.path.as_posix()} is a valid {REPORT_SCHEMA} report")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

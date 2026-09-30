@@ -479,7 +479,8 @@ def test_validate_subcommand(
     from src.data.sufficiency import main, write_report_json
 
     good = tmp_path / "good.json"
-    write_report_json(_split_report(tmp_path, data_start=_ms(2026, 9, 3), data_end=_ms(2026, 9, 8)), good)
+    report = _split_report(tmp_path, data_start=_ms(2026, 9, 3), data_end=_ms(2026, 9, 8))
+    write_report_json(report, good)
     doc = json.loads(good.read_text(encoding="utf-8"))
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps({**doc, "schema": "other/9", "rows": []}), encoding="utf-8")
