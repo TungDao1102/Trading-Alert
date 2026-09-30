@@ -120,22 +120,18 @@ class SystemMode(str, Enum):
 
 
 class RejectionReason(str, Enum):
-    """GLOSSARY §9 — Canonical rejection reasons.
+    """GLOSSARY §9 — Canonical rejection reasons (20 members).
 
     Do not create synonyms such as `Skipped-User`, `USER_SKIPPED`, and
     `SKIPPED_USER` in different modules. Use the canonical enum names
-    above.
+    above. The five aliases retired in Phase 12 (GLOSSARY 9.2) must not
+    return.
     """
 
     NO_TRADE_REGIME = "NO_TRADE_REGIME"
     RR_TOO_LOW = "RR_TOO_LOW"
     STALE_SETUP = "STALE_SETUP"
     INVALIDATED = "INVALIDATED"
-    RISK_LIMIT = "RISK_LIMIT"
-    CORRELATED_RISK_LIMIT = "CORRELATED_RISK_LIMIT"
-    DAILY_STOP = "DAILY_STOP"
-    QUANTIZATION_REJECT = "QUANTIZATION_REJECT"
-    MIN_NOTIONAL_REJECT = "MIN_NOTIONAL_REJECT"
     INSUFFICIENT_MARGIN = "INSUFFICIENT_MARGIN"
     EXCHANGE_CONSTRAINT = "EXCHANGE_CONSTRAINT"
     DATA_STALE = "DATA_STALE"
@@ -154,6 +150,9 @@ class RejectionReason(str, Enum):
     DAILY_STOP_BLOCK = "DAILY_STOP_BLOCK"
     STALE_CONSTRAINTS = "STALE_CONSTRAINTS"
     UNCERTAIN_ACCOUNT_STATE = "UNCERTAIN_ACCOUNT_STATE"
+    # Phase 12 D-08 cost-guard codes (GLOSSARY 9.1, D046): emitted before quantization.
+    STOP_TOO_TIGHT = "STOP_TOO_TIGHT"
+    COST_TO_RISK_EXCEEDED = "COST_TO_RISK_EXCEEDED"
 
 
 class DailyState(str, Enum):

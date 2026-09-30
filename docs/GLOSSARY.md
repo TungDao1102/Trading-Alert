@@ -149,7 +149,7 @@ INSUFFICIENT_EDGE
 
 ## 9. Canonical rejection reasons
 
-This section is the source of truth for rejection reason codes (D016, D031, audit F-110). One canonical code per concept: the 17 codes that production code references (`RejectionReason.X` in `src/`, derived by scan, gate GL-02) plus the reserved `INSUFFICIENT_MARGIN`. Five synonyms that still exist as `RejectionReason` members are listed as deprecated aliases in 9.2. No code is renamed in Phase 11; the enum cleanup is a recorded follow-up (D044).
+This section is the source of truth for rejection reason codes (D016, D031, audit F-110). One canonical code per concept: the 17 codes that production code referenced before Phase 12 (`RejectionReason.X` in `src/`, derived by scan, gate GL-02), the reserved `INSUFFICIENT_MARGIN`, and the two Phase 12 cost-guard codes `STOP_TOO_TIGHT` and `COST_TO_RISK_EXCEEDED` (D046). The block in 9.1 equals the `RejectionReason` enum (20 members, gate GL-03). The five synonyms that used to exist as members are retired and recorded in 9.2.
 
 ### 9.1 Canonical codes
 
@@ -172,23 +172,27 @@ DAILY_STOP_BLOCK
 STALE_CONSTRAINTS
 UNCERTAIN_ACCOUNT_STATE
 INSUFFICIENT_MARGIN
+STOP_TOO_TIGHT
+COST_TO_RISK_EXCEEDED
 ```
 
 `INSUFFICIENT_MARGIN` is reserved: no code emits it yet; it is first emitted by the Phase 22 margin guard.
 
-### 9.2 Deprecated aliases
+`STOP_TOO_TIGHT` means the stop distance divided by the sizing entry price is below the registry `min_stop_distance_rate`; `COST_TO_RISK_EXCEEDED` means the round-trip modeled cost divided by `risk_per_unit` is above the registry `max_cost_to_risk`. Both are emitted before quantization (D-07).
 
-These members remain in `RejectionReason` and in `tests/test_domain_enums.py` until the enum cleanup (owner: Phase 12). New code must use the canonical replacement. The union of 9.1 and this table equals the `RejectionReason` enum (23 members, gate GL-03).
+### 9.2 Retired aliases (removed in Phase 12)
 
-| Alias | Canonical replacement | Cleanup owner |
-|-------|-----------------------|---------------|
-| `QUANTIZATION_REJECT` | `MIN_QTY_REJECT` or `UTILIZATION_REJECT` | Phase 12 |
-| `MIN_NOTIONAL_REJECT` | `NOTIONAL_REJECT` | Phase 12 |
-| `RISK_LIMIT` | `AGGREGATE_CAP_REJECT` or `MAX_POSITIONS_REJECT` | Phase 12 |
-| `CORRELATED_RISK_LIMIT` | `CLUSTER_CAP_REJECT` | Phase 12 |
-| `DAILY_STOP` | `DAILY_STOP_BLOCK` when used as a rejection reason | Phase 12 |
+These five names were removed from `RejectionReason` and from `tests/test_domain_enums.py` in Phase 12 (D-09, D044 follow-up 1). New code must use the replacement. The table records the removal only: it declares no enum member, and gates GL-01 and GL-03 fail if a retired name re-enters the enum or the 9.1 block. The 9.1 block equals the `RejectionReason` enum (20 members, gate GL-03).
 
-`DAILY_STOP` remains a valid `DailyState` value (section 8.1); only its use as a rejection reason is deprecated.
+| Removed name | Use instead | Removed in |
+|--------------|-------------|------------|
+| `QUANTIZATION_REJECT` | `MIN_QTY_REJECT` or `UTILIZATION_REJECT` | Phase 12 (D046) |
+| `MIN_NOTIONAL_REJECT` | `NOTIONAL_REJECT` | Phase 12 (D046) |
+| `RISK_LIMIT` | `AGGREGATE_CAP_REJECT` or `MAX_POSITIONS_REJECT` | Phase 12 (D046) |
+| `CORRELATED_RISK_LIMIT` | `CLUSTER_CAP_REJECT` | Phase 12 (D046) |
+| `DAILY_STOP` | `DAILY_STOP_BLOCK` when used as a rejection reason | Phase 12 (D046) |
+
+`DAILY_STOP` remains a valid `DailyState` value (section 8.1); only its use as a rejection reason is retired.
 
 ### 9.3 Plain-string codes emitted outside RejectionReason
 
