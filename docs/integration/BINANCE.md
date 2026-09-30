@@ -106,3 +106,13 @@ reconnect
 API key must not have withdrawal permissions.
 
 Prefer IP restrictions and secret storage outside source control.
+
+## 12. Account commission rate
+
+Live sizing must not use a modeled fee that could sit below the account's real fee tier (F-962). The adapter reads the account's rate per symbol with `GET /fapi/v1/commissionRate` (USER_DATA, signed; request weight 20 on the IP limit; parameters `symbol` required and `recvWindow` optional; response fields `symbol`, `makerCommissionRate`, `takerCommissionRate` and `rpiCommissionRate`, all strings) through the official SDK method `user_commission_rate`. [Binance User Commission Rate](https://developers.binance.com/docs/derivatives/usds-margined-futures/account/rest-api/User-Commission-Rate) Verify against current Binance docs before implementation: the official page was reached only through search-result text, the installed SDK 17.4.0 and the change-log (see `SOURCES.md`, "Facts verified for Phase 12"), and the behavior of the endpoint on Binance Demo or testnet is not documented in any retrieved material and is verified in the Phase 24 demo stage.
+
+Sizing rule (D-10, D036): live sizing uses `max(parameter rate, account taker rate)` per side. Entry and the protective stop exit are both taker fills, so the account taker rate applies to both sides; the maker rate is read and validated but not used for sizing, and the `rpiCommissionRate` field is ignored. The BNB fee discount is ignored in sizing (F-031): the modeled cost is never reduced below the versioned parameter rate. A real account rate of 0 is legitimate and is floored by the parameter rate. The resulting rates carry the fee source `ACCOUNT_MAX`.
+
+Fail-closed rule (D-11): if the account rate is missing, older than `commission_rate_ttl_seconds` (baseline 3600 seconds), dated in the future, for a different symbol, or malformed, live entries are NO_TRADE with reason `UNCERTAIN_ACCOUNT_STATE`. The adapter raises on any malformed field and never returns 0 for an unknown rate; the resolver never sizes with zero and never silently falls back to the parameter rate, because the parameter rate is a floor and not a substitute for an unknown account state.
+
+Backtest and paper keep the versioned parameter fees so a run stays reproducible from the parameter-set hash (D-12). The scheduler and cache refresh loop that keep the account rate fresh at runtime are Phase 24 work (D-13); Phase 12 adds only the adapter method and the pure resolution.
