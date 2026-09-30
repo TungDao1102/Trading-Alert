@@ -18,7 +18,11 @@ Async / sync split:
   - The DB writes are SYNC (`session.merge`, `session.commit`) — they
     run inline inside the async function on the same event loop. SQLAlchemy
     is thread-safe at the session level, and the V1 loop is single-threaded.
-  - Parquet writes are SYNC (Polars is sync).
+  - Parquet writes are SYNC (Polars is sync). Every tick file (OI, OI
+    research, funding) is published through `store.atomic_write_parquet`
+    (F-408): temp file, fsync, `os.replace`, so a crash mid-write leaves
+    neither a torn tick file nor a stray temp file, and an existing file is
+    never overwritten (D-04).
 
 The collector is intentionally NOT a single asyncio Task class — the
 loop is owned by `main()` below (`python -m src.data.collector` runs
@@ -65,6 +69,7 @@ from src.data.collect_list import (
     CollectListError,
     load_collect_list,
 )
+from src.data.store import atomic_write_parquet
 from src.db.models import TICK_WIDE_SYMBOL, CollectorGap, CollectorWatermark
 
 log = structlog.get_logger()
@@ -232,7 +237,7 @@ def _write_oi_snapshot(snap: OiSnapshot, raw_root: Path) -> Path:
         ],
         schema=_OI_SCHEMA,
     )
-    df.write_parquet(path)
+    atomic_write_parquet(df, path)
     return path
 
 
@@ -262,7 +267,7 @@ def _write_oi_research_snapshot(snap: OiSnapshot, raw_root: Path) -> Path:
         ],
         schema=_OI_SCHEMA,
     )
-    df.write_parquet(path)
+    atomic_write_parquet(df, path)
     return path
 
 
@@ -292,7 +297,7 @@ def _write_funding_tick(tick: FundingTick, raw_root: Path) -> Path:
         ],
         schema=_FUNDING_SCHEMA,
     )
-    df.write_parquet(path)
+    atomic_write_parquet(df, path)
     return path
 
 
