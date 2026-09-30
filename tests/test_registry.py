@@ -1087,3 +1087,18 @@ def test_baseline_v5_matches_phase12(strategy_id: str, predecessor: str, set_id:
     assert set(params) - set(old) == set(_PHASE12_FROZEN)
     for key in old:
         assert params[key] == old[key], key
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["risk_rate", "minimum_rr", "max_cost_to_risk", "exit_slippage_rate", "min_stop_distance_rate"],
+)
+@pytest.mark.parametrize("bad", [Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")])
+def test_non_finite_numeric_keys_raise_registry_exception(
+    tmp_path: Path, key: str, bad: Decimal
+) -> None:
+    """12-REVIEW WR-04: NaN/Infinity raise StrategyKeyOutsideRegistry, never InvalidOperation."""
+    from src.domain.registry import _check_param_types
+
+    with pytest.raises(StrategyKeyOutsideRegistry, match="must be finite"):
+        _check_param_types({key: bad}, tmp_path / "test.toml")

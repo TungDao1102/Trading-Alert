@@ -324,6 +324,13 @@ def _check_value_range(key: str, value: Any, path: Path) -> None:
     by the per-type branches of `_check_param_types`).
     """
     number = Decimal(value)
+    # 12-REVIEW WR-04: NaN and Infinity must never load, for any numeric key.
+    # Without this, NaN compares raise decimal.InvalidOperation (wrong
+    # exception) and unranged keys (risk_rate, minimum_rr) accept them.
+    if not number.is_finite():
+        raise StrategyKeyOutsideRegistry(
+            f"{path}: parameter {key!r} must be finite, got {value}"
+        )
     if key in RATE_UNIT_KEYS:
         if number < 0 or number > MAX_RATE:
             raise StrategyKeyOutsideRegistry(
