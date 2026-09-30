@@ -36,7 +36,15 @@ jobs:
             exit 1
           fi
 
-          # Witness 2: DOC_STATUS.md must list the protocol under ## Stable / canonical and not still mark it pending-freeze or DRAFT.
+          # Version binding (D-02): the version V is read from the header; witnesses 2 and 3 must name that same V.
+          VER=$(sed -nE 's/^>\s*\*\*Protocol version:\*\*\s*v([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' "$PROTOCOL" | head -1)
+          if [ -z "$VER" ]; then
+            echo "::error::$PROTOCOL header does not carry a Protocol version line (> **Protocol version:** vX.Y.Z)"
+            exit 1
+          fi
+          VER_RE=$(printf '%s' "$VER" | sed 's/\./\\./g')
+
+          # Witness 2: DOC_STATUS.md must list the protocol under ## Stable / canonical at version V and not still mark it pending-freeze or DRAFT.
           if ! grep -E "research/RESEARCH_PROTOCOL\.md" docs/DOC_STATUS.md >/dev/null; then
             echo "::error::docs/DOC_STATUS.md does not list research/RESEARCH_PROTOCOL.md"
             exit 1
@@ -45,14 +53,18 @@ jobs:
             echo "::error::docs/DOC_STATUS.md still tags research/RESEARCH_PROTOCOL.md as pending-freeze or DRAFT"
             exit 1
           fi
-
-          # Witness 3: DECISIONS.md must have a freeze row referencing protocol v1.0.0 frozen / RESEARCH_PROTOCOL frozen.
-          if ! grep -E "protocol v1\.0\.0 frozen|RESEARCH_PROTOCOL.*frozen|frozen.*RESEARCH_PROTOCOL" docs/DECISIONS.md >/dev/null; then
-            echo "::error::docs/DECISIONS.md has no protocol v1.0.0 freeze row"
+          if ! grep -E "^- \`research/RESEARCH_PROTOCOL\.md\`.*v${VER_RE}" docs/DOC_STATUS.md >/dev/null; then
+            echo "::error::docs/DOC_STATUS.md protocol index line does not name version v${VER} (header says v${VER})"
             exit 1
           fi
 
-          echo "Freeze check passed: protocol FROZEN with matching DECISIONS row + DOC_STATUS index."
+          # Witness 3: DECISIONS.md must have a freeze row for exactly protocol vV (version taken from the header).
+          if ! grep -E "protocol v${VER_RE} frozen" docs/DECISIONS.md >/dev/null; then
+            echo "::error::docs/DECISIONS.md has no 'protocol v${VER} frozen' DECISIONS row (header says v${VER})"
+            exit 1
+          fi
+
+          echo "Freeze check passed: protocol v${VER} FROZEN with matching DECISIONS row + DOC_STATUS index."
 
       - name: Identity-tuple check (experiment and backtest records must carry the six identity fields)
         id: identity
