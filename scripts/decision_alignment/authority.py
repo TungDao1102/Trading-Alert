@@ -237,6 +237,9 @@ def run() -> list[Gate]:
         check_no_hmac_claim(scanned),
         check_tradingview_scheme(_read(TRADINGVIEW_PATH)),
         check_generated_row(stack, agents, FASTAPI_ROW_PREFIX, "AU-03"),
+        check_quantization_agreement(_read(RISK_PATH), _read(PROTOCOL_PATH), project, agents),
+        check_generated_row(project, agents, QUANTIZATION_BULLET_PREFIX, "AU-05"),
+        check_no_old_order({"AGENTS.md": agents, ".planning/PROJECT.md": project}),
     ]
 
 

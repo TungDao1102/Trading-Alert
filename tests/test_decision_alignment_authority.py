@@ -137,3 +137,116 @@ def test_au03_fails_when_a_side_has_no_row() -> None:
 def test_au03_ignores_line_endings() -> None:
     row = "| FastAPI | a | b | c |"
     assert authority.check_generated_row(row + "\r\n", row + "\n", "| FastAPI |")[1]
+
+
+# --------------------------------------------------------------------------- Task 2
+
+
+def test_au04_au05_au06_pass_on_real_repository() -> None:
+    gates = {name: (ok, detail) for name, ok, detail in authority.run()}
+    assert len(gates) == 6
+    for name in ("AU-04", "AU-05", "AU-06"):
+        assert gates[name][0], f"{name}: {gates[name][1]}"
+
+
+def test_au04_positive_on_all_four_locations() -> None:
+    ok, detail = authority.check_quantization_agreement(
+        _read(RISK), _read(PROTOCOL), _read(PROJECT), _read(AGENTS)
+    )[1:]
+    assert ok, detail
+
+
+@pytest.mark.parametrize(
+    ("swap", "label"),
+    [
+        (RISK, "RISK_MANAGEMENT"),
+        (PROTOCOL, "RESEARCH_PROTOCOL"),
+        (PROJECT, "PROJECT"),
+        (AGENTS, "AGENTS"),
+    ],
+)
+def test_au04_fails_when_one_location_is_pre_change(swap: str, label: str) -> None:
+    texts = {
+        RISK: _read(RISK),
+        PROTOCOL: _read(PROTOCOL),
+        PROJECT: _read(PROJECT),
+        AGENTS: _read(AGENTS),
+    }
+    texts[swap] = _old(swap)
+    ok, detail = authority.check_quantization_agreement(
+        texts[RISK], texts[PROTOCOL], texts[PROJECT], texts[AGENTS]
+    )[1:]
+    assert not ok
+    assert label in detail
+
+
+def test_au04_fails_when_order_is_swapped() -> None:
+    swapped = (
+        "- **Quantization**: floor to stepSize -> reject below min notional -> "
+        "reject below min quantity -> reject below minimum_risk_utilization_after_rounding"
+    )
+    assert not authority.check_quantization_order(swapped, "x")[1]
+
+
+def test_au04_fails_when_utilization_check_comes_first() -> None:
+    text = "floor to stepSize, minimum_risk_utilization_after_rounding, min quantity, min notional"
+    assert not authority.check_quantization_order(text, "x")[1]
+
+
+def test_au04_accepts_minimum_spelling() -> None:
+    text = "stepSize, minimum quantity, minimum notional, minimum_risk_utilization_after_rounding"
+    assert authority.check_quantization_order(text, "x")[1]
+
+
+def test_au04_fails_on_empty_region() -> None:
+    assert not authority.check_quantization_order("", "x")[1]
+
+
+def test_au05_positive_bullet_equals_source() -> None:
+    ok, detail = authority.check_generated_row(
+        _read(PROJECT), _read(AGENTS), authority.QUANTIZATION_BULLET_PREFIX, "AU-05"
+    )[1:]
+    assert ok, detail
+
+
+def test_au05_fails_when_agents_bullet_drifts() -> None:
+    project = _read(PROJECT)
+    agents = _read(AGENTS).replace("NO_TRADE preferred over round-up", "NO_TRADE")
+    assert agents != _read(AGENTS)
+    result = authority.check_generated_row(
+        project, agents, authority.QUANTIZATION_BULLET_PREFIX, "AU-05"
+    )
+    assert result[0] == "AU-05"
+    assert not result[1]
+
+
+def test_au05_fails_on_pre_change_bullets_against_amended_source() -> None:
+    assert not authority.check_generated_row(
+        _read(PROJECT), _old(AGENTS), authority.QUANTIZATION_BULLET_PREFIX, "AU-05"
+    )[1]
+
+
+def test_au06_positive_on_amended_files() -> None:
+    files = {AGENTS: _read(AGENTS), PROJECT: _read(PROJECT)}
+    assert authority.check_no_old_order(files)[1]
+
+
+@pytest.mark.parametrize("rel", [PROJECT, AGENTS])
+def test_au06_fails_on_pre_change_text(rel: str) -> None:
+    ok, detail = authority.check_no_old_order({rel: _old(rel)})[1:]
+    assert not ok
+    assert rel in detail
+
+
+def test_au06_detects_old_phrase_with_ascii_arrow_and_wrapping() -> None:
+    text = "realized-risk check (60% baseline)\n -> min-qty/notional reject"
+    assert not authority.check_no_old_order({"x.md": text})[1]
+
+
+def test_canonical_order_line_and_protocol_block_are_extracted() -> None:
+    assert "stepSize" in authority.canonical_order_line(_read(RISK))
+    assert authority.canonical_order_line("no label here") == ""
+    block = authority.protocol_quantization_block(_read(PROTOCOL))
+    assert "stepSize" in block
+    assert "## " not in block
+    assert authority.protocol_quantization_block("nothing") == ""
