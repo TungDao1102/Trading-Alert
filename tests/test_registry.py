@@ -886,7 +886,11 @@ def test_working_type_is_not_a_cost_key() -> None:
     assert "working_type" not in COST_KEYS
 
 
-_V4_SETS = (("trend-pullback", "baseline-v4"),)
+_V4_SETS = (
+    ("trend-pullback", "baseline-v4"),
+    ("breakout-retest", "baseline-v4"),
+    ("range-mr", "baseline-v4"),
+)
 
 
 @pytest.mark.parametrize(("strategy_id", "set_id"), _V4_SETS)
@@ -913,3 +917,30 @@ def test_trend_pullback_v4_differs_from_v3_only_in_d036_d038_keys() -> None:
     assert set(v3) <= set(v4)
     for key in set(v3) - changed:
         assert v3[key] == v4[key], key
+
+
+def test_breakout_retest_v4_differs_from_v3_only_in_d036_d038_keys() -> None:
+    v3 = load_parameter_set("breakout-retest", "baseline-v3").params
+    v4 = load_parameter_set("breakout-retest", "baseline-v4").params
+    changed = {"fee_rate_entry", "partial_fill_fraction", "working_type"}
+    assert set(v4) - set(v3) == {"working_type"}
+    for key in set(v3) - changed:
+        assert v3[key] == v4[key], key
+
+
+def test_range_mr_v4_is_v2_plus_extended_cost_keys() -> None:
+    v2 = load_parameter_set("range-mr", "baseline-v2").params
+    v4 = load_parameter_set("range-mr", "baseline-v4").params
+    added = {
+        "funding_treatment",
+        "slippage_model",
+        "spread_fill_assumptions",
+        "partial_fill_fraction",
+        "working_type",
+    }
+    assert set(v4) - set(v2) == added
+    for key in set(v2) - {"fee_rate_entry"}:
+        assert v2[key] == v4[key], key
+    assert v4["funding_treatment"] == "ADDITIVE"
+    assert v4["slippage_model"] == "FIXED_BPS"
+    assert v4["spread_fill_assumptions"] == "FULL_FILL"

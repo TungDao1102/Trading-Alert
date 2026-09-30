@@ -65,6 +65,18 @@
       "parameter_set_id": "baseline-v4",
       "strategy_version": "v3.0.0",
       "parameter_set_hash": "9d2f436da58070a2365b515fa53dc56a07a74ee29e67fe2515d5762be298edc0"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "baseline-v4",
+      "strategy_version": "v3.0.0",
+      "parameter_set_hash": "57a5787feb3861ecdaf4f29f3b6ad8ee86454657928f9ce1401b7792ad575330"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "baseline-v4",
+      "strategy_version": "v3.0.0",
+      "parameter_set_hash": "c856eb3137068965644c9acfbf8ca6690f00e9b60b646c3291468f621541e5d4"
     }
   ]
 }

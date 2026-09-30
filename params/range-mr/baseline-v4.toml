@@ -1,0 +1,70 @@
+# params/range-mr/baseline-v4.toml
+#
+# Phase 11 - D036-D038 aligned candidate set.
+#
+# Supersedes baseline-v2; there is no range-mr baseline-v3, v4 aligns the name
+# with the other families (D036-D038). baseline-v2 stays byte-identical for
+# reproducing past hashes (F-810); do not mutate. New behaviour means a new set
+# and a strategy-version bump (D-04, D-06).
+#
+# Changes versus baseline-v2 (every other key, value and order is unchanged):
+#   - fee_rate_entry 0.0005 (taker): entries may fill immediately and V1 has no
+#     post-only order, so the entry leg is charged at the taker rate (D036).
+#     The 0.0005 rate is assumed equal to fee_rate_exit until Phase 12 reads
+#     the account commission rate.
+#   - the four extended cost-model keys are added so that all 7 COST_KEYS are
+#     present and build_cost_model succeeds over the registry slice, with
+#     partial_fill_fraction 1.0: full fills for all canonical sets; partial or
+#     missed fills are studied as a separate sensitivity run (D038). TOML 1.0
+#     loads 1.0 as int 1, so there is no whole-number hash trap.
+#   - working_type MARK_PRICE: protective triggers use the mark-price series
+#     (D037).
+
+schema_version = 1
+
+[strategy]
+strategy_id = "range-mr"
+strategy_version = "v3.0.0"
+
+[parameters]
+# Inherited from baseline-v2.
+swing_lookback = 20
+zone_tolerance_atr = 0.5
+breakout_confirmation_bars = 3
+entry_buffer_atr = 0.1
+sl_buffer_atr = 0.2
+minimum_rr = 2.0
+signal_expiry_hours = 4
+risk_rate = 0.005
+minimum_risk_utilization_after_rounding = 0.6
+# Family C keys (added in plan 04-03, D-05).
+zone_min_touches = 2
+zone_aging_bars = 50
+range_break_buffer_atr = 0.2
+regime_filter_lookback = 50
+atr_period = 14
+touch_tolerance_atr = 0.3
+
+# Phase 5 D-05 additions.
+# Portfolio gates (RISK_MANAGEMENT §§4-5 research baselines).
+max_open_positions = 2
+max_aggregate_open_risk = 0.01
+cluster_cap = 0.005
+# Daily PnL state machine (RISK_MANAGEMENT §8).
+daily_loss_warning_threshold = 0.005
+daily_loss_stop_threshold = 0.01
+# Cost model keys (RISK_MANAGEMENT §3) - Phase-6-compatible.
+fee_rate_entry = 0.0005                 # 5 bps taker (D036)
+fee_rate_exit = 0.0005
+expected_slippage = 0.0001
+# Constraint-snapshot freshness (RISK_MANAGEMENT §12).
+constraint_snapshot_ttl_seconds = 3600
+
+# extended cost-model keys (all 7 COST_KEYS), values as in breakout-retest
+# baseline-v3 except partial_fill_fraction 1.0
+funding_treatment = "ADDITIVE"
+slippage_model = "FIXED_BPS"
+spread_fill_assumptions = "FULL_FILL"
+partial_fill_fraction = 1.0
+# Protective-trigger price source (D037). Not a cost key.
+working_type = "MARK_PRICE"
