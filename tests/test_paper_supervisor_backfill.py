@@ -65,25 +65,36 @@ def _make_rest_kline(
 
 
 class _FakeWsAdapter:
-    def __init__(self, *, raise_on_reconnect: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        raise_on_reconnect: Exception | None = None,
+        calls: list[tuple[Any, ...]] | None = None,
+    ) -> None:
         self.subscribe_calls: list[tuple[str, str]] = []
         self.reconnect_calls: list[Any] = []
         self.close_calls: list[Any] = []
         self._raise_on_reconnect = raise_on_reconnect
+        # Optional shared call log (D-20): the WS and REST fakes append to
+        # ONE list so the test can assert cross-adapter ORDER by index.
+        self.calls: list[tuple[Any, ...]] = calls if calls is not None else []
 
     def subscribe(
         self, *, symbol: str, interval: str, on_kline: Any, stream_id: Any = None
     ) -> Any:
         self.subscribe_calls.append((symbol, interval))
-        return object()
+        self.calls.append(("subscribe", symbol, interval))
+        return (symbol, interval)
 
     def reconnect(self, handle: Any) -> None:
         self.reconnect_calls.append(handle)
+        self.calls.append(("reconnect", handle))
         if self._raise_on_reconnect is not None:
             raise self._raise_on_reconnect
 
     def close(self, handle: Any) -> None:
         self.close_calls.append(handle)
+        self.calls.append(("close", handle))
 
 
 class _FakeRestAdapter:
@@ -91,9 +102,11 @@ class _FakeRestAdapter:
         self,
         *,
         pages: dict[tuple[str, str], list[Any] | Exception] | None = None,
+        calls: list[tuple[Any, ...]] | None = None,
     ) -> None:
         self._pages = pages or {}
         self.klines_calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[Any, ...]] = calls if calls is not None else []
 
     async def klines(
         self,
@@ -104,6 +117,7 @@ class _FakeRestAdapter:
         limit: int = 1500,
     ) -> list[Any]:
         self.klines_calls.append((symbol, interval))
+        self.calls.append(("klines", symbol, interval, start_ms))
         key = (symbol, interval)
         if key in self._pages:
             response = self._pages[key]
@@ -315,3 +329,116 @@ def test_backfill_exception_yields_outage_gap_not_silence() -> None:
     assert gap["expected_utc"] == last
     assert gap["observed_utc"] == now
     assert gap["reason"].startswith("backfill_exception:")
+
+
+# --------------------------------------------------------------------------- #
+# Plan 13-03 Task 1 (D-16, D-20, F-413): backfill BEFORE resubscribe.
+# --------------------------------------------------------------------------- #
+
+_T0 = datetime(2026, 9, 19, 10, 0, tzinfo=UTC)
+_HOUR = timedelta(hours=1)
+
+
+def _three_bars() -> list[Any]:
+    return [
+        _make_rest_kline("BTCUSDT", "1h", _T0 + i * _HOUR, _T0 + (i + 1) * _HOUR)
+        for i in range(3)
+    ]
+
+
+def _indices(calls: list[tuple[Any, ...]], kind: str) -> list[int]:
+    return [i for i, c in enumerate(calls) if c[0] == kind]
+
+
+def _seam_setup(
+    *, pages: Any = None, now: datetime | None = None
+) -> tuple[Any, _FakeWsAdapter, _FakeRestAdapter, list[tuple[Any, ...]]]:
+    calls: list[tuple[Any, ...]] = []
+    ws = _FakeWsAdapter(calls=calls)
+    rest = _FakeRestAdapter(
+        pages=pages if pages is not None else {("BTCUSDT", "1h"): _three_bars()},
+        calls=calls,
+    )
+    supervisor = _make_supervisor(
+        ws=ws, rest=rest, now=now or datetime(2026, 9, 19, 13, 0, tzinfo=UTC)
+    )
+    supervisor.start()
+    supervisor.record_close("BTCUSDT", "1h", _T0)
+    # Only the resubscribe sequence is under test, not the initial start().
+    calls.clear()
+    return supervisor, ws, rest, calls
+
+
+def test_backfill_runs_before_resubscribe_on_unsolicited_drop() -> None:
+    """close -> klines -> subscribe by index in one shared call log (D-20)."""
+    supervisor, _ws, _rest, calls = _seam_setup()
+
+    asyncio.run(supervisor.on_disconnect(scheduled=False))
+
+    closes = _indices(calls, "close")
+    klines = _indices(calls, "klines")
+    subscribes = _indices(calls, "subscribe")
+    assert closes and klines and subscribes, calls
+    assert max(closes) < min(klines), "old handles close before the backfill"
+    # First-pass klines entry precedes the first subscribe entry.
+    assert klines[0] < subscribes[0], (
+        "backfill must run BEFORE resubscribe (D-16, F-413)"
+    )
+
+
+def test_backfill_runs_before_resubscribe_on_rotation() -> None:
+    """Scheduled rotation: same order, and no reconnect entry."""
+    supervisor, _ws, _rest, calls = _seam_setup()
+
+    asyncio.run(supervisor.on_disconnect(scheduled=True))
+
+    assert _indices(calls, "reconnect") == []
+    closes = _indices(calls, "close")
+    klines = _indices(calls, "klines")
+    subscribes = _indices(calls, "subscribe")
+    assert closes and klines and subscribes, calls
+    assert max(closes) < min(klines)
+    assert klines[0] < subscribes[0]
+
+
+def test_backfilled_closes_advance_last_close() -> None:
+    """The last-close state moves to the latest backfilled bar's close."""
+    supervisor, _ws, _rest, _calls = _seam_setup()
+
+    backfilled, _gaps = asyncio.run(
+        supervisor._resubscribe_and_backfill(journal_outage_gaps=False)
+    )
+
+    assert len(backfilled[("BTCUSDT", "1h")]) == 3
+    assert supervisor._last_close[("BTCUSDT", "1h")] == _T0 + 3 * _HOUR
+
+
+def test_failing_pair_is_still_resubscribed_with_outage_gap() -> None:
+    """A raising pair still resubscribes and yields one outage gap (T-13-12)."""
+    supervisor, ws, _rest, calls = _seam_setup(
+        pages={("BTCUSDT", "1h"): RuntimeError("adapter down")}
+    )
+
+    backfilled, outage_gaps = asyncio.run(
+        supervisor._resubscribe_and_backfill(journal_outage_gaps=True)
+    )
+
+    assert backfilled == {}
+    assert len(outage_gaps) == 1
+    gap = outage_gaps[0]
+    assert gap["symbol"] == "BTCUSDT"
+    assert gap["data_class"] == "paper-1h"
+    assert gap["reason"].startswith("backfill_exception:")
+    assert _indices(calls, "subscribe"), "pair must be resubscribed regardless"
+    assert ws.subscribe_calls[-1] == ("btcusdt", "1h")
+
+
+def test_record_close_never_moves_backwards() -> None:
+    """record_close is monotonic: an earlier close leaves the stored one."""
+    supervisor, _ws, _rest, _calls = _seam_setup()
+    later = _T0 + 2 * _HOUR
+
+    supervisor.record_close("BTCUSDT", "1h", later)
+    supervisor.record_close("BTCUSDT", "1h", _T0 + _HOUR)
+
+    assert supervisor._last_close[("BTCUSDT", "1h")] == later
