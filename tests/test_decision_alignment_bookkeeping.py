@@ -57,21 +57,58 @@ def test_glossary_gates_pass_on_real_repo() -> None:
     assert all(ok for _, ok, _ in results), [g for g in results if not g[1]]
 
 
-def test_referenced_codes_are_the_seventeen_expected() -> None:
-    assert bk.referenced_reason_codes() == {
-        "NO_TRADE_REGIME", "RR_TOO_LOW", "STALE_SETUP", "INVALIDATED",
-        "EXCHANGE_CONSTRAINT", "DATA_STALE", "RECONCILIATION_REQUIRED",
-        "APPROVAL_EXPIRED", "MIN_QTY_REJECT", "NOTIONAL_REJECT", "UTILIZATION_REJECT",
-        "CLUSTER_CAP_REJECT", "AGGREGATE_CAP_REJECT", "MAX_POSITIONS_REJECT",
-        "DAILY_STOP_BLOCK", "STALE_CONSTRAINTS", "UNCERTAIN_ACCOUNT_STATE",
-    }  # fmt: skip
+PRE_PHASE_12_REFERENCED = {
+    "NO_TRADE_REGIME", "RR_TOO_LOW", "STALE_SETUP", "INVALIDATED",
+    "EXCHANGE_CONSTRAINT", "DATA_STALE", "RECONCILIATION_REQUIRED",
+    "APPROVAL_EXPIRED", "MIN_QTY_REJECT", "NOTIONAL_REJECT", "UTILIZATION_REJECT",
+    "CLUSTER_CAP_REJECT", "AGGREGATE_CAP_REJECT", "MAX_POSITIONS_REJECT",
+    "DAILY_STOP_BLOCK", "STALE_CONSTRAINTS", "UNCERTAIN_ACCOUNT_STATE",
+}  # fmt: skip
+PHASE_12_CODES = {"STOP_TOO_TIGHT", "COST_TO_RISK_EXCEEDED"}
 
 
-def test_real_glossary_split_is_18_plus_5_equals_23() -> None:
+def test_referenced_codes_are_the_seventeen_plus_optional_phase_12_codes() -> None:
+    referenced = bk.referenced_reason_codes()
+    # Superset/subset pair: the two cost-guard codes become referenced when plan 12-06
+    # lands, so this assertion needs no edit then.
+    assert PRE_PHASE_12_REFERENCED <= referenced
+    assert referenced <= PRE_PHASE_12_REFERENCED | PHASE_12_CODES
+
+
+def test_real_glossary_split_is_20_canonical_and_5_retired() -> None:
     parsed = bk.parse_glossary_sections(_read(GLOSSARY))
-    assert len(parsed["canonical"]) == 18
-    assert len(parsed["aliases"]) == 5
-    assert len(ENUM_VALUES) == 23
+    assert len(parsed["canonical"]) == 20
+    assert sorted(parsed["aliases"]) == sorted(bk.RETIRED_ALIASES)
+    assert len(bk.RETIRED_ALIASES) == 5
+    assert len(ENUM_VALUES) == 20
+    assert not hasattr(bk, "ALIASES")
+
+
+def test_retired_alias_added_to_enum_values_fails_gl03() -> None:
+    gates = {
+        n: ok
+        for n, ok, _ in bk.check_glossary(
+            _read(GLOSSARY),
+            ENUM_VALUES | {"RISK_LIMIT"},
+            bk.referenced_reason_codes(),
+            APPROVAL_VALUES,
+        )
+    }
+    assert gates["GL-03"] is False
+
+
+def test_retired_alias_pasted_into_canonical_block_fails_gl01() -> None:
+    lines = _read(GLOSSARY).splitlines()
+    idx = lines.index("STOP_TOO_TIGHT")
+    lines.insert(idx, "QUANTIZATION_REJECT")
+    assert _gl(chr(10).join(lines))["GL-01"] is False
+
+
+def test_retired_table_missing_a_row_fails_gl03() -> None:
+    lines = _read(GLOSSARY).splitlines(keepends=True)
+    kept = [ln for ln in lines if not ln.startswith("| `MIN_NOTIONAL_REJECT`")]
+    assert len(kept) == len(lines) - 1
+    assert _gl("".join(kept))["GL-03"] is False
 
 
 def test_pre_change_glossary_fails_gl01_gl03_gl04() -> None:
