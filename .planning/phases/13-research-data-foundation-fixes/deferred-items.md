@@ -21,3 +21,7 @@
   `src/adapters/telegram_notify.py:287: error: Incompatible types in assignment (expression has
   type "datetime", variable has type "Decimal")` (pulled in transitively). `src/paper/supervisor.py`
   itself is clean. Pre-existing, unrelated to 13-03; not touched.
+
+## Resolved by 13-11 (2026-09-30)
+
+- The RQ-01/RQ-04 decision-alignment failures listed under 13-01 are fixed: the requirements gate now maps OPS-06 to Phase 13.1 (drift introduced by commit 7ceede3). `verify_decision_alignment.py all` ends ALL_PASS all.
