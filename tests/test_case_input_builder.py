@@ -8,7 +8,6 @@ module-scoped store is built once; tests that mutate a store work on a copy.
 
 from __future__ import annotations
 
-import importlib
 import json
 import re
 import shutil
@@ -19,6 +18,7 @@ from typing import Any
 
 import pytest
 from src.adapters.binance_usdm import FundingTick, Kline, MarkKline, OiSnapshot
+from src.data import case_input as ci
 from src.data.collector import _write_funding_tick, _write_oi_snapshot
 from src.data.store import publish_batch, publish_mark_batch
 
@@ -41,11 +41,6 @@ BAR_KEYS = {
 }
 
 _STEP_MS = {"1m": 60_000, "1h": 3_600_000, "4h": 14_400_000}
-
-
-def _ci() -> Any:
-    """Import the module under test lazily so RED fails per test, not at collection."""
-    return importlib.import_module("src.data.case_input")
 
 
 def _price(open_ms: int) -> Decimal:
@@ -157,7 +152,7 @@ def _build(raw_root: Path, **overrides: Any) -> Any:
         "as_of_day_utc": AS_OF,
     }
     kwargs.update(overrides)
-    return _ci().build_case_input_data(raw_root, **kwargs)
+    return ci.build_case_input_data(raw_root, **kwargs)
 
 
 def _scenario() -> dict[str, Any]:
@@ -247,5 +242,5 @@ def test_builder_output_runs_through_simulator_and_assemble(base_store: Path) ->
 
 def test_to_case_input_refuses_builder_key_collision(base_store: Path) -> None:
     data = _build(base_store)
-    with pytest.raises(_ci().CaseInputError):
+    with pytest.raises(ci.CaseInputError):
         data.to_case_input(strategy_bars=[], **_scenario())
