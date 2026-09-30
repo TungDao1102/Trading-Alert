@@ -148,3 +148,94 @@ def test_webhook_hmac_claim_fails() -> None:
 
 def test_normalisation_strips_emphasis_backticks_and_whitespace() -> None:
     assert ops_risk.normalise("**A**   `b`\n c") == "A b c"
+
+
+# --------------------------------------------------------------------------- Task 2
+
+
+def test_or04_to_or08_pass_on_real_docs() -> None:
+    gates = {name: ok for name, ok, _ in ops_risk.run()}
+    for name in ("OR-04", "OR-05", "OR-06", "OR-07", "OR-08"):
+        assert gates[name] is True, name
+
+
+@pytest.mark.parametrize(
+    "func",
+    [
+        "check_daily_loss",
+        "check_margin",
+        "check_quantization",
+        "check_snapshot",
+        "check_sl_and_compensation",
+    ],
+)
+def test_risk_gates_positive_and_pre_change_negative(func: str) -> None:
+    check = getattr(ops_risk, func)
+    _, ok, detail = check(_read(RISK))
+    assert ok, detail
+    _, old_ok, _ = check(_old(RISK))
+    assert old_ok is False
+
+
+def test_quantization_synonym_fails() -> None:
+    text = _read(RISK) + "\nReject with QUANTIZATION_REJECT.\n"
+    _, ok, detail = ops_risk.check_quantization(text)
+    assert ok is False
+    assert "QUANTIZATION_REJECT" in detail
+
+
+def test_quantization_order_swap_fails() -> None:
+    text = _read(RISK)
+    swapped = text.replace("min quantity", "TMPQ").replace("min notional", "min quantity")
+    swapped = swapped.replace("TMPQ", "min notional")
+    _, ok, detail = ops_risk.check_quantization(swapped)
+    assert ok is False
+    assert "order" in detail
+
+
+def test_quantization_canonical_line_is_labelled() -> None:
+    assert "Canonical order (D031):" in ops_risk.normalise(_read(RISK))
+
+
+def test_no_numeric_liquidation_buffer() -> None:
+    text = ops_risk.normalise(_read(RISK)).lower()
+    assert "registry parameter" in text
+    assert "buffer of" not in text
+    assert "buffer =" not in text
+
+
+def test_daily_loss_missing_phrase_fails() -> None:
+    text = _read(RISK).replace("07:00 Asia/Ho_Chi_Minh", "07:00 local")
+    _, ok, detail = ops_risk.check_daily_loss(text)
+    assert ok is False
+    assert "07:00 Asia/Ho_Chi_Minh" in detail
+
+
+def test_margin_missing_resting_entry_fails() -> None:
+    text = _read(RISK).replace("resting entry", "pending")
+    _, ok, detail = ops_risk.check_margin(text)
+    assert ok is False
+    assert "resting entry" in detail
+
+
+def test_snapshot_missing_field_fails() -> None:
+    text = _read(RISK).replace("equity_used", "equity")
+    _, ok, detail = ops_risk.check_snapshot(text)
+    assert ok is False
+    assert "equity_used" in detail
+
+
+def test_sl_and_compensation_missing_fails() -> None:
+    text = _read(RISK).replace("averaging down", "adding")
+    _, ok, detail = ops_risk.check_sl_and_compensation(text)
+    assert ok is False
+    assert "averaging down" in detail
+
+
+def test_hard_coded_liquidation_buffer_fails() -> None:
+    text = _read(RISK).replace(
+        "the buffer is a registry parameter", "the buffer is 1.5x SL distance"
+    )
+    _, ok, detail = ops_risk.check_margin(text)
+    assert ok is False
+    assert "forbidden" in detail

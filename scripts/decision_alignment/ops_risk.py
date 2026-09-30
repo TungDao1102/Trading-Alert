@@ -20,6 +20,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SEC_OPS_PATH = REPO_ROOT / "docs" / "operations" / "SECURITY_AND_OPERATIONS.md"
 RUNBOOK_PATH = REPO_ROOT / "docs" / "operations" / "RUNBOOK.md"
+RISK_PATH = REPO_ROOT / "docs" / "trading" / "RISK_MANAGEMENT.md"
 
 Gate = tuple[str, bool, str]
 
@@ -158,6 +159,126 @@ def check_webhook_pointer(text: str) -> Gate:
     return verdict
 
 
+# --------------------------------------------------------------------------- OR-04..OR-08
+
+DAILY_LOSS_PHRASES = (
+    "UTC day",
+    "00:00 UTC",
+    "07:00 Asia/Ho_Chi_Minh",
+    "realized PnL",
+    "commissions",
+    "funding",
+    "equity at the UTC day start",
+    "0.5%",
+    "1.0%",
+    "cancel pending entry orders",
+    "protective stop-loss orders",
+    "daily_loss_warning_threshold",
+    "daily_loss_stop_threshold",
+    "D033",
+)
+DAILY_LOSS_FORBIDDEN = (r"daily loss stop: TBD",)
+
+MARGIN_PHRASES = (
+    "ISOLATED",
+    "5x",
+    "marginType",
+    "explicitly",
+    "liquidation price",
+    "buffer",
+    "registry parameter",
+    "resting entry",
+    "D035",
+)
+# A concrete liquidation-buffer number must never be hard-coded in the document.
+MARGIN_FORBIDDEN = (
+    r"buffer (of|=|is|:) ?\d",
+    r"\d+(\.\d+)?x (SL|stop) distance",
+)
+
+QUANTIZATION_CANONICAL_LABEL = "Canonical order (D031):"
+QUANTIZATION_ORDER_TOKENS = (
+    "stepSize",
+    "min quantity",
+    "min notional",
+    "minimum_risk_utilization_after_rounding",
+)
+QUANTIZATION_REASON_TOKENS = ("MIN_QTY_REJECT", "NOTIONAL_REJECT", "UTILIZATION_REJECT", "D031")
+QUANTIZATION_SYNONYM = "QUANTIZATION_REJECT"
+
+SNAPSHOT_PHRASES = (
+    "market_lot_size",
+    "percent_price",
+    "working_type",
+    "margin_type",
+    "leverage",
+    "equity_used",
+    "metadata_observed_at_utc",
+    "persisted per plan",
+    "verify",
+)
+
+SL_COMPENSATION_PHRASES = ("never a wider", "averaging down", "D034")
+
+
+def check_daily_loss(text: str) -> Gate:
+    """RISK_MANAGEMENT sections 4 and 8: the D033 daily-loss definition."""
+    body = _section(text, 4) + " " + _section(text, 8)
+    return _verdict(
+        "OR-04",
+        _missing(body, DAILY_LOSS_PHRASES),
+        _forbidden_hits(text, DAILY_LOSS_FORBIDDEN),
+    )
+
+
+def check_margin(text: str) -> Gate:
+    """RISK_MANAGEMENT section 9: D035 margin rules, no hard-coded buffer number."""
+    body = _section(text, 9)
+    return _verdict(
+        "OR-05",
+        _missing(body, MARGIN_PHRASES),
+        _forbidden_hits(body, MARGIN_FORBIDDEN),
+    )
+
+
+def check_quantization(text: str) -> Gate:
+    """RISK_MANAGEMENT section 11: one canonical quantization order, no synonym."""
+    body = _section(text, 11)
+    missing = _missing(body, QUANTIZATION_REASON_TOKENS)
+    forbidden: list[str] = []
+    if QUANTIZATION_SYNONYM in text:
+        forbidden.append(f"{QUANTIZATION_SYNONYM} synonym present")
+    canonical = [ln for ln in _lines(body) if ln.startswith(QUANTIZATION_CANONICAL_LABEL)]
+    if not canonical:
+        missing.append(f"labelled line '{QUANTIZATION_CANONICAL_LABEL}'")
+    else:
+        cursor = 0
+        line = canonical[0]
+        for token in QUANTIZATION_ORDER_TOKENS:
+            found = line.find(token, cursor)
+            if found < 0:
+                missing.append(
+                    f"canonical order violated at '{token}' (expected after position {cursor})"
+                )
+                break
+            cursor = found + len(token)
+    reason_positions = [body.find(tok) for tok in QUANTIZATION_REASON_TOKENS[:3]]
+    if -1 not in reason_positions and reason_positions != sorted(reason_positions):
+        missing.append("reason codes not in canonical order MIN_QTY, NOTIONAL, UTILIZATION")
+    return _verdict("OR-06", missing, forbidden)
+
+
+def check_snapshot(text: str) -> Gate:
+    """RISK_MANAGEMENT section 12: extended exchange constraint snapshot."""
+    return _verdict("OR-07", _missing(_section(text, 12), SNAPSHOT_PHRASES), [])
+
+
+def check_sl_and_compensation(text: str) -> Gate:
+    """RISK_MANAGEMENT sections 6 and 7: SL restore never wider, no averaging down."""
+    body = _section(text, 6) + " " + _section(text, 7)
+    return _verdict("OR-08", _missing(body, SL_COMPENSATION_PHRASES), [])
+
+
 # --------------------------------------------------------------------------- run
 
 
@@ -176,6 +297,7 @@ def run() -> list[Gate]:
     """Evaluate every gate against the real repository documents."""
     sec_ops = _read(SEC_OPS_PATH)
     runbook = _read(RUNBOOK_PATH)
+    risk = _read(RISK_PATH)
     return [
         _combine(
             "OR-01",
@@ -183,6 +305,11 @@ def run() -> list[Gate]:
         ),
         check_secrets(sec_ops),
         check_webhook_pointer(sec_ops),
+        check_daily_loss(risk),
+        check_margin(risk),
+        check_quantization(risk),
+        check_snapshot(risk),
+        check_sl_and_compensation(risk),
     ]
 
 
