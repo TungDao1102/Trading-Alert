@@ -19,6 +19,7 @@ fail until `src/data/collector.py` is implemented.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -600,6 +601,7 @@ def test_collector_module_has_real_entrypoint() -> None:
     assert proc.returncode == 0, f"stderr={proc.stderr!r}"
     assert "--healthcheck" in proc.stdout
     assert "--once" in proc.stdout
+    assert "--collect-list" in proc.stdout
 
 
 # --------------------------------------------------------------------------- #
@@ -850,3 +852,161 @@ async def test_funding_sweep_mixed_watermarks_fresh_symbol_uses_bounded_bootstra
         f"fresh ETH must use bounded bootstrap {expected_eth_start}, "
         f"got {eth_calls[0][1]}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 13 plan 01 (D-01, D-02, F-107): the collector universe comes from the
+# collect list, never from a hard-coded live-5 fallback.
+# --------------------------------------------------------------------------- #
+
+_COLLECT_EXTRAS = (
+    "ADAUSDT",
+    "AVAXUSDT",
+    "DOGEUSDT",
+    "DOTUSDT",
+    "LINKUSDT",
+    "LTCUSDT",
+    "MATICUSDT",
+    "NEARUSDT",
+    "SUIUSDT",
+    "TRXUSDT",
+    "UNIUSDT",
+)
+
+
+def _write_collect_list(path: Path, symbols: list[str]) -> Path:
+    body = ", ".join(f'"{s}"' for s in symbols)
+    lines = [
+        'schema = "collect-list/1"',
+        'list_id = "collect-list-v1"',
+        'chosen_on = "2026-09-30"',
+        'selection_rule = "test fixture"',
+        "top_n = 15",
+        f"symbols = [{body}]",
+    ]
+    path.write_text(os.linesep.join(lines) + os.linesep, encoding="utf-8")
+    return path
+
+
+def _sqlite_url(tmp_path: Path) -> str:
+    url = f"sqlite:///{tmp_path / 'collector.db'}"
+    engine = create_engine(url)
+    Base.metadata.create_all(engine)
+    engine.dispose()
+    return url
+
+
+def _install_fake_adapter(
+    monkeypatch: pytest.MonkeyPatch, adapter: FakeAdapter
+) -> list[int]:
+    """Patch the collector's adapter factory; returns a construction counter."""
+    built: list[int] = []
+
+    def factory() -> FakeAdapter:
+        built.append(1)
+        return adapter
+
+    monkeypatch.setattr("src.data.collector.BinanceUsdmAdapter", factory)
+    return built
+
+
+def test_main_once_polls_exactly_the_collect_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.data.collector import main
+
+    symbols = sorted([*LIVE_5, *_COLLECT_EXTRAS])
+    assert len(symbols) == 16
+    list_path = _write_collect_list(tmp_path / "list.toml", symbols)
+    adapter = FakeAdapter(oi_responses=[_mk_oi_snapshot(s) for s in symbols])
+    _install_fake_adapter(monkeypatch, adapter)
+
+    rc = main(
+        [
+            "--once",
+            "--collect-list",
+            str(list_path),
+            "--database-url",
+            _sqlite_url(tmp_path),
+            "--raw-root",
+            str(tmp_path / "raw"),
+        ]
+    )
+
+    assert rc == 0
+    assert adapter.oi_calls == symbols
+
+
+def test_missing_collect_list_refuses_start_without_live5_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from src.data.collector import main
+
+    adapter = FakeAdapter(oi_responses=[_mk_oi_snapshot(s) for s in LIVE_5])
+    built = _install_fake_adapter(monkeypatch, adapter)
+
+    rc = main(
+        [
+            "--once",
+            "--collect-list",
+            str(tmp_path / "missing.toml"),
+            "--database-url",
+            _sqlite_url(tmp_path),
+            "--raw-root",
+            str(tmp_path / "raw"),
+        ]
+    )
+
+    assert rc == 2
+    assert "collect list" in capsys.readouterr().err
+    assert built == []
+    assert adapter.oi_calls == []
+    assert adapter.funding_calls == []
+
+
+def test_healthcheck_with_missing_collect_list_is_unhealthy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from src.data.collector import main
+
+    rc = main(
+        [
+            "--healthcheck",
+            "--collect-list",
+            str(tmp_path / "missing.toml"),
+            "--database-url",
+            _sqlite_url(tmp_path),
+        ]
+    )
+
+    assert rc == 1
+    assert "collect list" in capsys.readouterr().err
+
+
+def test_explicit_universe_override_is_validated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.data.collector import main
+
+    override = ["BTCUSDT", "ETHUSDT"]
+    adapter = FakeAdapter(oi_responses=[_mk_oi_snapshot(s) for s in override])
+    _install_fake_adapter(monkeypatch, adapter)
+    common = [
+        "--once",
+        "--collect-list",
+        str(tmp_path / "ignored-missing.toml"),
+        "--database-url",
+        _sqlite_url(tmp_path),
+        "--raw-root",
+        str(tmp_path / "raw"),
+    ]
+
+    assert main([*common, "--universe", *override]) == 0
+    assert adapter.oi_calls == override
+
+    bad_adapter = FakeAdapter()
+    _install_fake_adapter(monkeypatch, bad_adapter)
+    assert main([*common, "--universe", "BTCUSDT", "../ETHUSDT"]) == 2
+    assert bad_adapter.oi_calls == []
