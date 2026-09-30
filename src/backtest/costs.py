@@ -5,9 +5,11 @@ Per D-02: costs apply from run #1 before any selection decision. The
 `cost_model_hash` computed via `sha256_hex` over the sorted seven-key
 snapshot (eight keys when the model carries `exit_slippage_rate`, Phase 12),
 with numeric values hashed as canonical text so equivalent spellings agree
-(D-15). `modeled_costs_per_unit` delegates to the same per-unit
-formula `src/risk/sizing.py` consumes — never re-derived inside the
-simulator body.
+(D-15). `modeled_costs_per_unit` is price-aware (quote currency per unit of
+base) and delegates to `src/risk/cost_rates.per_unit_round_trip_cost`, the one
+producer `evaluate_risk` also uses — never re-derived inside the simulator
+body. `guard_rates_from_params` reads the two cost-guard rates from the
+pinned registry set for both the simulator and the paper loop.
 
 The module imports NOTHING from Polars/pandas/NumPy/Binance SDK/
 SQLAlchemy/Pydantic — stdlib + Decimal + `src/core/_decimal.py` only,
@@ -21,12 +23,12 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from src.core._decimal import _add
 from src.domain.canonical import sha256_hex
 from src.risk.cost_rates import (
     FEE_SOURCE_PARAMETER,
     MAX_RATE,
     CostRates,
+    per_unit_round_trip_cost,
 )
 
 # Canonical cost-key vocabulary (D-02 + Pitfall 7). These keys are
@@ -341,22 +343,36 @@ def modeled_costs_per_unit(
     *,
     cost_model: CostModel,
     side: str,
+    entry_price: Decimal,
+    stop_price: Decimal,
 ) -> Decimal:
-    """Return the per-unit cost in quote currency.
+    """Return the modeled round-trip cost in QUOTE CURRENCY PER ONE UNIT of base.
 
-    Per D-02: this is the same formula `src/risk/sizing.py` consumes
-    via the `modeled_costs_per_unit` parameter. The simulator calls
-    this function identically — never re-derives the math.
+    Formula: `entry_price * (fee_rate_entry + expected_slippage)
+    + stop_price * (fee_rate_exit + exit_slippage_rate)`. This is the same
+    function `evaluate_risk` uses internally (`per_unit_round_trip_cost` over
+    `cost_rates_from_model(cost_model)`); the simulator record's
+    `modeled_costs_per_unit` is the value sizing produced, and this helper
+    reproduces it from explicit prices. The old form returned the dimensionless
+    rate sum, which is not a quote amount (F-001, F-801).
 
-    Formula: `fee_rate_entry + fee_rate_exit + expected_slippage`
-    (simplified for the tracer slice; funding treatment is ADDITIVE
-    so it folds into the per-unit cost).
+    Args:
+        cost_model: an 8-key model carrying `exit_slippage_rate`.
+        side: "LONG" or "SHORT".
+        entry_price: the sizing entry price (the adverse zone edge), > 0.
+        stop_price: the stop trigger price, > 0.
+
+    Raises:
+        ValueError: `side` is not LONG/SHORT, a price is <= 0, or the model is
+            a legacy 7-key model without `exit_slippage_rate`.
     """
     if side not in {"LONG", "SHORT"}:
         raise ValueError(f"side must be LONG or SHORT, got {side!r}")
-    return _add(
-        _add(cost_model.fee_rate_entry, cost_model.fee_rate_exit),
-        cost_model.expected_slippage,
+    return per_unit_round_trip_cost(
+        side=side,
+        entry_price=entry_price,
+        stop_price=stop_price,
+        rates=cost_rates_from_model(cost_model),
     )
 
 
