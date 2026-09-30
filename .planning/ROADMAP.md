@@ -444,7 +444,7 @@ This absorbs the confirmed bug from former Phase 11:
 
 **Audit refs**: F-001, F-801, F-601, F-306, F-002, F-962, F-005, F-028
 
-**Plans:** 9/11 plans executed
+**Plans:** 10/11 plans executed
 
 Plans:
 **Wave 1**
@@ -465,7 +465,7 @@ Plans:
 - [x] 12-09-PLAN.md — Simulator and paper cutover: per-leg slippage with exit_slippage_rate, price-aware modeled_costs_per_unit, parity fixture regenerated
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 12-10-PLAN.md — SL-loss property test (Decimal grid with old-formula mutation check) and cross-call-site cost parity tests
+- [x] 12-10-PLAN.md — SL-loss property test (Decimal grid with old-formula mutation check) and cross-call-site cost parity tests
 - [ ] 12-11-PLAN.md — DECISIONS D046-D048, RISK_MANAGEMENT and CONFIGURATION amendments, final regression
 
 ### Phase 13: Research Data Foundation Fixes + VPS Collector Deployment
@@ -886,7 +886,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 9. Live Execution Rollout | 4/4 | In Progress|  |
 | 10. Journal Depth + Kill-Gate Operations | 12/12 | In Progress|  |
 | 11. Decision Alignment (docs + params) | 8/8 | In Progress|  |
-| 12. Fee + Cost Model Correctness | 9/11 | In Progress|  |
+| 12. Fee + Cost Model Correctness | 10/11 | In Progress|  |
 | 13. Research Data Foundation Fixes + VPS Collector Deployment | 0/TBD | Not started | - |
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
