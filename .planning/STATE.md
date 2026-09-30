@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 13
 current_phase_name: research-data-foundation-fixes
 status: executing
-stopped_at: Completed 13-10-PLAN.md
-last_updated: "2026-09-30T15:41:15.745Z"
+stopped_at: Completed 13-08-PLAN.md
+last_updated: "2026-09-30T16:23:54.160Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 13 execution started
-state_head: bffb910e295e98bb2a0b82c018f4ae416dccdb4a
+state_head: 50fe6d31a41f506c5d4ef40830dd2280bf561ec8
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 82
-  completed_plans: 77
+  completed_plans: 78
 milestone_name: milestone
 ---
 
@@ -117,6 +117,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 13 P07 | 20 min | 3 tasks | 5 files |
 | Phase 13 P09 | 30 min | 3 tasks | 4 files |
 | Phase 13 P10 | 15min | 3 tasks | 3 files |
+| Phase 13 P08 | 35 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -305,6 +306,9 @@ Recent decisions affecting current work:
 - [Phase 13]: [13-10] Freeze report proposal_sha256 covers the full report body (candidates, ranking, unrankable, availability), not only the ranking
 - [Phase 13]: [13-10] Only -1121 switches REST to the archive; rate limits retry then fail the run; other REST errors fail closed; archive symbols listed with another contract type in exchangeInfo (TRADIFI) are never readmitted
 - [Phase 13]: [13-10] Archive-only proposed symbols have no mark source (REST only): they stay proposed and are flagged UNAVAILABLE in the review for the operator (13-12)
+- [Phase 13]: 13-08: sufficiency report checks data depth only; TRADE_FLOOR_NOTE states the D043 floor is unmeasurable until the Phase 14 simulator; exit 3 only for NOT_BACKFILLED, GAP, UNAVAILABLE
+- [Phase 13]: 13-08: archive fallback is lazy per symbol (REST -1121 or not in exchangeInfo), mark only from REST, provenance persisted in <cursor-root>/_sources.json; archive-capped windows trimmed to the last archived bar in the report
+- [Phase 13]: 13-08: 1m coverage printed per protocol split block on the 1h/4h timeline; extending 1m beyond 12 months stays a user decision (D-21)
 
 ### Pending Todos
 
@@ -350,6 +354,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T15:41:15.497Z
-Stopped at: Completed 13-10-PLAN.md
+Last session: 2026-09-30T16:23:53.914Z
+Stopped at: Completed 13-08-PLAN.md
 Resume file: None
