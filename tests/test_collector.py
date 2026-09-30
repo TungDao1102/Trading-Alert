@@ -1090,3 +1090,256 @@ def test_loop_sleeps_to_next_cadence_boundary_after_tick(
 
     assert rc == 0
     assert sleeps == [292.75]
+
+
+# --------------------------------------------------------------------------- #
+# Phase 13 plan 06 (D-23, DATA-02): paginated, resumable funding-history
+# backfill. The fake serves one page per call from a queue (FakeAdapter) or
+# filters a full history by start_ms like the exchange (PagedFundingAdapter).
+# --------------------------------------------------------------------------- #
+
+_FUNDING_EPOCH = datetime(2024, 1, 1, tzinfo=UTC)
+_FAR_END_MS = int(datetime(2030, 1, 1, tzinfo=UTC).timestamp() * 1000)
+
+
+def _funding_series(
+    symbol: str, count: int, *, first_index: int = 0, mark: str | None = "50000.00"
+) -> list[FundingTick]:
+    """`count` funding ticks 8h apart starting `first_index` steps after epoch."""
+    from datetime import timedelta
+
+    return [
+        FundingTick(
+            symbol=symbol,
+            funding_time_utc=_FUNDING_EPOCH + timedelta(hours=8 * (first_index + i)),
+            funding_rate=Decimal("0.0001"),
+            mark_price=Decimal(mark) if mark is not None else None,
+        )
+        for i in range(count)
+    ]
+
+
+class PagedFundingAdapter(FakeAdapter):
+    """Serves each symbol's full history filtered by start_ms/end_ms/limit."""
+
+    def __init__(self, history: dict[str, list[FundingTick]]) -> None:
+        super().__init__()
+        self._history = history
+
+    async def funding_rate(
+        self,
+        symbol: str | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 1000,
+    ) -> list[FundingTick]:
+        self.funding_calls.append((symbol, start_ms, end_ms))
+        rows = self._history.get(symbol or "", [])
+        picked = [
+            t
+            for t in rows
+            if (start_ms is None or _epoch_ms(t.funding_time_utc) >= start_ms)
+            and (end_ms is None or _epoch_ms(t.funding_time_utc) <= end_ms)
+        ]
+        return picked[:limit]
+
+
+def _funding_files(root: Path) -> list[Path]:
+    return sorted((root / "data_class=funding").rglob("*.parquet"))
+
+
+async def test_funding_history_paginates_and_advances_watermark(
+    session: Session, tmp_path: Path
+) -> None:
+    from src.data.collector import FundingHistoryResult, backfill_funding_history
+
+    history = _funding_series("BTCUSDT", 2190)
+    adapter = PagedFundingAdapter({"BTCUSDT": history})
+
+    result = await backfill_funding_history(
+        adapter,  # type: ignore[arg-type]
+        session,
+        symbols=["BTCUSDT"],
+        start_ms=_epoch_ms(_FUNDING_EPOCH),
+        end_ms=_FAR_END_MS,
+        raw_root=tmp_path,
+        observed_utc=datetime(2026, 9, 30, tzinfo=UTC),
+        page_limit=1000,
+        pace_seconds=0,
+    )
+
+    assert isinstance(result, FundingHistoryResult)
+    assert result.rows_per_symbol == {"BTCUSDT": 2190}
+    assert result.pages == 3
+    assert result.gaps_recorded == 0
+    assert result.truncated_symbols == ()
+    assert len(_funding_files(tmp_path)) == 2190
+    # A short third page ends the walk: exactly three calls, no empty fourth.
+    assert len(adapter.funding_calls) == 3
+    # The second call resumes 1 ms after the last funding time of page 1.
+    assert adapter.funding_calls[1][1] == _epoch_ms(history[999].funding_time_utc) + 1
+    wm = session.execute(
+        select(CollectorWatermark).where(
+            CollectorWatermark.symbol == "BTCUSDT",
+            CollectorWatermark.data_class == "funding",
+        )
+    ).scalar_one()
+    assert _epoch_ms(wm.last_tick_utc) == _epoch_ms(history[-1].funding_time_utc)
+
+
+async def test_funding_history_rerun_writes_nothing_twice(
+    session: Session, tmp_path: Path
+) -> None:
+    from src.data.collector import backfill_funding_history
+
+    history = _funding_series("BTCUSDT", 25)
+    start_ms = _epoch_ms(_FUNDING_EPOCH)
+    observed = datetime(2026, 9, 30, tzinfo=UTC)
+
+    first = await backfill_funding_history(
+        PagedFundingAdapter({"BTCUSDT": history}),  # type: ignore[arg-type]
+        session,
+        symbols=["BTCUSDT"],
+        start_ms=start_ms,
+        end_ms=_FAR_END_MS,
+        raw_root=tmp_path,
+        observed_utc=observed,
+        page_limit=10,
+        pace_seconds=0,
+    )
+    assert first.rows_per_symbol == {"BTCUSDT": 25}
+    before = {p: p.stat().st_mtime_ns for p in _funding_files(tmp_path)}
+    assert len(before) == 25
+
+    # Re-run against an exchange-like adapter: resumes after the watermark.
+    second = await backfill_funding_history(
+        PagedFundingAdapter({"BTCUSDT": history}),  # type: ignore[arg-type]
+        session,
+        symbols=["BTCUSDT"],
+        start_ms=start_ms,
+        end_ms=_FAR_END_MS,
+        raw_root=tmp_path,
+        observed_utc=observed,
+        page_limit=10,
+        pace_seconds=0,
+    )
+    assert second.rows_per_symbol == {"BTCUSDT": 0}
+    assert second.gaps_recorded == 0
+
+    # Re-run against a queue adapter that replays already covered ticks: the
+    # watermark cutoff skips them, nothing raises and nothing is rewritten.
+    replay = FakeAdapter(funding_responses=[history[:10]])
+    third = await backfill_funding_history(
+        replay,  # type: ignore[arg-type]
+        session,
+        symbols=["BTCUSDT"],
+        start_ms=start_ms,
+        end_ms=_FAR_END_MS,
+        raw_root=tmp_path,
+        observed_utc=observed,
+        page_limit=10,
+        pace_seconds=0,
+    )
+    assert third.rows_per_symbol == {"BTCUSDT": 0}
+    assert third.gaps_recorded == 0
+    after = {p: p.stat().st_mtime_ns for p in _funding_files(tmp_path)}
+    assert after == before
+
+
+async def test_funding_history_null_mark_price_is_stored_as_null(
+    session: Session, tmp_path: Path
+) -> None:
+    import polars as pl
+    from src.data.collector import backfill_funding_history
+
+    history = _funding_series("BTCUSDT", 2, mark=None)
+    await backfill_funding_history(
+        PagedFundingAdapter({"BTCUSDT": history}),  # type: ignore[arg-type]
+        session,
+        symbols=["BTCUSDT"],
+        start_ms=_epoch_ms(_FUNDING_EPOCH),
+        end_ms=_FAR_END_MS,
+        raw_root=tmp_path,
+        observed_utc=datetime(2026, 9, 30, tzinfo=UTC),
+        pace_seconds=0,
+    )
+
+    files = _funding_files(tmp_path)
+    assert len(files) == 2
+    for path in files:
+        frame = pl.read_parquet(path)
+        assert frame["mark_price"].to_list() == [None]
+        assert frame["funding_rate"].to_list() == [Decimal("0.0001000000")]
+
+
+async def test_funding_history_isolates_failing_symbol(
+    session: Session, tmp_path: Path
+) -> None:
+    from src.data.collector import backfill_funding_history
+
+    adapter = FakeAdapter(
+        funding_responses=[
+            RuntimeError("simulated outage"),
+            _funding_series("ETHUSDT", 4),
+        ]
+    )
+
+    result = await backfill_funding_history(
+        adapter,  # type: ignore[arg-type]
+        session,
+        symbols=["BTCUSDT", "ETHUSDT"],
+        start_ms=_epoch_ms(_FUNDING_EPOCH),
+        end_ms=_FAR_END_MS,
+        raw_root=tmp_path,
+        observed_utc=datetime(2026, 9, 30, tzinfo=UTC),
+        pace_seconds=0,
+    )
+
+    assert result.rows_per_symbol == {"BTCUSDT": 0, "ETHUSDT": 4}
+    assert result.gaps_recorded == 1
+    gaps = session.execute(select(CollectorGap)).scalars().all()
+    assert len(gaps) == 1
+    assert gaps[0].symbol == "BTCUSDT"
+    assert gaps[0].data_class == "funding"
+    assert gaps[0].reason.startswith("adapter_error:")
+    wm_symbols = {
+        w.symbol
+        for w in session.execute(
+            select(CollectorWatermark).where(CollectorWatermark.data_class == "funding")
+        )
+        .scalars()
+        .all()
+    }
+    assert wm_symbols == {"ETHUSDT"}
+
+
+async def test_funding_history_page_cap_is_reported(
+    session: Session, tmp_path: Path
+) -> None:
+    import structlog
+    from src.data.collector import backfill_funding_history
+
+    pages = [_funding_series("BTCUSDT", 3, first_index=3 * i) for i in range(6)]
+    adapter = FakeAdapter(funding_responses=list(pages))
+
+    with structlog.testing.capture_logs() as logs:
+        result = await backfill_funding_history(
+            adapter,  # type: ignore[arg-type]
+            session,
+            symbols=["BTCUSDT"],
+            start_ms=_epoch_ms(_FUNDING_EPOCH),
+            end_ms=_FAR_END_MS,
+            raw_root=tmp_path,
+            observed_utc=datetime(2026, 9, 30, tzinfo=UTC),
+            page_limit=3,
+            max_pages=2,
+            pace_seconds=0,
+        )
+
+    assert len(adapter.funding_calls) == 2
+    assert result.pages == 2
+    assert result.rows_per_symbol == {"BTCUSDT": 6}
+    assert result.truncated_symbols == ("BTCUSDT",)
+    events = [entry["event"] for entry in logs]
+    assert events.count("collector.funding_history.page") == 2
+    assert "collector.funding_history.truncated" in events
