@@ -120,12 +120,29 @@ def test_algo_status_rejects_pre_change_spec() -> None:
 
 @pytest.mark.parametrize(
     "phrase",
-    [p for p in exchange.ALGO_STATUS_PHRASES if p not in ("NEW", "FINISHED")],
+    list(exchange.ALGO_STATUS_PHRASES),
 )
 def test_algo_status_requires_each_phrase(phrase: str) -> None:
     _, ok, detail = exchange.check_algo_status(_drop(_read(EXECUTION_SPEC), phrase))
     assert not ok
     assert phrase in detail
+
+
+@pytest.mark.parametrize("status", list(exchange.ALGO_STATUS_ROWS))
+def test_algo_status_requires_each_table_row(status: str) -> None:
+    lines = _read(EXECUTION_SPEC).splitlines(keepends=True)
+    kept = [ln for ln in lines if not ln.startswith(f"| `{status}` |")]
+    assert len(kept) == len(lines) - 1
+    _, ok, detail = exchange.check_algo_status("".join(kept))
+    assert not ok
+    assert f"status row {status}" in detail
+
+
+def test_algo_status_word_outside_table_does_not_satisfy_row() -> None:
+    lines = _read(EXECUTION_SPEC).splitlines(keepends=True)
+    kept = [ln for ln in lines if not ln.startswith("| `EXPIRED` |")]
+    text = "".join(kept) + "\nEXPIRED is mentioned only in prose.\n"
+    assert not exchange.check_algo_status(text)[1]
 
 
 def test_position_mode_citation_positive() -> None:
@@ -208,6 +225,39 @@ def test_source_register_rejects_row_without_date() -> None:
     _, ok, detail = exchange.check_source_register(_read(EXECUTION_SPEC), mutated)
     assert not ok
     assert "cited but not registered" in detail
+
+
+def test_unfetched_pages_are_identified_from_the_register() -> None:
+    unfetched = exchange.unfetched_urls(_read(SOURCES))
+    assert any(u.endswith("/Change-Position-Mode") for u in unfetched)
+    assert not any(u.endswith("/New-Algo-Order") for u in unfetched)
+
+
+def test_source_register_rejects_unfetched_page_cited_without_verify_marker() -> None:
+    # The spec cites New-Algo-Order (a fetched page) with no verify marker; if the register
+    # says that page was never fetched, the citation no longer grounds anything.
+    lines = _read(SOURCES).splitlines(keepends=True)
+    mutated = "".join(
+        ln.replace("| WebFetch (orchestrator", "| Not fetched: 404 (orchestrator")
+        if "rest-api/New-Algo-Order" in ln
+        else ln
+        for ln in lines
+    )
+    assert mutated != "".join(lines)
+    _, ok, detail = exchange.check_source_register(_read(EXECUTION_SPEC), mutated)
+    assert not ok
+    assert "not-fetched" in detail
+    assert "New-Algo-Order" in detail
+
+
+def test_source_register_accepts_unfetched_page_cited_with_verify_marker() -> None:
+    spec = (
+        _read(EXECUTION_SPEC)
+        + "\nSee [p](https://developers.binance.com/docs/derivatives/usds-margined-futures"
+        "/trade/rest-api/Change-Position-Mode); verify against current Binance docs before use.\n"
+    )
+    _, ok, detail = exchange.check_source_register(spec, _read(SOURCES))
+    assert ok, detail
 
 
 def test_source_register_rejects_pre_change_register() -> None:

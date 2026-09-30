@@ -116,13 +116,12 @@ def check_algo_limit(text: str) -> Gate:
 
 # --------------------------------------------------------------------------- EX-02
 
+# Each status must be a row of the section 6.1 status table (first cell), not merely a word
+# that appears somewhere in the section.
+ALGO_STATUS_ROWS = ("NEW", "TRIGGERING", "FINISHED", "REJECTED", "EXPIRED")
+
 ALGO_STATUS_PHRASES = (
     "FINISHED does not mean filled",
-    "NEW",
-    "TRIGGERING",
-    "FINISHED",
-    "REJECTED",
-    "EXPIRED",
     "ALGO_UPDATE",
     "o.rm",
     "no margin check before",
@@ -133,7 +132,12 @@ ALGO_STATUS_PHRASES = (
 
 def check_algo_status(text: str) -> Gate:
     """EXECUTION_SPEC section 6.1: algo-order status semantics at trigger time (F-054)."""
-    return _verdict("EX-02", _missing(_section(text, 6), ALGO_STATUS_PHRASES), [])
+    section = _section(text, 6)
+    rows = {
+        m.group(1) for m in re.finditer(r"^\|\s*`?([A-Z_]+)`?\s*\|", section, flags=re.MULTILINE)
+    }
+    missing = [f"status row {r}" for r in ALGO_STATUS_ROWS if r not in rows]
+    return _verdict("EX-02", missing + _missing(section, ALGO_STATUS_PHRASES), [])
 
 
 # --------------------------------------------------------------------------- EX-03
@@ -224,11 +228,46 @@ def registered_urls(sources_text: str) -> tuple[set[str], list[str]]:
     return registered, incomplete
 
 
+def unfetched_urls(sources_text: str) -> set[str]:
+    """URLs in the Phase 11 register whose Method cell says the page was not fetched."""
+    body = _titled_section(sources_text, SOURCES_SECTION_TITLE)
+    out: set[str] = set()
+    for raw in body.splitlines():
+        if not raw.startswith("|"):
+            continue
+        cells = [c.strip() for c in raw.strip().strip("|").split("|")]
+        if len(cells) >= 4 and cells[3].lower().startswith("not fetched"):
+            out |= cited_urls(cells[0])
+    return out
+
+
+def _unmarked_unfetched_citations(spec_text: str, unfetched: set[str]) -> list[str]:
+    """Unfetched URLs cited in a paragraph that lacks the verify marker.
+
+    A page that was never read cannot ground a fact; the citing paragraph must say so.
+    """
+    bad: set[str] = set()
+    for block in re.split(r"\n\s*\n", spec_text.replace("\r\n", "\n")):
+        if VERIFY_MARKER in normalise(block):
+            continue
+        bad |= cited_urls(block) & unfetched
+    return sorted(bad)
+
+
 def check_source_register(spec_text: str, sources_text: str) -> Gate:
-    """Every Binance/TradingView URL cited in EXECUTION_SPEC is registered with date and method."""
+    """Every Binance/TradingView URL cited in EXECUTION_SPEC is registered with date and method.
+
+    A URL registered as "Not fetched" is accepted only where the citing paragraph carries
+    the ``verify against current Binance docs`` marker.
+    """
     registered, incomplete = registered_urls(sources_text)
     unregistered = sorted(u for u in cited_urls(spec_text) if u not in registered)
     problems: list[str] = []
+    unmarked = _unmarked_unfetched_citations(spec_text, unfetched_urls(sources_text))
+    if unmarked:
+        problems.append(
+            "cites a not-fetched page without the verify marker: " + "; ".join(unmarked)
+        )
     if unregistered:
         problems.append("cited but not registered: " + "; ".join(unregistered))
     if incomplete:
