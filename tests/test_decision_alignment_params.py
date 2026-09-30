@@ -68,6 +68,16 @@ def test_pa01_mutated_value_fails(params_copy: Path) -> None:
     assert any("range-mr/baseline-v4" in p for p in problems)
 
 
+def test_pa01_toml_syntax_error_is_attributed_and_does_not_abort(params_copy: Path) -> None:
+    bad = params_copy / "range-mr" / "baseline-v4.toml"
+    bad.write_text("this is = = not toml\n", encoding="utf-8", newline="\n")
+    problems = gate.check_pins(params_copy, gate.load_pins())
+    assert any("range-mr/baseline-v4" in p and "load failed" in p for p in problems)
+    # The other fourteen sets were still scanned and verified.
+    assert not any("pin file unreadable" in p for p in problems)
+    assert not any("trend-pullback/baseline-v4" in p for p in problems)
+
+
 def test_pa02_passes_on_copy(params_copy: Path) -> None:
     assert gate.check_byte_lock(params_copy, gate.PRE_PHASE_FILE_SHA256) == []
 

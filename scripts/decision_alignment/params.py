@@ -134,6 +134,10 @@ def check_pins(root: Path, pins: dict[SetKey, str]) -> list[str]:
             problems.append(f"{key[0]}/{key[1]}: pinned verify failed: {exc}")
         except registry.StrategyKeyOutsideRegistry as exc:
             problems.append(f"{key[0]}/{key[1]}: registry validation failed: {exc}")
+        except Exception as exc:  # noqa: BLE001 - record any load failure per file, keep scanning
+            # TOML syntax errors, undecodable bytes, unsafe path segments and the like must
+            # not abort the scan or be mislabelled as a pin-file problem (WR-12).
+            problems.append(f"{key[0]}/{key[1]}: load failed: {type(exc).__name__}: {exc}")
     for orphan in sorted(set(pins) - seen):
         problems.append(f"{orphan[0]}/{orphan[1]}: pin without a file")
     return problems
