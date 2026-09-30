@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 11
 current_phase_name: decision-alignment
 status: executing
-stopped_at: Completed 11-04-PLAN.md
-last_updated: "2026-09-30T04:29:16.873Z"
+stopped_at: Completed 11-06-PLAN.md
+last_updated: "2026-09-30T04:35:26.271Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 11 execution started
-state_head: fb02f8b0bf8d3a103cd13c254cb99a6bcf5ac2b1
+state_head: 5861890a5e35364a00547689c89996fc28be6917
 progress:
   total_phases: 28
   completed_phases: 2
   total_plans: 58
-  completed_plans: 53
+  completed_plans: 54
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 11 (decision-alignment) — EXECUTING
-Plan: 5 of 8
+Plan: 6 of 8
 Status: Ready to execute
 Last activity: 2026-09-30 — Phase 11 execution started
 
@@ -92,6 +92,7 @@ Progress: [██████████] 100%
 | Phase 11 P02 | 25min | 3 tasks | 11 files |
 | Phase 11 P03 | 20min | 2 tasks | 3 files |
 | Phase 11 P04 | 25min | 3 tasks | 8 files |
+| Phase 11 P06 | 30 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -243,6 +244,8 @@ Recent decisions affecting current work:
 - [Phase 11]: 11-02: working_type is a closed-set registry string key (MARK_PRICE/CONTRACT_PRICE), outside COST_KEYS; D036-D038 delivered as five new v3.0.0 sets, old params files byte-locked and all 15 sets pinned
 - [Phase 11]: 11-03: research-universe manifest is DRAFT with no symbols under docs/research/universe; Phase 13 freezes it with a sha256_hex content hash over sorted symbols
 - [Phase 11]: 11-04: liquidation buffer stays a registry parameter (value chosen in Phase 22); canonical quantization order lives on one labelled line in RISK_MANAGEMENT s11 (D031)
+- [Phase 11]: 11-06: TradingView cannot sign requests; docs describe secret URL path + source-IP allow-list + 3s ack + dedupe + normalise + 2FA (F-052); V1 has no webhook endpoint
+- [Phase 11]: 11-06: single canonical quantization order restated by pointer in PROJECT.md and AGENTS.md (D031); generated AGENTS.md rows guarded by drift gates AU-03/AU-05
 
 ### Pending Todos
 
@@ -287,6 +290,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T04:29:16.703Z
-Stopped at: Completed 11-04-PLAN.md
+Last session: 2026-09-30T04:35:26.112Z
+Stopped at: Completed 11-06-PLAN.md
 Resume file: None
