@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 12
 current_phase_name: fee-cost-model-correctness
-status: executing
-stopped_at: Completed 12-10-PLAN.md
-last_updated: "2026-09-30T10:20:56.160Z"
+status: verifying
+stopped_at: Completed 12-11-PLAN.md
+last_updated: "2026-09-30T10:31:25.274Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 11 execution started
-state_head: 1df545b8bc08366150957af1ab1743a7e9069f2c
+state_head: a74591adb28b2a29c3ab53fa615f25926196c608
 progress:
   total_phases: 28
   completed_phases: 2
   total_plans: 69
-  completed_plans: 67
+  completed_plans: 68
 milestone_name: milestone
 ---
 
@@ -32,7 +32,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 Phase: 12 (fee-cost-model-correctness) — READY TO EXECUTE
 Plan: 8 of 8
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-09-30 — Phase 11 execution started
 
 Progress: [██████████] 100%
@@ -106,6 +106,7 @@ Progress: [██████████] 100%
 | Phase 12 P08 | 15min | 2 tasks | 3 files |
 | Phase 12 P09 | 35min | 3 tasks | 9 files |
 | Phase 12 P10 | 10min | 3 tasks | 2 files |
+| Phase 12 P11 | 35min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -273,6 +274,7 @@ Recent decisions affecting current work:
 - [Phase 12]: 12-09: EOD exits use exit_slippage_rate (market-style close, D046 assumption A2); TP1 uses expected_slippage; unknown exit_kind refused
 - [Phase 12]: 12-09: guard rates read at the risk stage in both modes via guard_rates_from_params (legacy sets fail closed, paper fixtures that never reach risk keep legacy sets)
 - [Phase 12]: 12-10: property test uses zero loss tolerance; vacuity proof kept as a permanent harness test
+- [Phase 12]: D046-D048 recorded; max_cost_to_risk 0.15 implies ~0.79 percent min stop, ratification pending
 
 ### Pending Todos
 
@@ -317,6 +319,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T10:20:55.973Z
-Stopped at: Completed 12-10-PLAN.md
+Last session: 2026-09-30T10:31:25.077Z
+Stopped at: Completed 12-11-PLAN.md
 Resume file: None
