@@ -1,0 +1,7 @@
+src\reconcile\compare.py:517: error: Returning Any from function declared to return "bool"  [no-any-return]
+src\ops\drills.py:814: error: "None" not callable  [misc]
+src\adapters\telegram_notify.py:287: error: Incompatible types in assignment (expression has type "datetime", variable has type "Decimal")  [assignment]
+src\paper\supervisor.py:298: error: "object" has no attribute "isoformat"  [attr-defined]
+src\paper\supervisor.py:299: error: "object" has no attribute "isoformat"  [attr-defined]
+Found 5 errors in 4 files (checked 105 source files)
+exit=1

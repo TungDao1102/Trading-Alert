@@ -1,0 +1,44 @@
+........................................................................ [  5%]
+........................................................................ [ 11%]
+...................................................s.................... [ 16%]
+........................................................................ [ 22%]
+........................................................................ [ 28%]
+................................................s....................... [ 33%]
+........................................................................ [ 39%]
+........................................................................ [ 45%]
+........................................................................ [ 50%]
+........................................................................ [ 56%]
+.........sssss.......................................................... [ 62%]
+........................................................................ [ 67%]
+........................................................................ [ 73%]
+........................................................................ [ 79%]
+........................................................................ [ 84%]
+........................................................................ [ 90%]
+........................................................................ [ 96%]
+...................................................                      [100%]
+============================ slowest 15 durations =============================
+17.36s call     tests/test_analytics_typing.py::test_analytics_is_mypy_strict_clean
+10.10s call     tests/test_prefix_invariance.py::test_stateful_variant_is_detected_by_digest_comparison
+9.94s call     tests/test_prefix_invariance.py::test_full_run_digest_stable_over_identical_input
+7.74s call     tests/test_no_lookahead.py::test_appending_ten_future_bars_changes_zero_historical_decisions
+7.48s call     tests/test_no_lookahead.py::test_leaky_variant_is_detected_by_prefix_comparison
+7.44s call     tests/test_prefix_invariance.py::test_shared_prefix_embedded_in_two_inputs
+7.37s call     tests/test_no_lookahead.py::test_appended_bars_never_change_prefix_decisions
+7.22s call     tests/test_no_lookahead.py::test_same_prefix_different_suffixes_identical
+4.83s call     tests/test_backtest_simulator.py::test_run_twice_byte_identical
+4.65s call     tests/test_backtest_simulator.py::test_no_lookahead_appending_1m_candle_changes_nothing
+4.54s call     tests/test_backtest_simulator.py::test_cr02_trade_id_unique_across_bar_time_symbol_quantity
+4.09s call     tests/test_paper_parity.py::test_paper_replay_digest_equals_simulator_digest
+3.31s call     tests/test_paper_parity.py::test_paper_replay_is_prefix_invariant
+2.49s call     tests/test_backtest_simulator.py::test_risk_reject_is_first_class_outcome
+2.44s call     tests/test_backtest_simulator.py::test_intrabar_both_touched_short_resolves_sl_via_1m
+=========================== short test summary info ===========================
+SKIPPED [1] tests\test_analytics_files.py:701: symlinks unavailable on this platform: OSError
+SKIPPED [1] tests\test_analytics_store.py:561: live-PG analytics store test requires TEST_DATABASE_URL
+SKIPPED [1] tests\test_domain_mappers_pg.py:66: live-PG mapper tests require TEST_DATABASE_URL
+SKIPPED [1] tests\test_domain_mappers_pg.py:78: live-PG mapper tests require TEST_DATABASE_URL
+SKIPPED [1] tests\test_domain_mappers_pg.py:87: live-PG mapper tests require TEST_DATABASE_URL
+SKIPPED [1] tests\test_domain_mappers_pg.py:96: live-PG mapper tests require TEST_DATABASE_URL
+SKIPPED [1] tests\test_domain_mappers_pg.py:121: live-PG mapper tests require TEST_DATABASE_URL
+1268 passed, 7 skipped in 180.31s (0:03:00)
+exit=0

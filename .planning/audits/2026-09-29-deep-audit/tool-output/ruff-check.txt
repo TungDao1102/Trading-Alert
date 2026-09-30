@@ -1,0 +1,39 @@
+scripts\_compute_phase4_fixtures.py:155:101: E501 Line too long (104 > 100)
+scripts\_compute_phase4_fixtures.py:156:101: E501 Line too long (101 > 100)
+scripts\_compute_phase4_fixtures.py:157:101: E501 Line too long (104 > 100)
+scripts\_compute_phase4_fixtures.py:158:101: E501 Line too long (104 > 100)
+scripts\_extend_phase4_candles.py:31:51: UP017 [*] Use `datetime.UTC` alias
+scripts\_extend_phase4_candles.py:40:9: F841 Local variable `close_time` is assigned to but never used
+scripts\_extend_phase4_candles.py:63:51: UP017 [*] Use `datetime.UTC` alias
+scripts\_extend_phase4_candles.py:67:9: F841 Local variable `close_time` is assigned to but never used
+scripts\_extend_phase4_candles.py:91:51: UP017 [*] Use `datetime.UTC` alias
+scripts\_extend_phase4_candles.py:109:9: F841 Local variable `close_time` is assigned to but never used
+scripts\_extend_phase4_candles.py:133:52: UP017 [*] Use `datetime.UTC` alias
+scripts\_extend_phase4_candles.py:138:9: F841 Local variable `close_time` is assigned to but never used
+src\adapters\telegram_callbacks.py:38:1: I001 [*] Import block is un-sorted or un-formatted
+src\approval\replay.py:54:1: E402 Module level import not at top of file
+src\ops\drills.py:49:22: F401 [*] `datetime.UTC` imported but unused
+src\ops\drills.py:537:12: F401 [*] `asyncio` imported but unused
+src\ops\drills.py:874:16: F401 [*] `asyncio` imported but unused
+src\risk\portfolio.py:312:5: F841 Local variable `warning_threshold_quote` is assigned to but never used
+src\risk\portfolio.py:313:5: F841 Local variable `stop_threshold_quote` is assigned to but never used
+src\risk\types.py:13:1: I001 [*] Import block is un-sorted or un-formatted
+tests\test_backtest_report.py:58:58: UP017 [*] Use `datetime.UTC` alias
+tests\test_backtest_report.py:59:56: UP017 [*] Use `datetime.UTC` alias
+tests\test_backtest_report.py:93:62: UP017 [*] Use `datetime.UTC` alias
+tests\test_backtest_report.py:568:37: F401 [*] `src.backtest.report.ReportBuildError` imported but unused
+tests\test_backtest_report.py:579:10: B017 Do not assert blind exception: `Exception`
+tests\test_backtest_simulator.py:16:32: F401 [*] `datetime.timedelta` imported but unused
+tests\test_backtest_simulator.py:332:54: F401 [*] `src.backtest.costs.modeled_costs_per_unit` imported but unused
+tests\test_backtest_simulator.py:381:38: F401 [*] `datetime.datetime` imported but unused
+tests\test_backtest_simulator.py:489:57: UP017 [*] Use `datetime.UTC` alias
+tests\test_backtest_simulator.py:490:58: UP017 [*] Use `datetime.UTC` alias
+tests\test_core_features.py:13:1: I001 [*] Import block is un-sorted or un-formatted
+tests\test_core_features.py:31:5: F401 [*] `src.core.types.FeatureOutput` imported but unused
+tests\test_domain_boundary.py:66:50: UP017 [*] Use `datetime.UTC` alias
+tests\test_domain_boundary.py:88:50: UP017 [*] Use `datetime.UTC` alias
+tests\test_paper_attribution.py:646:5: I001 [*] Import block is un-sorted or un-formatted
+tests\test_paper_attribution.py:646:101: E501 Line too long (101 > 100)
+Found 36 errors.
+[*] 23 fixable with the `--fix` option (6 hidden fixes can be enabled with the `--unsafe-fixes` option).
+exit=1
