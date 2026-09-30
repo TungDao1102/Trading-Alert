@@ -63,6 +63,48 @@ Runtime configuration may live in environment variables or secret/config stores,
 
 Runtime configuration must not use the name `working_type` or any other registry key name: registry keys are strategy-semantic and are rejected outside the registry (D037).
 
+### Runtime configuration of the Phase 13 data tools
+
+These are command-line settings of the data tools (D049). They are runtime configuration, not strategy parameters: none is a registry key, none enters `parameter_set_hash`, and the exact data a run used is identified afterwards by the dataset identity (`data/DATA_MODEL.md` section 2.13) and the sufficiency report.
+
+Collector, `python -m src.data.collector`:
+
+| Setting | Default | Behavior |
+| --- | --- | --- |
+| `--collect-list` | `DEFAULT_COLLECT_LIST_PATH` in `src/data/collect_list.py`, that is `docs/research/universe/collect-list-v1.toml` relative to the working directory (the repository root locally, `/app` in the image, which ships `docs/research/universe`) | The symbols the OI and funding collector polls. The latest versioned list under `docs/research/universe` is the one in use; after the research-universe freeze a new list version is issued and the path is updated (D-24). |
+| `--universe` | none | Explicit symbol override, validated against `^[A-Z0-9]+USDT$`. |
+| `--cadence-seconds` | 300 | Poll cadence; the loop sleeps to the next grid boundary. |
+| `--raw-root`, `--database-url` | `data/raw`, `DATABASE_URL_SYNC` or `DATABASE_URL` | Parquet raw store and watermark database. |
+| `--once`, `--healthcheck` | off | One tick and exit; watermark-freshness probe. |
+
+Refusal behavior: a missing, unreadable, malformed or empty collect list, or an invalid symbol in it, makes the collector exit 2 (the healthcheck exit 1) before any engine or adapter is built. There is no fallback to the five live symbols.
+
+Collect-list proposer, `python -m src.data.collect_list propose --ticker-json P --exchange-info-json P --chosen-on YYYY-MM-DD [--top-n N] [--list-id ID] --out P`: deterministic, refuses to overwrite `--out`.
+
+History backfill, `python -m src.data.backfill_cli`:
+
+| Setting | Default | Behavior |
+| --- | --- | --- |
+| `--symbols` | the collect list union a FROZEN manifest | Explicit symbols replace the union (a FROZEN manifest still sets the 1h/4h start). |
+| `--collect-list`, `--manifest` | the collect list above; `docs/research/universe/research-universe-v1.toml` | A missing or invalid manifest is a configuration error (exit 2). A DRAFT manifest contributes nothing; a FROZEN one adds its symbols and its `selection_date` becomes the 1h/4h start. |
+| `--intervals`, `--datasets` | `1m 1h 4h`; `trade mark` | What to fetch. |
+| `--depth-1m-months`, `--depth-htf-months` | 12, 24 | History depth before the run date (D-04). Extending 1m to 24 months is a user decision after the sufficiency report (D-21). |
+| `--pace-seconds` | 0.25 | Pause between pages; at page size 1000 (weight 5) about 1,200 weight per minute, half of the IP budget. |
+| `--raw-root`, `--cursor-root` | `data/raw`, `data/raw/_cursors` | Store root and per-dataset resume cursors (plus `_sources.json`, the REST or ARCHIVE provenance of archive-filled symbols). |
+| `--report-out` | none (the table is always printed) | Writes the data-sufficiency report as canonical JSON. |
+| `--funding`, `--no-funding` | funding on | Funding-history backfill per symbol over the 1h/4h range. |
+| `--dry-run` | off | Reads exchangeInfo, prints every window, fetches and writes nothing. |
+| `--database-url` | `DATABASE_URL_SYNC` or `DATABASE_URL` | Read once by the engine factory and never printed. |
+
+Exit codes: 0 success, 1 a runtime failure (only exception type names are printed, never a URL), 2 a configuration error, 3 missing data (`NOT_BACKFILLED`, `GAP` or `UNAVAILABLE` in the sufficiency report). `python -m src.data.sufficiency validate <report>` checks a written report.
+
+Point-in-time universe freeze, `python -m src.data.universe_freeze`:
+
+| Command and setting | Default | Behavior |
+| --- | --- | --- |
+| `propose --run-date D --out P` | today (UTC); `docs/research/universe/research-universe-v1.freeze-report.json` | Ranks candidates by trailing 30-day quote volume at the dataset start (the run date minus two years) and writes the hashed report; exit 3 when fewer than 12 symbols are eligible (the report is still written). |
+| `freeze --report P --approve HASH [--freeze] [--manifest P] [--witness P]` | dry run unless `--freeze` | Approval-hash rule: `--approve` must equal the `proposal_sha256` recomputed from the report; an edited report, a manifest that is not DRAFT, a witness that is already set or a proposal that fails manifest validation refuses with no file changed. With `--freeze` the manifest and the second witness are written atomically and the manifest is restored if the witness write fails. |
+
 ## 4. Reproducibility contract
 
 Every backtest, paper signal, alert, approval, and live order plan must be traceable to:

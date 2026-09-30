@@ -341,6 +341,46 @@ created_at_utc
 result_summary_json
 ```
 
+### 2.13 Research Parquet datasets
+
+**V1 status: built in Phase 13 as immutable Parquet files under the raw root (`data/raw`), not as PostgreSQL tables (D049).** All timestamps are UTC (`Datetime` in milliseconds, time zone UTC); prices, quantities and rates are `Decimal`, never binary floating point; a published file is never rewritten. Exchange facts behind the layouts are in `SOURCES.md` ("Facts verified for Phase 13") and `integration/BINANCE.md` section 13.
+
+Trade candles, one file per symbol, interval and closed UTC day:
+
+```text
+data/raw/interval=<TF>/symbol=<SYMBOL>/date=<YYYY-MM-DD>/part.parquet
+columns: open_time_utc, close_time_utc, open, high, low, close (Decimal scale 8),
+         volume, quote_volume (Decimal scale 8), trade_count (Int64), interval, symbol
+```
+
+Mark-price klines are a separate dataset with the same partition shape under their own root, so the trade view (`candles_v1`, glob `interval=*/symbol=*/date=*/part.parquet`) never sees them and the existing backup root covers them (D-11, D-27):
+
+```text
+data/raw/dataset=mark_klines/interval=<TF>/symbol=<SYMBOL>/date=<YYYY-MM-DD>/part.parquet
+columns: open_time_utc, close_time_utc, open, high, low, close (Decimal scale 8),
+         price_tick_count (Int64), interval, symbol
+```
+
+The mark dataset has no volume, quote-volume or trade-count column (D-29): Binance returns `"0"` for the volume fields of a mark-price kline and the count field is a price-update count, stored as `price_tick_count`. It is a trigger series for the Phase 14 simulator (D037, D-12); Phase 13 does not consume it in any strategy or decision.
+
+Funding and open-interest ticks, one file per observation, written by the collector and the funding-history backfill:
+
+```text
+data/raw/data_class=funding/symbol=<SYMBOL>/date=<YYYY-MM-DD>/sweep-<iso>.parquet
+columns: symbol, funding_time_utc, funding_rate (Decimal scale 10), mark_price (Decimal scale 8, null for old rows)
+data/raw/data_class=oi/symbol=<SYMBOL>/date=<YYYY-MM-DD>/tick-<iso>.parquet
+columns: symbol, observed_at_utc, open_interest (Decimal scale 8), source
+data/raw/data_class=oi_research/...  (same shape as oi)
+```
+
+Publication rules: a candle day file is published only for a whole closed UTC day (or the terminal day of a delivered contract), through a temporary file and an atomic replace, and an existing file is never overwritten (`DATA_PIPELINE.md` section 15). A dataset that is written again from a different source or a different library version has different bytes and is therefore a new dataset, never an edit of the old one.
+
+Dataset identity (D-18): `dataset_id` is the canonical-JSON sha256 of `{"files": [{"path": <posix path relative to the raw root>, "sha256": <sha256 of the file bytes>}, ...]}` sorted by path, computed over exactly the day files a run reads (never a store-wide glob). It is a 64-hex string, independent of file order and of the operating system, and is carried as `ExperimentRecord.data_snapshot_id` so a research result names the exact bytes it was computed from (`src/data/case_input.py`, `dataset_identity`).
+
+Collect list versus research universe (D-01, D-02, D-06 to D-09). The collect list `docs/research/universe/collect-list-v1.toml` (schema `collect-list/1`) is an operational input naming the symbols the OI and funding collector polls: the live-5 union the top 15 TRADING USDT perpetuals by 24h quote volume on the day it was chosen (2026-09-30). It has no FROZEN state and no content hash, and a later version supersedes it without touching stored data. The research universe is the separate manifest `docs/research/universe/research-universe-v1.toml`, a point-in-time selection by trailing 30-day quote volume at the dataset start that becomes FROZEN with a content hash and a second witness in the decision-alignment gate. The reviewable evidence for that selection is the freeze report `docs/research/universe/research-universe-v1.freeze-report.json` (schema `research-universe-freeze-report/1`): dates, per-candidate status, contract type, onboard time, `deliveryDate`, source, days, volume sum, eligibility and reason, the ranking, unrankable symbols, trade and mark availability for each proposed symbol, and `proposal_sha256` computed over every other report field. The report sits outside the hashed manifest payload; `freeze` accepts it only when the operator passes that hash as `--approve`.
+
+Sufficiency report (D-04, D-05, D-21): `python -m src.data.backfill_cli --report-out <path>` writes canonical JSON (sorted keys, LF, UTF-8, atomic; byte-identical on an identical re-run) with schema `data-sufficiency-report/1` and the keys `run_date`, `depth_months`, `dataset_start`, `dataset_end`, `rows`, `split_coverage`, `trade_floor_note`, `depth_extension_note` and `missing_data`. Each row is one (dataset, symbol, interval) with `source` (REST or ARCHIVE), the expected window, `expected_bars`, `have_bars`, `missing_bars`, a `cause` (`OK`, `ONBOARD_LIMITED`, `DELISTED_CAPPED`, `NO_WINDOW`, `NOT_BACKFILLED`, `GAP`, `UNAVAILABLE`), `gaps` and `flat_tail`; `missing_data` is true only for `NOT_BACKFILLED`, `GAP` or `UNAVAILABLE`. `split_coverage` gives the 1m coverage of each protocol split block (40 percent Development, four 10 percent Validation folds, 20 percent holdout of the 1h/4h timeline). The report checks data depth only: the D043 trade floor (at least 100 closed trades pooled over the four Validation folds and at least 30 per fold) cannot be measured before the Phase 14 causal simulator exists, so the report states that and estimates no trade count. It never lowers the floor and it does not edit `RESEARCH_PROTOCOL.md`; extending 1m history from 12 to 24 months is a user decision taken after reading the report (D-21).
+
 ## 3. Canonical state machines
 
 Canonical states are defined in `GLOSSARY.md`.

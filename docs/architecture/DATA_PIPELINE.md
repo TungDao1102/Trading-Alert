@@ -162,3 +162,29 @@ Do not make PostgreSQL the only storage layer for the historical market dataset.
 ## 14. Python implementation rule
 
 The collector may use the Binance Python SDK and asyncio, but the normalized domain data passed to the strategy must be project-defined types/models. SDK classes and raw JSON must not leak into the strategy layer.
+
+## 15. Phase 13 research data rules
+
+These rules describe what the Phase 13 code enforces (D049). File layouts are in `data/DATA_MODEL.md` section 2.13 and exchange facts in `integration/BINANCE.md` section 13.
+
+Publishing candles:
+
+- Closed-day publish (D-13): the paginator clamps the window end to the start of the current UTC day and publishes a day file only when the whole day lies inside the window (or it is the terminal day of a delivered contract). A partly covered day is held back, logged and never advances the cursor, so the current forming day is never written.
+- Atomic, immutable publish (D-14): every file is written to a temporary file in the same directory, flushed, and moved into place with `os.replace` (up to five attempts, because Windows can refuse a replace while another process holds the file). An existing file is never overwritten; a crash leaves neither a torn `part.parquet` nor a temporary file that a `date=*/part.parquet` glob could pick up. The OI and funding tick writers use the same routine.
+- Zero-trade acceptance and precision (D-15): a bar with zero trades is valid telemetry (delisted contracts serve such flat bars) and is counted, not rejected; a negative trade count is rejected. A price or quantity that is not finite or has more than 8 fractional digits is rejected and counted, because the Parquet scale is 8 and rounding would change stored values silently.
+
+History windows and sources:
+
+- Delivery cap (D-26): each symbol's window is `max(depth start, onboard time)` to `min(run day floor, deliveryDate)`. A contract that is not TRADING and has no `deliveryDate`, or a symbol exchangeInfo no longer lists, gets no REST window (`DELIVERY_UNKNOWN`) and is refused instead of being fetched up to today, because the exchange serves invented flat bars after delivery.
+- Archive fallback (D-08): REST is tried first per symbol; only a REST -1121 or a symbol absent from exchangeInfo moves it to data.binance.vision, whose zips are sha256-checked (transport integrity only), size-capped and read in memory, then pass through the same paginator, quality gate, closed-day rule and atomic publisher. Mark klines are REST-only and become `UNAVAILABLE` otherwise; a symbol no source serves is `UNAVAILABLE` in the sufficiency report and unrankable in the freeze report, never silently dropped.
+- Resume: one cursor file per dataset, symbol and interval (`<cursor-root>/<SYMBOL>_<interval>.cursor` for trade data, a `mark__` prefix for the mark dataset), plus a store floor at the day after the latest published partition, so an interrupted run resumes without publishing any day twice. A store that already holds a short recent bootstrap for a symbol starts its resume after that bootstrap, so the depth run should start from an empty raw root or be read against the sufficiency report, where the missing history shows as `GAP`.
+- Depth and funding: 1m defaults to 12 months and 1h and 4h to 24 months before the run date (D-04); funding history is collected over the 1h/4h range per symbol, and a funding failure records a `collector_gaps` row instead of stopping the run.
+
+Building backtest inputs:
+
+- The case-input builder (D-19, `src/data/case_input.py`) reads an explicit per-day file list, refuses an unresolved gap with `CaseInputGapError` before any row is produced, and never pads, forward-fills or interpolates. A gap is one shared definition (`src/data/coverage.py`): a hole between consecutive rows larger than the maximum step, a first row later than the start allowance, or an end more than the maximum step after the last row; funding tolerates 8 hours plus 60 seconds and open interest twice its 5-minute cadence. A caller may pass `allow_gaps` entries equal to real gaps; those are recorded on the output. The range must end on or before an explicit `as_of_day_utc`; the module reads no wall clock.
+- The builder returns the `dataset_id` (`DATA_MODEL.md` section 2.13) that the backtest assembly takes as `data_snapshot_id`.
+
+Realtime seam (D-16, D-28), for the paper supervisor: on reconnect or scheduled rotation the order is close the old stream, backfill the missed closed candles, record them, start the new subscription, then run one verification backfill after it is attached. A single lock-guarded monotonic last-close cursor gates both the WebSocket handler and the backfill, so a close at or before the last processed close is dropped and no close is delivered twice or skipped across a reconnect. A pair whose first backfill failed is journaled once as an outage gap and still resubscribes.
+
+Collector (D-25): the loop sleeps to the next 5-minute grid boundary so a slow tick cannot stretch the period; a warn-only exchange-clock probe logs the offset at start and never blocks. Fail-closed clock checks belong to Phase 18 and the deployment-level time synchronization to Phase 13.1.
