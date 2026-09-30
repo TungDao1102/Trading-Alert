@@ -63,6 +63,8 @@ Final holdout / forward test
 
 The final holdout must not be used to choose parameters.
 
+Fixed proportions (40% Development, 40% Validation as four consecutive walk-forward test folds, last 20% final holdout, single-use) are pre-registered in `docs/research/RESEARCH_PROTOCOL.md` v1.1.0 §1 and §4 per D032 and D043.
+
 ## 8. Walk-forward
 
 Where practical, use rolling windows:
@@ -112,7 +114,7 @@ This is a methodology warning, not a claim that a fixed sample size proves or di
 
 To increase research sample size without changing the intended live product:
 
-- research may evaluate 10–15 sufficiently liquid symbols;
+- research evaluates the point-in-time universe of D039 (top 10–15 USDT perpetuals by volume at the dataset start date, delisted symbols included), declared in the manifest `docs/research/universe/research-universe-v1.toml` and frozen and hashed before evaluation;
 - live V1 may remain limited to the declared 5-symbol universe;
 - the research report must show results both for the broader research universe and the intended live universe.
 
@@ -150,7 +152,7 @@ A strategy may proceed only when:
 9. no critical conclusion depends on a single symbol, quarter, or isolated parameter point;
 10. candidate has been compared against declared baselines.
 
-Exact numerical acceptance thresholds remain `TBD` until the research methodology is exercised on real data.
+The numerical acceptance thresholds (trade floor, expectancy bound, multiple-testing correction, drawdown ceiling, single-use holdout) are pre-registered in `docs/research/RESEARCH_PROTOCOL.md` v1.1.0 §4 per D032 and D043.
 
 
 ## 13. Research implementation

@@ -26,7 +26,7 @@ A semantic change to the protocol triggers a new strategy-version lineage downst
 
 This is a semantic amendment (dataset splits, cost and execution assumptions, acceptance gates) per D032 and D043. The v1.0.1 text is unchanged in git history at commit `a68e97736e65b563c7ddbb8bf746d4225ad31f36` and is superseded, not edited. What changes: numeric acceptance thresholds, split proportions, the variant budget and multiple-testing correction, a single-use holdout with a consumed marker, no human pass override, the entry fee at the taker rate (D036), mark-price protective triggers (D037), `partial_fill_fraction` 1.0 as the canonical value (D038), the point-in-time research universe (D039), and one canonical quantization order. What does not change: the D030 kill-gate firing rule, the `Frozen on` clock start (2026-09-19, so the D013 six-month clock is not restarted), and the identity tuple in §5. Downstream strategy-version lineages restart per `docs/strategy/TRADING_STRATEGY_SPEC.md` §12. The full pre-registration body follows in §1–§4.
 
-**Numeric-gate reservation (RSCH-01/unclassified).** Every numeric threshold in §1–§5 — sample sizes, split ratios, ATR multipliers, RR minima, expiry hours, cost assumptions, frequency targets — is **TBD until exercised on real data**. Where a default direction is required to make the doc readable, it is stated as a *range to explore* (e.g. "10–15 symbols research slice", "0.5% baseline risk rate"), never as a frozen fact. A numeric gate appearing in this protocol before real-data exercise is a flagged assumption, never a frozen value.
+**Numeric-gate status (v1.1.0).** The acceptance thresholds, split proportions, variant budget, multiple-testing correction and holdout rule are pre-registered numerically in §1 and §4 per D032 and D043, before any Validation run. Strategy parameters (ATR multipliers, RR minima, expiry hours) stay versioned parameter-set values owned by the family sheets and the registry (§5). A pre-registered value changes only by a new protocol version (v1.2.0) and a new candidate lineage, never after a result is seen.
 
 ---
 
@@ -46,9 +46,9 @@ Validation
 Final holdout / forward test
 ```
 
-- **Development** — exploratory sweep space, feature engineering, structural hypothesis selection.
-- **Validation** — out-of-sample check on parameter regions chosen during Development; never used to invent new regions.
-- **Final holdout / forward test** — reserved; the **final holdout must not be used to choose parameters**. Its sole purpose is the one-time honest assessment of a candidate before live consideration.
+- **Development** — the first 40% of the dataset by time (D032, D043); exploratory sweep space, feature engineering, structural hypothesis selection.
+- **Validation** — the next 40% of the dataset by time, evaluated as four consecutive equal-length walk-forward test folds (anchored training window from the dataset start, parameters not re-fit inside a fold, every counted variant evaluated on all four folds); out-of-sample check on parameter regions chosen during Development; never used to invent new regions.
+- **Final holdout / forward test** — the last 20% of the dataset by time, locked; the **final holdout must not be used to choose parameters**. Its sole purpose is the one-time honest assessment of a candidate before live consideration; it is single-use per candidate lineage (§4, D032, D043).
 
 ### Walk-forward
 
@@ -62,8 +62,8 @@ The rolling period must be **fixed before** any evaluation on a window; the choi
 
 ### Universe discipline
 
-- **Research universe:** 10–15 sufficiently liquid Binance USDⓈ-M symbols, declared per experiment record (§5).
-- **Live V1 universe:** BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT (per `docs/00_PRODUCT_SCOPE.md`).
+- **Research universe:** the point-in-time universe of D039 — the top 10–15 USDT perpetuals by trailing 30-day quote volume at the dataset start date, delisted symbols included — declared in `docs/research/universe/research-universe-v1.toml` (status DRAFT until Phase 13 freezes and hashes it, before any evaluation). Once FROZEN, the experiment record (§5) carries its content hash.
+- **Live V1 universe:** BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT (per `docs/00_PRODUCT_SCOPE.md`); a separate list, unchanged by the research universe.
 - The experiment report must show results **both** for the broader research slice and the live-5 slice. A strategy is not accepted solely because the broader universe rescues a weak live universe.
 
 ### Anti-overfitting rules R1–R6
@@ -77,9 +77,9 @@ Restated from `docs/research/TRADING_STRATEGY_RESEARCH.md` anti-overfitting rule
 - **R5** — No daily-PnL targeting; NO_TRADE is a valid and reportable outcome.
 - **R6** — No optimization on skipped trades; skipped/expired plans remain part of the journal record.
 
-### Specific value reservations
+### Fixed proportions (v1.1.0)
 
-- Split ratios (e.g. 60/20/20 vs 70/15/15), walk-forward window length, and number of walk-forward windows are **ranges to explore**, not frozen facts. Their selection for an experiment is recorded in the experiment record (§5) and the parameter registry (§5).
+- The split is fixed at 40% Development, 40% Validation (four consecutive equal-length walk-forward test folds) and 20% final holdout, by time. These proportions were chosen before any evaluation (D032, D043; planner choice under the D-03 pre-registration) and are not tuned per family. The dataset start and end, and the resulting fold boundaries, are recorded in the experiment record (§5).
 
 ---
 
@@ -93,7 +93,7 @@ Every backtest/paper run **must expose** cost configuration. The minimum declare
 
 | Field | Definition | Reference |
 |---|---|---|
-| `entry_fee` | Taker/maker fee applied at entry, basis points per side | exchange schedule, re-verified at implementation |
+| `entry_fee` | Fee applied at entry, basis points per side; taker rate for canonical parameter sets (D036) | exchange schedule, re-verified at implementation |
 | `exit_fee` | Taker/maker fee applied at exit | exchange schedule |
 | `funding_treatment` | When funding applies and how it is signed | research §10.x (by title) |
 | `slippage_model` | Effective-entry formula (see below) | this section |
@@ -112,7 +112,7 @@ effective_entry = intended_entry + slippage
 ### Spread and fill assumptions
 
 - The backtest must distinguish **touched price** from **filled price** for limit orders (see §3 execution assumptions).
-- Partial fills are modeled; partial-fill fraction must be declared per experiment.
+- Canonical parameter sets use `partial_fill_fraction = 1.0` (D038), identical for candidates and baselines; partial or missed fills are a separate sensitivity run, never a canonical parameter.
 - A retest/touch that does not fill is logged with the same attribution fields as a fill.
 
 ### Funding
@@ -121,14 +121,15 @@ Funding is applied to positions held through funding events. The funding rate ap
 
 ### Quantization — floor-only, identical across modes
 
-> **Source:** `docs/trading/RISK_MANAGEMENT.md` quantization rules; restated in `docs/AGENTS.md` Constraints (canonical).
+> **Source:** `docs/trading/RISK_MANAGEMENT.md` §11 (the canonical statement of the check order, D031); restated in the repo-root `AGENTS.md` Constraints.
 
-The realized quantity is computed as:
+The realized quantity is computed in this canonical order (first failure wins):
 
 1. Floor the raw quantity to the symbol's `stepSize` (Binance `exchangeInfo` — re-verified, never hard-coded).
-2. Apply a realized-risk check against the intended risk budget (baseline 60% of intended — the exact percentage is **TBD per risk register** and may be tightened in live-mode).
-3. Reject the order if the floored quantity falls below `minQty` or the notional falls below `minNotional`.
-4. **NO_TRADE preferred over round-up.** Round-up silently inflates risk beyond the budget and is forbidden.
+2. Reject when the floored quantity is below the symbol's minimum quantity (`MIN_QTY_REJECT`).
+3. Reject when the notional is below the symbol's minimum notional (`NOTIONAL_REJECT`).
+4. Reject when realized risk over allowed risk is below `minimum_risk_utilization_after_rounding`, baseline 0.6 (`UTILIZATION_REJECT`); the exact percentage is a versioned parameter and may be tightened in live mode.
+5. A rejection yields NO_TRADE. **NO_TRADE preferred over round-up.** Round-up silently inflates risk beyond the budget and is forbidden.
 
 This quantization logic is **identical** in backtest, paper, and live. Any divergence must be reported as an incident and fixed in the engine, not patched at the call site.
 
@@ -163,12 +164,16 @@ When a 1H OHLC bar's high and low both touch stop and target inside the same bar
    - **Mark ambiguous and segregate** — count the bar in a separate "ambiguous" bucket; never blend into win/loss.
 3. When finer data is unavailable, use a conservative deterministic assumption and **report it** in the experiment record.
 
+### Protective trigger price series (D037)
+
+Protective SL/TP triggers are evaluated on mark-price klines (Binance markPriceKlines) with `workingType` `MARK_PRICE` recorded on the plan, so backtest, paper and live share one trigger price series (D037).
+
 ### Limit-order simulation — mandatory checklist
 
 The backtest engine must model, per limit order:
 
 - **touched vs filled** — the price was touched (wick) versus the order was filled at that price.
-- **partial fill** — declared partial-fill fraction, applied before any TP/SL logic.
+- **partial fill** — canonical sets use `partial_fill_fraction = 1.0` (D038); a partial-fill fraction below 1.0 is applied before any TP/SL logic only in a separate sensitivity run.
 - **time-in-force / expiry** — limit orders expire per their declared validity; a re-quote after expiry is a new order, not a fill.
 - **cancel-after-invalidation** — when a setup is invalidated, its unfilled limit order is canceled, not left to fill retroactively.
 - **no retroactive fill after expiry** — once an order has expired, a later price touch is not a fill.
@@ -201,21 +206,31 @@ A strategy may proceed only when **all ten** methodology criteria are met. Each 
 3. **Costs modeled** — every backtest exposes entry/exit fee, funding, slippage, and spread (§2).
 4. **Not single-symbol/session** — results span symbols and time slices; single-symbol dominance is a rejection signal.
 5. **OOS consistent** — out-of-sample behavior is not materially inconsistent with in-sample without an understood, recorded reason.
-6. **Operationally tolerable drawdown** — drawdown and loss streak are reported; the operational definition of "tolerable" is per-risk-register and is **TBD** until paper evidence exists.
+6. **Operationally tolerable drawdown** — maximum drawdown of the pooled Validation equity curve is at most 20% of research equity (gate G4 below); loss streak is reported, not gated.
 7. **Reproducible** — the experiment record (§5) carries enough identifiers that another agent can re-run the exact same experiment and obtain byte-equivalent results.
 8. **Distributional/interval uncertainty** — uncertainty is reported with distributional analysis (bootstrap intervals, resampled drawdowns), not a single expectancy number.
 9. **No single-point dependence** — no critical conclusion rests on a single symbol, quarter, or isolated parameter point.
 10. **Baseline-compared** — the candidate is compared against declared baselines (§3), not evaluated in isolation.
 
-### Thresholds remain TBD
+### Pre-registered thresholds (v1.1.0)
 
-Exact numerical acceptance thresholds (expectancy magnitude, drawdown ceiling, loss-streak ceiling, minimum OOS consistency margin, minimum trade count by slice) remain `TBD` until the methodology is exercised on real data. The mechanism for setting these thresholds is:
+Pre-registered per D032 and D043 before any Validation run. Every number below is fixed at freeze; a change forces protocol v1.2.0 and a new candidate lineage, and no value is ever changed after a result is seen.
 
-- A `parameterSet` is run through Development.
-- The family of candidate sets is run through Validation.
-- After ≥3 independently specified families (see kill gate below) have produced Validation evidence, **then** and only then are candidate numerical thresholds proposed, recorded in `DECISIONS.md`, and added to a future protocol amendment (e.g. `v1.1.0`).
+**Variant budget:** N = 25 per family, counting every parameter combination evaluated in Development or Validation, logged in the experiment record; exceeding it needs v1.2.0.
 
-A numeric threshold appearing before this empirical base is a flagged assumption, never a frozen gate.
+1. **G1 (trade floor)** — at least 100 closed trades pooled across the four Validation folds and at least 30 closed trades in each Validation fold; a candidate below the floor cannot pass and the floor is never lowered after the freeze.
+2. **G2 (expectancy)** — mean net R per trade after full costs (taker entry fee, exit fee, funding, slippage) over the pooled Validation trades is above 0 and the lower bound of the 95% block-bootstrap interval of that mean is above 0.
+3. **G3 (multiple testing)** — one-sided seeded stationary block-bootstrap p-value for the hypothesis that mean net R is at most 0, Holm-Bonferroni adjusted at family-wise alpha = 0.05 over the family's counted variants; the candidate passes only when its adjusted p-value is below 0.05.
+4. **G4 (drawdown)** — maximum drawdown of the pooled Validation equity curve is at most 20% of research equity, using the same equity base and risk_rate convention as the risk engine.
+5. **G5 (single-use holdout)** — the candidate lineage evaluates the final holdout (the last 20% of the dataset by time) exactly once, after G1-G4 pass, with parameters frozen; it passes when mean net R after full costs is above 0 and maximum drawdown is at most 20% on the holdout block (trade count reported, no floor).
+
+Holm-Bonferroni is applied per family; selecting one of the three families is an additional uncorrected layer, so the worst-case family-wise false-pass rate across three families is about 14% (1 minus 0.95 cubed); a cross-family correction needs an amendment.
+
+A candidate passes only when G1-G5 all pass. A human may reject a candidate that passes; a human may never pass a candidate that fails (D032, D043).
+
+**Holdout consumed marker.** Before the holdout is evaluated the harness appends `lineage_id`, `candidate_sha256`, `consumed_at_utc` and `decision_ref` to `docs/research/holdout_consumed.json`, `candidate_sha256` being the hash of `strategy_id`, `strategy_version` and the candidate `parameter_set_hash`. A second evaluation of an already listed `lineage_id` or `candidate_sha256` is a violation and the result is void. Lineage means a `strategy_id` plus its `strategy_version` line; successive lineages on one holdout window erode it, which the marker makes countable.
+
+**Power note.** With sigma about 1.2 R and Holm over 25 variants the trade floor detects only a large edge, about 0.35 R. The trade rate is unmeasured until the Phase 14 causal simulator exists, so D043 records that the floor may be unreachable at the decided dataset depth; that shortfall is reported, never papered over.
 
 ### Uncertainty reporting — required fields
 
@@ -238,7 +253,7 @@ The kill gate fires only when **all three** conditions hold:
 - at least six calendar months have elapsed since the protocol freeze date (the header `Frozen on` date, taken at 00:00Z), **and**
 - no family holds a recorded passing decision.
 
-"Independently specified" means a distinct `strategy_id`, a 7-slot family sheet, a distinct sheet content hash and distinct registered parameter-set hashes (baselines excluded). Until all three hold the state is WITHIN_BUDGET (keep researching) or PASSING_CANDIDATE (a family holds a recorded passing decision; this does not authorize live). Because numeric acceptance thresholds remain TBD, a family's passing status is a recorded human decision with a decision reference, never computed. This wording conforms the section to D013 and is recorded as D030 (protocol v1.0.1, clarification only; see the Amendment log).
+"Independently specified" means a distinct `strategy_id`, a 7-slot family sheet, a distinct sheet content hash and distinct registered parameter-set hashes (baselines excluded). Until all three hold the state is WITHIN_BUDGET (keep researching) or PASSING_CANDIDATE (a family holds a recorded passing decision; this does not authorize live). A family's passing status is computed from G1-G5 (Pre-registered thresholds (v1.1.0) above) and recorded with a decision reference; a human may reject a candidate that passes but may never pass a candidate that fails (D032, D043). This wording conforms the section to D013 and is recorded as D030 (protocol v1.0.1, clarification only; see the Amendment log).
 
 When the kill gate fires, the project stops adding complexity, keeps live execution disabled, classifies the artifact as research/journal infrastructure, and continues to log NO_TRADE outcomes. NO_TRADE is a valid outcome of the kill gate; a forced green light is not.
 
@@ -352,7 +367,7 @@ For convenience, the cross-reference targets in this section resolve to:
 - `docs/research/TRADING_STRATEGY_RESEARCH.md` — sections "Setup lifecycle" and "Journal" (by title).
 - `docs/data/DATA_MODEL.md` §6 — reporting joins and the four canonical attribution timestamps.
 - `docs/strategy/TRADING_STRATEGY_SPEC.md` §2 — regime taxonomy (TBD until the SPEC is frozen).
-- `docs/AGENTS.md` Constraints — fail-closed semantics for invalid data/connection/account/risk.
+- repo-root `AGENTS.md` Constraints — fail-closed semantics for invalid data/connection/account/risk.
 
 ---
 
@@ -368,7 +383,7 @@ A version is frozen when **all three** are true:
 2. A row in `docs/DECISIONS.md` names the freeze version (e.g. `D029 — Research protocol v1.0.0 frozen on YYYY-MM-DD`) and references the commit hash.
 3. The `docs/DOC_STATUS.md` index lists `docs/research/RESEARCH_PROTOCOL.md` under Stable/canonical and bumps its version line.
 
-Until all three land, the doc is `DRAFT` in effect, regardless of what the header says.
+Until all three land, the doc is `DRAFT` in effect, regardless of what the header says. The research-gate reads the header `Protocol version` and requires a DECISIONS row containing `protocol vX.Y.Z frozen` and a DOC_STATUS index line containing that same version; an older version's row does not satisfy a newer header (D043).
 
 ### Amendment procedure
 
@@ -377,8 +392,9 @@ Until all three land, the doc is `DRAFT` in effect, regardless of what the heade
 
 ### Living-draft firewall (operational)
 
-`docs/research/TRADING_STRATEGY_RESEARCH.md` is the only place new candidate ideas and open questions are first recorded. The protocol doc is updated only via the amendment procedure above. When a future research-gate CI workflow is in place, the workflow reads the protocol `Status:` line, the corresponding DECISIONS row, and the DOC_STATUS entry on every PR; any disagreement (e.g. header says FROZEN but no DECISIONS row exists) fails the gate.
+`docs/research/TRADING_STRATEGY_RESEARCH.md` is the only place new candidate ideas and open questions are first recorded. The protocol doc is updated only via the amendment procedure above. When a future research-gate CI workflow is in place, the workflow reads the protocol `Status:` line, the corresponding DECISIONS row, and the DOC_STATUS entry on every PR; any disagreement (e.g. header says FROZEN but no DECISIONS row exists, or the header version differs from the DECISIONS row or DOC_STATUS line) fails the gate.
 
 ### Amendment log
 
 - **v1.0.1 — 2026-09-29 — D030 (clarification).** Wording-only correction of the "Kill gate D013" firing rule to conform to D013 (fires only when at least three independently specified families were tested AND at least six calendar months elapsed since the freeze AND none holds a recorded passing decision); the earlier disjunctive shortfall list contradicted D013 and is removed. No dataset split, cost model, execution assumption, acceptance gate, threshold or numeric value changed. `Status`, `Frozen on` and `Supersedes` are unchanged.
+- **v1.1.0 — 2026-09-30 — D043 (semantic).** Implements D032. Pre-registers numeric acceptance thresholds (G1-G5: trade floor, expectancy with bootstrap bound, Holm-Bonferroni correction over N = 25 variants per family, drawdown ceiling, single-use holdout), fixes the 40/40/20 split with four walk-forward Validation folds, adds the append-only `docs/research/holdout_consumed.json` marker, removes any human pass override, and aligns costs and execution to D036 (taker entry fee), D037 (mark-price protective triggers), D038 (`partial_fill_fraction` 1.0) and D039 (point-in-time research universe) with one canonical quantization order. The research-gate freeze step is now version-bound to the header. `Frozen on` is unchanged (the D013 clock is not restarted); `Amended on` and `Supersedes: v1.0.1` are added. The D030 kill-gate firing rule is untouched.
