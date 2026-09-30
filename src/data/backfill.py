@@ -31,9 +31,10 @@ tracer's wiring skeleton (PLAN 02-02 Task 1).
 from __future__ import annotations
 
 import asyncio
+import calendar
 import os
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from datetime import date as _date
@@ -46,6 +47,7 @@ from src.adapters.binance_usdm import Kline, MarkKline, is_rate_limit_error
 from src.data.quality import QualityVerdict, check_batch, check_mark_batch
 from src.data.store import (
     DEFAULT_RAW_ROOT,
+    MARK_DATASET_DIR,
     publish_batch,
     publish_mark_batch,
 )
@@ -130,6 +132,10 @@ class DatasetSpec[S, R: _TimedRow]:
     fetch: Callable[[S, str, str, int, int], Awaitable[list[R]]]
     validate: Callable[[list[R], str], QualityVerdict]
     publish: Callable[[list[R], str, str, Path], list[Path]]
+    # Directory under the raw root that holds this dataset's day partitions
+    # ("" for trade klines, `dataset=mark_klines` for mark klines). The resume
+    # floor (`latest_published_day`) scans it.
+    root_subdir: str = ""
 
 
 async def _fetch_trade(
@@ -172,6 +178,7 @@ MARK_DATASET: DatasetSpec[MarkKlineSource, MarkKline] = DatasetSpec(
     fetch=_fetch_mark,
     validate=check_mark_batch,
     publish=_publish_mark,
+    root_subdir=MARK_DATASET_DIR,
 )
 
 
@@ -807,8 +814,93 @@ DEFAULT_BACKFILL_WINDOWS_MS: dict[str, int] = {
 }
 
 
+# D-04: decided history depth for the research backfill (F-122, F-906): 12
+# months of 1m and 24 months of 1h/4h before the run date. The CLI prints the
+# depth it used and lets flags override it.
+DEPTH_MONTHS_DEFAULT: dict[str, int] = {"1m": 12, "1h": 24, "4h": 24}
+
+
+def months_before(day: _date, months: int) -> _date:
+    """Calendar-month subtraction, day clamped to the target month's length.
+
+    `months_before(2026-03-31, 1)` is 2026-02-28 (never an invalid date).
+    Integer month arithmetic only, so the result is deterministic.
+    """
+    if months < 0:
+        raise ValueError(f"months must be non-negative, got {months}")
+    total = day.year * 12 + (day.month - 1) - months
+    year, month_index = divmod(total, 12)
+    month = month_index + 1
+    return _date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
+
+
+def latest_published_day(
+    raw_root: Path,
+    *,
+    dataset: DatasetSpec[Any, Any],
+    symbol: str,
+    interval: str,
+) -> _date | None:
+    """Latest UTC day with a published `part.parquet` for one key, else None.
+
+    Scans `raw_root/<dataset.root_subdir>/interval=<I>/symbol=<S>/date=*/`.
+    Published Parquet is immutable (D-04), so a resumed run must start after
+    this day even when its cursor file is lost. Directory names that do not
+    parse as an ISO date are ignored.
+    """
+    base = raw_root / dataset.root_subdir / f"interval={interval}" / f"symbol={symbol}"
+    if not base.is_dir():
+        return None
+    latest: _date | None = None
+    for part in base.glob("date=*/part.parquet"):
+        try:
+            day = _date.fromisoformat(part.parent.name.removeprefix("date="))
+        except ValueError:
+            continue
+        if latest is None or day > latest:
+            latest = day
+    return latest
+
+
+@overload
 async def backfill_universe(
     adapter: KlineSource,
+    *,
+    symbols: tuple[str, ...] = ...,
+    intervals: tuple[str, ...] = ...,
+    end_ms: int | None = None,
+    raw_root: Path = DEFAULT_RAW_ROOT,
+    config: BackfillConfig | None = None,
+    clock: Callable[[], datetime] = ...,
+    cursor_store: CursorStore | None = None,
+    interval_start_ms: Mapping[str, int] | None = None,
+    start_floor_ms: Mapping[str, int] | None = None,
+    end_cap_ms: Mapping[str, int] | None = None,
+    resume_from_store: bool = False,
+) -> UniverseBootstrapResult: ...
+
+
+@overload
+async def backfill_universe[S, R: _TimedRow](
+    adapter: S,
+    *,
+    symbols: tuple[str, ...] = ...,
+    intervals: tuple[str, ...] = ...,
+    end_ms: int | None = None,
+    raw_root: Path = DEFAULT_RAW_ROOT,
+    config: BackfillConfig | None = None,
+    clock: Callable[[], datetime] = ...,
+    cursor_store: CursorStore | None = None,
+    interval_start_ms: Mapping[str, int] | None = None,
+    start_floor_ms: Mapping[str, int] | None = None,
+    end_cap_ms: Mapping[str, int] | None = None,
+    dataset: DatasetSpec[S, R],
+    resume_from_store: bool = False,
+) -> UniverseBootstrapResult: ...
+
+
+async def backfill_universe(
+    adapter: Any,
     *,
     symbols: tuple[str, ...] = LIVE_5,
     intervals: tuple[str, ...] = ("1m", "1h", "4h"),
@@ -817,14 +909,33 @@ async def backfill_universe(
     config: BackfillConfig | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     cursor_store: CursorStore | None = None,
+    interval_start_ms: Mapping[str, int] | None = None,
+    start_floor_ms: Mapping[str, int] | None = None,
+    end_cap_ms: Mapping[str, int] | None = None,
+    dataset: DatasetSpec[Any, Any] = TRADE_DATASET,
+    resume_from_store: bool = False,
 ) -> UniverseBootstrapResult:
-    """Backfill the live-5 across `intervals` at bounded depth (D-01 + D-02).
+    """Backfill `symbols` across `intervals` (D-01 + D-02, extended by D-04).
 
-    Per (symbol, interval):
+    Per (symbol, interval), with every new keyword omitted (the default):
       - If `cursor_store` has an entry, resume from `cursor + 1 interval`.
       - Otherwise start at `end_ms - DEFAULT_BACKFILL_WINDOWS_MS[interval]`
         (bounded bootstrap; expand via a follow-up run with a deeper
         explicit window).
+
+    History-depth keywords (all optional, all default to the behavior above):
+      - `interval_start_ms`: explicit start per interval, used instead of the
+        bounded default window; a persisted cursor still moves it forward.
+      - `start_floor_ms`: per-symbol lower bound (e.g. the onboard time).
+      - `end_cap_ms`: per-symbol upper bound. A cap below the resolved end is
+        a contract's delivery: the run ends there and `terminal_end` lets the
+        paginator publish the partly covered last day.
+      - `dataset`: what is fetched/validated/published (trade by default).
+      - `resume_from_store`: also floor the start at the day after the latest
+        published partition, so a lost cursor can never re-publish a stored
+        day (D-04 immutability).
+    A key whose start is at or beyond its end is logged and returns an empty
+    result without touching the adapter.
 
     Symbols × intervals run sequentially inside one async loop so the
     weight budget stays bounded (Pitfall 5 — pacing). A future plan may
@@ -841,7 +952,10 @@ async def backfill_universe(
 
     for interval in intervals:
         window_ms = DEFAULT_BACKFILL_WINDOWS_MS.get(interval)
-        if window_ms is None:
+        explicit_start_ms = (
+            interval_start_ms.get(interval) if interval_start_ms is not None else None
+        )
+        if window_ms is None and explicit_start_ms is None:
             log.warning(
                 "backfill.universe.skip_interval",
                 interval=interval,
@@ -855,20 +969,63 @@ async def backfill_universe(
                 persisted = cursor_store.read(symbol=symbol, interval=interval)
             else:
                 persisted = None
-            if persisted is not None:
-                key_start_ms: int | None = persisted + interval_ms(interval)
+            if explicit_start_ms is not None:
+                key_start_ms = explicit_start_ms
+                if persisted is not None:
+                    key_start_ms = max(key_start_ms, persisted + interval_ms(interval))
+            elif persisted is not None:
+                key_start_ms = persisted + interval_ms(interval)
             else:
                 # Snap to the UTC day boundary so each page fits in one
                 # per-day partition (see `align_to_day_start_ms` docstring
                 # for the D-04 / multi-date-per-page rationale).
+                assert window_ms is not None  # narrowed by the skip above
                 key_start_ms = align_to_day_start_ms(resolved_end_ms - window_ms)
+            floor_ms = start_floor_ms.get(symbol) if start_floor_ms is not None else None
+            if floor_ms is not None:
+                key_start_ms = max(key_start_ms, floor_ms)
+            if resume_from_store:
+                latest_day = latest_published_day(
+                    raw_root, dataset=dataset, symbol=symbol, interval=interval
+                )
+                if latest_day is not None:
+                    day_start = utc_ms(
+                        datetime(
+                            latest_day.year, latest_day.month, latest_day.day, tzinfo=UTC
+                        )
+                    )
+                    key_start_ms = max(key_start_ms, day_start + DAY_MS)
+            # Per-symbol end: a cap below the resolved end is a delivery, and
+            # the run must end there as a terminal window (research Pitfall 1).
+            key_end_ms = resolved_end_ms
+            terminal = False
+            cap_ms = end_cap_ms.get(symbol) if end_cap_ms is not None else None
+            if cap_ms is not None and cap_ms < resolved_end_ms:
+                key_end_ms = cap_ms
+                terminal = True
+            if key_start_ms >= key_end_ms:
+                log.info(
+                    "backfill.universe.empty_window",
+                    symbol=symbol,
+                    interval=interval,
+                    start_ms=key_start_ms,
+                    end_ms=key_end_ms,
+                )
+                per_key[(symbol, interval)] = BackfillResult(
+                    pages=0,
+                    rows_published=0,
+                    structural_rejections=0,
+                    durations_ms=(),
+                )
+                continue
             log.info(
                 "backfill.universe.begin",
                 symbol=symbol,
                 interval=interval,
                 start_ms=key_start_ms,
-                end_ms=resolved_end_ms,
+                end_ms=key_end_ms,
                 from_persisted=persisted,
+                terminal=terminal,
             )
             # Per-interval config: never share one interval_ms across
             # timeframes (a shared interval_ms=0 froze the cursor and the
@@ -885,11 +1042,13 @@ async def backfill_universe(
                 symbol=symbol,
                 interval=interval,
                 start_ms=key_start_ms,
-                end_ms=resolved_end_ms,
+                end_ms=key_end_ms,
+                dataset=dataset,
                 raw_root=raw_root,
                 config=per_cfg,
                 clock=clock,
                 cursor_store=cursor_store,
+                terminal_end=terminal,
             )
             per_key[(symbol, interval)] = result
             total_rows += result.rows_published
