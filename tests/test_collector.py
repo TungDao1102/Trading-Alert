@@ -1010,3 +1010,83 @@ def test_explicit_universe_override_is_validated(
     _install_fake_adapter(monkeypatch, bad_adapter)
     assert main([*common, "--universe", "BTCUSDT", "../ETHUSDT"]) == 2
     assert bad_adapter.oi_calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Phase 13 plan 01 (research Pitfall 5): the loop sleeps to the next cadence
+# boundary so the period does not stretch by the tick duration.
+# --------------------------------------------------------------------------- #
+
+
+def test_ms_until_next_tick_on_boundary_waits_full_cadence() -> None:
+    from src.data.collector import _ms_until_next_tick
+
+    assert _ms_until_next_tick(12 * 3_600_000, 300_000) == 300_000
+
+
+def test_ms_until_next_tick_mid_period() -> None:
+    from src.data.collector import _ms_until_next_tick
+
+    assert _ms_until_next_tick(12 * 3_600_000 + 300_000 + 7_250, 300_000) == 292_750
+
+
+def test_ms_until_next_tick_after_overrun_does_not_replay_missed_boundary() -> None:
+    from src.data.collector import _ms_until_next_tick
+
+    # The tick ran 303 s; the boundary at +300 s is missed and not replayed.
+    assert _ms_until_next_tick(12 * 3_600_000 + 303_000, 300_000) == 297_000
+
+
+@pytest.mark.parametrize("bad", [0, -1, -300_000])
+def test_ms_until_next_tick_rejects_non_positive_cadence(bad: int) -> None:
+    from src.data.collector import _ms_until_next_tick
+
+    with pytest.raises(ValueError, match="cadence"):
+        _ms_until_next_tick(1_000, bad)
+
+
+def test_loop_sleeps_to_next_cadence_boundary_after_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from src.data import collector
+
+    list_path = _write_collect_list(tmp_path / "list.toml", list(LIVE_5))
+    clock = iter(
+        [
+            datetime(2026, 9, 30, 12, 5, 0, 0, tzinfo=UTC),
+            datetime(2026, 9, 30, 12, 5, 7, 250_000, tzinfo=UTC),
+        ]
+    )
+    monkeypatch.setattr(collector, "_utc_now", lambda: next(clock))
+    _install_fake_adapter(monkeypatch, FakeAdapter())
+
+    async def fake_tick(*_args: object, **_kwargs: object) -> tuple[object, object]:
+        return (
+            SimpleNamespace(snapshots_inserted=0, gaps_recorded=0),
+            SimpleNamespace(funding_inserted=0, gaps_recorded=0),
+        )
+
+    monkeypatch.setattr(collector, "_run_once_tick", fake_tick)
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(collector.time, "sleep", fake_sleep)
+
+    rc = collector.main(
+        [
+            "--collect-list",
+            str(list_path),
+            "--database-url",
+            _sqlite_url(tmp_path),
+            "--raw-root",
+            str(tmp_path / "raw"),
+        ]
+    )
+
+    assert rc == 0
+    assert sleeps == [292.75]
