@@ -293,3 +293,28 @@ async def test_any_object_with_the_kline_signature_is_a_source(
     )
 
     assert result.rows_published == 24
+
+
+async def test_zero_trade_bars_are_published_with_the_rest_of_the_day(
+    tmp_path: Path,
+) -> None:
+    """Illiquid zero-trade bars are real data: the whole day publishes (D-15)."""
+    day = _ms(2023, 11, 14)
+    bars = _bars(day, 24)
+    for index in (3, 4, 17):
+        bars[index] = _bar(day + index * HOUR_MS, trade_count=0)
+
+    result = await backfill_symbol_interval(
+        _Source(bars),
+        symbol="BTCUSDT",
+        interval=INTERVAL,
+        start_ms=day,
+        end_ms=_ms(2023, 11, 15),
+        raw_root=tmp_path,
+        config=_cfg(),
+        clock=_clock(_ms(2023, 11, 15, 1)),
+    )
+
+    assert result.structural_rejections == 0
+    assert result.rows_published == 24
+    assert _published(tmp_path) == {"date=2023-11-14": 24}

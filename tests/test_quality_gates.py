@@ -24,6 +24,7 @@ here — they live in `tests/test_tracer_slice.py` (Tracer Slice) and
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -292,3 +293,98 @@ def test_publishing_to_existing_partition_path_raises(
     # Second publish to the same target path MUST raise (no silent overwrite).
     with pytest.raises(FileExistsError, match="refusing to overwrite immutable Parquet"):
         publish_batch(batch, interval=interval, symbol=symbol, raw_root=tmp_path)
+
+
+# --------------------------------------------------------------------------- #
+# Zero-trade bars (D-15, F-409) and the no-silent-rounding precision guard.
+# --------------------------------------------------------------------------- #
+
+
+def _zero_trade(bar: Kline) -> Kline:
+    """An illiquid minute: flat price, no volume, no trades."""
+    return replace(
+        bar,
+        open=bar.close,
+        high=bar.close,
+        low=bar.close,
+        volume=Decimal("0"),
+        quote_volume=Decimal("0"),
+        trade_count=0,
+    )
+
+
+def test_zero_trade_bar_is_accepted_and_counted() -> None:
+    """A bar with volume 0 and trade_count 0 is real data, not corruption (D-15).
+
+    It passes the gate and is counted as telemetry only; a missing bar stays
+    a gap (see `test_missing_middle_row_is_warn_only_continuity_flag`).
+    """
+    bars = _three_minute_bars()
+    bars[1] = _zero_trade(bars[1])
+
+    verdict = check_batch(bars, INTERVAL)
+
+    assert verdict.structural_ok is True
+    assert verdict.zero_trade_bars == 1
+    assert verdict.negative_values == 0
+    assert verdict.gap_count == 0
+
+
+def test_negative_trade_count_is_rejected() -> None:
+    bars = _three_minute_bars()
+    bars[1] = replace(bars[1], trade_count=-1)
+
+    verdict = check_batch(bars, INTERVAL)
+
+    assert verdict.structural_ok is False
+    assert verdict.negative_values == 1
+
+
+def test_negative_volume_is_still_rejected() -> None:
+    bars = _three_minute_bars()
+    bars[1] = replace(bars[1], volume=Decimal("-1"))
+
+    verdict = check_batch(bars, INTERVAL)
+
+    assert verdict.structural_ok is False
+    assert verdict.negative_values == 1
+
+
+def test_missing_bar_is_a_gap_not_a_zero_trade_bar() -> None:
+    full = _three_minute_bars()
+
+    verdict = check_batch([full[0], full[2]], INTERVAL)
+
+    assert verdict.gap_count == 1
+    assert verdict.zero_trade_bars == 0
+
+
+def test_excess_precision_is_rejected() -> None:
+    """More than 8 fractional digits would be silently rounded by Polars."""
+    bars = _three_minute_bars()
+    bars[1] = replace(bars[1], low=Decimal("100"), close=Decimal("100.123456789"))
+
+    verdict = check_batch(bars, INTERVAL)
+
+    assert verdict.structural_ok is False
+    assert verdict.bad_decimals == 1
+
+
+def test_eight_fractional_digits_pass() -> None:
+    bars = _three_minute_bars()
+    bars[1] = replace(bars[1], low=Decimal("100"), close=Decimal("100.12345678"))
+
+    verdict = check_batch(bars, INTERVAL)
+
+    assert verdict.structural_ok is True
+    assert verdict.bad_decimals == 0
+
+
+def test_non_finite_decimal_is_rejected_without_raising() -> None:
+    bars = _three_minute_bars()
+    bars[1] = replace(bars[1], volume=Decimal("NaN"))
+
+    verdict = check_batch(bars, INTERVAL)
+
+    assert verdict.structural_ok is False
+    assert verdict.bad_decimals == 1
