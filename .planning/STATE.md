@@ -1,19 +1,19 @@
 ---
 gsd_state_version: "1.0"
 milestone: v0.3
-current_phase: 2
-current_phase_name: Data Foundation
-status: planning
-stopped_at: Phase 13 context gathered
-last_updated: "2026-09-30T11:55:05.151Z"
+current_phase: 13
+current_phase_name: research-data-foundation-fixes
+status: executing
+stopped_at: Completed 13-01-PLAN.md
+last_updated: "2026-09-30T13:26:25.651Z"
 last_activity: 2026-09-30
-last_activity_desc: Phase 12 complete, transitioned to Phase 2
-state_head: e732dd44ad1fc570feb08a5962e16f62a786df19
+last_activity_desc: Phase 13 execution started
+state_head: 251799d6dd781bad23e4c4793b37444dd0189bd8
 progress:
   total_phases: 29
   completed_phases: 3
-  total_plans: 69
-  completed_plans: 68
+  total_plans: 82
+  completed_plans: 69
 milestone_name: milestone
 ---
 
@@ -26,14 +26,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 13 — research-data-foundation-fixes-vps-collector-deployment
+**Current focus:** Phase 13 — research-data-foundation-fixes
 
 ## Current Position
 
-Phase: 2 — Data Foundation
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-09-30 — Phase 12 complete, transitioned to Phase 2
+Phase: 13 (research-data-foundation-fixes) — EXECUTING
+Plan: 2 of 13
+Status: Ready to execute
+Last activity: 2026-09-30 — Phase 13 execution started
 
 Progress: [█░░░░░░░░░] 11%
 
@@ -108,6 +108,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 12 P09 | 35min | 3 tasks | 9 files |
 | Phase 12 P10 | 10min | 3 tasks | 2 files |
 | Phase 12 P11 | 35min | 3 tasks | 6 files |
+| Phase 13 P01 | 21 min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -276,6 +277,8 @@ Recent decisions affecting current work:
 - [Phase 12]: 12-09: guard rates read at the risk stage in both modes via guard_rates_from_params (legacy sets fail closed, paper fixtures that never reach risk keep legacy sets)
 - [Phase 12]: 12-10: property test uses zero loss tolerance; vacuity proof kept as a permanent harness test
 - [Phase 12]: D046-D048 recorded; max_cost_to_risk 0.15 implies ~0.79 percent min stop, ratification pending
+- [Phase 13]: 13-01: collector universe comes from docs/research/universe/collect-list-v1.toml; any list defect exits 2 (healthcheck 1) with no live-5 fallback
+- [Phase 13]: 13-01: collect list is an operational input (no FROZEN semantics, no hash, not under params/); proposer keeps only TRADING PERPETUAL USDT, ranks by Decimal quoteVolume with symbol tie-break
 
 ### Pending Todos
 
@@ -321,6 +324,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T11:55:04.897Z
-Stopped at: Phase 13 context gathered
-Resume file: .planning/phases/13-research-data-foundation-fixes/13-CONTEXT.md
+Last session: 2026-09-30T13:26:25.411Z
+Stopped at: Completed 13-01-PLAN.md
+Resume file: None

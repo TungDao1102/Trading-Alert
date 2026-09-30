@@ -487,11 +487,11 @@ Plans:
 
 **Audit refs**: F-107, F-906, F-907, F-024, F-122, F-402, F-408, F-409, F-413, F-706
 
-**Plans:** 13 plans
+**Plans:** 1/13 plans executed
 
 Plans:
 **Wave 1**
-- [ ] 13-01-PLAN.md — Collect list (live-5 union top 15 TRADING USDT perpetuals) drives the OI/funding collector; no live-5 fallback; list shipped in the image; loop on the cadence grid (ships first, independently)
+- [x] 13-01-PLAN.md — Collect list (live-5 union top 15 TRADING USDT perpetuals) drives the OI/funding collector; no live-5 fallback; list shipped in the image; loop on the cadence grid (ships first, independently)
 - [ ] 13-02-PLAN.md — Store hardening before any long backfill: closed-day publish, atomic tmp+replace writes, zero-trade acceptance, precision guard, KlineSource protocol
 - [ ] 13-03-PLAN.md — Paper supervisor backfills before resubscribing, verification pass and monotonic guard (no duplicate or skipped bar)
 
@@ -926,7 +926,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 10. Journal Depth + Kill-Gate Operations | 12/12 | In Progress|  |
 | 11. Decision Alignment (docs + params) | 8/8 | In Progress|  |
 | 12. Fee + Cost Model Correctness | 11/11 | Complete    | 2026-09-30 |
-| 13. Research Data Foundation Fixes | 0/TBD | Not started | - |
+| 13. Research Data Foundation Fixes | 1/13 | In Progress|  |
 | 13.1. Deployment & CI | 0/TBD | Not started | - |
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
