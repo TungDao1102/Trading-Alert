@@ -101,3 +101,134 @@ def test_sources_requires_url_date_and_method(phrase: str) -> None:
     _, ok, detail = exchange.check_sources(mutated)
     assert not ok
     assert phrase in detail
+
+
+# --------------------------------------------------------------------------- Task 2
+
+
+def test_algo_status_positive() -> None:
+    name, ok, detail = exchange.check_algo_status(_read(EXECUTION_SPEC))
+    assert ok, detail
+    assert name == "EX-02"
+
+
+def test_algo_status_rejects_pre_change_spec() -> None:
+    _, ok, detail = exchange.check_algo_status(_old(EXECUTION_SPEC))
+    assert not ok
+    assert "FINISHED does not mean filled" in detail
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [p for p in exchange.ALGO_STATUS_PHRASES if p not in ("NEW", "FINISHED")],
+)
+def test_algo_status_requires_each_phrase(phrase: str) -> None:
+    _, ok, detail = exchange.check_algo_status(_drop(_read(EXECUTION_SPEC), phrase))
+    assert not ok
+    assert phrase in detail
+
+
+def test_position_mode_citation_positive() -> None:
+    name, ok, detail = exchange.check_position_mode_citation(_read(EXECUTION_SPEC))
+    assert ok, detail
+    assert name == "EX-03"
+
+
+def test_position_mode_citation_rejects_pre_change_spec() -> None:
+    _, ok, detail = exchange.check_position_mode_citation(_old(EXECUTION_SPEC))
+    assert not ok
+    assert "New-Order" in detail
+
+
+def test_position_mode_citation_rejects_new_order_link() -> None:
+    text = _read(EXECUTION_SPEC).replace("rest-api/Change-Position-Mode", "rest-api/New-Order")
+    _, ok, detail = exchange.check_position_mode_citation(text)
+    assert not ok
+    assert "New-Order" in detail
+
+
+def test_orphan_reconciler_positive() -> None:
+    name, ok, detail = exchange.check_orphan_reconciler(_read(EXECUTION_SPEC))
+    assert ok, detail
+    assert name == "EX-04"
+
+
+def test_orphan_reconciler_rejects_pre_change_spec() -> None:
+    _, ok, detail = exchange.check_orphan_reconciler(_old(EXECUTION_SPEC))
+    assert not ok
+    assert "not an orphan" in detail
+
+
+@pytest.mark.parametrize("phrase", exchange.ORPHAN_PHRASES)
+def test_orphan_reconciler_requires_each_phrase(phrase: str) -> None:
+    _, ok, detail = exchange.check_orphan_reconciler(_drop(_read(EXECUTION_SPEC), phrase))
+    assert not ok
+    assert phrase in detail
+
+
+def test_emergency_controls_positive() -> None:
+    name, ok, detail = exchange.check_emergency_controls(_read(EXECUTION_SPEC))
+    assert ok, detail
+    assert name == "EX-05"
+
+
+def test_emergency_controls_rejects_pre_change_spec() -> None:
+    _, ok, detail = exchange.check_emergency_controls(_old(EXECUTION_SPEC))
+    assert not ok
+    assert "disable new live orders" in detail
+
+
+def test_emergency_controls_rejects_reintroduced_wording() -> None:
+    text = _read(EXECUTION_SPEC) + "\n- disable new live orders,\n"
+    _, ok, detail = exchange.check_emergency_controls(text)
+    assert not ok
+    assert "forbidden" in detail
+
+
+def test_source_register_positive() -> None:
+    name, ok, detail = exchange.check_source_register(_read(EXECUTION_SPEC), _read(SOURCES))
+    assert ok, detail
+    assert name == "EX-06"
+
+
+def test_source_register_rejects_unregistered_url() -> None:
+    spec = (
+        _read(EXECUTION_SPEC)
+        + "\nSee [x](https://developers.binance.com/docs/unregistered-page).\n"
+    )
+    _, ok, detail = exchange.check_source_register(spec, _read(SOURCES))
+    assert not ok
+    assert "unregistered-page" in detail
+
+
+def test_source_register_rejects_row_without_date() -> None:
+    sources = _read(SOURCES)
+    start = sources.index(exchange.SOURCES_SECTION_TITLE)
+    mutated = sources[:start] + sources[start:].replace("| 2026-09-30 |", "| unknown |")
+    _, ok, detail = exchange.check_source_register(_read(EXECUTION_SPEC), mutated)
+    assert not ok
+    assert "cited but not registered" in detail
+
+
+def test_source_register_rejects_pre_change_register() -> None:
+    _, ok, detail = exchange.check_source_register(_read(EXECUTION_SPEC), _old(SOURCES))
+    assert not ok
+
+
+def test_cited_urls_ignores_anchors_and_other_hosts() -> None:
+    text = "[a](https://developers.binance.com/docs/x/#frag) https://example.com/y"
+    assert exchange.cited_urls(text) == {"https://developers.binance.com/docs/x"}
+
+
+def test_event_algo_order_update_row_states_method_and_reconfirmation() -> None:
+    body = exchange._titled_section(_read(SOURCES), exchange.SOURCES_SECTION_TITLE)
+    rows = [
+        ln
+        for ln in body.splitlines()
+        if ln.startswith("| https://") and "/Event-Algo-Order-Update |" in ln
+    ]
+    assert len(rows) == 1
+    normalised = exchange.normalise(rows[0])
+    assert "SDK model" in normalised
+    assert "official page could not be retrieved" in normalised
+    assert "re-confirmation" in normalised

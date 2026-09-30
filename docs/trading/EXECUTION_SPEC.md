@@ -97,6 +97,27 @@ ALERT HIGH PRIORITY
 
 The system must reconcile with Binance rather than trusting local state.
 
+### 6.1 Algo-order status semantics at trigger time
+
+Conditional (algo) orders live in the Binance Algo Service until their condition is met, and only then reach the matching engine. Binance performs no margin check before a conditional order triggers (change-log 2025-11-06), so a stop that was accepted at placement can still fail at trigger. The lifecycle arrives as `ALGO_UPDATE` events; the status field is `X` and the failure reason field is `rm` (`o.rm` on the event payload).
+
+| Status | Meaning |
+| --- | --- |
+| `NEW` | placed in the Algo Service, not yet triggered |
+| `TRIGGERING` | condition met, forwarded to the matching engine |
+| `FINISHED` | the triggered conditional order was filled or canceled in the matching engine |
+| `REJECTED` | denied by the matching engine at trigger, for example a margin check failure |
+| `EXPIRED` | canceled by the system |
+
+Consequences for the execution layer (F-054):
+
+- FINISHED does not mean filled: the resulting order state and the position must be read from the exchange before the protective exit is treated as executed.
+- REJECTED and EXPIRED can occur at trigger time, after the stop-loss was accepted at placement. "SL accepted" therefore never means "SL will execute"; reconciliation and the D034 ladder in section 9 must cover a stop that fails at trigger.
+- The failure reason is carried in `o.rm` on `ALGO_UPDATE`. A search summary of the change-log reports that the old `CONDITIONAL_ORDER_TRIGGER_REJECT` event was deprecated on 2025-12-15 in favour of `ALGO_UPDATE`; that date was not confirmed on the fetched change-log page, so parse `ALGO_UPDATE` and do not depend on the old event.
+- For trailing stops before trigger the status remains `NEW` and two `NEW` events can arrive (`ia` false, then true).
+
+Grounding and confidence: the official Event-Algo-Order-Update page could not be retrieved on 2026-09-30 (only the documentation shell). The field names come from the installed SDK model `algo_update_o.py` (`X` "Algo Status", `rm` "Algo order failed reason", `ia` "Is activated or not, only meaningful for trailing order") and the status meanings from a search summary of that page, recorded in `SOURCES.md`; verify against current Binance docs before implementation and re-confirm the status list before Phase 18.
+
 ## 7. Idempotency
 
 All order requests require deterministic client identifiers.
@@ -109,7 +130,7 @@ The tool must explicitly detect and support the chosen Binance position mode.
 
 Do not assume One-way Mode or Hedge Mode.
 
-Binance documents that position-mode changes have account-level restrictions and can be rejected when open orders/positions exist. [Binance Futures Trade API](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Order)
+Binance documents that position-mode changes have account-level restrictions and can be rejected when open orders/positions exist (error -4067 for open orders, -4068 for an open position, per the installed SDK docstring for `POST /fapi/v1/positionSide/dual`). [Binance Change Position Mode](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Change-Position-Mode) The page text itself was not retrievable on 2026-09-30; verify against current Binance docs before implementation (F-057).
 
 ## 9. Reconciliation loop
 
@@ -129,6 +150,10 @@ Any divergence enters `RECONCILIATION_REQUIRED`.
 
 The reconciliation job must explicitly detect **orphan protective orders**: active stop/TP orders whose associated position is already zero or whose plan is otherwise closed. Orphan orders must be canceled after authoritative position verification.
 
+A protective stop paired with a still-working ENTRY order is not an orphan: the position is zero only because the entry has not filled yet, so the sweeper leaves that stop in place (F-401).
+
+When a protective stop is missing (canceled, expired, or never acknowledged) while the position is open, the reconciler re-places it at the original plan stop-loss, never wider. This supersedes the earlier cancel-only reconciler decision (Phase 08 D-03 / Phase 09 D-02), per D034; if the re-placed stop is rejected or unacknowledged, the ladder continues with a reduce-only close and a HIGH-priority alert (see `SECURITY_AND_OPERATIONS.md` section 7).
+
 Do not rely only on the WebSocket event stream. Periodic authoritative reconciliation is required.
 
 ## 10. No blind recovery
@@ -144,9 +169,12 @@ If placement response is ambiguous due to timeout/network failure:
 Must provide a safe way to:
 
 - cancel pending strategy orders,
-- disable new live orders,
+- disable new entry orders (orders that can open or increase a position),
 - close strategy-generated positions according to explicit user action,
+- an explicit protect action (re-place the stop-loss at the original plan stop-loss),
 - switch system to `SAFE_MODE`.
+
+Per D034, protective and reduce-only orders are never blocked by a disable; the controls above only stop the system from opening or adding to risk.
 
 ## 12. Algo-order capacity
 
