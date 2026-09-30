@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 13
 current_phase_name: research-data-foundation-fixes
 status: executing
-stopped_at: Completed 13-06-PLAN.md
-last_updated: "2026-09-30T14:38:02.311Z"
+stopped_at: Completed 13-07-PLAN.md
+last_updated: "2026-09-30T15:04:21.842Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 13 execution started
-state_head: 75eec3099c36b4c3d70867571404ba642807adf3
+state_head: b1ab31d88fe817856a65243f2e35f53cb939d52b
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 82
-  completed_plans: 74
+  completed_plans: 75
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 13 (research-data-foundation-fixes) — EXECUTING
-Plan: 7 of 13
+Plan: 8 of 13
 Status: Ready to execute
 Last activity: 2026-09-30 — Phase 13 execution started
 
@@ -114,6 +114,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 13 P04 | 20 min | 3 tasks | 8 files |
 | Phase 13 P05 | 11 min | 3 tasks | 2 files |
 | Phase 13 P06 | 12 min | 3 tasks | 2 files |
+| Phase 13 P07 | 20 min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -294,6 +295,9 @@ Recent decisions affecting current work:
 - [Phase 13]: 13-05: checksum 404 disambiguated by probing zip status only (zip 404 -> ArchiveNotFound, zip 200 -> ArchiveChecksumMissing); monthly-404 falls back to daily zips, missing days skipped never interpolated
 - [Phase 13]: 13-06: funding-history walk treats end_ms as inclusive (cursor <= end_ms); a page with no forward progress stops the symbol with a warning
 - [Phase 13]: 13-06: clock probe is warn-only (>1000 ms warns, failure logs and returns None); fail-closed clock checks stay Phase 18, chrony Phase 13.1
+- [Phase 13]: 13-07: backfill windows are per (dataset, symbol, interval); CLI calls backfill_universe once per (dataset, interval) with the window start as symbol floor and window end as symbol cap; mark windows copy trade windows
+- [Phase 13]: 13-07: symbol absent from exchangeInfo or non-TRADING without deliveryDate gets DELIVERY_UNKNOWN and no window (fail closed); only the 13-08 archive fallback can bound it
+- [Phase 13]: 13-07: refresh_symbol_metadata raises MetadataWidthError (ValueError) for universe rows with contract_type/status over 16 chars; CLI prints exception type names only, plus width-error message (symbol and field)
 
 ### Pending Todos
 
@@ -339,6 +343,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T14:38:02.059Z
-Stopped at: Completed 13-06-PLAN.md
+Last session: 2026-09-30T15:04:21.592Z
+Stopped at: Completed 13-07-PLAN.md
 Resume file: None
