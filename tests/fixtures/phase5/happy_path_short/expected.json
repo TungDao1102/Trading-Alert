@@ -1,9 +1,9 @@
 {
   "is_no_trade": false,
-  "quantity": "0.049",
-  "quantity_before_rounding": "0.04995004995004995004995004995",
-  "quantity_after_rounding": "0.049",
+  "quantity": "0.042",
+  "quantity_before_rounding": "0.04270803081811503835181167467",
+  "quantity_after_rounding": "0.042",
   "quantization_decision": "ACCEPTED",
-  "realized_risk": "49.04900",
+  "realized_risk": "49.1710800",
   "reason_code": "OK"
 }
