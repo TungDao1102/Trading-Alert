@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 13
 current_phase_name: research-data-foundation-fixes
 status: executing
-stopped_at: Completed 13-04-PLAN.md
-last_updated: "2026-09-30T14:08:39.878Z"
+stopped_at: Completed 13-05-PLAN.md
+last_updated: "2026-09-30T14:20:11.786Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 13 execution started
-state_head: a2ef13e5a24dc98d0a261f09a8dfe9ed555b0fb6
+state_head: 76643252e3e27454d46c511fefa1d712dc8e2633
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 82
-  completed_plans: 72
+  completed_plans: 73
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 13 (research-data-foundation-fixes) — EXECUTING
-Plan: 5 of 13
+Plan: 6 of 13
 Status: Ready to execute
 Last activity: 2026-09-30 — Phase 13 execution started
 
@@ -112,6 +112,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 13 P02 | 15 min | 3 tasks | 8 files |
 | Phase 13 P03 | 15 min | 2 tasks | 3 files |
 | Phase 13 P04 | 20 min | 3 tasks | 8 files |
+| Phase 13 P05 | 11 min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -288,6 +289,8 @@ Recent decisions affecting current work:
 - [Phase 13]: Mark-price klines are a separate immutable dataset under data/raw/dataset=mark_klines (invisible to candles_v1, inside the backup root); rows carry price_tick_count and no volume or trade_count (D-11, D-29)
 - [Phase 13]: Paginator is dataset-generic via DatasetSpec (TRADE_DATASET default, MARK_DATASET); CursorStore.dataset namespaces cursor files and a mismatched cursor store is refused
 - [Phase 13]: Only an empty markPrice string maps to None in historical funding rows; malformed values still raise; deliveryDate exposed as SymbolFilters.delivery_date_ms with no migration (D-26)
+- [Phase 13]: 13-05: archive CSV header accepted only as exactly open_time; both open_time and close_time must be 13-digit ms (fail closed)
+- [Phase 13]: 13-05: checksum 404 disambiguated by probing zip status only (zip 404 -> ArchiveNotFound, zip 200 -> ArchiveChecksumMissing); monthly-404 falls back to daily zips, missing days skipped never interpolated
 
 ### Pending Todos
 
@@ -333,6 +336,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T14:08:39.627Z
-Stopped at: Completed 13-04-PLAN.md
+Last session: 2026-09-30T14:20:11.513Z
+Stopped at: Completed 13-05-PLAN.md
 Resume file: None
