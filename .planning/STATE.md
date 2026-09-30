@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 13
 current_phase_name: research-data-foundation-fixes
 status: executing
-stopped_at: Completed 13-08-PLAN.md
-last_updated: "2026-09-30T16:23:54.160Z"
+stopped_at: Completed 13-11-PLAN.md
+last_updated: "2026-09-30T16:42:44.305Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 13 execution started
-state_head: 50fe6d31a41f506c5d4ef40830dd2280bf561ec8
+state_head: ed5c881475e457da23fab2db04bbd0a207e98674
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 82
-  completed_plans: 78
+  completed_plans: 79
 milestone_name: milestone
 ---
 
@@ -118,6 +118,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 13 P09 | 30 min | 3 tasks | 4 files |
 | Phase 13 P10 | 15min | 3 tasks | 3 files |
 | Phase 13 P08 | 35 min | 3 tasks | 4 files |
+| Phase 13 P11 | 11 min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -309,6 +310,8 @@ Recent decisions affecting current work:
 - [Phase 13]: 13-08: sufficiency report checks data depth only; TRADE_FLOOR_NOTE states the D043 floor is unmeasurable until the Phase 14 simulator; exit 3 only for NOT_BACKFILLED, GAP, UNAVAILABLE
 - [Phase 13]: 13-08: archive fallback is lazy per symbol (REST -1121 or not in exchangeInfo), mark only from REST, provenance persisted in <cursor-root>/_sources.json; archive-capped windows trimmed to the last archived bar in the report
 - [Phase 13]: 13-08: 1m coverage printed per protocol split block on the 1h/4h timeline; extending 1m beyond 12 months stays a user decision (D-21)
+- [Phase 13]: D049 records Phase 13 data foundation; case-input builder lives in src/data/case_input.py (D-22 supersedes D-17); 1m depth stays 12 months pending the sufficiency report (D-21)
+- [Phase 13]: Decision-alignment requirements gate maps OPS-06 to Phase 13.1 (string phases); Phase 13 exchange facts recorded MEDIUM where only SDK docstring or live probe was available
 
 ### Pending Todos
 
@@ -354,6 +357,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T16:23:53.914Z
-Stopped at: Completed 13-08-PLAN.md
+Last session: 2026-09-30T16:42:44.051Z
+Stopped at: Completed 13-11-PLAN.md
 Resume file: None
