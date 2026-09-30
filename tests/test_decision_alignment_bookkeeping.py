@@ -301,9 +301,34 @@ def test_pre_change_decisions_fail_dc01_and_dc02() -> None:
     assert gates["DC-02"] is False  # ends at D042
 
 
-def test_appended_d046_keeps_dc02_green() -> None:
-    text = _read(DECISIONS).rstrip("\n") + "\n| D046 | Later decision | Accepted | x | y |\n"
+def test_appended_later_decision_keeps_dc02_green() -> None:
+    real = _read(DECISIONS)
+    next_id = f"D{len(bk._DECISION_ROW.findall(real)) + 1:03d}"
+    text = real.rstrip("\n") + f"\n| {next_id} | Later decision | Accepted | x | y |\n"
     assert _dc(decisions=text)["DC-02"] is True
+
+
+D046_WITNESS_TOKENS = (
+    "STOP_TOO_TIGHT",
+    "COST_TO_RISK_EXCEEDED",
+    "adverse edge",
+    "supersedes",
+    "exit_slippage_rate",
+    "ACCOUNT_MAX",
+    "UNCERTAIN_ACCOUNT_STATE",
+    "0.79",
+    "ratification",
+    "one-way",
+    "F-028",
+    "Phase 14",
+    "Phase 24",
+)
+
+
+def test_d046_row_carries_witness_tokens() -> None:
+    row = bk._decision_row(_read(DECISIONS), "D046")
+    assert row, "D046 row missing"
+    assert [t for t in D046_WITNESS_TOKENS if t not in row] == []
 
 
 def test_missing_d044_or_d045_fails_dc02_and_dc04() -> None:
