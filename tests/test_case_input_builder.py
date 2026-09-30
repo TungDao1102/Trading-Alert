@@ -20,6 +20,7 @@ import pytest
 from src.adapters.binance_usdm import FundingTick, Kline, MarkKline, OiSnapshot
 from src.data import case_input as ci
 from src.data.collector import _write_funding_tick, _write_oi_snapshot
+from src.data.coverage import GapRange
 from src.data.store import publish_batch, publish_mark_batch
 
 SYMBOL = "BTCUSDT"
@@ -280,8 +281,6 @@ def gap_store(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def _gap(start: datetime, minutes: int) -> Any:
-    from src.data.coverage import GapRange
-
     return GapRange(
         series="intrabar_1m",
         symbol=SYMBOL,

@@ -36,6 +36,14 @@ from types import MappingProxyType
 from typing import Any
 
 import polars as pl
+from src.data.coverage import (
+    DEFAULT_FUNDING_INTERVAL_MS,
+    DEFAULT_OI_INTERVAL_MS,
+    FUNDING_JITTER_MS,
+    TICK_GAP_FACTOR,
+    GapRange,
+    gap_ranges_for_files,
+)
 from src.data.quality import INTERVAL_MS
 from src.data.store import MARK_DATASET_DIR, partition_file
 from src.domain.canonical import sha256_hex
@@ -98,6 +106,23 @@ class CaseInputRangeError(CaseInputError):
     """The requested range is not a closed whole-UTC-day range (D-17)."""
 
 
+class CaseInputGapError(CaseInputError):
+    """A requested series has an unresolved gap; nothing is padded (D-19).
+
+    `gaps` lists every unacknowledged `GapRange`; pass the ones you have
+    inspected back as `allow_gaps` to proceed with a recorded hole.
+    """
+
+    def __init__(self, gaps: Sequence[GapRange]) -> None:
+        self.gaps: tuple[GapRange, ...] = tuple(gaps)
+        detail = "; ".join(
+            f"{g.series}/{g.interval} {g.start_utc.isoformat()}..{g.end_utc.isoformat()}"
+            f" missing={g.missing}"
+            for g in self.gaps
+        )
+        super().__init__(f"unresolved gaps in the published store: {detail}")
+
+
 # --------------------------------------------------------------------------- #
 # Output value object.
 # --------------------------------------------------------------------------- #
@@ -121,7 +146,7 @@ class CaseInputData:
     open_interest: tuple[Row, ...]
     files: tuple[str, ...]
     dataset_id: str
-    allowed_gaps: tuple[Any, ...]
+    allowed_gaps: tuple[GapRange, ...]
 
     def to_case_input(self, **scenario: Any) -> dict[str, Any]:
         """Return the simulator case-input dict: builder keys plus `scenario`.
@@ -140,7 +165,17 @@ class CaseInputData:
             "funding": [dict(r) for r in self.funding],
             "open_interest": [dict(r) for r in self.open_interest],
             "dataset_id": self.dataset_id,
-            "allowed_gaps": [],
+            "allowed_gaps": [
+                {
+                    "series": g.series,
+                    "symbol": g.symbol,
+                    "interval": g.interval,
+                    "start_utc": g.start_utc.isoformat(),
+                    "end_utc": g.end_utc.isoformat(),
+                    "missing": g.missing,
+                }
+                for g in self.allowed_gaps
+            ],
         }
         clash = sorted(set(scenario) & set(built))
         if clash:
@@ -279,6 +314,71 @@ def _tick_files(
 
 
 # --------------------------------------------------------------------------- #
+# Gap policy (D-19): the single gap definition lives in coverage.py.
+# --------------------------------------------------------------------------- #
+
+
+def _collect_gaps(
+    *,
+    wanted: Sequence[str],
+    symbol: str,
+    start_utc: datetime,
+    end_utc: datetime,
+    files_by_series: Mapping[str, Sequence[tuple[str, Sequence[Path]]]],
+) -> list[GapRange]:
+    """Every gap of every requested series, in a deterministic order."""
+    gaps: list[GapRange] = []
+    for series in SERIES_ALL:
+        if series not in wanted:
+            continue
+        for interval, files in files_by_series[series]:
+            if series == "funding":
+                step_ms = DEFAULT_FUNDING_INTERVAL_MS
+                max_step_ms: int | None = DEFAULT_FUNDING_INTERVAL_MS + FUNDING_JITTER_MS
+                time_column = "funding_time_utc"
+            elif series == "open_interest":
+                step_ms = DEFAULT_OI_INTERVAL_MS
+                max_step_ms = TICK_GAP_FACTOR * DEFAULT_OI_INTERVAL_MS
+                time_column = "observed_at_utc"
+            else:
+                step_ms = INTERVAL_MS[interval]
+                max_step_ms = None
+                time_column = "open_time_utc"
+            gaps.extend(
+                gap_ranges_for_files(
+                    files,
+                    series=series,
+                    symbol=symbol,
+                    interval=interval,
+                    time_column=time_column,
+                    step_ms=step_ms,
+                    start_utc=start_utc,
+                    end_utc=end_utc,
+                    max_step_ms=max_step_ms,
+                )
+            )
+    return gaps
+
+
+def _apply_allowed(
+    gaps: Sequence[GapRange], allow_gaps: Sequence[GapRange]
+) -> tuple[GapRange, ...]:
+    """Split `gaps` by the acknowledgement list; raise for the unacknowledged rest.
+
+    Only an entry equal to an actual gap counts; an entry that matches nothing is
+    ignored and never recorded. Returns the acknowledged gaps in gap order.
+    """
+    for entry in allow_gaps:
+        if not isinstance(entry, GapRange):
+            raise CaseInputError("allow_gaps entries must be GapRange values")
+    acknowledged = set(allow_gaps)
+    unresolved = [g for g in gaps if g not in acknowledged]
+    if unresolved:
+        raise CaseInputGapError(unresolved)
+    return tuple(g for g in gaps if g in acknowledged)
+
+
+# --------------------------------------------------------------------------- #
 # Row conversion (Decimal -> plain string, datetime -> ISO, no float).
 # --------------------------------------------------------------------------- #
 
@@ -369,7 +469,7 @@ def build_case_input_data(
     strategy_interval: str = "1h",
     context_interval: str = "4h",
     series: Sequence[str] = SERIES_ALL,
-    allow_gaps: Sequence[Any] = (),
+    allow_gaps: Sequence[GapRange] = (),
 ) -> CaseInputData:
     """Build the case-input data for one symbol and a whole-UTC-day range."""
     wanted = _validate(
@@ -381,7 +481,6 @@ def build_case_input_data(
         context_interval=context_interval,
         series=series,
     )
-    del allow_gaps  # gap policy arrives with the gap check (Task 2)
     days = _utc_days(start_utc, end_utc)
     mark_root = raw_root / MARK_DATASET_DIR
 
@@ -391,6 +490,29 @@ def build_case_input_data(
     mark_files = _kline_files(mark_root, "1m", symbol, days)
     funding_files = _tick_files(raw_root, "funding", "sweep", symbol, days)
     oi_files = _tick_files(raw_root, "oi", "tick", symbol, days)
+
+    trade_intervals = list(dict.fromkeys((strategy_interval, context_interval)))
+    files_by_series: dict[str, list[tuple[str, Sequence[Path]]]] = {
+        "trade": [
+            (iv, strategy_files if iv == strategy_interval else context_files)
+            for iv in trade_intervals
+        ],
+        "intrabar_1m": [("1m", minute_files)],
+        "mark_1m": [("1m", mark_files)],
+        "funding": [("8h", funding_files)],
+        "open_interest": [("5m", oi_files)],
+    }
+    # Fail closed BEFORE any row is emitted: a hole is never padded (D-19).
+    allowed_gaps = _apply_allowed(
+        _collect_gaps(
+            wanted=wanted,
+            symbol=symbol,
+            start_utc=start_utc,
+            end_utc=end_utc,
+            files_by_series=files_by_series,
+        ),
+        allow_gaps,
+    )
 
     used: list[Path] = []
     strategy_bars: list[Row] = []
@@ -451,7 +573,7 @@ def build_case_input_data(
         open_interest=tuple(open_interest),
         files=files,
         dataset_id=dataset_identity(raw_root, used),
-        allowed_gaps=(),
+        allowed_gaps=allowed_gaps,
     )
 
 
@@ -459,6 +581,7 @@ __all__ = [
     "SERIES_ALL",
     "CaseInputData",
     "CaseInputError",
+    "CaseInputGapError",
     "CaseInputRangeError",
     "build_case_input_data",
     "dataset_identity",

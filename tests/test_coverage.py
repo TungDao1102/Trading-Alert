@@ -36,10 +36,16 @@ import pytest
 from src.adapters.binance_usdm import Kline
 from src.data.backfill import LIVE_5
 from src.data.coverage import (
+    DEFAULT_FUNDING_INTERVAL_MS,
+    DEFAULT_OI_INTERVAL_MS,
     DEFAULT_SQL_PATH,
+    FUNDING_JITTER_MS,
+    TICK_GAP_FACTOR,
     CoverageReport,
+    GapRange,
     build_oi_coverage,
     build_oimeta_view,
+    gap_ranges_for_files,
     oi_coverage_rows,
     report_all_live5,
     report_symbol,
@@ -696,8 +702,6 @@ def _publish_hours(raw_root: Path, hours: list[int]) -> list[Path]:
 
 
 def _hour_gaps(files: list[Path]) -> list:
-    from src.data.coverage import gap_ranges_for_files
-
     return gap_ranges_for_files(
         files,
         series="trade",
@@ -711,8 +715,6 @@ def _hour_gaps(files: list[Path]) -> list:
 
 
 def test_gap_ranges_reports_interior_kline_gap(tmp_path: Path) -> None:
-    from src.data.coverage import GapRange
-
     files = _publish_hours(tmp_path, [h for h in range(24) if h not in (10, 11)])
     assert _hour_gaps(files) == [
         GapRange(
@@ -745,12 +747,6 @@ def test_gap_ranges_reports_leading_trailing_and_empty(tmp_path: Path) -> None:
 
 
 def _funding_gaps(files: list[Path]) -> list:
-    from src.data.coverage import (
-        DEFAULT_FUNDING_INTERVAL_MS,
-        FUNDING_JITTER_MS,
-        gap_ranges_for_files,
-    )
-
     return gap_ranges_for_files(
         files,
         series="funding",
@@ -788,12 +784,6 @@ def test_funding_jitter_is_not_a_gap_but_a_missing_tick_is(tmp_path: Path) -> No
 
 
 def _oi_gaps(files: list[Path]) -> list:
-    from src.data.coverage import (
-        DEFAULT_OI_INTERVAL_MS,
-        TICK_GAP_FACTOR,
-        gap_ranges_for_files,
-    )
-
     return gap_ranges_for_files(
         files,
         series="open_interest",

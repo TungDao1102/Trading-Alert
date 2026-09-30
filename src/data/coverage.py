@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypedDict
 from zoneinfo import ZoneInfo
@@ -42,6 +43,15 @@ DISPLAY_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 CANONICAL_INTERVALS: tuple[str, ...] = ("1m", "1h", "4h")
 DEFAULT_OI_INTERVAL_MS = 300_000  # 5-minute canonical cadence (D-07)
 DEFAULT_FUNDING_INTERVAL_MS = 28_800_000  # 8-hour funding cadence
+# Unresolved-gap tolerances for tick series (D-19). OI ticks may be up to
+# `TICK_GAP_FACTOR` cadences apart (the collector healthcheck bound) before a
+# hole counts; funding ticks land within seconds of the 8h boundary, so a
+# minute of jitter is tolerated and a missing tick (16h spacing) is a gap.
+TICK_GAP_FACTOR = 2
+FUNDING_JITTER_MS = 60_000
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _load_views(
@@ -275,6 +285,121 @@ def _gap_count_for_range(
         return 0
     expected = int(span_ms // expected_interval_ms) + 1
     return max(0, expected - rows)
+
+
+@dataclass(frozen=True)
+class GapRange:
+    """One unresolved hole in a published series (D-19).
+
+    `start_utc` is the first missing expected point (or the range start for a
+    leading hole), `end_utc` the next observed point (or the range end for a
+    trailing hole); `missing` is the number of expected slots inside the hole.
+    Frozen and value-comparable, so a caller can pass exactly the gaps it has
+    inspected back as an `allow_gaps` acknowledgement.
+    """
+
+    series: str
+    symbol: str
+    interval: str
+    start_utc: datetime
+    end_utc: datetime
+    missing: int
+
+
+def _utc_epoch_ms(value: datetime) -> int:
+    if value.tzinfo is None or value.utcoffset() != timedelta(0):
+        raise ValueError("gap range bounds must be UTC-aware datetimes")
+    return (value - _EPOCH) // timedelta(milliseconds=1)
+
+
+def _from_epoch_ms(value: int) -> datetime:
+    return _EPOCH + timedelta(milliseconds=value)
+
+
+def _observed_times_ms(
+    files: Sequence[Path], time_column: str, start_ms: int, end_ms: int
+) -> list[int]:
+    """Epoch-ms of every row of `time_column` inside [start_ms, end_ms), ascending.
+
+    Reads the explicit file list (never a glob). Polars writes tz-aware
+    columns, so the value is CAST to a naive TIMESTAMP under `TimeZone=UTC`
+    before `epoch_ms`, exactly like the coverage views.
+    """
+    if not _IDENT_RE.fullmatch(time_column):
+        raise ValueError(f"unsafe time column name {time_column!r}")
+    con = duckdb.connect(":memory:")
+    try:
+        con.execute("SET TimeZone = 'UTC'")
+        expr = f'epoch_ms(CAST("{time_column}" AS TIMESTAMP))'
+        rows = con.execute(
+            f"SELECT {expr} AS t FROM read_parquet(?, hive_partitioning = false) "
+            f"WHERE {expr} >= ? AND {expr} < ? ORDER BY t",
+            [[str(p) for p in files], start_ms, end_ms],
+        ).fetchall()
+    finally:
+        con.close()
+    return [int(r[0]) for r in rows]
+
+
+def gap_ranges_for_files(
+    files: Sequence[Path],
+    *,
+    series: str,
+    symbol: str,
+    interval: str,
+    time_column: str,
+    step_ms: int,
+    start_utc: datetime,
+    end_utc: datetime,
+    max_step_ms: int | None = None,
+) -> list[GapRange]:
+    """Return every unresolved hole of one series inside [start_utc, end_utc).
+
+    The single definition of a gap (D-19): consecutive observations further
+    apart than `max_step_ms` (default `step_ms`) form an interior hole; the
+    range start counts as a virtual observation one `step_ms` earlier, so a
+    leading hole exists when the first row is later than
+    `start + (max_step_ms - step_ms)`; a trailing hole exists when the range
+    end is more than `max_step_ms` after the last row. For a dense kline
+    series this means "any missing bar"; for ticks the tolerance is the
+    caller's `max_step_ms`. No file at all is one hole covering the range.
+    All arithmetic is integer epoch milliseconds.
+    """
+    if step_ms <= 0:
+        raise ValueError("step_ms must be positive")
+    limit = step_ms if max_step_ms is None else max_step_ms
+    if limit < step_ms:
+        raise ValueError("max_step_ms must not be below step_ms")
+    start_ms = _utc_epoch_ms(start_utc)
+    end_ms = _utc_epoch_ms(end_utc)
+    if end_ms <= start_ms:
+        raise ValueError("end_utc must be after start_utc")
+
+    def hole(from_ms: int, to_ms: int, missing: int) -> GapRange:
+        return GapRange(
+            series=series,
+            symbol=symbol,
+            interval=interval,
+            start_utc=_from_epoch_ms(from_ms),
+            end_utc=_from_epoch_ms(to_ms),
+            missing=max(1, missing),
+        )
+
+    times = _observed_times_ms(files, time_column, start_ms, end_ms) if files else []
+    if not times:
+        return [hole(start_ms, end_ms, (end_ms - start_ms) // step_ms)]
+
+    gaps: list[GapRange] = []
+    first = times[0]
+    if first - start_ms > limit - step_ms:
+        gaps.append(hole(start_ms, first, (first - start_ms) // step_ms))
+    for prev, nxt in zip(times, times[1:], strict=False):
+        if nxt - prev > limit:
+            gaps.append(hole(prev + step_ms, nxt, (nxt - prev) // step_ms - 1))
+    last = times[-1]
+    if end_ms - last > limit:
+        gaps.append(hole(last + step_ms, end_ms, (end_ms - last) // step_ms - 1))
+    return gaps
 
 
 def report_symbol(
