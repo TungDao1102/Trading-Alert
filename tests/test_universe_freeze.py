@@ -609,3 +609,171 @@ def test_module_has_no_float_call_or_annotation() -> None:
             assert node.func.id != "float"
         if isinstance(node, ast.AnnAssign) and isinstance(node.annotation, ast.Name):
             assert node.annotation.id != "float"
+
+
+# ---------------------------------------- Task 3: freeze safety gates and the CLI
+
+
+class _Setup:
+    def __init__(self, tmp_path: Path, report: uf.FreezeReport) -> None:
+        self.report = report
+        self.report_path = tmp_path / "report.json"
+        uf.write_report(report, self.report_path)
+        self.manifest = _tmp_manifest(tmp_path)
+        self.witness = _tmp_witness(tmp_path)
+
+    def argv(self, *, approve: str | None = None, freeze: bool = False) -> list[str]:
+        argv = [
+            "freeze",
+            "--report",
+            str(self.report_path),
+            "--approve",
+            self.report.proposal_sha256 if approve is None else approve,
+            "--manifest",
+            str(self.manifest),
+            "--witness",
+            str(self.witness),
+        ]
+        return [*argv, "--freeze"] if freeze else argv
+
+    def snapshot(self) -> tuple[bytes, bytes]:
+        return self.manifest.read_bytes(), self.witness.read_bytes()
+
+
+@pytest.fixture
+def setup(world: World, tmp_path: Path) -> _Setup:
+    import asyncio
+
+    report = asyncio.run(_build(_tracer_world(world)))
+    return _Setup(tmp_path, report)
+
+
+def test_freeze_without_flag_writes_nothing(
+    setup: _Setup, capsys: pytest.CaptureFixture[str]
+) -> None:
+    before = setup.snapshot()
+    assert uf.main(setup.argv()) == 0
+    assert setup.snapshot() == before
+    out = capsys.readouterr().out
+    assert 'status = "FROZEN"' in out
+    assert re.search(r"content_sha256: [0-9a-f]{64}", out)
+    assert "SET1USDT" in out
+
+
+def test_wrong_approval_hash_refuses(setup: _Setup, capsys: pytest.CaptureFixture[str]) -> None:
+    before = setup.snapshot()
+    for freeze_flag in (False, True):
+        assert uf.main(setup.argv(approve="0" * 64, freeze=freeze_flag)) == 2
+        assert "approval hash does not match" in capsys.readouterr().err
+        assert setup.snapshot() == before
+
+
+def test_edited_report_refuses_even_with_its_old_hash(setup: _Setup) -> None:
+    doc = json.loads(setup.report_path.read_text(encoding="utf-8"))
+    doc["proposed_symbols"][0] = "ZZZUSDT"
+    setup.report_path.write_text(json.dumps(doc), encoding="utf-8")
+    before = setup.snapshot()
+    assert uf.main(setup.argv(freeze=True)) == 2
+    assert setup.snapshot() == before
+
+
+def test_refreeze_refuses(setup: _Setup, capsys: pytest.CaptureFixture[str]) -> None:
+    assert uf.main(setup.argv(freeze=True)) == 0
+    frozen = setup.snapshot()
+    capsys.readouterr()
+    assert uf.main(setup.argv(freeze=True)) == 2
+    assert "only DRAFT can be frozen" in capsys.readouterr().err
+    assert setup.snapshot() == frozen
+
+
+def test_already_set_witness_refuses(setup: _Setup, capsys: pytest.CaptureFixture[str]) -> None:
+    text = setup.witness.read_text(encoding="utf-8")
+    setup.witness.write_text(
+        text.replace(
+            "FROZEN_CONTENT_SHA256: str | None = None",
+            f'FROZEN_CONTENT_SHA256: str | None = "{"a" * 64}"',
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    before = setup.snapshot()
+    assert uf.main(setup.argv(freeze=True)) == 2
+    assert "already set" in capsys.readouterr().err
+    assert setup.snapshot() == before
+
+
+def test_witness_write_failure_restores_the_manifest(
+    setup: _Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = setup.snapshot()
+    real_replace = uf.os.replace
+
+    def _failing(src: Any, dst: Any) -> None:
+        if Path(dst) == setup.witness:
+            raise OSError("disk full")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(uf.os, "replace", _failing)
+    assert uf.main(setup.argv(freeze=True)) != 0
+    assert setup.snapshot() == before
+    assert not list(setup.manifest.parent.glob("*.tmp"))
+
+
+class _FakeClient:
+    async def aclose(self) -> None:
+        return None
+
+
+def _patch_factories(monkeypatch: pytest.MonkeyPatch, world: World) -> None:
+    monkeypatch.setattr(uf, "_make_adapter", lambda: FakeAdapter(world))
+    monkeypatch.setattr(uf, "_make_archive_client", lambda: _FakeClient())
+
+
+def test_propose_writes_report_and_prints_the_review_block(
+    world: World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _tracer_world(world)
+    world.add("GONEUSDT", Decimal("1.5"), rest=False)
+    world.mark_missing.add("SET1USDT")
+    _patch_factories(monkeypatch, world)
+    out_path = tmp_path / "report.json"
+    assert uf.main(["propose", "--run-date", "2026-09-30", "--out", str(out_path)]) == 0
+    report = uf.load_report(out_path)
+    out = capsys.readouterr().out
+    assert "dataset_start=2024-09-30" in out
+    assert f"proposal_sha256: {report.proposal_sha256}" in out
+    assert " ".join(report.proposed_symbols) in out
+    assert "GONEUSDT" in out  # unrankable list
+    assert "UNAVAILABLE proposed data: ARCHUSDT SET1USDT" in out
+
+
+def test_propose_exits_3_when_too_few_symbols_are_eligible(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for i in range(5):
+        world.add(f"S{i}USDT", Decimal(f"{i + 1}0.5"))
+    _patch_factories(monkeypatch, world)
+    out_path = tmp_path / "report.json"
+    assert uf.main(["propose", "--run-date", "2026-09-30", "--out", str(out_path)]) == 3
+    assert len(uf.load_report(out_path).proposed_symbols) == 5  # report still written
+
+
+def test_freeze_requires_report_and_approve() -> None:
+    with pytest.raises(SystemExit) as info:
+        uf.main(["freeze", "--report", "x.json"])
+    assert info.value.code == 2
+
+
+def test_cli_help_lists_both_subcommands() -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "src.data.universe_freeze", "--help"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "propose" in proc.stdout
+    assert "freeze" in proc.stdout
