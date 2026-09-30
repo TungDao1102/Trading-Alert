@@ -487,10 +487,31 @@ Plans:
 
 **Audit refs**: F-107, F-906, F-907, F-024, F-122, F-402, F-408, F-409, F-413, F-706
 
-**Plans:** 0 plans
+**Plans:** 13 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 13 to break down)
+**Wave 1**
+- [ ] 13-01-PLAN.md — Collect list (live-5 union top 15 TRADING USDT perpetuals) drives the OI/funding collector; no live-5 fallback; list shipped in the image; loop on the cadence grid (ships first, independently)
+- [ ] 13-02-PLAN.md — Store hardening before any long backfill: closed-day publish, atomic tmp+replace writes, zero-trade acceptance, precision guard, KlineSource protocol
+- [ ] 13-03-PLAN.md — Paper supervisor backfills before resubscribing, verification pass and monotonic guard (no duplicate or skipped bar)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 13-04-PLAN.md — Mark-price klines as a separate validated dataset under data/raw; adapter facts (deliveryDate, empty markPrice, server time, -1121); backup coverage
+- [ ] 13-05-PLAN.md — Checksum-verified, size-capped data.binance.vision archive source for delisted symbols, bucket listing and last archive day
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 13-06-PLAN.md — Collector: paginated funding-history backfill, atomic tick writers, warn-only server-time probe
+- [ ] 13-07-PLAN.md — Backfill CLI core: metadata first, 12-month 1m / 24-month 1h-4h depth, onboard and delivery bounds, resumable trade and mark runs, metadata width guard
+- [ ] 13-09-PLAN.md — Parquet to backtest case-input builder with dataset identity (data_snapshot_id) and fail-closed gap policy
+- [ ] 13-10-PLAN.md — Point-in-time universe freeze tool: ranking, freeze report, approval hash and two-witness writer (tested on copies)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 13-08-PLAN.md — Backfill CLI completion: D043 data-sufficiency report with per-split 1m coverage and missing-data exit codes, archive fallback, funding step
+- [ ] 13-12-PLAN.md — Operator freeze: live proposal, one-way human decision, frozen manifest and witness in one commit (non-autonomous)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 13-11-PLAN.md — Documentation: Phase 13 facts in SOURCES/BINANCE, datasets and rules in DATA_MODEL/DATA_PIPELINE/CONFIGURATION, D049, requirements-gate OPS-06 mapping
+- [ ] 13-13-PLAN.md — Collect list re-issued with still-TRADING frozen symbols, operator backfill run, committed sufficiency report and shortfall surfaced (non-autonomous)
 
 ### Phase 13.1: Deployment & CI (INSERTED)
 
