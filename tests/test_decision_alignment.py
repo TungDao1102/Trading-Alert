@@ -204,3 +204,59 @@ def test_missing_module_key_is_reported_not_raised(capsys: pytest.CaptureFixture
     out = capsys.readouterr().out.splitlines()
     assert rc == 1
     assert any(line.startswith("FAIL authority-error") for line in out)
+
+
+# ---------------------------------------------------------------------------
+# CI wiring (static)
+# ---------------------------------------------------------------------------
+
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "registry-gate.yml"
+
+WORKFLOW_TEST_TARGETS = [
+    "tests/test_registry_gate.py",
+    "tests/test_registry.py",
+    "tests/test_kill_gate_docs.py",
+    "tests/test_kill_gate_clock.py",
+    "tests/test_research_gate_negative.py",
+    "tests/test_decision_alignment*.py",
+]
+
+
+def _workflow_text() -> str:
+    return WORKFLOW.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+
+def test_workflow_runs_verify_script() -> None:
+    text = _workflow_text()
+    assert "- name: Decision alignment gates" in text
+    assert "uv run python scripts/verify_decision_alignment.py all" in text
+    step = text.split("- name: Decision alignment gates", 1)[1].split("\n      - name:", 1)[0]
+    assert "set -eu" in step
+
+
+def test_workflow_negative_tests_list_is_extended() -> None:
+    text = _workflow_text()
+    negative = text.split("- name: Registry negative tests", 1)[1]
+    for target in WORKFLOW_TEST_TARGETS:
+        assert target in negative, target
+
+
+def test_workflow_steps_stay_well_formed() -> None:
+    text = _workflow_text()
+    steps_block = text.split("    steps:\n", 1)[1]
+    step_lines = [line for line in steps_block.splitlines() if line.startswith("      - ")]
+    assert step_lines, "no steps found"
+    assert all(line.startswith("      - name:") for line in step_lines)
+    names = [line.split("name:", 1)[1].strip() for line in step_lines]
+    verify_idx = next(i for i, n in enumerate(names) if n.startswith("Decision alignment gates"))
+    rehash_idx = next(i for i, n in enumerate(names) if n.startswith("Re-hash registry"))
+    negative_idx = next(i for i, n in enumerate(names) if n.startswith("Registry negative tests"))
+    assert rehash_idx < verify_idx < negative_idx
+
+
+def test_workflow_test_targets_exist() -> None:
+    for target in WORKFLOW_TEST_TARGETS:
+        if "*" in target:
+            assert list(REPO_ROOT.glob(target)), target
+        else:
+            assert (REPO_ROOT / target).is_file(), target

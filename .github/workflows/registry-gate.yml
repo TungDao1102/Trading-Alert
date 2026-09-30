@@ -82,8 +82,14 @@ jobs:
           print(f"Re-hash passed: {len(list(Path('params').rglob('*.toml')))} TOML file(s) match pins.")
           PYEOF
 
+      - name: Decision alignment gates (D-17, read-only)
+        id: alignment
+        run: |
+          set -eu
+          uv run python scripts/verify_decision_alignment.py all
+
       - name: Registry negative tests (fail-closed gates must hold)
         id: negative
         run: |
           set -eu
-          uv run pytest tests/test_registry_gate.py tests/test_registry.py -q
+          uv run pytest tests/test_registry_gate.py tests/test_registry.py tests/test_kill_gate_docs.py tests/test_kill_gate_clock.py tests/test_research_gate_negative.py tests/test_decision_alignment*.py -q
