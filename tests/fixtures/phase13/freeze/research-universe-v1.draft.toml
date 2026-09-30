@@ -1,0 +1,40 @@
+# Point-in-time research universe manifest (D039, Phase 11 decision D-09).
+#
+# Purpose: fix, before any evaluation, which USDT perpetual contracts the research
+# backtests see. The universe is the top top_n contracts by trailing volume at the
+# dataset start date, INCLUDING contracts delisted later, so survivorship bias cannot
+# enter through symbol selection.
+#
+# State: DRAFT. No symbol is listed on purpose. The volume data needed to rank symbols
+# does not exist yet; naming symbols now would be hand-picking, the defect D039 fixes.
+# Phase 13 (backfilled dataset) owns the freeze. The live-5 list is a separate config.
+#
+# Freeze procedure (Phase 13, in this order, committed before any evaluation):
+#   1. Rank all USDT perpetual contracts trading on the dataset start date by trailing
+#      30-day mean daily quote volume ending the day before the start date. Contracts
+#      without a full 30-day window are ineligible.
+#   2. Take the top top_n contracts, including symbols delisted later.
+#   3. Fill symbols and selection_date (ISO YYYY-MM-DD) and set status = "FROZEN".
+#   4. Set content_sha256 from: python -m scripts.decision_alignment.universe <this file>
+#   5. Set FROZEN_CONTENT_SHA256 in scripts/decision_alignment/universe.py to the same hash,
+#      in the same commit (UN-02 treats the two as independent witnesses).
+#   6. Commit the frozen manifest before any evaluation runs.
+#
+# This file lives under docs/research/universe, NOT under params/. A directory under
+# params/ would be read as a strategy family by registry-gate, the family scan and the
+# kill-gate registration tripwire.
+
+schema = "research-universe/1"
+status = "DRAFT"
+universe_id = "research-universe-v1"
+top_n = 12
+contract_type = "PERPETUAL"
+quote_asset = "USDT"
+rank_metric = "trailing_30d_mean_daily_quote_volume"
+rank_date_source = "dataset_start_date"
+include_delisted = true
+selection_date = ""
+symbols = []
+freeze_owner = "Phase 13"
+live_universe_note = "The live-5 list (BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT per 00_PRODUCT_SCOPE) is a separate config and unchanged by this manifest."
+content_sha256 = ""
