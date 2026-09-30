@@ -32,7 +32,7 @@ from src.risk import (
     evaluate_risk,
     size_and_quantize,
 )
-from src.risk.cost_guards import validate_guard_rates
+from src.risk.cost_guards import check_cost_guards, validate_guard_rates
 
 FROZEN_NOW = datetime(2026, 9, 19, tzinfo=UTC)
 TTL = timedelta(seconds=3600)
@@ -456,3 +456,157 @@ def test_quantize_reject_carries_cost_trail() -> None:
     assert sized.reason_code == "NOTIONAL_REJECT"
     assert sized.modeled_costs_per_unit == Decimal("83.0840")
     assert sized.fee_source == "PARAMETER"
+
+
+# --------------------------------------------------------------------------- #
+# Cost guards (D-07): STOP_TOO_TIGHT then COST_TO_RISK_EXCEEDED, before quantize
+# --------------------------------------------------------------------------- #
+
+TIGHT = Decimal("0.0000001")
+
+
+def test_check_cost_guards_pure_function() -> None:
+    assert (
+        check_cost_guards(
+            stop_distance_rate=Decimal("0.01"),
+            cost_to_risk_ratio=Decimal("0.1"),
+            min_stop_distance_rate=Decimal("0.003"),
+            max_cost_to_risk=Decimal("0.15"),
+        )
+        is None
+    )
+    assert (
+        check_cost_guards(
+            stop_distance_rate=Decimal("0.002"),
+            cost_to_risk_ratio=Decimal("0.1"),
+            min_stop_distance_rate=Decimal("0.003"),
+            max_cost_to_risk=Decimal("0.15"),
+        )
+        == "STOP_TOO_TIGHT"
+    )
+    assert (
+        check_cost_guards(
+            stop_distance_rate=Decimal("0.01"),
+            cost_to_risk_ratio=Decimal("0.2"),
+            min_stop_distance_rate=Decimal("0.003"),
+            max_cost_to_risk=Decimal("0.15"),
+        )
+        == "COST_TO_RISK_EXCEEDED"
+    )
+    # Stop check is first when both fail.
+    assert (
+        check_cost_guards(
+            stop_distance_rate=Decimal("0.001"),
+            cost_to_risk_ratio=Decimal("0.9"),
+            min_stop_distance_rate=Decimal("0.003"),
+            max_cost_to_risk=Decimal("0.15"),
+        )
+        == "STOP_TOO_TIGHT"
+    )
+
+
+def test_stop_distance_boundary_equality_passes() -> None:
+    # LONG zone 49900-50000, stop 49850 -> 150 / 50000 = 0.003 exactly.
+    plan = _plan(entry_min="49900", entry_max="50000", stop="49850")
+    sized = _size(plan, "LONG", _btc_constraints(), min_stop=Decimal("0.003"), max_ratio=Decimal("1"))
+    assert sized.stop_distance_rate == Decimal("0.003")
+    assert sized.reason_code != "STOP_TOO_TIGHT"
+
+
+def test_stop_distance_boundary_just_below_rejects() -> None:
+    plan = _plan(entry_min="49900", entry_max="50000", stop="49850")
+    sized = _size(plan, "LONG", _btc_constraints(), min_stop=Decimal("0.0031"), max_ratio=Decimal("1"))
+    assert sized.is_no_trade is True
+    assert sized.reason_code == "STOP_TOO_TIGHT"
+
+
+def test_cost_to_risk_boundary_equality_passes() -> None:
+    sized = _size(
+        _btc_long(),
+        "LONG",
+        _btc_constraints(),
+        min_stop=TIGHT,
+        max_ratio=Decimal("0.05921527150192005610498017225"),
+    )
+    assert sized.is_no_trade is False
+    assert sized.quantity == Decimal("0.035")
+
+
+def test_cost_to_risk_boundary_one_ulp_below_rejects() -> None:
+    sized = _size(
+        _btc_long(),
+        "LONG",
+        _btc_constraints(),
+        min_stop=TIGHT,
+        max_ratio=Decimal("0.05921527150192005610498017224"),
+    )
+    assert sized.is_no_trade is True
+    assert sized.reason_code == "COST_TO_RISK_EXCEEDED"
+
+
+def test_half_percent_stop_passes_stop_guard_but_fails_cost_ratio() -> None:
+    plan = _btc_long(stop="59800")
+    sized = _size(plan, "LONG", _btc_constraints())
+    assert sized.is_no_trade is True
+    assert sized.reason_code == "COST_TO_RISK_EXCEEDED"
+    assert sized.modeled_costs_per_unit == Decimal("83.9000")
+    assert sized.stop_distance_rate == Decimal("0.004991680532445923460898502496")
+    assert sized.cost_to_risk_ratio == Decimal("0.2185464964834592341755665538")
+
+
+def test_both_guards_violated_reports_stop_too_tight() -> None:
+    plan = _btc_long(stop="59980")
+    sized = _size(plan, "LONG", _btc_constraints())
+    assert sized.is_no_trade is True
+    assert sized.reason_code == "STOP_TOO_TIGHT"
+    assert sized.stop_distance_rate is not None and sized.stop_distance_rate < Decimal("0.003")
+    assert sized.cost_to_risk_ratio is not None and sized.cost_to_risk_ratio > Decimal("0.15")
+
+
+def test_guards_run_before_quantize() -> None:
+    # Tiny equity would be MIN_QTY_REJECT after rounding; the guard reason wins.
+    plan = _btc_long(stop="59980")
+    sized = _size(plan, "LONG", _btc_constraints(), account=_account(equity="1"))
+    assert sized.reason_code == "STOP_TOO_TIGHT"
+    # A plan that passes the guards with tiny equity does reach quantize.
+    ok_plan = _btc_long()
+    quantized = _size(ok_plan, "LONG", _btc_constraints(), account=_account(equity="1"))
+    assert quantized.reason_code == "MIN_QTY_REJECT"
+
+
+def test_guard_reject_shape() -> None:
+    plan = _btc_long(stop="59800")
+    sized = _size(plan, "LONG", _btc_constraints())
+    assert sized.is_no_trade is True
+    assert sized.quantity is None
+    assert sized.quantization_decision == "REJECTED"
+    assert sized.quantity_after_rounding == Decimal("0")
+    assert sized.realized_risk == Decimal("0")
+    assert sized.quantity_before_rounding > Decimal("0")
+    assert sized.fee_source == "PARAMETER"
+    assert sized.sizing_entry_price == Decimal("60100")
+
+
+def test_guard_reject_verdict_shape() -> None:
+    verdict = _evaluate(_btc_long(stop="59800"), "LONG", _btc_constraints())
+    assert verdict.is_no_trade is True
+    assert verdict.sized is None
+    assert verdict.reason_code == "COST_TO_RISK_EXCEEDED"
+    stop_verdict = _evaluate(_btc_long(stop="59980"), "LONG", _btc_constraints())
+    assert stop_verdict.reason_code == "STOP_TOO_TIGHT"
+
+
+def test_guard_reject_lineage_event() -> None:
+    with structlog.testing.capture_logs() as logs:
+        _size(_btc_long(stop="59800"), "LONG", _btc_constraints())
+    events = [e for e in logs if e.get("event") == "risk.cost_guard"]
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["reason_code"] == "COST_TO_RISK_EXCEEDED"
+    assert ev["stop_distance_rate"] == "0.004991680532445923460898502496"
+    assert ev["cost_to_risk_ratio"] == "0.2185464964834592341755665538"
+    assert all(isinstance(ev[k], str) for k in ("reason_code", "stop_distance_rate", "cost_to_risk_ratio"))
+    # No guard event on an accepted plan.
+    with structlog.testing.capture_logs() as ok_logs:
+        _size(_btc_long(), "LONG", _btc_constraints())
+    assert not [e for e in ok_logs if e.get("event") == "risk.cost_guard"]
