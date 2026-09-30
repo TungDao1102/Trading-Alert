@@ -195,3 +195,100 @@ def test_no_new_requirement_is_marked_complete() -> None:
         assert f"- [x] **{rid}**" not in req
         assert f"| {rid} |" in req and f"| {rid} | Phase" in req
         assert not any(ln.startswith(f"| {rid} |") and "Complete" in ln for ln in req.splitlines())
+
+
+# --------------------------------------------------------------------------- Task 3
+
+DECISIONS = "docs/DECISIONS.md"
+DOC_STATUS = "docs/DOC_STATUS.md"
+DATA_MODEL = "docs/data/DATA_MODEL.md"
+SEC_OPS = "docs/operations/SECURITY_AND_OPERATIONS.md"
+
+
+def _dc(
+    decisions: str | None = None,
+    doc_status: str | None = None,
+    data_model: str | None = None,
+    sec_ops: str | None = None,
+) -> dict[str, bool]:
+    gates = bk.check_decisions(
+        _read(DECISIONS) if decisions is None else decisions,
+        _read(DOC_STATUS) if doc_status is None else doc_status,
+        _read(DATA_MODEL) if data_model is None else data_model,
+        _read(SEC_OPS) if sec_ops is None else sec_ops,
+    )
+    return {n: ok for n, ok, _ in gates}
+
+
+def _drop_row(text: str, decision_id: str) -> str:
+    return "".join(
+        ln for ln in text.splitlines(keepends=True) if not ln.startswith(f"| {decision_id} |")
+    )
+
+
+def test_decision_gates_pass_on_real_repo() -> None:
+    results = bk.run_decisions()
+    assert [n for n, _, _ in results] == [f"DC-0{i}" for i in range(1, 7)]
+    assert all(ok for _, ok, _ in results), [g for g in results if not g[1]]
+
+
+def test_run_returns_seventeen_passing_gates() -> None:
+    results = bk.run()
+    assert len(results) == 17
+    assert all(ok for _, ok, _ in results), [g for g in results if not g[1]]
+
+
+def test_pre_change_decisions_fail_dc01_and_dc02() -> None:
+    gates = _dc(decisions=_old(DECISIONS))
+    assert gates["DC-01"] is False  # blank line inside the table
+    assert gates["DC-02"] is False  # ends at D042
+
+
+def test_missing_d044_or_d045_fails_dc02_and_dc04() -> None:
+    for decision_id in ("D044", "D045"):
+        gates = _dc(decisions=_drop_row(_read(DECISIONS), decision_id))
+        assert gates["DC-02"] is False
+        assert gates["DC-04"] is False
+
+
+def test_d044_missing_owner_phase_fails_dc04() -> None:
+    text = _read(DECISIONS)
+    row = next(ln for ln in text.splitlines() if ln.startswith("| D044 |"))
+    assert _dc(decisions=text.replace(row, row.replace("Phase 22", "Phase XX")))["DC-04"] is False
+
+
+def test_d045_missing_token_fails_dc04() -> None:
+    text = _read(DECISIONS)
+    row = next(ln for ln in text.splitlines() if ln.startswith("| D045 |"))
+    assert _dc(decisions=text.replace(row, row.replace("F-128", "F-XXX")))["DC-04"] is False
+
+
+def test_blank_line_inside_table_fails_dc01() -> None:
+    text = _read(DECISIONS)
+    marker = next(ln for ln in text.splitlines(keepends=True) if ln.startswith("| D020 |"))
+    assert _dc(decisions=text.replace(marker, "\n" + marker))["DC-01"] is False
+
+
+def test_d043_row_without_witness_phrase_fails_dc03() -> None:
+    text = _read(DECISIONS).replace("protocol v1.1.0 frozen", "protocol frozen")
+    assert _dc(decisions=text)["DC-03"] is False
+
+
+def test_data_model_without_notes_fails_dc05() -> None:
+    assert _dc(data_model=_old(DATA_MODEL))["DC-05"] is False
+
+
+def test_doc_status_without_d044_line_fails_dc05() -> None:
+    assert _dc(doc_status=_old(DOC_STATUS))["DC-05"] is False
+
+
+def test_sec_ops_without_d045_reference_fails_dc06() -> None:
+    assert _dc(sec_ops=_read(SEC_OPS).replace("D045", "DXXX"))["DC-06"] is False
+
+
+def test_d044_owner_phases_exist_in_roadmap() -> None:
+    roadmap = _read(ROADMAP)
+    for phase in bk.D044_OWNER_PHASES:
+        number = phase.split()[1]
+        assert f"### {phase}:" in roadmap, f"{phase} missing from ROADMAP.md"
+        assert number.isdigit()

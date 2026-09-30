@@ -65,6 +65,8 @@ Recommended index:
 
 ### 2.2 `feature_snapshots`
 
+**V1 status: not built (D045).** Feature snapshots are recomputed deterministically from closed candles; the field list below is a design record.
+
 Immutable derived inputs used by a strategy evaluation.
 
 ```text
@@ -165,6 +167,8 @@ result
 Repeated callback delivery must resolve to the existing approval/result rather than create a new approval or order.
 
 ### 2.6 `trades`
+
+**V1 status: not built (D045).** User-executed attribution derives from approvals, orders, fills, positions and journal events; the field list below is a design record.
 
 Logical user-executed trade instance. This is distinct from the plan that proposed it and the exchange position that represents current exposure.
 
@@ -316,6 +320,8 @@ metadata_observed_at_utc
 Do not hard-code current symbol filters into strategy code.
 
 ### 2.12 `experiment_runs`
+
+**V1 status: not built (D045).** Experiment identity is the six-field tuple in file-based experiment records (protocol section 5); the field list below is a design record.
 
 Backtest/research reproducibility.
 

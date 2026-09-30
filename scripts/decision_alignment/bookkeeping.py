@@ -340,9 +340,144 @@ def run_reqs() -> list[Gate]:
     return check_requirements(_read(REQUIREMENTS_PATH), _read(ROADMAP_PATH))
 
 
+# --------------------------------------------------------------------------- DECISIONS
+
+DECISIONS_PATH = REPO_ROOT / "docs" / "DECISIONS.md"
+DOC_STATUS_PATH = REPO_ROOT / "docs" / "DOC_STATUS.md"
+DATA_MODEL_PATH = REPO_ROOT / "docs" / "data" / "DATA_MODEL.md"
+SEC_OPS_PATH = REPO_ROOT / "docs" / "operations" / "SECURITY_AND_OPERATIONS.md"
+
+LAST_DECISION = 45
+
+# Owner phases named by the D044 follow-up list (DC-04).
+D044_OWNER_PHASES: tuple[str, ...] = (
+    "Phase 12",
+    "Phase 13",
+    "Phase 14",
+    "Phase 17",
+    "Phase 18",
+    "Phase 20",
+    "Phase 22",
+    "Phase 24",
+    "Phase 26",
+)
+D044_TOKENS: tuple[str, ...] = (
+    "D031",
+    "D039",
+    "baseline-v4",
+    "research-universe-v1.toml",
+    *D044_OWNER_PHASES,
+)
+D045_TOKENS: tuple[str, ...] = (
+    "trades",
+    "feature_snapshots",
+    "experiment_runs",
+    "application-level",
+    "F-128",
+    "OPS-02",
+)
+
+# DATA_MODEL sections that carry a "not built in V1" note (DC-05).
+DATA_MODEL_NOTED: tuple[tuple[str, str], ...] = (
+    ("2.2", "feature_snapshots"),
+    ("2.6", "trades"),
+    ("2.12", "experiment_runs"),
+)
+
+_DECISION_ROW = re.compile(r"^\| (D\d{3}) \|", flags=re.MULTILINE)
+
+
+def _decision_row(decisions: str, decision_id: str) -> str:
+    match = re.search(rf"^\| {decision_id} \|[^\n]*", _norm(decisions), flags=re.MULTILINE)
+    return match.group(0) if match else ""
+
+
+def check_decisions(decisions: str, doc_status: str, data_model: str, sec_ops: str) -> list[Gate]:
+    """Gates DC-01..DC-06 over DECISIONS, DOC_STATUS, DATA_MODEL and SECURITY_AND_OPERATIONS."""
+    text = _norm(decisions)
+    lines = text.split("\n")
+    gates: list[Gate] = []
+
+    # DC-01 contiguous table: header row through the last decision row, all pipe lines.
+    header = next((i for i, ln in enumerate(lines) if ln.startswith("| ID |")), None)
+    last = max((i for i, ln in enumerate(lines) if _DECISION_ROW.match(ln)), default=None)
+    if header is None or last is None:
+        gates.append(("DC-01", False, "table header or rows not found"))
+    else:
+        bad = [i + 1 for i in range(header, last + 1) if not lines[i].startswith("|")]
+        gates.append(
+            (
+                "DC-01",
+                not bad,
+                f"non-table lines inside the table at {bad}" if bad else "contiguous",
+            )
+        )
+
+    # DC-02 IDs D001..D045 each exactly once, in order.
+    ids = _DECISION_ROW.findall(text)
+    expected = [f"D{n:03d}" for n in range(1, LAST_DECISION + 1)]
+    gates.append(
+        (
+            "DC-02",
+            ids == expected,
+            "ok"
+            if ids == expected
+            else f"IDs end at {ids[-1] if ids else 'none'}, count {len(ids)}",
+        )
+    )
+
+    # DC-03 the D043 witness row.
+    ok03 = "protocol v1.1.0 frozen" in _decision_row(decisions, "D043")
+    gates.append(("DC-03", ok03, "ok" if ok03 else "D043 lacks 'protocol v1.1.0 frozen'"))
+
+    # DC-04 D044 and D045 content.
+    d044 = _decision_row(decisions, "D044")
+    d045 = _decision_row(decisions, "D045")
+    problems: list[str] = []
+    if not d044:
+        problems.append("D044 row missing")
+    else:
+        problems += [f"D044 lacks {t}" for t in D044_TOKENS if t not in d044]
+    if not d045:
+        problems.append("D045 row missing")
+    else:
+        problems += [f"D045 lacks {t}" for t in D045_TOKENS if t not in d045]
+    gates.append(("DC-04", not problems, "; ".join(problems) or "D044 and D045 complete"))
+
+    # DC-05 DOC_STATUS change-log line and the three DATA_MODEL notes.
+    problems = []
+    status_lines = [
+        ln for ln in _norm(doc_status).split("\n") if ln.startswith("- 2026-09-30") and "D044" in ln
+    ]
+    if not status_lines:
+        problems.append("DOC_STATUS has no 2026-09-30 line mentioning D044")
+    model = _norm(data_model)
+    for number, name in DATA_MODEL_NOTED:
+        body = _slice(model, rf"^### {re.escape(number)} `{name}`[^\n]*\n", r"^#{2,3} ")
+        first = next((ln for ln in body.split("\n") if ln.strip()), "")
+        if not first.startswith("**V1 status: not built (D045).**"):
+            problems.append(f"DATA_MODEL {number} {name} lacks the V1 status note")
+    gates.append(("DC-05", not problems, "; ".join(problems) or "log line and notes present"))
+
+    # DC-06 SECURITY_AND_OPERATIONS cites D045 and the row exists.
+    ok06 = "D045" in sec_ops and bool(d045)
+    gates.append(("DC-06", ok06, "ok" if ok06 else "SECURITY_AND_OPERATIONS/D045 reference broken"))
+    return gates
+
+
+def run_decisions() -> list[Gate]:
+    """Evaluate DC-01..DC-06 against the real documents."""
+    return check_decisions(
+        _read(DECISIONS_PATH),
+        _read(DOC_STATUS_PATH),
+        _read(DATA_MODEL_PATH),
+        _read(SEC_OPS_PATH),
+    )
+
+
 def run() -> list[Gate]:
     """Every bookkeeping gate against the real repository."""
-    return run_glossary() + run_reqs()
+    return run_glossary() + run_reqs() + run_decisions()
 
 
 if __name__ == "__main__":  # pragma: no cover
