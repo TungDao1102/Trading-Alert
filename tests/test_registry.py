@@ -950,3 +950,138 @@ def test_range_mr_v4_is_v2_plus_extended_cost_keys() -> None:
     assert v4["funding_treatment"] == "ADDITIVE"
     assert v4["slippage_model"] == "FIXED_BPS"
     assert v4["spread_fill_assumptions"] == "FULL_FILL"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 12 (plan 12-02) - exit slippage, cost guards, commission TTL; unit guard.
+# --------------------------------------------------------------------------- #
+
+_PHASE12_KEYS = (
+    "exit_slippage_rate",
+    "min_stop_distance_rate",
+    "max_cost_to_risk",
+    "commission_rate_ttl_seconds",
+)
+_RATE_KEYS = ("fee_rate_entry", "fee_rate_exit", "expected_slippage", "exit_slippage_rate")
+
+
+def test_phase12_keys_are_whitelisted_with_expected_types() -> None:
+    from src.backtest.costs import COST_KEYS
+    from src.domain.registry import DECIMAL_KEYS, INT_KEYS, STRATEGY_KEYS
+
+    for key in _PHASE12_KEYS:
+        assert key in STRATEGY_KEYS, key
+        assert key not in COST_KEYS, key
+    assert "commission_rate_ttl_seconds" in INT_KEYS
+    for key in ("exit_slippage_rate", "min_stop_distance_rate", "max_cost_to_risk"):
+        assert key in DECIMAL_KEYS, key
+        assert key not in INT_KEYS, key
+    assert "commission_rate_ttl_seconds" not in DECIMAL_KEYS
+
+
+def test_set_with_phase12_keys_loads(tmp_path: Path) -> None:
+    loaded = _load_tmp(
+        tmp_path,
+        "exit_slippage_rate = 0.0003\n"
+        "min_stop_distance_rate = 0.003\n"
+        "max_cost_to_risk = 0.15\n"
+        "commission_rate_ttl_seconds = 3600\n",
+    )
+    assert loaded.params["exit_slippage_rate"] == Decimal("0.0003")
+    assert loaded.params["min_stop_distance_rate"] == Decimal("0.003")
+    assert loaded.params["max_cost_to_risk"] == Decimal("0.15")
+    assert loaded.params["commission_rate_ttl_seconds"] == 3600
+
+
+def test_set_without_phase12_keys_still_loads(tmp_path: Path) -> None:
+    loaded = _load_tmp(tmp_path, "swing_lookback = 20\nfee_rate_entry = 0.0005\n")
+    for key in _PHASE12_KEYS:
+        assert key not in loaded.params
+
+
+@pytest.mark.parametrize("key", _RATE_KEYS)
+def test_rate_key_at_ceiling_loads(tmp_path: Path, key: str) -> None:
+    loaded = _load_tmp(tmp_path, f"{key} = 0.01\n")
+    assert loaded.params[key] == Decimal("0.01")
+
+
+@pytest.mark.parametrize("key", _RATE_KEYS)
+@pytest.mark.parametrize("literal", ["0.0100001", "2", "2.0", "-0.0001", "-1"])
+def test_rate_key_unit_error_raises_naming_key(tmp_path: Path, key: str, literal: str) -> None:
+    with pytest.raises(StrategyKeyOutsideRegistry) as excinfo:
+        _load_tmp(tmp_path, f"{key} = {literal}\n")
+    message = str(excinfo.value)
+    assert key in message
+    assert "unit error" in message
+
+
+@pytest.mark.parametrize("key", _RATE_KEYS)
+def test_rate_key_bool_raises(tmp_path: Path, key: str) -> None:
+    with pytest.raises(StrategyKeyOutsideRegistry, match=key):
+        _load_tmp(tmp_path, f"{key} = true\n")
+
+
+@pytest.mark.parametrize(
+    ("key", "literal", "loads"),
+    [
+        ("min_stop_distance_rate", "0", False),
+        ("min_stop_distance_rate", "1", False),
+        ("min_stop_distance_rate", "-0.1", False),
+        ("min_stop_distance_rate", "0.003", True),
+        ("max_cost_to_risk", "0", False),
+        ("max_cost_to_risk", "1.5", False),
+        ("max_cost_to_risk", "-0.1", False),
+        ("max_cost_to_risk", "1", True),
+        ("max_cost_to_risk", "0.15", True),
+        ("commission_rate_ttl_seconds", "0", False),
+        ("commission_rate_ttl_seconds", "-5", False),
+        ("commission_rate_ttl_seconds", "3600.5", False),
+        ("commission_rate_ttl_seconds", "3600", True),
+    ],
+)
+def test_guard_keys_range_checked(tmp_path: Path, key: str, literal: str, loads: bool) -> None:
+    if loads:
+        assert key in _load_tmp(tmp_path, f"{key} = {literal}\n").params
+        return
+    with pytest.raises(StrategyKeyOutsideRegistry, match=key):
+        _load_tmp(tmp_path, f"{key} = {literal}\n")
+
+
+@pytest.mark.parametrize("key", _PHASE12_KEYS)
+def test_ambient_config_named_after_phase12_key_is_rejected(key: str) -> None:
+    from src.domain.registry import check_strategy_key_outside_registry
+
+    with pytest.raises(StrategyKeyOutsideRegistry):
+        check_strategy_key_outside_registry({key: "1"})
+    with pytest.raises(StrategyKeyOutsideRegistry):
+        check_strategy_key_outside_registry({"nested": {key.upper(): "1"}})
+
+
+_PHASE12_FROZEN = {
+    "exit_slippage_rate": Decimal("0.0003"),
+    "min_stop_distance_rate": Decimal("0.003"),
+    "max_cost_to_risk": Decimal("0.15"),
+    "commission_rate_ttl_seconds": 3600,
+}
+
+_V5_SETS = (
+    ("trend-pullback", "baseline-v4", "baseline-v5"),
+)
+
+
+@pytest.mark.parametrize(("strategy_id", "predecessor", "set_id"), _V5_SETS)
+def test_baseline_v5_matches_phase12(strategy_id: str, predecessor: str, set_id: str) -> None:
+    old = load_parameter_set(strategy_id, predecessor).params
+    loaded = load_parameter_set(strategy_id, set_id)
+    params = loaded.params
+    assert loaded.strategy_version == "v4.0.0"
+    assert params["fee_rate_entry"] == Decimal("0.0005")
+    assert params["fee_rate_exit"] == Decimal("0.0005")
+    assert params["expected_slippage"] == Decimal("0.0001")
+    for key, value in _PHASE12_FROZEN.items():
+        assert params[key] == value, key
+        assert type(params[key]) is type(value), key
+    assert params["working_type"] == "MARK_PRICE"
+    assert set(params) - set(old) == set(_PHASE12_FROZEN)
+    for key in old:
+        assert params[key] == old[key], key
