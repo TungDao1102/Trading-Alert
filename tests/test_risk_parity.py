@@ -1,13 +1,15 @@
 """Parity-fixture tests for the Phase-5 risk pipeline (plan 05-01).
 
-Per D-02: identical inputs run through `size_position` then `quantize`
-produce byte-identical SizedResult outputs (including reason codes).
-The CI-blocking parity fixture pins the byte-identical guarantee so
-backtest, paper, and live modes share identical math.
+Per D-02: identical inputs run through the shared `size_and_quantize`
+step (adverse-edge sizing, cost guards, quantization) produce
+byte-identical SizedResult outputs (including reason codes). The
+CI-blocking parity fixture pins the byte-identical guarantee so backtest,
+paper, and live modes share identical math.
 
-TDD discipline: RED → GREEN. These tests are the RED phase — they MUST
-fail until `src/risk/sizing.py` and `src/risk/quantization.py` are
-implemented.
+Plan 12-07: the fixtures no longer carry a hand-typed cost per unit; they
+carry the four literal rates and the pipeline produces the cost. Expected
+values are hand-derived in tests/fixtures/phase5/DERIVATIONS.md and are
+compared numerically (Decimal equality), never pasted from pipeline output.
 """
 
 from __future__ import annotations
@@ -22,8 +24,8 @@ from src.core.types import AccountState
 from src.domain.canonical import sha256_hex
 from src.domain.enums import TradePlanStatus
 from src.domain.trade_plan import TradePlan
-from src.risk.quantization import quantize
-from src.risk.sizing import size_position
+from src.risk.cost_rates import CostRates
+from src.risk.gating import size_and_quantize
 from src.risk.types import ConstraintSnapshot, SizedResult
 
 PHASE5_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase5"
@@ -86,34 +88,33 @@ def _build_constraints(cs_dict: dict) -> ConstraintSnapshot:
     )
 
 
-def _run_pipeline(case_input: dict) -> SizedResult:
-    """Run size_position + quantize on a phase5 case input."""
-    trade_plan = _build_trade_plan(case_input["trade_plan"])
-    account = _build_account_state(case_input["account_state"])
-    constraints = _build_constraints(case_input["constraint_snapshot"])
-
-    # Zone-mid entry_ref = (entry_min + entry_max) / 2
-    entry_ref = (trade_plan.entry_min_price + trade_plan.entry_max_price) / Decimal("2")
-    modeled_costs = Decimal(str(case_input["modeled_costs_per_unit"]))
-
-    sized = size_position(
-        trade_plan=trade_plan,
-        account_state=account,
-        entry_ref=entry_ref,
-        modeled_costs_per_unit=modeled_costs,
+def _build_cost_rates(cr_dict: dict) -> CostRates:
+    return CostRates(
+        fee_rate_entry=Decimal(cr_dict["fee_rate_entry"]),
+        entry_slippage_rate=Decimal(cr_dict["entry_slippage_rate"]),
+        fee_rate_exit=Decimal(cr_dict["fee_rate_exit"]),
+        exit_slippage_rate=Decimal(cr_dict["exit_slippage_rate"]),
+        fee_source=cr_dict["fee_source"],
     )
 
-    allowed_risk = account.equity * account.risk_rate
-    sl_distance = abs(entry_ref - trade_plan.stop_loss_price)
-    risk_per_unit = sl_distance + modeled_costs
 
-    return quantize(
-        sized=sized,
-        constraint_snapshot=constraints,
-        allowed_risk=allowed_risk,
-        risk_per_unit=risk_per_unit,
-        minimum_risk_utilization_after_rounding=Decimal("0.6"),
-        reference_price=entry_ref,
+def _run_pipeline(case_input: dict) -> SizedResult:
+    """Run the shared size + guards + quantize step on a phase5 case input.
+
+    The math lives in `size_and_quantize`; this helper only builds its
+    typed arguments from the fixture (no sizing arithmetic here).
+    """
+    return size_and_quantize(
+        trade_plan=_build_trade_plan(case_input["trade_plan"]),
+        candidate_position_side=case_input["candidate_position_side"],
+        account_state=_build_account_state(case_input["account_state"]),
+        constraint_snapshot=_build_constraints(case_input["constraint_snapshot"]),
+        cost_rates=_build_cost_rates(case_input["cost_rates"]),
+        min_stop_distance_rate=Decimal(case_input["min_stop_distance_rate"]),
+        max_cost_to_risk=Decimal(case_input["max_cost_to_risk"]),
+        minimum_risk_utilization_after_rounding=Decimal(
+            case_input["minimum_risk_utilization_after_rounding"]
+        ),
     )
 
 
@@ -128,6 +129,30 @@ def _to_parity_dict(result: SizedResult) -> dict:
         "realized_risk": str(result.realized_risk),
         "reason_code": result.reason_code,
     }
+
+
+_DECIMAL_FIELDS = (
+    "quantity",
+    "quantity_before_rounding",
+    "quantity_after_rounding",
+    "realized_risk",
+)
+_EXACT_FIELDS = ("quantization_decision", "reason_code", "is_no_trade")
+
+
+def _assert_parity_numeric(actual: dict, expected: dict, case_name: str) -> None:
+    """Compare numerically so trailing-zero spelling cannot mask or fake a result."""
+    assert set(actual) == set(expected), f"field set mismatch in {case_name}"
+    for field in _DECIMAL_FIELDS:
+        a, e = actual[field], expected[field]
+        if e is None or a is None:
+            assert a is None and e is None, f"{case_name}.{field}: actual={a}, expected={e}"
+        else:
+            assert Decimal(a) == Decimal(e), f"{case_name}.{field}: actual={a}, expected={e}"
+    for field in _EXACT_FIELDS:
+        assert actual[field] == expected[field], (
+            f"{case_name}.{field}: actual={actual[field]}, expected={expected[field]}"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -187,13 +212,11 @@ _PHASE5_CASES = (
 
 @pytest.mark.parametrize("case_name", _PHASE5_CASES)
 def test_phase5_pipeline_matches_expected(case_name: str) -> None:
-    """Beh. 4: pipeline output dict matches expected.json canonical-JSON-exactly."""
+    """Beh. 4: pipeline output matches the hand-derived expected.json numerically."""
     case_dir = PHASE5_FIXTURES_DIR / case_name
     case_input = _load_input(case_dir)
     case_expected = _load_expected(case_dir)
 
     result = _run_pipeline(case_input)
     actual = _to_parity_dict(result)
-    assert sha256_hex(actual) == sha256_hex(case_expected), (
-        f"parity mismatch in {case_name}: actual={actual}, expected={case_expected}"
-    )
+    _assert_parity_numeric(actual, case_expected, case_name)
