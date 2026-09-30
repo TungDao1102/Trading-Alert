@@ -444,12 +444,12 @@ This absorbs the confirmed bug from former Phase 11:
 
 **Audit refs**: F-001, F-801, F-601, F-306, F-002, F-962, F-005, F-028
 
-**Plans:** 1/11 plans executed
+**Plans:** 2/11 plans executed
 
 Plans:
 **Wave 1**
 - [x] 12-01-PLAN.md — Rejection vocabulary window: STOP_TOO_TIGHT and COST_TO_RISK_EXCEEDED added, five deprecated aliases removed (GLOSSARY, enum, GL gates, tests)
-- [ ] 12-02-PLAN.md — Registry keys, unit and range guards, five v5/-v3 parameter sets at v4.0.0, pins and gate PA-07
+- [x] 12-02-PLAN.md — Registry keys, unit and range guards, five v5/-v3 parameter sets at v4.0.0, pins and gate PA-07
 - [ ] 12-03-PLAN.md — CostRates and the quote-per-unit producer, presence-driven exit_slippage_rate in CostModel, canonical cost-hash text, cost_slice binding
 
 **Wave 2** *(blocked on Wave 1 completion)*
@@ -886,7 +886,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 9. Live Execution Rollout | 4/4 | In Progress|  |
 | 10. Journal Depth + Kill-Gate Operations | 12/12 | In Progress|  |
 | 11. Decision Alignment (docs + params) | 8/8 | In Progress|  |
-| 12. Fee + Cost Model Correctness | 1/11 | In Progress|  |
+| 12. Fee + Cost Model Correctness | 2/11 | In Progress|  |
 | 13. Research Data Foundation Fixes + VPS Collector Deployment | 0/TBD | Not started | - |
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |

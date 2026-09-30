@@ -23,7 +23,7 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 ### Domain & Reproducibility
 
 - [ ] **DOMN-01**: System persists seven separate entities (Signal, TradePlan, Approval, Order, Fill, Position, JournalEvent) with GLOSSARY-canonical enums and no nullable-column state inference
-- [ ] **DOMN-02**: Every backtest/paper/alert/order plan is traceable to an immutable versioned parameter set (strategyVersion + parameterSetId + parameterSetHash + experiment linkage)
+- [x] **DOMN-02**: Every backtest/paper/alert/order plan is traceable to an immutable versioned parameter set (strategyVersion + parameterSetId + parameterSetHash + experiment linkage)
 - [ ] **DOMN-03**: Strategy correctness is enforced by golden fixtures (candles.csv + parameters.json + expected signals/plans) plus no-lookahead, prefix-invariance, candle-close-timing, and boundary suites
 - [ ] **DOMN-04**: Signal, TradePlan, Order and Position state transitions are validated against the GLOSSARY state machines and illegal transitions are rejected
 
@@ -35,7 +35,7 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 ### Risk
 
-- [ ] **RISK-01**: System sizes positions from equity × risk-rate ÷ SL-distance including modeled costs, floors quantity to stepSize, rejects below the utilization threshold or minimums, and uses identical logic in backtest/paper/live
+- [x] **RISK-01**: System sizes positions from equity × risk-rate ÷ SL-distance including modeled costs, floors quantity to stepSize, rejects below the utilization threshold or minimums, and uses identical logic in backtest/paper/live
 - [x] **RISK-02**: System enforces portfolio limits (max open positions, aggregate risk, correlated-cluster cap, DAILY_STOP states) and fails closed on uncertain account/risk state
 - [ ] **RISK-03**: A live protective stop is never loosened or removed while its position is open; any stop change is explicit, logged and permitted by the strategy and execution contract; automatic re-placement restores the original plan stop-loss, never a wider one
 - [ ] **RISK-04**: The system never increases risk because of previous losses or an unmet target and never adds to a losing position (no averaging down)
@@ -122,12 +122,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DATA-03 | Phase 2 | Pending |
 | DATA-04 | Phase 2 | Pending |
 | DOMN-01 | Phase 3 | Pending |
-| DOMN-02 | Phase 3 | Pending |
+| DOMN-02 | Phase 3 | Complete |
 | DOMN-03 | Phase 3 | Pending |
 | STRAT-01 | Phase 4 | Pending |
 | STRAT-02 | Phase 4 | Pending |
 | STRAT-03 | Phase 4 | Pending |
-| RISK-01 | Phase 5 | Pending |
+| RISK-01 | Phase 5 | Complete |
 | RISK-02 | Phase 5 | Complete |
 | BKTS-01 | Phase 6 | Pending |
 | BKTS-02 | Phase 6 | Complete |

@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 12
 current_phase_name: fee-cost-model-correctness
 status: executing
-stopped_at: Completed 12-01-PLAN.md
-last_updated: "2026-09-30T08:30:05.725Z"
+stopped_at: Completed 12-02-PLAN.md
+last_updated: "2026-09-30T08:40:50.072Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 11 execution started
-state_head: e6001bd5a3e696691b0960a08f207053f4d07a0a
+state_head: 9a169ec6a25e832b8b9b7e1a9535013a43a1aa83
 progress:
   total_phases: 28
   completed_phases: 2
   total_plans: 69
-  completed_plans: 58
+  completed_plans: 59
 milestone_name: milestone
 ---
 
@@ -97,6 +97,7 @@ Progress: [██████████] 100%
 | Phase 11 P07 | 10 min | 3 tasks | 8 files |
 | Phase 11 P08 | 35 min | 3 tasks | 4 files |
 | Phase 12 P01 | 25 min | 2 tasks | 5 files |
+| Phase 12 P02 | 35min | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -254,6 +255,7 @@ Recent decisions affecting current work:
 - [Phase 11]: 11-07: GLOSSARY canonical reason codes are the 17 code-referenced plus reserved INSUFFICIENT_MARGIN; five synonyms are deprecated aliases kept in the enum until the Phase 12 cleanup — D-15: no rename in Phase 11; gates GL-01..GL-06 tie the glossary to src/ and the enum
 - [Phase 11]: 11-07: 13 new requirement IDs registered (mapped to phases 13-26, Pending); D044 records the alignment and follow-ups, D045 records exclusions (trades, feature_snapshots, experiment_runs not built; no application-level secret encryption in V1) — D-16: silent drops not allowed; F-128 covered by OPS-02
 - [Phase 12]: 12-01: RejectionReason reduced to 20 codes (STOP_TOO_TIGHT, COST_TO_RISK_EXCEEDED added; five aliases retired, GLOSSARY 9.2 is a removal record; GL-01/GL-03 keep them out)
+- [Phase 12]: 12-02: Phase 12 cost-guard keys are optional registry keys; exit_slippage_rate stays outside the 7-key COST_KEYS so existing cost_model_hash values do not move; five v4.0.0 sets pinned and gated by PA-07
 
 ### Pending Todos
 
@@ -298,6 +300,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T08:30:05.524Z
-Stopped at: Completed 12-01-PLAN.md
+Last session: 2026-09-30T08:40:49.880Z
+Stopped at: Completed 12-02-PLAN.md
 Resume file: None
