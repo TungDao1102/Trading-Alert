@@ -321,6 +321,57 @@ def test_backup_supports_multiple_parquet_roots(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Phase 13 plan 04 (D-27, T-13-17) — the mark-kline subtree under the raw
+# root is covered by the EXISTING backup + restore drill (no new mechanism).
+# --------------------------------------------------------------------------- #
+
+
+def test_backup_covers_mark_kline_subtree(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    mark_part = (
+        raw_root
+        / "dataset=mark_klines"
+        / "interval=1m"
+        / "symbol=BTCUSDT"
+        / "date=2026-09-29"
+        / "part.parquet"
+    )
+    _seed_fake_parquet(mark_part)
+    trade_part = (
+        raw_root / "interval=1m" / "symbol=BTCUSDT" / "date=2026-09-29" / "part.parquet"
+    )
+    _seed_fake_parquet(trade_part)
+
+    bundle_root = tmp_path / "bundle"
+    backup_mod.backup(
+        bundle_root=bundle_root,
+        pg_dump_runner=lambda out: _no_op_pg_dump(out),
+        parquet_roots=[raw_root],
+    )
+
+    rel = "dataset=mark_klines/interval=1m/symbol=BTCUSDT/date=2026-09-29/part.parquet"
+    key = f"parquet/{raw_root.name}/{rel}"
+    copied = bundle_root / "parquet" / raw_root.name / rel
+    assert copied.exists()
+    assert copied.read_bytes() == mark_part.read_bytes()
+    manifest = json.loads((bundle_root / "manifest.json").read_text(encoding="utf-8"))
+    assert key in manifest
+    assert manifest[key] == _sha256(mark_part)
+
+    scratch_root = tmp_path / "scratch"
+    scratch_root.mkdir()
+    report = run_drill(
+        bundle_root=bundle_root,
+        scratch_root=scratch_root,
+        pg_dump_path=scratch_root / "pg.dump",
+        parquet_roots=[raw_root],
+    )
+    assert report.equal is True
+    assert report.failed_files == []
+    assert key in report.restored_files
+
+
+# --------------------------------------------------------------------------- #
 # Test 9 — drill exits non-zero (returncode) on a tampered backup via CLI.
 # --------------------------------------------------------------------------- #
 

@@ -143,9 +143,9 @@ def _day_rows(day_start_ms: int, count: int = 1440) -> list[list[Any]]:
     rows: list[list[Any]] = []
     for i in range(count):
         o = day_start_ms + i * MINUTE_MS
-        rows.append(
-            [o, "100.5", "101.0", "100.0", "100.7", "0", o + MINUTE_MS - 1, "0", 30 + i % 3, "0", "0", "0"]
-        )
+        close_ms = o + MINUTE_MS - 1
+        prices = ["100.5", "101.0", "100.0", "100.7"]
+        rows.append([o, *prices, "0", close_ms, "0", 30, "0", "0", "0"])
     return rows
 
 
@@ -406,3 +406,111 @@ async def test_trade_dataset_default_is_unchanged(tmp_path: Path) -> None:
 
 def test_cursor_store_default_dataset_is_trade(tmp_path: Path) -> None:
     assert CursorStore(root=tmp_path).dataset == "trade"
+
+
+# --------------------------------------------------------------------------- #
+# Dataset isolation: cursors and the trade view (T-13-13, T-13-15).
+# --------------------------------------------------------------------------- #
+
+
+def test_trade_and_mark_cursors_never_collide(tmp_path: Path) -> None:
+    trade = CursorStore(root=tmp_path)
+    mark = CursorStore(root=tmp_path, dataset="mark")
+    trade.write(symbol="BTCUSDT", interval="1m", cursor_ms=111)
+    mark.write(symbol="BTCUSDT", interval="1m", cursor_ms=222)
+
+    assert (tmp_path / "BTCUSDT_1m.cursor").exists()
+    assert (tmp_path / "mark__BTCUSDT_1m.cursor").exists()
+    assert trade.read(symbol="BTCUSDT", interval="1m") == 111
+    assert mark.read(symbol="BTCUSDT", interval="1m") == 222
+
+
+async def test_paginator_refuses_cursor_store_of_another_dataset(tmp_path: Path) -> None:
+    adapter, rest = _adapter(_day_rows(0))
+    with pytest.raises(ValueError, match="trade.*mark|mark.*trade"):
+        await backfill_symbol_interval(
+            adapter,
+            symbol="BTCUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=DAY_MS,
+            dataset=MARK_DATASET,
+            raw_root=tmp_path,
+            cursor_store=CursorStore(root=tmp_path / "cursors"),
+            clock=lambda: _dt(2 * DAY_MS),
+        )
+    assert rest.calls == []
+
+    trade_source_adapter, _ = _adapter([])
+    with pytest.raises(ValueError, match="trade.*mark|mark.*trade"):
+        await backfill_symbol_interval(
+            trade_source_adapter,
+            symbol="BTCUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=DAY_MS,
+            raw_root=tmp_path,
+            cursor_store=CursorStore(root=tmp_path / "cursors", dataset="mark"),
+            clock=lambda: _dt(2 * DAY_MS),
+        )
+
+
+async def test_mark_backfill_resumes_from_mark_cursor(tmp_path: Path) -> None:
+    day_start = 1790640000000 - (1790640000000 % DAY_MS)
+    adapter, _ = _adapter(_day_rows(day_start))
+    cursors = CursorStore(root=tmp_path / "cursors", dataset="mark")
+    await backfill_symbol_interval(
+        adapter,
+        symbol="BTCUSDT",
+        interval="1m",
+        start_ms=day_start,
+        end_ms=day_start + DAY_MS,
+        dataset=MARK_DATASET,
+        raw_root=tmp_path,
+        config=BackfillConfig(interval_ms=MINUTE_MS, pace_seconds=0),
+        cursor_store=cursors,
+        clock=lambda: _dt(day_start + DAY_MS + 3_600_000),
+    )
+    assert cursors.read(symbol="BTCUSDT", interval="1m") == day_start + DAY_MS - MINUTE_MS
+    assert (tmp_path / "cursors" / "mark__BTCUSDT_1m.cursor").exists()
+    assert not (tmp_path / "cursors" / "BTCUSDT_1m.cursor").exists()
+
+
+def test_candles_view_ignores_mark_dataset(tmp_path: Path) -> None:
+    """The trade `candles_v1` glob does not match dataset=mark_klines (T-13-13)."""
+    import duckdb
+    from src.data.coverage import report_symbol
+    from src.data.store import publish_batch
+
+    day_start = 1790640000000 - (1790640000000 % DAY_MS)
+    p = Decimal("100.00")
+    trade_rows = [
+        Kline(
+            symbol="BTCUSDT",
+            interval="1m",
+            open_time_utc=_dt(day_start + i * MINUTE_MS),
+            close_time_utc=_dt(day_start + (i + 1) * MINUTE_MS - 1),
+            open=p,
+            high=p,
+            low=p,
+            close=p,
+            volume=Decimal("1"),
+            quote_volume=Decimal("100"),
+            trade_count=2,
+        )
+        for i in range(3)
+    ]
+    publish_batch(trade_rows, interval="1m", symbol="BTCUSDT", raw_root=tmp_path)
+    publish_mark_batch(
+        [_mark(day_start + i * MINUTE_MS) for i in range(10)],
+        interval="1m",
+        symbol="BTCUSDT",
+        raw_root=tmp_path,
+    )
+
+    con = duckdb.connect(":memory:")
+    try:
+        cells = report_symbol(con, "BTCUSDT", raw_root=tmp_path)
+    finally:
+        con.close()
+    assert [(c.tf, c.rows) for c in cells] == [("1m", 3)]
