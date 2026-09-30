@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import copy
+import re
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -191,3 +194,96 @@ def test_frozen_changed_symbol_fails() -> None:
     doc = _frozen()
     doc["symbols"][0] = "ZZZUSDT"
     _assert_rejected(doc, "content_sha256")
+
+
+# ---------------------------------------------------------------- hashing
+
+
+def test_hash_is_stable_and_order_independent() -> None:
+    doc = _frozen()
+    first = universe.compute_content_sha256(doc)
+    assert first == universe.compute_content_sha256(copy.deepcopy(doc))
+    shuffled = copy.deepcopy(doc)
+    shuffled["symbols"] = list(reversed(shuffled["symbols"]))
+    assert universe.compute_content_sha256(shuffled) == first
+    assert re.fullmatch(r"[0-9a-f]{64}", first)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("selection_date", "2024-01-02"),
+        ("top_n", 13),
+        ("rank_metric", "other_metric"),
+    ],
+)
+def test_hash_changes_when_payload_field_changes(key: str, value: object) -> None:
+    doc = _frozen()
+    base = universe.compute_content_sha256(doc)
+    changed = copy.deepcopy(doc)
+    changed[key] = value
+    assert universe.compute_content_sha256(changed) != base
+
+
+def test_hash_changes_when_a_symbol_changes() -> None:
+    doc = _frozen()
+    base = universe.compute_content_sha256(doc)
+    changed = copy.deepcopy(doc)
+    changed["symbols"][0] = "ZZZUSDT"
+    assert universe.compute_content_sha256(changed) != base
+
+
+def test_hash_excludes_status_and_stored_hash() -> None:
+    doc = _frozen()
+    base = universe.compute_content_sha256(doc)
+    other = copy.deepcopy(doc)
+    other["status"] = "DRAFT"
+    other["content_sha256"] = "0" * 64
+    assert universe.compute_content_sha256(other) == base
+
+
+# ---------------------------------------------------------------- CLI
+
+
+def _cli(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "scripts.decision_alignment.universe", *args],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_cli_prints_one_64_hex_line_for_the_manifest() -> None:
+    proc = _cli(str(MANIFEST.relative_to(REPO_ROOT)))
+    assert proc.returncode == 0, proc.stderr
+    lines = proc.stdout.splitlines()
+    assert len(lines) == 1
+    assert re.fullmatch(r"[0-9a-f]{64}", lines[0])
+    assert lines[0] == universe.compute_content_sha256(_real_doc())
+
+
+def test_cli_missing_argument_exits_2_with_usage() -> None:
+    proc = _cli()
+    assert proc.returncode == 2
+    assert "usage" in proc.stdout.lower()
+
+
+def test_cli_nonexistent_path_exits_1() -> None:
+    proc = _cli("docs/research/universe/does-not-exist.toml")
+    assert proc.returncode == 1
+
+
+# ---------------------------------------------------------------- repo safety
+
+
+def test_manifest_is_invisible_to_research_gate_and_family_scanners() -> None:
+    assert MANIFEST.suffix == ".toml"
+    assert MANIFEST.parent == REPO_ROOT / "docs" / "research" / "universe"
+    assert not MANIFEST.name.startswith(("experiment", "backtest"))
+    text = MANIFEST.read_text(encoding="utf-8")
+    assert "parameter_set_id" not in text
+    assert "parameterSetHash" not in text
+    assert not re.search(r"^\[parameters", text, re.MULTILINE)
+    assert not (REPO_ROOT / "params" / "universe").exists()
