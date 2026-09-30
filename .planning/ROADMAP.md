@@ -10,18 +10,18 @@ Research-first path from frozen protocol to cautious live orders: formalize the 
 - The live path is library-only: no runtime composition, no operational persistence, no user-data stream.
 - Several auto-selected planning decisions were wrong.
 
-The user decided D031–D039 in `docs/DECISIONS.md`. Phases 11–26 below replace the earlier backlog-promoted phases 11–17 and carry their scope forward:
+The user decided D031–D039 in `docs/DECISIONS.md`. Phases 11–27 below replace the earlier backlog-promoted phases 11–17 and carry their scope forward:
 - old 11 → 12
 - old 12 → 21
 - old 13 + 14 → 22
 - old 15 → 19
 - old 16 → 23
-- old 17 → 26
+- old 17 → 27
 
 Order rule:
 - Evidence correctness (11–16) comes before any paper soak is trusted.
 - Every money-safety phase (17–23) comes before any live order.
-- Live enablement (25) requires 11–24 complete.
+- Live enablement (26) requires 11–25 complete, and follows the D040 release path SHADOW → DEMO → CANARY → LIVE.
 
 Finding IDs (F-xxx) refer to `.planning/audits/2026-09-29-deep-audit/findings.json`.
 
@@ -49,17 +49,18 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 13: Research Data Foundation Fixes** - History depth, point-in-time universe, mark-price klines, backfill robustness, Parquet→backtest builder
 - [ ] **Phase 14: Backtest Simulator Causality Rewrite** - Fills only after the signal bar, multi-bar holding, TP1/TP2 ladder, funding, mark-price triggers
 - [ ] **Phase 15: Strategy Geometry Correction** - Trend-pullback SL outside zone, confirmed pivots, min stop distance; families match their sheets
-- [ ] **Phase 16: Paper Runtime Composition** - Runnable paper process (M3), fixed WS await, simulated fills, measured approval delay; soak can start
+- [ ] **Phase 16: Paper Runtime Composition + SHADOW Approval Mode** - Runnable paper process (M3), fixed WS await, simulated fills, SHADOW APPROVE/SKIP journaled with no order path (D040); soak can start
 - [ ] **Phase 17: Operational Persistence Layer** - PostgreSQL journal/approval/execution stores, integrity constraints, durable approval consumption, write-ahead intent
 - [ ] **Phase 18: Binance User-Data Stream + Exchange Error Taxonomy** - listenKey + ORDER/ALGO/ACCOUNT events, error-code mapping, demo/testnet switch, clock checks
 - [ ] **Phase 19: Execution Plan Binding + Pre-Placement Checks** - Symbol/side/qty bound to the approved plan, live-price check, SL-reject fallback (absorbs old Phase 15)
 - [ ] **Phase 20: Reconcile + SAFE_MODE Hardening + Alerts** - No blind spots, pending-entry SL kept, auto SL re-place (D034), durable SAFE_MODE, operational alerts
 - [ ] **Phase 21: Account Equity + Daily Loss from Binance** - Binance-canonical equity and D033 daily-loss state (was Phase 12)
 - [ ] **Phase 22: Leverage, Margin + Liquidation Guard** - ISOLATED, 5x cap, liquidation beyond SL, available margin incl. resting entries (was Phases 13 + 14)
-- [ ] **Phase 23: Telegram Approval Hardening + Money Amounts** - User-id auth, working SKIP, keyboard removal, $ amounts in messages (was Phase 16)
+- [ ] **Phase 23: Telegram Approval Hardening + Two-Step Confirm + Money Amounts** - User-id auth, working SKIP, APPROVE→CONFIRM card (D041), keyboard removal, $ amounts (was Phase 16)
 - [ ] **Phase 24: Live Runtime Composition + Demo Rehearsal** - Wire APPROVE→execute, bot runner, schedulers, live risk inputs; end-to-end on Binance Demo Trading
-- [ ] **Phase 25: Go-Live Readiness Gate** - Affirmative enablement gate, verification closure 06–10, real backups, CI, ops minimum
-- [ ] **Phase 26: Configurable Quote Asset (USDC readiness)** - Remove USDT hard-coding; deliberate USDC evaluation (was Phase 17)
+- [ ] **Phase 25: Binance Demo Integration Test Campaign** - Automated failure-scenario suite on Binance Demo, APPROVE+CONFIRM→demo orders, multi-week demo soak (D040)
+- [ ] **Phase 26: Go-Live Readiness Gate** - Affirmative enablement gate, verification closure, real backups, CI, mainnet read-only check + small canary (D040)
+- [ ] **Phase 27: Configurable Quote Asset (USDC readiness)** - Remove USDT hard-coding; deliberate USDC evaluation (was Phase 17)
 
 ## Phase Details
 
@@ -499,9 +500,9 @@ Plans:
 Plans:
 - [ ] TBD (run /gsd-plan-phase 15 to break down)
 
-### Phase 16: Paper Runtime Composition
+### Phase 16: Paper Runtime Composition + SHADOW Approval Mode
 
-**Goal**: A runnable paper process observes the corrected families forward, so the wall-clock-bound soak can finally start.
+**Goal**: A runnable paper process observes the corrected families forward, so the wall-clock-bound soak can finally start. The operator can already APPROVE/SKIP (with the D041 confirm step) in SHADOW mode to build a decision history, with no possible path to a real order (D040).
 
 **Depends on**: Phase 12, Phase 15
 
@@ -512,8 +513,10 @@ Plans:
 2. The WS adapter awaits the async SDK call. Fakes are contract-bound to the SDK's async signatures (F-125, F-607).
 3. A simulated fill producer uses the same fill semantics as Phase 14. Approval delay is measured, not a fixed 30 s. SIMULATE buttons are functional (F-961).
 4. The paper exit criteria are quantitative and pre-registered (F-023).
+5. SHADOW mode (D040): SIMULATE/APPROVE messages are clearly labelled "SHADOW — no real order"; APPROVE → CONFIRM (D041) / SKIP / expiry are journaled with timestamps and approval delay; each confirmed plan gets a simulated position using the Phase-14 fill semantics on live market data, and the journal reports system vs user vs opportunity outcomes (F-961).
+6. Hard isolation: in SHADOW the process loads no trade-capable API key and never constructs an order adapter; a test proves that no code path from a SHADOW confirm reaches `execute_approved_plan` or any order endpoint.
 
-**Audit refs**: F-201, F-125, F-607, F-961, F-023
+**Audit refs**: F-201, F-125, F-607, F-961, F-023, D040, D041
 
 **Plans:** 0 plans
 
@@ -681,9 +684,9 @@ This was former Phases 13 and 14.
 Plans:
 - [ ] TBD (run /gsd-plan-phase 22 to break down)
 
-### Phase 23: Telegram Approval Hardening + Money Amounts
+### Phase 23: Telegram Approval Hardening + Two-Step Confirm + Money Amounts
 
-**Goal**: Only the authorized user in a private chat can approve. SKIP works. Decided messages cannot be tapped again. Every SIMULATE/APPROVE message shows the money at stake.
+**Goal**: Only the authorized user in a private chat can approve. SKIP works. An APPROVE tap alone never places an order: a second CONFIRM step on a confirmation card is required (D041). Decided messages cannot be tapped again. Every SIMULATE/APPROVE message shows the money at stake.
 
 This was former Phase 16.
 
@@ -701,8 +704,9 @@ This was former Phase 16.
    - the equity used, with its source and timestamp.
    All values come from the risk pipeline output, never recomputed (F-015).
 3. The expiry window shown and the remaining-validity rule match Phase 19 (F-016).
+4. Two-step confirm (D041): APPROVE edits the message into a confirmation card (mode SHADOW/DEMO/LIVE, symbol, side, quantity, notional, estimated loss at SL, current mark price vs entry/SL, remaining validity) with CONFIRM/CANCEL. Only CONFIRM triggers placement. The confirm token is distinct, single-use, bound to the same user id and plan hash, with a short TTL (default 60 s); CANCEL/expiry places nothing and is journaled; pre-placement checks re-run at confirm time. Tests cover: double-tap, replayed CONFIRM callback, CONFIRM after TTL, CONFIRM by another user, CONFIRM after the plan expired or price crossed SL.
 
-**Audit refs**: F-508, F-707, F-405, F-509, F-127, F-015, F-016
+**Audit refs**: F-508, F-707, F-405, F-509, F-127, F-015, F-016, D041
 
 **Plans:** 0 plans
 
@@ -720,13 +724,13 @@ Plans:
 **Success Criteria**:
 1. The composition root wires every link that has no production caller today (M1, M2, M5–M8) (F-201, F-956):
    - approval request sender;
-   - Telegram bot runner (APPROVE → `execute_approved_plan`);
+   - Telegram bot runner (APPROVE → CONFIRM → `execute_approved_plan`, D041);
    - execution service;
    - reconcile, sweeper and health schedulers;
    - live risk-input producer: constraints, equity, daily loss, open algo count;
    - kill-gate event → `enable()`.
 2. An end-to-end smoke test runs on Binance Demo Trading:
-   - signal → approve → entry → SL/TP;
+   - signal → approve → confirm → entry → SL/TP;
    - fill via the user-data stream;
    - reconcile clean;
    - SAFE_MODE drill;
@@ -741,28 +745,65 @@ Plans:
 Plans:
 - [ ] TBD (run /gsd-plan-phase 24 to break down)
 
-### Phase 25: Go-Live Readiness Gate
+### Phase 25: Binance Demo Integration Test Campaign
 
-**Goal**: Live trading can only be enabled affirmatively: a family has passed under protocol v1.1.0, the paper exit gate is met, all safety phases are verified, and operations are real. Otherwise it cannot be enabled.
+**Goal**: The complete system is proven correct and robust on Binance Demo Trading (D040 DEMO stage) — including failure paths — before any real money. Profitability is explicitly out of scope; correctness is the only goal.
 
 **Depends on**: Phase 24
 
-**Requirements**: GOV-01, OPS-01, OPS-02, PAPER-03
+**Requirements**: EXEC-01, EXEC-02, EXEC-03, APRV-01, APRV-02, OPS-01, OPS-02
 
 **Success Criteria**:
-1. `enable()` requires a recorded passing candidate, a met paper exit gate and a minimum capital. WITHIN_BUDGET is refused. The skipped Phase-10 review items WR-01/06/10/12/13 are resolved (F-953, F-105, F-960).
-2. Phases 06–24 each have a VERIFICATION.md written after their last review-fix wave. The ~30 "requires human verification" fixes are confirmed, and 05-VERIFICATION is reopened (F-807, F-808, F-109, F-956). One-way checkpoints carry recorded human decisions (F-124, F-809).
-3. Backups are off-host and encrypted, run on a schedule and follow a retention policy. The pg_dump URL is fixed. A real PostgreSQL restore drill passes (F-108, F-910, F-121, F-704).
-4. CI on a real remote runs pytest, ruff, mypy and the registry gate, and all are green (F-101, F-605). The Docker healthcheck uses the venv. The images are pinned. Postgres binds to localhost. Secrets are scrubbed from errors (F-705, F-709, F-708).
+1. An automated demo scenario suite runs against Binance Demo, separated from unit tests (e.g. `pytest -m demo`, credentials from env, never in CI by default). It covers at least:
+   - happy path;
+   - partial fill;
+   - price crossed SL before placement (-2021);
+   - SL rejected after fill → reduce-only close;
+   - cancel racing a fill;
+   - duplicate/replayed APPROVE and CONFIRM callbacks;
+   - restart mid-flow (before entry ACK, between entry and SL, after fill);
+   - WS disconnect and listenKey expiry;
+   - clock skew;
+   - rate limit / 418;
+   - DB outage during a risk-reducing action;
+   - DAILY_STOP;
+   - liquidation-guard and available-margin rejections;
+   - SAFE_MODE entry and operator exit;
+   - foreign order and doubled position detected by reconcile.
+2. APPROVE → CONFIRM places real orders on the Demo account through the same code path as live (only the endpoint and keys differ); journal, reconcile and alerts behave as in live.
+3. A continuous demo soak of at least 3 weeks (duration pre-registered) ends with zero unexplained local-vs-exchange divergences, zero positions without an exchange-side SL, zero duplicate entries, and every alert explained. Any defect found restarts the soak clock after the fix.
+4. Known demo-vs-mainnet differences (liquidity, fills, filters, fees, resets) are documented, so that CANARY (Phase 26) targets exactly what demo cannot prove.
 
-**Audit refs**: F-953, F-105, F-960, F-807, F-808, F-109, F-124, F-809, F-108, F-121, F-704, F-101, F-605, F-705, F-709, F-708
+**Audit refs**: F-501, F-104, F-124, F-702, F-701, F-401, F-126, D040, D041
 
 **Plans:** 0 plans
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 25 to break down)
 
-### Phase 26: Configurable Quote Asset (USDC readiness)
+### Phase 26: Go-Live Readiness Gate
+
+**Goal**: Live trading can only be enabled affirmatively: a family has passed under protocol v1.1.0, the paper exit gate is met, the demo campaign passed, all safety phases are verified, operations are real, and a small canary on the real exchange succeeded (D040). Otherwise it cannot be enabled.
+
+**Depends on**: Phase 25
+
+**Requirements**: GOV-01, OPS-01, OPS-02, PAPER-03
+
+**Success Criteria**:
+1. `enable()` requires a recorded passing candidate, a met paper exit gate, a passed Phase-25 demo campaign and a minimum capital. WITHIN_BUDGET is refused. The skipped Phase-10 review items WR-01/06/10/12/13 are resolved (F-953, F-105, F-960).
+2. Phases 06–25 each have a VERIFICATION.md written after their last review-fix wave. The ~30 "requires human verification" fixes are confirmed, and 05-VERIFICATION is reopened (F-807, F-808, F-109, F-956). One-way checkpoints carry recorded human decisions (F-124, F-809).
+3. Backups are off-host and encrypted, run on a schedule and follow a retention policy. The pg_dump URL is fixed. A real PostgreSQL restore drill passes (F-108, F-910, F-121, F-704).
+4. CI on a real remote runs pytest, ruff, mypy and the registry gate, and all are green (F-101, F-605). The Docker healthcheck uses the venv. The images are pinned. Postgres binds to localhost. Secrets are scrubbed from errors (F-705, F-709, F-708).
+5. CANARY (D040): a mainnet READ-ONLY API key (trade and withdraw disabled, IP-restricted) verifies real exchangeInfo filters, commission rates, mark prices and balances against what the system assumes; then a dedicated small isolated sub-account (order of USD 50–100, minimum size, leverage ≤ cap) executes a pre-registered number of trades with the operator watching, with zero divergences before full LIVE is allowed.
+
+**Audit refs**: F-953, F-105, F-960, F-807, F-808, F-109, F-124, F-809, F-108, F-121, F-704, F-101, F-605, F-705, F-709, F-708, D040
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 26 to break down)
+
+### Phase 27: Configurable Quote Asset (USDC readiness)
 
 **Goal**: The quote/margin asset becomes configuration instead of a constant, so a USDC pair can be evaluated deliberately. This was former Phase 17; its priority is lowered below all safety work.
 
@@ -772,7 +813,7 @@ The following are hard-coded today:
 
 Switching an instrument requires a DECISIONS entry, new data, a new versioned parameter set with current fees, and re-research. USDT evidence does not transfer.
 
-**Depends on**: Phase 25
+**Depends on**: Phase 26
 
 **Requirements**: DATA-01, DOMN-02, BKTS-02, JRN-01
 
@@ -781,12 +822,12 @@ Switching an instrument requires a DECISIONS entry, new data, a new versioned pa
 **Plans:** 0 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 26 to break down)
+- [ ] TBD (run /gsd-plan-phase 27 to break down)
 
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … → 26. (Phase 8 construction may overlap the Phase 7 paper soak; Phase 8 enablement gates on paper evidence. Phase 13 and Phase 17 depend only on Phase 11, so they may run in parallel with the evidence track 12→14→15→16. No live order before Phase 25 is complete.)
+Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … → 27. (Phase 8 construction may overlap the Phase 7 paper soak; Phase 8 enablement gates on paper evidence. Phase 13 and Phase 17 depend only on Phase 11, so they may run in parallel with the evidence track 12→14→15→16. No real-money order before Phase 26 is complete (D040: SHADOW → DEMO → CANARY → LIVE).)
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -805,14 +846,15 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 13. Research Data Foundation Fixes | 0/TBD | Not started | - |
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
-| 16. Paper Runtime Composition | 0/TBD | Not started | - |
+| 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
 | 17. Operational Persistence Layer | 0/TBD | Not started | - |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |
 | 19. Execution Plan Binding + Pre-Placement Checks | 0/TBD | Not started | - |
 | 20. Reconcile + SAFE_MODE Hardening + Alerts | 0/TBD | Not started | - |
 | 21. Account Equity + Daily Loss from Binance | 0/TBD | Not started | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
-| 23. Telegram Approval Hardening + Money Amounts | 0/TBD | Not started | - |
+| 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 0/TBD | Not started | - |
 | 24. Live Runtime Composition + Demo Rehearsal | 0/TBD | Not started | - |
-| 25. Go-Live Readiness Gate | 0/TBD | Not started | - |
-| 26. Configurable Quote Asset (USDC readiness) | 0/TBD | Not started | - |
+| 25. Binance Demo Integration Test Campaign | 0/TBD | Not started | - |
+| 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
+| 27. Configurable Quote Asset (USDC readiness) | 0/TBD | Not started | - |
