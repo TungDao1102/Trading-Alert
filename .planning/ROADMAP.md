@@ -487,7 +487,7 @@ Plans:
 
 **Audit refs**: F-107, F-906, F-907, F-024, F-122, F-402, F-408, F-409, F-413, F-706
 
-**Plans:** 5/13 plans executed
+**Plans:** 6/13 plans executed
 
 Plans:
 **Wave 1**
@@ -500,7 +500,7 @@ Plans:
 - [x] 13-05-PLAN.md — Checksum-verified, size-capped data.binance.vision archive source for delisted symbols, bucket listing and last archive day
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 13-06-PLAN.md — Collector: paginated funding-history backfill, atomic tick writers, warn-only server-time probe
+- [x] 13-06-PLAN.md — Collector: paginated funding-history backfill, atomic tick writers, warn-only server-time probe
 - [ ] 13-07-PLAN.md — Backfill CLI core: metadata first, 12-month 1m / 24-month 1h-4h depth, onboard and delivery bounds, resumable trade and mark runs, metadata width guard
 - [ ] 13-09-PLAN.md — Parquet to backtest case-input builder with dataset identity (data_snapshot_id) and fail-closed gap policy
 - [ ] 13-10-PLAN.md — Point-in-time universe freeze tool: ranking, freeze report, approval hash and two-witness writer (tested on copies)
@@ -926,7 +926,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 10. Journal Depth + Kill-Gate Operations | 12/12 | In Progress|  |
 | 11. Decision Alignment (docs + params) | 8/8 | In Progress|  |
 | 12. Fee + Cost Model Correctness | 11/11 | Complete    | 2026-09-30 |
-| 13. Research Data Foundation Fixes | 5/13 | In Progress|  |
+| 13. Research Data Foundation Fixes | 6/13 | In Progress|  |
 | 13.1. Deployment & CI | 0/TBD | Not started | - |
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
