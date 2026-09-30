@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 13
 current_phase_name: research-data-foundation-fixes
 status: executing
-stopped_at: Completed 13-09-PLAN.md
-last_updated: "2026-09-30T15:21:40.981Z"
+stopped_at: Completed 13-10-PLAN.md
+last_updated: "2026-09-30T15:41:15.745Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 13 execution started
-state_head: ceeeda3b9fea4744a6156edadfb03b0b44f75ecd
+state_head: bffb910e295e98bb2a0b82c018f4ae416dccdb4a
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 82
-  completed_plans: 76
+  completed_plans: 77
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 13 (research-data-foundation-fixes) — EXECUTING
-Plan: 9 of 13
+Plan: 10 of 13
 Status: Ready to execute
 Last activity: 2026-09-30 — Phase 13 execution started
 
@@ -116,6 +116,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 13 P06 | 12 min | 3 tasks | 2 files |
 | Phase 13 P07 | 20 min | 3 tasks | 5 files |
 | Phase 13 P09 | 30 min | 3 tasks | 4 files |
+| Phase 13 P10 | 15min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -301,6 +302,9 @@ Recent decisions affecting current work:
 - [Phase 13]: 13-07: refresh_symbol_metadata raises MetadataWidthError (ValueError) for universe rows with contract_type/status over 16 chars; CLI prints exception type names only, plus width-error message (symbol and field)
 - [Phase 13]: 13-09: dataset_id = sha256 over sorted posix-relative path + file-bytes sha256 of exactly the files read; re-written datasets are new datasets — Reproducible experiment identity (BKTS-02, D-18); byte changes after a Polars upgrade must be visible
 - [Phase 13]: 13-09: unresolved gap defined once in coverage.gap_ranges_for_files; builder fails closed (CaseInputGapError), allow_gaps recorded on the output — D-19: never pad or interpolate; acknowledged holes stay visible with the dataset
+- [Phase 13]: [13-10] Freeze report proposal_sha256 covers the full report body (candidates, ranking, unrankable, availability), not only the ranking
+- [Phase 13]: [13-10] Only -1121 switches REST to the archive; rate limits retry then fail the run; other REST errors fail closed; archive symbols listed with another contract type in exchangeInfo (TRADIFI) are never readmitted
+- [Phase 13]: [13-10] Archive-only proposed symbols have no mark source (REST only): they stay proposed and are flagged UNAVAILABLE in the review for the operator (13-12)
 
 ### Pending Todos
 
@@ -346,6 +350,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T15:21:40.735Z
-Stopped at: Completed 13-09-PLAN.md
+Last session: 2026-09-30T15:41:15.497Z
+Stopped at: Completed 13-10-PLAN.md
 Resume file: None

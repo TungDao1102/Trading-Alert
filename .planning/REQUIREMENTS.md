@@ -15,7 +15,7 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 ### Data Foundation
 
-- [ ] **DATA-01**: User can bootstrap 1m/1H/4H candles per symbol with continuity/quality checks (duplicates, OHLC validity, regressions, gaps) and query effective per-symbol coverage
+- [x] **DATA-01**: User can bootstrap 1m/1H/4H candles per symbol with continuity/quality checks (duplicates, OHLC validity, regressions, gaps) and query effective per-symbol coverage
 - [ ] **DATA-02**: System collects OI snapshots continuously from Phase 0 plus funding history, so the 30-day API window never destroys research data
 - [ ] **DATA-03**: System records versioned symbol metadata (onboard time, tick/step, min/max qty, notional constraints, position modes) from live exchangeInfo instead of hard-coded values
 - [ ] **DATA-04**: System passes an automated backup + restore drill covering PostgreSQL state and the self-collected OI dataset
@@ -117,7 +117,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | RSCH-01 | Phase 1 | Complete |
 | RSCH-02 | Phase 1 | Complete |
 | RSCH-03 | Phase 1 | Pending |
-| DATA-01 | Phase 2 | Pending |
+| DATA-01 | Phase 2 | Complete |
 | DATA-02 | Phase 2 | Pending |
 | DATA-03 | Phase 2 | Pending |
 | DATA-04 | Phase 2 | Pending |
