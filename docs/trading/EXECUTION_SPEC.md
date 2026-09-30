@@ -168,13 +168,13 @@ If placement response is ambiguous due to timeout/network failure:
 
 Must provide a safe way to:
 
-- cancel pending strategy orders,
+- cancel pending entry orders (protective stops and take-profits are never cancelled by this control),
 - disable new entry orders (orders that can open or increase a position),
 - close strategy-generated positions according to explicit user action,
 - an explicit protect action (re-place the stop-loss at the original plan stop-loss),
 - switch system to `SAFE_MODE`.
 
-Per D034, protective and reduce-only orders are never blocked by a disable; the controls above only stop the system from opening or adding to risk.
+Per D034, protective and reduce-only orders are never blocked by a disable. A disable never blocks or cancels a protective or reduce-only order; closing a position and protecting a position are separate, explicit actions, and cancelling a protective stop is never part of any control above. The disable controls only stop the system from opening or adding to risk.
 
 ## 12. Algo-order capacity
 

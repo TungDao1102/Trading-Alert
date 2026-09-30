@@ -195,6 +195,20 @@ def test_emergency_controls_rejects_pre_change_spec() -> None:
     assert "disable new live orders" in detail
 
 
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "protective stops and take-profits are never cancelled",
+        "A disable never blocks or cancels a protective or reduce-only order",
+    ],
+)
+def test_emergency_controls_require_protective_order_exclusion(phrase: str) -> None:
+    text = _read(EXECUTION_SPEC).replace(phrase, "REDACTED")
+    _, ok, detail = exchange.check_emergency_controls(text)
+    assert not ok
+    assert phrase in detail
+
+
 def test_emergency_controls_rejects_reintroduced_wording() -> None:
     text = _read(EXECUTION_SPEC) + "\n- disable new live orders,\n"
     _, ok, detail = exchange.check_emergency_controls(text)

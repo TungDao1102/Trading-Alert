@@ -174,7 +174,14 @@ def check_orphan_reconciler(text: str) -> Gate:
 
 # --------------------------------------------------------------------------- EX-05
 
-CONTROLS_PHRASES = ("disable new entry orders", "explicit protect", "SAFE_MODE", "D034")
+CONTROLS_PHRASES = (
+    "disable new entry orders",
+    "explicit protect",
+    "SAFE_MODE",
+    "D034",
+    "protective stops and take-profits are never cancelled",
+    "A disable never blocks or cancels a protective or reduce-only order",
+)
 CONTROLS_FORBIDDEN = (r"disable new live orders",)
 
 
