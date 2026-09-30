@@ -218,9 +218,131 @@ def run_glossary() -> list[Gate]:
     )
 
 
+# --------------------------------------------------------------------------- REQUIREMENTS
+
+# The 13 requirement IDs registered by plan 11-07 (F-116 and related findings) and the
+# phase that implements each. They stay Pending here; later phases complete them.
+NEW_REQUIREMENTS: dict[str, int] = {
+    "RISK-03": 20,
+    "RISK-04": 19,
+    "EXEC-04": 17,
+    "EXEC-05": 18,
+    "EXEC-06": 20,
+    "EXEC-07": 19,
+    "DOMN-04": 17,
+    "BKTS-04": 14,
+    "OPS-03": 24,
+    "OPS-04": 24,
+    "OPS-05": 20,
+    "OPS-06": 13,
+    "GOV-02": 26,
+}
+
+REQUIREMENTS_PATH = REPO_ROOT / ".planning" / "REQUIREMENTS.md"
+ROADMAP_PATH = REPO_ROOT / ".planning" / "ROADMAP.md"
+
+_LIST_ITEM = re.compile(r"^- \[[ x]\] \*\*([A-Z]+-\d+)\*\*:", flags=re.MULTILINE)
+_TRACE_ROW = re.compile(r"^\| ([A-Z]+-\d+) \| Phase ([\d.]+) \| (\w+) \|", flags=re.MULTILINE)
+
+
+def _roadmap_requirements_line(roadmap: str, phase: int) -> str:
+    """The ``**Requirements**:`` line inside the ``### Phase <phase>:`` section."""
+    body = _slice(roadmap, rf"^### Phase {phase}:[^\n]*\n", r"^### Phase ")
+    match = re.search(r"^\*\*Requirements\*\*:[^\n]*", body, flags=re.MULTILINE)
+    return match.group(0) if match else ""
+
+
+def check_requirements(req_text: str, roadmap_text: str) -> list[Gate]:
+    """Gates RQ-01..RQ-05 over REQUIREMENTS.md and ROADMAP.md text."""
+    req = _norm(req_text)
+    roadmap = _norm(roadmap_text)
+    items = _LIST_ITEM.findall(req)
+    rows = _TRACE_ROW.findall(req)
+    row_ids = [r[0] for r in rows]
+    gates: list[Gate] = []
+
+    # RQ-01 each new ID: exactly one list item and one traceability row with the phase.
+    problems: list[str] = []
+    for rid, phase in NEW_REQUIREMENTS.items():
+        if items.count(rid) != 1:
+            problems.append(f"{rid} list items: {items.count(rid)}")
+        matching = [r for r in rows if r[0] == rid]
+        if len(matching) != 1:
+            problems.append(f"{rid} trace rows: {len(matching)}")
+        elif matching[0][1] != str(phase) or matching[0][2] != "Pending":
+            problems.append(f"{rid} row is Phase {matching[0][1]} {matching[0][2]}")
+    gates.append(("RQ-01", not problems, "; ".join(problems) or "13 IDs listed and mapped"))
+
+    # RQ-02 coverage block counts equal the distinct IDs in the list.
+    distinct = len(set(items))
+    match_total = re.search(r"v1 requirements: (\d+) total", req)
+    match_mapped = re.search(r"Mapped to phases: (\d+)", req)
+    match_unmapped = re.search(r"Unmapped: (\d+)", req)
+    got = (
+        int(match_total.group(1)) if match_total else -1,
+        int(match_mapped.group(1)) if match_mapped else -1,
+        int(match_unmapped.group(1)) if match_unmapped else -1,
+    )
+    ok02 = got == (43, 43, 0) and distinct == 43
+    gates.append(
+        (
+            "RQ-02",
+            ok02,
+            "ok"
+            if ok02
+            else f"coverage {got}, distinct list IDs {distinct}, expected (43, 43, 0)/43",
+        )
+    )
+
+    # RQ-03 no duplicate IDs; the table has one row per list ID and nothing else.
+    dup_items = sorted({i for i in items if items.count(i) > 1})
+    dup_rows = sorted({i for i in row_ids if row_ids.count(i) > 1})
+    problems = []
+    if dup_items:
+        problems.append("duplicate list IDs: " + ", ".join(dup_items))
+    if dup_rows:
+        problems.append("duplicate trace rows: " + ", ".join(dup_rows))
+    if set(items) != set(row_ids):
+        problems.append(f"list/table ID mismatch: {sorted(set(items) ^ set(row_ids))}")
+    gates.append(("RQ-03", not problems, "; ".join(problems) or "one row per ID"))
+
+    # RQ-04 ROADMAP requirement lines carry the new IDs; placeholder sentences are gone.
+    problems = []
+    by_phase: dict[int, list[str]] = {}
+    for rid, phase in NEW_REQUIREMENTS.items():
+        by_phase.setdefault(phase, []).append(rid)
+    for phase, ids in sorted(by_phase.items()):
+        line = _roadmap_requirements_line(roadmap, phase)
+        absent = [i for i in ids if i not in line]
+        if absent:
+            problems.append(f"Phase {phase} Requirements line lacks {', '.join(absent)}")
+    if not re.search(
+        r"Thirteen new REQ-IDs.*phases 13-26", _roadmap_requirements_line(roadmap, 11)
+    ):
+        problems.append("Phase 11 Requirements line lacks the registration sentence")
+    for stale in ("New REQ-IDs are to be added", "A new REQ-ID is to be added"):
+        if stale in roadmap:
+            problems.append(f"stale sentence still present: {stale}")
+    if "research-universe-v1.toml" not in _slice(
+        roadmap, r"^### Phase 13:[^\n]*\n", r"^### Phase "
+    ):
+        problems.append("Phase 13 lacks the universe freeze sentence")
+    gates.append(("RQ-04", not problems, "; ".join(problems) or "ROADMAP lines updated"))
+
+    # RQ-05 footer names the update date.
+    ok05 = re.search(r"^\*Last updated: 2026-09-30", req, flags=re.MULTILINE) is not None
+    gates.append(("RQ-05", ok05, "ok" if ok05 else "footer does not name 2026-09-30"))
+    return gates
+
+
+def run_reqs() -> list[Gate]:
+    """Evaluate RQ-01..RQ-05 against the real REQUIREMENTS.md and ROADMAP.md."""
+    return check_requirements(_read(REQUIREMENTS_PATH), _read(ROADMAP_PATH))
+
+
 def run() -> list[Gate]:
     """Every bookkeeping gate against the real repository."""
-    return run_glossary()
+    return run_glossary() + run_reqs()
 
 
 if __name__ == "__main__":  # pragma: no cover

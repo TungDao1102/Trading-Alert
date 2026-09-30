@@ -389,7 +389,7 @@ Plans:
 
 **Depends on**: Phase 10
 
-**Requirements**: RSCH-01, RSCH-02, RISK-02, EXEC-02, OPS-01. New REQ-IDs are to be added for the lost MUST-level doc requirements (F-116).
+**Requirements**: RSCH-01, RSCH-02, RISK-02, EXEC-02, OPS-01. Thirteen new REQ-IDs for the lost MUST-level doc requirements (F-116) were added to REQUIREMENTS.md (plan 11-07) and are mapped to phases 13-26.
 
 **Success Criteria**:
 1. `docs/research/RESEARCH_PROTOCOL.md` v1.1.0 pre-registers numeric acceptance thresholds, the variant count with a multiple-testing correction, and a single-use holdout. It forbids a human "pass" override (D032; F-022, F-903, F-960).
@@ -455,7 +455,7 @@ Plans:
 
 **Depends on**: Phase 11
 
-**Requirements**: DATA-01, DATA-02, DATA-03, DATA-04, BKTS-02, OPS-02
+**Requirements**: DATA-01, DATA-02, DATA-03, DATA-04, BKTS-02, OPS-02, OPS-06
 
 **Success Criteria**:
 1. The OI/funding collector runs 24/7 on the single VPS under Docker Compose (D042). This is time-sensitive, because each day of delay loses a day of OI permanently, so it may be done first as an ops task ahead of the rest of this phase (F-107). Before it goes live:
@@ -463,7 +463,7 @@ Plans:
    - PostgreSQL binds to localhost / the compose network only (F-709);
    - the collector universe covers the D039 research universe (10–15 symbols), not only the live-5;
    - an encrypted off-VPS backup of the raw Parquet store and PostgreSQL runs on a schedule (F-108, F-910).
-2. A CLI backfills the decided history depth: 1m for 6–12 months, 1H/4H for 2 years (F-906). It covers the point-in-time research universe from D039, including delisted symbols (F-024, F-907), and runs `backfill_universe` / `refresh_symbol_metadata` (F-122).
+2. A CLI backfills the decided history depth: 1m for 6–12 months, 1H/4H for 2 years (F-906). It covers the point-in-time research universe from D039, including delisted symbols (F-024, F-907), and runs `backfill_universe` / `refresh_symbol_metadata` (F-122). Before any evaluation it freezes and hashes `docs/research/universe/research-universe-v1.toml` (DRAFT to FROZEN, D-09) and checks the decided history depth against the protocol v1.1.0 trade floor of D043, reporting a shortfall to the user instead of lowering the floor.
 3. Mark-price klines are ingested for SL/TP trigger evaluation (D037).
 4. Backfill never publishes a partial UTC day as immutable data. It writes files atomically (tmp + replace) and accepts zero-trade bars (F-402, F-408, F-409). The supervisor backfills before it resubscribes (F-413).
 5. A Parquet → backtest case-input builder exists (M4, v0.3 audit).
@@ -487,7 +487,7 @@ Plans:
 
 **Depends on**: Phase 12, Phase 13
 
-**Requirements**: BKTS-01, BKTS-02, DOMN-03
+**Requirements**: BKTS-01, BKTS-02, DOMN-03, BKTS-04
 
 **Success Criteria**:
 1. The entry fills only after the signal bar, and only on a trade-through of the limit price by at least one tick (F-120/F-901, F-902). The invariants `entry_time > signal_close` and `exit_time ≥ entry_time` are asserted on every trade (F-804).
@@ -553,7 +553,7 @@ Plans:
 
 **Depends on**: Phase 11
 
-**Requirements**: DOMN-01, APRV-02, EXEC-03
+**Requirements**: DOMN-01, APRV-02, EXEC-03, EXEC-04, DOMN-04
 
 **Success Criteria**:
 1. PostgreSQL implementations exist for the journal, approval and execution-state stores. The row mappers have production callers (F-202).
@@ -581,7 +581,7 @@ Plans:
 
 **Depends on**: Phase 17
 
-**Requirements**: EXEC-01, EXEC-02, OPS-02. A new REQ-ID is to be added for the user-data stream (lost requirement, F-104).
+**Requirements**: EXEC-01, EXEC-02, OPS-02, EXEC-05
 
 **Success Criteria**:
 1. A user-data stream is implemented: listenKey lifecycle; ORDER_TRADE_UPDATE, ALGO_UPDATE (including `o.rm`) and ACCOUNT_UPDATE handling; the `/private` WS URL. It feeds `fold_fills` and reconciliation. REST is the fallback (F-104, F-054).
@@ -609,7 +609,7 @@ This absorbs former Phase 15 (live-price check).
 
 **Depends on**: Phase 17, Phase 18
 
-**Requirements**: APRV-01, APRV-02, EXEC-01, EXEC-02
+**Requirements**: APRV-01, APRV-02, EXEC-01, EXEC-02, RISK-04, EXEC-07
 
 **Success Criteria**:
 1. `execute_approved_plan` / `attach_protectives_to_fill` derive symbol and side from the hashed plan, not from the caller, and assert SL/entry geometry. The placement quantity may only be ≤ the approved quantity; otherwise the plan is rejected, never up-sized (F-302, F-203).
@@ -635,7 +635,7 @@ Plans:
 
 **Depends on**: Phase 17, Phase 18
 
-**Requirements**: EXEC-02, OPS-01. A new REQ-ID is to be added for operational alerts (F-106).
+**Requirements**: EXEC-02, OPS-01, RISK-03, EXEC-06, OPS-05
 
 **Success Criteria**:
 1. The compare runs a reverse pass over exchange orders, compares signed amounts per position, and requires a STOP on the exchange for every open position. A doubled position, a sign-flipped position, a foreign order or a TP-only position is a divergence (F-701).
@@ -743,7 +743,7 @@ Plans:
 
 **Depends on**: Phase 16, Phase 19, Phase 20, Phase 21, Phase 22, Phase 23
 
-**Requirements**: APRV-01, EXEC-01, EXEC-02, EXEC-03, OPS-02
+**Requirements**: APRV-01, EXEC-01, EXEC-02, EXEC-03, OPS-02, OPS-03, OPS-04
 
 **Success Criteria**:
 1. The composition root wires every link that has no production caller today (M1, M2, M5–M8) (F-201, F-956):
@@ -812,7 +812,7 @@ Plans:
 
 **Depends on**: Phase 25
 
-**Requirements**: GOV-01, OPS-01, OPS-02, PAPER-03
+**Requirements**: GOV-01, OPS-01, OPS-02, PAPER-03, GOV-02
 
 **Success Criteria**:
 1. `enable()` requires a recorded passing candidate, a met paper exit gate, a passed Phase-25 demo campaign and a minimum capital. WITHIN_BUDGET is refused. The skipped Phase-10 review items WR-01/06/10/12/13 are resolved (F-953, F-105, F-960).

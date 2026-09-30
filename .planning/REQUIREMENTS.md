@@ -25,6 +25,7 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 - [ ] **DOMN-01**: System persists seven separate entities (Signal, TradePlan, Approval, Order, Fill, Position, JournalEvent) with GLOSSARY-canonical enums and no nullable-column state inference
 - [ ] **DOMN-02**: Every backtest/paper/alert/order plan is traceable to an immutable versioned parameter set (strategyVersion + parameterSetId + parameterSetHash + experiment linkage)
 - [ ] **DOMN-03**: Strategy correctness is enforced by golden fixtures (candles.csv + parameters.json + expected signals/plans) plus no-lookahead, prefix-invariance, candle-close-timing, and boundary suites
+- [ ] **DOMN-04**: Signal, TradePlan, Order and Position state transitions are validated against the GLOSSARY state machines and illegal transitions are rejected
 
 ### Strategy & Planning
 
@@ -36,12 +37,15 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 - [ ] **RISK-01**: System sizes positions from equity × risk-rate ÷ SL-distance including modeled costs, floors quantity to stepSize, rejects below the utilization threshold or minimums, and uses identical logic in backtest/paper/live
 - [ ] **RISK-02**: System enforces portfolio limits (max open positions, aggregate risk, correlated-cluster cap, DAILY_STOP states) and fails closed on uncertain account/risk state
+- [ ] **RISK-03**: A live protective stop is never loosened or removed while its position is open; any stop change is explicit, logged and permitted by the strategy and execution contract; automatic re-placement restores the original plan stop-loss, never a wider one
+- [ ] **RISK-04**: The system never increases risk because of previous losses or an unmet target and never adds to a losing position (no averaging down)
 
 ### Backtest & Evidence
 
 - [ ] **BKTS-01**: Backtest simulator resolves intrabar SL/TP ordering with 1m data, models limit fills/partials/expiry/invalidation, and applies fees/funding/slippage before any selection decision
 - [x] **BKTS-02**: Every experiment is reproducible from dataset + strategy + parameter set + cost + execution versions and is compared against no-trade and simple-trend baselines
 - [ ] **BKTS-03**: Reports show trade counts and slices (symbol/period/regime/version), R distribution, bootstrap intervals, and parameter-plateau analysis — never a single headline number
+- [ ] **BKTS-04**: Every experiment record carries the fields the research protocol requires, including NO_TRADE counts with reasons, the intrabar tie-break, timeframe, full parameters and costs, and a verifiable code version
 
 ### Paper & Forward Validation
 
@@ -59,13 +63,22 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 - [ ] **EXEC-01**: Execution manager places LIMIT-zone entries and Algo-Order protective exits (re-verified against current Binance docs), supports both position modes and partial-fill protective sizing
 - [ ] **EXEC-02**: Reconciliation loop compares local state against open normal orders, open algo orders, and positions, sweeps orphan protective orders, and forces SAFE_MODE on divergence
 - [ ] **EXEC-03**: Deterministic client/algo order identifiers prevent duplicate entry orders across retries, restarts, and replayed events
+- [ ] **EXEC-04**: The exact exchange constraint snapshot used for sizing, including MARKET_LOT_SIZE and PERCENT_PRICE filters, working type, margin type, leverage and equity, is persisted per trade plan and revalidated when stale
+- [ ] **EXEC-05**: The Binance user-data stream for order, algo-order, account and position events drives fills and state, with REST as fallback
+- [ ] **EXEC-06**: Manual emergency controls exist: cancel pending strategy orders, disable new entries, close strategy positions on explicit action, re-place protection, and enter SAFE_MODE
+- [ ] **EXEC-07**: Protective-order execution assumptions that change results (the TP1 split fraction, the TP2 rule and the time in force) are versioned registry parameters, not code constants
 
 ### Journal & Operations
 
 - [x] **JRN-01**: Journal/analytics reports MFE/MAE, execution-quality latencies, approval-delay impact, and robustness slices without hiding the full report
 - [x] **OPS-01**: SAFE_MODE blocks new entries while monitoring continues, and the RUNBOOK (unprotected/orphan/duplicate/API-down/stale-feed/DB-failure/manual-close/restore) is rehearsed before live enablement
 - [ ] **OPS-02**: Live credentials use no-withdrawal keys, IP allowlisting, off-source secret storage, and structured secret-free logging with health checks
+- [ ] **OPS-03**: The restart sequence loads config, validates time, reconciles Binance orders and positions, reconnects streams, verifies no duplicate action, and resumes only when state is consistent
+- [ ] **OPS-04**: Health and diagnostic output includes the runtime Python version and the application git revision
+- [ ] **OPS-05**: Operational alerts fire for an unprotected position, local versus exchange divergence, an unknown or foreign order, a duplicate execution attempt, stale data, a rejected protective action, an authentication failure, and daily-loss WARNING and DAILY_STOP
+- [ ] **OPS-06**: Secrets stay outside source control, paper and test credentials are separate from live, and live secrets are held in a permission-restricted .env with provider disk encryption on the VPS (D042)
 - [x] **GOV-01**: Kill-gate dashboard tracks the 3-families / 6-months budget and preserves NO_TRADE / INSUFFICIENT EDGE as a valid terminal outcome
+- [ ] **GOV-02**: Live order enablement requires an affirmative set of prerequisites (a recorded passing candidate, a met paper exit gate, a passed demo campaign and a minimum capital), not merely the absence of a terminal kill-gate state
 
 ## v2 Requirements
 
@@ -131,13 +144,26 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OPS-01 | Phase 8 | Complete |
 | OPS-02 | Phase 9 | Pending |
 | GOV-01 | Phase 10 | Complete |
+| RISK-03 | Phase 20 | Pending |
+| RISK-04 | Phase 19 | Pending |
+| EXEC-04 | Phase 17 | Pending |
+| EXEC-05 | Phase 18 | Pending |
+| EXEC-06 | Phase 20 | Pending |
+| EXEC-07 | Phase 19 | Pending |
+| DOMN-04 | Phase 17 | Pending |
+| BKTS-04 | Phase 14 | Pending |
+| OPS-03 | Phase 24 | Pending |
+| OPS-04 | Phase 24 | Pending |
+| OPS-05 | Phase 20 | Pending |
+| OPS-06 | Phase 13 | Pending |
+| GOV-02 | Phase 26 | Pending |
 
 **Coverage:**
 
-- v1 requirements: 30 total
-- Mapped to phases: 30
+- v1 requirements: 43 total
+- Mapped to phases: 43
 - Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-09-19 after initialization*
-*Last updated: 2026-09-19 after initial definition*
+*Last updated: 2026-09-30 after Phase 11 (F-116 additions: 13 requirement IDs registered, mapped to phases 13-26)*

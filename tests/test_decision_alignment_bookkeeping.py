@@ -121,3 +121,77 @@ def test_missing_string_code_fails_gl05() -> None:
 def test_missing_82_heading_fails_gl06() -> None:
     text = _read(GLOSSARY).replace("### 8.2 Canonical KillGateState", "### 8.2 Something else")
     assert _gl(text)["GL-06"] is False
+
+
+# --------------------------------------------------------------------------- Task 2
+
+REQUIREMENTS = ".planning/REQUIREMENTS.md"
+ROADMAP = ".planning/ROADMAP.md"
+
+
+def _rq(req: str, roadmap: str) -> dict[str, bool]:
+    return {n: ok for n, ok, _ in bk.check_requirements(req, roadmap)}
+
+
+def test_requirement_gates_pass_on_real_repo() -> None:
+    results = bk.run_reqs()
+    assert [n for n, _, _ in results] == [f"RQ-0{i}" for i in range(1, 6)]
+    assert all(ok for _, ok, _ in results), [g for g in results if not g[1]]
+
+
+def test_thirteen_new_ids_are_registered_and_all_pending() -> None:
+    req = _read(REQUIREMENTS)
+    assert len(bk.NEW_REQUIREMENTS) == 13
+    for rid, phase in bk.NEW_REQUIREMENTS.items():
+        assert f"| {rid} | Phase {phase} | Pending |" in req
+        assert f"- [ ] **{rid}**:" in req
+
+
+def test_pre_change_documents_fail_rq01_rq02_rq04_rq05() -> None:
+    gates = _rq(_old(REQUIREMENTS), _old(ROADMAP))
+    assert gates["RQ-01"] is False
+    assert gates["RQ-02"] is False
+    assert gates["RQ-04"] is False
+    assert gates["RQ-05"] is False
+
+
+def test_dropped_traceability_row_fails_rq01_and_rq03() -> None:
+    req = _read(REQUIREMENTS)
+    kept = [ln for ln in req.splitlines(keepends=True) if not ln.startswith("| GOV-02 |")]
+    gates = _rq("".join(kept), _read(ROADMAP))
+    assert gates["RQ-01"] is False
+    assert gates["RQ-03"] is False
+
+
+def test_wrong_phase_fails_rq01() -> None:
+    req = _read(REQUIREMENTS).replace("| OPS-06 | Phase 13 |", "| OPS-06 | Phase 14 |")
+    assert _rq(req, _read(ROADMAP))["RQ-01"] is False
+
+
+def test_stale_coverage_count_fails_rq02() -> None:
+    req = _read(REQUIREMENTS).replace("43 total", "30 total")
+    assert _rq(req, _read(ROADMAP))["RQ-02"] is False
+
+
+def test_duplicate_list_item_fails_rq03() -> None:
+    req = _read(REQUIREMENTS)
+    line = next(ln for ln in req.splitlines(keepends=True) if ln.startswith("- [ ] **RISK-04**"))
+    assert _rq(req + line, _read(ROADMAP))["RQ-03"] is False
+
+
+def test_roadmap_missing_new_id_fails_rq04() -> None:
+    roadmap = _read(ROADMAP).replace("EXEC-05", "EXEC-0X")
+    assert _rq(_read(REQUIREMENTS), roadmap)["RQ-04"] is False
+
+
+def test_stale_roadmap_sentence_fails_rq04() -> None:
+    roadmap = _read(ROADMAP) + "\nA new REQ-ID is to be added for something.\n"
+    assert _rq(_read(REQUIREMENTS), roadmap)["RQ-04"] is False
+
+
+def test_no_new_requirement_is_marked_complete() -> None:
+    req = _read(REQUIREMENTS)
+    for rid in bk.NEW_REQUIREMENTS:
+        assert f"- [x] **{rid}**" not in req
+        assert f"| {rid} |" in req and f"| {rid} | Phase" in req
+        assert not any(ln.startswith(f"| {rid} |") and "Complete" in ln for ln in req.splitlines())
