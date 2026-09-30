@@ -38,13 +38,17 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from datetime import date as _date
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol, overload
 
 import structlog
 import tenacity
-from src.adapters.binance_usdm import Kline, is_rate_limit_error
-from src.data.quality import check_batch
-from src.data.store import DEFAULT_RAW_ROOT, publish_batch
+from src.adapters.binance_usdm import Kline, MarkKline, is_rate_limit_error
+from src.data.quality import QualityVerdict, check_batch, check_mark_batch
+from src.data.store import (
+    DEFAULT_RAW_ROOT,
+    publish_batch,
+    publish_mark_batch,
+)
 
 log = structlog.get_logger()
 
@@ -83,6 +87,92 @@ class KlineSource(Protocol):
         end_ms: int | None = None,
         limit: int = 1500,
     ) -> list[Kline]: ...
+
+
+class MarkKlineSource(Protocol):
+    """Anything that can serve one mark-price kline page (D-11).
+
+    Same keyword-only page contract as `KlineSource`, returning `MarkKline`.
+    """
+
+    async def mark_klines(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 1500,
+    ) -> list[MarkKline]: ...
+
+
+class _TimedRow(Protocol):
+    """The two attributes the paginator reads from any dataset row."""
+
+    @property
+    def open_time_utc(self) -> datetime: ...
+
+    @property
+    def close_time_utc(self) -> datetime: ...
+
+
+@dataclass(frozen=True)
+class DatasetSpec[S, R: _TimedRow]:
+    """How the paginator fetches, validates and publishes one dataset.
+
+    The pagination, closed-day rule, dedup, cursor and structural-reject logic
+    is dataset-independent; only these three callables differ between trade
+    klines and mark klines (D-11). `name` keys the cursor file namespace, so a
+    trade run and a mark run can never share a cursor.
+    """
+
+    name: str
+    fetch: Callable[[S, str, str, int, int], Awaitable[list[R]]]
+    validate: Callable[[list[R], str], QualityVerdict]
+    publish: Callable[[list[R], str, str, Path], list[Path]]
+
+
+async def _fetch_trade(
+    source: KlineSource, symbol: str, interval: str, start_ms: int, limit: int
+) -> list[Kline]:
+    return await source.klines(
+        symbol=symbol, interval=interval, start_ms=start_ms, limit=limit
+    )
+
+
+def _publish_trade(
+    rows: list[Kline], interval: str, symbol: str, raw_root: Path
+) -> list[Path]:
+    return publish_batch(rows, interval=interval, symbol=symbol, raw_root=raw_root)
+
+
+async def _fetch_mark(
+    source: MarkKlineSource, symbol: str, interval: str, start_ms: int, limit: int
+) -> list[MarkKline]:
+    return await source.mark_klines(
+        symbol=symbol, interval=interval, start_ms=start_ms, limit=limit
+    )
+
+
+def _publish_mark(
+    rows: list[MarkKline], interval: str, symbol: str, raw_root: Path
+) -> list[Path]:
+    return publish_mark_batch(rows, interval=interval, symbol=symbol, raw_root=raw_root)
+
+
+TRADE_DATASET: DatasetSpec[KlineSource, Kline] = DatasetSpec(
+    name="trade",
+    fetch=_fetch_trade,
+    validate=check_batch,
+    publish=_publish_trade,
+)
+
+MARK_DATASET: DatasetSpec[MarkKlineSource, MarkKline] = DatasetSpec(
+    name="mark",
+    fetch=_fetch_mark,
+    validate=check_mark_batch,
+    publish=_publish_mark,
+)
 
 
 # Rate-limited failures are retried with jitter; on exhaustion the paginator
@@ -181,7 +271,11 @@ class CursorStore:
     page is re-encountered on the next run (fail-closed).
 
     Layout:
-        {root}/{symbol}_{interval}.cursor   (plain text, integer ms)
+        {root}/{symbol}_{interval}.cursor             (trade, plain text, integer ms)
+        {root}/{dataset}__{symbol}_{interval}.cursor  (any other dataset, e.g. mark)
+
+    `dataset` namespaces the file so a trade run and a mark run sharing one
+    root can never overwrite each other's cursor; the trade name is unchanged.
 
     `None` from `read()` means "nothing persisted yet" — the caller
     decides the bootstrap start (the live-5 bounded-depth runner uses
@@ -189,9 +283,12 @@ class CursorStore:
     """
 
     root: Path
+    dataset: str = "trade"
 
     def _path(self, *, symbol: str, interval: str) -> Path:
-        return self.root / f"{symbol}_{interval}.cursor"
+        if self.dataset == "trade":
+            return self.root / f"{symbol}_{interval}.cursor"
+        return self.root / f"{self.dataset}__{symbol}_{interval}.cursor"
 
     def read(self, *, symbol: str, interval: str) -> int | None:
         path = self._path(symbol=symbol, interval=interval)
@@ -235,6 +332,7 @@ def _is_rate_limit(exc: BaseException) -> bool:
     return is_rate_limit_error(exc)
 
 
+@overload
 async def fetch_page_with_retry(
     adapter: KlineSource,
     *,
@@ -244,20 +342,42 @@ async def fetch_page_with_retry(
     limit: int,
     max_retries: int,
     jitter_max_seconds: float,
-) -> list[Kline]:
-    """Fetch one kline page with tenacity-bounded retry on rate-limit hits."""
+) -> list[Kline]: ...
+
+
+@overload
+async def fetch_page_with_retry[S, R: _TimedRow](
+    adapter: S,
+    *,
+    symbol: str,
+    interval: str,
+    start_ms: int,
+    limit: int,
+    max_retries: int,
+    jitter_max_seconds: float,
+    dataset: DatasetSpec[S, R],
+) -> list[R]: ...
+
+
+async def fetch_page_with_retry(
+    adapter: Any,
+    *,
+    symbol: str,
+    interval: str,
+    start_ms: int,
+    limit: int,
+    max_retries: int,
+    jitter_max_seconds: float,
+    dataset: DatasetSpec[Any, Any] = TRADE_DATASET,
+) -> list[Any]:
+    """Fetch one page of `dataset` with tenacity-bounded retry on rate-limit hits."""
     retry = tenacity.retry_if_exception(lambda e: _is_rate_limit(e))
     stop = tenacity.stop_after_attempt(max_retries)
     wait = tenacity.wait_exponential_jitter(initial=0.5, max=jitter_max_seconds * 4)
     decorator = tenacity.AsyncRetrying(retry=retry, stop=stop, wait=wait, reraise=True)
 
-    async def _fetch() -> list[Kline]:
-        return await adapter.klines(
-            symbol=symbol,
-            interval=interval,
-            start_ms=start_ms,
-            limit=limit,
-        )
+    async def _fetch() -> list[Any]:
+        return await dataset.fetch(adapter, symbol, interval, start_ms, limit)
 
     async for attempt in decorator:
         with attempt:
@@ -272,6 +392,7 @@ async def fetch_page_with_retry(
 # --------------------------------------------------------------------------- #
 
 
+@overload
 async def backfill_symbol_interval(
     adapter: KlineSource,
     *,
@@ -279,6 +400,41 @@ async def backfill_symbol_interval(
     interval: str,
     start_ms: int | None = None,
     end_ms: int,
+    raw_root: Path = DEFAULT_RAW_ROOT,
+    config: BackfillConfig | None = None,
+    clock: Callable[[], datetime] = ...,
+    on_publish: Callable[[int], Awaitable[None] | None] | None = None,
+    cursor_store: CursorStore | None = None,
+    terminal_end: bool = False,
+) -> BackfillResult: ...
+
+
+@overload
+async def backfill_symbol_interval[S, R: _TimedRow](
+    adapter: S,
+    *,
+    symbol: str,
+    interval: str,
+    start_ms: int | None = None,
+    end_ms: int,
+    dataset: DatasetSpec[S, R],
+    raw_root: Path = DEFAULT_RAW_ROOT,
+    config: BackfillConfig | None = None,
+    clock: Callable[[], datetime] = ...,
+    on_publish: Callable[[int], Awaitable[None] | None] | None = None,
+    cursor_store: CursorStore | None = None,
+    terminal_end: bool = False,
+) -> BackfillResult: ...
+
+
+async def backfill_symbol_interval(
+    adapter: Any,
+    *,
+    symbol: str,
+    interval: str,
+    start_ms: int | None = None,
+    end_ms: int,
+    dataset: DatasetSpec[Any, Any] = TRADE_DATASET,
     raw_root: Path = DEFAULT_RAW_ROOT,
     config: BackfillConfig | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -300,6 +456,11 @@ async def backfill_symbol_interval(
     it, so a later run can fetch it whole. Callers should pass a day-aligned
     `start_ms` (see `align_to_day_start_ms`).
 
+    `dataset` selects what is fetched, validated and published (trade klines
+    by default; `MARK_DATASET` for mark-price klines). A `cursor_store` of a
+    different dataset is refused before any fetch: the two datasets must never
+    share a cursor (D-11).
+
     `clock` is injectable so tests can run with a frozen wall-clock and
     assert that the forming candle is dropped deterministically
     (Pitfall 1 — REPLAY-1 of the 02-02 threat model).
@@ -318,6 +479,11 @@ async def backfill_symbol_interval(
         raise ValueError(
             f"BackfillConfig.interval_ms={cfg.interval_ms} does not match "
             f"interval {interval!r} ({expected_interval_ms} ms)"
+        )
+    if cursor_store is not None and cursor_store.dataset != dataset.name:
+        raise ValueError(
+            f"cursor_store dataset {cursor_store.dataset!r} does not match "
+            f"backfill dataset {dataset.name!r}; refusing to share a cursor"
         )
     pages = 0
     rows_published = 0
@@ -384,7 +550,7 @@ async def backfill_symbol_interval(
     # EXCEPT the latest one (which a future page might still extend).
     # The latest date is flushed at end-of-loop. See `align_to_day_start_ms`
     # for the bootstrap-start alignment that prevents mid-page splits.
-    date_buffers: dict[_date, list[Kline]] = {}
+    date_buffers: dict[_date, list[Any]] = {}
 
     while cursor < effective_end:
         page_start = cursor
@@ -402,6 +568,7 @@ async def backfill_symbol_interval(
             limit=cfg.page_size,
             max_retries=cfg.max_retries,
             jitter_max_seconds=cfg.jitter_max_seconds,
+            dataset=dataset,
         )
         durations.append(int((time.monotonic() - t0) * 1000))
 
@@ -409,7 +576,7 @@ async def backfill_symbol_interval(
         # relative to the injected clock (Pitfall 1), and anything at or after
         # the effective end (closed-day rule, D-13). This must run BEFORE the
         # quality gate so it never inspects an unclosed or out-of-window bar.
-        closed: list[Kline] = [
+        closed: list[Any] = [
             k
             for k in raw_page
             if utc_ms(k.close_time_utc) <= now_ms
@@ -425,7 +592,7 @@ async def backfill_symbol_interval(
         # "duplicates" (fail-closed — corrupt data is surfaced, never
         # silently skipped).
         if closed:
-            deduped: list[Kline] = []
+            deduped: list[Any] = []
             for k in closed:
                 k_open_ms = utc_ms(k.open_time_utc)
                 if k_open_ms in seen_open_times:
@@ -436,7 +603,7 @@ async def backfill_symbol_interval(
 
         corrupt_rejection = False
         if closed:
-            verdict = check_batch(closed, interval)
+            verdict = dataset.validate(closed, interval)
             if not verdict.structural_ok:
                 structural_rejections += 1
                 corrupt_rejection = True
@@ -473,12 +640,7 @@ async def backfill_symbol_interval(
                             date_buffers[d],
                             key=lambda c: utc_ms(c.open_time_utc),
                         )
-                        written = publish_batch(
-                            candles,
-                            interval=interval,
-                            symbol=symbol,
-                            raw_root=raw_root,
-                        )
+                        written = dataset.publish(candles, interval, symbol, raw_root)
                         rows_published += len(candles)
                         last_published_open_ms = utc_ms(candles[-1].open_time_utc)
                         if cursor_store is not None:
@@ -573,12 +735,7 @@ async def backfill_symbol_interval(
                 date_buffers[d],
                 key=lambda c: utc_ms(c.open_time_utc),
             )
-            written = publish_batch(
-                candles,
-                interval=interval,
-                symbol=symbol,
-                raw_root=raw_root,
-            )
+            written = dataset.publish(candles, interval, symbol, raw_root)
             rows_published += len(candles)
             last_published_open_ms = utc_ms(candles[-1].open_time_utc)
             if cursor_store is not None:

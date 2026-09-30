@@ -171,6 +171,28 @@ class Kline:
 
 
 @dataclass(frozen=True)
+class MarkKline:
+    """One mark-price kline row (`GET /fapi/v1/markPriceKlines`), normalized.
+
+    The exchange row carries volume and quote volume fields that are always
+    "0" and a field 8 that is the number of mark-price UPDATES in the bar, not
+    a trade count. Neither is a trade statistic, so this type has no volume or
+    trade_count field and the update count is named `price_tick_count`
+    (D-11, D-29). Same closed-candle invariant as `Kline`.
+    """
+
+    symbol: str
+    interval: str
+    open_time_utc: datetime
+    close_time_utc: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    price_tick_count: int
+
+
+@dataclass(frozen=True)
 class OiSnapshot:
     """One open-interest observation for a symbol.
 
@@ -526,6 +548,28 @@ def _row_to_kline(symbol: str, interval: str, row: Sequence[Any]) -> Kline:
     )
 
 
+def _row_to_mark_kline(symbol: str, interval: str, row: Sequence[Any]) -> MarkKline:
+    """Map one raw markPriceKlines list (12-field row) to a `MarkKline`.
+
+    Same 12-field layout as a trade kline, but fields 5 and 7 (volume, quote
+    volume) are always "0" and field 8 is a mark-price update count. Only
+    fields 0-4, 6 and 8 are read; 5 and 7 are ignored by design (D-29).
+    """
+    if len(row) < 9:
+        raise ValueError(f"mark kline row too short ({len(row)} cols): {row!r}")
+    return MarkKline(
+        symbol=symbol,
+        interval=interval,
+        open_time_utc=_ms_to_utc(int(row[0])),
+        close_time_utc=_ms_to_utc(int(row[6])),
+        open=Decimal(str(row[1])),
+        high=Decimal(str(row[2])),
+        low=Decimal(str(row[3])),
+        close=Decimal(str(row[4])),
+        price_tick_count=int(row[8]),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Adapter — single owner of SDK imports.
 # --------------------------------------------------------------------------- #
@@ -574,6 +618,32 @@ class BinanceUsdmAdapter:
         # `data()` is a list[list[Any]] — see exchange_info_sample pattern.
         raw = response.data()
         return [_row_to_kline(symbol, interval, row) for row in raw]
+
+    async def mark_klines(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 1500,
+    ) -> list[MarkKline]:
+        """Fetch one page of mark-price klines (`GET /fapi/v1/markPriceKlines`).
+
+        Facts re-verified 2026-09-30 (see 13-04-SUMMARY): limit default 500,
+        max 1500; weight 1 / 2 / 5 / 10 for limit <1-99 / 100-499 / 500-1000 /
+        >1000; rows are 12-field lists with volume "0" (D-29). Runs in a worker
+        thread like `klines`; SDK types never leave this module.
+        """
+        response = await asyncio.to_thread(
+            self._sdk.rest_api.mark_price_kline_candlestick_data,
+            symbol=symbol,
+            interval=interval,  # type: ignore[arg-type]
+            start_time=start_ms,
+            end_time=end_ms,
+            limit=limit,
+        )
+        raw = response.data()
+        return [_row_to_mark_kline(symbol, interval, row) for row in raw]
 
     # ----- open interest --------------------------------------------------- #
 

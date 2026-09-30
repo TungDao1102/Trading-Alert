@@ -22,7 +22,7 @@ from datetime import datetime
 from decimal import Decimal
 
 import polars as pl
-from src.adapters.binance_usdm import Kline
+from src.adapters.binance_usdm import Kline, MarkKline
 
 # Interval → millisecond duration. Single source of truth for the
 # quality + paginator math; later phases extend the table when 15m
@@ -263,5 +263,152 @@ def check_batch(klines: list[Kline], interval: str) -> QualityVerdict:
         bad_durations=bad_durations,
         mixed_keys=mixed_keys,
         zero_trade_bars=zero_trade_bars,
+        bad_decimals=bad_decimals,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Mark-price kline dataset (D-11, D-29).
+#
+# Same structural checks as `check_batch`, minus every volume / trade-count
+# predicate: mark rows carry no volume and their field 8 is a price-update
+# count (`price_tick_count`), which is only required to be non-negative. A zero
+# count is valid data, not a reject and not telemetry.
+# --------------------------------------------------------------------------- #
+
+_MARK_SCHEMA: dict[str, pl.DataType | type[pl.DataType]] = {
+    "open_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
+    "close_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
+    "open": pl.Decimal(scale=8),
+    "high": pl.Decimal(scale=8),
+    "low": pl.Decimal(scale=8),
+    "close": pl.Decimal(scale=8),
+    "price_tick_count": pl.Int64,
+    "interval": pl.Utf8,
+    "symbol": pl.Utf8,
+}
+
+
+def _has_bad_mark_decimal(row: MarkKline) -> bool:
+    return any(_is_bad_decimal(v) for v in (row.open, row.high, row.low, row.close))
+
+
+def mark_klines_to_frame(rows: list[MarkKline]) -> pl.DataFrame:
+    """Project `MarkKline` rows to the canonical mark Parquet schema.
+
+    Nine columns, no volume / quote_volume / trade_count (D-29).
+    """
+    if not rows:
+        return pl.DataFrame(schema=_MARK_SCHEMA)
+    return pl.DataFrame(
+        {
+            "open_time_utc": [r.open_time_utc for r in rows],
+            "close_time_utc": [r.close_time_utc for r in rows],
+            "open": [r.open for r in rows],
+            "high": [r.high for r in rows],
+            "low": [r.low for r in rows],
+            "close": [r.close for r in rows],
+            "price_tick_count": [r.price_tick_count for r in rows],
+            "interval": [r.interval for r in rows],
+            "symbol": [r.symbol for r in rows],
+        },
+        schema_overrides={
+            "open_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
+            "close_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
+        },
+    )
+
+
+def check_mark_batch(rows: list[MarkKline], interval: str) -> QualityVerdict:
+    """Quality verdict for one mark-kline batch (fail closed, D-10).
+
+    Rejects duplicates, OHLC violations, timestamp regressions, negative
+    prices or price-update counts, close_time <= open_time, mixed
+    symbol/interval keys and non-finite / >8-fractional-digit prices. A missing
+    minute is a warn-only `gap_count`. `zero_trade_bars` stays 0: it has no
+    meaning for mark rows.
+    """
+    if interval not in INTERVAL_MS:
+        raise ValueError(
+            f"unsupported interval {interval!r}; expected one of {sorted(INTERVAL_MS)}"
+        )
+    bad_decimals = sum(1 for r in rows if _has_bad_mark_decimal(r))
+    if bad_decimals:
+        rows = [r for r in rows if not _has_bad_mark_decimal(r)]
+        if not rows:
+            return QualityVerdict(
+                structural_ok=False,
+                duplicates=0,
+                ohlc_violations=0,
+                timestamp_regressions=0,
+                gap_count=0,
+                bad_decimals=bad_decimals,
+            )
+    df = mark_klines_to_frame(rows)
+    if df.is_empty():
+        return QualityVerdict(
+            structural_ok=True,
+            duplicates=0,
+            ohlc_violations=0,
+            timestamp_regressions=0,
+            gap_count=0,
+        )
+
+    duplicates = df.filter(pl.col("open_time_utc").is_duplicated()).height
+    ohlc_violations = df.filter(
+        (pl.col("high") < pl.col("open"))
+        | (pl.col("high") < pl.col("close"))
+        | (pl.col("low") > pl.col("open"))
+        | (pl.col("low") > pl.col("close"))
+        | (pl.col("high") < pl.col("low"))
+    ).height
+
+    # A zero diff is a duplicate (counted above), not a regression.
+    timestamp_regressions = 0
+    for v in df["open_time_utc"].diff().to_list():
+        if v is None:
+            continue
+        if v.total_seconds() * 1000 < 0:
+            timestamp_regressions += 1
+
+    interval_ms = INTERVAL_MS[interval]
+    max_t = df["open_time_utc"].max()
+    min_t = df["open_time_utc"].min()
+    if not isinstance(max_t, datetime) or not isinstance(min_t, datetime):
+        raise ValueError(
+            "quality gate: open_time_utc extrema are not datetimes "
+            f"({max_t!r}, {min_t!r}) — schema drift, refusing batch"
+        )
+    span_ms = (max_t - min_t).total_seconds() * 1000
+    expected = int(span_ms // interval_ms) + 1 if span_ms else df.height
+    gap_count = max(0, expected - df.height)
+
+    negative_values = sum(
+        1
+        for r in rows
+        if r.open < 0 or r.high < 0 or r.low < 0 or r.close < 0 or r.price_tick_count < 0
+    )
+    bad_durations = sum(1 for r in rows if r.close_time_utc <= r.open_time_utc)
+    first_key = (rows[0].symbol, rows[0].interval)
+    mixed_keys = sum(1 for r in rows if (r.symbol, r.interval) != first_key)
+
+    structural_ok = (
+        duplicates == 0
+        and ohlc_violations == 0
+        and timestamp_regressions == 0
+        and negative_values == 0
+        and bad_durations == 0
+        and mixed_keys == 0
+        and bad_decimals == 0
+    )
+    return QualityVerdict(
+        structural_ok=structural_ok,
+        duplicates=duplicates,
+        ohlc_violations=ohlc_violations,
+        timestamp_regressions=timestamp_regressions,
+        gap_count=gap_count,
+        negative_values=negative_values,
+        bad_durations=bad_durations,
+        mixed_keys=mixed_keys,
         bad_decimals=bad_decimals,
     )

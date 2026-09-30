@@ -24,12 +24,19 @@ from datetime import date
 from pathlib import Path
 
 import polars as pl
-from src.adapters.binance_usdm import Kline
-from src.data.quality import klines_to_frame
+from src.adapters.binance_usdm import Kline, MarkKline
+from src.data.quality import klines_to_frame, mark_klines_to_frame
 
 # Default root for the immutable raw store. Tests inject a tmpdir via
 # `RAW_ROOT` argument to `publish_batch`.
 DEFAULT_RAW_ROOT = Path("data") / "raw"
+
+# Mark-price klines are a separate immutable dataset UNDER the raw root:
+#   data/raw/dataset=mark_klines/interval=<TF>/symbol=<S>/date=<D>/part.parquet
+# The trade view (`candles_v1`, glob `interval=*/symbol=*/date=*/part.parquet`)
+# does not match it, while the default backup root (`data/raw`) does cover it
+# (D-11, D-27). A sibling root would silently escape both.
+MARK_DATASET_DIR = "dataset=mark_klines"
 
 # Windows can refuse `os.replace` with PermissionError while an indexer or
 # antivirus scanner briefly holds the freshly written temp file. Retry a
@@ -138,5 +145,49 @@ def publish_batch(
             )
         group_to_write = group.drop("__day")
         atomic_write_parquet(group_to_write, path)
+        paths.append(path)
+    return paths
+
+
+def publish_mark_batch(
+    rows: Iterable[MarkKline],
+    *,
+    interval: str,
+    symbol: str,
+    raw_root: Path = DEFAULT_RAW_ROOT,
+) -> list[Path]:
+    """Publish mark-price klines as per-day Parquet files under `dataset=mark_klines`.
+
+    Mirrors `publish_batch` (homogeneity check, per-day grouping, existence
+    guard, atomic write) with the mark partition root and the mark frame
+    schema; mark rows never touch the trade partition root (D-11).
+    """
+    rows_list = list(rows)
+    if not rows_list:
+        return []
+
+    row_symbols = {r.symbol for r in rows_list}
+    row_intervals = {r.interval for r in rows_list}
+    if row_symbols != {symbol} or row_intervals != {interval}:
+        raise ValueError(
+            f"refusing to publish heterogeneous batch under "
+            f"({symbol}, {interval}): rows carry symbols={sorted(row_symbols)} "
+            f"intervals={sorted(row_intervals)}"
+        )
+
+    mark_root = raw_root / MARK_DATASET_DIR
+    df = mark_klines_to_frame(rows_list)
+    df = df.with_columns(pl.col("open_time_utc").dt.date().alias("__day"))
+    paths: list[Path] = []
+    for day_value, group in df.group_by("__day", maintain_order=True):
+        day: date = day_value[0]
+        path = partition_file(mark_root, interval, symbol, day)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            raise FileExistsError(
+                f"refusing to overwrite immutable Parquet at {path} "
+                "(D-04 immutability rule). Repair flow publishes a new version."
+            )
+        atomic_write_parquet(group.drop("__day"), path)
         paths.append(path)
     return paths
