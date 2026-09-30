@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from src.backtest.binding import assert_sizing_costs_bind_registry
 from src.backtest.costs import (
     build_cost_model,
     cost_rates_from_model,
@@ -345,6 +346,9 @@ def run_paper_tick(case_input: dict[str, Any]) -> dict[str, Any]:
             f"registry strategy_version={parameter_set.strategy_version!r} "
             f"for {strategy_id}/{parameter_set_id}"
         )
+
+    # 12-REVIEW WR-03: refuse a fixture cost model the registry set does not pin.
+    assert_sizing_costs_bind_registry(parameter_set, cost_model)
 
     absolute_thresholds = resolve_absolute_thresholds(
         parameter_set=parameter_set.params,

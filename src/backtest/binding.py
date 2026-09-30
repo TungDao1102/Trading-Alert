@@ -64,4 +64,34 @@ def assert_cost_model_binds_registry(parameter_set: ParameterSet, cost_model: Co
         )
 
 
-__all__ = ["CostModelBindingMismatch", "assert_cost_model_binds_registry"]
+def assert_sizing_costs_bind_registry(parameter_set: ParameterSet, cost_model: CostModel) -> None:
+    """Return None iff every sizing-relevant cost of `cost_model` matches the registry.
+
+    Used by the single-case entry points (`simulator.run`, `run_paper_tick`),
+    which size with a fixture-supplied cost dict while the guard thresholds
+    come from the registry set (12-REVIEW WR-03). The comparison is the
+    `assert_cost_model_binds_registry` hash-to-hash test with one field
+    excluded: `partial_fill_fraction` is an execution-scenario knob applied to
+    the filled quantity AFTER sizing (the partial-fill fixtures set it to a
+    value the registry does not pin), so it never influences the fee, slippage
+    or guard inputs of the risk gate. Every other cost key, including a
+    missing or divergent `exit_slippage_rate`, is refused. Raises
+    `CostModelBindingMismatch`; absent registry keys propagate as `KeyError`.
+    """
+    registry_slice = cost_slice(parameter_set.params)
+    registry_slice["partial_fill_fraction"] = cost_model.partial_fill_fraction
+    expected = build_cost_model(registry_slice)
+    if expected.cost_model_hash != cost_model.cost_model_hash:
+        raise CostModelBindingMismatch(
+            f"sizing cost model (hash {cost_model.cost_model_hash!r}, excluding "
+            f"partial_fill_fraction) does not match the registry set "
+            f"{parameter_set.strategy_id}/{parameter_set.parameter_set_id} "
+            f"(expected hash {expected.cost_model_hash!r})"
+        )
+
+
+__all__ = [
+    "CostModelBindingMismatch",
+    "assert_cost_model_binds_registry",
+    "assert_sizing_costs_bind_registry",
+]

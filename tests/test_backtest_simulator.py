@@ -18,6 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from src.backtest.binding import CostModelBindingMismatch
 from src.domain.canonical import sha256_hex
 
 PHASE6_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase6"
@@ -989,7 +990,9 @@ def test_run_refuses_legacy_registry_set_without_guard_rates() -> None:
     case_input = _load_input(PHASE6_FIXTURES_DIR / "intrabar_both_touched")
     case_input["parameter_set_id"] = "baseline-v4"
     case_input["strategy_version"] = "v3.0.0"
-    with pytest.raises(ValueError, match="min_stop_distance_rate"):
+    # The v5 fixture cost model carries exit_slippage_rate, the legacy v4 set
+    # does not pin it: the registry binding refuses before any sizing (WR-03).
+    with pytest.raises(CostModelBindingMismatch):
         run(case_input)
 
 
@@ -998,8 +1001,28 @@ def test_run_refuses_cost_dict_without_exit_slippage_rate() -> None:
 
     case_input = _load_input(PHASE6_FIXTURES_DIR / "intrabar_both_touched")
     del case_input["cost_model"]["exit_slippage_rate"]
-    with pytest.raises(ValueError, match="exit_slippage_rate"):
+    # A dict without exit_slippage_rate disagrees with the v5 registry set that
+    # pins it; the binding refuses it before the per-bar cost-rate mapping (WR-03).
+    with pytest.raises(CostModelBindingMismatch):
         run(case_input)
+
+
+def test_run_refuses_fixture_cost_model_that_disagrees_with_registry() -> None:
+    """WR-03: a fixture fee rate the registry set does not pin is refused."""
+    from src.backtest.simulator import run
+
+    case_input = _load_input(PHASE6_FIXTURES_DIR / "intrabar_both_touched")
+    case_input["cost_model"]["fee_rate_entry"] = "0.0001"
+    with pytest.raises(CostModelBindingMismatch):
+        run(case_input)
+
+
+def test_run_accepts_partial_fill_fraction_that_differs_from_registry() -> None:
+    """WR-03: partial_fill_fraction is applied after sizing and is not bound."""
+    from src.backtest.simulator import run
+
+    case_input = _load_input(PHASE6_FIXTURES_DIR / "limit_partial_fill")
+    assert run(case_input)["trades"][0]["entry_kind"] == "PARTIAL_FILL"
 
 
 def test_guard_reason_flows_from_the_shared_helper_into_a_reject_record(

@@ -32,6 +32,7 @@ from src.risk.gating import evaluate_risk
 from src.risk.portfolio import resolve_absolute_thresholds
 from src.risk.types import ConstraintSnapshot, OpenPosition
 
+from .binding import assert_sizing_costs_bind_registry
 from .costs import (
     CostModel,
     build_cost_model,
@@ -771,6 +772,10 @@ def run(case_input: dict[str, Any]) -> dict[str, Any]:
             f"registry strategy_version={parameter_set.strategy_version!r} "
             f"for {strategy_id}/{parameter_set_id}"
         )
+
+    # 12-REVIEW WR-03: sizing must use the costs the registry set pins, not a
+    # fixture-only dict that the parameter_set_hash never covered.
+    assert_sizing_costs_bind_registry(parameter_set, cost_model)
 
     # Resolve absolute thresholds for the portfolio gate.
     absolute_thresholds = resolve_absolute_thresholds(

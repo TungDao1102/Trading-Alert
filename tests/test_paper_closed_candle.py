@@ -175,3 +175,15 @@ def test_clean_run_is_byte_deterministic_under_frozen_clock() -> None:
     outcome_a = run_paper_tick(case_input)
     outcome_b = run_paper_tick(case_input)
     assert sha256_hex(outcome_a) == sha256_hex(outcome_b)
+
+
+def test_run_paper_tick_refuses_cost_model_that_disagrees_with_registry() -> None:
+    """12-REVIEW WR-03: sizing costs must match the pinned registry set."""
+    import pytest
+    from src.backtest.binding import CostModelBindingMismatch
+    from src.paper.loop import run_paper_tick
+
+    case_input = _load_input(PHASE7_FIXTURES_DIR / "clean_run")
+    case_input["cost_model"]["fee_rate_entry"] = "0.0001"
+    with pytest.raises(CostModelBindingMismatch):
+        run_paper_tick(case_input)
