@@ -404,6 +404,15 @@ def test_max_cost_to_risk_range(bad: Decimal) -> None:
         size_and_quantize(**kwargs)
 
 
+@pytest.mark.parametrize("field", ["min_stop_distance_rate", "max_cost_to_risk"])
+@pytest.mark.parametrize("bad", [Decimal("NaN"), Decimal("sNaN"), Decimal("Infinity")])
+def test_non_finite_guard_rate_raises_value_error(field: str, bad: Decimal) -> None:
+    """12-REVIEW WR-05: NaN raises the documented ValueError, not InvalidOperation."""
+    other = "max_cost_to_risk" if field == "min_stop_distance_rate" else "min_stop_distance_rate"
+    with pytest.raises(ValueError, match="finite"):
+        validate_guard_rates(**{field: bad, other: Decimal("0.5")})
+
+
 def test_max_cost_to_risk_of_exactly_one_is_valid() -> None:
     validate_guard_rates(min_stop_distance_rate=Decimal("0.003"), max_cost_to_risk=Decimal("1"))
 

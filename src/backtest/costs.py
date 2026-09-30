@@ -24,6 +24,7 @@ from decimal import Decimal
 from typing import Any
 
 from src.domain.canonical import sha256_hex
+from src.risk.cost_guards import validate_guard_rates
 from src.risk.cost_rates import (
     FEE_SOURCE_PARAMETER,
     MAX_RATE,
@@ -321,6 +322,11 @@ def guard_rates_from_params(params: Mapping[str, Any]) -> tuple[Decimal, Decimal
     pinned registry set identically (D-19). A legacy set that predates the
     guards (baseline-v4 and earlier) raises `ValueError` naming the missing
     key; the guards are never defaulted (fail closed, T-12-19).
+
+    Each value must be a `Decimal` or `int` (never bool, float or str, 12-REVIEW
+    WR-05) and the pair is range-checked through `validate_guard_rates`, so a
+    bad value fails here with `TypeError` / `ValueError` rather than deep in
+    the risk gate.
     """
     values: list[Decimal] = []
     for key in GUARD_RATE_KEYS:
@@ -330,8 +336,16 @@ def guard_rates_from_params(params: Mapping[str, Any]) -> tuple[Decimal, Decimal
                 "size without the cost guards; use a registry set that carries "
                 "them (baseline-v5 or later)"
             )
-        values.append(Decimal(str(params[key])))
-    return values[0], values[1]
+        raw = params[key]
+        if isinstance(raw, bool) or not isinstance(raw, (Decimal, int)):
+            raise TypeError(f"{key} must be Decimal or int, got {type(raw).__name__}")
+        values.append(Decimal(raw))
+    min_stop_distance_rate, max_cost_to_risk = values[0], values[1]
+    validate_guard_rates(
+        min_stop_distance_rate=min_stop_distance_rate,
+        max_cost_to_risk=max_cost_to_risk,
+    )
+    return min_stop_distance_rate, max_cost_to_risk
 
 
 # --------------------------------------------------------------------------- #

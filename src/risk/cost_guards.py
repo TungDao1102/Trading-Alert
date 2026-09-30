@@ -42,6 +42,12 @@ def validate_guard_rates(
     """
     min_stop = _require_decimal(min_stop_distance_rate, "min_stop_distance_rate")
     max_ratio = _require_decimal(max_cost_to_risk, "max_cost_to_risk")
+    # 12-REVIEW WR-05: NaN would raise decimal.InvalidOperation from the range
+    # comparison below; refuse non-finite values with the documented ValueError.
+    if not min_stop.is_finite():
+        raise ValueError(f"min_stop_distance_rate must be finite, got {min_stop}")
+    if not max_ratio.is_finite():
+        raise ValueError(f"max_cost_to_risk must be finite, got {max_ratio}")
     if not (Decimal("0") < min_stop < Decimal("1")):
         raise ValueError(
             f"min_stop_distance_rate must be in the open interval (0, 1), got {min_stop}"

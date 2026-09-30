@@ -830,7 +830,7 @@ def test_guard_rates_from_params_reads_both_keys_as_decimals() -> None:
     from src.backtest.costs import guard_rates_from_params
 
     result = guard_rates_from_params(
-        {"min_stop_distance_rate": Decimal("0.003"), "max_cost_to_risk": "0.15"}
+        {"min_stop_distance_rate": Decimal("0.003"), "max_cost_to_risk": Decimal("0.15")}
     )
     assert result == (Decimal("0.003"), Decimal("0.15"))
     assert all(isinstance(v, Decimal) for v in result)
@@ -840,7 +840,7 @@ def test_guard_rates_from_params_reads_both_keys_as_decimals() -> None:
 def test_guard_rates_from_params_names_the_missing_key(missing: str) -> None:
     from src.backtest.costs import guard_rates_from_params
 
-    params = {"min_stop_distance_rate": "0.003", "max_cost_to_risk": "0.15"}
+    params = {"min_stop_distance_rate": Decimal("0.003"), "max_cost_to_risk": Decimal("0.15")}
     del params[missing]
     with pytest.raises(ValueError, match=missing):
         guard_rates_from_params(params)
@@ -855,6 +855,36 @@ def test_guard_rates_from_params_matches_pinned_registry_set() -> None:
     v4 = load_parameter_set("trend-pullback", "baseline-v4")
     with pytest.raises(ValueError, match="min_stop_distance_rate"):
         guard_rates_from_params(v4.params)
+
+
+@pytest.mark.parametrize("bad", [0.003, "0.003", True, None])
+def test_guard_rates_from_params_rejects_non_decimal_types(bad: object) -> None:
+    """12-REVIEW WR-05: float, str, bool and None are refused (Decimal or int only)."""
+    from src.backtest.costs import guard_rates_from_params
+
+    params = {"min_stop_distance_rate": bad, "max_cost_to_risk": Decimal("0.15")}
+    with pytest.raises(TypeError, match="min_stop_distance_rate"):
+        guard_rates_from_params(params)
+
+
+@pytest.mark.parametrize(
+    ("min_stop", "max_ratio"),
+    [
+        (Decimal("NaN"), Decimal("0.15")),
+        (Decimal("0.003"), Decimal("NaN")),
+        (Decimal("Infinity"), Decimal("0.15")),
+        (Decimal("0.003"), Decimal("0")),
+        (Decimal("0.003"), Decimal("2")),
+    ],
+)
+def test_guard_rates_from_params_validates_range_and_finiteness(
+    min_stop: Decimal, max_ratio: Decimal
+) -> None:
+    from src.backtest.costs import guard_rates_from_params
+
+    params = {"min_stop_distance_rate": min_stop, "max_cost_to_risk": max_ratio}
+    with pytest.raises(ValueError):
+        guard_rates_from_params(params)
 
 
 # --------------------------------------------------------------------------- #
