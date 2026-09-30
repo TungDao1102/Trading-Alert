@@ -379,3 +379,28 @@ def test_d044_owner_phases_exist_in_roadmap() -> None:
         number = phase.split()[1]
         assert f"### {phase}:" in roadmap, f"{phase} missing from ROADMAP.md"
         assert number.isdigit()
+
+
+def test_real_table_reaches_d048() -> None:
+    ids = bk._DECISION_ROW.findall(_read(DECISIONS))
+    assert bk.MIN_LAST_DECISION == 48
+    assert len(ids) >= 48
+    assert ids[45:48] == ["D046", "D047", "D048"]
+
+
+def test_d047_and_d048_rows_carry_witness_tokens() -> None:
+    text = _read(DECISIONS)
+    d047 = bk._decision_row(text, "D047")
+    d048 = bk._decision_row(text, "D048")
+    assert [t for t in ("canonical", "parameter_set_hash", "1.0") if t not in d047] == []
+    assert [
+        t
+        for t in (
+            "parity_overlapping_history",
+            "DERIVATIONS",
+            "gen_phase6_fixtures",
+            "parameter_set_hash",
+            "placement_sequences",
+        )
+        if t not in d048
+    ] == []

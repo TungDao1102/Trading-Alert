@@ -383,7 +383,7 @@ DATA_MODEL_PATH = REPO_ROOT / "docs" / "data" / "DATA_MODEL.md"
 SEC_OPS_PATH = REPO_ROOT / "docs" / "operations" / "SECURITY_AND_OPERATIONS.md"
 
 # Decisions must run contiguously from D001 to at least this ID; later decisions append.
-MIN_LAST_DECISION = 45
+MIN_LAST_DECISION = 48
 
 # Owner phases named by the D044 follow-up list (DC-04).
 D044_OWNER_PHASES: tuple[str, ...] = (
@@ -449,7 +449,7 @@ def check_decisions(decisions: str, doc_status: str, data_model: str, sec_ops: s
             )
         )
 
-    # DC-02 IDs are D001.. contiguous, unique, in order, and reach at least D045.
+    # DC-02 IDs are D001.. contiguous, unique, in order, and reach at least D048.
     ids = _DECISION_ROW.findall(text)
     contiguous = [f"D{n:03d}" for n in range(1, len(ids) + 1)]
     ok02 = ids == contiguous and len(ids) >= MIN_LAST_DECISION
