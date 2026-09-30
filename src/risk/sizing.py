@@ -36,6 +36,12 @@ def size_position(
 ) -> SizedResult:
     """Compute raw position size per D-01 canonical formula.
 
+    `entry_ref` is the SIZING entry chosen by the caller: since Phase 12
+    (D-03) `size_and_quantize` passes the adverse zone edge (LONG
+    `entry_max`, SHORT `entry_min`), not the zone mid. The formula below is
+    unchanged (D-02); `modeled_costs_per_unit` is quote currency per unit,
+    produced by `per_unit_round_trip_cost` for that same entry.
+
     `allowed_risk = equity × risk_rate`.
     `sl_distance = |entry_ref - stop_loss_price|`.
     `risk_per_unit = sl_distance + modeled_costs_per_unit`.

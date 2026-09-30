@@ -24,8 +24,8 @@ from src.core.types import AccountState
 from src.domain.enums import TradePlanStatus
 from src.domain.trade_plan import TradePlan
 from src.risk import (
-    CostRates,
     ConstraintSnapshot,
+    CostRates,
     PortfolioVerdict,
     SizedResult,
     check_portfolio,
@@ -117,7 +117,9 @@ def _xrp_constraints() -> ConstraintSnapshot:
     )
 
 
-def _btc_long(*, stop: str = "58780", entry_min: str = "59900", entry_max: str = "60100") -> TradePlan:
+def _btc_long(
+    *, stop: str = "58780", entry_min: str = "59900", entry_max: str = "60100"
+) -> TradePlan:
     return _plan(entry_min=entry_min, entry_max=entry_max, stop=stop)
 
 

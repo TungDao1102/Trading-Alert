@@ -18,6 +18,7 @@ from decimal import Decimal
 
 from src.domain.enums import DailyState, Direction, QuantizationDecision, RejectionReason
 
+from .cost_rates import FEE_SOURCES
 
 # Canonical reason-code vocabulary (WR-11): risk output feeds journals and
 # Telegram payloads, so `reason_code` is validated against the GLOSSARY §9
@@ -111,6 +112,12 @@ class SizedResult:
     populated; `realized_risk` is the canonical "actual dollars at risk
     after rounding" value used by the utilization gate and logged per
     RISK_MANAGEMENT §11 rule 5.
+
+    Phase 12 (D-12) adds the optional cost trail written by
+    `size_and_quantize`: the modeled cost per unit, the sizing entry price
+    (the adverse zone edge), the stop distance rate, the cost-to-risk ratio,
+    the fee rates used and their source. All default to None so results
+    built by `size_position` / `quantize` alone stay valid.
     """
 
     is_no_trade: bool
@@ -120,6 +127,13 @@ class SizedResult:
     quantization_decision: str
     realized_risk: Decimal
     reason_code: str = "OK"
+    modeled_costs_per_unit: Decimal | None = None
+    sizing_entry_price: Decimal | None = None
+    stop_distance_rate: Decimal | None = None
+    cost_to_risk_ratio: Decimal | None = None
+    fee_rate_entry: Decimal | None = None
+    fee_rate_exit: Decimal | None = None
+    fee_source: str | None = None
 
     def __post_init__(self) -> None:
         _require_non_empty(self.quantization_decision, "quantization_decision")
@@ -139,6 +153,21 @@ class SizedResult:
             "realized_risk",
         ):
             _require_decimal(getattr(self, fname), fname)
+        for fname in (
+            "modeled_costs_per_unit",
+            "sizing_entry_price",
+            "stop_distance_rate",
+            "cost_to_risk_ratio",
+            "fee_rate_entry",
+            "fee_rate_exit",
+        ):
+            optional = getattr(self, fname)
+            if optional is not None:
+                _require_decimal(optional, fname)
+        if self.fee_source is not None and self.fee_source not in FEE_SOURCES:
+            raise ValueError(
+                f"SizedResult: unknown fee_source {self.fee_source!r}"
+            )
         if self.is_no_trade:
             if self.quantity is not None:
                 raise ValueError("SizedResult: is_no_trade=True requires quantity=None")
