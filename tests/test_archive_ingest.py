@@ -513,3 +513,211 @@ def test_archive_module_never_extracts_to_disk() -> None:
         and node.func.attr in forbidden
     ]
     assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# Task 3: symbol discovery (S3 listing with marker paging) and last day
+# ---------------------------------------------------------------------------
+
+LISTING_HOST = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
+MONTHLY_PREFIX = "data/futures/um/monthly/klines/"
+S3_NS = "http://s3.amazonaws.com/doc/2006-03-01/"
+
+
+def _listing_xml(
+    *,
+    prefixes: list[str] | None = None,
+    keys: list[str] | None = None,
+    truncated: bool = False,
+    next_marker: str | None = None,
+    prefix: str = MONTHLY_PREFIX,
+) -> str:
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        f'<ListBucketResult xmlns="{S3_NS}"><Name>data.binance.vision</Name>',
+        f"<Prefix>{prefix}</Prefix><MaxKeys>1000</MaxKeys><Delimiter>/</Delimiter>",
+        f"<IsTruncated>{'true' if truncated else 'false'}</IsTruncated>",
+    ]
+    if next_marker is not None:
+        parts.append(f"<NextMarker>{next_marker}</NextMarker>")
+    parts += [f"<CommonPrefixes><Prefix>{p}</Prefix></CommonPrefixes>" for p in prefixes or []]
+    parts += [
+        f"<Contents><Key>{k}</Key><Size>273</Size><StorageClass>STANDARD</StorageClass></Contents>"
+        for k in keys or []
+    ]
+    parts.append("</ListBucketResult>")
+    return "".join(parts)
+
+
+def _listing_route(
+    router: respx.MockRouter, pages: list[str]
+) -> tuple[respx.Route, list[dict[str, str]]]:
+    """Serve `pages` in order for GET on the listing host; record query params."""
+    seen: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(dict(request.url.params))
+        index = min(len(seen) - 1, len(pages) - 1)
+        return httpx.Response(200, text=pages[index])
+
+    route = router.route(method="GET", url__startswith=LISTING_HOST).mock(side_effect=handler)
+    return route, seen
+
+
+async def test_listing_pages_and_filters_symbols() -> None:
+    arc = _arc()
+    page1 = _listing_xml(
+        prefixes=[
+            f"{MONTHLY_PREFIX}BTCUSDT/",
+            f"{MONTHLY_PREFIX}BTCUSDC/",
+            f"{MONTHLY_PREFIX}1000SHIBUSDT/",
+        ],
+        truncated=True,
+        next_marker=f"{MONTHLY_PREFIX}1000SHIBUSDT/",
+    )
+    page2 = _listing_xml(
+        prefixes=[
+            f"{MONTHLY_PREFIX}BAD%2F../",
+            f"{MONTHLY_PREFIX}lowerUSDT/",
+            f"{MONTHLY_PREFIX}ETHUSDT/",
+            f"{MONTHLY_PREFIX}BTCUSDT_250627/",
+        ],
+    )
+    with respx.mock(assert_all_called=False) as router:
+        _, seen = _listing_route(router, [page1, page2])
+        async with arc.make_archive_client() as client:
+            symbols = await arc.list_archive_symbols(client)
+
+    assert symbols == ["1000SHIBUSDT", "BTCUSDT", "ETHUSDT"]
+    assert len(seen) == 2
+    assert seen[0]["prefix"] == MONTHLY_PREFIX
+    assert seen[0]["delimiter"] == "/"
+    assert "marker" not in seen[0]
+    assert seen[1]["marker"] == f"{MONTHLY_PREFIX}1000SHIBUSDT/"
+
+
+async def test_listing_only_supports_usdt_quote() -> None:
+    arc = _arc()
+    with respx.mock(assert_all_called=False) as router:
+        route, _ = _listing_route(router, [_listing_xml()])
+        async with arc.make_archive_client() as client:
+            with pytest.raises(ValueError, match="quote"):
+                await arc.list_archive_symbols(client, quote="USDC")
+        assert route.call_count == 0
+
+
+async def test_oversized_listing_body_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    arc = _arc()
+    monkeypatch.setattr(arc, "MAX_LISTING_BYTES", 100)
+    with respx.mock(assert_all_called=False) as router:
+        _listing_route(router, [_listing_xml(prefixes=[f"{MONTHLY_PREFIX}BTCUSDT/"])])
+        async with arc.make_archive_client() as client:
+            with pytest.raises(arc.ArchiveTooLarge):
+                await arc.list_archive_symbols(client)
+
+
+async def test_listing_pages_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    arc = _arc()
+    monkeypatch.setattr(arc, "MAX_LISTING_PAGES", 3)
+    pages = [
+        _listing_xml(
+            prefixes=[f"{MONTHLY_PREFIX}AAA{i}USDT/"],
+            truncated=True,
+            next_marker=f"{MONTHLY_PREFIX}AAA{i}USDT/",
+        )
+        for i in range(10)
+    ]
+    with respx.mock(assert_all_called=False) as router:
+        route, _ = _listing_route(router, pages)
+        async with arc.make_archive_client() as client:
+            with pytest.raises(arc.ArchiveError):
+                await arc.list_archive_symbols(client)
+        assert route.call_count == 3
+
+
+async def test_listing_marker_must_advance() -> None:
+    arc = _arc()
+    stuck = _listing_xml(
+        prefixes=[f"{MONTHLY_PREFIX}BTCUSDT/"],
+        truncated=True,
+        next_marker=f"{MONTHLY_PREFIX}BTCUSDT/",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        route, _ = _listing_route(router, [stuck])
+        async with arc.make_archive_client() as client:
+            with pytest.raises(arc.ArchiveError):
+                await arc.list_archive_symbols(client)
+        assert route.call_count == 2
+
+
+async def test_listing_with_doctype_or_bad_xml_is_rejected() -> None:
+    arc = _arc()
+    evil = (
+        '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa">]>'
+        f'<ListBucketResult xmlns="{S3_NS}"><IsTruncated>false</IsTruncated></ListBucketResult>'
+    )
+    for body in (evil, "<ListBucketResult"):
+        with respx.mock(assert_all_called=False) as router:
+            _listing_route(router, [body])
+            async with arc.make_archive_client() as client:
+                with pytest.raises(arc.ArchiveFormatError):
+                    await arc.list_archive_symbols(client)
+
+
+async def test_listing_http_error_is_an_archive_error() -> None:
+    arc = _arc()
+    with respx.mock(assert_all_called=False) as router:
+        router.route(method="GET", url__startswith=LISTING_HOST).respond(403)
+        async with arc.make_archive_client() as client:
+            with pytest.raises(arc.ArchiveError):
+                await arc.list_archive_symbols(client)
+
+
+async def test_archive_last_day_from_daily_listing() -> None:
+    arc = _arc()
+    prefix = "data/futures/um/daily/klines/SXPUSDT/1d/"
+    page1 = _listing_xml(
+        keys=[
+            f"{prefix}SXPUSDT-1d-2026-05-30.zip",
+            f"{prefix}SXPUSDT-1d-2026-05-30.zip.CHECKSUM",
+        ],
+        truncated=True,
+        next_marker=f"{prefix}SXPUSDT-1d-2026-05-30.zip.CHECKSUM",
+        prefix=prefix,
+    )
+    page2 = _listing_xml(
+        keys=[
+            f"{prefix}SXPUSDT-1d-2026-06-01.zip",
+            f"{prefix}SXPUSDT-1d-2026-06-01.zip.CHECKSUM",
+            f"{prefix}SXPUSDT-1d-2026-13-40.zip",
+            f"{prefix}OTHERUSDT-1d-2026-07-01.zip",
+        ],
+        prefix=prefix,
+    )
+    with respx.mock(assert_all_called=False) as router:
+        _, seen = _listing_route(router, [page1, page2])
+        async with arc.make_archive_client() as client:
+            last = await arc.archive_last_day(client, "SXPUSDT")
+
+    assert last == datetime(2026, 6, 1, tzinfo=UTC).date()
+    assert seen[0]["prefix"] == prefix
+    assert seen[1]["marker"] == f"{prefix}SXPUSDT-1d-2026-05-30.zip.CHECKSUM"
+
+
+async def test_archive_last_day_is_none_without_keys() -> None:
+    arc = _arc()
+    with respx.mock(assert_all_called=False) as router:
+        _listing_route(router, [_listing_xml(prefix="data/futures/um/daily/klines/NEWUSDT/1d/")])
+        async with arc.make_archive_client() as client:
+            assert await arc.archive_last_day(client, "NEWUSDT") is None
+
+
+async def test_archive_last_day_validates_symbol_before_any_request() -> None:
+    arc = _arc()
+    with respx.mock(assert_all_called=False) as router:
+        route, _ = _listing_route(router, [_listing_xml()])
+        async with arc.make_archive_client() as client:
+            with pytest.raises(ValueError, match="archive"):
+                await arc.archive_last_day(client, "../../etc")
+        assert route.call_count == 0
+
