@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 12
 current_phase_name: fee-cost-model-correctness
 status: executing
-stopped_at: Completed 12-08-PLAN.md
-last_updated: "2026-09-30T09:42:44.307Z"
+stopped_at: Completed 12-09-PLAN.md
+last_updated: "2026-09-30T10:13:20.746Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 11 execution started
-state_head: 5fce621ebd1092d86b31fc40a976716993e69c0a
+state_head: fa47fa4e996cfd0bfa80aa2e22405dd9e2e539e9
 progress:
   total_phases: 28
   completed_phases: 2
   total_plans: 69
-  completed_plans: 65
+  completed_plans: 66
 milestone_name: milestone
 ---
 
@@ -104,6 +104,7 @@ Progress: [██████████] 100%
 | Phase 12 P06 | 25 min | 2 tasks | 6 files |
 | Phase 12 P07 | 25min | 3 tasks | 19 files |
 | Phase 12 P08 | 15min | 2 tasks | 3 files |
+| Phase 12 P09 | 35min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -268,6 +269,8 @@ Recent decisions affecting current work:
 - [Phase 12]: 12-06: risk sizing entry is the adverse zone edge (LONG entry_max, SHORT entry_min); zone mid stays the quantizer notional reference (supersedes Phase 5 D-02 for sizing; DECISIONS D046 by 12-11)
 - [Phase 12]: 12-07: Phase 5 portfolio test helper runs shared size_and_quantize; candidate risks hand-derived in DERIVATIONS.md
 - [Phase 12]: 12-08: legacy modeled_costs_per_unit key rejected explicitly in the live cost-rate gate; PARAMETER fee source is NO_TRADE UNCERTAIN_ACCOUNT_STATE before evaluate_risk
+- [Phase 12]: 12-09: EOD exits use exit_slippage_rate (market-style close, D046 assumption A2); TP1 uses expected_slippage; unknown exit_kind refused
+- [Phase 12]: 12-09: guard rates read at the risk stage in both modes via guard_rates_from_params (legacy sets fail closed, paper fixtures that never reach risk keep legacy sets)
 
 ### Pending Todos
 
@@ -312,6 +315,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T09:42:44.087Z
-Stopped at: Completed 12-08-PLAN.md
+Last session: 2026-09-30T10:13:20.525Z
+Stopped at: Completed 12-09-PLAN.md
 Resume file: None

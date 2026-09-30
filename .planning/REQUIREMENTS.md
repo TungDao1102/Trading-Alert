@@ -42,7 +42,7 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 ### Backtest & Evidence
 
-- [ ] **BKTS-01**: Backtest simulator resolves intrabar SL/TP ordering with 1m data, models limit fills/partials/expiry/invalidation, and applies fees/funding/slippage before any selection decision
+- [x] **BKTS-01**: Backtest simulator resolves intrabar SL/TP ordering with 1m data, models limit fills/partials/expiry/invalidation, and applies fees/funding/slippage before any selection decision
 - [x] **BKTS-02**: Every experiment is reproducible from dataset + strategy + parameter set + cost + execution versions and is compared against no-trade and simple-trend baselines
 - [ ] **BKTS-03**: Reports show trade counts and slices (symbol/period/regime/version), R distribution, bootstrap intervals, and parameter-plateau analysis — never a single headline number
 - [ ] **BKTS-04**: Every experiment record carries the fields the research protocol requires, including NO_TRADE counts with reasons, the intrabar tie-break, timeframe, full parameters and costs, and a verifiable code version
@@ -129,7 +129,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STRAT-03 | Phase 4 | Pending |
 | RISK-01 | Phase 5 | Complete |
 | RISK-02 | Phase 5 | Complete |
-| BKTS-01 | Phase 6 | Pending |
+| BKTS-01 | Phase 6 | Complete |
 | BKTS-02 | Phase 6 | Complete |
 | BKTS-03 | Phase 6 | Pending |
 | PAPER-01 | Phase 7 | Pending |
