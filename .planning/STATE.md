@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 11
 current_phase_name: decision-alignment
 status: executing
-stopped_at: Completed 11-06-PLAN.md
-last_updated: "2026-09-30T04:35:26.271Z"
+stopped_at: Completed 11-05-PLAN.md
+last_updated: "2026-09-30T04:47:35.435Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 11 execution started
-state_head: 5861890a5e35364a00547689c89996fc28be6917
+state_head: a2eceb8cb1cd0513e6cf9c4885b3494cf6723498
 progress:
   total_phases: 28
   completed_phases: 2
   total_plans: 58
-  completed_plans: 54
+  completed_plans: 55
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 11 (decision-alignment) — EXECUTING
-Plan: 6 of 8
+Plan: 7 of 8
 Status: Ready to execute
 Last activity: 2026-09-30 — Phase 11 execution started
 
@@ -93,6 +93,7 @@ Progress: [██████████] 100%
 | Phase 11 P03 | 20min | 2 tasks | 3 files |
 | Phase 11 P04 | 25min | 3 tasks | 8 files |
 | Phase 11 P06 | 30 min | 2 tasks | 6 files |
+| Phase 11 P05 | 40min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -246,6 +247,7 @@ Recent decisions affecting current work:
 - [Phase 11]: 11-04: liquidation buffer stays a registry parameter (value chosen in Phase 22); canonical quantization order lives on one labelled line in RISK_MANAGEMENT s11 (D031)
 - [Phase 11]: 11-06: TradingView cannot sign requests; docs describe secret URL path + source-IP allow-list + 3s ack + dedupe + normalise + 2FA (F-052); V1 has no webhook endpoint
 - [Phase 11]: 11-06: single canonical quantization order restated by pointer in PROJECT.md and AGENTS.md (D031); generated AGENTS.md rows guarded by drift gates AU-03/AU-05
+- [Phase 11]: 11-05: 200 conditional-order limit documented account-wide from the dated change-log (2025-12-29); pages not retrievable are registered as not fetched and keep verify markers
 
 ### Pending Todos
 
@@ -290,6 +292,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T04:35:26.112Z
-Stopped at: Completed 11-06-PLAN.md
+Last session: 2026-09-30T04:47:35.274Z
+Stopped at: Completed 11-05-PLAN.md
 Resume file: None
