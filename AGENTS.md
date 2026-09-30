@@ -150,7 +150,7 @@ A deterministic, reproducible Binance Futures trading research and semi-automate
 | Redis (V1) | No documented concurrency/caching requirement; listen-keys, idempotency keys, and approval state all live correctly in PostgreSQL with TTL columns | PostgreSQL + in-process state; revisit only with a measured contention profile |
 | .NET / TypeScript as primary language | Canonical decision is Python 3.13 for the quant-research ecosystem (Polars/SciPy/VectorBT) and the official Binance Python SDKs | Python 3.13 + uv |
 | httpx 1.0 pre-releases / Polars 2.0 RC / SQLAlchemy 2.1 RC / Python 3.14 as baseline | Pre-release lines move under you; determinism starts with pinned stable dependencies | Stable lines listed above; re-evaluate RCs at defined upgrade windows, never mid-phase |
-| `float` for quantities/prices/notional/risk arithmetic | Binary floating point changes trading decisions (quantization floor → realized-risk check → min-qty/notional gates). A 1-ulp difference can flip NO_TRADE to an order | `Decimal` (or integer tick/qty-step arithmetic) for all exchange-sensitive values; floats allowed only inside statistical/feature code that never gates an order |
+| `float` for quantities/prices/notional/risk arithmetic | Binary floating point changes trading decisions (quantization floor → min-qty/min-notional rejects → realized-risk utilization check). A 1-ulp difference can flip NO_TRADE to an order | `Decimal` (or integer tick/qty-step arithmetic) for all exchange-sensitive values; floats allowed only inside statistical/feature code that never gates an order |
 
 ## Stack Patterns by Variant
 

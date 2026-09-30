@@ -227,7 +227,7 @@ def test_au05_fails_on_pre_change_bullets_against_amended_source() -> None:
 
 
 def test_au06_positive_on_amended_files() -> None:
-    files = {AGENTS: _read(AGENTS), PROJECT: _read(PROJECT)}
+    files = {AGENTS: _read(AGENTS), PROJECT: _read(PROJECT), STACK: _read(STACK)}
     assert authority.check_no_old_order(files)[1]
 
 
@@ -241,6 +241,21 @@ def test_au06_fails_on_pre_change_text(rel: str) -> None:
 def test_au06_detects_old_phrase_with_ascii_arrow_and_wrapping() -> None:
     text = "realized-risk check (60% baseline)\n -> min-qty/notional reject"
     assert not authority.check_no_old_order({"x.md": text})[1]
+
+
+def test_au06_detects_old_order_in_float_row_wording() -> None:
+    text = "(quantization floor → realized-risk check → min-qty/notional gates)"
+    assert not authority.check_no_old_order({"AGENTS.md": text})[1]
+
+
+def test_au06_accepts_canonical_order_in_float_row_wording() -> None:
+    text = "(quantization floor → min-qty/min-notional rejects → realized-risk utilization check)"
+    assert authority.check_no_old_order({"AGENTS.md": text})[1]
+
+
+@pytest.mark.parametrize("rel", [STACK, AGENTS])
+def test_au06_fails_on_pre_change_float_row(rel: str) -> None:
+    assert not authority.check_no_old_order({rel: _old(rel)})[1]
 
 
 def test_canonical_order_line_and_protocol_block_are_extracted() -> None:

@@ -60,7 +60,12 @@ QUANTIZATION_TOKENS: tuple[tuple[str, str], ...] = (
 
 # The pre-decision ordering that put the utilization check before the min-qty/notional
 # reject (11-RESEARCH F4).
-OLD_ORDER_PHRASE = r"realized-risk check \(60% baseline\)\s*(?:→|->)\s*min-qty/notional reject"
+# Matches the exact historical phrase and any sentence where a realized-risk check is
+# followed, inside one clause, by an arrow and a min-qty/min-quantity/min-notional step.
+OLD_ORDER_PHRASE = (
+    r"realized[- ]risk[^.|;]{0,40}?(?:→|->)[^.|;]{0,30}?"
+    r"min(?:imum)?[- ]?(?:qty|quantity|notional)"
+)
 
 
 def normalise(text: str) -> str:
@@ -239,7 +244,13 @@ def run() -> list[Gate]:
         check_generated_row(stack, agents, FASTAPI_ROW_PREFIX, "AU-03"),
         check_quantization_agreement(_read(RISK_PATH), _read(PROTOCOL_PATH), project, agents),
         check_generated_row(project, agents, QUANTIZATION_BULLET_PREFIX, "AU-05"),
-        check_no_old_order({"AGENTS.md": agents, ".planning/PROJECT.md": project}),
+        check_no_old_order(
+            {
+                "AGENTS.md": agents,
+                ".planning/PROJECT.md": project,
+                ".planning/research/STACK.md": stack,
+            }
+        ),
     ]
 
 
