@@ -61,7 +61,7 @@ MODES["all"] = tuple(step for mode in MODES for step in MODES[mode])
 # module passing vacuously). Set to the counts the modules return today.
 EXPECTED_MIN: dict[str, int] = {
     "protocol": 10,
-    "params": 6,
+    "params": 7,
     "universe": 5,
     "ops_risk": 11,
     "exchange": 9,

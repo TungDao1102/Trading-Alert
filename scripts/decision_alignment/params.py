@@ -1,9 +1,11 @@
-"""Parameter-set gate module (Phase 11, plan 11-02; D036, D037, D038, D-06, F-810).
+"""Parameter-set gate module (Phase 11, plan 11-02; D036, D037, D038, D-06, F-810;
+Phase 12, plan 12-02; D-04, D-06, D-07, D-11).
 
 Executable checks that keep the parameter registry honest after the D036-D038
 alignment: every set is pinned, the ten pre-phase files and hashes never move, the
-five new sets carry the aligned facts, and the canonical cost set is identical
-across them. ``run()`` returns ``(name, ok, detail)`` tuples PA-01..PA-06; every check
+five new sets carry the aligned facts, the canonical cost set is identical
+across them, and the five Phase 12 sets carry the frozen cost-guard values (PA-07).
+``run()`` returns ``(name, ok, detail)`` tuples PA-01..PA-07; every check
 is also a pure function over a params root directory so tests can inject a broken copy.
 
 Stdlib plus ``src.domain.registry`` and ``src.backtest.costs`` only.
@@ -105,6 +107,32 @@ NEW_SET_IDS: tuple[SetKey, ...] = (
 
 EXPECTED_NEW_VERSION = "v3.0.0"
 TAKER_FEE = Decimal("0.0005")
+
+# Phase 12 (plan 12-02): the five sets that carry exit_slippage_rate,
+# min_stop_distance_rate, max_cost_to_risk and commission_rate_ttl_seconds (PA-07).
+PHASE12_SET_IDS: tuple[SetKey, ...] = (
+    ("breakout-retest", "baseline-v5"),
+    ("range-mr", "baseline-v5"),
+    ("trend-pullback", "baseline-no-trade-v3"),
+    ("trend-pullback", "baseline-simple-trend-v3"),
+    ("trend-pullback", "baseline-v5"),
+)
+EXPECTED_PHASE12_VERSION = "v4.0.0"
+# Frozen at planning time (D-06, D-07, D-11); a different value means a new set.
+PHASE12_FROZEN: dict[str, Decimal | int] = {
+    "exit_slippage_rate": Decimal("0.0003"),
+    "min_stop_distance_rate": Decimal("0.003"),
+    "max_cost_to_risk": Decimal("0.15"),
+    "commission_rate_ttl_seconds": 3600,
+}
+# Rates are decimal fractions; the loader refuses values outside this band (D-04, F-028).
+PHASE12_RATE_KEYS: tuple[str, ...] = (
+    "fee_rate_entry",
+    "fee_rate_exit",
+    "expected_slippage",
+    "exit_slippage_rate",
+)
+PHASE12_MAX_RATE = Decimal("0.01")
 
 
 def _set_path(root: Path, key: SetKey) -> Path:
@@ -230,6 +258,50 @@ def check_cost_hash_parity(root: Path, ids: tuple[SetKey, ...]) -> list[str]:
     return problems
 
 
+def check_phase12_set_facts(root: Path, ids: tuple[SetKey, ...]) -> list[str]:
+    """PA-07: the Phase 12 sets carry the frozen cost-guard values and one cost set."""
+    problems: list[str] = []
+    cost_keys = (*COST_KEYS, "exit_slippage_rate")
+    seen: dict[str, dict[str, list[str]]] = {}
+    for key in ids:
+        label = f"{key[0]}/{key[1]}"
+        path = _set_path(root, key)
+        if not path.is_file():
+            problems.append(f"{label}: file missing")
+            continue
+        try:
+            version, params = _parse(root, key)
+        except Exception as exc:
+            problems.append(f"{label}: does not load: {exc}")
+            continue
+        if version != EXPECTED_PHASE12_VERSION:
+            problems.append(
+                f"{label}: strategy_version {version!r}, want {EXPECTED_PHASE12_VERSION}"
+            )
+        for name, frozen in PHASE12_FROZEN.items():
+            if name not in params:
+                problems.append(f"{label}: {name} missing")
+            elif params[name] != frozen or type(params[name]) is not type(frozen):
+                problems.append(f"{label}: {name} {params[name]!r}, want {frozen!r} (frozen)")
+        for name in PHASE12_RATE_KEYS:
+            rate = params.get(name)
+            if rate is None:
+                problems.append(f"{label}: {name} missing")
+            elif not Decimal(0) <= Decimal(rate) <= PHASE12_MAX_RATE:
+                problems.append(f"{label}: {name} {rate!r} outside 0..{PHASE12_MAX_RATE} (unit)")
+        header = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.startswith("#")]
+        if not any("Supersedes" in ln for ln in header):
+            problems.append(f"{label}: header comment lacks 'Supersedes'")
+        for name in cost_keys:
+            if name in params:
+                seen.setdefault(name, {}).setdefault(repr(params[name]), []).append(label)
+    for name in cost_keys:
+        values = seen.get(name, {})
+        if len(values) > 1:
+            problems.append(f"cost values differ across Phase 12 sets: {name}: {values}")
+    return problems
+
+
 def check_working_type_registry() -> list[str]:
     """PA-06: working_type is a registry string key and not a cost key."""
     problems: list[str] = []
@@ -249,7 +321,7 @@ def _result(name: str, problems: list[str]) -> tuple[str, bool, str]:
 
 
 def run() -> list[tuple[str, bool, str]]:
-    """Evaluate gates PA-01..PA-06 against the real repository."""
+    """Evaluate gates PA-01..PA-07 against the real repository."""
     try:
         pin_problems = check_pins(PARAMS_ROOT, load_pins())
     except (OSError, ValueError, KeyError) as exc:
@@ -261,6 +333,7 @@ def run() -> list[tuple[str, bool, str]]:
         _result("PA-04", check_new_set_facts(PARAMS_ROOT, NEW_SET_IDS)),
         _result("PA-05", check_cost_hash_parity(PARAMS_ROOT, NEW_SET_IDS)),
         _result("PA-06", check_working_type_registry()),
+        _result("PA-07", check_phase12_set_facts(PARAMS_ROOT, PHASE12_SET_IDS)),
     ]
 
 

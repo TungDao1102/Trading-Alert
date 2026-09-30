@@ -1,0 +1,80 @@
+# params/trend-pullback/baseline-simple-trend-v3.toml
+#
+# Phase 12 - fee and cost model correctness (D046) simple-trend baseline parameter set.
+#
+# Supersedes baseline-simple-trend-v2 (Phase 11). baseline-simple-trend-v2
+# stays byte-identical for reproducing past hashes (F-810); do not mutate. New
+# behaviour means a new set and a strategy-version bump (D-04, D-06).
+#
+# Per D-03 + BACKTEST_SPEC §9: every candidate experiment is compared against
+# declared baselines (no-trade + simple-trend at minimum). The simple-trend
+# baseline uses a looser `minimum_rr` and a single-condition trend filter
+# (zone_tolerance_atr widened) so the simulator emits a deterministic
+# single-direction trade list.
+#
+# Changes versus baseline-simple-trend-v2 (every other key, value and order is
+# unchanged; the looser zone and RR values are kept):
+#   - exit_slippage_rate 0.0003: a 3 bps stop-market exit. It is separate from
+#     the entry-side expected_slippage (0.0001) because a stop-market order
+#     fills worse than a limit order; 3 bps sits inside the audit 2-5 bps range
+#     and RESEARCH_PROTOCOL sets no numeric stress convention that overrides
+#     it. Never tuned after seeing results (D-06).
+#   - min_stop_distance_rate 0.003: a stop closer than 0.3 percent of price is
+#     rejected before sizing as STOP_TOO_TIGHT (D-07).
+#   - max_cost_to_risk 0.15: a trade whose modeled round-trip cost exceeds 15
+#     percent of its risk amount is rejected as COST_TO_RISK_EXCEEDED. At the
+#     14 bps modeled round trip this ceiling implies a minimum stop of about
+#     0.79 percent of price, which dominates the 0.3 percent floor above. The
+#     implication is recorded for ratification in D046 (D-07).
+#   - commission_rate_ttl_seconds 3600: one hour, matching
+#     constraint_snapshot_ttl_seconds, because a fee tier changes on a 30-day
+#     volume basis (D-11).
+#   - the canonical cost set stays identical to the candidate sets.
+
+schema_version = 1
+
+[strategy]
+strategy_id = "trend-pullback"
+strategy_version = "v4.0.0"
+
+[parameters]
+# Inherited from baseline-simple-trend-v2.
+swing_lookback = 20
+# Widened zone tolerance - single-condition trend filter (looser zone).
+zone_tolerance_atr = 1.0
+breakout_confirmation_bars = 3
+entry_buffer_atr = 0.1
+sl_buffer_atr = 0.2
+# Looser RR gate - most plans pass.
+minimum_rr = 0.5
+signal_expiry_hours = 4
+risk_rate = 0.005
+minimum_risk_utilization_after_rounding = 0.6
+
+# Phase 5 D-05 additions.
+max_open_positions = 2
+max_aggregate_open_risk = 0.01
+cluster_cap = 0.005
+daily_loss_warning_threshold = 0.005
+daily_loss_stop_threshold = 0.01
+fee_rate_entry = 0.0005                 # 5 bps taker (D036)
+fee_rate_exit = 0.0005
+expected_slippage = 0.0001
+constraint_snapshot_ttl_seconds = 3600
+
+# Detector volatility knob (Phase 6 review CR-11). compute_features reads
+# atr_period; value matches the sibling baseline-v2 sets (14).
+atr_period = 14
+
+# Phase 6 extended cost-model keys (D-02 + Pitfall 7, review WR-04).
+funding_treatment = "ADDITIVE"
+slippage_model = "FIXED_BPS"
+spread_fill_assumptions = "FULL_FILL"
+partial_fill_fraction = 1.0
+# Protective-trigger price source (D037). Not a cost key.
+working_type = "MARK_PRICE"
+# Phase 12 additions (D046).
+exit_slippage_rate = 0.0003             # 3 bps stop-market exit (D-06)
+min_stop_distance_rate = 0.003          # 0.3% of price minimum stop distance (D-07)
+max_cost_to_risk = 0.15                 # round-trip cost <= 15% of risk amount (D-07)
+commission_rate_ttl_seconds = 3600      # 1 hour commission-rate freshness (D-11)
