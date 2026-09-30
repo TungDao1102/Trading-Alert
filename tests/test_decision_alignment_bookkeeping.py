@@ -7,6 +7,7 @@ synthetic mutated copies.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -139,12 +140,39 @@ def test_requirement_gates_pass_on_real_repo() -> None:
     assert all(ok for _, ok, _ in results), [g for g in results if not g[1]]
 
 
-def test_thirteen_new_ids_are_registered_and_all_pending() -> None:
+def test_thirteen_new_ids_are_registered_and_mapped() -> None:
     req = _read(REQUIREMENTS)
     assert len(bk.NEW_REQUIREMENTS) == 13
     for rid, phase in bk.NEW_REQUIREMENTS.items():
-        assert f"| {rid} | Phase {phase} | Pending |" in req
-        assert f"- [ ] **{rid}**:" in req
+        # Status is not pinned: later phases flip these IDs to Complete.
+        assert re.search(rf"^\| {rid} \| Phase {phase} \| \w+ \|", req, flags=re.MULTILINE)
+        assert re.search(rf"^- \[[ x]\] \*\*{rid}\*\*:", req, flags=re.MULTILINE)
+
+
+def test_completed_new_requirement_does_not_fail_rq01() -> None:
+    req = _read(REQUIREMENTS).replace(
+        "| OPS-06 | Phase 13 | Pending |", "| OPS-06 | Phase 13 | Complete |"
+    )
+    assert _rq(req, _read(ROADMAP))["RQ-01"] is True
+
+
+def test_later_footer_date_and_consistent_counts_pass_rq02_rq05() -> None:
+    req = _read(REQUIREMENTS).replace("*Last updated: 2026-09-30", "*Last updated: 2027-01-15")
+    gates = _rq(req, _read(ROADMAP))
+    assert gates["RQ-02"] is True
+    assert gates["RQ-05"] is True
+
+
+def test_older_footer_date_fails_rq05() -> None:
+    req = _read(REQUIREMENTS).replace("*Last updated: 2026-09-30", "*Last updated: 2026-09-01")
+    assert _rq(req, _read(ROADMAP))["RQ-05"] is False
+
+
+def test_missing_planning_files_skip_rq_gates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bk, "REQUIREMENTS_PATH", bk.REPO_ROOT / "nope" / "REQUIREMENTS.md")
+    results = bk.run_reqs()
+    assert len(results) == 5
+    assert all(ok and detail.startswith("SKIP") for _, ok, detail in results)
 
 
 def test_pre_change_documents_fail_rq01_rq02_rq04_rq05() -> None:
@@ -187,14 +215,6 @@ def test_roadmap_missing_new_id_fails_rq04() -> None:
 def test_stale_roadmap_sentence_fails_rq04() -> None:
     roadmap = _read(ROADMAP) + "\nA new REQ-ID is to be added for something.\n"
     assert _rq(_read(REQUIREMENTS), roadmap)["RQ-04"] is False
-
-
-def test_no_new_requirement_is_marked_complete() -> None:
-    req = _read(REQUIREMENTS)
-    for rid in bk.NEW_REQUIREMENTS:
-        assert f"- [x] **{rid}**" not in req
-        assert f"| {rid} |" in req and f"| {rid} | Phase" in req
-        assert not any(ln.startswith(f"| {rid} |") and "Complete" in ln for ln in req.splitlines())
 
 
 # --------------------------------------------------------------------------- Task 3
@@ -242,6 +262,11 @@ def test_pre_change_decisions_fail_dc01_and_dc02() -> None:
     gates = _dc(decisions=_old(DECISIONS))
     assert gates["DC-01"] is False  # blank line inside the table
     assert gates["DC-02"] is False  # ends at D042
+
+
+def test_appended_d046_keeps_dc02_green() -> None:
+    text = _read(DECISIONS).rstrip("\n") + "\n| D046 | Later decision | Accepted | x | y |\n"
+    assert _dc(decisions=text)["DC-02"] is True
 
 
 def test_missing_d044_or_d045_fails_dc02_and_dc04() -> None:

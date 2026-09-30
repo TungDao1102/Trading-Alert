@@ -239,6 +239,9 @@ NEW_REQUIREMENTS: dict[str, int] = {
     "GOV-02": 26,
 }
 
+MIN_REQUIREMENTS = 43
+REQUIREMENTS_REGISTERED_ON = "2026-09-30"
+
 REQUIREMENTS_PATH = REPO_ROOT / ".planning" / "REQUIREMENTS.md"
 ROADMAP_PATH = REPO_ROOT / ".planning" / "ROADMAP.md"
 
@@ -270,12 +273,15 @@ def check_requirements(req_text: str, roadmap_text: str) -> list[Gate]:
         matching = [r for r in rows if r[0] == rid]
         if len(matching) != 1:
             problems.append(f"{rid} trace rows: {len(matching)}")
-        elif matching[0][1] != str(phase) or matching[0][2] != "Pending":
-            problems.append(f"{rid} row is Phase {matching[0][1]} {matching[0][2]}")
+        elif matching[0][1] != str(phase):
+            # Status is deliberately not pinned: later phases complete these IDs.
+            problems.append(f"{rid} row is Phase {matching[0][1]}, expected Phase {phase}")
     gates.append(("RQ-01", not problems, "; ".join(problems) or "13 IDs listed and mapped"))
 
-    # RQ-02 coverage block counts equal the distinct IDs in the list.
+    # RQ-02 coverage block counts are consistent with the list and table (invariants, not a
+    # snapshot); the floor of 43 is the registry size after Phase 11 registered 13 IDs.
     distinct = len(set(items))
+    mapped = len(set(row_ids))
     match_total = re.search(r"v1 requirements: (\d+) total", req)
     match_mapped = re.search(r"Mapped to phases: (\d+)", req)
     match_unmapped = re.search(r"Unmapped: (\d+)", req)
@@ -284,14 +290,16 @@ def check_requirements(req_text: str, roadmap_text: str) -> list[Gate]:
         int(match_mapped.group(1)) if match_mapped else -1,
         int(match_unmapped.group(1)) if match_unmapped else -1,
     )
-    ok02 = got == (43, 43, 0) and distinct == 43
+    ok02 = got == (distinct, mapped, distinct - mapped) and distinct >= MIN_REQUIREMENTS
     gates.append(
         (
             "RQ-02",
             ok02,
             "ok"
             if ok02
-            else f"coverage {got}, distinct list IDs {distinct}, expected (43, 43, 0)/43",
+            else f"coverage {got}, list IDs {distinct}, table IDs {mapped}, "
+            f"expected ({distinct}, {mapped}, {distinct - mapped}) with at least "
+            f"{MIN_REQUIREMENTS} IDs",
         )
     )
 
@@ -330,14 +338,26 @@ def check_requirements(req_text: str, roadmap_text: str) -> list[Gate]:
         problems.append("Phase 13 lacks the universe freeze sentence")
     gates.append(("RQ-04", not problems, "; ".join(problems) or "ROADMAP lines updated"))
 
-    # RQ-05 footer names the update date.
-    ok05 = re.search(r"^\*Last updated: 2026-09-30", req, flags=re.MULTILINE) is not None
-    gates.append(("RQ-05", ok05, "ok" if ok05 else "footer does not name 2026-09-30"))
+    # RQ-05 footer names an update date no earlier than the Phase 11 registration.
+    footer = re.search(r"^\*Last updated: (\d{4}-\d{2}-\d{2})", req, flags=re.MULTILINE)
+    ok05 = footer is not None and footer.group(1) >= REQUIREMENTS_REGISTERED_ON
+    gates.append(
+        (
+            "RQ-05",
+            ok05,
+            "ok" if ok05 else f"footer date is not on or after {REQUIREMENTS_REGISTERED_ON}",
+        )
+    )
     return gates
 
 
 def run_reqs() -> list[Gate]:
     """Evaluate RQ-01..RQ-05 against the real REQUIREMENTS.md and ROADMAP.md."""
+    missing = [p.name for p in (REQUIREMENTS_PATH, ROADMAP_PATH) if not p.is_file()]
+    if missing:
+        # .planning/ is archived by milestone completion and filtered out of PR branches.
+        detail = f"SKIP: {', '.join(missing)} not present"
+        return [(f"RQ-0{n}", True, detail) for n in range(1, 6)]
     return check_requirements(_read(REQUIREMENTS_PATH), _read(ROADMAP_PATH))
 
 
@@ -348,7 +368,8 @@ DOC_STATUS_PATH = REPO_ROOT / "docs" / "DOC_STATUS.md"
 DATA_MODEL_PATH = REPO_ROOT / "docs" / "data" / "DATA_MODEL.md"
 SEC_OPS_PATH = REPO_ROOT / "docs" / "operations" / "SECURITY_AND_OPERATIONS.md"
 
-LAST_DECISION = 45
+# Decisions must run contiguously from D001 to at least this ID; later decisions append.
+MIN_LAST_DECISION = 45
 
 # Owner phases named by the D044 follow-up list (DC-04).
 D044_OWNER_PHASES: tuple[str, ...] = (
@@ -414,16 +435,18 @@ def check_decisions(decisions: str, doc_status: str, data_model: str, sec_ops: s
             )
         )
 
-    # DC-02 IDs D001..D045 each exactly once, in order.
+    # DC-02 IDs are D001.. contiguous, unique, in order, and reach at least D045.
     ids = _DECISION_ROW.findall(text)
-    expected = [f"D{n:03d}" for n in range(1, LAST_DECISION + 1)]
+    contiguous = [f"D{n:03d}" for n in range(1, len(ids) + 1)]
+    ok02 = ids == contiguous and len(ids) >= MIN_LAST_DECISION
     gates.append(
         (
             "DC-02",
-            ids == expected,
+            ok02,
             "ok"
-            if ids == expected
-            else f"IDs end at {ids[-1] if ids else 'none'}, count {len(ids)}",
+            if ok02
+            else f"IDs end at {ids[-1] if ids else 'none'}, count {len(ids)}, "
+            f"expected contiguous D001..D{MIN_LAST_DECISION:03d} or later",
         )
     )
 

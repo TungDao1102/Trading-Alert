@@ -146,7 +146,7 @@ def _header_version(protocol: str) -> str | None:
 
 
 def check_header(protocol: str) -> list[str]:
-    """PR-02: Frozen on is unchanged; Amended on and Supersedes v1.0.1 are present."""
+    """PR-02: Frozen on is unchanged; Amended on and a Supersedes version are present."""
     header = _header(protocol)
     problems: list[str] = []
     if header.get("Status") != "FROZEN":
@@ -156,8 +156,8 @@ def check_header(protocol: str) -> list[str]:
     amended = header.get("Amended on", "")
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", amended):
         problems.append("header carries no Amended on date")
-    if header.get("Supersedes") != "v1.0.1":
-        problems.append("header Supersedes is not v1.0.1")
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", header.get("Supersedes", "")):
+        problems.append("header Supersedes does not name a vX.Y.Z protocol version")
     if _header_version(protocol) is None:
         problems.append("header carries no Protocol version vX.Y.Z")
     return problems

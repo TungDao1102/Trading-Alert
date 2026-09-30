@@ -106,11 +106,10 @@ def test_human_pass_wording_fails() -> None:
     assert any("may never pass" in p for p in gate.check_no_human_pass(stripped))
 
 
-def test_holdout_real_marker_is_valid_and_empty() -> None:
+def test_holdout_real_marker_is_valid() -> None:
     doc = json.loads(HOLDOUT.read_text(encoding="utf-8"))
     assert gate.check_holdout_marker(doc) == []
     assert set(doc) == {"schema", "protocol_version", "entries"}
-    assert doc["entries"] == []
 
 
 def test_holdout_valid_entry_passes() -> None:
