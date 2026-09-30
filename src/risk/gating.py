@@ -29,7 +29,7 @@ from typing import Any
 
 from src.core._decimal import _add, _div, _mul, _sub
 from src.core.types import AccountState
-from src.domain.enums import Direction, QuantizationDecision
+from src.domain.enums import Direction, QuantizationDecision, RejectionReason
 from src.domain.trade_plan import TradePlan
 
 from .cost_guards import check_cost_guards, validate_guard_rates
@@ -38,6 +38,24 @@ from .portfolio import check_portfolio
 from .quantization import quantize
 from .sizing import size_position
 from .types import ConstraintSnapshot, OpenPosition, PortfolioVerdict, SizedResult
+
+
+def _plan_geometry_is_valid(trade_plan: TradePlan, candidate_position_side: str) -> bool:
+    """True when the zone is ordered and the stop is on the loss side of the sizing edge.
+
+    LONG needs `entry_min <= entry_max` and `stop < entry_max`; SHORT needs
+    `entry_min <= entry_max` and `stop > entry_min`. The sizing edge is the
+    adverse edge (LONG `entry_max`, SHORT `entry_min`), so this guarantees a
+    positive signed stop distance there; a candidate side that disagrees with
+    the plan geometry fails the test. A stop inside the zone is deliberately
+    NOT rejected here: the Phase 6 strategy fixtures emit such plans, and
+    changing plan generation is outside the cost-model fix.
+    """
+    if trade_plan.entry_min_price > trade_plan.entry_max_price:
+        return False
+    if candidate_position_side == Direction.LONG.value:
+        return trade_plan.stop_loss_price < trade_plan.entry_max_price
+    return trade_plan.stop_loss_price > trade_plan.entry_min_price
 
 
 def size_and_quantize(
@@ -64,6 +82,10 @@ def size_and_quantize(
     `min_stop_distance_rate` and `max_cost_to_risk` are required, validated
     Decimals (no defaults) so a caller cannot disable the cost guards.
 
+    A plan with an inverted zone, or a stop on the wrong side of the sizing
+    edge for the candidate side, returns a NO_TRADE `EXCHANGE_CONSTRAINT`
+    (12-REVIEW WR-02).
+
     Raises:
         ValueError: `candidate_position_side` is not LONG/SHORT, or a guard
             rate is out of range.
@@ -81,6 +103,21 @@ def size_and_quantize(
         min_stop_distance_rate=min_stop_distance_rate,
         max_cost_to_risk=max_cost_to_risk,
     )
+
+    # Fail closed on malformed plan geometry (12-REVIEW WR-02): the adverse-edge
+    # rule (loss at the stop <= allowed_risk) only holds for an ordered zone
+    # with the stop on the loss side of the sizing edge, and the `abs()` stop
+    # distance below would otherwise hide an inverted plan.
+    if not _plan_geometry_is_valid(trade_plan, candidate_position_side):
+        return SizedResult(
+            is_no_trade=True,
+            quantity=None,
+            quantity_before_rounding=Decimal("0"),
+            quantity_after_rounding=Decimal("0"),
+            quantization_decision=QuantizationDecision.REJECTED.value,
+            realized_risk=Decimal("0"),
+            reason_code=RejectionReason.EXCHANGE_CONSTRAINT.value,
+        )
 
     # Adverse edge of the zone: the fill that maximizes the loss at the stop.
     if candidate_position_side == Direction.LONG.value:

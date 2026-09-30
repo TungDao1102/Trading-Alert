@@ -615,3 +615,34 @@ def test_guard_reject_lineage_event() -> None:
     with structlog.testing.capture_logs() as ok_logs:
         _size(_btc_long(), "LONG", _btc_constraints())
     assert not [e for e in ok_logs if e.get("event") == "risk.cost_guard"]
+
+
+# --------------------------------------------------------------------------- #
+# 12-REVIEW WR-02 — malformed plan geometry fails closed instead of sizing.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("plan", "side"),
+    [
+        # Swapped zone: LONG would size off the lower price.
+        (_btc_long(entry_min="60100", entry_max="59900"), "LONG"),
+        # LONG stop above the sizing edge (inverted plan hidden by abs()).
+        (_btc_long(stop="60500"), "LONG"),
+        # SHORT stop below the sizing edge.
+        (_btc_short(stop="59000"), "SHORT"),
+        # Candidate side disagrees with the plan geometry.
+        (_btc_long(), "SHORT"),
+        (_btc_short(), "LONG"),
+    ],
+)
+def test_malformed_plan_geometry_is_exchange_constraint_no_trade(
+    plan: TradePlan, side: str
+) -> None:
+    sized = _size(plan, side, _btc_constraints())
+    assert sized.is_no_trade is True
+    assert sized.reason_code == "EXCHANGE_CONSTRAINT"
+    assert sized.quantity is None
+    verdict = _evaluate(plan, side, _btc_constraints())
+    assert verdict.is_no_trade is True
+    assert verdict.reason_code == "EXCHANGE_CONSTRAINT"
