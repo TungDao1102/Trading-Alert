@@ -654,6 +654,32 @@ def _make_sync_engine(database_url: str | None) -> Engine:
     return create_engine(_resolve_database_url(database_url), future=True)
 
 
+def _utc_now() -> datetime:
+    """Wall-clock seam for the poll loop (tests patch this)."""
+    return datetime.now(UTC)
+
+
+_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _datetime_to_epoch_ms(value: datetime) -> int:
+    """Integer-millisecond epoch of a tz-aware datetime (no float round-trip)."""
+    delta = value.astimezone(UTC) - _EPOCH_UTC
+    return (delta.days * 86400 + delta.seconds) * 1000 + delta.microseconds // 1000
+
+
+def _ms_until_next_tick(now_ms: int, cadence_ms: int) -> int:
+    """Milliseconds from `now_ms` to the next cadence-grid boundary.
+
+    Exactly on a boundary this waits a full cadence. After an overrun the
+    missed boundary is not replayed: the wait is to the next future
+    boundary, so the period never stretches by the tick duration.
+    """
+    if cadence_ms <= 0:
+        raise ValueError(f"cadence_ms must be positive, got {cadence_ms}")
+    return cadence_ms - now_ms % cadence_ms
+
+
 def _floor_to_cadence(dt: datetime, cadence_seconds: float) -> datetime:
     """Floor `dt` to the cadence grid — the tick's expected timestamp."""
     epoch_s = int(dt.timestamp())
@@ -944,8 +970,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"cadence={cadence}s raw_root={raw_root}"
     )
     try:
+        cadence_ms = max(1, int(cadence * 1000))
         while True:
-            observed = datetime.now(UTC)
+            observed = _utc_now()
             session = session_factory()
             try:
                 oi, funding = asyncio.run(
@@ -972,7 +999,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 log.exception("collector.tick.failed")
             finally:
                 session.close()
-            time.sleep(cadence)
+            # Sleep to the next cadence boundary measured AFTER the tick, so
+            # a slower tick over a wider universe does not stretch the period.
+            wait_ms = _ms_until_next_tick(_datetime_to_epoch_ms(_utc_now()), cadence_ms)
+            time.sleep(wait_ms / 1000)
     except KeyboardInterrupt:
         print("collector: stopping")
         return 0
