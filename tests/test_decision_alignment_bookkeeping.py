@@ -180,15 +180,18 @@ def test_requirement_gates_pass_on_real_repo() -> None:
 def test_thirteen_new_ids_are_registered_and_mapped() -> None:
     req = _read(REQUIREMENTS)
     assert len(bk.NEW_REQUIREMENTS) == 13
+    assert all(isinstance(p, str) for p in bk.NEW_REQUIREMENTS.values())
+    assert bk.NEW_REQUIREMENTS["OPS-06"] == "13.1"  # the Phase 13.1 insertion moved it
     for rid, phase in bk.NEW_REQUIREMENTS.items():
         # Status is not pinned: later phases flip these IDs to Complete.
-        assert re.search(rf"^\| {rid} \| Phase {phase} \| \w+ \|", req, flags=re.MULTILINE)
+        row = rf"^\| {rid} \| Phase {re.escape(phase)} \| \w+ \|"
+        assert re.search(row, req, flags=re.MULTILINE)
         assert re.search(rf"^- \[[ x]\] \*\*{rid}\*\*:", req, flags=re.MULTILINE)
 
 
 def test_completed_new_requirement_does_not_fail_rq01() -> None:
     req = _read(REQUIREMENTS).replace(
-        "| OPS-06 | Phase 13 | Pending |", "| OPS-06 | Phase 13 | Complete |"
+        "| OPS-06 | Phase 13.1 | Pending |", "| OPS-06 | Phase 13.1 | Complete |"
     )
     assert _rq(req, _read(ROADMAP))["RQ-01"] is True
 
@@ -229,8 +232,17 @@ def test_dropped_traceability_row_fails_rq01_and_rq03() -> None:
 
 
 def test_wrong_phase_fails_rq01() -> None:
-    req = _read(REQUIREMENTS).replace("| OPS-06 | Phase 13 |", "| OPS-06 | Phase 14 |")
+    req = _read(REQUIREMENTS).replace("| OPS-06 | Phase 13.1 |", "| OPS-06 | Phase 14 |")
     assert _rq(req, _read(ROADMAP))["RQ-01"] is False
+
+
+def test_roadmap_requirements_line_matches_decimal_phase_literally() -> None:
+    roadmap = _read(ROADMAP)
+    assert "OPS-06" in bk._roadmap_requirements_line(roadmap, "13.1")
+    assert "OPS-06" not in bk._roadmap_requirements_line(roadmap, "13")
+    # The dot is a literal: "13.1" must not match a phase heading such as "13x1".
+    stub = "### Phase 13x1: X\n**Requirements**: A-01\n"
+    assert bk._roadmap_requirements_line(stub, "13.1") == ""
 
 
 def test_stale_coverage_count_fails_rq02() -> None:

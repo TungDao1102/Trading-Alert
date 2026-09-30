@@ -237,20 +237,22 @@ def run_glossary() -> list[Gate]:
 
 # The 13 requirement IDs registered by plan 11-07 (F-116 and related findings) and the
 # phase that implements each. They stay Pending here; later phases complete them.
-NEW_REQUIREMENTS: dict[str, int] = {
-    "RISK-03": 20,
-    "RISK-04": 19,
-    "EXEC-04": 17,
-    "EXEC-05": 18,
-    "EXEC-06": 20,
-    "EXEC-07": 19,
-    "DOMN-04": 17,
-    "BKTS-04": 14,
-    "OPS-03": 24,
-    "OPS-04": 24,
-    "OPS-05": 20,
-    "OPS-06": 13,
-    "GOV-02": 26,
+# Phases are strings so a decimal (inserted) phase can be named: OPS-06 moved from Phase 13 to
+# Phase 13.1 when the roadmap inserted the deployment phase (REQUIREMENTS.md and ROADMAP.md agree).
+NEW_REQUIREMENTS: dict[str, str] = {
+    "RISK-03": "20",
+    "RISK-04": "19",
+    "EXEC-04": "17",
+    "EXEC-05": "18",
+    "EXEC-06": "20",
+    "EXEC-07": "19",
+    "DOMN-04": "17",
+    "BKTS-04": "14",
+    "OPS-03": "24",
+    "OPS-04": "24",
+    "OPS-05": "20",
+    "OPS-06": "13.1",
+    "GOV-02": "26",
 }
 
 MIN_REQUIREMENTS = 43
@@ -263,9 +265,9 @@ _LIST_ITEM = re.compile(r"^- \[[ x]\] \*\*([A-Z]+-\d+)\*\*:", flags=re.MULTILINE
 _TRACE_ROW = re.compile(r"^\| ([A-Z]+-\d+) \| Phase ([\d.]+) \| (\w+) \|", flags=re.MULTILINE)
 
 
-def _roadmap_requirements_line(roadmap: str, phase: int) -> str:
+def _roadmap_requirements_line(roadmap: str, phase: str) -> str:
     """The ``**Requirements**:`` line inside the ``### Phase <phase>:`` section."""
-    body = _slice(roadmap, rf"^### Phase {phase}:[^\n]*\n", r"^### Phase ")
+    body = _slice(roadmap, rf"^### Phase {re.escape(phase)}:[^\n]*\n", r"^### Phase ")
     match = re.search(r"^\*\*Requirements\*\*:[^\n]*", body, flags=re.MULTILINE)
     return match.group(0) if match else ""
 
@@ -287,7 +289,7 @@ def check_requirements(req_text: str, roadmap_text: str) -> list[Gate]:
         matching = [r for r in rows if r[0] == rid]
         if len(matching) != 1:
             problems.append(f"{rid} trace rows: {len(matching)}")
-        elif matching[0][1] != str(phase):
+        elif matching[0][1] != phase:
             # Status is deliberately not pinned: later phases complete these IDs.
             problems.append(f"{rid} row is Phase {matching[0][1]}, expected Phase {phase}")
     gates.append(("RQ-01", not problems, "; ".join(problems) or "13 IDs listed and mapped"))
@@ -331,7 +333,7 @@ def check_requirements(req_text: str, roadmap_text: str) -> list[Gate]:
 
     # RQ-04 ROADMAP requirement lines carry the new IDs; placeholder sentences are gone.
     problems = []
-    by_phase: dict[int, list[str]] = {}
+    by_phase: dict[str, list[str]] = {}
     for rid, phase in NEW_REQUIREMENTS.items():
         by_phase.setdefault(phase, []).append(rid)
     for phase, ids in sorted(by_phase.items()):
@@ -340,7 +342,7 @@ def check_requirements(req_text: str, roadmap_text: str) -> list[Gate]:
         if absent:
             problems.append(f"Phase {phase} Requirements line lacks {', '.join(absent)}")
     if not re.search(
-        r"Thirteen new REQ-IDs.*phases 13-26", _roadmap_requirements_line(roadmap, 11)
+        r"Thirteen new REQ-IDs.*phases 13-26", _roadmap_requirements_line(roadmap, "11")
     ):
         problems.append("Phase 11 Requirements line lacks the registration sentence")
     for stale in ("New REQ-IDs are to be added", "A new REQ-ID is to be added"):
