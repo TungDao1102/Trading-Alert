@@ -140,3 +140,18 @@ A narrow isolated optimum is a robustness warning; see `TRADING_STRATEGY_RESEARC
 - `working_type` is an optional closed-set string key; the registry admits only `MARK_PRICE` (D037). `CONTRACT_PRICE` is rejected at load until the backtest simulator (Phase 14) and live placement (Phase 19) read the key; canonical sets use `MARK_PRICE`.
 - Old sets are never edited; they are superseded by new versions (`baseline-v4`, `baseline-no-trade-v2`, `baseline-simple-trend-v2`; D036-D038).
 - The point-in-time research universe manifest at `docs/research/universe/research-universe-v1.toml` is not a parameter set (D039).
+
+Phase 12 cost keys (D046):
+
+| Key | Type | Unit | Baseline | Constraint | Decision |
+|-----|------|------|----------|------------|----------|
+| `exit_slippage_rate` | Decimal | decimal fraction of price | 0.0003 | 0 to 0.01; separate from `expected_slippage`; applied to SL and EOD exits | D046 |
+| `min_stop_distance_rate` | Decimal | fraction of the sizing entry price | 0.003 | open interval 0 to 1 | D046 |
+| `max_cost_to_risk` | Decimal | ratio of round-trip modeled cost to risk per unit | 0.15 | greater than 0 and at most 1 | D046 |
+| `commission_rate_ttl_seconds` | integer | seconds | 3600 | greater than 0 | D046 |
+
+- Fee and slippage rates above 0.01 are rejected at load as unit errors (rates are decimal fractions, not basis points).
+- Runtime configuration must not reuse these key names.
+- The keys are optional in parameter sets that predate Phase 12 and required by the simulator and sizing; legacy sets are refused for sizing and simulation rather than defaulted.
+- The current sets are `baseline-v5` (three families), `baseline-no-trade-v3` and `baseline-simple-trend-v3` at `strategy_version` v4.0.0; the older `baseline-v4` sets stay unchanged and hash-locked.
+- `exit_slippage_rate` joins `cost_model_hash` by presence, so v5 sets carry an eight-key cost identity and older sets keep their seven-key identity (D047).

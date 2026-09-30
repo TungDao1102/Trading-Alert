@@ -31,6 +31,15 @@ Then validate exchange constraints:
 - leverage/margin requirements,
 - current portfolio exposure.
 
+Cost-aware sizing (Phase 12, D046). `risk_per_unit` is measured from the sizing entry, which is the adverse edge of the entry zone (`entry_max` for LONG, `entry_min` for SHORT), not the zone mid. `modeled_costs` is quote currency per unit of base:
+
+```text
+modeled_costs = sizing_entry x (entry_fee_rate + entry_slippage_rate)
+              + stop_price x (exit_fee_rate + exit_slippage_rate)
+```
+
+The loss at the stop, costs included, is therefore at most `allowed_risk` for a fill anywhere in the zone; a fill at the zone mid loses less than the budget, so the recorded realized risk is the worst case. The zone mid remains the reference price for the minimum-notional check. The same function runs in backtest, paper and live.
+
 ## 3. Costs
 
 Risk and performance calculations should consider:
@@ -42,6 +51,15 @@ Risk and performance calculations should consider:
 - partial fill effects.
 
 The entry fee is modeled at the taker rate (D036): entries may fill immediately and V1 uses no post-only order. Canonical parameter sets use `partial_fill_fraction` 1.0; partial and missed fills are studied as a separate sensitivity run (D038).
+
+Cost rates and guards (Phase 12, D046):
+
+- All fee and slippage rates are decimal fractions (0.0005 is 5 basis points); the loader rejects any rate above 0.01 as a unit error.
+- Exit slippage: stop-market exits fill worse than limits, so `exit_slippage_rate` (baseline 0.0003) is applied to SL and EOD exits; entry and TP1 use `expected_slippage`. Slippage is booked per leg as price x quantity x rate.
+- `STOP_TOO_TIGHT`: the stop distance divided by the sizing entry is below `min_stop_distance_rate` (baseline 0.003).
+- `COST_TO_RISK_EXCEEDED`: the round-trip modeled cost divided by `risk_per_unit` is above `max_cost_to_risk` (baseline 0.15). At the modeled round trip of about 14 basis points this ceiling implies a minimum stop of about 0.79 percent of price, above the 0.3 percent floor; the ceiling is the binding gate (D046 item 6, ratification pending).
+- Both guards are evaluated before quantization and reject with the codes above.
+- Live commission: the rate per side is the larger of the parameter and the account taker rate from `GET /fapi/v1/commissionRate` (fee_source `ACCOUNT_MAX`); the BNB discount is ignored. An unknown, stale or malformed account rate is NO_TRADE with `UNCERTAIN_ACCOUNT_STATE`, never zero and never a silent fallback to the parameter. Backtest and paper use the versioned fees.
 
 ## 4. Portfolio limits
 
@@ -124,6 +142,8 @@ FAIL CLOSED
 Exchange quantity steps and minimums are symbol-specific and must be loaded from current exchange metadata. Binance's current USDⓈ-M `exchangeInfo` exposes symbol filters including price/quantity constraints; the application must read those values rather than hard-code them. [Binance Exchange Information](https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Exchange-Information)
 
 Canonical order (D031): floor to stepSize, then reject below min quantity (MIN_QTY_REJECT), then reject below min notional (NOTIONAL_REJECT), then reject when realized risk divided by allowed risk is below minimum_risk_utilization_after_rounding, baseline 60% (UTILIZATION_REJECT), then NO_TRADE; never round quantity up; identical in backtest, paper and live.
+
+The two cost guards of section 3 (`STOP_TOO_TIGHT`, `COST_TO_RISK_EXCEEDED`) run before this quantization order and do not change it.
 
 This is the one order implemented in `src/risk/quantization.py`; AGENTS.md, PROJECT.md and the research protocol restate it by pointer (D031).
 
