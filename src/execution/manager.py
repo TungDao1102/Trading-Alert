@@ -318,8 +318,10 @@ async def execute_approved_plan(
         now_utc: The current UTC-aware datetime (injected for determinism).
         adapter: The Protocol-typed adapter surface.
         risk_kwargs: The kwargs to pass to `evaluate_risk` (trade_plan,
-            account_state, constraint_snapshot, open_positions,
-            daily_loss_quote, ttl, modeled_costs_per_unit,
+            candidate_position_side, account_state, constraint_snapshot,
+            open_positions, daily_loss_quote, now_utc, ttl, cost_rates
+            (`CostRates` from `resolve_live_cost_rates`),
+            min_stop_distance_rate, max_cost_to_risk,
             minimum_risk_utilization_after_rounding, parameter_set).
         safe_mode_controller: Required `SafeModeController`-like object.
             An entry whose exchange state cannot be determined forces

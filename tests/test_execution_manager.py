@@ -381,6 +381,24 @@ def _build_open_positions(case_input: dict[str, Any]) -> list[Any]:
     ]
 
 
+def _build_cost_rates(case_input: dict[str, Any]) -> Any:
+    """Build the CostRates the live boundary requires from the fixture.
+
+    The manager only serves live, so the fixture carries ACCOUNT_MAX rates
+    (as `resolve_live_cost_rates` would return them).
+    """
+    from src.risk.cost_rates import CostRates
+
+    raw = case_input["cost_rates"]
+    return CostRates(
+        fee_rate_entry=_coerce_decimal(raw["fee_rate_entry"], "fee_rate_entry"),
+        entry_slippage_rate=_coerce_decimal(raw["entry_slippage_rate"], "entry_slippage_rate"),
+        fee_rate_exit=_coerce_decimal(raw["fee_rate_exit"], "fee_rate_exit"),
+        exit_slippage_rate=_coerce_decimal(raw["exit_slippage_rate"], "exit_slippage_rate"),
+        fee_source=raw["fee_source"],
+    )
+
+
 def _build_risk_kwargs(case_input: dict[str, Any]) -> dict[str, Any]:
     """Build the kwargs for evaluate_risk from the fixture input."""
     # Convert string threshold values to Decimal (parameter_set expects
@@ -401,9 +419,11 @@ def _build_risk_kwargs(case_input: dict[str, Any]) -> dict[str, Any]:
         "daily_loss_quote": _coerce_decimal(case_input["daily_loss_quote"], "daily_loss_quote"),
         "now_utc": _parse_utc(case_input["now_utc"]),
         "ttl": timedelta(seconds=int(case_input["ttl_seconds"])),
-        "modeled_costs_per_unit": _coerce_decimal(
-            case_input["modeled_costs_per_unit"], "modeled_costs_per_unit"
+        "cost_rates": _build_cost_rates(case_input),
+        "min_stop_distance_rate": _coerce_decimal(
+            case_input["min_stop_distance_rate"], "min_stop_distance_rate"
         ),
+        "max_cost_to_risk": _coerce_decimal(case_input["max_cost_to_risk"], "max_cost_to_risk"),
         "minimum_risk_utilization_after_rounding": _coerce_decimal(
             case_input["minimum_risk_utilization_after_rounding"],
             "minimum_risk_utilization_after_rounding",
@@ -470,6 +490,9 @@ async def test_happy_path_places_one_entry_and_one_sl_leg() -> None:
     # fixture's quantity_after_rounding placeholder. The risk pipeline
     # computes the actual quantity from equity/risk_rate/SL distance.
     assert entry_kwargs["quantity"] > Decimal("0")
+    # Hand-derived (plan 12-08): sizing entry 102, stop 98, cost
+    # 102*0.0006 + 98*0.0008 = 0.1396, floor(10 / 4.1396) at step 0.001.
+    assert entry_kwargs["quantity"] == Decimal("2.415")
     assert entry_kwargs["price"] == _coerce_decimal(
         case_input["expected_limit_price"], "expected_limit_price"
     )
