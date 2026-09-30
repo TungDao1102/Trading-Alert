@@ -42,7 +42,7 @@ def test_reference_tables_cover_ten_old_and_five_new_sets() -> None:
     assert set(gate.PRE_PHASE_FILE_SHA256) == set(gate.PRE_PHASE_HASHES)
     assert len(gate.NEW_SET_IDS) == 5
     assert set(gate.NEW_SET_IDS).isdisjoint(gate.PRE_PHASE_HASHES)
-    assert len(gate.load_pins()) == 16
+    assert len(gate.load_pins()) == 18
 
 
 def test_pa01_passes_on_copy(params_copy: Path) -> None:
