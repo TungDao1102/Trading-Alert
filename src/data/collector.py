@@ -48,7 +48,7 @@ import asyncio
 import os
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -95,6 +95,11 @@ FUNDING_HEALTH_MAX_AGE_SECONDS = 9 * 3600.0
 MAX_FUNDING_PAGES = 50
 FUNDING_PAGE_PACE_SECONDS = 0.2
 
+# Clock-skew probe threshold (D-25, F-706): an absolute local-vs-exchange
+# offset above this many milliseconds logs a warning at collector start.
+# Warn-only; the fail-closed clock check is Phase 18's, VPS chrony is 13.1's.
+CLOCK_OFFSET_WARN_MS = 1000
+
 # Structural adapter surface used by the collector (IN-01). Production
 # passes a `BinanceUsdmAdapter`; tests inject a `FakeAdapter`. A
 # `Protocol` (not a `BinanceUsdmAdapter | object` union) means mypy
@@ -113,6 +118,7 @@ class AdapterLike(Protocol):
     async def open_interest_statistics(
         self, symbol: str, period: str, limit: int = 30
     ) -> list[OiSnapshot]: ...
+    async def server_time(self) -> datetime: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -851,6 +857,48 @@ def _datetime_to_epoch_ms(value: datetime) -> int:
     return (delta.days * 86400 + delta.seconds) * 1000 + delta.microseconds // 1000
 
 
+async def _probe_server_clock(
+    adapter: AdapterLike,
+    *,
+    local_now: Callable[[], datetime] | None = None,
+) -> int | None:
+    """Measure and log the local-vs-exchange clock offset once (D-25, F-706).
+
+    Returns `server - local` in integer milliseconds, or `None` when the
+    probe failed. The local reading is the midpoint of the samples taken
+    before and after the round trip, so half the request latency does not
+    masquerade as skew. An absolute offset above `CLOCK_OFFSET_WARN_MS`
+    logs `collector.clock_offset` at warning level, otherwise at info.
+
+    This is deliberately warn-only: it never raises, never exits and never
+    changes collection behavior, because it must not block a data
+    collector on a diagnostic. Fail-closed clock checks that gate orders
+    and approvals belong to Phase 18; VPS time sync (chrony) is Phase 13.1.
+    """
+    now = local_now if local_now is not None else (lambda: datetime.now(UTC))
+    try:
+        before_ms = _datetime_to_epoch_ms(now())
+        server = await adapter.server_time()
+        after_ms = _datetime_to_epoch_ms(now())
+        offset_ms = _datetime_to_epoch_ms(server) - (before_ms + after_ms) // 2
+    except Exception as exc:
+        log.warning("collector.clock_probe_failed", error_type=type(exc).__name__)
+        return None
+    if abs(offset_ms) > CLOCK_OFFSET_WARN_MS:
+        log.warning(
+            "collector.clock_offset",
+            offset_ms=offset_ms,
+            threshold_ms=CLOCK_OFFSET_WARN_MS,
+        )
+    else:
+        log.info(
+            "collector.clock_offset",
+            offset_ms=offset_ms,
+            threshold_ms=CLOCK_OFFSET_WARN_MS,
+        )
+    return offset_ms
+
+
 def _ms_until_next_tick(now_ms: int, cadence_ms: int) -> int:
     """Milliseconds from `now_ms` to the next cadence-grid boundary.
 
@@ -1126,6 +1174,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     adapter = BinanceUsdmAdapter()
     session_factory = sessionmaker(bind=engine)
+    # Warn-only clock-skew probe (D-25): runs once before the first tick,
+    # never blocks start and never changes the exit code.
+    asyncio.run(_probe_server_clock(adapter))
     if args.once:
         session = session_factory()
         try:

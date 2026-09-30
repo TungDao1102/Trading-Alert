@@ -1501,19 +1501,25 @@ def test_main_once_probes_clock_once_and_probe_failure_keeps_exit_code(
     from src.data.collector import main
 
     list_path = _write_collect_list(tmp_path / "list.toml", list(LIVE_5))
-    common = [
-        "--once",
-        "--collect-list",
-        str(list_path),
-        "--database-url",
-        _sqlite_url(tmp_path),
-        "--raw-root",
-        str(tmp_path / "raw"),
-    ]
+
+    def common(run: str) -> list[str]:
+        # Separate raw root and database per run: the fixed snapshot time
+        # would otherwise hit the D-04 no-overwrite guard on the second run.
+        root = tmp_path / run
+        root.mkdir()
+        return [
+            "--once",
+            "--collect-list",
+            str(list_path),
+            "--database-url",
+            _sqlite_url(root),
+            "--raw-root",
+            str(root / "raw"),
+        ]
 
     healthy = FakeAdapter(oi_responses=[_mk_oi_snapshot(s) for s in LIVE_5])
     _install_fake_adapter(monkeypatch, healthy)
-    assert main(common) == 0
+    assert main(common("healthy")) == 0
     assert healthy.server_time_calls == 1
 
     failing = FakeAdapter(
@@ -1521,9 +1527,9 @@ def test_main_once_probes_clock_once_and_probe_failure_keeps_exit_code(
         server_time_response=RuntimeError("time endpoint down"),
     )
     _install_fake_adapter(monkeypatch, failing)
-    assert main(common) == 0
+    assert main(common("failing")) == 0
     assert failing.server_time_calls == 1
-    assert failing.oi_calls == list(LIVE_5)
+    assert sorted(failing.oi_calls) == sorted(LIVE_5)
 
 
 def test_healthcheck_does_not_probe_clock(
