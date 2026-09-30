@@ -86,6 +86,8 @@ SAFE_MODE blocks new entry orders only, meaning orders that can open or increase
 - a database failure must not block risk-reducing actions (D034);
 - nothing depends on the operator reacting within minutes, because the operator works full-time (D034).
 
+Implementation status: the automatic stop re-placement, the reduce-only close and the DB-outage guarantee above are the target behaviour (D034), built in Phase 20 (EXEC-06, OPS-05). Until then the system enters SAFE_MODE and alerts on an unprotected position but does not re-place the stop-loss or close the position itself, so the operator must place the stop-loss or close the position manually.
+
 This supersedes the earlier "no new live order placement" wording and the cancel-only reconciler decision (Phase 08 D-03 / Phase 09 D-02), per D034.
 
 ## 8. Restart behavior

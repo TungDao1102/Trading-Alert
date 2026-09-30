@@ -44,6 +44,8 @@ SAFE_MODE
 
 The automatic ladder is per D034: the operator works full-time and cannot be assumed to react within minutes.
 
+**Implementation status:** the ladder above is the target behaviour (D034) and is built in Phase 20 (EXEC-06, OPS-05). Until then the system does not re-place a stop-loss or close the position by itself: on an entry without a protective stop it enters SAFE_MODE and alerts, and the operator must place the stop-loss or close the position manually on the exchange. Do not wait for an automatic action.
+
 Never assume a locally stored order ID means the exchange order exists.
 
 ## 4. Orphan protective orders
