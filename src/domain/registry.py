@@ -116,9 +116,12 @@ STRATEGY_KEYS = frozenset(
     }
 )
 
-# Closed set of admissible working_type values (D037). Anything else, e.g. LAST,
-# fails closed at load.
-WORKING_TYPE_VALUES = frozenset({"MARK_PRICE", "CONTRACT_PRICE"})
+# Closed set of admissible working_type values (D037). Anything else, e.g. LAST or
+# CONTRACT_PRICE, fails closed at load. Only MARK_PRICE is admitted because live
+# placement hard-codes it and no backtest/paper code reads the key yet; accepting
+# CONTRACT_PRICE would hash a claim the engine ignores. Widen only together with the
+# consumers (roadmap phases 14 and 19).
+WORKING_TYPE_VALUES = frozenset({"MARK_PRICE"})
 
 
 class UnregisteredParameterSet(Exception):

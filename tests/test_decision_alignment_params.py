@@ -146,7 +146,10 @@ def test_pa04_wrong_working_type_fails(params_copy: Path) -> None:
         'working_type = "CONTRACT_PRICE"',
     )
     problems = gate.check_new_set_facts(params_copy, gate.NEW_SET_IDS)
-    assert any("range-mr/baseline-v4" in p and "D037" in p for p in problems)
+    # The registry now rejects CONTRACT_PRICE at load (WR-08), so PA-04 reports a load failure.
+    assert any(
+        "range-mr/baseline-v4" in p and ("D037" in p or "working_type" in p) for p in problems
+    )
 
 
 def test_pa04_wrong_version_and_missing_supersedes_fail(params_copy: Path) -> None:

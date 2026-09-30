@@ -858,10 +858,16 @@ def _load_tmp(tmp_path: Path, parameters: str) -> ParameterSet:
         registry.REGISTRY_ROOT = original_root
 
 
-@pytest.mark.parametrize("value", ["MARK_PRICE", "CONTRACT_PRICE"])
-def test_working_type_accepts_documented_values(tmp_path: Path, value: str) -> None:
-    loaded = _load_tmp(tmp_path, f'working_type = "{value}"\n')
-    assert loaded.params["working_type"] == value
+def test_working_type_accepts_mark_price(tmp_path: Path) -> None:
+    loaded = _load_tmp(tmp_path, 'working_type = "MARK_PRICE"\n')
+    assert loaded.params["working_type"] == "MARK_PRICE"
+
+
+def test_working_type_rejects_contract_price_until_consumers_exist(tmp_path: Path) -> None:
+    # Live placement hard-codes MARK_PRICE and no backtest/paper code reads the key, so a
+    # CONTRACT_PRICE declaration would be hashed into the set identity but ignored (WR-08).
+    with pytest.raises(StrategyKeyOutsideRegistry):
+        _load_tmp(tmp_path, 'working_type = "CONTRACT_PRICE"\n')
 
 
 @pytest.mark.parametrize(

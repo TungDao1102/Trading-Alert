@@ -137,6 +137,6 @@ A narrow isolated optimum is a robustness warning; see `TRADING_STRATEGY_RESEARC
 
 - `fee_rate_entry` is modeled at the taker rate for canonical sets (D036).
 - `partial_fill_fraction` is 1.0 for every canonical set; partial or missed fills are a separate sensitivity run (D038).
-- `working_type` is an optional closed-set string key, `MARK_PRICE` or `CONTRACT_PRICE`; canonical sets use `MARK_PRICE` (D037).
+- `working_type` is an optional closed-set string key; the registry admits only `MARK_PRICE` (D037). `CONTRACT_PRICE` is rejected at load until the backtest simulator (Phase 14) and live placement (Phase 19) read the key; canonical sets use `MARK_PRICE`.
 - Old sets are never edited; they are superseded by new versions (`baseline-v4`, `baseline-no-trade-v2`, `baseline-simple-trend-v2`; D036-D038).
 - The point-in-time research universe manifest at `docs/research/universe/research-universe-v1.toml` is not a parameter set (D039).
