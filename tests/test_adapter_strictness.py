@@ -8,6 +8,7 @@ a plausible zero / empty string / silently dropped row.
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -15,8 +16,9 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
     ExchangeInformationResponse,
     ExchangeInformationResponseSymbolsInner,
     ExchangeInformationResponseSymbolsInnerFiltersInner,
+    UserCommissionRateResponse,
 )
-from src.adapters.binance_usdm import BinanceUsdmAdapter
+from src.adapters.binance_usdm import BinanceUsdmAdapter, CommissionRates
 
 
 def _price_filter(tick_size: str | None) -> Any:
@@ -67,9 +69,24 @@ class _FakeResponse:
 
 
 class _FakeRest:
-    def __init__(self, info: Any = None, oi_rows: Any = None) -> None:
+    def __init__(
+        self,
+        info: Any = None,
+        oi_rows: Any = None,
+        commission: Any = None,
+        commission_error: Exception | None = None,
+    ) -> None:
         self._info = info
         self._oi_rows = oi_rows or []
+        self._commission = commission
+        self._commission_error = commission_error
+        self.commission_calls: list[tuple[str, int | None]] = []
+
+    def user_commission_rate(self, symbol: str, recv_window: int | None = None) -> _FakeResponse:
+        self.commission_calls.append((symbol, recv_window))
+        if self._commission_error is not None:
+            raise self._commission_error
+        return _FakeResponse(self._commission)
 
     def exchange_information(self) -> _FakeResponse:
         return _FakeResponse(self._info)
@@ -157,3 +174,106 @@ def test_oi_statistics_accepts_complete_rows() -> None:
     out = asyncio.run(adapter.open_interest_statistics(symbol="BTCUSDT", period="5m"))
     assert len(out) == 1
     assert out[0].source == "research"
+
+
+# --------------------------------------------------------------------------- #
+# user_commission_rate (Phase 12, plan 12-05): strict, never fabricates a rate.
+# --------------------------------------------------------------------------- #
+
+
+def _commission_adapter(
+    payload: Any = None,
+    error: Exception | None = None,
+) -> tuple[BinanceUsdmAdapter, _FakeRest]:
+    rest = _FakeRest(commission=payload, commission_error=error)
+    return BinanceUsdmAdapter(sdk_client=_FakeSdk(rest)), rest  # type: ignore[arg-type]
+
+
+def _commission_response(
+    *,
+    symbol: str | None = "BTCUSDT",
+    maker: str | None = "0.0002",
+    taker: str | None = "0.0004",
+    rpi: str | None = "0.00005",
+) -> Any:
+    return UserCommissionRateResponse(
+        symbol=symbol,
+        maker_commission_rate=maker,
+        taker_commission_rate=taker,
+        rpi_commission_rate=rpi,
+    )
+
+
+def test_user_commission_rate_projects_frozen_dataclass() -> None:
+    adapter, rest = _commission_adapter(_commission_response())
+    out = asyncio.run(adapter.user_commission_rate("BTCUSDT"))
+    assert out == CommissionRates(
+        symbol="BTCUSDT",
+        maker_rate=Decimal("0.0002"),
+        taker_rate=Decimal("0.0004"),
+    )
+    assert rest.commission_calls == [("BTCUSDT", None)]
+    with pytest.raises(AttributeError):
+        out.taker_rate = Decimal("0.1")  # type: ignore[misc]
+
+
+def test_user_commission_rate_accepts_zero_taker() -> None:
+    adapter, _ = _commission_adapter(_commission_response(taker="0"))
+    out = asyncio.run(adapter.user_commission_rate("BTCUSDT"))
+    assert out.taker_rate == Decimal("0")
+
+
+def test_user_commission_rate_ignores_missing_rpi() -> None:
+    adapter, _ = _commission_adapter(_commission_response(rpi=None))
+    out = asyncio.run(adapter.user_commission_rate("BTCUSDT"))
+    assert out.taker_rate == Decimal("0.0004")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"taker": None},
+        {"maker": None},
+        {"taker": "abc"},
+        {"maker": "abc"},
+        {"taker": "NaN"},
+        {"taker": "Infinity"},
+        {"maker": "NaN"},
+        {"taker": "-0.0001"},
+        {"maker": "-0.0001"},
+        {"taker": "0.5"},
+        {"maker": "0.5"},
+        {"taker": ""},
+        {"symbol": None},
+        {"symbol": "ETHUSDT"},
+    ],
+)
+def test_user_commission_rate_raises_on_malformed_response(kwargs: dict[str, str | None]) -> None:
+    adapter, _ = _commission_adapter(_commission_response(**kwargs))
+    with pytest.raises(ValueError) as excinfo:
+        asyncio.run(adapter.user_commission_rate("BTCUSDT"))
+    assert "BTCUSDT" in str(excinfo.value)
+
+
+def test_user_commission_rate_raises_on_none_response() -> None:
+    adapter, _ = _commission_adapter(None)
+    with pytest.raises(ValueError, match="BTCUSDT"):
+        asyncio.run(adapter.user_commission_rate("BTCUSDT"))
+
+
+def test_user_commission_rate_error_names_field_not_secrets() -> None:
+    adapter, _ = _commission_adapter(_commission_response(taker="abc"))
+    with pytest.raises(ValueError) as excinfo:
+        asyncio.run(adapter.user_commission_rate("BTCUSDT"))
+    text = str(excinfo.value)
+    assert "takerCommissionRate" in text
+    for forbidden in ("signature", "http", "apiKey", "api_key", "secret"):
+        assert forbidden.lower() not in text.lower()
+
+
+def test_user_commission_rate_propagates_sdk_exception() -> None:
+    boom = RuntimeError("sdk down")
+    adapter, rest = _commission_adapter(error=boom)
+    with pytest.raises(RuntimeError, match="sdk down"):
+        asyncio.run(adapter.user_commission_rate("BTCUSDT"))
+    assert len(rest.commission_calls) == 1
