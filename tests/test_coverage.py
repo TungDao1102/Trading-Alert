@@ -673,3 +673,157 @@ def test_sql_view_defines_candles_oi_and_funding() -> None:
     assert "CREATE OR REPLACE VIEW candles_v1" in text
     assert "CREATE OR REPLACE VIEW coverage_v1" in text
     assert "oi_coverage_v1" in text or "funding_coverage_v1" in text
+
+
+# --------------------------------------------------------------------------- #
+# 13-09 - gap_ranges_for_files: the one definition of an unresolved gap (D-19).
+# --------------------------------------------------------------------------- #
+
+_H = 3_600_000
+_DAY0_MS = int(_dt.datetime(2026, 7, 1, tzinfo=_dt.UTC).timestamp() * 1000)
+
+
+def _utc(ms: int) -> _dt.datetime:
+    return _dt.datetime.fromtimestamp(ms / 1000, tz=_dt.UTC)
+
+
+def _publish_hours(raw_root: Path, hours: list[int]) -> list[Path]:
+    klines = [
+        _kline(open_ms=_DAY0_MS + h * _H, close_ms=_DAY0_MS + h * _H + _H - 1)
+        for h in hours
+    ]
+    return publish_batch(klines, interval="1h", symbol="BTCUSDT", raw_root=raw_root)
+
+
+def _hour_gaps(files: list[Path]) -> list:
+    from src.data.coverage import gap_ranges_for_files
+
+    return gap_ranges_for_files(
+        files,
+        series="trade",
+        symbol="BTCUSDT",
+        interval="1h",
+        time_column="open_time_utc",
+        step_ms=_H,
+        start_utc=_utc(_DAY0_MS),
+        end_utc=_utc(_DAY0_MS + 24 * _H),
+    )
+
+
+def test_gap_ranges_reports_interior_kline_gap(tmp_path: Path) -> None:
+    from src.data.coverage import GapRange
+
+    files = _publish_hours(tmp_path, [h for h in range(24) if h not in (10, 11)])
+    assert _hour_gaps(files) == [
+        GapRange(
+            series="trade",
+            symbol="BTCUSDT",
+            interval="1h",
+            start_utc=_utc(_DAY0_MS + 10 * _H),
+            end_utc=_utc(_DAY0_MS + 12 * _H),
+            missing=2,
+        )
+    ]
+
+
+def test_gap_ranges_complete_series_has_no_gap(tmp_path: Path) -> None:
+    files = _publish_hours(tmp_path, list(range(24)))
+    assert _hour_gaps(files) == []
+
+
+def test_gap_ranges_reports_leading_trailing_and_empty(tmp_path: Path) -> None:
+    files = _publish_hours(tmp_path, list(range(2, 22)))
+    gaps = _hour_gaps(files)
+    assert [(g.start_utc, g.end_utc, g.missing) for g in gaps] == [
+        (_utc(_DAY0_MS), _utc(_DAY0_MS + 2 * _H), 2),
+        (_utc(_DAY0_MS + 22 * _H), _utc(_DAY0_MS + 24 * _H), 2),
+    ]
+    whole = _hour_gaps([])
+    assert [(g.start_utc, g.end_utc, g.missing) for g in whole] == [
+        (_utc(_DAY0_MS), _utc(_DAY0_MS + 24 * _H), 24)
+    ]
+
+
+def _funding_gaps(files: list[Path]) -> list:
+    from src.data.coverage import (
+        DEFAULT_FUNDING_INTERVAL_MS,
+        FUNDING_JITTER_MS,
+        gap_ranges_for_files,
+    )
+
+    return gap_ranges_for_files(
+        files,
+        series="funding",
+        symbol="BTCUSDT",
+        interval="8h",
+        time_column="funding_time_utc",
+        step_ms=DEFAULT_FUNDING_INTERVAL_MS,
+        max_step_ms=DEFAULT_FUNDING_INTERVAL_MS + FUNDING_JITTER_MS,
+        start_utc=_utc(_DAY0_MS),
+        end_utc=_utc(_DAY0_MS + 24 * _H),
+    )
+
+
+def test_funding_jitter_is_not_a_gap_but_a_missing_tick_is(tmp_path: Path) -> None:
+    jittered = [
+        _seed_funding_tick(raw_root=tmp_path, symbol="BTCUSDT", funding_ms=_DAY0_MS + 4),
+        _seed_funding_tick(
+            raw_root=tmp_path, symbol="BTCUSDT", funding_ms=_DAY0_MS + 8 * _H + 8
+        ),
+        _seed_funding_tick(
+            raw_root=tmp_path, symbol="BTCUSDT", funding_ms=_DAY0_MS + 16 * _H + 12
+        ),
+    ]
+    assert _funding_gaps(jittered) == []
+
+    other = tmp_path / "other"
+    sparse = [
+        _seed_funding_tick(raw_root=other, symbol="BTCUSDT", funding_ms=_DAY0_MS),
+        _seed_funding_tick(raw_root=other, symbol="BTCUSDT", funding_ms=_DAY0_MS + 16 * _H),
+    ]
+    gaps = _funding_gaps(sparse)
+    assert [(g.start_utc, g.end_utc, g.missing) for g in gaps] == [
+        (_utc(_DAY0_MS + 8 * _H), _utc(_DAY0_MS + 16 * _H), 1)
+    ]
+
+
+def _oi_gaps(files: list[Path]) -> list:
+    from src.data.coverage import (
+        DEFAULT_OI_INTERVAL_MS,
+        TICK_GAP_FACTOR,
+        gap_ranges_for_files,
+    )
+
+    return gap_ranges_for_files(
+        files,
+        series="open_interest",
+        symbol="BTCUSDT",
+        interval="5m",
+        time_column="observed_at_utc",
+        step_ms=DEFAULT_OI_INTERVAL_MS,
+        max_step_ms=TICK_GAP_FACTOR * DEFAULT_OI_INTERVAL_MS,
+        start_utc=_utc(_DAY0_MS),
+        end_utc=_utc(_DAY0_MS + 30 * 60_000),
+    )
+
+
+def test_oi_gap_bound_is_twice_the_cadence(tmp_path: Path) -> None:
+    ok = [
+        _seed_oi_snapshot(
+            raw_root=tmp_path, symbol="BTCUSDT", observed_ms=_DAY0_MS + i * 320_000
+        )
+        for i in range(6)
+    ]
+    assert _oi_gaps(ok) == []
+
+    other = tmp_path / "other"
+    holed = [
+        _seed_oi_snapshot(
+            raw_root=other, symbol="BTCUSDT", observed_ms=_DAY0_MS + m * 60_000
+        )
+        for m in (0, 5, 16, 21, 26)
+    ]
+    gaps = _oi_gaps(holed)
+    assert [(g.start_utc, g.end_utc, g.missing) for g in gaps] == [
+        (_utc(_DAY0_MS + 10 * 60_000), _utc(_DAY0_MS + 16 * 60_000), 1)
+    ]

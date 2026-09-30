@@ -93,22 +93,39 @@ def _slots(start: datetime, end: datetime, interval: str) -> list[int]:
     return list(range(_ms(start), _ms(end), step))
 
 
-def build_store(raw_root: Path) -> None:
-    """Publish three whole UTC days for BTCUSDT through the real writers."""
+def build_store(
+    raw_root: Path,
+    *,
+    start: datetime = START,
+    end: datetime = END,
+    skip_1m_hour: datetime | None = None,
+) -> None:
+    """Publish whole UTC days for BTCUSDT through the real writers.
+
+    `skip_1m_hour` leaves the sixty 1m trade bars of that hour unpublished.
+    """
+    skipped: set[int] = set()
+    if skip_1m_hour is not None:
+        first = _ms(skip_1m_hour)
+        skipped = set(range(first, first + 3_600_000, 60_000))
     for interval in ("1h", "4h", "1m"):
         publish_batch(
-            [_kline(interval, ms) for ms in _slots(START, END, interval)],
+            [
+                _kline(interval, ms)
+                for ms in _slots(start, end, interval)
+                if not (interval == "1m" and ms in skipped)
+            ],
             interval=interval,
             symbol=SYMBOL,
             raw_root=raw_root,
         )
     publish_mark_batch(
-        [_mark(ms) for ms in _slots(START, END, "1m")],
+        [_mark(ms) for ms in _slots(start, end, "1m")],
         interval="1m",
         symbol=SYMBOL,
         raw_root=raw_root,
     )
-    for ms in range(_ms(START), _ms(END), 8 * 3_600_000):
+    for ms in range(_ms(start), _ms(end), 8 * 3_600_000):
         _write_funding_tick(
             FundingTick(
                 symbol=SYMBOL,
@@ -118,7 +135,7 @@ def build_store(raw_root: Path) -> None:
             ),
             raw_root,
         )
-    for ms in range(_ms(START), _ms(END), 300_000):
+    for ms in range(_ms(start), _ms(end), 300_000):
         _write_oi_snapshot(
             OiSnapshot(
                 symbol=SYMBOL,
@@ -244,3 +261,87 @@ def test_to_case_input_refuses_builder_key_collision(base_store: Path) -> None:
     data = _build(base_store)
     with pytest.raises(ci.CaseInputError):
         data.to_case_input(strategy_bars=[], **_scenario())
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 - fail-closed gap policy (D-19) and range refusal (D-17).
+# --------------------------------------------------------------------------- #
+
+DAY_END = datetime(2026, 7, 2, tzinfo=UTC)
+GAP_HOUR = datetime(2026, 7, 1, 10, tzinfo=UTC)
+
+
+@pytest.fixture(scope="module")
+def gap_store(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One whole day whose 10:00-11:00 one-minute trade bars were never published."""
+    root = tmp_path_factory.mktemp("case_input_gap") / "raw"
+    build_store(root, start=START, end=DAY_END, skip_1m_hour=GAP_HOUR)
+    return root
+
+
+def _gap(start: datetime, minutes: int) -> Any:
+    from src.data.coverage import GapRange
+
+    return GapRange(
+        series="intrabar_1m",
+        symbol=SYMBOL,
+        interval="1m",
+        start_utc=start,
+        end_utc=start + timedelta(minutes=minutes),
+        missing=minutes,
+    )
+
+
+def test_builder_refuses_unresolved_gap(gap_store: Path) -> None:
+    with pytest.raises(ci.CaseInputGapError) as excinfo:
+        _build(gap_store, end_utc=DAY_END)
+    assert isinstance(excinfo.value, ci.CaseInputError)
+    assert list(excinfo.value.gaps) == [_gap(GAP_HOUR, 60)]
+
+
+def test_allowed_gap_is_recorded_on_output(gap_store: Path) -> None:
+    gap = _gap(GAP_HOUR, 60)
+    unrelated = _gap(GAP_HOUR + timedelta(hours=2), 60)
+    data = _build(gap_store, end_utc=DAY_END, allow_gaps=(gap, unrelated))
+    assert data.allowed_gaps == (gap,)
+    close = GAP_HOUR + timedelta(hours=1) - timedelta(milliseconds=1)
+    key = f"BTCUSDT|{close.isoformat()}"
+    assert data.intrabar_1m_map[key] is None
+    # Every other hour keeps its full 60 one-minute candles.
+    others = [v for k, v in data.intrabar_1m_map.items() if k != key]
+    assert others
+    assert all(v is not None and len(v) == 60 for v in others)
+    exported = data.to_case_input(**_scenario())["allowed_gaps"]
+    assert exported == [
+        {
+            "series": "intrabar_1m",
+            "symbol": SYMBOL,
+            "interval": "1m",
+            "start_utc": gap.start_utc.isoformat(),
+            "end_utc": gap.end_utc.isoformat(),
+            "missing": 60,
+        }
+    ]
+
+
+def test_builder_never_pads_an_empty_store(tmp_path: Path) -> None:
+    with pytest.raises(ci.CaseInputGapError) as excinfo:
+        _build(tmp_path / "empty_raw", end_utc=DAY_END)
+    assert {g.series for g in excinfo.value.gaps} >= {"trade", "mark_1m", "funding"}
+
+
+def test_range_after_as_of_day_is_refused(base_store: Path) -> None:
+    with pytest.raises(ci.CaseInputRangeError):
+        _build(base_store, as_of_day_utc=date(2026, 7, 3))
+    # Ending exactly at the start of the as-of day is allowed.
+    data = _build(base_store, as_of_day_utc=date(2026, 7, 4))
+    assert data.end_utc == END
+
+
+def test_naive_or_non_midnight_start_is_refused(base_store: Path) -> None:
+    with pytest.raises(ci.CaseInputRangeError):
+        _build(base_store, start_utc=datetime(2026, 7, 1))
+    with pytest.raises(ci.CaseInputRangeError):
+        _build(base_store, start_utc=datetime(2026, 7, 1, 6, tzinfo=UTC))
+    with pytest.raises(ci.CaseInputRangeError):
+        _build(base_store, end_utc=START)
