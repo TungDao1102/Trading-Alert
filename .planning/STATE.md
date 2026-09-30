@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 11
 current_phase_name: decision-alignment
 status: executing
-stopped_at: Completed 11-03-PLAN.md
-last_updated: "2026-09-30T04:18:24.987Z"
+stopped_at: Completed 11-04-PLAN.md
+last_updated: "2026-09-30T04:29:16.873Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 11 execution started
-state_head: 214dffefbf63cfdda1691d53f7462c2ccf3bd771
+state_head: fb02f8b0bf8d3a103cd13c254cb99a6bcf5ac2b1
 progress:
   total_phases: 28
   completed_phases: 2
   total_plans: 58
-  completed_plans: 52
+  completed_plans: 53
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 11 (decision-alignment) — EXECUTING
-Plan: 4 of 8
+Plan: 5 of 8
 Status: Ready to execute
 Last activity: 2026-09-30 — Phase 11 execution started
 
@@ -91,6 +91,7 @@ Progress: [██████████] 100%
 | Phase 11 P01 | 30 min | 3 tasks | 10 files |
 | Phase 11 P02 | 25min | 3 tasks | 11 files |
 | Phase 11 P03 | 20min | 2 tasks | 3 files |
+| Phase 11 P04 | 25min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -241,6 +242,7 @@ Recent decisions affecting current work:
 - [Phase 11]: D043: research protocol v1.1.0 frozen with D032 pre-registration (100/30 trade floor, N=25 Holm-Bonferroni per family, last-20% single-use holdout); Frozen-on unchanged so the D013 clock is not restarted
 - [Phase 11]: 11-02: working_type is a closed-set registry string key (MARK_PRICE/CONTRACT_PRICE), outside COST_KEYS; D036-D038 delivered as five new v3.0.0 sets, old params files byte-locked and all 15 sets pinned
 - [Phase 11]: 11-03: research-universe manifest is DRAFT with no symbols under docs/research/universe; Phase 13 freezes it with a sha256_hex content hash over sorted symbols
+- [Phase 11]: 11-04: liquidation buffer stays a registry parameter (value chosen in Phase 22); canonical quantization order lives on one labelled line in RISK_MANAGEMENT s11 (D031)
 
 ### Pending Todos
 
@@ -285,6 +287,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T04:18:24.779Z
-Stopped at: Completed 11-03-PLAN.md
+Last session: 2026-09-30T04:29:16.703Z
+Stopped at: Completed 11-04-PLAN.md
 Resume file: None
