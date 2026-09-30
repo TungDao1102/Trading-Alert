@@ -264,6 +264,25 @@ _GATE_KWARG_KEYS: frozenset[str] = frozenset(
 )
 
 
+def _live_cost_rates_are_verified(
+    *, cost_rates: CostRates, candidate_symbol: str, now_utc: datetime
+) -> bool:
+    """True only for ACCOUNT_MAX rates whose commission provenance holds now.
+
+    The label alone is not proof (12-REVIEW WR-01): the rates must carry the
+    commission symbol and observation window, the symbol must be the one being
+    placed, and `now_utc` must lie inside [observed_at, expires_at] so a
+    commission resolved long before approval cannot size a live order.
+    """
+    if cost_rates.fee_source != FEE_SOURCE_ACCOUNT_MAX:
+        return False
+    observed = cost_rates.commission_observed_at_utc
+    expires = cost_rates.commission_expires_at_utc
+    if cost_rates.account_symbol != candidate_symbol or observed is None or expires is None:
+        return False
+    return observed <= now_utc <= expires
+
+
 # --------------------------------------------------------------------------- #
 # Public entry point — execute_approved_plan.
 # --------------------------------------------------------------------------- #
@@ -299,8 +318,10 @@ async def execute_approved_plan(
       2. Enablement guard (LIVE_ORDERS_DISABLED → DISABLED).
       3. SAFE_MODE guard (`guard_new_entries` → RECONCILIATION_REQUIRED).
       4. Live cost-rate gate (D-11, D-12): `cost_rates.fee_source` must be
-         ACCOUNT_MAX, else NO_TRADE UNCERTAIN_ACCOUNT_STATE before any risk
-         or adapter work.
+         ACCOUNT_MAX, and the commission it was resolved from must be for
+         the candidate symbol and still unexpired at `now_utc` (12-REVIEW
+         WR-01), else NO_TRADE UNCERTAIN_ACCOUNT_STATE before any risk or
+         adapter work.
       5. Risk pipeline (evaluate_risk with the identical Phase-5 inputs).
       6. Placement-time gates (headroom, stale, uncertain, portfolio),
          evaluated on the risk verdict's own `sized` (WR-05).
@@ -435,7 +456,11 @@ async def execute_approved_plan(
             "execute_approved_plan: risk_kwargs['cost_rates'] must be a CostRates "
             f"from resolve_live_cost_rates, got {type(cost_rates).__name__}"
         )
-    if cost_rates.fee_source != FEE_SOURCE_ACCOUNT_MAX:
+    if not _live_cost_rates_are_verified(
+        cost_rates=cost_rates,
+        candidate_symbol=risk_kwargs["constraint_snapshot"].symbol,
+        now_utc=now_utc,
+    ):
         return ExecutionOutcome(
             is_no_trade=True,
             reason_code=RejectionReason.UNCERTAIN_ACCOUNT_STATE.value,

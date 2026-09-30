@@ -158,6 +158,9 @@ def resolve_live_cost_rates(
         fee_rate_exit=fee_exit,
         exit_slippage_rate=parameter_rates.exit_slippage_rate,
         fee_source=FEE_SOURCE_ACCOUNT_MAX,
+        account_symbol=account_commission.symbol,
+        commission_observed_at_utc=account_commission.observed_at_utc,
+        commission_expires_at_utc=account_commission.observed_at_utc + ttl,
     )
     return LiveCostRatesResult(rates=rates, reason_code=_OK)
 

@@ -390,12 +390,25 @@ def _build_cost_rates(case_input: dict[str, Any]) -> Any:
     from src.risk.cost_rates import CostRates
 
     raw = case_input["cost_rates"]
+    provenance: dict[str, Any] = {}
+    if raw["fee_source"] == "ACCOUNT_MAX":
+        # Commission provenance as `resolve_live_cost_rates` stamps it: the
+        # candidate symbol, observed one minute before `now_utc`, valid for
+        # the fixture TTL (12-REVIEW WR-01).
+        observed = _parse_utc(case_input["now_utc"]) - timedelta(seconds=60)
+        ttl = timedelta(seconds=int(case_input["ttl_seconds"]))
+        provenance = {
+            "account_symbol": case_input["symbol"],
+            "commission_observed_at_utc": observed,
+            "commission_expires_at_utc": observed + ttl,
+        }
     return CostRates(
         fee_rate_entry=_coerce_decimal(raw["fee_rate_entry"], "fee_rate_entry"),
         entry_slippage_rate=_coerce_decimal(raw["entry_slippage_rate"], "entry_slippage_rate"),
         fee_rate_exit=_coerce_decimal(raw["fee_rate_exit"], "fee_rate_exit"),
         exit_slippage_rate=_coerce_decimal(raw["exit_slippage_rate"], "exit_slippage_rate"),
         fee_source=raw["fee_source"],
+        **provenance,
     )
 
 
@@ -1285,6 +1298,68 @@ async def test_parameter_fee_source_is_no_trade_before_risk_and_adapter(
     assert outcome.is_no_trade is True
     assert outcome.reason_code == "UNCERTAIN_ACCOUNT_STATE"
     assert adapter.calls == []
+
+
+async def test_account_max_rates_for_another_symbol_are_no_trade(monkeypatch: Any) -> None:
+    """12-REVIEW WR-01: ACCOUNT_MAX rates resolved from another symbol's
+    commission never size this order; NO_TRADE before risk and adapter."""
+    from dataclasses import replace
+
+    import src.execution.manager as manager
+
+    def _must_not_run(**_kwargs: Any) -> Any:
+        raise AssertionError("evaluate_risk must not run for a foreign commission")
+
+    monkeypatch.setattr(manager, "evaluate_risk", _must_not_run)
+    risk_kwargs = _build_risk_kwargs(_load_input())
+    risk_kwargs["cost_rates"] = replace(risk_kwargs["cost_rates"], account_symbol="ETHUSDT")
+    adapter = FakeExecutionAdapter()
+
+    outcome = await _run_plan(adapter, risk_kwargs=risk_kwargs)
+
+    assert outcome.is_no_trade is True
+    assert outcome.reason_code == "UNCERTAIN_ACCOUNT_STATE"
+    assert adapter.calls == []
+
+
+async def test_account_max_rates_expired_at_placement_are_no_trade(monkeypatch: Any) -> None:
+    """12-REVIEW WR-01: a commission that expired between resolution and
+    placement is re-checked against the manager's own clock."""
+    from dataclasses import replace
+
+    import src.execution.manager as manager
+
+    def _must_not_run(**_kwargs: Any) -> Any:
+        raise AssertionError("evaluate_risk must not run for a stale commission")
+
+    monkeypatch.setattr(manager, "evaluate_risk", _must_not_run)
+    risk_kwargs = _build_risk_kwargs(_load_input())
+    risk_kwargs["cost_rates"] = replace(
+        risk_kwargs["cost_rates"],
+        commission_expires_at_utc=risk_kwargs["now_utc"] - timedelta(seconds=1),
+    )
+    adapter = FakeExecutionAdapter()
+
+    outcome = await _run_plan(adapter, risk_kwargs=risk_kwargs)
+
+    assert outcome.is_no_trade is True
+    assert outcome.reason_code == "UNCERTAIN_ACCOUNT_STATE"
+    assert adapter.calls == []
+
+
+def test_account_max_label_without_provenance_cannot_be_constructed() -> None:
+    """12-REVIEW WR-01: the ACCOUNT_MAX label alone is not constructible."""
+    import pytest
+    from src.risk.cost_rates import FEE_SOURCE_ACCOUNT_MAX, CostRates
+
+    with pytest.raises(ValueError, match="ACCOUNT_MAX"):
+        CostRates(
+            fee_rate_entry=Decimal("0.0004"),
+            entry_slippage_rate=Decimal("0.0002"),
+            fee_rate_exit=Decimal("0.0004"),
+            exit_slippage_rate=Decimal("0.0002"),
+            fee_source=FEE_SOURCE_ACCOUNT_MAX,
+        )
 
 
 async def test_missing_or_wrong_typed_cost_rates_raises_type_error() -> None:

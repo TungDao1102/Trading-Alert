@@ -25,6 +25,7 @@ never the reverse) and performs no float arithmetic.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from src.core._decimal import _add, _mul
@@ -59,6 +60,13 @@ class CostRates:
     Every rate is a Decimal fraction in [0, MAX_RATE]. `fee_source` records
     whether the fee rates are registry parameters (`PARAMETER`) or the
     account-derived maximum (`ACCOUNT_MAX`).
+
+    An `ACCOUNT_MAX` value must also carry the provenance of the account
+    commission it was resolved from (12-REVIEW WR-01): the commission
+    `account_symbol`, the `commission_observed_at_utc` stamp and the
+    `commission_expires_at_utc` deadline (observation plus TTL). The live
+    gate re-checks these at placement time, so a bare label cannot pass it.
+    A `PARAMETER` value must not carry them.
     """
 
     fee_rate_entry: Decimal
@@ -66,6 +74,9 @@ class CostRates:
     fee_rate_exit: Decimal
     exit_slippage_rate: Decimal
     fee_source: str
+    account_symbol: str | None = None
+    commission_observed_at_utc: datetime | None = None
+    commission_expires_at_utc: datetime | None = None
 
     def __post_init__(self) -> None:
         for fname in _RATE_FIELDS:
@@ -76,6 +87,29 @@ class CostRates:
             raise ValueError(
                 f"fee_source must be one of {sorted(FEE_SOURCES)}, got {self.fee_source!r}"
             )
+        symbol = self.account_symbol
+        observed = self.commission_observed_at_utc
+        expires = self.commission_expires_at_utc
+        if self.fee_source == FEE_SOURCE_ACCOUNT_MAX:
+            if symbol is None or observed is None or expires is None:
+                raise ValueError(
+                    "ACCOUNT_MAX rates require account_symbol, "
+                    "commission_observed_at_utc and commission_expires_at_utc"
+                )
+            if not isinstance(symbol, str) or symbol == "":
+                raise ValueError("account_symbol must be a non-empty string")
+            for fname, stamp in (
+                ("commission_observed_at_utc", observed),
+                ("commission_expires_at_utc", expires),
+            ):
+                if not isinstance(stamp, datetime):
+                    raise TypeError(f"{fname} must be a datetime, got {type(stamp).__name__}")
+                if stamp.tzinfo is None or stamp.utcoffset() != timedelta(0):
+                    raise ValueError(f"{fname} must be UTC-aware")
+            if expires < observed:
+                raise ValueError("commission_expires_at_utc precedes commission_observed_at_utc")
+        elif symbol is not None or observed is not None or expires is not None:
+            raise ValueError("PARAMETER rates must not carry account commission provenance")
 
 
 def _require_price(value: object, field_name: str) -> Decimal:
