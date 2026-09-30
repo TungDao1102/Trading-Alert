@@ -1,7 +1,8 @@
 """Bookkeeping gate module (Phase 11, plan 11-07; D-15, D-16, D-19, D044, D045).
 
 Executable checks for the authority-chain bookkeeping: GLOSSARY reason codes and
-ApprovalResult (GL-01..GL-06), REQUIREMENTS/ROADMAP registration of the 13 new
+ApprovalResult (GL-01..GL-06; the five aliases were retired in Phase 12, so 9.2 is a
+removal record), REQUIREMENTS/ROADMAP registration of the 13 new
 requirement IDs (RQ-01..RQ-05), and the DECISIONS/DOC_STATUS/DATA_MODEL records
 (DC-01..DC-06). ``run()`` returns ``(name, ok, detail)`` tuples. Every check is a pure
 function over text (plus the enum and code-reference sets it is handed) so tests can
@@ -22,8 +23,9 @@ SRC_ROOT = REPO_ROOT / "src"
 
 Gate = tuple[str, bool, str]
 
-# The five synonym codes that D-15 (resolution 3) lists as deprecated aliases.
-ALIASES: tuple[str, ...] = (
+# The five synonym codes removed from RejectionReason in Phase 12 (D-09, D046). They are
+# recorded in GLOSSARY 9.2 and must never re-enter the enum or the 9.1 canonical block.
+RETIRED_ALIASES: tuple[str, ...] = (
     "QUANTIZATION_REJECT",
     "MIN_NOTIONAL_REJECT",
     "RISK_LIMIT",
@@ -118,24 +120,29 @@ def check_glossary(
     referenced_codes: set[str],
     approval_values: set[str],
 ) -> list[Gate]:
-    """Gates GL-01..GL-06 over GLOSSARY text and the code-derived sets."""
+    """Gates GL-01..GL-06 over GLOSSARY text and the code-derived sets.
+
+    Since Phase 12 the alias set is empty: the 9.1 block is the whole enum and section 9.2
+    is a record of the five retired names (``RETIRED_ALIASES``). GL-01 and GL-03 fail if a
+    retired name re-enters the enum or the canonical block.
+    """
     parsed = parse_glossary_sections(text)
     canonical = list(parsed["canonical"])
-    aliases = list(parsed["aliases"])
+    retired_table = list(parsed["aliases"])
     plain = str(parsed["plain"])
     approval = list(parsed["approval"])
     gates: list[Gate] = []
 
-    # GL-01 canonical block: unique tokens, none of the five aliases.
+    # GL-01 canonical block: unique tokens, none of the five retired aliases.
     dups = sorted({t for t in canonical if canonical.count(t) > 1})
-    leaked = sorted(set(canonical) & set(ALIASES))
+    leaked = sorted(set(canonical) & set(RETIRED_ALIASES))
     problems = []
     if not canonical:
         problems.append("section 9.1 block missing or empty")
     if dups:
         problems.append("duplicate tokens: " + ", ".join(dups))
     if leaked:
-        problems.append("aliases in canonical block: " + ", ".join(leaked))
+        problems.append("retired aliases in canonical block: " + ", ".join(leaked))
     gates.append(
         ("GL-01", not problems, "; ".join(problems) or f"{len(canonical)} canonical codes")
     )
@@ -152,20 +159,27 @@ def check_glossary(
         )
     )
 
-    # GL-03 canonical union aliases equals the enum; exactly five aliases.
-    union = set(canonical) | set(aliases)
+    # GL-03 the 9.1 block equals the enum; no retired alias is an enum member; the 9.2
+    # table documents exactly the five removed names (it declares no member).
+    canonical_set = set(canonical)
     problems = []
-    if union != enum_values:
-        only_doc = sorted(union - enum_values)
-        only_enum = sorted(enum_values - union)
-        problems.append(f"union differs from enum (doc-only {only_doc}, enum-only {only_enum})")
-    if sorted(aliases) != sorted(ALIASES):
-        problems.append(f"alias table is {sorted(aliases)}, expected {sorted(ALIASES)}")
+    if canonical_set != enum_values:
+        only_doc = sorted(canonical_set - enum_values)
+        only_enum = sorted(enum_values - canonical_set)
+        problems.append(f"9.1 block differs from enum (doc-only {only_doc}, enum-only {only_enum})")
+    revived = sorted(set(RETIRED_ALIASES) & enum_values)
+    if revived:
+        problems.append("retired aliases in enum: " + ", ".join(revived))
+    if sorted(retired_table) != sorted(RETIRED_ALIASES):
+        problems.append(
+            f"retired table is {sorted(retired_table)}, expected {sorted(RETIRED_ALIASES)}"
+        )
     gates.append(
         (
             "GL-03",
             not problems,
-            "; ".join(problems) or f"{len(canonical)}+{len(aliases)}={len(union)} equals enum",
+            "; ".join(problems)
+            or f"{len(canonical)} canonical equal enum, {len(retired_table)} retired recorded",
         )
     )
 
