@@ -9,15 +9,19 @@ by respx, and every zip is built in-test with `zipfile`.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib
 import io
 import zipfile
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 
+import httpx
 import polars as pl
+import pytest
 import respx
 from polars.testing import assert_frame_equal
 from src.adapters.binance_usdm import Kline, _row_to_kline
@@ -239,3 +243,273 @@ def test_archive_module_reuses_the_adapter_row_mapping() -> None:
     )
     assert "_row_to_kline" in source
     assert "Decimal(" not in source
+
+
+# ---------------------------------------------------------------------------
+# Task 2: fail-closed safety
+# ---------------------------------------------------------------------------
+
+SRC_ARCHIVE = Path(__file__).parent.parent / "src" / "data" / "archive.py"
+
+
+async def test_checksum_mismatch_publishes_nothing(tmp_path: Path) -> None:
+    arc = _arc()
+    with respx.mock(assert_all_called=False) as router:
+        _serve(router, "monthly", "2022-10", _csv(OCT_2022, OCT_ROWS), digest="0" * 64)
+        async with arc.make_archive_client() as client:
+            with pytest.raises(arc.ArchiveChecksumMismatch):
+                await arc.fetch_archive_klines(client, SYMBOL, INTERVAL, "monthly", "2022-10")
+
+            source = arc.ArchiveKlineSource(client, search_end_ms=NOV_2022)
+            with pytest.raises(arc.ArchiveChecksumMismatch):
+                await backfill_symbol_interval(
+                    source,
+                    symbol=SYMBOL,
+                    interval=INTERVAL,
+                    start_ms=OCT_2022,
+                    end_ms=NOV_2022,
+                    raw_root=tmp_path,
+                    config=BackfillConfig(interval_ms=HOUR_MS, pace_seconds=0),
+                    clock=_clock(_ms(2026, 9, 30)),
+                )
+
+    assert _published(tmp_path) == {}
+    assert not list(tmp_path.rglob("*.parquet"))
+
+
+async def test_zip_without_checksum_is_never_parsed() -> None:
+    arc = _arc()
+    with respx.mock(assert_all_called=False) as router:
+        url = _url("monthly", "2022-10")
+        router.get(f"{url}.CHECKSUM").respond(404)
+        router.get(url).respond(200, content=_zip_bytes(_csv(OCT_2022, 3), "x.csv"))
+        async with arc.make_archive_client() as client:
+            with pytest.raises(arc.ArchiveChecksumMissing):
+                await arc.fetch_archive_klines(client, SYMBOL, INTERVAL, "monthly", "2022-10")
+
+
+async def test_missing_zip_and_checksum_is_not_found() -> None:
+    arc = _arc()
+    with respx.mock(assert_all_called=False) as router:
+        _missing(router, "monthly", "2022-10")
+        async with arc.make_archive_client() as client:
+            with pytest.raises(arc.ArchiveNotFound):
+                await arc.fetch_archive_klines(client, SYMBOL, INTERVAL, "monthly", "2022-10")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"{'a' * 64}  OTHERUSDT-1h-2022-10.zip\n",
+        "not-a-digest  FTTUSDT-1h-2022-10.zip\n",
+        "",
+    ],
+)
+async def test_checksum_file_for_another_file_or_malformed_is_rejected(text: str) -> None:
+    arc = _arc()
+    with respx.mock(assert_all_called=False) as router:
+        url = _url("monthly", "2022-10")
+        router.get(f"{url}.CHECKSUM").respond(200, text=text)
+        zip_route = router.get(url).respond(200, content=b"unused")
+        async with arc.make_archive_client() as client:
+            with pytest.raises(arc.ArchiveFormatError):
+                await arc.fetch_archive_klines(client, SYMBOL, INTERVAL, "monthly", "2022-10")
+        assert zip_route.call_count == 0
+
+
+async def test_oversized_content_length_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    arc = _arc()
+    monkeypatch.setattr(arc, "MAX_ZIP_BYTES", 200)
+    with respx.mock(assert_all_called=False) as router:
+        _serve(router, "monthly", "2022-10", _csv(OCT_2022, OCT_ROWS))
+        async with arc.make_archive_client() as client:
+            with pytest.raises(arc.ArchiveTooLarge):
+                await arc.fetch_archive_klines(client, SYMBOL, INTERVAL, "monthly", "2022-10")
+
+
+async def test_oversized_body_without_content_length_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arc = _arc()
+    monkeypatch.setattr(arc, "MAX_ZIP_BYTES", 100)
+
+    async def body() -> AsyncIterator[bytes]:
+        for _ in range(5):
+            yield b"x" * 60
+
+    with respx.mock(assert_all_called=False) as router:
+        url = _url("monthly", "2022-10")
+        router.get(f"{url}.CHECKSUM").respond(200, text=f"{'a' * 64}  FTTUSDT-1h-2022-10.zip\n")
+        router.get(url).mock(return_value=httpx.Response(200, content=body()))
+        async with arc.make_archive_client() as client:
+            with pytest.raises(arc.ArchiveTooLarge):
+                await arc.fetch_archive_klines(client, SYMBOL, INTERVAL, "monthly", "2022-10")
+
+
+async def test_oversized_csv_member_is_rejected_before_reading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arc = _arc()
+    monkeypatch.setattr(arc, "MAX_CSV_BYTES", 500)
+    with respx.mock(assert_all_called=False) as router:
+        _serve(router, "monthly", "2022-10", _csv(OCT_2022, OCT_ROWS))  # ~100 KB CSV
+        async with arc.make_archive_client() as client:
+            with pytest.raises(arc.ArchiveTooLarge):
+                await arc.fetch_archive_klines(client, SYMBOL, INTERVAL, "monthly", "2022-10")
+
+
+def _multi_member_zip(names: list[str], csv_text: str) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in names:
+            zf.writestr(name, csv_text)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ["FTTUSDT-1h-2022-10.csv", "extra.csv"],
+        ["../evil.csv"],
+        ["sub/FTTUSDT-1h-2022-10.csv"],
+        ["OTHERUSDT-1h-2022-10.csv"],
+        [],
+    ],
+)
+async def test_zip_member_path_traversal_is_rejected(names: list[str]) -> None:
+    arc = _arc()
+    blob = _multi_member_zip(names, _csv(OCT_2022, 3))
+    with respx.mock(assert_all_called=False) as router:
+        url = _url("monthly", "2022-10")
+        router.get(f"{url}.CHECKSUM").respond(200, text=f"{_sha(blob)}  FTTUSDT-1h-2022-10.zip\n")
+        router.get(url).respond(200, content=blob)
+        async with arc.make_archive_client() as client:
+            with pytest.raises(arc.ArchiveFormatError):
+                await arc.fetch_archive_klines(client, SYMBOL, INTERVAL, "monthly", "2022-10")
+
+
+async def test_corrupt_zip_bytes_are_a_format_error() -> None:
+    arc = _arc()
+    blob = b"this is not a zip file"
+    with respx.mock(assert_all_called=False) as router:
+        url = _url("monthly", "2022-10")
+        router.get(f"{url}.CHECKSUM").respond(200, text=f"{_sha(blob)}  FTTUSDT-1h-2022-10.zip\n")
+        router.get(url).respond(200, content=blob)
+        async with arc.make_archive_client() as client:
+            with pytest.raises(arc.ArchiveFormatError):
+                await arc.fetch_archive_klines(client, SYMBOL, INTERVAL, "monthly", "2022-10")
+
+
+@pytest.mark.parametrize("width", [16, 10])
+async def test_non_millisecond_timestamp_is_rejected(width: int) -> None:
+    arc = _arc()
+    bad = HEADER + "\n" + _csv_row(OCT_2022, ts_width=width) + "\n"
+    with respx.mock(assert_all_called=False) as router:
+        _serve(router, "monthly", "2022-10", bad)
+        async with arc.make_archive_client() as client:
+            with pytest.raises(arc.ArchiveFormatError):
+                await arc.fetch_archive_klines(client, SYMBOL, INTERVAL, "monthly", "2022-10")
+
+
+async def test_malformed_row_is_a_format_error() -> None:
+    arc = _arc()
+    close_ms = OCT_2022 + HOUR_MS - 1
+    bad = HEADER + "\n" + f"{OCT_2022},not-a-number,1,1,1,1,{close_ms},1,1,0,0,0\n"
+    with respx.mock(assert_all_called=False) as router:
+        _serve(router, "monthly", "2022-10", bad)
+        async with arc.make_archive_client() as client:
+            with pytest.raises(arc.ArchiveFormatError):
+                await arc.fetch_archive_klines(client, SYMBOL, INTERVAL, "monthly", "2022-10")
+
+
+@pytest.mark.parametrize(
+    ("symbol", "interval", "period", "stamp"),
+    [
+        ("ftt", "1h", "monthly", "2022-10"),
+        ("FTT/../USDT", "1h", "monthly", "2022-10"),
+        ("FTTUSDC", "1h", "monthly", "2022-10"),
+        ("FTTUSDT", "2h", "monthly", "2022-10"),
+        ("FTTUSDT", "1h", "monthly", "2022-13"),
+        ("FTTUSDT", "1h", "monthly", "2022-10-01"),
+        ("FTTUSDT", "1h", "daily", "2022-10"),
+        ("FTTUSDT", "1h", "hourly", "2022-10"),
+    ],
+)
+async def test_invalid_inputs_raise_before_any_request(
+    symbol: str, interval: str, period: str, stamp: str
+) -> None:
+    arc = _arc()
+    with respx.mock(assert_all_called=False) as router:
+        router.route().respond(200)
+        async with arc.make_archive_client() as client:
+            with pytest.raises(ValueError, match="archive"):
+                await arc.fetch_archive_klines(client, symbol, interval, period, stamp)
+        with pytest.raises(ValueError, match="archive"):
+            arc.archive_zip_url(symbol, interval, period, stamp)
+        assert router.calls.call_count == 0
+
+
+async def test_redirects_are_not_followed() -> None:
+    arc = _arc()
+    with respx.mock(assert_all_called=False) as router:
+        url = _url("monthly", "2022-10")
+        router.get(f"{url}.CHECKSUM").respond(302, headers={"Location": "https://evil.example/x"})
+        evil = router.get("https://evil.example/x").respond(200, text="x")
+        async with arc.make_archive_client() as client:
+            with pytest.raises(arc.ArchiveError):
+                await arc.fetch_archive_klines(client, SYMBOL, INTERVAL, "monthly", "2022-10")
+        assert evil.call_count == 0
+
+
+async def test_archive_client_pins_timeout_and_no_redirects() -> None:
+    arc = _arc()
+    async with arc.make_archive_client() as client:
+        assert client.follow_redirects is False
+        assert client.timeout.read == arc.HTTP_TIMEOUT_SECONDS
+
+
+async def test_monthly_404_falls_back_to_daily_zips() -> None:
+    arc = _arc()
+    day1, day2 = _ms(2026, 9, 1), _ms(2026, 9, 2)
+    with respx.mock(assert_all_called=False) as router:
+        _missing(router, "monthly", "2026-09")
+        _serve(router, "daily", "2026-09-01", _csv(day1, 24))
+        _serve(router, "daily", "2026-09-02", _csv(day2, 24))
+        _missing(router, "daily", "2026-09-03")
+        async with arc.make_archive_client() as client:
+            source = arc.ArchiveKlineSource(client, search_end_ms=_ms(2026, 9, 4))
+            rows = await source.klines(SYMBOL, INTERVAL, start_ms=day1)
+
+    assert len(rows) == 48
+    assert rows[0].open_time_utc == _EPOCH + timedelta(milliseconds=day1)
+    assert rows[-1].open_time_utc == _EPOCH + timedelta(milliseconds=day2 + 23 * HOUR_MS)
+
+
+async def test_missing_daily_day_is_skipped_never_interpolated() -> None:
+    arc = _arc()
+    day1, day3 = _ms(2026, 9, 1), _ms(2026, 9, 3)
+    with respx.mock(assert_all_called=False) as router:
+        _missing(router, "monthly", "2026-09")
+        _serve(router, "daily", "2026-09-01", _csv(day1, 24))
+        _missing(router, "daily", "2026-09-02")
+        _serve(router, "daily", "2026-09-03", _csv(day3, 24))
+        async with arc.make_archive_client() as client:
+            source = arc.ArchiveKlineSource(client, search_end_ms=_ms(2026, 9, 4))
+            rows = await source.klines(SYMBOL, INTERVAL, start_ms=day1)
+
+    opens = {int((k.open_time_utc - _EPOCH) / timedelta(milliseconds=1)) for k in rows}
+    assert len(rows) == 48
+    assert not any(_ms(2026, 9, 2) <= o < day3 for o in opens)
+
+
+def test_archive_module_never_extracts_to_disk() -> None:
+    tree = ast.parse(SRC_ARCHIVE.read_text(encoding="utf-8"))
+    forbidden = {"extractall", "extract"}
+    offenders = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in forbidden
+    ]
+    assert offenders == []
