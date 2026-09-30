@@ -184,7 +184,7 @@ LONG, zone 49995-50005, stop 49555, equity 10000, risk_rate 0.0005.
    0.13403).
 
 Two open positions (ETHUSDT and SOLUSDT, open_risk 10.00 each) reach the
-max_concurrent_positions cap -> MAX_POSITIONS_REJECT.
+max_open_positions limit (2) -> MAX_POSITIONS_REJECT.
 
 ### daily_stop_block, stale_constraints, uncertain_account_state
 
@@ -194,8 +194,8 @@ These use the happy_path_long geometry (zone 49900-50100, stop 49000, equity
 
 - daily_stop_block: daily_loss_quote 100.00 -> DAILY_STOP_BLOCK, daily state
   DAILY_STOP.
-- stale_constraints: constraint metadata observed at 2026-09-18T22:59:59, more
-  than the freshness window before now (2026-09-19T00:00:00) -> STALE_CONSTRAINTS.
+- stale_constraints: constraint metadata observed at 2026-09-18T22:59:59, older
+  than the 3600 second ttl before now (2026-09-19T00:00:00) -> STALE_CONSTRAINTS.
 - uncertain_account_state: daily_loss_quote null -> UNCERTAIN_ACCOUNT_STATE.
 
 ## Hand-built portfolio candidates (tests/test_risk_portfolio.py)
