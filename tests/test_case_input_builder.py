@@ -344,3 +344,131 @@ def test_naive_or_non_midnight_start_is_refused(base_store: Path) -> None:
         _build(base_store, start_utc=datetime(2026, 7, 1, 6, tzinfo=UTC))
     with pytest.raises(ci.CaseInputRangeError):
         _build(base_store, end_utc=START)
+
+
+# --------------------------------------------------------------------------- #
+# Task 3 - determinism of the builder and its dataset identity (D-18, D-20).
+# --------------------------------------------------------------------------- #
+
+
+def test_dataset_id_is_deterministic(base_store: Path) -> None:
+    """Same store, same call: equal dataset_id and byte-equal canonical payloads (D-20)."""
+    from src.domain.canonical import canonical_bytes, sha256_hex
+
+    first = _build(base_store)
+    second = _build(base_store)
+    assert first.dataset_id == second.dataset_id
+    a = first.to_case_input(**_scenario())
+    b = second.to_case_input(**_scenario())
+    assert canonical_bytes(a) == canonical_bytes(b)
+    assert sha256_hex(a) == sha256_hex(b)
+
+
+def test_dataset_id_changes_with_any_partition(store: Path) -> None:
+    baseline = _build(store).dataset_id
+
+    # One changed close price in one re-written day file (immutable: unlink + republish).
+    day_file = store / "interval=1h" / f"symbol={SYMBOL}" / "date=2026-07-02" / "part.parquet"
+    day_file.unlink()
+    changed = [
+        _kline("1h", ms)
+        if ms != _ms(datetime(2026, 7, 2, 5, tzinfo=UTC))
+        else Kline(
+            symbol=SYMBOL,
+            interval="1h",
+            open_time_utc=_from_ms(ms),
+            close_time_utc=_from_ms(ms + 3_600_000 - 1),
+            open=_price(ms),
+            high=_price(ms) + Decimal("0.05"),
+            low=_price(ms) - Decimal("0.05"),
+            close=_price(ms) + Decimal("0.01"),
+            volume=Decimal("1.5"),
+            quote_volume=Decimal("150"),
+            trade_count=7,
+        )
+        for ms in _slots(datetime(2026, 7, 2, tzinfo=UTC), datetime(2026, 7, 3, tzinfo=UTC), "1h")
+    ]
+    publish_batch(changed, interval="1h", symbol=SYMBOL, raw_root=store)
+    after_rewrite = _build(store).dataset_id
+    assert after_rewrite != baseline
+
+    # One OI tick file removed (10 minute spacing is still inside the gap bound).
+    oi_dir = store / "data_class=oi" / f"symbol={SYMBOL}" / "date=2026-07-02"
+    sorted(oi_dir.glob("tick-*.parquet"))[100].unlink()
+    after_remove = _build(store).dataset_id
+    assert after_remove not in (baseline, after_rewrite)
+
+
+def test_dataset_identity_ignores_file_order(base_store: Path) -> None:
+    data = _build(base_store)
+    files = [base_store / rel for rel in data.files]
+    assert ci.dataset_identity(base_store, files) == data.dataset_id
+    assert ci.dataset_identity(base_store, list(reversed(files))) == data.dataset_id
+
+
+def test_dataset_identity_paths_are_posix_relative(base_store: Path) -> None:
+    """The hashed payload holds forward-slash paths relative to raw_root, nothing else."""
+    import hashlib
+
+    from src.domain.canonical import sha256_hex
+
+    data = _build(base_store)
+    assert data.files == tuple(sorted(data.files))
+    for rel in data.files:
+        assert "\\" not in rel
+        assert ":" not in rel
+        assert not rel.startswith("/")
+    payload = {
+        "files": [
+            {
+                "path": rel,
+                "sha256": hashlib.sha256((base_store / rel).read_bytes()).hexdigest(),
+            }
+            for rel in data.files
+        ]
+    }
+    assert sha256_hex(payload) == data.dataset_id
+
+
+def test_case_input_module_has_no_clock_or_float() -> None:
+    import ast
+
+    tree = ast.parse(Path(ci.__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == "float":
+                pytest.fail(f"float() call at line {node.lineno}")
+        if isinstance(node, ast.Attribute):
+            base = node.value
+            if isinstance(base, ast.Name) and (
+                (base.id == "datetime" and node.attr in {"now", "utcnow", "today"})
+                or (base.id == "date" and node.attr == "today")
+                or (base.id == "time" and node.attr in {"time", "time_ns"})
+            ):
+                pytest.fail(f"wall-clock reference {base.id}.{node.attr} at line {node.lineno}")
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [a.name for a in node.names]
+            module = getattr(node, "module", None)
+            assert "time" not in names and module != "time"
+
+
+def test_builder_rejects_unsafe_symbol_or_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _no_fs(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("filesystem touched before argument validation")
+
+    monkeypatch.setattr(ci, "_kline_files", _no_fs)
+    monkeypatch.setattr(ci, "_tick_files", _no_fs)
+    root = tmp_path / "raw"
+    with pytest.raises(ci.CaseInputError):
+        _build(root, symbol="../BTCUSDT")
+    with pytest.raises(ci.CaseInputError):
+        _build(root, symbol="btcusdt")
+    with pytest.raises(ci.CaseInputError):
+        _build(root, strategy_interval="2h")
+    with pytest.raises(ci.CaseInputError):
+        _build(root, context_interval="../4h")
+    with pytest.raises(ci.CaseInputError):
+        _build(root, series=("trade", "bogus"))
