@@ -110,6 +110,8 @@ The exact wording can change; the underlying numbers and reasons come from deter
 
 The numbers above are illustrative, satisfy `minimum_rr = 2.0` and come from deterministic engine output in production; times are presented in Asia/Ho_Chi_Minh (D025).
 
+The Expected R:R is computed at the zone midpoint reference entry (103925 in this example: risk 675, reward 1350 to TP1 and 2700 to TP2), the same `entry_ref` the planner uses (zone midpoint, no fill model). The `minimum_rr` gate is evaluated at that midpoint, not at the worst-case fill of the zone. A fill at the upper edge (104050) gives a lower realised R:R (about 1.53 to TP1) than the displayed value; the displayed value is the planned reference, not a guarantee.
+
 ## 6. Alert quality rules
 
 - No alert for an unfinished strategy candle unless explicitly designated as an informational preview.
