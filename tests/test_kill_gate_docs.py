@@ -3,11 +3,14 @@
 D-03 declares D013 authoritative over the protocol's originally inverted OR
 wording and demands the resolution be *recorded*, not silently picked. The
 resolution lives in a new DECISIONS row (D030), a clarification amendment to
-the frozen research protocol (v1.0.1) and the DOC_STATUS index.
+the frozen research protocol (v1.0.1, since superseded by the v1.1.0 semantic
+amendment D043) and the DOC_STATUS index.
 
 These tests make that reconciliation regress-proof and re-implement the three
 research-gate witnesses from ``.github/workflows/research-gate.yml`` so an
-amendment can never silently break the freeze check.
+amendment can never silently break the freeze check. The witnesses are
+version-bound: the header ``Protocol version`` (v1.1.0) must equal the DECISIONS
+``protocol v1.1.0 frozen`` row and the DOC_STATUS index line.
 """
 
 from __future__ import annotations
@@ -29,16 +32,18 @@ W1_STATUS = re.compile(r"^>\s*\*\*Status:\*\*\s*FROZEN\b", re.MULTILINE)
 W1_FROZEN_ON = re.compile(r"^>\s*\*\*Frozen on:\*\*\s*[0-9]{4}-[0-9]{2}-[0-9]{2}", re.MULTILINE)
 W2_LISTED = re.compile(r"research/RESEARCH_PROTOCOL\.md")
 W2_PENDING = re.compile(r"research/RESEARCH_PROTOCOL\.md.*(pending-freeze|DRAFT|Living research)")
-W3_FREEZE_ROW = re.compile(
-    r"protocol v1\.0\.0 frozen|RESEARCH_PROTOCOL.*frozen|frozen.*RESEARCH_PROTOCOL"
-)
+W3_FREEZE_ROW = re.compile(r"protocol v1\.1\.0 frozen")
+W2_INDEX_LINE = re.compile(r"^- `research/RESEARCH_PROTOCOL\.md`.*v1\.1\.0")
 
-# Pre-amendment literal lines that must stay verbatim.
+# Header lines that must stay verbatim. Frozen-on is the kill-gate clock start (D030) and
+# never moves; Amended-on records the v1.1.0 amendment without matching the clock pattern.
 PINNED_PROTOCOL_LINES = (
     "> **Status:** FROZEN",
     "> **Frozen on:** 2026-09-19",
-    "> **Supersedes:** none",
+    "> **Amended on:** 2026-09-30",
+    "> **Supersedes:** v1.0.1",
 )
+D043_ROW_PREFIX = "| D043 | Research protocol v1.1.0 frozen | Accepted"
 D029_ROW_PREFIX = "| D029 | Research protocol v1.0.0 frozen | Accepted |"
 
 
@@ -76,12 +81,12 @@ def test_d030_row_present() -> None:
 
 
 def test_protocol_freeze_witnesses_intact() -> None:
-    """The amendment leaves Status/Frozen-on/Supersedes/D029 and all witnesses intact."""
+    """The amendment keeps Status/Frozen-on, adds Amended-on/Supersedes and keeps D029."""
     protocol = _read(PROTOCOL)
     protocol_lines = protocol.splitlines()
     for pinned in PINNED_PROTOCOL_LINES:
         assert pinned in protocol_lines, f"pinned protocol line missing: {pinned!r}"
-    assert "> **Protocol version:** v1.0.1" in protocol_lines
+    assert "> **Protocol version:** v1.1.0" in protocol_lines
     # Witness 1: header FROZEN + Frozen-on date (date itself unchanged, pinned above).
     assert W1_STATUS.search(protocol)
     assert W1_FROZEN_ON.search(protocol)
@@ -111,14 +116,38 @@ def test_protocol_kill_gate_matches_d013() -> None:
     assert "forced green light" in norm
 
 
+def test_d043_row_present() -> None:
+    """D043 is recorded once, appended after D042, citing D032/D030 and the clock rule."""
+    lines = _lines(DECISIONS)
+    d043_idx = [i for i, ln in enumerate(lines) if ln.startswith(D043_ROW_PREFIX)]
+    d042_idx = [i for i, ln in enumerate(lines) if ln.startswith("| D042 |")]
+    assert len(d043_idx) == 1, "D043 must appear exactly once as a table-row start"
+    assert len(d042_idx) == 1
+    assert d043_idx[0] > d042_idx[0], "D043 must be appended after D042"
+    row = lines[d043_idx[0]]
+    for token in (
+        "D032",
+        "D030",
+        "Frozen on",
+        "Amended on",
+        "Holm",
+        "holdout_consumed.json",
+        "protocol v1.1.0 frozen",
+    ):
+        assert token in row, f"D043 row must mention {token}"
+    assert W3_FREEZE_ROW.search(row)
+
+
 def test_doc_status_line_not_pending() -> None:
-    """DOC_STATUS names the protocol at v1.0.1 with D030 and no pending markers."""
+    """DOC_STATUS names the protocol at v1.1.0 with D030, D043 and no pending markers."""
     lines = [ln for ln in _lines(DOC_STATUS) if W2_LISTED.search(ln)]
     assert lines, "DOC_STATUS must list research/RESEARCH_PROTOCOL.md"
     index_lines = [ln for ln in lines if ln.startswith("- `research/RESEARCH_PROTOCOL.md`")]
     assert len(index_lines) == 1
-    assert "v1.0.1" in index_lines[0]
+    assert W2_INDEX_LINE.search(index_lines[0])
+    assert "v1.1.0" in index_lines[0]
     assert "D030" in index_lines[0]
+    assert "D043" in index_lines[0]
     for ln in lines:
         assert not W2_PENDING.search(ln), f"pending marker on DOC_STATUS line: {ln!r}"
 

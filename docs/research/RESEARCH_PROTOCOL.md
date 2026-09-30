@@ -1,9 +1,10 @@
 # Research Protocol (Frozen)
 
-> **Protocol version:** v1.0.1
+> **Protocol version:** v1.1.0
 > **Status:** FROZEN
 > **Frozen on:** 2026-09-19
-> **Supersedes:** none
+> **Amended on:** 2026-09-30
+> **Supersedes:** v1.0.1
 
 ## §0 Identity, status, and one-way flow
 
@@ -20,6 +21,10 @@ This document is the **frozen research contract** for the Binance Futures resear
 - semantic change to dataset splits, cost model, execution simulation, or acceptance gates → bump to `v1.1.0` or `v2.0.0` per Semantic Versioning; add a `Supersedes` line and a migration paragraph.
 
 A semantic change to the protocol triggers a new strategy-version lineage downstream (see `docs/strategy/TRADING_STRATEGY_SPEC.md` §12 Strategy versioning). Living-draft edits never modify a frozen protocol section in place.
+
+### Migration (v1.0.1 to v1.1.0)
+
+This is a semantic amendment (dataset splits, cost and execution assumptions, acceptance gates) per D032 and D043. The v1.0.1 text is unchanged in git history at commit `a68e97736e65b563c7ddbb8bf746d4225ad31f36` and is superseded, not edited. What changes: numeric acceptance thresholds, split proportions, the variant budget and multiple-testing correction, a single-use holdout with a consumed marker, no human pass override, the entry fee at the taker rate (D036), mark-price protective triggers (D037), `partial_fill_fraction` 1.0 as the canonical value (D038), the point-in-time research universe (D039), and one canonical quantization order. What does not change: the D030 kill-gate firing rule, the `Frozen on` clock start (2026-09-19, so the D013 six-month clock is not restarted), and the identity tuple in §5. Downstream strategy-version lineages restart per `docs/strategy/TRADING_STRATEGY_SPEC.md` §12. The full pre-registration body follows in §1–§4.
 
 **Numeric-gate reservation (RSCH-01/unclassified).** Every numeric threshold in §1–§5 — sample sizes, split ratios, ATR multipliers, RR minima, expiry hours, cost assumptions, frequency targets — is **TBD until exercised on real data**. Where a default direction is required to make the doc readable, it is stated as a *range to explore* (e.g. "10–15 symbols research slice", "0.5% baseline risk rate"), never as a frozen fact. A numeric gate appearing in this protocol before real-data exercise is a flagged assumption, never a frozen value.
 
