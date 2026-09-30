@@ -891,11 +891,12 @@ def _run_main(
     adapter: FakeAdapter,
     symbols: Sequence[str],
     *extra: str,
+    minutes: int = 0,
 ) -> int:
     from src.data import backfill_cli
 
     monkeypatch.setattr(backfill_cli, "BinanceUsdmAdapter", lambda: adapter)
-    monkeypatch.setattr(backfill_cli, "_utc_now", _clock())
+    monkeypatch.setattr(backfill_cli, "_utc_now", _clock(minutes))
     manifest = _write_manifest(tmp_path / "manifest.toml")
     collect = _write_collect_list(tmp_path / "collect.toml")
     return backfill_cli.main(
@@ -973,8 +974,12 @@ def test_cli_exit_code_is_3_only_for_missing_data(
 
     out = capsys.readouterr().out
     assert rc == expected_rc
-    row = next(line for line in out.splitlines() if symbol in line and "1h" in line and "trade" in line and expected_cause in line.split())
-    assert expected_cause in row.split()
+    rows = [
+        line.split()
+        for line in out.splitlines()
+        if line.startswith("trade ") and f" {symbol} " in line
+    ]
+    assert [cells[-1] for cells in rows] == [expected_cause]
 
 
 def test_report_json_is_deterministic(
@@ -990,9 +995,12 @@ def test_report_json_is_deterministic(
         "--report-out", str(out_path),
     )
     first_bytes = out_path.read_bytes()
+    # A later run on the same store: the symbol_metadata row is versioned by
+    # observation time, so the second run needs its own instant.
     second = _run_main(
         tmp_path, monkeypatch, FakeAdapter([_filters("BTCUSDT")]), ["BTCUSDT"],
         "--report-out", str(out_path),
+        minutes=1,
     )
 
     assert first == second == 0

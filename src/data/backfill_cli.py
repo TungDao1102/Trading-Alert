@@ -34,7 +34,7 @@ import asyncio
 import sys
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -67,6 +67,12 @@ from src.data.collect_list import (
 from src.data.collector import _make_sync_engine
 from src.data.metadata import MetadataWidthError, refresh_symbol_metadata
 from src.data.store import DEFAULT_RAW_ROOT
+from src.data.sufficiency import (
+    SufficiencyReport,
+    build_sufficiency_report,
+    render_report_table,
+    write_report_json,
+)
 
 log = structlog.get_logger()
 
@@ -143,6 +149,7 @@ class BackfillRunConfig:
     cursor_root: Path
     pace_seconds: float
     dry_run: bool
+    report_out: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +188,7 @@ class BackfillRunReport:
     metadata_rows: int
     missing_from_exchange_info: tuple[str, ...]
     results: dict[tuple[str, str], UniverseBootstrapResult]
+    sufficiency: SufficiencyReport | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -518,7 +526,26 @@ async def run_backfill(
                 f"backfill: done {dataset_name} {interval} rows={result.total_rows} "
                 f"pages={result.total_pages} rejections={result.total_rejections}"
             )
-    return report
+
+    # 4. The data-sufficiency report (D-05): what depth exists, and why any is short.
+    htf_start_ms = depth_start_ms(
+        "1h", run_date=run_date, depth_months=depth, htf_start_date=config.htf_start_date
+    )
+    sufficiency = build_sufficiency_report(
+        config.raw_root,
+        windows,
+        run_date=run_date,
+        depth_months=depth,
+        dataset_start=datetime.fromtimestamp(htf_start_ms / 1000, tz=UTC).date(),
+        dataset_end=run_date,
+        sources={},
+    )
+    for line in render_report_table(sufficiency).splitlines():
+        emit(line)
+    if config.report_out is not None:
+        write_report_json(sufficiency, config.report_out)
+        emit(f"sufficiency: report written to {config.report_out.as_posix()}")
+    return replace(report, sufficiency=sufficiency)
 
 
 # --------------------------------------------------------------------------- #
@@ -608,6 +635,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="Sync DB URL (default: DATABASE_URL_SYNC / DATABASE_URL env).",
     )
     parser.add_argument(
+        "--report-out",
+        type=Path,
+        default=None,
+        help=(
+            "Write the data-sufficiency report as canonical JSON to this path "
+            "(the table is always printed after a backfill)."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Read exchangeInfo and print every window; write and fetch nothing.",
@@ -641,11 +677,17 @@ def _build_config(args: argparse.Namespace) -> BackfillRunConfig:
         cursor_root=cursor_root,
         pace_seconds=float(args.pace_seconds),
         dry_run=bool(args.dry_run),
+        report_out=Path(args.report_out) if args.report_out is not None else None,
     )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the backfill; exit 0 on success, 2 on usage/config errors, 1 on failure."""
+    """Run the backfill.
+
+    Exit 0 on success, 1 on failure, 2 on usage/config errors and 3 when the
+    data-sufficiency report shows missing data (NOT_BACKFILLED, GAP or
+    UNAVAILABLE). The trade count never sets an exit code (D-05).
+    """
     args = _parse_args(argv)
     try:
         config = _build_config(args)
@@ -702,6 +744,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"backfill: complete rows={total_rows} windows={len(report.windows)} "
         f"missing_from_exchange_info={len(report.missing_from_exchange_info)}"
     )
+    if report.sufficiency is not None and report.sufficiency.missing_data:
+        print(
+            "backfill: data is missing (NOT_BACKFILLED, GAP or UNAVAILABLE rows); exit 3",
+            file=sys.stderr,
+        )
+        return 3
     return 0
 
 
