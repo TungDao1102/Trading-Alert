@@ -334,3 +334,160 @@ def test_validate_rejects_tampered_reports(tmp_path: Path) -> None:
     assert any("schema" in p for p in validate_report_file(bad_schema))
     assert any("rows" in p for p in validate_report_file(no_rows))
     assert validate_report_file(tmp_path / "absent.json") != []
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 - per-split 1m coverage, flat-tail warning and the validate subcommand.
+# --------------------------------------------------------------------------- #
+
+
+def test_split_boundaries_follow_protocol_40_40_20() -> None:
+    from src.data.sufficiency import SPLIT_NAMES, split_boundaries
+
+    start, end = _ms(2024, 9, 30), _ms(2026, 9, 30)
+
+    blocks = split_boundaries(start, end)
+
+    assert [name for name, _, _ in blocks] == list(SPLIT_NAMES)
+    assert SPLIT_NAMES == (
+        "development",
+        "validation_fold_1",
+        "validation_fold_2",
+        "validation_fold_3",
+        "validation_fold_4",
+        "holdout",
+    )
+    # 730 days: 40% = 292 d, then four folds of 73 d, then a 146 d holdout.
+    edges = [blocks[0][1], *(b[2] for b in blocks)]
+    assert edges == [
+        _ms(2024, 9, 30),
+        _ms(2025, 7, 19),
+        _ms(2025, 9, 30),
+        _ms(2025, 12, 12),
+        _ms(2026, 2, 23),
+        _ms(2026, 5, 7),
+        _ms(2026, 9, 30),
+    ]
+    # Contiguous and covering the span exactly.
+    for (_, _, prev_end), (_, next_start, _) in zip(blocks, blocks[1:], strict=False):
+        assert prev_end == next_start
+    assert blocks[0][1] == start and blocks[-1][2] == end
+
+
+def test_split_boundaries_use_integer_arithmetic_on_odd_spans() -> None:
+    from src.data.sufficiency import split_boundaries
+
+    blocks = split_boundaries(0, 1_003)
+
+    assert [b[2] for b in blocks] == [401, 501, 601, 702, 802, 1_003]
+    assert all(isinstance(b[1], int) and isinstance(b[2], int) for b in blocks)
+    with pytest.raises(ValueError):
+        split_boundaries(5, 5)
+
+
+def _split_report(tmp_path: Path, *, data_start: int, data_end: int) -> Any:
+    raw = tmp_path / "raw"
+    _publish_trade(raw, "BTCUSDT", "1m", data_start, data_end)
+    window = _window(
+        interval="1m", start_ms=data_start, end_ms=data_end, cause="FULL_DEPTH"
+    )
+    return _report(
+        raw,
+        [window],
+        depth_months={"1m": 12},
+        dataset_start=date(2026, 8, 1),
+        dataset_end=date(2026, 9, 30),
+    )
+
+
+def test_split_coverage_shows_missing_1m_in_development(tmp_path: Path) -> None:
+    from src.data.sufficiency import DEPTH_EXTENSION_NOTE, render_report_table
+
+    # 60 days: blocks end Aug 25, Aug 31, Sep 6, Sep 12, Sep 18, Sep 30.
+    report = _split_report(tmp_path, data_start=_ms(2026, 9, 3), data_end=_ms(2026, 9, 8))
+
+    by_block = {c.block: c for c in report.split_coverage}
+    assert len(report.split_coverage) == 6
+    assert by_block["development"].have_1m == 0
+    assert by_block["development"].expected_1m == 24 * 1440
+    assert by_block["validation_fold_1"].have_1m == 0
+    assert by_block["validation_fold_2"].have_1m == 3 * 1440  # Sep 3 - Sep 6
+    assert by_block["validation_fold_2"].expected_1m == 6 * 1440
+    assert by_block["validation_fold_3"].have_1m == 2 * 1440  # Sep 6 - Sep 8
+    assert by_block["holdout"].have_1m == 0
+    assert report.depth_extension_note == DEPTH_EXTENSION_NOTE
+
+    text = render_report_table(report)
+    assert "50.00%" in text and "33.33%" in text and "0.00%" in text
+    assert "development" in text and "holdout" in text
+    assert DEPTH_EXTENSION_NOTE in text
+
+
+def test_full_1m_coverage_prints_no_extension_note(tmp_path: Path) -> None:
+    from src.data.sufficiency import DEPTH_EXTENSION_NOTE, render_report_table
+
+    raw = tmp_path / "raw"
+    start, end = _ms(2026, 9, 1), _ms(2026, 9, 11)
+    _publish_trade(raw, "BTCUSDT", "1m", start, end)
+
+    report = _report(
+        raw,
+        [_window(interval="1m", start_ms=start, end_ms=end)],
+        depth_months={"1m": 12},
+        dataset_start=date(2026, 9, 1),
+        dataset_end=date(2026, 9, 11),
+    )
+
+    assert all(c.have_1m == c.expected_1m for c in report.split_coverage)
+    assert report.depth_extension_note is None
+    assert DEPTH_EXTENSION_NOTE not in render_report_table(report)
+
+
+def test_flat_tail_is_warned_not_failed(tmp_path: Path) -> None:
+    from src.data.sufficiency import render_report_table
+
+    raw = tmp_path / "raw"
+    # Sep 27, 28 and 29 hold only zero-trade flat bars (the last three stored days).
+    _publish_trade(
+        raw, "FLATUSDT", "1h", _ms(2026, 9, 20), _ms(2026, 9, 30), flat_from_ms=_ms(2026, 9, 27)
+    )
+    # Only two flat days: not flagged.
+    _publish_trade(
+        raw, "LIVEUSDT", "1h", _ms(2026, 9, 20), _ms(2026, 9, 30), flat_from_ms=_ms(2026, 9, 28)
+    )
+    windows = [
+        _window("FLATUSDT", start_ms=_ms(2026, 9, 20)),
+        _window("LIVEUSDT", start_ms=_ms(2026, 9, 20)),
+    ]
+
+    report = _report(raw, windows)
+
+    flags = {r.symbol: r.flat_tail for r in report.rows}
+    assert flags == {"FLATUSDT": True, "LIVEUSDT": False}
+    assert {r.symbol: r.cause for r in report.rows} == {"FLATUSDT": "OK", "LIVEUSDT": "OK"}
+    assert report.missing_data is False  # a warning, never a failure
+    text = render_report_table(report)
+    assert any(
+        line.startswith("WARNING") and "FLATUSDT" in line for line in text.splitlines()
+    )
+    assert not any("LIVEUSDT" in line for line in text.splitlines() if "WARNING" in line)
+
+
+def test_validate_subcommand(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from src.data.sufficiency import main, write_report_json
+
+    good = tmp_path / "good.json"
+    write_report_json(_split_report(tmp_path, data_start=_ms(2026, 9, 3), data_end=_ms(2026, 9, 8)), good)
+    doc = json.loads(good.read_text(encoding="utf-8"))
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({**doc, "schema": "other/9", "rows": []}), encoding="utf-8")
+
+    assert main(["validate", str(good)]) == 0
+    capsys.readouterr()
+    assert main(["validate", str(bad)]) == 1
+    err = capsys.readouterr().err
+    assert "schema" in err and "rows" in err
+    assert main(["validate", str(tmp_path / "absent.json")]) == 1
+    assert main([]) == 2
