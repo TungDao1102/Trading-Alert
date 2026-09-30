@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 12
 current_phase_name: fee-cost-model-correctness
 status: executing
-stopped_at: Completed 12-04-PLAN.md
-last_updated: "2026-09-30T09:06:19.361Z"
+stopped_at: Completed 12-05-PLAN.md
+last_updated: "2026-09-30T09:18:40.126Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 11 execution started
-state_head: 94de95cee5b3f72b3a5270c32067d54e7adf24b1
+state_head: 061e26fd76d574869fbe8710ea708d07c4af4ce6
 progress:
   total_phases: 28
   completed_phases: 2
   total_plans: 69
-  completed_plans: 61
+  completed_plans: 62
 milestone_name: milestone
 ---
 
@@ -100,6 +100,7 @@ Progress: [██████████] 100%
 | Phase 12 P02 | 35min | 3 tasks | 12 files |
 | Phase 12 P03 | 35min | 2 tasks | 9 files |
 | Phase 12 P04 | 25 min | 2 tasks | 15 files |
+| Phase 12 P05 | 25 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -260,6 +261,7 @@ Recent decisions affecting current work:
 - [Phase 12]: 12-02: Phase 12 cost-guard keys are optional registry keys; exit_slippage_rate stays outside the 7-key COST_KEYS so existing cost_model_hash values do not move; five v4.0.0 sets pinned and gated by PA-07
 - [Phase 12]: 12-03: cost_model_hash canonicalizes numeric values to plain normalized text (D-15, D047); exit_slippage_rate joins the hash by presence, COST_KEYS stays 7 keys; legacy models refused for sizing
 - [Phase 12]: 12-04: Phase 6 fixtures regenerated with BAR_HALF_RANGE 0.80 (stops about 1.1 percent) on baseline-v5 / v3 sets; guard clearance pre-flight uses independent literal arithmetic
+- [Phase 12]: 12-05: adapter keeps its own 0.01 commission-rate ceiling (imports nothing from src); commissionRate SOURCES row stays MEDIUM (official page not read directly)
 
 ### Pending Todos
 
@@ -304,6 +306,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-30T09:06:19.171Z
-Stopped at: Completed 12-04-PLAN.md
+Last session: 2026-09-30T09:18:39.901Z
+Stopped at: Completed 12-05-PLAN.md
 Resume file: None
