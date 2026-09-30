@@ -1,0 +1,35 @@
+# Collect list for the OI/funding collector (Phase 13, D-01, D-02).
+#
+# This file is an operational input for the OI/funding collector: the live-5
+# union the top N TRADING USDT perpetuals by 24h quote volume at the date it
+# was chosen. It has no FROZEN semantics and no content hash, and it is not
+# the research-universe manifest (research-universe-v1.toml). A later version
+# supersedes it without touching stored data.
+#
+# Regenerate: python -m src.data.collect_list propose --help
+#
+# Source: GET /fapi/v1/ticker/24hr and GET /fapi/v1/exchangeInfo
+# Source: fetched 2026-09-30T13:05:22Z (UTC)
+
+schema = "collect-list/1"
+list_id = "collect-list-v1"
+chosen_on = "2026-09-30"
+selection_rule = "live-5 union top 15 TRADING USDT PERPETUAL by 24h quoteVolume (GET /fapi/v1/ticker/24hr)"
+top_n = 15
+symbols = [
+    "BNBUSDT",
+    "BTCUSDT",
+    "DOGEUSDT",
+    "ENAUSDT",
+    "ETHUSDT",
+    "HYPEUSDT",
+    "MOVRUSDT",
+    "NEARUSDT",
+    "PUMPUSDT",
+    "QNTUSDT",
+    "SOLUSDT",
+    "SUIUSDT",
+    "WLDUSDT",
+    "XRPUSDT",
+    "ZECUSDT",
+]
