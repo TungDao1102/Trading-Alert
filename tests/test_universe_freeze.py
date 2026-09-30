@@ -22,10 +22,11 @@ from types import ModuleType
 from typing import Any
 
 import pytest
-from binance_sdk_derivatives_trading_usds_futures import BadRequestError
+from binance_sdk_derivatives_trading_usds_futures import BadRequestError, TooManyRequestsError
 from scripts.decision_alignment import universe
 from src.adapters.binance_usdm import Kline, MarkKline, SymbolFilters
 from src.data import universe_freeze as uf
+from src.data.archive import ArchiveNotFound
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DRAFT_FIXTURE = (
@@ -437,3 +438,174 @@ def test_frozen_manifest_preserves_header_comments(world: World, tmp_path: Path)
         if line.startswith("#") and line not in dropped:
             assert line in frozen_lines, line
     assert any(line.startswith("# State: FROZEN on 2024-09-30") for line in frozen_lines)
+
+
+# ------------------------------------------------- Task 2: ranking and evidence rules
+
+
+def _candidate(report: uf.FreezeReport, symbol: str) -> uf.CandidateEvidence:
+    return next(c for c in report.candidates if c.symbol == symbol)
+
+
+def _requests(world: World, symbol: str) -> list[tuple[str, str, str]]:
+    return [call for call in world.calls if call[1] == symbol and call[0] != "exchange_info"]
+
+
+async def test_delivered_before_window_is_ineligible_without_a_request(world: World) -> None:
+    world.add("OLDUSDT", Decimal("900.5"), status="SETTLING", delivery_ms=_ms(WINDOW_START) - 1)
+    report = await _build(world)
+    evidence = _candidate(report, "OLDUSDT")
+    assert not evidence.eligible
+    assert evidence.reason == uf.DELIVERED_BEFORE_WINDOW
+    assert evidence.delivery_date_ms == _ms(WINDOW_START) - 1
+    assert evidence.status == "SETTLING"
+    assert _requests(world, "OLDUSDT") == []
+
+
+async def test_listed_after_window_start_is_ineligible_without_a_request(world: World) -> None:
+    world.add("NEWUSDT", Decimal("900.5"), onboard_ms=_ms(WINDOW_START) + HOUR_MS)
+    report = await _build(world)
+    evidence = _candidate(report, "NEWUSDT")
+    assert evidence.reason == uf.LISTED_AFTER_WINDOW_START
+    assert not evidence.eligible
+    assert _requests(world, "NEWUSDT") == []
+
+
+async def test_incomplete_and_zero_trade_windows_are_ineligible(world: World) -> None:
+    world.add("SHORTUSDT", Decimal("10.5"))
+    world.rest_bars["SHORTUSDT"] = _daily_bars("SHORTUSDT", Decimal("10.5"), days=29)
+    world.add("FLATUSDT", Decimal("10.5"))
+    world.rest_bars["FLATUSDT"] = _daily_bars("FLATUSDT", Decimal("10.5"), zero_trade_day=7)
+    report = await _build(world)
+    short = _candidate(report, "SHORTUSDT")
+    assert (short.reason, short.days, short.source) == (uf.INCOMPLETE_WINDOW, 29, "REST")
+    assert short.quote_volume_sum is None
+    flat = _candidate(report, "FLATUSDT")
+    assert (flat.reason, flat.days) == (uf.ZERO_TRADE_DAY, 30)
+    assert report.ranked == ()
+
+
+async def test_rest_invalid_symbol_falls_back_to_archive(world: World) -> None:
+    world.add("DELUSDT", Decimal("77.5"), rest=False, archive=True)  # listed, REST says -1121
+    report = await _build(world)
+    evidence = _candidate(report, "DELUSDT")
+    assert evidence.source == "ARCHIVE"
+    assert evidence.eligible
+    assert evidence.quote_volume_sum == Decimal("77.5") * 30
+    assert evidence.quote_volume_mean == Decimal("77.5")
+
+
+async def test_short_rest_window_tries_archive(world: World) -> None:
+    world.add("PARTUSDT", Decimal("40.5"), archive=True)
+    world.rest_bars["PARTUSDT"] = _daily_bars("PARTUSDT", Decimal("40.5"), days=29)
+    report = await _build(world)
+    evidence = _candidate(report, "PARTUSDT")
+    assert (evidence.source, evidence.eligible) == ("ARCHIVE", True)
+
+
+async def test_unavailable_symbol_is_listed_not_dropped(world: World) -> None:
+    world.add("GONEUSDT", Decimal("1.5"), rest=False)  # REST -1121, archive has nothing
+    world.add("BROKENUSDT", Decimal("1.5"), rest=False)
+    world.archive_errors["BROKENUSDT"] = ArchiveNotFound("no file")
+    report = await _build(world)
+    for symbol in ("GONEUSDT", "BROKENUSDT"):
+        evidence = _candidate(report, symbol)
+        assert (evidence.reason, evidence.source, evidence.eligible) == (
+            uf.UNAVAILABLE,
+            "NONE",
+            False,
+        )
+    assert dict(report.unrankable) == {
+        "BROKENUSDT": uf.UNAVAILABLE,
+        "GONEUSDT": uf.UNAVAILABLE,
+    }
+    assert "GONEUSDT" not in report.proposed_symbols
+
+
+async def test_rate_limit_is_retried_and_never_switches_source(world: World) -> None:
+    world.add("SLOWUSDT", Decimal("12.5"), archive=True)
+    limited = TooManyRequestsError(error_message="slow down", status_code=429)
+    world.rest_errors[("SLOWUSDT", "1d")] = [limited, limited]
+    report = await _build(world)
+    assert _candidate(report, "SLOWUSDT").source == "REST"
+    day_calls = [c for c in world.calls if c[:2] == ("klines", "SLOWUSDT") and c[2] == "1d"]
+    assert len(day_calls) == 3
+    assert not [c for c in world.calls if c[0] == "archive" and c[1] == "SLOWUSDT"]
+
+
+async def test_exhausted_rate_limit_fails_the_run(world: World) -> None:
+    world.add("SLOWUSDT", Decimal("12.5"), archive=True)
+    limited = TooManyRequestsError(error_message="slow down", status_code=429)
+    world.rest_errors[("SLOWUSDT", "1d")] = [limited] * 20
+    with pytest.raises(TooManyRequestsError):
+        await _build(world)
+    assert not [c for c in world.calls if c[0] == "archive" and c[1] == "SLOWUSDT"]
+
+
+async def test_equal_sums_at_the_cut_are_ordered_by_symbol(world: World) -> None:
+    world.add("AAAUSDT", Decimal("100.5"))
+    world.add("CCCUSDT", Decimal("50.5"))
+    world.add("BBBUSDT", Decimal("50.5"))
+    report = await _build(world, top_n=2)
+    assert [symbol for symbol, _ in report.ranked] == ["AAAUSDT", "BBBUSDT", "CCCUSDT"]
+    assert report.proposed_symbols == ("AAAUSDT", "BBBUSDT")
+
+
+async def test_availability_records_trade_and_mark_per_proposed_symbol(world: World) -> None:
+    world.add("RESTUSDT", Decimal("30.5"))
+    world.add("ARCHUSDT", Decimal("20.5"), listed=False, rest=False, archive=True)
+    world.add("NOMARKUSDT", Decimal("10.5"))
+    world.mark_missing.add("NOMARKUSDT")
+    report = await _build(world)
+    assert report.availability == (
+        ("ARCHUSDT", "ARCHIVE", "UNAVAILABLE"),
+        ("NOMARKUSDT", "REST", "UNAVAILABLE"),
+        ("RESTUSDT", "REST", "REST"),
+    )
+    assert report.proposed_symbols == ("ARCHUSDT", "NOMARKUSDT", "RESTUSDT")  # never re-ranked
+
+
+async def test_fewer_eligible_than_top_n_reports_short_and_freeze_refuses(
+    world: World, tmp_path: Path
+) -> None:
+    for i in range(5):
+        world.add(f"S{i}USDT", Decimal(f"{i + 1}0.5"))
+    report = await _build(world)
+    assert len(report.proposed_symbols) == 5
+    report_path = tmp_path / "report.json"
+    uf.write_report(report, report_path)
+    manifest = _tmp_manifest(tmp_path)
+    witness = _tmp_witness(tmp_path)
+    before = (manifest.read_bytes(), witness.read_bytes())
+    with pytest.raises(uf.FreezeError, match="does not validate"):
+        uf.freeze(
+            report_path,
+            approve_sha256=report.proposal_sha256,
+            manifest_path=manifest,
+            witness_path=witness,
+        )
+    assert (manifest.read_bytes(), witness.read_bytes()) == before
+
+
+def test_freeze_report_is_byte_deterministic(world: World, tmp_path: Path) -> None:
+    import asyncio
+
+    _tracer_world(world)
+    first = asyncio.run(_build(world))
+    second = asyncio.run(_build(world))
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    uf.write_report(first, a)
+    uf.write_report(second, b)
+    assert a.read_bytes() == b.read_bytes()
+    assert first.proposal_sha256 == second.proposal_sha256
+
+
+def test_module_has_no_float_call_or_annotation() -> None:
+    import ast
+
+    tree = ast.parse(Path(uf.__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            assert node.func.id != "float"
+        if isinstance(node, ast.AnnAssign) and isinstance(node.annotation, ast.Name):
+            assert node.annotation.id != "float"
