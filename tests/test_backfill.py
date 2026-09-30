@@ -164,20 +164,22 @@ def _read_published_symbol(
 async def test_windowed_cursor_emits_every_expected_candle(
     tmp_path: Path,
 ) -> None:
-    """    A window covering 3 pages of 5 candles each publishes all 15 rows.
+    """    A window covering 3 pages of 8 candles each publishes the whole day.
 
     No silent truncation: every open_time in the window appears in
-    Parquet exactly once. Page size is forced to 5 via `BackfillConfig.page_size`
-    so the paginator needs three fetches to walk the full window.
+    Parquet exactly once. Page size is forced to 8 via `BackfillConfig.page_size`
+    so the paginator needs three fetches to walk the full window. The window
+    is one whole closed UTC day (D-13: a partial day would be held back), so
+    the 24 bars publish as a single `date=` file.
     """
     base_ms = BASE_OPEN_MS
-    total_bars = 15
+    total_bars = 24
 
     pages: list[list[Kline]] = []
     for page_idx in range(3):
         bars: list[Kline] = []
-        for i in range(5):
-            open_ms = base_ms + (page_idx * 5 + i) * INTERVAL_MS
+        for i in range(8):
+            open_ms = base_ms + (page_idx * 8 + i) * INTERVAL_MS
             bars.append(
                 _mk_kline(open_ms=open_ms, close_ms=open_ms + INTERVAL_MS - 1)
             )
@@ -185,7 +187,7 @@ async def test_windowed_cursor_emits_every_expected_candle(
 
     adapter = FakeAdapter(responses=pages)
 
-    cfg = BackfillConfig(interval_ms=INTERVAL_MS, pace_seconds=0, page_size=5)
+    cfg = BackfillConfig(interval_ms=INTERVAL_MS, pace_seconds=0, page_size=8)
     result = await backfill_symbol_interval(
         adapter,  # type: ignore[arg-type]
         symbol="BTCUSDT",
@@ -220,7 +222,9 @@ async def test_forming_candle_at_frozen_now_is_excluded(
 
     Duplicated here from test_tracer_slice.py because the 02-03 plan
     enumerates it as one of the four behaviors the full runner must
-    demonstrate.
+    demonstrate. Since D-13 the frozen clock sits inside the CURRENT UTC day,
+    so the closed-day rule also excludes the closed bar of that day: nothing
+    is published, nothing is fetched, and the cursor is untouched.
     """
     closed_open = BASE_OPEN_MS
     forming_open = closed_open + INTERVAL_MS
@@ -231,6 +235,7 @@ async def test_forming_candle_at_frozen_now_is_excluded(
 
     adapter = FakeAdapter(responses=[[closed_bar, forming_bar]])
     cfg = BackfillConfig(interval_ms=INTERVAL_MS, pace_seconds=0)
+    cursor_store = CursorStore(root=tmp_path / "cursors")
 
     result = await backfill_symbol_interval(
         adapter,  # type: ignore[arg-type]
@@ -241,12 +246,15 @@ async def test_forming_candle_at_frozen_now_is_excluded(
         raw_root=tmp_path,
         config=cfg,
         clock=_frozen_clock(frozen_at),
+        cursor_store=cursor_store,
     )
 
-    assert result.rows_published == 1
-    assert result.pages == 1
+    assert result.rows_published == 0
+    assert result.pages == 0
+    assert adapter.calls == []
     published = _read_published_symbol(tmp_path, symbol="BTCUSDT", interval=INTERVAL)
-    assert published == [closed_open]
+    assert published == []
+    assert cursor_store.read(symbol="BTCUSDT", interval=INTERVAL) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -273,7 +281,9 @@ async def test_killed_run_resumes_from_persisted_cursor(
     adapter raises on call #2. Run 2 reads the cursor, starts at 24h,
     and walks pages 2-4 — every date is published exactly once across
     both runs (no double-publish), and the published set is exactly the
-    97 unique candles the fixture defines.
+    96 unique candles inside the window. The run ends at the day boundary
+    `base + 96h` (D-13), so the fixture's trailing 97th candle (open ==
+    end) is never published: only whole closed days D..D+3 exist.
     """
     base_ms = BASE_OPEN_MS
     bars_per_page = 25
@@ -291,14 +301,17 @@ async def test_killed_run_resumes_from_persisted_cursor(
         pages.append(bars)
 
     # Expected unique candles: 100 in the fixture, 3 boundary overlaps
-    # (24h, 48h, 72h each appear twice) → 97 unique. The open_times
-    # come back as datetimes from the fixture; we compare as ints below.
-    expected_unique_open_times_ms = sorted(
+    # (24h, 48h, 72h each appear twice) → 97 unique, of which the 97th
+    # (open == end_ms, 96h) is outside the window. The open_times come back
+    # as datetimes from the fixture; we compare as ints below.
+    end_ms = base_ms + total_pages * (bars_per_page - 1) * INTERVAL_MS
+    all_unique_ms = sorted(
         {int(b.open_time_utc.timestamp() * 1000) for page in pages for b in page}
     )
-    assert len(expected_unique_open_times_ms) == 97
-    # D is fully covered by page 1's first 24 candles (0h..23h).
-    assert expected_unique_open_times_ms[-1] == base_ms + 96 * INTERVAL_MS  # last candle = 96h
+    assert len(all_unique_ms) == 97
+    assert all_unique_ms[-1] == end_ms  # last candle = 96h, outside the window
+    expected_unique_open_times_ms = [t for t in all_unique_ms if t < end_ms]
+    assert len(expected_unique_open_times_ms) == 96
 
     cursor_store = CursorStore(root=tmp_path / "cursors")
     cfg = BackfillConfig(interval_ms=INTERVAL_MS, pace_seconds=0, page_size=bars_per_page)
@@ -343,19 +356,19 @@ async def test_killed_run_resumes_from_persisted_cursor(
     )
 
     # Resume must NOT republish D — and must publish exactly the remaining
-    # 73 unique candles across D+1 (24), D+2 (24), D+3 (24), and D+4's
-    # single trailing candle.
-    assert result.rows_published == 73, (
-        f"expected 73 rows on resume (24 + 24 + 24 + 1), got "
+    # 72 unique candles across D+1 (24), D+2 (24) and D+3 (24); D+4's
+    # boundary candle is outside the window.
+    assert result.rows_published == 72, (
+        f"expected 72 rows on resume (24 + 24 + 24), got "
         f"{result.rows_published}"
     )
     assert result.structural_rejections == 0
 
-    # The full Parquet set contains exactly the 97 unique candles — no
+    # The full Parquet set contains exactly the 96 unique candles — no
     # double-publish of D, no missing D+1 boundary.
     published = _read_published_symbol(tmp_path, symbol="BTCUSDT", interval=INTERVAL)
     assert published == expected_unique_open_times_ms, (
-        "resume must produce the full 97 unique candles with no duplicates"
+        "resume must produce the full 96 unique candles with no duplicates"
     )
 
 
@@ -413,7 +426,9 @@ async def test_corrupt_page_rejected_cursor_not_advanced_past_good_data(
         symbol="BTCUSDT",
         interval=INTERVAL,
         start_ms=base_ms,
-        end_ms=base_ms + 2 * bars_per_page * INTERVAL_MS,
+        # Day boundary (D-13): the window covers the whole closed day, so the
+        # buffered good rows publish at the end-of-loop flush.
+        end_ms=base_ms + 24 * INTERVAL_MS,
         raw_root=tmp_path,
         config=cfg,
         cursor_store=cursor_store,

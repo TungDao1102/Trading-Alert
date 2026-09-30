@@ -135,9 +135,15 @@ async def test_paginator_drops_forming_candle_at_frozen_clock(tmp_path: Path) ->
     # The frozen clock sits inside the forming bar so the closed bar's
     # close_time is in the past (kept) and the forming bar's close_time is
     # in the future (dropped).
+    #
+    # D-13: the closed-day rule clamps the run to the start of the current
+    # UTC day. The reference instant is 22:13:20 UTC on 2023-11-14 and the
+    # forming bar straddles midnight, so the frozen clock is 00:10 UTC on
+    # 2023-11-15: both bars open inside the closed day 2023-11-14 (the
+    # close_time filter, not the day cut, is what drops the forming bar).
     closed_open = 1_700_000_000_000          # fixed reference instant
     forming_open = closed_open + 3_600_000   # +1h (next bar starts here)
-    frozen_at = forming_open + 60_000        # +1min into the forming bar
+    frozen_at = 1_700_007_000_000            # 2023-11-15T00:10Z, in the forming bar
 
     closed_bar = _mk_kline(
         open_ms=closed_open,
@@ -191,10 +197,15 @@ async def test_duplicate_open_time_across_pages_collapse_to_one_row(
 ) -> None:
     # Two pages with an overlapping row at the boundary. The paginator
     # must dedup so the overlap row only lands in Parquet once.
-    bar0 = _mk_kline(open_ms=1_700_000_000_000, close_ms=1_700_000_000_000 + 3_599_999)
-    bar1 = _mk_kline(open_ms=1_700_000_000_000 + 3_600_000, close_ms=1_700_000_000_000 + 7_199_999)
+    #
+    # Mid-day mechanics (D-13): the window is the first three hours of a past
+    # UTC day, so it passes `terminal_end=True` (a delivered contract's last
+    # day) — otherwise the partly covered day would be held back.
+    base = 1_699_920_000_000  # 2023-11-14T00:00Z
+    bar0 = _mk_kline(open_ms=base, close_ms=base + 3_599_999)
+    bar1 = _mk_kline(open_ms=base + 3_600_000, close_ms=base + 7_199_999)
     # `bar1` repeats on the next page (overlap).
-    bar2 = _mk_kline(open_ms=1_700_000_000_000 + 7_200_000, close_ms=1_700_000_000_000 + 10_799_999)
+    bar2 = _mk_kline(open_ms=base + 7_200_000, close_ms=base + 10_799_999)
 
     adapter = FakeAdapter(responses=[[bar0, bar1], [bar1, bar2]])
 
@@ -208,10 +219,11 @@ async def test_duplicate_open_time_across_pages_collapse_to_one_row(
         adapter,  # type: ignore[arg-type]
         symbol="BTCUSDT",
         interval="1h",
-        start_ms=1_700_000_000_000,
-        end_ms=1_700_000_000_000 + 3 * 3_600_000,
+        start_ms=base,
+        end_ms=base + 3 * 3_600_000,
         raw_root=tmp_path,
         config=cfg,
+        terminal_end=True,
     )
 
     # Three distinct bars total; bar1 must not have been published twice.
@@ -230,9 +242,9 @@ async def test_duplicate_open_time_across_pages_collapse_to_one_row(
         int(t.timestamp() * 1000) for t in published["open_time_utc"].to_list()
     ]
     assert open_times_ms == [
-        1_700_000_000_000,
-        1_700_000_000_000 + 3_600_000,
-        1_700_000_000_000 + 7_200_000,
+        base,
+        base + 3_600_000,
+        base + 7_200_000,
     ]
 
 
@@ -245,7 +257,10 @@ async def test_paced_fetch_sleeps_and_retries_429_then_resumes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # First call raises a rate-limit; second call returns one valid page.
-    bar0 = _mk_kline(open_ms=1_700_000_000_000, close_ms=1_700_000_000_000 + 3_599_999)
+    # Mid-day mechanics (D-13): a one-hour window on a past UTC day passes
+    # `terminal_end=True`, otherwise the partly covered day would be held back.
+    base = 1_699_920_000_000  # 2023-11-14T00:00Z
+    bar0 = _mk_kline(open_ms=base, close_ms=base + 3_599_999)
     adapter = FakeAdapter(
         responses=[
             _FakeRateLimitError("simulated 429 from Binance"),
@@ -272,10 +287,11 @@ async def test_paced_fetch_sleeps_and_retries_429_then_resumes(
         adapter,  # type: ignore[arg-type]
         symbol="BTCUSDT",
         interval="1h",
-        start_ms=1_700_000_000_000,
-        end_ms=1_700_000_000_000 + 3_600_000,
+        start_ms=base,
+        end_ms=base + 3_600_000,
         raw_root=tmp_path,
         config=cfg,
+        terminal_end=True,
     )
 
     # The retry happened (two adapter calls — verified via the fake),
@@ -284,8 +300,8 @@ async def test_paced_fetch_sleeps_and_retries_429_then_resumes(
     assert len(adapter.calls) == 2, (
         f"expected retry to issue a 2nd adapter call, got {len(adapter.calls)}"
     )
-    assert adapter.calls[0]["start_ms"] == 1_700_000_000_000
-    assert adapter.calls[1]["start_ms"] == 1_700_000_000_000, (
+    assert adapter.calls[0]["start_ms"] == base
+    assert adapter.calls[1]["start_ms"] == base, (
         "paginator must resume from the original cursor after a 429 retry"
     )
     assert result.rows_published == 1

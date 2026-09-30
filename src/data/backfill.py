@@ -13,7 +13,16 @@ The paginator:
   6. Sends every batch through the quality gate; corrupt batches raise
      before any Parquet write (D-10 fail-closed).
   7. Persists per-file via `publish_batch` (D-04 immutability — file
-     already on disk raises `FileExistsError`).
+     already on disk raises `FileExistsError`; the write itself is atomic,
+     D-14).
+  8. Publishes ONLY whole, closed UTC days (D-13, F-402): the effective end
+     of every run is `min(end_ms, start of the current UTC day)`, rows at or
+     after it are dropped before buffering, and a day is published only when
+     the fetch window covered all of it (or the caller marks the end as
+     `terminal_end`, a delivered contract's last day). A partially fetched
+     day is held back, counted in `BackfillResult.partial_days_held`, and the
+     cursor never advances past it — published Parquet is immutable, so a
+     partial day could never be repaired.
 
 Production use: called by `02-03`/`02-04` plans; this file is the
 tracer's wiring skeleton (PLAN 02-02 Task 1).
@@ -26,21 +35,54 @@ import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from datetime import date as _date
 from pathlib import Path
+from typing import Protocol
 
 import structlog
 import tenacity
-from src.adapters.binance_usdm import (
-    BinanceUsdmAdapter,
-    Kline,
-    is_rate_limit_error,
-)
+from src.adapters.binance_usdm import Kline, is_rate_limit_error
 from src.data.quality import check_batch
 from src.data.store import DEFAULT_RAW_ROOT, publish_batch
 
 log = structlog.get_logger()
+
+DAY_MS = 86_400_000
+_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def utc_ms(value: datetime) -> int:
+    """Convert a tz-aware datetime to integer millisecond epoch.
+
+    Exact integer timedelta arithmetic (same as `src.paper.resync`); the
+    float `timestamp() * 1000` round-trip can skew a boundary by 1 ms, which
+    would misplace a bar against the closed-day cut. Naive datetimes are
+    rejected: their epoch is host-timezone dependent (determinism).
+    """
+    if value.tzinfo is None:
+        raise ValueError("utc_ms requires a timezone-aware datetime")
+    delta = value.astimezone(UTC) - _EPOCH_UTC
+    return (delta.days * 86400 + delta.seconds) * 1000 + delta.microseconds // 1000
+
+
+class KlineSource(Protocol):
+    """Anything that can serve one kline page (REST adapter, archive source).
+
+    The paginator depends on this shape only, so every source feeds the same
+    quality gate and immutable store. Keyword-only so both the real
+    `BinanceUsdmAdapter` and a plain test fake satisfy it structurally.
+    """
+
+    async def klines(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 1500,
+    ) -> list[Kline]: ...
 
 
 # Rate-limited failures are retried with jitter; on exhaustion the paginator
@@ -107,7 +149,7 @@ def align_to_day_start_ms(ms: int) -> int:
     Integer math only: the float round-trip through `timestamp() * 1000`
     can skew the snap by up to 1 ms.
     """
-    return ms - (ms % 86_400_000)
+    return ms - (ms % DAY_MS)
 
 
 @dataclass(frozen=True)
@@ -118,6 +160,8 @@ class BackfillResult:
     rows_published: int
     structural_rejections: int
     durations_ms: tuple[int, ...]  # length == pages; one per page fetch
+    # Past days the window only partly covered (held back, not published).
+    partial_days_held: int = 0
 
 
 # --------------------------------------------------------------------------- #
@@ -192,7 +236,7 @@ def _is_rate_limit(exc: BaseException) -> bool:
 
 
 async def fetch_page_with_retry(
-    adapter: BinanceUsdmAdapter,
+    adapter: KlineSource,
     *,
     symbol: str,
     interval: str,
@@ -229,7 +273,7 @@ async def fetch_page_with_retry(
 
 
 async def backfill_symbol_interval(
-    adapter: BinanceUsdmAdapter,
+    adapter: KlineSource,
     *,
     symbol: str,
     interval: str,
@@ -240,8 +284,21 @@ async def backfill_symbol_interval(
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     on_publish: Callable[[int], Awaitable[None] | None] | None = None,
     cursor_store: CursorStore | None = None,
+    terminal_end: bool = False,
 ) -> BackfillResult:
     """Paginate `[start_ms, end_ms)` for one (symbol, interval) and publish.
+
+    Closed-day rule (D-13, F-402): the run never publishes the current UTC
+    day. `effective_end = min(end_ms, start of the current UTC day)`; rows
+    whose open_time is at or after it are dropped before buffering. A day is
+    published only when the window covered all of it (the day ends at or
+    before `effective_end`). `terminal_end=True` additionally publishes the
+    day containing `effective_end - 1` even though it is only partly covered
+    -- for a delivered contract's last day, when `end_ms` is itself in the
+    past. Any other partly covered day is held back (logged, counted in
+    `BackfillResult.partial_days_held`) and the cursor is not advanced past
+    it, so a later run can fetch it whole. Callers should pass a day-aligned
+    `start_ms` (see `align_to_day_start_ms`).
 
     `clock` is injectable so tests can run with a frozen wall-clock and
     assert that the forming candle is dropped deterministically
@@ -298,7 +355,21 @@ async def backfill_symbol_interval(
     # and on a corrupt first page the cursor stays put at `start_ms`
     # (the loop will retry via subsequent fetches).
     last_published_open_ms = start_ms - cfg.interval_ms
-    now_ms = int(clock().timestamp() * 1000)
+    now_ms = utc_ms(clock())
+    day_start_now = align_to_day_start_ms(now_ms)
+    effective_end = min(end_ms, day_start_now)
+    if end_ms > day_start_now:
+        log.info(
+            "backfill.clamped_to_closed_days",
+            symbol=symbol,
+            interval=interval,
+            end_ms=end_ms,
+            effective_end_ms=effective_end,
+        )
+    # The terminal flag only means something when the caller's own end is a
+    # closed past instant; a clamped end is never terminal (the day is open).
+    terminal = terminal_end and end_ms <= day_start_now
+    partial_days_held = 0
     # Cross-page dedup: Binance's paginated response can return an
     # overlapping row at the boundary (Pitfall 2). Track every open_time
     # we've added to a per-date buffer so the overlap lands in Parquet
@@ -315,7 +386,7 @@ async def backfill_symbol_interval(
     # for the bootstrap-start alignment that prevents mid-page splits.
     date_buffers: dict[_date, list[Kline]] = {}
 
-    while cursor < end_ms:
+    while cursor < effective_end:
         page_start = cursor
         pages += 1
         # Monotonic clock for durations: wall-clock `datetime.now(UTC)`
@@ -335,10 +406,14 @@ async def backfill_symbol_interval(
         durations.append(int((time.monotonic() - t0) * 1000))
 
         # Drop the forming candle: anything whose close_time is in the future
-        # relative to the injected clock (Pitfall 1). This must run BEFORE the
-        # quality gate so it never inspects an unclosed bar.
+        # relative to the injected clock (Pitfall 1), and anything at or after
+        # the effective end (closed-day rule, D-13). This must run BEFORE the
+        # quality gate so it never inspects an unclosed or out-of-window bar.
         closed: list[Kline] = [
-            k for k in raw_page if int(k.close_time_utc.timestamp() * 1000) <= now_ms
+            k
+            for k in raw_page
+            if utc_ms(k.close_time_utc) <= now_ms
+            and utc_ms(k.open_time_utc) < effective_end
         ]
 
         # Cross-page dedup: skip rows whose open_time we already buffered
@@ -352,7 +427,7 @@ async def backfill_symbol_interval(
         if closed:
             deduped: list[Kline] = []
             for k in closed:
-                k_open_ms = int(k.open_time_utc.timestamp() * 1000)
+                k_open_ms = utc_ms(k.open_time_utc)
                 if k_open_ms in seen_open_times:
                     duplicates_skipped += 1
                     continue
@@ -380,9 +455,7 @@ async def backfill_symbol_interval(
                 # The batch passed the gate: only NOW mark its rows seen
                 # (see the dedup comment above) and buffer them by date.
                 for k in closed:
-                    seen_open_times.add(
-                        int(k.open_time_utc.timestamp() * 1000)
-                    )
+                    seen_open_times.add(utc_ms(k.open_time_utc))
                     d = k.open_time_utc.date()
                     date_buffers.setdefault(d, []).append(k)
 
@@ -398,7 +471,7 @@ async def backfill_symbol_interval(
                             continue
                         candles = sorted(
                             date_buffers[d],
-                            key=lambda c: int(c.open_time_utc.timestamp() * 1000),
+                            key=lambda c: utc_ms(c.open_time_utc),
                         )
                         written = publish_batch(
                             candles,
@@ -407,9 +480,7 @@ async def backfill_symbol_interval(
                             raw_root=raw_root,
                         )
                         rows_published += len(candles)
-                        last_published_open_ms = int(
-                            candles[-1].open_time_utc.timestamp() * 1000
-                        )
+                        last_published_open_ms = utc_ms(candles[-1].open_time_utc)
                         if cursor_store is not None:
                             # Persist on every successful publish so a killed
                             # run resumes at the right cursor (D-02
@@ -454,7 +525,7 @@ async def backfill_symbol_interval(
             consecutive_rejections = 0
             consecutive_empty_pages = 0
             # Normal advance past the page we just fetched.
-            last_open = int(raw_page[-1].open_time_utc.timestamp() * 1000)
+            last_open = utc_ms(raw_page[-1].open_time_utc)
             cursor = max(last_open + cfg.interval_ms, page_start + cfg.interval_ms)
         else:
             consecutive_rejections = 0
@@ -470,18 +541,37 @@ async def backfill_symbol_interval(
                 break
             cursor = page_start + cfg.interval_ms
 
-        if cursor < end_ms and cfg.pace_seconds > 0:
+        if cursor < effective_end and cfg.pace_seconds > 0:
             await asyncio.sleep(cfg.pace_seconds)
 
-    # End-of-loop flush: every date still in the buffer is now "as complete
-    # as we're going to get" (no more pages, no more candles for those
-    # dates in this run). Publish them in order and advance the cursor to
-    # the last published candle.
+    # End-of-loop flush: a buffered date is published only when this run's
+    # window covered the whole day (it ends at or before `effective_end`), or
+    # when `terminal` marks the day containing `effective_end - 1` as the
+    # last day of a delivered contract. Every other buffered date is a
+    # partially fetched day: immutable Parquet could never repair it, so it
+    # is held back (dropped from the buffer, logged, counted) and the cursor
+    # is never written for its rows (D-13, F-402).
     if date_buffers:
+        terminal_day = (
+            _EPOCH_UTC + timedelta(milliseconds=effective_end - 1)
+        ).date()
         for d in sorted(date_buffers.keys()):
+            day_start_ms = utc_ms(datetime(d.year, d.month, d.day, tzinfo=UTC))
+            whole_day = day_start_ms + DAY_MS <= effective_end
+            if not whole_day and not (terminal and d == terminal_day):
+                partial_days_held += 1
+                log.warning(
+                    "backfill.partial_day_held",
+                    symbol=symbol,
+                    interval=interval,
+                    date=d.isoformat(),
+                    rows=len(date_buffers[d]),
+                )
+                del date_buffers[d]
+                continue
             candles = sorted(
                 date_buffers[d],
-                key=lambda c: int(c.open_time_utc.timestamp() * 1000),
+                key=lambda c: utc_ms(c.open_time_utc),
             )
             written = publish_batch(
                 candles,
@@ -490,9 +580,7 @@ async def backfill_symbol_interval(
                 raw_root=raw_root,
             )
             rows_published += len(candles)
-            last_published_open_ms = int(
-                candles[-1].open_time_utc.timestamp() * 1000
-            )
+            last_published_open_ms = utc_ms(candles[-1].open_time_utc)
             if cursor_store is not None:
                 cursor_store.write(
                     symbol=symbol,
@@ -520,6 +608,7 @@ async def backfill_symbol_interval(
         rows_published=rows_published,
         structural_rejections=structural_rejections,
         durations_ms=tuple(durations),
+        partial_days_held=partial_days_held,
     )
 
 
@@ -562,7 +651,7 @@ DEFAULT_BACKFILL_WINDOWS_MS: dict[str, int] = {
 
 
 async def backfill_universe(
-    adapter: BinanceUsdmAdapter,
+    adapter: KlineSource,
     *,
     symbols: tuple[str, ...] = LIVE_5,
     intervals: tuple[str, ...] = ("1m", "1h", "4h"),
@@ -587,9 +676,7 @@ async def backfill_universe(
     """
     # Resolve end_ms once so every per-(symbol, interval) call uses the
     # same "now" anchor (deterministic — same input → same output).
-    resolved_end_ms = (
-        end_ms if end_ms is not None else int(clock().timestamp() * 1000)
-    )
+    resolved_end_ms = end_ms if end_ms is not None else utc_ms(clock())
     per_key: dict[tuple[str, str], BackfillResult] = {}
     total_rows = 0
     total_pages = 0
