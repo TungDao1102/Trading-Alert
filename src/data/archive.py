@@ -20,6 +20,7 @@ import hashlib
 import io
 import re
 import zipfile
+import zlib
 from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from typing import Final
@@ -33,6 +34,13 @@ log = structlog.get_logger()
 ARCHIVE_BASE_URL: Final = "https://data.binance.vision/data/futures/um"
 ARCHIVE_INTERVALS: Final = ("1m", "1h", "4h", "1d")
 HTTP_TIMEOUT_SECONDS: Final = 60.0
+# Download and parse caps (T-13-19). A 1m month of the busiest symbol is a few
+# MB compressed and about 6 MB of CSV; these leave a wide margin while still
+# stopping a zip bomb long before memory pressure. Read at call time so tests
+# can shrink them.
+MAX_ZIP_BYTES: Final = 32 * 1024 * 1024
+MAX_CSV_BYTES: Final = 128 * 1024 * 1024
+_MAX_CHECKSUM_BYTES: Final = 4096
 
 # Same shape the collect list and collector enforce (`^[A-Z0-9]+USDT$`); kept
 # as a private copy so this module has no import dependency on either.
@@ -42,6 +50,7 @@ _DAY_RE: Final = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
 _DIGEST_RE: Final = re.compile(r"^[0-9a-fA-F]{64}$")
 _PERIODS: Final = ("monthly", "daily")
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
+_TS_MS_RE: Final = re.compile(r"^\d{13}$")
 _MAX_CACHED_STAMPS: Final = 3
 
 
@@ -59,6 +68,10 @@ class ArchiveChecksumMismatch(ArchiveError):
 
 class ArchiveChecksumMissing(ArchiveError):
     """A zip exists but its `.CHECKSUM` does not; never parsed unchecked."""
+
+
+class ArchiveTooLarge(ArchiveError):
+    """A download, listing or decompressed member exceeds its size cap."""
 
 
 class ArchiveFormatError(ArchiveError):
@@ -91,9 +104,29 @@ def archive_zip_url(symbol: str, interval: str, period: str, stamp: str) -> str:
     return f"{ARCHIVE_BASE_URL}/{period}/klines/{symbol}/{interval}/{symbol}-{interval}-{stamp}.zip"
 
 
-async def _get(client: httpx.AsyncClient, url: str) -> tuple[int, bytes]:
-    response = await client.get(url)
-    return response.status_code, response.content
+async def _get(client: httpx.AsyncClient, url: str, cap: int) -> tuple[int, bytes]:
+    """GET with a hard byte cap; the body is only read for a 200 response.
+
+    The cap is enforced on the declared Content-Length and again on the
+    decoded bytes actually received, so it holds without the header.
+    """
+    try:
+        async with client.stream("GET", url) as response:
+            if response.status_code != 200:
+                return response.status_code, b""
+            declared = response.headers.get("content-length", "")
+            if declared.isdigit() and int(declared) > cap:
+                raise ArchiveTooLarge(f"{url}: Content-Length {declared} exceeds {cap} bytes")
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if total > cap:
+                    raise ArchiveTooLarge(f"{url}: body exceeds {cap} bytes")
+                chunks.append(chunk)
+            return 200, b"".join(chunks)
+    except httpx.HTTPError as exc:
+        raise ArchiveError(f"request failed for {url}: {exc!r}") from exc
 
 
 def _parse_checksum(text: str, zip_name: str) -> str:
@@ -105,16 +138,48 @@ def _parse_checksum(text: str, zip_name: str) -> str:
     return parts[0].lower()
 
 
+def _read_member(blob: bytes, member: str) -> str:
+    """The single expected CSV member as text, read in memory under the cap."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            infos = zf.infolist()
+            if len(infos) != 1:
+                raise ArchiveFormatError(f"expected exactly one member, found {len(infos)}")
+            info = infos[0]
+            if info.filename != member or info.is_dir():
+                raise ArchiveFormatError(f"unexpected zip member {info.filename!r}")
+            if info.file_size > MAX_CSV_BYTES:
+                raise ArchiveTooLarge(f"member {member} declares {info.file_size} bytes")
+            with zf.open(info) as handle:
+                data = handle.read(MAX_CSV_BYTES + 1)
+        if len(data) > MAX_CSV_BYTES:
+            raise ArchiveTooLarge(f"member {member} exceeds {MAX_CSV_BYTES} bytes")
+        return data.decode("utf-8")
+    except ArchiveError:
+        raise
+    except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError) as exc:
+        raise ArchiveFormatError(f"unreadable zip for {member}: {exc!r}") from exc
+    except UnicodeDecodeError as exc:
+        raise ArchiveFormatError(f"member {member} is not UTF-8") from exc
+
+
 def _parse_csv(blob: bytes, member: str, symbol: str, interval: str) -> list[Kline]:
-    text = zipfile.ZipFile(io.BytesIO(blob)).read(member).decode("utf-8")
-    rows = list(csv.reader(io.StringIO(text)))
     out: list[Kline] = []
-    for index, row in enumerate(rows):
+    for index, row in enumerate(csv.reader(io.StringIO(_read_member(blob, member)))):
         if not row:
             continue
-        if index == 0 and not row[0].isdigit():
+        if index == 0 and row[0] == "open_time":
             continue  # header row (open_time,open,high,...)
-        out.append(_row_to_kline(symbol, interval, row))
+        if len(row) < 9:
+            raise ArchiveFormatError(f"{member} row {index}: only {len(row)} columns")
+        # Futures archives are epoch milliseconds; any other width means a
+        # different unit (seconds, microseconds) and would land in the wrong era.
+        if not (_TS_MS_RE.match(row[0]) and _TS_MS_RE.match(row[6])):
+            raise ArchiveFormatError(f"{member} row {index}: non-millisecond timestamp")
+        try:
+            out.append(_row_to_kline(symbol, interval, row))
+        except (ValueError, ArithmeticError) as exc:
+            raise ArchiveFormatError(f"{member} row {index}: {exc!r}") from exc
     return out
 
 
@@ -129,9 +194,9 @@ async def fetch_archive_klines(
     url = archive_zip_url(symbol, interval, period, stamp)
     zip_name = url.rsplit("/", 1)[1]
 
-    status, body = await _get(client, f"{url}.CHECKSUM")
+    status, body = await _get(client, f"{url}.CHECKSUM", _MAX_CHECKSUM_BYTES)
     if status == 404:
-        zip_status, _ = await _get(client, url)
+        zip_status, _ = await _get(client, url, MAX_ZIP_BYTES)
         if zip_status == 404:
             raise ArchiveNotFound(url)
         raise ArchiveChecksumMissing(f"{url} has no .CHECKSUM (status {status})")
@@ -139,7 +204,7 @@ async def fetch_archive_klines(
         raise ArchiveError(f"unexpected status {status} for {url}.CHECKSUM")
     expected = _parse_checksum(body.decode("ascii", errors="replace"), zip_name)
 
-    zip_status, blob = await _get(client, url)
+    zip_status, blob = await _get(client, url, MAX_ZIP_BYTES)
     if zip_status == 404:
         raise ArchiveNotFound(url)
     if zip_status != 200:
