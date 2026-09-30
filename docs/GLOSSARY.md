@@ -149,22 +149,19 @@ INSUFFICIENT_EDGE
 
 ## 9. Canonical rejection reasons
 
+This section is the source of truth for rejection reason codes (D016, D031, audit F-110). One canonical code per concept: the 17 codes that production code references (`RejectionReason.X` in `src/`, derived by scan, gate GL-02) plus the reserved `INSUFFICIENT_MARGIN`. Five synonyms that still exist as `RejectionReason` members are listed as deprecated aliases in 9.2. No code is renamed in Phase 11; the enum cleanup is a recorded follow-up (D044).
+
+### 9.1 Canonical codes
+
 ```text
 NO_TRADE_REGIME
 RR_TOO_LOW
 STALE_SETUP
 INVALIDATED
-RISK_LIMIT
-CORRELATED_RISK_LIMIT
-DAILY_STOP
-QUANTIZATION_REJECT
-MIN_NOTIONAL_REJECT
-INSUFFICIENT_MARGIN
 EXCHANGE_CONSTRAINT
 DATA_STALE
 RECONCILIATION_REQUIRED
 APPROVAL_EXPIRED
-# Phase 5 D-05 fine-grained codes (plan 05-01, locked D-02 semantics)
 MIN_QTY_REJECT
 NOTIONAL_REJECT
 UTILIZATION_REJECT
@@ -174,6 +171,71 @@ MAX_POSITIONS_REJECT
 DAILY_STOP_BLOCK
 STALE_CONSTRAINTS
 UNCERTAIN_ACCOUNT_STATE
+INSUFFICIENT_MARGIN
 ```
 
+`INSUFFICIENT_MARGIN` is reserved: no code emits it yet; it is first emitted by the Phase 22 margin guard.
+
+### 9.2 Deprecated aliases
+
+These members remain in `RejectionReason` and in `tests/test_domain_enums.py` until the enum cleanup (owner: Phase 12). New code must use the canonical replacement. The union of 9.1 and this table equals the `RejectionReason` enum (23 members, gate GL-03).
+
+| Alias | Canonical replacement | Cleanup owner |
+|-------|-----------------------|---------------|
+| `QUANTIZATION_REJECT` | `MIN_QTY_REJECT` or `UTILIZATION_REJECT` | Phase 12 |
+| `MIN_NOTIONAL_REJECT` | `NOTIONAL_REJECT` | Phase 12 |
+| `RISK_LIMIT` | `AGGREGATE_CAP_REJECT` or `MAX_POSITIONS_REJECT` | Phase 12 |
+| `CORRELATED_RISK_LIMIT` | `CLUSTER_CAP_REJECT` | Phase 12 |
+| `DAILY_STOP` | `DAILY_STOP_BLOCK` when used as a rejection reason | Phase 12 |
+
+`DAILY_STOP` remains a valid `DailyState` value (section 8.1); only its use as a rejection reason is deprecated.
+
+### 9.3 Plain-string codes emitted outside RejectionReason
+
+Production code also emits the following plain strings as `reason_code` values or outcome labels. They are not `RejectionReason` members. Status for the rejection-style codes: proposed canonical, promote to the enum in the owning phase (Phases 20, 24 and 26). Derived from `src/` by reading the emitting code; the list is not exhaustive for divergence kinds.
+
+| Code | Emitted in | Meaning | Status |
+|------|------------|---------|--------|
+| `DISABLED` | `src/execution/enablement.py` (`_DISABLED`), `src/execution/manager.py` (fallback `reason_code`) | Live order enablement is off, no order placed | proposed canonical, promote in Phase 26 |
+| `ENTRY_WITHOUT_PROTECTIVE` | `src/execution/manager.py`, `src/execution/fill_monitor.py`, `src/reconcile/compare.py`, `src/ops/health.py` | An entry fill exists without a protective order; also a reconciler divergence kind and a SAFE_MODE entry reason (9.4) | proposed canonical, promote in Phase 20 |
+| `NO_FILL` | `src/execution/manager.py` (no-trade result reason) | Entry order produced no fill | proposed canonical, promote in Phase 24 |
+| `HEALTH_CHECK_FAILED` | `src/ops/health.py` (result `reason_code`, paired with `OK` on pass) | A health check reported failure, so trading is blocked | proposed canonical, promote in Phase 24 |
+| `EXPIRED` | `src/paper/journal.py` (paper journal outcome `reason_code`), `src/analytics/lifecycle.py` (`_EXPIRED_REASON`) | Signal or entry expired without a fill; this is a lifecycle outcome label, not a rejection reason (the rejection form is `APPROVAL_EXPIRED` or `STALE_SETUP`) | outcome label, not a rejection reason |
+| `OK` | `src/core/types.py` (`REASON_OK`), `src/ops/health.py` | Feature output valid or health check passed | not a rejection reason |
+| `WARMUP_INSUFFICIENT` | `src/core/types.py` (`REASON_WARMUP_INSUFFICIENT`) | Feature validity reason: not enough closed candles | feature validity string, not a rejection reason |
+| `GAP_IN_SOURCE` | `src/core/types.py` (`REASON_GAP_IN_SOURCE`) | Feature validity reason: gap in the candle source | feature validity string, not a rejection reason |
+| `INVALID_INPUT` | `src/core/types.py` (`REASON_INVALID_INPUT`) | Feature validity reason: invalid input | feature validity string, not a rejection reason |
+
+### 9.4 SAFE_MODE entry reasons
+
+Reason strings passed to `SafeModeController.enter_safe_mode(reason=...)` or recorded as the freeze halt reason. They describe why SAFE_MODE was entered, not why a plan was rejected.
+
+| Reason | Emitted in |
+|--------|------------|
+| `ENTRY_WITHOUT_PROTECTIVE` | `src/execution/manager.py`, `src/ops/drills.py` |
+| `ENTRY_STATE_UNKNOWN` | `src/execution/manager.py` |
+| `ORPHAN_PROTECTIVE` | `src/ops/drills.py`, `src/reconcile/compare.py` (divergence kind) |
+| `API_DEGRADATION` | `src/ops/drills.py` |
+| `STALE_FEED` | `src/ops/drills.py` |
+| `DB_FAILURE` | `src/ops/drills.py` |
+| `MANUAL_CLOSE` | `src/execution/manager.py`, `src/ops/drills.py` |
+| `REGISTRY_DIFF` | `src/paper/freeze.py` (halt reason on a parameter registry diff) |
+
 Do not create synonyms such as `Skipped-User`, `USER_SKIPPED`, and `SKIPPED_USER` in different modules. Use the canonical enum names above.
+
+## 10. Canonical ApprovalResult
+
+```text
+PENDING
+APPROVED
+SKIPPED
+EXPIRED
+```
+
+`ApprovalAction` maps to `ApprovalResult` as implemented by `action_to_result` in `src/approval/binding.py`:
+
+- `APPROVE` gives `APPROVED`.
+- `SKIP_USER`, `SKIP_BUSY` and `CANCEL` give `SKIPPED`.
+- `SIMULATE` gives `PENDING` (notify-only; it does not advance the approval state).
+
+`EXPIRED` is not produced by any `ApprovalAction`; lifecycle analytics derive it from the `EXPIRED` outcome label (`src/analytics/lifecycle.py`). The value set PENDING, APPROVED, SKIPPED, EXPIRED was a Phase 3 planner assumption (D-10); it is recorded here as the enum source of truth pending user ratification.
