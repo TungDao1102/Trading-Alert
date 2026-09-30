@@ -155,7 +155,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OPS-03 | Phase 24 | Pending |
 | OPS-04 | Phase 24 | Pending |
 | OPS-05 | Phase 20 | Pending |
-| OPS-06 | Phase 13 | Pending |
+| OPS-06 | Phase 13.1 | Pending |
 | GOV-02 | Phase 26 | Pending |
 
 **Coverage:**

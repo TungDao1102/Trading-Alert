@@ -46,18 +46,103 @@
     {
       "number": "9",
       "name": "Live Execution Rollout",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "10",
       "name": "Journal Depth + Kill-Gate Operations",
+      "status": "in_progress"
+    },
+    {
+      "number": "11",
+      "name": "Decision Alignment (docs + params)",
+      "status": "in_progress"
+    },
+    {
+      "number": "12",
+      "name": "Fee + Cost Model Correctness",
+      "status": "complete"
+    },
+    {
+      "number": "13",
+      "name": "Research Data Foundation Fixes",
+      "status": "pending"
+    },
+    {
+      "number": "14",
+      "name": "Backtest Simulator Causality Rewrite",
+      "status": "pending"
+    },
+    {
+      "number": "15",
+      "name": "Strategy Geometry Correction",
+      "status": "pending"
+    },
+    {
+      "number": "16",
+      "name": "Paper Runtime Composition + SHADOW Approval Mode",
+      "status": "pending"
+    },
+    {
+      "number": "17",
+      "name": "Operational Persistence Layer",
+      "status": "pending"
+    },
+    {
+      "number": "18",
+      "name": "Binance User-Data Stream + Exchange Error Taxonomy",
+      "status": "pending"
+    },
+    {
+      "number": "19",
+      "name": "Execution Plan Binding + Pre-Placement Checks",
+      "status": "pending"
+    },
+    {
+      "number": "20",
+      "name": "Reconcile + SAFE_MODE Hardening + Alerts",
+      "status": "pending"
+    },
+    {
+      "number": "21",
+      "name": "Account Equity + Daily Loss from Binance",
+      "status": "pending"
+    },
+    {
+      "number": "22",
+      "name": "Leverage, Margin + Liquidation Guard",
+      "status": "pending"
+    },
+    {
+      "number": "23",
+      "name": "Telegram Approval Hardening + Two-Step Confirm + Money Amounts",
+      "status": "pending"
+    },
+    {
+      "number": "24",
+      "name": "Live Runtime Composition + Demo Rehearsal",
+      "status": "pending"
+    },
+    {
+      "number": "25",
+      "name": "Binance Demo Integration Test Campaign",
+      "status": "pending"
+    },
+    {
+      "number": "26",
+      "name": "Go-Live Readiness Gate",
+      "status": "pending"
+    },
+    {
+      "number": "27",
+      "name": "Configurable Quote Asset (USDC readiness)",
       "status": "pending"
     }
   ],
   "next": {
     "command": "/gsd:progress --next",
-    "label": "Advance to the next step",
-    "reason": "Phase 09 of 11 · executing"
+    "label": "Advance to the next step (plan phase 2)",
+    "reason": "Phase 2 of 28 — needs a plan"
   },
-  "updated_at": "2026-09-29T02:07:48.249Z"
+  "updated_at": "2026-09-30T11:48:01.939Z"
 }

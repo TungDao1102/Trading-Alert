@@ -5,16 +5,15 @@ current_phase: 2
 current_phase_name: Data Foundation
 status: planning
 stopped_at: Phase 12 complete, ready to discuss Phase 13
-last_updated: "2026-09-30T10:46:12.439Z"
+last_updated: "2026-09-30T11:48:09.426Z"
 last_activity: 2026-09-30
 last_activity_desc: Phase 12 complete, transitioned to Phase 2
-state_head: 3a9dbc90300f1eec3de7087dffb53adb9c7cc342
+state_head: fd29a05a2374d28db1919af9455a5eb60799efcc
 progress:
-  total_phases: 28
+  total_phases: 29
   completed_phases: 3
   total_plans: 69
   completed_plans: 68
-  percent: 11
 milestone_name: milestone
 ---
 
@@ -306,6 +305,7 @@ Recent decisions affecting current work:
 
 - Phase 07.1 inserted after Phase 7: Close gap: B1 registry-cost to backtest identity binding (URGENT)
 - Phase 07.1 edited: edited fields: depends_on (Phase 7 -> Phase 6)
+- Phase 13.1 inserted after Phase 13: Deployment & CI: CI pipeline, image pinning, bootstrap/migrate scripts, provider-portable backups; VPS provisioning deferred
 
 ## Deferred Items
 
