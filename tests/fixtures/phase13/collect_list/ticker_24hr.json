@@ -1,0 +1,122 @@
+[
+  {
+    "symbol": "BTCUSDT",
+    "quoteVolume": "12142861546.19"
+  },
+  {
+    "symbol": "ETHUSDT",
+    "quoteVolume": "8569449829.14"
+  },
+  {
+    "symbol": "SOLUSDT",
+    "quoteVolume": "2125146834.6644"
+  },
+  {
+    "symbol": "UNIUSDT",
+    "quoteVolume": "311000000.000"
+  },
+  {
+    "symbol": "ZECUSDT",
+    "quoteVolume": "1856121144.37"
+  },
+  {
+    "symbol": "QNTUSDT",
+    "quoteVolume": "1570242470.629000"
+  },
+  {
+    "symbol": "XAUUSDT",
+    "quoteVolume": "99999999999.0"
+  },
+  {
+    "symbol": "OMGUSDT",
+    "quoteVolume": "88888888888.0"
+  },
+  {
+    "symbol": "GAIBUSDT",
+    "quoteVolume": "77777777777.0"
+  },
+  {
+    "symbol": "BTCUSDT_261225",
+    "quoteVolume": "66666666666.0"
+  },
+  {
+    "symbol": "BTCUSDC",
+    "quoteVolume": "55555555555.0"
+  },
+  {
+    "symbol": "XRPUSDT",
+    "quoteVolume": "1254632754.1529"
+  },
+  {
+    "symbol": "NEARUSDT",
+    "quoteVolume": "878573365.5660"
+  },
+  {
+    "symbol": "HYPEUSDT",
+    "quoteVolume": "621389839.18046"
+  },
+  {
+    "symbol": "AAVEUSDT",
+    "quoteVolume": "311000000.0"
+  },
+  {
+    "symbol": "DOGEUSDT",
+    "quoteVolume": "520267104.321710"
+  },
+  {
+    "symbol": "PUMPUSDT",
+    "quoteVolume": "497078135.3976640"
+  },
+  {
+    "symbol": "MOVRUSDT",
+    "quoteVolume": "455125704.170639"
+  },
+  {
+    "symbol": "SUIUSDT",
+    "quoteVolume": "414374512.005930"
+  },
+  {
+    "symbol": "WLDUSDT",
+    "quoteVolume": "391942428.2992000"
+  },
+  {
+    "symbol": "ENAUSDT",
+    "quoteVolume": "323581312.0345200"
+  },
+  {
+    "symbol": "BNBUSDT",
+    "quoteVolume": "150000000.000"
+  },
+  {
+    "symbol": "HBARUSDT",
+    "quoteVolume": "308261333.53188"
+  },
+  {
+    "symbol": "AVAXUSDT",
+    "quoteVolume": "302388589.4750"
+  },
+  {
+    "symbol": "LITUSDT",
+    "quoteVolume": "278827298.824430"
+  },
+  {
+    "symbol": "LINKUSDT",
+    "quoteVolume": "277954510.154"
+  },
+  {
+    "symbol": "SOONUSDT",
+    "quoteVolume": "270348720.0587000"
+  },
+  {
+    "symbol": "BTWUSDT",
+    "quoteVolume": "252523058.3389800"
+  },
+  {
+    "symbol": "1000PEPEUSDT",
+    "quoteVolume": "252001201.6744328"
+  },
+  {
+    "symbol": "TAOUSDT",
+    "quoteVolume": "202694858.58"
+  }
+]

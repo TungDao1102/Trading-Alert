@@ -1,0 +1,245 @@
+{
+  "_fixture_note": "Trimmed from live Binance public REST fetched with curl on 2026-09-30 (GET /fapi/v1/ticker/24hr and GET /fapi/v1/exchangeInfo). Kept the 25 highest-volume eligible symbols plus one real record each for TRADIFI_PERPETUAL (XAUUSDT), SETTLING (OMGUSDT), PENDING_TRADING (GAIBUSDT), CURRENT_QUARTER (BTCUSDT_261225) and a USDC-quoted symbol (BTCUSDC). Deliberate edits to ticker_24hr.json: the five excluded symbols carry artificially huge quoteVolume so exclusion is exercised; BNBUSDT quoteVolume lowered to 150000000.000 so a live-5 symbol ranks below the top 15; AAVEUSDT and UNIUSDT set to equal volumes (311000000.0 / 311000000.000) at the rank-15 cut and listed UNIUSDT first so the symbol-ascending tie-break is exercised. GAIBUSDT has no real ticker row (PENDING_TRADING); its row is synthesised. exchange_info.json records are otherwise unmodified.",
+  "symbols": [
+    {
+      "symbol": "BTCUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1567965300000
+    },
+    {
+      "symbol": "ETHUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1574840700000
+    },
+    {
+      "symbol": "SOLUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1600066800000
+    },
+    {
+      "symbol": "UNIUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1600412400000
+    },
+    {
+      "symbol": "ZECUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1580889600000
+    },
+    {
+      "symbol": "QNTUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1666076400000
+    },
+    {
+      "symbol": "XRPUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1578298800000
+    },
+    {
+      "symbol": "NEARUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1602748800000
+    },
+    {
+      "symbol": "HYPEUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1748601000000
+    },
+    {
+      "symbol": "AAVEUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1602831600000
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1594371600000
+    },
+    {
+      "symbol": "PUMPUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1752132600000
+    },
+    {
+      "symbol": "MOVRUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1703593800000
+    },
+    {
+      "symbol": "SUIUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1683072000000
+    },
+    {
+      "symbol": "WLDUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1690200000000
+    },
+    {
+      "symbol": "ENAUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1712061000000
+    },
+    {
+      "symbol": "BNBUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1581321600000
+    },
+    {
+      "symbol": "HBARUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1615964400000
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1600844400000
+    },
+    {
+      "symbol": "LITUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1766511000000
+    },
+    {
+      "symbol": "LINKUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1579248000000
+    },
+    {
+      "symbol": "SOONUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1747989000000
+    },
+    {
+      "symbol": "BTWUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1780582500000
+    },
+    {
+      "symbol": "1000PEPEUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1683244800000
+    },
+    {
+      "symbol": "TAOUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1712845800000
+    },
+    {
+      "symbol": "XAUUSDT",
+      "contractType": "TRADIFI_PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1765440300000
+    },
+    {
+      "symbol": "OMGUSDT",
+      "contractType": "PERPETUAL",
+      "status": "SETTLING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 1738314000000,
+      "onboardDate": 1593680400000
+    },
+    {
+      "symbol": "GAIBUSDT",
+      "contractType": "PERPETUAL",
+      "status": "PENDING_TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1763629200000
+    },
+    {
+      "symbol": "BTCUSDT_261225",
+      "contractType": "CURRENT_QUARTER",
+      "status": "TRADING",
+      "quoteAsset": "USDT",
+      "deliveryDate": 1798185600000,
+      "onboardDate": 1782460800000
+    },
+    {
+      "symbol": "BTCUSDC",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "quoteAsset": "USDC",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1704285000000
+    }
+  ]
+}
