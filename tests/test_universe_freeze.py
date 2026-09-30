@@ -28,8 +28,8 @@ from src.adapters.binance_usdm import Kline, MarkKline, SymbolFilters
 from src.data import universe_freeze as uf
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DRAFT_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "phase13" / "freeze" / (
-    "research-universe-v1.draft.toml"
+DRAFT_FIXTURE = (
+    REPO_ROOT / "tests" / "fixtures" / "phase13" / "freeze" / ("research-universe-v1.draft.toml")
 )
 GATE_SOURCE = REPO_ROOT / "scripts" / "decision_alignment" / "universe.py"
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -310,7 +310,9 @@ def test_discover_candidates_filters_and_dedupes() -> None:
         _filters("CCCUSDT", contract_type="TRADIFI_PERPETUAL"),
         _filters("DDDBUSD", quote_asset="BUSD"),
     ]
-    found = uf.discover_candidates(filters, ["BBBUSDT", "EEEUSDT", "bad$name", "FFFBUSD"])
+    found = uf.discover_candidates(
+        filters, ["BBBUSDT", "EEEUSDT", "bad$name", "FFFBUSD", "CCCUSDT"]
+    )
     assert found == ["AAAUSDT", "BBBUSDT", "EEEUSDT"]
 
 
@@ -396,9 +398,7 @@ def test_freeze_writes_matching_witnesses(world: World, tmp_path: Path) -> None:
     assert universe.validate_manifest(doc) == []
     assert universe.compute_content_sha256(doc) == digest
 
-    assert f'FROZEN_CONTENT_SHA256: str | None = "{digest}"' in witness.read_text(
-        encoding="utf-8"
-    )
+    assert f'FROZEN_CONTENT_SHA256: str | None = "{digest}"' in witness.read_text(encoding="utf-8")
     module = _load_module(witness)
     assert module.FROZEN_CONTENT_SHA256 == digest
     assert universe.check_second_witness(doc, module.FROZEN_CONTENT_SHA256) == []
