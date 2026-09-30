@@ -76,3 +76,17 @@ created: "2026-09-30"
 - [x] `nyquist_compliant: true` set after execution
 
 **Approval:** approved 2026-09-30 (full suite exit 0: 1603 passed, 7 skipped; `verify_decision_alignment.py all` prints `ALL_PASS all` with 64 PASS lines; ruff and mypy clean; hygiene diffs against 679825c clean). The open manual-only ALGO_UPDATE re-confirmation is tracked for Phase 18 and does not block this phase.
+
+## Validation Audit 2026-09-30
+
+Re-audited after the code-review fixes (WR-01..WR-09, WR-11, WR-12; commits 6b9c3d9..347bf43).
+
+| Metric | Count |
+|--------|-------|
+| Gaps found | 0 |
+| Resolved | 0 |
+| Escalated | 0 |
+
+- All 21 per-task rows still map to existing automated commands; full suite exits 0 (same 7 environment skips: symlinks, live-PG); `verify_decision_alignment.py all` prints `ALL_PASS all` with 64 PASS lines.
+- Manual-only item (ALGO_UPDATE wording re-confirmation, Phase 18) remains OPEN.
+- Open decision, not a coverage gap: WR-10 (no holdout trade-count floor in protocol G5) is skipped pending a protocol version bump.
