@@ -1343,3 +1343,54 @@ async def test_funding_history_page_cap_is_reported(
     events = [entry["event"] for entry in logs]
     assert events.count("collector.funding_history.page") == 2
     assert "collector.funding_history.truncated" in events
+
+
+# --------------------------------------------------------------------------- #
+# Phase 13 plan 06 (F-408): tick writers publish atomically and never
+# overwrite; a crash mid-write leaves neither a torn file nor a temp file.
+# --------------------------------------------------------------------------- #
+
+
+def _tick_writer_case(name: str) -> tuple[object, object]:
+    from src.data import collector
+
+    if name == "oi":
+        return collector._write_oi_snapshot, _mk_oi_snapshot("BTCUSDT")
+    if name == "oi_research":
+        return collector._write_oi_research_snapshot, _mk_oi_snapshot("BTCUSDT")
+    return collector._write_funding_tick, _mk_funding_tick("BTCUSDT")
+
+
+@pytest.mark.parametrize("writer_name", ["oi", "oi_research", "funding"])
+def test_tick_writers_are_atomic(
+    writer_name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import polars as pl
+
+    writer, tick = _tick_writer_case(writer_name)
+
+    def _crash(self: pl.DataFrame, file: Path, *args: object, **kwargs: object) -> None:
+        Path(file).write_bytes(b"PAR1-partial")
+        raise OSError("simulated crash mid write")
+
+    monkeypatch.setattr(pl.DataFrame, "write_parquet", _crash)
+
+    with pytest.raises(OSError, match="simulated crash"):
+        writer(tick, tmp_path)  # type: ignore[operator]
+
+    leftovers = [p for p in tmp_path.rglob("*") if p.is_file()]
+    assert leftovers == []
+
+
+@pytest.mark.parametrize("writer_name", ["oi", "oi_research", "funding"])
+def test_tick_writer_refuses_overwrite(writer_name: str, tmp_path: Path) -> None:
+    writer, tick = _tick_writer_case(writer_name)
+
+    path = writer(tick, tmp_path)  # type: ignore[operator]
+    first_bytes = Path(path).read_bytes()
+
+    with pytest.raises(FileExistsError):
+        writer(tick, tmp_path)  # type: ignore[operator]
+
+    assert Path(path).read_bytes() == first_bytes
+    assert [p for p in Path(path).parent.iterdir()] == [Path(path)]
