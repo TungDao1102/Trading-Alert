@@ -53,6 +53,17 @@ Requirements: DATA-01, DATA-02, DATA-03, DATA-04, BKTS-02. Audit refs: F-107, F-
 ### Verification
 - **D-20:** Tests use recorded/fake adapter fixtures and never hit Binance. Required: atomic-publish crash test (interrupted write leaves no partial file), partial-day refusal test, zero-trade-bar acceptance test, backfill-before-resubscribe ordering test, mark-kline schema/validation tests, deterministic dataset-hash test, freeze-manifest hash test that both witnesses match, and a collect-list loader test (empty list rejected).
 
+### Research-driven refinements (auto-resolved after 13-RESEARCH.md, 2026-09-30)
+- **D-21:** Keep 1m depth at 12 months (D-04). The D-05 sufficiency report also prints per-split (Development / Validation folds / holdout) 1m coverage, so a shortfall against the 2-year split is visible; extending to 24 months via the archive is a user decision after that report, not a silent change.
+- **D-22:** The case-input builder lives in `src/data/case_input.py` (adapter-side, Polars allowed), not in `src/backtest/`, whose package rule forbids Polars. It emits plain domain values (Decimal) to the simulator. This supersedes the `src/backtest/` location in D-17.
+- **D-23:** Funding-history backfill (paginated, resumable) is added to the CLI, plus the adapter fix for historical funding rows with an empty `markPrice`; DATA-02 and the builder (D-17) need it.
+- **D-24:** After the freeze, the collect list is re-issued as a superset that includes still-TRADING frozen symbols. The collect-list file must be inside the Docker image (Dockerfile currently copies only `src`, `scripts`, `alembic.ini`); the planner picks the packaging fix that stays inside Phase 13 scope.
+- **D-25:** F-706: warn-only server-time probe at collector start; no fail-closed clock logic (Phase 18 owns clock checks).
+- **D-26:** Delivery cap: each symbol's backfill is capped at its `deliveryDate` so post-delivery flat zero-volume bars are never published (would otherwise be accepted under D-15). `deliveryDate` is added as an optional trailing field on `SymbolFilters`, with no PostgreSQL migration, and recorded in the freeze report. Candidate discovery merges exchangeInfo with the archive symbol listing (D-08); archive ingestion verifies `.CHECKSUM` (transport integrity only).
+- **D-27:** DATA-04: all new datasets live under `data/raw` (mark klines at `data/raw/dataset=mark_klines/...`) so the existing backup root and Compose volume cover them; no new backup mechanism here (Phase 13.1).
+- **D-28:** F-413 (extends D-16): besides backfill-before-resubscribe, add a monotonic last-close guard in the WS handler and call `record_close` for backfilled closes, so no duplicate or skipped bar crosses the seam.
+- **D-29:** Mark-kline rows carry no volume and their trades field is a price-tick count: store it under a distinct name, never as `trade_count`. `refresh_symbol_metadata` always passes a `universe` filter (live `contract_type` `TRADIFI_PERPETUAL` exceeds `String(16)`). Tests that assert partial-day publish are rewritten, and the manifest-DRAFT test is updated at freeze time.
+
 ### Claude's Discretion
 - Module and CLI names, provided the CLI lives beside the existing collector/backfill entry points and follows their argparse style.
 - Exact flag names, log event names, and the layout of the mark-kline partition root.
