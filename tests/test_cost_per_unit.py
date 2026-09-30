@@ -21,7 +21,6 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-
 from src.risk.cost_rates import (
     FEE_SOURCE_ACCOUNT_MAX,
     FEE_SOURCE_PARAMETER,
@@ -241,7 +240,10 @@ def test_cost_rates_module_does_not_import_backtest() -> None:
     code = (
         "import sys\n"
         "import src.risk.cost_rates\n"
-        "bad = sorted(m for m in sys.modules if m == 'src.backtest' or m.startswith('src.backtest.'))\n"
+        "bad = sorted(\n"
+        "    m for m in sys.modules\n"
+        "    if m == 'src.backtest' or m.startswith('src.backtest.')\n"
+        ")\n"
         "print(','.join(bad))\n"
     )
     out = subprocess.run(

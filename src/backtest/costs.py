@@ -20,6 +20,11 @@ from typing import Any
 
 from src.core._decimal import _add
 from src.domain.canonical import sha256_hex
+from src.risk.cost_rates import (
+    FEE_SOURCE_PARAMETER,
+    MAX_RATE,
+    CostRates,
+)
 
 # Canonical cost-key vocabulary (D-02 + Pitfall 7). These keys are
 # read from the loaded ParameterSet.params dict; absent keys raise
@@ -33,6 +38,11 @@ COST_KEYS: tuple[str, ...] = (
     "spread_fill_assumptions",
     "partial_fill_fraction",
 )
+
+# Optional cost keys participate in cost identity by PRESENCE (D-14 option B):
+# a set that carries one hashes over the seven required keys plus this one; a
+# set that does not (every legacy set) keeps its byte-locked seven-key hash.
+OPTIONAL_COST_KEYS: tuple[str, ...] = ("exit_slippage_rate",)
 
 
 def _coerce_decimal(value: object, field_name: str) -> Decimal:
@@ -105,6 +115,11 @@ class CostModel:
     spread_fill_assumptions: str
     partial_fill_fraction: Decimal
     cost_model_hash: str
+    # Optional stop-exit slippage rate (Phase 12, D-14 option B). Trailing and
+    # defaulted so existing keyword and positional construction keeps working.
+    # None marks a legacy 7-key model: constructible and hashable, but refused
+    # by `cost_rates_from_model` (it cannot size).
+    exit_slippage_rate: Decimal | None = None
 
     def __post_init__(self) -> None:
         for fname in (
@@ -114,12 +129,24 @@ class CostModel:
             "partial_fill_fraction",
         ):
             object.__setattr__(self, fname, _coerce_decimal(getattr(self, fname), fname))
+        if self.exit_slippage_rate is not None:
+            object.__setattr__(
+                self,
+                "exit_slippage_rate",
+                _coerce_decimal(self.exit_slippage_rate, "exit_slippage_rate"),
+            )
         for fname in (
             "fee_rate_entry",
             "fee_rate_exit",
             "expected_slippage",
         ):
             _require_non_negative(Decimal(getattr(self, fname)), fname)
+            _require_in_range(Decimal(getattr(self, fname)), fname, Decimal("0"), MAX_RATE)
+        if self.exit_slippage_rate is not None:
+            _require_non_negative(self.exit_slippage_rate, "exit_slippage_rate")
+            _require_in_range(
+                self.exit_slippage_rate, "exit_slippage_rate", Decimal("0"), MAX_RATE
+            )
         _require_in_range(
             self.partial_fill_fraction,
             "partial_fill_fraction",
@@ -133,7 +160,12 @@ class CostModel:
         # Compute cost_model_hash if not provided; VERIFY it if provided
         # (CR-09): a non-empty hash copied from different cost assumptions
         # must fail closed, never silently poison experiment identity.
-        expected_hash = sha256_hex({k: getattr(self, k) for k in COST_KEYS})
+        hash_keys = (
+            (*COST_KEYS, *OPTIONAL_COST_KEYS)
+            if self.exit_slippage_rate is not None
+            else COST_KEYS
+        )
+        expected_hash = sha256_hex({k: getattr(self, k) for k in hash_keys})
         if self.cost_model_hash == "":
             object.__setattr__(self, "cost_model_hash", expected_hash)
         elif self.cost_model_hash != expected_hash:
@@ -154,6 +186,11 @@ def build_cost_model(cost_dict: dict[str, Any]) -> CostModel:
     The dict may come from a loaded ParameterSet.params or directly
     from a fixture's `cost_model` field.
     """
+    exit_slippage_rate = (
+        _coerce_decimal(cost_dict["exit_slippage_rate"], "exit_slippage_rate")
+        if "exit_slippage_rate" in cost_dict
+        else None
+    )
     return CostModel(
         fee_rate_entry=_coerce_decimal(cost_dict["fee_rate_entry"], "fee_rate_entry"),
         fee_rate_exit=_coerce_decimal(cost_dict["fee_rate_exit"], "fee_rate_exit"),
@@ -173,6 +210,29 @@ def build_cost_model(cost_dict: dict[str, Any]) -> CostModel:
             cost_dict["partial_fill_fraction"], "partial_fill_fraction"
         ),
         cost_model_hash="",
+        exit_slippage_rate=exit_slippage_rate,
+    )
+
+
+def cost_rates_from_model(cost_model: CostModel) -> CostRates:
+    """Map a CostModel to the four-rate `CostRates` the cost producer consumes.
+
+    `entry_slippage_rate` is the model's `expected_slippage`. A model without
+    `exit_slippage_rate` is a legacy 7-key model: refused (fail closed) and
+    never defaulted to `expected_slippage`, because sizing on a silently
+    assumed stop-exit slippage would under- or over-state the risk (T-12-07).
+    """
+    if cost_model.exit_slippage_rate is None:
+        raise ValueError(
+            "exit_slippage_rate is missing: legacy 7-key cost models cannot size; "
+            "use a registry set that carries exit_slippage_rate (baseline-v5 or later)"
+        )
+    return CostRates(
+        fee_rate_entry=cost_model.fee_rate_entry,
+        entry_slippage_rate=cost_model.expected_slippage,
+        fee_rate_exit=cost_model.fee_rate_exit,
+        exit_slippage_rate=cost_model.exit_slippage_rate,
+        fee_source=FEE_SOURCE_PARAMETER,
     )
 
 
@@ -206,7 +266,9 @@ def modeled_costs_per_unit(
 
 __all__ = [
     "COST_KEYS",
+    "OPTIONAL_COST_KEYS",
     "CostModel",
     "build_cost_model",
+    "cost_rates_from_model",
     "modeled_costs_per_unit",
 ]

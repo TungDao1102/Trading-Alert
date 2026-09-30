@@ -314,20 +314,20 @@ def test_direct_int_cost_model_converges_with_builder_hash() -> None:
     Per WR-03: CostModel.__post_init__ normalizes numeric fields via
     object.__setattr__ so both construction paths converge on Decimal
     before hashing. Covers all four numeric fields as int (including
-    fee_rate_entry-scale whole numbers and the partial_fill_fraction
-    upper bound 1), and asserts the stored fields are Decimal.
+    whole-number rates (0; rates above 0.01 are refused, D-04) and the
+    partial_fill_fraction upper bound 1), and asserts the stored fields are Decimal.
     """
     base = _load_match_input()["cost_model"]
     int_cost = {
         **base,
-        "fee_rate_entry": 1,
+        "fee_rate_entry": 0,
         "fee_rate_exit": 0,
         "expected_slippage": 0,
         "partial_fill_fraction": 1,
     }
     via_builder = _build_cost_model(int_cost)
     direct = CostModel(
-        fee_rate_entry=1,  # type: ignore[arg-type]
+        fee_rate_entry=0,  # type: ignore[arg-type]
         fee_rate_exit=0,  # type: ignore[arg-type]
         funding_treatment=int_cost["funding_treatment"],
         expected_slippage=0,  # type: ignore[arg-type]
