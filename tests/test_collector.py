@@ -77,7 +77,10 @@ class FakeAdapter:
         oi_responses: list[OiSnapshot | Exception] | None = None,
         funding_responses: list[list[FundingTick] | Exception] | None = None,
         oi_hist_response: dict[str, list[OiSnapshot]] | None = None,
+        server_time_response: datetime | Exception | None = None,
     ) -> None:
+        self._server_time = server_time_response
+        self.server_time_calls = 0
         self._oi = list(oi_responses or [])
         self._funding = list(funding_responses or [])
         self._oi_hist = oi_hist_response or {}
@@ -119,6 +122,14 @@ class FakeAdapter:
     ) -> list[OiSnapshot]:
         self.oi_hist_calls.append((symbol, period, limit))
         return list(self._oi_hist.get(symbol, []))
+
+    async def server_time(self) -> datetime:
+        self.server_time_calls += 1
+        if isinstance(self._server_time, Exception):
+            raise self._server_time
+        if self._server_time is None:
+            return datetime.now(UTC)
+        return self._server_time
 
 
 @pytest.fixture
@@ -1394,3 +1405,193 @@ def test_tick_writer_refuses_overwrite(writer_name: str, tmp_path: Path) -> None
 
     assert Path(path).read_bytes() == first_bytes
     assert [p for p in Path(path).parent.iterdir()] == [Path(path)]
+
+
+# --------------------------------------------------------------------------- #
+# Phase 13 plan 06 (D-25, F-706): warn-only server-time probe at start. It
+# only measures and logs; fail-closed clock checks belong to Phase 18.
+# --------------------------------------------------------------------------- #
+
+_PROBE_NOW = datetime(2026, 9, 30, 12, 0, 0, tzinfo=UTC)
+
+
+async def test_clock_probe_warns_on_large_offset() -> None:
+    from datetime import timedelta
+
+    import structlog
+    from src.data.collector import _probe_server_clock
+
+    adapter = FakeAdapter(server_time_response=_PROBE_NOW + timedelta(seconds=5))
+
+    with structlog.testing.capture_logs() as logs:
+        offset = await _probe_server_clock(
+            adapter,  # type: ignore[arg-type]
+            local_now=lambda: _PROBE_NOW,
+        )
+
+    assert offset == 5000
+    entries = [e for e in logs if e["event"] == "collector.clock_offset"]
+    assert len(entries) == 1
+    assert entries[0]["log_level"] == "warning"
+    assert entries[0]["offset_ms"] == 5000
+
+
+async def test_clock_probe_small_offset_logs_info() -> None:
+    from datetime import timedelta
+
+    import structlog
+    from src.data.collector import _probe_server_clock
+
+    adapter = FakeAdapter(server_time_response=_PROBE_NOW + timedelta(milliseconds=200))
+
+    with structlog.testing.capture_logs() as logs:
+        offset = await _probe_server_clock(
+            adapter,  # type: ignore[arg-type]
+            local_now=lambda: _PROBE_NOW,
+        )
+
+    assert offset == 200
+    entries = [e for e in logs if e["event"] == "collector.clock_offset"]
+    assert len(entries) == 1
+    assert entries[0]["log_level"] == "info"
+
+
+async def test_clock_probe_negative_offset_beyond_threshold_warns() -> None:
+    from datetime import timedelta
+
+    import structlog
+    from src.data.collector import _probe_server_clock
+
+    adapter = FakeAdapter(server_time_response=_PROBE_NOW - timedelta(seconds=3))
+
+    with structlog.testing.capture_logs() as logs:
+        offset = await _probe_server_clock(
+            adapter,  # type: ignore[arg-type]
+            local_now=lambda: _PROBE_NOW,
+        )
+
+    assert offset == -3000
+    assert [e["log_level"] for e in logs if e["event"] == "collector.clock_offset"] == [
+        "warning"
+    ]
+
+
+async def test_clock_probe_failure_never_blocks_start() -> None:
+    import structlog
+    from src.data.collector import _probe_server_clock
+
+    adapter = FakeAdapter(server_time_response=RuntimeError("no route to host"))
+
+    with structlog.testing.capture_logs() as logs:
+        offset = await _probe_server_clock(
+            adapter,  # type: ignore[arg-type]
+            local_now=lambda: _PROBE_NOW,
+        )
+
+    assert offset is None
+    entries = [e for e in logs if e["event"] == "collector.clock_probe_failed"]
+    assert len(entries) == 1
+    assert entries[0]["log_level"] == "warning"
+    assert entries[0]["error_type"] == "RuntimeError"
+
+
+def test_main_once_probes_clock_once_and_probe_failure_keeps_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.data.collector import main
+
+    list_path = _write_collect_list(tmp_path / "list.toml", list(LIVE_5))
+    common = [
+        "--once",
+        "--collect-list",
+        str(list_path),
+        "--database-url",
+        _sqlite_url(tmp_path),
+        "--raw-root",
+        str(tmp_path / "raw"),
+    ]
+
+    healthy = FakeAdapter(oi_responses=[_mk_oi_snapshot(s) for s in LIVE_5])
+    _install_fake_adapter(monkeypatch, healthy)
+    assert main(common) == 0
+    assert healthy.server_time_calls == 1
+
+    failing = FakeAdapter(
+        oi_responses=[_mk_oi_snapshot(s) for s in LIVE_5],
+        server_time_response=RuntimeError("time endpoint down"),
+    )
+    _install_fake_adapter(monkeypatch, failing)
+    assert main(common) == 0
+    assert failing.server_time_calls == 1
+    assert failing.oi_calls == list(LIVE_5)
+
+
+def test_healthcheck_does_not_probe_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.data.collector import main
+
+    list_path = _write_collect_list(tmp_path / "list.toml", list(LIVE_5))
+    adapter = FakeAdapter()
+    built = _install_fake_adapter(monkeypatch, adapter)
+
+    main(
+        [
+            "--healthcheck",
+            "--collect-list",
+            str(list_path),
+            "--database-url",
+            _sqlite_url(tmp_path),
+        ]
+    )
+
+    assert built == []
+    assert adapter.server_time_calls == 0
+
+
+def test_loop_probes_clock_once_before_first_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from src.data import collector
+
+    list_path = _write_collect_list(tmp_path / "list.toml", list(LIVE_5))
+    adapter = FakeAdapter()
+    _install_fake_adapter(monkeypatch, adapter)
+    order: list[str] = []
+
+    original_probe = collector._probe_server_clock
+
+    async def spy_probe(*args: object, **kwargs: object) -> int | None:
+        order.append("probe")
+        return await original_probe(*args, **kwargs)  # type: ignore[arg-type]
+
+    async def fake_tick(*_args: object, **_kwargs: object) -> tuple[object, object]:
+        order.append("tick")
+        return (
+            SimpleNamespace(snapshots_inserted=0, gaps_recorded=0),
+            SimpleNamespace(funding_inserted=0, gaps_recorded=0),
+        )
+
+    def stop_sleep(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(collector, "_probe_server_clock", spy_probe)
+    monkeypatch.setattr(collector, "_run_once_tick", fake_tick)
+    monkeypatch.setattr(collector.time, "sleep", stop_sleep)
+
+    rc = collector.main(
+        [
+            "--collect-list",
+            str(list_path),
+            "--database-url",
+            _sqlite_url(tmp_path),
+            "--raw-root",
+            str(tmp_path / "raw"),
+        ]
+    )
+
+    assert rc == 0
+    assert order == ["probe", "tick"]
+    assert adapter.server_time_calls == 1
