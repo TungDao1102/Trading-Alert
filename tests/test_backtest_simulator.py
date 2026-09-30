@@ -320,43 +320,98 @@ def test_run_twice_byte_identical() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Test 11 — cost parity: simulator modeled_costs_per_unit matches costs.modeled_costs_per_unit.
+# Test 11 - cost parity: the record's modeled cost is quote per unit at the
+# sizing edge, matching the public helper and literal arithmetic (D-18).
 # --------------------------------------------------------------------------- #
 
 
-def test_cost_parity_simulator_matches_costs_module() -> None:
-    """Beh. 11: simulator's modeled_costs_per_unit matches costs.modeled_costs_per_unit.
+@pytest.mark.parametrize(
+    "case_name", ["intrabar_missing_fallback", "intrabar_both_touched_short"]
+)
+def test_cost_parity_simulator_matches_costs_module(case_name: str) -> None:
+    """Beh. 11: the simulator record's modeled_costs_per_unit equals the public helper.
 
-    Per D-02: the simulator must call the identical cost formula that
-    src/risk/sizing.py consumes. A direct comparison pins the parity.
+    The plan edge and stop come from re-running the planner in the test; the
+    expected value is also written out as literal arithmetic,
+    edge x (0.0005 + 0.0001) + stop x (0.0005 + 0.0003), so the test cannot
+    agree with a re-derived buggy formula (the old rate-sum did).
     """
-    from src.backtest.costs import build_cost_model
+    from src.backtest.costs import build_cost_model, modeled_costs_per_unit
     from src.backtest.simulator import run
 
-    case_dir = PHASE6_FIXTURES_DIR / "intrabar_both_touched"
-    case_input = _load_input(case_dir)
-    # Build the cost model from the fixture.
+    case_input = _load_input(PHASE6_FIXTURES_DIR / case_name)
     cost_model = build_cost_model(case_input["cost_model"])
-    # Run the simulator.
-    result = run(case_input)
-    # The simulator's internal modeled_costs_per_unit must match the
-    # costs module's output for the same inputs.
-    trade = result["trades"][0]
-    # The trade record carries the modeled_costs_per_unit used.
+    trade = run(case_input)["trades"][0]
     sim_costs = Decimal(str(trade["modeled_costs_per_unit"]))
-    # Compute the expected value from the costs module.
-    # For a LONG trade with entry_ref ≈ 121.50 and SL ≈ 121.40:
-    # modeled_costs_per_unit = fee_rate_entry + fee_rate_exit + expected_slippage
-    # (simplified for the tracer slice).
-    expected_costs = (
-        Decimal(cost_model.fee_rate_entry)
-        + Decimal(cost_model.fee_rate_exit)
-        + Decimal(cost_model.expected_slippage)
+
+    trade_plan, direction = _replan(case_input)
+    edge = trade_plan.entry_max_price if direction == "LONG" else trade_plan.entry_min_price
+    via_helper = modeled_costs_per_unit(
+        cost_model=cost_model,
+        side=direction,
+        entry_price=edge,
+        stop_price=trade_plan.stop_loss_price,
     )
-    assert sim_costs == expected_costs, (
-        f"simulator modeled_costs_per_unit {sim_costs} != "
-        f"costs module {expected_costs}"
+    literal = edge * Decimal("0.0006") + trade_plan.stop_loss_price * Decimal("0.0008")
+    assert sim_costs == via_helper
+    assert sim_costs == literal
+    assert sim_costs > Decimal("0.0011"), "must not collapse to the dimensionless rate sum"
+
+
+_MODELED_COSTS_ORACLES = [
+    ("btc_long", "LONG", "60100", "58780", "83.0840"),
+    ("btc_short", "SHORT", "59900", "61300", "84.9800"),
+    ("xrp_long", "LONG", "0.5010", "0.4930", "0.000695"),
+]
+
+
+@pytest.mark.parametrize(
+    "label,side,entry,stop,expected",
+    _MODELED_COSTS_ORACLES,
+    ids=[row[0] for row in _MODELED_COSTS_ORACLES],
+)
+def test_modeled_costs_per_unit_price_aware_oracles(
+    label: str, side: str, entry: str, stop: str, expected: str
+) -> None:
+    from src.backtest.costs import build_cost_model, modeled_costs_per_unit
+
+    got = modeled_costs_per_unit(
+        cost_model=build_cost_model(_COST8),
+        side=side,
+        entry_price=Decimal(entry),
+        stop_price=Decimal(stop),
     )
+    assert got == Decimal(expected)
+
+
+def test_modeled_costs_per_unit_is_linear_in_price() -> None:
+    from src.backtest.costs import build_cost_model, modeled_costs_per_unit
+
+    model = build_cost_model(_COST8)
+    base = modeled_costs_per_unit(
+        cost_model=model, side="LONG", entry_price=Decimal("60100"), stop_price=Decimal("58780")
+    )
+    doubled = modeled_costs_per_unit(
+        cost_model=model, side="LONG", entry_price=Decimal("120200"), stop_price=Decimal("117560")
+    )
+    assert base == Decimal("83.0840")
+    assert doubled == Decimal("166.1680")
+
+
+def test_modeled_costs_per_unit_rejects_bad_side_legacy_model_and_old_call_form() -> None:
+    from src.backtest.costs import build_cost_model, modeled_costs_per_unit
+
+    model = build_cost_model(_COST8)
+    prices = {"entry_price": Decimal("60100"), "stop_price": Decimal("58780")}
+    with pytest.raises(ValueError, match="side"):
+        modeled_costs_per_unit(cost_model=model, side="FLAT", **prices)
+
+    legacy = build_cost_model({k: v for k, v in _COST8.items() if k != "exit_slippage_rate"})
+    with pytest.raises(ValueError, match="exit_slippage_rate"):
+        modeled_costs_per_unit(cost_model=legacy, side="LONG", **prices)
+
+    with pytest.raises(TypeError):
+        modeled_costs_per_unit(cost_model=model, side="LONG")  # type: ignore[call-arg]
 
 
 # --------------------------------------------------------------------------- #
