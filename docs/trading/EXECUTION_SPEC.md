@@ -150,6 +150,6 @@ Must provide a safe way to:
 
 ## 12. Algo-order capacity
 
-Do not read or depend on a `MAX_NUM_ALGO_ORDERS` exchangeInfo filter. Binance removed that filter from `GET /fapi/v1/exchangeInfo` in December 2025 and documented a 200-open-conditional-order limit per symbol instead. Current limits must still be verified before implementation. [Binance Futures changelog](https://developers.binance.com/docs/derivatives/usds-margined-futures/change-log)
+Do not read or depend on a `MAX_NUM_ALGO_ORDERS` exchangeInfo filter. Binance removed that filter from `GET /fapi/v1/exchangeInfo` on 2025-12-29 and documents the limit as 200 open conditional orders across all symbols (account-wide, not per symbol). The common-definition page may still describe a per-symbol filter; the dated change-log entry governs (see the Phase 11 register in `SOURCES.md`); verify against current Binance docs before implementation (F-051). [Binance Futures changelog](https://developers.binance.com/docs/derivatives/usds-margined-futures/change-log)
 
-The risk/execution layer should track current open algo-order count and leave operational headroom rather than assuming unlimited protective orders.
+The risk/execution layer should track the current open algo-order count account-wide (no symbol filter) and leave operational headroom rather than assuming unlimited protective orders. Per D031 the documents follow the accepted decision and the current official facts.
