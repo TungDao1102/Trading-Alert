@@ -75,6 +75,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 import tenacity
 from binance_sdk_derivatives_trading_usds_futures import (
+    BadRequestError,
     DerivativesTradingUsdsFutures,
     RateLimitBanError,
     TooManyRequestsError,
@@ -245,6 +246,11 @@ class SymbolFilters:
     notional_constraints_json: str
     order_capabilities_json: str
     position_mode_snapshot_json: str
+    # exchangeInfo `deliveryDate` (ms epoch). Perpetuals in TRADING carry the
+    # far-future sentinel 4133404800000, passed through unchanged; consumers
+    # decide what is "past". Optional trailing field: no PostgreSQL migration and
+    # no symbol_metadata column (D-26).
+    delivery_date_ms: int | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -514,6 +520,22 @@ def is_rate_limit_error(exc: BaseException) -> bool:
     return "TooManyRequests" in cls_name or "RateLimit" in cls_name
 
 
+# Binance error code for an unknown symbol (`-1121 Invalid symbol.`). The SDK
+# raises `BadRequestError` for HTTP 400 with the Binance code in `status_code`.
+# The freeze CLI and backfill treat it as "no data for this symbol" and fall
+# back to the archive instead of failing the run (D-08).
+INVALID_SYMBOL_CODE: int = -1121
+
+
+def is_invalid_symbol_error(exc: BaseException) -> bool:
+    """True when `exc` is the SDK's 400 carrying Binance code -1121 (invalid symbol).
+
+    Lives here because this module is the only one allowed to import the SDK.
+    Any other 400 code, non-SDK error or rate-limit error is False.
+    """
+    return isinstance(exc, BadRequestError) and exc.status_code == INVALID_SYMBOL_CODE
+
+
 def _row_to_kline(symbol: str, interval: str, row: Sequence[Any]) -> Kline:
     """Map one raw kline list (12-field tuple) to a `Kline`.
 
@@ -735,12 +757,31 @@ class BinanceUsdmAdapter:
                     symbol=resolved_symbol,
                     funding_time_utc=_ms_to_utc(int(item.funding_time)),
                     funding_rate=Decimal(str(item.funding_rate)),
+                    # Historical funding rows can carry markPrice "" (Pitfall 9).
+                    # Only the empty string maps to None; any other malformed
+                    # value still raises in Decimal() -- never fabricated as 0.
                     mark_price=(
-                        Decimal(str(item.mark_price)) if item.mark_price is not None else None
+                        Decimal(str(item.mark_price))
+                        if item.mark_price is not None and item.mark_price != ""
+                        else None
                     ),
                 )
             )
         return out
+
+    # ----- server time ----------------------------------------------------- #
+
+    async def server_time(self) -> datetime:
+        """Binance server time (`GET /fapi/v1/time`) as a UTC datetime (D-25).
+
+        Lets the CLI bound a run by the exchange clock instead of the host's.
+        A missing value raises: an unknown time is never defaulted.
+        """
+        response = await asyncio.to_thread(self._sdk.rest_api.check_server_time)
+        payload = response.data()
+        if payload is None or payload.server_time is None:
+            raise ValueError(f"check_server_time response missing server_time: {payload!r}")
+        return _ms_to_utc(int(payload.server_time))
 
     # ----- exchange info --------------------------------------------------- #
 
@@ -830,6 +871,9 @@ class BinanceUsdmAdapter:
                     notional_constraints_json=notional_blob,
                     order_capabilities_json=capabilities_blob,
                     position_mode_snapshot_json=position_mode_blob,
+                    delivery_date_ms=(
+                        int(sym.delivery_date) if sym.delivery_date is not None else None
+                    ),
                 )
             )
         if drifted:

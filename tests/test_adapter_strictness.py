@@ -8,7 +8,7 @@ a plausible zero / empty string / silently dropped row.
 from __future__ import annotations
 
 import asyncio
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import pytest
@@ -361,7 +361,7 @@ def test_funding_row_with_empty_mark_price_parses_as_none() -> None:
 
 def test_funding_row_with_malformed_mark_price_still_raises() -> None:
     adapter = _funding_adapter([_funding_row("abc")])
-    with pytest.raises(Exception, match="abc|Invalid|invalid"):
+    with pytest.raises(InvalidOperation):
         asyncio.run(adapter.funding_rate("BTCUSDT"))
 
 
@@ -394,7 +394,8 @@ def test_server_time_missing_value_raises() -> None:
 
 def test_invalid_symbol_predicate() -> None:
     assert INVALID_SYMBOL_CODE == -1121
-    assert is_invalid_symbol_error(BadRequestError(error_message="Invalid symbol.", status_code=-1121))
+    invalid = BadRequestError(error_message="Invalid symbol.", status_code=-1121)
+    assert is_invalid_symbol_error(invalid)
     assert not is_invalid_symbol_error(BadRequestError(error_message="x", status_code=-1100))
     assert not is_invalid_symbol_error(ValueError("x"))
     assert not is_invalid_symbol_error(TooManyRequestsError(error_message="slow", status_code=429))
