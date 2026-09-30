@@ -405,7 +405,7 @@ Plans:
 
 **Audit refs**: F-022, F-009, F-013, F-011, F-051, F-054, F-052, F-006, F-005, F-024, F-110, F-116, AMB-001…AMB-039 (report §20)
 
-**Plans:** 6/8 plans executed
+**Plans:** 7/8 plans executed
 
 Plans:
 **Wave 1**
@@ -419,7 +419,7 @@ Plans:
 - [x] 11-06-PLAN.md — TradingView "HMAC-checked" removed (STACK.md then AGENTS.md), real webhook auth scheme, quantization order pointers in PROJECT.md/AGENTS.md (RISK-02, EXEC-02, D-12, D-13)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 11-07-PLAN.md — GLOSSARY section 9 canonical codes + ApprovalResult, 13 new REQ-IDs with traceability, DECISIONS D044/D045, DOC_STATUS log (F-110, F-116, D-15, D-16, D-19)
+- [x] 11-07-PLAN.md — GLOSSARY section 9 canonical codes + ApprovalResult, 13 new REQ-IDs with traceability, DECISIONS D044/D045, DOC_STATUS log (F-110, F-116, D-15, D-16, D-19)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 11-08-PLAN.md — verify_decision_alignment.py over all gate modules, registry-gate CI wiring, phase-close full suite and validation sign-off (RSCH-01, RSCH-02, RISK-02, EXEC-02, OPS-01, D-17, D-18)
@@ -866,7 +866,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 8. Approval + Reconciliation Hardening | 5/5 | Complete   | 2026-09-27 |
 | 9. Live Execution Rollout | 4/4 | In Progress|  |
 | 10. Journal Depth + Kill-Gate Operations | 12/12 | In Progress|  |
-| 11. Decision Alignment (docs + params) | 6/8 | In Progress|  |
+| 11. Decision Alignment (docs + params) | 7/8 | In Progress|  |
 | 12. Fee + Cost Model Correctness | 0/TBD | Not started | - |
 | 13. Research Data Foundation Fixes + VPS Collector Deployment | 0/TBD | Not started | - |
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |
