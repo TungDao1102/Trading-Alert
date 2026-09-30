@@ -51,6 +51,7 @@ re-verification policy):
   | place_algo_protective       | new_algo_order(algo_type, symbol, side, type, position_side, trigger_price, close_position, working_type, client_algo_id) | 17.4.0: no signature change; algoType=CONDITIONAL required; closePosition=true mutually exclusive with quantity/reduceOnly; working_type MARK_PRICE for SL/TP triggers.  # noqa: E501
   | query_order_by_client       | query_order(symbol, orig_client_order_id) | 17.4.0: no signature change; `symbol` required, `order_id` / `orig_client_order_id` optional — populate `orig_client_order_id` for no-blind-recovery probe (EXECUTION_SPEC §10).  # noqa: E501
   | get_position_mode           | get_current_position_mode(recv_window) | 17.4.0: no signature change; returns dual_side_position bool (True=hedge, False=one-way); re-checked at placement time per D-02.  # noqa: E501
+  | user_commission_rate       | user_commission_rate(symbol, recv_window) | 17.4.0: `symbol` required, `recv_window` Optional (left to the SDK default); returns UserCommissionRateResponse with Optional str fields (symbol, makerCommissionRate, takerCommissionRate, rpiCommissionRate); strict parse, unknown raises, never zero (Phase 12, D-11).  # noqa: E501
 
 The 17.3.1 -> 17.4.0 changelog (per RESEARCH Open Question 2): the
 Delta closed during 08-04 was "no public REST method-signature change
@@ -68,7 +69,7 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -416,6 +417,22 @@ class PositionModeResult:
     """
 
     dual_side_position: bool
+
+
+@dataclass(frozen=True)
+class CommissionRates:
+    """Result of `user_commission_rate` (GET /fapi/v1/commissionRate).
+
+    Both rates are Decimal fractions in [0, 0.01] (0.0004 is 0.04 percent).
+    A real rate of 0 is legitimate; an unknown rate is never represented as
+    0 (the adapter raises instead). The adapter takes no clock: the caller
+    stamps `observed_at_utc` when it builds the risk-layer
+    `AccountCommission`. Runtime wiring is Phase 24.
+    """
+
+    symbol: str
+    maker_rate: Decimal
+    taker_rate: Decimal
 
 
 # --------------------------------------------------------------------------- #
@@ -1248,6 +1265,44 @@ class BinanceUsdmAdapter:
         raw: GetCurrentPositionModeResponse = response.data()
         return PositionModeResult(dual_side_position=bool(raw.dual_side_position))
 
+    async def user_commission_rate(self, symbol: str) -> CommissionRates:
+        """Read the account's maker/taker commission rate for one symbol.
+
+        GET /fapi/v1/commissionRate (USER_DATA, IP weight 20) through the
+        official SDK `rest_api.user_commission_rate(symbol, recv_window)`;
+        `recv_window` is left to the SDK default. The `rpiCommissionRate`
+        field is ignored.
+
+        Flag-never-fabricate (D-09, D-11): a missing, non-decimal,
+        non-finite, negative, above-0.01 or wrong-symbol field raises
+        `ValueError` — the adapter never returns a zero to mean unknown.
+        There is no retry and no fallback value; an SDK exception
+        propagates unchanged. The adapter takes no clock: the caller stamps
+        `observed_at_utc` when it builds the risk-layer `AccountCommission`,
+        and runtime wiring (refresh loop, TTL) is Phase 24.
+
+        Returns:
+            A frozen `CommissionRates` for the requested symbol.
+        """
+        from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
+            UserCommissionRateResponse,
+        )
+
+        response = await asyncio.to_thread(self._sdk.rest_api.user_commission_rate, symbol)
+        raw: UserCommissionRateResponse | None = response.data()
+        if raw is None:
+            raise ValueError(
+                f"commissionRate response empty for {symbol}: refusing to fabricate a rate"
+            )
+        if raw.symbol is None or raw.symbol != symbol:
+            raise ValueError(
+                f"commissionRate response symbol {raw.symbol!r} does not match "
+                f"requested {symbol}: refusing to use another symbol's rate"
+            )
+        maker = _require_commission_rate(raw.maker_commission_rate, "makerCommissionRate", symbol)
+        taker = _require_commission_rate(raw.taker_commission_rate, "takerCommissionRate", symbol)
+        return CommissionRates(symbol=symbol, maker_rate=maker, taker_rate=taker)
+
 
 # --------------------------------------------------------------------------- #
 # Internal helpers for reconciler snapshot projection.
@@ -1465,6 +1520,42 @@ def _require_quantity(value: Any, field_name: str) -> Decimal:
     if value is None:
         raise ValueError(f"snapshot row missing {field_name}: refusing to fabricate zero")
     return Decimal(str(value))
+
+
+# A commission RATE above 1 percent is a unit error, never a real Binance
+# rate (mirrors `src.risk.cost_rates.MAX_RATE`; the adapter imports nothing
+# from the risk package).
+_MAX_COMMISSION_RATE = Decimal("0.01")
+
+
+def _require_commission_rate(value: Any, field_name: str, symbol: str) -> Decimal:
+    """Parse one commissionRate string strictly; never fabricate a rate.
+
+    Messages carry the symbol and field name only — no request URL,
+    signature or key material.
+    """
+    if not isinstance(value, str) or value.strip() == "":
+        raise ValueError(
+            f"commissionRate {field_name} missing or not a string for {symbol}: "
+            "refusing to fabricate a rate"
+        )
+    try:
+        rate = Decimal(value)
+    except InvalidOperation:
+        raise ValueError(
+            f"commissionRate {field_name} is not a decimal for {symbol}: "
+            "refusing to fabricate a rate"
+        ) from None
+    if not rate.is_finite():
+        raise ValueError(f"commissionRate {field_name} is not finite for {symbol}")
+    if rate < Decimal("0"):
+        raise ValueError(f"commissionRate {field_name} is negative for {symbol}")
+    if rate > _MAX_COMMISSION_RATE:
+        raise ValueError(
+            f"commissionRate {field_name} exceeds {_MAX_COMMISSION_RATE} for {symbol}: "
+            "likely a unit error"
+        )
+    return rate
 
 
 def _require_update_time_utc(value: Any) -> datetime:
