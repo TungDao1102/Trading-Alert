@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from src.domain.enums import RejectionReason
+
 
 def _require_decimal(value: object, field_name: str) -> Decimal:
     """Reject non-Decimal values (bool, int, float, str and None included)."""
@@ -48,4 +50,30 @@ def validate_guard_rates(
         raise ValueError(f"max_cost_to_risk must be in (0, 1], got {max_ratio}")
 
 
-__all__ = ["validate_guard_rates"]
+def check_cost_guards(
+    *,
+    stop_distance_rate: Decimal,
+    cost_to_risk_ratio: Decimal,
+    min_stop_distance_rate: Decimal,
+    max_cost_to_risk: Decimal,
+) -> str | None:
+    """Return the first violated guard's reason code, or None when both pass.
+
+    Order is fixed: the stop check comes first. Boundaries:
+
+    * `STOP_TOO_TIGHT` when `stop_distance_rate` is STRICTLY BELOW
+      `min_stop_distance_rate` (equality passes).
+    * `COST_TO_RISK_EXCEEDED` when `cost_to_risk_ratio` is STRICTLY ABOVE
+      `max_cost_to_risk` (equality passes).
+
+    `cost_to_risk_ratio` is the modeled round-trip cost divided by the
+    per-unit risk (`stop distance + cost`), not by the stop distance.
+    """
+    if stop_distance_rate < min_stop_distance_rate:
+        return RejectionReason.STOP_TOO_TIGHT.value
+    if cost_to_risk_ratio > max_cost_to_risk:
+        return RejectionReason.COST_TO_RISK_EXCEEDED.value
+    return None
+
+
+__all__ = ["check_cost_guards", "validate_guard_rates"]

@@ -29,10 +29,10 @@ from typing import Any
 
 from src.core._decimal import _add, _div, _mul, _sub
 from src.core.types import AccountState
-from src.domain.enums import Direction
+from src.domain.enums import Direction, QuantizationDecision
 from src.domain.trade_plan import TradePlan
 
-from .cost_guards import validate_guard_rates
+from .cost_guards import check_cost_guards, validate_guard_rates
 from .cost_rates import CostRates, per_unit_round_trip_cost
 from .portfolio import check_portfolio
 from .quantization import quantize
@@ -53,7 +53,8 @@ def size_and_quantize(
 ) -> SizedResult:
     """Size at the adverse zone edge, then quantize; record the cost trail.
 
-    Fixed order: `size_position`, `quantize`. The returned SizedResult carries
+    Fixed order: `size_position`, STOP_TOO_TIGHT, COST_TO_RISK_EXCEEDED,
+    `quantize` (the guards run BEFORE any quantity is rounded). The returned SizedResult carries
     the modeled cost per unit, the sizing entry price, the stop distance rate,
     the cost-to-risk ratio, the fee rates used and their source (D-12), for
     accepted and quantize-rejected plans alike. A `risk.cost_rates` structlog
@@ -123,6 +124,35 @@ def size_and_quantize(
         cost_to_risk_ratio=cost_to_risk_ratio,
     )
 
+    guard_reason = check_cost_guards(
+        stop_distance_rate=stop_distance_rate,
+        cost_to_risk_ratio=cost_to_risk_ratio,
+        min_stop_distance_rate=min_stop_distance_rate,
+        max_cost_to_risk=max_cost_to_risk,
+    )
+    if guard_reason is not None:
+        _emit_cost_guard_lineage(
+            reason_code=guard_reason,
+            stop_distance_rate=stop_distance_rate,
+            cost_to_risk_ratio=cost_to_risk_ratio,
+        )
+        return SizedResult(
+            is_no_trade=True,
+            quantity=None,
+            quantity_before_rounding=sized.quantity_before_rounding,
+            quantity_after_rounding=Decimal("0"),
+            quantization_decision=QuantizationDecision.REJECTED.value,
+            realized_risk=Decimal("0"),
+            reason_code=guard_reason,
+            modeled_costs_per_unit=costs,
+            sizing_entry_price=sizing_entry,
+            stop_distance_rate=stop_distance_rate,
+            cost_to_risk_ratio=cost_to_risk_ratio,
+            fee_rate_entry=cost_rates.fee_rate_entry,
+            fee_rate_exit=cost_rates.fee_rate_exit,
+            fee_source=cost_rates.fee_source,
+        )
+
     quantized = quantize(
         sized=sized,
         constraint_snapshot=constraint_snapshot,
@@ -160,6 +190,9 @@ def evaluate_risk(
     parameter_set: dict[str, Any],
 ) -> PortfolioVerdict:
     """Run `size_and_quantize` then `check_portfolio` in fixed order.
+
+    Full order: `size_position`, STOP_TOO_TIGHT, COST_TO_RISK_EXCEEDED,
+    `quantize`, `check_portfolio`.
 
     The pipeline is the same function called in backtest/paper/live
     (D-02 parity guarantee). The first NO_TRADE short-circuits with its
@@ -235,6 +268,23 @@ def _emit_cost_rates_lineage(
         fee_source=cost_rates.fee_source,
         modeled_costs_per_unit=str(costs),
         sizing_entry_price=str(sizing_entry),
+        stop_distance_rate=str(stop_distance_rate),
+        cost_to_risk_ratio=str(cost_to_risk_ratio),
+    )
+
+
+def _emit_cost_guard_lineage(
+    *,
+    reason_code: str,
+    stop_distance_rate: Decimal,
+    cost_to_risk_ratio: Decimal,
+) -> None:
+    """Emit the `risk.cost_guard` event on every guard rejection (D-12)."""
+    import structlog
+
+    structlog.get_logger().info(
+        "risk.cost_guard",
+        reason_code=reason_code,
         stop_distance_rate=str(stop_distance_rate),
         cost_to_risk_ratio=str(cost_to_risk_ratio),
     )

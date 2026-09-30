@@ -508,14 +508,18 @@ def test_check_cost_guards_pure_function() -> None:
 def test_stop_distance_boundary_equality_passes() -> None:
     # LONG zone 49900-50000, stop 49850 -> 150 / 50000 = 0.003 exactly.
     plan = _plan(entry_min="49900", entry_max="50000", stop="49850")
-    sized = _size(plan, "LONG", _btc_constraints(), min_stop=Decimal("0.003"), max_ratio=Decimal("1"))
+    sized = _size(
+        plan, "LONG", _btc_constraints(), min_stop=Decimal("0.003"), max_ratio=Decimal("1")
+    )
     assert sized.stop_distance_rate == Decimal("0.003")
     assert sized.reason_code != "STOP_TOO_TIGHT"
 
 
 def test_stop_distance_boundary_just_below_rejects() -> None:
     plan = _plan(entry_min="49900", entry_max="50000", stop="49850")
-    sized = _size(plan, "LONG", _btc_constraints(), min_stop=Decimal("0.0031"), max_ratio=Decimal("1"))
+    sized = _size(
+        plan, "LONG", _btc_constraints(), min_stop=Decimal("0.0031"), max_ratio=Decimal("1")
+    )
     assert sized.is_no_trade is True
     assert sized.reason_code == "STOP_TOO_TIGHT"
 
@@ -605,7 +609,8 @@ def test_guard_reject_lineage_event() -> None:
     assert ev["reason_code"] == "COST_TO_RISK_EXCEEDED"
     assert ev["stop_distance_rate"] == "0.004991680532445923460898502496"
     assert ev["cost_to_risk_ratio"] == "0.2185464964834592341755665538"
-    assert all(isinstance(ev[k], str) for k in ("reason_code", "stop_distance_rate", "cost_to_risk_ratio"))
+    for key in ("reason_code", "stop_distance_rate", "cost_to_risk_ratio"):
+        assert isinstance(ev[key], str)
     # No guard event on an accepted plan.
     with structlog.testing.capture_logs() as ok_logs:
         _size(_btc_long(), "LONG", _btc_constraints())
