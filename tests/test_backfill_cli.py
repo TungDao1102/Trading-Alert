@@ -384,3 +384,387 @@ def test_unknown_dataset_or_interval_exits_2_without_adapter_call(
 
     assert rc == 2
     assert "expected one of" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 - per-symbol windows: onboard floor, delivery cap, frozen start,
+# mark bounds, resume and dry-run.
+# --------------------------------------------------------------------------- #
+
+FAR_FUTURE_DELIVERY_MS = 4_133_404_800_000  # the TRADING perpetual sentinel
+
+
+def _plan(
+    filters: dict[str, SymbolFilters],
+    *,
+    intervals: Sequence[str] = ("1h",),
+    datasets: Sequence[str] = ("trade",),
+    depth_months: dict[str, int] | None = None,
+    htf_start_date: date | None = None,
+) -> Any:
+    from src.data.backfill_cli import plan_windows
+
+    return plan_windows(
+        filters,
+        symbols=list(filters),
+        intervals=intervals,
+        datasets=datasets,
+        run_date=date(2026, 9, 30),
+        now_ms=int((RUN_NOW - _EPOCH) / timedelta(milliseconds=1)),
+        depth_months=depth_months or {"1m": 12, "1h": 24, "4h": 24},
+        htf_start_date=htf_start_date,
+    )
+
+
+def test_onboard_limited_window_starts_at_onboard_time() -> None:
+    windows = _plan(
+        {"NEWUSDT": _filters("NEWUSDT", onboard=datetime(2025, 3, 10, 7, tzinfo=UTC))}
+    )
+
+    (window,) = windows
+    assert window.start_ms == _ms(2025, 3, 10, 7)
+    assert window.end_ms == _ms(2026, 9, 30)
+    assert window.cause == "ONBOARD_LIMITED"
+    assert window.terminal is False
+
+
+def test_trading_symbol_with_far_future_delivery_is_not_capped() -> None:
+    windows = _plan({"BTCUSDT": _filters("BTCUSDT", delivery_ms=FAR_FUTURE_DELIVERY_MS)})
+
+    (window,) = windows
+    assert window.end_ms == _ms(2026, 9, 30)
+    assert window.terminal is False
+    assert window.cause == "FULL_DEPTH"
+
+
+def test_non_trading_symbol_without_delivery_date_gets_no_window() -> None:
+    windows = _plan(
+        {"OLDUSDT": _filters("OLDUSDT", status="SETTLING", delivery_ms=None)}
+    )
+
+    (window,) = windows
+    assert window.cause == "DELIVERY_UNKNOWN"
+    assert window.has_window is False
+
+
+def test_pending_symbol_onboarding_after_run_end_is_not_listed_in_range() -> None:
+    windows = _plan(
+        {
+            "SOONUSDT": _filters(
+                "SOONUSDT",
+                status="PENDING_TRADING",
+                onboard=datetime(2026, 10, 5, tzinfo=UTC),
+                delivery_ms=FAR_FUTURE_DELIVERY_MS,
+            )
+        }
+    )
+
+    (window,) = windows
+    assert window.cause == "NOT_LISTED_IN_RANGE"
+    assert window.has_window is False
+
+
+def test_mark_windows_match_trade_windows() -> None:
+    filters = {
+        "BTCUSDT": _filters("BTCUSDT"),
+        "NEWUSDT": _filters("NEWUSDT", onboard=datetime(2025, 3, 10, 7, tzinfo=UTC)),
+        "FTTUSDT": _filters(
+            "FTTUSDT", status="SETTLING", delivery_ms=_ms(2026, 8, 10, 8)
+        ),
+    }
+
+    windows = _plan(filters, intervals=("1h", "4h"), datasets=("trade", "mark"))
+
+    def key(w: Any) -> tuple[str, str, int | None, int | None, bool, str]:
+        return (w.symbol, w.interval, w.start_ms, w.end_ms, w.terminal, w.cause)
+
+    trade = sorted(key(w) for w in windows if w.dataset == "trade")
+    mark = sorted(key(w) for w in windows if w.dataset == "mark")
+    assert trade == mark
+    assert len(trade) == 6
+
+
+async def test_delivered_symbol_never_publishes_post_delivery_bars(
+    tmp_path: Path, session: Session
+) -> None:
+    import polars as pl
+    from src.data.backfill_cli import run_backfill
+
+    delivery_ms = _ms(2026, 8, 10, 8)
+    fixture = _filters("FTTUSDT", status="SETTLING", delivery_ms=delivery_ms)
+    # The exchange keeps serving flat zero-volume bars after delivery, all the
+    # way to "now" (research Pitfall 1).
+    adapter = FakeAdapter([fixture], session=session, flat_from_ms={"FTTUSDT": delivery_ms})
+
+    report = await run_backfill(
+        _config(tmp_path, symbols=["FTTUSDT"], depth_months={"1h": 2}),
+        adapter=adapter,
+        session=session,
+        clock=_clock(),
+    )
+
+    (window,) = [w for w in report.windows if w.has_window]
+    assert window.terminal is True
+    assert window.cause == "DELISTED_CAPPED"
+    assert window.end_ms == delivery_ms
+    days = _day_dirs(tmp_path / "raw", "1h", "FTTUSDT")
+    assert days[0] == "2026-07-30"
+    # No date directory after the delivery day exists; the delivery day itself
+    # is published (terminal) with its eight pre-delivery bars.
+    assert days[-1] == "2026-08-10"
+    assert not [d for d in days if d > "2026-08-10"]
+    delivery_day = (
+        tmp_path / "raw" / "interval=1h" / "symbol=FTTUSDT" / "date=2026-08-10" / "part.parquet"
+    )
+    assert pl.read_parquet(delivery_day).height == 8
+
+
+async def test_symbols_without_window_are_listed_and_never_fetched(
+    tmp_path: Path, session: Session
+) -> None:
+    from src.data.backfill_cli import run_backfill
+
+    adapter = FakeAdapter(
+        [
+            _filters("OLDUSDT", status="SETTLING", delivery_ms=None),
+            _filters(
+                "SOONUSDT",
+                status="PENDING_TRADING",
+                onboard=datetime(2026, 10, 5, tzinfo=UTC),
+                delivery_ms=FAR_FUTURE_DELIVERY_MS,
+            ),
+        ],
+        session=session,
+    )
+    lines: list[str] = []
+
+    report = await run_backfill(
+        _config(tmp_path, symbols=["OLDUSDT", "SOONUSDT"], depth_months={"1h": 1}),
+        adapter=adapter,
+        session=session,
+        clock=_clock(),
+        emit=lines.append,
+    )
+
+    assert adapter.kline_requests == []
+    assert {w.cause for w in report.windows} == {"DELIVERY_UNKNOWN", "NOT_LISTED_IN_RANGE"}
+    text = "\n".join(lines)
+    assert "OLDUSDT" in text and "DELIVERY_UNKNOWN" in text
+    assert "SOONUSDT" in text and "NOT_LISTED_IN_RANGE" in text
+
+
+async def test_mark_dataset_uses_trade_bounds_and_its_own_root(
+    tmp_path: Path, session: Session
+) -> None:
+    from src.data.backfill_cli import run_backfill
+
+    adapter = FakeAdapter(
+        [_filters("NEWUSDT", onboard=datetime(2026, 9, 10, 7, tzinfo=UTC))],
+        session=session,
+        first_ms={"NEWUSDT": _ms(2026, 9, 10, 7)},
+    )
+
+    await run_backfill(
+        _config(
+            tmp_path,
+            symbols=["NEWUSDT"],
+            datasets=["trade", "mark"],
+            depth_months={"1h": 2},
+        ),
+        adapter=adapter,
+        session=session,
+        clock=_clock(),
+    )
+
+    # Neither dataset is requested before onboard; roots are disjoint.
+    assert min(start for _, _, start in adapter.kline_requests) >= _ms(2026, 9, 10, 7)
+    assert min(start for _, _, start in adapter.mark_requests) >= _ms(2026, 9, 10, 7)
+    trade_days = _day_dirs(tmp_path / "raw", "1h", "NEWUSDT")
+    mark_days = _day_dirs(tmp_path / "raw", "1h", "NEWUSDT", sub="dataset=mark_klines")
+    assert trade_days == mark_days
+    assert trade_days[0] == "2026-09-10"
+    assert (tmp_path / "cursors" / "NEWUSDT_1h.cursor").exists()
+    assert (tmp_path / "cursors" / "mark__NEWUSDT_1h.cursor").exists()
+
+
+def test_frozen_manifest_sets_htf_start(tmp_path: Path) -> None:
+    from src.data.backfill_cli import resolve_universe
+
+    frozen = [f"T{i:02d}USDT" for i in range(12)]
+    manifest = _write_manifest(
+        tmp_path / "frozen.toml", status="FROZEN", selection_date="2024-09-28", symbols=frozen
+    )
+    collect = _write_collect_list(tmp_path / "collect.toml", extra=["EXTRAUSDT"])
+
+    symbols, htf_start = resolve_universe(collect, manifest, None)
+
+    assert htf_start == date(2024, 9, 28)
+    assert set(symbols) == {*LIVE_5, "EXTRAUSDT", *frozen}
+    assert symbols == sorted(symbols)
+
+    windows = _plan(
+        {"BTCUSDT": _filters("BTCUSDT")},
+        intervals=("1m", "1h", "4h"),
+        htf_start_date=htf_start,
+    )
+    starts = {w.interval: w.start_ms for w in windows}
+    assert starts["1h"] == _ms(2024, 9, 28)
+    assert starts["4h"] == _ms(2024, 9, 28)
+    assert starts["1m"] == _ms(2025, 9, 30)  # 12 months before the run date
+
+
+def test_draft_manifest_contributes_no_symbols_and_no_start(tmp_path: Path) -> None:
+    from src.data.backfill_cli import resolve_universe
+
+    manifest = _write_manifest(tmp_path / "draft.toml")
+    collect = _write_collect_list(tmp_path / "collect.toml", extra=["EXTRAUSDT"])
+
+    symbols, htf_start = resolve_universe(collect, manifest, None)
+
+    assert htf_start is None
+    assert symbols == sorted({*LIVE_5, "EXTRAUSDT"})
+
+
+def test_explicit_symbols_replace_the_union_but_keep_the_frozen_start(
+    tmp_path: Path,
+) -> None:
+    from src.data.backfill_cli import resolve_universe
+
+    manifest = _write_manifest(
+        tmp_path / "frozen.toml",
+        status="FROZEN",
+        selection_date="2024-09-28",
+        symbols=[f"T{i:02d}USDT" for i in range(12)],
+    )
+    collect = _write_collect_list(tmp_path / "collect.toml")
+
+    symbols, htf_start = resolve_universe(collect, manifest, ["ETHUSDT", "BTCUSDT"])
+
+    assert symbols == ["BTCUSDT", "ETHUSDT"]
+    assert htf_start == date(2024, 9, 28)
+
+
+async def test_resume_after_kill_uses_cursor_and_store_floor(
+    tmp_path: Path, session: Session
+) -> None:
+    import hashlib
+
+    from src.data.backfill_cli import run_backfill
+
+    config = _config(tmp_path, depth_months={"1h": 2})
+    raw = tmp_path / "raw"
+
+    # Run 1 is killed on its second page: the first page's days are published.
+    killed = FakeAdapter([_filters("BTCUSDT")], session=session, fail_on_kline_call=2)
+    with pytest.raises(RuntimeError, match="simulated kill"):
+        await run_backfill(config, adapter=killed, session=session, clock=_clock(0))
+    first_days = _day_dirs(raw, "1h", "BTCUSDT")
+    assert 0 < len(first_days) < 62
+    first_hashes = {
+        p.parent.name: hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in raw.glob("interval=1h/symbol=BTCUSDT/date=*/part.parquet")
+    }
+    assert (tmp_path / "cursors" / "BTCUSDT_1h.cursor").exists()
+
+    # Run 2 resumes from the cursor: only the remaining days, no FileExistsError.
+    resumed = FakeAdapter([_filters("BTCUSDT")], session=session)
+    await run_backfill(config, adapter=resumed, session=session, clock=_clock(1))
+    days = _day_dirs(raw, "1h", "BTCUSDT")
+    assert len(days) == 62
+    assert len(set(days)) == 62
+    assert days[0] == "2026-07-30"
+    assert days[-1] == "2026-09-29"
+    assert min(start for _, _, start in resumed.kline_requests) > _ms(2026, 7, 30)
+    for p in raw.glob("interval=1h/symbol=BTCUSDT/date=*/part.parquet"):
+        if p.parent.name in first_hashes:
+            assert hashlib.sha256(p.read_bytes()).hexdigest() == first_hashes[p.parent.name]
+
+    # Run 3 with every cursor file deleted: the store floor stops any republish.
+    for cursor in (tmp_path / "cursors").glob("*.cursor"):
+        cursor.unlink()
+    again = FakeAdapter([_filters("BTCUSDT")], session=session)
+    report = await run_backfill(config, adapter=again, session=session, clock=_clock(2))
+    assert again.kline_requests == []
+    assert sum(r.total_rows for r in report.results.values()) == 0
+    assert len(_day_dirs(raw, "1h", "BTCUSDT")) == 62
+
+
+async def test_depth_override_moves_the_start_and_the_header(
+    tmp_path: Path, session: Session
+) -> None:
+    from src.data.backfill_cli import run_backfill
+
+    adapter = FakeAdapter([_filters("BTCUSDT")], session=session)
+    lines: list[str] = []
+
+    report = await run_backfill(
+        _config(
+            tmp_path,
+            intervals=["1m"],
+            depth_months={"1m": 6},
+            dry_run=True,
+        ),
+        adapter=adapter,
+        session=None,
+        clock=_clock(),
+        emit=lines.append,
+    )
+
+    (window,) = report.windows
+    assert window.start_ms == _ms(2026, 3, 30)
+    assert "1m=6 months" in lines[0]
+
+
+async def test_dry_run_fetches_nothing(tmp_path: Path, session: Session) -> None:
+    from src.data.backfill_cli import run_backfill
+
+    adapter = FakeAdapter([_filters("BTCUSDT")], session=session)
+    lines: list[str] = []
+
+    report = await run_backfill(
+        _config(tmp_path, datasets=["trade", "mark"], dry_run=True),
+        adapter=adapter,
+        session=session,
+        clock=_clock(),
+        emit=lines.append,
+    )
+
+    assert adapter.calls == ["exchange_info"]
+    assert report.metadata_rows == 0
+    assert session.execute(select(func.count()).select_from(SymbolMetadata)).scalar_one() == 0
+    assert not (tmp_path / "raw").exists()
+    assert not (tmp_path / "cursors").exists()
+    assert any("window trade BTCUSDT 1h" in line for line in lines)
+    assert any("window mark BTCUSDT 1h" in line for line in lines)
+
+
+def test_main_dry_run_needs_no_database(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.data import backfill_cli
+
+    adapter = FakeAdapter([_filters("BTCUSDT")])
+    monkeypatch.setattr(backfill_cli, "BinanceUsdmAdapter", lambda: adapter)
+    monkeypatch.setattr(backfill_cli, "_utc_now", _clock())
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL_SYNC", raising=False)
+    manifest = _write_manifest(tmp_path / "manifest.toml")
+    collect = _write_collect_list(tmp_path / "collect.toml")
+
+    rc = backfill_cli.main(
+        [
+            "--symbols", "BTCUSDT",
+            "--dry-run",
+            "--raw-root", str(tmp_path / "raw"),
+            "--manifest", str(manifest),
+            "--collect-list", str(collect),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "DRY-RUN" in out
+    assert adapter.calls == ["exchange_info"]
+    assert not (tmp_path / "raw").exists()
