@@ -46,7 +46,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 10: Journal Depth + Kill-Gate Operations** - MFE/MAE analytics and the 3-families/6-months stop rule
 - [ ] **Phase 11: Decision Alignment (docs + params)** - Apply D031–D039 to canonical docs and parameter sets; protocol v1.1.0 pre-registration
 - [ ] **Phase 12: Fee + Cost Model Correctness** - Costs in quote currency everywhere, taker entry, exit slippage, real commission rate (was Phase 11)
-- [ ] **Phase 13: Research Data Foundation Fixes** - History depth, point-in-time universe, mark-price klines, backfill robustness, Parquet→backtest builder
+- [ ] **Phase 13: Research Data Foundation Fixes + VPS Collector Deployment** - Collector live on the single VPS (D042), history depth, point-in-time universe, mark-price klines, backfill robustness, Parquet→backtest builder
 - [ ] **Phase 14: Backtest Simulator Causality Rewrite** - Fills only after the signal bar, multi-bar holding, TP1/TP2 ladder, funding, mark-price triggers
 - [ ] **Phase 15: Strategy Geometry Correction** - Trend-pullback SL outside zone, confirmed pivots, min stop distance; families match their sheets
 - [ ] **Phase 16: Paper Runtime Composition + SHADOW Approval Mode** - Runnable paper process (M3), fixed WS await, simulated fills, SHADOW APPROVE/SKIP journaled with no order path (D040); soak can start
@@ -435,22 +435,32 @@ This absorbs the confirmed bug from former Phase 11:
 Plans:
 - [ ] TBD (run /gsd-plan-phase 12 to break down)
 
-### Phase 13: Research Data Foundation Fixes
+### Phase 13: Research Data Foundation Fixes + VPS Collector Deployment
 
-**Goal**: Research runs on enough correct, point-in-time data, and the Parquet store feeds the backtest directly.
+**Goal**: Research runs on enough correct, point-in-time data, and the Parquet store feeds the backtest directly. The OI/funding collector runs 24/7 on the single hardened VPS that will later host the whole stack (D042).
 
 **Depends on**: Phase 11
 
-**Requirements**: DATA-01, DATA-02, DATA-03, BKTS-02
+**Requirements**: DATA-01, DATA-02, DATA-03, DATA-04, BKTS-02, OPS-02
 
 **Success Criteria**:
-1. The OI collector is deployed and running. This is time-sensitive, because each day of delay loses a day of OI permanently; if it is not already running, do it first as an ops task (F-107).
+1. The OI/funding collector runs 24/7 on the single VPS under Docker Compose (D042). This is time-sensitive, because each day of delay loses a day of OI permanently, so it may be done first as an ops task ahead of the rest of this phase (F-107). Before it goes live:
+   - the Docker HEALTHCHECK uses the project venv interpreter (F-705);
+   - PostgreSQL binds to localhost / the compose network only (F-709);
+   - the collector universe covers the D039 research universe (10–15 symbols), not only the live-5;
+   - an encrypted off-VPS backup of the raw Parquet store and PostgreSQL runs on a schedule (F-108, F-910).
 2. A CLI backfills the decided history depth: 1m for 6–12 months, 1H/4H for 2 years (F-906). It covers the point-in-time research universe from D039, including delisted symbols (F-024, F-907), and runs `backfill_universe` / `refresh_symbol_metadata` (F-122).
 3. Mark-price klines are ingested for SL/TP trigger evaluation (D037).
 4. Backfill never publishes a partial UTC day as immutable data. It writes files atomically (tmp + replace) and accepts zero-trade bars (F-402, F-408, F-409). The supervisor backfills before it resubscribes (F-413).
 5. A Parquet → backtest case-input builder exists (M4, v0.3 audit).
+6. VPS baseline (D042):
+   - provider and a Binance-permitted region are chosen and recorded;
+   - SSH is key-only with minimal open ports;
+   - chrony/NTP time sync is active;
+   - an external off-VPS heartbeat monitor alerts the operator when the collector stops;
+   - a short deploy runbook documents bootstrap, update and restore on a fresh VPS.
 
-**Audit refs**: F-107, F-906, F-907, F-024, F-122, F-402, F-408, F-409, F-413
+**Audit refs**: F-107, F-906, F-907, F-024, F-122, F-402, F-408, F-409, F-413, F-705, F-709, F-108, F-910, F-706, D042
 
 **Plans:** 0 plans
 
@@ -737,8 +747,9 @@ Plans:
    - restart and rehydrate.
    This executes the blocked 09-04 rehearsal with recorded demo order ids.
 3. The approval → placement path is exercised with replayed callbacks and a restart mid-flow, and no duplicate orders result.
+4. The full runtime runs on the single VPS (D042) under Docker Compose with restart policies. The external heartbeat monitor covers every long-running process. The Binance Demo API key is IP-whitelisted to the VPS address.
 
-**Audit refs**: F-201, F-956, F-202, F-104, F-124
+**Audit refs**: F-201, F-956, F-202, F-104, F-124, D042
 
 **Plans:** 0 plans
 
@@ -792,11 +803,11 @@ Plans:
 **Success Criteria**:
 1. `enable()` requires a recorded passing candidate, a met paper exit gate, a passed Phase-25 demo campaign and a minimum capital. WITHIN_BUDGET is refused. The skipped Phase-10 review items WR-01/06/10/12/13 are resolved (F-953, F-105, F-960).
 2. Phases 06–25 each have a VERIFICATION.md written after their last review-fix wave. The ~30 "requires human verification" fixes are confirmed, and 05-VERIFICATION is reopened (F-807, F-808, F-109, F-956). One-way checkpoints carry recorded human decisions (F-124, F-809).
-3. Backups are off-host and encrypted, run on a schedule and follow a retention policy. The pg_dump URL is fixed. A real PostgreSQL restore drill passes (F-108, F-910, F-121, F-704).
-4. CI on a real remote runs pytest, ruff, mypy and the registry gate, and all are green (F-101, F-605). The Docker healthcheck uses the venv. The images are pinned. Postgres binds to localhost. Secrets are scrubbed from errors (F-705, F-709, F-708).
-5. CANARY (D040): a mainnet READ-ONLY API key (trade and withdraw disabled, IP-restricted) verifies real exchangeInfo filters, commission rates, mark prices and balances against what the system assumes; then a dedicated small isolated sub-account (order of USD 50–100, minimum size, leverage ≤ cap) executes a pre-registered number of trades with the operator watching, with zero divergences before full LIVE is allowed.
+3. Backups are off-VPS and encrypted (D042), run on a schedule and follow a retention policy. The pg_dump URL is fixed. A real PostgreSQL restore drill onto a fresh machine passes (F-108, F-910, F-121, F-704).
+4. CI on a real remote runs pytest, ruff, mypy and the registry gate, and all are green (F-101, F-605). The Docker healthcheck uses the venv and Postgres binds to localhost (both hardened in Phase 13, re-verified here). The images are pinned. Secrets are scrubbed from errors (F-705, F-709, F-708).
+5. CANARY (D040): a mainnet READ-ONLY API key (trade and withdraw disabled, IP-restricted to the VPS address per D042) verifies real exchangeInfo filters, commission rates, mark prices and balances against what the system assumes; then a dedicated small isolated sub-account (order of USD 50–100, minimum size, leverage ≤ cap) executes a pre-registered number of trades with the operator watching, with zero divergences before full LIVE is allowed.
 
-**Audit refs**: F-953, F-105, F-960, F-807, F-808, F-109, F-124, F-809, F-108, F-121, F-704, F-101, F-605, F-705, F-709, F-708, D040
+**Audit refs**: F-953, F-105, F-960, F-807, F-808, F-109, F-124, F-809, F-108, F-121, F-704, F-101, F-605, F-705, F-709, F-708, D040, D042
 
 **Plans:** 0 plans
 
@@ -843,7 +854,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 10. Journal Depth + Kill-Gate Operations | 12/12 | In Progress|  |
 | 11. Decision Alignment (docs + params) | 0/TBD | Not started | - |
 | 12. Fee + Cost Model Correctness | 0/TBD | Not started | - |
-| 13. Research Data Foundation Fixes | 0/TBD | Not started | - |
+| 13. Research Data Foundation Fixes + VPS Collector Deployment | 0/TBD | Not started | - |
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
