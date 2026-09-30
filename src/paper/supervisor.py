@@ -190,9 +190,20 @@ class PaperSupervisor:
             # Forming updates (x=False) are ignored by design — the
             # paper loop's double closed-candle gate rejects them before
             # they reach evaluate (loop.py).
-            if kline.is_closed:
-                self._last_close[(symbol, interval)] = kline.close_time_utc
-                self._on_closed_candle(kline)
+            if not kline.is_closed:
+                return
+            # Monotonic guard (D-28): a closed kline at or before the
+            # pair's last close was already delivered (via backfill or an
+            # earlier WS message) and is dropped, never dispatched twice.
+            if not self._advance_last_close(symbol, interval, kline.close_time_utc):
+                log.warning(
+                    "paper.supervisor.duplicate_close_dropped",
+                    symbol=symbol,
+                    interval=interval,
+                    close_time=kline.close_time_utc.isoformat(),
+                )
+                return
+            self._on_closed_candle(kline)
 
         return _on_kline
 
@@ -264,7 +275,12 @@ class PaperSupervisor:
 
         Order (D-16, F-413): close the old handles, REST-backfill every
         pair from its last close and record those closes (advancing the
-        last-close state), and only then re-attach the WS stream.
+        last-close state), and only then re-attach the WS stream. A
+        second verification backfill after the resubscribe picks up any
+        bar that closed in the seam between the first backfill's `now`
+        and the WS attach (D-28). The last-close state is monotonic, so
+        a bar reaching both the backfill and the WS stream is delivered
+        once, never twice.
 
         Returns the backfilled closes per (symbol, interval) pair
         (CR-03: log-only backfill dropped closes on the floor — the
@@ -280,6 +296,32 @@ class PaperSupervisor:
             journal_outage_gaps=journal_outage_gaps,
         )
         self.start()
+
+        # Verification pass (D-28): a bar can close in the seam between
+        # the first backfill's `now` and the WS attach. Backfill again
+        # from the updated last close; only closes that advance the
+        # last-close state are kept, so no bar appears twice and none is
+        # skipped. Failures here add an outage gap and never discard the
+        # first-pass closes.
+        verified, verify_gaps = await self._backfill_pairs(
+            self._clock(),
+            reason_prefix="verify_backfill_exception",
+            journal_outage_gaps=journal_outage_gaps,
+            log_missing_last_close=False,
+            skip_pairs=frozenset(
+                (str(g["symbol"]), str(g["data_class"]).removeprefix("paper-"))
+                for g in outage_gaps
+            ),
+        )
+        for pair, extra in verified.items():
+            backfilled.setdefault(pair, []).extend(extra)
+            log.info(
+                "paper.supervisor.verify_backfilled",
+                symbol=pair[0],
+                interval=pair[1],
+                closes=len(extra),
+            )
+        outage_gaps.extend(verify_gaps)
         return backfilled, outage_gaps
 
     async def _backfill_pairs(
@@ -288,6 +330,8 @@ class PaperSupervisor:
         *,
         reason_prefix: str,
         journal_outage_gaps: bool,
+        log_missing_last_close: bool = True,
+        skip_pairs: frozenset[tuple[str, str]] = frozenset(),
     ) -> tuple[dict[tuple[str, str], list[RestKline]], list[dict[str, Any]]]:
         """Backfill every pair from its last close, keeping only new closes.
 
@@ -302,17 +346,23 @@ class PaperSupervisor:
         outage_gaps: list[dict[str, Any]] = []
         for symbol in self._symbols:
             for interval in self._intervals:
+                if (symbol, interval) in skip_pairs:
+                    # The first pass already journaled this pair's outage
+                    # gap; re-running would double-count the same hole.
+                    continue
                 last = self._last_close.get((symbol, interval))
                 if last is None:
                     # No prior close recorded for this pair — nothing
                     # to backfill. Loud (not silent): a missing last
                     # means the dispatch path never recorded a close
-                    # for this pair.
-                    log.error(
-                        "paper.supervisor.no_last_close",
-                        symbol=symbol,
-                        interval=interval,
-                    )
+                    # for this pair. (The verification pass skips the
+                    # log: the first pass already reported it.)
+                    if log_missing_last_close:
+                        log.error(
+                            "paper.supervisor.no_last_close",
+                            symbol=symbol,
+                            interval=interval,
+                        )
                     continue
                 try:
                     closes, gaps = await backfill_missed_closes(

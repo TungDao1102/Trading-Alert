@@ -331,9 +331,10 @@ def test_rotation_treated_as_scheduled_resubscribes_and_backfills() -> None:
     assert len(ws.subscribe_calls) == initial_subscribe_count + 2, (
         f"expected 2 resubscribes, got {len(ws.subscribe_calls) - initial_subscribe_count}"
     )
-    # Backfill called for each pair with the last-seen close.
-    assert len(rest.klines_calls) == initial_klines_count + 2, (
-        f"expected 2 backfill calls, got {len(rest.klines_calls) - initial_klines_count}"
+    # Backfill called for each pair with the last-seen close: one
+    # first-pass call plus one verification-pass call per pair (D-28).
+    assert len(rest.klines_calls) == initial_klines_count + 4, (
+        f"expected 4 backfill calls, got {len(rest.klines_calls) - initial_klines_count}"
     )
     for call in rest.klines_calls[initial_klines_count:]:
         assert call[2] == int(datetime(2026, 9, 19, 10, 0, tzinfo=UTC).timestamp() * 1000)
@@ -386,9 +387,9 @@ def test_unsolicited_disconnect_reconnects_and_resyncs() -> None:
     assert len(ws.subscribe_calls) > initial_subscribe_count, (
         f"expected resubscribes after reconnect, got {len(ws.subscribe_calls)}"
     )
-    # Backfill called for each pair.
-    assert len(rest.klines_calls) == initial_klines_count + 2, (
-        f"expected 2 backfill calls, got {len(rest.klines_calls) - initial_klines_count}"
+    # Backfill called for each pair: first pass + verification pass (D-28).
+    assert len(rest.klines_calls) == initial_klines_count + 4, (
+        f"expected 4 backfill calls, got {len(rest.klines_calls) - initial_klines_count}"
     )
 
 
