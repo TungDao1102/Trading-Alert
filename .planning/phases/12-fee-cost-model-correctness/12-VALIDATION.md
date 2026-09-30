@@ -1,7 +1,7 @@
 ---
 phase: "12"
 slug: "fee-cost-model-correctness"
-status: complete
+status: validated
 nyquist_compliant: true
 wave_0_complete: true
 created: "2026-09-30"
@@ -81,3 +81,15 @@ All phase behaviors have automated verification. (Binance Demo behavior of `comm
 - [x] `nyquist_compliant: true` set in frontmatter
 
 **Approval:** complete (2026-09-30). Final regression: `pytest -q` exit 0; `verify_decision_alignment.py all` ALL_PASS; ruff and mypy report only findings in files this phase did not touch (recorded in 12-11-SUMMARY.md).
+
+---
+
+## Validation Audit 2026-09-30
+
+| Metric | Count |
+|--------|-------|
+| Gaps found | 0 |
+| Resolved | 0 |
+| Escalated | 0 |
+
+Re-audited after the code-review fixes WR-01..WR-05 (`8a0be9d`, `ec4dccb`, `fe830d6`, `d18f514`, `e7599f6`). All 11 map rows re-checked against the current tree; full `pytest -q` exit 0. The review fixes added regression tests in `tests/test_risk_cost_guards.py` and the binding/registry suites, and existing rows still cover their requirements.
