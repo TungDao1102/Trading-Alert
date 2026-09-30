@@ -1,6 +1,6 @@
 """Tests for the parameter-set gate module (Phase 11, plan 11-02; D036-D038, F-810).
 
-The real-repository test proves gates PA-01..PA-06 hold today; the negative tests run
+The real-repository test proves gates PA-01..PA-07 hold today; the negative tests run
 each pure check over a tmp_path copy of params/ that has been deliberately broken so
 a regression cannot pass silently.
 """
@@ -32,7 +32,7 @@ def _edit(root: Path, key: gate.SetKey, old: str, new: str) -> None:
 
 def test_real_repo_gates_all_ok() -> None:
     results = gate.run()
-    assert [name for name, _, _ in results] == [f"PA-0{i}" for i in range(1, 7)]
+    assert [name for name, _, _ in results] == [f"PA-0{i}" for i in range(1, 8)]
     failed = [(name, detail) for name, ok, detail in results if not ok]
     assert failed == []
 
@@ -42,7 +42,10 @@ def test_reference_tables_cover_ten_old_and_five_new_sets() -> None:
     assert set(gate.PRE_PHASE_FILE_SHA256) == set(gate.PRE_PHASE_HASHES)
     assert len(gate.NEW_SET_IDS) == 5
     assert set(gate.NEW_SET_IDS).isdisjoint(gate.PRE_PHASE_HASHES)
-    assert len(gate.load_pins()) == 18
+    assert len(gate.PHASE12_SET_IDS) == 5
+    assert set(gate.PHASE12_SET_IDS).isdisjoint(gate.PRE_PHASE_HASHES)
+    assert set(gate.PHASE12_SET_IDS).isdisjoint(gate.NEW_SET_IDS)
+    assert len(gate.load_pins()) == 20
 
 
 def test_pa01_passes_on_copy(params_copy: Path) -> None:
@@ -185,3 +188,93 @@ def test_pa05_non_cost_difference_is_ignored(params_copy: Path) -> None:
 
 def test_pa06_working_type_registry_facts() -> None:
     assert gate.check_working_type_registry() == []
+
+
+_V5_TREND = ("trend-pullback", "baseline-v5")
+_V5_RANGE = ("range-mr", "baseline-v5")
+
+
+def test_pa07_passes_on_copy(params_copy: Path) -> None:
+    assert gate.check_phase12_set_facts(params_copy, gate.PHASE12_SET_IDS) == []
+
+
+def test_pa07_frozen_constants() -> None:
+    from decimal import Decimal
+
+    assert gate.EXPECTED_PHASE12_VERSION == "v4.0.0"
+    assert gate.PHASE12_FROZEN == {
+        "exit_slippage_rate": Decimal("0.0003"),
+        "min_stop_distance_rate": Decimal("0.003"),
+        "max_cost_to_risk": Decimal("0.15"),
+        "commission_rate_ttl_seconds": 3600,
+    }
+    assert set(gate.PHASE12_SET_IDS) == {
+        ("trend-pullback", "baseline-v5"),
+        ("breakout-retest", "baseline-v5"),
+        ("range-mr", "baseline-v5"),
+        ("trend-pullback", "baseline-no-trade-v3"),
+        ("trend-pullback", "baseline-simple-trend-v3"),
+    }
+
+
+@pytest.mark.parametrize(
+    "key_line",
+    [
+        "exit_slippage_rate = 0.0003",
+        "min_stop_distance_rate = 0.003",
+        "max_cost_to_risk = 0.15",
+        "commission_rate_ttl_seconds = 3600",
+    ],
+)
+def test_pa07_missing_key_fails(params_copy: Path, key_line: str) -> None:
+    path = params_copy / "trend-pullback" / "baseline-v5.toml"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    kept = [ln for ln in lines if not ln.startswith(key_line)]
+    assert len(kept) == len(lines) - 1
+    path.write_text("\n".join(kept) + "\n", encoding="utf-8", newline="\n")
+    problems = gate.check_phase12_set_facts(params_copy, gate.PHASE12_SET_IDS)
+    name = key_line.split(" = ")[0]
+    assert any("trend-pullback/baseline-v5" in p and name in p for p in problems)
+
+
+def test_pa07_changed_frozen_value_fails(params_copy: Path) -> None:
+    _edit(params_copy, _V5_RANGE, "max_cost_to_risk = 0.15", "max_cost_to_risk = 0.2")
+    problems = gate.check_phase12_set_facts(params_copy, gate.PHASE12_SET_IDS)
+    assert any("range-mr/baseline-v5" in p and "max_cost_to_risk" in p for p in problems)
+
+
+def test_pa07_wrong_version_fails(params_copy: Path) -> None:
+    _edit(params_copy, _V5_TREND, 'strategy_version = "v4.0.0"', 'strategy_version = "v3.0.0"')
+    problems = gate.check_phase12_set_facts(params_copy, gate.PHASE12_SET_IDS)
+    assert any("trend-pullback/baseline-v5" in p and "strategy_version" in p for p in problems)
+
+
+def test_pa07_header_without_supersedes_fails(params_copy: Path) -> None:
+    _edit(params_copy, ("breakout-retest", "baseline-v5"), "Supersedes", "Replaces")
+    problems = gate.check_phase12_set_facts(params_copy, gate.PHASE12_SET_IDS)
+    assert any("breakout-retest/baseline-v5" in p and "Supersedes" in p for p in problems)
+
+
+def test_pa07_fee_changed_in_one_set_fails_parity(params_copy: Path) -> None:
+    _edit(params_copy, _V5_RANGE, "fee_rate_exit = 0.0005", "fee_rate_exit = 0.0006")
+    problems = gate.check_phase12_set_facts(params_copy, gate.PHASE12_SET_IDS)
+    assert any("cost values differ" in p and "fee_rate_exit" in p for p in problems)
+
+
+def test_pa07_fee_above_ceiling_fails_unit_check(params_copy: Path) -> None:
+    _edit(params_copy, _V5_TREND, "fee_rate_entry = 0.0005", "fee_rate_entry = 2")
+    problems = gate.check_phase12_set_facts(params_copy, gate.PHASE12_SET_IDS)
+    assert any("trend-pullback/baseline-v5" in p and "fee_rate_entry" in p for p in problems)
+
+
+def test_pa07_missing_file_fails(params_copy: Path) -> None:
+    (params_copy / "range-mr" / "baseline-v5.toml").unlink()
+    problems = gate.check_phase12_set_facts(params_copy, gate.PHASE12_SET_IDS)
+    assert "range-mr/baseline-v5: file missing" in problems
+
+
+def test_broken_v5_set_does_not_disturb_pa04_and_pa05(params_copy: Path) -> None:
+    _edit(params_copy, _V5_TREND, "fee_rate_entry = 0.0005", "fee_rate_entry = 0.0006")
+    assert gate.check_new_set_facts(params_copy, gate.NEW_SET_IDS) == []
+    assert gate.check_cost_hash_parity(params_copy, gate.NEW_SET_IDS) == []
+    assert gate.check_phase12_set_facts(params_copy, gate.PHASE12_SET_IDS) != []
