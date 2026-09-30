@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import pytest
 from src.backtest.simulator import run as simulator_run
 from src.domain.canonical import sha256_hex
 from src.paper.loop import run_paper_tick
@@ -312,3 +314,97 @@ def test_paper_full_projection_covers_every_bar() -> None:
     assert any(signal_id is None for (_, signal_id, _, _) in full), (
         "full projection must include signal-less records"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Test 4 - documentary fields of expected.json cannot drift (12-09).
+# --------------------------------------------------------------------------- #
+
+
+def test_parity_expected_documentary_fields_match_registry_and_simulator() -> None:
+    """expected.json's identity fields equal the registry-derived values.
+
+    strategy_version and parameter_set_hash come from the pinned
+    tests/fixtures/phase4/parameters.json entry for the fixture's set;
+    cost_model_hash is the hash of the cost slice of that registry set. All
+    three must also equal what the simulator reports on the fixture, and the
+    fixture must sit on the v5 identity (8-key cost dict).
+    """
+    from src.backtest.costs import build_cost_model, cost_slice
+    from src.domain.registry import load_parameter_set
+
+    case_input = json.loads((PARITY_FIXTURE_DIR / "input.json").read_text())
+    expected = json.loads((PARITY_FIXTURE_DIR / "expected.json").read_text())
+
+    assert case_input["parameter_set_id"] == "baseline-v5"
+    assert "exit_slippage_rate" in case_input["cost_model"]
+
+    pins = json.loads(
+        (PHASE7_FIXTURES_DIR.parent / "phase4" / "parameters.json").read_text()
+    )["parameter_sets"]
+    pin = next(
+        e
+        for e in pins
+        if e["strategy_id"] == case_input["strategy_id"]
+        and e["parameter_set_id"] == case_input["parameter_set_id"]
+    )
+    registry_set = load_parameter_set(
+        case_input["strategy_id"], case_input["parameter_set_id"]
+    )
+    registry_cost_hash = build_cost_model(cost_slice(registry_set.params)).cost_model_hash
+    sim_result = simulator_run(case_input)
+
+    assert expected["strategy_version"] == pin["strategy_version"] == "v4.0.0"
+    assert expected["parameter_set_hash"] == pin["parameter_set_hash"]
+    assert expected["parameter_set_hash"] == sim_result["parameter_set_hash"]
+    assert expected["cost_model_hash"] == registry_cost_hash
+    assert expected["cost_model_hash"] == sim_result["cost_model_hash"]
+    assert expected["trade_count"] == len(sim_result["trades"]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Test 5 - both modes pass identical cost inputs to evaluate_risk (D-19).
+# --------------------------------------------------------------------------- #
+
+
+def test_simulator_and_paper_pass_identical_cost_inputs_to_evaluate_risk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cost_rates and both guard rates the simulator and the paper loop
+    hand to evaluate_risk are equal, for every risk call either makes."""
+    import src.backtest.simulator as simulator_module
+    import src.paper.loop as paper_module
+
+    def _spy(module: Any, sink: list[tuple[Any, Any, Any]]) -> None:
+        real = module.evaluate_risk
+
+        def wrapper(**kwargs: Any) -> Any:
+            sink.append(
+                (
+                    kwargs["cost_rates"],
+                    kwargs["min_stop_distance_rate"],
+                    kwargs["max_cost_to_risk"],
+                )
+            )
+            return real(**kwargs)
+
+        monkeypatch.setattr(module, "evaluate_risk", wrapper)
+
+    sim_calls: list[tuple[Any, Any, Any]] = []
+    paper_calls: list[tuple[Any, Any, Any]] = []
+    _spy(simulator_module, sim_calls)
+    _spy(paper_module, paper_calls)
+
+    case_input = json.loads((PARITY_FIXTURE_DIR / "input.json").read_text())
+    simulator_run(case_input)
+    _replay_paper_through_bars(case_input)
+
+    assert sim_calls, "the simulator never reached the risk stage"
+    assert paper_calls, "the paper loop never reached the risk stage"
+    assert set(sim_calls) == set(paper_calls)
+    (cost_rates, min_stop, max_cost), *_ = sim_calls
+    assert cost_rates.fee_rate_entry == Decimal("0.0005")
+    assert cost_rates.entry_slippage_rate == Decimal("0.0001")
+    assert cost_rates.fee_rate_exit == Decimal("0.0005")
+    assert cost_rates.exit_slippage_rate == Decimal("0.0003")
+    assert (min_stop, max_cost) == (Decimal("0.003"), Decimal("0.15"))
