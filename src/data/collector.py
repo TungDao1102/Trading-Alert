@@ -84,6 +84,12 @@ FUNDING_BOOTSTRAP_LOOKBACK_MS = 8 * 60 * 60_000
 # own bound — sharing the OI bound would flap unhealthy forever.
 FUNDING_HEALTH_MAX_AGE_SECONDS = 9 * 3600.0
 
+# Funding-history backfill bounds (D-23). fundingRate returns at most 1000
+# rows per call (about 333 days at 3 per day) and shares a 500 requests per
+# 5 minutes per IP limit, so the walk is capped per symbol and paced.
+MAX_FUNDING_PAGES = 50
+FUNDING_PAGE_PACE_SECONDS = 0.2
+
 # Structural adapter surface used by the collector (IN-01). Production
 # passes a `BinanceUsdmAdapter`; tests inject a `FakeAdapter`. A
 # `Protocol` (not a `BinanceUsdmAdapter | object` union) means mypy
@@ -132,6 +138,21 @@ class FundingSweepResult:
     gaps_recorded: int
     empty: bool = False
     skipped_existing: int = 0
+
+
+@dataclass(frozen=True)
+class FundingHistoryResult:
+    """Outcome of one `backfill_funding_history` call (D-23).
+
+    `rows_per_symbol` counts newly written ticks (0 on a fully covered
+    re-run); `pages` counts non-empty pages fetched; `truncated_symbols`
+    lists symbols that hit `max_pages` with range left to walk.
+    """
+
+    rows_per_symbol: dict[str, int]
+    pages: int
+    gaps_recorded: int
+    truncated_symbols: tuple[str, ...]
 
 
 # --------------------------------------------------------------------------- #
@@ -563,6 +584,163 @@ async def async_funding_sweep(
         gaps_recorded=gaps,
         empty=(inserted == 0 and gaps == 0),
         skipped_existing=skipped_existing,
+    )
+
+
+async def backfill_funding_history(
+    adapter: AdapterLike,
+    session: Session,
+    *,
+    symbols: Sequence[str],
+    start_ms: int,
+    end_ms: int,
+    raw_root: Path,
+    observed_utc: datetime,
+    page_limit: int = 1000,
+    max_pages: int = MAX_FUNDING_PAGES,
+    pace_seconds: float = FUNDING_PAGE_PACE_SECONDS,
+) -> FundingHistoryResult:
+    """Walk each symbol's funding history in pages until the range is covered.
+
+    D-23 / DATA-02. `async_funding_sweep` fetches ONE page and bootstraps
+    only 8h back, so it cannot store two years of history. This walk is
+    sequential per symbol (the fundingRate endpoint shares a 500 requests
+    per 5 minutes per IP limit, so no fan-out): the cursor starts at
+    `max(start_ms, funding watermark + 1 ms)`, each page is written tick by
+    tick through `_write_funding_tick` (immutable, atomic), the watermark
+    advances to the page's latest funding time and is committed once per
+    page, and the next cursor is that latest time plus 1 ms. A page shorter
+    than `page_limit` ends the symbol's walk. `end_ms` is inclusive
+    (Binance `endTime`), so the walk continues while `cursor <= end_ms`.
+
+    Idempotence (T-13-24): ticks at or before the watermark are skipped and
+    a `FileExistsError` counts as covered (a prior run wrote the file and
+    then lost its commit), exactly as in `async_funding_sweep`, so a re-run
+    writes nothing twice.
+
+    Failure posture (D-03): an adapter error records ONE gap row for the
+    symbol (`data_class="funding"`, reason `adapter_error: ...`) and moves
+    to the next symbol; pages already committed for that symbol stay. A
+    write/commit error rolls back, records a gap row and re-raises. A symbol
+    that hits `max_pages` with the range still open is reported in
+    `truncated_symbols` (re-run to continue from its watermark).
+    """
+    rows_per_symbol: dict[str, int] = {}
+    total_pages = 0
+    gaps = 0
+    truncated: list[str] = []
+    for sym in symbols:
+        wm_row = session.execute(
+            select(CollectorWatermark).where(
+                CollectorWatermark.symbol == sym,
+                CollectorWatermark.data_class == "funding",
+            )
+        ).scalar_one_or_none()
+        wm_ms: int | None = (
+            _tick_epoch_ms(wm_row.last_tick_utc) if wm_row is not None else None
+        )
+        cursor = start_ms if wm_ms is None else max(start_ms, wm_ms + 1)
+        written = 0
+        rows_per_symbol[sym] = 0
+        for page_index in range(max_pages):
+            if cursor > end_ms:
+                break
+            try:
+                ticks = await adapter.funding_rate(
+                    symbol=sym, start_ms=cursor, end_ms=end_ms, limit=page_limit
+                )
+            except Exception as exc:
+                _record_gap(
+                    session,
+                    symbol=sym,
+                    data_class="funding",
+                    expected_utc=datetime.fromtimestamp(cursor / 1000, tz=UTC),
+                    observed_utc=observed_utc,
+                    reason=f"adapter_error: {type(exc).__name__}: {exc}",
+                )
+                gaps += 1
+                break
+            if not ticks:
+                break
+            total_pages += 1
+            page_latest = max(ticks, key=lambda t: _tick_epoch_ms(t.funding_time_utc))
+            page_latest_ms = _tick_epoch_ms(page_latest.funding_time_utc)
+            page_written = 0
+            try:
+                for tick in ticks:
+                    if wm_ms is not None and _tick_epoch_ms(tick.funding_time_utc) <= wm_ms:
+                        continue
+                    try:
+                        _write_funding_tick(tick, raw_root)
+                        page_written += 1
+                    except FileExistsError:
+                        log.info(
+                            "collector.funding.tick_exists",
+                            symbol=tick.symbol,
+                            funding_time=tick.funding_time_utc.isoformat(),
+                        )
+                if wm_ms is None or page_latest_ms > wm_ms:
+                    _advance_watermark(
+                        session,
+                        symbol=sym,
+                        data_class="funding",
+                        last_tick_utc=page_latest.funding_time_utc,
+                        updated_at_utc=observed_utc,
+                    )
+                session.commit()
+            except Exception as exc:
+                session.rollback()
+                _record_gap(
+                    session,
+                    symbol=sym,
+                    data_class="funding",
+                    expected_utc=datetime.fromtimestamp(cursor / 1000, tz=UTC),
+                    observed_utc=observed_utc,
+                    reason=f"write_error: {type(exc).__name__}: {exc}",
+                )
+                raise
+            if wm_ms is None or page_latest_ms > wm_ms:
+                wm_ms = page_latest_ms
+            written += page_written
+            rows_per_symbol[sym] = written
+            log.info(
+                "collector.funding_history.page",
+                symbol=sym,
+                page=page_index + 1,
+                rows=len(ticks),
+                written=page_written,
+                cursor_ms=cursor,
+            )
+            next_cursor = page_latest_ms + 1
+            if next_cursor <= cursor:
+                # The exchange returned nothing past the cursor: no forward
+                # progress, so stop instead of re-fetching the same page.
+                log.warning(
+                    "collector.funding_history.no_progress",
+                    symbol=sym,
+                    cursor_ms=cursor,
+                )
+                break
+            cursor = next_cursor
+            if len(ticks) < page_limit:
+                break
+            if page_index + 1 < max_pages:
+                await asyncio.sleep(pace_seconds)
+        else:
+            # Every allowed page was full and the range is still open.
+            if cursor <= end_ms:
+                truncated.append(sym)
+                log.warning(
+                    "collector.funding_history.truncated",
+                    symbol=sym,
+                    max_pages=max_pages,
+                    resume_from_ms=cursor,
+                )
+    return FundingHistoryResult(
+        rows_per_symbol=rows_per_symbol,
+        pages=total_pages,
+        gaps_recorded=gaps,
+        truncated_symbols=tuple(truncated),
     )
 
 
