@@ -1,9 +1,9 @@
 {
   "is_no_trade": true,
   "quantity": null,
-  "quantity_before_rounding": "0.005",
-  "quantity_after_rounding": "0.005",
+  "quantity_before_rounding": "0.004276208884251577921078288832",
+  "quantity_after_rounding": "0.004",
   "quantization_decision": "REJECTED",
-  "realized_risk": "5.00000",
+  "realized_risk": "4.6770400",
   "reason_code": "MIN_QTY_REJECT"
 }
