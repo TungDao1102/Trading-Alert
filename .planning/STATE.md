@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 17
 current_phase_name: operational-persistence-layer
 status: executing
-stopped_at: Completed 17-13-PLAN.md
-last_updated: "2026-10-01T17:25:05.810Z"
+stopped_at: Completed 17-14-PLAN.md
+last_updated: "2026-10-01T18:00:20.230Z"
 last_activity: 2026-10-01
 last_activity_desc: Phase 17 execution started
-state_head: d7d22f346cdccfaf9bbbd65a2a5c2b1616d695d9
+state_head: 5e195eefc7bea920a39ef157cece0d6e1ccd9f14
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 109
-  completed_plans: 103
+  completed_plans: 104
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 17 (operational-persistence-layer) — EXECUTING
-Plan: 14 of 15
+Plan: 15 of 15
 Status: Ready to execute
 Last activity: 2026-10-01 — Phase 17 execution started
 
@@ -143,6 +143,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 17 P11 | 35 min | 2 tasks | 8 files |
 | Phase 17 P12 | 32 min | 2 tasks | 8 files |
 | Phase 17 P13 | 25 min | 3 tasks | 7 files |
+| Phase 17 P14 | 25 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -361,6 +362,7 @@ Recent decisions affecting current work:
 - [Phase 17]: 17-11: gate order is identity, then stored-outcome replay, then expiry (Open Q2); pre-placement store failures return NO_TRADE without SAFE_MODE (IntentStateConflict at consume is INVALIDATED); for D051
 - [Phase 17]: 17-12: restart recovery probes by deterministic id only (found -> ACKED, young absent -> REJECTED, error/indeterminate/at-or-past 3 days stays UNKNOWN) and enters SAFE_MODE UNRESOLVED_EXECUTION_INTENT once; consume/protective-insert race loser returns False when the same (approval_id, role) row exists (secondary unique arbiter); for D051
 - [Phase 17]: 17-13: snapshot reads verify the denormalized columns as well as the sha256; system state values are str/bool/None only; state_snapshot normalizes entry/enable fields to None when off/disabled and rehydrate rejects inconsistent or malformed state (ValueError); for D051 — Fail closed on tampered evidence (D-18/D-19, T-17-35) and on restart state that could silently read SAFE_MODE as off (D-22, C14, T-17-34)
+- [Phase 17]: 17-14: no defect found by the end-to-end replay and redelivery tests, so no production file changed; after plan expiry the callback layer answers APPROVAL_EXPIRED while execute_approved_plan handed the stored approval returns the stored outcome; for D051
 
 ### Pending Todos
 
@@ -406,6 +408,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-01T17:25:05.548Z
-Stopped at: Completed 17-13-PLAN.md
+Last session: 2026-10-01T18:00:19.963Z
+Stopped at: Completed 17-14-PLAN.md
 Resume file: None
