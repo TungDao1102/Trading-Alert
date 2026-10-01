@@ -570,3 +570,33 @@ def test_security_and_operations_cites_d050_in_the_controlled_sections() -> None
     assert "off the VPS" in section_9
     assert "redact" in _section(text, 6).lower()
     assert "health" in _section(text, 4).lower()
+
+
+# --------------------------------------------------------------------------- decision records
+
+
+def test_d050_follows_d049_and_summarises_the_phase() -> None:
+    lines = _read(DECISIONS).split("\n")
+    rows = [ln for ln in lines if ln.startswith("| D050 |")]
+    assert len(rows) == 1
+    row = rows[0]
+    for phrase in ("rclone", "127.0.0.1", "Accepted (", "postgresql-client-17", "60 minutes"):
+        assert phrase in row, f"D050 lacks: {phrase}"
+    for audit_ref in ("F-101", "F-605", "F-705", "F-708", "F-709", "F-108", "F-910"):
+        assert audit_ref in row
+    index = lines.index(row)
+    assert lines[index - 1].startswith("| D049 |"), "D050 must directly follow D049"
+    assert row.count(" | ") == 3, "D050 must stay one table row (no stray pipes)"
+
+
+def test_doc_status_logs_d050_and_sources_has_the_phase_facts() -> None:
+    status = [ln for ln in _read(DOC_STATUS).split("\n") if "D050" in ln]
+    assert status and status[0].startswith("- 2026-10-01")
+    sources = _read(SOURCES)
+    assert len(re.findall(r"^## Facts verified for Phase 13\.1 \(", sources, re.M)) == 1
+    section = sources.split("## Facts verified for Phase 13.1", 1)[1]
+    for digest in _repo_images().values():
+        assert digest[1] in section, "SOURCES must carry every pinned image digest"
+    for sha, _tag in _workflow_actions().values():
+        assert sha in section, "SOURCES must carry every pinned action SHA"
+    assert "ASSUMED" in section
