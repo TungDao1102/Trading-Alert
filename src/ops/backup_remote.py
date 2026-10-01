@@ -34,15 +34,26 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from src.ops.backup import (
     DEFAULT_PG_DUMP_NAME,
     MANIFEST_NAME,
+    DataProbe,
+    PgDumpRunner,
+    PgRestoreRunner,
+    _assert_safe_scratch_root,
+    _is_unsafe_key,
+    _read_manifest,
+    _sqlalchemy_url,
+    backup,
+    restore_database,
     verify_bundle,
 )
 from src.ops.redaction import scrub
@@ -331,6 +342,73 @@ def list_snapshots(runner: RcloneRunner) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
+# Pull
+# --------------------------------------------------------------------------- #
+
+
+def pull_snapshot(dest: Path, runner: RcloneRunner, *, snapshot: str | None = None) -> str:
+    """Rebuild a verified bundle in ``dest`` from one snapshot; return the snapshot id.
+
+    ``dest`` must not exist or be empty. The snapshot directory (``pg.dump`` + ``manifest.json``)
+    is copied, then exactly the Parquet files its manifest names are fetched from the
+    append-only ``parquet/`` tree (``--files-from-raw``, so nothing else is transferred), and the
+    result is checked with ``verify_bundle``. A manifest that names a file the remote lacks,
+    or any hash mismatch, fails here, before the caller can use the bundle.
+    """
+    if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
+        raise RemoteError(f"refusing pull: --dest {dest} must be an empty directory or not exist")
+    check_sentinel(runner)
+    names = list_snapshots(runner)
+    if not names:
+        raise RemoteError("no snapshots found on the remote; nothing to pull")
+    if snapshot is None:
+        parseable = [n for n in names if parse_snapshot_id(n) is not None]
+        if not parseable:
+            raise RemoteError("the remote holds no snapshot with a valid id")
+        chosen = max(parseable)  # ids sort chronologically
+    else:
+        if parse_snapshot_id(snapshot) is None:
+            raise RemoteError("--snapshot is not a valid snapshot id (YYYYMMDDTHHMMSSZ)")
+        if snapshot not in names:
+            raise RemoteError(f"snapshot {snapshot} not found on the remote")
+        chosen = snapshot
+    dest.mkdir(parents=True, exist_ok=True)
+    root = dest.resolve()
+    _call(runner, ["copy", _crypt(f"{SNAPSHOTS_DIR}/{chosen}"), str(root)])
+    manifest, problem = _read_manifest(root)
+    if manifest is None:
+        raise RemoteError(f"snapshot {chosen} is unusable: {problem}")
+    parquet_prefix = f"{PARQUET_DIR}/"
+    wanted: list[str] = []
+    for key in sorted(manifest):
+        if _is_unsafe_key(key):
+            raise RemoteError(f"snapshot {chosen} is unusable: unsafe path in its manifest")
+        if key.startswith(parquet_prefix):
+            wanted.append(key[len(parquet_prefix) :])
+    if wanted:
+        with tempfile.TemporaryDirectory(prefix="backup-files-from-") as scratch:
+            listing = Path(scratch) / "files-from.txt"
+            listing.write_bytes(("\n".join(wanted) + "\n").encode("utf-8"))
+            _call(
+                runner,
+                [
+                    "copy",
+                    _crypt(PARQUET_DIR),
+                    str(root / PARQUET_DIR),
+                    "--files-from-raw",
+                    str(listing),
+                ],
+            )
+    problems = verify_bundle(root)
+    if problems:
+        raise RemoteError(
+            f"pulled bundle failed verification ({len(problems)} problem(s)): "
+            + "; ".join(problems[:5])
+        )
+    return chosen
+
+
+# --------------------------------------------------------------------------- #
 # Retention
 # --------------------------------------------------------------------------- #
 
@@ -444,4 +522,207 @@ def cli_retain(*, dry_run: bool, runner: RcloneRunner | None) -> int:
     )
     for name in report.deleted:
         print(f"  {name}")
+    return 0
+
+
+def cli_pull(dest: Path, *, snapshot: str | None, runner: RcloneRunner | None) -> int:
+    """``pull``: rebuild a verified bundle from the newest (or a named) snapshot."""
+    run = runner or make_rclone_runner(os.environ)
+    chosen = pull_snapshot(dest, run, snapshot=snapshot)
+    print(f"pull-OK snapshot={chosen} dest={dest}")
+    return 0
+
+
+def cli_scheduled(
+    bundle_root: Path,
+    parquet_roots: Sequence[Path],
+    *,
+    runner: RcloneRunner | None,
+    pg_dump_runner: PgDumpRunner,
+    now_utc: datetime | None,
+) -> int:
+    """``scheduled``: backup -> verify -> push (+ cryptcheck) -> retention.
+
+    Retention only runs after ``push_snapshot`` returned, i.e. after the new snapshot's
+    ``cryptcheck`` passed; any earlier failure raises and exits non-zero without deleting.
+    The rclone configuration is validated before ``pg_dump`` runs.
+    """
+    run = runner or make_rclone_runner(os.environ)
+    backup(
+        bundle_root=bundle_root,
+        pg_dump_runner=pg_dump_runner,
+        parquet_roots=tuple(parquet_roots),
+    )
+    problems = verify_bundle(bundle_root)
+    if problems:
+        raise RemoteError(
+            f"staging bundle failed verification ({len(problems)} problem(s)): "
+            + "; ".join(problems[:5])
+        )
+    snap = push_snapshot(bundle_root, run, now_utc=now_utc or datetime.now(UTC))
+    report = apply_retention(run, dry_run=False)
+    print(f"scheduled-OK snapshot={snap} kept={len(report.kept)} deleted={len(report.deleted)}")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# drill-remote: backup -> push -> pull -> verify -> pg_restore into a scratch database
+# --------------------------------------------------------------------------- #
+
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_MAX_IDENTIFIER = 63  # PostgreSQL truncates longer identifiers silently
+WATERMARK_TABLE = "collector_watermarks"
+
+
+@dataclass(frozen=True)
+class DrillDatabaseOps:
+    """Database operations of the drill, injectable so tests need no PostgreSQL."""
+
+    create_database: Callable[[str, str], None]  # (source database URL, new database name)
+    drop_database: Callable[[str, str], None]  # (source database URL, database name)
+    count_watermarks: Callable[[str], int]  # (database URL) -> row count
+
+
+def scratch_database_name(source_name: str | None, now_utc: datetime) -> str:
+    """``<db>_drill_<YYYYMMDDHHMMSS>``, validated against a strict identifier pattern."""
+    if not source_name or not _IDENTIFIER_RE.fullmatch(source_name):
+        raise RemoteError("refusing drill: the source database name is not a plain identifier")
+    name = f"{source_name}_drill_{now_utc.astimezone(UTC).strftime('%Y%m%d%H%M%S')}"
+    if len(name) > _MAX_IDENTIFIER:
+        raise RemoteError("refusing drill: the scratch database name would exceed 63 characters")
+    return name
+
+
+def _admin_engine(database_url: str) -> Any:
+    from sqlalchemy import create_engine
+
+    url = _sqlalchemy_url(database_url).set(database="postgres")
+    return create_engine(url, isolation_level="AUTOCOMMIT")
+
+
+def _prod_create_database(database_url: str, name: str) -> None:
+    from sqlalchemy import text
+
+    if not _IDENTIFIER_RE.fullmatch(name):
+        raise RemoteError("refusing to create a database with a non-identifier name")
+    engine = _admin_engine(database_url)
+    try:
+        with engine.connect() as conn:
+            quoted = engine.dialect.identifier_preparer.quote(name)
+            conn.execute(text(f"CREATE DATABASE {quoted}"))
+    finally:
+        engine.dispose()
+
+
+def _prod_drop_database(database_url: str, name: str) -> None:
+    from sqlalchemy import text
+
+    if not _IDENTIFIER_RE.fullmatch(name):
+        raise RemoteError("refusing to drop a database with a non-identifier name")
+    engine = _admin_engine(database_url)
+    try:
+        with engine.connect() as conn:
+            quoted = engine.dialect.identifier_preparer.quote(name)
+            conn.execute(text(f"DROP DATABASE IF EXISTS {quoted} WITH (FORCE)"))
+    finally:
+        engine.dispose()
+
+
+def _prod_count_watermarks(database_url: str) -> int:
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(_sqlalchemy_url(database_url))
+    try:
+        with engine.connect() as conn:
+            return int(conn.execute(text(f"SELECT count(*) FROM {WATERMARK_TABLE}")).scalar_one())
+    finally:
+        engine.dispose()
+
+
+PROD_DRILL_OPS = DrillDatabaseOps(
+    create_database=_prod_create_database,
+    drop_database=_prod_drop_database,
+    count_watermarks=_prod_count_watermarks,
+)
+
+
+def cli_drill_remote(
+    bundle_root: Path,
+    scratch_root: Path,
+    parquet_roots: Sequence[Path],
+    *,
+    database_url: str | None,
+    runner: RcloneRunner | None,
+    pg_dump_runner: PgDumpRunner,
+    pg_restore_runner: PgRestoreRunner,
+    data_probe: DataProbe | None,
+    ops: DrillDatabaseOps | None,
+    now_utc: datetime | None,
+) -> int:
+    """``drill-remote``: prove the newest off-host backup restores into a scratch database.
+
+    backup -> push -> pull into ``scratch_root`` -> verify -> create ``<db>_drill_<ts>`` ->
+    pg_restore -> compare ``collector_watermarks`` row counts with the source -> drop the
+    scratch database (always, in a ``finally``). Exit 0 only when the counts are equal.
+    """
+    if not database_url:
+        print("drill-REFUSED: DATABASE_URL_SYNC / DATABASE_URL is not set", file=sys.stderr)
+        return 1
+    database_ops = ops or PROD_DRILL_OPS
+    run = runner or make_rclone_runner(os.environ)
+    now = now_utc or datetime.now(UTC)
+    scratch_name = scratch_database_name(_sqlalchemy_url(database_url).database, now)
+    _assert_safe_scratch_root(scratch_root, bundle_root)
+
+    backup(
+        bundle_root=bundle_root,
+        pg_dump_runner=pg_dump_runner,
+        parquet_roots=tuple(parquet_roots),
+    )
+    snap = push_snapshot(bundle_root, run, now_utc=now)
+    pulled = pull_snapshot(scratch_root, run, snapshot=snap)  # verifies the pulled bundle
+
+    scratch_url = _sqlalchemy_url(database_url).set(database=scratch_name)
+    scratch_url_text = scratch_url.render_as_string(hide_password=False)
+    created = False
+    failed = False
+    source_rows = scratch_rows = -1
+    try:
+        database_ops.create_database(database_url, scratch_name)
+        created = True
+        restore_database(
+            scratch_root / DEFAULT_PG_DUMP_NAME,
+            database_url=scratch_url_text,
+            force=False,
+            pg_restore_runner=pg_restore_runner,
+            migrate_runner=None,
+            data_probe=data_probe,
+        )
+        source_rows = database_ops.count_watermarks(database_url)
+        scratch_rows = database_ops.count_watermarks(scratch_url_text)
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        if created:
+            try:
+                database_ops.drop_database(database_url, scratch_name)
+            except Exception as drop_exc:
+                if not failed:
+                    raise
+                print(
+                    f"warning: could not drop scratch database: {_excerpt(str(drop_exc))}",
+                    file=sys.stderr,
+                )
+    if source_rows != scratch_rows:
+        print(
+            f"drill-remote-FAILED snapshot={pulled} {WATERMARK_TABLE} rows "
+            f"source={source_rows} restored={scratch_rows}",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"drill-remote-OK snapshot={pulled} {WATERMARK_TABLE}_rows={scratch_rows} "
+        f"scratch_db={scratch_name} scratch_root={scratch_root}"
+    )
     return 0

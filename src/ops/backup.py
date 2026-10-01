@@ -63,7 +63,7 @@ from src.ops.redaction import configure_logging, scrub
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from src.ops.backup_remote import RcloneRunner
+    from src.ops.backup_remote import DrillDatabaseOps, RcloneRunner
 
 DEFAULT_PARQUET_ROOT = Path("data") / "raw"
 DEFAULT_BUNDLE_ROOT = Path("data") / "backup"
@@ -906,6 +906,7 @@ def main(
     data_probe: DataProbe | None = None,
     rclone_runner: RcloneRunner | None = None,
     now_utc: datetime | None = None,
+    drill_ops: DrillDatabaseOps | None = None,
 ) -> int:
     configure_logging()
     try:
@@ -917,6 +918,7 @@ def main(
             data_probe=data_probe,
             rclone_runner=rclone_runner,
             now_utc=now_utc,
+            drill_ops=drill_ops,
         )
     except Exception as exc:
         print(f"error: {_describe_error(exc)}", file=sys.stderr)
@@ -932,6 +934,7 @@ def _run_cli(
     data_probe: DataProbe | None,
     rclone_runner: RcloneRunner | None,
     now_utc: datetime | None,
+    drill_ops: DrillDatabaseOps | None,
 ) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m src.ops.backup",
@@ -1037,7 +1040,63 @@ def _run_cli(
         "--dry-run", action="store_true", help="List what would be deleted without deleting."
     )
 
+    pull_p = sub.add_parser(
+        "pull", help="Rebuild a verified bundle from an off-host snapshot (newest by default)."
+    )
+    pull_p.add_argument("--dest", type=Path, required=True)
+    pull_p.add_argument("--snapshot", default=None, help="Snapshot id (YYYYMMDDTHHMMSSZ).")
+
+    scheduled_p = sub.add_parser(
+        "scheduled", help="backup -> verify -> push -> cryptcheck -> retain (one scheduled run)."
+    )
+    scheduled_p.add_argument("--bundle-root", type=Path, default=DEFAULT_STAGING_BUNDLE_ROOT)
+    scheduled_p.add_argument(
+        "--parquet-roots", type=Path, nargs="+", default=[DEFAULT_PARQUET_ROOT]
+    )
+
+    drill_remote_p = sub.add_parser(
+        "drill-remote",
+        help="backup -> push -> pull -> verify -> pg_restore into a scratch database -> compare.",
+    )
+    drill_remote_p.add_argument("--bundle-root", type=Path, default=DEFAULT_STAGING_BUNDLE_ROOT)
+    drill_remote_p.add_argument("--scratch-root", type=Path, required=True)
+    drill_remote_p.add_argument(
+        "--parquet-roots", type=Path, nargs="+", default=[DEFAULT_PARQUET_ROOT]
+    )
+
     args = parser.parse_args(argv)
+
+    if args.cmd == "pull":
+        from src.ops import backup_remote
+
+        return backup_remote.cli_pull(args.dest, snapshot=args.snapshot, runner=rclone_runner)
+
+    if args.cmd == "scheduled":
+        from src.ops import backup_remote
+
+        return backup_remote.cli_scheduled(
+            args.bundle_root,
+            args.parquet_roots,
+            runner=rclone_runner,
+            pg_dump_runner=pg_dump_runner or _prod_pg_dump_runner,
+            now_utc=now_utc,
+        )
+
+    if args.cmd == "drill-remote":
+        from src.ops import backup_remote
+
+        return backup_remote.cli_drill_remote(
+            args.bundle_root,
+            args.scratch_root,
+            args.parquet_roots,
+            database_url=_database_url_from_env(),
+            runner=rclone_runner,
+            pg_dump_runner=pg_dump_runner or _prod_pg_dump_runner,
+            pg_restore_runner=pg_restore_runner or _prod_pg_restore_runner,
+            data_probe=data_probe,
+            ops=drill_ops,
+            now_utc=now_utc,
+        )
 
     if args.cmd == "retain":
         from src.ops import backup_remote
