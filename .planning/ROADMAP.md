@@ -653,7 +653,7 @@ Plans:
 
 **Audit refs**: F-202, F-404, F-403, F-406, F-411, F-412, F-410, F-126, F-951, F-703, F-603, F-606
 
-**Plans:** 12/15 plans executed
+**Plans:** 13/15 plans executed
 
 Plans:
 **Wave 1**
@@ -675,7 +675,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [x] 17-12-PLAN.md — Restart recovery by query only + full SC4 matrix with negative controls (W4)
-- [ ] 17-13-PLAN.md — Constraint snapshot and system-state stores, controller rehydrate across restart (W4)
+- [x] 17-13-PLAN.md — Constraint snapshot and system-state stores, controller rehydrate across restart (W4)
 - [ ] 17-14-PLAN.md — End-to-end APPROVE replay across restart/expiry and callback redelivery on PostgreSQL (W4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
@@ -979,7 +979,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
-| 17. Operational Persistence Layer | 12/15 | In Progress|  |
+| 17. Operational Persistence Layer | 13/15 | In Progress|  |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |
 | 19. Execution Plan Binding + Pre-Placement Checks | 0/TBD | Not started | - |
 | 20. Reconcile + SAFE_MODE Hardening + Alerts | 0/TBD | Not started | - |
