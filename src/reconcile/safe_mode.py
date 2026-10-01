@@ -343,13 +343,17 @@ class SafeModeController:
             # Still divergent — stay in SAFE_MODE.
             return False
 
-        # Clean compare + journaled restore event: exit.
-        self._in_safe_mode = False
+        # Clean compare + journaled restore event: exit. The opposite order to
+        # `enter_safe_mode` on purpose (17-REVIEW WR-03): the exit is journaled FIRST, so a
+        # journal failure propagates with the controller still in SAFE_MODE (fail closed)
+        # and a later retry can still exit; entering flips first so a failure there also
+        # fails closed.
         self._journal_safe_mode_event(
             event_type="SAFE_MODE_EXIT",
             reason="clean_three_source_compare",
             now_utc=effective_now,
         )
+        self._in_safe_mode = False
         self._entered_at_utc = None
         self._entered_reason = None
         return True

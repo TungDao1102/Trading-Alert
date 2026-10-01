@@ -22,6 +22,10 @@ Pinned behaviors (a journal outage is the only fault injected):
 
 Behaviors 2-4 are UNSAFE gaps for an outage (see the 17-08 SUMMARY); they are pinned, not
 fixed, here.
+
+  5. `SafeModeController.exit_safe_mode` journals the exit BEFORE clearing the flag
+     (17-REVIEW WR-03, the opposite order to entering): with a failing journal the controller
+     STAYS in SAFE_MODE and the error propagates, so a retry after recovery can still exit.
 """
 
 from __future__ import annotations
@@ -248,3 +252,45 @@ async def test_emergency_close_cancels_run_once_the_journal_is_back() -> None:
         "cancel_algo_order",
     ]
     assert adapter.calls[0][1] == {"symbol": SYMBOL, "orig_client_order_id": ENTRY_ID}
+
+
+# --------------------------------------------------------------------------- #
+# 5. exit_safe_mode is journal-first (17-REVIEW WR-03), so a journal outage fails closed.
+# --------------------------------------------------------------------------- #
+
+
+class _CleanTruthAdapter:
+    """Exchange truth that always agrees with an empty local state."""
+
+    async def snapshot_open_normal_orders(self, *, symbol: Any = None) -> list[Any]:
+        return []
+
+    async def snapshot_open_algo_orders(self, *, symbol: Any = None) -> list[Any]:
+        return []
+
+    async def snapshot_positions(self, *, symbol: Any = None) -> list[Any]:
+        return []
+
+
+async def test_exit_safe_mode_with_a_failing_journal_stays_in_safe_mode_and_can_retry() -> None:
+    journal = ToggleJournal()
+    controller = SafeModeController(adapter=_CleanTruthAdapter(), journal=journal)  # type: ignore[arg-type]
+    controller.enter_safe_mode(reason="DIVERGENCE", now_utc=NOW_UTC)
+    journal.down = True
+
+    with pytest.raises(StoreUnavailable):
+        await controller.exit_safe_mode(now_utc=NOW_UTC)
+
+    # Fail closed: the un-journaled exit did not happen, so entries stay blocked.
+    assert controller.in_safe_mode is True
+    assert controller.entered_reason == "DIVERGENCE"
+    assert controller.entered_at_utc == NOW_UTC
+    assert controller.guard_new_entries(trade_plan=None).is_no_trade is True
+    assert [e.event_type for e in journal.events] == ["SAFE_MODE_ENTER"]
+
+    # The retry after the journal recovers exits and records exactly one exit event.
+    journal.down = False
+    assert await controller.exit_safe_mode(now_utc=NOW_UTC) is True
+    assert controller.in_safe_mode is False
+    assert controller.entered_reason is None
+    assert [e.event_type for e in journal.events] == ["SAFE_MODE_ENTER", "SAFE_MODE_EXIT"]
