@@ -9,11 +9,14 @@ from pathlib import Path
 
 import pytest
 from src.domain.enums import (
+    ApprovalConsumptionStatus,
     ApprovalResult,
     ExecutionIntentStatus,
+    LiveInputsStatus,
     OrderStatus,
     PositionStatus,
     SignalStatus,
+    SystemStateKey,
     TradePlanStatus,
 )
 from src.domain.transitions import (
@@ -291,3 +294,26 @@ def test_glossary_section_11_records_the_auto_mode_default_status() -> None:
     text = _glossary_section(11)
     assert "auto-mode default" in text
     assert "D051" in text
+
+
+# --------------------------------------------------------------------------- section 12
+
+SECTION_12: dict[str, type[Enum]] = {
+    "12.1 ExecutionIntentStatus": ExecutionIntentStatus,
+    "12.2 ApprovalConsumptionStatus": ApprovalConsumptionStatus,
+    "12.3 LiveInputsStatus": LiveInputsStatus,
+    "12.4 SystemStateKey": SystemStateKey,
+}
+
+
+def test_glossary_section_12_has_the_four_subsections() -> None:
+    subsections = _subsections(_glossary_section(12), 12)
+    assert list(subsections) == list(SECTION_12)
+
+
+@pytest.mark.parametrize("title", list(SECTION_12))
+def test_glossary_section_12_block_equals_the_enum(title: str) -> None:
+    subsections = _subsections(_glossary_section(12), 12)
+    lines = _first_block_lines(subsections[title])
+    assert len(lines) == len(set(lines)), "duplicate tokens in block"
+    assert set(lines) == _values(SECTION_12[title])
