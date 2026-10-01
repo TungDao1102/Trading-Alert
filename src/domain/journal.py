@@ -16,6 +16,8 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+_MAX_EVENT_ID_LENGTH = 128
+
 
 def content_hash_event_id(
     *,
@@ -47,6 +49,45 @@ def content_hash_event_id(
         ensure_ascii=True,
     )
     return f"{prefix}_{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
+
+
+def correlated_event_id(
+    *,
+    prefix: str,
+    correlation_id: str,
+    event_type: str,
+    entity_id: str,
+    step: str,
+) -> str:
+    """Deterministic `journal_event_id` for correlated, replayable events.
+
+    A pure function of `(prefix, correlation_id, event_type, entity_id, step)`:
+    no clock, no randomness, no database-derived sequence (D-10, research C7).
+    A redelivered Telegram callback carries the same correlation id and so
+    writes the same ids; the journal primary key then makes the replay an
+    idempotent no-op. Distinct steps of one correlation (receipt, chat
+    reject, each distinct outcome) get distinct ids.
+
+    The hashed material is a compact JSON array of the four non-prefix
+    values, so field boundaries cannot be shifted to forge a collision.
+
+    Returns `"{prefix}_{sha256-hex}"`; with a short prefix this stays
+    within the 128-char column.
+    """
+    _require_non_empty(prefix, "prefix")
+    _require_non_empty(correlation_id, "correlation_id")
+    _require_non_empty(event_type, "event_type")
+    _require_non_empty(entity_id, "entity_id")
+    _require_non_empty(step, "step")
+    material = json.dumps(
+        [correlation_id, event_type, entity_id, step],
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    event_id = f"{prefix}_{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
+    if len(event_id) > _MAX_EVENT_ID_LENGTH:
+        raise ValueError(f"journal_event_id exceeds {_MAX_EVENT_ID_LENGTH} characters")
+    return event_id
 
 
 def _require_non_empty(value: str, field_name: str) -> None:

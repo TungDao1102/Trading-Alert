@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from src.domain.journal import JournalEvent
+from src.domain.journal import JournalEvent, content_hash_event_id
 
 # --------------------------------------------------------------------------- #
 # Adapter + journal protocols — the minimum surface the sweeper needs.
@@ -311,16 +311,21 @@ class OrphanSweeper:
             "update_time_utc": _iso(getattr(probe, "update_time_utc", None)),
             "phase": "pre_cancel",
         }
+        payload_json = _build_payload_json(payload)
         return JournalEvent(
-            journal_event_id=(
-                f"orphan_sweep_pre_{client_algo_id}_{int(now_utc.timestamp() * 1000)}"
+            journal_event_id=content_hash_event_id(
+                prefix="orphan_sweep",
+                event_type="ORPHAN_SWEEP",
+                entity_id=client_algo_id,
+                occurred_at_utc=now_utc,
+                payload_json=payload_json,
             ),
             occurred_at_utc=now_utc,
             event_type="ORPHAN_SWEEP",
             entity_type="OpenAlgoOrder",
             entity_id=client_algo_id,
             correlation_id="reconcile_orphan_sweep",
-            payload_json=_build_payload_json(payload),
+            payload_json=payload_json,
         )
 
     def _build_failure_event(
@@ -339,16 +344,21 @@ class OrphanSweeper:
             "reason": reason,
             "phase": phase,
         }
+        payload_json = _build_payload_json(payload)
         return JournalEvent(
-            journal_event_id=(
-                f"orphan_sweep_failed_{client_algo_id}_{int(now_utc.timestamp() * 1000)}"
+            journal_event_id=content_hash_event_id(
+                prefix="orphan_sweep",
+                event_type="ORPHAN_SWEEP",
+                entity_id=client_algo_id,
+                occurred_at_utc=now_utc,
+                payload_json=payload_json,
             ),
             occurred_at_utc=now_utc,
             event_type="ORPHAN_SWEEP",
             entity_type="OpenAlgoOrder",
             entity_id=client_algo_id,
             correlation_id="reconcile_orphan_sweep",
-            payload_json=_build_payload_json(payload),
+            payload_json=payload_json,
         )
 
     def _build_post_image_event(
@@ -366,16 +376,21 @@ class OrphanSweeper:
             "cancelled_at_utc": _iso(now_utc),
             "phase": "post_cancel",
         }
+        payload_json = _build_payload_json(payload)
         return JournalEvent(
-            journal_event_id=(
-                f"orphan_sweep_post_{client_algo_id}_{int(now_utc.timestamp() * 1000)}"
+            journal_event_id=content_hash_event_id(
+                prefix="orphan_sweep",
+                event_type="ORPHAN_SWEEP",
+                entity_id=client_algo_id,
+                occurred_at_utc=now_utc,
+                payload_json=payload_json,
             ),
             occurred_at_utc=now_utc,
             event_type="ORPHAN_SWEEP",
             entity_type="OpenAlgoOrder",
             entity_id=client_algo_id,
             correlation_id="reconcile_orphan_sweep",
-            payload_json=_build_payload_json(payload),
+            payload_json=payload_json,
         )
 
 

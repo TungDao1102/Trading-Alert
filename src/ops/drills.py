@@ -49,7 +49,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from src.domain.journal import JournalEvent
+from src.domain.journal import JournalEvent, content_hash_event_id
 
 # --------------------------------------------------------------------------- #
 # Canonical drill vocabulary — the eight RUNBOOK procedures this plan
@@ -398,14 +398,23 @@ def _build_drill_outcome_event(
         "runbook_section": declaration.runbook_section,
     }
     correlation_id = f"drill:{declaration.name}"
+    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return JournalEvent(
-        journal_event_id=(f"drill_outcome_{declaration.name}_{int(now_utc.timestamp() * 1000)}"),
+        # Content hash (D-10, F-412): two outcomes of one drill at the same
+        # millisecond (e.g. a PASS and a FAIL run) must not share an id.
+        journal_event_id=content_hash_event_id(
+            prefix="drill_outcome",
+            event_type="DRILL_OUTCOME",
+            entity_id=declaration.name,
+            occurred_at_utc=now_utc,
+            payload_json=payload_json,
+        ),
         occurred_at_utc=now_utc,
         event_type="DRILL_OUTCOME",
         entity_type="Drill",
         entity_id=declaration.name,
         correlation_id=correlation_id,
-        payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        payload_json=payload_json,
     )
 
 

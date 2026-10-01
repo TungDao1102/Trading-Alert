@@ -307,21 +307,31 @@ class SafeModeController:
         The journal layer is the audit trail; the controller never
         mutates state without journaling first (D-05 extended).
         """
-        from src.domain.journal import JournalEvent
+        from src.domain.journal import JournalEvent, content_hash_event_id
 
+        entity_id = SystemMode.SAFE_MODE.value
+        payload_json = _build_payload_json(
+            {
+                "reason": reason,
+                "system_mode": SystemMode.SAFE_MODE.value,
+            }
+        )
         event = JournalEvent(
-            journal_event_id=f"safe_mode_{event_type.lower()}_{int(now_utc.timestamp() * 1000)}",
+            # Content hash (D-10, F-412): two different transitions at the
+            # same millisecond must not share an id.
+            journal_event_id=content_hash_event_id(
+                prefix="safe_mode",
+                event_type=event_type,
+                entity_id=entity_id,
+                occurred_at_utc=now_utc,
+                payload_json=payload_json,
+            ),
             occurred_at_utc=now_utc,
             event_type=event_type,
             entity_type="SystemMode",
-            entity_id=SystemMode.SAFE_MODE.value,
+            entity_id=entity_id,
             correlation_id="reconcile_safe_mode",
-            payload_json=_build_payload_json(
-                {
-                    "reason": reason,
-                    "system_mode": SystemMode.SAFE_MODE.value,
-                }
-            ),
+            payload_json=payload_json,
         )
         self._journal.record(event)
 

@@ -15,7 +15,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
 from src.domain import journal as journal_module
 
 NOW = datetime(2026, 9, 19, 13, 0, 0, tzinfo=UTC)
