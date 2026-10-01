@@ -330,7 +330,7 @@ def test_the_store_exposes_no_update_or_delete_method() -> None:
     [
         "UPDATE journal_events SET event_type = 'TAMPERED'",
         "DELETE FROM journal_events",
-        "TRUNCATE journal_events",
+        "TRUNCATE journal_events CASCADE",
     ],
 )
 def test_a_bypassing_writer_is_refused_by_the_trigger(
