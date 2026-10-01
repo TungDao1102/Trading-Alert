@@ -59,7 +59,7 @@ from src.approval.mapping import ShortIdMapping, make_short_id_mapping
 from src.approval.replay import resolve_callback
 from src.domain.approval import Approval
 from src.domain.enums import ApprovalAction, RejectionReason
-from src.domain.journal import JournalEvent
+from src.domain.journal import JournalEvent, correlated_event_id
 
 if TYPE_CHECKING:
     from telegram import InlineKeyboardMarkup, Update
@@ -508,14 +508,22 @@ def _build_callback_receipt(
         "callback_data": parsed.raw,
         "kind": parsed.kind.value,
         "short_id": parsed.short_id,
-        "received_at_utc": callback_at_utc.astimezone(UTC).isoformat(),
     }
+    entity_id = f"short:{parsed.short_id}"
     return JournalEvent(
-        journal_event_id=f"cb-receipt:{correlation_id}",
+        # Pure function of the correlation (callback_query.id) and a fixed
+        # step label: a Telegram redelivery writes the same id (D-10, C7).
+        journal_event_id=correlated_event_id(
+            prefix="cb",
+            correlation_id=correlation_id,
+            event_type=EVENT_TYPE_CALLBACK_RECEIVED,
+            entity_id=entity_id,
+            step="receipt",
+        ),
         occurred_at_utc=callback_at_utc,
         event_type=EVENT_TYPE_CALLBACK_RECEIVED,
         entity_type="Approval",
-        entity_id=f"short:{parsed.short_id}",
+        entity_id=entity_id,
         correlation_id=correlation_id,
         signal_id=None,
         trade_plan_id=None,
@@ -546,14 +554,20 @@ def _build_chat_reject_receipt(
         "kind": parsed.kind.value,
         "short_id": parsed.short_id,
         "chat_gate_rejected": True,
-        "received_at_utc": callback_at_utc.astimezone(UTC).isoformat(),
     }
+    entity_id = f"short:{parsed.short_id}"
     return JournalEvent(
-        journal_event_id=f"cb-reject:{correlation_id}",
+        journal_event_id=correlated_event_id(
+            prefix="cb",
+            correlation_id=correlation_id,
+            event_type=EVENT_TYPE_CALLBACK_RECEIVED,
+            entity_id=entity_id,
+            step="chat_reject",
+        ),
         occurred_at_utc=callback_at_utc,
         event_type=EVENT_TYPE_CALLBACK_RECEIVED,
         entity_type="Approval",
-        entity_id=f"short:{parsed.short_id}",
+        entity_id=entity_id,
         correlation_id=correlation_id,
         payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
     )
@@ -568,11 +582,9 @@ def _journal_outcome(
     callback_at_utc: datetime,
     correlation_id: str,
 ) -> None:
-    import uuid
-
     event_type = EVENT_TYPE_CALLBACK_RESOLVED if ok else EVENT_TYPE_CALLBACK_REJECTED
-    suffix = uuid.uuid4().hex[:8]
-    ms = int(callback_at_utc.timestamp() * 1000)
+    reason_label = reason_code.value if reason_code is not None else "NONE"
+    entity_id = f"short:{parsed.short_id}"
     payload = {
         "short_id": parsed.short_id,
         "kind": parsed.kind.value,
@@ -582,11 +594,19 @@ def _journal_outcome(
     }
     journal_receipt(
         JournalEvent(
-            journal_event_id=f"cb-outcome:{parsed.short_id}:{ms}:{suffix}",
+            # The step encodes ok and reason_code, so a rejected first delivery
+            # and a resolved redelivery are two different events (D-10).
+            journal_event_id=correlated_event_id(
+                prefix="cb",
+                correlation_id=correlation_id,
+                event_type=event_type,
+                entity_id=entity_id,
+                step=f"outcome:{ok}:{reason_label}",
+            ),
             occurred_at_utc=callback_at_utc,
             event_type=event_type,
             entity_type="Approval",
-            entity_id=f"short:{parsed.short_id}",
+            entity_id=entity_id,
             correlation_id=correlation_id,
             payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
         )
@@ -643,11 +663,15 @@ async def on_callback(
         raise ValueError("update.effective_chat must not be None")
     callback_chat_id = int(chat.id)
 
-    import uuid
-
+    # Correlation comes from Telegram's callback_query.id, which is stable
+    # across redelivery of the same callback (D-10, research C7, A10). A
+    # missing id fails closed: without it a redelivery could not be told
+    # apart from a fresh press. The wall clock is event time only.
+    query_id = getattr(query, "id", None)
+    if not isinstance(query_id, str) or query_id == "":
+        raise ValueError("callback query carries no id")
     callback_at_utc = datetime.now(UTC)
-    ms = int(callback_at_utc.timestamp() * 1000)
-    correlation_id = f"cb:{parsed.short_id}:{ms}:{uuid.uuid4().hex[:8]}"
+    correlation_id = f"cbq:{query_id}"
 
     if not authorized_chat_gate(
         callback_chat_id=callback_chat_id,

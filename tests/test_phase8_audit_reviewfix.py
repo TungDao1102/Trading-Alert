@@ -401,7 +401,10 @@ def test_cr03_flat_local_position_stays_clean() -> None:
 
 
 class _FakeQuery:
-    def __init__(self, data: str, chat_id: int) -> None:
+    def __init__(self, data: str, chat_id: int, query_id: str = "q-default") -> None:
+        # Telegram's callback_query.id: stable across redelivery, the source
+        # of the callback correlation id (17-04, D-10).
+        self.id = query_id
         self.data = data
         self.message = SimpleNamespace(chat_id=chat_id)
         self.answered = False
@@ -474,7 +477,11 @@ async def test_wr02_unauthorized_chat_gets_generic_rejection() -> None:
 
 
 async def test_wr17_rapid_callbacks_get_distinct_correlations() -> None:
-    """Double-taps in the same second must not collide on receipt IDs."""
+    """Distinct Telegram queries (double-taps) must not collide on receipt IDs.
+
+    Correlation derives from `callback_query.id` (17-04): distinct presses carry
+    distinct query ids, so they get distinct correlations even within one second.
+    """
     short_id = "c" * 32
     seen: list[str] = []
 
@@ -482,8 +489,8 @@ async def test_wr17_rapid_callbacks_get_distinct_correlations() -> None:
         seen.append(kwargs["correlation_id"])
         return DispatchResult(ok=True, kind=parsed.kind)
 
-    for _ in range(3):
-        query = _FakeQuery("APR:" + short_id, chat_id=CHAT_ID)
+    for index in range(3):
+        query = _FakeQuery("APR:" + short_id, chat_id=CHAT_ID, query_id=f"q-{index}")
         update = _FakeUpdate(query, chat_id=CHAT_ID)
         await on_callback(
             update,  # type: ignore[arg-type]

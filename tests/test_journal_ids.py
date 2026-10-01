@@ -314,7 +314,7 @@ def test_ok_and_rejected_outcomes_for_one_correlation_never_share_an_id() -> Non
     for ok, reason in (
         (True, None),
         (False, RejectionReason.INVALIDATED),
-        (False, RejectionReason.EXPIRED),
+        (False, RejectionReason.STALE_SETUP),
     ):
         _journal_outcome(
             events.append,
