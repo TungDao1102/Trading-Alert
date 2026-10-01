@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 17
 current_phase_name: operational-persistence-layer
 status: executing
-stopped_at: Completed 17-01-PLAN.md
-last_updated: "2026-10-01T12:30:36.815Z"
+stopped_at: Completed 17-02-PLAN.md
+last_updated: "2026-10-01T12:57:40.683Z"
 last_activity: 2026-10-01
 last_activity_desc: Phase 17 execution started
-state_head: 0c58ee4c1014a724be92d0db1db4e3e772c36a25
+state_head: ab3b110dd54f26f87146dd3a09f5f5943e4ea627
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 109
-  completed_plans: 91
+  completed_plans: 92
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 17 (operational-persistence-layer) — EXECUTING
-Plan: 2 of 15
+Plan: 3 of 15
 Status: Ready to execute
 Last activity: 2026-10-01 — Phase 17 execution started
 
@@ -131,6 +131,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 13.1 P10 | ~2h | 3 tasks | 10 files |
 | Phase 13.1 P11 | 25min | 3 tasks | 7 files |
 | Phase 17 P01 | 22 min | 3 tasks | 19 files |
+| Phase 17 P02 | 30min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -334,6 +335,9 @@ Recent decisions affecting current work:
 - [Phase 13.1]: D050 records Phase 13.1; runbook step tables and pin tables are test-enforced against the repository files
 - [Phase 17]: 17-01 Task 1 auto-resolved to locked: sync SQLAlchemy repositories (D-01) and execution_intents PK (approval_id, role) with OrderRole role values, explicit approvals.consumption_status, UNIQUE(trade_plan_id, role) (D-13, C2, C8, Open Q5); record in D051 — One-way door gated in auto mode per plan; Phases 18-24 and Phase 20 reconciliation bind to these signatures
 - [Phase 17]: 17-01 Pre-placement NO_TRADE never consumes the approval; consumption only immediately before place_entry (research Open Q1); stored-outcome lookup moves ahead of expiry gate in plan 11 — Keeps a retried APPROVE able to re-run gates until placement; revisit in Phase 19
+- [Phase 17]: 17-02: positions.quantity gets no sign CHECK (position_amt is signed; C4 refinement for D051) — src/adapters/binance_usdm.py documents position_amt as negative for SHORT in one-way mode; >= 0 would reject a legal short
+- [Phase 17]: 17-02: terminal-status triggers use research draft terminal sets (signals, trade_plans, orders, positions, approvals, execution_intents); plan 10 cross-checks vs transitions.py — auto-mode default C3; DB rule mirrors Python transition tables
+- [Phase 17]: 17-02: all new 0004 constraints/indexes are PostgreSQL-only on the ORM via ddl_if; 18 pre-existing indexes declared plainly — keeps SQLite create_all fixture suites unchanged; alembic compare_metadata shows zero diff
 
 ### Pending Todos
 
@@ -379,6 +383,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-01T12:30:36.547Z
-Stopped at: Completed 17-01-PLAN.md
+Last session: 2026-10-01T12:57:40.395Z
+Stopped at: Completed 17-02-PLAN.md
 Resume file: None
