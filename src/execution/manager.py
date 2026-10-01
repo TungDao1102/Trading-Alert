@@ -427,8 +427,12 @@ async def execute_approved_plan(
             BEFORE `place_entry` (D-13, D-14); a second call with the same
             approval returns the stored outcome with zero adapter calls
             (D-15), even after a restart. The store is synchronous and is
-            called directly on the event loop (short indexed queries bounded
-            by the engine `lock_timeout`; Phase 24 may wrap it in
+            called directly on the event loop (short indexed queries; the
+            engine bounds connect, lock wait, statement, pool checkout and a
+            half-open socket with `connect_timeout`, `lock_timeout`,
+            `statement_timeout`, `pool_timeout` and TCP keepalives, see
+            `src.persistence.engine`; a call can still block the loop for up
+            to the longest of those bounds, and Phase 24 may wrap it in
             `asyncio.to_thread`). Store failures fail closed on both sides of
             placement: before the entry is sent a `PersistenceError` returns
             NO_TRADE (`RECONCILIATION_REQUIRED`, or `INVALIDATED` for an
