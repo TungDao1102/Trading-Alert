@@ -1,0 +1,427 @@
+"""Schema parity, reversibility and data-safe upgrade of the Alembic chain (D-11, D-24, F-411).
+
+Every database here is built by `alembic upgrade` (never from ORM metadata, D-23):
+
+  * `compare_metadata` diffs the migrated database against `Base.metadata` with
+    `compare_type`, `compare_server_default` and the opt-in
+    `alembic.ext.checkconstraint_byname` plugin, so drift in indexes, constraints,
+    types or widths fails.
+  * `compare_metadata` is blind to partial-index predicates and compares CHECKs by
+    name only (research Pitfall 4), so catalog assertions cover the predicates, the
+    enum CHECK literals and the triggers.
+  * The chain must be reversible (upgrade head, downgrade base, upgrade head) and a
+    data-bearing upgrade 0003 -> 0004 must keep every pre-existing row.
+"""
+
+from __future__ import annotations
+
+import re
+import tomllib
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import pytest
+from alembic.autogenerate import compare_metadata
+from alembic.migration import MigrationContext
+from sqlalchemy import MetaData, Table, select, text
+from sqlalchemy.engine import Engine
+from src.db.models import (
+    Base,
+    CollectorGap,
+    CollectorWatermark,
+    CoverageWindow,
+    ShortIdMappingRow,
+)
+from src.domain.enums import (
+    ApprovalAction,
+    ApprovalConsumptionStatus,
+    ApprovalResult,
+    Direction,
+    EntryModel,
+    ExecutionIntentStatus,
+    LiveInputsStatus,
+    OrderRole,
+    OrderStatus,
+    PositionStatus,
+    SetupType,
+    SignalStatus,
+    SourceTimeframe,
+    SystemStateKey,
+    TradePlanStatus,
+)
+from src.domain.registry import WORKING_TYPE_VALUES
+from src.persistence.engine import make_sync_engine
+
+from tests.pg_support import run_alembic
+from tests.support.pg_rows import (
+    T0,
+    make_approval,
+    make_fill,
+    make_journal,
+    make_order,
+    make_plan,
+    make_position,
+    make_signal,
+    make_symbol_metadata,
+)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+REVISION_0003 = "0003_callback_mapping"
+
+_AUTOGENERATE_PLUGINS = [
+    "alembic.autogenerate.*",
+    "alembic.ext.checkconstraint_byname",
+]
+_QUOTED_LITERAL = re.compile(r"'((?:[^']|'')*)'")
+
+
+@pytest.fixture
+def engine(pg_db: str) -> Iterator[Engine]:
+    eng = make_sync_engine(pg_db)
+    try:
+        yield eng
+    finally:
+        eng.dispose()
+
+
+# --------------------------------------------------------------------------------------
+# Alembic floor (D-11, research C19 / Pitfall 16)
+# --------------------------------------------------------------------------------------
+def test_alembic_floor_guarantees_the_opt_in_check_constraint_plugin() -> None:
+    """The plugin `alembic.ext.checkconstraint_byname` ships with Alembic >= 1.19.2."""
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = pyproject["project"]["dependencies"]
+    assert "alembic>=1.19.2" in dependencies, dependencies
+    assert not (REPO_ROOT / "scripts" / "check_migration_parity.py").exists()
+
+
+# --------------------------------------------------------------------------------------
+# compare_metadata parity (Pattern 5)
+# --------------------------------------------------------------------------------------
+def test_migrated_database_matches_orm_metadata(engine: Engine) -> None:
+    opts = {
+        "compare_type": True,
+        "compare_server_default": True,
+        "autogenerate_plugins": _AUTOGENERATE_PLUGINS,
+    }
+    with engine.connect() as conn:
+        diff = compare_metadata(MigrationContext.configure(conn, opts=opts), Base.metadata)
+    assert diff == [], f"ORM metadata and the migrated database differ: {diff!r}"
+
+
+_DRIFTS = {
+    "dropped_named_check": "ALTER TABLE signals DROP CONSTRAINT ck_signals_direction",
+    "widened_column": "ALTER TABLE signals ALTER COLUMN status TYPE VARCHAR(64)",
+    "dropped_index": "DROP INDEX uq_orders_client_order_id",
+    "dropped_foreign_key": "ALTER TABLE orders DROP CONSTRAINT fk_orders_trade_plan_id",
+}
+
+
+@pytest.mark.parametrize("drift", sorted(_DRIFTS))
+def test_parity_check_detects_drift(engine: Engine, drift: str) -> None:
+    """Sensitivity: the diff is non-empty once the database drifts from the ORM."""
+    opts = {
+        "compare_type": True,
+        "compare_server_default": True,
+        "autogenerate_plugins": _AUTOGENERATE_PLUGINS,
+    }
+    with engine.begin() as conn:
+        conn.execute(text(_DRIFTS[drift]))
+    with engine.connect() as conn:
+        diff = compare_metadata(MigrationContext.configure(conn, opts=opts), Base.metadata)
+    assert diff, f"drift {drift!r} went undetected"
+
+
+# --------------------------------------------------------------------------------------
+# Catalog assertions for what compare_metadata cannot see (Pitfall 4)
+# --------------------------------------------------------------------------------------
+def _normalize(sql: str) -> str:
+    """Lowercase and drop whitespace, parentheses and `::type` casts of a catalog predicate."""
+    sql = re.sub(r"::[a-z_ ]+(\[\])?", "", sql.lower())
+    return re.sub(r"[\s()]", "", sql)
+
+
+PARTIAL_INDEX_PREDICATES = {
+    "uq_approvals_one_decided_per_plan": "status<>'pending'",
+    "uq_orders_client_order_id": "client_order_idisnotnull",
+    "uq_orders_algo_client_id": "algo_client_idisnotnull",
+    "uq_execution_intents_client_order_id": "client_order_idisnotnull",
+    "uq_execution_intents_algo_client_id": "algo_client_idisnotnull",
+}
+
+
+@pytest.mark.parametrize(("index", "predicate"), sorted(PARTIAL_INDEX_PREDICATES.items()))
+def test_partial_unique_index_states_its_exact_predicate(
+    engine: Engine, index: str, predicate: str
+) -> None:
+    with engine.connect() as conn:
+        definition = conn.execute(
+            text("SELECT indexdef FROM pg_indexes WHERE indexname = :n"), {"n": index}
+        ).scalar_one()
+    assert definition.startswith("CREATE UNIQUE INDEX"), definition
+    assert " WHERE " in definition, definition
+    where = definition.split(" WHERE ", 1)[1]
+    assert _normalize(where) == predicate, definition
+
+
+# constraint name -> the exact value set the CHECK must list
+ENUM_CHECKS: dict[str, set[str]] = {
+    "ck_signals_status": {m.value for m in SignalStatus},
+    "ck_signals_direction": {m.value for m in Direction},
+    "ck_signals_setup_type": {m.value for m in SetupType},
+    "ck_signals_source_timeframe": {m.value for m in SourceTimeframe},
+    "ck_trade_plans_status": {m.value for m in TradePlanStatus},
+    "ck_trade_plans_entry_model": {m.value for m in EntryModel},
+    "ck_approvals_action": {m.value for m in ApprovalAction},
+    "ck_approvals_result": {m.value for m in ApprovalResult},
+    "ck_approvals_status": {m.value for m in ApprovalResult},
+    "ck_approvals_consumption_status": {m.value for m in ApprovalConsumptionStatus},
+    "ck_orders_local_status": {m.value for m in OrderStatus},
+    "ck_positions_status": {m.value for m in PositionStatus},
+    "ck_execution_intents_role": {m.value for m in OrderRole},
+    "ck_execution_intents_status": {m.value for m in ExecutionIntentStatus},
+    "ck_plan_constraint_snapshots_live_inputs_status": {m.value for m in LiveInputsStatus},
+    "ck_plan_constraint_snapshots_working_type": set(WORKING_TYPE_VALUES),
+    "ck_system_state_events_state_key": {m.value for m in SystemStateKey},
+}
+
+# every table the plan names for an enum CHECK
+ENUM_CHECK_TABLES = {
+    "signals",
+    "trade_plans",
+    "approvals",
+    "orders",
+    "positions",
+    "execution_intents",
+    "plan_constraint_snapshots",
+    "system_state_events",
+}
+
+
+def test_enum_check_inventory_covers_every_enum_table() -> None:
+    covered = {
+        next(table for table in ENUM_CHECK_TABLES if name.startswith(f"ck_{table}_"))
+        for name in ENUM_CHECKS
+    }
+    assert covered == ENUM_CHECK_TABLES
+
+
+@pytest.mark.parametrize(("name", "values"), sorted(ENUM_CHECKS.items()))
+def test_enum_check_lists_exactly_the_current_enum_values(
+    engine: Engine, name: str, values: set[str]
+) -> None:
+    with engine.connect() as conn:
+        definition = conn.execute(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = :n AND contype = 'c'"
+            ),
+            {"n": name},
+        ).scalar_one()
+    literals = {match.replace("''", "'") for match in _QUOTED_LITERAL.findall(definition)}
+    assert literals == values, (name, definition)
+
+
+APPEND_ONLY_TABLES = ("journal_events", "system_state_events", "plan_constraint_snapshots")
+TERMINAL_STATUS_TABLES = (
+    "signals",
+    "trade_plans",
+    "approvals",
+    "orders",
+    "positions",
+    "execution_intents",
+)
+
+
+def _triggers(engine: Engine) -> set[tuple[str, str]]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT c.relname, t.tgname FROM pg_trigger t "
+                "JOIN pg_class c ON c.oid = t.tgrelid "
+                "WHERE NOT t.tgisinternal"
+            )
+        ).all()
+    return {(str(row[0]), str(row[1])) for row in rows}
+
+
+def test_append_only_and_terminal_status_triggers_are_all_present(engine: Engine) -> None:
+    expected = {
+        (table, f"trg_{table}_{kind}")
+        for table in APPEND_ONLY_TABLES
+        for kind in ("append_only", "no_truncate")
+    } | {(table, f"trg_{table}_terminal_status") for table in TERMINAL_STATUS_TABLES}
+    assert _triggers(engine) == expected
+
+
+# --------------------------------------------------------------------------------------
+# Reversibility (D-24)
+# --------------------------------------------------------------------------------------
+def _public_tables(engine: Engine) -> set[str]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+        ).all()
+    return {str(row[0]) for row in rows}
+
+
+def _public_functions(engine: Engine) -> set[str]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+                "WHERE n.nspname = 'public'"
+            )
+        ).all()
+    return {str(row[0]) for row in rows}
+
+
+def test_upgrade_downgrade_upgrade_cycle_is_clean(pg_empty_db: str) -> None:
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        full_schema = _public_tables(engine)
+        assert {"signals", "execution_intents", "journal_events"} <= full_schema
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "downgrade", "base")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert _public_tables(engine) == {"alembic_version"}
+        assert _public_functions(engine) == set()
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert _public_tables(engine) == full_schema
+    finally:
+        engine.dispose()
+
+
+# --------------------------------------------------------------------------------------
+# Data-bearing upgrade 0003 -> 0004 (D-24)
+# --------------------------------------------------------------------------------------
+def _collector_rows() -> list[object]:
+    return [
+        CollectorWatermark(
+            symbol="BTCUSDT", data_class="klines", last_tick_utc=T0, updated_at_utc=T0
+        ),
+        CollectorGap(
+            symbol="BTCUSDT",
+            data_class="klines",
+            expected_utc=T0,
+            observed_utc=T0,
+            reason="missed tick",
+            recorded_at_utc=T0,
+        ),
+        CoverageWindow(
+            symbol="BTCUSDT",
+            interval="1h",
+            historical_data_start_utc=datetime(2026, 1, 1, tzinfo=UTC),
+            historical_data_end_utc=T0,
+            onboard_time_utc=None,
+            status_history_json="[]",
+            updated_at_utc=T0,
+        ),
+    ]
+
+
+def _rows_at_0003() -> list[Any]:
+    """One valid row per pre-existing table, parents first."""
+    return [
+        make_symbol_metadata(),
+        *_collector_rows(),
+        make_signal(1),
+        make_plan(1, 1),
+        make_position(1),
+        make_order(1, 1),
+        make_approval(1, 1, 1),
+        make_fill(1, 1),
+        make_journal(1),
+        ShortIdMappingRow(
+            short_id="ab" * 16,
+            signal_id=make_signal(1).signal_id,
+            trade_plan_id=make_plan(1, 1).trade_plan_id,
+            created_at_utc=T0,
+        ),
+    ]
+
+
+def _present_columns(engine: Engine) -> Callable[[str], set[str]]:
+    def columns(table: str) -> set[str]:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = :t"
+                ),
+                {"t": table},
+            ).all()
+        return {str(row[0]) for row in rows}
+
+    return columns
+
+
+def _values(row: Any, allowed: set[str]) -> dict[str, Any]:
+    return {c.key: getattr(row, c.key) for c in row.__table__.columns if c.key in allowed}
+
+
+def test_data_bearing_upgrade_keeps_every_row(pg_empty_db: str) -> None:
+    # Tables are REFLECTED from the 0003 database: the ORM declares 0004-only columns
+    # (and Python-side defaults for them) that a 0003 INSERT must not mention.
+    run_alembic(pg_empty_db, "upgrade", REVISION_0003)
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        columns_of = _present_columns(engine)
+        assert "consumption_status" not in columns_of("approvals")
+        rows = _rows_at_0003()
+        inserted: list[tuple[Any, dict[str, Any]]] = []
+        with engine.begin() as conn:
+            for row in rows:
+                name = row.__table__.name
+                table = Table(name, MetaData(), autoload_with=engine)
+                values = _values(row, columns_of(name))
+                assert values, name
+                conn.execute(table.insert().values(values))
+                inserted.append((table, values))
+        assert {t.name for t, _ in inserted} == {
+            "symbol_metadata",
+            "collector_watermarks",
+            "collector_gaps",
+            "coverage_windows",
+            "signals",
+            "trade_plans",
+            "approvals",
+            "orders",
+            "fills",
+            "positions",
+            "journal_events",
+            "short_id_mapping",
+        }
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "upgrade", "head")
+
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        with engine.connect() as conn:
+            for table, values in inserted:
+                keys = list(values)
+                head_table = Table(table.name, MetaData(), autoload_with=conn)
+                stored = conn.execute(select(*[head_table.c[k] for k in keys])).all()
+                assert len(stored) == 1, table.name
+                assert dict(zip(keys, stored[0], strict=True)) == values, table.name
+            consumption = conn.execute(
+                text("SELECT consumption_status, consumed_at_utc FROM approvals")
+            ).all()
+        assert [tuple(row) for row in consumption] == [
+            (ApprovalConsumptionStatus.UNCONSUMED.value, None)
+        ]
+    finally:
+        engine.dispose()
