@@ -109,6 +109,7 @@ from src.data.sufficiency import (
     render_report_table,
     write_report_json,
 )
+from src.ops.redaction import configure_logging
 
 log = structlog.get_logger()
 
@@ -1058,6 +1059,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     data-sufficiency report shows missing data (NOT_BACKFILLED, GAP or
     UNAVAILABLE). The trade count never sets an exit code (D-05).
     """
+    configure_logging()
     args = _parse_args(argv)
     try:
         config = _build_config(args)
