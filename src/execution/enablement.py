@@ -13,9 +13,10 @@ No analytics import, no Binance SDK, no SQLAlchemy, no Pydantic, no Polars.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, Protocol, Self
 
 from src.domain.enums import KillGateState
 from src.domain.journal import JournalEvent, content_hash_event_id
@@ -99,6 +100,52 @@ class LiveEnablementController:
         self._disabled: bool = True
         self._enabled_at_utc: datetime | None = None
         self._operator_id: str | None = None
+
+    @classmethod
+    def rehydrate(cls, *, journal: JournalLike, state: Mapping[str, Any] | None) -> Self:
+        """Rebuild a controller from a persisted `state_snapshot()` mapping (D-22, F-606).
+
+        `state=None` means nothing was ever persisted and returns the default controller
+        (live orders disabled). Any other value must be exactly the `state_snapshot()` format;
+        anything malformed raises `ValueError` instead of defaulting (fail closed). Restoring
+        writes nothing to the journal: the enable or disable transition that produced the
+        persisted state was already journaled by the controller that made it.
+
+        The mapping is plain data: this module imports nothing from `src.persistence`.
+
+        Args:
+            journal: The journal layer (as for the constructor).
+            state: `{"disabled": bool, "enabled_at_utc": ISO UTC text or None,
+                "operator_id": text or None}`, or None.
+
+        Raises:
+            ValueError: the mapping is not exactly the snapshot format, a value has the wrong
+                type, a datetime is naive or not UTC, an enabled state lacks its operator id or
+                enable time, or a disabled state still carries either.
+        """
+        controller = cls(journal=journal)
+        if state is None:
+            return controller
+        disabled, enabled_at_utc, operator_id = _parse_state(state)
+        controller._disabled = disabled
+        controller._enabled_at_utc = enabled_at_utc
+        controller._operator_id = operator_id
+        return controller
+
+    def state_snapshot(self) -> dict[str, str | bool | None]:
+        """The persistable enablement state (the `rehydrate` input format).
+
+        When live orders are disabled the enable time and operator id are reported as None.
+        """
+        if self._disabled:
+            return {"disabled": True, "enabled_at_utc": None, "operator_id": None}
+        return {
+            "disabled": False,
+            "enabled_at_utc": (
+                None if self._enabled_at_utc is None else self._enabled_at_utc.isoformat()
+            ),
+            "operator_id": self._operator_id,
+        }
 
     @property
     def is_disabled(self) -> bool:
@@ -286,6 +333,47 @@ class LiveEnablementController:
 # --------------------------------------------------------------------------- #
 # Internal helpers.
 # --------------------------------------------------------------------------- #
+
+
+_STATE_KEYS = frozenset({"disabled", "enabled_at_utc", "operator_id"})
+
+
+def _parse_state(state: object) -> tuple[bool, datetime | None, str | None]:
+    """Validate a persisted enablement mapping (fail closed, `ValueError` on anything off)."""
+    if not isinstance(state, Mapping):
+        raise ValueError(f"enablement state must be a mapping, got {type(state).__name__}")
+    if set(state) != _STATE_KEYS:
+        raise ValueError(
+            f"enablement state keys differ: unknown={sorted(map(str, set(state) - _STATE_KEYS))} "
+            f"missing={sorted(_STATE_KEYS - set(state))}"
+        )
+    disabled = state["disabled"]
+    if not isinstance(disabled, bool):
+        raise ValueError(f"disabled must be a bool, got {type(disabled).__name__}")
+    raw_at = state["enabled_at_utc"]
+    operator_id = state["operator_id"]
+    if raw_at is None:
+        enabled_at: datetime | None = None
+    else:
+        if not isinstance(raw_at, str):
+            raise ValueError(f"enabled_at_utc must be ISO-8601 text, got {type(raw_at).__name__}")
+        try:
+            enabled_at = datetime.fromisoformat(raw_at)
+        except ValueError:
+            raise ValueError("enabled_at_utc is not an ISO-8601 datetime") from None
+        _validate_utc_aware(enabled_at)
+    if operator_id is not None and not isinstance(operator_id, str):
+        raise ValueError(f"operator_id must be text or None, got {type(operator_id).__name__}")
+    if disabled:
+        if enabled_at is not None or operator_id is not None:
+            raise ValueError("disabled is true but an enable time or operator id is still set")
+    else:
+        if enabled_at is None:
+            raise ValueError("disabled is false but enabled_at_utc is missing")
+        if operator_id is None:
+            raise ValueError("disabled is false but operator_id is missing")
+        _validate_operator_id(operator_id)
+    return disabled, enabled_at, operator_id
 
 
 def _validate_operator_id(operator_id: str) -> None:

@@ -18,10 +18,10 @@ No Binance SDK, no SQLAlchemy, no Pydantic, no Polars.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, Protocol, Self
 
 from src.domain.enums import RejectionReason, SystemMode
 
@@ -145,6 +145,61 @@ class SafeModeController:
         self._in_safe_mode: bool = False
         self._entered_at_utc: datetime | None = None
         self._entered_reason: str | None = None
+
+    @classmethod
+    def rehydrate(
+        cls,
+        *,
+        adapter: AdapterLike,
+        journal: JournalLike,
+        compare_fn: Callable[..., Any] | None = None,
+        state: Mapping[str, Any] | None,
+    ) -> Self:
+        """Rebuild a controller from a persisted `state_snapshot()` mapping (D-22, F-606).
+
+        A restart must never silently read SAFE_MODE as off (research C14). `state=None` means
+        nothing was ever persisted and returns the default controller (not in SAFE_MODE). Any
+        other value must be exactly the `state_snapshot()` format; anything malformed raises
+        `ValueError` instead of defaulting (fail closed). Restoring writes nothing to the
+        journal: the original enter transition was already journaled.
+
+        The mapping is plain data: this module imports nothing from `src.persistence`.
+
+        Args:
+            adapter: The exchange-truth adapter (as for the constructor).
+            journal: The journal layer (as for the constructor).
+            compare_fn: The compare function (as for the constructor).
+            state: `{"in_safe_mode": bool, "entered_at_utc": ISO UTC text or None,
+                "entered_reason": text or None}`, or None.
+
+        Raises:
+            ValueError: the mapping is not exactly the snapshot format, a value has the wrong
+                type, a datetime is naive or not UTC, SAFE_MODE is set without its entry time
+                or reason, or SAFE_MODE is off while an entry time or reason is still set.
+        """
+        controller = cls(adapter=adapter, journal=journal, compare_fn=compare_fn)
+        if state is None:
+            return controller
+        in_safe_mode, entered_at_utc, entered_reason = _parse_state(state)
+        controller._in_safe_mode = in_safe_mode
+        controller._entered_at_utc = entered_at_utc
+        controller._entered_reason = entered_reason
+        return controller
+
+    def state_snapshot(self) -> dict[str, str | bool | None]:
+        """The persistable SAFE_MODE state (the `rehydrate` input format).
+
+        When the controller is not in SAFE_MODE the entry time and reason are reported as None.
+        """
+        if not self._in_safe_mode:
+            return {"in_safe_mode": False, "entered_at_utc": None, "entered_reason": None}
+        return {
+            "in_safe_mode": True,
+            "entered_at_utc": (
+                None if self._entered_at_utc is None else self._entered_at_utc.isoformat()
+            ),
+            "entered_reason": self._entered_reason,
+        }
 
     @property
     def in_safe_mode(self) -> bool:
@@ -341,6 +396,47 @@ class SafeModeController:
 # --------------------------------------------------------------------------- #
 
 _ZERO_TIMEDELTA = timedelta(0)
+
+_STATE_KEYS = frozenset({"in_safe_mode", "entered_at_utc", "entered_reason"})
+
+
+def _parse_state(state: object) -> tuple[bool, datetime | None, str | None]:
+    """Validate a persisted SAFE_MODE mapping (fail closed, `ValueError` on anything off)."""
+    if not isinstance(state, Mapping):
+        raise ValueError(f"SAFE_MODE state must be a mapping, got {type(state).__name__}")
+    if set(state) != _STATE_KEYS:
+        raise ValueError(
+            f"SAFE_MODE state keys differ: unknown={sorted(map(str, set(state) - _STATE_KEYS))} "
+            f"missing={sorted(_STATE_KEYS - set(state))}"
+        )
+    in_safe_mode = state["in_safe_mode"]
+    if not isinstance(in_safe_mode, bool):
+        raise ValueError(f"in_safe_mode must be a bool, got {type(in_safe_mode).__name__}")
+    raw_at = state["entered_at_utc"]
+    reason = state["entered_reason"]
+    if raw_at is None:
+        entered_at: datetime | None = None
+    else:
+        if not isinstance(raw_at, str):
+            raise ValueError(f"entered_at_utc must be ISO-8601 text, got {type(raw_at).__name__}")
+        try:
+            entered_at = datetime.fromisoformat(raw_at)
+        except ValueError:
+            raise ValueError("entered_at_utc is not an ISO-8601 datetime") from None
+        if entered_at.tzinfo is None:
+            raise ValueError("entered_at_utc must be UTC-aware, got naive datetime")
+        if entered_at.utcoffset() != _ZERO_TIMEDELTA:
+            raise ValueError("entered_at_utc must be UTC, not offset-aware")
+    if reason is not None and not isinstance(reason, str):
+        raise ValueError(f"entered_reason must be text or None, got {type(reason).__name__}")
+    if in_safe_mode:
+        if entered_at is None:
+            raise ValueError("in_safe_mode is true but entered_at_utc is missing")
+        if reason is None:
+            raise ValueError("in_safe_mode is true but entered_reason is missing")
+    elif entered_at is not None or reason is not None:
+        raise ValueError("in_safe_mode is false but an entry time or reason is still set")
+    return in_safe_mode, entered_at, reason
 
 
 def _build_payload_json(payload: dict[str, Any]) -> str:
