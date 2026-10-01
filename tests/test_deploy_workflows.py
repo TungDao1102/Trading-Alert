@@ -14,7 +14,12 @@ from pathlib import Path
 import pytest
 
 WORKFLOWS_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows"
-ALL_WORKFLOWS = ("ci.yml",)
+ALL_WORKFLOWS = (
+    "ci.yml",
+    "registry-gate.yml",
+    "research-gate.yml",
+    "paper_freeze_check.yml",
+)
 UV_VERSION = "0.12.21"
 RUNNER = "ubuntu-24.04"
 
