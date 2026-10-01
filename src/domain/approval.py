@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from .enums import ApprovalAction, ApprovalResult
+from .enums import ApprovalAction, ApprovalConsumptionStatus, ApprovalResult
 
 
 def _require_utc_aware(value: datetime, field_name: str) -> None:
@@ -35,8 +35,13 @@ class Approval:
     `status` alone answers state (D-11); NULL `acted_at_utc` means
     "transition never happened".
 
-    `acted_at_utc` and `telegram_message_id` are nullable: NULL means
-    "transition never happened" / "no Telegram message yet".
+    `acted_at_utc`, `consumed_at_utc` and `telegram_message_id` are nullable: NULL
+    means "transition never happened" / "no Telegram message yet".
+
+    Phase 17 (D-16, D-21, research C8/C13): `consumption_status` is the explicit
+    durable consumption state (UNCONSUMED by default, never inferred from
+    `consumed_at_utc`). CONSUMED requires `status` APPROVED and a UTC
+    `consumed_at_utc`; only the execution-state consume transaction sets them.
     """
 
     approval_id: str
@@ -51,6 +56,8 @@ class Approval:
     actor_id: str = ""
     telegram_message_id: str | None = None  # None = "no message yet"
     request_hash: str = ""
+    consumption_status: ApprovalConsumptionStatus = ApprovalConsumptionStatus.UNCONSUMED
+    consumed_at_utc: datetime | None = None  # None = "never consumed" (D-21)
 
     def __post_init__(self) -> None:
         # D-12: UTC-aware datetimes only.
@@ -66,3 +73,13 @@ class Approval:
         if self.status != ApprovalResult.PENDING and self.acted_at_utc is None:
             status_name = getattr(self.status, "value", self.status)
             raise ValueError(f"{status_name} approval must set acted_at_utc")
+        # Phase 17 (D-16, D-21): explicit consumption state coherence.
+        if self.consumed_at_utc is not None:
+            _require_utc_aware(self.consumed_at_utc, "consumed_at_utc")
+        if self.consumption_status == ApprovalConsumptionStatus.CONSUMED:
+            if self.consumed_at_utc is None:
+                raise ValueError("CONSUMED approval must set consumed_at_utc")
+            if self.status != ApprovalResult.APPROVED:
+                raise ValueError("CONSUMED approval must have status APPROVED")
+        elif self.consumed_at_utc is not None:
+            raise ValueError("UNCONSUMED approval must have consumed_at_utc=None")

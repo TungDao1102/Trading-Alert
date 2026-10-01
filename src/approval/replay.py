@@ -46,12 +46,27 @@ if TYPE_CHECKING:
 LookupByTokenHash = Callable[[str], "Approval | None"]
 SaveApproval = Callable[["Approval"], None]
 
+
+class ApprovalAlreadyDecided(Exception):
+    """A conditional decision lost a race: the approval was decided by someone else.
+
+    Raised by any store whose conditional write (UPDATE ... WHERE status = 'PENDING',
+    or a one-decision-per-plan uniqueness arbiter) found the approval already decided
+    (Phase 17 D-17, research C15). `existing` is the STORED approval, so the replay
+    layer resolves to the persisted decision and never returns a locally computed one.
+    """
+
+    def __init__(self, existing: Approval) -> None:
+        super().__init__("approval already decided")
+        self.existing = existing
+
+
 # Per-token in-process locks: two concurrent `resolve_callback` calls
 # for the same token hash serialize on the token's lock so only one
-# performs the PENDING->decided transition. Cross-process races still
-# need a conditional write (UPDATE ... WHERE status='PENDING') at the
-# store layer — the receiver treats a 0-row conditional update as
-# replay-return-existing. (`threading` is imported at the top of the module.)
+# performs the PENDING->decided transition. This is a latency optimization
+# only: correctness comes from the store's conditional write
+# (UPDATE ... WHERE status='PENDING'), whose lost race surfaces as
+# `ApprovalAlreadyDecided` and resolves to the stored approval (D-17).
 _TOKEN_LOCKS: dict[str, _threading.Lock] = {}
 _TOKEN_LOCKS_GUARD = _threading.Lock()
 
@@ -231,12 +246,23 @@ def _resolve_locked(
 
     # Save exactly once. If save raises (e.g., notify failure), the
     # approval stays PENDING — the caller catches the exception.
-    save(new_approval)
+    try:
+        save(new_approval)
+    except ApprovalAlreadyDecided as lost:
+        # Lost a (cross-process) race: the stored decision is the truth (D-17, C15).
+        existing = lost.existing
+        if existing.action == deciding_action and existing.status == new_result:
+            return existing
+        raise ApprovalRejected(
+            reason_code=RejectionReason.INVALIDATED,
+            message="approval already decided with a different outcome",
+        ) from None
 
     return new_approval
 
 
 __all__ = [
+    "ApprovalAlreadyDecided",
     "resolve_callback",
     "LookupByTokenHash",
     "SaveApproval",

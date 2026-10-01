@@ -28,6 +28,7 @@ from src.db.models import (
 from src.domain.approval import Approval
 from src.domain.enums import (
     ApprovalAction,
+    ApprovalConsumptionStatus,
     ApprovalResult,
     OrderStatus,
     PositionStatus,
@@ -177,6 +178,8 @@ def approval_to_row(a: Approval) -> ApprovalRow:
         actor_id=a.actor_id,
         telegram_message_id=a.telegram_message_id,
         request_hash=a.request_hash,
+        consumption_status=a.consumption_status.value,
+        consumed_at_utc=a.consumed_at_utc,
     )
 
 
@@ -200,6 +203,8 @@ def approval_from_row(r: ApprovalRow) -> Approval:
         actor_id=r.actor_id,
         telegram_message_id=r.telegram_message_id,
         request_hash=r.request_hash,
+        consumption_status=ApprovalConsumptionStatus(r.consumption_status),
+        consumed_at_utc=r.consumed_at_utc,
     )
 
 
