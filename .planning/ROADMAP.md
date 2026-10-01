@@ -653,11 +653,11 @@ Plans:
 
 **Audit refs**: F-202, F-404, F-403, F-406, F-411, F-412, F-410, F-126, F-951, F-703, F-603, F-606
 
-**Plans:** 15 plans
+**Plans:** 1/15 plans executed
 
 Plans:
 **Wave 1**
-- [ ] 17-01-PLAN.md — Tracer: durable approval consumption + write-ahead ENTRY intent through migration 0004, store and manager; exactly-one-entry PG proof with negative control; disposable-DB fixtures (W1)
+- [x] 17-01-PLAN.md — Tracer: durable approval consumption + write-ahead ENTRY intent through migration 0004, store and manager; exactly-one-entry PG proof with negative control; disposable-DB fixtures (W1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 17-02-PLAN.md — Schema integrity in 0004: widths, enum/quantity CHECKs, unique and partial unique indexes, RESTRICT FKs, append-only and terminal triggers, snapshot and system-state tables (W2)
@@ -979,7 +979,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
-| 17. Operational Persistence Layer | 0/TBD | Not started | - |
+| 17. Operational Persistence Layer | 1/15 | In Progress|  |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |
 | 19. Execution Plan Binding + Pre-Placement Checks | 0/TBD | Not started | - |
 | 20. Reconcile + SAFE_MODE Hardening + Alerts | 0/TBD | Not started | - |

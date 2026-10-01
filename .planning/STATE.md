@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 17
 current_phase_name: operational-persistence-layer
 status: executing
-stopped_at: Phase 17 context gathered
-last_updated: "2026-10-01T12:04:57.193Z"
+stopped_at: Completed 17-01-PLAN.md
+last_updated: "2026-10-01T12:30:36.815Z"
 last_activity: 2026-10-01
-last_activity_desc: Phase 13.1 execution started
-state_head: bb83ea51b6b2345a71dbf59a4bb53b72ab1ffea1
+last_activity_desc: Phase 17 execution started
+state_head: 0c58ee4c1014a724be92d0db1db4e3e772c36a25
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 109
-  completed_plans: 90
+  completed_plans: 91
 milestone_name: milestone
 ---
 
@@ -26,14 +26,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 13.1 — Deployment & CI
+**Current focus:** Phase 17 — operational-persistence-layer
 
 ## Current Position
 
-Phase: 17 (operational-persistence-layer) — READY TO EXECUTE
-Plan: 12 of 12
+Phase: 17 (operational-persistence-layer) — EXECUTING
+Plan: 2 of 15
 Status: Ready to execute
-Last activity: 2026-10-01 — Phase 13.1 execution started
+Last activity: 2026-10-01 — Phase 17 execution started
 
 Progress: [█░░░░░░░░░] 11%
 
@@ -130,6 +130,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 13.1 P09 | 3h | 3 tasks | 9 files |
 | Phase 13.1 P10 | ~2h | 3 tasks | 10 files |
 | Phase 13.1 P11 | 25min | 3 tasks | 7 files |
+| Phase 17 P01 | 22 min | 3 tasks | 19 files |
 
 ## Accumulated Context
 
@@ -331,6 +332,8 @@ Recent decisions affecting current work:
 - [Phase 13.1]: 13.1-08: upload order is parquet, pg.dump, manifest.json, cryptcheck so a snapshot is complete only after its dependencies exist; retention counts periods that have a snapshot; --init-remote also requires an empty raw bucket
 - [Phase 13.1]: 13.1-09: migrate.sh refuses to start when cutover/pg.dump already exists on either side (append-only rsync would silently reuse stale artifacts); first-tick wait uses new src.ops.cutover advanced subcommand
 - [Phase 13.1]: D050 records Phase 13.1; runbook step tables and pin tables are test-enforced against the repository files
+- [Phase 17]: 17-01 Task 1 auto-resolved to locked: sync SQLAlchemy repositories (D-01) and execution_intents PK (approval_id, role) with OrderRole role values, explicit approvals.consumption_status, UNIQUE(trade_plan_id, role) (D-13, C2, C8, Open Q5); record in D051 — One-way door gated in auto mode per plan; Phases 18-24 and Phase 20 reconciliation bind to these signatures
+- [Phase 17]: 17-01 Pre-placement NO_TRADE never consumes the approval; consumption only immediately before place_entry (research Open Q1); stored-outcome lookup moves ahead of expiry gate in plan 11 — Keeps a retried APPROVE able to re-run gates until placement; revisit in Phase 19
 
 ### Pending Todos
 
@@ -376,6 +379,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-01T10:58:11.394Z
-Stopped at: Phase 17 context gathered
-Resume file: .planning/phases/17-operational-persistence-layer/17-CONTEXT.md
+Last session: 2026-10-01T12:30:36.547Z
+Stopped at: Completed 17-01-PLAN.md
+Resume file: None
