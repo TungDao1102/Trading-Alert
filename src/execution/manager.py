@@ -695,6 +695,20 @@ async def execute_approved_plan(
     # caught here; a crash (any BaseException) must propagate untouched.
     store_failed = False
 
+    def _enter_safe_mode(reason: str) -> None:
+        """Enter SAFE_MODE without letting its audit row abort the protection steps.
+
+        The controller sets its in-memory flag BEFORE journaling, so when the journal
+        itself fails (the same database that just failed) only the audit row is lost.
+        Protection outranks the audit row (D034, 17-REVIEW CR-01): the stop loss and the
+        unprotected-entry cancel must still run. Only `Exception` is caught; a crash
+        (any `BaseException`) propagates untouched.
+        """
+        try:
+            safe_mode_controller.enter_safe_mode(reason=reason, now_utc=now_utc)
+        except Exception:  # noqa: BLE001, S110 — flag already set; only the audit row is lost
+            pass
+
     def _store_write(write: Callable[[], object]) -> bool:
         """Run one post-acknowledgement store write; False means the store failed."""
         nonlocal store_failed
@@ -704,7 +718,7 @@ async def execute_approved_plan(
             write()
         except PersistenceError:
             store_failed = True
-            safe_mode_controller.enter_safe_mode(reason=_DB_FAILURE, now_utc=now_utc)
+            _enter_safe_mode(_DB_FAILURE)
             return False
         return True
 
@@ -755,7 +769,7 @@ async def execute_approved_plan(
         # Fail closed: the entry may or may not exist on the exchange and
         # the probe could not tell. No SL, no retry — SAFE_MODE blocks new
         # entries while reconciliation resolves the truth.
-        safe_mode_controller.enter_safe_mode(reason=_ENTRY_STATE_UNKNOWN, now_utc=now_utc)
+        _enter_safe_mode(_ENTRY_STATE_UNKNOWN)
         _store_write(
             lambda: intent_store.record_result(
                 approval_id=approval.approval_id,
@@ -871,7 +885,7 @@ async def execute_approved_plan(
         # journaled inside `expire_pending_entry` and must not mask the
         # NO_TRADE outcome — SAFE_MODE is already in force and
         # reconciliation resolves any residual exposure.
-        safe_mode_controller.enter_safe_mode(reason=_ENTRY_WITHOUT_PROTECTIVE, now_utc=now_utc)
+        _enter_safe_mode(_ENTRY_WITHOUT_PROTECTIVE)
         try:
             await expire_pending_entry(
                 plan_hash=trade_plan.plan_hash,

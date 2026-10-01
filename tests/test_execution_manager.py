@@ -1664,6 +1664,124 @@ async def test_store_down_and_sl_unconfirmed_still_cancels_the_entry() -> None:
     assert [c["method"] for c in adapter.calls][-1] == "cancel_normal_order"
 
 
+class _StoreDownJournal:
+    """A journal whose `record` always raises `StoreUnavailable` (database outage)."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    def record(self, event: Any) -> None:
+        from src.persistence.errors import StoreUnavailable
+
+        self.attempts += 1
+        raise StoreUnavailable("database unavailable")
+
+
+def _real_controller_with_down_journal() -> tuple[Any, _StoreDownJournal]:
+    """The REAL `SafeModeController` wired to a journal that raises (17-REVIEW CR-01)."""
+    from src.reconcile.safe_mode import SafeModeController
+
+    class _NoOpTruth:
+        async def snapshot_open_normal_orders(self, *, symbol: Any = None) -> list[Any]:
+            return []
+
+        async def snapshot_open_algo_orders(self, *, symbol: Any = None) -> list[Any]:
+            return []
+
+        async def snapshot_positions(self, *, symbol: Any = None) -> list[Any]:
+            return []
+
+    journal = _StoreDownJournal()
+    return SafeModeController(adapter=_NoOpTruth(), journal=journal), journal
+
+
+async def test_cr01_db_outage_after_entry_ack_still_places_the_sl_with_real_controller() -> None:
+    """17-REVIEW CR-01: the real controller journals through the same failing store.
+
+    The controller sets its flag before journaling, so the journal error must not
+    abort the manager before the stop loss is placed.
+    """
+    from src.execution.order_ids import derive_algo_client_id
+    from src.persistence.errors import StoreUnavailable
+
+    from tests.support.intent_store_fakes import FailingIntentStore
+
+    case_input = _load_input()
+    adapter = FakeExecutionAdapter()
+    controller, journal = _real_controller_with_down_journal()
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=controller,
+        intent_store=FailingIntentStore("record_result", StoreUnavailable("down"), role="ENTRY"),
+    )
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    assert controller.in_safe_mode is True
+    assert journal.attempts >= 1  # the audit row WAS attempted and lost
+    sl_calls = [c for c in adapter.calls if c["method"] == "place_algo_protective"]
+    assert len(sl_calls) == 1
+    assert sl_calls[0]["kwargs"]["client_algo_id"] == derive_algo_client_id(
+        plan_hash=case_input["plan_hash"], role="STOP_LOSS"
+    )
+
+
+async def test_cr01_db_outage_at_sl_intent_still_places_the_sl_with_real_controller() -> None:
+    from src.persistence.errors import StoreUnavailable
+
+    from tests.support.intent_store_fakes import FailingIntentStore
+
+    adapter = FakeExecutionAdapter()
+    controller, _journal = _real_controller_with_down_journal()
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=controller,
+        intent_store=FailingIntentStore("record_protective_intent", StoreUnavailable("down")),
+    )
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    assert controller.in_safe_mode is True
+    assert len([c for c in adapter.calls if c["method"] == "place_algo_protective"]) == 1
+
+
+async def test_cr01_failing_journal_at_entry_state_unknown_still_records_and_finalizes() -> None:
+    """17-REVIEW CR-01 (call site ENTRY_STATE_UNKNOWN): the audit-row failure must not
+    skip the intent bookkeeping that follows the SAFE_MODE entry."""
+    from src.domain.enums import ExecutionIntentStatus
+
+    case_input = _load_input()
+    store = InMemoryExecutionIntentStore()
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.append(TimeoutError("status unknown"))
+    adapter.query_exceptions.append(RuntimeError("-2013 Order does not exist"))
+    controller, journal = _real_controller_with_down_journal()
+
+    outcome = await _run_plan(adapter, safe_mode_controller=controller, intent_store=store)
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    assert controller.in_safe_mode is True
+    assert journal.attempts >= 1
+    entry = store.get_entry(approval_id=case_input["approval_id"])
+    assert entry is not None
+    assert entry.intent_status == ExecutionIntentStatus.UNKNOWN
+    assert entry.outcome is not None
+    assert entry.outcome.reason_code == "RECONCILIATION_REQUIRED"
+    assert "place_algo_protective" not in [c["method"] for c in adapter.calls]
+
+
+async def test_cr01_failing_journal_at_entry_without_protective_still_cancels_the_entry() -> None:
+    """17-REVIEW CR-01 (call site ENTRY_WITHOUT_PROTECTIVE): the unprotected entry must
+    still be cancelled when the SAFE_MODE audit row cannot be written."""
+    adapter = FakeExecutionAdapter(algo_response={"algo_status": "REJECTED"})
+    controller, journal = _real_controller_with_down_journal()
+
+    outcome = await _run_plan(adapter, safe_mode_controller=controller)
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "ENTRY_WITHOUT_PROTECTIVE")
+    assert controller.in_safe_mode is True
+    assert journal.attempts >= 1
+    assert [c["method"] for c in adapter.calls][-1] == "cancel_normal_order"
+
+
 async def test_unconfirmed_sl_leaves_the_stop_loss_row_unknown() -> None:
     from src.domain.enums import ExecutionIntentStatus
 
