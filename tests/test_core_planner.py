@@ -27,7 +27,7 @@ import pytest
 from src.core.features import compute_features
 from src.core.planner import plan
 from src.core.types import AccountState, Candle, PlanResult
-from src.domain.canonical import sha256_hex
+from src.domain.canonical import canonical_decimal_text, quantize_for_storage, sha256_hex
 from src.domain.enums import RejectionReason, TradePlanStatus
 from src.domain.ids import derive_child_id
 from src.domain.registry import ParameterSet, load_parameter_set
@@ -271,10 +271,12 @@ def test_entry_zone_math_long(
     expected_entry_min = support_lower - entry_buffer_atr * atr
     expected_stop = swing_low - sl_buffer_atr * atr
 
+    # D-12: the persisted prices are the geometry rounded to the NUMERIC(38,18)
+    # scale (ROUND_HALF_EVEN), so they equal the quantized expected values.
     tp = plan_result.trade_plan
-    assert tp.entry_max_price == expected_entry_max
-    assert tp.entry_min_price == expected_entry_min
-    assert tp.stop_loss_price == expected_stop
+    assert tp.entry_max_price == quantize_for_storage(expected_entry_max)
+    assert tp.entry_min_price == quantize_for_storage(expected_entry_min)
+    assert tp.stop_loss_price == quantize_for_storage(expected_stop)
 
 
 # --------------------------------------------------------------------------- #
@@ -528,7 +530,7 @@ def test_plan_hash_recomputable_from_payload(
     parameter_set: ParameterSet,
     account_state: AccountState,
 ) -> None:
-    """Beh. 3a: plan_hash equals sha256_hex over the documented payload."""
+    """Beh. 3a: plan_hash equals sha256_hex over the stored-form payload (D-12)."""
     plan_result = _get_signal_and_plan(setup_candles, context_candles, parameter_set, account_state)
     assert isinstance(plan_result, PlanResult)
     assert not plan_result.is_no_trade
@@ -538,15 +540,72 @@ def test_plan_hash_recomputable_from_payload(
     expected_hash = sha256_hex(
         {
             "signal_id": tp.signal_id,
-            "entry_min_price": tp.entry_min_price,
-            "entry_max_price": tp.entry_max_price,
-            "stop_loss_price": tp.stop_loss_price,
+            "entry_min_price": canonical_decimal_text(tp.entry_min_price),
+            "entry_max_price": canonical_decimal_text(tp.entry_max_price),
+            "stop_loss_price": canonical_decimal_text(tp.stop_loss_price),
             "take_profit_json": tp.take_profit_json,
             "invalidation_rule_json": tp.invalidation_rule_json,
             "expiry_utc": tp.expiry_utc,
         }
     )
     assert tp.plan_hash == expected_hash
+
+
+def test_persisted_decimals_fit_numeric_38_18(
+    setup_candles: list[Candle],
+    context_candles: list[Candle],
+    parameter_set: ParameterSet,
+    account_state: AccountState,
+) -> None:
+    """D-12: every persisted Decimal and every TP price has at most 18 fractional digits."""
+    plan_result = _get_signal_and_plan(setup_candles, context_candles, parameter_set, account_state)
+    assert plan_result.trade_plan is not None
+    tp = plan_result.trade_plan
+    persisted = {
+        "entry_min_price": tp.entry_min_price,
+        "entry_max_price": tp.entry_max_price,
+        "stop_loss_price": tp.stop_loss_price,
+        "risk_rate": tp.risk_rate,
+        "risk_budget": tp.risk_budget,
+        "suggested_quantity": tp.suggested_quantity,
+        "quantity_before_rounding": tp.quantity_before_rounding,
+        "quantity_after_rounding": tp.quantity_after_rounding,
+    }
+    tp_prices = json.loads(tp.take_profit_json)
+    persisted["tp1"] = Decimal(tp_prices["tp1"])
+    persisted["tp2"] = Decimal(tp_prices["tp2"])
+    for name, value in persisted.items():
+        quantized = quantize_for_storage(value)
+        assert value == quantized, name
+        exponent = value.as_tuple().exponent
+        assert isinstance(exponent, int)
+        assert exponent >= -18, f"{name} has more than 18 fractional digits: {value}"
+
+
+def test_plan_hash_is_spelling_invariant() -> None:
+    """D-12: 50000, 50000.0 and the scale-18 read-back spelling hash identically."""
+    from src.core.planner import _plan_hash
+
+    base = dict(
+        signal_id="sig",
+        take_profit_json='{"tp1":"1"}',
+        invalidation_rule_json='{"basis":"CANDLE_CLOSE"}',
+        expiry_utc=datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
+    )
+    hashes = {
+        _plan_hash(
+            entry_min_price=Decimal(a),
+            entry_max_price=Decimal(b),
+            stop_loss_price=Decimal(c),
+            **base,
+        )
+        for a, b, c in [
+            ("50000", "51000", "49000"),
+            ("50000.0", "51000.0", "49000.0"),
+            ("50000.000000000000000000", "51000.000000000000000000", "49000.000000000000000000"),
+        ]
+    }
+    assert len(hashes) == 1
 
 
 def test_trade_plan_id_derives_from_signal_id(
