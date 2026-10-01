@@ -570,10 +570,10 @@ def test_non_finite_decimal_is_a_precision_error(store: PgTradingEntityStore) ->
 def test_integer_part_overflow_still_raises_a_database_error(
     store: PgTradingEntityStore,
 ) -> None:
-    from sqlalchemy.exc import DataError
+    from src.persistence.errors import StoreFailure
 
     store.insert_signal(signal_entity(1))
-    with pytest.raises(DataError):
+    with pytest.raises(StoreFailure):
         store.insert_trade_plan(plan_entity(1, 1, entry_min_price=Decimal(10) ** 21))
 
 

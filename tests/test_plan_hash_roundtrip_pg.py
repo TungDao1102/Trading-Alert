@@ -12,7 +12,7 @@ recomputes `_plan_hash` from the read-back fields:
   - every read-back Decimal equals the original, and its canonical text equals the original's;
   - the three plans pinned in `tests/fixtures/phase4/expected_plans.json` have the pinned hash;
   - a plan whose entry price carries 19 fractional digits is refused with `PrecisionError`
-    (the guard), while an integer-part overflow still raises the PostgreSQL `DataError`.
+    (the guard), while an integer-part overflow is a typed `StoreFailure` (17-REVIEW WR-01).
 
 If the hash test fails, the defect is in plan 17-05's quantization or in the store, and must be
 reported, not masked.
@@ -28,7 +28,6 @@ from typing import Any
 
 import pytest
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import DataError
 from src.core.planner import _plan_hash, plan
 from src.core.strategy import evaluate
 from src.core.types import AccountState, Candle, MarketSnapshot
@@ -38,7 +37,7 @@ from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
 from src.persistence.engine import make_sync_engine
 from src.persistence.entities import PgTradingEntityStore
-from src.persistence.errors import PrecisionError
+from src.persistence.errors import PrecisionError, StoreFailure
 from src.persistence.uow import OperationalDatabase
 
 from tests.test_core_planner import (
@@ -284,6 +283,6 @@ def test_integer_part_overflow_still_raises_a_database_error(
 ) -> None:
     signal, original = planner_outputs[("range-mr-short", "10000.00")]
     store.insert_signal(signal)
-    with pytest.raises(DataError):
+    with pytest.raises(StoreFailure):
         store.insert_trade_plan(replace(original, entry_max_price=Decimal(10) ** 21))
     assert store.get_trade_plan(original.trade_plan_id) is None

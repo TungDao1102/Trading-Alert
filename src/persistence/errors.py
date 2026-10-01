@@ -23,6 +23,15 @@ class StoreUnavailable(PersistenceError):
     """
 
 
+class StoreFailure(PersistenceError):
+    """PostgreSQL answered with an error that is not a connection loss or a constraint hit.
+
+    Covers a read-only transaction after a failover (`InternalError`), a trigger
+    `RAISE EXCEPTION` (`ProgrammingError`) and an out-of-range value (`DataError`).
+    The message carries exception type names only, never SQL, parameters or a URL.
+    """
+
+
 class SessionTimeZoneNotUtc(PersistenceError):
     """A pooled connection reported a TimeZone other than UTC (F-406, Pitfall 14)."""
 
