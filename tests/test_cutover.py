@@ -489,3 +489,44 @@ def test_report_window_end_before_window_start_is_a_usage_error(tmp_path: Path) 
         tmp_path, old_root, new_root, old_wm, dict(old_wm), "--window-end", "2026-10-01T09:00:00Z"
     )
     assert rc == 2
+
+
+# --- advanced: the migration script's "first new tick" probe (plan 09) ----------------------
+
+
+def _wm_files(tmp_path: Path, old: dict[str, str], new: dict[str, str]) -> list[str]:
+    old_f, new_f = tmp_path / "wm-old.json", tmp_path / "wm-new.json"
+    old_f.write_text(json.dumps(old), encoding="utf-8")
+    new_f.write_text(json.dumps(new), encoding="utf-8")
+    return ["--old-watermarks", str(old_f), "--new-watermarks", str(new_f)]
+
+
+def test_advanced_exits_zero_only_when_every_old_oi_watermark_moved(tmp_path: Path) -> None:
+    old = {"BTCUSDT|oi": "2026-10-01T10:00:00Z", "ETHUSDT|oi": "2026-10-01T10:00:00Z"}
+    both = {"BTCUSDT|oi": "2026-10-01T10:05:00Z", "ETHUSDT|oi": "2026-10-01T10:05:00Z"}
+    one = {"BTCUSDT|oi": "2026-10-01T10:05:00Z", "ETHUSDT|oi": "2026-10-01T10:00:00Z"}
+    assert cutover.main(["advanced", *_wm_files(tmp_path, old, both)]) == 0
+    assert cutover.main(["advanced", *_wm_files(tmp_path, old, one)]) == 1
+    assert cutover.main(["advanced", *_wm_files(tmp_path, old, old)]) == 1
+
+
+def test_advanced_ignores_other_data_classes_and_treats_a_missing_row_as_not_yet(
+    tmp_path: Path,
+) -> None:
+    old = {"BTCUSDT|oi": "2026-10-01T10:00:00Z", "BTCUSDT|funding": "2026-10-01T08:00:00Z"}
+    moved = {"BTCUSDT|oi": "2026-10-01T10:05:00Z", "BTCUSDT|funding": "2026-10-01T08:00:00Z"}
+    assert cutover.main(["advanced", *_wm_files(tmp_path, old, moved)]) == 0
+    assert cutover.main(["advanced", *_wm_files(tmp_path, old, {})]) == 1
+
+
+def test_advanced_unreadable_input_is_a_usage_error_never_not_yet(tmp_path: Path) -> None:
+    rc = cutover.main(
+        [
+            "advanced",
+            "--old-watermarks",
+            str(tmp_path / "missing-a"),
+            "--new-watermarks",
+            str(tmp_path / "missing-b"),
+        ]
+    )
+    assert rc == 2

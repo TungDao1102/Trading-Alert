@@ -9,10 +9,14 @@ host before the stop and on the NEW host after the start, then runs ``report``.
   python -m src.ops.cutover report --old-fingerprint F --new-fingerprint F
         --old-watermarks F --new-watermarks F --raw-root R [--max-gap-minutes 60]
         [--window-end ISO] [--json-out F]
+  python -m src.ops.cutover advanced --old-watermarks F --new-watermarks F
 
 Exit codes of ``report``: 0 clean, 1 data loss (a missing or changed old file, a lost
 or regressed watermark row), 3 OI gap above the threshold, 2 usage or input errors.
 Data loss outranks the gap.
+
+``advanced`` is the migration script's "first new tick" probe: exit 0 when every old OI
+watermark has moved strictly forward in the new snapshot, 1 while one has not, 2 on input errors.
 
 Two fingerprints are compared as sets of ``(path, sha256)``, never by byte counts.
 The module imports no strategy code and never prints a database URL: errors print
@@ -446,6 +450,22 @@ def _cmd_watermarks(args: argparse.Namespace) -> int:
     return EXIT_CLEAN
 
 
+def oi_advanced(old: Mapping[str, str], new: Mapping[str, str]) -> bool:
+    """True when every old ``<SYMBOL>|oi`` watermark moved strictly forward in ``new``."""
+    suffix = f"|{_OI_DATA_CLASS}"
+    return all(
+        key in new and _parse_iso_utc(new[key]) > _parse_iso_utc(old[key])
+        for key in old
+        if key.endswith(suffix)
+    )
+
+
+def _cmd_advanced(args: argparse.Namespace) -> int:
+    old = _read_map(Path(args.old_watermarks))
+    new = _read_map(Path(args.new_watermarks))
+    return EXIT_CLEAN if oi_advanced(old, new) else EXIT_DATA_LOSS
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     report = build_report(
         _read_map(Path(args.old_fingerprint)),
@@ -486,6 +506,11 @@ def _build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--window-end", default=None)
     rp.add_argument("--json-out", default=None)
     rp.set_defaults(func=_cmd_report)
+
+    adv = sub.add_parser("advanced", help="exit 0 once every old OI watermark moved forward")
+    adv.add_argument("--old-watermarks", required=True)
+    adv.add_argument("--new-watermarks", required=True)
+    adv.set_defaults(func=_cmd_advanced)
     return parser
 
 
