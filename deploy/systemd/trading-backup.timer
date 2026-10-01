@@ -1,0 +1,13 @@
+# Daily backup at 03:15 UTC (13.1-10, D-12); a persistent timer runs a missed backup after downtime;
+# the randomised delay keeps several hosts from hitting the provider in the same second.
+[Unit]
+Description=Trading stack: daily backup timer
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 UTC
+Persistent=true
+RandomizedDelaySec=5m
+Unit=trading-backup.service
+
+[Install]
+WantedBy=timers.target

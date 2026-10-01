@@ -94,3 +94,14 @@ write_if_changed() {
   chmod "$mode" "$tmp"
   mv -f "$tmp" "$path"
 }
+
+# compose_init: sets the COMPOSE array to this checkout's docker compose invocation.
+# COMPOSE_PROJECT_NAME is read by compose itself; TRADING_ENV_FILE (another env file, as used by
+# the docker tests to run several projects from one checkout) must also feed interpolation, so it
+# is passed as --env-file as well. Nothing here ever prints the file.
+compose_init() {
+  COMPOSE=(docker compose)
+  if [[ -n ${TRADING_ENV_FILE:-} ]]; then
+    COMPOSE+=(--env-file "$TRADING_ENV_FILE")
+  fi
+}
