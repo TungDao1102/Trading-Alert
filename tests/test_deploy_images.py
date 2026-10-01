@@ -152,3 +152,103 @@ def test_runtime_user_is_the_fixed_uid() -> None:
     tail = logical[runtime_start:]
     assert "USER 10001" in tail
     assert tail.index("USER 10001") < next(i for i, ln in enumerate(tail) if ln.startswith("CMD"))
+
+
+# --- ops target and build context (13.1-03 task 3) ------------------------------------------
+
+DOCKERIGNORE = REPO_ROOT / ".dockerignore"
+PGDG_FINGERPRINT = "B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8"
+RCLONE_IMAGE = (
+    "rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5"
+)
+
+
+def _ops_stage() -> list[str]:
+    logical = _logical_lines()
+    start = next(i for i, ln in enumerate(logical) if re.search(r"\bAS ops$", ln, re.IGNORECASE))
+    return logical[start:]
+
+
+def test_rclone_stage_is_pinned_and_declared_before_runtime() -> None:
+    lines = _lines()
+    rclone = next(i for i, ln in enumerate(lines) if ln.startswith(f"FROM {RCLONE_IMAGE} AS "))
+    runtime = next(i for i, ln in enumerate(lines) if re.search(r"\bAS runtime$", ln))
+    assert rclone < runtime
+    assert lines[rclone].endswith(" AS rclonebin")
+
+
+def test_ops_stage_extends_runtime_and_returns_to_the_unprivileged_user() -> None:
+    stage = _ops_stage()
+    assert stage[0] == "FROM runtime AS ops"
+    users = [ln for ln in stage if ln.startswith("USER ")]
+    assert users == ["USER root", "USER 10001"]
+    # The ops stage ends unprivileged and must not redefine the runtime probe or command.
+    assert not any(ln.startswith(("HEALTHCHECK", "CMD", "ENTRYPOINT")) for ln in stage)
+
+
+def test_ops_stage_copies_rclone_and_installs_the_toolbox() -> None:
+    stage = "\n".join(_ops_stage())
+    assert "COPY --from=rclonebin /usr/local/bin/rclone /usr/local/bin/rclone" in stage
+    for package in ("rsync", "openssh-client", "postgresql-client-17", "gnupg", "ca-certificates"):
+        assert package in stage, package
+    assert "apt-get install -y --no-install-recommends" in stage
+    assert "rm -rf /var/lib/apt/lists/*" in stage
+
+
+def test_ops_stage_verifies_the_pgdg_key_fingerprint_during_the_build() -> None:
+    stage = "\n".join(_ops_stage())
+    assert "https://www.postgresql.org/media/keys/ACCC4CF8.asc" in stage
+    assert "gpg --show-keys --with-colons" in stage
+    assert PGDG_FINGERPRINT in stage
+    assert "signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc" in stage
+    # The fingerprint comparison must come before the repository is added and apt is updated.
+    assert stage.index(PGDG_FINGERPRINT) < stage.index("pgdg.list")
+
+
+def test_ops_stage_documents_the_floating_client_exception() -> None:
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    assert "exception to D-05" in text
+
+
+def test_universe_copy_still_occurs_exactly_once() -> None:
+    copy_line = "COPY docs/research/universe ./docs/research/universe"
+    assert _lines().count(copy_line) == 1
+    assert not any(ln.startswith("RUN useradd") for ln in _ops_stage())
+
+
+def test_dockerignore_keeps_secrets_and_state_out_of_the_build_context() -> None:
+    entries = [
+        ln.strip()
+        for ln in DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+        if ln.strip() and not ln.strip().startswith("#")
+    ]
+    for required in (
+        ".env",
+        ".env.*",
+        "!.env.example",
+        ".git",
+        ".venv",
+        "data",
+        "logs",
+        "backup",
+        ".planning",
+        ".gsd",
+        ".omo",
+        ".codegraph",
+        "__pycache__",
+        "tests",
+    ):
+        assert required in entries, f"{required} missing from .dockerignore"
+    # The negation must come after the pattern it excepts, or it has no effect.
+    assert entries.index(".env.*") < entries.index("!.env.example")
+    assert any(entry.endswith("_cache") or entry.endswith("cache") for entry in entries)
+
+
+def test_dockerignore_does_not_exclude_what_the_image_copies() -> None:
+    entries = {
+        ln.strip()
+        for ln in DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+        if ln.strip() and not ln.strip().startswith("#")
+    }
+    for needed in ("src", "scripts", "alembic.ini", "pyproject.toml", "uv.lock", "docs"):
+        assert needed not in entries, f"{needed} is COPY'd by the Dockerfile"

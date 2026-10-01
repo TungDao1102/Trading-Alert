@@ -6,10 +6,13 @@
 #
 # Targets:
 #   runtime  collector / paper / live (one image, different commands)
-#   ops      runtime plus the backup/restore/cutover toolbox (added below)
+#   ops      runtime plus the backup/restore/cutover toolbox (pg client 17, rclone, rsync, ssh)
 
 # uv binary only; never pip-install uv. Pinned to the same version CI uses.
 FROM ghcr.io/astral-sh/uv:0.12.21@sha256:a7aed3216253ee804de3e2d8afa5073baa1a177335345d43845cd4165e43b711 AS uvbin
+
+# Static rclone binary (D-12) for the ops target only; pinned like every other base.
+FROM rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5 AS rclonebin
 
 FROM python:3.13.15-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS runtime
 
@@ -56,3 +59,26 @@ HEALTHCHECK --interval=60s --timeout=15s --start-period=6m --retries=3 \
 
 # Exec form, venv interpreter, no `uv run` at runtime (it would re-resolve and may sync).
 CMD ["/app/.venv/bin/python", "-m", "src.data.collector"]
+
+# Backup / restore / cutover toolbox. Extends runtime, so the application code, venv and
+# UID are identical; it adds only OS tools. Root is used for apt only, then dropped.
+FROM runtime AS ops
+USER root
+COPY --from=rclonebin /usr/local/bin/rclone /usr/local/bin/rclone
+# Debian bookworm ships PostgreSQL client 15 and pg_dump refuses a newer server, so the
+# client comes from the PGDG repository. The key is fetched over https and its fingerprint
+# is checked before the repository is added; the build fails on any mismatch (T-13.1-14).
+# The client floats within major 17 on purpose: PGDG removes superseded minor versions from
+# its live repository, so an exact version pin would break rebuilds. This is the one
+# conscious exception to D-05 (exact pins); the digest-pinned base images still apply.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl gnupg rsync openssh-client \
+    && install -d /usr/share/postgresql-common/pgdg \
+    && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && [ "$(gpg --show-keys --with-colons /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc | awk -F: '$1 == "fpr" {print $10; exit}')" = "B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8" ] \
+    && . /etc/os-release \
+    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-17 \
+    && rm -rf /var/lib/apt/lists/*
+USER 10001
