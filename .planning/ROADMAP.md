@@ -534,7 +534,7 @@ Plans:
 
 **Audit refs**: F-101, F-605, F-705, F-708, F-709, F-108, F-910, D042
 
-**Plans:** 3/12 plans executed
+**Plans:** 4/12 plans executed
 
 Plans:
 **Wave 1**
@@ -543,7 +543,7 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 - [x] 13.1-02-PLAN.md — CI workflow ci.yml (test, lint, types, docker jobs) and SHA-pinned actions in all four workflows
 - [x] 13.1-03-PLAN.md — Pinned Dockerfile (runtime and ops targets, venv HEALTHCHECK, owned mount points) and one compose stack with profiles, localhost-only PostgreSQL, db-upgrade
-- [ ] 13.1-04-PLAN.md — Secret redaction layer (structlog, stdlib, excepthooks, httpx) wired into collector and backfill; credential and backup variable names in .env.example
+- [x] 13.1-04-PLAN.md — Secret redaction layer (structlog, stdlib, excepthooks, httpx) wired into collector and backfill; credential and backup variable names in .env.example
 - [ ] 13.1-05-PLAN.md — deploy/lib.sh and idempotent deploy/bootstrap.sh with the anti lock-out guard; LF enforcement and script hygiene gate
 
 **Wave 3** *(blocked on Wave 2 completion)*
@@ -952,7 +952,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 11. Decision Alignment (docs + params) | 8/8 | In Progress|  |
 | 12. Fee + Cost Model Correctness | 11/11 | Complete    | 2026-09-30 |
 | 13. Research Data Foundation Fixes | 11/13 | In Progress|  |
-| 13.1. Deployment & CI | 3/12 | In Progress|  |
+| 13.1. Deployment & CI | 4/12 | In Progress|  |
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
