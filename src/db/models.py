@@ -39,6 +39,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import (
     Boolean,
@@ -895,6 +896,18 @@ class SystemStateEventRow(Base):
 _ENGINE_CACHE: dict[str, AsyncEngine] = {}
 
 
+def _utc_connect_args(database_url: str) -> dict[str, Any]:
+    """Driver connect args that pin every session to `TimeZone=UTC` (F-406).
+
+    psycopg returns `timestamptz` in the session zone and the domain constructors
+    reject non-UTC offsets, so a database whose default zone is not UTC must not leak
+    into application sessions.
+    """
+    if "+asyncpg" in database_url:
+        return {"server_settings": {"timezone": "UTC"}}
+    return {"options": "-c timezone=UTC"}
+
+
 def make_engine(database_url: str) -> AsyncEngine:
     """Return the shared async engine for `database_url`.
 
@@ -902,7 +915,8 @@ def make_engine(database_url: str) -> AsyncEngine:
     scheme, normalized to `+psycopg`); the synchronous form remains the
     contract for Alembic (env.py). The resolved URL must name an async
     driver — handing a sync-scheme string to `create_async_engine`
-    without validation is refused loudly.
+    without validation is refused loudly. Every session is pinned to
+    `timezone=UTC` (F-406), whatever the database default is.
     """
     if database_url.startswith("postgresql://"):
         database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
@@ -912,7 +926,12 @@ def make_engine(database_url: str) -> AsyncEngine:
             "(expected postgresql+psycopg:// or postgresql+asyncpg://)"
         )
     if database_url not in _ENGINE_CACHE:
-        _ENGINE_CACHE[database_url] = create_async_engine(database_url, future=True, echo=False)
+        _ENGINE_CACHE[database_url] = create_async_engine(
+            database_url,
+            future=True,
+            echo=False,
+            connect_args=_utc_connect_args(database_url),
+        )
     return _ENGINE_CACHE[database_url]
 
 
