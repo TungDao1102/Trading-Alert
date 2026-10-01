@@ -1,0 +1,289 @@
+"""Real planner output through PostgreSQL: plan_hash reproduction and the precision guard (17-10).
+
+The plan_hash is what an approval re-verifies before an order is placed (APRV-02), so a plan that
+leaves the database even one digit different from the plan that was approved would silently
+break the approval binding (F-410). This module takes plans from the REAL planner (the phase 4
+fixture windows: trend-pullback from `tests/fixtures/phase4/candles.csv`, breakout-retest and
+range-mr in both directions), inserts them through `PgTradingEntityStore`, reads them back and
+recomputes `_plan_hash` from the read-back fields:
+
+  - the recomputed hash equals the stored hash for every plan and for several account sizes (the
+    quantity columns take values with up to 18 fractional digits);
+  - every read-back Decimal equals the original, and its canonical text equals the original's;
+  - the three plans pinned in `tests/fixtures/phase4/expected_plans.json` have the pinned hash;
+  - a plan whose entry price carries 19 fractional digits is refused with `PrecisionError`
+    (the guard), while an integer-part overflow still raises the PostgreSQL `DataError`.
+
+If the hash test fails, the defect is in plan 17-05's quantization or in the store, and must be
+reported, not masked.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from dataclasses import fields, replace
+from datetime import timedelta
+from decimal import Decimal
+from typing import Any
+
+import pytest
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DataError
+from src.core.planner import _plan_hash, plan
+from src.core.strategy import evaluate
+from src.core.types import AccountState, Candle, MarketSnapshot
+from src.domain.canonical import canonical_decimal_text
+from src.domain.registry import load_parameter_set
+from src.domain.signal import Signal
+from src.domain.trade_plan import TradePlan
+from src.persistence.engine import make_sync_engine
+from src.persistence.entities import PgTradingEntityStore
+from src.persistence.errors import PrecisionError
+from src.persistence.uow import OperationalDatabase
+
+from tests.test_core_planner import (
+    _build_candles_from_csv,
+    _first_gap_index,
+    _with_support_touch_last_bar,
+)
+from tests.test_core_strategy_breakout_retest import (
+    _build_1h_candles_breakout_retest_long,
+    _build_1h_candles_breakout_retest_short,
+    _build_4h_candles_bearish,
+    _build_4h_candles_bullish,
+)
+from tests.test_core_strategy_range_mr import (
+    _build_1h_candles_range_mr_long,
+    _build_1h_candles_range_mr_short,
+    _build_4h_candles_neutral,
+)
+
+EQUITIES = ("10000.00", "777.77", "1234.5678")
+DECIMAL_FIELDS = tuple(
+    f.name for f in fields(TradePlan) if f.type in ("Decimal", Decimal)
+)  # eight persisted NUMERIC columns of the plan
+
+
+def _csv_windows(rows: list[dict[str, str]]) -> tuple[list[Candle], list[Candle]]:
+    """Trend-pullback window: first gap-free block of the phase 4 CSV (as test_core_planner)."""
+    rows_1h = [r for r in rows if r["timeframe"] == "1h"]
+    rows_4h = [r for r in rows if r["timeframe"] == "4h"]
+    setup = _with_support_touch_last_bar(
+        _build_candles_from_csv(rows_1h[: _first_gap_index(rows_1h, "1h")])
+    )
+    context = _build_candles_from_csv(rows_4h[: _first_gap_index(rows_4h, "4h")])
+    return setup, context
+
+
+def _windows(rows: list[dict[str, str]]) -> dict[str, tuple[str, list[Candle], list[Candle]]]:
+    trend_setup, trend_context = _csv_windows(rows)
+    return {
+        "trend-pullback": ("trend-pullback", trend_setup, trend_context),
+        "breakout-retest-long": (
+            "breakout-retest",
+            _build_1h_candles_breakout_retest_long(),
+            _build_4h_candles_bullish(),
+        ),
+        "breakout-retest-short": (
+            "breakout-retest",
+            _build_1h_candles_breakout_retest_short(),
+            _build_4h_candles_bearish(),
+        ),
+        "range-mr-long": (
+            "range-mr",
+            _build_1h_candles_range_mr_long(),
+            _build_4h_candles_neutral(),
+        ),
+        "range-mr-short": (
+            "range-mr",
+            _build_1h_candles_range_mr_short(),
+            _build_4h_candles_neutral(),
+        ),
+    }
+
+
+def _plan_for(
+    strategy_id: str, setup: list[Candle], context: list[Candle], equity: str
+) -> tuple[Signal, TradePlan]:
+    parameter_set = load_parameter_set(strategy_id, "baseline-v1")
+    account = AccountState(equity=Decimal(equity), risk_rate=Decimal("0.005"))
+    result = evaluate(
+        snapshot=MarketSnapshot(
+            symbol="BTCUSDT",
+            setup_candles=setup,
+            context_candles=context,
+            source_timeframe="1h",
+        ),
+        account_state=account,
+        strategy_version=parameter_set.strategy_version,
+        parameter_set=parameter_set,
+    )
+    assert not result.is_no_trade and result.signal is not None, result.reason_code
+    planned = plan(
+        signal=result.signal,
+        setup_candles=setup,
+        parameter_set=parameter_set,
+        account_state=account,
+        created_at_utc=result.signal.source_candle_close_utc + timedelta(hours=1),
+    )
+    assert not planned.is_no_trade and planned.trade_plan is not None, planned.reason_code
+    return result.signal, planned.trade_plan
+
+
+@pytest.fixture(scope="module")
+def planner_outputs(
+    phase4_candles: list[dict[str, str]],
+) -> dict[tuple[str, str], tuple[Signal, TradePlan]]:
+    """Every (window, equity) combination run through the real planner once."""
+    outputs: dict[tuple[str, str], tuple[Signal, TradePlan]] = {}
+    for name, (strategy_id, setup, context) in _windows(phase4_candles).items():
+        for equity in EQUITIES:
+            outputs[(name, equity)] = _plan_for(strategy_id, setup, context, equity)
+    return outputs
+
+
+CASES = [
+    (name, equity)
+    for name in (
+        "trend-pullback",
+        "breakout-retest-long",
+        "breakout-retest-short",
+        "range-mr-long",
+        "range-mr-short",
+    )
+    for equity in EQUITIES
+]
+
+
+@pytest.fixture
+def engine(pg_db: str) -> Iterator[Engine]:
+    eng = make_sync_engine(pg_db)
+    try:
+        yield eng
+    finally:
+        eng.dispose()
+
+
+@pytest.fixture
+def store(engine: Engine) -> PgTradingEntityStore:
+    return PgTradingEntityStore(OperationalDatabase(engine))
+
+
+def _recomputed_hash(stored: TradePlan) -> str:
+    return _plan_hash(
+        signal_id=stored.signal_id,
+        entry_min_price=stored.entry_min_price,
+        entry_max_price=stored.entry_max_price,
+        stop_loss_price=stored.stop_loss_price,
+        take_profit_json=stored.take_profit_json,
+        invalidation_rule_json=stored.invalidation_rule_json,
+        expiry_utc=stored.expiry_utc,
+    )
+
+
+@pytest.mark.parametrize(("name", "equity"), CASES, ids=[f"{n}@{e}" for n, e in CASES])
+def test_real_plan_round_trips_and_reproduces_its_plan_hash(
+    store: PgTradingEntityStore,
+    planner_outputs: dict[tuple[str, str], tuple[Signal, TradePlan]],
+    name: str,
+    equity: str,
+) -> None:
+    signal, original = planner_outputs[(name, equity)]
+    store.insert_signal(signal)
+    store.insert_trade_plan(original)
+
+    stored = store.get_trade_plan(original.trade_plan_id)
+    assert stored is not None
+    assert stored == original
+    # The stored hash is the planner's hash, and recomputing it from the READ-BACK fields
+    # reproduces it: PostgreSQL changed no hashed value (F-410, D-12).
+    assert stored.plan_hash == original.plan_hash
+    assert _recomputed_hash(stored) == stored.plan_hash
+    assert _recomputed_hash(original) == original.plan_hash
+    for field_name in DECIMAL_FIELDS:
+        read_back = getattr(stored, field_name)
+        assert read_back == getattr(original, field_name), field_name
+        assert canonical_decimal_text(read_back) == canonical_decimal_text(
+            getattr(original, field_name)
+        ), field_name
+    assert stored.take_profit_json == original.take_profit_json
+    assert stored.invalidation_rule_json == original.invalidation_rule_json
+    assert store.get_signal(signal.signal_id) == signal
+
+
+def test_decimal_field_list_is_the_eight_persisted_plan_columns() -> None:
+    assert sorted(DECIMAL_FIELDS) == sorted(
+        [
+            "entry_min_price",
+            "entry_max_price",
+            "stop_loss_price",
+            "risk_rate",
+            "risk_budget",
+            "suggested_quantity",
+            "quantity_before_rounding",
+            "quantity_after_rounding",
+        ]
+    )
+
+
+def test_recomputed_hash_is_sensitive_to_a_changed_stored_value(
+    store: PgTradingEntityStore,
+    planner_outputs: dict[tuple[str, str], tuple[Signal, TradePlan]],
+) -> None:
+    """Non-vacuity: the recomputation really depends on the read-back prices."""
+    signal, original = planner_outputs[("trend-pullback", "10000.00")]
+    store.insert_signal(signal)
+    store.insert_trade_plan(original)
+    stored = store.get_trade_plan(original.trade_plan_id)
+    assert stored is not None
+    one_unit_lower = replace(stored, stop_loss_price=stored.stop_loss_price - Decimal("1"))
+    assert _recomputed_hash(one_unit_lower) != stored.plan_hash
+
+
+def test_planner_hashes_equal_the_pinned_phase4_fixture(
+    planner_outputs: dict[tuple[str, str], tuple[Signal, TradePlan]],
+    phase4_expected_plans: dict[str, Any],
+) -> None:
+    pinned = {
+        entry["trade_plan_id"]: entry["plan_hash"] for entry in phase4_expected_plans["plans"]
+    }
+    produced = {
+        planner_outputs[(name, "10000.00")][1].trade_plan_id: planner_outputs[(name, "10000.00")][
+            1
+        ].plan_hash
+        for name in ("trend-pullback", "breakout-retest-long", "range-mr-long")
+    }
+    assert produced == pinned
+
+
+def _with_scale_19(value: Decimal) -> Decimal:
+    """`value` (18 fractional digits) with a 19th digit appended, built from text (exact)."""
+    return Decimal(f"{value:f}5")
+
+
+@pytest.mark.parametrize("field_name", ["entry_min_price", "entry_max_price", "stop_loss_price"])
+def test_a_price_with_nineteen_fractional_digits_is_refused_by_the_guard(
+    engine: Engine,
+    store: PgTradingEntityStore,
+    planner_outputs: dict[tuple[str, str], tuple[Signal, TradePlan]],
+    field_name: str,
+) -> None:
+    signal, original = planner_outputs[("breakout-retest-long", "10000.00")]
+    store.insert_signal(signal)
+    assert getattr(original, field_name).as_tuple().exponent == -18
+    tampered = replace(original, **{field_name: _with_scale_19(getattr(original, field_name))})
+    with pytest.raises(PrecisionError) as caught:
+        store.insert_trade_plan(tampered)
+    assert field_name in str(caught.value)
+    assert store.get_trade_plan(original.trade_plan_id) is None
+
+
+def test_integer_part_overflow_still_raises_a_database_error(
+    store: PgTradingEntityStore,
+    planner_outputs: dict[tuple[str, str], tuple[Signal, TradePlan]],
+) -> None:
+    signal, original = planner_outputs[("range-mr-short", "10000.00")]
+    store.insert_signal(signal)
+    with pytest.raises(DataError):
+        store.insert_trade_plan(replace(original, entry_max_price=Decimal(10) ** 21))
+    assert store.get_trade_plan(original.trade_plan_id) is None
