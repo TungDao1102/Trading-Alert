@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 17
 current_phase_name: operational-persistence-layer
 status: executing
-stopped_at: Completed 17-02-PLAN.md
-last_updated: "2026-10-01T12:57:40.683Z"
+stopped_at: Completed 17-03-PLAN.md
+last_updated: "2026-10-01T13:01:54.714Z"
 last_activity: 2026-10-01
 last_activity_desc: Phase 17 execution started
-state_head: ab3b110dd54f26f87146dd3a09f5f5943e4ea627
+state_head: 5f457152bba087150b7407cf80ace28fe89caaa4
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 109
-  completed_plans: 92
+  completed_plans: 93
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 17 (operational-persistence-layer) — EXECUTING
-Plan: 3 of 15
+Plan: 4 of 15
 Status: Ready to execute
 Last activity: 2026-10-01 — Phase 17 execution started
 
@@ -132,6 +132,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 13.1 P11 | 25min | 3 tasks | 7 files |
 | Phase 17 P01 | 22 min | 3 tasks | 19 files |
 | Phase 17 P02 | 30min | 2 tasks | 8 files |
+| Phase 17 P03 | 12 min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -338,6 +339,7 @@ Recent decisions affecting current work:
 - [Phase 17]: 17-02: positions.quantity gets no sign CHECK (position_amt is signed; C4 refinement for D051) — src/adapters/binance_usdm.py documents position_amt as negative for SHORT in one-way mode; >= 0 would reject a legal short
 - [Phase 17]: 17-02: terminal-status triggers use research draft terminal sets (signals, trade_plans, orders, positions, approvals, execution_intents); plan 10 cross-checks vs transitions.py — auto-mode default C3; DB rule mirrors Python transition tables
 - [Phase 17]: 17-02: all new 0004 constraints/indexes are PostgreSQL-only on the ORM via ddl_if; 18 pre-existing indexes declared plainly — keeps SQLite create_all fixture suites unchanged; alembic compare_metadata shows zero diff
+- [Phase 17]: 17-03: Transition tables authored from research draft as auto-mode default (C3); unchanged state is not a transition; APPROVED->SUPERSEDED for TradePlan illegal (open point, D051)
 
 ### Pending Todos
 
@@ -383,6 +385,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-01T12:57:40.395Z
-Stopped at: Completed 17-02-PLAN.md
+Last session: 2026-10-01T13:01:54.444Z
+Stopped at: Completed 17-03-PLAN.md
 Resume file: None
