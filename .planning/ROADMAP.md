@@ -653,10 +653,24 @@ Plans:
 
 **Audit refs**: F-202, F-404, F-403, F-406, F-411, F-412, F-410, F-126, F-951, F-703, F-603, F-606
 
-**Plans:** 0 plans
+**Plans:** 15 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 17 to break down)
+- [ ] 17-01-PLAN.md — Tracer: durable approval consumption + write-ahead ENTRY intent through migration 0004, store and manager; exactly-one-entry PG proof with negative control; disposable-DB fixtures (W1)
+- [ ] 17-02-PLAN.md — Schema integrity in 0004: widths, enum/quantity CHECKs, unique and partial unique indexes, RESTRICT FKs, append-only and terminal triggers, snapshot and system-state tables (W2)
+- [ ] 17-03-PLAN.md — DOMN-04 transition tables (pure) + GLOSSARY sections 11-12 (W2)
+- [ ] 17-04-PLAN.md — Deterministic, collision-free journal ids; callback correlation from callback_query.id (W2)
+- [ ] 17-05-PLAN.md — D-12 plan_hash canonicalization (18-digit ROUND_HALF_EVEN) with fixture regeneration inventory (W2)
+- [ ] 17-06-PLAN.md — EXEC-04 constraint snapshot core: MARKET_LOT_SIZE/PERCENT_PRICE parsing, canonical snapshot, live-validity predicate (W2)
+- [ ] 17-07-PLAN.md — ORM/migration parity (compare_metadata + catalog checks), reversible and data-safe 0004, UTC session on both engines (W3)
+- [ ] 17-08-PLAN.md — PostgreSQL journal store (append-only, replay-idempotent, conflict-detecting) (W3)
+- [ ] 17-09-PLAN.md — PostgreSQL approval store, explicit consumption state, race-safe decisions (W3)
+- [ ] 17-10-PLAN.md — Entity repositories with in-transaction transitions, precision guard, round-trip and plan_hash proofs (W3)
+- [ ] 17-11-PLAN.md — Manager write-ahead completion: SL intent, identity-before-replay, fail-closed store errors, crash injection (W3)
+- [ ] 17-12-PLAN.md — Restart recovery by query only + full SC4 matrix with negative controls (W4)
+- [ ] 17-13-PLAN.md — Constraint snapshot and system-state stores, controller rehydrate across restart (W4)
+- [ ] 17-14-PLAN.md — End-to-end APPROVE replay across restart/expiry and callback redelivery on PostgreSQL (W4)
+- [ ] 17-15-PLAN.md — Canonical docs, D051, DOC_STATUS, phase gate (W5)
 
 ### Phase 18: Binance User-Data Stream + Exchange Error Taxonomy
 
