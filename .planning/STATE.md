@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 17
 current_phase_name: operational-persistence-layer
 status: executing
-stopped_at: Completed 17-08-PLAN.md
-last_updated: "2026-10-01T15:02:22.046Z"
+stopped_at: Completed 17-09-PLAN.md
+last_updated: "2026-10-01T15:28:48.463Z"
 last_activity: 2026-10-01
 last_activity_desc: Phase 17 execution started
-state_head: 88bfe35272d3807022b54bd3fa4633959a8bc2df
+state_head: d01433c7a5b0ba9c208207f13308f0ab303d3152
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 109
-  completed_plans: 98
+  completed_plans: 99
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 17 (operational-persistence-layer) — EXECUTING
-Plan: 9 of 15
+Plan: 10 of 15
 Status: Ready to execute
 Last activity: 2026-10-01 — Phase 17 execution started
 
@@ -138,6 +138,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 17 P06 | 45 min | 2 tasks | 4 files |
 | Phase 17 P07 | 45 min | 2 tasks | 6 files |
 | Phase 17 P08 | 30 min | 2 tasks | 3 files |
+| Phase 17 P09 | 45 min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -350,6 +351,7 @@ Recent decisions affecting current work:
 - [Phase 17]: 17-06: max_quantity counts as a filter value for snapshot completeness (None => INCOMPLETE, invalid for live); snapshot JSON carries snapshot_schema_version 1 — Fail closed (D-19); versionable evidence (D-18)
 - [Phase 17]: 17-07: no ORM/migration drift found; parity enforced by compare_metadata (checkconstraint_byname) plus catalog assertions for predicates, CHECK literals and triggers; async make_engine pins timezone=UTC; alembic floor 1.19.2
 - [Phase 17]: 17-08: PgJournalStore conflict rule compares identity fields and payload only (not occurred_at_utc/created_at_utc); JournalConflict names field names, never payload. Journal-outage behavior pinned, not fixed: disable stays enabled (F-702) and emergency_manual_close issues zero exchange cancels when the journal is down (unsafe, Phase 20)
+- [Phase 17]: 17-09: insert_pending replay compares request identity fields only; pair-uniqueness violation on short_id_mapping maps to ShortIdRebindingRefused
 
 ### Pending Todos
 
@@ -395,6 +397,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-01T15:02:15.206Z
-Stopped at: Completed 17-08-PLAN.md
+Last session: 2026-10-01T15:28:48.198Z
+Stopped at: Completed 17-09-PLAN.md
 Resume file: None
