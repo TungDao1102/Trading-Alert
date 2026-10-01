@@ -328,3 +328,53 @@ REJECTED -> (terminal)
 ```
 
 Execution intent states are the values of section 12.1. An intent left `INTENDED`, `SENT` or `UNKNOWN` is unresolved and is resolved only by querying the exchange by its deterministic client id; it is never re-sent blindly.
+
+## 12. Persistence status values (Phase 17)
+
+Value sets of the four enums the Phase 17 persistence layer adds. Each text block lists one value per line and `tests/test_transitions.py` compares it with the enum in `src/domain/enums.py`, so a value cannot be added in one place only (D016, D031). These are explicit status columns (D-21): a state is never inferred from a nullable timestamp.
+
+### 12.1 ExecutionIntentStatus
+
+```text
+INTENDED
+SENT
+ACKED
+REJECTED
+UNKNOWN
+```
+
+- `INTENDED`: written ahead of the exchange call.
+- `SENT`: committed just before the exchange call.
+- `ACKED`: the exchange acknowledged the order, or it was found by its client id.
+- `REJECTED`: definitively absent or refused by the exchange.
+- `UNKNOWN`: unresolved; never re-sent, only resolved by querying the exchange.
+
+Legal moves are in section 11.6.
+
+### 12.2 ApprovalConsumptionStatus
+
+```text
+UNCONSUMED
+CONSUMED
+```
+
+Set only by the consume transaction that inserts the `ENTRY` execution intent. `CONSUMED` requires the approval status to be `APPROVED`.
+
+### 12.3 LiveInputsStatus
+
+```text
+COMPLETE
+INCOMPLETE
+```
+
+Recorded on plan constraint snapshots. `INCOMPLETE` while margin type, leverage, equity or a required exchange filter carries the `UNKNOWN` sentinel (D-19); such a snapshot can never support a live order.
+
+### 12.4 SystemStateKey
+
+```text
+SAFE_MODE
+LIVE_ENABLEMENT
+KILL_GATE
+```
+
+Keys of the durable system-state event log (D-22).
