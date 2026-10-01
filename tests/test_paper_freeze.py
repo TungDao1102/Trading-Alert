@@ -282,9 +282,7 @@ def test_check_registry_unchanged_opens_new_epoch_on_diff(tmp_path: Path) -> Non
 
     # Mutate one parameter value to trigger a registry diff.
     target_file = (
-        tmp_registry_root
-        / case_input["strategy_id"]
-        / f"{case_input['parameter_set_id']}.toml"
+        tmp_registry_root / case_input["strategy_id"] / f"{case_input['parameter_set_id']}.toml"
     )
     _mutate_toml_value(
         target_file,

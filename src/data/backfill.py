@@ -141,14 +141,10 @@ class DatasetSpec[S, R: _TimedRow]:
 async def _fetch_trade(
     source: KlineSource, symbol: str, interval: str, start_ms: int, limit: int
 ) -> list[Kline]:
-    return await source.klines(
-        symbol=symbol, interval=interval, start_ms=start_ms, limit=limit
-    )
+    return await source.klines(symbol=symbol, interval=interval, start_ms=start_ms, limit=limit)
 
 
-def _publish_trade(
-    rows: list[Kline], interval: str, symbol: str, raw_root: Path
-) -> list[Path]:
+def _publish_trade(rows: list[Kline], interval: str, symbol: str, raw_root: Path) -> list[Path]:
     return publish_batch(rows, interval=interval, symbol=symbol, raw_root=raw_root)
 
 
@@ -160,9 +156,7 @@ async def _fetch_mark(
     )
 
 
-def _publish_mark(
-    rows: list[MarkKline], interval: str, symbol: str, raw_root: Path
-) -> list[Path]:
+def _publish_mark(rows: list[MarkKline], interval: str, symbol: str, raw_root: Path) -> list[Path]:
     return publish_mark_batch(rows, interval=interval, symbol=symbol, raw_root=raw_root)
 
 
@@ -199,9 +193,7 @@ MAX_CONSECUTIVE_REJECTIONS = 5
 class StructuralRejectionError(RuntimeError):
     """Raised when consecutive corrupt pages exceed the in-run budget."""
 
-    def __init__(
-        self, symbol: str, interval: str, cursor_ms: int, consecutive: int
-    ) -> None:
+    def __init__(self, symbol: str, interval: str, cursor_ms: int, consecutive: int) -> None:
         super().__init__(
             f"structural rejection budget exhausted for {symbol}/{interval} "
             f"at cursor_ms={cursor_ms} "
@@ -223,8 +215,8 @@ class BackfillConfig:
     """
 
     interval_ms: int
-    page_size: int = 1000          # ≤1500 per Binance; 1000 → weight 5
-    pace_seconds: float = 0.05     # sleep between pages (conservative)
+    page_size: int = 1000  # ≤1500 per Binance; 1000 → weight 5
+    pace_seconds: float = 0.05  # sleep between pages (conservative)
     max_retries: int = 5
     jitter_max_seconds: float = 1.0
 
@@ -586,8 +578,7 @@ async def backfill_symbol_interval(
         closed: list[Any] = [
             k
             for k in raw_page
-            if utc_ms(k.close_time_utc) <= now_ms
-            and utc_ms(k.open_time_utc) < effective_end
+            if utc_ms(k.close_time_utc) <= now_ms and utc_ms(k.open_time_utc) < effective_end
         ]
 
         # Cross-page dedup: skip rows whose open_time we already buffered
@@ -686,9 +677,7 @@ async def backfill_symbol_interval(
             # instead of re-fetching the identical page forever.
             consecutive_rejections += 1
             if consecutive_rejections > MAX_CONSECUTIVE_REJECTIONS:
-                raise StructuralRejectionError(
-                    symbol, interval, cursor, consecutive_rejections
-                )
+                raise StructuralRejectionError(symbol, interval, cursor, consecutive_rejections)
             cursor = last_published_open_ms + cfg.interval_ms
         elif raw_page:
             consecutive_rejections = 0
@@ -721,9 +710,7 @@ async def backfill_symbol_interval(
     # is held back (dropped from the buffer, logged, counted) and the cursor
     # is never written for its rows (D-13, F-402).
     if date_buffers:
-        terminal_day = (
-            _EPOCH_UTC + timedelta(milliseconds=effective_end - 1)
-        ).date()
+        terminal_day = (_EPOCH_UTC + timedelta(milliseconds=effective_end - 1)).date()
         for d in sorted(date_buffers.keys()):
             day_start_ms = utc_ms(datetime(d.year, d.month, d.day, tzinfo=UTC))
             whole_day = day_start_ms + DAY_MS <= effective_end
@@ -990,9 +977,7 @@ async def backfill_universe(
                 )
                 if latest_day is not None:
                     day_start = utc_ms(
-                        datetime(
-                            latest_day.year, latest_day.month, latest_day.day, tzinfo=UTC
-                        )
+                        datetime(latest_day.year, latest_day.month, latest_day.day, tzinfo=UTC)
                     )
                     key_start_ms = max(key_start_ms, day_start + DAY_MS)
             # Per-symbol end: a cap below the resolved end is a delivery, and

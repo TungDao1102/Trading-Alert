@@ -85,9 +85,7 @@ def refresh_symbol_metadata(
     """
     when = observed_at if observed_at is not None else datetime.now(UTC)
     universe_set = set(universe) if universe is not None else None
-    selected = [
-        f for f in filters if universe_set is None or f.symbol in universe_set
-    ]
+    selected = [f for f in filters if universe_set is None or f.symbol in universe_set]
     # Validate every selected row BEFORE any session.add so a violation leaves
     # nothing pending: roll back and raise, never truncate (fail closed).
     for f in selected:

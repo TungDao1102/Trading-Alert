@@ -729,6 +729,5 @@ def test_breakout_retest_uses_zone_at_preceding_bar(
 
     # The breakout bar's close must be > zone_upper_ref.
     assert candles_1h[i].close > zone_upper_ref, (
-        f"breakout bar close {candles_1h[i].close} must be > "
-        f"zone_upper_ref {zone_upper_ref}"
+        f"breakout bar close {candles_1h[i].close} must be > zone_upper_ref {zone_upper_ref}"
     )

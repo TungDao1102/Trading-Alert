@@ -114,9 +114,7 @@ def _with_support_touch_last_bar(
 ) -> list[Candle]:
     """Patch the last bar's low onto the trailing swing low (CR-06 setup)."""
     ps = load_parameter_set(strategy_id, parameter_set_id)
-    frame = compute_features(
-        symbol="BTCUSDT", interval="1h", candles=candles, parameter_set=ps
-    )
+    frame = compute_features(symbol="BTCUSDT", interval="1h", candles=candles, parameter_set=ps)
     assert frame.features_valid
     assert frame.swing_low.value is not None
     swing_low = frame.swing_low.value
@@ -216,9 +214,7 @@ def _evaluate_and_plan(
 def main() -> None:
     fixtures_dir = Path("tests/fixtures/phase4")
 
-    trend_setup = _with_support_touch_last_bar(
-        _build_trend_1h(), "trend-pullback", "baseline-v1"
-    )
+    trend_setup = _with_support_touch_last_bar(_build_trend_1h(), "trend-pullback", "baseline-v1")
     trend_context = _build_trend_4h()
     fam_b_setup = fam_b._build_1h_candles_breakout_retest_long()
     fam_b_context = fam_b._build_4h_candles_bullish()
@@ -233,14 +229,14 @@ def main() -> None:
         ("breakout-retest", fam_b_setup, fam_b_context),
         ("range-mr", fam_c_setup, fam_c_context),
     ):
-        param_entry, signal_entry, plan_entry = _evaluate_and_plan(
-            strategy_id, setup, context
-        )
+        param_entry, signal_entry, plan_entry = _evaluate_and_plan(strategy_id, setup, context)
         param_entries.append(param_entry)
         signal_entries.append(signal_entry)
         plan_entries.append(plan_entry)
-        print(f"{strategy_id}: signal={signal_entry['signal_id'][:12]}... "
-              f"plan={plan_entry['plan_hash'][:12]}...")
+        print(
+            f"{strategy_id}: signal={signal_entry['signal_id'][:12]}... "
+            f"plan={plan_entry['plan_hash'][:12]}..."
+        )
 
     (fixtures_dir / "parameters.json").write_text(
         json.dumps({"parameter_sets": param_entries}, indent=2) + "\n",
@@ -272,12 +268,8 @@ def main() -> None:
         else None,
         "setup_ema_20": str(setup_frame.ema_20.value) if setup_frame.ema_20.valid else None,
         "setup_ema_50": str(setup_frame.ema_50.value) if setup_frame.ema_50.valid else None,
-        "setup_ema_200": str(setup_frame.ema_200.value)
-        if setup_frame.ema_200.valid
-        else None,
-        "context_ema_50": str(context_frame.ema_50.value)
-        if context_frame.ema_50.valid
-        else None,
+        "setup_ema_200": str(setup_frame.ema_200.value) if setup_frame.ema_200.valid else None,
+        "context_ema_50": str(context_frame.ema_50.value) if context_frame.ema_50.valid else None,
     }
     (fixtures_dir / "expected_features.json").write_text(
         json.dumps(expected_features, indent=2, sort_keys=True) + "\n",
@@ -291,8 +283,9 @@ def main() -> None:
         json.dumps({"plans": plan_entries}, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    print("Wrote parameters.json, expected_features.json, "
-          "expected_signals.json, expected_plans.json")
+    print(
+        "Wrote parameters.json, expected_features.json, expected_signals.json, expected_plans.json"
+    )
 
 
 if __name__ == "__main__":

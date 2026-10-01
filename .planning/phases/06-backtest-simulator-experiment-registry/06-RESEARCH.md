@@ -198,11 +198,16 @@ for bar in strategy_bars:  # time-ordered, deterministic
 **Example:**
 ```python
 # Source: src/domain/canonical.py + src/domain/registry.py hash pattern
-cost_model_hash = sha256_hex({
-    "fee_rate_entry": fee_entry, "fee_rate_exit": fee_exit,
-    "funding_treatment": funding_mode, "slippage_model": slippage_id,
-    "spread_fill_assumptions": spread_id, "partial_fill_fraction": partial,
-})
+cost_model_hash = sha256_hex(
+    {
+        "fee_rate_entry": fee_entry,
+        "fee_rate_exit": fee_exit,
+        "funding_treatment": funding_mode,
+        "slippage_model": slippage_id,
+        "spread_fill_assumptions": spread_id,
+        "partial_fill_fraction": partial,
+    }
+)
 ```
 
 ### Pattern 3: Experiment record = six-field identity + full context
@@ -310,9 +315,17 @@ Verified patterns from in-repo sources (out-of-repo citations noted):
 
 ```python
 # Source: src/core/types.py:67-112 (verbatim field contract)
-Candle(symbol="BTCUSDT", interval="1h",
-       open_time_utc=..., close_time_utc=...,   # aware UTC, open < close
-       open=..., high=..., low=..., close=..., volume=...)  # all Decimal
+Candle(
+    symbol="BTCUSDT",
+    interval="1h",
+    open_time_utc=...,
+    close_time_utc=...,  # aware UTC, open < close
+    open=...,
+    high=...,
+    low=...,
+    close=...,
+    volume=...,
+)  # all Decimal
 # Guards: high >= low; open/close within [low, high]; volume >= 0
 ```
 
@@ -320,12 +333,17 @@ Candle(symbol="BTCUSDT", interval="1h",
 
 ```python
 # Source: src/risk/sizing.py:30-36 + src/risk/quantization.py:32-40
-sized = size_position(trade_plan=plan, account_state=acct,
-                      entry_ref=entry_mid, modeled_costs_per_unit=costs_per_unit)
-final = quantize(sized=sized, constraint_snapshot=snap, allowed_risk=allowed,
-                 risk_per_unit=rpu,
-                 minimum_risk_utilization_after_rounding=Decimal("0.6"),
-                 reference_price=entry_mid)
+sized = size_position(
+    trade_plan=plan, account_state=acct, entry_ref=entry_mid, modeled_costs_per_unit=costs_per_unit
+)
+final = quantize(
+    sized=sized,
+    constraint_snapshot=snap,
+    allowed_risk=allowed,
+    risk_per_unit=rpu,
+    minimum_risk_utilization_after_rounding=Decimal("0.6"),
+    reference_price=entry_mid,
+)
 # Gate order first-failure-wins: MIN_QTY_REJECT → NOTIONAL_REJECT → UTILIZATION_REJECT
 # Rejects are first-class outcomes: SizedResult(is_no_trade=True, quantity=None, ...)
 ```
@@ -334,10 +352,16 @@ final = quantize(sized=sized, constraint_snapshot=snap, allowed_risk=allowed,
 
 ```python
 # Source: src/domain/canonical.py:87-89 sha256_hex + registry.py:365-374 payload shape
-cost_model_hash = sha256_hex({
-    "fee_rate_entry": ..., "fee_rate_exit": ..., "expected_slippage": ...,
-    "funding_treatment": ..., "slippage_model": ..., "partial_fill_fraction": ...,
-})
+cost_model_hash = sha256_hex(
+    {
+        "fee_rate_entry": ...,
+        "fee_rate_exit": ...,
+        "expected_slippage": ...,
+        "funding_treatment": ...,
+        "slippage_model": ...,
+        "partial_fill_fraction": ...,
+    }
+)
 ```
 
 ### Seeded stationary block bootstrap (report edge, stdlib-only)
@@ -346,14 +370,20 @@ cost_model_hash = sha256_hex({
 # Source: Politis & Romano 1994 stationary bootstrap (geometric block lengths)
 # https://doi.org/10.1080/01621459.1994.10476870
 import random, statistics
+
 rng = random.Random(experiment_seed)  # seed recorded in experiment record
+
+
 def stationary_bootstrap_mean(rs, probable=0.1, resamples=10000):
-    n = len(rs); means = []
+    n = len(rs)
+    means = []
     for _ in range(resamples):
         sample, i = [], rng.randrange(n)
         while len(sample) < n:  # geometric block length, mean 1/probable
-            sample.append(rs[i]); i = (i + 1) % n
-            if rng.random() < probable: i = rng.randrange(n)
+            sample.append(rs[i])
+            i = (i + 1) % n
+            if rng.random() < probable:
+                i = rng.randrange(n)
         means.append(statistics.fmean(sample))
     lo, hi = statistics.quantiles(means, n=40)[0], statistics.quantiles(means, n=40)[-1]
     return statistics.fmean(rs), lo, hi  # point + interval; floats stay in report.py
@@ -363,10 +393,20 @@ def stationary_bootstrap_mean(rs, probable=0.1, resamples=10000):
 
 ```python
 # Source: RESEARCH_PROTOCOL §5 + CONFIGURATION §7 (verbatim field names)
-record = {"experimentId": ..., "strategyVersion": ..., "parameterSetId": ...,
-          "parameterSetHash": ..., "dataSnapshotId": ..., "codeVersion": ...,
-          "costModelHash": ..., "time_range_start_utc": ..., "time_range_end_utc": ...,
-          "universe_hash": ..., "run_type": ..., "result_summary_json": ...}
+record = {
+    "experimentId": ...,
+    "strategyVersion": ...,
+    "parameterSetId": ...,
+    "parameterSetHash": ...,
+    "dataSnapshotId": ...,
+    "codeVersion": ...,
+    "costModelHash": ...,
+    "time_range_start_utc": ...,
+    "time_range_end_utc": ...,
+    "universe_hash": ...,
+    "run_type": ...,
+    "result_summary_json": ...,
+}
 # DATA_MODEL §2.12 experiment_runs columns (verbatim, lines 315-328 of DATA_MODEL.md)
 ```
 

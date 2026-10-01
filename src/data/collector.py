@@ -100,6 +100,7 @@ FUNDING_PAGE_PACE_SECONDS = 0.2
 # Warn-only; the fail-closed clock check is Phase 18's, VPS chrony is 13.1's.
 CLOCK_OFFSET_WARN_MS = 1000
 
+
 # Structural adapter surface used by the collector (IN-01). Production
 # passes a `BinanceUsdmAdapter`; tests inject a `FakeAdapter`. A
 # `Protocol` (not a `BinanceUsdmAdapter | object` union) means mypy
@@ -212,8 +213,7 @@ def _guard_no_overwrite(path: Path) -> None:
     """
     if path.exists():
         raise FileExistsError(
-            f"refusing to overwrite immutable tick file at {path} "
-            "(D-04 immutability rule)."
+            f"refusing to overwrite immutable tick file at {path} (D-04 immutability rule)."
         )
 
 
@@ -412,9 +412,7 @@ async def async_oi_tick(
             observed_utc=observed_utc,
             reason="scheduled_tick_skipped",
         )
-        return OITickResult(
-            snapshots_inserted=0, watermarks_advanced=0, gaps_recorded=1
-        )
+        return OITickResult(snapshots_inserted=0, watermarks_advanced=0, gaps_recorded=1)
 
     # Poll the adapter sequentially (5 symbols — bounded concurrency
     # unnecessary), isolating failures per symbol.
@@ -543,9 +541,7 @@ async def async_funding_sweep(
     try:
         for tick in ticks:
             wm = watermarks.get(tick.symbol)
-            if wm is not None and _tick_epoch_ms(
-                tick.funding_time_utc
-            ) <= _tick_epoch_ms(wm):
+            if wm is not None and _tick_epoch_ms(tick.funding_time_utc) <= _tick_epoch_ms(wm):
                 # Already covered by this symbol's watermark — never
                 # re-hit the immutability guard.
                 skipped_existing += 1
@@ -647,9 +643,7 @@ async def backfill_funding_history(
                 CollectorWatermark.data_class == "funding",
             )
         ).scalar_one_or_none()
-        wm_ms: int | None = (
-            _tick_epoch_ms(wm_row.last_tick_utc) if wm_row is not None else None
-        )
+        wm_ms: int | None = _tick_epoch_ms(wm_row.last_tick_utc) if wm_row is not None else None
         cursor = start_ms if wm_ms is None else max(start_ms, wm_ms + 1)
         written = 0
         rows_per_symbol[sym] = 0
@@ -822,11 +816,7 @@ def _resolve_database_url(explicit: str | None) -> str:
     Raises loudly when nothing is set — the loop must never start
     without a watermark session (fail closed, no phantom ticks).
     """
-    url = (
-        explicit
-        or os.environ.get("DATABASE_URL_SYNC")
-        or os.environ.get("DATABASE_URL")
-    )
+    url = explicit or os.environ.get("DATABASE_URL_SYNC") or os.environ.get("DATABASE_URL")
     if not url:
         raise RuntimeError(
             "refusing collector start: neither --database-url nor "
@@ -918,9 +908,7 @@ def _floor_to_cadence(dt: datetime, cadence_seconds: float) -> datetime:
     return datetime.fromtimestamp(epoch_s - (epoch_s % step), tz=UTC)
 
 
-def _funding_since_ms(
-    session: Session, universe: Sequence[str], now_ms: int
-) -> int:
+def _funding_since_ms(session: Session, universe: Sequence[str], now_ms: int) -> int:
     """Fallback `since_ms` for symbols without a funding watermark.
 
     Per-symbol resume happens inside `async_funding_sweep` (each
@@ -1142,9 +1130,7 @@ def _resolve_universe(args: argparse.Namespace) -> list[str]:
     if explicit is not None:
         for sym in explicit:
             if not SYMBOL_RE.match(sym):
-                raise CollectListError(
-                    f"--universe symbol {sym!r} must match {SYMBOL_RE.pattern}"
-                )
+                raise CollectListError(f"--universe symbol {sym!r} must match {SYMBOL_RE.pattern}")
         if not explicit:
             raise CollectListError("--universe is empty; refusing to collect nothing")
         return list(explicit)
@@ -1199,10 +1185,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"gaps={oi.gaps_recorded + funding.gaps_recorded}"
         )
         return 0
-    print(
-        f"collector: loop start universe={len(universe)} "
-        f"cadence={cadence}s raw_root={raw_root}"
-    )
+    print(f"collector: loop start universe={len(universe)} cadence={cadence}s raw_root={raw_root}")
     try:
         cadence_ms = max(1, int(cadence * 1000))
         while True:

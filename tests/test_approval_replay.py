@@ -139,9 +139,7 @@ def test_issue_one_time_token_returns_non_empty_urlsafe_string() -> None:
     import string
 
     allowed = set(string.ascii_letters + string.digits + "-_")
-    assert all(c in allowed for c in token), (
-        f"token contains non-URL-safe chars: {token!r}"
-    )
+    assert all(c in allowed for c in token), f"token contains non-URL-safe chars: {token!r}"
 
 
 def test_token_hash_of_returns_64_char_lowercase_hex() -> None:
@@ -212,8 +210,7 @@ def test_resolve_callback_5x_replay_produces_exactly_one_transition() -> None:
 
     # Exactly one transition occurred.
     assert len(transitions) == expected["transitions_count"], (
-        f"expected {expected['transitions_count']} transitions, "
-        f"got {len(transitions)}"
+        f"expected {expected['transitions_count']} transitions, got {len(transitions)}"
     )
 
     # The final state is APPROVED with acted_at_utc set.
@@ -697,6 +694,4 @@ def test_no_synonym_reason_strings_in_src_approval() -> None:
                 suspicious.append(f"{py_file.name}:{line_num}:{candidate}")
 
     # If suspicious found, surface them so the test fails loudly.
-    assert not suspicious, (
-        f"suspect reason-string literals in src/approval/: {suspicious}"
-    )
+    assert not suspicious, f"suspect reason-string literals in src/approval/: {suspicious}"

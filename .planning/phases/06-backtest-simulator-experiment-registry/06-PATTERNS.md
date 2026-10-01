@@ -65,8 +65,9 @@ try:
         parameter_set=parameter_set,
     )
 except ValueError:
-    return PlanResult(is_no_trade=True, trade_plan=None,
-                       reason_code=RejectionReason.DATA_STALE.value)
+    return PlanResult(
+        is_no_trade=True, trade_plan=None, reason_code=RejectionReason.DATA_STALE.value
+    )
 if not setup_frame.features_valid:
     # walk invalid features, pick first reason code
     return PlanResult(is_no_trade=True, trade_plan=None, reason_code=reason)
@@ -100,9 +101,11 @@ sorted_positions = sorted(open_positions, key=lambda p: (p.symbol, p.position_si
 
 **Local structlog import (purity contract)** — `src/risk/quantization.py:207-220`:
 ```python
-def _emit_lineage(*, raw_quantity, rounded_quantity, realized_risk,
-                  allowed_risk, reason_code) -> None:
-    import structlog   # local import preserves module-level purity
+def _emit_lineage(
+    *, raw_quantity, rounded_quantity, realized_risk, allowed_risk, reason_code
+) -> None:
+    import structlog  # local import preserves module-level purity
+
     ...
     structlog.get_logger().info("risk.quantize", ...)
 ```
@@ -133,14 +136,18 @@ def _emit_lineage(*, raw_quantity, rounded_quantity, realized_risk,
 
 **Apply to `simulator.resolve_intrabar`** (D-01 SL-first fallback):
 ```python
-def resolve_intrabar(*, strategy_bar, intrabar: list[Candle] | None,
-                     stop_loss, take_profits, direction) -> IntrabarOutcome:
+def resolve_intrabar(
+    *, strategy_bar, intrabar: list[Candle] | None, stop_loss, take_profits, direction
+) -> IntrabarOutcome:
     if intrabar is None:
         # Phase-2 D-09 flag-never-fabricate: conservative fallback,
         # log the flag on the trade record, never silent.
         return IntrabarOutcome(
-            exit_kind="SL", price=stop_loss, fallback_applied=True,
-            coverage_note="1m_intrabar_missing")
+            exit_kind="SL",
+            price=stop_loss,
+            fallback_applied=True,
+            coverage_note="1m_intrabar_missing",
+        )
     # 1m path: walk the 1m sequence strictly inside (entry_bar.open, exit_bar.close].
     for minute in intrabar:
         if direction == "LONG":
@@ -172,10 +179,10 @@ class ConstraintSnapshot:
     min_quantity: Decimal
     min_notional: Decimal
     metadata_observed_at_utc: datetime
+
     def __post_init__(self) -> None:
         _require_non_empty(self.symbol, "symbol")
-        for fname in ("price_tick_size", "quantity_step_size",
-                      "min_quantity", "min_notional"):
+        for fname in ("price_tick_size", "quantity_step_size", "min_quantity", "min_notional"):
             _require_decimal(getattr(self, fname), fname)
         _require_positive(self.price_tick_size, "price_tick_size")
         _require_positive(self.quantity_step_size, "quantity_step_size")
@@ -202,19 +209,22 @@ parameter_set_hash = sha256_hex(hash_payload)
   class CostModel:
       fee_rate_entry: Decimal
       fee_rate_exit: Decimal
-      funding_treatment: str          # enum-validated string
+      funding_treatment: str  # enum-validated string
       expected_slippage: Decimal
       slippage_model: str
       spread_fill_assumptions: str
       partial_fill_fraction: Decimal
-      cost_model_hash: str            # computed in __post_init__
+      cost_model_hash: str  # computed in __post_init__
 
       def __post_init__(self) -> None:
           _require_decimal(self.fee_rate_entry, "fee_rate_entry")
           # ... non-negative + in-range guards ...
           if self.cost_model_hash == "":
-              object.__setattr__(self, "cost_model_hash",
-                  sha256_hex({k: getattr(self, k) for k in _COST_KEYS_SORTED}))
+              object.__setattr__(
+                  self,
+                  "cost_model_hash",
+                  sha256_hex({k: getattr(self, k) for k in _COST_KEYS_SORTED}),
+              )
   ```
 - `build_cost_model(parameter_set: ParameterSet) -> CostModel` reads cost keys (`fee_rate_entry`, `fee_rate_exit`, `expected_slippage` already whitelisted in `src/domain/registry.py:94-97`; Pitfall 7 mandates adding `funding_treatment`, `slippage_model`, `spread_fill_assumptions`, `partial_fill_fraction` to `STRATEGY_KEYS` in a new `baseline-vN.toml`).
 - `modeled_costs_per_unit(trade_plan, cost_model, side) -> Decimal` — same formula used by `src/risk/sizing.py:35`; never re-derived inside the simulator body.
@@ -232,7 +242,7 @@ record = {
     "experimentId": sha256_hex(...),
     "strategyVersion": parameter_set.strategy_version,
     "parameterSetHash": parameter_set.parameter_set_hash,
-    "parameterSetId": parameter_set.parameter_set_id,    # alongside per D-03
+    "parameterSetId": parameter_set.parameter_set_id,  # alongside per D-03
     "dataSnapshotId": dataset_version_hash,
     "codeVersion": engine_commit_sha,
     "costModelHash": cost_model.cost_model_hash,
@@ -247,18 +257,27 @@ record = {
 
 **Content-hash ID construction** (`src/domain/ids.py:19-46`):
 ```python
-def make_signal_id(*, strategy_id, strategy_version, parameter_set_id,
-                   symbol, source_timeframe, source_candle_close_utc,
-                   setup_fingerprint) -> str:
-    return sha256_hex({
-        "strategy_id": strategy_id,
-        "strategy_version": strategy_version,
-        "parameter_set_id": parameter_set_id,
-        "symbol": symbol,
-        "source_timeframe": source_timeframe,
-        "source_candle_close_utc": source_candle_close_utc,
-        "setup_fingerprint": setup_fingerprint,
-    })
+def make_signal_id(
+    *,
+    strategy_id,
+    strategy_version,
+    parameter_set_id,
+    symbol,
+    source_timeframe,
+    source_candle_close_utc,
+    setup_fingerprint,
+) -> str:
+    return sha256_hex(
+        {
+            "strategy_id": strategy_id,
+            "strategy_version": strategy_version,
+            "parameter_set_id": parameter_set_id,
+            "symbol": symbol,
+            "source_timeframe": source_timeframe,
+            "source_candle_close_utc": source_candle_close_utc,
+            "setup_fingerprint": setup_fingerprint,
+        }
+    )
 ```
 
 **Frozen record + post-init validation** (`src/risk/types.py:103-150`):
@@ -272,6 +291,7 @@ class SizedResult:
     quantization_decision: str
     realized_risk: Decimal
     reason_code: str = "OK"
+
     def __post_init__(self) -> None:
         _require_non_empty(self.quantization_decision, "quantization_decision")
         if self.quantization_decision not in _QUANTIZATION_DECISIONS:
@@ -297,25 +317,34 @@ class SizedResult:
 **Lineage emission pattern** (`src/risk/quantization.py:207-220`):
 ```python
 import structlog
-structlog.get_logger().info("risk.quantize",
+
+structlog.get_logger().info(
+    "risk.quantize",
     raw_quantity=str(raw_quantity),
     rounded_quantity=str(rounded_quantity),
     realized_risk=str(realized_risk),
     realized_to_allowed_ratio=str(ratio),
-    reason_code=reason_code)
+    reason_code=reason_code,
+)
 ```
 
 **Stationary block bootstrap (stdlib-only)** (`docs/research/RESEARCH_PROTOCOL.md:217-224` + RESEARCH.md:343-360):
 ```python
 import random, statistics
-rng = random.Random(experiment_seed)        # seed recorded in experiment
+
+rng = random.Random(experiment_seed)  # seed recorded in experiment
+
+
 def stationary_bootstrap_mean(rs, probable=0.1, resamples=10_000):
-    n = len(rs); means = []
+    n = len(rs)
+    means = []
     for _ in range(resamples):
         sample, i = [], rng.randrange(n)
         while len(sample) < n:
-            sample.append(rs[i]); i = (i + 1) % n
-            if rng.random() < probable: i = rng.randrange(n)
+            sample.append(rs[i])
+            i = (i + 1) % n
+            if rng.random() < probable:
+                i = rng.randrange(n)
         means.append(statistics.fmean(sample))
     quantiles = statistics.quantiles(means, n=40)
     return statistics.fmean(rs), quantiles[0], quantiles[-1]
@@ -381,8 +410,12 @@ def stationary_bootstrap_mean(rs, probable=0.1, resamples=10_000):
 **Loading loop** (`tests/test_risk_parity.py:36-49`):
 ```python
 PHASE5_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase5"
+
+
 def _load_input(case_dir: Path) -> dict:
     return json.loads((case_dir / "input.json").read_text(encoding="utf-8"))
+
+
 def _load_expected(case_dir: Path) -> dict:
     return json.loads((case_dir / "expected.json").read_text(encoding="utf-8"))
 ```
@@ -515,9 +548,13 @@ def _find_float_calls(src: str) -> list[tuple[int, str]]:
             func = node.func
             if isinstance(func, ast.Name) and func.id == "float":
                 found[(node.lineno, lines[node.lineno - 1].strip())] = None
-            elif (isinstance(func, ast.Name) and func.id == "Decimal"
-                  and node.args and isinstance(node.args[0], ast.Constant)
-                  and isinstance(node.args[0].value, float)):
+            elif (
+                isinstance(func, ast.Name)
+                and func.id == "Decimal"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, float)
+            ):
                 found[(node.lineno, lines[node.lineno - 1].strip())] = None
         elif isinstance(node, ast.Constant):
             if isinstance(node.value, float):
@@ -532,11 +569,11 @@ def _find_float_calls(src: str) -> list[tuple[int, str]]:
 - Add the new scan list to `tests/test_domain_no_float.py:SCANNED_FILES`:
   ```python
   # Phase 6 plan 06-01 — pure backtest engine (D-05).
-  "src/backtest/__init__.py",
-  "src/backtest/simulator.py",
-  "src/backtest/costs.py",
-  "src/backtest/experiment.py",
-  "src/backtest/report.py",
+  ("src/backtest/__init__.py",)
+  ("src/backtest/simulator.py",)
+  ("src/backtest/costs.py",)
+  ("src/backtest/experiment.py",)
+  ("src/backtest/report.py",)
   ```
 - Plus a sibling `tests/test_backtest_no_float.py` (or extend the existing one) that calls the same `_find_float_calls` walker over the new files — keeps the WAVE-0 failures localized.
 - Keep the `Decimal(<float literal>)` walker entry — Phase 6 has fresh temptation to pass `Decimal(0.005)` from a `parameter_set.params[...]` value that may still be a `float` after a loader regression.

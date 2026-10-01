@@ -96,17 +96,26 @@ def _three_minute_bars(
         _mk_kline(
             open_ms=BASE_OPEN_MS,
             close_ms=BASE_OPEN_MS + INTERVAL_MS - 1,
-            open=o0, high=h0, low=l0, close=c0,
+            open=o0,
+            high=h0,
+            low=l0,
+            close=c0,
         ),
         _mk_kline(
             open_ms=BASE_OPEN_MS + INTERVAL_MS,
             close_ms=BASE_OPEN_MS + 2 * INTERVAL_MS - 1,
-            open=o1, high=h1, low=l1, close=c1,
+            open=o1,
+            high=h1,
+            low=l1,
+            close=c1,
         ),
         _mk_kline(
             open_ms=BASE_OPEN_MS + 2 * INTERVAL_MS,
             close_ms=BASE_OPEN_MS + 3 * INTERVAL_MS - 1,
-            open=o2, high=h2, low=l2, close=c2,
+            open=o2,
+            high=h2,
+            low=l2,
+            close=c2,
         ),
     ]
 

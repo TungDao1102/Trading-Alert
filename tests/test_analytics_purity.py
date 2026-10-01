@@ -91,9 +91,7 @@ def find_violations(source: str) -> list[tuple[int, str, str]]:
             if func.attr in _CLOCK_ATTRS:
                 add(node.lineno, f"ambient-clock: .{func.attr}()")
             elif (
-                isinstance(base, ast.Name)
-                and base.id == "time"
-                and func.attr in _TIME_MODULE_ATTRS
+                isinstance(base, ast.Name) and base.id == "time" and func.attr in _TIME_MODULE_ATTRS
             ):
                 add(node.lineno, f"ambient-clock: time.{func.attr}()")
             elif isinstance(base, ast.Name) and base.id == "random" and func.attr != "Random":

@@ -215,11 +215,7 @@ def dataset_identity(raw_root: Path, files: Iterable[Path]) -> str:
     entries: dict[str, str] = {}
     for path in files:
         entries[_relative_posix(raw_root, path)] = _file_sha256(path)
-    payload = {
-        "files": [
-            {"path": rel, "sha256": entries[rel]} for rel in sorted(entries)
-        ]
-    }
+    payload = {"files": [{"path": rel, "sha256": entries[rel]} for rel in sorted(entries)]}
     return sha256_hex(payload)
 
 
@@ -229,11 +225,7 @@ def dataset_identity(raw_root: Path, files: Iterable[Path]) -> str:
 
 
 def _require_midnight_utc(value: datetime, name: str) -> None:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() != timedelta(0)
-    ):
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() != timedelta(0):
         raise CaseInputRangeError(f"{name} must be a UTC-aware datetime")
     if (value.hour, value.minute, value.second, value.microsecond) != (0, 0, 0, 0):
         raise CaseInputRangeError(f"{name} must be at 00:00:00 UTC (whole UTC days only)")
@@ -256,24 +248,18 @@ def _validate(
         ("context_interval", context_interval),
     ):
         if interval not in INTERVAL_MS:
-            raise CaseInputError(
-                f"{label} {interval!r} is not one of {sorted(INTERVAL_MS)}"
-            )
+            raise CaseInputError(f"{label} {interval!r} is not one of {sorted(INTERVAL_MS)}")
     wanted = tuple(series)
     unknown = sorted(set(wanted) - set(SERIES_ALL))
     if unknown or not wanted:
-        raise CaseInputError(
-            f"series must be a non-empty subset of {SERIES_ALL}, got {wanted!r}"
-        )
+        raise CaseInputError(f"series must be a non-empty subset of {SERIES_ALL}, got {wanted!r}")
     _require_midnight_utc(start_utc, "start_utc")
     _require_midnight_utc(end_utc, "end_utc")
     if start_utc >= end_utc:
         raise CaseInputRangeError("start_utc must be before end_utc")
     if type(as_of_day_utc) is not date:
         raise CaseInputRangeError("as_of_day_utc must be a date (UTC day)")
-    cutoff = datetime(
-        as_of_day_utc.year, as_of_day_utc.month, as_of_day_utc.day, tzinfo=UTC
-    )
+    cutoff = datetime(as_of_day_utc.year, as_of_day_utc.month, as_of_day_utc.day, tzinfo=UTC)
     if end_utc > cutoff:
         raise CaseInputRangeError(
             f"end_utc {end_utc.isoformat()} is after the start of as_of_day_utc "
@@ -303,10 +289,7 @@ def _tick_files(
     out: list[Path] = []
     for day in days:
         day_dir = (
-            raw_root
-            / f"data_class={data_class}"
-            / f"symbol={symbol}"
-            / f"date={day.isoformat()}"
+            raw_root / f"data_class={data_class}" / f"symbol={symbol}" / f"date={day.isoformat()}"
         )
         if day_dir.is_dir():
             out.extend(sorted(day_dir.glob(f"{prefix}-*.parquet")))
@@ -416,12 +399,8 @@ def _read_rows(
     if frame.filter(pl.col("symbol") != symbol).height:
         raise CaseInputError(f"a published partition carries a symbol other than {symbol}")
     if interval is not None and frame.filter(pl.col("interval") != interval).height:
-        raise CaseInputError(
-            f"a published partition carries an interval other than {interval}"
-        )
-    return [
-        {col: _plain(row[col]) for col in columns} for row in frame.iter_rows(named=True)
-    ]
+        raise CaseInputError(f"a published partition carries an interval other than {interval}")
+    return [{col: _plain(row[col]) for col in columns} for row in frame.iter_rows(named=True)]
 
 
 def _epoch_ms(iso: str | int | None) -> int:
@@ -525,12 +504,18 @@ def build_case_input_data(
     if "trade" in wanted:
         used += strategy_files + context_files
         strategy_bars = _read_rows(
-            strategy_files, _BAR_COLUMNS, "open_time_utc",
-            symbol=symbol, interval=strategy_interval,
+            strategy_files,
+            _BAR_COLUMNS,
+            "open_time_utc",
+            symbol=symbol,
+            interval=strategy_interval,
         )
         context_bars = _read_rows(
-            context_files, _BAR_COLUMNS, "open_time_utc",
-            symbol=symbol, interval=context_interval,
+            context_files,
+            _BAR_COLUMNS,
+            "open_time_utc",
+            symbol=symbol,
+            interval=context_interval,
         )
     if "intrabar_1m" in wanted:
         used += minute_files
@@ -551,9 +536,7 @@ def build_case_input_data(
 
     step_ms = INTERVAL_MS[strategy_interval]
     if "intrabar_1m" in wanted:
-        intrabar = _group_intrabar(
-            strategy_bars, minutes, symbol=symbol, strategy_step_ms=step_ms
-        )
+        intrabar = _group_intrabar(strategy_bars, minutes, symbol=symbol, strategy_step_ms=step_ms)
     else:
         intrabar = {f"{symbol}|{bar['close_time_utc']}": None for bar in strategy_bars}
 

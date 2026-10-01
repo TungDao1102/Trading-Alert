@@ -318,9 +318,7 @@ def _trade_from_dict(t: dict[str, Any]) -> TradeRecord:
     return TradeRecord(**data)
 
 
-def _check_inputs_bind_record(
-    record: ExperimentRecord, simulator_inputs: dict[str, Any]
-) -> None:
+def _check_inputs_bind_record(record: ExperimentRecord, simulator_inputs: dict[str, Any]) -> None:
     """Fail closed unless the inputs reproduce the record's identity.
 
     CR-03: reproduce must run the RECORDED tuple, not whatever dict it
@@ -349,8 +347,7 @@ def _check_inputs_bind_record(
         mismatches.append("cost_model_hash != recorded cost_model_hash")
     if mismatches:
         raise ExperimentReproducibilityBroken(
-            "simulator_inputs do not bind to the recorded experiment: "
-            + "; ".join(mismatches)
+            "simulator_inputs do not bind to the recorded experiment: " + "; ".join(mismatches)
         )
 
 
@@ -444,9 +441,7 @@ def _require_baseline_params(
     fails the RR gate); simple-trend needs `minimum_rr < 2` (looser
     than the candidate gate).
     """
-    parameter_set = load_parameter_set(
-        case_input["strategy_id"], case_input["parameter_set_id"]
-    )
+    parameter_set = load_parameter_set(case_input["strategy_id"], case_input["parameter_set_id"])
     minimum_rr = Decimal(str(parameter_set.params["minimum_rr"]))
     if kind == "no_trade":
         if minimum_rr < Decimal("100"):

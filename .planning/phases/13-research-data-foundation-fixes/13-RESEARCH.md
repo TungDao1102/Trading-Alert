@@ -225,24 +225,27 @@ tests/  test_store_atomic.py, test_backfill_closed_day.py, test_mark_klines.py, 
 **Why the filter matters:** a 1000-row page of 1m bars is 16.7 h, so the last page routinely crosses `end_ms`; the current loop only filters `close_time <= now_ms` (`backfill.py:340-342`), so with a clamped `end_ms` alone, bars of the current day would still be buffered and published.
 ```python
 # Sketch (src/data/backfill.py) - Source: derived from backfill.py:301-342 + audit F-402 recommendation
-day_end_ms = align_to_day_start_ms(now_ms)          # start of the current UTC day, integer math
+day_end_ms = align_to_day_start_ms(now_ms)  # start of the current UTC day, integer math
 end_ms = min(end_ms, day_end_ms)
 ...
-closed = [k for k in raw_page
-          if int(k.close_time_utc.timestamp() * 1000) <= now_ms
-          and int(k.open_time_utc.timestamp() * 1000) < end_ms]
+closed = [
+    k
+    for k in raw_page
+    if int(k.close_time_utc.timestamp() * 1000) <= now_ms
+    and int(k.open_time_utc.timestamp() * 1000) < end_ms
+]
 ```
 Note the first and last day of a symbol's life are legitimately partial (listing mid-day, delivery mid-day). "All expected bars exist" in D-13 must be read as "the day has ended and the fetch covered through its end"; a hard 1440-bar completeness rule would leave a listing day unpublishable and stall the cursor.
 
 ### Pattern 2: Atomic immutable publish (D-14, F-408)
 ```python
 # Sketch (src/data/store.py) - keeps the existing FileExistsError guard at store.py:83-87
-tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")   # same directory => same volume => atomic
+tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")  # same directory => same volume => atomic
 try:
     group_to_write.write_parquet(tmp)
     with open(tmp, "rb+") as fh:
         os.fsync(fh.fileno())
-    if path.exists():                                     # no-overwrite guard stays
+    if path.exists():  # no-overwrite guard stays
         raise FileExistsError(...)
     os.replace(tmp, path)
 finally:
@@ -258,9 +261,13 @@ Adapter method (mirrors `klines`, `binance_usdm.py:548-576`):
 # Source: SDK 17.4.0 market_data_api.mark_price_kline_candlestick_data (GET /fapi/v1/markPriceKlines)
 response = await asyncio.to_thread(
     self._sdk.rest_api.mark_price_kline_candlestick_data,
-    symbol=symbol, interval=interval,  # type: ignore[arg-type]
-    start_time=start_ms, end_time=end_ms, limit=limit)
-raw = response.data()   # list[list], verified against a recorded live response
+    symbol=symbol,
+    interval=interval,  # type: ignore[arg-type]
+    start_time=start_ms,
+    end_time=end_ms,
+    limit=limit,
+)
+raw = response.data()  # list[list], verified against a recorded live response
 return [_row_to_mark_kline(symbol, interval, row) for row in raw]  # OHLC + times only
 ```
 Mark-kline bounds: bound each symbol's mark backfill start/end to the trade-kline range. Live probe: FTTUSDT mark klines begin 2022-04-14T00:00Z although `onboardDate` is 2022-04-14T07:00Z, and mark klines continue after delivery (FTT bars at 1668400020000 > delivery 1668398400000). Unbounded, the mark dataset would contain pre-listing and post-delisting rows the trade dataset lacks.
@@ -362,7 +369,7 @@ The freeze needs the network and hours of data; it cannot run in CI. Plan it as 
 #   or k.quote_volume < 0
 #   or k.trade_count <= 0
 # Change the last predicate to `k.trade_count < 0` and count zero-trade bars separately:
-zero_trade_bars = sum(1 for k in klines if k.trade_count == 0)   # telemetry only, never a rejection
+zero_trade_bars = sum(1 for k in klines if k.trade_count == 0)  # telemetry only, never a rejection
 # QualityVerdict gains `zero_trade_bars: int = 0` (default keeps existing constructors valid)
 ```
 
@@ -371,12 +378,12 @@ zero_trade_bars = sum(1 for k in klines if k.trade_count == 0)   # telemetry onl
 # Source: layout verified live 2026-09-30 (monthly/klines/FTTUSDT/1m/FTTUSDT-1m-2022-10.zip + .CHECKSUM)
 BASE = "https://data.binance.vision/data/futures/um"
 url = f"{BASE}/monthly/klines/{symbol}/{interval}/{symbol}-{interval}-{yyyy_mm}.zip"
-expected = (await client.get(url + ".CHECKSUM")).text.split()[0]      # "<sha256>  <filename>"
+expected = (await client.get(url + ".CHECKSUM")).text.split()[0]  # "<sha256>  <filename>"
 blob = (await client.get(url)).content
 if hashlib.sha256(blob).hexdigest() != expected:
-    raise ArchiveChecksumMismatch(url)                                 # fail closed
+    raise ArchiveChecksumMismatch(url)  # fail closed
 with zipfile.ZipFile(io.BytesIO(blob)) as z:
-    name = z.namelist()[0]                                              # single CSV
+    name = z.namelist()[0]  # single CSV
     rows = list(csv.reader(io.TextIOWrapper(z.open(name), encoding="utf-8")))
 # rows[0] is the header: open_time,open,high,low,close,volume,close_time,quote_volume,count,...
 # timestamps are epoch ms (verified 2022 and 2026 futures files); map rows[1:] through _row_to_kline
@@ -388,19 +395,26 @@ The `.CHECKSUM` file comes from the same origin as the zip, so it proves transpo
 # Source: scripts/decision_alignment/universe.py:53 currently reads (verbatim):
 #   FROZEN_CONTENT_SHA256: str | None = None
 doc = tomllib.loads(new_manifest_text)
-assert validate_manifest(doc) == []                       # UN-01 before anything is written
-digest = compute_content_sha256(doc)                      # same routine as `python -m ...universe <path>`
-witness_text = re.sub(r'^FROZEN_CONTENT_SHA256: str \| None = None$',
-                      f'FROZEN_CONTENT_SHA256: str | None = "{digest}"', src, count=1, flags=re.M)
+assert validate_manifest(doc) == []  # UN-01 before anything is written
+digest = compute_content_sha256(doc)  # same routine as `python -m ...universe <path>`
+witness_text = re.sub(
+    r"^FROZEN_CONTENT_SHA256: str \| None = None$",
+    f'FROZEN_CONTENT_SHA256: str | None = "{digest}"',
+    src,
+    count=1,
+    flags=re.M,
+)
 # write manifest and universe.py each via tmp + os.replace; operator commits both together
 ```
 
 ### Dataset identity (D-18)
 ```python
-files = sorted(paths)                                      # explicit list, posix-relative to data/raw
-entries = [{"path": p.relative_to(root).as_posix(),
-            "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p in files]
-dataset_id = sha256_hex({"files": entries})               # 64-hex -> ExperimentRecord.data_snapshot_id
+files = sorted(paths)  # explicit list, posix-relative to data/raw
+entries = [
+    {"path": p.relative_to(root).as_posix(), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
+    for p in files
+]
+dataset_id = sha256_hex({"files": entries})  # 64-hex -> ExperimentRecord.data_snapshot_id
 ```
 
 ## State of the Art

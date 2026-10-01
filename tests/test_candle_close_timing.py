@@ -152,9 +152,7 @@ def _shift_back(candles: list[Candle], hours: int) -> list[Candle]:
 # --------------------------------------------------------------------------- #
 
 
-def test_forming_candle_contributes_no_setup_signal(
-    phase4_candles, frozen_clock
-) -> None:
+def test_forming_candle_contributes_no_setup_signal(phase4_candles, frozen_clock) -> None:
     """Beh. 1: SETUP signals never reference a close that has not occurred.
 
     With the fixture shifted so the last bar closes at or before
@@ -224,9 +222,7 @@ def test_closed_candle_setup_detected_at_equals_source_close(
 # --------------------------------------------------------------------------- #
 
 
-def test_forming_candle_leak_variant_is_detected(
-    phase4_candles, frozen_clock
-) -> None:
+def test_forming_candle_leak_variant_is_detected(phase4_candles, frozen_clock) -> None:
     """Canary: emitting the forming close trips the absence check.
 
     A deliberately leaky helper (references the forming candle's

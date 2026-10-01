@@ -39,9 +39,7 @@ PHASE5_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase5"
 # V1 conservative cluster rule (D-03 + RESEARCH A3): directionally-aligned
 # BTC/ETH/SOL/XRP positions count as one cluster. The candidate's symbol
 # is supplied by the caller (the trade plan's symbol).
-CLUSTER_SYMBOLS: frozenset[str] = frozenset(
-    {"BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"}
-)
+CLUSTER_SYMBOLS: frozenset[str] = frozenset({"BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"})
 
 # Registry parameters (research baselines per RISK_MANAGEMENT §§4-5/8).
 # Values are ABSOLUTE quote amounts in USDT for an equity of 10000:
@@ -655,9 +653,9 @@ def test_positions_unreconciled_rejects() -> None:
         parameter_set=PARAMETERS,
         now_utc=FROZEN_NOW,
         ttl=timedelta(seconds=TTL_SECONDS),
-            positions_reconciled=False,
-            constraint_observed_at_utc=FROZEN_NOW,
-        )
+        positions_reconciled=False,
+        constraint_observed_at_utc=FROZEN_NOW,
+    )
     assert verdict.is_no_trade is True
     assert verdict.reason_code == "UNCERTAIN_ACCOUNT_STATE"
 
@@ -862,9 +860,7 @@ def test_resolve_absolute_thresholds_converts_rates() -> None:
         "daily_loss_warning_threshold": Decimal("0.005"),
         "daily_loss_stop_threshold": Decimal("0.01"),
     }
-    resolved = resolve_absolute_thresholds(
-        parameter_set=rates, equity=Decimal("10000")
-    )
+    resolved = resolve_absolute_thresholds(parameter_set=rates, equity=Decimal("10000"))
     assert resolved["max_open_positions"] == 2
     assert resolved["max_aggregate_open_risk"] == Decimal("100")
     assert resolved["cluster_cap"] == Decimal("50")
@@ -956,9 +952,7 @@ def _run_evaluate_risk(case_input: dict) -> PortfolioVerdict:
     constraints = _build_constraints(case_input["constraint_snapshot"])
     open_positions = _build_open_positions(case_input["open_positions"])
     daily_loss_raw = case_input["daily_loss_quote"]
-    daily_loss_quote = (
-        None if daily_loss_raw is None else Decimal(daily_loss_raw)
-    )
+    daily_loss_quote = None if daily_loss_raw is None else Decimal(daily_loss_raw)
     now_utc = datetime.fromisoformat(case_input["now_utc"])
     ttl = timedelta(seconds=int(case_input["ttl_seconds"]))
     cr = case_input["cost_rates"]
@@ -998,12 +992,8 @@ def _to_parity_dict(verdict: PortfolioVerdict) -> dict:
         "quantity_before_rounding": (
             None if sized is None else str(sized.quantity_before_rounding)
         ),
-        "quantity_after_rounding": (
-            None if sized is None else str(sized.quantity_after_rounding)
-        ),
-        "quantization_decision": (
-            None if sized is None else sized.quantization_decision
-        ),
+        "quantity_after_rounding": (None if sized is None else str(sized.quantity_after_rounding)),
+        "quantization_decision": (None if sized is None else sized.quantization_decision),
         "realized_risk": None if sized is None else str(sized.realized_risk),
         "reason_code": verdict.reason_code,
         "daily_state": verdict.daily_state.value,

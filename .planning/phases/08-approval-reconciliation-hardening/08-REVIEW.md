@@ -96,12 +96,14 @@ class Callback:
     action: ApprovalAction  # APPROVE vs SKIP_*, from the pressed button
     ...
 
+
 # replay.py — map the callback's action, not the stored row's action
 new_result = action_to_result(callback.action)
 # and reject a stored-action/callback-action mismatch explicitly
 if callback.action != approval.action:
-    raise ApprovalRejected(reason_code=RejectionReason.INVALIDATED,
-                           message="callback action != approval action")
+    raise ApprovalRejected(
+        reason_code=RejectionReason.INVALIDATED, message="callback action != approval action"
+    )
 ```
 Alternatively, mint one token per (plan, button) and store two approvals — but
 the current single-token wiring must then be replaced, not patched. Either way,
@@ -128,6 +130,8 @@ verdict).
 class SafeModeVerdict:
     is_no_trade: bool
     reason_code: str | None  # None == PASS; RECONCILIATION_REQUIRED == block
+
+
 # guard:
 return SafeModeVerdict(is_no_trade=False, reason_code=None)
 ```
@@ -581,8 +585,9 @@ with a misleading message on a live callback path.
 **Fix:** Reject explicitly at the top of the transition block:
 ```python
 if approval.action == ApprovalAction.SIMULATE:
-    raise ApprovalRejected(reason_code=RejectionReason.INVALIDATED,
-                           message="SIMULATE never transitions approval state")
+    raise ApprovalRejected(
+        reason_code=RejectionReason.INVALIDATED, message="SIMULATE never transitions approval state"
+    )
 ```
 
 ## Info

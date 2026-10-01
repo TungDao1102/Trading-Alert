@@ -110,20 +110,14 @@ def _parse_create_tables(sql: str) -> tuple[dict[str, _TableSpec], list[str]]:
             re.IGNORECASE,
         )
         if pk_match:
-            cols = tuple(
-                c.strip().strip('"').strip("'") for c in pk_match.group(1).split(",")
-            )
+            cols = tuple(c.strip().strip('"').strip("'") for c in pk_match.group(1).split(","))
             spec.pk = cols
             continue
-        if re.match(
-            r"(?:CONSTRAINT|FOREIGN KEY|UNIQUE|CHECK)\b", stripped, re.IGNORECASE
-        ):
+        if re.match(r"(?:CONSTRAINT|FOREIGN KEY|UNIQUE|CHECK)\b", stripped, re.IGNORECASE):
             continue
         assert current is not None  # narrowed: `current is None` continues above
         m = _COL_LINE.match(stripped)
-        type_head = (
-            m.group(2).strip().split()[0].split("(")[0].upper() if m else ""
-        )
+        type_head = m.group(2).strip().split()[0].split("(")[0].upper() if m else ""
         if m and type_head in _KNOWN_TYPES:
             name = m.group(1)
             norm = _norm_spec(m.group(2))
@@ -162,9 +156,7 @@ def main() -> int:
     for tbl in Base.metadata.sorted_tables:
         ddl = str(CreateTable(tbl).compile(engine))
         parsed, bad = _parse_create_tables(ddl)
-        model_tables[tbl.name] = parsed.get(
-            tbl.name, _TableSpec(columns={}, pk=())
-        )
+        model_tables[tbl.name] = parsed.get(tbl.name, _TableSpec(columns={}, pk=()))
         model_unparsed.extend(bad)
 
     migration_tables, migration_unparsed = _render_migration_ddl()
@@ -205,8 +197,7 @@ def main() -> int:
                 )
         if tuple(model_spec.pk) != tuple(migration_spec.pk):
             failures.append(
-                f"{tbl}: PK drift (model {model_spec.pk} vs "
-                f"migration {migration_spec.pk})"
+                f"{tbl}: PK drift (model {model_spec.pk} vs migration {migration_spec.pk})"
             )
 
     if failures:

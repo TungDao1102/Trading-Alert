@@ -96,13 +96,25 @@ A second problem appears once the kwarg is accepted: the adapter still never for
 The tests hide both problems because `FakeExecutionAdapter.place_algo_protective(**kwargs)` accepts anything.
 **Fix:**
 ```python
-async def place_algo_protective(self, *, symbol, side, algo_type, type, position_side,
-                                trigger_price, close_position, quantity, working_type,
-                                client_algo_id, reduce_only: bool | None = None):
+async def place_algo_protective(
+    self,
+    *,
+    symbol,
+    side,
+    algo_type,
+    type,
+    position_side,
+    trigger_price,
+    close_position,
+    quantity,
+    working_type,
+    client_algo_id,
+    reduce_only: bool | None = None,
+):
     if close_position and (quantity is not None or reduce_only):
         raise ValueError("closePosition=true is exclusive with quantity/reduceOnly")
     ...
-    reduce_only=(NewAlgoOrderReduceOnlyEnum.TRUE if reduce_only else None),
+    reduce_only = ((NewAlgoOrderReduceOnlyEnum.TRUE if reduce_only else None),)
 ```
 Also add a contract test that binds every fake-adapter call's kwargs against `inspect.signature(BinanceUsdmAdapter.<method>)`.
 
@@ -184,8 +196,12 @@ In a sync caller, every call also spins up and tears down a fresh event loop bet
 if approval.action is not ApprovalAction.APPROVE or approval.result is not ApprovalResult.APPROVED:
     return ExecutionOutcome(is_no_trade=True, reason_code=RejectionReason.INVALIDATED.value)
 tp = risk_kwargs["trade_plan"]
-if tp.plan_hash != callback.plan_hash or tp.plan_hash != approval.request_hash \
-        or tp.trade_plan_id != approval.trade_plan_id or expiry_utc != tp.expiry_utc:
+if (
+    tp.plan_hash != callback.plan_hash
+    or tp.plan_hash != approval.request_hash
+    or tp.trade_plan_id != approval.trade_plan_id
+    or expiry_utc != tp.expiry_utc
+):
     return ExecutionOutcome(is_no_trade=True, reason_code=RejectionReason.STALE_SETUP.value)
 ```
 Also add an idempotency check against persisted execution state (plan already submitted → replay existing outcome).

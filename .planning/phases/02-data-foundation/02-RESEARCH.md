@@ -202,8 +202,13 @@ class Kline:
     symbol: str
     interval: str
     open_time_utc: datetime  # tz-aware UTC
-    open: Decimal; high: Decimal; low: Decimal; close: Decimal
-    volume: Decimal; quote_volume: Decimal; trade_count: int
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
+    quote_volume: Decimal
+    trade_count: int
 ```
 
 ### Pattern 2: Deterministic paginated backfill
@@ -218,7 +223,8 @@ while cursor < window_end:
     sleep(weight_aware_delay(headers["X-MBX-USED-WEIGHT-1M"]))
     batch = [to_kline(r) for r in page if r.close_time < now_utc]  # drop forming candle
     verdict = quality.check(batch)  # fail-closed vs warn-flag per D-10
-    if verdict.structural_ok: store.publish(batch)
+    if verdict.structural_ok:
+        store.publish(batch)
     cursor = max_open_time(batch) + interval_ms
 ```
 
@@ -301,26 +307,37 @@ while cursor < window_end:
 # Source pattern: DATA_PIPELINE §6 rules; Polars lazy API per STACK.md
 import polars as pl
 
+
 def check_batch(df: pl.DataFrame) -> dict:
     dupes = df.filter(pl.col("open_time_utc").is_duplicated()).height
     ohlc_bad = df.filter(
-        (pl.col("high") < pl.col("open")) | (pl.col("high") < pl.col("close"))
-        | (pl.col("low") > pl.col("open")) | (pl.col("low") > pl.col("close"))
+        (pl.col("high") < pl.col("open"))
+        | (pl.col("high") < pl.col("close"))
+        | (pl.col("low") > pl.col("open"))
+        | (pl.col("low") > pl.col("close"))
         | (pl.col("high") < pl.col("low"))
     ).height
     regress = (df["open_time_utc"].diff() <= 0).fill_null(False).sum()
     # structural → fail closed; gaps → warn+flag (D-10)
-    structural_ok = (dupes == 0 and ohlc_bad == 0 and regress == 0)
+    structural_ok = dupes == 0 and ohlc_bad == 0 and regress == 0
     expected = (df["open_time_utc"].max() - df["open_time_utc"].min()) // interval_ms + 1
-    gaps = expected - df.height  # [ASSUMED arithmetic shape — verify interval_ms per timeframe at implementation]
-    return {"structural_ok": structural_ok, "duplicates": dupes,
-            "ohlc_violations": ohlc_bad, "regressions": regress, "gaps": gaps}
+    gaps = (
+        expected - df.height
+    )  # [ASSUMED arithmetic shape — verify interval_ms per timeframe at implementation]
+    return {
+        "structural_ok": structural_ok,
+        "duplicates": dupes,
+        "ohlc_violations": ohlc_bad,
+        "regressions": regress,
+        "gaps": gaps,
+    }
 ```
 
 ### DuckDB Hive-partitioned coverage view
 ```python
 # Source: Context7 /duckdb/duckdb-python — read_parquet hive_partitioning + from_parquet relation API [VERIFIED]
 import duckdb
+
 con = duckdb.connect()  # in-process :memory:; pass database= path to persist views
 con.execute("""
 CREATE OR REPLACE VIEW candles_v1 AS
@@ -336,6 +353,7 @@ FROM read_parquet('data/raw/interval=*/symbol=*/date=*/part.parquet', hive_parti
 ```python
 # Source: Context7 /websites/sqlalchemy_en_20 — official dialect docs [VERIFIED]
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+
 engine = create_async_engine("postgresql+psycopg://user:pass@localhost:5432/trading")
 Session = async_sessionmaker(engine, expire_on_commit=False)
 # Pool control variant: psycopg_pool.AsyncConnectionPool + poolclass=NullPool [VERIFIED same source]
@@ -346,8 +364,9 @@ Session = async_sessionmaker(engine, expire_on_commit=False)
 # Source: ENGINEERING_PRINCIPLES §8 + DATA_PIPELINE §7 (UTC store, display converts)
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo  # needs tzdata wheel on Windows [VERIFIED: PyPI tzdata 2026.4 exists]
+
 open_time_utc = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)  # persist this
-display = open_time_utc.astimezone(ZoneInfo("Asia/Ho_Chi_Minh"))     # display edge only (D-06)
+display = open_time_utc.astimezone(ZoneInfo("Asia/Ho_Chi_Minh"))  # display edge only (D-06)
 ```
 
 ## State of the Art

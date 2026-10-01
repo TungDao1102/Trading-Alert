@@ -36,9 +36,7 @@ PHASE7_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase7"
 # --------------------------------------------------------------------------- #
 
 
-def _make_rest_kline(
-    symbol: str, interval: str, open_utc: datetime, close_utc: datetime
-) -> Any:
+def _make_rest_kline(symbol: str, interval: str, open_utc: datetime, close_utc: datetime) -> Any:
     from src.adapters.binance_usdm import Kline
 
     return Kline(
@@ -75,11 +73,7 @@ class _PaginatingAdapter:
 
         self.calls.append(start_ms)
         assert start_ms is not None
-        page = [
-            k
-            for k in self._closes
-            if _datetime_to_ms(k.open_time_utc) >= start_ms
-        ][:limit]
+        page = [k for k in self._closes if _datetime_to_ms(k.open_time_utc) >= start_ms][:limit]
         return page
 
 
@@ -170,16 +164,11 @@ def test_callback_data_within_64_bytes_for_real_signal_id() -> None:
     for row in keyboard.inline_keyboard:
         for button in row:
             data = str(button.callback_data)
-            assert len(data.encode("utf-8")) <= 64, (
-                f"callback_data exceeds 64 bytes: {data!r}"
-            )
+            assert len(data.encode("utf-8")) <= 64, f"callback_data exceeds 64 bytes: {data!r}"
 
     # Deterministic: same id maps to same short data (idempotent sends).
     again = build_simulate_keyboard(long_id)
-    assert (
-        again.inline_keyboard[0][0].callback_data
-        == keyboard.inline_keyboard[0][0].callback_data
-    )
+    assert again.inline_keyboard[0][0].callback_data == keyboard.inline_keyboard[0][0].callback_data
 
 
 # --------------------------------------------------------------------------- #
@@ -238,9 +227,7 @@ def test_journal_callback_failure_never_triggers_resend() -> None:
     )
 
     assert outcome.kind == NotifyOutcomeKind.SENT
-    assert bot.calls == 1, (
-        f"journal fault must never multiply sends, got {bot.calls}"
-    )
+    assert bot.calls == 1, f"journal fault must never multiply sends, got {bot.calls}"
 
 
 def test_malformed_payload_yields_failed_without_send_or_raise() -> None:
@@ -322,11 +309,7 @@ def test_4h_close_routes_as_context_bar_not_setup_bar() -> None:
     with_4h = {**case_input, "feed_events": [*case_input["feed_events"], event_4h]}
     outcome = run_paper_tick(with_4h)
 
-    contexts = [
-        r
-        for r in outcome["no_trade_records"]
-        if r["reason_code"] == "CONTEXT_BAR"
-    ]
+    contexts = [r for r in outcome["no_trade_records"] if r["reason_code"] == "CONTEXT_BAR"]
     assert len(contexts) == 1, (
         f"4h close must yield exactly one CONTEXT_BAR, got {outcome['no_trade_records']}"
     )
@@ -394,9 +377,7 @@ def test_full_projection_is_non_vacuous_where_signal_only_is() -> None:
     full = _project_paper_verdicts_full(paper_outcomes)
 
     n_bars = len(case_input["strategy_bars"])
-    assert len(full) == n_bars, (
-        f"full projection must cover every bar, got {len(full)}/{n_bars}"
-    )
+    assert len(full) == n_bars, f"full projection must cover every bar, got {len(full)}/{n_bars}"
     # The anti-vacuity assertion: the old projection MUST be strictly
     # narrower here (it drops signal-less records), proving the new test
     # guards a real hole instead of re-pinning an already-covered shape.

@@ -79,9 +79,7 @@ def _coerce_money(value: object, field_name: str) -> Decimal:
         return Decimal(value)
     if isinstance(value, str):
         return Decimal(value)
-    raise TypeError(
-        f"{field_name} must be Decimal/str/int, got {type(value).__name__}"
-    )
+    raise TypeError(f"{field_name} must be Decimal/str/int, got {type(value).__name__}")
 
 
 def _parse_utc_aware(raw: object, field_name: str) -> datetime:
@@ -667,9 +665,7 @@ def _apply_costs(
     elif trade_record.exit_kind == "TP1":
         exit_leg_rate = cost_model.expected_slippage
     else:
-        raise ValueError(
-            f"unknown exit_kind {trade_record.exit_kind!r}: expected SL, TP1 or EOD"
-        )
+        raise ValueError(f"unknown exit_kind {trade_record.exit_kind!r}: expected SL, TP1 or EOD")
 
     quantity = trade_record.quantity
     entry_price = trade_record.entry_price
@@ -841,9 +837,7 @@ def run(case_input: dict[str, Any]) -> dict[str, Any]:
 
         # Risk pipeline.
         cost_rates = cost_rates_from_model(cost_model)
-        min_stop_distance_rate, max_cost_to_risk = guard_rates_from_params(
-            parameter_set.params
-        )
+        min_stop_distance_rate, max_cost_to_risk = guard_rates_from_params(parameter_set.params)
         verdict = evaluate_risk(
             trade_plan=trade_plan,
             candidate_position_side=signal.direction,

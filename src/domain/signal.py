@@ -29,9 +29,7 @@ def _require_utc_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     if value.utcoffset() != timedelta(0):
-        raise ValueError(
-            f"{field_name} must be UTC, got offset {value.utcoffset()}"
-        )
+        raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
 
 
 @dataclass(frozen=True)

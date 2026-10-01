@@ -175,8 +175,10 @@ parity with 429.)
 ```python
 # test against the real installed SDK surface:
 from binance_sdk_derivatives_trading_usds_futures import (
-    RateLimitBanError, TooManyRequestsError,
+    RateLimitBanError,
+    TooManyRequestsError,
 )
+
 assert _is_rate_limit(TooManyRequestsError("429")) is True
 assert _is_rate_limit(RateLimitBanError("418")) is True
 ```

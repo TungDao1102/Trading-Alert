@@ -36,9 +36,7 @@ def _require_utc_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     if value.utcoffset() != timedelta(0):
-        raise ValueError(
-            f"{field_name} must be UTC, got offset {value.utcoffset()}"
-        )
+        raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
 
 
 @dataclass(frozen=True)
@@ -75,9 +73,7 @@ class Callback:
         if not isinstance(self.raw_token, str) or self.raw_token == "":
             raise ValueError("raw_token must be a non-empty string")
         if not isinstance(self.chat_id, int):
-            raise TypeError(
-                f"chat_id must be int, got {type(self.chat_id).__name__}"
-            )
+            raise TypeError(f"chat_id must be int, got {type(self.chat_id).__name__}")
         for fname in (
             "plan_hash",
             "strategy_version",
@@ -89,16 +85,11 @@ class Callback:
                 raise ValueError(f"{fname} must be a non-empty string")
         if not isinstance(self.plan_hash, str) or len(self.plan_hash) != 64:
             raise ValueError("plan_hash must be a 64-char string")
-        if (
-            not isinstance(self.parameter_set_hash, str)
-            or len(self.parameter_set_hash) != 64
-        ):
+        if not isinstance(self.parameter_set_hash, str) or len(self.parameter_set_hash) != 64:
             raise ValueError("parameter_set_hash must be a 64-char string")
         _require_utc_aware(self.callback_at_utc, "callback_at_utc")
         if self.action is not None and not isinstance(self.action, ApprovalAction):
-            raise TypeError(
-                f"action must be ApprovalAction, got {type(self.action).__name__}"
-            )
+            raise TypeError(f"action must be ApprovalAction, got {type(self.action).__name__}")
 
 
 @dataclass(frozen=True)
@@ -188,9 +179,7 @@ def check_binding_full(
 
     # Gate 2: expiry (boundary inclusive — now_utc >= expiry_utc is expired).
     if now_utc >= expiry_utc:
-        return BindingCheck(
-            ok=False, reason_code=RejectionReason.APPROVAL_EXPIRED
-        )
+        return BindingCheck(ok=False, reason_code=RejectionReason.APPROVAL_EXPIRED)
 
     # Gate 3: plan-hash.
     if callback.plan_hash != approval.request_hash:
@@ -202,16 +191,12 @@ def check_binding_full(
         or callback.parameter_set_id != approval_parameter_set_id
         or callback.parameter_set_hash != approval_parameter_set_hash
     ):
-        return BindingCheck(
-            ok=False, reason_code=RejectionReason.INVALIDATED
-        )
+        return BindingCheck(ok=False, reason_code=RejectionReason.INVALIDATED)
 
     # Gate 5: token-hash.
     expected_hash = approval.approval_token_hash
     if not verify_token_hash(callback.raw_token, expected_hash):
-        return BindingCheck(
-            ok=False, reason_code=RejectionReason.INVALIDATED
-        )
+        return BindingCheck(ok=False, reason_code=RejectionReason.INVALIDATED)
 
     return BindingCheck(ok=True, reason_code=None)
 

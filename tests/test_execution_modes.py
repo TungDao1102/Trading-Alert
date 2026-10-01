@@ -80,15 +80,9 @@ def _build_protective_template(case_input: dict[str, Any]) -> Any:
         stop_loss_trigger_price=_coerce_decimal(
             pt["stop_loss_trigger_price"], "stop_loss_trigger_price"
         ),
-        tp1_trigger_price=_coerce_decimal(
-            pt["tp1_trigger_price"], "tp1_trigger_price"
-        ),
-        tp2_trigger_price=_coerce_decimal(
-            pt["tp2_trigger_price"], "tp2_trigger_price"
-        ),
-        tp1_quantity_fraction=_coerce_decimal(
-            pt["tp1_quantity_fraction"], "tp1_quantity_fraction"
-        ),
+        tp1_trigger_price=_coerce_decimal(pt["tp1_trigger_price"], "tp1_trigger_price"),
+        tp2_trigger_price=_coerce_decimal(pt["tp2_trigger_price"], "tp2_trigger_price"),
+        tp1_quantity_fraction=_coerce_decimal(pt["tp1_quantity_fraction"], "tp1_quantity_fraction"),
     )
 
 
@@ -145,9 +139,7 @@ def test_one_way_full_fill_yields_close_all_sl_tp1_qty_reduce_only_tp2_close_all
         expected["tp1_leg"]["trigger_price"], "tp1_trigger_price"
     )
     assert tp1["close_position"] is False
-    assert tp1["quantity"] == _coerce_decimal(
-        expected["tp1_leg"]["quantity"], "tp1_quantity"
-    )
+    assert tp1["quantity"] == _coerce_decimal(expected["tp1_leg"]["quantity"], "tp1_quantity")
     assert tp1["reduce_only"] is True
 
     # TP2 leg: close-all, no quantity, no reduceOnly.
@@ -243,9 +235,7 @@ def test_hedge_full_fill_yields_position_side_no_reduce_only() -> None:
     tp1 = result.tp1_leg
     assert tp1["position_side"] == expected["tp1_leg"]["position_side"]
     assert tp1["close_position"] is False
-    assert tp1["quantity"] == _coerce_decimal(
-        expected["tp1_leg"]["quantity"], "tp1_quantity"
-    )
+    assert tp1["quantity"] == _coerce_decimal(expected["tp1_leg"]["quantity"], "tp1_quantity")
     assert tp1["reduce_only"] is None  # NEVER reduceOnly in hedge.
 
     # TP2 leg: positionSide LONG, no reduceOnly, close-all.

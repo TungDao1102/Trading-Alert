@@ -203,9 +203,7 @@ def test_ema200_4h_warmup_short_prefix_invalid(parameter_set) -> None:
     assert frame.ema_200.reason_code == REASON_WARMUP_INSUFFICIENT
 
 
-def test_evaluate_returns_no_trade_on_warmup_short_prefix(
-    parameter_set, account_state
-) -> None:
+def test_evaluate_returns_no_trade_on_warmup_short_prefix(parameter_set, account_state) -> None:
     """Beh. 2b: evaluate on a warm-up-short prefix returns NO_TRADE with WARMUP_INSUFFICIENT.
 
     Both setup (1H) and context (4H) must have enough history to
@@ -272,9 +270,7 @@ def test_gap_injection_makes_spanning_features_invalid(
     assert frame.atr_14.reason_code == REASON_GAP_IN_SOURCE
 
 
-def test_gap_injection_returns_no_trade_never_bridged(
-    parameter_set, account_state
-) -> None:
+def test_gap_injection_returns_no_trade_never_bridged(parameter_set, account_state) -> None:
     """Beh. 3b: evaluate on gap-injected candles returns NO_TRADE, never bridges.
 
     The strategy gate must reject the gap-injected series as
@@ -455,9 +451,7 @@ def test_atr14_uses_wilder_alpha_not_ema_alpha() -> None:
     # Wilder recurrence: ATR_t = ((period-1) * ATR_{t-1} + TR_t) / period.
     period = 14
     atr_seed = sum(trs[:period]) / Decimal(str(period))
-    wilder_bar_14 = ((Decimal(str(period - 1)) * atr_seed) + trs[14]) / Decimal(
-        str(period)
-    )
+    wilder_bar_14 = ((Decimal(str(period - 1)) * atr_seed) + trs[14]) / Decimal(str(period))
 
     assert series[14].valid is True
     assert series[14].value == wilder_bar_14

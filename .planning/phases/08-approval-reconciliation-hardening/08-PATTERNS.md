@@ -254,13 +254,9 @@ SWEEPER_WAIT_MAX_SECONDS: int = 10
 class CancellerLike(Protocol):
     """Anything that quacks like the project adapter for order/algo cancel."""
 
-    async def cancel_normal_order(
-        self, *, symbol: str, orig_client_order_id: str
-    ) -> object: ...
+    async def cancel_normal_order(self, *, symbol: str, orig_client_order_id: str) -> object: ...
 
-    async def cancel_algo_order(
-        self, *, symbol: str, client_algo_id: str
-    ) -> object: ...
+    async def cancel_algo_order(self, *, symbol: str, client_algo_id: str) -> object: ...
 ```
 
 **Per-symbol try/except isolation + journal-first** (mirrors supervisor.py lines 262-291):
@@ -322,9 +318,7 @@ def check_portfolio(
     # Sort positions deterministically (Pitfall 4 — non-deterministic
     # iteration). Sort by (symbol, position_side) so two position lists
     # with different insertion orders yield identical verdicts.
-    sorted_positions = sorted(
-        open_positions, key=lambda p: (p.symbol, p.position_side)
-    )
+    sorted_positions = sorted(open_positions, key=lambda p: (p.symbol, p.position_side))
     # ... gates 1..4 ...
     # All gates passed.
     return PortfolioVerdict(...)
@@ -542,12 +536,8 @@ class ApprovalRow(Base):
     result: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     approval_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    requested_at_utc: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    acted_at_utc: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    requested_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    acted_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 ```
 
 **Add row + mapper:**
@@ -596,9 +586,7 @@ def upgrade() -> None:
         sa.Column("short_id", sa.String(length=64), nullable=False),
         sa.Column("signal_id", sa.String(length=128), nullable=False),
         sa.Column("trade_plan_id", sa.String(length=128), nullable=False),
-        sa.Column(
-            "created_at_utc", sa.DateTime(timezone=True), nullable=False
-        ),
+        sa.Column("created_at_utc", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("short_id"),
     )
     op.create_index(
@@ -698,6 +686,7 @@ class _FakeApprovalStore:
 ```python
 def test_format_approval_renders_all_12_aprv01_fields() -> None:
     from src.paper.notify import format_simulate  # if extended to approvals
+
     payload = _make_payload()
     text = format_simulate(**payload)
     assert "BTCUSDT" in text  # 1. symbol
@@ -728,6 +717,7 @@ assert len(skip_data.encode("utf-8")) <= 64
 ```python
 class FakeReconcileAdapter:
     """Fake Binance reconciler adapter."""
+
     def __init__(self) -> None:
         self.cancel_calls: list[dict[str, Any]] = []
         self._open_orders: list[Any] = []
@@ -760,6 +750,7 @@ class FakeReconcileAdapter:
 ```python
 def test_derive_client_order_id_is_deterministic() -> None:
     from src.approval.order_ids import derive_client_order_id
+
     plan_hash = "a" * 64
     role = "ENTRY"
     ids = {derive_client_order_id(plan_hash=plan_hash, role_code=role) for _ in range(100)}
@@ -768,6 +759,7 @@ def test_derive_client_order_id_is_deterministic() -> None:
 
 def test_derive_client_order_id_role_codes_never_collide() -> None:
     from src.approval.order_ids import derive_client_order_id
+
     plan_hash = "a" * 64
     id_entry = derive_client_order_id(plan_hash=plan_hash, role_code="ENTRY")
     id_stop = derive_client_order_id(plan_hash=plan_hash, role_code="STOP_LOSS")
@@ -855,9 +847,7 @@ def _require_utc_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     if value.utcoffset() != timedelta(0):
-        raise ValueError(
-            f"{field_name} must be UTC, got offset {value.utcoffset()}"
-        )
+        raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
 ```
 
 ### Adapter-Boundary Isolation (SDK / PTB containment)
@@ -902,8 +892,10 @@ RESYNC_MAX_DELAY_SECONDS: int = 120
 RESYNC_WAIT_MULTIPLIER_SECONDS: int = 1
 RESYNC_WAIT_MAX_SECONDS: int = 60
 
+
 def _is_transient(exc: BaseException) -> bool:
     return not isinstance(exc, (ValueError, KeyError, TypeError))
+
 
 retry = tenacity.retry_if_exception(_is_transient)
 stop = tenacity.stop_after_attempt(RESYNC_MAX_ATTEMPTS) | tenacity.stop_after_delay(
@@ -923,6 +915,7 @@ wait = tenacity.wait_random_exponential(
 
 ```python
 from src.domain.canonical import sha256_hex
+
 
 def derive_client_order_id(*, plan_hash: str, role_code: str) -> str:
     digest = sha256_hex(

@@ -124,9 +124,7 @@ def _load_views(
             # not break the statement (or worse, inject SQL).
             glob_lit = glob_pat.replace("'", "''")
             try:
-                hits = con.execute(
-                    f"SELECT count(*) FROM glob('{glob_lit}')"
-                ).fetchone()
+                hits = con.execute(f"SELECT count(*) FROM glob('{glob_lit}')").fetchone()
                 n = int(hits[0]) if hits else 0
             except duckdb.Error:
                 n = 0
@@ -152,8 +150,7 @@ def _load_views(
             con.execute(stmt)
         except duckdb.Error as exc:
             raise RuntimeError(
-                "coverage view failed to build: "
-                f"{stmt.splitlines()[0][:120]}: {exc}"
+                f"coverage view failed to build: {stmt.splitlines()[0][:120]}: {exc}"
             ) from exc
 
 
@@ -196,6 +193,7 @@ def _columns_for_view(view_name: str) -> str:
             "CAST(NULL AS TIMESTAMP) AS funding_time_utc"
         )
     return "CAST(NULL AS TIMESTAMP) AS __empty"
+
 
 def _format_utc(dt: datetime | None) -> str:
     if dt is None:
@@ -621,12 +619,8 @@ def _live5_to_json(report: CoverageReport) -> str:
             {
                 "symbol": r.symbol,
                 "tf": r.tf,
-                "historical_data_start_utc": (
-                    r.start_utc.isoformat() if r.start_utc else None
-                ),
-                "historical_data_end_utc": (
-                    r.end_utc.isoformat() if r.end_utc else None
-                ),
+                "historical_data_start_utc": (r.start_utc.isoformat() if r.start_utc else None),
+                "historical_data_end_utc": (r.end_utc.isoformat() if r.end_utc else None),
                 "rows": r.rows,
                 "gap_count": r.gap_count,
             }
@@ -699,12 +693,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "symbol": args.symbol,
                 "tf": r.tf,
-                "historical_data_start_utc": (
-                    r.start_utc.isoformat() if r.start_utc else None
-                ),
-                "historical_data_end_utc": (
-                    r.end_utc.isoformat() if r.end_utc else None
-                ),
+                "historical_data_start_utc": (r.start_utc.isoformat() if r.start_utc else None),
+                "historical_data_end_utc": (r.end_utc.isoformat() if r.end_utc else None),
                 "rows": r.rows,
             }
             for r in rows

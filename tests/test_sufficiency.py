@@ -34,9 +34,7 @@ def _dt(ms: int) -> datetime:
     return _EPOCH + timedelta(milliseconds=ms)
 
 
-def _kline(
-    symbol: str, interval: str, open_ms: int, *, flat: bool = False
-) -> Kline:
+def _kline(symbol: str, interval: str, open_ms: int, *, flat: bool = False) -> Kline:
     step = _STEP_MS[interval]
     price = Decimal("100.00")
     return Kline(
@@ -388,9 +386,7 @@ def test_split_boundaries_use_integer_arithmetic_on_odd_spans() -> None:
 def _split_report(tmp_path: Path, *, data_start: int, data_end: int) -> Any:
     raw = tmp_path / "raw"
     _publish_trade(raw, "BTCUSDT", "1m", data_start, data_end)
-    window = _window(
-        interval="1m", start_ms=data_start, end_ms=data_end, cause="FULL_DEPTH"
-    )
+    window = _window(interval="1m", start_ms=data_start, end_ms=data_end, cause="FULL_DEPTH")
     return _report(
         raw,
         [window],
@@ -467,15 +463,11 @@ def test_flat_tail_is_warned_not_failed(tmp_path: Path) -> None:
     assert {r.symbol: r.cause for r in report.rows} == {"FLATUSDT": "OK", "LIVEUSDT": "OK"}
     assert report.missing_data is False  # a warning, never a failure
     text = render_report_table(report)
-    assert any(
-        line.startswith("WARNING") and "FLATUSDT" in line for line in text.splitlines()
-    )
+    assert any(line.startswith("WARNING") and "FLATUSDT" in line for line in text.splitlines())
     assert not any("LIVEUSDT" in line for line in text.splitlines() if "WARNING" in line)
 
 
-def test_validate_subcommand(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_validate_subcommand(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     from src.data.sufficiency import main, write_report_json
 
     good = tmp_path / "good.json"

@@ -45,6 +45,7 @@ domain purity precedent. This barrel re-exports the public symbols.
 The package is dependency-free by construction. Any future plan that wants
 to add a third-party dependency here must first lift D-10.
 """
+
 from __future__ import annotations
 
 from .features import compute_features, ema_update, true_range
@@ -99,17 +100,13 @@ def _require_utc_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     if value.utcoffset() != timedelta(0):
-        raise ValueError(
-            f"{field_name} must be UTC, got offset {value.utcoffset()}"
-        )
+        raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
 
 
 def _require_decimal(value: object, field_name: str) -> None:
     """Reject non-Decimal values for money/qty/price fields (D-12)."""
     if not isinstance(value, Decimal):
-        raise TypeError(
-            f"{field_name} must be Decimal, got {type(value).__name__}"
-        )
+        raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
 
 
 def _require_positive(value: Decimal, field_name: str) -> None:
@@ -137,9 +134,7 @@ class AccountState:
         _require_decimal(self.risk_rate, "risk_rate")
         _require_positive(self.equity, "equity")
         if not (Decimal("0") < self.risk_rate <= Decimal("1")):
-            raise ValueError(
-                f"risk_rate {self.risk_rate} must be in (0, 1]"
-            )
+            raise ValueError(f"risk_rate {self.risk_rate} must be in (0, 1]")
 ```
 
 **PlanResult discriminator envelope** (`src/core/types.py:341-368`):
@@ -160,14 +155,10 @@ class PlanResult:
         _require_non_empty(self.reason_code, "reason_code")
         if self.is_no_trade:
             if self.trade_plan is not None:
-                raise ValueError(
-                    "PlanResult: is_no_trade=True requires trade_plan=None"
-                )
+                raise ValueError("PlanResult: is_no_trade=True requires trade_plan=None")
         else:
             if self.trade_plan is None:
-                raise ValueError(
-                    "PlanResult: is_no_trade=False requires a TradePlan"
-                )
+                raise ValueError("PlanResult: is_no_trade=False requires a TradePlan")
 ```
 
 **SymbolFilters mirror** (`src/adapters/binance_usdm.py:99-122`):
@@ -223,6 +214,7 @@ quantity_after_rounding = suggested_quantity  # Phase 5 floors; planner passes t
 **Pinned-prec helpers to reuse** (`src/core/_decimal.py:22-58`):
 ```python
 _PREC = 28
+
 
 def _q(x: Decimal | int | str) -> Decimal:
     """Build a Decimal from a string/int (never from a float)."""
@@ -340,9 +332,7 @@ def _require_utc_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     if value.utcoffset() != timedelta(0):
-        raise ValueError(
-            f"{field_name} must be UTC, got offset {value.utcoffset()}"
-        )
+        raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
 ```
 
 **Apply to `check_portfolio()`:** Signature `(*, sized: SizedResult, candidate_risk: Decimal, open_positions: Sequence[OpenPosition], daily_loss_quote: Decimal | None, parameter_set: ParameterSet, now_utc: datetime, ttl: timedelta) -> PortfolioVerdict` (pure — sorts positions deterministically per Pitfall 4).
@@ -415,7 +405,7 @@ class RejectionReason(str, Enum):
 **Apply:** Add the D-05 fine-grained codes (verbatim values — D-10 discipline):
 ```python
 # Phase 5 D-05 additions — extend GLOSSARY §9 to match.
-QUANTIZATION_REJECT = ...   # already present, retained
+QUANTIZATION_REJECT = ...  # already present, retained
 MIN_QTY_REJECT = "MIN_QTY_REJECT"
 NOTIONAL_REJECT = "NOTIONAL_REJECT"
 UTILIZATION_REJECT = "UTILIZATION_REJECT"
@@ -431,6 +421,7 @@ UNCERTAIN_ACCOUNT_STATE = "UNCERTAIN_ACCOUNT_STATE"
 ```python
 class DailyState(str, Enum):
     """GLOSSARY §8 — Daily PnL state machine (D-03)."""
+
     NORMAL = "NORMAL"
     WARNING = "WARNING"
     DAILY_STOP = "DAILY_STOP"
@@ -506,8 +497,8 @@ INT_KEYS = frozenset(
         # Detector volatility knob — Phase 04 review fix (CR-01).
         "atr_period",
         # ----- Phase 5 D-05 additions -----
-        "max_open_positions",                      # count, not a rate
-        "constraint_snapshot_ttl_seconds",         # duration in seconds
+        "max_open_positions",  # count, not a rate
+        "constraint_snapshot_ttl_seconds",  # duration in seconds
     }
 )
 ```
@@ -758,17 +749,13 @@ def _mk_filters(
 @pytest.fixture(scope="session")
 def phase4_parameters() -> dict:
     """Load the pinned registry set (trend-pullback/baseline-v1)."""
-    return json.loads(
-        (PHASE4_FIXTURES_DIR / "parameters.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PHASE4_FIXTURES_DIR / "parameters.json").read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="session")
 def phase4_expected_features() -> dict:
     """Load the byte-exact expected feature values for the tracer slice."""
-    return json.loads(
-        (PHASE4_FIXTURES_DIR / "expected_features.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PHASE4_FIXTURES_DIR / "expected_features.json").read_text(encoding="utf-8"))
 ```
 
 **Expected fixture shape** (`tests/fixtures/phase4/expected_plans.json:1-25`):
@@ -896,6 +883,8 @@ Recommend option 1 (extend SCANNED_FILES) — single guard, one place to extend 
 # Phase 4 fixtures directory (plan 04-01).
 PHASE4_FIXTURES_DIR = FIXTURES_DIR / "phase4"
 ...
+
+
 @pytest.fixture(scope="session")
 def phase4_candles() -> list[dict]:
     """Load the hand-built 1H + 4H closed candle CSV for the tracer slice."""
@@ -906,9 +895,7 @@ def phase4_candles() -> list[dict]:
 @pytest.fixture(scope="session")
 def phase4_parameters() -> dict:
     """Load the pinned registry set (trend-pullback/baseline-v1)."""
-    return json.loads(
-        (PHASE4_FIXTURES_DIR / "parameters.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PHASE4_FIXTURES_DIR / "parameters.json").read_text(encoding="utf-8"))
 ```
 
 **Apply:** Append to `tests/conftest.py`:
@@ -928,11 +915,13 @@ def phase5_parity_cases() -> list[dict]:
     for case_dir in sorted(PHASE5_FIXTURES_DIR.iterdir()):
         if not case_dir.is_dir():
             continue
-        cases.append({
-            "name": case_dir.name,
-            "input": json.loads((case_dir / "input.json").read_text(encoding="utf-8")),
-            "expected": json.loads((case_dir / "expected.json").read_text(encoding="utf-8")),
-        })
+        cases.append(
+            {
+                "name": case_dir.name,
+                "input": json.loads((case_dir / "input.json").read_text(encoding="utf-8")),
+                "expected": json.loads((case_dir / "expected.json").read_text(encoding="utf-8")),
+            }
+        )
     return cases
 
 

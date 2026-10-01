@@ -192,9 +192,12 @@ from binance_sdk_derivatives_trading_usds_futures.websocket_streams import (
 from binance_sdk_derivatives_trading_usds_futures.websocket_streams.models.enums import (
     KlineCandlestickStreamsIntervalEnum,  # '1m','1h','4h' members verified present
 )
+
 # (self, symbol, interval, id=None) -> RequestStreamHandle
-ws.kline_candlestick_streams(symbol="btcusdt", interval=KlineCandlestickStreamsIntervalEnum.INTERVAL_1h)
-ws.connect(url, configuration)        # raw or combined-stream URL
+ws.kline_candlestick_streams(
+    symbol="btcusdt", interval=KlineCandlestickStreamsIntervalEnum.INTERVAL_1h
+)
+ws.connect(url, configuration)  # raw or combined-stream URL
 ws.reconnect(connection, configuration)  # on unsolicited drop; schedule_reconnect exists too
 ```
 ```python
@@ -214,8 +217,12 @@ else:
 # Source: https://tenacity.readthedocs.io/en/latest/ (CITED) + adapter surface verified
 from tenacity import retry, stop_after_attempt, stop_after_delay, wait_random_exponential
 
-@retry(stop=(stop_after_attempt(7) | stop_after_delay(120)),
-       wait=wait_random_exponential(multiplier=1, max=60), reraise=True)
+
+@retry(
+    stop=(stop_after_attempt(7) | stop_after_delay(120)),
+    wait=wait_random_exponential(multiplier=1, max=60),
+    reraise=True,
+)
 async def reconnect_and_resync(symbol, interval, last_close_utc):
     await ws_reconnect()
     # Source: src/adapters/binance_usdm.py — (self, symbol, interval,
@@ -239,12 +246,16 @@ class SignalStatus(str, Enum):
     SKIPPED_BUSY = "SKIPPED_BUSY"
     EXPIRED = "EXPIRED"
     INVALIDATED = "INVALIDATED"
+
+
 class ApprovalAction(str, Enum):
     SIMULATE = "SIMULATE"
     APPROVE = "APPROVE"
     SKIP_USER = "SKIP_USER"
     SKIP_BUSY = "SKIP_BUSY"
     CANCEL = "CANCEL"
+
+
 class ApprovalResult(str, Enum):
     PENDING = "PENDING"
     APPROVED = "APPROVED"
@@ -330,15 +341,15 @@ from src.core import compute_features, evaluate, plan
 from src.risk import size_position, quantize, check_portfolio, evaluate_risk
 from src.backtest import resolve_intrabar, build_cost_model, assert_cost_model_binds_registry
 
-features = compute_features(closed_1h + closed_4h_ctx)   # invalid flags honored
+features = compute_features(closed_1h + closed_4h_ctx)  # invalid flags honored
 setup = evaluate(features, account_state, strategy_version, config)
 if setup.is_no_trade:
-    journal(reason_code=setup.reason_code)               # NO_TRADE is data
+    journal(reason_code=setup.reason_code)  # NO_TRADE is data
     return
 trade_plan = plan(setup, ...)
-sized = size_position(...)        # modeled costs included
-qty = quantize(...)              # floor+reject; NO_TRADE preferred over round-up
-verdict = check_portfolio(...)   # absolute amounts; converted by caller
+sized = size_position(...)  # modeled costs included
+qty = quantize(...)  # floor+reject; NO_TRADE preferred over round-up
+verdict = check_portfolio(...)  # absolute amounts; converted by caller
 outcome = resolve_intrabar(plan=trade_plan, intrabar_1m=...)  # SL-first simulated fill
 ```
 
@@ -347,13 +358,20 @@ outcome = resolve_intrabar(plan=trade_plan, intrabar_1m=...)  # SL-first simulat
 # Source: PTB stable docs via Context7 (CITED) + docs/integration/TELEGRAM.md §§4-5
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-keyboard = [[InlineKeyboardButton("SIMULATE-recorded", callback_data=f"SIM:{signal_id}"),
-             InlineKeyboardButton("SKIP (Phase 8)", callback_data=f"SKIP:{signal_id}")]]
-text = (f"{symbol} {direction} {setup_type}\nEntry {entry_min}–{entry_max} | SL {sl} | "
-        f"TP {tps} | RR {rr} | risk {risk} | exp {expiry} | inv {invalidation}\n"
-        f"Exposure {exposure} | Reasons {reason_codes}")  # all 12 APRV-01 fields
-await bot.send_message(chat_id=AUTHORIZED_CHAT, text=text,
-                       reply_markup=InlineKeyboardMarkup(keyboard))
+keyboard = [
+    [
+        InlineKeyboardButton("SIMULATE-recorded", callback_data=f"SIM:{signal_id}"),
+        InlineKeyboardButton("SKIP (Phase 8)", callback_data=f"SKIP:{signal_id}"),
+    ]
+]
+text = (
+    f"{symbol} {direction} {setup_type}\nEntry {entry_min}–{entry_max} | SL {sl} | "
+    f"TP {tps} | RR {rr} | risk {risk} | exp {expiry} | inv {invalidation}\n"
+    f"Exposure {exposure} | Reasons {reason_codes}"
+)  # all 12 APRV-01 fields
+await bot.send_message(
+    chat_id=AUTHORIZED_CHAT, text=text, reply_markup=InlineKeyboardMarkup(keyboard)
+)
 # No Application/poller in Phase 7 — callbacks are inert labels until Phase 8 hardens them.
 ```
 
@@ -363,7 +381,7 @@ await bot.send_message(chat_id=AUTHORIZED_CHAT, text=text,
 pinned = load_parameter_set(strategy_id, parameter_set_id)  # hash pinned at stream start
 current = load_parameter_set(strategy_id, parameter_set_id)  # re-read each tick
 if current.parameter_set_hash != pinned.parameter_set_hash:
-    open_new_epoch(pinned, current)   # evidence windows stay per-epoch; never rewrite
+    open_new_epoch(pinned, current)  # evidence windows stay per-epoch; never rewrite
     halt_evidence_claim("REGISTRY_DIFF")
 ```
 

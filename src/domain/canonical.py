@@ -57,13 +57,9 @@ def canonical_scalars(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, (set, frozenset)):
-        raise TypeError(
-            "unordered set in canonical hash input — use a sorted list"
-        )
+        raise TypeError("unordered set in canonical hash input — use a sorted list")
     if isinstance(value, float):
-        raise TypeError(
-            "float in canonical hash input — use Decimal/str/int"
-        )
+        raise TypeError("float in canonical hash input — use Decimal/str/int")
     # str/int/bool/None pass through; anything else → json TypeError
     return value
 

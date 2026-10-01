@@ -91,9 +91,7 @@ class FakeAdapter:
     async def open_interest(self, symbol: str) -> OiSnapshot:
         self.oi_calls.append(symbol)
         if not self._oi:
-            raise RuntimeError(
-                f"FakeAdapter.open_interest: no response queued for {symbol}"
-            )
+            raise RuntimeError(f"FakeAdapter.open_interest: no response queued for {symbol}")
         nxt = self._oi.pop(0)
         if isinstance(nxt, Exception):
             raise nxt
@@ -199,9 +197,11 @@ async def test_oi_tick_writes_one_snapshot_per_live5_and_advances_watermarks_ato
     assert result.gaps_recorded == 0
 
     # 5 watermark rows, one per symbol, all data_class='oi'.
-    wms = session.execute(
-        select(CollectorWatermark).order_by(CollectorWatermark.symbol)
-    ).scalars().all()
+    wms = (
+        session.execute(select(CollectorWatermark).order_by(CollectorWatermark.symbol))
+        .scalars()
+        .all()
+    )
     assert len(wms) == len(LIVE_5)
     for sym in LIVE_5:
         wm = next(w for w in wms if w.symbol == sym)
@@ -288,7 +288,7 @@ async def test_oi_skipped_tick_records_expected_vs_observed_no_interpolation(
     downstream treats the gap as missing, NEVER as an interpolated zero.
     """
     expected = datetime(2026, 9, 19, 11, 55, tzinfo=UTC)  # when it SHOULD have run
-    observed = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)   # when we noticed (5 min late)
+    observed = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)  # when we noticed (5 min late)
     # No OI responses queued — adapter is never called on skip.
     adapter = FakeAdapter()
 
@@ -348,9 +348,11 @@ async def test_funding_sweep_uses_separate_partition_and_watermark_namespace(
     assert result.gaps_recorded == 0
 
     # Watermark rows use data_class='funding', NOT 'oi'.
-    wms = session.execute(
-        select(CollectorWatermark).order_by(CollectorWatermark.symbol)
-    ).scalars().all()
+    wms = (
+        session.execute(select(CollectorWatermark).order_by(CollectorWatermark.symbol))
+        .scalars()
+        .all()
+    )
     assert len(wms) == len(LIVE_5)
     for wm in wms:
         assert wm.data_class == "funding"
@@ -361,9 +363,7 @@ async def test_funding_sweep_uses_separate_partition_and_watermark_namespace(
     assert len(funding_files) == len(LIVE_5)
 
     oi_dir = tmp_path / "data_class=oi"
-    assert not oi_dir.exists(), (
-        "funding sweep must NOT create the oi partition directory"
-    )
+    assert not oi_dir.exists(), "funding sweep must NOT create the oi partition directory"
 
 
 # --------------------------------------------------------------------------- #
@@ -411,9 +411,7 @@ async def test_open_interest_history_harvest_tagged_as_research_grade(
 
     # Harvest files live under a distinct partition (NOT data_class=oi).
     research_dir = tmp_path / "data_class=oi_research"
-    assert research_dir.exists(), (
-        "research harvest partition directory must exist"
-    )
+    assert research_dir.exists(), "research harvest partition directory must exist"
     research_files = sorted(research_dir.rglob("*.parquet"))
     assert len(research_files) == len(LIVE_5)
 
@@ -502,14 +500,18 @@ async def test_run_once_tick_publishes_snapshots_and_watermarks(
     assert funding.funding_inserted == len(LIVE_5)
     assert funding.gaps_recorded == 0
     # Both watermark namespaces advanced.
-    oi_marks = session.execute(
-        select(CollectorWatermark).where(CollectorWatermark.data_class == "oi")
-    ).scalars().all()
-    funding_marks = session.execute(
-        select(CollectorWatermark).where(
-            CollectorWatermark.data_class == "funding"
+    oi_marks = (
+        session.execute(select(CollectorWatermark).where(CollectorWatermark.data_class == "oi"))
+        .scalars()
+        .all()
+    )
+    funding_marks = (
+        session.execute(
+            select(CollectorWatermark).where(CollectorWatermark.data_class == "funding")
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert len(oi_marks) == len(LIVE_5)
     assert len(funding_marks) == len(LIVE_5)
 
@@ -620,9 +622,7 @@ def test_collector_module_has_real_entrypoint() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _mk_funding_tick_at(
-    symbol: str, ts: datetime, *, rate: str = "0.0001"
-) -> FundingTick:
+def _mk_funding_tick_at(symbol: str, ts: datetime, *, rate: str = "0.0001") -> FundingTick:
     """Build a funding tick for a specific funding timestamp."""
     return FundingTick(
         symbol=symbol,
@@ -692,9 +692,7 @@ async def test_funding_sweep_retry_after_transient_failure_makes_progress(
     wms = {
         w.symbol: w
         for w in session.execute(
-            select(CollectorWatermark).where(
-                CollectorWatermark.data_class == "funding"
-            )
+            select(CollectorWatermark).where(CollectorWatermark.data_class == "funding")
         )
         .scalars()
         .all()
@@ -702,9 +700,7 @@ async def test_funding_sweep_retry_after_transient_failure_makes_progress(
     assert set(wms) == set(universe)
     assert _epoch_ms(wms["BTCUSDT"].last_tick_utc) == _epoch_ms(event_e)
     assert _epoch_ms(wms["ETHUSDT"].last_tick_utc) == _epoch_ms(event_e)
-    assert (
-        len(sorted((tmp_path / "data_class=funding").rglob("*.parquet"))) == 2
-    )
+    assert len(sorted((tmp_path / "data_class=funding").rglob("*.parquet"))) == 2
 
 
 async def test_funding_sweep_treats_existing_tick_file_as_covered(
@@ -836,9 +832,7 @@ async def test_funding_sweep_mixed_watermarks_fresh_symbol_uses_bounded_bootstra
         [_mk_funding_tick_at("BTCUSDT", observed - timedelta(hours=8))],
         [_mk_funding_tick_at("ETHUSDT", observed - timedelta(hours=8))],
     ]
-    adapter = FakeAdapter(
-        oi_responses=oi_snapshots, funding_responses=funding_ticks
-    )
+    adapter = FakeAdapter(oi_responses=oi_snapshots, funding_responses=funding_ticks)
 
     await _run_once_tick(
         adapter,  # type: ignore[arg-type]
@@ -860,8 +854,7 @@ async def test_funding_sweep_mixed_watermarks_fresh_symbol_uses_bounded_bootstra
     assert len(eth_calls) == 1
     assert btc_calls[0][1] == int(stale.timestamp() * 1000) + 1
     assert eth_calls[0][1] == expected_eth_start, (
-        f"fresh ETH must use bounded bootstrap {expected_eth_start}, "
-        f"got {eth_calls[0][1]}"
+        f"fresh ETH must use bounded bootstrap {expected_eth_start}, got {eth_calls[0][1]}"
     )
 
 
@@ -907,9 +900,7 @@ def _sqlite_url(tmp_path: Path) -> str:
     return url
 
 
-def _install_fake_adapter(
-    monkeypatch: pytest.MonkeyPatch, adapter: FakeAdapter
-) -> list[int]:
+def _install_fake_adapter(monkeypatch: pytest.MonkeyPatch, adapter: FakeAdapter) -> list[int]:
     """Patch the collector's adapter factory; returns a construction counter."""
     built: list[int] = []
 
@@ -1198,9 +1189,7 @@ async def test_funding_history_paginates_and_advances_watermark(
     assert _epoch_ms(wm.last_tick_utc) == _epoch_ms(history[-1].funding_time_utc)
 
 
-async def test_funding_history_rerun_writes_nothing_twice(
-    session: Session, tmp_path: Path
-) -> None:
+async def test_funding_history_rerun_writes_nothing_twice(session: Session, tmp_path: Path) -> None:
     from src.data.collector import backfill_funding_history
 
     history = _funding_series("BTCUSDT", 25)
@@ -1283,9 +1272,7 @@ async def test_funding_history_null_mark_price_is_stored_as_null(
         assert frame["funding_rate"].to_list() == [Decimal("0.0001000000")]
 
 
-async def test_funding_history_isolates_failing_symbol(
-    session: Session, tmp_path: Path
-) -> None:
+async def test_funding_history_isolates_failing_symbol(session: Session, tmp_path: Path) -> None:
     from src.data.collector import backfill_funding_history
 
     adapter = FakeAdapter(
@@ -1324,9 +1311,7 @@ async def test_funding_history_isolates_failing_symbol(
     assert wm_symbols == {"ETHUSDT"}
 
 
-async def test_funding_history_page_cap_is_reported(
-    session: Session, tmp_path: Path
-) -> None:
+async def test_funding_history_page_cap_is_reported(session: Session, tmp_path: Path) -> None:
     import structlog
     from src.data.collector import backfill_funding_history
 
@@ -1471,9 +1456,7 @@ async def test_clock_probe_negative_offset_beyond_threshold_warns() -> None:
         )
 
     assert offset == -3000
-    assert [e["log_level"] for e in logs if e["event"] == "collector.clock_offset"] == [
-        "warning"
-    ]
+    assert [e["log_level"] for e in logs if e["event"] == "collector.clock_offset"] == ["warning"]
 
 
 async def test_clock_probe_failure_never_blocks_start() -> None:
@@ -1532,9 +1515,7 @@ def test_main_once_probes_clock_once_and_probe_failure_keeps_exit_code(
     assert sorted(failing.oi_calls) == sorted(LIVE_5)
 
 
-def test_healthcheck_does_not_probe_clock(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_healthcheck_does_not_probe_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from src.data.collector import main
 
     list_path = _write_collect_list(tmp_path / "list.toml", list(LIVE_5))

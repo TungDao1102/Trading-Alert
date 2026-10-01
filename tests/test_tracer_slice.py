@@ -112,9 +112,7 @@ def _frozen_clock(ms: int) -> callable:
     return _now
 
 
-def _read_published_symbol(
-    raw_root: Path, *, symbol: str, interval: str
-) -> pl.DataFrame:
+def _read_published_symbol(raw_root: Path, *, symbol: str, interval: str) -> pl.DataFrame:
     """Read back everything we published for one symbol/interval."""
     pattern = raw_root / f"interval={interval}" / f"symbol={symbol}"
     if not pattern.exists():
@@ -141,9 +139,9 @@ async def test_paginator_drops_forming_candle_at_frozen_clock(tmp_path: Path) ->
     # forming bar straddles midnight, so the frozen clock is 00:10 UTC on
     # 2023-11-15: both bars open inside the closed day 2023-11-14 (the
     # close_time filter, not the day cut, is what drops the forming bar).
-    closed_open = 1_700_000_000_000          # fixed reference instant
-    forming_open = closed_open + 3_600_000   # +1h (next bar starts here)
-    frozen_at = 1_700_007_000_000            # 2023-11-15T00:10Z, in the forming bar
+    closed_open = 1_700_000_000_000  # fixed reference instant
+    forming_open = closed_open + 3_600_000  # +1h (next bar starts here)
+    frozen_at = 1_700_007_000_000  # 2023-11-15T00:10Z, in the forming bar
 
     closed_bar = _mk_kline(
         open_ms=closed_open,
@@ -158,7 +156,7 @@ async def test_paginator_drops_forming_candle_at_frozen_clock(tmp_path: Path) ->
 
     cfg = BackfillConfig(
         interval_ms=3_600_000,
-        pace_seconds=0,            # no pacing noise in this test
+        pace_seconds=0,  # no pacing noise in this test
     )
 
     result = await backfill_symbol_interval(
@@ -180,9 +178,7 @@ async def test_paginator_drops_forming_candle_at_frozen_clock(tmp_path: Path) ->
     assert result.structural_rejections == 0
     assert result.pages == 1
 
-    published = _read_published_symbol(
-        tmp_path, symbol="BTCUSDT", interval="1h"
-    )
+    published = _read_published_symbol(tmp_path, symbol="BTCUSDT", interval="1h")
     assert published.height == 1
     assert published["open_time_utc"][0].timestamp() * 1000 == closed_open
 
@@ -234,13 +230,9 @@ async def test_duplicate_open_time_across_pages_collapse_to_one_row(
     assert result.pages == 2
     assert result.structural_rejections == 0
 
-    published = _read_published_symbol(
-        tmp_path, symbol="BTCUSDT", interval="1h"
-    )
+    published = _read_published_symbol(tmp_path, symbol="BTCUSDT", interval="1h")
     assert published.height == 3
-    open_times_ms = [
-        int(t.timestamp() * 1000) for t in published["open_time_utc"].to_list()
-    ]
+    open_times_ms = [int(t.timestamp() * 1000) for t in published["open_time_utc"].to_list()]
     assert open_times_ms == [
         base,
         base + 3_600_000,
@@ -310,9 +302,7 @@ async def test_paced_fetch_sleeps_and_retries_429_then_resumes(
     # transparent at this layer). The two adapter calls above prove the
     # retry actually happened.
     assert result.pages == 1
-    assert any(s > 0 for s in sleep_calls), (
-        f"expected pacing sleep, got {sleep_calls}"
-    )
+    assert any(s > 0 for s in sleep_calls), f"expected pacing sleep, got {sleep_calls}"
 
 
 # --------------------------------------------------------------------------- #

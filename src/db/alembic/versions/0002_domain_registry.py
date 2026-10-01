@@ -42,9 +42,7 @@ def upgrade() -> None:
         sa.Column("direction", sa.String(length=8), nullable=False),
         sa.Column("setup_type", sa.String(length=64), nullable=False),
         sa.Column("source_timeframe", sa.String(length=8), nullable=False),
-        sa.Column(
-            "source_candle_close_utc", sa.DateTime(timezone=True), nullable=False
-        ),
+        sa.Column("source_candle_close_utc", sa.DateTime(timezone=True), nullable=False),
         sa.Column("detected_at_utc", sa.DateTime(timezone=True), nullable=False),
         sa.Column("status", sa.String(length=16), nullable=False),
         sa.Column("expires_at_utc", sa.DateTime(timezone=True), nullable=False),
@@ -89,9 +87,7 @@ def upgrade() -> None:
         sa.Column("created_at_utc", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("trade_plan_id"),
     )
-    op.create_index(
-        "ix_trade_plans_signal_id", "trade_plans", ["signal_id"], unique=False
-    )
+    op.create_index("ix_trade_plans_signal_id", "trade_plans", ["signal_id"], unique=False)
 
     # ---------- approvals (Phase 3, plan 03-04) -----------------------------
     op.create_table(
@@ -110,12 +106,8 @@ def upgrade() -> None:
         sa.Column("request_hash", sa.String(length=64), nullable=False),
         sa.PrimaryKeyConstraint("approval_id"),
     )
-    op.create_index(
-        "ix_approvals_trade_plan_id", "approvals", ["trade_plan_id"], unique=False
-    )
-    op.create_index(
-        "ix_approvals_signal_id", "approvals", ["signal_id"], unique=False
-    )
+    op.create_index("ix_approvals_trade_plan_id", "approvals", ["trade_plan_id"], unique=False)
+    op.create_index("ix_approvals_signal_id", "approvals", ["signal_id"], unique=False)
 
     # ---------- orders (Phase 3, plan 03-04) --------------------------------
     op.create_table(
@@ -146,12 +138,8 @@ def upgrade() -> None:
         sa.Column("canceled_at_utc", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("order_id"),
     )
-    op.create_index(
-        "ix_orders_trade_plan_id", "orders", ["trade_plan_id"], unique=False
-    )
-    op.create_index(
-        "ix_orders_position_id", "orders", ["position_id"], unique=False
-    )
+    op.create_index("ix_orders_trade_plan_id", "orders", ["trade_plan_id"], unique=False)
+    op.create_index("ix_orders_position_id", "orders", ["position_id"], unique=False)
     op.create_index(
         "ix_orders_symbol_submitted",
         "orders",
@@ -180,9 +168,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("order_id", "exchange_trade_id", name="uq_fills_order_trade"),
     )
     op.create_index("ix_fills_order_id", "fills", ["order_id"], unique=False)
-    op.create_index(
-        "ix_fills_symbol_time", "fills", ["symbol", "fill_time_utc"], unique=False
-    )
+    op.create_index("ix_fills_symbol_time", "fills", ["symbol", "fill_time_utc"], unique=False)
 
     # ---------- positions (Phase 3, plan 03-04) ------------------------------
     op.create_table(

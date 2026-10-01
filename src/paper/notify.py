@@ -162,9 +162,7 @@ def format_simulate(
     if not setup:
         raise ValueError("setup must be a non-empty string")
     if entry_min > entry_max:
-        raise ValueError(
-            f"entry_min ({entry_min}) must be <= entry_max ({entry_max})"
-        )
+        raise ValueError(f"entry_min ({entry_min}) must be <= entry_max ({entry_max})")
     if not take_profits:
         raise ValueError("take_profits must be a non-empty list")
     for field_name, value in (
@@ -176,8 +174,7 @@ def format_simulate(
         if value.tzinfo is None:
             raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     tp_lines = "\n".join(
-        f"  TP{idx + 1}: {price} ({fraction})"
-        for idx, (price, fraction) in enumerate(take_profits)
+        f"  TP{idx + 1}: {price} ({fraction})" for idx, (price, fraction) in enumerate(take_profits)
     )
     reasons = ", ".join(reason_codes) if reason_codes else "(none)"
     return (
@@ -276,8 +273,7 @@ async def notify_simulate(
     try:
         async for attempt in AsyncRetrying(
             stop=(
-                stop_after_attempt(NOTIFY_MAX_ATTEMPTS)
-                | stop_after_delay(NOTIFY_MAX_DELAY_SECONDS)
+                stop_after_attempt(NOTIFY_MAX_ATTEMPTS) | stop_after_delay(NOTIFY_MAX_DELAY_SECONDS)
             ),
             wait=wait_random_exponential(
                 multiplier=NOTIFY_WAIT_MULTIPLIER_SECONDS,

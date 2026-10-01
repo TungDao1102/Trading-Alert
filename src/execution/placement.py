@@ -67,9 +67,7 @@ class ProtectiveTemplate:
         ):
             value = getattr(self, fname)
             if not isinstance(value, Decimal):
-                raise TypeError(
-                    f"{fname} must be Decimal, got {type(value).__name__}"
-                )
+                raise TypeError(f"{fname} must be Decimal, got {type(value).__name__}")
         if self.tp1_quantity_fraction < Decimal("0") or self.tp1_quantity_fraction > Decimal("1"):
             raise ValueError(
                 f"tp1_quantity_fraction must be in [0, 1], got {self.tp1_quantity_fraction}"
@@ -99,13 +97,9 @@ class ProtectiveSizing:
             raise ValueError("reason_code must be a non-empty string")
         if self.is_no_trade:
             if self.reason_code == _OK:
-                raise ValueError(
-                    "ProtectiveSizing: is_no_trade=True requires reason_code != 'OK'"
-                )
+                raise ValueError("ProtectiveSizing: is_no_trade=True requires reason_code != 'OK'")
             if self.sl_leg is not None or self.tp1_leg is not None or self.tp2_leg is not None:
-                raise ValueError(
-                    "ProtectiveSizing: is_no_trade=True requires all legs to be None"
-                )
+                raise ValueError("ProtectiveSizing: is_no_trade=True requires all legs to be None")
         else:
             if self.reason_code != _OK:
                 raise ValueError(
@@ -113,9 +107,7 @@ class ProtectiveSizing:
                     f"got {self.reason_code!r}"
                 )
             if self.sl_leg is None or self.tp1_leg is None or self.tp2_leg is None:
-                raise ValueError(
-                    "ProtectiveSizing: is_no_trade=False requires all legs populated"
-                )
+                raise ValueError("ProtectiveSizing: is_no_trade=False requires all legs populated")
 
 
 # --------------------------------------------------------------------------- #
@@ -245,13 +237,9 @@ def quantize_protective_qty(
         floored value and reason_code is the canonical rejection.
     """
     if not isinstance(raw_quantity, Decimal):
-        raise TypeError(
-            f"raw_quantity must be Decimal, got {type(raw_quantity).__name__}"
-        )
+        raise TypeError(f"raw_quantity must be Decimal, got {type(raw_quantity).__name__}")
     if not isinstance(reference_price, Decimal):
-        raise TypeError(
-            f"reference_price must be Decimal, got {type(reference_price).__name__}"
-        )
+        raise TypeError(f"reference_price must be Decimal, got {type(reference_price).__name__}")
 
     # Defensive: zero/negative step_size or reference_price → fail closed.
     if constraint_snapshot.quantity_step_size <= Decimal("0"):
@@ -301,9 +289,7 @@ def build_sl_leg(
         The mode-correct SL leg dict (same keys as every sized leg).
     """
     if position_mode not in (_ONE_WAY, _HEDGE):
-        raise ValueError(
-            f"position_mode must be {_ONE_WAY!r} or {_HEDGE!r}, got {position_mode!r}"
-        )
+        raise ValueError(f"position_mode must be {_ONE_WAY!r} or {_HEDGE!r}, got {position_mode!r}")
     if candidate_position_side not in (_LONG, _SHORT):
         raise ValueError(
             f"candidate_position_side must be {_LONG!r} or {_SHORT!r}, "
@@ -358,13 +344,9 @@ def size_protectives_to_filled_qty(
         fail-closed rejection if the filled quantity is sub-minimum.
     """
     if not isinstance(filled_quantity, Decimal):
-        raise TypeError(
-            f"filled_quantity must be Decimal, got {type(filled_quantity).__name__}"
-        )
+        raise TypeError(f"filled_quantity must be Decimal, got {type(filled_quantity).__name__}")
     if position_mode not in (_ONE_WAY, _HEDGE):
-        raise ValueError(
-            f"position_mode must be {_ONE_WAY!r} or {_HEDGE!r}, got {position_mode!r}"
-        )
+        raise ValueError(f"position_mode must be {_ONE_WAY!r} or {_HEDGE!r}, got {position_mode!r}")
     if candidate_position_side not in (_LONG, _SHORT):
         raise ValueError(
             f"candidate_position_side must be {_LONG!r} or {_SHORT!r}, "

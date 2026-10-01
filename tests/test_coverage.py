@@ -121,12 +121,7 @@ def _seed_oi_snapshot(
     observed_dt = _dt.datetime.fromtimestamp(observed_ms / 1000, tz=_dt.UTC)
     day = observed_dt.date().isoformat()
     iso = observed_dt.strftime("%Y%m%dT%H%M%SZ")
-    out_dir = (
-        raw_root
-        / f"data_class={data_class}"
-        / f"symbol={symbol}"
-        / f"date={day}"
-    )
+    out_dir = raw_root / f"data_class={data_class}" / f"symbol={symbol}" / f"date={day}"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"tick-{iso}.parquet"
     df = pl.DataFrame(
@@ -694,10 +689,7 @@ def _utc(ms: int) -> _dt.datetime:
 
 
 def _publish_hours(raw_root: Path, hours: list[int]) -> list[Path]:
-    klines = [
-        _kline(open_ms=_DAY0_MS + h * _H, close_ms=_DAY0_MS + h * _H + _H - 1)
-        for h in hours
-    ]
+    klines = [_kline(open_ms=_DAY0_MS + h * _H, close_ms=_DAY0_MS + h * _H + _H - 1) for h in hours]
     return publish_batch(klines, interval="1h", symbol="BTCUSDT", raw_root=raw_root)
 
 
@@ -763,12 +755,8 @@ def _funding_gaps(files: list[Path]) -> list:
 def test_funding_jitter_is_not_a_gap_but_a_missing_tick_is(tmp_path: Path) -> None:
     jittered = [
         _seed_funding_tick(raw_root=tmp_path, symbol="BTCUSDT", funding_ms=_DAY0_MS + 4),
-        _seed_funding_tick(
-            raw_root=tmp_path, symbol="BTCUSDT", funding_ms=_DAY0_MS + 8 * _H + 8
-        ),
-        _seed_funding_tick(
-            raw_root=tmp_path, symbol="BTCUSDT", funding_ms=_DAY0_MS + 16 * _H + 12
-        ),
+        _seed_funding_tick(raw_root=tmp_path, symbol="BTCUSDT", funding_ms=_DAY0_MS + 8 * _H + 8),
+        _seed_funding_tick(raw_root=tmp_path, symbol="BTCUSDT", funding_ms=_DAY0_MS + 16 * _H + 12),
     ]
     assert _funding_gaps(jittered) == []
 
@@ -799,18 +787,14 @@ def _oi_gaps(files: list[Path]) -> list:
 
 def test_oi_gap_bound_is_twice_the_cadence(tmp_path: Path) -> None:
     ok = [
-        _seed_oi_snapshot(
-            raw_root=tmp_path, symbol="BTCUSDT", observed_ms=_DAY0_MS + i * 320_000
-        )
+        _seed_oi_snapshot(raw_root=tmp_path, symbol="BTCUSDT", observed_ms=_DAY0_MS + i * 320_000)
         for i in range(6)
     ]
     assert _oi_gaps(ok) == []
 
     other = tmp_path / "other"
     holed = [
-        _seed_oi_snapshot(
-            raw_root=other, symbol="BTCUSDT", observed_ms=_DAY0_MS + m * 60_000
-        )
+        _seed_oi_snapshot(raw_root=other, symbol="BTCUSDT", observed_ms=_DAY0_MS + m * 60_000)
         for m in (0, 5, 16, 21, 26)
     ]
     gaps = _oi_gaps(holed)

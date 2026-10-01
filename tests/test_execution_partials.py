@@ -144,15 +144,11 @@ def test_out_of_order_fills_fold_to_same_view_as_in_order() -> None:
 
     # Fills are sorted deterministically by (order_id, exchange_trade_id).
     assert len(result.fills) == len(expected["folded_position_view"]["fills"])
-    for actual, exp in zip(
-        result.fills, expected["folded_position_view"]["fills"], strict=True
-    ):
+    for actual, exp in zip(result.fills, expected["folded_position_view"]["fills"], strict=True):
         assert actual["order_id"] == exp["order_id"]
         assert actual["exchange_trade_id"] == exp["exchange_trade_id"]
         assert actual["fill_price"] == _coerce_decimal(exp["fill_price"], "fill_price")
-        assert actual["fill_quantity"] == _coerce_decimal(
-            exp["fill_quantity"], "fill_quantity"
-        )
+        assert actual["fill_quantity"] == _coerce_decimal(exp["fill_quantity"], "fill_quantity")
 
 
 # --------------------------------------------------------------------------- #
@@ -220,12 +216,9 @@ def test_folded_view_sorts_deterministically() -> None:
 
     # The fills are sorted by (order_id, exchange_trade_id).
     expected_order = [
-        (f["order_id"], f["exchange_trade_id"])
-        for f in expected["folded_position_view"]["fills"]
+        (f["order_id"], f["exchange_trade_id"]) for f in expected["folded_position_view"]["fills"]
     ]
-    actual_order = [
-        (f["order_id"], f["exchange_trade_id"]) for f in result1.fills
-    ]
+    actual_order = [(f["order_id"], f["exchange_trade_id"]) for f in result1.fills]
     assert actual_order == expected_order, (
         f"sort order mismatch: got {actual_order}, expected {expected_order}"
     )

@@ -136,8 +136,7 @@ def test_domain_mapper_registry_path_has_no_float_call() -> None:
         if found:
             offenders[rel] = found
     assert not offenders, (
-        "Decimal-only invariant violated (D-12) — float shapes "
-        f"found: {offenders}"
+        f"Decimal-only invariant violated (D-12) — float shapes found: {offenders}"
     )
 
 

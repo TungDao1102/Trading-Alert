@@ -46,9 +46,7 @@ def _require_utc_aware(value: datetime | None, field_name: str) -> None:
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     if value.utcoffset() != timedelta(0):
-        raise ValueError(
-            f"{field_name} must be UTC, got offset {value.utcoffset()}"
-        )
+        raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
 
 
 # --------------------------------------------------------------------------- #
@@ -219,18 +217,14 @@ def assemble_paper_record(
     # fail loudly with dedicated messages instead of falling through
     # to the generic case-mismatch error.
     if skip_reason is not None and expired_at_utc is not None:
-        raise ValueError(
-            "ambiguous outcome: skip_reason and expired_at_utc both set"
-        )
+        raise ValueError("ambiguous outcome: skip_reason and expired_at_utc both set")
     if skip_reason is not None and not skip_reason:
         raise ValueError("skip_reason must be a non-empty string")
 
     # Case 1: filled in simulation — system + user-executed-sim.
     if approval is not None and order is not None and fill is not None:
         if skip_reason is not None or expired_at_utc is not None:
-            raise ValueError(
-                "ambiguous outcome: filled legs with skip_reason/expired_at_utc set"
-            )
+            raise ValueError("ambiguous outcome: filled legs with skip_reason/expired_at_utc set")
         # The simulated approval acted_at_utc equals signal time + lag.
         simulated_acted_at_utc = signal_detected_at_utc + timedelta(
             seconds=APPROVAL_DELAY_LAG_SECONDS
@@ -471,9 +465,7 @@ def paper_records_digest(records: list[PaperRecord]) -> str:
                     else None
                 ),
                 "fill_time_utc": (
-                    record.fill_time_utc.isoformat()
-                    if record.fill_time_utc is not None
-                    else None
+                    record.fill_time_utc.isoformat() if record.fill_time_utc is not None else None
                 ),
             }
         )

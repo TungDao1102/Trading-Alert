@@ -109,25 +109,19 @@ def phase3_candles() -> list[dict]:
 @pytest.fixture(scope="session")
 def phase3_parameters() -> dict:
     """Load the pinned registry set."""
-    return json.loads(
-        (PHASE3_FIXTURES_DIR / "parameters.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PHASE3_FIXTURES_DIR / "parameters.json").read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="session")
 def phase3_expected_signals() -> dict:
     """Load the byte-exact expected signals (placeholder per D-09)."""
-    return json.loads(
-        (PHASE3_FIXTURES_DIR / "expected_signals.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PHASE3_FIXTURES_DIR / "expected_signals.json").read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="session")
 def phase3_expected_plans() -> dict:
     """Load the byte-exact expected plans (placeholder per D-09)."""
-    return json.loads(
-        (PHASE3_FIXTURES_DIR / "expected_plans.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PHASE3_FIXTURES_DIR / "expected_plans.json").read_text(encoding="utf-8"))
 
 
 # --------------------------------------------------------------------------- #
@@ -149,33 +143,25 @@ def phase4_candles() -> list[dict]:
 @pytest.fixture(scope="session")
 def phase4_parameters() -> dict:
     """Load the pinned registry set (trend-pullback/baseline-v1)."""
-    return json.loads(
-        (PHASE4_FIXTURES_DIR / "parameters.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PHASE4_FIXTURES_DIR / "parameters.json").read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="session")
 def phase4_expected_features() -> dict:
     """Load the byte-exact expected feature values for the tracer slice."""
-    return json.loads(
-        (PHASE4_FIXTURES_DIR / "expected_features.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PHASE4_FIXTURES_DIR / "expected_features.json").read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="session")
 def phase4_expected_signals() -> dict:
     """Load the byte-exact expected signals for the tracer slice."""
-    return json.loads(
-        (PHASE4_FIXTURES_DIR / "expected_signals.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PHASE4_FIXTURES_DIR / "expected_signals.json").read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="session")
 def phase4_expected_plans() -> dict:
     """Load the byte-exact expected plans for the tracer slice."""
-    return json.loads(
-        (PHASE4_FIXTURES_DIR / "expected_plans.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PHASE4_FIXTURES_DIR / "expected_plans.json").read_text(encoding="utf-8"))
 
 
 # --------------------------------------------------------------------------- #
@@ -194,11 +180,13 @@ def phase5_parity_cases() -> list[dict]:
     for case_dir in sorted(PHASE5_FIXTURES_DIR.iterdir()):
         if not case_dir.is_dir():
             continue
-        cases.append({
-            "name": case_dir.name,
-            "input": json.loads((case_dir / "input.json").read_text(encoding="utf-8")),
-            "expected": json.loads((case_dir / "expected.json").read_text(encoding="utf-8")),
-        })
+        cases.append(
+            {
+                "name": case_dir.name,
+                "input": json.loads((case_dir / "input.json").read_text(encoding="utf-8")),
+                "expected": json.loads((case_dir / "expected.json").read_text(encoding="utf-8")),
+            }
+        )
     return cases
 
 

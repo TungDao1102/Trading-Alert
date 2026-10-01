@@ -40,17 +40,13 @@ def _require_utc_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     if value.utcoffset() != timedelta(0):
-        raise ValueError(
-            f"{field_name} must be UTC, got offset {value.utcoffset()}"
-        )
+        raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
 
 
 def _require_decimal(value: object, field_name: str) -> None:
     """Reject non-Decimal values for money/qty/price fields (D-12)."""
     if not isinstance(value, Decimal):
-        raise TypeError(
-            f"{field_name} must be Decimal, got {type(value).__name__}"
-        )
+        raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
 
 
 def _require_positive(value: Decimal, field_name: str) -> None:
@@ -96,13 +92,9 @@ class Candle:
                 f"open_time_utc {self.open_time_utc} must be < close_time_utc {self.close_time_utc}"
             )
         if self.high < self.low:
-            raise ValueError(
-                f"high {self.high} must be >= low {self.low}"
-            )
+            raise ValueError(f"high {self.high} must be >= low {self.low}")
         if not (self.low <= self.open <= self.high):
-            raise ValueError(
-                f"open {self.open} must be within [low={self.low}, high={self.high}]"
-            )
+            raise ValueError(f"open {self.open} must be within [low={self.low}, high={self.high}]")
         if not (self.low <= self.close <= self.high):
             raise ValueError(
                 f"close {self.close} must be within [low={self.low}, high={self.high}]"
@@ -142,9 +134,7 @@ class FeatureOutput:
         _require_non_empty(self.reason_code, "reason_code")
         if self.valid:
             if self.value is None:
-                raise ValueError(
-                    "FeatureOutput: valid=True requires value to be Decimal"
-                )
+                raise ValueError("FeatureOutput: valid=True requires value to be Decimal")
         else:
             # WR-09: a stale value must never ride along on invalid —
             # the AND-gate's chokepoint type enforces "no value without
@@ -152,9 +142,7 @@ class FeatureOutput:
             # not downstream. Adapters needing last-known values carry
             # them in their own local type.
             if self.value is not None:
-                raise ValueError(
-                    "FeatureOutput: valid=False requires value=None"
-                )
+                raise ValueError("FeatureOutput: valid=False requires value=None")
 
 
 def _ok(value: Decimal) -> FeatureOutput:
@@ -256,19 +244,13 @@ class SetupResult:
     def __post_init__(self) -> None:
         _require_non_empty(self.reason_code, "reason_code")
         if self.reason_code not in _SETUP_REASONS:
-            raise ValueError(
-                f"SetupResult: unknown reason_code {self.reason_code!r}"
-            )
+            raise ValueError(f"SetupResult: unknown reason_code {self.reason_code!r}")
         if self.is_no_trade:
             if self.signal is not None:
-                raise ValueError(
-                    "SetupResult: is_no_trade=True requires signal=None"
-                )
+                raise ValueError("SetupResult: is_no_trade=True requires signal=None")
         else:
             if self.signal is None:
-                raise ValueError(
-                    "SetupResult: is_no_trade=False requires a Signal"
-                )
+                raise ValueError("SetupResult: is_no_trade=False requires a Signal")
 
 
 # --------------------------------------------------------------------------- #
@@ -322,9 +304,7 @@ class AccountState:
         _require_decimal(self.risk_rate, "risk_rate")
         _require_positive(self.equity, "equity")
         if not (Decimal("0") < self.risk_rate <= Decimal("1")):
-            raise ValueError(
-                f"risk_rate {self.risk_rate} must be in (0, 1]"
-            )
+            raise ValueError(f"risk_rate {self.risk_rate} must be in (0, 1]")
 
 
 # Local re-export to keep `types` self-contained for the discriminator
@@ -357,14 +337,10 @@ class PlanResult:
         _require_non_empty(self.reason_code, "reason_code")
         if self.is_no_trade:
             if self.trade_plan is not None:
-                raise ValueError(
-                    "PlanResult: is_no_trade=True requires trade_plan=None"
-                )
+                raise ValueError("PlanResult: is_no_trade=True requires trade_plan=None")
         else:
             if self.trade_plan is None:
-                raise ValueError(
-                    "PlanResult: is_no_trade=False requires a TradePlan"
-                )
+                raise ValueError("PlanResult: is_no_trade=False requires a TradePlan")
 
 
 __all__ = [

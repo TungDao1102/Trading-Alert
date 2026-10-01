@@ -22,9 +22,7 @@ from .enums import TradePlanStatus
 def _require_decimal(value: object, field_name: str) -> None:
     """Reject non-Decimal values for money/qty/price fields (D-12)."""
     if not isinstance(value, Decimal):
-        raise TypeError(
-            f"{field_name} must be Decimal, got {type(value).__name__}"
-        )
+        raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
 
 
 def _require_non_empty(value: str, field_name: str) -> None:
@@ -38,9 +36,7 @@ def _require_utc_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     if value.utcoffset() != timedelta(0):
-        raise ValueError(
-            f"{field_name} must be UTC, got offset {value.utcoffset()}"
-        )
+        raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
 
 
 @dataclass(frozen=True)

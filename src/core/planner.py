@@ -131,9 +131,7 @@ def _long_geometry(
             _add(zone_upper, height),
         )
     if strategy_id == "range-mr":
-        setup = _detect_range_mr_setup(
-            setup_candles=setup_candles, parameter_set=parameter_set
-        )
+        setup = _detect_range_mr_setup(setup_candles=setup_candles, parameter_set=parameter_set)
         if setup is None or setup[0] != "LONG":
             return (None, None, None, None)
         _direction, _setup_type, zone_upper, zone_lower = setup
@@ -182,9 +180,7 @@ def _short_geometry(
             _sub(zone_lower, height),
         )
     if strategy_id == "range-mr":
-        setup = _detect_range_mr_setup(
-            setup_candles=setup_candles, parameter_set=parameter_set
-        )
+        setup = _detect_range_mr_setup(setup_candles=setup_candles, parameter_set=parameter_set)
         if setup is None or setup[0] != "SHORT":
             return (None, None, None, None)
         _direction, _setup_type, zone_upper, zone_lower = setup

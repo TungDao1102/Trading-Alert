@@ -134,9 +134,7 @@ def write_manifest(payload_root: Path, manifest_path: Path) -> dict[str, str]:
     whose stored hash is immediately stale).
     """
     manifest: dict[str, str] = {}
-    files = sorted(
-        p for p in payload_root.rglob("*") if p.is_file() and p.name != MANIFEST_NAME
-    )
+    files = sorted(p for p in payload_root.rglob("*") if p.is_file() and p.name != MANIFEST_NAME)
     for path in files:
         rel = path.relative_to(payload_root).as_posix()
         manifest[rel] = _sha256_file(path)
@@ -201,9 +199,7 @@ def backup(
     write_manifest(bundle_root, manifest_path)
     bundle_sha256 = _sha256_file(manifest_path)
 
-    parquet_files = tuple(
-        p for p in (bundle_root / "parquet").rglob("*") if p.is_file()
-    )
+    parquet_files = tuple(p for p in (bundle_root / "parquet").rglob("*") if p.is_file())
     return BackupResult(
         bundle_root=bundle_root,
         pg_dump_path=pg_dump_path,
@@ -300,13 +296,10 @@ def _assert_safe_scratch_root(scratch_root: Path, bundle_root: Path) -> None:
     bundle = bundle_root.resolve()
     if resolved == bundle:
         raise ValueError(
-            f"refusing drill: --scratch-root {scratch_root} resolves to "
-            "the bundle root itself"
+            f"refusing drill: --scratch-root {scratch_root} resolves to the bundle root itself"
         )
     if resolved == Path(resolved.anchor):
-        raise ValueError(
-            f"refusing drill: --scratch-root {scratch_root} is a filesystem root"
-        )
+        raise ValueError(f"refusing drill: --scratch-root {scratch_root} is a filesystem root")
     for protected in (Path.home().resolve(), Path.cwd().resolve()):
         if resolved == protected:
             raise ValueError(
@@ -407,9 +400,7 @@ def run_drill(
     # bundle's pg.dump + every restored parquet file.
     candidate_files: list[Path] = []
     candidate_files.append(restore_pg_dump)
-    candidate_files.extend(
-        p for p in (scratch_root / "parquet").rglob("*") if p.is_file()
-    )
+    candidate_files.extend(p for p in (scratch_root / "parquet").rglob("*") if p.is_file())
     for path in candidate_files:
         try:
             rel = path.relative_to(scratch_root).as_posix()
@@ -426,9 +417,7 @@ def run_drill(
         actual = _sha256_file(path)
         if actual != expected:
             report.failed_files.append(rel)
-            report.messages.append(
-                f"{rel}: sha256 mismatch (expected {expected}, got {actual})"
-            )
+            report.messages.append(f"{rel}: sha256 mismatch (expected {expected}, got {actual})")
         else:
             report.restored_files.append(rel)
 
@@ -553,19 +542,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.cmd == "backup":
-        runner = (
-            _sqlite_fake_pg_dump_runner
-            if args.sqlite_fake_pg_dump
-            else _prod_pg_dump_runner
-        )
+        runner = _sqlite_fake_pg_dump_runner if args.sqlite_fake_pg_dump else _prod_pg_dump_runner
         result = backup(
             bundle_root=args.bundle_root,
             pg_dump_runner=runner,
             parquet_roots=tuple(args.parquet_roots),
             pg_dump_name=(
-                args.pg_dump_path.name
-                if args.pg_dump_path is not None
-                else DEFAULT_PG_DUMP_NAME
+                args.pg_dump_path.name if args.pg_dump_path is not None else DEFAULT_PG_DUMP_NAME
             ),
         )
         print(f"backup-OK bundle_root={args.bundle_root}")
@@ -597,10 +580,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             dry_run=args.dry_run,
         )
         verb = "would prune" if prune_report.dry_run else "pruned"
-        print(
-            f"prune-OK bundle_root={args.bundle_root} "
-            f"{verb}={len(prune_report.pruned_files)}"
-        )
+        print(f"prune-OK bundle_root={args.bundle_root} {verb}={len(prune_report.pruned_files)}")
         for key in prune_report.pruned_files:
             print(f"  {key}")
         return 0

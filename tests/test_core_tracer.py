@@ -150,9 +150,7 @@ def account_state() -> AccountState:
     )
 
 
-def _to_snapshot(
-    candles_1h: list[Candle], candles_4h: list[Candle]
-) -> MarketSnapshot:
+def _to_snapshot(candles_1h: list[Candle], candles_4h: list[Candle]) -> MarketSnapshot:
     return MarketSnapshot(
         symbol="BTCUSDT",
         setup_candles=candles_1h,
@@ -419,9 +417,7 @@ def test_tracer_is_pure_function_no_io() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_features_warmup_gates_for_ema200(
-    candles_4h: list[Candle], parameter_set
-) -> None:
+def test_features_warmup_gates_for_ema200(candles_4h: list[Candle], parameter_set) -> None:
     """Beh. 4: EMA200(4H) is invalid until 200 bars of history exist.
 
     With 60 bars of 4H history, the EMA200 warm-up must be insufficient;

@@ -92,10 +92,7 @@ def test_seed_resamples_and_evidence_kind_change_the_digest() -> None:
 
 def test_digest_is_independent_of_interpreter_hash_seed() -> None:
     """A fresh process under different PYTHONHASHSEED values reproduces the pin."""
-    script = (
-        "from tests.test_analytics_digest import _build\n"
-        "print(_build()[0].digest())\n"
-    )
+    script = "from tests.test_analytics_digest import _build\nprint(_build()[0].digest())\n"
     expected = load_expected(CASE)["section_digest"]
     for hash_seed in ("1", "12345"):
         env = {**os.environ, "PYTHONHASHSEED": hash_seed}

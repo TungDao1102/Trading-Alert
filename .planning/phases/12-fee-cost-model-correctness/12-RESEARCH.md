@@ -188,7 +188,9 @@ tests/fixtures/phase4/parameters.json  # + pins for the new sets (PA-01)
 **Example (target shape, not existing code):**
 ```python
 # src/risk/cost_rates.py  (stdlib + Decimal + src.core._decimal only)
-def per_unit_round_trip_cost(*, entry_price: Decimal, stop_price: Decimal, rates: CostRates) -> Decimal:
+def per_unit_round_trip_cost(
+    *, entry_price: Decimal, stop_price: Decimal, rates: CostRates
+) -> Decimal:
     entry_leg = _mul(entry_price, _add(rates.fee_rate_entry, rates.entry_slippage_rate))
     exit_leg = _mul(stop_price, _add(rates.fee_rate_exit, rates.exit_slippage_rate))
     return _add(entry_leg, exit_leg)
@@ -329,10 +331,11 @@ Also add a short subsection to `docs/integration/BINANCE.md` (§6 Orders or a ne
 **Adapter design (project pattern):**
 ```python
 @dataclass(frozen=True)
-class CommissionRates:        # in src/adapters/binance_usdm.py next to PositionModeResult
+class CommissionRates:  # in src/adapters/binance_usdm.py next to PositionModeResult
     symbol: str
     maker_rate: Decimal
     taker_rate: Decimal
+
 
 async def user_commission_rate(self, symbol: str) -> CommissionRates:
     response = await asyncio.to_thread(self._sdk.rest_api.user_commission_rate, symbol)
@@ -409,19 +412,24 @@ Old-formula check: rate-sum `0.0009` added to a 1,320 distance makes the BTC LON
 ### `_apply_costs` target booking (edit localized to the cost math)
 ```python
 # src/backtest/simulator.py  _apply_costs  (sketch)
-exit_rate = (cost_model.exit_slippage_rate if trade_record.exit_kind in ("SL", "EOD")
-             else cost_model.expected_slippage)            # TP1 uses expected_slippage (D-05)
+exit_rate = (
+    cost_model.exit_slippage_rate
+    if trade_record.exit_kind in ("SL", "EOD")
+    else cost_model.expected_slippage
+)  # TP1 uses expected_slippage (D-05)
 slip_entry = _mul(_mul(entry_price, quantity), cost_model.expected_slippage)
-slip_exit  = _mul(_mul(exit_price,  quantity), exit_rate)
-slippage   = _add(slip_entry, slip_exit)                   # TradeRecord.slippage_amount = total
+slip_exit = _mul(_mul(exit_price, quantity), exit_rate)
+slippage = _add(slip_entry, slip_exit)  # TradeRecord.slippage_amount = total
 ```
 Fees are already `price × qty × rate` [VERIFIED: src/backtest/simulator.py:651-652]. `TradeRecord` field names stay; `modeled_costs_per_unit` keeps its name and changes meaning to quote per unit (persisted analytics fields `_TRADE_DECIMAL_FIELDS` in `src/adapters/analytics_files.py:79` and `src/backtest/experiment.py:263` just parse it as a Decimal).
 
 ### Property-test skeleton (explicit grid, no hypothesis)
 ```python
 PRICES = [Decimal("60000"), Decimal("3000"), Decimal("0.5")]
-STOP_WIDTHS = [Decimal(x) for x in ("0.008", "0.01", "0.015", "0.02", "0.03")]   # >= guard-clearing widths
-FILL_FRACTIONS = [Decimal(x) for x in ("0", "0.25", "0.5", "0.75", "1")]         # position inside the zone
+STOP_WIDTHS = [
+    Decimal(x) for x in ("0.008", "0.01", "0.015", "0.02", "0.03")
+]  # >= guard-clearing widths
+FILL_FRACTIONS = [Decimal(x) for x in ("0", "0.25", "0.5", "0.75", "1")]  # position inside the zone
 # for side in LONG/SHORT: build zone +-0.1% around price, stop at width below/above adverse edge,
 # run evaluate_risk -> quantized qty; for each fill p = emin + f*(emax-emin):
 #   loss = (p-S)*q + p*q*fee_in + S*q*fee_out + p*q*slip_in + S*q*slip_out   (LONG; mirror for SHORT)

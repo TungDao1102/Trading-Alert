@@ -149,9 +149,7 @@ class DiffLogEntry:
         if self.checked_at_utc.tzinfo is None:
             raise ValueError("checked_at_utc must be UTC-aware")
         if self.outcome not in ("clean", "REGISTRY_DIFF"):
-            raise ValueError(
-                f"outcome must be 'clean' or 'REGISTRY_DIFF', got {self.outcome!r}"
-            )
+            raise ValueError(f"outcome must be 'clean' or 'REGISTRY_DIFF', got {self.outcome!r}")
 
     def to_jsonl(self) -> str:
         """Render this entry as a single-line JSON string for the diff log."""
@@ -606,10 +604,7 @@ def run_check_cli(
     except FileNotFoundError:
         return 2
 
-    if (
-        strategy_id != pinned_epoch.strategy_id
-        or parameter_set_id != pinned_epoch.parameter_set_id
-    ):
+    if strategy_id != pinned_epoch.strategy_id or parameter_set_id != pinned_epoch.parameter_set_id:
         log.error(
             "paper.freeze.cli_id_mismatch",
             cli_strategy_id=strategy_id,

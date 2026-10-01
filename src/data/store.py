@@ -85,12 +85,7 @@ def atomic_write_parquet(frame: pl.DataFrame, path: Path) -> None:
 
 def partition_path(raw_root: Path, interval: str, symbol: str, day: date) -> Path:
     """Resolve one per-day partition directory."""
-    return (
-        raw_root
-        / f"interval={interval}"
-        / f"symbol={symbol}"
-        / f"date={day.isoformat()}"
-    )
+    return raw_root / f"interval={interval}" / f"symbol={symbol}" / f"date={day.isoformat()}"
 
 
 def partition_file(raw_root: Path, interval: str, symbol: str, day: date) -> Path:

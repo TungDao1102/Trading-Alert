@@ -40,13 +40,9 @@ class AdapterLike(Protocol):
     the sweeper only needs the cancel + query-by-ID surface.
     """
 
-    async def query_algo_order_by_client(
-        self, *, client_algo_id: str
-    ) -> Any: ...
+    async def query_algo_order_by_client(self, *, client_algo_id: str) -> Any: ...
 
-    async def cancel_algo_order(
-        self, *, symbol: str, client_algo_id: str
-    ) -> None: ...
+    async def cancel_algo_order(self, *, symbol: str, client_algo_id: str) -> None: ...
 
 
 class JournalLike(Protocol):
@@ -198,8 +194,7 @@ class OrphanSweeper:
                 second_read = await second_read
             if not (_is_zero_like(first_read) and _is_zero_like(second_read)):
                 skip_reason = (
-                    f"transient_position_gap: first_read={first_read!r} "
-                    f"second_read={second_read!r}"
+                    f"transient_position_gap: first_read={first_read!r} second_read={second_read!r}"
                 )
                 skipped.append(
                     SweepSkip(
@@ -318,8 +313,7 @@ class OrphanSweeper:
         }
         return JournalEvent(
             journal_event_id=(
-                f"orphan_sweep_pre_{client_algo_id}_"
-                f"{int(now_utc.timestamp() * 1000)}"
+                f"orphan_sweep_pre_{client_algo_id}_{int(now_utc.timestamp() * 1000)}"
             ),
             occurred_at_utc=now_utc,
             event_type="ORPHAN_SWEEP",
@@ -347,8 +341,7 @@ class OrphanSweeper:
         }
         return JournalEvent(
             journal_event_id=(
-                f"orphan_sweep_failed_{client_algo_id}_"
-                f"{int(now_utc.timestamp() * 1000)}"
+                f"orphan_sweep_failed_{client_algo_id}_{int(now_utc.timestamp() * 1000)}"
             ),
             occurred_at_utc=now_utc,
             event_type="ORPHAN_SWEEP",
@@ -375,8 +368,7 @@ class OrphanSweeper:
         }
         return JournalEvent(
             journal_event_id=(
-                f"orphan_sweep_post_{client_algo_id}_"
-                f"{int(now_utc.timestamp() * 1000)}"
+                f"orphan_sweep_post_{client_algo_id}_{int(now_utc.timestamp() * 1000)}"
             ),
             occurred_at_utc=now_utc,
             event_type="ORPHAN_SWEEP",

@@ -272,6 +272,7 @@ Verified patterns from official/secondary sources and in-repo precedent:
 #   EMA_t = alpha * price_t + (1 - alpha) * EMA_{t-1}
 from decimal import Decimal, localcontext
 
+
 def ema_update(prior: Decimal, price: Decimal, alpha: Decimal) -> Decimal:
     with localcontext() as ctx:
         ctx.prec = 28  # pinned; never inherit ambient getcontext().prec [CITED: docs.python.org/3/library/decimal.html]

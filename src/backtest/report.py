@@ -582,16 +582,10 @@ def build(
     confident-looking [0, 0] lie over real data.
     """
     _require_utc_aware(built_at_utc, "built_at_utc")
-    if (
-        not isinstance(resamples, int)
-        or isinstance(resamples, bool)
-        or resamples < 100
-    ):
+    if not isinstance(resamples, int) or isinstance(resamples, bool) or resamples < 100:
         raise ReportBuildError(f"resamples must be int >= 100, got {resamples!r}")
     if not isinstance(probable, Decimal):
-        raise ReportBuildError(
-            f"probable must be Decimal in (0, 1], got {type(probable).__name__}"
-        )
+        raise ReportBuildError(f"probable must be Decimal in (0, 1], got {type(probable).__name__}")
     if not (Decimal("0") < probable <= Decimal("1")):
         raise ReportBuildError(f"probable must be in (0, 1], got {probable}")
 
@@ -689,12 +683,9 @@ def build(
     # from the R distribution — say so on the report, never silently.
     if risk_zero_excluded:
         zero_note = (
-            f"{risk_zero_excluded} trade(s) excluded from the R distribution "
-            "(realized_risk=0)"
+            f"{risk_zero_excluded} trade(s) excluded from the R distribution (realized_risk=0)"
         )
-        insufficient_note = (
-            f"{insufficient_note}; {zero_note}" if insufficient_note else zero_note
-        )
+        insufficient_note = f"{insufficient_note}; {zero_note}" if insufficient_note else zero_note
 
     observed_dd = _max_drawdown(r_values)
     if resampled_means:

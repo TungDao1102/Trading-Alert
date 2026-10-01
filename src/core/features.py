@@ -287,9 +287,7 @@ def _expected_bar_duration(candles: list[Candle], interval: str) -> timedelta | 
     return declared
 
 
-def _detect_gaps(
-    candles: list[Candle], expected: timedelta | None
-) -> list[bool]:
+def _detect_gaps(candles: list[Candle], expected: timedelta | None) -> list[bool]:
     """Return a per-bar gap flag (True = this bar's open is later than expected).
 
     WR-04: the expectation anchors on each bar's PREVIOUS bar open
@@ -343,13 +341,9 @@ def compute_features(
     # Validate input shape.
     for c in candles:
         if c.symbol != symbol:
-            raise ValueError(
-                f"compute_features: candle symbol {c.symbol!r} != {symbol!r}"
-            )
+            raise ValueError(f"compute_features: candle symbol {c.symbol!r} != {symbol!r}")
         if c.interval != interval:
-            raise ValueError(
-                f"compute_features: candle interval {c.interval!r} != {interval!r}"
-            )
+            raise ValueError(f"compute_features: candle interval {c.interval!r} != {interval!r}")
 
     # Quality gate (D-04 fail-closed): duplicate timestamps and
     # non-monotonic open_time_utc both raise ValueError naming the

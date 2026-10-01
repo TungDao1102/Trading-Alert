@@ -278,12 +278,9 @@ def test_headroom_reject_yields_exchange_constraint_with_zero_place_calls() -> N
         parameter_set=parameter_set,
     )
 
-    assert verdict.is_no_trade is True, (
-        f"expected NO_TRADE, got PASS: {verdict.reason_code}"
-    )
+    assert verdict.is_no_trade is True, f"expected NO_TRADE, got PASS: {verdict.reason_code}"
     assert verdict.reason_code == expected["reason_code"], (
-        f"reason_code mismatch: got {verdict.reason_code!r}, "
-        f"expected {expected['reason_code']!r}"
+        f"reason_code mismatch: got {verdict.reason_code!r}, expected {expected['reason_code']!r}"
     )
 
 
@@ -502,9 +499,7 @@ def test_all_pass_yields_proceed_with_reconciled_set() -> None:
         parameter_set=parameter_set,
     )
 
-    assert verdict.is_no_trade is False, (
-        f"expected PASS, got NO_TRADE: {verdict.reason_code}"
-    )
+    assert verdict.is_no_trade is False, f"expected PASS, got NO_TRADE: {verdict.reason_code}"
     assert verdict.reason_code == "OK"
 
 

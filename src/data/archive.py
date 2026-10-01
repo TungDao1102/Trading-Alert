@@ -303,11 +303,7 @@ class ArchiveKlineSource:
         while _dt_to_ms(datetime(year, month, 1, tzinfo=UTC)) < upper:
             rows = await self._month_rows(symbol, interval, year, month)
             window = sorted(
-                (
-                    k
-                    for k in rows
-                    if start_ms <= _dt_to_ms(k.open_time_utc) < upper
-                ),
+                (k for k in rows if start_ms <= _dt_to_ms(k.open_time_utc) < upper),
                 key=lambda k: k.open_time_utc,
             )
             if window:

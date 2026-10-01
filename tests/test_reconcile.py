@@ -47,15 +47,11 @@ ORPHAN_FIXTURE_DIR = PHASE8_FIXTURES_DIR / "orphan_divergence"
 
 
 def _load_input() -> dict[str, Any]:
-    return json.loads(
-        (ORPHAN_FIXTURE_DIR / "input.json").read_text(encoding="utf-8")
-    )
+    return json.loads((ORPHAN_FIXTURE_DIR / "input.json").read_text(encoding="utf-8"))
 
 
 def _load_expected() -> dict[str, Any]:
-    return json.loads(
-        (ORPHAN_FIXTURE_DIR / "expected.json").read_text(encoding="utf-8")
-    )
+    return json.loads((ORPHAN_FIXTURE_DIR / "expected.json").read_text(encoding="utf-8"))
 
 
 def _parse_utc(raw: str) -> datetime:
@@ -84,9 +80,7 @@ def _build_open_order(row: dict[str, Any]) -> Any:
         status=row["status"],
         quantity=Decimal(str(row["quantity"])),
         price=Decimal(str(row["price"])) if row.get("price") else None,
-        stop_price=(
-            Decimal(str(row["stop_price"])) if row.get("stop_price") else None
-        ),
+        stop_price=(Decimal(str(row["stop_price"])) if row.get("stop_price") else None),
         reduce_only=row.get("reduce_only", False),
         close_position=row.get("close_position", False),
         working_type=row.get("working_type"),
@@ -109,16 +103,10 @@ def _build_open_algo_order(row: dict[str, Any]) -> Any:
         time_in_force=row["time_in_force"],
         algo_status=row["algo_status"],
         quantity=Decimal(str(row["quantity"])),
-        trigger_price=(
-            Decimal(str(row["trigger_price"]))
-            if row.get("trigger_price")
-            else None
-        ),
+        trigger_price=(Decimal(str(row["trigger_price"])) if row.get("trigger_price") else None),
         price=Decimal(str(row["price"])) if row.get("price") else None,
         trigger_time_utc=(
-            _parse_utc(row["trigger_time_utc"])
-            if row.get("trigger_time_utc")
-            else None
+            _parse_utc(row["trigger_time_utc"]) if row.get("trigger_time_utc") else None
         ),
         working_type=row.get("working_type"),
         close_position=row.get("close_position", False),
@@ -136,14 +124,10 @@ def _build_position(row: dict[str, Any]) -> Any:
         position_amt=Decimal(str(row["position_amt"])),
         entry_price=Decimal(str(row["entry_price"])),
         break_even_price=Decimal(str(row["break_even_price"])),
-        mark_price=(
-            Decimal(str(row["mark_price"])) if row.get("mark_price") else None
-        ),
+        mark_price=(Decimal(str(row["mark_price"])) if row.get("mark_price") else None),
         unrealized_profit=Decimal(str(row["unrealized_profit"])),
         liquidation_price=(
-            Decimal(str(row["liquidation_price"]))
-            if row.get("liquidation_price")
-            else None
+            Decimal(str(row["liquidation_price"])) if row.get("liquidation_price") else None
         ),
         notional=Decimal(str(row["notional"])) if row.get("notional") else None,
         margin_asset=row["margin_asset"],
@@ -188,25 +172,19 @@ class FakeReconcileAdapter:
         # Any place-order method call raises (no-place-order invariant).
         self.place_order_calls = 0
 
-    async def snapshot_open_normal_orders(
-        self, *, symbol: str | None = None
-    ) -> list[Any]:
+    async def snapshot_open_normal_orders(self, *, symbol: str | None = None) -> list[Any]:
         self.snapshot_open_normal_orders_calls += 1
         if symbol is None:
             return list(self._normal_orders)
         return [o for o in self._normal_orders if o.symbol == symbol]
 
-    async def snapshot_open_algo_orders(
-        self, *, symbol: str | None = None
-    ) -> list[Any]:
+    async def snapshot_open_algo_orders(self, *, symbol: str | None = None) -> list[Any]:
         self.snapshot_open_algo_orders_calls += 1
         if symbol is None:
             return list(self._algo_orders)
         return [o for o in self._algo_orders if o.symbol == symbol]
 
-    async def snapshot_positions(
-        self, *, symbol: str | None = None
-    ) -> list[Any]:
+    async def snapshot_positions(self, *, symbol: str | None = None) -> list[Any]:
         self.snapshot_positions_calls += 1
         if symbol is None:
             return list(self._positions)
@@ -227,9 +205,7 @@ class FakeReconcileAdapter:
             self._position_read_index += 1
         return value
 
-    async def query_algo_order_by_client(
-        self, *, client_algo_id: str
-    ) -> Any:
+    async def query_algo_order_by_client(self, *, client_algo_id: str) -> Any:
         from src.adapters.binance_usdm import AlgoOrderProbe
 
         self.query_algo_order_by_client_calls.append(client_algo_id)
@@ -248,43 +224,31 @@ class FakeReconcileAdapter:
             update_time_utc=None,
         )
 
-    async def cancel_normal_order(
-        self, *, symbol: str, orig_client_order_id: str
-    ) -> None:
+    async def cancel_normal_order(self, *, symbol: str, orig_client_order_id: str) -> None:
         self.cancel_normal_order_calls.append((symbol, orig_client_order_id))
         self._normal_orders = [
             o
             for o in self._normal_orders
-            if not (
-                o.symbol == symbol and o.client_order_id == orig_client_order_id
-            )
+            if not (o.symbol == symbol and o.client_order_id == orig_client_order_id)
         ]
 
-    async def cancel_algo_order(
-        self, *, symbol: str, client_algo_id: str
-    ) -> None:
+    async def cancel_algo_order(self, *, symbol: str, client_algo_id: str) -> None:
         self.cancel_algo_order_calls.append((symbol, client_algo_id))
         self._algo_orders = [
             o
             for o in self._algo_orders
-            if not (
-                o.symbol == symbol and o.client_algo_id == client_algo_id
-            )
+            if not (o.symbol == symbol and o.client_algo_id == client_algo_id)
         ]
 
     async def place_order(self, **_kwargs: Any) -> None:
         """The reconciler must NEVER place a new order (D-03)."""
         self.place_order_calls += 1
-        raise AssertionError(
-            "reconciler must never place a new order — query/cancel only"
-        )
+        raise AssertionError("reconciler must never place a new order — query/cancel only")
 
     async def place_algo_order(self, **_kwargs: Any) -> None:
         """The reconciler must NEVER place a new algo order (D-03)."""
         self.place_order_calls += 1
-        raise AssertionError(
-            "reconciler must never place a new algo order — query/cancel only"
-        )
+        raise AssertionError("reconciler must never place a new algo order — query/cancel only")
 
 
 class _FakeJournal:
@@ -345,17 +309,11 @@ def _make_local_intent(fixture: dict[str, Any]) -> dict[str, Any]:
 
 def _make_truth(fixture: dict[str, Any]) -> dict[str, Any]:
     return {
-        "normal_orders": [
-            _build_open_order(o)
-            for o in fixture["exchange_truth"]["normal_orders"]
-        ],
+        "normal_orders": [_build_open_order(o) for o in fixture["exchange_truth"]["normal_orders"]],
         "algo_orders": [
-            _build_open_algo_order(o)
-            for o in fixture["exchange_truth"]["algo_orders"]
+            _build_open_algo_order(o) for o in fixture["exchange_truth"]["algo_orders"]
         ],
-        "positions": [
-            _build_position(p) for p in fixture["exchange_truth"]["positions"]
-        ],
+        "positions": [_build_position(p) for p in fixture["exchange_truth"]["positions"]],
     }
 
 
@@ -547,9 +505,7 @@ def test_orphan_protective_divergence_classified_and_swept() -> None:
         journal=journal,  # type: ignore[arg-type]
         now_utc=now_utc,
     )
-    sweep_result = asyncio.run(
-        sweeper.sweep(diff, position_verifier=adapter.read_position)
-    )
+    sweep_result = asyncio.run(sweeper.sweep(diff, position_verifier=adapter.read_position))
 
     # Sweep outcome matches the fixture's expected counts.
     expected_sweep = expected["sweep_result"]
@@ -599,7 +555,8 @@ def test_orphan_protective_divergence_classified_and_swept() -> None:
         if a.client_algo_id != "xa-1111111111111111111111111111111SL"
     ]
     post_sweep_local_algos = [
-        a for a in local["open_algos"]
+        a
+        for a in local["open_algos"]
         if a["client_algo_id"] != "xa-1111111111111111111111111111111SL"
     ]
     post_diff = compare(
@@ -790,9 +747,7 @@ def test_entry_without_protective_divergence_does_not_sweep() -> None:
         journal=journal,  # type: ignore[arg-type]
         now_utc=datetime(2026, 9, 19, 11, 0, tzinfo=UTC),
     )
-    sweep_result = asyncio.run(
-        sweeper.sweep(diff, position_verifier=adapter.read_position)
-    )
+    sweep_result = asyncio.run(sweeper.sweep(diff, position_verifier=adapter.read_position))
     assert sweep_result.swept_count == 0
     assert adapter.cancel_algo_order_calls == []
     assert adapter.cancel_normal_order_calls == []
@@ -845,9 +800,7 @@ def test_transient_position_gap_blocks_premature_sweep() -> None:
         journal=journal,  # type: ignore[arg-type]
         now_utc=datetime(2026, 9, 19, 11, 0, tzinfo=UTC),
     )
-    sweep_result = asyncio.run(
-        sweeper.sweep(diff, position_verifier=adapter.read_position)
-    )
+    sweep_result = asyncio.run(sweeper.sweep(diff, position_verifier=adapter.read_position))
 
     # Cancel was skipped because the first position read was non-zero.
     assert sweep_result.swept_count == 0
@@ -883,9 +836,7 @@ def test_no_place_order_path_in_src_reconcile() -> None:
     for py_file in src_root.glob("*.py"):
         text = py_file.read_text(encoding="utf-8")
         for token in forbidden:
-            assert token not in text, (
-                f"{py_file} contains forbidden place-order token {token!r}"
-            )
+            assert token not in text, f"{py_file} contains forbidden place-order token {token!r}"
 
 
 def test_no_binance_sdk_import_in_src_reconcile() -> None:
@@ -901,6 +852,4 @@ def test_no_binance_sdk_import_in_src_reconcile() -> None:
     for py_file in src_root.glob("*.py"):
         text = py_file.read_text(encoding="utf-8")
         for token in forbidden:
-            assert token not in text, (
-                f"{py_file} contains forbidden Binance SDK import {token!r}"
-            )
+            assert token not in text, f"{py_file} contains forbidden Binance SDK import {token!r}"

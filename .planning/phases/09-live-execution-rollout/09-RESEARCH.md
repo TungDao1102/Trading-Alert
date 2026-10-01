@@ -147,12 +147,12 @@ tests/fixtures/phase9/      # placement sequences, partial-fill sizing, mode bra
 # Source: SDK signatures verified by inspect.signature on installed 17.4.0 this session
 response = await asyncio.to_thread(
     self._sdk.rest_api.new_order,
-    symbol=symbol,                 # str
-    side=side,                     # NewOrderSideEnum.BUY/SELL
-    type=type,                     # NewOrderTypeEnum.LIMIT
-    position_side=position_side,   # "BOTH" one-way / "LONG"/"SHORT" hedge (mandatory in hedge) [CITED: Binance New Order docs]
-    time_in_force=time_in_force,   # GTC (LIMIT requires timeInForce+quantity+price) [CITED: Binance New Order docs]
-    quantity=float(str(qty)),      # quantized Decimal → float at the edge only
+    symbol=symbol,  # str
+    side=side,  # NewOrderSideEnum.BUY/SELL
+    type=type,  # NewOrderTypeEnum.LIMIT
+    position_side=position_side,  # "BOTH" one-way / "LONG"/"SHORT" hedge (mandatory in hedge) [CITED: Binance New Order docs]
+    time_in_force=time_in_force,  # GTC (LIMIT requires timeInForce+quantity+price) [CITED: Binance New Order docs]
+    quantity=float(str(qty)),  # quantized Decimal → float at the edge only
     price=float(str(price)),
     new_client_order_id=client_order_id,  # deterministic x-… 36-char [VERIFIED: src/execution/order_ids.py:37-51]
 )
@@ -238,8 +238,12 @@ response = await asyncio.to_thread(
 ```python
 # Source: SDK new_order signature [VERIFIED: inspect.signature, installed 17.4.0] + client-ID rule ^[.A-Z:/a-z0-9_-]{1,36}$ [CITED: Binance New Order docs]
 resp = await adapter.place_entry(
-    symbol="BTCUSDT", side="BUY", position_side="BOTH",  # or LONG/SHORT in hedge
-    quantity=quantized_qty, price=limit_price, time_in_force="GTC",
+    symbol="BTCUSDT",
+    side="BUY",
+    position_side="BOTH",  # or LONG/SHORT in hedge
+    quantity=quantized_qty,
+    price=limit_price,
+    time_in_force="GTC",
     client_order_id=derive_client_order_id(plan_hash=ph, role="ENTRY"),
 )
 # Ambiguous response → query_order(symbol=symbol, orig_client_order_id=...) before any retry (EXECUTION_SPEC §10).
@@ -249,8 +253,13 @@ resp = await adapter.place_entry(
 ```python
 # Source: SDK new_algo_order signature [VERIFIED: inspect.signature] — algoType enum is CONDITIONAL-only [VERIFIED: NewAlgoOrderAlgoTypeEnum]
 resp = await adapter.place_algo_protective(
-    algo_type="CONDITIONAL", symbol="BTCUSDT", side="SELL", type="STOP_MARKET",
-    trigger_price=sl_trigger, close_position=True, working_type="MARK_PRICE",
+    algo_type="CONDITIONAL",
+    symbol="BTCUSDT",
+    side="SELL",
+    type="STOP_MARKET",
+    trigger_price=sl_trigger,
+    close_position=True,
+    working_type="MARK_PRICE",
     client_algo_id=derive_algo_client_id(plan_hash=ph, role="STOP_LOSS"),
 )
 # STOP/TAKE_PROFIT (non-MARKET) variants accept timeInForce (default GTC) + price [CITED: Binance New-Algo-Order notes].

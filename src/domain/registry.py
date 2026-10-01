@@ -50,9 +50,8 @@ _SEGMENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 def _check_registry_segment(value: str, field_name: str) -> None:
     """Raise UnregisteredParameterSet if a path segment is unsafe."""
     if not _SEGMENT_RE.fullmatch(value):
-        raise UnregisteredParameterSet(
-            f"invalid registry path segment {field_name}={value!r}"
-        )
+        raise UnregisteredParameterSet(f"invalid registry path segment {field_name}={value!r}")
+
 
 # Closed whitelist of strategy-semantic keys (D-06). Anything
 # strategy-semantic found OUTSIDE the registry raises; anything
@@ -328,9 +327,7 @@ def _check_value_range(key: str, value: Any, path: Path) -> None:
     # Without this, NaN compares raise decimal.InvalidOperation (wrong
     # exception) and unranged keys (risk_rate, minimum_rr) accept them.
     if not number.is_finite():
-        raise StrategyKeyOutsideRegistry(
-            f"{path}: parameter {key!r} must be finite, got {value}"
-        )
+        raise StrategyKeyOutsideRegistry(f"{path}: parameter {key!r} must be finite, got {value}")
     if key in RATE_UNIT_KEYS:
         if number < 0 or number > MAX_RATE:
             raise StrategyKeyOutsideRegistry(
@@ -360,14 +357,11 @@ def _check_param_types(params: dict[str, Any], path: Path) -> None:
     """Raise StrategyKeyOutsideRegistry on wrong-typed parameter values."""
     for key, value in params.items():
         if isinstance(value, bool):
-            raise StrategyKeyOutsideRegistry(
-                f"{path}: parameter {key!r} must not be bool"
-            )
+            raise StrategyKeyOutsideRegistry(f"{path}: parameter {key!r} must not be bool")
         if key in INT_KEYS:
             if not isinstance(value, int):
                 raise StrategyKeyOutsideRegistry(
-                    f"{path}: parameter {key!r} must be int, "
-                    f"got {type(value).__name__}"
+                    f"{path}: parameter {key!r} must be int, got {type(value).__name__}"
                 )
         elif key in STRING_KEYS:
             if not isinstance(value, str) or value == "":
@@ -383,8 +377,7 @@ def _check_param_types(params: dict[str, Any], path: Path) -> None:
         elif key in DECIMAL_KEYS:
             if not isinstance(value, (int, Decimal)):
                 raise StrategyKeyOutsideRegistry(
-                    f"{path}: parameter {key!r} must be Decimal or int, "
-                    f"got {type(value).__name__}"
+                    f"{path}: parameter {key!r} must be Decimal or int, got {type(value).__name__}"
                 )
         if key in INT_KEYS or key in DECIMAL_KEYS:
             _check_value_range(key, value, path)
@@ -400,8 +393,7 @@ def _check_ascii_keys(params: dict[str, Any], path: Path) -> None:
     for key in params:
         if not key.isascii():
             raise StrategyKeyOutsideRegistry(
-                f"{path}: non-ASCII parameter name {key!r} "
-                f"(parameter names must be 7-bit ASCII)"
+                f"{path}: non-ASCII parameter name {key!r} (parameter names must be 7-bit ASCII)"
             )
 
 
@@ -422,8 +414,7 @@ def _parse_and_validate(
 
     if doc.get("schema_version") != SCHEMA_VERSION:
         raise RegistrySchemaMismatch(
-            f"{path}: schema_version={doc.get('schema_version')!r}, "
-            f"expected {SCHEMA_VERSION}"
+            f"{path}: schema_version={doc.get('schema_version')!r}, expected {SCHEMA_VERSION}"
         )
 
     strategy = doc.get("strategy", {})
@@ -524,9 +515,7 @@ def verify_parameter_set(path: Path, expected_hash: str) -> None:
     }
     actual_hash = sha256_hex(hash_payload)
     if actual_hash != expected_hash:
-        raise ParameterSetMutated(
-            f"{path}: expected {expected_hash}, got {actual_hash}"
-        )
+        raise ParameterSetMutated(f"{path}: expected {expected_hash}, got {actual_hash}")
 
 
 def _iter_ambient_keys(ambient: dict[str, Any]) -> Any:

@@ -157,19 +157,15 @@ from src.domain.enums import RejectionReason, SystemMode
 ```python
 class AdapterLike(Protocol):
     """Anything that quacks like the project adapter for SAFE_MODE."""
-    async def snapshot_open_normal_orders(
-        self, *, symbol: str | None = None
-    ) -> list[Any]: ...
-    async def snapshot_open_algo_orders(
-        self, *, symbol: str | None = None
-    ) -> list[Any]: ...
-    async def snapshot_positions(
-        self, *, symbol: str | None = None
-    ) -> list[Any]: ...
+
+    async def snapshot_open_normal_orders(self, *, symbol: str | None = None) -> list[Any]: ...
+    async def snapshot_open_algo_orders(self, *, symbol: str | None = None) -> list[Any]: ...
+    async def snapshot_positions(self, *, symbol: str | None = None) -> list[Any]: ...
 
 
 class JournalLike(Protocol):
     """Anything that quacks like the project journal for SAFE_MODE."""
+
     def record(self, event: Any) -> None: ...
 ```
 The enablement module defines `AdapterLike` (with `place_entry`, `place_algo_protective`, `query_order_by_client`, `get_position_mode`) and `JournalLike` — same Protocol-typed surface pattern.
@@ -208,16 +204,14 @@ The new `place_entry` follows the same shape: `await asyncio.to_thread(self._sdk
 **Bounded retry pattern** (lines 804-845):
 ```python
 retry = tenacity.retry_if_exception(_cancel_retry_predicate)
-stop = tenacity.stop_after_attempt(
-    _RECONCILER_CANCEL_MAX_ATTEMPTS
-) | tenacity.stop_after_delay(_RECONCILER_CANCEL_MAX_DELAY_SECONDS)
+stop = tenacity.stop_after_attempt(_RECONCILER_CANCEL_MAX_ATTEMPTS) | tenacity.stop_after_delay(
+    _RECONCILER_CANCEL_MAX_DELAY_SECONDS
+)
 wait = tenacity.wait_random_exponential(
     multiplier=_RECONCILER_CANCEL_WAIT_MULTIPLIER_SECONDS,
     max=_RECONCILER_CANCEL_WAIT_MAX_SECONDS,
 )
-decorator = tenacity.AsyncRetrying(
-    retry=retry, stop=stop, wait=wait, reraise=True
-)
+decorator = tenacity.AsyncRetrying(retry=retry, stop=stop, wait=wait, reraise=True)
 ```
 The new placement methods use the same bounded-retry pattern with placement-specific ceilings (e.g., `_PLACEMENT_MAX_ATTEMPTS: int = 3`).
 
@@ -246,8 +240,7 @@ if (
     or f_min_notional.notional is None
 ):
     raise ValueError(
-        "exchangeInfo filter missing numeric field "
-        f"for {sym.symbol!r}: {sym.filters!r}"
+        f"exchangeInfo filter missing numeric field for {sym.symbol!r}: {sym.filters!r}"
     )
 ```
 The new placement methods raise loudly on missing SDK response fields — never default to zero or epoch-0.
@@ -531,9 +524,7 @@ The manager's placement-time gates follow the same shape: each gate returns a `R
 def _require_decimal(value: object, field_name: str) -> None:
     """Reject non-Decimal values for money/qty/price fields (D-12)."""
     if not isinstance(value, Decimal):
-        raise TypeError(
-            f"{field_name} must be Decimal, got {type(value).__name__}"
-        )
+        raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
 
 
 def _require_utc_aware(value: datetime, field_name: str) -> None:
@@ -541,9 +532,7 @@ def _require_utc_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     if value.utcoffset() != timedelta(0):
-        raise ValueError(
-            f"{field_name} must be UTC, got offset {value.utcoffset()}"
-        )
+        raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
 
 
 def _require_non_empty(value: str, field_name: str) -> None:
@@ -572,11 +561,7 @@ def derive_client_order_id(*, plan_hash: str, role: str) -> str:
     validated_hash = _require_plan_hash(plan_hash)
     validated_role = _require_role(role)
     role_code = ROLE_CODES[validated_role]
-    return (
-        _CLIENT_PREFIX
-        + validated_hash[:_CLIENT_PLAN_SLICE_LEN]
-        + role_code
-    )
+    return _CLIENT_PREFIX + validated_hash[:_CLIENT_PLAN_SLICE_LEN] + role_code
 
 
 def derive_algo_client_id(*, plan_hash: str, role: str) -> str:
@@ -584,11 +569,7 @@ def derive_algo_client_id(*, plan_hash: str, role: str) -> str:
     validated_hash = _require_plan_hash(plan_hash)
     validated_role = _require_role(role)
     role_code = ROLE_CODES[validated_role]
-    return (
-        _ALGO_PREFIX
-        + validated_hash[:_ALGO_PLAN_SLICE_LEN]
-        + role_code
-    )
+    return _ALGO_PREFIX + validated_hash[:_ALGO_PLAN_SLICE_LEN] + role_code
 ```
 
 The manager calls `derive_client_order_id(plan_hash, "ENTRY")` for entry placement and `derive_algo_client_id(plan_hash, role)` for each protective leg. Retry/restart/replay-safe by construction.
@@ -641,10 +622,7 @@ def _build_pre_image_event(
         "phase": "pre_cancel",
     }
     return JournalEvent(
-        journal_event_id=(
-            f"orphan_sweep_pre_{client_algo_id}_"
-            f"{int(now_utc.timestamp() * 1000)}"
-        ),
+        journal_event_id=(f"orphan_sweep_pre_{client_algo_id}_{int(now_utc.timestamp() * 1000)}"),
         occurred_at_utc=now_utc,
         event_type="ORPHAN_SWEEP",
         entity_type="OpenAlgoOrder",
@@ -668,13 +646,9 @@ The execution files journal every transition with `event_type` (PLACEMENT, FILL,
 class AdapterLike(Protocol):
     """Anything that quacks like the project adapter for cancel paths."""
 
-    async def query_algo_order_by_client(
-        self, *, client_algo_id: str
-    ) -> Any: ...
+    async def query_algo_order_by_client(self, *, client_algo_id: str) -> Any: ...
 
-    async def cancel_algo_order(
-        self, *, symbol: str, client_algo_id: str
-    ) -> None: ...
+    async def cancel_algo_order(self, *, symbol: str, client_algo_id: str) -> None: ...
 
 
 class JournalLike(Protocol):

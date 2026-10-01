@@ -166,9 +166,7 @@ def dist_stat(
     """Descriptive distribution: mean estimate, median, p90, min, max (no thresholds)."""
     mean = estimate_mean(values, seed=seed, resamples=resamples, n=n)
     if not values:
-        return DistStat(
-            n=mean.n, mean=mean, median=None, p90=None, minimum=None, maximum=None
-        )
+        return DistStat(n=mean.n, mean=mean, median=None, p90=None, minimum=None, maximum=None)
     return DistStat(
         n=mean.n,
         mean=mean,

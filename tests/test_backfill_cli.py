@@ -152,9 +152,7 @@ class FakeAdapter:
         self._kline_call_count += 1
         if self.metadata_rows_at_first_klines is None and self._session is not None:
             self.metadata_rows_at_first_klines = int(
-                self._session.execute(
-                    select(func.count()).select_from(SymbolMetadata)
-                ).scalar_one()
+                self._session.execute(select(func.count()).select_from(SymbolMetadata)).scalar_one()
             )
         if (
             self._fail_on_kline_call is not None
@@ -216,7 +214,6 @@ class FakeAdapter:
                 )
             )
         return rows
-
 
     async def funding_rate(
         self,
@@ -317,15 +314,11 @@ def _config(tmp_path: Path, **overrides: Any) -> Any:
 # --------------------------------------------------------------------------- #
 
 
-async def test_cli_refreshes_metadata_before_backfill(
-    tmp_path: Path, session: Session
-) -> None:
+async def test_cli_refreshes_metadata_before_backfill(tmp_path: Path, session: Session) -> None:
     from src.data.backfill_cli import run_backfill
 
     adapter = FakeAdapter([_filters("BTCUSDT")], session=session)
-    report = await run_backfill(
-        _config(tmp_path), adapter=adapter, session=session, clock=_clock()
-    )
+    report = await run_backfill(_config(tmp_path), adapter=adapter, session=session, clock=_clock())
 
     # exchange_info is the first adapter call and the metadata row is already
     # durable when the first klines request is made.
@@ -365,15 +358,24 @@ def test_cli_prints_depth_in_run_header(
 
     rc = backfill_cli.main(
         [
-            "--symbols", "BTCUSDT",
-            "--intervals", "1h",
-            "--datasets", "trade",
-            "--database-url", _sqlite_url(tmp_path),
-            "--raw-root", str(tmp_path / "raw"),
-            "--cursor-root", str(tmp_path / "cursors"),
-            "--manifest", str(manifest),
-            "--collect-list", str(collect),
-            "--pace-seconds", "0",
+            "--symbols",
+            "BTCUSDT",
+            "--intervals",
+            "1h",
+            "--datasets",
+            "trade",
+            "--database-url",
+            _sqlite_url(tmp_path),
+            "--raw-root",
+            str(tmp_path / "raw"),
+            "--cursor-root",
+            str(tmp_path / "cursors"),
+            "--manifest",
+            str(manifest),
+            "--collect-list",
+            str(collect),
+            "--pace-seconds",
+            "0",
         ]
     )
 
@@ -406,9 +408,12 @@ def test_unknown_dataset_or_interval_exits_2_without_adapter_call(
 
     rc = backfill_cli.main(
         [
-            "--symbols", "BTCUSDT",
-            "--manifest", str(manifest),
-            "--collect-list", str(collect),
+            "--symbols",
+            "BTCUSDT",
+            "--manifest",
+            str(manifest),
+            "--collect-list",
+            str(collect),
             *bad_args,
         ]
     )
@@ -448,9 +453,7 @@ def _plan(
 
 
 def test_onboard_limited_window_starts_at_onboard_time() -> None:
-    windows = _plan(
-        {"NEWUSDT": _filters("NEWUSDT", onboard=datetime(2025, 3, 10, 7, tzinfo=UTC))}
-    )
+    windows = _plan({"NEWUSDT": _filters("NEWUSDT", onboard=datetime(2025, 3, 10, 7, tzinfo=UTC))})
 
     (window,) = windows
     assert window.start_ms == _ms(2025, 3, 10, 7)
@@ -469,9 +472,7 @@ def test_trading_symbol_with_far_future_delivery_is_not_capped() -> None:
 
 
 def test_non_trading_symbol_without_delivery_date_gets_no_window() -> None:
-    windows = _plan(
-        {"OLDUSDT": _filters("OLDUSDT", status="SETTLING", delivery_ms=None)}
-    )
+    windows = _plan({"OLDUSDT": _filters("OLDUSDT", status="SETTLING", delivery_ms=None)})
 
     (window,) = windows
     assert window.cause == "DELIVERY_UNKNOWN"
@@ -499,9 +500,7 @@ def test_mark_windows_match_trade_windows() -> None:
     filters = {
         "BTCUSDT": _filters("BTCUSDT"),
         "NEWUSDT": _filters("NEWUSDT", onboard=datetime(2025, 3, 10, 7, tzinfo=UTC)),
-        "FTTUSDT": _filters(
-            "FTTUSDT", status="SETTLING", delivery_ms=_ms(2026, 8, 10, 8)
-        ),
+        "FTTUSDT": _filters("FTTUSDT", status="SETTLING", delivery_ms=_ms(2026, 8, 10, 8)),
     }
 
     windows = _plan(filters, intervals=("1h", "4h"), datasets=("trade", "mark"))
@@ -786,11 +785,15 @@ def test_main_dry_run_needs_no_database(
 
     rc = backfill_cli.main(
         [
-            "--symbols", "BTCUSDT",
+            "--symbols",
+            "BTCUSDT",
             "--dry-run",
-            "--raw-root", str(tmp_path / "raw"),
-            "--manifest", str(manifest),
-            "--collect-list", str(collect),
+            "--raw-root",
+            str(tmp_path / "raw"),
+            "--manifest",
+            str(manifest),
+            "--collect-list",
+            str(collect),
         ]
     )
 
@@ -889,13 +892,20 @@ def test_failure_prints_type_name_never_the_database_url(
 
     rc = backfill_cli.main(
         [
-            "--symbols", "BTCUSDT",
-            "--intervals", "1h",
-            "--datasets", "trade",
-            "--database-url", secret_url,
-            "--raw-root", str(tmp_path / "raw"),
-            "--manifest", str(manifest),
-            "--collect-list", str(collect),
+            "--symbols",
+            "BTCUSDT",
+            "--intervals",
+            "1h",
+            "--datasets",
+            "trade",
+            "--database-url",
+            secret_url,
+            "--raw-root",
+            str(tmp_path / "raw"),
+            "--manifest",
+            str(manifest),
+            "--collect-list",
+            str(collect),
         ]
     )
 
@@ -929,16 +939,26 @@ def _run_main(
     collect = _write_collect_list(tmp_path / "collect.toml")
     return backfill_cli.main(
         [
-            "--symbols", *symbols,
-            "--intervals", "1h",
-            "--datasets", "trade",
-            "--depth-htf-months", "1",
-            "--database-url", _sqlite_url(tmp_path),
-            "--raw-root", str(tmp_path / "raw"),
-            "--cursor-root", str(tmp_path / "cursors"),
-            "--manifest", str(manifest),
-            "--collect-list", str(collect),
-            "--pace-seconds", "0",
+            "--symbols",
+            *symbols,
+            "--intervals",
+            "1h",
+            "--datasets",
+            "trade",
+            "--depth-htf-months",
+            "1",
+            "--database-url",
+            _sqlite_url(tmp_path),
+            "--raw-root",
+            str(tmp_path / "raw"),
+            "--cursor-root",
+            str(tmp_path / "cursors"),
+            "--manifest",
+            str(manifest),
+            "--collect-list",
+            str(collect),
+            "--pace-seconds",
+            "0",
             *extra,
         ]
     )
@@ -1019,15 +1039,23 @@ def test_report_json_is_deterministic(
 
     out_path = tmp_path / "report.json"
     first = _run_main(
-        tmp_path, monkeypatch, FakeAdapter([_filters("BTCUSDT")]), ["BTCUSDT"],
-        "--report-out", str(out_path),
+        tmp_path,
+        monkeypatch,
+        FakeAdapter([_filters("BTCUSDT")]),
+        ["BTCUSDT"],
+        "--report-out",
+        str(out_path),
     )
     first_bytes = out_path.read_bytes()
     # A later run on the same store: the symbol_metadata row is versioned by
     # observation time, so the second run needs its own instant.
     second = _run_main(
-        tmp_path, monkeypatch, FakeAdapter([_filters("BTCUSDT")]), ["BTCUSDT"],
-        "--report-out", str(out_path),
+        tmp_path,
+        monkeypatch,
+        FakeAdapter([_filters("BTCUSDT")]),
+        ["BTCUSDT"],
+        "--report-out",
+        str(out_path),
         minutes=1,
     )
 
@@ -1048,8 +1076,12 @@ def test_report_states_trade_floor_is_unmeasurable(
 
     out_path = tmp_path / "report.json"
     rc = _run_main(
-        tmp_path, monkeypatch, FakeAdapter([_filters("BTCUSDT")]), ["BTCUSDT"],
-        "--report-out", str(out_path),
+        tmp_path,
+        monkeypatch,
+        FakeAdapter([_filters("BTCUSDT")]),
+        ["BTCUSDT"],
+        "--report-out",
+        str(out_path),
     )
 
     out = capsys.readouterr().out
@@ -1067,8 +1099,13 @@ def test_dry_run_writes_no_report_and_exits_0(
 ) -> None:
     out_path = tmp_path / "report.json"
     rc = _run_main(
-        tmp_path, monkeypatch, FakeAdapter([_filters("BTCUSDT")]), ["BTCUSDT"],
-        "--dry-run", "--report-out", str(out_path),
+        tmp_path,
+        monkeypatch,
+        FakeAdapter([_filters("BTCUSDT")]),
+        ["BTCUSDT"],
+        "--dry-run",
+        "--report-out",
+        str(out_path),
     )
 
     assert rc == 0
@@ -1146,8 +1183,7 @@ class FakeArchive:
         month_lo = _ms(year, month, 1)
         month_hi = _ms(year + (month == 12), month % 12 + 1, 1)
         opens = [
-            o
-            for o in range(-(-max(first, month_lo) // step) * step, min(end, month_hi), step)
+            o for o in range(-(-max(first, month_lo) // step) * step, min(end, month_hi), step)
         ]
         if not opens:
             return httpx.Response(404)
@@ -1167,9 +1203,7 @@ class FakeArchive:
 
 def _rows_for(report: Any, dataset: str, symbol: str) -> list[Any]:
     assert report.sufficiency is not None
-    return [
-        r for r in report.sufficiency.rows if r.dataset == dataset and r.symbol == symbol
-    ]
+    return [r for r in report.sufficiency.rows if r.dataset == dataset and r.symbol == symbol]
 
 
 async def test_invalid_symbol_uses_archive_source(tmp_path: Path, session: Session) -> None:
@@ -1204,9 +1238,7 @@ async def test_invalid_symbol_uses_archive_source(tmp_path: Path, session: Sessi
     assert any("FTTUSDT" in line and "ARCHIVE" in line for line in lines)
 
 
-async def test_archive_source_survives_a_complete_rerun(
-    tmp_path: Path, session: Session
-) -> None:
+async def test_archive_source_survives_a_complete_rerun(tmp_path: Path, session: Session) -> None:
     from src.data.backfill_cli import run_backfill
 
     fixture = _filters("FTTUSDT", status="SETTLING", delivery_ms=DELIVERY_MS)
@@ -1329,9 +1361,7 @@ async def test_mark_for_archive_symbol_comes_from_rest_or_is_unavailable(
     assert report.sufficiency is not None and report.sufficiency.missing_data is True
 
 
-async def test_funding_step_runs_per_symbol_within_bounds(
-    tmp_path: Path, session: Session
-) -> None:
+async def test_funding_step_runs_per_symbol_within_bounds(tmp_path: Path, session: Session) -> None:
     from src.data.backfill_cli import run_backfill
 
     fixtures = [
@@ -1365,9 +1395,7 @@ async def test_funding_step_runs_per_symbol_within_bounds(
     assert skipped.funding_calls == []
 
 
-async def test_funding_failure_is_a_gap_row_not_a_crash(
-    tmp_path: Path, session: Session
-) -> None:
+async def test_funding_failure_is_a_gap_row_not_a_crash(tmp_path: Path, session: Session) -> None:
     from src.data.backfill_cli import run_backfill
     from src.db.models import CollectorGap
 

@@ -26,9 +26,7 @@ from .types import OpenPosition, PortfolioVerdict, SizedResult
 # V1 conservative cluster rule (D-03 + RESEARCH A3): directionally-aligned
 # BTC/ETH/SOL/XRP positions count as one cluster. The candidate's symbol
 # is supplied by the caller (the trade plan's symbol).
-CLUSTER_SYMBOLS: frozenset[str] = frozenset(
-    {"BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"}
-)
+CLUSTER_SYMBOLS: frozenset[str] = frozenset({"BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"})
 
 _OK = "OK"
 
@@ -45,9 +43,7 @@ def _require_utc_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     if value.utcoffset() != timedelta(0):
-        raise ValueError(
-            f"{field_name} must be UTC, got offset {value.utcoffset()}"
-        )
+        raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
 
 
 def _derive_daily_state(
@@ -113,9 +109,7 @@ def resolve_absolute_thresholds(
 
 def _extract_thresholds(
     parameter_set: dict[str, Any],
-) -> (
-    tuple[int, Decimal, Decimal, Decimal, Decimal] | None
-):
+) -> tuple[int, Decimal, Decimal, Decimal, Decimal] | None:
     """Read and type-check portfolio thresholds, fail-closed on violation.
 
     Returns `(max_open_positions, max_aggregate_open_risk, cluster_cap,
@@ -133,9 +127,7 @@ def _extract_thresholds(
         stop = parameter_set["daily_loss_stop_threshold"]
     except KeyError:
         return None
-    if isinstance(max_open_positions, bool) or not isinstance(
-        max_open_positions, int
-    ):
+    if isinstance(max_open_positions, bool) or not isinstance(max_open_positions, int):
         return None
     for value in (max_aggregate_open_risk, cluster_cap, warning, stop):
         if not isinstance(value, Decimal):
@@ -239,9 +231,7 @@ def check_portfolio(
     # Sort positions deterministically (Pitfall 4 — non-deterministic
     # iteration). Sort by (symbol, position_side) so two position lists
     # with different insertion orders yield identical verdicts.
-    sorted_positions = sorted(
-        open_positions, key=lambda p: (p.symbol, p.position_side)
-    )
+    sorted_positions = sorted(open_positions, key=lambda p: (p.symbol, p.position_side))
 
     # Derive daily state from injected loss + thresholds BEFORE any
     # verdict below, so no fail-closed path masks DAILY_STOP from the
@@ -320,10 +310,7 @@ def check_portfolio(
     cluster_open_risk = Decimal("0")
     if candidate_in_cluster:
         for p in sorted_positions:
-            if (
-                p.symbol in CLUSTER_SYMBOLS
-                and p.position_side == candidate_position_side
-            ):
+            if p.symbol in CLUSTER_SYMBOLS and p.position_side == candidate_position_side:
                 cluster_open_risk = _add(cluster_open_risk, p.open_risk)
     cluster_sum = _add(cluster_open_risk, candidate_risk)
     if cluster_sum > cluster_cap_quote:

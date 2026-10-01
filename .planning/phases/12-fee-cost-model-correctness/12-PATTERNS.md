@@ -72,8 +72,12 @@ Current buggy line 654: `slippage = _mul(quantity, cost_model.expected_slippage)
 @dataclass(frozen=True)
 class PositionModeResult: ...
 
+
 async def get_position_mode(self) -> PositionModeResult:
-    from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (GetCurrentPositionModeResponse,)
+    from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
+        GetCurrentPositionModeResponse,
+    )
+
     response = await asyncio.to_thread(self._sdk.rest_api.get_current_position_mode)
     raw: GetCurrentPositionModeResponse = response.data()
     return PositionModeResult(dual_side_position=bool(raw.dual_side_position))

@@ -453,9 +453,7 @@ def run_paper_tick(case_input: dict[str, Any]) -> dict[str, Any]:
         # filtered to <= event close).
         closed_setup = sorted_1h + [closed_candle]
         closed_context = [
-            c
-            for c in sorted_4h + extra_context
-            if c.close_time_utc <= closed_candle.close_time_utc
+            c for c in sorted_4h + extra_context if c.close_time_utc <= closed_candle.close_time_utc
         ]
         snapshot = MarketSnapshot(
             symbol=symbol,
@@ -510,9 +508,7 @@ def run_paper_tick(case_input: dict[str, Any]) -> dict[str, Any]:
 
         # Risk pipeline.
         cost_rates = cost_rates_from_model(cost_model)
-        min_stop_distance_rate, max_cost_to_risk = guard_rates_from_params(
-            parameter_set.params
-        )
+        min_stop_distance_rate, max_cost_to_risk = guard_rates_from_params(parameter_set.params)
         verdict = evaluate_risk(
             trade_plan=trade_plan,
             candidate_position_side=signal.direction,

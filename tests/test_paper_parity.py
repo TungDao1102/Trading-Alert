@@ -43,12 +43,8 @@ def _bar_to_ws_event(bar: dict[str, Any]) -> dict[str, Any]:
     The bar's close_time_utc is the event's T (close ms); open_time_utc is t.
     x=True marks the event as closed (the double closed-candle gate).
     """
-    open_ms = int(
-        datetime.fromisoformat(bar["open_time_utc"]).timestamp() * 1000
-    )
-    close_ms = int(
-        datetime.fromisoformat(bar["close_time_utc"]).timestamp() * 1000
-    )
+    open_ms = int(datetime.fromisoformat(bar["open_time_utc"]).timestamp() * 1000)
+    close_ms = int(datetime.fromisoformat(bar["close_time_utc"]).timestamp() * 1000)
     return {
         "t": open_ms,
         "T": close_ms,
@@ -84,9 +80,7 @@ def _replay_paper_through_bars(
     for i, bar in enumerate(strategy_bars):
         warmed_up_1h = strategy_bars[:i]
         bar_close = bar["close_time_utc"]
-        warmed_up_4h = [
-            c for c in context_bars if c["close_time_utc"] <= bar_close
-        ]
+        warmed_up_4h = [c for c in context_bars if c["close_time_utc"] <= bar_close]
         feed_event = _bar_to_ws_event(bar)
 
         paper_input = {
@@ -164,9 +158,7 @@ def _project_simulator_verdicts(
     trades: list[dict[str, Any]],
 ) -> list[tuple[str, str]]:
     """Project simulator trades to (signal_id, reason_code) tuples."""
-    verdicts: list[tuple[str, str]] = [
-        (t["signal_id"], t["reason_code"]) for t in trades
-    ]
+    verdicts: list[tuple[str, str]] = [(t["signal_id"], t["reason_code"]) for t in trades]
     return sorted(verdicts)
 
 
@@ -339,18 +331,16 @@ def test_parity_expected_documentary_fields_match_registry_and_simulator() -> No
     assert case_input["parameter_set_id"] == "baseline-v5"
     assert "exit_slippage_rate" in case_input["cost_model"]
 
-    pins = json.loads(
-        (PHASE7_FIXTURES_DIR.parent / "phase4" / "parameters.json").read_text()
-    )["parameter_sets"]
+    pins = json.loads((PHASE7_FIXTURES_DIR.parent / "phase4" / "parameters.json").read_text())[
+        "parameter_sets"
+    ]
     pin = next(
         e
         for e in pins
         if e["strategy_id"] == case_input["strategy_id"]
         and e["parameter_set_id"] == case_input["parameter_set_id"]
     )
-    registry_set = load_parameter_set(
-        case_input["strategy_id"], case_input["parameter_set_id"]
-    )
+    registry_set = load_parameter_set(case_input["strategy_id"], case_input["parameter_set_id"])
     registry_cost_hash = build_cost_model(cost_slice(registry_set.params)).cost_model_hash
     sim_result = simulator_run(case_input)
 

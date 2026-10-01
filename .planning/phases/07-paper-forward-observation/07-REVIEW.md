@@ -84,8 +84,7 @@ closes_all: list[Kline] = []
 cursor_ms = start_ms
 truncated = False
 while True:
-    page = await adapter.klines(symbol=symbol, interval=interval,
-                                start_ms=cursor_ms, limit=1500)
+    page = await adapter.klines(symbol=symbol, interval=interval, start_ms=cursor_ms, limit=1500)
     if not page:
         break
     closes_all.extend(page)
@@ -114,8 +113,7 @@ if not scheduled:
     try:
         await self._reconnect_with_retry()
     except Exception as exc:
-        log.error("paper.supervisor.reconnect_exhausted",
-                  error=f"{type(exc).__name__}: {exc}")
+        log.error("paper.supervisor.reconnect_exhausted", error=f"{type(exc).__name__}: {exc}")
         # Fall through to resubscribe + backfill regardless.
 await self._resubscribe_and_backfill(journal_outage_gaps=True)
 ```
@@ -177,8 +175,7 @@ def _on_message(self, message):
         log.warning("paper_ws.extract_failed", error=repr(exc))
         return
     if payload is None:
-        log.warning("paper_ws.unknown_envelope",
-                    message_type=type(message).__name__)
+        log.warning("paper_ws.unknown_envelope", message_type=type(message).__name__)
         return
     try:
         kline = _normalize_kline_payload(symbol, interval, payload)
@@ -187,13 +184,15 @@ def _on_message(self, message):
         return
     on_kline(kline)
 
+
 def reconnect(self, handle):
     if hasattr(handle, "reconnect"):
         handle.reconnect()
     else:
-        log.error("paper_ws.reconnect_unsupported",
-                  handle_type=type(handle).__name__)
+        log.error("paper_ws.reconnect_unsupported", handle_type=type(handle).__name__)
         raise RuntimeError("WS handle has no reconnect; rotation impossible")
+
+
 # Same fail-loud pattern for close(). Add explicit connect()/start() wiring
 # per the installed SDK's lifecycle before the soak; extend
 # _extract_kline_payload to attribute-style SDK models with a unit test.
@@ -328,8 +327,12 @@ decision path; timestamps here gate determinism digests.
 **Fix:**
 ```python
 from datetime import timezone, timedelta
+
+
 def _ms_to_utc(ms: int) -> datetime:
     return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=ms)
+
+
 # Apply in loop.py (_is_closed_event, _event_to_candle, check_feed_freshness),
 # paper_ws.py, and resync.py start_ms/interval arithmetic.
 ```
@@ -375,8 +378,9 @@ duplicate-bar guard does, which this module does not verify.
 **Fix:**
 ```python
 if any(c.open_time_utc == closed_candle.open_time_utc for c in sorted_1h):
-    no_trade_records.append({"reason_code": "DUPLICATE_BAR",
-                             "bar_close_utc": ..., "stage": "feed_gate"})
+    no_trade_records.append(
+        {"reason_code": "DUPLICATE_BAR", "bar_close_utc": ..., "stage": "feed_gate"}
+    )
     continue
 ```
 
@@ -416,6 +420,7 @@ analysis and readability for no reason.
 **Fix:**
 ```python
 from datetime import UTC
+
 signal_detected_at_utc = _parse_utc(signal["detected_at_utc"])
 if signal_detected_at_utc is None:
     raise ValueError("signal['detected_at_utc'] must be present")
@@ -544,9 +549,9 @@ B against a state file pinned for pair A gets a check of A reported as
 success, with no mismatch error.
 **Fix:**
 ```python
-if (strategy_id != pinned_epoch.strategy_id
-        or parameter_set_id != pinned_epoch.parameter_set_id):
-    log.error(...); return 1
+if strategy_id != pinned_epoch.strategy_id or parameter_set_id != pinned_epoch.parameter_set_id:
+    log.error(...)
+    return 1
 ```
 
 ### WR-16: `pyproject.toml` mypy `files` key is not a valid mypy config option

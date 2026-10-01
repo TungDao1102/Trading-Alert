@@ -92,17 +92,11 @@ def _cost_hash_payload(model: CostModel) -> dict[str, str]:
     participates only when the model carries it (presence-driven, D-14
     option B), so every legacy seven-key model keeps its byte-locked hash.
     """
-    keys = (
-        (*COST_KEYS, *OPTIONAL_COST_KEYS)
-        if model.exit_slippage_rate is not None
-        else COST_KEYS
-    )
+    keys = (*COST_KEYS, *OPTIONAL_COST_KEYS) if model.exit_slippage_rate is not None else COST_KEYS
     payload: dict[str, str] = {}
     for key in keys:
         value = getattr(model, key)
-        payload[key] = (
-            _canonical_decimal_text(value) if key in _NUMERIC_HASH_KEYS else value
-        )
+        payload[key] = _canonical_decimal_text(value) if key in _NUMERIC_HASH_KEYS else value
     return payload
 
 
@@ -124,9 +118,7 @@ def _coerce_decimal(value: object, field_name: str) -> Decimal:
         return Decimal(value)
     if isinstance(value, int):
         return Decimal(value)
-    raise TypeError(
-        f"{field_name} must be Decimal/str/int, got {type(value).__name__}"
-    )
+    raise TypeError(f"{field_name} must be Decimal/str/int, got {type(value).__name__}")
 
 
 def _require_non_negative(value: Decimal, field_name: str) -> None:
@@ -206,9 +198,7 @@ class CostModel:
             _require_in_range(Decimal(getattr(self, fname)), fname, Decimal("0"), MAX_RATE)
         if self.exit_slippage_rate is not None:
             _require_non_negative(self.exit_slippage_rate, "exit_slippage_rate")
-            _require_in_range(
-                self.exit_slippage_rate, "exit_slippage_rate", Decimal("0"), MAX_RATE
-            )
+            _require_in_range(self.exit_slippage_rate, "exit_slippage_rate", Decimal("0"), MAX_RATE)
         _require_in_range(
             self.partial_fill_fraction,
             "partial_fill_fraction",
@@ -268,15 +258,9 @@ def build_cost_model(cost_dict: dict[str, Any]) -> CostModel:
     return CostModel(
         fee_rate_entry=_coerce_decimal(cost_dict["fee_rate_entry"], "fee_rate_entry"),
         fee_rate_exit=_coerce_decimal(cost_dict["fee_rate_exit"], "fee_rate_exit"),
-        funding_treatment=_require_cost_str(
-            cost_dict["funding_treatment"], "funding_treatment"
-        ),
-        expected_slippage=_coerce_decimal(
-            cost_dict["expected_slippage"], "expected_slippage"
-        ),
-        slippage_model=_require_cost_str(
-            cost_dict["slippage_model"], "slippage_model"
-        ),
+        funding_treatment=_require_cost_str(cost_dict["funding_treatment"], "funding_treatment"),
+        expected_slippage=_coerce_decimal(cost_dict["expected_slippage"], "expected_slippage"),
+        slippage_model=_require_cost_str(cost_dict["slippage_model"], "slippage_model"),
         spread_fill_assumptions=_require_cost_str(
             cost_dict["spread_fill_assumptions"], "spread_fill_assumptions"
         ),

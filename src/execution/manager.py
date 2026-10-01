@@ -49,9 +49,7 @@ from src.risk.types import ConstraintSnapshot
 # this far is a programming error, not a market condition.
 # --------------------------------------------------------------------------- #
 
-LIVE5_SYMBOLS: frozenset[str] = frozenset(
-    {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"}
-)
+LIVE5_SYMBOLS: frozenset[str] = frozenset({"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"})
 
 
 def _require_live5_symbol(symbol: str) -> None:
@@ -61,6 +59,7 @@ def _require_live5_symbol(symbol: str) -> None:
             f"symbol {symbol!r} is not in the live-5 universe "
             f"({sorted(LIVE5_SYMBOLS)}) — live placement scope violation"
         )
+
 
 # --------------------------------------------------------------------------- #
 # Protocol-typed adapter surface — the manager never imports the SDK.
@@ -431,9 +430,7 @@ async def execute_approved_plan(
     # Gate 3: SAFE_MODE guard (09-REVIEW CR-07) — SAFE_MODE blocks new
     # entries even when live orders are still enabled (e.g. right after
     # an ENTRY_WITHOUT_PROTECTIVE divergence).
-    safe_mode_verdict = safe_mode_controller.guard_new_entries(
-        trade_plan=risk_kwargs["trade_plan"]
-    )
+    safe_mode_verdict = safe_mode_controller.guard_new_entries(trade_plan=risk_kwargs["trade_plan"])
     if safe_mode_verdict.is_no_trade:
         return ExecutionOutcome(
             is_no_trade=True,
@@ -674,8 +671,7 @@ class ProtectiveConfirmationVerdict:
             )
         if not self.is_no_trade and self.reason_code != "OK":
             raise ValueError(
-                "ProtectiveConfirmationVerdict: is_no_trade=False requires "
-                "reason_code='OK'"
+                "ProtectiveConfirmationVerdict: is_no_trade=False requires reason_code='OK'"
             )
 
 
@@ -726,9 +722,7 @@ def require_protective_confirmation(
     if _REQUIRED_PROTECTIVE_ROLES.issubset(confirmed_roles):
         return ProtectiveConfirmationVerdict(is_no_trade=False, reason_code="OK")
     safe_mode_controller.enter_safe_mode(reason=_ENTRY_WITHOUT_PROTECTIVE, now_utc=now_utc)
-    return ProtectiveConfirmationVerdict(
-        is_no_trade=True, reason_code=_ENTRY_WITHOUT_PROTECTIVE
-    )
+    return ProtectiveConfirmationVerdict(is_no_trade=True, reason_code=_ENTRY_WITHOUT_PROTECTIVE)
 
 
 # Algo-order statuses that count as "exists and active" (EXECUTION_SPEC §6).
@@ -842,13 +836,9 @@ class AttachOutcome:
         if not isinstance(self.reason_code, str) or self.reason_code == "":
             raise ValueError("reason_code must be a non-empty string")
         if self.is_no_trade and self.reason_code == "OK":
-            raise ValueError(
-                "AttachOutcome: is_no_trade=True requires reason_code != 'OK'"
-            )
+            raise ValueError("AttachOutcome: is_no_trade=True requires reason_code != 'OK'")
         if not self.is_no_trade and self.reason_code != "OK":
-            raise ValueError(
-                "AttachOutcome: is_no_trade=False requires reason_code='OK'"
-            )
+            raise ValueError("AttachOutcome: is_no_trade=False requires reason_code='OK'")
 
 
 async def attach_protectives_to_fill(
@@ -965,9 +955,7 @@ async def attach_protectives_to_fill(
     except (TypeError, ValueError) as exc:
         return await _sl_only_then_hold(None, f"fill fold: {type(exc).__name__}")
     if folded.filled_quantity <= Decimal("0"):
-        return AttachOutcome(
-            is_no_trade=True, reason_code="NO_FILL", sized=None, placed_legs=()
-        )
+        return AttachOutcome(is_no_trade=True, reason_code="NO_FILL", sized=None, placed_legs=())
 
     sizing = size_protectives_to_filled_qty(
         filled_quantity=folded.filled_quantity,

@@ -72,9 +72,7 @@ def _passing_health_verdict() -> Any:
     observed = datetime(2026, 9, 19, 10, 0, tzinfo=UTC)
     return run_health_checks(
         results=[
-            HealthCheckResult(
-                check_name=name, status="PASS", detail="ok", observed_at_utc=observed
-            )
+            HealthCheckResult(check_name=name, status="PASS", detail="ok", observed_at_utc=observed)
             for name in ALL_CHECK_NAMES
         ]
     )

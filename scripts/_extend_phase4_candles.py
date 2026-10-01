@@ -96,9 +96,7 @@ def _build_setup_window_1h() -> list[dict]:
         elif i < 220:
             close = Decimal("65000.00") + Decimal(str(190 * 5 + 50 + (i - 189) * 100))
         elif i < 240:
-            close = Decimal("65000.00") + Decimal(
-                str(190 * 5 + 50 + 30 * 100 - (i - 219) * 110)
-            )
+            close = Decimal("65000.00") + Decimal(str(190 * 5 + 50 + 30 * 100 - (i - 219) * 110))
         elif i == 240:
             close = Decimal("65900.00")
         elif i < 249:

@@ -181,17 +181,13 @@ def test_publish_after_a_simulated_crash_matches_a_clean_write(
 
     with monkeypatch.context() as patched:
 
-        def _torn(
-            self: pl.DataFrame, file: Path, *args: object, **kwargs: object
-        ) -> None:
+        def _torn(self: pl.DataFrame, file: Path, *args: object, **kwargs: object) -> None:
             Path(file).write_bytes(b"PAR1-partial-bytes")
             raise OSError("simulated crash mid-write")
 
         patched.setattr(pl.DataFrame, "write_parquet", _torn)
         with pytest.raises(OSError, match="simulated crash"):
-            store.publish_batch(
-                bars, interval="1h", symbol="BTCUSDT", raw_root=crash_root
-            )
+            store.publish_batch(bars, interval="1h", symbol="BTCUSDT", raw_root=crash_root)
 
     day = datetime(2023, 11, 14).date()
     partition = store.partition_path(crash_root, "1h", "BTCUSDT", day)

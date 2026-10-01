@@ -64,9 +64,7 @@ class EnablementVerdict:
     def __post_init__(self) -> None:
         if self.reason_code is None:
             if self.is_no_trade:
-                raise ValueError(
-                    "EnablementVerdict: is_no_trade=True requires reason_code"
-                )
+                raise ValueError("EnablementVerdict: is_no_trade=True requires reason_code")
             return
         if not isinstance(self.reason_code, str) or self.reason_code == "":
             raise ValueError("reason_code must be a non-empty string")
@@ -301,9 +299,7 @@ def _validate_utc_aware(now_utc: datetime) -> None:
     if now_utc.tzinfo is None:
         raise ValueError("now_utc must be UTC-aware, got naive datetime")
     if now_utc.utcoffset() != timedelta(0):
-        raise ValueError(
-            f"now_utc must be UTC, got offset {now_utc.utcoffset()}"
-        )
+        raise ValueError(f"now_utc must be UTC, got offset {now_utc.utcoffset()}")
 
 
 __all__ = [

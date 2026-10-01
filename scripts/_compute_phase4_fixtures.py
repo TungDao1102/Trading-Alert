@@ -152,10 +152,18 @@ def main() -> None:
         "setup_frame_valid": setup_frame.features_valid,
         "context_frame_valid": context_frame.features_valid,
         "setup_atr": str(setup_frame.atr_14.value) if setup_frame.atr_14.valid else None,
-        "setup_swing_high": str(setup_frame.swing_high.value) if setup_frame.swing_high.valid else None,
-        "setup_swing_low": str(setup_frame.swing_low.value) if setup_frame.swing_low.valid else None,
-        "setup_zone_upper": str(setup_frame.zone_upper.value) if setup_frame.zone_upper.valid else None,
-        "setup_zone_lower": str(setup_frame.zone_lower.value) if setup_frame.zone_lower.valid else None,
+        "setup_swing_high": str(setup_frame.swing_high.value)
+        if setup_frame.swing_high.valid
+        else None,
+        "setup_swing_low": str(setup_frame.swing_low.value)
+        if setup_frame.swing_low.valid
+        else None,
+        "setup_zone_upper": str(setup_frame.zone_upper.value)
+        if setup_frame.zone_upper.valid
+        else None,
+        "setup_zone_lower": str(setup_frame.zone_lower.value)
+        if setup_frame.zone_lower.valid
+        else None,
         "setup_ema_20": str(setup_frame.ema_20.value) if setup_frame.ema_20.valid else None,
         "setup_ema_50": str(setup_frame.ema_50.value) if setup_frame.ema_50.valid else None,
         "setup_ema_200": str(setup_frame.ema_200.value) if setup_frame.ema_200.valid else None,

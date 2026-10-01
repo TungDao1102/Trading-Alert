@@ -197,8 +197,9 @@ off-host) is silently void in production.
 # default runner must shell out to the real pg_dump (env-configured),
 # and refuse to print backup-OK when it did not run:
 def _prod_pg_dump_runner(out: Path) -> Path:
-    subprocess.run(["pg_dump", "--format=custom", "-f", str(out),
-                    os.environ["DATABASE_URL_SYNC"]], check=True)
+    subprocess.run(
+        ["pg_dump", "--format=custom", "-f", str(out), os.environ["DATABASE_URL_SYNC"]], check=True
+    )
     return out
 ```
 
@@ -270,8 +271,7 @@ so truncated restores still yield `equal=True`.
 **Fix:**
 ```python
 # (a) exclude the manifest itself from its own hash:
-files = sorted(p for p in payload_root.rglob("*")
-               if p.is_file() and p.name != MANIFEST_NAME)
+files = sorted(p for p in payload_root.rglob("*") if p.is_file() and p.name != MANIFEST_NAME)
 # (b) after re-hashing, assert set(manifest) - {"manifest.json"} == set(restored)
 #     and fail on any manifest key never visited
 ```

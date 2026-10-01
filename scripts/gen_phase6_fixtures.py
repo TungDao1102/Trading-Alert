@@ -20,6 +20,7 @@ independent arithmetic.
 This script is committed for reproducibility — re-running it regenerates
 byte-identical fixtures.
 """
+
 from __future__ import annotations
 
 import json

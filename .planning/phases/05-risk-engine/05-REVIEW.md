@@ -70,6 +70,7 @@ Reason-code consistency verified clean: `RejectionReason`/`DailyState` match GLO
 # Option B (schema fix, Phase 7+ prerequisite): add direction/symbol
 # to TradePlan and thread plan.direction.value through both call sites.
 from src.domain.enums import Direction
+
 if candidate_position_side not in (Direction.LONG.value, Direction.SHORT.value):
     raise ValueError(f"unknown side {candidate_position_side!r} — refusing to evaluate")
 ```
@@ -108,6 +109,7 @@ if age > ttl or age < timedelta(0):  # also reject future-dated snapshots (WR-08
 **Fix:**
 ```python
 from src.core._decimal import _add, _div
+
 entry_ref = _div(_add(trade_plan.entry_min_price, trade_plan.entry_max_price), Decimal("2"))
 # quantize.py: route steps*step through _mul, or document why // is context-proof
 ```

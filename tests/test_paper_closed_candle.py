@@ -58,8 +58,7 @@ def test_clean_run_closed_candle_emits_canonical_outcome() -> None:
     digest = sha256_hex(outcome)
 
     assert digest == expected["outcome_digest"], (
-        f"outcome digest mismatch: got {digest!r}, "
-        f"expected {expected['outcome_digest']!r}"
+        f"outcome digest mismatch: got {digest!r}, expected {expected['outcome_digest']!r}"
     )
 
 
@@ -85,11 +84,7 @@ def test_forming_updates_emit_no_signal() -> None:
     # loop must emit no Signal from a single forming update.
     forming_only_input = {
         **case_input,
-        "feed_events": [
-            event
-            for event in case_input["feed_events"]
-            if not event["x"]
-        ],
+        "feed_events": [event for event in case_input["feed_events"] if not event["x"]],
     }
     assert forming_only_input["feed_events"], "fixture must include a forming event"
 
@@ -97,9 +92,7 @@ def test_forming_updates_emit_no_signal() -> None:
     signals = outcome.get("signals", [])
     trade_plans = outcome.get("trade_plans", [])
     assert signals == [], f"forming updates must not emit Signals, got {signals}"
-    assert trade_plans == [], (
-        f"forming updates must not emit TradePlans, got {trade_plans}"
-    )
+    assert trade_plans == [], f"forming updates must not emit TradePlans, got {trade_plans}"
 
 
 # --------------------------------------------------------------------------- #
@@ -147,12 +140,8 @@ def test_future_close_event_emits_no_signal() -> None:
     outcome = run_paper_tick(future_only_input)
     signals = outcome.get("signals", [])
     trade_plans = outcome.get("trade_plans", [])
-    assert signals == [], (
-        f"future-close events must not emit Signals, got {signals}"
-    )
-    assert trade_plans == [], (
-        f"future-close events must not emit TradePlans, got {trade_plans}"
-    )
+    assert signals == [], f"future-close events must not emit Signals, got {signals}"
+    assert trade_plans == [], f"future-close events must not emit TradePlans, got {trade_plans}"
 
 
 # --------------------------------------------------------------------------- #

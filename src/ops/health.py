@@ -99,9 +99,7 @@ class NotifierLike(Protocol):
     keyboard.
     """
 
-    async def send_message(
-        self, *, chat_id: Any, text: str, reply_markup: Any = None
-    ) -> Any: ...
+    async def send_message(self, *, chat_id: Any, text: str, reply_markup: Any = None) -> Any: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -134,8 +132,7 @@ class HealthCheckResult:
             )
         if self.status not in _STATUSES:
             raise ValueError(
-                f"HealthCheckResult: unknown status {self.status!r} "
-                f"(known: {sorted(_STATUSES)})"
+                f"HealthCheckResult: unknown status {self.status!r} (known: {sorted(_STATUSES)})"
             )
         if not isinstance(self.detail, str):
             raise TypeError(f"detail must be str, got {type(self.detail).__name__}")
@@ -169,13 +166,10 @@ class HealthVerdict:
             raise ValueError("reason_code must be a non-empty string")
         if self.is_no_trade and self.reason_code != "HEALTH_CHECK_FAILED":
             raise ValueError(
-                "HealthVerdict: is_no_trade=True requires "
-                "reason_code='HEALTH_CHECK_FAILED'"
+                "HealthVerdict: is_no_trade=True requires reason_code='HEALTH_CHECK_FAILED'"
             )
         if not self.is_no_trade and self.reason_code != "OK":
-            raise ValueError(
-                "HealthVerdict: is_no_trade=False requires reason_code='OK'"
-            )
+            raise ValueError("HealthVerdict: is_no_trade=False requires reason_code='OK'")
         if not self.is_no_trade and not _is_complete_passing_set(self.results):
             raise ValueError(
                 "HealthVerdict: a PASS verdict requires exactly one non-FAIL "
@@ -544,9 +538,7 @@ def check_unprotected_positions(
 ) -> HealthCheckResult:
     """FAIL when any divergence is ENTRY_WITHOUT_PROTECTIVE (T-9-14)."""
     unprotected_count = sum(
-        1
-        for d in divergences
-        if _get_field(d, "kind") == _DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE
+        1 for d in divergences if _get_field(d, "kind") == _DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE
     )
     if unprotected_count > 0:
         return _build_result(
@@ -573,9 +565,7 @@ def check_orphaned_orders(
 ) -> HealthCheckResult:
     """FAIL when any divergence is ORPHAN_PROTECTIVE (RUNBOOK section 4)."""
     orphan_count = sum(
-        1
-        for d in divergences
-        if _get_field(d, "kind") == _DIVERGENCE_KIND_ORPHAN_PROTECTIVE
+        1 for d in divergences if _get_field(d, "kind") == _DIVERGENCE_KIND_ORPHAN_PROTECTIVE
     )
     if orphan_count > 0:
         return _build_result(

@@ -89,12 +89,8 @@ def upgrade() -> None:
         "coverage_windows",
         sa.Column("symbol", sa.String(length=32), nullable=False),
         sa.Column("interval", sa.String(length=8), nullable=False),
-        sa.Column(
-            "historical_data_start_utc", sa.DateTime(timezone=True), nullable=False
-        ),
-        sa.Column(
-            "historical_data_end_utc", sa.DateTime(timezone=True), nullable=False
-        ),
+        sa.Column("historical_data_start_utc", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("historical_data_end_utc", sa.DateTime(timezone=True), nullable=False),
         sa.Column("onboard_time_utc", sa.DateTime(timezone=True), nullable=True),
         sa.Column("status_history_json", sa.String(), nullable=False),
         sa.Column("updated_at_utc", sa.DateTime(timezone=True), nullable=False),

@@ -173,12 +173,8 @@ def test_appended_bars_never_change_prefix_decisions(
     prefix = setup_1h[-200:]
     last_open = prefix[-1].open_time_utc
     extra_candles = [
-        _row_to_candle(
-            _synthetic_bar("BTCUSDT", last_open + timedelta(hours=1), "62000.00")
-        ),
-        _row_to_candle(
-            _synthetic_bar("BTCUSDT", last_open + timedelta(hours=2), "62500.00")
-        ),
+        _row_to_candle(_synthetic_bar("BTCUSDT", last_open + timedelta(hours=1), "62000.00")),
+        _row_to_candle(_synthetic_bar("BTCUSDT", last_open + timedelta(hours=2), "62500.00")),
     ]
     before = _decisions(prefix, context_4h, parameter_set)
     after = _decisions(prefix + extra_candles, context_4h, parameter_set)
@@ -205,22 +201,17 @@ def test_same_prefix_different_suffixes_identical(
     prefix = setup_1h[-200:]
     last_open = prefix[-1].open_time_utc
     suffix_a = [
-        _row_to_candle(
-            _synthetic_bar("BTCUSDT", last_open + timedelta(hours=1), "63000.00")
-        )
+        _row_to_candle(_synthetic_bar("BTCUSDT", last_open + timedelta(hours=1), "63000.00"))
     ]
     suffix_b = [
-        _row_to_candle(
-            _synthetic_bar("BTCUSDT", last_open + timedelta(hours=1), "55000.00")
-        )
+        _row_to_candle(_synthetic_bar("BTCUSDT", last_open + timedelta(hours=1), "55000.00"))
     ]
     out_a = _decisions(prefix + suffix_a, context_4h, parameter_set)
     out_b = _decisions(prefix + suffix_b, context_4h, parameter_set)
     # Prefix decisions match.
     for i in range(len(prefix)):
         assert _decision_key(out_a[i][1]) == _decision_key(out_b[i][1]), (
-            f"prefix decision at bar {i} differs between suffixes: "
-            f"a={out_a[i][1]}, b={out_b[i][1]}"
+            f"prefix decision at bar {i} differs between suffixes: a={out_a[i][1]}, b={out_b[i][1]}"
         )
 
 
@@ -315,9 +306,7 @@ def test_leaky_variant_is_detected_by_prefix_comparison(
     prefix = _with_support_touch_last_bar(prefix, parameter_set)
     last_open = prefix[-1].open_time_utc
     extra_candles = [
-        _row_to_candle(
-            _synthetic_bar("BTCUSDT", last_open + timedelta(hours=1), "62000.00")
-        )
+        _row_to_candle(_synthetic_bar("BTCUSDT", last_open + timedelta(hours=1), "62000.00"))
     ]
 
     def _leaky_decisions(
@@ -369,9 +358,7 @@ def test_leaky_variant_is_detected_by_prefix_comparison(
     # At least one prefix decision must differ — the leaky helper binds
     # future-bar length into the regime gate.
     diffs = [
-        i
-        for i in range(len(before))
-        if _decision_key(before[i][1]) != _decision_key(after[i][1])
+        i for i in range(len(before)) if _decision_key(before[i][1]) != _decision_key(after[i][1])
     ]
     assert len(diffs) > 0, (
         "leaky variant should change at least one prefix decision; "

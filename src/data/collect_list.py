@@ -37,9 +37,7 @@ SYMBOL_RE = re.compile(r"^[A-Z0-9]+USDT$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Relative to the working directory (repo root locally, /app in the image).
-DEFAULT_COLLECT_LIST_PATH = (
-    Path("docs") / "research" / "universe" / "collect-list-v1.toml"
-)
+DEFAULT_COLLECT_LIST_PATH = Path("docs") / "research" / "universe" / "collect-list-v1.toml"
 
 _REQUIRED_KEYS = (
     "schema",
@@ -86,9 +84,7 @@ def _parse_chosen_on(raw: object, path: Path) -> date:
     try:
         return date.fromisoformat(raw)
     except ValueError as exc:
-        raise CollectListError(
-            f"{path}: 'chosen_on' is not a real calendar date: {raw!r}"
-        ) from exc
+        raise CollectListError(f"{path}: 'chosen_on' is not a real calendar date: {raw!r}") from exc
 
 
 def _validate_symbols(raw: object, path: Path) -> tuple[str, ...]:
@@ -107,9 +103,7 @@ def _validate_symbols(raw: object, path: Path) -> tuple[str, ...]:
         seen.add(sym)
     missing_live = [s for s in LIVE_5 if s not in seen]
     if missing_live:
-        raise CollectListError(
-            f"{path}: must be a superset of the live-5; missing {missing_live}"
-        )
+        raise CollectListError(f"{path}: must be a superset of the live-5; missing {missing_live}")
     return tuple(sorted(seen))
 
 
@@ -129,9 +123,7 @@ def load_collect_list(path: Path) -> CollectList:
         if key not in doc:
             raise CollectListError(f"{path}: missing required key '{key}'")
     if doc["schema"] != SCHEMA:
-        raise CollectListError(
-            f"{path}: unsupported schema {doc['schema']!r}, expected {SCHEMA!r}"
-        )
+        raise CollectListError(f"{path}: unsupported schema {doc['schema']!r}, expected {SCHEMA!r}")
     list_id = _require_str(doc, "list_id", path)
     selection_rule = _require_str(doc, "selection_rule", path)
     chosen_on = _parse_chosen_on(doc["chosen_on"], path)
@@ -180,8 +172,7 @@ def _parse_quote_volume(symbol: str, value: object) -> Decimal:
         ) from exc
     if not volume.is_finite() or volume < 0:
         raise CollectListError(
-            f"ticker row for {symbol}: quoteVolume {value!r} must be a finite "
-            "non-negative decimal"
+            f"ticker row for {symbol}: quoteVolume {value!r} must be a finite non-negative decimal"
         )
     return volume
 
@@ -239,8 +230,7 @@ def propose_collect_list(
         volumes[symbol] = _parse_quote_volume(symbol, row.get("quoteVolume"))
     if len(volumes) < top_n:
         raise CollectListError(
-            f"only {len(volumes)} eligible symbols have a ticker row, "
-            f"fewer than top_n={top_n}"
+            f"only {len(volumes)} eligible symbols have a ticker row, fewer than top_n={top_n}"
         )
     ranked = sorted(volumes, key=lambda sym: (-volumes[sym], sym))
     chosen = set(ranked[:top_n]) | set(live_symbols)

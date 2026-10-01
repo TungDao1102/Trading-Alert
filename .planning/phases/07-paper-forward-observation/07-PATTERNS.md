@@ -112,9 +112,9 @@
 **Apply to:** `src/paper/attribution.py` — define the three-way attribution enum:
 ```python
 class AttributionKind(str, Enum):
-    SYSTEM = "system"               # engine emitted
+    SYSTEM = "system"  # engine emitted
     USER_EXECUTED_SIM = "user-executed-sim"  # SIMULATE fill (incl. approval-delay modeling)
-    OPPORTUNITY = "opportunity"     # skipped/expired with reason code (retained, never dropped)
+    OPPORTUNITY = "opportunity"  # skipped/expired with reason code (retained, never dropped)
 ```
 Plus a `PaperApprovalAction` extension or reuse `ApprovalAction.SIMULATE` for the simulated approval. The attribution field is a first-class column on every paper record, not a post-hoc join.
 
@@ -338,15 +338,17 @@ def make_signal_id(
     source_candle_close_utc: datetime,
     setup_fingerprint: str,
 ) -> str:
-    return sha256_hex({
-        "strategy_id": strategy_id,
-        "strategy_version": strategy_version,
-        "parameter_set_id": parameter_set_id,
-        "symbol": symbol,
-        "source_timeframe": source_timeframe,
-        "source_candle_close_utc": source_candle_close_utc,
-        "setup_fingerprint": setup_fingerprint,
-    })
+    return sha256_hex(
+        {
+            "strategy_id": strategy_id,
+            "strategy_version": strategy_version,
+            "parameter_set_id": parameter_set_id,
+            "symbol": symbol,
+            "source_timeframe": source_timeframe,
+            "source_candle_close_utc": source_candle_close_utc,
+            "setup_fingerprint": setup_fingerprint,
+        }
+    )
 ```
 
 **Rule:** `sha256_hex` uses canonical JSON (sorted keys, compact separators, `ensure_ascii=True`, `allow_nan=False`). Decimal → str() preserving full precision. datetime → UTC-normalized isoformat. Enum → .value. set/frozenset → REJECTED. float → REJECTED.
@@ -408,9 +410,7 @@ class Base(DeclarativeBase):
 def _require_decimal(value: object, field_name: str) -> None:
     """Reject non-Decimal values for money/qty/price fields (D-12)."""
     if not isinstance(value, Decimal):
-        raise TypeError(
-            f"{field_name} must be Decimal, got {type(value).__name__}"
-        )
+        raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
 ```
 
 **Rule:** `Decimal` (or integer tick/qty-step arithmetic) for all exchange-sensitive values; floats allowed only inside statistical/feature code that never gates an order. UTC internally always; `Asia/Ho_Chi_Minh` presentation only at the display edge.

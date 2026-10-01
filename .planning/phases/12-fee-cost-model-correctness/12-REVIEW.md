@@ -61,10 +61,12 @@ There are no blockers. The five warnings are all defense-in-depth gaps, where a 
 ```python
 # Option A: manager takes the observation and re-resolves with its own clock
 res = resolve_live_cost_rates(
-    parameter_rates=risk_kwargs["cost_rates"],   # PARAMETER-source rates
-    account_commission=account_commission,        # required kwarg
+    parameter_rates=risk_kwargs["cost_rates"],  # PARAMETER-source rates
+    account_commission=account_commission,  # required kwarg
     candidate_symbol=risk_kwargs["constraint_snapshot"].symbol,
-    now_utc=now_utc, ttl=commission_ttl)
+    now_utc=now_utc,
+    ttl=commission_ttl,
+)
 if res.is_no_trade:
     return ExecutionOutcome(True, res.reason_code)
 risk_kwargs = {**risk_kwargs, "cost_rates": res.rates}

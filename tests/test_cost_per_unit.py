@@ -317,8 +317,7 @@ def test_legacy_registry_hash_unchanged_by_optional_field() -> None:
 
     model = build_cost_model(dict(_SEVEN))
     assert (
-        model.cost_model_hash
-        == "e18ce00931314a670dab22a4f0bd704c75d36c5d736c0c8ca04713050bb704d8"
+        model.cost_model_hash == "e18ce00931314a670dab22a4f0bd704c75d36c5d736c0c8ca04713050bb704d8"
     )
 
 
@@ -453,9 +452,7 @@ def test_fee_spellings_hash_equal() -> None:
     from src.backtest.costs import build_cost_model
 
     spellings = ("0.0005", "0.00050", Decimal("0.00050"), Decimal("0.0005"))
-    hashes = {
-        build_cost_model(_cost(fee_rate_entry=s)).cost_model_hash for s in spellings
-    }
+    hashes = {build_cost_model(_cost(fee_rate_entry=s)).cost_model_hash for s in spellings}
     assert len(hashes) == 1
 
 

@@ -10,6 +10,7 @@ canonical-JSON hash of the trade list matches.
 TDD discipline: RED → GREEN. These tests are the RED phase — they MUST
 fail until `src/backtest/` is implemented.
 """
+
 from __future__ import annotations
 
 import json
@@ -82,9 +83,7 @@ def test_intrabar_both_touched_long_resolves_sl_via_1m() -> None:
     assert trade["fallback_applied"] is False, (
         "1m path was available; fallback_applied must be False"
     )
-    assert trade["coverage_note"] is None, (
-        "1m path was available; coverage_note must be None"
-    )
+    assert trade["coverage_note"] is None, "1m path was available; coverage_note must be None"
 
 
 # --------------------------------------------------------------------------- #
@@ -133,9 +132,7 @@ def test_intrabar_missing_fallback_resolves_sl_with_flag() -> None:
     assert len(trades) == 1, f"expected 1 trade, got {len(trades)}"
     trade = trades[0]
     assert trade["exit_kind"] == "SL"
-    assert trade["fallback_applied"] is True, (
-        "missing 1m must set fallback_applied=True"
-    )
+    assert trade["fallback_applied"] is True, "missing 1m must set fallback_applied=True"
     assert trade["coverage_note"] == "1m_intrabar_missing", (
         f"expected coverage_note='1m_intrabar_missing', got {trade['coverage_note']!r}"
     )
@@ -197,9 +194,7 @@ def test_risk_reject_is_first_class_outcome() -> None:
     trades = result["trades"]
     assert len(trades) >= 1
     # Find the reject record.
-    reject = next(
-        (t for t in trades if t.get("outcome_kind") == "REJECT"), None
-    )
+    reject = next((t for t in trades if t.get("outcome_kind") == "REJECT"), None)
     assert reject is not None, "expected a REJECT record in the trade list"
     assert reject["reason_code"] in {
         "NOTIONAL_REJECT",
@@ -315,9 +310,9 @@ def test_run_twice_byte_identical() -> None:
     b = run(case_input)
     a_canonical = [_canonical_trade_dict(t) for t in a["trades"]]
     b_canonical = [_canonical_trade_dict(t) for t in b["trades"]]
-    assert sha256_hex({"trades": a_canonical}) == sha256_hex(
-        {"trades": b_canonical}
-    ), "run-twice digests differ — determinism violated"
+    assert sha256_hex({"trades": a_canonical}) == sha256_hex({"trades": b_canonical}), (
+        "run-twice digests differ — determinism violated"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -326,9 +321,7 @@ def test_run_twice_byte_identical() -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize(
-    "case_name", ["intrabar_missing_fallback", "intrabar_both_touched_short"]
-)
+@pytest.mark.parametrize("case_name", ["intrabar_missing_fallback", "intrabar_both_touched_short"])
 def test_cost_parity_simulator_matches_costs_module(case_name: str) -> None:
     """Beh. 11: the simulator record's modeled_costs_per_unit equals the public helper.
 
@@ -451,9 +444,9 @@ def test_no_lookahead_appending_1m_candle_changes_nothing() -> None:
     b = run(case_input)
     a_canonical = [_canonical_trade_dict(t) for t in a["trades"]]
     b_canonical = [_canonical_trade_dict(t) for t in b["trades"]]
-    assert sha256_hex({"trades": a_canonical}) == sha256_hex(
-        {"trades": b_canonical}
-    ), "appending a post-horizon 1m candle changed the trade list — lookahead leak"
+    assert sha256_hex({"trades": a_canonical}) == sha256_hex({"trades": b_canonical}), (
+        "appending a post-horizon 1m candle changed the trade list — lookahead leak"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -463,9 +456,7 @@ def test_no_lookahead_appending_1m_candle_changes_nothing() -> None:
 
 def test_phase6_fixtures_exist() -> None:
     """Beh. 13: each case directory under phase6/ contains input.json."""
-    assert PHASE6_FIXTURES_DIR.is_dir(), (
-        f"missing phase6 fixtures dir: {PHASE6_FIXTURES_DIR}"
-    )
+    assert PHASE6_FIXTURES_DIR.is_dir(), f"missing phase6 fixtures dir: {PHASE6_FIXTURES_DIR}"
     expected_cases = {
         "intrabar_both_touched",
         "intrabar_both_touched_short",
@@ -575,29 +566,21 @@ def test_cr02_trade_id_unique_across_bar_time_symbol_quantity() -> None:
     assert _rec("BTCUSDT", bar_close_a, "0.9") != base, (
         "quantity-only variation must change trade_id (fraction collision)"
     )
-    assert _rec("ETHUSDT", bar_close_a, "0.5") != base, (
-        "symbol-only variation must change trade_id"
-    )
+    assert _rec("ETHUSDT", bar_close_a, "0.5") != base, "symbol-only variation must change trade_id"
     assert _rec("BTCUSDT", bar_close_b, "0.5") != base, (
         "bar-time-only variation must change trade_id"
     )
-    assert _rec("BTCUSDT", bar_close_a, "0.5") == base, (
-        "identical inputs must re-hash identically"
-    )
+    assert _rec("BTCUSDT", bar_close_a, "0.5") == base, "identical inputs must re-hash identically"
 
     # End-to-end anchor: the same plan filled at fraction 1.0 vs 0.5
     # yields different trade_ids on the same bar.
     case_dir = PHASE6_FIXTURES_DIR / "limit_partial_fill"
     full_input = _load_input(case_dir)
-    full_input["cost_model"] = dict(
-        full_input["cost_model"], partial_fill_fraction="1.0"
-    )
+    full_input["cost_model"] = dict(full_input["cost_model"], partial_fill_fraction="1.0")
     partial_input = _load_input(case_dir)
     full_id = run(full_input)["trades"][0]["trade_id"]
     partial_id = run(partial_input)["trades"][0]["trade_id"]
-    assert full_id != partial_id, (
-        "full vs partial fill of the same plan must not share a trade_id"
-    )
+    assert full_id != partial_id, "full vs partial fill of the same plan must not share a trade_id"
 
 
 def test_cr10_fixture_strategy_version_bound_to_registry() -> None:
@@ -656,9 +639,7 @@ _COST8 = {
 }
 
 
-def _filled_record(
-    *, direction: str, entry: str, exit_: str, quantity: str, exit_kind: str
-):
+def _filled_record(*, direction: str, entry: str, exit_: str, quantity: str, exit_kind: str):
     """Hand-built filled TradeRecord with every cost field still None."""
 
     from src.backtest.simulator import TradeRecord
@@ -698,28 +679,82 @@ def _filled_record(
 #  gross, entry_fee, exit_fee, slippage_total, realized)
 _APPLY_COSTS_ORACLES = [
     (
-        "btc_long_sl_edge", "LONG", "60100", "58780", "0.035", "SL",
-        "-46.200", "1.05175", "1.02865", "0.82754", "-49.10794",
+        "btc_long_sl_edge",
+        "LONG",
+        "60100",
+        "58780",
+        "0.035",
+        "SL",
+        "-46.200",
+        "1.05175",
+        "1.02865",
+        "0.82754",
+        "-49.10794",
     ),
     (
-        "btc_long_sl_mid", "LONG", "60000", "58780", "0.035", "SL",
-        "-42.700", "1.05", "1.02865", "0.82719", "-45.60584",
+        "btc_long_sl_mid",
+        "LONG",
+        "60000",
+        "58780",
+        "0.035",
+        "SL",
+        "-42.700",
+        "1.05",
+        "1.02865",
+        "0.82719",
+        "-45.60584",
     ),
     (
-        "btc_short_sl_edge", "SHORT", "59900", "61300", "0.033", "SL",
-        "-46.200", "0.98835", "1.01145", "0.80454", "-49.00434",
+        "btc_short_sl_edge",
+        "SHORT",
+        "59900",
+        "61300",
+        "0.033",
+        "SL",
+        "-46.200",
+        "0.98835",
+        "1.01145",
+        "0.80454",
+        "-49.00434",
     ),
     (
-        "xrp_long_sl_edge", "LONG", "0.5010", "0.4930", "5750.4", "SL",
-        "-46.00320", "1.4404752", "1.4174736", "1.1385792", "-49.999728",
+        "xrp_long_sl_edge",
+        "LONG",
+        "0.5010",
+        "0.4930",
+        "5750.4",
+        "SL",
+        "-46.00320",
+        "1.4404752",
+        "1.4174736",
+        "1.1385792",
+        "-49.999728",
     ),
     (
-        "btc_long_tp1", "LONG", "60000", "62000", "0.035", "TP1",
-        "70.000", "1.05", "1.085", "0.427", "67.438",
+        "btc_long_tp1",
+        "LONG",
+        "60000",
+        "62000",
+        "0.035",
+        "TP1",
+        "70.000",
+        "1.05",
+        "1.085",
+        "0.427",
+        "67.438",
     ),
     (
-        "btc_long_eod", "LONG", "60000", "60300", "0.035", "EOD",
-        "10.500", "1.05", "1.05525", "0.84315", "7.5516",
+        "btc_long_eod",
+        "LONG",
+        "60000",
+        "60300",
+        "0.035",
+        "EOD",
+        "10.500",
+        "1.05",
+        "1.05525",
+        "0.84315",
+        "7.5516",
     ),
 ]
 

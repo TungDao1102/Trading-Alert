@@ -293,13 +293,9 @@ def test_binding_gate_propagates_keyerror_for_missing_slice_keys() -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize(
-    "key", ["funding_treatment", "slippage_model", "spread_fill_assumptions"]
-)
+@pytest.mark.parametrize("key", ["funding_treatment", "slippage_model", "spread_fill_assumptions"])
 @pytest.mark.parametrize("bad_value", [None, 123, ""])
-def test_build_cost_model_rejects_non_string_cost_values(
-    key: str, bad_value: object
-) -> None:
+def test_build_cost_model_rejects_non_string_cost_values(key: str, bad_value: object) -> None:
     """Beh. 7: build_cost_model raises TypeError for non-string or empty
     string-valued cost keys instead of silently coercing via str().
 

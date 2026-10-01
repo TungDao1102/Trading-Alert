@@ -158,6 +158,7 @@ tripwire (covered only in unit tests, not in CI).
 **Fix:**
 ```python
 import json
+
 pinned = json.loads(Path("tests/fixtures/phase3/parameters.json").read_text())
 ps = load_parameter_set(strategy_id, parameter_set_id)
 assert ps.parameter_set_hash == pinned["parameter_set_hash"], f"{toml_path} mutated"

@@ -49,9 +49,7 @@ class _FakeWsClient:
         self.kline_calls: list[tuple[str, Any]] = []
         self.connect_calls = 0
 
-    def kline_candlestick_streams(
-        self, *, symbol: str, interval: Any, id: Any = None
-    ) -> Any:
+    def kline_candlestick_streams(self, *, symbol: str, interval: Any, id: Any = None) -> Any:
         self.kline_calls.append((symbol, interval))
         return self._handle
 
@@ -63,9 +61,7 @@ class _FakeWsClient:
 class _DeadWsClient:
     """Client exposing no connection entrypoint at all."""
 
-    def kline_candlestick_streams(
-        self, *, symbol: str, interval: Any, id: Any = None
-    ) -> Any:
+    def kline_candlestick_streams(self, *, symbol: str, interval: Any, id: Any = None) -> Any:
         return object()
 
 
@@ -133,9 +129,7 @@ def test_subscribe_raises_when_handle_has_no_dispatch() -> None:
     """subscribe() with a dispatch-less handle raises, never a dead stream."""
 
     class _NoDispatchClient:
-        def kline_candlestick_streams(
-            self, *, symbol: str, interval: Any, id: Any = None
-        ) -> Any:
+        def kline_candlestick_streams(self, *, symbol: str, interval: Any, id: Any = None) -> Any:
             return object()
 
     from src.adapters.paper_ws import PaperWsAdapter
@@ -161,9 +155,7 @@ def test_attribute_style_model_is_coerced_not_dropped() -> None:
 
     received: list[Any] = []
     adapter = PaperWsAdapter(ws_client=_FakeWsClient())  # type: ignore[arg-type]
-    adapter.subscribe(
-        symbol="btcusdt", interval="1h", on_kline=received.append
-    )
+    adapter.subscribe(symbol="btcusdt", interval="1h", on_kline=received.append)
     handle = adapter._ws._handle
     assert handle.callback is not None
     handle.callback(_AttrModel())
@@ -178,9 +170,7 @@ def test_unknown_envelope_is_logged_not_dispatched() -> None:
 
     received: list[Any] = []
     adapter = PaperWsAdapter(ws_client=_FakeWsClient())  # type: ignore[arg-type]
-    adapter.subscribe(
-        symbol="btcusdt", interval="1h", on_kline=received.append
-    )
+    adapter.subscribe(symbol="btcusdt", interval="1h", on_kline=received.append)
     handle = adapter._ws._handle
     handle.callback({"ack": True})  # junk: no data/k/t/T keys
     handle.callback(42)  # non-dict, non-model
@@ -193,9 +183,7 @@ def test_malformed_payload_does_not_kill_stream() -> None:
 
     received: list[Any] = []
     adapter = PaperWsAdapter(ws_client=_FakeWsClient())  # type: ignore[arg-type]
-    adapter.subscribe(
-        symbol="btcusdt", interval="1h", on_kline=received.append
-    )
+    adapter.subscribe(symbol="btcusdt", interval="1h", on_kline=received.append)
     handle = adapter._ws._handle
     handle.callback({"stream": "s", "data": {"k": {"t": 1}}})  # missing keys
     handle.callback({"stream": "s", "data": {"k": _kline_payload()}})

@@ -139,13 +139,10 @@ class SizedResult:
         _require_non_empty(self.quantization_decision, "quantization_decision")
         _require_non_empty(self.reason_code, "reason_code")
         if self.reason_code not in _REASON_CODES:
-            raise ValueError(
-                f"SizedResult: unknown reason_code {self.reason_code!r}"
-            )
+            raise ValueError(f"SizedResult: unknown reason_code {self.reason_code!r}")
         if self.quantization_decision not in _QUANTIZATION_DECISIONS:
             raise ValueError(
-                "SizedResult: unknown quantization_decision "
-                f"{self.quantization_decision!r}"
+                f"SizedResult: unknown quantization_decision {self.quantization_decision!r}"
             )
         for fname in (
             "quantity_before_rounding",
@@ -165,9 +162,7 @@ class SizedResult:
             if optional is not None:
                 _require_decimal(optional, fname)
         if self.fee_source is not None and self.fee_source not in FEE_SOURCES:
-            raise ValueError(
-                f"SizedResult: unknown fee_source {self.fee_source!r}"
-            )
+            raise ValueError(f"SizedResult: unknown fee_source {self.fee_source!r}")
         if self.is_no_trade:
             if self.quantity is not None:
                 raise ValueError("SizedResult: is_no_trade=True requires quantity=None")
@@ -203,9 +198,7 @@ class OpenPosition:
         _require_non_empty(self.symbol, "symbol")
         _require_non_empty(self.position_side, "position_side")
         if self.position_side not in _DIRECTIONS:
-            raise ValueError(
-                f"OpenPosition: unknown position_side {self.position_side!r}"
-            )
+            raise ValueError(f"OpenPosition: unknown position_side {self.position_side!r}")
         _require_decimal(self.open_risk, "open_risk")
         _require_decimal(self.daily_pnl_contribution, "daily_pnl_contribution")
         if self.open_risk < Decimal("0"):
@@ -238,23 +231,17 @@ class PortfolioVerdict:
     def __post_init__(self) -> None:
         _require_non_empty(self.reason_code, "reason_code")
         if self.reason_code not in _REASON_CODES:
-            raise ValueError(
-                f"PortfolioVerdict: unknown reason_code {self.reason_code!r}"
-            )
+            raise ValueError(f"PortfolioVerdict: unknown reason_code {self.reason_code!r}")
         if not isinstance(self.daily_state, DailyState):
             raise TypeError(
                 f"daily_state must be DailyState, got {type(self.daily_state).__name__}"
             )
         if self.is_no_trade:
             if self.sized is not None:
-                raise ValueError(
-                    "PortfolioVerdict: is_no_trade=True requires sized=None"
-                )
+                raise ValueError("PortfolioVerdict: is_no_trade=True requires sized=None")
         else:
             if self.sized is None:
-                raise ValueError(
-                    "PortfolioVerdict: is_no_trade=False requires sized"
-                )
+                raise ValueError("PortfolioVerdict: is_no_trade=False requires sized")
 
 
 __all__ = [

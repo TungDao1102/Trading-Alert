@@ -178,12 +178,18 @@ recorded_at = _parse_utc(raw["recorded_at_utc"], "recorded_at_utc", DecisionsFil
 file_priors = (
     ()
     if decisions.recorded_terminal is None
-    else (PriorEvaluation(KillGateState.INSUFFICIENT_EDGE,
-                          decisions.recorded_terminal.recorded_at_utc),)
+    else (
+        PriorEvaluation(
+            KillGateState.INSUFFICIENT_EDGE, decisions.recorded_terminal.recorded_at_utc
+        ),
+    )
 )
-prior_evaluations = tuple(sorted(
-    {*priors_from_events(events), *file_priors}, key=lambda p: (p.evaluated_at_utc, p.state.value)
-))
+prior_evaluations = tuple(
+    sorted(
+        {*priors_from_events(events), *file_priors},
+        key=lambda p: (p.evaluated_at_utc, p.state.value),
+    )
+)
 ```
 
 ### CR-02: Human family decisions whose `family_id` is not a registry directory are silently discarded
@@ -200,9 +206,7 @@ The effect is that a recorded pass can vanish (hiding PASSING_CANDIDATE), or a r
 ```python
 unknown_decisions = sorted(set(decision_by_family) - set(candidate_hashes))
 if unknown_decisions:
-    raise DecisionsFileError(
-        f"families: decisions for unregistered family ids {unknown_decisions}"
-    )
+    raise DecisionsFileError(f"families: decisions for unregistered family ids {unknown_decisions}")
 ```
 
 ## Warnings

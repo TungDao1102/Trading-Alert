@@ -119,9 +119,7 @@ def _build_protective_template(case_input: dict[str, Any]) -> Any:
         ),
         tp1_trigger_price=_coerce_decimal(pt["tp1_trigger_price"], "tp1_trigger_price"),
         tp2_trigger_price=_coerce_decimal(pt["tp2_trigger_price"], "tp2_trigger_price"),
-        tp1_quantity_fraction=_coerce_decimal(
-            pt["tp1_quantity_fraction"], "tp1_quantity_fraction"
-        ),
+        tp1_quantity_fraction=_coerce_decimal(pt["tp1_quantity_fraction"], "tp1_quantity_fraction"),
     )
 
 
@@ -357,7 +355,9 @@ def test_non_live5_symbol_raises_before_any_adapter_call() -> None:
         quantity_step_size=Decimal("1"),
         min_quantity=Decimal("1"),
         min_notional=Decimal("5.00"),
-        metadata_observed_at_utc=_parse_utc(case_input["constraint_snapshot"]["metadata_observed_at_utc"]),
+        metadata_observed_at_utc=_parse_utc(
+            case_input["constraint_snapshot"]["metadata_observed_at_utc"]
+        ),
     )
 
     with pytest.raises(ValueError, match="live-5"):
@@ -493,9 +493,7 @@ def test_entry_time_sl_is_adopted_not_duplicated() -> None:
     SL's deterministic id. Attach adopts it (probe finds it active) and
     only places TP1/TP2 — no duplicate clientAlgoId submission."""
     expected = _load_expected()
-    adapter = FakeExecutionAdapter(
-        existing_algo_status={expected["sl_algo_client_id"]: "NEW"}
-    )
+    adapter = FakeExecutionAdapter(existing_algo_status={expected["sl_algo_client_id"]: "NEW"})
     safe_mode_controller = _RecordingSafeModeController()
     outcome = _attach(adapter, safe_mode_controller)
 
@@ -528,9 +526,7 @@ def test_existing_non_active_leg_is_unconfirmed_and_never_re_placed() -> None:
     protection; attach holds ENTRY_WITHOUT_PROTECTIVE and places no
     rescue order."""
     expected = _load_expected()
-    adapter = FakeExecutionAdapter(
-        existing_algo_status={expected["sl_algo_client_id"]: "CANCELED"}
-    )
+    adapter = FakeExecutionAdapter(existing_algo_status={expected["sl_algo_client_id"]: "CANCELED"})
     safe_mode_controller = _RecordingSafeModeController()
     outcome = _attach(adapter, safe_mode_controller)
 
@@ -543,6 +539,7 @@ def test_existing_non_active_leg_is_unconfirmed_and_never_re_placed() -> None:
 
 def test_probe_failure_fails_closed_without_placement() -> None:
     """CR-04: an unknown probe outcome (probe raises) is unconfirmed."""
+
     class _ProbeRaises(FakeExecutionAdapter):
         async def query_algo_order_by_client(self, **kwargs: Any) -> Any:
             raise TimeoutError("probe timeout")

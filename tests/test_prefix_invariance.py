@@ -167,16 +167,8 @@ def test_shared_prefix_embedded_in_two_inputs(
     # Use the last 200 bars as the prefix so EMA200(1H) has warmed up.
     prefix = setup_1h[-200:]
     tail_open = prefix[-1].open_time_utc
-    tail_a = [
-        _row_to_candle(
-            _synthetic_bar("BTCUSDT", tail_open + timedelta(hours=1), "63000.00")
-        )
-    ]
-    tail_b = [
-        _row_to_candle(
-            _synthetic_bar("BTCUSDT", tail_open + timedelta(hours=1), "55000.00")
-        )
-    ]
+    tail_a = [_row_to_candle(_synthetic_bar("BTCUSDT", tail_open + timedelta(hours=1), "63000.00"))]
+    tail_b = [_row_to_candle(_synthetic_bar("BTCUSDT", tail_open + timedelta(hours=1), "55000.00"))]
     input_a = prefix + tail_a
     input_b = prefix + tail_b
     out_a = _decisions(input_a, context_4h, parameter_set)
@@ -184,8 +176,7 @@ def test_shared_prefix_embedded_in_two_inputs(
     # Prefix occupies positions 0..199 in both A and B.
     for i in range(len(prefix)):
         assert _decision_key(out_a[i][1]) == _decision_key(out_b[i][1]), (
-            f"prefix decision at bar {i} differs between inputs: "
-            f"a={out_a[i][1]}, b={out_b[i][1]}"
+            f"prefix decision at bar {i} differs between inputs: a={out_a[i][1]}, b={out_b[i][1]}"
         )
 
 
@@ -206,9 +197,7 @@ def test_full_run_digest_stable_over_identical_input(
     parameter_set = load_parameter_set("trend-pullback", "baseline-v1")
     first = _decisions(setup_1h, context_4h, parameter_set)
     second = _decisions(setup_1h, context_4h, parameter_set)
-    assert [_decision_key(r) for _, r in first] == [
-        _decision_key(r) for _, r in second
-    ]
+    assert [_decision_key(r) for _, r in first] == [_decision_key(r) for _, r in second]
 
 
 # --------------------------------------------------------------------------- #
@@ -284,9 +273,7 @@ def test_stateful_variant_is_detected_by_digest_comparison(
     # At least one decision must differ — the stateful helper binds
     # run-to-run state into the regime gate.
     diffs = [
-        i
-        for i in range(len(first))
-        if _decision_key(first[i][1]) != _decision_key(second[i][1])
+        i for i in range(len(first)) if _decision_key(first[i][1]) != _decision_key(second[i][1])
     ]
     assert len(diffs) > 0, (
         "stateful variant should change at least one decision; "

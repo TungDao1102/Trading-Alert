@@ -306,9 +306,13 @@ Layout is at planner discretion (D-01); the pure/edge split and the single `Trad
 # Source: src/paper/journal.py::paper_records_digest and src/backtest/report.py::UncertaintyReport.digest
 # sort by a total key, hand canonical JSON to sha256_hex (rejects float/set; Decimal -> str)
 def report_digest(self) -> str:
-    return sha256_hex({"sections": [s.digest() for s in self.sections_in_fixed_order],
-                       "provenance": self.provenance_payload,   # includes evaluated/as_of, seeds, vocabulary versions
-                       "evidence": self.evidence_kind.value})
+    return sha256_hex(
+        {
+            "sections": [s.digest() for s in self.sections_in_fixed_order],
+            "provenance": self.provenance_payload,  # includes evaluated/as_of, seeds, vocabulary versions
+            "evidence": self.evidence_kind.value,
+        }
+    )
 ```
 
 ### Pattern 2: Journal-first gate event through a `JournalLike` seam
@@ -386,10 +390,17 @@ Not a rename/refactor/migration phase - omitted by rule. (Only additive: one enu
 SCANNED_FILES = (
     # ... existing entries ...
     # Phase 10 - pure analytics (D-01 purity):
-    "src/analytics/__init__.py", "src/analytics/types.py", "src/analytics/inputs.py",
-    "src/analytics/excursion.py", "src/analytics/latency.py", "src/analytics/approval_delay.py",
-    "src/analytics/slices.py", "src/analytics/report.py", "src/analytics/family.py",
-    "src/analytics/killgate.py", "src/analytics/render.py",
+    "src/analytics/__init__.py",
+    "src/analytics/types.py",
+    "src/analytics/inputs.py",
+    "src/analytics/excursion.py",
+    "src/analytics/latency.py",
+    "src/analytics/approval_delay.py",
+    "src/analytics/slices.py",
+    "src/analytics/report.py",
+    "src/analytics/family.py",
+    "src/analytics/killgate.py",
+    "src/analytics/render.py",
 )
 ```
 `src/analytics/cli.py` and `src/adapters/analytics_store.py` stay out of the list (I/O edges), but forbid `float(` there too by review.
@@ -399,10 +410,20 @@ SCANNED_FILES = (
 # Source: src/execution/enablement.py::_journal_enablement_event, src/ops/health.py::_record_health_check_event
 payload_json = json.dumps(verdict_payload, separators=(",", ":"), sort_keys=True)
 event = JournalEvent(
-    journal_event_id=content_hash_event_id(prefix="kill_gate", event_type="KILL_GATE_EVALUATION",
-        entity_id="KILL_GATE", occurred_at_utc=evaluated_at_utc, payload_json=payload_json),
-    occurred_at_utc=evaluated_at_utc, event_type="KILL_GATE_EVALUATION", entity_type="KillGate",
-    entity_id="KILL_GATE", correlation_id="analytics_kill_gate", payload_json=payload_json)
+    journal_event_id=content_hash_event_id(
+        prefix="kill_gate",
+        event_type="KILL_GATE_EVALUATION",
+        entity_id="KILL_GATE",
+        occurred_at_utc=evaluated_at_utc,
+        payload_json=payload_json,
+    ),
+    occurred_at_utc=evaluated_at_utc,
+    event_type="KILL_GATE_EVALUATION",
+    entity_type="KillGate",
+    entity_id="KILL_GATE",
+    correlation_id="analytics_kill_gate",
+    payload_json=payload_json,
+)
 ```
 (`event_type`/`entity_type` are free validated non-empty strings; the literals above are the CONTEXT's suggested names, planner may rename. Payload Decimals must be `str` - `json.dumps` cannot serialize `Decimal`.)
 
@@ -410,8 +431,10 @@ event = JournalEvent(
 ```python
 # Source pattern: src/execution/enablement.py:146-176 (enable() raises ValueError BEFORE journaling)
 if kill_gate_state is KillGateState.INSUFFICIENT_EDGE:
-    raise ValueError("enable: kill gate is INSUFFICIENT_EDGE (terminal); live stays disabled "
-                     "until an explicit human decision record clears it")
+    raise ValueError(
+        "enable: kill gate is INSUFFICIENT_EDGE (terminal); live stays disabled "
+        "until an explicit human decision record clears it"
+    )
 ```
 
 ## Windows / PowerShell wrapper convention (verified)

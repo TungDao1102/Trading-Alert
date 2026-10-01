@@ -182,9 +182,9 @@ def test_refresh_inserts_one_version_row_per_live5_symbol(session: Session) -> N
 
     # Sanity: rows are also persisted (count via real session).
 
-    rows_persisted = session.execute(
-        select(SymbolMetadata).order_by(SymbolMetadata.symbol)
-    ).scalars().all()
+    rows_persisted = (
+        session.execute(select(SymbolMetadata).order_by(SymbolMetadata.symbol)).scalars().all()
+    )
     assert len(rows_persisted) == len(LIVE_5)
 
 
@@ -235,9 +235,7 @@ def test_filter_strings_parse_to_decimal_exactly(session: Session) -> None:
     filters = [_mk_filters("BTCUSDT", tick="0.10", step="0.001")]
     cap = CapturingSession(session)
 
-    refresh_symbol_metadata(
-        cap, filters, observed_at=datetime(2026, 9, 19, tzinfo=UTC)
-    )
+    refresh_symbol_metadata(cap, filters, observed_at=datetime(2026, 9, 19, tzinfo=UTC))
 
     assert len(cap.added) == 1
     row = cap.added[0]
@@ -249,9 +247,7 @@ def test_filter_strings_parse_to_decimal_exactly(session: Session) -> None:
     assert isinstance(row.min_notional, Decimal)
 
     # Decimal arithmetic is exact: 0.10 * 3 == 0.30.
-    assert (row.price_tick_size + row.price_tick_size + row.price_tick_size) == Decimal(
-        "0.30"
-    )
+    assert (row.price_tick_size + row.price_tick_size + row.price_tick_size) == Decimal("0.30")
 
 
 def _find_float_calls(src: str) -> list[tuple[int, str]]:
@@ -318,9 +314,7 @@ def test_unknown_symbols_outside_live5_are_ignored(session: Session) -> None:
     cap = CapturingSession(session)
 
     # With universe=LIVE_5, only the 3 matching rows are inserted.
-    inserted = refresh_symbol_metadata(
-        cap, all_filters, observed_at=observed, universe=LIVE_5
-    )
+    inserted = refresh_symbol_metadata(cap, all_filters, observed_at=observed, universe=LIVE_5)
     assert inserted == 3
     assert {r.symbol for r in cap.added} == {"BTCUSDT", "ETHUSDT", "BNBUSDT"}
 
@@ -355,9 +349,9 @@ def test_refresh_inserts_rows_for_settling_and_pending_symbols(session: Session)
     first = datetime(2026, 9, 30, 1, 0, tzinfo=UTC)
     second = datetime(2026, 9, 30, 1, 5, tzinfo=UTC)
 
-    assert refresh_symbol_metadata(
-        cap, _research_filters(), observed_at=first, universe=universe
-    ) == 3
+    assert (
+        refresh_symbol_metadata(cap, _research_filters(), observed_at=first, universe=universe) == 3
+    )
     statuses = {r.symbol: r.status for r in cap.added}
     assert statuses == {
         "FTTUSDT": "SETTLING",
@@ -365,9 +359,10 @@ def test_refresh_inserts_rows_for_settling_and_pending_symbols(session: Session)
         "BTCUSDT": "TRADING",
     }
 
-    assert refresh_symbol_metadata(
-        cap, _research_filters(), observed_at=second, universe=universe
-    ) == 3
+    assert (
+        refresh_symbol_metadata(cap, _research_filters(), observed_at=second, universe=universe)
+        == 3
+    )
     rows = session.execute(select(SymbolMetadata)).scalars().all()
     assert len(rows) == 6  # three new versions, none of the first ones updated
     assert sorted({r.metadata_observed_at_utc.replace(tzinfo=UTC) for r in rows}) == [

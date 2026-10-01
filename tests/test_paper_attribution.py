@@ -413,13 +413,9 @@ def test_full_timestamp_lineage_on_user_executed_sim_row() -> None:
     )
 
     sim_record = records[1]
-    assert sim_record.signal_detected_at_utc == _parse_utc(
-        filled_case["signal"]["detected_at_utc"]
-    )
+    assert sim_record.signal_detected_at_utc == _parse_utc(filled_case["signal"]["detected_at_utc"])
     assert sim_record.approval_acted_at_utc is not None
-    assert sim_record.order_submitted_at_utc == _parse_utc(
-        filled_case["order"]["submitted_at_utc"]
-    )
+    assert sim_record.order_submitted_at_utc == _parse_utc(filled_case["order"]["submitted_at_utc"])
     assert sim_record.fill_time_utc == _parse_utc(filled_case["fill"]["fill_time_utc"])
 
 
@@ -643,7 +639,12 @@ def test_orm_round_trip_system_row() -> None:
     The system row maps to SignalRow + TradePlanRow with no approval,
     order, or fill.
     """
-    from src.db.mappers import signal_from_row, signal_to_row, trade_plan_from_row, trade_plan_to_row
+    from src.db.mappers import (
+        signal_from_row,
+        signal_to_row,
+        trade_plan_from_row,
+        trade_plan_to_row,
+    )
     from src.domain.enums import SignalStatus, TradePlanStatus
     from src.domain.signal import Signal
     from src.domain.trade_plan import TradePlan
@@ -676,9 +677,7 @@ def test_orm_round_trip_system_row() -> None:
         direction=skipped_case["signal"]["direction"],
         setup_type=skipped_case["signal"]["setup_type"],
         source_timeframe=skipped_case["signal"]["source_timeframe"],
-        source_candle_close_utc=_parse_utc(
-            skipped_case["signal"]["source_candle_close_utc"]
-        ),
+        source_candle_close_utc=_parse_utc(skipped_case["signal"]["source_candle_close_utc"]),
         detected_at_utc=system_record.signal_detected_at_utc
         or _parse_utc(skipped_case["signal"]["detected_at_utc"]),
         status=SignalStatus(skipped_case["signal"]["status"]),
@@ -704,12 +703,8 @@ def test_orm_round_trip_system_row() -> None:
         risk_rate=Decimal(skipped_case["trade_plan"]["risk_rate"]),
         risk_budget=Decimal(skipped_case["trade_plan"]["risk_budget"]),
         suggested_quantity=Decimal(skipped_case["trade_plan"]["suggested_quantity"]),
-        quantity_before_rounding=Decimal(
-            skipped_case["trade_plan"]["quantity_before_rounding"]
-        ),
-        quantity_after_rounding=Decimal(
-            skipped_case["trade_plan"]["quantity_after_rounding"]
-        ),
+        quantity_before_rounding=Decimal(skipped_case["trade_plan"]["quantity_before_rounding"]),
+        quantity_after_rounding=Decimal(skipped_case["trade_plan"]["quantity_after_rounding"]),
         quantization_decision=skipped_case["trade_plan"]["quantization_decision"],
         plan_hash=system_record.plan_hash or "",
         status=TradePlanStatus(skipped_case["trade_plan"]["status"]),

@@ -808,7 +808,6 @@ def make_manual_close_drill(
     else:
         resolved_compare = compare_fn
 
-
     def inject() -> str:
         return "operator-initiated manual close + orphan protective"
 

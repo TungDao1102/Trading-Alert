@@ -27,9 +27,7 @@ from typing import Any
 
 DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE: str = "ENTRY_WITHOUT_PROTECTIVE"
 
-_DIVERGENCE_KINDS: frozenset[str] = frozenset(
-    {DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE}
-)
+_DIVERGENCE_KINDS: frozenset[str] = frozenset({DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE})
 
 
 # --------------------------------------------------------------------------- #
@@ -40,9 +38,7 @@ _DIVERGENCE_KINDS: frozenset[str] = frozenset(
 def _require_decimal(value: object, field_name: str) -> None:
     """Reject non-Decimal values for money/qty/price fields (D-12)."""
     if not isinstance(value, Decimal):
-        raise TypeError(
-            f"{field_name} must be Decimal, got {type(value).__name__}"
-        )
+        raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
 
 
 def _require_non_empty(value: str, field_name: str) -> None:
@@ -56,9 +52,7 @@ def _require_utc_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     if value.utcoffset() != timedelta(0):
-        raise ValueError(
-            f"{field_name} must be UTC, got offset {value.utcoffset()}"
-        )
+        raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
 
 
 # --------------------------------------------------------------------------- #
@@ -142,9 +136,7 @@ class FoldedPositionView:
         if self.fill_count < 0:
             raise ValueError(f"fill_count must be >= 0, got {self.fill_count}")
         if self.fill_count != len(self.fills):
-            raise ValueError(
-                f"fill_count {self.fill_count} != len(fills) {len(self.fills)}"
-            )
+            raise ValueError(f"fill_count {self.fill_count} != len(fills) {len(self.fills)}")
 
 
 # --------------------------------------------------------------------------- #
@@ -226,9 +218,7 @@ def fold_fills(
         if side not in _SIDE_SIGN:
             raise ValueError(f"fold_fills: unknown fill side {side!r} ({order_id})")
         if expected_symbol is not None and symbol != expected_symbol:
-            raise ValueError(
-                f"fold_fills: fill symbol {symbol!r} != expected {expected_symbol!r}"
-            )
+            raise ValueError(f"fold_fills: fill symbol {symbol!r} != expected {expected_symbol!r}")
         if expected_side is not None and side != expected_side:
             raise ValueError(f"fold_fills: fill side {side!r} != expected {expected_side!r}")
         if expected_order_id is not None and order_id != expected_order_id:

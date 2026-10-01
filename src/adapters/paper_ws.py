@@ -230,9 +230,7 @@ class PaperWsAdapter:
             "paper_ws.connect_unsupported",
             client_type=type(self._ws).__name__,
         )
-        raise RuntimeError(
-            f"WS client {type(self._ws).__name__} exposes no connection entrypoint"
-        )
+        raise RuntimeError(f"WS client {type(self._ws).__name__} exposes no connection entrypoint")
 
     def reconnect(self, handle: Any) -> None:
         """Delegate reconnect to the SDK handle (fail-loud, CR-04)."""
@@ -244,8 +242,7 @@ class PaperWsAdapter:
                 handle_type=type(handle).__name__,
             )
             raise RuntimeError(
-                f"WS handle {type(handle).__name__} has no reconnect; "
-                "rotation impossible"
+                f"WS handle {type(handle).__name__} has no reconnect; rotation impossible"
             )
 
     def schedule_reconnect(self, handle: Any) -> None:
@@ -257,9 +254,7 @@ class PaperWsAdapter:
                 "paper_ws.schedule_reconnect_unsupported",
                 handle_type=type(handle).__name__,
             )
-            raise RuntimeError(
-                f"WS handle {type(handle).__name__} has no schedule_reconnect"
-            )
+            raise RuntimeError(f"WS handle {type(handle).__name__} has no schedule_reconnect")
 
     def close(self, handle: Any) -> None:
         """Close the stream handle (fail-loud, CR-04)."""
@@ -270,9 +265,7 @@ class PaperWsAdapter:
                 "paper_ws.close_unsupported",
                 handle_type=type(handle).__name__,
             )
-            raise RuntimeError(
-                f"WS handle {type(handle).__name__} has no close"
-            )
+            raise RuntimeError(f"WS handle {type(handle).__name__} has no close")
 
 
 # --------------------------------------------------------------------------- #

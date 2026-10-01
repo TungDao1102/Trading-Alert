@@ -11,8 +11,7 @@ _t = {"start": time.perf_counter()}
 def pytest_collection_finish(session):
     _t["collected"] = time.perf_counter()
     print(
-        f"\n[timing] collection: {_t['collected'] - _t['start']:.2f}s "
-        f"({len(session.items)} tests)"
+        f"\n[timing] collection: {_t['collected'] - _t['start']:.2f}s ({len(session.items)} tests)"
     )
 
 

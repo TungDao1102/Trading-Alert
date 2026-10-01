@@ -106,12 +106,12 @@ def test_load_parameter_set_schema_mismatch_raises(tmp_path: Path) -> None:
     strategy_dir.mkdir()
     toml_path = strategy_dir / "test-set.toml"
     toml_path.write_text(
-        'schema_version = 99\n'
-        '[strategy]\n'
+        "schema_version = 99\n"
+        "[strategy]\n"
         'strategy_id = "test-strategy"\n'
         'strategy_version = "v1.0.0"\n'
-        '[parameters]\n'
-        'swing_lookback = 20\n',
+        "[parameters]\n"
+        "swing_lookback = 20\n",
         encoding="utf-8",
     )
 
@@ -143,13 +143,13 @@ def test_load_parameter_set_unknown_strategy_key_raises(tmp_path: Path) -> None:
     strategy_dir.mkdir()
     toml_path = strategy_dir / "test-set.toml"
     toml_path.write_text(
-        'schema_version = 1\n'
-        '[strategy]\n'
+        "schema_version = 1\n"
+        "[strategy]\n"
         'strategy_id = "test-strategy"\n'
         'strategy_version = "v1.0.0"\n'
-        '[parameters]\n'
-        'swing_lookback = 20\n'
-        'unknown_strategy_key = 42\n',  # not in STRATEGY_KEYS
+        "[parameters]\n"
+        "swing_lookback = 20\n"
+        "unknown_strategy_key = 42\n",  # not in STRATEGY_KEYS
         encoding="utf-8",
     )
 
@@ -257,12 +257,12 @@ def test_whole_number_toml_value_normalizes_to_int(tmp_path: Path) -> None:
     strategy_dir.mkdir()
     toml_path = strategy_dir / "test-set.toml"
     toml_path.write_text(
-        'schema_version = 1\n'
-        '[strategy]\n'
+        "schema_version = 1\n"
+        "[strategy]\n"
         'strategy_id = "test-strategy"\n'
         'strategy_version = "v1.0.0"\n'
-        '[parameters]\n'
-        'swing_lookback = 20\n',
+        "[parameters]\n"
+        "swing_lookback = 20\n",
         encoding="utf-8",
     )
 
@@ -296,12 +296,12 @@ def test_fractional_toml_value_normalizes_to_decimal_from_string(tmp_path: Path)
     strategy_dir.mkdir()
     toml_path = strategy_dir / "test-set.toml"
     toml_path.write_text(
-        'schema_version = 1\n'
-        '[strategy]\n'
+        "schema_version = 1\n"
+        "[strategy]\n"
         'strategy_id = "test-strategy"\n'
         'strategy_version = "v1.0.0"\n'
-        '[parameters]\n'
-        'zone_tolerance_atr = 0.5\n',
+        "[parameters]\n"
+        "zone_tolerance_atr = 0.5\n",
         encoding="utf-8",
     )
 
@@ -333,13 +333,13 @@ def test_same_toml_parsed_twice_yields_identical_hash(tmp_path: Path) -> None:
     strategy_dir.mkdir()
     toml_path = strategy_dir / "test-set.toml"
     toml_path.write_text(
-        'schema_version = 1\n'
-        '[strategy]\n'
+        "schema_version = 1\n"
+        "[strategy]\n"
         'strategy_id = "test-strategy"\n'
         'strategy_version = "v1.0.0"\n'
-        '[parameters]\n'
-        'swing_lookback = 20\n'
-        'zone_tolerance_atr = 0.5\n',
+        "[parameters]\n"
+        "swing_lookback = 20\n"
+        "zone_tolerance_atr = 0.5\n",
         encoding="utf-8",
     )
 
@@ -373,12 +373,12 @@ def test_non_ascii_parameter_name_raises_at_load(tmp_path: Path) -> None:
     toml_path = strategy_dir / "test-set.toml"
     # Use a quoted TOML key with a non-ASCII character (ñ = \xc3\xb1 in UTF-8).
     toml_path.write_text(
-        'schema_version = 1\n'
-        '[strategy]\n'
+        "schema_version = 1\n"
+        "[strategy]\n"
         'strategy_id = "test-strategy"\n'
         'strategy_version = "v1.0.0"\n'
-        '[parameters]\n'
-        'swing_lookback = 20\n'
+        "[parameters]\n"
+        "swing_lookback = 20\n"
         '"lookback_\xc3\xb1" = 10\n',
         encoding="utf-8",
     )
@@ -411,14 +411,14 @@ def test_volatile_sidecar_fields_do_not_affect_hash(tmp_path: Path) -> None:
     strategy_dir.mkdir()
     toml_path = strategy_dir / "test-set.toml"
     toml_path.write_text(
-        'schema_version = 1\n'
-        '[strategy]\n'
+        "schema_version = 1\n"
+        "[strategy]\n"
         'strategy_id = "test-strategy"\n'
         'strategy_version = "v1.0.0"\n'
         'author = "alice"\n'
         'created_at_utc = "2026-09-19T00:00:00Z"\n'
-        '[parameters]\n'
-        'swing_lookback = 20\n',
+        "[parameters]\n"
+        "swing_lookback = 20\n",
         encoding="utf-8",
     )
 
@@ -431,11 +431,13 @@ def test_volatile_sidecar_fields_do_not_affect_hash(tmp_path: Path) -> None:
         original_hash = ps_original.parameter_set_hash
 
         # Mutate the volatile sidecar fields.
-        mutated = toml_path.read_text(encoding="utf-8").replace(
-            'author = "alice"', 'author = "bob"'
-        ).replace(
-            'created_at_utc = "2026-09-19T00:00:00Z"',
-            'created_at_utc = "2026-12-31T23:59:59Z"',
+        mutated = (
+            toml_path.read_text(encoding="utf-8")
+            .replace('author = "alice"', 'author = "bob"')
+            .replace(
+                'created_at_utc = "2026-09-19T00:00:00Z"',
+                'created_at_utc = "2026-12-31T23:59:59Z"',
+            )
         )
         toml_path.write_text(mutated, encoding="utf-8")
 
@@ -463,12 +465,12 @@ def test_decimal_values_with_different_precision_yield_different_hashes(
     strategy_dir_a.mkdir()
     toml_path_a = strategy_dir_a / "test-set.toml"
     toml_path_a.write_text(
-        'schema_version = 1\n'
-        '[strategy]\n'
+        "schema_version = 1\n"
+        "[strategy]\n"
         'strategy_id = "test-strategy-a"\n'
         'strategy_version = "v1.0.0"\n'
-        '[parameters]\n'
-        'zone_tolerance_atr = 1.50\n',
+        "[parameters]\n"
+        "zone_tolerance_atr = 1.50\n",
         encoding="utf-8",
     )
 
@@ -476,12 +478,12 @@ def test_decimal_values_with_different_precision_yield_different_hashes(
     strategy_dir_b.mkdir()
     toml_path_b = strategy_dir_b / "test-set.toml"
     toml_path_b.write_text(
-        'schema_version = 1\n'
-        '[strategy]\n'
+        "schema_version = 1\n"
+        "[strategy]\n"
         'strategy_id = "test-strategy-b"\n'
         'strategy_version = "v1.0.0"\n'
-        '[parameters]\n'
-        'zone_tolerance_atr = 1.5\n',
+        "[parameters]\n"
+        "zone_tolerance_atr = 1.5\n",
         encoding="utf-8",
     )
 
@@ -523,11 +525,11 @@ def test_missing_strategy_version_raises(tmp_path: Path) -> None:
     """Beh. 15: TOML without strategy_version raises (CR-06)."""
     _write_toml(
         tmp_path,
-        'schema_version = 1\n'
-        '[strategy]\n'
+        "schema_version = 1\n"
+        "[strategy]\n"
         'strategy_id = "test-strategy"\n'
-        '[parameters]\n'
-        'swing_lookback = 20\n',
+        "[parameters]\n"
+        "swing_lookback = 20\n",
     )
 
     from src.domain import registry
@@ -545,8 +547,8 @@ def test_missing_parameters_table_raises(tmp_path: Path) -> None:
     """Beh. 16: TOML without [parameters] raises (CR-06)."""
     _write_toml(
         tmp_path,
-        'schema_version = 1\n'
-        '[strategy]\n'
+        "schema_version = 1\n"
+        "[strategy]\n"
         'strategy_id = "test-strategy"\n'
         'strategy_version = "v1.0.0"\n',
     )
@@ -568,17 +570,17 @@ def test_wrong_typed_values_raise_at_load(tmp_path: Path) -> None:
 
     cases = [
         'swing_lookback = "20"\n',  # string instead of int
-        'risk_rate = true\n',  # bool instead of Decimal
-        'signal_expiry_hours = [4]\n',  # list instead of int
+        "risk_rate = true\n",  # bool instead of Decimal
+        "signal_expiry_hours = [4]\n",  # list instead of int
     ]
     for extra in cases:
         _write_toml(
             tmp_path,
-            'schema_version = 1\n'
-            '[strategy]\n'
+            "schema_version = 1\n"
+            "[strategy]\n"
             'strategy_id = "test-strategy"\n'
             'strategy_version = "v1.0.0"\n'
-            '[parameters]\n' + extra,
+            "[parameters]\n" + extra,
         )
         original_root = registry.REGISTRY_ROOT
         registry.REGISTRY_ROOT = tmp_path
@@ -597,12 +599,12 @@ def test_inline_comment_and_quoted_key_load(tmp_path: Path) -> None:
 
     _write_toml(
         tmp_path,
-        'schema_version = 1\n'
-        '[strategy]\n'
+        "schema_version = 1\n"
+        "[strategy]\n"
         'strategy_id = "test-strategy"\n'
         'strategy_version = "v1.0.0"\n'
-        '[parameters]\n'
-        'swing_lookback = 20\n'
+        "[parameters]\n"
+        "swing_lookback = 20\n"
         '"zone_tolerance_atr" = 0.5  # tuned\n',
     )
     original_root = registry.REGISTRY_ROOT
@@ -687,12 +689,12 @@ def test_risk_rate_decimal_key_loads_as_decimal(tmp_path: Path) -> None:
     """Beh. 24: risk_rate (DECIMAL_KEY) loads as Decimal."""
     _write_toml(
         tmp_path,
-        'schema_version = 1\n'
-        '[strategy]\n'
+        "schema_version = 1\n"
+        "[strategy]\n"
         'strategy_id = "test-strategy"\n'
         'strategy_version = "v1.0.0"\n'
-        '[parameters]\n'
-        'risk_rate = 0.005\n',
+        "[parameters]\n"
+        "risk_rate = 0.005\n",
     )
 
     from src.domain import registry
@@ -711,12 +713,12 @@ def test_max_aggregate_open_risk_decimal_key_loads_as_decimal(tmp_path: Path) ->
     """Beh. 25: max_aggregate_open_risk (DECIMAL_KEY) loads as Decimal."""
     _write_toml(
         tmp_path,
-        'schema_version = 1\n'
-        '[strategy]\n'
+        "schema_version = 1\n"
+        "[strategy]\n"
         'strategy_id = "test-strategy"\n'
         'strategy_version = "v1.0.0"\n'
-        '[parameters]\n'
-        'max_aggregate_open_risk = 0.01\n',
+        "[parameters]\n"
+        "max_aggregate_open_risk = 0.01\n",
     )
 
     from src.domain import registry
@@ -753,8 +755,7 @@ def test_baseline_v2_sets_load_with_all_d05_keys() -> None:
         ):
             assert key in ps.params, f"{family}/baseline-v2 missing {key}"
             assert isinstance(ps.params[key], Decimal), (
-                f"{family}/baseline-v2[{key}] must be Decimal, got "
-                f"{type(ps.params[key]).__name__}"
+                f"{family}/baseline-v2[{key}] must be Decimal, got {type(ps.params[key]).__name__}"
             )
 
 
@@ -838,11 +839,11 @@ def test_pre_phase_11_hashes_and_versions_are_unchanged() -> None:
 
 
 _WORKING_TYPE_HEADER = (
-    'schema_version = 1\n'
-    '[strategy]\n'
+    "schema_version = 1\n"
+    "[strategy]\n"
     'strategy_id = "test-strategy"\n'
     'strategy_version = "v1.0.0"\n'
-    '[parameters]\n'
+    "[parameters]\n"
 )
 
 

@@ -47,6 +47,8 @@ from src.core.types import _require_utc_aware
 from src.domain.canonical import sha256_hex
 
 LIVE5_SYMBOLS: frozenset[str] = frozenset({"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"})
+
+
 class ReportBuildError(Exception): ...
 ```
 Reuse `LIVE5_SYMBOLS`, `_r_multiple`, `_has_zero_risk`, `_decimal_mean/median/pstdev`, `_quantile`, `BootstrapInterval`, `DualUniverseSlice/Section` by import rather than re-derive (CONTEXT D-01).
@@ -57,8 +59,11 @@ Reuse `LIVE5_SYMBOLS`, `_r_multiple`, `_has_zero_risk`, `_decimal_mean/median/ps
 ```python
 def _r_multiple(trade):
     ...
-    if risk == Decimal("0"): return None
+    if risk == Decimal("0"):
+        return None
     return _div(pnl, risk)
+
+
 def _has_zero_risk(trade) -> bool: ...
 ```
 Copy for MFE/MAE R-multiples; count exclusions and INCOMPLETE buckets explicitly. Low-n: flag (`insufficient_data: bool` like `DualUniverseSlice`), never drop. Empty live-5 slice: `trade_count=0, mean_r=None, insufficient_data=True` rendered "no data".
@@ -78,12 +83,22 @@ class JournalLike(Protocol):
 ```
 Event construction with content-hash id (enablement.py L170-200 shape):
 ```python
-payload_json = json.dumps({...}, separators=(",", ":"))   # add sort_keys=True for evidence dicts
+payload_json = json.dumps({...}, separators=(",", ":"))  # add sort_keys=True for evidence dicts
 event = JournalEvent(
-    journal_event_id=content_hash_event_id(prefix="kill_gate", event_type="KILL_GATE_EVALUATION",
-        entity_id="KILL_GATE_D013", occurred_at_utc=now_utc, payload_json=payload_json),
-    occurred_at_utc=now_utc, event_type="KILL_GATE_EVALUATION", entity_type="KillGate",
-    entity_id="KILL_GATE_D013", correlation_id="kill_gate_evaluation", payload_json=payload_json)
+    journal_event_id=content_hash_event_id(
+        prefix="kill_gate",
+        event_type="KILL_GATE_EVALUATION",
+        entity_id="KILL_GATE_D013",
+        occurred_at_utc=now_utc,
+        payload_json=payload_json,
+    ),
+    occurred_at_utc=now_utc,
+    event_type="KILL_GATE_EVALUATION",
+    entity_type="KillGate",
+    entity_id="KILL_GATE_D013",
+    correlation_id="kill_gate_evaluation",
+    payload_json=payload_json,
+)
 journal.record(event)
 ```
 `content_hash_event_id` (`src/domain/journal.py` L20-45): same inputs -> same id, so replay is idempotent (D-03). `JournalEvent.__post_init__` requires non-empty correlation/entity ids and UTC-aware datetimes. Evaluator itself is pure `evaluate(families, experiments, clock_start_utc, now_utc) -> KillGateEvaluation`; the journaling wrapper is separate (journal-first, as enablement).
@@ -93,6 +108,7 @@ journal.record(event)
 ```python
 class DailyState(str, Enum):
     """GLOSSARY §8 ..."""
+
     NORMAL = "NORMAL"
 ```
 Add `KillGateState(str, Enum)`: `WITHIN_BUDGET`, `PASSING_CANDIDATE`, `INSUFFICIENT_EDGE`; add GLOSSARY section following §8.1 style; `tests/test_domain_enums.py` pins enum values, extend it.
@@ -127,11 +143,11 @@ Use `Import-DotEnv`/`Set-ScopedEnv` from `_common.ps1` only if DB access needed.
 ### `tests/test_domain_no_float.py`
 Append to `SCANNED_FILES` (L18-70) following the per-phase comment convention:
 ```python
-    # Phase 10 — pure analytics package (D-01 purity).
-    "src/analytics/__init__.py",
-    "src/analytics/metrics.py",
-    "src/analytics/report.py",
-    "src/analytics/kill_gate.py",
+# Phase 10 — pure analytics package (D-01 purity).
+("src/analytics/__init__.py",)
+("src/analytics/metrics.py",)
+("src/analytics/report.py",)
+("src/analytics/kill_gate.py",)
 ```
 Exclude adapter and render modules only if they legitimately need non-Decimal (keep adapter out; render should still avoid floats). Test asserts every listed file exists, so add entries only when files land. Also check `tests/test_domain_boundary.py`/`test_quality_gates.py` for import-boundary lists needing `src/analytics`.
 

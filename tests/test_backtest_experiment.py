@@ -11,6 +11,7 @@ field fails the acceptance gate.
 TDD discipline: RED → GREEN. These tests are the RED phase — they MUST
 fail until `src/backtest/experiment.py` is implemented.
 """
+
 from __future__ import annotations
 
 import json
@@ -90,9 +91,7 @@ def test_experiment_assemble_stable_64_hex_identity() -> None:
         data_snapshot_id=case_input["data_snapshot_id"],
         code_version=case_input["code_version"],
         cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(
-            case_input["time_range_start_utc"]
-        ),
+        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
         time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
         universe=case_input["universe"],
         run_type=case_input["run_type"],
@@ -105,9 +104,7 @@ def test_experiment_assemble_stable_64_hex_identity() -> None:
         data_snapshot_id=case_input["data_snapshot_id"],
         code_version=case_input["code_version"],
         cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(
-            case_input["time_range_start_utc"]
-        ),
+        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
         time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
         universe=case_input["universe"],
         run_type=case_input["run_type"],
@@ -160,12 +157,8 @@ def test_experiment_assemble_missing_field_raises() -> None:
             data_snapshot_id="",
             code_version=case_input["code_version"],
             cost_model=cost_model,
-            time_range_start_utc=datetime.fromisoformat(
-                case_input["time_range_start_utc"]
-            ),
-            time_range_end_utc=datetime.fromisoformat(
-                case_input["time_range_end_utc"]
-            ),
+            time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
+            time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
             universe=case_input["universe"],
             run_type=case_input["run_type"],
             notes=case_input["notes"],
@@ -197,9 +190,7 @@ def test_experiment_reproduce_byte_identical() -> None:
         data_snapshot_id=case_input["data_snapshot_id"],
         code_version=case_input["code_version"],
         cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(
-            case_input["time_range_start_utc"]
-        ),
+        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
         time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
         universe=case_input["universe"],
         run_type=case_input["run_type"],
@@ -211,9 +202,7 @@ def test_experiment_reproduce_byte_identical() -> None:
     trades_b = reproduce(record, simulator_inputs={})
     digest_a = sha256_hex({"trades": [t.to_dict() for t in trades_a]})
     digest_b = sha256_hex({"trades": [t.to_dict() for t in trades_b]})
-    assert digest_a == digest_b, (
-        f"reproduce digests differ: {digest_a} != {digest_b}"
-    )
+    assert digest_a == digest_b, f"reproduce digests differ: {digest_a} != {digest_b}"
 
 
 # --------------------------------------------------------------------------- #
@@ -242,12 +231,8 @@ def test_experiment_unregistered_set_fails_closed() -> None:
             data_snapshot_id=case_input["data_snapshot_id"],
             code_version=case_input["code_version"],
             cost_model=cost_model,
-            time_range_start_utc=datetime.fromisoformat(
-                case_input["time_range_start_utc"]
-            ),
-            time_range_end_utc=datetime.fromisoformat(
-                case_input["time_range_end_utc"]
-            ),
+            time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
+            time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
             universe=case_input["universe"],
             run_type=case_input["run_type"],
             notes=case_input["notes"],
@@ -390,9 +375,7 @@ def test_verify_experiment_returns_none_when_reproducible() -> None:
         data_snapshot_id=case_input["data_snapshot_id"],
         code_version=case_input["code_version"],
         cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(
-            case_input["time_range_start_utc"]
-        ),
+        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
         time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
         universe=case_input["universe"],
         run_type=case_input["run_type"],
@@ -401,9 +384,7 @@ def test_verify_experiment_returns_none_when_reproducible() -> None:
 
     # verify_experiment must return None when reproducible.
     result = verify_experiment(record, simulator_inputs={})
-    assert result is None, (
-        f"verify_experiment must return None when reproducible, got {result!r}"
-    )
+    assert result is None, f"verify_experiment must return None when reproducible, got {result!r}"
 
 
 # --------------------------------------------------------------------------- #
@@ -431,9 +412,7 @@ def test_empty_input_yields_valid_record_with_zero_trades() -> None:
         data_snapshot_id=case_input["data_snapshot_id"],
         code_version=case_input["code_version"],
         cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(
-            case_input["time_range_start_utc"]
-        ),
+        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
         time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
         universe=case_input["universe"],
         run_type=case_input["run_type"],
@@ -442,9 +421,7 @@ def test_empty_input_yields_valid_record_with_zero_trades() -> None:
 
     # Empty simulator_inputs (no candles) → empty trade list, no exception.
     trades = reproduce(record, simulator_inputs={})
-    assert trades == [], (
-        f"empty input must yield empty trade list, got {len(trades)} trades"
-    )
+    assert trades == [], f"empty input must yield empty trade list, got {len(trades)} trades"
 
 
 # --------------------------------------------------------------------------- #
@@ -473,9 +450,7 @@ def test_run_twice_record_stability() -> None:
         data_snapshot_id=case_input["data_snapshot_id"],
         code_version=case_input["code_version"],
         cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(
-            case_input["time_range_start_utc"]
-        ),
+        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
         time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
         universe=case_input["universe"],
         run_type=case_input["run_type"],
@@ -488,9 +463,7 @@ def test_run_twice_record_stability() -> None:
         data_snapshot_id=case_input["data_snapshot_id"],
         code_version=case_input["code_version"],
         cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(
-            case_input["time_range_start_utc"]
-        ),
+        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
         time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
         universe=case_input["universe"],
         run_type=case_input["run_type"],
@@ -531,9 +504,7 @@ def test_universe_order_stability() -> None:
         data_snapshot_id=case_input["data_snapshot_id"],
         code_version=case_input["code_version"],
         cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(
-            case_input["time_range_start_utc"]
-        ),
+        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
         time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
         universe=universe_a,
         run_type=case_input["run_type"],
@@ -546,9 +517,7 @@ def test_universe_order_stability() -> None:
         data_snapshot_id=case_input["data_snapshot_id"],
         code_version=case_input["code_version"],
         cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(
-            case_input["time_range_start_utc"]
-        ),
+        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
         time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
         universe=universe_b,
         run_type=case_input["run_type"],
@@ -561,9 +530,7 @@ def test_universe_order_stability() -> None:
         data_snapshot_id=case_input["data_snapshot_id"],
         code_version=case_input["code_version"],
         cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(
-            case_input["time_range_start_utc"]
-        ),
+        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
         time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
         universe=universe_c,
         run_type=case_input["run_type"],
@@ -579,10 +546,14 @@ def test_universe_order_stability() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _assemble_gap_record(*, cost_dict: dict, run_type: str = "CANDIDATE",
-                         strategy_id: str = "trend-pullback",
-                         parameter_set_id: str = "baseline-v3",
-                         result_summary_json: str = "{}"):
+def _assemble_gap_record(
+    *,
+    cost_dict: dict,
+    run_type: str = "CANDIDATE",
+    strategy_id: str = "trend-pullback",
+    parameter_set_id: str = "baseline-v3",
+    result_summary_json: str = "{}",
+):
     """Assemble a record bound to registry params + the given cost dict.
 
     Per Phase 7.1 D-05: assemble() now requires a 7-key registry set.
@@ -680,9 +651,17 @@ def test_cr03b_reproduced_trades_carry_typed_decimal_datetime_fields() -> None:
     trades = reproduce(record, simulator_inputs=sim_inputs)
     assert len(trades) >= 1, "simple-trend baseline must yield filled trades"
     decimal_fields = (
-        "entry_price", "quantity", "exit_price", "realized_pnl",
-        "realized_risk", "gross_pnl", "entry_fee", "exit_fee",
-        "funding_amount", "slippage_amount", "modeled_costs_per_unit",
+        "entry_price",
+        "quantity",
+        "exit_price",
+        "realized_pnl",
+        "realized_risk",
+        "gross_pnl",
+        "entry_fee",
+        "exit_fee",
+        "funding_amount",
+        "slippage_amount",
+        "modeled_costs_per_unit",
     )
     for trade in trades:
         for fname in decimal_fields:
@@ -737,9 +716,16 @@ def test_cr05_decimal_inputs_hash_identically_to_string_inputs() -> None:
 
     string_cost = _gap_cost_dict()
     decimal_cost = {
-        key: (Decimal(value) if key not in {
-            "funding_treatment", "slippage_model", "spread_fill_assumptions",
-        } else value)
+        key: (
+            Decimal(value)
+            if key
+            not in {
+                "funding_treatment",
+                "slippage_model",
+                "spread_fill_assumptions",
+            }
+            else value
+        )
         for key, value in string_cost.items()
     }
     assert build_cost_model(decimal_cost).cost_model_hash == (
@@ -749,16 +735,13 @@ def test_cr05_decimal_inputs_hash_identically_to_string_inputs() -> None:
     # Equivalent spellings hash equally (D-15); a genuine change still differs.
     trailing = dict(string_cost, fee_rate_entry="0.00020")
     trimmed = dict(string_cost, fee_rate_entry="0.0002")
-    assert build_cost_model(trailing).cost_model_hash == (
-        build_cost_model(trimmed).cost_model_hash
+    assert build_cost_model(trailing).cost_model_hash == (build_cost_model(trimmed).cost_model_hash)
+    assert (
+        build_cost_model(dict(decimal_cost, fee_rate_entry=Decimal("0.00020"))).cost_model_hash
+        == build_cost_model(trailing).cost_model_hash
     )
-    assert build_cost_model(
-        dict(decimal_cost, fee_rate_entry=Decimal("0.00020"))
-    ).cost_model_hash == build_cost_model(trailing).cost_model_hash
     changed = dict(string_cost, fee_rate_entry="0.0003")
-    assert build_cost_model(changed).cost_model_hash != (
-        build_cost_model(trimmed).cost_model_hash
-    )
+    assert build_cost_model(changed).cost_model_hash != (build_cost_model(trimmed).cost_model_hash)
 
 
 def test_cr06_experiment_id_differs_across_run_type_and_strategy_id() -> None:
@@ -833,11 +816,7 @@ def test_cr11_baseline_tomls_carry_detector_and_cost_keys() -> None:
     from src.domain.registry import load_parameter_set
 
     repo_root = Path(__file__).resolve().parents[1]
-    tree = ast.parse(
-        (repo_root / "scripts" / "gen_phase6_fixtures.py").read_text(
-            encoding="utf-8"
-        )
-    )
+    tree = ast.parse((repo_root / "scripts" / "gen_phase6_fixtures.py").read_text(encoding="utf-8"))
     canonical: dict | None = None
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
@@ -883,9 +862,7 @@ def test_cr11_baseline_tomls_carry_detector_and_cost_keys() -> None:
                 "expected_slippage",
                 "exit_slippage_rate",
             ):
-                assert Decimal(str(parameter_set.params[key])) == Decimal(
-                    str(canonical[key])
-                ), (
+                assert Decimal(str(parameter_set.params[key])) == Decimal(str(canonical[key])), (
                     f"{parameter_set_id}: {key}={parameter_set.params[key]!r} != "
                     f"COST_MODEL canonical {canonical[key]!r}"
                 )

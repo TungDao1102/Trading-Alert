@@ -236,13 +236,9 @@ def check_batch(klines: list[Kline], interval: str) -> QualityVerdict:
         or k.trade_count < 0
     )
     zero_trade_bars = sum(1 for k in klines if k.trade_count == 0)
-    bad_durations = sum(
-        1 for k in klines if k.close_time_utc <= k.open_time_utc
-    )
+    bad_durations = sum(1 for k in klines if k.close_time_utc <= k.open_time_utc)
     first_key = (klines[0].symbol, klines[0].interval)
-    mixed_keys = sum(
-        1 for k in klines if (k.symbol, k.interval) != first_key
-    )
+    mixed_keys = sum(1 for k in klines if (k.symbol, k.interval) != first_key)
 
     structural_ok = (
         duplicates == 0

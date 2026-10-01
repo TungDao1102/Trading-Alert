@@ -181,9 +181,7 @@ async def test_archive_source_pages_through_a_month() -> None:
             source = arc.ArchiveKlineSource(client, search_end_ms=NOV_2022)
             first = await source.klines(SYMBOL, INTERVAL, start_ms=OCT_2022, limit=500)
             next_open = int((first[-1].open_time_utc - _EPOCH) / timedelta(milliseconds=1))
-            second = await source.klines(
-                SYMBOL, INTERVAL, start_ms=next_open + HOUR_MS, limit=500
-            )
+            second = await source.klines(SYMBOL, INTERVAL, start_ms=next_open + HOUR_MS, limit=500)
             past_end = await source.klines(SYMBOL, INTERVAL, start_ms=NOV_2022, limit=500)
 
         assert len(first) == 500
@@ -720,4 +718,3 @@ async def test_archive_last_day_validates_symbol_before_any_request() -> None:
             with pytest.raises(ValueError, match="archive"):
                 await arc.archive_last_day(client, "../../etc")
         assert route.call_count == 0
-

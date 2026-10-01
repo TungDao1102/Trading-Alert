@@ -220,11 +220,14 @@ target_metadata = Base.metadata
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 
+
 class Base(DeclarativeBase):
     pass
 
+
 def make_engine(database_url: str):
     return create_async_engine(database_url.replace("postgresql://", "postgresql+psycopg://"))
+
 
 Session = async_sessionmaker(make_engine(...), expire_on_commit=False)
 ```
@@ -236,18 +239,23 @@ from sqlalchemy import String, DateTime, Numeric
 from sqlalchemy.orm import Mapped, mapped_column
 from decimal import Decimal
 
+
 class SymbolMetadata(Base):
     __tablename__ = "symbol_metadata"
     symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
-    metadata_observed_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)  # version key
+    metadata_observed_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), primary_key=True
+    )  # version key
     status: Mapped[str] = mapped_column(String(16))
     contract_type: Mapped[str] = mapped_column(String(16))
-    onboard_time_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    price_tick_size: Mapped[Decimal] = mapped_column(Numeric(38, 18))    # DATA_MODEL §5: no float
+    onboard_time_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    price_tick_size: Mapped[Decimal] = mapped_column(Numeric(38, 18))  # DATA_MODEL §5: no float
     quantity_step_size: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     min_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     max_quantity: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
-    notional_constraints_json: Mapped[str] = mapped_column(String)        # JSON-as-text for portability
+    notional_constraints_json: Mapped[str] = mapped_column(String)  # JSON-as-text for portability
     order_capabilities_json: Mapped[str] = mapped_column(String)
     # ... + position-mode snapshot, base/quote/margin assets
 ```
@@ -271,15 +279,21 @@ from dataclasses import dataclass
 from decimal import Decimal
 from datetime import datetime
 
+
 @dataclass(frozen=True)
 class Kline:
     symbol: str
     interval: str
-    open_time_utc: datetime            # tz-aware UTC
+    open_time_utc: datetime  # tz-aware UTC
     close_time_utc: datetime
-    open: Decimal; high: Decimal; low: Decimal; close: Decimal
-    volume: Decimal; quote_volume: Decimal
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
+    quote_volume: Decimal
     trade_count: int
+
 
 @dataclass(frozen=True)
 class OiSnapshot:
@@ -287,12 +301,14 @@ class OiSnapshot:
     observed_at_utc: datetime
     open_interest: Decimal
 
+
 @dataclass(frozen=True)
 class FundingTick:
     symbol: str
     funding_time_utc: datetime
     funding_rate: Decimal
     mark_price: Decimal | None = None
+
 
 @dataclass(frozen=True)
 class SymbolFilters:
@@ -312,12 +328,14 @@ class SymbolFilters:
 # confirmed against the installed SDK + docs at implementation start. The adapter
 # is the layer that owns that confirmation; downstream modules never see SDK types.
 class BinanceUsdmAdapter:
-    def __init__(self, sdk_client):    # injected for respx mocking in adapter tests
+    def __init__(self, sdk_client):  # injected for respx mocking in adapter tests
         self._sdk = sdk_client
 
     async def klines(self, symbol, interval, start_ms, end_ms, limit=1500) -> list[Kline]: ...
     async def open_interest(self, symbol) -> OiSnapshot: ...
-    async def funding_rate(self, symbol, start_ms=None, end_ms=None, limit=1000) -> list[FundingTick]: ...
+    async def funding_rate(
+        self, symbol, start_ms=None, end_ms=None, limit=1000
+    ) -> list[FundingTick]: ...
     async def exchange_info(self) -> list[SymbolFilters]: ...
 ```
 
@@ -338,26 +356,32 @@ from dataclasses import dataclass
 
 INTERVAL_MS = {"1m": 60_000, "1h": 3_600_000, "4h": 14_400_000}
 
+
 @dataclass(frozen=True)
 class QualityVerdict:
-    structural_ok: bool           # False ⇒ reject the batch (D-10)
+    structural_ok: bool  # False ⇒ reject the batch (D-10)
     duplicates: int
     ohlc_violations: int
     timestamp_regressions: int
-    gap_count: int                # warn-only; flagged in coverage
+    gap_count: int  # warn-only; flagged in coverage
+
 
 def check_batch(df: pl.DataFrame, interval: str) -> QualityVerdict:
     dupes = df.filter(pl.col("open_time_utc").is_duplicated()).height
     ohlc_bad = df.filter(
-        (pl.col("high") < pl.col("open")) | (pl.col("high") < pl.col("close"))
-        | (pl.col("low") > pl.col("open")) | (pl.col("low") > pl.col("close"))
+        (pl.col("high") < pl.col("open"))
+        | (pl.col("high") < pl.col("close"))
+        | (pl.col("low") > pl.col("open"))
+        | (pl.col("low") > pl.col("close"))
         | (pl.col("high") < pl.col("low"))
     ).height
     regress = (df["open_time_utc"].diff() <= 0).fill_null(False).sum()
     interval_ms = INTERVAL_MS[interval]
-    expected = (df["open_time_utc"].max() - df["open_time_utc"].min()).total_seconds() * 1000 // interval_ms + 1
+    expected = (
+        df["open_time_utc"].max() - df["open_time_utc"].min()
+    ).total_seconds() * 1000 // interval_ms + 1
     gap_count = int(max(0, expected - df.height))
-    structural_ok = (dupes == 0 and ohlc_bad == 0 and regress == 0)
+    structural_ok = dupes == 0 and ohlc_bad == 0 and regress == 0
     return QualityVerdict(structural_ok, dupes, ohlc_bad, int(regress), gap_count)
 ```
 
@@ -382,8 +406,10 @@ from datetime import date
 
 RAW_ROOT = Path("data/raw")
 
+
 def partition_path(interval: str, symbol: str, day: date) -> Path:
     return RAW_ROOT / f"interval={interval}" / f"symbol={symbol}" / f"date={day.isoformat()}"
+
 
 def publish_batch(df: pl.DataFrame, interval: str, symbol: str) -> list[Path]:
     """Publish one or more per-day Parquet files; raw is immutable after publish.
@@ -411,16 +437,18 @@ def publish_batch(df: pl.DataFrame, interval: str, symbol: str) -> list[Path]:
 **The pseudocode block from RESEARCH.md §Architecture Patterns (lines 213-223) is the canonical pattern — copy its shape verbatim, swap SDK method names once re-verified at implementation:**
 ```python
 # Source: 02-RESEARCH.md:213-223 — Pseudocode, exact SDK call names re-verified at implementation [ASSUMED shape]
-async def backfill_symbol_interval(adapter, symbol, interval, window_start, window_end, store, quality):
+async def backfill_symbol_interval(
+    adapter, symbol, interval, window_start, window_end, store, quality
+):
     cursor = window_start
     while cursor < window_end:
-        page = await adapter.klines(symbol, interval, start_ms=cursor, limit=1500)   # weight 10
-        await weight_aware_delay(adapter.last_weight_1m_header)                        # Pitfall 5
-        batch = [k for k in page if k.close_time_utc <= utcnow()]                     # Pitfall 1: drop forming candle
+        page = await adapter.klines(symbol, interval, start_ms=cursor, limit=1500)  # weight 10
+        await weight_aware_delay(adapter.last_weight_1m_header)  # Pitfall 5
+        batch = [k for k in page if k.close_time_utc <= utcnow()]  # Pitfall 1: drop forming candle
         verdict = quality.check_batch(pl.from_dataclass(batch), interval=interval)
-        if verdict.structural_ok:                                                      # D-10 fail-closed
+        if verdict.structural_ok:  # D-10 fail-closed
             store.publish_batch(batch, interval=interval, symbol=symbol)
-            manifest_record(cursor, len(batch))                                        # idempotent re-run (D-02 reversibility)
+            manifest_record(cursor, len(batch))  # idempotent re-run (D-02 reversibility)
         cursor = max(k.open_time_utc for k in batch) + interval_ms(interval)
 ```
 
@@ -452,9 +480,10 @@ async def klines_with_pacing(adapter, ...): ...
 import asyncio
 from datetime import datetime, timezone, timedelta
 
-OI_PERIOD = timedelta(minutes=5)                      # D-07
-LIVE_5 = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")   # D-01
-FUNDING_PERIOD = timedelta(days=1)                    # RESEARCH.md §Open Questions 3
+OI_PERIOD = timedelta(minutes=5)  # D-07
+LIVE_5 = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")  # D-01
+FUNDING_PERIOD = timedelta(days=1)  # RESEARCH.md §Open Questions 3
+
 
 async def oi_loop(adapter, session_factory, watermarks_repo, gaps_repo, stop_event):
     while not stop_event.is_set():
@@ -464,18 +493,30 @@ async def oi_loop(adapter, session_factory, watermarks_repo, gaps_repo, stop_eve
         except Exception as exc:
             # D-09: gap journal, NEVER fabricated value
             async with session_factory() as s:
-                await gaps_repo.insert(s, symbol=None, data_class="oi",
-                                       expected_utc=tick_start, observed_utc=tick_start, reason=str(exc))
+                await gaps_repo.insert(
+                    s,
+                    symbol=None,
+                    data_class="oi",
+                    expected_utc=tick_start,
+                    observed_utc=tick_start,
+                    reason=str(exc),
+                )
                 await s.commit()
             await asyncio.sleep(OI_PERIOD.total_seconds())
             continue
         async with session_factory() as s:
             async with s.begin():
                 for snap in snapshots:
-                    await s.add(OiSnapshotRow(symbol=snap.symbol, observed_at_utc=snap.observed_at_utc,
-                                              open_interest=snap.open_interest))
-                    await watermarks_repo.advance(s, symbol=snap.symbol, data_class="oi",
-                                                   last_tick_utc=snap.observed_at_utc)
+                    await s.add(
+                        OiSnapshotRow(
+                            symbol=snap.symbol,
+                            observed_at_utc=snap.observed_at_utc,
+                            open_interest=snap.open_interest,
+                        )
+                    )
+                    await watermarks_repo.advance(
+                        s, symbol=snap.symbol, data_class="oi", last_tick_utc=snap.observed_at_utc
+                    )
         # Pace: drift next tick to the 5-minute boundary
         elapsed = (datetime.now(timezone.utc) - tick_start).total_seconds()
         await asyncio.sleep(max(0, OI_PERIOD.total_seconds() - elapsed))
@@ -499,8 +540,9 @@ async def oi_loop(adapter, session_factory, watermarks_repo, gaps_repo, stop_eve
 # Source: 02-RESEARCH.md:228-230 + docs/data/DATA_MODEL.md:289-308
 from decimal import Decimal, InvalidOperation
 
+
 async def refresh_symbol_metadata(adapter, session_factory):
-    info = await adapter.exchange_info()             # list[SymbolFilters] from adapter
+    info = await adapter.exchange_info()  # list[SymbolFilters] from adapter
     now = datetime.now(timezone.utc)
     async with session_factory() as s:
         async with s.begin():
@@ -508,7 +550,7 @@ async def refresh_symbol_metadata(adapter, session_factory):
                 row = SymbolMetadata(
                     symbol=f.symbol,
                     metadata_observed_at_utc=now,
-                    price_tick_size=Decimal(str(f.price_tick_size)),       # Pitfall 4: NEVER float
+                    price_tick_size=Decimal(str(f.price_tick_size)),  # Pitfall 4: NEVER float
                     quantity_step_size=Decimal(str(f.quantity_step_size)),
                     min_quantity=Decimal(str(f.min_quantity)),
                     max_quantity=Decimal(str(f.max_quantity)) if f.max_quantity else None,
@@ -517,7 +559,7 @@ async def refresh_symbol_metadata(adapter, session_factory):
                     order_capabilities_json=json.dumps({...}),
                     # ... + position-mode snapshot
                 )
-                await s.merge(row)                  # PK = (symbol, metadata_observed_at_utc)
+                await s.merge(row)  # PK = (symbol, metadata_observed_at_utc)
 ```
 
 **Refresh cadence** (DATA_PIPELINE §6 line 77 + RESEARCH.md Pattern 4): bootstrap + weekly; filter changes are rare but silent.
@@ -533,25 +575,31 @@ async def refresh_symbol_metadata(adapter, session_factory):
 # Source: 02-RESEARCH.md:321-333 — DuckDB hive-partitioned coverage view
 import duckdb
 from pathlib import Path
-import click   # or typer; planner picks, AGENTS.md delegation area
+import click  # or typer; planner picks, AGENTS.md delegation area
 
 CON = duckdb.connect()
 
+
 def load_coverage_views(sql_path: Path = Path("src/sql/coverage_v1.sql")):
-    CON.execute(sql_path.read_text())                # checked-in view definitions
+    CON.execute(sql_path.read_text())  # checked-in view definitions
+
 
 def report_symbol(symbol: str, intervals=("1m", "1h", "4h")) -> dict:
     """Returns per-symbol {start_utc, end_utc, rows, violations, gaps} per interval."""
     rows = {}
     for tf in intervals:
-        rows[tf] = CON.execute("""
+        rows[tf] = CON.execute(
+            """
             SELECT MIN(open_time_utc) AS start_utc,
                    MAX(close_time_utc) AS end_utc,
                    COUNT(*)           AS rows
             FROM candles_v1
             WHERE symbol = ? AND tf = ?
-        """, [symbol, tf]).fetchone()
+        """,
+            [symbol, tf],
+        ).fetchone()
     return rows
+
 
 @click.command()
 @click.option("--symbol", required=True)
@@ -609,14 +657,15 @@ import subprocess, shutil, hashlib, tempfile
 from pathlib import Path
 
 DATA_RAW = Path("data/raw")
-PG_DUMP_FMT = "-Fc"                                          # RESEARCH.md §Alternatives Considered (custom format recommended)
+PG_DUMP_FMT = "-Fc"  # RESEARCH.md §Alternatives Considered (custom format recommended)
+
 
 @click.command()
 @click.option("--mode", type=click.Choice(["backup", "drill"]), default="backup")
 @click.option("--off-host-target", type=Path, required=False, default=Path("backup"))
 def main(mode: str, off_host_target: Path):
     """`backup`: pg_dump + Parquet copy + off-host copy.
-       `drill`: backup + scratch-restore + row-count/hash verify; exit non-zero on mismatch."""
+    `drill`: backup + scratch-restore + row-count/hash verify; exit non-zero on mismatch."""
     pg_dump_path = off_host_target / "pg.dump"
     subprocess.run(["pg_dump", PG_DUMP_FMT, "-f", str(pg_dump_path), DATABASE_URL], check=True)
     parquet_copy = off_host_target / "parquet"
@@ -767,9 +816,10 @@ Per `docs/01_ENGINEERING_PRINCIPLES.md:81` §8 + `docs/architecture/DATA_PIPELIN
 ```python
 # Source: 02-RESEARCH.md:344-350 §Code Examples — UTC store, HCMC display edge
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo       # needs `tzdata` wheel on Windows
+from zoneinfo import ZoneInfo  # needs `tzdata` wheel on Windows
+
 now_utc = datetime.now(timezone.utc)
-display = now_utc.astimezone(ZoneInfo("Asia/Ho_Chi_Minh"))    # only at the CLI/UI edge
+display = now_utc.astimezone(ZoneInfo("Asia/Ho_Chi_Minh"))  # only at the CLI/UI edge
 ```
 
 **Apply to:** every model field of type `datetime` (use `TIMESTAMPTZ` not `TIMESTAMP`), every CLI output, every log line.
@@ -810,9 +860,11 @@ Per `docs/operations/SECURITY_AND_OPERATIONS.md:61-74` §6 Logging + `02-RESEARC
 
 ```python
 import structlog
+
 log = structlog.get_logger()
-log.info("oi.tick", symbol=s, observed_at_utc=o.isoformat(),
-         correlation_id=cid, strategy_version=None)   # Phase 2 has no strategy yet
+log.info(
+    "oi.tick", symbol=s, observed_at_utc=o.isoformat(), correlation_id=cid, strategy_version=None
+)  # Phase 2 has no strategy yet
 ```
 
 **Never log:** API keys, signatures, raw request bodies with `X-MBX-APIKEY`. `SECURITY_AND_OPERATIONS.md:74` hard rule.

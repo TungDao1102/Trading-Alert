@@ -70,23 +70,17 @@ class PlacementGateVerdict:
             raise ValueError("reason_code must be a non-empty string")
         valid_codes = {r.value for r in RejectionReason} | {_OK}
         if self.reason_code not in valid_codes:
-            raise ValueError(
-                f"PlacementGateVerdict: unknown reason_code {self.reason_code!r}"
-            )
+            raise ValueError(f"PlacementGateVerdict: unknown reason_code {self.reason_code!r}")
         if not isinstance(self.daily_state, DailyState):
             raise TypeError(
                 f"daily_state must be DailyState, got {type(self.daily_state).__name__}"
             )
         if self.is_no_trade:
             if self.sized is not None:
-                raise ValueError(
-                    "PlacementGateVerdict: is_no_trade=True requires sized=None"
-                )
+                raise ValueError("PlacementGateVerdict: is_no_trade=True requires sized=None")
         else:
             if self.sized is None:
-                raise ValueError(
-                    "PlacementGateVerdict: is_no_trade=False requires sized"
-                )
+                raise ValueError("PlacementGateVerdict: is_no_trade=False requires sized")
             if self.reason_code != _OK:
                 raise ValueError(
                     f"PlacementGateVerdict: is_no_trade=False requires "
@@ -162,9 +156,7 @@ def decide_placement(
     ):
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             raise ValueError(f"decide_placement: {name} must be an int >= 0, got {count!r}")
-    daily_state = derive_daily_state(
-        daily_loss_quote=daily_loss_quote, parameter_set=parameter_set
-    )
+    daily_state = derive_daily_state(daily_loss_quote=daily_loss_quote, parameter_set=parameter_set)
 
     # Gate 1: exchangeInfo revalidation.
     # ConstraintSnapshot.__post_init__ already validates positive values,

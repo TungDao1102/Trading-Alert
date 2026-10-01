@@ -140,9 +140,7 @@ def _frozen_clock(ms: int) -> callable:
     return _now
 
 
-def _read_published_symbol(
-    raw_root: Path, *, symbol: str, interval: str
-) -> list[int]:
+def _read_published_symbol(raw_root: Path, *, symbol: str, interval: str) -> list[int]:
     """Read back every published open_time (ms) for one symbol × interval."""
     import polars as pl
 
@@ -164,7 +162,7 @@ def _read_published_symbol(
 async def test_windowed_cursor_emits_every_expected_candle(
     tmp_path: Path,
 ) -> None:
-    """    A window covering 3 pages of 8 candles each publishes the whole day.
+    """A window covering 3 pages of 8 candles each publishes the whole day.
 
     No silent truncation: every open_time in the window appears in
     Parquet exactly once. Page size is forced to 8 via `BackfillConfig.page_size`
@@ -180,9 +178,7 @@ async def test_windowed_cursor_emits_every_expected_candle(
         bars: list[Kline] = []
         for i in range(8):
             open_ms = base_ms + (page_idx * 8 + i) * INTERVAL_MS
-            bars.append(
-                _mk_kline(open_ms=open_ms, close_ms=open_ms + INTERVAL_MS - 1)
-            )
+            bars.append(_mk_kline(open_ms=open_ms, close_ms=open_ms + INTERVAL_MS - 1))
         pages.append(bars)
 
     adapter = FakeAdapter(responses=pages)
@@ -265,7 +261,7 @@ async def test_forming_candle_at_frozen_now_is_excluded(
 async def test_killed_run_resumes_from_persisted_cursor(
     tmp_path: Path,
 ) -> None:
-    """    A process that dies mid-bootstrap resumes from the cursor on restart.
+    """A process that dies mid-bootstrap resumes from the cursor on restart.
 
     Page 1 must trigger a partial publish so the cursor is written before
     the kill. The paginator's date-buffer holds the LATEST date in the
@@ -359,8 +355,7 @@ async def test_killed_run_resumes_from_persisted_cursor(
     # 72 unique candles across D+1 (24), D+2 (24) and D+3 (24); D+4's
     # boundary candle is outside the window.
     assert result.rows_published == 72, (
-        f"expected 72 rows on resume (24 + 24 + 24), got "
-        f"{result.rows_published}"
+        f"expected 72 rows on resume (24 + 24 + 24), got {result.rows_published}"
     )
     assert result.structural_rejections == 0
 
@@ -478,8 +473,7 @@ def test_rate_limit_predicate_pins_canonical_sdk_error_names() -> None:
 def _result_summary(result: BackfillResult) -> str:
     """Tiny formatter for ad-hoc verification scripts."""
     return (
-        f"pages={result.pages} rows={result.rows_published} "
-        f"rejects={result.structural_rejections}"
+        f"pages={result.pages} rows={result.rows_published} rejects={result.structural_rejections}"
     )
 
 

@@ -141,9 +141,9 @@ Planner may merge `sizing.py`/`quantization.py`/`gating.py` differently; the non
 from decimal import Decimal
 from src.core._decimal import _add, _div, _mul, _sub
 
-allowed_risk = _mul(equity, risk_rate)                       # equity × risk_rate
-sl_distance = abs(_sub(entry_ref, stop_loss_price))          # per-unit SL distance
-risk_per_unit = _add(sl_distance, modeled_costs_per_unit)    # + entry+exit fee + slippage (+funding)
+allowed_risk = _mul(equity, risk_rate)  # equity × risk_rate
+sl_distance = abs(_sub(entry_ref, stop_loss_price))  # per-unit SL distance
+risk_per_unit = _add(sl_distance, modeled_costs_per_unit)  # + entry+exit fee + slippage (+funding)
 if risk_per_unit <= Decimal("0"):
     return no_trade("EXCHANGE_CONSTRAINT")  # fail closed, never divide by zero
 raw_quantity = _div(allowed_risk, risk_per_unit)
@@ -155,10 +155,10 @@ raw_quantity = _div(allowed_risk, risk_per_unit)
 **Example:**
 ```python
 # Source: docs/trading/RISK_MANAGEMENT.md §11 algorithm + rules 1-4
-steps = raw_quantity // step_size          # exact floor, Decimal
+steps = raw_quantity // step_size  # exact floor, Decimal
 rounded = steps * step_size
 if rounded < min_quantity:
-    return no_trade("MIN_QTY_REJECT")      # D-05 code; map to GLOSSARY enum per planner decision
+    return no_trade("MIN_QTY_REJECT")  # D-05 code; map to GLOSSARY enum per planner decision
 if rounded * reference_price < min_notional:
     return no_trade("NOTIONAL_REJECT")
 realized_risk = rounded * risk_per_unit
@@ -246,24 +246,26 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
+
 @dataclass(frozen=True)
 class ConstraintSnapshot:  # adapter-edge shape; mirrors SymbolFilters fields
-    symbol: str              # [VERIFIED: src/adapters/binance_usdm.py:108-122]
+    symbol: str  # [VERIFIED: src/adapters/binance_usdm.py:108-122]
     price_tick_size: Decimal
     quantity_step_size: Decimal
     min_quantity: Decimal
     min_notional: Decimal
     metadata_observed_at_utc: datetime  # RISK_MANAGEMENT §12, UTC-aware
 
+
 @dataclass(frozen=True)
 class SizedResult:
     is_no_trade: bool
-    quantity: Decimal | None          # final rounded qty when sized
+    quantity: Decimal | None  # final rounded qty when sized
     quantity_before_rounding: Decimal
     quantity_after_rounding: Decimal
-    quantization_decision: str        # ACCEPTED / REJECTED (+ DEFERRED_TO_RISK upstream only)
+    quantization_decision: str  # ACCEPTED / REJECTED (+ DEFERRED_TO_RISK upstream only)
     realized_risk: Decimal
-    reason_code: str                  # OK or D-05 vocabulary
+    reason_code: str  # OK or D-05 vocabulary
 ```
 
 ### Fail-closed input validation (D-04)
@@ -272,12 +274,12 @@ class SizedResult:
 def _validate_inputs(*, equity, constraints, positions_reconciled, now_utc, ttl):
     if equity is None or equity <= Decimal("0"):
         return "UNCERTAIN_ACCOUNT_STATE"
-    if not positions_reconciled:                       # unreconciled → no new orders
+    if not positions_reconciled:  # unreconciled → no new orders
         return "UNCERTAIN_ACCOUNT_STATE"
     if constraints is None or constraints.quantity_step_size <= 0:
-        return "STALE_CONSTRAINTS"                      # missing stepSize/tick/min/notional
+        return "STALE_CONSTRAINTS"  # missing stepSize/tick/min/notional
     if now_utc - constraints.metadata_observed_at_utc > ttl:
-        return "STALE_CONSTRAINTS"                      # stale snapshot → revalidate
+        return "STALE_CONSTRAINTS"  # stale snapshot → revalidate
     return None
 ```
 

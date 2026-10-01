@@ -38,8 +38,11 @@
 **Current LIVE_5 coupling to remove** (line 62, 824-829, 865):
 ```python
 from src.data.backfill import LIVE_5
+
 ...
-parser.add_argument("--universe", nargs="+", default=list(LIVE_5), help="Symbols to poll (default: live-5).")
+parser.add_argument(
+    "--universe", nargs="+", default=list(LIVE_5), help="Symbols to poll (default: live-5)."
+)
 ...
 universe: list[str] = list(args.universe) or list(LIVE_5)
 ```
@@ -88,9 +91,17 @@ Change `write_parquet(path)` to tmp-in-same-dir (`.{name}.{pid}.tmp`, dot-prefix
 
 **Analog:** itself, `check_batch` lines 174-184:
 ```python
-negative_values = sum(1 for k in klines
-    if k.open < 0 or k.high < 0 or k.low < 0 or k.close < 0
-    or k.volume < 0 or k.quote_volume < 0 or k.trade_count <= 0)
+negative_values = sum(
+    1
+    for k in klines
+    if k.open < 0
+    or k.high < 0
+    or k.low < 0
+    or k.close < 0
+    or k.volume < 0
+    or k.quote_volume < 0
+    or k.trade_count <= 0
+)
 ```
 Change `trade_count <= 0` to `< 0`; add `zero_trade_bars = sum(1 for k in klines if k.trade_count == 0)` as telemetry field on `QualityVerdict` with default `0`. Keep gap/OHLC/duplicate/regression/mixed-key checks (lines 160-200). Mark validator: copy `check_batch` minus volume/quote_volume/trade_count predicates; also reject `Decimal.as_tuple().exponent < -8` (Pitfall 8). Mark frame writer: sibling of `klines_to_frame` with columns `open_time_utc, close_time_utc, open, high, low, close, interval, symbol` at `Decimal(scale=8)`; tick count stored (if at all) as `price_tick_count`, never `trade_count` (D-29).
 
@@ -109,8 +120,12 @@ Edits:
 ```python
 response = await asyncio.to_thread(
     self._sdk.rest_api.kline_candlestick_data,
-    symbol=symbol, interval=interval,  # type: ignore[arg-type]
-    start_time=start_ms, end_time=end_ms, limit=limit)
+    symbol=symbol,
+    interval=interval,  # type: ignore[arg-type]
+    start_time=start_ms,
+    end_time=end_ms,
+    limit=limit,
+)
 raw = response.data()
 return [_row_to_kline(symbol, interval, row) for row in raw]
 ```
@@ -140,9 +155,11 @@ Add `mark_klines(...)` with `mark_price_kline_candlestick_data` and `_row_to_mar
 
 **Analogs:** `src/backtest/experiment.py` lines 76-82, 125-135 (`data_snapshot_id` validated as 64-hex), `src/domain.canonical.sha256_hex`, `src/paper/freeze.py` (existing Parquet reader precedent), simulator key rule `bar.close_time_utc.isoformat()` (`simulator.py:901`) and `_parse_intrabar_map` (335-343).
 ```python
-files = sorted(paths)   # explicit posix-relative list, never a dir scan
-entries = [{"path": p.relative_to(root).as_posix(),
-            "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p in files]
+files = sorted(paths)  # explicit posix-relative list, never a dir scan
+entries = [
+    {"path": p.relative_to(root).as_posix(), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
+    for p in files
+]
 dataset_id = sha256_hex({"files": entries})
 ```
 Return a frozen dataclass `CaseInputData` (`strategy_bars`, `context_bars`, `intrabar_1m`, `mark_bars_1m`, `dataset_id`, `allowed_gaps`) with `to_case_input(**scenario)`. Values as Decimal-strings and isoformat timestamps. Raise project exception on unresolved gap unless in `allow_gaps`. Must not live in `src/backtest` (no-Polars rule).
@@ -154,8 +171,9 @@ Return a frozen dataclass `CaseInputData` (`strategy_bars`, `context_bars`, `int
 self._close_all_handles()
 self.start()
 ...
-closes, gaps = await backfill_missed_closes(self._rest, symbol=symbol, interval=interval,
-                                            last_close_utc=last, now_utc=now)
+closes, gaps = await backfill_missed_closes(
+    self._rest, symbol=symbol, interval=interval, last_close_utc=last, now_utc=now
+)
 ```
 Move `self.start()` after the backfill loop, call `record_close` (advance `_last_close`) for each backfilled close, and add a monotonic guard in `_on_kline` (drop closed kline with `close_time_utc <= _last_close[(symbol, interval)]`). Keep per-pair `try/except` isolation and the outage-gap dict shape. Test analog: `tests/test_paper_supervisor_backfill.py` (`_FakeWsAdapter`, `_FakeRestAdapter` at line 89 with `klines_calls`, `_make_supervisor` at 116); give both a shared `calls` list, drive `on_disconnect(scheduled=False)`, assert klines call precedes subscribe and a duplicate WS kline is not dispatched.
 

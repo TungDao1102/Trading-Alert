@@ -129,9 +129,7 @@ class PaperSupervisor:
         self._handles: list[tuple[str, str, Any]] = []
         self._close_failures: int = 0
 
-    def record_close(
-        self, symbol: str, interval: str, close_time_utc: datetime
-    ) -> None:
+    def record_close(self, symbol: str, interval: str, close_time_utc: datetime) -> None:
         """Record the last-seen close for a pair.
 
         Called by the dispatch path when a closed kline arrives. The
@@ -141,9 +139,7 @@ class PaperSupervisor:
         """
         self._advance_last_close(symbol, interval, close_time_utc)
 
-    def _advance_last_close(
-        self, symbol: str, interval: str, close_time_utc: datetime
-    ) -> bool:
+    def _advance_last_close(self, symbol: str, interval: str, close_time_utc: datetime) -> bool:
         """Atomically move the pair's last close forward.
 
         Returns True only when there is no stored close or the new close
@@ -182,9 +178,7 @@ class PaperSupervisor:
                 )
                 self._handles.append((symbol, interval, handle))
 
-    def _make_kline_handler(
-        self, symbol: str, interval: str
-    ) -> Callable[[WsKline], None]:
+    def _make_kline_handler(self, symbol: str, interval: str) -> Callable[[WsKline], None]:
         def _on_kline(kline: WsKline) -> None:
             # Only closed klines advance the dispatch + last-close state.
             # Forming updates (x=False) are ignored by design — the
@@ -245,16 +239,14 @@ class PaperSupervisor:
     async def _reconnect_with_retry(self) -> None:
         """Tenacity-bounded reconnect attempt for every existing handle."""
         retry = tenacity.retry_if_exception(lambda _e: True)
-        stop = tenacity.stop_after_attempt(
-            SUPERVISOR_MAX_ATTEMPTS
-        ) | tenacity.stop_after_delay(SUPERVISOR_MAX_DELAY_SECONDS)
+        stop = tenacity.stop_after_attempt(SUPERVISOR_MAX_ATTEMPTS) | tenacity.stop_after_delay(
+            SUPERVISOR_MAX_DELAY_SECONDS
+        )
         wait = tenacity.wait_random_exponential(
             multiplier=SUPERVISOR_WAIT_MULTIPLIER_SECONDS,
             max=SUPERVISOR_WAIT_MAX_SECONDS,
         )
-        decorator = tenacity.AsyncRetrying(
-            retry=retry, stop=stop, wait=wait, reraise=True
-        )
+        decorator = tenacity.AsyncRetrying(retry=retry, stop=stop, wait=wait, reraise=True)
 
         async def _reconnect() -> None:
             for _symbol, _interval, handle in list(self._handles):
@@ -309,8 +301,7 @@ class PaperSupervisor:
             journal_outage_gaps=journal_outage_gaps,
             log_missing_last_close=False,
             skip_pairs=frozenset(
-                (str(g["symbol"]), str(g["data_class"]).removeprefix("paper-"))
-                for g in outage_gaps
+                (str(g["symbol"]), str(g["data_class"]).removeprefix("paper-")) for g in outage_gaps
             ),
         )
         for pair, extra in verified.items():

@@ -266,9 +266,7 @@ def test_forming_candle_in_page_is_dropped_before_use() -> None:
     )
     adapter = FakeAdapter(page=[closed_kline, forming_kline])
 
-    closes, gaps = _run(
-        backfill_missed_closes, adapter, symbol, interval, last_close_utc, now_utc
-    )
+    closes, gaps = _run(backfill_missed_closes, adapter, symbol, interval, last_close_utc, now_utc)
 
     # Only the closed candle survives; the forming one is dropped.
     assert len(closes) == 1, f"expected 1 close (forming dropped), got {len(closes)}"
@@ -448,8 +446,9 @@ def test_one_bad_symbol_does_not_block_healthy_symbols() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _run(func: Any, adapter: Any, symbol: str, interval: str,
-         last_close_utc: datetime, now_utc: datetime) -> tuple[list[Any], list[dict[str, Any]]]:
+def _run(
+    func: Any, adapter: Any, symbol: str, interval: str, last_close_utc: datetime, now_utc: datetime
+) -> tuple[list[Any], list[dict[str, Any]]]:
     """Run an async resync function synchronously via asyncio.run."""
     import asyncio
 

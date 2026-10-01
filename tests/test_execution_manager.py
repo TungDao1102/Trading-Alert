@@ -229,9 +229,7 @@ def _passing_health_verdict() -> Any:
     observed = datetime(2026, 9, 19, 10, 0, tzinfo=UTC)
     return run_health_checks(
         results=[
-            HealthCheckResult(
-                check_name=name, status="PASS", detail="ok", observed_at_utc=observed
-            )
+            HealthCheckResult(check_name=name, status="PASS", detail="ok", observed_at_utc=observed)
             for name in ALL_CHECK_NAMES
         ]
     )
@@ -947,9 +945,7 @@ async def test_rejected_sl_cancels_entry_and_forces_safe_mode() -> None:
     safe_mode_controller = RecordingSafeModeController()
     journal = FakeJournal()
 
-    outcome = await _run_plan(
-        adapter, safe_mode_controller=safe_mode_controller, journal=journal
-    )
+    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode_controller, journal=journal)
 
     assert outcome.is_no_trade is True
     assert outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
@@ -997,9 +993,7 @@ async def test_disabled_live_orders_block_placement() -> None:
     from src.execution.enablement import LiveEnablementController
 
     adapter = FakeExecutionAdapter()
-    outcome = await _run_plan(
-        adapter, enablement=LiveEnablementController(journal=FakeJournal())
-    )
+    outcome = await _run_plan(adapter, enablement=LiveEnablementController(journal=FakeJournal()))
     assert outcome.is_no_trade is True
     assert outcome.reason_code == "DISABLED"
     assert adapter.calls == []
@@ -1113,9 +1107,7 @@ async def test_skip_button_callback_never_places() -> None:
 
     from src.domain.enums import ApprovalAction
 
-    callback = dataclasses.replace(
-        _build_callback(_load_input()), action=ApprovalAction.SKIP_BUSY
-    )
+    callback = dataclasses.replace(_build_callback(_load_input()), action=ApprovalAction.SKIP_BUSY)
     adapter = FakeExecutionAdapter()
     outcome = await _run_plan(adapter, callback=callback)
     assert outcome.reason_code == "INVALIDATED"
@@ -1242,9 +1234,7 @@ async def test_caller_cannot_inject_a_foreign_sized_result_or_snapshot() -> None
 
     adapter = FakeExecutionAdapter()
     with pytest.raises(ValueError, match="gate_kwargs keys"):
-        await _run_plan(
-            adapter, gate_kwargs=_build_gate_kwargs(_load_input(), sized=object())
-        )
+        await _run_plan(adapter, gate_kwargs=_build_gate_kwargs(_load_input(), sized=object()))
     assert adapter.calls == []
 
 

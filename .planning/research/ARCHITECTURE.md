@@ -121,6 +121,7 @@ def evaluate(state: MarketSnapshot, params: ParameterSet) -> Signal | NoTrade:
     features = compute_features(state.closed_candles, params)
     return detect_setup(features, params)  # NO_TRADE or SETUP, prefix-invariant
 
+
 # Adapter (execution/): the ONLY place trading endpoints are called.
 class ExecutionManager:
     async def submit_entry(self, approved: ApprovedPlan) -> None: ...

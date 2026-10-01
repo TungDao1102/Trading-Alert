@@ -241,9 +241,7 @@ def test_entry_zone_math_long(
     account_state: AccountState,
 ) -> None:
     """Beh. 1: LONG entry zone is built off the SUPPORT zone (CR-06/WR-01)."""
-    plan_result = _get_signal_and_plan(
-        setup_candles, context_candles, parameter_set, account_state
-    )
+    plan_result = _get_signal_and_plan(setup_candles, context_candles, parameter_set, account_state)
     assert isinstance(plan_result, PlanResult)
     assert not plan_result.is_no_trade
     assert plan_result.trade_plan is not None
@@ -291,9 +289,7 @@ def test_rr_gate_exact_equality_passes(
     account_state: AccountState,
 ) -> None:
     """Beh. 2a: TP1 RR exactly equal to minimum_rr is admitted."""
-    plan_result = _get_signal_and_plan(
-        setup_candles, context_candles, parameter_set, account_state
-    )
+    plan_result = _get_signal_and_plan(setup_candles, context_candles, parameter_set, account_state)
     assert isinstance(plan_result, PlanResult)
     assert not plan_result.is_no_trade
     assert plan_result.trade_plan is not None
@@ -307,9 +303,7 @@ def test_rr_gate_one_tick_above_passes(
     account_state: AccountState,
 ) -> None:
     """Beh. 2b: RR one tick above minimum_rr is admitted."""
-    plan_result = _get_signal_and_plan(
-        setup_candles, context_candles, parameter_set, account_state
-    )
+    plan_result = _get_signal_and_plan(setup_candles, context_candles, parameter_set, account_state)
     assert isinstance(plan_result, PlanResult)
     assert not plan_result.is_no_trade
     assert plan_result.trade_plan is not None
@@ -510,9 +504,7 @@ def test_plan_symbol_mismatch_returns_no_trade(
     signal, created = _valid_signal_and_params(
         setup_candles, context_candles, parameter_set, account_state
     )
-    other = [
-        replace(c, symbol="ETHUSDT") for c in setup_candles
-    ]
+    other = [replace(c, symbol="ETHUSDT") for c in setup_candles]
     plan_result = plan(
         signal=signal,
         setup_candles=other,
@@ -537,9 +529,7 @@ def test_plan_hash_recomputable_from_payload(
     account_state: AccountState,
 ) -> None:
     """Beh. 3a: plan_hash equals sha256_hex over the documented payload."""
-    plan_result = _get_signal_and_plan(
-        setup_candles, context_candles, parameter_set, account_state
-    )
+    plan_result = _get_signal_and_plan(setup_candles, context_candles, parameter_set, account_state)
     assert isinstance(plan_result, PlanResult)
     assert not plan_result.is_no_trade
     assert plan_result.trade_plan is not None
@@ -566,9 +556,7 @@ def test_trade_plan_id_derives_from_signal_id(
     account_state: AccountState,
 ) -> None:
     """Beh. 3b: trade_plan_id = derive_child_id(signal_id, "trade_plan:v1")."""
-    plan_result = _get_signal_and_plan(
-        setup_candles, context_candles, parameter_set, account_state
-    )
+    plan_result = _get_signal_and_plan(setup_candles, context_candles, parameter_set, account_state)
     assert isinstance(plan_result, PlanResult)
     assert not plan_result.is_no_trade
     assert plan_result.trade_plan is not None
@@ -620,9 +608,7 @@ def test_expiry_equals_source_close_plus_signal_expiry_hours(
     assert plan_result.trade_plan is not None
 
     signal_expiry_hours = int(parameter_set.params["signal_expiry_hours"])
-    expected_expiry = signal.source_candle_close_utc + timedelta(
-        hours=signal_expiry_hours
-    )
+    expected_expiry = signal.source_candle_close_utc + timedelta(hours=signal_expiry_hours)
     assert plan_result.trade_plan.expiry_utc == expected_expiry
 
 
@@ -633,9 +619,7 @@ def test_invalidation_json_schema(
     account_state: AccountState,
 ) -> None:
     """Beh. 4b: invalidation JSON carries basis=CANDLE_CLOSE, level, break_distance."""
-    plan_result = _get_signal_and_plan(
-        setup_candles, context_candles, parameter_set, account_state
-    )
+    plan_result = _get_signal_and_plan(setup_candles, context_candles, parameter_set, account_state)
     assert isinstance(plan_result, PlanResult)
     assert not plan_result.is_no_trade
     assert plan_result.trade_plan is not None
@@ -654,9 +638,7 @@ def test_deferred_quantization_equality(
     account_state: AccountState,
 ) -> None:
     """Beh. 4c: quantity_after_rounding == quantity_before_rounding, DEFERRED_TO_RISK."""
-    plan_result = _get_signal_and_plan(
-        setup_candles, context_candles, parameter_set, account_state
-    )
+    plan_result = _get_signal_and_plan(setup_candles, context_candles, parameter_set, account_state)
     assert isinstance(plan_result, PlanResult)
     assert not plan_result.is_no_trade
     assert plan_result.trade_plan is not None
@@ -700,9 +682,7 @@ def test_planner_has_no_float_literals() -> None:
                 if node.args and isinstance(node.args[0], ast.Call):
                     inner = node.args[0]
                     if isinstance(inner.func, ast.Name) and inner.func.id == "float":
-                        pytest.fail(
-                            f"planner.py contains Decimal(float) at line {node.lineno}"
-                        )
+                        pytest.fail(f"planner.py contains Decimal(float) at line {node.lineno}")
 
 
 # --------------------------------------------------------------------------- #

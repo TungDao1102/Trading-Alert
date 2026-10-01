@@ -160,9 +160,7 @@ def test_recovery_after_stale_resumes_evaluation() -> None:
     # The fresh event passes the staleness gate (gap = 1s < 60s).
     # It may still emit NO_TRADE from the engine (regime/setup gates),
     # but NOT from the feed_gate stage.
-    feed_gate_records = [
-        r for r in fresh_outcome["no_trade_records"] if r["stage"] == "feed_gate"
-    ]
+    feed_gate_records = [r for r in fresh_outcome["no_trade_records"] if r["stage"] == "feed_gate"]
     assert len(feed_gate_records) == 0, (
         f"fresh event should pass feed gates; got {feed_gate_records}"
     )
@@ -209,9 +207,7 @@ def test_feed_freshness_within_threshold_passes() -> None:
     case["now_utc"] = now_utc.isoformat()
 
     outcome = run_paper_tick(case)
-    feed_gate_records = [
-        r for r in outcome["no_trade_records"] if r["stage"] == "feed_gate"
-    ]
+    feed_gate_records = [r for r in outcome["no_trade_records"] if r["stage"] == "feed_gate"]
     assert len(feed_gate_records) == 0, (
         f"event within threshold should pass feed gates; got {feed_gate_records}"
     )

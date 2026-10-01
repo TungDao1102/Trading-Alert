@@ -86,7 +86,7 @@ from .trade_plan import TradePlan
 __all__ = [
     # Enums
     "SignalStatus",
-    ...
+    ...,
 ]
 ```
 
@@ -121,9 +121,7 @@ def _require_utc_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     if value.utcoffset() != timedelta(0):
-        raise ValueError(
-            f"{field_name} must be UTC, got offset {value.utcoffset()}"
-        )
+        raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
 ```
 
 **Frozen dataclass + `__post_init__` pattern** (signal.py lines 37-78):
@@ -177,9 +175,7 @@ class Signal:
 def _require_decimal(value: object, field_name: str) -> None:
     """Reject non-Decimal values for money/qty/price fields (D-12)."""
     if not isinstance(value, Decimal):
-        raise TypeError(
-            f"{field_name} must be Decimal, got {type(value).__name__}"
-        )
+        raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
 ```
 
 **Apply to:** `Candle`, `FeatureOutput`, `FeatureFrame`, `SetupResult` (or `NO_TRADE`/`SETUP` discriminated union) — all frozen dataclasses with `__post_init__` validation.
@@ -238,6 +234,7 @@ class QualityVerdict:
 **Decimal EMA recurrence** (from RESEARCH.md §Code Examples, lines 273-279):
 ```python
 from decimal import Decimal, localcontext
+
 
 def ema_update(prior: Decimal, price: Decimal, alpha: Decimal) -> Decimal:
     with localcontext() as ctx:
@@ -576,7 +573,7 @@ __all__ = [
     "EntryModel",  # Phase 4
     "OrderRole",  # Phase 4
     "QuantizationDecision",  # Phase 4
-    ...
+    ...,
 ]
 ```
 
@@ -727,25 +724,19 @@ def phase3_candles() -> list[dict]:
 @pytest.fixture(scope="session")
 def phase3_parameters() -> dict:
     """Load the pinned registry set."""
-    return json.loads(
-        (PHASE3_FIXTURES_DIR / "parameters.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PHASE3_FIXTURES_DIR / "parameters.json").read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="session")
 def phase3_expected_signals() -> dict:
     """Load the byte-exact expected signals (placeholder per D-09)."""
-    return json.loads(
-        (PHASE3_FIXTURES_DIR / "expected_signals.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PHASE3_FIXTURES_DIR / "expected_signals.json").read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="session")
 def phase3_expected_plans() -> dict:
     """Load the byte-exact expected plans (placeholder per D-09)."""
-    return json.loads(
-        (PHASE3_FIXTURES_DIR / "expected_plans.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PHASE3_FIXTURES_DIR / "expected_plans.json").read_text(encoding="utf-8"))
 ```
 
 **Apply to:** Add `PHASE4_FIXTURES_DIR = FIXTURES_DIR / "phase4"` and `phase4_candles`, `phase4_parameters`, `phase4_expected_features`, `phase4_expected_signals`, `phase4_expected_plans` fixtures mirroring the phase3 pattern.
@@ -1004,15 +995,17 @@ signal_id = make_signal_id(
 trade_plan_id = derive_child_id(signal_id, "trade_plan:v1")
 
 # Plan hash
-plan_hash = sha256_hex({
-    "signal_id": signal_id,
-    "entry_min_price": entry_min,
-    "entry_max_price": entry_max,
-    "stop_loss_price": stop_loss,
-    "take_profit_json": take_profit_json,
-    "invalidation_rule_json": invalidation_rule_json,
-    "expiry_utc": expiry_utc,
-})
+plan_hash = sha256_hex(
+    {
+        "signal_id": signal_id,
+        "entry_min_price": entry_min,
+        "entry_max_price": entry_max,
+        "stop_loss_price": stop_loss,
+        "take_profit_json": take_profit_json,
+        "invalidation_rule_json": invalidation_rule_json,
+        "expiry_utc": expiry_utc,
+    }
+)
 ```
 
 ---
@@ -1026,6 +1019,7 @@ plan_hash = sha256_hex({
 @dataclass(frozen=True)
 class FeatureOutput:
     """One feature value with validity gate (D-03)."""
+
     value: Decimal | None
     valid: bool
     reason_code: str  # "OK", "WARMUP_INSUFFICIENT", "GAP_IN_SOURCE"
@@ -1034,6 +1028,7 @@ class FeatureOutput:
 @dataclass(frozen=True)
 class FeatureFrame:
     """Whole-bar feature summary (D-03)."""
+
     features_valid: bool  # AND of all required-feature validity
     ema_20: FeatureOutput
     ema_50: FeatureOutput
@@ -1092,23 +1087,20 @@ def phase4_candles() -> list[dict]:
     with (PHASE4_FIXTURES_DIR / "candles.csv").open(encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
+
 @pytest.fixture(scope="session")
 def phase4_parameters() -> dict:
-    return json.loads(
-        (PHASE4_FIXTURES_DIR / "parameters.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PHASE4_FIXTURES_DIR / "parameters.json").read_text(encoding="utf-8"))
+
 
 @pytest.fixture(scope="session")
 def phase4_expected_signals() -> dict:
-    return json.loads(
-        (PHASE4_FIXTURES_DIR / "expected_signals.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PHASE4_FIXTURES_DIR / "expected_signals.json").read_text(encoding="utf-8"))
+
 
 @pytest.fixture(scope="session")
 def phase4_expected_plans() -> dict:
-    return json.loads(
-        (PHASE4_FIXTURES_DIR / "expected_plans.json").read_text(encoding="utf-8")
-    )
+    return json.loads((PHASE4_FIXTURES_DIR / "expected_plans.json").read_text(encoding="utf-8"))
 ```
 
 ---
@@ -1121,6 +1113,7 @@ def phase4_expected_plans() -> dict:
 ```python
 from src.domain.canonical import sha256_hex
 from src.domain.ids import make_signal_id
+
 
 def _signal_entries(candles: list[dict]) -> list[tuple[str, str]]:
     """Pipeline output: one (close_iso, signal_id) per candle."""
@@ -1170,6 +1163,7 @@ SCANNED_FILES = (
 
 ```python
 from enum import Enum
+
 
 class Direction(str, Enum):
     """GLOSSARY — Signal direction (D-06 promotion)."""

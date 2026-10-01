@@ -309,9 +309,7 @@ def _build_row(raw_root: Path, window: WindowLike, source: str | None) -> Suffic
     # boundary; anchoring the gap check there keeps the range start from
     # counting as a missing bar.
     aligned_start = _ceil_to_step(start, step)
-    files = _day_files(
-        raw_root, window.dataset, window.interval, window.symbol, aligned_start, end
-    )
+    files = _day_files(raw_root, window.dataset, window.interval, window.symbol, aligned_start, end)
     have = _count_in(_open_times_ms(files), aligned_start, end)
     if have == 0:
         return row("NOT_BACKFILLED", expected=expected)
@@ -330,9 +328,7 @@ def _build_row(raw_root: Path, window: WindowLike, source: str | None) -> Suffic
     flat_tail = window.dataset == "trade" and _has_flat_tail(files)
     if gaps:
         return row("GAP", expected=expected, have=have, gaps=gaps, flat_tail=flat_tail)
-    return row(
-        _informational(window.cause), expected=expected, have=have, flat_tail=flat_tail
-    )
+    return row(_informational(window.cause), expected=expected, have=have, flat_tail=flat_tail)
 
 
 def _split_coverage(
@@ -391,12 +387,8 @@ def build_sufficiency_report(
     sources: Mapping[tuple[str, str], str],
 ) -> SufficiencyReport:
     """One row per planned window, in window order; `sources` maps (dataset, symbol)."""
-    rows = tuple(
-        _build_row(raw_root, w, sources.get((w.dataset, w.symbol))) for w in windows
-    )
-    split_coverage, depth_limited = _split_coverage(
-        raw_root, windows, dataset_start, dataset_end
-    )
+    rows = tuple(_build_row(raw_root, w, sources.get((w.dataset, w.symbol))) for w in windows)
+    split_coverage, depth_limited = _split_coverage(raw_root, windows, dataset_start, dataset_end)
     return SufficiencyReport(
         schema=REPORT_SCHEMA,
         run_date=run_date,
@@ -502,8 +494,7 @@ def render_report_table(report: SufficiencyReport) -> str:
 
     def fmt(cells: Sequence[str]) -> str:
         return "  ".join(
-            c.rjust(widths[i]) if i in numeric else c.ljust(widths[i])
-            for i, c in enumerate(cells)
+            c.rjust(widths[i]) if i in numeric else c.ljust(widths[i]) for i, c in enumerate(cells)
         ).rstrip()
 
     lines.append(fmt(headers))

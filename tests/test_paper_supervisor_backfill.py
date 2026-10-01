@@ -44,9 +44,7 @@ def _no_retry_sleep(monkeypatch: Any) -> None:
     )
 
 
-def _make_rest_kline(
-    symbol: str, interval: str, open_utc: datetime, close_utc: datetime
-) -> Any:
+def _make_rest_kline(symbol: str, interval: str, open_utc: datetime, close_utc: datetime) -> Any:
     from src.adapters.binance_usdm import Kline
 
     return Kline(
@@ -79,9 +77,7 @@ class _FakeWsAdapter:
         # ONE list so the test can assert cross-adapter ORDER by index.
         self.calls: list[tuple[Any, ...]] = calls if calls is not None else []
 
-    def subscribe(
-        self, *, symbol: str, interval: str, on_kline: Any, stream_id: Any = None
-    ) -> Any:
+    def subscribe(self, *, symbol: str, interval: str, on_kline: Any, stream_id: Any = None) -> Any:
         self.subscribe_calls.append((symbol, interval))
         self.calls.append(("subscribe", symbol, interval))
         return (symbol, interval)
@@ -127,9 +123,7 @@ class _FakeRestAdapter:
         return []
 
 
-def _make_supervisor(
-    *, ws: _FakeWsAdapter, rest: _FakeRestAdapter, now: datetime
-) -> Any:
+def _make_supervisor(*, ws: _FakeWsAdapter, rest: _FakeRestAdapter, now: datetime) -> Any:
     from src.paper.supervisor import PaperSupervisor
 
     return PaperSupervisor(
@@ -153,8 +147,7 @@ def test_resubscribe_and_backfill_returns_closes_per_pair() -> None:
     now = datetime(2026, 9, 19, 13, 0, tzinfo=UTC)
     hour = timedelta(hours=1)
     closes = [
-        _make_rest_kline("BTCUSDT", "1h", last + i * hour, last + (i + 1) * hour)
-        for i in range(3)
+        _make_rest_kline("BTCUSDT", "1h", last + i * hour, last + (i + 1) * hour) for i in range(3)
     ]
 
     ws = _FakeWsAdapter()
@@ -172,9 +165,7 @@ def test_resubscribe_and_backfill_returns_closes_per_pair() -> None:
     )
     returned = backfilled[("BTCUSDT", "1h")]
     assert len(returned) == 3
-    assert [k.close_time_utc for k in returned] == sorted(
-        k.close_time_utc for k in returned
-    )
+    assert [k.close_time_utc for k in returned] == sorted(k.close_time_utc for k in returned)
 
 
 def test_closed_kline_handler_records_last_close_for_backfill() -> None:
@@ -183,9 +174,7 @@ def test_closed_kline_handler_records_last_close_for_backfill() -> None:
 
     ws = _FakeWsAdapter()
     rest = _FakeRestAdapter()
-    supervisor = _make_supervisor(
-        ws=ws, rest=rest, now=datetime(2026, 9, 19, 13, 0, tzinfo=UTC)
-    )
+    supervisor = _make_supervisor(ws=ws, rest=rest, now=datetime(2026, 9, 19, 13, 0, tzinfo=UTC))
     supervisor.start()
 
     assert supervisor._last_close == {}
@@ -266,9 +255,9 @@ def test_missing_last_close_is_loud_and_pair_omitted(
 
     assert backfilled == {}, "pair with no last close contributes no entry"
     assert rest.klines_calls == [], "no backfill without a cursor"
-    assert any(
-        args and args[0] == "paper.supervisor.no_last_close" for args, _ in errors
-    ), "missing last close must log paper.supervisor.no_last_close at ERROR"
+    assert any(args and args[0] == "paper.supervisor.no_last_close" for args, _ in errors), (
+        "missing last close must log paper.supervisor.no_last_close at ERROR"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -282,8 +271,7 @@ def test_reconnect_exhaustion_still_runs_backfill() -> None:
     now = datetime(2026, 9, 19, 13, 0, tzinfo=UTC)
     hour = timedelta(hours=1)
     closes = [
-        _make_rest_kline("BTCUSDT", "1h", last + i * hour, last + (i + 1) * hour)
-        for i in range(3)
+        _make_rest_kline("BTCUSDT", "1h", last + i * hour, last + (i + 1) * hour) for i in range(3)
     ]
 
     ws = _FakeWsAdapter(raise_on_reconnect=ConnectionError("ws dead"))
@@ -297,11 +285,9 @@ def test_reconnect_exhaustion_still_runs_backfill() -> None:
     asyncio.run(supervisor.on_disconnect(scheduled=False))
 
     assert len(ws.reconnect_calls) > 0, "reconnect must have been attempted"
-    assert ("BTCUSDT", "1h") in [
-        (c[0], c[1]) for c in rest.klines_calls
-    ] or len(rest.klines_calls) >= 1, (
-        "REST backfill must run even when reconnect is exhausted"
-    )
+    assert ("BTCUSDT", "1h") in [(c[0], c[1]) for c in rest.klines_calls] or len(
+        rest.klines_calls
+    ) >= 1, "REST backfill must run even when reconnect is exhausted"
 
 
 def test_backfill_exception_yields_outage_gap_not_silence() -> None:
@@ -310,9 +296,7 @@ def test_backfill_exception_yields_outage_gap_not_silence() -> None:
     now = datetime(2026, 9, 19, 13, 0, tzinfo=UTC)
 
     ws = _FakeWsAdapter()
-    rest = _FakeRestAdapter(
-        pages={("BTCUSDT", "1h"): RuntimeError("adapter down")}
-    )
+    rest = _FakeRestAdapter(pages={("BTCUSDT", "1h"): RuntimeError("adapter down")})
     supervisor = _make_supervisor(ws=ws, rest=rest, now=now)
     supervisor.start()
     supervisor.record_close("BTCUSDT", "1h", last)
@@ -341,8 +325,7 @@ _HOUR = timedelta(hours=1)
 
 def _three_bars() -> list[Any]:
     return [
-        _make_rest_kline("BTCUSDT", "1h", _T0 + i * _HOUR, _T0 + (i + 1) * _HOUR)
-        for i in range(3)
+        _make_rest_kline("BTCUSDT", "1h", _T0 + i * _HOUR, _T0 + (i + 1) * _HOUR) for i in range(3)
     ]
 
 
@@ -381,9 +364,7 @@ def test_backfill_runs_before_resubscribe_on_unsolicited_drop() -> None:
     assert closes and klines and subscribes, calls
     assert max(closes) < min(klines), "old handles close before the backfill"
     # First-pass klines entry precedes the first subscribe entry.
-    assert klines[0] < subscribes[0], (
-        "backfill must run BEFORE resubscribe (D-16, F-413)"
-    )
+    assert klines[0] < subscribes[0], "backfill must run BEFORE resubscribe (D-16, F-413)"
 
 
 def test_backfill_runs_before_resubscribe_on_rotation() -> None:
@@ -405,9 +386,7 @@ def test_backfilled_closes_advance_last_close() -> None:
     """The last-close state moves to the latest backfilled bar's close."""
     supervisor, _ws, _rest, _calls = _seam_setup()
 
-    backfilled, _gaps = asyncio.run(
-        supervisor._resubscribe_and_backfill(journal_outage_gaps=False)
-    )
+    backfilled, _gaps = asyncio.run(supervisor._resubscribe_and_backfill(journal_outage_gaps=False))
 
     assert len(backfilled[("BTCUSDT", "1h")]) == 3
     assert supervisor._last_close[("BTCUSDT", "1h")] == _T0 + 3 * _HOUR
@@ -511,9 +490,7 @@ def test_verification_pass_picks_up_bar_closed_in_seam() -> None:
     rest = _SequencedRestAdapter([bars, [bars[-1], seam_bar]], calls=calls)
     supervisor = _two_pass_supervisor(rest, ws, [t1, t2])
 
-    backfilled, _gaps = asyncio.run(
-        supervisor._resubscribe_and_backfill(journal_outage_gaps=False)
-    )
+    backfilled, _gaps = asyncio.run(supervisor._resubscribe_and_backfill(journal_outage_gaps=False))
 
     returned = backfilled[("BTCUSDT", "1h")]
     closes = [k.close_time_utc for k in returned]
@@ -537,9 +514,7 @@ def test_same_bar_from_both_passes_returned_once() -> None:
     rest = _FakeRestAdapter(pages={("BTCUSDT", "1h"): _three_bars()}, calls=calls)
     supervisor = _two_pass_supervisor(rest, ws, [t1, t1])
 
-    backfilled, _gaps = asyncio.run(
-        supervisor._resubscribe_and_backfill(journal_outage_gaps=False)
-    )
+    backfilled, _gaps = asyncio.run(supervisor._resubscribe_and_backfill(journal_outage_gaps=False))
 
     assert len(rest.klines_calls) == 2, "both passes ran"
     closes = [k.close_time_utc for k in backfilled[("BTCUSDT", "1h")]]

@@ -233,14 +233,10 @@ def _detect_breakout_retest_setup(
     Returns ``(direction, setup_type, zone_upper, zone_lower)`` or
     ``None``.
     """
-    breakout_confirmation_bars = int(
-        parameter_set.params["breakout_confirmation_bars"]
-    )
+    breakout_confirmation_bars = int(parameter_set.params["breakout_confirmation_bars"])
     retest_window_bars = int(parameter_set.params["retest_window_bars"])
     retest_depth_atr = Decimal(str(parameter_set.params["retest_depth_atr"]))
-    zone_tolerance_atr = Decimal(
-        str(parameter_set.params["zone_tolerance_atr"])
-    )
+    zone_tolerance_atr = Decimal(str(parameter_set.params["zone_tolerance_atr"]))
     swing_lookback = int(parameter_set.params["swing_lookback"])
     atr_period = int(parameter_set.params["atr_period"])
 
@@ -279,12 +275,8 @@ def _detect_breakout_retest_setup(
         # the retest band derive from the reference bar's ATR, never
         # from a later bar's volatility.
         atr_ref = atr_ref_out.value
-        zone_upper = _add(
-            sh_ref_out.value, _mul(zone_tolerance_atr, atr_ref)
-        )
-        zone_lower = _sub(
-            sl_ref_out.value, _mul(zone_tolerance_atr, atr_ref)
-        )
+        zone_upper = _add(sh_ref_out.value, _mul(zone_tolerance_atr, atr_ref))
+        zone_lower = _sub(sl_ref_out.value, _mul(zone_tolerance_atr, atr_ref))
 
         long_breakout = True
         for j in range(breakout_confirmation_bars):
@@ -304,10 +296,7 @@ def _detect_breakout_retest_setup(
             if retest_bar_idx is not None:
                 return ("LONG", "BREAKOUT_RETEST_LONG", zone_upper, zone_lower)
 
-        if (
-            not sl_ref_out.valid
-            or sl_ref_out.value is None
-        ):
+        if not sl_ref_out.valid or sl_ref_out.value is None:
             continue
         short_breakout = True
         for j in range(breakout_confirmation_bars):
@@ -394,9 +383,7 @@ def _detect_range_mr_setup(
     """
     zone_min_touches = int(parameter_set.params["zone_min_touches"])
     zone_aging_bars = int(parameter_set.params["zone_aging_bars"])
-    range_break_buffer_atr = Decimal(
-        str(parameter_set.params["range_break_buffer_atr"])
-    )
+    range_break_buffer_atr = Decimal(str(parameter_set.params["range_break_buffer_atr"]))
     swing_lookback = int(parameter_set.params["swing_lookback"])
     # CR-01: versioned registry knobs — KeyError (never silent defaults).
     atr_period = int(parameter_set.params["atr_period"])

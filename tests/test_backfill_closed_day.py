@@ -99,10 +99,7 @@ def _published(raw_root: Path) -> dict[str, int]:
     base = raw_root / f"interval={INTERVAL}" / "symbol=BTCUSDT"
     if not base.exists():
         return {}
-    return {
-        f.parent.name: pl.read_parquet(f).height
-        for f in sorted(base.rglob("part.parquet"))
-    }
+    return {f.parent.name: pl.read_parquet(f).height for f in sorted(base.rglob("part.parquet"))}
 
 
 async def test_current_utc_day_is_never_published(tmp_path: Path) -> None:
@@ -125,9 +122,7 @@ async def test_current_utc_day_is_never_published(tmp_path: Path) -> None:
     )
 
     assert _published(tmp_path) == {"date=2023-11-14": 24}
-    assert not (
-        tmp_path / f"interval={INTERVAL}" / "symbol=BTCUSDT" / "date=2023-11-15"
-    ).exists()
+    assert not (tmp_path / f"interval={INTERVAL}" / "symbol=BTCUSDT" / "date=2023-11-15").exists()
     assert result.rows_published == 24
     assert cursors.read(symbol="BTCUSDT", interval=INTERVAL) == day + 23 * HOUR_MS
 

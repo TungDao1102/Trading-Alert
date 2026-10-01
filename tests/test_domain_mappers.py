@@ -501,9 +501,7 @@ def test_journal_event_round_trip(sample_journal_event: JournalEvent) -> None:
 # =========================================================================== #
 
 
-def test_signal_captured_snapshot_precision(
-    session: Session, sample_signal: Signal
-) -> None:
+def test_signal_captured_snapshot_precision(session: Session, sample_signal: Signal) -> None:
     """Beh. 8: captured SignalRow carries exact Decimal/UTC values."""
     cap = CapturingSession(session)
     cap.add(signal_to_row(sample_signal))
@@ -531,9 +529,7 @@ def test_trade_plan_captured_snapshot_precision(
     assert row.status == "READY"
 
 
-def test_approval_captured_snapshot_precision(
-    session: Session, sample_approval: Approval
-) -> None:
+def test_approval_captured_snapshot_precision(session: Session, sample_approval: Approval) -> None:
     """Beh. 10: captured ApprovalRow carries exact Enum/UTC values."""
     cap = CapturingSession(session)
     cap.add(approval_to_row(sample_approval))
@@ -546,9 +542,7 @@ def test_approval_captured_snapshot_precision(
     assert row.acted_at_utc is None
 
 
-def test_order_captured_snapshot_precision(
-    session: Session, sample_order: Order
-) -> None:
+def test_order_captured_snapshot_precision(session: Session, sample_order: Order) -> None:
     """Beh. 11: captured OrderRow carries exact Decimal/Enum values."""
     cap = CapturingSession(session)
     cap.add(order_to_row(sample_order))
@@ -561,9 +555,7 @@ def test_order_captured_snapshot_precision(
     assert row.canceled_at_utc is None
 
 
-def test_fill_captured_snapshot_precision(
-    session: Session, sample_fill: Fill
-) -> None:
+def test_fill_captured_snapshot_precision(session: Session, sample_fill: Fill) -> None:
     """Beh. 12: captured FillRow carries exact Decimal/UTC values."""
     cap = CapturingSession(session)
     cap.add(fill_to_row(sample_fill))
@@ -576,9 +568,7 @@ def test_fill_captured_snapshot_precision(
     assert row.is_maker is False
 
 
-def test_position_captured_snapshot_precision(
-    session: Session, sample_position: Position
-) -> None:
+def test_position_captured_snapshot_precision(session: Session, sample_position: Position) -> None:
     """Beh. 13: captured PositionRow carries exact Decimal/Enum values."""
     cap = CapturingSession(session)
     cap.add(position_to_row(sample_position))

@@ -30,15 +30,11 @@ ORDER_IDS_FIXTURE_DIR = PHASE8_FIXTURES_DIR / "order_ids"
 
 
 def _load_input() -> dict[str, Any]:
-    return json.loads(
-        (ORDER_IDS_FIXTURE_DIR / "input.json").read_text(encoding="utf-8")
-    )
+    return json.loads((ORDER_IDS_FIXTURE_DIR / "input.json").read_text(encoding="utf-8"))
 
 
 def _load_expected() -> dict[str, Any]:
-    return json.loads(
-        (ORDER_IDS_FIXTURE_DIR / "expected.json").read_text(encoding="utf-8")
-    )
+    return json.loads((ORDER_IDS_FIXTURE_DIR / "expected.json").read_text(encoding="utf-8"))
 
 
 # --------------------------------------------------------------------------- #
@@ -57,17 +53,10 @@ def test_derive_client_order_id_returns_fixed_length_ascii_string() -> None:
     from src.execution.order_ids import derive_client_order_id
 
     case = _load_input()
-    cid = derive_client_order_id(
-        plan_hash=case["plan_hash"], role="ENTRY"
-    )
+    cid = derive_client_order_id(plan_hash=case["plan_hash"], role="ENTRY")
     assert isinstance(cid, str)
     assert len(cid) == 36, f"expected 36 chars, got {len(cid)}: {cid!r}"
-    allowed = set(
-        "0123456789"
-        + "abcdefghijklmnopqrstuvwxyz"
-        + "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        + "-_"
-    )
+    allowed = set("0123456789" + "abcdefghijklmnopqrstuvwxyz" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ" + "-_")
     assert all(c in allowed for c in cid), (
         f"client_order_id contains non-ASCII-alnum-hyphen chars: {cid!r}"
     )
@@ -78,17 +67,10 @@ def test_derive_algo_client_id_returns_fixed_length_ascii_string() -> None:
     from src.execution.order_ids import derive_algo_client_id
 
     case = _load_input()
-    aid = derive_algo_client_id(
-        plan_hash=case["plan_hash"], role="STOP_LOSS"
-    )
+    aid = derive_algo_client_id(plan_hash=case["plan_hash"], role="STOP_LOSS")
     assert isinstance(aid, str)
     assert len(aid) == 36, f"expected 36 chars, got {len(aid)}: {aid!r}"
-    allowed = set(
-        "0123456789"
-        + "abcdefghijklmnopqrstuvwxyz"
-        + "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        + "-_"
-    )
+    allowed = set("0123456789" + "abcdefghijklmnopqrstuvwxyz" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ" + "-_")
     assert all(c in allowed for c in aid), (
         f"algo_client_id contains non-ASCII-alnum-hyphen chars: {aid!r}"
     )
@@ -137,9 +119,7 @@ def test_four_roles_yield_four_distinct_client_order_ids() -> None:
         role: derive_client_order_id(plan_hash=case["plan_hash"], role=role)
         for role in case["roles"]
     }
-    assert len(set(ids.values())) == 4, (
-        f"roles collided: {ids}"
-    )
+    assert len(set(ids.values())) == 4, f"roles collided: {ids}"
     # Entry and protective legs never share an identifier.
     assert ids["ENTRY"] != ids["STOP_LOSS"]
     assert ids["ENTRY"] != ids["TAKE_PROFIT_1"]
@@ -160,9 +140,7 @@ def test_four_roles_yield_four_distinct_algo_client_ids() -> None:
         role: derive_algo_client_id(plan_hash=case["plan_hash"], role=role)
         for role in case["roles"]
     }
-    assert len(set(ids.values())) == 4, (
-        f"roles collided: {ids}"
-    )
+    assert len(set(ids.values())) == 4, f"roles collided: {ids}"
 
 
 def test_client_and_algo_ids_for_same_role_do_not_collide() -> None:
@@ -178,10 +156,7 @@ def test_client_and_algo_ids_for_same_role_do_not_collide() -> None:
     for role in case["roles"]:
         cid = derive_client_order_id(plan_hash=case["plan_hash"], role=role)
         aid = derive_algo_client_id(plan_hash=case["plan_hash"], role=role)
-        assert cid != aid, (
-            f"client_order_id and algo_client_id collided for role {role}: "
-            f"{cid!r}"
-        )
+        assert cid != aid, f"client_order_id and algo_client_id collided for role {role}: {cid!r}"
 
 
 # --------------------------------------------------------------------------- #
@@ -246,12 +221,9 @@ def test_golden_fixture_client_order_ids_match_derivation() -> None:
     case = _load_input()
     expected = _load_expected()
     for role in case["roles"]:
-        derived = derive_client_order_id(
-            plan_hash=case["plan_hash"], role=role
-        )
+        derived = derive_client_order_id(plan_hash=case["plan_hash"], role=role)
         assert derived == expected["client_order_ids"][role], (
-            f"role {role}: derived={derived!r}, "
-            f"expected={expected['client_order_ids'][role]!r}"
+            f"role {role}: derived={derived!r}, expected={expected['client_order_ids'][role]!r}"
         )
 
 
@@ -264,12 +236,9 @@ def test_golden_fixture_algo_client_ids_match_derivation() -> None:
     case = _load_input()
     expected = _load_expected()
     for role in case["roles"]:
-        derived = derive_algo_client_id(
-            plan_hash=case["plan_hash"], role=role
-        )
+        derived = derive_algo_client_id(plan_hash=case["plan_hash"], role=role)
         assert derived == expected["algo_client_ids"][role], (
-            f"role {role}: derived={derived!r}, "
-            f"expected={expected['algo_client_ids'][role]!r}"
+            f"role {role}: derived={derived!r}, expected={expected['algo_client_ids'][role]!r}"
         )
 
 
@@ -336,27 +305,17 @@ def test_retry_same_call_twice_yields_byte_identical_ids() -> None:
     expected = _load_expected()
 
     for role in case["roles"]:
-        cid_first = derive_client_order_id(
-            plan_hash=case["plan_hash"], role=role
-        )
-        cid_second = derive_client_order_id(
-            plan_hash=case["plan_hash"], role=role
-        )
+        cid_first = derive_client_order_id(plan_hash=case["plan_hash"], role=role)
+        cid_second = derive_client_order_id(plan_hash=case["plan_hash"], role=role)
         assert cid_first.encode("utf-8") == cid_second.encode("utf-8"), (
-            f"retry produced different client_order_id for {role}: "
-            f"{cid_first!r} vs {cid_second!r}"
+            f"retry produced different client_order_id for {role}: {cid_first!r} vs {cid_second!r}"
         )
         assert cid_first == expected["client_order_ids"][role]
 
-        aid_first = derive_algo_client_id(
-            plan_hash=case["plan_hash"], role=role
-        )
-        aid_second = derive_algo_client_id(
-            plan_hash=case["plan_hash"], role=role
-        )
+        aid_first = derive_algo_client_id(plan_hash=case["plan_hash"], role=role)
+        aid_second = derive_algo_client_id(plan_hash=case["plan_hash"], role=role)
         assert aid_first.encode("utf-8") == aid_second.encode("utf-8"), (
-            f"retry produced different algo_client_id for {role}: "
-            f"{aid_first!r} vs {aid_second!r}"
+            f"retry produced different algo_client_id for {role}: {aid_first!r} vs {aid_second!r}"
         )
         assert aid_first == expected["algo_client_ids"][role]
 
@@ -381,25 +340,19 @@ def test_restart_reimport_yields_byte_identical_ids() -> None:
     expected = _load_expected()
 
     cid_before = {
-        role: order_ids_mod.derive_client_order_id(
-            plan_hash=case["plan_hash"], role=role
-        )
+        role: order_ids_mod.derive_client_order_id(plan_hash=case["plan_hash"], role=role)
         for role in case["roles"]
     }
 
     importlib.reload(order_ids_mod)
 
     cid_after = {
-        role: order_ids_mod.derive_client_order_id(
-            plan_hash=case["plan_hash"], role=role
-        )
+        role: order_ids_mod.derive_client_order_id(plan_hash=case["plan_hash"], role=role)
         for role in case["roles"]
     }
 
     for role in case["roles"]:
-        assert cid_before[role].encode("utf-8") == cid_after[role].encode(
-            "utf-8"
-        ), (
+        assert cid_before[role].encode("utf-8") == cid_after[role].encode("utf-8"), (
             f"restart produced different client_order_id for {role}: "
             f"before={cid_before[role]!r}, after={cid_after[role]!r}"
         )
@@ -428,41 +381,25 @@ def test_replay_interleaving_other_plans_does_not_perturb_ids() -> None:
     expected = _load_expected()
 
     target_hash = case["plan_hash"]
-    other_hashes = [
-        f"{i:064x}" for i in range(2, 6)
-    ]
+    other_hashes = [f"{i:064x}" for i in range(2, 6)]
     assert target_hash not in other_hashes
 
-    target_cid = derive_client_order_id(
-        plan_hash=target_hash, role="ENTRY"
-    )
-    target_aid = derive_algo_client_id(
-        plan_hash=target_hash, role="ENTRY"
-    )
+    target_cid = derive_client_order_id(plan_hash=target_hash, role="ENTRY")
+    target_aid = derive_algo_client_id(plan_hash=target_hash, role="ENTRY")
 
     for _ in range(3):
         for other_hash in other_hashes:
             for role in case["roles"]:
-                derive_client_order_id(
-                    plan_hash=other_hash, role=role
-                )
-                derive_algo_client_id(
-                    plan_hash=other_hash, role=role
-                )
+                derive_client_order_id(plan_hash=other_hash, role=role)
+                derive_algo_client_id(plan_hash=other_hash, role=role)
 
-        replay_cid = derive_client_order_id(
-            plan_hash=target_hash, role="ENTRY"
-        )
-        replay_aid = derive_algo_client_id(
-            plan_hash=target_hash, role="ENTRY"
-        )
+        replay_cid = derive_client_order_id(plan_hash=target_hash, role="ENTRY")
+        replay_aid = derive_algo_client_id(plan_hash=target_hash, role="ENTRY")
         assert replay_cid.encode("utf-8") == target_cid.encode("utf-8"), (
-            f"replay diverged for client_order_id: "
-            f"original={target_cid!r}, replay={replay_cid!r}"
+            f"replay diverged for client_order_id: original={target_cid!r}, replay={replay_cid!r}"
         )
         assert replay_aid.encode("utf-8") == target_aid.encode("utf-8"), (
-            f"replay diverged for algo_client_id: "
-            f"original={target_aid!r}, replay={replay_aid!r}"
+            f"replay diverged for algo_client_id: original={target_aid!r}, replay={replay_aid!r}"
         )
         assert replay_cid == expected["client_order_ids"]["ENTRY"]
         assert replay_aid == expected["algo_client_ids"]["ENTRY"]
@@ -538,15 +475,7 @@ def test_pinned_id_shape_matches_binance_client_order_id_rule() -> None:
     binance_pattern = re.compile(r"^[A-Za-z0-9_-]{1,36}$")
 
     for role in case["roles"]:
-        cid = derive_client_order_id(
-            plan_hash=case["plan_hash"], role=role
-        )
-        aid = derive_algo_client_id(
-            plan_hash=case["plan_hash"], role=role
-        )
-        assert binance_pattern.match(cid), (
-            f"client_order_id for {role} fails Binance rule: {cid!r}"
-        )
-        assert binance_pattern.match(aid), (
-            f"algo_client_id for {role} fails Binance rule: {aid!r}"
-        )
+        cid = derive_client_order_id(plan_hash=case["plan_hash"], role=role)
+        aid = derive_algo_client_id(plan_hash=case["plan_hash"], role=role)
+        assert binance_pattern.match(cid), f"client_order_id for {role} fails Binance rule: {cid!r}"
+        assert binance_pattern.match(aid), f"algo_client_id for {role} fails Binance rule: {aid!r}"

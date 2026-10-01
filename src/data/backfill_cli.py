@@ -221,11 +221,7 @@ class SymbolWindow:
 
     @property
     def has_window(self) -> bool:
-        return (
-            self.start_ms is not None
-            and self.end_ms is not None
-            and self.start_ms < self.end_ms
-        )
+        return self.start_ms is not None and self.end_ms is not None and self.start_ms < self.end_ms
 
 
 @dataclass(frozen=True)
@@ -356,9 +352,7 @@ def _plan_key(
         # Not in exchangeInfo: REST cannot bound the window. `run_backfill`
         # re-plans such a symbol from the archive (D-08) or reports it UNAVAILABLE.
         return None, None, False, DELIVERY_UNKNOWN
-    onboard_ms = (
-        utc_ms(filters.onboard_time_utc) if filters.onboard_time_utc is not None else None
-    )
+    onboard_ms = utc_ms(filters.onboard_time_utc) if filters.onboard_time_utc is not None else None
     if onboard_ms is not None and onboard_ms >= run_end_ms:
         return None, None, False, NOT_LISTED_IN_RANGE
     start = depth_start if onboard_ms is None else max(depth_start, onboard_ms)
@@ -535,9 +529,7 @@ def _archive_window(
 
 def _last_stored_open_ms(raw_root: Path, symbol: str, interval: str) -> int | None:
     """Open time (epoch ms) of the last stored trade bar of one key, or None."""
-    day = latest_published_day(
-        raw_root, dataset=TRADE_DATASET, symbol=symbol, interval=interval
-    )
+    day = latest_published_day(raw_root, dataset=TRADE_DATASET, symbol=symbol, interval=interval)
     if day is None:
         return None
     frame = pl.read_parquet(
@@ -586,8 +578,7 @@ async def run_backfill(
     )
     if config.htf_start_date is not None:
         header += (
-            f" 1h/4h start {config.htf_start_date.isoformat()} "
-            "(frozen manifest selection_date)"
+            f" 1h/4h start {config.htf_start_date.isoformat()} (frozen manifest selection_date)"
         )
     if config.dry_run:
         header += " DRY-RUN"
@@ -606,9 +597,7 @@ async def run_backfill(
         emit(f"backfill: metadata rows inserted {metadata_rows}")
     if missing:
         outcome = (
-            "no window planned"
-            if config.dry_run
-            else "no REST window; the archive is consulted"
+            "no window planned" if config.dry_run else "no REST window; the archive is consulted"
         )
         emit(
             f"backfill: missing from exchangeInfo ({len(missing)}): "
@@ -807,9 +796,7 @@ async def _backfill_and_report(
                     if not current.has_window:
                         continue
                 parts.append(
-                    await bootstrap(
-                        access.kline_source(run_end_ms), current, spec, cursor_store
-                    )
+                    await bootstrap(access.kline_source(run_end_ms), current, spec, cursor_store)
                 )
             merged_keys: dict[tuple[str, str], BackfillResult] = {}
             for part in parts:
@@ -1101,9 +1088,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     adapter = BinanceUsdmAdapter()
     try:
-        report = asyncio.run(
-            run_backfill(config, adapter=adapter, session=session, clock=_utc_now)
-        )
+        report = asyncio.run(run_backfill(config, adapter=adapter, session=session, clock=_utc_now))
     except BackfillConfigError as exc:
         print(f"backfill: {exc}", file=sys.stderr)
         return 2

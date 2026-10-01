@@ -98,9 +98,7 @@ def _adverse_edge(side: str, zone: tuple[Decimal, Decimal]) -> Decimal:
     return zone[1] if side == "LONG" else zone[0]
 
 
-def stop_loss_exit_loss(
-    *, side: str, fill: Decimal, stop: Decimal, quantity: Decimal
-) -> Decimal:
+def stop_loss_exit_loss(*, side: str, fill: Decimal, stop: Decimal, quantity: Decimal) -> Decimal:
     """Loss when the stop is hit, entry and exit fees and slippage included.
 
     LONG:  (fill - stop) q + fill q (fee_in + slip_in) + stop q (fee_out + slip_out)
@@ -384,9 +382,7 @@ def _guard_verdict(symbol: str, side: str, width: str) -> PortfolioVerdict:
 @pytest.mark.parametrize("symbol", ["BTCUSDT", "XRPUSDT"])
 @pytest.mark.parametrize("side", SIDES)
 @pytest.mark.parametrize("width", ["0.001", "0.002", "0.0029"])
-def test_widths_below_the_stop_floor_are_stop_too_tight(
-    symbol: str, side: str, width: str
-) -> None:
+def test_widths_below_the_stop_floor_are_stop_too_tight(symbol: str, side: str, width: str) -> None:
     verdict = _guard_verdict(symbol, side, width)
     assert verdict.is_no_trade is True
     assert verdict.reason_code == "STOP_TOO_TIGHT"

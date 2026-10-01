@@ -337,9 +337,7 @@ def test_backup_covers_mark_kline_subtree(tmp_path: Path) -> None:
         / "part.parquet"
     )
     _seed_fake_parquet(mark_part)
-    trade_part = (
-        raw_root / "interval=1m" / "symbol=BTCUSDT" / "date=2026-09-29" / "part.parquet"
-    )
+    trade_part = raw_root / "interval=1m" / "symbol=BTCUSDT" / "date=2026-09-29" / "part.parquet"
     _seed_fake_parquet(trade_part)
 
     bundle_root = tmp_path / "bundle"
@@ -616,9 +614,7 @@ def test_prune_dry_run_deletes_nothing(tmp_path: Path) -> None:
     (source / "stale.parquet").unlink()
     manifest_before = (bundle / "manifest.json").read_text(encoding="utf-8")
 
-    report = backup_mod.prune_bundle(
-        bundle_root=bundle, parquet_roots=[source], dry_run=True
-    )
+    report = backup_mod.prune_bundle(bundle_root=bundle, parquet_roots=[source], dry_run=True)
 
     stale_key = f"parquet/{source.name}/stale.parquet"
     assert stale_key in report.pruned_files
@@ -644,9 +640,7 @@ def test_prune_keeps_unmapped_keys(tmp_path: Path) -> None:
     manifest_path = bundle / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["parquet/ghost/g.parquet"] = _sha256(ghost)
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
-    )
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
 
     report = backup_mod.prune_bundle(bundle_root=bundle, parquet_roots=[source])
 

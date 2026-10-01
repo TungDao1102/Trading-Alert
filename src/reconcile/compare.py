@@ -140,15 +140,12 @@ class Divergence:
     def __post_init__(self) -> None:
         if self.kind not in _DIVERGENCE_KINDS:
             raise ValueError(
-                f"Divergence: unknown kind {self.kind!r} "
-                f"(known: {sorted(_DIVERGENCE_KINDS)})"
+                f"Divergence: unknown kind {self.kind!r} (known: {sorted(_DIVERGENCE_KINDS)})"
             )
         if not isinstance(self.symbol, str) or self.symbol == "":
             raise ValueError("Divergence: symbol must be a non-empty string")
         if not isinstance(self.order_role, str) or self.order_role == "":
-            raise ValueError(
-                "Divergence: order_role must be a non-empty string"
-            )
+            raise ValueError("Divergence: order_role must be a non-empty string")
 
 
 @dataclass(frozen=True)
@@ -164,9 +161,7 @@ class CompareDiff:
 
     agreement: bool
     divergences: tuple[Divergence, ...] = field(default_factory=tuple)
-    orphan_protectives: tuple[OrphanProtective, ...] = field(
-        default_factory=tuple
-    )
+    orphan_protectives: tuple[OrphanProtective, ...] = field(default_factory=tuple)
 
 
 # --------------------------------------------------------------------------- #
@@ -225,12 +220,8 @@ def compare(
     divergences: list[Divergence] = []
 
     # Index truth rows by their canonical identifier for O(1) lookup.
-    truth_normal_by_client_id: dict[str, Any] = {
-        o.client_order_id: o for o in truth_normal_orders
-    }
-    truth_algo_by_client_id: dict[str, Any] = {
-        o.client_algo_id: o for o in truth_algo_orders
-    }
+    truth_normal_by_client_id: dict[str, Any] = {o.client_order_id: o for o in truth_normal_orders}
+    truth_algo_by_client_id: dict[str, Any] = {o.client_algo_id: o for o in truth_algo_orders}
 
     # Index local intent by canonical identifier for the reverse check.
     local_normal_by_client_id: dict[str, Any] = {}
@@ -351,9 +342,7 @@ def compare(
                     order_role=order_role,
                     client_order_id=None,
                     client_algo_id=client_algo_id,
-                    reason=(
-                        "local algo with no matching exchange algo"
-                    ),
+                    reason=("local algo with no matching exchange algo"),
                 )
             )
 
@@ -398,10 +387,7 @@ def compare(
                     order_role=pos_side if isinstance(pos_side, str) and pos_side else "POSITION",
                     client_order_id=None,
                     client_algo_id=None,
-                    reason=(
-                        "local position with no protective algo "
-                        "for the same symbol"
-                    ),
+                    reason=("local position with no protective algo for the same symbol"),
                 )
             )
 
@@ -427,10 +413,7 @@ def compare(
                         order_role=order_role,
                         client_order_id=client_order_id,
                         client_algo_id=None,
-                        reason=(
-                            "local ENTRY with no matching algo protective "
-                            "for the same symbol"
-                        ),
+                        reason=("local ENTRY with no matching algo protective for the same symbol"),
                     )
                 )
 
@@ -463,9 +446,7 @@ def compare(
                     order_role="N/A",
                     client_order_id=None,
                     client_algo_id=None,
-                    reason=(
-                        "exchange position with no matching local intent"
-                    ),
+                    reason=("exchange position with no matching local intent"),
                 )
             )
 
@@ -547,9 +528,7 @@ def _is_local_intent_open(entry: Any) -> bool:
     """
     status = _get_field(entry, "status")
     if status is None:
-        raise ValueError(
-            f"local intent missing status attribute: {entry!r}"
-        )
+        raise ValueError(f"local intent missing status attribute: {entry!r}")
     return status in _LOCAL_OPEN_STATUSES
 
 

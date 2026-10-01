@@ -193,9 +193,7 @@ def test_oi_statistics_raises_on_malformed_row() -> None:
     rest = _FakeRest(oi_rows=[_OiRow("BTCUSDT", None, "123.4")])
     adapter = BinanceUsdmAdapter(sdk_client=_FakeSdk(rest))  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="missing fields"):
-        asyncio.run(
-            adapter.open_interest_statistics(symbol="BTCUSDT", period="5m")
-        )
+        asyncio.run(adapter.open_interest_statistics(symbol="BTCUSDT", period="5m"))
 
 
 def test_oi_statistics_accepts_complete_rows() -> None:

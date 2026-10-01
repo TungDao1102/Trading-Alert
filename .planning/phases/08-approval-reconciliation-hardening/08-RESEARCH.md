@@ -215,6 +215,7 @@ if self.status != ApprovalResult.PENDING and self.acted_at_utc is None:
 # Source: PTB 22.8 stable docs (Context7) + in-repo short-id scheme
 from telegram.ext import Application, CallbackQueryHandler
 
+
 async def on_callback(update, context) -> None:
     query = update.callback_query
     await query.answer()  # clear client spinner FIRST (fast, before I/O)
@@ -223,9 +224,10 @@ async def on_callback(update, context) -> None:
         await query.answer("unauthorized", show_alert=True)
         return
     intent = parse_callback(query.data)  # "APR:<short32>" / "SKP:<short32>"
-    journal_callback_receipt(intent)     # JournalEvent, at-least-once audit
+    journal_callback_receipt(intent)  # JournalEvent, at-least-once audit
     result = resolve_callback(intent, chat_id=chat_id, now_utc=utcnow())
     await query.edit_message_text(render(result))
+
 
 app = Application.builder().token(TOKEN).build()
 app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^(APR|SKP|SIM):"))
@@ -372,12 +374,12 @@ await app.run_polling(allowed_updates=["callback_query"])
 # `uv run python dir(DerivativesTradingUsdsFuturesRestAPI)` this session.
 # Signatures (params, pagination, response models) must be re-checked
 # from the installed package during planning — names only are verified here.
-rest.current_all_open_orders(...)        # GET /fapi/v1/openOrders
-rest.current_all_algo_open_orders(...)   # GET /fapi/v1/openAlgoOrders
-rest.position_information_v3(...)        # GET /fapi/v1/positionRisk
-rest.query_algo_order(...)               # GET /fapi/v1/algoOrder (no-blind-retry probe)
-rest.cancel_algo_order(...)              # DELETE /fapi/v1/algoOrder (orphan sweep)
-rest.get_current_position_mode(...)      # position-mode detect (one-way vs hedge)
+rest.current_all_open_orders(...)  # GET /fapi/v1/openOrders
+rest.current_all_algo_open_orders(...)  # GET /fapi/v1/openAlgoOrders
+rest.position_information_v3(...)  # GET /fapi/v1/positionRisk
+rest.query_algo_order(...)  # GET /fapi/v1/algoOrder (no-blind-retry probe)
+rest.cancel_algo_order(...)  # DELETE /fapi/v1/algoOrder (orphan sweep)
+rest.get_current_position_mode(...)  # position-mode detect (one-way vs hedge)
 ```
 
 ### Deterministic order-ID derivation (scheme shape — planner freezes exact lengths)
@@ -386,6 +388,7 @@ rest.get_current_position_mode(...)      # position-mode detect (one-way vs hedg
 # lengths are planner's discretion — verify against Binance client-order-ID
 # charset/length rules during planning (re-check installed SDK validator).
 import hashlib
+
 
 def derive_client_order_id(plan_hash: str, role_code: str) -> str:
     # role_code from the ONE canonical role table (see Pitfall 5)
@@ -398,7 +401,7 @@ def derive_client_order_id(plan_hash: str, role_code: str) -> str:
 # Source: standard library practice [ASSUMED — confirm in plan review].
 import hashlib, hmac, secrets
 
-raw_token = secrets.token_urlsafe(32)                    # sent in callback_data mapping, never stored
+raw_token = secrets.token_urlsafe(32)  # sent in callback_data mapping, never stored
 stored = hashlib.sha256(raw_token.encode()).hexdigest()  # → Approval.approval_token_hash
 ok = hmac.compare_digest(stored, hashlib.sha256(presented.encode()).hexdigest())
 ```

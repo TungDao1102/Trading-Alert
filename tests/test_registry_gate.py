@@ -101,12 +101,12 @@ def test_load_schema_version_2_raises_registry_schema_mismatch(tmp_path: Path) -
     strategy_dir.mkdir()
     toml_path = strategy_dir / "test-set.toml"
     toml_path.write_text(
-        'schema_version = 2\n'
-        '[strategy]\n'
+        "schema_version = 2\n"
+        "[strategy]\n"
         'strategy_id = "test-strategy"\n'
         'strategy_version = "v1.0.0"\n'
-        '[parameters]\n'
-        'swing_lookback = 20\n',
+        "[parameters]\n"
+        "swing_lookback = 20\n",
         encoding="utf-8",
     )
 

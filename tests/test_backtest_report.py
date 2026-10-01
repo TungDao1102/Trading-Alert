@@ -11,6 +11,7 @@ and intrabar-coverage note. No single headline number is ever accepted.
 TDD discipline: RED → GREEN. These tests are the RED phase — they MUST
 fail until `src/backtest/report.py` is implemented.
 """
+
 from __future__ import annotations
 
 import json
@@ -210,9 +211,7 @@ def test_build_includes_all_nine_sections() -> None:
         "intrabar_coverage",
     ]
     for section in required_sections:
-        assert hasattr(report, section), (
-            f"report missing required section: {section}"
-        )
+        assert hasattr(report, section), f"report missing required section: {section}"
         value = getattr(report, section)
         assert value is not None, f"report.{section} must not be None"
 
@@ -290,12 +289,8 @@ def test_dual_universe_includes_research_and_live5() -> None:
     )
 
     dual = report.dual_universe
-    assert hasattr(dual, "research_universe"), (
-        "dual_universe must expose research_universe slice"
-    )
-    assert hasattr(dual, "live5_universe"), (
-        "dual_universe must expose live5_universe slice"
-    )
+    assert hasattr(dual, "research_universe"), "dual_universe must expose research_universe slice"
+    assert hasattr(dual, "live5_universe"), "dual_universe must expose live5_universe slice"
     # Research universe includes every symbol; live-5 includes only the 5 live ones.
     research_symbols = set(dual.research_universe.symbols)
     live5_symbols = set(dual.live5_universe.symbols)
@@ -333,9 +328,7 @@ def test_build_with_empty_list_returns_valid_report() -> None:
     assert report.counts.trade_count == 0, (
         f"empty list must report 0 trade count, got {report.counts.trade_count}"
     )
-    assert report.expectancy_interval is None, (
-        "empty list must yield absent expectancy_interval"
-    )
+    assert report.expectancy_interval is None, "empty list must yield absent expectancy_interval"
     assert report.insufficient_data_note is not None, (
         "empty list must yield a non-None insufficient_data_note"
     )
@@ -417,25 +410,20 @@ def test_zero_r_counted_as_neither_wins_nor_losses() -> None:
     )
 
     assert report.r_distribution.zero_r_count == expected_zero_r, (
-        f"zero_r_count must equal {expected_zero_r}, "
-        f"got {report.r_distribution.zero_r_count}"
+        f"zero_r_count must equal {expected_zero_r}, got {report.r_distribution.zero_r_count}"
     )
     assert report.r_distribution.win_count == expected_wins, (
-        f"win_count must equal {expected_wins}, "
-        f"got {report.r_distribution.win_count}"
+        f"win_count must equal {expected_wins}, got {report.r_distribution.win_count}"
     )
     assert report.r_distribution.loss_count == expected_losses, (
-        f"loss_count must equal {expected_losses}, "
-        f"got {report.r_distribution.loss_count}"
+        f"loss_count must equal {expected_losses}, got {report.r_distribution.loss_count}"
     )
     # win_count + loss_count + zero_r_count must equal trade_count.
     assert (
         report.r_distribution.win_count
         + report.r_distribution.loss_count
         + report.r_distribution.zero_r_count
-    ) == report.counts.trade_count, (
-        "win + loss + zero_r must equal trade_count"
-    )
+    ) == report.counts.trade_count, "win + loss + zero_r must equal trade_count"
 
 
 # --------------------------------------------------------------------------- #
@@ -473,10 +461,7 @@ def test_bootstrap_uses_recorded_seed() -> None:
     assert report_b.bootstrap_seed == 999
     assert report_a.expectancy_interval is not None
     assert report_b.expectancy_interval is not None
-    assert (
-        report_a.expectancy_interval.digest()
-        != report_b.expectancy_interval.digest()
-    ), (
+    assert report_a.expectancy_interval.digest() != report_b.expectancy_interval.digest(), (
         "different bootstrap seeds must yield different interval digests"
     )
 
@@ -655,8 +640,7 @@ def test_wr05_non_extreme_coverage_percent_is_exact() -> None:
         resamples=100,
     )
     assert report.intrabar_coverage.percent != Decimal("66"), (
-        f"integer-truncated 66 must never appear, got "
-        f"{report.intrabar_coverage.percent}"
+        f"integer-truncated 66 must never appear, got {report.intrabar_coverage.percent}"
     )
     assert report.intrabar_coverage.percent == _div(_q(200), _q(3)), (
         f"2/3 coverage must be exact, got {report.intrabar_coverage.percent}"
@@ -685,9 +669,9 @@ def test_wr06_bootstrap_and_drawdown_use_decoupled_rng_streams() -> None:
         r_values, seed=_GAP_SEED, n_resamples=100, p=Decimal("0.1")
     )
     assert report.expectancy_interval is not None
-    assert report.expectancy_interval.lower == _quantile(
-        means, Decimal("0.025")
-    ), "expectancy bootstrap must run on the recorded seed"
+    assert report.expectancy_interval.lower == _quantile(means, Decimal("0.025")), (
+        "expectancy bootstrap must run on the recorded seed"
+    )
 
     drawdowns_plus_one = _resample_drawdowns(
         r_values, seed=_GAP_SEED + 1, n_resamples=100, p=Decimal("0.1")
@@ -723,11 +707,9 @@ def test_wr10_risk_zero_trades_counted_and_surfaced_in_note() -> None:
         + report.r_distribution.loss_count
         + report.r_distribution.zero_r_count
     )
-    assert counted == 1, (
-        "only the risk-bearing trade enters the R distribution"
-    )
+    assert counted == 1, "only the risk-bearing trade enters the R distribution"
     assert report.insufficient_data_note is not None
-    assert "1 trade(s) excluded from the R distribution" in (
-        report.insufficient_data_note
-    ), f"risk-zero exclusion must be surfaced, got {report.insufficient_data_note!r}"
+    assert "1 trade(s) excluded from the R distribution" in (report.insufficient_data_note), (
+        f"risk-zero exclusion must be surfaced, got {report.insufficient_data_note!r}"
+    )
     assert "realized_risk=0" in report.insufficient_data_note

@@ -320,6 +320,7 @@ Verified patterns from in-repo sources read this session (planner lifts these sh
 # Source: docs/GLOSSARY.md §§2-8 (verbatim values — copy exactly, invent nothing)
 from enum import Enum
 
+
 class SignalStatus(str, Enum):
     DETECTED = "DETECTED"
     NOTIFIED = "NOTIFIED"
@@ -330,6 +331,7 @@ class SignalStatus(str, Enum):
     EXPIRED = "EXPIRED"
     INVALIDATED = "INVALIDATED"
 
+
 class TradePlanStatus(str, Enum):
     READY = "READY"
     APPROVAL_PENDING = "APPROVAL_PENDING"
@@ -338,15 +340,19 @@ class TradePlanStatus(str, Enum):
     INVALIDATED = "INVALIDATED"
     SUPERSEDED = "SUPERSEDED"
 
-class ApprovalAction(str, Enum):   # NOTE: GLOSSARY defines ApprovalAction, not ApprovalStatus — see Q2
+
+class ApprovalAction(
+    str, Enum
+):  # NOTE: GLOSSARY defines ApprovalAction, not ApprovalStatus — see Q2
     SIMULATE = "SIMULATE"
     APPROVE = "APPROVE"
     SKIP_USER = "SKIP_USER"
     SKIP_BUSY = "SKIP_BUSY"
     CANCEL = "CANCEL"
 
+
 class OrderStatus(str, Enum):
-    PLANNED = "PLANNED"            # entry state — no approval state on orders (D024)
+    PLANNED = "PLANNED"  # entry state — no approval state on orders (D024)
     SUBMITTING = "SUBMITTING"
     NEW = "NEW"
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
@@ -356,12 +362,14 @@ class OrderStatus(str, Enum):
     REJECTED = "REJECTED"
     UNKNOWN = "UNKNOWN"
 
+
 class PositionStatus(str, Enum):
     OPEN = "OPEN"
     CLOSING = "CLOSING"
     CLOSED = "CLOSED"
     LIQUIDATION_REPORTED = "LIQUIDATION_REPORTED"
     UNKNOWN = "UNKNOWN"
+
 
 class SystemMode(str, Enum):
     RESEARCH = "RESEARCH"
@@ -370,6 +378,8 @@ class SystemMode(str, Enum):
     LIVE_APPROVAL = "LIVE_APPROVAL"
     SAFE_MODE = "SAFE_MODE"
     LIVE_AUTONOMOUS_DISABLED = "LIVE_AUTONOMOUS_DISABLED"
+
+
 # Values verbatim from docs/GLOSSARY.md:39-48, 58-65, 69-75, 81-90, 105-110, 115-121.
 # TradeStatus (PENDING/OPEN/CLOSED/ABORTED/UNKNOWN, GLOSSARY.md:95-100) + rejection
 # reasons (NO_TRADE_REGIME … APPROVAL_EXPIRED, GLOSSARY.md:129-143) ride along.
@@ -387,35 +397,46 @@ from decimal import Decimal
 from .canonical import sha256_hex
 from .enums import SignalStatus
 
+
 @dataclass(frozen=True)
 class Signal:
-    signal_id: str                 # content hash from ids.make_signal_id — never passed in by callers
+    signal_id: str  # content hash from ids.make_signal_id — never passed in by callers
     strategy_id: str
     strategy_version: str
     parameter_set_id: str
     parameter_set_hash: str
     symbol: str
-    direction: str                 # LONG/SHORT — Phase 4 may promote to Enum; D-09 keeps Phase 3 minimal
+    direction: str  # LONG/SHORT — Phase 4 may promote to Enum; D-09 keeps Phase 3 minimal
     setup_type: str
     source_timeframe: str
-    source_candle_close_utc: datetime   # aware UTC; loader/mapper assert tzinfo
+    source_candle_close_utc: datetime  # aware UTC; loader/mapper assert tzinfo
     detected_at_utc: datetime
-    status: SignalStatus           # explicit — never inferred (D-11)
+    status: SignalStatus  # explicit — never inferred (D-11)
     expires_at_utc: datetime
     invalidated_at_utc: datetime | None = None  # None = "never happened" (D-11)
 
+
 # ids.py — D-03 binding superset (parameterSetId included; cf. Pitfall 5)
-def make_signal_id(*, strategy_version: str, parameter_set_id: str, symbol: str,
-                   source_timeframe: str, source_candle_close_utc: datetime,
-                   setup_fingerprint: str) -> str:
-    return sha256_hex({
-        "strategy_version": strategy_version,
-        "parameter_set_id": parameter_set_id,
-        "symbol": symbol,
-        "source_timeframe": source_timeframe,
-        "source_candle_close_utc": source_candle_close_utc,  # canonical.py → isoformat
-        "setup_fingerprint": setup_fingerprint,
-    })
+def make_signal_id(
+    *,
+    strategy_version: str,
+    parameter_set_id: str,
+    symbol: str,
+    source_timeframe: str,
+    source_candle_close_utc: datetime,
+    setup_fingerprint: str,
+) -> str:
+    return sha256_hex(
+        {
+            "strategy_version": strategy_version,
+            "parameter_set_id": parameter_set_id,
+            "symbol": symbol,
+            "source_timeframe": source_timeframe,
+            "source_candle_close_utc": source_candle_close_utc,  # canonical.py → isoformat
+            "setup_fingerprint": setup_fingerprint,
+        }
+    )
+
 
 def derive_child_id(parent_signal_id: str, discriminator: str) -> str:
     # plan/order IDs: parent hash + fixed discriminator ("trade_plan:v1", "order:entry", …)
@@ -434,13 +455,14 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
+
 def canonical_scalars(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: canonical_scalars(value[k]) for k in sorted(value)}
     if isinstance(value, (list, tuple)):
         return [canonical_scalars(v) for v in value]
     if isinstance(value, Decimal):
-        return str(value)          # full precision: "1.50" ≠ "1.5" by design
+        return str(value)  # full precision: "1.50" ≠ "1.5" by design
     if isinstance(value, datetime):
         if value.tzinfo is None:
             raise ValueError("naive datetime in canonical hash input")
@@ -451,12 +473,18 @@ def canonical_scalars(value: Any) -> Any:
         raise TypeError("unordered set in canonical hash input — use a sorted list")
     if isinstance(value, float):
         raise TypeError("float in canonical hash input — use Decimal/str/int")
-    return value                   # str/int/bool/None pass through; anything else → json TypeError
+    return value  # str/int/bool/None pass through; anything else → json TypeError
+
 
 def canonical_bytes(payload: dict) -> bytes:
-    return json.dumps(canonical_scalars(payload), sort_keys=True,
-                      separators=(",", ":"), ensure_ascii=True,
-                      allow_nan=False).encode("utf-8")
+    return json.dumps(
+        canonical_scalars(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
 
 def sha256_hex(payload: dict) -> str:
     return hashlib.sha256(canonical_bytes(payload)).hexdigest()
@@ -478,24 +506,41 @@ REGISTRY_ROOT = Path("params")
 SCHEMA_VERSION = 1
 # Closed whitelist of strategy-semantic keys (D-06). Anything strategy-semantic
 # found OUTSIDE the registry raises; anything unknown INSIDE raises.
-STRATEGY_KEYS = frozenset({
-    "swing_lookback", "zone_tolerance_atr", "breakout_confirmation_bars",
-    "entry_buffer_atr", "sl_buffer_atr", "minimum_rr", "signal_expiry_hours",
-    "risk_rate", "minimum_risk_utilization_after_rounding",
-})  # seed list from CONFIGURATION.md §3 strategy examples — planner extends deliberately, never silently
+STRATEGY_KEYS = frozenset(
+    {
+        "swing_lookback",
+        "zone_tolerance_atr",
+        "breakout_confirmation_bars",
+        "entry_buffer_atr",
+        "sl_buffer_atr",
+        "minimum_rr",
+        "signal_expiry_hours",
+        "risk_rate",
+        "minimum_risk_utilization_after_rounding",
+    }
+)  # seed list from CONFIGURATION.md §3 strategy examples — planner extends deliberately, never silently
+
 
 class UnregisteredParameterSet(Exception): ...
+
+
 class ParameterSetMutated(Exception): ...
+
+
 class RegistrySchemaMismatch(Exception): ...
+
+
 class StrategyKeyOutsideRegistry(Exception): ...
+
 
 @dataclass(frozen=True)
 class ParameterSet:
     strategy_id: str
     strategy_version: str
     parameter_set_id: str
-    parameter_set_hash: str   # sha256 over canonical JSON of the normalized params doc
-    params: dict              # normalized values (Decimals preserved, not floats)
+    parameter_set_hash: str  # sha256 over canonical JSON of the normalized params doc
+    params: dict  # normalized values (Decimals preserved, not floats)
+
 
 def load_parameter_set(strategy_id: str, parameter_set_id: str) -> ParameterSet:
     path = REGISTRY_ROOT / strategy_id / f"{parameter_set_id}.toml"
@@ -520,14 +565,23 @@ class SignalRow(Base):
     parameter_set_id: Mapped[str] = mapped_column(String(64), nullable=False)
     parameter_set_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     symbol: Mapped[str] = mapped_column(String(32), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False)  # SignalStatus.value — explicit (D-11)
-    source_candle_close_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    invalidated_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False
+    )  # SignalStatus.value — explicit (D-11)
+    source_candle_close_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    invalidated_at_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # …remaining DATA_MODEL §2.3 fields; prices/qty NUMERIC(38,18); payloads String…
+
 
 # mappers.py — total + round-trip tested
 def signal_to_row(s: Signal) -> SignalRow: ...
 def signal_from_row(r: SignalRow) -> Signal: ...
+
+
 # assert signal_from_row(signal_to_row(s)) == s  (per-entity round-trip test)
 ```
 
@@ -541,6 +595,7 @@ op.create_table(...) calls match src/db/models.py Mapped[...] columns 1:1
 (same convention as 0001_baseline.py). Verified offline by
 scripts/check_migration_parity.py — no script changes needed.
 """
+
 revision: str = "0002_domain_registry"
 down_revision = "0001_baseline"
 # upgrade(): 7× op.create_table + indexes on (symbol, source_candle_close_utc),

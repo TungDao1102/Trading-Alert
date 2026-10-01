@@ -125,9 +125,7 @@ def test_empty_collect_list_is_rejected(tmp_path: Path) -> None:
         load_collect_list(path)
 
 
-@pytest.mark.parametrize(
-    "bad", ["btcusdt", "BTC-USDT", "../BTCUSDT", "BTCUSDC", "BTCUSDT/", ""]
-)
+@pytest.mark.parametrize("bad", ["btcusdt", "BTC-USDT", "../BTCUSDT", "BTCUSDC", "BTCUSDT/", ""])
 def test_malformed_symbol_is_rejected(tmp_path: Path, bad: str) -> None:
     symbols = [*LIVE_5, bad]
     path = _write(tmp_path, _render(symbols=symbols))
@@ -181,9 +179,7 @@ CHOSEN_ON = date(2026, 9, 30)
 
 def _fixture_inputs() -> tuple[list[dict[str, str]], list[dict[str, object]]]:
     ticker = json.loads((FIXTURE_DIR / "ticker_24hr.json").read_text(encoding="utf-8"))
-    exchange = json.loads(
-        (FIXTURE_DIR / "exchange_info.json").read_text(encoding="utf-8")
-    )
+    exchange = json.loads((FIXTURE_DIR / "exchange_info.json").read_text(encoding="utf-8"))
     return ticker, exchange["symbols"]
 
 

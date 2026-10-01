@@ -55,17 +55,11 @@ class AdapterLike(Protocol):
     verify a clean exit.
     """
 
-    async def snapshot_open_normal_orders(
-        self, *, symbol: str | None = None
-    ) -> list[Any]: ...
+    async def snapshot_open_normal_orders(self, *, symbol: str | None = None) -> list[Any]: ...
 
-    async def snapshot_open_algo_orders(
-        self, *, symbol: str | None = None
-    ) -> list[Any]: ...
+    async def snapshot_open_algo_orders(self, *, symbol: str | None = None) -> list[Any]: ...
 
-    async def snapshot_positions(
-        self, *, symbol: str | None = None
-    ) -> list[Any]: ...
+    async def snapshot_positions(self, *, symbol: str | None = None) -> list[Any]: ...
 
 
 class JournalLike(Protocol):
@@ -102,19 +96,13 @@ class SafeModeVerdict:
         if self.reason_code is None:
             if self.is_no_trade:
                 raise ValueError(
-                    "SafeModeVerdict: is_no_trade=True requires "
-                    "RECONCILIATION_REQUIRED"
+                    "SafeModeVerdict: is_no_trade=True requires RECONCILIATION_REQUIRED"
                 )
             return
         if self.reason_code not in {r.value for r in RejectionReason}:
-            raise ValueError(
-                f"SafeModeVerdict: unknown reason_code {self.reason_code!r}"
-            )
+            raise ValueError(f"SafeModeVerdict: unknown reason_code {self.reason_code!r}")
         if self.is_no_trade and self.reason_code != RejectionReason.RECONCILIATION_REQUIRED.value:
-            raise ValueError(
-                "SafeModeVerdict: is_no_trade=True requires "
-                "RECONCILIATION_REQUIRED"
-            )
+            raise ValueError("SafeModeVerdict: is_no_trade=True requires RECONCILIATION_REQUIRED")
 
 
 # --------------------------------------------------------------------------- #
@@ -313,9 +301,7 @@ class SafeModeController:
 
     # ----- internal helpers ---------------------------------------------- #
 
-    def _journal_safe_mode_event(
-        self, *, event_type: str, reason: str, now_utc: datetime
-    ) -> None:
+    def _journal_safe_mode_event(self, *, event_type: str, reason: str, now_utc: datetime) -> None:
         """Record one SAFE_MODE transition as a JournalEvent.
 
         The journal layer is the audit trail; the controller never

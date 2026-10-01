@@ -109,8 +109,9 @@ the caller; (3) `risk <= 0` (lines 191-194) raises `ValueError` where an
 **Fix:**
 ```python
 if not setup_candles:
-    return PlanResult(is_no_trade=True, trade_plan=None,
-                      reason_code=RejectionReason.DATA_STALE.value)
+    return PlanResult(
+        is_no_trade=True, trade_plan=None, reason_code=RejectionReason.DATA_STALE.value
+    )
 # ... and for both invalid-features and risk <= 0: return NO_TRADE, never raise.
 ```
 
@@ -236,14 +237,17 @@ levels the market left behind.
 **Fix:**
 ```python
 if signal.source_candle_close_utc != setup_candles[-1].close_time_utc:
-    return PlanResult(is_no_trade=True, trade_plan=None,
-                      reason_code=RejectionReason.STALE_SETUP.value)
+    return PlanResult(
+        is_no_trade=True, trade_plan=None, reason_code=RejectionReason.STALE_SETUP.value
+    )
 if expiry_utc <= created_at_utc:
-    return PlanResult(is_no_trade=True, trade_plan=None,
-                      reason_code=RejectionReason.APPROVAL_EXPIRED.value)
+    return PlanResult(
+        is_no_trade=True, trade_plan=None, reason_code=RejectionReason.APPROVAL_EXPIRED.value
+    )
 if signal.symbol != setup_candles[0].symbol or signal.source_timeframe != setup_candles[0].interval:
-    return PlanResult(is_no_trade=True, trade_plan=None,
-                      reason_code=RejectionReason.DATA_STALE.value)
+    return PlanResult(
+        is_no_trade=True, trade_plan=None, reason_code=RejectionReason.DATA_STALE.value
+    )
 ```
 
 ## Warnings

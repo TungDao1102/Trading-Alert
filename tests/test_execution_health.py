@@ -295,9 +295,7 @@ def test_unprotected_positions_probe_fails_on_entry_without_protective_divergenc
     journal = FakeJournal()
     divergences = [{"kind": "ENTRY_WITHOUT_PROTECTIVE", "symbol": "BTCUSDT"}]
 
-    result = check_unprotected_positions(
-        divergences=divergences, now_utc=NOW_UTC, journal=journal
-    )
+    result = check_unprotected_positions(divergences=divergences, now_utc=NOW_UTC, journal=journal)
     assert result.status == "FAIL"
 
 
