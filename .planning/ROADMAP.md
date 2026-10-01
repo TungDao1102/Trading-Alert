@@ -534,9 +534,34 @@ Plans:
 
 **Audit refs**: F-101, F-605, F-705, F-708, F-709, F-108, F-910, D042
 
-**Plans:** 0 plans
+**Plans:** 12 plans
 
 Plans:
+**Wave 1**
+- [ ] 13.1-01-PLAN.md — Gate repair (D-04): repo-wide ruff format in its own commit, narrow ruff/mypy fixes, docker marker, strict-aware skip helper, .python-version
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 13.1-02-PLAN.md — CI workflow ci.yml (test, lint, types, docker jobs) and SHA-pinned actions in all four workflows
+- [ ] 13.1-03-PLAN.md — Pinned Dockerfile (runtime and ops targets, venv HEALTHCHECK, owned mount points) and one compose stack with profiles, localhost-only PostgreSQL, db-upgrade
+- [ ] 13.1-04-PLAN.md — Secret redaction layer (structlog, stdlib, excepthooks, httpx) wired into collector and backfill; credential and backup variable names in .env.example
+- [ ] 13.1-05-PLAN.md — deploy/lib.sh and idempotent deploy/bootstrap.sh with the anti lock-out guard; LF enforcement and script hygiene gate
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 13.1-06-PLAN.md — Backup core: verify, refusing restore, safe pg_dump/pg_restore (libpq URL, PGPASSWORD), dump and restore-db
+- [ ] 13.1-07-PLAN.md — Cutover verifier src/ops/cutover.py: fingerprints, watermarks, OI gap minutes and exit codes
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 13.1-08-PLAN.md — Encrypted S3-compatible backups via rclone crypt, 7/4/6 retention with a fake-clock oracle, push/pull/scheduled/drill-remote
+- [ ] 13.1-09-PLAN.md — deploy/migrate.sh in the fixed cutover order and the two-environment docker cutover test
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 13.1-10-PLAN.md — Linux backup, restore and drill wrappers, systemd backup timer, update and rollback script, docker drill test
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 13.1-11-PLAN.md — Runbook (bootstrap, update, migrate, restore, pins, tested-vs-real-host), SECURITY_AND_OPERATIONS, D050, Facts verified for Phase 13.1
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 13.1-12-PLAN.md — Local gate battery, then push and confirm the real GitHub Actions run is green (non-autonomous)
 - [ ] TBD (run /gsd-plan-phase 13.1 to break down)
 
 ### Phase 14: Backtest Simulator Causality Rewrite
