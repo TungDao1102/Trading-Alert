@@ -38,7 +38,7 @@ branch_labels = None
 depends_on = None
 
 
-def upgrade() -> None:
+def _upgrade_consumption_and_intents() -> None:
     # --- approvals: explicit durable consumption state (D-16, D-21, research C8) ---
     op.add_column(
         "approvals",
@@ -153,7 +153,7 @@ def upgrade() -> None:
     )
 
 
-def downgrade() -> None:
+def _downgrade_consumption_and_intents() -> None:
     op.drop_index("uq_execution_intents_algo_client_id", table_name="execution_intents")
     op.drop_index("uq_execution_intents_client_order_id", table_name="execution_intents")
     op.drop_table("execution_intents")
@@ -161,3 +161,331 @@ def downgrade() -> None:
     op.drop_constraint("ck_approvals_consumption_status", "approvals", type_="check")
     op.drop_column("approvals", "consumed_at_utc")
     op.drop_column("approvals", "consumption_status")
+
+
+# --- widths (D-09, F-403, research C5) ----------------------------------------------
+_WIDENED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("signals", "status"),
+    ("trade_plans", "status"),
+    ("orders", "local_status"),
+    ("positions", "status"),
+    ("symbol_metadata", "contract_type"),
+    ("symbol_metadata", "status"),
+)
+
+
+def _widen_columns() -> None:
+    for table, column in _WIDENED_COLUMNS:
+        op.alter_column(
+            table,
+            column,
+            existing_type=sa.String(length=16),
+            type_=sa.String(length=32),
+            existing_nullable=False,
+        )
+
+
+def _narrow_columns() -> None:
+    # Fails loudly in PostgreSQL if a stored value would be truncated (intended).
+    for table, column in reversed(_WIDENED_COLUMNS):
+        op.alter_column(
+            table,
+            column,
+            existing_type=sa.String(length=32),
+            type_=sa.String(length=16),
+            existing_nullable=False,
+        )
+
+
+# --- enum CHECKs (D-08): literals COPIED from src/domain/enums.py ---------------------
+def _create_enum_checks() -> None:
+    op.create_check_constraint(
+        "ck_signals_status",
+        "signals",
+        "status IN ('DETECTED', 'NOTIFIED', 'VIEWED', 'APPROVED', 'SKIPPED_USER', "
+        "'SKIPPED_BUSY', 'EXPIRED', 'INVALIDATED')",
+    )
+    op.create_check_constraint("ck_signals_direction", "signals", "direction IN ('LONG', 'SHORT')")
+    op.create_check_constraint(
+        "ck_signals_setup_type",
+        "signals",
+        "setup_type IN ('TREND_PULLBACK_LONG', 'TREND_PULLBACK_SHORT', "
+        "'BREAKOUT_RETEST_LONG', 'BREAKOUT_RETEST_SHORT', 'RANGE_MR_LONG', 'RANGE_MR_SHORT')",
+    )
+    op.create_check_constraint(
+        "ck_signals_source_timeframe",
+        "signals",
+        "source_timeframe IN ('1m', '1h', '4h')",
+    )
+    op.create_check_constraint(
+        "ck_trade_plans_status",
+        "trade_plans",
+        "status IN ('READY', 'APPROVAL_PENDING', 'APPROVED', 'EXPIRED', 'INVALIDATED', "
+        "'SUPERSEDED')",
+    )
+    op.create_check_constraint(
+        "ck_trade_plans_entry_model",
+        "trade_plans",
+        "entry_model IN ('LIMIT_ZONE', 'MARKET')",
+    )
+    op.create_check_constraint(
+        "ck_approvals_action",
+        "approvals",
+        "action IN ('SIMULATE', 'APPROVE', 'SKIP_USER', 'SKIP_BUSY', 'CANCEL')",
+    )
+    op.create_check_constraint(
+        "ck_approvals_result",
+        "approvals",
+        "result IN ('PENDING', 'APPROVED', 'SKIPPED', 'EXPIRED')",
+    )
+    op.create_check_constraint(
+        "ck_approvals_status",
+        "approvals",
+        "status IN ('PENDING', 'APPROVED', 'SKIPPED', 'EXPIRED')",
+    )
+    op.create_check_constraint(
+        "ck_orders_local_status",
+        "orders",
+        "local_status IN ('PLANNED', 'SUBMITTING', 'NEW', 'PARTIALLY_FILLED', 'FILLED', "
+        "'CANCELED', 'EXPIRED', 'REJECTED', 'UNKNOWN')",
+    )
+    op.create_check_constraint(
+        "ck_positions_status",
+        "positions",
+        "status IN ('OPEN', 'CLOSING', 'CLOSED', 'LIQUIDATION_REPORTED', 'UNKNOWN')",
+    )
+
+
+def _drop_enum_checks() -> None:
+    for table, name in (
+        ("positions", "ck_positions_status"),
+        ("orders", "ck_orders_local_status"),
+        ("approvals", "ck_approvals_status"),
+        ("approvals", "ck_approvals_result"),
+        ("approvals", "ck_approvals_action"),
+        ("trade_plans", "ck_trade_plans_entry_model"),
+        ("trade_plans", "ck_trade_plans_status"),
+        ("signals", "ck_signals_source_timeframe"),
+        ("signals", "ck_signals_setup_type"),
+        ("signals", "ck_signals_direction"),
+        ("signals", "ck_signals_status"),
+    ):
+        op.drop_constraint(name, table, type_="check")
+
+
+# --- quantity and price CHECKs (D-08, research C4) ------------------------------------
+# positions.quantity deliberately has NO sign CHECK: position_amt is signed (negative for
+# SHORT in one-way mode), so `>= 0` would reject a legal short (refinement recorded for D051).
+def _create_quantity_checks() -> None:
+    op.create_check_constraint(
+        "ck_trade_plans_prices_positive",
+        "trade_plans",
+        "entry_min_price > 0 AND entry_max_price > 0 AND stop_loss_price > 0",
+    )
+    op.create_check_constraint(
+        "ck_trade_plans_risk_positive",
+        "trade_plans",
+        "risk_rate > 0 AND risk_budget > 0",
+    )
+    op.create_check_constraint(
+        "ck_trade_plans_quantities_nonnegative",
+        "trade_plans",
+        "suggested_quantity >= 0 AND quantity_before_rounding >= 0 "
+        "AND quantity_after_rounding >= 0",
+    )
+    op.create_check_constraint("ck_orders_quantity_nonnegative", "orders", "quantity >= 0")
+    op.create_check_constraint("ck_orders_price_positive", "orders", "price IS NULL OR price > 0")
+    op.create_check_constraint(
+        "ck_orders_stop_price_positive", "orders", "stop_price IS NULL OR stop_price > 0"
+    )
+    op.create_check_constraint(
+        "ck_fills_price_quantity_positive",
+        "fills",
+        "fill_price > 0 AND fill_quantity > 0",
+    )
+    op.create_check_constraint("ck_fills_commission_nonnegative", "fills", "commission >= 0")
+
+
+def _drop_quantity_checks() -> None:
+    for table, name in (
+        ("fills", "ck_fills_commission_nonnegative"),
+        ("fills", "ck_fills_price_quantity_positive"),
+        ("orders", "ck_orders_stop_price_positive"),
+        ("orders", "ck_orders_price_positive"),
+        ("orders", "ck_orders_quantity_nonnegative"),
+        ("trade_plans", "ck_trade_plans_quantities_nonnegative"),
+        ("trade_plans", "ck_trade_plans_risk_positive"),
+        ("trade_plans", "ck_trade_plans_prices_positive"),
+    ):
+        op.drop_constraint(name, table, type_="check")
+
+
+# --- unique and partial unique indexes (D-06, F-404) ----------------------------------
+def _create_unique_indexes() -> None:
+    op.create_index("uq_approvals_token_hash", "approvals", ["approval_token_hash"], unique=True)
+    op.create_index(
+        "uq_approvals_one_decided_per_plan",
+        "approvals",
+        ["trade_plan_id"],
+        unique=True,
+        postgresql_where=sa.text("status <> 'PENDING'"),
+    )
+    op.create_index(
+        "uq_orders_client_order_id",
+        "orders",
+        ["client_order_id"],
+        unique=True,
+        postgresql_where=sa.text("client_order_id IS NOT NULL"),
+    )
+    op.create_index(
+        "uq_orders_algo_client_id",
+        "orders",
+        ["algo_client_id"],
+        unique=True,
+        postgresql_where=sa.text("algo_client_id IS NOT NULL"),
+    )
+
+
+def _drop_unique_indexes() -> None:
+    op.drop_index("uq_orders_algo_client_id", table_name="orders")
+    op.drop_index("uq_orders_client_order_id", table_name="orders")
+    op.drop_index("uq_approvals_one_decided_per_plan", table_name="approvals")
+    op.drop_index("uq_approvals_token_hash", table_name="approvals")
+
+
+# --- foreign keys, all ON DELETE RESTRICT (D-07) --------------------------------------
+# short_id_mapping keeps NO FK to trade_plans: 0003 documents that the mapping must survive
+# a plan supersede for audit replay.
+def _create_foreign_keys() -> None:
+    op.create_foreign_key(
+        "fk_trade_plans_signal_id",
+        "trade_plans",
+        "signals",
+        ["signal_id"],
+        ["signal_id"],
+        ondelete="RESTRICT",
+    )
+    op.create_foreign_key(
+        "fk_approvals_trade_plan_id",
+        "approvals",
+        "trade_plans",
+        ["trade_plan_id"],
+        ["trade_plan_id"],
+        ondelete="RESTRICT",
+    )
+    op.create_foreign_key(
+        "fk_approvals_signal_id",
+        "approvals",
+        "signals",
+        ["signal_id"],
+        ["signal_id"],
+        ondelete="RESTRICT",
+    )
+    op.create_foreign_key(
+        "fk_orders_trade_plan_id",
+        "orders",
+        "trade_plans",
+        ["trade_plan_id"],
+        ["trade_plan_id"],
+        ondelete="RESTRICT",
+    )
+    op.create_foreign_key(
+        "fk_orders_position_id",
+        "orders",
+        "positions",
+        ["position_id"],
+        ["position_id"],
+        ondelete="RESTRICT",
+    )
+    op.create_foreign_key(
+        "fk_orders_parent_order_id",
+        "orders",
+        "orders",
+        ["parent_order_id"],
+        ["order_id"],
+        ondelete="RESTRICT",
+    )
+    op.create_foreign_key(
+        "fk_fills_order_id",
+        "fills",
+        "orders",
+        ["order_id"],
+        ["order_id"],
+        ondelete="RESTRICT",
+    )
+    op.create_foreign_key(
+        "fk_journal_events_signal_id",
+        "journal_events",
+        "signals",
+        ["signal_id"],
+        ["signal_id"],
+        ondelete="RESTRICT",
+    )
+    op.create_foreign_key(
+        "fk_journal_events_trade_plan_id",
+        "journal_events",
+        "trade_plans",
+        ["trade_plan_id"],
+        ["trade_plan_id"],
+        ondelete="RESTRICT",
+    )
+    op.create_foreign_key(
+        "fk_journal_events_approval_id",
+        "journal_events",
+        "approvals",
+        ["approval_id"],
+        ["approval_id"],
+        ondelete="RESTRICT",
+    )
+    op.create_foreign_key(
+        "fk_journal_events_order_id",
+        "journal_events",
+        "orders",
+        ["order_id"],
+        ["order_id"],
+        ondelete="RESTRICT",
+    )
+    op.create_foreign_key(
+        "fk_journal_events_position_id",
+        "journal_events",
+        "positions",
+        ["position_id"],
+        ["position_id"],
+        ondelete="RESTRICT",
+    )
+
+
+def _drop_foreign_keys() -> None:
+    for table, name in (
+        ("journal_events", "fk_journal_events_position_id"),
+        ("journal_events", "fk_journal_events_order_id"),
+        ("journal_events", "fk_journal_events_approval_id"),
+        ("journal_events", "fk_journal_events_trade_plan_id"),
+        ("journal_events", "fk_journal_events_signal_id"),
+        ("fills", "fk_fills_order_id"),
+        ("orders", "fk_orders_parent_order_id"),
+        ("orders", "fk_orders_position_id"),
+        ("orders", "fk_orders_trade_plan_id"),
+        ("approvals", "fk_approvals_signal_id"),
+        ("approvals", "fk_approvals_trade_plan_id"),
+        ("trade_plans", "fk_trade_plans_signal_id"),
+    ):
+        op.drop_constraint(name, table, type_="foreignkey")
+
+
+def upgrade() -> None:
+    _upgrade_consumption_and_intents()
+    _widen_columns()
+    _create_enum_checks()
+    _create_quantity_checks()
+    _create_unique_indexes()
+    _create_foreign_keys()
+
+
+def downgrade() -> None:
+    _drop_foreign_keys()
+    _drop_unique_indexes()
+    _drop_quantity_checks()
+    _drop_enum_checks()
+    _narrow_columns()
+    _downgrade_consumption_and_intents()

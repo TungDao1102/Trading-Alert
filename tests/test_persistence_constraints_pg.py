@@ -127,13 +127,9 @@ def test_duplicate_client_order_id_is_rejected(engine: Engine) -> None:
 
 def test_duplicate_algo_client_id_is_rejected(engine: Engine) -> None:
     _seed_plan(engine)
-    insert_and_commit(
-        engine, make_order(1, 1, client_order_id=None, algo_client_id="dup-algo")
-    )
+    insert_and_commit(engine, make_order(1, 1, client_order_id=None, algo_client_id="dup-algo"))
     with expect_db_error(_UNIQUE_VIOLATION) as info:
-        insert_and_commit(
-            engine, make_order(2, 1, client_order_id=None, algo_client_id="dup-algo")
-        )
+        insert_and_commit(engine, make_order(2, 1, client_order_id=None, algo_client_id="dup-algo"))
     assert info.constraint == "uq_orders_algo_client_id"
 
 
@@ -223,9 +219,7 @@ _ORPHANS: list[tuple[str, _Orphan]] = [
 
 
 @pytest.mark.parametrize(("constraint", "build"), _ORPHANS, ids=[n for n, _ in _ORPHANS])
-def test_orphan_child_is_rejected(
-    engine: Engine, constraint: str, build: _Orphan
-) -> None:
+def test_orphan_child_is_rejected(engine: Engine, constraint: str, build: _Orphan) -> None:
     insert_and_commit(engine, make_signal(1), make_plan(1, 1))
     with expect_db_error(_FK_VIOLATION) as info:
         insert_and_commit(engine, *build())
@@ -407,6 +401,4 @@ def test_zero_commission_fill_is_allowed(engine: Engine) -> None:
 
 def test_short_position_with_negative_quantity_is_allowed(engine: Engine) -> None:
     """C4 refinement (D051): position_amt is signed, so positions.quantity has no sign CHECK."""
-    insert_and_commit(
-        engine, make_position(1, position_side="BOTH", quantity=Decimal("-0.08"))
-    )
+    insert_and_commit(engine, make_position(1, position_side="BOTH", quantity=Decimal("-0.08")))

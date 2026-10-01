@@ -82,8 +82,10 @@ class SymbolMetadata(Base):
     )
 
     # exchangeInfo status (TRADING / HALT / etc.). Source of truth: live /exchangeInfo.
-    status: Mapped[str] = mapped_column(String(16), nullable=False)
-    contract_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Widened to 32 by migration 0004 (D-09, F-403): TRADIFI_PERPETUAL is 17 characters
+    # and TRADING_CANCEL_ONLY 19, both real Binance values.
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    contract_type: Mapped[str] = mapped_column(String(32), nullable=False)
 
     # Onboard time as UTC ms epoch (matches exchangeInfo.onboardDate).
     onboard_time_utc: Mapped[datetime | None] = mapped_column(
@@ -107,6 +109,8 @@ class SymbolMetadata(Base):
     base_asset: Mapped[str] = mapped_column(String(16), nullable=False)
     quote_asset: Mapped[str] = mapped_column(String(16), nullable=False)
     margin_asset: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    __table_args__ = (Index("ix_symbol_metadata_observed", "symbol", "metadata_observed_at_utc"),)
 
 
 # ---------- collector_watermarks ---------------------------------------------
@@ -155,6 +159,8 @@ class CollectorGap(Base):
     observed_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     reason: Mapped[str] = mapped_column(String(256), nullable=False)
     recorded_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (Index("ix_collector_gaps_class_expected", "data_class", "expected_utc"),)
 
 
 # ---------- coverage_windows --------------------------------------------------
@@ -211,10 +217,33 @@ class SignalRow(Base):
         DateTime(timezone=True), nullable=False
     )
     detected_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
     expires_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     invalidated_at_utc: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+    # Pre-existing indexes (0002) are declared plainly; the 0004 CHECKs are PostgreSQL-only
+    # (`ddl_if`) so SQLite `create_all` suites keep their pre-0004 DDL. Names match 0004.
+    __table_args__ = (
+        Index("ix_signals_symbol_close", "symbol", "source_candle_close_utc"),
+        Index("ix_signals_parameter_set", "parameter_set_id", "parameter_set_hash"),
+        CheckConstraint(
+            "status IN ('DETECTED', 'NOTIFIED', 'VIEWED', 'APPROVED', 'SKIPPED_USER', "
+            "'SKIPPED_BUSY', 'EXPIRED', 'INVALIDATED')",
+            name="ck_signals_status",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint("direction IN ('LONG', 'SHORT')", name="ck_signals_direction").ddl_if(
+            dialect="postgresql"
+        ),
+        CheckConstraint(
+            "setup_type IN ('TREND_PULLBACK_LONG', 'TREND_PULLBACK_SHORT', "
+            "'BREAKOUT_RETEST_LONG', 'BREAKOUT_RETEST_SHORT', 'RANGE_MR_LONG', 'RANGE_MR_SHORT')",
+            name="ck_signals_setup_type",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "source_timeframe IN ('1m', '1h', '4h')", name="ck_signals_source_timeframe"
+        ).ddl_if(dialect="postgresql"),
     )
 
 
@@ -249,8 +278,38 @@ class TradePlanRow(Base):
     quantity_after_rounding: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     quantization_decision: Mapped[str] = mapped_column(String(32), nullable=False)
     plan_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
     created_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_trade_plans_signal_id", "signal_id"),
+        ForeignKeyConstraint(
+            ["signal_id"],
+            ["signals.signal_id"],
+            name="fk_trade_plans_signal_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "status IN ('READY', 'APPROVAL_PENDING', 'APPROVED', 'EXPIRED', 'INVALIDATED', "
+            "'SUPERSEDED')",
+            name="ck_trade_plans_status",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "entry_model IN ('LIMIT_ZONE', 'MARKET')", name="ck_trade_plans_entry_model"
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "entry_min_price > 0 AND entry_max_price > 0 AND stop_loss_price > 0",
+            name="ck_trade_plans_prices_positive",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "risk_rate > 0 AND risk_budget > 0", name="ck_trade_plans_risk_positive"
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "suggested_quantity >= 0 AND quantity_before_rounding >= 0 "
+            "AND quantity_after_rounding >= 0",
+            name="ck_trade_plans_quantities_nonnegative",
+        ).ddl_if(dialect="postgresql"),
+    )
 
 
 # ---------- approvals (Phase 3, plan 03-04) ---------------------------------
@@ -294,6 +353,42 @@ class ApprovalRow(Base):
     # PostgreSQL-only integrity objects: SQLite `create_all` keeps its pre-0004 DDL
     # (`ddl_if`), PostgreSQL (alembic 0004) enforces everything. Names match the migration.
     __table_args__ = (
+        Index("ix_approvals_trade_plan_id", "trade_plan_id"),
+        Index("ix_approvals_signal_id", "signal_id"),
+        Index("uq_approvals_token_hash", "approval_token_hash", unique=True).ddl_if(
+            dialect="postgresql"
+        ),
+        Index(
+            "uq_approvals_one_decided_per_plan",
+            "trade_plan_id",
+            unique=True,
+            postgresql_where=text("status <> 'PENDING'"),
+            sqlite_where=text("status <> 'PENDING'"),
+        ).ddl_if(dialect="postgresql"),
+        ForeignKeyConstraint(
+            ["trade_plan_id"],
+            ["trade_plans.trade_plan_id"],
+            name="fk_approvals_trade_plan_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        ForeignKeyConstraint(
+            ["signal_id"],
+            ["signals.signal_id"],
+            name="fk_approvals_signal_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "action IN ('SIMULATE', 'APPROVE', 'SKIP_USER', 'SKIP_BUSY', 'CANCEL')",
+            name="ck_approvals_action",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "result IN ('PENDING', 'APPROVED', 'SKIPPED', 'EXPIRED')",
+            name="ck_approvals_result",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "status IN ('PENDING', 'APPROVED', 'SKIPPED', 'EXPIRED')",
+            name="ck_approvals_status",
+        ).ddl_if(dialect="postgresql"),
         CheckConstraint(
             "consumption_status IN ('UNCONSUMED', 'CONSUMED')",
             name="ck_approvals_consumption_status",
@@ -342,10 +437,63 @@ class OrderRow(Base):
     exchange_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     algo_client_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     exchange_status: Mapped[str] = mapped_column(String(32), nullable=False)
-    local_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    local_status: Mapped[str] = mapped_column(String(32), nullable=False)
     submitted_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     canceled_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # No CHECK on `order_role` (free-string domain field) - research A3.
+    __table_args__ = (
+        Index("ix_orders_trade_plan_id", "trade_plan_id"),
+        Index("ix_orders_position_id", "position_id"),
+        Index("ix_orders_symbol_submitted", "symbol", "submitted_at_utc"),
+        Index(
+            "uq_orders_client_order_id",
+            "client_order_id",
+            unique=True,
+            postgresql_where=text("client_order_id IS NOT NULL"),
+            sqlite_where=text("client_order_id IS NOT NULL"),
+        ).ddl_if(dialect="postgresql"),
+        Index(
+            "uq_orders_algo_client_id",
+            "algo_client_id",
+            unique=True,
+            postgresql_where=text("algo_client_id IS NOT NULL"),
+            sqlite_where=text("algo_client_id IS NOT NULL"),
+        ).ddl_if(dialect="postgresql"),
+        ForeignKeyConstraint(
+            ["trade_plan_id"],
+            ["trade_plans.trade_plan_id"],
+            name="fk_orders_trade_plan_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        ForeignKeyConstraint(
+            ["position_id"],
+            ["positions.position_id"],
+            name="fk_orders_position_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        ForeignKeyConstraint(
+            ["parent_order_id"],
+            ["orders.order_id"],
+            name="fk_orders_parent_order_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "local_status IN ('PLANNED', 'SUBMITTING', 'NEW', 'PARTIALLY_FILLED', 'FILLED', "
+            "'CANCELED', 'EXPIRED', 'REJECTED', 'UNKNOWN')",
+            name="ck_orders_local_status",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint("quantity >= 0", name="ck_orders_quantity_nonnegative").ddl_if(
+            dialect="postgresql"
+        ),
+        CheckConstraint("price IS NULL OR price > 0", name="ck_orders_price_positive").ddl_if(
+            dialect="postgresql"
+        ),
+        CheckConstraint(
+            "stop_price IS NULL OR stop_price > 0", name="ck_orders_stop_price_positive"
+        ).ddl_if(dialect="postgresql"),
+    )
 
 
 # ---------- execution_intents (Phase 17, plan 17-01) -------------------------
@@ -462,6 +610,20 @@ class FillRow(Base):
     __tablename__ = "fills"
     __table_args__ = (
         UniqueConstraint("order_id", "exchange_trade_id", name="uq_fills_order_trade"),
+        Index("ix_fills_order_id", "order_id"),
+        Index("ix_fills_symbol_time", "symbol", "fill_time_utc"),
+        ForeignKeyConstraint(
+            ["order_id"],
+            ["orders.order_id"],
+            name="fk_fills_order_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "fill_price > 0 AND fill_quantity > 0", name="ck_fills_price_quantity_positive"
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint("commission >= 0", name="ck_fills_commission_nonnegative").ddl_if(
+            dialect="postgresql"
+        ),
     )
 
     fill_id: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -505,7 +667,17 @@ class PositionRow(Base):
     opened_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    # `quantity` has NO sign CHECK: position_amt is signed (negative for SHORT in one-way
+    # mode), so `>= 0` would reject a legal short (research C4 refinement, recorded for D051).
+    __table_args__ = (
+        Index("ix_positions_symbol_status", "symbol", "status"),
+        CheckConstraint(
+            "status IN ('OPEN', 'CLOSING', 'CLOSED', 'LIQUIDATION_REPORTED', 'UNKNOWN')",
+            name="ck_positions_status",
+        ).ddl_if(dialect="postgresql"),
+    )
 
 
 # ---------- journal_events (Phase 3, plan 03-04) -----------------------------
@@ -536,6 +708,41 @@ class JournalEventRow(Base):
     payload_json: Mapped[str] = mapped_column(String, nullable=False)
     created_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    __table_args__ = (
+        Index("ix_journal_events_correlation", "correlation_id"),
+        Index("ix_journal_events_occurred", "occurred_at_utc"),
+        ForeignKeyConstraint(
+            ["signal_id"],
+            ["signals.signal_id"],
+            name="fk_journal_events_signal_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        ForeignKeyConstraint(
+            ["trade_plan_id"],
+            ["trade_plans.trade_plan_id"],
+            name="fk_journal_events_trade_plan_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        ForeignKeyConstraint(
+            ["approval_id"],
+            ["approvals.approval_id"],
+            name="fk_journal_events_approval_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        ForeignKeyConstraint(
+            ["order_id"],
+            ["orders.order_id"],
+            name="fk_journal_events_order_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        ForeignKeyConstraint(
+            ["position_id"],
+            ["positions.position_id"],
+            name="fk_journal_events_position_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+    )
+
 
 # ---------- short_id_mapping (Phase 8, plan 08-02) ----------------------------
 
@@ -565,6 +772,13 @@ class ShortIdMappingRow(Base):
     signal_id: Mapped[str] = mapped_column(String(128), nullable=False)
     trade_plan_id: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    # No FK to trade_plans by design (0003): the mapping must survive a plan supersede.
+    __table_args__ = (
+        Index("ix_short_id_mapping_signal_id", "signal_id"),
+        Index("ix_short_id_mapping_trade_plan_id", "trade_plan_id"),
+        Index("uq_short_id_mapping_signal_trade_plan", "signal_id", "trade_plan_id", unique=True),
+    )
 
 
 # ---------- engine factory ---------------------------------------------------

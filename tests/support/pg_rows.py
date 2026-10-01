@@ -88,9 +88,7 @@ def make_plan(n: int = 1, signal_n: int = 1, **overrides: Any) -> TradePlanRow:
     return TradePlanRow(**values)
 
 
-def make_approval(
-    n: int = 1, plan_n: int = 1, signal_n: int = 1, **overrides: Any
-) -> ApprovalRow:
+def make_approval(n: int = 1, plan_n: int = 1, signal_n: int = 1, **overrides: Any) -> ApprovalRow:
     values: dict[str, Any] = {
         "approval_id": hexid(0x2000 + n),
         "trade_plan_id": hexid(0x1000 + plan_n),

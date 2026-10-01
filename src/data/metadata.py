@@ -19,10 +19,12 @@ Wire-format rules enforced here:
   - Delisted and non-TRADING universe symbols (SETTLING, PENDING_TRADING,
     ...) present in exchangeInfo are inserted as ordinary versioned rows
     with their status preserved (D-10); history is never updated in place.
-  - `contract_type` and `status` are String(16) columns. SQLite ignores the
-    width and PostgreSQL rejects an overflow only at flush, so the width is
-    checked here and an overlong universe row raises instead of being
-    truncated (fail closed, T-13-30). No column is widened (no migration).
+  - `contract_type` and `status` are String(32) columns (widened from 16 by
+    migration 0004, D-09, F-403: TRADIFI_PERPETUAL is 17 characters and
+    TRADING_CANCEL_ONLY 19). SQLite ignores the width and PostgreSQL rejects an
+    overflow only at flush, so the width is checked here, derived from the
+    model, and an overlong universe row raises instead of being truncated
+    (fail closed, T-13-30).
 
 This module is the only writer of `symbol_metadata`; downstream consumers
 pin `metadata_observed_at_utc <= dataset_date` to reconstruct the rules
@@ -42,13 +44,21 @@ from src.db.models import SymbolMetadata
 if TYPE_CHECKING:
     pass
 
-# Width of the `symbol_metadata.contract_type` and `.status` columns
-# (String(16), src/db/models.py). A longer value is never truncated.
-METADATA_TEXT_MAX_LEN = 16
+
+def _text_column_length(column_name: str) -> int:
+    length = getattr(SymbolMetadata.__table__.c[column_name].type, "length", None)
+    if not isinstance(length, int) or length <= 0:
+        raise RuntimeError(f"symbol_metadata.{column_name} must be a bounded String column")
+    return length
+
+
+# Width of the `symbol_metadata.contract_type` and `.status` columns, derived from the
+# model (the stricter of the two if they ever diverge). A longer value is never truncated.
+METADATA_TEXT_MAX_LEN = min(_text_column_length("contract_type"), _text_column_length("status"))
 
 
 class MetadataWidthError(ValueError):
-    """A universe row's text field is wider than its String(16) column.
+    """A universe row's text field is wider than its bounded String column.
 
     The message names the symbol, field and length only, never a value that
     could be mistaken for a credential, so callers may print it.
