@@ -1,0 +1,220 @@
+"""Compose stack checks via ``docker compose config --format json`` (13.1-03).
+
+Needs the Docker CLI with the compose plugin but never a daemon. The compose file is copied into
+a temporary project directory together with a ``.env`` holding only the four POSTGRES_*
+variables (random hex values), so the checks are hermetic and prove that no backup or live
+variable is needed at interpolation time (research findings 6 and 7). The resolved config
+contains secrets, so assertion messages never print it.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import secrets
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any
+
+from tests.infra_helpers import compose_cli_available, infra_skip
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
+
+HEALTH_PROBE = ["/app/.venv/bin/python", "-m", "src.data.collector", "--healthcheck"]
+BASE_VARS = ("POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "POSTGRES_PORT")
+_SCRUBBED_ENV_PREFIXES = ("POSTGRES_", "COMPOSE_", "TRADING_ENV_FILE", "IMAGE_TAG", "DATABASE_URL")
+
+
+def _require_compose() -> None:
+    available, detail = compose_cli_available()
+    if not available:
+        infra_skip(f"docker compose CLI unavailable: {detail}")
+
+
+def _write_project(tmp_path: Path, overrides: dict[str, str] | None = None) -> Path:
+    project = tmp_path / "project"
+    project.mkdir()
+    shutil.copyfile(COMPOSE_FILE, project / "docker-compose.yml")
+    # The build context only has to exist for `config`; its content is irrelevant here.
+    (project / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8", newline="\n")
+    values = {
+        "POSTGRES_USER": "u" + secrets.token_hex(4),
+        "POSTGRES_PASSWORD": secrets.token_hex(16),
+        "POSTGRES_DB": "tradingtest",
+        "POSTGRES_PORT": "5432",
+    }
+    values.update(overrides or {})
+    body = "".join(f"{k}={v}\n" for k, v in values.items() if v != "")
+    (project / ".env").write_text(body, encoding="utf-8", newline="\n")
+    return project
+
+
+def _hermetic_env() -> dict[str, str]:
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(_SCRUBBED_ENV_PREFIXES) and not k.startswith("BACKUP_")
+    }
+    env["MSYS_NO_PATHCONV"] = "1"
+    return env
+
+
+def _run_config(project: Path, profiles: tuple[str, ...] = ()) -> subprocess.CompletedProcess[str]:
+    cmd = [
+        "docker",
+        "compose",
+        "--project-directory",
+        str(project),
+        "-f",
+        str(project / "docker-compose.yml"),
+    ]
+    for profile in profiles:
+        cmd += ["--profile", profile]
+    cmd += ["config", "--format", "json"]
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+        env=_hermetic_env(),
+    )
+
+
+def compose_config(
+    tmp_path: Path,
+    profiles: tuple[str, ...] = (),
+    overrides: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    _require_compose()
+    project = _write_project(tmp_path, overrides)
+    proc = _run_config(project, profiles)
+    # stderr can echo interpolation errors but never the resolved config.
+    assert proc.returncode == 0, f"compose config failed: {proc.stderr.strip()[:400]}"
+    parsed = json.loads(proc.stdout)
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+def _services(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    services = config["services"]
+    assert isinstance(services, dict)
+    return services
+
+
+def test_project_is_named_trading(tmp_path: Path) -> None:
+    config = compose_config(tmp_path)
+    assert config["name"] == "trading"
+
+
+def test_default_services_are_exactly_postgres_db_upgrade_collector(tmp_path: Path) -> None:
+    services = _services(compose_config(tmp_path))
+    assert set(services) == {"postgres", "db-upgrade", "collector"}
+
+
+def test_postgres_publishes_loopback_only(tmp_path: Path) -> None:
+    postgres = _services(compose_config(tmp_path))["postgres"]
+    ports = postgres["ports"]
+    assert len(ports) == 1
+    assert ports[0]["host_ip"] == "127.0.0.1"
+    assert int(ports[0]["target"]) == 5432
+    assert int(ports[0]["published"]) == 5432
+
+
+def test_only_postgres_publishes_ports(tmp_path: Path) -> None:
+    services = _services(compose_config(tmp_path, profiles=("paper", "live", "ops")))
+    published = {name for name, svc in services.items() if svc.get("ports")}
+    assert published == {"postgres"}
+
+
+def test_non_default_postgres_port_changes_only_the_host_side(tmp_path: Path) -> None:
+    services = _services(compose_config(tmp_path, overrides={"POSTGRES_PORT": "5433"}))
+    port = services["postgres"]["ports"][0]
+    assert port["host_ip"] == "127.0.0.1"
+    assert int(port["published"]) == 5433
+    assert int(port["target"]) == 5432
+    for name in ("db-upgrade", "collector"):
+        url = services[name]["environment"]["DATABASE_URL"]
+        assert "@postgres:5432/" in url, f"{name} must dial the in-network port"
+        assert "@postgres:5433" not in url
+        assert url.startswith("postgresql+psycopg://")
+        assert services[name]["environment"]["POSTGRES_HOST"] == "postgres"
+
+
+def test_database_url_uses_the_database_name_from_env(tmp_path: Path) -> None:
+    services = _services(compose_config(tmp_path, overrides={"POSTGRES_DB": "alt_db"}))
+    assert services["collector"]["environment"]["DATABASE_URL"].endswith("@postgres:5432/alt_db")
+
+
+def test_no_container_name_anywhere(tmp_path: Path) -> None:
+    services = _services(compose_config(tmp_path, profiles=("paper", "live", "ops")))
+    offenders = [name for name, svc in services.items() if "container_name" in svc]
+    assert offenders == []
+
+
+def test_all_volume_mounts_are_named_volumes_never_binds(tmp_path: Path) -> None:
+    services = _services(compose_config(tmp_path, profiles=("paper", "live", "ops")))
+    seen: set[str] = set()
+    for svc in services.values():
+        for mount in svc.get("volumes", []):
+            assert mount["type"] == "volume", mount.get("target")
+            seen.add(mount["source"])
+    assert seen <= {"pgdata", "rawdata", "backupdata", "logs"}
+    assert {"pgdata", "rawdata", "logs"} <= seen
+
+
+def test_declared_volumes_are_only_the_four_named_volumes(tmp_path: Path) -> None:
+    # `config` drops volumes no enabled service uses, so the default stack shows three.
+    declared = set(compose_config(tmp_path)["volumes"])
+    assert {"pgdata", "rawdata", "logs"} <= declared <= {"pgdata", "rawdata", "backupdata", "logs"}
+
+
+def test_collector_healthcheck_is_the_exec_form_venv_probe(tmp_path: Path) -> None:
+    collector = _services(compose_config(tmp_path))["collector"]
+    health = collector["healthcheck"]
+    assert health["test"] == ["CMD", *HEALTH_PROBE]
+    assert collector["command"] == ["/app/.venv/bin/python", "-m", "src.data.collector"]
+
+
+def test_postgres_healthcheck_is_pg_isready(tmp_path: Path) -> None:
+    health = _services(compose_config(tmp_path))["postgres"]["healthcheck"]
+    assert "pg_isready" in " ".join(health["test"])
+
+
+def test_db_upgrade_is_a_one_shot_migration_without_a_probe(tmp_path: Path) -> None:
+    services = _services(compose_config(tmp_path))
+    upgrade = services["db-upgrade"]
+    assert upgrade["command"] == ["/app/.venv/bin/alembic", "upgrade", "head"]
+    assert upgrade["restart"] == "no"
+    assert upgrade["healthcheck"] == {"disable": True}
+    assert upgrade["depends_on"]["postgres"]["condition"] == "service_healthy"
+    assert services["collector"]["depends_on"]["db-upgrade"]["condition"] == (
+        "service_completed_successfully"
+    )
+
+
+def test_collector_mounts_raw_data_and_logs_but_not_backups(tmp_path: Path) -> None:
+    collector = _services(compose_config(tmp_path))["collector"]
+    targets = {m["target"]: m["source"] for m in collector["volumes"]}
+    assert targets == {"/app/data/raw": "rawdata", "/app/logs": "logs"}
+
+
+def test_images_are_pinned_by_digest_or_local_tag(tmp_path: Path) -> None:
+    services = _services(compose_config(tmp_path))
+    assert services["postgres"]["image"].startswith("postgres:17.11-bookworm@sha256:")
+    assert services["collector"]["image"] == "trading-alert:dev"
+    assert services["db-upgrade"]["image"] == "trading-alert:dev"
+    # Exactly one of the two app services owns the build (no N parallel builds).
+    builders = [n for n in ("db-upgrade", "collector") if "build" in services[n]]
+    assert builders == ["db-upgrade"]
+    assert services["db-upgrade"]["build"]["target"] == "runtime"
+
+
+def test_missing_postgres_credentials_fail_config(tmp_path: Path) -> None:
+    _require_compose()
+    project = _write_project(tmp_path, overrides={"POSTGRES_PASSWORD": ""})
+    proc = _run_config(project)
+    assert proc.returncode != 0
+    assert "POSTGRES_PASSWORD" in proc.stderr

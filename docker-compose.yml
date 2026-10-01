@@ -1,15 +1,44 @@
-# Compose stack — Phase 2 Data Foundation
-# Per D-04/D-05/D-12 + PATTERNS.md §2-3:
-#  - postgres:17-bookworm with named volume; credentials from env only (T-02-02).
-#  - app image built from Dockerfile (above); entrypoint overridden per service
-#    (collector long-running, backup one-shot).
-#  - raw Parquet data dir mounted as a named volume so dev-machine restarts
-#    don't blow away the immutable raw store.
+# Compose stack (13.1, D-05 to D-09). One file, one image, different commands.
+#
+#  - Project name is fixed to `trading`, so named volumes are trading_pgdata etc. Override
+#    with `-p` to run a second, isolated environment from the same checkout (cutover tests).
+#  - postgres publishes on loopback only (F-709); it is reachable from other hosts only
+#    through an SSH tunnel. Docker bypasses ufw, so the bind address is the control.
+#  - Data lives only in named volumes (pgdata, rawdata, backupdata, logs); no host bind mounts.
+#  - Secrets come only from env_file (.env, mode 0600, gitignored). TRADING_ENV_FILE selects
+#    another file. `${VAR:?}` checks exist only on the always-on postgres vars: profile-gated
+#    services are still interpolated, so a required-variable check there would break every
+#    compose command for operators who have not configured backups or live.
+#  - No container_name anywhere (two projects on one daemon must not collide).
+
+name: trading
+
+x-app: &app
+  image: trading-alert:${IMAGE_TAG:-dev}
+  env_file: ${TRADING_ENV_FILE:-.env}
+  restart: unless-stopped
+  # tini as PID 1: Python as PID 1 gets no default SIGTERM handling, so a stop would wait
+  # out the grace period and then SIGKILL.
+  init: true
+  stop_grace_period: 30s
+  logging: &logging
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+x-database-env: &database-env
+  # Compose hostname (overrides POSTGRES_HOST=localhost from .env).
+  POSTGRES_HOST: postgres
+  # In-network DB URL built from the same vars as the postgres service. The port is the
+  # container port (literal 5432), never the host-published ${POSTGRES_PORT}: the published
+  # port only exists on the host, and a non-default value would break the collector.
+  # Passwords must stay URL-safe.
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER required in .env}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required in .env}@postgres:5432/${POSTGRES_DB:-trading}
 
 services:
   postgres:
-    image: postgres:17-bookworm
-    container_name: trading-alert-postgres
+    image: postgres:17.11-bookworm@sha256:639ab7ceb90e13123085b741fb31ef493fba25463002f6da665352e7b534b652
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER required in .env}
@@ -19,44 +48,55 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
+    logging: *logging
 
-  app:
+  # One-shot schema migration. Nothing else creates tables, so a fresh host needs this
+  # before the collector starts. It owns the image build; the other app services reuse
+  # the tag so one `compose build` produces one image.
+  db-upgrade:
+    <<: *app
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: trading-alert-app
-    restart: unless-stopped
+      target: runtime
+    restart: "no"
+    command: ["/app/.venv/bin/alembic", "upgrade", "head"]
+    environment: *database-env
     depends_on:
       postgres:
         condition: service_healthy
-    env_file: .env
-    environment:
-      # Compose hostname (overrides POSTGRES_HOST=localhost from .env)
-      POSTGRES_HOST: postgres
-      # In-network DB URL: the container cannot reach PG via the
-      # localhost URL in .env, so the collector/healthcheck get a
-      # compose-hostname URL built from the same required vars as the
-      # postgres service above (passwords must stay URL-safe).
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER required in .env}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required in .env}@postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-trading}
+    # Short-lived: the image HEALTHCHECK probes the collector and would report unhealthy.
+    healthcheck:
+      disable: true
+
+  # OI/funding collector (5-min poll per D-07). The probe repeats the image HEALTHCHECK
+  # explicitly so this service's contract does not depend on image metadata. Nothing
+  # depends on the collector being healthy: there is no watermark until the first tick.
+  collector:
+    <<: *app
+    environment: *database-env
+    depends_on:
+      db-upgrade:
+        condition: service_completed_successfully
     volumes:
       - rawdata:/app/data/raw
-      # The backup bundle must survive container restarts — without this
-      # mount, "off-host" bundles live on the ephemeral container FS.
-      - backupdata:/app/data/backup
-    # Phase 2 entrypoint is the OI/funding collector (5-min poll per D-07).
-    # `python -m src.data.collector` runs the poll loop (main() +
-    # __main__ in src/data/collector.py); the image HEALTHCHECK probes
-    # watermark freshness via `--healthcheck`.
-    # Backup drill runs as a one-shot Compose target (see scripts/backup-drill.ps1).
-    command: ["uv", "run", "python", "-m", "src.data.collector"]
+      - logs:/app/logs
+    command: ["/app/.venv/bin/python", "-m", "src.data.collector"]
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-m", "src.data.collector", "--healthcheck"]
+      interval: 60s
+      timeout: 15s
+      start_period: 6m
+      retries: 3
 
 volumes:
   pgdata:
   rawdata:
   backupdata:
+  logs:
