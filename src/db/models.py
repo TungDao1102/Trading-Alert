@@ -10,6 +10,13 @@ Phase 17 additions (plan 17-01, first slice of migration 0004):
   - approvals.consumption_status / consumed_at_utc  (explicit durable consumption)
   - execution_intents         (ExecutionIntentRow — write-ahead entry/leg intents)
 
+Phase 17 additions (plan 17-02, rest of migration 0004): named enum/quantity CHECKs,
+unique and partial unique indexes, RESTRICT foreign keys, widened status columns,
+`plan_constraint_snapshots` and `system_state_events`. Every NEW 0004 constraint and
+index is PostgreSQL-only (`ddl_if`) so SQLite `create_all` suites keep their DDL; the 18
+indexes from migrations 0001-0003 are declared plainly under their exact names. Append-only
+and terminal-state triggers live in the migration only (not ORM objects).
+
 Phase 3 additions (plans 03-01 + 03-04, D-02):
   - signals                   (SignalRow — content-hash PK, explicit status)
   - trade_plans               (TradePlanRow — content-hash PK, explicit status)
@@ -39,9 +46,11 @@ from sqlalchemy import (
     DateTime,
     ForeignKeyConstraint,
     Index,
+    Integer,
     Numeric,
     PrimaryKeyConstraint,
     String,
+    Text,
     UniqueConstraint,
     text,
 )
@@ -778,6 +787,103 @@ class ShortIdMappingRow(Base):
         Index("ix_short_id_mapping_signal_id", "signal_id"),
         Index("ix_short_id_mapping_trade_plan_id", "trade_plan_id"),
         Index("uq_short_id_mapping_signal_trade_plan", "signal_id", "trade_plan_id", unique=True),
+    )
+
+
+# ---------- plan_constraint_snapshots (Phase 17, plan 17-02) -------------------
+
+
+class PlanConstraintSnapshotRow(Base):
+    """Write-once exchange-constraint snapshot per trade plan (D-18, D-19, EXEC-04).
+
+    One row per `trade_plan_id` (PK and FK RESTRICT). `snapshot_json` is the canonical
+    JSON and `snapshot_sha256` its digest; the digest is plan EVIDENCE, never part of
+    `plan_hash`. Live inputs (margin type, leverage, equity) are NOT NULL text carrying
+    the explicit sentinel `UNKNOWN` until supplied, so `live_inputs_status` says
+    INCOMPLETE rather than a NULL hiding the gap. Append-only (trigger in 0004).
+    """
+
+    __tablename__ = "plan_constraint_snapshots"
+
+    trade_plan_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    working_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    margin_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    leverage: Mapped[str] = mapped_column(String(16), nullable=False)
+    equity_used: Mapped[str] = mapped_column(String(64), nullable=False)
+    live_inputs_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    constraints_observed_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    captured_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    snapshot_json: Mapped[str] = mapped_column(Text, nullable=False)
+    snapshot_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("trade_plan_id", name="pk_plan_constraint_snapshots"),
+        ForeignKeyConstraint(
+            ["trade_plan_id"],
+            ["trade_plans.trade_plan_id"],
+            name="fk_plan_constraint_snapshots_trade_plan_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "snapshot_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_plan_constraint_snapshots_sha256_hex",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "live_inputs_status IN ('COMPLETE', 'INCOMPLETE')",
+            name="ck_plan_constraint_snapshots_live_inputs_status",
+        ).ddl_if(dialect="postgresql"),
+        # Mirrors WORKING_TYPE_VALUES (src/domain/registry.py, D037): widen both together.
+        CheckConstraint(
+            "working_type IN ('MARK_PRICE')",
+            name="ck_plan_constraint_snapshots_working_type",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "live_inputs_status <> 'COMPLETE' OR (margin_type <> 'UNKNOWN' "
+            "AND leverage <> 'UNKNOWN' AND equity_used <> 'UNKNOWN')",
+            name="ck_plan_constraint_snapshots_complete_has_live_inputs",
+        ).ddl_if(dialect="postgresql"),
+    )
+
+
+# ---------- system_state_events (Phase 17, plan 17-02) --------------------------
+
+
+class SystemStateEventRow(Base):
+    """Append-only durable system-state event log (D-21, D-22).
+
+    One row per state change of a `SystemStateKey` with a per-key `state_version`
+    (UNIQUE with the key) and a link to the journal event that recorded it. "Latest per
+    key" is a query (plan 13), not a view, so the ORM parity check covers every object.
+    """
+
+    __tablename__ = "system_state_events"
+
+    state_event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    state_key: Mapped[str] = mapped_column(String(32), nullable=False)
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    state_json: Mapped[str] = mapped_column(Text, nullable=False)
+    journal_event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    recorded_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("state_event_id", name="pk_system_state_events"),
+        UniqueConstraint("state_key", "state_version", name="uq_system_state_events_key_version"),
+        ForeignKeyConstraint(
+            ["journal_event_id"],
+            ["journal_events.journal_event_id"],
+            name="fk_system_state_events_journal_event_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "state_key IN ('SAFE_MODE', 'LIVE_ENABLEMENT', 'KILL_GATE')",
+            name="ck_system_state_events_state_key",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "state_version >= 1", name="ck_system_state_events_version_positive"
+        ).ddl_if(dialect="postgresql"),
     )
 
 
