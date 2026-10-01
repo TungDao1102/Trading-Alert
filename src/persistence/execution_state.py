@@ -16,6 +16,9 @@ statements against the ORM tables:
     idempotent no-op (`assert_transition` raises on `old == new`).
   - protective legs (STOP_LOSS) are inserted INTENDED by `record_protective_intent`
     with the same targeted `ON CONFLICT (approval_id, role)`.
+  - a unique violation on a secondary arbiter that was caused by a concurrent insert of
+    the SAME (approval_id, role) row is a lost race, answered False (plan 17-12, D-17);
+    the same violation with no such row stays an `IntentStateConflict`.
 
 The correctness line is the database constraint, not Python: a lost race, a replay
 and a restart all end in the same stored row (D-15, D-17). Decimals stay Decimal
@@ -195,6 +198,10 @@ class PgExecutionStateStore:
                     )
                 return True
         except IntegrityError as exc:
+            if self._lost_race_to_same_row(
+                exc, approval_id=approval_id, role=OrderRole.ENTRY.value
+            ):
+                return False
             raise _translate_integrity(exc, what="consume approval") from exc
 
     def record_protective_intent(
@@ -244,6 +251,8 @@ class PgExecutionStateStore:
                 ).first()
                 return inserted is not None
         except IntegrityError as exc:
+            if self._lost_race_to_same_row(exc, approval_id=approval_id, role=role):
+                return False
             raise _translate_integrity(exc, what=f"record {role} intent") from exc
 
     def mark_sent(self, *, approval_id: str, role: str, now_utc: datetime) -> None:
@@ -311,6 +320,29 @@ class PgExecutionStateStore:
             raise _translate_integrity(exc, what="finalize entry outcome") from exc
 
     # ------------------------------------------------------------------ #
+
+    def _lost_race_to_same_row(self, exc: IntegrityError, *, approval_id: str, role: str) -> bool:
+        """True when a unique violation only means a concurrent writer inserted this same row.
+
+        `ON CONFLICT (approval_id, role) DO NOTHING` covers the primary-key arbiter. Under
+        a true race the loser can reach a SECONDARY unique index first (the plan/role pair
+        or the client id) and PostgreSQL reports that violation instead of skipping the
+        insert, although the winner's committed row is exactly the (approval_id, role) row
+        the loser wanted. That is a lost race (False, the replay path), not a conflict.
+        A violation with no such row means a DIFFERENT approval holds the plan or id, which
+        stays an `IntentStateConflict`. The failed transaction has already rolled back, so
+        the check runs in a fresh one that sees the winner's commit.
+        """
+        if getattr(exc.orig, "sqlstate", None) != _SQLSTATE_UNIQUE_VIOLATION:
+            return False
+        with self._db.transaction() as session:
+            existing = session.execute(
+                select(ExecutionIntentRow.approval_id).where(
+                    ExecutionIntentRow.approval_id == approval_id,
+                    ExecutionIntentRow.role == role,
+                )
+            ).first()
+        return existing is not None
 
     def _advance(
         self,

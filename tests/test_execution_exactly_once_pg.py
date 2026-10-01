@@ -574,3 +574,35 @@ def test_consume_race_never_raises_for_the_loser_over_many_rounds(pg_db: str) ->
             assert (
                 _scalar(engine, "SELECT count(*) FROM execution_intents WHERE role = 'ENTRY'") == 1
             )
+
+
+def test_consume_for_a_different_approval_of_the_same_plan_is_still_a_conflict(
+    pg_db: str,
+) -> None:
+    """Only a lost race to the SAME approval is False; another approval holding the plan raises."""
+    from dataclasses import replace
+
+    from src.domain.enums import ApprovalAction, ApprovalResult
+    from src.persistence.errors import IntentStateConflict
+
+    other = replace(
+        _build_approval(CASE),
+        approval_id="apprv_other_for_same_plan",
+        action=ApprovalAction.SIMULATE,
+        result=ApprovalResult.PENDING,
+        status=ApprovalResult.PENDING,
+        approval_token_hash="f" * 64,
+        acted_at_utc=None,
+    )
+    with _store_on(pg_db) as (engine, store):
+        _seed_parent_chain(engine)
+        with Session(engine) as session, session.begin():
+            session.add(approval_to_row(other))
+
+        assert store.consume_and_record_entry_intent(**_consume_args()) is True
+        rival = {**_consume_args(), "approval_id": other.approval_id}
+        with pytest.raises(IntentStateConflict):
+            store.consume_and_record_entry_intent(**rival)
+
+        assert _scalar(engine, "SELECT count(*) FROM execution_intents WHERE role = 'ENTRY'") == 1
+        assert _entry_row(engine)["approval_id"] == APPROVAL_ID
