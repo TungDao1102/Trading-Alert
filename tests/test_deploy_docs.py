@@ -15,6 +15,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tests.infra_helpers import find_bash, infra_skip
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -319,3 +321,252 @@ def test_refresh_pins_lookup_is_read_only_and_reports_moves(tmp_path: Path) -> N
     assert "MOVED" in moved.stdout
     assert "sha256:" + "f" * 64 in moved.stdout
     assert before == _digest_of_files(), "--lookup must never edit a repository file"
+
+
+# --------------------------------------------------------------------------- runbook procedures
+
+OPERATION_SECTIONS = {
+    13: "Host bootstrap",
+    14: "Update and rollback",
+    15: "Provider migration (cutover)",
+    16: "Image and action pins",
+    17: "Tested locally or in CI versus needs a real host",
+    18: "CI pipeline",
+}
+TESTED_BY = {"local test", "CI docker job", "real host (operator)"}
+
+SCRIPT_SECTION = {
+    "bootstrap.sh": 13,
+    "update.sh": 14,
+    "migrate.sh": 15,
+    "backup.sh": 11,
+    "restore.sh": 11,
+    "backup-drill.sh": 11,
+}
+
+
+def _missing(section: str, phrases: tuple[str, ...]) -> list[str]:
+    return [p for p in phrases if p not in section]
+
+
+def test_runbook_has_sections_13_to_18_in_order_after_12() -> None:
+    text = _runbook()
+    headings = re.findall(r"^## (\d+)\. (.+)$", text, re.M)
+    numbers = [int(n) for n, _ in headings]
+    assert numbers == sorted(numbers), "sections must stay in numeric order"
+    assert numbers[:12] == list(range(1, 13)), "sections 1-12 must not be renumbered"
+    titles = {int(n): title.strip() for n, title in headings}
+    for number, title in OPERATION_SECTIONS.items():
+        assert titles.get(number) == title, f"## {number}. {title} is missing or renamed"
+
+
+def test_section_11_covers_the_backup_scripts_retention_and_key_loss() -> None:
+    section = _section(_runbook(), 11)
+    missing = _missing(
+        section,
+        (
+            "deploy/backup.sh",
+            "deploy/restore.sh",
+            "deploy/backup-drill.sh",
+            "7/4/6",
+            "--init-remote",
+            "--install-timer",
+            "unrecoverable",
+            "passphrase",
+            "object lock",
+            "heartbeat",
+            "restore-",
+            "drill-",
+        ),
+    )
+    assert not missing, f"section 11 lacks: {missing}"
+    # the original wording stays (gates and readers rely on it)
+    assert "A backup is not considered valid until a restore test succeeds." in section
+
+
+def test_section_15_states_the_cutover_contract() -> None:
+    section = _section(_runbook(), 15)
+    missing = _missing(
+        section,
+        (
+            "deploy/migrate.sh",
+            "pre-sync",
+            "permanent loss",
+            "recoverable",
+            "60 minutes",
+            "--max-gap-minutes",
+            "docker run",
+            "sudo rsync",
+            "Phase 13.1 ops image",
+            "by hand",
+            "human",
+        ),
+    )
+    assert not missing, f"section 15 lacks: {missing}"
+    for code in ("0", "1", "2", "3"):
+        assert re.search(rf"\| `?{code}`? \|", section), f"exit code {code} is not tabulated"
+
+
+def test_section_14_warns_that_a_code_rollback_does_not_undo_a_migration() -> None:
+    section = _section(_runbook(), 14)
+    missing = _missing(
+        section,
+        (
+            "deploy/update.sh --ref",
+            "deploy/update.sh --rollback",
+            "--skip-backup",
+            "last-good.env",
+            "schema migration",
+            "deploy/restore.sh",
+            "roll back first",
+        ),
+    )
+    assert not missing, f"section 14 lacks: {missing}"
+
+
+def test_section_13_states_bootstrap_prerequisites_and_firewall_facts() -> None:
+    section = _section(_runbook(), 13)
+    missing = _missing(
+        section,
+        (
+            "deploy/bootstrap.sh",
+            "--dry-run",
+            "authorized key",
+            "second SSH session",
+            "unattended-upgrades",
+            "UTC",
+            "does not govern",
+            "127.0.0.1",
+            "Ubuntu 22.04",
+            "Ubuntu 24.04",
+            "Debian 12",
+        ),
+    )
+    assert not missing, f"section 13 lacks: {missing}"
+
+
+def _script_flags(script: Path) -> set[str]:
+    text = _read(script)
+    flags: set[str] = set()
+    pattern = r"^\s+((?:-h \| )?--[a-z][a-z-]*(?: \| --[a-z][a-z-]*)*)\)"
+    for group in re.findall(pattern, text, re.M):
+        flags.update(re.findall(r"--[a-z][a-z-]*", group))
+    flags.discard("--help")
+    return flags
+
+
+@pytest.mark.parametrize("name", sorted(SCRIPT_SECTION))
+def test_each_deploy_script_and_every_flag_is_named_in_its_runbook_section(name: str) -> None:
+    number = SCRIPT_SECTION[name]
+    section = _section(_runbook(), number)
+    assert f"deploy/{name}" in section, f"section {number} never names deploy/{name}"
+    flags = _script_flags(REPO_ROOT / "deploy" / name)
+    assert flags, f"no flags parsed from {name}"
+    missing = sorted(f for f in flags if f not in section)
+    assert not missing, f"section {number} does not document {missing} of {name}"
+
+
+def _step_ids(text: str) -> set[str]:
+    ids: set[str] = set()
+    for number in (11, 13, 14, 15):
+        ids.update(re.findall(r"^### (\d+\.\d+) ", _section(text, number), re.M))
+    return ids
+
+
+def test_section_17_table_covers_every_step_with_only_the_allowed_labels() -> None:
+    text = _runbook()
+    rows = _table_rows(_section(text, 17), "Step")
+    assert rows, "section 17 has no table"
+    table = {r["Step"]: r for r in rows}
+    assert set(table) == _step_ids(text), "section 17 must list exactly the steps of 11, 13-15"
+    for step, row in table.items():
+        labels = {label.strip() for label in row["Tested by"].split(";")}
+        assert labels <= TESTED_BY, f"step {step}: unknown label {labels - TESTED_BY}"
+        assert row["Notes"], f"step {step}: the Notes column must say what is proven where"
+
+
+def test_section_17_names_what_only_a_real_host_can_show() -> None:
+    section = _section(_runbook(), 17)
+    missing = _missing(
+        section,
+        (
+            "real host (operator)",
+            "Docker apt",
+            "ufw",
+            "sshd",
+            "chrony",
+            "Ubuntu 24.04",
+            "docker run",
+            "systemd timer",
+            "disk encryption",
+            "IP whitelist",
+            "heartbeat",
+            "real bucket",
+            "provider-to-provider",
+            "not run locally",
+        ),
+    )
+    assert not missing, f"section 17 lacks: {missing}"
+
+
+def test_section_18_documents_the_ci_pipeline() -> None:
+    section = _section(_runbook(), 18)
+    missing = _missing(
+        section,
+        (
+            "ci.yml",
+            "TRADING_CI_STRICT",
+            "test",
+            "lint",
+            "types",
+            "docker",
+            "registry-gate",
+            "research-gate",
+            "paper_freeze_check",
+            "test_backfill_cli",
+            "serial",
+            "uv lock --check",
+            "ruff format --check",
+            "mypy src",
+        ),
+    )
+    assert not missing, f"section 18 lacks: {missing}"
+
+
+def test_runbook_keeps_secrets_out_of_the_operator_workflow() -> None:
+    text = _runbook()
+    missing = _missing(text, ("docker compose config -q", "rclone obscure", "raw passphrase"))
+    assert not missing, f"RUNBOOK lacks the secrets rule: {missing}"
+    assert "off the VPS" in text
+    # a resolved compose config prints the interpolated environment: never run it bare
+    assert not re.search(r"docker compose config\s*(?:$|\|)", text, re.M)
+
+
+def test_every_compose_variable_is_documented_in_env_example() -> None:
+    lines = _read(COMPOSE).splitlines()
+    compose = "\n".join(ln for ln in lines if not ln.lstrip().startswith("#"))
+    variables = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)", compose))
+    assert {"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "IMAGE_TAG"} <= variables
+    env_example = _read(ENV_EXAMPLE)
+    undocumented = sorted(
+        v
+        for v in variables - {"TRADING_ENV_FILE"}
+        if not re.search(rf"^#?\s*{v}=", env_example, re.M)
+    )
+    assert not undocumented, f".env.example does not document: {undocumented}"
+    # TRADING_ENV_FILE selects which env file compose reads; the runbook documents it instead
+    assert "TRADING_ENV_FILE" in compose
+    assert "TRADING_ENV_FILE" in _runbook()
+
+
+def test_security_and_operations_cites_d050_in_the_controlled_sections() -> None:
+    text = _read(SEC_OPS)
+    assert text.count("D050") >= 5
+    for number in (1, 4, 6, 9, 10):
+        assert "D050" in _section(text, number), f"section {number} does not cite D050"
+    assert not _missing(_section(text, 1), ("0600", "separate", "paper/test", "live", "OPS-06"))
+    section_9 = _section(text, 9)
+    assert not _missing(section_9, ("7 daily", "4 weekly", "6 monthly", "unrecoverable"))
+    assert "off the VPS" in section_9
+    assert "redact" in _section(text, 6).lower()
+    assert "health" in _section(text, 4).lower()
