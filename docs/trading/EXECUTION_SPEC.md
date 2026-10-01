@@ -120,9 +120,50 @@ Grounding and confidence: the official Event-Algo-Order-Update page could not be
 
 ## 7. Idempotency
 
-All order requests require deterministic client identifiers.
+All order requests require deterministic client identifiers (`src/execution/order_ids.py`).
 
-Repeated execution of the same approved plan must not create duplicate entry orders.
+Repeated execution of the same approved plan must not create duplicate entry orders. The guarantee comes from a durable write-ahead record in PostgreSQL (`execution_intents`, `DATA_MODEL.md` section 2.14), not from the exchange.
+
+### 7.1 The exchange does not deduplicate
+
+Binance documents `newClientOrderId` and `clientAlgoId` as a unique id among open orders, and a duplicate raises `-4116 DUPLICATED_CLIENT_ORDER_ID`; the id is unique only among open orders, so a FILLED or CANCELED order frees its id and the exchange would accept a second order with the same id (`BINANCE.md` section 6.1; provenance and confidence in `SOURCES.md`, "Facts verified for Phase 17"). The Phase 08 D-04 premise that the exchange deduplicates a replayed `clientOrderId` therefore held only while the first entry was still open; after a fill or a cancel a replay would have placed a second entry (audit F-126, F-951). This section retires that premise. The deterministic id is kept because it lets a query by client id find the order after an ambiguous response or a restart, not because the exchange will reject a duplicate.
+
+### 7.2 Write-ahead order
+
+`execute_approved_plan` runs these steps in this order; every `COMMIT` is a separate durable transaction that lands before the adapter call that follows it:
+
+```text
+argument validation
+identity checks (chat, plan hash, version/parameter set, token)     -> INVALIDATED / STALE_SETUP
+stored-outcome lookup for this approval                              -> return the stored outcome, zero adapter calls
+expiry and the remaining gates (binding, approval-authorizes-plan,
+  enablement, SAFE_MODE, cost-rate, risk, placement, position mode)  -> NO_TRADE, approval stays unconsumed
+CONSUME: one transaction inserts the ENTRY intent (INTENDED) and
+  stamps the approval CONSUMED                                       -> COMMIT
+ENTRY SENT                                                           -> COMMIT
+place_entry
+ENTRY result: ACKED / REJECTED / UNKNOWN                             -> COMMIT
+STOP_LOSS intent INTENDED, then SENT                                 -> COMMIT
+place_algo_protective
+STOP_LOSS result: ACKED (confirmed) / UNKNOWN (not confirmed)        -> COMMIT
+ENTRY outcome (is_no_trade, reason_code) recorded                    -> COMMIT
+```
+
+A crash between any two steps leaves a readable row. An intent left INTENDED or SENT is never re-sent blindly (section 10).
+
+- Consumption happens only at placement. A NO_TRADE decided before placement (binding, enablement, SAFE_MODE, cost, risk, placement gates, position mode) does not consume the approval, so a later retry of the same approved plan re-runs every gate until the plan expires. A store failure before the entry is sent returns `RECONCILIATION_REQUIRED` and places nothing; a second approval of the same plan (`uq_execution_intents_plan_role`) returns `INVALIDATED` and places nothing.
+- The loser of a concurrent consume of the same approval gets `False` from the store (it read the winner's row) and returns the winner's stored outcome or, if none is recorded yet, `RECONCILIATION_REQUIRED`; it never places an order and never raises.
+- Gate order is identity, then stored outcome, then expiry (D-16). The identity checks run first so that a wrong token or wrong chat never sees the stored state; the stored outcome is looked up before the expiry gate so that a replay after the plan's expiry of a plan that was already executed returns the stored result instead of `APPROVAL_EXPIRED`. A plan that was never executed still expires.
+- One entry per plan is enforced by the database, not only by this code: primary key `(approval_id, role)`, `uq_execution_intents_plan_role (trade_plan_id, role)`, partial unique `client_order_id` and `algo_client_id`, and at most one decided approval per plan.
+- A replay returns the stored `ExecutionOutcome` with zero adapter calls, in the same process and after a restart, because the state is read from PostgreSQL. An ENTRY row without a recorded outcome (a crash after the entry was sent) replays as `RECONCILIATION_REQUIRED`.
+- Callers: after the plan's expiry the Telegram callback layer (`check_binding_full`) still answers a redelivered APPROVE with `APPROVAL_EXPIRED` even when the plan was executed, because the callback layer keeps its expiry gate. The stored outcome is returned only when `execute_approved_plan` is handed the stored approval. Both paths place nothing; Phase 23 and 24 must read `PgExecutionStateStore.get_entry` if the message should say "already executed".
+
+### 7.3 Failure policy for the intent writes
+
+- Before the entry may exist (lookup, consume, ENTRY SENT): a store failure is NO_TRADE (`RECONCILIATION_REQUIRED`), nothing is placed and SAFE_MODE is not entered. A failed ENTRY SENT write leaves the consumed INTENDED row, so every replay returns `RECONCILIATION_REQUIRED` until reconciliation resolves it.
+- After the entry may exist (the STOP_LOSS intent or any later write fails): the first failure enters SAFE_MODE with reason `DB_FAILURE` (once), every later store write is skipped, the stop-loss is still placed by its deterministic algo id, and the outcome is `RECONCILIATION_REQUIRED`. Protection outranks the audit row (section 6, D034). The unconfirmed-stop path (SAFE_MODE `ENTRY_WITHOUT_PROTECTIVE` plus entry cancel) still runs when the stop-loss is not confirmed.
+- Only the typed persistence errors are caught. A crash (any `BaseException`) propagates untouched, so a simulated or real crash is never mistaken for a handled failure.
+- The STOP_LOSS row keeps `exchange_order_id` and `exchange_status` empty until reconciliation fills them; a confirmed placement is recorded as ACKED.
 
 ## 8. Position modes
 
@@ -163,6 +204,20 @@ If placement response is ambiguous due to timeout/network failure:
 1. do not immediately retry blindly;
 2. query/reconcile by client order ID where supported;
 3. only retry if absence is confirmed.
+
+### 10.1 Restart recovery of execution intents
+
+After a restart every intent that is INTENDED, SENT or UNKNOWN is unresolved (`list_unresolved_intents`). `resolve_unresolved_intents` (`src/execution/intent_recovery.py`) resolves them by query only; it takes a two-method probe (`query_order_by_client`, `query_algo_order_by_client`), so placing an order is structurally impossible:
+
+1. INTENDED and SENT intents are first recorded as UNKNOWN;
+2. each is probed by its deterministic client id (ENTRY by client order id, protective legs by algo client id);
+3. found: ACKED (at any age), with the exchange order id for an ENTRY;
+4. definitively absent and intended less than the lookup window ago: REJECTED. The window is 3 days (default `lookup_window`), because Binance Query Order does not find a CANCELED or EXPIRED order without a fill after 3 days (`BINANCE.md` section 6.1), so "not found" proves absence only for a younger intent; exactly 3 days old is not young;
+5. a probe error, an indeterminate answer (anything but a literal true or false) or an absent order at or past the window: the intent stays UNKNOWN.
+
+Anything that stays UNKNOWN, or whose status write fails, enters SAFE_MODE with reason `UNRESOLVED_EXECUTION_INTENT` exactly once per pass (`GLOSSARY.md` section 9.4); an unreadable store enters SAFE_MODE `DB_FAILURE` and re-raises, so "nothing to resolve" is never confused with "could not look". Entries stay blocked until the intent is resolved; the exit rules are Phase 20. A later `execute_approved_plan` for the same approval returns the stored state (`RECONCILIATION_REQUIRED` when no outcome was recorded) and never calls `place_entry`.
+
+Implementation status (Phase 17): the store, the recovery function and the write-ahead flow exist and are proven on PostgreSQL (crash injection after each step, two-thread races, restart on a fresh engine), but nothing calls `resolve_unresolved_intents` or reads the persisted SAFE_MODE state at startup yet: that wiring is Phase 20 (SAFE_MODE, reconciliation) and Phase 24 (composition). Known gap owned by Phase 20: a crash after the STOP_LOSS intent was written leaves an acknowledged entry without a stop, and a restart does not place one (the intent rows ENTRY ACKED and STOP_LOSS INTENDED or SENT are what reconciliation reads); until then the operator uses `RUNBOOK.md` section 3.
 
 ## 11. Manual emergency controls
 

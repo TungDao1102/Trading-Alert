@@ -59,6 +59,14 @@ Conditional orders such as `STOP_MARKET` / `TAKE_PROFIT_MARKET` were migrated to
 
 Working type (D037): protective triggers use the mark-price series, so `workingType` must be sent explicitly as `MARK_PRICE` on every protective order. The Algo Order API default is `CONTRACT_PRICE`, so the adapter must never rely on the default. The audit's alternative `CONTRACT_PRICE` recommendation is not adopted. [Binance New Algo Order](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Algo-Order) Verify against current Binance docs before implementation.
 
+### 6.1 Client order id uniqueness (Phase 17, D051)
+
+Binance documents `newClientOrderId` (normal orders) and `clientAlgoId` (Algo Orders) as "A unique id among open orders", automatically generated if not sent, matching `^[.A-Z:/a-z0-9_-]{1,36}$`. A duplicate id raises error `-4116 DUPLICATED_CLIENT_ORDER_ID` ("clientOrderId is duplicated") for normal orders; the Algo Order page names no error code for a duplicate `clientAlgoId`, so none may be assumed. [Binance New Order](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Order), [Binance New Algo Order](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Algo-Order), [Binance error codes](https://developers.binance.com/docs/derivatives/usds-margined-futures/error-code) The provenance (which pages could be read, snapshot dates, SDK docstring fallback) and the confidence are recorded in `SOURCES.md`, section "Facts verified for Phase 17"; verify against current Binance docs before implementation.
+
+Consequence: the id is unique only among open orders, so once an order is FILLED or CANCELED its id is free again and the exchange would accept a second order with the same id. The exchange therefore cannot be relied on to deduplicate a replayed entry; the persisted execution intent is the guard (`EXECUTION_SPEC.md` section 7). The earlier Phase 08 premise that the exchange rejects a replayed `clientOrderId` was true only while the first entry was still open (audit F-126, F-951). The deterministic ids from `src/execution/order_ids.py` still matter, but for a different reason: they let a query by client id find the order after an ambiguous response or a restart.
+
+Query Order (`GET /fapi/v1/order`, weight 1) does not find an order when its status is CANCELED or EXPIRED with no filled trade and it was created more than 3 days ago, or when it was created more than 90 days ago. A "not found" answer is therefore a definitive absence only for an intent younger than 3 days (`EXECUTION_SPEC.md` section 10). The retention of the algo-order query is not documented and is treated as unknown. [Binance Query Order](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Query-Order)
+
 ## 7. Position mode
 
 The application must read and record:
