@@ -1,0 +1,15 @@
+# Test-only sshd for the cutover sidecar: key login only, one account, no forwarding.
+Port 22
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+PubkeyAuthentication yes
+UsePAM no
+AllowUsers rsync
+# The key volume is owned by the application UID, so ownership checks cannot pass.
+StrictModes no
+AuthorizedKeysFile /keys/id_ed25519.pub
+AllowTcpForwarding no
+X11Forwarding no
+PermitTTY no
+LogLevel INFO

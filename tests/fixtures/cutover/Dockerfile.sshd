@@ -1,0 +1,17 @@
+# Test-only rsync source for tests/test_docker_cutover.py (13.1-09, D-15).
+#
+# A key-only sshd plus rsync in the SAME pinned Python base the application image uses, so
+# there is one Python pin to maintain. It stands in for the OLD host: the test mounts the old
+# project's named volumes into it read-only and the migration script pulls from it over ssh.
+# Packages come from the distro only; nothing is fetched from a language registry.
+FROM python:3.13.15-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26
+
+# UID 10001 equals the application user, so the 0600 files the collector wrote stay readable
+# through the read-only volume mounts. `usermod -p '*'` keeps the account non-locked (sshd
+# refuses a locked account even for key logins) while no password can ever match.
+RUN apt-get update     && apt-get install -y --no-install-recommends openssh-server rsync     && rm -rf /var/lib/apt/lists/*     && useradd --uid 10001 --create-home --shell /bin/bash rsync     && usermod -p '*' rsync     && mkdir -p /run/sshd     && ssh-keygen -A
+
+COPY sshd_config /etc/ssh/sshd_config
+
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D", "-e"]

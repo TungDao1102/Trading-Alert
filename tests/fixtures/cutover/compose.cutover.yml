@@ -1,0 +1,27 @@
+# Test-only override for tests/test_docker_cutover.py (13.1-09, D-15): the real collector would
+# call Binance, so its command is replaced by the deterministic fake. The fixture directory is
+# mounted read-only (it is test code, never host data); the ops service gets it too so the
+# test can seed through the same file. FAKE_TICK_AT comes from the test process environment.
+services:
+  collector:
+    command: ["/app/.venv/bin/python", "/fixture/fake_collector.py", "tick"]
+    restart: "no"
+    environment:
+      FAKE_TICK_AT: ${FAKE_TICK_AT:-}
+      PYTHONPATH: /app
+    volumes:
+      - type: bind
+        source: ./tests/fixtures/cutover
+        target: /fixture
+        read_only: true
+    healthcheck:
+      disable: true
+
+  ops:
+    environment:
+      PYTHONPATH: /app
+    volumes:
+      - type: bind
+        source: ./tests/fixtures/cutover
+        target: /fixture
+        read_only: true
