@@ -247,7 +247,7 @@ def test_dry_run_prints_the_command_and_executes_nothing(rig: Rig) -> None:
     assert "src.ops.backup scheduled" in proc.stdout
 
 
-@pytest.mark.parametrize("script", ["backup.sh"])
+@pytest.mark.parametrize("script", ["backup.sh", "restore.sh", "backup-drill.sh", "update.sh"])
 def test_unknown_flag_exits_two(rig: Rig, script: str) -> None:
     proc = rig.run(script, "--definitely-not-a-flag")
     assert proc.returncode == 2, proc.stdout + proc.stderr
@@ -335,7 +335,7 @@ def test_service_is_a_oneshot_that_runs_the_wrapper_as_the_trading_user() -> Non
 FORBIDDEN = ("pg_dump", "pg_restore", "psql", "rclone", "restic", "gpg", "openssl", "age ")
 
 
-@pytest.mark.parametrize("name", ["backup.sh"])
+@pytest.mark.parametrize("name", ["backup.sh", "restore.sh", "backup-drill.sh"])
 def test_wrappers_never_call_dump_restore_or_remote_tools_directly(name: str) -> None:
     path = DEPLOY / name
     assert path.exists(), f"{name} is missing"
@@ -343,3 +343,237 @@ def test_wrappers_never_call_dump_restore_or_remote_tools_directly(name: str) ->
     for word in FORBIDDEN:
         assert word not in code, f"{name} mentions {word!r} outside a comment"
     assert "src.ops.backup" in code
+
+
+# --- restore.sh --------------------------------------------------------------------------------
+
+STAMP = r"[0-9]{8}T[0-9]{6}Z"
+
+
+def test_restore_runs_postgres_pull_restore_and_then_the_stack_in_order(rig: Rig) -> None:
+    proc = rig.run("restore.sh")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    calls = rig.docker_lines()
+    assert len(calls) == 4, calls
+    assert "up -d --wait" in calls[0] and calls[0].endswith(" postgres")
+    pull = re.search(rf"src\.ops\.backup pull --dest (data/backup/restore-{STAMP})$", calls[1])
+    assert pull, calls[1]
+    assert f"{OPS} --no-deps ops {PY} -m src.ops.backup pull" in calls[1]
+    restore = re.search(
+        rf"src\.ops\.backup restore --bundle-root (data/backup/restore-{STAMP}) "
+        r"--parquet-target data/raw$",
+        calls[2],
+    )
+    assert restore, calls[2]
+    assert restore.group(1) == pull.group(1), "restore must read the directory pull wrote"
+    assert calls[3].endswith(" up -d") and "postgres" not in calls[3]
+
+
+def test_restore_no_start_omits_the_final_up(rig: Rig) -> None:
+    proc = rig.run("restore.sh", "--no-start")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    calls = rig.docker_lines()
+    assert len(calls) == 3
+    assert not any(c.endswith(" up -d") for c in calls)
+
+
+def test_restore_forwards_force_to_restore_and_snapshot_to_pull(rig: Rig) -> None:
+    proc = rig.run("restore.sh", "--force", "--snapshot", "20260930T031500Z", "--no-start")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    calls = rig.docker_lines()
+    assert calls[1].endswith(" --snapshot 20260930T031500Z")
+    assert "--force" not in calls[1]
+    assert calls[2].endswith(" --force") and "--snapshot" not in calls[2]
+
+
+def test_restore_rejects_a_malformed_snapshot_id(rig: Rig) -> None:
+    proc = rig.run("restore.sh", "--snapshot", "../../etc")
+    assert proc.returncode == 2, proc.stderr
+    assert rig.lines() == []
+
+
+def test_a_failing_pull_stops_before_the_restore(rig: Rig) -> None:
+    proc = rig.run("restore.sh", env={"STUB_PULL_RC": "4"})
+    assert proc.returncode == 4, proc.stdout + proc.stderr
+    calls = rig.docker_lines()
+    assert len(calls) == 2, calls
+    assert "src.ops.backup restore" not in " ".join(calls)
+
+
+def test_a_refusing_restore_reaches_the_operator_and_the_stack_is_not_started(rig: Rig) -> None:
+    proc = rig.run("restore.sh", env={"STUB_RESTORE_RC": "1"})
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert not any(c.endswith(" up -d") for c in rig.docker_lines())
+
+
+def test_restore_dry_run_executes_nothing(rig: Rig) -> None:
+    proc = rig.run("restore.sh", "--dry-run")
+    assert proc.returncode == 0, proc.stderr
+    assert rig.lines() == []
+    assert proc.stdout.count("+ ") == 4
+
+
+# --- backup-drill.sh ---------------------------------------------------------------------------
+
+
+def test_drill_makes_exactly_one_ops_call_and_propagates_its_exit_code(rig: Rig) -> None:
+    proc = rig.run("backup-drill.sh", env={"STUB_DRILL_RC": "3"})
+    assert proc.returncode == 3, proc.stdout + proc.stderr
+    (call,) = rig.docker_lines()
+    assert re.search(
+        rf"{re.escape(OPS)} --no-deps ops {re.escape(PY)} -m src\.ops\.backup drill-remote "
+        rf"--scratch-root data/backup/drill-{STAMP}$",
+        call,
+    ), call
+
+
+def test_drill_succeeds_with_a_zero_exit_code(rig: Rig) -> None:
+    assert rig.run("backup-drill.sh").returncode == 0
+
+
+# --- update.sh ---------------------------------------------------------------------------------
+
+
+def _update(
+    rig: Rig, *args: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    return rig.run("update.sh", *args, env=env)
+
+
+def test_update_requires_a_ref_or_rollback_and_not_both(rig: Rig) -> None:
+    assert _update(rig).returncode == 2
+    assert _update(rig, "--ref", "v1", "--rollback").returncode == 2
+    assert _update(rig, "--ref", "--evil").returncode == 2
+    assert _update(rig, "--rollback", "--skip-backup").returncode == 2
+    assert rig.lines() == []
+
+
+def test_a_dirty_tree_stops_the_update_before_anything_else(rig: Rig) -> None:
+    proc = _update(rig, "--ref", "v0.3.1", env={"STUB_GIT_DIRTY": " M src/x.py\n"})
+    assert proc.returncode != 0
+    assert "uncommitted" in proc.stderr
+    assert rig.docker_lines() == []
+    assert not any(ln.startswith(("git checkout", "git fetch")) for ln in rig.lines())
+    assert not (rig.deploy_state / "last-good.env").exists()
+
+
+def test_update_records_state_backs_up_retags_checks_out_builds_and_starts(rig: Rig) -> None:
+    proc = _update(rig, "--ref", "v0.3.1")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    state = (rig.deploy_state / "last-good.env").read_text(encoding="utf-8")
+    assert state == f"GIT_SHA={OLD_SHA}\nAPP_IMAGE_ID={OLD_APP}\nOPS_IMAGE_ID={OLD_OPS}\n"
+
+    lines = rig.lines()
+    i_backup = _index(lines, "docker compose", "src.ops.backup scheduled")
+    i_tag_app = _index(lines, "docker tag trading-alert:dev trading-alert:rollback")
+    i_tag_ops = _index(lines, "docker tag trading-alert-ops:dev trading-alert-ops:rollback")
+    i_fetch = _index(lines, "git fetch")
+    i_checkout = _index(lines, "git checkout --detach v0.3.1")
+    i_build = _index(lines, "--profile ops build")
+    i_up = _index(lines, " up -d")
+    assert i_backup < i_tag_app < i_tag_ops < i_fetch < i_checkout < i_build < i_up
+    assert "--no-build" not in lines[i_up]
+    # the rollback tags hold the old images, the active tags the new ones
+    assert rig.image("trading-alert:rollback") == OLD_APP
+    assert rig.image("trading-alert-ops:rollback") == OLD_OPS
+    assert rig.image("trading-alert:dev") == NEW_APP
+    assert rig.head() == REF_SHA
+
+
+def test_skip_backup_omits_the_backup_run(rig: Rig) -> None:
+    proc = _update(rig, "--ref", "v0.3.1", "--skip-backup")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not any("src.ops.backup" in ln for ln in rig.lines())
+
+
+def test_a_failing_backup_stops_the_update(rig: Rig) -> None:
+    proc = _update(rig, "--ref", "v0.3.1", env={"STUB_BACKUP_RC": "9"})
+    assert proc.returncode == 9, proc.stdout + proc.stderr
+    lines = rig.lines()
+    assert not any(ln.startswith(("git checkout", "git fetch")) for ln in lines)
+    assert not any(" build" in ln for ln in lines)
+    assert rig.head() == OLD_SHA
+    assert rig.image("trading-alert:dev") == OLD_APP
+
+
+def test_an_update_without_local_images_is_refused(rig: Rig) -> None:
+    (rig.state / "img" / "trading-alert_dev").unlink()
+    proc = _update(rig, "--ref", "v0.3.1")
+    assert proc.returncode != 0
+    assert "must exist locally" in proc.stderr
+    assert not any(ln.startswith("git checkout") for ln in rig.lines())
+
+
+def test_update_dry_run_executes_nothing(rig: Rig) -> None:
+    proc = _update(rig, "--ref", "v0.3.1", "--dry-run")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not any(ln.startswith(("git checkout", "git fetch", "docker tag")) for ln in rig.lines())
+    assert not (rig.deploy_state / "last-good.env").exists()
+    assert "git checkout --detach v0.3.1" in proc.stdout
+
+
+def test_rollback_without_a_state_file_fails(rig: Rig) -> None:
+    proc = _update(rig, "--rollback")
+    assert proc.returncode != 0
+    assert "nothing to roll back" in proc.stderr
+    assert rig.docker_lines() == []
+
+
+def test_rollback_restores_the_recorded_commit_and_image_ids(rig: Rig) -> None:
+    assert _update(rig, "--ref", "v0.3.1").returncode == 0
+    assert rig.image("trading-alert:dev") == NEW_APP
+    before = len(rig.lines())
+
+    proc = _update(rig, "--rollback")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert rig.head() == OLD_SHA
+    assert rig.image("trading-alert:dev") == OLD_APP
+    assert rig.image("trading-alert-ops:dev") == OLD_OPS
+    lines = rig.lines()[before:]
+    i_checkout = _index(lines, f"git checkout --detach {OLD_SHA}")
+    i_tag = _index(lines, "docker tag trading-alert:rollback trading-alert:dev")
+    i_up = _index(lines, "up -d --no-build")
+    assert i_checkout < i_tag < i_up
+    assert not any(" build" in ln and "--no-build" not in ln for ln in lines)
+    assert "NOT undone" in proc.stderr
+
+
+def test_rollback_aborts_when_the_rollback_image_is_not_the_recorded_one(rig: Rig) -> None:
+    assert _update(rig, "--ref", "v0.3.1").returncode == 0
+    rig.set_image("trading-alert:rollback", "sha256:" + "e" * 64)
+    before = len(rig.lines())
+    proc = _update(rig, "--rollback")
+    assert proc.returncode != 0
+    assert "recorded was" in proc.stderr
+    after = rig.lines()[before:]
+    assert not any(ln.startswith(("git checkout", "docker compose")) for ln in after)
+    assert rig.image("trading-alert:dev") == NEW_APP
+
+
+def test_rollback_aborts_when_the_record_disagrees_with_the_image_ids(rig: Rig) -> None:
+    assert _update(rig, "--ref", "v0.3.1").returncode == 0
+    state = rig.deploy_state / "last-good.env"
+    text = state.read_text(encoding="utf-8").replace(OLD_APP, "sha256:" + "f" * 64)
+    _write(state, text)
+    proc = _update(rig, "--rollback")
+    assert proc.returncode != 0
+    assert not any(ln.endswith("up -d --no-build") for ln in rig.lines())
+
+
+def test_rollback_refuses_a_corrupt_state_file(rig: Rig) -> None:
+    _write(rig.deploy_state / "last-good.env", "GIT_SHA=not-a-sha\n")
+    proc = _update(rig, "--rollback")
+    assert proc.returncode != 0
+    assert "GIT_SHA" in proc.stderr
+    assert rig.lines() == []
+
+
+def test_deploy_state_directory_is_ignored_by_git() -> None:
+    proc = subprocess.run(
+        ["git", "check-ignore", ".deploy/last-good.env"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr

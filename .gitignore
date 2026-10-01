@@ -35,3 +35,6 @@ htmlcov/
 # Local env (T-02-02 — credentials must never be in git)
 .env
 .env.local
+
+# Deploy rollback state (13.1-10): recorded commit and image IDs, host-local
+.deploy/
