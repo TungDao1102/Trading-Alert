@@ -1,19 +1,19 @@
 ---
 gsd_state_version: "1.0"
 milestone: v0.3
-current_phase: 13
-current_phase_name: research-data-foundation-fixes
+current_phase: "13.1"
+current_phase_name: Deployment & CI
 status: executing
-stopped_at: Phase 13.1 context gathered
-last_updated: "2026-10-01T02:43:17.446Z"
-last_activity: 2026-09-30
-last_activity_desc: Phase 13 execution started
-state_head: d3b538240506e30c4333939b71b05a481277fdbe
+stopped_at: Completed 13.1-01-PLAN.md
+last_updated: "2026-10-01T04:43:00.611Z"
+last_activity: 2026-10-01
+last_activity_desc: Phase 13.1 execution started
+state_head: d6ba1921277d100459b4f4edd8c7926f8f0aa4ab
 progress:
   total_phases: 29
   completed_phases: 3
-  total_plans: 82
-  completed_plans: 79
+  total_plans: 94
+  completed_plans: 80
 milestone_name: milestone
 ---
 
@@ -26,14 +26,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 13 — research-data-foundation-fixes
+**Current focus:** Phase 13.1 — Deployment & CI
 
 ## Current Position
 
-Phase: 13 (research-data-foundation-fixes) — EXECUTING
-Plan: 10 of 13
+Phase: 13.1 (Deployment & CI) — EXECUTING
+Plan: 2 of 12
 Status: Ready to execute
-Last activity: 2026-09-30 — Phase 13 execution started
+Last activity: 2026-10-01 — Phase 13.1 execution started
 
 Progress: [█░░░░░░░░░] 11%
 
@@ -119,6 +119,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 13 P10 | 15min | 3 tasks | 3 files |
 | Phase 13 P08 | 35 min | 3 tasks | 4 files |
 | Phase 13 P11 | 11 min | 3 tasks | 9 files |
+| Phase 13.1 P01 | 40 min | 2 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -312,6 +313,7 @@ Recent decisions affecting current work:
 - [Phase 13]: 13-08: 1m coverage printed per protocol split block on the 1h/4h timeline; extending 1m beyond 12 months stays a user decision (D-21)
 - [Phase 13]: D049 records Phase 13 data foundation; case-input builder lives in src/data/case_input.py (D-22 supersedes D-17); 1m depth stays 12 months pending the sufficiency report (D-21)
 - [Phase 13]: Decision-alignment requirements gate maps OPS-06 to Phase 13.1 (string phases); Phase 13 exchange facts recorded MEDIUM where only SDK docstring or live probe was available
+- [Phase 13.1]: 13.1-01: ruff format repo-wide in own commit; src/risk/portfolio.py F841 per-file ignore (risk code untouched); docker marker + TRADING_CI_STRICT-aware infra_skip
 
 ### Pending Todos
 
@@ -357,6 +359,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-01T02:43:17.183Z
-Stopped at: Phase 13.1 context gathered
-Resume file: .planning/phases/13.1-deployment-ci/13.1-CONTEXT.md
+Last session: 2026-10-01T04:43:00.343Z
+Stopped at: Completed 13.1-01-PLAN.md
+Resume file: None
