@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: "13.1"
 current_phase_name: Deployment & CI
 status: executing
-stopped_at: Completed 13.1-02-PLAN.md
-last_updated: "2026-10-01T04:47:44.561Z"
+stopped_at: Completed 13.1-03-PLAN.md
+last_updated: "2026-10-01T04:58:06.622Z"
 last_activity: 2026-10-01
 last_activity_desc: Phase 13.1 execution started
-state_head: 21a378235d63a2d75d048f9757e0829555145d60
+state_head: 13d3c62a9212d43f11385839fa78d716238ad7c1
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 94
-  completed_plans: 81
+  completed_plans: 82
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 13.1 (Deployment & CI) — EXECUTING
-Plan: 3 of 12
+Plan: 4 of 12
 Status: Ready to execute
 Last activity: 2026-10-01 — Phase 13.1 execution started
 
@@ -121,6 +121,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 13 P11 | 11 min | 3 tasks | 9 files |
 | Phase 13.1 P01 | 40 min | 2 tasks | 12 files |
 | Phase 13.1 P02 | 20min | 2 tasks | 5 files |
+| Phase 13.1 P03 | 45min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -315,6 +316,7 @@ Recent decisions affecting current work:
 - [Phase 13]: D049 records Phase 13 data foundation; case-input builder lives in src/data/case_input.py (D-22 supersedes D-17); 1m depth stays 12 months pending the sufficiency report (D-21)
 - [Phase 13]: Decision-alignment requirements gate maps OPS-06 to Phase 13.1 (string phases); Phase 13 exchange facts recorded MEDIUM where only SDK docstring or live probe was available
 - [Phase 13.1]: 13.1-01: ruff format repo-wide in own commit; src/risk/portfolio.py F841 per-file ignore (risk code untouched); docker marker + TRADING_CI_STRICT-aware infra_skip
+- [Phase 13.1]: 13.1-03: compose project name trading and runtime UID 10001 fixed; ops-image postgresql-client-17 floats within major 17 (sole exception to D-05)
 
 ### Pending Todos
 
@@ -360,6 +362,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-01T04:47:44.285Z
-Stopped at: Completed 13.1-02-PLAN.md
+Last session: 2026-10-01T04:58:06.346Z
+Stopped at: Completed 13.1-03-PLAN.md
 Resume file: None
