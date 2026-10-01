@@ -14,6 +14,10 @@ manager can never swallow it) right after a named write-ahead step has been
 COMMITTED (plan 11, D-14, D-26): the row stays readable and a restarted manager
 must not re-send.
 
+`BarrierBeforeConsume` makes two concurrent callers meet at a `threading.Barrier` just
+before `consume_and_record_entry_intent`, so a race test releases both at the same moment
+instead of hoping the scheduler overlaps them (plan 17-12, D-26).
+
 `FailingIntentStore` raises a chosen exception from one method (optionally only
 for one role) to prove the manager fails closed on store errors on both sides of
 placement.
@@ -29,6 +33,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from src.domain.enums import ExecutionIntentStatus, OrderRole
 from src.domain.transitions import IllegalTransition, TransitionKind, assert_transition
@@ -418,6 +423,55 @@ class CrashAfter:
             now_utc=now_utc,
         )
         self._maybe_crash("finalize")
+
+
+class BarrierBeforeConsume:
+    """Delegates to `inner`; waits on `barrier` right before consume (race synchronization).
+
+    Every other store method is delegated unchanged through `__getattr__`, so a later
+    Protocol addition needs no edit here. A wait that times out (the other side never
+    arrived) raises `threading.BrokenBarrierError` instead of hanging the suite.
+    """
+
+    def __init__(
+        self,
+        inner: ExecutionIntentStore,
+        *,
+        barrier: threading.Barrier,
+        timeout_seconds: float = 30.0,
+    ) -> None:
+        self._inner = inner
+        self._barrier = barrier
+        self._timeout_seconds = timeout_seconds
+
+    def consume_and_record_entry_intent(
+        self,
+        *,
+        approval_id: str,
+        trade_plan_id: str,
+        plan_hash: str,
+        client_order_id: str,
+        symbol: str,
+        side: str,
+        intended_quantity: Decimal,
+        intended_price: Decimal,
+        now_utc: datetime,
+    ) -> bool:
+        self._barrier.wait(timeout=self._timeout_seconds)
+        return self._inner.consume_and_record_entry_intent(
+            approval_id=approval_id,
+            trade_plan_id=trade_plan_id,
+            plan_hash=plan_hash,
+            client_order_id=client_order_id,
+            symbol=symbol,
+            side=side,
+            intended_quantity=intended_quantity,
+            intended_price=intended_price,
+            now_utc=now_utc,
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
 
 
 _FAILABLE_METHODS: frozenset[str] = frozenset(

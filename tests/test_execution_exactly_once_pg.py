@@ -6,16 +6,25 @@ same deterministic id again and a replayed APPROVE would place a second entry.
 The approval is therefore consumed durably in PostgreSQL by writing the ENTRY
 execution intent ahead of `place_entry` (D-13, D-14, D-15).
 
+Plan 17-12 completes the SC4 matrix below the tracer tests: the first entry still
+OPEN, FILLED or CANCELED, each with and without a restart (all engines disposed, new
+engine, store and manager), two concurrent calls from two threads with separate engines,
+and negative controls (a store that never remembers) proving the fake would catch F-126.
+
 Every PostgreSQL test runs on a generated `t17_<hex>_test` database cloned from
 an alembic-built template (`tests/pg_support.py`).
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
+import threading
 from collections.abc import Iterator
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -32,7 +41,11 @@ from src.persistence.execution_state import PgExecutionStateStore
 from src.persistence.uow import OperationalDatabase
 
 from tests.support.fake_binance_exchange import BinanceSemanticsFakeAdapter
-from tests.support.intent_store_fakes import AlwaysWinsIntentStore, InMemoryExecutionIntentStore
+from tests.support.intent_store_fakes import (
+    AlwaysWinsIntentStore,
+    BarrierBeforeConsume,
+    InMemoryExecutionIntentStore,
+)
 from tests.test_execution_manager import (
     _build_approval,
     _build_approved_plan,
@@ -311,3 +324,253 @@ async def test_in_memory_store_has_the_same_one_entry_semantics() -> None:
     second = await _run_plan(adapter, intent_store=store)
     assert second == first
     assert len(adapter.calls_to("place_entry")) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Plan 17-12: the full SC4 matrix (D-15, D-17, D-25, D-26).
+# --------------------------------------------------------------------------- #
+
+OK = ExecutionOutcome(is_no_trade=False, reason_code="OK")
+RECONCILIATION_REQUIRED = ExecutionOutcome(is_no_trade=True, reason_code="RECONCILIATION_REQUIRED")
+SCENARIOS = ("open", "filled", "canceled")
+BARRIER_TIMEOUT_SECONDS = 30.0
+
+
+def _free_the_client_id(adapter: BinanceSemanticsFakeAdapter, scenario: str) -> None:
+    """What the exchange does to the first entry between the two calls."""
+    if scenario == "open":
+        return  # still on the open book: the exchange itself would reject a duplicate id
+    getattr(adapter, "fill" if scenario == "filled" else "cancel")(ENTRY_CLIENT_ID)
+
+
+class _RejectionRecordingAdapter(BinanceSemanticsFakeAdapter):
+    """Records every error the fake exchange raised for `place_entry` (e.g. -4116)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entry_rejections: list[str] = []
+
+    async def place_entry(self, **kwargs: Any) -> Any:
+        try:
+            return await super().place_entry(**kwargs)
+        except RuntimeError as exc:
+            self.entry_rejections.append(str(exc))
+            raise
+
+    @property
+    def accepted_entries(self) -> int:
+        return len(self.calls_to("place_entry")) - len(self.entry_rejections)
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["same_process", "restart"])
+@pytest.mark.parametrize("scenario", SCENARIOS)
+async def test_sc4_double_call_places_exactly_one_entry(
+    pg_db: str, scenario: str, restart: bool
+) -> None:
+    adapter = BinanceSemanticsFakeAdapter()
+
+    with _store_on(pg_db) as (engine, store):
+        _seed_parent_chain(engine)
+        first = await _run_plan(adapter, intent_store=store)
+        assert first == OK
+        if restart:
+            engine.dispose()  # the process "exits"; every pooled connection is gone
+        _free_the_client_id(adapter, scenario)
+        calls_after_first = len(adapter.calls)
+
+        second_context = _store_on(pg_db) if restart else nullcontext((engine, store))
+        with second_context as (engine2, store2):
+            second = await _run_plan(adapter, intent_store=store2)
+
+            assert second == first  # the stored outcome, not a fresh decision
+            assert len(adapter.calls) == calls_after_first  # zero adapter calls on the replay
+            assert len(adapter.calls_to("place_entry")) == 1
+            entries = _scalar(
+                engine2, "SELECT count(*) FROM execution_intents WHERE role = 'ENTRY'"
+            )
+            assert entries == 1
+            assert _entry_row(engine2)["intent_status"] == "ACKED"
+            consumed = _scalar(
+                engine2, "SELECT count(*) FROM approvals WHERE consumption_status = 'CONSUMED'"
+            )
+            assert consumed == 1
+
+
+# --------------------------------------------------------------------------- #
+# Concurrency: two threads, separate engines, released together at the barrier.
+# --------------------------------------------------------------------------- #
+
+
+def _consume_args() -> dict[str, Any]:
+    return {
+        "approval_id": APPROVAL_ID,
+        "trade_plan_id": CASE["trade_plan_id"],
+        "plan_hash": PLAN_HASH,
+        "client_order_id": ENTRY_CLIENT_ID,
+        "symbol": CASE["symbol"],
+        "side": "BUY",
+        "intended_quantity": Decimal("2.415"),
+        "intended_price": Decimal(str(CASE["expected_limit_price"])),
+        "now_utc": NOW_UTC,
+    }
+
+
+@pytest.mark.parametrize("attempt", range(3))
+def test_two_threads_consuming_the_same_approval_yield_one_winner_and_one_row(
+    pg_db: str, attempt: int
+) -> None:
+    barrier = threading.Barrier(2)
+
+    with _store_on(pg_db) as (engine, store_a), _store_on(pg_db) as (_engine_b, store_b):
+        _seed_parent_chain(engine)
+
+        def consume(store: PgExecutionStateStore) -> bool:
+            barrier.wait(timeout=BARRIER_TIMEOUT_SECONDS)
+            return store.consume_and_record_entry_intent(**_consume_args())
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(consume, store_a), pool.submit(consume, store_b)]
+            results = sorted(f.result(timeout=60) for f in futures)
+
+        assert results == [False, True]  # exactly one winner (D-17, D-26)
+        assert _scalar(engine, "SELECT count(*) FROM execution_intents WHERE role = 'ENTRY'") == 1
+        assert _entry_row(engine)["intent_status"] == "INTENDED"
+        consumed = _scalar(
+            engine, "SELECT count(*) FROM approvals WHERE consumption_status = 'CONSUMED'"
+        )
+        assert consumed == 1
+
+
+@pytest.mark.parametrize("attempt", range(3))
+def test_two_concurrent_manager_calls_place_exactly_one_entry(pg_db: str, attempt: int) -> None:
+    adapter = BinanceSemanticsFakeAdapter()
+    barrier = threading.Barrier(2)
+
+    with _store_on(pg_db) as (engine, store_a), _store_on(pg_db) as (_engine_b, store_b):
+        _seed_parent_chain(engine)
+
+        def run(store: PgExecutionStateStore) -> ExecutionOutcome:
+            raced = BarrierBeforeConsume(
+                store, barrier=barrier, timeout_seconds=BARRIER_TIMEOUT_SECONDS
+            )
+            # Its own event loop per thread: a blocking store call stalls only its thread.
+            return asyncio.run(_run_plan(adapter, intent_store=raced))
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(run, store_a), pool.submit(run, store_b)]
+            outcomes = [f.result(timeout=60) for f in futures]
+
+        assert len(adapter.calls_to("place_entry")) == 1
+        assert _scalar(engine, "SELECT count(*) FROM execution_intents WHERE role = 'ENTRY'") == 1
+        assert OK in outcomes  # the winner completed its run
+        # The loser returns the winner's recorded outcome, or fail-closed
+        # RECONCILIATION_REQUIRED while the winner has not finalized yet; never a 2nd order.
+        for outcome in outcomes:
+            assert outcome in (OK, RECONCILIATION_REQUIRED)
+        assert _entry_row(engine)["intent_status"] == "ACKED"
+
+
+# --------------------------------------------------------------------------- #
+# Negative controls: without a durable memory the fake sees F-126.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("scenario", ["filled", "canceled"])
+async def test_negative_control_never_remembering_store_places_two_entries_after_free(
+    scenario: str,
+) -> None:
+    adapter = _RejectionRecordingAdapter()
+    store = AlwaysWinsIntentStore()
+
+    first = await _run_plan(adapter, intent_store=store)
+    _free_the_client_id(adapter, scenario)
+    second = await _run_plan(adapter, intent_store=store)
+
+    assert first.is_no_trade is False
+    assert second.is_no_trade is False
+    # The exchange freed the id, so it accepted the SAME client id a second time.
+    assert len(adapter.calls_to("place_entry")) == 2
+    assert adapter.entry_rejections == []
+    assert adapter.accepted_entries == 2
+
+
+async def test_negative_control_open_entry_is_rejected_with_4116_by_the_exchange() -> None:
+    adapter = _RejectionRecordingAdapter()
+    store = AlwaysWinsIntentStore()
+
+    await _run_plan(adapter, intent_store=store)
+    await _run_plan(adapter, intent_store=store)  # the first entry is still OPEN
+
+    # One entry on the book; the second attempt reached the exchange and got -4116 back.
+    # Only the FILLED / CANCELED scenarios show why F-126 needs the local row: the
+    # exchange dedups an open id and nothing else.
+    assert len(adapter.calls_to("place_entry")) == 2
+    assert len(adapter.entry_rejections) == 1
+    assert "-4116" in adapter.entry_rejections[0]
+    assert adapter.accepted_entries == 1
+    assert len(adapter.open_orders) == 1
+
+
+def test_negative_control_concurrent_calls_without_a_durable_row_both_reach_the_exchange() -> None:
+    adapter = _RejectionRecordingAdapter()
+    barrier = threading.Barrier(2)
+
+    def run() -> ExecutionOutcome:
+        raced = BarrierBeforeConsume(
+            AlwaysWinsIntentStore(), barrier=barrier, timeout_seconds=BARRIER_TIMEOUT_SECONDS
+        )
+        return asyncio.run(_run_plan(adapter, intent_store=raced))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(run), pool.submit(run)]
+        for future in futures:
+            future.result(timeout=60)
+
+    # Both workers consumed the "same" approval and both sent: the barrier harness really
+    # overlaps the two calls, so the exactly-one assertions above are not vacuous.
+    assert len(adapter.calls_to("place_entry")) == 2
+
+
+def _reset_consumption(engine: Engine) -> None:
+    """Back to 'approved, nothing consumed' so one database can host many race rounds."""
+    with engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM execution_intents WHERE approval_id = :a"), {"a": APPROVAL_ID}
+        )
+        conn.execute(
+            text(
+                "UPDATE approvals SET consumption_status = 'UNCONSUMED', consumed_at_utc = NULL "
+                "WHERE approval_id = :a"
+            ),
+            {"a": APPROVAL_ID},
+        )
+
+
+def test_consume_race_never_raises_for_the_loser_over_many_rounds(pg_db: str) -> None:
+    """Two writers racing on one approval: the loser gets False, never an exception.
+
+    The loser's INSERT can reach the secondary unique index (plan, role) before it
+    sees the winner on the targeted arbiter (approval, role). That unique violation
+    means "lost the race to the same approval", not "a different approval holds the
+    plan", so the store must answer False (D-17). Many rounds make the narrow window
+    observable instead of a one-in-twenty flake.
+    """
+    rounds = 60
+    with _store_on(pg_db) as (engine, store_a), _store_on(pg_db) as (_engine_b, store_b):
+        _seed_parent_chain(engine)
+        for _round in range(rounds):
+            _reset_consumption(engine)
+            barrier = threading.Barrier(2)
+
+            def consume(store: PgExecutionStateStore, gate: threading.Barrier = barrier) -> bool:
+                gate.wait(timeout=BARRIER_TIMEOUT_SECONDS)
+                return store.consume_and_record_entry_intent(**_consume_args())
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(consume, store_a), pool.submit(consume, store_b)]
+                results = sorted(f.result(timeout=60) for f in futures)
+
+            assert results == [False, True]
+            assert (
+                _scalar(engine, "SELECT count(*) FROM execution_intents WHERE role = 'ENTRY'") == 1
+            )
