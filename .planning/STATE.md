@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: "13.1"
 current_phase_name: Deployment & CI
 status: executing
-stopped_at: Completed 13.1-10-PLAN.md
-last_updated: "2026-10-01T08:26:29.184Z"
+stopped_at: Completed 13.1-11-PLAN.md
+last_updated: "2026-10-01T08:46:46.116Z"
 last_activity: 2026-10-01
 last_activity_desc: Phase 13.1 execution started
-state_head: 25678c9ff6a0ff3197915f43d250ccc214db0aae
+state_head: 270d3c2a10835abe2e17b46a8a434f859ee217e8
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 94
-  completed_plans: 89
+  completed_plans: 90
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 13.1 (Deployment & CI) — EXECUTING
-Plan: 11 of 12
+Plan: 12 of 12
 Status: Ready to execute
 Last activity: 2026-10-01 — Phase 13.1 execution started
 
@@ -129,6 +129,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 13.1 P08 | 45 min | 3 tasks | 5 files |
 | Phase 13.1 P09 | 3h | 3 tasks | 9 files |
 | Phase 13.1 P10 | ~2h | 3 tasks | 10 files |
+| Phase 13.1 P11 | 25min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -329,6 +330,7 @@ Recent decisions affecting current work:
 - [Phase 13.1]: 13.1-07: cutover report exit 2 covers all input/runtime failures; gap-measurement errors cannot hide proven data loss (exit 1)
 - [Phase 13.1]: 13.1-08: upload order is parquet, pg.dump, manifest.json, cryptcheck so a snapshot is complete only after its dependencies exist; retention counts periods that have a snapshot; --init-remote also requires an empty raw bucket
 - [Phase 13.1]: 13.1-09: migrate.sh refuses to start when cutover/pg.dump already exists on either side (append-only rsync would silently reuse stale artifacts); first-tick wait uses new src.ops.cutover advanced subcommand
+- [Phase 13.1]: D050 records Phase 13.1; runbook step tables and pin tables are test-enforced against the repository files
 
 ### Pending Todos
 
@@ -374,6 +376,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-01T08:26:28.910Z
-Stopped at: Completed 13.1-10-PLAN.md
+Last session: 2026-10-01T08:46:45.850Z
+Stopped at: Completed 13.1-11-PLAN.md
 Resume file: None
