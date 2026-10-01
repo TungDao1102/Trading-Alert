@@ -35,7 +35,7 @@ import os
 import re
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -331,6 +331,88 @@ def list_snapshots(runner: RcloneRunner) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
+# Retention
+# --------------------------------------------------------------------------- #
+
+
+def select_retained(
+    names: Iterable[str],
+    *,
+    keep_daily: int = 7,
+    keep_weekly: int = 4,
+    keep_monthly: int = 6,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Return ``(keep, delete)`` for snapshot names under the 7/4/6 policy (D-12, D-17).
+
+    For each granularity (UTC day, ISO year-week, calendar month) the newest snapshot of every
+    period is a candidate and the newest N periods *that have a snapshot* are kept. Counting
+    periods that exist, not periods before "now", means a silent backup outage can never age
+    out the last good snapshots. The newest snapshot overall is always kept. Names that do not
+    parse as ``YYYYMMDDTHHMMSSZ`` are in neither set, so they are never deleted. No clock is
+    read: the result depends only on the names.
+    """
+    parsed: dict[str, datetime] = {}
+    for name in names:
+        stamp = parse_snapshot_id(name)
+        if stamp is not None:
+            parsed[name] = stamp
+    if not parsed:
+        return frozenset(), frozenset()
+    ordered = sorted(parsed, key=lambda n: parsed[n])  # ascending; ids sort chronologically
+    keep: set[str] = {ordered[-1]}
+    granularities: tuple[tuple[Callable[[datetime], tuple[int, ...]], int], ...] = (
+        (lambda d: (d.year, d.month, d.day), keep_daily),
+        (lambda d: tuple(d.isocalendar())[:2], keep_weekly),
+        (lambda d: (d.year, d.month), keep_monthly),
+    )
+    for period_of, count in granularities:
+        newest_per_period: dict[tuple[int, ...], str] = {}
+        for name in ordered:
+            newest_per_period[period_of(parsed[name])] = name  # later overwrites earlier
+        periods = sorted(newest_per_period)
+        recent = periods[max(0, len(periods) - count) :] if count > 0 else []
+        keep.update(newest_per_period[period] for period in recent)
+    delete = frozenset(parsed) - keep
+    return frozenset(keep), delete
+
+
+@dataclass(frozen=True)
+class RetentionReport:
+    """What ``apply_retention`` kept and deleted (or would delete with ``dry_run``)."""
+
+    kept: tuple[str, ...]
+    deleted: tuple[str, ...]
+    dry_run: bool
+
+
+def apply_retention(runner: RcloneRunner, *, dry_run: bool) -> RetentionReport:
+    """Delete snapshots outside the retention policy; only ever ``snapshots/<id>``.
+
+    Order: sentinel check, listing, then ``rclone purge`` for each name in the delete set. An
+    empty listing raises (after a passing sentinel it still means something is wrong, and an
+    outage must never look like "nothing to do"). ``parquet/`` is never listed or touched.
+    Callers run this only after the new snapshot passed ``cryptcheck``.
+    """
+    check_sentinel(runner)
+    names = list_snapshots(runner)
+    if not names:
+        raise RemoteError("no snapshots found on the remote; refusing to apply retention")
+    keep, delete = select_retained(names)
+    ordered_delete = tuple(sorted(delete))
+    if not dry_run:
+        for name in ordered_delete:
+            if parse_snapshot_id(name) is None:  # defence in depth; select_retained guarantees it
+                raise RemoteError("refusing to purge a name that is not a snapshot id")
+            result = runner(["purge", _crypt(f"{SNAPSHOTS_DIR}/{name}")], {})
+            if result.returncode != 0:
+                raise RemoteError(
+                    f"rclone purge failed (exit {result.returncode}) for snapshot {name}: "
+                    f"{_excerpt(result.stderr)}"
+                )
+    return RetentionReport(kept=tuple(sorted(keep)), deleted=ordered_delete, dry_run=dry_run)
+
+
+# --------------------------------------------------------------------------- #
 # CLI handlers (src.ops.backup dispatches here)
 # --------------------------------------------------------------------------- #
 
@@ -349,4 +431,17 @@ def cli_push(
         print(f"init-OK sentinel={'written' if written else 'present'}")
     snap = push_snapshot(bundle_root, run, now_utc=now_utc or datetime.now(UTC))
     print(f"push-OK snapshot={snap}")
+    return 0
+
+
+def cli_retain(*, dry_run: bool, runner: RcloneRunner | None) -> int:
+    """``retain``: apply the 7/4/6 policy to the remote snapshots."""
+    run = runner or make_rclone_runner(os.environ)
+    report = apply_retention(run, dry_run=dry_run)
+    verb = "would delete" if report.dry_run else "deleted"
+    print(
+        f"retain-OK dry_run={report.dry_run} kept={len(report.kept)} {verb}={len(report.deleted)}"
+    )
+    for name in report.deleted:
+        print(f"  {name}")
     return 0

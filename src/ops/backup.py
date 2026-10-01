@@ -1030,7 +1030,19 @@ def _run_cli(
         help="Create the remote sentinel (only on an empty bucket; first push only).",
     )
 
+    retain_p = sub.add_parser(
+        "retain", help="Delete remote snapshots outside the 7 daily / 4 weekly / 6 monthly policy."
+    )
+    retain_p.add_argument(
+        "--dry-run", action="store_true", help="List what would be deleted without deleting."
+    )
+
     args = parser.parse_args(argv)
+
+    if args.cmd == "retain":
+        from src.ops import backup_remote
+
+        return backup_remote.cli_retain(dry_run=args.dry_run, runner=rclone_runner)
 
     if args.cmd == "push":
         from src.ops import backup_remote
