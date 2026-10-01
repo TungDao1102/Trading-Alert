@@ -653,7 +653,7 @@ Plans:
 
 **Audit refs**: F-202, F-404, F-403, F-406, F-411, F-412, F-410, F-126, F-951, F-703, F-603, F-606
 
-**Plans:** 5/15 plans executed
+**Plans:** 6/15 plans executed
 
 Plans:
 **Wave 1**
@@ -664,7 +664,7 @@ Plans:
 - [x] 17-03-PLAN.md — DOMN-04 transition tables (pure) + GLOSSARY sections 11-12 (W2)
 - [x] 17-04-PLAN.md — Deterministic, collision-free journal ids; callback correlation from callback_query.id (W2)
 - [x] 17-05-PLAN.md — D-12 plan_hash canonicalization (18-digit ROUND_HALF_EVEN) with fixture regeneration inventory (W2)
-- [ ] 17-06-PLAN.md — EXEC-04 constraint snapshot core: MARKET_LOT_SIZE/PERCENT_PRICE parsing, canonical snapshot, live-validity predicate (W2)
+- [x] 17-06-PLAN.md — EXEC-04 constraint snapshot core: MARKET_LOT_SIZE/PERCENT_PRICE parsing, canonical snapshot, live-validity predicate (W2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 17-07-PLAN.md — ORM/migration parity (compare_metadata + catalog checks), reversible and data-safe 0004, UTC session on both engines (W3)
@@ -979,7 +979,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
-| 17. Operational Persistence Layer | 5/15 | In Progress|  |
+| 17. Operational Persistence Layer | 6/15 | In Progress|  |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |
 | 19. Execution Plan Binding + Pre-Placement Checks | 0/TBD | Not started | - |
 | 20. Reconcile + SAFE_MODE Hardening + Alerts | 0/TBD | Not started | - |
