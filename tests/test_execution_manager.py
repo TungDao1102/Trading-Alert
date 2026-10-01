@@ -37,6 +37,8 @@ from typing import Any
 
 from src.domain.enums import KillGateState
 
+from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
+
 PHASE9_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase9"
 PLACEMENT_FIXTURE_DIR = PHASE9_FIXTURES_DIR / "placement_sequences"
 
@@ -217,6 +219,8 @@ def _live_wiring(**overrides: Any) -> dict[str, Any]:
         "journal": FakeJournal(),
         "enablement": _enabled_controller(),
         "gate_kwargs": _build_gate_kwargs(_load_input()),
+        # Fresh in-memory store per call: every test keeps its one-call semantics.
+        "intent_store": InMemoryExecutionIntentStore(),
     }
     wiring.update(overrides)
     return wiring

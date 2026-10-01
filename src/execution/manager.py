@@ -7,8 +7,15 @@ Phase-5 risk pipeline, then calls the adapter placement surface in
 fixed order. First-failure-wins reason codes are preserved byte-identically.
 
 The module is dependency-free: stdlib + `src/approval/*` + `src/risk/*` +
-`src/execution/order_ids.py` + `src/execution/placement.py` only.
+`src/execution/order_ids.py` + `src/execution/placement.py` +
+`src/execution/intent_store.py` (a Protocol) only.
 No Binance SDK, no SQLAlchemy, no Pydantic, no Polars, no structlog.
+
+Phase 17 (D-13/D-14/D-15): the approval is consumed durably by writing the ENTRY
+execution intent BEFORE `place_entry` runs, through the `ExecutionIntentStore`
+Protocol. A replayed APPROVE returns the stored outcome with zero adapter calls;
+the exchange's own clientOrderId dedup is NOT relied on (Binance only rejects a
+duplicate while the earlier order is still open, F-126).
 """
 
 from __future__ import annotations
@@ -22,9 +29,16 @@ from typing import Any, Protocol
 
 from src.approval.binding import check_binding_full
 from src.domain.approval import Approval
-from src.domain.enums import ApprovalAction, ApprovalResult, OrderRole, RejectionReason
+from src.domain.enums import (
+    ApprovalAction,
+    ApprovalResult,
+    ExecutionIntentStatus,
+    OrderRole,
+    RejectionReason,
+)
 from src.domain.journal import JournalEvent, content_hash_event_id
 from src.execution.fill_monitor import CurrentPositionView, fold_fills
+from src.execution.intent_store import ExecutionIntentStore, IntentRecord
 from src.execution.order_ids import derive_algo_client_id, derive_client_order_id
 from src.execution.placement import (
     ProtectiveSizing,
@@ -159,14 +173,31 @@ _ENTRY_STATE_UNKNOWN = "ENTRY_STATE_UNKNOWN"
 _ENTRY_MAX_ATTEMPTS: int = 2
 
 
+@dataclass(frozen=True)
+class _EntryPlacement:
+    """State of the entry after placement plus the exchange identity, when known."""
+
+    state: str
+    exchange_order_id: str | None = None
+    exchange_status: str | None = None
+
+
+def _text_or_none(value: Any) -> str | None:
+    """Exchange identity text for the intent row; absent or empty is None."""
+    if value is None:
+        return None
+    text = str(value)
+    return text or None
+
+
 async def _place_entry_no_blind_retry(
     *,
     adapter: ExecutionAdapter,
     entry_kwargs: dict[str, Any],
-) -> str:
+) -> _EntryPlacement:
     """Place the entry; on ANY ambiguity probe by client id before retrying.
 
-    Returns one of:
+    The returned `state` is one of:
       - `ENTRY_PLACED`  — the adapter acknowledged the order.
       - `ENTRY_EXISTS`  — placement was ambiguous but the probe found it.
       - `ENTRY_ABSENT`  — every attempt was ambiguous and every probe
@@ -187,21 +218,32 @@ async def _place_entry_no_blind_retry(
         except Exception:  # noqa: BLE001 — ambiguous: probe decides
             response = None
         if response is not None:
-            return _ENTRY_STATE_PLACED
+            return _EntryPlacement(
+                state=_ENTRY_STATE_PLACED,
+                exchange_order_id=_text_or_none(
+                    _get_attr_or_key(response, "exchange_order_id")
+                    or _get_attr_or_key(response, "order_id")
+                ),
+                exchange_status=_text_or_none(_get_attr_or_key(response, "status")),
+            )
         try:
             probe = await adapter.query_order_by_client(
                 symbol=entry_kwargs["symbol"],
                 orig_client_order_id=client_order_id,
             )
         except Exception:  # noqa: BLE001 — unknown existence fails closed
-            return _ENTRY_STATE_UNKNOWN
+            return _EntryPlacement(state=_ENTRY_STATE_UNKNOWN)
         found = _get_attr_or_key(probe, "found")
         if found is True:
-            return _ENTRY_STATE_EXISTS
+            return _EntryPlacement(
+                state=_ENTRY_STATE_EXISTS,
+                exchange_order_id=_text_or_none(_get_attr_or_key(probe, "order_id")),
+                exchange_status=_text_or_none(_get_attr_or_key(probe, "status")),
+            )
         if found is not False:
-            return _ENTRY_STATE_UNKNOWN
+            return _EntryPlacement(state=_ENTRY_STATE_UNKNOWN)
         # Definitive absence: the next loop iteration may retry.
-    return _ENTRY_STATE_ABSENT
+    return _EntryPlacement(state=_ENTRY_STATE_ABSENT)
 
 
 # --------------------------------------------------------------------------- #
@@ -235,8 +277,9 @@ def _check_approval_authorizes_plan(
          otherwise STALE_SETUP.
 
     NOTE: consuming the approval (so an at-least-once Telegram replay
-    re-plays the persisted outcome instead of re-running the pipeline)
-    needs persisted execution state and is NOT handled here.
+    re-plays the persisted outcome instead of re-running the pipeline) is
+    NOT handled here; `execute_approved_plan` does it through the
+    `ExecutionIntentStore` (Phase 17, D-13/D-15).
     """
     callback_action = getattr(callback, "action", None)
     if (
@@ -303,6 +346,7 @@ async def execute_approved_plan(
     journal: Any,
     enablement: Any,
     gate_kwargs: dict[str, Any],
+    intent_store: ExecutionIntentStore,
 ) -> ExecutionOutcome:
     """Run the fixed-order pipeline: binding → enablement → SAFE_MODE → gates → risk → place.
 
@@ -365,11 +409,23 @@ async def execute_approved_plan(
             TTL, parameter set) is taken from `risk_kwargs` / the risk
             verdict and the single `now_utc` (09-REVIEW WR-05), so the
             gates can never judge a different order than the one placed.
+        intent_store: Required `ExecutionIntentStore` (None raises
+            ValueError; there is no in-memory default, D-02, 09-REVIEW
+            CR-07). The approval is consumed by writing the ENTRY intent
+            BEFORE `place_entry` (D-13, D-14); a second call with the same
+            approval returns the stored outcome with zero adapter calls
+            (D-15), even after a restart. The store is synchronous and is
+            called directly on the event loop (short indexed queries bounded
+            by the engine's `lock_timeout`; Phase 24 may wrap it in
+            `asyncio.to_thread`). Store errors propagate: the manager never
+            swallows them into a placement (fail closed).
 
     Returns:
         An `ExecutionOutcome` with `is_no_trade` and `reason_code`.
     """
     _require_safe_mode_controller(safe_mode_controller, "execute_approved_plan")
+    if intent_store is None:
+        raise ValueError("execute_approved_plan: intent_store is required (fail closed)")
     if enablement is None:
         raise ValueError("execute_approved_plan: enablement is required (fail closed)")
     if gate_kwargs is None:
@@ -416,6 +472,13 @@ async def execute_approved_plan(
     )
     if approval_verdict is not None:
         return approval_verdict
+
+    # Replay (D-15): an approval whose ENTRY intent already exists was consumed
+    # by an earlier call (or process). Return the stored outcome with ZERO
+    # adapter calls; the exchange's clientOrderId dedup is never consulted.
+    stored_entry = intent_store.get_entry(approval_id=approval.approval_id)
+    if stored_entry is not None:
+        return _stored_entry_outcome(stored_entry)
 
     # Gate 2: enablement guard (LIVE_ORDERS_DISABLED → DISABLED).
     enablement_verdict = enablement.guard_placement(
@@ -550,12 +613,52 @@ async def execute_approved_plan(
         )
     order_position_side = "BOTH" if position_mode == POSITION_MODE_ONE_WAY else candidate_side
 
+    # Write-ahead (D-13, D-14 steps 1-2): consume the approval by committing the
+    # ENTRY intent (INTENDED) BEFORE any order leaves. Pre-placement NO_TRADE
+    # verdicts above never consume (research Open Q1). Losing the race, or
+    # finding the row already there, returns the stored outcome without any
+    # adapter call.
+    consumed = intent_store.consume_and_record_entry_intent(
+        approval_id=approval.approval_id,
+        trade_plan_id=trade_plan.trade_plan_id,
+        plan_hash=trade_plan.plan_hash,
+        client_order_id=entry_client_order_id,
+        symbol=constraint_snapshot.symbol,
+        side=entry_side,
+        intended_quantity=quantity,
+        intended_price=limit_price,
+        now_utc=now_utc,
+    )
+    if not consumed:
+        existing_entry = intent_store.get_entry(approval_id=approval.approval_id)
+        if existing_entry is None:  # lost the race yet nothing stored: fail closed
+            return ExecutionOutcome(
+                is_no_trade=True, reason_code=RejectionReason.RECONCILIATION_REQUIRED.value
+            )
+        return _stored_entry_outcome(existing_entry)
+
+    def _finish(outcome: ExecutionOutcome) -> ExecutionOutcome:
+        """Persist the exact outcome on the ENTRY row, then return it (D-15)."""
+        intent_store.finalize_entry_outcome(
+            approval_id=approval.approval_id,
+            is_no_trade=outcome.is_no_trade,
+            reason_code=outcome.reason_code,
+            now_utc=now_utc,
+        )
+        return outcome
+
+    # Committed SENT before the call: a crash while `place_entry` is in flight
+    # leaves a durable row that restart recovery reads as unresolved (F-703).
+    intent_store.mark_sent(
+        approval_id=approval.approval_id, role=OrderRole.ENTRY.value, now_utc=now_utc
+    )
+
     # Place the entry (LIMIT, GTC).
     # 09-REVIEW CR-06: every adapter call is awaited on the caller's
     # running event loop (python-telegram-bot / FastAPI). No nested
     # `asyncio.run` — it raises inside a running loop and would tear
     # down loop-bound adapter resources between the entry and the SL.
-    entry_state = await _place_entry_no_blind_retry(
+    entry_placement = await _place_entry_no_blind_retry(
         adapter=adapter,
         entry_kwargs={
             "symbol": constraint_snapshot.symbol,
@@ -567,20 +670,49 @@ async def execute_approved_plan(
             "new_client_order_id": entry_client_order_id,
         },
     )
+    entry_state = entry_placement.state
     if entry_state == _ENTRY_STATE_UNKNOWN:
         # Fail closed: the entry may or may not exist on the exchange and
         # the probe could not tell. No SL, no retry — SAFE_MODE blocks new
         # entries while reconciliation resolves the truth.
+        intent_store.record_result(
+            approval_id=approval.approval_id,
+            role=OrderRole.ENTRY.value,
+            status=ExecutionIntentStatus.UNKNOWN,
+            exchange_order_id=None,
+            exchange_status=None,
+            now_utc=now_utc,
+        )
         safe_mode_controller.enter_safe_mode(reason=_ENTRY_STATE_UNKNOWN, now_utc=now_utc)
-        return ExecutionOutcome(
-            is_no_trade=True, reason_code=RejectionReason.RECONCILIATION_REQUIRED.value
+        return _finish(
+            ExecutionOutcome(
+                is_no_trade=True, reason_code=RejectionReason.RECONCILIATION_REQUIRED.value
+            )
         )
     if entry_state == _ENTRY_STATE_ABSENT:
         # Definitively not on the exchange after bounded attempts — no
         # exposure exists, so NO_TRADE without SAFE_MODE.
-        return ExecutionOutcome(
-            is_no_trade=True, reason_code=RejectionReason.EXCHANGE_CONSTRAINT.value
+        intent_store.record_result(
+            approval_id=approval.approval_id,
+            role=OrderRole.ENTRY.value,
+            status=ExecutionIntentStatus.REJECTED,
+            exchange_order_id=None,
+            exchange_status=None,
+            now_utc=now_utc,
         )
+        return _finish(
+            ExecutionOutcome(
+                is_no_trade=True, reason_code=RejectionReason.EXCHANGE_CONSTRAINT.value
+            )
+        )
+    intent_store.record_result(
+        approval_id=approval.approval_id,
+        role=OrderRole.ENTRY.value,
+        status=ExecutionIntentStatus.ACKED,
+        exchange_order_id=entry_placement.exchange_order_id,
+        exchange_status=entry_placement.exchange_status,
+        now_utc=now_utc,
+    )
 
     # Place the entry-time SL protective leg (CONDITIONAL, STOP_MARKET,
     # close_position) — the pre-fill safety net. TP1/TP2 are sized to the
@@ -626,9 +758,25 @@ async def execute_approved_plan(
             )
         except Exception:  # noqa: BLE001, S110 — journaled in expire_pending_entry
             pass
-        return ExecutionOutcome(is_no_trade=True, reason_code=_ENTRY_WITHOUT_PROTECTIVE)
+        return _finish(ExecutionOutcome(is_no_trade=True, reason_code=_ENTRY_WITHOUT_PROTECTIVE))
 
-    return ExecutionOutcome(is_no_trade=False, reason_code="OK")
+    return _finish(ExecutionOutcome(is_no_trade=False, reason_code="OK"))
+
+
+def _stored_entry_outcome(record: IntentRecord) -> ExecutionOutcome:
+    """The persisted outcome of an already-consumed approval (D-15).
+
+    An ENTRY row without a recorded outcome (crash between the write-ahead steps and
+    `finalize_entry_outcome`) is unresolved: the entry may exist on the exchange, so
+    the replay fails closed with RECONCILIATION_REQUIRED and never touches the adapter.
+    """
+    if record.outcome is not None:
+        return ExecutionOutcome(
+            is_no_trade=record.outcome.is_no_trade, reason_code=record.outcome.reason_code
+        )
+    return ExecutionOutcome(
+        is_no_trade=True, reason_code=RejectionReason.RECONCILIATION_REQUIRED.value
+    )
 
 
 # --------------------------------------------------------------------------- #

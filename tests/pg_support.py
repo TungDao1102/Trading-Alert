@@ -4,7 +4,7 @@
 never itself connected to for test work, altered or dropped. This module:
 
   1. builds ONE session-scoped template database named `t17_tmpl_<hex>_test`
-     by running `alembic upgrade head` (never ORM `create_all`; F-606),
+     by running `alembic upgrade head` (never an ORM-metadata schema build; F-606),
   2. clones it per test with `CREATE DATABASE ... TEMPLATE ...` into a
      generated `t17_<hex>_test` database (the append-only journal added in
      plan 02 makes row cleanup impossible, so a clone per test is mandatory),

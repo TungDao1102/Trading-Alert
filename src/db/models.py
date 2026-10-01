@@ -6,6 +6,10 @@ Per D-05, this package owns *operational* state in PostgreSQL 17:
   - collector_gaps            (D-09 — flag-never-fabricate gap journal)
   - coverage_windows          (DATA_PIPELINE §10 — per-symbol effective range)
 
+Phase 17 additions (plan 17-01, first slice of migration 0004):
+  - approvals.consumption_status / consumed_at_utc  (explicit durable consumption)
+  - execution_intents         (ExecutionIntentRow — write-ahead entry/leg intents)
+
 Phase 3 additions (plans 03-01 + 03-04, D-02):
   - signals                   (SignalRow — content-hash PK, explicit status)
   - trade_plans               (TradePlanRow — content-hash PK, explicit status)
@@ -29,7 +33,18 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, Numeric, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKeyConstraint,
+    Index,
+    Numeric,
+    PrimaryKeyConstraint,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -265,6 +280,31 @@ class ApprovalRow(Base):
     actor_id: Mapped[str] = mapped_column(String(64), nullable=False)
     telegram_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Phase 17 (D-16, D-21, research C8): explicit durable consumption state. The
+    # ENTRY execution intent row is the authority; `consumed_at_utc` is the nullable
+    # "transition never happened" timestamp tied to the status by a CHECK.
+    consumption_status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="UNCONSUMED",
+        server_default=text("'UNCONSUMED'"),
+    )
+    consumed_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # PostgreSQL-only integrity objects: SQLite `create_all` keeps its pre-0004 DDL
+    # (`ddl_if`), PostgreSQL (alembic 0004) enforces everything. Names match the migration.
+    __table_args__ = (
+        CheckConstraint(
+            "consumption_status IN ('UNCONSUMED', 'CONSUMED')",
+            name="ck_approvals_consumption_status",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "(consumption_status = 'UNCONSUMED' AND consumed_at_utc IS NULL) "
+            "OR (consumption_status = 'CONSUMED' AND consumed_at_utc IS NOT NULL "
+            "AND status = 'APPROVED')",
+            name="ck_approvals_consumption_coherent",
+        ).ddl_if(dialect="postgresql"),
+    )
 
 
 # ---------- orders (Phase 3, plan 03-04) -------------------------------------
@@ -306,6 +346,105 @@ class OrderRow(Base):
     submitted_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     canceled_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# ---------- execution_intents (Phase 17, plan 17-01) -------------------------
+
+
+class ExecutionIntentRow(Base):
+    """Write-ahead execution intent: one row per (approval_id, role) (D-13, D-14).
+
+    Consuming an approval means inserting its ENTRY row in the same transaction that
+    stamps `approvals.consumption_status`; a second attempt hits the primary key and
+    returns the stored result. The exchange's clientOrderId dedup is NOT relied on:
+    Binance only rejects a duplicate while the earlier order is still open (F-126).
+
+    `role` carries the real `OrderRole` values (research C2). Close-position legs carry
+    NULL quantity (research C4). The outcome columns hold the persisted
+    `ExecutionOutcome` of an ENTRY row, with an explicit `outcome_recorded` flag (C8).
+    """
+
+    __tablename__ = "execution_intents"
+
+    approval_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    trade_plan_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    plan_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    client_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    algo_client_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    intended_quantity: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    intended_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    intent_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    exchange_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    exchange_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    outcome_recorded: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    outcome_is_no_trade: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    outcome_reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    intended_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sent_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("approval_id", "role", name="pk_execution_intents"),
+        UniqueConstraint("trade_plan_id", "role", name="uq_execution_intents_plan_role"),
+        ForeignKeyConstraint(
+            ["approval_id"],
+            ["approvals.approval_id"],
+            name="fk_execution_intents_approval_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        ForeignKeyConstraint(
+            ["trade_plan_id"],
+            ["trade_plans.trade_plan_id"],
+            name="fk_execution_intents_trade_plan_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        Index(
+            "uq_execution_intents_client_order_id",
+            "client_order_id",
+            unique=True,
+            postgresql_where=text("client_order_id IS NOT NULL"),
+        ).ddl_if(dialect="postgresql"),
+        Index(
+            "uq_execution_intents_algo_client_id",
+            "algo_client_id",
+            unique=True,
+            postgresql_where=text("algo_client_id IS NOT NULL"),
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "role IN ('ENTRY', 'STOP_LOSS', 'TAKE_PROFIT_1', 'TAKE_PROFIT_2')",
+            name="ck_execution_intents_role",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "intent_status IN ('INTENDED', 'SENT', 'ACKED', 'REJECTED', 'UNKNOWN')",
+            name="ck_execution_intents_status",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "(role = 'ENTRY' AND client_order_id IS NOT NULL AND algo_client_id IS NULL) "
+            "OR (role <> 'ENTRY' AND algo_client_id IS NOT NULL AND client_order_id IS NULL)",
+            name="ck_execution_intents_client_id_by_role",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "intended_quantity IS NULL OR intended_quantity > 0",
+            name="ck_execution_intents_quantity",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "intended_price IS NULL OR intended_price > 0",
+            name="ck_execution_intents_price",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "(outcome_recorded AND outcome_reason_code IS NOT NULL "
+            "AND outcome_is_no_trade IS NOT NULL AND role = 'ENTRY') "
+            "OR (NOT outcome_recorded AND outcome_reason_code IS NULL "
+            "AND outcome_is_no_trade IS NULL)",
+            name="ck_execution_intents_outcome",
+        ).ddl_if(dialect="postgresql"),
+    )
 
 
 # ---------- fills (Phase 3, plan 03-04) --------------------------------------

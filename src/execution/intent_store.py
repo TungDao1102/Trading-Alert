@@ -1,0 +1,124 @@
+"""Execution-intent store Protocol (Phase 17, D-13/D-14/D-15, EXEC-03).
+
+The execution manager depends on this Protocol, never on a database driver:
+this module is stdlib + `src.domain` only (no SQLAlchemy import), so the
+manager stays free of persistence imports (09-REVIEW CR-07, research C12).
+
+The write-ahead contract the manager follows around the entry order:
+
+  1. `consume_and_record_entry_intent` — ONE transaction that inserts the ENTRY
+     intent (INTENDED) and stamps the approval consumed. `True` = this caller
+     won; `False` = the approval was already consumed (replay or lost race).
+  2. `mark_sent` — committed BEFORE `place_entry` is awaited.
+  3. `record_result` — ACKED / REJECTED / UNKNOWN from the exchange response.
+  4. `finalize_entry_outcome` — the exact `ExecutionOutcome` fields, so a replay
+     returns the stored result with zero adapter calls (D-15).
+
+The exchange's own client-id dedup is explicitly NOT relied on: Binance only
+rejects a duplicate while the earlier order is still open (F-126).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+from typing import Protocol, runtime_checkable
+
+from src.domain.enums import ExecutionIntentStatus
+
+# Allowed predecessor statuses per target status (plan 11 swaps this map for
+# `src/domain/transitions.py`). Shared by the PostgreSQL store and the in-memory
+# double so both enforce identical semantics.
+ALLOWED_PREDECESSORS: dict[ExecutionIntentStatus, frozenset[ExecutionIntentStatus]] = {
+    ExecutionIntentStatus.INTENDED: frozenset(),
+    ExecutionIntentStatus.SENT: frozenset({ExecutionIntentStatus.INTENDED}),
+    ExecutionIntentStatus.ACKED: frozenset(
+        {ExecutionIntentStatus.SENT, ExecutionIntentStatus.UNKNOWN}
+    ),
+    ExecutionIntentStatus.REJECTED: frozenset(
+        {
+            ExecutionIntentStatus.INTENDED,
+            ExecutionIntentStatus.SENT,
+            ExecutionIntentStatus.UNKNOWN,
+        }
+    ),
+    ExecutionIntentStatus.UNKNOWN: frozenset(
+        {ExecutionIntentStatus.INTENDED, ExecutionIntentStatus.SENT}
+    ),
+}
+
+
+@dataclass(frozen=True)
+class RecordedOutcome:
+    """The persisted `ExecutionOutcome` fields (kept separate from the manager's class)."""
+
+    is_no_trade: bool
+    reason_code: str
+
+
+@dataclass(frozen=True)
+class IntentRecord:
+    """One `execution_intents` row as the manager sees it (no ORM types)."""
+
+    approval_id: str
+    role: str
+    trade_plan_id: str
+    plan_hash: str
+    client_order_id: str | None
+    algo_client_id: str | None
+    symbol: str
+    side: str
+    intended_quantity: Decimal | None
+    intended_price: Decimal | None
+    intent_status: ExecutionIntentStatus
+    exchange_order_id: str | None
+    exchange_status: str | None
+    outcome: RecordedOutcome | None
+    intended_at_utc: datetime
+    sent_at_utc: datetime | None
+    resolved_at_utc: datetime | None
+    updated_at_utc: datetime
+
+
+@runtime_checkable
+class ExecutionIntentStore(Protocol):
+    """Durable approval consumption and write-ahead intents (synchronous, D-01)."""
+
+    def get_entry(self, *, approval_id: str) -> IntentRecord | None: ...
+
+    def consume_and_record_entry_intent(
+        self,
+        *,
+        approval_id: str,
+        trade_plan_id: str,
+        plan_hash: str,
+        client_order_id: str,
+        symbol: str,
+        side: str,
+        intended_quantity: Decimal,
+        intended_price: Decimal,
+        now_utc: datetime,
+    ) -> bool: ...
+
+    def mark_sent(self, *, approval_id: str, role: str, now_utc: datetime) -> None: ...
+
+    def record_result(
+        self,
+        *,
+        approval_id: str,
+        role: str,
+        status: ExecutionIntentStatus,
+        exchange_order_id: str | None,
+        exchange_status: str | None,
+        now_utc: datetime,
+    ) -> None: ...
+
+    def finalize_entry_outcome(
+        self,
+        *,
+        approval_id: str,
+        is_no_trade: bool,
+        reason_code: str,
+        now_utc: datetime,
+    ) -> None: ...

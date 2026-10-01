@@ -254,3 +254,51 @@ class QuantizationDecision(str, Enum):
     DEFERRED_TO_RISK = "DEFERRED_TO_RISK"
     ACCEPTED = "ACCEPTED"
     REJECTED = "REJECTED"
+
+
+class ExecutionIntentStatus(str, Enum):
+    """Write-ahead execution intent lifecycle (Phase 17, D-13/D-14).
+
+    INTENDED -> SENT -> ACKED | REJECTED | UNKNOWN. An intent left INTENDED, SENT
+    or UNKNOWN after a restart is unresolved: it is never re-sent blindly, only
+    resolved by querying the exchange by its deterministic client id.
+    GLOSSARY entries land in plan 03.
+    """
+
+    INTENDED = "INTENDED"
+    SENT = "SENT"
+    ACKED = "ACKED"
+    REJECTED = "REJECTED"
+    UNKNOWN = "UNKNOWN"
+
+
+class ApprovalConsumptionStatus(str, Enum):
+    """Explicit approval consumption state (Phase 17, D-16/D-21, research C8).
+
+    Never inferred from the nullable `consumed_at_utc`. GLOSSARY entries land in plan 03.
+    """
+
+    UNCONSUMED = "UNCONSUMED"
+    CONSUMED = "CONSUMED"
+
+
+class LiveInputsStatus(str, Enum):
+    """Whether a persisted constraint snapshot carries every live input (Phase 17, D-19).
+
+    INCOMPLETE while margin type, leverage or equity still hold the UNKNOWN sentinel.
+    GLOSSARY entries land in plan 03.
+    """
+
+    COMPLETE = "COMPLETE"
+    INCOMPLETE = "INCOMPLETE"
+
+
+class SystemStateKey(str, Enum):
+    """Keys of the durable system-state event log (Phase 17, D-22).
+
+    GLOSSARY entries land in plan 03.
+    """
+
+    SAFE_MODE = "SAFE_MODE"
+    LIVE_ENABLEMENT = "LIVE_ENABLEMENT"
+    KILL_GATE = "KILL_GATE"
