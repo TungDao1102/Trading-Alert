@@ -16,6 +16,9 @@ The write-ahead contract the manager follows around the entry order:
   5. `finalize_entry_outcome` — the exact `ExecutionOutcome` fields, so a replay
      returns the stored result with zero adapter calls (D-15).
 
+Restart recovery (plan 17-12, D-14) reads the rows no step above finished through
+`list_unresolved_intents` and resolves them by querying the exchange; it never re-sends.
+
 Status changes are legal only along `src.domain.transitions` (EXECUTION_INTENT, D-20);
 an unchanged status is an idempotent no-op.
 
@@ -25,6 +28,7 @@ rejects a duplicate while the earlier order is still open (F-126).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -70,6 +74,14 @@ class ExecutionIntentStore(Protocol):
     """Durable approval consumption and write-ahead intents (synchronous, D-01)."""
 
     def get_entry(self, *, approval_id: str) -> IntentRecord | None: ...
+
+    def list_unresolved_intents(self) -> Sequence[IntentRecord]:
+        """Every INTENDED, SENT and UNKNOWN intent (any role), never ACKED or REJECTED.
+
+        Ordered by `intended_at_utc`, then `approval_id`, then `role`, so recovery and
+        Phase 20 reconciliation walk the rows in one deterministic order (D-14).
+        """
+        ...
 
     def consume_and_record_entry_intent(
         self,

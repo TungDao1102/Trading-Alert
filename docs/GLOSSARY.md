@@ -218,10 +218,11 @@ Reason strings passed to `SafeModeController.enter_safe_mode(reason=...)` or rec
 |--------|------------|
 | `ENTRY_WITHOUT_PROTECTIVE` | `src/execution/manager.py`, `src/ops/drills.py` |
 | `ENTRY_STATE_UNKNOWN` | `src/execution/manager.py` |
+| `UNRESOLVED_EXECUTION_INTENT` | `src/execution/intent_recovery.py` (restart recovery: an execution intent could not be resolved by exchange query, so new entries stay blocked until Phase 20 reconciliation) |
 | `ORPHAN_PROTECTIVE` | `src/ops/drills.py`, `src/reconcile/compare.py` (divergence kind) |
 | `API_DEGRADATION` | `src/ops/drills.py` |
 | `STALE_FEED` | `src/ops/drills.py` |
-| `DB_FAILURE` | `src/ops/drills.py` |
+| `DB_FAILURE` | `src/execution/manager.py`, `src/execution/intent_recovery.py`, `src/ops/drills.py` |
 | `MANUAL_CLOSE` | `src/execution/manager.py`, `src/ops/drills.py` |
 | `REGISTRY_DIFF` | `src/paper/freeze.py` (halt reason on a parameter registry diff) |
 

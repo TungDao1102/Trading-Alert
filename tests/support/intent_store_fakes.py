@@ -25,6 +25,7 @@ fallback (D-04, T-17-04 fail closed).
 from __future__ import annotations
 
 import threading
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
@@ -33,6 +34,14 @@ from src.domain.enums import ExecutionIntentStatus, OrderRole
 from src.domain.transitions import IllegalTransition, TransitionKind, assert_transition
 from src.execution.intent_store import ExecutionIntentStore, IntentRecord, RecordedOutcome
 from src.persistence.errors import IntentStateConflict
+
+_UNRESOLVED: frozenset[ExecutionIntentStatus] = frozenset(
+    {
+        ExecutionIntentStatus.INTENDED,
+        ExecutionIntentStatus.SENT,
+        ExecutionIntentStatus.UNKNOWN,
+    }
+)
 
 
 class InMemoryExecutionIntentStore:
@@ -50,6 +59,15 @@ class InMemoryExecutionIntentStore:
         """Test-side read of any role's row (not part of the production Protocol)."""
         with self._lock:
             return self._rows.get((approval_id, role))
+
+    def list_unresolved_intents(self) -> tuple[IntentRecord, ...]:
+        with self._lock:
+            return tuple(
+                sorted(
+                    (r for r in self._rows.values() if r.intent_status in _UNRESOLVED),
+                    key=lambda r: (r.intended_at_utc, r.approval_id, r.role),
+                )
+            )
 
     def consume_and_record_entry_intent(
         self,
@@ -209,6 +227,9 @@ class AlwaysWinsIntentStore:
     def get_entry(self, *, approval_id: str) -> IntentRecord | None:
         return None
 
+    def list_unresolved_intents(self) -> tuple[IntentRecord, ...]:
+        return ()
+
     def consume_and_record_entry_intent(
         self,
         *,
@@ -300,6 +321,9 @@ class CrashAfter:
 
     def get_entry(self, *, approval_id: str) -> IntentRecord | None:
         return self._inner.get_entry(approval_id=approval_id)
+
+    def list_unresolved_intents(self) -> Sequence[IntentRecord]:
+        return self._inner.list_unresolved_intents()
 
     def consume_and_record_entry_intent(
         self,
@@ -399,6 +423,7 @@ class CrashAfter:
 _FAILABLE_METHODS: frozenset[str] = frozenset(
     {
         "get_entry",
+        "list_unresolved_intents",
         "consume_and_record_entry_intent",
         "record_protective_intent",
         "mark_sent",
@@ -438,6 +463,10 @@ class FailingIntentStore:
     def get_entry(self, *, approval_id: str) -> IntentRecord | None:
         self._maybe_fail("get_entry")
         return self._inner.get_entry(approval_id=approval_id)
+
+    def list_unresolved_intents(self) -> Sequence[IntentRecord]:
+        self._maybe_fail("list_unresolved_intents")
+        return self._inner.list_unresolved_intents()
 
     def consume_and_record_entry_intent(
         self,

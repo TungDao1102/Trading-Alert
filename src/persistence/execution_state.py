@@ -24,6 +24,7 @@ and every timestamp the store writes is the caller's injected UTC `now_utc`.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -108,6 +109,25 @@ class PgExecutionStateStore:
                 )
             ).scalar_one_or_none()
             return None if row is None else _to_record(row)
+
+    def list_unresolved_intents(self) -> Sequence[IntentRecord]:
+        """Every INTENDED, SENT and UNKNOWN row of either role, in a deterministic order."""
+        unresolved = (
+            ExecutionIntentStatus.INTENDED.value,
+            ExecutionIntentStatus.SENT.value,
+            ExecutionIntentStatus.UNKNOWN.value,
+        )
+        with self._db.transaction() as session:
+            rows = session.execute(
+                select(ExecutionIntentRow)
+                .where(ExecutionIntentRow.intent_status.in_(unresolved))
+                .order_by(
+                    ExecutionIntentRow.intended_at_utc,
+                    ExecutionIntentRow.approval_id,
+                    ExecutionIntentRow.role,
+                )
+            ).scalars()
+            return tuple(_to_record(row) for row in rows)
 
     def consume_and_record_entry_intent(
         self,
