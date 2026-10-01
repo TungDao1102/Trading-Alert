@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from src.domain.canonical import sha256_hex
+from src.domain.canonical import canonical_decimal_text, sha256_hex
 from src.risk.cost_guards import validate_guard_rates
 from src.risk.cost_rates import (
     FEE_SOURCE_PARAMETER,
@@ -63,26 +63,9 @@ _NUMERIC_HASH_KEYS: frozenset[str] = frozenset(
 )
 
 
-def _canonical_decimal_text(value: Decimal) -> str:
-    """Render a Decimal as one plain (non-exponent) text form (D-15).
-
-    Zero, in any spelling including negative zero, renders as "0". Every
-    other value renders as its plain positional text with trailing zeros
-    removed, so 1, 1.0 and Decimal("1.00") all render "1", 0.00020 renders
-    "0.0002", and 100 stays "100" (never "1E+2"). Built from the digit tuple
-    so it does not depend on the ambient Decimal context precision.
-    """
-    if not value.is_finite():
-        raise ValueError(f"cost value must be finite, got {value}")
-    if value == 0:
-        return "0"
-    sign, digits, exponent = value.as_tuple()
-    assert isinstance(exponent, int)  # finite Decimal
-    mantissa = list(digits)
-    while len(mantissa) > 1 and mantissa[-1] == 0:
-        mantissa.pop()
-        exponent += 1
-    return format(Decimal((sign, tuple(mantissa), exponent)), "f")
+# D047 canonical decimal text now lives in src.domain.canonical (Phase 17, D-12);
+# the private name is kept so every internal reference and test import still works.
+_canonical_decimal_text = canonical_decimal_text
 
 
 def _cost_hash_payload(model: CostModel) -> dict[str, str]:

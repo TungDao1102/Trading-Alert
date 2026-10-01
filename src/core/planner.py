@@ -27,7 +27,7 @@ import json
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from src.domain.canonical import sha256_hex
+from src.domain.canonical import canonical_decimal_text, quantize_for_storage, sha256_hex
 from src.domain.enums import RejectionReason, TradePlanStatus
 from src.domain.ids import derive_child_id
 from src.domain.registry import ParameterSet
@@ -62,14 +62,18 @@ def _plan_hash(
     """SHA256 over canonical JSON of the plan's identity-bearing fields.
 
     Per D-08: mirrors the D-04 canonical-hash discipline. Sorted keys,
-    compact separators, Decimal-as-str, datetime → UTC isoformat.
+    compact separators, datetime → UTC isoformat. The three Decimals are
+    hashed as canonical decimal text (D-12) so the hash is spelling-invariant:
+    50000, 50000.0 and the scale-18 spelling a PostgreSQL NUMERIC read-back
+    returns all hash identically, which is what lets an approval re-verify
+    the plan hash from the stored row (F-410).
     """
     return sha256_hex(
         {
             "signal_id": signal_id,
-            "entry_min_price": entry_min_price,
-            "entry_max_price": entry_max_price,
-            "stop_loss_price": stop_loss_price,
+            "entry_min_price": canonical_decimal_text(entry_min_price),
+            "entry_max_price": canonical_decimal_text(entry_max_price),
+            "stop_loss_price": canonical_decimal_text(stop_loss_price),
             "take_profit_json": take_profit_json,
             "invalidation_rule_json": invalidation_rule_json,
             "expiry_utc": expiry_utc,
@@ -371,8 +375,14 @@ def plan(
             reason_code=RejectionReason.STALE_SETUP.value,
         )
     assert take_profit_1 is not None
-    entry_min = _sub(zone_lower, entry_buffer)
-    entry_max = _add(zone_upper, entry_buffer)
+    # D-12: quantize each persisted price to the NUMERIC(38,18) scale
+    # (ROUND_HALF_EVEN) where the geometry is final, and size from the
+    # quantized prices, so the stored row is self-consistent and its
+    # plan_hash is reproducible from the stored values (F-410).
+    entry_min = quantize_for_storage(_sub(zone_lower, entry_buffer))
+    entry_max = quantize_for_storage(_add(zone_upper, entry_buffer))
+    stop_loss = quantize_for_storage(stop_loss)
+    take_profit_1 = quantize_for_storage(take_profit_1)
 
     # Reference entry = midpoint of the zone (deterministic, no fill model).
     # Per 04-03 checkpoint:decision option A: entry_ref = zone mid for LIMIT_ZONE.
@@ -391,9 +401,9 @@ def plan(
     tp1 = take_profit_1
     tp1_leg = _sub(tp1, entry_ref) if signal.direction == "LONG" else _sub(entry_ref, tp1)
     if signal.direction == "LONG":
-        tp2 = _add(entry_ref, _mul(_q("2"), tp1_leg))
+        tp2 = quantize_for_storage(_add(entry_ref, _mul(_q("2"), tp1_leg)))
     else:
-        tp2 = _sub(entry_ref, _mul(_q("2"), tp1_leg))
+        tp2 = quantize_for_storage(_sub(entry_ref, _mul(_q("2"), tp1_leg)))
 
     # RR gate — TP1 is structure-derived, so this gate can fire (CR-03).
     realized_rr = _div(abs(_sub(tp1, entry_ref)), risk)
@@ -437,9 +447,11 @@ def plan(
     )
 
     # Quantization estimates (D-09: DEFERRED_TO_RISK; Phase 5 owns stepSize math).
-    risk_budget = _mul(account_state.equity, risk_rate)
+    # D-12: every persisted sizing value is stored at the NUMERIC(38,18) scale.
+    risk_rate = quantize_for_storage(risk_rate)
+    risk_budget = quantize_for_storage(_mul(account_state.equity, risk_rate))
     # suggested_quantity = risk_budget / risk (pre-rounding; Phase 5 floors).
-    suggested_quantity = _div(risk_budget, risk)
+    suggested_quantity = quantize_for_storage(_div(risk_budget, risk))
     quantity_before_rounding = suggested_quantity
     quantity_after_rounding = suggested_quantity  # Phase 5 floors; planner passes through
 
