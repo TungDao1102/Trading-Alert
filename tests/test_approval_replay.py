@@ -695,3 +695,78 @@ def test_no_synonym_reason_strings_in_src_approval() -> None:
 
     # If suspicious found, surface them so the test fails loudly.
     assert not suspicious, f"suspect reason-string literals in src/approval/: {suspicious}"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 17 plan 09 (D-17, research C15): a lost cross-process race resolves to
+# the STORED approval (same outcome) or an explicit INVALIDATED rejection.
+# --------------------------------------------------------------------------- #
+
+
+def _lost_race_setup(existing_action: str, existing_status: str) -> tuple[Any, Any, Any, Any]:
+    from dataclasses import replace
+
+    from src.approval.replay import ApprovalAlreadyDecided
+    from src.domain.enums import ApprovalAction, ApprovalResult
+
+    case_input = _load_input(PHASE8_FIXTURES_DIR / "replay_5x")
+    pending = _make_pending_approval(case_input)
+    decided_result = ApprovalResult(existing_status)
+    existing = replace(
+        pending,
+        action=ApprovalAction(existing_action),
+        result=decided_result,
+        status=decided_result,
+        acted_at_utc=_parse_utc("2026-09-19T10:20:00+00:00"),
+        actor_id="other-process",
+    )
+
+    def _save(approval: Any) -> None:
+        raise ApprovalAlreadyDecided(existing)
+
+    return case_input, pending, existing, _save
+
+
+def test_lost_race_with_matching_outcome_returns_stored_approval() -> None:
+    from src.approval.replay import resolve_callback
+
+    case_input, pending, existing, save = _lost_race_setup("APPROVE", "APPROVED")
+    ctx = _binding_context(case_input)
+
+    result = resolve_callback(
+        callback=_make_callback(case_input),
+        lookup_by_token_hash=lambda h: pending,
+        save=save,
+        **ctx,
+    )
+
+    assert result is existing
+    assert result.actor_id == "other-process"
+
+
+def test_lost_race_with_different_outcome_is_invalidated() -> None:
+    from src.approval.replay import resolve_callback
+    from src.domain.enums import RejectionReason
+
+    case_input, pending, _existing, save = _lost_race_setup("SKIP_USER", "SKIPPED")
+    ctx = _binding_context(case_input)
+
+    with pytest.raises(ApprovalRejected) as excinfo:
+        resolve_callback(
+            callback=_make_callback(case_input),
+            lookup_by_token_hash=lambda h: pending,
+            save=save,
+            **ctx,
+        )
+
+    assert excinfo.value.reason_code is RejectionReason.INVALIDATED
+
+
+def test_approval_already_decided_carries_existing_and_is_exported() -> None:
+    from src.approval import replay
+
+    case_input = _load_input(PHASE8_FIXTURES_DIR / "replay_5x")
+    pending = _make_pending_approval(case_input)
+    exc = replay.ApprovalAlreadyDecided(pending)
+    assert exc.existing is pending
+    assert "ApprovalAlreadyDecided" in replay.__all__

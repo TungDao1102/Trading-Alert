@@ -63,6 +63,7 @@ from src.db.models import (
 from src.domain.approval import Approval
 from src.domain.enums import (
     ApprovalAction,
+    ApprovalConsumptionStatus,
     ApprovalResult,
     OrderStatus,
     PositionStatus,
@@ -883,3 +884,88 @@ def test_journal_event_message_id_none_round_trips() -> None:
     assert restored.order_id is None
     assert restored.position_id is None
     assert restored.created_at_utc is None
+
+
+# =========================================================================== #
+# Phase 17 plan 09: explicit approval consumption state (D-16, D-21, C8, C13).
+# =========================================================================== #
+
+
+def _decided_approval(**overrides: object) -> Approval:
+    values: dict[str, object] = {
+        "approval_id": "e" * 64,
+        "trade_plan_id": "c" * 64,
+        "signal_id": "a" * 64,
+        "action": ApprovalAction.APPROVE,
+        "result": ApprovalResult.APPROVED,
+        "status": ApprovalResult.APPROVED,
+        "approval_token_hash": "f" * 64,
+        "requested_at_utc": datetime(2026, 9, 19, 12, 5, tzinfo=UTC),
+        "acted_at_utc": datetime(2026, 9, 19, 12, 6, tzinfo=UTC),
+        "actor_id": "user-1",
+        "telegram_message_id": None,
+        "request_hash": "0" * 64,
+    }
+    values.update(overrides)
+    return Approval(**values)  # type: ignore[arg-type]
+
+
+def test_approval_defaults_to_unconsumed(sample_approval: Approval) -> None:
+    assert sample_approval.consumption_status is ApprovalConsumptionStatus.UNCONSUMED
+    assert sample_approval.consumed_at_utc is None
+
+
+def test_approval_consumed_requires_consumed_at_utc() -> None:
+    with pytest.raises(ValueError, match="consumed_at_utc"):
+        _decided_approval(consumption_status=ApprovalConsumptionStatus.CONSUMED)
+
+
+def test_approval_unconsumed_rejects_consumed_at_utc() -> None:
+    with pytest.raises(ValueError, match="consumed_at_utc"):
+        _decided_approval(consumed_at_utc=datetime(2026, 9, 19, 12, 7, tzinfo=UTC))
+
+
+@pytest.mark.parametrize("status", [ApprovalResult.PENDING, ApprovalResult.SKIPPED])
+def test_approval_consumed_requires_approved_status(status: ApprovalResult) -> None:
+    acted = None if status is ApprovalResult.PENDING else datetime(2026, 9, 19, 12, 6, tzinfo=UTC)
+    with pytest.raises(ValueError, match="CONSUMED"):
+        _decided_approval(
+            result=status,
+            status=status,
+            acted_at_utc=acted,
+            consumption_status=ApprovalConsumptionStatus.CONSUMED,
+            consumed_at_utc=datetime(2026, 9, 19, 12, 7, tzinfo=UTC),
+        )
+
+
+def test_approval_consumed_at_utc_must_be_utc() -> None:
+    from datetime import timedelta, timezone
+
+    with pytest.raises(ValueError, match="consumed_at_utc"):
+        _decided_approval(
+            consumption_status=ApprovalConsumptionStatus.CONSUMED,
+            consumed_at_utc=datetime(2026, 9, 19, 19, 7, tzinfo=timezone(timedelta(hours=7))),
+        )
+    with pytest.raises(ValueError, match="consumed_at_utc"):
+        _decided_approval(
+            consumption_status=ApprovalConsumptionStatus.CONSUMED,
+            consumed_at_utc=datetime(2026, 9, 19, 12, 7),
+        )
+
+
+def test_approval_consumption_fields_round_trip_consumed() -> None:
+    consumed = _decided_approval(
+        consumption_status=ApprovalConsumptionStatus.CONSUMED,
+        consumed_at_utc=datetime(2026, 9, 19, 12, 7, tzinfo=UTC),
+    )
+    row = approval_to_row(consumed)
+    assert row.consumption_status == "CONSUMED"
+    assert row.consumed_at_utc == datetime(2026, 9, 19, 12, 7, tzinfo=UTC)
+    assert approval_from_row(row) == consumed
+
+
+def test_approval_consumption_fields_round_trip_unconsumed(sample_approval: Approval) -> None:
+    row = approval_to_row(sample_approval)
+    assert row.consumption_status == "UNCONSUMED"
+    assert row.consumed_at_utc is None
+    assert approval_from_row(row) == sample_approval
