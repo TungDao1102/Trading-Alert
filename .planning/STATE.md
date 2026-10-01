@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 17
 current_phase_name: operational-persistence-layer
 status: executing
-stopped_at: Completed 17-06-PLAN.md
-last_updated: "2026-10-01T14:13:05.298Z"
+stopped_at: Completed 17-07-PLAN.md
+last_updated: "2026-10-01T14:41:29.156Z"
 last_activity: 2026-10-01
 last_activity_desc: Phase 17 execution started
-state_head: a7fb7e8d2deec7b601a90e9cf97a40b49e137846
+state_head: d43e1c8da5e76612ee161040d72b6c6da258b49b
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 109
-  completed_plans: 96
+  completed_plans: 97
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 17 (operational-persistence-layer) — EXECUTING
-Plan: 7 of 15
+Plan: 8 of 15
 Status: Ready to execute
 Last activity: 2026-10-01 — Phase 17 execution started
 
@@ -136,6 +136,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 17 P04 | 35min | 2 tasks | 7 files |
 | Phase 17 P05 | 40 min | 3 tasks | 6 files |
 | Phase 17 P06 | 45 min | 2 tasks | 4 files |
+| Phase 17 P07 | 45 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -346,6 +347,7 @@ Recent decisions affecting current work:
 - [Phase 17]: 17-04: journal ids are pure functions (content hash or callback_query.id correlation); missing callback query id fails closed
 - [Phase 17]: Plan 17-05: persisted plan Decimals quantized to NUMERIC(38,18) with ROUND_HALF_EVEN before hashing; _plan_hash hashes canonical decimal text (D-12, one-way); phase4 expected_plans.json regenerated (inventory in 17-05-SUMMARY for D051)
 - [Phase 17]: 17-06: max_quantity counts as a filter value for snapshot completeness (None => INCOMPLETE, invalid for live); snapshot JSON carries snapshot_schema_version 1 — Fail closed (D-19); versionable evidence (D-18)
+- [Phase 17]: 17-07: no ORM/migration drift found; parity enforced by compare_metadata (checkconstraint_byname) plus catalog assertions for predicates, CHECK literals and triggers; async make_engine pins timezone=UTC; alembic floor 1.19.2
 
 ### Pending Todos
 
@@ -391,6 +393,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-01T14:13:05.029Z
-Stopped at: Completed 17-06-PLAN.md
+Last session: 2026-10-01T14:41:28.891Z
+Stopped at: Completed 17-07-PLAN.md
 Resume file: None
