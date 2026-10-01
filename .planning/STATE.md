@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 17
 current_phase_name: operational-persistence-layer
 status: executing
-stopped_at: Completed 17-04-PLAN.md
-last_updated: "2026-10-01T13:19:50.829Z"
+stopped_at: Completed 17-05-PLAN.md
+last_updated: "2026-10-01T13:50:18.309Z"
 last_activity: 2026-10-01
 last_activity_desc: Phase 17 execution started
-state_head: 125d5c500bd1b63383d272fdba99f583ace74b02
+state_head: f63e64cc750a1fb72b22aa3de152c6eca77f4c6d
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 109
-  completed_plans: 94
+  completed_plans: 95
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 17 (operational-persistence-layer) — EXECUTING
-Plan: 5 of 15
+Plan: 6 of 15
 Status: Ready to execute
 Last activity: 2026-10-01 — Phase 17 execution started
 
@@ -134,6 +134,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 17 P02 | 30min | 2 tasks | 8 files |
 | Phase 17 P03 | 12 min | 2 tasks | 3 files |
 | Phase 17 P04 | 35min | 2 tasks | 7 files |
+| Phase 17 P05 | 40 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -342,6 +343,7 @@ Recent decisions affecting current work:
 - [Phase 17]: 17-02: all new 0004 constraints/indexes are PostgreSQL-only on the ORM via ddl_if; 18 pre-existing indexes declared plainly — keeps SQLite create_all fixture suites unchanged; alembic compare_metadata shows zero diff
 - [Phase 17]: 17-03: Transition tables authored from research draft as auto-mode default (C3); unchanged state is not a transition; APPROVED->SUPERSEDED for TradePlan illegal (open point, D051)
 - [Phase 17]: 17-04: journal ids are pure functions (content hash or callback_query.id correlation); missing callback query id fails closed
+- [Phase 17]: Plan 17-05: persisted plan Decimals quantized to NUMERIC(38,18) with ROUND_HALF_EVEN before hashing; _plan_hash hashes canonical decimal text (D-12, one-way); phase4 expected_plans.json regenerated (inventory in 17-05-SUMMARY for D051)
 
 ### Pending Todos
 
@@ -387,6 +389,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-01T13:19:50.545Z
-Stopped at: Completed 17-04-PLAN.md
+Last session: 2026-10-01T13:50:18.045Z
+Stopped at: Completed 17-05-PLAN.md
 Resume file: None
