@@ -1,8 +1,18 @@
 """Deterministic client/algo order identifier derivation (Phase 8, plan 08-03).
 
-Per D-04: a retry, restart, or replay of an approved plan must reuse the
-exchange-deduped identifier instead of minting a new one. The derivation
-is a pure function of `(plan_hash, role)` over stdlib `hashlib` only.
+Per D-04: a retry, restart, or replay of an approved plan reuses the same
+identifier instead of minting a new one. The derivation is a pure function of
+`(plan_hash, role)` over stdlib `hashlib` only.
+
+What the ids are for, and what they are NOT (Phase 17, D-13, F-951, research C18):
+the ids are deterministic so that a probe by client id can find an order that was
+sent but whose response was lost, and so that every restart derives the same id.
+They are NOT an exchange-side duplicate guard. Binance treats `newClientOrderId` and
+`clientAlgoId` as unique only among OPEN orders: once the earlier order is FILLED or
+CANCELED the id is free again and the exchange accepts a second order with it.
+Duplicate-entry protection is therefore the persisted execution intent written by
+`src/execution/manager.py` before `place_entry` (see `intent_store.py`), never the
+exchange.
 
 Pinned ID shape (re-verified against the installed Binance SDK during
 this plan; the SDK exposes response models only — request validation
@@ -83,9 +93,10 @@ def derive_client_order_id(*, plan_hash: str, role: str) -> str:
     """Return the deterministic Binance client_order_id for a plan leg.
 
     Per D-04: the same `(plan_hash, role)` always yields the same
-    client_order_id across processes, restarts, and replays. The
-    exchange uses this identifier to dedupe retries — a blind retry
-    without ID reuse is impossible by construction.
+    client_order_id across processes, restarts, and replays, so a probe
+    by client id can find the order. Binance only rejects a duplicate
+    while the earlier order is still OPEN, so this identifier is NOT a
+    duplicate-entry guard; the persisted execution intent is (D-13).
 
     Args:
         plan_hash: The 64-char SHA-256 hex digest of the parent

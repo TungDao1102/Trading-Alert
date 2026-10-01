@@ -10,8 +10,12 @@ statements against the ORM tables:
     violation on a DIFFERENT arbiter (a second approval for the same plan, a reused
     client id), hiding a second-entry attempt, so those surface as
     `IntentStateConflict` and the transaction rolls back (no intent row survives).
-  - status writes are conditional UPDATEs guarded by the allowed predecessors
-    (`ALLOWED_PREDECESSORS`); a rowcount of 0 raises `IntentStateConflict`.
+  - status writes read the current status `FOR UPDATE` inside the same transaction and
+    check the move with `src.domain.transitions` (EXECUTION_INTENT, D-20); an illegal
+    move or a missing row raises `IntentStateConflict`, an unchanged status is an
+    idempotent no-op (`assert_transition` raises on `old == new`).
+  - protective legs (STOP_LOSS) are inserted INTENDED by `record_protective_intent`
+    with the same targeted `ON CONFLICT (approval_id, role)`.
 
 The correctness line is the database constraint, not Python: a lost race, a replay
 and a restart all end in the same stored row (D-15, D-17). Decimals stay Decimal
@@ -35,7 +39,8 @@ from src.domain.enums import (
     ExecutionIntentStatus,
     OrderRole,
 )
-from src.execution.intent_store import ALLOWED_PREDECESSORS, IntentRecord, RecordedOutcome
+from src.domain.transitions import IllegalTransition, TransitionKind, assert_transition
+from src.execution.intent_store import IntentRecord, RecordedOutcome
 from src.persistence.errors import IntentStateConflict, ParentRowMissing
 from src.persistence.uow import OperationalDatabase
 
@@ -86,13 +91,6 @@ def _to_record(row: ExecutionIntentRow) -> IntentRecord:
         resolved_at_utc=row.resolved_at_utc,
         updated_at_utc=row.updated_at_utc,
     )
-
-
-def _predecessors(target: ExecutionIntentStatus) -> list[str]:
-    allowed = ALLOWED_PREDECESSORS[target]
-    if not allowed:
-        raise IntentStateConflict(f"status {target.value} cannot be written after creation")
-    return sorted(status.value for status in allowed)
 
 
 class PgExecutionStateStore:
@@ -179,6 +177,55 @@ class PgExecutionStateStore:
         except IntegrityError as exc:
             raise _translate_integrity(exc, what="consume approval") from exc
 
+    def record_protective_intent(
+        self,
+        *,
+        approval_id: str,
+        role: str,
+        trade_plan_id: str,
+        plan_hash: str,
+        algo_client_id: str,
+        symbol: str,
+        side: str,
+        intended_price: Decimal,
+        now_utc: datetime,
+    ) -> bool:
+        """Insert a protective-leg intent (INTENDED, NULL quantity: close-position leg).
+
+        Returns True when this call created the row and False when the
+        (approval_id, role) row already existed. Another unique arbiter (the plan/role
+        pair or the algo client id) surfaces as `IntentStateConflict`.
+        """
+        if role == OrderRole.ENTRY.value:
+            raise IntentStateConflict("the ENTRY intent is written by consume, not here")
+        values: dict[str, Any] = {
+            "approval_id": approval_id,
+            "role": role,
+            "trade_plan_id": trade_plan_id,
+            "plan_hash": plan_hash,
+            "client_order_id": None,
+            "algo_client_id": algo_client_id,
+            "symbol": symbol,
+            "side": side,
+            "intended_quantity": None,
+            "intended_price": intended_price,
+            "intent_status": ExecutionIntentStatus.INTENDED.value,
+            "outcome_recorded": False,
+            "intended_at_utc": now_utc,
+            "updated_at_utc": now_utc,
+        }
+        try:
+            with self._db.transaction() as session:
+                inserted = session.execute(
+                    pg_insert(ExecutionIntentRow)
+                    .values(**values)
+                    .on_conflict_do_nothing(index_elements=["approval_id", "role"])
+                    .returning(ExecutionIntentRow.approval_id)
+                ).first()
+                return inserted is not None
+        except IntegrityError as exc:
+            raise _translate_integrity(exc, what=f"record {role} intent") from exc
+
     def mark_sent(self, *, approval_id: str, role: str, now_utc: datetime) -> None:
         self._advance(
             approval_id=approval_id,
@@ -254,23 +301,34 @@ class PgExecutionStateStore:
         values: dict[str, Any],
         now_utc: datetime,
     ) -> None:
-        """Conditional UPDATE: only an allowed predecessor status may move to `target`."""
-        predecessors = _predecessors(target)
+        """Move one row to `target` if `src.domain.transitions` allows it (D-20)."""
         try:
             with self._db.transaction() as session:
-                result = session.execute(
+                current = session.execute(
+                    select(ExecutionIntentRow.intent_status)
+                    .where(
+                        ExecutionIntentRow.approval_id == approval_id,
+                        ExecutionIntentRow.role == role,
+                    )
+                    .with_for_update()
+                ).scalar_one_or_none()
+                if current is None:
+                    raise IntentStateConflict(f"no intent row for role {role}")
+                if current == target.value:
+                    return  # unchanged status is an idempotent no-op
+                try:
+                    assert_transition(TransitionKind.EXECUTION_INTENT, current, target)
+                except IllegalTransition as exc:
+                    raise IntentStateConflict(
+                        f"illegal intent transition {current} -> {target.value} for role {role}"
+                    ) from exc
+                session.execute(
                     update(ExecutionIntentRow)
                     .where(
                         ExecutionIntentRow.approval_id == approval_id,
                         ExecutionIntentRow.role == role,
-                        ExecutionIntentRow.intent_status.in_(predecessors),
                     )
                     .values(intent_status=target.value, updated_at_utc=now_utc, **values)
                 )
-                if result.rowcount != 1:  # type: ignore[attr-defined]
-                    raise IntentStateConflict(
-                        f"illegal intent transition to {target.value} for role {role} "
-                        "(missing row or disallowed predecessor status)"
-                    )
         except IntegrityError as exc:
             raise _translate_integrity(exc, what=f"record {target.value}") from exc

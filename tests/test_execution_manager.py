@@ -1460,7 +1460,7 @@ def test_check_binding_identity_hash_version_and_token_mismatches() -> None:
     for field, value in (
         ("strategy_version", "other-version"),
         ("parameter_set_id", "other-set"),
-        ("parameter_set_hash", "5" * 64),
+        ("parameter_set_hash", "6" * 64),
         ("raw_token", "not-the-token"),
     ):
         result = check_binding_identity(

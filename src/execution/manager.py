@@ -8,26 +8,32 @@ fixed order. First-failure-wins reason codes are preserved byte-identically.
 
 The module is dependency-free: stdlib + `src/approval/*` + `src/risk/*` +
 `src/execution/order_ids.py` + `src/execution/placement.py` +
-`src/execution/intent_store.py` (a Protocol) only.
-No Binance SDK, no SQLAlchemy, no Pydantic, no Polars, no structlog.
+`src/execution/intent_store.py` (a Protocol) + `src/persistence/errors.py` (pure
+exception classes) only. No Binance SDK, no SQLAlchemy, no Pydantic, no Polars,
+no structlog.
 
 Phase 17 (D-13/D-14/D-15): the approval is consumed durably by writing the ENTRY
 execution intent BEFORE `place_entry` runs, through the `ExecutionIntentStore`
-Protocol. A replayed APPROVE returns the stored outcome with zero adapter calls;
-the exchange's own clientOrderId dedup is NOT relied on (Binance only rejects a
-duplicate while the earlier order is still open, F-126).
+Protocol, and the STOP_LOSS leg gets its own intent BEFORE `place_algo_protective`
+(F-703). A replayed APPROVE returns the stored outcome with zero adapter calls,
+after the identity checks and before the expiry gate (D-16).
+
+The exchange is NOT a duplicate-entry guard: Binance treats `newClientOrderId` as
+unique only among OPEN orders, so a FILLED or CANCELED entry frees its id and a
+replay would be accepted again (F-126, F-951). The persisted execution intent is the
+guard; the deterministic ids only let a probe find an order whose response was lost.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
-from src.approval.binding import check_binding_full
+from src.approval.binding import check_binding_full, check_binding_identity
 from src.domain.approval import Approval
 from src.domain.enums import (
     ApprovalAction,
@@ -51,6 +57,7 @@ from src.execution.placement import (
     size_protectives_to_filled_qty,
     sl_trigger_rounding,
 )
+from src.persistence.errors import IntentStateConflict, PersistenceError
 from src.risk.cost_rates import FEE_SOURCE_ACCOUNT_MAX, CostRates
 from src.risk.gating import evaluate_risk
 from src.risk.types import ConstraintSnapshot
@@ -276,10 +283,11 @@ def _check_approval_authorizes_plan(
          `expiry_utc` (never a fresher caller-supplied value) →
          otherwise STALE_SETUP.
 
-    NOTE: consuming the approval (so an at-least-once Telegram replay
-    re-plays the persisted outcome instead of re-running the pipeline) is
-    NOT handled here; `execute_approved_plan` does it through the
-    `ExecutionIntentStore` (Phase 17, D-13/D-15).
+    Consumption of the approval is the persisted ENTRY execution intent
+    (Phase 17, D-13): `execute_approved_plan` writes it through the
+    `ExecutionIntentStore` before `place_entry`, so an at-least-once Telegram
+    replay re-plays the stored outcome instead of re-running the pipeline.
+    This function only decides authorization; it consumes nothing.
     """
     callback_action = getattr(callback, "action", None)
     if (
@@ -357,7 +365,11 @@ async def execute_approved_plan(
     preserved byte-identically.
 
     Gate order (fixed, never reordered):
-      1. Approval binding (chat→expiry→hash→version→token).
+      0. Identity (chat→hash→version→token, `check_binding_identity`), then the
+         stored-outcome lookup: an already-consumed approval returns its stored
+         outcome with zero adapter calls, even after the plan expiry, and a
+         caller that fails identity never learns the stored state (D-15, D-16).
+      1. Approval binding (`check_binding_full`; adds the expiry gate).
       2. Enablement guard (LIVE_ORDERS_DISABLED → DISABLED).
       3. SAFE_MODE guard (`guard_new_entries` → RECONCILIATION_REQUIRED).
       4. Live cost-rate gate (D-11, D-12): `cost_rates.fee_source` must be
@@ -416,9 +428,16 @@ async def execute_approved_plan(
             approval returns the stored outcome with zero adapter calls
             (D-15), even after a restart. The store is synchronous and is
             called directly on the event loop (short indexed queries bounded
-            by the engine's `lock_timeout`; Phase 24 may wrap it in
-            `asyncio.to_thread`). Store errors propagate: the manager never
-            swallows them into a placement (fail closed).
+            by the engine `lock_timeout`; Phase 24 may wrap it in
+            `asyncio.to_thread`). Store failures fail closed on both sides of
+            placement: before the entry is sent a `PersistenceError` returns
+            NO_TRADE (`RECONCILIATION_REQUIRED`, or `INVALIDATED` for an
+            `IntentStateConflict` at consume, i.e. a second approval of the same
+            plan) and nothing is placed; after the entry may exist the manager
+            enters SAFE_MODE (`DB_FAILURE`), still places the stop loss by its
+            deterministic id (protection outranks the audit row, D034) and
+            returns `RECONCILIATION_REQUIRED`. Only `PersistenceError` is
+            caught: a crash (any `BaseException`) propagates untouched.
 
     Returns:
         An `ExecutionOutcome` with `is_no_trade` and `reason_code`.
@@ -441,7 +460,38 @@ async def execute_approved_plan(
             "(one clock for binding, risk and gates)"
         )
 
-    # Gate 1: approval binding (chat→expiry→hash→version→token).
+    # Gate 0 (D-16): identity BEFORE any state lookup. A wrong chat, plan hash,
+    # version/parameter set or token is rejected here, so the stored outcome below
+    # is never revealed to a caller that cannot prove who it is.
+    identity = check_binding_identity(
+        callback=callback,
+        approval=approval,
+        authorized_chat_id=authorized_chat_id,
+        approval_strategy_version=approval_strategy_version,
+        approval_parameter_set_id=approval_parameter_set_id,
+        approval_parameter_set_hash=approval_parameter_set_hash,
+    )
+    if not identity.ok:
+        return ExecutionOutcome(
+            is_no_trade=True,
+            reason_code=identity.reason_code.value
+            if identity.reason_code is not None
+            else RejectionReason.INVALIDATED.value,
+        )
+
+    # Replay (D-15, Open Q2): an approval whose ENTRY intent already exists was
+    # consumed by an earlier call (or process). Return the stored outcome with ZERO
+    # adapter calls, BEFORE the expiry gate (an already-executed plan replays after
+    # its expiry); the exchange clientOrderId dedup is never consulted. An
+    # unreadable store fails closed.
+    try:
+        stored_entry = intent_store.get_entry(approval_id=approval.approval_id)
+    except PersistenceError:
+        return _reconciliation_required()
+    if stored_entry is not None:
+        return _stored_entry_outcome(stored_entry)
+
+    # Gate 1: full approval binding (identity again plus the expiry gate).
     binding = check_binding_full(
         callback=callback,
         approval=approval,
@@ -472,13 +522,6 @@ async def execute_approved_plan(
     )
     if approval_verdict is not None:
         return approval_verdict
-
-    # Replay (D-15): an approval whose ENTRY intent already exists was consumed
-    # by an earlier call (or process). Return the stored outcome with ZERO
-    # adapter calls; the exchange's clientOrderId dedup is never consulted.
-    stored_entry = intent_store.get_entry(approval_id=approval.approval_id)
-    if stored_entry is not None:
-        return _stored_entry_outcome(stored_entry)
 
     # Gate 2: enablement guard (LIVE_ORDERS_DISABLED → DISABLED).
     enablement_verdict = enablement.guard_placement(
@@ -617,47 +660,84 @@ async def execute_approved_plan(
     # ENTRY intent (INTENDED) BEFORE any order leaves. Pre-placement NO_TRADE
     # verdicts above never consume (research Open Q1). Losing the race, or
     # finding the row already there, returns the stored outcome without any
-    # adapter call.
-    consumed = intent_store.consume_and_record_entry_intent(
-        approval_id=approval.approval_id,
-        trade_plan_id=trade_plan.trade_plan_id,
-        plan_hash=trade_plan.plan_hash,
-        client_order_id=entry_client_order_id,
-        symbol=constraint_snapshot.symbol,
-        side=entry_side,
-        intended_quantity=quantity,
-        intended_price=limit_price,
-        now_utc=now_utc,
-    )
-    if not consumed:
-        existing_entry = intent_store.get_entry(approval_id=approval.approval_id)
-        if existing_entry is None:  # lost the race yet nothing stored: fail closed
-            return ExecutionOutcome(
-                is_no_trade=True, reason_code=RejectionReason.RECONCILIATION_REQUIRED.value
-            )
-        return _stored_entry_outcome(existing_entry)
-
-    def _finish(outcome: ExecutionOutcome) -> ExecutionOutcome:
-        """Persist the exact outcome on the ENTRY row, then return it (D-15)."""
-        intent_store.finalize_entry_outcome(
+    # order placement. A store failure here fails closed: nothing was sent.
+    try:
+        consumed = intent_store.consume_and_record_entry_intent(
             approval_id=approval.approval_id,
-            is_no_trade=outcome.is_no_trade,
-            reason_code=outcome.reason_code,
+            trade_plan_id=trade_plan.trade_plan_id,
+            plan_hash=trade_plan.plan_hash,
+            client_order_id=entry_client_order_id,
+            symbol=constraint_snapshot.symbol,
+            side=entry_side,
+            intended_quantity=quantity,
+            intended_price=limit_price,
             now_utc=now_utc,
         )
-        return outcome
+    except IntentStateConflict:
+        # A second approval for the same plan (or another unique arbiter): the plan
+        # is already spoken for, so this approval cannot authorize an order.
+        return ExecutionOutcome(is_no_trade=True, reason_code=RejectionReason.INVALIDATED.value)
+    except PersistenceError:
+        return _reconciliation_required()
+    if not consumed:
+        try:
+            existing_entry = intent_store.get_entry(approval_id=approval.approval_id)
+        except PersistenceError:
+            return _reconciliation_required()
+        if existing_entry is None:  # lost the race yet nothing stored: fail closed
+            return _reconciliation_required()
+        return _stored_entry_outcome(existing_entry)
+
+    # Post-consume store handling. Before `place_entry` a store failure only stops the
+    # placement; once the entry may exist a store failure enters SAFE_MODE(DB_FAILURE)
+    # exactly once and every later store write is skipped (the protective leg is still
+    # placed: protection outranks the audit row, D034). Only `PersistenceError` is
+    # caught here; a crash (any BaseException) must propagate untouched.
+    store_failed = False
+
+    def _store_write(write: Callable[[], object]) -> bool:
+        """Run one post-acknowledgement store write; False means the store failed."""
+        nonlocal store_failed
+        if store_failed:
+            return False
+        try:
+            write()
+        except PersistenceError:
+            store_failed = True
+            safe_mode_controller.enter_safe_mode(reason=_DB_FAILURE, now_utc=now_utc)
+            return False
+        return True
+
+    def _finish(outcome: ExecutionOutcome) -> ExecutionOutcome:
+        """Persist the exact outcome on the ENTRY row, then return it (D-15).
+
+        With a failed store the outcome cannot be persisted and the local state is
+        not trustworthy, so the caller gets RECONCILIATION_REQUIRED instead.
+        """
+        recorded = _store_write(
+            lambda: intent_store.finalize_entry_outcome(
+                approval_id=approval.approval_id,
+                is_no_trade=outcome.is_no_trade,
+                reason_code=outcome.reason_code,
+                now_utc=now_utc,
+            )
+        )
+        return outcome if recorded else _reconciliation_required()
 
     # Committed SENT before the call: a crash while `place_entry` is in flight
     # leaves a durable row that restart recovery reads as unresolved (F-703).
-    intent_store.mark_sent(
-        approval_id=approval.approval_id, role=OrderRole.ENTRY.value, now_utc=now_utc
-    )
+    try:
+        intent_store.mark_sent(
+            approval_id=approval.approval_id, role=OrderRole.ENTRY.value, now_utc=now_utc
+        )
+    except PersistenceError:
+        return _reconciliation_required()  # nothing was sent; the INTENDED row stays unresolved
 
     # Place the entry (LIMIT, GTC).
-    # 09-REVIEW CR-06: every adapter call is awaited on the caller's
-    # running event loop (python-telegram-bot / FastAPI). No nested
-    # `asyncio.run` — it raises inside a running loop and would tear
-    # down loop-bound adapter resources between the entry and the SL.
+    # 09-REVIEW CR-06: every adapter call is awaited on the caller running event
+    # loop (python-telegram-bot / FastAPI). No nested `asyncio.run` — it raises
+    # inside a running loop and would tear down loop-bound adapter resources
+    # between the entry and the SL.
     entry_placement = await _place_entry_no_blind_retry(
         adapter=adapter,
         entry_kwargs={
@@ -675,44 +755,77 @@ async def execute_approved_plan(
         # Fail closed: the entry may or may not exist on the exchange and
         # the probe could not tell. No SL, no retry — SAFE_MODE blocks new
         # entries while reconciliation resolves the truth.
-        intent_store.record_result(
-            approval_id=approval.approval_id,
-            role=OrderRole.ENTRY.value,
-            status=ExecutionIntentStatus.UNKNOWN,
-            exchange_order_id=None,
-            exchange_status=None,
-            now_utc=now_utc,
-        )
         safe_mode_controller.enter_safe_mode(reason=_ENTRY_STATE_UNKNOWN, now_utc=now_utc)
-        return _finish(
-            ExecutionOutcome(
-                is_no_trade=True, reason_code=RejectionReason.RECONCILIATION_REQUIRED.value
+        _store_write(
+            lambda: intent_store.record_result(
+                approval_id=approval.approval_id,
+                role=OrderRole.ENTRY.value,
+                status=ExecutionIntentStatus.UNKNOWN,
+                exchange_order_id=None,
+                exchange_status=None,
+                now_utc=now_utc,
             )
         )
+        return _finish(_reconciliation_required())
     if entry_state == _ENTRY_STATE_ABSENT:
         # Definitively not on the exchange after bounded attempts — no
         # exposure exists, so NO_TRADE without SAFE_MODE.
-        intent_store.record_result(
-            approval_id=approval.approval_id,
-            role=OrderRole.ENTRY.value,
-            status=ExecutionIntentStatus.REJECTED,
-            exchange_order_id=None,
-            exchange_status=None,
-            now_utc=now_utc,
+        _store_write(
+            lambda: intent_store.record_result(
+                approval_id=approval.approval_id,
+                role=OrderRole.ENTRY.value,
+                status=ExecutionIntentStatus.REJECTED,
+                exchange_order_id=None,
+                exchange_status=None,
+                now_utc=now_utc,
+            )
         )
         return _finish(
             ExecutionOutcome(
                 is_no_trade=True, reason_code=RejectionReason.EXCHANGE_CONSTRAINT.value
             )
         )
-    intent_store.record_result(
-        approval_id=approval.approval_id,
-        role=OrderRole.ENTRY.value,
-        status=ExecutionIntentStatus.ACKED,
-        exchange_order_id=entry_placement.exchange_order_id,
-        exchange_status=entry_placement.exchange_status,
-        now_utc=now_utc,
+    _store_write(
+        lambda: intent_store.record_result(
+            approval_id=approval.approval_id,
+            role=OrderRole.ENTRY.value,
+            status=ExecutionIntentStatus.ACKED,
+            exchange_order_id=entry_placement.exchange_order_id,
+            exchange_status=entry_placement.exchange_status,
+            now_utc=now_utc,
+        )
     )
+
+    # Write-ahead for the SL leg (D-14 step 4, F-703): its intent is committed
+    # INTENDED, then SENT, before `place_algo_protective`. If the database fails here
+    # the entry is already on the exchange, so the SL is placed anyway.
+    sl_algo_client_id = derive_algo_client_id(
+        plan_hash=trade_plan.plan_hash, role=OrderRole.STOP_LOSS.value
+    )
+
+    def _record_sl_intent() -> None:
+        created = intent_store.record_protective_intent(
+            approval_id=approval.approval_id,
+            role=OrderRole.STOP_LOSS.value,
+            trade_plan_id=trade_plan.trade_plan_id,
+            plan_hash=trade_plan.plan_hash,
+            algo_client_id=sl_algo_client_id,
+            symbol=constraint_snapshot.symbol,
+            side=sl_side,
+            intended_price=sl_trigger_price,
+            now_utc=now_utc,
+        )
+        if not created:
+            raise IntentStateConflict("STOP_LOSS intent already exists for a first placement")
+
+    if _store_write(_record_sl_intent):
+        _store_write(
+            lambda: intent_store.mark_sent(
+                approval_id=approval.approval_id,
+                role=OrderRole.STOP_LOSS.value,
+                now_utc=now_utc,
+            )
+        )
 
     # Place the entry-time SL protective leg (CONDITIONAL, STOP_MARKET,
     # close_position) — the pre-fill safety net. TP1/TP2 are sized to the
@@ -739,6 +852,18 @@ async def execute_approved_plan(
             "working_type": "MARK_PRICE",
         },
     )
+    # SL result: confirmed -> ACKED; not confirmed -> UNKNOWN (reconciliation resolves
+    # the leg against the exchange; the unprotected-entry path below acts immediately).
+    _store_write(
+        lambda: intent_store.record_result(
+            approval_id=approval.approval_id,
+            role=OrderRole.STOP_LOSS.value,
+            status=ExecutionIntentStatus.ACKED if sl_confirmed else ExecutionIntentStatus.UNKNOWN,
+            exchange_order_id=None,
+            exchange_status=None,
+            now_utc=now_utc,
+        )
+    )
     if not sl_confirmed:
         # The entry was acknowledged (or found) but has no confirmed stop:
         # block new entries FIRST, then cancel the entry by its
@@ -761,6 +886,13 @@ async def execute_approved_plan(
         return _finish(ExecutionOutcome(is_no_trade=True, reason_code=_ENTRY_WITHOUT_PROTECTIVE))
 
     return _finish(ExecutionOutcome(is_no_trade=False, reason_code="OK"))
+
+
+def _reconciliation_required() -> ExecutionOutcome:
+    """The fail-closed outcome for an unreadable or unwritable store (D-04, D034)."""
+    return ExecutionOutcome(
+        is_no_trade=True, reason_code=RejectionReason.RECONCILIATION_REQUIRED.value
+    )
 
 
 def _stored_entry_outcome(record: IntentRecord) -> ExecutionOutcome:
@@ -794,6 +926,10 @@ _REQUIRED_PROTECTIVE_ROLES: frozenset[str] = frozenset(
 )
 
 _ENTRY_WITHOUT_PROTECTIVE: str = "ENTRY_WITHOUT_PROTECTIVE"
+
+# SAFE_MODE reason when the operational database fails after an entry may exist
+# (GLOSSARY section 9.4; the same literal `src/ops/drills.py` uses).
+_DB_FAILURE: str = "DB_FAILURE"
 
 
 @dataclass(frozen=True)

@@ -137,6 +137,51 @@ def action_to_result(action: ApprovalAction) -> ApprovalResult:
     return ApprovalResult.PENDING
 
 
+def check_binding_identity(
+    *,
+    callback: Callback,
+    approval: Approval,
+    authorized_chat_id: int,
+    approval_strategy_version: str,
+    approval_parameter_set_id: str,
+    approval_parameter_set_hash: str,
+) -> BindingCheck:
+    """Run the identity gates of `check_binding_full` WITHOUT the expiry gate (D-16).
+
+    Order is fixed: chat-id -> plan-hash -> version/parameter-set -> token-hash. The
+    execution manager runs this first so a stored outcome is only ever revealed to a
+    caller that proves it is the approved caller, and only then looks the outcome up
+    BEFORE the expiry gate (a replay of an already-executed plan after its expiry must
+    return the stored outcome, not APPROVAL_EXPIRED).
+
+    It never looks at an expiry: an expired approval passes here and is rejected by
+    `check_binding_full`, which stays unchanged.
+    """
+    from src.approval.tokens import verify_token_hash
+
+    # Gate 1: chat-id (runs first, before any state lookup).
+    if callback.chat_id != authorized_chat_id:
+        return BindingCheck(ok=False, reason_code=RejectionReason.INVALIDATED)
+
+    # Gate 2: plan-hash.
+    if callback.plan_hash != approval.request_hash:
+        return BindingCheck(ok=False, reason_code=RejectionReason.STALE_SETUP)
+
+    # Gate 3: version/parameter-set.
+    if (
+        callback.strategy_version != approval_strategy_version
+        or callback.parameter_set_id != approval_parameter_set_id
+        or callback.parameter_set_hash != approval_parameter_set_hash
+    ):
+        return BindingCheck(ok=False, reason_code=RejectionReason.INVALIDATED)
+
+    # Gate 4: token-hash.
+    if not verify_token_hash(callback.raw_token, approval.approval_token_hash):
+        return BindingCheck(ok=False, reason_code=RejectionReason.INVALIDATED)
+
+    return BindingCheck(ok=True, reason_code=None)
+
+
 def check_binding_full(
     *,
     callback: Callback,
@@ -206,5 +251,6 @@ __all__ = [
     "BindingCheck",
     "ApprovalRejected",
     "check_binding_full",
+    "check_binding_identity",
     "action_to_result",
 ]

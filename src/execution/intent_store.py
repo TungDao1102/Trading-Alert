@@ -11,8 +11,13 @@ The write-ahead contract the manager follows around the entry order:
      won; `False` = the approval was already consumed (replay or lost race).
   2. `mark_sent` — committed BEFORE `place_entry` is awaited.
   3. `record_result` — ACKED / REJECTED / UNKNOWN from the exchange response.
-  4. `finalize_entry_outcome` — the exact `ExecutionOutcome` fields, so a replay
+  4. `record_protective_intent` + `mark_sent` + `record_result` for the STOP_LOSS leg,
+     committed BEFORE `place_algo_protective` runs (D-14, F-703).
+  5. `finalize_entry_outcome` — the exact `ExecutionOutcome` fields, so a replay
      returns the stored result with zero adapter calls (D-15).
+
+Status changes are legal only along `src.domain.transitions` (EXECUTION_INTENT, D-20);
+an unchanged status is an idempotent no-op.
 
 The exchange's own client-id dedup is explicitly NOT relied on: Binance only
 rejects a duplicate while the earlier order is still open (F-126).
@@ -26,27 +31,6 @@ from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 from src.domain.enums import ExecutionIntentStatus
-
-# Allowed predecessor statuses per target status (plan 11 swaps this map for
-# `src/domain/transitions.py`). Shared by the PostgreSQL store and the in-memory
-# double so both enforce identical semantics.
-ALLOWED_PREDECESSORS: dict[ExecutionIntentStatus, frozenset[ExecutionIntentStatus]] = {
-    ExecutionIntentStatus.INTENDED: frozenset(),
-    ExecutionIntentStatus.SENT: frozenset({ExecutionIntentStatus.INTENDED}),
-    ExecutionIntentStatus.ACKED: frozenset(
-        {ExecutionIntentStatus.SENT, ExecutionIntentStatus.UNKNOWN}
-    ),
-    ExecutionIntentStatus.REJECTED: frozenset(
-        {
-            ExecutionIntentStatus.INTENDED,
-            ExecutionIntentStatus.SENT,
-            ExecutionIntentStatus.UNKNOWN,
-        }
-    ),
-    ExecutionIntentStatus.UNKNOWN: frozenset(
-        {ExecutionIntentStatus.INTENDED, ExecutionIntentStatus.SENT}
-    ),
-}
 
 
 @dataclass(frozen=True)
@@ -100,6 +84,26 @@ class ExecutionIntentStore(Protocol):
         intended_price: Decimal,
         now_utc: datetime,
     ) -> bool: ...
+
+    def record_protective_intent(
+        self,
+        *,
+        approval_id: str,
+        role: str,
+        trade_plan_id: str,
+        plan_hash: str,
+        algo_client_id: str,
+        symbol: str,
+        side: str,
+        intended_price: Decimal,
+        now_utc: datetime,
+    ) -> bool:
+        """Insert a protective-leg intent (INTENDED, no quantity: close-position leg).
+
+        `True` = this caller created the row; `False` = the (approval_id, role) row
+        already existed.
+        """
+        ...
 
     def mark_sent(self, *, approval_id: str, role: str, now_utc: datetime) -> None: ...
 
