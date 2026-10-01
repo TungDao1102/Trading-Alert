@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: "13.1"
 current_phase_name: Deployment & CI
 status: executing
-stopped_at: Completed 13.1-07-PLAN.md
-last_updated: "2026-10-01T06:37:37.366Z"
+stopped_at: Completed 13.1-08-PLAN.md
+last_updated: "2026-10-01T07:27:22.167Z"
 last_activity: 2026-10-01
 last_activity_desc: Phase 13.1 execution started
-state_head: 7384547d8d73fb88e944a55df3f24cca07d10197
+state_head: fa31ab7e4a04856dd947d64d545e25723d390711
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 94
-  completed_plans: 86
+  completed_plans: 87
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 13.1 (Deployment & CI) — EXECUTING
-Plan: 8 of 12
+Plan: 9 of 12
 Status: Ready to execute
 Last activity: 2026-10-01 — Phase 13.1 execution started
 
@@ -126,6 +126,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 13.1 P05 | 95min | 3 tasks | 5 files |
 | Phase 13.1 P06 | 60min | 2 tasks | 2 files |
 | Phase 13.1 P07 | 45min | 2 tasks | 2 files |
+| Phase 13.1 P08 | 45 min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -324,6 +325,7 @@ Recent decisions affecting current work:
 - [Phase 13.1]: 13.1-04: structlog output becomes JSON after configure_logging(); redaction is value-based (env names containing PASSWORD/SECRET/TOKEN/API_KEY/ACCESS_KEY/CRYPT/PRIVATE, length >= 8) plus shape and key-name rules; alembic db-upgrade intentionally not wired
 - [Phase 13.1]: [13.1-06] restore order verify -> checks -> pg_restore -> Parquet copy -> alembic upgrade head; all refusals precede the first destructive step; password only via PGPASSWORD
 - [Phase 13.1]: 13.1-07: cutover report exit 2 covers all input/runtime failures; gap-measurement errors cannot hide proven data loss (exit 1)
+- [Phase 13.1]: 13.1-08: upload order is parquet, pg.dump, manifest.json, cryptcheck so a snapshot is complete only after its dependencies exist; retention counts periods that have a snapshot; --init-remote also requires an empty raw bucket
 
 ### Pending Todos
 
@@ -369,6 +371,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-01T06:37:37.095Z
-Stopped at: Completed 13.1-07-PLAN.md
+Last session: 2026-10-01T07:27:21.900Z
+Stopped at: Completed 13.1-08-PLAN.md
 Resume file: None
