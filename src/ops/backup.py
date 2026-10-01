@@ -24,7 +24,8 @@ The restore drill (`run_drill`):
   3. Re-hashes every payload file in the scratch root and compares it
      to the manifest. Any mismatch is a hard failure — exits non-zero.
 
-The CLI entry point is `python -m src.ops.backup [backup|drill]`. All
+The CLI entry point is `python -m src.ops.backup <subcommand>` (backup, drill,
+prune, verify, restore, dump, restore-db). All
 shell logic (PowerShell wrapper, scheduling, off-host copy) defers to
 this module — no SQL / copy logic lives in the shell scripts.
 
@@ -56,6 +57,8 @@ from typing import Any
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import structlog
+
+from src.ops.redaction import configure_logging, scrub
 
 DEFAULT_PARQUET_ROOT = Path("data") / "raw"
 DEFAULT_BUNDLE_ROOT = Path("data") / "backup"
@@ -147,6 +150,20 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _is_atomic_tmp(name: str) -> bool:
+    """True for an atomic-write temp file (``.<name>.<pid>.tmp``, src/data/store.py).
+
+    These are in-flight writes of the collector; copying or hashing one would put a
+    half-written file in the bundle.
+    """
+    return name.startswith(".") and name.endswith(".tmp")
+
+
+def _ignore_atomic_tmp(directory: str, names: list[str]) -> list[str]:
+    """``shutil.copytree`` ignore callback: skip in-flight atomic-write temp files."""
+    return [n for n in names if _is_atomic_tmp(n) and not (Path(directory) / n).is_dir()]
+
+
 def write_manifest(payload_root: Path, manifest_path: Path) -> dict[str, str]:
     """Walk `payload_root`, compute sha256 of every file, write JSON map.
 
@@ -158,7 +175,11 @@ def write_manifest(payload_root: Path, manifest_path: Path) -> dict[str, str]:
     whose stored hash is immediately stale).
     """
     manifest: dict[str, str] = {}
-    files = sorted(p for p in payload_root.rglob("*") if p.is_file() and p.name != MANIFEST_NAME)
+    files = sorted(
+        p
+        for p in payload_root.rglob("*")
+        if p.is_file() and p.name != MANIFEST_NAME and not _is_atomic_tmp(p.name)
+    )
     for path in files:
         rel = path.relative_to(payload_root).as_posix()
         manifest[rel] = _sha256_file(path)
@@ -192,6 +213,13 @@ def backup(
     until `prune_bundle()` (the `prune` subcommand) garbage-collects
     them — without pruning, a restore would resurrect deliberately
     removed data.
+
+    Order matters and is deliberate: ``pg_dump`` runs BEFORE the Parquet snapshot.
+    The dump holds ``collector_watermarks``; if the files were copied first, the
+    collector could advance a watermark in between and the restored database would
+    claim ticks that the restored files do not contain. Dump first means the
+    watermark can only be behind the files, never ahead. Atomic-write temp files
+    (``.<name>.<pid>.tmp``) are never copied or hashed.
     """
     bundle_root.mkdir(parents=True, exist_ok=True)
     pg_dump_path = bundle_root / pg_dump_name
@@ -217,7 +245,7 @@ def backup(
         if target.exists():
             # Re-running an incremental backup overwrites the same tree.
             shutil.rmtree(target)
-        shutil.copytree(source, target)
+        shutil.copytree(source, target, ignore=_ignore_atomic_tmp)
 
     manifest_path = bundle_root / MANIFEST_NAME
     write_manifest(bundle_root, manifest_path)
@@ -762,25 +790,37 @@ def restore_bundle(
 # --------------------------------------------------------------------------- #
 
 
-def _prod_pg_dump_runner(out: Path) -> Path:
-    """Production pg_dump runner — shells out to the real `pg_dump`.
+def _run_pg_tool(argv: list[str], *, env: dict[str, str]) -> None:
+    """Run a PostgreSQL client tool; a failure never carries argv or the URL in its text."""
+    try:
+        subprocess.run(argv, check=True, env=env)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"{Path(argv[0]).name} failed with exit status {exc.returncode}"
+        ) from None
 
-    Binary from `PG_DUMP_BIN` (default `pg_dump`); database URL from
-    `DATABASE_URL_SYNC` (fallback `DATABASE_URL`). Raises on any failure
-    so the CLI never prints `backup-OK` without archiving real
-    PostgreSQL state (D-12).
+
+def _prod_pg_dump_runner(out: Path) -> Path:
+    """Production pg_dump runner - shells out to the real ``pg_dump``.
+
+    Binary from ``PG_DUMP_BIN`` (default ``pg_dump``); database URL from
+    ``DATABASE_URL_SYNC`` (fallback ``DATABASE_URL``). The URL is converted to a
+    libpq URL without ``+driver`` and without the password; the password travels
+    only in ``PGPASSWORD`` (F-708). Raises on any failure so the CLI never prints
+    ``backup-OK`` without archiving real PostgreSQL state (D-12).
     """
     pg_bin = os.environ.get("PG_DUMP_BIN", "pg_dump")
-    db_url = os.environ.get("DATABASE_URL_SYNC") or os.environ.get("DATABASE_URL")
+    db_url = _database_url_from_env()
     if not db_url:
         raise RuntimeError(
             "refusing backup: neither DATABASE_URL_SYNC nor DATABASE_URL "
-            "is set — no PostgreSQL dump was taken, backup-OK refused"
+            "is set - no PostgreSQL dump was taken, backup-OK refused"
         )
+    target = libpq_target(db_url)
     out.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [pg_bin, "--format=custom", "-f", str(out), db_url],
-        check=True,
+    _run_pg_tool(
+        [pg_bin, "--format=custom", "-f", str(out), "--dbname", target.url_without_password],
+        env={**os.environ, **target.env},
     )
     return out
 
@@ -791,7 +831,7 @@ def _prod_pg_restore_runner(dump: Path, target: LibpqTarget) -> None:
     The password travels only in ``PGPASSWORD``; argv holds the password-free URL.
     """
     pg_bin = os.environ.get("PG_RESTORE_BIN", "pg_restore")
-    subprocess.run(
+    _run_pg_tool(
         [
             pg_bin,
             "--clean",
@@ -803,7 +843,6 @@ def _prod_pg_restore_runner(dump: Path, target: LibpqTarget) -> None:
             target.url_without_password,
             str(dump),
         ],
-        check=True,
         env={**os.environ, **target.env},
     )
 
@@ -840,12 +879,44 @@ def _database_url_from_env() -> str | None:
     return os.environ.get("DATABASE_URL_SYNC") or os.environ.get("DATABASE_URL") or None
 
 
+def _describe_error(exc: BaseException) -> str:
+    """One scrubbed line for an exception; a failed subprocess never prints its argv."""
+    if isinstance(exc, subprocess.CalledProcessError):
+        cmd = exc.cmd
+        prog = Path(str(cmd[0])).name if isinstance(cmd, (list, tuple)) and cmd else "subprocess"
+        return f"{prog} failed with exit status {exc.returncode}"
+    return scrub(f"{type(exc).__name__}: {exc}")
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
+    pg_dump_runner: PgDumpRunner | None = None,
     pg_restore_runner: PgRestoreRunner | None = None,
     migrate_runner: MigrateRunner | None = None,
     data_probe: DataProbe | None = None,
+) -> int:
+    configure_logging()
+    try:
+        return _run_cli(
+            argv,
+            pg_dump_runner=pg_dump_runner,
+            pg_restore_runner=pg_restore_runner,
+            migrate_runner=migrate_runner,
+            data_probe=data_probe,
+        )
+    except Exception as exc:
+        print(f"error: {_describe_error(exc)}", file=sys.stderr)
+        return 1
+
+
+def _run_cli(
+    argv: Sequence[str] | None,
+    *,
+    pg_dump_runner: PgDumpRunner | None,
+    pg_restore_runner: PgRestoreRunner | None,
+    migrate_runner: MigrateRunner | None,
+    data_probe: DataProbe | None,
 ) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m src.ops.backup",
@@ -920,7 +991,50 @@ def main(
     )
     restore_p.add_argument("--skip-db", action="store_true", help="Restore the Parquet files only.")
 
+    dump_p = sub.add_parser(
+        "dump", help="pg_dump only, with a <out>.sha256 sidecar (cutover, plan 09)."
+    )
+    dump_p.add_argument("--out", type=Path, required=True)
+
+    restore_db_p = sub.add_parser(
+        "restore-db", help="pg_restore a single dump file, then alembic upgrade head."
+    )
+    restore_db_p.add_argument("--pg-dump", type=Path, required=True)
+    restore_db_p.add_argument("--expect-sha256", default=None)
+    restore_db_p.add_argument(
+        "--force", action="store_true", help="Allow restoring over a non-empty database."
+    )
+
     args = parser.parse_args(argv)
+
+    if args.cmd == "dump":
+        written = (pg_dump_runner or _prod_pg_dump_runner)(args.out)
+        digest = _sha256_file(written)
+        sidecar = written.with_name(written.name + ".sha256")
+        sidecar.write_text(f"{digest}  {written.name}\n", encoding="utf-8")
+        print(f"dump-OK out={written} sha256={digest}")
+        return 0
+
+    if args.cmd == "restore-db":
+        database_url = _database_url_from_env()
+        if not database_url:
+            print("restore-REFUSED: DATABASE_URL_SYNC / DATABASE_URL is not set", file=sys.stderr)
+            return 1
+        try:
+            restore_database(
+                args.pg_dump,
+                database_url=database_url,
+                force=args.force,
+                pg_restore_runner=pg_restore_runner or _prod_pg_restore_runner,
+                migrate_runner=migrate_runner or _prod_migrate_runner,
+                expect_sha256=args.expect_sha256,
+                data_probe=data_probe,
+            )
+        except RestoreRefused as exc:
+            print(f"restore-REFUSED: {exc}", file=sys.stderr)
+            return 1
+        print(f"restore-db-OK dump={args.pg_dump}")
+        return 0
 
     if args.cmd == "verify":
         verify_problems = verify_bundle(args.bundle_root)
@@ -956,7 +1070,11 @@ def main(
         return 0
 
     if args.cmd == "backup":
-        runner = _sqlite_fake_pg_dump_runner if args.sqlite_fake_pg_dump else _prod_pg_dump_runner
+        runner = (
+            _sqlite_fake_pg_dump_runner
+            if args.sqlite_fake_pg_dump
+            else (pg_dump_runner or _prod_pg_dump_runner)
+        )
         result = backup(
             bundle_root=args.bundle_root,
             pg_dump_runner=runner,
