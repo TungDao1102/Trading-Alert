@@ -28,7 +28,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from src.adapters.binance_usdm import SymbolFilters
 from src.data.backfill import LIVE_5
-from src.data.metadata import refresh_symbol_metadata
+from src.data.metadata import METADATA_TEXT_MAX_LEN, refresh_symbol_metadata
 from src.db.models import Base, SymbolMetadata
 
 # --------------------------------------------------------------------------- #
@@ -337,7 +337,8 @@ def _research_filters() -> list[SymbolFilters]:
         ),
         _variant("NEWUSDT", status="PENDING_TRADING"),
         _variant("BTCUSDT"),
-        # 17 characters: longer than symbol_metadata.contract_type (String(16)).
+        # 17 characters: fits the widened String(32) column (plan 17-02, D-09), but is
+        # still outside the research universe the tests pass.
         _variant("XAUUSDT", contract_type="TRADIFI_PERPETUAL"),
     ]
 
@@ -389,9 +390,9 @@ def test_tradifi_contract_type_filtered_by_universe(session: Session) -> None:
 
 @pytest.mark.parametrize("field", ["contract_type", "status"])
 def test_overlong_metadata_text_raises_not_truncates(session: Session, field: str) -> None:
-    """A universe row wider than String(16) raises and nothing is committed (T-13-30)."""
-    overlong = "TRADIFI_PERPETUAL"  # 17 characters
-    assert len(overlong) > 16
+    """A universe row wider than the String(32) column raises and nothing is committed (T-13-30)."""
+    overlong = "X" * 33
+    assert len(overlong) > SymbolMetadata.__table__.c[field].type.length  # type: ignore[attr-defined]
     filters = [_variant("BTCUSDT"), _variant("XAUUSDT", **{field: overlong})]
     cap = CapturingSession(session)
 
@@ -405,3 +406,32 @@ def test_overlong_metadata_text_raises_not_truncates(session: Session, field: st
 
     assert cap.added == []
     assert session.execute(select(SymbolMetadata)).scalars().all() == []
+
+
+def test_metadata_width_limit_is_derived_from_the_model() -> None:
+    """The guard limit is the model column length, not a literal (D-09, F-403)."""
+    table = SymbolMetadata.__table__
+    assert METADATA_TEXT_MAX_LEN == table.c.contract_type.type.length  # type: ignore[attr-defined]
+    assert METADATA_TEXT_MAX_LEN == table.c.status.type.length  # type: ignore[attr-defined]
+    assert METADATA_TEXT_MAX_LEN == 32
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("contract_type", "TRADIFI_PERPETUAL"), ("status", "TRADING_CANCEL_ONLY")],
+)
+def test_real_exchange_values_wider_than_16_are_accepted(
+    session: Session, field: str, value: str
+) -> None:
+    """TRADIFI_PERPETUAL (17) and TRADING_CANCEL_ONLY (19) are real Binance values."""
+    cap = CapturingSession(session)
+
+    inserted = refresh_symbol_metadata(
+        cap,
+        [_variant("XAUUSDT", **{field: value})],
+        observed_at=datetime(2026, 9, 30, tzinfo=UTC),
+        universe={"XAUUSDT"},
+    )
+
+    assert inserted == 1
+    assert [getattr(r, field) for r in cap.added] == [value]
