@@ -35,6 +35,7 @@ Python rule — no float for exchange-sensitive values).
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -908,6 +909,14 @@ def _utc_connect_args(database_url: str) -> dict[str, Any]:
     return {"options": "-c timezone=UTC"}
 
 
+def _scheme_class(database_url: str) -> str:
+    """The URL scheme only (no userinfo, host or path), safe to put in an error message."""
+    scheme, separator, _rest = database_url.partition("://")
+    if separator and re.fullmatch(r"[A-Za-z][A-Za-z0-9+.-]{0,31}", scheme):
+        return scheme
+    return "<unrecognized>"
+
+
 def make_engine(database_url: str) -> AsyncEngine:
     """Return the shared async engine for `database_url`.
 
@@ -921,8 +930,9 @@ def make_engine(database_url: str) -> AsyncEngine:
     if database_url.startswith("postgresql://"):
         database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
     if "+psycopg" not in database_url and "+asyncpg" not in database_url:
+        # Never interpolate the URL: it carries the password (T-17-03, 17-REVIEW WR-04).
         raise ValueError(
-            f"refusing engine: {database_url!r} names no async driver "
+            f"refusing engine: scheme {_scheme_class(database_url)!r} names no async driver "
             "(expected postgresql+psycopg:// or postgresql+asyncpg://)"
         )
     if database_url not in _ENGINE_CACHE:
