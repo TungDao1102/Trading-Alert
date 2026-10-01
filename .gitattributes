@@ -1,1 +1,12 @@
 tests/fixtures/phase10/render_golden/* -text
+deploy/** text eol=lf
+*.sh text eol=lf
+*.service text eol=lf
+*.timer text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+docker-compose.yml text eol=lf
+*.yml text eol=lf
+.python-version text eol=lf
+.env.example text eol=lf
+tests/fixtures/cutover/** text eol=lf
