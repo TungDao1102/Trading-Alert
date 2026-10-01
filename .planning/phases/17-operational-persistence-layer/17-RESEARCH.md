@@ -246,17 +246,22 @@ tests/
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
+
 def make_sync_engine(database_url: str) -> Engine:
-    if database_url.startswith("postgresql://"):          # bare scheme would select psycopg2 (not installed)
+    if database_url.startswith(
+        "postgresql://"
+    ):  # bare scheme would select psycopg2 (not installed)
         database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
     if not database_url.startswith("postgresql+psycopg://"):
         raise ValueError("refusing engine: expected postgresql+psycopg://")
     engine = create_engine(
         database_url,
         pool_pre_ping=True,
-        connect_args={"options": "-c timezone=UTC -c lock_timeout=5000"},  # lock_timeout value is a design choice [ASSUMED]
+        connect_args={
+            "options": "-c timezone=UTC -c lock_timeout=5000"
+        },  # lock_timeout value is a design choice [ASSUMED]
     )
-    with engine.connect() as conn:                          # raises OperationalError if unreachable (fail closed)
+    with engine.connect() as conn:  # raises OperationalError if unreachable (fail closed)
         if conn.execute(text("SHOW TimeZone")).scalar_one() != "UTC":
             raise RuntimeError("session TimeZone is not UTC")
     return engine
@@ -285,23 +290,33 @@ Call sites in tests: `tests/test_execution_manager.py:209-222` `_live_wiring()` 
 ```python
 # Source: SQLAlchemy 2.0 postgresql insert().on_conflict_do_nothing(); PG ON CONFLICT semantics
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-stmt = (pg_insert(ExecutionIntentRow).values(**row_values)
-        .on_conflict_do_nothing(index_elements=["approval_id", "role"])   # named arbiter only
-        .returning(ExecutionIntentRow.approval_id))
+
+stmt = (
+    pg_insert(ExecutionIntentRow)
+    .values(**row_values)
+    .on_conflict_do_nothing(index_elements=["approval_id", "role"])  # named arbiter only
+    .returning(ExecutionIntentRow.approval_id)
+)
 won = session.execute(stmt).first() is not None
 ```
 A violation of a DIFFERENT unique index (for example `client_order_id` reused by another approval of the same plan) is NOT suppressed by a targeted arbiter and raises `IntegrityError`; map it to a fail-closed NO_TRADE (`INVALIDATED`) and roll back. Any `IntegrityError` aborts the current transaction in PostgreSQL, so code that must continue after catching one wraps the statement in `with session.begin_nested():` (SAVEPOINT).
 ```python
 try:
     with session.begin_nested():
-        res = session.execute(update(ApprovalRow)
-              .where(ApprovalRow.approval_id == aid, ApprovalRow.status == "PENDING")
-              .values(result=..., status=..., acted_at_utc=now))
+        res = session.execute(
+            update(ApprovalRow)
+            .where(ApprovalRow.approval_id == aid, ApprovalRow.status == "PENDING")
+            .values(result=..., status=..., acted_at_utc=now)
+        )
 except IntegrityError as exc:
-    name = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)  # Diagnostic.constraint_name verified offline
-    if name == "uq_approvals_one_decided_per_plan": raise ApprovalAlreadyDecided(...) from exc
+    name = getattr(
+        getattr(exc.orig, "diag", None), "constraint_name", None
+    )  # Diagnostic.constraint_name verified offline
+    if name == "uq_approvals_one_decided_per_plan":
+        raise ApprovalAlreadyDecided(...) from exc
     raise
-if res.rowcount == 0: raise ApprovalAlreadyDecided(...)    # someone else decided first
+if res.rowcount == 0:
+    raise ApprovalAlreadyDecided(...)  # someone else decided first
 ```
 The constraint name reported for a unique INDEX violation is the index name `[ASSUMED]` (standard PG behavior, not re-run here); the test must assert it on a real server.
 
@@ -309,8 +324,10 @@ The constraint name reported for a unique INDEX violation is the index name `[AS
 ```python
 # session scope: create template, run alembic upgrade head into it, dispose all connections
 # function scope: CREATE DATABASE t17_<hex>_test TEMPLATE t17_tmpl_<hex>_test ; yield url ; DROP DATABASE ... WITH (FORCE)
-admin = create_engine(server_url, isolation_level="AUTOCOMMIT")     # CREATE/DROP DATABASE cannot run in a transaction
-assert name.endswith("_test") and name.startswith("t17_")           # refuse anything else (D-23)
+admin = create_engine(
+    server_url, isolation_level="AUTOCOMMIT"
+)  # CREATE/DROP DATABASE cannot run in a transaction
+assert name.endswith("_test") and name.startswith("t17_")  # refuse anything else (D-23)
 ```
 Facts: `CREATE DATABASE ... TEMPLATE` fails if any other session is connected to the source `[CITED: postgresql.org/docs/17/manage-ag-templatedbs.html]`; `DROP DATABASE ... WITH (FORCE)` terminates remaining connections, except with prepared transactions, logical slots or subscriptions `[CITED: postgresql.org/docs/17/sql-dropdatabase.html]`. The CI service user `trading` is the container superuser (`POSTGRES_USER`, `ci.yml:36`), so CREATEDB is available. Reason for templates: `journal_events` rejects DELETE/TRUNCATE (D-10), so row cleanup between tests is impossible; clone per test instead. Read-only schema tests can share the session template DB.
 
@@ -320,8 +337,12 @@ Facts: `CREATE DATABASE ... TEMPLATE` fails if any other session is connected to
 #         alembic/ddl/impl.py:610-624 (compare_type compares type AND args such as length/precision)
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-opts = {"compare_type": True, "compare_server_default": True,
-        "autogenerate_plugins": ["alembic.autogenerate.*", "alembic.ext.checkconstraint_byname"]}
+
+opts = {
+    "compare_type": True,
+    "compare_server_default": True,
+    "autogenerate_plugins": ["alembic.autogenerate.*", "alembic.ext.checkconstraint_byname"],
+}
 with engine.connect() as conn:
     diff = compare_metadata(MigrationContext.configure(conn, opts=opts), Base.metadata)
 assert diff == [], diff
@@ -330,9 +351,13 @@ Requirements: NAME every CHECK, UNIQUE, FK and Index explicitly (the check plugi
 
 ### Pattern 6: Deterministic, collision-free journal ids
 ```python
-def correlated_event_id(*, prefix: str, correlation_id: str, event_type: str, entity_id: str, step: str) -> str:
-    material = json.dumps([correlation_id, event_type, entity_id, step], separators=(",", ":"), ensure_ascii=True)
-    return f"{prefix}_{hashlib.sha256(material.encode()).hexdigest()}"      # prefix + 65 chars <= 128
+def correlated_event_id(
+    *, prefix: str, correlation_id: str, event_type: str, entity_id: str, step: str
+) -> str:
+    material = json.dumps(
+        [correlation_id, event_type, entity_id, step], separators=(",", ":"), ensure_ascii=True
+    )
+    return f"{prefix}_{hashlib.sha256(material.encode()).hexdigest()}"  # prefix + 65 chars <= 128
 ```
 Rules: no clock, no uuid, no counter read from the DB. Replays with the same correlation id and step produce the same id, so `INSERT ... ON CONFLICT (journal_event_id) DO NOTHING` is idempotent; the store then re-SELECTs on conflict and compares `payload_json`, raising `JournalConflict` on mismatch (a silent drop of a different event is the exact F-412 failure). Existing `content_hash_event_id` (`src/domain/journal.py:20-49`, covers event_type, entity_id, occurred_at, payload; used by enablement, manager cancel events, health, killgate) stays for events with no stable correlation. Builders to fix: `src/reconcile/safe_mode.py:313`, `src/reconcile/sweeper.py:315,343,370`, `src/ops/drills.py:402`, `src/adapters/telegram_callbacks.py:514,552,585,650`.
 
@@ -571,15 +596,20 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from tests.infra_helpers import infra_skip
 
+
 @pytest.fixture(scope="session")
 def pg_server_url() -> str:
     url = os.environ.get("TEST_DATABASE_URL")
     if not url:
-        infra_skip("TEST_DATABASE_URL is not set; PG tests cannot run")   # fails when TRADING_CI_STRICT=1
+        infra_skip(
+            "TEST_DATABASE_URL is not set; PG tests cannot run"
+        )  # fails when TRADING_CI_STRICT=1
     return url
+
 
 def _admin(url: str):
     return create_engine(url, isolation_level="AUTOCOMMIT")
+
 
 @pytest.fixture(scope="session")
 def pg_template(pg_server_url: str):
@@ -588,11 +618,15 @@ def pg_template(pg_server_url: str):
     with _admin(pg_server_url).connect() as c:
         c.execute(text(f'CREATE DATABASE "{name}"'))
     url = make_url(pg_server_url).set(database=name).render_as_string(hide_password=False)
-    subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], check=True,
-                   env={**os.environ, "DATABASE_URL": url})            # never create_all
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        check=True,
+        env={**os.environ, "DATABASE_URL": url},
+    )  # never create_all
     yield name
     with _admin(pg_server_url).connect() as c:
         c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+
 
 @pytest.fixture
 def pg_db(pg_server_url: str, pg_template: str):
