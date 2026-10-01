@@ -251,6 +251,16 @@ class SymbolFilters:
     # decide what is "past". Optional trailing field: no PostgreSQL migration and
     # no symbol_metadata column (D-26).
     delivery_date_ms: int | None = None
+    # MARKET_LOT_SIZE and PERCENT_PRICE (Phase 17, EXEC-04 / D-18). Optional trailing
+    # fields: no PostgreSQL migration and no symbol_metadata column (research C10).
+    # None means the exchange did not publish the filter (never a fabricated default);
+    # the per-plan constraint snapshot renders None as the UNKNOWN sentinel.
+    market_lot_min_quantity: Decimal | None = None
+    market_lot_max_quantity: Decimal | None = None
+    market_lot_step_size: Decimal | None = None
+    percent_price_multiplier_up: Decimal | None = None
+    percent_price_multiplier_down: Decimal | None = None
+    percent_price_multiplier_decimals: int | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -854,6 +864,12 @@ class BinanceUsdmAdapter:
             capabilities_blob = _order_capabilities_blob(sym.order_types or [])
             position_mode_blob = _position_mode_blob(sym)
             onboard = _ms_to_utc(int(sym.onboard_date)) if sym.onboard_date is not None else None
+            market_lot = _parse_market_lot_size(
+                sym.symbol, _find_filter(sym.filters, "MARKET_LOT_SIZE")
+            )
+            percent_price = _parse_percent_price(
+                sym.symbol, _find_filter(sym.filters, "PERCENT_PRICE")
+            )
             out.append(
                 SymbolFilters(
                     symbol=sym.symbol,
@@ -874,6 +890,12 @@ class BinanceUsdmAdapter:
                     delivery_date_ms=(
                         int(sym.delivery_date) if sym.delivery_date is not None else None
                     ),
+                    market_lot_min_quantity=market_lot[0],
+                    market_lot_max_quantity=market_lot[1],
+                    market_lot_step_size=market_lot[2],
+                    percent_price_multiplier_up=percent_price[0],
+                    percent_price_multiplier_down=percent_price[1],
+                    percent_price_multiplier_decimals=percent_price[2],
                 )
             )
         if drifted:
@@ -1705,6 +1727,71 @@ def _find_filter(
         if f.filter_type == filter_type:
             return f
     return None
+
+
+def _filter_decimal(symbol: str | None, filter_type: str, field: str, raw: str | None) -> Decimal:
+    """Parse one numeric field of a PRESENT filter, failing closed (EXEC-04, D-09).
+
+    A missing, empty, non-numeric or non-finite value raises ValueError: a present
+    filter with a bad field is exchange contract drift, never a silent None.
+    """
+    if raw is None or raw == "":
+        raise ValueError(f"exchangeInfo {filter_type} for {symbol!r} is missing {field}")
+    try:
+        value = Decimal(str(raw))
+    except InvalidOperation as exc:
+        raise ValueError(
+            f"exchangeInfo {filter_type}.{field} for {symbol!r} is not numeric: {raw!r}"
+        ) from exc
+    if not value.is_finite():
+        raise ValueError(
+            f"exchangeInfo {filter_type}.{field} for {symbol!r} is not finite: {raw!r}"
+        )
+    return value
+
+
+def _parse_market_lot_size(
+    symbol: str | None,
+    f: ExchangeInformationResponseSymbolsInnerFiltersInner | None,
+) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+    """MARKET_LOT_SIZE as (min_qty, max_qty, step_size); all None when the filter is absent."""
+    if f is None:
+        return (None, None, None)
+    return (
+        _filter_decimal(symbol, "MARKET_LOT_SIZE", "minQty", f.min_qty),
+        _filter_decimal(symbol, "MARKET_LOT_SIZE", "maxQty", f.max_qty),
+        _filter_decimal(symbol, "MARKET_LOT_SIZE", "stepSize", f.step_size),
+    )
+
+
+def _parse_percent_price(
+    symbol: str | None,
+    f: ExchangeInformationResponseSymbolsInnerFiltersInner | None,
+) -> tuple[Decimal | None, Decimal | None, int | None]:
+    """PERCENT_PRICE as (multiplierUp, multiplierDown, multiplierDecimal as int).
+
+    All None when the filter is absent; a present filter missing or mangling any field
+    raises ValueError.
+    """
+    if f is None:
+        return (None, None, None)
+    up = _filter_decimal(symbol, "PERCENT_PRICE", "multiplierUp", f.multiplier_up)
+    down = _filter_decimal(symbol, "PERCENT_PRICE", "multiplierDown", f.multiplier_down)
+    raw_decimals = f.multiplier_decimal
+    if raw_decimals is None or raw_decimals == "":
+        raise ValueError(f"exchangeInfo PERCENT_PRICE for {symbol!r} is missing multiplierDecimal")
+    try:
+        decimals = int(str(raw_decimals))
+    except ValueError as exc:
+        raise ValueError(
+            f"exchangeInfo PERCENT_PRICE.multiplierDecimal for {symbol!r} is not an integer: "
+            f"{raw_decimals!r}"
+        ) from exc
+    if decimals < 0:
+        raise ValueError(
+            f"exchangeInfo PERCENT_PRICE.multiplierDecimal for {symbol!r} must be >= 0: {decimals}"
+        )
+    return (up, down, decimals)
 
 
 def _filter_blob(f: ExchangeInformationResponseSymbolsInnerFiltersInner) -> str:
