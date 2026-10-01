@@ -35,6 +35,15 @@ from src.ops import redaction
 
 from tests import infra_helpers
 
+# pytest discovers fixtures by name in this module's namespace, so the
+# Phase 17 disposable-database fixtures are imported (not used) here.
+from tests.pg_support import (  # noqa: F401
+    pg_db,
+    pg_empty_db,
+    pg_server_url,
+    pg_template_name,
+)
+
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 EXCHANGE_INFO_FIXTURE = FIXTURES_DIR / "exchange_info_sample.json"
 
