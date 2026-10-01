@@ -534,7 +534,7 @@ Plans:
 
 **Audit refs**: F-101, F-605, F-705, F-708, F-709, F-108, F-910, D042
 
-**Plans:** 8/12 plans executed
+**Plans:** 9/12 plans executed
 
 Plans:
 **Wave 1**
@@ -552,7 +552,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [x] 13.1-08-PLAN.md — Encrypted S3-compatible backups via rclone crypt, 7/4/6 retention with a fake-clock oracle, push/pull/scheduled/drill-remote
-- [ ] 13.1-09-PLAN.md — deploy/migrate.sh in the fixed cutover order and the two-environment docker cutover test
+- [x] 13.1-09-PLAN.md — deploy/migrate.sh in the fixed cutover order and the two-environment docker cutover test
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 13.1-10-PLAN.md — Linux backup, restore and drill wrappers, systemd backup timer, update and rollback script, docker drill test
@@ -952,7 +952,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 11. Decision Alignment (docs + params) | 8/8 | In Progress|  |
 | 12. Fee + Cost Model Correctness | 11/11 | Complete    | 2026-09-30 |
 | 13. Research Data Foundation Fixes | 11/13 | In Progress|  |
-| 13.1. Deployment & CI | 8/12 | In Progress|  |
+| 13.1. Deployment & CI | 9/12 | In Progress|  |
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
