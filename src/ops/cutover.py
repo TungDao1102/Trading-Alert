@@ -26,10 +26,16 @@ import json
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from src.data.coverage import (
+    DEFAULT_OI_INTERVAL_MS,
+    TICK_GAP_FACTOR,
+    GapRange,
+    gap_ranges_for_files,
+)
 from src.ops.backup import _database_url_from_env, _is_atomic_tmp, _sha256_file, _sqlalchemy_url
 from src.ops.redaction import configure_logging, scrub
 
@@ -155,6 +161,102 @@ def compare_watermarks(old: Mapping[str, str], new: Mapping[str, str]) -> Waterm
 
 
 # --------------------------------------------------------------------------- #
+# OI gaps (D-14: the single gap definition of coverage.py, D-19 of Phase 13)
+# --------------------------------------------------------------------------- #
+
+_MS = timedelta(milliseconds=1)
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_OI_DATA_CLASS = "oi"
+
+
+@dataclass(frozen=True)
+class SymbolGap:
+    """The OI holes of one symbol inside the cutover window and the longest one in minutes."""
+
+    symbol: str
+    max_gap_minutes: int
+    ranges: tuple[GapRange, ...]
+
+
+def _epoch_ms(value: datetime) -> int:
+    return (value - _EPOCH) // _MS
+
+
+def _hole_minutes(hole: GapRange, step_ms: int) -> int:
+    """Minutes of one hole in integer epoch milliseconds: end - start + step."""
+    return (_epoch_ms(hole.end_utc) - _epoch_ms(hole.start_utc) + step_ms) // 60_000
+
+
+def _symbol_tick_files(
+    raw_root: Path, symbol: str, window_start: datetime, window_end: datetime
+) -> list[Path]:
+    """Explicit tick-file list of one symbol whose ``date=`` partition touches the window."""
+    base = raw_root / f"data_class={_OI_DATA_CLASS}" / f"symbol={symbol}"
+    first_day = window_start.date().isoformat()
+    last_day = window_end.date().isoformat()
+    files: list[Path] = []
+    for path in sorted(base.glob("date=*/tick-*.parquet")):
+        day = path.parent.name.removeprefix("date=")
+        if first_day <= day <= last_day and not _is_atomic_tmp(path.name):
+            files.append(path)
+    return files
+
+
+def oi_gaps(
+    raw_root: Path,
+    symbols: Sequence[str],
+    window_start_utc: datetime,
+    window_end_utc: datetime,
+) -> tuple[SymbolGap, ...]:
+    """Per-symbol OI holes inside the window, using ``coverage.gap_ranges_for_files``.
+
+    A trailing hole (no tick yet after the last one) counts, so an outage that is still
+    going on is reported rather than hidden.
+    """
+    step_ms = DEFAULT_OI_INTERVAL_MS
+    result: list[SymbolGap] = []
+    for symbol in sorted(set(symbols)):
+        holes = gap_ranges_for_files(
+            _symbol_tick_files(raw_root, symbol, window_start_utc, window_end_utc),
+            series=_OI_DATA_CLASS,
+            symbol=symbol,
+            interval="5m",
+            time_column="observed_at_utc",
+            step_ms=step_ms,
+            start_utc=window_start_utc,
+            end_utc=window_end_utc,
+            max_step_ms=TICK_GAP_FACTOR * step_ms,
+        )
+        longest = max((_hole_minutes(h, step_ms) for h in holes), default=0)
+        result.append(SymbolGap(symbol, longest, tuple(holes)))
+    return tuple(result)
+
+
+def _oi_symbols_and_window_start(
+    old_watermarks: Mapping[str, str],
+) -> tuple[list[str], datetime | None]:
+    """Symbols with an old ``oi`` watermark, and window start = min tick minus 2 cadences."""
+    symbols: list[str] = []
+    ticks: list[datetime] = []
+    for key, value in old_watermarks.items():
+        symbol, _, data_class = key.rpartition("|")
+        if data_class == _OI_DATA_CLASS and symbol:
+            symbols.append(symbol)
+            ticks.append(_parse_iso_utc(value))
+    if not ticks:
+        return [], None
+    margin = timedelta(milliseconds=TICK_GAP_FACTOR * DEFAULT_OI_INTERVAL_MS)
+    return sorted(symbols), min(ticks) - margin
+
+
+def default_window_end(now: datetime | None = None) -> datetime:
+    """Now floored to the 5-minute OI cadence (UTC)."""
+    current = _as_utc(now or datetime.now(UTC))
+    floored_ms = _epoch_ms(current) // DEFAULT_OI_INTERVAL_MS * DEFAULT_OI_INTERVAL_MS
+    return _EPOCH + timedelta(milliseconds=floored_ms)
+
+
+# --------------------------------------------------------------------------- #
 # Report
 # --------------------------------------------------------------------------- #
 
@@ -163,11 +265,23 @@ def compare_watermarks(old: Mapping[str, str], new: Mapping[str, str]) -> Waterm
 class CutoverReport:
     files: FileDiff
     watermarks: WatermarkDiff
+    gaps: tuple[SymbolGap, ...]
+    max_gap_minutes_threshold: int
+    window_start_utc: datetime | None
+    window_end_utc: datetime | None
+    gap_error: str | None = None
+
+    @property
+    def worst_gap_minutes(self) -> int:
+        return max((g.max_gap_minutes for g in self.gaps), default=0)
 
     @property
     def exit_code(self) -> int:
+        """1 (data loss) outranks 3 (gap above threshold) outranks 0."""
         if self.files.lost_data or self.watermarks.lost_data:
             return EXIT_DATA_LOSS
+        if self.worst_gap_minutes > self.max_gap_minutes_threshold:
+            return EXIT_GAP
         return EXIT_CLEAN
 
     def as_dict(self) -> dict[str, Any]:
@@ -178,10 +292,31 @@ class CutoverReport:
                 "changed": list(self.files.changed),
                 "added_count": len(self.files.added),
             },
+            "gap_error": self.gap_error,
+            "max_gap_minutes_threshold": self.max_gap_minutes_threshold,
+            "oi_gaps": [
+                {
+                    "symbol": g.symbol,
+                    "max_gap_minutes": g.max_gap_minutes,
+                    "ranges": [
+                        {
+                            "start_utc": _iso_z(r.start_utc),
+                            "end_utc": _iso_z(r.end_utc),
+                            "missing": r.missing,
+                        }
+                        for r in g.ranges
+                    ],
+                }
+                for g in self.gaps
+            ],
             "watermarks": {
                 "lost": list(self.watermarks.lost),
                 "regressed": list(self.watermarks.regressed),
             },
+            "window_end_utc": None if self.window_end_utc is None else _iso_z(self.window_end_utc),
+            "window_start_utc": (
+                None if self.window_start_utc is None else _iso_z(self.window_start_utc)
+            ),
         }
 
 
@@ -190,19 +325,63 @@ def build_report(
     new_files: Mapping[str, str],
     old_watermarks: Mapping[str, str],
     new_watermarks: Mapping[str, str],
+    *,
+    raw_root: Path | None = None,
+    max_gap_minutes: int = DEFAULT_MAX_GAP_MINUTES,
+    window_end_utc: datetime | None = None,
 ) -> CutoverReport:
+    """Compare both snapshots and measure the OI gap of the new side's tick files.
+
+    Window: start = minimum old OI watermark minus 2 cadences; end = ``window_end_utc``
+    (default now floored to the 5-minute cadence). Symbols are those with an old OI
+    watermark; with none, there is no OI series to measure.
+    """
+    symbols, window_start = _oi_symbols_and_window_start(old_watermarks)
+    files = compare_files(old_files, new_files)
+    watermarks = compare_watermarks(old_watermarks, new_watermarks)
+    gap_error: str | None = None
+    gaps: tuple[SymbolGap, ...] = ()
+    window_end: datetime | None = None
+    if symbols and window_start is not None:
+        if raw_root is None:
+            raise ValueError("raw_root is required when the old side has OI watermarks")
+        window_end = _as_utc(window_end_utc) if window_end_utc else default_window_end()
+        if window_end <= window_start:
+            raise ValueError("window end must be after the window start")
+        try:
+            gaps = oi_gaps(raw_root, symbols, window_start, window_end)
+        except Exception as exc:
+            # An unreadable tick file (for example a corrupted one) must not hide data
+            # loss that is already proven; with no loss the gap cannot be judged: raise.
+            if not (files.lost_data or watermarks.lost_data):
+                raise
+            gap_error = type(exc).__name__
     return CutoverReport(
-        files=compare_files(old_files, new_files),
-        watermarks=compare_watermarks(old_watermarks, new_watermarks),
+        files=files,
+        watermarks=watermarks,
+        gaps=gaps,
+        max_gap_minutes_threshold=max_gap_minutes,
+        window_start_utc=window_start if symbols else None,
+        window_end_utc=window_end,
+        gap_error=gap_error,
     )
 
 
+_VERDICTS = {
+    EXIT_CLEAN: "CUTOVER VERDICT: CLEAN",
+    EXIT_DATA_LOSS: "CUTOVER VERDICT: DATA LOSS",
+    EXIT_GAP: "CUTOVER VERDICT: OI GAP ABOVE THRESHOLD",
+}
+
+_STATEMENTS = (
+    "OI gap minutes are permanent loss: open-interest snapshots cannot be fetched later.",
+    "Funding gaps are recoverable by the funding sweep.",
+    "The old host is shut down only by a human, and only after a clean report.",
+)
+
+
 def render_text(report: CutoverReport) -> str:
-    lines: list[str] = []
-    if report.exit_code == EXIT_CLEAN:
-        lines.append("CUTOVER VERDICT: CLEAN")
-    else:
-        lines.append("CUTOVER VERDICT: DATA LOSS")
+    lines: list[str] = [_VERDICTS[report.exit_code]]
     lines.append(
         f"files: {len(report.files.missing)} missing, {len(report.files.changed)} changed, "
         f"{len(report.files.added)} added since the switch"
@@ -215,6 +394,22 @@ def render_text(report: CutoverReport) -> str:
     )
     lines.extend(f"  lost: {key}" for key in report.watermarks.lost)
     lines.extend(f"  regressed: {key}" for key in report.watermarks.regressed)
+    if report.window_start_utc is not None and report.window_end_utc is not None:
+        lines.append(
+            f"oi gap window: {_iso_z(report.window_start_utc)} .. "
+            f"{_iso_z(report.window_end_utc)} (threshold {report.max_gap_minutes_threshold} min)"
+        )
+    else:
+        lines.append("oi gap: no OI watermark on the old side, nothing to measure")
+    if report.gap_error is not None:
+        lines.append(f"oi gap could not be measured: {report.gap_error}")
+    for gap in report.gaps:
+        lines.append(f"  oi {gap.symbol}: largest gap {gap.max_gap_minutes} min")
+        lines.extend(
+            f"    hole {_iso_z(r.start_utc)} .. {_iso_z(r.end_utc)} ({r.missing} slots)"
+            for r in gap.ranges
+        )
+    lines.extend(_STATEMENTS)
     return "\n".join(lines) + "\n"
 
 
@@ -257,6 +452,9 @@ def _cmd_report(args: argparse.Namespace) -> int:
         _read_map(Path(args.new_fingerprint)),
         _read_map(Path(args.old_watermarks)),
         _read_map(Path(args.new_watermarks)),
+        raw_root=Path(args.raw_root) if args.raw_root else None,
+        max_gap_minutes=args.max_gap_minutes,
+        window_end_utc=_parse_iso_utc(args.window_end) if args.window_end else None,
     )
     sys.stdout.write(render_text(report))
     if args.json_out:

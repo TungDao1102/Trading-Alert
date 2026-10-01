@@ -307,3 +307,185 @@ def test_cli_unreadable_input_exits_two_without_leaking_url(
     assert rc == 2
     assert "SuperSecretPw99" not in captured.out + captured.err
     assert "cutover:" in captured.err
+
+
+# --------------------------------------------------------------------------- #
+# OI gap minutes (Task 2)
+# --------------------------------------------------------------------------- #
+
+PAIR = ("BTCUSDT", "ETHUSDT")
+LAST_OLD = T0 + timedelta(hours=1)  # 11:00
+WINDOW_START = LAST_OLD - timedelta(minutes=10)  # minimum old OI tick minus 2 cadences
+WINDOW_END = datetime(2026, 10, 1, 11, 46, tzinfo=UTC)
+
+
+def _gap_setup(tmp_path: Path, *, new_tick: bool = True) -> tuple[Path, Path, dict[str, str]]:
+    """Old 10:00-11:00 ticks, new side = copy plus (optionally) a 11:45 tick."""
+    old_root = tmp_path / "old_raw"
+    new_root = tmp_path / "new_raw"
+    _ticks(old_root, PAIR, T0, LAST_OLD)
+    shutil.copytree(old_root, new_root)
+    if new_tick:
+        for symbol in PAIR:
+            _tick(new_root, symbol, T0 + timedelta(minutes=105))
+    return old_root, new_root, {f"{s}|oi": "2026-10-01T11:00:00Z" for s in PAIR}
+
+
+def _run_report(
+    tmp_path: Path,
+    old_root: Path,
+    new_root: Path,
+    old_wm: dict[str, str],
+    new_wm: dict[str, str],
+    *extra: str,
+) -> int:
+    assert (
+        cutover.main(["fingerprint", "--raw-root", str(old_root), "--out", str(tmp_path / "fo")])
+        == 0
+    )
+    assert (
+        cutover.main(["fingerprint", "--raw-root", str(new_root), "--out", str(tmp_path / "fn")])
+        == 0
+    )
+    _write_json(tmp_path / "wo", old_wm)
+    _write_json(tmp_path / "wn", new_wm)
+    return cutover.main(
+        [
+            "report",
+            "--old-fingerprint",
+            str(tmp_path / "fo"),
+            "--new-fingerprint",
+            str(tmp_path / "fn"),
+            "--old-watermarks",
+            str(tmp_path / "wo"),
+            "--new-watermarks",
+            str(tmp_path / "wn"),
+            "--raw-root",
+            str(new_root),
+            "--window-end",
+            "2026-10-01T11:46:00Z",
+            *extra,
+        ]
+    )
+
+
+def test_oi_gaps_interior_hole_is_45_minutes_for_both_symbols(tmp_path: Path) -> None:
+    _, new_root, _ = _gap_setup(tmp_path)
+
+    gaps = cutover.oi_gaps(new_root, PAIR, WINDOW_START, WINDOW_END)
+
+    assert {g.symbol: g.max_gap_minutes for g in gaps} == {"BTCUSDT": 45, "ETHUSDT": 45}
+    assert all(len(g.ranges) == 1 for g in gaps)
+
+
+def test_oi_gaps_trailing_hole_without_new_tick_is_46_minutes(tmp_path: Path) -> None:
+    _, new_root, _ = _gap_setup(tmp_path, new_tick=False)
+
+    gaps = cutover.oi_gaps(new_root, ("BTCUSDT",), WINDOW_START, WINDOW_END)
+
+    assert gaps[0].max_gap_minutes == 46
+
+
+def test_oi_gaps_one_second_jitter_is_not_a_gap(tmp_path: Path) -> None:
+    root = tmp_path / "raw"
+    at = T0
+    while at <= LAST_OLD + timedelta(minutes=45):
+        _tick(root, "BTCUSDT", at + timedelta(seconds=1 if (at.minute // 5) % 2 else 0))
+        at += timedelta(minutes=5)
+
+    gaps = cutover.oi_gaps(root, ("BTCUSDT",), WINDOW_START, WINDOW_END)
+
+    assert gaps[0].max_gap_minutes == 0
+    assert gaps[0].ranges == ()
+
+
+def test_report_threshold_default_passes_and_30_exits_three(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    old_root, new_root, old_wm = _gap_setup(tmp_path)
+    new_wm = {f"{s}|oi": "2026-10-01T11:45:00Z" for s in PAIR}
+
+    assert _run_report(tmp_path, old_root, new_root, old_wm, new_wm) == 0
+    assert "45" in capsys.readouterr().out
+    assert _run_report(tmp_path, old_root, new_root, old_wm, new_wm, "--max-gap-minutes", "30") == 3
+
+
+def test_report_trailing_hole_is_reported_not_hidden(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    old_root, new_root, old_wm = _gap_setup(tmp_path, new_tick=False)
+
+    rc = _run_report(tmp_path, old_root, new_root, old_wm, dict(old_wm), "--max-gap-minutes", "30")
+
+    assert rc == 3
+    assert "46" in capsys.readouterr().out
+
+
+def test_report_data_loss_outranks_gap(tmp_path: Path) -> None:
+    old_root, new_root, old_wm = _gap_setup(tmp_path)
+    next(new_root.rglob("*.parquet")).unlink()
+    new_wm = {f"{s}|oi": "2026-10-01T11:45:00Z" for s in PAIR}
+
+    assert _run_report(tmp_path, old_root, new_root, old_wm, new_wm, "--max-gap-minutes", "30") == 1
+
+
+def test_report_text_states_permanent_loss_recoverable_funding_and_human_shutdown(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    old_root, new_root, old_wm = _gap_setup(tmp_path)
+    new_wm = {f"{s}|oi": "2026-10-01T11:45:00Z" for s in PAIR}
+
+    assert _run_report(tmp_path, old_root, new_root, old_wm, new_wm) == 0
+
+    text = capsys.readouterr().out
+    assert "permanent loss" in text
+    assert "recoverable by the funding sweep" in text
+    assert "only by a human" in text
+    assert "clean report" in text
+
+
+def test_report_json_out_matches_facts_with_sorted_keys(tmp_path: Path) -> None:
+    old_root, new_root, old_wm = _gap_setup(tmp_path)
+    new_wm = {f"{s}|oi": "2026-10-01T11:45:00Z" for s in PAIR}
+    out = tmp_path / "report.json"
+
+    rc = _run_report(tmp_path, old_root, new_root, old_wm, new_wm, "--json-out", str(out))
+
+    raw = out.read_bytes()
+    data = json.loads(raw)
+    assert rc == 0 and data["exit_code"] == 0
+    assert data["max_gap_minutes_threshold"] == 60
+    assert {g["symbol"]: g["max_gap_minutes"] for g in data["oi_gaps"]} == {
+        "BTCUSDT": 45,
+        "ETHUSDT": 45,
+    }
+    assert data["files"]["missing"] == [] and b"\r" not in raw
+    assert raw == (json.dumps(data, sort_keys=True, indent=2) + "\n").encode()
+
+
+def test_report_without_oi_watermarks_needs_no_raw_root_and_has_no_gaps(
+    tmp_path: Path,
+) -> None:
+    _write_json(tmp_path / "e", {})
+    rc = cutover.main(
+        [
+            "report",
+            "--old-fingerprint",
+            str(tmp_path / "e"),
+            "--new-fingerprint",
+            str(tmp_path / "e"),
+            "--old-watermarks",
+            str(tmp_path / "e"),
+            "--new-watermarks",
+            str(tmp_path / "e"),
+        ]
+    )
+    assert rc == 0
+
+
+def test_report_window_end_before_window_start_is_a_usage_error(tmp_path: Path) -> None:
+    old_root, new_root, old_wm = _gap_setup(tmp_path)
+    rc = _run_report(
+        tmp_path, old_root, new_root, old_wm, dict(old_wm), "--window-end", "2026-10-01T09:00:00Z"
+    )
+    assert rc == 2
