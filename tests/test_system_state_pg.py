@@ -277,7 +277,11 @@ def test_two_concurrent_appends_for_one_key_yield_one_winner_and_a_row_conflict(
         assert _count(engine, "journal_events") == 1
 
         # The caller re-reads and retries: the next version is contiguous.
-        retried = store_a.append(SystemStateKey.SAFE_MODE, SAFE_OFF, now_utc=T0)
+        # (A plain store: the barriered journal of the two racers would wait for a peer.)
+        plain_db = OperationalDatabase(engine)
+        retried = PgSystemStateStore(plain_db, PgJournalStore(plain_db)).append(
+            SystemStateKey.SAFE_MODE, SAFE_OFF, now_utc=T0
+        )
         assert retried.version == 2
 
 
