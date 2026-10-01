@@ -243,3 +243,88 @@ EXPIRED
 - `SIMULATE` gives `PENDING` (notify-only; it does not advance the approval state).
 
 `EXPIRED` is not produced by any `ApprovalAction`; lifecycle analytics derive it from the `EXPIRED` outcome label (`src/analytics/lifecycle.py`). The value set PENDING, APPROVED, SKIPPED, EXPIRED was a Phase 3 planner assumption (D-10); it is recorded here as the enum source of truth pending user ratification.
+
+## 11. State transitions
+
+The legal-transition tables below are enforced by `src/domain/transitions.py` (`assert_transition`) inside the write transaction of the repositories, and the terminal rule (a terminal state has no successors) is also enforced by the database triggers of migration 0004. `tests/test_transitions.py` parses the text blocks in this section and compares them with the Python tables, so the two cannot drift apart. An unchanged state is not a transition: repositories treat an equal state as an idempotent no-op before calling `assert_transition`.
+
+Status: Accepted as the Phase 17 auto-mode default; the user is to confirm these tables (decision D051). The GLOSSARY carried value sets only before this section; the tables are anchored on EXECUTION_SPEC section 3 (entry order lifecycle). Open point for the user: `APPROVED -> SUPERSEDED` for a TradePlan is illegal in this draft.
+
+### 11.1 Signal transitions
+
+```text
+DETECTED -> NOTIFIED, SKIPPED_BUSY, EXPIRED, INVALIDATED
+NOTIFIED -> VIEWED, APPROVED, SKIPPED_USER, SKIPPED_BUSY, EXPIRED, INVALIDATED
+VIEWED -> APPROVED, SKIPPED_USER, SKIPPED_BUSY, EXPIRED, INVALIDATED
+APPROVED -> (terminal)
+SKIPPED_USER -> (terminal)
+SKIPPED_BUSY -> (terminal)
+EXPIRED -> (terminal)
+INVALIDATED -> (terminal)
+```
+
+An expired or invalidated signal can never become `APPROVED`.
+
+### 11.2 TradePlan transitions
+
+```text
+READY -> APPROVAL_PENDING, EXPIRED, INVALIDATED, SUPERSEDED
+APPROVAL_PENDING -> APPROVED, EXPIRED, INVALIDATED, SUPERSEDED
+APPROVED -> EXPIRED, INVALIDATED
+EXPIRED -> (terminal)
+INVALIDATED -> (terminal)
+SUPERSEDED -> (terminal)
+```
+
+`APPROVED` is not terminal: an approved plan can still expire or be invalidated before execution handoff completes.
+
+### 11.3 Order transitions
+
+```text
+PLANNED -> SUBMITTING, CANCELED
+SUBMITTING -> NEW, REJECTED, UNKNOWN, CANCELED
+NEW -> PARTIALLY_FILLED, FILLED, CANCELED, EXPIRED, REJECTED, UNKNOWN
+PARTIALLY_FILLED -> FILLED, CANCELED, EXPIRED, UNKNOWN
+UNKNOWN -> NEW, PARTIALLY_FILLED, FILLED, CANCELED, EXPIRED, REJECTED
+FILLED -> (terminal)
+CANCELED -> (terminal)
+EXPIRED -> (terminal)
+REJECTED -> (terminal)
+```
+
+The moves out of `UNKNOWN` are reconciliation-only: they resolve the unknown state against the exchange (Binance is canonical) and no other code path may produce them.
+
+### 11.4 Position transitions
+
+```text
+OPEN -> CLOSING, CLOSED, LIQUIDATION_REPORTED, UNKNOWN
+CLOSING -> CLOSED, OPEN, UNKNOWN
+LIQUIDATION_REPORTED -> CLOSED, UNKNOWN
+UNKNOWN -> OPEN, CLOSING, CLOSED, LIQUIDATION_REPORTED
+CLOSED -> (terminal)
+```
+
+The moves out of `UNKNOWN` are reconciliation-only, as for orders. A closed position never reopens: a new exposure is a new position.
+
+### 11.5 Approval transitions
+
+```text
+PENDING -> APPROVED, SKIPPED, EXPIRED
+APPROVED -> (terminal)
+SKIPPED -> (terminal)
+EXPIRED -> (terminal)
+```
+
+Approval states are the `ApprovalResult` values of section 10.
+
+### 11.6 ExecutionIntent transitions
+
+```text
+INTENDED -> SENT, UNKNOWN, REJECTED
+SENT -> ACKED, REJECTED, UNKNOWN
+UNKNOWN -> ACKED, REJECTED
+ACKED -> (terminal)
+REJECTED -> (terminal)
+```
+
+Execution intent states are the values of section 12.1. An intent left `INTENDED`, `SENT` or `UNKNOWN` is unresolved and is resolved only by querying the exchange by its deterministic client id; it is never re-sent blindly.
