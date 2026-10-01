@@ -23,7 +23,7 @@ Every PostgreSQL test runs on a generated database cloned from the migrated temp
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -38,7 +38,7 @@ from src.adapters.telegram_callbacks import (
     dispatch_callback,
 )
 from src.approval.binding import Callback
-from src.approval.mapping import derive_short_id, make_short_id_mapping
+from src.approval.mapping import ShortIdMapping, derive_short_id, make_short_id_mapping
 from src.approval.tokens import token_hash_of
 from src.domain.approval import Approval
 from src.domain.enums import (
@@ -196,8 +196,14 @@ def dispatch(
     raw_token: str = RAW_TOKEN,
     chat_id: int = CHAT_ID,
     kind: CallbackKind = CallbackKind.APPROVE,
+    lookup_by_token_hash: Callable[[str], Approval | None] | None = None,
+    save_atomic: Callable[[Approval, ShortIdMapping | None], None] | None = None,
 ) -> DispatchResult:
-    """One Telegram delivery through the real dispatch wired to the PostgreSQL stores."""
+    """One Telegram delivery through the real dispatch wired to the PostgreSQL stores.
+
+    `lookup_by_token_hash` and `save_atomic` default to the PostgreSQL approval store; a race
+    test wraps them to hold two deliveries between the lookup and the decision.
+    """
     prefix = "APR:" if kind is CallbackKind.APPROVE else "SKP:"
     return dispatch_callback(
         ParsedCallback(raw=prefix + SHORT_ID, kind=kind, short_id=SHORT_ID),
@@ -208,8 +214,8 @@ def dispatch(
         correlation_id=query_id,
         journal_receipt=proc.journal.record,
         lookup_by_short_id=proc.approvals.lookup_by_short_id,
-        lookup_by_token_hash=proc.approvals.lookup_by_token_hash,
-        save_atomic=proc.approvals.save_atomic,
+        lookup_by_token_hash=lookup_by_token_hash or proc.approvals.lookup_by_token_hash,
+        save_atomic=save_atomic or proc.approvals.save_atomic,
         now_utc=now_utc,
         binding_context=binding_context(),
     )
@@ -250,9 +256,17 @@ async def deliver(
     query_id: str,
     now_utc: datetime,
     intent_store: Any | None = None,
+    lookup_by_token_hash: Callable[[str], Approval | None] | None = None,
+    save_atomic: Callable[[Approval, ShortIdMapping | None], None] | None = None,
 ) -> Delivery:
     """The full chain for one APPROVE delivery: dispatch, then execute when it resolved."""
-    result = dispatch(proc, query_id=query_id, now_utc=now_utc)
+    result = dispatch(
+        proc,
+        query_id=query_id,
+        now_utc=now_utc,
+        lookup_by_token_hash=lookup_by_token_hash,
+        save_atomic=save_atomic,
+    )
     if not (
         result.ok
         and result.approval is not None
