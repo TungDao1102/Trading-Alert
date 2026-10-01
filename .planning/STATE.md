@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 17
 current_phase_name: operational-persistence-layer
-status: executing
-stopped_at: Completed 17-14-PLAN.md
-last_updated: "2026-10-01T18:00:20.230Z"
+status: verifying
+stopped_at: Completed 17-15-PLAN.md
+last_updated: "2026-10-01T18:34:04.844Z"
 last_activity: 2026-10-01
 last_activity_desc: Phase 17 execution started
-state_head: 5e195eefc7bea920a39ef157cece0d6e1ccd9f14
+state_head: a1b418d42e7c595a7f170f266560b2f87dbd4d6d
 progress:
   total_phases: 29
   completed_phases: 3
   total_plans: 109
-  completed_plans: 104
+  completed_plans: 105
 milestone_name: milestone
 ---
 
@@ -32,7 +32,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 Phase: 17 (operational-persistence-layer) — EXECUTING
 Plan: 15 of 15
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-01 — Phase 17 execution started
 
 Progress: [█░░░░░░░░░] 11%
@@ -144,6 +144,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 17 P12 | 32 min | 2 tasks | 8 files |
 | Phase 17 P13 | 25 min | 3 tasks | 7 files |
 | Phase 17 P14 | 25 min | 2 tasks | 2 files |
+| Phase 17 P15 | 36 min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -363,6 +364,7 @@ Recent decisions affecting current work:
 - [Phase 17]: 17-12: restart recovery probes by deterministic id only (found -> ACKED, young absent -> REJECTED, error/indeterminate/at-or-past 3 days stays UNKNOWN) and enters SAFE_MODE UNRESOLVED_EXECUTION_INTENT once; consume/protective-insert race loser returns False when the same (approval_id, role) row exists (secondary unique arbiter); for D051
 - [Phase 17]: 17-13: snapshot reads verify the denormalized columns as well as the sha256; system state values are str/bool/None only; state_snapshot normalizes entry/enable fields to None when off/disabled and rehydrate rejects inconsistent or malformed state (ValueError); for D051 — Fail closed on tampered evidence (D-18/D-19, T-17-35) and on restart state that could silently read SAFE_MODE as off (D-22, C14, T-17-34)
 - [Phase 17]: 17-14: no defect found by the end-to-end replay and redelivery tests, so no production file changed; after plan expiry the callback layer answers APPROVAL_EXPIRED while execute_approved_plan handed the stored approval returns the stored outcome; for D051
+- [Phase 17]: D051 recorded (Phase 17 persistence layer); the six transition tables stay an auto-mode default awaiting user confirmation (DOMN-04 manual check) — Research C3: tables were authored in Phase 17, GLOSSARY 11, user to confirm
 
 ### Pending Todos
 
@@ -408,6 +410,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-01T18:00:19.963Z
-Stopped at: Completed 17-14-PLAN.md
+Last session: 2026-10-01T18:33:59.810Z
+Stopped at: Completed 17-15-PLAN.md
 Resume file: None

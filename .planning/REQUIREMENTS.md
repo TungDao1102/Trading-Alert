@@ -22,10 +22,10 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 ### Domain & Reproducibility
 
-- [ ] **DOMN-01**: System persists seven separate entities (Signal, TradePlan, Approval, Order, Fill, Position, JournalEvent) with GLOSSARY-canonical enums and no nullable-column state inference
+- [x] **DOMN-01**: System persists seven separate entities (Signal, TradePlan, Approval, Order, Fill, Position, JournalEvent) with GLOSSARY-canonical enums and no nullable-column state inference
 - [x] **DOMN-02**: Every backtest/paper/alert/order plan is traceable to an immutable versioned parameter set (strategyVersion + parameterSetId + parameterSetHash + experiment linkage)
 - [ ] **DOMN-03**: Strategy correctness is enforced by golden fixtures (candles.csv + parameters.json + expected signals/plans) plus no-lookahead, prefix-invariance, candle-close-timing, and boundary suites
-- [ ] **DOMN-04**: Signal, TradePlan, Order and Position state transitions are validated against the GLOSSARY state machines and illegal transitions are rejected
+- [x] **DOMN-04**: Signal, TradePlan, Order and Position state transitions are validated against the GLOSSARY state machines and illegal transitions are rejected
 
 ### Strategy & Planning
 
@@ -62,8 +62,8 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 - [ ] **EXEC-01**: Execution manager places LIMIT-zone entries and Algo-Order protective exits (re-verified against current Binance docs), supports both position modes and partial-fill protective sizing
 - [x] **EXEC-02**: Reconciliation loop compares local state against open normal orders, open algo orders, and positions, sweeps orphan protective orders, and forces SAFE_MODE on divergence
-- [ ] **EXEC-03**: Deterministic client/algo order identifiers prevent duplicate entry orders across retries, restarts, and replayed events
-- [ ] **EXEC-04**: The exact exchange constraint snapshot used for sizing, including MARKET_LOT_SIZE and PERCENT_PRICE filters, working type, margin type, leverage and equity, is persisted per trade plan and revalidated when stale
+- [x] **EXEC-03**: Deterministic client/algo order identifiers prevent duplicate entry orders across retries, restarts, and replayed events
+- [x] **EXEC-04**: The exact exchange constraint snapshot used for sizing, including MARKET_LOT_SIZE and PERCENT_PRICE filters, working type, margin type, leverage and equity, is persisted per trade plan and revalidated when stale
 - [ ] **EXEC-05**: The Binance user-data stream for order, algo-order, account and position events drives fills and state, with REST as fallback
 - [ ] **EXEC-06**: Manual emergency controls exist: cancel pending strategy orders, disable new entries, close strategy positions on explicit action, re-place protection, and enter SAFE_MODE
 - [ ] **EXEC-07**: Protective-order execution assumptions that change results (the TP1 split fraction, the TP2 rule and the time in force) are versioned registry parameters, not code constants
@@ -121,7 +121,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DATA-02 | Phase 2 | Pending |
 | DATA-03 | Phase 2 | Pending |
 | DATA-04 | Phase 2 | Pending |
-| DOMN-01 | Phase 3 | Pending |
+| DOMN-01 | Phase 3 | Complete |
 | DOMN-02 | Phase 3 | Complete |
 | DOMN-03 | Phase 3 | Pending |
 | STRAT-01 | Phase 4 | Pending |
@@ -139,18 +139,18 @@ Which phases cover which requirements. Updated during roadmap creation.
 | APRV-02 | Phase 8 | Complete |
 | EXEC-01 | Phase 9 | Pending |
 | EXEC-02 | Phase 8 | Complete |
-| EXEC-03 | Phase 8 | Pending |
+| EXEC-03 | Phase 8 | Complete |
 | JRN-01 | Phase 10 | Complete |
 | OPS-01 | Phase 8 | Complete |
 | OPS-02 | Phase 9 | Pending |
 | GOV-01 | Phase 10 | Complete |
 | RISK-03 | Phase 20 | Pending |
 | RISK-04 | Phase 19 | Pending |
-| EXEC-04 | Phase 17 | Pending |
+| EXEC-04 | Phase 17 | Complete |
 | EXEC-05 | Phase 18 | Pending |
 | EXEC-06 | Phase 20 | Pending |
 | EXEC-07 | Phase 19 | Pending |
-| DOMN-04 | Phase 17 | Pending |
+| DOMN-04 | Phase 17 | Complete |
 | BKTS-04 | Phase 14 | Pending |
 | OPS-03 | Phase 24 | Pending |
 | OPS-04 | Phase 24 | Pending |
