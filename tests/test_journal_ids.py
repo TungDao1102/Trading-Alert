@@ -232,3 +232,154 @@ def test_drill_id_is_stable_for_the_same_event() -> None:
     assert a.journal_event_id == b.journal_event_id
     assert a.journal_event_id.startswith("drill_outcome_")
     json.loads(a.payload_json)  # payload unchanged and still valid JSON
+
+
+# --------------------------------------------------------------------------- #
+# Telegram callback ids: replay-stable correlation (D-10, research C7, A10)
+# --------------------------------------------------------------------------- #
+
+CHAT_ID = 123
+SHORT_ID = "a" * 32
+T1 = datetime(2026, 9, 19, 13, 0, 0, tzinfo=UTC)
+T2 = datetime(2026, 9, 19, 13, 0, 7, tzinfo=UTC)
+
+
+def _parsed(kind_prefix: str = "APR") -> Any:
+    from src.adapters.telegram_callbacks import parse_callback_data
+
+    return parse_callback_data(f"{kind_prefix}:{SHORT_ID}")
+
+
+def _dispatch(
+    *,
+    correlation_id: str,
+    callback_at_utc: datetime,
+    chat_id: int = CHAT_ID,
+    kind_prefix: str = "APR",
+) -> list[Any]:
+    from src.adapters.telegram_callbacks import dispatch_callback
+
+    events: list[Any] = []
+    dispatch_callback(
+        _parsed(kind_prefix),
+        callback_chat_id=chat_id,
+        authorized_chat_id=CHAT_ID,
+        callback_at_utc=callback_at_utc,
+        raw_token="",
+        correlation_id=correlation_id,
+        journal_receipt=events.append,
+        lookup_by_short_id=lambda short_id: None,
+        lookup_by_token_hash=lambda token_hash: None,
+        save_atomic=lambda approval, mapping: None,
+    )
+    return events
+
+
+def test_redelivery_journals_identical_ids_and_payloads() -> None:
+    first = _dispatch(correlation_id="cbq:777", callback_at_utc=T1)
+    second = _dispatch(correlation_id="cbq:777", callback_at_utc=T2)
+    assert [e.event_type for e in first] == ["CALLBACK_RECEIVED", "CALLBACK_REJECTED"]
+    assert [e.journal_event_id for e in first] == [e.journal_event_id for e in second]
+    assert [e.payload_json for e in first] == [e.payload_json for e in second]
+    assert [e.occurred_at_utc for e in first] == [T1, T1]
+    assert [e.occurred_at_utc for e in second] == [T2, T2]
+
+
+def test_different_correlation_ids_get_different_ids() -> None:
+    a = _dispatch(correlation_id="cbq:777", callback_at_utc=T1)
+    b = _dispatch(correlation_id="cbq:778", callback_at_utc=T1)
+    assert {e.journal_event_id for e in a}.isdisjoint({e.journal_event_id for e in b})
+
+
+def test_receipt_and_outcome_ids_are_distinct_within_one_delivery() -> None:
+    events = _dispatch(correlation_id="cbq:777", callback_at_utc=T1)
+    ids = [e.journal_event_id for e in events]
+    assert len(set(ids)) == len(ids)
+    assert all(i.startswith("cb_") for i in ids)
+
+
+def test_chat_reject_receipt_id_differs_from_normal_receipt_id() -> None:
+    rejected = _dispatch(correlation_id="cbq:777", callback_at_utc=T1, chat_id=999)
+    normal = _dispatch(correlation_id="cbq:777", callback_at_utc=T1)
+    assert rejected[0].event_type == normal[0].event_type == "CALLBACK_RECEIVED"
+    assert rejected[0].journal_event_id != normal[0].journal_event_id
+
+
+def test_ok_and_rejected_outcomes_for_one_correlation_never_share_an_id() -> None:
+    from src.adapters.telegram_callbacks import _journal_outcome
+    from src.domain.enums import RejectionReason
+
+    events: list[Any] = []
+    parsed = _parsed()
+    for ok, reason in (
+        (True, None),
+        (False, RejectionReason.INVALIDATED),
+        (False, RejectionReason.EXPIRED),
+    ):
+        _journal_outcome(
+            events.append,
+            parsed=parsed,
+            ok=ok,
+            reason_code=reason,
+            callback_at_utc=T1,
+            correlation_id="cbq:777",
+        )
+    ids = [e.journal_event_id for e in events]
+    assert len(set(ids)) == 3
+
+
+def test_no_receipt_or_outcome_payload_has_a_wall_clock_field() -> None:
+    for chat_id in (CHAT_ID, 999):
+        for event in _dispatch(correlation_id="cbq:777", callback_at_utc=T1, chat_id=chat_id):
+            payload = json.loads(event.payload_json)
+            assert "received_at_utc" not in payload
+            assert "received_at" not in payload
+
+
+class _FakeQuery:
+    def __init__(self, query_id: Any, data: str = f"APR:{SHORT_ID}") -> None:
+        self.id = query_id
+        self.data = data
+        self.message = SimpleNamespace(chat_id=CHAT_ID)
+
+    async def answer(self) -> None:
+        return None
+
+
+class _FakeUpdate:
+    def __init__(self, query: _FakeQuery) -> None:
+        self.callback_query = query
+        self.effective_chat = SimpleNamespace(id=CHAT_ID)
+
+
+async def _on_callback(query: _FakeQuery, seen: list[str]) -> None:
+    from src.adapters.telegram_callbacks import DispatchResult, on_callback
+
+    def fake_dispatch(parsed: Any, **kwargs: Any) -> DispatchResult:
+        seen.append(kwargs["correlation_id"])
+        return DispatchResult(ok=True, kind=parsed.kind)
+
+    await on_callback(
+        _FakeUpdate(query),  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        authorized_chat_id=CHAT_ID,
+        binding_context_resolver=lambda sid: None,
+        dispatch=fake_dispatch,
+        reply_text_fn=None,
+    )
+
+
+async def test_on_callback_correlation_comes_from_callback_query_id() -> None:
+    seen: list[str] = []
+    await _on_callback(_FakeQuery("777"), seen)
+    await _on_callback(_FakeQuery("777"), seen)  # Telegram redelivery
+    await _on_callback(_FakeQuery("778"), seen)
+    assert seen == ["cbq:777", "cbq:777", "cbq:778"]
+
+
+@pytest.mark.parametrize("bad_id", ["", None])
+async def test_on_callback_rejects_missing_query_id_before_dispatch(bad_id: Any) -> None:
+    seen: list[str] = []
+    with pytest.raises(ValueError):
+        await _on_callback(_FakeQuery(bad_id), seen)
+    assert seen == []
