@@ -11,15 +11,14 @@ tests prove the repository itself is frozen consistently.
 
 from __future__ import annotations
 
-import os
 import re
-import shutil
 import subprocess
-import sys
 import textwrap
 from pathlib import Path
 
 import pytest
+
+from tests.infra_helpers import find_bash
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "research-gate.yml"
@@ -28,19 +27,7 @@ REAL_DECISIONS = REPO_ROOT / "docs" / "DECISIONS.md"
 REAL_DOC_STATUS = REPO_ROOT / "docs" / "DOC_STATUS.md"
 
 
-def _find_bash() -> str | None:
-    found = shutil.which("bash")
-    if found and not (sys.platform == "win32" and "system32" in found.lower()):
-        return found
-    if sys.platform == "win32":
-        program_files = Path(os.environ.get("ProgramFiles", "C:/Program Files"))
-        candidate = program_files / "Git" / "bin" / "bash.exe"
-        if candidate.is_file():
-            return str(candidate)
-    return None
-
-
-BASH = _find_bash()
+BASH = find_bash()
 if BASH is None:
     pytest.skip("bash is required to run the research-gate freeze step", allow_module_level=True)
 

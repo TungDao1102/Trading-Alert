@@ -514,7 +514,7 @@ def _is_zero_like(value: Any) -> bool:
     if value is None:
         return False
     try:
-        return value == 0
+        return bool(value == 0)
     except TypeError:
         return False
 

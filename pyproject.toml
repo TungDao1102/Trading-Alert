@@ -51,6 +51,9 @@ addopts = "-q"
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+markers = [
+  "docker: needs a reachable Docker daemon and the built trading-alert images (cutover, backup drill, image checks)",
+]
 
 [tool.ruff]
 line-length = 100

@@ -802,7 +802,11 @@ def make_manual_close_drill(
             the drill exercises the configured function.
     """
     if compare_fn is None:
-        from src.reconcile.compare import compare as compare_fn
+        from src.reconcile.compare import compare as default_compare
+
+        resolved_compare: Callable[..., Any] = default_compare
+    else:
+        resolved_compare = compare_fn
 
 
     def inject() -> str:
@@ -811,7 +815,7 @@ def make_manual_close_drill(
     def assert_outcome(journal: DrillLog, context: dict[str, Any]) -> str:
         # Build a diff against the post-manual-close truth (the local
         # algo protective survives the manual close as an orphan).
-        diff = compare_fn(
+        diff = resolved_compare(
             local_open_orders=local_intent["open_orders"],
             local_open_algos=local_intent["open_algos"],
             local_open_positions=local_intent["open_positions"],

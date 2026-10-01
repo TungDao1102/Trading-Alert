@@ -30,6 +30,8 @@ from pathlib import Path
 
 import pytest
 
+from tests import infra_helpers
+
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 EXCHANGE_INFO_FIXTURE = FIXTURES_DIR / "exchange_info_sample.json"
 
@@ -44,6 +46,19 @@ PHASE5_FIXTURES_DIR = FIXTURES_DIR / "phase5"
 
 # D-01 — V1 live-5 universe, locked.
 LIVE_5: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Gate ``docker``-marked tests on a reachable daemon (13.1-01).
+
+    Skips with an explicit reason locally; FAILS under ``TRADING_CI_STRICT=1`` so CI can
+    never pass vacuously. Looked up through the module so tests can monkeypatch the probe.
+    """
+    if item.get_closest_marker("docker") is None:
+        return
+    reachable, detail = infra_helpers.docker_daemon_reachable()
+    if not reachable:
+        infra_helpers.infra_skip(f"docker daemon not reachable: {detail}")
 
 
 @pytest.fixture(scope="session")

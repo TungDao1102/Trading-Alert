@@ -284,14 +284,14 @@ def format_approve(
     for code in reason_codes:
         if "\n" in code or "\r" in code:
             raise ValueError(f"reason_codes entry must not contain newlines: {code!r}")
-    for field_name, value in (
+    for ts_name, ts_value in (
         ("expiry_utc", expiry_utc),
         ("detected_at_utc", detected_at_utc),
     ):
-        if not isinstance(value, datetime):
-            raise TypeError(f"{field_name} must be datetime, got {type(value).__name__}")
-        if value.tzinfo is None:
-            raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
+        if not isinstance(ts_value, datetime):
+            raise TypeError(f"{ts_name} must be datetime, got {type(ts_value).__name__}")
+        if ts_value.tzinfo is None:
+            raise ValueError(f"{ts_name} must be UTC-aware, got naive datetime")
     tp_lines = "\n".join(
         f"  TP{idx + 1}: {price} ({fraction})" for idx, (price, fraction) in enumerate(take_profits)
     )
