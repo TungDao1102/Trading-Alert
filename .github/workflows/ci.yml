@@ -1,0 +1,178 @@
+name: ci
+
+# Full pipeline on every push and pull request to master (13.1 D-01, D-02, D-03).
+# Pins: every action is a commit SHA with its version in a trailing comment, the runner
+# and uv are exact (D-19). No registry login, image push or deploy step lives here.
+# tests/test_deploy_workflows.py enforces all of this as text.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_PYTHON_DOWNLOADS: never
+  # Missing bash, docker, compose or shellcheck must fail the run, never skip it.
+  TRADING_CI_STRICT: "1"
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        # Digest-pinned so the live-PG tests run (instead of skipping) against a fixed image.
+        image: postgres:17.11-bookworm@sha256:639ab7ceb90e13123085b741fb31ef493fba25463002f6da665352e7b534b652
+        env:
+          POSTGRES_USER: trading
+          # CI-only throwaway literal for an ephemeral service container; not a secret.
+          POSTGRES_PASSWORD: ci-only-throwaway-not-a-secret
+          POSTGRES_DB: trading_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trading -d trading_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: decision-alignment tests read pre-change text via git and
+          # would skip in a shallow clone.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.21"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Run tests
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://trading:ci-only-throwaway-not-a-secret@localhost:5432/trading_test
+        run: uv run pytest -m "not docker" -rs -p no:cacheprovider
+
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.21"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Lockfile is current
+        run: uv lock --check
+
+      - name: Ruff lint
+        run: uv run ruff check
+
+      - name: Ruff format
+        run: uv run ruff format --check
+
+  types:
+    name: types
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.21"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Mypy
+        run: uv run mypy src
+
+  docker:
+    name: docker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.21"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Prepare env file from the template
+        run: |
+          cp .env.example .env
+          chmod 600 .env
+
+      # Quiet on purpose: a resolved config would print the interpolated environment.
+      - name: Compose config (default profile)
+        run: docker compose config -q
+
+      - name: Compose config (all profiles)
+        run: docker compose --profile paper --profile live --profile ops config -q
+
+      - name: Shellcheck deploy scripts
+        run: |
+          set -eu
+          if ! ls deploy/*.sh >/dev/null 2>&1; then
+            echo "::error::deploy/ has no .sh file to check"
+            exit 1
+          fi
+          shellcheck --version
+          shellcheck -x deploy/*.sh
+
+      - name: Build images
+        run: docker compose --profile ops build
+
+      - name: Docker-marked tests
+        run: uv run pytest -m docker -rs -p no:cacheprovider
