@@ -45,6 +45,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -52,6 +53,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import structlog
 
@@ -64,6 +66,28 @@ MANIFEST_NAME = "manifest.json"
 # returning the same path on success. Production wires this to a real
 # `pg_dump --format=custom ...` invocation; tests pass a sqlite fake.
 PgDumpRunner = Callable[[Path], Path]
+
+
+@dataclass(frozen=True)
+class LibpqTarget:
+    """A libpq-safe connection target: no password in the URL, password in the env.
+
+    ``env`` carries only ``PGPASSWORD`` (when the source URL had a password) and is
+    excluded from ``repr`` so a logged target never shows the secret.
+    """
+
+    url_without_password: str
+    env: dict[str, str] = field(default_factory=dict, repr=False)
+
+
+# pg_restore and `alembic upgrade head` seams, typed like PgDumpRunner so tests inject fakes.
+PgRestoreRunner = Callable[[Path, LibpqTarget], None]
+MigrateRunner = Callable[[str], None]
+# Returns the names of tables (other than alembic_version) that hold rows.
+DataProbe = Callable[[str], list[str]]
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 
 
 @dataclass(frozen=True)
@@ -439,6 +463,301 @@ def run_drill(
 
 
 # --------------------------------------------------------------------------- #
+# Verify and restore (Phase 13.1, D-13)
+# --------------------------------------------------------------------------- #
+
+
+class RestoreRefused(RuntimeError):
+    """A restore step refused bad or dangerous input. Messages name paths and counts only."""
+
+    def __init__(self, message: str, problems: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        self.problems = list(problems)
+
+
+@dataclass(frozen=True)
+class RestoreBundleReport:
+    """Outcome of one ``restore_bundle()`` call."""
+
+    copied: int
+    skipped: int
+    database_restored: bool
+
+
+def libpq_target(database_url: str) -> LibpqTarget:
+    """Split a SQLAlchemy-style URL into a libpq URL and a password-bearing env.
+
+    ``postgresql+psycopg://u:p%40ss@h:5432/db`` becomes
+    ``postgresql://u@h:5432/db`` plus ``{"PGPASSWORD": "p@ss"}``. libpq rejects the
+    ``+driver`` suffix and echoes the whole URL (password included) in its error,
+    so neither may reach argv. A ``password`` query parameter is moved as well.
+    """
+    parts = urlsplit(database_url)
+    scheme = parts.scheme.partition("+")[0].lower()
+    if scheme not in ("postgresql", "postgres"):
+        raise ValueError(f"unsupported database URL scheme {parts.scheme!r}")
+    userinfo, _, hostport = parts.netloc.rpartition("@")
+    username, _, raw_password = userinfo.partition(":")
+    env: dict[str, str] = {}
+    if raw_password:
+        env["PGPASSWORD"] = unquote(raw_password)
+    query = parts.query
+    pairs = parse_qsl(query, keep_blank_values=True)
+    if any(key == "password" for key, _ in pairs):
+        for key, value in pairs:
+            if key == "password" and "PGPASSWORD" not in env:
+                env["PGPASSWORD"] = value
+        query = urlencode([(k, v) for k, v in pairs if k != "password"])
+    netloc = f"{username}@{hostport}" if username else hostport
+    url = urlunsplit(("postgresql", netloc, parts.path, query, parts.fragment))
+    return LibpqTarget(url_without_password=url, env=env)
+
+
+def _is_unsafe_key(key: str) -> bool:
+    """True for a manifest key that could escape the bundle or target root."""
+    if not key or key.startswith("/") or "\\" in key or _WINDOWS_DRIVE.match(key):
+        return True
+    return any(segment in ("", ".", "..") for segment in key.split("/"))
+
+
+def _read_manifest(bundle_root: Path) -> tuple[dict[str, str] | None, str | None]:
+    """Return (manifest, None) or (None, problem line)."""
+    manifest_path = bundle_root / MANIFEST_NAME
+    if not manifest_path.is_file():
+        return None, f"{MANIFEST_NAME}: missing"
+    try:
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, f"{MANIFEST_NAME}: unreadable or not valid JSON"
+    if not isinstance(raw, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in raw.items()
+    ):
+        return None, f"{MANIFEST_NAME}: not a mapping of relative path to sha256"
+    return raw, None
+
+
+def verify_bundle(bundle_root: Path) -> list[str]:
+    """Hash every bundle file against the manifest; return the problems found.
+
+    An empty list means the bundle is valid. Checks: the manifest exists and is a
+    path-to-sha256 mapping, no key escapes the bundle, every key names a file whose
+    sha256 matches, and no file on disk (other than the root manifest itself) is
+    missing from the manifest (set equality). One problem line per offending path.
+    """
+    manifest, problem = _read_manifest(bundle_root)
+    if manifest is None:
+        return [problem or f"{MANIFEST_NAME}: unreadable"]
+    problems: list[str] = []
+    for key in sorted(manifest):
+        if _is_unsafe_key(key):
+            problems.append(f"{key}: unsafe path in manifest")
+            continue
+        path = bundle_root / key
+        if not path.is_file():
+            problems.append(f"{key}: missing from bundle")
+            continue
+        try:
+            actual = _sha256_file(path)
+        except OSError:
+            problems.append(f"{key}: unreadable")
+            continue
+        if actual != manifest[key]:
+            problems.append(f"{key}: sha256 mismatch")
+    on_disk = {
+        p.relative_to(bundle_root).as_posix()
+        for p in bundle_root.rglob("*")
+        if p.is_file() and p != bundle_root / MANIFEST_NAME
+    }
+    for rel in sorted(on_disk - set(manifest)):
+        problems.append(f"{rel}: in bundle but not in manifest")
+    return problems
+
+
+def _sqlalchemy_url(database_url: str) -> Any:
+    """SQLAlchemy URL object; a bare ``postgresql://`` gets the psycopg 3 driver."""
+    from sqlalchemy.engine import make_url
+
+    url = make_url(database_url)
+    if url.drivername in ("postgresql", "postgres"):
+        url = url.set(drivername="postgresql+psycopg")
+    return url
+
+
+def _tables_with_rows(database_url: str) -> list[str]:
+    """Names of tables (except alembic_version) that hold at least one row."""
+    from sqlalchemy import create_engine, inspect, text
+
+    engine = create_engine(_sqlalchemy_url(database_url))
+    try:
+        with engine.connect() as conn:
+            quote = engine.dialect.identifier_preparer.quote
+            filled: list[str] = []
+            for name in sorted(inspect(conn).get_table_names()):
+                if name == "alembic_version":
+                    continue
+                if conn.execute(text(f"SELECT 1 FROM {quote(name)} LIMIT 1")).first() is not None:
+                    filled.append(name)
+            return filled
+    finally:
+        engine.dispose()
+
+
+def restore_database(
+    dump_path: Path,
+    *,
+    database_url: str,
+    force: bool,
+    pg_restore_runner: PgRestoreRunner,
+    migrate_runner: MigrateRunner | None = None,
+    expect_sha256: str | None = None,
+    data_probe: DataProbe | None = None,
+) -> None:
+    """Restore ``dump_path`` into the database, refusing a non-empty database.
+
+    Order: dump exists, optional sha256 pin matches, URL is libpq-valid, database
+    is empty (or ``force``), ``pg_restore``, then ``migrate_runner`` when given.
+    ``restore_bundle`` passes ``migrate_runner=None`` because it migrates only after
+    the Parquet copy.
+    """
+    if not dump_path.is_file():
+        raise RestoreRefused(f"refusing restore: dump not found at {dump_path}")
+    if expect_sha256 is not None and _sha256_file(dump_path) != expect_sha256.strip().lower():
+        raise RestoreRefused(f"refusing restore: sha256 of {dump_path.name} differs from expected")
+    target = libpq_target(database_url)
+    filled = (data_probe or _tables_with_rows)(database_url)
+    if filled and not force:
+        raise RestoreRefused(
+            f"refusing restore: database is not empty ({len(filled)} table(s) with rows: "
+            f"{', '.join(filled)}); pass --force to overwrite"
+        )
+    pg_restore_runner(dump_path, target)
+    if migrate_runner is not None:
+        migrate_runner(database_url)
+
+
+def _plan_parquet_copy(manifest: dict[str, str]) -> dict[str, tuple[str, str]]:
+    """Map target-relative path -> (bundle key, sha256) for every Parquet entry."""
+    planned: dict[str, tuple[str, str]] = {}
+    for key in sorted(manifest):
+        if not key.startswith("parquet/"):
+            continue
+        parts = key.split("/", 2)
+        if len(parts) != 3:
+            raise RestoreRefused(f"{key}: cannot map this manifest entry into the Parquet target")
+        rel = parts[2]
+        prior = planned.get(rel)
+        if prior is not None and prior[1] != manifest[key]:
+            raise RestoreRefused(f"{rel}: two bundle roots hold different content for this path")
+        planned[rel] = (key, manifest[key])
+    return planned
+
+
+def _copy_into_target(src: Path, dest: Path, expected_sha256: str) -> None:
+    """Copy via a temp name plus os.replace; never overwrites an existing file."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
+    try:
+        shutil.copyfile(src, tmp)
+        if _sha256_file(tmp) != expected_sha256:
+            raise RestoreRefused(f"{dest.name}: copied content does not match the manifest")
+        if dest.exists():
+            raise FileExistsError(f"refusing to overwrite existing {dest}")
+        os.replace(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def restore_bundle(
+    bundle_root: Path,
+    *,
+    parquet_target: Path,
+    database_url: str | None,
+    force: bool,
+    skip_db: bool,
+    pg_restore_runner: PgRestoreRunner,
+    migrate_runner: MigrateRunner,
+    data_probe: DataProbe | None = None,
+) -> RestoreBundleReport:
+    """Verified, refusing restore: verify -> checks -> pg_restore -> Parquet copy -> migrate.
+
+    Nothing destructive happens before ``verify_bundle`` passes and every target
+    check (Parquet target empty or ``force``, no existing file with different
+    content, database empty or ``force``) has passed. An existing Parquet file with
+    identical content is skipped; one with different content aborts the restore
+    (raw files are immutable, D-04). ``skip_db`` restores Parquet only.
+    """
+    problems = verify_bundle(bundle_root)
+    if problems:
+        raise RestoreRefused(
+            f"refusing restore: bundle verification failed ({len(problems)} problem(s))",
+            problems,
+        )
+    manifest, _ = _read_manifest(bundle_root)
+    assert manifest is not None  # verify_bundle succeeded, so the manifest is valid
+
+    resolved_target = parquet_target.resolve()
+    resolved_bundle = bundle_root.resolve()
+    if resolved_target == resolved_bundle or resolved_bundle.is_relative_to(resolved_target):
+        raise RestoreRefused(
+            f"refusing restore: --parquet-target {parquet_target} contains the bundle"
+        )
+    if resolved_target.is_relative_to(resolved_bundle):
+        raise RestoreRefused(
+            f"refusing restore: --parquet-target {parquet_target} is inside the bundle"
+        )
+
+    planned = _plan_parquet_copy(manifest)
+    dump_path = bundle_root / DEFAULT_PG_DUMP_NAME
+    if not skip_db:
+        if not database_url:
+            raise RestoreRefused(
+                "refusing restore: DATABASE_URL_SYNC / DATABASE_URL is not set (use --skip-db "
+                "for a Parquet-only restore)"
+            )
+        if DEFAULT_PG_DUMP_NAME not in manifest:
+            raise RestoreRefused(f"refusing restore: {DEFAULT_PG_DUMP_NAME} is not in the bundle")
+        libpq_target(database_url)  # reject an unsupported scheme before anything runs
+
+    if parquet_target.exists():
+        if not parquet_target.is_dir():
+            raise RestoreRefused(f"refusing restore: {parquet_target} is not a directory")
+        if not force and any(parquet_target.iterdir()):
+            raise RestoreRefused(
+                f"refusing restore: Parquet target {parquet_target} is not empty; pass --force"
+            )
+    to_copy: list[tuple[str, Path, str]] = []
+    skipped = 0
+    for rel, (key, sha) in sorted(planned.items()):
+        dest = parquet_target / rel
+        if dest.exists() or dest.is_symlink():
+            if not dest.is_file() or _sha256_file(dest) != sha:
+                raise RestoreRefused(
+                    f"{rel}: already exists in the target with different content "
+                    "(raw files are immutable and never overwritten)"
+                )
+            skipped += 1
+        else:
+            to_copy.append((key, dest, sha))
+
+    if not skip_db:
+        assert database_url is not None
+        restore_database(
+            dump_path,
+            database_url=database_url,
+            force=force,
+            pg_restore_runner=pg_restore_runner,
+            migrate_runner=None,
+            data_probe=data_probe,
+        )
+    for key, dest, sha in to_copy:
+        _copy_into_target(bundle_root / key, dest, sha)
+    if not skip_db:
+        assert database_url is not None
+        migrate_runner(database_url)
+    return RestoreBundleReport(copied=len(to_copy), skipped=skipped, database_restored=not skip_db)
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
@@ -466,6 +785,40 @@ def _prod_pg_dump_runner(out: Path) -> Path:
     return out
 
 
+def _prod_pg_restore_runner(dump: Path, target: LibpqTarget) -> None:
+    """Production pg_restore runner (``PG_RESTORE_BIN`` overrides the binary).
+
+    The password travels only in ``PGPASSWORD``; argv holds the password-free URL.
+    """
+    pg_bin = os.environ.get("PG_RESTORE_BIN", "pg_restore")
+    subprocess.run(
+        [
+            pg_bin,
+            "--clean",
+            "--if-exists",
+            "--no-owner",
+            "--no-privileges",
+            "--exit-on-error",
+            "--dbname",
+            target.url_without_password,
+            str(dump),
+        ],
+        check=True,
+        env={**os.environ, **target.env},
+    )
+
+
+def _prod_migrate_runner(database_url: str) -> None:
+    """Run ``alembic upgrade head`` at the project root with DATABASE_URL in the child env."""
+    url = _sqlalchemy_url(database_url).render_as_string(hide_password=False)
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        check=True,
+        cwd=_PROJECT_ROOT,
+        env={**os.environ, "DATABASE_URL": url},
+    )
+
+
 def _sqlite_fake_pg_dump_runner(out: Path) -> Path:
     """TEST-ONLY fake — write a sqlite snapshot instead of a real dump.
 
@@ -483,7 +836,17 @@ def _sqlite_fake_pg_dump_runner(out: Path) -> Path:
     return out
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _database_url_from_env() -> str | None:
+    return os.environ.get("DATABASE_URL_SYNC") or os.environ.get("DATABASE_URL") or None
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    pg_restore_runner: PgRestoreRunner | None = None,
+    migrate_runner: MigrateRunner | None = None,
+    data_probe: DataProbe | None = None,
+) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m src.ops.backup",
         description="Single-command backup + scratch-restore drill (D-12).",
@@ -539,7 +902,58 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="List what would be pruned without deleting or rewriting.",
     )
 
+    verify_p = sub.add_parser(
+        "verify", help="Hash every bundle file against the manifest (set equality)."
+    )
+    verify_p.add_argument("--bundle-root", type=Path, default=DEFAULT_BUNDLE_ROOT)
+
+    restore_p = sub.add_parser(
+        "restore",
+        help="Verify, then pg_restore, copy Parquet, alembic upgrade head. Refuses bad input.",
+    )
+    restore_p.add_argument("--bundle-root", type=Path, default=DEFAULT_BUNDLE_ROOT)
+    restore_p.add_argument("--parquet-target", type=Path, required=True)
+    restore_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow a non-empty Parquet target or database (files are never overwritten).",
+    )
+    restore_p.add_argument("--skip-db", action="store_true", help="Restore the Parquet files only.")
+
     args = parser.parse_args(argv)
+
+    if args.cmd == "verify":
+        verify_problems = verify_bundle(args.bundle_root)
+        if verify_problems:
+            print(f"verify-FAILED bundle_root={args.bundle_root}", file=sys.stderr)
+            for line in verify_problems:
+                print(f"  {line}", file=sys.stderr)
+            return 1
+        print(f"verify-OK bundle_root={args.bundle_root}")
+        return 0
+
+    if args.cmd == "restore":
+        try:
+            restored = restore_bundle(
+                args.bundle_root,
+                parquet_target=args.parquet_target,
+                database_url=_database_url_from_env(),
+                force=args.force,
+                skip_db=args.skip_db,
+                pg_restore_runner=pg_restore_runner or _prod_pg_restore_runner,
+                migrate_runner=migrate_runner or _prod_migrate_runner,
+                data_probe=data_probe,
+            )
+        except RestoreRefused as exc:
+            print(f"restore-REFUSED: {exc}", file=sys.stderr)
+            for line in exc.problems:
+                print(f"  {line}", file=sys.stderr)
+            return 1
+        print(
+            f"restore-OK parquet_target={args.parquet_target} copied={restored.copied} "
+            f"skipped={restored.skipped} database_restored={restored.database_restored}"
+        )
+        return 0
 
     if args.cmd == "backup":
         runner = _sqlite_fake_pg_dump_runner if args.sqlite_fake_pg_dump else _prod_pg_dump_runner
