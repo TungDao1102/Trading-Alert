@@ -118,6 +118,12 @@ args=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -o | -g) shift 2 ;;
+    -m)
+      case "$(uname -s)" in
+        MINGW* | MSYS*) shift 2 ;;
+        *) args+=("$1" "$2"); shift 2 ;;
+      esac
+      ;;
     *) args+=("$1"); shift ;;
   esac
 done
@@ -321,7 +327,7 @@ def host(tmp_path: Path) -> Host:
     base = tmp_path / "host"
     h = Host(base=base, bash=bash)
     for name, body in STUBS.items():
-        _write(base / "bin" / name, "#!/usr/bin/env bash\n" + body)
+        _write(base / "bin" / name, "#!/usr/bin/env bash\n" + _LOG + body)
     _write(base / "driver.sh", DRIVER)
     h.set_os("ubuntu-24.04")
     _write(
@@ -458,3 +464,197 @@ def test_real_mode_requires_root(host: Host) -> None:
     assert proc.returncode != 0
     assert "root" in proc.stderr.lower()
     assert host.mutations() == []
+
+
+# --- Task 2: Docker repository, trading user, ufw, SSH hardening -------------------------------
+
+DOCKER_PACKAGES = "docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+DROPIN_REL = Path("etc/ssh/sshd_config.d/00-trading-hardening.conf")
+CONFIGURED_ENV = {
+    "STUB_INSTALLED": "ALL",
+    "STUB_USER_EXISTS": "1",
+    "STUB_GROUPS": "trading docker",
+    "STUB_UFW_ACTIVE": "1",
+    "STUB_ENABLED": "chrony docker",
+    "STUB_GIT_HEAD": "0123abc",
+    "STUB_GIT_REF_COMMIT": "0123abc",
+}
+
+
+def first_index(lines: list[str], prefix: str) -> int:
+    for idx, line in enumerate(lines):
+        if line.startswith(prefix):
+            return idx
+    raise AssertionError(f"no logged call starting with {prefix!r} in:\n" + "\n".join(lines))
+
+
+def has_call(lines: list[str], prefix: str) -> bool:
+    return any(line.startswith(prefix) for line in lines)
+
+
+def real_run(host: Host, *extra: str, **env: str) -> subprocess.CompletedProcess[str]:
+    return host.run(host.args(*extra), env=dict(env))
+
+
+@pytest.mark.parametrize(
+    ("release", "distro", "codename"),
+    [("ubuntu-24.04", "ubuntu", "noble"), ("debian-12", "debian", "bookworm")],
+)
+def test_docker_repository_is_written_in_deb822_form(
+    host: Host, release: str, distro: str, codename: str
+) -> None:
+    host.set_os(release)
+    proc = real_run(host)
+    assert proc.returncode == 0, proc.stderr
+    sources = host.root / "etc" / "apt" / "sources.list.d" / "docker.sources"
+    assert sources.read_text(encoding="utf-8") == (
+        "Types: deb\n"
+        f"URIs: https://download.docker.com/linux/{distro}\n"
+        f"Suites: {codename}\n"
+        "Components: stable\n"
+        "Architectures: amd64\n"
+        "Signed-By: /etc/apt/keyrings/docker.asc\n"
+    )
+    lines = host.log_lines()
+    gpg_url = f"download.docker.com/linux/{distro}/gpg"
+    assert any(gpg_url in ln for ln in lines if ln.startswith("curl"))
+    assert (host.root / "etc" / "apt" / "keyrings" / "docker.asc").is_file()
+    assert has_call(lines, f"apt-get install -y {DOCKER_PACKAGES}")
+
+
+def test_docker_step_is_a_noop_when_repo_and_packages_are_present(host: Host) -> None:
+    assert real_run(host).returncode == 0
+    host.log.unlink()
+    proc = real_run(host, **CONFIGURED_ENV)
+    assert proc.returncode == 0, proc.stderr
+    lines = host.log_lines()
+    assert not has_call(lines, "curl")
+    assert not any("docker" in ln for ln in lines if ln.startswith("apt-get"))
+    assert "docker.sources" not in proc.stdout
+
+
+def test_user_step_creates_user_group_and_keys(host: Host) -> None:
+    proc = real_run(host)
+    assert proc.returncode == 0, proc.stderr
+    lines = host.log_lines()
+    assert has_call(lines, "useradd --create-home --shell /bin/bash trading")
+    assert has_call(lines, "usermod -aG docker trading")
+    assert any(ln.startswith("install -d -m 0700 -o trading -g trading") for ln in lines)
+    keys = host.root / "home" / "trading" / ".ssh" / "authorized_keys"
+    assert VALID_KEY in keys.read_text(encoding="utf-8")
+    assert any(ln.startswith("chown trading:trading") and "authorized_keys" in ln for ln in lines)
+
+
+def test_user_step_skips_existing_user_and_docker_membership(host: Host) -> None:
+    proc = real_run(host, **CONFIGURED_ENV)
+    assert proc.returncode == 0, proc.stderr
+    lines = host.log_lines()
+    assert not has_call(lines, "useradd")
+    assert not has_call(lines, "usermod")
+
+
+def test_user_step_adds_group_only_when_user_exists_without_it(host: Host) -> None:
+    proc = real_run(host, STUB_USER_EXISTS="1", STUB_GROUPS="trading")
+    assert proc.returncode == 0, proc.stderr
+    lines = host.log_lines()
+    assert not has_call(lines, "useradd")
+    assert has_call(lines, "usermod -aG docker trading")
+
+
+def test_existing_authorized_keys_are_kept_when_new_keys_are_merged(host: Host) -> None:
+    existing = host.root / "home" / "trading" / ".ssh" / "authorized_keys"
+    _write(existing, "ssh-rsa AAAAB3NzaC1yc2EOLDKEYxxxxxxxxxxxxxxxxxxxxxxxxxxxx old@box\n")
+    proc = real_run(host)
+    assert proc.returncode == 0, proc.stderr
+    text = existing.read_text(encoding="utf-8")
+    assert "old@box" in text
+    assert VALID_KEY in text
+
+
+def test_ufw_allows_the_effective_ssh_port_before_enabling(host: Host) -> None:
+    proc = real_run(host, STUB_SSH_PORT="2222")
+    assert proc.returncode == 0, proc.stderr
+    lines = host.log_lines()
+    allow = first_index(lines, "ufw allow 2222/tcp")
+    enable = first_index(lines, "ufw --force enable")
+    assert first_index(lines, "ufw default deny incoming") < enable
+    assert first_index(lines, "ufw default allow outgoing") < enable
+    assert allow < enable
+    assert not has_call(lines, "ufw allow 22/tcp")
+
+
+def test_ufw_runs_after_the_user_step_and_before_the_ssh_drop_in(host: Host) -> None:
+    assert real_run(host).returncode == 0
+    lines = host.log_lines()
+    assert first_index(lines, "usermod") < first_index(lines, "ufw --force enable")
+    assert first_index(lines, "ufw --force enable") < first_index(lines, "sshd -t")
+
+
+def test_ufw_is_a_noop_when_already_active_with_the_rule(host: Host) -> None:
+    proc = real_run(host, **CONFIGURED_ENV)
+    assert proc.returncode == 0, proc.stderr
+    lines = host.log_lines()
+    assert not any(ln.startswith("ufw") and not ln.startswith("ufw status") for ln in lines)
+
+
+def test_ssh_drop_in_is_written_validated_asserted_and_reloaded(host: Host) -> None:
+    proc = real_run(host)
+    assert proc.returncode == 0, proc.stderr
+    content = (host.root / DROPIN_REL).read_text(encoding="utf-8")
+    for line in (
+        "PasswordAuthentication no",
+        "KbdInteractiveAuthentication no",
+        "PermitRootLogin no",
+        "PubkeyAuthentication yes",
+    ):
+        assert line in content.splitlines()
+    lines = host.log_lines()
+    validate = first_index(lines, "sshd -t")
+    reload_ = first_index(lines, "systemctl try-reload-or-restart ssh")
+    effective = max(i for i, ln in enumerate(lines) if ln.startswith("sshd -T"))
+    assert validate < effective < reload_
+    assert "second ssh session" in (proc.stdout + proc.stderr).lower()
+
+
+def test_ssh_step_refuses_without_the_include_line(host: Host) -> None:
+    _write(host.root / "etc" / "ssh" / "sshd_config", "Port 22\nUsePAM yes\n")
+    proc = real_run(host)
+    assert proc.returncode != 0
+    assert "include" in proc.stderr.lower()
+    assert not (host.root / DROPIN_REL).exists()
+    assert not has_call(host.log_lines(), "systemctl try-reload-or-restart")
+
+
+def test_ssh_drop_in_is_removed_when_the_effective_config_is_not_hardened(host: Host) -> None:
+    proc = real_run(host, STUB_SSHD_IGNORE_DROPIN="1")
+    assert proc.returncode != 0
+    assert "passwordauthentication" in proc.stderr.lower()
+    assert not (host.root / DROPIN_REL).exists()
+    assert not has_call(host.log_lines(), "systemctl try-reload-or-restart")
+
+
+def test_ssh_drop_in_is_removed_when_sshd_t_fails(host: Host) -> None:
+    proc = real_run(host, STUB_SSHD_T_RC="1")
+    assert proc.returncode != 0
+    assert not (host.root / DROPIN_REL).exists()
+    assert not has_call(host.log_lines(), "systemctl try-reload-or-restart")
+
+
+def test_second_run_announces_no_host_mutation_for_the_hardening_steps(host: Host) -> None:
+    assert real_run(host).returncode == 0
+    host.log.unlink()
+    proc = real_run(host, **CONFIGURED_ENV)
+    assert proc.returncode == 0, proc.stderr
+    for marker in (
+        "apt-get update",
+        "ca-certificates",
+        "docker",
+        "useradd",
+        "usermod",
+        "ufw",
+        "sshd",
+        "00-trading-hardening",
+        "authorized_keys",
+        "try-reload",
+    ):
+        assert marker not in proc.stdout, f"second run announced {marker!r}:\n{proc.stdout}"
