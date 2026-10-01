@@ -17,22 +17,21 @@ from decimal import Decimal
 
 import pytest
 from src.core.features import (
-    _ema_series,
     _atr_series,
+    _ema_series,
     compute_features,
     ema_update,
     true_range,
 )
+from src.core.strategy import evaluate
 from src.core.types import (
     REASON_GAP_IN_SOURCE,
     REASON_WARMUP_INSUFFICIENT,
     AccountState,
     Candle,
-    FeatureOutput,
     MarketSnapshot,
 )
 from src.domain.registry import ParameterSet, load_parameter_set
-from src.core.strategy import evaluate
 
 # --------------------------------------------------------------------------- #
 # Candle builder — produces deterministic, Decimal-only candles.

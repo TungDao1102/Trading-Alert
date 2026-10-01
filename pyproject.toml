@@ -76,6 +76,11 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B011"]  # asserts are fine in tests
 "src/adapters/binance_usdm.py" = ["E501"]  # SDK signature table in docstring is inherently long
+# F841: risk logic is not edited in the infrastructure phase 13.1. warning_threshold_quote and
+# stop_threshold_quote are assigned in check_portfolio and never read afterwards (the thresholds
+# are consumed earlier, by _derive_daily_state). Surfaced to the user as a possible latent
+# daily-loss gating gap (D-18); remove this ignore when the risk code is next touched.
+"src/risk/portfolio.py" = ["F841"]
 
 [tool.mypy]
 python_version = "3.13"

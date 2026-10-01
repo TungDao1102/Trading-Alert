@@ -46,7 +46,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from src.domain.journal import JournalEvent
@@ -534,7 +534,6 @@ def make_orphan_drill(
         position_verifier: Caller-supplied function returning the
             current position amount for a symbol.
     """
-    import asyncio
 
     def inject() -> str:
         return (
@@ -874,7 +873,6 @@ def make_restore_drill(
             raise AssertionError("restore drill: expected controller in SAFE_MODE after enter")
         # Step 2: exit SAFE_MODE via the controller's exit path. The
         # fake adapter must return a clean truth (zero divergences).
-        import asyncio
 
         # The exit path is async; tests inject a clean adapter so the
         # controller's compare yields agreement=True.

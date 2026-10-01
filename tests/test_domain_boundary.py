@@ -8,7 +8,7 @@ has been replaced with real `compute_features` + `evaluate` calls.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -63,7 +63,7 @@ def _make_candle(
 
 def _build_1h_candles(n: int) -> list[Candle]:
     """Build n closed 1H candles with a steady uptrend."""
-    base = datetime(2026, 9, 18, 0, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 9, 18, 0, 0, 0, tzinfo=UTC)
     rows: list[Candle] = []
     for i in range(n):
         close = Decimal("50000.00") + Decimal(str(i * 10))
@@ -85,7 +85,7 @@ def _build_1h_candles(n: int) -> list[Candle]:
 
 def _build_4h_candles(n: int) -> list[Candle]:
     """Build n closed 4H candles with a steady uptrend."""
-    base = datetime(2026, 9, 18, 0, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 9, 18, 0, 0, 0, tzinfo=UTC)
     rows: list[Candle] = []
     for i in range(n):
         close = Decimal("50000.00") + Decimal(str(i * 30))

@@ -13,7 +13,7 @@ they don't interfere with the existing 250-bar 1H + 250-bar 4H series.
 from __future__ import annotations
 
 import csv
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -28,7 +28,7 @@ def _build_gap_block() -> list[dict]:
     after the gap. The gap means features spanning it must report
     GAP_IN_SOURCE.
     """
-    base = datetime(2026, 10, 21, 0, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 10, 21, 0, 0, 0, tzinfo=UTC)
     rows: list[dict] = []
     for i in range(10):
         if i >= 5:
@@ -37,7 +37,6 @@ def _build_gap_block() -> list[dict]:
         else:
             offset = i
         open_time = base + timedelta(hours=offset)
-        close_time = open_time + timedelta(hours=1) - timedelta(seconds=1)
         close = Decimal("63000.00") + Decimal(str(i * 10))
         rows.append(
             {
@@ -60,11 +59,10 @@ def _build_warmup_short_block() -> list[dict]:
     With only 50 bars, EMA200(1H) is WARMUP_INSUFFICIENT. The strategy
     must NO_TRADE with WARMUP_INSUFFICIENT.
     """
-    base = datetime(2026, 10, 22, 0, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 10, 22, 0, 0, 0, tzinfo=UTC)
     rows: list[dict] = []
     for i in range(50):
         open_time = base + timedelta(hours=i)
-        close_time = open_time + timedelta(hours=1) - timedelta(seconds=1)
         close = Decimal("64000.00") + Decimal(str(i * 10))
         rows.append(
             {
@@ -88,7 +86,7 @@ def _build_setup_window_1h() -> list[dict]:
     20 bars of pullback, 1 swing-low bar, 8 bars of slow recovery,
     1 reversal confirmation bar at index 249.
     """
-    base = datetime(2026, 10, 25, 0, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 10, 25, 0, 0, 0, tzinfo=UTC)
     rows: list[dict] = []
     for i in range(250):
         if i < 190:
@@ -104,7 +102,6 @@ def _build_setup_window_1h() -> list[dict]:
         else:
             close = Decimal("66620.00")
         open_time = base + timedelta(hours=i)
-        close_time = open_time + timedelta(hours=1) - timedelta(seconds=1)
         rows.append(
             {
                 "symbol": "BTCUSDT",
@@ -128,12 +125,11 @@ def _build_setup_window_4h() -> list[dict]:
     The 4H close prices continue the existing uptrend pattern
     (65000 + i*50 + 30) so the EMA50(4H) stays valid (no GAP_IN_SOURCE).
     """
-    base = datetime(2026, 10, 20, 16, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 10, 20, 16, 0, 0, tzinfo=UTC)
     rows: list[dict] = []
     for i in range(250):
         close = Decimal("65000.00") + Decimal(str(i * 50 + 30))
         open_time = base + timedelta(hours=4 * i)
-        close_time = open_time + timedelta(hours=4) - timedelta(seconds=1)
         rows.append(
             {
                 "symbol": "BTCUSDT",

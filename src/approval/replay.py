@@ -22,6 +22,7 @@ key), runs the fixed-order binding gate, and either:
 
 from __future__ import annotations
 
+import threading as _threading
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
@@ -50,9 +51,7 @@ SaveApproval = Callable[["Approval"], None]
 # performs the PENDING->decided transition. Cross-process races still
 # need a conditional write (UPDATE ... WHERE status='PENDING') at the
 # store layer — the receiver treats a 0-row conditional update as
-# replay-return-existing.
-import threading as _threading
-
+# replay-return-existing. (`threading` is imported at the top of the module.)
 _TOKEN_LOCKS: dict[str, _threading.Lock] = {}
 _TOKEN_LOCKS_GUARD = _threading.Lock()
 

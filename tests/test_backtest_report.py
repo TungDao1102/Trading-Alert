@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -56,8 +56,8 @@ def _make_experiment_record() -> object:
         data_snapshot_id="0" * 64,
         code_version="06-03-red",
         cost_model_hash="0" * 64,
-        time_range_start_utc=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        time_range_end_utc=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        time_range_start_utc=datetime(2026, 1, 1, tzinfo=UTC),
+        time_range_end_utc=datetime(2026, 5, 1, tzinfo=UTC),
         universe_hash="0" * 64,
         run_type="CANDIDATE",
         result_summary_json="{}",
@@ -91,7 +91,7 @@ def _build_report(
     )
 
 
-_FIXED_BUILT_AT_UTC = datetime(2026, 9, 26, 12, 0, 0, tzinfo=timezone.utc)
+_FIXED_BUILT_AT_UTC = datetime(2026, 9, 26, 12, 0, 0, tzinfo=UTC)
 
 
 # --------------------------------------------------------------------------- #
@@ -550,7 +550,7 @@ def _gap_trades_four() -> list:
 
 def test_cr08_build_requires_explicit_built_at_utc() -> None:
     """CR-08: build() requires explicit built_at_utc (missing/None/naive fail)."""
-    from src.backtest.report import ReportBuildError, build
+    from src.backtest.report import build
 
     record = _make_experiment_record()
     trades = _gap_trades_four()[:2]
@@ -561,7 +561,7 @@ def test_cr08_build_requires_explicit_built_at_utc() -> None:
             trade_records=trades,
             bootstrap_seed=_GAP_SEED,
         )
-    with pytest.raises(Exception):
+    with pytest.raises(AttributeError):  # None has no .tzinfo
         build(
             experiment_record=record,
             trade_records=trades,

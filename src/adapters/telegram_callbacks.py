@@ -43,7 +43,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.adapters.telegram_notify import (
     APR_PREFIX,
@@ -60,7 +60,6 @@ from src.approval.replay import resolve_callback
 from src.domain.approval import Approval
 from src.domain.enums import ApprovalAction, RejectionReason
 from src.domain.journal import JournalEvent
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from telegram import InlineKeyboardMarkup, Update
