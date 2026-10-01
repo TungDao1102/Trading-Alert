@@ -17,6 +17,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from tests.infra_helpers import compose_cli_available, infra_skip
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -34,7 +36,8 @@ def _require_compose() -> None:
 
 
 def _write_project(tmp_path: Path, overrides: dict[str, str] | None = None) -> Path:
-    project = tmp_path / "project"
+    # Unique per call: one test may render several projects (different profiles or env).
+    project = tmp_path / f"project-{secrets.token_hex(3)}"
     project.mkdir()
     shutil.copyfile(COMPOSE_FILE, project / "docker-compose.yml")
     # The build context only has to exist for `config`; its content is irrelevant here.
@@ -166,9 +169,12 @@ def test_all_volume_mounts_are_named_volumes_never_binds(tmp_path: Path) -> None
 
 
 def test_declared_volumes_are_only_the_four_named_volumes(tmp_path: Path) -> None:
-    # `config` drops volumes no enabled service uses, so the default stack shows three.
+    # `config` drops volumes no enabled service uses, so the default stack shows three and
+    # the ops profile (backup, ops) brings in backupdata.
     declared = set(compose_config(tmp_path)["volumes"])
-    assert {"pgdata", "rawdata", "logs"} <= declared <= {"pgdata", "rawdata", "backupdata", "logs"}
+    assert declared == {"pgdata", "rawdata", "logs"}
+    all_declared = set(compose_config(tmp_path, profiles=("paper", "live", "ops"))["volumes"])
+    assert all_declared == {"pgdata", "rawdata", "backupdata", "logs"}
 
 
 def test_collector_healthcheck_is_the_exec_form_venv_probe(tmp_path: Path) -> None:
@@ -218,3 +224,104 @@ def test_missing_postgres_credentials_fail_config(tmp_path: Path) -> None:
     proc = _run_config(project)
     assert proc.returncode != 0
     assert "POSTGRES_PASSWORD" in proc.stderr
+
+
+DEFAULT = {"postgres", "db-upgrade", "collector"}
+
+
+@pytest.mark.parametrize(
+    ("profiles", "extra"),
+    [
+        ((), set()),
+        (("paper",), {"paper"}),
+        (("live",), {"live"}),
+        (("ops",), {"backup", "ops"}),
+        (("paper", "live", "ops"), {"paper", "live", "backup", "ops"}),
+    ],
+)
+def test_profiles_add_exactly_their_services(
+    tmp_path: Path, profiles: tuple[str, ...], extra: set[str]
+) -> None:
+    services = _services(compose_config(tmp_path, profiles=profiles))
+    assert set(services) == DEFAULT | extra
+
+
+@pytest.mark.parametrize(("service", "phase"), [("paper", "Phase 16"), ("live", "Phase 24")])
+def test_placeholders_fail_fast_naming_the_owning_phase(
+    tmp_path: Path, service: str, phase: str
+) -> None:
+    svc = _services(compose_config(tmp_path, profiles=(service,)))[service]
+    assert svc["restart"] == "no"
+    assert svc["healthcheck"] == {"disable": True}
+    command = svc["command"]
+    assert command[0] == "/app/.venv/bin/python"
+    assert any("SystemExit" in part and phase in part for part in command)
+    assert "src.data.collector" not in " ".join(command)
+
+
+def test_backup_service_runs_the_scheduled_cli_from_the_ops_image(tmp_path: Path) -> None:
+    services = _services(compose_config(tmp_path, profiles=("ops",)))
+    backup = services["backup"]
+    assert backup["command"] == ["/app/.venv/bin/python", "-m", "src.ops.backup", "scheduled"]
+    assert backup["image"] == "trading-alert-ops:dev"
+    assert backup["build"]["target"] == "ops"
+    assert backup["restart"] == "no"
+    assert backup["healthcheck"] == {"disable": True}
+    assert backup["depends_on"]["postgres"]["condition"] == "service_healthy"
+    mounts = {m["target"]: m for m in backup["volumes"]}
+    assert set(mounts) == {"/app/data/raw", "/app/data/backup"}
+    assert mounts["/app/data/raw"]["source"] == "rawdata"
+    assert mounts["/app/data/raw"].get("read_only") is True
+    assert mounts["/app/data/backup"]["source"] == "backupdata"
+    assert not mounts["/app/data/backup"].get("read_only")
+    env = backup["environment"]
+    assert "@postgres:5432/" in env["DATABASE_URL"]
+
+
+def test_ops_service_is_a_toolbox_on_the_ops_image(tmp_path: Path) -> None:
+    services = _services(compose_config(tmp_path, profiles=("ops",)))
+    ops = services["ops"]
+    assert ops["image"] == "trading-alert-ops:dev"
+    # Exactly one service owns the ops build.
+    assert "build" not in ops
+    assert ops["restart"] == "no"
+    assert ops["healthcheck"] == {"disable": True}
+    mounts = {m["target"]: m["source"] for m in ops["volumes"]}
+    assert mounts == {
+        "/app/data/raw": "rawdata",
+        "/app/data/backup": "backupdata",
+        "/app/logs": "logs",
+    }
+    assert ops["command"][:3] == ["/app/.venv/bin/python", "-m", "src.ops.backup"]
+    assert "@postgres:5432/" in ops["environment"]["DATABASE_URL"]
+
+
+def test_every_service_rotates_json_logs(tmp_path: Path) -> None:
+    services = _services(compose_config(tmp_path, profiles=("paper", "live", "ops")))
+    for name, svc in services.items():
+        logging = svc["logging"]
+        assert logging["driver"] == "json-file", name
+        assert logging["options"]["max-size"], name
+        assert logging["options"]["max-file"], name
+
+
+def test_every_app_service_has_init_and_a_stop_grace_period(tmp_path: Path) -> None:
+    services = _services(compose_config(tmp_path, profiles=("paper", "live", "ops")))
+    for name, svc in services.items():
+        if name == "postgres":
+            continue
+        assert svc["init"] is True, name
+        assert svc["stop_grace_period"] == "30s", name
+
+
+def test_every_service_has_its_own_healthcheck_decision(tmp_path: Path) -> None:
+    services = _services(compose_config(tmp_path, profiles=("paper", "live", "ops")))
+    for name, svc in services.items():
+        assert "healthcheck" in svc, f"{name} must state a healthcheck decision explicitly"
+
+
+def test_profile_services_need_no_backup_or_live_variables(tmp_path: Path) -> None:
+    # Only the four POSTGRES_* variables are present in the temp .env; interpolation of
+    # profile-gated services must not require anything else (research finding 6).
+    config = compose_config(tmp_path, profiles=("paper", "live", "ops"))
+    assert set(config["services"]) == DEFAULT | {"paper", "live", "backup", "ops"}
