@@ -1387,3 +1387,358 @@ async def test_legacy_modeled_costs_per_unit_keyword_raises_type_error() -> None
     with pytest.raises(TypeError, match="modeled_costs_per_unit"):
         await _run_plan(adapter, risk_kwargs=risk_kwargs)
     assert adapter.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Phase 17 plan 11 — identity-before-replay, SL write-ahead, fail-closed store
+# handling (D-14, D-15, D-16, F-703, F-951).
+# --------------------------------------------------------------------------- #
+
+
+def _binding_args(**overrides: Any) -> dict[str, Any]:
+    case_input = _load_input()
+    args: dict[str, Any] = {
+        "callback": _build_callback(case_input),
+        "approval": _build_approval(case_input),
+        "authorized_chat_id": case_input["chat_id"],
+        "approval_strategy_version": case_input["strategy_version"],
+        "approval_parameter_set_id": case_input["parameter_set_id"],
+        "approval_parameter_set_hash": case_input["parameter_set_hash"],
+    }
+    args.update(overrides)
+    return args
+
+
+def _placement_calls(adapter: FakeExecutionAdapter) -> list[str]:
+    return [
+        c["method"]
+        for c in adapter.calls
+        if c["method"] in ("place_entry", "place_algo_protective")
+    ]
+
+
+def _entry_calls(adapter: FakeExecutionAdapter) -> int:
+    return len([c for c in adapter.calls if c["method"] == "place_entry"])
+
+
+def test_check_binding_identity_passes_a_valid_callback_without_looking_at_expiry() -> None:
+    from src.approval.binding import check_binding_identity
+
+    result = check_binding_identity(**_binding_args())
+    assert result.ok is True
+    assert result.reason_code is None
+
+
+def test_check_binding_identity_wrong_chat_is_invalidated_first() -> None:
+    import dataclasses
+
+    from src.approval.binding import check_binding_identity
+    from src.domain.enums import RejectionReason
+
+    case_input = _load_input()
+    # A wrong chat AND a wrong hash: the chat gate runs before anything else.
+    callback = dataclasses.replace(_build_callback(case_input), plan_hash="4" * 64)
+    result = check_binding_identity(
+        **_binding_args(callback=callback, authorized_chat_id=case_input["chat_id"] + 1)
+    )
+    assert result.ok is False
+    assert result.reason_code == RejectionReason.INVALIDATED
+
+
+def test_check_binding_identity_hash_version_and_token_mismatches() -> None:
+    import dataclasses
+
+    from src.approval.binding import check_binding_identity
+    from src.domain.enums import RejectionReason
+
+    callback = _build_callback(_load_input())
+    stale = check_binding_identity(
+        **_binding_args(callback=dataclasses.replace(callback, plan_hash="4" * 64))
+    )
+    assert (stale.ok, stale.reason_code) == (False, RejectionReason.STALE_SETUP)
+
+    for field, value in (
+        ("strategy_version", "other-version"),
+        ("parameter_set_id", "other-set"),
+        ("parameter_set_hash", "5" * 64),
+        ("raw_token", "not-the-token"),
+    ):
+        result = check_binding_identity(
+            **_binding_args(callback=dataclasses.replace(callback, **{field: value}))
+        )
+        assert (result.ok, result.reason_code) == (False, RejectionReason.INVALIDATED), field
+
+
+async def test_replay_after_expiry_returns_the_stored_outcome_with_zero_adapter_calls() -> None:
+    """D-15/D-16 (Open Q2): the stored outcome is looked up BEFORE the expiry gate."""
+    case_input = _load_input()
+    store = InMemoryExecutionIntentStore()
+    first = await _run_plan(FakeExecutionAdapter(), intent_store=store)
+    assert first.is_no_trade is False
+
+    late = _parse_utc(case_input["expiry_utc"]) + timedelta(hours=1)
+    risk_kwargs = _build_risk_kwargs(case_input)
+    risk_kwargs["now_utc"] = late
+    replay_adapter = FakeExecutionAdapter()
+    replay = await _run_plan(
+        replay_adapter, intent_store=store, now_utc=late, risk_kwargs=risk_kwargs
+    )
+
+    assert replay == first
+    assert replay_adapter.calls == []
+
+
+async def test_expiry_still_rejects_when_nothing_was_stored() -> None:
+    case_input = _load_input()
+    late = _parse_utc(case_input["expiry_utc"]) + timedelta(seconds=1)
+    risk_kwargs = _build_risk_kwargs(case_input)
+    risk_kwargs["now_utc"] = late
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(adapter, now_utc=late, risk_kwargs=risk_kwargs)
+    assert outcome.reason_code == "APPROVAL_EXPIRED"
+    assert adapter.calls == []
+
+
+async def test_stored_outcome_is_not_revealed_to_a_wrong_token_or_wrong_chat() -> None:
+    """D-16: identity runs before the lookup, so a stranger gets INVALIDATED."""
+    import dataclasses
+
+    case_input = _load_input()
+    store = InMemoryExecutionIntentStore()
+    await _run_plan(FakeExecutionAdapter(), intent_store=store)
+
+    bad_token = dataclasses.replace(_build_callback(case_input), raw_token="not-the-token")
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(adapter, intent_store=store, callback=bad_token)
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "INVALIDATED")
+    assert adapter.calls == []
+
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter, intent_store=store, authorized_chat_id=case_input["chat_id"] + 1
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "INVALIDATED")
+    assert adapter.calls == []
+
+
+async def test_store_unavailable_on_lookup_fails_closed_with_zero_adapter_calls() -> None:
+    from src.persistence.errors import StoreUnavailable
+
+    from tests.support.intent_store_fakes import FailingIntentStore
+
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter, intent_store=FailingIntentStore("get_entry", StoreUnavailable("down"))
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    assert adapter.calls == []
+
+
+async def test_store_unavailable_at_consume_places_nothing() -> None:
+    from src.persistence.errors import StoreUnavailable
+
+    from tests.support.intent_store_fakes import FailingIntentStore
+
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter,
+        intent_store=FailingIntentStore("consume_and_record_entry_intent", StoreUnavailable("x")),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    assert _placement_calls(adapter) == []
+
+
+async def test_second_approval_of_the_same_plan_is_invalidated_without_placement() -> None:
+    """IntentStateConflict at consume (a second approval for the same plan)."""
+    from src.persistence.errors import IntentStateConflict
+
+    from tests.support.intent_store_fakes import FailingIntentStore
+
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter,
+        intent_store=FailingIntentStore(
+            "consume_and_record_entry_intent", IntentStateConflict("uq_plan_role")
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "INVALIDATED")
+    assert _placement_calls(adapter) == []
+
+
+async def test_store_unavailable_at_entry_mark_sent_places_nothing() -> None:
+    from src.persistence.errors import StoreUnavailable
+
+    from tests.support.intent_store_fakes import FailingIntentStore
+
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter,
+        intent_store=FailingIntentStore("mark_sent", StoreUnavailable("down"), role="ENTRY"),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    assert _placement_calls(adapter) == []
+
+
+async def test_successful_run_stores_entry_and_stop_loss_rows() -> None:
+    from src.domain.enums import ExecutionIntentStatus
+    from src.execution.order_ids import derive_algo_client_id
+
+    case_input = _load_input()
+    store = InMemoryExecutionIntentStore()
+    outcome = await _run_plan(FakeExecutionAdapter(), intent_store=store)
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+
+    entry = store.get_intent(approval_id=case_input["approval_id"], role="ENTRY")
+    stop_loss = store.get_intent(approval_id=case_input["approval_id"], role="STOP_LOSS")
+    assert entry is not None and stop_loss is not None
+    assert entry.intent_status == ExecutionIntentStatus.ACKED
+    assert entry.outcome is not None
+    assert (entry.outcome.is_no_trade, entry.outcome.reason_code) == (False, "OK")
+    assert stop_loss.intent_status == ExecutionIntentStatus.ACKED
+    assert stop_loss.algo_client_id == derive_algo_client_id(
+        plan_hash=case_input["plan_hash"], role="STOP_LOSS"
+    )
+    assert stop_loss.client_order_id is None
+    assert stop_loss.intended_quantity is None
+    assert stop_loss.side == "SELL"
+    assert stop_loss.outcome is None
+
+
+async def test_store_down_after_entry_ack_enters_safe_mode_and_still_places_the_sl() -> None:
+    """Planner decision for D051: protection outranks the audit row (D034)."""
+    from src.execution.order_ids import derive_algo_client_id
+    from src.persistence.errors import StoreUnavailable
+
+    from tests.support.intent_store_fakes import FailingIntentStore
+
+    case_input = _load_input()
+    adapter = FakeExecutionAdapter()
+    safe_mode = RecordingSafeModeController()
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        intent_store=FailingIntentStore("record_protective_intent", StoreUnavailable("down")),
+    )
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    assert safe_mode.entered_reasons == ["DB_FAILURE"]
+    sl_calls = [c for c in adapter.calls if c["method"] == "place_algo_protective"]
+    assert len(sl_calls) == 1
+    assert sl_calls[0]["kwargs"]["client_algo_id"] == derive_algo_client_id(
+        plan_hash=case_input["plan_hash"], role="STOP_LOSS"
+    )
+    assert "cancel_normal_order" not in [c["method"] for c in adapter.calls]
+
+
+async def test_store_down_when_recording_the_entry_ack_still_places_the_sl() -> None:
+    from src.persistence.errors import StoreUnavailable
+
+    from tests.support.intent_store_fakes import FailingIntentStore
+
+    adapter = FakeExecutionAdapter()
+    safe_mode = RecordingSafeModeController()
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        intent_store=FailingIntentStore("record_result", StoreUnavailable("down"), role="ENTRY"),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    assert safe_mode.entered_reasons == ["DB_FAILURE"]
+    assert len([c for c in adapter.calls if c["method"] == "place_algo_protective"]) == 1
+
+
+async def test_store_down_and_sl_unconfirmed_still_cancels_the_entry() -> None:
+    from src.persistence.errors import StoreUnavailable
+
+    from tests.support.intent_store_fakes import FailingIntentStore
+
+    adapter = FakeExecutionAdapter(algo_response={"algo_status": "REJECTED"})
+    safe_mode = RecordingSafeModeController()
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        intent_store=FailingIntentStore("record_protective_intent", StoreUnavailable("down")),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    assert safe_mode.entered_reasons == ["DB_FAILURE", "ENTRY_WITHOUT_PROTECTIVE"]
+    assert [c["method"] for c in adapter.calls][-1] == "cancel_normal_order"
+
+
+async def test_unconfirmed_sl_leaves_the_stop_loss_row_unknown() -> None:
+    from src.domain.enums import ExecutionIntentStatus
+
+    case_input = _load_input()
+    store = InMemoryExecutionIntentStore()
+    adapter = FakeExecutionAdapter(algo_response={"algo_status": "REJECTED"})
+    safe_mode = RecordingSafeModeController()
+    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode, intent_store=store)
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "ENTRY_WITHOUT_PROTECTIVE")
+    assert safe_mode.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
+    assert [c["method"] for c in adapter.calls][-1] == "cancel_normal_order"
+    stop_loss = store.get_intent(approval_id=case_input["approval_id"], role="STOP_LOSS")
+    assert stop_loss is not None
+    assert stop_loss.intent_status == ExecutionIntentStatus.UNKNOWN
+    entry = store.get_entry(approval_id=case_input["approval_id"])
+    assert entry is not None and entry.outcome is not None
+    assert entry.outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
+
+
+async def test_a_simulated_crash_propagates_unchanged() -> None:
+    import pytest
+
+    from tests.support.intent_store_fakes import CrashAfter, SimulatedCrash
+
+    for step in ("consume", "entry_sent", "entry_result", "sl_intent", "sl_sent", "sl_result"):
+        store = CrashAfter(InMemoryExecutionIntentStore(), step=step)
+        with pytest.raises(SimulatedCrash):
+            await _run_plan(FakeExecutionAdapter(), intent_store=store)
+
+
+async def test_restart_after_a_crash_never_resends_the_entry() -> None:
+    import pytest
+
+    from tests.support.intent_store_fakes import CrashAfter, SimulatedCrash
+
+    case_input = _load_input()
+    for step, entry_calls in (
+        ("consume", 0),
+        ("entry_sent", 0),
+        ("entry_result", 1),
+        ("sl_intent", 1),
+        ("sl_sent", 1),
+        ("sl_result", 1),
+    ):
+        inner = InMemoryExecutionIntentStore()
+        adapter = FakeExecutionAdapter()
+        with pytest.raises(SimulatedCrash):
+            await _run_plan(adapter, intent_store=CrashAfter(inner, step=step))
+        assert _entry_calls(adapter) == entry_calls, step
+        assert inner.get_entry(approval_id=case_input["approval_id"]) is not None
+
+        restarted = await _run_plan(adapter, intent_store=inner)
+        assert (restarted.is_no_trade, restarted.reason_code) == (
+            True,
+            "RECONCILIATION_REQUIRED",
+        ), step
+        assert _entry_calls(adapter) == entry_calls, step
+
+
+def test_intent_status_changes_go_through_the_transition_tables() -> None:
+    root = Path(__file__).parent.parent
+    pg_source = (root / "src" / "persistence" / "execution_state.py").read_text(encoding="utf-8")
+    protocol_source = (root / "src" / "execution" / "intent_store.py").read_text(encoding="utf-8")
+    assert "TransitionKind.EXECUTION_INTENT" in pg_source
+    assert "ALLOWED_PREDECESSORS" not in pg_source
+    assert "ALLOWED_PREDECESSORS" not in protocol_source
+
+
+def test_order_ids_do_not_claim_exchange_side_deduplication() -> None:
+    """D-13, F-951, research C18: the persisted intent is the duplicate-entry guard."""
+    source = (Path(__file__).parent.parent / "src" / "execution" / "order_ids.py").read_text(
+        encoding="utf-8"
+    )
+    lowered = source.lower()
+    assert "dedupe retries" not in lowered
+    assert "impossible by construction" not in lowered
+    assert "open orders" in lowered
