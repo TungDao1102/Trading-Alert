@@ -79,11 +79,33 @@ SAFE_MODE
 → continue only when unique execution intent is established
 ```
 
+Phase 17 (D051): the authority for "was this approval executed" is PostgreSQL, not the exchange and not Telegram. The exchange cannot tell you whether an entry was replayed, because Binance treats a client order id as unique only among open orders (`EXECUTION_SPEC.md` section 7). Two things record it, and both are read with read-only `SELECT` statements (use `psql` against the stack's PostgreSQL with the user and database from `.env`; never `UPDATE` or `DELETE` these tables by hand):
+
+```sql
+-- the approval and its consumption state
+SELECT approval_id, trade_plan_id, status, consumption_status, consumed_at_utc
+  FROM approvals WHERE trade_plan_id = '<trade plan id>';
+
+-- the write-ahead intent rows of the plan, one per role
+SELECT role, intent_status, client_order_id, algo_client_id, exchange_order_id,
+       outcome_recorded, outcome_is_no_trade, outcome_reason_code, intended_at_utc, sent_at_utc
+  FROM execution_intents WHERE trade_plan_id = '<trade plan id>' ORDER BY role;
+
+-- every intent that is not resolved
+SELECT approval_id, role, intent_status, intended_at_utc
+  FROM execution_intents WHERE intent_status IN ('INTENDED', 'SENT', 'UNKNOWN')
+ ORDER BY intended_at_utc;
+```
+
+How to read them: `approvals.consumption_status = CONSUMED` means the approval reached order placement, and exactly one ENTRY row exists for it (the database allows only one per plan). `ACKED` means the exchange accepted the leg, `REJECTED` that it definitively did not, and `INTENDED`, `SENT` or `UNKNOWN` that the entry may or may not exist on the exchange: query Binance by the `client_order_id` (ENTRY) or `algo_client_id` (protective legs) shown in the row, and do not approve again. A plan whose approval is `UNCONSUMED` has not placed anything; a NO_TRADE decided before placement leaves it retryable until the plan expires. After a restart the system itself resolves in-flight intents by the same deterministic-id query and enters SAFE_MODE with reason `UNRESOLVED_EXECUTION_INTENT` when it cannot (section 9); that startup wiring is built in Phase 20 and 24.
+
 ## 6. Telegram callback replay
 
 A repeated callback for the same approval token must return the current state.
 
 It must never create another execution intent.
+
+Phase 17 (D051): a replayed or redelivered APPROVE returns the stored approval and, for an executed plan, the stored execution outcome with zero Binance calls, also after a restart, because both are read from `approvals` and `execution_intents`. A redelivery of the same Telegram `callback_query.id` writes no second journal row. After the plan's expiry the callback layer still answers a redelivered APPROVE with "approval expired" even when the plan was executed (the callback layer keeps its expiry gate and does not read the intent rows); check `execution_intents` (section 5) before concluding that nothing was placed.
 
 ## 7. Market feed stale
 
@@ -127,6 +149,10 @@ SAFE_MODE
 → restore DB or switch to read-only monitoring
 → reconcile after recovery
 ```
+
+Phase 17 (D051): the PostgreSQL stores fail closed. A store that cannot reach the database raises a typed error instead of falling back to memory. Before an entry order is sent that is NO_TRADE: nothing is placed and the approval stays retryable. After the entry may exist, the first failed write enters SAFE_MODE with reason `DB_FAILURE` once, the protective stop-loss is still placed by its deterministic id, and the outcome is "reconciliation required". A database failure never blocks risk-reducing actions (D034).
+
+`UNRESOLVED_EXECUTION_INTENT` is the SAFE_MODE reason that restart recovery enters when an intent that was INTENDED, SENT or UNKNOWN at restart could not be resolved by querying the exchange (probe error, indeterminate answer, or the order is absent but older than the 3-day Query Order window). It means: an entry order may exist that the system cannot see. New entries stay blocked. Look up the intent (section 5), query Binance for its client id, and cancel or adopt the order by hand; do not edit the intent row. The system does not leave this SAFE_MODE by itself (the exit rules are Phase 20). Journal rows (`journal_events`), system-state rows (`system_state_events`) and plan constraint snapshots (`plan_constraint_snapshots`) are append-only: the database refuses a manual `UPDATE`, `DELETE` or `TRUNCATE` with an "append-only" error, so do not try to correct them. The table owner can disable the trigger; separating the owner role from the application role is Phase 26.
 
 ## 10. Binance API degradation
 
@@ -178,7 +204,7 @@ Retention is 7/4/6: the newest snapshot of each of the last 7 UTC days, 4 ISO we
 
 Prerequisites: the host is bootstrapped (section 13), `.env` holds the same `BACKUP_*` values (the obscured passwords are derived from the raw passphrase you kept off the VPS), and the checkout is at the version you want.
 
-`deploy/restore.sh [--snapshot ID] [--force] [--no-start] [--dry-run]`: starts only PostgreSQL; pulls the newest verified snapshot (or `--snapshot 20260930T031500Z`) into a fresh `data/backup/restore-<UTC timestamp>`; runs the refusing restore (bundle sha256 and set verification, then the empty-target checks, `pg_restore`, a never-overwriting Parquet copy into `data/raw`, `alembic upgrade head`); then starts the whole stack unless `--no-start`. It refuses a tampered bundle, a non-empty database or Parquet target unless `--force`, and aborts on any file that already exists with different content even under `--force` (raw files are immutable). Use `--no-start` to inspect the restored data before the collector runs. A failing step stops the script with that step's exit code.
+`deploy/restore.sh [--snapshot ID] [--force] [--no-start] [--dry-run]`: starts only PostgreSQL; pulls the newest verified snapshot (or `--snapshot 20260930T031500Z`) into a fresh `data/backup/restore-<UTC timestamp>`; runs the refusing restore (bundle sha256 and set verification, then the empty-target checks, `pg_restore`, a never-overwriting Parquet copy into `data/raw`, `alembic upgrade head`, which upgrades a dump taken before Phase 17 through migration 0004); then starts the whole stack unless `--no-start`. It refuses a tampered bundle, a non-empty database or Parquet target unless `--force`, and aborts on any file that already exists with different content even under `--force` (raw files are immutable). Use `--no-start` to inspect the restored data before the collector runs. A failing step stops the script with that step's exit code.
 
 ### 11.6 Restore drill
 
@@ -269,6 +295,7 @@ Commit or discard local changes (a dirty working tree is refused), make sure the
 ### 14.4 Limits to know
 
 - A rollback restores code and images only. A database **schema migration** that the newer version applied (`db-upgrade` runs `alembic upgrade head`) is **not undone**: if the older code cannot read the migrated schema, restore the pre-update backup with `deploy/restore.sh` instead (section 11.5). This is why `--skip-backup` is dangerous across a migration.
+- Phase 17 (D051): the migration `0004_persistence_integrity` (unique constraints, foreign keys, CHECKs, append-only and terminal-status triggers, `execution_intents`, `plan_constraint_snapshots`, `system_state_events`) is applied by the compose `db-upgrade` service (`alembic upgrade head`, which gates the collector), not by `deploy/migrate.sh` (that script is the provider cutover). The migration chain is proven reversible and data-safe in the tests, but a rollback of code does not run `alembic downgrade`, so the 0004 constraints and triggers stay in place; if the older code cannot work with them, restore the pre-update backup as described above.
 - Every `--ref` run overwrites `.deploy/last-good.env`. After a half-failed update, running `--ref` again records the half-updated state as the "last good" one. Always **roll back first** (or fix the cause), then update again.
 - The first state file is written only by `--ref`; `--rollback` on a host that never updated stops with "no rollback state".
 

@@ -153,6 +153,15 @@ None matched this phase.
 
 </deferred>
 
+## Post-research corrections (Phase 17 planning)
+
+Recorded by plan 17-15 after research and execution; the decisions above are not rewritten. The full list of resolutions (C1-C20) is in `17-RESEARCH.md` and in DECISIONS D051.
+
+- **C1 (D-05, D-24):** migration `0004_persistence_integrity` is applied by the compose `db-upgrade` service (`alembic upgrade head`) and by the restore path in `src/ops/backup.py` (`alembic upgrade head` after `pg_restore`), not by `deploy/migrate.sh`, which is the provider-to-provider cutover script and is untouched. Read "applied by `deploy/migrate.sh`" in D-05 and D-24 accordingly.
+- **C2 (D-13):** the `role` values are the real `OrderRole` values `ENTRY`, `STOP_LOSS`, `TAKE_PROFIT_1`, `TAKE_PROFIT_2`, not `SL`, `TP1`, `TP2`.
+- **C8 (D-16, D-21):** consumption is an explicit `approvals.consumption_status` (`UNCONSUMED` / `CONSUMED`) with `consumed_at_utc` as the nullable "never happened" timestamp, tied together by a CHECK; the ENTRY intent row is the authority. This satisfies D-16 and D-21 together.
+- **D-22:** "latest per key" is a query (`PgSystemStateStore.latest`), not a view.
+
 ---
 
 *Phase: 17-operational-persistence-layer*
