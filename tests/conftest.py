@@ -24,11 +24,14 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import structlog
+from src.ops import redaction
 
 from tests import infra_helpers
 
@@ -59,6 +62,39 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     reachable, detail = infra_helpers.docker_daemon_reachable()
     if not reachable:
         infra_helpers.infra_skip(f"docker daemon not reachable: {detail}")
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging_state() -> Iterator[None]:
+    """Undo ``configure_logging`` side effects after every test (13.1-04).
+
+    ``collector.main`` and ``backfill_cli.main`` call ``configure_logging()``; without this
+    a test running ``main()`` would change structlog, the root logger, the excepthooks and the
+    httpx levels for every later test.
+    """
+    was_configured = structlog.is_configured()
+    structlog_config = structlog.get_config()
+    root = logging.getLogger()
+    handlers = list(root.handlers)
+    handler_filters = {handler: list(handler.filters) for handler in handlers}
+    root_filters = list(root.filters)
+    root_level = root.level
+    http_levels = {name: logging.getLogger(name).level for name in ("httpx", "httpcore")}
+    yield
+    redaction.uninstall_global_hooks()
+    if was_configured:
+        structlog.configure(**structlog_config)
+    else:
+        structlog.reset_defaults()
+    for handler in list(root.handlers):
+        if handler not in handler_filters:
+            root.removeHandler(handler)
+    for handler, filters in handler_filters.items():
+        handler.filters[:] = filters
+    root.filters[:] = root_filters
+    root.setLevel(root_level)
+    for name, level in http_levels.items():
+        logging.getLogger(name).setLevel(level)
 
 
 @pytest.fixture(scope="session")

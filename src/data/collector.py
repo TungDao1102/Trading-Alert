@@ -71,6 +71,7 @@ from src.data.collect_list import (
 )
 from src.data.store import atomic_write_parquet
 from src.db.models import TICK_WIDE_SYMBOL, CollectorGap, CollectorWatermark
+from src.ops.redaction import configure_logging, scrub
 
 log = structlog.get_logger()
 
@@ -1053,7 +1054,7 @@ def _check_health(
         return 0
     except Exception as exc:
         print(
-            f"collector-health: UNKNOWN — {type(exc).__name__}: {exc}",
+            scrub(f"collector-health: UNKNOWN — {type(exc).__name__}: {exc}"),
             file=sys.stderr,
         )
         return 1
@@ -1139,6 +1140,7 @@ def _resolve_universe(args: argparse.Namespace) -> list[str]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the collector: loop (default), one tick (`--once`), or probe."""
+    configure_logging()
     args = _parse_collector_args(argv)
     try:
         universe = _resolve_universe(args)
@@ -1156,7 +1158,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         engine = _make_sync_engine(args.database_url)
     except RuntimeError as exc:
-        print(f"collector: {exc}", file=sys.stderr)
+        print(scrub(f"collector: {exc}"), file=sys.stderr)
         return 2
     adapter = BinanceUsdmAdapter()
     session_factory = sessionmaker(bind=engine)
