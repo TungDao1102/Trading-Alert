@@ -653,7 +653,7 @@ Plans:
 
 **Audit refs**: F-202, F-404, F-403, F-406, F-411, F-412, F-410, F-126, F-951, F-703, F-603, F-606
 
-**Plans:** 10/15 plans executed
+**Plans:** 11/15 plans executed
 
 Plans:
 **Wave 1**
@@ -671,7 +671,7 @@ Plans:
 - [x] 17-08-PLAN.md — PostgreSQL journal store (append-only, replay-idempotent, conflict-detecting) (W3)
 - [x] 17-09-PLAN.md — PostgreSQL approval store, explicit consumption state, race-safe decisions (W3)
 - [x] 17-10-PLAN.md — Entity repositories with in-transaction transitions, precision guard, round-trip and plan_hash proofs (W3)
-- [ ] 17-11-PLAN.md — Manager write-ahead completion: SL intent, identity-before-replay, fail-closed store errors, crash injection (W3)
+- [x] 17-11-PLAN.md — Manager write-ahead completion: SL intent, identity-before-replay, fail-closed store errors, crash injection (W3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 17-12-PLAN.md — Restart recovery by query only + full SC4 matrix with negative controls (W4)
@@ -979,7 +979,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
-| 17. Operational Persistence Layer | 10/15 | In Progress|  |
+| 17. Operational Persistence Layer | 11/15 | In Progress|  |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |
 | 19. Execution Plan Binding + Pre-Placement Checks | 0/TBD | Not started | - |
 | 20. Reconcile + SAFE_MODE Hardening + Alerts | 0/TBD | Not started | - |
