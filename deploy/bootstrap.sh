@@ -13,7 +13,7 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=deploy/lib.sh
+# shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
 # Supported releases as data (D-10); anything else is refused before anything changes.
@@ -124,6 +124,10 @@ preflight() {
   fi
 
   [[ -f $SECRETS_FILE && -r $SECRETS_FILE ]] || die "secrets file is not a readable file: $SECRETS_FILE"
+  validate_secrets_file "$SECRETS_FILE"
+  if [[ -n $DEPLOY_KEY && ! -f $DEPLOY_KEY ]]; then
+    die "deploy key is not a file: $DEPLOY_KEY"
+  fi
 
   resolve_user_home
   local keys_to_check
@@ -244,6 +248,7 @@ effective_ssh_ports() {
 # ufw: the SSH allow rule is in place before the firewall is enabled (anti lock-out, D-11).
 step_ufw() {
   local ports port status ok=1
+  local -a port_list
   ports="$(effective_ssh_ports)"
   if [[ -z $ports ]]; then
     if [[ $DRY_RUN == 1 ]]; then
@@ -252,10 +257,11 @@ step_ufw() {
       die "lock-out guard: could not read the effective SSH port from 'sshd -T'; not touching the firewall"
     fi
   fi
+  mapfile -t port_list <<<"$ports"
   status="$(ufw status verbose 2>/dev/null || true)"
   grep -q '^Status: active' <<<"$status" || ok=0
   grep -qi 'deny (incoming)' <<<"$status" || ok=0
-  for port in $ports; do
+  for port in "${port_list[@]}"; do
     grep -Eq "^${port}/tcp.*ALLOW" <<<"$status" || ok=0
   done
   if ((ok)); then
@@ -264,7 +270,7 @@ step_ufw() {
   fi
   run ufw default deny incoming
   run ufw default allow outgoing
-  for port in $ports; do
+  for port in "${port_list[@]}"; do
     run ufw allow "${port}/tcp"
   done
   run ufw --force enable
@@ -343,20 +349,176 @@ step_sshd() {
   fi
 }
 
+# clock_status: sets CLOCK_MSG. Returns 0 when chrony is synchronised and the system clock is
+# within MAX_DRIFT_MS of NTP time, 1 when it is not (yet) synchronised, 2 when drift is too big.
+# Parses the documented text format of `chronyc tracking`, never the undocumented CSV mode.
+CLOCK_MSG=""
+clock_status() {
+  local out leap sys ms
+  if ! out="$(chronyc tracking 2>/dev/null)"; then
+    CLOCK_MSG="chronyc tracking failed (is chrony running?)"
+    return 1
+  fi
+  leap="$(awk -F: '/^Leap status/ { gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit }' <<<"$out")"
+  if [[ $leap != Normal ]]; then
+    CLOCK_MSG="chrony is not synchronised (Leap status: ${leap:-unknown})"
+    return 1
+  fi
+  sys="$(awk '/^System time/ { print $4; exit }' <<<"$out")"
+  if [[ ! $sys =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    CLOCK_MSG="cannot parse the 'System time' line of chronyc tracking"
+    return 1
+  fi
+  ms="$(awk -v s="$sys" 'BEGIN { printf "%.3f", s * 1000 }')"
+  if awk -v m="$ms" -v b="$MAX_DRIFT_MS" 'BEGIN { exit !(m > b) }'; then
+    CLOCK_MSG="clock drift $ms ms exceeds the $MAX_DRIFT_MS ms bound"
+    return 2
+  fi
+  CLOCK_MSG="clock drift $ms ms (bound $MAX_DRIFT_MS ms)"
+}
+
 step_chrony() {
-  run apt-get install -y chrony
+  local changed=0 rc=0 max_correction
+  if ! pkg_installed chrony; then
+    changed=1
+  fi
+  apt_install_missing chrony
+  if systemctl is-enabled systemd-timesyncd >/dev/null 2>&1; then
+    run systemctl disable --now systemd-timesyncd
+  fi
+  if ! systemctl is-enabled chrony >/dev/null 2>&1; then
+    changed=1
+    run systemctl enable --now chrony
+  fi
+  clock_status || rc=$?
+  if ((rc != 0 || changed)); then
+    max_correction="$(awk -v b="$MAX_DRIFT_MS" 'BEGIN { printf "%.3f", b / 1000 }')"
+    if ! run chronyc waitsync 60 "$max_correction" 0 2; then
+      die "chronyc waitsync did not report a synchronised clock within the bound"
+    fi
+    if [[ $DRY_RUN == 1 ]]; then
+      printf '+ verify clock drift <= %s ms with chronyc tracking\n' "$MAX_DRIFT_MS"
+      return 0
+    fi
+    rc=0
+    clock_status || rc=$?
+  fi
+  ((rc == 0)) || die "$CLOCK_MSG"
+  log "$CLOCK_MSG"
 }
 
+# Checkout runs as the trading user so the tree is owned by it; REF should be a tag or commit.
 step_checkout() {
-  run git clone "$REPO_URL" "$(p "$INSTALL_DIR")"
+  local dir key_dst head target
+  local -a gitcmd=(runuser -u "$TRADING_USER" --)
+  dir="$(p "$INSTALL_DIR")"
+  if [[ -n $DEPLOY_KEY ]]; then
+    key_dst="$(p "$USER_HOME/.ssh/id_deploy")"
+    if [[ ! -f $key_dst ]] || ! cmp -s "$DEPLOY_KEY" "$key_dst"; then
+      run install -m 0600 -o "$TRADING_USER" -g "$TRADING_USER" "$DEPLOY_KEY" "$key_dst"
+    fi
+    gitcmd+=(env "GIT_SSH_COMMAND=ssh -i $USER_HOME/.ssh/id_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new")
+  fi
+  gitcmd+=(git)
+
+  if [[ -d $dir/.git ]]; then
+    head="$("${gitcmd[@]}" -C "$dir" rev-parse HEAD 2>/dev/null || true)"
+    target="$("${gitcmd[@]}" -C "$dir" rev-parse --verify --quiet "${REPO_REF}^{commit}" 2>/dev/null || true)"
+    if [[ -n $head && $head == "$target" ]]; then
+      log "repository already at $REPO_REF"
+      return 0
+    fi
+    run "${gitcmd[@]}" -C "$dir" fetch --tags origin
+  else
+    if [[ ! -d $dir ]]; then
+      run install -d -o "$TRADING_USER" -g "$TRADING_USER" "$dir"
+    fi
+    run "${gitcmd[@]}" clone "$REPO_URL" "$dir"
+  fi
+  run "${gitcmd[@]}" -C "$dir" checkout --detach "$REPO_REF"
 }
 
+REQUIRED_ENV_KEYS=(POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB)
+
+# validate_secrets_file FILE: required keys present and non-empty, no change_me placeholders.
+# Reports key NAMES only; a value is never read into a message (OPS-06, T-13.1-21).
+validate_secrets_file() {
+  local file=$1 problems
+  # Bash pattern match, not grep: Git-for-Windows grep strips the CR before matching.
+  if [[ "$(<"$file")" == *$'\r'* ]]; then
+    die "secrets file has CR (Windows) line endings; convert it to LF first: $file"
+  fi
+  problems="$(awk -v req="${REQUIRED_ENV_KEYS[*]}" '
+    BEGIN { n = split(req, need, " "); sq = sprintf("%c", 39); dq = sprintf("%c", 34) }
+    /^[ \t]*#/ || /^[ \t]*$/ { next }
+    {
+      line = $0
+      sub(/^[ \t]*export[ \t]+/, "", line)
+      i = index(line, "=")
+      if (i == 0) next
+      key = substr(line, 1, i - 1)
+      gsub(/[ \t]/, "", key)
+      val = substr(line, i + 1)
+      sub(/^[ \t]+/, "", val)
+      sub(/[ \t]+$/, "", val)
+      first = substr(val, 1, 1)
+      last = substr(val, length(val), 1)
+      if (length(val) >= 2 && first == last && (first == sq || first == dq)) {
+        val = substr(val, 2, length(val) - 2)
+      }
+      if (!(key in value)) order[++count] = key
+      value[key] = val
+    }
+    END {
+      for (k = 1; k <= n; k++) {
+        if (!(need[k] in value) || value[need[k]] == "") print "missing or empty: " need[k]
+      }
+      for (k = 1; k <= count; k++) {
+        if (tolower(value[order[k]]) ~ /change_me/) print "placeholder value: " order[k]
+      }
+    }' "$file")"
+  if [[ -n $problems ]]; then
+    die "secrets file is not usable ($file):
+$(sed 's/^/  /' <<<"$problems")"
+  fi
+}
+
+# .env is installed with umask 077 and mode 0600 owned by the trading user (OPS-06).
 step_env() {
-  run install -m 0600 "$SECRETS_FILE" "$(p "$INSTALL_DIR/.env")"
+  local dest mode
+  dest="$(p "$INSTALL_DIR/.env")"
+  if [[ -f $dest ]] && cmp -s "$SECRETS_FILE" "$dest"; then
+    if ! posix_modes_supported || [[ "$(stat -c %a "$dest")" == 600 ]]; then
+      log ".env already installed"
+      return 0
+    fi
+  fi
+  (
+    umask 077
+    run install -m 0600 -o "$TRADING_USER" -g "$TRADING_USER" "$SECRETS_FILE" "$dest"
+  )
+  if [[ $DRY_RUN != 1 ]] && posix_modes_supported; then
+    mode="$(stat -c %a "$dest")"
+    [[ $mode == 600 ]] || die ".env has mode $mode after install, expected 600"
+  fi
 }
 
 print_checklist() {
-  printf '\nOperator checklist\n'
+  cat <<EOF
+
+Operator checklist (none of this is automated):
+  1. Binance API key: restrict it to this host's public IP (IP whitelist / IP allow list) and
+     leave the withdrawal permission off; the key must have no withdrawal permission.
+  2. Heartbeat: register an off-VPS heartbeat monitor so a silent host is noticed.
+  3. Backup crypt passphrase: store it off the VPS; losing it makes every backup unrecoverable.
+  4. SSH: before closing this session, open a second SSH session as $TRADING_USER with your key.
+  5. Provider disk encryption: enable it (or confirm it is on) in the provider console.
+  6. Backups: set the BACKUP_* variables in $INSTALL_DIR/.env, then run
+       $INSTALL_DIR/deploy/backup.sh --install-timer
+  7. The docker group is root-equivalent: keep it to this one operator account. ufw does not
+     control ports published by Docker; publish only 127.0.0.1 ports.
+  8. Delete the copied secrets file from this host once .env is verified: $SECRETS_FILE
+EOF
 }
 
 main() {

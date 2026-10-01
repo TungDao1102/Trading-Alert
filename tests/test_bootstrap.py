@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import Callable
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -61,7 +61,7 @@ Leap status     : Normal
 # --- stub binaries -------------------------------------------------------------------------
 
 _LOG = r"""
-printf '%s\n' "$(basename "$0") $*" >> "${STUB_LOG:?}"
+printf '%s\n' "${0##*/} $*" >> "${STUB_LOG:?}"
 """
 
 STUBS: dict[str, str] = {
@@ -319,12 +319,7 @@ class Host:
         )
 
 
-@pytest.fixture
-def host(tmp_path: Path) -> Host:
-    bash = find_bash()
-    if bash is None:
-        infra_skip("bash not found; bootstrap tests need Git Bash or Linux bash")
-    base = tmp_path / "host"
+def build_host(base: Path, bash: str) -> Host:
     h = Host(base=base, bash=bash)
     for name, body in STUBS.items():
         _write(base / "bin" / name, "#!/usr/bin/env bash\n" + _LOG + body)
@@ -347,6 +342,46 @@ def host(tmp_path: Path) -> Host:
     return h
 
 
+def _need_bash() -> str:
+    bash = find_bash()
+    if bash is None:
+        infra_skip("bash not found; bootstrap tests need Git Bash or Linux bash")
+    return bash
+
+
+@pytest.fixture
+def host(tmp_path: Path) -> Host:
+    return build_host(tmp_path / "host", _need_bash())
+
+
+@dataclass
+class Golden:
+    """One shared successful first run on a fresh host, plus cheap idempotent re-runs.
+
+    Most per-step assertions only inspect what that first run did, so they share it instead
+    of paying for a dozen identical bash runs (each costs seconds under Git Bash on Windows).
+    """
+
+    host: Host
+    proc: subprocess.CompletedProcess[str]
+    first_run_lines: list[str]
+
+    def rerun(self, *, dry_run: bool = False) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        """Run again against the configured state; return the output and only the new log."""
+        before = len(self.host.log_lines())
+        args = self.host.args(*(["--dry-run"] if dry_run else []))
+        proc = self.host.run(args, env=dict(CONFIGURED_ENV))
+        return proc, self.host.log_lines()[before:]
+
+
+@pytest.fixture(scope="module")
+def golden(tmp_path_factory: pytest.TempPathFactory) -> Golden:
+    h = build_host(tmp_path_factory.mktemp("golden") / "host", _need_bash())
+    proc = h.run(h.args(), env={"STUB_ENABLED": "systemd-timesyncd"})
+    assert proc.returncode == 0, proc.stderr
+    return Golden(host=h, proc=proc, first_run_lines=h.log_lines())
+
+
 def assert_in_order(text: str, markers: list[str]) -> None:
     pos = 0
     for marker in markers:
@@ -354,8 +389,6 @@ def assert_in_order(text: str, markers: list[str]) -> None:
         assert idx >= 0, f"marker {marker!r} not found (in order) after offset {pos} in:\n{text}"
         pos = idx + len(marker)
 
-
-GetHost = Callable[[], Host]
 
 # --- Task 1: preflight, OS matrix, anti lock-out guard, dry-run plan -------------------------
 
@@ -496,16 +529,7 @@ def real_run(host: Host, *extra: str, **env: str) -> subprocess.CompletedProcess
     return host.run(host.args(*extra), env=dict(env))
 
 
-@pytest.mark.parametrize(
-    ("release", "distro", "codename"),
-    [("ubuntu-24.04", "ubuntu", "noble"), ("debian-12", "debian", "bookworm")],
-)
-def test_docker_repository_is_written_in_deb822_form(
-    host: Host, release: str, distro: str, codename: str
-) -> None:
-    host.set_os(release)
-    proc = real_run(host)
-    assert proc.returncode == 0, proc.stderr
+def assert_docker_repo(host: Host, distro: str, codename: str, lines: list[str]) -> None:
     sources = host.root / "etc" / "apt" / "sources.list.d" / "docker.sources"
     assert sources.read_text(encoding="utf-8") == (
         "Types: deb\n"
@@ -515,32 +539,37 @@ def test_docker_repository_is_written_in_deb822_form(
         "Architectures: amd64\n"
         "Signed-By: /etc/apt/keyrings/docker.asc\n"
     )
-    lines = host.log_lines()
     gpg_url = f"download.docker.com/linux/{distro}/gpg"
     assert any(gpg_url in ln for ln in lines if ln.startswith("curl"))
     assert (host.root / "etc" / "apt" / "keyrings" / "docker.asc").is_file()
     assert has_call(lines, f"apt-get install -y {DOCKER_PACKAGES}")
 
 
-def test_docker_step_is_a_noop_when_repo_and_packages_are_present(host: Host) -> None:
-    assert real_run(host).returncode == 0
-    host.log.unlink()
-    proc = real_run(host, **CONFIGURED_ENV)
+def test_docker_repository_is_written_in_deb822_form_for_ubuntu(golden: Golden) -> None:
+    assert_docker_repo(golden.host, "ubuntu", "noble", golden.first_run_lines)
+
+
+def test_docker_repository_is_written_in_deb822_form_for_debian(host: Host) -> None:
+    host.set_os("debian-12")
+    proc = real_run(host)
     assert proc.returncode == 0, proc.stderr
-    lines = host.log_lines()
-    assert not has_call(lines, "curl")
-    assert not any("docker" in ln for ln in lines if ln.startswith("apt-get"))
+    assert_docker_repo(host, "debian", "bookworm", host.log_lines())
+
+
+def test_docker_step_is_a_noop_when_repo_and_packages_are_present(golden: Golden) -> None:
+    proc, new_lines = golden.rerun()
+    assert proc.returncode == 0, proc.stderr
+    assert not has_call(new_lines, "curl")
+    assert not any("docker" in ln for ln in new_lines if ln.startswith("apt-get"))
     assert "docker.sources" not in proc.stdout
 
 
-def test_user_step_creates_user_group_and_keys(host: Host) -> None:
-    proc = real_run(host)
-    assert proc.returncode == 0, proc.stderr
-    lines = host.log_lines()
+def test_user_step_creates_user_group_and_keys(golden: Golden) -> None:
+    lines = golden.first_run_lines
     assert has_call(lines, "useradd --create-home --shell /bin/bash trading")
     assert has_call(lines, "usermod -aG docker trading")
     assert any(ln.startswith("install -d -m 0700 -o trading -g trading") for ln in lines)
-    keys = host.root / "home" / "trading" / ".ssh" / "authorized_keys"
+    keys = golden.host.root / "home" / "trading" / ".ssh" / "authorized_keys"
     assert VALID_KEY in keys.read_text(encoding="utf-8")
     assert any(ln.startswith("chown trading:trading") and "authorized_keys" in ln for ln in lines)
 
@@ -583,9 +612,8 @@ def test_ufw_allows_the_effective_ssh_port_before_enabling(host: Host) -> None:
     assert not has_call(lines, "ufw allow 22/tcp")
 
 
-def test_ufw_runs_after_the_user_step_and_before_the_ssh_drop_in(host: Host) -> None:
-    assert real_run(host).returncode == 0
-    lines = host.log_lines()
+def test_ufw_runs_after_the_user_step_and_before_the_ssh_drop_in(golden: Golden) -> None:
+    lines = golden.first_run_lines
     assert first_index(lines, "usermod") < first_index(lines, "ufw --force enable")
     assert first_index(lines, "ufw --force enable") < first_index(lines, "sshd -t")
 
@@ -597,10 +625,8 @@ def test_ufw_is_a_noop_when_already_active_with_the_rule(host: Host) -> None:
     assert not any(ln.startswith("ufw") and not ln.startswith("ufw status") for ln in lines)
 
 
-def test_ssh_drop_in_is_written_validated_asserted_and_reloaded(host: Host) -> None:
-    proc = real_run(host)
-    assert proc.returncode == 0, proc.stderr
-    content = (host.root / DROPIN_REL).read_text(encoding="utf-8")
+def test_ssh_drop_in_is_written_validated_asserted_and_reloaded(golden: Golden) -> None:
+    content = (golden.host.root / DROPIN_REL).read_text(encoding="utf-8")
     for line in (
         "PasswordAuthentication no",
         "KbdInteractiveAuthentication no",
@@ -608,12 +634,12 @@ def test_ssh_drop_in_is_written_validated_asserted_and_reloaded(host: Host) -> N
         "PubkeyAuthentication yes",
     ):
         assert line in content.splitlines()
-    lines = host.log_lines()
+    lines = golden.first_run_lines
     validate = first_index(lines, "sshd -t")
     reload_ = first_index(lines, "systemctl try-reload-or-restart ssh")
     effective = max(i for i, ln in enumerate(lines) if ln.startswith("sshd -T"))
     assert validate < effective < reload_
-    assert "second ssh session" in (proc.stdout + proc.stderr).lower()
+    assert "second ssh session" in (golden.proc.stdout + golden.proc.stderr).lower()
 
 
 def test_ssh_step_refuses_without_the_include_line(host: Host) -> None:
@@ -640,21 +666,231 @@ def test_ssh_drop_in_is_removed_when_sshd_t_fails(host: Host) -> None:
     assert not has_call(host.log_lines(), "systemctl try-reload-or-restart")
 
 
-def test_second_run_announces_no_host_mutation_for_the_hardening_steps(host: Host) -> None:
-    assert real_run(host).returncode == 0
-    host.log.unlink()
-    proc = real_run(host, **CONFIGURED_ENV)
+# --- Task 3: chrony, checkout, .env and the operator checklist ---------------------------------
+
+
+def tracking_text(
+    system_time: str = "0.000045000 seconds fast of NTP time", leap: str = "Normal"
+) -> str:
+    return (
+        "Reference ID    : A9FEA97B (169.254.169.123)\n"
+        "Stratum         : 4\n"
+        f"System time     : {system_time}\n"
+        "Last offset     : +0.000012000 seconds\n"
+        f"Leap status     : {leap}\n"
+    )
+
+
+def combined(proc: subprocess.CompletedProcess[str]) -> str:
+    return proc.stdout + proc.stderr
+
+
+def test_chrony_is_installed_enabled_synced_and_drift_is_reported(golden: Golden) -> None:
+    lines = golden.first_run_lines
+    assert has_call(lines, "apt-get install -y chrony")
+    assert has_call(lines, "systemctl disable --now systemd-timesyncd")
+    assert has_call(lines, "systemctl enable --now chrony")
+    enable = first_index(lines, "systemctl enable --now chrony")
+    assert enable < first_index(lines, "chronyc waitsync")
+    assert "0.045 ms" in combined(golden.proc)
+
+
+@pytest.mark.parametrize("direction", ["fast", "slow"])
+def test_chrony_drift_within_bound_passes_in_either_direction(host: Host, direction: str) -> None:
+    _write(host.tracking, tracking_text(f"0.000900000 seconds {direction} of NTP time"))
+    proc = real_run(host)
     assert proc.returncode == 0, proc.stderr
-    for marker in (
-        "apt-get update",
-        "ca-certificates",
-        "docker",
-        "useradd",
-        "usermod",
-        "ufw",
-        "sshd",
-        "00-trading-hardening",
-        "authorized_keys",
-        "try-reload",
-    ):
-        assert marker not in proc.stdout, f"second run announced {marker!r}:\n{proc.stdout}"
+    assert "0.900 ms" in combined(proc)
+
+
+def test_chrony_drift_above_the_bound_fails_and_names_the_drift(host: Host) -> None:
+    _write(host.tracking, tracking_text("0.250000000 seconds fast of NTP time"))
+    proc = real_run(host)
+    assert proc.returncode != 0
+    assert "250.000 ms" in proc.stderr
+    assert "100 ms" in proc.stderr
+
+
+def test_chrony_drift_bound_is_configurable(host: Host) -> None:
+    _write(host.tracking, tracking_text("0.250000000 seconds fast of NTP time"))
+    proc = host.run(host.args(max_drift_ms="1000"))
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_chrony_not_synchronised_fails(host: Host) -> None:
+    _write(host.tracking, tracking_text(leap="Not synchronised"))
+    proc = real_run(host)
+    assert proc.returncode != 0
+    assert "not synchronised" in proc.stderr.lower()
+
+
+def test_chrony_waitsync_failure_fails(host: Host) -> None:
+    proc = real_run(host, STUB_WAITSYNC_RC="1")
+    assert proc.returncode != 0
+    assert "waitsync" in proc.stderr.lower()
+
+
+def test_chrony_step_is_a_noop_when_installed_enabled_and_synced(golden: Golden) -> None:
+    proc, new_lines = golden.rerun()
+    assert proc.returncode == 0, proc.stderr
+    assert not has_call(new_lines, "chronyc waitsync")
+    assert not has_call(new_lines, "systemctl enable")
+    assert not has_call(new_lines, "systemctl disable")
+
+
+def test_checkout_clones_as_the_trading_user_and_detaches_at_the_ref(golden: Golden) -> None:
+    lines = golden.first_run_lines
+    repo = (golden.host.root / "opt" / "trading").as_posix()
+    clone = next(ln for ln in lines if ln.startswith("runuser -u trading -- git clone"))
+    assert "https://example.invalid/trading.git" in clone
+    assert clone.endswith(repo)
+    checkout = next(ln for ln in lines if "checkout --detach v1.0.0" in ln)
+    assert checkout.startswith("runuser -u trading -- git -C")
+    assert lines.index(clone) < lines.index(checkout)
+    assert any(ln.startswith("install -d -o trading -g trading") for ln in lines)
+
+
+def test_checkout_uses_the_deploy_key_through_git_ssh_command(host: Host) -> None:
+    deploy_key = _write(host.base / "deploy_key", "-----BEGIN FAKE KEY-----\n")
+    proc = real_run(host, "--deploy-key", deploy_key.as_posix())
+    assert proc.returncode == 0, proc.stderr
+    clone = next(ln for ln in host.log_lines() if " git clone " in ln)
+    assert "GIT_SSH_COMMAND=ssh -i /home/trading/.ssh/id_deploy" in clone
+    assert (host.root / "home" / "trading" / ".ssh" / "id_deploy").is_file()
+
+
+def test_checkout_fetches_when_the_repo_exists_at_another_commit(host: Host) -> None:
+    (host.root / "opt" / "trading" / ".git").mkdir(parents=True)
+    proc = real_run(host, STUB_GIT_HEAD="aaa111", STUB_GIT_REF_COMMIT="bbb222")
+    assert proc.returncode == 0, proc.stderr
+    lines = host.log_lines()
+    assert any(" fetch " in ln for ln in lines)
+    assert not any(" git clone " in ln for ln in lines)
+    assert any("checkout --detach v1.0.0" in ln for ln in lines)
+
+
+def test_checkout_is_a_noop_when_already_at_the_ref(host: Host) -> None:
+    (host.root / "opt" / "trading" / ".git").mkdir(parents=True)
+    proc = real_run(host, STUB_GIT_HEAD="same123", STUB_GIT_REF_COMMIT="same123")
+    assert proc.returncode == 0, proc.stderr
+    lines = host.log_lines()
+    assert not any(" fetch " in ln or " checkout " in ln or " clone " in ln for ln in lines)
+
+
+def test_checkout_without_repo_flag_and_without_a_checkout_dies(host: Host) -> None:
+    proc = host.run(host.args("--dry-run", repo=None))
+    assert proc.returncode != 0
+    assert "--repo" in proc.stderr
+    assert host.mutations() == []
+
+
+def test_env_file_is_installed_from_the_secrets_file_without_echoing_values(
+    golden: Golden,
+) -> None:
+    host = golden.host
+    env_file = host.root / "opt" / "trading" / ".env"
+    assert env_file.read_bytes() == host.secrets.read_bytes()
+    assert SECRET_PASSWORD not in combined(golden.proc)
+    assert any(
+        ln.startswith("install -m 0600 -o trading -g trading") and ".env" in ln
+        for ln in golden.first_run_lines
+    )
+    assert SECRET_PASSWORD not in "\n".join(host.log_lines())
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="NTFS cannot represent POSIX modes")
+def test_env_file_mode_is_0600(golden: Golden) -> None:
+    env_file = golden.host.root / "opt" / "trading" / ".env"
+    assert (env_file.stat().st_mode & 0o777) == 0o600
+
+
+@pytest.mark.parametrize(
+    ("content", "named_key"),
+    [
+        (f"POSTGRES_USER=trading\nPOSTGRES_PASSWORD={SECRET_PASSWORD}\n", "POSTGRES_DB"),
+        ("POSTGRES_USER=trading\nPOSTGRES_PASSWORD=\nPOSTGRES_DB=trading\n", "POSTGRES_PASSWORD"),
+        ("POSTGRES_USER=trading\nPOSTGRES_PASSWORD=''\nPOSTGRES_DB=trading\n", "POSTGRES_PASSWORD"),
+        (
+            f"POSTGRES_USER=trading\nPOSTGRES_PASSWORD=change_me_please\nPOSTGRES_DB=trading\n"
+            f"BINANCE_TESTNET_API_SECRET={SECRET_PASSWORD}\n",
+            "POSTGRES_PASSWORD",
+        ),
+        (
+            f"POSTGRES_USER=trading\nPOSTGRES_PASSWORD={SECRET_PASSWORD}\nPOSTGRES_DB=trading\n"
+            "BACKUP_S3_SECRET_ACCESS_KEY=CHANGE_ME\n",
+            "BACKUP_S3_SECRET_ACCESS_KEY",
+        ),
+    ],
+    ids=["missing-key", "empty-value", "quoted-empty", "placeholder", "placeholder-other-key"],
+)
+def test_env_validation_refuses_before_any_step_and_never_prints_values(
+    host: Host, content: str, named_key: str
+) -> None:
+    _write(host.secrets, content)
+    proc = real_run(host)
+    assert proc.returncode != 0
+    assert named_key in proc.stderr
+    assert SECRET_PASSWORD not in combined(proc)
+    assert host.mutations() == []
+    assert SECRET_PASSWORD not in "\n".join(host.log_lines())
+
+
+def test_env_validation_rejects_carriage_returns(host: Host) -> None:
+    with host.secrets.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(
+            "POSTGRES_USER=trading\r\nPOSTGRES_PASSWORD=x1y2z3w4\r\nPOSTGRES_DB=trading\r\n"
+        )
+    proc = real_run(host)
+    assert proc.returncode != 0
+    assert "line endings" in proc.stderr
+    assert host.mutations() == []
+
+
+def test_missing_secrets_file_is_refused(host: Host) -> None:
+    proc = host.run(host.args(secrets_file=(host.base / "nope.conf").as_posix()))
+    assert proc.returncode != 0
+    assert "secrets file" in proc.stderr.lower()
+    assert host.mutations() == []
+
+
+CHECKLIST_NEEDLES = (
+    "IP whitelist",
+    "withdraw",
+    "heartbeat",
+    "passphrase",
+    "second SSH session",
+    "disk encryption",
+    "backup.sh --install-timer",
+    "docker group",
+)
+
+
+def assert_checklist_last(out: str) -> None:
+    assert "Operator checklist" in out
+    for needle in CHECKLIST_NEEDLES:
+        assert needle in out, f"checklist lacks {needle!r}"
+    assert out.index("Operator checklist") > out.index("install -m 0600")
+
+
+def test_operator_checklist_ends_a_real_run(golden: Golden) -> None:
+    assert_checklist_last(golden.proc.stdout)
+
+
+def test_operator_checklist_ends_a_dry_run(host: Host) -> None:
+    proc = host.run(host.args("--dry-run"))
+    assert proc.returncode == 0, proc.stderr
+    assert_checklist_last(proc.stdout)
+
+
+def test_second_run_announces_no_mutation_at_all(golden: Golden) -> None:
+    proc, new_lines = golden.rerun()
+    assert proc.returncode == 0, proc.stderr
+    assert [ln for ln in proc.stdout.splitlines() if ln.startswith("+ ")] == []
+    assert [ln for ln in new_lines if is_mutation(ln)] == []
+
+
+def test_second_dry_run_announces_no_mutation_either(golden: Golden) -> None:
+    proc, new_lines = golden.rerun(dry_run=True)
+    assert proc.returncode == 0, proc.stderr
+    assert [ln for ln in proc.stdout.splitlines() if ln.startswith("+ ")] == []
+    assert [ln for ln in new_lines if is_mutation(ln)] == []
