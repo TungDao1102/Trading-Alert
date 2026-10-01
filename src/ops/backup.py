@@ -25,7 +25,7 @@ The restore drill (`run_drill`):
      to the manifest. Any mismatch is a hard failure — exits non-zero.
 
 The CLI entry point is `python -m src.ops.backup <subcommand>` (backup, drill,
-prune, verify, restore, dump, restore-db). All
+prune, verify, restore, dump, restore-db, push, pull, retain, scheduled, drill-remote). All
 shell logic (PowerShell wrapper, scheduling, off-host copy) defers to
 this module — no SQL / copy logic lives in the shell scripts.
 
@@ -53,15 +53,24 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import structlog
 
 from src.ops.redaction import configure_logging, scrub
 
+if TYPE_CHECKING:
+    from datetime import datetime
+
+    from src.ops.backup_remote import RcloneRunner
+
 DEFAULT_PARQUET_ROOT = Path("data") / "raw"
 DEFAULT_BUNDLE_ROOT = Path("data") / "backup"
+# Staging bundle of the off-host subcommands. Pulls (restore-<id>), drills (drill-<ts>) and
+# cutover artifacts are siblings under data/backup, never inside a bundle root: write_manifest
+# hashes everything below its root.
+DEFAULT_STAGING_BUNDLE_ROOT = DEFAULT_BUNDLE_ROOT / "bundle"
 DEFAULT_PG_DUMP_NAME = "pg.dump"
 MANIFEST_NAME = "manifest.json"
 
@@ -895,6 +904,8 @@ def main(
     pg_restore_runner: PgRestoreRunner | None = None,
     migrate_runner: MigrateRunner | None = None,
     data_probe: DataProbe | None = None,
+    rclone_runner: RcloneRunner | None = None,
+    now_utc: datetime | None = None,
 ) -> int:
     configure_logging()
     try:
@@ -904,6 +915,8 @@ def main(
             pg_restore_runner=pg_restore_runner,
             migrate_runner=migrate_runner,
             data_probe=data_probe,
+            rclone_runner=rclone_runner,
+            now_utc=now_utc,
         )
     except Exception as exc:
         print(f"error: {_describe_error(exc)}", file=sys.stderr)
@@ -917,6 +930,8 @@ def _run_cli(
     pg_restore_runner: PgRestoreRunner | None,
     migrate_runner: MigrateRunner | None,
     data_probe: DataProbe | None,
+    rclone_runner: RcloneRunner | None,
+    now_utc: datetime | None,
 ) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m src.ops.backup",
@@ -1005,7 +1020,27 @@ def _run_cli(
         "--force", action="store_true", help="Allow restoring over a non-empty database."
     )
 
+    push_p = sub.add_parser(
+        "push", help="Verify the bundle, then push an encrypted snapshot off-host (rclone crypt)."
+    )
+    push_p.add_argument("--bundle-root", type=Path, default=DEFAULT_STAGING_BUNDLE_ROOT)
+    push_p.add_argument(
+        "--init-remote",
+        action="store_true",
+        help="Create the remote sentinel (only on an empty bucket; first push only).",
+    )
+
     args = parser.parse_args(argv)
+
+    if args.cmd == "push":
+        from src.ops import backup_remote
+
+        return backup_remote.cli_push(
+            args.bundle_root,
+            init_remote=args.init_remote,
+            runner=rclone_runner,
+            now_utc=now_utc,
+        )
 
     if args.cmd == "dump":
         written = (pg_dump_runner or _prod_pg_dump_runner)(args.out)
