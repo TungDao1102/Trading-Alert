@@ -6,19 +6,21 @@ so code and documentation cannot drift) and are enforced by ``assert_transition`
 the write transaction of the repositories. The terminal rule is also enforced in PostgreSQL
 by the terminal-state triggers of migration 0004.
 
-Status: Accepted as the Phase 17 auto-mode default, awaiting user confirmation (research C3,
-recorded as D051). EXECUTION_SPEC section 3 (entry order lifecycle) is the anchor for the
-Order machine.
+Status: Accepted (D051); drafted as the Phase 17 auto-mode default (research C3) and
+confirmed by the user on 2026-10-02. EXECUTION_SPEC section 3 (entry order lifecycle) is the
+anchor for the Order machine.
 
 Rules:
 
 - A terminal state is a state with no successors.
 - An unchanged state is not a transition. ``assert_transition`` raises for ``old == new``,
   so a repository must treat equal states as an idempotent no-op before calling it.
-- ``UNKNOWN`` exits for Order and Position are reconciliation-only moves: they are legal
-  here because reconciliation resolves an unknown state against the exchange, and no other
-  code path may produce them.
-- ``APPROVED -> SUPERSEDED`` for a TradePlan stays illegal (open point for the user).
+- Every ``UNKNOWN`` exit for Order and Position must be backed by evidence from Binance (a
+  reconcile query over REST or a user-data stream event), never by local inference such as
+  a timeout or an operator guess. The tables only say which moves are legal; recording the
+  evidence source is deferred to Phase 18 and 20, when the first callers exist.
+- ``APPROVED -> SUPERSEDED`` for a TradePlan is deliberately illegal (D051 item (i)):
+  ``SUPERSEDED`` means replaced before the human decided.
 """
 
 from __future__ import annotations

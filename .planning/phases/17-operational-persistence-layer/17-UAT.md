@@ -8,10 +8,10 @@ updated: 2026-10-01T19:24:05Z
 
 ## Current Test
 
-number: 1
-name: Confirm or amend the DOMN-04 state-transition tables
+number: 2
+name: Observe the first remote CI run of the PostgreSQL battery
 expected: |
-  GLOSSARY section 11 and D051 item (f) match the intended Signal/TradePlan/Order/Position/Approval/ExecutionIntent lifecycles. Open points: TradePlan APPROVED -> SUPERSEDED is illegal in the draft; Order/Position UNKNOWN exits are legal; the terminal sets. A change touches src/domain/transitions.py, GLOSSARY 11 and the migration 0004 terminal-trigger arguments together.
+  ci.yml (digest-pinned postgres:17.11 service, TRADING_CI_STRICT=1) is green on the pushed branch; the PG tests have only run locally against Docker so far.
 awaiting: user response
 
 ## Tests
@@ -35,9 +35,9 @@ result: [pending]
 ## Summary
 
 total: 4
-passed: 0
+passed: 1
 issues: 0
-pending: 4
+pending: 3
 skipped: 0
 blocked: 0
 

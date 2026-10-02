@@ -249,7 +249,7 @@ EXPIRED
 
 The legal-transition tables below are enforced by `src/domain/transitions.py` (`assert_transition`) inside the write transaction of the repositories, and the terminal rule (a terminal state has no successors) is also enforced by the database triggers of migration 0004. `tests/test_transitions.py` parses the text blocks in this section and compares them with the Python tables, so the two cannot drift apart. An unchanged state is not a transition: repositories treat an equal state as an idempotent no-op before calling `assert_transition`.
 
-Status: Accepted as the Phase 17 auto-mode default; the user is to confirm these tables (decision D051). The GLOSSARY carried value sets only before this section; the tables are anchored on EXECUTION_SPEC section 3 (entry order lifecycle). Open point for the user: `APPROVED -> SUPERSEDED` for a TradePlan is illegal in this draft.
+Status: Accepted (decision D051); drafted as the Phase 17 auto-mode default and confirmed by the user on 2026-10-02. The GLOSSARY carried value sets only before this section; the tables are anchored on EXECUTION_SPEC section 3 (entry order lifecycle). `APPROVED -> SUPERSEDED` for a TradePlan is deliberately illegal (see 11.2).
 
 ### 11.1 Signal transitions
 
@@ -279,6 +279,10 @@ SUPERSEDED -> (terminal)
 
 `APPROVED` is not terminal: an approved plan can still expire or be invalidated before execution handoff completes.
 
+`SUPERSEDED` means a plan replaced before the human decided (from `READY` or `APPROVAL_PENDING`). An approved plan never becomes `SUPERSEDED`: it ends as `EXPIRED` or `INVALIDATED`, with its unfilled entry cancelled first, and a replacement plan needs its own approval. Allowing `APPROVED -> SUPERSEDED` later is a one-line additive change here and in `src/domain/transitions.py` and needs no migration, because `APPROVED` is not terminal.
+
+After execution a plan stays `APPROVED`. The trade lifecycle truth lives in Order and Position, which are learned from Binance (the user-data stream in Phase 18 and the reconcile in Phase 20), not from the plan. A plan's `expiry_utc` governs only an unfilled entry and must never move an already-executed plan to `EXPIRED`.
+
 ### 11.3 Order transitions
 
 ```text
@@ -293,7 +297,7 @@ EXPIRED -> (terminal)
 REJECTED -> (terminal)
 ```
 
-The moves out of `UNKNOWN` are reconciliation-only: they resolve the unknown state against the exchange (Binance is canonical) and no other code path may produce them.
+Every move out of `UNKNOWN` must be backed by evidence from Binance (the canonical source): a reconcile query over REST or a user-data stream event. It must never come from local inference such as a timeout or an operator guess. Recording the evidence source in the journal is deferred to Phase 18 and 20, when the first callers exist.
 
 ### 11.4 Position transitions
 
@@ -305,7 +309,7 @@ UNKNOWN -> OPEN, CLOSING, CLOSED, LIQUIDATION_REPORTED
 CLOSED -> (terminal)
 ```
 
-The moves out of `UNKNOWN` are reconciliation-only, as for orders. A closed position never reopens: a new exposure is a new position.
+The moves out of `UNKNOWN` need Binance evidence, as for orders. A closed position never reopens: a new exposure is a new position.
 
 ### 11.5 Approval transitions
 
