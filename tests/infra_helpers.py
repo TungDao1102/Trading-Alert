@@ -21,6 +21,8 @@ import pytest
 
 STRICT_ENV = "TRADING_CI_STRICT"
 
+_WSL_LAUNCHER_PARTS = ("system32", "windowsapps")
+
 _DOCKER_INFO_TIMEOUT_S = 20
 _COMPOSE_VERSION_TIMEOUT_S = 20
 
@@ -51,17 +53,20 @@ def infra_skip(reason: str) -> NoReturn:
 def find_bash() -> str | None:
     """Locate a usable bash, or None.
 
-    On Windows the ``bash.exe`` in System32 is the WSL launcher, which cannot run the
-    repo's shell scripts; it is rejected and Git-for-Windows bash is used instead.
+    On Windows the ``bash.exe`` in System32 and the Store alias in
+    ``Microsoft\\WindowsApps`` are WSL launchers, which cannot run the repo's shell
+    scripts; both are rejected, and Git-for-Windows bash is preferred over any other.
     """
-    found = shutil.which("bash")
-    if found and not (sys.platform == "win32" and "system32" in found.lower()):
-        return found
     if sys.platform == "win32":
         program_files = Path(os.environ.get("ProgramFiles", "C:/Program Files"))
         candidate = program_files / "Git" / "bin" / "bash.exe"
         if candidate.is_file():
             return str(candidate)
+    found = shutil.which("bash")
+    if found and not (
+        sys.platform == "win32" and any(p in found.lower() for p in _WSL_LAUNCHER_PARTS)
+    ):
+        return found
     return None
 
 

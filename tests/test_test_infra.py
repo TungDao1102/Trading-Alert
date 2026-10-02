@@ -56,6 +56,31 @@ def test_find_bash_rejects_windows_wsl_launcher(
     assert infra_helpers.find_bash() is None
 
 
+def test_find_bash_rejects_windowsapps_wsl_alias(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(infra_helpers.sys, "platform", "win32")
+    monkeypatch.setattr(
+        infra_helpers.shutil,
+        "which",
+        lambda _name: r"C:\Users\x\AppData\Local\Microsoft\WindowsApps\bash.exe",
+    )
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    assert infra_helpers.find_bash() is None
+
+
+def test_find_bash_prefers_git_bash_over_path_on_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    git_bash = tmp_path / "Git" / "bin" / "bash.exe"
+    git_bash.parent.mkdir(parents=True)
+    git_bash.write_text("", encoding="utf-8")
+    monkeypatch.setattr(infra_helpers.sys, "platform", "win32")
+    monkeypatch.setattr(infra_helpers.shutil, "which", lambda _name: r"D:\tools\bash.exe")
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    assert infra_helpers.find_bash() == str(git_bash)
+
+
 def test_find_bash_falls_back_to_program_files_git(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -73,6 +98,7 @@ def test_find_bash_falls_back_to_program_files_git(
 def test_find_bash_returns_which_result_when_acceptable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(infra_helpers.sys, "platform", "linux")
     monkeypatch.setattr(infra_helpers.shutil, "which", lambda _name: "/usr/bin/bash")
     assert infra_helpers.find_bash() == "/usr/bin/bash"
 

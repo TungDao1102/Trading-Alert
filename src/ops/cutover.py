@@ -49,6 +49,7 @@ EXIT_USAGE = 2
 EXIT_GAP = 3
 
 DEFAULT_MAX_GAP_MINUTES = 60
+_CONNECT_TIMEOUT_S = 5
 
 
 # --------------------------------------------------------------------------- #
@@ -98,7 +99,13 @@ def watermark_snapshot(database_url: str) -> dict[str, str]:
 
     from src.db.models import CollectorWatermark
 
-    engine = create_engine(_sqlalchemy_url(database_url))
+    url = _sqlalchemy_url(database_url)
+    # A closed or filtered port must fail in seconds, not libpq's default wait
+    # (about 130 s on Windows). SQLite has no such argument.
+    connect_args = (
+        {"connect_timeout": _CONNECT_TIMEOUT_S} if url.get_backend_name() == "postgresql" else {}
+    )
+    engine = create_engine(url, connect_args=connect_args)
     try:
         with Session(engine) as session:
             rows = session.execute(
