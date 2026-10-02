@@ -123,7 +123,7 @@ def test_ci_docker_job() -> None:
     assert "docker compose config -q" in block
     assert "docker compose --profile paper --profile live --profile ops config -q" in block
     assert "shellcheck --version" in block
-    assert "shellcheck -x deploy/*.sh" in block
+    assert "shellcheck -x -P SCRIPTDIR deploy/*.sh" in block
     assert "docker compose --profile ops build" in block
     assert "uv run pytest -m docker" in block
 

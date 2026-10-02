@@ -331,6 +331,13 @@ def outcome(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Outcome]:
         )
         migrate_output = _scrub(migrate.stdout + "\n" + migrate.stderr, secrets_)
 
+        # Every migrate.sh run rewrites report.json, including the strict --report-only run
+        # below, so the real run's report must be read before that one starts.
+        report: dict[str, Any] = {}
+        if migrate.returncode == 0:
+            report_args = ("run", "--rm", "-T", "--no-deps", "ops", "cat", f"{CUT}/report.json")
+            report = json.loads(_run(new, *report_args, secrets_=secrets_))
+
         strict = subprocess.run(
             [
                 bash,
@@ -349,12 +356,9 @@ def outcome(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Outcome]:
             timeout=600,
         )
 
-        report: dict[str, Any] = {}
         new_files: dict[str, str] = {}
         new_watermarks: dict[str, int] = {}
         if migrate.returncode == 0:
-            report_args = ("run", "--rm", "-T", "--no-deps", "ops", "cat", f"{CUT}/report.json")
-            report = json.loads(_run(new, *report_args, secrets_=secrets_))
             new_files = _volume_hashes(f"{new_name}_rawdata")
             new_watermarks = _watermarks(new, new_env, secrets_)
         yield Outcome(
