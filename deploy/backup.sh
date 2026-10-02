@@ -17,7 +17,6 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
-# shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
 # Git Bash on Windows would otherwise rewrite container paths such as /app/data/backup.

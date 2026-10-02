@@ -169,7 +169,7 @@ jobs:
             exit 1
           fi
           shellcheck --version
-          shellcheck -x deploy/*.sh
+          shellcheck -x -P SCRIPTDIR deploy/*.sh
 
       - name: Build images
         run: docker compose --profile ops build

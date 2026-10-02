@@ -73,7 +73,7 @@ def test_script_parses_under_bash_n(script: Path) -> None:
 def test_script_passes_shellcheck(script: Path) -> None:
     shellcheck = require_tool("shellcheck")
     proc = subprocess.run(
-        [shellcheck, "-x", script.as_posix()],
+        [shellcheck, "-x", "-P", "SCRIPTDIR", script.as_posix()],
         capture_output=True,
         text=True,
         check=False,

@@ -14,7 +14,6 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
-# shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
 # Supported releases as data (D-10); anything else is refused before anything changes.
