@@ -52,7 +52,9 @@ os_release_get() {
 
 # read_os_release: sets OS_ID, OS_VERSION_ID and OS_CODENAME (UBUNTU_CODENAME wins on Ubuntu).
 read_os_release() {
+  # shellcheck disable=SC2034  # read by the sourcing scripts
   OS_ID="$(os_release_get ID)"
+  # shellcheck disable=SC2034
   OS_VERSION_ID="$(os_release_get VERSION_ID)"
   OS_CODENAME="$(os_release_get UBUNTU_CODENAME)"
   if [[ -z $OS_CODENAME ]]; then
@@ -83,6 +85,7 @@ write_if_changed() {
   if [[ -f $path ]] && cmp -s "$path" <(printf '%s\n' "$content"); then
     return 0
   fi
+  # shellcheck disable=SC2034  # read by callers after write_if_changed
   WROTE=1
   printf '+ write %s\n' "$path"
   if [[ "${DRY_RUN}" == 1 ]]; then

@@ -96,6 +96,8 @@ def _write(path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
+    if text.startswith("#!"):
+        path.chmod(0o755)  # stubs must be executable on Linux; Git Bash ignores the bit
     return path
 
 

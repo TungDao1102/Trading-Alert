@@ -59,6 +59,8 @@ markers = [
 line-length = 100
 target-version = "py313"
 src = ["src", "tests"]
+# Planning artifacts are prose; ruff format would reformat python snippets inside their markdown.
+extend-exclude = [".planning", ".gsd"]
 
 [tool.ruff.lint]
 select = [

@@ -14,6 +14,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
+# shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
 # Supported releases as data (D-10); anything else is refused before anything changes.
@@ -478,6 +479,7 @@ validate_secrets_file() {
       }
     }' "$file")"
   if [[ -n $problems ]]; then
+    # shellcheck disable=SC2001  # sed prefixes every line; parameter expansion cannot
     die "secrets file is not usable ($file):
 $(sed 's/^/  /' <<<"$problems")"
   fi

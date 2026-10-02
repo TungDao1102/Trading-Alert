@@ -20,6 +20,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
+# shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
 export MSYS_NO_PATHCONV=1
