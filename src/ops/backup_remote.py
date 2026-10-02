@@ -238,6 +238,11 @@ def check_sentinel(runner: RcloneRunner) -> None:
             "wrong bucket, or the remote was never initialised "
             f"(first push uses --init-remote on an empty bucket); {_excerpt(result.stderr)}"
         )
+    if not result.stdout.strip():
+        raise RemoteError(
+            "backup sentinel is missing or empty: the remote was never initialised "
+            "(first push uses --init-remote on an empty bucket) or the crypt key is wrong"
+        )
     if not _sentinel_matches(result.stdout):
         raise RemoteError(
             "backup sentinel content differs from the expected value: wrong crypt key or a "
@@ -254,11 +259,18 @@ def init_sentinel(runner: RcloneRunner, *, raw_remote: str) -> bool:
     store also reads as "not found" and "empty", and initialising it would mix two keys.
     """
     result = runner(["cat", _crypt(SENTINEL_PATH)], {})
-    if result.returncode == 0:
+    # `rclone cat` on an object that does not exist exits 0 with no output: when the HEAD finds
+    # nothing, rclone treats the path as an (empty) directory. No valid sentinel is empty, so
+    # that outcome means "not found", the same as exit 3/4; the listing checks below still
+    # guard against an existing store read with a wrong key.
+    absent = result.returncode in _EXIT_NOT_FOUND or (
+        result.returncode == 0 and not result.stdout.strip()
+    )
+    if result.returncode == 0 and not absent:
         if _sentinel_matches(result.stdout):
             return False
         raise RemoteError("refusing --init-remote: a sentinel exists but its content differs")
-    if result.returncode not in _EXIT_NOT_FOUND:
+    if not absent:
         raise RemoteError(
             f"refusing --init-remote: sentinel read failed (rclone exit {result.returncode}): "
             f"{_excerpt(result.stderr)}"

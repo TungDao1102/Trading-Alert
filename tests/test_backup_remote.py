@@ -330,6 +330,41 @@ def test_init_remote_writes_sentinel_only_on_an_empty_store(
     assert ["copyto", fake.calls[3][1], SENTINEL_ARG, "--immutable"] in fake.calls
 
 
+def test_init_remote_treats_exit_0_with_empty_output_as_no_sentinel() -> None:
+    # `rclone cat` of a missing object exits 0 with no output (the path reads as an empty dir).
+    state = {"written": False}
+
+    class Fresh(FakeRclone):
+        def __call__(self, argv: Sequence[str], env: Mapping[str, str]) -> RcloneResult:
+            if list(argv)[:2] == ["cat", SENTINEL_ARG]:
+                self.calls.append(list(argv))
+                content = remote.SENTINEL_CONTENT if state["written"] else ""
+                return RcloneResult(0, content, "")
+            if argv[0] == "copyto" and argv[2] == SENTINEL_ARG:
+                self.calls.append(list(argv))
+                state["written"] = True
+                return RcloneResult(0, "", "")
+            return super().__call__(argv, env)
+
+    fake = Fresh()
+
+    assert remote.init_sentinel(fake, raw_remote="BACKUPS3:b") is True
+
+    assert "copyto" in fake.verbs()
+
+
+def test_init_remote_exit_0_empty_still_refuses_a_non_empty_bucket() -> None:
+    fake = FakeRclone(
+        sentinel=RcloneResult(0, "", ""),
+        overrides={"lsf": RcloneResult(0, "h3l2k5/\n", "")},
+    )
+
+    with pytest.raises(RemoteError, match="refusing --init-remote"):
+        remote.init_sentinel(fake, raw_remote="BACKUPS3:b")
+
+    assert "copyto" not in fake.verbs()
+
+
 def test_init_remote_refuses_when_snapshots_listing_is_not_empty() -> None:
     fake = FakeRclone(
         sentinel=RcloneResult(3, "", "directory not found"),
