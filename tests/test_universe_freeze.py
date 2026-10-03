@@ -750,6 +750,28 @@ def test_propose_writes_report_and_prints_the_review_block(
     assert "UNAVAILABLE proposed data: ARCHUSDT SET1USDT" in out
 
 
+def test_propose_refuses_to_overwrite_an_existing_report_without_force(
+    world: World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _tracer_world(world)
+    _patch_factories(monkeypatch, world)
+    out_path = tmp_path / "report.json"
+    out_path.write_text("committed evidence", encoding="utf-8")
+
+    code = uf.main(["propose", "--run-date", "2026-09-30", "--out", str(out_path)])
+
+    assert code == uf.EXIT_REFUSED
+    assert out_path.read_text(encoding="utf-8") == "committed evidence"
+    assert "already exists" in capsys.readouterr().err
+
+    forced = uf.main(["propose", "--run-date", "2026-09-30", "--out", str(out_path), "--force"])
+    assert forced == 0
+    assert uf.load_report(out_path).proposed_symbols
+
+
 def test_propose_exits_3_when_too_few_symbols_are_eligible(
     world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

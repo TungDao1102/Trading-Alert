@@ -817,6 +817,14 @@ def _print_review(report: FreezeReport, out: Path) -> None:
 
 
 def _cmd_propose(args: argparse.Namespace) -> int:
+    # The default --out is the committed freeze evidence that the FROZEN manifest
+    # and `reissue_collect_list` hash-check; overwriting it silently would break
+    # that chain (WR-04). Refuse before any network call unless --force is given.
+    if args.out.exists() and not args.force:
+        raise FreezeError(
+            f"--out {args.out} already exists; refusing to overwrite the freeze evidence "
+            "(pass a new --out path, or --force to replace it deliberately)"
+        )
     run_date: date = args.run_date or datetime.now(UTC).date()
     report = asyncio.run(_propose(run_date))
     write_report(report, args.out)
@@ -868,7 +876,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--out",
         type=Path,
         default=DEFAULT_REPORT_PATH,
-        help=f"Report path (default: {DEFAULT_REPORT_PATH.as_posix()}).",
+        help=f"Report path (default: {DEFAULT_REPORT_PATH.as_posix()}); must not exist.",
+    )
+    propose.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace an existing report at --out (it is the committed freeze evidence).",
     )
     frz = sub.add_parser("freeze", help="write the FROZEN manifest and witness from a report")
     frz.add_argument("--report", type=Path, required=True, help="Report written by propose.")
