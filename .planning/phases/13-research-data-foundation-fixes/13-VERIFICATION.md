@@ -1,8 +1,8 @@
 ---
 phase: 13-research-data-foundation-fixes
 verified: 2026-10-03T00:00:00Z
-status: human_needed
-score: 5/5 applicable success criteria verified in code and on disk (SC6 moved to Phase 13.1, not applicable); 3 human-verification items, 0 blocking gaps
+status: passed
+score: 5/5 applicable success criteria verified in code and on disk (SC6 moved to Phase 13.1, not applicable); 3 human-verification items resolved, 0 blocking gaps
 covered_files:
   - docs/research/universe/collect-list-v2.toml
   - docs/research/universe/research-universe-v1.sufficiency-report.json
@@ -104,7 +104,7 @@ _Verifier: Claude (gsd-verifier)_
 ## Human verification results (orchestrator, 2026-10-03)
 
 1. **Collector running (verified).** `docker compose exec collector /app/.venv/bin/python -m src.data.collector --healthcheck` printed `collector-health: OK - 18 symbols fresh` (exit 0). Both containers show healthy and recent ticks log `oi: 18, gaps: 0`. Note: the Docker daemon restarted at 15:02:14Z (collector and postgres show the same start time, RestartCount 0), so OI polling had an interruption of unknown length before that; the collector resumed on its own. This is an operations fact, not a Phase 13 gap.
-2. **Development-block shortfall (needs the operator's acceptance).** HYPEUSDT (75,690 of 420,480 1m bars), PUMPUSDT (16,830) and REEFUSDT (160,380, nothing after delivery) are short because of onboarding or delivery limits, not download failures. Recorded in 13-13-SUMMARY.md "Shortfall for the user". Pending: the operator confirms it is accepted for Phase 14.
+2. **Development-block shortfall (needs the operator's acceptance).** HYPEUSDT (75,690 of 420,480 1m bars), PUMPUSDT (16,830) and REEFUSDT (160,380, nothing after delivery) are short because of onboarding or delivery limits, not download failures. Recorded in 13-13-SUMMARY.md "Shortfall for the user". **Accepted by the operator on 2026-10-03** for Phase 14.
 3. **CR-02 and CR-04 on a real second run (observed).** The 24-month backfill ran CR-02's store-wins resume on real data for all symbols (`interior_hole` and `cursor_ahead_of_store` warnings, only the missing 12 months fetched, later partitions untouched, integrity scan clean over 76,400 files). The CR-04 funding start was exercised by the real re-run: funding rows in the report are OK for all 19 symbols with no gap (2,190 ticks for 8-hour symbols, 4,379 for the four shorter-interval symbols).
 
 ## Bookkeeping to do at close
