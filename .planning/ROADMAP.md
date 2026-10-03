@@ -46,7 +46,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 10: Journal Depth + Kill-Gate Operations** - MFE/MAE analytics and the 3-families/6-months stop rule
 - [ ] **Phase 11: Decision Alignment (docs + params)** - Apply D031–D039 to canonical docs and parameter sets; protocol v1.1.0 pre-registration
 - [x] **Phase 12: Fee + Cost Model Correctness** - Costs in quote currency everywhere, taker entry, exit slippage, real commission rate (was Phase 11) (completed 2026-09-30)
-- [ ] **Phase 13: Research Data Foundation Fixes** - Collector covers the D039 research universe, history depth, point-in-time universe, mark-price klines, backfill robustness, Parquet→backtest builder
+- [x] **Phase 13: Research Data Foundation Fixes** - Collector covers the D039 research universe, history depth, point-in-time universe, mark-price klines, backfill robustness, Parquet→backtest builder (completed 2026-10-03)
 - [ ] **Phase 13.1: Deployment & CI** (INSERTED) - CI on every commit, pinned images, one-command bootstrap and provider-portable migrate, S3-compatible encrypted backups; real VPS provisioning deferred
 - [ ] **Phase 14: Backtest Simulator Causality Rewrite** - Fills only after the signal bar, multi-bar holding, TP1/TP2 ladder, funding, mark-price triggers
 - [ ] **Phase 15: Strategy Geometry Correction** - Trend-pullback SL outside zone, confirmed pivots, min stop distance; families match their sheets
@@ -479,7 +479,7 @@ Plans:
 
 **Success Criteria**:
 1. The collector universe covers the D039 research universe (10–15 symbols), not only the live-5, so that it is ready to run 24/7 under Docker Compose (D042). Running it is time-sensitive, because each day of delay loses a day of OI permanently (F-107). It can run on a personal machine or on the VPS as soon as one exists, ahead of the rest of this phase. The Docker HEALTHCHECK fix (F-705), the PostgreSQL localhost binding (F-709) and the encrypted off-VPS backup (F-108, F-910) moved to Phase 13.1.
-2. A CLI backfills the decided history depth: 1m for 6–12 months, 1H/4H for 2 years (F-906). It covers the point-in-time research universe from D039, including delisted symbols (F-024, F-907), and runs `backfill_universe` / `refresh_symbol_metadata` (F-122). Before any evaluation it freezes and hashes `docs/research/universe/research-universe-v1.toml` (DRAFT to FROZEN, D-09) and checks the decided history depth against the protocol v1.1.0 trade floor of D043, reporting a shortfall to the user instead of lowering the floor.
+2. A CLI backfills the decided history depth: 1m for 6–12 months by default and 24 months as delivered (user decision D-21, 2026-10-03), 1H/4H for 2 years (F-906). It covers the point-in-time research universe from D039, including delisted symbols (F-024, F-907), and runs `backfill_universe` / `refresh_symbol_metadata` (F-122). Before any evaluation it freezes and hashes `docs/research/universe/research-universe-v1.toml` (DRAFT to FROZEN, D-09) and checks the decided history depth against the protocol v1.1.0 trade floor of D043, reporting a shortfall to the user instead of lowering the floor.
 3. Mark-price klines are ingested for SL/TP trigger evaluation (D037).
 4. Backfill never publishes a partial UTC day as immutable data. It writes files atomically (tmp + replace) and accepts zero-trade bars (F-402, F-408, F-409). The supervisor backfills before it resubscribes (F-413).
 5. A Parquet → backtest case-input builder exists (M4, v0.3 audit).
@@ -487,7 +487,7 @@ Plans:
 
 **Audit refs**: F-107, F-906, F-907, F-024, F-122, F-402, F-408, F-409, F-413, F-706
 
-**Plans:** 12/13 plans executed
+**Plans:** 13/13 plans complete
 
 Plans:
 **Wave 1**
@@ -511,7 +511,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [x] 13-11-PLAN.md — Documentation: Phase 13 facts in SOURCES/BINANCE, datasets and rules in DATA_MODEL/DATA_PIPELINE/CONFIGURATION, D049, requirements-gate OPS-06 mapping
-- [ ] 13-13-PLAN.md — Collect list re-issued with still-TRADING frozen symbols, operator backfill run, committed sufficiency report and shortfall surfaced (non-autonomous)
+- [x] 13-13-PLAN.md — Collect list re-issued with still-TRADING frozen symbols, operator backfill run, committed sufficiency report and shortfall surfaced (non-autonomous)
 
 ### Phase 13.1: Deployment & CI (INSERTED)
 
@@ -974,7 +974,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 10. Journal Depth + Kill-Gate Operations | 12/12 | In Progress|  |
 | 11. Decision Alignment (docs + params) | 8/8 | In Progress|  |
 | 12. Fee + Cost Model Correctness | 11/11 | Complete    | 2026-09-30 |
-| 13. Research Data Foundation Fixes | 12/13 | In Progress|  |
+| 13. Research Data Foundation Fixes | 13/13 | Complete    | 2026-10-03 |
 | 13.1. Deployment & CI | 11/12 | In Progress|  |
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
