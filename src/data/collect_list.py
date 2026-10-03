@@ -254,28 +254,48 @@ def reissue_collect_list(
     *,
     chosen_on: date,
     list_id: str,
+    exchange_info: Sequence[Mapping[str, Any]] | None = None,
 ) -> CollectList:
     """Re-issue `base` with the frozen research symbols that are still TRADING (D-24).
 
     The result is `base.symbols` union the freeze report's `proposed_symbols`
-    whose recorded candidate status is `TRADING`; SETTLING and other
-    non-TRADING symbols are left out so the collector does not journal a gap
-    row for them every tick (T-13-53). Statuses come from the report's own
-    candidate records (no network). `load_report` verifies the report hash, so
+    that are TRADING; SETTLING and other non-TRADING symbols are left out so
+    the collector does not journal a gap row for them every tick (T-13-53).
+
+    The status basis is explicit (WR-06). Without `exchange_info` it is the
+    freeze report's own candidate records (no network), which are only as
+    fresh as the report's `run_date`: a symbol delisted or settling since then
+    is still added, and `selection_rule` says so. With `exchange_info` (the
+    `symbols` list of a current `GET /fapi/v1/exchangeInfo`, supplied by the
+    caller, never fetched here) a frozen symbol is added only when it is
+    currently an eligible TRADING USDT perpetual, and `selection_rule` names
+    `chosen_on` as the as-of date. `load_report` verifies the report hash, so
     an edited report raises `FreezeError`, which propagates.
     """
     from src.data.universe_freeze import load_report  # lazy: see module docstring
 
     report = load_report(Path(freeze_report_path))
-    status = {c.symbol: c.status for c in report.candidates}
-    trading = {sym for sym in report.proposed_symbols if status.get(sym) == "TRADING"}
+    if exchange_info is None:
+        status = {c.symbol: c.status for c in report.candidates}
+        trading = {sym for sym in report.proposed_symbols if status.get(sym) == "TRADING"}
+        basis = (
+            f"status was TRADING in the freeze report of {report.run_date.isoformat()} "
+            "(not re-checked against the exchange)"
+        )
+    else:
+        live = {rec["symbol"] for rec in exchange_info if _is_eligible(rec) and "symbol" in rec}
+        trading = {sym for sym in report.proposed_symbols if sym in live}
+        basis = (
+            f"is TRADING in exchangeInfo as of {chosen_on.isoformat()} "
+            f"(freeze report of {report.run_date.isoformat()})"
+        )
     return CollectList(
         list_id=list_id,
         chosen_on=chosen_on,
         top_n=base.top_n,
         selection_rule=(
             f"{base.list_id} symbols union the frozen research-universe symbols whose "
-            "status was TRADING in the freeze report (D-24)"
+            f"{basis} (D-24)"
         ),
         symbols=tuple(sorted(set(base.symbols) | trading)),
     )
@@ -356,6 +376,16 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--freeze-report", type=Path, required=True, help="Committed freeze report JSON."
     )
     reissue.add_argument("--chosen-on", required=True, help="ISO date YYYY-MM-DD (UTC).")
+    reissue.add_argument(
+        "--exchange-info-json",
+        type=Path,
+        default=None,
+        help=(
+            "Current GET /fapi/v1/exchangeInfo saved as JSON. When given, a frozen symbol is "
+            "added only if it is TRADING there now; otherwise the (possibly stale) freeze "
+            "report status is used."
+        ),
+    )
     reissue.add_argument("--list-id", default=DEFAULT_REISSUE_LIST_ID)
     reissue.add_argument("--out", type=Path, required=True, help="Output path; must not exist.")
     return parser.parse_args(argv)
@@ -384,14 +414,38 @@ def _run_reissue(args: argparse.Namespace) -> None:
     if args.out.exists():
         raise CollectListError(f"--out {args.out} already exists; refusing to overwrite")
     base = load_collect_list(args.base)
+    exchange_info: list[Mapping[str, Any]] | None = None
+    if args.exchange_info_json is not None:
+        raw = _load_json(args.exchange_info_json, "exchangeInfo json")
+        if isinstance(raw, dict):
+            raw = raw.get("symbols")
+        if not isinstance(raw, list):
+            raise CollectListError("exchangeInfo json must hold a 'symbols' list")
+        exchange_info = [rec for rec in raw if isinstance(rec, dict)]
+    else:
+        print(
+            "collect-list: warning: no --exchange-info-json; frozen symbols are filtered by the "
+            "freeze report's status, which may be stale",
+            file=sys.stderr,
+        )
     reissued = reissue_collect_list(
-        base, args.freeze_report, chosen_on=chosen_on, list_id=args.list_id
+        base,
+        args.freeze_report,
+        chosen_on=chosen_on,
+        list_id=args.list_id,
+        exchange_info=exchange_info,
     )
     added = sorted(set(reissued.symbols) - set(base.symbols))
+    basis_text = (
+        f"exchangeInfo {args.exchange_info_json.as_posix()}"
+        if args.exchange_info_json is not None
+        else "freeze report (may be stale)"
+    )
     note = "\n".join(
         [
             f"base list: {args.base.as_posix()} ({base.list_id}, chosen {base.chosen_on})",
             f"freeze report: {args.freeze_report.as_posix()}",
+            f"status basis: {basis_text}",
             f"added (frozen, status TRADING): {', '.join(added) if added else 'none'}",
             "Regenerate: python -m src.data.collect_list reissue --help",
         ]

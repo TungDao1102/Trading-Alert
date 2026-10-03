@@ -458,6 +458,75 @@ def test_reissue_adds_only_trading_frozen_symbols(tmp_path: Path) -> None:
     assert "TRADING" in result.selection_rule
 
 
+def _exchange_record(symbol: str, status: str = "TRADING") -> dict[str, str]:
+    return {
+        "symbol": symbol,
+        "status": status,
+        "contractType": "PERPETUAL",
+        "quoteAsset": "USDT",
+    }
+
+
+def test_reissue_with_exchange_info_drops_symbols_no_longer_trading(tmp_path: Path) -> None:
+    """WR-06: a frozen symbol that settled or vanished since the freeze is not added."""
+    base = _base_list(tmp_path)
+    report = _write_freeze_report(
+        tmp_path / "freeze.json",
+        {"NEWAUSDT": "TRADING", "NEWBUSDT": "TRADING", "NEWCUSDT": "TRADING"},
+    )
+    exchange = [_exchange_record("NEWAUSDT"), _exchange_record("NEWBUSDT", status="SETTLING")]
+
+    result = reissue_collect_list(
+        base,
+        report,
+        chosen_on=date(2026, 10, 3),
+        list_id="collect-list-v2",
+        exchange_info=exchange,
+    )
+
+    assert set(result.symbols) == set(base.symbols) | {"NEWAUSDT"}
+    assert "2026-10-03" in result.selection_rule
+    assert "exchangeInfo" in result.selection_rule
+
+
+def test_reissue_without_exchange_info_names_the_report_date_as_the_basis(
+    tmp_path: Path,
+) -> None:
+    base = _base_list(tmp_path)
+    report = _write_freeze_report(tmp_path / "freeze.json", {"NEWAUSDT": "TRADING"})
+
+    result = reissue_collect_list(
+        base, report, chosen_on=date(2026, 10, 9), list_id="collect-list-v2"
+    )
+
+    assert "freeze report of 2026-10-03" in result.selection_rule
+    assert "not re-checked" in result.selection_rule
+
+
+def test_reissue_cli_uses_exchange_info_and_warns_when_it_is_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base_path = _write(tmp_path, _render())
+    report = _write_freeze_report(
+        tmp_path / "freeze.json", {"NEWAUSDT": "TRADING", "NEWBUSDT": "TRADING"}
+    )
+    info = tmp_path / "exchange.json"
+    info.write_text(json.dumps({"symbols": [_exchange_record("NEWAUSDT")]}), encoding="utf-8")
+    common = ["reissue", "--base", str(base_path), "--freeze-report", str(report)]
+
+    stale = tmp_path / "stale.toml"
+    assert collect_list_main([*common, "--chosen-on", "2026-10-03", "--out", str(stale)]) == 0
+    assert "may be stale" in capsys.readouterr().err
+    assert {"NEWAUSDT", "NEWBUSDT"} <= set(load_collect_list(stale).symbols)
+
+    fresh = tmp_path / "fresh.toml"
+    args = [*common, "--chosen-on", "2026-10-03", "--exchange-info-json", str(info)]
+    assert collect_list_main([*args, "--out", str(fresh)]) == 0
+    assert "may be stale" not in capsys.readouterr().err
+    symbols = set(load_collect_list(fresh).symbols)
+    assert "NEWAUSDT" in symbols and "NEWBUSDT" not in symbols
+
+
 def test_reissue_is_superset_of_base_and_live5(tmp_path: Path) -> None:
     base = _base_list(tmp_path)
     report = _write_freeze_report(tmp_path / "freeze.json", {"NEWAUSDT": "TRADING"})
