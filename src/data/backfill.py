@@ -48,6 +48,8 @@ from src.data.quality import QualityVerdict, check_batch, check_mark_batch
 from src.data.store import (
     DEFAULT_RAW_ROOT,
     MARK_DATASET_DIR,
+    REPLACE_MAX_ATTEMPTS,
+    REPLACE_RETRY_SLEEP_SECONDS,
     publish_batch,
     publish_mark_batch,
 )
@@ -309,11 +311,25 @@ class CursorStore:
     def write(self, *, symbol: str, interval: str, cursor_ms: int) -> None:
         # Atomic persist: a kill mid-write must never leave a torn cursor
         # file behind (tmp + os.replace is atomic on POSIX and Windows).
+        # Windows can refuse os.replace with PermissionError while an indexer,
+        # antivirus scanner or sync client briefly holds the cursor file (a
+        # cursor is rewritten after every page, so it is hit far more often
+        # than a partition). Retry like atomic_write_parquet, then fail closed.
         path = self._path(symbol=symbol, interval=interval)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(str(cursor_ms), encoding="utf-8")
-        os.replace(tmp, path)
+        try:
+            tmp.write_text(str(cursor_ms), encoding="utf-8")
+            for attempt in range(1, REPLACE_MAX_ATTEMPTS + 1):
+                try:
+                    os.replace(tmp, path)
+                    break
+                except PermissionError:
+                    if attempt == REPLACE_MAX_ATTEMPTS:
+                        raise
+                    time.sleep(REPLACE_RETRY_SLEEP_SECONDS)
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- #

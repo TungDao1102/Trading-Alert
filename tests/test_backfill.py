@@ -470,6 +470,62 @@ def test_rate_limit_predicate_pins_canonical_sdk_error_names() -> None:
     assert _is_rate_limit(ValueError("TooManyRequests-like value")) is False
 
 
+def test_cursor_write_retries_a_transient_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A briefly locked cursor file (Windows indexer/AV/sync) must not kill the run."""
+    import src.data.backfill as backfill_module
+
+    real_replace = backfill_module.os.replace
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    def flaky_replace(src: Any, dst: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise PermissionError("locked")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(backfill_module.os, "replace", flaky_replace)
+    monkeypatch.setattr(backfill_module.time, "sleep", sleeps.append)
+
+    store = CursorStore(root=tmp_path / "cursors")
+    store.write(symbol="BNBUSDT", interval=INTERVAL, cursor_ms=BASE_OPEN_MS)
+
+    assert calls["n"] == 3
+    assert len(sleeps) == 2
+    assert store.read(symbol="BNBUSDT", interval=INTERVAL) == BASE_OPEN_MS
+    assert not list((tmp_path / "cursors").glob("*.tmp"))
+
+
+def test_cursor_write_persistent_permission_error_raises_and_cleans_tmp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retries are bounded: a permanent lock fails closed, keeps the old cursor, leaves no tmp."""
+    import src.data.backfill as backfill_module
+    from src.data.store import REPLACE_MAX_ATTEMPTS
+
+    store = CursorStore(root=tmp_path / "cursors")
+    store.write(symbol="BNBUSDT", interval=INTERVAL, cursor_ms=BASE_OPEN_MS)
+
+    calls = {"n": 0}
+
+    def always_locked(src: Any, dst: Any) -> None:
+        calls["n"] += 1
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(backfill_module.os, "replace", always_locked)
+    monkeypatch.setattr(backfill_module.time, "sleep", lambda _s: None)
+
+    with pytest.raises(PermissionError):
+        store.write(symbol="BNBUSDT", interval=INTERVAL, cursor_ms=BASE_OPEN_MS + INTERVAL_MS)
+
+    assert calls["n"] == REPLACE_MAX_ATTEMPTS
+    monkeypatch.undo()
+    assert store.read(symbol="BNBUSDT", interval=INTERVAL) == BASE_OPEN_MS
+    assert not list((tmp_path / "cursors").glob("*.tmp"))
+
+
 def _result_summary(result: BackfillResult) -> str:
     """Tiny formatter for ad-hoc verification scripts."""
     return (
