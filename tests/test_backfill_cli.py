@@ -12,6 +12,7 @@ plan 13-13 changes the default collect list.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -1266,6 +1267,58 @@ async def test_archive_source_survives_a_complete_rerun(tmp_path: Path, session:
     assert report.sources[("trade", "FTTUSDT")] == "ARCHIVE"
     (row,) = _rows_for(report, "trade", "FTTUSDT")
     assert (row.source, row.cause) == ("ARCHIVE", "DELISTED_CAPPED")
+
+
+async def test_archive_source_survives_a_subset_run(tmp_path: Path, session: Session) -> None:
+    """WR-02: a subset run that archives another symbol keeps the first one's provenance."""
+    from src.data.backfill_cli import SOURCES_FILE_NAME, run_backfill
+
+    ftt = _filters("FTTUSDT", status="SETTLING", delivery_ms=DELIVERY_MS)
+    archive = FakeArchive(
+        {
+            "FTTUSDT": (_ms(2026, 7, 1), DELIVERY_MS),
+            "GONEUSDT": (_ms(2026, 7, 1), _ms(2026, 8, 5, 12)),
+        }
+    )
+    both = _config(tmp_path, symbols=["FTTUSDT", "GONEUSDT"], depth_months={"1h": 2})
+    await run_backfill(
+        both,
+        adapter=FakeAdapter([ftt], session=session, invalid_symbols=["FTTUSDT"]),
+        session=session,
+        clock=_clock(0),
+        archive_client=archive.client(),
+    )
+    sidecar = both.cursor_root / SOURCES_FILE_NAME
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == {
+        "trade|FTTUSDT": "ARCHIVE",
+        "trade|GONEUSDT": "ARCHIVE",
+    }
+
+    only_gone = _config(tmp_path, symbols=["GONEUSDT"], depth_months={"1h": 2})
+    await run_backfill(
+        only_gone,
+        adapter=FakeAdapter([ftt], session=session, invalid_symbols=["FTTUSDT"]),
+        session=session,
+        clock=_clock(1),
+        archive_client=archive.client(),
+    )
+    assert set(json.loads(sidecar.read_text(encoding="utf-8"))) == {
+        "trade|FTTUSDT",
+        "trade|GONEUSDT",
+    }
+
+    again = FakeAdapter([ftt], session=session, invalid_symbols=["FTTUSDT"])
+    report = await run_backfill(
+        both,
+        adapter=again,
+        session=session,
+        clock=_clock(2),
+        archive_client=archive.client(),
+    )
+
+    assert report.sources[("trade", "FTTUSDT")] == "ARCHIVE"
+    assert report.sources[("trade", "GONEUSDT")] == "ARCHIVE"
+    assert "FTTUSDT" not in {r[0] for r in again.kline_requests}
 
 
 async def test_archive_only_symbol_capped_at_last_archive_day(

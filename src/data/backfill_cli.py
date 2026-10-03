@@ -494,7 +494,9 @@ def _load_archive_presets(cursor_root: Path) -> set[str]:
 
 
 def _save_archive_presets(cursor_root: Path, symbols: set[str]) -> None:
+    """Persist `symbols` as the complete archive-provenance set (empty: remove the file)."""
     if not symbols:
+        (cursor_root / SOURCES_FILE_NAME).unlink(missing_ok=True)
         return
     doc = {f"trade|{sym}": SOURCE_ARCHIVE for sym in sorted(symbols)}
     text = json.dumps(doc, sort_keys=True, indent=2) + "\n"
@@ -684,7 +686,12 @@ async def _backfill_and_report(
     }
     sources: dict[tuple[str, str], str] = {}
     archive_capped: set[tuple[str, str]] = set()  # (symbol, interval) ended by the archive
-    archived = _load_archive_presets(config.cursor_root) & set(symbols)
+    # The sidecar covers every symbol ever filled from the archive. A subset run
+    # (`--symbols`, a changed collect list) must not erase the provenance of the
+    # symbols it does not process (WR-02), so only this run's symbols are
+    # rewritten when the file is saved below.
+    persisted_archived = _load_archive_presets(config.cursor_root)
+    archived = persisted_archived & set(symbols)
 
     def adopt_archive(symbol: str, last_day: date) -> None:
         """Route `symbol`'s trade history to the archive, capped at its last day."""
@@ -837,7 +844,9 @@ async def _backfill_and_report(
         if w.has_window:
             sources.setdefault((w.dataset, w.symbol), SOURCE_REST)
     _save_archive_presets(
-        config.cursor_root, {s for s in archived if sources.get(("trade", s)) == SOURCE_ARCHIVE}
+        config.cursor_root,
+        (persisted_archived - set(symbols))
+        | {s for s in archived if sources.get(("trade", s)) == SOURCE_ARCHIVE},
     )
     for dataset_name in datasets:
         listed = " ".join(
