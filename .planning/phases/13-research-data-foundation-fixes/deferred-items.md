@@ -25,3 +25,16 @@
 ## Resolved by 13-11 (2026-09-30)
 
 - The RQ-01/RQ-04 decision-alignment failures listed under 13-01 are fixed: the requirements gate now maps OPS-06 to Phase 13.1 (drift introduced by commit 7ceede3). `verify_decision_alignment.py all` ends ALL_PASS all.
+
+## Phase 13 close-out (2026-10-03): deferred on purpose
+
+Each item has an owner and the reason it is not done inside Phase 13. Items the review found that were small and in scope (CR-01..CR-04, WR-01..WR-07, IN-01..IN-04, the telegram_notify mypy error, funding coverage in the sufficiency report) were fixed in Phase 13 and are listed in `13-REVIEW-FIX.md` and `13-13-SUMMARY.md`, not here.
+
+| # | Item | Owner | Why not now |
+|---|------|-------|-------------|
+| 1 | Funding is stored one Parquet file per tick (about 50,000 files under `data/raw/data_class=funding`). Group by day or month. | Infra (Phase 13.1 or backlog) | Changes the on-disk layout that the backfill, the case-input builder and the backup all read; storage layout belongs with the backup work. |
+| 2 | The host store `data/raw` is outside the project backup flow (backups cover the Docker volume `rawdata`), and the user has OneDrive sync turned off, so the backfilled history has no second copy. | Phase 13.1 (backup) | New backup scope. Interim manual step: archive `data/raw` with a checksum to another disk. The history can be refetched (about 3 hours); the live OI in the Docker volume cannot. |
+| 3 | Legacy Parquet partitions with a different Decimal scale (for example DOGSUSDT, SOLUSDT, the older 12 months of 1m trade). Readers widen them losslessly. | Optional, when needed | `scripts/repair_parquet_scale.py` exists (dry-run by default, writes copies to a new root, never in place). Repairing is optional and needs free disk space and a user decision. |
+| 4 | The first funding tick of HYPEUSDT carries `.006` ms (12:00:00.006). | Phase 14 | Only matters when funding is joined to bar times; handle in the Phase 14 funding join. |
+| 5 | A day for which Binance really has no bars is requested again on every backfill run (one request per such day). Accepted trade-off of the CR-02 fix. | None | Documented behaviour, cheap. |
+| 6 | Three tests failed in the CR fix run for reasons believed unrelated: `test_deploy_workflows.py::test_ci_docker_job`, `test_docker_cutover.py` (forty-five-minute test), `test_deploy_docs.py` (lookup is read-only). See the investigation result in `13-13-SUMMARY.md`. | Phase 13.1 | Deployment and Docker tests belong to that phase. |

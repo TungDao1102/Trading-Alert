@@ -35,7 +35,7 @@ COPY src ./src
 COPY scripts ./scripts
 COPY alembic.ini ./
 # Operational collect list (D-01, D-02, D-24): the collector reads its symbols
-# from docs/research/universe/collect-list-v1.toml relative to /app.
+# from docs/research/universe/collect-list-v2.toml relative to /app.
 COPY docs/research/universe ./docs/research/universe
 
 # Never run as root. Fixed numeric UID so named-volume ownership is predictable on every

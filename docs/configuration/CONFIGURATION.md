@@ -71,7 +71,7 @@ Collector, `python -m src.data.collector`:
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| `--collect-list` | `DEFAULT_COLLECT_LIST_PATH` in `src/data/collect_list.py`, that is `docs/research/universe/collect-list-v1.toml` relative to the working directory (the repository root locally, `/app` in the image, which ships `docs/research/universe`) | The symbols the OI and funding collector polls. The latest versioned list under `docs/research/universe` is the one in use; after the research-universe freeze a new list version is issued and the path is updated (D-24). |
+| `--collect-list` | `DEFAULT_COLLECT_LIST_PATH` in `src/data/collect_list.py`, that is `docs/research/universe/collect-list-v2.toml` relative to the working directory (the repository root locally, `/app` in the image, which ships `docs/research/universe`) | The symbols the OI and funding collector polls. The latest versioned list under `docs/research/universe` is the one in use; after the research-universe freeze a new list version is issued and the path is updated (D-24). |
 | `--universe` | none | Explicit symbol override, validated against `^[A-Z0-9]+USDT$`. |
 | `--cadence-seconds` | 300 | Poll cadence; the loop sleeps to the next grid boundary. |
 | `--raw-root`, `--database-url` | `data/raw`, `DATABASE_URL_SYNC` or `DATABASE_URL` | Parquet raw store and watermark database. |
