@@ -687,3 +687,118 @@ async def test_429_backs_off_beyond_ten_seconds_and_honors_retry_after(
     assert len(sleeps) == 2
     assert sleeps[0] >= 45  # Retry-After wins over the 5 s first backoff
     assert RATE_LIMIT_BACKOFF_INITIAL_SECONDS <= sleeps[1] <= RATE_LIMIT_BACKOFF_CAP_SECONDS
+
+
+def test_cursor_write_fsyncs_before_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WR-07: the temp file is fsynced before it replaces the cursor."""
+    import src.data.backfill as backfill_module
+
+    order: list[str] = []
+    real_fsync = backfill_module.os.fsync
+    real_replace = backfill_module.os.replace
+
+    def spy_fsync(fd: int) -> None:
+        order.append("fsync")
+        real_fsync(fd)
+
+    def spy_replace(src: Any, dst: Any) -> None:
+        order.append("replace")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(backfill_module.os, "fsync", spy_fsync)
+    monkeypatch.setattr(backfill_module.os, "replace", spy_replace)
+
+    CursorStore(root=tmp_path / "cursors").write(
+        symbol="BNBUSDT", interval=INTERVAL, cursor_ms=BASE_OPEN_MS
+    )
+
+    assert order == ["fsync", "replace"]
+
+
+def test_cursor_write_failure_is_not_masked_by_a_locked_tmp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WR-07: a PermissionError while cleaning the tmp file must not hide the real error."""
+    import src.data.backfill as backfill_module
+
+    def replace_fails(src: Any, dst: Any) -> None:
+        raise PermissionError("replace locked")
+
+    real_unlink = Path.unlink
+
+    def unlink_fails(self: Path, missing_ok: bool = False) -> None:
+        if self.name.endswith(".tmp"):
+            raise PermissionError("tmp locked")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(backfill_module.os, "replace", replace_fails)
+    monkeypatch.setattr(backfill_module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(Path, "unlink", unlink_fails)
+
+    store = CursorStore(root=tmp_path / "cursors")
+    with pytest.raises(PermissionError, match="replace locked"):
+        store.write(symbol="BNBUSDT", interval=INTERVAL, cursor_ms=BASE_OPEN_MS)
+
+
+def test_cursor_read_retries_a_transient_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WR-07: reads tolerate the same brief lock as writes."""
+    import src.data.backfill as backfill_module
+
+    store = CursorStore(root=tmp_path / "cursors")
+    store.write(symbol="BNBUSDT", interval=INTERVAL, cursor_ms=BASE_OPEN_MS)
+
+    real_read_text = Path.read_text
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    def flaky_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self.name.endswith(".cursor"):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise PermissionError("locked")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+    monkeypatch.setattr(backfill_module.time, "sleep", sleeps.append)
+
+    assert store.read(symbol="BNBUSDT", interval=INTERVAL) == BASE_OPEN_MS
+    assert calls["n"] == 3
+    assert len(sleeps) == 2
+
+
+async def test_paginator_writes_the_cursor_off_the_event_loop_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WR-07: the retry sleep in CursorStore.write must not block the event loop."""
+    import threading
+
+    base = BASE_OPEN_MS
+    bars = [
+        _mk_kline(open_ms=base + i * INTERVAL_MS, close_ms=base + (i + 1) * INTERVAL_MS - 1)
+        for i in range(24)
+    ]
+    threads: list[int] = []
+    real_write = CursorStore.write
+
+    def spy_write(self: CursorStore, **kwargs: Any) -> None:
+        threads.append(threading.get_ident())
+        real_write(self, **kwargs)
+
+    monkeypatch.setattr(CursorStore, "write", spy_write)
+
+    await backfill_symbol_interval(
+        FakeAdapter(responses=[bars]),  # type: ignore[arg-type]
+        symbol="BTCUSDT",
+        interval=INTERVAL,
+        start_ms=base,
+        end_ms=base + 24 * INTERVAL_MS,
+        raw_root=tmp_path,
+        config=BackfillConfig(interval_ms=INTERVAL_MS, pace_seconds=0, page_size=24),
+        cursor_store=CursorStore(root=tmp_path / "cursors"),
+    )
+
+    assert threads and threading.get_ident() not in threads

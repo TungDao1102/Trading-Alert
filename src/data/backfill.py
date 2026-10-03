@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import contextlib
 import os
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -306,7 +307,16 @@ class CursorStore:
         path = self._path(symbol=symbol, interval=interval)
         if not path.exists():
             return None
-        text = path.read_text(encoding="utf-8").strip()
+        # Same transient Windows lock as `write` (indexer, antivirus, sync
+        # client): retry a bounded number of times, then fail closed.
+        for attempt in range(1, REPLACE_MAX_ATTEMPTS + 1):
+            try:
+                text = path.read_text(encoding="utf-8").strip()
+                break
+            except PermissionError:
+                if attempt == REPLACE_MAX_ATTEMPTS:
+                    raise
+                time.sleep(REPLACE_RETRY_SLEEP_SECONDS)
         if not text:
             return None
         try:
@@ -321,16 +331,23 @@ class CursorStore:
 
     def write(self, *, symbol: str, interval: str, cursor_ms: int) -> None:
         # Atomic persist: a kill mid-write must never leave a torn cursor
-        # file behind (tmp + os.replace is atomic on POSIX and Windows).
+        # file behind (tmp + fsync + os.replace is atomic on POSIX and
+        # Windows, and the fsync keeps a power loss from leaving an empty or
+        # stale cursor, as the parquet writer does).
         # Windows can refuse os.replace with PermissionError while an indexer,
         # antivirus scanner or sync client briefly holds the cursor file (a
         # cursor is rewritten after every page, so it is hit far more often
         # than a partition). Retry like atomic_write_parquet, then fail closed.
+        # The retry sleeps, so the paginator calls this through
+        # `asyncio.to_thread` rather than blocking the event loop (WR-07).
         path = self._path(symbol=symbol, interval=interval)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
         try:
-            tmp.write_text(str(cursor_ms), encoding="utf-8")
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(str(cursor_ms))
+                handle.flush()
+                os.fsync(handle.fileno())
             for attempt in range(1, REPLACE_MAX_ATTEMPTS + 1):
                 try:
                     os.replace(tmp, path)
@@ -340,7 +357,9 @@ class CursorStore:
                         raise
                     time.sleep(REPLACE_RETRY_SLEEP_SECONDS)
         finally:
-            tmp.unlink(missing_ok=True)
+            # Never let a locked tmp file mask the original error.
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -697,7 +716,8 @@ async def backfill_symbol_interval(
                             # Persist on every successful publish so a killed
                             # run resumes at the right cursor (D-02
                             # reversibility).
-                            cursor_store.write(
+                            await asyncio.to_thread(
+                                cursor_store.write,
                                 symbol=symbol,
                                 interval=interval,
                                 cursor_ms=last_published_open_ms,
@@ -791,7 +811,8 @@ async def backfill_symbol_interval(
             rows_published += len(candles)
             last_published_open_ms = utc_ms(candles[-1].open_time_utc)
             if cursor_store is not None:
-                cursor_store.write(
+                await asyncio.to_thread(
+                    cursor_store.write,
                     symbol=symbol,
                     interval=interval,
                     cursor_ms=last_published_open_ms,
