@@ -530,6 +530,23 @@ def is_rate_limit_error(exc: BaseException) -> bool:
     return "TooManyRequests" in cls_name or "RateLimit" in cls_name
 
 
+def is_rate_limit_ban_error(exc: BaseException) -> bool:
+    """True when `exc` is an IP ban (HTTP 418), not a plain 429.
+
+    Binance documents that requests sent while banned extend the ban, so a
+    caller must stop instead of retrying (WR-01).
+    """
+    return isinstance(exc, RateLimitBanError) or "RateLimitBan" in type(exc).__name__
+
+
+def rate_limit_retry_after_seconds(exc: BaseException) -> float | None:
+    """Seconds from the `Retry-After` header carried by a 429, else None."""
+    value = getattr(exc, "retry_after", None)
+    if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+        return None
+    return float(value)
+
+
 # Binance error code for an unknown symbol (`-1121 Invalid symbol.`). The SDK
 # raises `BadRequestError` for HTTP 400 with the Binance code in `status_code`.
 # The freeze CLI and backfill treat it as "no data for this symbol" and fall

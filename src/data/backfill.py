@@ -43,7 +43,13 @@ from typing import Any, Protocol, overload
 
 import structlog
 import tenacity
-from src.adapters.binance_usdm import Kline, MarkKline, is_rate_limit_error
+from src.adapters.binance_usdm import (
+    Kline,
+    MarkKline,
+    is_rate_limit_ban_error,
+    is_rate_limit_error,
+    rate_limit_retry_after_seconds,
+)
 from src.data.quality import QualityVerdict, check_batch, check_mark_batch
 from src.data.store import (
     DEFAULT_RAW_ROOT,
@@ -190,6 +196,11 @@ MAX_CONSECUTIVE_EMPTY_PAGES = 100
 # becomes a rate-limit, so consecutive structural rejections without a
 # single successful publish raise instead of re-fetching forever.
 MAX_CONSECUTIVE_REJECTIONS = 5
+
+# 429 backoff (WR-01): 5 s, 10 s, 20 s, 40 s ... capped at 60 s per wait, never
+# below the server's Retry-After. Sub-10-second retries just feed the limiter.
+RATE_LIMIT_BACKOFF_INITIAL_SECONDS = 5.0
+RATE_LIMIT_BACKOFF_CAP_SECONDS = 60.0
 
 
 class StructuralRejectionError(RuntimeError):
@@ -385,10 +396,33 @@ async def fetch_page_with_retry(
     jitter_max_seconds: float,
     dataset: DatasetSpec[Any, Any] = TRADE_DATASET,
 ) -> list[Any]:
-    """Fetch one page of `dataset` with tenacity-bounded retry on rate-limit hits."""
-    retry = tenacity.retry_if_exception(lambda e: _is_rate_limit(e))
+    """Fetch one page of `dataset` with tenacity-bounded retry on 429 hits.
+
+    A 429 backs off from `RATE_LIMIT_BACKOFF_INITIAL_SECONDS` up to
+    `RATE_LIMIT_BACKOFF_CAP_SECONDS` and never waits less than the server's
+    `Retry-After`. A 418 IP ban is NOT retried: requests sent while banned
+    extend the ban, so it is raised at once and the (resumable) run stops
+    (WR-01).
+    """
+    retry = tenacity.retry_if_exception(
+        lambda e: _is_rate_limit(e) and not is_rate_limit_ban_error(e)
+    )
     stop = tenacity.stop_after_attempt(max_retries)
-    wait = tenacity.wait_exponential_jitter(initial=0.5, max=jitter_max_seconds * 4)
+    backoff = tenacity.wait_exponential_jitter(
+        initial=RATE_LIMIT_BACKOFF_INITIAL_SECONDS,
+        max=RATE_LIMIT_BACKOFF_CAP_SECONDS,
+        jitter=jitter_max_seconds,
+    )
+
+    def wait(state: tenacity.RetryCallState) -> float:
+        delay = float(backoff(state))
+        outcome = state.outcome
+        exc = outcome.exception() if outcome is not None else None
+        retry_after = rate_limit_retry_after_seconds(exc) if exc is not None else None
+        if retry_after is not None:
+            delay = max(delay, min(retry_after, RATE_LIMIT_BACKOFF_CAP_SECONDS))
+        return delay
+
     decorator = tenacity.AsyncRetrying(retry=retry, stop=stop, wait=wait, reraise=True)
 
     async def _fetch() -> list[Any]:

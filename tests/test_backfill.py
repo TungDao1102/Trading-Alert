@@ -611,3 +611,79 @@ __all__ = [
     "_read_published_symbol",
     "_result_summary",
 ]
+
+
+async def test_ip_ban_418_is_raised_immediately_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-01: requests sent during a 418 ban extend it, so never retry one."""
+    import asyncio
+
+    from binance_sdk_derivatives_trading_usds_futures import RateLimitBanError
+    from src.data.backfill import fetch_page_with_retry
+
+    sleeps: list[float] = []
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+    adapter = FakeAdapter(responses=[RateLimitBanError("418"), [], []])
+
+    with pytest.raises(RateLimitBanError):
+        await fetch_page_with_retry(
+            adapter,  # type: ignore[arg-type]
+            symbol="BTCUSDT",
+            interval=INTERVAL,
+            start_ms=BASE_OPEN_MS,
+            limit=10,
+            max_retries=5,
+            jitter_max_seconds=0.01,
+        )
+
+    assert len(adapter.calls) == 1
+    assert sleeps == []
+
+
+async def test_429_backs_off_beyond_ten_seconds_and_honors_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-01: a 429 waits at least Retry-After (capped) and starts above 5 s."""
+    import asyncio
+
+    from binance_sdk_derivatives_trading_usds_futures import TooManyRequestsError
+    from src.data.backfill import (
+        RATE_LIMIT_BACKOFF_CAP_SECONDS,
+        RATE_LIMIT_BACKOFF_INITIAL_SECONDS,
+        fetch_page_with_retry,
+    )
+
+    sleeps: list[float] = []
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+    page = [_mk_kline(open_ms=BASE_OPEN_MS, close_ms=BASE_OPEN_MS + INTERVAL_MS - 1)]
+    adapter = FakeAdapter(
+        responses=[
+            TooManyRequestsError("429", 429, 45),
+            TooManyRequestsError("429", 429, None),
+            page,
+        ]
+    )
+
+    result = await fetch_page_with_retry(
+        adapter,  # type: ignore[arg-type]
+        symbol="BTCUSDT",
+        interval=INTERVAL,
+        start_ms=BASE_OPEN_MS,
+        limit=10,
+        max_retries=5,
+        jitter_max_seconds=0.0,
+    )
+
+    assert result == page
+    assert len(sleeps) == 2
+    assert sleeps[0] >= 45  # Retry-After wins over the 5 s first backoff
+    assert RATE_LIMIT_BACKOFF_INITIAL_SECONDS <= sleeps[1] <= RATE_LIMIT_BACKOFF_CAP_SECONDS
