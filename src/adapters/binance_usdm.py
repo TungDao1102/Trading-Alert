@@ -539,12 +539,12 @@ def is_rate_limit_ban_error(exc: BaseException) -> bool:
     return isinstance(exc, RateLimitBanError) or "RateLimitBan" in type(exc).__name__
 
 
-def rate_limit_retry_after_seconds(exc: BaseException) -> float | None:
-    """Seconds from the `Retry-After` header carried by a 429, else None."""
+def rate_limit_retry_after_seconds(exc: BaseException) -> int | None:
+    """Whole seconds from the `Retry-After` header carried by a 429, else None."""
     value = getattr(exc, "retry_after", None)
-    if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
-    return float(value)
+    return value
 
 
 # Binance error code for an unknown symbol (`-1121 Invalid symbol.`). The SDK
