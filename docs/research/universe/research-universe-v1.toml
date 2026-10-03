@@ -5,9 +5,8 @@
 # dataset start date, INCLUDING contracts delisted later, so survivorship bias cannot
 # enter through symbol selection.
 #
-# State: DRAFT. No symbol is listed on purpose. The volume data needed to rank symbols
-# does not exist yet; naming symbols now would be hand-picking, the defect D039 fixes.
-# Phase 13 (backfilled dataset) owns the freeze. The live-5 list is a separate config.
+# State: FROZEN on 2024-10-03 by python -m src.data.universe_freeze; ranking evidence in research-universe-v1.freeze-report.json.
+# The live-5 list is a separate config.
 #
 # Freeze procedure (Phase 13, in this order, committed before any evaluation):
 #   1. Rank all USDT perpetual contracts trading on the dataset start date by trailing
@@ -25,7 +24,7 @@
 # kill-gate registration tripwire.
 
 schema = "research-universe/1"
-status = "DRAFT"
+status = "FROZEN"
 universe_id = "research-universe-v1"
 top_n = 12
 contract_type = "PERPETUAL"
@@ -33,8 +32,21 @@ quote_asset = "USDT"
 rank_metric = "trailing_30d_mean_daily_quote_volume"
 rank_date_source = "dataset_start_date"
 include_delisted = true
-selection_date = ""
-symbols = []
+selection_date = "2024-10-03"
+symbols = [
+    "1000PEPEUSDT",
+    "BNBUSDT",
+    "BTCUSDT",
+    "DOGEUSDT",
+    "DOGSUSDT",
+    "ETHUSDT",
+    "REEFUSDT",
+    "SOLUSDT",
+    "SUIUSDT",
+    "WIFUSDT",
+    "WLDUSDT",
+    "XRPUSDT",
+]
 freeze_owner = "Phase 13"
 live_universe_note = "The live-5 list (BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT per 00_PRODUCT_SCOPE) is a separate config and unchanged by this manifest."
-content_sha256 = ""
+content_sha256 = "d6223620ade78290ca6b0a2eeeadd3430eb35316a42c78894afa2d62a82a1682"
