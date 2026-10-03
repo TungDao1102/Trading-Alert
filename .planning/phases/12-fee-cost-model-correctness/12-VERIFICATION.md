@@ -1,6 +1,6 @@
 ---
 phase: 12-fee-cost-model-correctness
-verified: 2026-09-30T12:00:00Z
+verified: 2026-10-03T12:00:00Z
 status: passed
 score: 4/4 must-haves verified
 covered_files:
@@ -42,18 +42,23 @@ covered_files:
   - tests/test_cost_parity.py
   - tests/test_risk_cost_guards.py
   - tests/test_sl_loss_property.py
-covered_digest: "v2:sha256:c433a2fcd8469c3a91ed811b2dd5469cfc63111b320c685e38dc9900e7b92a8b"
+covered_digest: "v2:sha256:6181dbd24d51a31f09a59f8a7b83bb38664488cff8b89fb92bc8c09335c5866c"
 behavior_unverified: 0
 overrides_applied: 0
-re_verification: false
+re_verification:
+  previous_status: passed
+  previous_score: 4/4
+  gaps_closed: []
+  gaps_remaining: []
+  regressions: []
 ---
 
 # Phase 12: Fee + Cost Model Correctness Verification Report
 
 **Phase Goal:** Every mode (backtest, paper, live) sizes and books trades with costs in quote currency, so a stop-loss exit never loses more than `risk_rate` plus bounded slippage. Live uses the account's real commission rate.
-**Verified:** 2026-09-30
+**Verified:** 2026-10-03
 **Status:** passed (with warnings, none of which defeats a success criterion)
-**Re-verification:** No, initial verification
+**Re-verification:** Yes, after Phase 13, 13.1 and 17 changed related code (costs.py hash helper moved, manager.py gained SL write-ahead and approval consumption, repo-wide ruff reflow)
 
 ## Goal Achievement
 
@@ -100,10 +105,10 @@ Cost values flow from registry params (or fixture cost dict) through `cost_rates
 
 | Behavior | Command | Result | Status |
 |----------|---------|--------|--------|
-| Key phase tests | `.venv/Scripts/python -m pytest tests/test_sl_loss_property.py tests/test_cost_parity.py tests/test_risk_cost_guards.py tests/test_commission_rates.py` | 142 passed | PASS |
-| Full suite, run once (`-x -m "not pg"`) | `.venv/Scripts/python -m pytest -x -q -m "not pg"` | reached 100%, no F/E, 5 skipped | PASS |
-| mypy on `src/risk` and `src/backtest/costs.py` | `mypy` | no issues in 10 files | PASS |
-| ruff on phase-touched src | `ruff check ...` | 2 findings, F841 in `src/risk/portfolio.py:312-313`; `git log` shows the file was last touched by Phase 5 and 9 commits, not Phase 12 | Pre-existing, not a phase 12 regression |
+| Key phase tests (re-run 2026-10-03) | `.venv/Scripts/python -m pytest tests/test_sl_loss_property.py tests/test_cost_parity.py tests/test_risk_cost_guards.py tests/test_commission_rates.py` | 153 passed | PASS |
+| Full suite, run once (`-m "not pg"`, `tests/test_deploy_docs.py` deselected) | `.venv/Scripts/python -m pytest -q -m "not pg"` | Only failure is `tests/test_docker_cutover.py::test_the_reported_oi_gap_is_the_engineered_forty_five_minutes` (Phase 13.1 Docker cutover proof, environment-dependent, exit_code 3). `tests/test_deploy_docs.py::test_refresh_pins_lookup_is_read_only_and_reports_moves` also fails (Phase 13.1 pin refresh, needs network/Docker). No Phase 12 test fails | PASS for Phase 12 (2 unrelated 13.1 environment failures) |
+| mypy on `src/risk`, `src/backtest/costs.py`, `simulator.py`, `execution/manager.py`, `adapters/binance_usdm.py` | `python -m mypy ...` | no issues in 13 files | PASS |
+| ruff on `src` and `tests` | `ruff check src tests` | All checks passed (the earlier F841 in `portfolio.py` is gone) | PASS |
 
 ### Probe Execution
 
@@ -123,11 +128,15 @@ All three IDs in PLAN frontmatter appear in REQUIREMENTS.md (lines 26, 38, 45). 
 
 No TBD, FIXME or XXX markers in the phase-touched risk and backtest cost modules. The two ruff F841 findings in `src/risk/portfolio.py` are not a phase-12 change.
 
+### Re-verification Note (Phase 13 / 13.1 / 17 drift)
+
+Commits since 2026-09-30 touching phase-12 files: `costs.py` (canonical decimal helper moved to `src/domain/canonical.py`, `_canonical_decimal_text` alias kept, hash pins unchanged), `simulator.py`/`registry.py`/`paper/loop.py` (ruff reflow only), `execution/manager.py` (Phase 17 write-ahead intent and approval consumption), `domain/enums.py` (Phase 17). `gating.py`, `cost_rates.py`, `cost_guards.py`, `live_commission.py`, `sizing.py` and the adapter are unchanged. Re-checked: simulator `_apply_costs` still books price x quantity x rate per leg with `exit_slippage_rate` for SL/EOD and raises when it is missing (lines 640-690); `manager._live_cost_rates_are_verified` now checks `fee_source == ACCOUNT_MAX`, `account_symbol == candidate_symbol`, and `observed_at <= now <= expires_at` and `execute_approved_plan` requires a `CostRates` (lines 317-335, 556-570). That closes WR-01 (label-only trust) in code. All four success criteria still hold; the Phase 12 goal is intact.
+
 ### Review Findings Weighed (12-REVIEW.md: 0 critical, 5 warning, 6 info)
 
 None of the findings defeats a success criterion. They are WARNINGS, recommended for closing before Phase 24 wires live.
 
-- **WR-01 (manager trusts the `fee_source` label):** CONFIRMED in code (`manager.py:438`). `CostRates` is a public dataclass, so a mistaken or hostile caller could label parameter fees `ACCOUNT_MAX`. It also does not re-check freshness or symbol at placement time. SC3 asks that live "reads commissionRate per symbol, uses max, never falls back to zero". Those properties hold in the adapter and resolver, both tested, and no production caller exists until Phase 24, which is named in the roadmap as the wiring phase. WARNING: harden in Phase 24 (Option A or B from the review).
+- **WR-01 (manager trusts the `fee_source` label):** originally confirmed; now MITIGATED by Phase 17 (`manager.py:317-335` verifies symbol and freshness window, see re-verification note). Original finding text follows. `CostRates` is a public dataclass, so a mistaken or hostile caller could label parameter fees `ACCOUNT_MAX`. It also does not re-check freshness or symbol at placement time. SC3 asks that live "reads commissionRate per symbol, uses max, never falls back to zero". Those properties hold in the adapter and resolver, both tested, and no production caller exists until Phase 24, which is named in the roadmap as the wiring phase. WARNING: harden in Phase 24 (Option A or B from the review).
 - **WR-02 (no plan-geometry validation, `abs()` masks inverted plans):** CONFIRMED as defense-in-depth. The planner builds the plans. It does not affect the property proven for well-formed plans. WARNING.
 - **WR-03 (`run()` and `run_paper_tick` do not assert cost-model to registry binding):** CONFIRMED. Binding is enforced at `experiment.assemble` and `paper.freeze.pin_stream_epoch`, so the recorded experiment and stream identity are guarded. Direct `run()` use with a mismatched fixture is not. "Backtest stays on versioned fees" holds at the experiment boundary. WARNING.
 - **WR-04 and WR-05 (NaN/Infinity and exception type in registry and guard validators):** not reachable from the TOML registry for the tested paths. Hardening. WARNING.
@@ -148,5 +157,5 @@ No gaps. All four ROADMAP success criteria are backed by code and by passing tes
 
 ---
 
-_Verified: 2026-09-30_
+_Verified: 2026-10-03_
 _Verifier: Claude (gsd-verifier)_

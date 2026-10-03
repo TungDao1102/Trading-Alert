@@ -1,46 +1,53 @@
 ---
 phase: 02-data-foundation
-verified: 2026-09-22T00:00:00Z
-status: human_needed
+verified: 2026-10-03T00:00:00Z
+status: passed
 score: 4/4 must-haves verified
 covered_files:
+  - .planning/phases/02-data-foundation/02-01-PLAN.md
+  - .planning/phases/02-data-foundation/02-01-SUMMARY.md
+  - .planning/phases/02-data-foundation/02-02-PLAN.md
+  - .planning/phases/02-data-foundation/02-02-SUMMARY.md
+  - .planning/phases/02-data-foundation/02-03-PLAN.md
+  - .planning/phases/02-data-foundation/02-03-SUMMARY.md
+  - .planning/phases/02-data-foundation/02-04-PLAN.md
+  - .planning/phases/02-data-foundation/02-04-SUMMARY.md
+  - .planning/phases/02-data-foundation/02-05-PLAN.md
+  - .planning/phases/02-data-foundation/02-05-SUMMARY.md
+  - scripts/backup-drill.ps1
   - src/adapters/binance_usdm.py
   - src/data/backfill.py
-  - src/data/quality.py
-  - src/data/store.py
+  - src/data/collector.py
   - src/data/coverage.py
   - src/data/metadata.py
-  - src/data/collector.py
+  - src/data/quality.py
+  - src/data/store.py
+  - src/db/alembic/versions/0001_baseline.py
+  - src/db/models.py
   - src/ops/backup.py
   - src/sql/coverage_v1.sql
-  - src/db/models.py
-  - src/db/alembic/versions/0001_baseline.py
-  - scripts/check_migration_parity.py
-  - scripts/backup-drill.ps1
-covered_digest: "unavailable-offline"
+covered_digest: "v2:sha256:a6dca861fb1dfbdb58150f2a87011e71a54f51eeef4a331b1c0e2e2387c0dc21"
 behavior_unverified: 0
 overrides_applied: 0
-human_verification:
-  - test: "Start Docker daemon, create .env from .env.example, `docker compose up -d postgres`, then `uv run alembic -c alembic.ini upgrade head` against live PG17"
-    expected: "Postgres healthy; 4 operational tables created; no migration error"
-    why_human: "Docker daemon not running in this environment (client v29.8.0 present, engine pipe missing); operator action required"
-  - test: "Run `backfill_universe` against live Binance (public klines, no key needed) for live-5 x 1m/1H/4h bounded windows, then `uv run python -m src.data.coverage --all`"
-    expected: "Per-(symbol,interval) row counts > 0, ranges printed, gap/violation counts shown"
-    why_human: "Live-network bootstrap never executed; offline TDD used fakes. Requires operator network run."
-  - test: "Deploy OI 5-min loop + funding sweep against live PG, let 2-3 ticks elapse, inspect oi partitions + watermarks + gap journal"
-    expected: "One snapshot per live-5 per tick, watermarks advance, no gap rows on healthy ticks"
-    why_human: "Collector proven via unit tests only; long-running deployment needs Compose PG + scheduler wiring"
-  - test: "Run backup + drill against live PG (`scripts/backup-drill.ps1` or `python -m src.ops.backup backup/drill` with real pg_dump runner)"
-    expected: "drill-OK, exit 0, manifest sha256 equality"
-    why_human: "Drill proven with fake pg_dump_runner + tmpdir Parquet; live-PG pg_dump path needs running PG"
+re_verification:
+  previous_status: human_needed
+  previous_score: 4/4
+  gaps_closed: []
+  gaps_remaining: []
+  regressions: []
+human_verification: []
 ---
 
 # Phase 2: Data Foundation Verification Report
 
 **Phase Goal:** Irrecoverable data is safe — OI accumulates from day one and every symbol has queryable, quality-checked coverage.
-**Verified:** 2026-09-22
-**Status:** human_needed (all code verified; only env-gated operator close-outs remain)
-**Re-verification:** No — initial verification
+**Verified:** 2026-10-03
+**Status:** passed (remaining human items accepted by the operator on 2026-10-04; see the final section)
+**Re-verification:** Yes — prior report (2026-09-22) went stale after Phases 13/13.1/17 changed collector/backfill/db/backup code; re-checked against the current repo.
+
+## Execution Confirmation
+
+All five plans were executed: `02-01` through `02-05` each have a `*-SUMMARY.md`, and the corresponding commits and artifacts exist in history. ROADMAP.md still shows the Phase 2 checkbox and the five plan lines unticked (and "Plans: 5 plans" instead of "5/5 executed"). This is a bookkeeping gap only. It should be ticked when the phase is closed out; this verifier does not edit ROADMAP.md.
 
 ## Goal Achievement
 
@@ -48,117 +55,87 @@ human_verification:
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| 1 | User can bootstrap 1m/1H/4H candles per symbol and query effective per-symbol coverage with duplicates, OHLC violations, and gaps flagged | ✓ VERIFIED | `backfill_universe` (LIVE_5 x 3 intervals, cursor resume) + `quality.check_batch` (duplicates/OHLC/regression/gap_count) + coverage CLI + DuckDB views; 62/62 tests pass; CLI runs (`--all` matrix prints) |
-| 2 | OI snapshots accumulate continuously from day one plus funding history, so the 30-day API window can never destroy research data | ✓ VERIFIED | `async_oi_tick` 5-min loop + `async_funding_sweep` + research-tagged `harvest_open_interest_history` + gap journal; 10 TDD tests pass |
-| 3 | Symbol metadata loads versioned from live exchangeInfo instead of hard-coded values | ✓ VERIFIED | `adapter.exchange_info()` (live SDK `exchange_information`) → `refresh_symbol_metadata` INSERT-only versioned rows; SDK 17.4.0 re-verified; Decimal-exact; parity script green |
-| 4 | Automated backup + restore drill passes covering PostgreSQL state and the self-collected OI dataset | ✓ VERIFIED | `src/ops/backup.py` backup()+run_drill() + sha256 manifest + tamper-detect exit-1 + multi-root + ps1 wrapper (manual drill-OK, exit 0); 15 backup tests pass |
+| 1 | User can bootstrap 1m/1H/4H candles per symbol and query effective per-symbol coverage with duplicates, OHLC violations, and gaps flagged | ✓ VERIFIED | `backfill_universe` (backfill.py:998-1034, now with contiguity-aware resume floor and rejection budget), `quality.check_batch` (quality.py:145), `src/data/coverage.py` CLI (`--help` runs), `coverage_v1.sql`. test_backfill*, test_quality_gates, test_coverage, test_store_atomic, test_tracer_slice all pass |
+| 2 | OI snapshots accumulate continuously from day one plus funding history, so the 30-day API window cannot destroy research data | ✓ VERIFIED | `async_oi_tick` (collector.py:380), `async_funding_sweep` (:473), `harvest_open_interest_history` (:757), gap journal; test_collector passes. Phase 13 widened the collector to the D039 research universe; the goal still holds |
+| 3 | Symbol metadata loads versioned from live exchangeInfo instead of hard-coded values | ✓ VERIFIED | `adapter.exchange_info()` (binance_usdm.py:815) feeds `refresh_symbol_metadata` (metadata.py:64, INSERT-only versioned rows); test_metadata and test_adapter_strictness pass. Phase 17 added MARKET_LOT_SIZE/PERCENT_PRICE filters without regression |
+| 4 | Automated backup + restore drill passes covering PostgreSQL state and the self-collected OI dataset | ✓ VERIFIED | `src/ops/backup.py` (backup/drill/verify/restore/retain subcommands, `--help` runs); test_backup, test_backup_restore, test_backup_retention, test_backup_remote pass with injectable pg_dump runner and sha256 manifest. Live-PG path is operator-gated |
 
-**Score:** 4/4 truths verified (0 present, behavior-unverified)
-
-### Per-Criterion Verdict
-
-| Criterion | Verdict |
-|-----------|---------|
-| (1) bootstrap 1m/1H/4H + coverage query with duplicates/OHLC/gaps flagged | PASS |
-| (2) OI 5-min day-one + funding history | PASS |
-| (3) versioned metadata from live exchangeInfo | PASS |
-| (4) automated backup+restore drill PG+OI | PASS |
-
-**Overall verdict:** PASS on implementation; status `human_needed` for env-gated close-outs (see below). No code gaps.
+**Score:** 4/4 truths verified (0 behavior-unverified)
 
 ### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `src/adapters/binance_usdm.py` | Sole SDK importer, klines/OI/funding/exchangeInfo | ✓ VERIFIED | Substantive (400 lines), sole SDK importer per grep, all 5 capabilities wired |
-| `src/data/backfill.py` | Cursor paginator + universe bootstrap | ✓ VERIFIED | CursorStore, date-buffer, `backfill_universe`, LIVE_5; wired to store+quality |
-| `src/data/quality.py` | Fail-closed quality gate | ✓ VERIFIED | duplicates/OHLC/regressions reject; gaps flagged; wired into paginator |
-| `src/data/store.py` | Immutable Hive Parquet publish | ✓ VERIFIED | FileExistsError on republish; wired |
-| `src/data/coverage.py` | Coverage matrix + CLI | ✓ VERIFIED | CoverageCell, gap_count, OI/funding rows, `--all/--json`; CLI runs live |
-| `src/sql/coverage_v1.sql` | candles/OI/funding views | ✓ VERIFIED | Loaded from checked-in file by tests; tz-cast boundary |
-| `src/data/metadata.py` | Versioned metadata refresh | ✓ VERIFIED | INSERT-only, universe trim; wired to adapter+ORM |
-| `src/data/collector.py` | OI/funding collection + gaps | ✓ VERIFIED | 3 async ops, atomic tick, tick-wide gap rows; wired |
-| `src/ops/backup.py` | Backup + drill | ✓ VERIFIED | backup/run_drill/manifest, injectable pg_dump_runner; CLI exit codes correct |
-| `scripts/backup-drill.ps1` | Thin PS wrapper | ✓ VERIFIED | Pure forwarder; manual drill-OK exit 0 |
-| `src/db/models.py` + `0001_baseline.py` | 4 operational tables | ✓ VERIFIED | Parity script green (6/4/7/16 cols); `--sql` emits all CREATE TABLEs |
-| `scripts/check_migration_parity.py` | Offline parity gate | ✓ VERIFIED | Exit 0, prints green |
+| `src/adapters/binance_usdm.py` | SDK adapter: klines/OI/funding/exchangeInfo | ✓ VERIFIED | Substantive; the SDK is imported only by this module and `paper_ws.py` (a later-phase adapter, still under `src/adapters/`) |
+| `src/data/backfill.py` | Cursor paginator + universe bootstrap | ✓ VERIFIED | Wired to store + quality |
+| `src/data/quality.py` | Fail-closed quality gate | ✓ VERIFIED | Wired into paginator |
+| `src/data/store.py` | Immutable Hive Parquet publish | ✓ VERIFIED | Atomic-publish tests pass |
+| `src/data/coverage.py` + `src/sql/coverage_v1.sql` | Coverage matrix + views | ✓ VERIFIED | CLI runs; test_coverage passes |
+| `src/data/metadata.py` | Versioned metadata refresh | ✓ VERIFIED | Wired to adapter + ORM |
+| `src/data/collector.py` | OI/funding collection + gaps | ✓ VERIFIED | Wired to adapter + models |
+| `src/ops/backup.py` | Backup + drill | ✓ VERIFIED | CLI present; extended by 13.1 (remote/retention) |
+| `scripts/backup-drill.ps1` | PowerShell wrapper | ✓ VERIFIED | Present |
+| `src/db/models.py` + `alembic/versions/0001_baseline.py` | Operational tables | ✓ VERIFIED | Baseline still present, followed by 0002-0004 |
+| `scripts/check_migration_parity.py` | Offline parity gate | SUPERSEDED | Deleted in 17-07 ("delete column-name-only parity script"), replaced by PG-backed migration tests (`tests/test_persistence_migration_pg.py`), which need live PG |
 
 ### Key Link Verification
 
-| From | To | Via | Status | Details |
-|------|----|-----|--------|---------|
-| backfill.py | quality.py | `check_batch` per page, verdict gates publish | WIRED | `verdict.duplicates/ohlc_violations/gap_count` flow into result |
-| backfill.py | store.py | `publish_batch` per date-buffer flush | WIRED | Cursor advances only on publish |
-| coverage.py | coverage_v1.sql | `_load_views` from checked-in SQL file | WIRED | Test asserts load from file path |
-| collector.py | models.py | watermark merge + gap insert + commit per tick | WIRED | Single-transaction pattern |
-| metadata.py | models.py | `session.add(SymbolMetadata)` + commit | WIRED | All 16 columns mapped |
-| backup.py | pg_dump + Parquet | injectable `pg_dump_runner` + multi-root copy | WIRED | Tests with fake runner; prod wires real pg_dump |
-| adapter | SDK 17.4.0 | `rest_api.*` via `asyncio.to_thread` | WIRED | Only module importing SDK |
-
-### Data-Flow Trace (Level 4)
-
-| Artifact | Data Variable | Source | Produces Real Data | Status |
-|----------|---------------|--------|--------------------|--------|
-| coverage CLI | rows/range/gap_count | DuckDB over Parquet hive | ✓ FLOWING (empty store → empty matrix, no crash) | ✓ VERIFIED |
-| quality verdict | duplicates/OHLC/gaps | Polars over live-shaped klines | ✓ FLOWING (tests + fail-closed rejects) | ✓ VERIFIED |
-| OI snapshots | OI + watermark | `adapter.open_interest()` live call | ✓ FLOWING (shape verified; live ticks pending deploy) | ✓ VERIFIED |
-| metadata rows | tick/step/notional | `adapter.exchange_info()` live call | ✓ FLOWING (golden fixture is trimmed live call) | ✓ VERIFIED |
-| backup bundle | pg.dump + Parquet copy + manifest | pg_dump_runner + fs copy | ✓ FLOWING (fake runner in tests; live runner pending PG) | ✓ VERIFIED |
+| From | To | Via | Status |
+|------|----|-----|--------|
+| backfill.py | quality.py / store.py | `check_batch` gates publish; cursor advances only on publish | WIRED (tests) |
+| coverage.py | coverage_v1.sql | views loaded from the checked-in SQL | WIRED |
+| collector.py | models.py | watermark merge + gap insert per tick | WIRED |
+| metadata.py | models.py | versioned INSERT | WIRED |
+| backup.py | pg_dump + Parquet | injectable runner, multi-root copy, manifest | WIRED |
 
 ### Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 |----------|---------|--------|--------|
-| Full suite | `uv run pytest tests/ -q` | 62 passed | ✓ PASS |
-| Coverage CLI | `python -m src.data.coverage --all --raw-root $TEMP` | live-5 matrix prints, exit 0 | ✓ PASS |
-| Backup CLI | `python -m src.ops.backup --help` | backup/drill subcommands | ✓ PASS |
-| Parity gate | `python scripts/check_migration_parity.py` | OK green, all 4 tables | ✓ PASS |
-| Import surface | import all src.data/adapters/ops modules | imports OK | ✓ PASS |
+| Phase-2 test files (17 files, ~400 tests: backfill*, collector, backup*, tracer, adapter strictness, coverage, metadata, quality, store, wave0, archive, collect_list) | `.venv/Scripts/python.exe -m pytest <files> -q` | all pass, no failures | ✓ PASS |
+| Lint | `ruff check src/data src/adapters src/ops src/db` | All checks passed | ✓ PASS |
+| Types | `mypy src/data src/adapters src/ops src/db` | no issues, 35 files | ✓ PASS |
+| CLIs | `python -m src.data.coverage --help`, `python -m src.ops.backup --help` | usage printed | ✓ PASS |
 
-Step 7b note: no live-network run attempted (read-only verification; live bootstrap is an operator close-out).
+No network or live Binance calls and no live PG were used.
 
 ### Requirements Coverage
 
-| Requirement | Source Plan | Description | Status | Evidence |
-|-------------|-------------|-------------|--------|----------|
-| DATA-01 | 02-02/02-03/02-05 | Bootstrap + quality + coverage query | ✓ SATISFIED | backfill_universe + check_batch + coverage CLI/views, tests green |
-| DATA-02 | 02-01/02-04 | OI day-one + funding history | ✓ SATISFIED | async_oi_tick + funding sweep + harvest, gap journal, 10 tests |
-| DATA-03 | 02-01/02-04 | Versioned metadata from exchangeInfo | ✓ SATISFIED | exchange_info + refresh_symbol_metadata, SDK re-verify, parity green |
-| DATA-04 | 02-03/02-05 | Backup + restore drill | ✓ SATISFIED | backup.py + drill + manifest + ps1 drill-OK, 15 tests |
+| Requirement | Status | Evidence |
+|-------------|--------|----------|
+| DATA-01 | ✓ SATISFIED | Truth 1 |
+| DATA-02 | ✓ SATISFIED | Truth 2 |
+| DATA-03 | ✓ SATISFIED | Truth 3 |
+| DATA-04 | ✓ SATISFIED | Truth 4 |
 
-No orphaned requirements: all 4 DATA requirements claimed and satisfied.
+No orphaned requirements.
 
 ### Anti-Patterns Found
 
 | File | Line | Pattern | Severity | Impact |
 |------|------|---------|----------|--------|
-| tests/test_backfill.py | 24, 134 | ruff F401 unused import + UP037 quotes | ℹ️ Info | Test-only lint; `ruff check` reports 2 fixable; src/ clean |
-| src/adapters/binance_usdm.py | 386 | "TBD" in `_position_mode_blob` docstring | ℹ️ Info | Informational only — blob IS populated from live fields today; precise field set refines in Phase 3 registry work. Not a stub. |
+| src/adapters/binance_usdm.py | ~1807 | "TBD" in a position-mode docstring | ℹ️ Info (not scored as blocker) | Docstring only; the field is populated from live fields and the line sits in code that later phases owned. No formal-reference marker, so re-check if Phase 3+ closes this out |
 
-No blockers. No `TODO/FIXME/XXX`, no placeholder returns, no hardcoded empty data flowing to output.
-
-### Deferral Judgment (Docker/alembic-live)
-
-The executors deferred `docker compose up` + `alembic upgrade head` against live PG until Docker Desktop is available. Judgment: **legitimate env-gated close-outs, NOT criterion-breaking gaps.**
-
-- Docker Desktop client v29.8.0 is now installed on this box, but the **engine daemon is not running** (`docker info` server section: pipe missing) and **no `.env` exists** (compose fails on missing POSTGRES_USER/PASSWORD). Live-PG verification is still physically impossible in this environment.
-- The deferred steps were correctly substituted with structural proof: offline parity script green, `--sql` DDL emission verified, ORM imports clean, backup drill proven with injectable runner + manual ps1 drill-OK.
-- Nothing in criteria (1)–(4) requires a running PG *in this environment today*; they require the *capability*, which is proven. The remaining live-PG steps are operator close-outs listed under Human Verification, not code gaps. **No `gaps:` section emitted.**
+No TODO/FIXME/XXX markers or stubs in covered files.
 
 ### Human Verification Required
 
-Four env-gated close-outs (frontmatter). All automated checks passed; awaiting operator with Docker daemon + network:
-
-1. Boot PG + apply migration live
-2. First live bounded bootstrap + coverage query
-3. Deploy OI/funding loop, observe ticks
-4. Live-PG backup drill
+Four environment-gated operator close-outs (see frontmatter): live PG boot + migrations, live bounded bootstrap + coverage query, live OI/funding loop observation, live-PG backup drill. None is a code gap.
 
 ### Gaps Summary
 
-None. All four success criteria are implemented, wired, and test-green. The phase goal — irrecoverable data safe by mechanism — is achieved in code; making it true in production is operator deployment work tracked above.
+No code gaps. The goal (irrecoverable data safe by mechanism: day-one OI/funding collector, quality-checked coverage, versioned metadata, backup drill) holds in the current repo after the Phase 13/13.1/17 changes. Housekeeping: tick Phase 2 and its five plans in ROADMAP.md.
 
 ---
 
-_Verified: 2026-09-22_
-_Verifier: gsd-verifier_
+_Verified: 2026-10-03_
+_Verifier: Claude (gsd-verifier)_
+
+## Accepted by Operator (2026-10-04)
+
+| Item | Status |
+|------|--------|
+| Boot Docker + Postgres and run the alembic migrations | **Done.** Compose PostgreSQL 17.11 healthy; database `trading` at alembic head `0004_persistence_integrity`; all `tests/*_pg.py` (19 files, 431 tests) pass against it with `TEST_DATABASE_URL` set. |
+| Observe collector OI/funding ticks on live PG | **Done.** `trading-collector-1` healthy and ticking every 5 minutes (`oi: 18, gaps: 0` in the last observed ticks); `collector_watermarks` 37 rows, `symbol_metadata` 19 rows. |
+| Live bounded backfill and coverage query | Backfilled store present (`data/raw` about 1.6 GB: funding, mark_klines 1h/1m/4h). The coverage CLI was not re-run in this session; backfill and coverage behaviour are covered by the passed Phase 13 verification. |
+| Backup drill against live PG | **Deferred to Phase 13.1** (S3-compatible encrypted backups and `deploy/backup-drill.sh` remote drill). Operator copied `data/raw` to external storage by hand on 2026-10-04. The PostgreSQL dump/restore path is therefore unproven until the Phase 13.1 drill; the DB currently holds almost no operational rows. |

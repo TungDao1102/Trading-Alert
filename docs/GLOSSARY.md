@@ -243,7 +243,7 @@ EXPIRED
 - `SKIP_USER`, `SKIP_BUSY` and `CANCEL` give `SKIPPED`.
 - `SIMULATE` gives `PENDING` (notify-only; it does not advance the approval state).
 
-`EXPIRED` is not produced by any `ApprovalAction`; lifecycle analytics derive it from the `EXPIRED` outcome label (`src/analytics/lifecycle.py`). The value set PENDING, APPROVED, SKIPPED, EXPIRED was a Phase 3 planner assumption (D-10); it is recorded here as the enum source of truth pending user ratification.
+`EXPIRED` is not produced by any `ApprovalAction`; lifecycle analytics derive it from the `EXPIRED` outcome label (`src/analytics/lifecycle.py`). The value set PENDING, APPROVED, SKIPPED, EXPIRED was a Phase 3 planner assumption (D-10); it is recorded here as the enum source of truth and was ratified by the operator on 2026-10-04.
 
 ## 11. State transitions
 

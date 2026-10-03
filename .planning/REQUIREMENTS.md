@@ -11,27 +11,27 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 - [x] **RSCH-01**: Research protocol is frozen (dataset splits, cost model, execution assumptions, acceptance methodology) before any parameter work begins
 - [x] **RSCH-02**: Three candidate families are specified independently (Trend Pullback, Breakout+Retest, Range Mean-Reversion) with deterministic alternatives per concept (informal → machine-detectable → alternatives → bias → parameters → backtest)
-- [ ] **RSCH-03**: Core Doc contradictions are resolved with decisions recorded in DECISIONS.md (SystemMode naming, order-lifecycle APPROVED, timezone canonicalization, §12 status names, duplicate section numbers)
+- [x] **RSCH-03**: Core Doc contradictions are resolved with decisions recorded in DECISIONS.md (SystemMode naming, order-lifecycle APPROVED, timezone canonicalization, §12 status names, duplicate section numbers)
 
 ### Data Foundation
 
 - [x] **DATA-01**: User can bootstrap 1m/1H/4H candles per symbol with continuity/quality checks (duplicates, OHLC validity, regressions, gaps) and query effective per-symbol coverage
 - [x] **DATA-02**: System collects OI snapshots continuously from Phase 0 plus funding history, so the 30-day API window never destroys research data
 - [x] **DATA-03**: System records versioned symbol metadata (onboard time, tick/step, min/max qty, notional constraints, position modes) from live exchangeInfo instead of hard-coded values
-- [ ] **DATA-04**: System passes an automated backup + restore drill covering PostgreSQL state and the self-collected OI dataset
+- [x] **DATA-04**: System passes an automated backup + restore drill covering PostgreSQL state and the self-collected OI dataset
 
 ### Domain & Reproducibility
 
 - [x] **DOMN-01**: System persists seven separate entities (Signal, TradePlan, Approval, Order, Fill, Position, JournalEvent) with GLOSSARY-canonical enums and no nullable-column state inference
 - [x] **DOMN-02**: Every backtest/paper/alert/order plan is traceable to an immutable versioned parameter set (strategyVersion + parameterSetId + parameterSetHash + experiment linkage)
-- [ ] **DOMN-03**: Strategy correctness is enforced by golden fixtures (candles.csv + parameters.json + expected signals/plans) plus no-lookahead, prefix-invariance, candle-close-timing, and boundary suites
+- [x] **DOMN-03**: Strategy correctness is enforced by golden fixtures (candles.csv + parameters.json + expected signals/plans) plus no-lookahead, prefix-invariance, candle-close-timing, and boundary suites
 - [x] **DOMN-04**: Signal, TradePlan, Order and Position state transitions are validated against the GLOSSARY state machines and illegal transitions are rejected
 
 ### Strategy & Planning
 
-- [ ] **STRAT-01**: Feature engine computes deterministic indicators/structure/zones from closed candles only, with warm-up gates (e.g. EMA200-4H invalid until history suffices)
-- [ ] **STRAT-02**: Strategy engine is a pure function (market snapshot + account state + strategy version + config → NO_TRADE or SETUP) emitting deterministic SignalIds
-- [ ] **STRAT-03**: Trade planner translates each valid setup into entry zone, SL, TP(s), invalidation, expiry, expected RR, and plan hash
+- [x] **STRAT-01**: Feature engine computes deterministic indicators/structure/zones from closed candles only, with warm-up gates (e.g. EMA200-4H invalid until history suffices)
+- [x] **STRAT-02**: Strategy engine is a pure function (market snapshot + account state + strategy version + config → NO_TRADE or SETUP) emitting deterministic SignalIds
+- [x] **STRAT-03**: Trade planner translates each valid setup into entry zone, SL, TP(s), invalidation, expiry, expected RR, and plan hash
 
 ### Risk
 
@@ -60,7 +60,7 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 ### Execution & Safety
 
-- [ ] **EXEC-01**: Execution manager places LIMIT-zone entries and Algo-Order protective exits (re-verified against current Binance docs), supports both position modes and partial-fill protective sizing
+- [x] **EXEC-01**: Execution manager places LIMIT-zone entries and Algo-Order protective exits (re-verified against current Binance docs), supports both position modes and partial-fill protective sizing
 - [x] **EXEC-02**: Reconciliation loop compares local state against open normal orders, open algo orders, and positions, sweeps orphan protective orders, and forces SAFE_MODE on divergence
 - [x] **EXEC-03**: Deterministic client/algo order identifiers prevent duplicate entry orders across retries, restarts, and replayed events
 - [x] **EXEC-04**: The exact exchange constraint snapshot used for sizing, including MARKET_LOT_SIZE and PERCENT_PRICE filters, working type, margin type, leverage and equity, is persisted per trade plan and revalidated when stale
@@ -72,7 +72,7 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 - [x] **JRN-01**: Journal/analytics reports MFE/MAE, execution-quality latencies, approval-delay impact, and robustness slices without hiding the full report
 - [x] **OPS-01**: SAFE_MODE blocks new entries while monitoring continues, and the RUNBOOK (unprotected/orphan/duplicate/API-down/stale-feed/DB-failure/manual-close/restore) is rehearsed before live enablement
-- [ ] **OPS-02**: Live credentials use no-withdrawal keys, IP allowlisting, off-source secret storage, and structured secret-free logging with health checks
+- [x] **OPS-02**: Live credentials use no-withdrawal keys, IP allowlisting, off-source secret storage, and structured secret-free logging with health checks
 - [ ] **OPS-03**: The restart sequence loads config, validates time, reconciles Binance orders and positions, reconnects streams, verifies no duplicate action, and resumes only when state is consistent
 - [ ] **OPS-04**: Health and diagnostic output includes the runtime Python version and the application git revision
 - [ ] **OPS-05**: Operational alerts fire for an unprotected position, local versus exchange divergence, an unknown or foreign order, a duplicate execution attempt, stale data, a rejected protective action, an authentication failure, and daily-loss WARNING and DAILY_STOP
@@ -116,17 +116,17 @@ Which phases cover which requirements. Updated during roadmap creation.
 |-------------|-------|--------|
 | RSCH-01 | Phase 1 | Complete |
 | RSCH-02 | Phase 1 | Complete |
-| RSCH-03 | Phase 1 | Pending |
+| RSCH-03 | Phase 1 | Complete |
 | DATA-01 | Phase 2 | Complete |
 | DATA-02 | Phase 2 | Complete |
 | DATA-03 | Phase 2 | Complete |
-| DATA-04 | Phase 2 | Pending |
+| DATA-04 | Phase 2 | Complete |
 | DOMN-01 | Phase 3 | Complete |
 | DOMN-02 | Phase 3 | Complete |
-| DOMN-03 | Phase 3 | Pending |
-| STRAT-01 | Phase 4 | Pending |
-| STRAT-02 | Phase 4 | Pending |
-| STRAT-03 | Phase 4 | Pending |
+| DOMN-03 | Phase 3 | Complete |
+| STRAT-01 | Phase 4 | Complete |
+| STRAT-02 | Phase 4 | Complete |
+| STRAT-03 | Phase 4 | Complete |
 | RISK-01 | Phase 5 | Complete |
 | RISK-02 | Phase 5 | Complete |
 | BKTS-01 | Phase 6 | Complete |
@@ -137,12 +137,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PAPER-03 | Phase 7 | Pending |
 | APRV-01 | Phase 8 | Complete |
 | APRV-02 | Phase 8 | Complete |
-| EXEC-01 | Phase 9 | Pending |
+| EXEC-01 | Phase 9 | Complete |
 | EXEC-02 | Phase 8 | Complete |
 | EXEC-03 | Phase 8 | Complete |
 | JRN-01 | Phase 10 | Complete |
 | OPS-01 | Phase 8 | Complete |
-| OPS-02 | Phase 9 | Pending |
+| OPS-02 | Phase 9 | Complete |
 | GOV-01 | Phase 10 | Complete |
 | RISK-03 | Phase 20 | Pending |
 | RISK-04 | Phase 19 | Pending |

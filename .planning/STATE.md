@@ -5,16 +5,16 @@ current_phase: 17
 current_phase_name: operational-persistence-layer
 status: verifying
 stopped_at: Completed 17-15-PLAN.md
-last_updated: "2026-10-03T15:39:28.492Z"
-last_activity: 2026-10-03
-last_activity_desc: Phase 13 complete (verification passed); Phase 17 still awaiting verification
-state_head: 40e2141d7b18f9f0cb3873d75d9b905e4bae2484
+last_updated: "2026-10-03T17:45:16.481Z"
+last_activity: 2026-10-04
+last_activity_desc: Phases 1-13 closed (Phase 7 closed by operator decision with PAPER-01..03 still Pending until Phase 16); Phase 17 awaiting verification
+state_head: e6700a21b2af543b84123e5ba8a91f4cbe1c10e7
 progress:
   total_phases: 29
-  completed_phases: 4
+  completed_phases: 13
   total_plans: 109
   completed_plans: 107
-  percent: 14
+  percent: 46
 milestone_name: milestone
 ---
 
@@ -34,15 +34,15 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 Phase: 17 (operational-persistence-layer) — EXECUTING
 Plan: 15 of 15
 Status: Phase complete — ready for verification
-Last activity: 2026-10-03 — Phase 13 complete (verification passed); Phase 13.1 and Phase 17 still open
+Last activity: 2026-10-04 — Phases 1-13 closed (Phase 7 closed by operator decision with PAPER-01..03 still Pending until Phase 16); Phase 17 awaiting verification
 
-Progress: [█░░░░░░░░░] 14%
+Progress: [█████░░░░░] 46%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 33 (Phase 03 + Phase 05 plans 1+2 + Phase 06 plan 1)
+- Total plans completed: 82 (Phase 03 + Phase 05 plans 1+2 + Phase 06 plan 1)
 - Average duration: ~14 min
 - Total execution time: ~100 min
 
@@ -50,12 +50,21 @@ Progress: [█░░░░░░░░░] 14%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 03 | 4 | 5 | ~12 min |
-| 05 | 2 | 2 | ~25 min |
+| 3 | 5 | - | - |
+| 5 | 2 | - | - |
 | 06 | 1 | 3 | ~15 min |
 | 07.1 | 2 | - | - |
 | 12 | 11 | - | - |
 | 13 | 13 | - | - |
+| 4 | 4 | - | - |
+| 7.1 | 2 | - | - |
+| 1 | 4 | - | - |
+| 2 | 5 | - | - |
+| 8 | 5 | - | - |
+| 9 | 4 | - | - |
+| 10 | 12 | - | - |
+| 11 | 8 | - | - |
+| 7 | 4 | - | - |
 
 **Recent Trend:**
 
@@ -404,6 +413,13 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 | Category | Item | Status | Deferred At | Milestone |
 |----------|------|--------|-------------|-----------|
+| Phase 6 carry-over | Gap G3: entry-expiry check uses the fixture's single `now_utc` (`simulator.py` ~758/~881), not the simulated bar time. Written into ROADMAP Phase 14 success criterion 6 | Deferred to Phase 14 | 2026-10-04 | v0.3 |
+| Phase 7 carry-over | Live WS ingestion (`PaperWsAdapter` missing `await`, `soak_smoke.log` ws_subscribe=BLOCKED), runnable paper process, SC3 soak evidence (`pinned_epoch.json`, `registry_diff.jsonl` all CLEAN). PAPER-01..03 stay Pending. Written into ROADMAP Phase 16 success criteria 7-9 | Deferred to Phase 16 | 2026-10-04 | v0.3 |
+| Phase 8 carry-over | Live Telegram callback check, read-only Binance reconcile, real-stack RUNBOOK drill | Deferred to Phases 20/23/24/25 | 2026-10-04 | v0.3 |
+| Phase 9 carry-over | Testnet rehearsal (needs signed-request adapter and a trading-permission demo key), 6 unconfirmed exchange facts in 09-REVIEW-FIX.md (confirm before Phase 24 wiring), hard-coded HEADROOM_LIMIT=200 | Deferred to Phases 24/25 | 2026-10-04 | v0.3 |
+| Phase 10 carry-over | Kill-gate review findings WR-01, WR-06, WR-12, WR-13 (decide before the first report on real evidence), WR-10 (enable flow) | Deferred to Phase 26 / Phase 24 | 2026-10-04 | v0.3 |
+| Phase 11 carry-over | Re-confirm ALGO_UPDATE wording and the 24h WebSocket lifetime against Binance pages | Deferred to before Phase 18 | 2026-10-04 | v0.3 |
+| Phase 2 carry-over | Backup drill: PostgreSQL dump and restore proof (operator hand-copied data/raw on 2026-10-04) | Deferred to Phase 13.1 remote drill | 2026-10-04 | v0.3 |
 | Rate-to-absolute conversion | Phase-7+ caller converts registry rates to absolute amounts before calling check_portfolio | Deferred to Phase 7+ | 2026-09-25 | v0.3 |
 | Enum promotion | setup_type, regime, order_role, side, position_side, order_type, time_in_force, event_type, entity_type | Deferred to Phase 4 | 2026-09-22 | v0.3 |
 | trades table | Logical user-executed trade entity (DATA_MODEL §2.6) | Deferred to Phase 5 | 2026-09-22 | v0.3 |
@@ -413,5 +429,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-10-01T18:33:59.810Z
-Stopped at: Phase 13 complete, ready to plan Phase 2
+Stopped at: Phase 7 complete, ready to plan Phase 07.1
 Resume file: None

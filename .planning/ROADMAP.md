@@ -35,16 +35,16 @@ Finding IDs (F-xxx) refer to `.planning/audits/2026-09-29-deep-audit/findings.js
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Research Formalization** - Frozen protocol, three family hypotheses, doc contradictions resolved
-- [ ] **Phase 2: Data Foundation** - Candles, day-one OI collector, funding, metadata, backup drill
-- [ ] **Phase 3: Domain + Registry + Fixtures** - Seven entities, versioned params, golden-fixture harness
-- [ ] **Phase 4: Pure Core (Feature + Strategy + Planner)** - Deterministic signals and trade plans from closed candles
-- [ ] **Phase 5: Risk Engine** - Identical sizing/quantization/portfolio caps in every mode
+- [x] **Phase 2: Data Foundation** - Candles, day-one OI collector, funding, metadata, backup drill (completed 2026-10-04)
+- [x] **Phase 3: Domain + Registry + Fixtures** - Seven entities, versioned params, golden-fixture harness (completed 2026-10-04)
+- [x] **Phase 4: Pure Core (Feature + Strategy + Planner)** - Deterministic signals and trade plans from closed candles (completed 2026-10-03)
+- [x] **Phase 5: Risk Engine** - Identical sizing/quantization/portfolio caps in every mode (completed 2026-10-03)
 - [x] **Phase 6: Backtest Simulator + Experiment Registry** - 1m intrabar parity engine with uncertainty-first reports (completed 2026-09-26)
-- [ ] **Phase 7: Paper Forward Observation** - WS realtime loop, three-way attribution, no tuning on paper
+- [x] **Phase 7: Paper Forward Observation** - WS realtime loop, three-way attribution, no tuning on paper (completed 2026-10-04)
 - [x] **Phase 8: Approval + Reconciliation Hardening** - Idempotent Telegram approvals, orphan sweeper, SAFE_MODE rehearsed (completed 2026-09-27)
-- [ ] **Phase 9: Live Execution Rollout** - LIMIT-zone entries, Algo protective exits, smallest capital
-- [ ] **Phase 10: Journal Depth + Kill-Gate Operations** - MFE/MAE analytics and the 3-families/6-months stop rule
-- [ ] **Phase 11: Decision Alignment (docs + params)** - Apply D031–D039 to canonical docs and parameter sets; protocol v1.1.0 pre-registration
+- [x] **Phase 9: Live Execution Rollout** - LIMIT-zone entries, Algo protective exits, smallest capital (completed 2026-10-04)
+- [x] **Phase 10: Journal Depth + Kill-Gate Operations** - MFE/MAE analytics and the 3-families/6-months stop rule (completed 2026-10-04)
+- [x] **Phase 11: Decision Alignment (docs + params)** - Apply D031–D039 to canonical docs and parameter sets; protocol v1.1.0 pre-registration (completed 2026-10-04)
 - [x] **Phase 12: Fee + Cost Model Correctness** - Costs in quote currency everywhere, taker entry, exit slippage, real commission rate (was Phase 11) (completed 2026-09-30)
 - [x] **Phase 13: Research Data Foundation Fixes** - Collector covers the D039 research universe, history depth, point-in-time universe, mark-price klines, backfill robustness, Parquet→backtest builder (completed 2026-10-03)
 - [ ] **Phase 13.1: Deployment & CI** (INSERTED) - CI on every commit, pinned images, one-command bootstrap and provider-portable migrate, S3-compatible encrypted backups; real VPS provisioning deferred
@@ -78,7 +78,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Every known Core Docs v0.3 contradiction appears as an explicit resolved decision in DECISIONS.md (SystemMode naming, APPROVED lifecycle, timezone, §12 status names, duplicate sections) — no silent renames
   4. A parameter run attempted without a frozen protocol and registered parameter set is rejected by gate, not by convention
 
-**Plans**: 4 plans
+**Plans**: 4/4 plans complete
 
 Plans:
 
@@ -100,15 +100,15 @@ Plans:
   3. Symbol metadata (tick/step, min/max qty, notional constraints, position modes, onboard time) loads versioned from live exchangeInfo instead of hard-coded values
   4. Automated backup + restore drill passes covering PostgreSQL state and the self-collected OI dataset
 
-**Plans**: 5 plans
+**Plans**: 5/5 plans complete
 
 Plans:
 
-- [ ] 02-01: Toolchain + storage skeleton + SDK re-verify + COVERAGE matrix
-- [ ] 02-02: Tracer end-to-end candle slice (one symbol, one interval)
-- [ ] 02-03: Full live-5 bounded-depth bootstrap with TDD quality gates
-- [ ] 02-04: Versioned metadata + day-one OI/funding collector (TDD)
-- [ ] 02-05: Coverage CLI/views + backup drill on off-host target
+- [x] 02-01: Toolchain + storage skeleton + SDK re-verify + COVERAGE matrix
+- [x] 02-02: Tracer end-to-end candle slice (one symbol, one interval)
+- [x] 02-03: Full live-5 bounded-depth bootstrap with TDD quality gates
+- [x] 02-04: Versioned metadata + day-one OI/funding collector (TDD)
+- [x] 02-05: Coverage CLI/views + backup drill on off-host target
 
 ### Phase 3: Domain + Registry + Fixtures
 
@@ -122,7 +122,7 @@ Plans:
   2. Any backtest, paper run, alert, or order plan displays its immutable identity (strategyVersion + parameterSetId + parameterSetHash + experiment linkage)
   3. Golden fixtures (candles.csv + parameters.json + expected signals/plans) plus no-lookahead, prefix-invariance, candle-close-timing, and boundary suites pass in CI; unregistered semantic changes are rejected
 
-**Plans**: 5/5 plans executed
+**Plans**: 5/5 plans complete
 
 Plans:
 
@@ -159,7 +159,7 @@ Plans:
   3. Every valid setup translates into a plan carrying entry zone, SL, TP(s), invalidation, expiry, expected RR, and plan hash
   4. No strategy family is declared a winner — all three remain hypotheses pending backtest plus out-of-sample evidence
 
-**Plans**: 4/4 plans executed
+**Plans**: 4/4 plans complete
 
 Plans:
 
@@ -193,7 +193,7 @@ Plans:
   2. Portfolio limits (max open positions, aggregate risk, correlated-cluster cap, DAILY_STOP states) are enforced, and uncertain account/risk state fails closed to NO_TRADE with no new orders
   3. Backtest, paper, and live produce identical sizing outputs for identical inputs (parity fixture green)
 
-**Plans**: 2 plans
+**Plans**: 2/2 plans complete
 
 Plans:
 
@@ -239,7 +239,7 @@ Plans:
   2. Paper loop records system vs user-executed vs opportunity (skipped/expired) attribution with signal/approve/order/fill timestamps
   3. Forward observation accumulates over the 3–6-month wall-clock envelope with zero tuning on the paper stream (registry diff proves no parameter change touched the running stream)
 
-**Plans**: 4/4 plans executed
+**Plans**: 4/4 plans complete
 
 Plans:
 
@@ -291,7 +291,7 @@ Plans:
   4. Retries, restarts, and replayed events never create duplicate entry orders (deterministic client/algo order identifiers verified)
   5. RUNBOOK failure drills (unprotected/orphan/duplicate/API-down/stale-feed/DB-failure/manual-close/restore) are rehearsed and logged; SAFE_MODE blocks new entries while monitoring and reconciliation continue
 
-**Plans**: 4/5 plans executed
+**Plans**: 5/5 plans complete
 
 Plans:
 
@@ -313,7 +313,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 08-05: RUNBOOK 8-drill harness plus journaled drill log plus phase gate (OPS-01, D-05)
+- [x] 08-05: RUNBOOK 8-drill harness plus journaled drill log plus phase gate (OPS-01, D-05)
 
 ### Phase 9: Live Execution Rollout
 
@@ -327,7 +327,7 @@ Plans:
   2. Live constraints are revalidated from exchangeInfo at placement time and DAILY_STOP is enforced against live state
   3. Live credentials use no-withdrawal keys with IP allowlisting, secrets live off-source, logs are structured and secret-free, and health checks are green — first orders only on smallest capital in the live-5 universe
 
-**Plans**: 4/4 plans executed
+**Plans**: 4/4 plans complete
 
 Plans:
 **Wave 1**
@@ -354,7 +354,7 @@ Plans:
   1. Journal/analytics reports MFE/MAE, execution-quality latencies, approval-delay impact, and robustness slices without hiding the full report
   2. Kill-gate dashboard tracks the 3-families / 6-months budget with live-5 vs research-universe slices, and NO_TRADE / INSUFFICIENT EDGE is recordable as a valid terminal outcome
 
-**Plans:** 12/12 plans executed
+**Plans:** 12/12 plans complete
 **UI hint**: yes
 
 Plans:
@@ -406,7 +406,7 @@ Plans:
 
 **Audit refs**: F-022, F-009, F-013, F-011, F-051, F-054, F-052, F-006, F-005, F-024, F-110, F-116, AMB-001…AMB-039 (report §20)
 
-**Plans:** 8/8 plans executed
+**Plans:** 8/8 plans complete
 
 Plans:
 **Wave 1**
@@ -578,8 +578,9 @@ Plans:
 3. Funding is modeled with a documented sign convention (F-905, F-021). Constraints are point-in-time. Portfolio, daily-loss and equity state evolve through the run (F-305).
 4. The R denominator is identical for backtest and live (F-204). The regime slice is emitted (F-123). ExperimentRecord carries the protocol-mandatory fields (F-118).
 5. Every golden case has a hand-derived expected output that is not produced by the code under test. The fixture generator no longer places 1m data inside the signal bar (F-602, F-805, F-608).
+6. **Carried over from Phase 6 (gap G3, entry-expiry clock):** the simulator no longer judges entry expiry with the fixture's single `now_utc`. `src/backtest/simulator.py` sets `_entry_now_utc = now_utc` (line ~758) and passes it to the entry check (line ~881), so expiry never advances with the bars. Expiry must be evaluated against the simulated bar time, and a multi-bar test must show a limit entry that expires after `signal_expiry_hours` and one that fills before it. Phase 6 was closed on 2026-10-04 with G3 still open because this phase rewrites the same entry and expiry logic (source: `06-VERIFICATION.md`).
 
-**Audit refs**: F-120, F-901, F-902, F-102, F-804, F-905, F-305, F-204, F-123, F-118, F-602, F-805, F-904
+**Audit refs**: F-120, F-901, F-902, F-102, F-804, F-905, F-305, F-204, F-123, F-118, F-602, F-805, F-904; carry-over from Phase 6 (`.planning/phases/06-backtest-simulator-experiment-registry/06-VERIFICATION.md`)
 
 **Plans:** 0 plans
 
@@ -622,8 +623,11 @@ Plans:
 4. The paper exit criteria are quantitative and pre-registered (F-023).
 5. SHADOW mode (D040): SIMULATE/APPROVE messages are clearly labelled "SHADOW — no real order"; APPROVE → CONFIRM (D041) / SKIP / expiry are journaled with timestamps and approval delay; each confirmed plan gets a simulated position using the Phase-14 fill semantics on live market data, and the journal reports system vs user vs opportunity outcomes (F-961).
 6. Hard isolation: in SHADOW the process loads no trade-capable API key and never constructs an order adapter; a test proves that no code path from a SHADOW confirm reaches `execute_approved_plan` or any order endpoint.
+7. **Carried over from Phase 7 (live WS):** a live smoke run shows `ws_subscribe` succeeding and delivering closed-candle events to the supervisor (`soak_smoke.log` reads `ws_subscribe=BLOCKED` with 0 events today). Phase 7 verified WS ingestion only with fakes.
+8. **Carried over from Phase 7 (SC3 soak evidence):** the stream epoch is pinned (`pin_stream_epoch`) and `python -m src.paper.freeze` runs hourly for the soak window; `logs/paper/pinned_epoch.json` and `logs/paper/registry_diff.jsonl` exist, every diff line is CLEAN, there is one `epoch_id`, and the pinned hash is unchanged. Nothing has ever been pinned yet. Source: `07-VERIFICATION.md` `behavior_unverified_items`.
+9. **Requirement closure rule:** PAPER-01, PAPER-02 and PAPER-03 stay Pending until criteria 1, 2, 7 and 8 hold. Phase 7 was closed on 2026-10-04 by operator decision with these requirements still unmet, so Phase 16 is the phase that closes them and must not mark them complete on the strength of fake-level tests.
 
-**Audit refs**: F-201, F-125, F-607, F-961, F-023, D040, D041
+**Audit refs**: F-201, F-125, F-607, F-961, F-023, D040, D041; carry-over from Phase 7 (`.planning/phases/07-paper-forward-observation/07-VERIFICATION.md`)
 
 **Plans:** 0 plans
 
@@ -962,17 +966,17 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Research Formalization | 0/TBD | Not started | - |
-| 2. Data Foundation | 0/TBD | Not started | - |
-| 3. Domain + Registry + Fixtures | 5/5 | In Progress|  |
-| 4. Pure Core (Feature + Strategy + Planner) | 4/4 | In Progress|  |
-| 5. Risk Engine | 2/2 | In Progress|  |
+| 1. Research Formalization | 4/4 | Complete    | 2026-10-04 |
+| 2. Data Foundation | 5/5 | Complete    | 2026-10-04 |
+| 3. Domain + Registry + Fixtures | 5/5 | Complete    | 2026-10-04 |
+| 4. Pure Core (Feature + Strategy + Planner) | 4/4 | Complete    | 2026-10-03 |
+| 5. Risk Engine | 2/2 | Complete    | 2026-10-03 |
 | 6. Backtest Simulator + Experiment Registry | 3/3 | Complete   | 2026-09-26 |
-| 7. Paper Forward Observation | 4/4 | In Progress|  |
-| 8. Approval + Reconciliation Hardening | 5/5 | Complete   | 2026-09-27 |
-| 9. Live Execution Rollout | 4/4 | In Progress|  |
-| 10. Journal Depth + Kill-Gate Operations | 12/12 | In Progress|  |
-| 11. Decision Alignment (docs + params) | 8/8 | In Progress|  |
+| 7. Paper Forward Observation | 4/4 | Complete    | 2026-10-04 |
+| 8. Approval + Reconciliation Hardening | 5/5 | Complete    | 2026-09-27 |
+| 9. Live Execution Rollout | 4/4 | Complete    | 2026-10-04 |
+| 10. Journal Depth + Kill-Gate Operations | 12/12 | Complete    | 2026-10-04 |
+| 11. Decision Alignment (docs + params) | 8/8 | Complete    | 2026-10-04 |
 | 12. Fee + Cost Model Correctness | 11/11 | Complete    | 2026-09-30 |
 | 13. Research Data Foundation Fixes | 13/13 | Complete    | 2026-10-03 |
 | 13.1. Deployment & CI | 11/12 | In Progress|  |
