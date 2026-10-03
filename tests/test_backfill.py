@@ -446,6 +446,75 @@ async def test_corrupt_page_rejected_cursor_not_advanced_past_good_data(
     assert published == [base_ms + i * INTERVAL_MS for i in range(bars_per_page)]
 
 
+class _StatelessWindowAdapter:
+    """Serves a fixed series by `start_ms`, like a real exchange (never runs dry)."""
+
+    def __init__(self, rows: list[Kline]) -> None:
+        self._rows = sorted(rows, key=lambda k: k.open_time_utc)
+        self.calls = 0
+
+    async def klines(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 1500,
+    ) -> list[Kline]:
+        self.calls += 1
+        assert self.calls < 200, "backfill did not terminate (CR-01 regression)"
+        assert start_ms is not None
+        eligible = [k for k in self._rows if int(k.open_time_utc.timestamp() * 1000) >= start_ms]
+        return eligible[:limit]
+
+
+async def test_corrupt_page_after_good_page_on_same_day_raises_instead_of_looping(
+    tmp_path: Path,
+) -> None:
+    """CR-01: a good page then a deterministically corrupt page on one UTC day.
+
+    The rollback re-fetch returns only already-buffered (de-duplicated) rows;
+    that must NOT reset the consecutive-rejection budget, otherwise the loop
+    never terminates. The run must fail closed with StructuralRejectionError.
+    """
+    from src.data.backfill import MAX_CONSECUTIVE_REJECTIONS, StructuralRejectionError
+
+    base_ms = BASE_OPEN_MS
+    page = 5
+    rows: list[Kline] = []
+    for i in range(page):
+        o = base_ms + i * INTERVAL_MS
+        rows.append(_mk_kline(open_ms=o, close_ms=o + INTERVAL_MS - 1))
+    for i in range(page, 2 * page):
+        o = base_ms + i * INTERVAL_MS
+        rows.append(
+            _mk_kline(
+                open_ms=o,
+                close_ms=o + INTERVAL_MS - 1,
+                open="110.00",
+                high="100.00",
+                low="100.00",
+                close="105.00",
+            )
+        )
+    adapter = _StatelessWindowAdapter(rows)
+    cfg = BackfillConfig(interval_ms=INTERVAL_MS, pace_seconds=0, page_size=page)
+
+    with pytest.raises(StructuralRejectionError):
+        await backfill_symbol_interval(
+            adapter,  # type: ignore[arg-type]
+            symbol="BTCUSDT",
+            interval=INTERVAL,
+            start_ms=base_ms,
+            end_ms=base_ms + 24 * INTERVAL_MS,
+            raw_root=tmp_path,
+            config=cfg,
+        )
+    # Bounded: each cycle is one good (deduped) fetch plus one corrupt fetch.
+    assert adapter.calls <= 2 * (MAX_CONSECUTIVE_REJECTIONS + 2) + 1
+
+
 # --------------------------------------------------------------------------- #
 # Helpers — exposed so the runner / smoke test can re-use them.
 # --------------------------------------------------------------------------- #

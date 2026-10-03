@@ -616,6 +616,7 @@ async def backfill_symbol_interval(
             closed = deduped
 
         corrupt_rejection = False
+        accepted_new = False
         if closed:
             verdict = dataset.validate(closed, interval)
             if not verdict.structural_ok:
@@ -635,6 +636,7 @@ async def backfill_symbol_interval(
             else:
                 # The batch passed the gate: only NOW mark its rows seen
                 # (see the dedup comment above) and buffer them by date.
+                accepted_new = True
                 for k in closed:
                     seen_open_times.add(utc_ms(k.open_time_utc))
                     d = k.open_time_utc.date()
@@ -696,7 +698,13 @@ async def backfill_symbol_interval(
                 raise StructuralRejectionError(symbol, interval, cursor, consecutive_rejections)
             cursor = last_published_open_ms + cfg.interval_ms
         elif raw_page:
-            consecutive_rejections = 0
+            # Reset the rejection budget ONLY when this page contributed new
+            # accepted rows. After a rollback the re-fetch can return nothing
+            # but already-buffered (de-duplicated) rows; resetting on that page
+            # would let a deterministically corrupt page that follows a good
+            # page on the same UTC day loop forever (CR-01).
+            if accepted_new:
+                consecutive_rejections = 0
             consecutive_empty_pages = 0
             # Normal advance past the page we just fetched.
             last_open = utc_ms(raw_page[-1].open_time_utc)
