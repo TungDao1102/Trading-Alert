@@ -1,0 +1,40 @@
+# Collect list for the OI/funding collector (Phase 13, D-01, D-02).
+#
+# This file is an operational input for the OI/funding collector: the live-5
+# union the top N TRADING USDT perpetuals by 24h quote volume at the date it
+# was chosen. It has no FROZEN semantics and no content hash, and it is not
+# the research-universe manifest (research-universe-v1.toml). A later version
+# supersedes it without touching stored data.
+#
+# Regenerate: python -m src.data.collect_list propose --help
+#
+# Source: base list: docs/research/universe/collect-list-v1.toml (collect-list-v1, chosen 2026-09-30)
+# Source: freeze report: docs/research/universe/research-universe-v1.freeze-report.json
+# Source: added (frozen, status TRADING): 1000PEPEUSDT, DOGSUSDT, WIFUSDT
+# Source: Regenerate: python -m src.data.collect_list reissue --help
+
+schema = "collect-list/1"
+list_id = "collect-list-v2"
+chosen_on = "2026-10-03"
+selection_rule = "collect-list-v1 symbols union the frozen research-universe symbols whose status was TRADING in the freeze report (D-24)"
+top_n = 15
+symbols = [
+    "1000PEPEUSDT",
+    "BNBUSDT",
+    "BTCUSDT",
+    "DOGEUSDT",
+    "DOGSUSDT",
+    "ENAUSDT",
+    "ETHUSDT",
+    "HYPEUSDT",
+    "MOVRUSDT",
+    "NEARUSDT",
+    "PUMPUSDT",
+    "QNTUSDT",
+    "SOLUSDT",
+    "SUIUSDT",
+    "WIFUSDT",
+    "WLDUSDT",
+    "XRPUSDT",
+    "ZECUSDT",
+]

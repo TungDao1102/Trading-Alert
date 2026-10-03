@@ -31,13 +31,14 @@ from pathlib import Path
 from typing import Any
 
 from src.data.backfill import LIVE_5
+from src.data.universe_freeze import FreezeError, load_report
 
 SCHEMA = "collect-list/1"
 SYMBOL_RE = re.compile(r"^[A-Z0-9]+USDT$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Relative to the working directory (repo root locally, /app in the image).
-DEFAULT_COLLECT_LIST_PATH = Path("docs") / "research" / "universe" / "collect-list-v1.toml"
+DEFAULT_COLLECT_LIST_PATH = Path("docs") / "research" / "universe" / "collect-list-v2.toml"
 
 _REQUIRED_KEYS = (
     "schema",
@@ -52,6 +53,7 @@ _REQUIRED_KEYS = (
 DEFAULT_LIST_ID = "collect-list-v1"
 DEFAULT_TOP_N = 15
 DEFAULT_SOURCE_NOTE = "GET /fapi/v1/ticker/24hr and GET /fapi/v1/exchangeInfo"
+DEFAULT_REISSUE_LIST_ID = "collect-list-v2"
 
 
 class CollectListError(ValueError):
@@ -243,6 +245,37 @@ def propose_collect_list(
     )
 
 
+def reissue_collect_list(
+    base: CollectList,
+    freeze_report_path: Path,
+    *,
+    chosen_on: date,
+    list_id: str,
+) -> CollectList:
+    """Re-issue `base` with the frozen research symbols that are still TRADING (D-24).
+
+    The result is `base.symbols` union the freeze report's `proposed_symbols`
+    whose recorded candidate status is `TRADING`; SETTLING and other
+    non-TRADING symbols are left out so the collector does not journal a gap
+    row for them every tick (T-13-53). Statuses come from the report's own
+    candidate records (no network). `load_report` verifies the report hash, so
+    an edited report raises `FreezeError`, which propagates.
+    """
+    report = load_report(Path(freeze_report_path))
+    status = {c.symbol: c.status for c in report.candidates}
+    trading = {sym for sym in report.proposed_symbols if status.get(sym) == "TRADING"}
+    return CollectList(
+        list_id=list_id,
+        chosen_on=chosen_on,
+        top_n=base.top_n,
+        selection_rule=(
+            f"{base.list_id} symbols union the frozen research-universe symbols whose "
+            "status was TRADING in the freeze report (D-24)"
+        ),
+        symbols=tuple(sorted(set(base.symbols) | trading)),
+    )
+
+
 def _toml_str(value: str) -> str:
     """Render a TOML basic string; JSON string escaping is valid TOML here."""
     return json.dumps(value)
@@ -309,7 +342,57 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="UTC fetch timestamp recorded in the file's source comment.",
     )
     propose.add_argument("--out", type=Path, required=True, help="Output path; must not exist.")
+    reissue = sub.add_parser(
+        "reissue",
+        help="Re-issue a collect list with the still-TRADING frozen research symbols (D-24).",
+    )
+    reissue.add_argument("--base", type=Path, required=True, help="Collect list to extend.")
+    reissue.add_argument(
+        "--freeze-report", type=Path, required=True, help="Committed freeze report JSON."
+    )
+    reissue.add_argument("--chosen-on", required=True, help="ISO date YYYY-MM-DD (UTC).")
+    reissue.add_argument("--list-id", default=DEFAULT_REISSUE_LIST_ID)
+    reissue.add_argument("--out", type=Path, required=True, help="Output path; must not exist.")
     return parser.parse_args(argv)
+
+
+def _parse_chosen_on_arg(raw: str) -> date:
+    if not DATE_RE.match(raw):
+        raise CollectListError(f"--chosen-on must be YYYY-MM-DD, got {raw!r}")
+    try:
+        return date.fromisoformat(raw)
+    except ValueError as exc:
+        raise CollectListError(f"--chosen-on is not a real date: {raw!r}") from exc
+
+
+def _write_new(out: Path, text: str) -> None:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with out.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+    except FileExistsError as exc:
+        raise CollectListError(f"--out {out} already exists; refusing to overwrite") from exc
+
+
+def _run_reissue(args: argparse.Namespace) -> None:
+    chosen_on = _parse_chosen_on_arg(args.chosen_on)
+    if args.out.exists():
+        raise CollectListError(f"--out {args.out} already exists; refusing to overwrite")
+    base = load_collect_list(args.base)
+    reissued = reissue_collect_list(
+        base, args.freeze_report, chosen_on=chosen_on, list_id=args.list_id
+    )
+    added = sorted(set(reissued.symbols) - set(base.symbols))
+    note = "\n".join(
+        [
+            f"base list: {args.base.as_posix()} ({base.list_id}, chosen {base.chosen_on})",
+            f"freeze report: {args.freeze_report.as_posix()}",
+            f"added (frozen, status TRADING): {', '.join(added) if added else 'none'}",
+            "Regenerate: python -m src.data.collect_list reissue --help",
+        ]
+    )
+    _write_new(args.out, render_collect_list_toml(reissued, source_note=note))
+    print(f"collect-list: wrote {len(reissued.symbols)} symbols to {args.out}")
 
 
 def _run_propose(args: argparse.Namespace) -> None:
@@ -356,7 +439,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "propose":
             _run_propose(args)
-    except CollectListError as exc:
+        elif args.command == "reissue":
+            _run_reissue(args)
+    except (CollectListError, FreezeError) as exc:
         print(f"collect-list: error: {exc}", file=sys.stderr)
         return 2
     return 0

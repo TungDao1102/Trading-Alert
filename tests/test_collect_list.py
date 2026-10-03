@@ -375,9 +375,13 @@ def test_committed_collect_list_is_valid_live5_superset() -> None:
     assert set(LIVE_5) <= set(cl.symbols)
     assert 15 <= len(cl.symbols) <= 20
     assert cl.chosen_on <= datetime.now(UTC).date()
-    text = path.read_text(encoding="utf-8")
-    assert "GET /fapi/v1/ticker/24hr" in text
-    assert "GET /fapi/v1/exchangeInfo" in text
+    # The default (v2) is derived from v1, whose source note names the public endpoints.
+    v1_text = (REPO_ROOT / "docs" / "research" / "universe" / "collect-list-v1.toml").read_text(
+        encoding="utf-8"
+    )
+    assert "GET /fapi/v1/ticker/24hr" in v1_text
+    assert "GET /fapi/v1/exchangeInfo" in v1_text
+    assert "freeze-report.json" in path.read_text(encoding="utf-8")
 
 
 def test_dockerfile_copies_universe_directory() -> None:
@@ -489,7 +493,7 @@ def test_reissue_cli_refuses_overwrite(tmp_path: Path) -> None:
     assert "NEWAUSDT" in written.symbols
     assert written.list_id == "collect-list-v2"
     text = out.read_text(encoding="utf-8")
-    assert str(base_path) in text and str(report) in text
+    assert base_path.as_posix() in text and report.as_posix() in text
     assert collect_list_main(args) == 2
     assert out.read_text(encoding="utf-8") == text
 
