@@ -49,7 +49,7 @@ covered_files:
   - scripts/decision_alignment/universe.py
   - scripts/verify_decision_alignment.py
   - src/domain/registry.py
-covered_digest: "v2:sha256:ccc91d236b9f02bf1f879ae5b9eed5937ffa8acca6a84a0755a251cc658e6d74"
+covered_digest: "v2:sha256:650bdb94706e6fcaac95bebd5285de546790b03883916878b8eeac8406e8a891"
 behavior_unverified: 0
 overrides_applied: 0
 gaps: []
