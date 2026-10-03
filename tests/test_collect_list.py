@@ -19,9 +19,18 @@ from src.data.collect_list import (
     CollectListError,
     load_collect_list,
     propose_collect_list,
+    reissue_collect_list,
     render_collect_list_toml,
 )
 from src.data.collect_list import main as collect_list_main
+from src.data.universe_freeze import (
+    REPORT_SCHEMA,
+    CandidateEvidence,
+    FreezeError,
+    FreezeReport,
+    _hash_report,
+    write_report,
+)
 
 EXTRA_SYMBOLS = (
     "ADAUSDT",
@@ -82,7 +91,7 @@ def test_loads_valid_list_sorted(tmp_path: Path) -> None:
 
 def test_default_path_is_operational_docs_location() -> None:
     assert DEFAULT_COLLECT_LIST_PATH == (
-        Path("docs") / "research" / "universe" / "collect-list-v1.toml"
+        Path("docs") / "research" / "universe" / "collect-list-v2.toml"
     )
 
 
@@ -377,3 +386,118 @@ def test_dockerfile_copies_universe_directory() -> None:
     assert lines.count(copy_line) == 1
     useradd = next(i for i, ln in enumerate(lines) if ln.startswith("RUN useradd"))
     assert lines.index(copy_line) < useradd
+
+
+# --------------------------------------------------------------------------- #
+# 13-13 Task 1: re-issue the collect list after the research-universe freeze (D-24).
+# --------------------------------------------------------------------------- #
+
+
+def _candidate(symbol: str, status: str) -> CandidateEvidence:
+    return CandidateEvidence(
+        symbol=symbol,
+        status=status,
+        contract_type="PERPETUAL",
+        onboard_utc=None,
+        delivery_date_ms=None,
+        source="exchangeInfo",
+        days=30,
+        quote_volume_sum=None,
+        quote_volume_mean=None,
+        eligible=True,
+        reason="ok",
+    )
+
+
+def _write_freeze_report(path: Path, proposed: dict[str, str]) -> Path:
+    """Write a hash-valid freeze report whose proposal carries `proposed` symbol: status."""
+    unsigned = FreezeReport(
+        schema=REPORT_SCHEMA,
+        run_date=date(2026, 10, 3),
+        dataset_start=date(2025, 10, 3),
+        window_start=date(2025, 9, 3),
+        window_end=date(2025, 10, 3),
+        top_n=len(proposed),
+        candidates=tuple(_candidate(sym, status) for sym, status in sorted(proposed.items())),
+        ranked=(),
+        proposed_symbols=tuple(sorted(proposed)),
+        unrankable=(),
+        availability=(),
+        proposal_sha256="",
+    )
+    report = FreezeReport(**{**unsigned.__dict__, "proposal_sha256": _hash_report(unsigned)})
+    write_report(report, path)
+    return path
+
+
+def _base_list(tmp_path: Path) -> CollectList:
+    return load_collect_list(_write(tmp_path, _render()))
+
+
+def test_reissue_adds_only_trading_frozen_symbols(tmp_path: Path) -> None:
+    base = _base_list(tmp_path)
+    report = _write_freeze_report(
+        tmp_path / "freeze.json",
+        {"NEWAUSDT": "TRADING", "NEWBUSDT": "SETTLING", "ADAUSDT": "TRADING"},
+    )
+    result = reissue_collect_list(
+        base, report, chosen_on=date(2026, 10, 3), list_id="collect-list-v2"
+    )
+    assert set(result.symbols) == set(base.symbols) | {"NEWAUSDT"}
+    assert "NEWBUSDT" not in result.symbols
+    assert result.symbols.count("ADAUSDT") == 1
+    assert list(result.symbols) == sorted(result.symbols)
+    assert result.list_id == "collect-list-v2"
+    assert result.chosen_on == date(2026, 10, 3)
+    assert result.top_n == base.top_n
+    assert "D-24" in result.selection_rule
+    assert "TRADING" in result.selection_rule
+
+
+def test_reissue_is_superset_of_base_and_live5(tmp_path: Path) -> None:
+    base = _base_list(tmp_path)
+    report = _write_freeze_report(tmp_path / "freeze.json", {"NEWAUSDT": "TRADING"})
+    result = reissue_collect_list(
+        base, report, chosen_on=date(2026, 10, 3), list_id="collect-list-v2"
+    )
+    assert set(base.symbols) <= set(result.symbols)
+    assert set(LIVE_5) <= set(result.symbols)
+    # A report edited after its hash was computed must not be trusted.
+    text = report.read_text(encoding="utf-8").replace("NEWAUSDT", "EVILUSDT")
+    report.write_text(text, encoding="utf-8")
+    with pytest.raises(FreezeError):
+        reissue_collect_list(base, report, chosen_on=date(2026, 10, 3), list_id="collect-list-v2")
+
+
+def test_reissue_cli_refuses_overwrite(tmp_path: Path) -> None:
+    base_path = _write(tmp_path, _render())
+    report = _write_freeze_report(tmp_path / "freeze.json", {"NEWAUSDT": "TRADING"})
+    out = tmp_path / "v2.toml"
+    args = [
+        "reissue",
+        "--base",
+        str(base_path),
+        "--freeze-report",
+        str(report),
+        "--chosen-on",
+        "2026-10-03",
+        "--out",
+        str(out),
+    ]
+    assert collect_list_main(args) == 0
+    written = load_collect_list(out)
+    assert "NEWAUSDT" in written.symbols
+    assert written.list_id == "collect-list-v2"
+    text = out.read_text(encoding="utf-8")
+    assert str(base_path) in text and str(report) in text
+    assert collect_list_main(args) == 2
+    assert out.read_text(encoding="utf-8") == text
+
+
+def test_default_collect_list_is_v2_and_loads() -> None:
+    assert DEFAULT_COLLECT_LIST_PATH.name == "collect-list-v2.toml"
+    v1 = load_collect_list(REPO_ROOT / "docs" / "research" / "universe" / "collect-list-v1.toml")
+    v2 = load_collect_list(REPO_ROOT / DEFAULT_COLLECT_LIST_PATH)
+    assert v2.list_id == "collect-list-v2"
+    assert set(v1.symbols) <= set(v2.symbols)
+    assert set(LIVE_5) <= set(v2.symbols)
