@@ -101,6 +101,8 @@ from src.data.collector import (
 from src.data.metadata import MetadataWidthError, refresh_symbol_metadata
 from src.data.store import DEFAULT_RAW_ROOT, partition_file
 from src.data.sufficiency import (
+    FUNDING_DATASET,
+    FUNDING_INTERVAL,
     SOURCE_ARCHIVE,
     SOURCE_REST,
     SOURCE_UNAVAILABLE,
@@ -376,6 +378,55 @@ def _plan_key(
     return start, end, terminal, cause
 
 
+def plan_funding_window(
+    symbol: str,
+    filters: SymbolFilters | None,
+    own: Sequence[SymbolWindow],
+    *,
+    htf_start_ms: int,
+    run_end_ms: int,
+    trade_unavailable: bool,
+) -> SymbolWindow:
+    """The funding-coverage window of one symbol (D-23), same causes as the kline windows.
+
+    Start is `max(dataset start, onboard)`, end is `min(run end, delivery, a capped
+    kline window end)`, exactly the range the funding walk covers. `own` are the
+    symbol's final kline windows that have a window. A symbol the walk could not
+    serve (no trade source, or neither exchangeInfo nor a kline window) is
+    `DELIVERY_UNKNOWN`, which the report states as UNAVAILABLE.
+    """
+
+    def window(start: int | None, end: int | None, terminal: bool, cause: str) -> SymbolWindow:
+        return SymbolWindow(
+            dataset=FUNDING_DATASET,
+            symbol=symbol,
+            interval=FUNDING_INTERVAL,
+            start_ms=start,
+            end_ms=end,
+            terminal=terminal,
+            cause=cause,
+        )
+
+    if trade_unavailable or (filters is None and not own):
+        return window(None, None, False, DELIVERY_UNKNOWN)
+    if filters is None:
+        start, end, terminal, cause = htf_start_ms, run_end_ms, False, FULL_DEPTH
+    else:
+        planned_start, planned_end, terminal, cause = _plan_key(
+            filters, depth_start=htf_start_ms, run_end_ms=run_end_ms
+        )
+        if planned_start is None or planned_end is None:
+            return window(None, None, False, cause)
+        start, end = planned_start, planned_end
+    caps = [w.end_ms for w in own if w.terminal and w.end_ms is not None]
+    capped_end = min([end, *caps])
+    if capped_end < end:
+        end, terminal, cause = capped_end, True, DELISTED_CAPPED
+    if start >= end:
+        return window(None, None, False, DELISTED_CAPPED if terminal else NOT_LISTED_IN_RANGE)
+    return window(start, end, terminal, cause)
+
+
 def plan_windows(
     filters_by_symbol: Mapping[str, SymbolFilters],
     *,
@@ -646,6 +697,7 @@ async def run_backfill(
             report=report,
             missing=missing,
             now=now,
+            filters_by_symbol=by_symbol,
         )
     finally:
         await access.aclose()
@@ -662,6 +714,7 @@ async def _backfill_and_report(
     report: BackfillRunReport,
     missing: tuple[str, ...],
     now: datetime,
+    filters_by_symbol: Mapping[str, SymbolFilters] | None = None,
 ) -> BackfillRunReport:
     """Steps 3 to 6 of `run_backfill`: sources, klines, funding, sufficiency report."""
     symbols = tuple(config.symbols)
@@ -896,6 +949,23 @@ async def _backfill_and_report(
             truncated_symbols=tuple(truncated),
         )
 
+    # Funding coverage rows (D-23): one per symbol, only when funding was requested.
+    funding_windows = (
+        tuple(
+            plan_funding_window(
+                symbol,
+                (filters_by_symbol or {}).get(symbol),
+                [w for w in final_windows if w.symbol == symbol and w.has_window],
+                htf_start_ms=htf_start_ms,
+                run_end_ms=run_end_ms,
+                trade_unavailable=sources.get(("trade", symbol)) == SOURCE_UNAVAILABLE,
+            )
+            for symbol in symbols
+        )
+        if config.funding
+        else ()
+    )
+
     # 6. The data-sufficiency report (D-05): what depth exists, and why any is short.
     sufficiency = build_sufficiency_report(
         config.raw_root,
@@ -905,6 +975,7 @@ async def _backfill_and_report(
         dataset_start=datetime.fromtimestamp(htf_start_ms / 1000, tz=UTC).date(),
         dataset_end=run_date,
         sources=sources,
+        funding_windows=funding_windows,
     )
     for line in render_report_table(sufficiency).splitlines():
         emit(line)

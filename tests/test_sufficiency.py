@@ -484,3 +484,227 @@ def test_validate_subcommand(tmp_path: Path, capsys: pytest.CaptureFixture[str])
     assert "schema" in err and "rows" in err
     assert main(["validate", str(tmp_path / "absent.json")]) == 1
     assert main([]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Funding coverage rows (D-23): per-symbol intervals, no constant step assumed.
+# --------------------------------------------------------------------------- #
+
+H8 = 8 * HOUR_MS
+H4 = 4 * HOUR_MS
+
+
+def _write_funding(raw: Path, symbol: str, times_ms: Sequence[int]) -> None:
+    """One sweep-*.parquet per tick, exactly like the collector writes them."""
+    import polars as pl
+
+    for t in times_ms:
+        when = _dt(t)
+        folder = raw / "data_class=funding" / f"symbol={symbol}" / f"date={when.date()}"
+        folder.mkdir(parents=True, exist_ok=True)
+        frame = pl.DataFrame(
+            {
+                "symbol": [symbol],
+                "funding_time_utc": [when],
+                "funding_rate": [Decimal("0.0001")],
+                "mark_price": [Decimal("100")],
+            },
+            schema={
+                "symbol": pl.String(),
+                "funding_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
+                "funding_rate": pl.Decimal(scale=10),
+                "mark_price": pl.Decimal(scale=8),
+            },
+        )
+        frame.write_parquet(folder / f"sweep-{when:%Y%m%dT%H%M%SZ}-{t}.parquet")
+
+
+def _series(start_ms: int, end_ms: int, step_ms: int) -> list[int]:
+    return list(range(start_ms, end_ms, step_ms))
+
+
+def _funding_window(
+    symbol: str = "BTCUSDT",
+    *,
+    start_ms: int | None = _ms(2026, 9, 1),
+    end_ms: int | None = _ms(2026, 9, 10),
+    terminal: bool = False,
+    cause: str = "FULL_DEPTH",
+) -> Any:
+    return _window(
+        symbol,
+        dataset="funding",
+        interval="funding",
+        start_ms=start_ms,
+        end_ms=end_ms,
+        terminal=terminal,
+        cause=cause,
+    )
+
+
+def _funding_report(raw: Path, windows: Sequence[Any], **overrides: Any) -> Any:
+    return _report(raw, [], funding_windows=list(windows), **overrides)
+
+
+def test_full_8h_funding_series_is_ok(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    _write_funding(raw, "BTCUSDT", _series(_ms(2026, 9, 1), _ms(2026, 9, 10), H8))
+
+    report = _funding_report(raw, [_funding_window()])
+
+    (row,) = report.rows
+    assert (row.dataset, row.interval, row.cause) == ("funding", "funding", "OK")
+    assert (row.expected_bars, row.have_bars, row.missing_bars) == (27, 27, 0)
+    assert report.missing_data is False
+
+
+def test_mixed_8h_then_4h_funding_series_is_ok(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    switch = _ms(2026, 9, 5)
+    ticks = _series(_ms(2026, 9, 1), switch, H8) + _series(switch, _ms(2026, 9, 10), H4)
+    _write_funding(raw, "BTCUSDT", ticks)
+
+    report = _funding_report(raw, [_funding_window()])
+
+    (row,) = report.rows
+    assert row.cause == "OK"
+    assert (row.expected_bars, row.have_bars) == (len(ticks), len(ticks))
+
+
+def test_hole_in_the_middle_of_funding_is_a_gap_with_a_range(tmp_path: Path) -> None:
+    from src.data.sufficiency import render_report_table
+
+    raw = tmp_path / "raw"
+    hole = (_ms(2026, 9, 4), _ms(2026, 9, 5))
+    ticks = [
+        t for t in _series(_ms(2026, 9, 1), _ms(2026, 9, 10), H8) if not hole[0] <= t < hole[1]
+    ]
+    _write_funding(raw, "BTCUSDT", ticks)
+
+    report = _funding_report(raw, [_funding_window()])
+
+    (row,) = report.rows
+    assert row.cause == "GAP"
+    assert report.missing_data is True
+    (gap,) = row.gaps
+    assert gap.missing == 3
+    assert (gap.start_utc, gap.end_utc) == (_dt(hole[0]), _dt(hole[1]))
+    assert (row.expected_bars, row.have_bars, row.missing_bars) == (27, 24, 3)
+    line = "GAP funding BTCUSDT funding 2026-09-04T00:00:00Z..2026-09-05T00:00:00Z missing 3"
+    assert line in render_report_table(report)
+
+
+def test_funding_hole_inside_a_4h_stretch_counts_4h_ticks(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    hole = (_ms(2026, 9, 4), _ms(2026, 9, 4, 12))
+    ticks = [
+        t for t in _series(_ms(2026, 9, 1), _ms(2026, 9, 10), H4) if not hole[0] <= t < hole[1]
+    ]
+    _write_funding(raw, "BTCUSDT", ticks)
+
+    (row,) = _funding_report(raw, [_funding_window()]).rows
+
+    assert row.cause == "GAP"
+    assert [g.missing for g in row.gaps] == [3]
+
+
+def test_funding_late_first_tick_and_early_last_tick_are_gaps(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    _write_funding(raw, "LATEUSDT", _series(_ms(2026, 9, 3), _ms(2026, 9, 10), H8))
+    _write_funding(raw, "EARLYUSDT", _series(_ms(2026, 9, 1), _ms(2026, 9, 8), H8))
+
+    report = _funding_report(raw, [_funding_window("LATEUSDT"), _funding_window("EARLYUSDT")])
+
+    late, early = report.rows
+    assert (late.cause, early.cause) == ("GAP", "GAP")
+    assert late.gaps[0].start_utc == _dt(_ms(2026, 9, 1))
+    assert late.gaps[0].missing == 6
+    assert early.gaps[0].end_utc == _dt(_ms(2026, 9, 10))
+
+
+def test_funding_jitter_within_tolerance_is_not_a_gap(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    base = _series(_ms(2026, 9, 1), _ms(2026, 9, 10), H8)
+    _write_funding(raw, "BTCUSDT", [t + (3 if i % 2 else 0) for i, t in enumerate(base)])
+
+    (row,) = _funding_report(raw, [_funding_window()]).rows
+
+    assert row.cause == "OK"
+
+
+def test_onboard_limited_funding_starts_at_the_late_window(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    _write_funding(raw, "NEWUSDT", _series(_ms(2026, 9, 6, 8), _ms(2026, 9, 10), H8))
+
+    report = _funding_report(
+        raw,
+        [_funding_window("NEWUSDT", start_ms=_ms(2026, 9, 6, 3), cause="ONBOARD_LIMITED")],
+    )
+
+    (row,) = report.rows
+    assert row.cause == "ONBOARD_LIMITED"
+    assert row.missing_bars == 0
+    assert report.missing_data is False
+
+
+def test_delisted_funding_is_capped_at_the_delivery(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    delivery = _ms(2026, 9, 6, 8)
+    _write_funding(raw, "OLDUSDT", _series(_ms(2026, 9, 1), delivery, H8))
+
+    report = _funding_report(
+        raw,
+        [_funding_window("OLDUSDT", end_ms=delivery, terminal=True, cause="DELISTED_CAPPED")],
+    )
+
+    (row,) = report.rows
+    assert row.cause == "DELISTED_CAPPED"
+    assert report.missing_data is False
+    assert row.expected_end_utc == "2026-09-06T08:00:00Z"
+
+    # Stopping a day before the delivery is a gap, not a cap.
+    _write_funding(raw, "CUTUSDT", _series(_ms(2026, 9, 1), _ms(2026, 9, 5, 8), H8))
+    cut_window = _funding_window("CUTUSDT", end_ms=delivery, terminal=True, cause="DELISTED_CAPPED")
+    (cut,) = _funding_report(raw, [cut_window]).rows
+    assert cut.cause == "GAP"
+
+
+def test_empty_funding_is_not_backfilled_and_missing(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+
+    report = _funding_report(raw, [_funding_window()])
+
+    (row,) = report.rows
+    assert row.cause == "NOT_BACKFILLED"
+    assert (row.expected_bars, row.have_bars) == (27, 0)
+    assert report.missing_data is True
+
+
+def test_funding_without_window_is_no_window_or_unavailable(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+
+    report = _funding_report(
+        raw,
+        [
+            _funding_window("NOWUSDT", start_ms=None, end_ms=None, cause="NOT_LISTED_IN_RANGE"),
+            _funding_window("UNKUSDT", start_ms=None, end_ms=None, cause="DELIVERY_UNKNOWN"),
+        ],
+    )
+
+    assert [r.cause for r in report.rows] == ["NO_WINDOW", "UNAVAILABLE"]
+
+
+def test_report_with_funding_rows_still_validates(tmp_path: Path) -> None:
+    from src.data.sufficiency import validate_report_file, write_report_json
+
+    raw = tmp_path / "raw"
+    _publish_trade(raw, "BTCUSDT", "1h", _ms(2026, 9, 27), _ms(2026, 9, 30))
+    _write_funding(raw, "BTCUSDT", _series(_ms(2026, 9, 1), _ms(2026, 9, 10), H8))
+    report = _report(raw, [_window()], funding_windows=[_funding_window()])
+    path = tmp_path / "report.json"
+
+    write_report_json(report, path)
+
+    assert report.schema == "data-sufficiency-report/1"
+    assert validate_report_file(path) == []
+    assert [r.dataset for r in report.rows] == ["trade", "funding"]

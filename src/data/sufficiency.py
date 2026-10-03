@@ -12,7 +12,24 @@ shortfall:
   GAP              stored bars leave an unresolved hole.            (missing data)
   UNAVAILABLE      no source serves the symbol or dataset.          (missing data)
 
-The gap definition is `coverage.gap_ranges_for_files`, the same one the case
+Funding ticks are reported as extra rows with dataset `funding` and interval
+`funding` (D-23). The schema stays `data-sufficiency-report/1`: the change is
+additive (a reader that ignores unknown datasets still works, and the validator
+does not require funding rows, so reports written before it still validate).
+The funding interval differs per symbol and changes over time (8h, later 4h),
+so no constant step is assumed:
+
+  * a series is GAP when the window holds no tick at all (NOT_BACKFILLED), the
+    first tick is later than window start + 8h, the last tick is earlier than
+    window end - 8h (the window end is the delivery for a delivered contract),
+    or two consecutive unique ticks are more than 8h + `FUNDING_TOLERANCE_MS` apart;
+  * `have_bars` is the number of unique ticks in the window; `expected_bars` is
+    that count plus the ticks implied by each hole at the interval observed
+    next to it (the smaller of the adjacent regular spacings, 8h when neither
+    side has one), so a clean series always shows zero missing;
+  * a funding row's `missing_bars` and gap `missing` counts are ticks.
+
+The gap definition for klines is `coverage.gap_ranges_for_files`, the same one the case
 input builder refuses on (D-19), so a GAP row here is exactly a range the
 builder would fail closed on.
 
@@ -83,6 +100,11 @@ SPLIT_NAMES: Final = (
 # (a delivered contract's synthetic tail, research Pitfall 1); it is not a failure.
 FLAT_TAIL_DAYS: Final = 3
 _ONE_MINUTE_MS: Final = 60_000
+
+FUNDING_DATASET: Final = "funding"
+FUNDING_INTERVAL: Final = "funding"
+FUNDING_MAX_STEP_MS: Final = 8 * 3_600_000  # the longest funding interval on Binance
+FUNDING_TOLERANCE_MS: Final = 60_000  # jitter allowed on top of the longest interval
 
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 _DAY_MS: Final = 86_400_000
@@ -254,6 +276,74 @@ def _has_flat_tail(files: Sequence[Path]) -> bool:
     return bool(frame.select(flat.all()).item())
 
 
+def _funding_tick_times(raw_root: Path, symbol: str, lo_ms: int, hi_ms: int) -> list[int]:
+    """Sorted unique funding times (epoch ms) of one symbol inside [lo_ms, hi_ms)."""
+    if lo_ms >= hi_ms:
+        return []
+    base = raw_root / "data_class=funding" / f"symbol={symbol}"
+    files: list[str] = []
+    day = _from_ms(lo_ms).date()
+    last = _from_ms(hi_ms - 1).date()
+    while day <= last:
+        files.extend(
+            str(p) for p in sorted((base / f"date={day.isoformat()}").glob("sweep-*.parquet"))
+        )
+        day += timedelta(days=1)
+    if not files:
+        return []
+    frame = pl.read_parquet(files, columns=["funding_time_utc"], hive_partitioning=False)
+    times = frame["funding_time_utc"].dt.epoch("ms")
+    return sorted({int(t) for t in times.to_list() if lo_ms <= int(t) < hi_ms})
+
+
+def funding_holes(
+    ticks: Sequence[int], start_ms: int, end_ms: int, symbol: str
+) -> tuple[GapRange, ...]:
+    """Holes in a sorted unique funding series over [start_ms, end_ms).
+
+    No constant interval is assumed. A hole is a leading stretch longer than
+    8h, a trailing stretch longer than 8h, or two consecutive ticks more than
+    8h plus the tolerance apart. Its `missing` count uses the interval observed
+    next to it (smaller adjacent regular spacing; 8h when there is none).
+    """
+    limit = FUNDING_MAX_STEP_MS + FUNDING_TOLERANCE_MS
+    deltas = [b - a for a, b in zip(ticks, ticks[1:], strict=False)]
+
+    def regular(index: int) -> int | None:
+        if 0 <= index < len(deltas) and deltas[index] <= limit:
+            return deltas[index]
+        return None
+
+    def make(first_ms: int, last_ms: int, missing: int) -> GapRange:
+        return GapRange(
+            series="funding_ticks",
+            symbol=symbol,
+            interval=FUNDING_INTERVAL,
+            start_utc=_from_ms(first_ms),
+            end_utc=_from_ms(last_ms),
+            missing=missing,
+        )
+
+    holes: list[GapRange] = []
+    if not ticks:
+        return ()
+    if ticks[0] - start_ms > limit:
+        step = next((d for d in deltas if d <= limit), FUNDING_MAX_STEP_MS)
+        holes.append(make(start_ms, ticks[0], max((ticks[0] - start_ms) // step, 1)))
+    for i, delta in enumerate(deltas):
+        if delta <= limit:
+            continue
+        sides = [d for d in (regular(i - 1), regular(i + 1)) if d is not None]
+        step = min(sides) if sides else FUNDING_MAX_STEP_MS
+        holes.append(
+            make(ticks[i] + step, ticks[i + 1], max((delta + FUNDING_TOLERANCE_MS) // step - 1, 1))
+        )
+    if end_ms - ticks[-1] > limit:
+        step = next((d for d in reversed(deltas) if d <= limit), FUNDING_MAX_STEP_MS)
+        holes.append(make(ticks[-1] + step, end_ms, max((end_ms - 1 - ticks[-1]) // step, 1)))
+    return tuple(holes)
+
+
 # --------------------------------------------------------------------------- #
 # Rows.
 # --------------------------------------------------------------------------- #
@@ -298,6 +388,19 @@ def _build_row(raw_root: Path, window: WindowLike, source: str | None) -> Suffic
     if not has_window or start is None or end is None:
         # A capped window that ended before the depth start expects nothing.
         return row("DELISTED_CAPPED" if window.cause == "DELISTED_CAPPED" else "NO_WINDOW")
+
+    if window.dataset == FUNDING_DATASET:
+        ticks = _funding_tick_times(raw_root, window.symbol, start, end)
+        if not ticks:
+            # Nothing stored; the expected count assumes the longest (8h) interval.
+            expected_none = (end - start) // FUNDING_MAX_STEP_MS
+            if expected_none == 0:
+                return row(_informational(window.cause))
+            return row("NOT_BACKFILLED", expected=expected_none)
+        holes = funding_holes(ticks, start, end, window.symbol)
+        expected_ticks = len(ticks) + sum(h.missing for h in holes)
+        cause = "GAP" if holes else _informational(window.cause)
+        return row(cause, expected=expected_ticks, have=len(ticks), gaps=holes)
 
     step = INTERVAL_MS[window.interval]
     expected = expected_bar_count(start, end, step)
@@ -383,9 +486,17 @@ def build_sufficiency_report(
     dataset_start: date,
     dataset_end: date,
     sources: Mapping[tuple[str, str], str],
+    funding_windows: Sequence[WindowLike] = (),
 ) -> SufficiencyReport:
-    """One row per planned window, in window order; `sources` maps (dataset, symbol)."""
-    rows = tuple(_build_row(raw_root, w, sources.get((w.dataset, w.symbol))) for w in windows)
+    """One row per planned window, in window order; `sources` maps (dataset, symbol).
+
+    `funding_windows` (dataset `funding`) add one funding-coverage row per symbol
+    after the kline rows; they never feed the 1m split coverage.
+    """
+    rows = tuple(
+        _build_row(raw_root, w, sources.get((w.dataset, w.symbol)))
+        for w in (*windows, *funding_windows)
+    )
     split_coverage, depth_limited = _split_coverage(raw_root, windows, dataset_start, dataset_end)
     return SufficiencyReport(
         schema=REPORT_SCHEMA,

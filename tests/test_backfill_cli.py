@@ -24,7 +24,7 @@ import pytest
 from binance_sdk_derivatives_trading_usds_futures import BadRequestError
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
-from src.adapters.binance_usdm import Kline, MarkKline, SymbolFilters
+from src.adapters.binance_usdm import FundingTick, Kline, MarkKline, SymbolFilters
 from src.data.backfill import LIVE_5
 from src.db.models import Base, SymbolMetadata
 
@@ -104,11 +104,14 @@ class FakeAdapter:
         invalid_symbols: Sequence[str] = (),
         invalid_mark_symbols: Sequence[str] = (),
         funding_fail_symbols: Sequence[str] = (),
+        funding_step_hours: int | None = 8,
     ) -> None:
         self._filters = list(filters)
         self._invalid_symbols = frozenset(invalid_symbols)
         self._invalid_mark_symbols = frozenset(invalid_mark_symbols)
         self._funding_fail_symbols = frozenset(funding_fail_symbols)
+        # A healthy exchange serves a tick every `funding_step_hours`; None serves nothing.
+        self._funding_step_hours = funding_step_hours
         self.funding_calls: list[tuple[str | None, int | None, int | None]] = []
         self._skip_days_ms = frozenset(skip_days_ms)
         self._session = session
@@ -226,7 +229,23 @@ class FakeAdapter:
         self.funding_calls.append((symbol, start_ms, end_ms))
         if symbol in self._funding_fail_symbols:
             raise RuntimeError("simulated funding failure")
-        return []
+        if self._funding_step_hours is None or symbol is None:
+            return []
+        step = self._funding_step_hours * 3_600_000
+        onboard = next(
+            (
+                (f.onboard_time_utc - _dt(0)) // timedelta(milliseconds=1)
+                for f in self._filters
+                if f.symbol == symbol and f.onboard_time_utc is not None
+            ),
+            0,
+        )
+        first = -(-max(start_ms or 0, onboard) // step) * step
+        last = end_ms if end_ms is not None else first
+        return [
+            FundingTick(symbol, _dt(t), Decimal("0.0001"), Decimal("100"))
+            for t in range(first, last + 1, step)
+        ][:limit]
 
 
 @pytest.fixture
@@ -1436,7 +1455,7 @@ async def test_funding_step_runs_per_symbol_within_bounds(tmp_path: Path, sessio
         ("FTTUSDT", _ms(2026, 7, 30), DELIVERY_MS),
     ]
     assert report.funding is not None
-    assert report.funding.rows_per_symbol == {"BTCUSDT": 0, "FTTUSDT": 0}
+    assert report.funding.rows_per_symbol == {"BTCUSDT": 187, "FTTUSDT": 35}
 
     skipped = FakeAdapter(fixtures, session=session)
     await run_backfill(
@@ -1509,3 +1528,56 @@ def test_no_funding_flag_skips_the_step(
     rc = _run_main(tmp_path, monkeypatch, without, ["BTCUSDT"], "--no-funding", minutes=1)
     assert rc == 0
     assert without.funding_calls == []
+
+
+def test_cli_exits_3_when_funding_fetched_nothing(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-23: an empty funding series is missing data, exactly like a kline gap."""
+    adapter = FakeAdapter([_filters("BTCUSDT")], funding_step_hours=None)
+    report_path = tmp_path / "report.json"
+
+    rc = _run_main(tmp_path, monkeypatch, adapter, ["BTCUSDT"], "--report-out", str(report_path))
+
+    out = capsys.readouterr().out
+    assert rc == 3
+    funding_rows = [line.split() for line in out.splitlines() if line.startswith("funding ")]
+    assert [cells[-1] for cells in funding_rows] == ["NOT_BACKFILLED"]
+    doc = json.loads(report_path.read_text(encoding="utf-8"))
+    assert doc["missing_data"] is True
+    assert [r["cause"] for r in doc["rows"] if r["dataset"] == "funding"] == ["NOT_BACKFILLED"]
+
+
+def test_cli_funding_rows_are_ok_with_a_healthy_series_and_absent_without_funding(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rc = _run_main(
+        tmp_path,
+        monkeypatch,
+        FakeAdapter([_filters("BTCUSDT")]),
+        ["BTCUSDT"],
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert [line.split()[-1] for line in out.splitlines() if line.startswith("funding ")] == ["OK"]
+
+
+def test_cli_funding_rows_are_absent_with_no_funding(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = FakeAdapter([_filters("BTCUSDT")], funding_step_hours=None)
+
+    rc = _run_main(tmp_path, monkeypatch, adapter, ["BTCUSDT"], "--no-funding")
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert not [line for line in out.splitlines() if line.startswith("funding ")]
