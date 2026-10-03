@@ -4,6 +4,32 @@ verified: 2026-10-03T00:00:00Z
 status: passed
 score: 5/5 applicable success criteria verified in code and on disk (SC6 moved to Phase 13.1, not applicable); 3 human-verification items resolved, 0 blocking gaps
 covered_files:
+  - .planning/phases/13-research-data-foundation-fixes/13-01-PLAN.md
+  - .planning/phases/13-research-data-foundation-fixes/13-01-SUMMARY.md
+  - .planning/phases/13-research-data-foundation-fixes/13-02-PLAN.md
+  - .planning/phases/13-research-data-foundation-fixes/13-02-SUMMARY.md
+  - .planning/phases/13-research-data-foundation-fixes/13-03-PLAN.md
+  - .planning/phases/13-research-data-foundation-fixes/13-03-SUMMARY.md
+  - .planning/phases/13-research-data-foundation-fixes/13-04-PLAN.md
+  - .planning/phases/13-research-data-foundation-fixes/13-04-SUMMARY.md
+  - .planning/phases/13-research-data-foundation-fixes/13-05-PLAN.md
+  - .planning/phases/13-research-data-foundation-fixes/13-05-SUMMARY.md
+  - .planning/phases/13-research-data-foundation-fixes/13-06-PLAN.md
+  - .planning/phases/13-research-data-foundation-fixes/13-06-SUMMARY.md
+  - .planning/phases/13-research-data-foundation-fixes/13-07-PLAN.md
+  - .planning/phases/13-research-data-foundation-fixes/13-07-SUMMARY.md
+  - .planning/phases/13-research-data-foundation-fixes/13-08-PLAN.md
+  - .planning/phases/13-research-data-foundation-fixes/13-08-SUMMARY.md
+  - .planning/phases/13-research-data-foundation-fixes/13-09-PLAN.md
+  - .planning/phases/13-research-data-foundation-fixes/13-09-SUMMARY.md
+  - .planning/phases/13-research-data-foundation-fixes/13-10-PLAN.md
+  - .planning/phases/13-research-data-foundation-fixes/13-10-SUMMARY.md
+  - .planning/phases/13-research-data-foundation-fixes/13-11-PLAN.md
+  - .planning/phases/13-research-data-foundation-fixes/13-11-SUMMARY.md
+  - .planning/phases/13-research-data-foundation-fixes/13-12-PLAN.md
+  - .planning/phases/13-research-data-foundation-fixes/13-12-SUMMARY.md
+  - .planning/phases/13-research-data-foundation-fixes/13-13-PLAN.md
+  - .planning/phases/13-research-data-foundation-fixes/13-13-SUMMARY.md
   - docs/research/universe/collect-list-v2.toml
   - docs/research/universe/research-universe-v1.sufficiency-report.json
   - src/data/backfill.py
@@ -12,7 +38,7 @@ covered_files:
   - src/data/collect_list.py
   - src/data/collector.py
   - src/data/sufficiency.py
-covered_digest: "v2:sha256:cc914776ff53e9e3dbad3e00d7fcaa630a3c6bad4d40dba741ca58813485f493"
+covered_digest: "v2:sha256:fdfbc9e8a70d63bbc7672e96d95bf60eb1cfaa490b3f1131b90500545bafec89"
 behavior_unverified: 0
 overrides_applied: 0
 gaps: []
