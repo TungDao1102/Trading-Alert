@@ -42,6 +42,16 @@ INTERVAL_MS: dict[str, int] = {
 # would silently change hashed, immutable data — so it is a structural reject.
 MAX_FRACTION_DIGITS = 8
 
+# One pinned Parquet type for every price / volume column. Left to inference,
+# Polars picks the Decimal scale from the batch's own values, so partitions
+# written from different batches carried different schemas (scale 7 vs 8, and
+# volume scale 0-2) and a multi-file read raised `SchemaError` (CR-03). The
+# >8-fractional-digit gate above makes the cast exact.
+PRICE_DECIMAL_SCALE = MAX_FRACTION_DIGITS
+PRICE_DECIMAL = pl.Decimal(38, PRICE_DECIMAL_SCALE)
+_DECIMAL_COLUMNS = ("open", "high", "low", "close", "volume", "quote_volume")
+_MARK_DECIMAL_COLUMNS = ("open", "high", "low", "close")
+
 
 def _is_bad_decimal(value: Decimal) -> bool:
     """True for a non-finite Decimal or one with more than 8 fractional digits."""
@@ -99,12 +109,12 @@ def klines_to_frame(klines: list[Kline]) -> pl.DataFrame:
             schema={
                 "open_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
                 "close_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
-                "open": pl.Decimal(scale=8),
-                "high": pl.Decimal(scale=8),
-                "low": pl.Decimal(scale=8),
-                "close": pl.Decimal(scale=8),
-                "volume": pl.Decimal(scale=8),
-                "quote_volume": pl.Decimal(scale=8),
+                "open": PRICE_DECIMAL,
+                "high": PRICE_DECIMAL,
+                "low": PRICE_DECIMAL,
+                "close": PRICE_DECIMAL,
+                "volume": PRICE_DECIMAL,
+                "quote_volume": PRICE_DECIMAL,
                 "trade_count": pl.Int64,
                 "interval": pl.Utf8,
                 "symbol": pl.Utf8,
@@ -127,6 +137,7 @@ def klines_to_frame(klines: list[Kline]) -> pl.DataFrame:
         schema_overrides={
             "open_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
             "close_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
+            **dict.fromkeys(_DECIMAL_COLUMNS, PRICE_DECIMAL),
         },
     )
 
@@ -275,10 +286,10 @@ def check_batch(klines: list[Kline], interval: str) -> QualityVerdict:
 _MARK_SCHEMA: dict[str, pl.DataType | type[pl.DataType]] = {
     "open_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
     "close_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
-    "open": pl.Decimal(scale=8),
-    "high": pl.Decimal(scale=8),
-    "low": pl.Decimal(scale=8),
-    "close": pl.Decimal(scale=8),
+    "open": PRICE_DECIMAL,
+    "high": PRICE_DECIMAL,
+    "low": PRICE_DECIMAL,
+    "close": PRICE_DECIMAL,
     "price_tick_count": pl.Int64,
     "interval": pl.Utf8,
     "symbol": pl.Utf8,
@@ -311,6 +322,7 @@ def mark_klines_to_frame(rows: list[MarkKline]) -> pl.DataFrame:
         schema_overrides={
             "open_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
             "close_time_utc": pl.Datetime(time_unit="ms", time_zone="UTC"),
+            **dict.fromkeys(_MARK_DECIMAL_COLUMNS, PRICE_DECIMAL),
         },
     )
 

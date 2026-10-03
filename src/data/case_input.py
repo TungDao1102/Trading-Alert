@@ -45,7 +45,7 @@ from src.data.coverage import (
     gap_ranges_for_files,
 )
 from src.data.quality import INTERVAL_MS
-from src.data.store import MARK_DATASET_DIR, partition_file
+from src.data.store import MARK_DATASET_DIR, partition_file, read_partitions
 from src.domain.canonical import sha256_hex
 
 SERIES_ALL: tuple[str, ...] = (
@@ -389,13 +389,16 @@ def _read_rows(
     *,
     symbol: str,
     interval: str | None = None,
+    pin_price_scale: bool = False,
 ) -> list[Row]:
-    """Read `files` into rows sorted by `time_column` with a fixed column order."""
+    """Read `files` into rows sorted by `time_column` with a fixed column order.
+
+    `pin_price_scale` floors every Decimal column at scale 8 (kline and mark
+    partitions); funding and open-interest keep their own declared scales.
+    """
     if not files:
         return []
-    frame = pl.read_parquet(
-        [str(p) for p in files], columns=list(columns), hive_partitioning=False
-    ).sort(time_column)
+    frame = read_partitions(files, columns, pin_price_scale=pin_price_scale).sort(time_column)
     if frame.filter(pl.col("symbol") != symbol).height:
         raise CaseInputError(f"a published partition carries a symbol other than {symbol}")
     if interval is not None and frame.filter(pl.col("interval") != interval).height:
@@ -509,6 +512,7 @@ def build_case_input_data(
             "open_time_utc",
             symbol=symbol,
             interval=strategy_interval,
+            pin_price_scale=True,
         )
         context_bars = _read_rows(
             context_files,
@@ -516,16 +520,27 @@ def build_case_input_data(
             "open_time_utc",
             symbol=symbol,
             interval=context_interval,
+            pin_price_scale=True,
         )
     if "intrabar_1m" in wanted:
         used += minute_files
         minutes = _read_rows(
-            minute_files, _BAR_COLUMNS, "open_time_utc", symbol=symbol, interval="1m"
+            minute_files,
+            _BAR_COLUMNS,
+            "open_time_utc",
+            symbol=symbol,
+            interval="1m",
+            pin_price_scale=True,
         )
     if "mark_1m" in wanted:
         used += mark_files
         mark_bars = _read_rows(
-            mark_files, _MARK_COLUMNS, "open_time_utc", symbol=symbol, interval="1m"
+            mark_files,
+            _MARK_COLUMNS,
+            "open_time_utc",
+            symbol=symbol,
+            interval="1m",
+            pin_price_scale=True,
         )
     if "funding" in wanted:
         used += funding_files

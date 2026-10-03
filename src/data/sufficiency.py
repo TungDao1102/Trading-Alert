@@ -40,7 +40,7 @@ from typing import Any, Final, Protocol
 import polars as pl
 from src.data.coverage import GapRange, gap_ranges_for_files
 from src.data.quality import INTERVAL_MS
-from src.data.store import MARK_DATASET_DIR, partition_file
+from src.data.store import MARK_DATASET_DIR, partition_file, read_partitions
 
 REPORT_SCHEMA: Final = "data-sufficiency-report/1"
 
@@ -240,10 +240,8 @@ def _has_flat_tail(files: Sequence[Path]) -> bool:
     tail = list(files[-FLAT_TAIL_DAYS:])
     if len(tail) < FLAT_TAIL_DAYS:
         return False
-    frame = pl.read_parquet(
-        [str(p) for p in tail],
-        columns=["trade_count", "open", "high", "low", "close"],
-        hive_partitioning=False,
+    frame = read_partitions(
+        tail, ["trade_count", "open", "high", "low", "close"], pin_price_scale=True
     )
     if frame.height == 0:
         return False
