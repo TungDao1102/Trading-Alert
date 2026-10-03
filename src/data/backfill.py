@@ -873,6 +873,72 @@ def latest_published_day(
     return latest
 
 
+def published_days(
+    raw_root: Path,
+    *,
+    dataset: DatasetSpec[Any, Any],
+    symbol: str,
+    interval: str,
+) -> frozenset[_date]:
+    """Every UTC day with a published `part.parquet` for one key.
+
+    Same scan as `latest_published_day`, but returns the whole set so the
+    resume logic can see holes, not just the newest partition.
+    """
+    base = raw_root / dataset.root_subdir / f"interval={interval}" / f"symbol={symbol}"
+    if not base.is_dir():
+        return frozenset()
+    days: set[_date] = set()
+    for part in base.glob("date=*/part.parquet"):
+        try:
+            days.add(_date.fromisoformat(part.parent.name.removeprefix("date=")))
+        except ValueError:
+            continue
+    return frozenset(days)
+
+
+def missing_day_runs(
+    start_ms: int, end_ms: int, published: frozenset[_date]
+) -> list[tuple[int, int]]:
+    """Maximal runs of unpublished UTC days inside `[start_ms, end_ms)`.
+
+    Returns `(run_start_ms, run_end_ms)` pairs in ascending order. The first
+    run starts at `start_ms` itself when that instant falls on a missing day
+    (a mid-day onboard start is preserved); every run that ends at a published
+    day ends exactly on that day's midnight, so a fetch segment can never reach
+    into an immutable partition (D-04). A run that reaches the window end keeps
+    `end_ms` unchanged (it may be mid-day for a delivered contract).
+    """
+    if start_ms >= end_ms:
+        return []
+    published_idx = {(d - _EPOCH_UTC.date()).days for d in published}
+    first_idx = start_ms // DAY_MS
+    last_idx = (end_ms - 1) // DAY_MS
+    runs: list[tuple[int, int]] = []
+    run_start_idx: int | None = None
+    for idx in range(first_idx, last_idx + 1):
+        if idx in published_idx:
+            if run_start_idx is not None:
+                runs.append((max(start_ms, run_start_idx * DAY_MS), idx * DAY_MS))
+                run_start_idx = None
+        elif run_start_idx is None:
+            run_start_idx = idx
+    if run_start_idx is not None:
+        runs.append((max(start_ms, run_start_idx * DAY_MS), end_ms))
+    return runs
+
+
+def _merge_results(results: list[BackfillResult]) -> BackfillResult:
+    """Sum the per-segment results of one (symbol, interval) key."""
+    return BackfillResult(
+        pages=sum(r.pages for r in results),
+        rows_published=sum(r.rows_published for r in results),
+        structural_rejections=sum(r.structural_rejections for r in results),
+        durations_ms=tuple(d for r in results for d in r.durations_ms),
+        partial_days_held=sum(r.partial_days_held for r in results),
+    )
+
+
 @overload
 async def backfill_universe(
     adapter: KlineSource,
@@ -936,17 +1002,25 @@ async def backfill_universe(
 
     History-depth keywords (all optional, all default to the behavior above):
       - `interval_start_ms`: explicit start per interval, used instead of the
-        bounded default window; a persisted cursor still moves it forward.
+        bounded default window; a persisted cursor still moves it forward
+        (unless `resume_from_store` is set, where the store decides).
       - `start_floor_ms`: per-symbol lower bound (e.g. the onboard time).
       - `end_cap_ms`: per-symbol upper bound. A cap below the resolved end is
         a contract's delivery: the run ends there and `terminal_end` lets the
         paginator publish the partly covered last day.
       - `dataset`: what is fetched/validated/published (trade by default).
-      - `resume_from_store`: also floor the start at the day after the latest
-        published partition, so a lost cursor can never re-publish a stored
-        day (D-04 immutability).
+      - `resume_from_store`: the published store, not the cursor file, decides
+        what to fetch (CR-02). Only UTC days with no partition inside the
+        requested window are fetched, as one segment per missing run; each
+        segment stops at the next published day, so a stored day is never
+        re-published (D-04 immutability) and a stray newer partition or a
+        cursor ahead of the store can never hide older missing days. A deeper
+        explicit window therefore extends history backwards. Interior holes
+        and a cursor ahead of the store are logged at warning level.
     A key whose start is at or beyond its end is logged and returns an empty
-    result without touching the adapter.
+    result without touching the adapter. When a cursor floor empties a window
+    the caller requested, the log is a warning that names both the requested
+    and the floored start.
 
     Symbols × intervals run sequentially inside one async loop so the
     weight budget stays bounded (Pitfall 5 — pacing). A future plan may
@@ -980,30 +1054,22 @@ async def backfill_universe(
                 persisted = cursor_store.read(symbol=symbol, interval=interval)
             else:
                 persisted = None
-            if explicit_start_ms is not None:
-                key_start_ms = explicit_start_ms
-                if persisted is not None:
-                    key_start_ms = max(key_start_ms, persisted + interval_ms(interval))
-            elif persisted is not None:
-                key_start_ms = persisted + interval_ms(interval)
-            else:
+            floor_ms = start_floor_ms.get(symbol) if start_floor_ms is not None else None
+            if window_ms is not None:
                 # Snap to the UTC day boundary so each page fits in one
                 # per-day partition (see `align_to_day_start_ms` docstring
                 # for the D-04 / multi-date-per-page rationale).
-                assert window_ms is not None  # narrowed by the skip above
-                key_start_ms = align_to_day_start_ms(resolved_end_ms - window_ms)
-            floor_ms = start_floor_ms.get(symbol) if start_floor_ms is not None else None
-            if floor_ms is not None:
-                key_start_ms = max(key_start_ms, floor_ms)
-            if resume_from_store:
-                latest_day = latest_published_day(
-                    raw_root, dataset=dataset, symbol=symbol, interval=interval
-                )
-                if latest_day is not None:
-                    day_start = utc_ms(
-                        datetime(latest_day.year, latest_day.month, latest_day.day, tzinfo=UTC)
-                    )
-                    key_start_ms = max(key_start_ms, day_start + DAY_MS)
+                default_start_ms: int | None = align_to_day_start_ms(resolved_end_ms - window_ms)
+            else:
+                default_start_ms = None
+            # The window the caller asked for, before any resume floor.
+            requested_base_ms = (
+                explicit_start_ms if explicit_start_ms is not None else default_start_ms
+            )
+            assert requested_base_ms is not None  # narrowed by the skip above
+            requested_start_ms = (
+                max(requested_base_ms, floor_ms) if floor_ms is not None else requested_base_ms
+            )
             # Per-symbol end: a cap below the resolved end is a delivery, and
             # the run must end there as a terminal window (research Pitfall 1).
             key_end_ms = resolved_end_ms
@@ -1012,30 +1078,88 @@ async def backfill_universe(
             if cap_ms is not None and cap_ms < resolved_end_ms:
                 key_end_ms = cap_ms
                 terminal = True
-            if key_start_ms >= key_end_ms:
-                log.info(
-                    "backfill.universe.empty_window",
-                    symbol=symbol,
-                    interval=interval,
-                    start_ms=key_start_ms,
-                    end_ms=key_end_ms,
-                )
-                per_key[(symbol, interval)] = BackfillResult(
-                    pages=0,
-                    rows_published=0,
-                    structural_rejections=0,
-                    durations_ms=(),
-                )
-                continue
-            log.info(
-                "backfill.universe.begin",
-                symbol=symbol,
-                interval=interval,
-                start_ms=key_start_ms,
-                end_ms=key_end_ms,
-                from_persisted=persisted,
-                terminal=terminal,
-            )
+
+            # Fetch segments for this key, as `(start_ms, end_ms)` pairs.
+            segments: list[tuple[int, int]]
+            if resume_from_store:
+                # CR-02: the published store is authoritative and the floor is
+                # contiguity-aware. Only days with no partition are fetched, so
+                # a stray newer partition or cursor can never hide older
+                # missing days, and a deeper explicit window extends history
+                # backwards. Each segment ends on the midnight of the next
+                # published day so it never reaches into an immutable
+                # partition (D-04). The cursor file is advisory in this mode.
+                days = published_days(raw_root, dataset=dataset, symbol=symbol, interval=interval)
+                plan_end_ms = min(key_end_ms, align_to_day_start_ms(utc_ms(clock())))
+                runs = missing_day_runs(requested_start_ms, plan_end_ms, days)
+                segments = [
+                    (run_start, key_end_ms if run_end == plan_end_ms else run_end)
+                    for run_start, run_end in runs
+                ]
+                # A missing run that is followed by published days is an
+                # interior hole (a stray newer partition, or a deeper window).
+                interior = [seg for seg in segments if seg[1] < key_end_ms]
+                if interior:
+                    log.warning(
+                        "backfill.universe.interior_hole",
+                        symbol=symbol,
+                        interval=interval,
+                        requested_start_ms=requested_start_ms,
+                        holes=interior,
+                        reason="unpublished days precede already-published days; "
+                        "fetching only the missing runs",
+                    )
+                if persisted is not None and segments:
+                    persisted_next_ms = persisted + interval_ms(interval)
+                    if persisted_next_ms > segments[0][0]:
+                        log.warning(
+                            "backfill.universe.cursor_ahead_of_store",
+                            symbol=symbol,
+                            interval=interval,
+                            persisted_ms=persisted,
+                            first_missing_ms=segments[0][0],
+                            reason="cursor is ahead of the published store; "
+                            "the store wins and the missing days are fetched",
+                        )
+                if not segments:
+                    log.info(
+                        "backfill.universe.complete_from_store",
+                        symbol=symbol,
+                        interval=interval,
+                        requested_start_ms=requested_start_ms,
+                        end_ms=plan_end_ms,
+                    )
+            else:
+                if explicit_start_ms is not None:
+                    key_start_ms = explicit_start_ms
+                    if persisted is not None:
+                        key_start_ms = max(key_start_ms, persisted + interval_ms(interval))
+                elif persisted is not None:
+                    key_start_ms = persisted + interval_ms(interval)
+                else:
+                    assert default_start_ms is not None
+                    key_start_ms = default_start_ms
+                if floor_ms is not None:
+                    key_start_ms = max(key_start_ms, floor_ms)
+                if key_start_ms >= key_end_ms:
+                    # A floor (cursor) that overrides the requested depth and
+                    # empties the window must be distinguishable from a window
+                    # that was never requested (CR-02).
+                    floored = key_start_ms > requested_start_ms and requested_start_ms < key_end_ms
+                    (log.warning if floored else log.info)(
+                        "backfill.universe.empty_window",
+                        symbol=symbol,
+                        interval=interval,
+                        start_ms=key_start_ms,
+                        end_ms=key_end_ms,
+                        requested_start_ms=requested_start_ms,
+                        floored_start_ms=key_start_ms,
+                        floor_reason="cursor" if persisted is not None else "none",
+                    )
+                    segments = []
+                else:
+                    segments = [(key_start_ms, key_end_ms)]
+
             # Per-interval config: never share one interval_ms across
             # timeframes (a shared interval_ms=0 froze the cursor and the
             # `while cursor < end_ms` loop could never terminate). The
@@ -1046,19 +1170,35 @@ async def backfill_universe(
                 if config is not None
                 else BackfillConfig(interval_ms=interval_ms(interval))
             )
-            result = await backfill_symbol_interval(
-                adapter,
-                symbol=symbol,
-                interval=interval,
-                start_ms=key_start_ms,
-                end_ms=key_end_ms,
-                dataset=dataset,
-                raw_root=raw_root,
-                config=per_cfg,
-                clock=clock,
-                cursor_store=cursor_store,
-                terminal_end=terminal,
-            )
+            segment_results: list[BackfillResult] = []
+            for seg_start_ms, seg_end_ms in segments:
+                seg_terminal = terminal and seg_end_ms == key_end_ms
+                log.info(
+                    "backfill.universe.begin",
+                    symbol=symbol,
+                    interval=interval,
+                    start_ms=seg_start_ms,
+                    end_ms=seg_end_ms,
+                    requested_start_ms=requested_start_ms,
+                    from_persisted=persisted,
+                    terminal=seg_terminal,
+                )
+                segment_results.append(
+                    await backfill_symbol_interval(
+                        adapter,
+                        symbol=symbol,
+                        interval=interval,
+                        start_ms=seg_start_ms,
+                        end_ms=seg_end_ms,
+                        dataset=dataset,
+                        raw_root=raw_root,
+                        config=per_cfg,
+                        clock=clock,
+                        cursor_store=cursor_store,
+                        terminal_end=seg_terminal,
+                    )
+                )
+            result = _merge_results(segment_results)
             per_key[(symbol, interval)] = result
             total_rows += result.rows_published
             total_pages += result.pages
