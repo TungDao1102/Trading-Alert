@@ -33,6 +33,7 @@ from src.data.backfill import LIVE_5
 from src.data.collector import (
     FundingSweepResult,
     OITickResult,
+    _tick_epoch_ms,
     async_funding_sweep,
     async_oi_tick,
     harvest_open_interest_history,
@@ -1631,3 +1632,13 @@ def test_loop_probes_clock_once_before_first_tick(
     assert rc == 0
     assert order == ["probe", "tick"]
     assert adapter.server_time_calls == 1
+
+
+def test_tick_epoch_ms_is_exact_integer_arithmetic() -> None:
+    """IN-02: epoch-ms is exact (no float round-trip), naive treated as UTC."""
+    aware = datetime(2024, 1, 1, 0, 0, 0, 1000, tzinfo=UTC)
+    assert _tick_epoch_ms(aware) == 1_704_067_200_001
+    assert _tick_epoch_ms(aware.replace(tzinfo=None)) == 1_704_067_200_001
+    # Sub-millisecond remainder truncates toward the earlier millisecond.
+    assert _tick_epoch_ms(datetime(2024, 1, 1, 0, 0, 0, 1999, tzinfo=UTC)) == 1_704_067_200_001
+    assert _tick_epoch_ms(datetime(1970, 1, 1, tzinfo=UTC)) == 0

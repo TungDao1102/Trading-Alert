@@ -638,3 +638,44 @@ def test_verification_failure_keeps_first_pass_closes() -> None:
     assert len(outage_gaps) == 1
     assert outage_gaps[0]["reason"].startswith("verify_backfill_exception:")
     assert _indices(calls, "subscribe"), "the pair is still resubscribed"
+
+
+# --------------------------------------------------------------------------- #
+# IN-03: a partial subscribe failure rolls back so start() can be retried.
+# --------------------------------------------------------------------------- #
+
+
+def test_start_partial_subscribe_failure_rolls_back_and_allows_retry() -> None:
+    from src.paper.supervisor import PaperSupervisor
+
+    class _FlakyWs(_FakeWsAdapter):
+        fail_on = 2
+
+        def subscribe(
+            self, *, symbol: str, interval: str, on_kline: Any, stream_id: Any = None
+        ) -> Any:
+            if len(self.subscribe_calls) + 1 == self.fail_on:
+                self.fail_on = -1
+                raise RuntimeError("subscribe down")
+            return super().subscribe(
+                symbol=symbol, interval=interval, on_kline=on_kline, stream_id=stream_id
+            )
+
+    ws = _FlakyWs()
+    supervisor = PaperSupervisor(
+        ws_adapter=ws,  # type: ignore[arg-type]
+        rest_adapter=_FakeRestAdapter(),  # type: ignore[arg-type]
+        on_closed_candle=lambda _k: None,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        intervals=("1h",),
+        clock=lambda: _T0,
+    )
+
+    with pytest.raises(RuntimeError, match="subscribe down"):
+        supervisor.start()
+
+    assert ws.close_calls == [("btcusdt", "1h")], "the created handle is closed"
+    assert supervisor._handles == []
+
+    supervisor.start()  # retry must not raise "called twice"
+    assert len(supervisor._handles) == 2

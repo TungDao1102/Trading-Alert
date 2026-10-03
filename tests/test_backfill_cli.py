@@ -1448,6 +1448,30 @@ async def test_funding_step_runs_per_symbol_within_bounds(tmp_path: Path, sessio
     assert skipped.funding_calls == []
 
 
+async def test_funding_depth_follows_config_when_1h_not_selected(
+    tmp_path: Path, session: Session
+) -> None:
+    """IN-04: with --intervals 1m the funding walk still honors the 1h/4h depth."""
+    from src.data.backfill_cli import run_backfill
+
+    adapter = FakeAdapter([_filters("BTCUSDT")], session=session)
+    report = await run_backfill(
+        _config(
+            tmp_path,
+            intervals=["1m"],
+            depth_months={"1m": 1, "1h": 2, "4h": 2},
+            funding=True,
+        ),
+        adapter=adapter,
+        session=session,
+        clock=_clock(),
+    )
+
+    assert adapter.funding_calls == [("BTCUSDT", _ms(2026, 7, 30), _ms(2026, 9, 30))]
+    assert report.sufficiency is not None
+    assert report.sufficiency.dataset_start == date(2026, 7, 30)
+
+
 async def test_funding_failure_is_a_gap_row_not_a_crash(tmp_path: Path, session: Session) -> None:
     from src.data.backfill_cli import run_backfill
     from src.db.models import CollectorGap

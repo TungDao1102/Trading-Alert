@@ -1094,10 +1094,7 @@ class BinanceUsdmAdapter:
         async def _do_cancel_with_retry() -> CancelOrderResponse:
             async for attempt in decorator:
                 with attempt:
-                    result = await _do_cancel()
-                    if _is_already_canceled_response(result):
-                        return result
-                    return result
+                    return await _do_cancel()
             raise RuntimeError("unreachable: tenacity.AsyncRetrying exhausted without reraise")
 
         try:
@@ -1152,10 +1149,7 @@ class BinanceUsdmAdapter:
         async def _do_cancel_with_retry() -> CancelAlgoOrderResponse:
             async for attempt in decorator:
                 with attempt:
-                    result = await _do_cancel()
-                    if _is_already_canceled_response(result):
-                        return result
-                    return result
+                    return await _do_cancel()
             raise RuntimeError("unreachable: tenacity.AsyncRetrying exhausted without reraise")
 
         try:
@@ -1473,16 +1467,6 @@ def _is_already_canceled_message(message: str) -> bool:
     return "UNKNOWN_ORDER" in message or "-2011" in message
 
 
-def _is_already_canceled_response(result: Any) -> bool:
-    """True when a successful cancel response already reflects the post-state."""
-    # The Binance cancel responses carry a `status` field that
-    # normalizes to "CANCELED" or "EXPIRED" on success; we don't
-    # special-case them because the function returns None either way.
-    # This helper exists so the caller has a single decision point if
-    # a future Binance change introduces a "noop" status.
-    return False
-
-
 def _row_to_open_order_snapshot(
     item: CurrentAllOpenOrdersResponse,
 ) -> OpenOrderSnapshot | None:
@@ -1715,18 +1699,6 @@ def _require_update_time_utc(value: Any) -> datetime:
     if value is None:
         raise ValueError("snapshot row missing update_time: refusing to fabricate epoch-0")
     return _ms_to_utc(int(value))
-
-
-def _epoch_utc() -> datetime:
-    """UTC epoch — used as a defensive default when update_time is missing.
-
-    `flag-never-fabricate` says a missing timestamp must surface
-    loudly, but the snapshot projection runs on rows that already
-    passed identity validation. The defensive epoch is here so a
-    downstream consumer that requires a tz-aware datetime never sees
-    a naive value; the row's identity still carries the truth.
-    """
-    return datetime(1970, 1, 1, tzinfo=UTC)
 
 
 # --------------------------------------------------------------------------- #

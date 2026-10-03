@@ -674,10 +674,12 @@ async def _backfill_and_report(
     results = report.results
 
     def depth_of(interval: str) -> int:
+        # IN-04: follow the configured depth for ANY interval (e.g. 1h for the funding
+        # walk when only --intervals 1m is selected), never the registry default.
         return depth_start_ms(
             interval,
             run_date=run_date,
-            depth_months=depth,
+            depth_months=config.depth_months,
             htf_start_date=config.htf_start_date,
         )
 

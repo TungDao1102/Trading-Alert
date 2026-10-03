@@ -202,8 +202,8 @@ def _tick_epoch_ms(dt: datetime) -> int:
     (`already covered?`) total-ordered on both backends.
     """
     if dt.tzinfo is None:
-        return int(dt.replace(tzinfo=UTC).timestamp() * 1000)
-    return int(dt.timestamp() * 1000)
+        dt = dt.replace(tzinfo=UTC)
+    return _datetime_to_epoch_ms(dt)
 
 
 def _guard_no_overwrite(path: Path) -> None:
@@ -962,7 +962,7 @@ async def _run_once_tick(
         observed_utc=observed_utc,
         raw_root=raw_root,
     )
-    now_ms = int(observed_utc.timestamp() * 1000)
+    now_ms = _datetime_to_epoch_ms(observed_utc)
     since_ms = _funding_since_ms(session, universe, now_ms)
     funding = await async_funding_sweep(
         adapter,

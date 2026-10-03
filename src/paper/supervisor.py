@@ -169,14 +169,20 @@ class PaperSupervisor:
                 "PaperSupervisor.start() called twice without stop(); "
                 "restart via _resubscribe_and_backfill only"
             )
-        for symbol in self._symbols:
-            for interval in self._intervals:
-                handle = self._ws.subscribe(
-                    symbol=symbol.lower(),
-                    interval=interval,
-                    on_kline=self._make_kline_handler(symbol, interval),
-                )
-                self._handles.append((symbol, interval, handle))
+        try:
+            for symbol in self._symbols:
+                for interval in self._intervals:
+                    handle = self._ws.subscribe(
+                        symbol=symbol.lower(),
+                        interval=interval,
+                        on_kline=self._make_kline_handler(symbol, interval),
+                    )
+                    self._handles.append((symbol, interval, handle))
+        except Exception:
+            # IN-03: roll back the handles already created so a retry of
+            # start() is possible (otherwise the double-start guard wedges).
+            self._close_all_handles()
+            raise
 
     def _make_kline_handler(self, symbol: str, interval: str) -> Callable[[WsKline], None]:
         def _on_kline(kline: WsKline) -> None:
@@ -417,7 +423,12 @@ class PaperSupervisor:
         return backfilled, outage_gaps
 
     def _close_all_handles(self) -> None:
-        """Close every WS handle we own."""
+        """Close every WS handle we own.
+
+        ``_close_failures`` persists across calls and is reset only when a
+        full close pass succeeds, so the logged count is truly consecutive.
+        """
+        pass_clean = True
         for symbol, interval, handle in self._handles:
             try:
                 self._ws.close(handle)
@@ -427,6 +438,7 @@ class PaperSupervisor:
                 # symbol/interval pair plus a consecutive-failure
                 # count make repeated rotation failures
                 # distinguishable from one-offs (WR-08).
+                pass_clean = False
                 self._close_failures += 1
                 log.warning(
                     "paper.supervisor.close_failed",
@@ -436,7 +448,8 @@ class PaperSupervisor:
                     consecutive_close_failures=self._close_failures,
                 )
                 continue
-        self._close_failures = 0
+        if pass_clean:
+            self._close_failures = 0
         self._handles.clear()
 
 

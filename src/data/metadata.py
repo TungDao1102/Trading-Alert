@@ -35,14 +35,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 from src.adapters.binance_usdm import SymbolFilters
 from src.db.models import SymbolMetadata
-
-if TYPE_CHECKING:
-    pass
 
 
 def _text_column_length(column_name: str) -> int:
