@@ -265,7 +265,7 @@ def _read_manifest(path: Path) -> tuple[list[str], date | None]:
         raise BackfillConfigError(f"{path}: FROZEN manifest has no symbols")
     symbols: list[str] = []
     for sym in raw_symbols:
-        if not isinstance(sym, str) or not SYMBOL_RE.match(sym):
+        if not isinstance(sym, str) or not SYMBOL_RE.fullmatch(sym):
             raise BackfillConfigError(
                 f"{path}: invalid manifest symbol {sym!r} (must match {SYMBOL_RE.pattern})"
             )
@@ -303,7 +303,7 @@ def resolve_universe(
         if not explicit:
             raise BackfillConfigError("--symbols is empty; refusing to backfill nothing")
         for sym in explicit:
-            if not SYMBOL_RE.match(sym):
+            if not SYMBOL_RE.fullmatch(sym):
                 raise BackfillConfigError(
                     f"--symbols symbol {sym!r} must match {SYMBOL_RE.pattern}"
                 )
@@ -488,7 +488,7 @@ def _load_archive_presets(cursor_root: Path) -> set[str]:
     symbols: set[str] = set()
     for key, value in doc.items():
         dataset, _, symbol = str(key).partition("|")
-        if dataset == "trade" and value == SOURCE_ARCHIVE and SYMBOL_RE.match(symbol):
+        if dataset == "trade" and value == SOURCE_ARCHIVE and SYMBOL_RE.fullmatch(symbol):
             symbols.add(symbol)
     return symbols
 

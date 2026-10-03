@@ -1134,7 +1134,7 @@ def _resolve_universe(args: argparse.Namespace) -> list[str]:
     explicit: list[str] | None = args.universe
     if explicit is not None:
         for sym in explicit:
-            if not SYMBOL_RE.match(sym):
+            if not SYMBOL_RE.fullmatch(sym):
                 raise CollectListError(f"--universe symbol {sym!r} must match {SYMBOL_RE.pattern}")
         if not explicit:
             raise CollectListError("--universe is empty; refusing to collect nothing")

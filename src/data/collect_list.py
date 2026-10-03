@@ -96,7 +96,7 @@ def _validate_symbols(raw: object, path: Path) -> tuple[str, ...]:
         raise CollectListError(f"{path}: 'symbols' is empty; refusing to collect nothing")
     seen: set[str] = set()
     for sym in raw:
-        if not isinstance(sym, str) or not SYMBOL_RE.match(sym):
+        if not isinstance(sym, str) or not SYMBOL_RE.fullmatch(sym):
             raise CollectListError(
                 f"{path}: invalid symbol {sym!r} (must match {SYMBOL_RE.pattern})"
             )
@@ -161,7 +161,7 @@ def _is_eligible(record: Mapping[str, Any]) -> bool:
         and record.get("quoteAsset") == "USDT"
         and record.get("status") == "TRADING"
         and isinstance(symbol, str)
-        and SYMBOL_RE.match(symbol) is not None
+        and SYMBOL_RE.fullmatch(symbol) is not None
     )
 
 

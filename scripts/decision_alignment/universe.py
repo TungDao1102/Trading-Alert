@@ -114,8 +114,8 @@ def _check_frozen(doc: dict[str, Any], top_n_ok: bool) -> list[str]:
     symbols = doc["symbols"]
     if not isinstance(symbols, list):
         return ["symbols must be a list"]
-    if not all(isinstance(s, str) and SYMBOL_RE.match(s) for s in symbols):
-        bad = [s for s in symbols if not (isinstance(s, str) and SYMBOL_RE.match(s))]
+    if not all(isinstance(s, str) and SYMBOL_RE.fullmatch(s) for s in symbols):
+        bad = [s for s in symbols if not (isinstance(s, str) and SYMBOL_RE.fullmatch(s))]
         problems.append(f"invalid symbol(s) (uppercase *USDT expected): {bad!r}")
     if len(set(symbols)) != len(symbols):
         problems.append("duplicate symbols")

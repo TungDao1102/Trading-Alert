@@ -219,12 +219,12 @@ def discover_candidates(
     other: set[str] = set()
     for f in filters:
         if f.contract_type == "PERPETUAL" and f.quote_asset == "USDT":
-            if SYMBOL_RE.match(f.symbol):
+            if SYMBOL_RE.fullmatch(f.symbol):
                 found.add(f.symbol)
         else:
             other.add(f.symbol)
     for symbol in archive_symbols:
-        if SYMBOL_RE.match(symbol) and symbol not in other:
+        if SYMBOL_RE.fullmatch(symbol) and symbol not in other:
             found.add(symbol)
     return sorted(found)
 
@@ -632,7 +632,7 @@ def render_frozen_manifest(
     draft_text: str, *, symbols: Sequence[str], selection_date: str, content_sha256: str
 ) -> str:
     """Turn the DRAFT manifest text into the FROZEN text, keeping every other line."""
-    if not all(SYMBOL_RE.match(s) for s in symbols):
+    if not all(SYMBOL_RE.fullmatch(s) for s in symbols):
         raise FreezeError("refusing to render an invalid symbol name")
     try:
         date.fromisoformat(selection_date)
