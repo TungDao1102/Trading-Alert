@@ -505,3 +505,27 @@ def test_default_collect_list_is_v2_and_loads() -> None:
     assert v2.list_id == "collect-list-v2"
     assert set(v1.symbols) <= set(v2.symbols)
     assert set(LIVE_5) <= set(v2.symbols)
+
+
+def test_collector_import_chain_does_not_load_scripts_or_universe_freeze() -> None:
+    """WR-05: the collector entrypoint must not depend on `scripts/` or the freeze tool."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    code = (
+        "import sys\n"
+        "import src.data.collect_list, src.data.collector\n"
+        "bad = [m for m in sys.modules if m == 'scripts' or m.startswith('scripts.')"
+        " or m == 'src.data.universe_freeze']\n"
+        "sys.exit(1 if bad else 0)\n"
+    )
+    repo_root = Path(__file__).resolve().parent.parent
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr

@@ -13,7 +13,11 @@ there is no fallback to the live-5 list, because a silent fallback would
 quietly stop collecting OI for the wider universe (T-13-02).
 
 The symbol and date patterns duplicate `scripts/decision_alignment/universe.py`
-on purpose: `src/` must not import from `scripts/`.
+on purpose: `src/` must not import from `scripts/`. `src.data.universe_freeze`
+(which does import `scripts/`) is therefore imported lazily, only by the
+re-issue path and the CLI, so the collector entrypoint and its container
+HEALTHCHECK, which import this module, never pull in `scripts/`, `httpx` or
+`tenacity` (WR-05).
 """
 
 from __future__ import annotations
@@ -31,7 +35,6 @@ from pathlib import Path
 from typing import Any
 
 from src.data.backfill import LIVE_5
-from src.data.universe_freeze import FreezeError, load_report
 
 SCHEMA = "collect-list/1"
 SYMBOL_RE = re.compile(r"^[A-Z0-9]+USDT$")
@@ -261,6 +264,8 @@ def reissue_collect_list(
     candidate records (no network). `load_report` verifies the report hash, so
     an edited report raises `FreezeError`, which propagates.
     """
+    from src.data.universe_freeze import load_report  # lazy: see module docstring
+
     report = load_report(Path(freeze_report_path))
     status = {c.symbol: c.status for c in report.candidates}
     trading = {sym for sym in report.proposed_symbols if status.get(sym) == "TRADING"}
@@ -435,6 +440,8 @@ def _run_propose(args: argparse.Namespace) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point; returns 0 on success, 2 on usage or input errors."""
+    from src.data.universe_freeze import FreezeError  # lazy: see module docstring
+
     args = _parse_args(argv)
     try:
         if args.command == "propose":
