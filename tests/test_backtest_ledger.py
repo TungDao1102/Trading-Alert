@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from src.backtest import ledger as ledger_mod
 from src.backtest.costs import guard_rates_from_params
 from src.backtest.ledger import (
     Ledger,
@@ -191,3 +192,198 @@ def test_a_non_decimal_amount_is_refused() -> None:
     )
     with pytest.raises(TypeError):
         apply_booking(_fresh_ledger(), bad)
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: UTC day roll, exposure projection, exhausted equity.
+# --------------------------------------------------------------------------- #
+
+DAY1_LOSS_TIME = datetime(2026, 1, 5, 15, 0, 0, tzinfo=UTC)
+DAY2_START = datetime(2026, 1, 6, 0, 0, 0, tzinfo=UTC)
+
+
+def _day1_loss_ledger() -> Ledger:
+    """Loss of 120 on day 1 -> equity 9880, DAILY_STOP (120 >= 100)."""
+    return apply_booking(_fresh_ledger(), _booking(DAY1_LOSS_TIME, "-120.00", BOOKING_EXIT))
+
+
+def test_day1_loss_of_120_is_daily_stop() -> None:
+    ledger = _day1_loss_ledger()
+    assert ledger.equity == D("9880.00")
+    assert daily_state(ledger) is DailyState.DAILY_STOP
+
+
+def test_roll_to_next_utc_day_resets_the_day_and_reresolves_thresholds() -> None:
+    rolled = ledger_mod.roll_to(_day1_loss_ledger(), DAY2_START)
+    assert rolled.day_pnl == D("0")
+    assert rolled.equity_at_day_start == D("9880.00")
+    assert rolled.equity == D("9880.00")
+    assert rolled.thresholds["daily_loss_stop_threshold"] == D("98.80")
+    assert rolled.thresholds["daily_loss_warning_threshold"] == D("49.40")
+    assert daily_loss_quote(rolled) == D("0")
+    assert daily_state(rolled) is DailyState.NORMAL
+    assert cancel_resting_required(rolled) is False
+
+
+def test_roll_to_within_the_same_day_changes_nothing() -> None:
+    ledger = _day1_loss_ledger()
+    later = datetime(2026, 1, 5, 23, 59, 59, 999000, tzinfo=UTC)
+    assert ledger_mod.roll_to(ledger, later) == ledger
+
+
+def test_roll_to_an_earlier_day_is_refused() -> None:
+    rolled = ledger_mod.roll_to(_day1_loss_ledger(), DAY2_START)
+    with pytest.raises(ValueError, match="backwards"):
+        ledger_mod.roll_to(rolled, datetime(2026, 1, 5, 12, 0, 0, tzinfo=UTC))
+
+
+def test_a_booking_exactly_at_midnight_belongs_to_the_new_day() -> None:
+    ledger = apply_booking(_day1_loss_ledger(), _booking(DAY2_START, "-10.00", BOOKING_EXIT))
+    assert ledger.day_pnl == D("-10.00")
+    assert ledger.equity_at_day_start == D("9880.00")
+    assert ledger.equity == D("9870.00")
+    assert daily_loss_quote(ledger) == D("10.00")
+    assert ledger.thresholds["daily_loss_stop_threshold"] == D("98.80")
+
+
+def test_a_booking_just_before_midnight_stays_on_the_old_day() -> None:
+    just_before = DAY2_START - timedelta(milliseconds=1)
+    ledger = apply_booking(_day1_loss_ledger(), _booking(just_before, "-10.00", BOOKING_EXIT))
+    assert ledger.equity_at_day_start == D("10000")
+    assert daily_loss_quote(ledger) == D("130.00")
+
+
+def test_thresholds_are_reresolved_only_at_a_day_roll_not_per_booking() -> None:
+    ledger = apply_booking(_fresh_ledger(), _booking(FILL_TIME, "-30.00", BOOKING_EXIT))
+    assert ledger.equity == D("9970.00")
+    assert ledger.thresholds["daily_loss_stop_threshold"] == D("100")
+
+
+def test_resting_exposure_projects_open_risk_with_zero_daily_pnl() -> None:
+    ledger = ledger_mod.register_exposure(
+        _fresh_ledger(),
+        trade_plan_id="tp-1",
+        symbol="BTCUSDT",
+        position_side="LONG",
+        open_risk=D("50"),
+    )
+    assert ledger_mod.open_positions_for_risk(ledger) == [
+        OpenPosition(
+            symbol="BTCUSDT",
+            position_side="LONG",
+            open_risk=D("50"),
+            daily_pnl_contribution=D("0"),
+        )
+    ]
+
+
+def test_update_exposure_after_tp1_scales_open_risk_by_remaining_over_filled() -> None:
+    ledger = ledger_mod.register_exposure(
+        _fresh_ledger(),
+        trade_plan_id="tp-1",
+        symbol="BTCUSDT",
+        position_side="LONG",
+        open_risk=D("50"),
+    )
+    ledger = ledger_mod.update_exposure(
+        ledger,
+        trade_plan_id="tp-1",
+        filled_quantity=D("0.5"),
+        remaining_quantity=D("0.25"),
+    )
+    (position,) = ledger_mod.open_positions_for_risk(ledger)
+    assert position.open_risk == D("25")
+
+
+def test_remove_exposure_drops_the_projection() -> None:
+    ledger = ledger_mod.register_exposure(
+        _fresh_ledger(),
+        trade_plan_id="tp-1",
+        symbol="BTCUSDT",
+        position_side="LONG",
+        open_risk=D("50"),
+    )
+    ledger = ledger_mod.remove_exposure(ledger, trade_plan_id="tp-1")
+    assert ledger_mod.open_positions_for_risk(ledger) == []
+
+
+def test_projections_are_sorted_by_symbol_then_side_regardless_of_registration_order() -> None:
+    ledger = _fresh_ledger()
+    for plan_id, symbol, side in (
+        ("tp-c", "ETHUSDT", "SHORT"),
+        ("tp-a", "ETHUSDT", "LONG"),
+        ("tp-b", "BTCUSDT", "SHORT"),
+    ):
+        ledger = ledger_mod.register_exposure(
+            ledger,
+            trade_plan_id=plan_id,
+            symbol=symbol,
+            position_side=side,
+            open_risk=D("10"),
+        )
+    keys = [(p.symbol, p.position_side) for p in ledger_mod.open_positions_for_risk(ledger)]
+    assert keys == [("BTCUSDT", "SHORT"), ("ETHUSDT", "LONG"), ("ETHUSDT", "SHORT")]
+
+
+def test_duplicate_registration_and_unknown_updates_fail_loudly() -> None:
+    ledger = ledger_mod.register_exposure(
+        _fresh_ledger(),
+        trade_plan_id="tp-1",
+        symbol="BTCUSDT",
+        position_side="LONG",
+        open_risk=D("50"),
+    )
+    with pytest.raises(ValueError, match="already registered"):
+        ledger_mod.register_exposure(
+            ledger,
+            trade_plan_id="tp-1",
+            symbol="BTCUSDT",
+            position_side="LONG",
+            open_risk=D("50"),
+        )
+    with pytest.raises(ValueError, match="unknown"):
+        ledger_mod.update_exposure(
+            ledger,
+            trade_plan_id="tp-9",
+            filled_quantity=D("0.5"),
+            remaining_quantity=D("0.25"),
+        )
+    with pytest.raises(ValueError, match="unknown"):
+        ledger_mod.remove_exposure(ledger, trade_plan_id="tp-9")
+
+
+def test_resting_exposure_counts_toward_the_portfolio_gates_in_evaluate_risk() -> None:
+    """A resting 50 of risk plus the candidate exceeds the 50 cluster cap (D-18, D035)."""
+    ledger = ledger_mod.register_exposure(
+        _fresh_ledger(),
+        trade_plan_id="tp-1",
+        symbol="BTCUSDT",
+        position_side="LONG",
+        open_risk=D("50"),
+    )
+    verdict = _risk_verdict(ledger, ledger_mod.open_positions_for_risk(ledger))
+    assert verdict.is_no_trade
+    assert verdict.reason_code == "CLUSTER_CAP_REJECT"
+
+
+def test_equity_positive_is_false_at_zero_or_negative_equity() -> None:
+    assert ledger_mod.equity_positive(_fresh_ledger()) is True
+    broke = apply_booking(_fresh_ledger(), _booking(FILL_TIME, "-10000.00", BOOKING_EXIT))
+    assert broke.equity == D("0.00")
+    assert ledger_mod.equity_positive(broke) is False
+    below = apply_booking(broke, _booking(EXIT_TIME, "-5.00", BOOKING_EXIT))
+    assert below.equity == D("-5.00")
+    assert ledger_mod.equity_positive(below) is False
+
+
+def test_roll_to_with_exhausted_equity_fails_closed_to_daily_stop() -> None:
+    broke = apply_booking(_fresh_ledger(), _booking(FILL_TIME, "-10000.00", BOOKING_EXIT))
+    rolled = ledger_mod.roll_to(broke, DAY2_START)
+    assert ledger_mod.equity_positive(rolled) is False
+    assert daily_state(rolled) is DailyState.DAILY_STOP
+    assert cancel_resting_required(rolled) is True
+
+
+def test_start_refuses_non_positive_equity() -> None:
+    with pytest.raises(ValueError):
+        Ledger.start(equity=D("0"), parameter_set_params=PARAMS, at_utc=START)
