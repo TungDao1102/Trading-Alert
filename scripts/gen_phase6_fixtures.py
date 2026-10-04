@@ -336,6 +336,11 @@ COST_MODEL = {
     "funding_treatment": "ADDITIVE",
     "expected_slippage": "0.0001",
     "exit_slippage_rate": "0.0003",
+    # Funding sign convention joins cost identity for sizeable sets (Phase 14,
+    # D-16). Literal on purpose: this script imports nothing from src/. The
+    # binding gate (cost_slice appends semantics.FUNDING_CONVENTION) refuses a
+    # fixture whose value drifts from the code constant.
+    "funding_convention": "MARK_NOTIONAL_SIGNED_V1",
     "slippage_model": "FIXED_BPS",
     "spread_fill_assumptions": "FULL_FILL",
     "partial_fill_fraction": "1.0",
@@ -403,7 +408,7 @@ def write_parity_overlapping_history() -> None:
     """Phase 7 backtest-to-paper parity input: the LONG both-touched payload (12-09).
 
     A copy of the `intrabar_both_touched` payload (baseline-v5 identity and
-    the eight-key cost dict) written under the Phase 7 fixture root, so the
+    the nine-key cost dict) written under the Phase 7 fixture root, so the
     parity fixture stays on the same registry set as the Phase 6 fixtures.
     `expected.json` (digest and the documentary hashes) is pinned by hand from
     the simulator output and asserted by tests/test_paper_parity.py.
