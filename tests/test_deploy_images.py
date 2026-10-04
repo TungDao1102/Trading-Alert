@@ -236,6 +236,11 @@ def test_dockerignore_keeps_secrets_and_state_out_of_the_build_context() -> None
         ".omo",
         ".codegraph",
         "__pycache__",
+        # WR-12: unanchored patterns only match at the context root, so nested bytecode
+        # (src/**/__pycache__) needs the ** forms.
+        "**/__pycache__",
+        "**/*.py[cod]",
+        "**/.pytest_cache",
         "tests",
     ):
         assert required in entries, f"{required} missing from .dockerignore"
