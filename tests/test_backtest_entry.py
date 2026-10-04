@@ -13,12 +13,18 @@ Hand oracles (zone 99.50-100.60 -> mid 100.05; tick 0.10; D-07, D-08):
 
 from __future__ import annotations
 
+import dataclasses
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+import src.backtest.entry as entry_rules
+import src.backtest.lifecycle as lifecycle_api
 from src.backtest.lifecycle import LifecycleEvent, PlanState, advance, new_plan_state
 from src.backtest.series import ListMinuteSource
 from src.core.types import Candle
+from src.domain.trade_plan import TradePlan
 
 from tests.backtest_plan_helpers import make_minute, make_trade_plan
 
@@ -294,3 +300,248 @@ def test_is_touch_and_is_trade_through_are_side_specific() -> None:
         )
         is True
     )
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: CANDLE_CLOSE invalidation, cancel API, PENDING_AT_DATA_END (D-05, D-32..D-35)
+#
+# Hand oracles (strategy bars are 1h; signal bar N = 09:00-09:59, N+1 = 10:00-10:59):
+#     LONG  level 98.00 (= stop): bar close 97.90 < 98.00 -> INVALIDATION_CANCEL at the bar
+#           close 10:59:59.999; close 98.00 is not beyond the level -> still RESTING.
+#     SHORT level 102.00: bar close 102.10 > 102.00 -> INVALIDATION_CANCEL.
+#     Fill first: the 10:30 minute trades through (low 99.90) and the bar closes 97.90 ->
+#           the plan FILLS and is not invalidated.
+#     Expiry 13:59:59.999: the 13:00-13:59 bar closes at expiry beyond the level ->
+#           INVALIDATION_CANCEL wins over EXPIRED; with no bar (a mid-bar window) -> EXPIRED.
+# --------------------------------------------------------------------------- #
+
+BAR_1_CLOSE = datetime(2026, 1, 5, 10, 59, 59, 999000, tzinfo=UTC)
+EXPIRY = datetime(2026, 1, 5, 13, 59, 59, 999000, tzinfo=UTC)
+
+
+def _bar(open_hour: int, close: str) -> Candle:
+    """A 1h strategy bar (open_hour:00 - open_hour:59:59.999) closing at `close`."""
+    return Candle(
+        symbol=SYMBOL,
+        interval="1h",
+        open_time_utc=datetime(2026, 1, 5, open_hour, 0, tzinfo=UTC),
+        close_time_utc=datetime(2026, 1, 5, open_hour, 59, 59, 999000, tzinfo=UTC),
+        open=D("100.00"),
+        high=D("103.00"),
+        low=D("97.00"),
+        close=D(close),
+        volume=D("10"),
+    )
+
+
+def _flat_minutes(hour: int, count: int = 3) -> list[Candle]:
+    """Trade minutes that never reach the LONG limit 100.00 nor the SHORT limit 100.10."""
+    return [
+        make_minute(SYMBOL, _at(hour, m), "100.04", "100.05", "100.01", "100.03", "trade")
+        for m in range(count)
+    ]
+
+
+def _bar_run(
+    state: PlanState,
+    trade: list[Candle],
+    *,
+    bar: Candle | None,
+    start: datetime = SIGNAL_CLOSE,
+    end: datetime = BAR_1_CLOSE,
+) -> tuple[PlanState, tuple[LifecycleEvent, ...]]:
+    marks = _benign_marks([(c.open_time_utc.hour, c.open_time_utc.minute) for c in trade])
+    source = ListMinuteSource(trade={SYMBOL: trade}, mark={SYMBOL: marks})
+    return advance(state, source=source, start_exclusive=start, end_inclusive=end, bar=bar)
+
+
+def _opened_long() -> PlanState:
+    filled, _ = _run(
+        _state("LONG"), [_trade(0, o="100.40", h="100.50", low="99.90", c="100.20")], "LONG"
+    )
+    assert filled.phase == "OPEN"
+    return filled
+
+
+def test_invalidation_level_parses_the_candle_close_rule_and_fails_closed() -> None:
+    plan = make_trade_plan("LONG", stop_loss="98.00")
+    assert entry_rules.invalidation_level(plan) == D("98.00")
+
+    def with_rule(rule: object) -> TradePlan:
+        text = rule if isinstance(rule, str) else json.dumps(rule)
+        return dataclasses.replace(plan, invalidation_rule_json=text)
+
+    with pytest.raises(ValueError, match="CANDLE_CLOSE"):
+        entry_rules.invalidation_level(with_rule({"basis": "WICK", "level": "98.00"}))
+    with pytest.raises(ValueError, match="level"):
+        entry_rules.invalidation_level(with_rule({"basis": "CANDLE_CLOSE"}))
+    with pytest.raises(ValueError, match="level"):
+        entry_rules.invalidation_level(with_rule({"basis": "CANDLE_CLOSE", "level": 98.0}))
+    with pytest.raises(ValueError, match="level"):
+        entry_rules.invalidation_level(with_rule({"basis": "CANDLE_CLOSE", "level": "abc"}))
+    with pytest.raises(ValueError, match="JSON"):
+        entry_rules.invalidation_level(with_rule("{not json"))
+
+
+def test_is_invalidated_is_strictly_beyond_the_level_on_each_side() -> None:
+    level = D("98.00")
+    assert (
+        entry_rules.is_invalidated(bar_close_price=D("97.90"), level=level, direction="LONG")
+        is True
+    )
+    assert (
+        entry_rules.is_invalidated(bar_close_price=D("98.00"), level=level, direction="LONG")
+        is False
+    )
+    assert (
+        entry_rules.is_invalidated(bar_close_price=D("99.00"), level=level, direction="LONG")
+        is False
+    )
+    high = D("102.00")
+    assert (
+        entry_rules.is_invalidated(bar_close_price=D("102.10"), level=high, direction="SHORT")
+        is True
+    )
+    assert (
+        entry_rules.is_invalidated(bar_close_price=D("102.00"), level=high, direction="SHORT")
+        is False
+    )
+    assert (
+        entry_rules.is_invalidated(bar_close_price=D("101.00"), level=high, direction="SHORT")
+        is False
+    )
+
+
+def test_long_bar_closing_below_the_level_without_a_fill_is_invalidation_cancel() -> None:
+    state, events = _bar_run(_state("LONG"), _flat_minutes(10), bar=_bar(10, "97.90"))
+    assert state.phase == "CLOSED"
+    assert state.entry_kind == "INVALIDATION_CANCEL"
+    assert state.entry_time_utc is None
+    assert state.resolved_at_utc == BAR_1_CLOSE
+    assert [e.kind for e in events] == ["CANCEL"]
+    assert events[0].time_utc == BAR_1_CLOSE
+    assert events[0].entry_kind == "INVALIDATION_CANCEL"
+
+
+def test_bar_closing_exactly_at_the_level_does_not_invalidate() -> None:
+    state, events = _bar_run(_state("LONG"), _flat_minutes(10), bar=_bar(10, "98.00"))
+    assert state.phase == "RESTING"
+    assert events == ()
+
+
+def test_short_bar_closing_above_the_level_is_invalidation_cancel() -> None:
+    state, events = _bar_run(_state("SHORT"), _flat_minutes(10), bar=_bar(10, "102.10"))
+    assert state.entry_kind == "INVALIDATION_CANCEL"
+    assert state.resolved_at_utc == BAR_1_CLOSE
+    assert [e.kind for e in events] == ["CANCEL"]
+
+
+def test_fill_is_evaluated_first_so_a_filling_bar_is_never_invalidated() -> None:
+    minutes = [
+        *_flat_minutes(10, 30),
+        make_minute(SYMBOL, _at(10, 30), "100.40", "100.50", "99.90", "100.20", "trade"),
+    ]
+    state, events = _bar_run(_state("LONG"), minutes, bar=_bar(10, "97.90"))
+    assert state.phase == "OPEN"
+    assert state.entry_kind == "ENTRY_FILLED"
+    assert state.entry_time_utc == datetime(2026, 1, 5, 10, 30, 59, 999000, tzinfo=UTC)
+    assert [e.kind for e in events] == ["FILL"]
+
+
+def test_invalidation_wins_over_expiry_at_the_same_instant() -> None:
+    start = datetime(2026, 1, 5, 12, 59, 59, 999000, tzinfo=UTC)
+    minutes = _flat_minutes(13)
+    invalidated, invalidated_events = _bar_run(
+        _state("LONG"), minutes, bar=_bar(13, "97.90"), start=start, end=EXPIRY
+    )
+    assert invalidated.entry_kind == "INVALIDATION_CANCEL"
+    assert invalidated.resolved_at_utc == EXPIRY
+    assert [e.entry_kind for e in invalidated_events] == ["INVALIDATION_CANCEL"]
+
+    # The same window without a strategy bar (mid-bar view) never invalidates: it expires.
+    expired, expired_events = _bar_run(_state("LONG"), minutes, bar=None, start=start, end=EXPIRY)
+    assert expired.entry_kind == "EXPIRED"
+    assert [e.entry_kind for e in expired_events] == ["EXPIRED"]
+
+
+def test_a_bar_closing_after_expiry_cannot_invalidate_an_already_expired_plan() -> None:
+    start = datetime(2026, 1, 5, 12, 59, 59, 999000, tzinfo=UTC)
+    end = datetime(2026, 1, 5, 14, 59, 59, 999000, tzinfo=UTC)
+    state, events = _bar_run(
+        _state("LONG"), _flat_minutes(13), bar=_bar(14, "97.90"), start=start, end=end
+    )
+    assert state.entry_kind == "EXPIRED"
+    assert state.resolved_at_utc == EXPIRY
+    assert [e.kind for e in events] == ["CANCEL"]
+
+
+def test_a_window_that_ends_mid_bar_never_invalidates() -> None:
+    # Minutes sit just under the SHORT limit and above the LONG stop, bar is None: nothing ends.
+    quiet = [make_minute(SYMBOL, _at(10, 0), "100.05", "100.05", "100.01", "100.03", "trade")]
+    state, events = _bar_run(_state("SHORT"), quiet, bar=None)
+    assert state.phase == "RESTING"
+    assert events == ()
+    # A LONG whose minutes sit far below the level fills (trade-through); it is never cancelled.
+    crash = [make_minute(SYMBOL, _at(10, 0), "97.00", "97.50", "96.00", "96.50", "trade")]
+    long_state, long_events = _bar_run(_state("LONG"), crash, bar=None)
+    assert long_state.entry_kind == "ENTRY_FILLED"
+    assert [e.kind for e in long_events] == ["FILL"]
+
+
+def test_a_bar_that_does_not_close_at_the_window_end_is_refused() -> None:
+    with pytest.raises(ValueError, match="bar"):
+        _bar_run(_state("LONG"), _flat_minutes(10), bar=_bar(9, "97.90"))
+
+
+def test_cancel_plan_ends_a_resting_plan_at_the_given_instant() -> None:
+    at = datetime(2026, 1, 5, 10, 15, 30, tzinfo=UTC)
+    state, events = lifecycle_api.cancel_plan(
+        _state("LONG"), entry_kind="DAILY_STOP_CANCEL", at_utc=at
+    )
+    assert state.phase == "CLOSED"
+    assert state.entry_kind == "DAILY_STOP_CANCEL"
+    assert state.resolved_at_utc == at
+    assert state.entry_time_utc is None
+    assert [e.kind for e in events] == ["CANCEL"]
+    assert events[0].time_utc == at
+    assert events[0].entry_kind == "DAILY_STOP_CANCEL"
+
+
+def test_cancel_plan_refuses_an_open_position_a_fill_kind_and_a_naive_instant() -> None:
+    at = datetime(2026, 1, 5, 11, 0, tzinfo=UTC)
+    with pytest.raises(ValueError, match="OPEN"):
+        lifecycle_api.cancel_plan(_opened_long(), entry_kind="DAILY_STOP_CANCEL", at_utc=at)
+    with pytest.raises(ValueError, match="entry_kind"):
+        lifecycle_api.cancel_plan(_state("LONG"), entry_kind="ENTRY_FILLED", at_utc=at)
+    with pytest.raises(ValueError, match="UTC"):
+        lifecycle_api.cancel_plan(
+            _state("LONG"), entry_kind="DAILY_STOP_CANCEL", at_utc=datetime(2026, 1, 5, 11)
+        )
+
+
+def test_a_plan_still_resting_at_data_end_is_pending_not_expired() -> None:
+    data_end = datetime(2026, 1, 5, 12, 0, 0, tzinfo=UTC)  # before expiry 13:59:59.999
+    resting, _ = _bar_run(_state("LONG"), _flat_minutes(10), bar=None, end=data_end)
+    assert resting.phase == "RESTING"
+    final, events = lifecycle_api.finalize_at_data_end(resting, data_end_utc=data_end)
+    assert final.phase == "CLOSED"
+    assert final.entry_kind == "PENDING_AT_DATA_END"
+    assert final.entry_kind != "EXPIRED"
+    assert final.resolved_at_utc == data_end
+    assert [e.kind for e in events] == ["PENDING"]
+    assert events[0].time_utc == data_end
+    assert events[0].entry_kind == "PENDING_AT_DATA_END"
+
+
+def test_finalize_at_data_end_refuses_an_open_position_until_plan_14_07() -> None:
+    with pytest.raises(ValueError, match="END_OF_DATA"):
+        lifecycle_api.finalize_at_data_end(_opened_long(), data_end_utc=WINDOW_END)
+
+
+def test_finalize_at_data_end_leaves_a_terminal_plan_untouched() -> None:
+    start = datetime(2026, 1, 5, 12, 59, 59, 999000, tzinfo=UTC)
+    expired, _ = _bar_run(_state("LONG"), _flat_minutes(13), bar=None, start=start, end=EXPIRY)
+    assert expired.entry_kind == "EXPIRED"
+    final, events = lifecycle_api.finalize_at_data_end(expired, data_end_utc=EXPIRY)
+    assert final == expired
+    assert events == ()
