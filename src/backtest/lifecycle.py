@@ -39,11 +39,12 @@ from .entry import (
     is_trade_through,
     snapped_limit_price,
 )
-from .exits import ProtectiveLevels, is_sl_touched, sl_trigger_price
+from .exits import ProtectiveLevels, is_sl_touched, is_tp_touched, sl_trigger_price
 from .semantics import (
     DAILY_STOP_CANCEL,
     ENTRY_FILLED,
     EXIT_SL,
+    EXIT_TP2,
     EXPIRED,
     INVALIDATION_CANCEL,
     PARTIAL_FILL,
@@ -230,6 +231,61 @@ def _stop_out(state: PlanState, minute: Candle) -> tuple[PlanState, LifecycleEve
     return closed, event
 
 
+def _take_tp1(state: PlanState, minute: Candle) -> tuple[PlanState, LifecycleEvent]:
+    """Book the TP1 reduce-only partial at its trigger (live-sized, stop unchanged, D-11)."""
+    levels = state.levels
+    if (
+        levels.tp1_trigger is None
+        or levels.tp1_quantity is None
+        or state.remaining_quantity is None
+    ):
+        raise ValueError("TP1 needs levels sized by protective_levels_for_fill and an OPEN state")
+    reduced = replace(
+        state,
+        remaining_quantity=state.remaining_quantity - levels.tp1_quantity,
+        tp1_quantity=levels.tp1_quantity,
+        tp1_price=levels.tp1_trigger,
+        tp1_time_utc=minute.close_time_utc,
+    )
+    event = LifecycleEvent(
+        kind=EVENT_TP1,
+        symbol=state.symbol,
+        trade_plan_id=state.plan.trade_plan_id,
+        time_utc=minute.close_time_utc,
+        price=levels.tp1_trigger,
+        quantity=levels.tp1_quantity,
+        entry_kind=state.entry_kind,
+    )
+    return reduced, event
+
+
+def _take_tp2(state: PlanState, minute: Candle) -> tuple[PlanState, LifecycleEvent]:
+    """Close the remainder at the TP2 trigger (no price improvement)."""
+    trigger = state.levels.tp2_trigger
+    if trigger is None or state.remaining_quantity is None:
+        raise ValueError("TP2 needs levels sized by protective_levels_for_fill and an OPEN state")
+    closed = replace(
+        state,
+        phase=PHASE_CLOSED,
+        remaining_quantity=_ZERO,
+        exit_kind=EXIT_TP2,
+        exit_price=trigger,
+        exit_time_utc=minute.close_time_utc,
+        resolved_at_utc=minute.close_time_utc,
+    )
+    event = LifecycleEvent(
+        kind=EVENT_EXIT,
+        symbol=state.symbol,
+        trade_plan_id=state.plan.trade_plan_id,
+        time_utc=minute.close_time_utc,
+        price=trigger,
+        quantity=state.remaining_quantity,
+        entry_kind=state.entry_kind,
+        exit_kind=EXIT_TP2,
+    )
+    return closed, event
+
+
 def _close_resting(
     state: PlanState, *, entry_kind: str, at_utc: datetime
 ) -> tuple[PlanState, LifecycleEvent]:
@@ -350,6 +406,27 @@ def advance(
             ):
                 current, exit_event = _stop_out(current, mark_minute)
                 events.append(exit_event)
+                break
+            tp1_trigger = current.levels.tp1_trigger
+            tp2_trigger = current.levels.tp2_trigger
+            if (
+                tp1_trigger is not None
+                and current.tp1_quantity is None
+                and is_tp_touched(
+                    mark_minute=mark_minute, tp_trigger=tp1_trigger, direction=current.direction
+                )
+            ):
+                current, tp1_event = _take_tp1(current, mark_minute)
+                events.append(tp1_event)
+            if (
+                tp2_trigger is not None
+                and current.tp1_quantity is not None
+                and is_tp_touched(
+                    mark_minute=mark_minute, tp_trigger=tp2_trigger, direction=current.direction
+                )
+            ):
+                current, tp2_event = _take_tp2(current, mark_minute)
+                events.append(tp2_event)
                 break
 
     return current, tuple(events)

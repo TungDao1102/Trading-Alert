@@ -31,12 +31,24 @@ from src.domain.canonical import sha256_hex
 from src.risk.realized_risk import realized_risk_for_fill
 
 from .costs import CostModel
-from .lifecycle import EVENT_EXIT, EVENT_FILL, PHASE_CLOSED, LifecycleEvent, PlanState
+from .lifecycle import (
+    EVENT_EXIT,
+    EVENT_FILL,
+    EVENT_TP1,
+    PHASE_CLOSED,
+    LifecycleEvent,
+    PlanState,
+)
 from .semantics import ENTRY_KINDS, EXIT_KINDS, EXIT_TP2, SIMULATOR_SEMANTICS_VERSION
 from .validator import validate_trade_record
 
 BOOKING_FILL = "FILL"
+BOOKING_TP1 = "TP1"
 BOOKING_EXIT = "EXIT"
+
+# Leg label of the TP1 partial. It is not an exit kind (a position never ends at TP1), so it
+# lives here beside the per-leg cost rules rather than in `semantics.EXIT_KINDS`.
+LEG_TP1 = "TP1"
 
 
 @dataclass(frozen=True)
@@ -123,10 +135,11 @@ class Booking:
 
 
 def _exit_slippage_rate(exit_kind: str | None, cost_model: CostModel) -> Decimal:
-    """Slippage rate of the exit leg: stop-style exits are worse than a resting limit.
+    """Slippage rate of a final exit leg: stop-style exits are worse than a resting limit.
 
     SL (a stop-market order) and END_OF_DATA (a forced market close, D046) use
-    `exit_slippage_rate`; TP2 (a resting limit) uses `expected_slippage` (D-10).
+    `exit_slippage_rate`; TP2 (a resting limit) uses `expected_slippage` (D-10). The TP1
+    partial is priced through `_leg_slippage_rate`.
     """
     if exit_kind not in EXIT_KINDS:
         raise ValueError(f"unknown exit_kind {exit_kind!r}: expected one of {sorted(EXIT_KINDS)}")
@@ -138,6 +151,13 @@ def _exit_slippage_rate(exit_kind: str | None, cost_model: CostModel) -> Decimal
             "models cannot book stop-exit slippage; use baseline-v5 or later"
         )
     return cost_model.exit_slippage_rate
+
+
+def _leg_slippage_rate(leg_kind: str | None, cost_model: CostModel) -> Decimal:
+    """Slippage rate of one exit leg: the TP1 partial and TP2 use `expected_slippage` (D-10)."""
+    if leg_kind == LEG_TP1:
+        return cost_model.expected_slippage
+    return _exit_slippage_rate(leg_kind, cost_model)
 
 
 def _gross(direction: str, entry_price: Decimal, exit_price: Decimal, quantity: Decimal) -> Decimal:
@@ -158,22 +178,24 @@ def _entry_leg_cost(
 
 
 def _exit_leg_cost(
-    exit_price: Decimal, quantity: Decimal, exit_kind: str | None, cost_model: CostModel
+    exit_price: Decimal, quantity: Decimal, leg_kind: str | None, cost_model: CostModel
 ) -> tuple[Decimal, Decimal]:
-    """Return `(exit_fee, exit_slippage)` for one exit leg."""
+    """Return `(exit_fee, exit_slippage)` of one leg (`leg_kind`: TP1, SL, TP2, END_OF_DATA)."""
     notional = _mul(exit_price, quantity)
     return (
         _mul(notional, cost_model.fee_rate_exit),
-        _mul(notional, _exit_slippage_rate(exit_kind, cost_model)),
+        _mul(notional, _leg_slippage_rate(leg_kind, cost_model)),
     )
 
 
 def booking_for_event(event: LifecycleEvent, *, state: PlanState, cost_model: CostModel) -> Booking:
     """Book one lifecycle event as a dated, signed ledger amount (D-18).
 
-    FILL books minus the entry fee and entry slippage at the fill time. EXIT books the
-    exit-leg gross PnL minus the exit fee and exit slippage at the exit time; an SL
-    exit uses `exit_slippage_rate` (D-10). Other event kinds raise `ValueError`.
+    FILL books minus the entry fee and entry slippage at the fill time. TP1 books the
+    partial leg (gross on the TP1 quantity minus exit fee and `expected_slippage`
+    slippage). EXIT books the final-leg gross PnL minus the exit fee and exit slippage at
+    the exit time; SL and END_OF_DATA exits use `exit_slippage_rate`, TP2 uses
+    `expected_slippage` (D-10). Other event kinds raise `ValueError`.
     """
     if event.price is None or event.quantity is None:
         raise ValueError(f"{event.kind} event needs a price and a quantity to be booked")
@@ -187,12 +209,13 @@ def booking_for_event(event: LifecycleEvent, *, state: PlanState, cost_model: Co
             amount=amount,
             kind=BOOKING_FILL,
         )
-    if event.kind == EVENT_EXIT:
+    if event.kind in (EVENT_EXIT, EVENT_TP1):
         if state.entry_price is None:
-            raise ValueError("EXIT event on a state that never filled")
+            raise ValueError(f"{event.kind} event on a state that never filled")
+        is_tp1 = event.kind == EVENT_TP1
         gross = _gross(state.direction, state.entry_price, event.price, event.quantity)
         exit_fee, exit_slippage = _exit_leg_cost(
-            event.price, event.quantity, event.exit_kind, cost_model
+            event.price, event.quantity, LEG_TP1 if is_tp1 else event.exit_kind, cost_model
         )
         amount = _sub(_sub(gross, exit_fee), exit_slippage)
         return Booking(
@@ -200,9 +223,9 @@ def booking_for_event(event: LifecycleEvent, *, state: PlanState, cost_model: Co
             symbol=event.symbol,
             trade_plan_id=event.trade_plan_id,
             amount=amount,
-            kind=BOOKING_EXIT,
+            kind=BOOKING_TP1 if is_tp1 else BOOKING_EXIT,
         )
-    raise ValueError(f"cannot book a {event.kind} event in plan 14-01 (TP1 legs land in 14-07)")
+    raise ValueError(f"cannot book a {event.kind} event")
 
 
 def _trade_id(
@@ -309,11 +332,30 @@ def build_trade_record(
     if state.exit_price is None or state.exit_time_utc is None:
         raise ValueError("a filled CLOSED state needs an exit price and an exit time")
     quantity = state.fill_quantity
-    gross = _gross(state.direction, state.entry_price, state.exit_price, quantity)
     entry_fee, entry_slippage = _entry_leg_cost(state.entry_price, quantity, cost_model)
-    exit_fee, exit_slippage = _exit_leg_cost(
-        state.exit_price, quantity, state.exit_kind, cost_model
-    )
+    # Per-leg booking: the TP1 partial (when it happened) and the final leg on the remainder
+    # are costed separately and summed, exactly as `booking_for_event` books them.
+    tp1_quantity = state.tp1_quantity
+    if tp1_quantity is None:
+        final_quantity = quantity
+        gross = _gross(state.direction, state.entry_price, state.exit_price, final_quantity)
+        exit_fee, exit_slippage = _exit_leg_cost(
+            state.exit_price, final_quantity, state.exit_kind, cost_model
+        )
+    else:
+        if state.tp1_price is None or state.tp1_time_utc is None:
+            raise ValueError("a TP1 leg needs its price and time on the state")
+        final_quantity = _sub(quantity, tp1_quantity)
+        tp1_fee, tp1_slippage = _exit_leg_cost(state.tp1_price, tp1_quantity, LEG_TP1, cost_model)
+        final_fee, final_slippage = _exit_leg_cost(
+            state.exit_price, final_quantity, state.exit_kind, cost_model
+        )
+        gross = _add(
+            _gross(state.direction, state.entry_price, state.tp1_price, tp1_quantity),
+            _gross(state.direction, state.entry_price, state.exit_price, final_quantity),
+        )
+        exit_fee = _add(tp1_fee, final_fee)
+        exit_slippage = _add(tp1_slippage, final_slippage)
     slippage = _add(entry_slippage, exit_slippage)
     realized_pnl = _add(_sub(_sub(_sub(gross, entry_fee), exit_fee), slippage), funding_amount)
     realized_risk = realized_risk_for_fill(
@@ -350,6 +392,8 @@ def build_trade_record(
 __all__ = [
     "BOOKING_EXIT",
     "BOOKING_FILL",
+    "BOOKING_TP1",
+    "LEG_TP1",
     "Booking",
     "TradeRecord",
     "booking_for_event",
