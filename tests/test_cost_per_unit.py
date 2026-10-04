@@ -559,7 +559,7 @@ def test_cost_slice_missing_required_key_raises_bare_key_error() -> None:
 
 
 def test_cost_keys_tuple_unchanged() -> None:
-    from src.backtest.costs import COST_KEYS, OPTIONAL_COST_KEYS, _NUMERIC_HASH_KEYS
+    from src.backtest.costs import _NUMERIC_HASH_KEYS, COST_KEYS, OPTIONAL_COST_KEYS
 
     assert len(COST_KEYS) == 7
     assert "exit_slippage_rate" not in COST_KEYS
@@ -719,8 +719,7 @@ def test_funding_convention_changes_cost_hash() -> None:
     base = _cost(exit_slippage_rate="0.0003")
     with_convention = _cost(exit_slippage_rate="0.0003", funding_convention=FUNDING_CONVENTION)
     assert (
-        build_cost_model(with_convention).cost_model_hash
-        != build_cost_model(base).cost_model_hash
+        build_cost_model(with_convention).cost_model_hash != build_cost_model(base).cost_model_hash
     )
     assert build_cost_model(with_convention).funding_convention == FUNDING_CONVENTION
     assert build_cost_model(base).funding_convention is None

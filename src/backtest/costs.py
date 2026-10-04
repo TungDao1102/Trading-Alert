@@ -3,10 +3,14 @@
 Per D-02: costs apply from run #1 before any selection decision. The
 `CostModel` is a frozen dataclass built from registry cost keys, with
 `cost_model_hash` computed via `sha256_hex` over the sorted seven-key
-snapshot (eight keys when the model carries `exit_slippage_rate`, Phase 12),
-with numeric values hashed as canonical text so equivalent spellings agree
-(D-15). `modeled_costs_per_unit` is price-aware (quote currency per unit of
-base) and delegates to `src/risk/cost_rates.per_unit_round_trip_cost`, the one
+snapshot (plus `exit_slippage_rate` when the model carries it, Phase 12, plus
+`funding_convention` when it carries that, Phase 14), with numeric values
+hashed as canonical text so equivalent spellings agree (D-15) and the string
+`funding_convention` hashed as-is. Funding DATA identity is not part of the
+cost hash: it rides in `data_snapshot_id` plus the recorded `allowed_gaps`
+(D-36); only the sign convention joins cost identity (D-16).
+`modeled_costs_per_unit` is price-aware (quote currency per unit of base)
+and delegates to `src/risk/cost_rates.per_unit_round_trip_cost`, the one
 producer `evaluate_risk` also uses — never re-derived inside the simulator
 body. `guard_rates_from_params` reads the two cost-guard rates from the
 pinned registry set for both the simulator and the paper loop.
@@ -32,6 +36,8 @@ from src.risk.cost_rates import (
     per_unit_round_trip_cost,
 )
 
+from .semantics import FUNDING_CONVENTION
+
 # Canonical cost-key vocabulary (D-02 + Pitfall 7). These keys are
 # read from the loaded ParameterSet.params dict; absent keys raise
 # KeyError (fail closed, never silent defaults).
@@ -48,7 +54,9 @@ COST_KEYS: tuple[str, ...] = (
 # Optional cost keys participate in cost identity by PRESENCE (D-14 option B):
 # a set that carries one hashes over the seven required keys plus this one; a
 # set that does not (every legacy set) keeps its byte-locked seven-key hash.
-OPTIONAL_COST_KEYS: tuple[str, ...] = ("exit_slippage_rate",)
+# `funding_convention` (Phase 14, D-16) is a STRING key: it is hashed as-is, so
+# it is deliberately absent from `_NUMERIC_HASH_KEYS`.
+OPTIONAL_COST_KEYS: tuple[str, ...] = ("exit_slippage_rate", "funding_convention")
 
 
 # Numeric cost fields hashed as canonical text (D-15); the rest are strings.
@@ -71,11 +79,12 @@ _canonical_decimal_text = canonical_decimal_text
 def _cost_hash_payload(model: CostModel) -> dict[str, str]:
     """Build the hash payload: canonical text for numerics, strings as-is.
 
-    The seven `COST_KEYS` always participate; `exit_slippage_rate`
-    participates only when the model carries it (presence-driven, D-14
-    option B), so every legacy seven-key model keeps its byte-locked hash.
+    The seven `COST_KEYS` always participate; each optional key
+    (`exit_slippage_rate`, `funding_convention`) participates only when the
+    model carries it (presence-driven, D-14 option B), so every legacy
+    seven-key model keeps its byte-locked hash.
     """
-    keys = (*COST_KEYS, *OPTIONAL_COST_KEYS) if model.exit_slippage_rate is not None else COST_KEYS
+    keys = (*COST_KEYS, *(k for k in OPTIONAL_COST_KEYS if getattr(model, k) is not None))
     payload: dict[str, str] = {}
     for key in keys:
         value = getattr(model, key)
@@ -139,9 +148,10 @@ class CostModel:
     """Registry-parameterized cost model (D-02).
 
     `cost_model_hash` is SHA256 over the canonical JSON of the sorted
-    seven-key snapshot, plus `exit_slippage_rate` when present. Numeric
-    values enter the hash as canonical text (equivalent spellings agree,
-    D-15). Once referenced by an experiment, the hash is permanent (D-03).
+    seven-key snapshot, plus `exit_slippage_rate` and `funding_convention`
+    when present. Numeric values enter the hash as canonical text (equivalent
+    spellings agree, D-15); the string `funding_convention` enters as-is.
+    Once referenced by an experiment, the hash is permanent (D-03).
     """
 
     fee_rate_entry: Decimal
@@ -157,6 +167,10 @@ class CostModel:
     # None marks a legacy 7-key model: constructible and hashable, but refused
     # by `cost_rates_from_model` (it cannot size).
     exit_slippage_rate: Decimal | None = None
+    # Funding sign convention (Phase 14, D-16, Phase 12 D-15). Trailing and
+    # defaulted like `exit_slippage_rate`; None marks a model that predates it.
+    # A present value must equal `semantics.FUNDING_CONVENTION`.
+    funding_convention: str | None = None
 
     def __post_init__(self) -> None:
         for fname in (
@@ -192,6 +206,13 @@ class CostModel:
             value = getattr(self, fname)
             if not isinstance(value, str) or value == "":
                 raise ValueError(f"{fname} must be a non-empty string")
+        if self.funding_convention is not None:
+            _require_cost_str(self.funding_convention, "funding_convention")
+            if self.funding_convention != FUNDING_CONVENTION:
+                raise ValueError(
+                    f"funding_convention must be {FUNDING_CONVENTION!r}, "
+                    f"got {self.funding_convention!r}"
+                )
         # Compute cost_model_hash if not provided; VERIFY it if provided
         # (CR-09): a non-empty hash copied from different cost assumptions
         # must fail closed, never silently poison experiment identity.
@@ -213,16 +234,22 @@ def cost_slice(params: Mapping[str, Any]) -> dict[str, Any]:
     """Slice the cost keys out of a registry parameter mapping.
 
     Returns the seven required `COST_KEYS` plus `exit_slippage_rate` when the
-    set carries it (Phase 12 sets do; every legacy set does not). A set
-    missing a required key raises a bare `KeyError` (fail closed, never
-    defaulted): baseline-v1 and baseline-v2 take that path. This is the one
-    slice builder shared by the binding gate and the paper freeze so the
-    registry side of the cost binding is built in exactly one place.
+    set carries it (Phase 12 sets do; every legacy set does not). Whenever the
+    slice carries `exit_slippage_rate` (a sizeable set) it also appends
+    `funding_convention = FUNDING_CONVENTION`, a code constant and never a
+    params/ value (D-16), so a funding-less identity is not producible for a
+    sizeable set; legacy sets cannot size and keep seven keys. Funding data
+    identity is NOT carried here: it rides in `data_snapshot_id` plus the
+    recorded `allowed_gaps` (D-36). A set missing a required key raises a bare
+    `KeyError` (fail closed, never defaulted): baseline-v1 and baseline-v2
+    take that path. This is the one slice builder shared by the binding gate
+    and the paper freeze so the registry side of the cost binding is built in
+    exactly one place.
     """
     sliced: dict[str, Any] = {k: params[k] for k in COST_KEYS}
-    for key in OPTIONAL_COST_KEYS:
-        if key in params:
-            sliced[key] = params[key]
+    if "exit_slippage_rate" in params:
+        sliced["exit_slippage_rate"] = params["exit_slippage_rate"]
+        sliced["funding_convention"] = FUNDING_CONVENTION
     return sliced
 
 
@@ -236,6 +263,11 @@ def build_cost_model(cost_dict: dict[str, Any]) -> CostModel:
     exit_slippage_rate = (
         _coerce_decimal(cost_dict["exit_slippage_rate"], "exit_slippage_rate")
         if "exit_slippage_rate" in cost_dict
+        else None
+    )
+    funding_convention = (
+        _require_cost_str(cost_dict["funding_convention"], "funding_convention")
+        if "funding_convention" in cost_dict
         else None
     )
     return CostModel(
@@ -252,6 +284,7 @@ def build_cost_model(cost_dict: dict[str, Any]) -> CostModel:
         ),
         cost_model_hash="",
         exit_slippage_rate=exit_slippage_rate,
+        funding_convention=funding_convention,
     )
 
 
