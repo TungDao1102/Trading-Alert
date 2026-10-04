@@ -47,9 +47,7 @@ def test_exit_before_entry_raises_and_exit_equal_entry_passes() -> None:
 
 def test_tp1_time_outside_the_holding_window_raises() -> None:
     inside = datetime(2026, 1, 5, 10, 10, 59, 999000, tzinfo=UTC)
-    validate_trade_record(
-        make_record(tp1_time_utc=inside, tp1_quantity="0.25", tp1_price="104.00")
-    )
+    validate_trade_record(make_record(tp1_time_utc=inside, tp1_quantity="0.25", tp1_price="104.00"))
     early = datetime(2026, 1, 5, 10, 0, 59, 999000, tzinfo=UTC)
     with pytest.raises(TradeRecordInvariantError, match="tp1_time"):
         validate_trade_record(make_record(tp1_time_utc=early, tp1_quantity="0.25"))
