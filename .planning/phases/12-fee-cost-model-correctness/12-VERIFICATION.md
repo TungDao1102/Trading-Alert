@@ -159,3 +159,10 @@ No gaps. All four ROADMAP success criteria are backed by code and by passing tes
 
 _Verified: 2026-10-03_
 _Verifier: Claude (gsd-verifier)_
+
+## Accepted by Operator (2026-10-04)
+
+| Item | Decision |
+|------|----------|
+| D046 item 6: `max_cost_to_risk` 0.15 implies a minimum stop of about 0.79 percent of price (round trip about 14 bps: 5 + 1 entry, 5 + 3 exit) | **Ratified, values kept as locked.** The ceiling is the binding gate and biases tight-stop setups toward NO_TRADE (`COST_TO_RISK_EXCEEDED`). Changing it means new v6 parameter sets chosen before any result is seen, never tuned afterwards. To revisit once the Phase 14 simulator measures real stop widths, or if entries move to maker (a lower entry fee lowers the implied minimum stop; roughly 0.6 percent, an estimate not a computed gate value). |
+| Maker or post-only entries (operator idea) | **Not adopted.** D036 stands (no GTX in V1; entry fee modeled and sized at the taker rate). Recorded as a pending decision in `.planning/STATE.md` and `.planning/LIVE-TEST-2026-10-04.md`. |

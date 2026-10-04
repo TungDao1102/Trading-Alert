@@ -196,3 +196,13 @@ The operator reviewed the open items and accepted them as follows. `10-REVIEW-DI
 | WR-13 gate cells G07/G08/G10 turn MET from self-reported booleans | Same (Phase 26). |
 
 None of the five affects order placement or sizing; they concern the integrity of kill-gate reporting, and no report has been read on real evidence yet. Info findings IN-01 to IN-10 remain untriaged. The PostgreSQL record path was exercised on 2026-10-04: all 19 `tests/*_pg.py` files (431 tests) passed against PostgreSQL 17.
+
+### Kill-gate policy calls accepted by the operator (2026-10-04, later entry)
+
+| Item | Decision |
+|------|----------|
+| 10-02 D3: the D030 firing-rule wording change is a clarification (protocol v1.0.1), not a semantic change | **Accepted as a clarification.** The old wording contradicted D013, the IMPLEMENTATION_PLAN section and the family sheets, and would fire at project start; D013 is authoritative. |
+| 10-05 D5: a recorded INSUFFICIENT_EDGE terminal is permanent; new passing evidence never clears it, only a valid human KILL_GATE reset | **Accepted** (one-way door, locked D-03). |
+| 10-07 D6: after a reset the cycle clock restarts at the reset time and only decisions dated on or after it count | **Accepted** as the intent of D013. |
+
+The fourth skipped Phase 10 item (the Binance `realizedPnl` excludes commission premise, 10-06 D4) is a documentation check, not an operator call, and stays open until confirmed against current Binance docs or real fills (owner: Phase 24).

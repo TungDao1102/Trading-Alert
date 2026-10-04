@@ -4,7 +4,7 @@ verified: 2026-10-03T18:00:00Z
 status: passed
 score: 4/4 must-haves verified # 4/4 roadmap success criteria + 21/21 plan-level must-have truths (1 override applied)
 covered_files: [".github/workflows/research-gate.yml", ".planning/phases/01-research-formalization/01-01-PLAN.md", ".planning/phases/01-research-formalization/01-01-SUMMARY.md", ".planning/phases/01-research-formalization/01-02-PLAN.md", ".planning/phases/01-research-formalization/01-02-SUMMARY.md", ".planning/phases/01-research-formalization/01-03-PLAN.md", ".planning/phases/01-research-formalization/01-03-SUMMARY.md", ".planning/phases/01-research-formalization/01-04-PLAN.md", ".planning/phases/01-research-formalization/01-04-SUMMARY.md", ".planning/phases/01-research-formalization/01-04-negative-test-GREEN.txt", ".planning/phases/01-research-formalization/01-04-negative-test-RED.txt", "docs/00_PRODUCT_SCOPE.md", "docs/DECISIONS.md", "docs/DOC_STATUS.md", "docs/GLOSSARY.md", "docs/architecture/DATA_PIPELINE.md", "docs/backtest/BACKTEST_SPEC.md", "docs/data/DATA_MODEL.md", "docs/integration/TRADINGVIEW.md", "docs/operations/SECURITY_AND_OPERATIONS.md", "docs/research/RESEARCH_PROTOCOL.md", "docs/research/TRADING_STRATEGY_RESEARCH.md", "docs/research/families/breakout-retest.md", "docs/research/families/range-mr.md", "docs/research/families/trend-pullback.md", "docs/testing/TESTING_STRATEGY.md", "docs/trading/EXECUTION_SPEC.md", "docs/trading/SIGNAL_AND_ALERTS.md", "tests/test_research_gate_negative.py"]
-covered_digest: "v2:sha256:868db12b82e3e7c5fd4fa3082e5fe7619f886791e5eb695e9d488a014166f009"
+covered_digest: "v2:sha256:3302833c29b86b22a8d1a29cb044f6a8b75e4804623be6361a025088b1955681"
 behavior_unverified: 0
 overrides_applied: 1
 overrides:
