@@ -530,6 +530,8 @@ Plans:
 6. Backups go to a provider-neutral, S3-compatible object store, encrypted and scheduled, with a retention policy. `restore.sh` restores the latest bundle onto an empty host. Linux shell versions exist for the backup and restore drills (today `backup-drill.ps1` is PowerShell only).
 7. A cutover test runs locally between two Docker environments and proves no Parquet file or watermark row is lost, and that the gap recorded across the switch is bounded and reported. The runbook for bootstrap, update, migrate and restore is written and tested by this run.
 
+**Open decisions from review (not decided)**: WR-05 (sudo or PermitRootLogin after hardening), WR-06 (split env_file), CR-01 (`--size-only` trade-off); see `13.1-OPEN-DECISIONS.md`.
+
 **Deferred to the operator (needs a real host, not required to close code work)**: choose the provider and a Binance-permitted region, create the VPS, run `bootstrap.sh`, add the IP whitelist for Binance keys, set up the off-VPS heartbeat monitor.
 
 **Audit refs**: F-101, F-605, F-705, F-708, F-709, F-108, F-910, D042
@@ -854,6 +856,8 @@ Plans:
 **Depends on**: Phase 16, Phase 19, Phase 20, Phase 21, Phase 22, Phase 23
 
 **Requirements**: APRV-01, EXEC-01, EXEC-02, EXEC-03, OPS-02, OPS-03, OPS-04
+
+**Carried from Phase 13.1 (open, undecided)**: WR-06 split the shared `env_file` per service before real `BINANCE_LIVE_API_*` keys enter `.env`; see `.planning/phases/13.1-deployment-ci/13.1-OPEN-DECISIONS.md`.
 
 **Success Criteria**:
 1. The composition root wires every link that has no production caller today (M1, M2, M5–M8) (F-201, F-956):
