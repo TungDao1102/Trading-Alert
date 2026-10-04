@@ -4,6 +4,10 @@ Signal / TradePlan / Order / Fill rows become R-valued LIVE `TradeOutcome`s unde
 an explicit net-PnL definition, behind a fail-closed exchange-semantics gate:
 live R is shown only when the Binance realizedPnl / commission semantics were
 verified against the current official docs; otherwise it is INCOMPLETE.
+
+Phase 14 plan 14-06 (D-20, D-29): the R denominator is `realized_risk_for_fill` over an
+explicit `sized_risks` input keyed by trade_plan_id; `TradePlan.risk_budget` is not a
+denominator, and a candidate without a sized figure is INCOMPLETE(NO_RISK_VALUE).
 """
 
 from __future__ import annotations
@@ -21,10 +25,16 @@ from src.analytics.live_outcomes import (
     LIVE_NET_PNL_SEMANTICS_NOTE,
     QUOTE_ASSET,
     LiveOutcomeResult,
+    SizedRisk,
     normalize_live_outcomes,
 )
 from src.analytics.stats import r_value
-from src.analytics.types import EvidenceKind, IncompleteReason, TradeOutcome
+from src.analytics.types import (
+    AnalyticsInputError,
+    EvidenceKind,
+    IncompleteReason,
+    TradeOutcome,
+)
 from src.domain.enums import OrderStatus, SignalStatus, TradePlanStatus
 from src.domain.fill import Fill
 from src.domain.order import Order
@@ -143,6 +153,20 @@ class _Rows:
         self.plans = [_plan(row) for row in data["plans"]]
         self.orders = [_order(row) for row in data["orders"]]
         self.fills = [_fill(row) for row in data["fills"]]
+        self.fixture_risk = {row["trade_plan_id"]: D(row["risk_budget"]) for row in data["plans"]}
+
+    def sized_risks(self) -> dict[str, SizedRisk]:
+        """Full-fill sized figures equal to the fixture's former risk_budget values.
+
+        Planned quantity is the entry quantity actually filled (PLAN-A 2.0, PLAN-B 1.0,
+        PLAN-C 1.0), so `realized_risk_for_fill` returns the figure unchanged and the
+        expected realized_risk and r in the fixture do not move.
+        """
+        entered = {"PLAN-A": D("2.0"), "PLAN-B": D("1.0"), "PLAN-C": D("1.0")}
+        return {
+            plan_id: SizedRisk(realized_risk=risk, planned_quantity=entered[plan_id])
+            for plan_id, risk in self.fixture_risk.items()
+        }
 
     def run(self, **overrides: Any) -> LiveOutcomeResult:
         args: dict[str, Any] = {
@@ -150,10 +174,15 @@ class _Rows:
             "plans": self.plans,
             "orders": self.orders,
             "fills": self.fills,
+            "sized_risks": self.sized_risks(),
         }
         args.update(overrides)
         return normalize_live_outcomes(
-            args["signals"], args["plans"], args["orders"], args["fills"]
+            args["signals"],
+            args["plans"],
+            args["orders"],
+            args["fills"],
+            sized_risks=args["sized_risks"],
         )
 
 
@@ -265,7 +294,34 @@ def test_open_position_emits_outcome_without_exit_or_pnl(
     assert ("SIG-B", IncompleteReason.OPEN_POSITION) in result.incomplete
 
 
-def test_non_positive_risk_budget_is_no_risk_value(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_sized_risk_supplied_is_no_risk_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(live_outcomes, "LIVE_NET_PNL_SEMANTICS_VERIFIED", True)
+    rows = _Rows()
+    # Every fixture plan carries a positive risk_budget; none of them may become a denominator.
+    assert all(plan.risk_budget > 0 for plan in rows.plans)
+    result = rows.run(sized_risks=None)
+    for trade_id, signal_id in (("PLAN-A", "SIG-A"), ("PLAN-B", "SIG-B"), ("PLAN-C", "SIG-C")):
+        outcome = _by_trade(result)[trade_id]
+        assert outcome.realized_risk is None
+        assert (signal_id, IncompleteReason.NO_RISK_VALUE) in result.incomplete
+        assert r_value(outcome.realized_pnl, outcome.realized_risk) is None
+
+
+def test_sized_risk_for_only_some_plans_leaves_the_others_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(live_outcomes, "LIVE_NET_PNL_SEMANTICS_VERIFIED", True)
+    rows = _Rows()
+    only_a = {"PLAN-A": rows.sized_risks()["PLAN-A"]}
+    result = rows.run(sized_risks=only_a)
+    by_trade = _by_trade(result)
+    assert by_trade["PLAN-A"].realized_risk == D("10.00")
+    assert by_trade["PLAN-B"].realized_risk is None
+    assert ("SIG-A", IncompleteReason.NO_RISK_VALUE) not in result.incomplete
+    assert ("SIG-B", IncompleteReason.NO_RISK_VALUE) in result.incomplete
+
+
+def test_plan_risk_budget_is_not_a_denominator(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(live_outcomes, "LIVE_NET_PNL_SEMANTICS_VERIFIED", True)
     rows = _Rows()
     zero_budget = [
@@ -274,9 +330,79 @@ def test_non_positive_risk_budget_is_no_risk_value(monkeypatch: pytest.MonkeyPat
     ]
     result = rows.run(plans=zero_budget)
     outcome = _by_trade(result)["PLAN-A"]
-    assert outcome.realized_risk is None
-    assert ("SIG-A", IncompleteReason.NO_RISK_VALUE) in result.incomplete
-    assert r_value(outcome.realized_pnl, outcome.realized_risk) is None
+    assert outcome.realized_risk == D("10.00")  # the sized figure, whatever the budget says
+    assert ("SIG-A", IncompleteReason.NO_RISK_VALUE) not in result.incomplete
+    assert r_value(outcome.realized_pnl, outcome.realized_risk) == D("0.67")
+
+
+def test_realized_risk_scales_with_the_filled_share_of_the_planned_quantity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(live_outcomes, "LIVE_NET_PNL_SEMANTICS_VERIFIED", True)
+    rows = _Rows()
+    # PLAN-A filled 2.0 of a planned 4.0: half of the sized 10.00.
+    half = {"PLAN-A": SizedRisk(realized_risk=D("10.00"), planned_quantity=D("4.0"))}
+    outcome = _by_trade(rows.run(sized_risks=half))["PLAN-A"]
+    assert outcome.realized_risk == D("5.00")
+    assert r_value(outcome.realized_pnl, outcome.realized_risk) == D("1.34")  # 6.70 / 5.00
+
+
+def test_filled_above_planned_quantity_is_a_malformed_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(live_outcomes, "LIVE_NET_PNL_SEMANTICS_VERIFIED", True)
+    rows = _Rows()
+    too_small = {"PLAN-A": SizedRisk(realized_risk=D("10.00"), planned_quantity=D("1.0"))}
+    result = rows.run(sized_risks=too_small)
+    assert "PLAN-A" not in _by_trade(result)
+    assert ("SIG-A", IncompleteReason.MALFORMED_ROW) in result.incomplete
+
+
+@pytest.mark.parametrize(
+    ("realized_risk", "planned_quantity"),
+    [
+        (D("10.00"), D("0")),
+        (D("10.00"), D("-1")),
+        (D("0"), D("1")),
+        (D("-5"), D("1")),
+        (D("NaN"), D("1")),
+        (D("10.00"), D("Infinity")),
+    ],
+)
+def test_sized_risk_with_non_positive_fields_raises(
+    realized_risk: Decimal, planned_quantity: Decimal
+) -> None:
+    with pytest.raises(AnalyticsInputError):
+        SizedRisk(realized_risk=realized_risk, planned_quantity=planned_quantity)
+
+
+def test_sized_risk_refuses_floats() -> None:
+    with pytest.raises(AnalyticsInputError):
+        SizedRisk(realized_risk=10.0, planned_quantity=D("1"))  # type: ignore[arg-type]
+
+
+def test_sized_risks_entry_that_is_not_a_sized_risk_fails_closed() -> None:
+    rows = _Rows()
+    with pytest.raises(AnalyticsInputError):
+        rows.run(sized_risks={"PLAN-A": D("10.00")})
+
+
+def test_default_fail_closed_branch_has_no_risk_value_for_every_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Semantics unverified and no sized input: exchange semantics and risk are INCOMPLETE."""
+    monkeypatch.setattr(live_outcomes, "LIVE_NET_PNL_SEMANTICS_VERIFIED", False)
+    result = _Rows().run(sized_risks=None)
+    assert all(o.realized_pnl is None and o.realized_risk is None for o in result.outcomes)
+    assert result.incomplete == (
+        ("SIG-A", IncompleteReason.NO_RISK_VALUE),
+        ("SIG-A", IncompleteReason.UNVERIFIED_EXCHANGE_SEMANTICS),
+        ("SIG-B", IncompleteReason.NO_RISK_VALUE),
+        ("SIG-B", IncompleteReason.OPEN_POSITION),
+        ("SIG-C", IncompleteReason.COMMISSION_ASSET_NOT_QUOTE),
+        ("SIG-C", IncompleteReason.NO_RISK_VALUE),
+        ("SIG-C", IncompleteReason.UNVERIFIED_EXCHANGE_SEMANTICS),
+    )
 
 
 def test_exit_kind_comes_from_latest_exit_fill(monkeypatch: pytest.MonkeyPatch) -> None:
