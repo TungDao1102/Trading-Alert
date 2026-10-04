@@ -25,17 +25,33 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from src.core._decimal import _add, _sub
-from src.domain.enums import DailyState
+from src.core._decimal import _add, _div, _mul, _sub
+from src.domain.enums import DailyState, Direction
 from src.risk.portfolio import (
     RATE_THRESHOLD_KEYS,
     derive_daily_state,
     resolve_absolute_thresholds,
 )
+from src.risk.types import OpenPosition
 
 from .records import Booking
 
 _ZERO = Decimal("0")
+
+
+@dataclass(frozen=True)
+class Exposure:
+    """One resting plan or open position as the portfolio gates see it.
+
+    `initial_risk` is the sized realized risk registered with the plan; `open_risk` is the
+    risk still carried (equal to `initial_risk` until a TP leg reduces the position).
+    """
+
+    trade_plan_id: str
+    symbol: str
+    position_side: str
+    initial_risk: Decimal
+    open_risk: Decimal
 
 
 @dataclass(frozen=True)
@@ -47,7 +63,8 @@ class Ledger:
     amounts against `equity_at_day_start`, ready for `evaluate_risk(parameter_set=...)`.
     `day_start_utc` is the 00:00:00 UTC of the current day, `day_pnl` the sum of the
     bookings dated in that day and `last_booking_time_utc` the latest applied booking
-    (the order guard). Neither dict may be mutated by callers.
+    (the order guard). `exposures` holds the registered resting plans and open positions
+    sorted by trade plan id. Neither dict may be mutated by callers.
     """
 
     initial_equity: Decimal
@@ -58,6 +75,7 @@ class Ledger:
     equity_at_day_start: Decimal
     day_pnl: Decimal
     last_booking_time_utc: datetime | None
+    exposures: tuple[Exposure, ...] = ()
 
     @classmethod
     def start(
@@ -75,6 +93,8 @@ class Ledger:
         """
         if not isinstance(equity, Decimal):
             raise TypeError(f"equity must be Decimal, got {type(equity).__name__}")
+        if equity <= _ZERO:
+            raise ValueError(f"equity must be > 0, got {equity}")
         _require_utc(at_utc, "at_utc")
         params = dict(parameter_set_params)
         return cls(
@@ -137,6 +157,18 @@ def _roll(ledger: Ledger, at_utc: datetime) -> Ledger:
     )
 
 
+def roll_to(ledger: Ledger, at_utc: datetime) -> Ledger:
+    """Roll to the UTC day of `at_utc` (no-op inside the current day).
+
+    A new day resets `day_pnl`, sets `equity_at_day_start` to the closing equity of the
+    previous day and re-resolves the absolute thresholds against it (D033, D-18).
+
+    Raises:
+        ValueError: `at_utc` is not UTC-aware or lies in a UTC day before the current one.
+    """
+    return _roll(ledger, at_utc)
+
+
 def apply_booking(ledger: Ledger, booking: Booking) -> Ledger:
     """Book one dated amount: roll the UTC day if needed, then add it to equity and day PnL.
 
@@ -185,10 +217,136 @@ def cancel_resting_required(ledger: Ledger) -> bool:
     return daily_state(ledger) is DailyState.DAILY_STOP
 
 
+def equity_positive(ledger: Ledger) -> bool:
+    """False when equity is exhausted (`<= 0`): the engine must stop opening trades.
+
+    `AccountState` raises for non-positive equity, so the engine checks this first and
+    fails closed instead of letting the constructor raise mid-run.
+    """
+    return ledger.equity > _ZERO
+
+
+def _sorted_exposures(exposures: tuple[Exposure, ...]) -> tuple[Exposure, ...]:
+    return tuple(sorted(exposures, key=lambda e: e.trade_plan_id))
+
+
+def _find_exposure(ledger: Ledger, trade_plan_id: str) -> Exposure:
+    for exposure in ledger.exposures:
+        if exposure.trade_plan_id == trade_plan_id:
+            return exposure
+    raise ValueError(f"unknown exposure: trade_plan_id {trade_plan_id!r} is not registered")
+
+
+def _swap_exposure(ledger: Ledger, old: Exposure, new: Exposure | None) -> Ledger:
+    kept = tuple(e for e in ledger.exposures if e is not old)
+    updated = kept if new is None else (*kept, new)
+    return replace(ledger, exposures=_sorted_exposures(updated))
+
+
+def register_exposure(
+    ledger: Ledger,
+    *,
+    trade_plan_id: str,
+    symbol: str,
+    position_side: str,
+    open_risk: Decimal,
+) -> Ledger:
+    """Register a resting plan (or position) with its sized realized risk (D-18, D035).
+
+    Raises:
+        TypeError: `open_risk` is not a Decimal.
+        ValueError: the id is already registered, the side is not LONG/SHORT, the symbol
+            is empty or `open_risk` is negative.
+    """
+    if not isinstance(open_risk, Decimal):
+        raise TypeError(f"open_risk must be Decimal, got {type(open_risk).__name__}")
+    if not symbol:
+        raise ValueError("symbol must be non-empty")
+    if position_side not in {d.value for d in Direction}:
+        raise ValueError(f"position_side must be LONG or SHORT, got {position_side!r}")
+    if open_risk < _ZERO:
+        raise ValueError(f"open_risk must be >= 0, got {open_risk}")
+    if any(e.trade_plan_id == trade_plan_id for e in ledger.exposures):
+        raise ValueError(f"exposure {trade_plan_id!r} is already registered")
+    exposure = Exposure(
+        trade_plan_id=trade_plan_id,
+        symbol=symbol,
+        position_side=position_side,
+        initial_risk=open_risk,
+        open_risk=open_risk,
+    )
+    return replace(ledger, exposures=_sorted_exposures((*ledger.exposures, exposure)))
+
+
+def update_exposure(
+    ledger: Ledger,
+    *,
+    trade_plan_id: str,
+    filled_quantity: Decimal,
+    remaining_quantity: Decimal,
+) -> Ledger:
+    """Scale a position's open risk after a partial close: `initial x remaining / filled`.
+
+    Raises:
+        TypeError: a quantity is not a Decimal.
+        ValueError: the id is unknown, `filled_quantity <= 0` or `remaining_quantity` is
+            outside `[0, filled_quantity]`.
+    """
+    for name, value in (
+        ("filled_quantity", filled_quantity),
+        ("remaining_quantity", remaining_quantity),
+    ):
+        if not isinstance(value, Decimal):
+            raise TypeError(f"{name} must be Decimal, got {type(value).__name__}")
+    old = _find_exposure(ledger, trade_plan_id)
+    if filled_quantity <= _ZERO:
+        raise ValueError(f"filled_quantity must be > 0, got {filled_quantity}")
+    if remaining_quantity < _ZERO or remaining_quantity > filled_quantity:
+        raise ValueError(
+            f"remaining_quantity {remaining_quantity} must be within [0, {filled_quantity}]"
+        )
+    scaled = _div(_mul(old.initial_risk, remaining_quantity), filled_quantity)
+    return _swap_exposure(ledger, old, replace(old, open_risk=scaled))
+
+
+def remove_exposure(ledger: Ledger, *, trade_plan_id: str) -> Ledger:
+    """Drop a cancelled, expired or closed plan from the portfolio projection.
+
+    Raises:
+        ValueError: the id is unknown.
+    """
+    return _swap_exposure(ledger, _find_exposure(ledger, trade_plan_id), None)
+
+
+def open_positions_for_risk(ledger: Ledger) -> list[OpenPosition]:
+    """Project the exposures to `OpenPosition`s sorted by `(symbol, position_side)`.
+
+    Resting plans count with their sized risk (D-18, D035); `daily_pnl_contribution` is
+    always 0 (the daily loss comes from `daily_loss_quote`, not from the positions).
+    """
+    ordered = sorted(ledger.exposures, key=lambda e: (e.symbol, e.position_side, e.trade_plan_id))
+    return [
+        OpenPosition(
+            symbol=e.symbol,
+            position_side=e.position_side,
+            open_risk=e.open_risk,
+            daily_pnl_contribution=_ZERO,
+        )
+        for e in ordered
+    ]
+
+
 __all__ = [
+    "Exposure",
     "Ledger",
     "apply_booking",
     "cancel_resting_required",
     "daily_loss_quote",
     "daily_state",
+    "equity_positive",
+    "open_positions_for_risk",
+    "register_exposure",
+    "remove_exposure",
+    "roll_to",
+    "update_exposure",
 ]
