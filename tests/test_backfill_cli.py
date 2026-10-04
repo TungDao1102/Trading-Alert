@@ -1581,3 +1581,97 @@ def test_cli_funding_rows_are_absent_with_no_funding(
     out = capsys.readouterr().out
     assert rc == 0
     assert not [line for line in out.splitlines() if line.startswith("funding ")]
+
+
+# --------------------------------------------------------------------------- #
+# Review WR-10: the failure cause must be recoverable, and the provenance sidecar
+# must survive a transient Windows os.replace lock like the cursor and partitions do.
+# --------------------------------------------------------------------------- #
+
+
+def test_failure_logs_a_redacted_traceback_so_the_cause_is_recoverable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.data import backfill_cli
+
+    secret_url = f"{_sqlite_url(tmp_path)}?password=hunter2-secret"
+
+    def _leaky(*args: Any, **kwargs: Any) -> int:
+        raise RuntimeError(f"connection to {secret_url} failed: disk quota exceeded")
+
+    adapter = FakeAdapter([_filters("BTCUSDT")])
+    monkeypatch.setattr(backfill_cli, "BinanceUsdmAdapter", lambda: adapter)
+    monkeypatch.setattr(backfill_cli, "_utc_now", _clock())
+    monkeypatch.setattr(backfill_cli, "refresh_symbol_metadata", _leaky)
+    rc = backfill_cli.main(
+        [
+            "--symbols",
+            "BTCUSDT",
+            "--intervals",
+            "1h",
+            "--datasets",
+            "trade",
+            "--database-url",
+            secret_url,
+            "--raw-root",
+            str(tmp_path / "raw"),
+            "--manifest",
+            str(_write_manifest(tmp_path / "manifest.toml")),
+            "--collect-list",
+            str(_write_collect_list(tmp_path / "collect.toml")),
+        ]
+    )
+
+    out = capsys.readouterr()
+    assert rc == 1
+    assert "hunter2-secret" not in out.out + out.err
+    assert "backfill: failed (RuntimeError)" in out.err
+    assert "backfill.failed" in out.out + out.err
+    assert "Traceback" in out.out + out.err  # the cause (frames and message) is in the log
+    assert "disk quota exceeded" in out.out + out.err
+
+
+def test_save_archive_presets_retries_a_transient_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from src.data import backfill_cli, store
+
+    real_replace = os.replace
+    attempts: list[int] = []
+
+    def _flaky(src: Any, dst: Any) -> None:
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise PermissionError("the file is held by another process")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(store.os, "replace", _flaky)
+    monkeypatch.setattr(store.time, "sleep", lambda _s: None)
+
+    backfill_cli._save_archive_presets(tmp_path, {"FTTUSDT"})
+
+    sidecar = tmp_path / backfill_cli.SOURCES_FILE_NAME
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == {"trade|FTTUSDT": "ARCHIVE"}
+    assert len(attempts) == 3
+    assert [p.name for p in tmp_path.iterdir()] == [backfill_cli.SOURCES_FILE_NAME]
+
+
+def test_save_archive_presets_fails_closed_after_the_bounded_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.data import backfill_cli, store
+
+    def _locked(src: Any, dst: Any) -> None:
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(store.os, "replace", _locked)
+    monkeypatch.setattr(store.time, "sleep", lambda _s: None)
+
+    with pytest.raises(PermissionError):
+        backfill_cli._save_archive_presets(tmp_path, {"FTTUSDT"})
+
+    assert list(tmp_path.iterdir()) == []  # the temp file is cleaned up

@@ -45,6 +45,22 @@ REPLACE_MAX_ATTEMPTS = 5
 REPLACE_RETRY_SLEEP_SECONDS = 0.1
 
 
+def replace_with_retry(tmp: Path, path: Path) -> None:
+    """`os.replace(tmp, path)`, retried on a transient Windows `PermissionError`.
+
+    Bounded (`REPLACE_MAX_ATTEMPTS`), then the error propagates (fail closed). The caller
+    owns cleanup of `tmp`.
+    """
+    for attempt in range(1, REPLACE_MAX_ATTEMPTS + 1):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == REPLACE_MAX_ATTEMPTS:
+                raise
+            time.sleep(REPLACE_RETRY_SLEEP_SECONDS)
+
+
 def atomic_write_parquet(frame: pl.DataFrame, path: Path) -> None:
     """Write `frame` to `path` atomically and never overwrite (D-14, D-04).
 

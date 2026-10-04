@@ -333,6 +333,22 @@ def test_shape_rules_mask_secrets_in_free_text() -> None:
     assert cleaned.endswith("\ntail")
 
 
+def test_url_query_string_password_is_masked_without_a_matching_env_var() -> None:
+    """WR-10: a traceback that embeds a ?password= URL must be safe to log."""
+    configure_logging(environ={}, stream=io.StringIO())
+    planted = secrets.token_urlsafe(12)
+    text = (
+        f"connection to postgresql://db/trading?sslmode=require&password={planted} failed; "
+        f"retry postgresql://db/t?PASSWD={planted}"
+    )
+
+    cleaned = scrub(text)
+
+    _no_leak(planted, cleaned)
+    assert "sslmode=require" in cleaned
+    assert cleaned.count("[REDACTED]") == 2
+
+
 def test_ordinary_words_and_numbers_are_untouched() -> None:
     configure_logging(environ={}, stream=io.StringIO())
     text = "tick 12345678 at 10:30:45 ratio 3.14159265 http://host:8080/path BTCUSDT 1h"

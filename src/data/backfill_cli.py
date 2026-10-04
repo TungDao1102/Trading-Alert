@@ -99,7 +99,7 @@ from src.data.collector import (
     backfill_funding_history,
 )
 from src.data.metadata import MetadataWidthError, refresh_symbol_metadata
-from src.data.store import DEFAULT_RAW_ROOT, partition_file
+from src.data.store import DEFAULT_RAW_ROOT, partition_file, replace_with_retry
 from src.data.sufficiency import (
     FUNDING_DATASET,
     FUNDING_INTERVAL,
@@ -553,10 +553,11 @@ def _save_archive_presets(cursor_root: Path, symbols: set[str]) -> None:
     text = json.dumps(doc, sort_keys=True, indent=2) + "\n"
     cursor_root.mkdir(parents=True, exist_ok=True)
     path = cursor_root / SOURCES_FILE_NAME
-    tmp = path.with_name(f".{path.name}.tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         tmp.write_bytes(text.encode("utf-8"))
-        os.replace(tmp, path)
+        # Windows can refuse the rename while an indexer or sync client holds the file.
+        replace_with_retry(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -1181,9 +1182,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"backfill: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:
-        # Type name only: a database error message can embed the connection URL.
+        # The console line stays type-name only. The full traceback goes to the log, where
+        # `redact_processor` (configure_logging above) scrubs any connection URL or secret
+        # a message embeds, so the cause of a failure stays recoverable.
         print(f"backfill: failed ({type(exc).__name__})", file=sys.stderr)
-        log.error("backfill.failed", error_type=type(exc).__name__)
+        log.exception("backfill.failed", error_type=type(exc).__name__)
         return 1
     finally:
         if session is not None:
