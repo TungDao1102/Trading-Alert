@@ -325,7 +325,14 @@ def push_snapshot(bundle_root: Path, runner: RcloneRunner, *, now_utc: datetime)
     snap = snapshot_id(now_utc)
     snap_remote = _crypt(f"{SNAPSHOTS_DIR}/{snap}")
     if (root / PARQUET_DIR).is_dir():
-        _call(runner, ["copy", str(root / PARQUET_DIR), _crypt(PARQUET_DIR), "--immutable"])
+        # --size-only: an object already on the remote is skipped on size, not modtime. A file
+        # restored onto a new host has the same bytes (the manifest sha256 proves it) but not
+        # necessarily the same mtime; --immutable alone would fail that as "file modified".
+        # A same-named file of a different size is still an error.
+        _call(
+            runner,
+            ["copy", str(root / PARQUET_DIR), _crypt(PARQUET_DIR), "--immutable", "--size-only"],
+        )
     for name in (DEFAULT_PG_DUMP_NAME, MANIFEST_NAME):
         _call(runner, ["copyto", str(root / name), f"{snap_remote}/{name}", "--immutable"])
     _call(runner, ["cryptcheck", str(root), snap_remote, *_snapshot_filters()])
@@ -353,6 +360,28 @@ def list_snapshots(runner: RcloneRunner) -> list[str]:
     return sorted(line.strip().rstrip("/") for line in result.stdout.splitlines() if line.strip())
 
 
+def list_complete_snapshots(runner: RcloneRunner) -> list[str]:
+    """Snapshot ids whose ``manifest.json`` is on the remote, sorted.
+
+    ``push_snapshot`` uploads the manifest last, so a directory without one is a push that
+    died half way. One recursive listing answers it for every snapshot at once. Same caller
+    contract as ``list_snapshots`` (sentinel first).
+    """
+    result = _call(
+        runner,
+        ["lsf", "--files-only", "-R", "--max-depth", "2", _crypt(f"{SNAPSHOTS_DIR}/")],
+        ok=frozenset({0, *_EXIT_NOT_FOUND}),
+    )
+    if result.returncode != 0:
+        return []
+    complete: set[str] = set()
+    for line in result.stdout.splitlines():
+        snap, sep, name = line.strip().partition("/")
+        if sep and name == MANIFEST_NAME and snap:
+            complete.add(snap)
+    return sorted(complete)
+
+
 # --------------------------------------------------------------------------- #
 # Pull
 # --------------------------------------------------------------------------- #
@@ -373,16 +402,24 @@ def pull_snapshot(dest: Path, runner: RcloneRunner, *, snapshot: str | None = No
     names = list_snapshots(runner)
     if not names:
         raise RemoteError("no snapshots found on the remote; nothing to pull")
+    complete = set(list_complete_snapshots(runner))
     if snapshot is None:
         parseable = [n for n in names if parse_snapshot_id(n) is not None]
         if not parseable:
             raise RemoteError("the remote holds no snapshot with a valid id")
-        chosen = max(parseable)  # ids sort chronologically
+        # A half-pushed snapshot (no manifest yet) is never "the newest": fall back to the
+        # newest complete one instead of failing the restore on it.
+        usable = [n for n in parseable if n in complete]
+        if not usable:
+            raise RemoteError("the remote holds no complete snapshot (none has a manifest.json)")
+        chosen = max(usable)  # ids sort chronologically
     else:
         if parse_snapshot_id(snapshot) is None:
             raise RemoteError("--snapshot is not a valid snapshot id (YYYYMMDDTHHMMSSZ)")
         if snapshot not in names:
             raise RemoteError(f"snapshot {snapshot} not found on the remote")
+        if snapshot not in complete:
+            raise RemoteError(f"snapshot {snapshot} is incomplete on the remote (no manifest.json)")
         chosen = snapshot
     dest.mkdir(parents=True, exist_ok=True)
     root = dest.resolve()
@@ -482,12 +519,30 @@ def apply_retention(runner: RcloneRunner, *, dry_run: bool) -> RetentionReport:
     empty listing raises (after a passing sentinel it still means something is wrong, and an
     outage must never look like "nothing to do"). ``parquet/`` is never listed or touched.
     Callers run this only after the new snapshot passed ``cryptcheck``.
+
+    Only complete snapshots (a ``manifest.json`` is present) count toward the 7/4/6 windows, so
+    a half-pushed snapshot can never displace a good one. An incomplete directory older than the
+    newest complete snapshot is garbage and is purged; a newer one may be a push in progress
+    and is left alone.
     """
     check_sentinel(runner)
     names = list_snapshots(runner)
     if not names:
         raise RemoteError("no snapshots found on the remote; refusing to apply retention")
-    keep, delete = select_retained(names)
+    complete = list_complete_snapshots(runner)
+    keep, delete = select_retained(complete)
+    complete_stamps = [stamp for n in complete if (stamp := parse_snapshot_id(n)) is not None]
+    if complete_stamps:
+        newest_complete = max(complete_stamps)
+        complete_set = set(complete)
+        stale_incomplete = {
+            n
+            for n in names
+            if n not in complete_set
+            and (stamp := parse_snapshot_id(n)) is not None
+            and stamp < newest_complete
+        }
+        delete = frozenset(delete | stale_incomplete)
     ordered_delete = tuple(sorted(delete))
     if not dry_run:
         for name in ordered_delete:

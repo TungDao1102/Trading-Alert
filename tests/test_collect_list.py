@@ -19,9 +19,18 @@ from src.data.collect_list import (
     CollectListError,
     load_collect_list,
     propose_collect_list,
+    reissue_collect_list,
     render_collect_list_toml,
 )
 from src.data.collect_list import main as collect_list_main
+from src.data.universe_freeze import (
+    REPORT_SCHEMA,
+    CandidateEvidence,
+    FreezeError,
+    FreezeReport,
+    _hash_report,
+    write_report,
+)
 
 EXTRA_SYMBOLS = (
     "ADAUSDT",
@@ -82,7 +91,7 @@ def test_loads_valid_list_sorted(tmp_path: Path) -> None:
 
 def test_default_path_is_operational_docs_location() -> None:
     assert DEFAULT_COLLECT_LIST_PATH == (
-        Path("docs") / "research" / "universe" / "collect-list-v1.toml"
+        Path("docs") / "research" / "universe" / "collect-list-v2.toml"
     )
 
 
@@ -366,9 +375,13 @@ def test_committed_collect_list_is_valid_live5_superset() -> None:
     assert set(LIVE_5) <= set(cl.symbols)
     assert 15 <= len(cl.symbols) <= 20
     assert cl.chosen_on <= datetime.now(UTC).date()
-    text = path.read_text(encoding="utf-8")
-    assert "GET /fapi/v1/ticker/24hr" in text
-    assert "GET /fapi/v1/exchangeInfo" in text
+    # The default (v2) is derived from v1, whose source note names the public endpoints.
+    v1_text = (REPO_ROOT / "docs" / "research" / "universe" / "collect-list-v1.toml").read_text(
+        encoding="utf-8"
+    )
+    assert "GET /fapi/v1/ticker/24hr" in v1_text
+    assert "GET /fapi/v1/exchangeInfo" in v1_text
+    assert "freeze-report.json" in path.read_text(encoding="utf-8")
 
 
 def test_dockerfile_copies_universe_directory() -> None:
@@ -377,3 +390,211 @@ def test_dockerfile_copies_universe_directory() -> None:
     assert lines.count(copy_line) == 1
     useradd = next(i for i, ln in enumerate(lines) if ln.startswith("RUN useradd"))
     assert lines.index(copy_line) < useradd
+
+
+# --------------------------------------------------------------------------- #
+# 13-13 Task 1: re-issue the collect list after the research-universe freeze (D-24).
+# --------------------------------------------------------------------------- #
+
+
+def _candidate(symbol: str, status: str) -> CandidateEvidence:
+    return CandidateEvidence(
+        symbol=symbol,
+        status=status,
+        contract_type="PERPETUAL",
+        onboard_utc=None,
+        delivery_date_ms=None,
+        source="exchangeInfo",
+        days=30,
+        quote_volume_sum=None,
+        quote_volume_mean=None,
+        eligible=True,
+        reason="ok",
+    )
+
+
+def _write_freeze_report(path: Path, proposed: dict[str, str]) -> Path:
+    """Write a hash-valid freeze report whose proposal carries `proposed` symbol: status."""
+    unsigned = FreezeReport(
+        schema=REPORT_SCHEMA,
+        run_date=date(2026, 10, 3),
+        dataset_start=date(2025, 10, 3),
+        window_start=date(2025, 9, 3),
+        window_end=date(2025, 10, 3),
+        top_n=len(proposed),
+        candidates=tuple(_candidate(sym, status) for sym, status in sorted(proposed.items())),
+        ranked=(),
+        proposed_symbols=tuple(sorted(proposed)),
+        unrankable=(),
+        availability=(),
+        proposal_sha256="",
+    )
+    report = FreezeReport(**{**unsigned.__dict__, "proposal_sha256": _hash_report(unsigned)})
+    write_report(report, path)
+    return path
+
+
+def _base_list(tmp_path: Path) -> CollectList:
+    return load_collect_list(_write(tmp_path, _render()))
+
+
+def test_reissue_adds_only_trading_frozen_symbols(tmp_path: Path) -> None:
+    base = _base_list(tmp_path)
+    report = _write_freeze_report(
+        tmp_path / "freeze.json",
+        {"NEWAUSDT": "TRADING", "NEWBUSDT": "SETTLING", "ADAUSDT": "TRADING"},
+    )
+    result = reissue_collect_list(
+        base, report, chosen_on=date(2026, 10, 3), list_id="collect-list-v2"
+    )
+    assert set(result.symbols) == set(base.symbols) | {"NEWAUSDT"}
+    assert "NEWBUSDT" not in result.symbols
+    assert result.symbols.count("ADAUSDT") == 1
+    assert list(result.symbols) == sorted(result.symbols)
+    assert result.list_id == "collect-list-v2"
+    assert result.chosen_on == date(2026, 10, 3)
+    assert result.top_n == base.top_n
+    assert "D-24" in result.selection_rule
+    assert "TRADING" in result.selection_rule
+
+
+def _exchange_record(symbol: str, status: str = "TRADING") -> dict[str, str]:
+    return {
+        "symbol": symbol,
+        "status": status,
+        "contractType": "PERPETUAL",
+        "quoteAsset": "USDT",
+    }
+
+
+def test_reissue_with_exchange_info_drops_symbols_no_longer_trading(tmp_path: Path) -> None:
+    """WR-06: a frozen symbol that settled or vanished since the freeze is not added."""
+    base = _base_list(tmp_path)
+    report = _write_freeze_report(
+        tmp_path / "freeze.json",
+        {"NEWAUSDT": "TRADING", "NEWBUSDT": "TRADING", "NEWCUSDT": "TRADING"},
+    )
+    exchange = [_exchange_record("NEWAUSDT"), _exchange_record("NEWBUSDT", status="SETTLING")]
+
+    result = reissue_collect_list(
+        base,
+        report,
+        chosen_on=date(2026, 10, 3),
+        list_id="collect-list-v2",
+        exchange_info=exchange,
+    )
+
+    assert set(result.symbols) == set(base.symbols) | {"NEWAUSDT"}
+    assert "2026-10-03" in result.selection_rule
+    assert "exchangeInfo" in result.selection_rule
+
+
+def test_reissue_without_exchange_info_names_the_report_date_as_the_basis(
+    tmp_path: Path,
+) -> None:
+    base = _base_list(tmp_path)
+    report = _write_freeze_report(tmp_path / "freeze.json", {"NEWAUSDT": "TRADING"})
+
+    result = reissue_collect_list(
+        base, report, chosen_on=date(2026, 10, 9), list_id="collect-list-v2"
+    )
+
+    assert "freeze report of 2026-10-03" in result.selection_rule
+    assert "not re-checked" in result.selection_rule
+
+
+def test_reissue_cli_uses_exchange_info_and_warns_when_it_is_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base_path = _write(tmp_path, _render())
+    report = _write_freeze_report(
+        tmp_path / "freeze.json", {"NEWAUSDT": "TRADING", "NEWBUSDT": "TRADING"}
+    )
+    info = tmp_path / "exchange.json"
+    info.write_text(json.dumps({"symbols": [_exchange_record("NEWAUSDT")]}), encoding="utf-8")
+    common = ["reissue", "--base", str(base_path), "--freeze-report", str(report)]
+
+    stale = tmp_path / "stale.toml"
+    assert collect_list_main([*common, "--chosen-on", "2026-10-03", "--out", str(stale)]) == 0
+    assert "may be stale" in capsys.readouterr().err
+    assert {"NEWAUSDT", "NEWBUSDT"} <= set(load_collect_list(stale).symbols)
+
+    fresh = tmp_path / "fresh.toml"
+    args = [*common, "--chosen-on", "2026-10-03", "--exchange-info-json", str(info)]
+    assert collect_list_main([*args, "--out", str(fresh)]) == 0
+    assert "may be stale" not in capsys.readouterr().err
+    symbols = set(load_collect_list(fresh).symbols)
+    assert "NEWAUSDT" in symbols and "NEWBUSDT" not in symbols
+
+
+def test_reissue_is_superset_of_base_and_live5(tmp_path: Path) -> None:
+    base = _base_list(tmp_path)
+    report = _write_freeze_report(tmp_path / "freeze.json", {"NEWAUSDT": "TRADING"})
+    result = reissue_collect_list(
+        base, report, chosen_on=date(2026, 10, 3), list_id="collect-list-v2"
+    )
+    assert set(base.symbols) <= set(result.symbols)
+    assert set(LIVE_5) <= set(result.symbols)
+    # A report edited after its hash was computed must not be trusted.
+    text = report.read_text(encoding="utf-8").replace("NEWAUSDT", "EVILUSDT")
+    report.write_text(text, encoding="utf-8")
+    with pytest.raises(FreezeError):
+        reissue_collect_list(base, report, chosen_on=date(2026, 10, 3), list_id="collect-list-v2")
+
+
+def test_reissue_cli_refuses_overwrite(tmp_path: Path) -> None:
+    base_path = _write(tmp_path, _render())
+    report = _write_freeze_report(tmp_path / "freeze.json", {"NEWAUSDT": "TRADING"})
+    out = tmp_path / "v2.toml"
+    args = [
+        "reissue",
+        "--base",
+        str(base_path),
+        "--freeze-report",
+        str(report),
+        "--chosen-on",
+        "2026-10-03",
+        "--out",
+        str(out),
+    ]
+    assert collect_list_main(args) == 0
+    written = load_collect_list(out)
+    assert "NEWAUSDT" in written.symbols
+    assert written.list_id == "collect-list-v2"
+    text = out.read_text(encoding="utf-8")
+    assert base_path.as_posix() in text and report.as_posix() in text
+    assert collect_list_main(args) == 2
+    assert out.read_text(encoding="utf-8") == text
+
+
+def test_default_collect_list_is_v2_and_loads() -> None:
+    assert DEFAULT_COLLECT_LIST_PATH.name == "collect-list-v2.toml"
+    v1 = load_collect_list(REPO_ROOT / "docs" / "research" / "universe" / "collect-list-v1.toml")
+    v2 = load_collect_list(REPO_ROOT / DEFAULT_COLLECT_LIST_PATH)
+    assert v2.list_id == "collect-list-v2"
+    assert set(v1.symbols) <= set(v2.symbols)
+    assert set(LIVE_5) <= set(v2.symbols)
+
+
+def test_collector_import_chain_does_not_load_scripts_or_universe_freeze() -> None:
+    """WR-05: the collector entrypoint must not depend on `scripts/` or the freeze tool."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    code = (
+        "import sys\n"
+        "import src.data.collect_list, src.data.collector\n"
+        "bad = [m for m in sys.modules if m == 'scripts' or m.startswith('scripts.')"
+        " or m == 'src.data.universe_freeze']\n"
+        "sys.exit(1 if bad else 0)\n"
+    )
+    repo_root = Path(__file__).resolve().parent.parent
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr

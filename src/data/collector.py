@@ -202,8 +202,8 @@ def _tick_epoch_ms(dt: datetime) -> int:
     (`already covered?`) total-ordered on both backends.
     """
     if dt.tzinfo is None:
-        return int(dt.replace(tzinfo=UTC).timestamp() * 1000)
-    return int(dt.timestamp() * 1000)
+        dt = dt.replace(tzinfo=UTC)
+    return _datetime_to_epoch_ms(dt)
 
 
 def _guard_no_overwrite(path: Path) -> None:
@@ -614,24 +614,30 @@ async def backfill_funding_history(
     only 8h back, so it cannot store two years of history. This walk is
     sequential per symbol (the fundingRate endpoint shares a 500 requests
     per 5 minutes per IP limit, so no fan-out): the cursor starts at
-    `max(start_ms, funding watermark + 1 ms)`, each page is written tick by
-    tick through `_write_funding_tick` (immutable, atomic), the watermark
-    advances to the page's latest funding time and is committed once per
-    page, and the next cursor is that latest time plus 1 ms. A page shorter
+    `start_ms` (the dataset window), NOT at the funding watermark. The
+    watermark is the live sweep's resume point and sits at "now" on any
+    deployment where the collector ran first; starting there would fetch
+    nothing and silently skip the whole history (CR-04). Each page is written
+    tick by tick through `_write_funding_tick` (immutable, atomic), the
+    watermark advances (never backwards) to the page's latest funding time and
+    is committed once per page, and the next cursor is that latest time plus
+    1 ms. A page shorter
     than `page_limit` ends the symbol's walk. `end_ms` is inclusive
     (Binance `endTime`), so the walk continues while `cursor <= end_ms`.
 
-    Idempotence (T-13-24): ticks at or before the watermark are skipped and
-    a `FileExistsError` counts as covered (a prior run wrote the file and
-    then lost its commit), exactly as in `async_funding_sweep`, so a re-run
-    writes nothing twice.
+    Idempotence (T-13-24): a tick whose file already exists (written by an
+    earlier backfill, by the live sweep, or by a run that then lost its
+    commit) raises `FileExistsError` and counts as covered, so a re-run
+    de-duplicates on write and writes nothing twice. A full re-walk costs
+    about three pages per symbol for 24 months of 8h funding.
 
     Failure posture (D-03): an adapter error records ONE gap row for the
     symbol (`data_class="funding"`, reason `adapter_error: ...`) and moves
     to the next symbol; pages already committed for that symbol stay. A
     write/commit error rolls back, records a gap row and re-raises. A symbol
     that hits `max_pages` with the range still open is reported in
-    `truncated_symbols` (re-run to continue from its watermark).
+    `truncated_symbols` (raise `max_pages` or narrow the window and re-run;
+    existing ticks are de-duplicated).
     """
     rows_per_symbol: dict[str, int] = {}
     total_pages = 0
@@ -645,7 +651,7 @@ async def backfill_funding_history(
             )
         ).scalar_one_or_none()
         wm_ms: int | None = _tick_epoch_ms(wm_row.last_tick_utc) if wm_row is not None else None
-        cursor = start_ms if wm_ms is None else max(start_ms, wm_ms + 1)
+        cursor = start_ms
         written = 0
         rows_per_symbol[sym] = 0
         for page_index in range(max_pages):
@@ -674,8 +680,6 @@ async def backfill_funding_history(
             page_written = 0
             try:
                 for tick in ticks:
-                    if wm_ms is not None and _tick_epoch_ms(tick.funding_time_utc) <= wm_ms:
-                        continue
                     try:
                         _write_funding_tick(tick, raw_root)
                         page_written += 1
@@ -958,7 +962,7 @@ async def _run_once_tick(
         observed_utc=observed_utc,
         raw_root=raw_root,
     )
-    now_ms = int(observed_utc.timestamp() * 1000)
+    now_ms = _datetime_to_epoch_ms(observed_utc)
     since_ms = _funding_since_ms(session, universe, now_ms)
     funding = await async_funding_sweep(
         adapter,
@@ -1130,7 +1134,7 @@ def _resolve_universe(args: argparse.Namespace) -> list[str]:
     explicit: list[str] | None = args.universe
     if explicit is not None:
         for sym in explicit:
-            if not SYMBOL_RE.match(sym):
+            if not SYMBOL_RE.fullmatch(sym):
                 raise CollectListError(f"--universe symbol {sym!r} must match {SYMBOL_RE.pattern}")
         if not explicit:
             raise CollectListError("--universe is empty; refusing to collect nothing")

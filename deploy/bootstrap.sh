@@ -268,11 +268,13 @@ step_ufw() {
     log "ufw already active with default deny incoming and the SSH allow rule"
     return 0
   fi
-  run ufw default deny incoming
-  run ufw default allow outgoing
+  # Allow rules first: on an already active firewall, flipping the default to deny before the
+  # SSH rule exists would drop new SSH connections (permanently if `ufw allow` then failed).
   for port in "${port_list[@]}"; do
     run ufw allow "${port}/tcp"
   done
+  run ufw default deny incoming
+  run ufw default allow outgoing
   run ufw --force enable
 }
 
@@ -440,7 +442,8 @@ step_checkout() {
 
 REQUIRED_ENV_KEYS=(POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB)
 
-# validate_secrets_file FILE: required keys present and non-empty, no change_me placeholders.
+# validate_secrets_file FILE: required keys present and non-empty, no change_me placeholders,
+# POSTGRES_PASSWORD URL-safe and at least 16 characters.
 # Reports key NAMES only; a value is never read into a message (OPS-06, T-13.1-21).
 validate_secrets_file() {
   local file=$1 problems
@@ -448,7 +451,7 @@ validate_secrets_file() {
   if [[ "$(<"$file")" == *$'\r'* ]]; then
     die "secrets file has CR (Windows) line endings; convert it to LF first: $file"
   fi
-  problems="$(awk -v req="${REQUIRED_ENV_KEYS[*]}" '
+  problems="$(LC_ALL=C awk -v req="${REQUIRED_ENV_KEYS[*]}" '
     BEGIN { n = split(req, need, " "); sq = sprintf("%c", 39); dq = sprintf("%c", 34) }
     /^[ \t]*#/ || /^[ \t]*$/ { next }
     {
@@ -475,6 +478,15 @@ validate_secrets_file() {
       }
       for (k = 1; k <= count; k++) {
         if (tolower(value[order[k]]) ~ /change_me/) print "placeholder value: " order[k]
+      }
+      # docker-compose.yml builds DATABASE_URL from this value, so it must be URL-safe (no @ / : #
+      # or $), and the redactor only masks values of 8+ characters; a weak or unsafe password
+      # would otherwise surface only after the SSH hardening step as a stack that never connects.
+      pw = value["POSTGRES_PASSWORD"]
+      if (pw != "" && pw !~ /^[A-Za-z0-9._~-]+$/) {
+        print "not URL-safe (use only letters, digits and . _ ~ -): POSTGRES_PASSWORD"
+      } else if (pw != "" && length(pw) < 16) {
+        print "too short (16 characters minimum): POSTGRES_PASSWORD"
       }
     }' "$file")"
   if [[ -n $problems ]]; then
@@ -514,8 +526,13 @@ Operator checklist (none of this is automated):
   3. Backup crypt passphrase: store it off the VPS; losing it makes every backup unrecoverable.
   4. SSH: before closing this session, open a second SSH session as $TRADING_USER with your key.
   5. Provider disk encryption: enable it (or confirm it is on) in the provider console.
-  6. Backups: set the BACKUP_* variables in $INSTALL_DIR/.env, then run
+  6. Backups: set the BACKUP_* variables in $INSTALL_DIR/.env as $TRADING_USER, and run
+       $INSTALL_DIR/deploy/backup.sh --init-remote
+     as $TRADING_USER. Root SSH login is now disabled and $TRADING_USER has no sudo, so install
+     the timer as root from the provider console (or from this root session, before you close it;
+     the install does not read .env):
        $INSTALL_DIR/deploy/backup.sh --install-timer
+     The same applies to every later apt, ufw or systemctl change: reach root via the console.
   7. The docker group is root-equivalent: keep it to this one operator account. ufw does not
      control ports published by Docker; publish only 127.0.0.1 ports.
   8. Delete the copied secrets file from this host once .env is verified: $SECRETS_FILE

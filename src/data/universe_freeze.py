@@ -219,12 +219,12 @@ def discover_candidates(
     other: set[str] = set()
     for f in filters:
         if f.contract_type == "PERPETUAL" and f.quote_asset == "USDT":
-            if SYMBOL_RE.match(f.symbol):
+            if SYMBOL_RE.fullmatch(f.symbol):
                 found.add(f.symbol)
         else:
             other.add(f.symbol)
     for symbol in archive_symbols:
-        if SYMBOL_RE.match(symbol) and symbol not in other:
+        if SYMBOL_RE.fullmatch(symbol) and symbol not in other:
             found.add(symbol)
     return sorted(found)
 
@@ -632,7 +632,7 @@ def render_frozen_manifest(
     draft_text: str, *, symbols: Sequence[str], selection_date: str, content_sha256: str
 ) -> str:
     """Turn the DRAFT manifest text into the FROZEN text, keeping every other line."""
-    if not all(SYMBOL_RE.match(s) for s in symbols):
+    if not all(SYMBOL_RE.fullmatch(s) for s in symbols):
         raise FreezeError("refusing to render an invalid symbol name")
     try:
         date.fromisoformat(selection_date)
@@ -817,6 +817,14 @@ def _print_review(report: FreezeReport, out: Path) -> None:
 
 
 def _cmd_propose(args: argparse.Namespace) -> int:
+    # The default --out is the committed freeze evidence that the FROZEN manifest
+    # and `reissue_collect_list` hash-check; overwriting it silently would break
+    # that chain (WR-04). Refuse before any network call unless --force is given.
+    if args.out.exists() and not args.force:
+        raise FreezeError(
+            f"--out {args.out} already exists; refusing to overwrite the freeze evidence "
+            "(pass a new --out path, or --force to replace it deliberately)"
+        )
     run_date: date = args.run_date or datetime.now(UTC).date()
     report = asyncio.run(_propose(run_date))
     write_report(report, args.out)
@@ -868,7 +876,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--out",
         type=Path,
         default=DEFAULT_REPORT_PATH,
-        help=f"Report path (default: {DEFAULT_REPORT_PATH.as_posix()}).",
+        help=f"Report path (default: {DEFAULT_REPORT_PATH.as_posix()}); must not exist.",
+    )
+    propose.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace an existing report at --out (it is the committed freeze evidence).",
     )
     frz = sub.add_parser("freeze", help="write the FROZEN manifest and witness from a report")
     frz.add_argument("--report", type=Path, required=True, help="Report written by propose.")

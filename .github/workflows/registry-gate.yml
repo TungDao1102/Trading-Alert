@@ -8,6 +8,11 @@ on:
     branches:
       - master
 
+# Least privilege (review WR-08): a read-only GITHUB_TOKEN, regardless of the repository default,
+# and checkout does not persist it into .git/config.
+permissions:
+  contents: read
+
 jobs:
   registry-gate:
     name: registry-gate (D-05)
@@ -16,6 +21,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # Full history: the phase-11 negative tests read pre-change text via
           # `git show <baseline>:<file>` and would silently skip in a shallow clone.
           fetch-depth: 0
@@ -96,6 +102,10 @@ jobs:
 
       - name: Registry negative tests (fail-closed gates must hold)
         id: negative
+        env:
+          # A missing bash must fail this job, never make the research-gate negative tests
+          # vanish behind a module-level skip (review WR-09); -rs lists any skip that remains.
+          TRADING_CI_STRICT: "1"
         run: |
           set -eu
-          uv run pytest tests/test_registry_gate.py tests/test_registry.py tests/test_kill_gate_docs.py tests/test_kill_gate_clock.py tests/test_research_gate_negative.py tests/test_decision_alignment*.py -q
+          uv run pytest tests/test_registry_gate.py tests/test_registry.py tests/test_kill_gate_docs.py tests/test_kill_gate_clock.py tests/test_research_gate_negative.py tests/test_decision_alignment*.py -q -rs

@@ -16,9 +16,7 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-import pytest
-
-from tests.infra_helpers import find_bash
+from tests.infra_helpers import find_bash, module_skip
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "research-gate.yml"
@@ -29,7 +27,7 @@ REAL_DOC_STATUS = REPO_ROOT / "docs" / "DOC_STATUS.md"
 
 BASH = find_bash()
 if BASH is None:
-    pytest.skip("bash is required to run the research-gate freeze step", allow_module_level=True)
+    module_skip("bash is required to run the research-gate freeze step")
 
 
 def _freeze_script() -> str:

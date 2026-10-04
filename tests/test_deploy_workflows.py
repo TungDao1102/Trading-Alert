@@ -177,9 +177,40 @@ def test_no_workflow_suppresses_step_failure_key(name: str) -> None:
     assert SUPPRESSION_KEY not in _read(name)
 
 
+@pytest.mark.parametrize("name", ALL_WORKFLOWS)
+def test_every_workflow_declares_read_only_token_permissions(name: str) -> None:
+    """WR-08: least privilege must not depend on the repository's default token setting."""
+    text = _read(name)
+    header = text[: re.search(r"^jobs:\s*$", text, re.MULTILINE).start()]  # type: ignore[union-attr]
+    assert re.search(r"^permissions:\s*\n  contents: read\s*$", header, re.MULTILINE), name
+    assert not re.search(r"^\s+\w[\w-]*: write\s*$", header, re.MULTILINE), name
+
+
+@pytest.mark.parametrize("name", ALL_WORKFLOWS)
+def test_every_checkout_drops_the_persisted_token(name: str) -> None:
+    text = _read(name)
+    steps = re.split(r"^      - name:", text, flags=re.MULTILINE)
+    checkouts = [step for step in steps if "uses: actions/checkout@" in step]
+    assert checkouts, f"{name}: no checkout step found"
+    for step in checkouts:
+        assert re.search(r"^          persist-credentials: false\s*$", step, re.MULTILINE), (
+            f"{name}: a checkout step keeps the token in .git/config"
+        )
+
+
 @pytest.mark.parametrize("pattern", OR_TRUE_PATTERNS)
 def test_ci_has_no_or_true_idiom(pattern: str) -> None:
     assert re.search(pattern, _read("ci.yml")) is None
+
+
+def test_registry_gate_negative_tests_run_strict_and_report_skips() -> None:
+    """WR-09: the research-gate negative tests must not be skippable in this job."""
+    block = _jobs(_read("registry-gate.yml"))["registry-gate"]
+    assert 'TRADING_CI_STRICT: "1"' in block
+    pytest_line = next(
+        ln for ln in block.splitlines() if "tests/test_research_gate_negative.py" in ln
+    )
+    assert " -rs" in pytest_line
 
 
 def test_gate_workflows_keep_their_gate_scripts() -> None:

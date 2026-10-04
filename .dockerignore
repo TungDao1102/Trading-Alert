@@ -24,6 +24,11 @@
 .ruff_cache
 __pycache__
 *.py[cod]
+# Patterns without ** only match at the context root: bytecode under src/ and scripts/ would
+# otherwise be baked into the image and tie it to the build host (review WR-12).
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
 
 # Runtime data and backups live in named volumes, never in the image
 data

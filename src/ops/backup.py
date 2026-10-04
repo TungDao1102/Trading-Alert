@@ -50,13 +50,19 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import structlog
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 from src.ops.redaction import configure_logging, scrub
 
@@ -73,6 +79,9 @@ DEFAULT_BUNDLE_ROOT = Path("data") / "backup"
 DEFAULT_STAGING_BUNDLE_ROOT = DEFAULT_BUNDLE_ROOT / "bundle"
 DEFAULT_PG_DUMP_NAME = "pg.dump"
 MANIFEST_NAME = "manifest.json"
+# Advisory lock next to a bundle root (never inside it); excluded from manifests and verification
+# so a bundle root that happens to contain it (the legacy data/backup root) stays consistent.
+BACKUP_LOCK_NAME = ".backup.lock"
 
 # Type alias for the pg_dump runner — callable taking an output path and
 # returning the same path on success. Production wires this to a real
@@ -187,7 +196,9 @@ def write_manifest(payload_root: Path, manifest_path: Path) -> dict[str, str]:
     files = sorted(
         p
         for p in payload_root.rglob("*")
-        if p.is_file() and p.name != MANIFEST_NAME and not _is_atomic_tmp(p.name)
+        if p.is_file()
+        and p.name not in {MANIFEST_NAME, BACKUP_LOCK_NAME}
+        and not _is_atomic_tmp(p.name)
     )
     for path in files:
         rel = path.relative_to(payload_root).as_posix()
@@ -198,6 +209,42 @@ def write_manifest(payload_root: Path, manifest_path: Path) -> dict[str, str]:
         encoding="utf-8",
     )
     return manifest
+
+
+class BackupBusy(RuntimeError):
+    """Another backup, push or drill already holds the lock for this bundle root."""
+
+
+def _try_lock(handle: IO[bytes]) -> None:
+    """Take a non-blocking exclusive lock on the open file; raise OSError when it is held."""
+    if sys.platform == "win32":
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+@contextmanager
+def backup_lock(bundle_root: Path) -> Iterator[None]:
+    """Hold an exclusive, non-blocking lock for as long as a run uses ``bundle_root``.
+
+    The scheduled timer, ``deploy/update.sh``, the restore drill and manual runs all stage
+    into the same bundle directory (``rmtree`` + ``copytree`` + manifest rewrite, then push),
+    so two overlapping runs would make each other's ``verify_bundle`` fail or race between
+    verify and push. The lock file sits beside the bundle root, on the same shared volume, so
+    it also serialises runs in different containers. It is released when the process ends,
+    including after a crash; the file itself is left in place.
+    """
+    lock_path = bundle_root.parent / BACKUP_LOCK_NAME
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        try:
+            _try_lock(handle)
+        except OSError as exc:
+            raise BackupBusy(
+                f"another backup is already running (lock {lock_path}); try again when it ends"
+            ) from exc
+        yield
 
 
 def backup(
@@ -603,7 +650,7 @@ def verify_bundle(bundle_root: Path) -> list[str]:
     on_disk = {
         p.relative_to(bundle_root).as_posix()
         for p in bundle_root.rglob("*")
-        if p.is_file() and p != bundle_root / MANIFEST_NAME
+        if p.is_file() and p != bundle_root / MANIFEST_NAME and p.name != BACKUP_LOCK_NAME
     }
     for rel in sorted(on_disk - set(manifest)):
         problems.append(f"{rel}: in bundle but not in manifest")
@@ -694,7 +741,10 @@ def _copy_into_target(src: Path, dest: Path, expected_sha256: str) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
     try:
-        shutil.copyfile(src, tmp)
+        # copy2 keeps the bundle file's mtime: the next backup stages this file with the same
+        # mtime the off-host copy already carries, so rclone's --immutable push (which compares
+        # modtime) does not read a restored file as a modification.
+        shutil.copy2(src, tmp)
         if _sha256_file(tmp) != expected_sha256:
             raise RestoreRefused(f"{dest.name}: copied content does not match the manifest")
         if dest.exists():
@@ -1065,7 +1115,36 @@ def _run_cli(
     )
 
     args = parser.parse_args(argv)
+    seams: dict[str, Any] = {
+        "pg_dump_runner": pg_dump_runner,
+        "pg_restore_runner": pg_restore_runner,
+        "migrate_runner": migrate_runner,
+        "data_probe": data_probe,
+        "rclone_runner": rclone_runner,
+        "now_utc": now_utc,
+        "drill_ops": drill_ops,
+    }
+    if args.cmd in _BUNDLE_LOCKED_COMMANDS:
+        with backup_lock(args.bundle_root):
+            return _dispatch(args, **seams)
+    return _dispatch(args, **seams)
 
+
+# Subcommands that write the staging bundle or push it: one at a time per bundle root (WR-04).
+_BUNDLE_LOCKED_COMMANDS = frozenset({"backup", "push", "scheduled", "drill-remote"})
+
+
+def _dispatch(
+    args: argparse.Namespace,
+    *,
+    pg_dump_runner: PgDumpRunner | None,
+    pg_restore_runner: PgRestoreRunner | None,
+    migrate_runner: MigrateRunner | None,
+    data_probe: DataProbe | None,
+    rclone_runner: RcloneRunner | None,
+    now_utc: datetime | None,
+    drill_ops: DrillDatabaseOps | None,
+) -> int:
     if args.cmd == "pull":
         from src.ops import backup_remote
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -297,6 +298,32 @@ def test_restore_bundle_api_returns_counts(tmp_path: Path) -> None:
     assert report.copied == 2
     assert report.skipped == 0
     assert report.database_restored is True
+
+
+def test_restore_preserves_parquet_mtime_so_a_later_immutable_push_is_not_a_modification(
+    tmp_path: Path,
+) -> None:
+    """CR-01: a restored file must keep the mtime it was collected with."""
+    source = tmp_path / "raw"
+    source.mkdir()
+    old_ns = 1_700_000_000 * 1_000_000_000
+    (source / "oi.parquet").write_bytes(b"BBB" * 100)
+    os.utime(source / "oi.parquet", ns=(old_ns, old_ns))
+    bundle = tmp_path / "bundle"
+    backup_mod.backup(bundle_root=bundle, pg_dump_runner=_fake_dump, parquet_roots=[source])
+    target = tmp_path / "restored"
+
+    restore_bundle(
+        bundle,
+        parquet_target=target,
+        database_url=None,
+        force=False,
+        skip_db=True,
+        pg_restore_runner=_Recorder(target).pg_restore,
+        migrate_runner=_Recorder(target).migrate,
+    )
+
+    assert (target / "oi.parquet").stat().st_mtime_ns == old_ns
 
 
 # --------------------------------------------------------------------------- #

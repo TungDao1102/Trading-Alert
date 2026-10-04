@@ -92,8 +92,6 @@ def _load_views(
         cleaned_lines.append(line)
     sql_text = "\n".join(cleaned_lines)
 
-    import re
-
     pattern = re.compile(
         r"read_parquet\(\s*'([^']+)'\s*,\s*hive_partitioning\s*=\s*true\s*\)",
         flags=re.IGNORECASE,

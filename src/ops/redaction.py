@@ -84,6 +84,11 @@ SHAPE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(rf"{_PEM_BEGIN}.*?(?:{_PEM_END}|\Z)", re.DOTALL), REDACTED),
     # URL userinfo password: scheme://user:PASSWORD@host
     (re.compile(r"(://[^\s/:@\"']*:)[^\s/@\"']+(@)"), rf"\1{REDACTED}\2"),
+    # Password in a URL query string (libpq / psycopg style): ?password=SECRET or &passwd=SECRET
+    (
+        re.compile(r"(?i)([?&](?:password|passwd|pwd|sslpassword)=)[^\s&\"']+"),
+        rf"\1{REDACTED}",
+    ),
     # Telegram bot token: <8-10 digits>:<35 url-safe chars>
     (re.compile(r"(?<![0-9])\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])"), REDACTED),
     # Binance signed-request signature query parameter.

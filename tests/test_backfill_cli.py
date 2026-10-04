@@ -12,6 +12,7 @@ plan 13-13 changes the default collect list.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -23,7 +24,7 @@ import pytest
 from binance_sdk_derivatives_trading_usds_futures import BadRequestError
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
-from src.adapters.binance_usdm import Kline, MarkKline, SymbolFilters
+from src.adapters.binance_usdm import FundingTick, Kline, MarkKline, SymbolFilters
 from src.data.backfill import LIVE_5
 from src.db.models import Base, SymbolMetadata
 
@@ -103,11 +104,14 @@ class FakeAdapter:
         invalid_symbols: Sequence[str] = (),
         invalid_mark_symbols: Sequence[str] = (),
         funding_fail_symbols: Sequence[str] = (),
+        funding_step_hours: int | None = 8,
     ) -> None:
         self._filters = list(filters)
         self._invalid_symbols = frozenset(invalid_symbols)
         self._invalid_mark_symbols = frozenset(invalid_mark_symbols)
         self._funding_fail_symbols = frozenset(funding_fail_symbols)
+        # A healthy exchange serves a tick every `funding_step_hours`; None serves nothing.
+        self._funding_step_hours = funding_step_hours
         self.funding_calls: list[tuple[str | None, int | None, int | None]] = []
         self._skip_days_ms = frozenset(skip_days_ms)
         self._session = session
@@ -225,7 +229,23 @@ class FakeAdapter:
         self.funding_calls.append((symbol, start_ms, end_ms))
         if symbol in self._funding_fail_symbols:
             raise RuntimeError("simulated funding failure")
-        return []
+        if self._funding_step_hours is None or symbol is None:
+            return []
+        step = self._funding_step_hours * 3_600_000
+        onboard = next(
+            (
+                (f.onboard_time_utc - _dt(0)) // timedelta(milliseconds=1)
+                for f in self._filters
+                if f.symbol == symbol and f.onboard_time_utc is not None
+            ),
+            0,
+        )
+        first = -(-max(start_ms or 0, onboard) // step) * step
+        last = end_ms if end_ms is not None else first
+        return [
+            FundingTick(symbol, _dt(t), Decimal("0.0001"), Decimal("100"))
+            for t in range(first, last + 1, step)
+        ][:limit]
 
 
 @pytest.fixture
@@ -1268,6 +1288,58 @@ async def test_archive_source_survives_a_complete_rerun(tmp_path: Path, session:
     assert (row.source, row.cause) == ("ARCHIVE", "DELISTED_CAPPED")
 
 
+async def test_archive_source_survives_a_subset_run(tmp_path: Path, session: Session) -> None:
+    """WR-02: a subset run that archives another symbol keeps the first one's provenance."""
+    from src.data.backfill_cli import SOURCES_FILE_NAME, run_backfill
+
+    ftt = _filters("FTTUSDT", status="SETTLING", delivery_ms=DELIVERY_MS)
+    archive = FakeArchive(
+        {
+            "FTTUSDT": (_ms(2026, 7, 1), DELIVERY_MS),
+            "GONEUSDT": (_ms(2026, 7, 1), _ms(2026, 8, 5, 12)),
+        }
+    )
+    both = _config(tmp_path, symbols=["FTTUSDT", "GONEUSDT"], depth_months={"1h": 2})
+    await run_backfill(
+        both,
+        adapter=FakeAdapter([ftt], session=session, invalid_symbols=["FTTUSDT"]),
+        session=session,
+        clock=_clock(0),
+        archive_client=archive.client(),
+    )
+    sidecar = both.cursor_root / SOURCES_FILE_NAME
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == {
+        "trade|FTTUSDT": "ARCHIVE",
+        "trade|GONEUSDT": "ARCHIVE",
+    }
+
+    only_gone = _config(tmp_path, symbols=["GONEUSDT"], depth_months={"1h": 2})
+    await run_backfill(
+        only_gone,
+        adapter=FakeAdapter([ftt], session=session, invalid_symbols=["FTTUSDT"]),
+        session=session,
+        clock=_clock(1),
+        archive_client=archive.client(),
+    )
+    assert set(json.loads(sidecar.read_text(encoding="utf-8"))) == {
+        "trade|FTTUSDT",
+        "trade|GONEUSDT",
+    }
+
+    again = FakeAdapter([ftt], session=session, invalid_symbols=["FTTUSDT"])
+    report = await run_backfill(
+        both,
+        adapter=again,
+        session=session,
+        clock=_clock(2),
+        archive_client=archive.client(),
+    )
+
+    assert report.sources[("trade", "FTTUSDT")] == "ARCHIVE"
+    assert report.sources[("trade", "GONEUSDT")] == "ARCHIVE"
+    assert "FTTUSDT" not in {r[0] for r in again.kline_requests}
+
+
 async def test_archive_only_symbol_capped_at_last_archive_day(
     tmp_path: Path, session: Session
 ) -> None:
@@ -1383,7 +1455,7 @@ async def test_funding_step_runs_per_symbol_within_bounds(tmp_path: Path, sessio
         ("FTTUSDT", _ms(2026, 7, 30), DELIVERY_MS),
     ]
     assert report.funding is not None
-    assert report.funding.rows_per_symbol == {"BTCUSDT": 0, "FTTUSDT": 0}
+    assert report.funding.rows_per_symbol == {"BTCUSDT": 187, "FTTUSDT": 35}
 
     skipped = FakeAdapter(fixtures, session=session)
     await run_backfill(
@@ -1393,6 +1465,30 @@ async def test_funding_step_runs_per_symbol_within_bounds(tmp_path: Path, sessio
         clock=_clock(1),
     )
     assert skipped.funding_calls == []
+
+
+async def test_funding_depth_follows_config_when_1h_not_selected(
+    tmp_path: Path, session: Session
+) -> None:
+    """IN-04: with --intervals 1m the funding walk still honors the 1h/4h depth."""
+    from src.data.backfill_cli import run_backfill
+
+    adapter = FakeAdapter([_filters("BTCUSDT")], session=session)
+    report = await run_backfill(
+        _config(
+            tmp_path,
+            intervals=["1m"],
+            depth_months={"1m": 1, "1h": 2, "4h": 2},
+            funding=True,
+        ),
+        adapter=adapter,
+        session=session,
+        clock=_clock(),
+    )
+
+    assert adapter.funding_calls == [("BTCUSDT", _ms(2026, 7, 30), _ms(2026, 9, 30))]
+    assert report.sufficiency is not None
+    assert report.sufficiency.dataset_start == date(2026, 7, 30)
 
 
 async def test_funding_failure_is_a_gap_row_not_a_crash(tmp_path: Path, session: Session) -> None:
@@ -1432,3 +1528,150 @@ def test_no_funding_flag_skips_the_step(
     rc = _run_main(tmp_path, monkeypatch, without, ["BTCUSDT"], "--no-funding", minutes=1)
     assert rc == 0
     assert without.funding_calls == []
+
+
+def test_cli_exits_3_when_funding_fetched_nothing(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-23: an empty funding series is missing data, exactly like a kline gap."""
+    adapter = FakeAdapter([_filters("BTCUSDT")], funding_step_hours=None)
+    report_path = tmp_path / "report.json"
+
+    rc = _run_main(tmp_path, monkeypatch, adapter, ["BTCUSDT"], "--report-out", str(report_path))
+
+    out = capsys.readouterr().out
+    assert rc == 3
+    funding_rows = [line.split() for line in out.splitlines() if line.startswith("funding ")]
+    assert [cells[-1] for cells in funding_rows] == ["NOT_BACKFILLED"]
+    doc = json.loads(report_path.read_text(encoding="utf-8"))
+    assert doc["missing_data"] is True
+    assert [r["cause"] for r in doc["rows"] if r["dataset"] == "funding"] == ["NOT_BACKFILLED"]
+
+
+def test_cli_funding_rows_are_ok_with_a_healthy_series_and_absent_without_funding(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rc = _run_main(
+        tmp_path,
+        monkeypatch,
+        FakeAdapter([_filters("BTCUSDT")]),
+        ["BTCUSDT"],
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert [line.split()[-1] for line in out.splitlines() if line.startswith("funding ")] == ["OK"]
+
+
+def test_cli_funding_rows_are_absent_with_no_funding(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = FakeAdapter([_filters("BTCUSDT")], funding_step_hours=None)
+
+    rc = _run_main(tmp_path, monkeypatch, adapter, ["BTCUSDT"], "--no-funding")
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert not [line for line in out.splitlines() if line.startswith("funding ")]
+
+
+# --------------------------------------------------------------------------- #
+# Review WR-10: the failure cause must be recoverable, and the provenance sidecar
+# must survive a transient Windows os.replace lock like the cursor and partitions do.
+# --------------------------------------------------------------------------- #
+
+
+def test_failure_logs_a_redacted_traceback_so_the_cause_is_recoverable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.data import backfill_cli
+
+    secret_url = f"{_sqlite_url(tmp_path)}?password=hunter2-secret"
+
+    def _leaky(*args: Any, **kwargs: Any) -> int:
+        raise RuntimeError(f"connection to {secret_url} failed: disk quota exceeded")
+
+    adapter = FakeAdapter([_filters("BTCUSDT")])
+    monkeypatch.setattr(backfill_cli, "BinanceUsdmAdapter", lambda: adapter)
+    monkeypatch.setattr(backfill_cli, "_utc_now", _clock())
+    monkeypatch.setattr(backfill_cli, "refresh_symbol_metadata", _leaky)
+    rc = backfill_cli.main(
+        [
+            "--symbols",
+            "BTCUSDT",
+            "--intervals",
+            "1h",
+            "--datasets",
+            "trade",
+            "--database-url",
+            secret_url,
+            "--raw-root",
+            str(tmp_path / "raw"),
+            "--manifest",
+            str(_write_manifest(tmp_path / "manifest.toml")),
+            "--collect-list",
+            str(_write_collect_list(tmp_path / "collect.toml")),
+        ]
+    )
+
+    out = capsys.readouterr()
+    assert rc == 1
+    assert "hunter2-secret" not in out.out + out.err
+    assert "backfill: failed (RuntimeError)" in out.err
+    assert "backfill.failed" in out.out + out.err
+    assert "Traceback" in out.out + out.err  # the cause (frames and message) is in the log
+    assert "disk quota exceeded" in out.out + out.err
+
+
+def test_save_archive_presets_retries_a_transient_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from src.data import backfill_cli, store
+
+    real_replace = os.replace
+    attempts: list[int] = []
+
+    def _flaky(src: Any, dst: Any) -> None:
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise PermissionError("the file is held by another process")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(store.os, "replace", _flaky)
+    monkeypatch.setattr(store.time, "sleep", lambda _s: None)
+
+    backfill_cli._save_archive_presets(tmp_path, {"FTTUSDT"})
+
+    sidecar = tmp_path / backfill_cli.SOURCES_FILE_NAME
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == {"trade|FTTUSDT": "ARCHIVE"}
+    assert len(attempts) == 3
+    assert [p.name for p in tmp_path.iterdir()] == [backfill_cli.SOURCES_FILE_NAME]
+
+
+def test_save_archive_presets_fails_closed_after_the_bounded_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.data import backfill_cli, store
+
+    def _locked(src: Any, dst: Any) -> None:
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(store.os, "replace", _locked)
+    monkeypatch.setattr(store.time, "sleep", lambda _s: None)
+
+    with pytest.raises(PermissionError):
+        backfill_cli._save_archive_presets(tmp_path, {"FTTUSDT"})
+
+    assert list(tmp_path.iterdir()) == []  # the temp file is cleaned up

@@ -33,6 +33,7 @@ from src.data.backfill import LIVE_5
 from src.data.collector import (
     FundingSweepResult,
     OITickResult,
+    _tick_epoch_ms,
     async_funding_sweep,
     async_oi_tick,
     harvest_open_interest_history,
@@ -1211,7 +1212,7 @@ async def test_funding_history_rerun_writes_nothing_twice(session: Session, tmp_
     before = {p: p.stat().st_mtime_ns for p in _funding_files(tmp_path)}
     assert len(before) == 25
 
-    # Re-run against an exchange-like adapter: resumes after the watermark.
+    # Re-run against an exchange-like adapter: every tick already has a file.
     second = await backfill_funding_history(
         PagedFundingAdapter({"BTCUSDT": history}),  # type: ignore[arg-type]
         session,
@@ -1227,7 +1228,8 @@ async def test_funding_history_rerun_writes_nothing_twice(session: Session, tmp_
     assert second.gaps_recorded == 0
 
     # Re-run against a queue adapter that replays already covered ticks: the
-    # watermark cutoff skips them, nothing raises and nothing is rewritten.
+    # existing files de-duplicate them on write, nothing raises and nothing is
+    # rewritten.
     replay = FakeAdapter(funding_responses=[history[:10]])
     third = await backfill_funding_history(
         replay,  # type: ignore[arg-type]
@@ -1244,6 +1246,54 @@ async def test_funding_history_rerun_writes_nothing_twice(session: Session, tmp_
     assert third.gaps_recorded == 0
     after = {p: p.stat().st_mtime_ns for p in _funding_files(tmp_path)}
     assert after == before
+
+
+async def test_funding_history_ignores_a_live_sweep_watermark_at_now(
+    session: Session, tmp_path: Path
+) -> None:
+    """CR-04: a collector that ran first leaves the shared watermark at "now".
+
+    The history walk must still start at the dataset window, write every
+    missing tick, de-duplicate the one the live sweep already wrote, and never
+    move the watermark backwards.
+    """
+    from src.data.collector import _advance_watermark, _write_funding_tick, backfill_funding_history
+
+    history = _funding_series("BTCUSDT", 25)
+    live_tick = history[-1]
+    _write_funding_tick(live_tick, tmp_path)  # what the live sweep stored
+    _advance_watermark(
+        session,
+        symbol="BTCUSDT",
+        data_class="funding",
+        last_tick_utc=datetime(2026, 9, 30, tzinfo=UTC),
+        updated_at_utc=datetime(2026, 9, 30, tzinfo=UTC),
+    )
+    session.commit()
+    adapter = PagedFundingAdapter({"BTCUSDT": history})
+
+    result = await backfill_funding_history(
+        adapter,  # type: ignore[arg-type]
+        session,
+        symbols=["BTCUSDT"],
+        start_ms=_epoch_ms(_FUNDING_EPOCH),
+        end_ms=_FAR_END_MS,
+        raw_root=tmp_path,
+        observed_utc=datetime(2026, 9, 30, tzinfo=UTC),
+        page_limit=10,
+        pace_seconds=0,
+    )
+
+    assert adapter.funding_calls[0][1] == _epoch_ms(_FUNDING_EPOCH)
+    assert result.rows_per_symbol == {"BTCUSDT": 24}
+    assert len(_funding_files(tmp_path)) == 25
+    wm = session.execute(
+        select(CollectorWatermark).where(
+            CollectorWatermark.symbol == "BTCUSDT",
+            CollectorWatermark.data_class == "funding",
+        )
+    ).scalar_one()
+    assert _epoch_ms(wm.last_tick_utc) == _epoch_ms(datetime(2026, 9, 30, tzinfo=UTC))
 
 
 async def test_funding_history_null_mark_price_is_stored_as_null(
@@ -1582,3 +1632,13 @@ def test_loop_probes_clock_once_before_first_tick(
     assert rc == 0
     assert order == ["probe", "tick"]
     assert adapter.server_time_calls == 1
+
+
+def test_tick_epoch_ms_is_exact_integer_arithmetic() -> None:
+    """IN-02: epoch-ms is exact (no float round-trip), naive treated as UTC."""
+    aware = datetime(2024, 1, 1, 0, 0, 0, 1000, tzinfo=UTC)
+    assert _tick_epoch_ms(aware) == 1_704_067_200_001
+    assert _tick_epoch_ms(aware.replace(tzinfo=None)) == 1_704_067_200_001
+    # Sub-millisecond remainder truncates toward the earlier millisecond.
+    assert _tick_epoch_ms(datetime(2024, 1, 1, 0, 0, 0, 1999, tzinfo=UTC)) == 1_704_067_200_001
+    assert _tick_epoch_ms(datetime(1970, 1, 1, tzinfo=UTC)) == 0

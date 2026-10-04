@@ -19,13 +19,13 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import date
 from pathlib import Path
 
 import polars as pl
 from src.adapters.binance_usdm import Kline, MarkKline
-from src.data.quality import klines_to_frame, mark_klines_to_frame
+from src.data.quality import PRICE_DECIMAL_SCALE, klines_to_frame, mark_klines_to_frame
 
 # Default root for the immutable raw store. Tests inject a tmpdir via
 # `RAW_ROOT` argument to `publish_batch`.
@@ -43,6 +43,22 @@ MARK_DATASET_DIR = "dataset=mark_klines"
 # bounded number of times, then fail closed (never loop forever).
 REPLACE_MAX_ATTEMPTS = 5
 REPLACE_RETRY_SLEEP_SECONDS = 0.1
+
+
+def replace_with_retry(tmp: Path, path: Path) -> None:
+    """`os.replace(tmp, path)`, retried on a transient Windows `PermissionError`.
+
+    Bounded (`REPLACE_MAX_ATTEMPTS`), then the error propagates (fail closed). The caller
+    owns cleanup of `tmp`.
+    """
+    for attempt in range(1, REPLACE_MAX_ATTEMPTS + 1):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == REPLACE_MAX_ATTEMPTS:
+                raise
+            time.sleep(REPLACE_RETRY_SLEEP_SECONDS)
 
 
 def atomic_write_parquet(frame: pl.DataFrame, path: Path) -> None:
@@ -81,6 +97,48 @@ def atomic_write_parquet(frame: pl.DataFrame, path: Path) -> None:
                 time.sleep(REPLACE_RETRY_SLEEP_SECONDS)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def read_partitions(
+    files: Sequence[Path],
+    columns: Sequence[str],
+    *,
+    pin_price_scale: bool = False,
+) -> pl.DataFrame:
+    """Read `files` into one frame, tolerating mixed Decimal scales (CR-03).
+
+    Partitions written before the writer pinned `Decimal(38, 8)` carry a
+    scale inferred from their own values (7 vs 8, volume 0-2), and Polars
+    refuses to concatenate those (`SchemaError`). Each file is read on its own
+    and every Decimal column is widened to the largest scale seen in any file
+    (never narrowed, so the cast is exact). `pin_price_scale=True` additionally
+    floors that scale at `PRICE_DECIMAL_SCALE`, so kline readers see the same
+    text for the same number regardless of which batch wrote the file.
+    Non-Decimal columns are passed through untouched; nothing is written.
+    """
+    frames = [
+        pl.read_parquet(str(path), columns=list(columns), hive_partitioning=False) for path in files
+    ]
+    if not frames:
+        return pl.DataFrame()
+    scales: dict[str, int] = {}
+    for frame in frames:
+        for name, dtype in frame.schema.items():
+            if isinstance(dtype, pl.Decimal):
+                scales[name] = max(scales.get(name, 0), dtype.scale)
+    if pin_price_scale:
+        scales = {name: max(scale, PRICE_DECIMAL_SCALE) for name, scale in scales.items()}
+    aligned = [
+        frame.with_columns(
+            [
+                pl.col(name).cast(pl.Decimal(38, scale))
+                for name, scale in scales.items()
+                if frame.schema[name] != pl.Decimal(38, scale)
+            ]
+        )
+        for frame in frames
+    ]
+    return pl.concat(aligned, how="vertical")
 
 
 def partition_path(raw_root: Path, interval: str, symbol: str, day: date) -> Path:

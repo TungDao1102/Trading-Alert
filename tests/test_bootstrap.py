@@ -608,9 +608,12 @@ def test_ufw_allows_the_effective_ssh_port_before_enabling(host: Host) -> None:
     lines = host.log_lines()
     allow = first_index(lines, "ufw allow 2222/tcp")
     enable = first_index(lines, "ufw --force enable")
-    assert first_index(lines, "ufw default deny incoming") < enable
+    deny = first_index(lines, "ufw default deny incoming")
+    assert deny < enable
     assert first_index(lines, "ufw default allow outgoing") < enable
-    assert allow < enable
+    # WR-13: the SSH allow rule exists before the default flips to deny, so a re-run on an
+    # already active firewall never drops new SSH connections between the two commands.
+    assert allow < deny < enable
     assert not has_call(lines, "ufw allow 22/tcp")
 
 
@@ -837,6 +840,37 @@ def test_env_validation_refuses_before_any_step_and_never_prints_values(
     assert SECRET_PASSWORD not in "\n".join(host.log_lines())
 
 
+@pytest.mark.parametrize(
+    ("password", "reason"),
+    [
+        ("Ab1@cdEfGhIjKlMn2", "URL-safe"),
+        ("Ab1/cdEfGhIjKlMn2", "URL-safe"),
+        ("Ab1:cdEfGhIjKlMn2", "URL-safe"),
+        ("Ab1#cdEfGhIjKlMn2", "URL-safe"),
+        ("Ab1$cdEfGhIjKlMn2", "URL-safe"),
+        ("Short1pw", "too short"),
+        ("Fifteen-chars-15", "OK"),
+    ],
+    ids=["at", "slash", "colon", "hash", "dollar", "short", "sixteen-ok"],
+)
+def test_env_validation_enforces_a_url_safe_long_postgres_password(
+    host: Host, password: str, reason: str
+) -> None:
+    """WR-11: compose builds DATABASE_URL from the password, so the shape is checked up front."""
+    _write(
+        host.secrets, f"POSTGRES_USER=trading\nPOSTGRES_PASSWORD={password}\nPOSTGRES_DB=trading\n"
+    )
+    proc = real_run(host)
+    if reason == "OK":
+        assert proc.returncode == 0, proc.stderr
+        return
+    assert proc.returncode != 0
+    assert "POSTGRES_PASSWORD" in proc.stderr
+    assert reason in proc.stderr
+    assert password not in combined(proc)
+    assert host.mutations() == []
+
+
 def test_env_validation_rejects_carriage_returns(host: Host) -> None:
     with host.secrets.open("w", encoding="utf-8", newline="") as handle:
         handle.write(
@@ -863,6 +897,8 @@ CHECKLIST_NEEDLES = (
     "second SSH session",
     "disk encryption",
     "backup.sh --install-timer",
+    "Root SSH login is now disabled",  # WR-05: say how root is reached after hardening
+    "provider console",
     "docker group",
 )
 

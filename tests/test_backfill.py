@@ -446,6 +446,75 @@ async def test_corrupt_page_rejected_cursor_not_advanced_past_good_data(
     assert published == [base_ms + i * INTERVAL_MS for i in range(bars_per_page)]
 
 
+class _StatelessWindowAdapter:
+    """Serves a fixed series by `start_ms`, like a real exchange (never runs dry)."""
+
+    def __init__(self, rows: list[Kline]) -> None:
+        self._rows = sorted(rows, key=lambda k: k.open_time_utc)
+        self.calls = 0
+
+    async def klines(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 1500,
+    ) -> list[Kline]:
+        self.calls += 1
+        assert self.calls < 200, "backfill did not terminate (CR-01 regression)"
+        assert start_ms is not None
+        eligible = [k for k in self._rows if int(k.open_time_utc.timestamp() * 1000) >= start_ms]
+        return eligible[:limit]
+
+
+async def test_corrupt_page_after_good_page_on_same_day_raises_instead_of_looping(
+    tmp_path: Path,
+) -> None:
+    """CR-01: a good page then a deterministically corrupt page on one UTC day.
+
+    The rollback re-fetch returns only already-buffered (de-duplicated) rows;
+    that must NOT reset the consecutive-rejection budget, otherwise the loop
+    never terminates. The run must fail closed with StructuralRejectionError.
+    """
+    from src.data.backfill import MAX_CONSECUTIVE_REJECTIONS, StructuralRejectionError
+
+    base_ms = BASE_OPEN_MS
+    page = 5
+    rows: list[Kline] = []
+    for i in range(page):
+        o = base_ms + i * INTERVAL_MS
+        rows.append(_mk_kline(open_ms=o, close_ms=o + INTERVAL_MS - 1))
+    for i in range(page, 2 * page):
+        o = base_ms + i * INTERVAL_MS
+        rows.append(
+            _mk_kline(
+                open_ms=o,
+                close_ms=o + INTERVAL_MS - 1,
+                open="110.00",
+                high="100.00",
+                low="100.00",
+                close="105.00",
+            )
+        )
+    adapter = _StatelessWindowAdapter(rows)
+    cfg = BackfillConfig(interval_ms=INTERVAL_MS, pace_seconds=0, page_size=page)
+
+    with pytest.raises(StructuralRejectionError):
+        await backfill_symbol_interval(
+            adapter,  # type: ignore[arg-type]
+            symbol="BTCUSDT",
+            interval=INTERVAL,
+            start_ms=base_ms,
+            end_ms=base_ms + 24 * INTERVAL_MS,
+            raw_root=tmp_path,
+            config=cfg,
+        )
+    # Bounded: each cycle is one good (deduped) fetch plus one corrupt fetch.
+    assert adapter.calls <= 2 * (MAX_CONSECUTIVE_REJECTIONS + 2) + 1
+
+
 # --------------------------------------------------------------------------- #
 # Helpers — exposed so the runner / smoke test can re-use them.
 # --------------------------------------------------------------------------- #
@@ -470,6 +539,62 @@ def test_rate_limit_predicate_pins_canonical_sdk_error_names() -> None:
     assert _is_rate_limit(ValueError("TooManyRequests-like value")) is False
 
 
+def test_cursor_write_retries_a_transient_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A briefly locked cursor file (Windows indexer/AV/sync) must not kill the run."""
+    import src.data.backfill as backfill_module
+
+    real_replace = backfill_module.os.replace
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    def flaky_replace(src: Any, dst: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise PermissionError("locked")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(backfill_module.os, "replace", flaky_replace)
+    monkeypatch.setattr(backfill_module.time, "sleep", sleeps.append)
+
+    store = CursorStore(root=tmp_path / "cursors")
+    store.write(symbol="BNBUSDT", interval=INTERVAL, cursor_ms=BASE_OPEN_MS)
+
+    assert calls["n"] == 3
+    assert len(sleeps) == 2
+    assert store.read(symbol="BNBUSDT", interval=INTERVAL) == BASE_OPEN_MS
+    assert not list((tmp_path / "cursors").glob("*.tmp"))
+
+
+def test_cursor_write_persistent_permission_error_raises_and_cleans_tmp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retries are bounded: a permanent lock fails closed, keeps the old cursor, leaves no tmp."""
+    import src.data.backfill as backfill_module
+    from src.data.store import REPLACE_MAX_ATTEMPTS
+
+    store = CursorStore(root=tmp_path / "cursors")
+    store.write(symbol="BNBUSDT", interval=INTERVAL, cursor_ms=BASE_OPEN_MS)
+
+    calls = {"n": 0}
+
+    def always_locked(src: Any, dst: Any) -> None:
+        calls["n"] += 1
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(backfill_module.os, "replace", always_locked)
+    monkeypatch.setattr(backfill_module.time, "sleep", lambda _s: None)
+
+    with pytest.raises(PermissionError):
+        store.write(symbol="BNBUSDT", interval=INTERVAL, cursor_ms=BASE_OPEN_MS + INTERVAL_MS)
+
+    assert calls["n"] == REPLACE_MAX_ATTEMPTS
+    monkeypatch.undo()
+    assert store.read(symbol="BNBUSDT", interval=INTERVAL) == BASE_OPEN_MS
+    assert not list((tmp_path / "cursors").glob("*.tmp"))
+
+
 def _result_summary(result: BackfillResult) -> str:
     """Tiny formatter for ad-hoc verification scripts."""
     return (
@@ -486,3 +611,194 @@ __all__ = [
     "_read_published_symbol",
     "_result_summary",
 ]
+
+
+async def test_ip_ban_418_is_raised_immediately_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-01: requests sent during a 418 ban extend it, so never retry one."""
+    import asyncio
+
+    from binance_sdk_derivatives_trading_usds_futures import RateLimitBanError
+    from src.data.backfill import fetch_page_with_retry
+
+    sleeps: list[float] = []
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+    adapter = FakeAdapter(responses=[RateLimitBanError("418"), [], []])
+
+    with pytest.raises(RateLimitBanError):
+        await fetch_page_with_retry(
+            adapter,  # type: ignore[arg-type]
+            symbol="BTCUSDT",
+            interval=INTERVAL,
+            start_ms=BASE_OPEN_MS,
+            limit=10,
+            max_retries=5,
+            jitter_max_seconds=0.01,
+        )
+
+    assert len(adapter.calls) == 1
+    assert sleeps == []
+
+
+async def test_429_backs_off_beyond_ten_seconds_and_honors_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-01: a 429 waits at least Retry-After (capped) and starts above 5 s."""
+    import asyncio
+
+    from binance_sdk_derivatives_trading_usds_futures import TooManyRequestsError
+    from src.data.backfill import (
+        RATE_LIMIT_BACKOFF_CAP_SECONDS,
+        RATE_LIMIT_BACKOFF_INITIAL_SECONDS,
+        fetch_page_with_retry,
+    )
+
+    sleeps: list[float] = []
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+    page = [_mk_kline(open_ms=BASE_OPEN_MS, close_ms=BASE_OPEN_MS + INTERVAL_MS - 1)]
+    adapter = FakeAdapter(
+        responses=[
+            TooManyRequestsError("429", 429, 45),
+            TooManyRequestsError("429", 429, None),
+            page,
+        ]
+    )
+
+    result = await fetch_page_with_retry(
+        adapter,  # type: ignore[arg-type]
+        symbol="BTCUSDT",
+        interval=INTERVAL,
+        start_ms=BASE_OPEN_MS,
+        limit=10,
+        max_retries=5,
+        jitter_max_seconds=0.0,
+    )
+
+    assert result == page
+    assert len(sleeps) == 2
+    assert sleeps[0] >= 45  # Retry-After wins over the 5 s first backoff
+    assert RATE_LIMIT_BACKOFF_INITIAL_SECONDS <= sleeps[1] <= RATE_LIMIT_BACKOFF_CAP_SECONDS
+
+
+def test_cursor_write_fsyncs_before_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WR-07: the temp file is fsynced before it replaces the cursor."""
+    import src.data.backfill as backfill_module
+
+    order: list[str] = []
+    real_fsync = backfill_module.os.fsync
+    real_replace = backfill_module.os.replace
+
+    def spy_fsync(fd: int) -> None:
+        order.append("fsync")
+        real_fsync(fd)
+
+    def spy_replace(src: Any, dst: Any) -> None:
+        order.append("replace")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(backfill_module.os, "fsync", spy_fsync)
+    monkeypatch.setattr(backfill_module.os, "replace", spy_replace)
+
+    CursorStore(root=tmp_path / "cursors").write(
+        symbol="BNBUSDT", interval=INTERVAL, cursor_ms=BASE_OPEN_MS
+    )
+
+    assert order == ["fsync", "replace"]
+
+
+def test_cursor_write_failure_is_not_masked_by_a_locked_tmp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WR-07: a PermissionError while cleaning the tmp file must not hide the real error."""
+    import src.data.backfill as backfill_module
+
+    def replace_fails(src: Any, dst: Any) -> None:
+        raise PermissionError("replace locked")
+
+    real_unlink = Path.unlink
+
+    def unlink_fails(self: Path, missing_ok: bool = False) -> None:
+        if self.name.endswith(".tmp"):
+            raise PermissionError("tmp locked")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(backfill_module.os, "replace", replace_fails)
+    monkeypatch.setattr(backfill_module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(Path, "unlink", unlink_fails)
+
+    store = CursorStore(root=tmp_path / "cursors")
+    with pytest.raises(PermissionError, match="replace locked"):
+        store.write(symbol="BNBUSDT", interval=INTERVAL, cursor_ms=BASE_OPEN_MS)
+
+
+def test_cursor_read_retries_a_transient_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WR-07: reads tolerate the same brief lock as writes."""
+    import src.data.backfill as backfill_module
+
+    store = CursorStore(root=tmp_path / "cursors")
+    store.write(symbol="BNBUSDT", interval=INTERVAL, cursor_ms=BASE_OPEN_MS)
+
+    real_read_text = Path.read_text
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    def flaky_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self.name.endswith(".cursor"):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise PermissionError("locked")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+    monkeypatch.setattr(backfill_module.time, "sleep", sleeps.append)
+
+    assert store.read(symbol="BNBUSDT", interval=INTERVAL) == BASE_OPEN_MS
+    assert calls["n"] == 3
+    assert len(sleeps) == 2
+
+
+async def test_paginator_writes_the_cursor_off_the_event_loop_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WR-07: the retry sleep in CursorStore.write must not block the event loop."""
+    import threading
+
+    base = BASE_OPEN_MS
+    bars = [
+        _mk_kline(open_ms=base + i * INTERVAL_MS, close_ms=base + (i + 1) * INTERVAL_MS - 1)
+        for i in range(24)
+    ]
+    threads: list[int] = []
+    real_write = CursorStore.write
+
+    def spy_write(self: CursorStore, **kwargs: Any) -> None:
+        threads.append(threading.get_ident())
+        real_write(self, **kwargs)
+
+    monkeypatch.setattr(CursorStore, "write", spy_write)
+
+    await backfill_symbol_interval(
+        FakeAdapter(responses=[bars]),  # type: ignore[arg-type]
+        symbol="BTCUSDT",
+        interval=INTERVAL,
+        start_ms=base,
+        end_ms=base + 24 * INTERVAL_MS,
+        raw_root=tmp_path,
+        config=BackfillConfig(interval_ms=INTERVAL_MS, pace_seconds=0, page_size=24),
+        cursor_store=CursorStore(root=tmp_path / "cursors"),
+    )
+
+    assert threads and threading.get_ident() not in threads

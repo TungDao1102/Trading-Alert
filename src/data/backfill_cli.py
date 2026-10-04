@@ -99,8 +99,10 @@ from src.data.collector import (
     backfill_funding_history,
 )
 from src.data.metadata import MetadataWidthError, refresh_symbol_metadata
-from src.data.store import DEFAULT_RAW_ROOT, partition_file
+from src.data.store import DEFAULT_RAW_ROOT, partition_file, replace_with_retry
 from src.data.sufficiency import (
+    FUNDING_DATASET,
+    FUNDING_INTERVAL,
     SOURCE_ARCHIVE,
     SOURCE_REST,
     SOURCE_UNAVAILABLE,
@@ -265,7 +267,7 @@ def _read_manifest(path: Path) -> tuple[list[str], date | None]:
         raise BackfillConfigError(f"{path}: FROZEN manifest has no symbols")
     symbols: list[str] = []
     for sym in raw_symbols:
-        if not isinstance(sym, str) or not SYMBOL_RE.match(sym):
+        if not isinstance(sym, str) or not SYMBOL_RE.fullmatch(sym):
             raise BackfillConfigError(
                 f"{path}: invalid manifest symbol {sym!r} (must match {SYMBOL_RE.pattern})"
             )
@@ -303,7 +305,7 @@ def resolve_universe(
         if not explicit:
             raise BackfillConfigError("--symbols is empty; refusing to backfill nothing")
         for sym in explicit:
-            if not SYMBOL_RE.match(sym):
+            if not SYMBOL_RE.fullmatch(sym):
                 raise BackfillConfigError(
                     f"--symbols symbol {sym!r} must match {SYMBOL_RE.pattern}"
                 )
@@ -374,6 +376,55 @@ def _plan_key(
     else:
         cause = FULL_DEPTH
     return start, end, terminal, cause
+
+
+def plan_funding_window(
+    symbol: str,
+    filters: SymbolFilters | None,
+    own: Sequence[SymbolWindow],
+    *,
+    htf_start_ms: int,
+    run_end_ms: int,
+    trade_unavailable: bool,
+) -> SymbolWindow:
+    """The funding-coverage window of one symbol (D-23), same causes as the kline windows.
+
+    Start is `max(dataset start, onboard)`, end is `min(run end, delivery, a capped
+    kline window end)`, exactly the range the funding walk covers. `own` are the
+    symbol's final kline windows that have a window. A symbol the walk could not
+    serve (no trade source, or neither exchangeInfo nor a kline window) is
+    `DELIVERY_UNKNOWN`, which the report states as UNAVAILABLE.
+    """
+
+    def window(start: int | None, end: int | None, terminal: bool, cause: str) -> SymbolWindow:
+        return SymbolWindow(
+            dataset=FUNDING_DATASET,
+            symbol=symbol,
+            interval=FUNDING_INTERVAL,
+            start_ms=start,
+            end_ms=end,
+            terminal=terminal,
+            cause=cause,
+        )
+
+    if trade_unavailable or (filters is None and not own):
+        return window(None, None, False, DELIVERY_UNKNOWN)
+    if filters is None:
+        start, end, terminal, cause = htf_start_ms, run_end_ms, False, FULL_DEPTH
+    else:
+        planned_start, planned_end, terminal, cause = _plan_key(
+            filters, depth_start=htf_start_ms, run_end_ms=run_end_ms
+        )
+        if planned_start is None or planned_end is None:
+            return window(None, None, False, cause)
+        start, end = planned_start, planned_end
+    caps = [w.end_ms for w in own if w.terminal and w.end_ms is not None]
+    capped_end = min([end, *caps])
+    if capped_end < end:
+        end, terminal, cause = capped_end, True, DELISTED_CAPPED
+    if start >= end:
+        return window(None, None, False, DELISTED_CAPPED if terminal else NOT_LISTED_IN_RANGE)
+    return window(start, end, terminal, cause)
 
 
 def plan_windows(
@@ -488,22 +539,25 @@ def _load_archive_presets(cursor_root: Path) -> set[str]:
     symbols: set[str] = set()
     for key, value in doc.items():
         dataset, _, symbol = str(key).partition("|")
-        if dataset == "trade" and value == SOURCE_ARCHIVE and SYMBOL_RE.match(symbol):
+        if dataset == "trade" and value == SOURCE_ARCHIVE and SYMBOL_RE.fullmatch(symbol):
             symbols.add(symbol)
     return symbols
 
 
 def _save_archive_presets(cursor_root: Path, symbols: set[str]) -> None:
+    """Persist `symbols` as the complete archive-provenance set (empty: remove the file)."""
     if not symbols:
+        (cursor_root / SOURCES_FILE_NAME).unlink(missing_ok=True)
         return
     doc = {f"trade|{sym}": SOURCE_ARCHIVE for sym in sorted(symbols)}
     text = json.dumps(doc, sort_keys=True, indent=2) + "\n"
     cursor_root.mkdir(parents=True, exist_ok=True)
     path = cursor_root / SOURCES_FILE_NAME
-    tmp = path.with_name(f".{path.name}.tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         tmp.write_bytes(text.encode("utf-8"))
-        os.replace(tmp, path)
+        # Windows can refuse the rename while an indexer or sync client holds the file.
+        replace_with_retry(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -644,6 +698,7 @@ async def run_backfill(
             report=report,
             missing=missing,
             now=now,
+            filters_by_symbol=by_symbol,
         )
     finally:
         await access.aclose()
@@ -660,6 +715,7 @@ async def _backfill_and_report(
     report: BackfillRunReport,
     missing: tuple[str, ...],
     now: datetime,
+    filters_by_symbol: Mapping[str, SymbolFilters] | None = None,
 ) -> BackfillRunReport:
     """Steps 3 to 6 of `run_backfill`: sources, klines, funding, sufficiency report."""
     symbols = tuple(config.symbols)
@@ -672,10 +728,12 @@ async def _backfill_and_report(
     results = report.results
 
     def depth_of(interval: str) -> int:
+        # IN-04: follow the configured depth for ANY interval (e.g. 1h for the funding
+        # walk when only --intervals 1m is selected), never the registry default.
         return depth_start_ms(
             interval,
             run_date=run_date,
-            depth_months=depth,
+            depth_months=config.depth_months,
             htf_start_date=config.htf_start_date,
         )
 
@@ -684,7 +742,12 @@ async def _backfill_and_report(
     }
     sources: dict[tuple[str, str], str] = {}
     archive_capped: set[tuple[str, str]] = set()  # (symbol, interval) ended by the archive
-    archived = _load_archive_presets(config.cursor_root) & set(symbols)
+    # The sidecar covers every symbol ever filled from the archive. A subset run
+    # (`--symbols`, a changed collect list) must not erase the provenance of the
+    # symbols it does not process (WR-02), so only this run's symbols are
+    # rewritten when the file is saved below.
+    persisted_archived = _load_archive_presets(config.cursor_root)
+    archived = persisted_archived & set(symbols)
 
     def adopt_archive(symbol: str, last_day: date) -> None:
         """Route `symbol`'s trade history to the archive, capped at its last day."""
@@ -837,7 +900,9 @@ async def _backfill_and_report(
         if w.has_window:
             sources.setdefault((w.dataset, w.symbol), SOURCE_REST)
     _save_archive_presets(
-        config.cursor_root, {s for s in archived if sources.get(("trade", s)) == SOURCE_ARCHIVE}
+        config.cursor_root,
+        (persisted_archived - set(symbols))
+        | {s for s in archived if sources.get(("trade", s)) == SOURCE_ARCHIVE},
     )
     for dataset_name in datasets:
         listed = " ".join(
@@ -885,6 +950,23 @@ async def _backfill_and_report(
             truncated_symbols=tuple(truncated),
         )
 
+    # Funding coverage rows (D-23): one per symbol, only when funding was requested.
+    funding_windows = (
+        tuple(
+            plan_funding_window(
+                symbol,
+                (filters_by_symbol or {}).get(symbol),
+                [w for w in final_windows if w.symbol == symbol and w.has_window],
+                htf_start_ms=htf_start_ms,
+                run_end_ms=run_end_ms,
+                trade_unavailable=sources.get(("trade", symbol)) == SOURCE_UNAVAILABLE,
+            )
+            for symbol in symbols
+        )
+        if config.funding
+        else ()
+    )
+
     # 6. The data-sufficiency report (D-05): what depth exists, and why any is short.
     sufficiency = build_sufficiency_report(
         config.raw_root,
@@ -894,6 +976,7 @@ async def _backfill_and_report(
         dataset_start=datetime.fromtimestamp(htf_start_ms / 1000, tz=UTC).date(),
         dataset_end=run_date,
         sources=sources,
+        funding_windows=funding_windows,
     )
     for line in render_report_table(sufficiency).splitlines():
         emit(line)
@@ -1099,9 +1182,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"backfill: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:
-        # Type name only: a database error message can embed the connection URL.
+        # The console line stays type-name only. The full traceback goes to the log, where
+        # `redact_processor` (configure_logging above) scrubs any connection URL or secret
+        # a message embeds, so the cause of a failure stays recoverable.
         print(f"backfill: failed ({type(exc).__name__})", file=sys.stderr)
-        log.error("backfill.failed", error_type=type(exc).__name__)
+        log.exception("backfill.failed", error_type=type(exc).__name__)
         return 1
     finally:
         if session is not None:

@@ -251,9 +251,11 @@ class FakeRemote:
         *,
         sentinel: RcloneResult | None = None,
         listing_code: int = 0,
+        complete: list[str] | None = None,
     ) -> None:
         self.calls: list[list[str]] = []
         self.listing = listing
+        self.complete = complete  # ids that have a manifest; None means every listed id
         self.listing_code = listing_code
         self.sentinel = sentinel or RcloneResult(0, remote.SENTINEL_CONTENT, "")
 
@@ -261,6 +263,12 @@ class FakeRemote:
         self.calls.append(list(argv))
         if list(argv)[:2] == ["cat", SENTINEL_ARG]:
             return self.sentinel
+        if argv[0] == "lsf" and "-R" in argv:  # recursive listing of every snapshot's files
+            names = self.listing if self.complete is None else self.complete
+            stdout = "".join(
+                f"{name}/{leaf}\n" for name in names for leaf in ("manifest.json", "pg.dump")
+            )
+            return RcloneResult(self.listing_code, stdout, "")
         if argv[0] == "lsf":
             stdout = "".join(f"{name}/\n" for name in self.listing)
             return RcloneResult(self.listing_code, stdout, "")
@@ -286,12 +294,46 @@ def test_apply_retention_checks_sentinel_lists_then_purges_exactly_the_delete_se
     assert fake.calls[1] == ["lsf", "--dirs-only", "BACKUPS3CRYPT:snapshots/"]
     assert set(fake.purged()) == {f"BACKUPS3CRYPT:snapshots/{n}" for n in delete}
     assert "BACKUPS3CRYPT:snapshots/notes" not in fake.purged()
+    assert fake.calls[2] == [
+        "lsf",
+        "--files-only",
+        "-R",
+        "--max-depth",
+        "2",
+        "BACKUPS3CRYPT:snapshots/",
+    ]
     assert all(
-        arg.startswith("BACKUPS3CRYPT:snapshots/") for call in fake.calls[2:] for arg in call[1:]
+        arg.startswith("BACKUPS3CRYPT:snapshots/") for call in fake.calls[3:] for arg in call[1:]
     )
     assert set(report.kept) == keep
     assert set(report.deleted) == delete
     assert not report.dry_run
+
+
+def test_apply_retention_ignores_an_incomplete_snapshot_when_choosing_what_to_keep() -> None:
+    names = _daily_names(40)
+    # Later than the newest complete snapshot (a push that may still be running): left alone.
+    incomplete = snapshot_id(datetime(2026, 2, 20, 23, 0, tzinfo=UTC))
+    fake = FakeRemote([*names, incomplete], complete=names)
+
+    report = remote.apply_retention(fake, dry_run=True)
+
+    keep, delete = select_retained(names)
+    assert set(report.kept) == keep
+    assert incomplete not in report.kept
+    assert incomplete not in report.deleted
+    assert set(report.deleted) == delete
+
+
+def test_apply_retention_purges_an_incomplete_snapshot_older_than_the_newest_complete() -> None:
+    names = _daily_names(40)
+    incomplete = snapshot_id(datetime(2026, 1, 5, 23, 0, tzinfo=UTC))
+    fake = FakeRemote([*names, incomplete], complete=names)
+
+    report = remote.apply_retention(fake, dry_run=False)
+
+    assert incomplete in report.deleted
+    assert f"BACKUPS3CRYPT:snapshots/{incomplete}" in fake.purged()
 
 
 def test_apply_retention_never_touches_parquet_and_never_uses_sync_or_move() -> None:

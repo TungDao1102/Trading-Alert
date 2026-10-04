@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 import subprocess
 import sys
@@ -15,6 +16,12 @@ from scripts.decision_alignment import universe
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = REPO_ROOT / "docs" / "research" / "universe" / "research-universe-v1.toml"
+FREEZE_REPORT = (
+    REPO_ROOT / "docs" / "research" / "universe" / "research-universe-v1.freeze-report.json"
+)
+DRAFT_FIXTURE = (
+    REPO_ROOT / "tests" / "fixtures" / "phase13" / "freeze" / "research-universe-v1.draft.toml"
+)
 
 SYNTHETIC_SYMBOLS = [f"{c * 3}USDT" for c in "ABCDEFGHIJKL"]
 
@@ -25,7 +32,8 @@ def _real_doc() -> dict[str, Any]:
 
 
 def _draft() -> dict[str, Any]:
-    return copy.deepcopy(_real_doc())
+    with DRAFT_FIXTURE.open("rb") as fh:
+        return copy.deepcopy(tomllib.load(fh))
 
 
 def _frozen(symbols: list[str] | None = None) -> dict[str, Any]:
@@ -45,16 +53,20 @@ def test_real_manifest_validates_with_zero_problems() -> None:
     assert universe.validate_manifest(_real_doc()) == []
 
 
-def test_real_manifest_is_draft_with_empty_freeze_fields() -> None:
+def test_real_manifest_is_frozen_with_matching_witnesses() -> None:
     doc = _real_doc()
+    report = json.loads(FREEZE_REPORT.read_text(encoding="utf-8"))
     assert doc["schema"] == "research-universe/1"
-    assert doc["status"] == "DRAFT"
+    assert doc["status"] == "FROZEN"
     assert doc["top_n"] == 12
     assert doc["include_delisted"] is True
-    assert doc["symbols"] == []
-    assert doc["selection_date"] == ""
-    assert doc["content_sha256"] == ""
     assert doc["freeze_owner"] == "Phase 13"
+    assert sorted(doc["symbols"]) == sorted(report["proposed_symbols"])
+    assert len(doc["symbols"]) == 12
+    assert doc["selection_date"] == report["dataset_start"]
+    digest = universe.compute_content_sha256(doc)
+    assert doc["content_sha256"] == universe.FROZEN_CONTENT_SHA256 == digest
+    assert universe.validate_manifest(doc) == []
 
 
 def test_run_gates_un01_to_un05_all_ok() -> None:

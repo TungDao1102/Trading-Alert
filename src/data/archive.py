@@ -102,14 +102,14 @@ def archive_zip_url(symbol: str, interval: str, period: str, stamp: str) -> str:
 
     Raises ValueError (caller input) before any request can be made.
     """
-    if not SYMBOL_RE.match(symbol):
+    if not SYMBOL_RE.fullmatch(symbol):
         raise ValueError(f"invalid archive symbol {symbol!r} (must match {SYMBOL_RE.pattern})")
     if interval not in ARCHIVE_INTERVALS:
         raise ValueError(f"unsupported archive interval {interval!r}; expected {ARCHIVE_INTERVALS}")
     if period not in _PERIODS:
         raise ValueError(f"unsupported archive period {period!r}; expected {_PERIODS}")
     pattern = _MONTH_RE if period == "monthly" else _DAY_RE
-    if not pattern.match(stamp):
+    if not pattern.fullmatch(stamp):
         raise ValueError(f"invalid {period} archive stamp {stamp!r}")
     return f"{ARCHIVE_BASE_URL}/{period}/klines/{symbol}/{interval}/{symbol}-{interval}-{stamp}.zip"
 
@@ -389,7 +389,7 @@ async def list_archive_symbols(client: httpx.AsyncClient, *, quote: str = "USDT"
     skipped: list[str] = []
     for entry in prefixes:
         name = entry.removeprefix(_MONTHLY_KLINES_PREFIX).removesuffix("/")
-        if entry.startswith(_MONTHLY_KLINES_PREFIX) and SYMBOL_RE.match(name):
+        if entry.startswith(_MONTHLY_KLINES_PREFIX) and SYMBOL_RE.fullmatch(name):
             symbols.add(name)
         else:
             skipped.append(entry)
@@ -404,7 +404,7 @@ async def archive_last_day(client: httpx.AsyncClient, symbol: str) -> date | Non
     `.CHECKSUM` keys, other symbols and impossible dates are ignored. A CLI
     uses this to cap an archive-only symbol at its last real day.
     """
-    if not SYMBOL_RE.match(symbol):
+    if not SYMBOL_RE.fullmatch(symbol):
         raise ValueError(f"invalid archive symbol {symbol!r} (must match {SYMBOL_RE.pattern})")
     prefix = f"{_DAILY_KLINES_PREFIX}{symbol}/1d/"
     name = re.escape(f"{prefix}{symbol}-1d-")
