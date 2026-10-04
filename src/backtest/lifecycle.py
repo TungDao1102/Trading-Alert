@@ -140,6 +140,7 @@ def new_plan_state(
     planned_quantity: Decimal,
     sized_realized_risk: Decimal,
     fill_quantity: Decimal | None = None,
+    levels: ProtectiveLevels | None = None,
 ) -> PlanState:
     """Build the RESTING state of a plan created at `signal_close_utc`.
 
@@ -171,7 +172,9 @@ def new_plan_state(
         planned_quantity=planned_quantity,
         fill_quantity=fill,
         sized_realized_risk=sized_realized_risk,
-        levels=ProtectiveLevels(
+        levels=levels
+        if levels is not None
+        else ProtectiveLevels(
             sl_trigger=sl_trigger_price(
                 plan=plan, direction=direction, price_tick_size=price_tick_size
             )

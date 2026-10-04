@@ -19,6 +19,7 @@ from decimal import Decimal
 from src.core.types import Candle
 from src.domain.trade_plan import TradePlan
 from src.execution.placement import derive_sl_trigger_price, quantize_price, sl_trigger_rounding
+from src.risk.types import ConstraintSnapshot
 
 _LONG = "LONG"
 _SHORT = "SHORT"
@@ -45,6 +46,29 @@ def sl_trigger_price(*, plan: TradePlan, direction: str, price_tick_size: Decima
         price=derive_sl_trigger_price(stop_loss_price=plan.stop_loss_price),
         price_tick_size=price_tick_size,
         direction=sl_trigger_rounding(candidate_position_side=direction),
+    )
+
+
+@dataclass(frozen=True)
+class ProtectiveReject:
+    """TP1 cannot be sized for the filled quantity: the plan is a NO_TRADE reject (D-27)."""
+
+    reason_code: str
+
+
+def protective_levels_for_fill(
+    *,
+    plan: TradePlan,
+    direction: str,
+    filled_quantity: Decimal,
+    constraint_snapshot: ConstraintSnapshot,
+) -> ProtectiveLevels | ProtectiveReject:
+    """RED skeleton: stop only (wrong on purpose, replaced in the GREEN commit)."""
+    del filled_quantity
+    return ProtectiveLevels(
+        sl_trigger=sl_trigger_price(
+            plan=plan, direction=direction, price_tick_size=constraint_snapshot.price_tick_size
+        )
     )
 
 
