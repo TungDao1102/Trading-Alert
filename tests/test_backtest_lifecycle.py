@@ -41,11 +41,12 @@ from src.backtest.semantics import (
 from src.backtest.series import ListMinuteSource
 from src.backtest.validator import TradeRecordInvariantError, validate_trade_record
 from src.core.types import Candle
-from src.domain.enums import TradePlanStatus
 from src.domain.trade_plan import TradePlan
 
+from tests.backtest_plan_helpers import make_minute, make_trade_plan
+
 SYMBOL = "BTCUSDT"
-SIGNAL_CLOSE = datetime(2026, 1, 5, 9, 59, 59, 999000, tzinfo=UTC)
+SIGNAL_CLOSE = datetime(2026, 1, 5, 9, 59, 59, 999000, tzinfo=UTC)  # same as the helper default
 TICK = Decimal("0.10")
 
 
@@ -56,30 +57,14 @@ def D(text: str) -> Decimal:  # noqa: N802 - terse fixture helper
 def _plan(direction: str) -> TradePlan:
     """Hand-built plan: zone 99-101 (mid 100.00); LONG stop 98.00, SHORT stop 102.00."""
     stop = "98.00" if direction == "LONG" else "102.00"
-    return TradePlan(
+    return make_trade_plan(
+        direction,
+        entry_min="99.00",
+        entry_max="101.00",
+        stop_loss=stop,
+        signal_close_utc=SIGNAL_CLOSE,
         trade_plan_id="tp-tracer",
         signal_id="sig-tracer",
-        trade_plan_version="v1",
-        entry_model="LIMIT_ZONE",
-        entry_min_price=D("99.00"),
-        entry_max_price=D("101.00"),
-        stop_loss_price=D(stop),
-        take_profit_json='{"tp1":"104.00","tp1_role":"TAKE_PROFIT_1",'
-        '"tp2":"108.00","tp2_role":"TAKE_PROFIT_2"}',
-        invalidation_rule_json='{"basis":"CANDLE_CLOSE","break_distance_atr":"0.5","level":"'
-        + stop
-        + '"}',
-        expiry_utc=SIGNAL_CLOSE + timedelta(hours=4),
-        expected_rr_json='{"tp1_rr":"2","tp2_rr":"4"}',
-        risk_rate=D("0.01"),
-        risk_budget=D("1.50"),
-        suggested_quantity=D("0.5"),
-        quantity_before_rounding=D("0.5"),
-        quantity_after_rounding=D("0.5"),
-        quantization_decision="ACCEPTED",
-        plan_hash="a" * 64,
-        status=TradePlanStatus.READY,
-        created_at_utc=SIGNAL_CLOSE,
     )
 
 
@@ -90,19 +75,10 @@ def _minute(
     h: str,
     low: str,
     c: str,
-    day: int = 5,
+    kind: str = "trade",
 ) -> Candle:
-    open_time = datetime(2026, 1, day, open_hm[0], open_hm[1], tzinfo=UTC)
-    return Candle(
-        symbol=SYMBOL,
-        interval="1m",
-        open_time_utc=open_time,
-        close_time_utc=open_time + timedelta(seconds=59, milliseconds=999),
-        open=D(o),
-        high=D(h),
-        low=D(low),
-        close=D(c),
-        volume=D("1"),
+    return make_minute(
+        SYMBOL, datetime(2026, 1, 5, open_hm[0], open_hm[1], tzinfo=UTC), o, h, low, c, kind
     )
 
 
@@ -125,13 +101,13 @@ def _long_trade_minutes(*, with_signal_bar: bool) -> list[Candle]:
 def _long_mark_minutes(*, with_signal_bar: bool) -> list[Candle]:
     rows: list[Candle] = []
     if with_signal_bar:
-        rows.append(_minute((9, 30), o="95.00", h="100.00", low="90.00", c="95.00"))
-        rows.append(_minute((9, 59), o="95.00", h="100.00", low="90.00", c="95.00"))
+        rows.append(_minute((9, 30), o="95.00", h="100.00", low="90.00", c="95.00", kind="mark"))
+        rows.append(_minute((9, 59), o="95.00", h="100.00", low="90.00", c="95.00", kind="mark"))
     rows.extend(
         [
-            _minute((10, 0), o="100.50", h="100.80", low="99.00", c="100.40"),
-            _minute((10, 1), o="100.10", h="100.30", low="97.90", c="98.50"),
-            _minute((10, 2), o="98.50", h="99.00", low="97.00", c="97.50"),
+            _minute((10, 0), o="100.50", h="100.80", low="99.00", c="100.40", kind="mark"),
+            _minute((10, 1), o="100.10", h="100.30", low="97.90", c="98.50", kind="mark"),
+            _minute((10, 2), o="98.50", h="99.00", low="97.00", c="97.50", kind="mark"),
         ]
     )
     return rows
@@ -205,7 +181,9 @@ def test_tracer_touch_then_trade_through_fill_then_mark_stop_on_fill_minute() ->
 def test_touch_only_minute_does_not_fill() -> None:
     only_touch = ListMinuteSource(
         trade={SYMBOL: [_minute((10, 0), o="100.50", h="100.80", low="100.00", c="100.40")]},
-        mark={SYMBOL: [_minute((10, 0), o="100.50", h="100.80", low="99.00", c="100.40")]},
+        mark={
+            SYMBOL: [_minute((10, 0), o="100.50", h="100.80", low="99.00", c="100.40", kind="mark")]
+        },
     )
     state, events = advance(
         _long_state(),
@@ -282,8 +260,8 @@ def test_short_mirror_fills_on_high_trade_through_and_stops_on_mark_high() -> No
         },
         mark={
             SYMBOL: [
-                _minute((10, 0), o="99.50", h="100.00", low="99.40", c="99.80"),
-                _minute((10, 1), o="99.80", h="102.10", low="99.70", c="101.00"),
+                _minute((10, 0), o="99.50", h="100.00", low="99.40", c="99.80", kind="mark"),
+                _minute((10, 1), o="99.80", h="102.10", low="99.70", c="101.00", kind="mark"),
             ]
         },
     )
