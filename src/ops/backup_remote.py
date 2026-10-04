@@ -313,7 +313,14 @@ def push_snapshot(bundle_root: Path, runner: RcloneRunner, *, now_utc: datetime)
     snap = snapshot_id(now_utc)
     snap_remote = _crypt(f"{SNAPSHOTS_DIR}/{snap}")
     if (root / PARQUET_DIR).is_dir():
-        _call(runner, ["copy", str(root / PARQUET_DIR), _crypt(PARQUET_DIR), "--immutable"])
+        # --size-only: an object already on the remote is skipped on size, not modtime. A file
+        # restored onto a new host has the same bytes (the manifest sha256 proves it) but not
+        # necessarily the same mtime; --immutable alone would fail that as "file modified".
+        # A same-named file of a different size is still an error.
+        _call(
+            runner,
+            ["copy", str(root / PARQUET_DIR), _crypt(PARQUET_DIR), "--immutable", "--size-only"],
+        )
     for name in (DEFAULT_PG_DUMP_NAME, MANIFEST_NAME):
         _call(runner, ["copyto", str(root / name), f"{snap_remote}/{name}", "--immutable"])
     _call(runner, ["cryptcheck", str(root), snap_remote, *_snapshot_filters()])

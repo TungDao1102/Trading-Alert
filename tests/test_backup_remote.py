@@ -7,6 +7,7 @@ records argv. The real binary is exercised in tests/test_docker_backup_remote.py
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -168,7 +169,13 @@ def test_push_cli_runs_sentinel_then_parquet_then_snapshot_then_cryptcheck(
     assert f"push-OK snapshot={SNAP}" in capsys.readouterr().out
     assert fake.calls == [
         ["cat", SENTINEL_ARG],
-        ["copy", str(Path(root) / "parquet"), "BACKUPS3CRYPT:parquet", "--immutable"],
+        [
+            "copy",
+            str(Path(root) / "parquet"),
+            "BACKUPS3CRYPT:parquet",
+            "--immutable",
+            "--size-only",
+        ],
         [
             "copyto",
             str(Path(root) / "pg.dump"),
@@ -483,20 +490,30 @@ class StoreRclone:
     def _flag_values(argv: Sequence[str], flag: str) -> list[str]:
         return [argv[i + 1] for i, a in enumerate(argv) if a == flag]
 
-    def _put(self, source: Path, target: Path, *, immutable: bool) -> RcloneResult:
+    def _put(
+        self, source: Path, target: Path, *, immutable: bool, size_only: bool = False
+    ) -> RcloneResult:
+        """Model rclone's default size+modtime comparison, which ``--immutable`` makes strict."""
         if target.exists():
+            if size_only and target.stat().st_size == source.stat().st_size:
+                return RcloneResult(0, "", "")
             if target.read_bytes() == source.read_bytes():
+                if immutable and target.stat().st_mtime_ns != source.stat().st_mtime_ns:
+                    return RcloneResult(6, "", "immutable file modified")
                 return RcloneResult(0, "", "")
             if immutable:
                 return RcloneResult(6, "", "immutable file modified")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(source.read_bytes())
+        stat = source.stat()
+        os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))  # rclone keeps the modtime
         return RcloneResult(0, "", "")
 
     def __call__(self, argv: Sequence[str], env: Mapping[str, str]) -> RcloneResult:
         self.calls.append(list(argv))
         verb = argv[0]
         immutable = "--immutable" in argv
+        size_only = "--size-only" in argv
         if verb == "cat":
             path = self._path(argv[1])
             if not path.is_file():
@@ -512,7 +529,9 @@ class StoreRclone:
             dirs = sorted(d.name for d in path.iterdir() if d.is_dir())
             return RcloneResult(0, "".join(f"{name}/\n" for name in dirs), "")
         if verb == "copyto":
-            return self._put(Path(argv[1]), self._path(argv[2]), immutable=immutable)
+            return self._put(
+                Path(argv[1]), self._path(argv[2]), immutable=immutable, size_only=size_only
+            )
         if verb == "copy":
             source, dest = argv[1], argv[2]
             if source.startswith(CRYPT):  # remote -> local
@@ -526,11 +545,11 @@ class StoreRclone:
                 for file in candidates:
                     out = Path(dest) / file.relative_to(src_dir)
                     out.parent.mkdir(parents=True, exist_ok=True)
-                    out.write_bytes(file.read_bytes())
+                    shutil.copy2(file, out)  # rclone keeps the remote modtime on download
                 return RcloneResult(0, "", "")
             for file in (p for p in Path(source).rglob("*") if p.is_file()):  # local -> remote
                 target = self._path(dest) / file.relative_to(source)
-                outcome = self._put(file, target, immutable=immutable)
+                outcome = self._put(file, target, immutable=immutable, size_only=size_only)
                 if outcome.returncode != 0:
                     return outcome
             return RcloneResult(0, "", "")
@@ -683,6 +702,54 @@ def test_push_never_issues_delete_sync_or_move_against_the_remote(tmp_path: Path
     remote.push_snapshot(bundle, store, now_utc=datetime(2026, 10, 2, 3, 15, 0, tzinfo=UTC))
 
     assert set(store.verbs()) <= {"cat", "copy", "copyto", "cryptcheck"}
+
+
+def test_push_after_the_staged_file_mtime_changed_is_not_an_immutable_violation(
+    tmp_path: Path,
+) -> None:
+    """CR-01: same bytes with a new mtime (a restored host) must not fail the push."""
+    store, bundle, _first = _pushed_store(tmp_path)
+    staged = bundle / "parquet" / "raw" / "oi.parquet"
+    later_ns = staged.stat().st_mtime_ns + 90 * 86_400 * 1_000_000_000
+    os.utime(staged, ns=(later_ns, later_ns))
+
+    snap = remote.push_snapshot(bundle, store, now_utc=datetime(2026, 10, 2, 3, 15, 0, tzinfo=UTC))
+
+    assert snap == "20261002T031500Z"
+
+
+def test_backup_and_push_after_a_restore_succeeds(tmp_path: Path) -> None:
+    """CR-01 end to end: backup, push, pull, restore, backup again, push again."""
+    source = tmp_path / "raw"
+    source.mkdir()
+    (source / "oi.parquet").write_bytes(b"BBB" * 100)
+    old_ns = 1_700_000_000 * 1_000_000_000
+    os.utime(source / "oi.parquet", ns=(old_ns, old_ns))
+    bundle = tmp_path / "bundle"
+    backup_mod.backup(bundle_root=bundle, pg_dump_runner=_fake_dump, parquet_roots=[source])
+    store = StoreRclone(tmp_path / "remote")
+    store.init()
+    remote.push_snapshot(bundle, store, now_utc=NOW)
+
+    pulled = tmp_path / "pulled"
+    remote.pull_snapshot(pulled, store)
+    restored_root = tmp_path / "restored"
+    restored = restored_root / "raw"  # same root name as the source: same remote object paths
+    backup_mod.restore_bundle(
+        pulled,
+        parquet_target=restored,
+        database_url=None,
+        force=False,
+        skip_db=True,
+        pg_restore_runner=lambda _dump, _target: None,
+        migrate_runner=lambda _url: None,
+    )
+    bundle2 = tmp_path / "bundle2"
+    backup_mod.backup(bundle_root=bundle2, pg_dump_runner=_fake_dump, parquet_roots=[restored])
+
+    snap = remote.push_snapshot(bundle2, store, now_utc=datetime(2026, 10, 2, 3, 15, 0, tzinfo=UTC))
+
+    assert snap == "20261002T031500Z"
 
 
 def test_a_changed_parquet_file_makes_the_immutable_copy_fail(tmp_path: Path) -> None:

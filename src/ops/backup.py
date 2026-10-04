@@ -694,7 +694,10 @@ def _copy_into_target(src: Path, dest: Path, expected_sha256: str) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
     try:
-        shutil.copyfile(src, tmp)
+        # copy2 keeps the bundle file's mtime: the next backup stages this file with the same
+        # mtime the off-host copy already carries, so rclone's --immutable push (which compares
+        # modtime) does not read a restored file as a modification.
+        shutil.copy2(src, tmp)
         if _sha256_file(tmp) != expected_sha256:
             raise RestoreRefused(f"{dest.name}: copied content does not match the manifest")
         if dest.exists():
