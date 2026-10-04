@@ -39,6 +39,7 @@ from .costs import (
     cost_rates_from_model,
     guard_rates_from_params,
 )
+from .records import TradeRecord
 
 # --------------------------------------------------------------------------- #
 # Validation helpers — local copies (D-12 fail-closed).
@@ -110,63 +111,6 @@ class IntrabarOutcome:
     fallback_applied: bool
     coverage_note: str | None
     exit_time_utc: datetime | None  # deciding 1m candle's close; None on fallback
-
-
-# --------------------------------------------------------------------------- #
-# TradeRecord — frozen per-trade outcome.
-# --------------------------------------------------------------------------- #
-
-
-@dataclass(frozen=True)
-class TradeRecord:
-    """One trade outcome emitted by the simulator.
-
-    `entry_kind` is one of: "ENTRY_FILLED", "PARTIAL_FILL", "TOUCH_NO_FILL",
-    "EXPIRED", "INVALIDATION_CANCEL". `exit_kind` is one of: "SL", "TP1",
-    "EOD", or None if the trade never filled. Single-exit scope: the
-    planner's TP2 runner leg is not modeled — a fill exits wholly at the
-    first touched level (TP1), which is conservative. `outcome_kind` is
-    "OK" for filled trades, "REJECT" for risk-rejected plans.
-    """
-
-    trade_id: str
-    signal_id: str | None
-    trade_plan_id: str | None
-    strategy_version: str
-    parameter_set_hash: str
-    symbol: str
-    direction: str
-    entry_kind: str
-    entry_price: Decimal | None
-    entry_time_utc: datetime | None
-    quantity: Decimal | None
-    exit_kind: str | None
-    exit_price: Decimal | None
-    exit_time_utc: datetime | None
-    realized_pnl: Decimal | None
-    realized_risk: Decimal | None
-    gross_pnl: Decimal | None
-    entry_fee: Decimal | None
-    exit_fee: Decimal | None
-    funding_amount: Decimal | None
-    slippage_amount: Decimal | None
-    modeled_costs_per_unit: Decimal | None
-    coverage_note: str | None
-    fallback_applied: bool
-    outcome_kind: str  # "OK" | "REJECT"
-    reason_code: str  # canonical RejectionReason value or "OK"
-
-    def to_dict(self) -> dict[str, Any]:
-        """Project to a canonical-JSON-safe dict for hashing."""
-        out: dict[str, Any] = {}
-        for k, v in self.__dict__.items():
-            if isinstance(v, Decimal):
-                out[k] = str(v)
-            elif isinstance(v, datetime):
-                out[k] = v.isoformat()
-            else:
-                out[k] = v
-        return out
 
 
 # --------------------------------------------------------------------------- #
