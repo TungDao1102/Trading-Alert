@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
@@ -34,7 +34,13 @@ from src.execution.placement import (
 )
 from src.risk.types import ConstraintSnapshot
 
-from .semantics import EXIT_SL, EXIT_TP2, POSITION_MODE, TP1_QUANTITY_FRACTION
+from .semantics import (
+    EXIT_END_OF_DATA,
+    EXIT_SL,
+    EXIT_TP2,
+    POSITION_MODE,
+    TP1_QUANTITY_FRACTION,
+)
 from .series import MinuteSource
 
 if TYPE_CHECKING:
@@ -164,7 +170,7 @@ def resolve_mark_minute(
 
 @dataclass(frozen=True)
 class FallbackResolution:
-    """RED skeleton of a fallback-hour resolution (replaced in the GREEN commit)."""
+    """The legs a strategy-bar-close fallback resolves, plus the coverage note to record."""
 
     legs: tuple[ExitLeg, ...]
     coverage_note: str
@@ -173,15 +179,72 @@ class FallbackResolution:
 def resolve_fallback_hour(
     *, state: PlanState, bar: Candle, first_missing_open_utc: datetime
 ) -> FallbackResolution:
-    """RED skeleton: no legs and no note (wrong on purpose)."""
-    del state, bar, first_missing_open_utc
-    return FallbackResolution(legs=(), coverage_note="")
+    """Resolve the rest of a strategy bar with missing mark minutes at the bar close (D-12, D-33).
+
+    Used only when the mark series has a hole inside `bar` while a position is open: the
+    minutes before `first_missing_open_utc` were walked normally and everything from the
+    hole to the bar close resolves ONCE, at `bar.close_time_utc` (never mid-bar), from the
+    trade-price range of the strategy bar and stop-first. A bar range touching the stop
+    closes the whole remaining position at the stop trigger; otherwise TP1 and TP2 are
+    resolved exactly as for a mark minute. When the position was filled inside this bar, the
+    range also covers minutes before the fill, so only the stop may be resolved (the
+    take-profit is deferred to the next bar, the fallback analogue of the fill-minute rule).
+    Returns the legs (possibly none) and the coverage note naming the first missing minute.
+    """
+    remaining = state.remaining_quantity
+    if remaining is None or remaining <= Decimal("0"):
+        raise ValueError("resolve_fallback_hour needs an OPEN position with a remaining quantity")
+    note = (
+        f"mark_price_1m_missing_from_{first_missing_open_utc.isoformat()}; "
+        f"resolved_at_strategy_bar_close_{bar.close_time_utc.isoformat()} "
+        "from the trade-price bar range, stop first"
+    )
+    trigger = state.levels.sl_trigger
+    if is_sl_touched(mark_minute=bar, sl_trigger=trigger, direction=state.direction):
+        stop = ExitLeg(kind=EXIT_SL, price=trigger, quantity=remaining, time_utc=bar.close_time_utc)
+        return FallbackResolution(legs=(stop,), coverage_note=note)
+    entry_time = state.entry_time_utc
+    if entry_time is not None and entry_time >= bar.open_time_utc:
+        return FallbackResolution(legs=(), coverage_note=note)
+    return FallbackResolution(
+        legs=_tp_legs(state=state, mark_minute=bar, remaining=remaining), coverage_note=note
+    )
 
 
 def end_of_data_exit(*, state: PlanState, data_end_utc: datetime, source: MinuteSource) -> ExitLeg:
-    """RED skeleton: not implemented yet."""
-    del state, data_end_utc, source
-    raise ValueError("END_OF_DATA close is not implemented yet")
+    """Close the remaining quantity at the last mark close at or before `data_end_utc` (D-06, D-34).
+
+    The position is carried until SL, TP2 or data end; one still open when the data ends is
+    closed here at the close of the last mark-price minute inside `[entry minute, data end]`,
+    as an `END_OF_DATA` leg (a forced market close, so the record uses `exit_slippage_rate`),
+    never booked as SL or TP. The mark series is read backward in doubling look-back windows
+    (starting at one hour) so a long holding period is never loaded whole. Raises
+    `ValueError` when no mark minute exists, because the close cannot be priced (fail closed).
+    """
+    remaining = state.remaining_quantity
+    entry_time = state.entry_time_utc
+    if remaining is None or entry_time is None or remaining <= Decimal("0"):
+        raise ValueError("end_of_data_exit needs an OPEN position with a remaining quantity")
+    floor_start = entry_time - timedelta(microseconds=1)  # includes the fill minute itself
+    lookback = timedelta(hours=1)
+    while True:
+        window_start = max(floor_start, data_end_utc - lookback)
+        minutes = source.mark_minutes(state.symbol, window_start, data_end_utc)
+        if minutes:
+            last = minutes[-1]
+            return ExitLeg(
+                kind=EXIT_END_OF_DATA,
+                price=last.close,
+                quantity=remaining,
+                time_utc=last.close_time_utc,
+            )
+        if window_start == floor_start:
+            raise ValueError(
+                f"no mark-price minute for {state.symbol} between the entry "
+                f"{entry_time.isoformat()} and the data end {data_end_utc.isoformat()}: "
+                "cannot price the END_OF_DATA close"
+            )
+        lookback = lookback * 2
 
 
 def take_profit_levels(plan: TradePlan) -> tuple[Decimal, Decimal]:

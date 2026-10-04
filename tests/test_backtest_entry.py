@@ -441,7 +441,17 @@ def test_fill_is_evaluated_first_so_a_filling_bar_is_never_invalidated() -> None
         *_flat_minutes(10, 30),
         make_minute(SYMBOL, _at(10, 30), "100.40", "100.50", "99.90", "100.20", "trade"),
     ]
-    state, events = _bar_run(_state("LONG"), minutes, bar=_bar(10, "97.90"))
+    # The mark series covers the whole bar: a hole after the fill would (since plan 14-07)
+    # resolve the rest of the bar at the bar close, which is not what this test is about.
+    marks = _benign_marks([(10, m) for m in range(60)])
+    source = ListMinuteSource(trade={SYMBOL: minutes}, mark={SYMBOL: marks})
+    state, events = advance(
+        _state("LONG"),
+        source=source,
+        start_exclusive=SIGNAL_CLOSE,
+        end_inclusive=BAR_1_CLOSE,
+        bar=_bar(10, "97.90"),
+    )
     assert state.phase == "OPEN"
     assert state.entry_kind == "ENTRY_FILLED"
     assert state.entry_time_utc == datetime(2026, 1, 5, 10, 30, 59, 999000, tzinfo=UTC)
@@ -533,7 +543,7 @@ def test_a_plan_still_resting_at_data_end_is_pending_not_expired() -> None:
     assert events[0].entry_kind == "PENDING_AT_DATA_END"
 
 
-def test_finalize_at_data_end_refuses_an_open_position_until_plan_14_07() -> None:
+def test_finalize_at_data_end_refuses_an_open_position_without_a_minute_source() -> None:
     with pytest.raises(ValueError, match="END_OF_DATA"):
         lifecycle_api.finalize_at_data_end(_opened_long(), data_end_utc=WINDOW_END)
 

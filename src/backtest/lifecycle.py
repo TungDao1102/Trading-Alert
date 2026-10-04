@@ -39,7 +39,15 @@ from .entry import (
     is_trade_through,
     snapped_limit_price,
 )
-from .exits import LEG_TP1, ExitLeg, ProtectiveLevels, resolve_mark_minute, sl_trigger_price
+from .exits import (
+    LEG_TP1,
+    ExitLeg,
+    ProtectiveLevels,
+    end_of_data_exit,
+    resolve_fallback_hour,
+    resolve_mark_minute,
+    sl_trigger_price,
+)
 from .semantics import (
     DAILY_STOP_CANCEL,
     ENTRY_FILLED,
@@ -292,6 +300,38 @@ def _close_resting(
     return closed, event
 
 
+_MINUTE = timedelta(seconds=60)
+
+
+def _grid_ceil(value: datetime) -> datetime:
+    """Smallest whole-minute instant at or after `value`."""
+    floor = value.replace(second=0, microsecond=0)
+    return floor if floor == value else floor + _MINUTE
+
+
+def _first_missing_mark_open(
+    state: PlanState, *, mark: tuple[Candle, ...], start: datetime, bar: Candle
+) -> datetime | None:
+    """Open time of the first mark minute absent from `bar` while the position is open.
+
+    The expected minutes run from the latest of the window start, the first whole minute
+    after the entry and the bar open, to the last minute of the bar. Only a window that
+    ends at the closing bar can name a hole: a mid-bar window never resolves anything (D-33).
+    """
+    entry_time = state.entry_time_utc
+    if entry_time is None:
+        return None
+    first = max(_grid_ceil(start), _grid_ceil(entry_time), bar.open_time_utc)
+    last = (bar.close_time_utc - timedelta(milliseconds=1)).replace(second=0, microsecond=0)
+    present = {minute.open_time_utc for minute in mark}
+    expected = first
+    while expected <= last:
+        if expected not in present:
+            return expected
+        expected += _MINUTE
+    return None
+
+
 def advance(
     state: PlanState,
     *,
@@ -314,8 +354,10 @@ def advance(
     a strategy bar closing at `end_inclusive` beyond the CANDLE_CLOSE level cancels the
     plan INVALIDATION_CANCEL (D-05, D-35); otherwise a window reaching `expiry_utc` ends
     it EXPIRED at `expiry_utc`. Precedence: fill, then invalidation, then expiry.
-    OPEN: mark minutes opening at or after the entry time are walked and the first stop
-    touch exits at the trigger price.
+    OPEN: mark minutes opening at or after the entry time are walked through
+    `resolve_mark_minute` (stop first, TP1 partial, TP2). When `bar` closes the window and
+    the bar has a hole in its mark minutes, the walk stops at the hole and the rest of the bar
+    resolves once at the bar close through `resolve_fallback_hour` (D-12, D-33).
     """
     if state.phase == PHASE_CLOSED:
         return state, ()
@@ -385,9 +427,16 @@ def advance(
             events.append(expire_event)
 
     if current.phase == PHASE_OPEN and current.entry_time_utc is not None:
+        first_missing = (
+            None
+            if bar is None
+            else _first_missing_mark_open(current, mark=mark, start=start, bar=bar)
+        )
         for mark_minute in mark:
             if mark_minute.open_time_utc < current.entry_time_utc:
                 continue
+            if first_missing is not None and mark_minute.open_time_utc >= first_missing:
+                break  # the rest of the bar resolves at the bar close, not minute by minute
             current = _apply_legs(
                 current,
                 resolve_mark_minute(state=current, mark_minute=mark_minute, is_fill_minute=False),
@@ -395,6 +444,15 @@ def advance(
             )
             if current.phase == PHASE_CLOSED:
                 break
+        if current.phase == PHASE_OPEN and bar is not None and first_missing is not None:
+            resolution = resolve_fallback_hour(
+                state=current, bar=bar, first_missing_open_utc=first_missing
+            )
+            note = resolution.coverage_note
+            if current.coverage_note is not None:
+                note = f"{current.coverage_note} | {note}"
+            current = replace(current, fallback_applied=True, coverage_note=note)
+            current = _apply_legs(current, resolution.legs, events)
 
     return current, tuple(events)
 
@@ -425,22 +483,25 @@ def cancel_plan(
 def finalize_at_data_end(
     state: PlanState, *, data_end_utc: datetime, source: MinuteSource | None = None
 ) -> tuple[PlanState, tuple[LifecycleEvent, ...]]:
-    """Resolve a plan when the data ends (D-34).
+    """Resolve a plan when the data ends (D-06, D-34).
 
     A RESTING plan becomes PENDING_AT_DATA_END (never EXPIRED) with a PENDING event at
-    `data_end_utc`. A CLOSED plan is returned unchanged. An OPEN position raises
-    `ValueError`: its END_OF_DATA close (D-06) is owned by plan 14-07, so no open position
-    can silently pass through this function.
+    `data_end_utc`. A CLOSED plan is returned unchanged. An OPEN position (already advanced
+    through the data) is closed at the last mark close at or before `data_end_utc` with
+    exit kind END_OF_DATA (a flagged exit, never SL or TP); that needs the minute `source`,
+    and without one it raises `ValueError` so no open position can silently pass through.
     """
-    del source  # RED skeleton: the OPEN close is not implemented yet
     _require_utc(data_end_utc, "data_end_utc")
     if state.phase == PHASE_CLOSED:
         return state, ()
     if state.phase == PHASE_OPEN:
-        raise ValueError(
-            "an OPEN position at data end needs the END_OF_DATA close (plan 14-07); "
-            "finalize_at_data_end cannot pass it through"
-        )
+        if source is None:
+            raise ValueError(
+                "an OPEN position at data end needs the minute source for its END_OF_DATA close"
+            )
+        leg = end_of_data_exit(state=state, data_end_utc=data_end_utc, source=source)
+        closed, exit_event = _apply_leg(state, leg)
+        return closed, (exit_event,)
     pending = replace(
         state,
         phase=PHASE_CLOSED,
