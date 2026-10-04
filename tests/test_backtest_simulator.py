@@ -1072,6 +1072,17 @@ def test_run_refuses_cost_dict_without_exit_slippage_rate() -> None:
         run(case_input)
 
 
+def test_run_refuses_cost_dict_without_funding_convention() -> None:
+    from src.backtest.simulator import run
+
+    case_input = _load_input(PHASE6_FIXTURES_DIR / "intrabar_both_touched")
+    del case_input["cost_model"]["funding_convention"]
+    # A v5 cost dict lacking the funding sign convention hashes differently from
+    # the registry slice, so the sizing binding refuses it (Phase 14, D-16).
+    with pytest.raises(CostModelBindingMismatch):
+        run(case_input)
+
+
 def test_run_refuses_fixture_cost_model_that_disagrees_with_registry() -> None:
     """WR-03: a fixture fee rate the registry set does not pin is refused."""
     from src.backtest.simulator import run

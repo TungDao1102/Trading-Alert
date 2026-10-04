@@ -22,6 +22,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from src.backtest.semantics import FUNDING_CONVENTION
 from src.backtest.simulator import _parse_account_state, _parse_candle
 from src.core.planner import plan
 from src.core.strategy import evaluate
@@ -59,6 +60,7 @@ EXPECTED_COST_KEYS = {
     "fee_rate_exit",
     "expected_slippage",
     "exit_slippage_rate",
+    "funding_convention",
     "funding_treatment",
     "slippage_model",
     "spread_fill_assumptions",
@@ -152,6 +154,9 @@ def test_fixture_carries_phase12_identity(name: str) -> None:
     assert cost["fee_rate_exit"] == "0.0005"
     assert cost["expected_slippage"] == "0.0001"
     assert cost["exit_slippage_rate"] == "0.0003"
+    # Phase 14 (D-16): the sign convention joins cost identity; the fixture value
+    # must equal the code constant the registry slice appends.
+    assert cost["funding_convention"] == FUNDING_CONVENTION
     assert cost["funding_treatment"] == "ADDITIVE"
     assert cost["slippage_model"] == "FIXED_BPS"
     assert cost["spread_fill_assumptions"] == "FULL_FILL"

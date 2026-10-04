@@ -824,6 +824,10 @@ def test_cr11_baseline_tomls_carry_detector_and_cost_keys() -> None:
         ):
             canonical = ast.literal_eval(node.value)
     assert canonical is not None, "COST_MODEL canonical source must exist"
+    # Phase 14 (D-16): the generator literal must equal the code constant.
+    from src.backtest.semantics import FUNDING_CONVENTION
+
+    assert canonical["funding_convention"] == FUNDING_CONVENTION
 
     for parameter_set_id in (
         "baseline-no-trade-v1",
