@@ -31,10 +31,12 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from src.backtest.series import MinuteSource
+from src.backtest.semantics import FUNDING_JITTER, FUNDING_MAX_CADENCE
+from src.backtest.series import MinuteSeriesError, MinuteSource
 from src.core._decimal import _add, _mul
 
 _DIRECTIONS = ("LONG", "SHORT")
+_MINUTE = timedelta(seconds=60)
 
 
 @dataclass(frozen=True)
@@ -194,8 +196,113 @@ def check_funding_coverage(
     loaded_end_utc: datetime,
     allowed_gaps: Sequence[FundingGap],
 ) -> tuple[FundingGap, ...]:
-    """RED skeleton: the coverage rule is not implemented yet."""
-    return ()
+    """Fail closed unless the funding history of `symbol` covers the holding window (D-36).
+
+    With `G = FUNDING_MAX_CADENCE + FUNDING_JITTER` the window must lie inside
+    `[loaded_start_utc, loaded_end_utc]` (the closed UTC days actually loaded). The
+    checked points are `max(window_start - G, loaded_start)`, every funding instant of
+    the symbol inside that extended range, and `min(window_end + G, loaded_end)`; every
+    consecutive difference must be at most `G`. In effect there must be a funding
+    instant at or before the window start and one at or after its end, and nothing
+    longer than a cadence plus jitter between them, so a missed tick in a 4 h series
+    that the 8 h grid test would hide is still found. A larger difference is a hole,
+    reported with the real neighbouring instant where one exists (else the synthetic
+    edge). A hole fully covered by a same-symbol allowed gap is accepted and returned;
+    anything else raises.
+
+    Returns:
+        The allowed gaps that were actually needed, in order of first use.
+
+    Raises:
+        FundingCoverageError: the window leaves the loaded range or a hole is uncovered.
+        ValueError: a duplicate `funding_time_utc` for the symbol, or an inverted window.
+    """
+    if window_end_utc < window_start_utc:
+        raise ValueError("window_end_utc must not be before window_start_utc")
+    if window_start_utc < loaded_start_utc or window_end_utc > loaded_end_utc:
+        raise FundingCoverageError(
+            f"{symbol} holding window {window_start_utc.isoformat()} to "
+            f"{window_end_utc.isoformat()} lies outside the loaded range "
+            f"{loaded_start_utc.isoformat()} to {loaded_end_utc.isoformat()}"
+        )
+    tolerance = FUNDING_MAX_CADENCE + FUNDING_JITTER
+    low = max(window_start_utc - tolerance, loaded_start_utc)
+    high = min(window_end_utc + tolerance, loaded_end_utc)
+    times = [r.funding_time_utc for r in _symbol_rows(symbol, rows)]
+    inside = [t for t in times if low <= t <= high]
+    before = [t for t in times if t < low]
+    after = [t for t in times if t > high]
+    points = [low, *inside, high]
+    holes: list[FundingGap] = []
+    for index in range(len(points) - 1):
+        start, end = points[index], points[index + 1]
+        if end - start <= tolerance:
+            continue
+        if index == 0 and before:
+            start = before[-1]
+        if index == len(points) - 2 and after:
+            end = after[0]
+        holes.append(FundingGap(symbol=symbol, start_utc=start, end_utc=end))
+    used: list[FundingGap] = []
+    uncovered: list[FundingGap] = []
+    for hole in holes:
+        cover = next(
+            (
+                g
+                for g in allowed_gaps
+                if g.symbol == symbol
+                and g.start_utc <= hole.start_utc
+                and g.end_utc >= hole.end_utc
+            ),
+            None,
+        )
+        if cover is None:
+            uncovered.append(hole)
+        elif cover not in used:
+            used.append(cover)
+    if uncovered:
+        listing = "; ".join(
+            f"{h.start_utc.isoformat()} to {h.end_utc.isoformat()}" for h in uncovered
+        )
+        raise FundingCoverageError(
+            f"{symbol} funding history has uncovered holes for the holding window "
+            f"{window_start_utc.isoformat()} to {window_end_utc.isoformat()}: {listing}",
+            holes=tuple(uncovered),
+        )
+    return tuple(used)
+
+
+def _symbol_rows(symbol: str, rows: Sequence[FundingRow]) -> list[FundingRow]:
+    """Rows of one symbol sorted by time; a duplicate `funding_time_utc` is refused."""
+    own = sorted((r for r in rows if r.symbol == symbol), key=lambda r: r.funding_time_utc)
+    for previous, current in zip(own, own[1:], strict=False):
+        if previous.funding_time_utc == current.funding_time_utc:
+            raise ValueError(
+                f"duplicate funding_time_utc {current.funding_time_utc.isoformat()} for {symbol}"
+            )
+    return own
+
+
+def _mark_from_kline(symbol: str, when: datetime, mark_source: MinuteSource) -> Decimal:
+    """Open of the mark minute containing `when` (D-15, assumption A2); fail closed if absent.
+
+    The minute with `open <= when < open + 60 s` is selected from a window wide enough
+    to include it even when `when` falls in the last millisecond after its close time.
+    A neighbouring minute is never used.
+    """
+    try:
+        minutes = mark_source.mark_minutes(symbol, when - _MINUTE, when + _MINUTE)
+    except MinuteSeriesError as exc:
+        raise FundingCoverageError(
+            f"{symbol} funding {when.isoformat()} has no mark price and no mark kline series: {exc}"
+        ) from exc
+    for minute in minutes:
+        if minute.open_time_utc <= when < minute.open_time_utc + _MINUTE:
+            return minute.open
+    raise FundingCoverageError(
+        f"{symbol} funding {when.isoformat()} has no mark price and no mark kline minute "
+        "contains it"
+    )
 
 
 def _check_segments(segments: Sequence[OpenSegment]) -> None:
@@ -226,21 +333,38 @@ def funding_events(
     if direction not in _DIRECTIONS:
         raise ValueError(f"direction must be LONG or SHORT, got {direction!r}")
     _check_segments(segments)
-    own = sorted((r for r in rows if r.symbol == symbol), key=lambda r: r.funding_time_utc)
+    own = _symbol_rows(symbol, rows)
+    used: tuple[FundingGap, ...] = ()
+    if segments:
+        window_start = segments[0].start_utc
+        window_end = segments[-1].end_utc
+        # A zero-length window (fill and exit in the same minute) cannot contain an instant.
+        if window_end > window_start:
+            used = check_funding_coverage(
+                symbol=symbol,
+                rows=own,
+                window_start_utc=window_start,
+                window_end_utc=window_end,
+                loaded_start_utc=loaded_start_utc,
+                loaded_end_utc=loaded_end_utc,
+                allowed_gaps=allowed_gaps,
+            )
     events: list[FundingEvent] = []
     total = Decimal("0")
     for segment in segments:
         for row in own:
             if not (segment.start_utc <= row.funding_time_utc < segment.end_utc):
                 continue
-            if row.mark_price is None:
-                raise FundingCoverageError(
-                    f"{symbol} funding row {row.funding_time_utc.isoformat()} has no mark price"
-                )
+            from_kline = row.mark_price is None
+            mark = (
+                _mark_from_kline(symbol, row.funding_time_utc, mark_source)
+                if row.mark_price is None
+                else row.mark_price
+            )
             amount = funding_pnl(
                 direction=direction,
                 quantity=segment.quantity,
-                mark_price=row.mark_price,
+                mark_price=mark,
                 funding_rate=row.funding_rate,
             )
             events.append(
@@ -248,11 +372,11 @@ def funding_events(
                     symbol=symbol,
                     funding_time_utc=row.funding_time_utc,
                     funding_rate=row.funding_rate,
-                    mark_price=row.mark_price,
+                    mark_price=mark,
                     quantity=segment.quantity,
                     amount=amount,
-                    mark_from_kline=False,
+                    mark_from_kline=from_kline,
                 )
             )
             total = _add(total, amount)
-    return FundingResult(events=tuple(events), total=total, used_allowed_gaps=())
+    return FundingResult(events=tuple(events), total=total, used_allowed_gaps=used)

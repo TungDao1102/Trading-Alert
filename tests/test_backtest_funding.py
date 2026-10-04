@@ -431,7 +431,8 @@ def test_a_spacing_just_beyond_the_tolerance_is_a_hole() -> None:
     too_far = DAY + timedelta(hours=8, seconds=61)
     rows = [_row(DAY, "0.0001", "100"), _row(too_far, "0.0001", "100")]
     with pytest.raises(FundingCoverageError) as caught:
-        _cover(rows, EARLY, datetime(2026, 1, 5, 12, 0, tzinfo=UTC))
+        # window ends before the last row so only the 8 h 1 m 1 s spacing is a hole
+        _cover(rows, EARLY, datetime(2026, 1, 5, 8, 0, tzinfo=UTC))
     assert caught.value.holes == (FundingGap(SYMBOL, DAY, too_far),)
 
 
