@@ -402,3 +402,54 @@ def test_decimal_cost_inputs_hash_equal_to_string_baseline() -> None:
     assert drift.cost_model_hash == baseline.cost_model_hash, (
         "equivalent spellings must converge on one cost hash (D-15)"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Plan 14-04 — funding_convention binds both gates hash-to-hash (D-16, D-36).
+# --------------------------------------------------------------------------- #
+
+
+def _v5_registry_pair():
+    from src.backtest.costs import cost_slice
+    from src.domain.registry import load_parameter_set
+
+    parameter_set = load_parameter_set("trend-pullback", "baseline-v5")
+    return parameter_set, dict(cost_slice(parameter_set.params))
+
+
+def test_gates_accept_v5_model_carrying_funding_convention() -> None:
+    from src.backtest.binding import (
+        assert_cost_model_binds_registry,
+        assert_sizing_costs_bind_registry,
+    )
+    from src.backtest.semantics import FUNDING_CONVENTION
+
+    parameter_set, registry_slice = _v5_registry_pair()
+    assert registry_slice["funding_convention"] == FUNDING_CONVENTION
+    model = build_cost_model(registry_slice)
+    assert_cost_model_binds_registry(parameter_set, model)
+    assert_sizing_costs_bind_registry(parameter_set, model)
+
+
+def test_gates_refuse_v5_model_lacking_funding_convention() -> None:
+    from src.backtest.binding import (
+        assert_cost_model_binds_registry,
+        assert_sizing_costs_bind_registry,
+    )
+
+    parameter_set, registry_slice = _v5_registry_pair()
+    del registry_slice["funding_convention"]
+    model = build_cost_model(registry_slice)
+    assert model.funding_convention is None
+    with pytest.raises(CostModelBindingMismatch):
+        assert_cost_model_binds_registry(parameter_set, model)
+    with pytest.raises(CostModelBindingMismatch):
+        assert_sizing_costs_bind_registry(parameter_set, model)
+
+
+def test_legacy_set_slice_never_carries_funding_convention() -> None:
+    from src.backtest.costs import cost_slice
+    from src.domain.registry import load_parameter_set
+
+    legacy = cost_slice(load_parameter_set("trend-pullback", "baseline-v4").params)
+    assert "funding_convention" not in legacy

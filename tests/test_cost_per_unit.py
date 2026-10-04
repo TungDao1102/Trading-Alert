@@ -535,14 +535,18 @@ def test_cost_slice_legacy_set_is_seven_keys() -> None:
     assert tuple(sorted(cost_slice(params))) == tuple(sorted(COST_KEYS))
 
 
-def test_cost_slice_v5_set_adds_exit_slippage() -> None:
+def test_cost_slice_v5_set_adds_exit_slippage_and_funding_convention() -> None:
     from src.backtest.costs import COST_KEYS, cost_slice
+    from src.backtest.semantics import FUNDING_CONVENTION
     from src.domain.registry import load_parameter_set
 
     params = load_parameter_set("trend-pullback", "baseline-v5").params
     sliced = cost_slice(params)
-    assert set(sliced) == {*COST_KEYS, "exit_slippage_rate"}
+    assert set(sliced) == {*COST_KEYS, "exit_slippage_rate", "funding_convention"}
     assert Decimal(str(sliced["exit_slippage_rate"])) == Decimal("0.0003")
+    assert sliced["funding_convention"] == FUNDING_CONVENTION
+    # The convention is a code constant (D-16), never read from a params/ file.
+    assert "funding_convention" not in params
 
 
 def test_cost_slice_missing_required_key_raises_bare_key_error() -> None:
@@ -555,22 +559,31 @@ def test_cost_slice_missing_required_key_raises_bare_key_error() -> None:
 
 
 def test_cost_keys_tuple_unchanged() -> None:
-    from src.backtest.costs import COST_KEYS
+    from src.backtest.costs import COST_KEYS, OPTIONAL_COST_KEYS, _NUMERIC_HASH_KEYS
 
     assert len(COST_KEYS) == 7
     assert "exit_slippage_rate" not in COST_KEYS
+    assert "funding_convention" not in COST_KEYS
+    assert "funding_convention" in OPTIONAL_COST_KEYS
+    # A string key: hashed as-is, never as canonical numeric text (D-36).
+    assert "funding_convention" not in _NUMERIC_HASH_KEYS
 
 
 @pytest.mark.parametrize(("strategy_id", "set_id"), V5_SETS)
-def test_v5_slice_hashes_over_eight_keys(strategy_id: str, set_id: str) -> None:
+def test_v5_slice_hashes_over_nine_keys(strategy_id: str, set_id: str) -> None:
     from src.backtest.costs import build_cost_model, cost_slice
+    from src.backtest.semantics import FUNDING_CONVENTION
     from src.domain.registry import load_parameter_set
 
     params = load_parameter_set(strategy_id, set_id).params
     model = build_cost_model(cost_slice(params))
     assert model.exit_slippage_rate == Decimal("0.0003")
+    assert model.funding_convention == FUNDING_CONVENTION
     legacy_hash = LEGACY_COST_HASHES[("trend-pullback", "baseline-v4")]
     assert model.cost_model_hash != legacy_hash
+    # Nine keys hashed: dropping the convention yields a different identity.
+    without = {k: v for k, v in cost_slice(params).items() if k != "funding_convention"}
+    assert build_cost_model(without).cost_model_hash != model.cost_model_hash
 
 
 def test_v5_sets_share_one_cost_hash() -> None:
@@ -622,7 +635,11 @@ def test_binding_v5_set_refuses_seven_key_model() -> None:
     from src.backtest.binding import CostModelBindingMismatch
     from src.backtest.costs import build_cost_model
 
-    seven = {k: v for k, v in _v5_cost_dict().items() if k != "exit_slippage_rate"}
+    seven = {
+        k: v
+        for k, v in _v5_cost_dict().items()
+        if k not in {"exit_slippage_rate", "funding_convention"}
+    }
     with pytest.raises(CostModelBindingMismatch):
         _assemble_v5(build_cost_model(seven))
 
@@ -676,7 +693,11 @@ def test_freeze_v5_set_pins_and_refuses_seven_key_model() -> None:
     )
     assert epoch.parameter_set_id == "baseline-v5"
 
-    seven = {k: v for k, v in _v5_cost_dict().items() if k != "exit_slippage_rate"}
+    seven = {
+        k: v
+        for k, v in _v5_cost_dict().items()
+        if k not in {"exit_slippage_rate", "funding_convention"}
+    }
     with pytest.raises(CostModelBindingMismatch):
         pin_stream_epoch(
             strategy_id="trend-pullback",
@@ -684,3 +705,61 @@ def test_freeze_v5_set_pins_and_refuses_seven_key_model() -> None:
             opened_at_utc=opened,
             cost_model=build_cost_model(seven),
         )
+
+
+# --------------------------------------------------------------------------- #
+# Plan 14-04 — funding_convention joins cost identity (D-16, D-36).
+# --------------------------------------------------------------------------- #
+
+
+def test_funding_convention_changes_cost_hash() -> None:
+    from src.backtest.costs import build_cost_model
+    from src.backtest.semantics import FUNDING_CONVENTION
+
+    base = _cost(exit_slippage_rate="0.0003")
+    with_convention = _cost(exit_slippage_rate="0.0003", funding_convention=FUNDING_CONVENTION)
+    assert (
+        build_cost_model(with_convention).cost_model_hash
+        != build_cost_model(base).cost_model_hash
+    )
+    assert build_cost_model(with_convention).funding_convention == FUNDING_CONVENTION
+    assert build_cost_model(base).funding_convention is None
+
+
+def test_funding_convention_hashed_as_is_over_nine_keys() -> None:
+    from src.backtest.costs import CostModel, _cost_hash_payload, build_cost_model
+    from src.backtest.semantics import FUNDING_CONVENTION
+
+    model = build_cost_model(
+        _cost(exit_slippage_rate="0.0003", funding_convention=FUNDING_CONVENTION)
+    )
+    assert isinstance(model, CostModel)
+    payload = _cost_hash_payload(model)
+    assert len(payload) == 9
+    assert payload["funding_convention"] == FUNDING_CONVENTION
+
+
+def test_funding_convention_unknown_value_raises_naming_accepted_value() -> None:
+    from src.backtest.costs import build_cost_model
+    from src.backtest.semantics import FUNDING_CONVENTION
+
+    with pytest.raises(ValueError, match=FUNDING_CONVENTION):
+        build_cost_model(_cost(exit_slippage_rate="0.0003", funding_convention="OTHER_V2"))
+
+
+@pytest.mark.parametrize("bad", [None, 3, "", b"MARK_NOTIONAL_SIGNED_V1"])
+def test_funding_convention_non_string_raises_type_error(bad: object) -> None:
+    from src.backtest.costs import build_cost_model
+
+    with pytest.raises(TypeError, match="funding_convention"):
+        build_cost_model(_cost(exit_slippage_rate="0.0003", funding_convention=bad))
+
+
+def test_binding_v5_set_refuses_model_lacking_funding_convention() -> None:
+    from src.backtest.binding import CostModelBindingMismatch
+    from src.backtest.costs import build_cost_model
+
+    no_convention = {k: v for k, v in _v5_cost_dict().items() if k != "funding_convention"}
+    assert "exit_slippage_rate" in no_convention
+    with pytest.raises(CostModelBindingMismatch):
+        _assemble_v5(build_cost_model(no_convention))
