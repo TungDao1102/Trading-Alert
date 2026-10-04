@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.core.types import Candle
 from src.domain.trade_plan import TradePlan
@@ -33,6 +34,9 @@ from src.execution.placement import (
 from src.risk.types import ConstraintSnapshot
 
 from .semantics import POSITION_MODE, TP1_QUANTITY_FRACTION
+
+if TYPE_CHECKING:
+    from .lifecycle import PlanState
 
 _LONG = "LONG"
 _SHORT = "SHORT"
@@ -61,6 +65,25 @@ class ProtectiveReject:
     """
 
     reason_code: str
+
+
+@dataclass(frozen=True)
+class ExitLeg:
+    """RED skeleton of one exit leg (replaced in the GREEN commit)."""
+
+    kind: str
+    price: Decimal
+    quantity: Decimal
+    time_utc: datetime
+    gap_through_stop: bool = False
+
+
+def resolve_mark_minute(
+    *, state: PlanState, mark_minute: Candle, is_fill_minute: bool
+) -> tuple[ExitLeg, ...]:
+    """RED skeleton: no legs (wrong on purpose)."""
+    del state, mark_minute, is_fill_minute
+    return ()
 
 
 def take_profit_levels(plan: TradePlan) -> tuple[Decimal, Decimal]:
