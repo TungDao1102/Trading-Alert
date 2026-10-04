@@ -42,6 +42,8 @@ SCANNED_FILES = (
     "src/risk/gating.py",
     # Phase 5 plan 05-02 — portfolio gates (D-03/D-04).
     "src/risk/portfolio.py",
+    # Phase 14 plan 14-01 — the single R-denominator function (D-20).
+    "src/risk/realized_risk.py",
     # Phase 6 plan 06-03 — pure backtest package (D-05).
     "src/backtest/__init__.py",
     "src/backtest/simulator.py",
@@ -125,11 +127,35 @@ def _find_float_calls(src: str) -> list[tuple[int, str]]:
     return sorted(found)
 
 
+# Phase 14 plan 14-01: packages scanned by glob, so a module added by a later plan can
+# never be silently skipped by the explicit list above (registration trap, D-26).
+SCANNED_GLOBS = ("src/backtest/*.py",)
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _glob_scanned_files() -> list[str]:
+    """Return every file matched by `SCANNED_GLOBS` as sorted repo-relative posix paths."""
+    root = _repo_root()
+    matched: set[str] = set()
+    for pattern in SCANNED_GLOBS:
+        matched.update(p.relative_to(root).as_posix() for p in root.glob(pattern))
+    return sorted(matched)
+
+
+def _all_scanned_files() -> list[str]:
+    """The explicit list first (kept in order), then any glob match not already listed."""
+    extra = [rel for rel in _glob_scanned_files() if rel not in SCANNED_FILES]
+    return [*SCANNED_FILES, *extra]
+
+
 def test_domain_mapper_registry_path_has_no_float_call() -> None:
-    """Beh. 1: zero float shapes across the scanned list."""
-    repo_root = Path(__file__).resolve().parent.parent
+    """Beh. 1: zero float shapes across the scanned list and the scanned globs."""
+    repo_root = _repo_root()
     offenders: dict[str, list[tuple[int, str]]] = {}
-    for rel in SCANNED_FILES:
+    for rel in _all_scanned_files():
         path = repo_root / rel
         assert path.is_file(), f"guard file list stale — missing: {rel}"
         found = _find_float_calls(path.read_text(encoding="utf-8"))
@@ -138,6 +164,25 @@ def test_domain_mapper_registry_path_has_no_float_call() -> None:
     assert not offenders, (
         f"Decimal-only invariant violated (D-12) — float shapes found: {offenders}"
     )
+
+
+def test_every_backtest_module_is_scanned_by_the_float_guard() -> None:
+    """Every src/backtest/*.py file, including ones later plans add, is float-scanned."""
+    backtest_files = sorted(
+        p.relative_to(_repo_root()).as_posix() for p in (_repo_root() / "src/backtest").glob("*.py")
+    )
+    assert {
+        "src/backtest/semantics.py",
+        "src/backtest/series.py",
+        "src/backtest/entry.py",
+        "src/backtest/exits.py",
+        "src/backtest/lifecycle.py",
+        "src/backtest/records.py",
+        "src/backtest/validator.py",
+    } <= set(backtest_files)
+    scanned = set(_all_scanned_files())
+    missing = [rel for rel in backtest_files if rel not in scanned]
+    assert not missing, f"src/backtest modules not covered by the float guard: {missing}"
 
 
 def test_float_guard_catches_literals_and_decimal_float() -> None:
