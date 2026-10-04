@@ -44,7 +44,7 @@ patterns-established:
 
 requirements-completed: [BKTS-04]
 
-duration: 25min
+duration: 15min
 completed: 2026-10-04
 status: complete
 ---
@@ -55,7 +55,7 @@ status: complete
 
 ## Performance
 
-- **Duration:** about 25 min (start time was not captured in a shell variable; estimated from commit times)
+- **Duration:** about 15 min wall time (21:45 to 22:00 +07:00 by commit timestamps, including the 9 min full-suite run; the start time was not captured in a shell variable)
 - **Completed:** 2026-10-04
 - **Tasks:** 2 (1 tracer, 1 auto, both tdd)
 - **Files modified:** 3 (1 created, 2 modified)

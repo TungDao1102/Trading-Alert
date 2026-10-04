@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 14
 current_phase_name: backtest-causality-rewrite
 status: executing
-stopped_at: Completed 14-05-PLAN.md
-last_updated: "2026-10-04T14:45:39.752Z"
+stopped_at: Completed 14-06-PLAN.md
+last_updated: "2026-10-04T15:00:55.830Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 14 execution started
-state_head: cccf3fa305fd18c680f5cf26a0ae83b05cabe531
+state_head: 72d5764598461dd03c477d42535c79bd730fc46f
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 125
-  completed_plans: 113
+  completed_plans: 114
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 14 (backtest-causality-rewrite) — EXECUTING
-Plan: 6 of 16
+Plan: 7 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 -- Phase 14 execution started
 
@@ -160,6 +160,7 @@ Progress: [█████░░░░░] 46%
 | Phase 14 P03 | 7 min | 2 tasks | 2 files |
 | Phase 14 P04 | 35min | 3 tasks | 18 files |
 | Phase 14 P05 | 25 min | 3 tasks | 4 files |
+| Phase 14 P06 | 15 min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -387,6 +388,7 @@ Recent decisions affecting current work:
 - [Phase 14]: 14-04: funding_convention is a presence-driven string cost key appended by cost_slice for sizeable sets; funding data identity rides in data_snapshot_id plus allowed_gaps (D-36)
 - [Phase 14]: 14-05: exhausted equity (<= 0) at a UTC day roll resolves the rate thresholds to 0 (DAILY_STOP, all caps reject) instead of raising; equity_positive lets the engine stop before AccountState raises
 - [Phase 14]: 14-05: point-in-time constraints clamp the snapshot metadata_observed_at_utc to the bar close (ttl timedelta(0)) and return the true observed_at and an extrapolated flag separately; src/risk untouched
+- [Phase 14]: 14-06: live R denominator is realized_risk_for_fill over an explicit sized_risks input (D-29, not persisted); absent input stays INCOMPLETE(NO_RISK_VALUE), overfill is MALFORMED_ROW
 
 ### Pending Todos
 
@@ -441,6 +443,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-04T14:45:24.947Z
-Stopped at: Completed 14-05-PLAN.md
+Last session: 2026-10-04T15:00:55.531Z
+Stopped at: Completed 14-06-PLAN.md
 Resume file: None
