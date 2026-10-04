@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 14
 current_phase_name: backtest-causality-rewrite
 status: executing
-stopped_at: Completed 14-01-PLAN.md
-last_updated: "2026-10-04T13:40:47.712Z"
+stopped_at: Completed 14-02-PLAN.md
+last_updated: "2026-10-04T13:52:12.454Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 14 execution started
-state_head: bf2e8153c43896054e4266d8c8dc9e75a3bbf9b8
+state_head: 7ff2db4876bb223a1565f97b35f7b292c82e758e
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 125
-  completed_plans: 109
+  completed_plans: 110
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 14 (backtest-causality-rewrite) — EXECUTING
-Plan: 2 of 16
+Plan: 3 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 -- Phase 14 execution started
 
@@ -156,6 +156,7 @@ Progress: [█████░░░░░] 46%
 | Phase 17 P14 | 25 min | 2 tasks | 2 files |
 | Phase 17 P15 | 36 min | 2 tasks | 11 files |
 | Phase 14 P01 | 20 min | 3 tasks | 16 files |
+| Phase 14 P02 | 15min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -378,6 +379,7 @@ Recent decisions affecting current work:
 - [Phase 17]: D051 recorded (Phase 17 persistence layer); the six transition tables stay an auto-mode default awaiting user confirmation (DOMN-04 manual check) — Research C3: tables were authored in Phase 17, GLOSSARY 11, user to confirm
 - [Phase 14]: 14-01: TP1_QUANTITY_FRACTION is the code constant Decimal('0.5') in src/backtest/semantics.py covered by SIMULATOR_SEMANTICS_VERSION 2.0.0 (D-27), not a registry tunable — User-resolved 2026-10-04; keeps params/ untouched and ties the policy to simulator identity
 - [Phase 14]: 14-01: validate_trade_record requires planned_quantity on filled records and ListMinuteSource raises on an unknown symbol (fail closed) — A missing planned quantity or series cannot be compared or read as no price moves
+- [Phase 14]: 14-02: advance() raises when a bar does not close at end_inclusive; invalidation skipped when the window end is after expiry (EXPIRED wins); cancel_plan accepts only EXPIRED/INVALIDATION_CANCEL/DAILY_STOP_CANCEL on RESTING plans
 
 ### Pending Todos
 
@@ -432,6 +434,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-04T13:40:47.335Z
-Stopped at: Completed 14-01-PLAN.md
+Last session: 2026-10-04T13:52:12.160Z
+Stopped at: Completed 14-02-PLAN.md
 Resume file: None

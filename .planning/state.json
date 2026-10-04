@@ -76,7 +76,7 @@
     {
       "number": "14",
       "name": "Backtest Simulator Causality Rewrite",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "15",
@@ -149,5 +149,5 @@
     "label": "Advance to the next step",
     "reason": "Phase 14 of 29 · executing"
   },
-  "updated_at": "2026-10-04T13:40:42.346Z"
+  "updated_at": "2026-10-04T13:52:08.954Z"
 }
