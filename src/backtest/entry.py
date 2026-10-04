@@ -18,6 +18,7 @@ mirroring the Phase-4 D-10 / Phase-5 D-05 purity precedent.
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 
 from src.core._decimal import _add, _sub
@@ -45,6 +46,16 @@ def snapped_limit_price(*, plan: TradePlan, direction: str, price_tick_size: Dec
         price_tick_size=price_tick_size,
         direction=entry_limit_rounding(candidate_position_side=direction),
     )
+
+
+def is_minute_eligible(*, minute: Candle, expiry_utc: datetime) -> bool:
+    """True when a minute may still fill the plan: its close is at or before expiry (D-04, D-33).
+
+    The comparison is `<=` against the minute's own close time, so the last eligible
+    minute is the one closing exactly at `expiry_utc` and the next minute is not. Expiry
+    is judged against the simulated minute, never against a fixture clock.
+    """
+    return minute.close_time_utc <= expiry_utc
 
 
 def is_trade_through(

@@ -30,9 +30,9 @@ from decimal import Decimal
 from src.core.types import Candle
 from src.domain.trade_plan import TradePlan
 
-from .entry import is_touch_only, is_trade_through, snapped_limit_price
+from .entry import is_minute_eligible, is_touch_only, is_trade_through, snapped_limit_price
 from .exits import ProtectiveLevels, is_sl_touched, sl_trigger_price
-from .semantics import ENTRY_FILLED, EXIT_SL, PARTIAL_FILL
+from .semantics import ENTRY_FILLED, EXIT_SL, EXPIRED, PARTIAL_FILL
 from .series import MinuteSource
 
 PHASE_RESTING = "RESTING"
@@ -211,6 +211,23 @@ def _stop_out(state: PlanState, minute: Candle) -> tuple[PlanState, LifecycleEve
     return closed, event
 
 
+def _close_resting(
+    state: PlanState, *, entry_kind: str, at_utc: datetime
+) -> tuple[PlanState, LifecycleEvent]:
+    """End a resting plan without a fill: CLOSED with `entry_kind` and a CANCEL event."""
+    closed = replace(state, phase=PHASE_CLOSED, entry_kind=entry_kind, resolved_at_utc=at_utc)
+    event = LifecycleEvent(
+        kind=EVENT_CANCEL,
+        symbol=state.symbol,
+        trade_plan_id=state.plan.trade_plan_id,
+        time_utc=at_utc,
+        price=None,
+        quantity=None,
+        entry_kind=entry_kind,
+    )
+    return closed, event
+
+
 def advance(
     state: PlanState,
     *,
@@ -244,7 +261,10 @@ def advance(
     mark = tuple(source.mark_minutes(state.symbol, start, end_inclusive))
 
     if current.phase == PHASE_RESTING:
+        expiry_utc = current.plan.expiry_utc
         for minute in source.trade_minutes(state.symbol, start, end_inclusive):
+            if not is_minute_eligible(minute=minute, expiry_utc=expiry_utc):
+                continue
             if is_trade_through(
                 minute=minute,
                 limit_price=current.limit_price,
@@ -272,6 +292,9 @@ def advance(
                 direction=current.direction,
             ):
                 current = replace(current, touch_no_fill_count=current.touch_no_fill_count + 1)
+        if current.phase == PHASE_RESTING and end_inclusive >= expiry_utc:
+            current, expire_event = _close_resting(current, entry_kind=EXPIRED, at_utc=expiry_utc)
+            events.append(expire_event)
 
     if current.phase == PHASE_OPEN and current.entry_time_utc is not None:
         for mark_minute in mark:
