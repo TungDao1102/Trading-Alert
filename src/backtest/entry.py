@@ -5,6 +5,10 @@ snapped onto the tick grid with the live rounding rule (LONG floors, SHORT ceils
 The helpers of `src/execution/placement.py` are called, never re-derived, so the
 backtest cannot drift from the order the exchange sees (D-07).
 
+A resting plan is invalidated only at a strategy-bar close: a LONG when the bar close is
+below the plan's CANDLE_CLOSE level, a SHORT when it is above (D-05, D-35). The level is
+the plan's own `stop_loss_price` as written by the planner.
+
 A LONG fills only when a trade-price 1m low is at or below `limit - tick`; a SHORT
 only when a 1m high is at or above `limit + tick` (trade-through of at least one
 tick). A minute that merely reaches the limit is a touch with no fill. The fill
@@ -18,8 +22,9 @@ mirroring the Phase-4 D-10 / Phase-5 D-05 purity precedent.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from src.core._decimal import _add, _sub
 from src.core.types import Candle
@@ -28,6 +33,7 @@ from src.execution.placement import derive_limit_price, entry_limit_rounding, qu
 
 _LONG = "LONG"
 _SHORT = "SHORT"
+_CANDLE_CLOSE = "CANDLE_CLOSE"
 
 
 def _require_direction(direction: str) -> None:
@@ -91,3 +97,38 @@ def is_touch_only(
     ):
         return False
     return is_touch(minute=minute, limit_price=limit_price, direction=direction)
+
+
+def invalidation_level(plan: TradePlan) -> Decimal:
+    """Parse the plan's CANDLE_CLOSE invalidation level as a `Decimal` (D-35).
+
+    Fails closed: an unparseable rule, a basis other than CANDLE_CLOSE, or a missing,
+    non-string or non-numeric level raises `ValueError` rather than guessing a level.
+    """
+    try:
+        rule = json.loads(plan.invalidation_rule_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalidation_rule_json is not valid JSON: {exc}") from exc
+    if not isinstance(rule, dict):
+        raise ValueError("invalidation_rule_json must be a JSON object")
+    basis = rule.get("basis")
+    if basis != _CANDLE_CLOSE:
+        raise ValueError(f"invalidation basis must be CANDLE_CLOSE, got {basis!r}")
+    raw = rule.get("level")
+    if not isinstance(raw, str):
+        raise ValueError(f"invalidation level must be a decimal string, got {raw!r}")
+    try:
+        level = Decimal(raw)
+    except InvalidOperation as exc:
+        raise ValueError(f"invalidation level is not a decimal: {raw!r}") from exc
+    if not level.is_finite():
+        raise ValueError(f"invalidation level must be finite, got {raw!r}")
+    return level
+
+
+def is_invalidated(*, bar_close_price: Decimal, level: Decimal, direction: str) -> bool:
+    """True when a strategy-bar close is strictly beyond the invalidation level (D-05, D-35)."""
+    _require_direction(direction)
+    if direction == _LONG:
+        return bar_close_price < level
+    return bar_close_price > level

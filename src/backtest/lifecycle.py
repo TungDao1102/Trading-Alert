@@ -12,9 +12,10 @@ the same output. Minutes are examined in order; entry detection uses trade-price
 minutes and stop detection uses mark-price minutes (D-08, D-10). On the fill minute
 only the stop can trigger (D-33).
 
-This plan (14-01) is the tracer slice: resting entry, one-tick trade-through fill,
-mark-price stop. Expiry, invalidation and cancellation land in plan 14-02, the
-TP1/TP2 ladder, stop gaps and END_OF_DATA in plan 14-07.
+Plan 14-01 built the tracer slice (resting entry, one-tick trade-through fill, mark-price
+stop); plan 14-02 added simulated-minute expiry, CANDLE_CLOSE invalidation, `cancel_plan`
+and the resting half of `finalize_at_data_end`. The TP1/TP2 ladder, stop gaps and the
+OPEN-state END_OF_DATA close land in plan 14-07.
 
 The module imports NOTHING from Polars/pandas/NumPy/Binance SDK/
 SQLAlchemy/Pydantic — stdlib + Decimal + `src/core/_decimal.py` only,
@@ -30,9 +31,24 @@ from decimal import Decimal
 from src.core.types import Candle
 from src.domain.trade_plan import TradePlan
 
-from .entry import is_minute_eligible, is_touch_only, is_trade_through, snapped_limit_price
+from .entry import (
+    invalidation_level,
+    is_invalidated,
+    is_minute_eligible,
+    is_touch_only,
+    is_trade_through,
+    snapped_limit_price,
+)
 from .exits import ProtectiveLevels, is_sl_touched, sl_trigger_price
-from .semantics import ENTRY_FILLED, EXIT_SL, EXPIRED, PARTIAL_FILL
+from .semantics import (
+    DAILY_STOP_CANCEL,
+    ENTRY_FILLED,
+    EXIT_SL,
+    EXPIRED,
+    INVALIDATION_CANCEL,
+    PARTIAL_FILL,
+    PENDING_AT_DATA_END,
+)
 from .series import MinuteSource
 
 PHASE_RESTING = "RESTING"
@@ -240,21 +256,29 @@ def advance(
 
     `start_exclusive` is clamped to at least `state.signal_close_utc`, so the signal
     bar's own minutes can never be read. `bar` is the strategy bar closing at
-    `end_inclusive`, or `None` when the window ends mid-bar (a cancellation instant);
-    it is reserved for the closed-candle invalidation rule of plan 14-02.
+    `end_inclusive` (anything else raises), or `None` when the window ends mid-bar (a
+    cancellation instant), in which case invalidation is never evaluated (D-05).
 
-    RESTING: the first trade minute that trades through the limit fills the plan; a
-    minute that only reaches the limit increments `touch_no_fill_count`. On the fill
-    minute only the stop is checked, on the mark minute with the same open time (D-33).
+    RESTING: minutes closing after `plan.expiry_utc` are skipped (D-04, D-33). The first
+    eligible trade minute that trades through the limit fills the plan; a minute that
+    only reaches the limit increments `touch_no_fill_count`. On the fill minute only the
+    stop is checked, on the mark minute with the same open time (D-33). Without a fill,
+    a strategy bar closing at `end_inclusive` beyond the CANDLE_CLOSE level cancels the
+    plan INVALIDATION_CANCEL (D-05, D-35); otherwise a window reaching `expiry_utc` ends
+    it EXPIRED at `expiry_utc`. Precedence: fill, then invalidation, then expiry.
     OPEN: mark minutes opening at or after the entry time are walked and the first stop
     touch exits at the trigger price.
     """
-    del bar  # reserved for plan 14-02 (CANDLE_CLOSE invalidation)
     if state.phase == PHASE_CLOSED:
         return state, ()
     start = max(start_exclusive, state.signal_close_utc)
     if end_inclusive <= start:
         return state, ()
+    if bar is not None and bar.close_time_utc != end_inclusive:
+        raise ValueError(
+            f"bar closing {bar.close_time_utc.isoformat()} must close at the window end "
+            f"{end_inclusive.isoformat()}; pass bar=None for a window that ends mid-bar"
+        )
 
     events: list[LifecycleEvent] = []
     current = state
@@ -292,6 +316,22 @@ def advance(
                 direction=current.direction,
             ):
                 current = replace(current, touch_no_fill_count=current.touch_no_fill_count + 1)
+        if (
+            current.phase == PHASE_RESTING
+            and bar is not None
+            and end_inclusive <= expiry_utc
+            and is_invalidated(
+                bar_close_price=bar.close,
+                level=invalidation_level(current.plan),
+                direction=current.direction,
+            )
+        ):
+            # Fill first (above), invalidation second, expiry last: a bar closing exactly at
+            # expiry_utc that is beyond the level is INVALIDATION_CANCEL, not EXPIRED (D-35).
+            current, cancel_event = _close_resting(
+                current, entry_kind=INVALIDATION_CANCEL, at_utc=end_inclusive
+            )
+            events.append(cancel_event)
         if current.phase == PHASE_RESTING and end_inclusive >= expiry_utc:
             current, expire_event = _close_resting(current, entry_kind=EXPIRED, at_utc=expiry_utc)
             events.append(expire_event)
@@ -310,3 +350,62 @@ def advance(
                 break
 
     return current, tuple(events)
+
+
+_CANCEL_KINDS = frozenset({EXPIRED, INVALIDATION_CANCEL, DAILY_STOP_CANCEL})
+
+
+def cancel_plan(
+    state: PlanState, *, entry_kind: str, at_utc: datetime
+) -> tuple[PlanState, tuple[LifecycleEvent, ...]]:
+    """Cancel a RESTING plan at an arbitrary instant (D-32, D033 DAILY_STOP_CANCEL).
+
+    Returns the CLOSED state with `entry_kind` and a CANCEL event at `at_utc`. An OPEN
+    position is never cancelled here: D033 keeps the stop of an open position, so asking
+    to cancel one raises `ValueError`, as does a CLOSED state or a non-cancel `entry_kind`.
+    """
+    if entry_kind not in _CANCEL_KINDS:
+        raise ValueError(f"entry_kind must be one of {sorted(_CANCEL_KINDS)}, got {entry_kind!r}")
+    _require_utc(at_utc, "at_utc")
+    if state.phase == PHASE_OPEN:
+        raise ValueError("cannot cancel an OPEN position: its stop stays active (D033)")
+    if state.phase != PHASE_RESTING:
+        raise ValueError(f"cannot cancel a plan in phase {state.phase}")
+    closed, event = _close_resting(state, entry_kind=entry_kind, at_utc=at_utc)
+    return closed, (event,)
+
+
+def finalize_at_data_end(
+    state: PlanState, *, data_end_utc: datetime
+) -> tuple[PlanState, tuple[LifecycleEvent, ...]]:
+    """Resolve a plan when the data ends (D-34).
+
+    A RESTING plan becomes PENDING_AT_DATA_END (never EXPIRED) with a PENDING event at
+    `data_end_utc`. A CLOSED plan is returned unchanged. An OPEN position raises
+    `ValueError`: its END_OF_DATA close (D-06) is owned by plan 14-07, so no open position
+    can silently pass through this function.
+    """
+    _require_utc(data_end_utc, "data_end_utc")
+    if state.phase == PHASE_CLOSED:
+        return state, ()
+    if state.phase == PHASE_OPEN:
+        raise ValueError(
+            "an OPEN position at data end needs the END_OF_DATA close (plan 14-07); "
+            "finalize_at_data_end cannot pass it through"
+        )
+    pending = replace(
+        state,
+        phase=PHASE_CLOSED,
+        entry_kind=PENDING_AT_DATA_END,
+        resolved_at_utc=data_end_utc,
+    )
+    event = LifecycleEvent(
+        kind=EVENT_PENDING,
+        symbol=state.symbol,
+        trade_plan_id=state.plan.trade_plan_id,
+        time_utc=data_end_utc,
+        price=None,
+        quantity=None,
+        entry_kind=PENDING_AT_DATA_END,
+    )
+    return pending, (event,)
