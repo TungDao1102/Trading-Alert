@@ -583,7 +583,7 @@ Plans:
 
 **Audit refs**: F-120, F-901, F-902, F-102, F-804, F-905, F-305, F-204, F-123, F-118, F-602, F-805, F-904; carry-over from Phase 6 (`.planning/phases/06-backtest-simulator-experiment-registry/06-VERIFICATION.md`)
 
-**Plans:** 6/16 plans executed
+**Plans:** 7/16 plans executed
 
 Plans:
 **Wave 1**
@@ -597,7 +597,7 @@ Plans:
 - [x] 14-06-PLAN.md — Live R denominator wiring (D-29) and backtest/live R parity test
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 14-07-PLAN.md — Exit engine: live TP1/TP2 ladder, mark-price triggers, stop-first, fill-minute rule, stop gaps, fallback at bar close, END_OF_DATA, per-leg costs
+- [x] 14-07-PLAN.md — Exit engine: live TP1/TP2 ladder, mark-price triggers, stop-first, fill-minute rule, stop gaps, fallback at bar close, END_OF_DATA, per-leg costs
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 14-08-PLAN.md — v2 engine: case-input v2, event loop with D-18 ordering, windowed strategy and scripted front-ends, ledger-fed risk, one active per symbol, DAILY_STOP cancel, TP1 sizeability reject, funding wiring
@@ -1015,7 +1015,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 12. Fee + Cost Model Correctness | 11/11 | Complete    | 2026-09-30 |
 | 13. Research Data Foundation Fixes | 13/13 | Complete    | 2026-10-03 |
 | 13.1. Deployment & CI | 12/12 | Complete | 2026-10-04 |
-| 14. Backtest Simulator Causality Rewrite | 6/16 | In Progress|  |
+| 14. Backtest Simulator Causality Rewrite | 7/16 | In Progress|  |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
 | 17. Operational Persistence Layer | 15/15 | In Progress|  |

@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 14
 current_phase_name: backtest-causality-rewrite
 status: executing
-stopped_at: Completed 14-06-PLAN.md
-last_updated: "2026-10-04T15:00:55.830Z"
+stopped_at: Completed 14-07-PLAN.md
+last_updated: "2026-10-04T15:42:11.753Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 14 execution started
-state_head: 72d5764598461dd03c477d42535c79bd730fc46f
+state_head: 23be75718c487a24f451ed016e8437700ac12232
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 125
-  completed_plans: 114
+  completed_plans: 115
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 14 (backtest-causality-rewrite) — EXECUTING
-Plan: 7 of 16
+Plan: 8 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 -- Phase 14 execution started
 
@@ -161,6 +161,7 @@ Progress: [█████░░░░░] 46%
 | Phase 14 P04 | 35min | 3 tasks | 18 files |
 | Phase 14 P05 | 25 min | 3 tasks | 4 files |
 | Phase 14 P06 | 15 min | 2 tasks | 3 files |
+| Phase 14 P07 | 36 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -389,6 +390,8 @@ Recent decisions affecting current work:
 - [Phase 14]: 14-05: exhausted equity (<= 0) at a UTC day roll resolves the rate thresholds to 0 (DAILY_STOP, all caps reject) instead of raising; equity_positive lets the engine stop before AccountState raises
 - [Phase 14]: 14-05: point-in-time constraints clamp the snapshot metadata_observed_at_utc to the bar close (ttl timedelta(0)) and return the true observed_at and an extrapolated flag separately; src/risk untouched
 - [Phase 14]: 14-06: live R denominator is realized_risk_for_fill over an explicit sized_risks input (D-29, not persisted); absent input stays INCOMPLETE(NO_RISK_VALUE), overfill is MALFORMED_ROW
+- [Phase 14]: Plan 14-07: a hole in a strategy bar's mark minutes resolves the rest of the bar once at the bar close from the trade-price bar range, stop-first (minutes after the hole unused); a fill inside that bar defers take-profits to the next bar and only the stop resolves — D-12/D-33: fallback never resolves mid-bar and never optimistically; the bar range includes pre-fill minutes so the fill-bar fallback is stop-only
+- [Phase 14]: Plan 14-07: new_plan_state takes sized levels from protective_levels_for_fill (TP1 half via size_protectives_to_filled_qty, D-27); finalize_at_data_end needs the minute source to close an OPEN position as END_OF_DATA at the last mark close with exit_slippage_rate; CANCEL and PENDING events book zero — D-06/D-11/D-34: live ladder mirrored exactly, no time stop exists (searched), END_OF_DATA flagged and never booked as SL or TP
 
 ### Pending Todos
 
@@ -443,6 +446,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-04T15:00:55.531Z
-Stopped at: Completed 14-06-PLAN.md
+Last session: 2026-10-04T15:42:02.657Z
+Stopped at: Completed 14-07-PLAN.md
 Resume file: None
