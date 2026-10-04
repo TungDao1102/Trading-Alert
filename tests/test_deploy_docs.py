@@ -216,10 +216,23 @@ def _run_refresh(
 ) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["MSYS_NO_PATHCONV"] = "1"
+    command = [_bash(), REFRESH.as_posix(), *args]
     if path_prefix is not None:
-        env["PATH"] = f"{path_prefix.as_posix()}{os.pathsep}{env['PATH']}"
+        # Git Bash re-orders PATH when it starts (/mingw64/bin and /usr/bin first, and a nested
+        # bash does it again), so a stub directory prepended through the environment loses to the
+        # real curl/git. BASH_ENV is sourced after that start-up, so prepend it from there, as a
+        # bash-native path, and the stubs win on Windows and Linux alike.
+        hook = path_prefix / "stub-path.sh"
+        hook.write_text(
+            'if command -v cygpath >/dev/null 2>&1; then d="$(cygpath -u "$STUB_DIR")"; '
+            'else d="$STUB_DIR"; fi\nPATH="$d:$PATH"\nexport PATH\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        env["STUB_DIR"] = path_prefix.as_posix()
+        env["BASH_ENV"] = hook.as_posix()
     return subprocess.run(
-        [_bash(), REFRESH.as_posix(), *args],
+        command,
         capture_output=True,
         text=True,
         check=False,
