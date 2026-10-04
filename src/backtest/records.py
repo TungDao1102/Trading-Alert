@@ -31,6 +31,7 @@ from src.domain.canonical import sha256_hex
 from src.risk.realized_risk import realized_risk_for_fill
 
 from .costs import CostModel
+from .exits import LEG_TP1
 from .lifecycle import (
     EVENT_EXIT,
     EVENT_FILL,
@@ -45,10 +46,6 @@ from .validator import validate_trade_record
 BOOKING_FILL = "FILL"
 BOOKING_TP1 = "TP1"
 BOOKING_EXIT = "EXIT"
-
-# Leg label of the TP1 partial. It is not an exit kind (a position never ends at TP1), so it
-# lives here beside the per-leg cost rules rather than in `semantics.EXIT_KINDS`.
-LEG_TP1 = "TP1"
 
 
 @dataclass(frozen=True)

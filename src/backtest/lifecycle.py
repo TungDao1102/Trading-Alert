@@ -39,12 +39,11 @@ from .entry import (
     is_trade_through,
     snapped_limit_price,
 )
-from .exits import ProtectiveLevels, is_sl_touched, is_tp_touched, sl_trigger_price
+from .exits import LEG_TP1, ExitLeg, ProtectiveLevels, resolve_mark_minute, sl_trigger_price
 from .semantics import (
     DAILY_STOP_CANCEL,
     ENTRY_FILLED,
-    EXIT_SL,
-    EXIT_TP2,
+    EXIT_KINDS,
     EXPIRED,
     INVALIDATION_CANCEL,
     PARTIAL_FILL,
@@ -206,84 +205,74 @@ def _fill(state: PlanState, minute: Candle) -> tuple[PlanState, LifecycleEvent]:
     return filled, event
 
 
-def _stop_out(state: PlanState, minute: Candle) -> tuple[PlanState, LifecycleEvent]:
-    """Exit the whole remaining position at the stop trigger (no price improvement)."""
-    exit_quantity = state.remaining_quantity
+def _apply_leg(state: PlanState, leg: ExitLeg) -> tuple[PlanState, LifecycleEvent]:
+    """Apply one exit leg: TP1 reduces the position, every other kind closes the remainder.
+
+    A TP1 leg lowers `remaining_quantity` and records `tp1_quantity`, `tp1_price` and
+    `tp1_time_utc` while the stop level stays unchanged (D-11). SL, TP2 and END_OF_DATA legs
+    close the plan at the leg price and time; a gapped stop sets `gap_through_stop`.
+    """
+    remaining = state.remaining_quantity
+    if state.phase != PHASE_OPEN or remaining is None:
+        raise ValueError(f"cannot apply a {leg.kind} leg to a {state.phase} plan")
+    if leg.quantity <= _ZERO or leg.quantity > remaining:
+        raise ValueError(f"{leg.kind} leg quantity {leg.quantity} must be in (0, {remaining}]")
+    if leg.kind == LEG_TP1:
+        reduced = replace(
+            state,
+            remaining_quantity=remaining - leg.quantity,
+            tp1_quantity=leg.quantity,
+            tp1_price=leg.price,
+            tp1_time_utc=leg.time_utc,
+        )
+        event = LifecycleEvent(
+            kind=EVENT_TP1,
+            symbol=state.symbol,
+            trade_plan_id=state.plan.trade_plan_id,
+            time_utc=leg.time_utc,
+            price=leg.price,
+            quantity=leg.quantity,
+            entry_kind=state.entry_kind,
+        )
+        return reduced, event
+    if leg.kind not in EXIT_KINDS:
+        raise ValueError(f"unknown exit leg kind {leg.kind!r}")
+    if leg.quantity != remaining:
+        raise ValueError(f"{leg.kind} must close the whole remaining quantity {remaining}")
     closed = replace(
         state,
         phase=PHASE_CLOSED,
         remaining_quantity=_ZERO,
-        exit_kind=EXIT_SL,
-        exit_price=state.levels.sl_trigger,
-        exit_time_utc=minute.close_time_utc,
-        resolved_at_utc=minute.close_time_utc,
+        exit_kind=leg.kind,
+        exit_price=leg.price,
+        exit_time_utc=leg.time_utc,
+        resolved_at_utc=leg.time_utc,
+        gap_through_stop=state.gap_through_stop or leg.gap_through_stop,
     )
     event = LifecycleEvent(
         kind=EVENT_EXIT,
         symbol=state.symbol,
         trade_plan_id=state.plan.trade_plan_id,
-        time_utc=minute.close_time_utc,
-        price=state.levels.sl_trigger,
-        quantity=exit_quantity,
+        time_utc=leg.time_utc,
+        price=leg.price,
+        quantity=leg.quantity,
         entry_kind=state.entry_kind,
-        exit_kind=EXIT_SL,
+        exit_kind=leg.kind,
     )
     return closed, event
 
 
-def _take_tp1(state: PlanState, minute: Candle) -> tuple[PlanState, LifecycleEvent]:
-    """Book the TP1 reduce-only partial at its trigger (live-sized, stop unchanged, D-11)."""
-    levels = state.levels
-    if (
-        levels.tp1_trigger is None
-        or levels.tp1_quantity is None
-        or state.remaining_quantity is None
-    ):
-        raise ValueError("TP1 needs levels sized by protective_levels_for_fill and an OPEN state")
-    reduced = replace(
-        state,
-        remaining_quantity=state.remaining_quantity - levels.tp1_quantity,
-        tp1_quantity=levels.tp1_quantity,
-        tp1_price=levels.tp1_trigger,
-        tp1_time_utc=minute.close_time_utc,
-    )
-    event = LifecycleEvent(
-        kind=EVENT_TP1,
-        symbol=state.symbol,
-        trade_plan_id=state.plan.trade_plan_id,
-        time_utc=minute.close_time_utc,
-        price=levels.tp1_trigger,
-        quantity=levels.tp1_quantity,
-        entry_kind=state.entry_kind,
-    )
-    return reduced, event
-
-
-def _take_tp2(state: PlanState, minute: Candle) -> tuple[PlanState, LifecycleEvent]:
-    """Close the remainder at the TP2 trigger (no price improvement)."""
-    trigger = state.levels.tp2_trigger
-    if trigger is None or state.remaining_quantity is None:
-        raise ValueError("TP2 needs levels sized by protective_levels_for_fill and an OPEN state")
-    closed = replace(
-        state,
-        phase=PHASE_CLOSED,
-        remaining_quantity=_ZERO,
-        exit_kind=EXIT_TP2,
-        exit_price=trigger,
-        exit_time_utc=minute.close_time_utc,
-        resolved_at_utc=minute.close_time_utc,
-    )
-    event = LifecycleEvent(
-        kind=EVENT_EXIT,
-        symbol=state.symbol,
-        trade_plan_id=state.plan.trade_plan_id,
-        time_utc=minute.close_time_utc,
-        price=trigger,
-        quantity=state.remaining_quantity,
-        entry_kind=state.entry_kind,
-        exit_kind=EXIT_TP2,
-    )
-    return closed, event
+def _apply_legs(
+    state: PlanState, legs: tuple[ExitLeg, ...], events: list[LifecycleEvent]
+) -> PlanState:
+    """Apply `legs` in order, appending their events; stops once the plan is closed."""
+    current = state
+    for leg in legs:
+        current, event = _apply_leg(current, leg)
+        events.append(event)
+        if current.phase == PHASE_CLOSED:
+            break
+    return current
 
 
 def _close_resting(
@@ -359,13 +348,13 @@ def advance(
                 for fill_mark in mark:
                     if fill_mark.open_time_utc != minute.open_time_utc:
                         continue
-                    if is_sl_touched(
-                        mark_minute=fill_mark,
-                        sl_trigger=current.levels.sl_trigger,
-                        direction=current.direction,
-                    ):
-                        current, exit_event = _stop_out(current, fill_mark)
-                        events.append(exit_event)
+                    current = _apply_legs(
+                        current,
+                        resolve_mark_minute(
+                            state=current, mark_minute=fill_mark, is_fill_minute=True
+                        ),
+                        events,
+                    )
                     break
                 break
             if is_touch_only(
@@ -399,34 +388,12 @@ def advance(
         for mark_minute in mark:
             if mark_minute.open_time_utc < current.entry_time_utc:
                 continue
-            if is_sl_touched(
-                mark_minute=mark_minute,
-                sl_trigger=current.levels.sl_trigger,
-                direction=current.direction,
-            ):
-                current, exit_event = _stop_out(current, mark_minute)
-                events.append(exit_event)
-                break
-            tp1_trigger = current.levels.tp1_trigger
-            tp2_trigger = current.levels.tp2_trigger
-            if (
-                tp1_trigger is not None
-                and current.tp1_quantity is None
-                and is_tp_touched(
-                    mark_minute=mark_minute, tp_trigger=tp1_trigger, direction=current.direction
-                )
-            ):
-                current, tp1_event = _take_tp1(current, mark_minute)
-                events.append(tp1_event)
-            if (
-                tp2_trigger is not None
-                and current.tp1_quantity is not None
-                and is_tp_touched(
-                    mark_minute=mark_minute, tp_trigger=tp2_trigger, direction=current.direction
-                )
-            ):
-                current, tp2_event = _take_tp2(current, mark_minute)
-                events.append(tp2_event)
+            current = _apply_legs(
+                current,
+                resolve_mark_minute(state=current, mark_minute=mark_minute, is_fill_minute=False),
+                events,
+            )
+            if current.phase == PHASE_CLOSED:
                 break
 
     return current, tuple(events)

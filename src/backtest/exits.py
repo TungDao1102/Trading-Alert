@@ -22,6 +22,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
+from src.core._decimal import _sub
 from src.core.types import Candle
 from src.domain.trade_plan import TradePlan
 from src.execution.placement import (
@@ -33,7 +34,7 @@ from src.execution.placement import (
 )
 from src.risk.types import ConstraintSnapshot
 
-from .semantics import POSITION_MODE, TP1_QUANTITY_FRACTION
+from .semantics import EXIT_SL, EXIT_TP2, POSITION_MODE, TP1_QUANTITY_FRACTION
 
 if TYPE_CHECKING:
     from .lifecycle import PlanState
@@ -67,9 +68,19 @@ class ProtectiveReject:
     reason_code: str
 
 
+# Label of the TP1 partial leg. It is not an exit kind (a position never ends at TP1).
+LEG_TP1 = "TP1"
+
+
 @dataclass(frozen=True)
 class ExitLeg:
-    """RED skeleton of one exit leg (replaced in the GREEN commit)."""
+    """One exit leg resolved from a mark minute or a fallback bar.
+
+    `kind` is `LEG_TP1` (partial), `EXIT_SL`, `EXIT_TP2` or `EXIT_END_OF_DATA` (the last two
+    ones close the remainder). `price` is the booked price: the trigger for a take-profit
+    (no price improvement), the adverse of trigger and mark-minute open for a stop.
+    `gap_through_stop` is True only for a stop leg priced at a gapped open.
+    """
 
     kind: str
     price: Decimal
@@ -78,12 +89,76 @@ class ExitLeg:
     gap_through_stop: bool = False
 
 
+def _stop_leg(*, state: PlanState, mark_minute: Candle, quantity: Decimal) -> ExitLeg:
+    """Exit `quantity` at the stop: the adverse of the trigger and the minute open (D-33)."""
+    trigger = state.levels.sl_trigger
+    if state.direction == _LONG:
+        price = min(trigger, mark_minute.open)
+    else:
+        price = max(trigger, mark_minute.open)
+    return ExitLeg(
+        kind=EXIT_SL,
+        price=price,
+        quantity=quantity,
+        time_utc=mark_minute.close_time_utc,
+        gap_through_stop=price != trigger,
+    )
+
+
+def _tp_legs(*, state: PlanState, mark_minute: Candle, remaining: Decimal) -> tuple[ExitLeg, ...]:
+    """TP1 then TP2 legs touched by a mark minute (TP1 first when both are touched)."""
+    levels = state.levels
+    tp1_trigger, tp1_quantity, tp2_trigger = (
+        levels.tp1_trigger,
+        levels.tp1_quantity,
+        levels.tp2_trigger,
+    )
+    if tp1_trigger is None or tp1_quantity is None or tp2_trigger is None:
+        return ()  # a stop-only state: the stop is its only exit
+    direction = state.direction
+    tp1_touched = is_tp_touched(
+        mark_minute=mark_minute, tp_trigger=tp1_trigger, direction=direction
+    )
+    tp2_touched = is_tp_touched(
+        mark_minute=mark_minute, tp_trigger=tp2_trigger, direction=direction
+    )
+    at_utc = mark_minute.close_time_utc
+    legs: list[ExitLeg] = []
+    tp1_taken = state.tp1_quantity is not None
+    if not tp1_taken and (tp1_touched or tp2_touched):
+        legs.append(
+            ExitLeg(kind=LEG_TP1, price=tp1_trigger, quantity=tp1_quantity, time_utc=at_utc)
+        )
+        remaining = _sub(remaining, tp1_quantity)
+        tp1_taken = True
+    if tp1_taken and tp2_touched:
+        legs.append(ExitLeg(kind=EXIT_TP2, price=tp2_trigger, quantity=remaining, time_utc=at_utc))
+    return tuple(legs)
+
+
 def resolve_mark_minute(
     *, state: PlanState, mark_minute: Candle, is_fill_minute: bool
 ) -> tuple[ExitLeg, ...]:
-    """RED skeleton: no legs (wrong on purpose)."""
-    del state, mark_minute, is_fill_minute
-    return ()
+    """Return the ordered exit legs of one mark-price minute for an OPEN position (D-12, D-33).
+
+    The stop is decided before any take-profit (stop-first, `semantics.TIE_BREAK`): a minute
+    touching the stop closes the whole remaining quantity at the stop, whatever else it
+    touched. On the fill minute only the stop is eligible, because the instant of the fill
+    inside the minute is unknown. Otherwise TP1 (a partial, once) and then TP2 (the
+    remainder) are returned in that order; a minute touching both books TP1 then TP2 at the
+    same minute close. Take-profits book their trigger price; the stop books the adverse of
+    trigger and minute open and flags a gap.
+    """
+    remaining = state.remaining_quantity
+    if remaining is None or remaining <= Decimal("0"):
+        raise ValueError("resolve_mark_minute needs an OPEN position with a remaining quantity")
+    if is_sl_touched(
+        mark_minute=mark_minute, sl_trigger=state.levels.sl_trigger, direction=state.direction
+    ):
+        return (_stop_leg(state=state, mark_minute=mark_minute, quantity=remaining),)
+    if is_fill_minute:
+        return ()
+    return _tp_legs(state=state, mark_minute=mark_minute, remaining=remaining)
 
 
 def take_profit_levels(plan: TradePlan) -> tuple[Decimal, Decimal]:
