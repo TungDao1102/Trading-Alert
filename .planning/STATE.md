@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 14
 current_phase_name: backtest-causality-rewrite
 status: executing
-stopped_at: Completed 14-04-PLAN.md
-last_updated: "2026-10-04T14:36:43.283Z"
+stopped_at: Completed 14-05-PLAN.md
+last_updated: "2026-10-04T14:45:39.752Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 14 execution started
-state_head: 5fa30554af1cbcb992af15d286d710a310d78e8d
+state_head: cccf3fa305fd18c680f5cf26a0ae83b05cabe531
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 125
-  completed_plans: 112
+  completed_plans: 113
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 14 (backtest-causality-rewrite) — EXECUTING
-Plan: 5 of 16
+Plan: 6 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 -- Phase 14 execution started
 
@@ -159,6 +159,7 @@ Progress: [█████░░░░░] 46%
 | Phase 14 P02 | 15min | 3 tasks | 4 files |
 | Phase 14 P03 | 7 min | 2 tasks | 2 files |
 | Phase 14 P04 | 35min | 3 tasks | 18 files |
+| Phase 14 P05 | 25 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -384,6 +385,8 @@ Recent decisions affecting current work:
 - [Phase 14]: 14-02: advance() raises when a bar does not close at end_inclusive; invalidation skipped when the window end is after expiry (EXPIRED wins); cancel_plan accepts only EXPIRED/INVALIDATION_CANCEL/DAILY_STOP_CANCEL on RESTING plans
 - [Phase 14]: 14-03: funding coverage requires a funding instant at or before the window start and at or after its end with spacing at most 8h+60s; allow-gaps cover a hole only by full same-symbol containment and are recorded on the result
 - [Phase 14]: 14-04: funding_convention is a presence-driven string cost key appended by cost_slice for sizeable sets; funding data identity rides in data_snapshot_id plus allowed_gaps (D-36)
+- [Phase 14]: 14-05: exhausted equity (<= 0) at a UTC day roll resolves the rate thresholds to 0 (DAILY_STOP, all caps reject) instead of raising; equity_positive lets the engine stop before AccountState raises
+- [Phase 14]: 14-05: point-in-time constraints clamp the snapshot metadata_observed_at_utc to the bar close (ttl timedelta(0)) and return the true observed_at and an extrapolated flag separately; src/risk untouched
 
 ### Pending Todos
 
@@ -438,6 +441,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-04T14:36:42.976Z
-Stopped at: Completed 14-04-PLAN.md
+Last session: 2026-10-04T14:45:24.947Z
+Stopped at: Completed 14-05-PLAN.md
 Resume file: None
