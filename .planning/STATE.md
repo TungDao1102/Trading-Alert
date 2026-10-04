@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 14
 current_phase_name: backtest-causality-rewrite
 status: executing
-stopped_at: Completed 14-03-PLAN.md
-last_updated: "2026-10-04T14:02:04.909Z"
+stopped_at: Completed 14-04-PLAN.md
+last_updated: "2026-10-04T14:36:43.283Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 14 execution started
-state_head: 7753772549592f1b17b22c8d3ddcb65a8c70d2f1
+state_head: 5fa30554af1cbcb992af15d286d710a310d78e8d
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 125
-  completed_plans: 111
+  completed_plans: 112
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 14 (backtest-causality-rewrite) — EXECUTING
-Plan: 4 of 16
+Plan: 5 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 -- Phase 14 execution started
 
@@ -158,6 +158,7 @@ Progress: [█████░░░░░] 46%
 | Phase 14 P01 | 20 min | 3 tasks | 16 files |
 | Phase 14 P02 | 15min | 3 tasks | 4 files |
 | Phase 14 P03 | 7 min | 2 tasks | 2 files |
+| Phase 14 P04 | 35min | 3 tasks | 18 files |
 
 ## Accumulated Context
 
@@ -382,6 +383,7 @@ Recent decisions affecting current work:
 - [Phase 14]: 14-01: validate_trade_record requires planned_quantity on filled records and ListMinuteSource raises on an unknown symbol (fail closed) — A missing planned quantity or series cannot be compared or read as no price moves
 - [Phase 14]: 14-02: advance() raises when a bar does not close at end_inclusive; invalidation skipped when the window end is after expiry (EXPIRED wins); cancel_plan accepts only EXPIRED/INVALIDATION_CANCEL/DAILY_STOP_CANCEL on RESTING plans
 - [Phase 14]: 14-03: funding coverage requires a funding instant at or before the window start and at or after its end with spacing at most 8h+60s; allow-gaps cover a hole only by full same-symbol containment and are recorded on the result
+- [Phase 14]: 14-04: funding_convention is a presence-driven string cost key appended by cost_slice for sizeable sets; funding data identity rides in data_snapshot_id plus allowed_gaps (D-36)
 
 ### Pending Todos
 
@@ -436,6 +438,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-04T14:01:50.845Z
-Stopped at: Completed 14-03-PLAN.md
+Last session: 2026-10-04T14:36:42.976Z
+Stopped at: Completed 14-04-PLAN.md
 Resume file: None
