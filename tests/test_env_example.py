@@ -11,6 +11,7 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
 from src.ops.redaction import SHAPE_RULES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -154,3 +155,30 @@ def test_real_env_file_stays_gitignored() -> None:
         check=False,
     )
     assert proc.returncode == 0
+
+
+@pytest.mark.parametrize(
+    "name",
+    [".env.prod", ".env.live", ".env.backup", "secrets.prod.env", "deploy/id_ed25519", "k/key.pem"],
+)
+def test_env_variants_and_key_files_are_gitignored(name: str) -> None:
+    """WR-07: a variant such as .env.live must not be addable with `git add -A`."""
+    proc = subprocess.run(
+        ["git", "check-ignore", "-q", name],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"{name} is not gitignored"
+
+
+def test_the_env_template_is_not_gitignored() -> None:
+    proc = subprocess.run(
+        ["git", "check-ignore", "-q", ".env.example"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 1
