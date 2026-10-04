@@ -413,6 +413,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 | Category | Item | Status | Deferred At | Milestone |
 |----------|------|--------|-------------|-----------|
+| Pending decision | Maker/post-only entries instead of taker (operator idea 2026-10-04). D036 currently says no GTX in V1 and entry fee modeled as taker; changing it needs a new decision plus Phase 12 and Phase 14 changes. Details in `.planning/LIVE-TEST-2026-10-04.md` | Awaiting operator | 2026-10-04 | v0.3 |
+| Live test findings | Telegram and Binance Demo probe: findings and owners (Phases 16, 22, 23, 24) recorded in `.planning/LIVE-TEST-2026-10-04.md` and ROADMAP | Recorded | 2026-10-04 | v0.3 |
 | Phase 6 carry-over | Gap G3: entry-expiry check uses the fixture's single `now_utc` (`simulator.py` ~758/~881), not the simulated bar time. Written into ROADMAP Phase 14 success criterion 6 | Deferred to Phase 14 | 2026-10-04 | v0.3 |
 | Phase 7 carry-over | Live WS ingestion (`PaperWsAdapter` missing `await`, `soak_smoke.log` ws_subscribe=BLOCKED), runnable paper process, SC3 soak evidence (`pinned_epoch.json`, `registry_diff.jsonl` all CLEAN). PAPER-01..03 stay Pending. Written into ROADMAP Phase 16 success criteria 7-9 | Deferred to Phase 16 | 2026-10-04 | v0.3 |
 | Phase 8 carry-over | Live Telegram callback check, read-only Binance reconcile, real-stack RUNBOOK drill | Deferred to Phases 20/23/24/25 | 2026-10-04 | v0.3 |

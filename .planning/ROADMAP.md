@@ -806,7 +806,7 @@ This was former Phases 13 and 14.
 **Requirements**: RISK-01, RISK-02, EXEC-01, EXEC-02
 
 **Success Criteria**:
-1. `change_margin_type` / `change_initial_leverage` are applied and verified via `/fapi/v1/symbolConfig`. positionRisk v3 has no leverage field. The system never inherits account defaults (F-011, F-964).
+1. `change_margin_type` / `change_initial_leverage` are applied and verified via `/fapi/v1/symbolConfig`. positionRisk v3 has no leverage field. The system never inherits account defaults (F-011, F-964). Evidence (live Demo probe 2026-10-04): the demo account's BTCUSDT config was x20 CROSSED from account defaults, and nothing in the system had read or set it.
 2. The liquidation check uses exchange leverage brackets and maintenance margin, never hard-coded values. The liquidation price must lie beyond the SL by a configured buffer (F-964).
 3. The available-margin check uses `availableBalance`, the new order's initial margin plus fees, other resting entries and approved-but-unplaced plans (F-966).
 4. Position mode is one-way single-asset only. Any other mode results in NO_TRADE (F-965, F-020).
