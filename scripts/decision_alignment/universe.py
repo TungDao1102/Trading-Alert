@@ -50,7 +50,11 @@ HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 # Second witness for the frozen manifest hash (WR-06). None while the manifest is DRAFT.
 # The manifest carries its own content_sha256, so on its own the file is only self-hashed;
 # this constant lives in a different file, and a freeze records the hash in both.
+# The freeze writer (src/data/universe_freeze.py) rewrites this exact one-line form, so the
+# formatter must not wrap it in parentheses.
+# fmt: off
 FROZEN_CONTENT_SHA256: str | None = "d6223620ade78290ca6b0a2eeeadd3430eb35316a42c78894afa2d62a82a1682"  # noqa: E501
+# fmt: on
 
 REQUIRED_KEYS = (
     "schema",
