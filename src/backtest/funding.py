@@ -37,8 +37,21 @@ from src.core._decimal import _add, _mul
 _DIRECTIONS = ("LONG", "SHORT")
 
 
+@dataclass(frozen=True)
+class FundingGap:
+    """A stretch of one symbol's funding history with no usable row (or an allow-gap)."""
+
+    symbol: str
+    start_utc: datetime
+    end_utc: datetime
+
+
 class FundingCoverageError(ValueError):
     """The funding history cannot support a holding window (D-15): fail closed."""
+
+    def __init__(self, message: str, holes: tuple[FundingGap, ...] = ()) -> None:
+        super().__init__(message)
+        self.holes = holes
 
 
 def _require_decimal(value: object, field_name: str) -> Decimal:
@@ -168,7 +181,21 @@ class FundingResult:
 
     events: tuple[FundingEvent, ...]
     total: Decimal
-    used_allowed_gaps: tuple[object, ...]
+    used_allowed_gaps: tuple[FundingGap, ...]
+
+
+def check_funding_coverage(
+    *,
+    symbol: str,
+    rows: Sequence[FundingRow],
+    window_start_utc: datetime,
+    window_end_utc: datetime,
+    loaded_start_utc: datetime,
+    loaded_end_utc: datetime,
+    allowed_gaps: Sequence[FundingGap],
+) -> tuple[FundingGap, ...]:
+    """RED skeleton: the coverage rule is not implemented yet."""
+    return ()
 
 
 def _check_segments(segments: Sequence[OpenSegment]) -> None:
@@ -186,7 +213,7 @@ def funding_events(
     segments: Sequence[OpenSegment],
     rows: Sequence[FundingRow],
     mark_source: MinuteSource,
-    allowed_gaps: Sequence[object],
+    allowed_gaps: Sequence[FundingGap],
     loaded_start_utc: datetime,
     loaded_end_utc: datetime,
 ) -> FundingResult:
