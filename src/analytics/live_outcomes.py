@@ -12,8 +12,17 @@ and it is computed ONLY when every fill's `commission_asset` equals `QUOTE_ASSET
 INCOMPLETE(COMMISSION_ASSET_NOT_QUOTE): no price conversion is ever attempted and
 no converted number is shown. Funding payments are not part of any `Fill`, so
 funding is excluded from this net PnL and is stated as excluded, never imputed.
-R is then `net_pnl / TradePlan.risk_budget` via the shared Phase-6 R helper; a
-non-positive risk budget is INCOMPLETE(NO_RISK_VALUE).
+R is then `net_pnl / realized_risk` via the shared Phase-6 R helper, where
+`realized_risk = realized_risk_for_fill(sized_realized_risk, planned_quantity,
+filled_quantity)` is the single R denominator that the backtest records use too
+(Phase 14, D-20); `TradePlan.risk_budget` (equity x rate) is no longer a denominator
+anywhere in analytics (F-204). The sized figure is NOT persisted for live rows
+(D-29): the caller supplies it explicitly through `sized_risks`, keyed by
+trade_plan_id, and a candidate without an entry there is
+INCOMPLETE(NO_RISK_VALUE) with `realized_risk` None, never an imputed value. It
+stays INCOMPLETE until a later phase persists the sized figure. Live R also excludes
+funding (`LIVE_R_EXCLUDES`), so it is comparable with backtest R only on
+zero-funding trades.
 
 EXCHANGE-SEMANTICS GATE (fail closed). The rule above is only correct if Binance's
 `realizedPnl` EXCLUDES commission and `commission` is denominated in
@@ -48,7 +57,7 @@ Evidence is always labelled LIVE and is never pooled with other kinds (D-05).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -61,6 +70,7 @@ from src.domain.fill import Fill
 from src.domain.order import Order
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
+from src.risk.realized_risk import realized_risk_for_fill
 
 QUOTE_ASSET = "USDT"
 # Fail closed until the docs verification described in the module docstring exists.
@@ -81,6 +91,28 @@ _EXIT_KINDS: dict[str, str] = {
     OrderRole.TAKE_PROFIT_2.value: "TP2",
 }
 _ENTRY_KIND = "ENTRY_FILLED"
+
+
+@dataclass(frozen=True)
+class SizedRisk:
+    """The risk figure persisted at sizing for one plan (D-20, D-29), supplied by the caller.
+
+    `realized_risk` is `SizedResult.realized_risk` (the worst-case adverse-edge figure)
+    and `planned_quantity` the quantity it was sized for. Both are positive Decimals.
+    """
+
+    realized_risk: Decimal
+    planned_quantity: Decimal
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("realized_risk", self.realized_risk),
+            ("planned_quantity", self.planned_quantity),
+        ):
+            if not isinstance(value, Decimal):
+                raise AnalyticsInputError(f"SizedRisk.{name} must be Decimal")
+            if not value.is_finite() or value <= _ZERO:
+                raise AnalyticsInputError(f"SizedRisk.{name} must be a positive finite Decimal")
 
 
 @dataclass(frozen=True)
@@ -152,8 +184,16 @@ def normalize_live_outcomes(
     plans: Sequence[TradePlan],
     orders: Sequence[Order],
     fills: Sequence[Fill],
+    *,
+    sized_risks: Mapping[str, SizedRisk] | None = None,
 ) -> LiveOutcomeResult:
     """Normalize live rows into LIVE TradeOutcomes under the documented net-PnL rules.
+
+    `sized_risks` maps trade_plan_id to the sizing-time `SizedRisk` (D-29: not persisted
+    for live). A candidate with an entry there gets `realized_risk` from
+    `realized_risk_for_fill`; one without stays INCOMPLETE(NO_RISK_VALUE). A filled
+    quantity above the sized planned quantity is a MALFORMED_ROW. An entry that is not
+    a `SizedRisk` fails closed with `AnalyticsInputError`.
 
     One candidate per TradePlan with at least one ENTRY-role order that has a fill.
     Every input is ordered by an explicit total key, so output never depends on
@@ -161,6 +201,10 @@ def normalize_live_outcomes(
     stays in the lifecycle normalizer. A duplicate signal_id or trade_plan_id
     fails closed with `AnalyticsInputError`.
     """
+    sized_by_plan: Mapping[str, SizedRisk] = {} if sized_risks is None else sized_risks
+    for plan_id, supplied in sized_by_plan.items():
+        if not isinstance(supplied, SizedRisk):
+            raise AnalyticsInputError(f"sized_risks[{plan_id!r}] must be a SizedRisk")
     signal_by_id: dict[str, Signal] = {}
     for signal in sorted(signals, key=lambda item: item.signal_id):
         if signal.signal_id in signal_by_id:
@@ -215,6 +259,19 @@ def normalize_live_outcomes(
             continue
 
         entry_quantity = _total_quantity(entry_fills)
+        sized = sized_by_plan.get(plan.trade_plan_id)
+        realized_risk: Decimal | None = None
+        if sized is None:
+            incomplete.add((plan.signal_id, IncompleteReason.NO_RISK_VALUE))
+        elif entry_quantity > sized.planned_quantity:
+            incomplete.add((plan.signal_id, IncompleteReason.MALFORMED_ROW))
+            continue
+        else:
+            realized_risk = realized_risk_for_fill(
+                sized_realized_risk=sized.realized_risk,
+                planned_quantity=sized.planned_quantity,
+                filled_quantity=entry_quantity,
+            )
         closed = bool(exit_fills) and _total_quantity(exit_fills) >= entry_quantity
         exit_price: Decimal | None = None
         exit_time: datetime | None = None
@@ -235,10 +292,6 @@ def normalize_live_outcomes(
                 incomplete.add((plan.signal_id, IncompleteReason.UNVERIFIED_EXCHANGE_SEMANTICS))
             elif quote_only:
                 realized_pnl = _net_pnl(all_fills)
-        realized_risk: Decimal | None = plan.risk_budget
-        if plan.risk_budget <= _ZERO:
-            realized_risk = None
-            incomplete.add((plan.signal_id, IncompleteReason.NO_RISK_VALUE))
 
         outcomes.append(
             TradeOutcome(
