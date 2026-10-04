@@ -583,7 +583,7 @@ Plans:
 
 **Audit refs**: F-120, F-901, F-902, F-102, F-804, F-905, F-305, F-204, F-123, F-118, F-602, F-805, F-904; carry-over from Phase 6 (`.planning/phases/06-backtest-simulator-experiment-registry/06-VERIFICATION.md`)
 
-**Plans:** 2/16 plans executed
+**Plans:** 3/16 plans executed
 
 Plans:
 **Wave 1**
@@ -591,7 +591,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [x] 14-02-PLAN.md — Entry lifecycle: simulated-time expiry (G3), trade-through both sides, touch counter, CANDLE_CLOSE invalidation, cancel API, PENDING_AT_DATA_END
-- [ ] 14-03-PLAN.md — Funding module: D-14 sign convention, actual fundingTimes, open-quantity segments, mark fallback, fail-closed coverage with recorded allow-gaps
+- [x] 14-03-PLAN.md — Funding module: D-14 sign convention, actual fundingTimes, open-quantity segments, mark fallback, fail-closed coverage with recorded allow-gaps
 - [ ] 14-04-PLAN.md — Funding identity: presence-driven funding_convention cost key via cost_slice, legacy hashes locked, deliberate fixture fan-out
 - [ ] 14-05-PLAN.md — Simulated ledger (equity, exposures, UTC-day loss, DAILY_STOP) and point-in-time constraints with back-extrapolation flag
 - [ ] 14-06-PLAN.md — Live R denominator wiring (D-29) and backtest/live R parity test
@@ -1015,7 +1015,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 12. Fee + Cost Model Correctness | 11/11 | Complete    | 2026-09-30 |
 | 13. Research Data Foundation Fixes | 13/13 | Complete    | 2026-10-03 |
 | 13.1. Deployment & CI | 12/12 | Complete | 2026-10-04 |
-| 14. Backtest Simulator Causality Rewrite | 2/16 | In Progress|  |
+| 14. Backtest Simulator Causality Rewrite | 3/16 | In Progress|  |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
 | 17. Operational Persistence Layer | 15/15 | In Progress|  |
