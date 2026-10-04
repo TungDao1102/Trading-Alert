@@ -1,17 +1,20 @@
 ---
-gsd_state_version: 1.0
+gsd_state_version: "1.0"
 milestone: v0.3
-milestone_name: milestone
+current_phase: 14
+current_phase_name: backtest-causality-rewrite
 status: executing
-stopped_at: Phase 14 context gathered
-last_updated: "2026-10-04T09:51:21.158Z"
-last_activity: 2026-10-04 -- Phase 14 planning complete
+stopped_at: Completed 14-01-PLAN.md
+last_updated: "2026-10-04T13:40:47.712Z"
+last_activity: 2026-10-04
+last_activity_desc: Phase 14 execution started
+state_head: bf2e8153c43896054e4266d8c8dc9e75a3bbf9b8
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 125
   completed_plans: 109
-  percent: 55
+milestone_name: milestone
 ---
 
 <!-- STATE-MD-SCHEMA:END:frontmatter -->
@@ -23,14 +26,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 17 — operational-persistence-layer
+**Current focus:** Phase 14 — backtest-causality-rewrite
 
 ## Current Position
 
-Phase: 17 (operational-persistence-layer) — EXECUTING
-Plan: 15 of 15
+Phase: 14 (backtest-causality-rewrite) — EXECUTING
+Plan: 2 of 16
 Status: Ready to execute
-Last activity: 2026-10-04 -- Phase 14 planning complete
+Last activity: 2026-10-04 -- Phase 14 execution started
 
 Progress: [█████░░░░░] 46%
 
@@ -152,6 +155,7 @@ Progress: [█████░░░░░] 46%
 | Phase 17 P13 | 25 min | 3 tasks | 7 files |
 | Phase 17 P14 | 25 min | 2 tasks | 2 files |
 | Phase 17 P15 | 36 min | 2 tasks | 11 files |
+| Phase 14 P01 | 20 min | 3 tasks | 16 files |
 
 ## Accumulated Context
 
@@ -372,6 +376,8 @@ Recent decisions affecting current work:
 - [Phase 17]: 17-13: snapshot reads verify the denormalized columns as well as the sha256; system state values are str/bool/None only; state_snapshot normalizes entry/enable fields to None when off/disabled and rehydrate rejects inconsistent or malformed state (ValueError); for D051 — Fail closed on tampered evidence (D-18/D-19, T-17-35) and on restart state that could silently read SAFE_MODE as off (D-22, C14, T-17-34)
 - [Phase 17]: 17-14: no defect found by the end-to-end replay and redelivery tests, so no production file changed; after plan expiry the callback layer answers APPROVAL_EXPIRED while execute_approved_plan handed the stored approval returns the stored outcome; for D051
 - [Phase 17]: D051 recorded (Phase 17 persistence layer); the six transition tables stay an auto-mode default awaiting user confirmation (DOMN-04 manual check) — Research C3: tables were authored in Phase 17, GLOSSARY 11, user to confirm
+- [Phase 14]: 14-01: TP1_QUANTITY_FRACTION is the code constant Decimal('0.5') in src/backtest/semantics.py covered by SIMULATOR_SEMANTICS_VERSION 2.0.0 (D-27), not a registry tunable — User-resolved 2026-10-04; keeps params/ untouched and ties the policy to simulator identity
+- [Phase 14]: 14-01: validate_trade_record requires planned_quantity on filled records and ListMinuteSource raises on an unknown symbol (fail closed) — A missing planned quantity or series cannot be compared or read as no price moves
 
 ### Pending Todos
 
@@ -426,6 +432,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-04T08:29:06.747Z
-Stopped at: Phase 14 context gathered
-Resume file: .planning/phases/14-backtest-causality-rewrite/14-CONTEXT.md
+Last session: 2026-10-04T13:40:47.335Z
+Stopped at: Completed 14-01-PLAN.md
+Resume file: None
