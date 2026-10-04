@@ -313,6 +313,45 @@ def test_push_list_pull_cryptcheck_and_retention_with_the_real_rclone(
     assert main(["pull", "--dest", str(again)], rclone_runner=runner) == 0
 
 
+def test_push_after_a_restore_with_new_mtimes_succeeds_with_the_real_rclone(
+    s3_double: S3Double, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CR-01: same bytes, different mtime (a restored host) is not an immutable violation."""
+    bucket = s3_double.new_bucket()
+    env = s3_double.env_for(bucket, passphrase=secrets.token_hex(8), salt=secrets.token_hex(8))
+    runner = s3_double.runner(env)
+    _set_env(monkeypatch, env)
+    bundle = _make_bundle(tmp_path)
+    assert (
+        main(
+            ["push", "--bundle-root", str(bundle), "--init-remote"],
+            rclone_runner=runner,
+            now_utc=DAY1,
+        )
+        == 0
+    )
+
+    pulled = tmp_path / "pulled"
+    assert main(["pull", "--dest", str(pulled)], rclone_runner=runner) == 0
+    restored = tmp_path / "restored" / "raw"
+    backup_mod.restore_bundle(
+        pulled,
+        parquet_target=restored,
+        database_url=None,
+        force=False,
+        skip_db=True,
+        pg_restore_runner=lambda _dump, _target: None,
+        migrate_runner=lambda _url: None,
+    )
+    for staged in restored.rglob("*.parquet"):  # a host restored months later
+        later_ns = staged.stat().st_mtime_ns + 90 * 86_400 * 1_000_000_000
+        os.utime(staged, ns=(later_ns, later_ns))
+    bundle2 = tmp_path / "bundle2"
+    backup_mod.backup(bundle_root=bundle2, pg_dump_runner=_fake_dump, parquet_roots=[restored])
+
+    assert main(["push", "--bundle-root", str(bundle2)], rclone_runner=runner, now_utc=DAY2) == 0
+
+
 def test_a_wrong_crypt_key_is_refused_by_every_operation(
     s3_double: S3Double, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
