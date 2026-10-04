@@ -840,6 +840,37 @@ def test_env_validation_refuses_before_any_step_and_never_prints_values(
     assert SECRET_PASSWORD not in "\n".join(host.log_lines())
 
 
+@pytest.mark.parametrize(
+    ("password", "reason"),
+    [
+        ("Ab1@cdEfGhIjKlMn2", "URL-safe"),
+        ("Ab1/cdEfGhIjKlMn2", "URL-safe"),
+        ("Ab1:cdEfGhIjKlMn2", "URL-safe"),
+        ("Ab1#cdEfGhIjKlMn2", "URL-safe"),
+        ("Ab1$cdEfGhIjKlMn2", "URL-safe"),
+        ("Short1pw", "too short"),
+        ("Fifteen-chars-15", "OK"),
+    ],
+    ids=["at", "slash", "colon", "hash", "dollar", "short", "sixteen-ok"],
+)
+def test_env_validation_enforces_a_url_safe_long_postgres_password(
+    host: Host, password: str, reason: str
+) -> None:
+    """WR-11: compose builds DATABASE_URL from the password, so the shape is checked up front."""
+    _write(
+        host.secrets, f"POSTGRES_USER=trading\nPOSTGRES_PASSWORD={password}\nPOSTGRES_DB=trading\n"
+    )
+    proc = real_run(host)
+    if reason == "OK":
+        assert proc.returncode == 0, proc.stderr
+        return
+    assert proc.returncode != 0
+    assert "POSTGRES_PASSWORD" in proc.stderr
+    assert reason in proc.stderr
+    assert password not in combined(proc)
+    assert host.mutations() == []
+
+
 def test_env_validation_rejects_carriage_returns(host: Host) -> None:
     with host.secrets.open("w", encoding="utf-8", newline="") as handle:
         handle.write(

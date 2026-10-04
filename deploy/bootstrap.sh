@@ -442,7 +442,8 @@ step_checkout() {
 
 REQUIRED_ENV_KEYS=(POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB)
 
-# validate_secrets_file FILE: required keys present and non-empty, no change_me placeholders.
+# validate_secrets_file FILE: required keys present and non-empty, no change_me placeholders,
+# POSTGRES_PASSWORD URL-safe and at least 16 characters.
 # Reports key NAMES only; a value is never read into a message (OPS-06, T-13.1-21).
 validate_secrets_file() {
   local file=$1 problems
@@ -450,7 +451,7 @@ validate_secrets_file() {
   if [[ "$(<"$file")" == *$'\r'* ]]; then
     die "secrets file has CR (Windows) line endings; convert it to LF first: $file"
   fi
-  problems="$(awk -v req="${REQUIRED_ENV_KEYS[*]}" '
+  problems="$(LC_ALL=C awk -v req="${REQUIRED_ENV_KEYS[*]}" '
     BEGIN { n = split(req, need, " "); sq = sprintf("%c", 39); dq = sprintf("%c", 34) }
     /^[ \t]*#/ || /^[ \t]*$/ { next }
     {
@@ -477,6 +478,15 @@ validate_secrets_file() {
       }
       for (k = 1; k <= count; k++) {
         if (tolower(value[order[k]]) ~ /change_me/) print "placeholder value: " order[k]
+      }
+      # docker-compose.yml builds DATABASE_URL from this value, so it must be URL-safe (no @ / : #
+      # or $), and the redactor only masks values of 8+ characters; a weak or unsafe password
+      # would otherwise surface only after the SSH hardening step as a stack that never connects.
+      pw = value["POSTGRES_PASSWORD"]
+      if (pw != "" && pw !~ /^[A-Za-z0-9._~-]+$/) {
+        print "not URL-safe (use only letters, digits and . _ ~ -): POSTGRES_PASSWORD"
+      } else if (pw != "" && length(pw) < 16) {
+        print "too short (16 characters minimum): POSTGRES_PASSWORD"
       }
     }' "$file")"
   if [[ -n $problems ]]; then
