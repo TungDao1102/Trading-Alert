@@ -268,11 +268,13 @@ step_ufw() {
     log "ufw already active with default deny incoming and the SSH allow rule"
     return 0
   fi
-  run ufw default deny incoming
-  run ufw default allow outgoing
+  # Allow rules first: on an already active firewall, flipping the default to deny before the
+  # SSH rule exists would drop new SSH connections (permanently if `ufw allow` then failed).
   for port in "${port_list[@]}"; do
     run ufw allow "${port}/tcp"
   done
+  run ufw default deny incoming
+  run ufw default allow outgoing
   run ufw --force enable
 }
 

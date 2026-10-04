@@ -608,9 +608,12 @@ def test_ufw_allows_the_effective_ssh_port_before_enabling(host: Host) -> None:
     lines = host.log_lines()
     allow = first_index(lines, "ufw allow 2222/tcp")
     enable = first_index(lines, "ufw --force enable")
-    assert first_index(lines, "ufw default deny incoming") < enable
+    deny = first_index(lines, "ufw default deny incoming")
+    assert deny < enable
     assert first_index(lines, "ufw default allow outgoing") < enable
-    assert allow < enable
+    # WR-13: the SSH allow rule exists before the default flips to deny, so a re-run on an
+    # already active firewall never drops new SSH connections between the two commands.
+    assert allow < deny < enable
     assert not has_call(lines, "ufw allow 22/tcp")
 
 
