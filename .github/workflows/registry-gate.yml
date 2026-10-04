@@ -8,6 +8,11 @@ on:
     branches:
       - master
 
+# Least privilege (review WR-08): a read-only GITHUB_TOKEN, regardless of the repository default,
+# and checkout does not persist it into .git/config.
+permissions:
+  contents: read
+
 jobs:
   registry-gate:
     name: registry-gate (D-05)
@@ -16,6 +21,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # Full history: the phase-11 negative tests read pre-change text via
           # `git show <baseline>:<file>` and would silently skip in a shallow clone.
           fetch-depth: 0

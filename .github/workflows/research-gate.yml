@@ -8,6 +8,11 @@ on:
     branches:
       - master
 
+# Least privilege (review WR-08): a read-only GITHUB_TOKEN, regardless of the repository default,
+# and checkout does not persist it into .git/config.
+permissions:
+  contents: read
+
 jobs:
   research-gate:
     name: research-gate (D-07)
@@ -15,6 +20,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Freeze check (protocol header + DECISIONS row + DOC_STATUS index must all agree)
         id: freeze
