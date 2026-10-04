@@ -153,6 +153,14 @@ def _rsync_lines(lines: list[str]) -> list[str]:
     return [ln for ln in lines if " ops rsync " in ln]
 
 
+def test_a_remote_new_target_is_refused_before_anything_runs(rig: Rig) -> None:
+    """WR-03: a second ssh hop would split the rsync arguments after the old side was stopped."""
+    proc = rig.run("--key-source", "t131keys", OLD, "trading@new.example")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "must be 'local'" in proc.stderr
+    assert rig.lines() == [], "nothing may run before the refusal"
+
+
 # --- dry run ---------------------------------------------------------------------------------
 
 

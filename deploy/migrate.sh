@@ -3,10 +3,13 @@ set -Eeuo pipefail
 # Provider-to-provider cutover: move the running collector, its Parquet store and its database
 # from an OLD host to a NEW host with a bounded, reported data gap (D-14, D-15, D-20, D-21).
 #
-# Usage (run on the NEW host, or anywhere that can reach both over ssh):
+# Usage (run on the NEW host; the new side is always "local"):
 #   deploy/migrate.sh [--dry-run] [--max-gap-minutes N] [--wait-seconds S]
 #                     [--key-source PATH_OR_VOLUME] [--report-only]
-#                     <old-ssh-target> <new-ssh-target|local>
+#                     <old-ssh-target> local
+#
+# A remote <new-ssh-target> is refused: the rsync arguments (--rsync-path, -e) contain spaces
+# and would lose their quoting through a second ssh hop, after the old collector was stopped.
 #
 # Fixed order: preflight; Parquet pre-sync while the old collector runs; stop the old
 # collector; final sync; on the old host pg_dump + fingerprint + watermark snapshot; pull those
@@ -60,7 +63,7 @@ RSYNC_PATH=""
 RSYNC_SSH=""
 
 usage() {
-  sed -n '3,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '3,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
 usage_error() {
@@ -101,9 +104,15 @@ parse_args() {
         ;;
     esac
   done
-  ((${#positional[@]} == 2)) || usage_error "expected <old-ssh-target> <new-ssh-target|local>"
+  ((${#positional[@]} == 2)) || usage_error "expected <old-ssh-target> local"
   OLD_TARGET="${positional[0]}"
   NEW_TARGET="${positional[1]}"
+  # The new side must be this host (or an explicit MIGRATE_NEW_COMPOSE harness): through a
+  # second ssh hop the rsync arguments lose their quoting and the failure would come after the
+  # old collector was already stopped. Refuse before anything runs.
+  if [[ $NEW_TARGET != local && -z ${MIGRATE_NEW_COMPOSE:-} ]]; then
+    usage_error "the new side must be 'local': run this script on the new host"
+  fi
   [[ $MAX_GAP_MINUTES =~ ^[0-9]+$ ]] || usage_error "--max-gap-minutes must be a whole number"
   [[ $WAIT_SECONDS =~ ^[0-9]+$ ]] || usage_error "--wait-seconds must be a whole number"
   [[ -n $OLD_TARGET && -n $NEW_TARGET && -n $KEY_SOURCE ]] || usage_error "empty argument"
