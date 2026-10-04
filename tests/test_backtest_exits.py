@@ -25,16 +25,26 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from src.backtest.costs import CostModel
 from src.backtest.exits import (
     ProtectiveLevels,
     ProtectiveReject,
+    end_of_data_exit,
     protective_levels_for_fill,
+    resolve_fallback_hour,
     resolve_mark_minute,
 )
-from src.backtest.lifecycle import LifecycleEvent, PlanState, advance, new_plan_state
+from src.backtest.lifecycle import (
+    LifecycleEvent,
+    PlanState,
+    advance,
+    finalize_at_data_end,
+    new_plan_state,
+)
 from src.backtest.records import TradeRecord, booking_for_event, build_trade_record
 from src.backtest.series import ListMinuteSource
+from src.backtest.validator import validate_trade_record
 from src.core.types import Candle
 from src.domain.trade_plan import TradePlan
 from src.risk.types import ConstraintSnapshot
@@ -539,3 +549,238 @@ def test_short_ladder_takes_tp1_then_tp2_on_mark_lows() -> None:
     assert final.tp1_price == D("96.00")
     assert final.exit_kind == "TP2"
     assert final.exit_price == D("92.00")
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: missing-minute fallback at the strategy-bar close, END_OF_DATA close.
+#
+# Fallback (D-12, D-33): while a position is open and the mark minutes of a strategy bar
+# have a hole, minutes before the first missing one are walked normally; the rest of the
+# bar resolves ONCE at the bar close from the strategy-bar range, stop-first, never mid-bar.
+#
+# END_OF_DATA hand oracle (LONG entry 100.00 qty 0.5, last mark close 100.40 at 11:59:59.999):
+#   gross    = (100.40 - 100.00) x 0.5            = 0.20
+#   exit fee = 100.40 x 0.5 x 0.0005              = 0.02510
+#   exit slp = 100.40 x 0.5 x 0.0010 (exit_slippage_rate, forced market close) = 0.05020
+#   slippage = 0.0100 + 0.05020                   = 0.0602
+#   realized = 0.20 - 0.0250 - 0.02510 - 0.0602   = 0.0897
+# TP1 then END_OF_DATA (TP1 0.250 at 104.00, remainder 0.250 closed at 100.40):
+#   gross    = 1.00 + 0.250 x 0.40 = 1.10
+#   exit fee = 0.0130 + 100.40 x 0.250 x 0.0005 = 0.0130 + 0.01255 = 0.02555
+#   slippage = 0.0100 + 0.0052 + 100.40 x 0.250 x 0.0010 = 0.0100 + 0.0052 + 0.0251 = 0.0403
+#   realized = 1.10 - 0.0250 - 0.02555 - 0.0403   = 1.00915
+# --------------------------------------------------------------------------- #
+
+HOLE_FROM_12_15 = {at(12, m) for m in range(15, 60)}  # minutes 12:00-12:14 exist, then a hole
+FIRST_MISSING_12_15 = "2026-01-05T12:15:00+00:00"
+BAR_12_CLOSE = at(13) - timedelta(milliseconds=1)
+
+
+def run_with_hole(
+    bar12: Candle,
+    *,
+    marks: dict[datetime, Ohlc] | None = None,
+    holes: set[datetime] | None = None,
+) -> tuple[PlanState, list[LifecycleEvent]]:
+    source = long_fill_source(
+        mark_specials=marks, mark_holes=HOLE_FROM_12_15 if holes is None else holes
+    )
+    return walk_hours(long_state(), source, [flat_bar(10), flat_bar(11), bar12])
+
+
+def test_hole_resolves_the_rest_of_the_hour_at_the_bar_close_with_stop_first() -> None:
+    bar12 = strategy_bar(12, o="101.00", h="101.50", low="97.90", c="99.00")
+    final, events = run_with_hole(bar12)
+    assert final.exit_kind == "SL"
+    assert final.exit_price == D("98.00")
+    assert final.exit_time_utc == BAR_12_CLOSE  # the bar close, never mid-bar
+    assert final.fallback_applied is True
+    assert final.coverage_note is not None and FIRST_MISSING_12_15 in final.coverage_note
+    assert [e.kind for e in events] == ["FILL", "EXIT"]
+    record = record_of(final)
+    assert record.fallback_applied is True
+    assert record.coverage_note == final.coverage_note
+
+
+def test_hole_with_a_bar_range_that_touches_only_tp1_books_tp1_at_the_bar_close() -> None:
+    bar12 = strategy_bar(12, o="101.00", h="104.50", low="100.50", c="103.00")
+    final, events = run_with_hole(bar12)
+    assert final.phase == "OPEN"
+    assert final.tp1_time_utc == BAR_12_CLOSE
+    assert final.tp1_price == D("104.00")
+    assert final.remaining_quantity == D("0.250")
+    assert final.fallback_applied is True
+    assert [e.kind for e in events] == ["FILL", "TP1"]
+
+
+def test_hole_with_a_bar_range_that_touches_tp2_books_tp1_then_tp2_at_the_bar_close() -> None:
+    bar12 = strategy_bar(12, o="101.00", h="108.50", low="100.50", c="108.00")
+    final, events = run_with_hole(bar12)
+    assert [e.kind for e in events] == ["FILL", "TP1", "EXIT"]
+    assert final.exit_kind == "TP2"
+    assert final.tp1_time_utc == final.exit_time_utc == BAR_12_CLOSE
+
+
+def test_minutes_before_the_hole_are_walked_and_minutes_after_it_are_not_used() -> None:
+    # 12:10 (before the hole) touches TP1 on the mark series and books at its own minute.
+    bar12 = strategy_bar(12, o="101.00", h="104.20", low="100.50", c="103.00")
+    before, _ = run_with_hole(bar12, marks={at(12, 10): TP1_TOUCH})
+    assert before.tp1_time_utc == close_of(at(12, 10))
+    # 12:40 exists after the hole and would stop the position, but the rest of the hour
+    # resolves from the bar range only (low 100.50 never reaches the stop).
+    after, _ = run_with_hole(bar12, marks={at(12, 40): SL_THROUGH})
+    assert after.phase == "OPEN"
+    assert after.fallback_applied is True
+
+
+def test_a_window_that_ends_mid_bar_never_resolves_a_hole() -> None:
+    source = long_fill_source(mark_holes=HOLE_FROM_12_15)
+    open_state, _ = walk_hours(long_state(), source, [flat_bar(10), flat_bar(11)])
+    start = flat_bar(11).close_time_utc
+    mid, mid_events = advance(
+        open_state,
+        source=source,
+        start_exclusive=start,
+        end_inclusive=close_of(at(12, 30)),
+        bar=None,
+    )
+    assert mid == open_state  # nothing resolved, nothing flagged
+    assert mid_events == ()
+    bar12 = strategy_bar(12, o="101.00", h="101.50", low="97.90", c="99.00")
+    resolved, _ = advance(
+        open_state,
+        source=source,
+        start_exclusive=start,
+        end_inclusive=bar12.close_time_utc,
+        bar=bar12,
+    )
+    assert resolved.exit_kind == "SL"  # the hour resolves only when the bar-close window arrives
+    assert resolved.exit_time_utc == BAR_12_CLOSE
+
+
+def test_full_mark_coverage_never_uses_the_fallback_even_when_the_bar_range_is_wide() -> None:
+    bar12 = strategy_bar(12, o="101.00", h="109.00", low="97.00", c="101.00")
+    final, events = run_with_hole(bar12, holes=set())
+    assert final.phase == "OPEN"  # the flat mark series never touches a level
+    assert final.fallback_applied is False
+    assert final.coverage_note is None
+    assert [e.kind for e in events] == ["FILL"]
+
+
+def test_fallback_in_the_fill_bar_resolves_only_the_stop() -> None:
+    holes = {at(10, m) for m in range(30, 60)}
+    wide_but_safe = strategy_bar(10, o="100.40", h="105.00", low="99.00", c="101.00")
+    source = long_fill_source(mark_holes=holes)
+    safe, safe_events = advance(
+        long_state(),
+        source=source,
+        start_exclusive=SIGNAL_CLOSE,
+        end_inclusive=wide_but_safe.close_time_utc,
+        bar=wide_but_safe,
+    )
+    assert safe.phase == "OPEN"  # the range reaches TP1 but the bar also holds pre-fill minutes
+    assert safe.tp1_quantity is None
+    assert safe.fallback_applied is True
+    assert safe.coverage_note is not None and "2026-01-05T10:30:00+00:00" in safe.coverage_note
+    assert [e.kind for e in safe_events] == ["FILL"]
+    stopped_bar = strategy_bar(10, o="100.40", h="105.00", low="97.90", c="101.00")
+    stopped, _ = advance(
+        long_state(),
+        source=source,
+        start_exclusive=SIGNAL_CLOSE,
+        end_inclusive=stopped_bar.close_time_utc,
+        bar=stopped_bar,
+    )
+    assert stopped.exit_kind == "SL"
+    assert stopped.exit_time_utc == stopped_bar.close_time_utc
+
+
+def test_resolve_fallback_hour_returns_stop_first_legs_and_a_coverage_note() -> None:
+    state = walk_hours(long_state(), long_fill_source(), [flat_bar(10), flat_bar(11)])[0]
+    bar12 = strategy_bar(12, o="101.00", h="104.50", low="97.90", c="99.00")
+    resolution = resolve_fallback_hour(state=state, bar=bar12, first_missing_open_utc=at(12, 15))
+    assert [(leg.kind, leg.price, leg.quantity) for leg in resolution.legs] == [
+        ("SL", D("98.00"), D("0.5"))
+    ]
+    assert resolution.legs[0].time_utc == BAR_12_CLOSE
+    assert FIRST_MISSING_12_15 in resolution.coverage_note
+    assert "trade-price" in resolution.coverage_note
+
+
+DATA_END = at(12)  # mid-run data end: the last mark minute at or before it opens at 11:59
+EOD_MARKS: dict[datetime, Ohlc] = {at(11, 59): ("101.00", "101.00", "100.40", "100.40")}
+
+
+def eod_state(mark_specials: dict[datetime, Ohlc]) -> tuple[PlanState, ListMinuteSource]:
+    source = long_fill_source(mark_specials=mark_specials)
+    state, _ = advance(
+        long_state(),
+        source=source,
+        start_exclusive=SIGNAL_CLOSE,
+        end_inclusive=DATA_END,
+        bar=None,
+    )
+    assert state.phase == "OPEN"
+    return state, source
+
+
+def test_end_of_data_closes_the_open_position_at_the_last_mark_close() -> None:
+    state, source = eod_state(EOD_MARKS)
+    closed, events = finalize_at_data_end(state, data_end_utc=DATA_END, source=source)
+    assert closed.phase == "CLOSED"
+    assert closed.exit_kind == "END_OF_DATA"
+    assert closed.exit_price == D("100.40")
+    assert closed.exit_time_utc == close_of(at(11, 59))
+    assert closed.entry_kind == "ENTRY_FILLED"
+    assert [e.kind for e in events] == ["EXIT"]
+    assert events[0].exit_kind == "END_OF_DATA"
+    assert events[0].quantity == D("0.5")
+    record = record_of(closed)
+    assert record.exit_kind == "END_OF_DATA"
+    assert record.gross_pnl == D("0.20")
+    assert record.exit_fee == D("0.02510")
+    assert record.slippage_amount == D("0.0602")  # the exit leg uses exit_slippage_rate
+    assert record.realized_pnl == D("0.0897")
+    start = SIGNAL_CLOSE
+    validate_trade_record(record, data_start_utc=start, data_end_utc=DATA_END)
+
+
+def test_end_of_data_after_tp1_closes_only_the_remainder() -> None:
+    state, source = eod_state({**EOD_MARKS, at(11, 20): TP1_TOUCH})
+    closed, events = finalize_at_data_end(state, data_end_utc=DATA_END, source=source)
+    assert closed.exit_kind == "END_OF_DATA"
+    assert events[0].quantity == D("0.250")
+    record = record_of(closed)
+    assert record.tp1_quantity == D("0.250")
+    assert record.gross_pnl == D("1.10")
+    assert record.exit_fee == D("0.02555")
+    assert record.slippage_amount == D("0.0403")
+    assert record.realized_pnl == D("1.00915")
+
+
+def test_end_of_data_looks_back_past_a_trailing_mark_hole() -> None:
+    # The mark series stops at 10:30 while the data ends at 13:00: the close at 10:30 is used.
+    holes = {at(10, 30) + MINUTE * k for k in range(1, 400)}
+    source = long_fill_source(
+        mark_specials={at(10, 30): ("101.00", "101.00", "100.40", "100.40")}, mark_holes=holes
+    )
+    state, _ = advance(
+        long_state(),
+        source=source,
+        start_exclusive=SIGNAL_CLOSE,
+        end_inclusive=close_of(at(10, 30)),
+        bar=None,
+    )
+    closed, _ = finalize_at_data_end(state, data_end_utc=at(13), source=source)
+    assert closed.exit_time_utc == close_of(at(10, 30))
+    assert closed.exit_price == D("100.40")
+
+
+def test_end_of_data_without_a_source_or_a_mark_minute_fails_closed() -> None:
+    state, source = eod_state({})
+    with pytest.raises(ValueError, match="END_OF_DATA"):
+        finalize_at_data_end(state, data_end_utc=DATA_END)
+    empty = ListMinuteSource(trade={SYMBOL: []}, mark={SYMBOL: []})
+    with pytest.raises(ValueError, match="mark"):
+        end_of_data_exit(state=state, data_end_utc=DATA_END, source=empty)
+    assert source is not None

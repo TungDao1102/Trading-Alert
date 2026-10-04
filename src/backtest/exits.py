@@ -35,6 +35,7 @@ from src.execution.placement import (
 from src.risk.types import ConstraintSnapshot
 
 from .semantics import EXIT_SL, EXIT_TP2, POSITION_MODE, TP1_QUANTITY_FRACTION
+from .series import MinuteSource
 
 if TYPE_CHECKING:
     from .lifecycle import PlanState
@@ -159,6 +160,28 @@ def resolve_mark_minute(
     if is_fill_minute:
         return ()
     return _tp_legs(state=state, mark_minute=mark_minute, remaining=remaining)
+
+
+@dataclass(frozen=True)
+class FallbackResolution:
+    """RED skeleton of a fallback-hour resolution (replaced in the GREEN commit)."""
+
+    legs: tuple[ExitLeg, ...]
+    coverage_note: str
+
+
+def resolve_fallback_hour(
+    *, state: PlanState, bar: Candle, first_missing_open_utc: datetime
+) -> FallbackResolution:
+    """RED skeleton: no legs and no note (wrong on purpose)."""
+    del state, bar, first_missing_open_utc
+    return FallbackResolution(legs=(), coverage_note="")
+
+
+def end_of_data_exit(*, state: PlanState, data_end_utc: datetime, source: MinuteSource) -> ExitLeg:
+    """RED skeleton: not implemented yet."""
+    del state, data_end_utc, source
+    raise ValueError("END_OF_DATA close is not implemented yet")
 
 
 def take_profit_levels(plan: TradePlan) -> tuple[Decimal, Decimal]:

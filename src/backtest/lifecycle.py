@@ -423,7 +423,7 @@ def cancel_plan(
 
 
 def finalize_at_data_end(
-    state: PlanState, *, data_end_utc: datetime
+    state: PlanState, *, data_end_utc: datetime, source: MinuteSource | None = None
 ) -> tuple[PlanState, tuple[LifecycleEvent, ...]]:
     """Resolve a plan when the data ends (D-34).
 
@@ -432,6 +432,7 @@ def finalize_at_data_end(
     `ValueError`: its END_OF_DATA close (D-06) is owned by plan 14-07, so no open position
     can silently pass through this function.
     """
+    del source  # RED skeleton: the OPEN close is not implemented yet
     _require_utc(data_end_utc, "data_end_utc")
     if state.phase == PHASE_CLOSED:
         return state, ()
