@@ -68,11 +68,21 @@ def is_trade_through(
     return minute.high >= _add(limit_price, price_tick_size)
 
 
+def is_touch(*, minute: Candle, limit_price: Decimal, direction: str) -> bool:
+    """True when a trade-price minute reaches the limit (LONG low <= limit, SHORT high >= limit).
+
+    A touch alone never fills; whether it also traded through is `is_trade_through`.
+    """
+    _require_direction(direction)
+    if direction == _LONG:
+        return minute.low <= limit_price
+    return minute.high >= limit_price
+
+
 def is_touch_only(
     *, minute: Candle, limit_price: Decimal, price_tick_size: Decimal, direction: str
 ) -> bool:
-    """True when a minute reaches the limit price but does not trade through it."""
-    _require_direction(direction)
+    """True when a minute reaches the limit price but does not trade through it (D-07)."""
     if is_trade_through(
         minute=minute,
         limit_price=limit_price,
@@ -80,6 +90,4 @@ def is_touch_only(
         direction=direction,
     ):
         return False
-    if direction == _LONG:
-        return minute.low <= limit_price
-    return minute.high >= limit_price
+    return is_touch(minute=minute, limit_price=limit_price, direction=direction)
