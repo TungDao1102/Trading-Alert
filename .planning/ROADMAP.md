@@ -561,8 +561,7 @@ Plans:
 - [x] 13.1-11-PLAN.md — Runbook (bootstrap, update, migrate, restore, pins, tested-vs-real-host), SECURITY_AND_OPERATIONS, D050, Facts verified for Phase 13.1
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 13.1-12-PLAN.md — Local gate battery, then push and confirm the real GitHub Actions run is green (non-autonomous)
-- [ ] TBD (run /gsd-plan-phase 13.1 to break down)
+- [x] 13.1-12-PLAN.md — Local gate battery, then push and confirm the real GitHub Actions run is green (non-autonomous)
 
 ### Phase 14: Backtest Simulator Causality Rewrite
 
@@ -981,7 +980,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 11. Decision Alignment (docs + params) | 8/8 | Complete    | 2026-10-04 |
 | 12. Fee + Cost Model Correctness | 11/11 | Complete    | 2026-09-30 |
 | 13. Research Data Foundation Fixes | 13/13 | Complete    | 2026-10-03 |
-| 13.1. Deployment & CI | 11/12 | In Progress|  |
+| 13.1. Deployment & CI | 12/12 | Executed, pending verify |  |
 | 14. Backtest Simulator Causality Rewrite | 0/TBD | Not started | - |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
