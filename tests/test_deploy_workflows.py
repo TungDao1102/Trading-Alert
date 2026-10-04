@@ -203,6 +203,16 @@ def test_ci_has_no_or_true_idiom(pattern: str) -> None:
     assert re.search(pattern, _read("ci.yml")) is None
 
 
+def test_registry_gate_negative_tests_run_strict_and_report_skips() -> None:
+    """WR-09: the research-gate negative tests must not be skippable in this job."""
+    block = _jobs(_read("registry-gate.yml"))["registry-gate"]
+    assert 'TRADING_CI_STRICT: "1"' in block
+    pytest_line = next(
+        ln for ln in block.splitlines() if "tests/test_research_gate_negative.py" in ln
+    )
+    assert " -rs" in pytest_line
+
+
 def test_gate_workflows_keep_their_gate_scripts() -> None:
     """Only pins/runner change in registry-gate and research-gate (D-01)."""
     registry = _read("registry-gate.yml")

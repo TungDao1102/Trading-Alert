@@ -50,6 +50,17 @@ def infra_skip(reason: str) -> NoReturn:
     pytest.skip(reason)
 
 
+def module_skip(reason: str) -> NoReturn:
+    """Module-level counterpart of ``infra_skip``: skip the whole module, or FAIL collection
+    when ``TRADING_CI_STRICT=1`` so a missing tool cannot make a gate module vanish in CI."""
+    if _strict():
+        pytest.fail(
+            f"{reason} ({STRICT_ENV}=1: missing infrastructure is a failure)",
+            pytrace=False,
+        )
+    pytest.skip(reason, allow_module_level=True)
+
+
 def find_bash() -> str | None:
     """Locate a usable bash, or None.
 

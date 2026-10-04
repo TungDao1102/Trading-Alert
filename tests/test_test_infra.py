@@ -115,6 +115,24 @@ def test_require_tool_returns_path_or_skips(monkeypatch: pytest.MonkeyPatch) -> 
         infra_helpers.require_tool("tool")
 
 
+def test_module_skip_skips_the_module_or_fails_collection_when_strict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-09: a gate module must not vanish silently when its tool is missing in CI."""
+    monkeypatch.delenv(infra_helpers.STRICT_ENV, raising=False)
+    with pytest.raises(pytest.skip.Exception):
+        infra_helpers.module_skip("no bash")
+    monkeypatch.setenv(infra_helpers.STRICT_ENV, "1")
+    with pytest.raises(pytest.fail.Exception, match="no bash"):
+        infra_helpers.module_skip("no bash")
+
+
+def test_research_gate_negative_uses_the_strict_aware_module_skip() -> None:
+    source = (Path(__file__).parent / "test_research_gate_negative.py").read_text(encoding="utf-8")
+    assert "allow_module_level" not in source
+    assert "module_skip(" in source
+
+
 def test_docker_marker_is_registered(pytestconfig: pytest.Config) -> None:
     markers = pytestconfig.getini("markers")
     assert any(str(m).startswith("docker:") for m in markers)

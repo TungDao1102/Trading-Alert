@@ -102,6 +102,10 @@ jobs:
 
       - name: Registry negative tests (fail-closed gates must hold)
         id: negative
+        env:
+          # A missing bash must fail this job, never make the research-gate negative tests
+          # vanish behind a module-level skip (review WR-09); -rs lists any skip that remains.
+          TRADING_CI_STRICT: "1"
         run: |
           set -eu
-          uv run pytest tests/test_registry_gate.py tests/test_registry.py tests/test_kill_gate_docs.py tests/test_kill_gate_clock.py tests/test_research_gate_negative.py tests/test_decision_alignment*.py -q
+          uv run pytest tests/test_registry_gate.py tests/test_registry.py tests/test_kill_gate_docs.py tests/test_kill_gate_clock.py tests/test_research_gate_negative.py tests/test_decision_alignment*.py -q -rs
