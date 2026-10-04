@@ -291,14 +291,23 @@ def test_push_list_pull_cryptcheck_and_retention_with_the_real_rclone(
         assert copied.returncode == 0
     everything = remote.list_snapshots(runner)
     assert sorted(everything) == sorted([*planted, *snaps])
-    keep, delete = remote.select_retained(everything)
+    # WR-01: the real recursive listing reports a snapshot as complete once it has a manifest.
+    assert remote.list_complete_snapshots(runner) == sorted(everything)
+    half = remote.snapshot_id(datetime(2025, 1, 20, 3, 15, 0, tzinfo=UTC))
+    dump_remote = f"{snap_remote}/pg.dump"
+    assert runner(["copyto", dump_remote, f"{CRYPT}snapshots/{half}/pg.dump"], {}).returncode == 0
+    assert half in remote.list_snapshots(runner)
+    assert half not in remote.list_complete_snapshots(runner)
+    assert remote.pull_snapshot(tmp_path / "skips-half", runner) == snaps[-1]
+    everything = remote.list_snapshots(runner)
+    keep, delete = remote.select_retained(remote.list_complete_snapshots(runner))
     assert delete  # the oldest planted days fall outside every window
     assert set(snaps) <= keep
 
     assert main(["retain", "--dry-run"], rclone_runner=runner) == 0
     assert remote.list_snapshots(runner) == sorted(everything)
     assert main(["retain"], rclone_runner=runner) == 0
-    assert remote.list_snapshots(runner) == sorted(keep)
+    assert remote.list_snapshots(runner) == sorted(keep)  # the stale half push is purged too
     # The Parquet objects survived retention: pulling the newest snapshot still verifies.
     again = tmp_path / "pulled-after-retention"
     assert main(["pull", "--dest", str(again)], rclone_runner=runner) == 0

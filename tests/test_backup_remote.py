@@ -526,6 +526,11 @@ class StoreRclone:
             path = self._path(target)
             if not path.is_dir():
                 return RcloneResult(3, "", "directory not found")
+            if "-R" in argv:  # recursive file listing, relative to the listed directory
+                files = sorted(
+                    p.relative_to(path).as_posix() for p in path.rglob("*") if p.is_file()
+                )
+                return RcloneResult(0, "".join(f"{name}\n" for name in files), "")
             dirs = sorted(d.name for d in path.iterdir() if d.is_dir())
             return RcloneResult(0, "".join(f"{name}/\n" for name in dirs), "")
         if verb == "copyto":
@@ -750,6 +755,52 @@ def test_backup_and_push_after_a_restore_succeeds(tmp_path: Path) -> None:
     snap = remote.push_snapshot(bundle2, store, now_utc=datetime(2026, 10, 2, 3, 15, 0, tzinfo=UTC))
 
     assert snap == "20261002T031500Z"
+
+
+def test_pull_skips_a_half_pushed_newest_snapshot_for_the_newest_complete_one(
+    tmp_path: Path,
+) -> None:
+    """WR-01: a snapshot whose manifest never arrived is not 'the newest'."""
+    store, bundle, first = _pushed_store(tmp_path)
+    half = store.store / "snapshots" / "20261005T031500Z"
+    half.mkdir()
+    (half / "pg.dump").write_bytes((bundle / "pg.dump").read_bytes())  # manifest never uploaded
+
+    assert remote.pull_snapshot(tmp_path / "a", store) == first
+    with pytest.raises(RemoteError, match="incomplete"):
+        remote.pull_snapshot(tmp_path / "b", store, snapshot="20261005T031500Z")
+
+
+def test_retention_keeps_the_complete_snapshot_over_a_half_pushed_one_of_the_same_day(
+    tmp_path: Path,
+) -> None:
+    """WR-01: the incomplete later snapshot of a day must not displace the good one."""
+    store, bundle, first = _pushed_store(tmp_path)  # 2026-10-01 03:15, complete
+    half = store.store / "snapshots" / "20261001T230000Z"  # same day, later, no manifest
+    half.mkdir()
+    (half / "pg.dump").write_bytes((bundle / "pg.dump").read_bytes())
+
+    report = remote.apply_retention(store, dry_run=False)
+
+    assert first in report.kept
+    assert (store.store / "snapshots" / first / "manifest.json").is_file()
+    assert report.deleted == ()  # the half push is newer than every complete one: left alone
+    assert half.is_dir()
+
+
+def test_retention_purges_an_incomplete_snapshot_older_than_a_complete_one(
+    tmp_path: Path,
+) -> None:
+    store, bundle, first = _pushed_store(tmp_path)
+    garbage = store.store / "snapshots" / "20260901T031500Z"
+    garbage.mkdir()
+    (garbage / "pg.dump").write_bytes((bundle / "pg.dump").read_bytes())
+
+    report = remote.apply_retention(store, dry_run=False)
+
+    assert report.deleted == ("20260901T031500Z",)
+    assert not garbage.exists()
+    assert (store.store / "snapshots" / first / "manifest.json").is_file()
 
 
 def test_a_changed_parquet_file_makes_the_immutable_copy_fail(tmp_path: Path) -> None:
