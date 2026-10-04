@@ -59,6 +59,7 @@ case "$*" in
   *"src.ops.backup pull"*) exit "${STUB_PULL_RC:-0}" ;;
   *"src.ops.backup restore"*) exit "${STUB_RESTORE_RC:-0}" ;;
   *"src.ops.backup drill-remote"*) exit "${STUB_DRILL_RC:-0}" ;;
+  *" up -d"*) exit "${STUB_UP_RC:-0}" ;;
   *" build") # a build moves the active tags to new images
     printf '%s' "${STUB_NEW_APP:?}" > "$(img trading-alert:dev)"
     printf '%s' "${STUB_NEW_OPS:?}" > "$(img trading-alert-ops:dev)"
@@ -71,7 +72,16 @@ exit 0
 head="$state/head"
 case "$1" in
   status) printf '%s' "${STUB_GIT_DIRTY:-}"; exit 0 ;;
-  rev-parse) cat "$head"; exit 0 ;;
+  rev-parse)
+    if [ "$2" = --verify ]; then
+      [ -z "${STUB_REF_UNRESOLVED:-}" ] || exit 1
+      ref="${@: -1}"
+      ref="${ref%'^{commit}'}"
+      if [[ $ref =~ ^[0-9a-f]{40}$ ]]; then printf '%s\n' "$ref"
+      else printf '%s\n' "${STUB_REF_SHA:?}"; fi
+      exit 0
+    fi
+    cat "$head"; exit 0 ;;
   checkout)
     target="${@: -1}"
     if [[ $target =~ ^[0-9a-f]{40}$ ]]; then printf '%s\n' "$target" > "$head"
@@ -480,6 +490,37 @@ def test_update_records_state_backs_up_retags_checks_out_builds_and_starts(rig: 
     assert rig.image("trading-alert-ops:rollback") == OLD_OPS
     assert rig.image("trading-alert:dev") == NEW_APP
     assert rig.head() == REF_SHA
+
+
+def test_a_retried_update_keeps_the_rollback_state_of_the_last_good_release(rig: Rig) -> None:
+    """WR-02: run 1 builds the new images but fails to start; run 2 must not record them."""
+    failed = _update(rig, "--ref", "v0.3.1", env={"STUB_UP_RC": "1"})
+    assert failed.returncode != 0
+    assert rig.head() == REF_SHA
+    assert rig.image("trading-alert:dev") == NEW_APP
+
+    retry = _update(rig, "--ref", "v0.3.1")
+    assert retry.returncode == 0, retry.stdout + retry.stderr
+
+    state = (rig.deploy_state / "last-good.env").read_text(encoding="utf-8")
+    assert state == f"GIT_SHA={OLD_SHA}\nAPP_IMAGE_ID={OLD_APP}\nOPS_IMAGE_ID={OLD_OPS}\n"
+    assert rig.image("trading-alert:rollback") == OLD_APP
+    assert rig.image("trading-alert-ops:rollback") == OLD_OPS
+    assert "keeping the rollback state" in retry.stderr
+
+    assert _update(rig, "--rollback").returncode == 0
+    assert rig.head() == OLD_SHA
+    assert rig.image("trading-alert:dev") == OLD_APP
+
+
+def test_an_unresolvable_ref_is_never_mistaken_for_a_retry(rig: Rig) -> None:
+    assert _update(rig, "--ref", "v0.3.1").returncode == 0  # state records OLD, head is now NEW
+    proc = _update(rig, "--ref", "v0.4.0", env={"STUB_REF_UNRESOLVED": "1"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    state = (rig.deploy_state / "last-good.env").read_text(encoding="utf-8")
+    assert f"GIT_SHA={REF_SHA}" in state  # recorded the release that was running
+    previous = (rig.deploy_state / "last-good.env.prev").read_text(encoding="utf-8")
+    assert previous == f"GIT_SHA={OLD_SHA}\nAPP_IMAGE_ID={OLD_APP}\nOPS_IMAGE_ID={OLD_OPS}\n"
 
 
 def test_skip_backup_omits_the_backup_run(rig: Rig) -> None:

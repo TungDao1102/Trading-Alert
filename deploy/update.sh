@@ -7,9 +7,11 @@ set -Eeuo pipefail
 #   deploy/update.sh --rollback [--dry-run]
 #
 # --ref refuses a dirty working tree, records the current commit and the IDs of both images in
-# .deploy/last-good.env, runs deploy/backup.sh (unless --skip-backup; a failing backup stops the
-# update), tags both images :rollback, fetches, checks out REF detached, builds and starts the
-# stack.
+# .deploy/last-good.env (the previous record is kept as last-good.env.prev), runs
+# deploy/backup.sh (unless --skip-backup; a failing backup stops the update), tags both images
+# :rollback, fetches, checks out REF detached, builds and starts the stack. A retry of a failed
+# update (the checkout is already at REF and a valid record exists) keeps the record and the
+# :rollback tags, so --rollback still returns to the last good release.
 # --rollback checks out the recorded commit, tags the :rollback images back to the active tag,
 # compares the image IDs with the recorded ones (a mismatch aborts), and starts with --no-build.
 # A schema migration that the newer version applied is NOT undone by a code rollback: restore
@@ -37,7 +39,7 @@ STATE_FILE=""
 COMPOSE=()
 
 usage() {
-  sed -n '3,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '3,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
 usage_error() {
@@ -98,7 +100,7 @@ state_value() {
 }
 
 record_state() {
-  local sha app_id ops_id
+  local sha app_id ops_id content
   sha="$(git rev-parse HEAD)"
   app_id="$(image_id "$APP_REPO:$TAG")"
   ops_id="$(image_id "$OPS_REPO:$TAG")"
@@ -109,19 +111,54 @@ record_state() {
     [[ -n $app_id && -n $ops_id ]] ||
       die "images $APP_REPO:$TAG and $OPS_REPO:$TAG must exist locally so they can be rolled back to"
   fi
-  write_if_changed "$STATE_FILE" "GIT_SHA=$sha
+  content="GIT_SHA=$sha
 APP_IMAGE_ID=$app_id
-OPS_IMAGE_ID=$ops_id" 0600
+OPS_IMAGE_ID=$ops_id"
+  # Keep the previous record next to the new one (not in dry-run, which writes nothing).
+  if [[ -f $STATE_FILE && $DRY_RUN != 1 ]] && ! cmp -s "$STATE_FILE" <(printf '%s\n' "$content"); then
+    cp -p "$STATE_FILE" "$STATE_FILE.prev"
+  fi
+  write_if_changed "$STATE_FILE" "$content" 0600
+}
+
+# is_retry: true when the checkout is already at REF and a usable rollback record exists, i.e. an
+# earlier --ref run got as far as checking REF out (and maybe building it) but did not finish.
+# Recording again would overwrite the last good release with the half-deployed one and retag
+# :rollback to the new images. A record is usable only when it parses and the :rollback tags
+# still hold the recorded images.
+is_retry() {
+  local head target sha app_id ops_id
+  [[ -f $STATE_FILE ]] || return 1
+  head="$(git rev-parse HEAD)"
+  target="$(git rev-parse --verify --quiet "$REF^{commit}" || true)"
+  [[ -n $target && $target == "$head" ]] || return 1
+  sha="$(state_value GIT_SHA)"
+  app_id="$(state_value APP_IMAGE_ID)"
+  ops_id="$(state_value OPS_IMAGE_ID)"
+  [[ $sha =~ ^[0-9a-f]{40}$ ]] || return 1
+  [[ $app_id =~ ^sha256:[0-9a-f]{64}$ && $ops_id =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  [[ "$(image_id "$APP_REPO:rollback")" == "$app_id" ]] || return 1
+  [[ "$(image_id "$OPS_REPO:rollback")" == "$ops_id" ]] || return 1
+  return 0
 }
 
 do_update() {
+  local retry=0
   require_clean_tree
-  record_state
+  if is_retry; then
+    retry=1
+    log "already at $REF; keeping the rollback state recorded for $(state_value GIT_SHA)" \
+      "and the existing :rollback images"
+  else
+    record_state
+  fi
   if ((!SKIP_BACKUP)); then
     run bash "$SCRIPT_DIR/backup.sh"
   fi
-  run docker tag "$APP_REPO:$TAG" "$APP_REPO:rollback"
-  run docker tag "$OPS_REPO:$TAG" "$OPS_REPO:rollback"
+  if ((!retry)); then
+    run docker tag "$APP_REPO:$TAG" "$APP_REPO:rollback"
+    run docker tag "$OPS_REPO:$TAG" "$OPS_REPO:rollback"
+  fi
   run git fetch --tags origin
   run git checkout --detach "$REF"
   run "${COMPOSE[@]}" --profile ops build
