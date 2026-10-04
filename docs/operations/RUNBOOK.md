@@ -268,7 +268,7 @@ Optional operator choices that bootstrap does not make: install `unattended-upgr
 3. Backup crypt passphrase stored off the VPS; losing it makes every backup unrecoverable (section 11).
 4. Second SSH session tested before closing the first.
 5. Provider disk encryption enabled or confirmed.
-6. `BACKUP_*` variables set in `/opt/trading/.env`, then `sudo /opt/trading/deploy/backup.sh --install-timer` and `deploy/backup.sh --init-remote` (section 11).
+6. `BACKUP_*` variables set in `/opt/trading/.env` and `deploy/backup.sh --init-remote` run as `trading` (section 11). Root SSH login is disabled and `trading` has no sudo, so install the timer as root from the provider console, or from the bootstrap root session before closing it: `/opt/trading/deploy/backup.sh --install-timer` (it does not read `.env`). Later apt, ufw or systemctl changes also need the provider console.
 7. Docker group kept to this one account; only `127.0.0.1` ports published.
 8. Delete the copied secrets file from the host once `.env` is verified.
 

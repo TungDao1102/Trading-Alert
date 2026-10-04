@@ -866,6 +866,8 @@ CHECKLIST_NEEDLES = (
     "second SSH session",
     "disk encryption",
     "backup.sh --install-timer",
+    "Root SSH login is now disabled",  # WR-05: say how root is reached after hardening
+    "provider console",
     "docker group",
 )
 

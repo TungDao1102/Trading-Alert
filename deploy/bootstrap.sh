@@ -516,8 +516,13 @@ Operator checklist (none of this is automated):
   3. Backup crypt passphrase: store it off the VPS; losing it makes every backup unrecoverable.
   4. SSH: before closing this session, open a second SSH session as $TRADING_USER with your key.
   5. Provider disk encryption: enable it (or confirm it is on) in the provider console.
-  6. Backups: set the BACKUP_* variables in $INSTALL_DIR/.env, then run
+  6. Backups: set the BACKUP_* variables in $INSTALL_DIR/.env as $TRADING_USER, and run
+       $INSTALL_DIR/deploy/backup.sh --init-remote
+     as $TRADING_USER. Root SSH login is now disabled and $TRADING_USER has no sudo, so install
+     the timer as root from the provider console (or from this root session, before you close it;
+     the install does not read .env):
        $INSTALL_DIR/deploy/backup.sh --install-timer
+     The same applies to every later apt, ufw or systemctl change: reach root via the console.
   7. The docker group is root-equivalent: keep it to this one operator account. ufw does not
      control ports published by Docker; publish only 127.0.0.1 ports.
   8. Delete the copied secrets file from this host once .env is verified: $SECRETS_FILE
