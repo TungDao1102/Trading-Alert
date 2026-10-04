@@ -6,8 +6,9 @@ window at a time. `ListMinuteSource` serves fixtures from in-memory candles; the
 Polars-backed implementation lives in `src/data` (plan 14-10) so this package stays
 Polars-free.
 
-A hole (a missing minute) is explicit and stays absent from every window; nothing
-is padded or sorted silently (D-13).
+Minute series are validated on load (D-13): strictly increasing, minute-aligned
+open times, no duplicate or overlapping minutes. A hole (a missing minute) is
+explicit and stays absent from every window; nothing is padded or sorted silently.
 
 The module imports NOTHING from Polars/pandas/NumPy/Binance SDK/
 SQLAlchemy/Pydantic — stdlib + Decimal + `src/core/_decimal.py` only,
@@ -18,13 +19,15 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 
 from src.core.types import Candle
 
+_MINUTE = timedelta(seconds=60)
 _KINDS = ("trade", "mark")
+_MINUTE_INTERVAL = "1m"
 
 
 class MinuteSeriesError(ValueError):
@@ -62,24 +65,46 @@ def _window(
 
 
 def validate_minute_series(candles: Sequence[Candle], *, symbol: str, kind: str) -> None:
-    """Fail closed unless `candles` has strictly increasing open times for `symbol`.
+    """Fail closed unless `candles` is a valid 1m series for `symbol` (D-13).
+
+    Per candle: symbol and interval match, and the close time lies strictly inside
+    `(open, open + 60 s)`. Per pair: the next open time is strictly later than the
+    previous one (no duplicate, no decreasing order) and not earlier than previous open
+    + 60 s (no overlap). Every open time is aligned to a whole minute. A gap between
+    consecutive opens is a legal, explicit hole.
 
     Raises:
-        MinuteSeriesError: a symbol mismatch, or an open time that is not strictly
-            later than the previous one.
+        MinuteSeriesError: any violation, naming the offending open time.
     """
     if kind not in _KINDS:
         raise MinuteSeriesError(f"kind must be one of {_KINDS}, got {kind!r}")
     previous_open: datetime | None = None
     for candle in candles:
+        opened = candle.open_time_utc
+        where = f"{kind} minute {opened.isoformat()} for {symbol}"
         if candle.symbol != symbol:
-            raise MinuteSeriesError(f"{kind} minute for {symbol}: symbol mismatch")
-        if previous_open is not None and candle.open_time_utc <= previous_open:
+            raise MinuteSeriesError(f"{where}: symbol mismatch, got {candle.symbol!r}")
+        if candle.interval != _MINUTE_INTERVAL:
+            raise MinuteSeriesError(f"{where}: interval must be '1m', got {candle.interval!r}")
+        if not (opened < candle.close_time_utc < opened + _MINUTE):
             raise MinuteSeriesError(
-                f"{kind} minute {candle.open_time_utc.isoformat()} for {symbol}: "
-                "open times must be strictly increasing"
+                f"{where}: close time {candle.close_time_utc.isoformat()} must lie strictly "
+                "inside (open, open + 60 s)"
             )
-        previous_open = candle.open_time_utc
+        if previous_open is not None:
+            if opened == previous_open:
+                raise MinuteSeriesError(f"{where}: duplicate open time")
+            if opened < previous_open:
+                raise MinuteSeriesError(
+                    f"{where}: open time decreases (previous {previous_open.isoformat()})"
+                )
+            if opened < previous_open + _MINUTE:
+                raise MinuteSeriesError(
+                    f"{where}: overlaps the previous minute {previous_open.isoformat()}"
+                )
+        if opened.second != 0 or opened.microsecond != 0:
+            raise MinuteSeriesError(f"{where}: open time is not aligned to a whole minute")
+        previous_open = opened
 
 
 class ListMinuteSource:
@@ -119,24 +144,61 @@ class ListMinuteSource:
         return _window(self._mark[symbol], start_exclusive, end_inclusive)
 
 
-def parse_minute_row(row: Mapping[str, Any], *, kind: str) -> Candle:
-    """Build a 1m `Candle` from a JSON-like row.
+def _parse_money(value: object, field_name: str) -> Decimal:
+    """Coerce a money field to Decimal; floats and bools are refused, never coerced."""
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool | float):
+        raise TypeError(f"{field_name} must be Decimal/str/int, got {type(value).__name__}")
+    if isinstance(value, int | str):
+        return Decimal(value)
+    raise TypeError(f"{field_name} must be Decimal/str/int, got {type(value).__name__}")
 
-    `kind` is `"trade"` or `"mark"`. Mark rows carry no volume (the Phase 13 mark
-    columns have `price_tick_count` instead), so a parsed mark candle gets
-    `Decimal("0")` volume.
+
+def _parse_time(value: object, field_name: str) -> datetime:
+    """Parse an ISO string or datetime into a UTC-aware datetime (naive refused)."""
+    if isinstance(value, str):
+        parsed = datetime.fromisoformat(value)
+    elif isinstance(value, datetime):
+        parsed = value
+    else:
+        raise TypeError(f"{field_name} must be an ISO str or datetime, got {type(value).__name__}")
+    if parsed.tzinfo is None:
+        raise MinuteSeriesError(f"{field_name} must be UTC-aware, got naive datetime")
+    if parsed.utcoffset() != timedelta(0):
+        raise MinuteSeriesError(f"{field_name} must be UTC, got offset {parsed.utcoffset()}")
+    return parsed
+
+
+def parse_minute_row(row: Mapping[str, Any], *, kind: str) -> Candle:
+    """Build a 1m `Candle` from a JSON-like row (D-13).
+
+    `kind` is `"trade"` or `"mark"`. Trade rows carry `volume`; mark rows do not (the
+    Phase 13 mark columns have `price_tick_count` instead), so a parsed mark candle
+    gets `Decimal("0")` volume and a trade row without volume is refused.
+
+    Raises:
+        TypeError: a money field is a float/bool or a time field has the wrong type.
+        MinuteSeriesError: naive or non-UTC time, missing column, or an unknown kind.
     """
     if kind not in _KINDS:
         raise MinuteSeriesError(f"kind must be one of {_KINDS}, got {kind!r}")
-    volume = Decimal(row["volume"]) if kind == "trade" else Decimal("0")
+    required = ["symbol", "interval", "open_time_utc", "close_time_utc"]
+    required.extend(["open", "high", "low", "close"])
+    if kind == "trade":
+        required.append("volume")
+    missing = [name for name in required if name not in row]
+    if missing:
+        raise MinuteSeriesError(f"{kind} minute row is missing columns {missing}")
+    volume = _parse_money(row["volume"], "volume") if kind == "trade" else Decimal("0")
     return Candle(
         symbol=str(row["symbol"]),
         interval=str(row["interval"]),
-        open_time_utc=datetime.fromisoformat(str(row["open_time_utc"])),
-        close_time_utc=datetime.fromisoformat(str(row["close_time_utc"])),
-        open=Decimal(row["open"]),
-        high=Decimal(row["high"]),
-        low=Decimal(row["low"]),
-        close=Decimal(row["close"]),
+        open_time_utc=_parse_time(row["open_time_utc"], "open_time_utc"),
+        close_time_utc=_parse_time(row["close_time_utc"], "close_time_utc"),
+        open=_parse_money(row["open"], "open"),
+        high=_parse_money(row["high"], "high"),
+        low=_parse_money(row["low"], "low"),
+        close=_parse_money(row["close"], "close"),
         volume=volume,
     )
