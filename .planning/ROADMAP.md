@@ -583,10 +583,40 @@ Plans:
 
 **Audit refs**: F-120, F-901, F-902, F-102, F-804, F-905, F-305, F-204, F-123, F-118, F-602, F-805, F-904; carry-over from Phase 6 (`.planning/phases/06-backtest-simulator-experiment-registry/06-VERIFICATION.md`)
 
-**Plans:** 0 plans
+**Plans:** 16 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 14 to break down)
+**Wave 1**
+- [ ] 14-01-PLAN.md — Tracer lifecycle slice: semantics constants (D-27 TP1 policy), MinuteSource, entry/exit rules, pure lifecycle driver, TradeRecord v2 in records.py, shared validator, single R-denominator function, purity guards
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 14-02-PLAN.md — Entry lifecycle: simulated-time expiry (G3), trade-through both sides, touch counter, CANDLE_CLOSE invalidation, cancel API, PENDING_AT_DATA_END
+- [ ] 14-03-PLAN.md — Funding module: D-14 sign convention, actual fundingTimes, open-quantity segments, mark fallback, fail-closed coverage with recorded allow-gaps
+- [ ] 14-04-PLAN.md — Funding identity: presence-driven funding_convention cost key via cost_slice, legacy hashes locked, deliberate fixture fan-out
+- [ ] 14-05-PLAN.md — Simulated ledger (equity, exposures, UTC-day loss, DAILY_STOP) and point-in-time constraints with back-extrapolation flag
+- [ ] 14-06-PLAN.md — Live R denominator wiring (D-29) and backtest/live R parity test
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 14-07-PLAN.md — Exit engine: live TP1/TP2 ladder, mark-price triggers, stop-first, fill-minute rule, stop gaps, fallback at bar close, END_OF_DATA, per-leg costs
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 14-08-PLAN.md — v2 engine: case-input v2, event loop with D-18 ordering, windowed strategy and scripted front-ends, ledger-fed risk, one active per symbol, DAILY_STOP cancel, TP1 sizeability reject, funding wiring
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 14-09-PLAN.md — Regime on SetupResult and records, typed run summary, simulator-level determinism and prefix-invariance suites
+- [ ] 14-10-PLAN.md — Data adapter: lazy ParquetMinuteSource, multi-symbol v2 builder with per-symbol funding cadence, constraint history reader
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 14-11-PLAN.md — Analytics and report: validator at normalizer boundary, chain test, v2 kinds, closed-trade counting, regime slice, plateau not computed
+- [ ] 14-12-PLAN.md — Switch run to the v2 engine, retire v1, regenerate phase6/phase7 inputs as regression snapshots, migrate consumers
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 14-13-PLAN.md — Hand-derived golden cases (16) with DERIVATIONS.md, input-only generator and meta-tests
+- [ ] 14-14-PLAN.md — Local real-data smoke script with runtime, memory and digest measurements
+- [ ] 14-15-PLAN.md — Typed ExperimentRecord, verifiable code version, reproduce/verify on v2, evidence schema v2
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 14-16-PLAN.md — Protocol v2.0.0 amendment, D052/D053, spec updates, ROADMAP criterion 2 rewording (D-39), void markers
 
 ### Phase 15: Strategy Geometry Correction
 
