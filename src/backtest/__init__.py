@@ -19,6 +19,7 @@ from .costs import (
     cost_slice,
     modeled_costs_per_unit,
 )
+from .engine import simulate
 from .experiment import (
     ExperimentRecord,
     ExperimentReproducibilityBroken,
@@ -29,20 +30,12 @@ from .experiment import (
     reproduce,
     verify_experiment,
 )
-from .simulator import (
-    IntrabarOutcome,
-    SimulatorResult,
-    TradeRecord,
-    resolve_intrabar,
-    run,
-)
+from .simulator import TradeRecord, run
 
 __all__ = [
     # Types
     "CostModel",
     "ExperimentRecord",
-    "IntrabarOutcome",
-    "SimulatorResult",
     "TradeRecord",
     # Exceptions
     "CostModelBindingMismatch",
@@ -58,7 +51,7 @@ __all__ = [
     "cost_slice",
     "modeled_costs_per_unit",
     "reproduce",
-    "resolve_intrabar",
     "run",
+    "simulate",
     "verify_experiment",
 ]
