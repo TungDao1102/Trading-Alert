@@ -646,7 +646,7 @@ def assemble(
     `IncompleteExperimentRecord` naming the cause) when its `plan_source` is not
     STRATEGY (a scripted run is never evidence), when its semantics version or tie-break
     differ from the code constants, when its `data_window` is not the record's time
-    range, when its `dataset_id` is set and is not `data_snapshot_id`, or when the cost
+    range, when its `dataset_id` is absent or is not `data_snapshot_id`, or when the cost
     model lacks the funding convention. Holdout-once enforcement is Phase 26 (F-960).
 
     `run_identity` is the engine output (or any mapping with its `strategy_version`,
@@ -701,7 +701,12 @@ def assemble(
             f"({time_range_start_utc.isoformat()} to {time_range_end_utc.isoformat()})"
         )
     dataset_id = _summary_value(run_summary, "dataset_id")
-    if dataset_id is not None and dataset_id != data_snapshot_id:
+    if dataset_id is None:
+        raise IncompleteExperimentRecord(
+            "run_summary dataset_id is missing: a run over data that carries no dataset id "
+            "cannot be bound to data_snapshot_id (WR-03)"
+        )
+    if dataset_id != data_snapshot_id:
         raise IncompleteExperimentRecord(
             f"run_summary dataset_id {dataset_id!r} is not data_snapshot_id {data_snapshot_id!r}"
         )
@@ -919,6 +924,15 @@ def _check_inputs_bind_record(record: ExperimentRecord, simulator_inputs: dict[s
             f"strategy_version {simulator_inputs.get('strategy_version')!r} "
             f"!= recorded {record.strategy_version!r}"
         )
+    missing = [
+        key
+        for key in ("strategy_id", "parameter_set_id", "cost_model", "symbols")
+        if key not in simulator_inputs
+    ]
+    if missing:
+        raise ExperimentReproducibilityBroken(
+            "simulator_inputs are missing " + ", ".join(repr(key) for key in missing)
+        )
     parameter_set = load_parameter_set(
         simulator_inputs["strategy_id"], simulator_inputs["parameter_set_id"]
     )
@@ -927,6 +941,13 @@ def _check_inputs_bind_record(record: ExperimentRecord, simulator_inputs: dict[s
     cost_model = build_cost_model(simulator_inputs["cost_model"])
     if cost_model.cost_model_hash != record.cost_model_hash:
         mismatches.append("cost_model_hash != recorded cost_model_hash")
+    symbols = simulator_inputs["symbols"]
+    if (
+        not isinstance(symbols, (list, tuple))
+        or not all(isinstance(symbol, str) for symbol in symbols)
+        or _universe_hash(symbols) != record.universe_hash
+    ):
+        mismatches.append("symbols != recorded universe_hash")
     window = simulator_inputs.get("data_window")
     if not isinstance(window, Mapping):
         mismatches.append("data_window is missing from the simulator inputs")
@@ -969,8 +990,11 @@ def _check_run_binds_record(record: ExperimentRecord, run_summary: Mapping[str, 
             mismatches.append(f"{name} {value!r} != recorded {recorded!r}")
     if window != (record.time_range_start_utc, record.time_range_end_utc):
         mismatches.append("data_window != recorded time range")
-    if dataset_id is not None and dataset_id != record.data_snapshot_id:
-        mismatches.append(f"dataset_id {dataset_id!r} != recorded data_snapshot_id")
+    if dataset_id is None or dataset_id != record.data_snapshot_id:
+        mismatches.append(
+            f"dataset_id {dataset_id!r} != recorded data_snapshot_id "
+            "(a run without a dataset id is not bound to the recorded data)"
+        )
     if mismatches:
         raise ExperimentReproducibilityBroken(
             "the re-run does not match the recorded experiment: " + "; ".join(mismatches)
@@ -988,11 +1012,14 @@ def reproduce(
     yields byte-identical trade lists. Inputs are checked against the
     record's identity first (fail closed on mismatch), and the re-run's summary must
     agree with the record's typed fields; rebuilt trades carry typed Decimal/datetime
-    fields and are validated (D-23). With empty `simulator_inputs`, returns an empty
-    list (deterministic, no candles to replay).
+    fields and are validated (D-23). Empty `simulator_inputs` raise
+    `ExperimentReproducibilityBroken`: there is nothing to replay, so reporting the
+    experiment as reproducible would check nothing (WR-03).
     """
     if not simulator_inputs:
-        return []
+        raise ExperimentReproducibilityBroken(
+            "simulator_inputs are empty: nothing can be reproduced against the record"
+        )
     _check_inputs_bind_record(record, simulator_inputs)
     result = simulator_run(simulator_inputs)
     _check_run_binds_record(record, result["run_summary"])

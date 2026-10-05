@@ -51,6 +51,11 @@ def _load_input(case_dir: Path) -> dict:
     return json.loads((case_dir / "input.json").read_text(encoding="utf-8"))
 
 
+def _load_bound_input(case_dir: Path) -> dict:
+    """A case input that carries the dataset id `_simple_trend_record` binds (WR-03)."""
+    return {**_load_input(case_dir), "dataset_id": "3" * 64}
+
+
 def _load_expected(case_dir: Path) -> dict:
     return json.loads((case_dir / "expected.json").read_text(encoding="utf-8"))
 
@@ -136,11 +141,13 @@ def test_experiment_reproduce_byte_identical() -> None:
     """
     from src.backtest.experiment import reproduce
 
-    record = _assemble()
+    case = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    record = _simple_trend_record(case)
 
     # Reproduce twice — both runs must yield byte-identical trade lists.
-    trades_a = reproduce(record, simulator_inputs={})
-    trades_b = reproduce(record, simulator_inputs={})
+    trades_a = reproduce(record, simulator_inputs=case)
+    trades_b = reproduce(record, simulator_inputs=case)
+    assert trades_a, "the simple-trend baseline must yield trades to compare"
     digest_a = sha256_hex({"trades": [t.to_dict() for t in trades_a]})
     digest_b = sha256_hex({"trades": [t.to_dict() for t in trades_b]})
     assert digest_a == digest_b, f"reproduce digests differ: {digest_a} != {digest_b}"
@@ -287,10 +294,11 @@ def test_verify_experiment_returns_none_when_reproducible() -> None:
     """
     from src.backtest.experiment import verify_experiment
 
-    record = _assemble()
+    case = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    record = _simple_trend_record(case)
 
     # verify_experiment must return None when reproducible.
-    result = verify_experiment(record, simulator_inputs={})
+    result = verify_experiment(record, simulator_inputs=case)
     assert result is None, f"verify_experiment must return None when reproducible, got {result!r}"
 
 
@@ -299,21 +307,27 @@ def test_verify_experiment_returns_none_when_reproducible() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_empty_input_yields_valid_record_with_zero_trades() -> None:
-    """Beh. 9: zero strategy bars yields a valid ExperimentRecord with
-    trade_count zero plus an empty trade list (REFACTOR task).
-
-    Per D-03: the experiment record is valid even when the simulator
-    produces no trades. The empty-input case must not raise.
+def test_empty_input_yields_valid_record_but_cannot_be_reproduced_vacuously() -> None:
+    """Beh. 9: a record over a run with no trades is valid, but empty simulator inputs are
+    refused by reproduce/verify_experiment instead of reporting "reproducible" (WR-03).
     """
-    from src.backtest.experiment import reproduce
+    from src.backtest.experiment import (
+        ExperimentReproducibilityBroken,
+        reproduce,
+        verify_experiment,
+    )
 
     record = _assemble(run_summary=strategy_run_summary(no_trade_counts={}, end_of_data_count=0))
     assert record.no_trade_counts == ()
 
-    # Empty simulator_inputs (no candles) → empty trade list, no exception.
-    trades = reproduce(record, simulator_inputs={})
-    assert trades == [], f"empty input must yield empty trade list, got {len(trades)} trades"
+    with pytest.raises(ExperimentReproducibilityBroken, match="empty"):
+        reproduce(record, simulator_inputs={})
+    with pytest.raises(ExperimentReproducibilityBroken, match="empty"):
+        verify_experiment(record, simulator_inputs={})
+    # A missing key is a typed failure, not a KeyError.
+    partial = {key: value for key, value in _gap_simulator_inputs().items() if key != "cost_model"}
+    with pytest.raises(ExperimentReproducibilityBroken, match="cost_model"):
+        reproduce(record, simulator_inputs=partial)
 
 
 # --------------------------------------------------------------------------- #
@@ -414,7 +428,7 @@ def test_cr03b_reproduced_trades_carry_typed_decimal_datetime_fields() -> None:
     """CR-03b: reproduced TradeRecords hold typed Decimal/datetime fields."""
     from src.backtest.experiment import reproduce
 
-    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    case = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
     assert case["parameter_set_id"] == "baseline-simple-trend-v3"
     record = _simple_trend_record(case)
     trades = reproduce(record, simulator_inputs=case)
@@ -470,22 +484,28 @@ def test_cr03c_verify_experiment_detects_engine_drift_vs_stored_digest() -> None
     """CR-03c: verify_experiment detects drift vs the stored result digest."""
     from src.backtest.experiment import (
         ExperimentReproducibilityBroken,
+        reproduce,
+        trades_digest,
         verify_experiment,
     )
 
-    # No stored digest: empty-input determinism check passes.
-    record = _assemble()
-    assert verify_experiment(record, simulator_inputs={}) is None
+    case = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+
+    # No stored digest: the determinism check over a real re-run passes.
+    record = _simple_trend_record(case)
+    assert verify_experiment(record, simulator_inputs=case) is None
 
     # Forged stored digest: drift detected.
-    forged = _assemble(result_summary_json=json.dumps({"trades_digest": "f" * 64}))
+    forged = _simple_trend_record(case, result_summary_json=json.dumps({"trades_digest": "f" * 64}))
     with pytest.raises(ExperimentReproducibilityBroken):
-        verify_experiment(forged, simulator_inputs={})
+        verify_experiment(forged, simulator_inputs=case)
 
     # Matching stored digest: accepted.
-    matching_digest = sha256_hex({"trades": []})
-    matching = _assemble(result_summary_json=json.dumps({"trades_digest": matching_digest}))
-    assert verify_experiment(matching, simulator_inputs={}) is None
+    matching_digest = trades_digest(reproduce(record, simulator_inputs=case))
+    matching = _simple_trend_record(
+        case, result_summary_json=json.dumps({"trades_digest": matching_digest})
+    )
+    assert verify_experiment(matching, simulator_inputs=case) is None
 
 
 def test_cr05_decimal_inputs_hash_identically_to_string_inputs() -> None:
@@ -710,7 +730,7 @@ def test_baseline_simple_trend_keeps_the_filled_trade_of_the_v2_engine() -> None
     from src.backtest.experiment import baseline_simple_trend
     from src.backtest.simulator import run
 
-    case_input = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    case_input = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
     trades = baseline_simple_trend(case_input)
     assert len(trades) == 1
     (trade,) = trades
@@ -727,7 +747,7 @@ def test_reproduce_reruns_the_v2_engine_and_reproduces_byte_identical_trades() -
     from src.backtest.experiment import reproduce
     from src.backtest.simulator import run
 
-    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    case = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
     record = _simple_trend_record(case)
     first = reproduce(record, simulator_inputs=case)
     second = reproduce(record, simulator_inputs=case)
@@ -742,7 +762,7 @@ def test_verify_experiment_compares_the_v2_digest_and_detects_a_changed_minute_s
     from src.backtest.experiment import ExperimentReproducibilityBroken, verify_experiment
     from src.backtest.simulator import run
 
-    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    case = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
     digest = sha256_hex({"trades": run(case)["trades"]})
     matching = _simple_trend_record(
         case, result_summary_json=_json.dumps({"trades_digest": digest})
@@ -758,7 +778,7 @@ def test_verify_experiment_compares_the_v2_digest_and_detects_a_changed_minute_s
     # Drift: the stop minute no longer reaches the stop, so the position runs to the data end.
     # The re-run summary (END_OF_DATA count) no longer matches the typed record, which trips
     # before the digest comparison is reached (plan 14-15).
-    drifted = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    drifted = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
     for row in drifted["mark_bars_1m"]:
         if row["open_time_utc"] == "2026-09-11T10:06:00+00:00":
             row["low"] = "121.50"
@@ -1085,11 +1105,13 @@ def test_assemble_binds_the_run_to_the_identity_it_attests() -> None:
         _assemble(universe=["BTCUSDT", "ETHUSDT"], run_identity=base)
 
 
-def test_assemble_refuses_a_run_over_another_dataset() -> None:
+def test_assemble_refuses_a_run_over_another_or_no_dataset() -> None:
     from src.backtest.experiment import IncompleteExperimentRecord
 
     with pytest.raises(IncompleteExperimentRecord, match="dataset_id"):
         _assemble(run_summary=strategy_run_summary(dataset_id="9" * 64))
+    with pytest.raises(IncompleteExperimentRecord, match="dataset_id is missing"):
+        _assemble(run_summary=strategy_run_summary(dataset_id=None))
     ok = _assemble(data_snapshot_id="9" * 64, run_summary=strategy_run_summary(dataset_id="9" * 64))
     assert ok.data_snapshot_id == "9" * 64
 
@@ -1121,7 +1143,7 @@ def _engine_trade() -> dict[str, Any]:
     """The one filled trade dict the simple-trend baseline case produces (engine output)."""
     from src.backtest.simulator import run
 
-    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    case = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
     (trade,) = run(case)["trades"]
     return dict(trade)
 
@@ -1239,7 +1261,7 @@ def test_trade_from_dict_refuses_mistyped_counters_flags_and_labels(
 def test_reproduce_binds_the_data_window_to_the_record_time_range() -> None:
     from src.backtest.experiment import ExperimentReproducibilityBroken, reproduce
 
-    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    case = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
     record = _simple_trend_record(case)
     shifted = dict(case, data_window=dict(case["data_window"], end_utc="2026-09-11T11:30:00+00:00"))
     with pytest.raises(ExperimentReproducibilityBroken, match="data_window"):
@@ -1252,7 +1274,7 @@ def test_reproduce_binds_the_data_window_to_the_record_time_range() -> None:
 def test_verify_experiment_fails_closed_when_the_data_window_changes() -> None:
     from src.backtest.experiment import ExperimentReproducibilityBroken, verify_experiment
 
-    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    case = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
     record = _simple_trend_record(case)
     assert verify_experiment(record, simulator_inputs=case) is None
     shorter = dict(case, data_window=dict(case["data_window"], end_utc="2026-09-11T10:30:00+00:00"))
@@ -1265,7 +1287,7 @@ def test_verify_experiment_fails_closed_when_the_simulator_semantics_change(
 ) -> None:
     from src.backtest.experiment import ExperimentReproducibilityBroken, verify_experiment
 
-    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    case = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
     record = _simple_trend_record(case)
     # The engine now reports a different semantics version than the record was made under.
     monkeypatch.setattr("src.backtest.engine.SIMULATOR_SEMANTICS_VERSION", "2.0.1")
@@ -1276,7 +1298,7 @@ def test_verify_experiment_fails_closed_when_the_simulator_semantics_change(
 def test_reproduce_refuses_a_run_whose_typed_counts_differ_from_the_record() -> None:
     from src.backtest.experiment import ExperimentReproducibilityBroken, reproduce
 
-    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    case = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
     record = dataclasses.replace(
         _simple_trend_record(case), no_trade_counts=(("NO_TRADE_REGIME", 1),)
     )
@@ -1287,7 +1309,7 @@ def test_reproduce_refuses_a_run_whose_typed_counts_differ_from_the_record() -> 
 def test_reproduce_refuses_to_replay_a_scripted_run() -> None:
     from src.backtest.experiment import ExperimentReproducibilityBroken, reproduce
 
-    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    case = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
     record = _simple_trend_record(case)
     scripted = dict(case, scripted_plans=[])
     with pytest.raises(ExperimentReproducibilityBroken, match="plan_source"):
@@ -1298,7 +1320,7 @@ def test_reproduce_returns_validated_typed_trades_for_a_bound_record() -> None:
     from src.backtest.experiment import reproduce
     from src.backtest.simulator import run
 
-    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    case = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
     record = _simple_trend_record(case)
     trades = reproduce(record, simulator_inputs=case)
     assert [t.to_dict() for t in trades] == run(case)["trades"]

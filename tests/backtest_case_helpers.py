@@ -344,6 +344,7 @@ def phase6_strategy_rows(fixture: str) -> tuple[list[dict[str, Any]], list[dict[
 RECORD_START = datetime(2026, 1, 1, tzinfo=UTC)
 RECORD_END = datetime(2026, 2, 1, tzinfo=UTC)
 CODE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+DEFAULT_DATASET_ID = "1" * 64  # the data_snapshot_id `assemble_kwargs` binds by default
 
 
 def strategy_run_summary(
@@ -362,7 +363,7 @@ def strategy_run_summary(
         "context_timeframe": "4h",
         "context_window_bars": CONTEXT_WINDOW_BARS,
         "data_window": {"start_utc": start.isoformat(), "end_utc": end.isoformat()},
-        "dataset_id": None,
+        "dataset_id": DEFAULT_DATASET_ID,
         "end_of_data_count": 1,
         "fallback_count": 2,
         "gap_through_stop_count": 0,
