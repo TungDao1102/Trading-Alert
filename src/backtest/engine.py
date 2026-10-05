@@ -126,6 +126,7 @@ class _Entity:
     state: PlanState
     advanced_to: datetime
     extrapolated: bool
+    regime: str | None = None
     funding_amount: Decimal = _ZERO
     funding_count: int = 0
     exposure_remaining: Decimal = _ZERO
@@ -505,7 +506,7 @@ class _Engine:
             cost_model=self.cost_model,
             funding_amount=entity.funding_amount,
             funding_event_count=entity.funding_count,
-            regime=None,
+            regime=entity.regime,
             constraints_extrapolated=entity.extrapolated,
         )
         validate_trade_record(record, data_start_utc=self.data_start, data_end_utc=self.data_end)
@@ -588,7 +589,7 @@ class _Engine:
             self._count(NO_TRADE_CONFLICT)
             return
         self._size_and_register(
-            symbol, close, scripted.plan, scripted.direction, scripted.signal_id
+            symbol, close, scripted.plan, scripted.direction, scripted.signal_id, scripted.regime
         )
 
     def _evaluate_strategy(self, symbol: str, close: datetime) -> None:
@@ -625,11 +626,22 @@ class _Engine:
         )
         if planned.is_no_trade or planned.trade_plan is None:
             self._reject(
-                symbol, signal.direction, signal.signal_id, None, planned.reason_code, close
+                symbol,
+                signal.direction,
+                signal.signal_id,
+                None,
+                planned.reason_code,
+                close,
+                regime=result.regime,
             )
             return
         self._size_and_register(
-            symbol, close, planned.trade_plan, signal.direction, signal.signal_id
+            symbol,
+            close,
+            planned.trade_plan,
+            signal.direction,
+            signal.signal_id,
+            result.regime,
         )
 
     def _setup_window(self, symbol: str, close: datetime) -> list[Candle]:
@@ -653,6 +665,7 @@ class _Engine:
         *,
         modeled_costs_per_unit: Decimal | None = None,
         extrapolated: bool = False,
+        regime: str | None = None,
     ) -> None:
         self.records.append(
             build_reject_record(
@@ -666,6 +679,7 @@ class _Engine:
                 parameter_set_hash=self.parameter_set.parameter_set_hash,
                 modeled_costs_per_unit=modeled_costs_per_unit,
                 constraints_extrapolated=extrapolated,
+                regime=regime,
             )
         )
 
@@ -676,6 +690,7 @@ class _Engine:
         trade_plan: TradePlan,
         direction: str,
         signal_id: str,
+        regime: str | None,
     ) -> None:
         """Gate a plan through `risk_fn` on the ledger and, on a pass, let it rest (D-17, D-18)."""
         pit: PitConstraint = select_constraints(
@@ -707,6 +722,7 @@ class _Engine:
                 verdict.reason_code,
                 close,
                 extrapolated=pit.extrapolated,
+                regime=regime,
             )
             return
         planned_quantity = sized.quantity
@@ -724,6 +740,7 @@ class _Engine:
                 close,
                 modeled_costs_per_unit=sized.modeled_costs_per_unit,
                 extrapolated=pit.extrapolated,
+                regime=regime,
             )
             return
         levels = protective_levels_for_fill(
@@ -742,6 +759,7 @@ class _Engine:
                 close,
                 modeled_costs_per_unit=sized.modeled_costs_per_unit,
                 extrapolated=pit.extrapolated,
+                regime=regime,
             )
             return
         state = new_plan_state(
@@ -762,7 +780,9 @@ class _Engine:
             position_side=direction,
             open_risk=sized.realized_risk,
         )
-        self.active[symbol] = _Entity(state=state, advanced_to=close, extrapolated=pit.extrapolated)
+        self.active[symbol] = _Entity(
+            state=state, advanced_to=close, extrapolated=pit.extrapolated, regime=regime
+        )
 
 
 def simulate_detailed(

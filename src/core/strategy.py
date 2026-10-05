@@ -575,6 +575,7 @@ def evaluate(
     last_context_close = snapshot.context_candles[-1].close
     regime = _resolve_regime(context_frame, last_context_close)
     if regime == "NO_TRADE":
+        # The context frame was invalid: no regime verdict exists, so none is named.
         return SetupResult(
             is_no_trade=True,
             reason_code=RejectionReason.NO_TRADE_REGIME.value,
@@ -583,6 +584,7 @@ def evaluate(
         return SetupResult(
             is_no_trade=True,
             reason_code=RejectionReason.NO_TRADE_REGIME.value,
+            regime=regime,
         )
     # CR-07: range-mr is a NEUTRAL-regime family — fading an established
     # trend as "mean reversion" is the false-positive class the regime
@@ -591,6 +593,7 @@ def evaluate(
         return SetupResult(
             is_no_trade=True,
             reason_code=RejectionReason.NO_TRADE_REGIME.value,
+            regime=regime,
         )
 
     # Forming-bar gate (D-02/STRAT-01): the engine must NEVER source a
@@ -611,6 +614,7 @@ def evaluate(
         return SetupResult(
             is_no_trade=True,
             reason_code=RejectionReason.DATA_STALE.value,
+            regime=regime,
         )
 
     # Setup gate (1H setup stream) — family dispatch (D-05).
@@ -637,11 +641,13 @@ def evaluate(
         return SetupResult(
             is_no_trade=True,
             reason_code=RejectionReason.DATA_STALE.value,
+            regime=regime,
         )
     if setup is None:
         return SetupResult(
             is_no_trade=True,
             reason_code=RejectionReason.NO_TRADE_REGIME.value,
+            regime=regime,
         )
     direction, setup_type, zone_upper, zone_lower = setup
 
@@ -698,6 +704,7 @@ def evaluate(
         is_no_trade=False,
         signal=signal,
         reason_code="OK",
+        regime=regime,
     )
 
 

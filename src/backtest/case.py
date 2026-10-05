@@ -120,7 +120,7 @@ _SCRIPTED_REQUIRED = frozenset(
         "expiry_hours",
     }
 )
-_SCRIPTED_KEYS = _SCRIPTED_REQUIRED | {"invalidation_level"}
+_SCRIPTED_KEYS = _SCRIPTED_REQUIRED | {"invalidation_level", "regime"}
 _ZERO = Decimal("0")
 
 
@@ -144,6 +144,7 @@ class ScriptedPlan:
     signal_id: str
     direction: str
     plan: TradePlan
+    regime: str | None = None
 
 
 @dataclass(frozen=True)
@@ -523,6 +524,7 @@ def _parse_scripted(
             label=label,
             account=account,
         )
+        regime = _require_str(row["regime"], f"{label}.regime") if "regime" in row else None
         plans.append(
             ScriptedPlan(
                 symbol=symbol,
@@ -530,6 +532,7 @@ def _parse_scripted(
                 signal_id=signal_id,
                 direction=direction,
                 plan=plan,
+                regime=regime,
             )
         )
     plans.sort(key=lambda p: (p.bar_close_utc, p.symbol))

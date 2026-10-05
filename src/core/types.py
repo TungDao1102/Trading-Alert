@@ -235,14 +235,23 @@ class SetupResult:
     A `signal` is set only when the strategy detected a setup; otherwise
     `reason_code` carries the rejection reason (canonical RejectionReason
     value or an additive warm-up/gap code).
+
+    `regime` is the 4H regime verdict ("BULLISH" / "BEARISH" / "NEUTRAL") the
+    strategy resolved while evaluating, or None when the evaluation stopped
+    before the regime was known. It is report metadata only (Phase 14, D-21,
+    D-38): it is NOT part of the persisted Signal and enters no signal id,
+    fingerprint or plan hash.
     """
 
     is_no_trade: bool
     signal: Signal | None = field(default=None)
     reason_code: str = "OK"
+    regime: str | None = field(default=None)
 
     def __post_init__(self) -> None:
         _require_non_empty(self.reason_code, "reason_code")
+        if self.regime is not None:
+            _require_non_empty(self.regime, "regime")
         if self.reason_code not in _SETUP_REASONS:
             raise ValueError(f"SetupResult: unknown reason_code {self.reason_code!r}")
         if self.is_no_trade:
