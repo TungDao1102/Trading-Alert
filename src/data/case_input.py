@@ -70,6 +70,8 @@ SERIES_ALL: tuple[str, ...] = (
     "funding",
     "open_interest",
 )
+# The series the engine reads: open interest stays inert (no case-input v2 key).
+ENGINE_SERIES: tuple[str, ...] = ("trade", "intrabar_1m", "mark_1m", "funding")
 
 _HASH_CHUNK = 1 << 20
 _MS = timedelta(milliseconds=1)
@@ -178,7 +180,19 @@ class CaseInputData:
         A scenario key that collides with a builder key is refused: the store owns the
         market data, the caller owns the strategy identity and the account, cost and
         constraint scenario. Open interest has no v2 key and is not emitted.
+
+        The engine reads the bars, the 1m trade and mark minutes and funding, and
+        `dataset_id` is what binds a run to its data, so a case is only produced for data
+        whose identity covers every one of those series: a subset such as `("trade",
+        "funding")` could be paired with a lazily supplied `ParquetMinuteSource` over 1m
+        files that are not in the identity (WR-10).
         """
+        missing = sorted(set(ENGINE_SERIES) - set(self.series))
+        if missing:
+            raise CaseInputError(
+                f"the dataset was built without the series {missing} the engine reads, so its "
+                "dataset_id does not cover them; rebuild with every engine series"
+            )
         built: dict[str, Any] = {
             "case_input_schema": CASE_INPUT_SCHEMA,
             "symbols": list(self.symbols),
@@ -685,6 +699,7 @@ def build_case_input_data(
 
 
 __all__ = [
+    "ENGINE_SERIES",
     "SERIES_ALL",
     "CaseInputData",
     "CaseInputError",

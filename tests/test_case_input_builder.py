@@ -8,6 +8,7 @@ module-scoped store is built once; tests that mutate a store work on a copy.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import shutil
 from datetime import UTC, date, datetime, timedelta
@@ -464,7 +465,11 @@ def test_a_long_funding_hole_fails_closed_unless_allowed_and_is_recorded(
 
     data = _build(root, end_utc=FUNDING_END, series=("funding",), allow_gaps=(hole,))
     assert data.allowed_gaps == (hole,)
-    case = data.to_case_input(**_scenario())
+    # WR-10: data whose identity lacks the 1m series the engine reads yields no engine case.
+    with pytest.raises(ci.CaseInputError, match="series"):
+        data.to_case_input(**_scenario())
+    full = dataclasses.replace(data, series=ci.SERIES_ALL)  # only the export shape is tested
+    case = full.to_case_input(**_scenario())
     assert case["allowed_gaps"] == [
         {
             "series": "funding",
