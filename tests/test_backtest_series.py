@@ -173,6 +173,14 @@ def test_parse_minute_row_rejects_float_values() -> None:
         parse_minute_row(_row(volume=12.5), kind="trade")
 
 
+def test_parse_minute_row_rejects_non_finite_values() -> None:
+    for bad in ("NaN", "Infinity", "-Infinity"):
+        with pytest.raises(MinuteSeriesError, match="finite"):
+            parse_minute_row(_row(high=bad), kind="trade")
+        with pytest.raises(MinuteSeriesError, match="finite"):
+            parse_minute_row(_row(volume=bad), kind="trade")
+
+
 def test_parse_minute_row_rejects_naive_datetimes() -> None:
     with pytest.raises(MinuteSeriesError, match="open_time_utc"):
         parse_minute_row(_row(open_time_utc="2026-01-05T10:00:00"), kind="trade")

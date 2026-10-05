@@ -145,14 +145,13 @@ class ListMinuteSource:
 
 
 def _parse_money(value: object, field_name: str) -> Decimal:
-    """Coerce a money field to Decimal; floats and bools are refused, never coerced."""
-    if isinstance(value, Decimal):
-        return value
-    if isinstance(value, bool | float):
+    """Coerce a money field to a finite Decimal; floats, bools and NaN/Infinity are refused."""
+    if isinstance(value, bool | float) or not isinstance(value, Decimal | int | str):
         raise TypeError(f"{field_name} must be Decimal/str/int, got {type(value).__name__}")
-    if isinstance(value, int | str):
-        return Decimal(value)
-    raise TypeError(f"{field_name} must be Decimal/str/int, got {type(value).__name__}")
+    parsed = value if isinstance(value, Decimal) else Decimal(value)
+    if not parsed.is_finite():
+        raise MinuteSeriesError(f"{field_name} must be finite, got {parsed}")
+    return parsed
 
 
 def _parse_time(value: object, field_name: str) -> datetime:

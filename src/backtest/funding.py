@@ -64,14 +64,13 @@ def _require_decimal(value: object, field_name: str) -> Decimal:
 
 
 def _parse_decimal(value: object, field_name: str) -> Decimal:
-    """Coerce a Decimal/str/int to Decimal; floats and bools are refused."""
-    if isinstance(value, Decimal):
-        return value
-    if isinstance(value, bool | float):
+    """Coerce a Decimal/str/int to a finite Decimal; floats, bools and NaN/Infinity are refused."""
+    if isinstance(value, bool | float) or not isinstance(value, Decimal | int | str):
         raise TypeError(f"{field_name} must be Decimal/str/int, got {type(value).__name__}")
-    if isinstance(value, int | str):
-        return Decimal(value)
-    raise TypeError(f"{field_name} must be Decimal/str/int, got {type(value).__name__}")
+    parsed = value if isinstance(value, Decimal) else Decimal(value)
+    if not parsed.is_finite():
+        raise ValueError(f"{field_name} must be finite, got {parsed}")
+    return parsed
 
 
 def _require_utc(value: object, field_name: str) -> datetime:
@@ -114,6 +113,8 @@ def parse_funding_row(row: Mapping[str, Any]) -> FundingRow:
         raise ValueError(f"funding row is missing columns {missing}")
     raw_mark = row.get("mark_price")
     mark = None if raw_mark is None or raw_mark == "" else _parse_decimal(raw_mark, "mark_price")
+    if mark is not None and mark <= 0:
+        raise ValueError(f"mark_price must be positive when present, got {mark}")
     return FundingRow(
         symbol=str(row["symbol"]),
         funding_time_utc=_require_utc(row["funding_time_utc"], "funding_time_utc"),

@@ -226,6 +226,23 @@ def test_parse_funding_row_rejects_floats_and_naive_times() -> None:
         parse_funding_row({**base, "funding_time_utc": datetime(2026, 1, 5, 8, 0)})
 
 
+def test_parse_funding_row_rejects_non_finite_values_and_a_non_positive_mark() -> None:
+    base = {
+        "symbol": SYMBOL,
+        "funding_time_utc": T1,
+        "funding_rate": "0.0001",
+        "mark_price": "100",
+    }
+    for bad in ("NaN", "Infinity", "-Infinity"):
+        with pytest.raises(ValueError, match="finite"):
+            parse_funding_row({**base, "funding_rate": bad})
+        with pytest.raises(ValueError, match="finite"):
+            parse_funding_row({**base, "mark_price": bad})
+    for bad in ("0", "-1"):
+        with pytest.raises(ValueError, match="mark_price"):
+            parse_funding_row({**base, "mark_price": bad})
+
+
 # --------------------------------------------------------------------------- #
 # Open-quantity segments across a TP1 partial (D-36)
 # --------------------------------------------------------------------------- #
