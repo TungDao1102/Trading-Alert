@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 14
 current_phase_name: Backtest Simulator Causality Rewrite
 status: executing
-stopped_at: Completed 14-13-PLAN.md
-last_updated: "2026-10-05T07:55:02.317Z"
+stopped_at: Completed 14-14-PLAN.md
+last_updated: "2026-10-05T08:53:15.622Z"
 last_activity: 2026-10-05
 last_activity_desc: Phase 14 execution started
-state_head: b2981c71e56e6f8c7c6d6b284b9bcdd4cf946acb
+state_head: 7893a0e29be9095e2a47136da8105c53432a85f1
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 125
-  completed_plans: 121
+  completed_plans: 122
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 14 (Backtest Simulator Causality Rewrite) — EXECUTING
-Plan: 14 of 16
+Plan: 15 of 16
 Status: Ready to execute
 Last activity: 2026-10-05 — Phase 14 execution started
 
@@ -168,6 +168,7 @@ Progress: [█████░░░░░] 46%
 | Phase 14 P11 | about 1 h | 3 tasks | 29 files |
 | Phase 14 P12 | 70min | 3 tasks | 19 files |
 | Phase 14 P13 | 90 min | 3 tasks | 36 files |
+| Phase 14 P14 | 3h | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -412,6 +413,8 @@ Recent decisions affecting current work:
 - [Phase 14]: 14-12: paper parity fixture is a single-signal history where the ledger never binds (D052 input); asserted explicitly
 - [Phase 14]: 14-13: Phase 14 goldens use scripted round-number plans; expected.json is hand-written from DERIVATIONS.md standalone Decimal arithmetic and the generator writes input.json only
 - [Phase 14]: 14-13: daily_loss_blocks_next needs three sequential stop-outs (about 34 each, sizes shrink with realized equity) to reach the 100 DAILY_STOP threshold; two stop-outs cannot
+- [Phase 14]: 14-14: smoke script requests series trade/intrabar_1m/mark_1m/funding only; open_interest is not consumed by the v2 engine and cannot be backfilled for 90 days
+- [Phase 14]: 14-14: real smoke measured BTCUSDT 90d at ~380s/run (tracemalloc on), heap peak ~7.8MB, digest 806c885e... reproducible; constraints are today's values (assumption, smoke only); incremental feature series recommended as post-Phase-15 follow-up (D052 input)
 
 ### Pending Todos
 
@@ -466,6 +469,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-05T07:55:01.541Z
-Stopped at: Completed 14-13-PLAN.md
+Last session: 2026-10-05T08:53:14.792Z
+Stopped at: Completed 14-14-PLAN.md
 Resume file: None
