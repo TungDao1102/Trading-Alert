@@ -583,7 +583,7 @@ Plans:
 
 **Audit refs**: F-120, F-901, F-902, F-102, F-804, F-905, F-305, F-204, F-123, F-118, F-602, F-805, F-904; carry-over from Phase 6 (`.planning/phases/06-backtest-simulator-experiment-registry/06-VERIFICATION.md`)
 
-**Plans:** 14/16 plans executed
+**Plans:** 15/16 plans executed
 
 Plans:
 **Wave 1**
@@ -613,7 +613,7 @@ Plans:
 **Wave 7** *(blocked on Wave 6 completion)*
 - [x] 14-13-PLAN.md — Hand-derived golden cases (16) with DERIVATIONS.md, input-only generator and meta-tests
 - [x] 14-14-PLAN.md — Local real-data smoke script with runtime, memory and digest measurements
-- [ ] 14-15-PLAN.md — Typed ExperimentRecord, verifiable code version, reproduce/verify on v2, evidence schema v2
+- [x] 14-15-PLAN.md — Typed ExperimentRecord, verifiable code version, reproduce/verify on v2, evidence schema v2
 
 **Wave 8** *(blocked on Wave 7 completion)*
 - [ ] 14-16-PLAN.md — Protocol v2.0.0 amendment, D052/D053, spec updates, ROADMAP criterion 2 rewording (D-39), void markers
@@ -1015,7 +1015,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 12. Fee + Cost Model Correctness | 11/11 | Complete    | 2026-09-30 |
 | 13. Research Data Foundation Fixes | 13/13 | Complete    | 2026-10-03 |
 | 13.1. Deployment & CI | 12/12 | Complete | 2026-10-04 |
-| 14. Backtest Simulator Causality Rewrite | 14/16 | In Progress|  |
+| 14. Backtest Simulator Causality Rewrite | 15/16 | In Progress|  |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
 | 17. Operational Persistence Layer | 15/15 | In Progress|  |
