@@ -117,11 +117,17 @@ effective_entry = intended_entry + slippage
 
 - The backtest must distinguish **touched price** from **filled price** for limit orders (see §3 execution assumptions).
 - Canonical parameter sets use `partial_fill_fraction = 1.0` (D038), identical for candidates and baselines; partial or missed fills are a separate sensitivity run, never a canonical parameter.
-- A retest/touch that does not fill is logged with the same attribution fields as a fill.
+- A retest/touch that does not fill is logged with the same attribution fields as a fill. A limit fills only on a trade-price trade-through of one tick (§3); a touch without trade-through is counted per plan and is never terminal.
 
 ### Funding
 
-Funding is applied to positions held through funding events. The funding rate applied is the Binance-published USDⓈ-M perpetual funding rate; for periods outside the public API window, self-collected historical funding rates are used (Phase 0 data foundation). Funding is signed per side per the documented convention and is part of the cost snapshot — never retrofitted.
+Funding is charged at every **actual** `fundingTime` of the symbol's funding history at which the position is open (`entry_time <= fundingTime < exit_time`); there is no fixed 8 h grid, because the interval can differ per symbol. The rate applied is the Binance-published USDⓈ-M perpetual funding rate; for periods outside the public API window, self-collected historical funding rates are used (Phase 0 data foundation).
+
+- **Sign convention (D052):** `funding_pnl = -sign(position) x open_quantity x markPrice(fundingTime) x fundingRate`, with sign +1 for LONG and -1 for SHORT. A LONG pays when the rate is positive and receives when it is negative; a SHORT is the mirror. `open_quantity` is the quantity open at that instant, so after a TP1 the post-TP1 remainder is charged.
+- **Mark price:** the funding-history row's mark price; when it is empty, the open of the mark-price kline of that minute.
+- **In and out:** funding is part of net PnL and of R and is never part of position sizing. The convention (`funding_convention`, `MARK_NOTIONAL_SIGNED_V1`) is part of the cost snapshot and of `cost_model_hash` — never retrofitted.
+- **Coverage rule:** a holding window is covered only when consecutive funding rows are at most the symbol's cadence (8 h or 4 h) plus 60 s apart and the window lies inside the loaded closed UTC days. Otherwise the run fails closed, unless the caller passes an explicit allowed-gap list, which is recorded on the output.
+- **Not modeled:** the exchange's short grace window around `fundingTime` (a position closed within seconds of the instant); the fact and its fetch date are in `docs/SOURCES.md`.
 
 ### Quantization — floor-only, identical across modes
 
@@ -151,36 +157,41 @@ Strategy decisions use **only** information available by the source candle close
 - No future swing confirmation leaks.
 - No future intrabar outcome leaks.
 - Core signals on closed candles only; warm-up indicators (e.g. EMA200 on the 4H) are flagged invalid until sufficient history is available.
+- A plan created at the close of strategy bar N is active from bar N+1. The signal bar's own range is never examined for a fill or an exit, and an exit can never precede the entry.
 
 ### Timeframe hierarchy
 
 - **Decision timeframes:** 4H (regime/context) and 1H (setup). 15M is optional, used only for entry refinement where the candidate spec calls for it.
-- **Execution simulation timeframe:** 1m. When 1m data is unavailable, the conservative deterministic assumption (see "Intrabar ambiguity" below) applies and is reported.
+- **Execution simulation timeframe:** 1m, as one continuous sorted series per symbol: trade-price klines for entries, mark-price klines for exits. A missing 1m trade minute never produces a fill. A missing 1m mark minute resolves once at the strategy-bar close (see "Intrabar ambiguity" below), is flagged and is counted in the report.
 
 ### Intrabar ambiguity — fixed before evaluation
 
-When a 1H OHLC bar's high and low both touch stop and target inside the same bar:
+When one 1m mark-price minute touches both the stop and a target:
 
-1. Resolve with 1m data when available; the canonical tie-break is **fixed before any evaluation** (i.e. before the first run on the dataset).
-2. Candidates for the fixed tie-break (any one, declared in the experiment record):
-   - **Conservative adverse-first** — assume the stop fills first.
-   - **Next-finer-timeframe** — defer to the 1m sequence.
-   - **Mark ambiguous and segregate** — count the bar in a separate "ambiguous" bucket; never blend into win/loss.
-3. When finer data is unavailable, use a conservative deterministic assumption and **report it** in the experiment record.
+1. The canonical tie-break is **conservative adverse-first (`STOP_FIRST`)**, fixed before any evaluation and written to the experiment record: the stop is booked and the target is not.
+2. On the fill minute only the stop can trigger; a target touched on that minute is deferred to later minutes.
+3. A stop gap is booked at the adverse of the trigger price and the mark-minute open (no price improvement) and sets a counted flag.
+4. When 1m mark coverage is missing for part of a strategy bar, the rest of that bar is resolved once at the strategy-bar close from the bar range, stop-first, with a counted `fallback_applied` flag and a coverage note. The fallback is for missing or ambiguous bars only, never the default path, and never produces an entry.
+5. Alternatives (next-finer-timeframe, mark ambiguous and segregate) are not used by canonical runs.
 
 ### Protective trigger price series (D037)
 
-Protective SL/TP triggers are evaluated on mark-price klines (Binance markPriceKlines) with `workingType` `MARK_PRICE` recorded on the plan, so backtest, paper and live share one trigger price series (D037).
+Protective SL/TP triggers are evaluated on mark-price klines (Binance markPriceKlines) with `workingType` `MARK_PRICE` recorded on the plan, so backtest, paper and live share one trigger price series (D037). Exit prices are the trigger price with the cost-model slippage terms, with no price improvement.
+
+**Exit ladder (D052, mirrors live):** TP1 is a reduce-only partial of half the filled quantity (`TP1_QUANTITY_FRACTION` 0.5, a code constant covered by `simulator_semantics_version`, not a tunable), sized through the live `size_protectives_to_filled_qty` helper (a TP1 that cannot be sized rejects the plan as NO_TRADE with the live reason). TP2 closes the remainder. The stop is unchanged after TP1. A position is carried until SL, TP2 or data end; there is no time stop.
 
 ### Limit-order simulation — mandatory checklist
 
 The backtest engine must model, per limit order:
 
-- **touched vs filled** — the price was touched (wick) versus the order was filled at that price.
+- **touched vs filled** — the limit is the tick-snapped live order price. A LONG fills only when a trade-price 1m low is at or below `limit - tick`, a SHORT only when a 1m high is at or above `limit + tick` (trade-through of at least one tick). The fill price is the limit (a gap through it gets no price improvement) and the fill time is the close of the deciding minute. A touch without trade-through is counted and never terminal.
 - **partial fill** — canonical sets use `partial_fill_fraction = 1.0` (D038); a partial-fill fraction below 1.0 is applied before any TP/SL logic only in a separate sensitivity run.
-- **time-in-force / expiry** — limit orders expire per their declared validity; a re-quote after expiry is a new order, not a fill.
-- **cancel-after-invalidation** — when a setup is invalidated, its unfilled limit order is canceled, not left to fill retroactively.
+- **time-in-force / expiry** — a resting entry expires when the close of a simulated minute is after `expiry_utc` (a minute closing at or before it can still fill); expiry is judged against the simulated minute, never a wall clock. A re-quote after expiry is a new order, not a fill.
+- **cancel-after-invalidation** — when a setup is invalidated (CANDLE_CLOSE rule, §6), its unfilled limit order is canceled, not left to fill retroactively. Within one strategy bar the fill is evaluated first, invalidation second, expiry last.
 - **no retroactive fill after expiry** — once an order has expired, a later price touch is not a fill.
+- **one plan or position per symbol** — a re-signal while a plan rests or a position is open is skipped and counted as a conflict with an open position.
+- **daily stop** — a DAILY_STOP cancels resting entries; protective stops of open positions stay (D033).
+- **data end** — a position open at data end closes at the last mark close as `END_OF_DATA`; a plan still resting is `PENDING_AT_DATA_END` (never `EXPIRED`). Both are kept as records, counted and reported separately, and excluded from pooled R and the closed-trade floor.
 
 ### Baselines
 
@@ -193,7 +204,7 @@ The purpose is not to declare a winner; the purpose is to measure whether the ad
 
 ### NO_TRADE as a valid outcome
 
-NO_TRADE is a first-class outcome reported alongside trades. The experiment record must include the count of NO_TRADE decisions and the reason category (regime filter, RR floor, conflict with open position, data unavailability, kill-gate trip).
+NO_TRADE is a first-class outcome reported alongside trades. The experiment record must include the count of NO_TRADE decisions and the reason category (regime filter, RR floor, conflict with open position, data unavailability, kill-gate trip). The record also carries the counts of `END_OF_DATA`, `PENDING_AT_DATA_END`, fallback and stop-gap events.
 
 ---
 
@@ -346,9 +357,10 @@ This section is short by design. Regime classification, invalidation rules, expi
 Every emitted setup carries:
 
 - **valid_until** — a timestamp or candle-close boundary beyond which the setup is no longer valid; expiry reasons are categorized (time, candle count, structure, volatility, external event).
-- **invalidation** — a price or structure condition that, when met on a closed candle, cancels the setup. Invalidation is closed-candle only; an intrabar touch is not an invalidation.
+- **invalidation** — a price or structure condition that, when met on a closed candle, cancels the setup. Invalidation is closed-candle only; an intrabar touch is not an invalidation. In the simulator this is the plan's own `CANDLE_CLOSE` rule with level `stop_loss_price`: at a strategy-bar close an unfilled plan is cancelled when the close is strictly beyond the level (LONG below, SHORT above). A fill during the bar comes first, and invalidation wins over expiry at the same close. This replaces the v1 simulator's close-versus-open bar heuristic (D052).
 - **optional volatility invalidation** — when the strategy spec calls for one; never a `high ATR = news` inference without event data.
 - **attribution timestamps** — the four canonical timestamps `SignalTime`, `ApproveTime`, `OrderTime`, `FillTime` from `docs/data/DATA_MODEL.md` §6 reporting joins.
+- **simulated end states (v2.0.0)** — an entry ends exactly one way: filled, `EXPIRED`, `INVALIDATION_CANCEL`, `DAILY_STOP_CANCEL` or `PENDING_AT_DATA_END`; a filled position ends as SL, TP2 or `END_OF_DATA`. `END_OF_DATA` and `PENDING_AT_DATA_END` are reported separately and never booked as SL, TP or expiry.
 
 ### Regime classification — by reference
 

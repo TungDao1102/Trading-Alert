@@ -59,6 +59,7 @@ Cost rates and guards (Phase 12, D046):
 - `STOP_TOO_TIGHT`: the stop distance divided by the sizing entry is below `min_stop_distance_rate` (baseline 0.003).
 - `COST_TO_RISK_EXCEEDED`: the round-trip modeled cost divided by `risk_per_unit` is above `max_cost_to_risk` (baseline 0.15). At the modeled round trip of about 14 basis points this ceiling implies a minimum stop of about 0.79 percent of price, above the 0.3 percent floor; the ceiling is the binding gate (D046 item 6, ratification pending).
 - Both guards are evaluated before quantization and reject with the codes above.
+- Funding (protocol v2.0.0, D052): in the simulator `funding_pnl = -sign(position) x open_quantity x markPrice(fundingTime) x fundingRate`, charged at every actual `fundingTime` with `entry_time <= fundingTime < exit_time` (sign +1 LONG, -1 SHORT, so a LONG pays when the rate is positive and receives when it is negative). The open quantity is the quantity open at that `fundingTime` (the post-TP1 remainder after a TP1). The mark price comes from the funding-history row, else from the mark kline of that minute. Funding is included in net PnL and in R (it also counts toward the daily loss, section 8) and is excluded from position sizing, so the quantity is never reduced to pre-pay it. A holding window without funding coverage fails closed unless an allowed gap is recorded. The 15-second grace around `fundingTime` that the exchange describes is not modeled.
 - Live commission: the rate per side is the larger of the parameter and the account taker rate from `GET /fapi/v1/commissionRate` (fee_source `ACCOUNT_MAX`); the BNB discount is ignored. An unknown, stale or malformed account rate is NO_TRADE with `UNCERTAIN_ACCOUNT_STATE`, never zero and never a silent fallback to the parameter. Backtest and paper use the versioned fees.
 
 ## 4. Portfolio limits
@@ -111,7 +112,7 @@ Definition (D033):
 
 When `DAILY_STOP` is reached (D033):
 
-- cancel pending entry orders, so no working entry opens a new position;
+- cancel pending entry orders, so no working entry opens a new position (the simulator cancels every resting entry as `DAILY_STOP_CANCEL` at that instant, and resting entries are cancelled on DAILY_STOP in backtest exactly as in live);
 - keep the protective stop-loss orders on open positions active;
 - alert the user.
 
