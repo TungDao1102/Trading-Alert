@@ -21,9 +21,11 @@ from .costs import (
 )
 from .engine import simulate
 from .experiment import (
+    CodeVersion,
     ExperimentRecord,
     ExperimentReproducibilityBroken,
     IncompleteExperimentRecord,
+    RecordedGap,
     assemble,
     baseline_no_trade,
     baseline_simple_trend,
@@ -34,8 +36,10 @@ from .simulator import TradeRecord, run
 
 __all__ = [
     # Types
+    "CodeVersion",
     "CostModel",
     "ExperimentRecord",
+    "RecordedGap",
     "TradeRecord",
     # Exceptions
     "CostModelBindingMismatch",

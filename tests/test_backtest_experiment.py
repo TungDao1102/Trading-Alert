@@ -753,13 +753,14 @@ def test_verify_experiment_compares_the_v2_digest_and_detects_a_changed_minute_s
     with pytest.raises(ExperimentReproducibilityBroken, match="trades_digest"):
         verify_experiment(forged, simulator_inputs=case)
 
-    # Drift: the stop minute no longer reaches the stop, so the engine outcome differs from
-    # the digest recorded for the original series.
+    # Drift: the stop minute no longer reaches the stop, so the position runs to the data end.
+    # The re-run summary (END_OF_DATA count) no longer matches the typed record, which trips
+    # before the digest comparison is reached (plan 14-15).
     drifted = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
     for row in drifted["mark_bars_1m"]:
         if row["open_time_utc"] == "2026-09-11T10:06:00+00:00":
             row["low"] = "121.50"
-    with pytest.raises(ExperimentReproducibilityBroken, match="trades_digest"):
+    with pytest.raises(ExperimentReproducibilityBroken, match="end_of_data_count"):
         verify_experiment(matching, simulator_inputs=drifted)
 
 
@@ -907,9 +908,8 @@ def test_experiment_id_binds_the_simulator_semantics_version(
     assert bumped.simulator_semantics_version == "2.0.1"
     assert bumped.experiment_id != base.experiment_id
     # Everything else is identical, so the semantics version is the only moved input.
-    assert dataclasses.replace(
-        bumped, simulator_semantics_version="2.0.0", experiment_id=base.experiment_id
-    ) == dataclasses.replace(base)
+    moved = {key for key, value in bumped.to_dict().items() if value != base.to_dict()[key]}
+    assert moved == {"experiment_id", "simulator_semantics_version"}
 
 
 # ----- invalid construction -------------------------------------------------
