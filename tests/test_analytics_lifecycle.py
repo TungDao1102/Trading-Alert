@@ -20,6 +20,7 @@ from src.analytics.lifecycle import (
 )
 from src.analytics.stats import seconds_between
 from src.analytics.types import AnalyticsInputError, EvidenceKind, TradeOutcome
+from src.backtest.validator import validate_trade_record
 from src.domain.approval import Approval
 from src.domain.enums import ApprovalAction, ApprovalResult, OrderStatus, SignalStatus
 from src.domain.fill import Fill
@@ -27,7 +28,14 @@ from src.domain.journal import JournalEvent
 from src.domain.order import Order
 from src.domain.signal import Signal
 
-from tests.phase10_helpers import D, load_expected, load_input, make_paper_record, parse_utc
+from tests.phase10_helpers import (
+    D,
+    load_expected,
+    load_input,
+    make_paper_record,
+    make_trade_record,
+    parse_utc,
+)
 
 
 def _outcome(
@@ -66,11 +74,21 @@ def test_backtest_entry_kind_mapping() -> None:
         _outcome("C", entry_kind="TOUCH_NO_FILL", intended="100"),
         _outcome("D", entry_kind="EXPIRED", intended="100"),
         _outcome("E", entry_kind="INVALIDATION_CANCEL", intended="100"),
+        _outcome("F", entry_kind="DAILY_STOP_CANCEL", intended="100"),
+        _outcome("G", entry_kind="PENDING_AT_DATA_END", intended="100"),
     ]
     records = normalize_backtest_lifecycle(outcomes)
-    assert [rec.source_id for rec in records] == ["A", "B", "C", "D", "E"]
-    assert [rec.entry_filled for rec in records] == [True, True, False, False, False]
-    assert [rec.expired_without_fill for rec in records] == [False, False, False, True, False]
+    assert [rec.source_id for rec in records] == ["A", "B", "C", "D", "E", "F", "G"]
+    assert [rec.entry_filled for rec in records] == [True, True, False, False, False, False, False]
+    assert [rec.expired_without_fill for rec in records] == [
+        False,
+        False,
+        False,
+        True,
+        False,
+        False,
+        False,
+    ]
     for rec in records:
         assert rec.evidence is EvidenceKind.BACKTEST
         assert rec.path is LifecyclePath.SYSTEM_ONLY
@@ -471,3 +489,64 @@ def test_empty_live_inputs_yield_empty_result() -> None:
     assert result.records == ()
     assert result.rejected == ()
     assert all(j.matched == 0 and j.unmatched == 0 for j in result.joins)
+
+
+# --------------------------------------------------------------------------- #
+# Plan 14-11: the Phase 10 helpers build v2 trade records (D-23 boundary validator).
+# --------------------------------------------------------------------------- #
+
+
+def test_make_trade_record_accepts_every_v2_field_and_parses_decimals_and_datetimes() -> None:
+    record = make_trade_record(
+        entry_price="100.00",
+        entry_time_utc="2026-01-05T10:00:30+00:00",
+        quantity="1",
+        exit_kind="TP2",
+        exit_price="108.00",
+        exit_time_utc="2026-01-05T12:00:30+00:00",
+        signal_close_utc="2026-01-05T09:59:59.999000+00:00",
+        planned_quantity="2",
+        tp1_quantity="0.5",
+        tp1_price="104.00",
+        tp1_time_utc="2026-01-05T11:00:30+00:00",
+        resolved_at_utc="2026-01-05T12:00:30+00:00",
+        touch_no_fill_count=2,
+        gap_through_stop=True,
+        constraints_extrapolated=True,
+        regime="BULLISH",
+        funding_event_count=3,
+    )
+    assert record.planned_quantity == D("2")
+    assert record.tp1_quantity == D("0.5")
+    assert record.tp1_price == D("104.00")
+    assert record.tp1_time_utc == parse_utc("2026-01-05T11:00:30+00:00")
+    assert record.signal_close_utc == parse_utc("2026-01-05T09:59:59.999000+00:00")
+    assert record.resolved_at_utc == parse_utc("2026-01-05T12:00:30+00:00")
+    assert (record.touch_no_fill_count, record.funding_event_count) == (2, 3)
+    assert record.gap_through_stop is True and record.constraints_extrapolated is True
+    assert record.regime == "BULLISH"
+    validate_trade_record(record)
+
+
+def test_a_default_filled_record_passes_the_shared_validator() -> None:
+    record = make_trade_record(
+        entry_price="100.00",
+        entry_time_utc="2026-01-05T10:00:30+00:00",
+        quantity="1",
+        exit_kind="SL",
+        exit_price="98.00",
+        exit_time_utc="2026-01-05T10:40:30+00:00",
+    )
+    assert record.signal_close_utc is not None
+    assert record.entry_time_utc is not None
+    assert record.signal_close_utc < record.entry_time_utc
+    assert record.planned_quantity is not None and record.quantity is not None
+    assert record.planned_quantity >= record.quantity
+    validate_trade_record(record)
+
+
+def test_a_default_unfilled_record_has_no_signal_close_and_passes_the_validator() -> None:
+    record = make_trade_record(entry_kind="EXPIRED")
+    assert record.signal_close_utc is None
+    assert record.planned_quantity is None
+    validate_trade_record(record)
