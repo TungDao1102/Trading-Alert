@@ -394,17 +394,19 @@ def test_zero_r_counted_as_neither_wins_nor_losses() -> None:
         universe_tags=case_input["universe_tags"],
     )
 
-    # trade_004 has realized_pnl == realized_risk (0/0.20) → R = 0.
+    # trade_004 has realized_pnl == realized_risk (0/0.20) → R = 0. Only closed trades
+    # (exit SL or TP2) are in the pool: the END_OF_DATA trade_011 and the plan outcomes are not.
+    closed = [t for t in case_input["trades"] if t["exit_kind"] in ("SL", "TP2")]
     expected_zero_r = 1
     expected_wins = sum(
         1
-        for t in case_input["trades"]
+        for t in closed
         if t["realized_risk"] not in (None, "0", "0.0")
         and Decimal(str(t["realized_pnl"])) / Decimal(str(t["realized_risk"])) > 0
     )
     expected_losses = sum(
         1
-        for t in case_input["trades"]
+        for t in closed
         if t["realized_risk"] not in (None, "0", "0.0")
         and Decimal(str(t["realized_pnl"])) / Decimal(str(t["realized_risk"])) < 0
     )
@@ -923,3 +925,25 @@ def test_the_mixed_report_is_deterministic_and_input_order_independent() -> None
 
     assert forward.digest() == _mixed_report().digest()
     assert forward.counts.digest() == reverse.counts.digest()
+
+
+def test_the_golden_fixture_counts_closed_trades_end_of_data_and_plan_outcomes_apart() -> None:
+    case_input = _load_input(REPORT_SLICES_DIR)
+    report = _build_report(
+        experiment_record=_make_experiment_record(),
+        trade_records=case_input["trades"],
+        bootstrap_seed=case_input["bootstrap_seed"],
+        resamples=case_input["resamples"],
+        probable=Decimal(case_input["probable"]),
+        universe_tags=case_input["universe_tags"],
+    )
+
+    assert len(case_input["trades"]) == 15
+    assert report.counts.trade_count == 10
+    assert report.counts.end_of_data_count == 1
+    assert report.counts.plan_outcome_counts == {
+        "EXPIRED": 2,
+        "INVALIDATION_CANCEL": 1,
+        "REJECT": 1,
+    }
+    assert report.plateau.status == "NOT_COMPUTED"

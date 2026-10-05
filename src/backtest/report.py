@@ -4,11 +4,19 @@ Per D-04 + BACKTEST_SPEC §10 + METRICS §§1–2: every report carries
 trade counts overall and by symbol/quarter/regime/version, mean /
 median / std of R, bootstrap expectancy interval (block bootstrap with
 a recorded seed), drawdown distribution under resampling, stability
-across time and symbols, parameter-plateau analysis, baseline
+across time and symbols, a parameter-plateau section, baseline
 comparison (no-trade + simple-trend), dual-universe slices
 (research_universe vs live-5), and an intrabar-coverage note. No
 single headline number is ever accepted — uncertainty sections are
 mandatory for every candidate.
+
+Plan 14-11 (D-34, D-37, D-21): only CLOSED FILLED trades (outcome OK, a filled entry,
+exit_kind SL or TP2) are trades. They alone feed trade_count, the R distribution, the
+bootstrap, drawdown, stability, baselines and the dual-universe slices, so a plan that
+never filled can never inflate the trade floor. Positions the data end closed
+(END_OF_DATA) are counted apart and kept out of the pooled R; non-fill plan outcomes are
+counted by entry_kind. The plateau section is a fixed NOT_COMPUTED structure until
+BKTS-03 exists: the report neither states nor implies plateau evidence.
 
 The module imports NOTHING from Polars/pandas/NumPy/Binance SDK/
 SQLAlchemy/Pydantic — stdlib + Decimal + `src/core/_decimal.py` only,
@@ -31,9 +39,15 @@ from src.core._decimal import _add, _div, _mul, _q, _sub
 from src.core.types import _require_utc_aware
 from src.domain.canonical import sha256_hex
 
+from .semantics import ENTRY_FILLED, EXIT_END_OF_DATA, EXIT_SL, EXIT_TP2, PARTIAL_FILL
+
 LIVE5_SYMBOLS: frozenset[str] = frozenset({"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"})
 
 _MAX_BLOCK_LENGTH = 10000
+_FILLED_ENTRY_KINDS = frozenset({ENTRY_FILLED, PARTIAL_FILL})
+_CLOSED_EXIT_KINDS = frozenset({EXIT_SL, EXIT_TP2})
+PLATEAU_STATUS_NOT_COMPUTED = "NOT_COMPUTED"
+PLATEAU_NOTE = "not computed (BKTS-03 pending)"
 _RANDOM_BIT_WIDTH = 64
 
 
@@ -43,18 +57,27 @@ class ReportBuildError(Exception):
 
 @dataclass(frozen=True)
 class CountsSection:
-    """Trade counts overall and sliced by symbol/quarter/regime/version."""
+    """Closed-trade counts overall and sliced by symbol/quarter/regime/version.
+
+    `trade_count` and every slice cover closed filled trades only (D-37).
+    `end_of_data_count` counts positions the data end closed; `plan_outcome_counts`
+    counts plans that never filled, keyed by `entry_kind` (sorted).
+    """
 
     trade_count: int
     counts_by_symbol: dict[str, int]
     counts_by_quarter: dict[str, int]
     counts_by_regime: dict[str, int]
     counts_by_version: dict[str, int]
+    end_of_data_count: int
+    plan_outcome_counts: dict[str, int]
 
     def digest(self) -> str:
         return sha256_hex(
             {
                 "trade_count": self.trade_count,
+                "end_of_data_count": self.end_of_data_count,
+                "plan_outcome_counts": self.plan_outcome_counts,
                 "counts_by_symbol": self.counts_by_symbol,
                 "counts_by_quarter": self.counts_by_quarter,
                 "counts_by_regime": self.counts_by_regime,
@@ -172,37 +195,19 @@ class StabilitySection:
 
 
 @dataclass(frozen=True)
-class PlateauRegion:
-    """Per-region summary for the plateau section."""
-
-    region: str
-    trade_count: int
-    mean_r: Decimal | None
-
-    def digest(self) -> str:
-        return sha256_hex(
-            {
-                "region": self.region,
-                "trade_count": self.trade_count,
-                "mean_r": self.mean_r,
-            }
-        )
-
-
-@dataclass(frozen=True)
 class PlateauSection:
-    """Parameter-plateau analysis (D-04 + RESEARCH_PROTOCOL §4 R2)."""
+    """Parameter-plateau section: always NOT_COMPUTED until BKTS-03 (D-21, D-37).
 
-    regions: tuple[PlateauRegion, ...]
-    isolated_optimum_warnings: tuple[str, ...]
+    A fixed structure with no regions and no warnings, whatever the trades are: a
+    plateau needs a parameter sweep that does not exist yet, and an empty or
+    single-region "analysis" would read as evidence.
+    """
+
+    status: str = PLATEAU_STATUS_NOT_COMPUTED
+    note: str = PLATEAU_NOTE
 
     def digest(self) -> str:
-        return sha256_hex(
-            {
-                "regions": [r.digest() for r in self.regions],
-                "isolated_optimum_warnings": list(self.isolated_optimum_warnings),
-            }
-        )
+        return sha256_hex({"status": self.status, "note": self.note})
 
 
 @dataclass(frozen=True)
@@ -302,11 +307,18 @@ class DualUniverseSection:
 
 @dataclass(frozen=True)
 class IntrabarCoverage:
-    """1m intrabar coverage aggregation (D-01 + Phase-2 D-09)."""
+    """1m intrabar coverage aggregation (D-01 + Phase-2 D-09).
+
+    Fallback can occur on a closed trade or on an END_OF_DATA trade, so the population is
+    both; `closed_trades` and `end_of_data_trades` state the two totals and `total_trades`
+    is their sum.
+    """
 
     percent: Decimal
     fallback_count: int
     total_trades: int
+    closed_trades: int
+    end_of_data_trades: int
     coverage_notes: tuple[str, ...]
 
     def digest(self) -> str:
@@ -315,6 +327,8 @@ class IntrabarCoverage:
                 "percent": self.percent,
                 "fallback_count": self.fallback_count,
                 "total_trades": self.total_trades,
+                "closed_trades": self.closed_trades,
+                "end_of_data_trades": self.end_of_data_trades,
                 "coverage_notes": list(self.coverage_notes),
             }
         )
@@ -561,6 +575,38 @@ def _quantile(values: Sequence[Decimal], q: Decimal) -> Decimal:
     return _add(sorted_v[lo_idx], _mul(_sub(sorted_v[hi_idx], sorted_v[lo_idx]), frac))
 
 
+def _classify(
+    trade_records: Sequence[Mapping[str, Any]],
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]], Counter[str]]:
+    """Split records into closed filled trades, END_OF_DATA trades and plan outcomes (D-34).
+
+    A record that filled (outcome OK, entry ENTRY_FILLED or PARTIAL_FILL) must leave with
+    SL, TP2 or END_OF_DATA; any other exit (a v1 TP1 or EOD, a missing or unknown kind) is
+    refused, never counted as a trade of unknown meaning. Everything else is a plan outcome,
+    counted by `entry_kind`.
+    """
+    closed: list[Mapping[str, Any]] = []
+    end_of_data: list[Mapping[str, Any]] = []
+    plan_outcomes: Counter[str] = Counter()
+    for trade in trade_records:
+        entry_kind = trade.get("entry_kind")
+        filled = trade.get("outcome_kind") == "OK" and entry_kind in _FILLED_ENTRY_KINDS
+        if not filled:
+            plan_outcomes[_safe_str(entry_kind, "UNKNOWN")] += 1
+            continue
+        exit_kind = trade.get("exit_kind")
+        if exit_kind in _CLOSED_EXIT_KINDS:
+            closed.append(trade)
+        elif exit_kind == EXIT_END_OF_DATA:
+            end_of_data.append(trade)
+        else:
+            raise ReportBuildError(
+                f"filled trade {trade.get('trade_id')!r} has exit_kind {exit_kind!r}: "
+                f"expected one of {sorted(_CLOSED_EXIT_KINDS | {EXIT_END_OF_DATA})}"
+            )
+    return closed, end_of_data, plan_outcomes
+
+
 def build(
     *,
     experiment_record: Any,
@@ -589,10 +635,12 @@ def build(
     if not (Decimal("0") < probable <= Decimal("1")):
         raise ReportBuildError(f"probable must be in (0, 1], got {probable}")
 
+    closed_trades, end_of_data_trades, plan_outcomes = _classify(trade_records)
+
     r_values: list[Decimal] = []
     annotated: list[tuple[Mapping[str, Any], Decimal]] = []
     risk_zero_excluded = 0
-    for trade in trade_records:
+    for trade in closed_trades:
         r = _r_multiple(trade)
         if r is not None:
             r_values.append(r)
@@ -600,14 +648,14 @@ def build(
         elif _has_zero_risk(trade):
             risk_zero_excluded += 1
 
-    n_trades = len(trade_records)
+    n_trades = len(closed_trades)
     n_r = len(r_values)
 
     by_symbol: Counter[str] = Counter()
     by_quarter: Counter[str] = Counter()
     by_regime: Counter[str] = Counter()
     by_version: Counter[str] = Counter()
-    for trade in trade_records:
+    for trade in closed_trades:
         by_symbol[_safe_str(trade.get("symbol"), "UNKNOWN")] += 1
         by_quarter[_quarter(_parse_exit_dt(trade))] += 1
         by_regime[_safe_str(trade.get("regime"), "UNKNOWN")] += 1
@@ -618,6 +666,8 @@ def build(
         counts_by_quarter=dict(sorted(by_quarter.items())),
         counts_by_regime=dict(sorted(by_regime.items())),
         counts_by_version=dict(sorted(by_version.items())),
+        end_of_data_count=len(end_of_data_trades),
+        plan_outcome_counts=dict(sorted(plan_outcomes.items())),
     )
 
     if n_r == 0:
@@ -654,7 +704,7 @@ def build(
     if n_r < 2:
         interval: BootstrapInterval | None = None
         if n_trades == 0:
-            insufficient_note = "no trades in trade list; bootstrap interval absent"
+            insufficient_note = "no closed trades in trade list; bootstrap interval absent"
         else:
             insufficient_note = (
                 f"only {n_r} R-valued trade(s); bootstrap interval absent "
@@ -723,35 +773,7 @@ def build(
     )
     stability = StabilitySection(slices=stability_slices)
 
-    region_groups: dict[str, list[Decimal]] = {}
-    for trade, r in annotated:
-        region = _safe_str(trade.get("parameter_region"), "UNKNOWN")
-        region_groups.setdefault(region, []).append(r)
-    plateau_regions_tuple = tuple(
-        PlateauRegion(
-            region=region,
-            trade_count=len(rs),
-            mean_r=_decimal_mean(rs) if rs else None,
-        )
-        for region, rs in sorted(region_groups.items())
-    )
-    isolated_warnings: list[str] = []
-    if plateau_regions_tuple and len(plateau_regions_tuple) > 1:
-        trade_counts = sorted(len(rs) for rs in region_groups.values())
-        median_count = trade_counts[len(trade_counts) // 2]
-        mean_rs = [
-            r.mean_r if r.mean_r is not None else Decimal("0") for r in plateau_regions_tuple
-        ]
-        median_mean = _decimal_median(mean_rs)
-        for plat in plateau_regions_tuple:
-            if plat.mean_r is None:
-                continue
-            if plat.mean_r > median_mean and plat.trade_count < median_count:
-                isolated_warnings.append(plat.region)
-    plateau = PlateauSection(
-        regions=plateau_regions_tuple,
-        isolated_optimum_warnings=tuple(isolated_warnings),
-    )
+    plateau = PlateauSection()
 
     candidate_mean = r_dist.mean
     no_trade = baseline_summaries.no_trade if baseline_summaries else None
@@ -818,26 +840,31 @@ def build(
         weak_live_universe_rejection=weak_rejection,
     )
 
-    fallback_count = sum(1 for t in trade_records if t.get("fallback_applied") is True)
+    # Fallback can occur on a closed trade or on an END_OF_DATA trade: both are filled.
+    filled_trades = [*closed_trades, *end_of_data_trades]
+    n_filled = len(filled_trades)
+    fallback_count = sum(1 for t in filled_trades if t.get("fallback_applied") is True)
     coverage_notes = tuple(
         sorted(
             {
                 str(t.get("coverage_note"))
-                for t in trade_records
+                for t in filled_trades
                 if t.get("coverage_note") not in (None, "")
             }
         )
     )
-    if n_trades == 0:
+    if n_filled == 0:
         coverage_pct = Decimal("100")
     else:
         # WR-05: exact Decimal division under the pinned context — the
         # old integer `//` floored e.g. 2/3 coverage to 66.
-        coverage_pct = _div(_q((n_trades - fallback_count) * 100), _q(n_trades))
+        coverage_pct = _div(_q((n_filled - fallback_count) * 100), _q(n_filled))
     intrabar = IntrabarCoverage(
         percent=coverage_pct,
         fallback_count=fallback_count,
-        total_trades=n_trades,
+        total_trades=n_filled,
+        closed_trades=n_trades,
+        end_of_data_trades=len(end_of_data_trades),
         coverage_notes=coverage_notes,
     )
 
@@ -869,7 +896,6 @@ __all__ = [
     "DualUniverseSlice",
     "IntrabarCoverage",
     "LIVE5_SYMBOLS",
-    "PlateauRegion",
     "PlateauSection",
     "RDistributionSection",
     "ReportBuildError",
