@@ -776,6 +776,21 @@ def test_end_of_data_looks_back_past_a_trailing_mark_hole() -> None:
     assert closed.exit_price == D("100.40")
 
 
+def test_end_of_data_is_never_dated_before_a_fallback_booked_tp1() -> None:
+    # CR-01: a hole in the last bar books TP1 at the bar close (12:59:59.999) while the last
+    # mark minute is 12:14; the forced close must not be dated before that TP1 leg.
+    bar12 = strategy_bar(12, o="101.00", h="104.50", low="99.00", c="101.00")
+    source = long_fill_source(mark_holes=HOLE_FROM_12_15)
+    state, _ = walk_hours(long_state(), source, [flat_bar(10), flat_bar(11), bar12])
+    assert state.phase == "OPEN"
+    assert state.tp1_time_utc == BAR_12_CLOSE
+    closed, events = finalize_at_data_end(state, data_end_utc=at(13), source=source)
+    assert closed.exit_kind == "END_OF_DATA"
+    assert closed.exit_time_utc == BAR_12_CLOSE
+    assert events[0].time_utc == BAR_12_CLOSE
+    validate_trade_record(record_of(closed), data_start_utc=SIGNAL_CLOSE, data_end_utc=at(13))
+
+
 def test_end_of_data_without_a_source_or_a_mark_minute_fails_closed() -> None:
     state, source = eod_state({})
     with pytest.raises(ValueError, match="END_OF_DATA"):

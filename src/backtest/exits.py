@@ -226,6 +226,9 @@ def end_of_data_exit(*, state: PlanState, data_end_utc: datetime, source: Minute
     if remaining is None or entry_time is None or remaining <= Decimal("0"):
         raise ValueError("end_of_data_exit needs an OPEN position with a remaining quantity")
     floor_start = entry_time - timedelta(microseconds=1)  # includes the fill minute itself
+    # The forced close is never dated before an event the position already produced: a
+    # fallback-resolved TP1 booked at a bar close can sit after the last mark minute (CR-01).
+    floor_time = entry_time if state.tp1_time_utc is None else max(entry_time, state.tp1_time_utc)
     lookback = timedelta(hours=1)
     while True:
         window_start = max(floor_start, data_end_utc - lookback)
@@ -236,7 +239,7 @@ def end_of_data_exit(*, state: PlanState, data_end_utc: datetime, source: Minute
                 kind=EXIT_END_OF_DATA,
                 price=last.close,
                 quantity=remaining,
-                time_utc=last.close_time_utc,
+                time_utc=max(last.close_time_utc, floor_time),
             )
         if window_start == floor_start:
             raise ValueError(
