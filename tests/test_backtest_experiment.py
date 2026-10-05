@@ -870,3 +870,100 @@ def test_cr11_baseline_tomls_carry_detector_and_cost_keys() -> None:
                     f"{parameter_set_id}: {key}={parameter_set.params[key]!r} != "
                     f"COST_MODEL canonical {canonical[key]!r}"
                 )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 14 (plan 14-12): baselines, reproduce and verify_experiment run the v2 engine.
+# --------------------------------------------------------------------------- #
+
+
+def _simple_trend_record(case: dict, *, result_summary_json: str = "{}"):
+    """Assemble a record bound to the regenerated simple-trend baseline case (v3 set)."""
+    from src.backtest.experiment import assemble
+
+    return assemble(
+        parameter_set_id=case["parameter_set_id"],
+        strategy_id=case["strategy_id"],
+        strategy_version=case["strategy_version"],
+        data_snapshot_id="3" * 64,
+        code_version="plan-14-12",
+        cost_model=_build_cost_model(dict(case["cost_model"])),
+        time_range_start_utc=datetime.fromisoformat("2026-09-11T00:00:00+00:00"),
+        time_range_end_utc=datetime.fromisoformat("2026-09-11T11:00:00+00:00"),
+        universe=["BTCUSDT"],
+        run_type="BASELINE_SIMPLE_TREND",
+        notes="plan 14-12 v2 reproduce",
+        result_summary_json=result_summary_json,
+    )
+
+
+def test_baseline_no_trade_runs_the_engine_and_drops_the_reject_record() -> None:
+    """The v2 engine emits a first-class RR_TOO_LOW REJECT record; the baseline keeps filled
+    trades only, so the no-trade baseline is still the empty list."""
+    from src.backtest.experiment import baseline_no_trade
+    from src.backtest.simulator import run
+
+    case_input = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "no_trade")
+    assert case_input["case_input_schema"] == "backtest-case/2"
+    raw = run(case_input)["trades"]
+    assert [(t["entry_kind"], t["reason_code"]) for t in raw] == [("REJECT", "RR_TOO_LOW")]
+    assert baseline_no_trade(case_input) == []
+
+
+def test_baseline_simple_trend_keeps_the_filled_trade_of_the_v2_engine() -> None:
+    from src.backtest.experiment import baseline_simple_trend
+    from src.backtest.simulator import run
+
+    case_input = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    trades = baseline_simple_trend(case_input)
+    assert len(trades) == 1
+    (trade,) = trades
+    assert trade.entry_kind == "ENTRY_FILLED"
+    assert trade.exit_kind == "SL"
+    assert trade.direction == "LONG"
+    # The v2 trailing fields stay strings on the rebuilt record until plan 14-15 types them
+    # (_trade_from_dict), so the causal order is read from the engine output itself.
+    (raw,) = run(case_input)["trades"]
+    assert raw["entry_time_utc"] > raw["signal_close_utc"]
+
+
+def test_reproduce_reruns_the_v2_engine_and_reproduces_byte_identical_trades() -> None:
+    from src.backtest.experiment import reproduce
+    from src.backtest.simulator import run
+
+    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    record = _simple_trend_record(case)
+    first = reproduce(record, simulator_inputs=case)
+    second = reproduce(record, simulator_inputs=case)
+    assert [t.to_dict() for t in first] == [t.to_dict() for t in second]
+    # The rebuilt records equal the engine output record for record.
+    assert [t.to_dict() for t in first] == run(case)["trades"]
+
+
+def test_verify_experiment_compares_the_v2_digest_and_detects_a_changed_minute_series() -> None:
+    import json as _json
+
+    from src.backtest.experiment import ExperimentReproducibilityBroken, verify_experiment
+    from src.backtest.simulator import run
+
+    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    digest = sha256_hex({"trades": run(case)["trades"]})
+    matching = _simple_trend_record(
+        case, result_summary_json=_json.dumps({"trades_digest": digest})
+    )
+    assert verify_experiment(matching, simulator_inputs=case) is None
+
+    forged = _simple_trend_record(
+        case, result_summary_json=_json.dumps({"trades_digest": "f" * 64})
+    )
+    with pytest.raises(ExperimentReproducibilityBroken, match="trades_digest"):
+        verify_experiment(forged, simulator_inputs=case)
+
+    # Drift: the stop minute no longer reaches the stop, so the engine outcome differs from
+    # the digest recorded for the original series.
+    drifted = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    for row in drifted["mark_bars_1m"]:
+        if row["open_time_utc"] == "2026-09-11T10:06:00+00:00":
+            row["low"] = "121.50"
+    with pytest.raises(ExperimentReproducibilityBroken, match="trades_digest"):
+        verify_experiment(matching, simulator_inputs=drifted)
