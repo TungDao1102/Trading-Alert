@@ -1,8 +1,16 @@
-"""Published Parquet -> backtest case-input builder (M4, D-17, D-18, D-22).
+"""Published Parquet -> backtest case-input v2 builder (M4, D-17, D-18, D-22; Phase 14 D-13).
 
-`build_case_input_data` reads ONLY the immutable published partitions for one
-symbol and a whole-UTC-day range and returns the simulator's case-input
-keys, so a backtest runs straight from the store without hand-built fixtures.
+`build_case_input_data` reads ONLY the immutable published partitions for one or
+more symbols and a whole-UTC-day range and returns the case-input v2 keys
+(`backtest-case/2`: schema, sorted symbols, strategy and context bars, funding per
+symbol, `data_window`, `dataset_id`, `allowed_gaps`), so a backtest runs straight from
+the store without hand-built fixtures. The caller adds the scenario keys (strategy
+identity, `account_state`, `cost_model`, `constraint_history`, `scripted_plans`).
+
+1m minutes (D-13, D-31): by default the case carries NO minute rows; the caller passes a
+lazy `ParquetMinuteSource` (src/data/minute_source.py) to `engine.simulate`.
+`with_minute_rows=True` adds `trade_bars_1m` and `mark_bars_1m` rows for small ranges.
+The per-signal-bar intrabar map of the v1 case is gone.
 
 Design rules (13-CONTEXT D-17..D-22):
 
@@ -13,37 +21,44 @@ Design rules (13-CONTEXT D-17..D-22):
   string (`format(Decimal, "f")`), every timestamp as an ISO-8601 UTC string.
   There is no float anywhere in the path.
 - Dataset identity (D-18): `dataset_id` is sha256 over the sorted list of
-  `{repo-relative posix path, sha256 of file bytes}` for exactly the files read.
-  The same partitions give the same id; a changed, added or removed partition
-  changes it. A dataset that is re-written (for example after a Polars upgrade
-  changes the Parquet bytes) is a NEW dataset by design (13-RESEARCH A4).
+  `{repo-relative posix path, sha256 of file bytes}` for every file of the requested
+  series, symbols and day range: the bars, every funding file, and (when the 1m series
+  are requested) every 1m trade and mark partition, whether the rows are embedded or
+  served lazily. A lazy `ParquetMinuteSource` can only open files of that set, so the id
+  covers every file a run reads. The same partitions give the same id; a changed, added
+  or removed partition changes it. A dataset that is re-written (for example after a
+  Polars upgrade changes the Parquet bytes) is a NEW dataset by design (13-RESEARCH A4).
+- Funding cadence (D-36, D-15): each symbol funding cadence (8 h or 4 h) is inferred
+  from the observed spacing; a hole is two observations further apart than
+  `FUNDING_MAX_CADENCE + FUNDING_JITTER` (the engine tolerance, equal by test to the
+  `src/data/coverage` constants). Holes fail closed unless passed as `allow_gaps`.
 - Package purity (D-12): Polars and DuckDB live here in `src/data`; nothing under
-  `src/backtest` imports this module. The mark-price, funding and open-interest
-  keys are inert to the current simulator, which ignores unknown keys, until
-  Phase 14 consumes them.
+  `src/backtest` imports this module (this module may import the pure backtest
+  constants). Phase 14 consumes bars, mark, funding and minutes; open interest stays
+  inert (it is read and hashed but has no case-input v2 key).
 """
 
 from __future__ import annotations
 
 import hashlib
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 
 import polars as pl
+from src.backtest.case import CASE_INPUT_SCHEMA
+from src.backtest.semantics import FUNDING_JITTER, FUNDING_MAX_CADENCE
 from src.data.coverage import (
     DEFAULT_FUNDING_INTERVAL_MS,
     DEFAULT_OI_INTERVAL_MS,
-    FUNDING_JITTER_MS,
     TICK_GAP_FACTOR,
     GapRange,
     gap_ranges_for_files,
 )
+from src.data.minute_source import SYMBOL_RE as _SYMBOL_RE
 from src.data.quality import INTERVAL_MS
 from src.data.store import MARK_DATASET_DIR, partition_file, read_partitions
 from src.domain.canonical import sha256_hex
@@ -56,9 +71,13 @@ SERIES_ALL: tuple[str, ...] = (
     "open_interest",
 )
 
-_SYMBOL_RE = re.compile(r"^[A-Z0-9]+USDT$")
-_ONE_MINUTE_MS = 60_000
 _HASH_CHUNK = 1 << 20
+_MS = timedelta(milliseconds=1)
+
+# D-36: two funding observations further apart than the max cadence plus jitter are a hole.
+# The engine coverage check uses the same sum (src/backtest/funding.py).
+FUNDING_TOLERANCE_MS: int = (FUNDING_MAX_CADENCE + FUNDING_JITTER) // _MS
+_FOUR_HOUR_MS = 4 * 3_600_000
 
 Row = dict[str, str | int | None]
 
@@ -130,9 +149,13 @@ class CaseInputGapError(CaseInputError):
 
 @dataclass(frozen=True)
 class CaseInputData:
-    """Everything the simulator (and the experiment record) needs from the store."""
+    """Everything the engine (and the experiment record) needs from the store.
 
-    symbol: str
+    `trade_bars_1m` and `mark_bars_1m` are empty unless the builder ran with
+    `with_minute_rows=True`; the lazy path serves minutes from a `ParquetMinuteSource`.
+    """
+
+    symbols: tuple[str, ...]
     strategy_interval: str
     context_interval: str
     start_utc: datetime
@@ -140,36 +163,37 @@ class CaseInputData:
     series: tuple[str, ...]
     strategy_bars: tuple[Row, ...]
     context_bars: tuple[Row, ...]
-    intrabar_1m_map: Mapping[str, tuple[Row, ...] | None]
+    trade_bars_1m: tuple[Row, ...]
     mark_bars_1m: tuple[Row, ...]
     funding: tuple[Row, ...]
     open_interest: tuple[Row, ...]
     files: tuple[str, ...]
     dataset_id: str
     allowed_gaps: tuple[GapRange, ...]
+    with_minute_rows: bool = False
 
     def to_case_input(self, **scenario: Any) -> dict[str, Any]:
-        """Return the simulator case-input dict: builder keys plus `scenario`.
+        """Return the case-input v2 dict: builder keys plus `scenario`.
 
-        A scenario key that collides with a builder key is refused: the store
-        owns the bars, the caller owns the account/constraint/cost scenario.
+        A scenario key that collides with a builder key is refused: the store owns the
+        market data, the caller owns the strategy identity and the account, cost and
+        constraint scenario. Open interest has no v2 key and is not emitted.
         """
         built: dict[str, Any] = {
+            "case_input_schema": CASE_INPUT_SCHEMA,
+            "symbols": list(self.symbols),
             "strategy_bars": [dict(b) for b in self.strategy_bars],
             "context_bars": [dict(b) for b in self.context_bars],
-            "intrabar_1m_map": {
-                key: None if minutes is None else [dict(m) for m in minutes]
-                for key, minutes in self.intrabar_1m_map.items()
-            },
-            "mark_price_bars": [dict(b) for b in self.mark_bars_1m],
             "funding": [dict(r) for r in self.funding],
-            "open_interest": [dict(r) for r in self.open_interest],
+            "data_window": {
+                "start_utc": self.start_utc.isoformat(),
+                "end_utc": self.end_utc.isoformat(),
+            },
             "dataset_id": self.dataset_id,
             "allowed_gaps": [
                 {
                     "series": g.series,
                     "symbol": g.symbol,
-                    "interval": g.interval,
                     "start_utc": g.start_utc.isoformat(),
                     "end_utc": g.end_utc.isoformat(),
                     "missing": g.missing,
@@ -177,6 +201,12 @@ class CaseInputData:
                 for g in self.allowed_gaps
             ],
         }
+        if self.with_minute_rows:
+            built["trade_bars_1m"] = [dict(m) for m in self.trade_bars_1m]
+            built["mark_bars_1m"] = [
+                {k: v for k, v in dict(m).items() if k != "price_tick_count"}
+                for m in self.mark_bars_1m
+            ]
         clash = sorted(set(scenario) & set(built))
         if clash:
             raise CaseInputError(
@@ -231,9 +261,20 @@ def _require_midnight_utc(value: datetime, name: str) -> None:
         raise CaseInputRangeError(f"{name} must be at 00:00:00 UTC (whole UTC days only)")
 
 
+def _resolve_symbols(symbols: Sequence[str] | None, symbol: str | None) -> list[str]:
+    """The requested symbols as a list: `symbols`, or the single-symbol `symbol` keyword."""
+    if symbols is not None and symbol is not None:
+        raise CaseInputError("pass either symbols or symbol, not both")
+    if symbol is not None:
+        return [symbol]
+    if symbols is None or isinstance(symbols, str):
+        raise CaseInputError("symbols must be a non-empty sequence of symbols")
+    return list(symbols)
+
+
 def _validate(
     *,
-    symbol: str,
+    symbols: Sequence[str],
     start_utc: datetime,
     end_utc: datetime,
     as_of_day_utc: date,
@@ -241,8 +282,13 @@ def _validate(
     context_interval: str,
     series: Sequence[str],
 ) -> tuple[str, ...]:
-    if not isinstance(symbol, str) or not _SYMBOL_RE.fullmatch(symbol):
-        raise CaseInputError(f"symbol {symbol!r} does not match ^[A-Z0-9]+USDT$")
+    if not symbols:
+        raise CaseInputError("symbols must not be empty")
+    for symbol in symbols:
+        if not isinstance(symbol, str) or not _SYMBOL_RE.fullmatch(symbol):
+            raise CaseInputError(f"symbol {symbol!r} does not match ^[A-Z0-9]+USDT$")
+    if len(set(symbols)) != len(symbols):
+        raise CaseInputError(f"symbols must be unique, got {list(symbols)}")
     for label, interval in (
         ("strategy_interval", strategy_interval),
         ("context_interval", context_interval),
@@ -308,16 +354,21 @@ def _collect_gaps(
     start_utc: datetime,
     end_utc: datetime,
     files_by_series: Mapping[str, Sequence[tuple[str, Sequence[Path]]]],
+    funding_step_ms: int = DEFAULT_FUNDING_INTERVAL_MS,
 ) -> list[GapRange]:
-    """Every gap of every requested series, in a deterministic order."""
+    """Every gap of every requested series, in a deterministic order.
+
+    `funding_step_ms` is the symbol inferred funding cadence; the funding tolerance is
+    always `FUNDING_TOLERANCE_MS` (the engine cadence plus jitter, D-36).
+    """
     gaps: list[GapRange] = []
     for series in SERIES_ALL:
         if series not in wanted:
             continue
         for interval, files in files_by_series[series]:
             if series == "funding":
-                step_ms = DEFAULT_FUNDING_INTERVAL_MS
-                max_step_ms: int | None = DEFAULT_FUNDING_INTERVAL_MS + FUNDING_JITTER_MS
+                step_ms = funding_step_ms
+                max_step_ms: int | None = FUNDING_TOLERANCE_MS
                 time_column = "funding_time_utc"
             elif series == "open_interest":
                 step_ms = DEFAULT_OI_INTERVAL_MS
@@ -413,27 +464,25 @@ def _epoch_ms(iso: str | int | None) -> int:
     return delta // timedelta(milliseconds=1)
 
 
-def _group_intrabar(
-    strategy_bars: Sequence[Row],
-    minutes: Sequence[Row],
-    *,
-    symbol: str,
-    strategy_step_ms: int,
-) -> dict[str, tuple[Row, ...] | None]:
-    """Map `SYMBOL|ISO_CLOSE` to the bar's 60 one-minute rows, else None."""
-    expected = strategy_step_ms // _ONE_MINUTE_MS
-    buckets: dict[int, list[Row]] = {}
-    for minute in minutes:
-        open_ms = _epoch_ms(minute["open_time_utc"])
-        buckets.setdefault(open_ms - open_ms % strategy_step_ms, []).append(minute)
-    out: dict[str, tuple[Row, ...] | None] = {}
-    for bar in strategy_bars:
-        bar_open = _epoch_ms(bar["open_time_utc"])
-        group = buckets.get(bar_open, [])
-        offsets = {(_epoch_ms(m["open_time_utc"]) - bar_open) // _ONE_MINUTE_MS for m in group}
-        complete = len(group) == expected and offsets == set(range(expected))
-        out[f"{symbol}|{bar['close_time_utc']}"] = tuple(group) if complete else None
-    return out
+def infer_funding_cadence_ms(times_ms: Sequence[int]) -> int:
+    """Infer a funding series cadence (8 h or 4 h) from its observed instants (D-36).
+
+    Each spacing votes for the nearer cadence (under 6 h counts as 4 h, anything longer,
+    including a long hole, as 8 h); the majority wins and a tie, an empty or a
+    single-observation series defaults to 8 h. A missed instant in a 4 h series (one 8 h
+    spacing) therefore does not change the cadence, and jitter of seconds is irrelevant.
+    """
+    midpoint = (_FOUR_HOUR_MS + DEFAULT_FUNDING_INTERVAL_MS) // 2
+    four = eight = 0
+    for earlier, later in zip(times_ms, times_ms[1:], strict=False):
+        spacing = later - earlier
+        if spacing <= 0:
+            continue
+        if spacing < midpoint:
+            four += 1
+        else:
+            eight += 1
+    return _FOUR_HOUR_MS if four > eight else DEFAULT_FUNDING_INTERVAL_MS
 
 
 # --------------------------------------------------------------------------- #
@@ -441,10 +490,44 @@ def _group_intrabar(
 # --------------------------------------------------------------------------- #
 
 
+@dataclass(frozen=True)
+class _SymbolFiles:
+    """The explicit partition files of one symbol over the requested days."""
+
+    symbol: str
+    strategy: list[Path]
+    context: list[Path]
+    minute: list[Path]
+    mark: list[Path]
+    funding: list[Path]
+    open_interest: list[Path]
+
+
+def _symbol_files(
+    raw_root: Path,
+    symbol: str,
+    days: Sequence[date],
+    *,
+    strategy_interval: str,
+    context_interval: str,
+) -> _SymbolFiles:
+    mark_root = raw_root / MARK_DATASET_DIR
+    return _SymbolFiles(
+        symbol=symbol,
+        strategy=_kline_files(raw_root, strategy_interval, symbol, days),
+        context=_kline_files(raw_root, context_interval, symbol, days),
+        minute=_kline_files(raw_root, "1m", symbol, days),
+        mark=_kline_files(mark_root, "1m", symbol, days),
+        funding=_tick_files(raw_root, "funding", "sweep", symbol, days),
+        open_interest=_tick_files(raw_root, "oi", "tick", symbol, days),
+    )
+
+
 def build_case_input_data(
     raw_root: Path,
     *,
-    symbol: str,
+    symbols: Sequence[str] | None = None,
+    symbol: str | None = None,
     start_utc: datetime,
     end_utc: datetime,
     as_of_day_utc: date,
@@ -452,10 +535,18 @@ def build_case_input_data(
     context_interval: str = "4h",
     series: Sequence[str] = SERIES_ALL,
     allow_gaps: Sequence[GapRange] = (),
+    with_minute_rows: bool = False,
 ) -> CaseInputData:
-    """Build the case-input data for one symbol and a whole-UTC-day range."""
+    """Build the case-input v2 data for one or more symbols and a whole-UTC-day range.
+
+    Pass `symbols` (any order; emitted sorted) or the single-symbol keyword `symbol`.
+    `with_minute_rows=True` embeds the 1m trade and mark rows; the default leaves them
+    out for a lazy `ParquetMinuteSource`. Gap detection and the dataset identity cover the
+    1m partitions either way.
+    """
+    names = _resolve_symbols(symbols, symbol)
     wanted = _validate(
-        symbol=symbol,
+        symbols=names,
         start_utc=start_utc,
         end_utc=end_utc,
         as_of_day_utc=as_of_day_utc,
@@ -463,101 +554,118 @@ def build_case_input_data(
         context_interval=context_interval,
         series=series,
     )
+    ordered = sorted(names)
     days = _utc_days(start_utc, end_utc)
-    mark_root = raw_root / MARK_DATASET_DIR
-
-    strategy_files = _kline_files(raw_root, strategy_interval, symbol, days)
-    context_files = _kline_files(raw_root, context_interval, symbol, days)
-    minute_files = _kline_files(raw_root, "1m", symbol, days)
-    mark_files = _kline_files(mark_root, "1m", symbol, days)
-    funding_files = _tick_files(raw_root, "funding", "sweep", symbol, days)
-    oi_files = _tick_files(raw_root, "oi", "tick", symbol, days)
-
     trade_intervals = list(dict.fromkeys((strategy_interval, context_interval)))
-    files_by_series: dict[str, list[tuple[str, Sequence[Path]]]] = {
-        "trade": [
-            (iv, strategy_files if iv == strategy_interval else context_files)
-            for iv in trade_intervals
-        ],
-        "intrabar_1m": [("1m", minute_files)],
-        "mark_1m": [("1m", mark_files)],
-        "funding": [("8h", funding_files)],
-        "open_interest": [("5m", oi_files)],
-    }
-    # Fail closed BEFORE any row is emitted: a hole is never padded (D-19).
-    allowed_gaps = _apply_allowed(
-        _collect_gaps(
-            wanted=wanted,
-            symbol=symbol,
-            start_utc=start_utc,
-            end_utc=end_utc,
-            files_by_series=files_by_series,
-        ),
-        allow_gaps,
-    )
 
+    # Phase 1: files and funding rows per symbol, then every gap, BEFORE any other row is
+    # read: a hole is never padded (D-19). Funding rows come first because the cadence
+    # (8 h or 4 h) is inferred from the observed spacing (D-36).
+    files_of: dict[str, _SymbolFiles] = {}
+    funding_of: dict[str, list[Row]] = {}
+    gaps: list[GapRange] = []
+    for name in ordered:
+        files = _symbol_files(
+            raw_root,
+            name,
+            days,
+            strategy_interval=strategy_interval,
+            context_interval=context_interval,
+        )
+        files_of[name] = files
+        funding_rows: list[Row] = []
+        if "funding" in wanted:
+            funding_rows = _read_rows(
+                files.funding, _FUNDING_COLUMNS, "funding_time_utc", symbol=name
+            )
+        funding_of[name] = funding_rows
+        cadence_ms = infer_funding_cadence_ms(
+            [_epoch_ms(r["funding_time_utc"]) for r in funding_rows]
+        )
+        files_by_series: dict[str, list[tuple[str, Sequence[Path]]]] = {
+            "trade": [
+                (iv, files.strategy if iv == strategy_interval else files.context)
+                for iv in trade_intervals
+            ],
+            "intrabar_1m": [("1m", files.minute)],
+            "mark_1m": [("1m", files.mark)],
+            "funding": [(f"{cadence_ms // 3_600_000}h", files.funding)],
+            "open_interest": [("5m", files.open_interest)],
+        }
+        gaps.extend(
+            _collect_gaps(
+                wanted=wanted,
+                symbol=name,
+                start_utc=start_utc,
+                end_utc=end_utc,
+                files_by_series=files_by_series,
+                funding_step_ms=cadence_ms,
+            )
+        )
+    allowed_gaps = _apply_allowed(gaps, allow_gaps)
+
+    # Phase 2: rows. Rows are grouped by sorted symbol, ascending in time within a symbol.
     used: list[Path] = []
     strategy_bars: list[Row] = []
     context_bars: list[Row] = []
-    minutes: list[Row] = []
+    trade_minutes: list[Row] = []
     mark_bars: list[Row] = []
     funding: list[Row] = []
     open_interest: list[Row] = []
+    for name in ordered:
+        files = files_of[name]
+        if "trade" in wanted:
+            used += files.strategy + files.context
+            strategy_bars += _read_rows(
+                files.strategy,
+                _BAR_COLUMNS,
+                "open_time_utc",
+                symbol=name,
+                interval=strategy_interval,
+                pin_price_scale=True,
+            )
+            context_bars += _read_rows(
+                files.context,
+                _BAR_COLUMNS,
+                "open_time_utc",
+                symbol=name,
+                interval=context_interval,
+                pin_price_scale=True,
+            )
+        if "intrabar_1m" in wanted:
+            used += files.minute
+            if with_minute_rows:
+                trade_minutes += _read_rows(
+                    files.minute,
+                    _BAR_COLUMNS,
+                    "open_time_utc",
+                    symbol=name,
+                    interval="1m",
+                    pin_price_scale=True,
+                )
+        if "mark_1m" in wanted:
+            used += files.mark
+            if with_minute_rows:
+                mark_bars += _read_rows(
+                    files.mark,
+                    _MARK_COLUMNS,
+                    "open_time_utc",
+                    symbol=name,
+                    interval="1m",
+                    pin_price_scale=True,
+                )
+        if "funding" in wanted:
+            used += files.funding
+            funding += funding_of[name]
+        if "open_interest" in wanted:
+            used += files.open_interest
+            open_interest += _read_rows(
+                files.open_interest, _OI_COLUMNS, "observed_at_utc", symbol=name
+            )
 
-    if "trade" in wanted:
-        used += strategy_files + context_files
-        strategy_bars = _read_rows(
-            strategy_files,
-            _BAR_COLUMNS,
-            "open_time_utc",
-            symbol=symbol,
-            interval=strategy_interval,
-            pin_price_scale=True,
-        )
-        context_bars = _read_rows(
-            context_files,
-            _BAR_COLUMNS,
-            "open_time_utc",
-            symbol=symbol,
-            interval=context_interval,
-            pin_price_scale=True,
-        )
-    if "intrabar_1m" in wanted:
-        used += minute_files
-        minutes = _read_rows(
-            minute_files,
-            _BAR_COLUMNS,
-            "open_time_utc",
-            symbol=symbol,
-            interval="1m",
-            pin_price_scale=True,
-        )
-    if "mark_1m" in wanted:
-        used += mark_files
-        mark_bars = _read_rows(
-            mark_files,
-            _MARK_COLUMNS,
-            "open_time_utc",
-            symbol=symbol,
-            interval="1m",
-            pin_price_scale=True,
-        )
-    if "funding" in wanted:
-        used += funding_files
-        funding = _read_rows(funding_files, _FUNDING_COLUMNS, "funding_time_utc", symbol=symbol)
-    if "open_interest" in wanted:
-        used += oi_files
-        open_interest = _read_rows(oi_files, _OI_COLUMNS, "observed_at_utc", symbol=symbol)
-
-    step_ms = INTERVAL_MS[strategy_interval]
-    if "intrabar_1m" in wanted:
-        intrabar = _group_intrabar(strategy_bars, minutes, symbol=symbol, strategy_step_ms=step_ms)
-    else:
-        intrabar = {f"{symbol}|{bar['close_time_utc']}": None for bar in strategy_bars}
-
-    files = tuple(sorted({_relative_posix(raw_root, p) for p in used}))
+    relative = tuple(sorted({_relative_posix(raw_root, p) for p in used}))
     return CaseInputData(
-        symbol=symbol,
+        symbols=tuple(ordered),
         strategy_interval=strategy_interval,
         context_interval=context_interval,
         start_utc=start_utc,
@@ -565,13 +673,14 @@ def build_case_input_data(
         series=wanted,
         strategy_bars=tuple(strategy_bars),
         context_bars=tuple(context_bars),
-        intrabar_1m_map=MappingProxyType(intrabar),
+        trade_bars_1m=tuple(trade_minutes),
         mark_bars_1m=tuple(mark_bars),
         funding=tuple(funding),
         open_interest=tuple(open_interest),
-        files=files,
+        files=relative,
         dataset_id=dataset_identity(raw_root, used),
         allowed_gaps=allowed_gaps,
+        with_minute_rows=with_minute_rows,
     )
 
 
@@ -581,6 +690,8 @@ __all__ = [
     "CaseInputError",
     "CaseInputGapError",
     "CaseInputRangeError",
+    "FUNDING_TOLERANCE_MS",
     "build_case_input_data",
     "dataset_identity",
+    "infer_funding_cadence_ms",
 ]
