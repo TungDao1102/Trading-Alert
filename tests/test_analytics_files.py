@@ -42,6 +42,7 @@ from src.analytics.family import (
 from src.analytics.killgate import ResetRecord, evaluate
 from src.analytics.types import OutcomeContext
 from src.backtest.experiment import ExperimentRecord
+from src.backtest.validator import validate_trade_record
 from src.domain.canonical import sha256_hex
 from src.domain.enums import KillGateState
 from src.domain.registry import load_parameter_set
@@ -403,9 +404,185 @@ def test_evidence_fixture_files_avoid_research_gate_tripwires() -> None:
 
 
 def test_evidence_wrong_schema_fails_closed(tmp_path: Path) -> None:
-    path = _evidence_with(tmp_path, lambda doc: doc.update(schema="analytics-evidence/2"))
+    path = _evidence_with(tmp_path, lambda doc: doc.update(schema="analytics-evidence/3"))
     with pytest.raises(EvidenceFileError, match="schema"):
         load_evidence_file(path)
+
+
+# --------------------------------------------------------------------------- #
+# Plan 14-15 Task 3 - analytics-evidence/2: typed experiment fields, v2 trades, v1 refused
+# --------------------------------------------------------------------------- #
+
+_TYPED_EXPERIMENT_KEYS = (
+    "no_trade_counts",
+    "intrabar_tie_break",
+    "timeframe",
+    "context_timeframe",
+    "parameter_values",
+    "cost_values",
+    "simulator_semantics_version",
+    "code_commit",
+    "code_dirty",
+    "fallback_count",
+    "end_of_data_count",
+    "strategy_window_bars",
+    "context_window_bars",
+    "allowed_gaps",
+    "split_role",
+    "split_start_utc",
+    "split_end_utc",
+)
+
+
+def test_the_evidence_schema_is_version_two() -> None:
+    from src.adapters.analytics_files import EVIDENCE_SCHEMA
+
+    assert EVIDENCE_SCHEMA == "analytics-evidence/2"
+    assert _sample(EVIDENCE_SAMPLE)["schema"] == "analytics-evidence/2"
+
+
+def test_evidence_version_one_files_are_refused_naming_the_expected_schema(
+    tmp_path: Path,
+) -> None:
+    path = _evidence_with(tmp_path, lambda doc: doc.update(schema="analytics-evidence/1"))
+    with pytest.raises(EvidenceFileError, match="analytics-evidence/2"):
+        load_evidence_file(path)
+
+
+def test_the_v2_sample_carries_every_typed_experiment_field_and_validated_trades() -> None:
+    document = _sample(EVIDENCE_SAMPLE)
+    experiment = document["backtest"][0]["experiment"]
+    for key in _TYPED_EXPERIMENT_KEYS:
+        assert key in experiment, key
+    evidence = load_evidence_file(EVIDENCE_SAMPLE)
+    entry = evidence.backtest[0]
+    record = entry.experiment
+    assert record.simulator_semantics_version == "2.0.0"
+    assert record.intrabar_tie_break == "STOP_FIRST"
+    assert record.code_version == record.code_commit  # a clean tree
+    assert record.code_dirty is False
+    assert record.split_role in ("DEVELOPMENT", "VALIDATION", "HOLDOUT")
+    assert dict(record.cost_values)["funding_convention"] == "MARK_NOTIONAL_SIGNED_V1"
+    assert record.parameter_values and record.no_trade_counts
+    assert record.time_range_start_utc >= record.split_start_utc
+    for trade in entry.trades:
+        validate_trade_record(trade)  # raises on any violated invariant
+    filled = entry.trades[0]
+    assert filled.signal_close_utc is not None and filled.entry_time_utc is not None
+    assert filled.entry_time_utc > filled.signal_close_utc
+    assert filled.planned_quantity == Decimal("1")
+    assert filled.exit_kind == "TP2"
+    assert entry.trades[1].entry_kind == "REJECT"
+
+
+@pytest.mark.parametrize("key", _TYPED_EXPERIMENT_KEYS)
+def test_evidence_experiment_missing_a_typed_field_fails_closed(tmp_path: Path, key: str) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        del doc["backtest"][0]["experiment"][key]
+
+    with pytest.raises(EvidenceFileError, match=key):
+        load_evidence_file(_evidence_with(tmp_path, mutate))
+
+
+@pytest.mark.parametrize(
+    ("key", "bad"),
+    [
+        ("code_dirty", "yes"),
+        ("split_role", "TRAIN"),
+        ("simulator_semantics_version", "1.0.0"),
+        ("intrabar_tie_break", "TP_FIRST"),
+        ("fallback_count", -1),
+        ("fallback_count", True),
+        ("no_trade_counts", {"RR_TOO_LOW": -1}),
+        ("no_trade_counts", [["RR_TOO_LOW", 1]]),
+        ("parameter_values", {}),
+        ("parameter_values", {"swing_lookback": 20}),
+        ("cost_values", {"fee_rate_entry": "0.0009"}),
+        ("code_commit", "abc"),
+        ("split_start_utc", "2026-01-02T00:00:00+00:00"),
+        ("split_end_utc", "2026-02-01T00:00:00"),
+        ("allowed_gaps", [{"series": "funding"}]),
+        ("allowed_gaps", "none"),
+    ],
+)
+def test_evidence_experiment_invalid_typed_value_fails_closed(
+    tmp_path: Path, key: str, bad: Any
+) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["backtest"][0]["experiment"][key] = bad
+
+    with pytest.raises(EvidenceFileError, match="experiment"):
+        load_evidence_file(_evidence_with(tmp_path, mutate))
+
+
+def test_evidence_experiment_unexpected_key_fails_closed(tmp_path: Path) -> None:
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["backtest"][0]["experiment"]["parameters"] = {"swing_lookback": "20"}
+
+    with pytest.raises(EvidenceFileError, match="parameters"):
+        load_evidence_file(_evidence_with(tmp_path, mutate))
+
+
+def test_a_v1_shaped_trade_in_a_v2_file_fails_closed(tmp_path: Path) -> None:
+    def old_exit_kind(doc: dict[str, Any]) -> None:
+        doc["backtest"][0]["trades"][0]["exit_kind"] = "TP1"
+
+    def old_entry_kind(doc: dict[str, Any]) -> None:
+        doc["backtest"][0]["trades"][1]["entry_kind"] = "TOUCH_NO_FILL"
+
+    def no_signal_close(doc: dict[str, Any]) -> None:
+        del doc["backtest"][0]["trades"][0]["signal_close_utc"]
+
+    def entry_before_signal_close(doc: dict[str, Any]) -> None:
+        doc["backtest"][0]["trades"][0]["signal_close_utc"] = "2026-01-05T10:00:01+00:00"
+
+    for mutate in (old_exit_kind, old_entry_kind, no_signal_close, entry_before_signal_close):
+        with pytest.raises(EvidenceFileError, match="trade record"):
+            load_evidence_file(_evidence_with(tmp_path, mutate))
+
+
+@pytest.mark.parametrize(
+    "key", ["planned_quantity", "tp1_quantity", "tp1_price", "tp1_time_utc", "signal_close_utc"]
+)
+def test_evidence_new_trade_fields_are_parsed_before_the_shared_parser(
+    tmp_path: Path, key: str
+) -> None:
+    secret = "postgresql://user:hunter2@host/db"
+
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["backtest"][0]["trades"][0][key] = secret
+
+    with pytest.raises(EvidenceFileError, match=key) as info:
+        load_evidence_file(_evidence_with(tmp_path, mutate))
+    assert "hunter2" not in str(info.value)
+
+
+def test_a_record_serialized_with_to_dict_loads_back_equal(tmp_path: Path) -> None:
+    record = make_experiment_record(
+        code_commit="a" * 40,
+        code_version="a" * 40,
+        split_role="VALIDATION",
+    )
+
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["backtest"][0]["experiment"] = record.to_dict()
+
+    loaded = load_evidence_file(_evidence_with(tmp_path, mutate)).backtest[0].experiment
+    assert loaded == record
+
+
+def _json_keys(node: Any) -> set[str]:
+    if isinstance(node, dict):
+        return set(node) | {key for child in node.values() for key in _json_keys(child)}
+    if isinstance(node, list):
+        return {key for child in node for key in _json_keys(child)}
+    return set()
+
+
+def test_the_evidence_sample_has_no_research_gate_keys_at_any_depth() -> None:
+    keys = _json_keys(_sample(EVIDENCE_SAMPLE))
+    assert not ({"parameters", "parameters_json"} & keys)
+    assert "parameter_values" in keys
 
 
 def test_evidence_missing_top_level_key_fails_closed(tmp_path: Path) -> None:
