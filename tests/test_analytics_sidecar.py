@@ -246,7 +246,7 @@ def test_report_file_stem_format_and_pinned_value() -> None:
     stem = report_file_stem(report)
     assert stem == "journal-depth-20270401T000000Z-" + report.digest()[:12]
     assert re.fullmatch(r"journal-depth-\d{8}T\d{6}Z-[0-9a-f]{12}", stem)
-    assert stem == "journal-depth-20270401T000000Z-57bcaab6d328"
+    assert stem == "journal-depth-20270401T000000Z-2838cb3aa827"
 
 
 def test_telegram_pointer_is_the_exact_plain_text_and_carries_no_decision_surface() -> None:

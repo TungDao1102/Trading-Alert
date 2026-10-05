@@ -35,9 +35,22 @@ _DECIMAL_FIELDS = frozenset(
         "funding_amount",
         "slippage_amount",
         "modeled_costs_per_unit",
+        "planned_quantity",
+        "tp1_quantity",
+        "tp1_price",
     }
 )
-_DATETIME_FIELDS = frozenset({"entry_time_utc", "exit_time_utc"})
+_DATETIME_FIELDS = frozenset(
+    {
+        "entry_time_utc",
+        "exit_time_utc",
+        "signal_close_utc",
+        "tp1_time_utc",
+        "resolved_at_utc",
+    }
+)
+# A default signal closes this long before the entry fill (the plan rests from the next minute).
+_SIGNAL_LEAD = timedelta(hours=1)
 
 _TRADE_DEFAULTS: dict[str, Any] = {
     "trade_id": "T-DEFAULT",
@@ -66,6 +79,20 @@ _TRADE_DEFAULTS: dict[str, Any] = {
     "fallback_applied": False,
     "outcome_kind": "OK",
     "reason_code": "OK",
+    # --- v2 trailing fields (Phase 14, plan 14-01) ---
+    # `signal_close_utc` and `planned_quantity` are derived in `make_trade_record` when the
+    # record fills and the caller gave none, so the defaults pass `validate_trade_record`.
+    "signal_close_utc": None,
+    "planned_quantity": None,
+    "tp1_quantity": None,
+    "tp1_price": None,
+    "tp1_time_utc": None,
+    "resolved_at_utc": None,
+    "touch_no_fill_count": 0,
+    "gap_through_stop": False,
+    "constraints_extrapolated": False,
+    "regime": None,
+    "funding_event_count": 0,
 }
 
 
@@ -125,7 +152,12 @@ def make_candles(rows: list[dict[str, str]]) -> list[Candle]:
 
 
 def make_trade_record(**overrides: Any) -> TradeRecord:
-    """Build a TradeRecord from a dict of JSON scalars (Decimals/datetimes parsed)."""
+    """Build a TradeRecord from a dict of JSON scalars (Decimals/datetimes parsed).
+
+    A record that filled (it has an entry time) gets a `signal_close_utc` one hour before
+    the entry and a `planned_quantity` equal to its quantity unless the caller passes them,
+    so a default filled record satisfies the shared temporal validator (D-23).
+    """
     fields: dict[str, Any] = dict(_TRADE_DEFAULTS)
     unknown = set(overrides) - set(fields)
     if unknown:
@@ -137,6 +169,11 @@ def make_trade_record(**overrides: Any) -> TradeRecord:
             fields[name] = parse_utc(value)
         else:
             fields[name] = value
+    entry_time = fields["entry_time_utc"]
+    if entry_time is not None and "signal_close_utc" not in overrides:
+        fields["signal_close_utc"] = entry_time - _SIGNAL_LEAD
+    if fields["quantity"] is not None and "planned_quantity" not in overrides:
+        fields["planned_quantity"] = fields["quantity"]
     return TradeRecord(**fields)
 
 

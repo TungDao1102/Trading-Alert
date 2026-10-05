@@ -428,7 +428,7 @@ def test_incomplete_ledger_is_sorted_omits_zero_and_surfaces_notes_and_zero_risk
         entry_price="100.00",
         entry_time_utc="2026-01-05T10:00:30+00:00",
         quantity="1",
-        exit_kind="TP1",
+        exit_kind="TP2",
         exit_price="101.00",
         exit_time_utc="2026-01-05T10:03:10+00:00",
         realized_pnl="1.00",

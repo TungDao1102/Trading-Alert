@@ -7,7 +7,7 @@
       "direction": "LONG",
       "entry_time_utc": "2026-01-10T08:00:00+00:00",
       "exit_time_utc": "2026-01-10T12:00:00+00:00",
-      "exit_kind": "TP1",
+      "exit_kind": "TP2",
       "realized_pnl": "15",
       "realized_risk": "10"
     },
@@ -17,7 +17,7 @@
       "direction": "LONG",
       "entry_time_utc": "2026-01-07T08:00:00+00:00",
       "exit_time_utc": "2026-01-07T12:00:00+00:00",
-      "exit_kind": "TP1",
+      "exit_kind": "TP2",
       "realized_pnl": "5",
       "realized_risk": "10"
     },
@@ -27,7 +27,7 @@
       "direction": "LONG",
       "entry_time_utc": "2026-01-05T08:00:00+00:00",
       "exit_time_utc": "2026-01-05T12:00:00+00:00",
-      "exit_kind": "TP1",
+      "exit_kind": "TP2",
       "realized_pnl": "10",
       "realized_risk": "10"
     },
@@ -35,7 +35,7 @@
       "trade_id": "T7",
       "symbol": "BTCUSDT",
       "direction": "LONG",
-      "entry_kind": "TOUCH_NO_FILL"
+      "entry_kind": "INVALIDATION_CANCEL"
     },
     {
       "trade_id": "T5",
@@ -77,7 +77,7 @@
       "strategy_version": "v2.1.0",
       "entry_time_utc": "2026-04-10T07:59:59+00:00",
       "exit_time_utc": "2026-04-10T09:00:00+00:00",
-      "exit_kind": "TP1",
+      "exit_kind": "TP2",
       "realized_pnl": "20",
       "realized_risk": "10",
       "regime": "BEARISH"
@@ -109,7 +109,7 @@
       "strategy_version": "v2.0.0",
       "entry_time_utc": "2026-03-31T16:00:00+00:00",
       "exit_time_utc": "2026-04-01T02:00:00+00:00",
-      "exit_kind": "TP1",
+      "exit_kind": "TP2",
       "realized_pnl": "5",
       "realized_risk": "10",
       "regime": "NEUTRAL",
@@ -120,7 +120,7 @@
       "symbol": "BTCUSDT",
       "direction": "LONG",
       "strategy_version": "v2.0.0",
-      "entry_kind": "TOUCH_NO_FILL"
+      "entry_kind": "INVALIDATION_CANCEL"
     },
     {
       "trade_id": "F6",
@@ -129,7 +129,7 @@
       "strategy_version": "v2.1.0",
       "entry_time_utc": "2026-04-15T15:59:59+00:00",
       "exit_time_utc": "2026-04-15T18:00:00+00:00",
-      "exit_kind": "TP1",
+      "exit_kind": "TP2",
       "realized_pnl": "15",
       "realized_risk": "10",
       "regime": "CHOP"
@@ -154,7 +154,7 @@
       "strategy_version": "v2.1.0",
       "entry_time_utc": "2026-04-05T23:59:59+00:00",
       "exit_time_utc": "2026-04-06T03:00:00+00:00",
-      "exit_kind": "TP1",
+      "exit_kind": "TP2",
       "realized_pnl": "10",
       "realized_risk": "10",
       "regime": "BULLISH",

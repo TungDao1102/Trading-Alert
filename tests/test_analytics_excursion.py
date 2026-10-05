@@ -183,14 +183,14 @@ def test_zero_risk_trade_excluded_from_r_but_counted() -> None:
 
 
 def _four_trade_outcomes() -> tuple[tuple[TradeOutcome, ...], dict[str, list[Candle]]]:
-    """LONG/SHORT x TP1/SL over the same candles; all share one exit instant."""
+    """LONG/SHORT x TP2/SL over the same candles; all share one exit instant."""
     long_data = load_input("complete_trade")
     short_data = load_input("short_trade")
     records = []
     for tag, base, exit_kind, pnl in (
-        ("A", long_data["trade"], "TP1", "8.00"),
+        ("A", long_data["trade"], "TP2", "8.00"),
         ("B", long_data["trade"], "SL", "-10.00"),
-        ("C", short_data["trade"], "TP1", "8.00"),
+        ("C", short_data["trade"], "TP2", "8.00"),
         ("D", short_data["trade"], "SL", "-10.00"),
     ):
         records.append(
