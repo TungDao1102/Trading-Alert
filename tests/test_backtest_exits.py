@@ -658,6 +658,52 @@ def test_a_window_that_ends_mid_bar_never_resolves_a_hole() -> None:
     assert resolved.exit_time_utc == BAR_12_CLOSE
 
 
+def test_a_hole_in_an_earlier_mid_bar_window_is_found_at_the_bar_close() -> None:
+    # WR-09: the 12:15-12:29 hole lies in a mid-bar window; the closing-bar window starts
+    # after it, but the hole scan covers the whole bar, so the hour still falls back.
+    holes = {at(12, m) for m in range(15, 30)}
+    source = long_fill_source(mark_holes=holes)
+    open_state, _ = walk_hours(long_state(), source, [flat_bar(10), flat_bar(11)])
+    start = flat_bar(11).close_time_utc
+    mid, _ = advance(
+        open_state,
+        source=source,
+        start_exclusive=start,
+        end_inclusive=close_of(at(12, 30)),
+        bar=None,
+    )
+    bar12 = strategy_bar(12, o="101.00", h="101.50", low="97.90", c="99.00")
+    resolved, _ = advance(
+        mid,
+        source=source,
+        start_exclusive=close_of(at(12, 30)),
+        end_inclusive=bar12.close_time_utc,
+        bar=bar12,
+    )
+    assert resolved.fallback_applied is True
+    assert (
+        resolved.coverage_note is not None and "2026-01-05T12:15:00+00:00" in resolved.coverage_note
+    )
+    assert resolved.exit_kind == "SL"
+    assert resolved.exit_time_utc == BAR_12_CLOSE
+
+
+def test_a_hole_on_the_fill_minute_is_flagged_and_resolved_by_the_fallback() -> None:
+    # WR-09: the fill minute (10:01) has no mark minute, so its stop check cannot run.
+    source = long_fill_source(mark_holes={at(10, 1)})
+    bar10 = strategy_bar(10, o="100.40", h="105.00", low="97.90", c="101.00")
+    state, _ = advance(
+        long_state(),
+        source=source,
+        start_exclusive=SIGNAL_CLOSE,
+        end_inclusive=bar10.close_time_utc,
+        bar=bar10,
+    )
+    assert state.fallback_applied is True
+    assert state.coverage_note is not None and "2026-01-05T10:01:00+00:00" in state.coverage_note
+    assert state.exit_kind == "SL"  # the bar range reaches the stop; only the stop is eligible
+
+
 def test_full_mark_coverage_never_uses_the_fallback_even_when_the_bar_range_is_wide() -> None:
     bar12 = strategy_bar(12, o="101.00", h="109.00", low="97.00", c="101.00")
     final, events = run_with_hole(bar12, holes=set())

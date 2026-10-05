@@ -303,25 +303,27 @@ def _close_resting(
 _MINUTE = timedelta(seconds=60)
 
 
-def _grid_ceil(value: datetime) -> datetime:
-    """Smallest whole-minute instant at or after `value`."""
-    floor = value.replace(second=0, microsecond=0)
-    return floor if floor == value else floor + _MINUTE
+def _grid_floor(value: datetime) -> datetime:
+    """Whole-minute instant at or before `value` (the open of the minute containing it)."""
+    return value.replace(second=0, microsecond=0)
 
 
 def _first_missing_mark_open(
-    state: PlanState, *, mark: tuple[Candle, ...], start: datetime, bar: Candle
+    state: PlanState, *, mark: tuple[Candle, ...], bar: Candle
 ) -> datetime | None:
     """Open time of the first mark minute absent from `bar` while the position is open.
 
-    The expected minutes run from the latest of the window start, the first whole minute
-    after the entry and the bar open, to the last minute of the bar. Only a window that
-    ends at the closing bar can name a hole: a mid-bar window never resolves anything (D-33).
+    `mark` holds every mark minute of the whole bar (not just the advanced window), and
+    the expected minutes run from the later of the bar open and the fill minute itself to
+    the last minute of the bar. A hole in an earlier mid-bar window of the same bar, or on
+    the fill minute, is therefore found when the closing-bar window arrives (WR-09). Only
+    a window that ends at the closing bar can name a hole: a mid-bar window never resolves
+    anything (D-33).
     """
     entry_time = state.entry_time_utc
     if entry_time is None:
         return None
-    first = max(_grid_ceil(start), _grid_ceil(entry_time), bar.open_time_utc)
+    first = max(_grid_floor(entry_time), bar.open_time_utc)
     last = (bar.close_time_utc - timedelta(milliseconds=1)).replace(second=0, microsecond=0)
     present = {minute.open_time_utc for minute in mark}
     expected = first
@@ -430,7 +432,11 @@ def advance(
         first_missing = (
             None
             if bar is None
-            else _first_missing_mark_open(current, mark=mark, start=start, bar=bar)
+            else _first_missing_mark_open(
+                current,
+                mark=tuple(source.mark_minutes(state.symbol, bar.open_time_utc, end_inclusive)),
+                bar=bar,
+            )
         )
         for mark_minute in mark:
             if mark_minute.open_time_utc < current.entry_time_utc:
