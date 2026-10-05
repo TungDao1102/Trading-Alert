@@ -30,7 +30,7 @@ from src.analytics.family import (
 from src.analytics.gates import FamilyGateFacts
 from src.analytics.killgate import ResetRecord
 from src.analytics.types import OutcomeContext
-from src.backtest.experiment import ExperimentRecord, _trade_from_dict
+from src.backtest.experiment import ExperimentRecord, RecordedGap, _trade_from_dict
 from src.backtest.simulator import TradeRecord
 from src.domain.registry import REGISTRY_ROOT, load_parameter_set
 from src.paper.attribution import AttributionKind
@@ -62,7 +62,7 @@ _PROTOCOL_RELATIVE = Path("docs") / "research" / "RESEARCH_PROTOCOL.md"
 _SLOT_HEADING = re.compile(r"^## ([1-7])\.", re.MULTILINE)
 _CANDIDATE_RUN_TYPE = "CANDIDATE"
 
-EVIDENCE_SCHEMA = "analytics-evidence/1"
+EVIDENCE_SCHEMA = "analytics-evidence/2"
 DECISIONS_SCHEMA = "kill-gate-decisions/1"
 _SYMBOL = re.compile(r"[A-Z0-9]{5,20}")
 _TRADE_DECIMAL_FIELDS = (
@@ -77,8 +77,57 @@ _TRADE_DECIMAL_FIELDS = (
     "funding_amount",
     "slippage_amount",
     "modeled_costs_per_unit",
+    "planned_quantity",
+    "tp1_quantity",
+    "tp1_price",
 )
-_TRADE_DATETIME_FIELDS = ("entry_time_utc", "exit_time_utc")
+_TRADE_DATETIME_FIELDS = (
+    "entry_time_utc",
+    "exit_time_utc",
+    "signal_close_utc",
+    "tp1_time_utc",
+    "resolved_at_utc",
+)
+# The `experiment` object of an `analytics-evidence/2` file: a closed key set. The plain
+# identity fields come first, then the typed fields of plan 14-15 (D-22).
+_EXPERIMENT_PLAIN_KEYS = (
+    "experiment_id",
+    "strategy_version",
+    "parameter_set_id",
+    "parameter_set_hash",
+    "data_snapshot_id",
+    "code_version",
+    "cost_model_hash",
+    "universe_hash",
+    "run_type",
+    "result_summary_json",
+    "notes",
+    "intrabar_tie_break",
+    "timeframe",
+    "context_timeframe",
+    "simulator_semantics_version",
+    "code_commit",
+    "code_dirty",
+    "fallback_count",
+    "end_of_data_count",
+    "strategy_window_bars",
+    "context_window_bars",
+    "split_role",
+)
+_EXPERIMENT_DATETIME_KEYS = (
+    "time_range_start_utc",
+    "time_range_end_utc",
+    "split_start_utc",
+    "split_end_utc",
+)
+_EXPERIMENT_MAPPING_KEYS = ("no_trade_counts", "parameter_values", "cost_values")
+_EXPERIMENT_KEYS = (
+    *_EXPERIMENT_PLAIN_KEYS,
+    *_EXPERIMENT_DATETIME_KEYS,
+    *_EXPERIMENT_MAPPING_KEYS,
+    "allowed_gaps",
+)
+_GAP_KEYS = ("series", "symbol", "start_utc", "end_utc")
 _PAPER_DATETIME_FIELDS = (
     "signal_detected_at_utc",
     "approval_acted_at_utc",
@@ -324,7 +373,7 @@ def scan_family_facts(
 
 
 # --------------------------------------------------------------------------- #
-# Evidence file (schema analytics-evidence/1)
+# Evidence file (schema analytics-evidence/2)
 # --------------------------------------------------------------------------- #
 
 
@@ -491,17 +540,76 @@ def _load_flags(raw: Any, where: str) -> ExperimentFlags:
     )
 
 
+def _mapping_pairs(
+    raw: Any, key: str, where: str, *, value_type: type
+) -> tuple[tuple[str, Any], ...]:
+    """A JSON object of `str -> value_type` as the sorted pair tuple the record stores."""
+    if not isinstance(raw, dict):
+        raise EvidenceFileError(f"{where}: {key!r} must be an object")
+    for name, value in raw.items():
+        if isinstance(value, bool) or not isinstance(value, value_type):
+            raise EvidenceFileError(f"{where}: {key!r} values must be {value_type.__name__}")
+        if name == "":
+            raise EvidenceFileError(f"{where}: {key!r} keys must be non-empty")
+    return tuple(sorted(raw.items()))
+
+
+def _load_gaps(raw: Any, where: str) -> tuple[RecordedGap, ...]:
+    if not isinstance(raw, list):
+        raise EvidenceFileError(f"{where}: 'allowed_gaps' must be a list")
+    gaps: list[RecordedGap] = []
+    for index, item in enumerate(raw):
+        label = f"{where}.allowed_gaps[{index}]"
+        if not isinstance(item, dict):
+            raise EvidenceFileError(f"{label}: must be an object")
+        for name in _GAP_KEYS:
+            _require_key(item, name, EvidenceFileError, label)
+        extra = sorted(set(item) - set(_GAP_KEYS))
+        if extra:
+            raise EvidenceFileError(f"{label}: unexpected key {extra[0]!r}")
+        try:
+            gaps.append(
+                RecordedGap(
+                    series=item["series"],
+                    symbol=item["symbol"],
+                    start_utc=_parse_utc(item["start_utc"], "start_utc", EvidenceFileError, label),
+                    end_utc=_parse_utc(item["end_utc"], "end_utc", EvidenceFileError, label),
+                )
+            )
+        except EvidenceFileError:
+            raise
+        except Exception as exc:  # IncompleteExperimentRecord: wrap, never echo values
+            raise EvidenceFileError(f"{label}: invalid gap ({type(exc).__name__})") from None
+    return tuple(sorted(gaps, key=RecordedGap.sort_key))
+
+
 def _load_experiment(raw: Any, where: str) -> ExperimentRecord:
+    """Build the typed `ExperimentRecord` of an `analytics-evidence/2` experiment object.
+
+    Every key of the closed set must be present and no other key may appear; mappings
+    become the sorted pair tuples the record stores, datetimes must be UTC-aware. The
+    record validates the rest in `__post_init__` (D-22), and any failure is re-raised as
+    `EvidenceFileError` without echoing values.
+    """
     if not isinstance(raw, dict):
         raise EvidenceFileError(f"{where}: 'experiment' must be an object")
-    fields = dict(raw)
-    for name in ("time_range_start_utc", "time_range_end_utc"):
-        fields[name] = _parse_utc(
-            _require_key(raw, name, EvidenceFileError, f"{where}.experiment"),
-            name,
-            EvidenceFileError,
-            f"{where}.experiment",
-        )
+    label = f"{where}.experiment"
+    for name in _EXPERIMENT_KEYS:
+        _require_key(raw, name, EvidenceFileError, label)
+    extra = sorted(set(raw) - set(_EXPERIMENT_KEYS))
+    if extra:
+        raise EvidenceFileError(f"{label}: unexpected key {extra[0]!r}")
+    fields: dict[str, Any] = {name: raw[name] for name in _EXPERIMENT_PLAIN_KEYS}
+    for name in _EXPERIMENT_DATETIME_KEYS:
+        fields[name] = _parse_utc(raw[name], name, EvidenceFileError, label)
+    fields["no_trade_counts"] = _mapping_pairs(
+        raw["no_trade_counts"], "no_trade_counts", label, value_type=int
+    )
+    fields["parameter_values"] = _mapping_pairs(
+        raw["parameter_values"], "parameter_values", label, value_type=str
+    )
+    fields["cost_values"] = _mapping_pairs(raw["cost_values"], "cost_values", label, value_type=str)
+    fields["allowed_gaps"] = _load_gaps(raw["allowed_gaps"], label)
     try:
         return ExperimentRecord(**fields)
     except Exception as exc:  # IncompleteExperimentRecord / TypeError / ValueError
@@ -543,7 +651,10 @@ def _load_paper_record(raw: Any, index: int) -> PaperRecord:
 
 
 def load_evidence_file(path: Path) -> EvidenceFile:
-    """Load an `analytics-evidence/1` file fail-closed into typed objects (T-10-30/31)."""
+    """Load an `analytics-evidence/2` file fail-closed into typed objects (T-10-30/31, T-14-29).
+
+    A file of any other schema (the void pre-Phase-14 `analytics-evidence/1`) is refused.
+    """
     doc = _read_json_object(path, EvidenceFileError, "evidence")
     if doc.get("schema") != EVIDENCE_SCHEMA:
         raise EvidenceFileError(f"schema must be {EVIDENCE_SCHEMA!r}")
