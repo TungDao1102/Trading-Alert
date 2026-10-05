@@ -214,6 +214,9 @@ def run_main(
         is_tty=lambda: is_tty,
         read_confirmation=confirmation,
         evidence_dir=tmp_path,
+        # The spine tests exercise the tracer path only (reads, evidence, gates); the full
+        # scenarios and their Telegram dependencies are covered in test_demo_rehearsal_flow.py.
+        scenario_runner=dr.run_tracer,
     )
     return code, used
 
