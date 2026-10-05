@@ -238,9 +238,19 @@ def test_real_triplet_passes(tmp_path: Path) -> None:
     assert "Freeze check passed" in result.stdout
 
 
-def test_real_decisions_without_d043_row_fails(tmp_path: Path) -> None:
+def _real_header_version(protocol: str) -> str:
+    """The real header version as ``vX.Y.Z``; read, never typed, so an amendment keeps pace."""
+    match = re.search(
+        r"^>\s*\*\*Protocol version:\*\*\s*(v\d+\.\d+\.\d+)\s*$", protocol, re.MULTILINE
+    )
+    assert match is not None
+    return match.group(1)
+
+
+def test_real_decisions_without_header_version_row_fails(tmp_path: Path) -> None:
     protocol, decisions, doc_status = _real()
-    kept = [ln for ln in decisions.splitlines() if not ln.startswith("| D043 |")]
+    version = _real_header_version(protocol)
+    kept = [ln for ln in decisions.splitlines() if f"protocol {version} frozen" not in ln]
     assert len(kept) == len(decisions.splitlines()) - 1
     result = _run(tmp_path, protocol, "\n".join(kept) + "\n", doc_status)
     _assert_fails(result, "DECISIONS")
@@ -250,9 +260,10 @@ def test_real_doc_status_reverted_to_old_version_fails(tmp_path: Path) -> None:
     protocol, decisions, doc_status = _real()
     out: list[str] = []
     changed = 0
+    version = _real_header_version(protocol)
     for ln in doc_status.splitlines():
         if ln.startswith("- `research/RESEARCH_PROTOCOL.md`"):
-            ln = ln.replace("v1.1.0", "v1.0.1")
+            ln = ln.replace(version, "v0.0.1")
             changed += 1
         out.append(ln)
     assert changed == 1

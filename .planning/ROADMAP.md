@@ -575,7 +575,7 @@ Plans:
 
 **Success Criteria**:
 1. The entry fills only after the signal bar, and only on a trade-through of the limit price by at least one tick (F-120/F-901, F-902). The invariants `entry_time > signal_close` and `exit_time ≥ entry_time` are asserted on every trade (F-804).
-2. Positions are held across bars until SL, TP or expiry. The TP1/TP2 ladder matches live (F-102). SL/TP triggers are evaluated on mark-price klines (D037).
+2. Positions are held across bars until SL, TP2 or data end. The TP1/TP2 ladder matches live (F-102). SL/TP triggers are evaluated on mark-price klines (D037).
 3. Funding is modeled with a documented sign convention (F-905, F-021). Constraints are point-in-time. Portfolio, daily-loss and equity state evolve through the run (F-305).
 4. The R denominator is identical for backtest and live (F-204). The regime slice is emitted (F-123). ExperimentRecord carries the protocol-mandatory fields (F-118).
 5. Every golden case has a hand-derived expected output that is not produced by the code under test. The fixture generator no longer places 1m data inside the signal bar (F-602, F-805, F-608).

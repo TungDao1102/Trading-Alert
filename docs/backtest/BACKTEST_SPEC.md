@@ -63,7 +63,7 @@ Final holdout / forward test
 
 The final holdout must not be used to choose parameters.
 
-Fixed proportions (40% Development, 40% Validation as four consecutive walk-forward test folds, last 20% final holdout, single-use) are pre-registered in `docs/research/RESEARCH_PROTOCOL.md` v1.1.0 §1 and §4 per D032 and D043.
+Fixed proportions (40% Development, 40% Validation as four consecutive walk-forward test folds, last 20% final holdout, single-use) are pre-registered in `docs/research/RESEARCH_PROTOCOL.md` v2.0.0 §1 and §4 per D032 and D043.
 
 ## 8. Walk-forward
 
@@ -152,7 +152,7 @@ A strategy may proceed only when:
 9. no critical conclusion depends on a single symbol, quarter, or isolated parameter point;
 10. candidate has been compared against declared baselines.
 
-The numerical acceptance thresholds (trade floor, expectancy bound, multiple-testing correction, drawdown ceiling, single-use holdout) are pre-registered in `docs/research/RESEARCH_PROTOCOL.md` v1.1.0 §4 per D032 and D043.
+The numerical acceptance thresholds (trade floor, expectancy bound, multiple-testing correction, drawdown ceiling, single-use holdout) are pre-registered in `docs/research/RESEARCH_PROTOCOL.md` v2.0.0 §4 per D032 and D043.
 
 
 ## 13. Research implementation

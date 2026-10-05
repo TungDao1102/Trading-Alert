@@ -1,4 +1,4 @@
-"""Protocol v1.1.0 gate module (Phase 11, plan 11-01; D032, D043).
+"""Protocol gate module (Phase 11, plan 11-01; D032, D043; amended to v2.0.0 by D052).
 
 Executable checks that keep the frozen research protocol, the DECISIONS row, the
 DOC_STATUS index, the holdout consumed marker and the BACKTEST_SPEC pointers
@@ -303,12 +303,19 @@ def check_quantization_order(protocol: str) -> list[str]:
     return []
 
 
-def check_backtest_spec(text: str) -> list[str]:
-    """PR-08: BACKTEST_SPEC points at protocol v1.1.0 and no longer defers the thresholds."""
+def check_backtest_spec(text: str, protocol: str | None = None) -> list[str]:
+    """PR-08: BACKTEST_SPEC points at the header protocol version and does not defer thresholds.
+
+    The pointer version is read from the protocol header (``protocol`` text, default: the real
+    file), never typed here, so an amendment cannot leave a stale literal behind (D-28).
+    """
     norm = _norm(text)
     problems: list[str] = []
-    if "RESEARCH_PROTOCOL.md" not in norm or "v1.1.0" not in norm:
-        problems.append("BACKTEST_SPEC does not point to protocol v1.1.0")
+    version = _header_version(_read(PROTOCOL_PATH) if protocol is None else protocol)
+    if version is None:
+        problems.append("protocol header carries no Protocol version vX.Y.Z")
+    elif "RESEARCH_PROTOCOL.md" not in norm or f"v{version}" not in norm:
+        problems.append(f"BACKTEST_SPEC does not point to protocol v{version}")
     if re.search(r"thresholds\s+remain\s+TBD", norm):
         problems.append("BACKTEST_SPEC still defers numeric thresholds")
     if UNIVERSE_MANIFEST not in norm or "D039" not in norm:
@@ -351,7 +358,7 @@ def run() -> list[tuple[str, bool, str]]:
     except (OSError, ValueError) as exc:
         holdout_problems = [f"holdout marker unreadable: {exc}"]
     try:
-        spec_problems = check_backtest_spec(_read(BACKTEST_SPEC_PATH))
+        spec_problems = check_backtest_spec(_read(BACKTEST_SPEC_PATH), protocol)
     except OSError as exc:
         spec_problems = [f"BACKTEST_SPEC unreadable: {exc}"]
     return [

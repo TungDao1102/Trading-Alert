@@ -383,6 +383,7 @@ DECISIONS_PATH = REPO_ROOT / "docs" / "DECISIONS.md"
 DOC_STATUS_PATH = REPO_ROOT / "docs" / "DOC_STATUS.md"
 DATA_MODEL_PATH = REPO_ROOT / "docs" / "data" / "DATA_MODEL.md"
 SEC_OPS_PATH = REPO_ROOT / "docs" / "operations" / "SECURITY_AND_OPERATIONS.md"
+PROTOCOL_PATH = REPO_ROOT / "docs" / "research" / "RESEARCH_PROTOCOL.md"
 
 # Decisions must run contiguously from D001 to at least this ID; later decisions append.
 MIN_LAST_DECISION = 48
@@ -430,8 +431,18 @@ def _decision_row(decisions: str, decision_id: str) -> str:
     return match.group(0) if match else ""
 
 
-def check_decisions(decisions: str, doc_status: str, data_model: str, sec_ops: str) -> list[Gate]:
-    """Gates DC-01..DC-06 over DECISIONS, DOC_STATUS, DATA_MODEL and SECURITY_AND_OPERATIONS."""
+def check_decisions(
+    decisions: str,
+    doc_status: str,
+    data_model: str,
+    sec_ops: str,
+    protocol: str | None = None,
+) -> list[Gate]:
+    """Gates DC-01..DC-06 over DECISIONS, DOC_STATUS, DATA_MODEL and SECURITY_AND_OPERATIONS.
+
+    ``protocol`` is the research protocol text (default: the real file); DC-03 reads the header
+    version from it so the freeze-row witness is never a typed literal (D-28).
+    """
     text = _norm(decisions)
     lines = text.split("\n")
     gates: list[Gate] = []
@@ -466,9 +477,23 @@ def check_decisions(decisions: str, doc_status: str, data_model: str, sec_ops: s
         )
     )
 
-    # DC-03 the D043 witness row.
-    ok03 = "protocol v1.1.0 frozen" in _decision_row(decisions, "D043")
-    gates.append(("DC-03", ok03, "ok" if ok03 else "D043 lacks 'protocol v1.1.0 frozen'"))
+    # DC-03 the historic D043 witness row and the row for the current header version.
+    protocol_text = _read(PROTOCOL_PATH) if protocol is None else protocol
+    version = re.search(
+        r"^>\s*\*\*Protocol version:\*\*\s*(v\d+\.\d+\.\d+)\s*$", protocol_text, re.MULTILINE
+    )
+    problems03: list[str] = []
+    if "protocol v1.1.0 frozen" not in _decision_row(decisions, "D043"):
+        problems03.append("D043 lacks 'protocol v1.1.0 frozen'")
+    if version is None:
+        problems03.append("protocol header carries no Protocol version vX.Y.Z")
+    elif not re.search(
+        rf"^\| D\d{{3}} \|[^\n]*protocol {re.escape(version.group(1))} frozen",
+        text,
+        flags=re.MULTILINE,
+    ):
+        problems03.append(f"DECISIONS has no row with 'protocol {version.group(1)} frozen'")
+    gates.append(("DC-03", not problems03, "; ".join(problems03) or "ok"))
 
     # DC-04 D044 and D045 content.
     d044 = _decision_row(decisions, "D044")

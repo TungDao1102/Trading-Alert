@@ -1,10 +1,10 @@
 # Research Protocol (Frozen)
 
-> **Protocol version:** v1.1.0
+> **Protocol version:** v2.0.0
 > **Status:** FROZEN
 > **Frozen on:** 2026-09-19
-> **Amended on:** 2026-09-30
-> **Supersedes:** v1.0.1
+> **Amended on:** 2026-10-05
+> **Supersedes:** v1.1.0
 
 ## §0 Identity, status, and one-way flow
 
@@ -25,6 +25,10 @@ A semantic change to the protocol triggers a new strategy-version lineage downst
 ### Migration (v1.0.1 to v1.1.0)
 
 This is a semantic amendment (dataset splits, cost and execution assumptions, acceptance gates) per D032 and D043. The v1.0.1 text is unchanged in git history at commit `a68e97736e65b563c7ddbb8bf746d4225ad31f36` and is superseded, not edited. What changes: numeric acceptance thresholds, split proportions, the variant budget and multiple-testing correction, a single-use holdout with a consumed marker, no human pass override, the entry fee at the taker rate (D036), mark-price protective triggers (D037), `partial_fill_fraction` 1.0 as the canonical value (D038), the point-in-time research universe (D039), and one canonical quantization order. What does not change: the D030 kill-gate firing rule, the `Frozen on` clock start (2026-09-19, so the D013 six-month clock is not restarted), and the identity tuple in §5. Downstream strategy-version lineages restart per `docs/strategy/TRADING_STRATEGY_SPEC.md` §12. The full pre-registration body follows in §1–§4.
+
+### Migration (v1.1.0 to v2.0.0)
+
+This is a semantic amendment (execution simulation) per D032, D043 and D052. The v1.1.0 text is unchanged in git history at commit `7a80af52146d7a8112cab3536143c179050a02d2` and is superseded, not edited. What changes: the backtest simulator is rebuilt as a cross-bar event loop. A plan created at the close of strategy bar N is active from bar N+1 and the signal bar is never examined for a fill; a limit fills only on a trade-price 1m trade-through of one tick; SL and TP trigger on mark-price 1m klines (D037); the exit policy is the live TP1/TP2 ladder (TP1 is a reduce-only partial of half the filled quantity, TP2 closes the remainder, the stop is unchanged after TP1); funding is modeled at every actual `fundingTime`; constraints are point-in-time; a simulated ledger carries equity, positions, resting entries and the daily loss; one R denominator is shared with live; `simulator_semantics_version` 2.0.0 joins the experiment identity. **All earlier backtest evidence is void** (D052): the v1 simulator examined the signal bar, filled at a touch, booked a single-exit TP1 and ignored funding and the ledger. What does not change: every pre-registered threshold, the split proportions, the variant budget and multiple-testing correction, the single-use holdout rule, the D030 kill-gate firing rule, the identity tuple in §5 and the `Frozen on` clock start (2026-09-19, so the D013 six-month clock is not restarted). Downstream strategy-version lineages restart per `docs/strategy/TRADING_STRATEGY_SPEC.md` §12: the evidence-bearing strategy sets are the new versioned sets created in Phase 15, not the sets that existed before this amendment.
 
 **Numeric-gate status (v1.1.0).** The acceptance thresholds, split proportions, variant budget, multiple-testing correction and holdout rule are pre-registered numerically in §1 and §4 per D032 and D043, before any Validation run. Strategy parameters (ATR multipliers, RR minima, expiry hours) stay versioned parameter-set values owned by the family sheets and the registry (§5). A pre-registered value changes only by a new protocol version (v1.2.0) and a new candidate lineage, never after a result is seen.
 
@@ -398,3 +402,4 @@ Until all three land, the doc is `DRAFT` in effect, regardless of what the heade
 
 - **v1.0.1 — 2026-09-29 — D030 (clarification).** Wording-only correction of the "Kill gate D013" firing rule to conform to D013 (fires only when at least three independently specified families were tested AND at least six calendar months elapsed since the freeze AND none holds a recorded passing decision); the earlier disjunctive shortfall list contradicted D013 and is removed. No dataset split, cost model, execution assumption, acceptance gate, threshold or numeric value changed. `Status`, `Frozen on` and `Supersedes` are unchanged.
 - **v1.1.0 — 2026-09-30 — D043 (semantic).** Implements D032. Pre-registers numeric acceptance thresholds (G1-G5: trade floor, expectancy with bootstrap bound, Holm-Bonferroni correction over N = 25 variants per family, drawdown ceiling, single-use holdout), fixes the 40/40/20 split with four walk-forward Validation folds, adds the append-only `docs/research/holdout_consumed.json` marker, removes any human pass override, and aligns costs and execution to D036 (taker entry fee), D037 (mark-price protective triggers), D038 (`partial_fill_fraction` 1.0) and D039 (point-in-time research universe) with one canonical quantization order. The research-gate freeze step is now version-bound to the header. `Frozen on` is unchanged (the D013 clock is not restarted); `Amended on` and `Supersedes: v1.0.1` are added. The D030 kill-gate firing rule is untouched.
+- **v2.0.0 - 2026-10-05 - D052 (semantic).** Execution simulation rebuilt for causality (Phase 14): a plan is active from bar N+1, fills need a one-tick trade-price trade-through at the live limit, SL and TP trigger on mark-price minutes, the TP1/TP2 ladder mirrors live, funding is charged at actual `fundingTime` instants, constraints are point-in-time, a simulated ledger and one R denominator are used, and `simulator_semantics_version` 2.0.0 joins the experiment identity. All earlier backtest evidence is void. Thresholds, splits, the D030 firing rule and the identity tuple are unchanged. `Frozen on` is unchanged (the D013 clock is not restarted); `Amended on` is 2026-10-05 and `Supersedes: v1.1.0`. The version pins in the gate code and tests are read from this header from now on.
