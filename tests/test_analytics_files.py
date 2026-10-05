@@ -391,6 +391,35 @@ def test_evidence_sample_loads_into_typed_objects() -> None:
     assert evidence.research_universe == ("BTCUSDT", "ETHUSDT")
 
 
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (lambda t, e, d: t[0].update(strategy_version="v9.9.9"), "strategy_version"),
+        (lambda t, e, d: t[0].update(parameter_set_hash="b" * 64), "parameter_set_hash"),
+        (
+            lambda t, e, d: t[0].update(exit_time_utc="2026-04-01T00:00:00+00:00"),
+            "time range",
+        ),
+        (lambda t, e, d: e.update(fallback_count=1), "fallback"),
+        (lambda t, e, d: e.update(end_of_data_count=1), "END_OF_DATA"),
+        (
+            lambda t, e, d: e.update(result_summary_json=json.dumps({"trades_digest": "c" * 64})),
+            "trades_digest",
+        ),
+        (lambda t, e, d: d.update(research_universe=["ETHUSDT"]), "research universe"),
+    ],
+)
+def test_evidence_trades_that_do_not_belong_to_the_experiment_are_refused(
+    tmp_path: Path, mutate: Any, match: str
+) -> None:
+    def apply(doc: dict[str, Any]) -> None:
+        entry = doc["backtest"][0]
+        mutate(entry["trades"], entry["experiment"], doc)
+
+    with pytest.raises(EvidenceFileError, match=match):
+        load_evidence_file(_evidence_with(tmp_path, apply))
+
+
 def test_evidence_sample_universe_hash_matches_the_sorted_universe() -> None:
     evidence = load_evidence_file(EVIDENCE_SAMPLE)
     expected = sha256_hex({"universe": sorted(evidence.research_universe)})
@@ -562,6 +591,8 @@ def test_a_record_serialized_with_to_dict_loads_back_equal(tmp_path: Path) -> No
         code_commit="a" * 40,
         code_version="a" * 40,
         split_role="VALIDATION",
+        fallback_count=0,
+        end_of_data_count=0,
     )
 
     def mutate(doc: dict[str, Any]) -> None:

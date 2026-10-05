@@ -1004,6 +1004,20 @@ def reproduce(
 # --------------------------------------------------------------------------- #
 
 
+def trades_digest(trades: Sequence[Any]) -> str:
+    """The digest `verify_experiment` compares: SHA256 over the trades in the given order.
+
+    Engine order is `(signal_close_utc or data start, symbol, trade_id)`; a caller holding
+    the trades in another order sorts them that way before digesting.
+    """
+    return sha256_hex({"trades": [t.to_dict() for t in trades]})
+
+
+def stored_trades_digest(record: ExperimentRecord) -> str | None:
+    """The persisted `trades_digest` of `record`, or None when it carries none."""
+    return _stored_trades_digest(record)
+
+
 def _stored_trades_digest(record: ExperimentRecord) -> str | None:
     """Return the persisted trades digest, if the record carries one.
 
@@ -1037,14 +1051,14 @@ def verify_experiment(
     (determinism).
     """
     trades_a = reproduce(record, simulator_inputs=simulator_inputs)
-    digest_a = sha256_hex({"trades": [t.to_dict() for t in trades_a]})
+    digest_a = trades_digest(trades_a)
     stored = _stored_trades_digest(record)
     if stored is not None and digest_a != stored:
         raise ExperimentReproducibilityBroken(
             f"reproduce digest {digest_a} != recorded trades_digest {stored}"
         )
     trades_b = reproduce(record, simulator_inputs=simulator_inputs)
-    digest_b = sha256_hex({"trades": [t.to_dict() for t in trades_b]})
+    digest_b = trades_digest(trades_b)
     if digest_a != digest_b:
         raise ExperimentReproducibilityBroken(f"reproduce digests differ: {digest_a} != {digest_b}")
     return None
@@ -1143,5 +1157,7 @@ __all__ = [
     "cost_value_pairs",
     "parameter_value_pairs",
     "reproduce",
+    "stored_trades_digest",
+    "trades_digest",
     "verify_experiment",
 ]

@@ -30,7 +30,13 @@ from src.analytics.family import (
 from src.analytics.gates import FamilyGateFacts
 from src.analytics.killgate import ResetRecord
 from src.analytics.types import OutcomeContext
-from src.backtest.experiment import ExperimentRecord, RecordedGap, _trade_from_dict
+from src.backtest.experiment import (
+    ExperimentRecord,
+    RecordedGap,
+    _trade_from_dict,
+    stored_trades_digest,
+    trades_digest,
+)
 from src.backtest.simulator import TradeRecord
 from src.domain.registry import REGISTRY_ROOT, load_parameter_set
 from src.paper.attribution import AttributionKind
@@ -618,14 +624,57 @@ def _load_experiment(raw: Any, where: str) -> ExperimentRecord:
         ) from None
 
 
+def _check_trades_belong_to_experiment(
+    experiment: ExperimentRecord, trades: tuple[TradeRecord, ...], where: str
+) -> None:
+    """Refuse trades that are not the output of the experiment they are filed under (WR-02).
+
+    Trades from another run could otherwise be paired with a candidate experiment and feed
+    the kill gate: every trade must carry the experiment's strategy version and parameter
+    set hash, sit inside its time range, and agree with its typed fallback / END_OF_DATA
+    counts and (when stored) its `trades_digest`.
+    """
+    start = experiment.time_range_start_utc
+    end = experiment.time_range_end_utc
+    for trade in trades:
+        label = f"{where}.trades[{trade.trade_id!r}]"
+        if trade.strategy_version != experiment.strategy_version:
+            raise EvidenceFileError(f"{label}: strategy_version is not the experiment's")
+        if trade.parameter_set_hash != experiment.parameter_set_hash:
+            raise EvidenceFileError(f"{label}: parameter_set_hash is not the experiment's")
+        for name in ("signal_close_utc", "entry_time_utc", "exit_time_utc"):
+            moment = getattr(trade, name)
+            if moment is not None and not start <= moment <= end:
+                raise EvidenceFileError(f"{label}: {name!r} lies outside the experiment time range")
+    fallback = sum(trade.fallback_applied for trade in trades)
+    if fallback != experiment.fallback_count:
+        raise EvidenceFileError(
+            f"{where}: {fallback} fallback trades but the experiment records "
+            f"{experiment.fallback_count}"
+        )
+    end_of_data = sum(trade.exit_kind == "END_OF_DATA" for trade in trades)
+    if end_of_data != experiment.end_of_data_count:
+        raise EvidenceFileError(
+            f"{where}: {end_of_data} END_OF_DATA trades but the experiment records "
+            f"{experiment.end_of_data_count}"
+        )
+    stored = stored_trades_digest(experiment)
+    if stored is not None:
+        ordered = sorted(trades, key=lambda t: (t.signal_close_utc or start, t.symbol, t.trade_id))
+        if trades_digest(ordered) != stored:
+            raise EvidenceFileError(f"{where}: trades do not match the experiment trades_digest")
+
+
 def _load_backtest_entry(raw: Any, index: int) -> BacktestEvidence:
     where = f"backtest[{index}]"
     if not isinstance(raw, dict):
         raise EvidenceFileError(f"{where}: must be an object")
     experiment = _load_experiment(_require_key(raw, "experiment", EvidenceFileError, where), where)
+    trades = _load_trades(_require_key(raw, "trades", EvidenceFileError, where), where)
+    _check_trades_belong_to_experiment(experiment, trades, where)
     return BacktestEvidence(
         experiment=experiment,
-        trades=_load_trades(_require_key(raw, "trades", EvidenceFileError, where), where),
+        trades=trades,
         contexts=_load_contexts(_require_key(raw, "contexts", EvidenceFileError, where), where),
         flags=_load_flags(_require_key(raw, "flags", EvidenceFileError, where), where),
     )
@@ -666,10 +715,19 @@ def load_evidence_file(path: Path) -> EvidenceFile:
         raise EvidenceFileError("evidence: 'backtest' must be a list")
     if not isinstance(raw_paper, list):
         raise EvidenceFileError("evidence: 'paper' must be a list")
+    research_universe = _parse_symbols(raw_universe, where)
+    backtest = tuple(_load_backtest_entry(raw, i) for i, raw in enumerate(raw_backtest))
+    for index, entry in enumerate(backtest):
+        for trade in entry.trades:
+            if trade.symbol not in research_universe:
+                raise EvidenceFileError(
+                    f"backtest[{index}].trades[{trade.trade_id!r}]: symbol is outside the "
+                    "research universe"
+                )
     return EvidenceFile(
-        backtest=tuple(_load_backtest_entry(raw, i) for i, raw in enumerate(raw_backtest)),
+        backtest=backtest,
         paper=tuple(_load_paper_record(raw, i) for i, raw in enumerate(raw_paper)),
-        research_universe=_parse_symbols(raw_universe, where),
+        research_universe=research_universe,
     )
 
 
