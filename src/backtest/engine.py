@@ -311,17 +311,29 @@ class _Engine:
             key=lambda r: (r.signal_close_utc or self.data_start, r.symbol, r.trade_id),
         )
         used = sorted(set(self.used_gaps), key=lambda g: (g.symbol, g.start_utc, g.end_utc))
+        # Funding gaps are recorded when they covered a hole; every acknowledged gap of any
+        # other series is recorded too, so a run over data with missing bars or minutes never
+        # reads as gap-free (WR-05).
+        gap_rows: list[tuple[str, str, datetime, datetime]] = [
+            (g.symbol, FUNDING_SERIES, g.start_utc, g.end_utc) for g in used
+        ]
+        gap_rows.extend(
+            (g.symbol, g.series, g.start_utc, g.end_utc)
+            for g in self.parsed.allowed_gaps
+            if g.series != FUNDING_SERIES
+        )
+        gap_rows = sorted(set(gap_rows), key=lambda row: (row[0], row[2], row[3], row[1]))
         scripted = self.parsed.scripted_plans is not None
         records = self.records
         summary: dict[str, Any] = {
             "allowed_gaps_used": [
                 {
-                    "series": FUNDING_SERIES,
-                    "symbol": gap.symbol,
-                    "start_utc": gap.start_utc.isoformat(),
-                    "end_utc": gap.end_utc.isoformat(),
+                    "series": series,
+                    "symbol": symbol,
+                    "start_utc": start.isoformat(),
+                    "end_utc": end.isoformat(),
                 }
-                for gap in used
+                for symbol, series, start, end in gap_rows
             ],
             "constraints_extrapolated_count": sum(r.constraints_extrapolated for r in records),
             "context_timeframe": _CONTEXT_TIMEFRAME,

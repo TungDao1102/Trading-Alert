@@ -260,6 +260,34 @@ def test_allowed_gaps_used_is_echoed_with_the_gap_that_covered_the_hole() -> Non
     ]
 
 
+def test_acknowledged_gaps_of_other_series_are_recorded_in_the_summary() -> None:
+    # WR-05: a run over data with an acknowledged missing 1m trade minute must not read as
+    # gap-free; the acknowledged gap is recorded next to the funding gaps that were used.
+    gap = {
+        "series": "trade",
+        "symbol": SYMBOL,
+        "start_utc": at(10, 30).isoformat(),
+        "end_utc": at(10, 30).isoformat(),
+        "missing": 1,
+    }
+    case = make_case(
+        scripted=[scripted_plan(SYMBOL, SIGNAL_CLOSE, "sig-1")],
+        trade_minutes=[go_through(SYMBOL, at(10, 1))],
+        mark_minutes=flat_minutes(SYMBOL, at(10, 0), 120, "100.00", kind="mark"),
+        allowed_gaps=[gap],
+    )
+    output = simulate(case, risk_fn=fixed_risk_fn("0.5", "1.50"))
+
+    assert output["run_summary"]["allowed_gaps_used"] == [
+        {
+            "series": "trade",
+            "symbol": SYMBOL,
+            "start_utc": gap["start_utc"],
+            "end_utc": gap["end_utc"],
+        }
+    ]
+
+
 def test_the_summary_is_json_native_sorted_and_carries_no_parameters() -> None:
     output = simulate(counters_case(), risk_fn=fixed_risk_fn("0.5", "1.50"))
     summary = output["run_summary"]

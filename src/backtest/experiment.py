@@ -44,7 +44,6 @@ from src.domain.canonical import canonical_decimal_text, sha256_hex
 from src.domain.registry import load_parameter_set
 
 from .binding import assert_cost_model_binds_registry
-from .case import FUNDING_SERIES
 from .costs import COST_KEYS, OPTIONAL_COST_KEYS, CostModel, build_cost_model
 from .semantics import (
     FUNDING_CONVENTION,
@@ -183,13 +182,18 @@ class CodeVersion:
 
 
 # --------------------------------------------------------------------------- #
-# RecordedGap — an allowed gap a run actually used (BACKTEST_SPEC §11, D-36).
+# RecordedGap — an acknowledged data gap the run carried (BACKTEST_SPEC §11, D-36).
 # --------------------------------------------------------------------------- #
 
 
 @dataclass(frozen=True)
 class RecordedGap:
-    """One allowed funding gap that covered a hole during the run."""
+    """One acknowledged data gap of a run (WR-05).
+
+    A funding gap is recorded when it covered a hole during the run; a gap of any other
+    series (bars, 1m trade or mark minutes, open interest) is recorded whenever the case
+    acknowledged it, because the run then simulated over data that is missing those rows.
+    """
 
     series: str
     symbol: str
@@ -197,18 +201,15 @@ class RecordedGap:
     end_utc: datetime
 
     def __post_init__(self) -> None:
-        if self.series != FUNDING_SERIES:
-            raise IncompleteExperimentRecord(
-                f"allowed_gaps series must be {FUNDING_SERIES!r}, got {self.series!r}"
-            )
+        _require_text(self.series, "allowed_gaps series")
         _require_text(self.symbol, "allowed_gaps symbol")
         _incomplete_if_not_utc(self.start_utc, "allowed_gaps start_utc")
         _incomplete_if_not_utc(self.end_utc, "allowed_gaps end_utc")
-        if not self.end_utc > self.start_utc:
-            raise IncompleteExperimentRecord("allowed_gaps end_utc must be > start_utc")
+        if self.end_utc < self.start_utc:
+            raise IncompleteExperimentRecord("allowed_gaps end_utc must be >= start_utc")
 
-    def sort_key(self) -> tuple[str, datetime, datetime]:
-        return (self.symbol, self.start_utc, self.end_utc)
+    def sort_key(self) -> tuple[str, datetime, datetime, str]:
+        return (self.symbol, self.start_utc, self.end_utc, self.series)
 
     def to_dict(self) -> dict[str, str]:
         return {

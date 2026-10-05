@@ -859,6 +859,27 @@ def test_allowed_gaps_used_become_sorted_typed_gaps() -> None:
     assert all(g.series == "funding" for g in record.allowed_gaps)
 
 
+def test_acknowledged_gaps_of_other_series_become_typed_gaps() -> None:
+    summary = strategy_run_summary(
+        allowed_gaps_used=[
+            {
+                "series": "trade",
+                "symbol": "BTCUSDT",
+                "start_utc": "2026-01-02T10:30:00+00:00",
+                "end_utc": "2026-01-02T10:30:00+00:00",
+            },
+            {
+                "series": "funding",
+                "symbol": "BTCUSDT",
+                "start_utc": "2026-01-02T10:30:00+00:00",
+                "end_utc": "2026-01-02T16:00:00+00:00",
+            },
+        ]
+    )
+    record = _assemble(run_summary=summary)
+    assert [g.series for g in record.allowed_gaps] == ["trade", "funding"]
+
+
 def test_the_record_has_no_free_form_parameters_field() -> None:
     from src.backtest.experiment import ExperimentRecord
 
