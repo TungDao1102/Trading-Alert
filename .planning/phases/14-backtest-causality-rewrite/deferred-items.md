@@ -24,3 +24,11 @@
 - **Resolved: `experiment._trade_from_dict` left the v2 trailing fields as strings (from 14-12).** It now rebuilds `signal_close_utc`, `planned_quantity`, `tp1_*` and `resolved_at_utc` as typed values, checks counters and flags strictly, and calls `validate_trade_record`.
 - **Still open: `modeled_costs_per_unit` is `None` on v2 filled records** (14-12 item). Plan 14-15 does not read the field and did not restore it; decide in 14-16 or later.
 - **Not covered by any Phase 14 plan: experiments over a `SCRIPTED` run are refused by `assemble` and `reproduce`.** That is deliberate (a scripted fixture is never evidence); a later plan that wants scripted records for tests must build `ExperimentRecord` through the shared factory, not `assemble`.
+
+## From plan 14-16
+
+- **Still open, now recorded in D052: `modeled_costs_per_unit` is `None` on v2 filled records** (14-12 item, restated in 14-15). Plan 14-16 does not read or restore it (nothing in `src` reads it; sizing figures come from the `evaluate_risk` verdict). The Phase 15 research runner decides.
+- **Still open, recorded in D052: no runner calls `read_code_version` plus `assemble` outside tests.** Owed to the Phase 15 research runner (and Phase 26 for the holdout-once enforcement).
+- **ROADMAP Phase 26 goal still reads "a family has passed under protocol v1.1.0"** (`.planning/ROADMAP.md` line about 956). After D052 no family can pass under v1.1.0 (all earlier evidence is void). Not in 14-16's file list, so not edited here; fix when Phase 26 is planned (reword to the protocol version in force, v2.0.0 or later).
+- **`06-VERIFICATION.md` frontmatter `covered_digest` is now stale** because plan 14-16 added the VOID notes to `06-01-SUMMARY.md` and `06-03-SUMMARY.md` (both listed in `covered_files`). Intended: the report is void; a re-verification of Phase 6 would replace the digest.
+- **`tests/test_research_gate_negative.py` was missing from the plan's file list** but pinned the literal v1.1.0 in two real-file tests; it is header-driven now (Rule 3, see the SUMMARY).
