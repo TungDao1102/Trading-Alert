@@ -539,7 +539,12 @@ class _Engine:
             regime=entity.regime,
             constraints_extrapolated=entity.extrapolated,
         )
-        validate_trade_record(record, data_start_utc=self.data_start, data_end_utc=self.data_end)
+        validate_trade_record(
+            record,
+            data_start_utc=self.data_start,
+            data_end_utc=self.data_end,
+            strict=True,
+        )
         self.records.append(record)
         del self.active[symbol]
 

@@ -346,7 +346,7 @@ def build_trade_record(
             slippage_amount=None,
             **common,
         )
-        validate_trade_record(record)
+        validate_trade_record(record, strict=True)
         return record
 
     if state.exit_price is None or state.exit_time_utc is None:
@@ -405,7 +405,7 @@ def build_trade_record(
         funding_event_count=funding_event_count,
         **common,
     )
-    validate_trade_record(record)
+    validate_trade_record(record, strict=True)
     return record
 
 
@@ -482,7 +482,7 @@ def build_reject_record(
         constraints_extrapolated=constraints_extrapolated,
         regime=regime,
     )
-    validate_trade_record(record)
+    validate_trade_record(record, strict=True)
     return record
 
 

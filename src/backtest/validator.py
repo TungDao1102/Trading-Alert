@@ -12,8 +12,16 @@ Invariants, on a record that filled:
   - `0 < quantity <= planned_quantity`;
   - a TP1 leg, when present, happened inside the holding window and closed less than
     the whole position;
-  - `entry_kind` and `exit_kind` come from the pinned vocabularies.
+  - `entry_kind` and `exit_kind` come from the pinned vocabularies;
 A record that never filled must have every exit field `None`.
+
+Strict mode (`strict=True`, used where the engine builds or reloads its own records, WR-01)
+adds the cross-field shape of an engine record: a filled record has `entry_kind`
+`ENTRY_FILLED` (or `PARTIAL_FILL` exactly when quantity < planned_quantity), an entry price
+and, when `OK`, a complete closed exit (kind, price, time, realized PnL, realized risk); an
+unfilled record has a non-filled `entry_kind` and every fill-derived field `None`. The
+analytics boundary stays non-strict because it reports incomplete filled records instead
+of refusing them (phase 10).
 
 The module imports NOTHING from Polars/pandas/NumPy/Binance SDK/
 SQLAlchemy/Pydantic — stdlib + Decimal + `src/core/_decimal.py` only,
@@ -26,7 +34,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from .semantics import ENTRY_KINDS, EXIT_KINDS
+from .semantics import ENTRY_FILLED, ENTRY_KINDS, EXIT_KINDS, PARTIAL_FILL
 
 if TYPE_CHECKING:
     from .records import TradeRecord
@@ -53,16 +61,81 @@ def _validate_vocabulary(record: TradeRecord) -> None:
         )
 
 
-def _validate_unfilled(record: TradeRecord) -> None:
-    if (
-        record.exit_kind is not None
-        or record.exit_price is not None
-        or record.exit_time_utc is not None
-    ):
+_FILLED_KINDS = frozenset({ENTRY_FILLED, PARTIAL_FILL})
+_UNFILLED_FIELDS: tuple[str, ...] = (
+    "entry_price",
+    "quantity",
+    "exit_kind",
+    "exit_price",
+    "exit_time_utc",
+    "realized_pnl",
+    "realized_risk",
+    "gross_pnl",
+    "entry_fee",
+    "exit_fee",
+    "funding_amount",
+    "slippage_amount",
+    "tp1_quantity",
+    "tp1_price",
+    "tp1_time_utc",
+)
+
+
+def _validate_unfilled(record: TradeRecord, *, strict: bool) -> None:
+    if not strict:
+        if (
+            record.exit_kind is not None
+            or record.exit_price is not None
+            or record.exit_time_utc is not None
+        ):
+            raise TradeRecordInvariantError(
+                "exit fields must be None on a record that never filled: "
+                f"exit_kind={record.exit_kind!r}, exit_price={record.exit_price}, "
+                f"exit_time={record.exit_time_utc}"
+            )
+        return
+    if record.entry_kind in _FILLED_KINDS:
         raise TradeRecordInvariantError(
-            "exit fields must be None on a record that never filled: "
-            f"exit_kind={record.exit_kind!r}, exit_price={record.exit_price}, "
-            f"exit_time={record.exit_time_utc}"
+            f"entry_kind {record.entry_kind!r} needs a fill but entry_time is None"
+        )
+    present = [name for name in _UNFILLED_FIELDS if getattr(record, name) is not None]
+    if present:
+        raise TradeRecordInvariantError(
+            "fill-derived and exit fields must be None on a record that never filled: "
+            + ", ".join(f"{name}={getattr(record, name)!r}" for name in present)
+        )
+
+
+def _validate_filled_shape(record: TradeRecord) -> None:
+    """A strict filled record has a filled kind, an entry price and a complete closed exit."""
+    if record.entry_kind not in _FILLED_KINDS:
+        raise TradeRecordInvariantError(
+            f"a record with an entry_time must have entry_kind ENTRY_FILLED or PARTIAL_FILL, "
+            f"got {record.entry_kind!r}"
+        )
+    if record.entry_price is None:
+        raise TradeRecordInvariantError("entry_price is required on a filled record")
+    quantity, planned = record.quantity, record.planned_quantity
+    if quantity is not None and planned is not None:
+        partial = quantity < planned
+        if partial != (record.entry_kind == PARTIAL_FILL):
+            raise TradeRecordInvariantError(
+                f"entry_kind {record.entry_kind!r} disagrees with quantity {quantity} "
+                f"against planned_quantity {planned}: PARTIAL_FILL exactly when quantity < planned"
+            )
+    if record.outcome_kind != "OK":
+        return
+    required = (
+        "exit_kind",
+        "exit_price",
+        "exit_time_utc",
+        "realized_pnl",
+        "realized_risk",
+    )
+    missing = [name for name in required if getattr(record, name) is None]
+    if missing:
+        raise TradeRecordInvariantError(
+            f"a filled OK record needs {', '.join(missing)} (closed trades only)"
         )
 
 
@@ -129,22 +202,26 @@ def validate_trade_record(
     *,
     data_start_utc: datetime | None = None,
     data_end_utc: datetime | None = None,
+    strict: bool = False,
 ) -> None:
     """Raise `TradeRecordInvariantError` unless `record` satisfies every invariant.
 
     `data_start_utc` / `data_end_utc` bound `exit_time` (inclusive); with both `None`
-    the window check is skipped, which is the normalizer-boundary use. Returns `None`
-    on a valid record and never emits a warning.
+    the window check is skipped, which is the normalizer-boundary use. `strict` adds the
+    engine-record cross-field shape described in the module docstring. Returns `None` on a
+    valid record and never emits a warning.
     """
     _validate_vocabulary(record)
     entry_time = record.entry_time_utc
     if entry_time is None:
-        _validate_unfilled(record)
+        _validate_unfilled(record, strict=strict)
         return
     signal_close = record.signal_close_utc
     if signal_close is None:
         raise TradeRecordInvariantError(
             f"signal_close_utc is required on a filled record (entry_time {_iso(entry_time)})"
         )
+    if strict:
+        _validate_filled_shape(record)
     _validate_times(record, entry_time, signal_close, data_start_utc, data_end_utc)
     _validate_quantities(record)

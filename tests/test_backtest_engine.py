@@ -702,7 +702,8 @@ def test_every_record_is_validated_with_the_data_window_before_it_is_emitted(
     output = simulate(end_of_data_case(), risk_fn=fixed_risk_fn("0.5", "1.50"))
 
     assert len(calls) == len(output["trades"]) == 2
-    assert all(c == {"data_start_utc": DATA_START, "data_end_utc": DATA_END} for c in calls)
+    expected_call = {"data_start_utc": DATA_START, "data_end_utc": DATA_END, "strict": True}
+    assert all(c == expected_call for c in calls)
 
 
 def test_a_minute_closing_at_the_signal_close_can_never_fill_the_plan() -> None:

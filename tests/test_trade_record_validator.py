@@ -146,3 +146,61 @@ def test_exit_kind_outside_the_vocabulary_raises() -> None:
 def test_filled_record_without_planned_quantity_raises() -> None:
     with pytest.raises(TradeRecordInvariantError, match="planned_quantity"):
         validate_trade_record(make_record(planned_quantity=None))
+
+
+# ----- strict mode (WR-01): the cross-field shape of an engine record ---------------
+
+
+def test_strict_accepts_a_valid_closed_record() -> None:
+    validate_trade_record(make_record(), strict=True)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"entry_kind": "EXPIRED"}, "entry_kind"),
+        ({"entry_kind": "PARTIAL_FILL"}, "PARTIAL_FILL"),  # quantity == planned_quantity
+        ({"quantity": "0.4", "planned_quantity": "0.5"}, "PARTIAL_FILL"),  # ENTRY_FILLED
+        ({"entry_price": None}, "entry_price"),
+        ({"exit_kind": None, "exit_price": None, "exit_time_utc": None}, "exit_kind"),
+        ({"realized_pnl": None}, "realized_pnl"),
+        ({"realized_risk": None}, "realized_risk"),
+    ],
+)
+def test_strict_refuses_an_inconsistent_filled_record(overrides: dict, match: str) -> None:
+    record = make_record(**overrides)
+    with pytest.raises(TradeRecordInvariantError, match=match):
+        validate_trade_record(record, strict=True)
+
+
+def test_strict_refuses_an_unfilled_record_with_fill_fields() -> None:
+    unfilled = {
+        "entry_kind": "EXPIRED",
+        "entry_price": None,
+        "entry_time_utc": None,
+        "quantity": None,
+        "exit_kind": None,
+        "exit_price": None,
+        "exit_time_utc": None,
+    }
+    with pytest.raises(TradeRecordInvariantError, match="realized_pnl"):
+        validate_trade_record(make_record(**unfilled), strict=True)  # still carries PnL
+    clean = {
+        name: None
+        for name in (
+            "realized_pnl",
+            "realized_risk",
+            "gross_pnl",
+            "entry_fee",
+            "exit_fee",
+            "funding_amount",
+            "slippage_amount",
+            "tp1_quantity",
+            "tp1_price",
+            "tp1_time_utc",
+        )
+    }
+    validate_trade_record(make_record(**unfilled, **clean), strict=True)
+    filled_kind = make_record(**{**unfilled, **clean, "entry_kind": "ENTRY_FILLED"})
+    with pytest.raises(TradeRecordInvariantError, match="needs a fill"):
+        validate_trade_record(filled_kind, strict=True)

@@ -895,7 +895,7 @@ def _trade_from_dict(t: dict[str, Any]) -> TradeRecord:
         if fname in data:
             data[fname] = _coerce_trade_optional_str(data[fname], fname)
     trade = TradeRecord(**data)
-    validate_trade_record(trade)
+    validate_trade_record(trade, strict=True)
     return trade
 
 
