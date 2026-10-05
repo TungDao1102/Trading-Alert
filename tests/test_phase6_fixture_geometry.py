@@ -1,4 +1,4 @@
-"""Pre-flight geometry guard for the Phase 6 simulator fixtures (Phase 12-04).
+"""Pre-flight geometry guard for the Phase 6 simulator fixtures (Phase 12-04, Phase 14-12).
 
 The old generator built 1H bars with a 0.05 half-range, which gives ATR-derived
 stops 0.06 to 0.26 percent away from entry. The Phase 12 cost guards (minimum
@@ -10,20 +10,25 @@ and planner, then checks the guard thresholds with independent literal
 arithmetic. It deliberately does NOT import ``src.risk.cost_rates`` or
 ``src.backtest.costs`` to compute expectations: a producer bug must not be able
 to bless its own fixtures (threat T-12-09).
+
+Phase 14 (plan 14-12, D-24, D-25): every generated input is a case-input v2 dict.
+The 1m data of a case starts at bar N+1 (never inside the signal bar), the funding
+rows cover the data window, and the v1 per-bar simulator code is gone.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import pytest
+from src.backtest.case import CASE_INPUT_SCHEMA, REMOVED_V1_KEYS, parse_case_input
 from src.backtest.semantics import FUNDING_CONVENTION
-from src.backtest.simulator import _parse_account_state, _parse_candle
 from src.core.planner import plan
 from src.core.strategy import evaluate
 from src.core.types import MarketSnapshot
@@ -31,6 +36,9 @@ from src.domain.registry import load_parameter_set
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PHASE6_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase6"
+PHASE7_PARITY_INPUT = (
+    Path(__file__).parent / "fixtures" / "phase7" / "parity_overlapping_history" / "input.json"
+)
 
 SIMULATOR_FIXTURES = (
     "intrabar_both_touched",
@@ -41,6 +49,11 @@ SIMULATOR_FIXTURES = (
     "limit_expiry",
     "invalidation_cancels_entry",
 )
+
+# Close of the trigger (signal) bar of every phase 6 case: bar 249 of the 1h series that
+# starts 2026-09-01 00:00 UTC. A 1m row of a v2 fixture may never open before this instant
+# (D-24, F-602).
+TRIGGER_CLOSE = datetime(2026, 9, 11, 9, 59, 59, tzinfo=UTC)
 
 # Independent literals (deliberately not read from the project producer).
 FEE_ENTRY = Decimal("0.0005")
@@ -67,8 +80,12 @@ EXPECTED_COST_KEYS = {
     "partial_fill_fraction",
 }
 EXPECTED_PARTIAL_FILL = {
-    "limit_touch_no_fill": "0",
     "limit_partial_fill": "0.5",
+}
+
+BASELINE_SETS = {
+    "no_trade": "baseline-no-trade-v3",
+    "simple_trend": "baseline-simple-trend-v3",
 }
 
 
@@ -79,28 +96,24 @@ def _load_case(*parts: str) -> dict[str, Any]:
 
 
 def _plan_for(case: dict[str, Any]) -> tuple[str, Any]:
-    """Return (direction, plan_result) for the LAST strategy bar.
+    """Return (direction, plan_result) for the trigger bar (the bar closing at TRIGGER_CLOSE).
 
-    Mirrors ``simulator.run``: closed setup candles up to the last bar, closed
-    context candles at or before it, registry set named by the fixture.
+    Mirrors the engine's strategy front-end: closed setup candles up to the trigger bar,
+    closed context candles at or before it, the registry set named by the fixture. The case
+    is read through the v2 parser, so a v1-shaped fixture fails here.
     """
-    strategy_bars = sorted(
-        (_parse_candle(r) for r in case["strategy_bars"]),
-        key=lambda b: (b.close_time_utc, b.symbol),
-    )
-    context_bars = sorted(
-        (_parse_candle(r) for r in case["context_bars"]),
-        key=lambda c: (c.close_time_utc, c.symbol),
-    )
+    parsed = parse_case_input(case)
+    strategy_bars = [b for b in parsed.strategy_bars if b.close_time_utc <= TRIGGER_CLOSE]
+    context_bars = [c for c in parsed.context_bars if c.close_time_utc <= TRIGGER_CLOSE]
     last = strategy_bars[-1]
-    closed_context = [c for c in context_bars if c.close_time_utc <= last.close_time_utc]
+    assert last.close_time_utc == TRIGGER_CLOSE
     snapshot = MarketSnapshot(
         symbol=last.symbol,
         setup_candles=strategy_bars,
-        context_candles=closed_context,
+        context_candles=context_bars,
         source_timeframe="1h",
     )
-    account_state = _parse_account_state(case["account_state"])
+    account_state = parsed.account_state
     parameter_set = load_parameter_set(case["strategy_id"], case["parameter_set_id"])
     setup = evaluate(
         snapshot=snapshot,
@@ -168,12 +181,6 @@ def test_fixture_clears_both_cost_guards(name: str) -> None:
     _assert_guard_clearance(_load_case(name))
 
 
-BASELINE_SETS = {
-    "no_trade": "baseline-no-trade-v3",
-    "simple_trend": "baseline-simple-trend-v3",
-}
-
-
 @pytest.mark.parametrize("name", sorted(BASELINE_SETS))
 def test_baseline_fixture_carries_phase12_identity(name: str) -> None:
     case = _load_case("baselines", name)
@@ -208,8 +215,8 @@ def test_fixture_cost_dict_binds_its_registry_set(parts: tuple[str, ...]) -> Non
 
     case = _load_case(*parts)
     parameter_set = load_parameter_set(case["strategy_id"], case["parameter_set_id"])
-    # The two partial-fill fixtures deliberately differ from the registry
-    # (partial_fill_fraction 0 / 0.5) and are excluded from this parametrization.
+    # The partial-fill fixture deliberately differs from the registry
+    # (partial_fill_fraction 0.5) and is excluded from this parametrization.
     assert_cost_model_binds_registry(parameter_set, build_cost_model(dict(case["cost_model"])))
 
 
@@ -235,7 +242,9 @@ def _load_generator() -> ModuleType:
 
 def _snapshot_tree(root: Path) -> dict[str, bytes]:
     return {
-        str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()
+        str(p.relative_to(root)).replace("\\", "/"): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
     }
 
 
@@ -244,8 +253,10 @@ def test_generator_is_deterministic_and_matches_committed_fixtures(
 ) -> None:
     generator = _load_generator()
     generator.FIXTURE_ROOT = tmp_path / "first"
+    generator.PHASE7_FIXTURE_ROOT = tmp_path / "first_phase7"
     generator.main()
     generator.FIXTURE_ROOT = tmp_path / "second"
+    generator.PHASE7_FIXTURE_ROOT = tmp_path / "second_phase7"
     generator.main()
     first = _snapshot_tree(tmp_path / "first")
     second = _snapshot_tree(tmp_path / "second")
@@ -254,3 +265,87 @@ def test_generator_is_deterministic_and_matches_committed_fixtures(
     for rel, data in first.items():
         committed = (PHASE6_FIXTURES_DIR / rel).read_bytes()
         assert committed == data, f"committed fixture {rel} differs from generator output"
+    first_phase7 = _snapshot_tree(tmp_path / "first_phase7")
+    assert first_phase7 == _snapshot_tree(tmp_path / "second_phase7")
+    assert set(first_phase7) == {"parity_overlapping_history/input.json"}
+    assert PHASE7_PARITY_INPUT.read_bytes() == first_phase7["parity_overlapping_history/input.json"]
+
+
+# --------------------------------------------------------------------------- #
+# Phase 14 (plan 14-12): every generated case is a v2 case with no 1m data inside the
+# signal bar (D-24, F-602), and the v1 per-bar simulator code is gone (D-01).
+# --------------------------------------------------------------------------- #
+
+ALL_V2_CASES: list[tuple[str, ...]] = [(n,) for n in SIMULATOR_FIXTURES] + [
+    ("baselines", n) for n in sorted(BASELINE_SETS)
+]
+
+
+def _all_generated_inputs() -> list[Any]:
+    params = [pytest.param(parts, id="/".join(parts)) for parts in ALL_V2_CASES]
+    params.append(pytest.param(("phase7", "parity_overlapping_history"), id="phase7/parity"))
+    return params
+
+
+def _load_generated(parts: tuple[str, ...]) -> dict[str, Any]:
+    if parts[0] == "phase7":
+        loaded: dict[str, Any] = json.loads(PHASE7_PARITY_INPUT.read_text(encoding="utf-8"))
+        return loaded
+    return _load_case(*parts)
+
+
+@pytest.mark.parametrize("parts", _all_generated_inputs())
+def test_generated_case_is_a_v2_case_the_parser_accepts(parts: tuple[str, ...]) -> None:
+    case = _load_generated(parts)
+    assert case["case_input_schema"] == CASE_INPUT_SCHEMA == "backtest-case/2"
+    assert not set(REMOVED_V1_KEYS) & set(case)
+    parsed = parse_case_input(case)
+    assert parsed.minute_source is not None
+    assert parsed.allowed_gaps == ()
+
+
+@pytest.mark.parametrize("parts", _all_generated_inputs())
+def test_no_minute_row_opens_inside_the_signal_bar(parts: tuple[str, ...]) -> None:
+    """1m data covers bar N+1 onward: every row opens at or after the trigger bar close (D-24)."""
+    case = _load_generated(parts)
+    for series in ("trade_bars_1m", "mark_bars_1m"):
+        rows = case[series]
+        assert rows, f"{series} is empty"
+        for row in rows:
+            opened = datetime.fromisoformat(row["open_time_utc"])
+            closed = datetime.fromisoformat(row["close_time_utc"])
+            assert opened >= TRIGGER_CLOSE, f"{series} row {opened} opens inside the signal bar"
+            assert closed > TRIGGER_CLOSE, f"{series} row {closed} closes inside the signal bar"
+
+
+@pytest.mark.parametrize("parts", _all_generated_inputs())
+def test_funding_rows_cover_the_data_window(parts: tuple[str, ...]) -> None:
+    case = _load_generated(parts)
+    window_start = datetime.fromisoformat(case["data_window"]["start_utc"])
+    window_end = datetime.fromisoformat(case["data_window"]["end_utc"])
+    times = sorted(datetime.fromisoformat(r["funding_time_utc"]) for r in case["funding"])
+    assert times[0] <= window_start and times[-1] >= window_end
+    gaps = [later - earlier for earlier, later in zip(times, times[1:], strict=False)]
+    assert max(gaps).total_seconds() <= 8 * 3600
+
+
+def test_simulator_module_has_no_v1_per_bar_code() -> None:
+    import src.backtest as backtest_package
+    import src.backtest.simulator as simulator
+
+    for name in (
+        "resolve_intrabar",
+        "IntrabarOutcome",
+        "SimulatorResult",
+        "_resolve_entry",
+        "_make_record",
+        "_make_filled_record",
+        "_patch_record_metadata",
+        "_apply_costs",
+        "_parse_intrabar_map",
+        "_parse_candle",
+        "_entry_now_utc",
+    ):
+        assert not hasattr(simulator, name), name
+        assert not hasattr(backtest_package, name), name
+    assert simulator.run.__module__ == "src.backtest.simulator"
