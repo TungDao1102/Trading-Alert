@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -74,6 +75,64 @@ def test_synthetic_root_runs_twice_with_matching_digests(
     ):
         assert len(re.findall(rf"^{key}=", out, flags=re.MULTILINE)) == 2, key
     assert re.search(r"^dataset_id=[0-9a-f]{64}$", out, flags=re.MULTILINE)
+
+
+def _copy_without(raw_root: Path, dest_root: Path, *, drop: Path) -> Path:
+    """A private copy of the store with the `drop` subtree (relative to the root) removed."""
+    dest = dest_root / "raw"
+    shutil.copytree(raw_root, dest)
+    target = dest / drop
+    assert target.exists(), target
+    shutil.rmtree(target)
+    return dest
+
+
+def test_store_without_open_interest_still_runs(
+    raw_root: Path,
+    constraints_json: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """OI is not consumed by the v2 engine, so a store with no OI partitions must build.
+
+    The real local store has no 90-day OI history (the Binance OI statistics endpoint serves
+    about 30 days), so the smoke script deliberately does not request the series.
+    """
+    no_oi = _copy_without(raw_root, tmp_path, drop=Path("data_class=oi"))
+
+    code = smoke.main([*_base_args(no_oi), "--constraints-json", str(constraints_json)])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    digests = _DIGEST_LINE.findall(out)
+    assert len(digests) == 2
+    assert digests[0] == digests[1]
+
+
+@pytest.mark.parametrize(
+    "drop",
+    [
+        Path("interval=1m") / f"symbol={SYMBOL}" / "date=2026-07-02",
+        Path("dataset=mark_klines") / "interval=1m" / f"symbol={SYMBOL}" / "date=2026-07-02",
+    ],
+    ids=["trade_1m_day_missing", "mark_1m_day_missing"],
+)
+def test_hole_in_a_requested_series_still_fails_closed(
+    raw_root: Path,
+    constraints_json: Path,
+    tmp_path: Path,
+    drop: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Skipping OI hides nothing: the requested series keep failing closed (D-19)."""
+    holed = _copy_without(raw_root, tmp_path, drop=drop)
+
+    code = smoke.main([*_base_args(holed), "--constraints-json", str(constraints_json)])
+    captured = capsys.readouterr()
+
+    assert code == 3
+    assert not _DIGEST_LINE.search(captured.out)
+    assert "CaseInputGapError" in captured.err
 
 
 def test_missing_constraint_source_fails_closed_with_exit_2(
