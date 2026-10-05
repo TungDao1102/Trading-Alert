@@ -509,7 +509,9 @@ def _build_input(
 
 def _write(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    # Explicit LF bytes with a trailing newline: `write_text` would translate to CRLF on
+    # Windows, making the committed bytes depend on git's autocrlf (WR-11).
+    path.write_bytes((json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"))
 
 
 def _long_case(
