@@ -12,6 +12,13 @@ by bar, so the paper loop and simulator see the same snapshots.
 The projection reduces both outputs to a list of
 (signal_id, reason_code) tuples — the verdict chain is the
 common surface (the paper loop does not simulate fills yet).
+
+Phase 14 (plan 14-12, D-18, RESEARCH Q7): the engine sizes every setup on a portfolio
+ledger (equity, resting entries, open positions, daily loss), while the paper loop is
+stateless. The two verdict chains are therefore only comparable on a history where the
+ledger never binds: the parity fixture holds ONE signal and ONE plan, so no resting entry,
+open position or daily stop can change a later verdict. The tests assert that property
+explicitly (`_assert_ledger_never_binds`). The choice is recorded for D052.
 """
 
 from __future__ import annotations
@@ -59,6 +66,26 @@ def _bar_to_ws_event(bar: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _paper_constraint_snapshot(fixture_input: dict[str, Any], bar_close: str) -> dict[str, Any]:
+    """The paper-loop constraint snapshot the engine would hand `evaluate_risk` at `bar_close`.
+
+    The v2 case holds point-in-time `constraint_history` rows. The engine selects the row in
+    force and stamps its `metadata_observed_at_utc` with the bar close (ttl 0, so the live
+    freshness gate sees age 0); the paper replay does the same, from the only row.
+    """
+    rows = fixture_input["constraint_history"]
+    assert len(rows) == 1, "the parity fixture has a single constraint row"
+    row = rows[0]
+    return {
+        "symbol": row["symbol"],
+        "price_tick_size": row["price_tick_size"],
+        "quantity_step_size": row["quantity_step_size"],
+        "min_quantity": row["min_quantity"],
+        "min_notional": row["min_notional"],
+        "metadata_observed_at_utc": bar_close,
+    }
+
+
 def _replay_paper_through_bars(
     fixture_input: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -69,12 +96,14 @@ def _replay_paper_through_bars(
       - warmed_up_4h = context_bars filtered to <= bar close
       - feed_events = [WS event from current bar]
       - now_utc = bar close_time_utc
+      - constraint_snapshot = the constraint row stamped with the bar close, ttl 0,
+        no open positions, no daily loss (the engine's view of an empty ledger)
 
     Returns the list of run_paper_tick outcomes (one per bar).
     """
     strategy_bars = fixture_input["strategy_bars"]
     context_bars = fixture_input["context_bars"]
-    symbol = fixture_input["constraint_snapshot"]["symbol"]
+    (symbol,) = fixture_input["symbols"]
 
     outcomes: list[dict[str, Any]] = []
     for i, bar in enumerate(strategy_bars):
@@ -84,7 +113,15 @@ def _replay_paper_through_bars(
         feed_event = _bar_to_ws_event(bar)
 
         paper_input = {
-            **fixture_input,
+            "strategy_id": fixture_input["strategy_id"],
+            "strategy_version": fixture_input["strategy_version"],
+            "parameter_set_id": fixture_input["parameter_set_id"],
+            "account_state": fixture_input["account_state"],
+            "cost_model": fixture_input["cost_model"],
+            "constraint_snapshot": _paper_constraint_snapshot(fixture_input, bar_close),
+            "open_positions": [],
+            "daily_loss_quote": "0",
+            "ttl_seconds": "0",
             "symbol": symbol,
             "warmed_up_1h": warmed_up_1h,
             "warmed_up_4h": warmed_up_4h,
@@ -157,9 +194,32 @@ def _project_paper_verdicts_full(
 def _project_simulator_verdicts(
     trades: list[dict[str, Any]],
 ) -> list[tuple[str, str]]:
-    """Project simulator trades to (signal_id, reason_code) tuples."""
-    verdicts: list[tuple[str, str]] = [(t["signal_id"], t["reason_code"]) for t in trades]
+    """Project engine records to (signal_id, reason_code) tuples.
+
+    Every engine record that carries a signal verdict is projected: OK records (a plan that
+    ran its course) and REJECT records. The engine's conflict skips are counters in the run
+    summary, never records, so they are not verdicts (D-32).
+    """
+    verdicts: list[tuple[str, str]] = [
+        (t["signal_id"], t["reason_code"]) for t in trades if t["signal_id"] is not None
+    ]
     return sorted(verdicts)
+
+
+def _assert_ledger_never_binds(output: dict[str, Any]) -> None:
+    """The parity history is one the stateless paper loop and the ledger engine can share.
+
+    At most one OK verdict (one plan), no DAILY_STOP reason on any record, and no setup
+    skipped for a conflict or an exhausted equity: nothing a ledger tracks (a resting entry,
+    an open position, a daily loss) could have changed a later verdict (D-18, RESEARCH Q7).
+    """
+    verdicts = _project_simulator_verdicts(output["trades"])
+    assert sum(1 for _, reason in verdicts if reason == "OK") <= 1
+    assert all("DAILY_STOP" not in reason for _, reason in verdicts)
+    assert all(t["entry_kind"] != "DAILY_STOP_CANCEL" for t in output["trades"])
+    counts = output["run_summary"]["no_trade_counts"]
+    assert "CONFLICT_WITH_OPEN_POSITION" not in counts
+    assert "UNCERTAIN_ACCOUNT_STATE" not in counts
 
 
 def _verdict_digest(verdicts: list[tuple[str, str]]) -> str:
@@ -187,6 +247,7 @@ def test_paper_replay_digest_equals_simulator_digest() -> None:
 
     # Simulator run.
     sim_result = simulator_run(case_input)
+    _assert_ledger_never_binds(sim_result)
     sim_verdicts = _project_simulator_verdicts(sim_result["trades"])
     sim_digest = _verdict_digest(sim_verdicts)
 
@@ -350,6 +411,7 @@ def test_parity_expected_documentary_fields_match_registry_and_simulator() -> No
     assert expected["cost_model_hash"] == registry_cost_hash
     assert expected["cost_model_hash"] == sim_result["cost_model_hash"]
     assert expected["trade_count"] == len(sim_result["trades"]) == 1
+    _assert_ledger_never_binds(sim_result)
 
 
 # --------------------------------------------------------------------------- #
@@ -362,11 +424,11 @@ def test_simulator_and_paper_pass_identical_cost_inputs_to_evaluate_risk(
 ) -> None:
     """The cost_rates and both guard rates the simulator and the paper loop
     hand to evaluate_risk are equal, for every risk call either makes."""
-    import src.backtest.simulator as simulator_module
-    import src.paper.loop as paper_module
+    import importlib
 
-    def _spy(module: Any, sink: list[tuple[Any, Any, Any]]) -> None:
-        real = module.evaluate_risk
+    def _spy(seam: str, sink: list[tuple[Any, Any, Any]]) -> None:
+        module_name, attribute = seam.rsplit(".", 1)
+        real = getattr(importlib.import_module(module_name), attribute)
 
         def wrapper(**kwargs: Any) -> Any:
             sink.append(
@@ -378,12 +440,14 @@ def test_simulator_and_paper_pass_identical_cost_inputs_to_evaluate_risk(
             )
             return real(**kwargs)
 
-        monkeypatch.setattr(module, "evaluate_risk", wrapper)
+        monkeypatch.setattr(seam, wrapper)
 
     sim_calls: list[tuple[Any, Any, Any]] = []
     paper_calls: list[tuple[Any, Any, Any]] = []
-    _spy(simulator_module, sim_calls)
-    _spy(paper_module, paper_calls)
+    # The engine resolves evaluate_risk from the simulator module globals at call time
+    # (Phase 14, D-01), so this seam intercepts every engine risk call.
+    _spy("src.backtest.simulator.evaluate_risk", sim_calls)
+    _spy("src.paper.loop.evaluate_risk", paper_calls)
 
     case_input = json.loads((PARITY_FIXTURE_DIR / "input.json").read_text())
     simulator_run(case_input)

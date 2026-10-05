@@ -6,6 +6,11 @@ and `evaluate_risk`. The simulator and the paper loop must hand `evaluate_risk`
 identical cost arguments on the same trigger bar, and both wrappers must
 delegate to the single producer object (patching it changes both).
 
+Phase 14 (plan 14-12): the simulator is the v2 engine. The call-site parity test reads the
+regenerated phase 7 parity input (a case-input v2 whose engine ledger is empty at the one
+risk call) and the per-leg parity test books the entry, TP1 and final legs of two phase 6
+cases against hand arithmetic.
+
 Every expected number is a hand-derived literal:
 
 * BTC LONG zone 59900-60100, stop 58780: 60100 x 0.0006 + 58780 x 0.0008
@@ -14,6 +19,9 @@ Every expected number is a hand-derived literal:
   = 0.0003006 + 0.0003944 = 0.000695
 * BTC LONG with account taker 0.0007: 60100 x 0.0008 + 58780 x 0.0010
   = 48.08 + 58.78 = 106.86
+* phase 6 SL case: entry leg 121.50 x 32.071 x (0.0005 + 0.0001), final leg SL 121.20 x 32.071
+  x (0.0005 + 0.0003); the TP ladder case: entry 121.50 x 16.035, TP1 125.60 x 8.017 and TP2
+  129.70 x 8.018, each exit leg at fee 0.0005 plus the resting-limit slippage 0.0001
 """
 
 from __future__ import annotations
@@ -241,9 +249,70 @@ def test_simulator_and_paper_call_evaluate_risk_with_identical_arguments(
     assert sim_verdict.sized.quantity == paper_verdict.sized.quantity
     assert sim_verdict.sized.modeled_costs_per_unit == paper_verdict.sized.modeled_costs_per_unit
 
-    # The simulator record shows what sizing used.
+    # The engine record shows what sizing used: the sized quantity and the realized risk.
+    # (v2 filled records do not carry modeled_costs_per_unit, so that figure is compared
+    # through the verdicts above.)
     (trade,) = sim_result["trades"]
-    assert Decimal(str(trade["modeled_costs_per_unit"])) == sim_verdict.sized.modeled_costs_per_unit
+    assert Decimal(trade["planned_quantity"]) == sim_verdict.sized.quantity
+    assert Decimal(trade["realized_risk"]) == sim_verdict.sized.realized_risk
+
+
+# --------------------------------------------------------------------------- #
+# Per-leg parity: entry leg, TP1 leg when present, final leg (Phase 14, D-10, D-18)
+# --------------------------------------------------------------------------- #
+
+PHASE6_DIR = PARITY_FIXTURE_DIR.parents[1] / "phase6"
+FEE = Decimal("0.0005")
+ENTRY_SLIPPAGE = Decimal("0.0001")  # entry leg and every resting-limit exit (TP1, TP2)
+STOP_SLIPPAGE = Decimal("0.0003")  # stop-market exit leg
+
+
+def _bookings_by_kind(case_name: str) -> tuple[dict[str, Decimal], dict[str, Any]]:
+    from src.backtest.engine import simulate_detailed
+    from src.risk.gating import evaluate_risk as real_evaluate_risk
+
+    case_input = json.loads((PHASE6_DIR / case_name / "input.json").read_text(encoding="utf-8"))
+    run = simulate_detailed(case_input, risk_fn=real_evaluate_risk)
+    kinds = [b.kind for b in run.bookings]
+    assert len(kinds) == len(set(kinds)), f"{case_name}: one booking per kind expected: {kinds}"
+    (trade,) = run.output["trades"]
+    return {b.kind: b.amount for b in run.bookings}, trade
+
+
+def test_per_leg_costs_for_a_stop_out_match_hand_arithmetic() -> None:
+    """Entry leg and the SL final leg (stop-market, exit_slippage_rate), 32.071 at 121.50."""
+    bookings, trade = _bookings_by_kind("intrabar_both_touched")
+    qty, entry, stop = Decimal("32.071"), Decimal("121.50"), Decimal("121.20")
+
+    entry_leg = -(entry * qty * (FEE + ENTRY_SLIPPAGE))
+    final_leg = (stop - entry) * qty - stop * qty * (FEE + STOP_SLIPPAGE)
+    assert bookings == {"FILL": entry_leg, "EXIT": final_leg}
+    assert Decimal(trade["realized_pnl"]) == entry_leg + final_leg + Decimal(
+        trade["funding_amount"]
+    )
+    assert Decimal(trade["entry_fee"]) == entry * qty * FEE
+    assert Decimal(trade["slippage_amount"]) == entry * qty * ENTRY_SLIPPAGE + stop * qty * (
+        STOP_SLIPPAGE
+    )
+
+
+def test_per_leg_costs_for_a_tp_ladder_match_hand_arithmetic() -> None:
+    """Entry, TP1 and TP2 legs: 16.035 filled, 8.017 at TP1 125.60, 8.018 at TP2 129.70.
+
+    A resting take-profit leg pays expected_slippage 0.0001, never the stop rate (D-10).
+    """
+    bookings, trade = _bookings_by_kind("limit_partial_fill")
+    entry = Decimal("121.50")
+    qty, tp1_qty, tp2_qty = Decimal("16.035"), Decimal("8.017"), Decimal("8.018")
+    tp1, tp2 = Decimal("125.60"), Decimal("129.70")
+
+    entry_leg = -(entry * qty * (FEE + ENTRY_SLIPPAGE))
+    tp1_leg = (tp1 - entry) * tp1_qty - tp1 * tp1_qty * (FEE + ENTRY_SLIPPAGE)
+    final_leg = (tp2 - entry) * tp2_qty - tp2 * tp2_qty * (FEE + ENTRY_SLIPPAGE)
+    assert bookings == {"FILL": entry_leg, "TP1": tp1_leg, "EXIT": final_leg}
+    assert Decimal(trade["realized_pnl"]) == entry_leg + tp1_leg + final_leg
+    assert Decimal(trade["tp1_quantity"]) == tp1_qty
+    assert Decimal(trade["quantity"]) == tp1_qty + tp2_qty == qty
 
 
 # --------------------------------------------------------------------------- #
