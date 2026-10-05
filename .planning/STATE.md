@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 14
 current_phase_name: Backtest Simulator Causality Rewrite
-status: executing
-stopped_at: Completed 14-15-PLAN.md
-last_updated: "2026-10-05T09:48:51.232Z"
+status: verifying
+stopped_at: Completed 14-16-PLAN.md
+last_updated: "2026-10-05T10:19:49.378Z"
 last_activity: 2026-10-05
 last_activity_desc: Phase 14 execution started
-state_head: ab8a6068b152b5c97a256b0761d723522c48e496
+state_head: bb32a684f75150d17c3709e29f718e0ef5e3f6e8
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 125
-  completed_plans: 123
+  completed_plans: 124
 milestone_name: milestone
 ---
 
@@ -32,7 +32,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 Phase: 14 (Backtest Simulator Causality Rewrite) — EXECUTING
 Plan: 16 of 16
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-05 — Phase 14 execution started
 
 Progress: [█████░░░░░] 46%
@@ -170,6 +170,7 @@ Progress: [█████░░░░░] 46%
 | Phase 14 P13 | 90 min | 3 tasks | 36 files |
 | Phase 14 P14 | 3h | 2 tasks | 2 files |
 | Phase 14 P15 | 2.5h | 3 tasks | 22 files |
+| Phase 14 P16 | 90min | 3 tasks | 19 files |
 
 ## Accumulated Context
 
@@ -419,6 +420,9 @@ Recent decisions affecting current work:
 - [Phase 14]: 14-15: ExperimentRecord carries 17 required typed fields validated in __post_init__; cost_values must hash to cost_model_hash and carry funding_convention; experiment_id binds simulator_semantics_version, split_role and split boundaries
 - [Phase 14]: 14-15: assemble also binds run_summary data_window to the record range and dataset_id to data_snapshot_id; reproduce compares every typed field of the re-run summary; legacy 7-key sets can no longer assemble (gate and legacy hashes unchanged)
 - [Phase 14]: 14-15: evidence schema analytics-evidence/2 (closed experiment key set, v1 refused); Phase 10 report_composite identity moved to a 40-hex commit and baseline-v5 cost hash, digest pins regenerated (report_digest ebd9e101...)
+- [Phase 14]: D052: research protocol v2.0.0 frozen (Phase 14 backtest causality); all earlier backtest evidence void; Frozen on unchanged, D013 clock not restarted
+- [Phase 14]: D053: Phase 14 regeneration inventory recorded (cost_model_hash 3063dc39 to 6d6c4e23, goldens, evidence schema analytics-evidence/2)
+- [Phase 14]: Protocol version pins are read from the header in gate code and tests (PR-08, DC-03); research-gate negative tests header-driven
 
 ### Pending Todos
 
@@ -473,6 +477,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-05T09:48:50.364Z
-Stopped at: Completed 14-15-PLAN.md
+Last session: 2026-10-05T10:19:48.578Z
+Stopped at: Completed 14-16-PLAN.md
 Resume file: None
