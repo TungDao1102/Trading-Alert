@@ -37,6 +37,12 @@ REQUIRED_CASES: tuple[str, ...] = (
     "g3_expire_after",
     "stop_first_tie",
     "gap_through_limit",
+    "funding_paid_received",
+    "funding_between_times",
+    "daily_loss_blocks_next",
+    "end_of_data",
+    "missing_mark_fallback",
+    "nonzero_cost_parity",
 )
 
 DECIMAL_FIELDS = frozenset(

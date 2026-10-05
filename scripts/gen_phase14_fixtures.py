@@ -556,6 +556,177 @@ def gap_through_limit() -> dict[str, object]:
     )
 
 
+def funding_paid_received() -> dict[str, object]:
+    """LONG crosses a positive instant (pays, full size) and a negative one (after TP1)."""
+    plan = _plan("BTCUSDT", signal_id="G14-FUNDING-PR")
+    mid: Ohlc = ("103.0", "103.2", "102.8", "103.0")
+    return _single(
+        plan,
+        count=75,
+        trade={"10:05": LONG_FILL_TRADE},
+        mark={
+            "10:05": LONG_FILL_MARK,
+            "10:30": ("101.0", "104.1", "100.9", "104.0"),
+            **_span("10:31", "10:59", mid),
+            "11:00": ("104.0", "108.2", "103.9", "108.0"),
+        },
+        funding_extra=(
+            ("BTCUSDT", "10:20", "0.001", "101.0"),
+            ("BTCUSDT", "10:40", "-0.002", "103.0"),
+        ),
+    )
+
+
+def funding_between_times() -> dict[str, object]:
+    """SHORT opened after one instant (10:02), closed before the next (10:50); 10:30 counts."""
+    plan = _short_plan("BTCUSDT", signal_id="G14-FUNDING-BETWEEN")
+    return _single(
+        plan,
+        flat=SHORT_FLAT,
+        count=60,
+        trade={"10:05": SHORT_FILL_TRADE},
+        mark={"10:40": SHORT_STOP_MARK},
+        funding_extra=(
+            ("BTCUSDT", "10:02", "0.0005", "99.0"),
+            ("BTCUSDT", "10:30", "0.0005", "99.0"),
+            ("BTCUSDT", "10:50", "0.0005", "99.0"),
+        ),
+    )
+
+
+def daily_loss_blocks_next() -> dict[str, object]:
+    """Three stop-outs on three symbols in one UTC day reach the DAILY_STOP threshold.
+
+    ADAUSDT, BNBUSDT and LTCUSDT each fill and stop out (a loss of about 34.06); DOGEUSDT rests
+    from the first signal and never trades through its limit. The third stop-out (12:10:59.999)
+    takes the day loss past the stop threshold (1.0 percent of 10000 = 100): the resting
+    DOGEUSDT entry is cancelled DAILY_STOP_CANCEL at that instant, and the next signal
+    (ADAUSDT at 12:59:59.999) is rejected DAILY_STOP_BLOCK.
+    """
+    symbols = ["ADAUSDT", "BNBUSDT", "DOGEUSDT", "LTCUSDT"]
+    first_close = SIGNAL_CLOSE
+    second_close = datetime(2026, 1, 5, 10, 59, 59, 999000, tzinfo=UTC)
+    third_close = datetime(2026, 1, 5, 11, 59, 59, 999000, tzinfo=UTC)
+    fourth_close = datetime(2026, 1, 5, 12, 59, 59, 999000, tzinfo=UTC)
+    plans = [
+        _plan("ADAUSDT", signal_id="G14-DAILY-A", close=first_close),
+        _plan("DOGEUSDT", signal_id="G14-DAILY-R", close=first_close),
+        _plan("BNBUSDT", signal_id="G14-DAILY-B", close=second_close),
+        _plan("LTCUSDT", signal_id="G14-DAILY-C", close=third_close),
+        _plan("ADAUSDT", signal_id="G14-DAILY-D", close=fourth_close),
+    ]
+    trade: list[dict[str, str]] = []
+    mark: list[dict[str, str]] = []
+    # (symbol, plan close, first minute, minutes, fill minute, stop minute)
+    runs = [
+        ("ADAUSDT", first_close, "10:00", 15, "10:05", "10:10"),
+        ("BNBUSDT", second_close, "11:00", 15, "11:05", "11:10"),
+        ("LTCUSDT", third_close, "12:00", 15, "12:05", "12:10"),
+    ]
+    for symbol, close, start, count, fill_at, stop_at in runs:
+        trade += _minute_rows(
+            symbol,
+            "trade",
+            first=start,
+            count=count,
+            base=LONG_FLAT,
+            overrides={fill_at: LONG_FILL_TRADE},
+            not_before=close,
+        )
+        mark += _minute_rows(
+            symbol,
+            "mark",
+            first=start,
+            count=count,
+            base=LONG_FLAT,
+            overrides={fill_at: LONG_FILL_MARK, stop_at: LONG_STOP_MARK},
+            not_before=close,
+        )
+    resting: Ohlc = ("103.0", "103.2", "102.9", "103.0")  # never reaches the limit 100.0
+    for kind, rows in (("trade", trade), ("mark", mark)):
+        rows += _minute_rows(
+            "DOGEUSDT",
+            kind,
+            first="10:00",
+            count=135,
+            base=resting,
+            not_before=first_close,
+        )
+    return _case(
+        symbols=symbols,
+        plans=plans,
+        trade=_by_symbol(trade),
+        mark=_by_symbol(mark),
+        data_end=DAY + timedelta(hours=13),
+    )
+
+
+def _by_symbol(rows: Sequence[dict[str, str]]) -> list[dict[str, str]]:
+    """Group rows by symbol (sorted), keeping each symbol's time order."""
+    return sorted(rows, key=lambda r: (r["symbol"], r["open_time_utc"]))
+
+
+def end_of_data() -> dict[str, object]:
+    """LONG fills at 10:05 and is still open when the data window ends at 10:30."""
+    plan = _plan("BTCUSDT", signal_id="G14-END-OF-DATA")
+    return _single(
+        plan,
+        count=30,
+        trade={"10:05": LONG_FILL_TRADE},
+        mark={"10:05": LONG_FILL_MARK, "10:29": ("101.1", "101.3", "100.9", "101.2")},
+        data_end=_clock("10:30"),
+    )
+
+
+def missing_mark_fallback() -> dict[str, object]:
+    """LONG (stop 98.50) fills at 10:05; the mark series has a hole from 10:06 to the bar close.
+
+    Bar N+1 (10:00 to 10:59:59.999) has a trade low of 98.4 at 10:30, below the stop, so the
+    rest of the bar resolves once at the bar close, stop first, with `fallback_applied`.
+    """
+    plan = _plan("BTCUSDT", signal_id="G14-FALLBACK", stop="98.50")
+    trade = _minute_rows(
+        "BTCUSDT",
+        "trade",
+        first="10:00",
+        count=60,
+        base=LONG_FLAT,
+        overrides={"10:05": LONG_FILL_TRADE, "10:30": ("101.0", "101.1", "98.4", "99.0")},
+        not_before=SIGNAL_CLOSE,
+    )
+    mark = _minute_rows(
+        "BTCUSDT",
+        "mark",
+        first="10:00",
+        count=6,
+        base=LONG_FLAT,
+        overrides={"10:05": LONG_FILL_MARK},
+        not_before=SIGNAL_CLOSE,
+    )
+    bars = [
+        _hour_bar("BTCUSDT", _clock("09:00"), ("100.5", "101.0", "100.0", "100.8")),
+        _bar_from_trade_minutes("BTCUSDT", _clock("10:00"), trade),
+    ]
+    return _case(symbols=["BTCUSDT"], plans=[plan], trade=trade, mark=mark, strategy_bars=bars)
+
+
+def nonzero_cost_parity() -> dict[str, object]:
+    """SHORT with a TP1 partial then a stop: entry, TP1 and SL legs each carry fee and slippage."""
+    plan = _short_plan("BTCUSDT", signal_id="G14-COST-PARITY")
+    calm: Ohlc = ("97.0", "97.2", "96.8", "97.0")
+    return _single(
+        plan,
+        flat=SHORT_FLAT,
+        count=60,
+        trade={"10:05": SHORT_FILL_TRADE},
+        mark={
+            "10:12": ("99.0", "99.2", "95.9", "96.1"),
+            **_span("10:13", "10:39", calm),
+            "10:40": ("97.0", "102.2", "96.9", "102.0"),
+        },
+    )
+
+
 CASES: dict[str, Callable[[], dict[str, object]]] = {
     "signal_bar_touch_no_fill": signal_bar_touch_no_fill,
     "trade_through_vs_touch": trade_through_vs_touch,
@@ -567,6 +738,12 @@ CASES: dict[str, Callable[[], dict[str, object]]] = {
     "g3_expire_after": g3_expire_after,
     "stop_first_tie": stop_first_tie,
     "gap_through_limit": gap_through_limit,
+    "funding_paid_received": funding_paid_received,
+    "funding_between_times": funding_between_times,
+    "daily_loss_blocks_next": daily_loss_blocks_next,
+    "end_of_data": end_of_data,
+    "missing_mark_fallback": missing_mark_fallback,
+    "nonzero_cost_parity": nonzero_cost_parity,
 }
 
 

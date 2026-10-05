@@ -1,0 +1,715 @@
+{
+  "account_state": {
+    "equity": "10000",
+    "risk_rate": "0.005"
+  },
+  "allowed_gaps": [],
+  "case_input_schema": "backtest-case/2",
+  "constraint_history": [
+    {
+      "metadata_observed_at_utc": "2025-12-01T00:00:00+00:00",
+      "min_notional": "5",
+      "min_quantity": "0.001",
+      "price_tick_size": "0.10",
+      "quantity_step_size": "0.001",
+      "symbol": "BTCUSDT"
+    }
+  ],
+  "context_bars": [],
+  "cost_model": {
+    "exit_slippage_rate": "0.0003",
+    "expected_slippage": "0.0001",
+    "fee_rate_entry": "0.0005",
+    "fee_rate_exit": "0.0005",
+    "funding_convention": "MARK_NOTIONAL_SIGNED_V1",
+    "funding_treatment": "ADDITIVE",
+    "partial_fill_fraction": "1.0",
+    "slippage_model": "FIXED_BPS",
+    "spread_fill_assumptions": "FULL_FILL"
+  },
+  "data_window": {
+    "end_utc": "2026-01-05T10:30:00+00:00",
+    "start_utc": "2026-01-05T00:00:00+00:00"
+  },
+  "funding": [
+    {
+      "funding_rate": "0.0001",
+      "funding_time_utc": "2026-01-04T16:00:00+00:00",
+      "mark_price": "100",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "funding_rate": "0.0001",
+      "funding_time_utc": "2026-01-05T00:00:00+00:00",
+      "mark_price": "100",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "funding_rate": "0.0001",
+      "funding_time_utc": "2026-01-05T08:00:00+00:00",
+      "mark_price": "100",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "funding_rate": "0.0001",
+      "funding_time_utc": "2026-01-05T16:00:00+00:00",
+      "mark_price": "100",
+      "symbol": "BTCUSDT"
+    }
+  ],
+  "mark_bars_1m": [
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:00:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:00:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:01:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:01:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:02:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:02:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:03:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:03:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:04:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:04:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "100.2",
+      "close_time_utc": "2026-01-05T10:05:59.999000+00:00",
+      "high": "100.8",
+      "interval": "1m",
+      "low": "99.95",
+      "open": "100.6",
+      "open_time_utc": "2026-01-05T10:05:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:06:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:06:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:07:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:07:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:08:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:08:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:09:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:09:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:10:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:10:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:11:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:11:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:12:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:12:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:13:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:13:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:14:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:14:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:15:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:15:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:16:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:16:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:17:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:17:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:18:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:18:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:19:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:19:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:20:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:20:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:21:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:21:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:22:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:22:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:23:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:23:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:24:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:24:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:25:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:25:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:26:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:26:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:27:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:27:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:28:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:28:00+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close": "101.2",
+      "close_time_utc": "2026-01-05T10:29:59.999000+00:00",
+      "high": "101.3",
+      "interval": "1m",
+      "low": "100.9",
+      "open": "101.1",
+      "open_time_utc": "2026-01-05T10:29:00+00:00",
+      "symbol": "BTCUSDT"
+    }
+  ],
+  "parameter_set_id": "baseline-v5",
+  "scripted_plans": [
+    {
+      "bar_close_utc": "2026-01-05T09:59:59.999000+00:00",
+      "direction": "LONG",
+      "entry_max_price": "101.00",
+      "entry_min_price": "99.00",
+      "expiry_hours": 4,
+      "signal_id": "G14-END-OF-DATA",
+      "stop_loss_price": "98.00",
+      "symbol": "BTCUSDT",
+      "tp1": "104.00",
+      "tp2": "108.00"
+    }
+  ],
+  "strategy_bars": [],
+  "strategy_id": "trend-pullback",
+  "strategy_version": "v4.0.0",
+  "symbols": [
+    "BTCUSDT"
+  ],
+  "trade_bars_1m": [
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:00:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:00:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:01:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:01:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:02:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:02:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:03:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:03:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:04:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:04:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "100.2",
+      "close_time_utc": "2026-01-05T10:05:59.999000+00:00",
+      "high": "100.8",
+      "interval": "1m",
+      "low": "99.9",
+      "open": "100.6",
+      "open_time_utc": "2026-01-05T10:05:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:06:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:06:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:07:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:07:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:08:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:08:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:09:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:09:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:10:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:10:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:11:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:11:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:12:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:12:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:13:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:13:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:14:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:14:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:15:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:15:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:16:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:16:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:17:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:17:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:18:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:18:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:19:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:19:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:20:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:20:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:21:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:21:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:22:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:22:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:23:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:23:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:24:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:24:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:25:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:25:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:26:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:26:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:27:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:27:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:28:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:28:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    },
+    {
+      "close": "101.0",
+      "close_time_utc": "2026-01-05T10:29:59.999000+00:00",
+      "high": "101.2",
+      "interval": "1m",
+      "low": "100.6",
+      "open": "101.0",
+      "open_time_utc": "2026-01-05T10:29:00+00:00",
+      "symbol": "BTCUSDT",
+      "volume": "1"
+    }
+  ]
+}

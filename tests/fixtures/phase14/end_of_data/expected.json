@@ -1,0 +1,44 @@
+{
+  "derivation": "tests/fixtures/phase14/DERIVATIONS.md#end_of_data",
+  "trades": [
+    {
+      "signal_id": "G14-END-OF-DATA",
+      "symbol": "BTCUSDT",
+      "direction": "LONG",
+      "outcome_kind": "OK",
+      "reason_code": "OK",
+      "signal_close_utc": "2026-01-05T09:59:59.999+00:00",
+      "entry_kind": "ENTRY_FILLED",
+      "entry_time_utc": "2026-01-05T10:05:59.999+00:00",
+      "entry_price": "100.0",
+      "quantity": "15.928",
+      "planned_quantity": "15.928",
+      "exit_kind": "END_OF_DATA",
+      "exit_price": "101.2",
+      "exit_time_utc": "2026-01-05T10:29:59.999+00:00",
+      "resolved_at_utc": "2026-01-05T10:29:59.999+00:00",
+      "tp1_quantity": null,
+      "tp1_price": null,
+      "tp1_time_utc": null,
+      "gross_pnl": "19.1136",
+      "entry_fee": "0.7964",
+      "exit_fee": "0.8059568",
+      "slippage_amount": "0.64285408",
+      "funding_amount": "0",
+      "funding_event_count": 0,
+      "realized_pnl": "16.86838912",
+      "realized_risk": "49.997992",
+      "touch_no_fill_count": 0,
+      "gap_through_stop": false,
+      "fallback_applied": false
+    }
+  ],
+  "run_summary": {
+    "end_of_data_count": 1,
+    "fallback_count": 0,
+    "gap_through_stop_count": 0,
+    "pending_at_data_end_count": 0,
+    "touch_no_fill_total": 0,
+    "no_trade_counts": {}
+  }
+}

@@ -315,3 +315,204 @@ python -c "from decimal import Decimal as D;e=D('101');s=D('98');rpu=e-s+e*D('0.
 
 Result: ENTRY_FILLED at 100.0 (not 98.5) at 10:05:59.999; TP1 7.964 at 104.0 at 10:20:59.999; final exit
 TP2 at 108.0 at 10:20:59.999; realized_pnl 93.5992992.
+
+## funding_paid_received
+
+LONG, base plan, held across two actual funding instants. The instants are synthetic (D-14 allows any actual
+`fundingTime`, there is no 8 h grid): 10:20 at rate +0.001 with mark 101.0, and 10:40 at rate -0.002 with
+mark 103.0 (the rate sizes are large on purpose, so the amounts are visible to the cent). The funding rows
+at 2026-01-04 16:00 and 2026-01-05 00:00, 08:00 and 16:00 are outside the hold.
+
+1. Sizing as in `signal_bar_touch_no_fill`: quantity 15.928; TP1 quantity 7.964; remainder 7.964.
+2. Fill at 100.0 at 10:05:59.999. Mark minute 10:30 has high 104.1 (TP1 104.0 reached, TP2 108.0 not) and low
+   100.9: TP1 books 7.964 at 104.0 at 10:30:59.999. Mark minutes 10:31 to 10:59 stay near 103.0. Mark minute
+   11:00 has high 108.2 >= 108.0: TP2 books 7.964 at 108.0 at 11:00:59.999.
+3. Funding (D-14, D-36), amount = -sign x open quantity x row mark x row rate, with sign +1 for a LONG:
+
+   | instant | rate | mark | open quantity | amount |
+   |---------|------|------|---------------|--------|
+   | 10:20 | +0.001 | 101.0 | 15.928 (before TP1) | -(15.928 x 101.0 x 0.001) = -1.608728 (paid) |
+   | 10:40 | -0.002 | 103.0 | 7.964 (after TP1) | +(7.964 x 103.0 x -(-0.002)) = +1.640584 (received) |
+
+   Net funding = -1.608728 + 1.640584 = +0.031856, two events.
+4. Trading legs as in `gap_through_limit` (TP1 then TP2): gross 95.568, entry fee 0.7964, exit fees 0.844184,
+   slippage 0.3281168.
+5. realized_pnl = 95.568 - 0.7964 - 0.844184 - 0.3281168 + 0.031856 = 93.6311552;
+   R = 93.6311552 / 49.997992 = 1.87269831...
+
+Check (standalone):
+
+```bash
+python -c "from decimal import Decimal as D;e=D('101');s=D('98');rpu=e-s+e*D('0.0006')+s*D('0.0008');q=(D(50)/rpu//D('0.001'))*D('0.001');a=(q/2//D('0.001'))*D('0.001');b=q-a;f1=-q*D(101)*D('0.001');f2=-b*D(103)*D('-0.002');f=f1+f2;g=(D(104)-D(100))*a+(D(108)-D(100))*b;ef=D(100)*q*D('0.0005');xf=(D(104)*a+D(108)*b)*D('0.0005');sl=D(100)*q*D('0.0001')+(D(104)*a+D(108)*b)*D('0.0001');p=g-ef-xf-sl+f;print(rpu,q,a,b,f1,f2,f,g,ef,xf,sl,p,p/(q*rpu))"
+```
+
+Result: one record, ENTRY_FILLED at 10:05:59.999, TP1 7.964 at 104.0 at 10:30:59.999, TP2 108.0 at
+11:00:59.999, funding_amount +0.031856 over 2 events, realized_pnl 93.6311552.
+
+## funding_between_times
+
+SHORT, base SHORT plan, opened between two funding instants. Instants (all rate +0.0005, mark 99.0): 10:02,
+10:30 and 10:50. The position is open from the fill 10:05:59.999 to the exit 10:40:59.999, so only 10:30 lies in
+[entry, exit): 10:02 is before the entry and 10:50 is after the exit.
+
+1. Sizing as in `trade_through_vs_touch`: quantity 15.918, realized_risk 49.998438. Fill at 100.0 at
+   10:05:59.999 (trade minute 10:05: high 100.1). The fill minute's mark high is 99.4.
+2. Mark minute 10:40 has open 99.0 and high 102.2 >= 102.0: stop at max(102.0, 99.0) = 102.0 at 10:40:59.999.
+3. Funding: SHORT sign is -1, so amount = +quantity x mark x rate = 15.918 x 99.0 x 0.0005 = +0.787941
+   (a SHORT receives a positive rate), one event at 10:30 only.
+4. Trading legs as in `trade_through_vs_touch`: gross -31.836, entry fee 0.7959, exit fee 0.811818,
+   slippage 0.6462708.
+5. realized_pnl = -31.836 - 0.7959 - 0.811818 - 0.6462708 + 0.787941 = -33.3020478;
+   R = -33.3020478 / 49.998438 = -0.66606176...
+
+Check (standalone):
+
+```bash
+python -c "from decimal import Decimal as D;e=D('99');s=D('102');rpu=s-e+e*D('0.0006')+s*D('0.0008');q=(D(50)/rpu//D('0.001'))*D('0.001');g=(D(100)-s)*q;ef=D(100)*q*D('0.0005');xf=s*q*D('0.0005');sl=D(100)*q*D('0.0001')+s*q*D('0.0003');f=q*D(99)*D('0.0005');p=g-ef-xf-sl+f;print(rpu,q,q*rpu,g,ef,xf,sl,f,p,p/(q*rpu))"
+```
+
+Result: one record, ENTRY_FILLED at 10:05:59.999, SL 102.0 at 10:40:59.999, funding_amount +0.787941 over
+1 event, realized_pnl -33.3020478.
+
+## daily_loss_blocks_next
+
+Five scripted plans, four symbols, one UTC day (2026-01-05). Every plan is the LONG base plan (zone 99.00 to
+101.00, stop 98.00) at its own bar close, with at most 15 minutes of fill-then-stop data, except DOGEUSDT which
+rests with a flat price of 103.0 and never reaches the limit. Cluster: none of ADAUSDT, BNBUSDT, DOGEUSDT,
+LTCUSDT is in the cluster set, so the cluster gate adds only the candidate (49.99 <= cluster cap 50).
+
+Thresholds at the day start (equity 10000): cluster cap 0.005 x 10000 = 50, aggregate cap 0.01 x 10000 = 100,
+maximum positions 2, daily-loss warning 0.005 x 10000 = 50 and daily stop 0.01 x 10000 = 100 (resolved once,
+at the day start; bookings change the equity, not the thresholds of the same day).
+
+Timeline:
+
+1. 09:59:59.999: plans A (ADAUSDT) and R (DOGEUSDT), evaluated in symbol order on equity 10000. A is sized
+   15.928 (realized_risk 49.997992), rests. R is sized 15.928 too; aggregate = 49.997992 x 2 = 99.995984 <= 100
+   and positions 1 < 2, so R rests as well.
+2. A fills at 10:05:59.999 and stops at 98.0 at 10:10:59.999: loss per unit = (100 - 98) + 100 x 0.0006 +
+   98 x 0.0008 = 2.1384, so the loss is 15.928 x 2.1384 = 34.0604352. Day loss 34.06 < warning 50: NORMAL.
+3. 10:59:59.999: plan B (BNBUSDT) on equity 10000 - 34.0604352 = 9965.9395648: allowed_risk 49.829697824, raw
+   = 49.829697824 / 3.1390 = 15.8743..., quantity 15.874, realized_risk 15.874 x 3.1390 = 49.828486. Open
+   exposure is R only (A was removed at its exit): aggregate 49.997992 + 49.828486 = 99.826478 <= 100, so B rests.
+4. B fills at 11:05:59.999 and stops at 98.0 at 11:10:59.999: loss 15.874 x 2.1384 = 33.9449616. Day loss
+   68.0053968: WARNING (50 <= loss < 100), which still passes the gate.
+5. 11:59:59.999: plan C (LTCUSDT) on equity 9965.9395648 - 33.9449616 = 9931.9946032: allowed_risk
+   49.659973016, quantity 15.820 (raw 15.8203...), realized_risk 15.820 x 3.1390 = 49.65898. R is still the
+   only exposure: aggregate 49.997992 + 49.65898 = 99.656972 <= 100, WARNING state passes, C rests.
+6. C fills at 12:05:59.999 and stops at 98.0 at 12:10:59.999: loss 15.820 x 2.1384 = 33.829488. Day loss =
+   34.0604352 + 33.9449616 + 33.829488 = 101.8348848 >= 100: DAILY_STOP (D033). At that booking the resting
+   entry R (it never traded through its limit) is cancelled DAILY_STOP_CANCEL at 12:10:59.999 (D-32); the open
+   stops of other positions would stay (none are open).
+7. 12:59:59.999: plan D (ADAUSDT again) is sized (equity 9898.1651152), but the portfolio gates run in the
+   order cluster, aggregate, positions, daily state: no exposure remains, so it passes the first three and is
+   rejected at the daily state with reason DAILY_STOP_BLOCK (a REJECT record, never a resting plan).
+
+Per-trade legs (entry 100.0, stop 98.0, no TP, no funding inside any hold): gross = -2 x quantity; entry fee =
+100 x quantity x 0.0005; exit fee = 98 x quantity x 0.0005; slippage = 100 x quantity x 0.0001 + 98 x quantity x
+0.0003:
+
+| trade | quantity | gross | entry fee | exit fee | slippage | realized_pnl |
+|-------|----------|-------|-----------|----------|----------|--------------|
+| A ADAUSDT | 15.928 | -31.856 | 0.7964 | 0.780472 | 0.6275632 | -34.0604352 |
+| B BNBUSDT | 15.874 | -31.748 | 0.7937 | 0.777826 | 0.6254356 | -33.9449616 |
+| C LTCUSDT | 15.820 | -31.64 | 0.791 | 0.77518 | 0.623308 | -33.829488 |
+
+Check (standalone; first the equity chain of steps 1 to 6, then the per-trade legs):
+
+```bash
+python -c "from decimal import Decimal as D;r=D('3.1390');l=D('2.1384');f=D('0.001');e0=D(10000);q1=(e0*D('0.005')/r//f)*f;e1=e0-q1*l;q2=(e1*D('0.005')/r//f)*f;e2=e1-q2*l;q3=(e2*D('0.005')/r//f)*f;e3=e2-q3*l;print(q1,q2,q3,q1*l,q2*l,q3*l,e1,e2,e3,e0-e3,q1*r,q2*r,q3*r,q1*r+q2*r,q1*r+q3*r)"
+```
+
+```bash
+python -c "from decimal import Decimal as D;f=lambda q:(-2*q,D(100)*q*D('0.0005'),D(98)*q*D('0.0005'),D(100)*q*D('0.0001')+D(98)*q*D('0.0003'));print([f(D(x)) for x in ('15.928','15.874','15.820')])"
+```
+
+Result: five records, ordered by signal close then symbol: ADAUSDT A (SL), DOGEUSDT R (DAILY_STOP_CANCEL at
+12:10:59.999), BNBUSDT B (SL), LTCUSDT C (SL), ADAUSDT D (REJECT, DAILY_STOP_BLOCK). Run summary:
+no_trade_counts {"DAILY_STOP_BLOCK": 1}, everything else 0.
+
+## end_of_data
+
+LONG, base plan. The data window ends at 10:30:00 with the position still open (D-06, D-34).
+
+1. Sizing as in `signal_bar_touch_no_fill`: quantity 15.928. Fill at 100.0 at 10:05:59.999. The mark series
+   stays between 100.6 and 101.2 and never reaches the stop 98.0 or TP1 104.0.
+2. The last mark minute is 10:29 (closes 10:29:59.999) with close 101.2. At the data end the position is
+   closed at the last mark close: exit kind END_OF_DATA, price 101.2, time 10:29:59.999. It is a forced market
+   close, so it uses the stop-style slippage rate 0.0003; it is never booked as SL or TP.
+3. gross = (101.2 - 100) x 15.928 = 19.1136; entry fee = 0.7964; exit fee = 101.2 x 15.928 x 0.0005 =
+   0.8059568; slippage = 100 x 15.928 x 0.0001 + 101.2 x 15.928 x 0.0003 = 0.15928 + 0.48357408 =
+   0.64285408; funding 0 (no instant in [10:05:59.999, 10:29:59.999)).
+4. realized_pnl = 19.1136 - 0.7964 - 0.8059568 - 0.64285408 = 16.86838912; R = 16.86838912 / 49.997992 =
+   0.33738133...
+
+Check (standalone):
+
+```bash
+python -c "from decimal import Decimal as D;e=D('101');s=D('98');rpu=e-s+e*D('0.0006')+s*D('0.0008');q=(D(50)/rpu//D('0.001'))*D('0.001');x=D('101.2');g=(x-D(100))*q;ef=D(100)*q*D('0.0005');xf=x*q*D('0.0005');sl=D(100)*q*D('0.0001')+x*q*D('0.0003');p=g-ef-xf-sl;print(rpu,q,q*rpu,g,ef,xf,sl,p,p/(q*rpu))"
+```
+
+Result: one record, ENTRY_FILLED at 10:05:59.999, END_OF_DATA at 101.2 at 10:29:59.999, realized_pnl
+16.86838912. Run summary: end_of_data_count 1, everything else 0.
+
+## missing_mark_fallback
+
+LONG, zone 99.00 to 101.00, stop 98.50, TP1 104.00, TP2 108.00 (sized as in `tp1_then_tp2`: quantity 18.943,
+realized_risk 49.9981542). The input carries the 1h bars 09:00 (signal bar) and 10:00 to 10:59:59.999 (bar N+1),
+the trade series for 10:00 to 10:59 and a mark series that stops after minute 10:05: a hole from 10:06 to the end
+of the bar (D-12, D-33).
+
+1. Fill at 100.0 at 10:05:59.999 (trade minute 10:05: low 99.9); the fill minute's mark low 100.5 is above the
+   stop 98.5.
+2. The first missing mark minute is 10:06. The rest of bar N+1 resolves once, at the bar close 10:59:59.999,
+   from the trade-price range of the strategy bar, stop first. Bar N+1's range has low 98.4 (the trade
+   minute 10:30) <= 98.5, so the whole position stops at the trigger 98.5 at 10:59:59.999, with
+   `fallback_applied` true and a coverage note naming the first missing minute (10:06) and the bar close.
+3. gross = (98.5 - 100) x 18.943 = -28.4145; entry fee = 100 x 18.943 x 0.0005 = 0.94715; exit fee =
+   98.5 x 18.943 x 0.0005 = 0.93294275; slippage = 100 x 18.943 x 0.0001 + 98.5 x 18.943 x 0.0003 =
+   0.18943 + 0.55976565 = 0.74919565; funding 0.
+4. realized_pnl = -28.4145 - 0.94715 - 0.93294275 - 0.74919565 = -31.0437884; R = -31.0437884 / 49.9981542 =
+   -0.62089869...
+
+Check (standalone):
+
+```bash
+python -c "from decimal import Decimal as D;e=D('101');s=D('98.5');rpu=e-s+e*D('0.0006')+s*D('0.0008');q=(D(50)/rpu//D('0.001'))*D('0.001');g=(s-D(100))*q;ef=D(100)*q*D('0.0005');xf=s*q*D('0.0005');sl=D(100)*q*D('0.0001')+s*q*D('0.0003');p=g-ef-xf-sl;print(rpu,q,q*rpu,g,ef,xf,sl,p,p/(q*rpu))"
+```
+
+Result: one record, ENTRY_FILLED at 10:05:59.999, SL 98.5 at 10:59:59.999, fallback_applied true. Run summary:
+fallback_count 1, everything else 0.
+
+## nonzero_cost_parity
+
+SHORT, base SHORT plan, TP1 96.00, TP2 92.00. Entry, TP1 and the stop each carry a fee and slippage, and each
+leg's cost is exactly price x leg quantity x rate (D-10, F-306); the rates are those of baseline-v5 (the cost
+model is bound to the registry set, so it cannot differ from them).
+
+1. Sizing as in `trade_through_vs_touch`: quantity 15.918, realized_risk 49.998438. TP1 quantity =
+   floor(7.959) = 7.959; the remainder is 7.959.
+2. Fill at 100.0 at 10:05:59.999 (trade minute 10:05: high 100.1). Mark minute 10:12 has low 95.9 <= 96.0 and
+   high 99.2 (stop not reached): TP1 books 7.959 at 96.0 at 10:12:59.999. Mark minute 10:40 has open 97.0 and
+   high 102.2 >= 102.0: the remainder stops at max(102.0, 97.0) = 102.0 at 10:40:59.999.
+3. Per-leg costs:
+
+   | leg | price | quantity | fee (x 0.0005) | slippage rate | slippage |
+   |-----|-------|----------|----------------|---------------|----------|
+   | entry (SHORT sell) | 100.0 | 15.918 | 0.7959 | 0.0001 | 0.15918 |
+   | TP1 | 96.0 | 7.959 | 0.382032 | 0.0001 | 0.0764064 |
+   | SL | 102.0 | 7.959 | 0.405909 | 0.0003 | 0.2435454 |
+
+   exit fees = 0.382032 + 0.405909 = 0.787941; slippage = 0.15918 + 0.0764064 + 0.2435454 = 0.4791318.
+4. gross = (100 - 96) x 7.959 + (100 - 102) x 7.959 = 31.836 - 15.918 = 15.918; funding 0.
+5. realized_pnl = 15.918 - 0.7959 - 0.787941 - 0.4791318 = 13.8550272; R = 13.8550272 / 49.998438 =
+   0.27710920...
+
+Check (standalone):
+
+```bash
+python -c "from decimal import Decimal as D;e=D('99');s=D('102');rpu=s-e+e*D('0.0006')+s*D('0.0008');q=(D(50)/rpu//D('0.001'))*D('0.001');a=(q/2//D('0.001'))*D('0.001');b=q-a;g=(D(100)-D(96))*a+(D(100)-s)*b;ef=D(100)*q*D('0.0005');xf=(D(96)*a+s*b)*D('0.0005');sl=D(100)*q*D('0.0001')+D(96)*a*D('0.0001')+s*b*D('0.0003');p=g-ef-xf-sl;print(rpu,q,a,b,q*rpu,g,ef,xf,sl,p,p/(q*rpu))"
+```
+
+Result: one record, ENTRY_FILLED at 10:05:59.999, TP1 7.959 at 96.0 at 10:12:59.999, final exit SL at 102.0 at
+10:40:59.999, realized_pnl 13.8550272.
