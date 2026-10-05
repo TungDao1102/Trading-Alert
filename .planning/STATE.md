@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 14
 current_phase_name: Backtest Simulator Causality Rewrite
 status: executing
-stopped_at: Completed 14-10-PLAN.md
-last_updated: "2026-10-05T06:37:06.945Z"
+stopped_at: Completed 14-11-PLAN.md
+last_updated: "2026-10-05T07:00:58.647Z"
 last_activity: 2026-10-05
 last_activity_desc: Phase 14 execution started
-state_head: fcb934f23c61cd1648a17d09120c81998ba752ff
+state_head: 9ed64190026c75693d206bd601299d6cebcf19b0
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 125
-  completed_plans: 118
+  completed_plans: 119
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 14 (Backtest Simulator Causality Rewrite) — EXECUTING
-Plan: 11 of 16
+Plan: 12 of 16
 Status: Ready to execute
 Last activity: 2026-10-05 — Phase 14 execution started
 
@@ -165,6 +165,7 @@ Progress: [█████░░░░░] 46%
 | Phase 14 P08 | 3h | 3 tasks | 6 files |
 | Phase 14 P09 | 35 min | 3 tasks | 9 files |
 | Phase 14 P10 | 20 min | 3 tasks | 6 files |
+| Phase 14 P11 | about 1 h | 3 tasks | 29 files |
 
 ## Accumulated Context
 
@@ -402,6 +403,9 @@ Recent decisions affecting current work:
 - [Phase 14]: 14-10: builder dataset_id hashes every 1m trade/mark partition of the requested range (lazy source files_read() is a subset), so the id covers every file a run reads
 - [Phase 14]: 14-10: funding cadence (8h/4h) inferred per symbol by spacing majority; tolerance fixed at FUNDING_MAX_CADENCE + FUNDING_JITTER, equal by test to coverage constants
 - [Phase 14]: 14-10: to_case_input exports v2 allowed_gaps without interval, omits open_interest, strips price_tick_count from mark rows; minute rows only with with_minute_rows=True
+- [Phase 14]: 14-11: report refuses a filled record whose exit_kind is not SL/TP2/END_OF_DATA instead of counting it as a plan outcome
+- [Phase 14]: 14-11: PlateauSection is a fixed NOT_COMPUTED structure (note: not computed (BKTS-03 pending)); regions and isolated-optimum warnings removed
+- [Phase 14]: 14-11: test_analytics_cli (31 tests) red until 14-15 migrates the evidence loader and evidence_sample.json; logged in deferred-items.md
 
 ### Pending Todos
 
@@ -456,6 +460,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-05T06:37:06.252Z
-Stopped at: Completed 14-10-PLAN.md
+Last session: 2026-10-05T07:00:57.922Z
+Stopped at: Completed 14-11-PLAN.md
 Resume file: None
