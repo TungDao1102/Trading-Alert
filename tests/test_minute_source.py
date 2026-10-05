@@ -202,9 +202,7 @@ def test_a_missing_minute_stays_a_hole_and_is_never_padded(tmp_path: Path) -> No
     hole = DAY1 + timedelta(hours=10, minutes=30)
     publish_days(root, DAY1, DAY2, skip=frozenset({hole}))
     source = make_source(root, end_utc=DAY2)
-    candles = source.trade_minutes(
-        SYMBOL, DAY1 + timedelta(hours=10), DAY1 + timedelta(hours=11)
-    )
+    candles = source.trade_minutes(SYMBOL, DAY1 + timedelta(hours=10), DAY1 + timedelta(hours=11))
     opens = {c.open_time_utc for c in candles}
     assert len(candles) == 59
     assert hole not in opens
