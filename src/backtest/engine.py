@@ -99,10 +99,12 @@ from .semantics import (
     FUNDING_JITTER,
     FUNDING_MAX_CADENCE,
     NO_TRADE_CONFLICT,
+    PENDING_AT_DATA_END,
     PLAN_SOURCE_SCRIPTED,
     PLAN_SOURCE_STRATEGY,
     SIMULATOR_SEMANTICS_VERSION,
     STRATEGY_WINDOW_BARS,
+    TIE_BREAK,
 )
 from .series import MinuteSource
 from .validator import validate_trade_record
@@ -113,6 +115,15 @@ _ZERO = Decimal("0")
 _UNCERTAIN_ACCOUNT_STATE = "UNCERTAIN_ACCOUNT_STATE"
 _MIN_QTY_REJECT = "MIN_QTY_REJECT"
 _SOURCE_TIMEFRAME = "1h"
+_CONTEXT_TIMEFRAME = "4h"
+# Pitfall 12: signals closing together are evaluated in (time, symbol) order, and a symbol
+# earlier in that order claims shared portfolio capacity first (D-18). The bias is stated in
+# every run summary so a reader of the evidence cannot miss it.
+_TIE_ORDER_NOTE = (
+    "Setups closing at the same instant are evaluated in (time, symbol) order, so a symbol "
+    "earlier in that order claims shared cluster, aggregate and position capacity first: a "
+    "known order bias, not randomized."
+)
 
 # Order of the items sharing one instant: funding first, then the lifecycle order of a plan.
 _RANK_FUNDING = 0
@@ -301,22 +312,41 @@ class _Engine:
         )
         used = sorted(set(self.used_gaps), key=lambda g: (g.symbol, g.start_utc, g.end_utc))
         scripted = self.parsed.scripted_plans is not None
+        records = self.records
+        summary: dict[str, Any] = {
+            "allowed_gaps_used": [
+                {
+                    "series": FUNDING_SERIES,
+                    "symbol": gap.symbol,
+                    "start_utc": gap.start_utc.isoformat(),
+                    "end_utc": gap.end_utc.isoformat(),
+                }
+                for gap in used
+            ],
+            "constraints_extrapolated_count": sum(r.constraints_extrapolated for r in records),
+            "context_timeframe": _CONTEXT_TIMEFRAME,
+            "context_window_bars": CONTEXT_WINDOW_BARS,
+            "data_window": {
+                "start_utc": self.data_start.isoformat(),
+                "end_utc": self.data_end.isoformat(),
+            },
+            "dataset_id": self.parsed.dataset_id,
+            "end_of_data_count": sum(r.exit_kind == EXIT_END_OF_DATA for r in records),
+            "fallback_count": sum(r.fallback_applied for r in records),
+            "gap_through_stop_count": sum(r.gap_through_stop for r in records),
+            "intrabar_tie_break": TIE_BREAK,
+            "no_trade_counts": dict(sorted(self.no_trade_counts.items())),
+            "pending_at_data_end_count": sum(r.entry_kind == PENDING_AT_DATA_END for r in records),
+            "plan_source": PLAN_SOURCE_SCRIPTED if scripted else PLAN_SOURCE_STRATEGY,
+            "simulator_semantics_version": SIMULATOR_SEMANTICS_VERSION,
+            "strategy_window_bars": STRATEGY_WINDOW_BARS,
+            "tie_order_note": _TIE_ORDER_NOTE,
+            "timeframe": _SOURCE_TIMEFRAME,
+            "touch_no_fill_total": sum(r.touch_no_fill_count for r in records),
+        }
         return {
             "trades": [record.to_dict() for record in ordered],
-            "run_summary": {
-                "no_trade_counts": dict(sorted(self.no_trade_counts.items())),
-                "plan_source": PLAN_SOURCE_SCRIPTED if scripted else PLAN_SOURCE_STRATEGY,
-                "allowed_gaps_used": [
-                    {
-                        "series": FUNDING_SERIES,
-                        "symbol": gap.symbol,
-                        "start_utc": gap.start_utc.isoformat(),
-                        "end_utc": gap.end_utc.isoformat(),
-                    }
-                    for gap in used
-                ],
-                "simulator_semantics_version": SIMULATOR_SEMANTICS_VERSION,
-            },
+            "run_summary": dict(sorted(summary.items())),
             "strategy_version": self.parsed.strategy_version,
             "parameter_set_hash": self.parameter_set.parameter_set_hash,
             "cost_model_hash": self.cost_model.cost_model_hash,
@@ -667,6 +697,7 @@ class _Engine:
         extrapolated: bool = False,
         regime: str | None = None,
     ) -> None:
+        self._count(reason_code)  # every reject is also a NO_TRADE outcome of the run
         self.records.append(
             build_reject_record(
                 signal_id=signal_id,
@@ -825,8 +856,13 @@ def simulate(
     """Run the v2 engine on a case-input v2 dict and return the output dict.
 
     The output carries `trades` (`TradeRecord.to_dict()` in the deterministic order signal
-    bar close, symbol, trade id), `run_summary` (`no_trade_counts`, `plan_source`,
-    `allowed_gaps_used`, `simulator_semantics_version`), `strategy_version`,
+    bar close, symbol, trade id), `run_summary` (sorted JSON-native keys: `allowed_gaps_used`,
+    `constraints_extrapolated_count`, `context_timeframe`, `context_window_bars`,
+    `data_window`, `dataset_id`, `end_of_data_count`, `fallback_count`,
+    `gap_through_stop_count`, `intrabar_tie_break`, `no_trade_counts`,
+    `pending_at_data_end_count`, `plan_source`, `simulator_semantics_version`,
+    `strategy_window_bars`, `tie_order_note`, `timeframe`, `touch_no_fill_total`),
+    `strategy_version`,
     `parameter_set_hash`, `cost_model_hash` and `symbols`.
     """
     return simulate_detailed(case_input, risk_fn=risk_fn, minute_source=minute_source).output

@@ -451,8 +451,9 @@ def test_an_unsizeable_tp1_leg_rejects_the_plan_and_it_never_rests(
         ("sig-1", "REJECT", reason),
         ("sig-2", "REJECT", reason),
     ]
-    # Nothing rested, so the second setup was a fresh evaluation and not a conflict.
-    assert output["run_summary"]["no_trade_counts"] == {}
+    # Nothing rested, so the second setup was a fresh evaluation and not a conflict; both
+    # rejects are NO_TRADE outcomes of the run (plan 14-09).
+    assert output["run_summary"]["no_trade_counts"] == {reason: 2}
 
 
 def test_a_partial_fill_floors_the_quantity_and_scales_the_realized_risk() -> None:
