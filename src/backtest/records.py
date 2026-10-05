@@ -28,6 +28,7 @@ from typing import Any
 
 from src.core._decimal import _add, _mul, _sub
 from src.domain.canonical import sha256_hex
+from src.domain.enums import RejectionReason
 from src.risk.realized_risk import realized_risk_for_fill
 
 from .costs import CostModel
@@ -41,7 +42,7 @@ from .lifecycle import (
     LifecycleEvent,
     PlanState,
 )
-from .semantics import ENTRY_KINDS, EXIT_KINDS, EXIT_TP2, SIMULATOR_SEMANTICS_VERSION
+from .semantics import ENTRY_KINDS, EXIT_KINDS, EXIT_TP2, REJECT, SIMULATOR_SEMANTICS_VERSION
 from .validator import validate_trade_record
 
 BOOKING_FILL = "FILL"
@@ -50,6 +51,8 @@ BOOKING_EXIT = "EXIT"
 # A cancel or a pending-at-data-end changes no cash: it books a zero amount at its own time.
 BOOKING_CANCEL = "CANCEL"
 BOOKING_PENDING = "PENDING"
+# A funding payment books at its own fundingTime, between the fill and the exit.
+BOOKING_FUNDING = "FUNDING"
 
 
 @dataclass(frozen=True)
@@ -406,14 +409,93 @@ def build_trade_record(
     return record
 
 
+_REJECT_REASONS = frozenset(reason.value for reason in RejectionReason)
+
+
+def build_reject_record(
+    *,
+    signal_id: str | None,
+    trade_plan_id: str | None,
+    symbol: str,
+    direction: str,
+    reason_code: str,
+    bar_close_utc: datetime,
+    strategy_version: str,
+    parameter_set_hash: str,
+    modeled_costs_per_unit: Decimal | None = None,
+    constraints_extrapolated: bool = False,
+    regime: str | None = None,
+) -> TradeRecord:
+    """Build the REJECT record of a plan the planner, risk gates or protective sizing refused.
+
+    A reject never rests and never fills: `outcome_kind` and `entry_kind` are "REJECT" and
+    every trade field is `None`. `reason_code` must be a canonical `RejectionReason` value
+    (a skipped re-signal is a summary counter, never a reject record, D-32). The id is
+    bound to the semantics version, the signal, the symbol, the reason and the bar close,
+    so a v1 reject can never collide with a v2 one.
+
+    Raises:
+        ValueError: `reason_code` is not a `RejectionReason` value.
+        TradeRecordInvariantError: the built record violates a temporal invariant.
+    """
+    if reason_code not in _REJECT_REASONS:
+        raise ValueError(
+            f"reason_code {reason_code!r} is not a RejectionReason value: "
+            "a skipped setup is counted in the run summary, not recorded as a reject"
+        )
+    payload = {
+        "simulator_semantics_version": SIMULATOR_SEMANTICS_VERSION,
+        "signal_id": signal_id,
+        "symbol": symbol,
+        "reason_code": reason_code,
+        "bar_close_utc": bar_close_utc,
+    }
+    record = TradeRecord(
+        trade_id=sha256_hex(payload),
+        signal_id=signal_id,
+        trade_plan_id=trade_plan_id,
+        strategy_version=strategy_version,
+        parameter_set_hash=parameter_set_hash,
+        symbol=symbol,
+        direction=direction,
+        entry_kind=REJECT,
+        entry_price=None,
+        entry_time_utc=None,
+        quantity=None,
+        exit_kind=None,
+        exit_price=None,
+        exit_time_utc=None,
+        realized_pnl=None,
+        realized_risk=None,
+        gross_pnl=None,
+        entry_fee=None,
+        exit_fee=None,
+        funding_amount=None,
+        slippage_amount=None,
+        modeled_costs_per_unit=modeled_costs_per_unit,
+        coverage_note=None,
+        fallback_applied=False,
+        outcome_kind=REJECT,
+        reason_code=reason_code,
+        signal_close_utc=bar_close_utc,
+        resolved_at_utc=bar_close_utc,
+        constraints_extrapolated=constraints_extrapolated,
+        regime=regime,
+    )
+    validate_trade_record(record)
+    return record
+
+
 __all__ = [
-    "BOOKING_EXIT",
     "BOOKING_CANCEL",
+    "BOOKING_EXIT",
     "BOOKING_FILL",
+    "BOOKING_FUNDING",
     "BOOKING_PENDING",
     "BOOKING_TP1",
     "Booking",
     "TradeRecord",
     "booking_for_event",
+    "build_reject_record",
     "build_trade_record",
 ]
