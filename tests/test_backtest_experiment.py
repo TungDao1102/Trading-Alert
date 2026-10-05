@@ -1085,3 +1085,197 @@ def test_the_record_serializes_without_the_research_gate_keys() -> None:
     assert document["simulator_semantics_version"] == "2.0.0"
     assert document["no_trade_counts"] == {"CONFLICT_WITH_OPEN_POSITION": 3, "RR_TOO_LOW": 5}
     assert json.loads(text) == document
+
+
+# --------------------------------------------------------------------------- #
+# Phase 14 (plan 14-15, Task 2): trade fan-out validation and the v2 run binding.
+# --------------------------------------------------------------------------- #
+
+
+def _engine_trade() -> dict[str, Any]:
+    """The one filled trade dict the simple-trend baseline case produces (engine output)."""
+    from src.backtest.simulator import run
+
+    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    (trade,) = run(case)["trades"]
+    return dict(trade)
+
+
+def test_trade_from_dict_round_trips_every_v2_field() -> None:
+    from src.backtest.experiment import _trade_from_dict
+
+    raw = _engine_trade()
+    trade = _trade_from_dict(raw)
+    assert trade.to_dict() == raw
+    assert isinstance(trade.signal_close_utc, datetime)
+    assert isinstance(trade.resolved_at_utc, datetime)
+    assert trade.planned_quantity == Decimal("20.598")
+    assert trade.regime == "BULLISH"
+    assert type(trade.funding_event_count) is int
+    assert type(trade.gap_through_stop) is bool
+
+
+def test_trade_from_dict_rebuilds_the_tp1_leg_as_typed_values() -> None:
+    from src.backtest.experiment import _trade_from_dict
+
+    raw = _engine_trade()
+    raw.update(
+        exit_kind="TP2",
+        exit_price="129.70",
+        exit_time_utc="2026-09-11T10:30:00+00:00",
+        tp1_quantity="10.299",
+        tp1_price="125.60",
+        tp1_time_utc="2026-09-11T10:20:00+00:00",
+    )
+    trade = _trade_from_dict(raw)
+    assert trade.tp1_quantity == Decimal("10.299")
+    assert trade.tp1_price == Decimal("125.60")
+    assert trade.tp1_time_utc == datetime(2026, 9, 11, 10, 20, tzinfo=UTC)
+
+
+def test_trade_from_dict_validates_every_trade() -> None:
+    from src.backtest.experiment import _trade_from_dict
+    from src.backtest.validator import TradeRecordInvariantError
+
+    before_signal = _engine_trade()
+    before_signal["entry_time_utc"] = "2026-09-11T09:59:00+00:00"  # before signal_close_utc
+    with pytest.raises(TradeRecordInvariantError, match="entry_time"):
+        _trade_from_dict(before_signal)
+
+    no_signal_close = _engine_trade()
+    del no_signal_close["signal_close_utc"]
+    with pytest.raises(TradeRecordInvariantError, match="signal_close_utc"):
+        _trade_from_dict(no_signal_close)
+
+    over_planned = _engine_trade()
+    over_planned["quantity"] = "99"
+    with pytest.raises(TradeRecordInvariantError, match="planned_quantity"):
+        _trade_from_dict(over_planned)
+
+    exit_before_entry = _engine_trade()
+    exit_before_entry["exit_time_utc"] = "2026-09-11T10:00:00+00:00"
+    with pytest.raises(TradeRecordInvariantError, match="exit_time"):
+        _trade_from_dict(exit_before_entry)
+
+
+def test_trade_from_dict_refuses_a_v1_shaped_trade() -> None:
+    from src.backtest.experiment import _trade_from_dict
+    from src.backtest.validator import TradeRecordInvariantError
+
+    v1 = _engine_trade()
+    for key in (
+        "signal_close_utc",
+        "planned_quantity",
+        "tp1_quantity",
+        "tp1_price",
+        "tp1_time_utc",
+        "resolved_at_utc",
+        "touch_no_fill_count",
+        "gap_through_stop",
+        "constraints_extrapolated",
+        "regime",
+        "funding_event_count",
+    ):
+        del v1[key]
+    v1["exit_kind"] = "TP1"
+    with pytest.raises(TradeRecordInvariantError, match="exit_kind"):
+        _trade_from_dict(v1)
+
+    v1_unfilled = _engine_trade()
+    v1_unfilled.update(entry_kind="TOUCH_NO_FILL", exit_kind=None)
+    with pytest.raises(TradeRecordInvariantError, match="entry_kind"):
+        _trade_from_dict(v1_unfilled)
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("touch_no_fill_count", "1"),
+        ("touch_no_fill_count", True),
+        ("funding_event_count", 1.5),
+        ("gap_through_stop", 0),
+        ("fallback_applied", "false"),
+        ("constraints_extrapolated", None),
+        ("regime", 7),
+        ("coverage_note", ["x"]),
+    ],
+)
+def test_trade_from_dict_refuses_mistyped_counters_flags_and_labels(
+    field: str, bad: object
+) -> None:
+    from src.backtest.experiment import ExperimentReproducibilityBroken, _trade_from_dict
+
+    raw = _engine_trade()
+    raw[field] = bad
+    with pytest.raises(ExperimentReproducibilityBroken, match=field):
+        _trade_from_dict(raw)
+
+
+def test_reproduce_binds_the_data_window_to_the_record_time_range() -> None:
+    from src.backtest.experiment import ExperimentReproducibilityBroken, reproduce
+
+    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    record = _simple_trend_record(case)
+    shifted = dict(case, data_window=dict(case["data_window"], end_utc="2026-09-11T11:30:00+00:00"))
+    with pytest.raises(ExperimentReproducibilityBroken, match="data_window"):
+        reproduce(record, simulator_inputs=shifted)
+    missing = {k: v for k, v in case.items() if k != "data_window"}
+    with pytest.raises(ExperimentReproducibilityBroken, match="data_window"):
+        reproduce(record, simulator_inputs=missing)
+
+
+def test_verify_experiment_fails_closed_when_the_data_window_changes() -> None:
+    from src.backtest.experiment import ExperimentReproducibilityBroken, verify_experiment
+
+    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    record = _simple_trend_record(case)
+    assert verify_experiment(record, simulator_inputs=case) is None
+    shorter = dict(case, data_window=dict(case["data_window"], end_utc="2026-09-11T10:30:00+00:00"))
+    with pytest.raises(ExperimentReproducibilityBroken, match="data_window"):
+        verify_experiment(record, simulator_inputs=shorter)
+
+
+def test_verify_experiment_fails_closed_when_the_simulator_semantics_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backtest.experiment import ExperimentReproducibilityBroken, verify_experiment
+
+    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    record = _simple_trend_record(case)
+    # The engine now reports a different semantics version than the record was made under.
+    monkeypatch.setattr("src.backtest.engine.SIMULATOR_SEMANTICS_VERSION", "2.0.1")
+    with pytest.raises(ExperimentReproducibilityBroken, match="simulator_semantics_version"):
+        verify_experiment(record, simulator_inputs=case)
+
+
+def test_reproduce_refuses_a_run_whose_typed_counts_differ_from_the_record() -> None:
+    from src.backtest.experiment import ExperimentReproducibilityBroken, reproduce
+
+    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    record = dataclasses.replace(
+        _simple_trend_record(case), no_trade_counts=(("NO_TRADE_REGIME", 1),)
+    )
+    with pytest.raises(ExperimentReproducibilityBroken, match="no_trade_counts"):
+        reproduce(record, simulator_inputs=case)
+
+
+def test_reproduce_refuses_to_replay_a_scripted_run() -> None:
+    from src.backtest.experiment import ExperimentReproducibilityBroken, reproduce
+
+    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    record = _simple_trend_record(case)
+    scripted = dict(case, scripted_plans=[])
+    with pytest.raises(ExperimentReproducibilityBroken, match="plan_source"):
+        reproduce(record, simulator_inputs=scripted)
+
+
+def test_reproduce_returns_validated_typed_trades_for_a_bound_record() -> None:
+    from src.backtest.experiment import reproduce
+    from src.backtest.simulator import run
+
+    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
+    record = _simple_trend_record(case)
+    trades = reproduce(record, simulator_inputs=case)
+    assert [t.to_dict() for t in trades] == run(case)["trades"]
+    assert record.no_trade_counts == (("NO_TRADE_REGIME", 9),)
+    assert record.end_of_data_count == 0
