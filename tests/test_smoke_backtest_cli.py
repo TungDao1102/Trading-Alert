@@ -123,6 +123,7 @@ def test_unreachable_database_prints_the_exception_type_only(
     secret = "S3cr3tPw-do-not-print"
     url = f"postgresql://smoke_user:{secret}@127.0.0.1:1/smoke_db"
     monkeypatch.setenv("SMOKE_TEST_DB_URL", url)
+    monkeypatch.setattr(smoke, "DB_CONNECT_TIMEOUT_SECONDS", 1)
 
     code = smoke.main([*_base_args(raw_root), "--database-url-env", "SMOKE_TEST_DB_URL"])
     text = capsys.readouterr()
@@ -133,6 +134,23 @@ def test_unreachable_database_prints_the_exception_type_only(
     assert "postgresql://" not in combined
     assert "smoke_user" not in combined
     assert "127.0.0.1" not in combined
+
+
+def test_malformed_database_url_prints_the_exception_type_only(
+    raw_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secret = "S3cr3tPw-do-not-print"
+    monkeypatch.setenv("SMOKE_TEST_DB_URL", f"postgresql://smoke_user:{secret}@db-host:notaport/x")
+
+    code = smoke.main([*_base_args(raw_root), "--database-url-env", "SMOKE_TEST_DB_URL"])
+    text = capsys.readouterr()
+    combined = text.out + text.err
+
+    assert code != 0
+    assert secret not in combined
+    assert "postgresql://" not in combined
+    assert "smoke_user" not in combined
+    assert "db-host" not in combined
 
 
 @pytest.mark.parametrize(
