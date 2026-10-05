@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 14
 current_phase_name: Backtest Simulator Causality Rewrite
 status: executing
-stopped_at: Completed 14-12-PLAN.md
-last_updated: "2026-10-05T07:33:19.194Z"
+stopped_at: Completed 14-13-PLAN.md
+last_updated: "2026-10-05T07:55:02.317Z"
 last_activity: 2026-10-05
 last_activity_desc: Phase 14 execution started
-state_head: d6acf893ae920f1cbb975324ace6e78f93e42e54
+state_head: b2981c71e56e6f8c7c6d6b284b9bcdd4cf946acb
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 125
-  completed_plans: 120
+  completed_plans: 121
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 14 (Backtest Simulator Causality Rewrite) — EXECUTING
-Plan: 13 of 16
+Plan: 14 of 16
 Status: Ready to execute
 Last activity: 2026-10-05 — Phase 14 execution started
 
@@ -167,6 +167,7 @@ Progress: [█████░░░░░] 46%
 | Phase 14 P10 | 20 min | 3 tasks | 6 files |
 | Phase 14 P11 | about 1 h | 3 tasks | 29 files |
 | Phase 14 P12 | 70min | 3 tasks | 19 files |
+| Phase 14 P13 | 90 min | 3 tasks | 36 files |
 
 ## Accumulated Context
 
@@ -409,6 +410,8 @@ Recent decisions affecting current work:
 - [Phase 14]: 14-11: test_analytics_cli (31 tests) red until 14-15 migrates the evidence loader and evidence_sample.json; logged in deferred-items.md
 - [Phase 14]: 14-12: simulator.run is a thin shell over engine.simulate with evaluate_risk resolved from module globals at call time; phase6 cases are regression snapshots with 1m data from bar N+1
 - [Phase 14]: 14-12: paper parity fixture is a single-signal history where the ledger never binds (D052 input); asserted explicitly
+- [Phase 14]: 14-13: Phase 14 goldens use scripted round-number plans; expected.json is hand-written from DERIVATIONS.md standalone Decimal arithmetic and the generator writes input.json only
+- [Phase 14]: 14-13: daily_loss_blocks_next needs three sequential stop-outs (about 34 each, sizes shrink with realized equity) to reach the 100 DAILY_STOP threshold; two stop-outs cannot
 
 ### Pending Todos
 
@@ -463,6 +466,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-05T07:33:18.330Z
-Stopped at: Completed 14-12-PLAN.md
+Last session: 2026-10-05T07:55:01.541Z
+Stopped at: Completed 14-13-PLAN.md
 Resume file: None
