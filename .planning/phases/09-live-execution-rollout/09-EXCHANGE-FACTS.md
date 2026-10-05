@@ -102,7 +102,7 @@
 
 **Claim:** The exchange accepts, rejects or later cancels a `closePosition=true` STOP_MARKET algo order that is placed while no position exists (this decides how the orphaned entry-time SL in WR-07 behaves).
 
-**Verdict:** UNCONFIRMED
+**Verdict:** RESOLVED on Demo: the exchange rejects it (-4509)
 
 **Source:** https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Algo-Order (snapshot http://web.archive.org/web/20260519005421/https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Algo-Order), https://developers.binance.com/docs/derivatives/usds-margined-futures/user-data-streams/Event-Algo-Order-Update (snapshot http://web.archive.org/web/20260113091316/...)
 
@@ -112,7 +112,7 @@
 
 **Code impact:** None made here. The EXPIRED example concerns a GTE_GTC time-in-force order, not a plain closePosition STOP_MARKET, so it is not evidence for this case. The runner's far scenario places exactly this order (entry-time SL while the LIMIT entry is unfilled), so the Demo cross-check will answer it: placement accepted or rejected, and whether the order stays NEW afterwards.
 
-**Demo cross-check:** NOT YET OBSERVED
+**Demo cross-check:** OBSERVED 2026-10-05 (`--execute far`, evidence `09-DEMO-REHEARSAL-EVIDENCE-far-20261005T154847Z.json`). With the LIMIT entry resting unfilled and no position, placing the `closePosition=true` STOP_MARKET algo order failed with `BadRequestError`, `binance code -4509: Time in Force (TIF) GTE can only be used with open positions. Please ensure that positions are available.` So the exchange REJECTS it at placement; it is not accepted and later cancelled. The manager then ended ENTRY_WITHOUT_PROTECTIVE, cancelled the entry and entered SAFE_MODE (fail closed, nothing left on the account).
 
 ## Addendum
 
@@ -157,7 +157,7 @@
 | Fact 3 | reduceOnly on CONDITIONAL algo orders | CONFIRMED | trade/rest-api/New-Algo-Order |
 | Fact 4 | MIN_NOTIONAL on reduce-only legs | CONTRADICTED | error-code, common-definition |
 | Fact 5 | MAX_NUM_ALGO_ORDERS and the literal 200 | CONFIRMED | change-log, common-definition |
-| Fact 6 | closePosition STOP_MARKET with no position | UNCONFIRMED | New-Algo-Order, Event-Algo-Order-Update |
+| Fact 6 | closePosition STOP_MARKET with no position | REJECTED on Demo (-4509) | New-Algo-Order, Event-Algo-Order-Update |
 | Addendum A | Demo REST URL and algo endpoint support | UNCONFIRMED | general-info |
 | Addendum B | PERCENT_PRICE semantics | CONFIRMED | common-definition |
 

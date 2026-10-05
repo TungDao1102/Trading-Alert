@@ -1,0 +1,205 @@
+{
+  "attestation_map": {
+    "1": {
+      "detail": "the fill scenario did not confirm all three legs in this run",
+      "status": "NOT_OBSERVED",
+      "title": "smallest LIMIT plus SL, TP1, TP2 round trip on Demo"
+    },
+    "2": {
+      "detail": "no TP1 and TP2 echoes were recorded; trigger-time behaviour is never forced",
+      "status": "NOT_OBSERVED",
+      "title": "TP1 partial then TP2 close-all semantics"
+    },
+    "3": {
+      "detail": "needs a user-data stream, which arrives with Phase 18",
+      "status": "NOT_OBSERVED",
+      "title": "ALGO_UPDATE.o.rm rejection parsing"
+    },
+    "4": {
+      "detail": "no runner can attest this; the operator confirms it by hand",
+      "status": "HUMAN_ONLY",
+      "title": "live credential provisioning (no withdrawal, IP allowlist, storage)"
+    },
+    "5": {
+      "detail": "skip_tap=None, approve=PASSED, unknown_chat_tap=None",
+      "status": "PARTIALLY_OBSERVED",
+      "title": "Telegram approval taps"
+    },
+    "6": {
+      "detail": "7 PASS and 3 DEGRADED; DEGRADED probes (not evaluated by a REST-only rehearsal): ws_connection_state, user_data_stream_state, db_writes",
+      "status": "OBSERVED_WITH_DEGRADED",
+      "title": "ten health probes"
+    }
+  },
+  "base_url": "https://demo-fapi.binance.com",
+  "constraints": {
+    "contract_type": "PERPETUAL",
+    "max_quantity": "1000",
+    "min_notional": "50",
+    "min_quantity": "0.0001",
+    "percent_price_multiplier_down": "0.9500",
+    "percent_price_multiplier_up": "1.0500",
+    "price_tick_size": "0.10",
+    "quantity_step_size": "0.0001",
+    "status": "TRADING",
+    "symbol": "BTCUSDT"
+  },
+  "details": {
+    "authorized_chat_sha256_prefix": "9338381c2be5",
+    "enablement": {
+      "disabled_after_run": true,
+      "enabled_in_run": true,
+      "operator_id": "demo-rehearsal-runner"
+    },
+    "health": [
+      {
+        "check_name": "market_feed_freshness",
+        "detail": "market feed fresh: age=0:00:22.565000",
+        "status": "PASS"
+      },
+      {
+        "check_name": "last_closed_candle_time",
+        "detail": "last closed candle fresh: age=0:46:22.566000",
+        "status": "PASS"
+      },
+      {
+        "check_name": "ws_connection_state",
+        "detail": "not evaluated: this REST-only rehearsal opens no WebSocket (no market stream)",
+        "status": "DEGRADED"
+      },
+      {
+        "check_name": "user_data_stream_state",
+        "detail": "not evaluated: this REST-only rehearsal opens no user-data stream (Phase 18)",
+        "status": "DEGRADED"
+      },
+      {
+        "check_name": "rest_error_rate",
+        "detail": "REST error rate 0 within max 0.1",
+        "status": "PASS"
+      },
+      {
+        "check_name": "reconciliation_drift",
+        "detail": "reconciled",
+        "status": "PASS"
+      },
+      {
+        "check_name": "db_writes",
+        "detail": "not evaluated: this rehearsal has no PostgreSQL, so no db writes occur",
+        "status": "DEGRADED"
+      },
+      {
+        "check_name": "telegram_delivery",
+        "detail": "probe delivered",
+        "status": "PASS"
+      },
+      {
+        "check_name": "unprotected_positions",
+        "detail": "no unprotected positions",
+        "status": "PASS"
+      },
+      {
+        "check_name": "orphaned_orders",
+        "detail": "no orphaned orders",
+        "status": "PASS"
+      }
+    ],
+    "journal_event_counts": {
+      "CALLBACK_RECEIVED": 1,
+      "CALLBACK_RESOLVED": 1,
+      "ENTRY_EXPIRY": 4,
+      "HEALTH_CHECK": 10,
+      "LIVE_ORDERS_DISABLED": 1,
+      "LIVE_ORDERS_ENABLED": 1,
+      "PROTECTIVE_CANCEL": 6,
+      "SAFE_MODE_ENTER": 1
+    },
+    "operator_instructions": [
+      "Check the Binance Demo UI for any leftover order or position."
+    ],
+    "plan": {
+      "entry_price": "83674.50",
+      "expiry_utc": "2026-10-05T16:01:23.993000+00:00",
+      "mark_price": "85820.00000000",
+      "parameter_set_hash": "41ed39d4be10491abf614491aad7a9b0d35e1f52f5e894ff9d94fb2149ac3df9",
+      "parameter_set_id": "baseline-v5",
+      "plan_hash": "02b1ca51a028013a54a5485a190de1065d514523a030150a9f505cc45c3f245f",
+      "quantity": "0.0012",
+      "rehearsal_equity": "329.10",
+      "risk_rate": "0.005",
+      "run_id": "far-20261005T154619Z",
+      "scenario": "far",
+      "stop_loss": "82419.40",
+      "strategy_version": "v4.0.0",
+      "tp1_quantity": "0.0006",
+      "tp1_quantity_fraction": "0.5",
+      "tp1_trigger": "88394.60",
+      "tp2_trigger": "90969.20",
+      "trade_plan_id": "6601408ce7966720e4ccd3dbd587d60bf9a40da228f016bff83c100a6cdf3c84"
+    },
+    "run_id": "far-20261005T154619Z"
+  },
+  "exchange_orders": [
+    {
+      "client_order_id": "x-02b1ca51a028013a54a5485a190de106EN",
+      "exchange_order_id": "28619374859",
+      "order_type": "LIMIT",
+      "position_side": "BOTH",
+      "price": "83674.50",
+      "quantity": "0.0012",
+      "side": "BUY",
+      "source": "exchange_response",
+      "status": "NEW",
+      "symbol": "BTCUSDT",
+      "time_in_force": "GTC",
+      "type": "EntryPlacementResult",
+      "update_time_utc": "2026-10-05T15:46:34.309000+00:00"
+    }
+  ],
+  "failures": [
+    {
+      "exception_type": "BadRequestError",
+      "step": "place_algo_protective"
+    }
+  ],
+  "mode": "EXECUTE",
+  "observations": [],
+  "outcome": "FAILED",
+  "planned_requests": [],
+  "runner_clock_utc": {
+    "finished": "2026-10-05T15:46:37.437533+00:00",
+    "started": "2026-10-05T15:46:19.691753+00:00"
+  },
+  "scenario": "far",
+  "schema": "demo-rehearsal-evidence/schema-1",
+  "steps": [
+    {
+      "detail": "7 PASS, 3 DEGRADED (ws_connection_state, user_data_stream_state, db_writes); none FAILED",
+      "name": "health_preflight",
+      "status": "PASSED"
+    },
+    {
+      "detail": "APPROVE resolved APPROVED through dispatch_callback",
+      "name": "approval_tap",
+      "status": "PASSED"
+    },
+    {
+      "detail": "tick, step, minimums unchanged",
+      "name": "constraint_recheck",
+      "status": "PASSED"
+    },
+    {
+      "detail": "execute_approved_plan: ENTRY_WITHOUT_PROTECTIVE",
+      "name": "place_entry_and_stop",
+      "status": "FAILED"
+    }
+  ],
+  "symbol": "BTCUSDT",
+  "synthetic_inputs": [
+    "rehearsal equity 329.10 USDT back-solved from the target quantity (a rehearsal input, not a Demo account fact)",
+    "daily_loss_quote fixed at 0 (not read from the account)",
+    "kill-gate state constant WITHIN_BUDGET passed to enable() (not an evaluation of the research ledger)",
+    "execution intent store is the in-memory test double tests.support.intent_store_fakes.InMemoryExecutionIntentStore",
+    "approval book, short-id mapping and journal are in-memory rehearsal doubles",
+    "plan prices derive from the Demo mark price and exchangeInfo (rehearsal values, not a strategy signal)"
+  ]
+}
