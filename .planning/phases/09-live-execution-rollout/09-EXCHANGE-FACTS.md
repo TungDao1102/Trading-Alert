@@ -20,7 +20,7 @@
 
 **Claim:** `query_order_by_client` treats `-2011 UNKNOWN_ORDER` as "order not found" (found=False) and deliberately does not map `-2013 NO_SUCH_ORDER`; `query_algo_order_by_client` uses the same `-2011` mapping.
 
-**Verdict:** UNCONFIRMED
+**Verdict:** CONFIRMED for Query Algo Order (Demo-observed -2013); Query Order -2013 documented but not Demo-observed
 
 **Source:** https://developers.binance.com/docs/derivatives/usds-margined-futures/error-code (snapshot http://web.archive.org/web/20260616115238/https://developers.binance.com/docs/derivatives/usds-margined-futures/error-code), https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Query-Order (snapshot http://web.archive.org/web/20260617202104/...), https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Query-Algo-Order (snapshot http://web.archive.org/web/20260422084421/...), https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Cancel-Algo-Order (snapshot http://web.archive.org/web/20260616114853/...)
 
@@ -30,7 +30,9 @@
 
 **Code impact:** None made here. Two observations for the orchestrator. (a) No official page ties either code to Query Order or Query Algo Order, so the `-2011` mapping in `BinanceUsdmAdapter.query_order_by_client` and `query_algo_order_by_client` is unconfirmed, and so is the decision not to map `-2013`. (b) The docs name `-2011` `CANCEL_REJECTED`; the text `UNKNOWN_ORDER` does not appear for it. The adapter matches `"UNKNOWN_ORDER" in str(exc) or "-2011" in str(exc)`, so only the `-2011` branch can match a documented code, and that depends on the SDK exception text carrying the numeric code. If the Demo run shows `-2013` for an unknown client id, the mapping in those two adapter methods is the place that would change, and only after a deliberate decision (a wrong mapping enables a retry and risks a duplicate order). Fail-closed behaviour stays as it is.
 
-**Demo cross-check:** NOT YET OBSERVED
+**Demo cross-check:** OBSERVED 2026-10-05 (read-only probe, one signed `GET /fapi/v1/algoOrder` on `demo-fapi.binance.com` with a client id that cannot exist; nothing placed or cancelled). The SDK raised `binance_common.errors.BadRequestError` with `status_code=-2013`, `error_message='Order does not exist.'`, `str(exc) == "(-2013, 'Order does not exist.')"`. So Demo answers a missing algo order with `-2013 NO_SUCH_ORDER`, not `-2011`, and the pre-fix mapping raised, ending the `far` dry-run in ENTRY_WITHOUT_PROTECTIVE. Not observed: Query Order (`GET /fapi/v1/order`) on Demo; the docs list `-2013` for it, and it is mapped on that documentary basis.
+
+**Resolution (quick 261005-vb2):** `_is_order_not_found_error` in `src/adapters/binance_usdm.py` keys on the int `status_code` (`-2013`, `-2011`) and falls back to message text only when no int code exists; both `query_algo_order_by_client` and `query_order_by_client` use it. Every other code still raises (fail closed). Cancel paths are unchanged.
 
 ### Fact 2: Active algo statuses
 
@@ -150,7 +152,7 @@
 
 | Entry | Topic | Verdict | Official page used |
 |-------|-------|---------|--------------------|
-| Fact 1 | Query-order and algo not-found code | UNCONFIRMED | error-code, Query-Order, Query-Algo-Order, Cancel-Algo-Order |
+| Fact 1 | Query-order and algo not-found code | CONFIRMED (algo, Demo); query-order by docs | error-code, Query-Order, Query-Algo-Order, Cancel-Algo-Order |
 | Fact 2 | Active algo statuses | UNCONFIRMED | user-data-streams/Event-Algo-Order-Update |
 | Fact 3 | reduceOnly on CONDITIONAL algo orders | CONFIRMED | trade/rest-api/New-Algo-Order |
 | Fact 4 | MIN_NOTIONAL on reduce-only legs | CONTRADICTED | error-code, common-definition |
@@ -161,7 +163,7 @@
 
 ## Open items
 
-- Fact 1: which code Query Order and Query Algo Order return for an unknown client id (and whether `-2011` or `-2013`); only the Demo run or the live docs can settle it.
+- Fact 1: settled for Query Algo Order (Demo returns `-2013`, mapped). Query Order on Demo is still unobserved; one more read-only probe would close it.
 - Fact 2: whether TRIGGERING and TRIGGERED should count as active; the docs list the values but do not classify them.
 - Fact 6: behaviour of a closePosition STOP_MARKET placed with no open position; not documented.
 - Addendum A: whether the algo endpoints are supported on Demo; the docs say only "Most of the endpoints".
