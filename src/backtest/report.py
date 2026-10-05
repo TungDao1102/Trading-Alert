@@ -31,7 +31,7 @@ import random
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -475,6 +475,15 @@ def _parse_exit_dt(trade: Mapping[str, Any]) -> datetime | None:
     return None
 
 
+_EARLIEST = datetime.min.replace(tzinfo=UTC)
+
+
+def _realized_order_key(trade: Mapping[str, Any]) -> tuple[datetime, str]:
+    """Order key of a closed trade by realized time: `(exit_time_utc, trade_id)`."""
+    exit_dt = _parse_exit_dt(trade)
+    return (exit_dt if exit_dt is not None else _EARLIEST, str(trade.get("trade_id")))
+
+
 def _sample_block_length(rng: random.Random, p: Decimal) -> int:
     if p <= Decimal("0") or p > Decimal("1"):
         raise ReportBuildError(f"p must be in (0, 1], got {p}")
@@ -636,6 +645,10 @@ def build(
         raise ReportBuildError(f"probable must be in (0, 1], got {probable}")
 
     closed_trades, end_of_data_trades, plan_outcomes = _classify(trade_records)
+    # WR-06: the engine orders trades by signal close, but results are realized at exit, and
+    # holding periods overlap. Drawdown, block bootstrap and stability walk the equity path,
+    # so the closed trades are ordered by realized time (exit time, then trade id).
+    closed_trades = sorted(closed_trades, key=_realized_order_key)
 
     r_values: list[Decimal] = []
     annotated: list[tuple[Mapping[str, Any], Decimal]] = []

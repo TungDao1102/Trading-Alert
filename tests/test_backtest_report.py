@@ -538,6 +538,22 @@ def _gap_trades_four() -> list:
     ]
 
 
+def test_wr06_drawdown_walks_trades_in_exit_time_order_not_signal_order() -> None:
+    """WR-06: trades arrive in signal order, but results are realized at exit time."""
+    record = _make_experiment_record()
+    # Signal order: late-exit loss, early-exit win, mid-exit loss (R = -3, +3, -3).
+    trades = [
+        _gap_trade("w6-a", "-0.30", "0.10", exit_time_utc="2026-01-15T13:00:00+00:00"),
+        _gap_trade("w6-b", "0.30", "0.10", exit_time_utc="2026-01-15T11:00:00+00:00"),
+        _gap_trade("w6-c", "-0.30", "0.10", exit_time_utc="2026-01-15T12:00:00+00:00"),
+    ]
+    report = _build_report(
+        experiment_record=record, trade_records=trades, bootstrap_seed=_GAP_SEED, resamples=100
+    )
+    # Exit order +3, -3, -3 draws down 6 from the peak; signal order would show only 3.
+    assert report.drawdown_distribution.observed_max_drawdown == Decimal("6")
+
+
 def test_cr08_build_requires_explicit_built_at_utc() -> None:
     """CR-08: build() requires explicit built_at_utc (missing/None/naive fail)."""
     from src.backtest.report import build
