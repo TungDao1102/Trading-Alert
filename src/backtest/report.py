@@ -839,14 +839,13 @@ def build(
     research_slice = _slice_for("research_universe", research_symbols)
     live5_slice = _slice_for("live5_universe", live5_symbols)
 
-    weak_rejection = False
-    if (
+    # WR-08: a live-5 universe with no R-valued trades has not shown a positive expectancy
+    # either, so a positive research universe must not rescue it (BACKTEST_SPEC section 10.1).
+    weak_rejection = (
         research_slice.mean_r is not None
-        and live5_slice.mean_r is not None
         and research_slice.mean_r > Decimal("0")
-        and live5_slice.mean_r <= Decimal("0")
-    ):
-        weak_rejection = True
+        and (live5_slice.mean_r is None or live5_slice.mean_r <= Decimal("0"))
+    )
     dual = DualUniverseSection(
         research_universe=research_slice,
         live5_universe=live5_slice,

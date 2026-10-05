@@ -290,6 +290,31 @@ def test_dual_universe_includes_research_and_live5() -> None:
     )
 
 
+def test_wr08_a_live5_universe_without_trades_is_a_weak_live_universe_rejection() -> None:
+    """WR-08: a positive research universe must not rescue a live-5 slice with no trades."""
+    record = _make_experiment_record()
+    trades = [
+        _gap_trade("w8-a", "0.30", "0.10", symbol="DOTUSDT"),
+        _gap_trade("w8-b", "0.20", "0.10", symbol="ADAUSDT"),
+    ]
+    tags = {
+        "BTCUSDT": ["research_universe", "live5_universe"],
+        "DOTUSDT": ["research_universe"],
+        "ADAUSDT": ["research_universe"],
+    }
+    report = _build_report(
+        experiment_record=record,
+        trade_records=trades,
+        bootstrap_seed=_GAP_SEED,
+        resamples=100,
+        universe_tags=tags,
+    )
+    dual = report.dual_universe
+    assert dual.live5_universe.insufficient_data is True
+    assert dual.live5_universe.mean_r is None
+    assert dual.weak_live_universe_rejection is True
+
+
 # --------------------------------------------------------------------------- #
 # Test 6 — empty list returns valid report without interval.
 # --------------------------------------------------------------------------- #
