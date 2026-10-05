@@ -26,7 +26,18 @@ FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "phase14"
 
 # Cases the plan requires; the list grows with each task of plan 14-13 and is checked in full
 # by `test_every_required_case_is_present`.
-REQUIRED_CASES: tuple[str, ...] = ("signal_bar_touch_no_fill",)
+REQUIRED_CASES: tuple[str, ...] = (
+    "signal_bar_touch_no_fill",
+    "trade_through_vs_touch",
+    "hold_to_sl",
+    "tp1_then_tp2",
+    "tp1_then_sl",
+    "expiry_before_fill",
+    "g3_fill_before_expiry",
+    "g3_expire_after",
+    "stop_first_tie",
+    "gap_through_limit",
+)
 
 DECIMAL_FIELDS = frozenset(
     {

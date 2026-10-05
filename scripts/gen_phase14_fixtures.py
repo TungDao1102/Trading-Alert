@@ -411,8 +411,162 @@ def signal_bar_touch_no_fill() -> dict[str, object]:
     return _case(symbols=["BTCUSDT"], plans=[plan], trade=trade, mark=mark, strategy_bars=bars)
 
 
+def trade_through_vs_touch() -> dict[str, object]:
+    """SHORT: two minutes with a high of exactly the limit (touch), the third one tick above."""
+    return _single(
+        _short_plan("BTCUSDT", signal_id="G14-TOUCH-VS-THROUGH"),
+        flat=SHORT_FLAT,
+        trade={
+            "10:05": ("99.9", "100.0", "99.5", "99.8"),
+            "10:06": ("99.8", "100.0", "99.6", "99.9"),
+            "10:07": SHORT_FILL_TRADE,
+            "10:08": SHORT_STOP_MARK,
+        },
+        mark={"10:07": ("99.9", "100.05", "99.7", "100.0"), "10:08": SHORT_STOP_MARK},
+        count=30,
+    )
+
+
+def hold_to_sl() -> dict[str, object]:
+    """LONG fills at 10:30 (bar N+1), holds through bars N+2 and N+3, stops at 13:20 (bar N+4)."""
+    plan = _plan("BTCUSDT", signal_id="G14-HOLD-TO-SL")
+    trade = _minute_rows(
+        "BTCUSDT",
+        "trade",
+        first="10:00",
+        count=240,
+        base=LONG_FLAT,
+        overrides={"10:30": LONG_FILL_TRADE, "13:20": ("100.0", "100.1", "97.9", "98.2")},
+        not_before=SIGNAL_CLOSE,
+    )
+    mark = _minute_rows(
+        "BTCUSDT",
+        "mark",
+        first="10:00",
+        count=240,
+        base=LONG_FLAT,
+        overrides={"10:30": LONG_FILL_MARK, "13:20": ("100.0", "100.1", "97.9", "98.2")},
+        not_before=SIGNAL_CLOSE,
+    )
+    bars = [
+        _bar_from_trade_minutes("BTCUSDT", _clock(f"{hour}:00"), trade) for hour in (10, 11, 12, 13)
+    ]
+    return _case(
+        symbols=["BTCUSDT"],
+        plans=[plan],
+        trade=trade,
+        mark=mark,
+        strategy_bars=bars,
+        data_end=DAY + timedelta(hours=14),
+    )
+
+
+def tp1_then_tp2() -> dict[str, object]:
+    """LONG, stop 98.50 so the quantity 18.943 is odd in steps and the TP1 half is floored."""
+    plan = _plan("BTCUSDT", signal_id="G14-TP1-TP2", stop="98.50")
+    mid: Ohlc = ("103.0", "103.2", "102.8", "103.0")
+    return _single(
+        plan,
+        count=60,
+        trade={"10:05": LONG_FILL_TRADE},
+        mark={
+            "10:05": LONG_FILL_MARK,
+            "10:15": ("101.5", "104.2", "101.4", "104.0"),
+            **_span("10:16", "10:39", mid),
+            "10:40": ("105.0", "108.3", "104.8", "108.0"),
+        },
+    )
+
+
+def tp1_then_sl() -> dict[str, object]:
+    """LONG: TP1 at 10:15, then the remainder is stopped at the unchanged stop at 10:50 (F-102)."""
+    plan = _plan("BTCUSDT", signal_id="G14-TP1-SL")
+    mid: Ohlc = ("103.0", "103.2", "102.8", "103.0")
+    return _single(
+        plan,
+        count=60,
+        trade={"10:05": LONG_FILL_TRADE},
+        mark={
+            "10:05": LONG_FILL_MARK,
+            "10:15": ("101.5", "104.3", "101.4", "104.0"),
+            **_span("10:16", "10:49", mid),
+            "10:50": ("103.0", "103.1", "97.9", "98.0"),
+        },
+    )
+
+
+def expiry_before_fill() -> dict[str, object]:
+    """One-hour expiry (10:59:59.999); a trade-through at 11:00 closes after it and is ignored."""
+    plan = _plan("BTCUSDT", signal_id="G14-EXPIRY", expiry_hours=1)
+    return _single(
+        plan,
+        count=76,
+        trade={"11:00": ("100.6", "100.8", "99.8", "100.2")},
+    )
+
+
+def g3_fill_before_expiry() -> dict[str, object]:
+    """signal_expiry_hours 4: the trade-through at 11:20 (bar N+2) fills before expiry (D-04)."""
+    plan = _plan("BTCUSDT", signal_id="G14-G3-FILL", expiry_hours=4)
+    return _single(
+        plan,
+        count=120,
+        trade={"11:20": LONG_FILL_TRADE},
+        mark={"11:20": LONG_FILL_MARK, "11:40": ("101.0", "101.2", "97.9", "98.0")},
+    )
+
+
+def g3_expire_after() -> dict[str, object]:
+    """Same plan: the first trade-through is at 14:30 (bar N+5), after the 13:59:59.999 expiry."""
+    plan = _plan("BTCUSDT", signal_id="G14-G3-EXPIRE", expiry_hours=4)
+    return _single(
+        plan,
+        count=276,
+        trade={"14:30": LONG_FILL_TRADE},
+        mark={"14:30": LONG_FILL_MARK},
+        data_end=DAY + timedelta(hours=15),
+    )
+
+
+def stop_first_tie() -> dict[str, object]:
+    """One mark minute (10:06) reaches TP1 104.0 and the stop 98.0: the whole position stops."""
+    plan = _plan("BTCUSDT", signal_id="G14-STOP-FIRST")
+    return _single(
+        plan,
+        count=30,
+        trade={"10:05": LONG_FILL_TRADE},
+        mark={"10:05": LONG_FILL_MARK, "10:06": ("101.0", "104.5", "97.9", "101.0")},
+    )
+
+
+def gap_through_limit() -> dict[str, object]:
+    """The fill minute opens 1.5 below the limit (gap down); the fill is at the limit 100.0."""
+    plan = _plan("BTCUSDT", signal_id="G14-GAP-LIMIT")
+    gapped: Ohlc = ("98.5", "98.6", "98.4", "98.5")
+    calm: Ohlc = ("99.0", "99.2", "98.8", "99.0")
+    return _single(
+        plan,
+        count=30,
+        trade={"10:05": gapped},
+        mark={
+            "10:05": gapped,
+            **_span("10:06", "10:19", calm),
+            "10:20": ("99.0", "108.5", "98.9", "108.3"),
+        },
+    )
+
+
 CASES: dict[str, Callable[[], dict[str, object]]] = {
     "signal_bar_touch_no_fill": signal_bar_touch_no_fill,
+    "trade_through_vs_touch": trade_through_vs_touch,
+    "hold_to_sl": hold_to_sl,
+    "tp1_then_tp2": tp1_then_tp2,
+    "tp1_then_sl": tp1_then_sl,
+    "expiry_before_fill": expiry_before_fill,
+    "g3_fill_before_expiry": g3_fill_before_expiry,
+    "g3_expire_after": g3_expire_after,
+    "stop_first_tie": stop_first_tie,
+    "gap_through_limit": gap_through_limit,
 }
 
 

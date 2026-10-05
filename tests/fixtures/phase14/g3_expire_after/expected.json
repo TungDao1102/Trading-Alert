@@ -1,0 +1,42 @@
+{
+  "derivation": "tests/fixtures/phase14/DERIVATIONS.md#g3_expire_after",
+  "trades": [
+    {
+      "signal_id": "G14-G3-EXPIRE",
+      "symbol": "BTCUSDT",
+      "direction": "LONG",
+      "outcome_kind": "OK",
+      "reason_code": "OK",
+      "signal_close_utc": "2026-01-05T09:59:59.999+00:00",
+      "entry_kind": "EXPIRED",
+      "entry_time_utc": null,
+      "entry_price": null,
+      "quantity": null,
+      "planned_quantity": "15.928",
+      "exit_kind": null,
+      "exit_price": null,
+      "exit_time_utc": null,
+      "resolved_at_utc": "2026-01-05T13:59:59.999+00:00",
+      "tp1_quantity": null,
+      "tp1_price": null,
+      "tp1_time_utc": null,
+      "gross_pnl": null,
+      "entry_fee": null,
+      "exit_fee": null,
+      "slippage_amount": null,
+      "funding_amount": null,
+      "realized_pnl": null,
+      "realized_risk": null,
+      "touch_no_fill_count": 0,
+      "fallback_applied": false
+    }
+  ],
+  "run_summary": {
+    "end_of_data_count": 0,
+    "fallback_count": 0,
+    "gap_through_stop_count": 0,
+    "pending_at_data_end_count": 0,
+    "touch_no_fill_total": 0,
+    "no_trade_counts": {}
+  }
+}
