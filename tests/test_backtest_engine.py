@@ -24,21 +24,26 @@ from __future__ import annotations
 
 import ast
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
+from src.backtest import engine
 from src.backtest.case import CASE_INPUT_SCHEMA, REMOVED_V1_KEYS
 from src.backtest.engine import simulate, simulate_detailed
+from src.backtest.funding import FundingCoverageError
 from src.backtest.records import build_reject_record
 from src.backtest.semantics import SIMULATOR_SEMANTICS_VERSION
+from src.backtest.series import ListMinuteSource, parse_minute_row
 from src.domain.enums import RejectionReason
 from src.risk.gating import evaluate_risk
 from src.risk.types import PortfolioVerdict
 
 from tests.backtest_case_helpers import (
+    DATA_END,
+    DATA_START,
     SIGNAL_CLOSE,
     SYMBOL,
     at,
@@ -46,6 +51,7 @@ from tests.backtest_case_helpers import (
     default_funding,
     fixed_risk_fn,
     flat_minutes,
+    funding_row,
     make_case,
     minute_close,
     minute_row,
@@ -526,3 +532,239 @@ def test_build_reject_record_is_deterministic_and_has_no_trade_fields() -> None:
 def test_the_rejection_vocabulary_is_unchanged_and_excludes_the_conflict_label() -> None:
     assert len(list(RejectionReason)) == 20
     assert "CONFLICT_WITH_OPEN_POSITION" not in {r.value for r in RejectionReason}
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: funding, data end, deterministic order
+# --------------------------------------------------------------------------- #
+
+EARLY_CLOSE = datetime(2026, 1, 5, 6, 59, 59, 999000, tzinfo=UTC)  # 06:59:59.999
+
+
+def funding_case(*, funding: list[dict[str, Any]], mark: list[dict[str, str]]) -> dict[str, Any]:
+    """A LONG filled 07:01 (limit 100.00), held until the mark minutes stop it out."""
+    return make_case(
+        scripted=[scripted_plan(SYMBOL, EARLY_CLOSE, "sig-1")],
+        trade_minutes=[go_through(SYMBOL, at(7, 1))],
+        mark_minutes=mark,
+        funding=funding,
+        data_end=at(20, 0),
+    )
+
+
+def test_funding_across_two_instants_is_charged_in_time_order_and_booked_at_each_instant() -> None:
+    # LONG 0.5 pays rate x mark x quantity: 08:00 -0.5 x 100 x 0.0001 = -0.0050 and
+    # 16:00 -0.5 x 102 x (-0.0002) = +0.0102, so funding_amount = +0.0052 (D-14).
+    funding = [
+        funding_row(SYMBOL, datetime(2026, 1, 5, 0, 0, tzinfo=UTC)),
+        funding_row(SYMBOL, at(8, 0), "0.0001", "100"),
+        funding_row(SYMBOL, at(16, 0), "-0.0002", "102"),
+        funding_row(SYMBOL, datetime(2026, 1, 6, 0, 0, tzinfo=UTC)),
+    ]
+    mark = [
+        *flat_minutes(SYMBOL, at(7, 0), 60, "100.00", kind="mark"),
+        stop_out(SYMBOL, at(17, 30)),
+    ]
+    run = simulate_detailed(
+        funding_case(funding=funding, mark=mark), risk_fn=fixed_risk_fn("0.5", "1.50")
+    )
+
+    trade = run.output["trades"][0]
+    assert Decimal(trade["funding_amount"]) == Decimal("0.0052")
+    assert trade["funding_event_count"] == 2
+    # Fees and slippage of the fill and the stop: 0.025 + 0.0245 + 0.005 + 0.0147 = 0.0692.
+    assert Decimal(trade["realized_pnl"]) == Decimal("-1.0640")  # -1.00 - 0.0692 + 0.0052
+    payments = [(b.time_utc, b.amount) for b in run.bookings if b.kind == "FUNDING"]
+    assert payments == [(at(8, 0), Decimal("-0.0050")), (at(16, 0), Decimal("0.0102"))]
+    times = [b.time_utc for b in run.bookings]
+    assert times == sorted(times)  # the ledger received everything in time order
+    assert run.ledger.equity == Decimal("10000") + Decimal("-1.0640")
+
+
+def test_the_tp1_remainder_is_charged_funding_on_the_smaller_quantity() -> None:
+    # Fill 0.5 at 07:01; funding 07:15 on 0.5; TP1 (0.250 at 104.00) at 07:30; funding 08:00
+    # on the remaining 0.250 (D-36): -0.5 x 100 x 0.0001 - 0.25 x 100 x 0.0001 = -0.0075.
+    funding = [
+        funding_row(SYMBOL, datetime(2026, 1, 5, 0, 0, tzinfo=UTC)),
+        funding_row(SYMBOL, at(7, 15), "0.0001", "100"),
+        funding_row(SYMBOL, at(8, 0), "0.0001", "100"),
+        funding_row(SYMBOL, at(16, 0)),
+    ]
+    take_profit = minute_row(SYMBOL, at(7, 30), "100.00", "104.20", "99.90", "103.00", kind="mark")
+    mark = [
+        *flat_minutes(SYMBOL, at(7, 0), 30, "100.00", kind="mark"),
+        take_profit,
+        *flat_minutes(SYMBOL, at(7, 31), 29, "103.00", kind="mark"),
+        stop_out(SYMBOL, at(8, 30)),
+    ]
+    run = simulate_detailed(
+        funding_case(funding=funding, mark=mark), risk_fn=fixed_risk_fn("0.5", "1.50")
+    )
+
+    trade = run.output["trades"][0]
+    assert Decimal(trade["tp1_quantity"]) == Decimal("0.250")
+    assert Decimal(trade["funding_amount"]) == Decimal("-0.0075")
+    assert trade["funding_event_count"] == 2
+    payments = [(b.time_utc, b.amount) for b in run.bookings if b.kind == "FUNDING"]
+    assert payments == [(at(7, 15), Decimal("-0.0050")), (at(8, 0), Decimal("-0.0025"))]
+
+
+def hole_case(**overrides: Any) -> dict[str, Any]:
+    """A LONG filled 10:01 and still open at 12:00, with a 20 hour hole in the funding history."""
+    funding = [
+        funding_row(SYMBOL, datetime(2026, 1, 5, 0, 0, tzinfo=UTC)),
+        funding_row(SYMBOL, at(20, 0)),
+    ]
+    arguments: dict[str, Any] = {
+        "scripted": [scripted_plan(SYMBOL, SIGNAL_CLOSE, "sig-1")],
+        "trade_minutes": [go_through(SYMBOL, at(10, 1))],
+        "mark_minutes": flat_minutes(SYMBOL, at(10, 0), 120, "100.00", kind="mark"),
+        "funding": funding,
+        "data_end": at(20, 0),
+    }
+    arguments.update(overrides)
+    return make_case(**arguments)
+
+
+def test_a_holding_window_with_a_funding_hole_fails_closed() -> None:
+    with pytest.raises(FundingCoverageError, match="uncovered holes"):
+        simulate(hole_case(), risk_fn=fixed_risk_fn("0.5", "1.50"))
+
+
+def test_an_allowed_gap_covers_the_hole_and_is_returned_on_the_output() -> None:
+    gap = {
+        "series": "funding",
+        "symbol": SYMBOL,
+        "start_utc": datetime(2026, 1, 5, 0, 0, tzinfo=UTC).isoformat(),
+        "end_utc": at(20, 0).isoformat(),
+        "missing": 2,
+    }
+    output = simulate(hole_case(allowed_gaps=[gap]), risk_fn=fixed_risk_fn("0.5", "1.50"))
+
+    assert len(output["trades"]) == 1
+    assert output["run_summary"]["allowed_gaps_used"] == [
+        {
+            "series": "funding",
+            "symbol": SYMBOL,
+            "start_utc": gap["start_utc"],
+            "end_utc": gap["end_utc"],
+        }
+    ]
+
+
+def end_of_data_case() -> dict[str, Any]:
+    """BTC fills at 10:01 and stays open to 12:00; ETH rests and never fills."""
+    return make_case(
+        symbols=("BTCUSDT", "ETHUSDT"),
+        scripted=[
+            scripted_plan("BTCUSDT", SIGNAL_CLOSE, "sig-btc"),
+            scripted_plan("ETHUSDT", SIGNAL_CLOSE, "sig-eth"),
+        ],
+        trade_minutes=[
+            *flat_minutes("BTCUSDT", at(10, 0), 1, "105.00", kind="trade"),
+            go_through("BTCUSDT", at(10, 1)),
+            *flat_minutes("ETHUSDT", at(10, 0), 120, "105.00", kind="trade"),
+        ],
+        mark_minutes=[
+            *flat_minutes("BTCUSDT", at(10, 0), 120, "100.00", kind="mark"),
+            *flat_minutes("ETHUSDT", at(10, 0), 120, "100.00", kind="mark"),
+        ],
+    )
+
+
+def test_positions_close_end_of_data_and_resting_plans_are_pending_at_data_end() -> None:
+    output = simulate(end_of_data_case(), risk_fn=fixed_risk_fn("0.5", "1.50"))
+    by_symbol = {t["symbol"]: t for t in output["trades"]}
+
+    held = by_symbol["BTCUSDT"]
+    assert held["entry_kind"] == "ENTRY_FILLED"
+    assert held["exit_kind"] == "END_OF_DATA"
+    assert held["exit_time_utc"] == minute_close(at(11, 59)).isoformat()  # last mark close
+    assert Decimal(held["exit_price"]) == Decimal("100.00")
+    resting = by_symbol["ETHUSDT"]
+    assert resting["entry_kind"] == "PENDING_AT_DATA_END"
+    assert resting["resolved_at_utc"] == DATA_END.isoformat()
+    assert resting["exit_kind"] is None
+
+
+def test_every_record_is_validated_with_the_data_window_before_it_is_emitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    original = engine.validate_trade_record
+
+    def spy(record: Any, **kwargs: Any) -> None:
+        calls.append(kwargs)
+        original(record, **kwargs)
+
+    monkeypatch.setattr(engine, "validate_trade_record", spy)
+    output = simulate(end_of_data_case(), risk_fn=fixed_risk_fn("0.5", "1.50"))
+
+    assert len(calls) == len(output["trades"]) == 2
+    assert all(c == {"data_start_utc": DATA_START, "data_end_utc": DATA_END} for c in calls)
+
+
+def test_a_minute_closing_at_the_signal_close_can_never_fill_the_plan() -> None:
+    # The 09:59 minute closes at 09:59:59.999 == the signal close and trades through the limit.
+    case = make_case(
+        scripted=[scripted_plan(SYMBOL, SIGNAL_CLOSE, "sig-1")],
+        trade_minutes=[go_through(SYMBOL, at(9, 59))],
+        mark_minutes=flat_minutes(SYMBOL, at(9, 59), 5, "100.00", kind="mark"),
+    )
+    output = simulate(case, risk_fn=fixed_risk_fn("0.5", "1.50"))
+
+    assert output["trades"][0]["entry_kind"] == "PENDING_AT_DATA_END"
+    assert output["trades"][0]["entry_time_utc"] is None
+
+
+def ordering_case() -> dict[str, Any]:
+    symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+    trade: list[dict[str, str]] = []
+    mark: list[dict[str, str]] = []
+    for symbol in symbols:
+        series = resting_series(symbol, "105.00")
+        trade.extend(series["trade"])
+        mark.extend(series["mark"])
+    return make_case(
+        symbols=symbols,
+        scripted=[
+            scripted_plan("SOLUSDT", NEXT_CLOSE, "sig-sol"),
+            scripted_plan("ETHUSDT", SIGNAL_CLOSE, "sig-eth"),
+            scripted_plan("BTCUSDT", SIGNAL_CLOSE, "sig-btc"),
+        ],
+        trade_minutes=trade,
+        mark_minutes=mark,
+    )
+
+
+def test_records_are_ordered_by_signal_close_then_symbol_and_the_output_is_byte_identical() -> None:
+    first = simulate(ordering_case(), risk_fn=fixed_risk_fn("0.5", "1.50"))
+    second = simulate(ordering_case(), risk_fn=fixed_risk_fn("0.5", "1.50"))
+
+    assert [(t["signal_close_utc"], t["symbol"]) for t in first["trades"]] == [
+        (SIGNAL_CLOSE.isoformat(), "BTCUSDT"),
+        (SIGNAL_CLOSE.isoformat(), "ETHUSDT"),
+        (NEXT_CLOSE.isoformat(), "SOLUSDT"),
+    ]
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+
+def test_a_passed_minute_source_replaces_the_case_rows() -> None:
+    case = tracer_case()
+    trade = {SYMBOL: [parse_minute_row(r, kind="trade") for r in case.pop("trade_bars_1m")]}
+    mark = {SYMBOL: [parse_minute_row(r, kind="mark") for r in case.pop("mark_bars_1m")]}
+    output = simulate(
+        case,
+        risk_fn=fixed_risk_fn("0.5", "1.50"),
+        minute_source=ListMinuteSource(trade=trade, mark=mark),
+    )
+
+    assert output["trades"][0]["exit_kind"] == "SL"
+
+
+def test_a_case_without_minute_rows_and_without_a_source_is_refused() -> None:
+    case = tracer_case()
+    del case["trade_bars_1m"]
+    del case["mark_bars_1m"]
+    with pytest.raises(ValueError, match="minute"):
+        simulate(case, risk_fn=fixed_risk_fn("0.5", "1.50"))
