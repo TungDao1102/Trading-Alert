@@ -1353,7 +1353,7 @@ def test_section10_field_order_hash_prefixes_and_experiment_sub_rows() -> None:
         f"parameter_set_id={experiment.parameter_set_id}; "
         f"parameter_set_hash={experiment.parameter_set_hash[:12]}; "
         f"data_snapshot_id={experiment.data_snapshot_id[:12]}; "
-        f"code_version={experiment.code_version}; "
+        f"code_version={experiment.code_version[:12]}; "
         f"cost_model_hash={experiment.cost_model_hash[:12]}"
     )
     assert values["universe hash"] == f"{provenance.research_universe_hash[:12]} (VERIFIED)"

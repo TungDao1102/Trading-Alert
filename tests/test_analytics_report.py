@@ -55,6 +55,7 @@ from src.domain.canonical import canonical_scalars
 from src.domain.enums import KillGateState
 from src.domain.journal import JournalEvent
 
+from tests.backtest_case_helpers import make_experiment_record
 from tests.phase10_helpers import (
     load_expected,
     load_input,
@@ -106,10 +107,30 @@ def build_backtest_inputs(raw: dict[str, Any]) -> EvidenceInputs:
 
 
 def build_experiment(raw: dict[str, Any]) -> ExperimentRecord:
-    fields = dict(raw)
-    for name in ("time_range_start_utc", "time_range_end_utc"):
-        fields[name] = parse_utc(fields[name])
-    return ExperimentRecord(**fields)
+    """A typed record (shared factory, plan 14-15) carrying the raw fixture identity.
+
+    The fixture supplies the six identity fields (its `code_version` is a 40-hex commit and
+    its `cost_model_hash` the baseline-v5 cost hash, so the typed record binds them); the
+    typed fields come from the factory defaults.
+    """
+    return make_experiment_record(
+        experiment_id=raw["experiment_id"],
+        strategy_version=raw["strategy_version"],
+        parameter_set_id=raw["parameter_set_id"],
+        parameter_set_hash=raw["parameter_set_hash"],
+        data_snapshot_id=raw["data_snapshot_id"],
+        code_version=raw["code_version"],
+        code_commit=raw["code_version"],
+        cost_model_hash=raw["cost_model_hash"],
+        time_range_start_utc=parse_utc(raw["time_range_start_utc"]),
+        time_range_end_utc=parse_utc(raw["time_range_end_utc"]),
+        split_start_utc=parse_utc(raw["time_range_start_utc"]),
+        split_end_utc=parse_utc(raw["time_range_end_utc"]),
+        universe_hash=raw["universe_hash"],
+        run_type=raw["run_type"],
+        result_summary_json=raw["result_summary_json"],
+        notes=raw["notes"],
+    )
 
 
 def build_family(raw: dict[str, Any]) -> FamilyEvidence:

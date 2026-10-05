@@ -2,7 +2,7 @@
 
 | Field | Value |
 | :--- | :--- |
-| Report digest | sha256:2838cb3aa82744bee5ccf588c3e1ef5a0b9e20bb6e1814f4ca88dcfb4db33627 |
+| Report digest | sha256:ebd9e1014da67eeba942199a67699b3ac79f5fb8c64ef86b7218f003733a19c7 |
 | As of (UTC) | 2027-04-01T00:00:00+00:00 |
 | As of (display) | 2027-04-01 07:00:00 +07:00 (Asia/Ho_Chi_Minh) |
 | Timezone note | Stored and computed values are UTC. Display times are Asia/Ho_Chi_Minh (UTC+07:00, no DST). |
@@ -629,7 +629,7 @@ adapter.rejected_rows: 1 rows rejected (MALFORMED_ROW). The report was produced 
 | strategyVersion | v2.0.0 |
 | parameterSetId | PS-1 |
 | parameterSetHash | aaaaaaaaaaaa |
-| experiment identity (BACKTEST) | experiment_id=e1e1e1e1e1e1; strategy_version=v2.0.0; parameter_set_id=PS-1; parameter_set_hash=aaaaaaaaaaaa; data_snapshot_id=d1d1d1d1d1d1; code_version=code-abc123; cost_model_hash=c1c1c1c1c1c1 |
+| experiment identity (BACKTEST) | experiment_id=e1e1e1e1e1e1; strategy_version=v2.0.0; parameter_set_id=PS-1; parameter_set_hash=aaaaaaaaaaaa; data_snapshot_id=d1d1d1d1d1d1; code_version=0123456789ab; cost_model_hash=6d6c4e237ed0 |
 | universe hash | 760c0431a63a (VERIFIED) |
 | dataset/version identifiers | snapshots: d1d1d1d1d1d1; schema: analytics-schema/1 |
 | epoch_id (paper) | EPOCH-1 |

@@ -40,27 +40,15 @@ def _load_expected(case_dir: Path) -> dict:
 
 
 def _make_experiment_record() -> object:
-    """Build a minimal ExperimentRecord with 64-hex identity fields.
+    """Build a typed ExperimentRecord through the shared factory (plan 14-15).
 
-    The report module only needs the experiment_id field for the digest;
-    the other fields are populated so __post_init__ passes.
+    The report module only needs the experiment_id field for the digest; the factory
+    supplies every typed field, and the id keeps its Phase 6 placeholder value.
     """
-    from src.backtest.experiment import ExperimentRecord
+    from tests.backtest_case_helpers import make_experiment_record
 
-    # Deterministic 64-hex placeholders.
-    return ExperimentRecord(
+    return make_experiment_record(
         experiment_id="0" * 64,
-        strategy_version="v2.0.0",
-        parameter_set_id="baseline-v2",
-        parameter_set_hash="0" * 64,
-        data_snapshot_id="0" * 64,
-        code_version="06-03-red",
-        cost_model_hash="0" * 64,
-        time_range_start_utc=datetime(2026, 1, 1, tzinfo=UTC),
-        time_range_end_utc=datetime(2026, 5, 1, tzinfo=UTC),
-        universe_hash="0" * 64,
-        run_type="CANDIDATE",
-        result_summary_json="{}",
         notes="Phase 6 plan 06-03 report_slices fixture (RED phase).",
     )
 

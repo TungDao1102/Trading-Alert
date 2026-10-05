@@ -48,6 +48,11 @@ ships these refusal cases as the expansion task.
 # call simulator_run directly, not assemble(), so the gate never fires
 # on those paths.
 #
+# Plan 14-15 update: `assemble()` now refuses a cost model without the funding
+# convention (D-22), and a funding convention exists only on the Phase 12 sets, so the
+# assemble-based tests below bind baseline-v5 through `_v5_case`. The phase 7.1 fixture
+# files stay byte-untouched; they keep feeding the tests that never call assemble().
+#
 # Phase 12 update (D048): the list above is the Phase 7.1 audit verdict and
 # stays as history. Phase 12 (plan 12-04) regenerated the seven simulator
 # fixtures (intrabar_both_touched, intrabar_both_touched_short,
@@ -75,7 +80,23 @@ from src.backtest.binding import CostModelBindingMismatch
 from src.backtest.costs import CostModel, build_cost_model
 from src.backtest.experiment import assemble
 
+from tests.backtest_case_helpers import (
+    DEFAULT_COST_MODEL,
+    assemble_kwargs,
+    strategy_run_summary,
+)
+
 PHASE7_1_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase7.1"
+
+# How each phase 7.1 case diverges from the registry cost slice, respelled for baseline-v5
+# (fee_rate_entry 0.0005, funding_treatment ADDITIVE): the divergence is what the test is
+# about, the v3 spellings of the fixture files are not.
+_V5_COST_DEVIATION: dict[str, dict[str, str]] = {
+    "match": {},
+    "wrong_fee": {"fee_rate_entry": "0.0009"},
+    "wrong_funding": {"funding_treatment": "PRO_RATA"},
+    "precision_drift": {"fee_rate_entry": "0.00050"},
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -99,26 +120,42 @@ def _build_cost_model(cost_dict: dict):
     return build_cost_model(cost_dict)
 
 
+def _v5_case(case_subdir: str) -> dict:
+    """A phase 7.1 case rebound onto baseline-v5 with its cost divergence respelled."""
+    case = _load_case_input(case_subdir)
+    case["parameter_set_id"] = "baseline-v5"
+    case["strategy_version"] = "v4.0.0"
+    case["cost_model"] = {**DEFAULT_COST_MODEL, **_V5_COST_DEVIATION[case_subdir]}
+    return case
+
+
 def _gate_assemble(case: dict, *, cost_model=None):
-    """Assemble a record from a phase7.1 case dict.
+    """Assemble a typed record from a phase7.1 case dict.
 
     Optional `cost_model` override lets mismatch tests inject a
-    registry-divergent CostModel without rebuilding the whole dict.
+    registry-divergent CostModel without rebuilding the whole dict. The run summary is a
+    valid STRATEGY summary over the case's own time range.
     """
     if cost_model is None:
         cost_model = _build_cost_model(case["cost_model"])
+    start = datetime.fromisoformat(case["time_range_start_utc"])
+    end = datetime.fromisoformat(case["time_range_end_utc"])
     return assemble(
-        parameter_set_id=case["parameter_set_id"],
-        strategy_id=case["strategy_id"],
-        strategy_version=case["strategy_version"],
-        data_snapshot_id=case["data_snapshot_id"],
-        code_version=case["code_version"],
-        cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(case["time_range_start_utc"]),
-        time_range_end_utc=datetime.fromisoformat(case["time_range_end_utc"]),
-        universe=case["universe"],
-        run_type=case["run_type"],
-        notes=case["notes"],
+        **assemble_kwargs(
+            parameter_set_id=case["parameter_set_id"],
+            strategy_id=case["strategy_id"],
+            strategy_version=case["strategy_version"],
+            data_snapshot_id=case["data_snapshot_id"],
+            cost_model=cost_model,
+            time_range_start_utc=start,
+            time_range_end_utc=end,
+            universe=case["universe"],
+            run_type=case["run_type"],
+            notes=case["notes"],
+            run_summary=strategy_run_summary(start=start, end=end),
+            split_start_utc=start,
+            split_end_utc=end,
+        )
     )
 
 
@@ -136,7 +173,7 @@ def test_binding_gate_accepts_match_case() -> None:
     construction. A consistent pair assembles byte-identically to the
     pre-gate path (D-04).
     """
-    case = _load_match_input()
+    case = _v5_case("match")
     record = _gate_assemble(case)
 
     # Six-field identity tuple is present and well-formed.
@@ -173,7 +210,7 @@ def test_binding_gate_does_not_change_experiment_id_for_match_case() -> None:
     never changes what a consistent input hashes to. Two assemble()
     calls with identical inputs must yield identical experiment_id.
     """
-    case = _load_match_input()
+    case = _v5_case("match")
     record_a = _gate_assemble(case)
     record_b = _gate_assemble(case)
     assert record_a.experiment_id == record_b.experiment_id, (
@@ -195,7 +232,7 @@ def test_binding_gate_rejects_wrong_fee_rate() -> None:
     CostModelBindingMismatch naming both hashes; comparison is
     hash-string only (never Decimal value equality, per D-04/D-12).
     """
-    case = _load_case_input("wrong_fee")
+    case = _v5_case("wrong_fee")
     cost_model = _build_cost_model(case["cost_model"])
     with pytest.raises(CostModelBindingMismatch):
         _gate_assemble(case, cost_model=cost_model)
@@ -215,7 +252,7 @@ def test_binding_gate_rejects_wrong_funding_treatment() -> None:
     regardless of value type. The refusal proves the string-typed
     keys bind just as tightly as the numeric ones.
     """
-    case = _load_case_input("wrong_funding")
+    case = _v5_case("wrong_funding")
     cost_model = _build_cost_model(case["cost_model"])
     with pytest.raises(CostModelBindingMismatch):
         _gate_assemble(case, cost_model=cost_model)
@@ -236,10 +273,10 @@ def test_binding_gate_accepts_equivalent_spelling() -> None:
     test_binding_gate_rejects_wrong_fee_rate (the wrong_fee case).
     Comparison stays hash-string only.
     """
-    case = _load_case_input("precision_drift")
+    case = _v5_case("precision_drift")
     cost_model = _build_cost_model(case["cost_model"])
     record = _gate_assemble(case, cost_model=cost_model)
-    match_model = _build_cost_model(_load_match_input()["cost_model"])
+    match_model = _build_cost_model(_v5_case("match")["cost_model"])
     assert record.cost_model_hash == match_model.cost_model_hash
 
 

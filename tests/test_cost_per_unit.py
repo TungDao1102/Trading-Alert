@@ -605,23 +605,11 @@ def _v5_cost_dict() -> dict[str, object]:
 
 
 def _assemble_v5(cost_model: object) -> object:
-    from datetime import UTC, datetime
-
     from src.backtest.experiment import assemble
 
-    return assemble(
-        parameter_set_id="baseline-v5",
-        strategy_id="trend-pullback",
-        strategy_version="v4.0.0",
-        data_snapshot_id="1" * 64,
-        code_version="12-03",
-        cost_model=cost_model,  # type: ignore[arg-type]
-        time_range_start_utc=datetime(2026, 9, 1, tzinfo=UTC),
-        time_range_end_utc=datetime(2026, 9, 11, tzinfo=UTC),
-        universe=["BTCUSDT"],
-        run_type="CANDIDATE",
-        notes="12-03 v5 binding",
-    )
+    from tests.backtest_case_helpers import assemble_kwargs
+
+    return assemble(**assemble_kwargs(cost_model=cost_model, notes="12-03 v5 binding"))
 
 
 def test_binding_v5_set_accepts_matching_eight_key_model() -> None:
@@ -654,27 +642,32 @@ def test_binding_v5_set_refuses_disagreeing_exit_slippage() -> None:
 
 
 def test_binding_legacy_set_with_seven_key_model_unchanged() -> None:
-    from datetime import UTC, datetime
+    """The gate still binds a legacy 7-key set and its hash is byte-locked; assemble refuses it.
 
+    Plan 14-15 (D-22): a record needs the funding convention, which only the Phase 12 sets
+    carry, so `assemble` raises for a legacy set instead of producing a record. The binding
+    gate itself (and the permanent legacy hash) is unchanged.
+    """
+    from src.backtest.binding import assert_cost_model_binds_registry
     from src.backtest.costs import build_cost_model, cost_slice
-    from src.backtest.experiment import assemble
+    from src.backtest.experiment import IncompleteExperimentRecord, assemble
     from src.domain.registry import load_parameter_set
 
-    params = load_parameter_set("trend-pullback", "baseline-v4").params
-    record = assemble(
-        parameter_set_id="baseline-v4",
-        strategy_id="trend-pullback",
-        strategy_version="v3.0.0",
-        data_snapshot_id="1" * 64,
-        code_version="12-03",
-        cost_model=build_cost_model(cost_slice(params)),
-        time_range_start_utc=datetime(2026, 9, 1, tzinfo=UTC),
-        time_range_end_utc=datetime(2026, 9, 11, tzinfo=UTC),
-        universe=["BTCUSDT"],
-        run_type="CANDIDATE",
-        notes="12-03 legacy binding",
-    )
-    assert record.cost_model_hash == LEGACY_COST_HASHES[("trend-pullback", "baseline-v4")]
+    from tests.backtest_case_helpers import assemble_kwargs
+
+    parameter_set = load_parameter_set("trend-pullback", "baseline-v4")
+    model = build_cost_model(cost_slice(parameter_set.params))
+    assert_cost_model_binds_registry(parameter_set, model)
+    assert model.cost_model_hash == LEGACY_COST_HASHES[("trend-pullback", "baseline-v4")]
+    with pytest.raises(IncompleteExperimentRecord, match="funding_convention"):
+        assemble(
+            **assemble_kwargs(
+                parameter_set_id="baseline-v4",
+                strategy_version="v3.0.0",
+                cost_model=model,
+                notes="12-03 legacy binding",
+            )
+        )
 
 
 def test_freeze_v5_set_pins_and_refuses_seven_key_model() -> None:

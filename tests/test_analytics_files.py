@@ -47,6 +47,8 @@ from src.domain.enums import KillGateState
 from src.domain.registry import load_parameter_set
 from src.paper.attribution import AttributionKind
 
+from tests.backtest_case_helpers import make_experiment_record
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SHEETS_ROOT = REPO_ROOT / "docs" / "research" / "families"
 EVALUATED_AT = datetime(2026, 9, 29, tzinfo=UTC)
@@ -87,24 +89,18 @@ def _experiment(
     *,
     parameter_set_hash: str,
     run_type: str = "CANDIDATE",
-    cost_model_hash: str | None = None,
+    cost_overrides: dict[str, str] | None = None,
     parameter_set_id: str = "baseline-v1",
 ) -> ExperimentRecord:
-    return ExperimentRecord(
+    """A typed record from the shared factory (plan 14-15) with the scan-relevant identity."""
+    record: ExperimentRecord = make_experiment_record(
         experiment_id=exp_char * 64,
-        strategy_version="v2.0.0",
         parameter_set_id=parameter_set_id,
         parameter_set_hash=parameter_set_hash,
-        data_snapshot_id="d" * 64,
-        code_version="test-code",
-        cost_model_hash=cost_model_hash if cost_model_hash is not None else "c" * 64,
-        time_range_start_utc=datetime(2026, 1, 1, tzinfo=UTC),
-        time_range_end_utc=datetime(2026, 2, 1, tzinfo=UTC),
-        universe_hash="e" * 64,
         run_type=run_type,
-        result_summary_json="{}",
-        notes="",
+        cost_overrides=cost_overrides,
     )
+    return record
 
 
 def _family(scan: FamilyScan, family_id: str) -> Any:
@@ -225,7 +221,7 @@ def test_scan_candidate_experiments_map_by_parameter_set_hash() -> None:
     range_v1 = load_parameter_set("range-mr", "baseline-v1").parameter_set_hash
     experiments = (
         _experiment("1", parameter_set_hash=trend_v1),
-        _experiment("2", parameter_set_hash=range_v1, cost_model_hash="b" * 64),
+        _experiment("2", parameter_set_hash=range_v1, cost_overrides={"fee_rate_entry": "0.0009"}),
     )
     scan = _scan(experiments=experiments)
     assert _family(scan, "trend-pullback").experiment_ids == ("1" * 64,)
