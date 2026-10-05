@@ -66,6 +66,7 @@ follow the same posture: no signature change in the four new methods.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -137,6 +138,28 @@ def _is_transient_reconcile(exc: BaseException) -> bool:
     masking deterministic faults as transient.
     """
     return not isinstance(exc, (ValueError, KeyError, TypeError))
+
+
+# Binance codes meaning "this order is not there": -2013 NO_SUCH_ORDER ("Order does not
+# exist.") is what the Demo host returned for GET /fapi/v1/algoOrder with a missing client id
+# (read-only probe 2026-10-05); -2011 is the documented cancel-path code. Mapping a code to
+# not-found enables a retry, so only these two are accepted and everything else raises.
+_NOT_FOUND_CODES: frozenset[int] = frozenset({-2013, -2011})
+_NOT_FOUND_MESSAGE = re.compile(r"(?<!\d)-(?:2013|2011)(?!\d)")
+
+
+def _is_order_not_found_error(exc: BaseException) -> bool:
+    """True only for a definitive "order does not exist" answer from the exchange.
+
+    The SDK's `BadRequestError` carries the Binance code in an int `status_code`; when one is
+    present it alone decides. Only an error with no int code (fakes, older wrappers) falls
+    back to the code or `UNKNOWN_ORDER` text in the message.
+    """
+    code = getattr(exc, "status_code", None)
+    if isinstance(code, int) and not isinstance(code, bool):
+        return code in _NOT_FOUND_CODES
+    message = str(exc)
+    return "UNKNOWN_ORDER" in message or _NOT_FOUND_MESSAGE.search(message) is not None
 
 
 def _cancel_retry_predicate(exc: BaseException) -> bool:
@@ -1014,8 +1037,8 @@ class BinanceUsdmAdapter:
         """Look up one algo order by its deterministic client_algo_id.
 
         Returns `AlgoOrderProbe(found=False, ...)` when the SDK raises
-        a not-found error (the SDK normalizes not-found as a generic
-        API error with code -2011). The sweeper treats `found=False`
+        a not-found error (Demo: BadRequestError code -2013 "Order
+        does not exist."). The sweeper treats `found=False`
         as a successful prior sweep — no cancel call needed.
 
         Per T-8-32 (no-blind-retry, query-by-ID-first) and EXECUTION_SPEC
@@ -1031,11 +1054,9 @@ class BinanceUsdmAdapter:
                 client_algo_id=client_algo_id,
             )
         except Exception as exc:  # noqa: BLE001 - SDK wraps unknown codes
-            # Binance returns -2011 (UNKNOWN_ORDER) for missing algo
-            # orders. Match by message code rather than importing the
-            # SDK error class hierarchy, since the SDK does not expose
-            # the per-code exception types.
-            if "UNKNOWN_ORDER" in str(exc) or "-2011" in str(exc):
+            # Demo answers a missing algo order with -2013 "Order does not
+            # exist." (observed); -2011 is kept for the cancel-path form.
+            if _is_order_not_found_error(exc):
                 return AlgoOrderProbe(
                     client_algo_id=client_algo_id,
                     found=False,
@@ -1351,7 +1372,7 @@ class BinanceUsdmAdapter:
         Per T-8-32 + EXECUTION_SPEC §10: the execution manager probes
         by deterministic client_order_id before any retry (no-blind-
         recovery). Returns `OrderProbe(found=False, ...)` when the SDK
-        raises a not-found error (code -2011 UNKNOWN_ORDER).
+        raises a not-found error (-2013 NO_SUCH_ORDER or -2011).
 
         Args:
             symbol: The trading pair (Binance requires it).
@@ -1372,15 +1393,11 @@ class BinanceUsdmAdapter:
                 orig_client_order_id=orig_client_order_id,
             )
         except Exception as exc:  # noqa: BLE001 - SDK wraps unknown codes
-            # Only the already-mapped -2011 / UNKNOWN_ORDER form is treated
-            # as a definitive "not found". Any other error (including a
-            # query-order not-found code such as -2013 NO_SUCH_ORDER, which
-            # must be re-verified against the current Binance error-code
-            # docs before it is mapped here) RAISES, and the execution
-            # manager treats a raising probe as UNKNOWN -> SAFE_MODE (fail
-            # closed, 09-REVIEW CR-09). Mapping a code to not-found enables
-            # a retry, so a wrong mapping would risk a duplicate order.
-            if "UNKNOWN_ORDER" in str(exc) or "-2011" in str(exc):
+            # Only a definitive not-found code (-2013 NO_SUCH_ORDER, -2011) is
+            # "not found". Any other error RAISES and the execution manager
+            # treats a raising probe as UNKNOWN -> SAFE_MODE (fail closed,
+            # 09-REVIEW CR-09): a wrong mapping would enable a duplicate order.
+            if _is_order_not_found_error(exc):
                 return OrderProbe(
                     client_order_id=orig_client_order_id,
                     found=False,
