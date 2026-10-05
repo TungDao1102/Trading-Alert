@@ -707,6 +707,22 @@ def test_resolve_fallback_hour_returns_stop_first_legs_and_a_coverage_note() -> 
     assert "trade-price" in resolution.coverage_note
 
 
+def test_resolve_fallback_hour_prices_a_gap_through_the_stop_at_the_bar_open() -> None:
+    # WR-04: the position is already open when bar 12 opens beneath the 98.00 stop (gap down),
+    # so the fallback books the open, not the trigger, and flags the gap.
+    state = walk_hours(long_state(), long_fill_source(), [flat_bar(10), flat_bar(11)])[0]
+    gapped = strategy_bar(12, o="96.50", h="97.00", low="95.00", c="96.00")
+    resolution = resolve_fallback_hour(state=state, bar=gapped, first_missing_open_utc=at(12, 0))
+    (stop,) = resolution.legs
+    assert (stop.kind, stop.price, stop.gap_through_stop) == ("SL", D("96.50"), True)
+    # An open above the stop (no gap) still books the trigger, unflagged.
+    plain = strategy_bar(12, o="101.00", h="101.50", low="97.90", c="99.00")
+    (plain_stop,) = resolve_fallback_hour(
+        state=state, bar=plain, first_missing_open_utc=at(12, 0)
+    ).legs
+    assert (plain_stop.price, plain_stop.gap_through_stop) == (D("98.00"), False)
+
+
 DATA_END = at(12)  # mid-run data end: the last mark minute at or before it opens at 11:59
 EOD_MARKS: dict[datetime, Ohlc] = {at(11, 59): ("101.00", "101.00", "100.40", "100.40")}
 

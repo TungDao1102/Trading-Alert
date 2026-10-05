@@ -185,10 +185,12 @@ def resolve_fallback_hour(
     minutes before `first_missing_open_utc` were walked normally and everything from the
     hole to the bar close resolves ONCE, at `bar.close_time_utc` (never mid-bar), from the
     trade-price range of the strategy bar and stop-first. A bar range touching the stop
-    closes the whole remaining position at the stop trigger; otherwise TP1 and TP2 are
-    resolved exactly as for a mark minute. When the position was filled inside this bar, the
-    range also covers minutes before the fill, so only the stop may be resolved (the
-    take-profit is deferred to the next bar, the fallback analogue of the fill-minute rule).
+    closes the whole remaining position at the stop trigger (the adverse of trigger and bar
+    open, flagged as a gap, when the position was already open at the bar open); otherwise
+    TP1 and TP2 are resolved exactly as for a mark minute. When the position was filled
+    inside this bar, the range also covers minutes before the fill, so only the stop may be
+    resolved (the take-profit is deferred to the next bar, the fallback analogue of the
+    fill-minute rule).
     Returns the legs (possibly none) and the coverage note naming the first missing minute.
     """
     remaining = state.remaining_quantity
@@ -200,10 +202,22 @@ def resolve_fallback_hour(
         "from the trade-price bar range, stop first"
     )
     trigger = state.levels.sl_trigger
-    if is_sl_touched(mark_minute=bar, sl_trigger=trigger, direction=state.direction):
-        stop = ExitLeg(kind=EXIT_SL, price=trigger, quantity=remaining, time_utc=bar.close_time_utc)
-        return FallbackResolution(legs=(stop,), coverage_note=note)
     entry_time = state.entry_time_utc
+    if is_sl_touched(mark_minute=bar, sl_trigger=trigger, direction=state.direction):
+        price = trigger
+        if entry_time is not None and entry_time < bar.open_time_utc:
+            # The position was already open when the bar opened, so a bar opening beyond
+            # the stop gapped through it: book the adverse of trigger and bar open, flagged
+            # (WR-04). A fill inside the bar cannot use the pre-fill open.
+            price = min(trigger, bar.open) if state.direction == _LONG else max(trigger, bar.open)
+        stop = ExitLeg(
+            kind=EXIT_SL,
+            price=price,
+            quantity=remaining,
+            time_utc=bar.close_time_utc,
+            gap_through_stop=price != trigger,
+        )
+        return FallbackResolution(legs=(stop,), coverage_note=note)
     if entry_time is not None and entry_time >= bar.open_time_utc:
         return FallbackResolution(legs=(), coverage_note=note)
     return FallbackResolution(
