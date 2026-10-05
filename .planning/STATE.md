@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 14
 current_phase_name: Backtest Simulator Causality Rewrite
 status: executing
-stopped_at: Completed 14-11-PLAN.md
-last_updated: "2026-10-05T07:00:58.647Z"
+stopped_at: Completed 14-12-PLAN.md
+last_updated: "2026-10-05T07:33:19.194Z"
 last_activity: 2026-10-05
 last_activity_desc: Phase 14 execution started
-state_head: 9ed64190026c75693d206bd601299d6cebcf19b0
+state_head: d6acf893ae920f1cbb975324ace6e78f93e42e54
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 125
-  completed_plans: 119
+  completed_plans: 120
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 14 (Backtest Simulator Causality Rewrite) — EXECUTING
-Plan: 12 of 16
+Plan: 13 of 16
 Status: Ready to execute
 Last activity: 2026-10-05 — Phase 14 execution started
 
@@ -166,6 +166,7 @@ Progress: [█████░░░░░] 46%
 | Phase 14 P09 | 35 min | 3 tasks | 9 files |
 | Phase 14 P10 | 20 min | 3 tasks | 6 files |
 | Phase 14 P11 | about 1 h | 3 tasks | 29 files |
+| Phase 14 P12 | 70min | 3 tasks | 19 files |
 
 ## Accumulated Context
 
@@ -406,6 +407,8 @@ Recent decisions affecting current work:
 - [Phase 14]: 14-11: report refuses a filled record whose exit_kind is not SL/TP2/END_OF_DATA instead of counting it as a plan outcome
 - [Phase 14]: 14-11: PlateauSection is a fixed NOT_COMPUTED structure (note: not computed (BKTS-03 pending)); regions and isolated-optimum warnings removed
 - [Phase 14]: 14-11: test_analytics_cli (31 tests) red until 14-15 migrates the evidence loader and evidence_sample.json; logged in deferred-items.md
+- [Phase 14]: 14-12: simulator.run is a thin shell over engine.simulate with evaluate_risk resolved from module globals at call time; phase6 cases are regression snapshots with 1m data from bar N+1
+- [Phase 14]: 14-12: paper parity fixture is a single-signal history where the ledger never binds (D052 input); asserted explicitly
 
 ### Pending Todos
 
@@ -460,6 +463,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-05T07:00:57.922Z
-Stopped at: Completed 14-11-PLAN.md
+Last session: 2026-10-05T07:33:18.330Z
+Stopped at: Completed 14-12-PLAN.md
 Resume file: None

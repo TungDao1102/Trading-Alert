@@ -583,7 +583,7 @@ Plans:
 
 **Audit refs**: F-120, F-901, F-902, F-102, F-804, F-905, F-305, F-204, F-123, F-118, F-602, F-805, F-904; carry-over from Phase 6 (`.planning/phases/06-backtest-simulator-experiment-registry/06-VERIFICATION.md`)
 
-**Plans:** 11/16 plans executed
+**Plans:** 12/16 plans executed
 
 Plans:
 **Wave 1**
@@ -608,7 +608,7 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5 completion)*
 - [x] 14-11-PLAN.md — Analytics and report: validator at normalizer boundary, chain test, v2 kinds, closed-trade counting, regime slice, plateau not computed
-- [ ] 14-12-PLAN.md — Switch run to the v2 engine, retire v1, regenerate phase6/phase7 inputs as regression snapshots, migrate consumers
+- [x] 14-12-PLAN.md — Switch run to the v2 engine, retire v1, regenerate phase6/phase7 inputs as regression snapshots, migrate consumers
 
 **Wave 7** *(blocked on Wave 6 completion)*
 - [ ] 14-13-PLAN.md — Hand-derived golden cases (16) with DERIVATIONS.md, input-only generator and meta-tests
@@ -1015,7 +1015,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 12. Fee + Cost Model Correctness | 11/11 | Complete    | 2026-09-30 |
 | 13. Research Data Foundation Fixes | 13/13 | Complete    | 2026-10-03 |
 | 13.1. Deployment & CI | 12/12 | Complete | 2026-10-04 |
-| 14. Backtest Simulator Causality Rewrite | 11/16 | In Progress|  |
+| 14. Backtest Simulator Causality Rewrite | 12/16 | In Progress|  |
 | 15. Strategy Geometry Correction | 0/TBD | Not started | - |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
 | 17. Operational Persistence Layer | 15/15 | In Progress|  |
