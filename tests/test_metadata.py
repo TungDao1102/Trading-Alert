@@ -28,7 +28,11 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from src.adapters.binance_usdm import SymbolFilters
 from src.data.backfill import LIVE_5
-from src.data.metadata import METADATA_TEXT_MAX_LEN, refresh_symbol_metadata
+from src.data.metadata import (
+    METADATA_TEXT_MAX_LEN,
+    read_constraint_history,
+    refresh_symbol_metadata,
+)
 from src.db.models import Base, SymbolMetadata
 
 # --------------------------------------------------------------------------- #
@@ -435,3 +439,123 @@ def test_real_exchange_values_wider_than_16_are_accepted(
 
     assert inserted == 1
     assert [getattr(r, field) for r in cap.added] == [value]
+
+
+# --------------------------------------------------------------------------- #
+# Point-in-time constraint history reader (Phase 14, plan 14-10, D-17).
+# --------------------------------------------------------------------------- #
+
+_T1 = datetime(2026, 1, 10, tzinfo=UTC)
+_T2 = datetime(2026, 3, 5, 12, 30, tzinfo=UTC)
+_T3 = datetime(2026, 6, 20, tzinfo=UTC)
+
+
+def _seed_history(session: Session) -> None:
+    """Three BTCUSDT versions and one ETHUSDT version (binary-exact values for SQLite REAL)."""
+    for when, tick, step, notional in (
+        (_T2, "0.5", "0.125", "10"),
+        (_T3, "0.25", "0.0625", "20"),
+        (_T1, "1", "0.25", "5"),
+    ):
+        refresh_symbol_metadata(
+            session,
+            [_mk_filters("BTCUSDT", tick=tick, step=step, min_notional=notional)],
+            observed_at=when,
+        )
+    refresh_symbol_metadata(
+        session,
+        [_mk_filters("ETHUSDT", tick="0.5", step="0.5", min_notional="5")],
+        observed_at=_T2,
+    )
+
+
+def test_read_constraint_history_returns_sorted_decimal_text_rows(session: Session) -> None:
+    _seed_history(session)
+
+    rows = read_constraint_history(session, ["ETHUSDT", "BTCUSDT"])
+
+    assert [(r["symbol"], r["metadata_observed_at_utc"]) for r in rows] == [
+        ("BTCUSDT", _T1.isoformat()),
+        ("BTCUSDT", _T2.isoformat()),
+        ("BTCUSDT", _T3.isoformat()),
+        ("ETHUSDT", _T2.isoformat()),
+    ]
+    for row in rows:
+        assert set(row) == {
+            "symbol",
+            "metadata_observed_at_utc",
+            "price_tick_size",
+            "quantity_step_size",
+            "min_quantity",
+            "min_notional",
+        }
+        assert all(isinstance(v, str) for v in row.values())
+        for key in ("price_tick_size", "quantity_step_size", "min_quantity", "min_notional"):
+            assert "E" not in row[key].upper()  # plain notation, never scientific
+        assert (
+            datetime.fromisoformat(row["metadata_observed_at_utc"]).utcoffset().total_seconds() == 0
+        )  # type: ignore[union-attr]
+    first = rows[0]
+    assert Decimal(first["price_tick_size"]) == Decimal("1")
+    assert Decimal(first["quantity_step_size"]) == Decimal("0.25")
+    assert Decimal(first["min_quantity"]) == Decimal("0.25")
+    assert Decimal(first["min_notional"]) == Decimal("5")
+    # Only the requested symbols are read.
+    assert {r["symbol"] for r in read_constraint_history(session, ["ETHUSDT"])} == {"ETHUSDT"}
+
+
+def test_read_constraint_history_rows_parse_with_the_engine_parser(session: Session) -> None:
+    from src.backtest.constraints import ConstraintHistory, parse_constraint_row
+
+    _seed_history(session)
+    rows = read_constraint_history(session, ["BTCUSDT", "ETHUSDT"])
+
+    parsed = [parse_constraint_row(row) for row in rows]
+    assert [p.symbol for p in parsed] == ["BTCUSDT", "BTCUSDT", "BTCUSDT", "ETHUSDT"]
+    assert parsed[1].observed_at_utc == _T2
+    assert parsed[1].price_tick_size == Decimal("0.5")
+    history = ConstraintHistory.from_rows(parsed)
+    assert set(history.rows_by_symbol) == {"BTCUSDT", "ETHUSDT"}
+
+
+def test_read_constraint_history_is_independent_of_request_order(session: Session) -> None:
+    _seed_history(session)
+    forward = read_constraint_history(session, ["BTCUSDT", "ETHUSDT"])
+    backward = read_constraint_history(session, ["ETHUSDT", "BTCUSDT", "BTCUSDT"])
+    assert forward == backward
+
+
+def test_read_constraint_history_fails_closed_for_a_symbol_without_rows(session: Session) -> None:
+    _seed_history(session)
+    with pytest.raises(ValueError, match="SOLUSDT"):
+        read_constraint_history(session, ["BTCUSDT", "SOLUSDT"])
+    with pytest.raises(ValueError):
+        read_constraint_history(session, [])
+
+
+def test_read_constraint_history_uses_bound_parameters(session: Session) -> None:
+    import inspect
+
+    from sqlalchemy import event
+    from src.data import metadata as metadata_module
+
+    _seed_history(session)
+    seen: list[tuple[str, object]] = []
+    engine = session.get_bind()
+
+    def capture(conn, cursor, statement, parameters, context, executemany):  # type: ignore[no-untyped-def]
+        seen.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        read_constraint_history(session, ["BTCUSDT"])
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    assert seen, "the reader must run a query"
+    for statement, parameters in seen:
+        assert "BTCUSDT" not in statement  # the symbol travels as a bound parameter
+        assert "BTCUSDT" in parameters  # type: ignore[operator]
+    source = inspect.getsource(metadata_module.read_constraint_history)
+    assert "select(" in source
+    assert "text(" not in source and 'f"SELECT' not in source and 'execute("' not in source
