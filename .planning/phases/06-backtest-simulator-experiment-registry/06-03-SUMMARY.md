@@ -169,6 +169,8 @@ status: complete
 
 # Phase 6 Plan 3: Uncertainty-First Backtest Report Summary
 
+> VOID (Phase 14, D052): the pinned report digests and every BKTS claim below were produced from v1 simulator output and are void with all earlier backtest evidence. BKTS-03 (plateau analysis) stays Pending and is not claimed by Phase 14; the report digest was regenerated on v2 trade records in plan 14-11. The text is kept unchanged as history.
+
 **Seeded stationary block bootstrap + nine-section uncertainty envelope + repo-wide no-float guard extension**
 
 ## Performance

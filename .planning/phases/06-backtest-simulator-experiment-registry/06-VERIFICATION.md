@@ -24,6 +24,8 @@ deferred:
 
 # Phase 06: Backtest Simulator + Experiment Registry Verification Report
 
+> VOID (Phase 14, D052): this report verified the v1 simulator (it examined the signal bar, filled at a touch, booked a single-exit TP1, ignored funding and the portfolio ledger). Protocol v2.0.0 declares all earlier backtest evidence void; BKTS-01, BKTS-02 and DOMN-03 are re-verified against the v2 engine in Phase 14. The text below is kept unchanged as history and must not be read as current evidence.
+
 **Phase Goal:** Backtest is the canonical validation authority - selection decisions rest on costs-included, uncertainty-first evidence.
 **Verified:** 2026-10-04
 **Status:** passed (one prior gap deferred to Phase 14, see below)

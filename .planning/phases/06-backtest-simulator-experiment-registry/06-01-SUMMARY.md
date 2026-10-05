@@ -1,5 +1,7 @@
 # Phase 6 Plan 1: Backtest Simulator Tracer Slice Summary
 
+> VOID (Phase 14, D052): every BKTS-01 simulator claim below (intrabar resolution, limit fills, expiry, invalidation, costs) describes the v1 simulator, which examined the signal bar and filled at a touch. Phase 14 replaced it (protocol v2.0.0) and declared all earlier backtest evidence void; BKTS-01 is re-verified against the v2 engine. The text is kept unchanged as history.
+
 ## One-liner
 Event-driven backtest simulator replaying closed 1H strategy bars through strategy.evaluate → planner.plan → evaluate_risk with 1m intrabar SL-first resolution, registry-parameterized costs from run #1, and limit-model entry state machine (TOUCH_NO_FILL / PARTIAL_FILL / EXPIRED / INVALIDATION_CANCEL).
 

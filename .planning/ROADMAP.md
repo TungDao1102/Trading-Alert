@@ -39,7 +39,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 3: Domain + Registry + Fixtures** - Seven entities, versioned params, golden-fixture harness (completed 2026-10-04)
 - [x] **Phase 4: Pure Core (Feature + Strategy + Planner)** - Deterministic signals and trade plans from closed candles (completed 2026-10-03)
 - [x] **Phase 5: Risk Engine** - Identical sizing/quantization/portfolio caps in every mode (completed 2026-10-03)
-- [x] **Phase 6: Backtest Simulator + Experiment Registry** - 1m intrabar parity engine with uncertainty-first reports (completed 2026-09-26)
+- [x] **Phase 6: Backtest Simulator + Experiment Registry** - 1m intrabar parity engine with uncertainty-first reports (completed 2026-09-26; VOID (Phase 14, D052): the v1 simulator evidence is void, BKTS-01 and BKTS-02 are re-verified by Phase 14)
 - [x] **Phase 7: Paper Forward Observation** - WS realtime loop, three-way attribution, no tuning on paper (completed 2026-10-04)
 - [x] **Phase 8: Approval + Reconciliation Hardening** - Idempotent Telegram approvals, orphan sweeper, SAFE_MODE rehearsed (completed 2026-09-27)
 - [x] **Phase 9: Live Execution Rollout** - LIMIT-zone entries, Algo protective exits, smallest capital (completed 2026-10-04)
@@ -630,7 +630,7 @@ Plans:
 1. For trend-pullback, the SL lies outside the entry zone with a minimum ATR distance. Swings use confirmed pivots only, excluding the evaluated bar, so a setup cannot fire on a new 20-bar low (F-301).
 2. The implemented geometries of all three families match the sheets' Stage baselines, or a DECISIONS entry records the deviation (F-113).
 3. New versioned parameter sets record a rationale for every value; no fixture seed values are used (F-909).
-4. A research re-run under protocol v1.1.0 is ready to start on the Phase-14 engine. The run itself is a research activity, not part of this phase.
+4. A research re-run under protocol v2.0.0 is ready to start on the Phase-14 engine. The run itself is a research activity, not part of this phase.
 
 **Audit refs**: F-301, F-113, F-909
 

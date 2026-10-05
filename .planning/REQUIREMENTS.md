@@ -24,7 +24,7 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 - [x] **DOMN-01**: System persists seven separate entities (Signal, TradePlan, Approval, Order, Fill, Position, JournalEvent) with GLOSSARY-canonical enums and no nullable-column state inference
 - [x] **DOMN-02**: Every backtest/paper/alert/order plan is traceable to an immutable versioned parameter set (strategyVersion + parameterSetId + parameterSetHash + experiment linkage)
-- [x] **DOMN-03**: Strategy correctness is enforced by golden fixtures (candles.csv + parameters.json + expected signals/plans) plus no-lookahead, prefix-invariance, candle-close-timing, and boundary suites
+- [x] **DOMN-03**: Strategy correctness is enforced by golden fixtures (candles.csv + parameters.json + expected signals/plans) plus no-lookahead, prefix-invariance, candle-close-timing, and boundary suites (Phase 6 evidence is void per D052; re-verified by Phase 14 through tests/test_backtest_entry.py, tests/test_backtest_exits.py, tests/test_backtest_funding.py, tests/test_backtest_ledger.py, tests/test_backtest_expiry_clock.py, tests/test_backtest_goldens.py, tests/test_backtest_determinism.py and tests/test_backtest_chain.py)
 - [x] **DOMN-04**: Signal, TradePlan, Order and Position state transitions are validated against the GLOSSARY state machines and illegal transitions are rejected
 
 ### Strategy & Planning
@@ -42,8 +42,8 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 ### Backtest & Evidence
 
-- [x] **BKTS-01**: Backtest simulator resolves intrabar SL/TP ordering with 1m data, models limit fills/partials/expiry/invalidation, and applies fees/funding/slippage before any selection decision
-- [x] **BKTS-02**: Every experiment is reproducible from dataset + strategy + parameter set + cost + execution versions and is compared against no-trade and simple-trend baselines
+- [x] **BKTS-01**: Backtest simulator resolves intrabar SL/TP ordering with 1m data, models limit fills/partials/expiry/invalidation, and applies fees/funding/slippage before any selection decision (Phase 6 evidence is void per D052; re-verified by Phase 14 through tests/test_backtest_entry.py, tests/test_backtest_exits.py, tests/test_backtest_funding.py, tests/test_backtest_ledger.py, tests/test_backtest_expiry_clock.py, tests/test_backtest_goldens.py, tests/test_backtest_determinism.py and tests/test_backtest_chain.py)
+- [x] **BKTS-02**: Every experiment is reproducible from dataset + strategy + parameter set + cost + execution versions and is compared against no-trade and simple-trend baselines (Phase 6 evidence is void per D052; re-verified by Phase 14 through tests/test_backtest_entry.py, tests/test_backtest_exits.py, tests/test_backtest_funding.py, tests/test_backtest_ledger.py, tests/test_backtest_expiry_clock.py, tests/test_backtest_goldens.py, tests/test_backtest_determinism.py and tests/test_backtest_chain.py)
 - [ ] **BKTS-03**: Reports show trade counts and slices (symbol/period/regime/version), R distribution, bootstrap intervals, and parameter-plateau analysis — never a single headline number
 - [x] **BKTS-04**: Every experiment record carries the fields the research protocol requires, including NO_TRADE counts with reasons, the intrabar tie-break, timeframe, full parameters and costs, and a verifiable code version
 
@@ -157,6 +157,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OPS-05 | Phase 20 | Pending |
 | OPS-06 | Phase 13.1 | Pending |
 | GOV-02 | Phase 26 | Pending |
+
+> Traceability note (Phase 14, D052): the Phase 6 evidence behind the BKTS-01, BKTS-02 and DOMN-03 rows is void. Phase 14 re-verifies those requirements against the v2 engine (tests/test_backtest_entry.py, tests/test_backtest_exits.py, tests/test_backtest_funding.py, tests/test_backtest_ledger.py, tests/test_backtest_expiry_clock.py, tests/test_backtest_goldens.py, tests/test_backtest_determinism.py and tests/test_backtest_chain.py). The status cells above are unchanged; the verifier owns them.
 
 **Coverage:**
 
