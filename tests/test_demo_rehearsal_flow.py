@@ -1042,6 +1042,29 @@ def test_exchange_failure_is_recorded_honestly(tmp_path: Path) -> None:
     assert FAKE_SECRET not in text and "secret " not in text
 
 
+def test_sdk_error_code_and_text_are_recorded_but_other_errors_stay_type_only(
+    tmp_path: Path,
+) -> None:
+    """A Binance 400 records its code and public text; a plain error records no detail."""
+    from binance_sdk_derivatives_trading_usds_futures import BadRequestError
+
+    adapter = FakeDemoAdapter()
+    adapter.raise_on["place_entry"] = BadRequestError(
+        error_message="Order would immediately trigger.", status_code=-2021
+    )
+    _, data, _, _ = run_flow(tmp_path, scenario="far", adapter=adapter, execute=True)
+    entry = next(f for f in data["failures"] if f["step"] == "place_entry")
+    assert entry["exception_type"] == "BadRequestError"
+    assert entry["message"] == "binance code -2021: Order would immediately trigger."
+
+    (tmp_path / "plain").mkdir()
+    adapter = FakeDemoAdapter()
+    adapter.raise_on["place_entry"] = ValueError("secret " + FAKE_SECRET)
+    _, data, _, _ = run_flow(tmp_path / "plain", scenario="far", adapter=adapter, execute=True)
+    entry = next(f for f in data["failures"] if f["step"] == "place_entry")
+    assert "message" not in entry
+
+
 async def test_enablement_is_in_process_only() -> None:
     adapter = FakeDemoAdapter()
     adapter.raise_when_symbol_none = RuntimeError("account-wide read failed")

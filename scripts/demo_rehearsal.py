@@ -538,6 +538,19 @@ class EvidenceRecorder:
 # --------------------------------------------------------------------------- #
 
 
+def _exchange_error_detail(exc: BaseException) -> str | None:
+    """The exchange's own error code and text, only when the SDK carried an int code.
+
+    Binance error text is public API vocabulary (never request data); it is still scrubbed
+    on write and capped here. Anything without an int `status_code` yields no detail.
+    """
+    code = getattr(exc, "status_code", None)
+    if isinstance(code, bool) or not isinstance(code, int):
+        return None
+    text = str(getattr(exc, "error_message", "") or "")[:200]
+    return f"binance code {code}: {text}"
+
+
 class GuardedAdapter:
     """Run the host guard before every call; in DRY_RUN never reach a mutating method."""
 
@@ -558,7 +571,7 @@ class GuardedAdapter:
         self.call_count = 0
         self.error_count = 0
         self.mutating_attempts = 0
-        self.error_log: list[tuple[str, str]] = []
+        self.error_log: list[tuple[str, str, str | None]] = []
         self._sim_orders: dict[str, str] = {}
         self._sim_algos: dict[str, str] = {}
 
@@ -573,7 +586,7 @@ class GuardedAdapter:
             return await call()
         except Exception as exc:
             self.error_count += 1
-            self.error_log.append((name, type(exc).__name__))
+            self.error_log.append((name, type(exc).__name__, _exchange_error_detail(exc)))
             raise
 
     # ----- reads ------------------------------------------------------------- #
@@ -2536,8 +2549,8 @@ def main(
         recorder.add_step("run", STEP_FAILED, f"run failed: {type(exc).__name__}")
         outcome = OUTCOME_FAILED
     if guarded is not None:
-        for method, exc_type in guarded.error_log:
-            recorder.record_failure_name(method, exc_type)
+        for method, exc_type, detail in guarded.error_log:
+            recorder.record_failure_name(method, exc_type, detail)
     if ctx is not None:
         recorder.details["journal_event_counts"] = ctx.journal.counts()
         recorder.details["run_id"] = ctx.run_id
