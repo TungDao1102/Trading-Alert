@@ -404,7 +404,22 @@ def assemble_kwargs(**overrides: Any) -> dict[str, Any]:
         "result_summary_json": "{}",
     }
     kwargs.update(overrides)
+    if "run_identity" not in overrides:
+        kwargs["run_identity"] = run_identity_for(kwargs)
     return kwargs
+
+
+def run_identity_for(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """The engine-output identity keys that match `assemble` kwargs (CR-02 binding)."""
+    from src.domain.registry import load_parameter_set
+
+    parameter_set = load_parameter_set(kwargs["strategy_id"], kwargs["parameter_set_id"])
+    return {
+        "strategy_version": parameter_set.strategy_version,
+        "parameter_set_hash": parameter_set.parameter_set_hash,
+        "cost_model_hash": kwargs["cost_model"].cost_model_hash,
+        "symbols": sorted(kwargs["universe"]),
+    }
 
 
 def make_experiment_record(

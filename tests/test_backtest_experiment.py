@@ -671,6 +671,7 @@ def _simple_trend_record(case: dict, *, result_summary_json: str = "{}"):
 
     start = datetime.fromisoformat(case["data_window"]["start_utc"])
     end = datetime.fromisoformat(case["data_window"]["end_utc"])
+    output = run(case)
     return assemble(
         parameter_set_id=case["parameter_set_id"],
         strategy_id=case["strategy_id"],
@@ -682,7 +683,8 @@ def _simple_trend_record(case: dict, *, result_summary_json: str = "{}"):
         time_range_end_utc=end,
         universe=list(case["symbols"]),
         run_type="BASELINE_SIMPLE_TREND",
-        run_summary=run(case)["run_summary"],
+        run_summary=output["run_summary"],
+        run_identity=output,
         split_role="DEVELOPMENT",
         split_start_utc=start,
         split_end_utc=end,
@@ -1058,6 +1060,29 @@ def test_assemble_refuses_a_run_summary_for_another_time_range() -> None:
     other = strategy_run_summary(start=RECORD_START + _ONE_DAY)
     with pytest.raises(IncompleteExperimentRecord, match="data_window"):
         _assemble(run_summary=other)
+
+
+def test_assemble_binds_the_run_to_the_identity_it_attests() -> None:
+    # CR-02: the strategy version, parameter-set hash, cost-model hash and symbols of the
+    # engine run must match the record's own identity inputs.
+    from src.backtest.experiment import IncompleteExperimentRecord
+
+    with pytest.raises(IncompleteExperimentRecord, match="strategy_version"):
+        _assemble(strategy_version="v999.0.0-bogus")
+    base = assemble_kwargs()["run_identity"]
+    for key, bad in (
+        ("strategy_version", "v999.0.0-bogus"),
+        ("parameter_set_hash", "0" * 64),
+        ("cost_model_hash", "0" * 64),
+        ("symbols", ["ETHUSDT"]),
+    ):
+        with pytest.raises(IncompleteExperimentRecord, match=key):
+            _assemble(run_identity={**base, key: bad})
+    missing = {k: v for k, v in base.items() if k != "symbols"}
+    with pytest.raises(IncompleteExperimentRecord, match="symbols"):
+        _assemble(run_identity=missing)
+    with pytest.raises(IncompleteExperimentRecord, match="universe"):
+        _assemble(universe=["BTCUSDT", "ETHUSDT"], run_identity=base)
 
 
 def test_assemble_refuses_a_run_over_another_dataset() -> None:

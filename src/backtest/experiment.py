@@ -575,6 +575,45 @@ def _summary_window(run_summary: Mapping[str, Any]) -> tuple[datetime, datetime]
 # --------------------------------------------------------------------------- #
 
 
+def _check_run_identity(
+    run_identity: Mapping[str, Any],
+    *,
+    strategy_version: str,
+    parameter_set: Any,
+    cost_model: CostModel,
+    universe: Sequence[str],
+) -> None:
+    """Refuse an engine run that is not the one the record's identity inputs describe (CR-02)."""
+    if parameter_set.strategy_version != strategy_version:
+        raise IncompleteExperimentRecord(
+            f"strategy_version {strategy_version!r} is not the parameter set's "
+            f"strategy_version {parameter_set.strategy_version!r}"
+        )
+    if not isinstance(run_identity, Mapping):
+        raise IncompleteExperimentRecord("run_identity must be the engine output mapping")
+    expected: tuple[tuple[str, Any], ...] = (
+        ("strategy_version", strategy_version),
+        ("parameter_set_hash", parameter_set.parameter_set_hash),
+        ("cost_model_hash", cost_model.cost_model_hash),
+    )
+    for key, value in expected:
+        if key not in run_identity:
+            raise IncompleteExperimentRecord(f"run_identity is missing {key!r}")
+        if run_identity[key] != value:
+            raise IncompleteExperimentRecord(
+                f"run_identity {key} {run_identity[key]!r} is not the record's {value!r}: "
+                "the run is not the one this record attests"
+            )
+    symbols = run_identity.get("symbols")
+    if not isinstance(symbols, (list, tuple)) or any(not isinstance(s, str) for s in symbols):
+        raise IncompleteExperimentRecord("run_identity symbols must be a list of symbol strings")
+    if sorted(symbols) != sorted(universe):
+        raise IncompleteExperimentRecord(
+            f"run_identity symbols {sorted(symbols)!r} are not the record universe "
+            f"{sorted(universe)!r}"
+        )
+
+
 def assemble(
     *,
     parameter_set_id: str,
@@ -588,6 +627,7 @@ def assemble(
     universe: Sequence[str],
     run_type: str,
     run_summary: Mapping[str, Any],
+    run_identity: Mapping[str, Any],
     split_role: str,
     split_start_utc: datetime,
     split_end_utc: datetime,
@@ -608,6 +648,12 @@ def assemble(
     differ from the code constants, when its `data_window` is not the record's time
     range, when its `dataset_id` is set and is not `data_snapshot_id`, or when the cost
     model lacks the funding convention. Holdout-once enforcement is Phase 26 (F-960).
+
+    `run_identity` is the engine output (or any mapping with its `strategy_version`,
+    `parameter_set_hash`, `cost_model_hash` and `symbols` keys). The record attests those
+    identity inputs, so each is compared with the record's own (CR-02): the registry set's
+    strategy version must be `strategy_version`, the run's parameter-set and cost-model
+    hashes must be the record's, and the run's symbols must be the record's `universe`.
 
     Raises:
         UnregisteredParameterSet: parameter_set_id not in registry.
@@ -659,6 +705,14 @@ def assemble(
         raise IncompleteExperimentRecord(
             f"run_summary dataset_id {dataset_id!r} is not data_snapshot_id {data_snapshot_id!r}"
         )
+
+    _check_run_identity(
+        run_identity,
+        strategy_version=strategy_version,
+        parameter_set=parameter_set,
+        cost_model=cost_model,
+        universe=universe,
+    )
 
     # Build the universe hash (sorted for order-stability).
     universe_hash = _universe_hash(universe)
