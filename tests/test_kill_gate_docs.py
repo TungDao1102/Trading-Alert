@@ -211,3 +211,28 @@ def test_glossary_tokens_match_enum() -> None:
     assert len(tokens) == 3
     assert set(tokens) == {m.value for m in KillGateState}
     assert "D030" in body
+
+
+def test_d053_inventory_row_present() -> None:
+    """D053 lists what moved in Phase 14, once, directly after D052 (D048 style)."""
+    lines = _lines(DECISIONS)
+    d053_idx = [i for i, ln in enumerate(lines) if ln.startswith("| D053 |")]
+    d052_idx = [i for i, ln in enumerate(lines) if ln.startswith("| D052 |")]
+    assert len(d053_idx) == 1, "D053 must appear exactly once as a table-row start"
+    assert len(d052_idx) == 1
+    assert d053_idx[0] == d052_idx[0] + 1, "D053 must directly follow D052"
+    row = lines[d053_idx[0]]
+    for token in (
+        "regeneration inventory",
+        "MOVED:",
+        "NOT MOVED",
+        "funding_convention",
+        "6d6c4e237ed0b56996ed344f4449b09a59c253a8d148af60e3aba1c8436f1caa",
+        "3063dc390cecf6d7a19c2bbb338629990db366fd881f5383151ccb0bcd07a0d4",
+        "analytics-evidence/2",
+        "backtest-case/2",
+        "ebd9e1014da67eeba942199a67699b3ac79f5fb8c64ef86b7218f003733a19c7",
+        "74bbcc50fb94ee1f24a41f72668f3a9c32df7889355c521b146e56b518f4a2ec",
+        "REGRESSION_SNAPSHOTS.md",
+    ):
+        assert token in row, f"D053 row must mention {token}"

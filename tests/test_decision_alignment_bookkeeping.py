@@ -423,6 +423,12 @@ def test_d044_owner_phases_exist_in_roadmap() -> None:
         assert number.isdigit()
 
 
+def test_real_table_reaches_d053() -> None:
+    ids = bk._DECISION_ROW.findall(_read(DECISIONS))
+    assert len(ids) >= 53
+    assert ids[50:53] == ["D051", "D052", "D053"]
+
+
 def test_real_table_reaches_d048() -> None:
     ids = bk._DECISION_ROW.findall(_read(DECISIONS))
     assert bk.MIN_LAST_DECISION == 48
