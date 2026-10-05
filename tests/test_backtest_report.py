@@ -379,7 +379,7 @@ def test_zero_r_counted_as_neither_wins_nor_losses() -> None:
     """Beh. 8: trades with R exactly zero are counted in the
     distribution as neither wins nor losses.
 
-    Per D-04: zero-R trades (e.g. EOD exit at entry) are reported
+    Per D-04: zero-R trades (e.g. a breakeven stop) are reported
     separately from wins and losses; the win_count + loss_count must
     equal the trade_count minus the zero-R count.
     """
@@ -516,7 +516,7 @@ def _gap_trade(trade_id: str, pnl: str, risk: str, **overrides: object) -> dict:
         "entry_price": "100.00",
         "entry_time_utc": "2026-01-15T10:00:00+00:00",
         "quantity": "0.1",
-        "exit_kind": "TP1",
+        "exit_kind": "TP2",
         "exit_price": "101.00",
         "exit_time_utc": "2026-01-15T11:00:00+00:00",
         "realized_pnl": pnl,
@@ -713,3 +713,213 @@ def test_wr10_risk_zero_trades_counted_and_surfaced_in_note() -> None:
         f"risk-zero exclusion must be surfaced, got {report.insufficient_data_note!r}"
     )
     assert "realized_risk=0" in report.insufficient_data_note
+
+
+# --------------------------------------------------------------------------- #
+# Plan 14-11 (D-34, D-37, D-21): only closed filled trades are trades.
+# --------------------------------------------------------------------------- #
+
+
+def _end_of_data_trade(trade_id: str, pnl: str, risk: str, **overrides: object) -> dict:
+    """A position still open when the data ended: force-closed, never a real exit."""
+    return _gap_trade(trade_id, pnl, risk, exit_kind="END_OF_DATA", **overrides)
+
+
+def _plan_outcome(trade_id: str, entry_kind: str, **overrides: object) -> dict:
+    """A plan that never filled: no entry, no exit, no PnL."""
+    trade = _gap_trade(
+        trade_id,
+        "0",
+        "0",
+        entry_kind=entry_kind,
+        entry_price=None,
+        entry_time_utc=None,
+        quantity=None,
+        exit_kind=None,
+        exit_price=None,
+        exit_time_utc=None,
+        realized_pnl=None,
+        realized_risk=None,
+        gross_pnl=None,
+        regime=None,
+    )
+    trade.update(overrides)
+    return trade
+
+
+def _mixed_outcomes() -> list:
+    """3 SL, 2 TP2, 1 END_OF_DATA, 2 EXPIRED, 1 INVALIDATION_CANCEL, 1 REJECT."""
+    return [
+        _gap_trade("m-sl1", "-0.10", "0.10", exit_kind="SL"),
+        _gap_trade("m-sl2", "-0.10", "0.10", exit_kind="SL"),
+        _gap_trade("m-sl3", "-0.10", "0.10", exit_kind="SL"),
+        _gap_trade("m-tp1", "0.20", "0.10", exit_kind="TP2"),
+        _gap_trade("m-tp2", "0.30", "0.10", exit_kind="TP2"),
+        _end_of_data_trade("m-eod", "9.00", "0.10"),
+        _plan_outcome("m-exp1", "EXPIRED"),
+        _plan_outcome("m-exp2", "EXPIRED"),
+        _plan_outcome("m-inv", "INVALIDATION_CANCEL"),
+        _plan_outcome("m-rej", "REJECT", outcome_kind="REJECT", reason_code="CLUSTER_CAP_REJECT"),
+    ]
+
+
+def _mixed_report() -> object:
+    return _build_report(
+        experiment_record=_make_experiment_record(),
+        trade_records=_mixed_outcomes(),
+        bootstrap_seed=_GAP_SEED,
+        resamples=100,
+    )
+
+
+def test_trade_count_and_r_distribution_cover_only_closed_filled_trades() -> None:
+    report = _mixed_report()
+
+    assert report.counts.trade_count == 5
+    r = report.r_distribution
+    assert (r.win_count, r.loss_count, r.zero_r_count) == (2, 3, 0)
+    # The END_OF_DATA trade (R = 90) is not in the pool.
+    assert r.max == Decimal("3")
+    assert r.min == Decimal("-1")
+    assert report.baselines.candidate_trade_count == 5
+    assert sum(report.counts.counts_by_symbol.values()) == 5
+    assert sum(report.counts.counts_by_regime.values()) == 5
+
+
+def test_end_of_data_count_is_separate_and_plan_outcome_counts_are_by_entry_kind() -> None:
+    counts = _mixed_report().counts
+
+    assert counts.end_of_data_count == 1
+    assert counts.plan_outcome_counts == {
+        "EXPIRED": 2,
+        "INVALIDATION_CANCEL": 1,
+        "REJECT": 1,
+    }
+    assert list(counts.plan_outcome_counts) == sorted(counts.plan_outcome_counts)
+
+
+def test_non_fills_alone_leave_the_trade_floor_at_zero() -> None:
+    plans = [_plan_outcome(f"p-{i}", "EXPIRED") for i in range(40)]
+    report = _build_report(
+        experiment_record=_make_experiment_record(),
+        trade_records=plans,
+        bootstrap_seed=_GAP_SEED,
+        resamples=100,
+    )
+
+    assert report.counts.trade_count == 0
+    assert report.counts.plan_outcome_counts == {"EXPIRED": 40}
+    assert report.expectancy_interval is None
+
+
+def test_end_of_data_trades_never_enter_the_stability_or_dual_universe_slices() -> None:
+    trades = [
+        _gap_trade("s-1", "0.20", "0.10", exit_kind="TP2"),
+        _gap_trade("s-2", "-0.10", "0.10", exit_kind="SL"),
+        _end_of_data_trade("s-eod", "5.00", "0.10"),
+    ]
+    report = _build_report(
+        experiment_record=_make_experiment_record(),
+        trade_records=trades,
+        bootstrap_seed=_GAP_SEED,
+        resamples=100,
+        universe_tags={"BTCUSDT": ["research_universe", "live5_universe"]},
+    )
+
+    assert sum(s.trade_count for s in report.stability.slices) == 2
+    assert report.dual_universe.research_universe.trade_count == 2
+    assert report.dual_universe.live5_universe.trade_count == 2
+
+
+def test_regime_slice_is_keyed_by_the_record_regime_and_unknown_only_when_none() -> None:
+    trades = [
+        _gap_trade("r-1", "0.20", "0.10", exit_kind="TP2", regime="BULLISH"),
+        _gap_trade("r-2", "-0.10", "0.10", exit_kind="SL", regime="BULLISH"),
+        _gap_trade("r-3", "-0.10", "0.10", exit_kind="SL", regime="BEARISH"),
+        _gap_trade("r-4", "0.30", "0.10", exit_kind="TP2", regime=None),
+    ]
+    report = _build_report(
+        experiment_record=_make_experiment_record(),
+        trade_records=trades,
+        bootstrap_seed=_GAP_SEED,
+        resamples=100,
+    )
+
+    assert report.counts.counts_by_regime == {"BEARISH": 1, "BULLISH": 2, "UNKNOWN": 1}
+
+
+def test_plateau_section_is_a_fixed_not_computed_structure_for_any_input() -> None:
+    from src.backtest.report import PlateauSection
+
+    regions = [
+        _gap_trade("g-a", "0.20", "0.10", exit_kind="TP2", parameter_region="region_a"),
+        _gap_trade("g-b", "-0.10", "0.10", exit_kind="SL", parameter_region="region_b"),
+        _gap_trade("g-c", "0.30", "0.10", exit_kind="TP2", parameter_region="region_c"),
+    ]
+    inputs = [[], regions, _mixed_outcomes(), _gap_trades_four()]
+    plateaus = [
+        _build_report(
+            experiment_record=_make_experiment_record(),
+            trade_records=trades,
+            bootstrap_seed=_GAP_SEED,
+            resamples=100,
+        ).plateau
+        for trades in inputs
+    ]
+
+    for plateau in plateaus:
+        assert isinstance(plateau, PlateauSection)
+        assert plateau.status == "NOT_COMPUTED"
+        assert plateau.note == "not computed (BKTS-03 pending)"
+        assert not hasattr(plateau, "regions")
+        assert not hasattr(plateau, "isolated_optimum_warnings")
+    assert len({plateau.digest() for plateau in plateaus}) == 1
+
+
+def test_intrabar_coverage_counts_fallback_over_closed_and_end_of_data_trades() -> None:
+    trades = [
+        _gap_trade("i-1", "0.20", "0.10", exit_kind="TP2"),
+        _gap_trade("i-2", "-0.10", "0.10", exit_kind="SL", fallback_applied=True),
+        _end_of_data_trade("i-3", "0.10", "0.10", fallback_applied=True),
+        _end_of_data_trade("i-4", "0.10", "0.10"),
+        _plan_outcome("i-5", "EXPIRED"),
+    ]
+    report = _build_report(
+        experiment_record=_make_experiment_record(),
+        trade_records=trades,
+        bootstrap_seed=_GAP_SEED,
+        resamples=100,
+    )
+
+    coverage = report.intrabar_coverage
+    assert coverage.closed_trades == 2
+    assert coverage.end_of_data_trades == 2
+    assert coverage.total_trades == 4
+    assert coverage.fallback_count == 2
+    assert coverage.percent == Decimal("50")
+
+
+def test_a_filled_record_with_a_v1_exit_kind_is_refused() -> None:
+    from src.backtest.report import ReportBuildError
+
+    for bad_exit in ("TP1", "EOD", None, "MYSTERY"):
+        with pytest.raises(ReportBuildError):
+            _build_report(
+                experiment_record=_make_experiment_record(),
+                trade_records=[_gap_trade("v-1", "0.20", "0.10", exit_kind=bad_exit)],
+                bootstrap_seed=_GAP_SEED,
+                resamples=100,
+            )
+
+
+def test_the_mixed_report_is_deterministic_and_input_order_independent() -> None:
+    forward = _mixed_report()
+    reverse = _build_report(
+        experiment_record=_make_experiment_record(),
+        trade_records=list(reversed(_mixed_outcomes())),
+        bootstrap_seed=_GAP_SEED,
+        resamples=100,
+    )
+
+    assert forward.digest() == _mixed_report().digest()
+    assert forward.counts.digest() == reverse.counts.digest()
