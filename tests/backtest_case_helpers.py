@@ -159,8 +159,12 @@ def scripted_plan(
     tp2: str = "108.00",
     expiry_hours: int = 4,
     invalidation_level: str | None = None,
+    regime: str | None = None,
 ) -> dict[str, Any]:
-    """One scripted plan row, scheduled at `bar_close` (a strategy-bar close of `symbol`)."""
+    """One scripted plan row, scheduled at `bar_close` (a strategy-bar close of `symbol`).
+
+    `regime` (optional) is the label the engine copies onto the plan's records.
+    """
     row: dict[str, Any] = {
         "symbol": symbol,
         "bar_close_utc": bar_close.isoformat(),
@@ -175,6 +179,8 @@ def scripted_plan(
     }
     if invalidation_level is not None:
         row["invalidation_level"] = invalidation_level
+    if regime is not None:
+        row["regime"] = regime
     return row
 
 

@@ -21,8 +21,10 @@ from src.backtest.exits import sl_trigger_price
 from src.core.planner import plan
 from src.core.strategy import evaluate
 from src.core.types import AccountState, Candle, MarketSnapshot, SetupResult
+from src.domain.enums import DailyState
 from src.domain.registry import load_parameter_set
 from src.risk.gating import evaluate_risk
+from src.risk.types import PortfolioVerdict
 
 from tests.backtest_case_helpers import (
     SYMBOL,
@@ -31,6 +33,7 @@ from tests.backtest_case_helpers import (
     make_case,
     minute_row,
     phase6_strategy_rows,
+    scripted_plan,
 )
 
 TICK = Decimal("0.10")
@@ -241,3 +244,125 @@ def test_a_close_of_a_strategy_bar_outside_the_data_window_is_not_evaluated(
         day + timedelta(hours=3) - timedelta(milliseconds=1),
         day + timedelta(hours=4) - timedelta(milliseconds=1),
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Regime flows from strategy.evaluate through SetupResult onto every record (D-21, D-38).
+# --------------------------------------------------------------------------- #
+
+REGIMES = {"BULLISH", "BEARISH", "NEUTRAL"}
+
+
+def trigger_setup_result() -> SetupResult:
+    """`strategy.evaluate` on the full phase 6 prefix: the trigger-bar SetupResult."""
+    strategy_rows, context_rows = phase6_strategy_rows(TRIGGER_FIXTURE)
+    setup = [candle_of(r) for r in strategy_rows]
+    context = [candle_of(r) for r in context_rows]
+    snapshot = MarketSnapshot(
+        symbol=SYMBOL,
+        setup_candles=setup,
+        context_candles=[c for c in context if c.close_time_utc <= setup[-1].close_time_utc],
+        source_timeframe="1h",
+    )
+    return evaluate(
+        snapshot=snapshot,
+        account_state=AccountState(equity=Decimal("10000"), risk_rate=Decimal("0.005")),
+        strategy_version="v4.0.0",
+        parameter_set=load_parameter_set("trend-pullback", "baseline-v5"),
+    )
+
+
+def test_the_trigger_bar_setup_result_carries_the_resolved_regime() -> None:
+    result = trigger_setup_result()
+
+    assert result.signal is not None
+    assert result.regime in REGIMES
+
+
+def test_the_emitted_trade_record_carries_the_setup_regime() -> None:
+    case, _, _ = trigger_case()
+    output = simulate(case, risk_fn=evaluate_risk)
+
+    assert [t["regime"] for t in output["trades"]] == [trigger_setup_result().regime]
+
+
+def test_a_reject_record_carries_the_signal_regime() -> None:
+    def rejecting(**_: Any) -> PortfolioVerdict:
+        return PortfolioVerdict(
+            is_no_trade=True,
+            sized=None,
+            reason_code="CLUSTER_CAP_REJECT",
+            daily_state=DailyState.NORMAL,
+        )
+
+    case, signal, _ = trigger_case()
+    output = simulate(case, risk_fn=rejecting)
+
+    assert len(output["trades"]) == 1
+    record = output["trades"][0]
+    assert record["entry_kind"] == "REJECT"
+    assert record["signal_id"] == signal.signal_id
+    assert record["regime"] == trigger_setup_result().regime
+
+
+def test_a_scripted_plan_record_carries_its_own_regime_or_none() -> None:
+    from tests.backtest_case_helpers import SIGNAL_CLOSE, fixed_risk_fn, minute_close
+
+    def run(regime: str | None) -> dict[str, Any]:
+        row = scripted_plan(SYMBOL, SIGNAL_CLOSE, "sig-regime", regime=regime)
+        marks = flat_minutes(
+            SYMBOL,
+            minute_close(SIGNAL_CLOSE).replace(second=0, microsecond=0),
+            30,
+            "100",
+            kind="mark",
+        )
+        trades = flat_minutes(
+            SYMBOL,
+            minute_close(SIGNAL_CLOSE).replace(second=0, microsecond=0),
+            30,
+            "100",
+            kind="trade",
+            half_range="1.5",
+        )
+        case = make_case(scripted=[row], trade_minutes=trades, mark_minutes=marks)
+        return simulate(case, risk_fn=fixed_risk_fn("1.000", "3.0"))
+
+    assert [t["regime"] for t in run("BULLISH")["trades"]] == ["BULLISH"]
+    assert [t["regime"] for t in run(None)["trades"]] == [None]
+
+
+def test_a_no_trade_setup_result_without_a_regime_still_constructs() -> None:
+    result = SetupResult(is_no_trade=True, reason_code="NO_TRADE_REGIME")
+
+    assert result.regime is None
+    with pytest.raises(ValueError):
+        SetupResult(is_no_trade=True, reason_code="NO_TRADE_REGIME", regime="")
+
+
+def test_a_no_trade_result_past_the_regime_gate_names_the_regime() -> None:
+    strategy_rows, context_rows = phase6_strategy_rows(TRIGGER_FIXTURE)
+    setup = [candle_of(r) for r in strategy_rows]
+    context = [candle_of(r) for r in context_rows]
+    parameter_set = load_parameter_set("trend-pullback", "baseline-v5")
+    account = AccountState(equity=Decimal("10000"), risk_rate=Decimal("0.005"))
+    named = 0
+    for end in range(210, len(setup)):
+        prefix = setup[:end]
+        result = evaluate(
+            snapshot=MarketSnapshot(
+                symbol=SYMBOL,
+                setup_candles=prefix,
+                context_candles=[
+                    c for c in context if c.close_time_utc <= prefix[-1].close_time_utc
+                ],
+                source_timeframe="1h",
+            ),
+            account_state=account,
+            strategy_version="v4.0.0",
+            parameter_set=parameter_set,
+        )
+        assert result.regime is None or result.regime in REGIMES
+        if result.is_no_trade and result.regime is not None:
+            named += 1
+    assert named > 0
