@@ -18,11 +18,13 @@ and ``digest`` (sha256 over ``json.dumps(output, sort_keys=True)``). Exit codes:
     3  the store, the constraint source or the run failed (exception type name only)
 
 The window comes only from ``--end-day`` and ``--days``; this script never derives a data
-window from the wall clock, so a rerun reads the same files (D-26). ``time.perf_counter``
-measures durations only. Constraint history is either a JSON file (a list of rows, or an
-object with a ``constraint_history`` list) or the database named by an environment variable
-(``--database-url-env``). The URL is read once and is never printed: a database failure
-prints the exception type name only (T-14-27). Reads no network other than that database.
+window from the wall clock, so a rerun reads the same files (D-26). Open interest is not
+requested (the v2 engine does not consume it); every requested series fails closed.
+``time.perf_counter`` measures durations only. Constraint history is either a JSON file (a
+list of rows, or an object with a ``constraint_history`` list) or the database named by an
+environment variable (``--database-url-env``). The URL is read once and is never printed: a
+database failure prints the exception type name only (T-14-27). Reads no network other than
+that database.
 """
 
 from __future__ import annotations
@@ -58,6 +60,7 @@ EXIT_FAILURE = 3
 _RUNS = 2
 DB_CONNECT_TIMEOUT_SECONDS = 10
 _CONSTRAINT_KEYS = "constraint_history"
+_SMOKE_SERIES = ("trade", "intrabar_1m", "mark_1m", "funding")
 
 
 class _UsageError(Exception):
@@ -227,6 +230,11 @@ def _execute(args: argparse.Namespace) -> int:
         start_utc=start_utc,
         end_utc=end_utc,
         as_of_day_utc=as_of,
+        # open_interest is not consumed by the v2 engine (case-input v2 has no OI key) and
+        # the Binance OI statistics endpoint serves only ~30 days, so a 90-day OI history
+        # cannot exist locally. It is deliberately not requested: no gap is hidden, every
+        # requested series still fails closed on a hole (D-19).
+        series=_SMOKE_SERIES,
     )
     case = data.to_case_input(
         strategy_id=args.strategy_id,
