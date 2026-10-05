@@ -1,4 +1,4 @@
-"""Tests for the Phase 6 experiment registry (plan 06-02).
+"""Tests for the Phase 6 experiment registry (plan 06-02) and the typed record (plan 14-15).
 
 Per D-03 + BACKTEST_SPEC §11 + RESEARCH_PROTOCOL §5: every experiment
 record carries the canonical six-field identity tuple
@@ -8,20 +8,36 @@ record carries the canonical six-field identity tuple
 parameters, cost assumptions, results, and notes. A record missing any
 field fails the acceptance gate.
 
-TDD discipline: RED → GREEN. These tests are the RED phase — they MUST
-fail until `src/backtest/experiment.py` is implemented.
+Phase 14 (plan 14-15, D-22, F-118, BKTS-04): the record also carries the typed,
+validated fields (NO_TRADE counts, tie-break, timeframes, parameter and cost values,
+semantics version, code commit and dirty flag, counts, windows, allowed gaps, split
+role and boundaries). An invalid record cannot be constructed, and `experiment_id`
+binds the semantics version and the split. Every record in this file comes from the
+shared factory in `tests/backtest_case_helpers.py`.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
-from src.domain.canonical import sha256_hex
-from src.domain.registry import UnregisteredParameterSet
+from src.domain.canonical import canonical_decimal_text, sha256_hex
+from src.domain.registry import UnregisteredParameterSet, load_parameter_set
+
+from tests.backtest_case_helpers import (
+    CODE_COMMIT,
+    DEFAULT_COST_MODEL,
+    RECORD_END,
+    RECORD_START,
+    assemble_kwargs,
+    make_experiment_record,
+    strategy_run_summary,
+)
 
 PHASE6_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase6"
 
@@ -46,23 +62,11 @@ def _build_cost_model(cost_dict: dict):
     return build_cost_model(cost_dict)
 
 
-def _v3_case_input(case_dir: Path) -> dict:
-    """Load a phase6 fixture and rebind it to the v3 registry set.
+def _assemble(**overrides: Any):
+    """`assemble` over the shared valid baseline-v5 inputs, with keyword overrides."""
+    from src.backtest.experiment import assemble
 
-    Per Phase 7.1 D-05: phase6 fixtures stay byte-identical (NOT
-    regenerated), but tests that call assemble() must migrate to a
-    7-key registry set. baseline-v3 ships all 7 COST_KEYS; baseline-v2
-    only has 3 and now raises KeyError at the gate (correct behavior).
-    The cost_model dict is also rebinding partial_fill_fraction from
-    "1.0" (phase6 spelling) to "0.5" (v3 TOML spelling) so the
-    registry slice and the fixture dict hash identically.
-    """
-    case: dict = _load_input(case_dir)
-    case["parameter_set_id"] = "baseline-v3"
-    cost_model: dict = dict(case["cost_model"])
-    cost_model["partial_fill_fraction"] = "0.5"
-    case["cost_model"] = cost_model
-    return case
+    return assemble(**assemble_kwargs(**overrides))
 
 
 # --------------------------------------------------------------------------- #
@@ -78,38 +82,8 @@ def test_experiment_assemble_stable_64_hex_identity() -> None:
     identity tuple. All hash fields must be 64-hex strings; the
     experiment_id must be stable across reruns.
     """
-    from src.backtest.experiment import assemble
-
-    case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
-    case_input = _v3_case_input(case_dir)
-    cost_model = _build_cost_model(case_input["cost_model"])
-
-    record_a = assemble(
-        parameter_set_id=case_input["parameter_set_id"],
-        strategy_id=case_input["strategy_id"],
-        strategy_version=case_input["strategy_version"],
-        data_snapshot_id=case_input["data_snapshot_id"],
-        code_version=case_input["code_version"],
-        cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
-        time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
-        universe=case_input["universe"],
-        run_type=case_input["run_type"],
-        notes=case_input["notes"],
-    )
-    record_b = assemble(
-        parameter_set_id=case_input["parameter_set_id"],
-        strategy_id=case_input["strategy_id"],
-        strategy_version=case_input["strategy_version"],
-        data_snapshot_id=case_input["data_snapshot_id"],
-        code_version=case_input["code_version"],
-        cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
-        time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
-        universe=case_input["universe"],
-        run_type=case_input["run_type"],
-        notes=case_input["notes"],
-    )
+    record_a = _assemble()
+    record_b = _assemble()
 
     # All six identity fields must be 64-hex strings.
     for field in (
@@ -142,27 +116,10 @@ def test_experiment_assemble_missing_field_raises() -> None:
 
     Per D-03: a record missing any field fails the acceptance gate.
     """
-    from src.backtest.experiment import IncompleteExperimentRecord, assemble
+    from src.backtest.experiment import IncompleteExperimentRecord
 
-    case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
-    case_input = _v3_case_input(case_dir)
-    cost_model = _build_cost_model(case_input["cost_model"])
-
-    # Missing data_snapshot_id.
     with pytest.raises(IncompleteExperimentRecord):
-        assemble(
-            parameter_set_id=case_input["parameter_set_id"],
-            strategy_id=case_input["strategy_id"],
-            strategy_version=case_input["strategy_version"],
-            data_snapshot_id="",
-            code_version=case_input["code_version"],
-            cost_model=cost_model,
-            time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
-            time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
-            universe=case_input["universe"],
-            run_type=case_input["run_type"],
-            notes=case_input["notes"],
-        )
+        _assemble(data_snapshot_id="")
 
 
 # --------------------------------------------------------------------------- #
@@ -177,25 +134,9 @@ def test_experiment_reproduce_byte_identical() -> None:
     Per D-03: reproduction = re-running the recorded six-field tuple
     yields byte-identical trade lists.
     """
-    from src.backtest.experiment import assemble, reproduce
+    from src.backtest.experiment import reproduce
 
-    case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
-    case_input = _v3_case_input(case_dir)
-    cost_model = _build_cost_model(case_input["cost_model"])
-
-    record = assemble(
-        parameter_set_id=case_input["parameter_set_id"],
-        strategy_id=case_input["strategy_id"],
-        strategy_version=case_input["strategy_version"],
-        data_snapshot_id=case_input["data_snapshot_id"],
-        code_version=case_input["code_version"],
-        cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
-        time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
-        universe=case_input["universe"],
-        run_type=case_input["run_type"],
-        notes=case_input["notes"],
-    )
+    record = _assemble()
 
     # Reproduce twice — both runs must yield byte-identical trade lists.
     trades_a = reproduce(record, simulator_inputs={})
@@ -217,26 +158,8 @@ def test_experiment_unregistered_set_fails_closed() -> None:
     Per D-03: any run without a registered parameterSetId + matching
     hash fails closed.
     """
-    from src.backtest.experiment import assemble
-
-    case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
-    case_input = _load_input(case_dir)
-    cost_model = _build_cost_model(case_input["cost_model"])
-
     with pytest.raises(UnregisteredParameterSet):
-        assemble(
-            parameter_set_id="does-not-exist",
-            strategy_id=case_input["strategy_id"],
-            strategy_version=case_input["strategy_version"],
-            data_snapshot_id=case_input["data_snapshot_id"],
-            code_version=case_input["code_version"],
-            cost_model=cost_model,
-            time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
-            time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
-            universe=case_input["universe"],
-            run_type=case_input["run_type"],
-            notes=case_input["notes"],
-        )
+        _assemble(parameter_set_id="does-not-exist")
 
 
 # --------------------------------------------------------------------------- #
@@ -362,25 +285,9 @@ def test_verify_experiment_returns_none_when_reproducible() -> None:
     Per D-03: verify_experiment is the runtime tripwire for
     reproducibility.
     """
-    from src.backtest.experiment import assemble, verify_experiment
+    from src.backtest.experiment import verify_experiment
 
-    case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
-    case_input = _v3_case_input(case_dir)
-    cost_model = _build_cost_model(case_input["cost_model"])
-
-    record = assemble(
-        parameter_set_id=case_input["parameter_set_id"],
-        strategy_id=case_input["strategy_id"],
-        strategy_version=case_input["strategy_version"],
-        data_snapshot_id=case_input["data_snapshot_id"],
-        code_version=case_input["code_version"],
-        cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
-        time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
-        universe=case_input["universe"],
-        run_type=case_input["run_type"],
-        notes=case_input["notes"],
-    )
+    record = _assemble()
 
     # verify_experiment must return None when reproducible.
     result = verify_experiment(record, simulator_inputs={})
@@ -399,25 +306,10 @@ def test_empty_input_yields_valid_record_with_zero_trades() -> None:
     Per D-03: the experiment record is valid even when the simulator
     produces no trades. The empty-input case must not raise.
     """
-    from src.backtest.experiment import assemble, reproduce
+    from src.backtest.experiment import reproduce
 
-    case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
-    case_input = _v3_case_input(case_dir)
-    cost_model = _build_cost_model(case_input["cost_model"])
-
-    record = assemble(
-        parameter_set_id=case_input["parameter_set_id"],
-        strategy_id=case_input["strategy_id"],
-        strategy_version=case_input["strategy_version"],
-        data_snapshot_id=case_input["data_snapshot_id"],
-        code_version=case_input["code_version"],
-        cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
-        time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
-        universe=case_input["universe"],
-        run_type=case_input["run_type"],
-        notes=case_input["notes"],
-    )
+    record = _assemble(run_summary=strategy_run_summary(no_trade_counts={}, end_of_data_count=0))
+    assert record.no_trade_counts == ()
 
     # Empty simulator_inputs (no candles) → empty trade list, no exception.
     trades = reproduce(record, simulator_inputs={})
@@ -437,41 +329,12 @@ def test_run_twice_record_stability() -> None:
     sorts dict keys before hashing, so the order in which inputs are
     provided does not affect the digest.
     """
-    from src.backtest.experiment import assemble
-
-    case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
-    case_input = _v3_case_input(case_dir)
-    cost_model = _build_cost_model(case_input["cost_model"])
-
-    record_a = assemble(
-        parameter_set_id=case_input["parameter_set_id"],
-        strategy_id=case_input["strategy_id"],
-        strategy_version=case_input["strategy_version"],
-        data_snapshot_id=case_input["data_snapshot_id"],
-        code_version=case_input["code_version"],
-        cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
-        time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
-        universe=case_input["universe"],
-        run_type=case_input["run_type"],
-        notes=case_input["notes"],
-    )
-    record_b = assemble(
-        parameter_set_id=case_input["parameter_set_id"],
-        strategy_id=case_input["strategy_id"],
-        strategy_version=case_input["strategy_version"],
-        data_snapshot_id=case_input["data_snapshot_id"],
-        code_version=case_input["code_version"],
-        cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
-        time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
-        universe=case_input["universe"],
-        run_type=case_input["run_type"],
-        notes=case_input["notes"],
-    )
+    record_a = _assemble()
+    record_b = _assemble()
     assert record_a.experiment_id == record_b.experiment_id, (
         "experiment_id must be stable across reruns"
     )
+    assert record_a == record_b
 
 
 # --------------------------------------------------------------------------- #
@@ -486,56 +349,9 @@ def test_universe_order_stability() -> None:
     Per D-03: the universe hash must be stable across input orderings.
     Symbols are sorted alphabetically before hashing.
     """
-    from src.backtest.experiment import assemble
-
-    case_dir = PHASE6_FIXTURES_DIR / "registry_identity"
-    case_input = _v3_case_input(case_dir)
-    cost_model = _build_cost_model(case_input["cost_model"])
-
-    # Same universe in different orders.
-    universe_a = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-    universe_b = ["SOLUSDT", "BTCUSDT", "ETHUSDT"]
-    universe_c = ["ETHUSDT", "SOLUSDT", "BTCUSDT"]
-
-    record_a = assemble(
-        parameter_set_id=case_input["parameter_set_id"],
-        strategy_id=case_input["strategy_id"],
-        strategy_version=case_input["strategy_version"],
-        data_snapshot_id=case_input["data_snapshot_id"],
-        code_version=case_input["code_version"],
-        cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
-        time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
-        universe=universe_a,
-        run_type=case_input["run_type"],
-        notes=case_input["notes"],
-    )
-    record_b = assemble(
-        parameter_set_id=case_input["parameter_set_id"],
-        strategy_id=case_input["strategy_id"],
-        strategy_version=case_input["strategy_version"],
-        data_snapshot_id=case_input["data_snapshot_id"],
-        code_version=case_input["code_version"],
-        cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
-        time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
-        universe=universe_b,
-        run_type=case_input["run_type"],
-        notes=case_input["notes"],
-    )
-    record_c = assemble(
-        parameter_set_id=case_input["parameter_set_id"],
-        strategy_id=case_input["strategy_id"],
-        strategy_version=case_input["strategy_version"],
-        data_snapshot_id=case_input["data_snapshot_id"],
-        code_version=case_input["code_version"],
-        cost_model=cost_model,
-        time_range_start_utc=datetime.fromisoformat(case_input["time_range_start_utc"]),
-        time_range_end_utc=datetime.fromisoformat(case_input["time_range_end_utc"]),
-        universe=universe_c,
-        run_type=case_input["run_type"],
-        notes=case_input["notes"],
-    )
+    record_a = _assemble(universe=["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+    record_b = _assemble(universe=["SOLUSDT", "BTCUSDT", "ETHUSDT"])
+    record_c = _assemble(universe=["ETHUSDT", "SOLUSDT", "BTCUSDT"])
     assert record_a.experiment_id == record_b.experiment_id == record_c.experiment_id, (
         "experiment_id must be stable across universe orderings"
     )
@@ -544,39 +360,6 @@ def test_universe_order_stability() -> None:
 # --------------------------------------------------------------------------- #
 # Nyquist gap-fill (review-fix iteration 1): CR-03a/b/c, CR-05..CR-11.
 # --------------------------------------------------------------------------- #
-
-
-def _assemble_gap_record(
-    *,
-    cost_dict: dict,
-    run_type: str = "CANDIDATE",
-    strategy_id: str = "trend-pullback",
-    parameter_set_id: str = "baseline-v3",
-    result_summary_json: str = "{}",
-):
-    """Assemble a record bound to registry params + the given cost dict.
-
-    Per Phase 7.1 D-05: assemble() now requires a 7-key registry set.
-    baseline-v3 ships all 7 keys; baseline-v2 only has 3 and now raises
-    KeyError at the gate (correct behavior — see fixture audit table).
-    Phase6 fixtures themselves remain grandfathered (NOT regenerated).
-    """
-    from src.backtest.experiment import assemble
-
-    return assemble(
-        parameter_set_id=parameter_set_id,
-        strategy_id=strategy_id,
-        strategy_version="v2.0.0",
-        data_snapshot_id="1" * 64,
-        code_version="gap-test",
-        cost_model=_build_cost_model(cost_dict),
-        time_range_start_utc=datetime.fromisoformat("2026-09-01T00:00:00+00:00"),
-        time_range_end_utc=datetime.fromisoformat("2026-09-11T10:00:00+00:00"),
-        universe=["BTCUSDT"],
-        run_type=run_type,
-        notes="nyquist gap test",
-        result_summary_json=result_summary_json,
-    )
 
 
 def _gap_cost_dict() -> dict:
@@ -591,12 +374,16 @@ def _gap_cost_dict() -> dict:
     }
 
 
-def _gap_simulator_inputs(cost_dict: dict) -> dict:
+def _gap_simulator_inputs() -> dict:
     return {
         "strategy_id": "trend-pullback",
-        "parameter_set_id": "baseline-v3",
-        "strategy_version": "v2.0.0",
-        "cost_model": dict(cost_dict),
+        "parameter_set_id": "baseline-v5",
+        "strategy_version": "v4.0.0",
+        "cost_model": dict(DEFAULT_COST_MODEL),
+        "data_window": {
+            "start_utc": RECORD_START.isoformat(),
+            "end_utc": RECORD_END.isoformat(),
+        },
     }
 
 
@@ -607,11 +394,10 @@ def test_cr03a_reproduce_rejects_mismatched_simulator_inputs() -> None:
         reproduce,
     )
 
-    cost = _gap_cost_dict()
-    record = _assemble_gap_record(cost_dict=cost)
-    good = _gap_simulator_inputs(cost)
+    record = _assemble()
+    good = _gap_simulator_inputs()
 
-    bad_set = dict(good, parameter_set_id="baseline-no-trade-v1")
+    bad_set = dict(good, parameter_set_id="baseline-no-trade-v3")
     with pytest.raises(ExperimentReproducibilityBroken):
         reproduce(record, simulator_inputs=bad_set)
 
@@ -619,36 +405,19 @@ def test_cr03a_reproduce_rejects_mismatched_simulator_inputs() -> None:
     with pytest.raises(ExperimentReproducibilityBroken):
         reproduce(record, simulator_inputs=bad_version)
 
-    bad_cost = dict(good, cost_model=dict(cost, fee_rate_entry="0.0099"))
+    bad_cost = dict(good, cost_model=dict(DEFAULT_COST_MODEL, fee_rate_entry="0.0099"))
     with pytest.raises(ExperimentReproducibilityBroken):
         reproduce(record, simulator_inputs=bad_cost)
 
 
 def test_cr03b_reproduced_trades_carry_typed_decimal_datetime_fields() -> None:
     """CR-03b: reproduced TradeRecords hold typed Decimal/datetime fields."""
-    from src.backtest.experiment import assemble, reproduce
+    from src.backtest.experiment import reproduce
 
-    # Phase 12 (D048): the regenerated baseline fixture names its own v3
-    # baseline set and carries the matching 8-key cost dict, so assemble()
-    # binds it directly - no rebinding to baseline-v3 and no respelling.
-    case = dict(_load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend"))
+    case = _load_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
     assert case["parameter_set_id"] == "baseline-simple-trend-v3"
-    cost_model_dict: dict = dict(case["cost_model"])
-    record = assemble(
-        parameter_set_id=case["parameter_set_id"],
-        strategy_id=case["strategy_id"],
-        strategy_version=case["strategy_version"],
-        data_snapshot_id="2" * 64,
-        code_version="gap-test-cr03b",
-        cost_model=_build_cost_model(cost_model_dict),
-        time_range_start_utc=datetime.fromisoformat("2026-09-01T00:00:00+00:00"),
-        time_range_end_utc=datetime.fromisoformat("2026-09-11T10:00:00+00:00"),
-        universe=["BTCUSDT"],
-        run_type="BASELINE_SIMPLE_TREND",
-        notes="nyquist cr03b",
-    )
-    sim_inputs = dict(case, cost_model=cost_model_dict)
-    trades = reproduce(record, simulator_inputs=sim_inputs)
+    record = _simple_trend_record(case)
+    trades = reproduce(record, simulator_inputs=case)
     assert len(trades) >= 1, "simple-trend baseline must yield filled trades"
     decimal_fields = (
         "entry_price",
@@ -662,6 +431,16 @@ def test_cr03b_reproduced_trades_carry_typed_decimal_datetime_fields() -> None:
         "funding_amount",
         "slippage_amount",
         "modeled_costs_per_unit",
+        "planned_quantity",
+        "tp1_quantity",
+        "tp1_price",
+    )
+    datetime_fields = (
+        "entry_time_utc",
+        "exit_time_utc",
+        "signal_close_utc",
+        "tp1_time_utc",
+        "resolved_at_utc",
     )
     for trade in trades:
         for fname in decimal_fields:
@@ -670,43 +449,42 @@ def test_cr03b_reproduced_trades_carry_typed_decimal_datetime_fields() -> None:
                 f"{fname} must be Decimal|None, got {type(value).__name__} "
                 f"({value!r}) — stringified rebuild corrupts types"
             )
-        for fname in ("entry_time_utc", "exit_time_utc"):
+        for fname in datetime_fields:
             value = getattr(trade, fname)
             assert value is None or isinstance(value, datetime), (
                 f"{fname} must be datetime|None, got {type(value).__name__}"
             )
+        for fname in ("touch_no_fill_count", "funding_event_count"):
+            assert type(getattr(trade, fname)) is int
+        for fname in ("fallback_applied", "gap_through_stop", "constraints_extrapolated"):
+            assert type(getattr(trade, fname)) is bool
         assert not isinstance(trade.entry_price, str)
         assert not isinstance(trade.exit_time_utc, str)
+        # The typed rebuild lets the causal order be read off the record itself.
+        assert trade.signal_close_utc is not None
+        assert trade.entry_time_utc is not None
+        assert trade.entry_time_utc > trade.signal_close_utc
 
 
 def test_cr03c_verify_experiment_detects_engine_drift_vs_stored_digest() -> None:
     """CR-03c: verify_experiment detects drift vs the stored result digest."""
-    import json
-
     from src.backtest.experiment import (
         ExperimentReproducibilityBroken,
         verify_experiment,
     )
 
-    cost = _gap_cost_dict()
     # No stored digest: empty-input determinism check passes.
-    record = _assemble_gap_record(cost_dict=cost)
+    record = _assemble()
     assert verify_experiment(record, simulator_inputs={}) is None
 
     # Forged stored digest: drift detected.
-    forged = _assemble_gap_record(
-        cost_dict=cost,
-        result_summary_json=json.dumps({"trades_digest": "f" * 64}),
-    )
+    forged = _assemble(result_summary_json=json.dumps({"trades_digest": "f" * 64}))
     with pytest.raises(ExperimentReproducibilityBroken):
         verify_experiment(forged, simulator_inputs={})
 
     # Matching stored digest: accepted.
     matching_digest = sha256_hex({"trades": []})
-    matching = _assemble_gap_record(
-        cost_dict=cost,
-        result_summary_json=json.dumps({"trades_digest": matching_digest}),
-    )
+    matching = _assemble(result_summary_json=json.dumps({"trades_digest": matching_digest}))
     assert verify_experiment(matching, simulator_inputs={}) is None
 
 
@@ -746,22 +524,26 @@ def test_cr05_decimal_inputs_hash_identically_to_string_inputs() -> None:
 
 def test_cr06_experiment_id_differs_across_run_type_and_strategy_id() -> None:
     """CR-06: experiment_id binds run_type and strategy_id (no collisions)."""
-    cost = _gap_cost_dict()
-    candidate = _assemble_gap_record(cost_dict=cost, run_type="CANDIDATE")
-    baseline = _assemble_gap_record(cost_dict=cost, run_type="BASELINE_NO_TRADE")
+    candidate = _assemble(run_type="CANDIDATE")
+    baseline = _assemble(run_type="BASELINE_NO_TRADE")
     assert candidate.experiment_id != baseline.experiment_id, (
         "CANDIDATE vs BASELINE_NO_TRADE over identical inputs must differ"
     )
 
-    trend = _assemble_gap_record(cost_dict=cost, strategy_id="trend-pullback")
-    breakout = _assemble_gap_record(
-        cost_dict=cost,
+    trend = _assemble(strategy_id="trend-pullback")
+    breakout = _assemble(
         strategy_id="breakout-retest",
-        parameter_set_id="baseline-v3",
+        cost_model=_build_cost_model(_breakout_v5_cost_slice()),
     )
     assert trend.experiment_id != breakout.experiment_id, (
         "two strategies sharing a version string must never share experiment_id"
     )
+
+
+def _breakout_v5_cost_slice() -> dict:
+    from src.backtest.costs import cost_slice
+
+    return cost_slice(load_parameter_set("breakout-retest", "baseline-v5").params)
 
 
 def test_cr07_baselines_enforce_degenerated_minimum_rr() -> None:
@@ -804,8 +586,9 @@ def test_cr09_forged_cost_model_hash_rejected_at_assembly() -> None:
         partial_fill_fraction=good.partial_fill_fraction,
         cost_model_hash=good.cost_model_hash,
     )
-    record = _assemble_gap_record(cost_dict=_gap_cost_dict())
-    assert record.cost_model_hash == verified.cost_model_hash
+    assert verified.cost_model_hash == good.cost_model_hash
+    record = _assemble()
+    assert record.cost_model_hash == _build_cost_model(DEFAULT_COST_MODEL).cost_model_hash
 
 
 def test_cr11_baseline_tomls_carry_detector_and_cost_keys() -> None:
@@ -878,20 +661,31 @@ def test_cr11_baseline_tomls_carry_detector_and_cost_keys() -> None:
 
 
 def _simple_trend_record(case: dict, *, result_summary_json: str = "{}"):
-    """Assemble a record bound to the regenerated simple-trend baseline case (v3 set)."""
-    from src.backtest.experiment import assemble
+    """Assemble a typed record bound to the regenerated simple-trend baseline case (v3 set).
 
+    The run summary is the real engine output of that case, so the typed fields are the
+    ones a reproduction of the case yields.
+    """
+    from src.backtest.experiment import CodeVersion, assemble
+    from src.backtest.simulator import run
+
+    start = datetime.fromisoformat(case["data_window"]["start_utc"])
+    end = datetime.fromisoformat(case["data_window"]["end_utc"])
     return assemble(
         parameter_set_id=case["parameter_set_id"],
         strategy_id=case["strategy_id"],
         strategy_version=case["strategy_version"],
         data_snapshot_id="3" * 64,
-        code_version="plan-14-12",
+        code_version=CodeVersion(commit=CODE_COMMIT, dirty=False),
         cost_model=_build_cost_model(dict(case["cost_model"])),
-        time_range_start_utc=datetime.fromisoformat("2026-09-11T00:00:00+00:00"),
-        time_range_end_utc=datetime.fromisoformat("2026-09-11T11:00:00+00:00"),
-        universe=["BTCUSDT"],
+        time_range_start_utc=start,
+        time_range_end_utc=end,
+        universe=list(case["symbols"]),
         run_type="BASELINE_SIMPLE_TREND",
+        run_summary=run(case)["run_summary"],
+        split_role="DEVELOPMENT",
+        split_start_utc=start,
+        split_end_utc=end,
         notes="plan 14-12 v2 reproduce",
         result_summary_json=result_summary_json,
     )
@@ -967,3 +761,327 @@ def test_verify_experiment_compares_the_v2_digest_and_detects_a_changed_minute_s
             row["low"] = "121.50"
     with pytest.raises(ExperimentReproducibilityBroken, match="trades_digest"):
         verify_experiment(matching, simulator_inputs=drifted)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 14 (plan 14-15, Task 1): typed ExperimentRecord, identity binding, assemble refusals.
+# --------------------------------------------------------------------------- #
+
+
+def _canonical_value_text(value: object) -> str:
+    return canonical_decimal_text(value) if isinstance(value, Decimal) else str(value)
+
+
+def test_assemble_binds_the_run_summary_into_typed_fields() -> None:
+    record = _assemble()
+    assert record.simulator_semantics_version == "2.0.0"
+    assert record.intrabar_tie_break == "STOP_FIRST"
+    assert record.no_trade_counts == (("CONFLICT_WITH_OPEN_POSITION", 3), ("RR_TOO_LOW", 5))
+    assert (record.timeframe, record.context_timeframe) == ("1h", "4h")
+    assert (record.fallback_count, record.end_of_data_count) == (2, 1)
+    assert (record.strategy_window_bars, record.context_window_bars) == (1000, 300)
+    assert record.allowed_gaps == ()
+    assert record.split_role == "DEVELOPMENT"
+    assert (record.split_start_utc, record.split_end_utc) == (RECORD_START, RECORD_END)
+    assert record.code_commit == CODE_COMMIT
+    assert record.code_dirty is False
+    assert record.code_version == CODE_COMMIT
+
+
+def test_dirty_code_version_is_the_commit_plus_dirty() -> None:
+    from src.backtest.experiment import CodeVersion
+
+    record = _assemble(code_version=CodeVersion(commit=CODE_COMMIT, dirty=True))
+    assert record.code_commit == CODE_COMMIT
+    assert record.code_dirty is True
+    assert record.code_version == f"{CODE_COMMIT}-dirty"
+
+
+def test_parameter_and_cost_values_are_canonical_text_with_sorted_keys() -> None:
+    record = _assemble()
+    params = load_parameter_set("trend-pullback", "baseline-v5").params
+    assert record.parameter_values == tuple(
+        (key, _canonical_value_text(params[key])) for key in sorted(params)
+    )
+    costs = dict(record.cost_values)
+    assert list(costs) == sorted(costs)
+    assert costs["funding_convention"] == "MARK_NOTIONAL_SIGNED_V1"
+    assert costs["fee_rate_entry"] == "0.0005"
+    assert costs["partial_fill_fraction"] == "1"
+    assert "exit_slippage_rate" in costs
+
+
+def test_allowed_gaps_used_become_sorted_typed_gaps() -> None:
+    summary = strategy_run_summary(
+        allowed_gaps_used=[
+            {
+                "series": "funding",
+                "symbol": "ETHUSDT",
+                "start_utc": "2026-01-03T00:00:00+00:00",
+                "end_utc": "2026-01-03T16:00:00+00:00",
+            },
+            {
+                "series": "funding",
+                "symbol": "BTCUSDT",
+                "start_utc": "2026-01-02T00:00:00+00:00",
+                "end_utc": "2026-01-02T16:00:00+00:00",
+            },
+        ]
+    )
+    record = _assemble(run_summary=summary)
+    assert [(g.symbol, g.start_utc, g.end_utc) for g in record.allowed_gaps] == [
+        ("BTCUSDT", datetime(2026, 1, 2, tzinfo=UTC), datetime(2026, 1, 2, 16, tzinfo=UTC)),
+        ("ETHUSDT", datetime(2026, 1, 3, tzinfo=UTC), datetime(2026, 1, 3, 16, tzinfo=UTC)),
+    ]
+    assert all(g.series == "funding" for g in record.allowed_gaps)
+
+
+def test_the_record_has_no_free_form_parameters_field() -> None:
+    from src.backtest.experiment import ExperimentRecord
+
+    names = {f.name for f in dataclasses.fields(ExperimentRecord)}
+    assert "parameters" not in names and "parameters_json" not in names
+    assert {
+        "no_trade_counts",
+        "intrabar_tie_break",
+        "timeframe",
+        "context_timeframe",
+        "parameter_values",
+        "cost_values",
+        "simulator_semantics_version",
+        "code_commit",
+        "code_dirty",
+        "fallback_count",
+        "end_of_data_count",
+        "strategy_window_bars",
+        "context_window_bars",
+        "allowed_gaps",
+        "split_role",
+        "split_start_utc",
+        "split_end_utc",
+    } <= names
+
+
+def test_the_record_cannot_be_built_without_the_typed_fields() -> None:
+    from src.backtest.experiment import ExperimentRecord
+
+    with pytest.raises(TypeError):
+        ExperimentRecord(  # type: ignore[call-arg]
+            experiment_id="a" * 64,
+            strategy_version="v4.0.0",
+            parameter_set_id="baseline-v5",
+            parameter_set_hash="b" * 64,
+            data_snapshot_id="c" * 64,
+            code_version="x",
+            cost_model_hash="d" * 64,
+            time_range_start_utc=RECORD_START,
+            time_range_end_utc=RECORD_END,
+            universe_hash="e" * 64,
+            run_type="CANDIDATE",
+            result_summary_json="{}",
+            notes="",
+        )
+
+
+# ----- identity -------------------------------------------------------------
+
+
+def test_experiment_id_changes_with_the_split_role_and_boundaries() -> None:
+    base = _assemble()
+    validation = _assemble(split_role="VALIDATION")
+    holdout = _assemble(split_role="HOLDOUT")
+    assert len({base.experiment_id, validation.experiment_id, holdout.experiment_id}) == 3
+
+    wider_start = _assemble(split_start_utc=RECORD_START - timedelta(days=1))
+    wider_end = _assemble(split_end_utc=RECORD_END + timedelta(days=1))
+    assert len({base.experiment_id, wider_start.experiment_id, wider_end.experiment_id}) == 3
+    assert base.experiment_id == _assemble().experiment_id
+
+
+def test_experiment_id_binds_the_simulator_semantics_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = _assemble()
+    monkeypatch.setattr("src.backtest.experiment.SIMULATOR_SEMANTICS_VERSION", "2.0.1")
+    bumped = _assemble(run_summary=strategy_run_summary(simulator_semantics_version="2.0.1"))
+    assert bumped.simulator_semantics_version == "2.0.1"
+    assert bumped.experiment_id != base.experiment_id
+    # Everything else is identical, so the semantics version is the only moved input.
+    assert dataclasses.replace(
+        bumped, simulator_semantics_version="2.0.0", experiment_id=base.experiment_id
+    ) == dataclasses.replace(base)
+
+
+# ----- invalid construction -------------------------------------------------
+
+_ONE_DAY = timedelta(days=1)
+
+
+def _no_funding_convention_costs() -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (k, v) for k, v in make_experiment_record().cost_values if k != "funding_convention"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("simulator_semantics_version", "1.0.0"),
+        ("intrabar_tie_break", "TP_FIRST"),
+        ("split_role", "TRAIN"),
+        ("split_start_utc", RECORD_START + _ONE_DAY),
+        ("split_end_utc", RECORD_END - _ONE_DAY),
+        ("fallback_count", -1),
+        ("fallback_count", True),
+        ("end_of_data_count", -1),
+        ("no_trade_counts", (("RR_TOO_LOW", -1),)),
+        ("no_trade_counts", (("RR_TOO_LOW", 1), ("RR_TOO_LOW", 2))),
+        ("no_trade_counts", (("B", 1), ("A", 1))),
+        ("code_version", "deadbeef"),
+        ("code_dirty", "yes"),
+        ("code_commit", "0123456789ABCDEF0123456789ABCDEF01234567"),
+        ("code_commit", "abc"),
+        ("parameter_values", ()),
+        ("parameter_values", (("b", "1"), ("a", "2"))),
+        ("cost_values", ()),
+        ("strategy_window_bars", 0),
+        ("context_window_bars", -5),
+        ("timeframe", ""),
+        ("context_timeframe", 4),
+    ],
+)
+def test_an_invalid_value_cannot_construct_a_record(field: str, bad: object) -> None:
+    from src.backtest.experiment import IncompleteExperimentRecord
+
+    with pytest.raises(IncompleteExperimentRecord, match=field):
+        make_experiment_record(**{field: bad})
+
+
+def test_a_commit_that_is_not_40_hex_cannot_construct_a_record() -> None:
+    from src.backtest.experiment import IncompleteExperimentRecord
+
+    for commit in ("abc", "g" * 40, "A" * 40, "a" * 41):
+        with pytest.raises(IncompleteExperimentRecord, match="code_commit"):
+            make_experiment_record(code_commit=commit, code_version=commit)
+
+
+def test_code_version_must_match_the_commit_and_the_dirty_flag() -> None:
+    from src.backtest.experiment import IncompleteExperimentRecord
+
+    with pytest.raises(IncompleteExperimentRecord, match="code_version"):
+        make_experiment_record(code_dirty=True)  # code_version lacks the -dirty suffix
+    with pytest.raises(IncompleteExperimentRecord, match="code_version"):
+        make_experiment_record(code_version=f"{CODE_COMMIT}-dirty")  # flag says clean
+    ok = make_experiment_record(code_dirty=True, code_version=f"{CODE_COMMIT}-dirty")
+    assert ok.code_dirty is True
+
+
+def test_cost_values_must_carry_the_funding_convention() -> None:
+    from src.backtest.experiment import IncompleteExperimentRecord
+
+    with pytest.raises(IncompleteExperimentRecord, match="funding_convention"):
+        make_experiment_record(cost_values=_no_funding_convention_costs())
+
+
+def test_cost_values_must_hash_to_the_recorded_cost_model_hash() -> None:
+    from src.backtest.experiment import IncompleteExperimentRecord
+
+    forged = tuple(
+        (k, "0.0009" if k == "fee_rate_entry" else v)
+        for k, v in make_experiment_record().cost_values
+    )
+    with pytest.raises(IncompleteExperimentRecord, match="cost_values"):
+        make_experiment_record(cost_values=forged)
+    # The shared factory can swap values and hash together; the record stays valid.
+    other = make_experiment_record(cost_overrides={"fee_rate_entry": "0.0009"})
+    assert dict(other.cost_values)["fee_rate_entry"] == "0.0009"
+    assert other.cost_model_hash != make_experiment_record().cost_model_hash
+
+
+def test_split_boundaries_must_contain_the_time_range() -> None:
+    from src.backtest.experiment import IncompleteExperimentRecord
+
+    with pytest.raises(IncompleteExperimentRecord, match="split"):
+        make_experiment_record(split_start_utc=RECORD_START + _ONE_DAY)
+    with pytest.raises(IncompleteExperimentRecord, match="split"):
+        make_experiment_record(split_end_utc=RECORD_END - _ONE_DAY)
+    naive = datetime(2025, 12, 1)
+    with pytest.raises(IncompleteExperimentRecord, match="split_start_utc"):
+        make_experiment_record(split_start_utc=naive)
+
+
+# ----- assemble refusals ----------------------------------------------------
+
+
+def test_assemble_refuses_a_scripted_run() -> None:
+    from src.backtest.experiment import IncompleteExperimentRecord
+
+    with pytest.raises(IncompleteExperimentRecord, match="plan_source"):
+        _assemble(run_summary=strategy_run_summary(plan_source="SCRIPTED"))
+
+
+def test_assemble_refuses_a_cost_model_without_the_funding_convention() -> None:
+    from src.backtest.experiment import IncompleteExperimentRecord
+
+    # baseline-v3 is a legacy 7-key set: its registry slice binds, but it carries no
+    # funding convention, so a record over it would hide the funding sign convention.
+    with pytest.raises(IncompleteExperimentRecord, match="funding_convention"):
+        _assemble(parameter_set_id="baseline-v3", cost_model=_build_cost_model(_gap_cost_dict()))
+
+
+@pytest.mark.parametrize(
+    ("key", "bad"),
+    [
+        ("simulator_semantics_version", "1.0.0"),
+        ("intrabar_tie_break", "TP_FIRST"),
+    ],
+)
+def test_assemble_refuses_a_run_from_another_simulator_semantics(key: str, bad: str) -> None:
+    from src.backtest.experiment import IncompleteExperimentRecord
+
+    with pytest.raises(IncompleteExperimentRecord, match=key):
+        _assemble(run_summary=strategy_run_summary(**{key: bad}))
+
+
+def test_assemble_refuses_a_run_summary_missing_a_key() -> None:
+    from src.backtest.experiment import IncompleteExperimentRecord
+
+    summary = strategy_run_summary()
+    del summary["fallback_count"]
+    with pytest.raises(IncompleteExperimentRecord, match="fallback_count"):
+        _assemble(run_summary=summary)
+
+
+def test_assemble_refuses_a_run_summary_for_another_time_range() -> None:
+    from src.backtest.experiment import IncompleteExperimentRecord
+
+    other = strategy_run_summary(start=RECORD_START + _ONE_DAY)
+    with pytest.raises(IncompleteExperimentRecord, match="data_window"):
+        _assemble(run_summary=other)
+
+
+def test_assemble_refuses_a_run_over_another_dataset() -> None:
+    from src.backtest.experiment import IncompleteExperimentRecord
+
+    with pytest.raises(IncompleteExperimentRecord, match="dataset_id"):
+        _assemble(run_summary=strategy_run_summary(dataset_id="9" * 64))
+    ok = _assemble(data_snapshot_id="9" * 64, run_summary=strategy_run_summary(dataset_id="9" * 64))
+    assert ok.data_snapshot_id == "9" * 64
+
+
+def test_the_record_serializes_without_the_research_gate_keys() -> None:
+    record = _assemble()
+    document = record.to_dict()
+    text = json.dumps(document)
+
+    def keys(node: object) -> set[str]:
+        if isinstance(node, dict):
+            return set(node) | {k for child in node.values() for k in keys(child)}
+        if isinstance(node, list):
+            return {k for child in node for k in keys(child)}
+        return set()
+
+    assert not ({"parameters", "parameters_json"} & keys(document))
+    assert document["simulator_semantics_version"] == "2.0.0"
+    assert document["no_trade_counts"] == {"CONFLICT_WITH_OPEN_POSITION": 3, "RR_TOO_LOW": 5}
+    assert json.loads(text) == document

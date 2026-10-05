@@ -12,6 +12,10 @@ float): the v2 parser refuses floats anywhere in a case.
   realized risk, so a test controls the sizing instead of re-deriving it.
 - `phase6_strategy_rows`: the strategy and context rows of a phase 6 fixture input,
   read key by key so the helper keeps working after the fixtures are regenerated.
+- `strategy_run_summary`, `assemble_kwargs`, `make_experiment_record`: the one shared
+  factory for typed experiment records (Phase 14, plan 14-15). Every test that needs an
+  `ExperimentRecord` or an `assemble` call builds it here; none spells the typed fields
+  by hand.
 """
 
 from __future__ import annotations
@@ -23,6 +27,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from src.backtest.semantics import (
+    CONTEXT_WINDOW_BARS,
+    PLAN_SOURCE_STRATEGY,
+    SIMULATOR_SEMANTICS_VERSION,
+    STRATEGY_WINDOW_BARS,
+    TIE_BREAK,
+)
 from src.domain.enums import DailyState, QuantizationDecision
 from src.risk.types import PortfolioVerdict, SizedResult
 
@@ -324,3 +335,99 @@ def phase6_strategy_rows(fixture: str) -> tuple[list[dict[str, Any]], list[dict[
     """
     payload = json.loads((FIXTURE_ROOT / fixture / "input.json").read_text(encoding="utf-8"))
     return list(payload["strategy_bars"]), list(payload["context_bars"])
+
+
+# --------------------------------------------------------------------------- #
+# Typed experiment records (Phase 14, plan 14-15).
+# --------------------------------------------------------------------------- #
+
+RECORD_START = datetime(2026, 1, 1, tzinfo=UTC)
+RECORD_END = datetime(2026, 2, 1, tzinfo=UTC)
+CODE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+def strategy_run_summary(
+    *,
+    start: datetime = RECORD_START,
+    end: datetime = RECORD_END,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """A v2 STRATEGY `run_summary` shaped exactly like the engine output (JSON-native).
+
+    Keyword overrides replace single keys, so a test changes one value at a time.
+    """
+    summary: dict[str, Any] = {
+        "allowed_gaps_used": [],
+        "constraints_extrapolated_count": 0,
+        "context_timeframe": "4h",
+        "context_window_bars": CONTEXT_WINDOW_BARS,
+        "data_window": {"start_utc": start.isoformat(), "end_utc": end.isoformat()},
+        "dataset_id": None,
+        "end_of_data_count": 1,
+        "fallback_count": 2,
+        "gap_through_stop_count": 0,
+        "intrabar_tie_break": TIE_BREAK,
+        "no_trade_counts": {"CONFLICT_WITH_OPEN_POSITION": 3, "RR_TOO_LOW": 5},
+        "pending_at_data_end_count": 0,
+        "plan_source": PLAN_SOURCE_STRATEGY,
+        "simulator_semantics_version": SIMULATOR_SEMANTICS_VERSION,
+        "strategy_window_bars": STRATEGY_WINDOW_BARS,
+        "tie_order_note": "ties resolve in (time, symbol) order",
+        "timeframe": "1h",
+        "touch_no_fill_total": 0,
+    }
+    summary.update(overrides)
+    return dict(sorted(summary.items()))
+
+
+def assemble_kwargs(**overrides: Any) -> dict[str, Any]:
+    """Keyword arguments for `experiment.assemble` that bind baseline-v5 (every value valid)."""
+    from src.backtest.costs import build_cost_model
+    from src.backtest.experiment import CodeVersion
+
+    kwargs: dict[str, Any] = {
+        "parameter_set_id": "baseline-v5",
+        "strategy_id": "trend-pullback",
+        "strategy_version": "v4.0.0",
+        "data_snapshot_id": "1" * 64,
+        "code_version": CodeVersion(commit=CODE_COMMIT, dirty=False),
+        "cost_model": build_cost_model(dict(DEFAULT_COST_MODEL)),
+        "time_range_start_utc": RECORD_START,
+        "time_range_end_utc": RECORD_END,
+        "universe": ["BTCUSDT"],
+        "run_type": "CANDIDATE",
+        "run_summary": strategy_run_summary(),
+        "split_role": "DEVELOPMENT",
+        "split_start_utc": RECORD_START,
+        "split_end_utc": RECORD_END,
+        "notes": "",
+        "result_summary_json": "{}",
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def make_experiment_record(
+    *, cost_overrides: dict[str, str] | None = None, **overrides: Any
+) -> Any:
+    """A valid typed `ExperimentRecord` (assembled from baseline-v5), with fields replaced.
+
+    `overrides` are field names of the record; they go through `dataclasses.replace`, so an
+    invalid value raises `IncompleteExperimentRecord` exactly as a direct construction does.
+    `cost_overrides` swaps cost values AND the matching cost hash in one step (the record
+    binds the two), for tests that need a second, different cost identity.
+    """
+    import dataclasses
+
+    from src.backtest.costs import build_cost_model
+    from src.backtest.experiment import assemble, cost_value_pairs
+
+    record = assemble(**assemble_kwargs())
+    if cost_overrides:
+        model = build_cost_model({**DEFAULT_COST_MODEL, **cost_overrides})
+        overrides = {
+            "cost_values": cost_value_pairs(model),
+            "cost_model_hash": model.cost_model_hash,
+            **overrides,
+        }
+    return dataclasses.replace(record, **overrides)
