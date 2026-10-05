@@ -19,13 +19,19 @@ from src.analytics.types import (
     TradeOutcome,
 )
 from src.backtest.simulator import TradeRecord
+from src.backtest.validator import TradeRecordInvariantError, validate_trade_record
 
 
 def normalize_backtest(
     trades: Sequence[TradeRecord],
     contexts: Mapping[str, OutcomeContext] | None = None,
 ) -> BacktestNormalization:
-    """Normalize TradeRecords (sorted by trade_id) into outcomes and NO_TRADE rejects."""
+    """Normalize TradeRecords (sorted by trade_id) into outcomes and NO_TRADE rejects.
+
+    Every record passes the shared temporal validator first (D-23, F-804). No data window
+    is known here, so only the window-independent invariants run; a violation is re-raised
+    as `AnalyticsInputError` chained from `TradeRecordInvariantError`.
+    """
     context_by_id: Mapping[str, OutcomeContext] = contexts if contexts is not None else {}
     outcomes: list[TradeOutcome] = []
     rejects: list[NoTradeRecord] = []
@@ -34,6 +40,12 @@ def normalize_backtest(
         if trade.trade_id in seen:
             raise AnalyticsInputError(f"duplicate trade_id {trade.trade_id!r}")
         seen.add(trade.trade_id)
+        try:
+            validate_trade_record(trade)
+        except TradeRecordInvariantError as error:
+            raise AnalyticsInputError(
+                f"trade {trade.trade_id!r} violates a record invariant: {error}"
+            ) from error
         if trade.outcome_kind == "REJECT":
             rejects.append(
                 NoTradeRecord(

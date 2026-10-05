@@ -43,7 +43,17 @@ from src.paper.journal import PaperRecord
 _DIRECTIONS = frozenset({"LONG", "SHORT"})
 _EXPIRED_REASON = "EXPIRED"
 _BACKTEST_FILLED_KINDS = frozenset({"ENTRY_FILLED", "PARTIAL_FILL"})
-_BACKTEST_UNFILLED_KINDS = frozenset({"TOUCH_NO_FILL", "EXPIRED", "INVALIDATION_CANCEL"})
+# v2 vocabulary (D-34); TOUCH_NO_FILL stays for old evidence, v2 records only carry it as a
+# per-plan counter and the boundary validator refuses it as a kind.
+_BACKTEST_UNFILLED_KINDS = frozenset(
+    {
+        "TOUCH_NO_FILL",
+        "EXPIRED",
+        "INVALIDATION_CANCEL",
+        "DAILY_STOP_CANCEL",
+        "PENDING_AT_DATA_END",
+    }
+)
 _ENTRY_EXPIRY_EVENT_TYPE = "ENTRY_EXPIRY"
 _PHASE_POST_CANCEL = "post_cancel"
 _JOIN_APPROVAL_SIGNAL = "approval->signal"
@@ -280,7 +290,8 @@ def normalize_backtest_lifecycle(
     """Backtest outcomes -> LifecycleRecords sorted by trade_id (all timestamps None).
 
     `entry_filled` is True for ENTRY_FILLED / PARTIAL_FILL and False for
-    TOUCH_NO_FILL / EXPIRED / INVALIDATION_CANCEL; `expired_without_fill` is True
+    EXPIRED / INVALIDATION_CANCEL / DAILY_STOP_CANCEL / PENDING_AT_DATA_END (and the old
+    TOUCH_NO_FILL); `expired_without_fill` is True
     only for EXPIRED. An unknown entry_kind or a duplicate trade_id fails closed.
     """
     records: list[LifecycleRecord] = []

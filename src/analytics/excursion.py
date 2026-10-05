@@ -51,6 +51,8 @@ EXCURSION_MEASURES: tuple[str, ...] = (
 
 _ZERO = Decimal(0)
 _ONE_MINUTE = timedelta(minutes=1)
+# A take-profit exit is TP1 (live outcomes, partial leg) or TP2 (v2 backtest final leg, D-11).
+_TAKE_PROFIT_EXIT_KINDS = frozenset({"TP1", "TP2"})
 
 
 @dataclass(frozen=True)
@@ -316,7 +318,7 @@ def build_excursion_section(
     # Diagnostics get distinct deterministic seeds after the measure ordinals.
     diag_base = len(EXCURSION_MEASURES)
     sl_excursions = [e for e in excursions if e.exit_kind == "SL"]
-    tp_excursions = [e for e in excursions if e.exit_kind == "TP1"]
+    tp_excursions = [e for e in excursions if e.exit_kind in _TAKE_PROFIT_EXIT_KINDS]
     give_back_values = [
         _sub(e.mfe_r, e.realized_r)
         for e in excursions
