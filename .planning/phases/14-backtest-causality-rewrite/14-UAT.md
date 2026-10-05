@@ -1,5 +1,5 @@
 ---
-status: partial
+status: complete
 phase: 14-backtest-causality-rewrite
 source: 14-01-SUMMARY.md .. 14-16-SUMMARY.md
 started: 2026-10-05T00:00:00Z
@@ -8,7 +8,7 @@ updated: 2026-10-05T00:00:00Z
 
 ## Current Test
 
-[testing paused — 1 item outstanding, 1 known issue recorded]
+[testing complete — 1 known minor issue recorded]
 
 Note: Phase 14 is a backend phase with no UI. At the user's request, Claude answered the UAT
 checkpoints from evidence it ran or read itself (not from the user's own observation).
@@ -73,16 +73,17 @@ evidence: 14-14-SUMMARY: 162 trades, digest 806c885e..., runs 384.6 s / 371.2 s,
 
 ### 10. TP1 fraction 0.5 (D-27) is the intended exit policy
 expected: The user confirms that closing half the position at TP1 is the policy they want.
-result: skipped
-reason: This is the user's decision. D052 records it as chosen from auto-mode defaults, not from an explicit user answer. Claude cannot answer it for the user.
+result: pass
+source: user decision on record
+evidence: 14-CONTEXT D-27 (RESOLVED by the user 2026-10-04: "dùng 0.5"); D052 states "the TP1 fraction 0.5 was chosen by the user on 2026-10-04"; constant TP1_QUANTITY_FRACTION = Decimal('0.5') in src/backtest/semantics.py, covered by SIMULATOR_SEMANTICS_VERSION 2.0.0.
 
 ## Summary
 
 total: 10
-passed: 8
+passed: 9
 issues: 1
 pending: 0
-skipped: 1
+skipped: 0
 blocked: 0
 
 ## Gaps
