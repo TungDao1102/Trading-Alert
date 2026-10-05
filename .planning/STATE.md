@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 14
 current_phase_name: Backtest Simulator Causality Rewrite
 status: executing
-stopped_at: Completed 14-08-PLAN.md
-last_updated: "2026-10-05T05:36:25.605Z"
+stopped_at: Completed 14-09-PLAN.md
+last_updated: "2026-10-05T06:15:40.800Z"
 last_activity: 2026-10-05
 last_activity_desc: Phase 14 execution started
-state_head: 333da656ce0150aaf1b68133362b3cccf8f943c0
+state_head: 1b4c4073c246ae0f259f1583a138af3769082056
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 125
-  completed_plans: 116
+  completed_plans: 117
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 14 (Backtest Simulator Causality Rewrite) — EXECUTING
-Plan: 2 of 16
+Plan: 10 of 16
 Status: Ready to execute
 Last activity: 2026-10-05 — Phase 14 execution started
 
@@ -163,6 +163,7 @@ Progress: [█████░░░░░] 46%
 | Phase 14 P06 | 15 min | 2 tasks | 3 files |
 | Phase 14 P07 | 36 min | 3 tasks | 6 files |
 | Phase 14 P08 | 3h | 3 tasks | 6 files |
+| Phase 14 P09 | 35 min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -395,6 +396,8 @@ Recent decisions affecting current work:
 - [Phase 14]: Plan 14-07: new_plan_state takes sized levels from protective_levels_for_fill (TP1 half via size_protectives_to_filled_qty, D-27); finalize_at_data_end needs the minute source to close an OPEN position as END_OF_DATA at the last mark close with exit_slippage_rate; CANCEL and PENDING events book zero — D-06/D-11/D-34: live ladder mirrored exactly, no time stop exists (searched), END_OF_DATA flagged and never booked as SL or TP
 - [Phase 14]: 14-08: case-input v2 is a closed key set; a passed minute_source wins over case minute rows; warm-up closes before data_window.start are not evaluated
 - [Phase 14]: 14-08: DAILY_STOP cancels entries resting at the booking instant by re-advancing from the window-start state; END_OF_DATA bookings are dated no earlier than the last ledger booking
+- [Phase 14]: 14-09: regime rides SetupResult only (never Signal), so no signal/plan hash moves (D-38)
+- [Phase 14]: 14-09: planner, risk and TP1-sizing rejects also count in run_summary no_trade_counts; run_summary has 18 sorted JSON-native keys recomputed from records
 
 ### Pending Todos
 
@@ -449,6 +452,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-05T05:36:24.797Z
-Stopped at: Completed 14-08-PLAN.md
+Last session: 2026-10-05T06:15:40.124Z
+Stopped at: Completed 14-09-PLAN.md
 Resume file: None
