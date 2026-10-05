@@ -1,4 +1,4 @@
-"""Tests for the protocol v1.1.0 gate module (Phase 11, plan 11-01; D032, D043).
+"""Tests for the protocol gate module (Phase 11, plan 11-01; D032, D043; v2.0.0 by D052).
 
 The real-repository test proves gates PR-01..PR-10 hold today; the negative tests feed
 each pure check a deliberately broken input so a regression in the protocol text, the
@@ -34,10 +34,19 @@ def _protocol() -> str:
     return PROTOCOL.read_text(encoding="utf-8")
 
 
+def _version() -> str:
+    """The header protocol version as ``vX.Y.Z`` (never typed in this file, D-28)."""
+    match = re.search(
+        r"^>\s*\*\*Protocol version:\*\*\s*(v\d+\.\d+\.\d+)\s*$", _protocol(), re.MULTILINE
+    )
+    assert match is not None
+    return match.group(1)
+
+
 def _doc(entries: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {
         "schema": "holdout-consumed/1",
-        "protocol_version": "v1.1.0",
+        "protocol_version": _version(),
         "entries": copy.deepcopy(entries if entries is not None else []),
     }
 
@@ -54,9 +63,12 @@ def test_witnesses_agree_on_real_files() -> None:
     decisions = DECISIONS.read_text(encoding="utf-8")
     doc_status = DOC_STATUS.read_text(encoding="utf-8")
     assert gate.check_witnesses(protocol, decisions, doc_status) == []
-    stale = doc_status.replace("v1.1.0", "v1.0.1")
+    version = _version()
+    stale = doc_status.replace(version, "v0.0.1")
     assert gate.check_witnesses(protocol, decisions, stale)
-    no_row = "\n".join(ln for ln in decisions.splitlines() if "protocol v1.1.0 frozen" not in ln)
+    no_row = "\n".join(
+        ln for ln in decisions.splitlines() if f"protocol {version} frozen" not in ln
+    )
     assert gate.check_witnesses(protocol, no_row, doc_status)
 
 
@@ -167,6 +179,18 @@ def test_quantization_order_swapped_fails() -> None:
 
 def test_backtest_spec_real_file_passes() -> None:
     assert gate.check_backtest_spec(BACKTEST_SPEC.read_text(encoding="utf-8")) == []
+
+
+def test_backtest_spec_pointer_follows_the_header_version() -> None:
+    """The pointer check is header-driven: a different header version needs a different pointer."""
+    spec = BACKTEST_SPEC.read_text(encoding="utf-8")
+    assert gate.check_backtest_spec(spec, protocol=_protocol()) == []
+    bumped = _protocol().replace(
+        f"**Protocol version:** {_version()}", "**Protocol version:** v9.9.9"
+    )
+    assert any("v9.9.9" in p for p in gate.check_backtest_spec(spec, protocol=bumped))
+    stale = spec.replace(_version(), "v0.0.1")
+    assert any(_version() in p for p in gate.check_backtest_spec(stale, protocol=_protocol()))
 
 
 def test_backtest_spec_still_deferring_thresholds_fails() -> None:

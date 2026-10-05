@@ -272,6 +272,7 @@ DECISIONS = "docs/DECISIONS.md"
 DOC_STATUS = "docs/DOC_STATUS.md"
 DATA_MODEL = "docs/data/DATA_MODEL.md"
 SEC_OPS = "docs/operations/SECURITY_AND_OPERATIONS.md"
+PROTOCOL = "docs/research/RESEARCH_PROTOCOL.md"
 
 
 def _dc(
@@ -279,12 +280,14 @@ def _dc(
     doc_status: str | None = None,
     data_model: str | None = None,
     sec_ops: str | None = None,
+    protocol: str | None = None,
 ) -> dict[str, bool]:
     gates = bk.check_decisions(
         _read(DECISIONS) if decisions is None else decisions,
         _read(DOC_STATUS) if doc_status is None else doc_status,
         _read(DATA_MODEL) if data_model is None else data_model,
         _read(SEC_OPS) if sec_ops is None else sec_ops,
+        protocol=_read(PROTOCOL) if protocol is None else protocol,
     )
     return {n: ok for n, ok, _ in gates}
 
@@ -371,6 +374,33 @@ def test_blank_line_inside_table_fails_dc01() -> None:
 def test_d043_row_without_witness_phrase_fails_dc03() -> None:
     text = _read(DECISIONS).replace("protocol v1.1.0 frozen", "protocol frozen")
     assert _dc(decisions=text)["DC-03"] is False
+
+
+def _header_version() -> str:
+    match = re.search(r"^> \*\*Protocol version:\*\* (v\d+\.\d+\.\d+)", _read(PROTOCOL), re.M)
+    assert match is not None
+    return match.group(1)
+
+
+def test_current_header_version_row_is_required_by_dc03() -> None:
+    """DC-03 also binds the row of the header version (v2.0.0, D052), not only the D043 row."""
+    version = _header_version()
+    text = _read(DECISIONS)
+    assert f"protocol {version} frozen" in bk._decision_row(text, "D052")
+    assert (
+        _dc(decisions=text.replace(f"protocol {version} frozen", "protocol frozen"))["DC-03"]
+        is False
+    )
+    # a header that names a version with no freeze row at all fails closed
+    bumped = _read(PROTOCOL).replace(
+        f"**Protocol version:** {version}", "**Protocol version:** v9.9.9"
+    )
+    assert _dc(protocol=bumped)["DC-03"] is False
+    # a header without a version line fails closed too
+    no_version = "\n".join(
+        ln for ln in _read(PROTOCOL).splitlines() if not ln.startswith("> **Protocol version:**")
+    )
+    assert _dc(protocol=no_version)["DC-03"] is False
 
 
 def test_data_model_without_notes_fails_dc05() -> None:
