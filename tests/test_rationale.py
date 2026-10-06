@@ -15,11 +15,19 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from src.domain import registry
-from src.domain.rationale import check_rationale, placeholder_keys
+from src.domain.rationale import (
+    RationaleEntry,
+    check_rationale,
+    load_rationale,
+    placeholder_keys,
+)
+from src.domain.registry import verify_parameter_set
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_SET = REPO_ROOT / "params" / "trend-pullback" / "baseline-v5.toml"
+PINS_PATH = REPO_ROOT / "tests" / "fixtures" / "phase4" / "parameters.json"
 
 STRATEGY_ID = "trend-pullback"
 SET_ID = "baseline-v5"
@@ -167,3 +175,201 @@ def test_placeholder_keys_returns_sorted_placeholder_keys(tmp_path: Path) -> Non
 def test_placeholder_keys_empty_without_rationale(tmp_path: Path) -> None:
     path = write_set(tmp_path, spec=None)
     assert placeholder_keys(path) == ()
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 - the remaining rules, hash neutrality on every committed set.
+# --------------------------------------------------------------------------- #
+
+
+def _problems_with(tmp_path: Path, key: str, entry: dict[str, str]) -> list[str]:
+    """check_rationale problems after replacing one key's entry in a complete set."""
+    spec = complete_rationale(parsed_params(BASE_SET))
+    spec[key] = entry
+    return check_rationale(write_set(tmp_path, spec=spec))
+
+
+def test_check_rationale_reports_empty_text(tmp_path: Path) -> None:
+    problems = _problems_with(
+        tmp_path,
+        "swing_lookback",
+        {"basis": "STRUCTURAL", "value": "20", "text": "   "},
+    )
+    assert len(problems) == 1
+    assert "swing_lookback" in problems[0]
+    assert "text" in problems[0]
+
+
+def test_check_rationale_reports_unknown_basis(tmp_path: Path) -> None:
+    problems = _problems_with(
+        tmp_path,
+        "swing_lookback",
+        {"basis": "INERT", "value": "20", "text": "x"},
+    )
+    assert len(problems) == 1
+    assert "swing_lookback" in problems[0]
+    assert "INERT" in problems[0]
+
+
+def test_check_rationale_reports_missing_basis(tmp_path: Path) -> None:
+    problems = _problems_with(tmp_path, "swing_lookback", {"value": "20", "text": "x"})
+    assert len(problems) == 1
+    assert "swing_lookback" in problems[0]
+    assert "basis" in problems[0]
+
+
+def test_check_rationale_reports_non_string_value_field(tmp_path: Path) -> None:
+    path = write_set(tmp_path, spec=complete_rationale(parsed_params(BASE_SET)))
+    text = path.read_bytes().decode("utf-8")
+    needle = '[rationale.swing_lookback]\nbasis = "DECISION"\nvalue = "20"'
+    assert needle in text
+    path.write_bytes(
+        text.replace(needle, '[rationale.swing_lookback]\nbasis = "DECISION"\nvalue = 20').encode()
+    )
+    problems = check_rationale(path)
+    assert len(problems) == 1
+    assert "swing_lookback" in problems[0]
+    assert "value" in problems[0]
+
+
+def test_check_rationale_reports_value_mismatch(tmp_path: Path) -> None:
+    problems = _problems_with(
+        tmp_path,
+        "zone_tolerance_atr",
+        {"basis": "DECISION", "value": "0.6", "text": "x", "ref": "D046"},
+    )
+    assert len(problems) == 1
+    assert "zone_tolerance_atr" in problems[0]
+    assert "0.6" in problems[0]
+
+
+def test_check_rationale_accepts_numerically_equal_value_spelling(tmp_path: Path) -> None:
+    # minimum_rr = 2.0 normalizes to int 2; partial_fill_fraction = 1.0 to int 1.
+    spec = complete_rationale(parsed_params(BASE_SET))
+    spec["minimum_rr"] = {"basis": "DECISION", "value": "2.0", "text": "x", "ref": "D046"}
+    spec["partial_fill_fraction"] = {"basis": "STRUCTURAL", "value": "1.00", "text": "x"}
+    assert check_rationale(write_set(tmp_path, spec=spec)) == []
+
+
+def test_check_rationale_reports_unparseable_numeric_value(tmp_path: Path) -> None:
+    problems = _problems_with(
+        tmp_path,
+        "zone_tolerance_atr",
+        {"basis": "DECISION", "value": "half", "text": "x", "ref": "D046"},
+    )
+    assert len(problems) == 1
+    assert "zone_tolerance_atr" in problems[0]
+    assert "half" in problems[0]
+
+
+def test_check_rationale_compares_string_parameters_exactly(tmp_path: Path) -> None:
+    bad = _problems_with(
+        tmp_path / "bad",
+        "funding_treatment",
+        {"basis": "STRUCTURAL", "value": "additive", "text": "x"},
+    )
+    assert len(bad) == 1
+    assert "funding_treatment" in bad[0]
+    good = _problems_with(
+        tmp_path / "good",
+        "funding_treatment",
+        {"basis": "STRUCTURAL", "value": "ADDITIVE", "text": "x"},
+    )
+    assert good == []
+
+
+def test_check_rationale_reports_experiment_without_ref(tmp_path: Path) -> None:
+    problems = _problems_with(
+        tmp_path,
+        "swing_lookback",
+        {"basis": "EXPERIMENT", "value": "20", "text": "x"},
+    )
+    assert len(problems) == 1
+    assert "swing_lookback" in problems[0]
+    assert "ref" in problems[0]
+
+
+def test_check_rationale_accepts_experiment_with_ref(tmp_path: Path) -> None:
+    problems = _problems_with(
+        tmp_path,
+        "swing_lookback",
+        {"basis": "EXPERIMENT", "value": "20", "text": "x", "ref": "EXP-15-A"},
+    )
+    assert problems == []
+
+
+def test_check_rationale_reports_decision_and_cost_guard_without_d_number(
+    tmp_path: Path,
+) -> None:
+    for basis in ("DECISION", "COST_GUARD"):
+        for ref in (None, "046", "D46", "D0461", "decision 46"):
+            entry = {"basis": basis, "value": "20", "text": "x"}
+            if ref is not None:
+                entry["ref"] = ref
+            problems = _problems_with(tmp_path / f"{basis}-{ref}", "swing_lookback", entry)
+            assert len(problems) == 1, (basis, ref, problems)
+            assert "swing_lookback" in problems[0]
+            assert "ref" in problems[0]
+
+
+def test_check_rationale_structural_and_placeholder_need_no_ref(tmp_path: Path) -> None:
+    for basis in ("STRUCTURAL", "PLACEHOLDER"):
+        problems = _problems_with(
+            tmp_path / basis,
+            "swing_lookback",
+            {"basis": basis, "value": "20", "text": "x"},
+        )
+        assert problems == []
+
+
+def test_check_rationale_output_is_sorted_and_deterministic(tmp_path: Path) -> None:
+    spec = complete_rationale(parsed_params(BASE_SET))
+    del spec["swing_lookback"]
+    spec["zz_extra"] = {"basis": "STRUCTURAL", "value": "1", "text": "x"}
+    spec["risk_rate"] = {"basis": "NOPE", "value": "0.005", "text": "x"}
+    path = write_set(tmp_path, spec=spec)
+    first = check_rationale(path)
+    assert len(first) == 3
+    assert first == sorted(first)
+    assert check_rationale(path) == first
+
+
+def test_load_rationale_reads_entries_and_rejects_malformed(tmp_path: Path) -> None:
+    params = parsed_params(BASE_SET)
+    entries = load_rationale(write_rationalized_set(tmp_path / "ok"))
+    assert set(entries) == set(params)
+    assert entries["minimum_rr"] == RationaleEntry(
+        key="minimum_rr", basis="DECISION", value="2", text="why minimum_rr", ref="D046"
+    )
+
+    spec = complete_rationale(params)
+    spec["minimum_rr"] = {"basis": "DECISION", "text": "x", "ref": "D046"}
+    with pytest.raises(ValueError, match="minimum_rr"):
+        load_rationale(write_set(tmp_path / "bad", spec=spec))
+
+
+def test_rationale_hash_neutral_on_every_committed_set(tmp_path: Path) -> None:
+    pins_doc = json.loads(PINS_PATH.read_text(encoding="utf-8"))
+    pins = pins_doc["parameter_sets"]
+    assert pins, "no pinned sets collected"
+    checked = 0
+    for pin in pins:
+        strategy_id = pin["strategy_id"]
+        set_id = pin["parameter_set_id"]
+        source = REPO_ROOT / "params" / strategy_id / f"{set_id}.toml"
+        text = source.read_bytes().decode("utf-8")
+        params = parsed_params(source)
+        spec = {
+            key: {"basis": "PLACEHOLDER", "value": str(value), "text": "seed"}
+            for key, value in params.items()
+        }
+        target = tmp_path / strategy_id / f"{set_id}.toml"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        body = text.rstrip("\r\n") + "\n\n" + render_rationale(spec)
+        target.write_bytes(body.encode("utf-8"))
+        # The pinned hash must still verify with the rationale block appended.
+        verify_parameter_set(target, pin["parameter_set_hash"])
+        assert check_rationale(target) == []
+        assert placeholder_keys(target) == tuple(sorted(params))
+        checked += 1
+    assert checked == len(pins)

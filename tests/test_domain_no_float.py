@@ -24,6 +24,7 @@ SCANNED_FILES = (
     "src/domain/journal.py",
     "src/domain/order.py",
     "src/domain/position.py",
+    "src/domain/rationale.py",
     "src/domain/registry.py",
     "src/domain/signal.py",
     "src/domain/trade_plan.py",
