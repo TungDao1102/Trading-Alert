@@ -1,18 +1,18 @@
 ---
 gsd_state_version: "1.0"
 milestone: v0.3
-current_phase: 14
-current_phase_name: Backtest Simulator Causality Rewrite
-status: verifying
+current_phase: 15
+current_phase_name: strategy-geometry-correction
+status: executing
 stopped_at: Phase 15 context gathered
-last_updated: "2026-10-06T01:07:39.561Z"
+last_updated: "2026-10-06T03:52:00.380Z"
 last_activity: 2026-10-05
 last_activity_desc: Phase 14 execution started
-state_head: fc025a1b35434de294ad6d4238b985636a65be4f
+state_head: 99f814efe7b595b3813f1dcb94f1af807392afbe
 progress:
   total_phases: 29
   completed_phases: 16
-  total_plans: 125
+  total_plans: 140
   completed_plans: 124
 milestone_name: milestone
 ---
@@ -30,9 +30,9 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 ## Current Position
 
-Phase: 14 (Backtest Simulator Causality Rewrite) — EXECUTING
+Phase: 15 (strategy-geometry-correction) — READY TO EXECUTE
 Plan: 16 of 16
-Status: Phase complete — ready for verification
+Status: Ready to execute
 Last activity: 2026-10-05 — Phase 14 execution started
 
 Progress: [█████░░░░░] 46%
