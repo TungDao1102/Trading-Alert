@@ -1103,3 +1103,206 @@ def test_non_finite_numeric_keys_raise_registry_exception(
 
     with pytest.raises(StrategyKeyOutsideRegistry, match="must be finite"):
         _check_param_types({key: bad}, tmp_path / "test.toml")
+
+
+# --------------------------------------------------------------------------- #
+# Phase 15 (plan 15-03) - pivot widths, geometry_version, tp_mode, min_stop_atr.
+# --------------------------------------------------------------------------- #
+
+_PHASE15_KEYS = (
+    "pivot_left_bars",
+    "pivot_right_bars",
+    "geometry_version",
+    "tp_mode",
+    "min_stop_atr",
+)
+_PIVOT_BLOCK = "pivot_left_bars = 3\npivot_right_bars = 3\ngeometry_version = 1\n"
+
+
+def _load_family(tmp_path: Path, family: str, parameters: str) -> ParameterSet:
+    """Load a tmp set whose strategy_id is a real family name (cross-key rules key on it)."""
+    from src.domain import registry
+
+    strategy_dir = tmp_path / family
+    strategy_dir.mkdir(exist_ok=True)
+    (strategy_dir / "test-set.toml").write_text(
+        "schema_version = 1\n"
+        "[strategy]\n"
+        f'strategy_id = "{family}"\n'
+        'strategy_version = "v1.0.0"\n'
+        "[parameters]\n"
+        "swing_lookback = 20\n" + parameters,
+        encoding="utf-8",
+    )
+    original_root = registry.REGISTRY_ROOT
+    registry.REGISTRY_ROOT = tmp_path
+    try:
+        return load_parameter_set(family, "test-set")
+    finally:
+        registry.REGISTRY_ROOT = original_root
+
+
+def test_phase15_keys_are_whitelisted_with_expected_types() -> None:
+    from src.backtest.costs import COST_KEYS
+    from src.domain.registry import (
+        DECIMAL_KEYS,
+        GEOMETRY_VERSION_VALUES,
+        INT_KEYS,
+        STRATEGY_KEYS,
+        STRING_KEYS,
+        TP_MODE_VALUES,
+    )
+
+    for key in _PHASE15_KEYS:
+        assert key in STRATEGY_KEYS, key
+        assert key not in COST_KEYS, key
+    for key in ("pivot_left_bars", "pivot_right_bars", "geometry_version"):
+        assert key in INT_KEYS, key
+    assert "tp_mode" in STRING_KEYS
+    assert "min_stop_atr" in DECIMAL_KEYS
+    assert GEOMETRY_VERSION_VALUES == frozenset({1})
+    assert TP_MODE_VALUES == frozenset({"T_MID", "T_OPPOSITE"})
+
+
+def test_trend_pullback_set_with_phase15_keys_loads(tmp_path: Path) -> None:
+    loaded = _load_family(tmp_path, "trend-pullback", _PIVOT_BLOCK + "min_stop_atr = 0.5\n")
+    assert loaded.params["pivot_left_bars"] == 3
+    assert loaded.params["pivot_right_bars"] == 3
+    assert loaded.params["geometry_version"] == 1
+    assert loaded.params["min_stop_atr"] == Decimal("0.5")
+
+
+@pytest.mark.parametrize("tp_mode", ["T_MID", "T_OPPOSITE"])
+def test_range_mr_set_with_phase15_keys_loads(tmp_path: Path, tp_mode: str) -> None:
+    loaded = _load_family(tmp_path, "range-mr", _PIVOT_BLOCK + f'tp_mode = "{tp_mode}"\n')
+    assert loaded.params["tp_mode"] == tp_mode
+
+
+def test_breakout_retest_set_with_geometry_version_only_loads(tmp_path: Path) -> None:
+    loaded = _load_family(tmp_path, "breakout-retest", "geometry_version = 1\n")
+    assert loaded.params["geometry_version"] == 1
+
+
+def test_set_without_phase15_keys_still_loads(tmp_path: Path) -> None:
+    loaded = _load_family(tmp_path, "trend-pullback", "zone_tolerance_atr = 0.5\n")
+    for key in _PHASE15_KEYS:
+        assert key not in loaded.params
+
+
+@pytest.mark.parametrize(
+    ("key", "literal"),
+    [
+        ("pivot_left_bars", "0"),
+        ("pivot_left_bars", "51"),
+        ("pivot_left_bars", "true"),
+        ("pivot_left_bars", "3.5"),
+        ("pivot_right_bars", "0"),
+        ("pivot_right_bars", "51"),
+        ("pivot_right_bars", "false"),
+        ("pivot_right_bars", "2.5"),
+        ("geometry_version", "0"),
+        ("geometry_version", "2"),
+        ("geometry_version", "true"),
+        ("geometry_version", "1.5"),
+        ("tp_mode", '"MID"'),
+        ("tp_mode", '""'),
+        ("tp_mode", "1"),
+        ("min_stop_atr", "0"),
+        ("min_stop_atr", "-1"),
+        ("min_stop_atr", "10.5"),
+        ("min_stop_atr", "true"),
+    ],
+)
+def test_phase15_key_values_rejected(tmp_path: Path, key: str, literal: str) -> None:
+    with pytest.raises(StrategyKeyOutsideRegistry, match=key):
+        _load_family(tmp_path, "range-mr", f"{key} = {literal}\n")
+
+
+@pytest.mark.parametrize(("literal", "loads"), [("1", True), ("50", True), ("51", False)])
+def test_pivot_width_bounds_are_inclusive(tmp_path: Path, literal: str, loads: bool) -> None:
+    body = f"pivot_left_bars = {literal}\npivot_right_bars = 3\ngeometry_version = 1\n"
+    if loads:
+        loaded = _load_family(tmp_path, "trend-pullback", body)
+        assert loaded.params["pivot_left_bars"] == int(literal)
+        return
+    with pytest.raises(StrategyKeyOutsideRegistry, match="pivot_left_bars"):
+        _load_family(tmp_path, "trend-pullback", body)
+
+
+@pytest.mark.parametrize(("literal", "loads"), [("10", True), ("0.0001", True), ("10.0001", False)])
+def test_min_stop_atr_upper_bound_is_inclusive(tmp_path: Path, literal: str, loads: bool) -> None:
+    body = f"min_stop_atr = {literal}\n"
+    if loads:
+        assert "min_stop_atr" in _load_family(tmp_path, "trend-pullback", body).params
+        return
+    with pytest.raises(StrategyKeyOutsideRegistry, match="min_stop_atr"):
+        _load_family(tmp_path, "trend-pullback", body)
+
+
+@pytest.mark.parametrize("bad", [Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")])
+def test_min_stop_atr_non_finite_raises_registry_exception(tmp_path: Path, bad: Decimal) -> None:
+    from src.domain.registry import _check_param_types
+
+    with pytest.raises(StrategyKeyOutsideRegistry, match="must be finite"):
+        _check_param_types({"min_stop_atr": bad}, tmp_path / "test.toml")
+
+
+@pytest.mark.parametrize("literal", ["nan", "inf", "-inf"])
+def test_min_stop_atr_non_finite_toml_literals_are_rejected(tmp_path: Path, literal: str) -> None:
+    with pytest.raises(StrategyKeyOutsideRegistry):
+        _load_family(tmp_path, "trend-pullback", f"min_stop_atr = {literal}\n")
+
+
+@pytest.mark.parametrize(
+    ("family", "body"),
+    [
+        # only one pivot key
+        ("trend-pullback", "pivot_left_bars = 3\ngeometry_version = 1\n"),
+        ("trend-pullback", "pivot_right_bars = 3\ngeometry_version = 1\n"),
+        # pivot_right_bars + 1 > swing_lookback (swing_lookback is 20)
+        ("trend-pullback", "pivot_left_bars = 3\npivot_right_bars = 20\ngeometry_version = 1\n"),
+        # pivot keys without geometry_version
+        ("trend-pullback", "pivot_left_bars = 3\npivot_right_bars = 3\n"),
+        # tp_mode without geometry_version
+        ("range-mr", 'tp_mode = "T_MID"\n'),
+        # tp_mode in a non-range-mr set
+        ("trend-pullback", _PIVOT_BLOCK + 'tp_mode = "T_MID"\n'),
+        ("breakout-retest", 'geometry_version = 1\ntp_mode = "T_MID"\n'),
+        # pivot keys in a breakout-retest set
+        ("breakout-retest", _PIVOT_BLOCK),
+        # geometry_version without both pivot keys in trend-pullback / range-mr
+        ("trend-pullback", "geometry_version = 1\n"),
+        ("range-mr", 'geometry_version = 1\ntp_mode = "T_MID"\n'),
+        # geometry_version in a range-mr set without tp_mode
+        ("range-mr", _PIVOT_BLOCK),
+    ],
+)
+def test_phase15_cross_key_rules_reject(tmp_path: Path, family: str, body: str) -> None:
+    with pytest.raises(StrategyKeyOutsideRegistry):
+        _load_family(tmp_path, family, body)
+
+
+def test_pivot_right_bars_equal_to_swing_lookback_minus_one_loads(tmp_path: Path) -> None:
+    body = "pivot_left_bars = 3\npivot_right_bars = 19\ngeometry_version = 1\n"
+    assert _load_family(tmp_path, "trend-pullback", body).params["pivot_right_bars"] == 19
+
+
+@pytest.mark.parametrize("key", _PHASE15_KEYS)
+def test_ambient_config_named_after_phase15_key_is_rejected(key: str) -> None:
+    from src.domain.registry import check_strategy_key_outside_registry
+
+    with pytest.raises(StrategyKeyOutsideRegistry):
+        check_strategy_key_outside_registry({key: "1"})
+    with pytest.raises(StrategyKeyOutsideRegistry):
+        check_strategy_key_outside_registry({"nested": {key.upper(): "1"}})
+
+
+def test_committed_sets_carry_no_phase15_key() -> None:
+    from src.domain import registry
+
+    committed = sorted(Path(registry.REGISTRY_ROOT).glob("*/*.toml"))
+    assert committed
+    for path in committed:
+        loaded = load_parameter_set(path.parent.name, path.stem)
+        for key in _PHASE15_KEYS:
+            assert key not in loaded.params, f"{path}: unexpected Phase 15 key {key}"
