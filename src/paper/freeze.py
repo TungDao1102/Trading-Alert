@@ -65,6 +65,11 @@ import structlog
 from src.backtest.binding import assert_cost_model_binds_registry
 from src.backtest.costs import CostModel, build_cost_model, cost_slice
 from src.domain.canonical import sha256_hex
+from src.domain.rationale import (
+    UnrationalizedParameterSet,
+    check_rationale,
+    placeholder_keys,
+)
 from src.domain.registry import (
     REGISTRY_ROOT,
     ParameterSet,
@@ -332,6 +337,20 @@ def _load_parameter_set_with_root(
     )
 
 
+def _require_rationalized(path: Path) -> None:
+    """Refuse a set whose rationale is incomplete or that carries PLACEHOLDER keys."""
+    problems = check_rationale(path)
+    placeholders = placeholder_keys(path)
+    if not problems and not placeholders:
+        return
+    parts: list[str] = []
+    if problems:
+        parts.append("rationale problems: " + "; ".join(problems))
+    if placeholders:
+        parts.append("PLACEHOLDER keys: " + ", ".join(placeholders))
+    raise UnrationalizedParameterSet(f"{path.parent.name}/{path.stem}: " + " | ".join(parts))
+
+
 # --------------------------------------------------------------------------- #
 # pin_stream_epoch — pin (parameterSetId, parameterSetHash) at stream start.
 # --------------------------------------------------------------------------- #
@@ -363,9 +382,17 @@ def pin_stream_epoch(
             binding).
         registry_root: Optional registry root override (for tests).
             Defaults to `src.domain.registry.REGISTRY_ROOT`.
+        allow_unrationalized: Test-only escape hatch for pinning legacy
+            sets that carry no `[rationale.<key>]` tables. The default is
+            strict: a set with a missing or incomplete rationale, or with
+            any PLACEHOLDER key, cannot be pinned for paper (D-16, D-27).
+            No module under `src/` passes True.
 
     Raises:
         UnregisteredParameterSet: file does not exist.
+        UnrationalizedParameterSet: the set's rationale is missing or
+            incomplete, or at least one key has basis PLACEHOLDER, and
+            `allow_unrationalized` is False.
         CostModelBindingMismatch: caller-supplied cost model does not
             bind the registry (per 07.1 D-01).
         KeyError: missing cost-slice keys in the registry (fail
@@ -375,6 +402,9 @@ def pin_stream_epoch(
     _require_utc_aware(opened_at_utc, "opened_at_utc")
     root = registry_root if registry_root is not None else REGISTRY_ROOT
     parameter_set = _load_parameter_set_with_root(strategy_id, parameter_set_id, root)
+
+    if not allow_unrationalized:
+        _require_rationalized(root / strategy_id / f"{parameter_set_id}.toml")
 
     # Build the cost model from the registry's cost-key slice. This
     # propagates bare KeyError from build_cost_model if any slice key
