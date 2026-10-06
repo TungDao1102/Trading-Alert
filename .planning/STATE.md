@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 15
 current_phase_name: Strategy Geometry Correction
 status: executing
-stopped_at: Completed 15-10-PLAN.md
-last_updated: "2026-10-06T08:30:14.742Z"
+stopped_at: Completed 15-11-PLAN.md
+last_updated: "2026-10-06T08:40:24.966Z"
 last_activity: 2026-10-06
 last_activity_desc: Phase 15 execution started
-state_head: 72c72f59132c87b891b9df425ce2856c2364894c
+state_head: 15fbaf8bd730d04d660b58de8b9e39e10a628198
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 140
-  completed_plans: 134
+  completed_plans: 135
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 15 (Strategy Geometry Correction) — EXECUTING
-Plan: 11 of 15
+Plan: 12 of 15
 Status: Ready to execute
 Last activity: 2026-10-06 — Phase 15 execution started
 
@@ -181,6 +181,7 @@ Progress: [█████░░░░░] 46%
 | Phase 15 P08 | 1h | 3 tasks | 10 files |
 | Phase 15 P09 | 25min | 2 tasks | 6 files |
 | Phase 15 P10 | 60min | 2 tasks | 3 files |
+| Phase 15 P11 | 40min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -447,6 +448,7 @@ Recent decisions affecting current work:
 - [Phase 15]: 15-09: -v4 baselines take baseline-v6 values with only the ratified overrides; override basis DECISION D054; PA-08 plus exact pin-set equality guard the five Phase 15 sets
 - [Phase 15]: 15-10: v6 payloads use a V-dip 1H history (confirmed pivot low at bar 240, TP1 pivot high at bar 244) and mirror around 250.00 for SHORT; no ratified or registry value tuned, bars and minutes were designed to the ratified values
 - [Phase 15]: 15-10: fixture facts consumed by 15-12 are hand-derived with standalone Decimal commands quoted in 15-10-SUMMARY; engine digests are regression pins only
+- [Phase 15]: 15-11: planner tests and Phase 4 snapshots run on baseline-v6; the regeneration script no longer writes the pin file (parameters.json) or expected_features.json (T-15-19)
 
 ### Pending Todos
 
@@ -501,6 +503,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-06T08:30:13.943Z
-Stopped at: Completed 15-10-PLAN.md
+Last session: 2026-10-06T08:40:24.099Z
+Stopped at: Completed 15-11-PLAN.md
 Resume file: None
