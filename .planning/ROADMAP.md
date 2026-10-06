@@ -634,7 +634,7 @@ Plans:
 
 **Audit refs**: F-301, F-113, F-909
 
-**Plans:** 12/15 plans executed
+**Plans:** 13/15 plans executed
 
 Plans:
 
@@ -669,7 +669,7 @@ Plans:
 - [x] 15-14-PLAN.md — Family sheets "Implemented as" (NOT FROZEN), GLOSSARY reason-code prose, CONFIGURATION key table
 
 **Wave 10** *(blocked on Wave 9 completion)*
-- [ ] 15-12-PLAN.md — Regenerate Phase 6/7 fixtures from the proven v6 payloads and migrate every consumer in the same plan (simulator snapshots, parity, cost parity, engine-strategy, determinism, experiment); full suite green
+- [x] 15-12-PLAN.md — Regenerate Phase 6/7 fixtures from the proven v6 payloads and migrate every consumer in the same plan (simulator snapshots, parity, cost parity, engine-strategy, determinism, experiment); full suite green
 
 **Wave 11** *(blocked on Wave 10 completion)*
 - [ ] 15-13-PLAN.md — Validator universal for every set; legacy regression tests; full suite green
@@ -1054,7 +1054,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 13. Research Data Foundation Fixes | 13/13 | Complete    | 2026-10-03 |
 | 13.1. Deployment & CI | 12/12 | Complete | 2026-10-04 |
 | 14. Backtest Simulator Causality Rewrite | 16/16 | In Progress|  |
-| 15. Strategy Geometry Correction | 12/15 | In Progress|  |
+| 15. Strategy Geometry Correction | 13/15 | In Progress|  |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
 | 17. Operational Persistence Layer | 15/15 | In Progress|  |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |
