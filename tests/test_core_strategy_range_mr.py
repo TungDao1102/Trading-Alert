@@ -15,14 +15,20 @@ in plan 04-04 task 2.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from src.core import strategy as strategy_module
+from src.core.planner import plan
 from src.core.strategy import evaluate
-from src.core.types import AccountState, Candle, MarketSnapshot
+from src.core.types import AccountState, Candle, MarketSnapshot, SetupResult
+from src.domain.enums import RejectionReason
 from src.domain.ids import make_signal_id
 from src.domain.registry import ParameterSet, load_parameter_set
+
+from tests import geometry_builders
 
 # --------------------------------------------------------------------------- #
 # Candle builders — deterministic, Decimal-only candles.
@@ -500,3 +506,438 @@ def test_signal_id_recomputable_via_make_signal_id(
         setup_fingerprint=result.signal.expires_at_utc.isoformat(),
     )
     assert len(canonical) == 64
+
+
+# --------------------------------------------------------------------------- #
+# Plan 15-06 Task 2: the Family C pivot regime (D-22, F1). Hand derivations of the 4h windows
+# are in tests/fixtures/phase15/DERIVATIONS.md (c_long_worked) and the waypoint tables in
+# tests/geometry_builders.py; all values here are test-local, nothing under params/ changes.
+# --------------------------------------------------------------------------- #
+
+_ACCOUNT = AccountState(equity=Decimal("10000"), risk_rate=Decimal("0.005"))
+
+
+def _pivot_set(**overrides: int | str | Decimal) -> ParameterSet:
+    """range-mr baseline-v5 plus test-local geometry_version 1 keys (in memory only)."""
+    base = load_parameter_set("range-mr", "baseline-v5")
+    params = dict(base.params)
+    params.update(
+        {
+            "pivot_left_bars": 3,
+            "pivot_right_bars": 3,
+            "regime_filter_lookback": 50,
+            "tp_mode": "T_MID",
+            "geometry_version": 1,
+        }
+    )
+    params.update(overrides)
+    return dataclasses.replace(base, params=params)
+
+
+def _regime(waypoints: tuple[tuple[int, str], ...], **overrides: int | str | Decimal) -> str:
+    context = geometry_builders.pivot_context(waypoints)
+    return strategy_module._resolve_regime_pivots(context, _pivot_set(**overrides))
+
+
+def _evaluate(
+    window: tuple[list[Candle], list[Candle]], parameter_set: ParameterSet
+) -> SetupResult:
+    setup, context = window
+    return evaluate(
+        snapshot=MarketSnapshot(
+            symbol="BTCUSDT",
+            setup_candles=setup,
+            context_candles=context,
+            source_timeframe="1h",
+        ),
+        account_state=_ACCOUNT,
+        strategy_version=parameter_set.strategy_version,
+        parameter_set=parameter_set,
+    )
+
+
+def _pivots(
+    candles: list[Candle], *, high: bool, left: int = 3, right: int = 3, lookback: int = 50
+) -> list[tuple[int, Decimal]]:
+    """Confirmed pivots by the definition (newest first), independent of src.core.pivots.
+
+    Pivot high at t: high[t] >= highs[t-left..t-1] and high[t] > highs[t+1..t+right]; the pivot
+    low mirrors it. Only t + right <= last index counts, inside the last `lookback` bars.
+    """
+    last = len(candles) - 1
+    values = [c.high if high else c.low for c in candles]
+    found: list[tuple[int, Decimal]] = []
+    for t in range(last - right, max(left, last - lookback + 1) - 1, -1):
+        level = values[t]
+        left_ok = all(
+            (level >= values[j]) if high else (level <= values[j]) for j in range(t - left, t)
+        )
+        right_ok = all(
+            (level > values[j]) if high else (level < values[j])
+            for j in range(t + 1, t + right + 1)
+        )
+        if left_ok and right_ok:
+            found.append((t, level))
+    return found
+
+
+def test_pivot_regime_bullish_higher_high_and_higher_low() -> None:
+    """Pivot highs 109 (bar 210) then 113 (bar 230), pivot lows 101 (220) then 105 (240)."""
+    assert _regime(geometry_builders.PIVOT_BULLISH) == "BULLISH"
+
+
+def test_pivot_regime_bearish_lower_high_and_lower_low() -> None:
+    """Pivot highs 109 (210) then 105 (230), pivot lows 99 (220) then 95 (240)."""
+    assert _regime(geometry_builders.PIVOT_BEARISH) == "BEARISH"
+
+
+def test_pivot_regime_neutral_contracting_lower_high_and_higher_low() -> None:
+    """Highs 111 then 109 (LH), lows 99 then 101 (HL): contracting, the Family C range."""
+    assert _regime(geometry_builders.PIVOT_NEUTRAL_CONTRACTING) == "NEUTRAL"
+
+
+def test_pivot_regime_neutral_expanding_higher_high_and_lower_low() -> None:
+    """Highs 109 then 110 (HH), lows 99 then 98 (LL): expanding, also NEUTRAL."""
+    assert _regime(geometry_builders.PIVOT_NEUTRAL_EXPANDING) == "NEUTRAL"
+
+
+_TIE_VARIANTS = {
+    "tied_highs_rising_lows": (
+        (0, "100"),
+        (200, "100"),
+        (210, "108"),
+        (220, "100"),
+        (230, "108"),
+        (240, "102"),
+        (249, "106.5"),
+    ),
+    "tied_highs_falling_lows": (
+        (0, "100"),
+        (200, "100"),
+        (210, "108"),
+        (220, "100"),
+        (230, "108"),
+        (240, "98"),
+        (249, "102.5"),
+    ),
+    "higher_high_tied_lows": (
+        (0, "100"),
+        (200, "100"),
+        (210, "108"),
+        (220, "100"),
+        (230, "109"),
+        (240, "100"),
+        (249, "104.5"),
+    ),
+    "lower_high_tied_lows": (
+        (0, "100"),
+        (200, "100"),
+        (210, "108"),
+        (220, "100"),
+        (230, "104"),
+        (240, "100"),
+        (249, "104.5"),
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_TIE_VARIANTS))
+def test_pivot_regime_neutral_when_one_pair_is_tied(name: str) -> None:
+    """Rule: an equal newest and previous pivot is neither higher nor lower.
+
+    BULLISH needs a strictly higher high AND a strictly higher low, BEARISH a strictly lower
+    high AND a strictly lower low. One tied pair therefore gives NEUTRAL whatever the other
+    pair does (HH with tied lows is not BULLISH, LH with tied lows is not BEARISH, tied highs
+    with HL or LL are neither).
+    """
+    assert _regime(_TIE_VARIANTS[name]) == "NEUTRAL"
+
+
+def test_pivot_regime_tied_variants_really_tie() -> None:
+    """The tie windows hold equal pivot levels (the premise of the rule above)."""
+    for name in ("tied_highs_rising_lows", "tied_highs_falling_lows"):
+        context = geometry_builders.pivot_context(_TIE_VARIANTS[name])
+        highs = [level for _t, level in _pivots(context, high=True)[:2]]
+        assert highs[0] == highs[1] == Decimal("109"), name
+    context = geometry_builders.pivot_context(_TIE_VARIANTS["higher_high_tied_lows"])
+    lows = [level for _t, level in _pivots(context, high=False)[:2]]
+    assert lows[0] == lows[1] == Decimal("99")
+
+
+_ONE_PIVOT_HIGH = (
+    (0, "100"),
+    (200, "100"),
+    (220, "110"),
+    (240, "100"),
+    (249, "104.5"),
+)
+# Peaks at 209 and 229 (both 109), one trough at 219 inside the window and an older trough at
+# 199 that is exactly one bar outside regime_filter_lookback 50 of the last bar 249.
+_OLD_LOW_OUTSIDE = (
+    (0, "100"),
+    (199, "100"),
+    (209, "108"),
+    (219, "100"),
+    (229, "108"),
+    (249, "98"),
+)
+# The same shape shifted one bar later: the older trough is bar 200, the first window bar.
+_OLD_LOW_ON_BOUNDARY = (
+    (0, "100"),
+    (200, "100"),
+    (210, "108"),
+    (220, "100"),
+    (230, "108"),
+    (249, "98.5"),
+)
+
+
+def test_insufficient_pivots_one_pivot_high_is_no_trade() -> None:
+    """A single peak (bar 220) and two pivot lows (200, 240): fewer than two highs."""
+    context = geometry_builders.pivot_context(_ONE_PIVOT_HIGH)
+    assert len(_pivots(context, high=True)) == 1
+    assert len(_pivots(context, high=False)) == 2
+    assert strategy_module._resolve_regime_pivots(context, _pivot_set()) == "NO_TRADE"
+
+
+def test_insufficient_pivots_one_pivot_low_is_no_trade() -> None:
+    context = geometry_builders.pivot_context(_OLD_LOW_OUTSIDE)
+    assert len(_pivots(context, high=True)) == 2
+    assert len(_pivots(context, high=False)) == 1
+    assert strategy_module._resolve_regime_pivots(context, _pivot_set()) == "NO_TRADE"
+
+
+def test_insufficient_pivots_in_a_flat_window_is_no_trade() -> None:
+    assert _regime(((0, "100"), (249, "100"))) == "NO_TRADE"
+
+
+def test_insufficient_pivots_evaluate_returns_no_trade_regime_without_a_regime_name() -> None:
+    setup = geometry_builders.constant_range_candles(geometry_builders.range_mr_closes())
+    context = geometry_builders.pivot_context(_ONE_PIVOT_HIGH)
+    result = _evaluate((setup, context), _pivot_set())
+    assert result.is_no_trade
+    assert result.reason_code == RejectionReason.NO_TRADE_REGIME.value
+    assert result.regime is None
+
+
+def test_pivot_regime_ignores_a_pivot_older_than_the_lookback() -> None:
+    """The trough at bar 199 is outside the 50-bar window of bar 249 and does not count.
+
+    With it ignored the window holds one pivot low (NO_TRADE); the same shape one bar later
+    puts the older trough on bar 200, the first window bar, where it counts (two equal lows
+    and two equal highs, so NEUTRAL). A lookback of 49 drops bar 200 again.
+    """
+    assert _regime(_OLD_LOW_OUTSIDE) == "NO_TRADE"
+    assert _regime(_OLD_LOW_ON_BOUNDARY) == "NEUTRAL"
+    assert _regime(_OLD_LOW_ON_BOUNDARY, regime_filter_lookback=49) == "NO_TRADE"
+
+
+_UNCONFIRMED_TAIL = (
+    (0, "100"),
+    (200, "100"),
+    (210, "108"),
+    (220, "102"),
+    (230, "112"),
+    (240, "106"),
+    (246, "109"),
+    (249, "107.5"),
+)
+
+
+def test_pivot_regime_ignores_a_swing_in_the_last_right_bars() -> None:
+    """A swing high on bar 246 is confirmed only when bar 249 has closed (right = 3).
+
+    On the first 249 bars (last index 248) it has two right-side bars and is ignored, so the
+    verdict is BULLISH (highs 109 then 113, lows 101 then 105). One bar later it is a lower
+    high (110 under 113) and the verdict is NEUTRAL.
+    """
+    context = geometry_builders.pivot_context(_UNCONFIRMED_TAIL)
+    parameter_set = _pivot_set()
+    assert strategy_module._resolve_regime_pivots(context[:249], parameter_set) == "BULLISH"
+    assert strategy_module._resolve_regime_pivots(context, parameter_set) == "NEUTRAL"
+    assert [t for t, _ in _pivots(context[:249], high=True)] == [230, 210]
+    assert [t for t, _ in _pivots(context, high=True)] == [246, 230, 210]
+
+
+_ZIGZAG_LEVELS = (
+    100, 108, 101, 109, 105, 97, 104, 98, 106, 100, 108, 103, 99, 107, 100, 105,
+    96, 104, 99, 107, 102, 110, 101, 106, 98, 105, 100, 109, 103, 97, 104, 100,
+)  # fmt: skip
+
+
+def _zigzag_context(length: int = 320) -> list[Candle]:
+    """320 closed 4h bars through ten-bar legs between `_ZIGZAG_LEVELS` (steps at most 1)."""
+    waypoints = [(10 * j, str(level)) for j, level in enumerate(_ZIGZAG_LEVELS)]
+    waypoints.append((length - 1, str(_ZIGZAG_LEVELS[-1])))
+    return geometry_builders.four_hour_context(
+        geometry_builders.interpolated_closes(waypoints), setup_length=length
+    )
+
+
+def _oracle_regime(candles: list[Candle]) -> str:
+    highs = _pivots(candles, high=True)[:2]
+    lows = _pivots(candles, high=False)[:2]
+    if len(highs) < 2 or len(lows) < 2:
+        return "NO_TRADE"
+    high_new, high_old = highs[0][1], highs[1][1]
+    low_new, low_old = lows[0][1], lows[1][1]
+    if high_new > high_old and low_new > low_old:
+        return "BULLISH"
+    if high_new < high_old and low_new < low_old:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
+def test_regime_prefix_invariance_matches_the_definition_at_every_bar() -> None:
+    """The verdict on context[: k + 1] equals the by-definition verdict of that prefix for all k.
+
+    The oracle counts a pivot only when its right-side bars are inside the prefix, so a
+    look-ahead in the implementation would disagree with it somewhere on the 320-bar zig-zag.
+    All three verdicts and NO_TRADE occur on this path, so the comparison is not vacuous.
+    """
+    context = _zigzag_context()
+    parameter_set = _pivot_set()
+    verdicts = [
+        strategy_module._resolve_regime_pivots(context[: k + 1], parameter_set)
+        for k in range(len(context))
+    ]
+    assert verdicts == [_oracle_regime(context[: k + 1]) for k in range(len(context))]
+    assert {"BULLISH", "BEARISH", "NEUTRAL", "NO_TRADE"} <= set(verdicts)
+
+
+def test_regime_prefix_invariance_later_bars_never_change_an_earlier_verdict() -> None:
+    """Altering every bar after k leaves the verdict on context[: k + 1] unchanged."""
+    context = _zigzag_context()
+    parameter_set = _pivot_set()
+    for k in range(0, len(context), 7):
+        altered = [
+            *context[: k + 1],
+            *geometry_builders.mirror_candles(context[k + 1 :], pivot=Decimal("500")),
+        ]
+        assert altered[: k + 1] == context[: k + 1]
+        assert strategy_module._resolve_regime_pivots(
+            altered[: k + 1], parameter_set
+        ) == strategy_module._resolve_regime_pivots(context[: k + 1], parameter_set), k
+
+
+def test_regime_pivots_ignore_the_price_level_and_the_ema_features() -> None:
+    """The pivot regime reads highs and lows only: a uniform price shift leaves it unchanged."""
+    base = geometry_builders.pivot_context(geometry_builders.PIVOT_BULLISH)
+    shifted = [
+        dataclasses.replace(
+            c,
+            open=c.open + Decimal("1000"),
+            high=c.high + Decimal("1000"),
+            low=c.low + Decimal("1000"),
+            close=c.close + Decimal("1000"),
+        )
+        for c in base
+    ]
+    parameter_set = _pivot_set()
+    assert strategy_module._resolve_regime_pivots(base, parameter_set) == "BULLISH"
+    assert strategy_module._resolve_regime_pivots(shifted, parameter_set) == "BULLISH"
+
+
+# Signal ids and plan hashes recorded from the pre-change commit (f8a5553) on the builders of
+# this file. The legacy Family C regime, detector and planner must keep producing them byte
+# for byte (D-25).
+_LEGACY_PINS = {
+    ("baseline-v1", "long"): (
+        "43765c0e8515ed1833bc1349185a20e791172ce0630c3ed7fa479216d9618144",
+        "d90a223225aa1a630cd360897867db8e68e3ed44b1a5d9958876b2d8feec01cf",
+    ),
+    ("baseline-v1", "short"): (
+        "3c7d6b97e46a34faa6c2a1b43afbd01f3f8269f9d9cc8c4662773a507a019cb5",
+        "3ace17e966ea9769058c6978c88250fcffc3715b840172ce61287baabfccdacb",
+    ),
+    ("baseline-v5", "long"): (
+        "0e53de0d48a163e7b1f7e5021d804337663584212e2d8a4ca6514e3048e3fccc",
+        "21e34b809d246d2da9285f96c984810c02a156682017e8d4411719253432d45a",
+    ),
+    ("baseline-v5", "short"): (
+        "c071fe023f2172014fbbbbf1106ba5c9febc6ad2d70b4eb05e4f736945ba9478",
+        "d8f472ffc0ee07fcf51575b185ce5461efb34ad9d656a95bbda0fb2af91d790c",
+    ),
+}
+
+
+@pytest.mark.parametrize(("version", "side"), sorted(_LEGACY_PINS))
+def test_legacy_unchanged_signal_id_and_plan_hash_match_the_pre_change_values(
+    version: str, side: str
+) -> None:
+    parameter_set = load_parameter_set("range-mr", version)
+    assert "geometry_version" not in parameter_set.params
+    setup = (
+        _build_1h_candles_range_mr_long() if side == "long" else _build_1h_candles_range_mr_short()
+    )
+    result = _evaluate((setup, _build_4h_candles_neutral()), parameter_set)
+    assert not result.is_no_trade, result.reason_code
+    assert result.signal is not None
+    signal_id, plan_hash = _LEGACY_PINS[(version, side)]
+    assert result.signal.signal_id == signal_id
+    planned = plan(
+        signal=result.signal,
+        setup_candles=setup,
+        parameter_set=parameter_set,
+        account_state=_ACCOUNT,
+        created_at_utc=result.signal.source_candle_close_utc + timedelta(hours=1),
+    )
+    assert planned.trade_plan is not None
+    assert planned.trade_plan.plan_hash == plan_hash
+
+
+def test_legacy_regime_still_requires_exact_ema50_equality() -> None:
+    """A set without geometry_version ignores the pivots: a contracting window is not NEUTRAL."""
+    legacy = load_parameter_set("range-mr", "baseline-v5")
+    setup, context = geometry_builders.range_mr_long_window()
+    result = _evaluate((setup, context), legacy)
+    assert result.is_no_trade
+    assert result.reason_code == RejectionReason.NO_TRADE_REGIME.value
+    assert result.regime in {"BULLISH", "BEARISH"}
+    flat = geometry_builders.range_mr_long_flat_context_window()
+    assert not _evaluate(flat, legacy).is_no_trade
+    # The same 1h window with the pivot regime set reaches NEUTRAL on the contracting window.
+    corrected = _evaluate((setup, context), _pivot_set())
+    assert not corrected.is_no_trade, corrected.reason_code
+    assert corrected.regime == "NEUTRAL"
+
+
+def test_legacy_wrapper_agrees_with_the_levels_function() -> None:
+    parameter_set = load_parameter_set("range-mr", "baseline-v5")
+    candles = _build_1h_candles_range_mr_long()
+    wrapper = strategy_module._detect_range_mr_setup(
+        setup_candles=candles, parameter_set=parameter_set
+    )
+    levels = strategy_module._detect_range_mr_levels(
+        setup_candles=candles, parameter_set=parameter_set
+    )
+    assert wrapper is not None and levels is not None
+    assert wrapper == (levels.direction, levels.setup_type, levels.zone_upper, levels.zone_lower)
+    assert levels.sr_far_edge is None
+
+
+def test_families_a_and_b_keep_the_ema50_regime_with_geometry_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-22: only range-mr switches to the pivot regime; A stays on the EMA50 proxy."""
+
+    def _forbidden(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("pivot regime used outside range-mr")
+
+    monkeypatch.setattr(strategy_module, "_resolve_regime_pivots", _forbidden)
+    base = load_parameter_set("trend-pullback", "baseline-v5")
+    params = dict(base.params)
+    params.update(
+        {
+            "zone_tolerance_atr": Decimal("0.5"),
+            "swing_lookback": 20,
+            "pivot_left_bars": 3,
+            "pivot_right_bars": 3,
+            "geometry_version": 1,
+        }
+    )
+    result = _evaluate(
+        geometry_builders.family_a_long_window(), dataclasses.replace(base, params=params)
+    )
+    assert not result.is_no_trade, result.reason_code
+    assert result.regime == "BULLISH"
