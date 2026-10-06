@@ -679,6 +679,7 @@ def test_freeze_v5_set_pins_and_refuses_seven_key_model() -> None:
 
     opened = datetime(2026, 9, 19, 10, 0, tzinfo=UTC)
     epoch = pin_stream_epoch(
+        allow_unrationalized=True,
         strategy_id="trend-pullback",
         parameter_set_id="baseline-v5",
         opened_at_utc=opened,
@@ -693,6 +694,7 @@ def test_freeze_v5_set_pins_and_refuses_seven_key_model() -> None:
     }
     with pytest.raises(CostModelBindingMismatch):
         pin_stream_epoch(
+            allow_unrationalized=True,
             strategy_id="trend-pullback",
             parameter_set_id="baseline-v5",
             opened_at_utc=opened,

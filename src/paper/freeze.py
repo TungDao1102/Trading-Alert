@@ -344,6 +344,7 @@ def pin_stream_epoch(
     opened_at_utc: datetime,
     cost_model: CostModel | None = None,
     registry_root: Path | None = None,
+    allow_unrationalized: bool = False,
 ) -> StreamEpoch:
     """Pin a parameter set at stream start (D-04).
 

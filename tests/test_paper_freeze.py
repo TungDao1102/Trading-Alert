@@ -120,6 +120,7 @@ def test_pin_stream_epoch_returns_pinned_tuple_on_clean_registry() -> None:
     opened_at_utc = _parse_utc(case_input["opened_at_utc"])
 
     epoch = pin_stream_epoch(
+        allow_unrationalized=True,
         strategy_id=case_input["strategy_id"],
         parameter_set_id=case_input["parameter_set_id"],
         opened_at_utc=opened_at_utc,
@@ -176,6 +177,7 @@ def test_pin_stream_epoch_raises_cost_model_binding_mismatch_on_mismatch() -> No
 
     with pytest.raises(CostModelBindingMismatch):
         pin_stream_epoch(
+            allow_unrationalized=True,
             strategy_id="trend-pullback",
             parameter_set_id="baseline-v3",
             opened_at_utc=datetime(2026, 9, 19, 10, 0, tzinfo=UTC),
@@ -211,6 +213,7 @@ def test_check_registry_unchanged_appends_clean_entry_and_keeps_epoch(
 
     # Pin against the real registry.
     pinned_epoch = pin_stream_epoch(
+        allow_unrationalized=True,
         strategy_id=case_input["strategy_id"],
         parameter_set_id=case_input["parameter_set_id"],
         opened_at_utc=opened_at_utc,
@@ -274,6 +277,7 @@ def test_check_registry_unchanged_opens_new_epoch_on_diff(tmp_path: Path) -> Non
 
     # Pin epoch 1 against the tmp registry (untouched).
     pinned_epoch = pin_stream_epoch(
+        allow_unrationalized=True,
         strategy_id=case_input["strategy_id"],
         parameter_set_id=case_input["parameter_set_id"],
         opened_at_utc=opened_at_utc_epoch1,
@@ -355,6 +359,7 @@ def test_pin_stream_epoch_propagates_keyerror_for_missing_cost_keys() -> None:
 
     with pytest.raises(KeyError):
         pin_stream_epoch(
+            allow_unrationalized=True,
             strategy_id="trend-pullback",
             parameter_set_id="baseline-v2",
             opened_at_utc=datetime(2026, 9, 19, 10, 0, tzinfo=UTC),
@@ -410,6 +415,7 @@ def test_cli_check_appends_clean_diff_log_entry(tmp_path: Path) -> None:
     from src.paper.freeze import pin_stream_epoch
 
     real_epoch = pin_stream_epoch(
+        allow_unrationalized=True,
         strategy_id=case_input["strategy_id"],
         parameter_set_id=case_input["parameter_set_id"],
         opened_at_utc=_parse_utc(case_input["opened_at_utc"]),
@@ -439,3 +445,77 @@ def test_cli_check_appends_clean_diff_log_entry(tmp_path: Path) -> None:
     assert entry["outcome"] == "clean"
     assert entry["pinned_hash"] == real_epoch.parameter_set_hash
     assert entry["current_hash"] == real_epoch.parameter_set_hash
+
+
+# --------------------------------------------------------------------------- #
+# Plan 15-02 - pin_stream_epoch refuses unrationalized and PLACEHOLDER sets
+# (D-16, D-27, T-15-02). The strict default is the contract; the flag exists
+# only for tests that pin legacy sets.
+# --------------------------------------------------------------------------- #
+
+
+def test_pin_stream_epoch_pins_a_fully_rationalized_set(tmp_path: Path) -> None:
+    from src.paper.freeze import pin_stream_epoch
+
+    from tests.test_rationale import write_rationalized_set
+
+    write_rationalized_set(tmp_path)
+    epoch = pin_stream_epoch(
+        strategy_id="trend-pullback",
+        parameter_set_id="baseline-v5",
+        opened_at_utc=datetime(2026, 10, 6, 10, 0, tzinfo=UTC),
+        registry_root=tmp_path,
+    )
+    assert epoch.parameter_set_id == "baseline-v5"
+    assert epoch.evidence_claim_open is True
+
+
+def test_pin_stream_epoch_refuses_placeholder_key_and_names_it(tmp_path: Path) -> None:
+    from src.domain.rationale import UnrationalizedParameterSet
+    from src.paper.freeze import pin_stream_epoch
+
+    from tests.test_rationale import write_rationalized_set
+
+    write_rationalized_set(tmp_path, placeholder_key="sl_buffer_atr")
+    with pytest.raises(UnrationalizedParameterSet) as excinfo:
+        pin_stream_epoch(
+            strategy_id="trend-pullback",
+            parameter_set_id="baseline-v5",
+            opened_at_utc=datetime(2026, 10, 6, 10, 0, tzinfo=UTC),
+            registry_root=tmp_path,
+        )
+    assert "sl_buffer_atr" in str(excinfo.value)
+    assert "baseline-v5" in str(excinfo.value)
+
+
+def test_pin_stream_epoch_refuses_set_without_rationale(tmp_path: Path) -> None:
+    from src.domain.rationale import UnrationalizedParameterSet
+    from src.paper.freeze import pin_stream_epoch
+
+    from tests.test_rationale import write_set
+
+    write_set(tmp_path, spec=None)
+    with pytest.raises(UnrationalizedParameterSet) as excinfo:
+        pin_stream_epoch(
+            strategy_id="trend-pullback",
+            parameter_set_id="baseline-v5",
+            opened_at_utc=datetime(2026, 10, 6, 10, 0, tzinfo=UTC),
+            registry_root=tmp_path,
+        )
+    assert "missing" in str(excinfo.value)
+
+
+def test_pin_stream_epoch_allow_unrationalized_pins_legacy_set(tmp_path: Path) -> None:
+    from src.paper.freeze import pin_stream_epoch
+
+    from tests.test_rationale import write_set
+
+    write_set(tmp_path, spec=None)
+    epoch = pin_stream_epoch(
+        strategy_id="trend-pullback",
+        parameter_set_id="baseline-v5",
+        opened_at_utc=datetime(2026, 10, 6, 10, 0, tzinfo=UTC),
+        registry_root=tmp_path,
+        allow_unrationalized=True,
+    )
+    assert epoch.parameter_set_id == "baseline-v5"
