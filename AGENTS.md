@@ -170,6 +170,14 @@ A deterministic, reproducible Binance Futures trading research and semi-automate
 | pytest 9 + pytest-asyncio (auto mode) | Python 3.13 | pytest 8 EOL in plugin ecosystem (pytest-httpx 0.36 requires 9). Do not mix pytest-asyncio with anyio in the same suite |
 | PostgreSQL 17-bookworm image | SQLAlchemy/psycopg/Alembic above | pgvector-style extensions NOT needed in V1; keep the image stock |
 
+## Installed State (uv.lock, checked 2026-10-06)
+
+The tables above are the recommended stack; `pyproject.toml` and `uv.lock` are the installed truth. When they disagree, the lockfile wins for versions and this section wins for what is adopted.
+
+- **Pinned in the lockfile:** Python 3.13.15, uv 0.12.21, `binance-sdk-derivatives-trading-usds-futures` 17.4.0, SQLAlchemy 2.0.54, psycopg 3.3.6, Alembic 1.20.0, Pydantic 2.13.5 (+ pydantic-settings 2.15.0), Polars 1.44.2, pyarrow 25.0.1, DuckDB 1.5.5, httpx 0.28.1, python-telegram-bot 22.8, tenacity 9.1.4, structlog 26.1.0; dev: pytest 9.1.1, pytest-asyncio 1.4.0, respx 0.23.1, ruff 0.16.8, mypy 2.3.1. PostgreSQL image is `postgres:17.11-bookworm` (digest-pinned).
+- **Recommended but NOT installed yet:** pandas, NumPy, SciPy, VectorBT, FastAPI, uvicorn. Nothing in `src/` imports them; the TradingView webhook edge is not built. Add them only through `uv add` with the lockfile updated in the same change.
+- **Parameter files** are TOML under `params/<family>/`, so no PyYAML/tomli dependency exists.
+
 ## Sources
 
 - PyPI `binance-sdk-derivatives-trading-usds-futures` (17.2.1 listing; GitHub releases to v17.3.1, Sep 10 2026) + USDⓈ-M Futures SDK README (REST/WS API/WS Streams, Python 3.10+) — HIGH
@@ -187,14 +195,23 @@ A deterministic, reproducible Binance Futures trading research and semi-automate
 
 ## Conventions
 
-Conventions not yet established. Will populate as patterns emerge during development.
+- Commands (the same ones CI runs): `uv sync --frozen --extra dev`, `uv run pytest -m "not docker"`, `uv run ruff check`, `uv run ruff format --check`, `uv run mypy src`, `uv lock --check`. Live-PostgreSQL tests need `TEST_DATABASE_URL` and skip without it.
+- Ruff line length 100; mypy strict on `src`; pytest `asyncio_mode = "auto"`.
+- Money-sensitive values use `Decimal`; the pure core (`src/core`) imports only stdlib and `Decimal`.
+- Parameter sets are versioned TOML files that are hash-locked: an existing set is never edited in place; a behavior change ships as a new set plus a new `strategy_version`.
+- Every parameter value carries a provenance label (STRUCTURAL, COST_GUARD, DECISION, EXPERIMENT or PLACEHOLDER); a value is never chosen or tuned from backtest results.
+- Decisions live in `docs/DECISIONS.md`; when sources conflict the order is DECISIONS.md > `docs/` > AGENTS.md > `.planning/` (D031).
 <!-- GSD:conventions-end -->
 
 <!-- GSD:architecture-start source:ARCHITECTURE.md -->
 
 ## Architecture
 
-Architecture not yet mapped. Follow existing patterns found in the codebase.
+- `src/core`: pure deterministic features, `evaluate` and `plan` (no Polars, pandas, NumPy, Pydantic or SDK imports).
+- `src/domain`: entities, enums, canonical serialization and the parameter registry. `src/risk`: sizing, cost guards, quantization, portfolio gates.
+- `src/backtest`: project-owned closed-candle simulator (costs, funding, mark-price triggers). `src/paper`: paper loop and freeze. `src/analytics`: research metrics and the kill-gate report. `src/data`: collectors and Parquet datasets.
+- `src/execution`, `src/approval`, `src/reconcile`: human-approved order placement, approval tokens and replay, exchange reconciliation. `src/adapters`: Binance and Telegram behind project interfaces. `src/persistence`, `src/db`, `src/sql`: PostgreSQL state and migrations. `src/ops`: backup, cutover, health.
+- `params/<family>/`: parameter sets for `trend-pullback`, `breakout-retest` and `range-mr`. `docs/`: canonical specs. `.planning/`: GSD phases, roadmap and state.
 <!-- GSD:architecture-end -->
 
 <!-- GSD:skills-start source:skills/ -->

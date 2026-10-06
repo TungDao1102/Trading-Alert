@@ -163,6 +163,14 @@ uv add --dev pytest "pytest-asyncio>=1" respx ruff mypy pre-commit
 | pytest 9 + pytest-asyncio (auto mode) | Python 3.13 | pytest 8 EOL in plugin ecosystem (pytest-httpx 0.36 requires 9). Do not mix pytest-asyncio with anyio in the same suite |
 | PostgreSQL 17-bookworm image | SQLAlchemy/psycopg/Alembic above | pgvector-style extensions NOT needed in V1; keep the image stock |
 
+## Installed State (uv.lock, checked 2026-10-06)
+
+The tables above are the recommended stack; `pyproject.toml` and `uv.lock` are the installed truth. When they disagree, the lockfile wins for versions and this section wins for what is adopted.
+
+- **Pinned in the lockfile:** Python 3.13.15, uv 0.12.21, `binance-sdk-derivatives-trading-usds-futures` 17.4.0, SQLAlchemy 2.0.54, psycopg 3.3.6, Alembic 1.20.0, Pydantic 2.13.5 (+ pydantic-settings 2.15.0), Polars 1.44.2, pyarrow 25.0.1, DuckDB 1.5.5, httpx 0.28.1, python-telegram-bot 22.8, tenacity 9.1.4, structlog 26.1.0; dev: pytest 9.1.1, pytest-asyncio 1.4.0, respx 0.23.1, ruff 0.16.8, mypy 2.3.1. PostgreSQL image is `postgres:17.11-bookworm` (digest-pinned).
+- **Recommended but NOT installed yet:** pandas, NumPy, SciPy, VectorBT, FastAPI, uvicorn. Nothing in `src/` imports them; the TradingView webhook edge is not built. Add them only through `uv add` with the lockfile updated in the same change.
+- **Parameter files** are TOML under `params/<family>/`, so no PyYAML/tomli dependency exists.
+
 ## Sources
 
 - PyPI `binance-sdk-derivatives-trading-usds-futures` (17.2.1 listing; GitHub releases to v17.3.1, Sep 10 2026) + USDⓈ-M Futures SDK README (REST/WS API/WS Streams, Python 3.10+) — HIGH

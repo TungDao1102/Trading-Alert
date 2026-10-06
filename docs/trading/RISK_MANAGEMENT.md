@@ -57,7 +57,7 @@ Cost rates and guards (Phase 12, D046):
 - All fee and slippage rates are decimal fractions (0.0005 is 5 basis points); the loader rejects any rate above 0.01 as a unit error.
 - Exit slippage: stop-market exits fill worse than limits, so `exit_slippage_rate` (baseline 0.0003) is applied to SL and EOD exits; entry and TP1 use `expected_slippage`. Slippage is booked per leg as price x quantity x rate.
 - `STOP_TOO_TIGHT`: the stop distance divided by the sizing entry is below `min_stop_distance_rate` (baseline 0.003).
-- `COST_TO_RISK_EXCEEDED`: the round-trip modeled cost divided by `risk_per_unit` is above `max_cost_to_risk` (baseline 0.15). At the modeled round trip of about 14 basis points this ceiling implies a minimum stop of about 0.79 percent of price, above the 0.3 percent floor; the ceiling is the binding gate (D046 item 6, ratification pending).
+- `COST_TO_RISK_EXCEEDED`: the round-trip modeled cost divided by `risk_per_unit` is above `max_cost_to_risk` (baseline 0.15). At the modeled round trip of about 14 basis points this ceiling implies a minimum stop of about 0.79 percent of price, above the 0.3 percent floor; the ceiling is the binding gate (D046 item 6, ratified by the operator on 2026-10-04).
 - Both guards are evaluated before quantization and reject with the codes above.
 - Funding (protocol v2.0.0, D052): in the simulator `funding_pnl = -sign(position) x open_quantity x markPrice(fundingTime) x fundingRate`, charged at every actual `fundingTime` with `entry_time <= fundingTime < exit_time` (sign +1 LONG, -1 SHORT, so a LONG pays when the rate is positive and receives when it is negative). The open quantity is the quantity open at that `fundingTime` (the post-TP1 remainder after a TP1). The mark price comes from the funding-history row, else from the mark kline of that minute. Funding is included in net PnL and in R (it also counts toward the daily loss, section 8) and is excluded from position sizing, so the quantity is never reduced to pre-pay it. A holding window without funding coverage fails closed unless an allowed gap is recorded. The 15-second grace around `fundingTime` that the exchange describes is not modeled.
 - Live commission: the rate per side is the larger of the parameter and the account taker rate from `GET /fapi/v1/commissionRate` (fee_source `ACCOUNT_MAX`); the BNB discount is ignored. An unknown, stale or malformed account rate is NO_TRADE with `UNCERTAIN_ACCOUNT_STATE`, never zero and never a silent fallback to the parameter. Backtest and paper use the versioned fees.
@@ -68,7 +68,7 @@ Initial research placeholders:
 
 - max open positions: `2`
 - max aggregate open risk: `1.0%`
-- max risk for one correlated cluster: `TBD`
+- max risk for one correlated cluster: `cluster_cap`, research placeholder `0.5%` (registry value 0.005, not yet validated)
 - daily loss: warning 0.5% and stop 1.0% of equity at the UTC day start, registry keys `daily_loss_warning_threshold` and `daily_loss_stop_threshold`; defined in section 8 (D033)
 
 These are to be validated by research and simulation.
@@ -147,6 +147,8 @@ Canonical order (D031): floor to stepSize, then reject below min quantity (MIN_Q
 The two cost guards of section 3 (`STOP_TOO_TIGHT`, `COST_TO_RISK_EXCEEDED`) run before this quantization order and do not change it.
 
 This is the one order implemented in `src/risk/quantization.py`; AGENTS.md, PROJECT.md and the research protocol restate it by pointer (D031).
+
+Provenance: D031 is the source-of-authority rule that makes this section the single statement of the order when documents conflicted; it does not set any numeric value. The 60% baseline is a research parameter from this section, not a D031 value, and it is not evidence-backed.
 
 Algorithm:
 
