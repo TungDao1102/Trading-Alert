@@ -179,7 +179,7 @@ def test_universal_invariants_section_lists_reasons_and_order() -> None:
 # --------------------------------------------------------------------------- #
 
 SHEETS_ROOT = REPO_ROOT / "docs" / "research" / "families"
-SHEET_FAMILIES = ("trend-pullback",)
+SHEET_FAMILIES = ("trend-pullback", "breakout-retest", "range-mr")
 IMPLEMENTED_AS = "Implemented as (Phase 15, D054)"
 BASELINE_LINE = re.compile(r"^- Stage [ABC] baseline implemented: (?P<value>.+)$", re.MULTILINE)
 VARIANTS_LINE = re.compile(
@@ -216,8 +216,8 @@ def check_sheet(text: str) -> list[str]:
     return problems
 
 
-def test_sheet_families_cover_the_registry_families_checked_so_far() -> None:
-    assert set(SHEET_FAMILIES) <= {"trend-pullback", "breakout-retest", "range-mr"}
+def test_sheet_check_covers_all_three_families() -> None:
+    assert SHEET_FAMILIES == ("trend-pullback", "breakout-retest", "range-mr")
 
 
 def test_family_sheets_record_the_implemented_geometry_and_stay_not_frozen() -> None:
@@ -235,3 +235,28 @@ def test_sheet_check_detects_a_frozen_status_a_missing_record_and_a_flipped_vari
     assert any("baseline implemented line lacks" in p for p in check_sheet(no_baseline))
     flipped = VARIANTS_LINE.sub(lambda m: f"- {m.group('names')}: `YES`", text)
     assert any("no longer ends in `NO`" in p for p in check_sheet(flipped))
+
+
+def test_glossary_states_the_planner_meanings_without_touching_the_enum_block() -> None:
+    text = (REPO_ROOT / "docs" / "GLOSSARY.md").read_text(encoding="utf-8").replace("\r\n", "\n")
+    assert "Phase 15 planner meanings (D054, D-27)" in text
+    assert "min_stop_atr" in text
+    block = re.search(r"### 9\.1 Canonical codes\n\n```text\n(.*?)```", text, re.DOTALL)
+    assert block is not None
+    assert len(block.group(1).split()) == 20
+
+
+def test_configuration_documents_the_phase15_keys_and_current_sets() -> None:
+    path = REPO_ROOT / "docs" / "configuration" / "CONFIGURATION.md"
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    assert "Phase 15 geometry keys (D054)" in text
+    for key in (
+        "pivot_left_bars",
+        "pivot_right_bars",
+        "geometry_version",
+        "tp_mode",
+        "min_stop_atr",
+    ):
+        assert f"| `{key}` |" in text, key
+    for set_id in ("baseline-v6", "baseline-no-trade-v4", "baseline-simple-trend-v4", "v5.0.0"):
+        assert set_id in text, set_id

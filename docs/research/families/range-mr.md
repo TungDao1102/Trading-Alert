@@ -94,6 +94,18 @@ The full cross-product is intentionally **not** enumerated here — that is the 
 
 Selection-implying adjectives are intentionally absent — see `## V1 family selection` footer below.
 
+### 3.2 Implemented as (Phase 15, D054)
+
+This paragraph records what the code does for the Stage C baseline row, where it differs from the sheet, and where the record lives. It is an implementation record, not evidence: the sheet stays a hypothesis and no value below is claimed to be evidence-backed.
+
+- **Set and versions.** `params/range-mr/baseline-v6.toml`, `strategy_version` v5.0.0, `geometry_version` 1, `tp_mode` T_MID (STRUCTURAL). Every parameter carries a basis in the in-file rationale table; the pivot widths 3 and 3, `min_stop_atr` 0.5, the range, touch, aging, buffer and `minimum_rr` values are labelled PLACEHOLDER, so the set is research-only.
+- **Regime (D-22).** The filter is ON: NEUTRAL means neither higher highs with higher lows nor lower highs with lower lows on the confirmed 4H pivots (`pivot_left_bars` / `pivot_right_bars`) inside the last `regime_filter_lookback` 4H bars, closed bars only, evaluated at the last closed 4H bar. Fewer than two pivots of either kind is NO_TRADE, never a default. The earlier EMA50 equality test could not be satisfied in practice and is not used when `geometry_version` is present. This reads `regime_filter_lookback` as the pivot window of one verdict at the last closed 4H bar; the sheet's binding rule 2 (every closed 4H bar over the lookback returns `range`) is therefore only approximated, a recorded deviation.
+- **Range and touches (deviation).** The range edges are the trailing `swing_lookback` high and low taken at the bar before the evaluated bar (one level per side, not merged zones). A touch is a bar whose high or low lies within `touch_tolerance_atr x ATR` of an edge; the setup needs `zone_min_touches` earlier touches with the newest inside `zone_aging_bars`, and a close beyond an edge by `range_break_buffer_atr x ATR` invalidates the range. The evaluated bar's low (LONG, lower edge) or high (SHORT, upper edge) must touch the near edge (P1). Range construction stays as implemented and is recorded in D054.
+- **Entry.** E2: the entry zone is the touched range edge plus or minus `entry_buffer_atr x ATR`.
+- **Stop (S3, D-23).** Beyond the far edge of the narrow S/R zone around the touched edge (the edge minus or plus `zone_tolerance_atr x ATR`), then `sl_buffer_atr x ATR` further out. Shared planner invariants apply: the stop is strictly outside the whole entry zone, the signal bar has not already traded through it (INVALIDATED), and `abs(entry reference - stop) >= min_stop_atr x ATR`.
+- **Target.** TP1 is the range midpoint through `tp_mode` T_MID, the sheet's Stage C baseline (D-10). T-opposite (the opposite boundary, variants C-tp-opposite and C-direction-2) stays the named variant behind `tp_mode` T_OPPOSITE and needs its own parameter set; no set in this phase uses it.
+- **Where the deviations are recorded.** D054 in `docs/DECISIONS.md` and the Family C rows of `docs/research/GEOMETRY_AUDIT.md` (D-22, D-23, D-10, D-14, D-25).
+
 ## 4. Advantages / Disadvantages
 
 ### 4.1 Why this family might earn backtest admission
@@ -244,7 +256,7 @@ Family A's Q1 (trend definition), Family A's Q5–Q7 (entry/SL/TP method codes),
 
 ## Acceptance status
 
-- Stage C baseline implemented: `NO`
+- Stage C baseline implemented: `AS RECORDED` (baseline-v6, deviations in D054)
 - C-filter-off / C-pullback-1…4 / C-tp-opposite / C-direction-2 variants implemented: `NO`
 - Backtested on the same split as Families A and B: `NO`
 - Out-of-sample validated: `NO`

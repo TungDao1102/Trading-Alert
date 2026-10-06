@@ -195,5 +195,20 @@ Phase 12 cost keys (D046):
 - Fee and slippage rates above 0.01 are rejected at load as unit errors (rates are decimal fractions, not basis points).
 - Runtime configuration must not reuse these key names.
 - The keys are optional in parameter sets that predate Phase 12 and required by the simulator and sizing; legacy sets are refused for sizing and simulation rather than defaulted.
-- The current sets are `baseline-v5` (three families), `baseline-no-trade-v3` and `baseline-simple-trend-v3` at `strategy_version` v4.0.0; the older `baseline-v4` sets stay unchanged and hash-locked.
+- The current sets are `baseline-v6` (three families), `baseline-no-trade-v4` and `baseline-simple-trend-v4` at `strategy_version` v5.0.0; the older sets (`baseline-v5`, `baseline-v4`, `baseline-no-trade-v3`, `baseline-simple-trend-v3` and earlier) stay unchanged and hash-locked.
 - `exit_slippage_rate` joins `cost_model_hash` by presence, so v5 sets carry an eight-key cost identity and older sets keep their seven-key identity (D047).
+
+Phase 15 geometry keys (D054):
+
+| Key | Type | Unit | Constraint | Read by |
+|-----|------|------|------------|---------|
+| `pivot_left_bars` | integer | bars | 1 to 50; given together with `pivot_right_bars`, never alone; needs `geometry_version` | trend-pullback and range-mr only |
+| `pivot_right_bars` | integer | bars | 1 to 50; given together with `pivot_left_bars`; `pivot_right_bars` + 1 must not exceed `swing_lookback`; needs `geometry_version` | trend-pullback and range-mr only |
+| `geometry_version` | integer | none | closed set {1}; absent means the legacy behavior; in a trend-pullback or range-mr set it needs both pivot keys, and in a range-mr set also `tp_mode` | all three families |
+| `tp_mode` | string | none | `T_MID` or `T_OPPOSITE`; needs `geometry_version` | range-mr only |
+| `min_stop_atr` | Decimal | multiple of ATR | greater than 0 and at most 10 | any family (shared planner stop invariant) |
+
+- Runtime configuration must not reuse these key names.
+- A breakout-retest set takes no pivot keys; it reads `geometry_version` for the with-direction gate, the evaluated-bar anchoring and the narrow-zone stop.
+- `geometry_version` is the switch for the corrected geometry: sets that omit it keep the legacy behavior byte for byte, and the older sets stay hash-locked.
+- Values of these keys in a set are recorded with a basis in the set's in-file rationale table; a PLACEHOLDER basis keeps the set research-only and is not evidence.

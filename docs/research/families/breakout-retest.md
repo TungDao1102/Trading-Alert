@@ -90,6 +90,19 @@ The full cross-product is intentionally **not** enumerated here — that is the 
 
 Selection-implying adjectives are intentionally absent — see `## V1 family selection` footer below.
 
+### 3.2 Implemented as (Phase 15, D054)
+
+This paragraph records what the code does for the Stage B baseline row, where it differs from the sheet, and where the record lives. It is an implementation record, not evidence: the sheet stays a hypothesis and no value below is claimed to be evidence-backed.
+
+- **Set and versions.** `params/breakout-retest/baseline-v6.toml`, `strategy_version` v5.0.0, `geometry_version` 1. Every parameter carries a basis in the in-file rationale table; `breakout_confirmation_bars` is 1 (STRUCTURAL, sheet B1), `min_stop_atr` 0.5 and the zone, buffer, retest-window, retest-depth and `minimum_rr` values are labelled PLACEHOLDER, so the set is research-only.
+- **Regime and direction.** The 4H regime is the EMA50 proxy (BULLISH when the last closed 4H close is above the EMA50, BEARISH when below), a deviation from the R1 structure-only regime that the sheet's Q1 pointer names (D-22, recorded in D054). The breakout direction must equal the regime direction (section 2.4, with-direction only); a counter-trend breakout produces no signal.
+- **Breakout.** `breakout_confirmation_bars` consecutive closes beyond the zone edge, with the value 1: one close outside the zone, which equals B1. The earlier registry value 3 matched no sheet row and is not used by this set. The zone edge is the trailing `swing_lookback` extreme plus (LONG) or minus (SHORT) `zone_tolerance_atr x ATR`, both taken at the bar before the earliest confirmation bar, so the breakout bars never feed their own reference level.
+- **Retest (deviation from R1) and anchoring.** The retest is a bar whose low (LONG) or high (SHORT) lies within `retest_depth_atr x ATR` of the broken edge, found after the breakout and within `retest_window_bars`; the sheet's R1 reads "the bar low is inside the broken zone", so the band rule is a recorded deviation. The first such retest after the breakout must be the evaluated bar itself; an older retest produces no signal (D-24).
+- **Entry.** E2: the entry zone is the broken edge plus or minus `entry_buffer_atr x ATR`.
+- **Stop (S3, D-23).** Beyond the far edge of the narrow broken S/R zone (the swing level minus or plus `zone_tolerance_atr x ATR`), then `sl_buffer_atr x ATR` further out. The decision basis recorded in D054 is the sheet text alone (section 2.2 zone bounds, Q6, section 6 parameter rows). Shared planner invariants apply: the stop is strictly outside the whole entry zone, the signal bar has not already traded through it (INVALIDATED), and `abs(entry reference - stop) >= min_stop_atr x ATR`.
+- **Target (deviation from T1).** TP1 is the measured move: the broken edge plus or minus the range height (zone upper minus zone lower). A target built from `minimum_rr` would make the RR gate vacuous (CR-03), so `minimum_rr` stays an acceptance threshold only.
+- **Where the deviations are recorded.** D054 in `docs/DECISIONS.md` and the Family B rows of `docs/research/GEOMETRY_AUDIT.md` (D-22, D-14, D-23, D-24, D-25).
+
 ## 4. Advantages / Disadvantages
 
 ### 4.1 Why this family might earn backtest admission
@@ -242,7 +255,7 @@ Family A's Q1 (trend definition) is NOT directly answered here — Family B inhe
 
 ## Acceptance status
 
-- Stage B baseline implemented: `NO`
+- Stage B baseline implemented: `AS RECORDED` (baseline-v6, deviations in D054)
 - B-retest-* / B-direction-* / B-breakout-4 / B-counter-trend variants implemented: `NO`
 - Backtested on the same split as Families A and C: `NO`
 - Out-of-sample validated: `NO`

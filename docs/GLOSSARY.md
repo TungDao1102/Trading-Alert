@@ -180,6 +180,8 @@ COST_TO_RISK_EXCEEDED
 
 `STOP_TOO_TIGHT` means the stop distance divided by the sizing entry price is below the registry `min_stop_distance_rate`; `COST_TO_RISK_EXCEEDED` means the round-trip modeled cost divided by `risk_per_unit` is above the registry `max_cost_to_risk`. Both are emitted before quantization (D-07).
 
+Phase 15 planner meanings (D054, D-27): the planner reuses three existing codes for its geometry invariants, checked in this fixed order with the invariants before the RR gate. `STOP_TOO_TIGHT` also means the stop is not strictly outside the whole entry zone (a LONG stop at or above the lower edge of the zone, a SHORT stop at or below its upper edge), or the distance from the entry reference to the stop is closer than `min_stop_atr` x ATR when that key is present. `INVALIDATED` also means the signal bar has already traded through the planned stop (a LONG bar low at or below the stop, a SHORT bar high at or above it). `RR_TOO_LOW` also means TP1 is not on the profit side of the entry reference, which is checked before the `minimum_rr` threshold. No new member was added for these cases.
+
 ### 9.2 Retired aliases (removed in Phase 12)
 
 These five names were removed from `RejectionReason` and from `tests/test_domain_enums.py` in Phase 12 (D-09, D044 follow-up 1). New code must use the replacement. The table records the removal only: it declares no enum member, and gates GL-01 and GL-03 fail if a retired name re-enters the enum or the 9.1 block. The 9.1 block equals the `RejectionReason` enum (20 members, gate GL-03).
