@@ -126,6 +126,20 @@ STRATEGY_KEYS = frozenset(
         "min_stop_distance_rate",
         "max_cost_to_risk",
         "commission_rate_ttl_seconds",
+        # Phase 15 (D-02, D-08, D-25). Optional: absent in sets that predate Phase 15, so
+        # every older set keeps loading and keeps its parameter_set_hash.
+        #   pivot_left_bars, pivot_right_bars  fractal pivot widths L and R (D-02)
+        #   geometry_version                   selects the corrected geometry; absent means the
+        #                                      legacy path byte for byte (D-25)
+        #   tp_mode                            Family C take-profit: T_MID or T_OPPOSITE (D-10)
+        #   min_stop_atr                       minimum |entry_ref - stop| in ATR (D-08)
+        # NOTE: check_strategy_key_outside_registry rejects ambient config named after these
+        # keys; runtime configuration must use other names.
+        "pivot_left_bars",
+        "pivot_right_bars",
+        "geometry_version",
+        "tp_mode",
+        "min_stop_atr",
     }
 )
 
@@ -144,6 +158,14 @@ MAX_RATE = Decimal("0.01")
 # CONTRACT_PRICE would hash a claim the engine ignores. Widen only together with the
 # consumers (roadmap phases 14 and 19).
 WORKING_TYPE_VALUES = frozenset({"MARK_PRICE"})
+
+# Phase 15 closed sets and bounds. geometry_version 1 is the only corrected geometry that
+# exists; a value no code path implements must not load. The pivot width ceiling is a sanity
+# bound (PROPOSED, RESEARCH A8), not a tuned value; min_stop_atr is a multiple of ATR.
+GEOMETRY_VERSION_VALUES = frozenset({1})
+TP_MODE_VALUES = frozenset({"T_MID", "T_OPPOSITE"})
+PIVOT_WIDTH_MAX = 50
+MIN_STOP_ATR_MAX = Decimal(10)
 
 
 class UnregisteredParameterSet(Exception):
@@ -299,6 +321,10 @@ INT_KEYS = frozenset(
         "constraint_snapshot_ttl_seconds",
         # Phase 12 (D-11): commission-rate freshness window, seconds.
         "commission_rate_ttl_seconds",
+        # Phase 15 (D-02, D-25): pivot widths and the geometry selector.
+        "pivot_left_bars",
+        "pivot_right_bars",
+        "geometry_version",
     }
 )
 # Phase 6 plan 06-02 — string-valued cost-model keys (D-02 + Pitfall 7).
@@ -311,6 +337,8 @@ STRING_KEYS = frozenset(
         "slippage_model",
         "spread_fill_assumptions",
         "working_type",
+        # Phase 15 (D-10): Family C take-profit mode.
+        "tp_mode",
     }
 )
 DECIMAL_KEYS = STRATEGY_KEYS - INT_KEYS - STRING_KEYS
@@ -351,6 +379,24 @@ def _check_value_range(key: str, value: Any, path: Path) -> None:
         raise StrategyKeyOutsideRegistry(
             f"{path}: parameter {key!r} = {value} must be greater than 0 seconds (D-11)"
         )
+    elif key in ("pivot_left_bars", "pivot_right_bars"):
+        if not (1 <= number <= PIVOT_WIDTH_MAX):
+            raise StrategyKeyOutsideRegistry(
+                f"{path}: parameter {key!r} = {value} must be a bar count within "
+                f"1 and {PIVOT_WIDTH_MAX} inclusive (D-02)"
+            )
+    elif key == "geometry_version":
+        if value not in GEOMETRY_VERSION_VALUES:
+            raise StrategyKeyOutsideRegistry(
+                f"{path}: parameter {key!r} = {value} must be one of "
+                f"{sorted(GEOMETRY_VERSION_VALUES)} (D-25)"
+            )
+    elif key == "min_stop_atr":
+        if not (Decimal(0) < number <= MIN_STOP_ATR_MAX):
+            raise StrategyKeyOutsideRegistry(
+                f"{path}: parameter {key!r} = {value} must be within (0, {MIN_STOP_ATR_MAX}] "
+                f"as a multiple of ATR (D-08)"
+            )
 
 
 def _check_param_types(params: dict[str, Any], path: Path) -> None:
@@ -374,6 +420,11 @@ def _check_param_types(params: dict[str, Any], path: Path) -> None:
                     f"{path}: parameter 'working_type' must be one of "
                     f"{sorted(WORKING_TYPE_VALUES)}, got {value!r}"
                 )
+            if key == "tp_mode" and value not in TP_MODE_VALUES:
+                raise StrategyKeyOutsideRegistry(
+                    f"{path}: parameter 'tp_mode' must be one of "
+                    f"{sorted(TP_MODE_VALUES)}, got {value!r}"
+                )
         elif key in DECIMAL_KEYS:
             if not isinstance(value, (int, Decimal)):
                 raise StrategyKeyOutsideRegistry(
@@ -381,6 +432,61 @@ def _check_param_types(params: dict[str, Any], path: Path) -> None:
                 )
         if key in INT_KEYS or key in DECIMAL_KEYS:
             _check_value_range(key, value, path)
+
+
+def _check_geometry_keys(params: dict[str, Any], path: Path, strategy_id: str) -> None:
+    """Raise StrategyKeyOutsideRegistry on inconsistent Phase 15 key combinations.
+
+    Runs after `_check_param_types`, so every present Phase 15 key is already typed and
+    ranged. Rules (family names are the registry directory names):
+      - the two pivot widths come together, and only with `geometry_version`;
+      - `pivot_right_bars + 1 <= swing_lookback` when both are present (a pivot needs room);
+      - breakout-retest takes no pivot keys;
+      - `tp_mode` belongs to range-mr and needs `geometry_version`;
+      - `geometry_version` in trend-pullback or range-mr needs both pivot widths, and in
+        range-mr also `tp_mode`.
+    """
+    has_left = "pivot_left_bars" in params
+    has_right = "pivot_right_bars" in params
+    has_geometry = "geometry_version" in params
+    has_tp_mode = "tp_mode" in params
+
+    if has_left != has_right:
+        raise StrategyKeyOutsideRegistry(
+            f"{path}: pivot_left_bars and pivot_right_bars must be given together (D-02)"
+        )
+    if has_left and not has_geometry:
+        raise StrategyKeyOutsideRegistry(
+            f"{path}: pivot keys need geometry_version; without it the legacy geometry runs "
+            f"and would ignore them (D-25)"
+        )
+    if has_tp_mode and not has_geometry:
+        raise StrategyKeyOutsideRegistry(
+            f"{path}: tp_mode needs geometry_version; without it the legacy geometry runs "
+            f"and would ignore it (D-25)"
+        )
+    if has_tp_mode and strategy_id != "range-mr":
+        raise StrategyKeyOutsideRegistry(f"{path}: tp_mode belongs to range-mr sets only (D-10)")
+    if has_left and strategy_id == "breakout-retest":
+        raise StrategyKeyOutsideRegistry(f"{path}: breakout-retest sets take no pivot keys")
+    if (
+        has_right
+        and "swing_lookback" in params
+        and params["pivot_right_bars"] + 1 > int(params["swing_lookback"])
+    ):
+        raise StrategyKeyOutsideRegistry(
+            f"{path}: pivot_right_bars + 1 ({params['pivot_right_bars'] + 1}) must not exceed "
+            f"swing_lookback ({params['swing_lookback']})"
+        )
+    if has_geometry and strategy_id in ("trend-pullback", "range-mr") and not has_left:
+        raise StrategyKeyOutsideRegistry(
+            f"{path}: geometry_version in a {strategy_id} set needs pivot_left_bars and "
+            f"pivot_right_bars (D-02)"
+        )
+    if has_geometry and strategy_id == "range-mr" and not has_tp_mode:
+        raise StrategyKeyOutsideRegistry(
+            f"{path}: geometry_version in a range-mr set needs tp_mode (D-10)"
+        )
 
 
 def _check_ascii_keys(params: dict[str, Any], path: Path) -> None:
@@ -442,6 +548,7 @@ def _parse_and_validate(
     raw_strings = _extract_raw_param_strings(text)
     normalized_params = _normalize_params(params, raw_strings)
     _check_param_types(normalized_params, path)
+    _check_geometry_keys(normalized_params, path, strategy_id)
     return strategy["strategy_version"], normalized_params
 
 
