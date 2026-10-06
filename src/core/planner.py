@@ -263,6 +263,52 @@ def _short_geometry(
 
 
 # --------------------------------------------------------------------------- #
+# Shared structural validator (Phase 15, D-06/D-07/D-08/F6/D-26).
+# --------------------------------------------------------------------------- #
+
+
+def _geometry_rejection(
+    *,
+    direction: str,
+    entry_min: Decimal,
+    entry_max: Decimal,
+    entry_ref: Decimal,
+    stop_loss: Decimal,
+    take_profit_1: Decimal,
+    atr: Decimal,
+    signal_low: Decimal,
+    signal_high: Decimal,
+    min_stop_atr: Decimal | None,
+) -> str | None:
+    """Return the RejectionReason value of the first failed structural check, or None.
+
+    The single place for the plan geometry invariants, evaluated on the prices as stored
+    (after `quantize_for_storage`) and BEFORE the RR gate (D-26). The order is part of the
+    contract and uses existing reason codes only:
+
+    1. D-06: the stop is strictly outside the whole entry zone (LONG `stop < entry_min`,
+       SHORT `stop > entry_max`), else STOP_TOO_TIGHT.
+    2. D-07: the signal bar has not already traded through the stop (LONG
+       `signal_low <= stop`, SHORT `signal_high >= stop`; touching counts), else INVALIDATED.
+    3. D-08: when `min_stop_atr` is present, `|entry_ref - stop| >= min_stop_atr * atr`,
+       else STOP_TOO_TIGHT (equality passes).
+    4. F6: TP1 lies strictly on the profit side of `entry_ref` (LONG `tp1 - entry_ref > 0`,
+       SHORT `entry_ref - tp1 > 0`), else RR_TOO_LOW.
+    """
+    long = direction == "LONG"
+    if (stop_loss >= entry_min) if long else (stop_loss <= entry_max):
+        return RejectionReason.STOP_TOO_TIGHT.value
+    if (signal_low <= stop_loss) if long else (signal_high >= stop_loss):
+        return RejectionReason.INVALIDATED.value
+    if min_stop_atr is not None and abs(_sub(entry_ref, stop_loss)) < _mul(min_stop_atr, atr):
+        return RejectionReason.STOP_TOO_TIGHT.value
+    leg = _sub(take_profit_1, entry_ref) if long else _sub(entry_ref, take_profit_1)
+    if leg <= Decimal("0"):
+        return RejectionReason.RR_TOO_LOW.value
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Public entry point — plan.
 # --------------------------------------------------------------------------- #
 
@@ -455,6 +501,24 @@ def plan(
     # Per 04-03 checkpoint:decision option A: entry_ref = zone mid for LIMIT_ZONE.
     entry_ref = _div(_add(entry_min, entry_max), _q("2"))
 
+    # D-06/D-07/D-08/F6, fixed order (D-26): structural invariants before the RR gate.
+    if geometry_version(parameter_set) is not None:
+        min_stop_raw = parameter_set.params.get("min_stop_atr")
+        rejection = _geometry_rejection(
+            direction=signal.direction,
+            entry_min=entry_min,
+            entry_max=entry_max,
+            entry_ref=entry_ref,
+            stop_loss=stop_loss,
+            take_profit_1=take_profit_1,
+            atr=atr,
+            signal_low=setup_candles[-1].low,
+            signal_high=setup_candles[-1].high,
+            min_stop_atr=None if min_stop_raw is None else Decimal(str(min_stop_raw)),
+        )
+        if rejection is not None:
+            return PlanResult(is_no_trade=True, trade_plan=None, reason_code=rejection)
+
     # Risk = |entry_ref - stop_loss|; non-positive risk is NO_TRADE (CR-02).
     risk = abs(_sub(entry_ref, stop_loss))
     if risk <= Decimal("0"):
@@ -464,16 +528,20 @@ def plan(
             reason_code=RejectionReason.RR_TOO_LOW.value,
         )
 
-    # TP2 extends the structure move: entry ± 2 * (TP1 − entry).
+    # TP2 extends the structure move: entry ± 2 * (TP1 − entry). The legs are signed toward
+    # profit (F6): a TP1 on the loss side has a non-positive leg and can never pass the gate.
     tp1 = take_profit_1
-    tp1_leg = _sub(tp1, entry_ref) if signal.direction == "LONG" else _sub(entry_ref, tp1)
-    if signal.direction == "LONG":
+    long_side = signal.direction == "LONG"
+    tp1_leg = _sub(tp1, entry_ref) if long_side else _sub(entry_ref, tp1)
+    if long_side:
         tp2 = quantize_for_storage(_add(entry_ref, _mul(_q("2"), tp1_leg)))
+        tp2_leg = _sub(tp2, entry_ref)
     else:
         tp2 = quantize_for_storage(_sub(entry_ref, _mul(_q("2"), tp1_leg)))
+        tp2_leg = _sub(entry_ref, tp2)
 
     # RR gate — TP1 is structure-derived, so this gate can fire (CR-03).
-    realized_rr = _div(abs(_sub(tp1, entry_ref)), risk)
+    realized_rr = _div(tp1_leg, risk)
     if realized_rr < minimum_rr:
         return PlanResult(
             is_no_trade=True,
@@ -507,7 +575,7 @@ def plan(
     expected_rr_json = json.dumps(
         {
             "tp1_rr": str(realized_rr),
-            "tp2_rr": str(_div(abs(_sub(tp2, entry_ref)), risk)),
+            "tp2_rr": str(_div(tp2_leg, risk)),
         },
         sort_keys=True,
         separators=(",", ":"),
