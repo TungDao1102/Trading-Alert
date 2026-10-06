@@ -260,3 +260,80 @@ def test_configuration_documents_the_phase15_keys_and_current_sets() -> None:
         assert f"| `{key}` |" in text, key
     for set_id in ("baseline-v6", "baseline-no-trade-v4", "baseline-simple-trend-v4", "v5.0.0"):
         assert set_id in text, set_id
+
+
+# --------------------------------------------------------------------------- #
+# Final audit (plan 15-15, D-14, D-20, F8, T-15-25)
+# --------------------------------------------------------------------------- #
+
+READINESS_HEADING = "## Re-run readiness (criterion 4)"
+HEX64 = re.compile(r"\b[0-9a-f]{64}\b")
+SRC_CORE = REPO_ROOT / "src" / "core"
+
+# The function that implements each FIX row (the plan 15-15 list).
+FIX_FUNCTIONS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("A", "level"): ("pivot_at", "_detect_pivot_setup"),
+    ("A", "stop"): ("_pivot_geometry", "_geometry_rejection"),
+    ("B", "direction"): ("_detect_breakout_retest_levels",),
+    ("B", "anchoring"): ("_detect_breakout_retest_levels", "_find_retest_bar"),
+    ("B", "stop"): ("_breakout_retest_geometry",),
+    ("C", "regime"): ("_resolve_regime_pivots",),
+    ("C", "stop"): ("_range_mr_geometry",),
+    ("C", "target"): ("_range_mr_geometry",),
+}
+
+
+def _src_core_text() -> str:
+    return "\n".join(p.read_text(encoding="utf-8") for p in sorted(SRC_CORE.glob("*.py")))
+
+
+def _readiness_section(text: str) -> str:
+    """The readiness section body: from its heading up to the next level-2 heading."""
+    start = text.index(READINESS_HEADING)
+    rest = text[start + len(READINESS_HEADING) :]
+    match = re.search(r"^## ", rest, re.MULTILINE)
+    return rest[: match.start()] if match else rest
+
+
+def test_no_parameter_verdict_remains_and_ratified_breakout_is_a_match() -> None:
+    rows = parse_rows(_read_doc())
+    assert [f"{r['family']}/{r['cell']}" for r in rows if r["verdict"] == "PARAMETER"] == []
+    breakout = next(r for r in rows if (r["family"], r["cell"]) == ("B", "breakout"))
+    assert breakout["verdict"] == "MATCH"
+    assert "`breakout_confirmation_bars` = 1" in breakout["resolution"]
+
+
+def test_every_deviation_row_cites_d054() -> None:
+    rows = parse_rows(_read_doc())
+    deviations = [r for r in rows if r["verdict"] == "DEVIATION"]
+    assert len(deviations) == 7
+    assert [f"{r['family']}/{r['cell']}" for r in deviations if "D054" not in r["decision"]] == []
+
+
+def test_every_fix_row_names_an_existing_implementing_function() -> None:
+    rows = parse_rows(_read_doc())
+    fixes = {(r["family"], r["cell"]): r for r in rows if r["verdict"] == "FIX"}
+    assert set(fixes) == set(FIX_FUNCTIONS)
+    source = _src_core_text()
+    for key, names in FIX_FUNCTIONS.items():
+        resolution = fixes[key]["resolution"]
+        for name in names:
+            assert f"`{name}`" in resolution, f"{key}: resolution does not name {name}"
+            assert re.search(rf"^def {name}\(", source, re.MULTILINE), f"{name} is not defined"
+
+
+def test_readiness_section_has_a_digest_row_per_family_with_zero_violations() -> None:
+    text = _read_doc()
+    assert text.count(READINESS_HEADING) == 1
+    section = _readiness_section(text)
+    for family in SHEET_FAMILIES:
+        rows = [ln for ln in section.split("\n") if ln.startswith(f"| {family} |")]
+        assert any(HEX64.search(ln) and "invariant_violations 0" in ln for ln in rows), family
+    for token in (
+        "digests_match=true",
+        "RESEARCH_PROTOCOL",
+        "no amendment",
+        "research-universe-v1",
+    ):
+        assert token.lower() in section.lower(), token
+    assert "PLACEHOLDER" in section
