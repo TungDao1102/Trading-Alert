@@ -9,7 +9,7 @@ Tie rule (RESEARCH Assumption A1), pivot low at `t`:
   - `low[t] <= low[j]` for `j` in `[t - left, t - 1]`   (non-strict on the left)
   - `low[t] <  low[j]` for `j` in `[t + 1, t + right]`  (strict on the right)
 The pivot high mirrors this with `>=` and `>`. Two equal lows in one window therefore yield
-exactly one pivot, the left one.
+exactly one pivot, the right one (the left one fails the strict right side).
 
 Pure and prefix-invariant (D-04): the value at index `i` reads `candles[0..i]` only. Decimal
 only, no wall clock, no randomness. Callers decide what a missing pivot means; this module
@@ -18,8 +18,9 @@ never falls back to a trailing extreme (D-03).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from decimal import Decimal
+from itertools import islice
 
 from .types import Candle
 
@@ -42,6 +43,56 @@ def _is_pivot(candles: Sequence[Candle], t: int, *, left: int, right: int, high:
     return True
 
 
+def _validate(candles: Sequence[Candle], i: int, *, lookback: int, left: int, right: int) -> None:
+    if left < 1:
+        raise ValueError(f"pivot left width must be >= 1, got {left}")
+    if right < 1:
+        raise ValueError(f"pivot right width must be >= 1, got {right}")
+    if lookback < right + 1:
+        raise ValueError(f"pivot lookback must be >= right + 1 ({right + 1}), got {lookback}")
+    if not 0 <= i < len(candles):
+        raise ValueError(f"pivot index {i} is outside [0, {len(candles) - 1}]")
+
+
+def _confirmed(
+    candles: Sequence[Candle], i: int, *, lookback: int, left: int, right: int, high: bool
+) -> Iterator[tuple[int, Decimal]]:
+    """Yield `(index, level)` of confirmed pivots, newest first.
+
+    Candidates are `t` in `[max(left, i - lookback + 1), i - right]`, scanned downward from
+    `i - right`, so `t + right <= i` always holds: the evaluated bar only confirms (T-15-05).
+    `t - left` may fall before the lookback window (RESEARCH Assumption A2). With fewer than
+    `left + right + 1` bars the range is empty.
+    """
+    first = max(left, i - lookback + 1)
+    for t in range(i - right, first - 1, -1):
+        if _is_pivot(candles, t, left=left, right=right, high=high):
+            yield t, _level(candles[t], high)
+
+
+def recent_pivots(
+    candles: Sequence[Candle],
+    i: int,
+    *,
+    lookback: int,
+    left: int,
+    right: int,
+    high: bool,
+    count: int,
+) -> tuple[tuple[int, Decimal], ...]:
+    """Up to `count` confirmed pivots as `(index, level)`, newest first.
+
+    Raises:
+        ValueError: left < 1, right < 1, lookback < right + 1, count < 1, or `i` outside
+            `[0, len(candles) - 1]`.
+    """
+    _validate(candles, i, lookback=lookback, left=left, right=right)
+    if count < 1:
+        raise ValueError(f"pivot count must be >= 1, got {count}")
+    found = _confirmed(candles, i, lookback=lookback, left=left, right=right, high=high)
+    return tuple(islice(found, count))
+
+
 def pivot_at(
     candles: Sequence[Candle],
     i: int,
@@ -55,26 +106,15 @@ def pivot_at(
 
     `None` covers both "no pivot inside the lookback" and "fewer than left + right + 1 bars"
     (D-03). The result depends only on `candles[0..i]` (D-04).
+
+    Raises:
+        ValueError: left < 1, right < 1, lookback < right + 1, or `i` outside
+            `[0, len(candles) - 1]`.
     """
-    first = max(left, i - lookback + 1)
-    for t in range(i - right, first - 1, -1):
-        if _is_pivot(candles, t, left=left, right=right, high=high):
-            return _level(candles[t], high)
-    return None
+    _validate(candles, i, lookback=lookback, left=left, right=right)
+    found = _confirmed(candles, i, lookback=lookback, left=left, right=right, high=high)
+    newest = next(found, None)
+    return None if newest is None else newest[1]
 
 
-__all__ = ["pivot_at"]
-
-
-def recent_pivots(
-    candles: Sequence[Candle],
-    i: int,
-    *,
-    lookback: int,
-    left: int,
-    right: int,
-    high: bool,
-    count: int,
-) -> tuple[tuple[int, Decimal], ...]:
-    """Skeleton for the RED commit; replaced in GREEN."""
-    return ()
+__all__ = ["pivot_at", "recent_pivots"]
