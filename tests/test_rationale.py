@@ -394,11 +394,13 @@ def test_rationale_hash_neutral_on_every_committed_set(tmp_path: Path) -> None:
 # Phase 15 sets (plan 15-08): the real files under params/, justified value by value.
 # --------------------------------------------------------------------------- #
 
-# Set ids added so far; plan 15-09 appends the two -v4 comparison baselines.
+# The five Phase 15 sets: three baseline-v6 candidates and the two -v4 comparison baselines.
 PHASE15_SETS: tuple[tuple[str, str], ...] = (
     ("trend-pullback", "baseline-v6"),
     ("breakout-retest", "baseline-v6"),
     ("range-mr", "baseline-v6"),
+    ("trend-pullback", "baseline-no-trade-v4"),
+    ("trend-pullback", "baseline-simple-trend-v4"),
 )
 
 # PLACEHOLDER keys exactly as ratified at checkpoint 15-08-01 (recorded in 15-08-SUMMARY.md).
@@ -420,6 +422,42 @@ PHASE15_PLACEHOLDERS: dict[tuple[str, str], tuple[str, ...]] = {
         "spread_fill_assumptions",
         "swing_lookback",
         "zone_tolerance_atr",
+    ),
+    # The -v4 baselines take the v6 values; the ratified overrides (D054) are DECISION rows,
+    # so they leave the PLACEHOLDER list: minimum_rr (no-trade) and zone_tolerance_atr plus
+    # minimum_rr (simple-trend).
+    ("trend-pullback", "baseline-no-trade-v4"): (
+        "cluster_cap",
+        "constraint_snapshot_ttl_seconds",
+        "entry_buffer_atr",
+        "funding_treatment",
+        "max_aggregate_open_risk",
+        "max_open_positions",
+        "min_stop_atr",
+        "pivot_left_bars",
+        "pivot_right_bars",
+        "signal_expiry_hours",
+        "sl_buffer_atr",
+        "slippage_model",
+        "spread_fill_assumptions",
+        "swing_lookback",
+        "zone_tolerance_atr",
+    ),
+    ("trend-pullback", "baseline-simple-trend-v4"): (
+        "cluster_cap",
+        "constraint_snapshot_ttl_seconds",
+        "entry_buffer_atr",
+        "funding_treatment",
+        "max_aggregate_open_risk",
+        "max_open_positions",
+        "min_stop_atr",
+        "pivot_left_bars",
+        "pivot_right_bars",
+        "signal_expiry_hours",
+        "sl_buffer_atr",
+        "slippage_model",
+        "spread_fill_assumptions",
+        "swing_lookback",
     ),
     ("breakout-retest", "baseline-v6"): (
         "atr_period",
@@ -512,3 +550,85 @@ def test_trend_pullback_v6_plans_a_stop_below_the_entry_zone() -> None:
     )
     assert planned.trade_plan is not None, planned.reason_code
     assert planned.trade_plan.stop_loss_price < planned.trade_plan.entry_min_price
+
+
+# --------------------------------------------------------------------------- #
+# Phase 15 comparison baselines (plan 15-09, D-26): -v4 under the corrected geometry.
+# --------------------------------------------------------------------------- #
+
+_V4_BASELINES: tuple[str, str] = ("baseline-no-trade-v4", "baseline-simple-trend-v4")
+# Overrides versus trend-pullback baseline-v6, exactly as ratified at checkpoint 15-08-01.
+_V4_OVERRIDES: dict[str, dict[str, Decimal | int]] = {
+    "baseline-no-trade-v4": {"minimum_rr": 100},
+    "baseline-simple-trend-v4": {
+        "zone_tolerance_atr": Decimal("1.0"),
+        "minimum_rr": Decimal("0.5"),
+    },
+}
+
+
+@pytest.mark.parametrize("set_id", _V4_BASELINES)
+def test_v4_baseline_equals_v6_values_except_the_ratified_overrides(set_id: str) -> None:
+    v6 = parsed_params(_phase15_path("trend-pullback", "baseline-v6"))
+    v4 = parsed_params(_phase15_path("trend-pullback", set_id))
+    assert set(v4) == set(v6)
+    assert "min_stop_atr" in v4
+    differing = {key for key in v6 if v4[key] != v6[key]}
+    assert differing == set(_V4_OVERRIDES[set_id])
+    for key, value in _V4_OVERRIDES[set_id].items():
+        assert Decimal(str(v4[key])) == Decimal(str(value))
+    parameter_set = load_parameter_set("trend-pullback", set_id)
+    assert parameter_set.strategy_version == "v5.0.0"
+    assert parameter_set.params["geometry_version"] == 1
+
+
+def _family_a_signal(parameter_set: Any, account: AccountState) -> tuple[Any, Any]:
+    setup, context = geometry_builders.family_a_long_window()
+    result = evaluate(
+        snapshot=MarketSnapshot(
+            symbol="BTCUSDT", setup_candles=setup, context_candles=context, source_timeframe="1h"
+        ),
+        account_state=account,
+        strategy_version=parameter_set.strategy_version,
+        parameter_set=parameter_set,
+    )
+    assert result.signal is not None, result.reason_code
+    return result.signal, setup
+
+
+def test_no_trade_v4_is_rejected_by_the_rr_gate_on_a_family_a_window() -> None:
+    parameter_set = load_parameter_set("trend-pullback", "baseline-no-trade-v4")
+    account = AccountState(equity=Decimal("1000"), risk_rate=Decimal("0.005"))
+    signal, setup = _family_a_signal(parameter_set, account)
+    planned = plan(
+        signal=signal,
+        setup_candles=setup,
+        parameter_set=parameter_set,
+        account_state=account,
+        created_at_utc=setup[-1].close_time_utc,
+    )
+    # The geometry invariants pass first (D-26): the only reason left is the RR floor.
+    assert planned.trade_plan is None
+    assert planned.reason_code == "RR_TOO_LOW"
+
+
+def test_simple_trend_v4_plans_a_stop_below_the_entry_zone_on_a_family_a_window() -> None:
+    parameter_set = load_parameter_set("trend-pullback", "baseline-simple-trend-v4")
+    account = AccountState(equity=Decimal("1000"), risk_rate=Decimal("0.005"))
+    signal, setup = _family_a_signal(parameter_set, account)
+    planned = plan(
+        signal=signal,
+        setup_candles=setup,
+        parameter_set=parameter_set,
+        account_state=account,
+        created_at_utc=setup[-1].close_time_utc,
+    )
+    assert planned.trade_plan is not None, planned.reason_code
+    assert planned.trade_plan.stop_loss_price < planned.trade_plan.entry_min_price
+
+
+@pytest.mark.parametrize("set_id", _V4_BASELINES)
+def test_v4_baselines_are_not_candidates_of_the_trend_pullback_family(set_id: str) -> None:
+    from src.analytics.family import is_baseline_parameter_set_id
+
+    assert is_baseline_parameter_set_id(set_id) is True

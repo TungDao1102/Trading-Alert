@@ -137,6 +137,18 @@
       "parameter_set_id": "baseline-v6",
       "strategy_version": "v5.0.0",
       "parameter_set_hash": "c9023e476e762fc56c993f3e920133d84a8d5700ec20805e9e85135148324100"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "baseline-no-trade-v4",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "98e541eec72b3771f73adaae6f039d2de2a2ef9bcb66baa4d3507d3fe32bac9c"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "baseline-simple-trend-v4",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "27f4c18b92b44c28387299edb69be32977e3ab48004c1b0301fbbcc2e0d08c5f"
     }
   ]
 }
