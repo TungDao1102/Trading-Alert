@@ -636,7 +636,7 @@ Readiness evidence: docs/research/GEOMETRY_AUDIT.md 'Re-run readiness (criterion
 
 **Audit refs**: F-301, F-113, F-909
 
-**Plans:** 14/15 plans executed
+**Plans:** 15/15 plans executed
 
 Plans:
 
@@ -677,7 +677,7 @@ Plans:
 - [x] 15-13-PLAN.md — Validator universal for every set; legacy regression tests; full suite green
 
 **Wave 12** *(blocked on Wave 11 completion)*
-- [ ] 15-15-PLAN.md — Criterion-4 readiness (smoke and census on v6 sets), final audit verdicts, D054 with regeneration inventory
+- [x] 15-15-PLAN.md — Criterion-4 readiness (smoke and census on v6 sets), final audit verdicts, D054 with regeneration inventory
 
 ### Phase 16: Paper Runtime Composition + SHADOW Approval Mode
 
@@ -1056,7 +1056,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 13. Research Data Foundation Fixes | 13/13 | Complete    | 2026-10-03 |
 | 13.1. Deployment & CI | 12/12 | Complete | 2026-10-04 |
 | 14. Backtest Simulator Causality Rewrite | 16/16 | In Progress|  |
-| 15. Strategy Geometry Correction | 14/15 | In Progress|  |
+| 15. Strategy Geometry Correction | 15/15 | In Progress|  |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
 | 17. Operational Persistence Layer | 15/15 | In Progress|  |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |

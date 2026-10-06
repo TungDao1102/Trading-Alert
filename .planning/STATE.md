@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 15
 current_phase_name: Strategy Geometry Correction
-status: executing
-stopped_at: Completed 15-13-PLAN.md
-last_updated: "2026-10-06T10:46:23.752Z"
+status: verifying
+stopped_at: Completed 15-15-PLAN.md
+last_updated: "2026-10-06T11:20:06.960Z"
 last_activity: 2026-10-06
 last_activity_desc: Phase 15 execution started
-state_head: 3d3a0723babf69a01aaa392c74c9f6657a552777
+state_head: 3c31af7e136a0e81376617edac49c5744e96bc1a
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 140
-  completed_plans: 138
+  completed_plans: 139
 milestone_name: milestone
 ---
 
@@ -32,7 +32,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 Phase: 15 (Strategy Geometry Correction) — EXECUTING
 Plan: 15 of 15
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-06 — Phase 15 execution started
 
 Progress: [█████░░░░░] 46%
@@ -185,6 +185,7 @@ Progress: [█████░░░░░] 46%
 | Phase 15 P14 | 25min | 2 tasks | 6 files |
 | Phase 15 P12 | 2h | 3 tasks | 21 files |
 | Phase 15 P13 | 55min | 2 tasks | 3 files |
+| Phase 15 P15 | ~2h | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -454,6 +455,7 @@ Recent decisions affecting current work:
 - [Phase 15]: 15-11: planner tests and Phase 4 snapshots run on baseline-v6; the regeneration script no longer writes the pin file (parameters.json) or expected_features.json (T-15-19)
 - [Phase 15]: 15-12: Phase 6/7 fixtures regenerated from build_v6_payloads(); every consumer migrated in the same plan; digests re-pinned only on cases proven by V6_SCENARIOS; no parameter tuned from results
 - [Phase 15]: [15-13] Structural validator (D-06/D-07/D-08/F6) now runs for every parameter set; legacy Family A plans are STOP_TOO_TIGHT, legacy B/C signal bar through the stop is INVALIDATED; passing legacy B/C plan_hash unchanged
+- [Phase 15]: D054: Phase 15 geometry correction recorded once with the compiled regeneration inventory; no amendment of RESEARCH_PROTOCOL v2.0.0 needed; re-run readiness verified on the Phase-14 engine for all three baseline-v6 sets (equal digests, census invariant_violations 0)
 
 ### Pending Todos
 
@@ -508,6 +510,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-06T10:46:22.923Z
-Stopped at: Completed 15-13-PLAN.md
+Last session: 2026-10-06T11:20:06.147Z
+Stopped at: Completed 15-15-PLAN.md
 Resume file: None
