@@ -658,18 +658,18 @@ Plans:
 - [ ] 15-07-PLAN.md — D-06 property test for all families; counts-only geometry census; census run and worked examples for the checkpoint
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 15-08-PLAN.md — Checkpoint: user ratifies every parameter value; baseline-v6 sets for A, B, C with rationale tables and pins
+- [ ] 15-08-PLAN.md — Checkpoint (blocking-human, never auto-selected): user ratifies every parameter value; baseline-v6 sets for A, B, C with rationale tables and pins
 
 **Wave 8** *(blocked on Wave 7 completion)*
 - [ ] 15-09-PLAN.md — baseline-no-trade-v4 and baseline-simple-trend-v4; gate PA-08
 
 **Wave 9** *(blocked on Wave 8 completion)*
-- [ ] 15-10-PLAN.md — Phase 6 generator V-dip on v6, regenerated Phase 6/7 fixtures, CRLF fix (F12), re-pinned snapshots
+- [ ] 15-10-PLAN.md — Phase 6 generator v6 payloads (V-dip confirmed pivot) proven in memory: independent geometry, named scenarios, hand-derived fixture facts; CRLF fix (F12); no committed fixture moves
 - [ ] 15-11-PLAN.md — Planner unit tests and Phase 4 / PostgreSQL plan-hash snapshots on v6; pin-safe regeneration script
 - [ ] 15-14-PLAN.md — Family sheets "Implemented as" (NOT FROZEN), GLOSSARY reason-code prose, CONFIGURATION key table
 
 **Wave 10** *(blocked on Wave 9 completion)*
-- [ ] 15-12-PLAN.md — Backtest consumers (engine-strategy, determinism, cost parity, experiment) on the regenerated fixtures
+- [ ] 15-12-PLAN.md — Regenerate Phase 6/7 fixtures from the proven v6 payloads and migrate every consumer in the same plan (simulator snapshots, parity, cost parity, engine-strategy, determinism, experiment); full suite green
 
 **Wave 11** *(blocked on Wave 10 completion)*
 - [ ] 15-13-PLAN.md — Validator universal for every set; legacy regression tests; full suite green
