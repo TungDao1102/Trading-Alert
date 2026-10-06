@@ -45,6 +45,7 @@ from .pivots import pivot_at
 from .strategy import (
     _detect_breakout_retest_levels,
     _detect_breakout_retest_setup,
+    _detect_range_mr_levels,
     _detect_range_mr_setup,
     geometry_version,
 )
@@ -158,6 +159,41 @@ def _breakout_retest_geometry(
     return (edge, edge, _add(levels.sr_far_edge, sl_buffer), _sub(edge, height))
 
 
+def _range_mr_geometry(
+    setup_candles: list[Candle],
+    parameter_set: ParameterSet,
+    sl_buffer: Decimal,
+    *,
+    direction: str,
+) -> _Geometry:
+    """Family C geometry_version 1 (D-22, D-23, D-10): S3 stop and the `tp_mode` target.
+
+    Re-derives the same setup the detector found (CR-05) and reads its `sr_far_edge`. The entry
+    zone stays degenerate at the touched range edge. LONG: edge `zone_lower`, stop `sr_far_edge
+    - sl_buffer`; SHORT: edge `zone_upper`, stop `sr_far_edge + sl_buffer`. TP1 is the range
+    midpoint `(zone_upper + zone_lower) / 2` for T_MID and the opposite boundary (`zone_upper`
+    for LONG, `zone_lower` for SHORT) for T_OPPOSITE. A vanished or direction-mismatched setup
+    returns all-None (STALE_SETUP at the caller); a `tp_mode` outside the registry values is a
+    configuration error and raises, like a missing key.
+    """
+    levels = _detect_range_mr_levels(setup_candles=setup_candles, parameter_set=parameter_set)
+    if levels is None or levels.direction != direction or levels.sr_far_edge is None:
+        return (None, None, None, None)
+    tp_mode = parameter_set.params["tp_mode"]
+    long = direction == "LONG"
+    if tp_mode == "T_MID":
+        tp1 = _div(_add(levels.zone_upper, levels.zone_lower), _q("2"))
+    elif tp_mode == "T_OPPOSITE":
+        tp1 = levels.zone_upper if long else levels.zone_lower
+    else:
+        raise ValueError(f"tp_mode must be T_MID or T_OPPOSITE, got {tp_mode!r}")
+    if long:
+        edge = levels.zone_lower
+        return (edge, edge, _sub(levels.sr_far_edge, sl_buffer), tp1)
+    edge = levels.zone_upper
+    return (edge, edge, _add(levels.sr_far_edge, sl_buffer), tp1)
+
+
 def _long_geometry(
     strategy_id: str,
     setup_candles: list[Candle],
@@ -221,6 +257,8 @@ def _long_geometry(
             _add(zone_upper, height),
         )
     if strategy_id == "range-mr":
+        if geometry_version(parameter_set) is not None:
+            return _range_mr_geometry(setup_candles, parameter_set, sl_buffer, direction="LONG")
         setup = _detect_range_mr_setup(setup_candles=setup_candles, parameter_set=parameter_set)
         if setup is None or setup[0] != "LONG":
             return (None, None, None, None)
@@ -286,6 +324,8 @@ def _short_geometry(
             _sub(zone_lower, height),
         )
     if strategy_id == "range-mr":
+        if geometry_version(parameter_set) is not None:
+            return _range_mr_geometry(setup_candles, parameter_set, sl_buffer, direction="SHORT")
         setup = _detect_range_mr_setup(setup_candles=setup_candles, parameter_set=parameter_set)
         if setup is None or setup[0] != "SHORT":
             return (None, None, None, None)

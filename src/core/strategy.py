@@ -41,7 +41,7 @@ from src.domain.signal import Signal
 
 from ._decimal import _add, _div, _mul, _q, _sub  # noqa: F401 (re-export for compat)
 from .features import _atr_series, _swing_series, compute_features
-from .pivots import pivot_at
+from .pivots import pivot_at, recent_pivots
 from .types import (
     AccountState,
     Candle,
@@ -118,6 +118,42 @@ def _resolve_regime(
     if last_context_close > context_frame.ema_50.value:
         return "BULLISH"
     if last_context_close < context_frame.ema_50.value:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
+def _resolve_regime_pivots(context_candles: list[Candle], parameter_set: ParameterSet) -> str:
+    """Family C regime on confirmed 4H pivots (D-22, flag F1), geometry_version 1 only.
+
+    Takes the two newest confirmed pivot highs and the two newest confirmed pivot lows inside
+    the last `regime_filter_lookback` bars of the 4H context (pivot widths `pivot_left_bars`
+    and `pivot_right_bars`, the D-01 function). BULLISH when the newest high is above the
+    previous one and the newest low is above the previous one (HH + HL); BEARISH when both
+    are below (LH + LL); NEUTRAL otherwise, so an equal pair is neither higher nor lower and
+    the verdict is NEUTRAL whatever the other pair does. Fewer than two pivots of either
+    kind is "NO_TRADE": the regime is unknown, never defaulted (D-03).
+
+    Pure and prefix-invariant (D-04): a pivot is counted only once its right-side bars have
+    closed (`t + right <= last index`), so the verdict depends on `context_candles` only.
+    Decimal comparisons only; the EMA features are not read.
+    """
+    last = len(context_candles) - 1
+    lookback = int(parameter_set.params["regime_filter_lookback"])
+    left = int(parameter_set.params["pivot_left_bars"])
+    right = int(parameter_set.params["pivot_right_bars"])
+    highs = recent_pivots(
+        context_candles, last, lookback=lookback, left=left, right=right, high=True, count=2
+    )
+    lows = recent_pivots(
+        context_candles, last, lookback=lookback, left=left, right=right, high=False, count=2
+    )
+    if len(highs) < 2 or len(lows) < 2:
+        return "NO_TRADE"
+    newest_high, previous_high = highs[0][1], highs[1][1]
+    newest_low, previous_low = lows[0][1], lows[1][1]
+    if newest_high > previous_high and newest_low > previous_low:
+        return "BULLISH"
+    if newest_high < previous_high and newest_low < previous_low:
         return "BEARISH"
     return "NEUTRAL"
 
@@ -262,13 +298,16 @@ def _setup_fingerprint(
 
 @dataclass(frozen=True)
 class SetupLevels:
-    """The levels of one detected Family B setup (plan 15-05, D-23).
+    """The levels of one detected Family B or Family C setup (plans 15-05 and 15-06, D-23).
 
-    `zone_upper` and `zone_lower` are the legacy zone bounds; the retest edge is
-    `zone_upper` for LONG and `zone_lower` for SHORT. `sr_far_edge` is the far bound of the
-    narrow broken S/R zone and is set only under `geometry_version`: `swing_high_ref -
-    zone_tolerance_atr * ATR_ref` for LONG, `swing_low_ref + zone_tolerance_atr * ATR_ref` for
-    SHORT. Legacy sets leave it None.
+    `zone_upper` and `zone_lower` are the legacy zone bounds. Family B: the retest edge is
+    `zone_upper` for LONG and `zone_lower` for SHORT, and `sr_far_edge` is the far bound of
+    the narrow broken S/R zone, `swing_high_ref - zone_tolerance_atr * ATR_ref` for LONG and
+    `swing_low_ref + zone_tolerance_atr * ATR_ref` for SHORT. Family C: the touched range edge
+    is `zone_lower` for LONG and `zone_upper` for SHORT, and `sr_far_edge` is the far bound of
+    the narrow S/R zone around it, `zone_lower - zone_tolerance_atr * ATR_ref` for LONG and
+    `zone_upper + zone_tolerance_atr * ATR_ref` for SHORT. It is set only under
+    `geometry_version`; legacy sets leave it None.
     """
 
     direction: str
@@ -487,11 +526,11 @@ def _find_retest_bar(
 # --------------------------------------------------------------------------- #
 
 
-def _detect_range_mr_setup(
+def _detect_range_mr_levels(
     *,
     setup_candles: list[Candle],
     parameter_set: ParameterSet,
-) -> tuple[str, str, Decimal, Decimal] | None:
+) -> SetupLevels | None:
     """Family C detector: range-edge touch on a NEUTRAL regime.
 
     Per `docs/research/families/range-mr.md` §2.4:
@@ -504,8 +543,12 @@ def _detect_range_mr_setup(
       4. Range-break invalidation: a close beyond the band by
          `range_break_buffer_atr * ATR` invalidates the zone.
 
-    Returns ``(direction, setup_type, zone_upper, zone_lower)`` or
-    ``None``.
+    Detection is identical with and without `geometry_version`; the only difference is
+    `sr_far_edge` (plan 15-06, D-23), which is set under `geometry_version` and None for
+    legacy sets. The reference level and `ATR_ref` come from bar `n - 2`, so the evaluated
+    bar never moves them (D-13).
+
+    Returns a `SetupLevels` or ``None``.
     """
     zone_min_touches = int(parameter_set.params["zone_min_touches"])
     zone_aging_bars = int(parameter_set.params["zone_aging_bars"])
@@ -589,11 +632,44 @@ def _detect_range_mr_setup(
         and abs(_sub(last_high, zone_upper)) < abs(_sub(last_low, zone_lower))
     )
 
+    anchored = geometry_version(parameter_set) is not None
+    half_width = (
+        _mul(Decimal(str(parameter_set.params["zone_tolerance_atr"])), atr_ref)
+        if anchored
+        else None
+    )
     if long_eligible:
-        return ("LONG", "RANGE_MR_LONG", zone_upper, zone_lower)
+        return SetupLevels(
+            direction="LONG",
+            setup_type="RANGE_MR_LONG",
+            zone_upper=zone_upper,
+            zone_lower=zone_lower,
+            sr_far_edge=None if half_width is None else _sub(zone_lower, half_width),
+        )
     if short_eligible:
-        return ("SHORT", "RANGE_MR_SHORT", zone_upper, zone_lower)
+        return SetupLevels(
+            direction="SHORT",
+            setup_type="RANGE_MR_SHORT",
+            zone_upper=zone_upper,
+            zone_lower=zone_lower,
+            sr_far_edge=None if half_width is None else _add(zone_upper, half_width),
+        )
     return None
+
+
+def _detect_range_mr_setup(
+    *,
+    setup_candles: list[Candle],
+    parameter_set: ParameterSet,
+) -> tuple[str, str, Decimal, Decimal] | None:
+    """Legacy 4-tuple view of `_detect_range_mr_levels`.
+
+    Returns ``(direction, setup_type, zone_upper, zone_lower)`` or ``None``.
+    """
+    levels = _detect_range_mr_levels(setup_candles=setup_candles, parameter_set=parameter_set)
+    if levels is None:
+        return None
+    return (levels.direction, levels.setup_type, levels.zone_upper, levels.zone_lower)
 
 
 # --------------------------------------------------------------------------- #
@@ -699,9 +775,14 @@ def evaluate(
 
     # Regime gate (4H context) — family-specific.
     last_context_close = snapshot.context_candles[-1].close
-    regime = _resolve_regime(context_frame, last_context_close)
+    if parameter_set.strategy_id == "range-mr" and geometry_version(parameter_set) is not None:
+        # D-22: Family C reads confirmed 4H pivots; the EMA50-equality gate never fired (F1).
+        regime = _resolve_regime_pivots(snapshot.context_candles, parameter_set)
+    else:
+        regime = _resolve_regime(context_frame, last_context_close)
     if regime == "NO_TRADE":
-        # The context frame was invalid: no regime verdict exists, so none is named.
+        # No regime verdict exists (invalid context frame, or fewer than two confirmed
+        # pivots of a kind for Family C), so none is named.
         return SetupResult(
             is_no_trade=True,
             reason_code=RejectionReason.NO_TRADE_REGIME.value,

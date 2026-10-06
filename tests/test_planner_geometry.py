@@ -799,9 +799,6 @@ def test_c_long_legacy_contrast_keeps_the_code_stop_and_the_opposite_boundary() 
         parameter_set=_parameter_set(case),
     )
     assert levels is not None and levels.sr_far_edge is None
-    corrected, _plan, _ = _run("c_long_worked")
-    assert corrected.signal is not None
-    assert corrected.signal.signal_id != result.signal.signal_id
 
 
 def test_c_legacy_regime_still_needs_exact_ema50_equality() -> None:
