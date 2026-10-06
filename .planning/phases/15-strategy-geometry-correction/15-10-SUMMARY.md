@@ -15,11 +15,11 @@ provides:
 affects: [15-12]
 
 actuals:
-  tokens: ACTUALS_TOKENS
+  tokens: 13071
   tasks: 2
   commits: 2
 plan_head_before: d4a8f24c2515812f9f53d0b0e24eae9990c72874
-plan_head_after: PLAN_HEAD_AFTER
+plan_head_after: 72c72f59132c87b891b9df425ce2856c2364894c
 
 key-files:
   created:
@@ -47,7 +47,7 @@ status: complete
 ## Accomplishments
 
 - Task 1 (tracer, commit a410cc3): the LONG trigger payload end to end. The 1H history is a smooth uptrend (bars 0..234), a fall in 0.80 steps to a dip bottom at bar 240 (low 117.80), a recovery to a peak at bar 244 (high 123.20) and a slow pullback; bar 249 (open 121.00, high 121.10, low 118.00, close 119.60) touches the pivot zone. A monotonic uptrend has no confirmed pivot low (15-RESEARCH section 6), so the dip is what makes the geometry testable. The tracer gate (`<verify>` end to end) passed before expansion.
-- Task 2 (commit TASK2_COMMIT): the SHORT mirror, the missing-mark fallback, invalidation, expiry, partial fill, touch-without-fill, the two -v4 baselines and the parity input; V6_SCENARIOS for all nine cases; the mirrored geometry check, the baseline tests and the hand-derived fact tests.
+- Task 2 (commit 72c72f5): the SHORT mirror, the missing-mark fallback, invalidation, expiry, partial fill, touch-without-fill, the two -v4 baselines and the parity input; V6_SCENARIOS for all nine cases; the mirrored geometry check, the baseline tests and the hand-derived fact tests.
 - Candidate cases carry `baseline-v6` / `v5.0.0`; the baselines carry `baseline-no-trade-v4` / `baseline-simple-trend-v4` at `v5.0.0` (D-26). The nine-key `COST_MODEL` literal is unchanged and equals the ratified cost values of all three sets (asserted against the TOML files).
 - F12: the committed-fixture comparison replaces `b"\r\n"` with `b"\n"` on both sides; `test_generator_is_deterministic_and_matches_committed_fixtures`, which failed on this Windows checkout since 15-04, now passes (see deferred-items.md).
 - Running `scripts/gen_phase6_fixtures.py` leaves `tests/fixtures/phase6` and `tests/fixtures/phase7` unchanged (`git diff --quiet` exits 0); the generator imports nothing from `src/` or `tests/`.
@@ -219,7 +219,7 @@ none in this plan: no committed fixture moved (`git diff --quiet -- tests/fixtur
 - **Issue:** the plan states "sum of no_trade_counts = number of strategy bars - 1". The engine evaluates only the closes inside the data window (bars 240..249, plus bar 250 where present); closes before the window start are warm-up and not counted, so the sum is 9 (10 with bar 250), not 249.
 - **Fix:** the test asserts `sum(no_trade_counts) == evaluated closes - 1 + rejects` (the RR_TOO_LOW reject of the no-trade baseline adds its own count), and proves the stronger claim "NO_TRADE on every earlier bar" two ways: an independent own-loop scan of every bar 14..248 (no bar's extreme lies inside the zone of the pivot known at its close) and the real `evaluate` on the prefixes of bars 230..248.
 - **Files modified:** tests/test_phase6_fixture_scenarios.py, tests/test_phase6_fixture_geometry.py
-- **Commit:** a410cc3, TASK2_COMMIT
+- **Commit:** a410cc3, 72c72f5
 
 **2. [Rule 3 - Missing referenced helper] No independent Wilder ATR in the geometry test file**
 - **Found during:** Task 1
@@ -249,3 +249,9 @@ None. T-15-27 (self-certified facts) mitigated: independent pivot, ATR, zone, st
 - `ruff check src tests scripts`: clean; `ruff format --check src tests scripts`: 388 files formatted; `mypy src`: no issues in 149 source files.
 - The scenario test collects 10 parametrized cases (nine Phase 6 cases plus the parity key); `V6_SCENARIOS` has nine entries.
 - Targeted suites only, foreground, no background process left.
+
+## Self-Check: PASSED
+
+- FOUND: scripts/gen_phase6_fixtures.py (def build_v6_payloads), tests/test_phase6_fixture_geometry.py, tests/test_phase6_fixture_scenarios.py (V6_SCENARIOS), this SUMMARY with "## v6 fixture facts"
+- FOUND: commits a410cc3, 72c72f5
+- `git diff --stat` of the two task commits lists only the generator, the two test files and this SUMMARY
