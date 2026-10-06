@@ -634,10 +634,48 @@ Plans:
 
 **Audit refs**: F-301, F-113, F-909
 
-**Plans:** 0 plans
+**Plans:** 15 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 15 to break down)
+
+**Wave 1**
+- [ ] 15-01-PLAN.md — Geometry audit table (sheet Stage baseline vs code, verdicts, leakage, flag dispositions) before any geometry change (D-10)
+- [ ] 15-02-PLAN.md — Hash-neutral rationale record and PLACEHOLDER refusal in pin_stream_epoch (D-16, D-27)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 15-03-PLAN.md — Tracer: confirmed-pivot Family A LONG end to end; pivot function under TDD; optional registry keys incl. geometry_version
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 15-04-PLAN.md — Shared geometry validator (D-06/D-07/D-08/F6) and Family A complete: SHORT, opposite-pivot TP1, audit anchors, p9 regression
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 15-05-PLAN.md — Family B under geometry_version 1: anchored retest, with-direction gate, S3 stop on the narrow S/R zone, leakage proof
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 15-06-PLAN.md — Family C under geometry_version 1: range regime on confirmed 4H pivots, S3 stop, T-mid target, leakage proof
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 15-07-PLAN.md — D-06 property test for all families; counts-only geometry census; census run and worked examples for the checkpoint
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 15-08-PLAN.md — Checkpoint: user ratifies every parameter value; baseline-v6 sets for A, B, C with rationale tables and pins
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 15-09-PLAN.md — baseline-no-trade-v4 and baseline-simple-trend-v4; gate PA-08
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 15-10-PLAN.md — Phase 6 generator V-dip on v6, regenerated Phase 6/7 fixtures, CRLF fix (F12), re-pinned snapshots
+- [ ] 15-11-PLAN.md — Planner unit tests and Phase 4 / PostgreSQL plan-hash snapshots on v6; pin-safe regeneration script
+- [ ] 15-14-PLAN.md — Family sheets "Implemented as" (NOT FROZEN), GLOSSARY reason-code prose, CONFIGURATION key table
+
+**Wave 10** *(blocked on Wave 9 completion)*
+- [ ] 15-12-PLAN.md — Backtest consumers (engine-strategy, determinism, cost parity, experiment) on the regenerated fixtures
+
+**Wave 11** *(blocked on Wave 10 completion)*
+- [ ] 15-13-PLAN.md — Validator universal for every set; legacy regression tests; full suite green
+
+**Wave 12** *(blocked on Wave 11 completion)*
+- [ ] 15-15-PLAN.md — Criterion-4 readiness (smoke and census on v6 sets), final audit verdicts, D054 with regeneration inventory
 
 ### Phase 16: Paper Runtime Composition + SHADOW Approval Mode
 
