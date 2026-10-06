@@ -428,3 +428,161 @@ def with_evaluated_bar(
         volume=last.volume,
     )
     return [*setup[:-1], replaced]
+
+
+# --------------------------------------------------------------------------- #
+# Family C (range-mr) windows, plan 15-06. Hand derivations: DERIVATIONS.md.
+# --------------------------------------------------------------------------- #
+
+# 4h close waypoints (bar index, close) for the pivot regime. Every tail starts at bar 200, the
+# first bar of the 50-bar regime window of the last bar 249 (regime_filter_lookback 50); steps
+# are at most 1.00 so the constant-range builder accepts them. High = close + 1, low = close - 1.
+# Confirmed pivots (3/3) and their levels are listed per case in DERIVATIONS.md.
+PIVOT_NEUTRAL_CONTRACTING = (
+    (0, "100"),
+    (200, "100"),
+    (210, "110"),
+    (220, "100"),
+    (230, "108"),
+    (240, "102"),
+    (249, "106.5"),
+)
+PIVOT_BULLISH = (
+    (0, "100"),
+    (200, "100"),
+    (210, "108"),
+    (220, "102"),
+    (230, "112"),
+    (240, "106"),
+    (249, "110.5"),
+)
+PIVOT_BEARISH = (
+    (0, "100"),
+    (200, "100"),
+    (210, "108"),
+    (220, "100"),
+    (230, "104"),
+    (240, "96"),
+    (249, "100.5"),
+)
+PIVOT_NEUTRAL_EXPANDING = (
+    (0, "100"),
+    (200, "100"),
+    (210, "108"),
+    (220, "100"),
+    (230, "109"),
+    (240, "99"),
+    (249, "103.5"),
+)
+
+
+def interpolated_closes(waypoints: Sequence[tuple[int, str]]) -> list[Decimal]:
+    """Closes through (index, close) waypoints, linear in between and exact in Decimal.
+
+    The first waypoint is bar 0. A step that does not divide exactly is a bug in the case
+    design and raises, so every close in a derived window is a short terminating decimal.
+    """
+    closes: list[Decimal] = []
+    for (i0, v0_text), (i1, v1_text) in zip(waypoints, waypoints[1:], strict=False):
+        v0, v1 = Decimal(v0_text), Decimal(v1_text)
+        if not closes:
+            closes.append(v0)
+        for k in range(i0 + 1, i1 + 1):
+            value = v0 + (v1 - v0) * (k - i0) / (i1 - i0)
+            if (value - v0) * (i1 - i0) != (v1 - v0) * (k - i0):
+                raise ValueError(f"waypoint step {i0}->{i1} is not exact at bar {k}")
+            closes.append(value)
+    return closes
+
+
+def four_hour_context(
+    closes: Sequence[Decimal], *, setup_length: int, half_range: Decimal = Decimal("1")
+) -> list[Candle]:
+    """Closed 4h bars whose last bar has closed before the evaluated 1h bar `setup_length - 1`.
+
+    Same alignment as `trending_context`: the last 4h bar opens six hours before the evaluated
+    1h bar opens.
+    """
+    start = (
+        SETUP_START + timedelta(hours=setup_length - 1 - 6) - timedelta(hours=4) * (len(closes) - 1)
+    )
+    return constant_range_candles(closes, interval="4h", start=start, half_range=half_range)
+
+
+def pivot_context(
+    waypoints: Sequence[tuple[int, str]] = PIVOT_NEUTRAL_CONTRACTING, *, setup_length: int = 250
+) -> list[Candle]:
+    """250 4h bars through `waypoints` (a pivot-regime context)."""
+    return four_hour_context(interpolated_closes(waypoints), setup_length=setup_length)
+
+
+def flat_context(*, setup_length: int = 250, close: Decimal = Decimal("100")) -> list[Candle]:
+    """250 flat 4h bars: the last close equals EMA50 (the legacy NEUTRAL regime)."""
+    return four_hour_context([close] * 250, setup_length=setup_length)
+
+
+def range_mr_closes(*, half_period: int = 6, length: int = 250) -> list[Decimal]:
+    """Triangle wave between close 99 and 99 + half_period, ending on a trough (close 99).
+
+    With `half_period` 6 the closes run 99..105 and back (period 12); the zone is low 98 to
+    high 106 and the evaluated bar `length - 1` closes 99 (low 98.00, the lower edge). With
+    `half_period` 2 the closes run 99..101 (period 4): zone 98 to 102. Steps are 1.00, so every
+    bar keeps true range 2.00 and ATR = 2.00.
+    """
+    period = 2 * half_period
+    return [
+        Decimal("99") + min(p, period - p)
+        for p in ((k - (length - 1)) % period for k in range(length))
+    ]
+
+
+def range_mr_window(
+    *,
+    half_period: int = 6,
+    mirror: bool = False,
+    regime: Sequence[tuple[int, str]] | None = PIVOT_NEUTRAL_CONTRACTING,
+) -> tuple[list[Candle], list[Candle]]:
+    """(setup, context) for a Family C case; `mirror` reflects the setup to a SHORT shape.
+
+    `regime` gives the 4h pivot waypoints; `None` builds the flat 4h window instead.
+    """
+    setup = constant_range_candles(range_mr_closes(half_period=half_period))
+    if mirror:
+        setup = mirror_candles(setup)
+    context = (
+        flat_context(setup_length=len(setup))
+        if regime is None
+        else pivot_context(regime, setup_length=len(setup))
+    )
+    return setup, context
+
+
+def range_mr_long_window() -> tuple[list[Candle], list[Candle]]:
+    """c_long_worked: wide triangle, zone 98..106, pivot NEUTRAL (LH + HL) 4h context."""
+    return range_mr_window()
+
+
+def range_mr_short_window() -> tuple[list[Candle], list[Candle]]:
+    """c_short_worked: the mirror (p -> 200 - p) of c_long_worked, zone 94..102."""
+    return range_mr_window(mirror=True)
+
+
+def range_mr_long_flat_context_window() -> tuple[list[Candle], list[Candle]]:
+    """c_long_legacy_contrast: the c_long_worked 1h window with a flat 4h window."""
+    return range_mr_window(regime=None)
+
+
+def range_mr_narrow_window() -> tuple[list[Candle], list[Candle]]:
+    """c_long_narrow: narrow triangle, zone 98..102, pivot NEUTRAL 4h context."""
+    return range_mr_window(half_period=2)
+
+
+def range_mr_crash_window() -> tuple[list[Candle], list[Candle]]:
+    """c_long_worked with the evaluated bar replaced by a crash bar (D-07).
+
+    Bar 249: open 100, high 100, low 95.00, close 98 (true range 5.00).
+    """
+    setup, context = range_mr_long_window()
+    return with_evaluated_bar(
+        setup, high=Decimal("100"), low=Decimal("95"), close=Decimal("98")
+    ), context

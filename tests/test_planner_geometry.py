@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import json
+import re
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -38,8 +39,10 @@ def _load_cases() -> dict[str, Any]:
     return cases
 
 
-def _number(text: str) -> int | Decimal:
-    """Registry spelling: whole numbers are int, fractions are Decimal."""
+def _number(text: str) -> int | Decimal | str:
+    """Registry spelling: whole numbers are int, fractions are Decimal, words stay text."""
+    if not re.fullmatch(r"-?\d+(\.\d+)?", text):
+        return text
     return int(text) if "." not in text else Decimal(text)
 
 
@@ -738,3 +741,76 @@ def test_derivations_file_has_a_section_for_every_plan_15_04_case() -> None:
         "## a_long_no_opposite_pivot",
     ):
         assert heading in text, heading
+
+
+# --------------------------------------------------------------------------- #
+# Plan 15-06: Family C (range-mr) under geometry_version 1.
+# --------------------------------------------------------------------------- #
+
+
+def test_c_long_worked_plan_has_the_s3_stop_beyond_the_narrow_sr_zone() -> None:
+    result, planned, expected = _run("c_long_worked")
+    assert result.signal is not None
+    assert result.signal.direction == expected["direction"]
+    assert result.signal.setup_type == expected["setup_type"]
+    assert result.regime == expected["regime"] == "NEUTRAL"
+    _assert_plan_matches(planned, expected)
+    trade_plan = planned.trade_plan
+    assert trade_plan is not None
+    assert trade_plan.entry_min_price == Decimal("97.80")
+    assert trade_plan.entry_max_price == Decimal("98.20")
+    assert trade_plan.stop_loss_price == Decimal("96.60")
+    assert trade_plan.stop_loss_price < trade_plan.entry_min_price
+    targets = json.loads(trade_plan.take_profit_json)
+    midpoint = (Decimal(expected["zone_upper"]) + Decimal(expected["zone_lower"])) / 2
+    assert Decimal(targets["tp1"]) == midpoint == Decimal("102")
+    assert _expected_rr(trade_plan) == Decimal(expected["tp1_rr"])
+
+
+def test_c_long_worked_levels_carry_the_far_edge_of_the_sr_zone() -> None:
+    case = _load_cases()["c_long_worked"]
+    setup, _context = getattr(geometry_builders, case["builder"])()
+    levels = strategy_module._detect_range_mr_levels(
+        setup_candles=setup, parameter_set=_parameter_set(case)
+    )
+    assert levels is not None
+    expected = case["expected"]
+    assert levels.direction == "LONG"
+    assert levels.setup_type == "RANGE_MR_LONG"
+    assert levels.zone_upper == Decimal(expected["zone_upper"])
+    assert levels.zone_lower == Decimal(expected["zone_lower"])
+    assert levels.sr_far_edge == Decimal(expected["sr_far_edge"])
+
+
+def test_c_long_legacy_contrast_keeps_the_code_stop_and_the_opposite_boundary() -> None:
+    case = _load_cases()["c_long_legacy_contrast"]
+    assert "geometry_version" not in case["params"]
+    result, planned, expected = _run("c_long_legacy_contrast")
+    assert result.signal is not None
+    assert result.regime == "NEUTRAL"
+    _assert_plan_matches(planned, expected)
+    trade_plan = planned.trade_plan
+    assert trade_plan is not None
+    assert trade_plan.stop_loss_price == Decimal("97.60")  # zone_lower - 0.2 x ATR_last
+    legacy_tp1 = Decimal(json.loads(trade_plan.take_profit_json)["tp1"])
+    assert legacy_tp1 == Decimal("106.00")  # zone_upper
+    levels = strategy_module._detect_range_mr_levels(
+        setup_candles=geometry_builders.range_mr_long_window()[0],
+        parameter_set=_parameter_set(case),
+    )
+    assert levels is not None and levels.sr_far_edge is None
+    corrected, _plan, _ = _run("c_long_worked")
+    assert corrected.signal is not None
+    assert corrected.signal.signal_id != result.signal.signal_id
+
+
+def test_c_legacy_regime_still_needs_exact_ema50_equality() -> None:
+    """D-25: without geometry_version the pivot (contracting) 4h window is not NEUTRAL."""
+    case = _load_cases()["c_long_legacy_contrast"]
+    result, planned = _evaluate_and_plan(
+        geometry_builders.range_mr_long_window(), _parameter_set(case)
+    )
+    assert planned is None
+    assert result.is_no_trade
+    assert result.reason_code == RejectionReason.NO_TRADE_REGIME.value
+    assert result.regime in {"BULLISH", "BEARISH"}

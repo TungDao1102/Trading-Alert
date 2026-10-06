@@ -516,3 +516,122 @@ print(D('102')-D('2.0')*D('2'), D('102')+D('2.0')*D('2'))
 ATR_last = 2.853498542274052478134110787, stop = sr_far_edge - 0.2 x ATR_last =
 99.42930029154518950437317784, which is below entry_min 101.7146501457725947521865889 (D-06 passes)
 and above the signal bar low 98.50, so D-07 fires: INVALIDATED.
+
+# Family C (range-mr) cases, plan 15-06
+
+Basis (D-22, D-23, D-10, sheet text alone): `docs/research/families/range-mr.md` section 3
+(S3: the stop lies beyond the far edge of the narrow S/R zone around the touched range edge,
+`zone_tolerance_atr` is the zone half-width, `sl_buffer_atr` the buffer; `tp_mode` T-mid is the
+range midpoint, T-opposite the opposite boundary) and `GEOMETRY_AUDIT.md` flag F1 (the legacy
+EMA50-equality NEUTRAL gate fires on 0 of 4,380 4H bars). Under `geometry_version` 1 the regime
+comes from confirmed 4H pivots (D-22): the two newest pivot highs and lows inside the last
+`regime_filter_lookback` closed 4H bars, BULLISH = HH + HL, BEARISH = LH + LL, otherwise NEUTRAL,
+and fewer than two of either kind is NO_TRADE. Family C trades only in NEUTRAL.
+
+Same independence rule as above: every number comes from a standalone `python -c` Decimal
+computation with no project imports. Every parameter value is test-local; none is a proposed or
+ratified strategy parameter (ratification is plan 15-08).
+
+## Family C common inputs
+
+| Symbol | Value |
+|--------|-------|
+| symbol / streams | synthetic `BTCUSDT`, 250 closed 1h bars (setup) and 250 closed 4h bars (context) |
+| bar shape | every bar has high - low = 2.00 (high = close + 1.00, low = close - 1.00), open = previous close, consecutive closes differ by at most 1.00, so every true range is 2.00 and ATR(14) = 2.00 at every bar (ATR_ref = ATR_last = 2.00) |
+| zone_tolerance_atr | 0.5 (half-width 0.5 x 2.00 = 1.00) |
+| entry_buffer_atr | 0.1 (entry buffer 0.20) |
+| sl_buffer_atr | 0.2 (stop buffer 0.40, from ATR_last) |
+| minimum_rr | 2 |
+| swing_lookback | 20 |
+| touch_tolerance_atr | 0.3 (band half-width 0.3 x ATR_ref = 0.60) |
+| zone_min_touches / zone_aging_bars / range_break_buffer_atr | 2 / 50 / 0.2 (inherited baseline-v5 values; band break buffer 0.40) |
+| regime_filter_lookback | 50 4h bars; pivot_left_bars / pivot_right_bars 3 / 3 |
+| geometry_version / tp_mode | 1 / T_MID (the legacy contrast case omits all of the geometry keys) |
+| equity / risk_rate | 10000 / 0.005 |
+
+1h setup stream (`range_mr_closes`, half_period 6): closes are a triangle wave 99, 100, ..., 105,
+104, ..., 100, 99, ... of period 12 that ends on a trough: bar 249 closes 99 (low 98.00, high
+100.00), bar 248 closes 100, troughs (close 99, low 98) at bars 249 - 12 m and peaks (close 105,
+high 106) at bars 243 - 12 m.
+
+## c_long_worked
+
+4h regime (`PIVOT_NEUTRAL_CONTRACTING`): closes are flat 100 up to bar 200, then linear through
+(210, 110), (220, 100), (230, 108), (240, 102) and (249, 106.5), steps 1.00, 1.00, 0.80, 0.60,
+0.50 per bar. The regime window of the last bar i = 249 is bars 200..249 (lookback 50), pivot
+candidates t in [200, 246]. The confirmed pivots, by the definition (low[t] <= left lows and <
+right lows; mirrored for highs) in an independent script:
+
+```
+python -c "
+from decimal import Decimal as D
+wp=[(0,'100'),(200,'100'),(210,'110'),(220,'100'),(230,'108'),(240,'102'),(249,'106.5')]
+cl=[]
+for (i0,a),(i1,b) in zip(wp,wp[1:]):
+    a=D(a);b=D(b)
+    if not cl: cl.append(a)
+    for k in range(i0+1,i1+1): cl.append(a+(b-a)*(k-i0)/(i1-i0))
+hi=[c+1 for c in cl]; lo=[c-1 for c in cl]
+i=249;L=3;R=3;LB=50
+def piv(arr,high):
+    out=[]
+    for t in range(i-R,max(L,i-LB+1)-1,-1):
+        lv=arr[t]
+        ok=all((lv>=arr[j]) if high else (lv<=arr[j]) for j in range(t-L,t))
+        ok=ok and all((lv>arr[j]) if high else (lv<arr[j]) for j in range(t+1,t+R+1))
+        if ok: out.append((t,lv))
+    return out
+print(piv(hi,True)); print(piv(lo,False))
+"
+[(230, Decimal('109')), (210, Decimal('111'))]
+[(240, Decimal('101')), (220, Decimal('99')), (200, Decimal('99'))]
+```
+
+Pivot highs, newest first: bar 230 (109) and bar 210 (111): 109 < 111, a lower high (LH). Pivot
+lows, newest first: bar 240 (101) and bar 220 (99): 101 > 99, a higher low (HL; bar 200 is an older
+third pivot low). LH + HL is neither BULLISH nor BEARISH, so the regime is NEUTRAL (a contracting
+structure, which is the Family C range regime).
+
+1h range. Evaluated bar n - 1 = 249, reference bar ref_idx = 248. The 20-bar swing window of bar
+248 is bars 229..248: its lowest low is 98 (troughs at bars 237, 249 - 12 = 237) and its highest
+high is 106 (peak at bar 243, also bar 231), so zone_lower = 98.00 and zone_upper = 106.00, and
+ATR_ref = 2.00. Touch band = 0.3 x 2.00 = 0.60: lower band [97.40, 98.60], upper band [105.40,
+106.60]. The touch scan covers bars 20..(248 - 20) = 228. Lower touches (low 98) are bars 225, 213,
+201, ... and the last is 225 >= 249 - 50 = 199 (aging passes), count well above 2. The evaluated
+bar has low 98.00 in the lower band, close 99 above the break line 98.00 - 0.40 = 97.60 and below
+106.40, and |98 - 98| = 0 <= |100 - 106| = 6 (near-edge test), so RANGE_MR_LONG.
+
+```
+python -c "from decimal import Decimal as D; zl=D('98'); zu=D('106'); atr=D('2'); t=D('0.5'); far=zl-t*atr; print(far, far-D('0.2')*atr)"
+97.0 96.6
+python -c "from decimal import Decimal as D; zl=D('98'); atr=D('2'); eb=D('0.1')*atr; print(zl-eb, zl+eb, ((zl-eb)+(zl+eb))/2)"
+97.8 98.2 98.0
+python -c "from decimal import Decimal as D; zl=D('98'); zu=D('106'); ref=D('98'); stop=D('96.6'); tp1=(zu+zl)/2; print(tp1, ref-stop, tp1-ref, (tp1-ref)/(ref-stop), ref+2*(tp1-ref))"
+102 1.4 4 2.857142857142857142857142857 106
+```
+
+| Field | Value |
+|-------|-------|
+| regime | NEUTRAL |
+| zone_upper / zone_lower | 106.00 / 98.00 |
+| sr_far_edge | 97.00 (zone_lower - 0.5 x ATR_ref) |
+| entry_min / entry_max | 97.80 / 98.20 (zone_lower -/+ 0.1 x ATR_last) |
+| entry_ref | 98.00 |
+| stop_loss | 96.60 = sr_far_edge - 0.2 x ATR_last, strictly below entry_min |
+| TP1 (T_MID) | 102.00 = (106 + 98) / 2 |
+| TP2 | 106.00 = entry_ref + 2 x (TP1 - entry_ref) |
+| risk / reward | 1.40 / 4.00 |
+| RR to TP1 | 2.857142857142857142857142857 (minimum_rr 2) |
+
+## c_long_legacy_contrast
+
+The same 1h window and the legacy parameter set (no `geometry_version`, `tp_mode` or pivot
+widths) with a flat 4h window (250 bars closing 100, so the last close equals EMA50 and the legacy
+equality regime is NEUTRAL). Legacy geometry: zone 106.00 / 98.00, entry 97.80..98.20, stop =
+zone_lower - sl_buffer = 98.00 - 0.40 = 97.60 (above the far edge, only 0.20 below entry_min), TP1
+= zone_upper = 106.00, TP2 = 98 + 2 x 8 = 114.
+
+```
+python -c "from decimal import Decimal as D; zl=D('98'); zu=D('106'); sb=D('0.2')*D('2'); print(zl-sb, zu, zl+2*(zu-zl), (zu-zl)/(zl-(zl-sb)))"
+97.6 106 114 20
+```
