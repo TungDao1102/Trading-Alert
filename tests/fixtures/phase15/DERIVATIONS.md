@@ -207,3 +207,38 @@ low 92.00, inside 90.75-92.75, so evaluate emits a LONG signal.
 Pivot high: candidates inside the last 20 bars are bars 230..246. Every one of them has higher
 highs on its left (the series falls 0.25 per bar there), so none qualifies, and the 99.25 peak at
 bar 220 is outside the lookback. There is no TP1, so plan() returns NO_TRADE with STALE_SETUP.
+
+## p9_regression
+
+Plan 15-04 Task 3 (D-01, D-07, F4). Same parameters as a_long_worked (zone_tolerance_atr 0.5, so
+tolerance = 0.5 x 2.00 = 1.00 = 0.5 ATR). Setup path: bars 0..247 close 44.25 + 0.25 k (bar 247
+closes 106.00), then bars 248..257 close 105, 104, 103, 102, 101, 100.5, 100, 100.5, 101, 101.5.
+The 4h context rises (BULLISH).
+
+Pivot low: bar 254 (close 100, low 99.00) has lows 101, 100, 99.5 on its left and 99.5, 100,
+100.5 on its right, confirmed at bar 257, so P = 99.00. Pivot highs: bar 257 (high 102.50, right
+bars 258..260 are lower in both windows) and bar 247 (high 107.00). The newest is 102.50, so
+TP1 = 102.50.
+
+Beyond tolerance (evaluated bar 262): bars 258..262 close 100.5, 99.5, 98.5, 97.5, 97. The last
+bar has low 96.00 = P - 1.5 x 2.00, below the zone 98.00-100.00, so there is no signal. (The
+legacy trailing 20-bar swing low includes the evaluated bar, becomes 96.00 and signals.)
+
+Inside tolerance (evaluated bar 260): bars 258..260 close 100.5, 99.7, 99.2. The last bar has
+low 98.20 = P - 0.4 x 2.00, a new low but inside 98.00-100.00, so it signals.
+
+```
+python -c "from decimal import Decimal as D; P=D('99'); h=D('0.5')*D('2'); zl=P-h; zu=P+h; eb=D('0.1')*D('2'); sb=D('0.2')*D('2'); emin=zl-eb; emax=zu+eb; ref=(emin+emax)/2; tp1=D('102.5'); print(zl, zu, emin, emax, ref, emin-sb, tp1-ref, (tp1-ref)/(ref-(emin-sb)), ref+2*(tp1-ref))"
+98.0 100.0 97.8 100.2 99.0 97.4 3.5 2.1875 106.0
+python -c "from decimal import Decimal as D; P=D('99'); print(P-D('1.5')*D('2'), P-D('0.4')*D('2'))"
+96.0 98.2
+```
+
+| Field (inside-tolerance plan) | Value |
+|-------|-------|
+| zone_upper / zone_lower | 100.00 / 98.00 |
+| entry_min / entry_max | 97.80 / 100.20 |
+| entry_ref | 99.00 |
+| stop_loss | 97.40, below the signal bar low 98.20 |
+| TP1 / TP2 | 102.50 / 106.00 |
+| RR to TP1 | 2.1875 (minimum_rr 2) |

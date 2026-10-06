@@ -148,6 +148,43 @@ def family_a_no_opposite_pivot_window() -> tuple[list[Candle], list[Candle]]:
     return window_from_closes(family_a_no_opposite_pivot_closes())
 
 
+def _p9_closes(final_tail: str) -> list[Decimal]:
+    """Shared p9 lead-in: 0.25 ramp to a 106 peak (bar 247), a fall to a confirmed pivot low.
+
+    Bar 247 closes 106 (pivot high 107), bars 248..254 close 105, 104, 103, 102, 101, 100.5,
+    100 (bar 254, low 99.00 = the pivot low P, confirmed at bar 257 by 100.5, 101, 101.5), and
+    `final_tail` continues from bar 258.
+    """
+    closes = [Decimal("44.25") + Decimal("0.25") * k for k in range(248)]
+    lead = "105 104 103 102 101 100.5 100 100.5 101 101.5"
+    closes.extend(Decimal(v) for v in lead.split())
+    closes.extend(Decimal(v) for v in final_tail.split())
+    return closes
+
+
+def family_a_p9_inside_tolerance_closes() -> list[Decimal]:
+    """Last bar (260) closes 99.2: low 98.20 is a new low but inside 98.00-100.00 (P = 99)."""
+    return _p9_closes("100.5 99.7 99.2")
+
+
+def family_a_p9_beyond_tolerance_closes() -> list[Decimal]:
+    """Last bar (262) closes 97: low 96.00 is 3.00 = 1.5 ATR below P = 99, outside 98.00-100.00."""
+    return _p9_closes("100.5 99.5 98.5 97.5 97")
+
+
+def family_a_p9_inside_tolerance_window() -> tuple[list[Candle], list[Candle]]:
+    return window_from_closes(family_a_p9_inside_tolerance_closes())
+
+
+def family_a_p9_beyond_tolerance_window() -> tuple[list[Candle], list[Candle]]:
+    return window_from_closes(family_a_p9_beyond_tolerance_closes())
+
+
+def family_a_rising_closes(count: int = 250) -> list[Decimal]:
+    """Strictly rising 0.25 closes: every low exceeds all lows before it, so no pivot low."""
+    return [Decimal("44.25") + Decimal("0.25") * k for k in range(count)]
+
+
 def family_a_tp_loss_side_closes() -> list[Decimal]:
     """Setup closes whose newest confirmed pivot high lies BELOW the pivot low (F6).
 
