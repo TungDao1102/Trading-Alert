@@ -1297,12 +1297,29 @@ def test_ambient_config_named_after_phase15_key_is_rejected(key: str) -> None:
         check_strategy_key_outside_registry({"nested": {key.upper(): "1"}})
 
 
-def test_committed_sets_carry_no_phase15_key() -> None:
+# Sets written in Phase 15 (plan 15-08 baseline-v6; plan 15-09 re-issues the two comparison
+# baselines as -v4). Every other committed set predates the Phase 15 keys and must stay free of
+# them, which is what keeps its parameter_set_hash and byte lock valid (D-15).
+_PHASE15_SET_IDS = frozenset(
+    {
+        ("trend-pullback", "baseline-v6"),
+        ("breakout-retest", "baseline-v6"),
+        ("range-mr", "baseline-v6"),
+        ("trend-pullback", "baseline-no-trade-v4"),
+        ("trend-pullback", "baseline-simple-trend-v4"),
+    }
+)
+
+
+def test_committed_sets_carry_no_phase15_key_outside_the_phase15_sets() -> None:
     from src.domain import registry
 
     committed = sorted(Path(registry.REGISTRY_ROOT).glob("*/*.toml"))
     assert committed
     for path in committed:
         loaded = load_parameter_set(path.parent.name, path.stem)
+        if (path.parent.name, path.stem) in _PHASE15_SET_IDS:
+            assert loaded.params.get("geometry_version") == 1, f"{path}: Phase 15 set lacks the key"
+            continue
         for key in _PHASE15_KEYS:
             assert key not in loaded.params, f"{path}: unexpected Phase 15 key {key}"

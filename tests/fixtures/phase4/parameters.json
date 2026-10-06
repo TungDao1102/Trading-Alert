@@ -119,6 +119,12 @@
       "parameter_set_id": "baseline-simple-trend-v3",
       "strategy_version": "v4.0.0",
       "parameter_set_hash": "17016aeb3c5bc21ddfba6641b1179414215b239edf63e48ed347d2ca31d10464"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "baseline-v6",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "2c4f1528b00f1b1e48c76040bbd6cc218a25eec21c521d8b68da86ee4811360f"
     }
   ]
 }

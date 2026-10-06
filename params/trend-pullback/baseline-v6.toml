@@ -1,0 +1,224 @@
+# params/trend-pullback/baseline-v6.toml
+#
+# Phase 15 - strategy geometry correction candidate set. Every value was ratified
+# by the user at checkpoint 15-08-01 (reply: ratify) and carries a basis in its
+# [rationale.<key>] table below. PLACEHOLDER values have no empirical or structural
+# basis yet, so this set is research-only: pin_stream_epoch refuses it for paper.
+#
+# Supersedes baseline-v5 (Phase 12). baseline-v5 stays byte-identical for
+# reproducing past hashes (F-810); do not mutate. New behaviour means a new set
+# and a strategy-version bump (D-15).
+#
+# Changes versus baseline-v5 (every other key and value is unchanged):
+#   - strategy_version v4.0.0 -> v5.0.0.
+#   - geometry_version 1: selects the corrected Family A geometry (pivot-anchored
+#     zone, stop outside the zone). Mechanism recorded in D054 (D-25).
+#   - pivot_left_bars 3 and pivot_right_bars 3: fractal pivot widths (D-02); a
+#     pivot is confirmed 3 bars after its candle closes. PLACEHOLDER.
+#   - min_stop_atr 0.5: minimum stop distance in ATR (D-08, ROADMAP criterion 1).
+#     PLACEHOLDER, never tuned from any count (D-17).
+#   - breakout_confirmation_bars and risk_rate are omitted: no module under src/
+#     reads either for this family (risk_rate: the account risk rate is the sizing
+#     source, WR-03).
+#   - one [rationale.<key>] table per parameter (D-16, D-27).
+
+schema_version = 1
+
+[strategy]
+strategy_id = "trend-pullback"
+strategy_version = "v5.0.0"
+
+[parameters]
+# Geometry (Phase 15).
+geometry_version = 1
+pivot_left_bars = 3
+pivot_right_bars = 3
+min_stop_atr = 0.5
+
+# Setup geometry (seed values, PLACEHOLDER).
+swing_lookback = 20
+zone_tolerance_atr = 0.5
+entry_buffer_atr = 0.1
+sl_buffer_atr = 0.2
+minimum_rr = 2.0
+signal_expiry_hours = 4
+
+# Sizing, portfolio and daily-loss gates (RISK_MANAGEMENT sections 4, 8, 11).
+minimum_risk_utilization_after_rounding = 0.6
+max_open_positions = 2
+max_aggregate_open_risk = 0.01
+cluster_cap = 0.005
+daily_loss_warning_threshold = 0.005
+daily_loss_stop_threshold = 0.01
+
+# Cost model (RISK_MANAGEMENT section 3) and Phase 12 guards (D046).
+fee_rate_entry = 0.0005
+fee_rate_exit = 0.0005
+expected_slippage = 0.0001
+constraint_snapshot_ttl_seconds = 3600
+funding_treatment = "ADDITIVE"
+slippage_model = "FIXED_BPS"
+spread_fill_assumptions = "FULL_FILL"
+partial_fill_fraction = 1.0
+working_type = "MARK_PRICE"
+exit_slippage_rate = 0.0003
+min_stop_distance_rate = 0.003
+max_cost_to_risk = 0.15
+commission_rate_ttl_seconds = 3600
+
+[rationale.geometry_version]
+basis = "DECISION"
+value = "1"
+text = "Selects the corrected Phase 15 geometry read by src/core/strategy.py and src/core/planner.py; a design mechanism chosen in CONTEXT D-25, recorded in D054 and ratified at checkpoint 15-08-01."
+ref = "D054"
+
+[rationale.pivot_left_bars]
+basis = "PLACEHOLDER"
+value = "3"
+text = "Left width of the fractal pivot read by src/core/strategy.py and src/core/planner.py; proposed in CONTEXT D-02, no spec or decision fixes it (the family sheet gives the width as TBD)."
+
+[rationale.pivot_right_bars]
+basis = "PLACEHOLDER"
+value = "3"
+text = "Right width of the fractal pivot (confirmation delay in bars) read by src/core/strategy.py and src/core/planner.py; proposed in CONTEXT D-02, no spec or decision fixes it."
+
+[rationale.min_stop_atr]
+basis = "PLACEHOLDER"
+value = "0.5"
+text = "Minimum distance from the entry reference to the stop in ATR, read by src/core/planner.py (D-08); 0.5 is only proposed in CONTEXT D-08, no spec or decision fixes it, and it is not tuned from any count."
+
+[rationale.swing_lookback]
+basis = "PLACEHOLDER"
+value = "20"
+text = "Bounds how old a pivot or swing may be, read by src/core/features.py, src/core/strategy.py and src/core/planner.py; Phase 3 seed value (plan 03-01, audit F-909), unchanged since baseline-v1, no empirical basis yet."
+
+[rationale.zone_tolerance_atr]
+basis = "PLACEHOLDER"
+value = "0.5"
+text = "Half-width of the entry zone in ATR, read by src/core/features.py, src/core/strategy.py and src/core/planner.py; Phase 3 seed value (plan 03-01, audit F-909), unchanged since baseline-v1, no empirical basis yet."
+
+[rationale.entry_buffer_atr]
+basis = "PLACEHOLDER"
+value = "0.1"
+text = "Buffer added to the zone edges for the entry range in ATR, read by src/core/planner.py; Phase 3 seed value (plan 03-01, audit F-909), unchanged since baseline-v1, no empirical basis yet."
+
+[rationale.sl_buffer_atr]
+basis = "PLACEHOLDER"
+value = "0.2"
+text = "Buffer beyond the far zone edge for the stop in ATR, read by src/core/planner.py; Phase 3 seed value (plan 03-01, audit F-909), unchanged since baseline-v1, no empirical basis yet."
+
+[rationale.minimum_rr]
+basis = "PLACEHOLDER"
+value = "2.0"
+text = "Minimum reward-to-risk a plan must reach, read by src/core/planner.py; Phase 3 seed value (plan 03-01, audit F-909), unchanged since baseline-v1, no empirical basis yet."
+
+[rationale.signal_expiry_hours]
+basis = "PLACEHOLDER"
+value = "4"
+text = "Hours from the source candle close until a signal expires, read by src/core/planner.py and src/core/strategy.py; Phase 3 seed value (plan 03-01, audit F-909), unchanged since baseline-v1, no empirical basis yet."
+
+[rationale.minimum_risk_utilization_after_rounding]
+basis = "STRUCTURAL"
+value = "0.6"
+text = "Minimum realized-to-allowed risk after quantization, read by src/risk/quantization.py and src/risk/gating.py; fixed by AGENTS.md Constraints (Quantization) and docs/trading/RISK_MANAGEMENT.md section 11."
+
+[rationale.max_open_positions]
+basis = "PLACEHOLDER"
+value = "2"
+text = "Portfolio gate read by src/risk/portfolio.py and src/risk/gating.py; docs/trading/RISK_MANAGEMENT.md section 4 lists it as an initial research placeholder."
+
+[rationale.max_aggregate_open_risk]
+basis = "PLACEHOLDER"
+value = "0.01"
+text = "Aggregate open-risk cap read by src/risk/portfolio.py and src/risk/gating.py; docs/trading/RISK_MANAGEMENT.md section 4 lists it as an initial research placeholder."
+
+[rationale.cluster_cap]
+basis = "PLACEHOLDER"
+value = "0.005"
+text = "Cluster risk cap read by src/risk/portfolio.py and src/risk/gating.py; docs/trading/RISK_MANAGEMENT.md section 4 gives the cluster limit as TBD."
+
+[rationale.daily_loss_warning_threshold]
+basis = "DECISION"
+value = "0.005"
+text = "Daily-loss WARNING threshold read by src/risk/portfolio.py; D033: thresholds stay as in the params."
+ref = "D033"
+
+[rationale.daily_loss_stop_threshold]
+basis = "DECISION"
+value = "0.01"
+text = "Daily-loss DAILY_STOP threshold read by src/risk/portfolio.py; D033: thresholds stay as in the params."
+ref = "D033"
+
+[rationale.fee_rate_entry]
+basis = "DECISION"
+value = "0.0005"
+text = "Entry fee modeled as taker, read by src/backtest/costs.py and src/risk/cost_rates.py (D036)."
+ref = "D036"
+
+[rationale.fee_rate_exit]
+basis = "DECISION"
+value = "0.0005"
+text = "Exit fee modeled as taker, read by src/backtest/costs.py and src/risk/cost_rates.py (D036)."
+ref = "D036"
+
+[rationale.expected_slippage]
+basis = "DECISION"
+value = "0.0001"
+text = "Entry-side slippage (1 bps) read by src/backtest/costs.py; Phase 12 auto-mode default of D046, item 6 ratified by the operator 2026-10-04."
+ref = "D046"
+
+[rationale.constraint_snapshot_ttl_seconds]
+basis = "PLACEHOLDER"
+value = "3600"
+text = "Freshness window of the exchange-constraint snapshot read by src/execution/constraint_snapshot.py; docs/trading/RISK_MANAGEMENT.md section 12 requires fresh constraints but gives no number; the value dates from Phase 5 plan 05-01."
+
+[rationale.funding_treatment]
+basis = "PLACEHOLDER"
+value = "ADDITIVE"
+text = "Funding treatment declared for the cost model, read by src/backtest/costs.py; RESEARCH_PROTOCOL v2.0.0 section 2 requires the field to be declared but fixes no value (Phase 6 fix CR-11/WR-04)."
+
+[rationale.slippage_model]
+basis = "PLACEHOLDER"
+value = "FIXED_BPS"
+text = "Slippage model declared for the cost model, read by src/backtest/costs.py; RESEARCH_PROTOCOL v2.0.0 section 2 requires the field to be declared but fixes no value (Phase 6 fix CR-11/WR-04)."
+
+[rationale.spread_fill_assumptions]
+basis = "PLACEHOLDER"
+value = "FULL_FILL"
+text = "Spread and fill assumption declared for the cost model, read by src/backtest/costs.py; RESEARCH_PROTOCOL v2.0.0 section 2 requires the field to be declared but fixes no value (Phase 6 fix CR-11/WR-04)."
+
+[rationale.partial_fill_fraction]
+basis = "DECISION"
+value = "1.0"
+text = "Full fills for all canonical cost sets, read by src/backtest/costs.py and src/backtest/engine.py (D038)."
+ref = "D038"
+
+[rationale.working_type]
+basis = "DECISION"
+value = "MARK_PRICE"
+text = "Protective SL/TP trigger price source, read by src/execution/placement.py and src/execution/manager.py (D037)."
+ref = "D037"
+
+[rationale.exit_slippage_rate]
+basis = "DECISION"
+value = "0.0003"
+text = "Stop-market exit slippage (3 bps) read by src/backtest/costs.py, src/backtest/exits.py and src/risk/cost_rates.py; Phase 12 auto-mode default of D046, item 6 ratified by the operator 2026-10-04."
+ref = "D046"
+
+[rationale.min_stop_distance_rate]
+basis = "COST_GUARD"
+value = "0.003"
+text = "Phase 12 cost guard: a stop closer than this fraction of price is rejected as STOP_TOO_TIGHT, read by src/risk/cost_guards.py (D046)."
+ref = "D046"
+
+[rationale.max_cost_to_risk]
+basis = "COST_GUARD"
+value = "0.15"
+text = "Phase 12 cost guard: a plan whose modeled round-trip cost exceeds this share of its risk is rejected as COST_TO_RISK_EXCEEDED, read by src/risk/cost_guards.py (D046)."
+ref = "D046"
+
+[rationale.commission_rate_ttl_seconds]
+basis = "DECISION"
+value = "3600"
+text = "Freshness window of the live commission rate read by src/risk/live_commission.py; Phase 12 auto-mode default of D046, item 6 ratified by the operator 2026-10-04."
+ref = "D046"

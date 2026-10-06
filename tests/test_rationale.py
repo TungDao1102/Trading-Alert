@@ -12,18 +12,27 @@ file under params/ (PA-01 reads every params/**/*.toml as a set).
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
+from src.core.planner import plan
+from src.core.strategy import evaluate
+from src.core.types import AccountState, MarketSnapshot
 from src.domain import registry
 from src.domain.rationale import (
     RationaleEntry,
+    UnrationalizedParameterSet,
     check_rationale,
     load_rationale,
     placeholder_keys,
 )
-from src.domain.registry import verify_parameter_set
+from src.domain.registry import load_parameter_set, verify_parameter_set
+from src.paper.freeze import pin_stream_epoch
+
+from tests import geometry_builders
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_SET = REPO_ROOT / "params" / "trend-pullback" / "baseline-v5.toml"
@@ -359,6 +368,12 @@ def test_rationale_hash_neutral_on_every_committed_set(tmp_path: Path) -> None:
         source = REPO_ROOT / "params" / strategy_id / f"{set_id}.toml"
         text = source.read_bytes().decode("utf-8")
         params = parsed_params(source)
+        if "[rationale." in text:
+            # Phase 15 sets carry their own rationale tables: the pin verifies as written.
+            verify_parameter_set(source, pin["parameter_set_hash"])
+            assert (strategy_id, set_id) in PHASE15_SETS
+            checked += 1
+            continue
         spec = {
             key: {"basis": "PLACEHOLDER", "value": str(value), "text": "seed"}
             for key, value in params.items()
@@ -373,3 +388,80 @@ def test_rationale_hash_neutral_on_every_committed_set(tmp_path: Path) -> None:
         assert placeholder_keys(target) == tuple(sorted(params))
         checked += 1
     assert checked == len(pins)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 15 sets (plan 15-08): the real files under params/, justified value by value.
+# --------------------------------------------------------------------------- #
+
+# Set ids added so far; plan 15-09 appends the two -v4 comparison baselines.
+PHASE15_SETS: tuple[tuple[str, str], ...] = (("trend-pullback", "baseline-v6"),)
+
+# PLACEHOLDER keys exactly as ratified at checkpoint 15-08-01 (recorded in 15-08-SUMMARY.md).
+PHASE15_PLACEHOLDERS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("trend-pullback", "baseline-v6"): (
+        "cluster_cap",
+        "constraint_snapshot_ttl_seconds",
+        "entry_buffer_atr",
+        "funding_treatment",
+        "max_aggregate_open_risk",
+        "max_open_positions",
+        "min_stop_atr",
+        "minimum_rr",
+        "pivot_left_bars",
+        "pivot_right_bars",
+        "signal_expiry_hours",
+        "sl_buffer_atr",
+        "slippage_model",
+        "spread_fill_assumptions",
+        "swing_lookback",
+        "zone_tolerance_atr",
+    ),
+}
+
+
+def _phase15_path(strategy_id: str, set_id: str) -> Path:
+    return REPO_ROOT / "params" / strategy_id / f"{set_id}.toml"
+
+
+@pytest.mark.parametrize(("strategy_id", "set_id"), PHASE15_SETS)
+def test_phase15_set_rationale_is_complete_and_placeholders_are_refused(
+    strategy_id: str, set_id: str
+) -> None:
+    path = _phase15_path(strategy_id, set_id)
+    assert check_rationale(path) == []
+    assert set(load_rationale(path)) == set(parsed_params(path))
+    assert placeholder_keys(path) == PHASE15_PLACEHOLDERS[(strategy_id, set_id)]
+    assert placeholder_keys(path), "a PLACEHOLDER-free set would be pinnable for paper"
+    with pytest.raises(UnrationalizedParameterSet, match="PLACEHOLDER keys"):
+        pin_stream_epoch(
+            strategy_id=strategy_id,
+            parameter_set_id=set_id,
+            opened_at_utc=datetime(2026, 10, 6, tzinfo=UTC),
+        )
+
+
+def test_trend_pullback_v6_plans_a_stop_below_the_entry_zone() -> None:
+    parameter_set = load_parameter_set("trend-pullback", "baseline-v6")
+    assert parameter_set.strategy_version == "v5.0.0"
+    assert parameter_set.params["geometry_version"] == 1
+    account = AccountState(equity=Decimal("1000"), risk_rate=Decimal("0.005"))
+    setup, context = geometry_builders.family_a_long_window()
+    result = evaluate(
+        snapshot=MarketSnapshot(
+            symbol="BTCUSDT", setup_candles=setup, context_candles=context, source_timeframe="1h"
+        ),
+        account_state=account,
+        strategy_version=parameter_set.strategy_version,
+        parameter_set=parameter_set,
+    )
+    assert result.signal is not None, result.reason_code
+    planned = plan(
+        signal=result.signal,
+        setup_candles=setup,
+        parameter_set=parameter_set,
+        account_state=account,
+        created_at_utc=setup[-1].close_time_utc,
+    )
+    assert planned.trade_plan is not None, planned.reason_code
+    assert planned.trade_plan.stop_loss_price < planned.trade_plan.entry_min_price
