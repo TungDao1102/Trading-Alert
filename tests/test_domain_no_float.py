@@ -35,6 +35,7 @@ SCANNED_FILES = (
     "src/core/features.py",
     "src/core/strategy.py",
     "src/core/planner.py",
+    "src/core/pivots.py",
     # Phase 5 plan 05-01 — pure risk engine (D-05).
     "src/risk/__init__.py",
     "src/risk/types.py",

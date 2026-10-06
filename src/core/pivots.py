@@ -64,3 +64,17 @@ def pivot_at(
 
 
 __all__ = ["pivot_at"]
+
+
+def recent_pivots(
+    candles: Sequence[Candle],
+    i: int,
+    *,
+    lookback: int,
+    left: int,
+    right: int,
+    high: bool,
+    count: int,
+) -> tuple[tuple[int, Decimal], ...]:
+    """Skeleton for the RED commit; replaced in GREEN."""
+    return ()
