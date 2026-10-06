@@ -991,6 +991,61 @@ def test_legacy_unchanged_signal_id_and_plan_hash_match_the_pre_change_values(
     assert planned.trade_plan.plan_hash == plan_hash
 
 
+# --------------------------------------------------------------------------- #
+# Plan 15-05 Task 3: leakage (D-13). The levels come from bars before the breakout end bar,
+# never from the evaluated bar n - 1; only its position in the retest band is read.
+# --------------------------------------------------------------------------- #
+
+_LEAK_VARIANTS = {
+    # (high, low, close) of the replacement bar; the open stays that of the original bar.
+    "long_higher_high_other_low": ("long", "105", "102.3", "104"),
+    "long_far_higher_high": ("long", "130", "102.0", "103"),
+    "short_lower_low_other_high": ("short", "98.3", "95", "96.5"),
+    "short_far_lower_low": ("short", "98.2", "60", "97"),
+}
+
+
+def _legacy_and_anchored_levels(
+    setup: list[Candle], direction: str
+) -> tuple[tuple[Decimal, ...], tuple[Decimal, ...]]:
+    anchored = _detect_breakout_retest_levels(
+        setup_candles=setup, parameter_set=_b_set(), direction=direction
+    )
+    legacy = _detect_breakout_retest_setup(
+        setup_candles=setup, parameter_set=_b_set(geometry=False)
+    )
+    assert anchored is not None and anchored.sr_far_edge is not None
+    assert legacy is not None
+    return (
+        (anchored.zone_upper, anchored.zone_lower, anchored.sr_far_edge),
+        (legacy[2], legacy[3]),
+    )
+
+
+@pytest.mark.parametrize("variant", sorted(_LEAK_VARIANTS))
+def test_evaluated_bar_does_not_move_level(variant: str) -> None:
+    """Replacing the evaluated bar (still inside the retest band) leaves every level unchanged.
+
+    LONG band 101.40..102.60 on the low, SHORT band 97.40..98.60 on the high. The legacy
+    wrapper is compared too: its zone bounds also never read bar n - 1.
+    """
+    side, high, low, close = _LEAK_VARIANTS[variant]
+    setup, _context = (
+        geometry_builders.family_b_long_window()
+        if side == "long"
+        else geometry_builders.family_b_short_window()
+    )
+    direction = "LONG" if side == "long" else "SHORT"
+    replaced = geometry_builders.with_evaluated_bar(
+        setup, high=Decimal(high), low=Decimal(low), close=Decimal(close)
+    )
+    assert replaced[-1] != setup[-1]
+    assert replaced[:-1] == setup[:-1]
+    assert _legacy_and_anchored_levels(replaced, direction) == _legacy_and_anchored_levels(
+        setup, direction
+    )
+
+
 @pytest.mark.parametrize("side", ["long", "short"])
 def test_legacy_unchanged_wrapper_agrees_with_the_levels_function(side: str) -> None:
     parameter_set = load_parameter_set("breakout-retest", "baseline-v1")

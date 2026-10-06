@@ -645,6 +645,73 @@ def test_every_corrected_family_b_plan_has_its_stop_outside_the_zone() -> None:
     assert checked == 3  # b_long_worked, b_short_worked, b_long_legacy_confirm3
 
 
+def test_b_d07_signal_bar_through_the_stop_is_invalidated() -> None:
+    """D-07 on B: retest_depth_atr 2.0 lets a crash bar (low 98.50) be the first retest.
+
+    DERIVATIONS.md b_long_invalidated: bars 247 and 248 have lows 108 (above the band
+    98.00..106.00), bar 249 has low 98.50. ATR_last = 2.853498542274052478134110787, so the
+    stop is 100 - 0.2 x ATR_last = 99.42930029154518950437317784, above the bar low.
+    """
+    parameter_set = _case_set("b_long_worked", retest_depth_atr="2.0")
+    window = geometry_builders.family_b_crash_window()
+    result, planned = _evaluate_and_plan(window, parameter_set)
+    assert not result.is_no_trade, result.reason_code
+    assert result.signal is not None and result.signal.direction == "LONG"
+    assert planned is not None
+    assert planned.is_no_trade
+    assert planned.trade_plan is None
+    assert planned.reason_code == _INVALIDATED
+    setup, _context = window
+    atr_last = Decimal("2.853498542274052478134110787")
+    stop = strategy_module._detect_breakout_retest_levels(
+        setup_candles=setup, parameter_set=parameter_set, direction="LONG"
+    )
+    assert stop is not None and stop.sr_far_edge == Decimal("100.0")
+    expected_stop = Decimal("100.0") - Decimal("0.2") * atr_last
+    assert expected_stop == Decimal("99.42930029154518950437317784")
+    assert setup[-1].low == Decimal("98.50") < expected_stop
+
+
+def test_b_d08_min_stop_atr_rejects_the_narrow_zone_stop() -> None:
+    """D-08 on B: risk from entry_ref is 2 x 0.5 x 2.00 + 0.2 x 2.00 = 2.40 = 1.2 ATR."""
+    window = geometry_builders.family_b_long_window()
+    _result, tight = _evaluate_and_plan(window, _case_set("b_long_worked", min_stop_atr="2.0"))
+    assert tight is not None and tight.trade_plan is None
+    assert tight.reason_code == _STOP_TOO_TIGHT
+    _result, just_over = _evaluate_and_plan(window, _case_set("b_long_worked", min_stop_atr="1.21"))
+    assert just_over is not None and just_over.reason_code == _STOP_TOO_TIGHT
+    _result, equal = _evaluate_and_plan(window, _case_set("b_long_worked", min_stop_atr="1.2"))
+    assert equal is not None and not equal.is_no_trade, equal.reason_code
+    assert equal.trade_plan is not None
+    assert equal.trade_plan.stop_loss_price == Decimal("99.60")
+
+
+def test_b_d06_stop_inside_the_entry_zone_is_stop_too_tight() -> None:
+    """D-06 on B: zone_tolerance_atr 0 puts the far edge at the edge, and a 0.05 stop buffer
+    below the 0.1 entry buffer leaves the stop at 101.90, inside the entry zone 101.80..102.20."""
+    window = geometry_builders.family_b_long_window()
+    parameter_set = _case_set("b_long_worked", zone_tolerance_atr="0", sl_buffer_atr="0.05")
+    result, planned = _evaluate_and_plan(window, parameter_set)
+    assert not result.is_no_trade, result.reason_code
+    assert planned is not None
+    assert planned.is_no_trade
+    assert planned.trade_plan is None
+    assert planned.reason_code == _STOP_TOO_TIGHT
+
+
+def test_b_validator_causes_are_distinct_but_share_the_reason() -> None:
+    """Two different STOP_TOO_TIGHT causes (D-06 inside the zone, D-08 ATR floor) on B."""
+    window = geometry_builders.family_b_long_window()
+    _r1, inside = _evaluate_and_plan(
+        window, _case_set("b_long_worked", zone_tolerance_atr="0", sl_buffer_atr="0.05")
+    )
+    _r2, floor = _evaluate_and_plan(window, _case_set("b_long_worked", min_stop_atr="2.0"))
+    assert _plan_reason(inside) == _plan_reason(floor) == _STOP_TOO_TIGHT
+    # The same window passes with neither override, so each cause is the only blocker.
+    _r3, clean = _evaluate_and_plan(window, _case_set("b_long_worked"))
+    assert clean is not None and not clean.is_no_trade
+
+
 def test_derivations_file_has_a_section_for_every_plan_15_05_case() -> None:
     text = (_CASES_PATH.parent / "DERIVATIONS.md").read_text(encoding="utf-8")
     for heading in (
@@ -653,6 +720,7 @@ def test_derivations_file_has_a_section_for_every_plan_15_05_case() -> None:
         "## b_short_worked",
         "## b_long_legacy_confirm3",
         "## Family B anchoring windows",
+        "## Family B leakage and validator cases",
     ):
         assert heading in text, heading
     for name in ("b_long_worked", "b_short_worked"):

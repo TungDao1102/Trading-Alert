@@ -445,3 +445,74 @@ bar). Under geometry_version 1 the scan is restricted to SHORT and no close is b
 (closes are 99..104 against SHORT edges of 97 or below), so NO_TRADE_REGIME with regime BEARISH.
 The legacy set ignores the regime for Family B and signals LONG (edge 103.00 at i = 247, as in
 `b_long_legacy_contrast`).
+
+## Family B leakage and validator cases
+
+Leakage (D-13). For `b_long_worked` and its mirror the reference bar is ref_prev = 244 (end bar i
+= 246, confirmation bars 1), so every level is a function of bars 0..244: swing_high_ref 101,
+swing_low_ref 98, ATR_ref 2.00 give zone_upper 102.00, zone_lower 97.00 and `sr_far_edge` 100.00
+(SHORT: 103.00, 98.00, 100.00). Bar 249 is read only for "does its low (high for SHORT) lie in the
+band 101.40..102.60 (97.40..98.60)", so a replacement bar with a higher high, another low, or
+extreme values on the far side leaves all three levels unchanged. The replacements used keep
+the low (LONG) or the high (SHORT) inside the band: LONG (high 105, low 102.30, close 104), (high
+130, low 102.00, close 103); SHORT (high 98.30, low 95, close 96.50), (high 98.20, low 60, close 97).
+The legacy wrapper (confirmation bars 1, no geometry_version) stops at i = 247 on bar 248, so its
+zone bounds do not depend on bar 249 either.
+
+D-08 (`min_stop_atr`) on `b_long_worked`: the risk from entry_ref is the width of the narrow
+S/R zone plus the buffer, 2 x 0.5 x 2.00 + 0.2 x 2.00 = 2.40 = 1.2 ATR (ATR = 2.00). With
+`min_stop_atr` 2.0 the floor is 4.00 and the plan is STOP_TOO_TIGHT; 1.21 gives 2.42 (rejected);
+1.2 gives exactly 2.40 (equality passes) and the plan keeps stop 99.60.
+
+D-06 (stop inside the entry zone) on `b_long_worked` with `zone_tolerance_atr` 0 and
+`sl_buffer_atr` 0.05: with tolerance 0 the edge is the swing high itself. i = 248 (ref_prev 246,
+swing high 103, edge 103.00) has no retest on bar 249 (low 102 outside 102.40..103.60); i = 247
+(ref_prev 245, swing high 102, edge 102.00, close 104 above it) has the retest on bar 249 (low 102
+inside 101.40..102.60), so edge 102.00, swing_low_ref 98 and zone_lower 98.00, `sr_far_edge` =
+102.00 - 0 = 102.00. Entry zone 102 -/+ 0.1 x 2.00 = 101.80..102.20; stop = 102.00 - 0.05 x 2.00 =
+101.90, not below entry_min 101.80, so STOP_TOO_TIGHT.
+
+```
+python -c "from decimal import Decimal as D; edge=D('102'); far=edge-D('0')*D('2'); print(far, far-D('0.05')*D('2'), edge-D('0.1')*D('2'), edge+D('0.1')*D('2'))"
+102 101.90 101.8 102.2
+python -c "from decimal import Decimal as D; print(D('2')*D('0.5')*D('2')+D('0.2')*D('2'), (D('2')*D('0.5')*D('2')+D('0.2')*D('2'))/D('2'), D('1.2')*D('2'), D('1.21')*D('2'), D('2.0')*D('2'))"
+2.4 1.2 2.4 2.42 4.0
+```
+
+## b_long_invalidated
+
+D-07 on B (INVALIDATED). `b_long_worked` up to the breakout bar 246, then (`family_b_crash_window`)
+bar 247 open 108, low 108, high 109, close 109; bar 248 open 109, low 108, high 110, close 109; the
+evaluated bar 249 open 109, high 109, low 98.50, close 100. Test-local `retest_depth_atr` 2.0 (band
+half-width 2.0 x ATR_ref = 4.00) and `breakout_confirmation_bars` 1; other values as in
+`b_long_worked`.
+
+Breakout end bar i = 246 (ref_prev 244: swing high 101, ATR_ref 2.00, edge 102.00, close 103
+above). Band 102 -/+ 4.00 = [98.00, 106.00]: bars 247 and 248 have low 108 (outside), bar 249 has
+low 98.50 (inside), the first retest. Other end bars: i = 248 (ref_prev 246, swing high 103, edge
+104.00, close 109 above) has the band [100.00, 108.00], bar 249 low 98.50 is outside; i = 247
+(ref_prev 245, swing high 102, edge 103.00, close 109 above) has the band [99.00, 107.00], bar 248
+low 108 and bar 249 low 98.50 are both outside. So the detector returns i = 246.
+
+True ranges: bar 247 max(1, |109 - 103|, |108 - 103|) = 6; bar 248 max(2, 1, 1) = 2; bar 249
+max(10.5, 0, 10.5) = 10.5. ATR before them is 2.00 (every earlier true range is 2.00). Wilder:
+
+```
+python -c "
+from decimal import Decimal as D
+a=D('2')
+for tr in ('6','2','10.5'):
+    a=(D('13')*a+D(tr))/D('14'); print(a)
+sb=D('0.2')*a; print(sb, D('100')-sb, D('102')-D('0.1')*a)
+print(D('102')-D('2.0')*D('2'), D('102')+D('2.0')*D('2'))
+"
+2.285714285714285714285714286
+2.265306122448979591836734694
+2.853498542274052478134110787
+0.5706997084548104956268221574 99.42930029154518950437317784 101.7146501457725947521865889
+98.0 106.0
+```
+
+ATR_last = 2.853498542274052478134110787, stop = sr_far_edge - 0.2 x ATR_last =
+99.42930029154518950437317784, which is below entry_min 101.7146501457725947521865889 (D-06 passes)
+and above the signal bar low 98.50, so D-07 fires: INVALIDATED.
