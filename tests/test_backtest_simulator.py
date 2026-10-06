@@ -51,6 +51,8 @@ from src.core.types import MarketSnapshot
 from src.domain.canonical import sha256_hex
 from src.domain.registry import load_parameter_set
 
+from tests.test_phase6_fixture_scenarios import V6_SCENARIOS
+
 PHASE6_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase6"
 TRIGGER_CLOSE = datetime(2026, 9, 11, 9, 59, 59, tzinfo=UTC)
 REGRESSION_DOC = PHASE6_FIXTURES_DIR / "REGRESSION_SNAPSHOTS.md"
@@ -154,18 +156,18 @@ def _sized_modeled_costs(case_input: dict[str, Any], monkeypatch: pytest.MonkeyP
 
 
 def test_intrabar_both_touched_long_resolves_sl_first() -> None:
-    """The plan fills at 10:05 (a one-tick trade-through of the 121.50 limit), then one mark
-    minute touches both the stop (121.2) and TP1 (125.60): the stop wins (D-12)."""
+    """The plan fills at 10:05 (a one-tick trade-through of the 117.80 limit), then one mark
+    minute touches both the stop (116.50) and TP1 (123.20): the stop wins (D-12)."""
     from src.backtest.simulator import run
 
     trades = run(_case("intrabar_both_touched"))["trades"]
     assert len(trades) == 1
     trade = trades[0]
     assert trade["entry_kind"] == "ENTRY_FILLED"
-    assert trade["entry_price"] == "121.50"
+    assert trade["entry_price"] == "117.80"
     assert trade["entry_time_utc"] == "2026-09-11T10:05:59+00:00"
     assert trade["exit_kind"] == "SL"
-    assert trade["exit_price"] == "121.20"
+    assert trade["exit_price"] == "116.50"
     assert trade["exit_time_utc"] == "2026-09-11T10:06:59+00:00"
     assert trade["tp1_quantity"] is None
     assert trade["fallback_applied"] is False
@@ -176,7 +178,7 @@ def test_intrabar_both_touched_long_resolves_sl_first() -> None:
 
 
 def test_intrabar_both_touched_short_resolves_sl_first() -> None:
-    """Mirror: SHORT limit 128.50 fills on a trade high of 128.60; stop 128.8 beats TP1."""
+    """Mirror: SHORT limit 132.20 fills on a trade high of 132.30; stop 133.50 beats TP1."""
     from src.backtest.simulator import run
 
     trades = run(_case("intrabar_both_touched_short"))["trades"]
@@ -184,9 +186,9 @@ def test_intrabar_both_touched_short_resolves_sl_first() -> None:
     trade = trades[0]
     assert trade["direction"] == "SHORT"
     assert trade["entry_kind"] == "ENTRY_FILLED"
-    assert trade["entry_price"] == "128.50"
+    assert trade["entry_price"] == "132.20"
     assert trade["exit_kind"] == "SL"
-    assert trade["exit_price"] == "128.80"
+    assert trade["exit_price"] == "133.50"
     assert trade["fallback_applied"] is False
     assert trade["coverage_note"] is None
 
@@ -195,23 +197,23 @@ def test_intrabar_missing_mark_series_resolves_at_the_bar_close_with_a_flag() ->
     """The mark series has a hole from 10:06: the rest of bar 250 resolves once at its close
     from the bar range, stop first, flagged (never synthesized minute prices, D-12).
 
-    The follow-up record is the new setup the strategy produced at the close of bar 250 once
-    the first plan was closed; it is still resting when the data ends.
+    On the corrected geometry the stop lies beyond the zone edge, so a bar range that reaches
+    the stop is outside the zone and bar 250 raises no follow-up setup: one record (15-10
+    facts, "What changed against the baseline-v5 fixtures").
     """
     from src.backtest.simulator import run
 
     output = run(_case("intrabar_missing_fallback"))
     trades = output["trades"]
-    assert [t["entry_kind"] for t in trades] == ["ENTRY_FILLED", "PENDING_AT_DATA_END"]
+    assert [t["entry_kind"] for t in trades] == ["ENTRY_FILLED"]
     trade = trades[0]
     assert trade["exit_kind"] == "SL"
-    assert trade["exit_price"] == "121.20"
+    assert trade["exit_price"] == "116.50"
     assert trade["exit_time_utc"] == "2026-09-11T10:59:59+00:00"
     assert trade["fallback_applied"] is True
     assert trade["coverage_note"] is not None
     assert trade["coverage_note"].startswith("mark_price_1m_missing_from_2026-09-11T10:06:00")
     assert output["run_summary"]["fallback_count"] == 1
-    assert trades[1]["fallback_applied"] is False
 
 
 def test_costs_apply_from_run_1_and_realized_pnl_is_the_booked_sum() -> None:
@@ -260,24 +262,24 @@ def test_limit_touch_no_fill_counts_touches_and_the_plan_expires() -> None:
     assert trade["entry_kind"] == "EXPIRED"
     assert trade["touch_no_fill_count"] == 3
     assert trade["quantity"] is None
-    assert trade["planned_quantity"] == "32.071"
+    assert trade["planned_quantity"] == "19.303"
     assert trade["resolved_at_utc"] == "2026-09-11T13:59:59+00:00"
     assert output["run_summary"]["touch_no_fill_total"] == 3
 
 
 def test_limit_partial_fill_fills_half_then_takes_tp1_and_tp2() -> None:
-    """partial_fill_fraction 0.5 fills floor(32.071 x 0.5) = 16.035; TP1 takes half of it."""
+    """partial_fill_fraction 0.5 fills floor(19.303 x 0.5) = 9.651; TP1 takes half of it."""
     from src.backtest.simulator import run
 
     (trade,) = run(_case("limit_partial_fill"))["trades"]
     assert trade["entry_kind"] == "PARTIAL_FILL"
-    assert trade["planned_quantity"] == "32.071"
-    assert trade["quantity"] == "16.035"
+    assert trade["planned_quantity"] == "19.303"
+    assert trade["quantity"] == "9.651"
     assert Decimal(trade["quantity"]) < Decimal(trade["planned_quantity"])
-    assert trade["tp1_quantity"] == "8.017"
-    assert trade["tp1_price"] == "125.60"
+    assert trade["tp1_quantity"] == "4.825"
+    assert trade["tp1_price"] == "123.20"
     assert trade["exit_kind"] == "TP2"
-    assert trade["exit_price"] == "129.70"
+    assert trade["exit_price"] == "128.60"
 
 
 def test_limit_expiry_without_a_touch() -> None:
@@ -292,14 +294,14 @@ def test_limit_expiry_without_a_touch() -> None:
 
 
 def test_invalidation_cancels_the_resting_entry_at_the_next_bar_close() -> None:
-    """Bar 250 closes at 120.80, below the invalidation level, while the plan rests.
+    """Bar 250 closes at 116.00, below the invalidation level, while the plan rests.
 
-    The second record is the follow-up setup of bar 250, still resting at the data end.
+    Bar 250 raises no follow-up setup on the corrected geometry (15-10 facts): one record.
     """
     from src.backtest.simulator import run
 
     trades = run(_case("invalidation_cancels_entry"))["trades"]
-    assert [t["entry_kind"] for t in trades] == ["INVALIDATION_CANCEL", "PENDING_AT_DATA_END"]
+    assert [t["entry_kind"] for t in trades] == ["INVALIDATION_CANCEL"]
     cancelled = trades[0]
     assert cancelled["quantity"] is None
     assert cancelled["resolved_at_utc"] == "2026-09-11T10:59:59+00:00"
@@ -308,36 +310,46 @@ def test_invalidation_cancels_the_resting_entry_at_the_next_bar_close() -> None:
 # Regression snapshots (D-25): scenario tuple and a digest of the whole output, both pinned
 # from the v2 engine. They are NOT hand-derived. Regenerating the fixtures or changing the
 # engine semantics moves them; re-pin by printing `_digest(run(case))` and say why in the
-# plan's regeneration inventory.
+# plan's regeneration inventory. Phase 15 (plan 15-12, D-19, D054): re-pinned on the v6
+# fixtures; every scenario tuple equals `V6_SCENARIOS` of tests/test_phase6_fixture_scenarios.py
+# (asserted below) and the digests were re-pinned only while that module passed.
 REGRESSION_SNAPSHOTS: dict[str, tuple[tuple[str, str | None, bool, int], str]] = {
     # name: ((entry_kind, exit_kind, fallback_applied, touch_no_fill_count), digest)
     "intrabar_both_touched": (
         ("ENTRY_FILLED", "SL", False, 0),
-        "8361c7ee192ec0b3d845b618118b81d702bc7325961efb710ef65357983d41bb",
+        "04db4983b254951ec0eba4946787d415b0d9471ed259e6aec5ce88bb664433c3",
     ),
     "intrabar_both_touched_short": (
         ("ENTRY_FILLED", "SL", False, 0),
-        "12ab88b86e5d676d53d486f71569cc32783752bb68117441811c61ef8dd2c6dc",
+        "0d50102b4b8a567bc014f6b015ebb796e51611dd6dfd43d53c0874f95c40ee94",
     ),
     "intrabar_missing_fallback": (
         ("ENTRY_FILLED", "SL", True, 0),
-        "8beeb6e4aee7ad546e259c4d8154fd4d4be1ed27b51f5dbea4492578adfb0dee",
+        "7c7b3bf2dcf231eaf7c7fee43e9bbf6857195b80027eb80e6d1f1b66b5516a30",
     ),
     "limit_touch_no_fill": (
         ("EXPIRED", None, False, 3),
-        "3d97433276538773911a9873f07760497f2c94dd6b7501201450af1488a73812",
+        "7458ac0e6f34cb50317e225bb004b55edeac97720193347c5ae06209c7f50c8c",
     ),
     "limit_partial_fill": (
         ("PARTIAL_FILL", "TP2", False, 0),
-        "a51dfcddef59c29711e12a43bc1ae18269d8ecbab220ea8ace08d3c4b69969db",
+        "3a7039dcf55851952dcc57918983a457d49710e12dd5534979477b340597f24a",
     ),
     "limit_expiry": (
         ("EXPIRED", None, False, 0),
-        "f4a1733a2162d95430c8216792b672a6afda3eb77978becfdcca0bf1a3a3cf1c",
+        "fb60c4d61514ba557659de1ec713f5f5579b8fd60b1ec9b64a4d4a9e47120002",
     ),
     "invalidation_cancels_entry": (
         ("INVALIDATION_CANCEL", None, False, 0),
-        "76856083699f1bac96d423336fc9c258282acd693ef9ccca4d0c876c587b9fcb",
+        "74cea2d2bce3fee34ead91b2e568db41492ff391212eb82c9505f211ec22833e",
+    ),
+    "baselines/no_trade": (
+        ("REJECT", None, False, 0),
+        "79621110930faa9a355d087849a301b9b0dee105330397206d9213efb8c766c1",
+    ),
+    "baselines/simple_trend": (
+        ("ENTRY_FILLED", "SL", False, 0),
+        "15f56a1a524d3c2361ac6cf077c82478c03446380bdaf0ed702cb5fb95689a41",
     ),
 }
 
@@ -353,6 +365,7 @@ def test_phase6_case_matches_its_regression_snapshot(name: str) -> None:
     from src.backtest.simulator import run
 
     scenario, digest = REGRESSION_SNAPSHOTS[name]
+    assert scenario == V6_SCENARIOS[name]
     output = run(_case(name))
     first = output["trades"][0]
     assert (
@@ -801,18 +814,18 @@ def test_end_to_end_sl_loss_including_costs_is_within_allowed_risk(case_name: st
 def test_end_to_end_tp_ladder_costs_are_booked_per_leg() -> None:
     """TP1 half then TP2 (both resting limits at expected_slippage 0.0001), hand arithmetic.
 
-    Entry 121.50 x 16.035; TP1 125.60 x 8.017; TP2 129.70 x 8.018 (the remainder).
+    Entry 117.80 x 9.651; TP1 123.20 x 4.825; TP2 128.60 x 4.826 (the remainder).
     """
     from src.backtest.simulator import run
 
     (trade,) = run(_case("limit_partial_fill"))["trades"]
-    entry, qty = Decimal("121.50"), Decimal("16.035")
-    tp1_price, tp1_qty = Decimal("125.60"), Decimal("8.017")
-    tp2_price, tp2_qty = Decimal("129.70"), qty - tp1_qty
-    assert tp2_qty == Decimal("8.018")
+    entry, qty = Decimal("117.80"), Decimal("9.651")
+    tp1_price, tp1_qty = Decimal("123.20"), Decimal("4.825")
+    tp2_price, tp2_qty = Decimal("128.60"), qty - tp1_qty
+    assert tp2_qty == Decimal("4.826")
 
     gross = tp1_qty * (tp1_price - entry) + tp2_qty * (tp2_price - entry)
-    assert gross == Decimal("98.6173")
+    assert gross == Decimal("78.1758")
     fees = (entry * qty + tp1_price * tp1_qty + tp2_price * tp2_qty) * Decimal("0.0005")
     slippage = (entry * qty + tp1_price * tp1_qty + tp2_price * tp2_qty) * Decimal("0.0001")
 
@@ -894,7 +907,7 @@ def test_run_accepts_partial_fill_fraction_that_differs_from_registry() -> None:
 def test_guard_reason_flows_from_the_shared_helper_into_a_reject_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A min_stop_distance_rate of 2 percent (the fixture stop is about 1.1 percent)."""
+    """A min_stop_distance_rate of 3 percent (the fixture stop is about 2.04 percent)."""
     import src.backtest.engine as engine
     import src.backtest.simulator as simulator
 
@@ -902,7 +915,7 @@ def test_guard_reason_flows_from_the_shared_helper_into_a_reject_record(
 
     def _tight(params):  # type: ignore[no-untyped-def]
         _, max_cost_to_risk = real(params)
-        return Decimal("0.02"), max_cost_to_risk
+        return Decimal("0.03"), max_cost_to_risk
 
     monkeypatch.setattr(engine, "guard_rates_from_params", _tight)
     trades = simulator.run(_case("intrabar_both_touched"))["trades"]
