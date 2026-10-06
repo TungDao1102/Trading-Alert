@@ -403,11 +403,14 @@ V6_BASELINE_KEYS = {
     V6_NO_TRADE: "baseline-no-trade-v4",
     V6_SIMPLE_TREND: "baseline-simple-trend-v4",
 }
-V6_KEYS = (V6_LONG,)
+V6_KEYS = (*V6_CANDIDATE_KEYS, *V6_BASELINE_KEYS)
 V6_PARTIAL_FILL_FRACTIONS = {V6_PARTIAL_FILL: "0.5"}
 # The trigger payloads whose planner geometry is recomputed, with the registry set each uses.
 V6_GEOMETRY_CASES = {
     "long": (V6_LONG, "baseline-v6", False),
+    "short": (V6_SHORT, "baseline-v6", True),
+    "simple_trend": (V6_SIMPLE_TREND, "baseline-simple-trend-v4", False),
+    "no_trade": (V6_NO_TRADE, "baseline-no-trade-v4", False),
 }
 TRIGGER_INDEX = 249  # bar 249 of the 1h series closes at TRIGGER_CLOSE
 
@@ -609,6 +612,8 @@ def test_build_v6_payloads_is_pure_and_returns_every_case() -> None:
     second = _load_generator().build_v6_payloads()
     assert first == second
     assert set(first) == set(V6_KEYS)
+    assert len(V6_KEYS) == 10
+    assert first[V6_PARITY] == first[V6_LONG], "the parity input is the both-touched payload"
 
 
 def _walk_keys(value: Any) -> set[str]:
@@ -729,6 +734,43 @@ def test_v6_trigger_geometry_matches_independent_arithmetic(name: str) -> None:
     stop_rate, cost_to_risk = _assert_guard_clearance(case)
     assert stop_rate == geo["stop_rate"]
     assert cost_to_risk == geo["cost_to_risk"]
+
+
+def test_no_trade_baseline_is_rejected_by_the_rr_gate_alone() -> None:
+    """The structural invariants pass first (D-26): on baseline-v6 the same bars give a plan."""
+    case = _v6(V6_NO_TRADE)
+    _, rejected = _plan_for(case)
+    assert rejected.is_no_trade and rejected.reason_code == "RR_TOO_LOW"
+    candidate = dict(case, parameter_set_id="baseline-v6")
+    _, accepted = _plan_for(candidate)
+    assert not accepted.is_no_trade
+    assert accepted.trade_plan is not None
+
+
+def test_simple_trend_baseline_has_the_wider_stop_of_its_wider_zone() -> None:
+    """zone_tolerance_atr 1.0 puts the stop 1.3 ATR from the entry reference (0.8 for v6)."""
+    wide = _own_geometry(
+        _v6(V6_SIMPLE_TREND), _toml_params("baseline-simple-trend-v4"), short=False
+    )
+    narrow = _own_geometry(_v6(V6_LONG), _toml_params("baseline-v6"), short=False)
+    tolerance = Decimal("1e-12")
+    assert abs(wide["risk"] / wide["atr"] - Decimal("1.3")) < tolerance
+    assert abs(narrow["risk"] / narrow["atr"] - Decimal("0.8")) < tolerance
+    assert wide["stop"] < narrow["stop"]
+
+
+def test_the_short_payload_is_the_exact_mirror_of_the_long_payload() -> None:
+    """Price' = 250 - price, high' = 250 - low, low' = 250 - high on every 1H bar."""
+    long_rows = _v6(V6_LONG)["strategy_bars"]
+    short_rows = _v6(V6_SHORT)["strategy_bars"]
+    assert len(long_rows) == len(short_rows) == 250
+    axis = Decimal("250.00")
+    for lrow, srow in zip(long_rows, short_rows, strict=True):
+        assert srow["open_time_utc"] == lrow["open_time_utc"]
+        assert _d(srow["open"]) == axis - _d(lrow["open"])
+        assert _d(srow["high"]) == axis - _d(lrow["low"])
+        assert _d(srow["low"]) == axis - _d(lrow["high"])
+        assert _d(srow["close"]) == axis - _d(lrow["close"])
 
 
 @pytest.mark.parametrize("key", V6_KEYS)

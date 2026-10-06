@@ -962,8 +962,72 @@ def build_v6_payloads() -> dict[str, dict]:
     v5.0.0; the two baseline cases carry baseline-no-trade-v4 / baseline-simple-trend-v4 at
     v5.0.0 (D-26). Every call builds fresh dicts, writes nothing and reads no clock.
     """
+    long_stop_through = (
+        V6_REST,
+        V6_REST + Decimal("0.05"),
+        V6_LEVELS.stop - Decimal("0.30"),
+        V6_LEVELS.limit + Decimal("0.05"),
+    )
+    # Bar 250 closes at 116.00, below the invalidation level (the plan's stop, about 116.41).
+    invalidation_bar = (
+        V6_REST,
+        V6_REST + Decimal("0.10"),
+        Decimal("115.90"),
+        Decimal("116.00"),
+    )
+    holes = frozenset(range(50, HOUR_MINUTES))
+
+    def simple_trend_path(kind: str) -> LongPath:
+        return _v6_both_touched(kind, V6_SIMPLE_TREND_LEVELS)
+
     return {
         "phase6/intrabar_both_touched/input.json": _v6_case(short=False, path_for=_v6_both_touched),
+        "phase6/intrabar_both_touched_short/input.json": _v6_case(
+            short=True, path_for=_v6_both_touched
+        ),
+        "phase6/intrabar_missing_fallback/input.json": _v6_case(
+            short=False,
+            path_for=_v6_missing_mark,
+            mark_holes=frozenset(range(EXIT_MINUTE, HOUR_MINUTES)),
+            extra_bar_long=long_stop_through,
+        ),
+        "phase6/limit_touch_no_fill/input.json": _v6_case(
+            short=False,
+            path_for=_v6_touch_only,
+            count=EXPIRY_MINUTES,
+            data_end=EXPIRY_DATA_END,
+        ),
+        "phase6/limit_partial_fill/input.json": _v6_case(
+            short=False,
+            path_for=_v6_tp_ladder,
+            cost_overrides={"partial_fill_fraction": "0.5"},
+        ),
+        "phase6/limit_expiry/input.json": _v6_case(
+            short=False,
+            path_for=lambda kind: _v6_resting,
+            count=EXPIRY_MINUTES,
+            data_end=EXPIRY_DATA_END,
+        ),
+        "phase6/invalidation_cancels_entry/input.json": _v6_case(
+            short=False,
+            path_for=lambda kind: _v6_resting,
+            trade_holes=holes,
+            mark_holes=holes,
+            extra_bar_long=invalidation_bar,
+        ),
+        "phase6/baselines/no_trade/input.json": _v6_case(
+            short=False,
+            path_for=_v6_both_touched,
+            parameter_set_id=V6_BASELINE_NO_TRADE_SET_ID,
+        ),
+        "phase6/baselines/simple_trend/input.json": _v6_case(
+            short=False,
+            path_for=simple_trend_path,
+            parameter_set_id=V6_BASELINE_SIMPLE_TREND_SET_ID,
+        ),
+        "phase7/parity_overlapping_history/input.json": _v6_case(
+            short=False, path_for=_v6_both_touched
+        ),
     }
 
 
