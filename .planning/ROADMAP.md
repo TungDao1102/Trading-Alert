@@ -634,7 +634,7 @@ Plans:
 
 **Audit refs**: F-301, F-113, F-909
 
-**Plans:** 2/15 plans executed
+**Plans:** 3/15 plans executed
 
 Plans:
 
@@ -643,7 +643,7 @@ Plans:
 - [x] 15-02-PLAN.md — Hash-neutral rationale record and PLACEHOLDER refusal in pin_stream_epoch (D-16, D-27)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 15-03-PLAN.md — Tracer: confirmed-pivot Family A LONG end to end; pivot function under TDD; optional registry keys incl. geometry_version
+- [x] 15-03-PLAN.md — Tracer: confirmed-pivot Family A LONG end to end; pivot function under TDD; optional registry keys incl. geometry_version
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 15-04-PLAN.md — Shared geometry validator (D-06/D-07/D-08/F6) and Family A complete: SHORT, opposite-pivot TP1, audit anchors, p9 regression
@@ -1054,7 +1054,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 13. Research Data Foundation Fixes | 13/13 | Complete    | 2026-10-03 |
 | 13.1. Deployment & CI | 12/12 | Complete | 2026-10-04 |
 | 14. Backtest Simulator Causality Rewrite | 16/16 | In Progress|  |
-| 15. Strategy Geometry Correction | 2/15 | In Progress|  |
+| 15. Strategy Geometry Correction | 3/15 | In Progress|  |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
 | 17. Operational Persistence Layer | 15/15 | In Progress|  |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |

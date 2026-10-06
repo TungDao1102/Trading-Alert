@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 15
 current_phase_name: Strategy Geometry Correction
 status: executing
-stopped_at: Completed 15-02-PLAN.md
-last_updated: "2026-10-06T05:59:40.394Z"
+stopped_at: Completed 15-03-PLAN.md
+last_updated: "2026-10-06T06:15:05.648Z"
 last_activity: 2026-10-06
 last_activity_desc: Phase 15 execution started
-state_head: d21bdf1fab1d227436d06a857edc58d0fac1ca96
+state_head: 1e78d9870347b0b5e3f6bb046f0f2b5acb99423c
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 140
-  completed_plans: 126
+  completed_plans: 127
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 15 (Strategy Geometry Correction) — EXECUTING
-Plan: 3 of 15
+Plan: 4 of 15
 Status: Ready to execute
 Last activity: 2026-10-06 — Phase 15 execution started
 
@@ -173,6 +173,7 @@ Progress: [█████░░░░░] 46%
 | Phase 14 P16 | 90min | 3 tasks | 19 files |
 | Phase 15 P01 | 25min | 2 tasks | 2 files |
 | Phase 15 P02 | 40min | 2 tasks | 6 files |
+| Phase 15 P03 | 40min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -427,6 +428,8 @@ Recent decisions affecting current work:
 - [Phase 14]: Protocol version pins are read from the header in gate code and tests (PR-08, DC-03); research-gate negative tests header-driven
 - [Phase 15]: 15-01: geometry audit verdicts follow D-22..D-27 over D-10/D-11 (B stop FIX per D-23, B breakout_confirmation_bars is PARAMETER pending 15-08)
 - [Phase 15]: 15-02: rationale tables are hash-neutral metadata; pin_stream_epoch refuses missing/incomplete rationale and PLACEHOLDER keys by default (allow_unrationalized is test-only)
+- [Phase 15]: 15-03: pivot tie rule is left non-strict/right strict, so of two equal lows the right one is the pivot; geometry_version gates the corrected Family A path, legacy sets unchanged
+- [Phase 15]: 15-03: optional registry keys pivot_left_bars, pivot_right_bars, geometry_version, tp_mode, min_stop_atr with cross-key rules; no committed set changed hash
 
 ### Pending Todos
 
@@ -481,6 +484,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-06T05:59:39.496Z
-Stopped at: Completed 15-02-PLAN.md
+Last session: 2026-10-06T06:15:04.860Z
+Stopped at: Completed 15-03-PLAN.md
 Resume file: None
