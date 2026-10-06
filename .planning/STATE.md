@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 15
 current_phase_name: Strategy Geometry Correction
 status: executing
-stopped_at: Completed 15-05-PLAN.md
-last_updated: "2026-10-06T06:51:59.172Z"
+stopped_at: Completed 15-06-PLAN.md
+last_updated: "2026-10-06T07:10:01.048Z"
 last_activity: 2026-10-06
 last_activity_desc: Phase 15 execution started
-state_head: c166622cac713702a83aaa0612a1714c4a9b9d03
+state_head: c79709b4d5fd45bb2560f4cced433e0598f8c458
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 140
-  completed_plans: 129
+  completed_plans: 130
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 15 (Strategy Geometry Correction) — EXECUTING
-Plan: 6 of 15
+Plan: 7 of 15
 Status: Ready to execute
 Last activity: 2026-10-06 — Phase 15 execution started
 
@@ -176,6 +176,7 @@ Progress: [█████░░░░░] 46%
 | Phase 15 P03 | 40min | 3 tasks | 11 files |
 | Phase 15 P04 | 45min | 3 tasks | 6 files |
 | Phase 15 P05 | 105min | 3 tasks | 7 files |
+| Phase 15 P06 | 1h 20m | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -435,6 +436,7 @@ Recent decisions affecting current work:
 - [Phase 15]: 15-04: _geometry_rejection is the single structural validator (D-06/D-07/D-08/F6, fixed order, before the RR gate); RR and TP2 RR use the signed profit-side leg; TP1-beyond-entry-zone tightening deferred (check compares entry_ref per plan)
 - [Phase 15]: Phase 15 plan 15-05: Family B geometry_version 1 anchors the retest to the evaluated bar, trades only with the 4H regime and puts the stop beyond the far edge of the narrow S/R zone (D-23, D-24); legacy output pinned unchanged
 - [Phase 15]: Phase 15 plan 15-05: breakout_confirmation_bars is 1 only as a test-local proposed baseline (sheet B1), 3 only in the labelled legacy case; ratification stays at 15-08
+- [Phase 15]: 15-06: Family C regime under geometry_version is the two newest confirmed 4H pivots per side (HH+HL bullish, LH+LL bearish, tied or mixed neutral, fewer than two NO_TRADE); S3 stop beyond the narrow S/R zone; tp_mode T_MID midpoint or T_OPPOSITE opposite boundary — D-22, D-23, D-10; one tied pair is NEUTRAL; values test-local, ratified at 15-08
 
 ### Pending Todos
 
@@ -489,6 +491,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-06T06:51:58.369Z
-Stopped at: Completed 15-05-PLAN.md
+Last session: 2026-10-06T07:10:00.271Z
+Stopped at: Completed 15-06-PLAN.md
 Resume file: None
