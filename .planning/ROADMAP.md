@@ -634,7 +634,7 @@ Plans:
 
 **Audit refs**: F-301, F-113, F-909
 
-**Plans:** 8/15 plans executed
+**Plans:** 9/15 plans executed
 
 Plans:
 
@@ -661,7 +661,7 @@ Plans:
 - [x] 15-08-PLAN.md — Checkpoint (blocking-human, never auto-selected): user ratifies every parameter value; baseline-v6 sets for A, B, C with rationale tables and pins
 
 **Wave 8** *(blocked on Wave 7 completion)*
-- [ ] 15-09-PLAN.md — baseline-no-trade-v4 and baseline-simple-trend-v4; gate PA-08
+- [x] 15-09-PLAN.md — baseline-no-trade-v4 and baseline-simple-trend-v4; gate PA-08
 
 **Wave 9** *(blocked on Wave 8 completion)*
 - [ ] 15-10-PLAN.md — Phase 6 generator v6 payloads (V-dip confirmed pivot) proven in memory: independent geometry, named scenarios, hand-derived fixture facts; CRLF fix (F12); no committed fixture moves
@@ -1054,7 +1054,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 13. Research Data Foundation Fixes | 13/13 | Complete    | 2026-10-03 |
 | 13.1. Deployment & CI | 12/12 | Complete | 2026-10-04 |
 | 14. Backtest Simulator Causality Rewrite | 16/16 | In Progress|  |
-| 15. Strategy Geometry Correction | 8/15 | In Progress|  |
+| 15. Strategy Geometry Correction | 9/15 | In Progress|  |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
 | 17. Operational Persistence Layer | 15/15 | In Progress|  |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |

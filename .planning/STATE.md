@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 15
 current_phase_name: Strategy Geometry Correction
 status: executing
-stopped_at: Completed 15-08-PLAN.md
-last_updated: "2026-10-06T08:01:39.757Z"
+stopped_at: Completed 15-09-PLAN.md
+last_updated: "2026-10-06T08:07:41.965Z"
 last_activity: 2026-10-06
 last_activity_desc: Phase 15 execution started
-state_head: 33f5ff73e17ae5b9c3a9c7287af2d29a20a0d93b
+state_head: c800f3d6a76abf12864e5eb8198bb5b1ea1cbb3c
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 140
-  completed_plans: 132
+  completed_plans: 133
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 15 (Strategy Geometry Correction) — EXECUTING
-Plan: 9 of 15
+Plan: 10 of 15
 Status: Ready to execute
 Last activity: 2026-10-06 — Phase 15 execution started
 
@@ -179,6 +179,7 @@ Progress: [█████░░░░░] 46%
 | Phase 15 P06 | 1h 20m | 3 tasks | 7 files |
 | Phase 15 P07 | 1h30m | 3 tasks | 3 files |
 | Phase 15 P08 | 1h | 3 tasks | 10 files |
+| Phase 15 P09 | 25min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -442,6 +443,7 @@ Recent decisions affecting current work:
 - [Phase 15]: 15-07: census is counts-only and run once per draft set; draft geometry_version 1 sets show 0 invariant violations, legacy Family A 323 of 323 (F-301); values stay with the user for 15-08
 - [Phase 15]: Phase 15 baseline-v6 sets written exactly as ratified by the user at checkpoint 15-08-01 (reply ratify); min_stop_atr 0.5 and most seed values are PLACEHOLDER so the sets are research-only
 - [Phase 15]: risk_rate, breakout_volume_threshold (B) and breakout_confirmation_bars (A, C) omitted from the v6 sets: no src/ reader
+- [Phase 15]: 15-09: -v4 baselines take baseline-v6 values with only the ratified overrides; override basis DECISION D054; PA-08 plus exact pin-set equality guard the five Phase 15 sets
 
 ### Pending Todos
 
@@ -496,6 +498,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-06T08:01:38.929Z
-Stopped at: Completed 15-08-PLAN.md
+Last session: 2026-10-06T08:07:41.057Z
+Stopped at: Completed 15-09-PLAN.md
 Resume file: None
