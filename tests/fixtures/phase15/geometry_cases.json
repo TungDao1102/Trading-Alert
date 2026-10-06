@@ -1,0 +1,55 @@
+{
+  "cases": {
+    "a_long_worked": {
+      "family": "trend-pullback",
+      "builder": "family_a_long_window",
+      "params": {
+        "zone_tolerance_atr": "0.5",
+        "entry_buffer_atr": "0.1",
+        "sl_buffer_atr": "0.2",
+        "minimum_rr": "2",
+        "swing_lookback": "20",
+        "pivot_left_bars": "3",
+        "pivot_right_bars": "3",
+        "geometry_version": "1"
+      },
+      "expected": {
+        "direction": "LONG",
+        "setup_type": "TREND_PULLBACK_LONG",
+        "zone_upper": "100.00",
+        "zone_lower": "98.00",
+        "entry_min": "97.80",
+        "entry_max": "100.20",
+        "entry_ref": "99.00",
+        "stop_loss": "97.40",
+        "tp1": "106.00",
+        "tp2": "113.00",
+        "reason_code": "OK"
+      }
+    },
+    "a_long_legacy_contrast": {
+      "family": "trend-pullback",
+      "builder": "family_a_long_window",
+      "params": {
+        "zone_tolerance_atr": "0.5",
+        "entry_buffer_atr": "0.1",
+        "sl_buffer_atr": "0.2",
+        "minimum_rr": "2",
+        "swing_lookback": "20"
+      },
+      "expected": {
+        "direction": "LONG",
+        "setup_type": "TREND_PULLBACK_LONG",
+        "zone_upper": "99.00",
+        "zone_lower": "97.00",
+        "entry_min": "96.80",
+        "entry_max": "99.20",
+        "entry_ref": "98.00",
+        "stop_loss": "97.60",
+        "tp1": "106.00",
+        "tp2": "114.00",
+        "reason_code": "OK"
+      }
+    }
+  }
+}
