@@ -79,6 +79,19 @@ The full cross-product is intentionally **not** enumerated here — that is the 
 
 Selection-implying adjectives ("highest-ranked", "first-pick", "top-of-list") are intentionally absent by construction — see `## V1 family selection` footer below.
 
+### 3.2 Implemented as (Phase 15, D054)
+
+This paragraph records what the code does for the Stage A baseline row, where it differs from the sheet, and where the record lives. It is an implementation record, not evidence: the sheet stays a hypothesis and no value below is claimed to be evidence-backed.
+
+- **Set and versions.** `params/trend-pullback/baseline-v6.toml`, `strategy_version` v5.0.0, `geometry_version` 1. Every parameter of the set carries a basis in its in-file rationale table; the geometry numbers (pivot widths 3 and 3, `min_stop_atr` 0.5, `zone_tolerance_atr`, `entry_buffer_atr`, `sl_buffer_atr`, `minimum_rr`, `swing_lookback`) are labelled PLACEHOLDER, so the set is research-only. Comparison baselines on the same geometry: `baseline-no-trade-v4` and `baseline-simple-trend-v4` (same directory).
+- **Regime (deviation from R1).** The 4H regime is the EMA50 proxy: BULLISH when the last closed 4H close is above EMA50(4H), BEARISH when below, NEUTRAL on exact equality. The sheet's Stage A baseline names R1 (structure-only); the proxy is kept for Families A and B (D-22) and the deviation is recorded in D054.
+- **Level.** The most recent confirmed pivot inside `swing_lookback` (low for LONG, high for SHORT), with `pivot_left_bars` / `pivot_right_bars` from the set. A pivot is known only once its right-side bars have closed, the evaluated bar is never part of it, and no confirmed pivot means no setup (never a fallback to a trailing extreme). This replaces the earlier trailing extreme that included the evaluated bar (`GEOMETRY_AUDIT.md`, Family A `level` row).
+- **Zone (deviation).** A single level, `level +/- zone_tolerance_atr x ATR`. The merge, collide and separate semantics of section 5.1 and `zone_min_touches` stay a research variant and are not implemented; recorded in D054.
+- **Pullback and entry.** P1: the evaluated bar's low (LONG) or high (SHORT) lies inside the zone. Entry E2: the entry zone is the pivot zone widened by `entry_buffer_atr x ATR` on each side; the entry reference is the zone midpoint.
+- **Stop (reading of S2).** Beyond the outer edge of the whole entry zone by `sl_buffer_atr x ATR`: LONG `entry zone lower edge - sl_buffer_atr x ATR`, SHORT `entry zone upper edge + sl_buffer_atr x ATR`. Measuring the buffer from the outer zone edge rather than from the pivot is a recorded reading of S2. Shared planner invariants apply after quantization: the stop is strictly outside the whole entry zone, the signal bar has not already traded through it (INVALIDATED), and `abs(entry reference - stop) >= min_stop_atr x ATR`.
+- **Target (deviation from T1).** TP1 is the opposite confirmed pivot and TP2 is entry +/- 2 x (TP1 - entry). A target built from `minimum_rr` would make the RR gate vacuous (CR-03), so `minimum_rr` stays an acceptance threshold only. TP1 must lie on the profit side of the entry reference.
+- **Where the deviations are recorded.** D054 in `docs/DECISIONS.md` and the Family A rows of `docs/research/GEOMETRY_AUDIT.md` (D-22, D-05, D-09, D-14).
+
 ## 4. Advantages / Disadvantages
 
 ### 4.1 Why this family might earn backtest admission
@@ -225,7 +238,7 @@ Family B's questions (Q3 / Q4) and Family C's question (Q9's filter-side) are NO
 
 ## Acceptance status
 
-- Stage A baseline implemented: `NO`
+- Stage A baseline implemented: `AS RECORDED` (baseline-v6, deviations in D054)
 - A1–A6 variants implemented: `NO`
 - Backtested on the same split as Families B and C: `NO`
 - Out-of-sample validated: `NO`

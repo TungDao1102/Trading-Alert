@@ -172,3 +172,66 @@ def test_universal_invariants_section_lists_reasons_and_order() -> None:
     assert "## Universal planner invariants" in text
     for token in ("D-06", "D-07", "D-08", "F6", "STOP_TOO_TIGHT", "INVALIDATED", "RR_TOO_LOW"):
         assert token in text
+
+
+# --------------------------------------------------------------------------- #
+# Family sheets (plan 15-14, D-12, F-113, T-15-24)
+# --------------------------------------------------------------------------- #
+
+SHEETS_ROOT = REPO_ROOT / "docs" / "research" / "families"
+SHEET_FAMILIES = ("trend-pullback",)
+IMPLEMENTED_AS = "Implemented as (Phase 15, D054)"
+BASELINE_LINE = re.compile(r"^- Stage [ABC] baseline implemented: (?P<value>.+)$", re.MULTILINE)
+VARIANTS_LINE = re.compile(
+    r"^- (?P<names>[^\n]*variants implemented): (?P<value>.+)$", re.MULTILINE
+)
+
+
+def _read_sheet(family: str) -> str:
+    """Read one family sheet as UTF-8 with CRLF normalized to LF."""
+    return (SHEETS_ROOT / f"{family}.md").read_text(encoding="utf-8").replace("\r\n", "\n")
+
+
+def check_sheet(text: str) -> list[str]:
+    """Return every structural problem of one family sheet (empty list means the sheet is sound)."""
+    problems: list[str] = []
+    status = next((line for line in text.split("\n") if line.startswith("> Status:")), "")
+    if "HYPOTHESIS" not in status or "**NOT FROZEN**" not in status:
+        problems.append(f"Status line is not 'HYPOTHESIS ... NOT FROZEN': {status!r}")
+    if not re.search(rf"^###? .*{re.escape(IMPLEMENTED_AS)}", text, re.MULTILINE):
+        problems.append(f"no heading carries {IMPLEMENTED_AS!r}")
+    baseline = BASELINE_LINE.search(text)
+    if baseline is None:
+        problems.append("no 'Stage X baseline implemented' acceptance line")
+    else:
+        value = baseline.group("value")
+        for token in ("AS RECORDED", "baseline-v6", "D054"):
+            if token not in value:
+                problems.append(f"baseline implemented line lacks {token!r}: {value!r}")
+    variants = VARIANTS_LINE.search(text)
+    if variants is None:
+        problems.append("no variants-implemented acceptance line")
+    elif not variants.group("value").endswith("`NO`"):
+        problems.append(f"variants line no longer ends in `NO`: {variants.group('value')!r}")
+    return problems
+
+
+def test_sheet_families_cover_the_registry_families_checked_so_far() -> None:
+    assert set(SHEET_FAMILIES) <= {"trend-pullback", "breakout-retest", "range-mr"}
+
+
+def test_family_sheets_record_the_implemented_geometry_and_stay_not_frozen() -> None:
+    for family in SHEET_FAMILIES:
+        assert check_sheet(_read_sheet(family)) == [], family
+
+
+def test_sheet_check_detects_a_frozen_status_a_missing_record_and_a_flipped_variants_line() -> None:
+    text = _read_sheet("trend-pullback")
+    frozen = text.replace("**NOT FROZEN**", "**FROZEN**", 1)
+    assert any("NOT FROZEN" in p for p in check_sheet(frozen))
+    missing = text.replace(IMPLEMENTED_AS, "Implementation note")
+    assert any(IMPLEMENTED_AS in p for p in check_sheet(missing))
+    no_baseline = BASELINE_LINE.sub("- Stage A baseline implemented: `NO`", text)
+    assert any("baseline implemented line lacks" in p for p in check_sheet(no_baseline))
+    flipped = VARIANTS_LINE.sub(lambda m: f"- {m.group('names')}: `YES`", text)
+    assert any("no longer ends in `NO`" in p for p in check_sheet(flipped))
