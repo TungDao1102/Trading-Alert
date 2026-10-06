@@ -4,11 +4,11 @@ milestone: v0.3
 current_phase: 14
 current_phase_name: Backtest Simulator Causality Rewrite
 status: verifying
-stopped_at: Completed 14-16-PLAN.md
-last_updated: "2026-10-05T10:19:49.378Z"
+stopped_at: Phase 15 context gathered
+last_updated: "2026-10-06T01:07:39.561Z"
 last_activity: 2026-10-05
 last_activity_desc: Phase 14 execution started
-state_head: bb32a684f75150d17c3709e29f718e0ef5e3f6e8
+state_head: fc025a1b35434de294ad6d4238b985636a65be4f
 progress:
   total_phases: 29
   completed_phases: 16
@@ -477,6 +477,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-05T10:19:48.578Z
-Stopped at: Completed 14-16-PLAN.md
-Resume file: None
+Last session: 2026-10-06T01:07:37.542Z
+Stopped at: Phase 15 context gathered
+Resume file: .planning/phases/15-strategy-geometry-correction/15-CONTEXT.md
