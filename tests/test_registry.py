@@ -1287,6 +1287,28 @@ def test_pivot_right_bars_equal_to_swing_lookback_minus_one_loads(tmp_path: Path
     assert _load_family(tmp_path, "trend-pullback", body).params["pivot_right_bars"] == 19
 
 
+def test_range_mr_regime_filter_lookback_below_pivot_right_plus_one_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """15-REVIEW WR-01: the Family C regime reads pivots over `regime_filter_lookback` bars.
+
+    A lookback below `pivot_right_bars + 1` makes `evaluate()` raise ValueError in the pure
+    core, so the registry must refuse the set at load (fail closed) rather than let a
+    backtest abort mid-run.
+    """
+    body = _PIVOT_BLOCK + 'tp_mode = "T_MID"\nregime_filter_lookback = 3\n'
+    with pytest.raises(StrategyKeyOutsideRegistry, match="regime_filter_lookback"):
+        _load_family(tmp_path, "range-mr", body)
+
+
+def test_range_mr_regime_filter_lookback_equal_to_pivot_right_plus_one_loads(
+    tmp_path: Path,
+) -> None:
+    body = _PIVOT_BLOCK + 'tp_mode = "T_MID"\nregime_filter_lookback = 4\n'
+    loaded = _load_family(tmp_path, "range-mr", body)
+    assert loaded.params["regime_filter_lookback"] == 4
+
+
 @pytest.mark.parametrize("key", _PHASE15_KEYS)
 def test_ambient_config_named_after_phase15_key_is_rejected(key: str) -> None:
     from src.domain.registry import check_strategy_key_outside_registry

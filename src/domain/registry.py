@@ -441,6 +441,7 @@ def _check_geometry_keys(params: dict[str, Any], path: Path, strategy_id: str) -
     ranged. Rules (family names are the registry directory names):
       - the two pivot widths come together, and only with `geometry_version`;
       - `pivot_right_bars + 1 <= swing_lookback` when both are present (a pivot needs room);
+      - in range-mr, likewise `pivot_right_bars + 1 <= regime_filter_lookback`;
       - breakout-retest takes no pivot keys;
       - `tp_mode` belongs to range-mr and needs `geometry_version`;
       - `geometry_version` in trend-pullback or range-mr needs both pivot widths, and in
@@ -477,6 +478,18 @@ def _check_geometry_keys(params: dict[str, Any], path: Path, strategy_id: str) -
         raise StrategyKeyOutsideRegistry(
             f"{path}: pivot_right_bars + 1 ({params['pivot_right_bars'] + 1}) must not exceed "
             f"swing_lookback ({params['swing_lookback']})"
+        )
+    if (
+        has_right
+        and strategy_id == "range-mr"
+        and "regime_filter_lookback" in params
+        and params["pivot_right_bars"] + 1 > int(params["regime_filter_lookback"])
+    ):
+        # The Family C regime reads pivots over `regime_filter_lookback` bars; a smaller
+        # lookback makes pivots._validate raise inside evaluate() (15-REVIEW WR-01).
+        raise StrategyKeyOutsideRegistry(
+            f"{path}: pivot_right_bars + 1 ({params['pivot_right_bars'] + 1}) must not exceed "
+            f"regime_filter_lookback ({params['regime_filter_lookback']})"
         )
     if has_geometry and strategy_id in ("trend-pullback", "range-mr") and not has_left:
         raise StrategyKeyOutsideRegistry(
