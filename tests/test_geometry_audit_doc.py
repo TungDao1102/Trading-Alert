@@ -22,7 +22,10 @@ DECISION_PATTERN = re.compile(r"D-\d\d|D054")
 
 REQUIRED_CELLS: dict[str, tuple[str, ...]] = {
     "A": ("regime", "pullback", "level", "zone", "entry", "stop", "target"),
+    "B": ("regime", "direction", "breakout", "retest", "anchoring", "entry", "stop", "target"),
+    "C": ("regime", "range", "entry", "stop", "target"),
 }
+REQUIRED_FLAGS = tuple(f"F{n}" for n in range(1, 13))
 
 COLUMN_COUNT = 7
 
@@ -93,6 +96,15 @@ def check_rows(rows: list[dict[str, str]]) -> list[str]:
     return problems
 
 
+def test_required_cells_cover_twenty_family_cell_pairs() -> None:
+    assert sum(len(cells) for cells in REQUIRED_CELLS.values()) == 20
+    assert {family: len(cells) for family, cells in REQUIRED_CELLS.items()} == {
+        "A": 7,
+        "B": 8,
+        "C": 5,
+    }
+
+
 def test_audit_doc_exists_and_has_table_header() -> None:
     assert AUDIT_DOC.is_file()
     assert TABLE_HEADER in _read_doc()
@@ -136,3 +148,27 @@ def test_arithmetic_section_carries_the_acceptance_anchors() -> None:
     assert "## Arithmetic" in text
     assert "59,680" in text
     assert "no plan with SL inside the zone" in text
+
+
+def test_flags_table_lists_each_research_flag_exactly_once() -> None:
+    text = _read_doc()
+    assert "## Research flags and their disposition" in text
+    flag_rows = [_split_row(line) for line in text.splitlines() if re.match(r"\| F\d+ \|", line)]
+    assert sorted(row[0] for row in flag_rows) == sorted(REQUIRED_FLAGS)
+    for row in flag_rows:
+        assert len(row) == 4, f"flag row {row[0]} must have Flag, Finding, Disposition, Plan"
+        assert re.fullmatch(r"15-\d\d(, 15-\d\d)*", row[3]), f"{row[0]}: plan cell {row[3]!r}"
+        assert "TBD" not in re.split(r"\W+", " ".join(row))
+
+
+def test_leakage_verdicts_heading_and_d23_supersession_present() -> None:
+    text = _read_doc()
+    assert "## Leakage verdicts (D-13)" in text
+    assert "superseded by D-23" in text
+
+
+def test_universal_invariants_section_lists_reasons_and_order() -> None:
+    text = _read_doc()
+    assert "## Universal planner invariants" in text
+    for token in ("D-06", "D-07", "D-08", "F6", "STOP_TOO_TIGHT", "INVALIDATED", "RR_TOO_LOW"):
+        assert token in text
