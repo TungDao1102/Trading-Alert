@@ -1,143 +1,60 @@
-"""Regenerate byte-exact phase4 expectation fixtures (Phase 04 review fix).
+"""Regenerate the Phase 4 regression snapshots of signals and plans (Phase 15, D-19).
 
 Run: `uv run python scripts/_regen_phase4_expectations.py` from the repo root.
 
-Why this exists: the Phase 04 review fixes intentionally changed
-byte-exact outputs (CR-01 registry promotion changed the B/C
-parameter-set hashes; CR-03/CR-05/CR-06/WR-01 reworked planner geometry
-and setup zones; CR-08 requires created_at inside the expiry window).
-The expectation fixtures must be recomputed from the corrected code —
-never hand-edited to match.
+Why this exists: `tests/fixtures/phase4/expected_signals.json` and `expected_plans.json` are
+regression snapshots (D-19, Phase 14 D-25) of the real planner output on three fixed windows.
+Phase 15 corrected the strategy geometry, so the snapshots are recomputed from the corrected
+code with the baseline-v6 sets (never hand-edited to match). `expected_plans.json` is consumed
+by `tests/test_plan_hash_roundtrip_pg.py::test_planner_hashes_equal_the_pinned_phase4_fixture`,
+which builds the same plans from the same windows and sets.
 
-Windows (all deterministic, Decimal-only, no clock reads):
-  - trend-pullback: the 250-bar 1H + 250-bar 4H builders from
-    `_compute_phase4_fixtures.py`, with the last 1H bar patched to
-    touch the trailing support zone (review CR-06: LONG requires a
-    support touch; the unpatched reversal bar touches neither side).
-  - breakout-retest: the LONG builders from
-    `tests/test_core_strategy_breakout_retest.py`.
-  - range-mr: the LONG builders from
-    `tests/test_core_strategy_range_mr.py`.
+What this script writes: ONLY `expected_signals.json` and `expected_plans.json`.
 
-`candles.csv` is NOT rewritten (market inputs are untouched by review
-fixes). `created_at_utc` is `source_close + 1h` (inside the 4h expiry
-window per CR-08). Outputs are printed for hand-verification before
-committing.
+What it never writes (T-15-19): `tests/fixtures/phase4/parameters.json` and
+`expected_features.json`. The pin file is owned by the PA-01 gate
+(`scripts/decision_alignment`), which verifies every registered parameter set hash; a
+regeneration that rewrote it would silently drop the pins of every other set. The features
+snapshot is not written either: the legacy feature values (ATR, EMAs, swing extremes) did not
+change in Phase 15, and the legacy trend window it described is gone.
+
+Windows (all deterministic, Decimal-only, no clock reads; the same builders the planner and
+geometry tests use, `tests/geometry_builders.py`):
+  - trend-pullback: `family_a_long_window` (confirmed pivot low 99.00, last bar touches the
+    pivot zone, BULLISH 4h context).
+  - breakout-retest LONG: `family_b_long_window` (anchored with-direction retest, BULLISH).
+  - range-mr LONG: `range_mr_long_window` (wide triangle, pivot-NEUTRAL 4h context).
+
+`candles.csv` is NOT rewritten. `created_at_utc` is `source_close + 1h` (inside the 4h expiry
+window per CR-08). Output files are written with LF line endings so a regeneration on any
+platform produces the same bytes (git normalizes the working tree on Windows). Outputs are
+printed for hand-verification before committing.
 """
 
 from __future__ import annotations
 
 import json
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
-sys.path.insert(0, str(_REPO_ROOT / "tests"))
 
-from src.core.features import compute_features  # noqa: E402 (sys.path above)
 from src.core.planner import plan  # noqa: E402 (sys.path above)
 from src.core.strategy import evaluate  # noqa: E402 (sys.path above)
 from src.core.types import AccountState, Candle, MarketSnapshot  # noqa: E402 (sys.path above)
 from src.domain.registry import load_parameter_set  # noqa: E402 (sys.path above)
+from tests import geometry_builders  # noqa: E402 (sys.path above)
 
-import test_core_strategy_breakout_retest as fam_b  # noqa: E402 (sys.path above)
-import test_core_strategy_range_mr as fam_c  # noqa: E402 (sys.path above)
-
-
-def _build_trend_1h() -> list[Candle]:
-    rows = []
-    base_price = Decimal("50000.00")
-    for i in range(250):
-        if i < 190:
-            close = base_price + Decimal(str(i * 5 + 50))
-        elif i < 220:
-            close = base_price + Decimal(str(190 * 5 + 50 + (i - 189) * 100))
-        elif i < 240:
-            close = base_price + Decimal(str(190 * 5 + 50 + 30 * 100 - (i - 219) * 110))
-        elif i == 240:
-            close = Decimal("50900.00")
-        elif i < 249:
-            close = Decimal("50900.00") + Decimal(str((i - 240) * 80))
-        else:
-            close = Decimal("51620.00")
-        open_p = close - Decimal("10.00")
-        high = close + Decimal("50.00")
-        low = close - Decimal("60.00")
-        open_time = datetime(2026, 9, 8, 0, 0, 0, tzinfo=UTC) + timedelta(hours=i)
-        rows.append(
-            Candle(
-                symbol="BTCUSDT",
-                interval="1h",
-                open_time_utc=open_time,
-                close_time_utc=open_time + timedelta(hours=1) - timedelta(seconds=1),
-                open=open_p,
-                high=high,
-                low=low,
-                close=close,
-                volume=Decimal("100.00"),
-            )
-        )
-    return rows
-
-
-def _build_trend_4h() -> list[Candle]:
-    rows = []
-    base_price = Decimal("50000.00")
-    base = datetime(2026, 9, 9, 0, 0, 0, tzinfo=UTC)
-    for i in range(250):
-        close = base_price + Decimal(str(i * 50 + 30))
-        open_p = close - Decimal("20.00")
-        high = close + Decimal("40.00")
-        low = close - Decimal("40.00")
-        open_time = base + timedelta(hours=4 * i)
-        rows.append(
-            Candle(
-                symbol="BTCUSDT",
-                interval="4h",
-                open_time_utc=open_time,
-                close_time_utc=open_time + timedelta(hours=4) - timedelta(seconds=1),
-                open=open_p,
-                high=high,
-                low=low,
-                close=close,
-                volume=Decimal("500.00"),
-            )
-        )
-    return rows
-
-
-def _with_support_touch_last_bar(
-    candles: list[Candle], strategy_id: str, parameter_set_id: str
-) -> list[Candle]:
-    """Patch the last bar's low onto the trailing swing low (CR-06 setup)."""
-    ps = load_parameter_set(strategy_id, parameter_set_id)
-    frame = compute_features(symbol="BTCUSDT", interval="1h", candles=candles, parameter_set=ps)
-    assert frame.features_valid
-    assert frame.swing_low.value is not None
-    swing_low = frame.swing_low.value
-    last = candles[-1]
-    assert last.open >= swing_low and last.close >= swing_low
-    patched = Candle(
-        symbol=last.symbol,
-        interval=last.interval,
-        open_time_utc=last.open_time_utc,
-        close_time_utc=last.close_time_utc,
-        open=last.open,
-        high=max(last.high, last.open, last.close),
-        low=swing_low,
-        close=last.close,
-        volume=last.volume,
-    )
-    return [*candles[:-1], patched]
+PARAMETER_SET_ID = "baseline-v6"
 
 
 def _evaluate_and_plan(
     strategy_id: str, setup: list[Candle], context: list[Candle]
-) -> tuple[dict, dict, dict]:
-    ps = load_parameter_set(strategy_id, "baseline-v1")
+) -> tuple[dict, dict]:
+    ps = load_parameter_set(strategy_id, PARAMETER_SET_ID)
     account = AccountState(equity=Decimal("10000.00"), risk_rate=Decimal("0.005"))
     snapshot = MarketSnapshot(
         symbol="BTCUSDT",
@@ -165,12 +82,6 @@ def _evaluate_and_plan(
     assert not plan_result.is_no_trade, f"{strategy_id}: {plan_result.reason_code}"
     tp = plan_result.trade_plan
     assert tp is not None
-    param_entry = {
-        "strategy_id": ps.strategy_id,
-        "parameter_set_id": ps.parameter_set_id,
-        "strategy_version": ps.strategy_version,
-        "parameter_set_hash": ps.parameter_set_hash,
-    }
     signal_entry = {
         "signal_id": signal.signal_id,
         "strategy_id": signal.strategy_id,
@@ -208,20 +119,22 @@ def _evaluate_and_plan(
         "status": tp.status.value,
         "created_at_utc": tp.created_at_utc.isoformat(),
     }
-    return param_entry, signal_entry, plan_entry
+    return signal_entry, plan_entry
+
+
+def _write_lf(path: Path, payload: object, *, sort_keys: bool) -> None:
+    text = json.dumps(payload, indent=2, sort_keys=sort_keys) + "\n"
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
 
 
 def main() -> None:
-    fixtures_dir = Path("tests/fixtures/phase4")
+    fixtures_dir = _REPO_ROOT / "tests" / "fixtures" / "phase4"
 
-    trend_setup = _with_support_touch_last_bar(_build_trend_1h(), "trend-pullback", "baseline-v1")
-    trend_context = _build_trend_4h()
-    fam_b_setup = fam_b._build_1h_candles_breakout_retest_long()
-    fam_b_context = fam_b._build_4h_candles_bullish()
-    fam_c_setup = fam_c._build_1h_candles_range_mr_long()
-    fam_c_context = fam_c._build_4h_candles_neutral()
+    trend_setup, trend_context = geometry_builders.family_a_long_window()
+    fam_b_setup, fam_b_context = geometry_builders.family_b_long_window()
+    fam_c_setup, fam_c_context = geometry_builders.range_mr_long_window()
 
-    param_entries: list[dict] = []
     signal_entries: list[dict] = []
     plan_entries: list[dict] = []
     for strategy_id, setup, context in (
@@ -229,8 +142,7 @@ def main() -> None:
         ("breakout-retest", fam_b_setup, fam_b_context),
         ("range-mr", fam_c_setup, fam_c_context),
     ):
-        param_entry, signal_entry, plan_entry = _evaluate_and_plan(strategy_id, setup, context)
-        param_entries.append(param_entry)
+        signal_entry, plan_entry = _evaluate_and_plan(strategy_id, setup, context)
         signal_entries.append(signal_entry)
         plan_entries.append(plan_entry)
         print(
@@ -238,54 +150,9 @@ def main() -> None:
             f"plan={plan_entry['plan_hash'][:12]}..."
         )
 
-    (fixtures_dir / "parameters.json").write_text(
-        json.dumps({"parameter_sets": param_entries}, indent=2) + "\n",
-        encoding="utf-8",
-    )
-
-    ps_trend = load_parameter_set("trend-pullback", "baseline-v1")
-    setup_frame = compute_features(
-        symbol="BTCUSDT", interval="1h", candles=trend_setup, parameter_set=ps_trend
-    )
-    context_frame = compute_features(
-        symbol="BTCUSDT", interval="4h", candles=trend_context, parameter_set=ps_trend
-    )
-    expected_features = {
-        "setup_frame_valid": setup_frame.features_valid,
-        "context_frame_valid": context_frame.features_valid,
-        "setup_atr": str(setup_frame.atr_14.value) if setup_frame.atr_14.valid else None,
-        "setup_swing_high": str(setup_frame.swing_high.value)
-        if setup_frame.swing_high.valid
-        else None,
-        "setup_swing_low": str(setup_frame.swing_low.value)
-        if setup_frame.swing_low.valid
-        else None,
-        "setup_zone_upper": str(setup_frame.zone_upper.value)
-        if setup_frame.zone_upper.valid
-        else None,
-        "setup_zone_lower": str(setup_frame.zone_lower.value)
-        if setup_frame.zone_lower.valid
-        else None,
-        "setup_ema_20": str(setup_frame.ema_20.value) if setup_frame.ema_20.valid else None,
-        "setup_ema_50": str(setup_frame.ema_50.value) if setup_frame.ema_50.valid else None,
-        "setup_ema_200": str(setup_frame.ema_200.value) if setup_frame.ema_200.valid else None,
-        "context_ema_50": str(context_frame.ema_50.value) if context_frame.ema_50.valid else None,
-    }
-    (fixtures_dir / "expected_features.json").write_text(
-        json.dumps(expected_features, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    (fixtures_dir / "expected_signals.json").write_text(
-        json.dumps({"signals": signal_entries}, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    (fixtures_dir / "expected_plans.json").write_text(
-        json.dumps({"plans": plan_entries}, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    print(
-        "Wrote parameters.json, expected_features.json, expected_signals.json, expected_plans.json"
-    )
+    _write_lf(fixtures_dir / "expected_signals.json", {"signals": signal_entries}, sort_keys=True)
+    _write_lf(fixtures_dir / "expected_plans.json", {"plans": plan_entries}, sort_keys=True)
+    print("Wrote expected_signals.json, expected_plans.json")
 
 
 if __name__ == "__main__":
