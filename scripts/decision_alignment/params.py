@@ -1,14 +1,16 @@
 """Parameter-set gate module (Phase 11, plan 11-02; D036, D037, D038, D-06, F-810;
-Phase 12, plan 12-02; D-04, D-06, D-07, D-11).
+Phase 12, plan 12-02; D-04, D-06, D-07, D-11; Phase 15, plan 15-09; D-08, D-15, D-20, D-26).
 
 Executable checks that keep the parameter registry honest after the D036-D038
 alignment: every set is pinned, the ten pre-phase files and hashes never move, the
 five new sets carry the aligned facts, the canonical cost set is identical
-across them, and the five Phase 12 sets carry the frozen cost-guard values (PA-07).
-``run()`` returns ``(name, ok, detail)`` tuples PA-01..PA-07; every check
+across them, the five Phase 12 sets carry the frozen cost-guard values (PA-07), and the five
+Phase 15 sets carry version v5.0.0, geometry_version 1, the frozen guards, one cost set, a
+Supersedes header, complete rationale and the pivot, tp_mode and min_stop_atr keys (PA-08).
+``run()`` returns ``(name, ok, detail)`` tuples PA-01..PA-08; every check
 is also a pure function over a params root directory so tests can inject a broken copy.
 
-Stdlib plus ``src.domain.registry`` and ``src.backtest.costs`` only.
+Stdlib plus ``src.domain.registry``, ``src.domain.rationale`` and ``src.backtest.costs`` only.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from typing import Any
 
 from src.backtest.costs import COST_KEYS, build_cost_model
 from src.domain import registry
+from src.domain.rationale import check_rationale
 from src.domain.registry import ParameterSetMutated, verify_parameter_set
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -133,6 +136,21 @@ PHASE12_RATE_KEYS: tuple[str, ...] = (
     "exit_slippage_rate",
 )
 PHASE12_MAX_RATE = Decimal("0.01")
+
+# Phase 15 (plans 15-08, 15-09): the three baseline-v6 candidate sets and the two -v4 comparison
+# baselines that carry the corrected geometry (PA-08).
+PHASE15_SET_IDS: tuple[SetKey, ...] = (
+    ("breakout-retest", "baseline-v6"),
+    ("range-mr", "baseline-v6"),
+    ("trend-pullback", "baseline-v6"),
+    ("trend-pullback", "baseline-no-trade-v4"),
+    ("trend-pullback", "baseline-simple-trend-v4"),
+)
+EXPECTED_PHASE15_VERSION = "v5.0.0"
+EXPECTED_GEOMETRY_VERSION = 1
+# Strategies whose geometry reads the fractal pivot widths (D-02) and the Family C take-profit mode.
+PHASE15_PIVOT_STRATEGIES: tuple[str, ...] = ("trend-pullback", "range-mr")
+PHASE15_PIVOT_KEYS: tuple[str, ...] = ("pivot_left_bars", "pivot_right_bars")
 
 
 def _set_path(root: Path, key: SetKey) -> Path:
@@ -302,6 +320,72 @@ def check_phase12_set_facts(root: Path, ids: tuple[SetKey, ...]) -> list[str]:
     return problems
 
 
+def check_phase15_set_facts(root: Path, ids: tuple[SetKey, ...]) -> list[str]:
+    """PA-08: the Phase 15 sets carry the corrected-geometry facts and one cost set."""
+    problems: list[str] = []
+    cost_keys = (*COST_KEYS, "exit_slippage_rate")
+    seen: dict[str, dict[str, list[str]]] = {}
+    for key in ids:
+        label = f"{key[0]}/{key[1]}"
+        path = _set_path(root, key)
+        if not path.is_file():
+            problems.append(f"{label}: file missing")
+            continue
+        try:
+            version, params = _parse(root, key)
+        except Exception as exc:
+            problems.append(f"{label}: does not load: {exc}")
+            continue
+        if version != EXPECTED_PHASE15_VERSION:
+            problems.append(
+                f"{label}: strategy_version {version!r}, want {EXPECTED_PHASE15_VERSION}"
+            )
+        geometry = params.get("geometry_version")
+        if geometry is None:
+            problems.append(f"{label}: geometry_version missing")
+        elif type(geometry) is not int or geometry != EXPECTED_GEOMETRY_VERSION:
+            problems.append(
+                f"{label}: geometry_version {geometry!r}, want {EXPECTED_GEOMETRY_VERSION}"
+            )
+        for name, frozen in PHASE12_FROZEN.items():
+            if name not in params:
+                problems.append(f"{label}: {name} missing")
+            elif params[name] != frozen or type(params[name]) is not type(frozen):
+                problems.append(f"{label}: {name} {params[name]!r}, want {frozen!r} (frozen)")
+        for name in PHASE12_RATE_KEYS:
+            rate = params.get(name)
+            if rate is None:
+                problems.append(f"{label}: {name} missing")
+            elif not Decimal(0) <= Decimal(rate) <= PHASE12_MAX_RATE:
+                problems.append(f"{label}: {name} {rate!r} outside 0..{PHASE12_MAX_RATE} (unit)")
+        header = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.startswith("#")]
+        if not any("Supersedes" in ln for ln in header):
+            problems.append(f"{label}: header comment lacks 'Supersedes'")
+        try:
+            problems.extend(f"{label}: rationale: {entry}" for entry in check_rationale(path))
+        except Exception as exc:
+            problems.append(f"{label}: rationale unreadable: {exc}")
+        if key[0] in PHASE15_PIVOT_STRATEGIES:
+            problems.extend(
+                f"{label}: {name} missing" for name in PHASE15_PIVOT_KEYS if name not in params
+            )
+        if key[0] == "range-mr" and "tp_mode" not in params:
+            problems.append(f"{label}: tp_mode missing")
+        if key[0] == "trend-pullback" and "min_stop_atr" not in params:
+            problems.append(
+                f"{label}: min_stop_atr missing "
+                "(ROADMAP criterion 1: the trend-pullback stop sits at a minimum ATR distance)"
+            )
+        for name in cost_keys:
+            if name in params:
+                seen.setdefault(name, {}).setdefault(repr(params[name]), []).append(label)
+    for name in cost_keys:
+        values = seen.get(name, {})
+        if len(values) > 1:
+            problems.append(f"cost values differ across Phase 15 sets: {name}: {values}")
+    return problems
+
+
 def check_working_type_registry() -> list[str]:
     """PA-06: working_type is a registry string key and not a cost key."""
     problems: list[str] = []
@@ -321,7 +405,7 @@ def _result(name: str, problems: list[str]) -> tuple[str, bool, str]:
 
 
 def run() -> list[tuple[str, bool, str]]:
-    """Evaluate gates PA-01..PA-07 against the real repository."""
+    """Evaluate gates PA-01..PA-08 against the real repository."""
     try:
         pin_problems = check_pins(PARAMS_ROOT, load_pins())
     except (OSError, ValueError, KeyError) as exc:
@@ -334,6 +418,7 @@ def run() -> list[tuple[str, bool, str]]:
         _result("PA-05", check_cost_hash_parity(PARAMS_ROOT, NEW_SET_IDS)),
         _result("PA-06", check_working_type_registry()),
         _result("PA-07", check_phase12_set_facts(PARAMS_ROOT, PHASE12_SET_IDS)),
+        _result("PA-08", check_phase15_set_facts(PARAMS_ROOT, PHASE15_SET_IDS)),
     ]
 
 

@@ -1,6 +1,6 @@
 """Tests for the parameter-set gate module (Phase 11, plan 11-02; D036-D038, F-810).
 
-The real-repository test proves gates PA-01..PA-07 hold today; the negative tests run
+The real-repository test proves gates PA-01..PA-08 hold today; the negative tests run
 each pure check over a tmp_path copy of params/ that has been deliberately broken so
 a regression cannot pass silently.
 """
@@ -32,7 +32,7 @@ def _edit(root: Path, key: gate.SetKey, old: str, new: str) -> None:
 
 def test_real_repo_gates_all_ok() -> None:
     results = gate.run()
-    assert [name for name, _, _ in results] == [f"PA-0{i}" for i in range(1, 8)]
+    assert [name for name, _, _ in results] == [f"PA-0{i}" for i in range(1, 9)]
     failed = [(name, detail) for name, ok, detail in results if not ok]
     assert failed == []
 
@@ -45,6 +45,10 @@ def test_reference_tables_cover_ten_old_and_five_new_sets() -> None:
     assert len(gate.PHASE12_SET_IDS) == 5
     assert set(gate.PHASE12_SET_IDS).isdisjoint(gate.PRE_PHASE_HASHES)
     assert set(gate.PHASE12_SET_IDS).isdisjoint(gate.NEW_SET_IDS)
+    assert len(gate.PHASE15_SET_IDS) == 5
+    assert set(gate.PHASE15_SET_IDS).isdisjoint(gate.PRE_PHASE_HASHES)
+    assert set(gate.PHASE15_SET_IDS).isdisjoint(gate.NEW_SET_IDS)
+    assert set(gate.PHASE15_SET_IDS).isdisjoint(gate.PHASE12_SET_IDS)
     assert len(gate.load_pins()) == 25
 
 
@@ -278,3 +282,140 @@ def test_broken_v5_set_does_not_disturb_pa04_and_pa05(params_copy: Path) -> None
     assert gate.check_new_set_facts(params_copy, gate.NEW_SET_IDS) == []
     assert gate.check_cost_hash_parity(params_copy, gate.NEW_SET_IDS) == []
     assert gate.check_phase12_set_facts(params_copy, gate.PHASE12_SET_IDS) != []
+
+
+# --------------------------------------------------------------------------- PA-08
+
+_P15_TREND = ("trend-pullback", "baseline-v6")
+_P15_RANGE = ("range-mr", "baseline-v6")
+_P15_NO_TRADE = ("trend-pullback", "baseline-no-trade-v4")
+_P15_SIMPLE = ("trend-pullback", "baseline-simple-trend-v4")
+
+
+def _drop_key(root: Path, key: gate.SetKey, name: str) -> None:
+    """Remove ``name`` from [parameters] and its [rationale.<name>] table (stays loadable)."""
+    path = root / key[0] / f"{key[1]}.toml"
+    kept: list[str] = []
+    skipping = False
+    dropped_line = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith(f"[rationale.{name}]"):
+            skipping = True
+            continue
+        if skipping:
+            if line.strip() == "":
+                skipping = False
+            continue
+        if not dropped_line and line.startswith(f"{name} = "):
+            dropped_line = True
+            continue
+        kept.append(line)
+    assert dropped_line, (key, name)
+    path.write_text("\n".join(kept) + "\n", encoding="utf-8", newline="\n")
+
+
+def test_pa08_passes_on_copy(params_copy: Path) -> None:
+    assert gate.check_phase15_set_facts(params_copy, gate.PHASE15_SET_IDS) == []
+
+
+def test_pa08_constants() -> None:
+    assert gate.EXPECTED_PHASE15_VERSION == "v5.0.0"
+    assert set(gate.PHASE15_SET_IDS) == {
+        ("trend-pullback", "baseline-v6"),
+        ("breakout-retest", "baseline-v6"),
+        ("range-mr", "baseline-v6"),
+        ("trend-pullback", "baseline-no-trade-v4"),
+        ("trend-pullback", "baseline-simple-trend-v4"),
+    }
+
+
+def test_pa08_wrong_version_fails(params_copy: Path) -> None:
+    _edit(params_copy, _P15_TREND, 'strategy_version = "v5.0.0"', 'strategy_version = "v4.0.0"')
+    problems = gate.check_phase15_set_facts(params_copy, gate.PHASE15_SET_IDS)
+    assert any("trend-pullback/baseline-v6" in p and "strategy_version" in p for p in problems)
+
+
+def test_pa08_missing_geometry_version_fails(params_copy: Path) -> None:
+    _drop_key(params_copy, _P15_RANGE, "geometry_version")
+    problems = gate.check_phase15_set_facts(params_copy, gate.PHASE15_SET_IDS)
+    assert any("range-mr/baseline-v6" in p and "geometry_version" in p for p in problems)
+
+
+def test_pa08_wrong_geometry_version_fails(params_copy: Path) -> None:
+    _edit(params_copy, _P15_NO_TRADE, "geometry_version = 1", "geometry_version = 0")
+    problems = gate.check_phase15_set_facts(params_copy, gate.PHASE15_SET_IDS)
+    assert any("baseline-no-trade-v4" in p and "geometry_version" in p for p in problems)
+
+
+def test_pa08_changed_frozen_guard_value_fails(params_copy: Path) -> None:
+    _edit(params_copy, _P15_RANGE, "max_cost_to_risk = 0.15", "max_cost_to_risk = 0.2")
+    problems = gate.check_phase15_set_facts(params_copy, gate.PHASE15_SET_IDS)
+    assert any("range-mr/baseline-v6" in p and "max_cost_to_risk" in p for p in problems)
+
+
+def test_pa08_cost_value_differing_between_sets_fails(params_copy: Path) -> None:
+    _edit(params_copy, _P15_SIMPLE, "fee_rate_exit = 0.0005", "fee_rate_exit = 0.0006")
+    problems = gate.check_phase15_set_facts(params_copy, gate.PHASE15_SET_IDS)
+    assert any("cost values differ" in p and "fee_rate_exit" in p for p in problems)
+
+
+def test_pa08_deleted_rationale_table_fails(params_copy: Path) -> None:
+    path = params_copy / "trend-pullback" / "baseline-v6.toml"
+    text = path.read_text(encoding="utf-8")
+    start = text.index("[rationale.sl_buffer_atr]")
+    end = text.index("\n\n", start) + 2
+    path.write_text(text[:start] + text[end:], encoding="utf-8", newline="\n")
+    problems = gate.check_phase15_set_facts(params_copy, gate.PHASE15_SET_IDS)
+    assert any("trend-pullback/baseline-v6" in p and "sl_buffer_atr" in p for p in problems)
+
+
+def test_pa08_header_without_supersedes_fails(params_copy: Path) -> None:
+    _edit(params_copy, _P15_SIMPLE, "Supersedes", "Replaces")
+    problems = gate.check_phase15_set_facts(params_copy, gate.PHASE15_SET_IDS)
+    assert any("baseline-simple-trend-v4" in p and "Supersedes" in p for p in problems)
+
+
+def test_pa08_range_mr_without_tp_mode_fails(params_copy: Path) -> None:
+    _drop_key(params_copy, _P15_RANGE, "tp_mode")
+    problems = gate.check_phase15_set_facts(params_copy, gate.PHASE15_SET_IDS)
+    assert any("range-mr/baseline-v6" in p and "tp_mode" in p for p in problems)
+
+
+@pytest.mark.parametrize("name", ["pivot_left_bars", "pivot_right_bars"])
+@pytest.mark.parametrize("key", [_P15_TREND, _P15_RANGE, _P15_NO_TRADE, _P15_SIMPLE])
+def test_pa08_missing_pivot_key_fails(params_copy: Path, key: gate.SetKey, name: str) -> None:
+    _drop_key(params_copy, key, name)
+    problems = gate.check_phase15_set_facts(params_copy, gate.PHASE15_SET_IDS)
+    assert any(f"{key[0]}/{key[1]}" in p and name in p for p in problems)
+
+
+@pytest.mark.parametrize("key", [_P15_TREND, _P15_NO_TRADE, _P15_SIMPLE])
+def test_pa08_trend_pullback_without_min_stop_atr_fails(
+    params_copy: Path, key: gate.SetKey
+) -> None:
+    _drop_key(params_copy, key, "min_stop_atr")
+    problems = gate.check_phase15_set_facts(params_copy, gate.PHASE15_SET_IDS)
+    assert any(f"{key[0]}/{key[1]}" in p and "min_stop_atr" in p for p in problems)
+    assert any("ROADMAP criterion 1" in p for p in problems)
+
+
+def test_pa08_missing_file_fails(params_copy: Path) -> None:
+    (params_copy / "trend-pullback" / "baseline-no-trade-v4.toml").unlink()
+    problems = gate.check_phase15_set_facts(params_copy, gate.PHASE15_SET_IDS)
+    assert "trend-pullback/baseline-no-trade-v4: file missing" in problems
+
+
+def test_broken_phase15_set_does_not_disturb_pa07(params_copy: Path) -> None:
+    _edit(params_copy, _P15_RANGE, "max_cost_to_risk = 0.15", "max_cost_to_risk = 0.2")
+    assert gate.check_phase12_set_facts(params_copy, gate.PHASE12_SET_IDS) == []
+    assert gate.check_phase15_set_facts(params_copy, gate.PHASE15_SET_IDS) != []
+
+
+def test_pin_file_key_set_equals_every_recorded_set_table_exactly() -> None:
+    expected = (
+        set(gate.PRE_PHASE_HASHES)
+        | set(gate.NEW_SET_IDS)
+        | set(gate.PHASE12_SET_IDS)
+        | set(gate.PHASE15_SET_IDS)
+    )
+    assert set(gate.load_pins()) == expected
