@@ -811,3 +811,222 @@ def test_c_legacy_regime_still_needs_exact_ema50_equality() -> None:
     assert result.is_no_trade
     assert result.reason_code == RejectionReason.NO_TRADE_REGIME.value
     assert result.regime in {"BULLISH", "BEARISH"}
+
+
+# --------------------------------------------------------------------------- #
+# Plan 15-06 Task 3: Family C SHORT, T_OPPOSITE, the T-mid RR gate and the validator on C.
+# --------------------------------------------------------------------------- #
+
+_C_WORKED = ["c_short_worked", "c_long_t_opposite"]
+
+
+@pytest.mark.parametrize("name", _C_WORKED)
+def test_family_c_worked_case_matches_the_hand_derived_sidecar(name: str) -> None:
+    result, planned, expected = _run(name)
+    assert result.signal is not None
+    assert result.signal.direction == expected["direction"]
+    assert result.signal.setup_type == expected["setup_type"]
+    assert result.regime == expected["regime"] == "NEUTRAL"
+    _assert_plan_matches(planned, expected)
+    trade_plan = planned.trade_plan
+    assert trade_plan is not None
+    assert _expected_rr(trade_plan) == Decimal(expected["tp1_rr"])
+
+
+def test_c_short_worked_stop_is_above_the_whole_zone_and_tp1_is_the_midpoint() -> None:
+    _result, planned, expected = _run("c_short_worked")
+    trade_plan = planned.trade_plan
+    assert trade_plan is not None
+    assert trade_plan.entry_min_price == Decimal("101.80")
+    assert trade_plan.entry_max_price == Decimal("102.20")
+    assert trade_plan.stop_loss_price == Decimal("103.40")
+    assert trade_plan.stop_loss_price > trade_plan.entry_max_price
+    targets = json.loads(trade_plan.take_profit_json)
+    midpoint = (Decimal(expected["zone_upper"]) + Decimal(expected["zone_lower"])) / 2
+    assert Decimal(targets["tp1"]) == midpoint == Decimal("98")
+    case = _load_cases()["c_short_worked"]
+    setup, _context = geometry_builders.range_mr_short_window()
+    levels = strategy_module._detect_range_mr_levels(
+        setup_candles=setup, parameter_set=_parameter_set(case)
+    )
+    assert levels is not None
+    assert levels.direction == "SHORT"
+    assert levels.zone_upper == Decimal(expected["zone_upper"])
+    assert levels.zone_lower == Decimal(expected["zone_lower"])
+    assert levels.sr_far_edge == Decimal(expected["sr_far_edge"])
+
+
+def test_t_opposite_keeps_the_opposite_boundary_and_the_larger_rr() -> None:
+    """Same window and stop as c_long_worked; only tp_mode changes (D-10)."""
+    _result, opposite, expected = _run("c_long_t_opposite")
+    _result_mid, mid, expected_mid = _run("c_long_worked")
+    assert opposite.trade_plan is not None and mid.trade_plan is not None
+    assert opposite.trade_plan.stop_loss_price == mid.trade_plan.stop_loss_price
+    opposite_tp1 = Decimal(json.loads(opposite.trade_plan.take_profit_json)["tp1"])
+    assert opposite_tp1 == Decimal(expected["zone_upper"]) == Decimal("106")
+    assert _expected_rr(opposite.trade_plan) == Decimal("5.714285714285714285714285714")
+    assert _expected_rr(opposite.trade_plan) > _expected_rr(mid.trade_plan)
+    assert Decimal(expected_mid["tp1"]) < opposite_tp1
+
+
+def test_t_mid_on_a_narrow_range_is_rr_too_low_and_t_opposite_keeps_the_plan() -> None:
+    """D-10 counting case: the midpoint leg 2.00 is under 2 x risk 1.40 = 2.80."""
+    window = geometry_builders.range_mr_narrow_window()
+    _result, mid = _evaluate_and_plan(window, _case_set("c_long_worked"))
+    assert mid is not None
+    assert mid.is_no_trade and mid.trade_plan is None
+    assert mid.reason_code == _RR_TOO_LOW
+    result, opposite = _evaluate_and_plan(window, _case_set("c_long_worked", tp_mode="T_OPPOSITE"))
+    assert result.regime == "NEUTRAL"
+    assert opposite is not None and not opposite.is_no_trade, opposite.reason_code
+    assert opposite.trade_plan is not None
+    assert opposite.trade_plan.stop_loss_price == Decimal("96.60")
+    targets = json.loads(opposite.trade_plan.take_profit_json)
+    assert Decimal(targets["tp1"]) == Decimal("102")
+    assert Decimal(targets["tp2"]) == Decimal("106")
+    assert _expected_rr(opposite.trade_plan) == Decimal("2.857142857142857142857142857")
+    setup, _context = window
+    midpoint_leg = (Decimal("102") + Decimal("98")) / 2 - Decimal("98")
+    assert midpoint_leg < Decimal("2") * (Decimal("98") - Decimal("96.6"))
+    assert setup[-1].low == Decimal("98")
+
+
+def test_t_mid_gate_boundary_follows_minimum_rr() -> None:
+    """The narrow midpoint RR is 1.428571...: minimum_rr 1.4 admits it, 1.43 rejects it."""
+    window = geometry_builders.range_mr_narrow_window()
+    _r, admitted = _evaluate_and_plan(window, _case_set("c_long_worked", minimum_rr="1.4"))
+    assert admitted is not None and not admitted.is_no_trade, admitted.reason_code
+    _r, rejected = _evaluate_and_plan(window, _case_set("c_long_worked", minimum_rr="1.43"))
+    assert rejected is not None and rejected.reason_code == _RR_TOO_LOW
+
+
+def test_c_d07_signal_bar_through_the_stop_is_invalidated() -> None:
+    """D-07 on C: touch_tolerance_atr 2.0 lets a crash bar (low 95.00) be the touch bar.
+
+    DERIVATIONS.md: ATR_last = 2.214285714285714285714285714, so the stop is 97.00 - 0.2 x
+    ATR_last = 96.55714285714285714285714286, above the bar low.
+    """
+    parameter_set = _case_set("c_long_worked", touch_tolerance_atr="2.0")
+    window = geometry_builders.range_mr_crash_window()
+    result, planned = _evaluate_and_plan(window, parameter_set)
+    assert not result.is_no_trade, result.reason_code
+    assert result.signal is not None and result.signal.direction == "LONG"
+    assert planned is not None
+    assert planned.is_no_trade and planned.trade_plan is None
+    assert planned.reason_code == _INVALIDATED
+    setup, _context = window
+    levels = strategy_module._detect_range_mr_levels(
+        setup_candles=setup, parameter_set=parameter_set
+    )
+    assert levels is not None and levels.sr_far_edge == Decimal("97.0")
+    atr_last = (Decimal("13") * Decimal("2") + Decimal("5")) / Decimal("14")
+    assert atr_last == Decimal("2.214285714285714285714285714")
+    expected_stop = Decimal("97.0") - Decimal("0.2") * atr_last
+    assert expected_stop == Decimal("96.55714285714285714285714286")
+    assert setup[-1].low == Decimal("95") < expected_stop
+
+
+def test_c_d08_min_stop_atr_rejects_a_stop_closer_than_the_floor() -> None:
+    """D-08 on C: the risk 1.40 is 0.7 ATR; the floor 1.0 ATR (2.00) rejects it."""
+    window = geometry_builders.range_mr_long_window()
+    _r, tight = _evaluate_and_plan(window, _case_set("c_long_worked", min_stop_atr="1.0"))
+    assert tight is not None and tight.trade_plan is None
+    assert tight.reason_code == _STOP_TOO_TIGHT
+    _r, just_over = _evaluate_and_plan(window, _case_set("c_long_worked", min_stop_atr="0.71"))
+    assert just_over is not None and just_over.reason_code == _STOP_TOO_TIGHT
+    _r, equal = _evaluate_and_plan(window, _case_set("c_long_worked", min_stop_atr="0.7"))
+    assert equal is not None and not equal.is_no_trade, equal.reason_code
+    assert equal.trade_plan is not None
+    assert equal.trade_plan.stop_loss_price == Decimal("96.60")
+
+
+def test_c_d06_stop_inside_the_entry_zone_is_stop_too_tight() -> None:
+    """D-06 on C: zone_tolerance_atr 0 puts the far edge at the edge; a 0.05 stop buffer
+    below the 0.1 entry buffer leaves the stop at 97.90, inside the zone 97.80..98.20."""
+    window = geometry_builders.range_mr_long_window()
+    parameter_set = _case_set("c_long_worked", zone_tolerance_atr="0", sl_buffer_atr="0.05")
+    result, planned = _evaluate_and_plan(window, parameter_set)
+    assert not result.is_no_trade, result.reason_code
+    assert planned is not None
+    assert planned.is_no_trade and planned.trade_plan is None
+    assert planned.reason_code == _STOP_TOO_TIGHT
+
+
+def test_c_validator_causes_are_distinct_but_share_the_reason() -> None:
+    """Two STOP_TOO_TIGHT causes on C (D-06 inside the zone, D-08 ATR floor)."""
+    window = geometry_builders.range_mr_long_window()
+    _r1, inside = _evaluate_and_plan(
+        window, _case_set("c_long_worked", zone_tolerance_atr="0", sl_buffer_atr="0.05")
+    )
+    _r2, floor = _evaluate_and_plan(window, _case_set("c_long_worked", min_stop_atr="1.0"))
+    assert _plan_reason(inside) == _plan_reason(floor) == _STOP_TOO_TIGHT
+    _r3, clean = _evaluate_and_plan(window, _case_set("c_long_worked"))
+    assert clean is not None and not clean.is_no_trade
+
+
+def test_every_corrected_family_c_plan_has_its_stop_outside_the_zone() -> None:
+    checked = 0
+    for name, case in _load_cases().items():
+        expected = case["expected"]
+        if case["family"] != "range-mr" or "geometry_version" not in case["params"]:
+            continue
+        _result, planned, _ = _run(name)
+        trade_plan = planned.trade_plan
+        assert trade_plan is not None, name
+        if expected["direction"] == "LONG":
+            assert trade_plan.stop_loss_price < trade_plan.entry_min_price, name
+        else:
+            assert trade_plan.stop_loss_price > trade_plan.entry_max_price, name
+        checked += 1
+    assert checked == 3  # c_long_worked, c_short_worked, c_long_t_opposite
+
+
+@pytest.mark.parametrize(
+    "name", ["c_long_worked", "c_short_worked", "c_long_t_opposite", "c_long_legacy_contrast"]
+)
+def test_c_cases_are_deterministic(name: str) -> None:
+    first = _run(name)
+    second = _run(name)
+    assert first[0].signal == second[0].signal
+    assert first[1].trade_plan == second[1].trade_plan
+
+
+def test_c_tp_mode_outside_the_registry_values_is_a_configuration_error() -> None:
+    parameter_set = _case_set("c_long_worked", tp_mode="T_THIRD")
+    with pytest.raises(ValueError, match="tp_mode"):
+        _evaluate_and_plan(geometry_builders.range_mr_long_window(), parameter_set)
+
+
+def test_c_vanished_setup_at_plan_time_is_stale_setup() -> None:
+    """A signal from the worked window planned on candles where the touch has gone."""
+    case = _load_cases()["c_long_worked"]
+    parameter_set = _parameter_set(case)
+    setup, context = geometry_builders.range_mr_long_window()
+    result, _planned = _evaluate_and_plan((setup, context), parameter_set)
+    assert result.signal is not None
+    moved = geometry_builders.with_evaluated_bar(
+        setup, high=Decimal("104"), low=Decimal("100"), close=Decimal("103.5")
+    )
+    planned = plan(
+        signal=result.signal,
+        setup_candles=moved,
+        parameter_set=parameter_set,
+        account_state=AccountState(equity=Decimal("10000"), risk_rate=Decimal("0.005")),
+        created_at_utc=result.signal.source_candle_close_utc + timedelta(hours=1),
+    )
+    assert planned.is_no_trade
+    assert planned.reason_code == RejectionReason.STALE_SETUP.value
+
+
+def test_derivations_file_has_a_section_for_every_plan_15_06_case() -> None:
+    text = (_CASES_PATH.parent / "DERIVATIONS.md").read_text(encoding="utf-8")
+    for heading in (
+        "## c_long_worked",
+        "## c_long_legacy_contrast",
+        "## c_short_worked",
+        "## c_long_t_opposite",
+        "## Family C narrow range and validator cases",
+    ):
+        assert heading in text, heading
+    section = text.split("## c_long_worked", 1)[1].split("\n## ", 1)[0]
+    assert "NEUTRAL" in section and "pivot" in section.lower()

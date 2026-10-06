@@ -941,3 +941,72 @@ def test_families_a_and_b_keep_the_ema50_regime_with_geometry_version(
     )
     assert not result.is_no_trade, result.reason_code
     assert result.regime == "BULLISH"
+
+
+# --------------------------------------------------------------------------- #
+# Plan 15-06 Task 3: leakage (D-13). The Family C levels come from the reference bar n - 2
+# (swing window 229..248, ATR_ref = ATR(248)), never from the evaluated bar n - 1; only its
+# position in the touch band, the near-edge test and the range-break line are read.
+# --------------------------------------------------------------------------- #
+
+_LEAK_VARIANTS = {
+    # (side, high, low, close) of the replacement bar; the open stays that of the original.
+    "long_lower_low_inside_band": ("long", "100", "97.5", "99"),
+    "long_higher_high": ("long", "105", "98", "99"),
+    "short_higher_high_inside_band": ("short", "102.5", "100", "101"),
+    "short_lower_low": ("short", "102", "95", "101"),
+}
+
+
+def _levels(setup: list[Candle], parameter_set: ParameterSet) -> tuple[Decimal | None, ...]:
+    levels = strategy_module._detect_range_mr_levels(
+        setup_candles=setup, parameter_set=parameter_set
+    )
+    assert levels is not None
+    return (levels.zone_upper, levels.zone_lower, levels.sr_far_edge)
+
+
+@pytest.mark.parametrize("variant", sorted(_LEAK_VARIANTS))
+def test_evaluated_bar_does_not_move_level(variant: str) -> None:
+    """Replacing the evaluated bar (still touching the edge) leaves every level unchanged.
+
+    LONG: band 97.40..98.60 on the low; SHORT: band 101.40..102.60 on the high. The legacy
+    set's zone bounds are compared too: they never read bar n - 1 either.
+    """
+    side, high, low, close = _LEAK_VARIANTS[variant]
+    setup, _context = (
+        geometry_builders.range_mr_long_window()
+        if side == "long"
+        else geometry_builders.range_mr_short_window()
+    )
+    replaced = geometry_builders.with_evaluated_bar(
+        setup, high=Decimal(high), low=Decimal(low), close=Decimal(close)
+    )
+    assert replaced[-1] != setup[-1]
+    assert replaced[:-1] == setup[:-1]
+    anchored = _pivot_set()
+    assert _levels(replaced, anchored) == _levels(setup, anchored)
+    assert _levels(setup, anchored)[2] is not None
+    legacy = load_parameter_set("range-mr", "baseline-v5")
+    assert _levels(replaced, legacy)[:2] == _levels(setup, legacy)[:2]
+    assert _levels(replaced, legacy)[2] is None
+    expected = (
+        (Decimal("106"), Decimal("98"), Decimal("97.0"))
+        if side == "long"
+        else (Decimal("102"), Decimal("94"), Decimal("103.0"))
+    )
+    assert _levels(replaced, anchored) == expected
+
+
+def test_evaluated_bar_does_not_move_level_even_when_it_breaks_the_range() -> None:
+    """A bar that closes beyond the break line voids the setup; it never shifts the levels."""
+    setup, _context = geometry_builders.range_mr_long_window()
+    broken = geometry_builders.with_evaluated_bar(
+        setup, high=Decimal("100"), low=Decimal("90"), close=Decimal("92")
+    )
+    anchored = _pivot_set()
+    assert (
+        strategy_module._detect_range_mr_levels(setup_candles=broken, parameter_set=anchored)
+        is None
+    )
+    assert _levels(setup, anchored) == (Decimal("106"), Decimal("98"), Decimal("97.0"))

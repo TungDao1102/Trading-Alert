@@ -635,3 +635,100 @@ zone_lower - sl_buffer = 98.00 - 0.40 = 97.60 (above the far edge, only 0.20 bel
 python -c "from decimal import Decimal as D; zl=D('98'); zu=D('106'); sb=D('0.2')*D('2'); print(zl-sb, zu, zl+2*(zu-zl), (zu-zl)/(zl-(zl-sb)))"
 97.6 106 114 20
 ```
+
+## c_short_worked
+
+The exact mirror p -> 200 - p of the c_long_worked 1h window (highs and lows swap, times
+unchanged), with the same contracting 4h window (NEUTRAL: the mirror of LH + HL is HL + LH, still
+neither BULLISH nor BEARISH, and the context itself is unchanged), so every bar keeps true range
+2.00 and ATR = 2.00. The evaluated bar 249 closes 101 (high 102.00, low 100.00). Reference bar 248:
+swing high over bars 229..248 = 200 - 98 = 102 (the mirror of the trough), swing low = 200 - 106 =
+94, so zone_upper = 102.00 and zone_lower = 94.00. Upper band [101.40, 102.60]: the evaluated bar's
+high 102.00 is inside it, upper touches (high 102) are the mirrored troughs at bars 225, 213, ...
+(the last, 225, is within 50 bars of bar 249), close 101 lies inside [93.60, 102.40] (no range
+break), and |102 - 102| = 0 < |100 - 94| = 6 (strict near-edge test for SHORT), so RANGE_MR_SHORT.
+
+```
+python -c "from decimal import Decimal as D; zu=D('102'); zl=D('94'); atr=D('2'); far=zu+D('0.5')*atr; stop=far+D('0.2')*atr; eb=D('0.1')*atr; print(far, stop, zu-eb, zu+eb, (zu-eb+zu+eb)/2)"
+103.0 103.4 101.8 102.2 102.0
+python -c "from decimal import Decimal as D; zu=D('102'); zl=D('94'); ref=D('102'); stop=D('103.4'); tp1=(zu+zl)/2; print(tp1, stop-ref, ref-tp1, (ref-tp1)/(stop-ref), ref-2*(ref-tp1))"
+98 1.4 4 2.857142857142857142857142857 94
+```
+
+| Field | Value |
+|-------|-------|
+| regime | NEUTRAL |
+| zone_upper / zone_lower | 102.00 / 94.00 |
+| sr_far_edge | 103.00 (zone_upper + 0.5 x ATR_ref) |
+| entry_min / entry_max | 101.80 / 102.20 |
+| entry_ref | 102.00 |
+| stop_loss | 103.40 = sr_far_edge + 0.2 x ATR_last, strictly above entry_max |
+| TP1 (T_MID) | 98.00 |
+| TP2 | 94.00 |
+| risk / reward | 1.40 / 4.00 |
+| RR to TP1 | 2.857142857142857142857142857 |
+
+## c_long_t_opposite
+
+`c_long_worked` with `tp_mode` T_OPPOSITE (every other value and the window unchanged): TP1 is the
+opposite boundary zone_upper = 106.00, so the TP1 leg is 106 - 98 = 8.00 against the same risk
+1.40; TP2 = 98 + 2 x 8 = 114.00.
+
+```
+python -c "from decimal import Decimal as D; ref=D('98'); stop=D('96.6'); tp1=D('106'); print(tp1-ref, (tp1-ref)/(ref-stop), ref+2*(tp1-ref))"
+8 5.714285714285714285714285714 114
+```
+
+## Family C narrow range and validator cases
+
+Narrow range (`range_mr_narrow_window`, `range_mr_closes(half_period=2)`): the 1h closes are a
+triangle wave 99, 100, 101, 100, 99, ... of period 4 ending on a trough (bar 249 closes 99), with
+the same contracting 4h window. Troughs (low 98) are bars 249 - 4 m and peaks (high 102) are bars
+247 - 4 m, so zone_lower = 98.00, zone_upper = 102.00, the lower touches exist inside the aging
+window and the evaluated bar touches the lower band: RANGE_MR_LONG with the same stop 96.60, entry
+97.80..98.20 and risk 1.40 as c_long_worked. With T_MID the TP1 leg is (102 + 98) / 2 - 98 = 2.00,
+which is below minimum_rr x risk = 2 x 1.40 = 2.80 (RR 1.428571428571428571428571429): RR_TOO_LOW.
+With T_OPPOSITE the leg is 102 - 98 = 4.00 and the RR is 2.857142857142857142857142857 (TP1
+102.00, TP2 106.00): a plan.
+
+```
+python -c "from decimal import Decimal as D; ref=D('98'); stop=D('96.6'); zu=D('102'); zl=D('98'); mid=(zu+zl)/2; print(mid, (mid-ref)/(ref-stop), D('2')*(ref-stop), (zu-ref)/(ref-stop), ref+2*(zu-ref))"
+100 1.428571428571428571428571429 2.8 2.857142857142857142857142857 106
+```
+
+D-08 (`min_stop_atr`) on `c_long_worked`: the risk from entry_ref is 98.00 - 96.60 = 1.40 = 0.7 ATR
+(ATR = 2.00). `min_stop_atr` 1.0 gives the floor 2.00 and the plan is STOP_TOO_TIGHT; 0.71 gives
+1.42 (rejected); 0.7 gives exactly 1.40 (equality passes).
+
+D-06 (stop inside the entry zone) on `c_long_worked` with `zone_tolerance_atr` 0 and `sl_buffer_atr`
+0.05 (below `entry_buffer_atr` 0.1): sr_far_edge = 98.00 - 0 = 98.00, stop = 98.00 - 0.05 x 2.00 =
+97.90, not below entry_min = 98.00 - 0.1 x 2.00 = 97.80, so STOP_TOO_TIGHT.
+
+```
+python -c "from decimal import Decimal as D; print(D('0.7')*D('2'), D('0.71')*D('2'), D('1.0')*D('2'), D('98')-D('96.6'))"
+1.4 1.42 2.0 1.4
+python -c "from decimal import Decimal as D; far=D('98')-D('0')*D('2'); print(far, far-D('0.05')*D('2'), D('98')-D('0.1')*D('2'))"
+98 97.90 97.8
+```
+
+Leakage (D-13). Every Family C level is a function of the reference bar ref_idx = n - 2 = 248
+(swing window bars 229..248 and ATR_ref = ATR(248) = 2.00), so zone_upper 106.00, zone_lower 98.00
+and `sr_far_edge` 97.00 do not depend on bar 249. Bar 249 is read only for "is its low (high for
+SHORT) inside the band [97.40, 98.60] ([101.40, 102.60])", the near-edge test and the range-break
+line. The replacements used keep those true: LONG (high 100, low 97.50, close 99) and (high 105,
+low 98.00, close 99); SHORT (mirror, zone 102 / 94, band [101.40, 102.60] on the high) (high
+102.50, low 100, close 101) and (high 102, low 95, close 101). The levels are unchanged.
+
+D-07 (INVALIDATED). `c_long_worked` up to bar 248, then the crash bar (`range_mr_crash_window`)
+bar 249: open 100, high 100, low 95.00, close 98 (true range max(5, 0, 5) = 5). Test-local
+`touch_tolerance_atr` 2.0 (band half-width 2.0 x ATR_ref = 4.00: lower band [94.00, 102.00], upper
+band [102.00, 110.00]) lets the low 95.00 count as a lower-edge touch; the other detector tests
+hold (close 98 above the break line 97.60, |95 - 98| = 3 <= |100 - 106| = 6, the high 100 is
+below the upper band). The zone and sr_far_edge stay 98.00 / 106.00 / 97.00 (ATR_ref 2.00).
+ATR_last = (13 x 2.00 + 5) / 14, so the stop = 97.00 - 0.2 x ATR_last, below entry_min (D-06
+passes) and above the signal bar low 95.00, so D-07 fires: INVALIDATED.
+
+```
+python -c "from decimal import Decimal as D; a=(D('13')*D('2')+D('5'))/D('14'); print(a, D('0.2')*a, D('97')-D('0.2')*a, D('98')-D('0.1')*a)"
+2.214285714285714285714285714 0.4428571428571428571428571428 96.55714285714285714285714286 97.77857142857142857142857143
+```
