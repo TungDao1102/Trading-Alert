@@ -242,3 +242,102 @@ python -c "from decimal import Decimal as D; P=D('99'); print(P-D('1.5')*D('2'),
 | stop_loss | 97.40, below the signal bar low 98.20 |
 | TP1 / TP2 | 102.50 / 106.00 |
 | RR to TP1 | 2.1875 (minimum_rr 2) |
+
+# Family B (breakout-retest) cases, plan 15-05
+
+Basis of the stop (D-23, sheet text alone): `docs/research/families/breakout-retest.md` section
+2.2 (the broken zone has `resistance_zone_lower_bound` and `resistance_zone_upper_bound`), Q6
+(Stage B baseline S3 = zone invalidation on the other side of the broken zone) and section 6
+(`zone_tolerance_atr` is the zone half-width, `sl_buffer_atr` is the S3 buffer). So for a LONG
+the stop sits one `sl_buffer_atr x ATR_last` beyond the LOWER bound of the broken resistance
+zone, `swing_high_ref - zone_tolerance_atr x ATR_ref`. The measured-move TP1 is kept (D-23).
+
+Same independence rule as above: every number comes from a standalone `python -c` Decimal
+one-liner, never from the code under test. Every parameter value is test-local. None is a
+proposed or ratified strategy parameter, with one labelled exception below
+(`breakout_confirmation_bars = 1`, the proposed baseline of sheet Stage B B1, ratified only at
+plan 15-08).
+
+## Family B common inputs
+
+| Symbol | Value |
+|--------|-------|
+| symbol / streams | synthetic `BTCUSDT`, 250 closed 1h bars (setup) and 250 closed 4h bars (context) |
+| bar shape | high - low = 2.00 for every bar and the true range of every bar is 2.00 (the breakout bar is built so that close - previous close = 2.00 with low = previous close), so ATR(14) = 2.00 at every bar |
+| zone_tolerance_atr | 0.5 (half-width 0.5 x 2.00 = 1.00) |
+| entry_buffer_atr | 0.1 (entry buffer 0.20) |
+| sl_buffer_atr | 0.2 (stop buffer 0.40, from ATR_last) |
+| minimum_rr | 2 |
+| swing_lookback | 20 |
+| retest_window_bars / retest_depth_atr | 5 / 0.3 (band half-width 0.3 x ATR_ref = 0.60) |
+| breakout_confirmation_bars | 1 (test-local, set explicitly in every ParameterSet of the main worked cases: the proposed baseline of sheet Stage B B1, ratified only at 15-08; the inherited baseline-v5 value 3 is the legacy implementation value and is covered separately by `b_long_legacy_confirm3`) |
+| geometry_version | 1 (the legacy contrast sets omit it) |
+| equity / risk_rate | 10000 / 0.005 |
+| context stream | 250 bars rising 1.00 per bar (BULLISH), falling 1.00 per bar for the SHORT mirror (BEARISH) |
+
+Bars used by `family_b_long_setup()` (first_breakout f = 246, plateau 2): bars 0..244 alternate
+close 99 / 100 (even index 100, odd index 99: bar 244 closes 100); bar 245 closes 101; bar 246 is
+the breakout bar (open 101, low 101, high 103, close 103); bars 247 and 248 close 104 (low 103,
+high 105); the evaluated bar 249 closes 103 (open 104, low 102, high 104).
+
+## b_long_worked
+
+Test-local `breakout_confirmation_bars = 1` (proposed baseline, sheet B1). The edge, zone,
+`sr_far_edge` and stop formulas below do not contain `breakout_confirmation_bars`: the value only
+selects the reference bar `ref_prev = i - breakout_confirmation_bars - 1` and how many closes must
+clear the edge.
+
+Breakout end bar i = 246, reference bar ref_prev = 246 - 1 - 1 = 244. Window of the 20-bar swing
+at bar 244 is bars 225..244: highs are 101 (close 100) or 100 (close 99), so swing_high_ref = 101;
+lows are 99 or 98, so swing_low_ref = 98. Bar 245 (high 102) is NOT in that window, which is what
+separates ref_prev 244 from 245. ATR_ref = ATR(244) = 2.00 and ATR_last = ATR(249) = 2.00.
+
+Edge: 101 + 0.5 x 2.00 = 102.00. Close of bar 246 = 103 > 102.00, a breakout. Retest band
+(depth 0.3 x 2.00 = 0.60): [101.40, 102.60]. Bars 247 and 248 have low 103, outside the band; bar
+249 has low 102 inside it, and it is the first bar of the band after the breakout, so the retest
+is the evaluated bar n - 1 = 249 (within retest_window_bars of bar 246).
+
+Other breakout end bars scanned from n - 2 = 248 down to max(1 + 1, n - 1 - 5) = 244:
+i = 248: ref 246, swing high 103, edge 104.00, close 104 is not above it. i = 247: ref 245, swing
+high 102, edge 103.00, close 104 clears it, but its first retest is bar 248 (low 103 in
+[102.40, 103.60]), not bar 249, so it does not count. i = 246 is the first match.
+i = 245 and 244 close at or below 101, no breakout.
+
+```
+python -c "from decimal import Decimal as D; sh=D('100')+D('1'); sl=D('99')-D('1'); atr=D('2'); t=D('0.5'); edge=sh+t*atr; zl=sl-t*atr; sr=sh-t*atr; h=edge-zl; print(sh, sl, edge, zl, sr, h, edge+h)"
+101 98 102.0 97.0 100.0 5.0 107.0
+python -c "from decimal import Decimal as D; edge=D('102'); eb=D('0.1')*D('2'); sb=D('0.2')*D('2'); sr=D('100'); stop=sr-sb; print(edge-eb, edge+eb, (edge-eb+edge+eb)/2, stop)"
+101.8 102.2 102.0 99.6
+python -c "from decimal import Decimal as D; ref=D('102'); stop=D('99.6'); tp1=D('107'); print(ref-stop, tp1-ref, (tp1-ref)/(ref-stop), ref+2*(tp1-ref))"
+2.4 5 2.083333333333333333333333333 112
+python -c "from decimal import Decimal as D; print(D('102')-D('0.3')*D('2'), D('102')+D('0.3')*D('2'))"
+101.4 102.6
+```
+
+| Field | Value |
+|-------|-------|
+| swing_high_ref / swing_low_ref / ATR_ref | 101 / 98 / 2.00 |
+| zone_upper = edge | 102.00 |
+| zone_lower | 97.00 (swing_low_ref - 1.00) |
+| sr_far_edge | 100.00 (swing_high_ref - 0.5 x ATR_ref = 101 - 1.00) |
+| entry_min / entry_max | 101.80 / 102.20 (edge -/+ 0.1 x ATR_last) |
+| entry_ref | 102.00 |
+| stop_loss | 99.60 = sr_far_edge - 0.2 x ATR_last, strictly below entry_min |
+| TP1 (measured move) | 107.00 = edge + (edge - zone_lower) |
+| TP2 | 112.00 |
+| risk / reward | 2.40 / 5.00 |
+| RR to TP1 | 2.083333333333333333333333333 (minimum_rr 2) |
+
+## b_long_legacy_contrast
+
+The same window under a set that omits `geometry_version` (test-local `breakout_confirmation_bars
+= 1`, same other values). The legacy scan runs i from n - 1 down and accepts any retest within the
+window, so it stops at i = 247 (edge 103.00 from ref_prev 245, swing high 102, swing low 98;
+retest bar 248 with low 103 inside [102.40, 103.60]). zone_upper = 103.00, zone_lower = 98 - 1.00
+= 97.00, height 6.00, TP1 = 109.00, entry 102.80 .. 103.20, stop = edge - sl_buffer = 102.60 (the
+legacy `edge - sl_buffer_atr x ATR`, unchanged), TP2 = 103 + 2 x 6 = 115.
+
+```
+python -c "from decimal import Decimal as D; edge=D('102')+D('1'); zl=D('98')-D('1'); h=edge-zl; eb=D('0.1')*D('2'); sb=D('0.2')*D('2'); print(edge, zl, h, edge+h, edge-eb, edge+eb, edge-sb, edge+2*h)"
+103 97 6 109 102.8 103.2 102.6 115
+```

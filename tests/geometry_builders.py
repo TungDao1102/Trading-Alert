@@ -79,15 +79,25 @@ def window_from_closes(
     over 250 bars.
     """
     setup = constant_range_candles(closes, half_range=half_range)
+    return setup, trending_context(len(setup), half_range=half_range, bearish=bearish)
+
+
+def trending_context(
+    setup_length: int, *, half_range: Decimal = Decimal("1"), bearish: bool = False
+) -> list[Candle]:
+    """250 closed 4h bars rising (BULLISH) or falling (`bearish`) by `half_range` per bar.
+
+    The last 4h bar opens six hours before the evaluated 1h bar (index `setup_length - 1`)
+    opens, so it has closed by then.
+    """
     if bearish:
         context_closes = [Decimal("100") + half_range * (250 - k) for k in range(250)]
     else:
         context_closes = [Decimal("100") + half_range * k for k in range(250)]
-    context_start = SETUP_START + timedelta(hours=len(closes) - 1 - 6) - timedelta(hours=4) * 249
-    context = constant_range_candles(
+    context_start = SETUP_START + timedelta(hours=setup_length - 1 - 6) - timedelta(hours=4) * 249
+    return constant_range_candles(
         context_closes, interval="4h", start=context_start, half_range=half_range
     )
-    return setup, context
 
 
 def scale_closes(closes: Sequence[Decimal], *, atr: Decimal, pivot_low: Decimal) -> list[Decimal]:
@@ -217,3 +227,204 @@ def family_a_long_window() -> tuple[list[Candle], list[Candle]]:
     )
     context = constant_range_candles(context_closes, interval="4h", start=context_start)
     return setup, context
+
+
+# --------------------------------------------------------------------------- #
+# Family B (breakout-retest) windows, plan 15-05. Hand derivations: DERIVATIONS.md.
+# --------------------------------------------------------------------------- #
+
+_ONE_HOUR = timedelta(hours=1)
+
+
+def bar_after(
+    previous: Candle,
+    *,
+    high: Decimal,
+    low: Decimal,
+    close: Decimal,
+    open_: Decimal | None = None,
+) -> Candle:
+    """The 1h bar following `previous`; `open_` defaults to the previous close."""
+    open_time = previous.open_time_utc + _ONE_HOUR
+    return Candle(
+        symbol=previous.symbol,
+        interval=previous.interval,
+        open_time_utc=open_time,
+        close_time_utc=open_time + _ONE_HOUR - timedelta(seconds=1),
+        open=previous.close if open_ is None else open_,
+        high=high,
+        low=low,
+        close=close,
+        volume=Decimal("1"),
+    )
+
+
+def range_bar_after(previous: Candle, close: Decimal) -> Candle:
+    """A constant-range bar (high = close + 1, low = close - 1) following `previous`."""
+    return bar_after(previous, high=close + Decimal("1"), low=close - Decimal("1"), close=close)
+
+
+def family_b_long_setup(
+    *,
+    first_breakout: int = 246,
+    plateau: int = 2,
+    tail: Sequence[Decimal] = (),
+) -> list[Candle]:
+    """Flat range, one breakout run, a plateau away from the band, then the retest bar.
+
+    Bars 0..first_breakout-2 alternate close 99 / 100 and end on 100 (range 2.00, so
+    ATR = 2.00 exactly; swing high 101, swing low 98 over any 20 of them). Bar
+    first_breakout-1 closes 101 (its high 102 is outside the swing window of the reference
+    bar first_breakout-2 and inside the window of first_breakout-1). Bar first_breakout is
+    the breakout bar (open 101, low 101, high 103, close 103, true range 2.00). Then
+    `plateau` constant-range bars close 104 (low 103, above the retest band), then the retest
+    bar closes 103 (low 102.00), then the `tail` closes (each within 1.00 of the previous).
+    True range is 2.00 for every bar, so ATR = 2.00 everywhere.
+    """
+    flat = [
+        Decimal("100") if (first_breakout - 2 - k) % 2 == 0 else Decimal("99")
+        for k in range(first_breakout - 1)
+    ]
+    candles = constant_range_candles([*flat, Decimal("101")])
+    candles.append(
+        bar_after(candles[-1], high=Decimal("103"), low=Decimal("101"), close=Decimal("103"))
+    )
+    for close in [*([Decimal("104")] * plateau), Decimal("103"), *tail]:
+        candles.append(range_bar_after(candles[-1], close))
+    return candles
+
+
+def mirror_candles(candles: Sequence[Candle], *, pivot: Decimal = Decimal("200")) -> list[Candle]:
+    """Reflect every price p to pivot - p (highs and lows swap); times are unchanged."""
+    return [
+        Candle(
+            symbol=c.symbol,
+            interval=c.interval,
+            open_time_utc=c.open_time_utc,
+            close_time_utc=c.close_time_utc,
+            open=pivot - c.open,
+            high=pivot - c.low,
+            low=pivot - c.high,
+            close=pivot - c.close,
+            volume=c.volume,
+        )
+        for c in candles
+    ]
+
+
+def family_b_window(
+    *,
+    mirror: bool = False,
+    bearish_context: bool | None = None,
+    first_breakout: int = 246,
+    plateau: int = 2,
+    tail: Sequence[Decimal] = (),
+) -> tuple[list[Candle], list[Candle]]:
+    """(setup, context) for a Family B case; `mirror` reflects the setup to a SHORT shape.
+
+    The 4h context follows the mirror flag (BEARISH when mirrored) unless `bearish_context`
+    overrides it, which builds the counter-regime windows.
+    """
+    setup = family_b_long_setup(first_breakout=first_breakout, plateau=plateau, tail=tail)
+    if mirror:
+        setup = mirror_candles(setup)
+    bearish = mirror if bearish_context is None else bearish_context
+    return setup, trending_context(len(setup), bearish=bearish)
+
+
+def family_b_long_window() -> tuple[list[Candle], list[Candle]]:
+    """b_long_worked: breakout bar 246, retest and evaluated bar 249, BULLISH."""
+    return family_b_window()
+
+
+def family_b_short_window() -> tuple[list[Candle], list[Candle]]:
+    """b_short_worked: the mirror (p -> 200 - p) of b_long_worked, BEARISH."""
+    return family_b_window(mirror=True)
+
+
+def family_b_confirm3_window() -> tuple[list[Candle], list[Candle]]:
+    """b_long_legacy_confirm3: closes 103, 104, 104 on bars 245..247 (three clear the edge)."""
+    return family_b_window(first_breakout=245, plateau=3)
+
+
+def family_b_confirm3_one_close_window() -> tuple[list[Candle], list[Candle]]:
+    """Same stretch as confirm3 but only bar 247 clears the edge 102.00.
+
+    Bars 0..243 alternate as in family_b_long_setup (bar 243 closes 100), bar 244 closes 101,
+    bar 245 closes 101, bar 246 closes 102 (equal to the edge, not above it), bar 247 is a
+    custom bar (open 102, low 102, high 104, close 104, true range 2.00), bar 248 closes 104
+    and the evaluated bar 249 closes 103.
+    """
+    flat = [Decimal("100") if (243 - k) % 2 == 0 else Decimal("99") for k in range(244)]
+    candles = constant_range_candles([*flat, Decimal("101"), Decimal("101"), Decimal("102")])
+    candles.append(
+        bar_after(candles[-1], high=Decimal("104"), low=Decimal("102"), close=Decimal("104"))
+    )
+    candles.append(range_bar_after(candles[-1], Decimal("104")))
+    candles.append(range_bar_after(candles[-1], Decimal("103")))
+    return candles, trending_context(len(candles))
+
+
+def family_b_stale_window() -> tuple[list[Candle], list[Candle]]:
+    """A breakout and its first retest 40 bars before the evaluated bar, nothing since.
+
+    The b_long_worked pattern shifted so the breakout bar is 206 and the retest bar 209;
+    bars 210..249 close 104 (low 103, high 105).
+    """
+    return family_b_window(first_breakout=206, tail=[Decimal("104")] * 40)
+
+
+def family_b_not_first_retest_window() -> tuple[list[Candle], list[Candle]]:
+    """Breakout bar 246, a retest at 248 (n - 2) and another band touch at 249 (n - 1)."""
+    return family_b_window(plateau=1, tail=[Decimal("103")])
+
+
+def family_b_late_retest_window() -> tuple[list[Candle], list[Candle]]:
+    """Breakout bar 246, five bars at 104, the first retest at 252 (six bars after 246)."""
+    return family_b_window(plateau=5)
+
+
+def family_b_crash_window() -> tuple[list[Candle], list[Candle]]:
+    """b_long_worked up to the breakout bar 246, then a gap away and a crash on bar 249.
+
+    Bar 247: open 108, low 108, high 109, close 109. Bar 248: open 109, low 108, high 110,
+    close 109. Evaluated bar 249: open 109, high 109, low 98.50, close 100. With
+    retest_depth_atr 2.0 the band around the edge 102.00 is 98.00..106.00, so bars 247 and
+    248 (lows 108) are outside it and bar 249 (low 98.50) is the first retest.
+    """
+    candles = family_b_long_setup()[:247]
+    candles.append(
+        bar_after(
+            candles[-1],
+            high=Decimal("109"),
+            low=Decimal("108"),
+            close=Decimal("109"),
+            open_=Decimal("108"),
+        )
+    )
+    candles.append(
+        bar_after(candles[-1], high=Decimal("110"), low=Decimal("108"), close=Decimal("109"))
+    )
+    candles.append(
+        bar_after(candles[-1], high=Decimal("109"), low=Decimal("98.50"), close=Decimal("100"))
+    )
+    return candles, trending_context(len(candles))
+
+
+def with_evaluated_bar(
+    setup: Sequence[Candle], *, high: Decimal, low: Decimal, close: Decimal
+) -> list[Candle]:
+    """`setup` with its last bar replaced (same open and times); used by the leakage proofs."""
+    last = setup[-1]
+    replaced = Candle(
+        symbol=last.symbol,
+        interval=last.interval,
+        open_time_utc=last.open_time_utc,
+        close_time_utc=last.close_time_utc,
+        open=last.open,
+        high=high,
+        low=low,
+        close=close,
+        volume=last.volume,
+    )
+    return [*setup[:-1], replaced]

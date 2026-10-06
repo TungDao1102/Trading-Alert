@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 from src.core import planner as planner_module
+from src.core import strategy as strategy_module
 from src.core.planner import plan
 from src.core.strategy import evaluate
 from src.core.types import AccountState, Candle, MarketSnapshot, PlanResult, SetupResult
@@ -43,7 +44,8 @@ def _number(text: str) -> int | Decimal:
 
 
 def _parameter_set(case: dict[str, Any]) -> ParameterSet:
-    base = load_parameter_set("trend-pullback", "baseline-v5")
+    """baseline-v5 of the case's family plus the case's own keys (in memory only)."""
+    base = load_parameter_set(case.get("family", "trend-pullback"), "baseline-v5")
     params = dict(base.params)
     for key, text in case["params"].items():
         params[key] = _number(text)
@@ -443,6 +445,8 @@ def test_every_corrected_family_a_plan_has_its_stop_outside_the_zone() -> None:
     checked = 0
     for name, case in _load_cases().items():
         expected = case["expected"]
+        if case["family"] != "trend-pullback":
+            continue  # Family B has its own test below
         if "geometry_version" not in case["params"] or expected.get("reason_code") != "OK":
             continue  # the legacy contrast case keeps the stop inside the zone on purpose
         _result, planned, _ = _run(name)
@@ -490,6 +494,66 @@ def test_evaluate_is_unchanged_when_the_last_bar_is_rebuilt_from_the_prefix() ->
     again, _plan = _evaluate_and_plan((rebuilt, context), parameter_set)
     assert original == again
     assert original.signal is not None
+
+
+# --------------------------------------------------------------------------- #
+# Plan 15-05: Family B (breakout-retest) under geometry_version 1.
+# --------------------------------------------------------------------------- #
+
+
+def _expected_rr(trade_plan: Any) -> Decimal:
+    return Decimal(json.loads(trade_plan.expected_rr_json)["tp1_rr"])
+
+
+def test_b_long_worked_sets_breakout_confirmation_bars_explicitly() -> None:
+    """D-18: the proposed baseline 1 (sheet B1) is test-local, never inherited from v5 (3)."""
+    case = _load_cases()["b_long_worked"]
+    assert case["params"]["breakout_confirmation_bars"] == "1"
+    assert _parameter_set(case).params["breakout_confirmation_bars"] == 1
+    inherited = load_parameter_set("breakout-retest", "baseline-v5")
+    assert inherited.params["breakout_confirmation_bars"] == 3  # the legacy implementation value
+
+
+def test_b_long_worked_plan_has_the_s3_stop_beyond_the_narrow_sr_zone() -> None:
+    result, planned, expected = _run("b_long_worked")
+    assert result.signal is not None
+    assert result.signal.direction == expected["direction"]
+    assert result.signal.setup_type == expected["setup_type"]
+    _assert_plan_matches(planned, expected)
+    trade_plan = planned.trade_plan
+    assert trade_plan is not None
+    assert trade_plan.entry_min_price == Decimal("101.80")
+    assert trade_plan.entry_max_price == Decimal("102.20")
+    assert trade_plan.stop_loss_price == Decimal("99.60")
+    assert trade_plan.stop_loss_price < trade_plan.entry_min_price
+    assert _expected_rr(trade_plan) == Decimal(expected["tp1_rr"])
+
+
+def test_b_long_worked_levels_carry_the_far_edge_of_the_sr_zone() -> None:
+    case = _load_cases()["b_long_worked"]
+    setup, _context = getattr(geometry_builders, case["builder"])()
+    levels = strategy_module._detect_breakout_retest_levels(
+        setup_candles=setup, parameter_set=_parameter_set(case), direction="LONG"
+    )
+    assert levels is not None
+    expected = case["expected"]
+    assert levels.direction == "LONG"
+    assert levels.setup_type == "BREAKOUT_RETEST_LONG"
+    assert levels.zone_upper == Decimal(expected["zone_upper"])
+    assert levels.zone_lower == Decimal(expected["zone_lower"])
+    assert levels.sr_far_edge == Decimal(expected["sr_far_edge"])
+
+
+def test_b_long_legacy_contrast_keeps_the_code_stop_edge_minus_sl_buffer() -> None:
+    result, planned, expected = _run("b_long_legacy_contrast")
+    assert result.signal is not None
+    _assert_plan_matches(planned, expected)
+    trade_plan = planned.trade_plan
+    assert trade_plan is not None
+    assert trade_plan.stop_loss_price == Decimal("102.60")  # edge 103.00 - 0.2 x 2.00
+    corrected, _plan, _ = _run("b_long_worked")
+    assert corrected.signal is not None
+    assert corrected.signal.signal_id != result.signal.signal_id
 
 
 def test_derivations_file_has_a_section_for_every_plan_15_04_case() -> None:

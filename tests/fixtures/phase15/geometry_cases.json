@@ -150,6 +150,63 @@
         "setup_type": "TREND_PULLBACK_LONG",
         "plan_reason_code": "STALE_SETUP"
       }
+    },
+    "b_long_worked": {
+      "family": "breakout-retest",
+      "builder": "family_b_long_window",
+      "params": {
+        "zone_tolerance_atr": "0.5",
+        "entry_buffer_atr": "0.1",
+        "sl_buffer_atr": "0.2",
+        "minimum_rr": "2",
+        "swing_lookback": "20",
+        "breakout_confirmation_bars": "1",
+        "retest_window_bars": "5",
+        "retest_depth_atr": "0.3",
+        "geometry_version": "1"
+      },
+      "expected": {
+        "direction": "LONG",
+        "setup_type": "BREAKOUT_RETEST_LONG",
+        "zone_upper": "102.00",
+        "zone_lower": "97.00",
+        "sr_far_edge": "100.00",
+        "entry_min": "101.80",
+        "entry_max": "102.20",
+        "entry_ref": "102.00",
+        "stop_loss": "99.60",
+        "tp1": "107.00",
+        "tp2": "112.00",
+        "tp1_rr": "2.083333333333333333333333333",
+        "reason_code": "OK"
+      }
+    },
+    "b_long_legacy_contrast": {
+      "family": "breakout-retest",
+      "builder": "family_b_long_window",
+      "params": {
+        "zone_tolerance_atr": "0.5",
+        "entry_buffer_atr": "0.1",
+        "sl_buffer_atr": "0.2",
+        "minimum_rr": "2",
+        "swing_lookback": "20",
+        "breakout_confirmation_bars": "1",
+        "retest_window_bars": "5",
+        "retest_depth_atr": "0.3"
+      },
+      "expected": {
+        "direction": "LONG",
+        "setup_type": "BREAKOUT_RETEST_LONG",
+        "zone_upper": "103.00",
+        "zone_lower": "97.00",
+        "entry_min": "102.80",
+        "entry_max": "103.20",
+        "entry_ref": "103.00",
+        "stop_loss": "102.60",
+        "tp1": "109.00",
+        "tp2": "115.00",
+        "reason_code": "OK"
+      }
     }
   }
 }
