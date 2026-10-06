@@ -19,9 +19,10 @@ Every expected number is a hand-derived literal:
   = 0.0003006 + 0.0003944 = 0.000695
 * BTC LONG with account taker 0.0007: 60100 x 0.0008 + 58780 x 0.0010
   = 48.08 + 58.78 = 106.86
-* phase 6 SL case: entry leg 121.50 x 32.071 x (0.0005 + 0.0001), final leg SL 121.20 x 32.071
-  x (0.0005 + 0.0003); the TP ladder case: entry 121.50 x 16.035, TP1 125.60 x 8.017 and TP2
-  129.70 x 8.018, each exit leg at fee 0.0005 plus the resting-limit slippage 0.0001
+* phase 6 SL case (baseline-v6 fixture, plan 15-12): entry leg 117.80 x 19.303 x
+  (0.0005 + 0.0001), final leg SL 116.50 x 19.303 x (0.0005 + 0.0003); the TP ladder case:
+  entry 117.80 x 9.651, TP1 123.20 x 4.825 and TP2 128.60 x 4.826, each exit leg at fee 0.0005
+  plus the resting-limit slippage 0.0001
 """
 
 from __future__ import annotations
@@ -224,7 +225,7 @@ def test_simulator_and_paper_call_evaluate_risk_with_identical_arguments(
         assert sim_kwargs[name] == paper_kwargs[name], name
     assert sim_kwargs == paper_kwargs
 
-    # The literal parameter rates reach both call sites (baseline-v5 fixture).
+    # The literal parameter rates reach both call sites (baseline-v6 fixture).
     rates = sim_kwargs["cost_rates"]
     assert (
         rates.fee_rate_entry,
@@ -280,9 +281,9 @@ def _bookings_by_kind(case_name: str) -> tuple[dict[str, Decimal], dict[str, Any
 
 
 def test_per_leg_costs_for_a_stop_out_match_hand_arithmetic() -> None:
-    """Entry leg and the SL final leg (stop-market, exit_slippage_rate), 32.071 at 121.50."""
+    """Entry leg and the SL final leg (stop-market, exit_slippage_rate), 19.303 at 117.80."""
     bookings, trade = _bookings_by_kind("intrabar_both_touched")
-    qty, entry, stop = Decimal("32.071"), Decimal("121.50"), Decimal("121.20")
+    qty, entry, stop = Decimal("19.303"), Decimal("117.80"), Decimal("116.50")
 
     entry_leg = -(entry * qty * (FEE + ENTRY_SLIPPAGE))
     final_leg = (stop - entry) * qty - stop * qty * (FEE + STOP_SLIPPAGE)
@@ -297,14 +298,14 @@ def test_per_leg_costs_for_a_stop_out_match_hand_arithmetic() -> None:
 
 
 def test_per_leg_costs_for_a_tp_ladder_match_hand_arithmetic() -> None:
-    """Entry, TP1 and TP2 legs: 16.035 filled, 8.017 at TP1 125.60, 8.018 at TP2 129.70.
+    """Entry, TP1 and TP2 legs: 9.651 filled, 4.825 at TP1 123.20, 4.826 at TP2 128.60.
 
     A resting take-profit leg pays expected_slippage 0.0001, never the stop rate (D-10).
     """
     bookings, trade = _bookings_by_kind("limit_partial_fill")
-    entry = Decimal("121.50")
-    qty, tp1_qty, tp2_qty = Decimal("16.035"), Decimal("8.017"), Decimal("8.018")
-    tp1, tp2 = Decimal("125.60"), Decimal("129.70")
+    entry = Decimal("117.80")
+    qty, tp1_qty, tp2_qty = Decimal("9.651"), Decimal("4.825"), Decimal("4.826")
+    tp1, tp2 = Decimal("123.20"), Decimal("128.60")
 
     entry_leg = -(entry * qty * (FEE + ENTRY_SLIPPAGE))
     tp1_leg = (tp1 - entry) * tp1_qty - tp1 * tp1_qty * (FEE + ENTRY_SLIPPAGE)

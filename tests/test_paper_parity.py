@@ -381,7 +381,7 @@ def test_parity_expected_documentary_fields_match_registry_and_simulator() -> No
     tests/fixtures/phase4/parameters.json entry for the fixture's set;
     cost_model_hash is the hash of the cost slice of that registry set. All
     three must also equal what the simulator reports on the fixture, and the
-    fixture must sit on the v5 identity (8-key cost dict).
+    fixture must sit on the Phase 15 identity (baseline-v6, v5.0.0, 9-key cost dict).
     """
     from src.backtest.costs import build_cost_model, cost_slice
     from src.domain.registry import load_parameter_set
@@ -389,7 +389,7 @@ def test_parity_expected_documentary_fields_match_registry_and_simulator() -> No
     case_input = json.loads((PARITY_FIXTURE_DIR / "input.json").read_text())
     expected = json.loads((PARITY_FIXTURE_DIR / "expected.json").read_text())
 
-    assert case_input["parameter_set_id"] == "baseline-v5"
+    assert case_input["parameter_set_id"] == "baseline-v6"
     assert "exit_slippage_rate" in case_input["cost_model"]
 
     pins = json.loads((PHASE7_FIXTURES_DIR.parent / "phase4" / "parameters.json").read_text())[
@@ -405,7 +405,7 @@ def test_parity_expected_documentary_fields_match_registry_and_simulator() -> No
     registry_cost_hash = build_cost_model(cost_slice(registry_set.params)).cost_model_hash
     sim_result = simulator_run(case_input)
 
-    assert expected["strategy_version"] == pin["strategy_version"] == "v4.0.0"
+    assert expected["strategy_version"] == pin["strategy_version"] == "v5.0.0"
     assert expected["parameter_set_hash"] == pin["parameter_set_hash"]
     assert expected["parameter_set_hash"] == sim_result["parameter_set_hash"]
     assert expected["cost_model_hash"] == registry_cost_hash

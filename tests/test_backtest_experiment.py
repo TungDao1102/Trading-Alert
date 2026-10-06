@@ -429,7 +429,7 @@ def test_cr03b_reproduced_trades_carry_typed_decimal_datetime_fields() -> None:
     from src.backtest.experiment import reproduce
 
     case = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
-    assert case["parameter_set_id"] == "baseline-simple-trend-v3"
+    assert case["parameter_set_id"] == "baseline-simple-trend-v4"
     record = _simple_trend_record(case)
     trades = reproduce(record, simulator_inputs=case)
     assert len(trades) >= 1, "simple-trend baseline must yield filled trades"
@@ -681,7 +681,7 @@ def test_cr11_baseline_tomls_carry_detector_and_cost_keys() -> None:
 
 
 def _simple_trend_record(case: dict, *, result_summary_json: str = "{}"):
-    """Assemble a typed record bound to the regenerated simple-trend baseline case (v3 set).
+    """Assemble a typed record bound to the regenerated simple-trend baseline case (v4 set).
 
     The run summary is the real engine output of that case, so the typed fields are the
     ones a reproduction of the case yields.
@@ -781,7 +781,7 @@ def test_verify_experiment_compares_the_v2_digest_and_detects_a_changed_minute_s
     drifted = _load_bound_input(PHASE6_FIXTURES_DIR / "baselines" / "simple_trend")
     for row in drifted["mark_bars_1m"]:
         if row["open_time_utc"] == "2026-09-11T10:06:00+00:00":
-            row["low"] = "121.50"
+            row["low"] = "117.80"  # above the v6 stop trigger 115.60 (15-10 facts)
     with pytest.raises(ExperimentReproducibilityBroken, match="end_of_data_count"):
         verify_experiment(matching, simulator_inputs=drifted)
 
@@ -1177,7 +1177,7 @@ def test_trade_from_dict_round_trips_every_v2_field() -> None:
     assert trade.to_dict() == raw
     assert isinstance(trade.signal_close_utc, datetime)
     assert isinstance(trade.resolved_at_utc, datetime)
-    assert trade.planned_quantity == Decimal("20.598")
+    assert trade.planned_quantity == Decimal("11.566")
     assert trade.regime == "BULLISH"
     assert type(trade.funding_event_count) is int
     assert type(trade.gap_through_stop) is bool

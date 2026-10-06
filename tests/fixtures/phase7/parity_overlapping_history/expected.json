@@ -1,7 +1,7 @@
 {
-  "digest": "d06c739aa73e0aec8033908086f25da78525ace4d422356a88fcfd4e2d4d3efe",
+  "digest": "48a486fd7f3e3c40f217c21b5be526c53292a9a7c3f38c265d9766c6a256e347",
   "trade_count": 1,
-  "strategy_version": "v4.0.0",
-  "parameter_set_hash": "41ed39d4be10491abf614491aad7a9b0d35e1f52f5e894ff9d94fb2149ac3df9",
+  "strategy_version": "v5.0.0",
+  "parameter_set_hash": "2c4f1528b00f1b1e48c76040bbd6cc218a25eec21c521d8b68da86ee4811360f",
   "cost_model_hash": "6d6c4e237ed0b56996ed344f4449b09a59c253a8d148af60e3aba1c8436f1caa"
 }
