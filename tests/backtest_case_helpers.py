@@ -12,6 +12,8 @@ float): the v2 parser refuses floats anywhere in a case.
   realized risk, so a test controls the sizing instead of re-deriving it.
 - `phase6_strategy_rows`: the strategy and context rows of a phase 6 fixture input,
   read key by key so the helper keeps working after the fixtures are regenerated.
+- `phase6_case_identity`: the strategy id, strategy version and parameter set id a phase 6
+  fixture declares, so a test that runs a regenerated case binds the identity the fixture names.
 - `strategy_run_summary`, `assemble_kwargs`, `make_experiment_record`: the one shared
   factory for typed experiment records (Phase 14, plan 14-15). Every test that needs an
   `ExperimentRecord` or an `assemble` call builds it here; none spells the typed fields
@@ -335,6 +337,27 @@ def phase6_strategy_rows(fixture: str) -> tuple[list[dict[str, Any]], list[dict[
     """
     payload = json.loads((FIXTURE_ROOT / fixture / "input.json").read_text(encoding="utf-8"))
     return list(payload["strategy_bars"]), list(payload["context_bars"])
+
+
+def phase6_case_identity(fixture: str) -> tuple[str, str, str]:
+    """Return `(strategy_id, strategy_version, parameter_set_id)` of a phase 6 fixture input.
+
+    Phase 15 (plan 15-12): the fixtures moved from baseline-v5 / v4.0.0 to baseline-v6 /
+    v5.0.0, so a test that runs a regenerated case reads the identity from the fixture
+    instead of spelling it.
+    """
+    payload = json.loads((FIXTURE_ROOT / fixture / "input.json").read_text(encoding="utf-8"))
+    return (
+        str(payload["strategy_id"]),
+        str(payload["strategy_version"]),
+        str(payload["parameter_set_id"]),
+    )
+
+
+def phase6_cost_model(fixture: str) -> dict[str, str]:
+    """Return the `cost_model` dict of a phase 6 fixture input (all values strings)."""
+    payload = json.loads((FIXTURE_ROOT / fixture / "input.json").read_text(encoding="utf-8"))
+    return {str(key): str(value) for key, value in payload["cost_model"].items()}
 
 
 # --------------------------------------------------------------------------- #

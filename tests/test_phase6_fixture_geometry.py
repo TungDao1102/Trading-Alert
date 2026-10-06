@@ -87,8 +87,8 @@ EXPECTED_PARTIAL_FILL = {
 }
 
 BASELINE_SETS = {
-    "no_trade": "baseline-no-trade-v3",
-    "simple_trend": "baseline-simple-trend-v3",
+    "no_trade": "baseline-no-trade-v4",
+    "simple_trend": "baseline-simple-trend-v4",
 }
 
 
@@ -160,10 +160,10 @@ def _assert_guard_clearance(case: dict[str, Any]) -> tuple[Decimal, Decimal]:
 
 
 @pytest.mark.parametrize("name", SIMULATOR_FIXTURES)
-def test_fixture_carries_phase12_identity(name: str) -> None:
+def test_fixture_carries_phase15_identity(name: str) -> None:
     case = _load_case(name)
-    assert case["parameter_set_id"] == "baseline-v5"
-    assert case["strategy_version"] == "v4.0.0"
+    assert case["parameter_set_id"] == "baseline-v6"
+    assert case["strategy_version"] == "v5.0.0"
     cost = case["cost_model"]
     assert set(cost) == EXPECTED_COST_KEYS
     assert cost["fee_rate_entry"] == "0.0005"
@@ -185,17 +185,17 @@ def test_fixture_clears_both_cost_guards(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", sorted(BASELINE_SETS))
-def test_baseline_fixture_carries_phase12_identity(name: str) -> None:
+def test_baseline_fixture_carries_phase15_identity(name: str) -> None:
     case = _load_case("baselines", name)
     assert case["parameter_set_id"] == BASELINE_SETS[name]
-    assert case["strategy_version"] == "v4.0.0"
+    assert case["strategy_version"] == "v5.0.0"
     assert case["cost_model"] == _load_case("intrabar_both_touched")["cost_model"]
     assert set(case["cost_model"]) == EXPECTED_COST_KEYS
 
 
 def test_simple_trend_baseline_clears_both_cost_guards() -> None:
     stop_rate, _ = _assert_guard_clearance(_load_case("baselines", "simple_trend"))
-    # Planning-time prototype: about 1.83 percent.
+    # Planning-time prototype (v6): stop 115.5475 against the edge 119.7060, about 3.5 percent.
     assert stop_rate >= Decimal("0.01")
 
 

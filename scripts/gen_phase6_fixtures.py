@@ -1,11 +1,12 @@
 """Helper script to generate Phase 6 backtest fixture data deterministically.
 
-Phase 14 (plan 14-12, D-24, D-25): every output is a case-input v2 dict
-("backtest-case/2"), driven through the event-loop engine
-(`src.backtest.engine.simulate`) via `src.backtest.simulator.run`. The 1H and 4H
-geometry is unchanged from Phase 12:
+Phase 15 (plan 15-12, D-19, D-26): every output is a case-input v2 dict
+("backtest-case/2") taken from `build_v6_payloads()`, the corrected Family A geometry built in
+plan 15-10, and driven through the event-loop engine (`src.backtest.engine.simulate`) via
+`src.backtest.simulator.run`:
 
-  - trend-pullback (Family A) baseline-v5 parameters produce a known setup
+  - trend-pullback (Family A) baseline-v6 parameters produce a known setup on a V-shaped
+    pivot history (a monotonic uptrend has no confirmed pivot low)
   - 4H context confirms the regime
   - bar 249 (the trigger bar) closes at 2026-09-11 09:59:59 UTC and creates the plan
   - the plan RESTS from bar 250 onward and is filled, stopped, expired or cancelled by
@@ -16,17 +17,14 @@ opens at 10:00:00 UTC, the first minute after the trigger bar close (D-24, F-602
 whose scenario needs a strategy bar N+1 (the missing-mark fallback and the invalidation
 case) carries bar 250 as an extra 1H row.
 
-Phase 12 (F-002, F-608): the 1H bars carry a realistic half-range (BAR_HALF_RANGE = 0.80)
-so the ATR-derived stop sits about 1.1 percent from entry instead of 0.06 to 0.26
-percent. That clears the minimum-stop (0.3 percent) and cost-to-risk (0.15) guards with
-margin. The plan geometry is DERIVED by the planner from the bars; the numbers quoted in
-the docstrings below are illustrations from the planning-time prototype, and
+The plan geometry is DERIVED by the planner from the bars; the numbers quoted in the
+comments below are illustrations from the planning-time prototype, and
 tests/test_phase6_fixture_geometry.py recomputes and checks them with independent
-arithmetic. For the LONG case the zone is 120.4586 to 122.5414 (limit 121.50, the zone
-mid), the stop 121.1529 (trigger 121.2 after the tick snap), TP1 125.60 and TP2 129.70;
-the SHORT mirror has limit 128.50, stop 128.8471, TP1 124.40 and TP2 120.30. The tick is
-0.10, so a LONG limit fills only on a trade-price low of 121.40 or lower (a SHORT: a high
-of 128.60 or higher); a low of exactly 121.50 is a touch without a fill (D-07).
+arithmetic. For the LONG case the zone is 116.9336 to 118.6664 (limit 117.80, the zone mid),
+the stop 116.4138 (trigger 116.50 after the tick snap), TP1 123.20 and TP2 128.60; the SHORT
+mirror has limit 132.20, stop trigger 133.50, TP1 126.80 and TP2 121.40. The tick is 0.10, so
+a LONG limit fills only on a trade-price low of 117.70 or lower (a SHORT: a high of 132.30 or
+higher); a low of exactly 117.80 is a touch without a fill (D-07).
 
 The expected outputs of these cases are regression snapshots (D-25, F-608): they are pinned
 from the v2 engine, not hand-derived. Hand-derived goldens live in tests/fixtures/phase14.
@@ -73,96 +71,6 @@ EXPIRY_DATA_END = FIRST_MINUTE_OPEN + timedelta(hours=4)
 def _fmt(dt: datetime) -> str:
     """Format datetime as ISO 8601 with +00:00 suffix."""
     return dt.astimezone(UTC).isoformat()
-
-
-def _make_1h_candles_long_setup() -> list[dict]:
-    """250 1H bars trending up; the last bar dips to touch the support zone.
-
-    Bars 0..248: smooth uptrend from 100.00 to 124.80 (delta 0.10/bar), each bar
-    spanning close +/- BAR_HALF_RANGE.
-    Bar 249 (trigger): bullish bar that dips to touch the support zone
-    and closes above its open (close >= open) so the invalidation gate
-    does not fire.
-    """
-    rows: list[dict] = []
-    for i in range(250):
-        open_t = BASE_OPEN + timedelta(hours=i)
-        close_t = open_t + timedelta(hours=1) - timedelta(seconds=1)
-        if i < 249:
-            price = Decimal("100.00") + Decimal(str(i)) * Decimal("0.10")
-            rows.append(
-                {
-                    "symbol": SYMBOL,
-                    "interval": "1h",
-                    "open_time_utc": _fmt(open_t),
-                    "close_time_utc": _fmt(close_t),
-                    "open": f"{price:.2f}",
-                    "high": f"{price + BAR_HALF_RANGE:.2f}",
-                    "low": f"{price - BAR_HALF_RANGE:.2f}",
-                    "close": f"{price:.2f}",
-                    "volume": "1.0",
-                }
-            )
-        else:
-            rows.append(
-                {
-                    "symbol": SYMBOL,
-                    "interval": "1h",
-                    "open_time_utc": _fmt(open_t),
-                    "close_time_utc": _fmt(close_t),
-                    "open": "121.50",
-                    "high": "125.00",
-                    "low": "121.50",
-                    "close": "124.50",
-                    "volume": "1.0",
-                }
-            )
-    return rows
-
-
-def _make_1h_candles_short_setup() -> list[dict]:
-    """250 1H bars trending down; the last bar spikes to touch the resistance zone.
-
-    Bars 0..248: smooth downtrend from 150.00 to 125.20 (delta -0.10/bar), each
-    bar spanning close +/- BAR_HALF_RANGE.
-    Bar 249 (trigger): bearish bar that spikes to touch the resistance
-    zone and closes below its open (close <= open) so the invalidation
-    gate does not fire.
-    """
-    rows: list[dict] = []
-    for i in range(250):
-        open_t = BASE_OPEN + timedelta(hours=i)
-        close_t = open_t + timedelta(hours=1) - timedelta(seconds=1)
-        if i < 249:
-            price = Decimal("150.00") - Decimal(str(i)) * Decimal("0.10")
-            rows.append(
-                {
-                    "symbol": SYMBOL,
-                    "interval": "1h",
-                    "open_time_utc": _fmt(open_t),
-                    "close_time_utc": _fmt(close_t),
-                    "open": f"{price:.2f}",
-                    "high": f"{price + BAR_HALF_RANGE:.2f}",
-                    "low": f"{price - BAR_HALF_RANGE:.2f}",
-                    "close": f"{price:.2f}",
-                    "volume": "1.0",
-                }
-            )
-        else:
-            rows.append(
-                {
-                    "symbol": SYMBOL,
-                    "interval": "1h",
-                    "open_time_utc": _fmt(open_t),
-                    "close_time_utc": _fmt(close_t),
-                    "open": "128.50",
-                    "high": "128.50",
-                    "low": "125.00",
-                    "close": "125.00",
-                    "volume": "1.0",
-                }
-            )
-    return rows
 
 
 def _make_4h_context_bars_long() -> list[dict]:
@@ -313,109 +221,7 @@ FILL_MINUTE = 5  # 10:05, the minute that trades through the limit
 EXIT_MINUTE = 6  # 10:06, the first minute after the fill minute
 
 
-def _long_resting(i: int) -> Ohlc:
-    """LONG price above the limit (121.50): never reaches it."""
-    return ("123.00", "123.05", "122.95", "123.00")
-
-
-def _long_both_touched(kind: str) -> Path1m:
-    """LONG: rest, trade through the limit at 10:05, then one minute touching SL and TP1.
-
-    Minute 5 (10:05) trade low 121.40 trades through the 121.50 limit by one tick (fill at
-    the close of the minute); its mark minute low 121.45 stays above the stop trigger 121.2,
-    so the fill minute does not stop out. Minute 6 (10:06) low 121.10 touches the stop and
-    high 125.70 touches TP1 (125.60): the stop wins (stop-first, D-12).
-    """
-
-    def path(i: int) -> Ohlc:
-        if i < FILL_MINUTE:
-            return _long_resting(i)
-        if i == FILL_MINUTE:
-            low = "121.40" if kind == "trade" else "121.45"
-            return ("121.80", "121.90", low, "121.60")
-        if i == EXIT_MINUTE:
-            return ("121.60", "125.70", "121.10", "121.50")
-        return ("121.55", "121.60", "121.50", "121.55")
-
-    return path
-
-
-def _short_resting(i: int) -> Ohlc:
-    """SHORT price below the limit (128.50): never reaches it."""
-    return ("126.00", "126.05", "125.95", "126.00")
-
-
-def _short_both_touched(kind: str) -> Path1m:
-    """SHORT mirror: trade high 128.60 trades through the 128.50 limit; stop 128.8, TP1 124.40."""
-
-    def path(i: int) -> Ohlc:
-        if i < FILL_MINUTE:
-            return _short_resting(i)
-        if i == FILL_MINUTE:
-            high = "128.60" if kind == "trade" else "128.55"
-            return ("128.20", high, "128.10", "128.30")
-        if i == EXIT_MINUTE:
-            return ("128.30", "128.90", "124.30", "128.50")
-        return ("128.45", "128.50", "128.40", "128.45")
-
-    return path
-
-
-def _long_missing_mark(kind: str) -> Path1m:
-    """LONG fill at 10:05 and a hole in the mark series from 10:06 to the end of the hour.
-
-    The trade series continues (its low 121.00 at 10:20 is what the bar 250 range carries).
-    """
-
-    def path(i: int) -> Ohlc:
-        if i < FILL_MINUTE:
-            return _long_resting(i)
-        if i == FILL_MINUTE:
-            low = "121.40" if kind == "trade" else "121.45"
-            return ("121.80", "121.90", low, "121.60")
-        if i == 20:
-            return ("121.55", "121.60", "121.00", "121.50")
-        return ("121.55", "121.60", "121.50", "121.55")
-
-    return path
-
-
-def _long_touch_only(kind: str) -> Path1m:
-    """LONG minutes that reach the limit 121.50 exactly (a touch, no trade-through) three times."""
-
-    def path(i: int) -> Ohlc:
-        if i in (10, 11, 30):
-            low = "121.50" if kind == "trade" else "121.52"
-            return ("121.80", "121.90", low, "121.70")
-        return _long_resting(i)
-
-    return path
-
-
-def _long_tp_ladder(kind: str) -> Path1m:
-    """LONG: fill at 10:05, TP1 (125.60) at 10:06, TP2 (129.70) at 10:07."""
-
-    def path(i: int) -> Ohlc:
-        if i < FILL_MINUTE:
-            return _long_resting(i)
-        if i == FILL_MINUTE:
-            low = "121.40" if kind == "trade" else "121.45"
-            return ("121.80", "121.90", low, "121.60")
-        if i == EXIT_MINUTE:
-            return ("121.60", "125.70", "121.50", "125.60")
-        if i == EXIT_MINUTE + 1:
-            return ("125.60", "130.00", "125.40", "129.80")
-        return ("129.80", "129.85", "129.75", "129.80")
-
-    return path
-
-
-def _long_invalidation(kind: str) -> Path1m:
-    """LONG minutes stay above the limit until 10:49; the rest of the hour is a data hole."""
-    return _long_resting
-
-
-# Shared base inputs for trend-pullback baseline-v5 (Phase 12 cost identity).
+# Shared base inputs for trend-pullback baseline-v6 (Phase 15 identity, D-26).
 ACCOUNT_STATE = {"equity": "10000.00", "risk_rate": "0.005"}
 CONSTRAINT_HISTORY = [
     {
@@ -442,15 +248,10 @@ COST_MODEL = {
     "spread_fill_assumptions": "FULL_FILL",
     "partial_fill_fraction": "1.0",
 }
-PARAMETER_SET_ID = "baseline-v5"
-# Degenerated baseline sets (Phase 12 cost identity, same strategy version).
-BASELINE_NO_TRADE_SET_ID = "baseline-no-trade-v3"
-BASELINE_SIMPLE_TREND_SET_ID = "baseline-simple-trend-v3"
 STRATEGY_ID = "trend-pullback"
-STRATEGY_VERSION = "v4.0.0"
 
 
-def _funding_rows() -> list[dict]:
+def _funding_rows(mark_price: str) -> list[dict]:
     """Funding at 00:00, 08:00 and 16:00 UTC from 2026-09-10 16:00 to 2026-09-12 00:00.
 
     The rows cover every data window of this script (00:00 on the 11th to 14:00): the
@@ -469,7 +270,7 @@ def _funding_rows() -> list[dict]:
             "symbol": SYMBOL,
             "funding_time_utc": _fmt(when),
             "funding_rate": "0.0001",
-            "mark_price": "121.50",
+            "mark_price": mark_price,
         }
         for when in instants
     ]
@@ -482,7 +283,8 @@ def _build_input(
     trade_bars_1m: list[dict],
     mark_bars_1m: list[dict],
     data_end: datetime,
-    parameter_set_id: str = PARAMETER_SET_ID,
+    mark_price: str,
+    parameter_set_id: str,
     cost_overrides: dict[str, str] | None = None,
 ) -> dict:
     """Build the canonical case-input v2 `input.json` shape for the Phase 6 cases."""
@@ -492,14 +294,14 @@ def _build_input(
     return {
         "case_input_schema": "backtest-case/2",
         "strategy_id": STRATEGY_ID,
-        "strategy_version": STRATEGY_VERSION,
+        "strategy_version": V6_STRATEGY_VERSION,
         "parameter_set_id": parameter_set_id,
         "symbols": [SYMBOL],
         "strategy_bars": strategy_bars,
         "context_bars": context_bars,
         "trade_bars_1m": trade_bars_1m,
         "mark_bars_1m": mark_bars_1m,
-        "funding": _funding_rows(),
+        "funding": _funding_rows(mark_price),
         "constraint_history": CONSTRAINT_HISTORY,
         "account_state": ACCOUNT_STATE,
         "cost_model": cost_model,
@@ -515,156 +317,10 @@ def _write(path: Path, payload: dict) -> None:
     path.write_bytes((json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"))
 
 
-def _long_case(
-    *,
-    path_for: Callable[[str], Path1m],
-    count: int = HOUR_MINUTES,
-    data_end: datetime = HOUR_DATA_END,
-    trade_holes: frozenset[int] = frozenset(),
-    mark_holes: frozenset[int] = frozenset(),
-    extra_bar: dict | None = None,
-    parameter_set_id: str = PARAMETER_SET_ID,
-    cost_overrides: dict[str, str] | None = None,
-) -> dict:
-    bars = _make_1h_candles_long_setup()
-    if extra_bar is not None:
-        bars.append(extra_bar)
-    return _build_input(
-        strategy_bars=bars,
-        context_bars=_make_4h_context_bars_long(),
-        trade_bars_1m=_minute_rows("trade", count, path_for("trade"), trade_holes),
-        mark_bars_1m=_minute_rows("mark", count, path_for("mark"), mark_holes),
-        data_end=data_end,
-        parameter_set_id=parameter_set_id,
-        cost_overrides=cost_overrides,
-    )
-
-
-def write_intrabar_both_touched() -> None:
-    """LONG setup; fill at 10:05, then a minute touching SL and TP1: stop-first (D-12)."""
-    _write(
-        FIXTURE_ROOT / "intrabar_both_touched" / "input.json",
-        _long_case(path_for=_long_both_touched),
-    )
-
-
-def write_parity_overlapping_history() -> None:
-    """Phase 7 backtest-to-paper parity input: the LONG both-touched payload (12-09).
-
-    A copy of the `intrabar_both_touched` payload (baseline-v5 identity and the nine-key
-    cost dict) written under the Phase 7 fixture root, so the parity fixture stays on the
-    same registry set as the Phase 6 fixtures. It holds a single signal and a single plan,
-    so the portfolio ledger never binds a later verdict (D-18, RESEARCH Q7). `expected.json`
-    (digest and the documentary hashes) is pinned from the engine output through the
-    computation in tests/test_paper_parity.py.
-    """
-    _write(
-        PHASE7_FIXTURE_ROOT / "parity_overlapping_history" / "input.json",
-        _long_case(path_for=_long_both_touched),
-    )
-
-
-def _write_baseline(case_name: str, parameter_set_id: str) -> None:
-    """Baseline fixture: the LONG both-touched payload on a degenerated set."""
-    _write(
-        FIXTURE_ROOT / "baselines" / case_name / "input.json",
-        _long_case(path_for=_long_both_touched, parameter_set_id=parameter_set_id),
-    )
-
-
-def write_baseline_no_trade() -> None:
-    """No-trade baseline: minimum_rr=100 makes the planner reject (RR_TOO_LOW)."""
-    _write_baseline("no_trade", BASELINE_NO_TRADE_SET_ID)
-
-
-def write_baseline_simple_trend() -> None:
-    """Simple-trend baseline: looser minimum_rr, wider zone; yields a real plan."""
-    _write_baseline("simple_trend", BASELINE_SIMPLE_TREND_SET_ID)
-
-
-def write_intrabar_both_touched_short() -> None:
-    """SHORT setup; fill at 10:05, then a minute touching SL and TP1: stop-first (D-12)."""
-    bars = _make_1h_candles_short_setup()
-    payload = _build_input(
-        strategy_bars=bars,
-        context_bars=_make_4h_context_bars_short(),
-        trade_bars_1m=_minute_rows("trade", HOUR_MINUTES, _short_both_touched("trade")),
-        mark_bars_1m=_minute_rows("mark", HOUR_MINUTES, _short_both_touched("mark")),
-        data_end=HOUR_DATA_END,
-    )
-    _write(FIXTURE_ROOT / "intrabar_both_touched_short" / "input.json", payload)
-
-
-def write_intrabar_missing_fallback() -> None:
-    """LONG setup; fill at 10:05, then the mark series has a hole from 10:06 (D-12).
-
-    The strategy bar N+1 (bar 250, 10:00 to 10:59:59) has a low of 121.00 below the stop,
-    so the rest of the hour resolves once at the bar close from the bar range, stop first,
-    with `fallback_applied` set and a coverage note (never synthesized minute prices).
-    """
-    payload = _long_case(
-        path_for=_long_missing_mark,
-        mark_holes=frozenset(range(EXIT_MINUTE, HOUR_MINUTES)),
-        extra_bar=_bar_250("123.00", "123.10", "121.00", "121.60"),
-    )
-    _write(FIXTURE_ROOT / "intrabar_missing_fallback" / "input.json", payload)
-
-
-def write_limit_touch_no_fill() -> None:
-    """LONG setup; three minutes reach the limit exactly but never trade through it.
-
-    The plan rests until its expiry (13:59:59) and ends EXPIRED with
-    `touch_no_fill_count` 3 (D-07, D-34). The 1m data covers every minute up to the expiry.
-    """
-    payload = _long_case(
-        path_for=_long_touch_only,
-        count=EXPIRY_MINUTES,
-        data_end=EXPIRY_DATA_END,
-    )
-    _write(FIXTURE_ROOT / "limit_touch_no_fill" / "input.json", payload)
-
-
-def write_limit_partial_fill() -> None:
-    """LONG setup; partial_fill_fraction 0.5 fills half the planned size, then TP1 and TP2."""
-    payload = _long_case(path_for=_long_tp_ladder, cost_overrides={"partial_fill_fraction": "0.5"})
-    _write(FIXTURE_ROOT / "limit_partial_fill" / "input.json", payload)
-
-
-def write_limit_expiry() -> None:
-    """LONG setup; the limit is never reached and the plan expires at 13:59:59 (D-04)."""
-    payload = _long_case(
-        path_for=lambda kind: _long_resting,
-        count=EXPIRY_MINUTES,
-        data_end=EXPIRY_DATA_END,
-    )
-    _write(FIXTURE_ROOT / "limit_expiry" / "input.json", payload)
-
-
-def write_invalidation_cancels_entry() -> None:
-    """LONG setup; the bar after the trigger closes beyond the invalidation level (D-05, D-35).
-
-    Bar 250 closes at 120.80, below the plan's CANDLE_CLOSE level (about 121.15), while the
-    plan is still resting. The 1m data stops at 10:49: the last ten minutes of the hour are a
-    data hole, because a real fall through the limit would show as a trade-through and fill
-    the plan first. The case is therefore a synthetic regression snapshot of the precedence
-    rule fill, then invalidation, then expiry; it is not a realistic price path.
-    """
-    holes = frozenset(range(50, HOUR_MINUTES))
-    payload = _long_case(
-        path_for=_long_invalidation,
-        trade_holes=holes,
-        mark_holes=holes,
-        extra_bar=_bar_250("123.50", "123.60", "120.50", "120.80"),
-    )
-    _write(FIXTURE_ROOT / "invalidation_cancels_entry" / "input.json", payload)
-
-
 # --------------------------------------------------------------------------- #
 # Phase 15 (plan 15-10, D-19, D-26): the Phase 6 cases and the Phase 7 parity input on the
 # corrected Family A geometry. `build_v6_payloads()` is PURE: it returns the payloads and
-# writes nothing. The writers above and `main()` still produce the baseline-v5 files byte
-# for byte; plan 15-12 moves the committed fixtures to these payloads together with every
-# consumer of them.
+# writes nothing; the writers below and `main()` write exactly its entries (plan 15-12).
 #
 # Geometry (geometry_version 1, params/trend-pullback/baseline-v6.toml): the setup level is
 # the most recent CONFIRMED fractal pivot (3 bars each side, searched over the last
@@ -933,7 +589,7 @@ def _v6_case(
     bars = _v6_strategy_bars(short=short)
     if extra_bar_long is not None:
         bars.append(_v6_bar_250(extra_bar_long, short=short))
-    payload = _build_input(
+    return _build_input(
         strategy_bars=bars,
         context_bars=_make_4h_context_bars_short() if short else _make_4h_context_bars_long(),
         trade_bars_1m=_v6_minute_rows(
@@ -943,16 +599,10 @@ def _v6_case(
             "mark", count, path_for("mark"), short=short, holes=mark_holes
         ),
         data_end=data_end,
+        mark_price=f"{(SHORT_MIRROR_K - V6_LEVELS.limit) if short else V6_LEVELS.limit:.2f}",
         parameter_set_id=parameter_set_id,
         cost_overrides=cost_overrides,
     )
-    payload["strategy_version"] = V6_STRATEGY_VERSION
-    mark = V6_LEVELS.limit
-    payload["funding"] = [
-        {**row, "mark_price": f"{(SHORT_MIRROR_K - mark) if short else mark:.2f}"}
-        for row in payload["funding"]
-    ]
-    return payload
 
 
 def build_v6_payloads() -> dict[str, dict]:
@@ -1029,6 +679,92 @@ def build_v6_payloads() -> dict[str, dict]:
             short=False, path_for=_v6_both_touched
         ),
     }
+
+
+def _write_payload(key: str) -> None:
+    """Write the `build_v6_payloads()` entry `key` under its fixture root."""
+    root_name, relative = key.split("/", 1)
+    root = {"phase6": FIXTURE_ROOT, "phase7": PHASE7_FIXTURE_ROOT}[root_name]
+    _write(root / relative, build_v6_payloads()[key])
+
+
+def write_intrabar_both_touched() -> None:
+    """LONG setup; fill at 10:05, then a minute touching SL and TP1: stop-first (D-12)."""
+    _write_payload("phase6/intrabar_both_touched/input.json")
+
+
+def write_parity_overlapping_history() -> None:
+    """Phase 7 backtest-to-paper parity input: the LONG both-touched payload (12-09).
+
+    A copy of the `intrabar_both_touched` payload (baseline-v6 identity and the nine-key
+    cost dict) written under the Phase 7 fixture root, so the parity fixture stays on the
+    same registry set as the Phase 6 fixtures. It holds a single signal and a single plan,
+    so the portfolio ledger never binds a later verdict (D-18, RESEARCH Q7). `expected.json`
+    (digest and the documentary hashes) is pinned from the engine output through the
+    computation in tests/test_paper_parity.py.
+    """
+    _write_payload("phase7/parity_overlapping_history/input.json")
+
+
+def _write_baseline(case_name: str) -> None:
+    """Baseline fixture: the LONG both-touched payload on a degenerated set."""
+    _write_payload(f"phase6/baselines/{case_name}/input.json")
+
+
+def write_baseline_no_trade() -> None:
+    """No-trade baseline: minimum_rr=100 makes the planner reject (RR_TOO_LOW)."""
+    _write_baseline("no_trade")
+
+
+def write_baseline_simple_trend() -> None:
+    """Simple-trend baseline: looser minimum_rr, wider zone; yields a real plan."""
+    _write_baseline("simple_trend")
+
+
+def write_intrabar_both_touched_short() -> None:
+    """SHORT mirror; fill at 10:05, then a minute touching SL and TP1: stop-first (D-12)."""
+    _write_payload("phase6/intrabar_both_touched_short/input.json")
+
+
+def write_intrabar_missing_fallback() -> None:
+    """LONG setup; fill at 10:05, then the mark series has a hole from 10:06 (D-12).
+
+    The strategy bar N+1 (bar 250, 10:00 to 10:59:59) has a low of 116.20 below the stop
+    trigger, so the rest of the hour resolves once at the bar close from the bar range, stop
+    first, with `fallback_applied` set and a coverage note (never synthesized minute prices).
+    """
+    _write_payload("phase6/intrabar_missing_fallback/input.json")
+
+
+def write_limit_touch_no_fill() -> None:
+    """LONG setup; three minutes reach the limit exactly but never trade through it.
+
+    The plan rests until its expiry (13:59:59) and ends EXPIRED with
+    `touch_no_fill_count` 3 (D-07, D-34). The 1m data covers every minute up to the expiry.
+    """
+    _write_payload("phase6/limit_touch_no_fill/input.json")
+
+
+def write_limit_partial_fill() -> None:
+    """LONG setup; partial_fill_fraction 0.5 fills half the planned size, then TP1 and TP2."""
+    _write_payload("phase6/limit_partial_fill/input.json")
+
+
+def write_limit_expiry() -> None:
+    """LONG setup; the limit is never reached and the plan expires at 13:59:59 (D-04)."""
+    _write_payload("phase6/limit_expiry/input.json")
+
+
+def write_invalidation_cancels_entry() -> None:
+    """LONG setup; the bar after the trigger closes beyond the invalidation level (D-05, D-35).
+
+    Bar 250 closes at 116.00, below the plan's CANDLE_CLOSE level (the stop, about 116.41),
+    while the plan is still resting. The 1m data stops at 10:49: the last ten minutes of the
+    hour are a data hole, because a real fall through the limit would show as a trade-through
+    and fill the plan first. The case is therefore a synthetic regression snapshot of the
+    precedence rule fill, then invalidation, then expiry; it is not a realistic price path.
+    """
+    _write_payload("phase6/invalidation_cancels_entry/input.json")
 
 
 def main() -> None:

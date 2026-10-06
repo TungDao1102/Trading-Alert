@@ -32,6 +32,8 @@ from tests.backtest_case_helpers import (
     flat_minutes,
     make_case,
     minute_row,
+    phase6_case_identity,
+    phase6_cost_model,
     phase6_strategy_rows,
     scripted_plan,
 )
@@ -63,7 +65,8 @@ def trigger_case() -> tuple[dict[str, Any], Any, Any]:
     strategy_rows, context_rows = phase6_strategy_rows(TRIGGER_FIXTURE)
     setup = [candle_of(r) for r in strategy_rows]
     context = [candle_of(r) for r in context_rows]
-    parameter_set = load_parameter_set("trend-pullback", "baseline-v5")
+    strategy_id, strategy_version, parameter_set_id = phase6_case_identity(TRIGGER_FIXTURE)
+    parameter_set = load_parameter_set(strategy_id, parameter_set_id)
     account = AccountState(equity=Decimal("10000"), risk_rate=Decimal("0.005"))
     snapshot = MarketSnapshot(
         symbol=SYMBOL,
@@ -74,7 +77,7 @@ def trigger_case() -> tuple[dict[str, Any], Any, Any]:
     result = evaluate(
         snapshot=snapshot,
         account_state=account,
-        strategy_version="v4.0.0",
+        strategy_version=strategy_version,
         parameter_set=parameter_set,
     )
     assert result.signal is not None, "the phase 6 trigger-bar fixture must produce a setup"
@@ -120,6 +123,10 @@ def trigger_case() -> tuple[dict[str, Any], Any, Any]:
         kind="mark",
     )
     case = make_case(
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        parameter_set_id=parameter_set_id,
+        cost_overrides=phase6_cost_model(TRIGGER_FIXTURE),
         strategy_bars=strategy_rows,
         context_bars=context_rows,
         trade_minutes=[trade_row],
@@ -264,11 +271,12 @@ def trigger_setup_result() -> SetupResult:
         context_candles=[c for c in context if c.close_time_utc <= setup[-1].close_time_utc],
         source_timeframe="1h",
     )
+    strategy_id, strategy_version, parameter_set_id = phase6_case_identity(TRIGGER_FIXTURE)
     return evaluate(
         snapshot=snapshot,
         account_state=AccountState(equity=Decimal("10000"), risk_rate=Decimal("0.005")),
-        strategy_version="v4.0.0",
-        parameter_set=load_parameter_set("trend-pullback", "baseline-v5"),
+        strategy_version=strategy_version,
+        parameter_set=load_parameter_set(strategy_id, parameter_set_id),
     )
 
 
@@ -344,7 +352,8 @@ def test_a_no_trade_result_past_the_regime_gate_names_the_regime() -> None:
     strategy_rows, context_rows = phase6_strategy_rows(TRIGGER_FIXTURE)
     setup = [candle_of(r) for r in strategy_rows]
     context = [candle_of(r) for r in context_rows]
-    parameter_set = load_parameter_set("trend-pullback", "baseline-v5")
+    strategy_id, strategy_version, parameter_set_id = phase6_case_identity(TRIGGER_FIXTURE)
+    parameter_set = load_parameter_set(strategy_id, parameter_set_id)
     account = AccountState(equity=Decimal("10000"), risk_rate=Decimal("0.005"))
     named = 0
     for end in range(210, len(setup)):
@@ -359,7 +368,7 @@ def test_a_no_trade_result_past_the_regime_gate_names_the_regime() -> None:
                 source_timeframe="1h",
             ),
             account_state=account,
-            strategy_version="v4.0.0",
+            strategy_version=strategy_version,
             parameter_set=parameter_set,
         )
         assert result.regime is None or result.regime in REGIMES
