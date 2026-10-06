@@ -20,8 +20,10 @@ float-free (D-21).
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -100,13 +102,78 @@ def load_rationale(path: Path) -> dict[str, RationaleEntry]:
     return entries
 
 
+_D_NUMBER = re.compile(r"D\d{3}")
+
+
+def _value_problem(key: str, recorded: str, parameter: Any) -> str | None:
+    """Problem when the recorded value differs from the parsed parameter, else None.
+
+    String parameters compare exactly; int and Decimal parameters compare
+    numerically through Decimal, so "1.0" matches a parameter normalized to int 1.
+    """
+    if isinstance(parameter, str):
+        if recorded != parameter:
+            return f"{key}: recorded value {recorded!r} differs from parameter {parameter!r}"
+        return None
+    try:
+        recorded_number = Decimal(recorded)
+        comparable = recorded_number.is_finite()
+        equal = comparable and recorded_number == Decimal(str(parameter))
+    except InvalidOperation:
+        comparable = False
+        equal = False
+    if not comparable:
+        return f"{key}: recorded value {recorded!r} is not a finite number"
+    if not equal:
+        return f"{key}: recorded value {recorded!r} differs from parameter {str(parameter)!r}"
+    return None
+
+
+def _entry_problems(key: str, table: Any, parameter: Any) -> list[str]:
+    """Every problem of one `[rationale.<key>]` table; never raises."""
+    if not isinstance(table, dict):
+        return [f"{key}: rationale entry must be a table"]
+    problems: list[str] = []
+    basis = table.get("basis")
+    value = table.get("value")
+    text = table.get("text")
+    ref = table.get("ref")
+    if not isinstance(basis, str):
+        problems.append(f"{key}: missing or non-string field 'basis'")
+    elif basis not in RATIONALE_BASES:
+        problems.append(f"{key}: unknown basis {basis!r}, expected one of {RATIONALE_BASES}")
+    if not isinstance(value, str):
+        problems.append(f"{key}: missing or non-string field 'value'")
+    else:
+        mismatch = _value_problem(key, value, parameter)
+        if mismatch is not None:
+            problems.append(mismatch)
+    if not isinstance(text, str):
+        problems.append(f"{key}: missing or non-string field 'text'")
+    elif not text.strip():
+        problems.append(f"{key}: field 'text' is empty")
+    if ref is not None and not isinstance(ref, str):
+        problems.append(f"{key}: field 'ref' must be a string")
+    elif basis == "EXPERIMENT" and not (ref and ref.strip()):
+        problems.append(
+            f"{key}: basis EXPERIMENT requires a non-empty 'ref' (experiment reference)"
+        )
+    elif basis in ("DECISION", "COST_GUARD") and not (ref and _D_NUMBER.fullmatch(ref)):
+        problems.append(
+            f"{key}: basis {basis} requires a 'ref' of the form D<3 digits>, got {ref!r}"
+        )
+    return problems
+
+
 def check_rationale(path: Path) -> list[str]:
     """All rationale problems of a set file, sorted; empty when complete."""
     params = _parameters(path)
     raw, problems = _raw_tables(_read_doc(path))
-    for key in params:
+    for key, parameter in params.items():
         if key not in raw:
             problems.append(f"{key}: missing rationale entry")
+        else:
+            problems.extend(_entry_problems(key, raw[key], parameter))
     for key in raw:
         if key not in params:
             problems.append(f"{key}: rationale entry for a key that is not in [parameters]")
