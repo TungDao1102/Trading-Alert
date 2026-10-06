@@ -66,6 +66,42 @@ def rising_context(count: int = 250) -> list[Decimal]:
     return [Decimal("100") + Decimal(k) for k in range(count)]
 
 
+def window_from_closes(
+    closes: Sequence[Decimal], *, half_range: Decimal = Decimal("1")
+) -> tuple[list[Candle], list[Candle]]:
+    """(setup_candles, context_candles) for any 1h close path with a rising 4h context.
+
+    The last 4h bar opens six hours before the evaluated 1h bar opens, so it has closed by
+    then. The context rises by `half_range` per bar from 100 (BULLISH regime).
+    """
+    setup = constant_range_candles(closes, half_range=half_range)
+    context_closes = [Decimal("100") + half_range * k for k in range(250)]
+    context_start = SETUP_START + timedelta(hours=len(closes) - 1 - 6) - timedelta(hours=4) * 249
+    context = constant_range_candles(
+        context_closes, interval="4h", start=context_start, half_range=half_range
+    )
+    return setup, context
+
+
+def family_a_tp_loss_side_closes() -> list[Decimal]:
+    """Setup closes whose newest confirmed pivot high lies BELOW the pivot low (F6).
+
+    A 0.25 ramp up to a 104 peak (pivot high 105, confirmed by 103, 102, 101), a rise to 108,
+    then a small dip whose bottom (close 107, low 106) is the confirmed pivot low. The bars
+    around the dip keep making equal or higher highs, so no newer pivot high is confirmed
+    when the last bar (close 107.5, low 106.5) touches the pivot zone. Bar count 258.
+    """
+    closes = [Decimal("44.25") + Decimal("0.25") * k for k in range(240)]
+    tail = "103 102 101 102 103 104 105 106 107 108 108 107.5 107 108 108.5 109 108.5 107.5"
+    closes.extend(Decimal(v) for v in tail.split())
+    return closes
+
+
+def family_a_tp_loss_side_window() -> tuple[list[Candle], list[Candle]]:
+    """(setup_candles, context_candles) for the loss-side TP1 case (F6)."""
+    return window_from_closes(family_a_tp_loss_side_closes())
+
+
 def family_a_long_window() -> tuple[list[Candle], list[Candle]]:
     """(setup_candles, context_candles) for the a_long_worked case.
 

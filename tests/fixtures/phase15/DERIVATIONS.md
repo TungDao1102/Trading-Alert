@@ -86,3 +86,39 @@ python -c "from decimal import Decimal as D; ref=D('98'); stop=D('97.6'); tp1=D(
 | entry_ref | 98.00 |
 | stop_loss | 97.60, inside the entry zone (the defect Phase 15 corrects) |
 | TP1 / TP2 | 106.00 / 114.00 |
+
+## tp_loss_side
+
+Plan 15-04 Task 1 (F6). Parameters as in a_long_worked except `minimum_rr` 0.1, so the RR gate
+cannot be the thing that rejects. Setup closes: bars 0..239 close 44.25 + 0.25 k (bar 239
+closes 104.00), then bars 240..257 close 103, 102, 101, 102, 103, 104, 105, 106, 107, 108, 108,
+107.5, 107, 108, 108.5, 109, 108.5, 107.5. The evaluated bar is 257.
+
+Pivot low: bar 252 (close 107, low 106.00) has lows 107, 107, 106.5 on its left (bars 249..251)
+and 107, 107.5, 108 on its right (bars 253..255), so it is confirmed at bar 255 and P = 106.00.
+The evaluated bar 257 has low 106.50, inside 105.00-107.00. No later pivot low exists (the
+newest candidate is bar 254).
+
+Pivot high: candidates run from bar 238 to bar 254. Bar 239 (close 104, high 105.00) has rising
+highs on its left and strictly lower highs 104, 103, 102 on its right, so it is a confirmed
+pivot high. Every candidate after it fails the right-side test: bars 240..248 are followed by
+a higher high, bar 249 (high 109) by an equal high at bar 250, bar 250 by the equal high 109 at
+bar 253, bars 251 and 252 by the higher 109 at bar 253, and bars 253 and 254 by the higher
+highs 109.5 and 110 at bars 254 and 255. The peak at bar 255 (high 110.00) has only two bars to
+its right, so it is not yet confirmed. So TP1 = 105.00, which is below entry_ref.
+
+```
+python -c "from decimal import Decimal as D; P=D('107')-D('1'); h=D('0.5')*D('2'); zl=P-h; zu=P+h; eb=D('0.1')*D('2'); sb=D('0.2')*D('2'); print(P, zl, zu, zl-eb, zu+eb, zl-eb-sb, ((zl-eb)+(zu+eb))/2)"
+106 105.0 107.0 104.8 107.2 104.4 106.0
+python -c "from decimal import Decimal as D; print(D('104')+1, D('105')-D('106'))"
+105 -1
+```
+
+| Field | Value |
+|-------|-------|
+| zone | 107.00 / 105.00 |
+| entry_min / entry_max | 104.80 / 107.20 |
+| entry_ref | 106.00 |
+| stop_loss | 104.40, strictly below entry_min |
+| TP1 | 105.00, signed profit-side leg -1.00 (loss side) |
+| expected plan() result | NO_TRADE, RR_TOO_LOW (abs() used to give RR 0.625 and a plan) |
