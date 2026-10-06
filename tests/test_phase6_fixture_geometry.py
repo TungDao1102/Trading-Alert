@@ -18,10 +18,13 @@ rows cover the data window, and the v1 per-bar simulator code is gone.
 
 from __future__ import annotations
 
+import copy
+import functools
 import importlib.util
 import json
+import tomllib
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -240,6 +243,16 @@ def _load_generator() -> ModuleType:
     return module
 
 
+def _lf(data: bytes) -> bytes:
+    """Line endings normalized to LF (F12): a Windows checkout may hold CRLF working files.
+
+    The generator writes explicit LF bytes, and git stores LF, but `core.autocrlf` rewrites the
+    working tree to CRLF on Windows. The comparison is about content, not about the checkout's
+    line-ending convention, so both sides are normalized before they are compared.
+    """
+    return data.replace(b"\r\n", b"\n")
+
+
 def _snapshot_tree(root: Path) -> dict[str, bytes]:
     return {
         str(p.relative_to(root)).replace("\\", "/"): p.read_bytes()
@@ -263,12 +276,14 @@ def test_generator_is_deterministic_and_matches_committed_fixtures(
     assert first == second
     assert first, "generator wrote nothing"
     for rel, data in first.items():
-        committed = (PHASE6_FIXTURES_DIR / rel).read_bytes()
-        assert committed == data, f"committed fixture {rel} differs from generator output"
+        committed = _lf((PHASE6_FIXTURES_DIR / rel).read_bytes())
+        assert committed == _lf(data), f"committed fixture {rel} differs from generator output"
     first_phase7 = _snapshot_tree(tmp_path / "first_phase7")
     assert first_phase7 == _snapshot_tree(tmp_path / "second_phase7")
     assert set(first_phase7) == {"parity_overlapping_history/input.json"}
-    assert PHASE7_PARITY_INPUT.read_bytes() == first_phase7["parity_overlapping_history/input.json"]
+    assert _lf(PHASE7_PARITY_INPUT.read_bytes()) == _lf(
+        first_phase7["parity_overlapping_history/input.json"]
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -349,3 +364,403 @@ def test_simulator_module_has_no_v1_per_bar_code() -> None:
         assert not hasattr(simulator, name), name
         assert not hasattr(backtest_package, name), name
     assert simulator.run.__module__ == "src.backtest.simulator"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 15 (plan 15-10, D-19, D-26, F12): the v6 payloads of `build_v6_payloads()`.
+#
+# Nothing below reads a committed fixture: the payloads exist only in memory until plan 15-12
+# writes them. Every expectation is recomputed here with this module's own loops and literal
+# arithmetic (pivot search, Wilder ATR, zone, entry range, stop, TP1, RR, guard figures); the
+# parameter values come from the registry TOML files through `tomllib`, never through the
+# registry loader, so a producer bug cannot bless its own payloads (threat T-15-27).
+# --------------------------------------------------------------------------- #
+
+PARAMS_DIR = REPO_ROOT / "params" / "trend-pullback"
+
+V6_LONG = "phase6/intrabar_both_touched/input.json"
+V6_SHORT = "phase6/intrabar_both_touched_short/input.json"
+V6_MISSING_FALLBACK = "phase6/intrabar_missing_fallback/input.json"
+V6_TOUCH_NO_FILL = "phase6/limit_touch_no_fill/input.json"
+V6_PARTIAL_FILL = "phase6/limit_partial_fill/input.json"
+V6_EXPIRY = "phase6/limit_expiry/input.json"
+V6_INVALIDATION = "phase6/invalidation_cancels_entry/input.json"
+V6_NO_TRADE = "phase6/baselines/no_trade/input.json"
+V6_SIMPLE_TREND = "phase6/baselines/simple_trend/input.json"
+V6_PARITY = "phase7/parity_overlapping_history/input.json"
+
+V6_CANDIDATE_KEYS = (
+    V6_LONG,
+    V6_SHORT,
+    V6_MISSING_FALLBACK,
+    V6_TOUCH_NO_FILL,
+    V6_PARTIAL_FILL,
+    V6_EXPIRY,
+    V6_INVALIDATION,
+    V6_PARITY,
+)
+V6_BASELINE_KEYS = {
+    V6_NO_TRADE: "baseline-no-trade-v4",
+    V6_SIMPLE_TREND: "baseline-simple-trend-v4",
+}
+V6_KEYS = (V6_LONG,)
+V6_PARTIAL_FILL_FRACTIONS = {V6_PARTIAL_FILL: "0.5"}
+# The trigger payloads whose planner geometry is recomputed, with the registry set each uses.
+V6_GEOMETRY_CASES = {
+    "long": (V6_LONG, "baseline-v6", False),
+}
+TRIGGER_INDEX = 249  # bar 249 of the 1h series closes at TRIGGER_CLOSE
+
+
+@functools.cache
+def _v6_cache() -> dict[str, dict[str, Any]]:
+    return _load_generator().build_v6_payloads()
+
+
+def _v6(key: str) -> dict[str, Any]:
+    """A private copy of one v6 payload (the cache is never handed out)."""
+    return copy.deepcopy(_v6_cache()[key])
+
+
+def _d(value: object) -> Decimal:
+    return Decimal(str(value))
+
+
+def _toml_params(set_id: str) -> dict[str, Any]:
+    text = (PARAMS_DIR / f"{set_id}.toml").read_text(encoding="utf-8")
+    parameters: dict[str, Any] = tomllib.loads(text)["parameters"]
+    return parameters
+
+
+def _stored(value: Decimal) -> Decimal:
+    """The NUMERIC(38,18) spelling the planner stores (ROUND_HALF_EVEN at 18 places)."""
+    with localcontext() as ctx:
+        ctx.prec = 60
+        return value.quantize(Decimal("1e-18"), rounding=ROUND_HALF_EVEN)
+
+
+class _Bars:
+    """Highs, lows and closes of a payload's strategy bars up to the trigger bar."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        rows = [
+            r
+            for r in payload["strategy_bars"]
+            if datetime.fromisoformat(r["close_time_utc"]) <= TRIGGER_CLOSE
+        ]
+        assert len(rows) == TRIGGER_INDEX + 1
+        self.high = [_d(r["high"]) for r in rows]
+        self.low = [_d(r["low"]) for r in rows]
+        self.close = [_d(r["close"]) for r in rows]
+
+
+def _own_atr_series(bars: _Bars, period: int = 14) -> list[Decimal | None]:
+    """Wilder ATR: SMA seed of the first `period` true ranges, then (n-1)/n smoothing."""
+    with localcontext() as ctx:
+        ctx.prec = 28
+        true_ranges = [bars.high[0] - bars.low[0]]
+        for i in range(1, len(bars.close)):
+            prev_close = bars.close[i - 1]
+            true_ranges.append(
+                max(
+                    bars.high[i] - bars.low[i],
+                    abs(bars.high[i] - prev_close),
+                    abs(bars.low[i] - prev_close),
+                )
+            )
+        seed = sum(true_ranges[:period], Decimal(0)) / period
+        series: list[Decimal | None] = [None] * (period - 1) + [seed]
+        atr = seed
+        for tr in true_ranges[period:]:
+            atr = ((period - 1) * atr + tr) / period
+            series.append(atr)
+        return series
+
+
+def _own_pivot(
+    values: list[Decimal], i: int, *, high: bool, left: int, right: int, lookback: int
+) -> tuple[int, Decimal] | None:
+    """Newest confirmed fractal pivot at bar `i` (reads values[0..i] only).
+
+    Tie rule: non-strict on the left, strict on the right (low: `<=` and `<`; high: `>=` and
+    `>`). A candidate `t` needs `t + right <= i` and lies in `[max(left, i - lookback + 1),
+    i - right]`, newest first.
+    """
+    for t in range(i - right, max(left, i - lookback + 1) - 1, -1):
+        left_ok = all(
+            values[t] >= values[j] if high else values[t] <= values[j] for j in range(t - left, t)
+        )
+        right_ok = all(
+            values[t] > values[j] if high else values[t] < values[j]
+            for j in range(t + 1, t + right + 1)
+        )
+        if left_ok and right_ok:
+            return t, values[t]
+    return None
+
+
+def _own_geometry(
+    payload: dict[str, Any], params: dict[str, Any], *, short: bool
+) -> dict[str, Any]:
+    """Every trigger-bar figure of the corrected Family A geometry, by literal arithmetic."""
+    bars = _Bars(payload)
+    left, right = int(params["pivot_left_bars"]), int(params["pivot_right_bars"])
+    lookback = int(params["swing_lookback"])
+    tol, buffer_atr = _d(params["zone_tolerance_atr"]), _d(params["entry_buffer_atr"])
+    sl_atr = _d(params["sl_buffer_atr"])
+    atr = _own_atr_series(bars)[TRIGGER_INDEX]
+    assert atr is not None
+    pivot = _own_pivot(
+        bars.high if short else bars.low,
+        TRIGGER_INDEX,
+        high=short,
+        left=left,
+        right=right,
+        lookback=lookback,
+    )
+    target = _own_pivot(
+        bars.low if short else bars.high,
+        TRIGGER_INDEX,
+        high=not short,
+        left=left,
+        right=right,
+        lookback=lookback,
+    )
+    assert pivot is not None and target is not None
+    with localcontext() as ctx:
+        ctx.prec = 28
+        half, entry_buffer, sl_buffer = tol * atr, buffer_atr * atr, sl_atr * atr
+        level = pivot[1]
+        zone_lower, zone_upper = level - half, level + half
+        entry_min = _stored(zone_lower - entry_buffer)
+        entry_max = _stored(zone_upper + entry_buffer)
+        stop = _stored(
+            zone_upper + entry_buffer + sl_buffer
+            if short
+            else zone_lower - entry_buffer - sl_buffer
+        )
+        tp1 = _stored(target[1])
+        entry_ref = (entry_min + entry_max) / 2
+        risk = abs(entry_ref - stop)
+        leg = entry_ref - tp1 if short else tp1 - entry_ref
+        tp2 = _stored(entry_ref - 2 * leg if short else entry_ref + 2 * leg)
+        edge = entry_min if short else entry_max
+        distance = abs(edge - stop)
+        cost = edge * ENTRY_RATE + stop * EXIT_RATE
+    return {
+        "atr": atr,
+        "pivot_index": pivot[0],
+        "pivot": level,
+        "target_index": target[0],
+        "zone": (zone_lower, zone_upper),
+        "entry_min": entry_min,
+        "entry_max": entry_max,
+        "stop": stop,
+        "tp1": tp1,
+        "tp2": tp2,
+        "entry_ref": entry_ref,
+        "risk": risk,
+        "rr": leg / risk,
+        "leg": leg,
+        "stop_rate": distance / edge,
+        "cost_to_risk": cost / (distance + cost),
+        "trigger_extreme": bars.high[-1] if short else bars.low[-1],
+        "min_stop": _d(params["min_stop_atr"]) * atr,
+        "left": left,
+        "right": right,
+        "lookback": lookback,
+        "outer_edge": zone_upper + entry_buffer if short else zone_lower - entry_buffer,
+        "sl_buffer": sl_buffer,
+    }
+
+
+def _earlier_bars_that_touch(
+    payload: dict[str, Any], params: dict[str, Any], *, short: bool
+) -> list[int]:
+    """Bars 0..248 whose extreme lies inside the zone of the pivot known at that bar's close."""
+    bars = _Bars(payload)
+    atr_series = _own_atr_series(bars)
+    tol = _d(params["zone_tolerance_atr"])
+    touching: list[int] = []
+    for i in range(TRIGGER_INDEX):
+        atr = atr_series[i]
+        if atr is None:
+            continue
+        pivot = _own_pivot(
+            bars.high if short else bars.low,
+            i,
+            high=short,
+            left=int(params["pivot_left_bars"]),
+            right=int(params["pivot_right_bars"]),
+            lookback=int(params["swing_lookback"]),
+        )
+        if pivot is None:
+            continue
+        half = tol * atr
+        extreme = bars.high[i] if short else bars.low[i]
+        if pivot[1] - half <= extreme <= pivot[1] + half:
+            touching.append(i)
+    return touching
+
+
+def test_build_v6_payloads_is_pure_and_returns_every_case() -> None:
+    """Two calls return equal dicts keyed by the output path relative to tests/fixtures."""
+    first = _load_generator().build_v6_payloads()
+    second = _load_generator().build_v6_payloads()
+    assert first == second
+    assert set(first) == set(V6_KEYS)
+
+
+def _walk_keys(value: Any) -> set[str]:
+    if isinstance(value, dict):
+        found = set(value)
+        for child in value.values():
+            found |= _walk_keys(child)
+        return found
+    if isinstance(value, list):
+        found = set()
+        for child in value:
+            found |= _walk_keys(child)
+        return found
+    return set()
+
+
+@pytest.mark.parametrize("key", V6_KEYS)
+def test_v6_payload_carries_its_identity_and_never_a_parameters_key(key: str) -> None:
+    case = _v6(key)
+    expected_set = V6_BASELINE_KEYS.get(key, "baseline-v6")
+    assert case["parameter_set_id"] == expected_set
+    assert case["strategy_id"] == "trend-pullback"
+    assert case["strategy_version"] == "v5.0.0"
+    assert not {"parameters", "parameters_json"} & _walk_keys(case)
+    assert set(case["cost_model"]) == EXPECTED_COST_KEYS
+    assert case["cost_model"]["partial_fill_fraction"] == V6_PARTIAL_FILL_FRACTIONS.get(key, "1.0")
+    assert case["cost_model"]["funding_convention"] == FUNDING_CONVENTION
+
+
+@pytest.mark.parametrize(
+    "set_id", ["baseline-v6", "baseline-no-trade-v4", "baseline-simple-trend-v4"]
+)
+def test_v6_cost_dict_equals_the_ratified_cost_values(set_id: str) -> None:
+    """The one canonical cost literal COST_MODEL equals every ratified cost value (15-08)."""
+    params = _toml_params(set_id)
+    cost = _v6(V6_LONG)["cost_model"]
+    for key in (
+        "fee_rate_entry",
+        "fee_rate_exit",
+        "expected_slippage",
+        "exit_slippage_rate",
+        "partial_fill_fraction",
+    ):
+        assert _d(cost[key]) == _d(params[key]), key
+    for key in ("funding_treatment", "slippage_model", "spread_fill_assumptions"):
+        assert cost[key] == params[key], key
+
+
+@pytest.mark.parametrize("key", [k for k in V6_KEYS if k not in V6_PARTIAL_FILL_FRACTIONS])
+def test_v6_cost_dict_binds_its_registry_set(key: str) -> None:
+    """The payload's own cost dict binds the registry set it names (no rebinding)."""
+    from src.backtest.binding import assert_cost_model_binds_registry
+    from src.backtest.costs import build_cost_model
+
+    case = _v6(key)
+    parameter_set = load_parameter_set(case["strategy_id"], case["parameter_set_id"])
+    assert_cost_model_binds_registry(parameter_set, build_cost_model(dict(case["cost_model"])))
+
+
+@pytest.mark.parametrize("name", sorted(V6_GEOMETRY_CASES))
+def test_v6_trigger_geometry_matches_independent_arithmetic(name: str) -> None:
+    """Pivot, ATR, zone, entry range, stop, TP1, RR and both guard figures, recomputed here."""
+    key, set_id, short = V6_GEOMETRY_CASES[name]
+    params = _toml_params(set_id)
+    case = _v6(key)
+    geo = _own_geometry(case, params, short=short)
+
+    # The pivot sits inside the search window and was confirmed no later than bar 248.
+    assert geo["pivot_index"] + geo["right"] <= 248
+    assert geo["pivot_index"] >= TRIGGER_INDEX - geo["lookback"] + 1
+    assert geo["target_index"] + geo["right"] <= 248
+    # The trigger bar touches the pivot zone without trading through the stop.
+    zone_lower, zone_upper = geo["zone"]
+    assert zone_lower <= geo["trigger_extreme"] <= zone_upper
+    if short:
+        assert geo["stop"] > geo["entry_max"]
+        assert geo["trigger_extreme"] < geo["stop"]
+        assert geo["tp1"] < geo["entry_ref"]
+    else:
+        assert geo["stop"] < geo["entry_min"]
+        assert geo["trigger_extreme"] > geo["stop"]
+        assert geo["tp1"] > geo["entry_ref"]
+    # The stop lies one sl_buffer beyond the outer edge of the whole entry zone.
+    beyond = geo["outer_edge"] + geo["sl_buffer"] if short else geo["outer_edge"] - geo["sl_buffer"]
+    assert abs(geo["stop"] - beyond) <= Decimal("1e-17")
+    # min_stop_atr distance and the Phase 12 guards.
+    assert geo["risk"] >= geo["min_stop"]
+    assert geo["stop_rate"] >= MIN_STOP_RATE
+    assert geo["stop_rate"] >= CEILING_BINDING_STOP_RATE
+    assert geo["cost_to_risk"] <= MAX_COST_TO_RISK
+    # The RR gate: a candidate clears minimum_rr, the no-trade baseline cannot.
+    minimum_rr = _d(params["minimum_rr"])
+    if name == "no_trade":
+        assert geo["rr"] < minimum_rr
+        assert geo["rr"] > 0, "TP1 is on the profit side, so only the RR gate rejects"
+    else:
+        assert geo["rr"] >= minimum_rr
+    # No earlier bar touches the zone of the pivot known at its close.
+    assert _earlier_bars_that_touch(case, params, short=short) == []
+
+    # The real strategy and planner give the same figures.
+    direction, result = _plan_for(case)
+    assert direction == ("SHORT" if short else "LONG")
+    if name == "no_trade":
+        assert result.is_no_trade and result.reason_code == "RR_TOO_LOW"
+        return
+    assert not result.is_no_trade, result.reason_code
+    trade_plan = result.trade_plan
+    assert trade_plan is not None
+    assert trade_plan.entry_min_price == geo["entry_min"]
+    assert trade_plan.entry_max_price == geo["entry_max"]
+    assert trade_plan.stop_loss_price == geo["stop"]
+    take_profit = json.loads(trade_plan.take_profit_json)
+    assert Decimal(take_profit["tp1"]) == geo["tp1"]
+    assert Decimal(take_profit["tp2"]) == geo["tp2"]
+    rr = json.loads(trade_plan.expected_rr_json)
+    assert Decimal(rr["tp1_rr"]) == geo["rr"]
+    stop_rate, cost_to_risk = _assert_guard_clearance(case)
+    assert stop_rate == geo["stop_rate"]
+    assert cost_to_risk == geo["cost_to_risk"]
+
+
+@pytest.mark.parametrize("key", V6_KEYS)
+def test_v6_payload_is_a_v2_case_the_parser_accepts(key: str) -> None:
+    case = _v6(key)
+    assert case["case_input_schema"] == CASE_INPUT_SCHEMA == "backtest-case/2"
+    assert not set(REMOVED_V1_KEYS) & set(case)
+    parsed = parse_case_input(case)
+    assert parsed.minute_source is not None
+    assert parsed.allowed_gaps == ()
+
+
+@pytest.mark.parametrize("key", V6_KEYS)
+def test_v6_no_minute_row_opens_inside_the_signal_bar(key: str) -> None:
+    """1m data covers bar N+1 onward: every row opens at or after the trigger bar close (D-24)."""
+    case = _v6(key)
+    for series in ("trade_bars_1m", "mark_bars_1m"):
+        rows = case[series]
+        assert rows, f"{series} is empty"
+        for row in rows:
+            opened = datetime.fromisoformat(row["open_time_utc"])
+            closed = datetime.fromisoformat(row["close_time_utc"])
+            assert opened >= TRIGGER_CLOSE, f"{series} row {opened} opens inside the signal bar"
+            assert closed > TRIGGER_CLOSE, f"{series} row {closed} closes inside the signal bar"
+
+
+@pytest.mark.parametrize("key", V6_KEYS)
+def test_v6_funding_rows_cover_the_data_window(key: str) -> None:
+    case = _v6(key)
+    window_start = datetime.fromisoformat(case["data_window"]["start_utc"])
+    window_end = datetime.fromisoformat(case["data_window"]["end_utc"])
+    times = sorted(datetime.fromisoformat(r["funding_time_utc"]) for r in case["funding"])
+    assert times[0] <= window_start and times[-1] >= window_end
+    gaps = [later - earlier for earlier, later in zip(times, times[1:], strict=False)]
+    assert max(gaps).total_seconds() <= 8 * 3600

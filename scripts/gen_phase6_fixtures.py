@@ -42,6 +42,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import NamedTuple
 
 FIXTURE_ROOT = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "phase6"
 PHASE7_FIXTURE_ROOT = FIXTURE_ROOT.parent / "phase7"
@@ -656,6 +657,314 @@ def write_invalidation_cancels_entry() -> None:
         extra_bar=_bar_250("123.50", "123.60", "120.50", "120.80"),
     )
     _write(FIXTURE_ROOT / "invalidation_cancels_entry" / "input.json", payload)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 15 (plan 15-10, D-19, D-26): the Phase 6 cases and the Phase 7 parity input on the
+# corrected Family A geometry. `build_v6_payloads()` is PURE: it returns the payloads and
+# writes nothing. The writers above and `main()` still produce the baseline-v5 files byte
+# for byte; plan 15-12 moves the committed fixtures to these payloads together with every
+# consumer of them.
+#
+# Geometry (geometry_version 1, params/trend-pullback/baseline-v6.toml): the setup level is
+# the most recent CONFIRMED fractal pivot (3 bars each side, searched over the last
+# swing_lookback = 20 bars), the entry zone is the pivot +/- 0.5 ATR widened by 0.1 ATR on
+# each side, the stop sits 0.2 ATR beyond that outer edge and TP1 is the most recent
+# confirmed pivot on the other side. A monotonic uptrend has NO confirmed pivot low (every
+# low is above the lows before it), so the 1H history carries a deliberate V-shaped dip:
+#
+#   bars 0..234    uptrend 100.00 + 0.10 i (close), half-range BAR_HALF_RANGE
+#   bars 235..240  fall in 0.80 steps to the dip bottom: bar 240 closes 118.60, low 117.80
+#   bars 241..244  recovery to a peak: bar 244 closes 122.40, high 123.20
+#   bars 245..248  slow pullback (lows stay above the pivot zone)
+#   bar 249        trigger: open 121.00, high 121.10, low 118.00, close 119.60
+#
+# The dip bottom (bar 240) is the confirmed pivot low P = 117.80 (confirmed at bar 243), the
+# peak (bar 244) is the confirmed pivot high that becomes TP1 = 123.20 (confirmed at bar
+# 247), and the trigger bar's low 118.00 lies inside P +/- 0.5 ATR. No earlier bar touches
+# the zone of the pivot known at its time, so bar 249 is the only signal. The planning-time
+# prototype gives ATR about 1.7327, zone 116.9336 to 118.6664, entry 116.7604 to 118.8396
+# (limit 117.80, the zone mid), stop 116.4138 (trigger 116.50 after the tick snap), TP1
+# 123.20 and TP2 128.60. The tick is 0.10, so a LONG limit fills only on a trade-price low
+# of 117.70 or lower; tests/test_phase6_fixture_geometry.py recomputes every figure with
+# independent arithmetic. The SHORT case is the exact mirror around 250.00 (price' =
+# 250.00 - price, high' = 250.00 - low, low' = 250.00 - high): limit 132.20, stop trigger
+# 133.50, TP1 126.80, TP2 121.40.
+# --------------------------------------------------------------------------- #
+
+V6_PARAMETER_SET_ID = "baseline-v6"
+V6_STRATEGY_VERSION = "v5.0.0"
+V6_BASELINE_NO_TRADE_SET_ID = "baseline-no-trade-v4"
+V6_BASELINE_SIMPLE_TREND_SET_ID = "baseline-simple-trend-v4"
+
+# Closes of bars 235..248 (the fall, the dip bottom, the recovery, the pullback).
+V_DIP_TAIL_CLOSES = (
+    "122.60",
+    "121.80",
+    "121.00",
+    "120.20",
+    "119.40",
+    "118.60",
+    "119.60",
+    "120.60",
+    "121.60",
+    "122.40",
+    "122.20",
+    "121.80",
+    "121.40",
+    "121.00",
+)
+V_DIP_FIRST_TAIL_BAR = 235
+# The trigger bar (LONG orientation): a pullback that touches the pivot zone.
+V6_TRIGGER_BAR_LONG = ("121.00", "121.10", "118.00", "119.60")
+SHORT_MIRROR_K = Decimal("250.00")
+TICK = Decimal("0.10")
+# Resting price of the trade and mark minutes before the fill (LONG orientation).
+V6_REST = Decimal("119.50")
+
+
+class _Levels(NamedTuple):
+    """Protective levels of a LONG-orientation v6 case (a SHORT case mirrors them)."""
+
+    limit: Decimal
+    stop: Decimal
+    tp1: Decimal
+    tp2: Decimal
+
+
+# Planning-time prototype levels (tick-snapped): the zone mid, the stop trigger, TP1 and TP2.
+V6_LEVELS = _Levels(
+    limit=Decimal("117.80"),
+    stop=Decimal("116.50"),
+    tp1=Decimal("123.20"),
+    tp2=Decimal("128.60"),
+)
+# baseline-simple-trend-v4: zone_tolerance_atr 1.0 gives the wider stop 115.5475 (trigger 115.60).
+V6_SIMPLE_TREND_LEVELS = V6_LEVELS._replace(stop=Decimal("115.60"))
+
+Ohlc4 = tuple[Decimal, Decimal, Decimal, Decimal]
+LongPath = Callable[[int], Ohlc4]
+
+
+def _v_dip_closes() -> list[Decimal]:
+    """Closes of bars 0..248: the uptrend, then the V-shaped dip with its recovery."""
+    closes = [Decimal("100.00") + Decimal(i) * Decimal("0.10") for i in range(V_DIP_FIRST_TAIL_BAR)]
+    closes.extend(Decimal(value) for value in V_DIP_TAIL_CLOSES)
+    return closes
+
+
+def _mirror(ohlc: Ohlc4) -> Ohlc4:
+    """The SHORT mirror of a LONG-orientation bar: high and low swap around the axis."""
+    o, h, lo, c = ohlc
+    return (SHORT_MIRROR_K - o, SHORT_MIRROR_K - lo, SHORT_MIRROR_K - h, SHORT_MIRROR_K - c)
+
+
+def _v6_bar_row(i: int, ohlc: Ohlc4) -> dict:
+    open_t = BASE_OPEN + timedelta(hours=i)
+    close_t = open_t + timedelta(hours=1) - timedelta(seconds=1)
+    o, h, lo, c = ohlc
+    return {
+        "symbol": SYMBOL,
+        "interval": "1h",
+        "open_time_utc": _fmt(open_t),
+        "close_time_utc": _fmt(close_t),
+        "open": f"{o:.2f}",
+        "high": f"{h:.2f}",
+        "low": f"{lo:.2f}",
+        "close": f"{c:.2f}",
+        "volume": "1.0",
+    }
+
+
+def _v6_strategy_bars(*, short: bool) -> list[dict]:
+    """250 1H bars: the V-dip history (bars 0..248) and the trigger bar 249."""
+    rows: list[dict] = []
+    for i, close in enumerate(_v_dip_closes()):
+        bar: Ohlc4 = (close, close + BAR_HALF_RANGE, close - BAR_HALF_RANGE, close)
+        rows.append(_v6_bar_row(i, _mirror(bar) if short else bar))
+    o, h, lo, c = (Decimal(value) for value in V6_TRIGGER_BAR_LONG)
+    trigger: Ohlc4 = (o, h, lo, c)
+    rows.append(_v6_bar_row(249, _mirror(trigger) if short else trigger))
+    return rows
+
+
+def _v6_bar_250(ohlc: Ohlc4, *, short: bool) -> dict:
+    """The strategy bar N+1 (10:00 to 10:59:59) of the cases whose scenario needs it."""
+    o, h, lo, c = _mirror(ohlc) if short else ohlc
+    return _bar_250(f"{o:.2f}", f"{h:.2f}", f"{lo:.2f}", f"{c:.2f}")
+
+
+def _v6_minute_rows(
+    kind: str, count: int, path: LongPath, *, short: bool, holes: frozenset[int]
+) -> list[dict]:
+    """`count` consecutive minutes from 10:00 following a LONG-orientation `path`."""
+
+    def oriented(i: int) -> Ohlc:
+        ohlc = path(i)
+        o, h, lo, c = _mirror(ohlc) if short else ohlc
+        return (f"{o:.2f}", f"{h:.2f}", f"{lo:.2f}", f"{c:.2f}")
+
+    return _minute_rows(kind, count, oriented, holes)
+
+
+def _v6_resting(_i: int) -> Ohlc4:
+    return (V6_REST, V6_REST + Decimal("0.05"), V6_REST - Decimal("0.05"), V6_REST)
+
+
+def _v6_fill_minute(kind: str, levels: _Levels) -> Ohlc4:
+    """A one-tick trade-through of the limit; the mark minute stays above the stop trigger."""
+    limit = levels.limit
+    low = limit - TICK if kind == "trade" else limit - TICK / 2
+    return (limit + Decimal("0.30"), limit + Decimal("0.40"), low, limit + Decimal("0.10"))
+
+
+def _v6_after(levels: _Levels) -> Ohlc4:
+    limit = levels.limit
+    return (limit + Decimal("0.05"), limit + Decimal("0.10"), limit, limit + Decimal("0.05"))
+
+
+def _v6_both_touched(kind: str, levels: _Levels = V6_LEVELS) -> LongPath:
+    """Rest, trade through the limit at 10:05, then one minute touching the stop and TP1.
+
+    Minute 5 (10:05) trade low 117.70 trades through the 117.80 limit by one tick (fill at
+    the close of the minute); its mark low 117.75 stays above the stop trigger 116.50.
+    Minute 6 (10:06) low is one tick below the stop trigger and its high one tick above TP1
+    (123.20): the stop wins (stop-first, D-12).
+    """
+
+    def path(i: int) -> Ohlc4:
+        if i < FILL_MINUTE:
+            return _v6_resting(i)
+        if i == FILL_MINUTE:
+            return _v6_fill_minute(kind, levels)
+        if i == EXIT_MINUTE:
+            return (
+                levels.limit + Decimal("0.10"),
+                levels.tp1 + TICK,
+                levels.stop - TICK,
+                levels.limit,
+            )
+        return _v6_after(levels)
+
+    return path
+
+
+def _v6_missing_mark(kind: str, levels: _Levels = V6_LEVELS) -> LongPath:
+    """LONG fill at 10:05 and a hole in the mark series from 10:06 to the end of the hour.
+
+    The trade series continues; its low 116.20 at 10:20 (below the stop trigger) is what the
+    bar 250 range carries.
+    """
+
+    def path(i: int) -> Ohlc4:
+        if i < FILL_MINUTE:
+            return _v6_resting(i)
+        if i == FILL_MINUTE:
+            return _v6_fill_minute(kind, levels)
+        if i == 20:
+            return (
+                levels.limit + Decimal("0.05"),
+                levels.limit + Decimal("0.10"),
+                levels.stop - Decimal("0.30"),
+                levels.limit,
+            )
+        return _v6_after(levels)
+
+    return path
+
+
+def _v6_touch_only(kind: str, levels: _Levels = V6_LEVELS) -> LongPath:
+    """Minutes that reach the limit exactly (a touch, no trade-through) three times."""
+
+    def path(i: int) -> Ohlc4:
+        if i in (10, 11, 30):
+            low = levels.limit if kind == "trade" else levels.limit + Decimal("0.02")
+            return (
+                levels.limit + Decimal("0.30"),
+                levels.limit + Decimal("0.40"),
+                low,
+                levels.limit + Decimal("0.20"),
+            )
+        return _v6_resting(i)
+
+    return path
+
+
+def _v6_tp_ladder(kind: str, levels: _Levels = V6_LEVELS) -> LongPath:
+    """Fill at 10:05, TP1 (123.20) at 10:06, TP2 (128.60) at 10:07."""
+
+    def path(i: int) -> Ohlc4:
+        if i < FILL_MINUTE:
+            return _v6_resting(i)
+        if i == FILL_MINUTE:
+            return _v6_fill_minute(kind, levels)
+        if i == EXIT_MINUTE:
+            return (levels.limit + Decimal("0.10"), levels.tp1 + TICK, levels.limit, levels.tp1)
+        if i == EXIT_MINUTE + 1:
+            return (
+                levels.tp1,
+                levels.tp2 + Decimal("0.30"),
+                levels.tp1 - Decimal("0.20"),
+                levels.tp2 + Decimal("0.10"),
+            )
+        return (
+            levels.tp2 + Decimal("0.10"),
+            levels.tp2 + Decimal("0.15"),
+            levels.tp2 + Decimal("0.05"),
+            levels.tp2 + Decimal("0.10"),
+        )
+
+    return path
+
+
+def _v6_case(
+    *,
+    short: bool,
+    path_for: Callable[[str], LongPath],
+    count: int = HOUR_MINUTES,
+    data_end: datetime = HOUR_DATA_END,
+    trade_holes: frozenset[int] = frozenset(),
+    mark_holes: frozenset[int] = frozenset(),
+    extra_bar_long: Ohlc4 | None = None,
+    parameter_set_id: str = V6_PARAMETER_SET_ID,
+    cost_overrides: dict[str, str] | None = None,
+) -> dict:
+    """One v6 case-input v2 payload (LONG, or its SHORT mirror) on the corrected geometry."""
+    bars = _v6_strategy_bars(short=short)
+    if extra_bar_long is not None:
+        bars.append(_v6_bar_250(extra_bar_long, short=short))
+    payload = _build_input(
+        strategy_bars=bars,
+        context_bars=_make_4h_context_bars_short() if short else _make_4h_context_bars_long(),
+        trade_bars_1m=_v6_minute_rows(
+            "trade", count, path_for("trade"), short=short, holes=trade_holes
+        ),
+        mark_bars_1m=_v6_minute_rows(
+            "mark", count, path_for("mark"), short=short, holes=mark_holes
+        ),
+        data_end=data_end,
+        parameter_set_id=parameter_set_id,
+        cost_overrides=cost_overrides,
+    )
+    payload["strategy_version"] = V6_STRATEGY_VERSION
+    mark = V6_LEVELS.limit
+    payload["funding"] = [
+        {**row, "mark_price": f"{(SHORT_MIRROR_K - mark) if short else mark:.2f}"}
+        for row in payload["funding"]
+    ]
+    return payload
+
+
+def build_v6_payloads() -> dict[str, dict]:
+    """Every Phase 6 case and the Phase 7 parity input on the corrected geometry (pure).
+
+    Keys are the output paths relative to tests/fixtures. Candidate cases carry baseline-v6 /
+    v5.0.0; the two baseline cases carry baseline-no-trade-v4 / baseline-simple-trend-v4 at
+    v5.0.0 (D-26). Every call builds fresh dicts, writes nothing and reads no clock.
+    """
+    return {
+        "phase6/intrabar_both_touched/input.json": _v6_case(short=False, path_for=_v6_both_touched),
+    }
 
 
 def main() -> None:
