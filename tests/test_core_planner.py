@@ -17,7 +17,7 @@ fail until `src/core/planner.py` is updated to the full contract.
 
 from __future__ import annotations
 
-import csv
+import dataclasses
 import json
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 from src.core.features import compute_features
+from src.core.pivots import pivot_at
 from src.core.planner import plan
 from src.core.types import AccountState, Candle, PlanResult
 from src.domain.canonical import canonical_decimal_text, quantize_for_storage, sha256_hex
@@ -32,156 +33,48 @@ from src.domain.enums import RejectionReason, TradePlanStatus
 from src.domain.ids import derive_child_id
 from src.domain.registry import ParameterSet, load_parameter_set
 
-# --------------------------------------------------------------------------- #
-# Helpers — load phase4 candles and build Candle objects.
-# --------------------------------------------------------------------------- #
-
-
-def _build_candles_from_csv(rows: list[dict]) -> list[Candle]:
-    """Convert CSV dict rows to Candle objects."""
-    candles: list[Candle] = []
-    for row in rows:
-        open_time = datetime.fromisoformat(row["open_time_utc"].replace("Z", "+00:00"))
-        interval = row["timeframe"]
-        if interval == "1h":
-            bar_duration = timedelta(hours=1)
-        elif interval == "4h":
-            bar_duration = timedelta(hours=4)
-        elif interval == "1m":
-            bar_duration = timedelta(minutes=1)
-        else:
-            raise ValueError(f"unknown interval: {interval}")
-        close_time = open_time + bar_duration - timedelta(seconds=1)
-        candles.append(
-            Candle(
-                symbol=row["symbol"],
-                interval=interval,
-                open_time_utc=open_time,
-                close_time_utc=close_time,
-                open=Decimal(row["open"]),
-                high=Decimal(row["high"]),
-                low=Decimal(row["low"]),
-                close=Decimal(row["close"]),
-                volume=Decimal(row["volume"]),
-            )
-        )
-    return candles
-
+from tests import geometry_builders
 
 # --------------------------------------------------------------------------- #
-# Fixtures — use phase4 candles which are known to produce a valid SETUP.
+# Fixtures — the registered baseline-v6 set on a hand-derived Family A window.
 #
-# Plan 04-02 added an intentional gap block to the shared candles.csv
-# fixture (D-04 gap-policy boundary case). Feeding ALL 1H candles through
-# evaluate()/plan() now hits GAP_IN_SOURCE → DATA_STALE instead of SETUP.
-#
-# Per D-04/D-08: the planner tests need a gap-free contiguous window.
-# We subset the fixture to the first contiguous block (bars before the
-# first gap) — this is the minimal correct fix that stays within 04-03
-# scope and avoids mutating 04-02-owned files.
-#
-# Window choice: 1H bars 0..249 (250 bars, before the first gap at
-# index 250). The corresponding 4H context is the bars with open_time
-# <= the last 1H bar's close_time — enough for the EMA50(4H) regime
-# gate (regime gate only requires EMA50 validity per 04-01 decision).
+# Phase 15 (D-19): the first-generation set and the "patched to touch support"
+# phase4 CSV window are gone. Family A now plans from a confirmed fractal pivot
+# (D-02/D-05): tests/geometry_builders.py `family_a_long_window` is the
+# a_long_worked case of tests/fixtures/phase15/DERIVATIONS.md (pivot low 99.00,
+# ATR 2.00, zone 98.00-100.00, entry 97.80-100.20, stop 97.40, TP1 106.00).
 # --------------------------------------------------------------------------- #
 
-
-def _first_gap_index(rows: list[dict], interval: str) -> int:
-    """Return the index of the first gap, or len(rows) if contiguous."""
-    from datetime import timedelta
-
-    if interval == "1h":
-        expected = timedelta(hours=1)
-    elif interval == "4h":
-        expected = timedelta(hours=4)
-    else:
-        raise ValueError(f"unknown interval: {interval}")
-
-    for i in range(1, len(rows)):
-        prev_open = datetime.fromisoformat(rows[i - 1]["open_time_utc"].replace("Z", "+00:00"))
-        curr_open = datetime.fromisoformat(rows[i]["open_time_utc"].replace("Z", "+00:00"))
-        if curr_open - prev_open > expected:
-            return i
-    return len(rows)
+PARAMETER_SET_ID = "baseline-v6"
 
 
 @pytest.fixture
-def phase4_candles_csv() -> list[dict]:
-    """Load the phase4 candles CSV."""
-    path = Path("tests/fixtures/phase4/candles.csv")
-    assert path.is_file(), f"missing: {path}"
-    with path.open(encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+def window() -> tuple[list[Candle], list[Candle]]:
+    """(setup_candles, context_candles) of the a_long_worked window."""
+    return geometry_builders.family_a_long_window()
 
 
 @pytest.fixture
-def setup_candles(phase4_candles_csv: list[dict]) -> list[Candle]:
-    """1H setup candles — contiguous window before the first gap.
-
-    Plan 04-02 added an intentional gap at index 250 of the 1H bars.
-    We subset to bars 0..249 to keep a gap-free contiguous window.
-
-    Review fix CR-06: the last fixture bar (a mid-range reversal bar)
-    is no longer a valid Family-A setup — LONG requires a touch of the
-    SUPPORT zone. The last bar is patched to touch support (its low is
-    set to the trailing swing low; times/symbol/interval untouched so
-    gap, forming-bar, and correspondence checks are unaffected).
-    """
-    rows_1h = [r for r in phase4_candles_csv if r["timeframe"] == "1h"]
-    gap_idx = _first_gap_index(rows_1h, "1h")
-    rows_1h = rows_1h[:gap_idx]
-    return _with_support_touch_last_bar(_build_candles_from_csv(rows_1h))
-
-
-def _with_support_touch_last_bar(candles: list[Candle]) -> list[Candle]:
-    """Patch the last bar's low onto the trailing swing low (CR-06 setup)."""
-    frame = compute_features(
-        symbol="BTCUSDT",
-        interval="1h",
-        candles=candles,
-        parameter_set=load_parameter_set("trend-pullback", "baseline-v1"),
-    )
-    assert frame.features_valid
-    assert frame.swing_low.value is not None
-    swing_low = frame.swing_low.value
-    last = candles[-1]
-    assert last.open >= swing_low and last.close >= swing_low
-    patched = Candle(
-        symbol=last.symbol,
-        interval=last.interval,
-        open_time_utc=last.open_time_utc,
-        close_time_utc=last.close_time_utc,
-        open=last.open,
-        high=max(last.high, last.open, last.close),
-        low=swing_low,
-        close=last.close,
-        volume=last.volume,
-    )
-    return [*candles[:-1], patched]
+def setup_candles(window: tuple[list[Candle], list[Candle]]) -> list[Candle]:
+    """1H setup candles; the last bar touches the pivot zone of the confirmed pivot low."""
+    return window[0]
 
 
 @pytest.fixture
-def context_candles(phase4_candles_csv: list[dict]) -> list[Candle]:
-    """4H context candles — first contiguous block (pre-gap truncation).
-
-    Plan 04-02's feature gate requires ALL features valid on both streams
-    (including EMA200, which needs 200 bars). Plan 04-04 appended family
-    B/C windows with intentional gap blocks (D-04) after the tracer
-    window, so the 4H stream is truncated to its first contiguous block
-    (500 bars from 2026-09-09 — enough for EMA200(4H) warm-up), mirroring
-    the setup_candles truncation above.
-    """
-    rows_4h = [r for r in phase4_candles_csv if r["timeframe"] == "4h"]
-    gap_idx = _first_gap_index(rows_4h, "4h")
-    rows_4h = rows_4h[:gap_idx]
-    return _build_candles_from_csv(rows_4h)
+def context_candles(window: tuple[list[Candle], list[Candle]]) -> list[Candle]:
+    """4H context candles (BULLISH regime)."""
+    return window[1]
 
 
 @pytest.fixture
 def parameter_set() -> ParameterSet:
-    """Load trend-pullback/baseline-v1."""
-    return load_parameter_set("trend-pullback", "baseline-v1")
+    """Load trend-pullback/baseline-v6."""
+    return load_parameter_set("trend-pullback", PARAMETER_SET_ID)
+
+
+def _with_override(parameter_set: ParameterSet, key: str, value: Decimal) -> ParameterSet:
+    """In-memory copy of `parameter_set` with exactly one parameter replaced (nothing on disk)."""
+    return dataclasses.replace(parameter_set, params={**parameter_set.params, key: value})
 
 
 @pytest.fixture
@@ -230,7 +123,8 @@ def _get_signal_and_plan(
 
 
 # --------------------------------------------------------------------------- #
-# Test 1 — entry zone math: entry_max = zone_upper + entry_buffer_atr * ATR.
+# Test 1 — entry zone math (D-05): zone = P +/- zone_tolerance_atr x ATR, entry range
+# widened by entry_buffer_atr x ATR, stop sl_buffer_atr x ATR beyond entry_min.
 # --------------------------------------------------------------------------- #
 
 
@@ -240,7 +134,12 @@ def test_entry_zone_math_long(
     parameter_set: ParameterSet,
     account_state: AccountState,
 ) -> None:
-    """Beh. 1: LONG entry zone is built off the SUPPORT zone (CR-06/WR-01)."""
+    """Beh. 1: LONG entry zone is built off the confirmed pivot low (D-05, D-06).
+
+    Rewritten for the corrected geometry (the legacy test priced the zone off the trailing
+    swing low and put the stop at `swing_low - sl_buffer_atr x ATR`, inside the zone): the
+    stop is now `entry_min - sl_buffer_atr x ATR`, strictly below the whole entry zone.
+    """
     plan_result = _get_signal_and_plan(setup_candles, context_candles, parameter_set, account_state)
     assert isinstance(plan_result, PlanResult)
     assert not plan_result.is_no_trade
@@ -254,22 +153,29 @@ def test_entry_zone_math_long(
         parameter_set=parameter_set,
     )
     assert frame.features_valid
-    assert frame.swing_low.value is not None
     assert frame.atr_14.value is not None
+    pivot_low = pivot_at(
+        setup_candles,
+        len(setup_candles) - 1,
+        lookback=int(parameter_set.params["swing_lookback"]),
+        left=int(parameter_set.params["pivot_left_bars"]),
+        right=int(parameter_set.params["pivot_right_bars"]),
+        high=False,
+    )
+    assert pivot_low is not None
 
     entry_buffer_atr = Decimal(str(parameter_set.params["entry_buffer_atr"]))
     sl_buffer_atr = Decimal(str(parameter_set.params["sl_buffer_atr"]))
     zone_tolerance_atr = Decimal(str(parameter_set.params["zone_tolerance_atr"]))
     atr = frame.atr_14.value
-    swing_low = frame.swing_low.value
 
-    # Per-side Family-A geometry: LONG entry = support zone ± buffer.
+    # D-05: zone = P +/- zone_tolerance_atr x ATR.
     half_width = zone_tolerance_atr * atr
-    support_upper = swing_low + half_width
-    support_lower = swing_low - half_width
-    expected_entry_max = support_upper + entry_buffer_atr * atr
-    expected_entry_min = support_lower - entry_buffer_atr * atr
-    expected_stop = swing_low - sl_buffer_atr * atr
+    zone_upper = pivot_low + half_width
+    zone_lower = pivot_low - half_width
+    expected_entry_max = zone_upper + entry_buffer_atr * atr
+    expected_entry_min = zone_lower - entry_buffer_atr * atr
+    expected_stop = expected_entry_min - sl_buffer_atr * atr
 
     # D-12: the persisted prices are the geometry rounded to the NUMERIC(38,18)
     # scale (ROUND_HALF_EVEN), so they equal the quantized expected values.
@@ -277,11 +183,43 @@ def test_entry_zone_math_long(
     assert tp.entry_max_price == quantize_for_storage(expected_entry_max)
     assert tp.entry_min_price == quantize_for_storage(expected_entry_min)
     assert tp.stop_loss_price == quantize_for_storage(expected_stop)
+    # D-06: the stop lies strictly below the whole entry zone.
+    assert tp.stop_loss_price < tp.entry_min_price
+    # Cross-check with the hand derivation (DERIVATIONS.md a_long_worked).
+    assert (pivot_low, atr) == (Decimal("99.00"), Decimal("2"))
+    assert tp.entry_min_price == Decimal("97.80")
+    assert tp.entry_max_price == Decimal("100.20")
+    assert tp.stop_loss_price == Decimal("97.40")
 
 
 # --------------------------------------------------------------------------- #
 # Test 2 — RR gate: exact-equality pass, one-tick-above pass.
+#
+# The a_long_worked plan has entry_ref 99.00, stop 97.40, TP1 106.00 (hand-derived), so
+# its RR to TP1 is 7.00 / 1.60 = 4.375 exactly (expected_rr_json tp1_rr).
 # --------------------------------------------------------------------------- #
+
+_RR_TP1 = Decimal("4.375")
+
+
+def _plan_with_minimum_rr(
+    setup_candles: list[Candle],
+    context_candles: list[Candle],
+    parameter_set: ParameterSet,
+    account_state: AccountState,
+    minimum_rr: Decimal,
+) -> PlanResult:
+    """Plan with `minimum_rr` replaced in an in-memory copy of baseline-v6 (one override)."""
+    signal, created = _valid_signal_and_params(
+        setup_candles, context_candles, parameter_set, account_state
+    )
+    return plan(
+        signal=signal,
+        setup_candles=setup_candles,
+        parameter_set=_with_override(parameter_set, "minimum_rr", minimum_rr),
+        account_state=account_state,
+        created_at_utc=created,
+    )
 
 
 def test_rr_gate_exact_equality_passes(
@@ -290,12 +228,24 @@ def test_rr_gate_exact_equality_passes(
     parameter_set: ParameterSet,
     account_state: AccountState,
 ) -> None:
-    """Beh. 2a: TP1 RR exactly equal to minimum_rr is admitted."""
+    """Beh. 2a: TP1 RR exactly equal to minimum_rr is admitted.
+
+    The default plan on baseline-v6 is admitted and carries tp1_rr 4.375. Override:
+    minimum_rr = 4.375 (the plan's TP1 RR) on an in-memory copy of baseline-v6.
+    """
     plan_result = _get_signal_and_plan(setup_candles, context_candles, parameter_set, account_state)
     assert isinstance(plan_result, PlanResult)
     assert not plan_result.is_no_trade
     assert plan_result.trade_plan is not None
     assert plan_result.trade_plan.status == TradePlanStatus.READY
+    assert json.loads(plan_result.trade_plan.expected_rr_json)["tp1_rr"] == str(_RR_TP1)
+
+    at_equality = _plan_with_minimum_rr(
+        setup_candles, context_candles, parameter_set, account_state, _RR_TP1
+    )
+    assert not at_equality.is_no_trade
+    assert at_equality.trade_plan is not None
+    assert at_equality.trade_plan.status == TradePlanStatus.READY
 
 
 def test_rr_gate_one_tick_above_passes(
@@ -304,8 +254,13 @@ def test_rr_gate_one_tick_above_passes(
     parameter_set: ParameterSet,
     account_state: AccountState,
 ) -> None:
-    """Beh. 2b: RR one tick above minimum_rr is admitted."""
-    plan_result = _get_signal_and_plan(setup_candles, context_candles, parameter_set, account_state)
+    """Beh. 2b: RR one tick above minimum_rr is admitted.
+
+    Override: minimum_rr = 4.374 (one 0.001 tick below the plan's RR 4.375).
+    """
+    plan_result = _plan_with_minimum_rr(
+        setup_candles, context_candles, parameter_set, account_state, Decimal("4.374")
+    )
     assert isinstance(plan_result, PlanResult)
     assert not plan_result.is_no_trade
     assert plan_result.trade_plan is not None
@@ -317,65 +272,14 @@ def test_rr_gate_below_returns_no_trade_with_rr_too_low(
     parameter_set: ParameterSet,
     account_state: AccountState,
 ) -> None:
-    """Beh. 2c: RR below minimum_rr returns NO_TRADE with RR_TOO_LOW."""
-    from src.core.strategy import evaluate
-    from src.core.types import MarketSnapshot
+    """Beh. 2c: RR below minimum_rr returns NO_TRADE with RR_TOO_LOW.
 
-    snapshot = MarketSnapshot(
-        symbol="BTCUSDT",
-        setup_candles=setup_candles,
-        context_candles=context_candles,
-        source_timeframe="1h",
-    )
-    result = evaluate(
-        snapshot=snapshot,
-        account_state=account_state,
-        strategy_version=parameter_set.strategy_version,
-        parameter_set=parameter_set,
-    )
-    assert not result.is_no_trade
-    signal = result.signal
-    assert signal is not None
-
-    # Perturb the last candle to widen the zone (deep wick).
-    perturbed = list(setup_candles)
-    last = perturbed[-1]
-    perturbed[-1] = Candle(
-        symbol=last.symbol,
-        interval=last.interval,
-        open_time_utc=last.open_time_utc,
-        close_time_utc=last.close_time_utc,
-        open=last.open,
-        high=last.high,
-        low=last.low - Decimal("500.00"),
-        close=last.close,
-        volume=last.volume,
-    )
-
-    plan_result = plan(
-        signal=signal,
-        setup_candles=perturbed,
-        parameter_set=parameter_set,
-        account_state=account_state,
-        created_at_utc=signal.source_candle_close_utc + timedelta(hours=1),
-    )
-    assert isinstance(plan_result, PlanResult)
-    if plan_result.is_no_trade:
-        assert plan_result.reason_code == RejectionReason.RR_TOO_LOW.value
-        assert plan_result.trade_plan is None
-
-
-def test_rr_gate_fires_on_structure_tp_below_minimum(
-    setup_candles: list[Candle],
-    context_candles: list[Candle],
-    parameter_set: ParameterSet,
-    account_state: AccountState,
-) -> None:
-    """Beh. 2d (CR-03): TP1 is structure-derived, so the RR gate can fire.
-
-    With minimum_rr raised above the structure-implied RR, the planner
-    must return NO_TRADE with RR_TOO_LOW — the gate is a real
-    acceptance threshold, not a tautology.
+    The legacy test deepened the last bar's low by 500 and asserted only `if plan_result
+    .is_no_trade`. Under the corrected geometry a low below the stop is INVALIDATED (D-07),
+    so the zone is widened the other way: the last bar's high rises by 500, ATR jumps, the
+    stop moves far below entry_ref and the RR to the fixed TP1 collapses. The assertion is
+    now unconditional (stronger than before). The perturbation uses no parameter override;
+    the boundary check after it overrides minimum_rr = 4.376 (one tick above the plan RR).
     """
     from src.core.strategy import evaluate
     from src.core.types import MarketSnapshot
@@ -396,13 +300,74 @@ def test_rr_gate_fires_on_structure_tp_below_minimum(
     signal = result.signal
     assert signal is not None
 
-    strict_params = ParameterSet(
-        strategy_id=parameter_set.strategy_id,
-        strategy_version=parameter_set.strategy_version,
-        parameter_set_id=parameter_set.parameter_set_id,
-        parameter_set_hash=parameter_set.parameter_set_hash,
-        params={**parameter_set.params, "minimum_rr": Decimal("1000")},
+    # Perturb the last candle to widen the zone (tall wick; ATR rises, geometry follows).
+    perturbed = list(setup_candles)
+    last = perturbed[-1]
+    perturbed[-1] = Candle(
+        symbol=last.symbol,
+        interval=last.interval,
+        open_time_utc=last.open_time_utc,
+        close_time_utc=last.close_time_utc,
+        open=last.open,
+        high=last.high + Decimal("500.00"),
+        low=last.low,
+        close=last.close,
+        volume=last.volume,
     )
+
+    plan_result = plan(
+        signal=signal,
+        setup_candles=perturbed,
+        parameter_set=parameter_set,
+        account_state=account_state,
+        created_at_utc=signal.source_candle_close_utc + timedelta(hours=1),
+    )
+    assert isinstance(plan_result, PlanResult)
+    assert plan_result.is_no_trade
+    assert plan_result.reason_code == RejectionReason.RR_TOO_LOW.value
+    assert plan_result.trade_plan is None
+
+    # And the exact boundary: minimum_rr one tick above the plan RR rejects, never downgrades.
+    just_above = _plan_with_minimum_rr(
+        setup_candles, context_candles, parameter_set, account_state, Decimal("4.376")
+    )
+    assert just_above.is_no_trade
+    assert just_above.reason_code == RejectionReason.RR_TOO_LOW.value
+    assert just_above.trade_plan is None
+
+
+def test_rr_gate_fires_on_structure_tp_below_minimum(
+    setup_candles: list[Candle],
+    context_candles: list[Candle],
+    parameter_set: ParameterSet,
+    account_state: AccountState,
+) -> None:
+    """Beh. 2d (CR-03): TP1 is structure-derived, so the RR gate can fire.
+
+    With minimum_rr raised above the structure-implied RR (override minimum_rr = 1000 on an
+    in-memory copy of baseline-v6), the planner must return NO_TRADE with RR_TOO_LOW — the
+    gate is a real acceptance threshold, not a tautology.
+    """
+    from src.core.strategy import evaluate
+    from src.core.types import MarketSnapshot
+
+    snapshot = MarketSnapshot(
+        symbol="BTCUSDT",
+        setup_candles=setup_candles,
+        context_candles=context_candles,
+        source_timeframe="1h",
+    )
+    result = evaluate(
+        snapshot=snapshot,
+        account_state=account_state,
+        strategy_version=parameter_set.strategy_version,
+        parameter_set=parameter_set,
+    )
+    assert not result.is_no_trade
+    signal = result.signal
+    assert signal is not None
+
+    strict_params = _with_override(parameter_set, "minimum_rr", Decimal("1000"))
     plan_result = plan(
         signal=signal,
         setup_candles=setup_candles,
