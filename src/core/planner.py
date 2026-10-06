@@ -41,7 +41,12 @@ from src.domain.trade_plan import TradePlan
 # review WR-16); re-exported here for `from .planner import ...` users.
 from ._decimal import _add, _div, _mul, _q, _sub  # noqa: F401 (re-export for compat)
 from .features import compute_features
-from .strategy import _detect_breakout_retest_setup, _detect_range_mr_setup
+from .pivots import pivot_at
+from .strategy import (
+    _detect_breakout_retest_setup,
+    _detect_range_mr_setup,
+    geometry_version,
+)
 from .types import AccountState, Candle, PlanResult
 
 # --------------------------------------------------------------------------- #
@@ -88,6 +93,42 @@ def _plan_hash(
 _Geometry = tuple[Decimal | None, Decimal | None, Decimal | None, Decimal | None]
 
 
+def _pivot_geometry(
+    setup_candles: list[Candle],
+    parameter_set: ParameterSet,
+    atr: Decimal,
+    zone_tolerance_atr: Decimal,
+    sl_buffer: Decimal,
+    *,
+    entry_buffer: Decimal,
+    long: bool,
+) -> _Geometry:
+    """Family A geometry_version 1 (D-01, D-05): entry zone around the confirmed pivot P.
+
+    Re-derives P and the opposite-side pivot from the same setup candles the detector used
+    (CR-05). The stop lies beyond the outer edge of the whole entry zone, which is the pivot
+    zone widened by `entry_buffer` on each side: LONG `zone_lower - entry_buffer - sl_buffer`,
+    SHORT `zone_upper + entry_buffer + sl_buffer`. TP1 is the most recent confirmed pivot on
+    the opposite side. A missing pivot returns all-None (STALE_SETUP at the caller).
+    """
+    last = len(setup_candles) - 1
+    lookback = int(parameter_set.params["swing_lookback"])
+    left = int(parameter_set.params["pivot_left_bars"])
+    right = int(parameter_set.params["pivot_right_bars"])
+    level = pivot_at(setup_candles, last, lookback=lookback, left=left, right=right, high=not long)
+    target = pivot_at(setup_candles, last, lookback=lookback, left=left, right=right, high=long)
+    if level is None or target is None:
+        return (None, None, None, None)
+    half = _mul(zone_tolerance_atr, atr)
+    zone_upper = _add(level, half)
+    zone_lower = _sub(level, half)
+    if long:
+        stop = _sub(_sub(zone_lower, entry_buffer), sl_buffer)
+    else:
+        stop = _add(_add(zone_upper, entry_buffer), sl_buffer)
+    return (zone_upper, zone_lower, stop, target)
+
+
 def _long_geometry(
     strategy_id: str,
     setup_candles: list[Candle],
@@ -97,6 +138,8 @@ def _long_geometry(
     swing_low: Decimal,
     zone_tolerance_atr: Decimal,
     sl_buffer: Decimal,
+    *,
+    entry_buffer: Decimal,
 ) -> _Geometry:
     """Return (zone_upper, zone_lower, stop_loss, tp1) for a LONG signal.
 
@@ -107,6 +150,16 @@ def _long_geometry(
     all-None so the caller emits STALE_SETUP.
     """
     if strategy_id == "trend-pullback":
+        if geometry_version(parameter_set) is not None:
+            return _pivot_geometry(
+                setup_candles,
+                parameter_set,
+                atr,
+                zone_tolerance_atr,
+                sl_buffer,
+                entry_buffer=entry_buffer,
+                long=True,
+            )
         half = _mul(zone_tolerance_atr, atr)
         support_upper = _add(swing_low, half)
         support_lower = _sub(swing_low, half)
@@ -157,9 +210,21 @@ def _short_geometry(
     swing_low: Decimal,
     zone_tolerance_atr: Decimal,
     sl_buffer: Decimal,
+    *,
+    entry_buffer: Decimal,
 ) -> _Geometry:
     """Return (zone_upper, zone_lower, stop_loss, tp1) for a SHORT signal."""
     if strategy_id == "trend-pullback":
+        if geometry_version(parameter_set) is not None:
+            return _pivot_geometry(
+                setup_candles,
+                parameter_set,
+                atr,
+                zone_tolerance_atr,
+                sl_buffer,
+                entry_buffer=entry_buffer,
+                long=False,
+            )
         half = _mul(zone_tolerance_atr, atr)
         resistance_upper = _add(swing_high, half)
         resistance_lower = _sub(swing_high, half)
@@ -350,6 +415,7 @@ def plan(
             swing_low,
             zone_tolerance_atr,
             sl_buffer,
+            entry_buffer=entry_buffer,
         )
     elif signal.direction == "SHORT":
         zone_upper, zone_lower, stop_loss, take_profit_1 = _short_geometry(
@@ -361,6 +427,7 @@ def plan(
             swing_low,
             zone_tolerance_atr,
             sl_buffer,
+            entry_buffer=entry_buffer,
         )
     else:
         return PlanResult(

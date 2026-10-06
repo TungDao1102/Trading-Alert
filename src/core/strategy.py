@@ -40,6 +40,7 @@ from src.domain.signal import Signal
 
 from ._decimal import _add, _div, _mul, _q, _sub  # noqa: F401 (re-export for compat)
 from .features import _atr_series, _swing_series, compute_features
+from .pivots import pivot_at
 from .types import (
     AccountState,
     Candle,
@@ -159,6 +160,59 @@ def _detect_setup(
     elif regime == "BEARISH":
         if resistance_lower <= last_setup_candle.high <= resistance_upper:
             return ("SHORT", "TREND_PULLBACK_SHORT", resistance_upper, resistance_lower)
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Setup gate, geometry_version 1 — Family A zone touch on a confirmed pivot.
+# --------------------------------------------------------------------------- #
+
+
+def geometry_version(parameter_set: ParameterSet) -> int | None:
+    """The optional registry integer `geometry_version`; None means legacy behavior (D-25)."""
+    value = parameter_set.params.get("geometry_version")
+    return None if value is None else int(value)
+
+
+def _detect_pivot_setup(
+    setup_candles: list[Candle],
+    setup_frame: FeatureFrame,
+    regime: str,
+    parameter_set: ParameterSet,
+) -> tuple[str, str, Decimal, Decimal] | None:
+    """Return (direction, setup_type, zone_upper, zone_lower) or None (geometry_version 1).
+
+    D-01/D-03: the setup level is the most recent CONFIRMED pivot (low for LONG, high for
+    SHORT) inside `swing_lookback` bars. The evaluated bar is only ever a right-side
+    confirmer, so a bar that makes a new N-bar low can no longer signal a pullback to
+    support. No confirmed pivot returns None (never a fallback to the trailing extreme).
+    The touch test itself is unchanged: the evaluated bar's low (LONG) or high (SHORT)
+    lies within `pivot +/- zone_tolerance_atr * ATR`.
+    """
+    if not setup_frame.features_valid or regime not in ("BULLISH", "BEARISH"):
+        return None
+    assert setup_frame.atr_14.value is not None
+    last = len(setup_candles) - 1
+    last_candle = setup_candles[last]
+    bullish = regime == "BULLISH"
+    level = pivot_at(
+        setup_candles,
+        last,
+        lookback=int(parameter_set.params["swing_lookback"]),
+        left=int(parameter_set.params["pivot_left_bars"]),
+        right=int(parameter_set.params["pivot_right_bars"]),
+        high=not bullish,
+    )
+    if level is None:
+        return None
+    half = _mul(Decimal(str(parameter_set.params["zone_tolerance_atr"])), setup_frame.atr_14.value)
+    zone_lower = _sub(level, half)
+    zone_upper = _add(level, half)
+    if bullish:
+        if zone_lower <= last_candle.low <= zone_upper:
+            return ("LONG", "TREND_PULLBACK_LONG", zone_upper, zone_lower)
+    elif zone_lower <= last_candle.high <= zone_upper:
+        return ("SHORT", "TREND_PULLBACK_SHORT", zone_upper, zone_lower)
     return None
 
 
@@ -629,13 +683,16 @@ def evaluate(
             parameter_set=parameter_set,
         )
     elif parameter_set.strategy_id == "trend-pullback":
-        zone_tolerance_atr = Decimal(str(parameter_set.params["zone_tolerance_atr"]))
-        setup = _detect_setup(
-            setup_frame,
-            last_setup_candle,
-            regime,
-            zone_tolerance_atr=zone_tolerance_atr,
-        )
+        if geometry_version(parameter_set) is not None:
+            setup = _detect_pivot_setup(snapshot.setup_candles, setup_frame, regime, parameter_set)
+        else:
+            zone_tolerance_atr = Decimal(str(parameter_set.params["zone_tolerance_atr"]))
+            setup = _detect_setup(
+                setup_frame,
+                last_setup_candle,
+                regime,
+                zone_tolerance_atr=zone_tolerance_atr,
+            )
     else:
         # WR-11: unknown family is NO_TRADE — never default to Family A.
         return SetupResult(
