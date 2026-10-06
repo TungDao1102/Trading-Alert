@@ -634,7 +634,7 @@ Plans:
 
 **Audit refs**: F-301, F-113, F-909
 
-**Plans:** 4/15 plans executed
+**Plans:** 5/15 plans executed
 
 Plans:
 
@@ -649,7 +649,7 @@ Plans:
 - [x] 15-04-PLAN.md — Shared geometry validator (D-06/D-07/D-08/F6) and Family A complete: SHORT, opposite-pivot TP1, audit anchors, p9 regression
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 15-05-PLAN.md — Family B under geometry_version 1: anchored retest, with-direction gate, S3 stop on the narrow S/R zone, leakage proof
+- [x] 15-05-PLAN.md — Family B under geometry_version 1: anchored retest, with-direction gate, S3 stop on the narrow S/R zone, leakage proof
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 15-06-PLAN.md — Family C under geometry_version 1: range regime on confirmed 4H pivots, S3 stop, T-mid target, leakage proof
@@ -1054,7 +1054,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 13. Research Data Foundation Fixes | 13/13 | Complete    | 2026-10-03 |
 | 13.1. Deployment & CI | 12/12 | Complete | 2026-10-04 |
 | 14. Backtest Simulator Causality Rewrite | 16/16 | In Progress|  |
-| 15. Strategy Geometry Correction | 4/15 | In Progress|  |
+| 15. Strategy Geometry Correction | 5/15 | In Progress|  |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
 | 17. Operational Persistence Layer | 15/15 | In Progress|  |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |
