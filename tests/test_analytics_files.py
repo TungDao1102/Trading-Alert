@@ -63,8 +63,9 @@ _EXPECTED_CANDIDATE_IDS = {
         "baseline-v3",
         "baseline-v4",
         "baseline-v5",
+        "baseline-v6",
     ),
-    "range-mr": ("baseline-v1", "baseline-v2", "baseline-v4", "baseline-v5"),
+    "range-mr": ("baseline-v1", "baseline-v2", "baseline-v4", "baseline-v5", "baseline-v6"),
     "trend-pullback": (
         "baseline-v1",
         "baseline-v2",

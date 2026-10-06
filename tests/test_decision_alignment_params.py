@@ -45,7 +45,7 @@ def test_reference_tables_cover_ten_old_and_five_new_sets() -> None:
     assert len(gate.PHASE12_SET_IDS) == 5
     assert set(gate.PHASE12_SET_IDS).isdisjoint(gate.PRE_PHASE_HASHES)
     assert set(gate.PHASE12_SET_IDS).isdisjoint(gate.NEW_SET_IDS)
-    assert len(gate.load_pins()) == 21
+    assert len(gate.load_pins()) == 23
 
 
 def test_pa01_passes_on_copy(params_copy: Path) -> None:

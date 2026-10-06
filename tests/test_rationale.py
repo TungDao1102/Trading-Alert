@@ -395,7 +395,11 @@ def test_rationale_hash_neutral_on_every_committed_set(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 # Set ids added so far; plan 15-09 appends the two -v4 comparison baselines.
-PHASE15_SETS: tuple[tuple[str, str], ...] = (("trend-pullback", "baseline-v6"),)
+PHASE15_SETS: tuple[tuple[str, str], ...] = (
+    ("trend-pullback", "baseline-v6"),
+    ("breakout-retest", "baseline-v6"),
+    ("range-mr", "baseline-v6"),
+)
 
 # PLACEHOLDER keys exactly as ratified at checkpoint 15-08-01 (recorded in 15-08-SUMMARY.md).
 PHASE15_PLACEHOLDERS: dict[tuple[str, str], tuple[str, ...]] = {
@@ -415,6 +419,49 @@ PHASE15_PLACEHOLDERS: dict[tuple[str, str], tuple[str, ...]] = {
         "slippage_model",
         "spread_fill_assumptions",
         "swing_lookback",
+        "zone_tolerance_atr",
+    ),
+    ("breakout-retest", "baseline-v6"): (
+        "atr_period",
+        "cluster_cap",
+        "constraint_snapshot_ttl_seconds",
+        "entry_buffer_atr",
+        "funding_treatment",
+        "max_aggregate_open_risk",
+        "max_open_positions",
+        "min_stop_atr",
+        "minimum_rr",
+        "retest_depth_atr",
+        "retest_window_bars",
+        "signal_expiry_hours",
+        "sl_buffer_atr",
+        "slippage_model",
+        "spread_fill_assumptions",
+        "swing_lookback",
+        "zone_tolerance_atr",
+    ),
+    ("range-mr", "baseline-v6"): (
+        "atr_period",
+        "cluster_cap",
+        "constraint_snapshot_ttl_seconds",
+        "entry_buffer_atr",
+        "funding_treatment",
+        "max_aggregate_open_risk",
+        "max_open_positions",
+        "min_stop_atr",
+        "minimum_rr",
+        "pivot_left_bars",
+        "pivot_right_bars",
+        "range_break_buffer_atr",
+        "regime_filter_lookback",
+        "signal_expiry_hours",
+        "sl_buffer_atr",
+        "slippage_model",
+        "spread_fill_assumptions",
+        "swing_lookback",
+        "touch_tolerance_atr",
+        "zone_aging_bars",
+        "zone_min_touches",
         "zone_tolerance_atr",
     ),
 }
