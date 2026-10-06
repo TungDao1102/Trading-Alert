@@ -50,6 +50,106 @@
         "tp2": "114.00",
         "reason_code": "OK"
       }
+    },
+    "a_short_worked": {
+      "family": "trend-pullback",
+      "builder": "family_a_short_window",
+      "params": {
+        "zone_tolerance_atr": "0.5",
+        "entry_buffer_atr": "0.1",
+        "sl_buffer_atr": "0.2",
+        "minimum_rr": "2",
+        "swing_lookback": "20",
+        "pivot_left_bars": "3",
+        "pivot_right_bars": "3",
+        "geometry_version": "1"
+      },
+      "expected": {
+        "direction": "SHORT",
+        "setup_type": "TREND_PULLBACK_SHORT",
+        "zone_upper": "102.00",
+        "zone_lower": "100.00",
+        "entry_min": "99.80",
+        "entry_max": "102.20",
+        "entry_ref": "101.00",
+        "stop_loss": "102.60",
+        "tp1": "94.00",
+        "tp2": "87.00",
+        "reason_code": "OK"
+      }
+    },
+    "a_long_audit_60000": {
+      "family": "trend-pullback",
+      "builder": "family_a_long_audit_60000_window",
+      "params": {
+        "zone_tolerance_atr": "0.5",
+        "entry_buffer_atr": "0.1",
+        "sl_buffer_atr": "0.2",
+        "minimum_rr": "2",
+        "swing_lookback": "20",
+        "pivot_left_bars": "3",
+        "pivot_right_bars": "3",
+        "geometry_version": "1"
+      },
+      "expected": {
+        "direction": "LONG",
+        "setup_type": "TREND_PULLBACK_LONG",
+        "zone_upper": "60200",
+        "zone_lower": "59800",
+        "entry_min": "59760",
+        "entry_max": "60240",
+        "entry_ref": "60000",
+        "stop_loss": "59680",
+        "tp1": "61400",
+        "tp2": "62800",
+        "reason_code": "OK"
+      }
+    },
+    "a_long_audit_59000": {
+      "family": "trend-pullback",
+      "builder": "family_a_long_audit_59000_window",
+      "params": {
+        "zone_tolerance_atr": "0.5",
+        "entry_buffer_atr": "0.1",
+        "sl_buffer_atr": "0.2",
+        "minimum_rr": "2",
+        "swing_lookback": "20",
+        "pivot_left_bars": "3",
+        "pivot_right_bars": "3",
+        "geometry_version": "1"
+      },
+      "expected": {
+        "direction": "LONG",
+        "setup_type": "TREND_PULLBACK_LONG",
+        "zone_upper": "59150",
+        "zone_lower": "58850",
+        "entry_min": "58820",
+        "entry_max": "59180",
+        "entry_ref": "59000",
+        "stop_loss": "58760",
+        "tp1": "60050",
+        "tp2": "61100",
+        "reason_code": "OK"
+      }
+    },
+    "a_long_no_opposite_pivot": {
+      "family": "trend-pullback",
+      "builder": "family_a_no_opposite_pivot_window",
+      "params": {
+        "zone_tolerance_atr": "0.5",
+        "entry_buffer_atr": "0.1",
+        "sl_buffer_atr": "0.2",
+        "minimum_rr": "2",
+        "swing_lookback": "20",
+        "pivot_left_bars": "3",
+        "pivot_right_bars": "3",
+        "geometry_version": "1"
+      },
+      "expected": {
+        "direction": "LONG",
+        "setup_type": "TREND_PULLBACK_LONG",
+        "plan_reason_code": "STALE_SETUP"
+      }
     }
   }
 }

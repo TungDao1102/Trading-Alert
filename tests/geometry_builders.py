@@ -67,20 +67,85 @@ def rising_context(count: int = 250) -> list[Decimal]:
 
 
 def window_from_closes(
-    closes: Sequence[Decimal], *, half_range: Decimal = Decimal("1")
+    closes: Sequence[Decimal],
+    *,
+    half_range: Decimal = Decimal("1"),
+    bearish: bool = False,
 ) -> tuple[list[Candle], list[Candle]]:
-    """(setup_candles, context_candles) for any 1h close path with a rising 4h context.
+    """(setup_candles, context_candles) for any 1h close path with a trending 4h context.
 
     The last 4h bar opens six hours before the evaluated 1h bar opens, so it has closed by
-    then. The context rises by `half_range` per bar from 100 (BULLISH regime).
+    then. The context rises (BULLISH) or falls (`bearish`, BEARISH) by `half_range` per bar
+    over 250 bars.
     """
     setup = constant_range_candles(closes, half_range=half_range)
-    context_closes = [Decimal("100") + half_range * k for k in range(250)]
+    if bearish:
+        context_closes = [Decimal("100") + half_range * (250 - k) for k in range(250)]
+    else:
+        context_closes = [Decimal("100") + half_range * k for k in range(250)]
     context_start = SETUP_START + timedelta(hours=len(closes) - 1 - 6) - timedelta(hours=4) * 249
     context = constant_range_candles(
         context_closes, interval="4h", start=context_start, half_range=half_range
     )
     return setup, context
+
+
+def scale_closes(closes: Sequence[Decimal], *, atr: Decimal, pivot_low: Decimal) -> list[Decimal]:
+    """Affine copy of an a_long_worked-shaped path for a different price scale.
+
+    Maps close c to `half * c + (pivot_low - 99 * half)` with `half = atr / 2`, so the bar
+    range becomes `atr` and the base case pivot low 99.00 lands on `pivot_low`. Every ratio of
+    the base derivation (zone, buffers, stop, RR) is preserved. Decimal only.
+    """
+    half = atr / 2
+    offset = pivot_low - Decimal("99") * half
+    return [half * close + offset for close in closes]
+
+
+def family_a_long_audit_window(
+    *, atr: Decimal, pivot_low: Decimal
+) -> tuple[list[Candle], list[Candle]]:
+    """a_long_worked shape rescaled to bar range `atr` with the pivot low at `pivot_low`."""
+    closes = scale_closes(family_a_long_closes(), atr=atr, pivot_low=pivot_low)
+    return window_from_closes(closes, half_range=atr / 2)
+
+
+def family_a_long_audit_60000_window() -> tuple[list[Candle], list[Candle]]:
+    """CONTEXT audit anchor: pivot 60,000, ATR 400 (bar range 400)."""
+    return family_a_long_audit_window(atr=Decimal("400"), pivot_low=Decimal("60000"))
+
+
+def family_a_long_audit_59000_window() -> tuple[list[Candle], list[Candle]]:
+    """CONTEXT audit anchor 1: pivot 59,000, ATR 300 (bar range 300)."""
+    return family_a_long_audit_window(atr=Decimal("300"), pivot_low=Decimal("59000"))
+
+
+def family_a_short_closes() -> list[Decimal]:
+    """Mirror of the a_long_worked path: close' = 200 - close (steps keep their size)."""
+    return [Decimal("200") - close for close in family_a_long_closes()]
+
+
+def family_a_short_window() -> tuple[list[Candle], list[Candle]]:
+    """(setup_candles, context_candles) for a_short_worked (BEARISH 4h context)."""
+    return window_from_closes(family_a_short_closes(), bearish=True)
+
+
+def family_a_no_opposite_pivot_closes() -> list[Decimal]:
+    """A confirmed pivot low and a touching last bar, but no confirmed pivot high in 20 bars.
+
+    A 0.25 ramp to a 99.25 peak at bar 220 (outside the 20-bar lookback of the last bar),
+    then a 0.25 fall for 26 bars to the pivot low bar 246 (close 92.75, low 91.75), then
+    93.00, 93.25 and 93.00. Falling highs have higher bars on their left, so no pivot high
+    qualifies. 250 bars; the evaluated bar 249 is the third right-side bar of the pivot low.
+    """
+    closes = [Decimal("44.25") + Decimal("0.25") * k for k in range(221)]
+    closes.extend(Decimal("99.25") - Decimal("0.25") * j for j in range(1, 27))
+    closes.extend(Decimal(v) for v in "93.00 93.25 93.00".split())
+    return closes
+
+
+def family_a_no_opposite_pivot_window() -> tuple[list[Candle], list[Candle]]:
+    return window_from_closes(family_a_no_opposite_pivot_closes())
 
 
 def family_a_tp_loss_side_closes() -> list[Decimal]:

@@ -122,3 +122,88 @@ python -c "from decimal import Decimal as D; print(D('104')+1, D('105')-D('106')
 | stop_loss | 104.40, strictly below entry_min |
 | TP1 | 105.00, signed profit-side leg -1.00 (loss side) |
 | expected plan() result | NO_TRADE, RR_TOO_LOW (abs() used to give RR 0.625 and a plan) |
+
+## a_short_worked
+
+Plan 15-04 Task 2 (D-05 mirrored). The a_long_worked setup path mirrored through 200: bar k
+closes 200 - c_k, so the ramp falls from 155.75 to 97.00 and the tail closes 98, 99, 100, 99,
+98, 97, 96, 95, 96, 97, 98, 99, 100, 101. The 4h context falls 1.00 per bar (BEARISH: last
+close below EMA50). Same parameters as a_long_worked.
+
+Pivot high: bar 238 (close 100, high 101.00) is the highest high of bars 235..241 (left
+non-strict, right strict) and is confirmed at bar 241, so H = 101.00. The evaluated bar 249
+closes 101, high 102.00, inside 100.00-102.00 (upper edge inclusive). Pivot low: bar 243
+(close 95, low 94.00) is the newest confirmed pivot low, so TP1 = 94.00.
+
+```
+python -c "from decimal import Decimal as D; H=D('200')-D('99'); h=D('0.5')*D('2'); zl=H-h; zu=H+h; eb=D('0.1')*D('2'); sb=D('0.2')*D('2'); emin=zl-eb; emax=zu+eb; print(H, zl, zu, emin, emax, emax+sb, (emin+emax)/2)"
+101 100.0 102.0 99.8 102.2 102.6 101.0
+python -c "from decimal import Decimal as D; ref=D('101'); stop=D('102.6'); tp1=D('200')-D('106'); print(tp1, ref-stop, stop-ref, (ref-tp1)/(stop-ref), ref-2*(ref-tp1))"
+94 -1.6 1.6 4.375 87
+```
+
+| Field | Value |
+|-------|-------|
+| zone_upper / zone_lower | 102.00 / 100.00 |
+| entry_min / entry_max | 99.80 / 102.20 |
+| entry_ref | 101.00 |
+| stop_loss | 102.60, strictly above entry_max |
+| TP1 / TP2 | 94.00 / 87.00 |
+| risk / RR to TP1 | 1.60 / 4.375 |
+
+## a_long_audit_60000
+
+Audit anchor (CONTEXT, RESEARCH F5): pivot 60,000 and ATR 400. The a_long_worked path mapped
+through close' = 200 c + 40,200 (so every bar has range 400, the 0.25 ramp steps become 50,
+and the pivot low 99.00 becomes 60,000). Parameters unchanged (they are ATR multiples):
+half = 0.5 x 400 = 200, entry buffer 0.1 x 400 = 40, stop buffer 0.2 x 400 = 80.
+
+```
+python -c "from decimal import Decimal as D; atr=D('400'); P=D('60000'); h=D('0.5')*atr; zl=P-h; zu=P+h; eb=D('0.1')*atr; sb=D('0.2')*atr; emin=zl-eb; emax=zu+eb; print(zl, zu, emin, emax, (emin+emax)/2, emin-sb)"
+59800.0 60200.0 59760.0 60240.0 60000.0 59680.0
+python -c "from decimal import Decimal as D; a=D('200'); b=D('60000')-D('99')*a; tp1=a*D('106')+b; ref=D('60000'); print(tp1, ref+2*(tp1-ref), (tp1-ref)/(ref-D('59680')))"
+61400 62800 4.375
+```
+
+| Field | Value |
+|-------|-------|
+| zone_upper / zone_lower | 60200 / 59800 |
+| entry_min / entry_max | 59760 / 60240 |
+| entry_ref | 60000 |
+| stop_loss | 59680, strictly below entry_min 59760 (no stop inside 59760-60240) |
+| TP1 / TP2 | 61400 / 62800 |
+
+## a_long_audit_59000
+
+Audit anchor 1 (CONTEXT): pivot 59,000 and ATR 300. The same path mapped through
+close' = 150 c + 44,150 (bar range 300, pivot low 99.00 becomes 59,000). Old geometry put the
+stop at 58,940, inside the entry zone; the corrected stop lies below entry_min 58,820.
+
+```
+python -c "from decimal import Decimal as D; atr=D('300'); P=D('59000'); h=D('0.5')*atr; zl=P-h; zu=P+h; eb=D('0.1')*atr; sb=D('0.2')*atr; emin=zl-eb; emax=zu+eb; print(zl, zu, emin, emax, (emin+emax)/2, emin-sb)"
+58850.0 59150.0 58820.0 59180.0 59000.0 58760.0
+python -c "from decimal import Decimal as D; a=D('150'); b=D('59000')-D('99')*a; tp1=a*D('106')+b; ref=D('59000'); print(tp1, ref+2*(tp1-ref), (tp1-ref)/(ref-D('58760')))"
+60050 61100 4.375
+```
+
+| Field | Value |
+|-------|-------|
+| zone_upper / zone_lower | 59150 / 58850 |
+| entry_min / entry_max | 58820 / 59180 |
+| entry_ref | 59000 |
+| stop_loss | 58760, strictly below entry_min 58820 |
+| TP1 / TP2 | 60050 / 61100 |
+
+## a_long_no_opposite_pivot
+
+Plan 15-04 Task 2 (D-03, D-09). Bars 0..220 close 44.25 + 0.25 k (bar 220 closes 99.25, the
+peak), bars 221..246 close 99.25 - 0.25 j for j = 1..26 (bar 246 closes 92.75), then bars
+247..249 close 93.00, 93.25, 93.00. Same parameters as a_long_worked, rising 4h context.
+
+Pivot low: bar 246 (low 91.75) has strictly higher lows on its right (92.00, 92.25, 92.00) and
+higher lows on its left, so it is confirmed at bar 249 and P = 91.75. The evaluated bar 249 has
+low 92.00, inside 90.75-92.75, so evaluate emits a LONG signal.
+
+Pivot high: candidates inside the last 20 bars are bars 230..246. Every one of them has higher
+highs on its left (the series falls 0.25 per bar there), so none qualifies, and the 99.25 peak at
+bar 220 is outside the lookback. There is no TP1, so plan() returns NO_TRADE with STALE_SETUP.

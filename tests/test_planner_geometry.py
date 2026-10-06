@@ -387,3 +387,118 @@ def test_legacy_set_is_not_subject_to_the_validator() -> None:
     _result, planned, expected = _run("a_long_legacy_contrast")
     assert planned.trade_plan is not None
     assert planned.trade_plan.stop_loss_price == Decimal(expected["stop_loss"])
+
+
+# --------------------------------------------------------------------------- #
+# Plan 15-04 Task 2: Family A SHORT, audit anchors, missing pivot, determinism.
+# --------------------------------------------------------------------------- #
+
+_WORKED_CASES = ["a_short_worked", "a_long_audit_60000", "a_long_audit_59000"]
+
+
+@pytest.mark.parametrize("name", _WORKED_CASES)
+def test_family_a_worked_case_matches_the_hand_derived_sidecar(name: str) -> None:
+    result, planned, expected = _run(name)
+    assert result.signal is not None
+    assert result.signal.direction == expected["direction"]
+    assert result.signal.setup_type == expected["setup_type"]
+    _assert_plan_matches(planned, expected)
+
+
+def test_a_short_worked_stop_is_above_the_whole_zone() -> None:
+    _result, planned, _expected = _run("a_short_worked")
+    trade_plan = planned.trade_plan
+    assert trade_plan is not None
+    assert trade_plan.entry_min_price == Decimal("99.80")
+    assert trade_plan.entry_max_price == Decimal("102.20")
+    assert trade_plan.stop_loss_price == Decimal("102.60")
+    assert trade_plan.stop_loss_price > trade_plan.entry_max_price
+    targets = json.loads(trade_plan.take_profit_json)
+    assert Decimal(targets["tp1"]) == Decimal("94.00")
+    assert Decimal(targets["tp2"]) == Decimal("87.00")
+
+
+def test_a_long_audit_60000_has_no_stop_inside_the_zone() -> None:
+    """F5: S = 60,000 and ATR = 400 give a corrected plan, never one with the SL in the zone."""
+    _result, planned, _expected = _run("a_long_audit_60000")
+    trade_plan = planned.trade_plan
+    assert trade_plan is not None
+    assert trade_plan.stop_loss_price == Decimal("59680")
+    zone = (Decimal("59760"), Decimal("60240"))
+    assert not zone[0] <= trade_plan.stop_loss_price <= zone[1]
+    assert trade_plan.stop_loss_price < zone[0]
+
+
+def test_a_long_audit_59000_stop_is_below_entry_min() -> None:
+    """CONTEXT anchor: 59,000 / ATR 300 gives SL 58,760 below 58,820 (old SL 58,940 was inside)."""
+    _result, planned, _expected = _run("a_long_audit_59000")
+    trade_plan = planned.trade_plan
+    assert trade_plan is not None
+    assert trade_plan.entry_min_price == Decimal("58820")
+    assert trade_plan.stop_loss_price == Decimal("58760")
+    assert trade_plan.stop_loss_price < trade_plan.entry_min_price
+
+
+def test_every_corrected_family_a_plan_has_its_stop_outside_the_zone() -> None:
+    checked = 0
+    for name, case in _load_cases().items():
+        expected = case["expected"]
+        if "geometry_version" not in case["params"] or expected.get("reason_code") != "OK":
+            continue  # the legacy contrast case keeps the stop inside the zone on purpose
+        _result, planned, _ = _run(name)
+        trade_plan = planned.trade_plan
+        assert trade_plan is not None, name
+        if expected["direction"] == "LONG":
+            assert trade_plan.stop_loss_price < trade_plan.entry_min_price, name
+        else:
+            assert trade_plan.stop_loss_price > trade_plan.entry_max_price, name
+        checked += 1
+    assert checked == 4  # a_long_worked, a_short_worked and the two audit anchors
+
+
+def test_missing_opposite_pivot_at_plan_time_is_stale_setup() -> None:
+    """D-09: a confirmed pivot low and a touching bar, but no pivot high to use as TP1."""
+    case = _load_cases()["a_long_no_opposite_pivot"]
+    window = geometry_builders.family_a_no_opposite_pivot_window()
+    result, planned = _evaluate_and_plan(window, _parameter_set(case))
+    assert not result.is_no_trade, result.reason_code
+    assert result.signal is not None
+    assert result.signal.direction == case["expected"]["direction"]
+    assert planned is not None
+    assert planned.is_no_trade
+    assert planned.trade_plan is None
+    assert planned.reason_code == case["expected"]["plan_reason_code"]
+
+
+@pytest.mark.parametrize("name", ["a_long_worked", *_WORKED_CASES])
+def test_signal_id_and_plan_hash_are_deterministic(name: str) -> None:
+    first = _run(name)
+    second = _run(name)
+    assert first[0].signal is not None and second[0].signal is not None
+    assert first[0].signal.signal_id == second[0].signal.signal_id
+    assert first[1].trade_plan is not None and second[1].trade_plan is not None
+    assert first[1].trade_plan.plan_hash == second[1].trade_plan.plan_hash
+
+
+def test_evaluate_is_unchanged_when_the_last_bar_is_rebuilt_from_the_prefix() -> None:
+    """No later candle exists to poison; rebuilding window[:-1] + [same last bar] is a no-op."""
+    case = _load_cases()["a_long_worked"]
+    parameter_set = _parameter_set(case)
+    setup, context = geometry_builders.family_a_long_window()
+    original, _plan = _evaluate_and_plan((setup, context), parameter_set)
+    rebuilt = setup[:-1] + [dataclasses.replace(setup[-1])]
+    again, _plan = _evaluate_and_plan((rebuilt, context), parameter_set)
+    assert original == again
+    assert original.signal is not None
+
+
+def test_derivations_file_has_a_section_for_every_plan_15_04_case() -> None:
+    text = (_CASES_PATH.parent / "DERIVATIONS.md").read_text(encoding="utf-8")
+    for heading in (
+        "## tp_loss_side",
+        "## a_short_worked",
+        "## a_long_audit_60000",
+        "## a_long_audit_59000",
+        "## a_long_no_opposite_pivot",
+    ):
+        assert heading in text, heading
