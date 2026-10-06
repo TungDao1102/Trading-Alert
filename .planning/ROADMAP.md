@@ -634,7 +634,7 @@ Plans:
 
 **Audit refs**: F-301, F-113, F-909
 
-**Plans:** 7/15 plans executed
+**Plans:** 8/15 plans executed
 
 Plans:
 
@@ -658,7 +658,7 @@ Plans:
 - [x] 15-07-PLAN.md — D-06 property test for all families; counts-only geometry census; census run and worked examples for the checkpoint
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 15-08-PLAN.md — Checkpoint (blocking-human, never auto-selected): user ratifies every parameter value; baseline-v6 sets for A, B, C with rationale tables and pins
+- [x] 15-08-PLAN.md — Checkpoint (blocking-human, never auto-selected): user ratifies every parameter value; baseline-v6 sets for A, B, C with rationale tables and pins
 
 **Wave 8** *(blocked on Wave 7 completion)*
 - [ ] 15-09-PLAN.md — baseline-no-trade-v4 and baseline-simple-trend-v4; gate PA-08
@@ -1054,7 +1054,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 13. Research Data Foundation Fixes | 13/13 | Complete    | 2026-10-03 |
 | 13.1. Deployment & CI | 12/12 | Complete | 2026-10-04 |
 | 14. Backtest Simulator Causality Rewrite | 16/16 | In Progress|  |
-| 15. Strategy Geometry Correction | 7/15 | In Progress|  |
+| 15. Strategy Geometry Correction | 8/15 | In Progress|  |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
 | 17. Operational Persistence Layer | 15/15 | In Progress|  |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |
