@@ -90,7 +90,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--raw-root", default="data/raw", help="published store root")
     parser.add_argument("--strategy-id", default="trend-pullback")
-    parser.add_argument("--parameter-set-id", default="baseline-v5")
+    parser.add_argument("--parameter-set-id", default="baseline-v6")
     parser.add_argument("--equity", default="1000", help="account equity, a Decimal string")
     parser.add_argument("--risk-rate", default="0.005", help="risk rate, a Decimal string")
     parser.add_argument("--constraints-json", default=None, help="exported constraint history")

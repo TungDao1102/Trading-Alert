@@ -123,3 +123,23 @@ The SHORT mirror (stop 60,320) gives the same RR, adverse distance 560 (0.937 pe
 | C, stop beyond the 0.5 ATR tolerance zone (D-23 reading) | SL 58,720 (0.5 + 0.2 ATR below the edge), T-mid 60,000 | 3.57 | 320 (0.542 percent) | 0.2048 | COST_TO_RISK_EXCEEDED at this ATR |
 
 Reading of the table: under the whole-range reading Family B can never reach `minimum_rr`; under the narrow-zone reading the RR is about 4.5. For Family C the midpoint target cuts the RR from 25.0 to 12.5 on the old geometry and gives 3.57 on the corrected stop. None of these figures chooses a parameter.
+
+## Re-run readiness (criterion 4)
+
+ROADMAP criterion 4 asks that a research re-run under protocol v2.0.0 is ready to start; the re-run itself is not part of Phase 15. Readiness is verified here by running the three `baseline-v6` sets (plan 15-08) on the Phase-14 engine, not asserted.
+
+**F8 definition of "zero invariant violations" (research flag F8).** A set is ready when all of the following hold: (1) `scripts/smoke_backtest_realdata.py` runs the Phase-14 `simulator.run` twice on the same real-data window, exits 0 and prints `digests_match=true` (two equal sha256 digests); (2) every key of the printed `no_trade_counts` is a canonical `RejectionReason` value or a feature-layer code (`WARMUP_INSUFFICIENT`, `GAP_IN_SOURCE`, `INVALID_INPUT`); (3) `scripts/geometry_census.py` on the same set reports `invariant_violations 0` (its checker compares stored plan fields with literal comparisons and does not import the planner validator); (4) the property test over the parameter grid (plans 15-07 and 15-13, `tests/test_geometry_property.py`) is green.
+
+**Inputs.** Local published store `data/raw` (1h, 4h, 1m trade, 1m mark and funding partitions), symbol BTCUSDT, 30 closed UTC days ending 2026-10-01 (2026-09-02 to 2026-10-01). Constraint history: the one-row BTCUSDT export recorded in `14-14-SUMMARY.md` (tick 0.10, step 0.001, min_qty 0.001, min_notional 50, observed 2026-10-05T08:18:37+00:00), written to a JSON file outside the repository; the database was not touched. Equity 1000 and risk rate 0.005 (the script defaults). The constraint row is observed after the window start, so the engine back-extrapolates it (D-30): the run is valid as a plumbing and invariant check, NOT as strategy evaluation.
+
+**These counts are plumbing and invariant evidence only.** Trade and NO_TRADE counts are never strategy performance, and no parameter was or will be changed because of them (D-17).
+
+Smoke command (per family): `.venv/Scripts/python scripts/smoke_backtest_realdata.py --symbol BTCUSDT --days 30 --end-day 2026-10-01 --strategy-id <family> --parameter-set-id baseline-v6 --constraints-json <scratch file>`. Census command (per family): `.venv/Scripts/python scripts/geometry_census.py --strategy-id <family> --parameter-set-id baseline-v6 --symbols BTCUSDT --days 30 --end-day 2026-10-01` (the census reads 50 extra warm-up days before the window so every evaluated bar sees full strategy and context windows).
+
+| Family | Set | Smoke window | Smoke runtime run 1 / run 2 (s) | Smoke digest (both runs equal) | trade_count | no_trade_counts | Census (BTCUSDT) |
+|---|---|---|---|---|---|---|---|
+| trend-pullback | baseline-v6 | 30 days to 2026-10-01 | 123.118 / 78.919 | 52ae9d503a3ab28f5da96e765ee13550c67d7794c30ded9e2f09dd7a1badb5c3 | 0 | {"NO_TRADE_REGIME":3,"WARMUP_INSUFFICIENT":717} | setups 148, plans 123, planner RR_TOO_LOW 24 and STALE_SETUP 1, guard COST_TO_RISK_EXCEEDED 68 and STOP_TOO_TIGHT 1, guard pass 54, invariant_violations 0 |
+
+Both smoke runs exited 0 with `digests_match=true`; `dataset_id` 3ba0132e1e3449dae18cea11d0e55cd35e3baac79ae854bad2233c839fb737e1. The census total line reports `invariant_violations: 0`, `guard_other: {}` and `violation_kinds: {}` (parameter_set_hash 2c4f1528b00f1b1e48c76040bbd6cc218a25eec21c521d8b68da86ee4811360f).
+
+**Reading the smoke result.** The smoke script reads only the requested window and no history before it, so a 30-day window cannot fill the 1000-bar strategy window: 717 of 720 closed 1H bars are `WARMUP_INSUFFICIENT` and the three other bars are `NO_TRADE_REGIME`. The 30-day smoke therefore proves that the set loads, the case builds, the engine runs deterministically and only canonical codes appear; it does not drive any plan through the simulator. The geometry itself (setups, plans, guards, invariants) is exercised by the census, which does read the warm-up history, and by the longer supplementary smoke below. A zero trade count in a short window is a recorded finding, not a failure.
