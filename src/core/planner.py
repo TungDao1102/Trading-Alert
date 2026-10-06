@@ -43,6 +43,7 @@ from ._decimal import _add, _div, _mul, _q, _sub  # noqa: F401 (re-export for co
 from .features import compute_features
 from .pivots import pivot_at
 from .strategy import (
+    _detect_breakout_retest_levels,
     _detect_breakout_retest_setup,
     _detect_range_mr_setup,
     geometry_version,
@@ -129,6 +130,34 @@ def _pivot_geometry(
     return (zone_upper, zone_lower, stop, target)
 
 
+def _breakout_retest_geometry(
+    setup_candles: list[Candle],
+    parameter_set: ParameterSet,
+    sl_buffer: Decimal,
+    *,
+    direction: str,
+) -> _Geometry:
+    """Family B geometry_version 1 (D-23): the S3 stop on the narrow broken S/R zone.
+
+    Re-derives the same anchored, direction-filtered setup the detector found (CR-05) and
+    reads its `sr_far_edge`. The entry zone stays degenerate at the retest edge and TP1 stays
+    the measured move. LONG: edge `zone_upper`, stop `sr_far_edge - sl_buffer`, TP1 `edge +
+    height`. SHORT: edge `zone_lower`, stop `sr_far_edge + sl_buffer`, TP1 `edge - height`.
+    A vanished or direction-mismatched setup returns all-None (STALE_SETUP at the caller).
+    """
+    levels = _detect_breakout_retest_levels(
+        setup_candles=setup_candles, parameter_set=parameter_set, direction=direction
+    )
+    if levels is None or levels.direction != direction or levels.sr_far_edge is None:
+        return (None, None, None, None)
+    height = _sub(levels.zone_upper, levels.zone_lower)
+    if direction == "LONG":
+        edge = levels.zone_upper
+        return (edge, edge, _sub(levels.sr_far_edge, sl_buffer), _add(edge, height))
+    edge = levels.zone_lower
+    return (edge, edge, _add(levels.sr_far_edge, sl_buffer), _sub(edge, height))
+
+
 def _long_geometry(
     strategy_id: str,
     setup_candles: list[Candle],
@@ -170,6 +199,10 @@ def _long_geometry(
             swing_high,
         )
     if strategy_id == "breakout-retest":
+        if geometry_version(parameter_set) is not None:
+            return _breakout_retest_geometry(
+                setup_candles, parameter_set, sl_buffer, direction="LONG"
+            )
         setup = _detect_breakout_retest_setup(
             setup_candles=setup_candles, parameter_set=parameter_set
         )
@@ -235,6 +268,10 @@ def _short_geometry(
             swing_low,
         )
     if strategy_id == "breakout-retest":
+        if geometry_version(parameter_set) is not None:
+            return _breakout_retest_geometry(
+                setup_candles, parameter_set, sl_buffer, direction="SHORT"
+            )
         setup = _detect_breakout_retest_setup(
             setup_candles=setup_candles, parameter_set=parameter_set
         )

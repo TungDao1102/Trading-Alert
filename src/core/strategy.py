@@ -29,6 +29,7 @@ families remain hypotheses pending backtest + out-of-sample evidence.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 
@@ -259,11 +260,30 @@ def _setup_fingerprint(
 # --------------------------------------------------------------------------- #
 
 
-def _detect_breakout_retest_setup(
+@dataclass(frozen=True)
+class SetupLevels:
+    """The levels of one detected Family B setup (plan 15-05, D-23).
+
+    `zone_upper` and `zone_lower` are the legacy zone bounds; the retest edge is
+    `zone_upper` for LONG and `zone_lower` for SHORT. `sr_far_edge` is the far bound of the
+    narrow broken S/R zone and is set only under `geometry_version`: `swing_high_ref -
+    zone_tolerance_atr * ATR_ref` for LONG, `swing_low_ref + zone_tolerance_atr * ATR_ref` for
+    SHORT. Legacy sets leave it None.
+    """
+
+    direction: str
+    setup_type: str
+    zone_upper: Decimal
+    zone_lower: Decimal
+    sr_far_edge: Decimal | None
+
+
+def _detect_breakout_retest_levels(
     *,
     setup_candles: list[Candle],
     parameter_set: ParameterSet,
-) -> tuple[str, str, Decimal, Decimal] | None:
+    direction: str | None = None,
+) -> SetupLevels | None:
     """Family B detector: breakout followed by a retest within the window.
 
     Per `docs/research/families/breakout-retest.md` §2.1 (B1 close
@@ -284,8 +304,20 @@ def _detect_breakout_retest_setup(
     `swing_high[i]` includes bar `i`'s high and `zone_upper` becomes
     strictly greater than `close[i]`, making the detector unsatisfiable.
 
-    Returns ``(direction, setup_type, zone_upper, zone_lower)`` or
-    ``None``.
+    Legacy sets (no `geometry_version`) keep the original scan byte for byte: it starts at
+    the last bar, accepts a retest anywhere in the window and ignores `direction`.
+
+    With `geometry_version` (D-24, F2) the setup is anchored to the evaluated bar `n - 1`:
+    the breakout end bar `i` is scanned from `n - 2` down to `max(breakout_confirmation_bars
+    + 1, n - 1 - retest_window_bars)` and the FIRST retest bar after it must be exactly
+    `n - 1`. The lower bound is exact because the retest scan covers `[i + 1, i + 1 +
+    retest_window_bars)`, so `n - 1` is reachable only when `i >= n - 1 -
+    retest_window_bars`; the `breakout_confirmation_bars + 1` term keeps the reference index
+    `i - breakout_confirmation_bars - 1` non-negative for every value. A given `direction`
+    restricts the scan to that side (the with-regime filter); `sr_far_edge` is set. No
+    reference level or ATR ever comes from bar `n - 1` (D-13).
+
+    Returns a `SetupLevels` or ``None``.
     """
     breakout_confirmation_bars = int(parameter_set.params["breakout_confirmation_bars"])
     retest_window_bars = int(parameter_set.params["retest_window_bars"])
@@ -293,6 +325,7 @@ def _detect_breakout_retest_setup(
     zone_tolerance_atr = Decimal(str(parameter_set.params["zone_tolerance_atr"]))
     swing_lookback = int(parameter_set.params["swing_lookback"])
     atr_period = int(parameter_set.params["atr_period"])
+    anchored = geometry_version(parameter_set) is not None
 
     n = len(setup_candles)
     # WR-15: only breakout_confirmation_bars + swing_lookback of HISTORY
@@ -306,9 +339,20 @@ def _detect_breakout_retest_setup(
     swing_low_series = _swing_series(setup_candles, swing_lookback, high=False)
     atr_series = _atr_series(setup_candles, atr_period)
 
+    if anchored:
+        scan = range(
+            n - 2,
+            max(breakout_confirmation_bars + 1, n - 1 - retest_window_bars) - 1,
+            -1,
+        )
+    else:
+        scan = range(n - 1, breakout_confirmation_bars - 1, -1)
+    consider_long = not anchored or direction in (None, "LONG")
+    consider_short = not anchored or direction in (None, "SHORT")
+
     # CR-04: every op routes through the pinned prec-28 helpers — no
     # localcontext(prec=50) block, no ambient-precision arithmetic.
-    for i in range(n - 1, breakout_confirmation_bars - 1, -1):
+    for i in scan:
         ref_bar = i - breakout_confirmation_bars
         ref_prev = ref_bar - 1
         if ref_prev < 0:
@@ -329,14 +373,16 @@ def _detect_breakout_retest_setup(
         # the retest band derive from the reference bar's ATR, never
         # from a later bar's volatility.
         atr_ref = atr_ref_out.value
-        zone_upper = _add(sh_ref_out.value, _mul(zone_tolerance_atr, atr_ref))
-        zone_lower = _sub(sl_ref_out.value, _mul(zone_tolerance_atr, atr_ref))
+        half_width = _mul(zone_tolerance_atr, atr_ref)
+        zone_upper = _add(sh_ref_out.value, half_width)
+        zone_lower = _sub(sl_ref_out.value, half_width)
 
-        long_breakout = True
-        for j in range(breakout_confirmation_bars):
-            if setup_candles[i - j].close <= zone_upper:
-                long_breakout = False
-                break
+        long_breakout = consider_long
+        if long_breakout:
+            for j in range(breakout_confirmation_bars):
+                if setup_candles[i - j].close <= zone_upper:
+                    long_breakout = False
+                    break
         if long_breakout:
             retest_bar_idx = _find_retest_bar(
                 setup_candles,
@@ -347,9 +393,17 @@ def _detect_breakout_retest_setup(
                 i + 1,
                 is_long=True,
             )
-            if retest_bar_idx is not None:
-                return ("LONG", "BREAKOUT_RETEST_LONG", zone_upper, zone_lower)
+            if retest_bar_idx is not None and (not anchored or retest_bar_idx == n - 1):
+                return SetupLevels(
+                    direction="LONG",
+                    setup_type="BREAKOUT_RETEST_LONG",
+                    zone_upper=zone_upper,
+                    zone_lower=zone_lower,
+                    sr_far_edge=_sub(sh_ref_out.value, half_width) if anchored else None,
+                )
 
+        if not consider_short:
+            continue
         if not sl_ref_out.valid or sl_ref_out.value is None:
             continue
         short_breakout = True
@@ -367,15 +421,33 @@ def _detect_breakout_retest_setup(
                 i + 1,
                 is_long=False,
             )
-            if retest_bar_idx is not None:
-                return (
-                    "SHORT",
-                    "BREAKOUT_RETEST_SHORT",
-                    zone_upper,
-                    zone_lower,
+            if retest_bar_idx is not None and (not anchored or retest_bar_idx == n - 1):
+                return SetupLevels(
+                    direction="SHORT",
+                    setup_type="BREAKOUT_RETEST_SHORT",
+                    zone_upper=zone_upper,
+                    zone_lower=zone_lower,
+                    sr_far_edge=_add(sl_ref_out.value, half_width) if anchored else None,
                 )
 
     return None
+
+
+def _detect_breakout_retest_setup(
+    *,
+    setup_candles: list[Candle],
+    parameter_set: ParameterSet,
+) -> tuple[str, str, Decimal, Decimal] | None:
+    """Legacy 4-tuple view of `_detect_breakout_retest_levels` (no direction filter).
+
+    Returns ``(direction, setup_type, zone_upper, zone_lower)`` or ``None``.
+    """
+    levels = _detect_breakout_retest_levels(
+        setup_candles=setup_candles, parameter_set=parameter_set
+    )
+    if levels is None:
+        return None
+    return (levels.direction, levels.setup_type, levels.zone_upper, levels.zone_lower)
 
 
 def _find_retest_bar(
@@ -673,10 +745,24 @@ def evaluate(
 
     # Setup gate (1H setup stream) — family dispatch (D-05).
     if parameter_set.strategy_id == "breakout-retest":
-        setup = _detect_breakout_retest_setup(
-            setup_candles=snapshot.setup_candles,
-            parameter_set=parameter_set,
-        )
+        if geometry_version(parameter_set) is not None:
+            # D-24: Family B trades only with the 4H regime (the neutral regime already
+            # returned above), and the retest must be the evaluated bar (anchored scan).
+            levels = _detect_breakout_retest_levels(
+                setup_candles=snapshot.setup_candles,
+                parameter_set=parameter_set,
+                direction="LONG" if regime == "BULLISH" else "SHORT",
+            )
+            setup = (
+                None
+                if levels is None
+                else (levels.direction, levels.setup_type, levels.zone_upper, levels.zone_lower)
+            )
+        else:
+            setup = _detect_breakout_retest_setup(
+                setup_candles=snapshot.setup_candles,
+                parameter_set=parameter_set,
+            )
     elif parameter_set.strategy_id == "range-mr":
         setup = _detect_range_mr_setup(
             setup_candles=snapshot.setup_candles,
