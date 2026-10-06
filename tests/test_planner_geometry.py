@@ -556,6 +556,110 @@ def test_b_long_legacy_contrast_keeps_the_code_stop_edge_minus_sl_buffer() -> No
     assert corrected.signal.signal_id != result.signal.signal_id
 
 
+def test_b_short_worked_plan_has_the_s3_stop_above_the_whole_zone() -> None:
+    result, planned, expected = _run("b_short_worked")
+    assert result.signal is not None
+    assert result.signal.direction == "SHORT"
+    assert result.signal.setup_type == "BREAKOUT_RETEST_SHORT"
+    assert result.regime == "BEARISH"
+    _assert_plan_matches(planned, expected)
+    trade_plan = planned.trade_plan
+    assert trade_plan is not None
+    assert trade_plan.entry_min_price == Decimal("97.80")
+    assert trade_plan.entry_max_price == Decimal("98.20")
+    assert trade_plan.stop_loss_price == Decimal("100.40")
+    assert trade_plan.stop_loss_price > trade_plan.entry_max_price
+    assert _expected_rr(trade_plan) == Decimal(expected["tp1_rr"])
+    case = _load_cases()["b_short_worked"]
+    assert case["params"]["breakout_confirmation_bars"] == "1"
+    setup, _context = geometry_builders.family_b_short_window()
+    levels = strategy_module._detect_breakout_retest_levels(
+        setup_candles=setup, parameter_set=_parameter_set(case), direction="SHORT"
+    )
+    assert levels is not None
+    assert levels.zone_upper == Decimal(expected["zone_upper"])
+    assert levels.zone_lower == Decimal(expected["zone_lower"])
+    assert levels.sr_far_edge == Decimal(expected["sr_far_edge"])
+
+
+def test_b_long_legacy_confirm3_is_labelled_and_uses_the_legacy_value() -> None:
+    case = _load_cases()["b_long_legacy_confirm3"]
+    assert case["note"] == "legacy value, not the baseline to be ratified"
+    assert _parameter_set(case).params["breakout_confirmation_bars"] == 3
+    text = (_CASES_PATH.parent / "DERIVATIONS.md").read_text(encoding="utf-8")
+    section = text.split("## b_long_legacy_confirm3", 1)[1].split("\n## ", 1)[0]
+    assert "legacy value, not the baseline to be ratified" in section
+
+
+def test_b_long_legacy_confirm3_reference_bar_is_four_bars_before_the_end_bar() -> None:
+    """ref_prev = i - 4 = 243: bar 244 (high 102) stays out of the swing window, edge 102.00."""
+    result, planned, expected = _run("b_long_legacy_confirm3")
+    assert result.signal is not None
+    assert result.signal.direction == "LONG"
+    _assert_plan_matches(planned, expected)
+    trade_plan = planned.trade_plan
+    assert trade_plan is not None
+    assert trade_plan.stop_loss_price == Decimal("99.60")
+    assert trade_plan.stop_loss_price < trade_plan.entry_min_price
+    assert _expected_rr(trade_plan) == Decimal(expected["tp1_rr"])
+
+
+def test_b_long_legacy_confirm3_needs_all_three_closes_above_the_edge() -> None:
+    case = _load_cases()["b_long_legacy_confirm3"]
+    result, _planned = _evaluate_and_plan(
+        geometry_builders.family_b_confirm3_one_close_window(), _parameter_set(case)
+    )
+    assert result.is_no_trade
+    assert result.reason_code == RejectionReason.NO_TRADE_REGIME.value
+
+
+def test_b_main_worked_cases_state_confirmation_bars_one_and_the_legacy_case_three() -> None:
+    cases = _load_cases()
+    for name in ("b_long_worked", "b_short_worked"):
+        assert cases[name]["params"]["breakout_confirmation_bars"] == "1", name
+    assert cases["b_long_legacy_confirm3"]["params"]["breakout_confirmation_bars"] == "3"
+
+
+@pytest.mark.parametrize("name", ["b_long_worked", "b_short_worked", "b_long_legacy_confirm3"])
+def test_b_cases_are_deterministic(name: str) -> None:
+    first = _run(name)
+    second = _run(name)
+    assert first[0].signal == second[0].signal
+    assert first[1].trade_plan == second[1].trade_plan
+
+
+def test_every_corrected_family_b_plan_has_its_stop_outside_the_zone() -> None:
+    checked = 0
+    for name, case in _load_cases().items():
+        expected = case["expected"]
+        if case["family"] != "breakout-retest" or "geometry_version" not in case["params"]:
+            continue
+        _result, planned, _ = _run(name)
+        trade_plan = planned.trade_plan
+        assert trade_plan is not None, name
+        if expected["direction"] == "LONG":
+            assert trade_plan.stop_loss_price < trade_plan.entry_min_price, name
+        else:
+            assert trade_plan.stop_loss_price > trade_plan.entry_max_price, name
+        checked += 1
+    assert checked == 3  # b_long_worked, b_short_worked, b_long_legacy_confirm3
+
+
+def test_derivations_file_has_a_section_for_every_plan_15_05_case() -> None:
+    text = (_CASES_PATH.parent / "DERIVATIONS.md").read_text(encoding="utf-8")
+    for heading in (
+        "## b_long_worked",
+        "## b_long_legacy_contrast",
+        "## b_short_worked",
+        "## b_long_legacy_confirm3",
+        "## Family B anchoring windows",
+    ):
+        assert heading in text, heading
+    for name in ("b_long_worked", "b_short_worked"):
+        section = text.split(f"## {name}", 1)[1].split("\n## ", 1)[0]
+        assert "breakout_confirmation_bars = 1" in section, name
+
+
 def test_derivations_file_has_a_section_for_every_plan_15_04_case() -> None:
     text = (_CASES_PATH.parent / "DERIVATIONS.md").read_text(encoding="utf-8")
     for heading in (

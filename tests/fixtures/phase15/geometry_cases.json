@@ -181,6 +181,67 @@
         "reason_code": "OK"
       }
     },
+    "b_short_worked": {
+      "family": "breakout-retest",
+      "builder": "family_b_short_window",
+      "params": {
+        "zone_tolerance_atr": "0.5",
+        "entry_buffer_atr": "0.1",
+        "sl_buffer_atr": "0.2",
+        "minimum_rr": "2",
+        "swing_lookback": "20",
+        "breakout_confirmation_bars": "1",
+        "retest_window_bars": "5",
+        "retest_depth_atr": "0.3",
+        "geometry_version": "1"
+      },
+      "expected": {
+        "direction": "SHORT",
+        "setup_type": "BREAKOUT_RETEST_SHORT",
+        "zone_upper": "103.00",
+        "zone_lower": "98.00",
+        "sr_far_edge": "100.00",
+        "entry_min": "97.80",
+        "entry_max": "98.20",
+        "entry_ref": "98.00",
+        "stop_loss": "100.40",
+        "tp1": "93.00",
+        "tp2": "88.00",
+        "tp1_rr": "2.083333333333333333333333333",
+        "reason_code": "OK"
+      }
+    },
+    "b_long_legacy_confirm3": {
+      "family": "breakout-retest",
+      "builder": "family_b_confirm3_window",
+      "note": "legacy value, not the baseline to be ratified",
+      "params": {
+        "zone_tolerance_atr": "0.5",
+        "entry_buffer_atr": "0.1",
+        "sl_buffer_atr": "0.2",
+        "minimum_rr": "2",
+        "swing_lookback": "20",
+        "breakout_confirmation_bars": "3",
+        "retest_window_bars": "5",
+        "retest_depth_atr": "0.3",
+        "geometry_version": "1"
+      },
+      "expected": {
+        "direction": "LONG",
+        "setup_type": "BREAKOUT_RETEST_LONG",
+        "zone_upper": "102.00",
+        "zone_lower": "97.00",
+        "sr_far_edge": "100.00",
+        "entry_min": "101.80",
+        "entry_max": "102.20",
+        "entry_ref": "102.00",
+        "stop_loss": "99.60",
+        "tp1": "107.00",
+        "tp2": "112.00",
+        "tp1_rr": "2.083333333333333333333333333",
+        "reason_code": "OK"
+      }
+    },
     "b_long_legacy_contrast": {
       "family": "breakout-retest",
       "builder": "family_b_long_window",

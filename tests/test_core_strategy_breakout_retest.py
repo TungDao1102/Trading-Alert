@@ -17,15 +17,24 @@ in plan 04-04 task 1.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 from src.core.features import _atr_series, _swing_series
-from src.core.strategy import evaluate
-from src.core.types import AccountState, Candle, MarketSnapshot
+from src.core.planner import plan
+from src.core.strategy import (
+    _detect_breakout_retest_levels,
+    _detect_breakout_retest_setup,
+    evaluate,
+)
+from src.core.types import AccountState, Candle, MarketSnapshot, SetupResult
+from src.domain.enums import RejectionReason
 from src.domain.ids import make_signal_id
 from src.domain.registry import ParameterSet, load_parameter_set
+
+from tests import geometry_builders
 
 # --------------------------------------------------------------------------- #
 # Candle builders — deterministic, Decimal-only candles.
@@ -731,3 +740,269 @@ def test_breakout_retest_uses_zone_at_preceding_bar(
     assert candles_1h[i].close > zone_upper_ref, (
         f"breakout bar close {candles_1h[i].close} must be > zone_upper_ref {zone_upper_ref}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Plan 15-05: geometry_version 1 anchoring, with-regime gate, bounds, legacy unchanged.
+# Hand derivations: tests/fixtures/phase15/DERIVATIONS.md (Family B sections).
+# --------------------------------------------------------------------------- #
+
+_ACCOUNT = AccountState(equity=Decimal("10000.00"), risk_rate=Decimal("0.005"))
+
+
+def _b_set(*, geometry: bool = True, **overrides: object) -> ParameterSet:
+    """baseline-v5 breakout-retest with test-local keys (in memory only).
+
+    breakout_confirmation_bars is set to 1 explicitly (the proposed baseline of sheet B1, not
+    the inherited legacy value 3); `geometry=False` builds the legacy contrast set.
+    """
+    base = load_parameter_set("breakout-retest", "baseline-v5")
+    params = dict(base.params)
+    params["breakout_confirmation_bars"] = 1
+    if geometry:
+        params["geometry_version"] = 1
+    params.update(overrides)
+    return dataclasses.replace(base, params=params)
+
+
+def _eval(window: tuple[list[Candle], list[Candle]], parameter_set: ParameterSet) -> SetupResult:
+    setup, context = window
+    return evaluate(
+        snapshot=MarketSnapshot(
+            symbol="BTCUSDT",
+            setup_candles=setup,
+            context_candles=context,
+            source_timeframe="1h",
+        ),
+        account_state=_ACCOUNT,
+        strategy_version=parameter_set.strategy_version,
+        parameter_set=parameter_set,
+    )
+
+
+def test_stale_breakout_does_not_signal_under_geometry_version_1() -> None:
+    """F2: a breakout and its first retest 40 bars ago, nothing since, is no longer a signal."""
+    window = geometry_builders.family_b_stale_window()
+    anchored = _eval(window, _b_set())
+    assert anchored.is_no_trade
+    assert anchored.reason_code == RejectionReason.NO_TRADE_REGIME.value
+    assert anchored.regime == "BULLISH"
+    legacy = _eval(window, _b_set(geometry=False))
+    assert not legacy.is_no_trade, legacy.reason_code
+    assert legacy.signal is not None
+    assert legacy.signal.setup_type == "BREAKOUT_RETEST_LONG"
+
+
+def test_first_retest_must_be_the_evaluated_bar() -> None:
+    """A retest at n - 2 followed by another band touch at n - 1 is not the first retest."""
+    window = geometry_builders.family_b_not_first_retest_window()
+    result = _eval(window, _b_set())
+    assert result.is_no_trade
+    assert result.reason_code == RejectionReason.NO_TRADE_REGIME.value
+    legacy = _eval(window, _b_set(geometry=False))
+    assert not legacy.is_no_trade, legacy.reason_code
+
+
+def test_retest_outside_window_does_not_signal() -> None:
+    """The first retest comes six bars after the breakout bar, past retest_window_bars 5."""
+    window = geometry_builders.family_b_late_retest_window()
+    result = _eval(window, _b_set())
+    assert result.is_no_trade
+    assert result.reason_code == RejectionReason.NO_TRADE_REGIME.value
+
+
+def test_counter_regime_breakout_is_no_trade_regime_under_geometry_version_1() -> None:
+    """D-24: a LONG breakout-retest anchored at n - 1 under a BEARISH 4H regime is rejected."""
+    window = geometry_builders.family_b_window(bearish_context=True)
+    result = _eval(window, _b_set())
+    assert result.is_no_trade
+    assert result.reason_code == RejectionReason.NO_TRADE_REGIME.value
+    assert result.regime == "BEARISH"
+    legacy = _eval(window, _b_set(geometry=False))
+    assert not legacy.is_no_trade, legacy.reason_code
+    assert legacy.signal is not None
+    assert legacy.signal.direction == "LONG"
+
+
+def test_counter_regime_short_breakout_is_no_trade_regime_under_a_bullish_context() -> None:
+    window = geometry_builders.family_b_window(mirror=True, bearish_context=False)
+    result = _eval(window, _b_set())
+    assert result.is_no_trade
+    assert result.reason_code == RejectionReason.NO_TRADE_REGIME.value
+    assert result.regime == "BULLISH"
+
+
+def test_with_regime_direction_is_chosen_from_the_regime() -> None:
+    long_result = _eval(geometry_builders.family_b_long_window(), _b_set())
+    short_result = _eval(geometry_builders.family_b_short_window(), _b_set())
+    assert long_result.signal is not None and long_result.signal.direction == "LONG"
+    assert short_result.signal is not None and short_result.signal.direction == "SHORT"
+
+
+@pytest.mark.parametrize("confirmation_bars", [1, 2, 3, 5])
+def test_anchored_scan_never_reads_a_negative_reference_index(confirmation_bars: int) -> None:
+    """The lower bound max(confirm + 1, n - 1 - window) keeps ref_prev >= 0 for every n."""
+    parameter_set = _b_set(breakout_confirmation_bars=confirmation_bars)
+    setup = geometry_builders.family_b_long_setup()
+    for length in range(1, 60):
+        for direction in (None, "LONG", "SHORT"):
+            levels = _detect_breakout_retest_levels(
+                setup_candles=setup[:length], parameter_set=parameter_set, direction=direction
+            )
+            assert levels is None or length >= confirmation_bars + 20
+
+
+def _bars(rows: list[tuple[str, str, str, str]]) -> list[Candle]:
+    candles: list[Candle] = []
+    for index, (open_, high, low, close) in enumerate(rows):
+        open_time = _hour_open(index)
+        candles.append(
+            Candle(
+                symbol="BTCUSDT",
+                interval="1h",
+                open_time_utc=open_time,
+                close_time_utc=open_time + timedelta(hours=1) - timedelta(seconds=1),
+                open=Decimal(open_),
+                high=Decimal(high),
+                low=Decimal(low),
+                close=Decimal(close),
+                volume=Decimal("1"),
+            )
+        )
+    return candles
+
+
+_SMALL_ROWS = [
+    ("100", "101", "99", "100"),
+    ("100", "101", "99", "100"),
+    ("100", "103", "100", "103"),
+    ("103", "103", "100", "101.5"),
+    ("101.5", "103", "100", "101.5"),
+    ("101.5", "103", "100", "101.5"),
+    ("101.5", "103", "100", "101.5"),
+]
+
+
+def _small_set() -> ParameterSet:
+    """swing_lookback 1 and atr_period 1 make bar 0 a valid reference bar (ATR = true range)."""
+    return _b_set(swing_lookback=1, atr_period=1)
+
+
+def test_anchored_scan_reaches_the_smallest_breakout_bar_two() -> None:
+    """n = 8, window 5, confirm 1: the lowest scanned end bar is max(2, 2) = 2, ref_prev = 0.
+
+    Hand numbers: bar 0 has swing high 101, swing low 99 and ATR (true range) 2.00, so the edge
+    is 101 + 0.5 x 2.00 = 102.00 and the far edge 101 - 1.00 = 100.00; bar 2 closes 103; bars 3..6
+    have lows 100.00 (below the band 101.40..102.60) and bar 7 has low 102.00, the first retest.
+    End bars 6..3 have no breakout (bar 3 closes 101.5, at or below its edge 102.00).
+    """
+    setup = _bars([*_SMALL_ROWS, ("102.5", "103", "102", "102.5")])
+    assert len(setup) == 8
+    levels = _detect_breakout_retest_levels(
+        setup_candles=setup, parameter_set=_small_set(), direction="LONG"
+    )
+    assert levels is not None
+    assert levels.zone_upper == Decimal("102.00")
+    assert levels.zone_lower == Decimal("98.00")
+    assert levels.sr_far_edge == Decimal("100.00")
+
+
+def test_anchored_scan_does_not_reach_a_breakout_whose_retest_is_past_the_window() -> None:
+    """n = 9: the same breakout bar 2 would need its retest at bar 8 = i + 6, past the window."""
+    setup = _bars(
+        [
+            *_SMALL_ROWS,
+            ("101.5", "103", "100", "101.5"),
+            ("102.5", "103", "102", "102.5"),
+        ]
+    )
+    assert len(setup) == 9
+    assert (
+        _detect_breakout_retest_levels(
+            setup_candles=setup, parameter_set=_small_set(), direction="LONG"
+        )
+        is None
+    )
+
+
+def test_geometry_version_1_levels_without_direction_consider_both_sides() -> None:
+    long_setup, _ = geometry_builders.family_b_long_window()
+    short_setup, _ = geometry_builders.family_b_short_window()
+    parameter_set = _b_set()
+    any_long = _detect_breakout_retest_levels(setup_candles=long_setup, parameter_set=parameter_set)
+    any_short = _detect_breakout_retest_levels(
+        setup_candles=short_setup, parameter_set=parameter_set
+    )
+    assert any_long is not None and any_long.direction == "LONG"
+    assert any_short is not None and any_short.direction == "SHORT"
+    assert (
+        _detect_breakout_retest_levels(
+            setup_candles=long_setup, parameter_set=parameter_set, direction="SHORT"
+        )
+        is None
+    )
+
+
+# Signal ids and plan hashes recorded from the pre-change commit (ef8daf3) on the builders of
+# this file. The legacy detector and planner must keep producing them byte for byte (D-25).
+_LEGACY_PINS = {
+    ("baseline-v1", "long"): (
+        "bffcc6a24417850c9b9125a7e4ad7947ee91cf5ab19bad0a65a4c1c747d2ca90",
+        "8b7b24eedd950b6b8326df44e17a3ea88d54dc61bc6062f5f95103f3066bda9d",
+    ),
+    ("baseline-v1", "short"): (
+        "03549b85f45ad47da97f15522f895f8b34f64a8b044c3a04eee8bf735d87701a",
+        "328614ed936f5bf73a694222ddd9fb93aa9de374a34c5dbfa9feca3823c07a33",
+    ),
+    ("baseline-v5", "long"): (
+        "b316999bb116bbdd2a188df328e74d0900a7e1916334120cce38c7f60f49c80c",
+        "14127b2707d8ff858f6433f01570afdac8ef7e4cde569f97610c544526564d33",
+    ),
+    ("baseline-v5", "short"): (
+        "15dac458d784ec30b5c44a15d2ac21aa974f88574ae09d2622a70a15cfa3e809",
+        "afdb32c40feaa8fb864cb6327b1881f68a56bba212a3b625e29678b19387e4c7",
+    ),
+}
+
+
+@pytest.mark.parametrize(("version", "side"), sorted(_LEGACY_PINS))
+def test_legacy_unchanged_signal_id_and_plan_hash_match_the_pre_change_values(
+    version: str, side: str
+) -> None:
+    parameter_set = load_parameter_set("breakout-retest", version)
+    assert "geometry_version" not in parameter_set.params
+    if side == "long":
+        window = (_build_1h_candles_breakout_retest_long(), _build_4h_candles_bullish())
+    else:
+        window = (_build_1h_candles_breakout_retest_short(), _build_4h_candles_bearish())
+    result = _eval(window, parameter_set)
+    assert not result.is_no_trade, result.reason_code
+    assert result.signal is not None
+    signal_id, plan_hash = _LEGACY_PINS[(version, side)]
+    assert result.signal.signal_id == signal_id
+    planned = plan(
+        signal=result.signal,
+        setup_candles=window[0],
+        parameter_set=parameter_set,
+        account_state=_ACCOUNT,
+        created_at_utc=result.signal.source_candle_close_utc + timedelta(hours=1),
+    )
+    assert planned.trade_plan is not None
+    assert planned.trade_plan.plan_hash == plan_hash
+
+
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_legacy_unchanged_wrapper_agrees_with_the_levels_function(side: str) -> None:
+    parameter_set = load_parameter_set("breakout-retest", "baseline-v1")
+    candles = (
+        _build_1h_candles_breakout_retest_long()
+        if side == "long"
+        else _build_1h_candles_breakout_retest_short()
+    )
+    wrapper = _detect_breakout_retest_setup(setup_candles=candles, parameter_set=parameter_set)
+    levels = _detect_breakout_retest_levels(
+        setup_candles=candles, parameter_set=parameter_set, direction="SHORT"
+    )
+    assert wrapper is not None and levels is not None
+    assert (levels.direction, levels.setup_type, levels.zone_upper, levels.zone_lower) == wrapper
+    assert levels.sr_far_edge is None  # legacy sets never carry the far edge; direction ignored

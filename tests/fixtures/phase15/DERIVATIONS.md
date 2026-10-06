@@ -341,3 +341,107 @@ legacy `edge - sl_buffer_atr x ATR`, unchanged), TP2 = 103 + 2 x 6 = 115.
 python -c "from decimal import Decimal as D; edge=D('102')+D('1'); zl=D('98')-D('1'); h=edge-zl; eb=D('0.1')*D('2'); sb=D('0.2')*D('2'); print(edge, zl, h, edge+h, edge-eb, edge+eb, edge-sb, edge+2*h)"
 103 97 6 109 102.8 103.2 102.6 115
 ```
+
+## b_short_worked
+
+The exact mirror p -> 200 - p of `b_long_worked` (highs and lows swap, times unchanged) under a
+BEARISH 4h context (250 bars falling 1.00 per bar), so every bar still has range 2.00 and true
+range 2.00 and ATR = 2.00. Test-local `breakout_confirmation_bars = 1` (proposed baseline, sheet
+B1); all other test-local values as in the common inputs.
+
+Breakout end bar i = 246 (close 97 < the edge), ref_prev = 244. Swing low over bars 225..244 =
+200 - 101 = 99, swing high = 200 - 98 = 102 (bar 245, high 100 after mirroring, is outside the
+window). Edge (SHORT, `zone_lower`) = 99 - 0.5 x 2.00 = 98.00, `zone_upper` = 102 + 1.00 = 103.00,
+`sr_far_edge` = swing_low_ref + 0.5 x ATR_ref = 99 + 1.00 = 100.00. Retest band [97.40, 98.60]
+(0.3 x 2.00 = 0.60): bars 247 and 248 have high 97 (outside), bar 249 has high 98 (inside), so the
+retest is the evaluated bar. The stop is the far edge plus the buffer: 100.00 + 0.40 = 100.40,
+strictly above entry_max. TP1 is the measured move down: edge - (zone_upper - zone_lower).
+
+```
+python -c "from decimal import Decimal as D; sl=D('200')-D('101'); sh=D('200')-D('98'); atr=D('2'); t=D('0.5'); edge=sl-t*atr; zu=sh+t*atr; far=sl+t*atr; h=zu-edge; print(sl, sh, edge, zu, far, h, edge-h)"
+99 102 98.0 103.0 100.0 5.0 93.0
+python -c "from decimal import Decimal as D; edge=D('98'); eb=D('0.1')*D('2'); sb=D('0.2')*D('2'); far=D('100'); print(edge-eb, edge+eb, (edge-eb+edge+eb)/2, far+sb)"
+97.8 98.2 98.0 100.4
+python -c "from decimal import Decimal as D; ref=D('98'); stop=D('100.4'); tp1=D('93'); print(stop-ref, ref-tp1, (ref-tp1)/(stop-ref), ref-2*(ref-tp1))"
+2.4 5 2.083333333333333333333333333 88
+```
+
+| Field | Value |
+|-------|-------|
+| swing_low_ref / swing_high_ref / ATR_ref | 99 / 102 / 2.00 |
+| zone_lower = edge | 98.00 |
+| zone_upper | 103.00 |
+| sr_far_edge | 100.00 |
+| entry_min / entry_max | 97.80 / 98.20 |
+| entry_ref | 98.00 |
+| stop_loss | 100.40, strictly above entry_max |
+| TP1 / TP2 | 93.00 / 88.00 |
+| risk / reward | 2.40 / 5.00 |
+| RR to TP1 | 2.083333333333333333333333333 |
+
+## b_long_legacy_confirm3
+
+legacy value, not the baseline to be ratified. This case uses the legacy implementation value
+`breakout_confirmation_bars = 3` (baseline-v5 carries it; it matches no sheet row, B4 is two
+consecutive closes) test-locally, with every other test-local value as in `b_long_worked`. The
+edge, zone, `sr_far_edge` and stop formulas contain no `breakout_confirmation_bars`; the value
+only selects the reference bar and how many closes must clear the edge.
+
+Window (`family_b_confirm3_window`, first_breakout 245, plateau 3): bars 0..243 alternate close
+99 / 100 with bar 243 at 100, bar 244 closes 101 (high 102), bar 245 is the breakout-run bar (open
+101, low 101, high 103, close 103), bars 246, 247 and 248 close 104 (low 103, high 105), the
+evaluated bar 249 closes 103 (low 102). True range is 2.00 everywhere, ATR = 2.00.
+
+Breakout end bar i = 247: the three bars 245, 246, 247 close 103, 104, 104, all above the edge. The
+reference bar is ref_prev = i - 3 - 1 = 243 (not 244: bar 244, high 102, is outside the window
+224..243, so swing_high_ref = 101; it would be 102 and the edge 103.00 if the reference were 244).
+Edge = 101 + 1.00 = 102.00, swing_low_ref = 98, zone_lower = 97.00, `sr_far_edge` = 101 - 1.00 =
+100.00. Band [101.40, 102.60]: bar 248 has low 103 (outside), bar 249 low 102 (inside), so the
+first retest is the evaluated bar. i = 248 is scanned first (ref_prev 244, swing high 102, edge
+103.00, closes of bars 246..248 are 104, above it), but its retest band is [102.40, 103.60] and bar
+249 has low 102, outside it, so it does not match. The plan numbers are those of `b_long_worked`.
+
+```
+python -c "from decimal import Decimal as D; sh=D('100')+D('1'); sl=D('99')-D('1'); atr=D('2'); t=D('0.5'); edge=sh+t*atr; zl=sl-t*atr; sr=sh-t*atr; print(edge, zl, sr, edge+(edge-zl))"
+102.0 97.0 100.0 107.0
+python -c "from decimal import Decimal as D; print(D('102')+D('0.5')*D('2'), D('0.3')*D('2'))"
+103.0 0.6
+```
+
+With only one close above the edge (`family_b_confirm3_one_close_window`: bars 244, 245, 246 close
+101, 101, 102, bar 247 closes 104, bar 248 closes 104, bar 249 closes 103) the same set gives no
+signal: for i = 247 (edge 102.00) bar 246 closes 102, not above it; for i = 248 (ref_prev 244,
+swing high 102, edge 103.00) bar 246 closes 102, not above it; lower i have closes at or below 102.
+
+## Family B anchoring windows
+
+All use the `b_long_worked` parameters (breakout_confirmation_bars 1, tolerance 0.5, window 5,
+depth 0.3) with geometry_version 1, and the b_long_worked bar vocabulary (breakout bar custom with
+close 103; plateau bars close 104; retest bar close 103 with low 102; every true range 2.00).
+
+Stale breakout (`family_b_stale_window`): first_breakout 206, plateau 2, retest bar 209, then 40
+bars (210..249) closing 104. The v1 scan covers i = 248 down to 244 only. For each of them the
+swing window contains plateau highs 105, so the edge is at least 106.00 and no close of 104 clears
+it. No signal under geometry_version 1 (NO_TRADE_REGIME). The legacy scan from n - 1 finds i =
+207 (ref_prev 205, swing high 102, edge 103.00, close 104 above it) with the retest bar 208 (low 103
+in [102.40, 103.60]), so the legacy set still signals.
+
+Not the first retest (`family_b_not_first_retest_window`): first_breakout 246, plateau 1, retest
+bar 248 (close 103, low 102), tail bar 249 closes 103 (low 102, inside the band again). For i =
+246 the first retest is bar 248, not 249. i = 247 (edge 103.00, close 104 above it) has the band
+[102.40, 103.60] and lows 102 at 248 and 249 are outside it. i = 248 closes at 103, below its edge
+104. No signal.
+
+Retest outside the window (`family_b_late_retest_window`): first_breakout 246, plateau 5 (bars
+247..251 close 104), retest bar 252 (n = 253, n - 1 = 252). The scan covers i = 251 down to
+max(2, 252 - 5) = 247, so i = 246 (the breakout whose first retest is 252, six bars after it, past
+the five-bar window) is not scanned. i = 247 has edge 103.00 and the band [102.40, 103.60] holds
+the lows 103 of bars 248..251, so its first retest is bar 248, not 252. i = 248 and above have
+swing highs of 103 or 105 and edges of 104.00 or more, which a close of 104 does not clear. No
+signal.
+
+Counter-regime: the `b_long_worked` setup with a BEARISH 4h context (250 bars falling 1.00 per
+bar). Under geometry_version 1 the scan is restricted to SHORT and no close is below any edge
+(closes are 99..104 against SHORT edges of 97 or below), so NO_TRADE_REGIME with regime BEARISH.
+The legacy set ignores the regime for Family B and signals LONG (edge 103.00 at i = 247, as in
+`b_long_legacy_contrast`).
