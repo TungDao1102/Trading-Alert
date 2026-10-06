@@ -149,6 +149,22 @@ def test_census_window_counts_the_worked_long_setup_and_plan() -> None:
     assert counts.by_direction["LONG"]["plans"] == 1
 
 
+def test_census_window_runs_on_a_set_without_risk_rate() -> None:
+    """The v6 sets omit risk_rate (no src/ module reads it; the account risk rate is the
+    sizing source, WR-03), so the census falls back to the documented 0.005 account rate."""
+    setup, context = geometry_builders.family_a_long_window()
+    with_rate = _case_set("a_long_worked")
+    assert "risk_rate" in with_rate.params
+    without = dataclasses.replace(
+        with_rate, params={k: v for k, v in with_rate.params.items() if k != "risk_rate"}
+    )
+    kwargs = {"setup_bars": setup, "context_bars": context, "indices": _last_index(setup)}
+    expected = census.census_window(parameter_set=with_rate, equity=EQUITY, **kwargs)
+    counts = census.census_window(parameter_set=without, equity=EQUITY, **kwargs)
+    assert counts == expected
+    assert counts.plans == 1
+
+
 def test_census_window_counts_strategy_no_trade_reasons() -> None:
     setup, context = geometry_builders.family_a_long_window()
     counts = census.census_window(

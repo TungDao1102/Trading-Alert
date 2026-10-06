@@ -82,6 +82,10 @@ EXIT_USAGE = 2
 EXIT_FAILURE = 3
 
 _SOURCE_TIMEFRAME = "1h"
+# Account risk rate used when a set carries no `risk_rate` key (the v6 sets omit it: no src/
+# module reads it, the account risk rate is the sizing source, WR-03). The value is the
+# documented per-trade rate of docs/trading/RISK_MANAGEMENT.md section 1, not a tuned input.
+ACCOUNT_RISK_RATE = Decimal("0.005")
 _NEUTRAL = Decimal("0.00000001")
 _GUARD_REASONS = frozenset(
     {
@@ -242,7 +246,9 @@ def census_window(
     cost_rates = cost_rates_from_model(build_cost_model(cost_slice(params)))
     min_stop_distance_rate, max_cost_to_risk = guard_rates_from_params(params)
     min_utilization = Decimal(str(params["minimum_risk_utilization_after_rounding"]))
-    account = AccountState(equity=equity, risk_rate=Decimal(str(params["risk_rate"])))
+    account = AccountState(
+        equity=equity, risk_rate=Decimal(str(params.get("risk_rate", ACCOUNT_RISK_RATE)))
+    )
     setup_closes = [bar.close_time_utc for bar in setup_bars]
     context_closes = [bar.close_time_utc for bar in context_bars]
     counts = CensusCounts()
