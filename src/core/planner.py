@@ -408,6 +408,13 @@ def plan(
     `compute_features` is the validity gate, not the geometry source.
     TP1 is structure-derived and `minimum_rr` is purely an acceptance
     threshold (CR-03), so the RR gate below can actually fire.
+
+    Structural invariants apply to EVERY parameter set, legacy or geometry_version 1, and all
+    three families (D-06/D-07/D-08/F6): after quantization and before the RR gate (D-26) the
+    plan goes through `_geometry_rejection` exactly once, so no READY plan has its stop inside
+    the entry zone (STOP_TOO_TIGHT), a signal bar already through the stop (INVALIDATED) or a
+    TP1 on the loss side (RR_TOO_LOW). A legacy Family A set therefore still emits its signal
+    but never a plan; a legacy B/C plan that satisfies the invariants keeps its plan_hash.
     """
     # Signal-vs-candles correspondence (CR-08/WR-14) — before touching
     # setup_candles[0], so an empty stream returns NO_TRADE (CR-02).
@@ -578,23 +585,24 @@ def plan(
     # Per 04-03 checkpoint:decision option A: entry_ref = zone mid for LIMIT_ZONE.
     entry_ref = _div(_add(entry_min, entry_max), _q("2"))
 
-    # D-06/D-07/D-08/F6, fixed order (D-26): structural invariants before the RR gate.
-    if geometry_version(parameter_set) is not None:
-        min_stop_raw = parameter_set.params.get("min_stop_atr")
-        rejection = _geometry_rejection(
-            direction=signal.direction,
-            entry_min=entry_min,
-            entry_max=entry_max,
-            entry_ref=entry_ref,
-            stop_loss=stop_loss,
-            take_profit_1=take_profit_1,
-            atr=atr,
-            signal_low=setup_candles[-1].low,
-            signal_high=setup_candles[-1].high,
-            min_stop_atr=None if min_stop_raw is None else Decimal(str(min_stop_raw)),
-        )
-        if rejection is not None:
-            return PlanResult(is_no_trade=True, trade_plan=None, reason_code=rejection)
+    # D-06/D-07/D-08/F6, fixed order (D-26): structural invariants before the RR gate, for every
+    # parameter set (legacy and geometry_version alike). `min_stop_atr` is optional: legacy sets
+    # carry no D-08 floor.
+    min_stop_raw = parameter_set.params.get("min_stop_atr")
+    rejection = _geometry_rejection(
+        direction=signal.direction,
+        entry_min=entry_min,
+        entry_max=entry_max,
+        entry_ref=entry_ref,
+        stop_loss=stop_loss,
+        take_profit_1=take_profit_1,
+        atr=atr,
+        signal_low=setup_candles[-1].low,
+        signal_high=setup_candles[-1].high,
+        min_stop_atr=None if min_stop_raw is None else Decimal(str(min_stop_raw)),
+    )
+    if rejection is not None:
+        return PlanResult(is_no_trade=True, trade_plan=None, reason_code=rejection)
 
     # Risk = |entry_ref - stop_loss|; non-positive risk is NO_TRADE (CR-02).
     risk = abs(_sub(entry_ref, stop_loss))

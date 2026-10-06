@@ -147,12 +147,17 @@ def test_a_long_worked_plan_has_stop_beyond_the_whole_entry_zone() -> None:
     assert trade_plan.stop_loss_price == Decimal("97.40")
 
 
-def test_a_long_legacy_contrast_keeps_the_stop_inside_the_zone() -> None:
-    _result, planned, expected = _run("a_long_legacy_contrast")
-    _assert_plan_matches(planned, expected)
-    trade_plan = planned.trade_plan
-    assert trade_plan is not None
-    assert trade_plan.stop_loss_price > trade_plan.entry_min_price
+def test_a_long_legacy_contrast_stop_inside_the_zone_is_now_stop_too_tight() -> None:
+    """Plan 15-13: the legacy contrast still signals but its plan is refused (D-06).
+
+    The sidecar numbers document why: the legacy stop 97.60 lies above entry_min 96.80.
+    """
+    result, planned, expected = _run("a_long_legacy_contrast")
+    assert result.signal is not None
+    assert Decimal(expected["stop_loss"]) > Decimal(expected["entry_min"])
+    assert planned.is_no_trade
+    assert planned.trade_plan is None
+    assert planned.reason_code == _STOP_TOO_TIGHT
 
 
 def test_geometry_version_changes_the_signal_identity() -> None:
@@ -374,6 +379,24 @@ def _is_geometry_rejection_call(node: ast.AST) -> bool:
     )
 
 
+def _enclosing_ifs(root: ast.AST, target: ast.AST) -> list[ast.If]:
+    """Every `if` statement of `root` whose body or else-branch contains `target`."""
+    return [
+        node
+        for node in ast.walk(root)
+        if isinstance(node, ast.If) and any(target is inner for inner in ast.walk(node))
+    ]
+
+
+def _mentions_geometry_version(node: ast.AST) -> bool:
+    for inner in ast.walk(node):
+        if isinstance(inner, ast.Name) and inner.id == "geometry_version":
+            return True
+        if isinstance(inner, ast.Constant) and inner.value == "geometry_version":
+            return True
+    return False
+
+
 def test_plan_holds_exactly_one_geometry_rejection_call() -> None:
     """D-06: the invariants live in one function with one call site, inside plan()."""
     tree = ast.parse(Path(planner_module.__file__ or "").read_text(encoding="utf-8"))
@@ -387,11 +410,185 @@ def test_plan_holds_exactly_one_geometry_rejection_call() -> None:
     assert calls[0] is inside_plan[0]
 
 
-def test_legacy_set_is_not_subject_to_the_validator() -> None:
-    """No geometry_version: the legacy stop inside the zone still plans (until plan 15-13)."""
-    _result, planned, expected = _run("a_long_legacy_contrast")
-    assert planned.trade_plan is not None
-    assert planned.trade_plan.stop_loss_price == Decimal(expected["stop_loss"])
+def test_geometry_rejection_call_is_not_gated_by_geometry_version() -> None:
+    """T-15-22: no enclosing `if` of the single call tests geometry_version (D-06 is universal)."""
+    tree = ast.parse(Path(planner_module.__file__ or "").read_text(encoding="utf-8"))
+    plan_def = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "plan"
+    )
+    call = next(node for node in ast.walk(plan_def) if _is_geometry_rejection_call(node))
+    gating = [
+        node for node in _enclosing_ifs(plan_def, call) if _mentions_geometry_version(node.test)
+    ]
+    assert gating == []
+    # No plan()-level early return keyed on geometry_version before the call either: the call
+    # is reached on every path that has a quantized zone, legacy or not.
+    assert not any(
+        isinstance(node, ast.If)
+        and _mentions_geometry_version(node.test)
+        and node.lineno < call.lineno
+        and any(isinstance(inner, ast.Return) for inner in ast.walk(node))
+        for node in ast.walk(plan_def)
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Plan 15-13: the validator is universal. Legacy parameter sets (no geometry_version) are
+# subject to D-06, D-07 and F6 as well (D-06: a plan violating the invariant is a bug).
+# Plan hashes below were captured from the pre-change planner (old geometry_version gate).
+# --------------------------------------------------------------------------- #
+
+_LEGACY_B_PASSING_HASH = "4c998fb73d10cb9d24d675da6440964a7cb0fef337d26017bc3e96db3c1ea595"
+_LEGACY_C_PASSING_HASH = "4b849e874dba87c6a593c01e8291ff71bad2185312c0e8df8db219875880da28"
+_LEGACY_C_LOW_97_7_HASH = "523151f79fa89a10c921d3e2e3a4069f65cadfcee6204f9a51b2665c7e51ebd5"
+
+
+def _legacy_b_window(*, low: str) -> tuple[list[Candle], list[Candle]]:
+    """The b_long_legacy_contrast window with the evaluated bar's low replaced (high 104)."""
+    setup, context = geometry_builders.family_b_long_window()
+    bar = geometry_builders.with_evaluated_bar(
+        setup, high=Decimal("104"), low=Decimal(low), close=Decimal("103")
+    )
+    return bar, context
+
+
+def _legacy_c_set(**overrides: str) -> ParameterSet:
+    return _case_set("c_long_legacy_contrast", **overrides)
+
+
+def _legacy_c_window(*, low: str | None = None) -> tuple[list[Candle], list[Candle]]:
+    """The c_long_legacy_contrast window (flat 4h); `low` replaces the evaluated bar's low."""
+    setup, context = geometry_builders.range_mr_long_flat_context_window()
+    if low is None:
+        return setup, context
+    return (
+        geometry_builders.with_evaluated_bar(
+            setup, high=Decimal("100"), low=Decimal(low), close=Decimal("98")
+        ),
+        context,
+    )
+
+
+def test_legacy_family_a_stop_too_tight_end_to_end() -> None:
+    """A4/D-06: a baseline-v5 style Family A set still emits its legacy signal, never a plan.
+
+    The legacy stop is swing_low - 0.2 x ATR = 97.60, inside the entry zone 96.80..99.20.
+    """
+    case = _load_cases()["a_long_legacy_contrast"]
+    assert "geometry_version" not in case["params"]
+    result, planned = _evaluate_and_plan(
+        geometry_builders.family_a_long_window(), _parameter_set(case)
+    )
+    assert not result.is_no_trade, result.reason_code
+    assert result.signal is not None and result.signal.direction == "LONG"
+    assert planned is not None
+    assert planned.is_no_trade
+    assert planned.trade_plan is None
+    assert planned.reason_code == _STOP_TOO_TIGHT
+
+
+def test_legacy_family_a_registry_baseline_v5_never_plans() -> None:
+    """The registered baseline-v5 itself: whenever it emits a signal, plan() refuses it."""
+    parameter_set = load_parameter_set("trend-pullback", "baseline-v5")
+    assert "geometry_version" not in parameter_set.params
+    for window in (
+        geometry_builders.family_a_long_window(),
+        geometry_builders.family_a_short_window(),
+    ):
+        result, planned = _evaluate_and_plan(window, parameter_set)
+        if planned is not None:
+            assert result.signal is not None
+            assert planned.trade_plan is None
+            assert planned.reason_code == _STOP_TOO_TIGHT
+
+
+def test_legacy_b_invalidated_when_the_signal_bar_is_through_the_stop() -> None:
+    """D-07 on a legacy B plan: bar low 102.00 <= the legacy stop 102.60 (the sidecar contrast)."""
+    case = _load_cases()["b_long_legacy_contrast"]
+    assert "geometry_version" not in case["params"]
+    window = geometry_builders.family_b_long_window()
+    result, planned = _evaluate_and_plan(window, _parameter_set(case))
+    assert not result.is_no_trade, result.reason_code
+    assert result.signal is not None and result.signal.direction == "LONG"
+    assert planned is not None
+    assert planned.is_no_trade and planned.trade_plan is None
+    assert planned.reason_code == _INVALIDATED
+    assert window[0][-1].low == Decimal("102")
+
+
+def test_legacy_b_touching_the_stop_is_invalidated_and_above_it_plans() -> None:
+    """Touching counts (`low <= stop`): at low 102.50 the stop is 102.607, above the bar low."""
+    parameter_set = _case_set("b_long_legacy_contrast")
+    _r, through = _evaluate_and_plan(_legacy_b_window(low="102.5"), parameter_set)
+    assert through is not None and through.reason_code == _INVALIDATED
+    _r, above = _evaluate_and_plan(_legacy_b_window(low="102.7"), parameter_set)
+    assert above is not None and not above.is_no_trade, above.reason_code
+
+
+def test_legacy_c_invalidated_when_the_signal_bar_is_through_the_stop() -> None:
+    """D-07 on a legacy C plan (flat 4h): crash bar low 95.00 <= stop 97.557 (zone 98 - 0.2 ATR)."""
+    parameter_set = _legacy_c_set(touch_tolerance_atr="2.0")
+    assert "geometry_version" not in parameter_set.params
+    result, planned = _evaluate_and_plan(_legacy_c_window(low="95"), parameter_set)
+    assert not result.is_no_trade, result.reason_code
+    assert result.signal is not None and result.signal.direction == "LONG"
+    assert planned is not None
+    assert planned.is_no_trade and planned.trade_plan is None
+    assert planned.reason_code == _INVALIDATED
+
+
+def test_legacy_c_above_the_stop_still_plans() -> None:
+    parameter_set = _legacy_c_set(touch_tolerance_atr="2.0")
+    _r, above = _evaluate_and_plan(_legacy_c_window(low="97.7"), parameter_set)
+    assert above is not None and not above.is_no_trade, above.reason_code
+    assert above.trade_plan is not None
+    assert above.trade_plan.stop_loss_price < above.trade_plan.entry_min_price
+
+
+def test_legacy_plan_hash_unchanged_for_plans_that_satisfy_the_invariants() -> None:
+    """D-07: a legacy B/C plan that passes keeps its exact plan_hash (pre-change literals)."""
+    _r, b_plan = _evaluate_and_plan(
+        _legacy_b_window(low="102.7"), _case_set("b_long_legacy_contrast")
+    )
+    assert b_plan is not None and b_plan.trade_plan is not None
+    assert b_plan.trade_plan.plan_hash == _LEGACY_B_PASSING_HASH
+    _r, c_plan = _evaluate_and_plan(_legacy_c_window(), _legacy_c_set())
+    assert c_plan is not None and c_plan.trade_plan is not None
+    assert c_plan.trade_plan.plan_hash == _LEGACY_C_PASSING_HASH
+    _r, c_plan_2 = _evaluate_and_plan(
+        _legacy_c_window(low="97.7"), _legacy_c_set(touch_tolerance_atr="2.0")
+    )
+    assert c_plan_2 is not None and c_plan_2.trade_plan is not None
+    assert c_plan_2.trade_plan.plan_hash == _LEGACY_C_LOW_97_7_HASH
+
+
+@pytest.mark.parametrize("family", ["b", "c"])
+def test_legacy_tp1_on_the_loss_side_is_rr_too_low_through_plan(
+    family: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F6 on legacy B/C: plan() routes the legacy plan through the validator unconditionally.
+
+    The legacy geometry cannot produce a loss-side TP1 on its own windows, so the spy feeds the
+    real validator a loss-side TP1 and counts the call: it must happen exactly once.
+    """
+    real = planner_module._geometry_rejection
+    seen: list[dict[str, Any]] = []
+
+    def spy(**kwargs: Any) -> str | None:
+        seen.append(kwargs)
+        kwargs = {**kwargs, "take_profit_1": kwargs["entry_ref"] - Decimal("1")}
+        return real(**kwargs)
+
+    monkeypatch.setattr(planner_module, "_geometry_rejection", spy)
+    if family == "b":
+        window, parameter_set = _legacy_b_window(low="102.7"), _case_set("b_long_legacy_contrast")
+    else:
+        window, parameter_set = _legacy_c_window(), _legacy_c_set()
+    assert "geometry_version" not in parameter_set.params
+    _r, planned = _evaluate_and_plan(window, parameter_set)
+    assert len(seen) == 1
+    assert planned is not None and planned.trade_plan is None
+    assert planned.reason_code == _RR_TOO_LOW
 
 
 # --------------------------------------------------------------------------- #
@@ -547,13 +744,17 @@ def test_b_long_worked_levels_carry_the_far_edge_of_the_sr_zone() -> None:
     assert levels.sr_far_edge == Decimal(expected["sr_far_edge"])
 
 
-def test_b_long_legacy_contrast_keeps_the_code_stop_edge_minus_sl_buffer() -> None:
+def test_b_long_legacy_contrast_signal_bar_through_the_code_stop_is_now_invalidated() -> None:
+    """Plan 15-13: the legacy code stop edge - sl_buffer = 102.60 (103.00 - 0.2 x 2.00) lies at or
+    above the signal bar's low 102.00, so D-07 refuses the plan; the signal is unchanged."""
     result, planned, expected = _run("b_long_legacy_contrast")
     assert result.signal is not None
-    _assert_plan_matches(planned, expected)
-    trade_plan = planned.trade_plan
-    assert trade_plan is not None
-    assert trade_plan.stop_loss_price == Decimal("102.60")  # edge 103.00 - 0.2 x 2.00
+    assert Decimal(expected["stop_loss"]) == Decimal("102.60")
+    assert geometry_builders.family_b_long_window()[0][-1].low == Decimal("102")
+    assert Decimal(expected["stop_loss"]) >= Decimal("102")
+    assert planned.is_no_trade
+    assert planned.trade_plan is None
+    assert planned.reason_code == _INVALIDATED
     corrected, _plan, _ = _run("b_long_worked")
     assert corrected.signal is not None
     assert corrected.signal.signal_id != result.signal.signal_id
