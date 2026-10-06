@@ -632,6 +632,8 @@ Plans:
 3. New versioned parameter sets record a rationale for every value; no fixture seed values are used (F-909).
 4. A research re-run under protocol v2.0.0 is ready to start on the Phase-14 engine. The run itself is a research activity, not part of this phase.
 
+Readiness evidence: docs/research/GEOMETRY_AUDIT.md 'Re-run readiness (criterion 4)' and D054.
+
 **Audit refs**: F-301, F-113, F-909
 
 **Plans:** 14/15 plans executed

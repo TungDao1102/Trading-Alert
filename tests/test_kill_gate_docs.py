@@ -236,3 +236,39 @@ def test_d053_inventory_row_present() -> None:
         "REGRESSION_SNAPSHOTS.md",
     ):
         assert token in row, f"D053 row must mention {token}"
+
+
+def test_d054_geometry_row_present() -> None:
+    """D054 records Phase 15 once, directly after D053 (D048 style, T-15-26)."""
+    lines = _lines(DECISIONS)
+    d054_idx = [i for i, ln in enumerate(lines) if ln.startswith("| D054 |")]
+    d053_idx = [i for i, ln in enumerate(lines) if ln.startswith("| D053 |")]
+    assert len(d054_idx) == 1, "D054 must appear exactly once as a table-row start"
+    assert len(d053_idx) == 1
+    assert d054_idx[0] == d053_idx[0] + 1, "D054 must directly follow D053"
+    row = lines[d054_idx[0]]
+    for token in (
+        "baseline-v6",
+        "baseline-no-trade-v4",
+        "baseline-simple-trend-v4",
+        "geometry_version",
+        "STOP_TOO_TIGHT",
+        "INVALIDATED",
+        "no amendment",
+        "The observed guard-survival figures",
+        "not optimized",
+        "D-25",
+        "B1",
+        "Regeneration inventory",
+        "NOT MOVED",
+        "_plan_geometry_is_valid",
+        "far half of the entry zone",
+        "TEST_DATABASE_URL",
+        "2c4f1528b00f1b1e48c76040bbd6cc218a25eec21c521d8b68da86ee4811360f",
+        "289d47ac5a77fd67d0551e0cb004e29562755b9455e7f9161567e7957746174d",
+        "c9023e476e762fc56c993f3e920133d84a8d5700ec20805e9e85135148324100",
+        "98e541eec72b3771f73adaae6f039d2de2a2ef9bcb66baa4d3507d3fe32bac9c",
+        "27f4c18b92b44c28387299edb69be32977e3ab48004c1b0301fbbcc2e0d08c5f",
+    ):
+        assert token in row, f"D054 row must mention {token}"
+    assert "ratified only through the 15-08 checkpoint" in row

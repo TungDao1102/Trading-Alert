@@ -429,6 +429,12 @@ def test_real_table_reaches_d053() -> None:
     assert ids[50:53] == ["D051", "D052", "D053"]
 
 
+def test_real_table_reaches_d054() -> None:
+    ids = bk._DECISION_ROW.findall(_read(DECISIONS))
+    assert len(ids) >= 54
+    assert ids[50:54] == ["D051", "D052", "D053", "D054"]
+
+
 def test_real_table_reaches_d048() -> None:
     ids = bk._DECISION_ROW.findall(_read(DECISIONS))
     assert bk.MIN_LAST_DECISION == 48
