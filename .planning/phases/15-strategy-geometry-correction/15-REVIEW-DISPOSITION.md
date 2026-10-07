@@ -9,7 +9,7 @@ findings:
     title: "Registry accepts a range-mr geometry set whose `regime_filter_lookback` is below `pivot_right_bars + 1`; `evaluate()` then raises `ValueError`"
   - id: IN-01
     severity: info
-    disposition: open
+    disposition: fixed
     title: "The PLACEHOLDER/rationale gate has no production caller, and the paper loop bypasses it"
   - id: IN-02
     severity: info
@@ -31,7 +31,7 @@ findings:
     severity: info
     disposition: open
     title: "Minor maintainability items"
-open: 6
+open: 5
 total: 7
 recorded: 2026-10-06T00:00:00.000Z
 ---
@@ -41,7 +41,7 @@ recorded: 2026-10-06T00:00:00.000Z
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
 | WR-01 | warning | fixed | 15-REVIEW-FIX.md (commit e0593a6) |
-| IN-01 | info | open | - |
+| IN-01 | info | fixed | 15-17-SUMMARY.md (commits df7e9c8, a35558c) |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
 | IN-04 | info | open | - |
