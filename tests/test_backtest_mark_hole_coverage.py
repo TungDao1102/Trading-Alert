@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+import pytest
 from src.backtest.engine import simulate
 from src.backtest.lifecycle import PlanState, advance, finalize_at_data_end
 from src.backtest.report import build
@@ -471,3 +472,94 @@ def test_exactly_the_cap_is_listed_in_full_and_one_more_span_is_counted() -> Non
     assert over is not None
     assert over.count(NOTE_PREFIX) == LISTED_CAP
     assert "mark_price_1m_missing_1_further_spans_not_listed" in over
+
+
+# --------------------------------------------------------------------------- #
+# Review WR-02: boundary arithmetic and window cuts pinned by mutation-checked tests.
+# --------------------------------------------------------------------------- #
+
+
+def test_end_of_data_on_a_close_time_data_end_reports_the_unwalked_last_whole_minute() -> None:
+    # Data end 10:59:59.999 (the kline close convention), marks only to 10:58: minute 10:59 is a
+    # whole minute that completed by the data end and has no mark, so it is noted. Without the
+    # +1 ms in the last-whole-minute arithmetic this minute is lost.
+    missing = _closed_at_data_end(marks_end=at(10, 59), data_end=close_of(at(10, 59)))
+    assert missing.exit_kind == "END_OF_DATA"
+    assert missing.exit_time_utc == close_of(at(10, 58))
+    assert missing.coverage_note is not None
+    assert missing.coverage_note.startswith(prefix(at(10, 59), at(10, 59)))
+    assert missing.coverage_note.count(NOTE_PREFIX) == 1
+
+
+def test_end_of_data_on_a_close_time_data_end_adds_nothing_when_the_last_minute_is_covered() -> (
+    None
+):
+    covered = _closed_at_data_end(marks_end=at(10, 59), data_end=close_of(at(10, 58)))
+    assert covered.exit_kind == "END_OF_DATA"
+    assert covered.coverage_note is None
+    # Marks to 10:59 and a data end 10:59:59.998: minute 10:59 has not completed, never noted.
+    early = datetime(2026, 1, 5, 10, 59, 59, 998000, tzinfo=UTC)
+    assert _closed_at_data_end(marks_end=at(11, 0), data_end=early).coverage_note is None
+    # Marks to 10:58 and a data end 10:59:59.998: 10:58 is the last completed minute and exists.
+    assert _closed_at_data_end(marks_end=at(10, 59), data_end=early).coverage_note is None
+
+
+def test_a_hole_ending_exactly_at_a_close_time_data_end_is_one_trailing_span() -> None:
+    closed = _closed_at_data_end(marks_end=at(10, 50), data_end=close_of(at(10, 59)))
+    assert closed.coverage_note is not None
+    assert closed.coverage_note.startswith(prefix(at(10, 50), at(10, 59)))
+    assert closed.coverage_note.count(NOTE_PREFIX) == 1
+
+
+@pytest.mark.parametrize(
+    "cut",
+    [
+        close_of(at(10, 54)),  # just before the hole
+        close_of(at(10, 55)),  # on its first minute
+        close_of(at(10, 59)),  # through the middle of the hole
+        close_of(at(11, 3)),  # inside its second half
+        close_of(at(11, 4)),  # on its last minute
+        close_of(at(11, 5)),  # just after it
+    ],
+)
+def test_a_hole_cut_through_the_middle_by_a_window_end_gets_the_same_single_note(
+    cut: datetime,
+) -> None:
+    holes = {at(10, m) for m in range(55, 60)} | {at(11, m) for m in range(0, 5)}
+    source = long_fill_source(mark_holes=holes)
+    end = close_of(at(12, 30))
+    one = _advance_bar_less(source, end)
+    first, _ = advance(
+        long_state(), source=source, start_exclusive=SIGNAL_CLOSE, end_inclusive=cut, bar=None
+    )
+    cut_run, _ = advance(first, source=source, start_exclusive=cut, end_inclusive=end, bar=None)
+    assert cut_run == one
+    assert one.coverage_note is not None
+    assert one.coverage_note.startswith(prefix(at(10, 55), at(11, 4)))
+    assert one.coverage_note.count(NOTE_PREFIX) == 1
+
+
+def test_a_fallback_then_a_trailing_hole_at_the_data_end_notes_only_the_trailing_minutes() -> None:
+    # Fallback for the hole 11:20-11:29 in bar 11 (marker moves to the bar end 11:59), marks then
+    # run to 12:29 only and the data ends at 13:00: the trailing note starts at 12:30, not at
+    # the fallback's hole.
+    source = long_fill_source(
+        mark_holes={at(11, m) for m in range(20, 30)}, end_exclusive=at(12, 30)
+    )
+    state, _ = walk_hours(long_state(), source, [flat_bar(10), QUIET_BAR_11])
+    assert state.fallback_applied is True
+    state, _ = advance(
+        state,
+        source=source,
+        start_exclusive=QUIET_BAR_11.close_time_utc,
+        end_inclusive=at(13, 0),
+        bar=None,
+    )
+    closed, _ = finalize_at_data_end(state, data_end_utc=at(13, 0), source=source)
+    assert closed.exit_kind == "END_OF_DATA"
+    assert closed.exit_time_utc == close_of(at(12, 29))
+    assert closed.fallback_applied is True
+    assert closed.coverage_note is not None
+    fallback_note, trailing_note = closed.coverage_note.split(" | ")
+    assert fallback_note.startswith(f"{NOTE_PREFIX}{at(11, 20).isoformat()}; resolved_at_strategy")
+    assert trailing_note.startswith(prefix(at(12, 30), at(12, 59)))
