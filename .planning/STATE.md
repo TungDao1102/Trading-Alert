@@ -5,10 +5,10 @@ current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: planning
 stopped_at: Phase 17 complete, ready to plan Phase 16
-last_updated: "2026-10-07T04:59:59.065Z"
+last_updated: "2026-10-07T10:06:35.640Z"
 last_activity: 2026-10-07
 last_activity_desc: Phase 17 complete, transitioned to Phase 16
-state_head: 8a09ac65d646e3480d41dd812ece9f49d09960ac
+state_head: 7148528c030c750cd0bf713b0d9c32923665eee9
 progress:
   total_phases: 29
   completed_phases: 17
@@ -490,6 +490,7 @@ Recent decisions affecting current work:
 | 260930-bvi | Import deep-audit report into .planning/audits and re-plan roadmap phases 11-26 (stay in v0.3) | 2026-09-30 | d190855 | [260930-bvi-import-deep-audit-report-and-re-plan-roa](./quick/260930-bvi-import-deep-audit-report-and-re-plan-roa/) |
 | 260930-cgi | Add D040 safe release path (SHADOW-DEMO-CANARY-LIVE) and D041 two-step Telegram confirm; insert Phase 25 demo test campaign | 2026-09-30 | 7a05679 | [260930-cgi-add-safe-release-path-and-two-step-teleg](./quick/260930-cgi-add-safe-release-path-and-two-step-teleg/) |
 | 260930-d0b | Record D042 single-VPS deployment; pull VPS hardening + collector deployment into Phase 13 | 2026-09-30 | 2660fb6 | [260930-d0b-record-single-vps-deployment-decision-d0](./quick/260930-d0b-record-single-vps-deployment-decision-d0/) |
+| 261007-mkw | WR-05 (D062): trading user joins sudo with a password, lock-out guard, no passwordless rule | 2026-10-07 | 7148528 | [261007-mkw-wr-05-d062-trading-user-joins-sudo-with-](./quick/261007-mkw-wr-05-d062-trading-user-joins-sudo-with-/) |
 
 ### Roadmap Evolution
 
