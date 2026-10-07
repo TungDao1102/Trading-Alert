@@ -112,6 +112,18 @@ Every Binance fact that Phase 17 code or documentation relies on (the clientOrde
 | https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Query-Order (Wayback snapshot 2026-06-17, https://web.archive.org/web/20260617202104/https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Query-Order) | `GET /fapi/v1/order` (weight 1) does not find an order when its status is CANCELED or EXPIRED and it has no filled trade and created time plus 3 days is before the current time, or when its create time plus 90 days is before the current time. Restart recovery therefore treats "not found" as a definitive absence only for an intent younger than 3 days (EXECUTION_SPEC section 10); the retention of the algo-order query is not documented (ASSUMED) | 2026-10-01 | Snapshot text extracted by the executor (HTTP 200, 41169 bytes); the same two conditions are in the SDK docstring of `query_order` (SDK 17.4.0). MEDIUM confidence (archived copy) |
 | Inference from the two rows above, not a quoted fact | Because a client id is unique only among OPEN orders, a FILLED or CANCELED order no longer holds its id, so Binance would accept a second order with the same id after the first was filled or canceled, and the "-4116 rejects a replayed entry" premise of Phase 08 D-04 holds only while the first entry is still open (audit F-126, F-951). The test double `tests/support/fake_binance_exchange.py` models exactly this (a duplicate is rejected only while the id is open) and was NOT validated against a live Binance account | 2026-10-01 | Derived by the executor from the documented rule; not observed on the exchange. MEDIUM confidence. Confirm on the demo environment before Phase 19 |
 
+### Live re-read of the Phase 17 facts (2026-10-07)
+
+The three developers.binance.com pages above were fetched live on 2026-10-07 with WebFetch (no WAF challenge this time). WebFetch returns a model-written summary of the page, not raw text, so the quoted sentences are the tool's quotation and confidence stays MEDIUM-HIGH until the raw page is read in a browser. The facts did not change.
+
+| Page | Result on 2026-10-07 |
+| --- | --- |
+| .../trade/rest-api/New-Order | `newClientOrderId`: "A unique id among open orders. Automatically generated if not sent." Pattern `^[\.A-Z\:/a-z0-9_-]{1,36}$`. Matches the 2026-10-01 row. |
+| .../trade/rest-api/New-Algo-Order | `clientAlgoId`: same sentence and pattern. The page does not say whether a duplicate against closed orders is checked. Matches the snapshot row. |
+| .../trade/rest-api/Query-Order | Not found when status is CANCELED or EXPIRED, there is no filled trade and create time + 3 days < now, or when create time + 90 days < now. Same rule appears on All Orders and Query Algo Order. This also covers the Query Algo Order retention that the 2026-10-01 row marked ASSUMED (one summary, re-check in a browser). |
+
+Still NOT verified live: the duplicate-id error code -4116 for algo orders, and the inference that a replayed id is accepted once the first order is closed. Both need the demo environment (Phase 18 probe) before Phase 19.
+
 
 ## Facts verified for Phase 14 (2026-10-05)
 
