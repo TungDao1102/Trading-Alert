@@ -545,6 +545,67 @@ def test_guard_helper_accepts_the_allowed_forms(tmp_path: Path) -> None:
     assert _scan_src_violations(tmp_path) == []
 
 
+FLAG_BLIND_SPOTS = {
+    "int-literal": "def f(g):\n    return g(allow_unrationalized=1)\n",
+    "string-literal": 'def f(g):\n    return g(allow_unrationalized="yes")\n',
+    "negated-false": "def f(g):\n    return g(allow_unrationalized=not False)\n",
+    "bound-name": "def f(g):\n    flag = True\n    return g(allow_unrationalized=flag)\n",
+    "own-name-outside-run_paper_tick": (
+        "def f(g, allow_unrationalized=False):\n"
+        "    return g(allow_unrationalized=allow_unrationalized)\n"
+    ),
+    "call-result": "def f(g, h):\n    return g(allow_unrationalized=h())\n",
+}
+
+ALLOWLIST_BLIND_SPOTS = {
+    "globals-subscript": 'globals()["PAPER_START_ALLOWLIST"] = (1,)\n',
+    "vars-subscript": 'vars()["PAPER_START_ALLOWLIST"] = (1,)\n',
+    "globals-update": "globals().update(PAPER_START_ALLOWLIST=(1,))\n",
+    "walrus": "if (PAPER_START_ALLOWLIST := (1,)):\n    pass\n",
+    "for-target": "for PAPER_START_ALLOWLIST in [(1,)]:\n    pass\n",
+    "with-target": 'with open("x") as PAPER_START_ALLOWLIST:\n    pass\n',
+    "def-rebind": "def PAPER_START_ALLOWLIST():\n    return (1,)\n",
+    "class-rebind": "class PAPER_START_ALLOWLIST:\n    pass\n",
+}
+
+
+@pytest.mark.parametrize("snippet", FLAG_BLIND_SPOTS.values(), ids=FLAG_BLIND_SPOTS.keys())
+def test_guard_helper_flags_every_flag_form_but_the_literal_false(
+    tmp_path: Path, snippet: str
+) -> None:
+    """Review WR-02: any truthy or non-literal value for the flag is reported in paper/loop.py."""
+    _write(tmp_path, "paper/freeze.py", "PAPER_START_ALLOWLIST: tuple[int, ...] = ()\n")
+    _write(tmp_path, "paper/loop.py", snippet)
+    found = _scan_src_violations(tmp_path)
+    assert any("paper/loop.py" in line and FLAG in line for line in found), found
+
+
+@pytest.mark.parametrize(
+    "snippet", ALLOWLIST_BLIND_SPOTS.values(), ids=ALLOWLIST_BLIND_SPOTS.keys()
+)
+def test_guard_helper_flags_every_allowlist_rebinding_form(tmp_path: Path, snippet: str) -> None:
+    """Review WR-02: every static way to rebind the allowlist in paper/freeze.py is reported."""
+    _write(
+        tmp_path,
+        "paper/freeze.py",
+        "PAPER_START_ALLOWLIST: tuple[int, ...] = ()\n" + snippet,
+    )
+    found = _scan_src_violations(tmp_path)
+    assert any("paper/freeze.py" in line and ALLOWLIST in line for line in found), found
+
+
+def test_guard_helper_accepts_run_paper_tick_forwarding_its_own_flag(tmp_path: Path) -> None:
+    _write(tmp_path, "paper/freeze.py", "PAPER_START_ALLOWLIST: tuple[int, ...] = ()\n")
+    _write(
+        tmp_path,
+        "paper/loop.py",
+        "def run_paper_tick(case, *, allow_unrationalized=False):\n"
+        "    pin(allow_unrationalized=allow_unrationalized)\n"
+        "    return pin(allow_unrationalized=False)\n",
+    )
+    assert _scan_src_violations(tmp_path) == []
+
+
 def test_no_module_under_src_enables_the_flag_or_touches_the_allowlist() -> None:
     assert _scan_src_violations(REPO_ROOT / "src") == []
 
