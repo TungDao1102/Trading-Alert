@@ -532,6 +532,72 @@ def test_the_flag_is_honoured_only_as_the_bool_true() -> None:
     assert pin_stream_epoch(**kwargs, allow_unrationalized=True).evidence_claim_open is True
 
 
+def _traversal_registry(tmp_path: Path) -> tuple[Path, str]:
+    """A tmp registry whose `trend-pullback` dir can be walked out of to a real set file."""
+    registry = tmp_path / "reg"
+    (registry / STRATEGY_ID).mkdir(parents=True)
+    write_rationalized_set(tmp_path / "outside")
+    return registry, f"../../outside/{STRATEGY_ID}/{SET_ID}"
+
+
+@pytest.mark.parametrize("allow", [False, True])
+def test_pin_stream_epoch_rejects_a_traversing_parameter_set_id(
+    tmp_path: Path, allow: bool
+) -> None:
+    """Review WR-04: the gate entry validates registry path segments like load_parameter_set."""
+    from src.domain.registry import UnregisteredParameterSet
+    from src.paper.freeze import pin_stream_epoch
+
+    registry, escaping_id = _traversal_registry(tmp_path)
+    assert (registry / STRATEGY_ID / f"{escaping_id}.toml").resolve().is_file()
+    with pytest.raises(UnregisteredParameterSet, match="invalid registry path segment"):
+        pin_stream_epoch(
+            strategy_id=STRATEGY_ID,
+            parameter_set_id=escaping_id,
+            opened_at_utc=datetime(2026, 10, 7, 10, 0, tzinfo=UTC),
+            registry_root=registry,
+            allow_unrationalized=allow,
+        )
+
+
+@pytest.mark.parametrize(
+    ("strategy_id", "parameter_set_id"),
+    [
+        ("../trend-pullback", "baseline-v3"),
+        ("trend-pullback", "../baseline-v3"),
+        ("trend-pullback", "a/b"),
+        ("trend-pullback", "a\\b"),
+        ("trend-pullback", ""),
+        ("", "baseline-v3"),
+        ("trend-pullback", "baseline-v3\x00"),
+        ("C:/abs", "baseline-v3"),
+    ],
+)
+def test_pin_stream_epoch_rejects_unsafe_registry_segments(
+    strategy_id: str, parameter_set_id: str
+) -> None:
+    from src.domain.registry import UnregisteredParameterSet
+    from src.paper.freeze import pin_stream_epoch
+
+    with pytest.raises(UnregisteredParameterSet, match="invalid registry path segment"):
+        pin_stream_epoch(
+            strategy_id=strategy_id,
+            parameter_set_id=parameter_set_id,
+            opened_at_utc=datetime(2026, 10, 7, 10, 0, tzinfo=UTC),
+        )
+
+
+def test_recompute_parameter_set_hash_rejects_a_traversing_id(tmp_path: Path) -> None:
+    from src.domain.registry import UnregisteredParameterSet
+    from src.paper.freeze import _recompute_parameter_set_hash
+
+    registry, escaping_id = _traversal_registry(tmp_path)
+    with pytest.raises(UnregisteredParameterSet, match="invalid registry path segment"):
+        _recompute_parameter_set_hash(
+            strategy_id=STRATEGY_ID, parameter_set_id=escaping_id, registry_root=registry
+        )
+
+
 def test_flag_is_keyword_only_and_strict_by_default() -> None:
     from src.paper.freeze import pin_stream_epoch
     from src.paper.loop import run_paper_tick
