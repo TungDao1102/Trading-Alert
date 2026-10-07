@@ -27,7 +27,7 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 15 — Strategy Geometry Correction
+**Current focus:** Phase 16 — Paper Runtime Composition + SHADOW Approval Mode (ready to plan)
 
 ## Current Position
 
@@ -476,7 +476,7 @@ Recent decisions affecting current work:
 
 - Paper forward observation (Phase 7) is wall-clock bound (3–6 months) — dominates calendar regardless of code velocity
 - OI history irrecoverable outside ~30-day window — OI collector must start in Phase 2 day one (the collector exists in `src/data`; the dated commitment of D059 item 4 is under Commitments with dates)
-- Algo-Order field details MEDIUM confidence — re-verify against current Binance docs before Phase 9 wiring
+- Algo-Order field details MEDIUM confidence — Phase 9 wiring is done; the `ALGO_UPDATE` field wording and the 24-hour WebSocket lifetime are re-confirmed before Phase 18 wiring (ROADMAP Phase 18 inherited items); the clientOrderId facts were re-read live on 2026-10-07 (docs/SOURCES.md, Phase 17 section)
 - evaluate_risk takes absolute amounts: the backtest ledger (`src/backtest/ledger.py`) and the paper loop (`src/paper/loop.py`) convert registry rates through `resolve_absolute_thresholds`; the live caller (live risk-input producer) is owned by Phase 24 success criterion 1
 - WS-connect gap (07-04 follow-up) blocks soak start; Phase 8 construction can proceed in parallel
 - 08-02 LIVE-TAP GATE: partly cleared. Real APPROVE and SKIP taps were observed (`09-DEMO-REHEARSAL-FINDINGS.md`, dry-run `taps`: SKIP and APPROVE passed); the unknown-chat tap is still NOT_REHEARSED and the live Telegram check is deferred to Phases 23/24 (08-VERIFICATION, accepted by the operator 2026-10-04; ROADMAP Phase 24 item G2-014)

@@ -24,18 +24,19 @@ from src.risk.portfolio import check_portfolio, derive_daily_state
 from src.risk.types import ConstraintSnapshot, OpenPosition, SizedResult
 
 # --------------------------------------------------------------------------- #
-# Headroom limit per Binance USDⓈ-M Futures: 200 conditional orders per symbol.
+# Headroom limit per Binance USDⓈ-M Futures: 200 open conditional orders across all
+# symbols (account-wide, not per symbol).
 #
 # Per D-03: headroom equality (count + legs == 200) is assumed reject to keep
 # operational headroom. The check is `count + legs >= 200` so the boundary
 # case (exactly 200) also rejects.
 #
-# KNOWN GAP (09-REVIEW WR-06): AGENTS.md requires this limit to be detected
-# dynamically (exchangeInfo `MAX_NUM_ALGO_ORDERS` per symbol), not
-# hard-coded. The adapter's `SymbolFilters` / `ConstraintSnapshot` do not
-# carry that filter yet; sourcing it needs a snapshot-schema change plus a
-# re-verification of the filter against current Binance docs. Until then
-# this literal is the conservative fallback.
+# Binance removed the `MAX_NUM_ALGO_ORDERS` exchangeInfo filter on 2025-12-29 and
+# documents the limit as account-wide (docs/trading/EXECUTION_SPEC.md section 12,
+# docs/SOURCES.md), so there is no filter to read and this literal is the documented
+# value. The open algo-order count the caller passes in must be account-wide
+# (no symbol filter); its live producer is owned by ROADMAP Phase 24. Re-verify the
+# limit against the current Binance change-log before wiring it.
 # --------------------------------------------------------------------------- #
 
 HEADROOM_LIMIT: int = 200

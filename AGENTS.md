@@ -48,7 +48,7 @@ A deterministic, reproducible Binance Futures trading research and semi-automate
 - Protective exits: `POST /fapi/v1/algoOrder` with `algoType=CONDITIONAL`; query via `GET /fapi/v1/algoOrder`; cancel via `DELETE /fapi/v1/algoOrder`. Weight 1 on order-count limits, 0 on IP weight — cheap to manage.
 - Conditional-order lifecycle moved to the Algo Service (Dec 2025 changelog): `CONDITIONAL_ORDER_TRIGGER_REJECT` event is GONE; rejection reasons now arrive inside `ALGO_UPDATE.o.rm`. The reconciler/orphan-sweeper must parse `ALGO_UPDATE`, not the old event.
 - User-data streams are the preferred realtime source for orders/fills/positions (Binance-canonical per D002); REST is fallback + reconciliation.
-- 200-conditional-order headroom and position-mode (one-way vs hedge → `positionSide` mandatory in hedge) detection must be dynamic via `exchangeInfo`/account queries, never hard-coded.
+- The 200-conditional-order limit is account-wide (Binance removed the `MAX_NUM_ALGO_ORDERS` exchangeInfo filter on 2025-12-29; docs/SOURCES.md): the open algo-order count must come from the account at runtime and the limit is re-verified against current docs, never hard-coded from memory. Position-mode (one-way vs hedge → `positionSide` mandatory in hedge) detection must be dynamic via account queries.
 
 ### Operational Persistence
 
