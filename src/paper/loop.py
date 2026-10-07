@@ -35,7 +35,7 @@ from src.core.types import (
 )
 from src.domain.registry import load_parameter_set
 from src.domain.trade_plan import TradePlan
-from src.paper.freeze import pin_stream_epoch
+from src.paper.freeze import pin_stream_epoch, require_bool_flag
 from src.risk.gating import evaluate_risk
 from src.risk.portfolio import resolve_absolute_thresholds
 from src.risk.types import ConstraintSnapshot, OpenPosition
@@ -335,6 +335,7 @@ def run_paper_tick(
     `now_utc` (read from `case_input["now_utc"]`). No clock reads,
     no I/O, no randomness.
     """
+    require_bool_flag(allow_unrationalized)  # review WR-01: only a real bool, before anything else
     strategy_id = case_input["strategy_id"]
     strategy_version = case_input["strategy_version"]
     parameter_set_id = case_input["parameter_set_id"]

@@ -375,6 +375,18 @@ class PaperAllowlistEntry:
 PAPER_START_ALLOWLIST: tuple[PaperAllowlistEntry, ...] = ()
 
 
+def require_bool_flag(value: object) -> None:
+    """Fail closed on a non-bool `allow_unrationalized` (review WR-01).
+
+    A config or CLI string such as "False" or an int is truthy and would silently switch the
+    gate off, so only a real bool is accepted; the gate is bypassed only by exactly `True`.
+    """
+    if not isinstance(value, bool):
+        raise TypeError(
+            f"allow_unrationalized must be a bool, got {type(value).__name__} ({value!r})"
+        )
+
+
 def _has_rationale_tables(path: Path) -> bool:
     """True when the set's TOML document has a top-level `rationale` key (even if malformed)."""
     return "rationale" in tomllib.loads(path.read_bytes().decode("utf-8"))
@@ -487,11 +499,12 @@ def pin_stream_epoch(
             closed, never translated — 07.1 D-02).
         ValueError: naive opened_at_utc (WR-07).
     """
+    require_bool_flag(allow_unrationalized)
     _require_utc_aware(opened_at_utc, "opened_at_utc")
     root = registry_root if registry_root is not None else REGISTRY_ROOT
     parameter_set = _load_parameter_set_with_root(strategy_id, parameter_set_id, root)
 
-    if not allow_unrationalized:
+    if allow_unrationalized is not True:
         _require_rationalized(
             root / strategy_id / f"{parameter_set_id}.toml",
             strategy_id=strategy_id,
