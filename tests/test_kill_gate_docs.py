@@ -18,7 +18,11 @@ header, never typed here, so a later amendment cannot leave a stale literal behi
 from __future__ import annotations
 
 import re
+import tomllib
+from decimal import Decimal
 from pathlib import Path
+
+from src.domain.registry import load_parameter_set
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DECISIONS = REPO_ROOT / "docs" / "DECISIONS.md"
@@ -272,3 +276,55 @@ def test_d054_geometry_row_present() -> None:
     ):
         assert token in row, f"D054 row must mention {token}"
     assert "ratified only through the 15-08 checkpoint" in row
+
+
+def test_d054_v4_overrides_are_comparison_reference_points() -> None:
+    """D054 labels the three -v4 override values as comparison reference points (G-15-10).
+
+    The user answered on 2026-10-07 (15-UAT.md test 10) that the values are comparison
+    reference points, to be written down clearly. The sentence must stay tied to the two
+    hash-locked set files it describes: values, basis DECISION, ref D054, pinned hashes.
+    """
+    row = next(ln for ln in _lines(DECISIONS) if ln.startswith("| D054 |"))
+    for token in (
+        "comparison reference points",
+        "comparison reference points for the RESEARCH_PROTOCOL Baselines comparison",
+        "not evidence-backed parameters",
+        "15-UAT.md test 10",
+        "RESEARCH_PROTOCOL Baselines comparison",
+        "hash-locked",
+        "new parameter_set_hash",
+        "baseline-no-trade-v4 minimum_rr 100",
+        "baseline-simple-trend-v4 zone_tolerance_atr 1.0 and minimum_rr 0.5",
+    ):
+        assert token in row, f"D054 row must mention {token!r}"
+    assert row.count("|") == 5, "D054 must stay one row with no pipe inside a cell"
+
+    no_trade = load_parameter_set("trend-pullback", "baseline-no-trade-v4")
+    simple = load_parameter_set("trend-pullback", "baseline-simple-trend-v4")
+    assert Decimal(str(no_trade.params["minimum_rr"])) == Decimal("100")
+    assert Decimal(str(simple.params["zone_tolerance_atr"])) == Decimal("1.0")
+    assert Decimal(str(simple.params["minimum_rr"])) == Decimal("0.5")
+    assert no_trade.parameter_set_hash == (
+        "98e541eec72b3771f73adaae6f039d2de2a2ef9bcb66baa4d3507d3fe32bac9c"
+    )
+    assert simple.parameter_set_hash == (
+        "27f4c18b92b44c28387299edb69be32977e3ab48004c1b0301fbbcc2e0d08c5f"
+    )
+    assert no_trade.parameter_set_hash in row
+    assert simple.parameter_set_hash in row
+
+    params_dir = REPO_ROOT / "params" / "trend-pullback"
+    no_trade_doc = tomllib.loads(
+        (params_dir / "baseline-no-trade-v4.toml").read_bytes().decode("utf-8")
+    )
+    simple_doc = tomllib.loads(
+        (params_dir / "baseline-simple-trend-v4.toml").read_bytes().decode("utf-8")
+    )
+    for table in (
+        no_trade_doc["rationale"]["minimum_rr"],
+        simple_doc["rationale"]["zone_tolerance_atr"],
+        simple_doc["rationale"]["minimum_rr"],
+    ):
+        assert table["basis"] == "DECISION"
+        assert "D054" in table["text"]
