@@ -16,6 +16,11 @@ from decimal import Decimal
 
 # D-02: experiment-identity version of the simulator semantics. A record produced by
 # the v1 simulator can never be compared with a v2 record.
+# Documented exception (plan 14-17, review WR-05): the annotate-only mark-hole coverage note is
+# NOT a semantics change. For input without a mark hole inside a position's life nothing changes;
+# for input with such a hole only the `coverage_note` text moves, and with it the trade payload
+# bytes and the hashes derived from them, while this version stays 2.0.0 because no price, time,
+# cost, count or event moves.
 SIMULATOR_SEMANTICS_VERSION = "2.0.0"
 
 # D-27 (resolved by the user 2026-10-04): TP1 closes half the position. A code constant

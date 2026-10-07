@@ -29,6 +29,12 @@ minutes (WR-03), and at most `MAX_LISTED_MARK_HOLE_SPANS` spans are listed, the 
 window never meets the closing-bar fallback, so its stop is resolved at that minute (an
 existing engine decision, D-33) while a single closing window would have resolved it by fallback.
 
+Digest consequence (WR-05): for input without a mark hole inside a position's life nothing
+changes (`coverage_note` stays None and every record byte and digest is as before). For input
+with such a hole only the `coverage_note` text moves, and with it the trade payload bytes and the
+hashes derived from them; no price, time, cost, count or event moves, and
+`SIMULATOR_SEMANTICS_VERSION` stays 2.0.0.
+
 The module imports NOTHING from Polars/pandas/NumPy/Binance SDK/
 SQLAlchemy/Pydantic — stdlib + Decimal + `src/core/_decimal.py` only,
 mirroring the Phase-4 D-10 / Phase-5 D-05 purity precedent.
