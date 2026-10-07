@@ -1,5 +1,5 @@
 ---
-status: testing
+status: complete
 phase: 15-strategy-geometry-correction
 source: 15-01-SUMMARY.md .. 15-15-SUMMARY.md, 15-VERIFICATION.md
 started: 2026-10-07T00:00:00Z
@@ -8,11 +8,7 @@ updated: 2026-10-07T00:00:00Z
 
 ## Current Test
 
-number: 9
-name: TP1 inside the far half of the entry zone (D054 item g)
-expected: |
-  The user decides whether such a plan is kept (deferred), rejected, or left open.
-awaiting: user response (user asked for a recommendation first)
+[testing complete — 2 issues recorded (G-15-10, G-15-11), gap-closure planning in progress]
 
 Note: Phase 15 is a backend phase with no UI. At the user's request, Claude answered tests 1-8
 from evidence it ran itself (not from the user's own observation), the same way Phase 14 did.
@@ -73,7 +69,8 @@ reason: needs the local data store and minutes of runtime; not re-run in this UA
 
 ### 9. TP1 inside the far half of the entry zone (D054 item g)
 expected: The user decides whether a plan whose TP1 is on the profit side of the entry reference but inside the far half of the zone is kept, rejected or left open.
-result: [pending]
+result: skipped
+reason: "Deferred follow-up: hoãn" (user chose to keep current behavior and defer, after Claude's recommendation; the minimum-RR gate at the zone mid still applies)
 
 ### 10. Three -v4 override values (baseline-no-trade-v4 minimum_rr 100; baseline-simple-trend-v4 zone_tolerance_atr 1.0 and minimum_rr 0.5)
 expected: The user confirms what these values are, and D054 states it.
@@ -92,8 +89,8 @@ severity: major
 total: 11
 passed: 7
 issues: 2
-pending: 1
-skipped: 1
+pending: 0
+skipped: 2
 blocked: 0
 
 ## Gaps
@@ -131,3 +128,9 @@ blocked: 0
     - "Planner must handle: the Phase 7 parity fixture and the paper tests deliberately run baseline-v6 (PLACEHOLDER-heavy), and legacy sets such as baseline-v3 are also refused. Tests need the explicit allow_unrationalized flag in tests only, never in src/"
     - "Whether a legacy set without a rationale table should be refused is a safety decision for the user, not the planner"
   debug_session: ""
+
+## Deferred Follow-Ups
+
+- test: 9
+  idea: "hoãn — revisit whether to reject a TP1 inside the far half of the entry zone after the research re-run (D054 item g)"
+  deferred_at: 2026-10-07
