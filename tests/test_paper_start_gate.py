@@ -48,7 +48,24 @@ PHASE7_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase7"
 CLEAN_RUN_DIR = PHASE7_FIXTURES_DIR / "clean_run"
 PINS_PATH = REPO_ROOT / "tests" / "fixtures" / "phase4" / "parameters.json"
 
-SPIED_NAMES = ("_parse_candle", "_is_closed_event", "evaluate", "plan", "evaluate_risk")
+SPIED_NAMES = (
+    "_parse_candle",
+    "_is_closed_event",
+    "evaluate",
+    "plan",
+    "evaluate_risk",
+    # Review WR-03: everything run_paper_tick does with the caller's account, constraint,
+    # position, cost and warm-up inputs sits behind the gate too.
+    "_parse_account_state",
+    "_parse_constraint_snapshot",
+    "_parse_open_positions",
+    "_coerce_money",
+    "build_cost_model",
+    "assert_sizing_costs_bind_registry",
+    "check_feature_validity",
+    "check_feed_freshness",
+)
+GATE_READ_KEYS = frozenset({"strategy_id", "strategy_version", "parameter_set_id", "now_utc"})
 
 
 # --------------------------------------------------------------------------- #
@@ -113,6 +130,48 @@ def spies(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[int]]:
 
 def _assert_no_candle_work(calls: dict[str, list[int]]) -> None:
     assert {name: len(v) for name, v in calls.items()} == {name: 0 for name in SPIED_NAMES}
+
+
+class _RecordingCase(dict[str, Any]):
+    """case_input that records every key the loop reads, so the gate's reach can be proven."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        super().__init__(data)
+        self.reads: list[str] = []
+
+    def __getitem__(self, key: str) -> Any:
+        self.reads.append(key)
+        return super().__getitem__(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        self.reads.append(key)
+        return super().get(key, default)
+
+
+@pytest.mark.parametrize("tick_input", [_clean_run_input, _parity_tick_input], ids=["v3", "v6"])
+def test_a_refused_set_never_reads_any_other_case_input_field(
+    tick_input: Any, spies: dict[str, list[int]]
+) -> None:
+    """Review WR-03: the gate precedes every account, constraint, cost and feed-event read."""
+    from src.paper.loop import run_paper_tick
+
+    case = _RecordingCase(tick_input())
+    with pytest.raises(UnrationalizedParameterSet):
+        run_paper_tick(case)
+    assert set(case.reads) <= GATE_READ_KEYS, sorted(set(case.reads) - GATE_READ_KEYS)
+    _assert_no_candle_work(spies)
+
+
+@pytest.mark.parametrize("tick_input", [_clean_run_input, _parity_tick_input], ids=["v3", "v6"])
+def test_a_refused_set_is_refused_even_when_every_other_field_is_missing(
+    tick_input: Any,
+) -> None:
+    from src.paper.loop import run_paper_tick
+
+    full = tick_input()
+    stripped = {k: full[k] for k in GATE_READ_KEYS}
+    with pytest.raises(UnrationalizedParameterSet):
+        run_paper_tick(stripped)
 
 
 def _entry(strategy_id: str, parameter_set_id: str, parameter_set_hash: str) -> Any:
