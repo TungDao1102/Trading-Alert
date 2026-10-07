@@ -30,7 +30,9 @@ from decimal import Decimal
 from typing import Any
 
 from src.backtest.engine import simulate
+from src.backtest.lifecycle import PlanState, advance, finalize_at_data_end
 from src.backtest.report import build
+from src.backtest.validator import validate_trade_record
 from src.risk.gating import evaluate_risk
 
 from tests.backtest_case_helpers import (
@@ -41,6 +43,8 @@ from tests.backtest_case_helpers import (
 )
 from tests.test_backtest_engine import tracer_case
 from tests.test_backtest_exits import (
+    BAR_12_CLOSE,
+    SIGNAL_CLOSE,
     SL_THROUGH,
     at,
     close_of,
@@ -48,6 +52,7 @@ from tests.test_backtest_exits import (
     long_fill_source,
     long_state,
     record_of,
+    strategy_bar,
     walk_hours,
 )
 
@@ -166,3 +171,183 @@ def test_a_stop_after_the_hole_is_not_changed_and_the_closed_trade_keeps_the_not
     record = record_of(final)
     assert record.coverage_note == final.coverage_note
     assert record.fallback_applied is False
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 (expansion): no double note, fill minute, END_OF_DATA, path independence.
+# --------------------------------------------------------------------------- #
+
+QUIET_BAR_11 = strategy_bar(11, o="101.00", h="101.50", low="100.50", c="101.00")
+QUIET_BAR_12 = strategy_bar(12, o="101.00", h="101.50", low="100.50", c="101.00")
+
+
+def test_a_hole_that_straddles_the_bar_open_gets_one_note_before_the_bar_and_the_fallback() -> None:
+    # Holes 11:50-11:59 (before bar 12) and 12:00-12:05 (inside bar 12). The closing-bar scan
+    # covers the bar region from 12:00 and resolves it by fallback; 11:50-11:59 lies before the
+    # bar region, which that scan never covers, so it gets its own continuity note.
+    holes = {at(11, m) for m in range(50, 60)} | {at(12, m) for m in range(0, 6)}
+    final, events = walk_hours(
+        long_state(), long_fill_source(mark_holes=holes), [flat_bar(10), QUIET_BAR_12]
+    )
+    assert final.phase == "OPEN"
+    assert final.fallback_applied is True
+    assert [e.kind for e in events] == ["FILL"]
+    assert final.coverage_note is not None
+    first, second = final.coverage_note.split(" | ")
+    assert first.startswith(prefix(at(11, 50), at(11, 59)))
+    assert second.startswith(f"{NOTE_PREFIX}{at(12, 0).isoformat()}; ")
+    assert f"resolved_at_strategy_bar_close_{BAR_12_CLOSE.isoformat()}" in second
+    assert final.mark_settled_through_utc == at(12, 59)
+
+
+def test_no_second_note_after_a_fallback_resolved_hole() -> None:
+    holes = {at(11, m) for m in range(20, 30)}
+    final, _ = walk_hours(
+        long_state(),
+        long_fill_source(mark_holes=holes),
+        [flat_bar(10), QUIET_BAR_11, flat_bar(12)],
+    )
+    assert final.fallback_applied is True
+    assert final.coverage_note is not None
+    assert final.coverage_note.count(NOTE_PREFIX) == 1
+    assert at(11, 20).isoformat() in final.coverage_note
+    assert f"resolved_at_strategy_bar_close_{close_of(at(11, 59)).isoformat()}" in (
+        final.coverage_note
+    )
+    assert final.mark_settled_through_utc == at(12, 59)
+
+
+def test_a_hole_on_the_fill_minute_without_a_bar_is_noted_at_the_next_walked_minute() -> None:
+    source = long_fill_source(mark_holes={at(10, 1)})
+    state, events = advance(
+        long_state(),
+        source=source,
+        start_exclusive=SIGNAL_CLOSE,
+        end_inclusive=close_of(at(10, 30)),
+        bar=None,
+    )
+    assert state.phase == "OPEN"
+    assert [e.kind for e in events] == ["FILL"]
+    assert state.fallback_applied is False
+    assert state.coverage_note is not None
+    assert state.coverage_note.startswith(prefix(at(10, 1), at(10, 1)))
+
+
+def _closed_at_data_end(*, marks_end: datetime, data_end: datetime) -> PlanState:
+    """The END_OF_DATA closed state with mark minutes only up to `marks_end` (exclusive)."""
+    source = long_fill_source(end_exclusive=marks_end)
+    state, _ = advance(
+        long_state(),
+        source=source,
+        start_exclusive=SIGNAL_CLOSE,
+        end_inclusive=data_end,
+        bar=None,
+    )
+    assert state.phase == "OPEN"
+    closed, _ = finalize_at_data_end(state, data_end_utc=data_end, source=source)
+    return closed
+
+
+def test_end_of_data_notes_the_minutes_missing_before_the_data_end() -> None:
+    closed = _closed_at_data_end(marks_end=at(10, 30), data_end=at(11, 0))
+    assert closed.exit_kind == "END_OF_DATA"
+    assert closed.exit_price == Decimal("101.00")
+    assert closed.exit_time_utc == close_of(at(10, 29))
+    assert closed.coverage_note is not None
+    assert closed.coverage_note.startswith(prefix(at(10, 30), at(10, 59)))
+    # Complete data up to the data end adds no note.
+    complete = _closed_at_data_end(marks_end=at(10, 30), data_end=at(10, 30))
+    assert complete.exit_kind == "END_OF_DATA"
+    assert complete.coverage_note is None
+    # A partial last minute is never reported as missing.
+    partial = _closed_at_data_end(
+        marks_end=at(10, 45), data_end=datetime(2026, 1, 5, 10, 45, 20, tzinfo=UTC)
+    )
+    assert partial.exit_kind == "END_OF_DATA"
+    assert partial.coverage_note is None
+
+
+def test_hour_by_hour_and_one_window_give_the_same_state_and_notes() -> None:
+    holes = {at(11, m) for m in range(20, 30)} | {at(12, m) for m in range(40, 45)}
+    source = long_fill_source(mark_holes=holes)
+    one, _ = advance(
+        long_state(),
+        source=source,
+        start_exclusive=SIGNAL_CLOSE,
+        end_inclusive=close_of(at(13, 59)),
+        bar=None,
+    )
+    stepped = long_state()
+    previous = SIGNAL_CLOSE
+    for end in (
+        close_of(at(10, 59)),
+        close_of(at(11, 59)),
+        close_of(at(12, 59)),
+        close_of(at(13, 59)),
+    ):
+        stepped, _ = advance(
+            stepped, source=source, start_exclusive=previous, end_inclusive=end, bar=None
+        )
+        previous = end
+    assert stepped == one
+    assert one.coverage_note is not None
+    first, second = one.coverage_note.split(" | ")
+    assert first.startswith(prefix(at(11, 20), at(11, 29)))
+    assert second.startswith(prefix(at(12, 40), at(12, 44)))
+    assert one.mark_settled_through_utc == at(13, 59)
+
+
+def test_re_advancing_a_walked_window_adds_nothing_and_never_moves_the_marker_back() -> None:
+    source = long_fill_source()
+    walked, _ = walk_hours(long_state(), source, [flat_bar(10), flat_bar(11)])
+    assert walked.mark_settled_through_utc == at(11, 59)
+    again, events = advance(
+        walked,
+        source=source,
+        start_exclusive=SIGNAL_CLOSE,
+        end_inclusive=close_of(at(10, 59)),
+        bar=None,
+    )
+    assert events == ()
+    assert again == walked
+
+
+def test_a_noted_closed_trade_passes_the_record_validator() -> None:
+    final, _ = walk_hours(
+        long_state(),
+        long_fill_source(mark_specials={at(11, 40): SL_THROUGH}, mark_holes=HOLE_11_20),
+        BARS_10_AND_12,
+    )
+    assert final.phase == "CLOSED"
+    assert final.coverage_note is not None
+    validate_trade_record(record_of(final), data_start_utc=SIGNAL_CLOSE, data_end_utc=at(14))
+
+
+def test_a_hole_seen_mid_bar_and_resolved_at_the_bar_close_carries_both_notes() -> None:
+    # Documents the accepted double note: a mid-bar window sees the hole (continuity note) and
+    # the later closing-bar window resolves the same hole by fallback (fallback note).
+    holes = {at(12, m) for m in range(15, 30)}
+    source = long_fill_source(mark_holes=holes)
+    open_state, _ = walk_hours(long_state(), source, [flat_bar(10), flat_bar(11)])
+    mid, _ = advance(
+        open_state,
+        source=source,
+        start_exclusive=flat_bar(11).close_time_utc,
+        end_inclusive=close_of(at(12, 30)),
+        bar=None,
+    )
+    bar12 = strategy_bar(12, o="101.00", h="101.50", low="97.90", c="99.00")
+    resolved, _ = advance(
+        mid,
+        source=source,
+        start_exclusive=close_of(at(12, 30)),
+        end_inclusive=bar12.close_time_utc,
+        bar=bar12,
+    )
+    assert resolved.exit_kind == "SL"
+    assert resolved.exit_price == Decimal("98.00")
+    assert resolved.exit_time_utc == BAR_12_CLOSE
+    assert resolved.coverage_note is not None
+    first, second = resolved.coverage_note.split(" | ")
+    assert first.startswith(prefix(at(12, 15), at(12, 29)))
+    assert second.startswith(f"{NOTE_PREFIX}{at(12, 15).isoformat()}; ")
