@@ -21,7 +21,13 @@ Plan 14-17 adds the mark-hole annotation: while a position is open, a gap of mor
 minute between consecutive walked mark minutes is recorded in `PlanState.coverage_note`
 (annotation only: nothing is resolved, repriced or counted, and `fallback_applied` is
 untouched). The internal marker `mark_settled_through_utc` tracks how far mark coverage is
-settled and is never copied into a record.
+settled and is never copied into a record. The note is rendered from structured entries
+(`PlanState.note_entries`), so its text is the same however the windows were cut: a hole span a
+mid-bar window already noted is cut back or dropped when the closing-bar fallback claims those
+minutes (WR-03), and at most `MAX_LISTED_MARK_HOLE_SPANS` spans are listed, the rest counted
+(WR-01). One more window-cut dependence is NOT removed: a position stopped out inside a mid-bar
+window never meets the closing-bar fallback, so its stop is resolved at that minute (an
+existing engine decision, D-33) while a single closing window would have resolved it by fallback.
 
 The module imports NOTHING from Polars/pandas/NumPy/Binance SDK/
 SQLAlchemy/Pydantic — stdlib + Decimal + `src/core/_decimal.py` only,
@@ -391,6 +397,27 @@ def _skipped_note(span: tuple[datetime, datetime]) -> str:
     )
 
 
+def _without_claimed_spans(
+    entries: tuple[_NoteEntry, ...], first_missing: datetime
+) -> tuple[_NoteEntry, ...]:
+    """Drop the part of earlier hole spans that a closing-bar fallback from `first_missing` claims.
+
+    A mid-bar window may already have walked past a hole of the bar and noted it; the
+    closing-bar window then resolves everything from `first_missing` on by fallback, and that
+    fallback note is the only record of those minutes. A span starting at or after
+    `first_missing` is dropped, one that straddles it is cut back to the minutes before it,
+    and spans wholly before it and earlier fallback notes stay. The result equals what a
+    single closing-bar window would have recorded (review WR-03).
+    """
+    kept: list[_NoteEntry] = []
+    for entry in entries:
+        if entry.last is None or entry.last < first_missing:
+            kept.append(entry)
+        elif entry.first < first_missing:
+            kept.append(_NoteEntry(first=entry.first, last=first_missing - _MINUTE))
+    return tuple(kept)
+
+
 def _render_notes(entries: tuple[_NoteEntry, ...]) -> str | None:
     """Render the coverage note: pieces in order joined by ' | '; None when there are none.
 
@@ -566,7 +593,7 @@ def advance(
             resolution = resolve_fallback_hour(
                 state=current, bar=bar, first_missing_open_utc=first_missing
             )
-            entries = current.note_entries + (
+            entries = _without_claimed_spans(current.note_entries, first_missing) + (
                 _NoteEntry(first=first_missing, text=resolution.coverage_note),
             )
             current = replace(
