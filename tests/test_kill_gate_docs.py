@@ -328,3 +328,45 @@ def test_d054_v4_overrides_are_comparison_reference_points() -> None:
     ):
         assert table["basis"] == "DECISION"
         assert "D054" in table["text"]
+
+
+def test_d054_records_the_paper_start_gate() -> None:
+    """D054 item (i) records the paper-start gate and the user's older-set decision (G-15-11).
+
+    The user decided on 2026-10-07 (15-UAT.md test 11, then checkpoint 15-17-01, Option B)
+    that run_paper_tick enforces the rationale gate before any candle, that sets without
+    rationale tables need an exact-hash allowlist entry, and that the allowlist ships empty
+    with D-27 unchanged. The doc and the code constant must agree.
+    """
+    from src.paper.freeze import PAPER_START_ALLOWLIST
+
+    row = next(ln for ln in _lines(DECISIONS) if ln.startswith("| D054 |"))
+    for token in (
+        "(i) Paper-start gate",
+        "G-15-11",
+        "run_paper_tick",
+        "pin_stream_epoch",
+        "before it parses any candle",
+        "15-UAT.md test 11",
+        "checkpoint 15-17-01",
+        "tests/test_paper_start_gate.py",
+        "byte-identical",
+        "legacy-set rule: option B",
+        "PAPER_START_ALLOWLIST",
+        "full 64-hex parameter_set_hash",
+        "The allowlist is empty at 2026-10-07",
+        "D-27 unchanged",
+        "new fully rationalized set",
+        "new user checkpoint adds an exact-hash entry",
+        "authorization/rationale",
+        "fail-closed: run_paper_tick",
+        "plan 15-17",
+        "checker",
+        "recorded in item (i)",
+    ):
+        assert token in row, f"D054 row must mention {token!r}"
+    assert row.count("|") == 5, "D054 must stay one row with no pipe inside a cell"
+
+    item_i = row[row.index("(i) Paper-start gate") :]
+    assert not re.search(r"[0-9a-f]{64}", item_i), "item (i) names no set hash (empty allowlist)"
+    assert PAPER_START_ALLOWLIST == (), "the doc says the allowlist is empty; the code must agree"
