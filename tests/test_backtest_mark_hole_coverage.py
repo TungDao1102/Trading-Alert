@@ -413,10 +413,11 @@ def test_the_capped_note_is_path_independent_and_prefix_invariant() -> None:
         )
         previous = end
     assert stepped.coverage_note == one.coverage_note
-    # Prefix-invariant: the spans listed after hour 11 alone are the first spans listed later.
+    # Prefix-invariant: after hour 11 alone 29 spans are known (the 11:59 hole is only noted once
+    # a later minute is walked), and the 20 listed are the first 20 listed later.
     after_11 = _advance_bar_less(source, close_of(at(11, 59))).coverage_note
     assert after_11 is not None
-    assert "mark_price_1m_missing_10_further_spans_not_listed" in after_11
+    assert "mark_price_1m_missing_9_further_spans_not_listed" in after_11
     assert one.coverage_note is not None
     assert after_11.split(" | ")[:LISTED_CAP] == one.coverage_note.split(" | ")[:LISTED_CAP]
 
