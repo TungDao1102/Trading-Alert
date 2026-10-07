@@ -82,7 +82,8 @@ SENTINEL_CONTENT = "trading-alert backup sentinel format=1\n"
 SNAPSHOTS_DIR = "snapshots"
 PARQUET_DIR = "parquet"
 
-# rclone exit codes (https://rclone.org/docs/#exit-code).
+# rclone exit codes (https://rclone.org/docs/#exit-code). ``cat`` of a missing object (the
+# sentinel) tolerates 3 and 4; a listing tolerates only ``_EXIT_LSF_NOT_FOUND`` (WR-02).
 _EXIT_NOT_FOUND = frozenset({3, 4})
 
 _SNAPSHOT_ID_FORMAT = "%Y%m%dT%H%M%SZ"
@@ -281,12 +282,14 @@ def init_sentinel(runner: RcloneRunner, *, raw_remote: str) -> bool:
             f"{_excerpt(result.stderr)}"
         )
     snapshots = runner(["lsf", "--dirs-only", _crypt(f"{SNAPSHOTS_DIR}/")], {})
-    if snapshots.returncode not in {0, *_EXIT_NOT_FOUND} or (
+    if snapshots.returncode not in {0, _EXIT_LSF_NOT_FOUND} or (
         snapshots.returncode == 0 and snapshots.stdout.strip()
     ):
         raise RemoteError("refusing --init-remote: the remote already holds snapshots")
     raw = runner(["lsf", raw_remote], {})
-    if raw.returncode not in {0, *_EXIT_NOT_FOUND} or (raw.returncode == 0 and raw.stdout.strip()):
+    if raw.returncode not in {0, _EXIT_LSF_NOT_FOUND} or (
+        raw.returncode == 0 and raw.stdout.strip()
+    ):
         raise RemoteError(
             "refusing --init-remote: the bucket is not empty (an existing store with a "
             "different crypt key looks exactly like this)"
@@ -439,12 +442,17 @@ def _differing_paths(stderr: str, candidates: Collection[str]) -> list[str]:
     An error excerpt keeps only the end of rclone's output, which can cut the path off, so
     the paths are read from the lines themselves.
     """
+    wanted = set(candidates)
     named: set[str] = set()
     for line in stderr.splitlines():
         _, marker, rest = line.partition("ERROR : ")
-        path = rest.split(": ", 1)[0]
-        if marker and path in candidates:
-            named.add(path)
+        if not marker:
+            continue
+        cut = rest.find(": ")
+        while cut != -1:  # a path can contain ": " itself: try every prefix that ends at one
+            if rest[:cut] in wanted:
+                named.add(rest[:cut])
+            cut = rest.find(": ", cut + 1)
     return sorted(named)
 
 
@@ -505,6 +513,15 @@ def _stage_parquet(
             )
 
 
+def _by_hand(snap: str) -> str:
+    """What to tell the operator when the compensating removal of a manifest failed."""
+    return (
+        f"the manifest of snapshot {snap} could not be removed: remove "
+        f"{SNAPSHOTS_DIR}/{snap}/{MANIFEST_NAME} through the crypt remote by hand and do not "
+        "trust that snapshot until then"
+    )
+
+
 def _remove_manifest(runner: RcloneRunner, manifest_remote: str) -> bool:
     """Delete this snapshot's manifest object; two attempts, an absent object counts as removed."""
     for _attempt in range(2):
@@ -524,11 +541,14 @@ def push_snapshot(bundle_root: Path, runner: RcloneRunner, *, now_utc: datetime)
     Order is crash-safe. The sentinel is checked first, then each local Parquet path is decided
     from its SHA-256 against the manifests of the complete remote snapshots plus a listing of
     ``parquet/`` (``classify_parquet_paths``); a path published with other content is refused
-    before anything is written. New files go up (``--immutable``), then ``pg.dump``; the Parquet
-    tree and ``pg.dump`` are checked with ``rclone cryptcheck`` BEFORE ``manifest.json`` is
-    published, so a snapshot only looks complete once everything it names is verified. The
-    manifest is then published and checked, and removed again if either step fails.
-    Retention must not run before this returns.
+    before anything is written. New files go up (``--immutable``) and the whole Parquet tree is
+    checked with ``rclone cryptcheck`` BEFORE ``pg.dump`` is uploaded, so a damaged Parquet
+    object leaves no snapshot directory behind. ``pg.dump`` goes up and is checked, then the
+    bundle is verified against its manifest once more (a local file changed during a long upload
+    would otherwise get a manifest naming the old hash, because ``cryptcheck`` compares against
+    the bytes on disk now). Only then is ``manifest.json`` published, so a snapshot only looks
+    complete once everything it names is verified. The manifest is checked and removed again
+    if that fails. Retention must not run before this returns.
     """
     problems = verify_bundle(bundle_root)
     if problems:
@@ -552,11 +572,15 @@ def push_snapshot(bundle_root: Path, runner: RcloneRunner, *, now_utc: datetime)
     # them chooses what to upload; --immutable stays on every upload as defence in depth only.
     if local:
         _stage_parquet(runner, root, local, complete)
+        _check_parquet_tree(runner, root, local)
     dump = DEFAULT_PG_DUMP_NAME
     _call(runner, ["copyto", str(root / dump), f"{snap_remote}/{dump}", "--immutable"])
-    if local:
-        _check_parquet_tree(runner, root, local)
     _call(runner, ["cryptcheck", str(root), snap_remote, *_snapshot_filters([dump])])
+    changed = verify_bundle(bundle_root)
+    if changed:
+        raise RemoteError(
+            f"refusing to publish manifest: bundle changed during push: {_named(changed)}"
+        )
     manifest_remote = f"{snap_remote}/{MANIFEST_NAME}"
     try:
         _call(runner, ["copyto", str(root / MANIFEST_NAME), manifest_remote, "--immutable"])
@@ -564,13 +588,11 @@ def push_snapshot(bundle_root: Path, runner: RcloneRunner, *, now_utc: datetime)
     except (RemoteError, KeyboardInterrupt) as exc:
         removed = _remove_manifest(runner, manifest_remote)
         if isinstance(exc, KeyboardInterrupt):
+            if not removed:  # the type stays an interrupt; the operator still learns what is left
+                exc.add_note(f"manifest publication interrupted AND {_by_hand(snap)}")
             raise
         if not removed:
-            raise RemoteError(
-                f"manifest verification failed AND the manifest of snapshot {snap} could not be "
-                f"removed: remove {SNAPSHOTS_DIR}/{snap}/{MANIFEST_NAME} through the crypt remote "
-                f"by hand and do not trust that snapshot until then ({exc})"
-            ) from exc
+            raise RemoteError(f"manifest verification failed AND {_by_hand(snap)} ({exc})") from exc
         raise RemoteError(
             f"manifest verification failed: snapshot {snap} left incomplete: {exc}"
         ) from exc
@@ -591,7 +613,7 @@ def list_snapshots(runner: RcloneRunner) -> list[str]:
     result = _call(
         runner,
         ["lsf", "--dirs-only", _crypt(f"{SNAPSHOTS_DIR}/")],
-        ok=frozenset({0, *_EXIT_NOT_FOUND}),
+        ok=frozenset({0, _EXIT_LSF_NOT_FOUND}),
     )
     if result.returncode != 0:
         return []
@@ -608,7 +630,7 @@ def list_complete_snapshots(runner: RcloneRunner) -> list[str]:
     result = _call(
         runner,
         ["lsf", "--files-only", "-R", "--max-depth", "2", _crypt(f"{SNAPSHOTS_DIR}/")],
-        ok=frozenset({0, *_EXIT_NOT_FOUND}),
+        ok=frozenset({0, _EXIT_LSF_NOT_FOUND}),
     )
     if result.returncode != 0:
         return []

@@ -202,8 +202,8 @@ def test_push_cli_runs_sentinel_then_parquet_then_snapshot_then_cryptcheck(
         ["lsf", "--files-only", "-R", "--max-depth", "2", "BACKUPS3CRYPT:snapshots/"],
         ["lsf", "-R", "--files-only", "BACKUPS3CRYPT:parquet/"],
         ["copy", parquet, "BACKUPS3CRYPT:parquet", "--files-from-raw", "<LIST>", "--immutable"],
-        ["copyto", str(Path(root) / "pg.dump"), f"{snap_remote}/pg.dump", "--immutable"],
         ["cryptcheck", parquet, "BACKUPS3CRYPT:parquet", "--one-way"],
+        ["copyto", str(Path(root) / "pg.dump"), f"{snap_remote}/pg.dump", "--immutable"],
         ["cryptcheck", root, snap_remote, "--include", "/pg.dump"],
         [
             "copyto",
@@ -231,8 +231,13 @@ def test_push_uploads_manifest_last_so_a_snapshot_is_never_complete_before_its_f
     manifest_put = next(
         i for i, call in enumerate(fake.calls) if call[0] == "copyto" and "manifest.json" in call[2]
     )
+    dump_put = next(
+        i for i, call in enumerate(fake.calls) if call[0] == "copyto" and "pg.dump" in call[2]
+    )
     assert len(checks) == 3
-    assert checks[0] < checks[1] < manifest_put < checks[2]  # tree and pg.dump are checked first
+    # The tree is verified before pg.dump goes up; tree and pg.dump are both checked before the
+    # manifest is published (D064).
+    assert checks[0] < dump_put < checks[1] < manifest_put < checks[2]
 
 
 def test_push_skips_parquet_copy_when_bundle_has_no_parquet(tmp_path: Path) -> None:
@@ -1600,6 +1605,7 @@ def test_case_f_upload_followed_by_cryptcheck_failure_leaves_the_snapshot_incomp
     assert "exit 1" in str(excinfo.value)
     if target == "parquet":
         assert str(excinfo.value).startswith(HEAD_VERIFY)
+        assert not (store.store / "snapshots" / SNAP).exists()  # WR-05: no pg.dump went up
     assert not (store.store / _manifest_object(SNAP)).exists()
     failing = max(
         i for i, c in enumerate(store.calls) if c[0] == "cryptcheck"
@@ -1622,7 +1628,8 @@ def test_case_g_remote_object_modified_after_upload_is_detected(tmp_path: Path) 
     assert "exit 1" in text
     assert "raw/oi.parquet" in text
     assert "copy" not in store.verbs()  # no auto-heal: the object is not uploaded over
-    assert not (store.store / _manifest_object(SNAP2)).exists()
+    assert "copyto" not in store.verbs()  # WR-05: the tree is verified before pg.dump goes up
+    assert not (store.store / "snapshots" / SNAP2).exists()
     assert remote.list_complete_snapshots(store) == [first]
 
 
@@ -1638,7 +1645,8 @@ def test_case_h_remote_object_deleted_after_upload_is_detected(tmp_path: Path) -
     assert text.startswith(HEAD_VERIFY)
     assert "raw/oi.parquet" in text
     assert "copy" not in store.verbs()
-    assert not (store.store / _manifest_object(SNAP2)).exists()
+    assert "copyto" not in store.verbs()  # WR-05: the tree is verified before pg.dump goes up
+    assert not (store.store / "snapshots" / SNAP2).exists()
     assert remote.list_complete_snapshots(store) == [first]
 
 
@@ -1702,9 +1710,10 @@ def test_case_i_an_interrupt_during_manifest_publication_still_removes_the_manif
         crash=KeyboardInterrupt(),
     )
 
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(KeyboardInterrupt) as excinfo:
         remote.push_snapshot(bundle, store, now_utc=NOW)
 
+    assert not getattr(excinfo.value, "__notes__", [])  # removed: nothing for the operator to do
     assert not (store.store / _manifest_object(SNAP)).exists()
     assert remote.list_complete_snapshots(store) == []
 
@@ -1869,3 +1878,213 @@ def test_a_failing_tree_check_names_the_path_even_when_the_excerpt_is_cut(tmp_pa
     assert "raw/oi.parquet" in text
     assert "exit 1" in text
     assert len(text) < 1000  # bounded
+
+
+# -- review fixes WR-01 to WR-05 on commit 6ce7aac ---------------------------------------------- #
+
+
+def _manifest_copy(argv: Sequence[str]) -> bool:
+    return argv[0] == "copyto" and argv[2].endswith("/manifest.json")
+
+
+def test_wr01_an_interrupt_with_two_failed_removals_stays_an_interrupt_and_names_the_object(
+    tmp_path: Path,
+) -> None:
+    store = _fresh(tmp_path, FaultStore)
+    bundle = _bundle(tmp_path, "one", FILES)
+    store.hook(_manifest_copy, crash=KeyboardInterrupt())
+    store.hook(
+        _call_with("deletefile"),
+        forced=[RcloneResult(1, "", "Failed to deletefile: boom")] * 2,
+    )
+
+    with pytest.raises(KeyboardInterrupt) as excinfo:
+        remote.push_snapshot(bundle, store, now_utc=NOW)
+
+    assert len([c for c in store.calls if c[0] == "deletefile"]) == 2
+    assert (store.store / _manifest_object(SNAP)).exists()  # still there, nothing removed it
+    notes = getattr(excinfo.value, "__notes__", [])
+    assert len(notes) == 1
+    assert f"the manifest of snapshot {SNAP} could not be removed" in notes[0]
+    assert f"snapshots/{SNAP}/manifest.json" in notes[0]
+    assert "by hand" in notes[0]
+    assert "do not trust that snapshot" in notes[0]
+
+
+@pytest.mark.parametrize("listing", [remote.list_snapshots, remote.list_complete_snapshots])
+def test_wr02_a_listing_tolerates_only_exit_3_as_a_missing_directory(
+    listing: Callable[[Any], list[str]],
+) -> None:
+    missing = FakeRclone(overrides={"lsf": RcloneResult(3, "", "directory not found")})
+    other = FakeRclone(overrides={"lsf": RcloneResult(4, "", "object not found")})
+
+    assert listing(missing) == []
+    with pytest.raises(RemoteError, match=r"rclone lsf failed \(exit 4\)"):
+        listing(other)
+
+
+def test_wr02_a_push_refuses_when_the_snapshot_listing_exits_4(tmp_path: Path) -> None:
+    bundle = _make_bundle(tmp_path)
+    fake = FakeRclone(overrides={"lsf": RcloneResult(4, "", "object not found")})
+
+    with pytest.raises(RemoteError, match=r"rclone lsf failed \(exit 4\)"):
+        remote.push_snapshot(bundle, fake, now_utc=NOW)
+
+    assert fake.verbs() == ["cat", "lsf"]  # an empty-looking remote never reaches an upload
+
+
+@pytest.mark.parametrize(
+    ("bad_listing", "pattern"),
+    [("snapshots", "already holds snapshots"), ("bucket", "bucket is not empty")],
+)
+def test_wr02_init_remote_does_not_read_an_lsf_exit_4_as_an_empty_store(
+    bad_listing: str, pattern: str
+) -> None:
+    class Listing(FakeRclone):
+        def __call__(self, argv: Sequence[str], env: Mapping[str, str]) -> RcloneResult:
+            if argv[0] == "lsf":
+                self.calls.append(list(argv))
+                is_bucket = argv[1] == "BACKUPS3:b"
+                if is_bucket == (bad_listing == "bucket"):
+                    return RcloneResult(4, "", "object not found")
+                return RcloneResult(3, "", "directory not found")
+            return super().__call__(argv, env)
+
+    fake = Listing(sentinel=RcloneResult(3, "", "directory not found"))
+
+    with pytest.raises(RemoteError, match=pattern):
+        remote.init_sentinel(fake, raw_remote="BACKUPS3:b")
+
+    assert "copyto" not in fake.verbs()
+
+
+def test_wr03_a_bundle_file_changed_during_the_push_gets_no_manifest(tmp_path: Path) -> None:
+    store = _fresh(tmp_path, FaultStore)
+    bundle = _bundle(tmp_path, "one", FILES)
+    victim = bundle / "parquet" / "raw" / "interval=1m" / "a.parquet"
+    # The local file changes after the uploads and both cryptchecks passed: cryptcheck compares
+    # against the bytes on disk now, so only a second verification can see the manifest is stale.
+    store.hook(
+        _call_with("cryptcheck", "--include", "/pg.dump"),
+        after=lambda: victim.write_bytes(b"Z" * 50),
+    )
+
+    with pytest.raises(RemoteError) as excinfo:
+        remote.push_snapshot(bundle, store, now_utc=NOW)
+
+    text = str(excinfo.value)
+    assert text.startswith("refusing to publish manifest: bundle changed during push: ")
+    assert "parquet/raw/interval=1m/a.parquet: sha256 mismatch" in text
+    assert not any("manifest.json" in " ".join(call) for call in store.calls)
+    assert not (store.store / _manifest_object(SNAP)).exists()
+    assert remote.list_complete_snapshots(store) == []
+
+
+def test_wr03_the_second_verification_names_at_most_five_problems(tmp_path: Path) -> None:
+    many = {f"interval=1m/f{i}.parquet": f"{i}".encode() * 10 for i in range(8)}
+    store = _fresh(tmp_path, FaultStore)
+    bundle = _bundle(tmp_path, "one", many)
+
+    def change_all() -> None:
+        for staged in (bundle / "parquet").rglob("*.parquet"):
+            staged.write_bytes(b"changed")
+
+    store.hook(_call_with("cryptcheck", "--include", "/pg.dump"), after=change_all)
+
+    with pytest.raises(RemoteError) as excinfo:
+        remote.push_snapshot(bundle, store, now_utc=NOW)
+
+    text = str(excinfo.value)
+    assert text.count("sha256 mismatch") == 5
+    assert "and 3 more" in text
+
+
+@pytest.mark.parametrize("delete_rc", [4, 1], ids=["absent-object", "failed-removal"])
+def test_wr04_deletefile_exit_4_is_already_removed_and_any_other_exit_is_a_failed_removal(
+    tmp_path: Path, delete_rc: int
+) -> None:
+    store = _fresh(tmp_path, FaultStore)
+    bundle = _bundle(tmp_path, "one", FILES)
+    # The manifest upload fails before it wrote anything: the object to delete does not exist.
+    store.hook(_manifest_copy, forced=[RcloneResult(1, "", "connection reset before writing")])
+    if delete_rc != 4:
+        store.hook(
+            _call_with("deletefile"),
+            forced=[RcloneResult(delete_rc, "", "Failed to deletefile: boom")] * 2,
+        )
+
+    with pytest.raises(RemoteError) as excinfo:
+        remote.push_snapshot(bundle, store, now_utc=NOW)
+
+    text = str(excinfo.value)
+    deletes = [c for c in store.calls if c[0] == "deletefile"]
+    if delete_rc == 4:  # the store answers 4 for an absent object: counted as removed, one try
+        assert len(deletes) == 1
+        assert text.startswith(f"manifest verification failed: snapshot {SNAP} left incomplete")
+    else:
+        assert len(deletes) == 2
+        assert text.startswith(
+            f"manifest verification failed AND the manifest of snapshot {SNAP} could not be removed"
+        )
+
+
+def test_wr04_a_fatal_exit_of_the_adopt_check_fails_the_push_and_publishes_nothing(
+    tmp_path: Path,
+) -> None:
+    store = _fresh(tmp_path, FaultStore)
+    remote.push_snapshot(_bundle(tmp_path, "one", FILES), store, now_utc=NOW)
+    bundle = _bundle(tmp_path, "two", {**FILES, **NEW_FILE})
+    orphan = store.store / "parquet" / "raw" / "interval=1m" / "c.parquet"
+    orphan.write_bytes(NEW_FILE["interval=1m/c.parquet"])  # left by a push that died
+    store.hook(
+        _call_with("cryptcheck", "--files-from-raw"),
+        forced=[RcloneResult(7, "", "Fatal error: out of memory")],
+    )
+    store.calls.clear()
+
+    with pytest.raises(RemoteError) as excinfo:
+        remote.push_snapshot(bundle, store, now_utc=LATER)
+
+    text = str(excinfo.value)
+    assert text.startswith("rclone cryptcheck failed (exit 7)")  # a transport error, not a refusal
+    assert not text.startswith(HEAD_ORPHAN)
+    assert _writes(store) == []
+    assert not (store.store / "snapshots" / SNAP2).exists()
+
+
+def test_wr04_a_fatal_exit_of_the_tree_check_fails_the_push_before_any_snapshot_file(
+    tmp_path: Path,
+) -> None:
+    store = _fresh(tmp_path, FaultStore)
+    bundle = _bundle(tmp_path, "one", FILES)
+    store.hook(
+        lambda argv: argv[0] == "cryptcheck" and "--one-way" in argv,
+        forced=[RcloneResult(7, "", "Fatal error: out of memory")],
+    )
+
+    with pytest.raises(RemoteError) as excinfo:
+        remote.push_snapshot(bundle, store, now_utc=NOW)
+
+    text = str(excinfo.value)
+    assert text.startswith(HEAD_VERIFY)
+    assert "exit 7" in text
+    assert not (store.store / "snapshots" / SNAP).exists()  # not even the pg.dump went up
+    assert remote.list_complete_snapshots(store) == []
+
+
+def test_wr04_differing_paths_reads_a_path_that_contains_a_colon_and_spaces() -> None:
+    awkward = "raw/x=1/part 1: final.parquet"
+    stderr = "\n".join(
+        [
+            f'ERROR : {awkward}: hashes differ (BACKUPS3CRYPT{{x}}:) "a" vs (local:) "b"',
+            "ERROR : raw/plain.parquet: file not in Encrypted drive 'BACKUPS3CRYPT{x}:'",
+            "ERROR : raw/not-asked.parquet: sizes differ",
+            "NOTICE: Failed to cryptcheck: 3 differences found",
+        ]
+    )
+    candidates = {awkward, "raw/plain.parquet", "raw/untouched.parquet"}
+    expected = sorted([awkward, "raw/plain.parquet"])
+
+    assert remote._differing_paths(stderr, candidates) == expected
+    assert remote._differing_paths(stderr, tuple(candidates)) == expected
+    assert remote._differing_paths("NOTICE: 0 differences", candidates) == []
