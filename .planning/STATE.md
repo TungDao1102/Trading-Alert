@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 15
 current_phase_name: Strategy Geometry Correction
 status: executing
-stopped_at: Completed 15-16-PLAN.md
-last_updated: "2026-10-07T02:03:51.534Z"
+stopped_at: Completed 15-17-PLAN.md
+last_updated: "2026-10-07T02:11:28.643Z"
 last_activity: 2026-10-07
 last_activity_desc: Phase 15 execution started
-state_head: 22aad5f1992f3b6481e72b6f8125318397f0143e
+state_head: 6db53ca481feaf75fb8700e551c46e019eacd161
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 143
-  completed_plans: 140
+  completed_plans: 141
 milestone_name: milestone
 ---
 
@@ -31,8 +31,8 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 15 (Strategy Geometry Correction) — EXECUTING
-Plan: 16 of 18 complete (15-17, 15-18 pending)
-Status: Ready to execute 15-17
+Plan: 17 of 18 complete (15-18 pending)
+Status: Ready to execute 15-18
 Last activity: 2026-10-07 — Phase 15 execution started
 
 Progress: [█████░░░░░] 46%
@@ -187,6 +187,7 @@ Progress: [█████░░░░░] 46%
 | Phase 15 P13 | 55min | 2 tasks | 3 files |
 | Phase 15 P15 | ~2h | 3 tasks | 7 files |
 | Phase 15 P16 | 10 min | 1 tasks | 2 files |
+| Phase 15 P17 | 6 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -458,6 +459,7 @@ Recent decisions affecting current work:
 - [Phase 15]: [15-13] Structural validator (D-06/D-07/D-08/F6) now runs for every parameter set; legacy Family A plans are STOP_TOO_TIGHT, legacy B/C signal bar through the stop is INVALIDATED; passing legacy B/C plan_hash unchanged
 - [Phase 15]: D054: Phase 15 geometry correction recorded once with the compiled regeneration inventory; no amendment of RESEARCH_PROTOCOL v2.0.0 needed; re-run readiness verified on the Phase-14 engine for all three baseline-v6 sets (equal digests, census invariant_violations 0)
 - [Phase 15]: D054 records the user's 2026-10-07 answer: the three -v4 override values are comparison reference points, not evidence-backed parameters; in-file DECISION/D054 label stays (hash-locked)
+- [Phase 15]: 15-17: run_paper_tick runs the stream-start gate (pin_stream_epoch) at its top before any candle is parsed; sets without rationale tables need an exact-hash PAPER_START_ALLOWLIST entry; allowlist ships empty (checkpoint 15-17-01 Option B, D-27 unchanged)
 
 ### Pending Todos
 
@@ -512,6 +514,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-07T02:03:50.675Z
-Stopped at: Completed 15-16-PLAN.md
+Last session: 2026-10-07T02:11:27.495Z
+Stopped at: Completed 15-17-PLAN.md
 Resume file: None
