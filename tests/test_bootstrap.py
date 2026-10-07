@@ -66,8 +66,27 @@ printf '%s\n' "${0##*/} $*" >> "${STUB_LOG:?}"
 
 STUBS: dict[str, str] = {
     "apt-get": "",
-    "usermod": "",
-    "useradd": "",
+    "usermod": r"""
+if [ "${1:-}" = "-aG" ] && [ "${STUB_USERMOD_NOOP:-0}" != "1" ] && [ -n "${STUB_STATE:-}" ]; then
+  mkdir -p "$STUB_STATE"
+  printf '%s\n' "${2:-}" >> "$STUB_STATE/groups"
+fi
+""",
+    "useradd": r"""
+if [ -n "${STUB_STATE:-}" ]; then
+  mkdir -p "$STUB_STATE"
+  : > "$STUB_STATE/user_created"
+fi
+""",
+    "passwd": r"""
+if [ "${1:-}" = "-S" ] && [ -n "${2:-}" ]; then
+  st="${STUB_PASSWD_STATUS:-P}"
+  if [ "$st" = "UNREADABLE" ]; then exit 1; fi
+  echo "$2 $st 2026-10-07 0 99999 7 -1"
+  exit 0
+fi
+exit 2
+""",
     "chown": "",
     "dpkg": r"""
 if [ "${1:-}" = "--print-architecture" ]; then echo "${STUB_ARCH:-amd64}"; fi
@@ -82,7 +101,7 @@ echo "dpkg-query: no packages found matching $pkg" >&2
 exit 1
 """,
     "getent": r"""
-if [ "${STUB_USER_EXISTS:-0}" = "1" ]; then
+if [ "${STUB_USER_EXISTS:-0}" = "1" ] || [ -f "${STUB_STATE:-/nonexistent}/user_created" ]; then
   echo "${2:-trading}:x:1000:1000::/home/${2:-trading}:/bin/bash"
   exit 0
 fi
@@ -92,7 +111,15 @@ exit 2
 case "${1:-}" in
   -u) echo "${STUB_UID:-0}" ;;
   -nG)
-    if [ "${STUB_USER_EXISTS:-0}" = "1" ]; then echo "${STUB_GROUPS:-trading}"; else exit 1; fi
+    if [ "${STUB_USER_EXISTS:-0}" = "1" ] || [ -f "${STUB_STATE:-/nonexistent}/user_created" ]; then
+      extra=""
+      if [ -f "${STUB_STATE:-/nonexistent}/groups" ]; then
+        extra=" $(tr '\n' ' ' < "$STUB_STATE/groups")"
+      fi
+      echo "${STUB_GROUPS:-trading}$extra"
+    else
+      exit 1
+    fi
     ;;
 esac
 """,
@@ -216,7 +243,13 @@ def _posix(path: Path) -> str:
 
 # Argv prefixes that only read state. Everything else a stub logs counts as a mutation.
 _PROBE_FIRST_WORDS = {"dpkg-query", "dpkg", "getent", "id", "ssh-keygen"}
-_PROBE_PREFIXES = ("ufw status", "systemctl is-enabled", "sshd -T", "chronyc tracking")
+_PROBE_PREFIXES = (
+    "ufw status",
+    "systemctl is-enabled",
+    "sshd -T",
+    "chronyc tracking",
+    "passwd -S",
+)
 
 
 def is_mutation(line: str) -> bool:
@@ -242,6 +275,11 @@ class Host:
     @property
     def log(self) -> Path:
         return self.base / "stub.log"
+
+    @property
+    def state(self) -> Path:
+        """Stub state (user created, groups added); outside ``root`` so tree() ignores it."""
+        return self.base / "state"
 
     @property
     def secrets(self) -> Path:
@@ -302,6 +340,7 @@ class Host:
                 "MSYS_NO_PATHCONV": "1",
                 "BOOTSTRAP_SCRIPT": _posix(BOOTSTRAP),
                 "STUB_LOG": _posix(self.log),
+                "STUB_STATE": _posix(self.state),
                 "TRADING_ROOT_PREFIX": _posix(self.root),
                 "OS_RELEASE_FILE": _posix(self.base / "os-release"),
                 "STUB_TRACKING_FILE": _posix(self.tracking),
@@ -326,6 +365,7 @@ def build_host(base: Path, bash: str) -> Host:
     for name, body in STUBS.items():
         _write(base / "bin" / name, "#!/usr/bin/env bash\n" + _LOG + body)
     _write(base / "driver.sh", DRIVER)
+    (base / "state").mkdir(parents=True, exist_ok=True)
     h.set_os("ubuntu-24.04")
     _write(
         h.secrets,
@@ -459,8 +499,10 @@ def test_dry_run_prints_the_ordered_plan_and_ends_with_the_checklist(host: Host)
             "install -y docker-ce",
             "+ useradd",
             "+ usermod -aG docker",
+            "+ usermod -aG sudo",
             "+ ufw allow",
             "+ ufw --force enable",
+            "lock-out guard would require",
             "00-trading-hardening.conf",
             "+ sshd -t",
             "+ systemctl try-reload-or-restart ssh",
@@ -508,7 +550,7 @@ DROPIN_REL = Path("etc/ssh/sshd_config.d/00-trading-hardening.conf")
 CONFIGURED_ENV = {
     "STUB_INSTALLED": "ALL",
     "STUB_USER_EXISTS": "1",
-    "STUB_GROUPS": "trading docker",
+    "STUB_GROUPS": "trading docker sudo",
     "STUB_UFW_ACTIVE": "1",
     "STUB_ENABLED": "chrony docker",
     "STUB_GIT_HEAD": "0123abc",
@@ -669,6 +711,105 @@ def test_ssh_drop_in_is_removed_when_sshd_t_fails(host: Host) -> None:
     assert proc.returncode != 0
     assert not (host.root / DROPIN_REL).exists()
     assert not has_call(host.log_lines(), "systemctl try-reload-or-restart")
+
+
+# --- WR-05 (D062): trading user joins sudo with a password; the lock-out guard fails closed ---
+
+
+def test_user_step_adds_the_trading_user_to_the_sudo_group(golden: Golden) -> None:
+    lines = golden.first_run_lines
+    install = first_index(lines, "apt-get install -y ca-certificates curl git ufw sudo")
+    add = first_index(lines, "usermod -aG sudo trading")
+    assert install < add < first_index(lines, "sshd -t")
+    assert (golden.host.root / DROPIN_REL).is_file()
+
+
+def test_sudo_group_is_not_re_added_on_a_configured_host(host: Host) -> None:
+    proc = real_run(host, **CONFIGURED_ENV)
+    assert proc.returncode == 0, proc.stderr
+    lines = host.log_lines()
+    assert not has_call(lines, "usermod -aG sudo")
+    assert not any(ln.startswith("apt-get install") and "sudo" in ln for ln in lines)
+
+
+def assert_sudo_guard_refused(host: Host, proc: subprocess.CompletedProcess[str]) -> None:
+    assert proc.returncode != 0
+    assert "lock-out guard" in proc.stderr
+    assert not (host.root / DROPIN_REL).exists()
+    lines = host.log_lines()
+    assert not has_call(lines, "sshd -t")
+    assert not has_call(lines, "systemctl try-reload-or-restart")
+
+
+@pytest.mark.parametrize("status", ["L", "NP", "UNREADABLE"])
+def test_sudo_guard_refuses_an_account_without_a_usable_password(host: Host, status: str) -> None:
+    proc = real_run(host, STUB_PASSWD_STATUS=status)
+    assert_sudo_guard_refused(host, proc)
+    assert "passwd trading" in proc.stderr
+    assert "again" in proc.stderr
+    assert has_call(host.log_lines(), "usermod -aG sudo trading")
+
+
+def test_sudo_guard_refuses_an_account_that_is_not_in_the_sudo_group(host: Host) -> None:
+    proc = real_run(host, STUB_USERMOD_NOOP="1", STUB_PASSWD_STATUS="P")
+    assert_sudo_guard_refused(host, proc)
+    assert "sudo group" in proc.stderr
+
+
+def test_sudo_guard_fails_closed_on_a_rerun_of_a_configured_host(host: Host) -> None:
+    proc = real_run(host, **{**CONFIGURED_ENV, "STUB_PASSWD_STATUS": "L"})
+    assert_sudo_guard_refused(host, proc)
+    assert not has_call(host.log_lines(), "useradd")
+
+
+def test_sudo_guard_flow_first_run_stops_then_second_run_after_passwd_succeeds(host: Host) -> None:
+    first = real_run(host, STUB_PASSWD_STATUS="NP")
+    assert_sudo_guard_refused(host, first)
+    assert has_call(host.log_lines(), "useradd")
+    second = real_run(host, STUB_PASSWD_STATUS="P")
+    assert second.returncode == 0, second.stderr
+    assert (host.root / DROPIN_REL).is_file()
+    assert sum(1 for ln in host.log_lines() if ln.startswith("useradd")) == 1
+
+
+def test_dry_run_shows_the_sudo_step_and_the_guard_without_calling_passwd(host: Host) -> None:
+    before = host.tree()
+    proc = host.run(host.args("--dry-run"), env={"STUB_PASSWD_STATUS": "L"})
+    assert proc.returncode == 0, proc.stderr
+    assert "+ usermod -aG sudo trading" in proc.stdout
+    guard = [ln for ln in proc.stdout.splitlines() if "lock-out guard would require" in ln]
+    assert len(guard) == 1
+    assert not guard[0].startswith("+ ")
+    assert "trading" in guard[0]
+    assert "sudo group" in guard[0]
+    assert "passwd -S" in guard[0]
+    assert "passwd trading" in guard[0]
+    assert not has_call(host.log_lines(), "passwd")
+    assert host.tree() == before
+    assert host.mutations() == []
+
+
+def test_the_script_never_sets_or_reads_a_password(golden: Golden, host: Host) -> None:
+    proc = real_run(host, STUB_PASSWD_STATUS="NP")
+    assert proc.returncode != 0
+    for lines in (golden.first_run_lines, host.log_lines()):
+        calls = [ln for ln in lines if ln.startswith("passwd")]
+        assert calls, "the guard must read the account status"
+        assert all(ln.startswith("passwd -S trading") for ln in calls), calls
+    assert SECRET_PASSWORD not in combined(proc)
+
+
+def test_ssh_drop_in_keeps_permit_root_login_no_and_exactly_four_directives(
+    golden: Golden,
+) -> None:
+    content = (golden.host.root / DROPIN_REL).read_text(encoding="utf-8")
+    directives = [ln for ln in content.splitlines() if ln.strip() and not ln.startswith("#")]
+    assert directives == [
+        "PasswordAuthentication no",
+        "KbdInteractiveAuthentication no",
+        "PermitRootLogin no",
+        "PubkeyAuthentication yes",
+    ]
 
 
 # --- Task 3: chrony, checkout, .env and the operator checklist ---------------------------------
@@ -897,8 +1038,11 @@ CHECKLIST_NEEDLES = (
     "second SSH session",
     "disk encryption",
     "backup.sh --install-timer",
-    "Root SSH login is now disabled",  # WR-05: say how root is reached after hardening
-    "provider console",
+    "Root SSH login is now disabled",  # WR-05 (D062): pins the new item 6 sentence
+    "passwd trading",
+    "sudo -v",
+    "sudo /opt/trading/deploy/backup.sh --install-timer",
+    "no passwordless sudo rule",
     "docker group",
 )
 
@@ -907,6 +1051,8 @@ def assert_checklist_last(out: str) -> None:
     assert "Operator checklist" in out
     for needle in CHECKLIST_NEEDLES:
         assert needle in out, f"checklist lacks {needle!r}"
+    assert "has no sudo" not in out
+    assert "from the provider console" not in out
     assert out.index("Operator checklist") > out.index("install -m 0600")
 
 

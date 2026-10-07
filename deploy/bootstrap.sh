@@ -111,7 +111,7 @@ preflight() {
   ((supported)) || die "unsupported OS '$combo' (supported: ${SUPPORTED_OS[*]}); nothing was changed"
 
   local cmd
-  for cmd in awk cmp mktemp ssh-keygen dpkg-query apt-get; do
+  for cmd in awk cmp mktemp ssh-keygen dpkg-query apt-get passwd; do
     require_cmd "$cmd"
   done
 
@@ -167,8 +167,10 @@ apt_install_missing() {
   fi
 }
 
+# sudo is installed only when dpkg reports it missing (D062 WR-05): Debian minimal images may not
+# ship it, and the package creates the sudo group that step_user needs. It runs before step_user.
 step_base_packages() {
-  apt_install_missing ca-certificates curl git ufw
+  apt_install_missing ca-certificates curl git ufw sudo
 }
 
 DOCKER_PACKAGES=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
@@ -216,6 +218,22 @@ merge_keys() {
   } | awk 'NF && !seen[$0]++'
 }
 
+# user_in_group GROUP: true when the trading user is a member of GROUP. No pipe, so pipefail and
+# SIGPIPE cannot turn a match into a miss.
+user_in_group() {
+  local groups=""
+  groups="$(id -nG "$TRADING_USER" 2>/dev/null || true)"
+  [[ " $groups " == *" $1 "* ]]
+}
+
+# passwd_status: the status word of `passwd -S USER` (P usable password, L locked, NP none);
+# empty when unreadable. Only this one field is ever read; a password is never read or set.
+passwd_status() {
+  local out=""
+  out="$(passwd -S "$TRADING_USER" 2>/dev/null || true)"
+  awk 'NR == 1 { print $2 }' <<<"$out"
+}
+
 step_user() {
   local ssh_dir keys_dst
   if getent passwd "$TRADING_USER" >/dev/null 2>&1; then
@@ -223,8 +241,14 @@ step_user() {
   else
     run useradd --create-home --shell /bin/bash "$TRADING_USER"
   fi
-  if ! id -nG "$TRADING_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+  if ! user_in_group docker; then
     run usermod -aG docker "$TRADING_USER"
+  fi
+  # D062 (WR-05): once root SSH login is off, this account is the administrator and sudo asks for
+  # its password. No sudoers rule is written: a rule that skips the password for a script this
+  # account can edit would be unrestricted root.
+  if ! user_in_group sudo; then
+    run usermod -aG sudo "$TRADING_USER"
   fi
   resolve_user_home
   ssh_dir="$(p "$USER_HOME/.ssh")"
@@ -307,6 +331,29 @@ sshd_effective_gaps() {
   done
 }
 
+# sudo_lockout_guard: with root SSH login off, the trading user must be able to sudo, and useradd
+# creates no password. Refuse to continue unless the account is in the sudo group and passwd -S
+# reports status P. The operator sets the password with passwd in the root session; this script
+# never sets, reads or prints a password. A dry run only states what would be checked.
+sudo_lockout_guard() {
+  local status shown
+  if [[ $DRY_RUN == 1 ]]; then
+    printf 'lock-out guard would require: %s in the sudo group and passwd -S %s reporting status P (set it with: passwd %s)\n' \
+      "$TRADING_USER" "$TRADING_USER" "$TRADING_USER"
+    return 0
+  fi
+  user_in_group sudo ||
+    die "lock-out guard: $TRADING_USER is not in the sudo group; not writing the SSH drop-in (root SSH login would be disabled with no way to administer the host)"
+  status="$(passwd_status)"
+  if [[ $status != P ]]; then
+    shown="$status"
+    if [[ ! $shown =~ ^[A-Z]{1,2}$ ]]; then
+      shown="unreadable"
+    fi
+    die "lock-out guard: passwd -S $TRADING_USER reports status $shown, not P (no usable password, so sudo would fail once root SSH login is disabled); not writing the SSH drop-in. Run 'passwd $TRADING_USER' in this root session, then run the same bootstrap command again"
+  fi
+}
+
 step_sshd() {
   local cfg dropin gaps
   cfg="$(p /etc/ssh/sshd_config)"
@@ -319,6 +366,7 @@ step_sshd() {
     keys_file_has_valid_key "$(p "$USER_HOME/.ssh/authorized_keys")" ||
       die "lock-out guard: $TRADING_USER has no valid authorized_keys entry; not writing the SSH drop-in"
   fi
+  sudo_lockout_guard
 
   write_if_changed "$dropin" "$(sshd_dropin_content)" 0644
   if ((WROTE)); then
@@ -528,11 +576,14 @@ Operator checklist (none of this is automated):
   5. Provider disk encryption: enable it (or confirm it is on) in the provider console.
   6. Backups: set the BACKUP_* variables in $INSTALL_DIR/.env as $TRADING_USER, and run
        $INSTALL_DIR/deploy/backup.sh --init-remote
-     as $TRADING_USER. Root SSH login is now disabled and $TRADING_USER has no sudo, so install
-     the timer as root from the provider console (or from this root session, before you close it;
-     the install does not read .env):
-       $INSTALL_DIR/deploy/backup.sh --install-timer
-     The same applies to every later apt, ufw or systemctl change: reach root via the console.
+     as $TRADING_USER. Root SSH login is now disabled. $TRADING_USER is in the sudo group and
+     sudo asks for its password; there is no passwordless sudo rule. The lock-out guard let this
+     script continue only because that password is usable; you set it with passwd $TRADING_USER
+     in the root session. In a SECOND SSH session as $TRADING_USER with your key, run sudo -v and
+     see it succeed BEFORE you close this root session. Afterwards use sudo for the backup timer
+     (the install does not read .env):
+       sudo $INSTALL_DIR/deploy/backup.sh --install-timer
+     Use sudo the same way for every later apt, ufw or systemctl change.
   7. The docker group is root-equivalent: keep it to this one operator account. ufw does not
      control ports published by Docker; publish only 127.0.0.1 ports.
   8. Delete the copied secrets file from this host once .env is verified: $SECRETS_FILE

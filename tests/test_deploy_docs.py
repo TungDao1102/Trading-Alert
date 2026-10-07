@@ -26,6 +26,7 @@ DECISIONS = REPO_ROOT / "docs" / "DECISIONS.md"
 DOC_STATUS = REPO_ROOT / "docs" / "DOC_STATUS.md"
 SOURCES = REPO_ROOT / "docs" / "SOURCES.md"
 REFRESH = REPO_ROOT / "deploy" / "refresh-pins.sh"
+DEPLOY_DIR = REPO_ROOT / "deploy"
 
 DOCKERFILE = REPO_ROOT / "Dockerfile"
 SSHD_DOCKERFILE = REPO_ROOT / "tests" / "fixtures" / "cutover" / "Dockerfile.sshd"
@@ -456,6 +457,51 @@ def test_section_13_states_bootstrap_prerequisites_and_firewall_facts() -> None:
         ),
     )
     assert not missing, f"section 13 lacks: {missing}"
+
+
+def _subsection(text: str, number: str) -> str:
+    """Body of ``### <number> ...`` up to the next heading ('' when absent)."""
+    match = re.search(rf"^### {re.escape(number)} [^\n]*\n(.*?)(?=^##|\Z)", text, re.M | re.S)
+    return match.group(0) if match else ""
+
+
+def test_section_13_documents_sudo_with_a_password_after_ssh_hardening() -> None:
+    """WR-05 (D062): trading is the administrator once root SSH login is off."""
+    section = _section(_runbook(), 13)
+    missing = _missing(
+        section,
+        (
+            "passwd trading",
+            "sudo -v",
+            "sudo group",
+            "passwd -S",
+            "passwordless sudo rule",
+            "`ufw`, `sudo`)",
+            "PermitRootLogin no",
+        ),
+    )
+    assert not missing, f"section 13 lacks: {missing}"
+    checklist = _subsection(_runbook(), "13.5")
+    assert "sudo /opt/trading/deploy/backup.sh --install-timer" in checklist
+    assert "passwd trading" in checklist
+    assert "sudo -v" in checklist
+
+
+def test_runbook_no_longer_says_trading_has_no_sudo_or_to_use_the_console_for_root() -> None:
+    text = _runbook()
+    assert "has no sudo" not in text
+    assert "from the provider console" not in text
+
+
+def test_no_passwordless_sudo_rule_exists_in_deploy_or_the_runbook() -> None:
+    keyword = "NOPASSWD"
+    files = [p for p in sorted(DEPLOY_DIR.rglob("*")) if p.is_file()] + [RUNBOOK]
+    offenders = [
+        p.relative_to(REPO_ROOT).as_posix()
+        for p in files
+        if keyword in p.read_text(encoding="utf-8", errors="replace")
+    ]
+    assert not offenders, f"a passwordless sudo rule is named in: {offenders}"
 
 
 def _script_flags(script: Path) -> set[str]:
