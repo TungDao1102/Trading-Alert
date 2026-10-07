@@ -3,12 +3,12 @@ status: complete
 phase: 14-backtest-causality-rewrite
 source: 14-01-SUMMARY.md .. 14-16-SUMMARY.md
 started: 2026-10-05T00:00:00Z
-updated: 2026-10-05T00:00:00Z
+updated: 2026-10-07T12:00:00Z
 ---
 
 ## Current Test
 
-[testing complete — 1 known minor issue recorded]
+[testing complete - the one minor gap (G-14-06) re-tested and resolved 2026-10-07]
 
 Note: Phase 14 is a backend phase with no UI. At the user's request, Claude answered the UAT
 checkpoints from evidence it ran or read itself (not from the user's own observation).
@@ -49,9 +49,10 @@ evidence: tests/test_backtest_determinism.py, tests/test_domain_no_float.py
 
 ### 6. END_OF_DATA and mark-data holes
 expected: An open position at data end closes END_OF_DATA, never dated before its own TP1; a hole in mark data falls back to the trade-price bar, flagged, with gap-through-stop priced at the bar open.
-result: issue
-reported: "Fixed in review (CR-01, WR-04, WR-09) but WR-09 is only partly fixed: holes in an hour where the symbol has no strategy bar are still not scanned and leave no coverage note."
-severity: minor
+result: pass
+source: automated (claude), re-test after gap closure 14-17 and review fixes WR-01..WR-05
+reported_before: "Fixed in review (CR-01, WR-04, WR-09) but WR-09 is only partly fixed: holes in an hour where the symbol has no strategy bar are still not scanned and leave no coverage note." (severity minor, gap G-14-06)
+evidence: plan 14-17 (annotate-only): a hole in a window with no strategy bar now leaves a coverage_note that reaches report.intrabar_coverage.coverage_notes; tests/test_backtest_mark_hole_coverage.py (27) incl. the engine-to-report tracer and the UAT scenario; exits, determinism, simulator, records, report, experiment and the 16 goldens pass unchanged; no file under params/ or tests/fixtures/ changed; SIMULATOR_SEMANTICS_VERSION stays 2.0.0; verify_decision_alignment ALL_PASS. Not decided: OQ-1 (a trade held through holes still counts as a normal trade), see deferred-items.md.
 
 ### 7. Experiment record identity binding
 expected: assemble refuses a run whose strategy version, parameter-set hash, cost-model hash, universe or dataset id does not match the record; reproduce with empty inputs raises.
@@ -80,8 +81,8 @@ evidence: 14-CONTEXT D-27 (RESOLVED by the user 2026-10-04: "dùng 0.5"); D052 s
 ## Summary
 
 total: 10
-passed: 9
-issues: 1
+passed: 10
+issues: 0
 pending: 0
 skipped: 0
 blocked: 0
@@ -89,7 +90,8 @@ blocked: 0
 ## Gaps
 
 - truth: "Mark-data holes are detected and flagged in every window, including hours with no strategy bar"
-  status: failed
+  status: resolved
+  resolved_by: 14-17 (commits fb6f3c8..14fcac5) and review fixes WR-01..WR-05 (commits f7aa000..712cced)
   reason: "Known partial fix of review finding WR-09: needs a new field on the plan state"
   severity: minor
   test: 6
