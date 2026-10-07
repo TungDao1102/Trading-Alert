@@ -1,19 +1,20 @@
 ---
 gsd_state_version: "1.0"
 milestone: v0.3
-current_phase: 14
-current_phase_name: Backtest Simulator Causality Rewrite
+current_phase: 16
+current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: planning
-stopped_at: Completed 14-17-PLAN.md
-last_updated: "2026-10-07T03:48:59.253Z"
+stopped_at: Phase 14 complete, ready to plan Phase 16
+last_updated: "2026-10-07T04:30:48.908Z"
 last_activity: 2026-10-07
-last_activity_desc: Phase 15 complete, transitioned to Phase 14
-state_head: fbd93dd16cb051d092b33a72bedb0534410e0af7
+last_activity_desc: Phase 14 complete, transitioned to Phase 16
+state_head: efd337da18f59f2df5403ce567871bbcd621d974
 progress:
   total_phases: 29
   completed_phases: 16
   total_plans: 144
   completed_plans: 143
+  percent: 57
 milestone_name: milestone
 ---
 
@@ -30,18 +31,18 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 ## Current Position
 
-Phase: 14 — Backtest Simulator Causality Rewrite
-Plan: 17 of 17 plans executed
-Status: Phase 14: 17 of 17 plans executed, awaiting verification
-Last activity: 2026-10-07 — Plan 14-17 complete (mark-hole coverage notes, annotate-only; OQ-1 left to the user)
+Phase: 16 — Paper Runtime Composition + SHADOW Approval Mode
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-10-07 — Phase 14 complete, transitioned to Phase 16
 
-Progress: [█████░░░░░] 54%
+Progress: [██████░░░░] 57%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 100 (Phase 03 + Phase 05 plans 1+2 + Phase 06 plan 1)
+- Total plans completed: 117 (Phase 03 + Phase 05 plans 1+2 + Phase 06 plan 1)
 - Average duration: ~14 min
 - Total execution time: ~100 min
 
@@ -65,6 +66,7 @@ Progress: [█████░░░░░] 54%
 | 11 | 8 | - | - |
 | 7 | 4 | - | - |
 | 15 | 18 | - | - |
+| 14 | 17 | - | - |
 
 **Recent Trend:**
 
@@ -519,5 +521,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-10-07T03:48:58.205Z
-Stopped at: Completed 14-17-PLAN.md
+Stopped at: Phase 14 complete, ready to plan Phase 16
 Resume file: None
