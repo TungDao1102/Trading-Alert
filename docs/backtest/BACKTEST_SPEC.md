@@ -32,6 +32,8 @@ If one 1m mark minute touches both the stop and a target, the stop wins (`STOP_F
 
 If 1m mark coverage is missing for part of a strategy bar, the remainder of that bar is resolved once at the strategy-bar close from the bar range, stop-first, with a counted `fallback_applied` flag and a coverage note. The fallback applies to exits only: a missing trade minute never produces a fill.
 
+While a position is open the simulator walks the mark minutes in order. When two consecutive walked minutes, or the minute before the fill minute and the first walked minute, are more than one minute apart, or when a position closed `END_OF_DATA` has whole minutes missing before the data end, the missing minutes carry no mark price, so no stop or target is evaluated minute by minute for them. This applies to minutes outside any strategy-bar fallback, for example an hour in which the symbol has no strategy bar. The trade's `coverage_note` records the first and last missing minute. This is annotation only: it does not set `fallback_applied`, changes no price, time or count, and the report lists the note under its intrabar coverage notes.
+
 Exit ladder: TP1 is a reduce-only partial of half the filled quantity (`TP1_QUANTITY_FRACTION` 0.5, a code constant covered by `simulator_semantics_version`), TP2 closes the remainder, the stop is unchanged after TP1. A position is carried until SL, TP2 or data end; there is no time stop. A position open at data end closes at the last mark close as `END_OF_DATA`.
 
 ## 5. Fees and funding
