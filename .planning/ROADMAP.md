@@ -936,6 +936,10 @@ This was former Phase 12. Today `AccountState.equity` and `daily_loss_quote` are
 
 **Audit refs**: F-012, F-013, F-963, F-407, F-955, F-908, F-014
 
+**Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
+- [G4-039] Phases 21 and 22 replace the UNKNOWN margin type, leverage and equity in the plan constraint snapshot so that it can become COMPLETE (source: .planning/phases/17-operational-persistence-layer/17-13-SUMMARY.md:208; decision: none required)
+- [G2-042] Daily loss (D033) counts commissions, but whether Binance `realizedPnl` excludes commission is unverified: `LIVE_NET_PNL_SEMANTICS_VERIFIED` is False, so live R stays INCOMPLETE; the verification itself is owned by Phase 24 and this phase depends on its outcome (source: src/analytics/live_outcomes.py:77, .planning/phases/10-journal-depth-kill-gate-operations/10-VERIFICATION.md:208; decision: none required)
+
 **Plans:** 0 plans
 
 Plans:
@@ -958,6 +962,10 @@ This was former Phases 13 and 14.
 4. Position mode is one-way single-asset only. Any other mode results in NO_TRADE (F-965, F-020).
 
 **Audit refs**: F-011, F-964, F-966, F-965, F-020, F-019
+
+**Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
+- [G3-001] The Change-Position-Mode wording was not fetched in Phase 11 and docs/SOURCES.md still carries it unconfirmed; re-confirm it on the official page before criterion 4 relies on the one-way check (source: .planning/phases/11-decision-alignment/11-05-SUMMARY.md:125-126, docs/SOURCES.md:46; decision: D044)
+- [G4-039] Fill the UNKNOWN margin type and leverage fields of the plan constraint snapshot so it can become COMPLETE (see Phase 21) (source: .planning/phases/17-operational-persistence-layer/17-13-SUMMARY.md:208; decision: none required)
 
 **Plans:** 0 plans
 
@@ -988,6 +996,10 @@ This was former Phase 16.
 5. **Findings from the live Telegram test (2026-10-04, Phase 8 behaviour):** a decided message keeps its button and the bot answers every later tap (replays are idempotent: 3 taps gave 1 transition, but the keyboard must be removed and later taps refused); `actor_id` is empty on the decided approval, so the journal does not say who decided; APPROVE moves straight to APPROVED with no CONFIRM step (D041); the application has no error handler, so callbacks queued during downtime raise `BadRequest: Query is too old` at `query.answer()` and must be handled; the messages show no money amounts and the display note says Asia/Ho_Chi_Minh while the times are UTC; SIMULATE/APPROVE/SKIP are separate keyboards, so one message carries one button (decide whether one message should carry APPROVE and SKIP together).
 
 **Audit refs**: F-508, F-707, F-405, F-509, F-127, F-015, F-016, D041
+
+**Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
+- [G4-032] After a plan expires, a redelivered APPROVE is answered APPROVAL_EXPIRED even if the plan was executed; if the message should show "already executed", the composition must read the stored outcome via `PgExecutionStateStore.get_entry`, and criterion 4 tests should cover it (source: .planning/phases/17-operational-persistence-layer/17-14-SUMMARY.md:159; decision: none required)
+- [G4-042] `uq_approvals_one_decided_per_plan` conflicts with expiring sibling approval rows (a second sibling EXPIRED write violates the index); decide the expiry rule (exclude EXPIRED from the index predicate, or plan-level expiry) and record it in DATA_MODEL (source: .planning/phases/17-operational-persistence-layer/17-REVIEW.md:160; decision: open user decision)
 
 **Plans:** 0 plans
 
@@ -1025,6 +1037,23 @@ Plans:
 
 **Audit refs**: F-201, F-956, F-202, F-104, F-124, D042
 
+**Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
+- [D055] The -4509 finding in criterion 5 (protective legs placed after the entry fills) is a recorded observation, not a chosen execution model; criteria 1 and 2 are NOT amended and depend on the D055 outcome (the Phase 18 probe, then a user decision); no LIVE execution until D055 is closed with a verified execution policy (source: docs/DECISIONS.md D055; decision: D055, execution model is an open user decision)
+- [D056] DEGRADED health policy: on mainnet a DEGRADED health state cannot enable any order-capable capability and, once enabled, no new entry may be created until health returns to an allowed state; Demo may run DEGRADED only in an explicit Demo or Rehearsal mode that journals the health state and can never switch to LIVE. Today `src/ops/health.py` lets DEGRADED pass and nothing under `src` produces it, so a producer, a state transition and an explicit mode are designed here together with Phase 26 (source: docs/DECISIONS.md D056, src/ops/health.py:37-39; decision: D056)
+- [D058] Live mark-price gate: execution fails closed when the mark-price data needed for risk or protection is missing or stale, and LIVE cannot be enabled in that state; a stale or degraded mark price while LIVE is enabled is an invalid state and LIVE never bypasses it. This phase owns the enablement side; Phase 20 owns stale-feed handling (source: docs/DECISIONS.md D058; decision: D058)
+- [G2-014] A tap from an unknown chat or another user has never been observed live (NOT_REHEARSED); reject it live with no state change and a journaled `chat_gate_rejected` (needs a second Telegram account or a group) (source: .planning/phases/09-live-execution-rollout/09-DEMO-REHEARSAL-FINDINGS.md:9,35; decision: none required)
+- [G2-042] Verify against current Binance docs and a Demo fill whether `realizedPnl` excludes commission, record the citation, then decide whether to set `LIVE_NET_PNL_SEMANTICS_VERIFIED` (Phase 10 assigned this to Phase 24) (source: .planning/phases/10-journal-depth-kill-gate-operations/10-VERIFICATION.md:208, src/analytics/live_outcomes.py:77; decision: none required, verification task)
+- [G3-008] Live commission wiring: `resolve_live_cost_rates` has no production caller; add per-symbol commission rates to the live risk-input producer (scheduler, cache, refresh loop, fail closed), re-read the official commissionRate page first (MEDIUM confidence) and record Demo behaviour (source: .planning/phases/12-fee-cost-model-correctness/12-05-SUMMARY.md:93, .planning/phases/12-fee-cost-model-correctness/12-VERIFICATION.md:71,83; decision: D046 item 7)
+- [G3-014] Fold phase 12 review Info IN-01 (negative maker rate fails closed) and IN-05 (`assert`-based invariants) into the commission-wiring plan (source: .planning/phases/12-fee-cost-model-correctness/12-REVIEW.md:121,150; decision: none required)
+- [G3-029] WR-06: per-service env allowlists (the shared `env_file` split) are in place and verified, with the cutover test and drills re-run, before real live keys enter `.env`; WR-05 (who administers the host after hardening) and CR-01 are still undecided (source: .planning/phases/13.1-deployment-ci/13.1-OPEN-DECISIONS.md:10-12; decision: open user decision)
+- [G3-033] The VPS is built with `deploy/bootstrap.sh` and the RUNBOOK section 13 and section 17 "real host" rows are executed and recorded (docker apt install, ufw, sshd drop-in, chrony replacing timesyncd, NTP drift monitoring); the systemd backup timer firing and catching up after downtime and one real `migrate.sh` run (or an explicit waiver) are checked too (source: .planning/phases/13.1-deployment-ci/13.1-UAT.md:60-71; decision: D042)
+- [T-04] OPS-04 is listed in this phase's requirements but no criterion names it: health and diagnostic output includes the runtime Python version and the application git revision (source: .planning/REQUIREMENTS.md:77; decision: none required)
+- [G4-029] Wire `resolve_unresolved_intents` (startup intent recovery) and the system-state and constraint-snapshot rehydrate paths into the composition root (source: .planning/phases/17-operational-persistence-layer/17-12-SUMMARY.md:201, .planning/phases/17-operational-persistence-layer/17-13-SUMMARY.md:202; decision: none required)
+- [G4-040] The sync PostgreSQL store runs on the event loop; wrap store calls in `asyncio.to_thread` or use an async pool, or record the decision (source: .planning/phases/17-operational-persistence-layer/17-01-SUMMARY.md:63, docs/DECISIONS.md D051 item (a); decision: open user decision)
+- [G3-005] Promote `NO_FILL` and `HEALTH_CHECK_FAILED` into the RejectionReason enum and update GLOSSARY 9.3 (source: docs/GLOSSARY.md:207-208, docs/DECISIONS.md D044 item (1); decision: D044)
+- [G2-035] Phase 9 review Info IN-01 (pyproject.toml E501 ignore), IN-05 (headroom fixture 198+3), IN-06 (`plan_hash=approval.trade_plan_id` at `src/execution/manager.py:532`) and IN-07 (`src/ops/health.py:404` accepts error_count above total_count) were carried here as warnings and need triage or a won't-fix note (source: .planning/phases/09-live-execution-rollout/09-REVIEW-DISPOSITION.md:94-118,153; decision: none required)
+- [T-02] OPS-06 (separate paper and live credentials, WR-06, provider disk encryption) is Pending and mapped to closed Phase 13.1; the WR-06 half belongs here and the disk-encryption half to Phase 26 (source: .planning/REQUIREMENTS.md:79,158; decision: none required, the REQUIREMENTS re-map is a separate change)
+
 **Plans:** 0 plans
 
 Plans:
@@ -1061,6 +1090,12 @@ Plans:
 
 **Audit refs**: F-501, F-104, F-124, F-702, F-701, F-401, F-126, D040, D041
 
+**Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
+- [G2-016] The scenario list in criterion 1 omits three of the eight RUNBOOK drills: manual close outside the system (do the protective legs orphan or auto-cancel, see Phase 20), stale feed and an unprotected-position drill (source: src/ops/drills.py:71-80, .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md:5-12; decision: none required)
+- [D055] The scenarios "SL rejected after fill" and "partial fill" depend on the execution model chosen after the D055 probe; they are not amended here (source: docs/DECISIONS.md D055; decision: D055, execution model is an open user decision)
+- [D056] Demo runs in a DEGRADED state are never evidence of live readiness; the scenario suite and the soak must also run in a healthy state (source: docs/DECISIONS.md D056 item 2(d); decision: D056)
+- [G2-030] After Phase 24, fill the "Demo cross-check" lines of `09-EXCHANGE-FACTS.md` (Facts 3 and 5 and the addenda read NOT YET OBSERVED) from the recorded Demo order ids (source: .planning/phases/09-live-execution-rollout/09-EXCHANGE-FACTS.md:15,51,67; decision: none required)
+
 **Plans:** 0 plans
 
 Plans:
@@ -1082,6 +1117,21 @@ Plans:
 5. CANARY (D040): a mainnet READ-ONLY API key (trade and withdraw disabled, IP-restricted to the VPS address per D042) verifies real exchangeInfo filters, commission rates, mark prices and balances against what the system assumes; then a dedicated small isolated sub-account (order of USD 50–100, minimum size, leverage ≤ cap) executes a pre-registered number of trades with the operator watching, with zero divergences before full LIVE is allowed.
 
 **Audit refs**: F-953, F-105, F-960, F-807, F-808, F-109, F-124, F-809, F-108, F-121, F-704, F-101, F-605, F-705, F-709, F-708, D040, D042
+
+**Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
+- [T-03] The goal text says "a family has passed under protocol v1.1.0", but D052 voids all earlier backtest evidence; the goal is not edited here, read it as the protocol version in force (v2.0.0 or later) when this phase is planned (source: docs/DECISIONS.md D052 item (k), Phase 26 Goal above; decision: D052)
+- [D059-3] D013 stays Provisional; its own condition (three independently specified candidate families and at least 6 months of research) is unchanged and does not move because Phase 16 or an implementation finishes (source: docs/DECISIONS.md D059 item 3; decision: D059)
+- [D059-5] `enable()` requires a passing candidate produced by the Phase 16 research runner work (Backlog 999.2 is not a numbered phase); candidates come only from pre-registered values with a rationale, never from a backtest result, and need the user's exact-hash approval before paper start (source: docs/DECISIONS.md D059 item 5; decision: D059)
+- [D057] Once the protocol amendment lands, the executable G5 evaluation enforces the minimum of 30 qualifying closed trades and each `holdout_consumed.json` entry carries its own `protocol_version`; a candidate under the floor fails G5 and the holdout counts as consumed for that lineage (source: docs/DECISIONS.md D057; decision: D057, not yet in force)
+- [D056] Enablement refuses to treat DEGRADED health as an allowed state on mainnet, and live-readiness evidence comes only from healthy runs (source: docs/DECISIONS.md D056 items 1 to 3; decision: D056)
+- [G3-004] The executable G1-G5 gate code (`src/analytics/gates.py`), the append-only `holdout_consumed.json` writer and the `candidate_sha256` serialization (defined only in `scripts/decision_alignment/protocol.py`) do not exist in `src` yet (source: .planning/phases/11-decision-alignment/11-01-SUMMARY.md:143,151, docs/DECISIONS.md D043 and D044 item (3); decision: D043)
+- [G1-001] The research-gate is not a required status check on master (GitHub returned 403 on a private repo and an override was accepted); require it, or record a waiver, when the repo or plan changes (source: .planning/phases/01-research-formalization/01-VERIFICATION.md:11-14,126,150; decision: open user decision)
+- [G2-041] Triage Phase 10 review Info IN-01, IN-02 and IN-04 to IN-10, with IN-08 first (`scripts/dev/journal-report.ps1` `Import-DotEnv` exports every `.env` secret to the analytics process) (source: .planning/phases/10-journal-depth-kill-gate-operations/10-REVIEW.md:369-373; decision: none required)
+- [G2-045] Run the journal-report CLI against a populated Demo or paper journal and have the operator read the first report before any real-evidence kill-gate decision (source: .planning/phases/10-journal-depth-kill-gate-operations/10-VERIFICATION.md:154; decision: none required)
+- [G3-005] Promote `DISABLED` into the RejectionReason enum and update GLOSSARY 9.3 (source: docs/GLOSSARY.md:205, docs/DECISIONS.md D044 item (1); decision: D044)
+- [G3-030] CR-01: record whether the Parquet push keeps `--size-only` (a same-size changed file is skipped at push and caught by sha256 at pull) or switches to `--checksum`, as a DECISIONS row (source: .planning/phases/13.1-deployment-ci/13.1-OPEN-DECISIONS.md:12,51; decision: open user decision)
+- [G3-032] OPS-06 provider disk encryption check on the real host (source: .planning/phases/13.1-deployment-ci/13.1-UAT.md:72-77, .planning/REQUIREMENTS.md:79,158; decision: none required, see the Phase 24 entry T-02)
+- [G4-033] Separate database roles for the application and for migrations stay deferred to the go-live gate; the application role should not be the table owner and so should not be able to disable the append-only triggers (source: .planning/phases/17-operational-persistence-layer/17-CONTEXT.md:148, .planning/phases/17-operational-persistence-layer/17-02-SUMMARY.md:211; decision: none required)
 
 **Plans:** 0 plans
 
@@ -1160,7 +1210,40 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 **Goal:** Give an owner to the research-runner items that Phase 14 deferred to "the Phase 15 research runner", which no phase plans
 **Source phase:** 14
 **Recorded at:** 2026-10-07 during the Phase 14 close (user agreed)
+**Ownership (D059 item 5, 2026-10-07):** this is not a numbered phase. Phase 16 owns the research runner, the feasibility and sample-size gate and the registration of candidate parameter sets; Phase 26 requires a passing candidate produced by that work. Candidates come only from pre-registered values with a rationale, never from a backtest result, and still need the user's exact-hash approval before paper start. The matching entries are in the Inherited items blocks of Phase 16 and Phase 26.
 **Follow-ups:**
 - [ ] `modeled_costs_per_unit` is `None` on v2 filled `TradeRecord`s (14-12 item, D052): decide whether the runner restores it
 - [ ] No production caller of `read_code_version` plus `assemble` exists outside tests (D052): the runner must call them so a real run produces an `ExperimentRecord`; Phase 26 only owns holdout-once enforcement
 - [ ] OQ-1 (deferred-items.md "Open decisions for the user"): how a trade held through mark-price holes is treated in the evidence, to decide with the real count from the first real-data research run
+- [ ] BKTS-03 parameter-plateau analysis and sweep runner: REQUIREMENTS.md keeps BKTS-03 Pending against closed Phase 6 and `src/backtest/report.py` prints "not computed (BKTS-03 pending)"; Phase 14 left it to a runner (14-CONTEXT.md D-21, D-37), so the Phase 16 research runner delivers it
+
+### Phase 999.3: Info-finding cleanups (BACKLOG)
+
+**Goal:** Give every review Info finding and housekeeping item that no phase owns a named home and a pick-up trigger, so none is silently dropped. Each line says what it is, where it came from and when to pick it up. Triggers are proposals; none is a user decision.
+**Source phase:** 02 to 17 review files
+**Recorded at:** 2026-10-07 during the ownership batch
+**Follow-ups:**
+- [ ] Phase 02 (`02-REVIEW.md` IN-01, IN-02; `02-REVIEW.iter3.md` IN-02, IN-04 to IN-07): FundingSweepResult.empty ambiguity, the harvest-complete marker sharing `collector_gaps`, `oi_coverage_rows` swallowing `except duckdb.Error: continue` (`src/data/coverage.py:514`), `backfill_universe` aborting the whole universe on the first key failure. Trigger: the next change to `src/data` coverage or backfill; take `coverage.py:514` and the harvest marker first.
+- [ ] Phase 03 (`03-REVIEW.md` IN-01, IN-04, IN-06): registry barrel omits public API, `JournalEventRow.created_at_utc` nullable (`src/db/models.py:720`), `derive_child_id` discriminators are convention only. Trigger: the next persistence or id change; IN-04 matters before audit rows are relied on.
+- [ ] Phase 04 (`04-REVIEW.md` IN-01, IN-02, IN-07 substantive; IN-03, IN-05, IN-06 cosmetic): `Decimal(str(x))` float fallback at boundaries, bare `int()` truncation of Decimal parameters, `Signal.direction`, `setup_type` and `source_timeframe` as unvalidated strings (`src/domain/signal.py:50-51`, can fork ids). Trigger: before the research runner registers a candidate (Phase 16).
+- [ ] Phase 05 (`05-REVIEW.md` IN-01, IN-03, IN-04): a structlog failure propagates from pure risk math (`src/risk/quantization.py`), inverted warning and stop thresholds are not rejected, `src/risk/__init__.py` docstring overstates purity. Trigger: Phase 21 daily-loss work (fail-closed hygiene).
+- [ ] Phase 06 (`06-REVIEW.md` IN-06): `verify_parameter_set` derives identity from `path.parent.name` (`src/domain/registry.py:621`) with no REGISTRY_ROOT anchor. Trigger: the next registry change.
+- [ ] Phase 07 (`07-REVIEW.md` IN-01 to IN-07; IN-04 is owned by Phase 16): dead identity helpers, barrel omits the supervisor, duplicated retry ceilings, the SKIP label, `test_domain_no_float` scan list. Trigger: Phase 16 planning, or close as won't-fix.
+- [ ] Phase 07.1 (`07.1-REVIEW.md` IN-01 to IN-05): `binding.py` docstring misattributes the KeyError source, bare KeyError lacks the set identity, no divergent-keys hint, no breakout match fixture, `reproduce()` raises a bare KeyError outside the tripwire vocabulary. Trigger: the next change to `src/backtest/binding.py`.
+- [ ] Phase 08 (`08-REVIEW.md` IN-01 to IN-16; IN-10 is owned by Phase 18, IN-14 and IN-15 by Phase 20): dead code and two drill outcomes never emitted (`src/ops/drills.py`). Trigger: Phase 20 planning.
+- [ ] Phase 09 (`09-REVIEW-DISPOSITION.md` IN-01 to IN-07): carried into Phase 24 (see its Inherited items); IN-02 and IN-04 look stale and need a check first. Trigger: Phase 24 planning.
+- [ ] Phase 10 (`10-REVIEW.md` IN-01 to IN-10): owned by Phase 26 (see its Inherited items); IN-03 looks stale. Trigger: Phase 26 planning.
+- [ ] Phase 11 (`11-REVIEW.md` IN-01 to IN-08): tautological UN-03/04/05 gates, `SYMBOL_RE` in `scripts/decision_alignment/universe.py`, triplicated hash tables, weak bash freeze witnesses, power note. Trigger: the next decision-alignment gate change.
+- [ ] Phase 12 (`12-REVIEW.md` IN-01 to IN-06): IN-01 and IN-05 are folded into Phase 24 commission wiring; the rest (ASCII regex before Decimal, `MAX_RATE` defined in four places, "byte-locked" wording, lazy guard-rate load) wait. Trigger: Phase 24 commission-wiring plan.
+- [ ] Phase 13.1 (`13.1-REVIEW.md` IN-01 to IN-10): unquoted replacement in `backup.sh`, hard-coded systemd `User=trading`, Docker apt key not fingerprint-pinned, plaintext restore copies accumulate, `drill-remote` compares only row counts, stale `BACKUP_TARGET` docs, dead `portfolio.py` assignments and the F841 waiver, CI triggers on master only so develop is ungated, compose lacks no-new-privileges and cap_drop. Trigger: Phase 26 criterion 4 hardening review.
+- [ ] Phase 14 (`14-REVIEW.md` IN-01 to IN-08; `14-REVIEW-MARK-HOLES.md` IN-01 to IN-03): IN-03 latent look-ahead (constraints back-extrapolated, only counted), IN-04 duplicate scripted `signal_id`, IN-05 dead kind and float coercion, IN-06 population standard deviation feeding a standard error, IN-08 latent run abort; the mark-holes items were left open by choice. Trigger: the first real-data research run (Phase 16); IN-03 needs an evidence gate on the extrapolated-constraint count.
+- [ ] Phase 15 (`15-REVIEW-DISPOSITION.md` IN-02 to IN-06; IN-02 is placed in Phase 19): census extra bar, snapshot script asserts, non-ASCII digits in the rationale checker, maintainability. Trigger: mark IN-03 to IN-06 `deferred` in the disposition file at the next Phase 15 file touch. The paper-gate review Info items (`15-REVIEW-PAPER-GATE.md` IN-01 to IN-05) are in Phase 16.
+- [ ] Phase 17 (`17-REVIEW.md` IN-01 to IN-03; IN-04 is placed in Phase 23): stale "exchange-deduped" docstring (`src/execution/__init__.py:4`), SQL params chained into errors, the consume UPDATE not bound to plan and hash. Also `src/persistence/__init__.py` module map lists 4 of 9 modules. Trigger: the first Phase 18 or Phase 20 plan that touches `src/persistence`.
+- [ ] Housekeeping: funding is stored one Parquet file per tick (about 50,000 files under `data/raw/data_class=funding`); group by day or month, which changes backfill, the case-input builder and the backup readers together. Trigger: before the first full-history backup restore drill (Phase 26 criterion 3). Source: `.planning/phases/13-research-data-foundation-fixes/deferred-items.md:35`.
+- [ ] Housekeeping: `tests/test_backfill_cli.py` fails intermittently (`rc == 1`, about 1 in 15 to 30 runs) and the cause is unknown; explain and fix it, a rerun-once policy is not acceptable. Trigger: the first CI flake on the Phase 26 remote CI, or sooner. Source: `.planning/phases/13.1-deployment-ci/13.1-12-SUMMARY.md:59`.
+- [ ] Housekeeping: doc overclaims. `.env.example:66-68` and `docs/operations/SECURITY_AND_OPERATIONS.md:12` say a paper process can never pick up a live credential (true only of variable names, see WR-06 in Phase 24); `docs/operations/RUNBOOK.md:390` says the CI docker job "has run nowhere" although it has run. Trigger: one docs quick task, or WR-06 closing in Phase 24.
+- [ ] Housekeeping: `src/execution/gates.py:26-38` comment still says the 200 conditional-order limit is per symbol and a "KNOWN GAP"; docs/trading/EXECUTION_SPEC.md:236 says it is an account-wide count with the 200 limit from the docs. Trigger: the next change to `src/execution/gates.py`.
+- [ ] Housekeeping: `src/risk/gating.py:50` docstring "A stop inside the zone is deliberately..." predates the D054 baseline wording. Trigger: the next risk-code touch (Phase 19 or 22).
+- [ ] Housekeeping: `src/paper/journal.py:17` docstring still says the Parquet extract mirror is "deferred to Phase 10", but Phase 10 chose SELECT-only SQL readers. Trigger: the next change to `src/paper/journal.py`.
+- [ ] Housekeeping: `10-UI-SPEC.md` lacks CLI exit code 3 (defined in `src/analytics/cli.py:14` and `journal-report.ps1`). Trigger: the next analytics CLI change.
+- [ ] Housekeeping: each SDK minor bump (`>=17.3,<18`) re-runs the COVERAGE re-verification; nothing assigns this step. Trigger: every bump of `binance-sdk-derivatives-trading-usds-futures`, see `.planning/phases/02-data-foundation/COVERAGE.md:88`.
