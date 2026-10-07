@@ -17,10 +17,11 @@ the image is pulled on demand and a missing daemon or image is a failure.
 from __future__ import annotations
 
 import os
+import random
 import secrets
 import time
-from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -393,3 +394,365 @@ def test_a_wrong_crypt_key_is_refused_by_every_operation(
     _set_env(monkeypatch, good)
     remote.check_sentinel(good_runner)  # the right key still works
     assert remote.list_snapshots(good_runner) == [remote.snapshot_id(DAY1)]
+
+
+# --------------------------------------------------------------------------- #
+# CR-01 replacement (D064): manifest SHA-256 comparison, cryptcheck before the manifest
+#
+# Real rclone 1.75.1 through the adapter. What each test asserts was observed first in
+# .planning/quick/261007-onb-cr-01-replacement-d064-parquet-push-mani/261007-onb-proof-output.txt
+# (cryptcheck detects a same-size change, an out-of-band overwrite and a deletion; a removed
+# manifest object leaves the snapshot incomplete). Double only, not a real S3 provider (D064).
+# --------------------------------------------------------------------------- #
+
+DAY3 = datetime(2026, 10, 2, 3, 15, 0, tzinfo=UTC)
+DAY4 = datetime(2026, 10, 3, 3, 15, 0, tzinfo=UTC)
+ORIG_NS = 1_700_000_000 * 1_000_000_000
+NINETY_DAYS_NS = 90 * 86_400 * 1_000_000_000
+CRYPT_OVERHEAD = 48  # bytes added to a plaintext of up to 64 KiB (proof FINDINGS, o3)
+PARQUET_FILES = {"interval=1m/a.parquet": b"A" * 1200, "interval=1m/b.parquet": b"B" * 1300}
+NEW_PARQUET_FILE = {"interval=1m/c.parquet": b"C" * 1400}
+A_REMOTE = f"{CRYPT}parquet/raw/interval=1m/a.parquet"
+B_REMOTE = f"{CRYPT}parquet/raw/interval=1m/b.parquet"
+C_REMOTE = f"{CRYPT}parquet/raw/interval=1m/c.parquet"
+HEAD_DIFFERENT = "parquet push refused: path(s) already published with different content"
+HEAD_ORPHAN = (
+    "parquet push refused: remote object(s) differ from the local file(s) "
+    "and no complete snapshot names them"
+)
+
+
+class _Crash(Exception):
+    """A simulated process death between two rclone calls."""
+
+
+@dataclass
+class _CallLog:
+    """A runner wrapper that records argv and can run an action after a matching call."""
+
+    inner: remote.RcloneRunner
+    calls: list[list[str]] = field(default_factory=list)
+    hooks: list[tuple[Callable[[Sequence[str]], bool], Callable[[], None]]] = field(
+        default_factory=list
+    )
+
+    def __call__(self, argv: Sequence[str], extra: Mapping[str, str]) -> RcloneResult:
+        result = self.inner(argv, extra)
+        self.calls.append(list(argv))
+        for hook in list(self.hooks):
+            if hook[0](argv):
+                self.hooks.remove(hook)
+                hook[1]()
+        return result
+
+    def after(self, match: Callable[[Sequence[str]], bool], action: Callable[[], None]) -> None:
+        self.hooks.append((match, action))
+
+
+def _is_parquet_upload(argv: Sequence[str]) -> bool:
+    return argv[0] == "copy" and not argv[1].startswith(CRYPT) and "--files-from-raw" in argv
+
+
+def _is_manifest_upload(argv: Sequence[str]) -> bool:
+    return argv[0] == "copyto" and argv[2].endswith("/manifest.json")
+
+
+def _bundle_from(
+    tmp_path: Path, name: str, files: Mapping[str, bytes], mtime_ns: int | None = None
+) -> Path:
+    """A bundle whose source root is named ``raw`` (remote paths ``parquet/raw/...``)."""
+    source = tmp_path / name / "raw"
+    for rel, data in files.items():
+        target = source / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    bundle = tmp_path / f"{name}-bundle"
+    backup_mod.backup(bundle_root=bundle, pg_dump_runner=_fake_dump, parquet_roots=[source])
+    if mtime_ns is not None:  # touching the staged files does not change the manifest
+        for staged in (bundle / "parquet").rglob("*.parquet"):
+            os.utime(staged, ns=(mtime_ns, mtime_ns))
+    return bundle
+
+
+def _ciphertext_objects(s3: S3Double, bucket: str) -> dict[str, int]:
+    """Server-side object path to size."""
+    out: dict[str, int] = {}
+    for line in s3.objects(bucket):
+        path, size, _ = line.rsplit(" ", 2)
+        out[path.removeprefix("./")] = int(size)
+    return out
+
+
+def _ciphertext_object(
+    s3: S3Double, bucket: str, plain_size: int, exclude: Collection[str] = ()
+) -> tuple[str, int]:
+    """The one server object holding ``plain_size`` plaintext bytes (constant crypt overhead)."""
+    wanted = plain_size + CRYPT_OVERHEAD
+    found = [
+        (path, size)
+        for path, size in _ciphertext_objects(s3, bucket).items()
+        if size == wanted and path not in exclude
+    ]
+    assert len(found) == 1, f"expected one object of {wanted} bytes, found {found}"
+    return found[0]
+
+
+def _corrupt_object(
+    s3: S3Double, env: Mapping[str, str], path: str, size: int, scratch: Path
+) -> None:
+    """Overwrite a server object through the raw S3 remote with same-length random bytes."""
+    garbage = scratch / "garbage.bin"
+    garbage.write_bytes(random.Random(7).randbytes(size))
+    done = s3.runner(env)(["copyto", str(garbage), f"{remote.raw_bucket_remote(env)}/{path}"], {})
+    assert done.returncode == 0, done.stderr
+
+
+@dataclass
+class _Remote:
+    """A fresh bucket with its crypt environment, the docker runner and the first push done."""
+
+    s3: S3Double
+    bucket: str
+    env: Mapping[str, str]
+    runner: DockerRclone
+
+    def push(self, bundle: Path, when: datetime, runner: remote.RcloneRunner | None = None) -> int:
+        return main(
+            ["push", "--bundle-root", str(bundle)],
+            rclone_runner=runner or self.runner,
+            now_utc=when,
+        )
+
+    def complete(self) -> list[str]:
+        return remote.list_complete_snapshots(self.runner)
+
+
+def _new_remote(
+    s3: S3Double, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first: Mapping[str, bytes]
+) -> tuple[_Remote, Path]:
+    """Initialise a bucket and push ``first`` as the DAY1 snapshot (original mtimes)."""
+    bucket = s3.new_bucket()
+    env = s3.env_for(bucket, passphrase=secrets.token_hex(8), salt=secrets.token_hex(8))
+    runner = s3.runner(env)
+    _set_env(monkeypatch, env)
+    bundle = _bundle_from(tmp_path, "one", first, ORIG_NS)
+    code = main(
+        ["push", "--bundle-root", str(bundle), "--init-remote"], rclone_runner=runner, now_utc=DAY1
+    )
+    assert code == 0
+    return _Remote(s3, bucket, env, runner), bundle
+
+
+def test_known_path_with_same_content_is_skipped_even_with_new_mtimes(
+    s3_double: S3Double, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rem, _first = _new_remote(s3_double, tmp_path, monkeypatch, PARQUET_FILES)
+    before = s3_double.objects(rem.bucket)
+    again = _bundle_from(tmp_path, "two", PARQUET_FILES, ORIG_NS + NINETY_DAYS_NS)
+    log = _CallLog(rem.runner)
+
+    assert rem.push(again, DAY2, log) == 0
+
+    assert not any(_is_parquet_upload(call) for call in log.calls)
+    after = s3_double.objects(rem.bucket)
+    assert before <= after  # nothing that existed was changed or removed
+    assert len(after - before) == 2  # exactly pg.dump and manifest.json of the new snapshot
+    assert rem.complete() == [remote.snapshot_id(DAY1), remote.snapshot_id(DAY2)]
+
+
+@pytest.mark.parametrize("new_mtime", [False, True], ids=["original-mtime", "new-mtime"])
+def test_same_path_same_size_different_content_fails_hard_without_overwrite(
+    s3_double: S3Double,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    new_mtime: bool,
+) -> None:
+    rem, _first = _new_remote(s3_double, tmp_path, monkeypatch, PARQUET_FILES)
+    before = s3_double.objects(rem.bucket)
+    changed = {**PARQUET_FILES, "interval=1m/a.parquet": b"X" * 1200}
+    bundle = _bundle_from(tmp_path, "two", changed, ORIG_NS + (NINETY_DAYS_NS if new_mtime else 0))
+    capsys.readouterr()
+
+    assert rem.push(bundle, DAY2) == 1
+
+    err = capsys.readouterr().err
+    assert HEAD_DIFFERENT in err
+    assert "raw/interval=1m/a.parquet" in err
+    assert rem.runner(["cat", A_REMOTE], {}).stdout == "A" * 1200  # the remote file is unchanged
+    assert remote.list_snapshots(rem.runner) == [remote.snapshot_id(DAY1)]
+    assert s3_double.objects(rem.bucket) == before
+
+
+def test_same_path_different_size_fails_hard_without_overwrite(
+    s3_double: S3Double,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rem, _first = _new_remote(s3_double, tmp_path, monkeypatch, PARQUET_FILES)
+    before = s3_double.objects(rem.bucket)
+    changed = {**PARQUET_FILES, "interval=1m/b.parquet": b"B" * 1301}
+    bundle = _bundle_from(tmp_path, "two", changed, ORIG_NS)
+    capsys.readouterr()
+
+    assert rem.push(bundle, DAY2) == 1
+
+    err = capsys.readouterr().err
+    assert HEAD_DIFFERENT in err
+    assert "raw/interval=1m/b.parquet" in err
+    assert rem.runner(["cat", B_REMOTE], {}).stdout == "B" * 1300
+    assert remote.list_snapshots(rem.runner) == [remote.snapshot_id(DAY1)]
+    assert s3_double.objects(rem.bucket) == before
+
+
+def test_a_new_path_uploads_and_nothing_else_changes(
+    s3_double: S3Double, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rem, _first = _new_remote(s3_double, tmp_path, monkeypatch, PARQUET_FILES)
+    before = s3_double.objects(rem.bucket)
+    bundle = _bundle_from(tmp_path, "two", {**PARQUET_FILES, **NEW_PARQUET_FILE}, ORIG_NS)
+    log = _CallLog(rem.runner)
+
+    assert rem.push(bundle, DAY2, log) == 0
+
+    uploads = [call for call in log.calls if _is_parquet_upload(call)]
+    assert len(uploads) == 1
+    after = s3_double.objects(rem.bucket)
+    assert before <= after  # earlier objects identical, mtimes included
+    assert len(after - before) == 3  # the new Parquet object, pg.dump and manifest.json
+    assert rem.runner(["cat", C_REMOTE], {}).stdout == "C" * 1400
+
+
+def test_an_orphan_identical_to_the_local_file_is_adopted_after_an_interrupted_push(
+    s3_double: S3Double, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rem, _first = _new_remote(s3_double, tmp_path, monkeypatch, PARQUET_FILES)
+    before = s3_double.objects(rem.bucket)
+    bundle = _bundle_from(tmp_path, "two", {**PARQUET_FILES, **NEW_PARQUET_FILE}, ORIG_NS)
+    dying = _CallLog(rem.runner)
+
+    def die() -> None:
+        raise _Crash("killed right after the Parquet upload")
+
+    dying.after(_is_parquet_upload, die)
+    with pytest.raises(_Crash):
+        remote.push_snapshot(bundle, dying, now_utc=DAY2)
+    orphan = s3_double.objects(rem.bucket) - before
+    assert len(orphan) == 1  # the Parquet object went up, nothing else did
+    assert rem.complete() == [remote.snapshot_id(DAY1)]
+    log = _CallLog(rem.runner)
+
+    assert rem.push(bundle, DAY3, log) == 0
+
+    assert orphan <= s3_double.objects(rem.bucket)  # the orphan line is identical: not re-uploaded
+    assert not any(_is_parquet_upload(call) for call in log.calls)
+    assert any(call[0] == "cryptcheck" and "--files-from-raw" in call for call in log.calls)
+    assert rem.complete() == [remote.snapshot_id(DAY1), remote.snapshot_id(DAY3)]
+
+
+def test_an_orphan_different_from_the_local_file_fails_hard_and_stays_untouched(
+    s3_double: S3Double,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rem, _first = _new_remote(s3_double, tmp_path, monkeypatch, PARQUET_FILES)
+    other = tmp_path / "other.bin"
+    other.write_bytes(b"Z" * 1400)  # same size as the local c.parquet, other content
+    assert rem.runner(["copyto", str(other), C_REMOTE], {}).returncode == 0
+    before = s3_double.objects(rem.bucket)
+    bundle = _bundle_from(tmp_path, "two", {**PARQUET_FILES, **NEW_PARQUET_FILE}, ORIG_NS)
+    capsys.readouterr()
+
+    assert rem.push(bundle, DAY2) == 1
+
+    err = capsys.readouterr().err
+    assert HEAD_ORPHAN in err
+    assert "raw/interval=1m/c.parquet" in err
+    assert s3_double.objects(rem.bucket) == before
+    assert rem.runner(["cat", C_REMOTE], {}).stdout == "Z" * 1400
+    assert remote.list_snapshots(rem.runner) == [remote.snapshot_id(DAY1)]
+
+
+def test_upload_followed_by_cryptcheck_failure_leaves_the_snapshot_incomplete(
+    s3_double: S3Double, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rem, _first = _new_remote(s3_double, tmp_path, monkeypatch, PARQUET_FILES)
+    known = set(_ciphertext_objects(s3_double, rem.bucket))
+    bundle = _bundle_from(tmp_path, "two", {**PARQUET_FILES, **NEW_PARQUET_FILE}, ORIG_NS)
+    log = _CallLog(rem.runner)
+
+    def corrupt_new_object() -> None:
+        path, size = _ciphertext_object(s3_double, rem.bucket, 1400, exclude=known)
+        _corrupt_object(s3_double, rem.env, path, size, tmp_path)
+
+    log.after(_is_parquet_upload, corrupt_new_object)
+
+    assert rem.push(bundle, DAY2, log) == 1
+
+    assert rem.complete() == [remote.snapshot_id(DAY1)]
+    assert not any(_is_manifest_upload(call) for call in log.calls)  # no manifest was published
+
+
+def test_a_remote_object_modified_after_upload_is_detected(
+    s3_double: S3Double,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rem, first = _new_remote(s3_double, tmp_path, monkeypatch, PARQUET_FILES)
+    path, size = _ciphertext_object(s3_double, rem.bucket, 1200)
+    _corrupt_object(s3_double, rem.env, path, size, tmp_path)
+    capsys.readouterr()
+
+    assert rem.push(first, DAY2) == 1
+
+    err = capsys.readouterr().err
+    assert "parquet verification failed" in err
+    assert "raw/interval=1m/a.parquet" in err
+    assert rem.complete() == [remote.snapshot_id(DAY1)]
+
+
+def test_a_remote_object_deleted_after_upload_is_detected(
+    s3_double: S3Double,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rem, first = _new_remote(s3_double, tmp_path, monkeypatch, PARQUET_FILES)
+    assert rem.runner(["deletefile", B_REMOTE], {}).returncode == 0
+    capsys.readouterr()
+
+    assert rem.push(first, DAY2) == 1
+
+    err = capsys.readouterr().err
+    assert "parquet verification failed" in err
+    assert "raw/interval=1m/b.parquet" in err
+    assert rem.complete() == [remote.snapshot_id(DAY1)]
+
+
+def test_a_manifest_that_fails_its_check_is_removed_and_the_snapshot_stays_incomplete(
+    s3_double: S3Double, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rem, _first = _new_remote(s3_double, tmp_path, monkeypatch, PARQUET_FILES)
+    known = set(_ciphertext_objects(s3_double, rem.bucket))
+    bundle = _bundle_from(tmp_path, "two", {**PARQUET_FILES, **NEW_PARQUET_FILE}, ORIG_NS)
+    manifest_size = (bundle / "manifest.json").stat().st_size
+    log = _CallLog(rem.runner)
+
+    def corrupt_manifest() -> None:
+        path, size = _ciphertext_object(s3_double, rem.bucket, manifest_size, exclude=known)
+        _corrupt_object(s3_double, rem.env, path, size, tmp_path)
+
+    log.after(_is_manifest_upload, corrupt_manifest)
+    id1, id2 = remote.snapshot_id(DAY1), remote.snapshot_id(DAY2)
+
+    assert rem.push(bundle, DAY2, log) == 1
+
+    deletes = [call for call in log.calls if call[0] == "deletefile"]
+    assert deletes == [["deletefile", f"{CRYPT}snapshots/{id2}/manifest.json"]]
+    assert rem.complete() == [id1]  # the new snapshot never looks complete
+    listing = rem.runner(["lsf", "-R", "--files-only", f"{CRYPT}snapshots/{id2}/"], {})
+    assert listing.stdout.split() == ["pg.dump"]  # only its manifest was removed
+    assert remote.pull_snapshot(tmp_path / "pulled", rem.runner) == id1

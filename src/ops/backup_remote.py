@@ -12,8 +12,9 @@ Remote layout (inside the crypt remote)::
     _sentinel/sentinel.txt                       fixed content, proves the crypt key is right
     snapshots/<YYYYMMDDTHHMMSSZ>/pg.dump
     snapshots/<YYYYMMDDTHHMMSSZ>/manifest.json   lists pg.dump and every Parquet path + sha256
-    parquet/<root basename>/...                  append-only: copied with ``--immutable``,
-                                                 never synced, moved or deleted
+    parquet/<root basename>/...                  append-only: only new files are uploaded,
+                                                 with ``--immutable``; never overwritten,
+                                                 synced, moved or deleted
 
 Safety rules enforced here (research finding 13, Pitfalls 6 and 7):
 
@@ -21,6 +22,9 @@ Safety rules enforced here (research finding 13, Pitfalls 6 and 7):
   sub-path operations exit 3). So every push, pull and retention run first decrypts the sentinel
   and compares it; exit code 3, an empty listing and a content mismatch are errors, never "no
   backups yet". The sentinel is only created by an explicit ``--init-remote`` on an empty bucket.
+* A Parquet path is uploaded only when no complete snapshot names it; one a snapshot names with
+  another SHA-256 is refused (D064). ``rclone cryptcheck`` verifies the Parquet tree and
+  ``pg.dump`` before ``manifest.json`` is published, and the manifest right after.
 * Retention deletes only ``snapshots/<id>`` directories whose name parses as a snapshot id, only
   after the new snapshot passed ``rclone cryptcheck``, and never touches ``parquet/``.
 * A pulled bundle is rebuilt from one snapshot plus exactly the Parquet files its manifest names
@@ -31,12 +35,13 @@ Stdlib only, plus ``src.ops.backup`` (bundle verification) and ``src.ops.redacti
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -299,20 +304,231 @@ def init_sentinel(runner: RcloneRunner, *, raw_remote: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-def _snapshot_filters() -> list[str]:
-    return [
-        arg for name in (DEFAULT_PG_DUMP_NAME, MANIFEST_NAME) for arg in ("--include", f"/{name}")
-    ]
+def _snapshot_filters(names: Sequence[str]) -> list[str]:
+    return [arg for name in names for arg in ("--include", f"/{name}")]
+
+
+# Fixed message heads: tests and RUNBOOK 11.8 cite them.
+HEAD_PARQUET_DIFFERENT = "parquet push refused: path(s) already published with different content"
+HEAD_PARQUET_ORPHAN = (
+    "parquet push refused: remote object(s) differ from the local file(s) "
+    "and no complete snapshot names them"
+)
+HEAD_PARQUET_VERIFY = "parquet verification failed"
+_MAX_NAMED_PATHS = 5
+_PARQUET_PREFIX = f"{PARQUET_DIR}/"
+_EXIT_LSF_NOT_FOUND = 3  # `lsf` of a directory that does not exist (proof 261007-onb, l2)
+_EXIT_DELETE_NOT_FOUND = 4  # `deletefile` of an object that does not exist (proof 261007-onb, m4)
+
+
+@dataclass(frozen=True)
+class ParquetPushPlan:
+    """What a push does with each local Parquet path (all paths relative to ``parquet/``).
+
+    ``skip``: a complete snapshot names the path with the same SHA-256. ``upload``: no complete
+    snapshot names it and the remote lacks it. ``adopt``: no complete snapshot names it but the
+    remote already holds an object there (an earlier push died before its manifest): it is
+    verified against the local file and never uploaded again. ``conflicts``: the path with the
+    reason, for a path a complete snapshot names with another hash, or that the manifests of
+    two complete snapshots name with different hashes.
+    """
+
+    skip: tuple[str, ...]
+    upload: tuple[str, ...]
+    adopt: tuple[str, ...]
+    conflicts: tuple[tuple[str, str], ...]
+
+
+def local_parquet_hashes(manifest: Mapping[str, str]) -> dict[str, str]:
+    """The Parquet entries of a bundle manifest as path (below ``parquet/``) to SHA-256.
+
+    A path with a line break is refused: the upload and check lists are one path per line.
+    """
+    out: dict[str, str] = {}
+    for key, digest in manifest.items():
+        if not key.startswith(_PARQUET_PREFIX):
+            continue
+        if "\n" in key or "\r" in key:
+            raise RemoteError(f"refusing push: Parquet path {key!r} contains a line break")
+        out[key[len(_PARQUET_PREFIX) :]] = digest
+    return out
+
+
+def known_parquet_hashes(
+    runner: RcloneRunner, complete: Sequence[str]
+) -> dict[str, frozenset[str]]:
+    """Parquet path to the SHA-256 values the manifests of the given complete snapshots name.
+
+    Every manifest is read with ``rclone cat`` and must be a path-to-sha256 mapping without an
+    unsafe key. Anything else is a hard failure naming the snapshot (never its content):
+    skipping a manifest would silently shrink the known set.
+    """
+    known: dict[str, set[str]] = {}
+    for snap in complete:
+        head = f"unreadable manifest of complete snapshot {snap}"
+        try:
+            result = _call(runner, ["cat", _crypt(f"{SNAPSHOTS_DIR}/{snap}/{MANIFEST_NAME}")])
+        except RemoteError as exc:
+            raise RemoteError(f"{head}: {exc}") from exc
+        try:
+            parsed = json.loads(result.stdout)
+        except ValueError:
+            raise RemoteError(f"{head}: not valid JSON") from None
+        if not isinstance(parsed, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in parsed.items()
+        ):
+            raise RemoteError(f"{head}: not a mapping of relative path to sha256")
+        for key, digest in parsed.items():
+            if _is_unsafe_key(key):
+                raise RemoteError(f"{head}: unsafe path in its manifest")
+            if key.startswith(_PARQUET_PREFIX):
+                known.setdefault(key[len(_PARQUET_PREFIX) :], set()).add(digest)
+    return {path: frozenset(digests) for path, digests in known.items()}
+
+
+def remote_parquet_paths(runner: RcloneRunner) -> frozenset[str]:
+    """Decrypted relative paths of every file under ``parquet/`` (empty when it does not exist).
+
+    The listing carries no hashes: it only says which paths are present. Same caller contract
+    as ``list_snapshots`` (sentinel first).
+    """
+    result = _call(
+        runner,
+        ["lsf", "-R", "--files-only", _crypt(f"{PARQUET_DIR}/")],
+        ok=frozenset({0, _EXIT_LSF_NOT_FOUND}),
+    )
+    if result.returncode != 0:
+        return frozenset()
+    return frozenset(line for line in result.stdout.splitlines() if line)
+
+
+def classify_parquet_paths(
+    local: Mapping[str, str],
+    known: Mapping[str, frozenset[str]],
+    remote_present: Collection[str],
+) -> ParquetPushPlan:
+    """Decide each local path from its SHA-256, never from rclone's size or modification time."""
+    skip: list[str] = []
+    upload: list[str] = []
+    adopt: list[str] = []
+    conflicts: list[tuple[str, str]] = []
+    for path in sorted(local):
+        hashes = known.get(path)
+        if not hashes:
+            (adopt if path in remote_present else upload).append(path)
+        elif len(hashes) > 1:
+            conflicts.append((path, "manifests disagree"))
+        elif local[path] in hashes:
+            skip.append(path)
+        else:
+            conflicts.append((path, "different content"))
+    return ParquetPushPlan(tuple(skip), tuple(upload), tuple(adopt), tuple(conflicts))
+
+
+def _named(items: Sequence[str]) -> str:
+    """At most five items, then how many more; scrubbed."""
+    text = ", ".join(items[:_MAX_NAMED_PATHS])
+    if len(items) > _MAX_NAMED_PATHS:
+        text += f", and {len(items) - _MAX_NAMED_PATHS} more"
+    return scrub(text)
+
+
+def _differing_paths(stderr: str, candidates: Collection[str]) -> list[str]:
+    """Candidate paths that rclone named on an ``ERROR : <path>: ...`` line, sorted.
+
+    An error excerpt keeps only the end of rclone's output, which can cut the path off, so
+    the paths are read from the lines themselves.
+    """
+    named: set[str] = set()
+    for line in stderr.splitlines():
+        _, marker, rest = line.partition("ERROR : ")
+        path = rest.split(": ", 1)[0]
+        if marker and path in candidates:
+            named.add(path)
+    return sorted(named)
+
+
+def _check_parquet_tree(runner: RcloneRunner, root: Path, local: Collection[str]) -> None:
+    """``cryptcheck`` of the whole local Parquet tree against the remote (one way)."""
+    result = runner(["cryptcheck", str(root / PARQUET_DIR), _crypt(PARQUET_DIR), "--one-way"], {})
+    if result.returncode == 0:
+        return
+    named = _differing_paths(result.stderr, local)
+    paths = f"{_named(named)} " if named else ""
+    raise RemoteError(
+        f"{HEAD_PARQUET_VERIFY}: {paths}(rclone cryptcheck failed "
+        f"(exit {result.returncode}): {_excerpt(result.stderr)})"
+    )
+
+
+def _write_list(scratch: str, paths: Sequence[str]) -> str:
+    listing = Path(scratch) / "files-from.txt"
+    listing.write_bytes(("\n".join(paths) + "\n").encode("utf-8"))
+    return str(listing)
+
+
+def _stage_parquet(
+    runner: RcloneRunner, root: Path, local: Mapping[str, str], complete: Sequence[str]
+) -> None:
+    """Classify the local Parquet paths, refuse conflicts, verify orphans, upload the new ones."""
+    known = known_parquet_hashes(runner, complete)
+    plan = classify_parquet_paths(local, known, remote_present=remote_parquet_paths(runner))
+    if plan.conflicts:
+        raise RemoteError(
+            f"{HEAD_PARQUET_DIFFERENT}: "
+            + _named([f"{path} ({reason})" for path, reason in plan.conflicts])
+        )
+    local_dir = str(root / PARQUET_DIR)
+    remote_dir = _crypt(PARQUET_DIR)
+    with tempfile.TemporaryDirectory(prefix="backup-files-from-") as scratch:
+        if plan.adopt:
+            listing = _write_list(scratch, plan.adopt)
+            checked = runner(
+                ["cryptcheck", local_dir, remote_dir, "--one-way", "--files-from-raw", listing], {}
+            )
+            if checked.returncode == 1:
+                named = _differing_paths(checked.stderr, plan.adopt) or list(plan.adopt)
+                raise RemoteError(
+                    f"{HEAD_PARQUET_ORPHAN}: {_named(named)} "
+                    f"(rclone cryptcheck exit 1: {_excerpt(checked.stderr)})"
+                )
+            if checked.returncode != 0:
+                raise RemoteError(
+                    f"rclone cryptcheck failed (exit {checked.returncode}): "
+                    f"{_excerpt(checked.stderr)}"
+                )
+        if plan.upload:
+            listing = _write_list(scratch, plan.upload)
+            _call(
+                runner,
+                ["copy", local_dir, remote_dir, "--files-from-raw", listing, "--immutable"],
+            )
+
+
+def _remove_manifest(runner: RcloneRunner, manifest_remote: str) -> bool:
+    """Delete this snapshot's manifest object; two attempts, an absent object counts as removed."""
+    for _attempt in range(2):
+        try:
+            _call(
+                runner, ["deletefile", manifest_remote], ok=frozenset({0, _EXIT_DELETE_NOT_FOUND})
+            )
+        except RemoteError:
+            continue
+        return True
+    return False
 
 
 def push_snapshot(bundle_root: Path, runner: RcloneRunner, *, now_utc: datetime) -> str:
-    """Verify the bundle, push Parquet then the snapshot, cryptcheck it, return the snapshot id.
+    """Verify the bundle, push new Parquet files then the snapshot, check it, return the id.
 
-    Order is crash-safe: the sentinel is checked first, the append-only Parquet files go up
-    next (``--immutable``: an existing remote file is never changed), then ``pg.dump`` and
-    finally ``manifest.json``, so a snapshot only looks complete once everything it names is
-    already on the remote. ``rclone cryptcheck`` then compares the snapshot against the local
-    files; retention must not run before this returns.
+    Order is crash-safe. The sentinel is checked first, then each local Parquet path is decided
+    from its SHA-256 against the manifests of the complete remote snapshots plus a listing of
+    ``parquet/`` (``classify_parquet_paths``); a path published with other content is refused
+    before anything is written. New files go up (``--immutable``), then ``pg.dump``; the Parquet
+    tree and ``pg.dump`` are checked with ``rclone cryptcheck`` BEFORE ``manifest.json`` is
+    published, so a snapshot only looks complete once everything it names is verified. The
+    manifest is then published and checked, and removed again if either step fails.
+    Retention must not run before this returns.
     """
     problems = verify_bundle(bundle_root)
     if problems:
@@ -322,20 +538,42 @@ def push_snapshot(bundle_root: Path, runner: RcloneRunner, *, now_utc: datetime)
         )
     check_sentinel(runner)
     root = bundle_root.resolve()
+    manifest, problem = _read_manifest(root)
+    if manifest is None:
+        raise RemoteError(f"refusing push: {problem}")
     snap = snapshot_id(now_utc)
     snap_remote = _crypt(f"{SNAPSHOTS_DIR}/{snap}")
-    if (root / PARQUET_DIR).is_dir():
-        # --size-only: an object already on the remote is skipped on size, not modtime. A file
-        # restored onto a new host has the same bytes (the manifest sha256 proves it) but not
-        # necessarily the same mtime; --immutable alone would fail that as "file modified".
-        # A same-named file of a different size is still an error.
-        _call(
-            runner,
-            ["copy", str(root / PARQUET_DIR), _crypt(PARQUET_DIR), "--immutable", "--size-only"],
-        )
-    for name in (DEFAULT_PG_DUMP_NAME, MANIFEST_NAME):
-        _call(runner, ["copyto", str(root / name), f"{snap_remote}/{name}", "--immutable"])
-    _call(runner, ["cryptcheck", str(root), snap_remote, *_snapshot_filters()])
+    complete = list_complete_snapshots(runner)
+    if snap in complete:
+        raise RemoteError(f"snapshot id {snap} already exists on the remote; nothing was written")
+    local = local_parquet_hashes(manifest)
+    # Identity is the manifest SHA-256 (D064, proof in quick 261007-onb). On a crypt remote the
+    # size, modification-time and checksum comparisons of rclone decide nothing, so none of
+    # them chooses what to upload; --immutable stays on every upload as defence in depth only.
+    if local:
+        _stage_parquet(runner, root, local, complete)
+    dump = DEFAULT_PG_DUMP_NAME
+    _call(runner, ["copyto", str(root / dump), f"{snap_remote}/{dump}", "--immutable"])
+    if local:
+        _check_parquet_tree(runner, root, local)
+    _call(runner, ["cryptcheck", str(root), snap_remote, *_snapshot_filters([dump])])
+    manifest_remote = f"{snap_remote}/{MANIFEST_NAME}"
+    try:
+        _call(runner, ["copyto", str(root / MANIFEST_NAME), manifest_remote, "--immutable"])
+        _call(runner, ["cryptcheck", str(root), snap_remote, *_snapshot_filters([MANIFEST_NAME])])
+    except (RemoteError, KeyboardInterrupt) as exc:
+        removed = _remove_manifest(runner, manifest_remote)
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        if not removed:
+            raise RemoteError(
+                f"manifest verification failed AND the manifest of snapshot {snap} could not be "
+                f"removed: remove {SNAPSHOTS_DIR}/{snap}/{MANIFEST_NAME} through the crypt remote "
+                f"by hand and do not trust that snapshot until then ({exc})"
+            ) from exc
+        raise RemoteError(
+            f"manifest verification failed: snapshot {snap} left incomplete: {exc}"
+        ) from exc
     return snap
 
 
