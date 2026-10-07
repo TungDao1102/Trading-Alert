@@ -525,7 +525,7 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 - VPS provisioning date: not set; until a VPS exists the collector runs on a dev machine (`.planning/phases/13.1-deployment-ci/13.1-CONTEXT.md`, 13.1-OPEN-DECISIONS UAT 8-10, D042, D050).
 - Container registry push and deploy on tag: needs a registry and VPS decision; no owner phase (`13.1-CONTEXT.md` Deferred Ideas, D050).
 - Legacy Parquet partitions with a different Decimal scale: repair is optional, operator decision, no deadline (`.planning/phases/13-research-data-foundation-fixes/deferred-items.md` item 3, `scripts/repair_parquet_scale.py`).
-- Phase 13.1 WR-05 (who administers the host after hardening), WR-06 (split `env_file` per service; ROADMAP Phase 24 G3-029) and CR-01 (`--size-only` on the Parquet push; ROADMAP Phase 26 G3-030): `.planning/phases/13.1-deployment-ci/13.1-OPEN-DECISIONS.md`.
+- Phase 13.1 WR-05 (decided 2026-10-07, D062: `trading` joins sudo; implementation in Phase 16) and CR-01 (decided, D062: `--checksum` on the Parquet push; implementation in Phase 16) are decided; WR-06 (split `env_file` per service; ROADMAP Phase 24 G3-029) is still open and must precede any live key: `.planning/phases/13.1-deployment-ci/13.1-OPEN-DECISIONS.md`.
 - Which plan carries the research protocol v2.1.0 amendment of D057 (30-trade G5 floor): not yet named; D057 is not in force until it lands (ROADMAP Phase 26 item D057).
 - Host that runs the hourly paper freeze check: ROADMAP Phase 16 item G2-009.
 - Whether the kill-gate review items WR-01, WR-06, WR-12 and WR-13 move ahead of Phase 26: ROADMAP Phase 16 item G2-038.
