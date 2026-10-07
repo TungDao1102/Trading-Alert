@@ -79,7 +79,7 @@ covered_files:
   - src/data/metadata.py
   - src/data/minute_source.py
   - src/risk/realized_risk.py
-covered_digest: "v2:sha256:f30915298aca42058c6672198f546bf2f84f330cd5b163a5b35c077779ec5331"
+covered_digest: "v2:sha256:5880aa37399bbf8ed47bef1442defa8d1fd3ba7bf9c075c80a699fbc8e0a6f33"
 behavior_unverified: 0
 overrides_applied: 0
 human_verification:
@@ -283,3 +283,5 @@ No gaps. All six ROADMAP criteria hold in the current code, and the goal clause 
 
 _Verified: 2026-10-07T04:19:53Z_
 _Verifier: Claude (gsd-verifier)_
+
+**Digest refresh (2026-10-07, orchestrator, not a re-verification):** after this report was written, `14-17-SUMMARY.md` (a covered file) and `deferred-items.md` got documentation-only corrections (the superseded "accepted double note", the backlog 999.2 pointer). No source, script, doc or test file in the covered list changed after the verifier ran (`git diff --name-only` over `src scripts docs tests` is empty), so `covered_digest` was recomputed with `verification.fingerprint` over the same covered files. The three human items below were agreed by the user on 2026-10-07 to be closed as deferred, with owner ROADMAP Backlog 999.2 (items 2 and 3) and `deferred-items.md` (OQ-1).
