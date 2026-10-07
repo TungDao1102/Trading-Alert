@@ -1,7 +1,7 @@
 ---
 phase: 14-backtest-causality-rewrite
 verified: 2026-10-07T04:19:53Z
-status: human_needed
+status: passed
 score: 6/6 must-haves verified
 covered_files:
   - .planning/phases/14-backtest-causality-rewrite/14-01-PLAN.md
@@ -82,24 +82,32 @@ covered_files:
 covered_digest: "v2:sha256:5880aa37399bbf8ed47bef1442defa8d1fd3ba7bf9c075c80a699fbc8e0a6f33"
 behavior_unverified: 0
 overrides_applied: 0
-human_verification:
-  - test: "OQ-1: decide how a trade held through mark-price holes is treated in the evidence (keep annotate-only, count it against coverage, exclude it from pooled R, or void it)"
-    expected: "A recorded user decision (DECISIONS row or UAT entry). Today such a trade is annotated in coverage_note and otherwise counts as a normal trade; fallback_applied, fallback_count, the coverage percent and the ExperimentRecord do not change"
-    why_human: "Evidence policy is the user's call (deferred-items.md 'Open decisions for the user'). The recommended default (annotate-only until the research runner decides the evidence format) is a recommendation, not a decision"
-  - test: "Name an owner for 'modeled_costs_per_unit is None on v2 filled TradeRecords' or accept it as is"
-    expected: "A ROADMAP phase or a recorded decision. D052 says the item is owed to 'the Phase 15 research runner', but Phase 15 is complete and its criterion 4 puts the research run outside any phase, so the named owner no longer points at a scheduled deliverable"
-    why_human: "Choosing a phase or accepting the gap is a planning decision. Nothing in src reads the field today (sizing figures come from the evaluate_risk verdict), so no Phase 14 criterion depends on it"
-  - test: "Name an owner for 'no runner calls read_code_version plus assemble outside tests'"
-    expected: "A ROADMAP phase (or a decision) that builds the production research runner. D052 names the Phase 15 research runner (and Phase 26 for holdout-once only). Phase 15 is complete and built no runner; grep finds assemble( only in src/backtest/experiment.py and read_code_version only in src/adapters/code_version.py"
-    why_human: "Same as above: the named owner is no longer a scheduled deliverable. The typed record, the binding checks and code_version verification exist and are tested; only the production caller is missing"
+re_verification:
+  re_verified: 2026-10-07T04:29:32Z
+  previous_status: human_needed
+  previous_score: 6/6 must-haves verified
+  gaps_closed: []
+  gaps_remaining: []
+  regressions: []
+  reason: "The three open user items now have a recorded deferral owner (user agreed 2026-10-07). No source, script, doc or test file changed since ddfaed7"
+deferred:
+  - truth: "OQ-1: how a trade held through mark-price holes is treated in the evidence (annotate-only, count against coverage, exclude from pooled R, or void)"
+    addressed_in: "deferred-items.md 'Open decisions for the user' (open user decision, kept annotate-only on purpose) and ROADMAP Backlog Phase 999.2 (third follow-up)"
+    evidence: "deferred-items.md records OQ-1 as 'kept annotate-only on purpose; the user has not decided', revisit after the real-data research re-run. ROADMAP 999.2 lists it as a follow-up 'to decide with the real count from the first real-data research run'. Still undecided by design; this is a deferral, not a decision"
+  - truth: "Owner for modeled_costs_per_unit = None on v2 filled TradeRecords"
+    addressed_in: "ROADMAP Backlog Phase 999.2: Research runner owner (BACKLOG)"
+    evidence: "999.2 follow-up 1: 'modeled_costs_per_unit is None on v2 filled TradeRecords (14-12 item, D052): decide whether the runner restores it'. Recorded at 2026-10-07 during the Phase 14 close (user agreed)"
+  - truth: "Owner for the production caller of read_code_version plus assemble"
+    addressed_in: "ROADMAP Backlog Phase 999.2: Research runner owner (BACKLOG)"
+    evidence: "999.2 follow-up 2: 'No production caller of read_code_version plus assemble exists outside tests (D052): the runner must call them so a real run produces an ExperimentRecord; Phase 26 only owns holdout-once enforcement'"
 ---
 
 # Phase 14: Backtest Simulator Causality Rewrite Verification Report
 
 **Phase Goal:** The backtest cannot see the future. A plan created at the close of bar N can fill only from bar N+1, until expiry, at a price that actually traded. Positions carry across bars, and exits follow live semantics. All earlier backtest evidence is declared void.
 **Verified:** 2026-10-07T04:19:53Z (HEAD bffc4ba; working tree changes are only .planning/config.json, .planning/state.json and .gsd/, none of which were touched)
-**Status:** human_needed
-**Re-verification:** No. This is the first verification.
+**Status:** passed (re-verified 2026-10-07T04:29:32Z; was human_needed)
+**Re-verification:** Yes, a short one. Its only subject is the status of the three open user items. The criteria evidence below comes from the first verification at 04:19:53Z and was not re-run, apart from the two spot checks listed under "Re-verification (2026-10-07T04:29:32Z)".
 
 Note on code state: Phase 15 has executed on top of Phase 14, so HEAD includes Phase 15 changes (for example the re-pinned phase 6 regression digests, D-19 of Phase 15). Every Phase 14 test below was re-run against HEAD and passes.
 
@@ -248,36 +256,44 @@ All four IDs from the PLAN frontmatter match the ROADMAP requirement list. No or
 
 ### Human Verification Required
 
-These items are recorded, not decided. The verifier does not decide them.
+None is open. The three items listed here at the first verification are now **deferred with an owner**. They keep their numbers, so the references to "human item 2" and "human item 3" above still resolve. The user agreed to this deferral on 2026-10-07. That agreement records a deferral and an owner. It is not an approval of any money- or evidence-affecting design choice, and OQ-1 stays undecided by design.
 
-### 1. OQ-1: treatment of trades held through mark-price holes
+### 1. OQ-1: treatment of trades held through mark-price holes (deferred, undecided)
 
-**Test:** Decide whether such a trade stays annotate-only, counts against coverage, is excluded from pooled R, or is voided.
-**Expected:** A recorded user decision. Current behaviour (verified in code and by test_backtest_mark_hole_coverage): the note reaches `report.intrabar_coverage.coverage_notes`, and nothing priced, counted or hashed in `run_summary` changes.
-**Why human:** This is evidence policy. deferred-items.md marks it "the user has not decided". The suggested trigger is after the real-data research re-run.
+**Owner:** `deferred-items.md` "Open decisions for the user" (recorded 2026-10-07, "kept annotate-only on purpose; the user has not decided"), also follow-up 3 of ROADMAP Backlog Phase 999.2.
+**Current behaviour, unchanged:** the hole note reaches `report.intrabar_coverage.coverage_notes`. Nothing priced, counted or hashed in `run_summary` changes. This was re-checked here: test_backtest_mark_hole_coverage, 27 passed.
+**Trigger to decide:** the first real-data research re-run, using the real count of hole-bearing positions.
 
-### 2. Owner of `modeled_costs_per_unit = None` on v2 filled records
+### 2. `modeled_costs_per_unit = None` on v2 filled records (deferred with owner)
 
-**Test:** Name a ROADMAP phase or record acceptance.
-**Expected:** D052 says the item is "owed to the Phase 15 research runner". Phase 15 is complete (its verification passed) and built no runner. ROADMAP Phase 15 criterion 4 says the research run is "a research activity, not part of this phase". So the recorded owner no longer points at any scheduled work.
-**Why human:** Planning decision. No Phase 14 criterion depends on it.
+**Owner:** ROADMAP Backlog Phase 999.2 "Research runner owner (BACKLOG)", follow-up 1 (user agreed 2026-10-07). This replaces the owner-less pointer to "the Phase 15 research runner". No Phase 14 criterion depends on it, and nothing in `src` reads the field.
 
-### 3. Owner of the production caller of `read_code_version` + `assemble`
+### 3. Production caller of `read_code_version` + `assemble` (deferred with owner)
 
-**Test:** Name a ROADMAP phase (or record a decision) for the research runner.
-**Expected:** Same situation as item 2. Phase 26 owns only holdout-once enforcement.
-**Why human:** Planning decision. The typed record, identity binding and code-version checks are built and tested. Only the production caller is missing.
+**Owner:** ROADMAP Backlog Phase 999.2, follow-up 2 (user agreed 2026-10-07). Phase 26 still owns only holdout-once enforcement. The typed record, identity binding and code-version checks are built and tested. Only the production caller is missing.
+
+**Remaining Info (not blocking):** the D052 row in `docs/DECISIONS.md` still says both items are "owed to the Phase 15 research runner". DECISIONS.md was not edited (`git diff ddfaed7 HEAD -- docs` is empty). This is a stale pointer, not a contradiction: D052 records the items as OPEN, and 999.2 is the ROADMAP home of that same research runner, with its goal written against that wording. The next change that touches D052 should point it at Backlog 999.2.
 
 ### Notes for the orchestrator (not gaps, outside the verifier's write scope)
 
-- `.planning/phases/06-backtest-simulator-experiment-registry/06-UAT.md` test 23 ("Entry-expiry clock uses simulated bar time (G3)") still reads `result: skipped` and "owned by Phase 14", so audit-uat keeps listing it. This verification found G3 closed in code and tests (criterion 6). Closing that UAT entry is a bookkeeping step for the orchestrator or user.
+- Resolved in 48ccc76: `06-UAT.md` test 23 (G3) now reads `result: pass`, with this report's criterion 6 as evidence. The Phase 6 evidence stays VOID (D052).
 - `06-VERIFICATION.md` `covered_digest` is stale because 14-16 added VOID notes to the Phase 6 SUMMARYs. That is intended (deferred-items.md).
 - ROADMAP Phase 26 goal still names protocol v1.1.0 (deferred-items.md, fix when Phase 26 is planned).
-- The 14-17 SUMMARY and deferred-items.md still describe the WR-03 double note as accepted behaviour. That is stale after the mark-hole review fix (14-REVIEW-MARK-HOLES-FIX.md). Docs only.
+- Resolved in 48ccc76: the 14-17 SUMMARY marks the "accepted double note" as superseded by WR-03, and deferred-items.md describes the fix. Docs only.
 
 ### Gaps Summary
 
-No gaps. All six ROADMAP criteria hold in the current code, and the goal clause that earlier evidence is void is recorded and enforced (protocol v2.0.0, evidence schema v2, D052 (k)). I re-ran 42 test files one process at a time, plus ruff, mypy and the decision-alignment gate, and all are green. The status is `human_needed`, not `passed`, for one reason. Three open items have no recorded decision or no live deferral owner: OQ-1 is an explicit open user decision, and the two D052 OPEN items name "the Phase 15 research runner" as owner, which Phase 15 did not deliver and the ROADMAP does not schedule. None of the three makes a Phase 14 criterion fail.
+No gaps. All six ROADMAP criteria hold in the current code, and the goal clause that earlier evidence is void is recorded and enforced (protocol v2.0.0, evidence schema v2, D052 (k)). At the first verification I re-ran 42 test files one process at a time, plus ruff, mypy and the decision-alignment gate, and all were green.
+
+The first verification returned `human_needed` because three open items had no recorded decision and no live deferral owner. Each now has an explicit owner on disk. OQ-1 is an open user decision recorded in deferred-items.md and listed in ROADMAP Backlog 999.2. The two D052 OPEN items are ROADMAP Backlog 999.2 follow-ups. None of the three makes a Phase 14 criterion fail. So the status is `passed`, with those three items carried as deferred. OQ-1 is still undecided, and no design choice was approved by this change.
+
+### Re-verification (2026-10-07T04:29:32Z)
+
+- `git diff --name-only ddfaed7 HEAD -- src scripts docs tests`: empty. The only changes since the first report are `.planning/ROADMAP.md` (appended Backlog 999.2 only, Phase 14 criteria text unchanged), `06-UAT.md` (test 23 closed), `14-17-SUMMARY.md` (superseded note plus an update section), `deferred-items.md` and this report (digest refresh).
+- Spot checks, separate processes: `tests/test_backtest_mark_hole_coverage.py` 27 passed, `tests/test_backtest_exits.py` 36 passed.
+- `14-UAT.md`: status complete, 10 of 10 passed, 0 issues, 0 pending.
+- Not re-run here: the other 40 test files, ruff, mypy, the decision-alignment gate and the PostgreSQL tests. The real-data smoke result is still recorded evidence from 14-14 (see "Not run here"). No backtest, smoke or research run, and no Phase 16 work.
+- `covered_files` and `covered_digest` are unchanged from the orchestrator's refresh at 0b61ab7. This edit touched only this report, which is not a covered file.
 
 ---
 
