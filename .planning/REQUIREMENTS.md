@@ -44,7 +44,7 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 - [x] **BKTS-01**: Backtest simulator resolves intrabar SL/TP ordering with 1m data, models limit fills/partials/expiry/invalidation, and applies fees/funding/slippage before any selection decision (Phase 6 evidence is void per D052; re-verified by Phase 14 through tests/test_backtest_entry.py, tests/test_backtest_exits.py, tests/test_backtest_funding.py, tests/test_backtest_ledger.py, tests/test_backtest_expiry_clock.py, tests/test_backtest_goldens.py, tests/test_backtest_determinism.py and tests/test_backtest_chain.py)
 - [x] **BKTS-02**: Every experiment is reproducible from dataset + strategy + parameter set + cost + execution versions and is compared against no-trade and simple-trend baselines (Phase 6 evidence is void per D052; re-verified by Phase 14 through tests/test_backtest_entry.py, tests/test_backtest_exits.py, tests/test_backtest_funding.py, tests/test_backtest_ledger.py, tests/test_backtest_expiry_clock.py, tests/test_backtest_goldens.py, tests/test_backtest_determinism.py and tests/test_backtest_chain.py)
-- [ ] **BKTS-03**: Reports show trade counts and slices (symbol/period/regime/version), R distribution, bootstrap intervals, and parameter-plateau analysis — never a single headline number
+- [ ] **BKTS-03**: Reports show trade counts and slices (symbol/period/regime/version), R distribution, bootstrap intervals, and parameter-plateau analysis — never a single headline number *(Originally mapped to Phase 6; `src/backtest/report.py` prints "not computed (BKTS-03 pending)". Owner: the Phase 16 research runner (D059 item 5, Backlog 999.2).)*
 - [x] **BKTS-04**: Every experiment record carries the fields the research protocol requires, including NO_TRADE counts with reasons, the intrabar tie-break, timeframe, full parameters and costs, and a verifiable code version
 
 ### Paper & Forward Validation
@@ -60,8 +60,8 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 ### Execution & Safety
 
-- [x] **EXEC-01**: Execution manager places LIMIT-zone entries and Algo-Order protective exits (re-verified against current Binance docs), supports both position modes and partial-fill protective sizing
-- [x] **EXEC-02**: Reconciliation loop compares local state against open normal orders, open algo orders, and positions, sweeps orphan protective orders, and forces SAFE_MODE on divergence
+- [ ] **EXEC-01**: Execution manager places LIMIT-zone entries and Algo-Order protective exits (re-verified against current Binance docs), supports both position modes and partial-fill protective sizing *(Implemented and unit-tested, not Demo-proven: `09-DEMO-REHEARSAL-FINDINGS.md` keeps it Pending until real Demo evidence exists; the Demo run stopped at SL placement with -4509 and the execution model is open (D055). Evidence owners: Phase 24 and Phase 25.)*
+- [ ] **EXEC-02**: Reconciliation loop compares local state against open normal orders, open algo orders, and positions, sweeps orphan protective orders, and forces SAFE_MODE on divergence *(Implemented and verified at library level with fakes only (08-VERIFICATION); the reconcile loop is not composed into a running process and no live read-only reconcile has run. Demo-proven evidence pending, owners Phase 24 and Phase 25.)*
 - [x] **EXEC-03**: Deterministic client/algo order identifiers prevent duplicate entry orders across retries, restarts, and replayed events
 - [x] **EXEC-04**: The exact exchange constraint snapshot used for sizing, including MARKET_LOT_SIZE and PERCENT_PRICE filters, working type, margin type, leverage and equity, is persisted per trade plan and revalidated when stale
 - [ ] **EXEC-05**: The Binance user-data stream for order, algo-order, account and position events drives fills and state, with REST as fallback
@@ -71,12 +71,12 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 ### Journal & Operations
 
 - [x] **JRN-01**: Journal/analytics reports MFE/MAE, execution-quality latencies, approval-delay impact, and robustness slices without hiding the full report
-- [x] **OPS-01**: SAFE_MODE blocks new entries while monitoring continues, and the RUNBOOK (unprotected/orphan/duplicate/API-down/stale-feed/DB-failure/manual-close/restore) is rehearsed before live enablement
-- [x] **OPS-02**: Live credentials use no-withdrawal keys, IP allowlisting, off-source secret storage, and structured secret-free logging with health checks
+- [ ] **OPS-01**: SAFE_MODE blocks new entries while monitoring continues, and the RUNBOOK (unprotected/orphan/duplicate/API-down/stale-feed/DB-failure/manual-close/restore) is rehearsed before live enablement *(SAFE_MODE gating and the 8-drill harness are verified with fakes (08-VERIFICATION); the real-stack RUNBOOK drill rehearsal is deferred. Demo-proven evidence pending, owners Phase 25 and Phase 26.)*
+- [ ] **OPS-02**: Live credentials use no-withdrawal keys, IP allowlisting, off-source secret storage, and structured secret-free logging with health checks *(Health and secret-free posture verified; credential provisioning is not attested (09-VERIFICATION) and `09-DEMO-REHEARSAL-FINDINGS.md` keeps it Pending until real Demo evidence exists. Owners Phase 24, Phase 25 and Phase 26.)*
 - [ ] **OPS-03**: The restart sequence loads config, validates time, reconciles Binance orders and positions, reconnects streams, verifies no duplicate action, and resumes only when state is consistent
 - [ ] **OPS-04**: Health and diagnostic output includes the runtime Python version and the application git revision
 - [ ] **OPS-05**: Operational alerts fire for an unprotected position, local versus exchange divergence, an unknown or foreign order, a duplicate execution attempt, stale data, a rejected protective action, an authentication failure, and daily-loss WARNING and DAILY_STOP
-- [ ] **OPS-06**: Secrets stay outside source control, paper and test credentials are separate from live, and live secrets are held in a permission-restricted .env with provider disk encryption on the VPS (D042)
+- [ ] **OPS-06**: Secrets stay outside source control, paper and test credentials are separate from live, and live secrets are held in a permission-restricted .env with provider disk encryption on the VPS (D042) *(Originally mapped to Phase 13.1, which closed with OPS-06 NEEDS HUMAN (13.1-VERIFICATION). Open owners: Phase 24 for WR-06, the per-service env split, and Phase 26 for the provider disk-encryption check on the real host. The traceability cell stays Phase 13.1 because `scripts/decision_alignment/bookkeeping.py` NEW_REQUIREMENTS pins it.)*
 - [x] **GOV-01**: Kill-gate dashboard tracks the 3-families / 6-months budget and preserves NO_TRADE / INSUFFICIENT EDGE as a valid terminal outcome
 - [ ] **GOV-02**: Live order enablement requires an affirmative set of prerequisites (a recorded passing candidate, a met paper exit gate, a passed demo campaign and a minimum capital), not merely the absence of a terminal kill-gate state
 
@@ -112,6 +112,14 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 Which phases cover which requirements. Updated during roadmap creation.
 
+Evidence levels (a requirement can sit at any one; they do not imply each other):
+
+- **Implemented**: code exists and unit tests pass.
+- **Verified**: a verifier confirmed the requirement text at the level it claims, with offline evidence.
+- **Demo-proven**: the behavior was observed against Binance Demo Trading with recorded evidence.
+- **Live-ready**: Demo-proven and cleared by the Phase 26 go-live gate.
+- The Status column says Complete only for Verified at the level the requirement text claims; a requirement that is implemented but lacks the Demo or live evidence its text asks for stays Pending.
+
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | RSCH-01 | Phase 1 | Complete |
@@ -131,18 +139,18 @@ Which phases cover which requirements. Updated during roadmap creation.
 | RISK-02 | Phase 5 | Complete |
 | BKTS-01 | Phase 6 | Complete |
 | BKTS-02 | Phase 6 | Complete |
-| BKTS-03 | Phase 6 | Pending |
+| BKTS-03 | Phase 16 | Pending |
 | PAPER-01 | Phase 7 | Pending |
 | PAPER-02 | Phase 7 | Pending |
 | PAPER-03 | Phase 7 | Pending |
 | APRV-01 | Phase 8 | Complete |
 | APRV-02 | Phase 8 | Complete |
-| EXEC-01 | Phase 9 | Complete |
-| EXEC-02 | Phase 8 | Complete |
+| EXEC-01 | Phase 9 | Pending |
+| EXEC-02 | Phase 8 | Pending |
 | EXEC-03 | Phase 8 | Complete |
 | JRN-01 | Phase 10 | Complete |
-| OPS-01 | Phase 8 | Complete |
-| OPS-02 | Phase 9 | Complete |
+| OPS-01 | Phase 8 | Pending |
+| OPS-02 | Phase 9 | Pending |
 | GOV-01 | Phase 10 | Complete |
 | RISK-03 | Phase 20 | Pending |
 | RISK-04 | Phase 19 | Pending |
@@ -160,6 +168,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 > Traceability note (Phase 14, D052): the Phase 6 evidence behind the BKTS-01, BKTS-02 and DOMN-03 rows is void. Phase 14 re-verifies those requirements against the v2 engine (tests/test_backtest_entry.py, tests/test_backtest_exits.py, tests/test_backtest_funding.py, tests/test_backtest_ledger.py, tests/test_backtest_expiry_clock.py, tests/test_backtest_goldens.py, tests/test_backtest_determinism.py and tests/test_backtest_chain.py). The status cells above are unchanged; the verifier owns them.
 
+> Traceability note (2026-10-07 evidence-level review): EXEC-01, EXEC-02, OPS-01 and OPS-02 are Pending because Demo-proven evidence is missing (sources: 08-VERIFICATION, 09-VERIFICATION, 09-DEMO-REHEARSAL-FINDINGS); their Phase column keeps the implementing phase, and the Phase 24, 25 and 26 Requirements lines in ROADMAP.md own the missing evidence. OPS-06 is open in Phases 24 (WR-06) and 26 (disk encryption) as ROADMAP Inherited items T-02, G3-029 and G3-032 record, but its cell stays Phase 13.1 until the pinned mapping in `scripts/decision_alignment/bookkeeping.py` and `tests/test_decision_alignment_bookkeeping.py` is changed.
+
 **Coverage:**
 
 - v1 requirements: 43 total
@@ -169,3 +179,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 ---
 *Requirements defined: 2026-09-19 after initialization*
 *Last updated: 2026-09-30 after Phase 11 (F-116 additions: 13 requirement IDs registered, mapped to phases 13-26)*
+*Evidence-level review 2026-10-07: EXEC-01, EXEC-02, OPS-01, OPS-02 set to Pending; BKTS-03 re-mapped to Phase 16; OPS-06 owners noted*
