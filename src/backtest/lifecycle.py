@@ -30,7 +30,7 @@ mirroring the Phase-4 D-10 / Phase-5 D-05 purity precedent.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -80,6 +80,25 @@ EVENT_KINDS = frozenset({EVENT_FILL, EVENT_TP1, EVENT_EXIT, EVENT_CANCEL, EVENT_
 _ZERO = Decimal("0")
 _DIRECTIONS = frozenset({"LONG", "SHORT"})
 
+# Annotation-text cap (an implementation constant for coverage-note text only, NOT a strategy
+# parameter and not covered by `SIMULATOR_SEMANTICS_VERSION`): a note lists the first this many
+# mark-hole spans of one position and only counts the rest, so a position held over many holes
+# cannot grow its trade payload without bound (review WR-01).
+MAX_LISTED_MARK_HOLE_SPANS = 20
+
+
+@dataclass(frozen=True)
+class _NoteEntry:
+    """One piece of a position's `coverage_note`, kept structured until it is rendered.
+
+    A mark-hole span has `last` set (its first and last missing minute; the text is rendered
+    from them). A bar-close fallback note has `last` None and carries its finished `text`.
+    """
+
+    first: datetime
+    last: datetime | None = None
+    text: str | None = None
+
 
 @dataclass(frozen=True)
 class PlanState:
@@ -115,6 +134,10 @@ class PlanState:
     # (walked, resolved by a bar fallback, or the minute before the fill). Internal: never
     # copied into a record (plan 14-17).
     mark_settled_through_utc: datetime | None = None
+    # The structured pieces `coverage_note` is rendered from (plan 14-17, review WR-01). Internal:
+    # never copied into a record, and left out of equality because `coverage_note` (compared)
+    # is a pure function of it.
+    note_entries: tuple[_NoteEntry, ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
         if self.direction not in _DIRECTIONS:
@@ -368,9 +391,30 @@ def _skipped_note(span: tuple[datetime, datetime]) -> str:
     )
 
 
-def _join_notes(existing: str | None, extra: list[str]) -> str | None:
-    """Join an existing coverage note and new notes with ' | '; None when both are empty."""
-    parts = ([existing] if existing else []) + extra
+def _render_notes(entries: tuple[_NoteEntry, ...]) -> str | None:
+    """Render the coverage note: pieces in order joined by ' | '; None when there are none.
+
+    At most `MAX_LISTED_MARK_HOLE_SPANS` hole spans are written out (the first ones, in time
+    order); the rest are counted in one closing piece. A pure function of `entries`, so the
+    text does not depend on how the windows were cut (review WR-01).
+    """
+    parts: list[str] = []
+    listed = 0
+    unlisted = 0
+    for entry in entries:
+        if entry.last is None:
+            if entry.text is not None:
+                parts.append(entry.text)
+        elif listed < MAX_LISTED_MARK_HOLE_SPANS:
+            parts.append(_skipped_note((entry.first, entry.last)))
+            listed += 1
+        else:
+            unlisted += 1
+    if unlisted:
+        parts.append(
+            f"mark_price_1m_missing_{unlisted}_further_spans_not_listed; "
+            "stop and targets not evaluated minute by minute for those minutes"
+        )
     return " | ".join(parts) if parts else None
 
 
@@ -483,7 +527,7 @@ def advance(
             )
         )
         settled = current.mark_settled_through_utc
-        new_notes: list[str] = []
+        new_notes: list[_NoteEntry] = []
         for mark_minute in mark:
             if mark_minute.open_time_utc < current.entry_time_utc:
                 continue
@@ -491,7 +535,7 @@ def advance(
                 break  # the rest of the bar resolves at the bar close, not minute by minute
             span = _skipped_span(settled, mark_minute.open_time_utc)
             if span is not None:
-                new_notes.append(_skipped_note(span))
+                new_notes.append(_NoteEntry(first=span[0], last=span[1]))
             settled = (
                 mark_minute.open_time_utc
                 if settled is None
@@ -509,24 +553,27 @@ def advance(
             # from `first_missing` on stays the fallback's (no second note for it).
             straddle = _skipped_span(settled, first_missing)
             if straddle is not None:
-                new_notes.append(_skipped_note(straddle))
+                new_notes.append(_NoteEntry(first=straddle[0], last=straddle[1]))
         if new_notes or settled != current.mark_settled_through_utc:
+            entries = current.note_entries + tuple(new_notes)
             current = replace(
                 current,
                 mark_settled_through_utc=settled,
-                coverage_note=_join_notes(current.coverage_note, new_notes),
+                note_entries=entries,
+                coverage_note=_render_notes(entries),
             )
         if current.phase == PHASE_OPEN and bar is not None and first_missing is not None:
             resolution = resolve_fallback_hour(
                 state=current, bar=bar, first_missing_open_utc=first_missing
             )
-            note = resolution.coverage_note
-            if current.coverage_note is not None:
-                note = f"{current.coverage_note} | {note}"
+            entries = current.note_entries + (
+                _NoteEntry(first=first_missing, text=resolution.coverage_note),
+            )
             current = replace(
                 current,
                 fallback_applied=True,
-                coverage_note=note,
+                note_entries=entries,
+                coverage_note=_render_notes(entries),
                 mark_settled_through_utc=_last_minute_open(bar),
             )
             current = _apply_legs(current, resolution.legs, events)
@@ -586,9 +633,8 @@ def finalize_at_data_end(
         last_whole = _grid_floor(data_end_utc + timedelta(milliseconds=1) - _MINUTE)
         trailing = _skipped_span(state.mark_settled_through_utc, last_whole + _MINUTE)
         if trailing is not None:
-            closed = replace(
-                closed, coverage_note=_join_notes(closed.coverage_note, [_skipped_note(trailing)])
-            )
+            entries = closed.note_entries + (_NoteEntry(first=trailing[0], last=trailing[1]),)
+            closed = replace(closed, note_entries=entries, coverage_note=_render_notes(entries))
         return closed, (exit_event,)
     pending = replace(
         state,
