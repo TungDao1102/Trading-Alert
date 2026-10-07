@@ -54,7 +54,7 @@ def test_clean_run_closed_candle_emits_canonical_outcome() -> None:
     case_input = _load_input(case_dir)
     expected = _load_expected(case_dir)
 
-    outcome = run_paper_tick(case_input)
+    outcome = run_paper_tick(case_input, allow_unrationalized=True)
     digest = sha256_hex(outcome)
 
     assert digest == expected["outcome_digest"], (
@@ -88,7 +88,7 @@ def test_forming_updates_emit_no_signal() -> None:
     }
     assert forming_only_input["feed_events"], "fixture must include a forming event"
 
-    outcome = run_paper_tick(forming_only_input)
+    outcome = run_paper_tick(forming_only_input, allow_unrationalized=True)
     signals = outcome.get("signals", [])
     trade_plans = outcome.get("trade_plans", [])
     assert signals == [], f"forming updates must not emit Signals, got {signals}"
@@ -137,7 +137,7 @@ def test_future_close_event_emits_no_signal() -> None:
         "feed_events": [future_event],
     }
 
-    outcome = run_paper_tick(future_only_input)
+    outcome = run_paper_tick(future_only_input, allow_unrationalized=True)
     signals = outcome.get("signals", [])
     trade_plans = outcome.get("trade_plans", [])
     assert signals == [], f"future-close events must not emit Signals, got {signals}"
@@ -161,8 +161,8 @@ def test_clean_run_is_byte_deterministic_under_frozen_clock() -> None:
     case_dir = PHASE7_FIXTURES_DIR / "clean_run"
     case_input = _load_input(case_dir)
 
-    outcome_a = run_paper_tick(case_input)
-    outcome_b = run_paper_tick(case_input)
+    outcome_a = run_paper_tick(case_input, allow_unrationalized=True)
+    outcome_b = run_paper_tick(case_input, allow_unrationalized=True)
     assert sha256_hex(outcome_a) == sha256_hex(outcome_b)
 
 
@@ -175,4 +175,4 @@ def test_run_paper_tick_refuses_cost_model_that_disagrees_with_registry() -> Non
     case_input = _load_input(PHASE7_FIXTURES_DIR / "clean_run")
     case_input["cost_model"]["fee_rate_entry"] = "0.0001"
     with pytest.raises(CostModelBindingMismatch):
-        run_paper_tick(case_input)
+        run_paper_tick(case_input, allow_unrationalized=True)

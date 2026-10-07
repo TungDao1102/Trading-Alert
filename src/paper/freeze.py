@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import tomllib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -337,8 +338,85 @@ def _load_parameter_set_with_root(
     )
 
 
-def _require_rationalized(path: Path) -> None:
-    """Refuse a set whose rationale is incomplete or that carries PLACEHOLDER keys."""
+@dataclass(frozen=True)
+class PaperAllowlistEntry:
+    """One approved parameter set without rationale tables (checkpoint 15-17-01, Option B).
+
+    The ids select candidate entries (lookup only, exact string equality). The only thing
+    that admits a set is exact equality between `parameter_set_hash` and the hash computed
+    from the parameter file through the registry parse path.
+    """
+
+    strategy_id: str
+    """Strategy id the entry applies to (exact match, e.g. "trend-pullback")."""
+    parameter_set_id: str
+    """Parameter set id the entry applies to (exact match, e.g. "baseline-v3")."""
+    parameter_set_hash: str
+    """Full 64-hex lowercase parameter_set_hash the file must compute to."""
+    purpose: str
+    """Why this set may start a paper stream."""
+    approved_at: str
+    """ISO date of the user's approval."""
+    basis: str
+    """The user checkpoint and decision row that approved the entry."""
+
+
+# Checkpoint 15-17-01, Option B (user decision of 2026-10-07): the approved paper-start
+# allowlist is EMPTY. Adding an entry needs a new user checkpoint, a D054 update and an
+# update of the decision-record test in tests/test_paper_start_gate.py. An entry never
+# admits a set that has rationale tables (D-27 unchanged).
+PAPER_START_ALLOWLIST: tuple[PaperAllowlistEntry, ...] = ()
+
+
+def _has_rationale_tables(path: Path) -> bool:
+    """True when the set's TOML document has a top-level `rationale` key (even if malformed)."""
+    return "rationale" in tomllib.loads(path.read_bytes().decode("utf-8"))
+
+
+def _require_allowlisted(
+    *, strategy_id: str, parameter_set_id: str, parameter_set_hash: str
+) -> None:
+    """Admit a set without rationale tables only on an exact-hash allowlist entry."""
+    allowlist = PAPER_START_ALLOWLIST  # read at call time, never copied at import
+    candidates = [
+        entry
+        for entry in allowlist
+        if entry.strategy_id == strategy_id and entry.parameter_set_id == parameter_set_id
+    ]
+    if any(entry.parameter_set_hash == parameter_set_hash for entry in candidates):
+        return
+    message = (
+        f"{strategy_id}/{parameter_set_id}: missing rationale tables and "
+        f"not in the approved allowlist (parameter_set_hash {parameter_set_hash})"
+    )
+    if candidates:
+        listed = ", ".join(entry.parameter_set_hash for entry in candidates)
+        message += f"; allowlist lists hash {listed} for these ids, not the file's hash"
+    elif not allowlist:
+        message += (
+            "; the approved allowlist is empty (checkpoint 15-17-01, Option B), so no set "
+            "without rationale tables may start a paper stream; this is the decided safe "
+            "state, not a system fault"
+        )
+    raise UnrationalizedParameterSet(message)
+
+
+def _require_rationalized(
+    path: Path,
+    *,
+    strategy_id: str,
+    parameter_set_id: str,
+    parameter_set_hash: str,
+) -> None:
+    """Refuse a set whose rationale is incomplete, that carries PLACEHOLDER keys, or that has
+    no rationale tables and no exact-hash allowlist entry (D-16, D-27)."""
+    if not _has_rationale_tables(path):
+        _require_allowlisted(
+            strategy_id=strategy_id,
+            parameter_set_id=parameter_set_id,
+            parameter_set_hash=parameter_set_hash,
+        )
+        return
     problems = check_rationale(path)
     placeholders = placeholder_keys(path)
     if not problems and not placeholders:
@@ -404,7 +482,12 @@ def pin_stream_epoch(
     parameter_set = _load_parameter_set_with_root(strategy_id, parameter_set_id, root)
 
     if not allow_unrationalized:
-        _require_rationalized(root / strategy_id / f"{parameter_set_id}.toml")
+        _require_rationalized(
+            root / strategy_id / f"{parameter_set_id}.toml",
+            strategy_id=strategy_id,
+            parameter_set_id=parameter_set_id,
+            parameter_set_hash=parameter_set.parameter_set_hash,
+        )
 
     # Build the cost model from the registry's cost-key slice. This
     # propagates bare KeyError from build_cost_model if any slice key

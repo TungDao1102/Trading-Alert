@@ -35,6 +35,7 @@ from src.core.types import (
 )
 from src.domain.registry import load_parameter_set
 from src.domain.trade_plan import TradePlan
+from src.paper.freeze import pin_stream_epoch
 from src.risk.gating import evaluate_risk
 from src.risk.portfolio import resolve_absolute_thresholds
 from src.risk.types import ConstraintSnapshot, OpenPosition
@@ -308,8 +309,20 @@ def check_feed_freshness(
 # --------------------------------------------------------------------------- #
 
 
-def run_paper_tick(case_input: dict[str, Any]) -> dict[str, Any]:
+def run_paper_tick(
+    case_input: dict[str, Any],
+    *,
+    allow_unrationalized: bool = False,
+) -> dict[str, Any]:
     """Run the paper loop on a feed sequence.
+
+    The stream-start gate runs first, before any candle is parsed or feed event read:
+    the parameter set is loaded, its strategy_version checked and `pin_stream_epoch`
+    called. A set with a missing or incomplete rationale or a PLACEHOLDER key raises
+    `UnrationalizedParameterSet` (D-16, D-27); a set without rationale tables needs an
+    exact-hash entry in the approved paper-start allowlist of `src/paper/freeze.py`,
+    which is empty by the user's decision at checkpoint 15-17-01. `allow_unrationalized`
+    is for tests only; src/ never turns it on.
 
     Returns a canonical-JSON-safe outcome dict with keys:
       - `signals`: list of Signal dicts emitted by the engine
@@ -325,8 +338,30 @@ def run_paper_tick(case_input: dict[str, Any]) -> dict[str, Any]:
     strategy_id = case_input["strategy_id"]
     strategy_version = case_input["strategy_version"]
     parameter_set_id = case_input["parameter_set_id"]
-    symbol = case_input["symbol"]
     now_utc = _parse_utc_aware(case_input["now_utc"], "now_utc")
+
+    # Stream-start gate (G-15-11): nothing below this block runs for a refused set.
+    parameter_set = load_parameter_set(strategy_id, parameter_set_id)
+    if parameter_set.strategy_version != strategy_version:
+        raise ValueError(
+            f"fixture strategy_version={strategy_version!r} != "
+            f"registry strategy_version={parameter_set.strategy_version!r} "
+            f"for {strategy_id}/{parameter_set_id}"
+        )
+    epoch = pin_stream_epoch(
+        strategy_id=strategy_id,
+        parameter_set_id=parameter_set_id,
+        opened_at_utc=now_utc,
+        allow_unrationalized=allow_unrationalized,
+    )
+    if epoch.parameter_set_hash != parameter_set.parameter_set_hash:
+        raise ValueError(
+            f"stream-start gate judged parameter_set_hash={epoch.parameter_set_hash!r} but the "
+            f"loop loaded parameter_set_hash={parameter_set.parameter_set_hash!r} "
+            f"for {strategy_id}/{parameter_set_id}"
+        )
+
+    symbol = case_input["symbol"]
     ttl = timedelta(seconds=int(case_input["ttl_seconds"]))
 
     account_state = _parse_account_state(case_input["account_state"])
@@ -338,14 +373,6 @@ def run_paper_tick(case_input: dict[str, Any]) -> dict[str, Any]:
     warmed_up_1h = [_parse_candle(r) for r in case_input["warmed_up_1h"]]
     warmed_up_4h = [_parse_candle(r) for r in case_input["warmed_up_4h"]]
     feed_events = case_input["feed_events"]
-
-    parameter_set = load_parameter_set(strategy_id, parameter_set_id)
-    if parameter_set.strategy_version != strategy_version:
-        raise ValueError(
-            f"fixture strategy_version={strategy_version!r} != "
-            f"registry strategy_version={parameter_set.strategy_version!r} "
-            f"for {strategy_id}/{parameter_set_id}"
-        )
 
     # 12-REVIEW WR-03: refuse a fixture cost model the registry set does not pin.
     assert_sizing_costs_bind_registry(parameter_set, cost_model)

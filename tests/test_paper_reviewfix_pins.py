@@ -288,7 +288,7 @@ def test_4h_close_routes_as_context_bar_not_setup_bar() -> None:
     from src.paper.loop import run_paper_tick
 
     case_input = _clean_run_input()
-    baseline = run_paper_tick(case_input)
+    baseline = run_paper_tick(case_input, allow_unrationalized=True)
 
     now_utc = datetime.fromisoformat(case_input["now_utc"])
     close_utc = now_utc  # fresh: within the 60s staleness threshold
@@ -307,7 +307,7 @@ def test_4h_close_routes_as_context_bar_not_setup_bar() -> None:
         "interval": "4h",
     }
     with_4h = {**case_input, "feed_events": [*case_input["feed_events"], event_4h]}
-    outcome = run_paper_tick(with_4h)
+    outcome = run_paper_tick(with_4h, allow_unrationalized=True)
 
     contexts = [r for r in outcome["no_trade_records"] if r["reason_code"] == "CONTEXT_BAR"]
     assert len(contexts) == 1, (
@@ -347,8 +347,14 @@ def test_4h_context_extends_later_1h_evaluation_without_setup_pollution() -> Non
     # with the interleaved 4h context event.
     from src.domain.canonical import sha256_hex
 
-    first = run_paper_tick({**case_input, "feed_events": [*case_input["feed_events"], event_4h]})
-    second = run_paper_tick({**case_input, "feed_events": [*case_input["feed_events"], event_4h]})
+    first = run_paper_tick(
+        {**case_input, "feed_events": [*case_input["feed_events"], event_4h]},
+        allow_unrationalized=True,
+    )
+    second = run_paper_tick(
+        {**case_input, "feed_events": [*case_input["feed_events"], event_4h]},
+        allow_unrationalized=True,
+    )
     assert sha256_hex(first) == sha256_hex(second)
 
 

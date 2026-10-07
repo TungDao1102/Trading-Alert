@@ -48,7 +48,7 @@ def test_warmup_invalid_emits_warmup_insufficient() -> None:
     case = _load_case("warmup_invalid_no_trade")
     expected = _load_expected("warmup_invalid_no_trade")
 
-    outcome = run_paper_tick(case)
+    outcome = run_paper_tick(case, allow_unrationalized=True)
 
     assert outcome["signals"] == []
     assert outcome["trade_plans"] == []
@@ -83,7 +83,7 @@ def test_feed_stale_emits_data_stale() -> None:
         f"STALENESS_THRESHOLD_SECONDS ({STALENESS_THRESHOLD_SECONDS}s)"
     )
 
-    outcome = run_paper_tick(case)
+    outcome = run_paper_tick(case, allow_unrationalized=True)
 
     assert outcome["signals"] == []
     assert outcome["trade_plans"] == []
@@ -120,7 +120,7 @@ def test_recovery_after_stale_resumes_evaluation() -> None:
     base = _load_case("feed_stale_no_trade")
 
     # Call 1: stale event → DATA_STALE.
-    stale_outcome = run_paper_tick(base)
+    stale_outcome = run_paper_tick(base, allow_unrationalized=True)
     assert len(stale_outcome["no_trade_records"]) == 1
     assert stale_outcome["no_trade_records"][0]["reason_code"] == "DATA_STALE"
     assert stale_outcome["no_trade_records"][0]["stage"] == "feed_gate"
@@ -155,7 +155,7 @@ def test_recovery_after_stale_resumes_evaluation() -> None:
     # open_time_utc in the snapshot (same pattern as clean_run).
     case2["warmed_up_1h"] = base["warmed_up_1h"][:-1]
 
-    fresh_outcome = run_paper_tick(case2)
+    fresh_outcome = run_paper_tick(case2, allow_unrationalized=True)
 
     # The fresh event passes the staleness gate (gap = 1s < 60s).
     # It may still emit NO_TRADE from the engine (regime/setup gates),
@@ -167,7 +167,7 @@ def test_recovery_after_stale_resumes_evaluation() -> None:
 
     # And the outcome is byte-deterministic under frozen clock.
     case2_again = deepcopy(case2)
-    fresh_outcome_again = run_paper_tick(case2_again)
+    fresh_outcome_again = run_paper_tick(case2_again, allow_unrationalized=True)
     assert sha256_hex(fresh_outcome) == sha256_hex(fresh_outcome_again)
 
 
@@ -206,7 +206,7 @@ def test_feed_freshness_within_threshold_passes() -> None:
     case["feed_events"] = [event]
     case["now_utc"] = now_utc.isoformat()
 
-    outcome = run_paper_tick(case)
+    outcome = run_paper_tick(case, allow_unrationalized=True)
     feed_gate_records = [r for r in outcome["no_trade_records"] if r["stage"] == "feed_gate"]
     assert len(feed_gate_records) == 0, (
         f"event within threshold should pass feed gates; got {feed_gate_records}"

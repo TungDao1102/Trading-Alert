@@ -128,7 +128,7 @@ def _replay_paper_through_bars(
             "feed_events": [feed_event],
             "now_utc": bar_close,
         }
-        outcome = run_paper_tick(paper_input)
+        outcome = run_paper_tick(paper_input, allow_unrationalized=True)
         outcomes.append(outcome)
     return outcomes
 
