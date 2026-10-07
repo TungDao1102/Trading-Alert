@@ -26,7 +26,9 @@ Public surface (the only symbols downstream code uses):
     (D-04).
   - `pin_stream_epoch(...)` — load the registry ParameterSet, run the
     07.1 binding gate (CostModelBindingMismatch on inequality, bare
-    KeyError on absent slice keys), and return the StreamEpoch.
+    KeyError on absent slice keys), and return the StreamEpoch. It is
+    called by `run_paper_tick` (src/paper/loop.py) at the start of every
+    paper tick, before any candle is parsed (G-15-11, D-16, D-27).
   - `check_registry_unchanged(...)` — re-read the registry, compare
     canonical hashes, append one JSONL entry to the diff log. Returns
     a FreezeCheckOutcome: on a clean tick current_epoch == pinned_epoch
@@ -37,6 +39,11 @@ Public surface (the only symbols downstream code uses):
     JSON, calls `check_registry_unchanged`, writes the diff-log
     entry, and writes the new pinned state on rollover. Exits 0 on
     success, non-zero on missing state.
+
+`PaperAllowlistEntry` and `PAPER_START_ALLOWLIST` are module-internal policy
+data read only by `pin_stream_epoch`. The allowlist is empty by the user's
+decision at checkpoint 15-17-01 (Option B), is consulted only for sets without
+rationale tables, and is guarded by tests/test_paper_start_gate.py.
 
 The module owns the freeze-monitor slice: registry reads go through
 `src/domain/registry.py`, cost-key binding through `src/backtest/`
@@ -464,12 +471,15 @@ def pin_stream_epoch(
             sets that carry no `[rationale.<key>]` tables. The default is
             strict: a set with a missing or incomplete rationale, or with
             any PLACEHOLDER key, cannot be pinned for paper (D-16, D-27).
-            No module under `src/` passes True.
+            Tests only. src/ never sets it to True (tests/test_paper_start_gate.py
+            enforces this); run_paper_tick passes its own keyword through, default False.
 
     Raises:
         UnregisteredParameterSet: file does not exist.
         UnrationalizedParameterSet: the set's rationale is missing or
-            incomplete, or at least one key has basis PLACEHOLDER, and
+            incomplete, or at least one key has basis PLACEHOLDER, or the
+            set has no rationale tables and no exact-hash
+            PAPER_START_ALLOWLIST entry admits it, and
             `allow_unrationalized` is False.
         CostModelBindingMismatch: caller-supplied cost model does not
             bind the registry (per 07.1 D-01).

@@ -13,6 +13,9 @@ tests/fixtures/.
 
 from __future__ import annotations
 
+import ast
+import dataclasses
+import inspect
 import json
 import subprocess
 import sys
@@ -351,6 +354,99 @@ def test_import_with_the_empty_allowlist_emits_no_error_or_warning() -> None:
 # --------------------------------------------------------------------------- #
 
 
+FLAG = "allow_unrationalized"
+ALLOWLIST = "PAPER_START_ALLOWLIST"
+FLAG_FILES = frozenset({"paper/freeze.py", "paper/loop.py"})
+ALLOWLIST_FILE = "paper/freeze.py"
+
+
+def _bound_names(node: ast.AST) -> list[str]:
+    """Names (or attribute names) a statement binds, rebinds or deletes."""
+    targets: list[ast.expr] = []
+    if isinstance(node, ast.Assign):
+        targets = list(node.targets)
+    elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+        targets = [node.target]
+    elif isinstance(node, ast.Delete):
+        targets = list(node.targets)
+    names: list[str] = []
+    for target in targets:
+        for sub in ast.walk(target):
+            if isinstance(sub, ast.Name):
+                names.append(sub.id)
+            elif isinstance(sub, ast.Attribute):
+                names.append(sub.attr)
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        names.extend((alias.asname or alias.name) for alias in node.names)
+    return names
+
+
+def _allowlist_binding_violations(tree: ast.Module, rel: str) -> list[str]:
+    """Exactly one module-level tuple-literal binding of the allowlist; nothing else touches it."""
+    found: list[str] = []
+    module_level = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and ALLOWLIST in _bound_names(node)
+    ]
+    if len(module_level) != 1:
+        found.append(
+            f"{rel}: {ALLOWLIST} needs exactly one module-level binding, found {len(module_level)}"
+        )
+    for node in module_level:
+        value = node.value
+        if not isinstance(value, ast.Tuple):
+            found.append(f"{rel}:{node.lineno}: {ALLOWLIST} value is not a tuple literal")
+    allowed = {id(node) for node in module_level[:1]}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Global, ast.Nonlocal)) and ALLOWLIST in node.names:
+            found.append(f"{rel}:{node.lineno}: {ALLOWLIST} declared global or nonlocal")
+        elif ALLOWLIST in _bound_names(node) and id(node) not in allowed:
+            found.append(f"{rel}:{node.lineno}: {ALLOWLIST} rebound, extended or deleted")
+    return found
+
+
+def _scan_src_violations(root: Path) -> list[str]:
+    """AST scan of every *.py under root: the test-only flag and the allowlist (plan 15-17).
+
+    Reports, sorted: a call passing the flag as the constant True; a dict literal keyed by the
+    flag name; any mention of the flag outside paper/freeze.py and paper/loop.py; any mention
+    of the allowlist name outside paper/freeze.py; and in paper/freeze.py anything but one
+    module-level tuple-literal binding (rebinding, augmented assignment, global, del,
+    setattr/delattr naming it). A name built at runtime is not visible to this check.
+    """
+    found: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                for kw in node.keywords:
+                    if (
+                        kw.arg == FLAG
+                        and isinstance(kw.value, ast.Constant)
+                        and kw.value.value is True
+                    ):
+                        found.append(
+                            f"{rel}:{node.lineno}: call passes {FLAG} as the constant True"
+                        )
+                if isinstance(node.func, ast.Name) and node.func.id in {"setattr", "delattr"}:
+                    if any(isinstance(a, ast.Constant) and a.value == ALLOWLIST for a in node.args):
+                        found.append(f"{rel}:{node.lineno}: {node.func.id} names {ALLOWLIST}")
+            elif isinstance(node, ast.Dict):
+                for key in node.keys:
+                    if isinstance(key, ast.Constant) and key.value == FLAG:
+                        found.append(f"{rel}:{node.lineno}: dict key {FLAG}")
+        if rel not in FLAG_FILES and FLAG in source:
+            found.append(f"{rel}: mentions {FLAG} outside paper/freeze.py and paper/loop.py")
+        if rel != ALLOWLIST_FILE and ALLOWLIST in source:
+            found.append(f"{rel}: mentions {ALLOWLIST} outside {ALLOWLIST_FILE}")
+        if rel == ALLOWLIST_FILE:
+            found.extend(_allowlist_binding_violations(tree, rel))
+    return sorted(found)
+
+
 def _write(root: Path, rel: str, text: str) -> None:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -392,3 +488,51 @@ def test_guard_helper_accepts_the_allowed_forms(tmp_path: Path) -> None:
 
 def test_no_module_under_src_enables_the_flag_or_touches_the_allowlist() -> None:
     assert _scan_src_violations(REPO_ROOT / "src") == []
+
+
+def test_flag_is_keyword_only_and_strict_by_default() -> None:
+    from src.paper.freeze import pin_stream_epoch
+    from src.paper.loop import run_paper_tick
+
+    for func in (run_paper_tick, pin_stream_epoch):
+        parameter = inspect.signature(func).parameters[FLAG]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default is False
+
+
+def test_run_paper_tick_passes_its_own_flag_through_by_name() -> None:
+    tree = ast.parse((REPO_ROOT / "src" / "paper" / "loop.py").read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "pin_stream_epoch"
+    ]
+    assert len(calls) == 1
+    (keyword,) = [kw for kw in calls[0].keywords if kw.arg == FLAG]
+    assert isinstance(keyword.value, ast.Name)
+    assert keyword.value.id == FLAG
+    assert {kw.arg for kw in calls[0].keywords}.isdisjoint({"cost_model", "registry_root"})
+
+
+def test_allowlist_entry_shape_and_privacy() -> None:
+    import src.paper as paper_pkg
+    import src.paper.freeze as freeze
+    from src.paper.freeze import PaperAllowlistEntry
+
+    assert dataclasses.is_dataclass(PaperAllowlistEntry)
+    assert PaperAllowlistEntry.__dataclass_params__.frozen  # type: ignore[attr-defined]
+    fields = dataclasses.fields(PaperAllowlistEntry)
+    assert [f.name for f in fields] == [
+        "strategy_id",
+        "parameter_set_id",
+        "parameter_set_hash",
+        "purpose",
+        "approved_at",
+        "basis",
+    ]
+    assert all(f.type in (str, "str") for f in fields)
+    for name in ("PaperAllowlistEntry", ALLOWLIST):
+        assert name not in freeze.__all__
+        assert not hasattr(paper_pkg, name)
