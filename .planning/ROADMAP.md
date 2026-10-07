@@ -710,6 +710,26 @@ Plans:
 
 **Audit refs**: F-201, F-125, F-607, F-961, F-023, D040, D041; carry-over from Phase 7 (`.planning/phases/07-paper-forward-observation/07-VERIFICATION.md`)
 
+**Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
+- [G2-007] The WS-to-`feed_events` producer sets `event["interval"]` per stream, REST-backfilled klines are converted into the loop's `feed_events` path, and `CONTEXT_BAR` (emitted at `src/paper/loop.py:455`, absent from docs/GLOSSARY.md) is confirmed as a feed-gate reason code and added to the GLOSSARY (source: .planning/phases/07-paper-forward-observation/07-REVIEW-FIX.md:76-80,150-154; decision: none required, confirmation task)
+- [G2-008] Paper-vs-backtest parity cannot cover strategy-stage NO_TRADE or signal-less bars because the engine emits trades only; either per-bar verdict parity is delivered or the limitation is recorded in DECISIONS (source: tests/test_paper_parity.py:148-155, .planning/phases/07-paper-forward-observation/07-REVIEW-FIX.md:262-267; decision: open user decision)
+- [G4-010] The paper loop has no ledger, so a multi-signal history diverges from the backtest by design; D052 item (i) says closing that gap belongs to a paper-loop phase (source: docs/DECISIONS.md D052 item (i); decision: D052)
+- [G2-009] `.github/workflows/paper_freeze_check.yml` hard-codes `--strategy-id trend-pullback --parameter-set-id baseline-v3`; the hourly freeze check must take the pinned strategy and parameter set, and the host that runs it is not named in SC8 (source: .github/workflows/paper_freeze_check.yml:80-81, .planning/phases/07-paper-forward-observation/07-REVIEW.md:602-610; decision: open user decision, which host runs the hourly check)
+- [G4-021] No committed parameter set can start a paper stream today (PAPER_START_ALLOWLIST is empty by user decision; the five Phase 15 sets carry PLACEHOLDER keys); SC8 needs a fully rationalized non-PLACEHOLDER set or a new user checkpoint, a D054 update and the test `test_production_allowlist_is_empty_by_user_decision` revisited (source: .planning/phases/15-strategy-geometry-correction/15-17-SUMMARY.md:117-119, tests/test_paper_start_gate.py:228; decision: D054 item (i))
+- [G4-018] Phase 15 paper-gate review Info items IN-01..IN-05 (PaperAllowlistEntry validates nothing, stale docstrings, the stream-start gate runs per tick, test nits, two independent REGISTRY_ROOT bindings); Phase 16 is the first consumer, so validate the allowlist entry and bind REGISTRY_ROOT once (source: .planning/phases/15-strategy-geometry-correction/15-REVIEW-PAPER-GATE.md:96-137; decision: none required, left open by user choice)
+- [G3-026] One real fetch from data.binance.vision is observed during the live smoke (the Phase 13 UAT test for the live httpx client was skipped behind a TLS-intercepting proxy) (source: .planning/phases/13-research-data-foundation-fixes/13-UAT.md:179-182; decision: none required)
+- [D059-5] Backlog 999.2 is not a numbered phase: Phase 16 owns the research runner, the feasibility and sample-size gate and the registration of candidate parameter sets; candidates come only from pre-registered values with a rationale, never from a backtest result, and still need the user's exact-hash approval before paper start (source: docs/DECISIONS.md D059 item 5; decision: D059)
+- [D052-open] `modeled_costs_per_unit` is None on v2 filled `TradeRecord`s, and no runner calls `read_code_version` plus `assemble` outside tests; D052 says both are owed to the research runner (source: docs/DECISIONS.md D052, .planning/phases/14-backtest-causality-rewrite/deferred-items.md:17-31; decision: D059 item 5, restoring `modeled_costs_per_unit` is still an open user decision)
+- [T-01] BKTS-03 parameter-plateau analysis and sweep runner: the report prints `not computed (BKTS-03 pending)` and the requirement is Pending against closed Phase 6; the runner built here owns it (source: .planning/REQUIREMENTS.md:47,134, src/backtest/report.py:50, .planning/phases/14-backtest-causality-rewrite/14-CONTEXT.md:14,155; decision: D059 item 5; the REQUIREMENTS re-map is left to the requirements batch)
+- [G4-003] The research re-run itself, candidate-set freeze, data window and split, research-universe-v1, trade-floor reachability and the PLACEHOLDER resolution of baseline-v6 are "not part of Phase 15" and no other phase plans them (source: .planning/phases/15-strategy-geometry-correction/15-VERIFICATION.md:92,142, docs/DECISIONS.md D054 item (h); decision: D059 item 5)
+- [G3-027] Measure the D043 trade-floor feasibility (at least 100 closed trades pooled across the Validation folds, at least 30 per fold) on the first real research run and report any shortfall; the floor is never lowered (source: .planning/phases/11-decision-alignment/11-01-SUMMARY.md:50,84, docs/DECISIONS.md D043; decision: D043)
+- [G3-012] Revisit `max_cost_to_risk` 0.15 (implied minimum stop about 0.79 percent of price) once real stop widths are measured; only through a new parameter set chosen before any result is seen, never tuned afterwards (source: .planning/phases/12-fee-cost-model-correctness/12-VERIFICATION.md:167; decision: D046 item 6, values kept as locked until a new set)
+- [G4-009] The incremental feature series stays deferred; re-time one run without tracemalloc first, and make any change an exact-equivalence refactor (source: docs/DECISIONS.md D052 item (h); decision: D052)
+- [OQ-1] How a backtest trade held through mark-price holes is treated in the evidence (annotate only, count against coverage, exclude from pooled R, or void) is decided with the real count from the first real-data run; D058 (live fail-closed) is not the answer to it (source: .planning/phases/14-backtest-causality-rewrite/deferred-items.md:45-47, docs/DECISIONS.md D058; decision: open user decision)
+- [G2-038] The skipped kill-gate review items WR-01, WR-06, WR-12 and WR-13 must be decided before the first kill-gate report is read on real evidence, which a research run owned here can produce before Phase 26 (source: .planning/phases/10-journal-depth-kill-gate-operations/10-VERIFICATION.md:193-194; decision: open user decision, whether the resolution moves ahead of Phase 26)
+- [D057] Protocol G5 floor of 30 qualifying closed trades is decided but not in force: RESEARCH_PROTOCOL.md v2.0.0 still says "no floor" until the amendment plan (intended v2.1.0) lands; it must land before any holdout run, and the plan that carries it is not yet named (source: docs/DECISIONS.md D057, docs/research/RESEARCH_PROTOCOL.md:240; decision: D057; owning plan: open user decision)
+- [D059-4] The OI collector must be running and writing OI data successfully no later than 2026-10-08; a deployment that does not ingest does not count, every later OI gap is recorded as a coverage gap, and the dataset is never called full history while a known gap exists. The deadline is the user's and the repository cannot enforce it (source: docs/DECISIONS.md D059 item 4; decision: D059)
+
 **Plans:** 0 plans
 
 Plans:
@@ -777,6 +797,13 @@ Plans:
 **Success Criteria**:
 1. A user-data stream is implemented: listenKey lifecycle; ORDER_TRADE_UPDATE, ALGO_UPDATE (including `o.rm`) and ACCOUNT_UPDATE handling; the `/private` WS URL. It feeds `fold_fills` and reconciliation. REST is the fallback (F-104, F-054).
 2. A demo or testnet probe records the actual not-found codes for GET order and GET algoOrder. The same probe also records two Phase 17 facts that the live docs do not state (docs/SOURCES.md, "Facts verified for Phase 17"): the error code returned for a duplicate `clientAlgoId` on a new algo order (-4116 is documented only for `clientOrderId`), and whether an id is accepted again once the first order is FILLED or CANCELED. Phase 17's `BinanceSemanticsFakeAdapter` is corrected if the probe disagrees with it. Adapter mappings are keyed on `status_code`, including -2011, -2013, -2019, -4164, -1021 and -2021 (F-501, F-205, F-503, F-502).
+   Demo probe cases recorded by D055 (the -4509 protective-stop question; results are labelled demo-observed, not mainnet; feasibility and safety verification only, never used to choose a trading parameter):
+   - pre-place a STOP_MARKET with an explicit quantity and reduceOnly while no position exists;
+   - an entry that never fills and is then cancelled: is the protective order orphaned, and does it cancel cleanly;
+   - a full fill: does the protective order protect exactly the filled quantity;
+   - a partial fill: how quantity and protection behave;
+   - a rejected protective order;
+   - reconciliation after each of these states.
 3. The client configuration supports:
    - explicit REST timeouts;
    - API key loading;
@@ -786,6 +813,15 @@ Plans:
    (F-504, F-128, F-505, F-706, F-506)
 
 **Audit refs**: F-104, F-054, F-501, F-205, F-503, F-502, F-504, F-128, F-505, F-706, F-506
+
+**Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
+- [G3-001] First task: re-confirm the ALGO_UPDATE status list, the 24-hour WS lifetime and the Change-Position-Mode wording on the official Binance pages (Phase 11 could not fetch them; docs/SOURCES.md marks them as not fetched or MEDIUM) and update SOURCES.md (source: .planning/STATE.md:514, .planning/phases/11-decision-alignment/11-05-SUMMARY.md:125-126,135,152, docs/DECISIONS.md D044 item (7); decision: D044)
+- [G2-028] Document a classification of every `algoStatus` value (NEW, TRIGGERING, TRIGGERED, FINISHED, CANCELED, REJECTED, EXPIRED) used by attach, reconcile and the sweeper; today `_ACTIVE_ALGO_STATUSES` is {"NEW"} only (source: src/execution/manager.py:1036, .planning/phases/09-live-execution-rollout/09-EXCHANGE-FACTS.md:37-49; decision: none required)
+- [G2-029] Add to the Demo probe: a below-minimum-notional reduce-only conditional leg, and the MARKET_LOT_SIZE question for a triggered `*_MARKET` exit; record accept or reject, and correct BINANCE.md and Phase 19 criterion 4 if the probe disagrees (source: .planning/phases/09-live-execution-rollout/09-EXCHANGE-FACTS.md:69-79, .planning/phases/11-decision-alignment/11-05-SUMMARY.md:94,152; decision: none required, verification task)
+- [G3-009] Parse `commission` and `commissionAsset` from ORDER_TRADE_UPDATE and feed them to the Phase 21 daily-loss accounting (source: .planning/phases/12-fee-cost-model-correctness/COVERAGE.md:16; decision: none required)
+- [G4-034] Every Order or Position move out of UNKNOWN needs Binance evidence; record the evidence source (REST reconcile or user-data event) in the journal when the first caller exists (source: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md:17-18, docs/DECISIONS.md D051 item (i); decision: D051)
+- [G4-043] Order `exchange_status` and `exchange_order_id` updates have no store method yet; add them with the first caller (source: .planning/phases/17-operational-persistence-layer/17-10-SUMMARY.md:167-168; decision: none required)
+- [D055] The probe cases now listed under criterion 2 feed the -4509 decision: whether protection is placed after the entry fill or pre-placed before it stays OPEN until the user records a new decision row after the probe; alternative (b) with explicit quantity is UNVERIFIED on Demo (source: docs/DECISIONS.md D055; decision: D055, execution model is an open user decision)
 
 **Plans:** 0 plans
 
@@ -815,6 +851,19 @@ This absorbs former Phase 15 (live-price check).
 
 **Audit refs**: F-302, F-203, F-007, F-016, F-303, F-304, F-959, F-507, F-208, F-307
 
+**Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
+- [D055] `execute_approved_plan` still places the protective stop right after the entry (`src/execution/manager.py` gate 6 near line 613 and the SL intent near line 818), which Demo rejects with -4509 while no position exists; criteria 1, 3 and 4 are NOT amended here and depend on the D055 outcome (the Phase 18 probe, then a user decision) (source: docs/DECISIONS.md D055, .planning/phases/09-live-execution-rollout/09-DEMO-REHEARSAL-FINDINGS.md; decision: D055, execution model is an open user decision)
+- [D059-1,2] The TP1 far-half-of-zone rejection rule stays deferred to Backlog 999.1, and maker or post-only entries are deferred; neither is part of this phase's execution scope (source: docs/DECISIONS.md D059 items 1 and 2; decision: D059)
+- [T-04] EXEC-07 is listed in this phase's requirements but no criterion names it: the TP1 split fraction, the TP2 rule and the time in force as versioned registry parameters, while D052 item (c) keeps `TP1_QUANTITY_FRACTION` a code constant; the two have to be reconciled (source: .planning/REQUIREMENTS.md:69,152, docs/DECISIONS.md D052 item (c); decision: open user decision)
+- [G4-006] The live producer of the TP1 quantity and exit ladder (F-103) has no phase number ("a later phase" in D052); it must use the backtest fraction and `size_protectives_to_filled_qty` (source: docs/DECISIONS.md D052 item (c), .planning/phases/14-backtest-causality-rewrite/14-VERIFICATION.md:255; decision: D052)
+- [G4-007] The criterion 4 single-TP fallback differs from the backtest rule D-27 (an un-sizeable TP1 is NO_TRADE); the backtest and the live fallback must change together so the parity test stays green (source: .planning/phases/14-backtest-causality-rewrite/14-VERIFICATION.md:255; decision: none required, the two must move together)
+- [G2-032] TP1 is not resized when later partial fills arrive (cancel-then-replace with a versioned role id); decide and implement it, or document that SL and TP2 close-all suffice (source: .planning/phases/09-live-execution-rollout/09-REVIEW-FIX.md:88-90; decision: open user decision)
+- [G4-038] Write TP legs ahead with `record_protective_intent`, and check `snapshot_is_valid_for_live` before placement, re-sizing or refusing on a stale snapshot (source: .planning/phases/17-operational-persistence-layer/17-11-SUMMARY.md:198-201, src/execution/constraint_snapshot.py:394; decision: none required)
+- [G4-008] `realized_risk` is not persisted for live fills, so live R stays INCOMPLETE (NO_RISK_VALUE); persist it with the fill record (the audit allowed Phase 19 or 20, placed here) (source: docs/DECISIONS.md D052 item (f); decision: D052)
+- [G4-017] INVALIDATED now carries two meanings (planner D-07 reject versus approval and binding invalidation); distinguish them when criterion 2 invalidation is built (source: .planning/phases/15-strategy-geometry-correction/15-REVIEW.md:106-110, .planning/phases/15-strategy-geometry-correction/15-REVIEW-DISPOSITION.md:45; decision: none required)
+- [G4-020] The planner has no tick size, so a stop within one tick of the zone edge could be snapped by the risk layer; assert SL and entry geometry after tick snap (source: .planning/phases/15-strategy-geometry-correction/15-13-SUMMARY.md:90; decision: D054, accepted limitation)
+- [G4-036] An executed TradePlan stays APPROVED and `expiry_utc` governs only an unfilled entry; nothing may move an executed plan to EXPIRED, so the criterion 2 plan-status check must not contradict this (source: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md:19-20, docs/DECISIONS.md D051 item (i); decision: D051)
+
 **Plans:** 0 plans
 
 Plans:
@@ -843,6 +892,22 @@ Plans:
 5. The tests that asserted the old rules ("reconciler never places") are rewritten (F-604).
 
 **Audit refs**: F-701, F-401, F-952, F-009, F-711, F-127, F-702, F-502, F-106, F-604
+
+Input: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md
+
+**Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
+- [D055] Criterion 2 presumes an entry-time SL on a resting entry, which Demo rejects with -4509; it is NOT amended here and depends on the D055 outcome (the Phase 18 probe, then a user decision), with the invariant that no new entry opens while any position is unprotected (source: docs/DECISIONS.md D055; decision: D055, execution model is an open user decision)
+- [D058] Stale-feed handling: execution fails closed when the mark-price data needed for risk or protection is missing or stale; this phase detects and handles the stale feed, and Phase 24 owns the enablement gate (source: docs/DECISIONS.md D058; decision: D058)
+- [G2-026] The "WR-07 ordering rules" in criterion 2 are defined only as a skipped review item: expiry would cancel a plan's protective legs only with zero fills, which needs an agreed fill-state source; the emergency close needs either a reduce-only MARKET order or a flat-confirmation contract (source: .planning/phases/09-live-execution-rollout/09-REVIEW-FIX.md:266-277; decision: open user decision, premise also depends on D055)
+- [G4-035] Manual close outside the system: whether the closePosition protective legs auto-cancel or orphan decides what the sweeper and reconcile do; re-read the live Binance pages and prove it on Demo (Phase 25 scenario) before relying on either answer (source: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md:5-12; decision: none required, verification task)
+- [G2-016] Drills to rehearse for the reconcile and alert work (also listed in Phase 25): UNPROTECTED position, STALE_FEED and MANUAL_CLOSE, from the eight RUNBOOK drills (source: src/ops/drills.py:71-80, .planning/phases/08-approval-reconciliation-hardening/08-VERIFICATION.md; decision: none required)
+- [G4-029] `resolve_unresolved_intents` and `list_unresolved_intents` have no production caller; restart must run intent recovery, including an acknowledged ENTRY with a STOP_LOSS intent that is rejected or absent (source: .planning/phases/17-operational-persistence-layer/17-12-SUMMARY.md:201, src/execution/intent_recovery.py:234; decision: none required, Phase 24 wires the caller)
+- [G4-034] Order and Position exits from UNKNOWN record the evidence source in the journal (see the Phase 18 entry) (source: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md:17-18; decision: D051)
+- [G4-043] Position quantity and PnL updates by reconciliation have no store method yet (`update_position_snapshot`) (source: .planning/phases/17-operational-persistence-layer/17-10-SUMMARY.md:167; decision: none required)
+- [G2-019] Duplicate exchange client ids collapse silently in the compare index (08-REVIEW IN-15) and skipped sweeper cancels leave no journal trace (IN-14); surface both as divergences or journal events (source: .planning/phases/08-approval-reconciliation-hardening/08-REVIEW.md:714,724; decision: none required)
+- [T-05] OPS-05 also requires alerts for a duplicate execution attempt, a rejected protective action and a daily-loss WARNING, which the criterion 4 list omits (source: .planning/REQUIREMENTS.md:78; decision: none required)
+- [T-06] The reconcile cadence, stale-feed threshold and WS-silence threshold have no values ("configured freshness threshold"); they must be registry parameters with provenance labels (source: docs/operations/RUNBOOK.md:113-115, .planning/audits/2026-09-29-deep-audit/DEEP_AUDIT_REPORT.md:636 (F-026); decision: open user decision, the values)
+- [G3-005] Promote `ENTRY_WITHOUT_PROTECTIVE` into the RejectionReason enum and update GLOSSARY 9.3 (source: docs/GLOSSARY.md:206, docs/DECISIONS.md D044 item (1); decision: D044)
 
 **Plans:** 0 plans
 
