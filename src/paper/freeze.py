@@ -75,8 +75,8 @@ from src.backtest.costs import CostModel, build_cost_model, cost_slice
 from src.domain.canonical import sha256_hex
 from src.domain.rationale import (
     UnrationalizedParameterSet,
-    check_rationale,
-    placeholder_keys,
+    check_rationale_text,
+    placeholder_keys_text,
 )
 from src.domain.registry import (
     REGISTRY_ROOT,
@@ -309,18 +309,15 @@ def _recompute_parameter_set_hash(
     )
 
 
-def _load_parameter_set_with_root(
+def _read_registry_file(
     strategy_id: str,
     parameter_set_id: str,
     registry_root: Path,
-) -> ParameterSet:
-    """Load a ParameterSet from a possibly-non-default registry root.
+) -> tuple[Path, str]:
+    """Validate both ids as registry path segments, then read the set file exactly once.
 
-    Mirrors `load_parameter_set` (src/domain/registry.py:372) but
-    allows tests to point at a tmp registry root. Reuses the same
-    `_parse_and_validate` helper so the canonical-hash construction
-    matches what `load_parameter_set` would compute against the real
-    root (D-04 byte-stability).
+    Returns the file path and its decoded text. Everything the gate decides about a set (hash,
+    rationale verdict, allowlist match) is derived from this one read (review WR-05).
     """
     from src.domain.registry import UnregisteredParameterSet
 
@@ -329,8 +326,33 @@ def _load_parameter_set_with_root(
     path = registry_root / strategy_id / f"{parameter_set_id}.toml"
     if not path.is_file():
         raise UnregisteredParameterSet(f"{strategy_id}/{parameter_set_id}")
+    return path, path.read_bytes().decode("utf-8")
 
-    text = path.read_bytes().decode("utf-8")
+
+def _load_parameter_set_with_root(
+    strategy_id: str,
+    parameter_set_id: str,
+    registry_root: Path,
+) -> ParameterSet:
+    """Load a ParameterSet from a possibly-non-default registry root.
+
+    Mirrors `load_parameter_set` (src/domain/registry.py) but
+    allows tests to point at a tmp registry root. Reuses the same
+    `_parse_and_validate` helper so the canonical-hash construction
+    matches what `load_parameter_set` would compute against the real
+    root (D-04 byte-stability).
+    """
+    path, text = _read_registry_file(strategy_id, parameter_set_id, registry_root)
+    return _parameter_set_from_text(text, path, strategy_id, parameter_set_id)
+
+
+def _parameter_set_from_text(
+    text: str,
+    path: Path,
+    strategy_id: str,
+    parameter_set_id: str,
+) -> ParameterSet:
+    """Parse, validate and hash set-file text the caller already read."""
     strategy_version, normalized_params = _parse_and_validate(
         text, path, strategy_id, parameter_set_id
     )
@@ -392,9 +414,9 @@ def require_bool_flag(value: object) -> None:
         )
 
 
-def _has_rationale_tables(path: Path) -> bool:
+def _has_rationale_tables(text: str) -> bool:
     """True when the set's TOML document has a top-level `rationale` key (even if malformed)."""
-    return "rationale" in tomllib.loads(path.read_bytes().decode("utf-8"))
+    return "rationale" in tomllib.loads(text)
 
 
 def _require_allowlisted(
@@ -427,6 +449,7 @@ def _require_allowlisted(
 
 def _require_rationalized(
     path: Path,
+    text: str,
     *,
     strategy_id: str,
     parameter_set_id: str,
@@ -434,15 +457,15 @@ def _require_rationalized(
 ) -> None:
     """Refuse a set whose rationale is incomplete, that carries PLACEHOLDER keys, or that has
     no rationale tables and no exact-hash allowlist entry (D-16, D-27)."""
-    if not _has_rationale_tables(path):
+    if not _has_rationale_tables(text):
         _require_allowlisted(
             strategy_id=strategy_id,
             parameter_set_id=parameter_set_id,
             parameter_set_hash=parameter_set_hash,
         )
         return
-    problems = check_rationale(path)
-    placeholders = placeholder_keys(path)
+    problems = check_rationale_text(text, path)
+    placeholders = placeholder_keys_text(text)
     if not problems and not placeholders:
         return
     parts: list[str] = []
@@ -507,11 +530,13 @@ def pin_stream_epoch(
     require_bool_flag(allow_unrationalized)
     _require_utc_aware(opened_at_utc, "opened_at_utc")
     root = registry_root if registry_root is not None else REGISTRY_ROOT
-    parameter_set = _load_parameter_set_with_root(strategy_id, parameter_set_id, root)
+    path, text = _read_registry_file(strategy_id, parameter_set_id, root)
+    parameter_set = _parameter_set_from_text(text, path, strategy_id, parameter_set_id)
 
     if allow_unrationalized is not True:
         _require_rationalized(
-            root / strategy_id / f"{parameter_set_id}.toml",
+            path,
+            text,
             strategy_id=strategy_id,
             parameter_set_id=parameter_set_id,
             parameter_set_hash=parameter_set.parameter_set_hash,

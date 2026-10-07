@@ -65,9 +65,8 @@ def _raw_tables(doc: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     return raw, []
 
 
-def _parameters(path: Path) -> dict[str, Any]:
+def _parameters(text: str, path: Path) -> dict[str, Any]:
     """Normalized `[parameters]` through the registry's own parse path."""
-    text = path.read_bytes().decode("utf-8")
     _version, params = registry._parse_and_validate(text, path, path.parent.name, path.stem)
     return params
 
@@ -166,9 +165,14 @@ def _entry_problems(key: str, table: Any, parameter: Any) -> list[str]:
 
 
 def check_rationale(path: Path) -> list[str]:
-    """All rationale problems of a set file, sorted; empty when complete."""
-    params = _parameters(path)
-    raw, problems = _raw_tables(_read_doc(path))
+    """All rationale problems of a set file, sorted; empty when complete (one read of the file)."""
+    return check_rationale_text(path.read_bytes().decode("utf-8"), path)
+
+
+def check_rationale_text(text: str, path: Path) -> list[str]:
+    """`check_rationale` over file text the caller already read; `path` names the set only."""
+    params = _parameters(text, path)
+    raw, problems = _raw_tables(tomllib.loads(text))
     for key, parameter in params.items():
         if key not in raw:
             problems.append(f"{key}: missing rationale entry")
@@ -181,8 +185,13 @@ def check_rationale(path: Path) -> list[str]:
 
 
 def placeholder_keys(path: Path) -> tuple[str, ...]:
-    """Sorted keys whose rationale basis is PLACEHOLDER."""
-    raw, _structural = _raw_tables(_read_doc(path))
+    """Sorted keys whose rationale basis is PLACEHOLDER (one read of the file)."""
+    return placeholder_keys_text(path.read_bytes().decode("utf-8"))
+
+
+def placeholder_keys_text(text: str) -> tuple[str, ...]:
+    """`placeholder_keys` over file text the caller already read."""
+    raw, _structural = _raw_tables(tomllib.loads(text))
     return tuple(
         sorted(
             key
