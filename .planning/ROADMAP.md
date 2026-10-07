@@ -1069,3 +1069,13 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 25. Binance Demo Integration Test Campaign | 0/TBD | Not started | - |
 | 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
 | 27. Configurable Quote Asset (USDC readiness) | 0/TBD | Not started | - |
+
+## Backlog
+
+### Phase 999.1: Follow-up — Phase 15 deferred UAT follow-up: Test 9 (BACKLOG)
+
+**Goal:** Resolve the UAT checkpoint deferred during Phase 15 verification
+**Source phase:** 15
+**Deferred at:** 2026-10-07 during /gsd-verify-work 15 session completion
+**Follow-ups:**
+- [ ] Test 9: hoãn — revisit whether to reject a TP1 inside the far half of the entry zone after the research re-run (D054 item g) (deferred 2026-10-07)
