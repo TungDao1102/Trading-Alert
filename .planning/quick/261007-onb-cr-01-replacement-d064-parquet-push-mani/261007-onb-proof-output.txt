@@ -1,0 +1,2200 @@
+=== STEP 0: environment and help text (help, not behaviour) ===
+--- git ls-files --eol (six files) ---
+i/lf    w/crlf  attr/                 	.planning/phases/13.1-deployment-ci/13.1-OPEN-DECISIONS.md
+i/lf    w/crlf  attr/                 	docs/DOC_STATUS.md
+i/lf    w/crlf  attr/                 	docs/operations/RUNBOOK.md
+i/lf    w/crlf  attr/                 	src/ops/backup_remote.py
+i/lf    w/crlf  attr/                 	tests/test_backup_remote.py
+i/lf    w/crlf  attr/                 	tests/test_docker_backup_remote.py
+--- docker version ---
+client=29.5.3 server=29.5.3
+NCPU=16 Mem=8235704320 OS=Docker Desktop
+--- IMG: rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
+--- docker run --rm IMG version ---
+rclone v1.75.1
+- os/version: alpine 3.24.1 (64 bit)
+- os/kernel: 6.6.87.2-microsoft-standard-WSL2 (x86_64)
+- os/type: linux
+- os/arch: amd64
+- go/version: go1.27.1
+- go/linking: static
+- go/tags: none
+--- docker run --rm IMG cryptcheck --help ---
+Checks a remote against an [encrypted](/crypt/) remote. This is the equivalent
+of running rclone [check](/commands/rclone_check/), but able to check the
+checksums of the encrypted remote.
+
+For it to work the underlying remote of the cryptedremote must support
+some kind of checksum.
+
+It works by reading the nonce from each file on the cryptedremote: and
+using that to encrypt each file on the remote:.  It then checks the
+checksum of the underlying file on the cryptedremote: against the
+checksum of the file it has just encrypted.
+
+Use it like this
+
+```console
+rclone cryptcheck /path/to/files encryptedremote:path
+```
+
+You can use it like this also, but that will involve downloading all
+the files in `remote:path`.
+
+```console
+rclone cryptcheck remote:path encryptedremote:path
+```
+
+After it has run it will log the status of the `encryptedremote:`.
+
+If you supply the `--one-way` flag, it will only check that files in
+the source match the files in the destination, not the other way
+around. This means that extra files in the destination that are not in
+the source will not be detected.
+
+The `--differ`, `--missing-on-dst`, `--missing-on-src`, `--match`
+and `--error` flags write paths, one per line, to the file name (or
+stdout if it is `-`) supplied. What they write is described in the
+help below. For example `--differ` will write all paths which are
+present on both the source and destination but different.
+
+The `--combined` flag will write a file (or stdout) which contains all
+file paths with a symbol and then a space and then the path to tell
+you what happened to it. These are reminiscent of diff files.
+
+- `= path` means path was found in source and destination and was identical
+- `- path` means path was missing on the source, so only in the destination
+- `+ path` means path was missing on the destination, so only in the source
+- `* path` means path was present in source and destination but different.
+- `! path` means there was an error reading or hashing the source or dest.
+
+The default number of parallel checks is 8. See the [--checkers](/docs/#checkers-int)
+option for more information.
+
+Usage:
+  rclone cryptcheck remote:path cryptedremote:path [flags]
+
+Flags:
+      --combined string         Make a combined report of changes to this file
+      --differ string           Report all non-matching files to this file
+      --error string            Report all files with errors (hashing or reading) to this file
+  -h, --help                    help for cryptcheck
+      --match string            Report all matching files to this file
+      --missing-on-dst string   Report all files missing from the destination to this file
+      --missing-on-src string   Report all files missing from the source to this file
+      --one-way                 Check one way only, source files must exist on remote
+
+Flags used for check commands (flag group Check):
+      --max-backlog int   Maximum number of objects in sync or check backlog (default 10000)
+
+Flags for filtering directory listings (flag group Filter):
+      --delete-excluded                     Delete files on dest excluded from sync
+      --exclude stringArray                 Exclude files matching pattern
+      --exclude-from stringArray            Read file exclude patterns from file (use - to read from stdin)
+      --exclude-if-present stringArray      Exclude directories if filename is present
+      --files-from stringArray              Read list of source-file names from file (use - to read from stdin)
+      --files-from-raw stringArray          Read list of source-file names from file without any processing of lines (use - to read from stdin)
+      --files-from0 stringArray             Read list of source-file names from file using NUL as separator (use - to read from stdin)
+  -f, --filter stringArray                  Add a file filtering rule
+      --filter-from stringArray             Read file filtering patterns from a file (use - to read from stdin)
+      --hash-filter string                  Partition filenames by hash k/n or randomly @/n
+      --ignore-case                         Ignore case in filters (case insensitive)
+      --include stringArray                 Include files matching pattern
+      --include-from stringArray            Read file include patterns from file (use - to read from stdin)
+      --max-age Duration                    Only transfer files younger than this in s or suffix ms|s|m|h|d|w|M|y (default off)
+      --max-depth int                       If set limits the recursion depth to this (default -1)
+      --max-size SizeSuffix                 Only transfer files smaller than this in KiB or suffix B|K|M|G|T|P (default off)
+      --metadata-exclude stringArray        Exclude metadatas matching pattern
+      --metadata-exclude-from stringArray   Read metadata exclude patterns from file (use - to read from stdin)
+      --metadata-filter stringArray         Add a metadata filtering rule
+      --metadata-filter-from stringArray    Read metadata filtering patterns from a file (use - to read from stdin)
+      --metadata-include stringArray        Include metadatas matching pattern
+      --metadata-include-from stringArray   Read metadata include patterns from file (use - to read from stdin)
+      --min-age Duration                    Only transfer files older than this in s or suffix ms|s|m|h|d|w|M|y (default off)
+      --min-size SizeSuffix                 Only transfer files bigger than this in KiB or suffix B|K|M|G|T|P (default off)
+
+Flags for listing directories (flag group Listing):
+      --default-time Time   Time to show if modtime is unknown for files and directories (default 2000-01-01T00:00:00Z)
+      --fast-list           Use recursive list if available; uses more memory but fewer transactions
+
+Use "rclone [command] --help" for more information about a command.
+Use "rclone help flags" for to see the global flags.
+Use "rclone help backends" for a list of supported services.
+--- docker run --rm IMG check --help ---
+Checks the files in the source and destination match.  It compares
+sizes and hashes (MD5 or SHA1) and logs a report of files that don't
+match.  It doesn't alter the source or destination.
+
+For the [crypt](/crypt/) remote there is a dedicated command,
+[cryptcheck](/commands/rclone_cryptcheck/), that are able to check
+the checksums of the encrypted files.
+
+If you supply the `--size-only` flag, it will only compare the sizes not
+the hashes as well.  Use this for a quick check.
+
+If you supply the `--download` flag, it will download the data from
+both remotes and check them against each other on the fly.  This can
+be useful for remotes that don't support hashes or if you really want
+to check all the data.
+
+If you supply the `--checkfile HASH` flag with a valid hash name,
+the `source:path` must point to a text file in the SUM format.
+
+If you supply the `--one-way` flag, it will only check that files in
+the source match the files in the destination, not the other way
+around. This means that extra files in the destination that are not in
+the source will not be detected.
+
+The `--differ`, `--missing-on-dst`, `--missing-on-src`, `--match`
+and `--error` flags write paths, one per line, to the file name (or
+stdout if it is `-`) supplied. What they write is described in the
+help below. For example `--differ` will write all paths which are
+present on both the source and destination but different.
+
+The `--combined` flag will write a file (or stdout) which contains all
+file paths with a symbol and then a space and then the path to tell
+you what happened to it. These are reminiscent of diff files.
+
+- `= path` means path was found in source and destination and was identical
+- `- path` means path was missing on the source, so only in the destination
+- `+ path` means path was missing on the destination, so only in the source
+- `* path` means path was present in source and destination but different.
+- `! path` means there was an error reading or hashing the source or dest.
+
+The default number of parallel checks is 8. See the [--checkers](/docs/#checkers-int)
+option for more information.
+
+Usage:
+  rclone check source:path dest:path [flags]
+
+Flags:
+  -C, --checkfile string        Treat source:path as a SUM file with hashes of given type
+      --combined string         Make a combined report of changes to this file
+      --differ string           Report all non-matching files to this file
+      --download                Check by downloading rather than with hash
+      --error string            Report all files with errors (hashing or reading) to this file
+  -h, --help                    help for check
+      --match string            Report all matching files to this file
+      --missing-on-dst string   Report all files missing from the destination to this file
+      --missing-on-src string   Report all files missing from the source to this file
+      --one-way                 Check one way only, source files must exist on remote
+
+Flags used for check commands (flag group Check):
+      --max-backlog int   Maximum number of objects in sync or check backlog (default 10000)
+
+Flags for filtering directory listings (flag group Filter):
+      --delete-excluded                     Delete files on dest excluded from sync
+      --exclude stringArray                 Exclude files matching pattern
+      --exclude-from stringArray            Read file exclude patterns from file (use - to read from stdin)
+      --exclude-if-present stringArray      Exclude directories if filename is present
+      --files-from stringArray              Read list of source-file names from file (use - to read from stdin)
+      --files-from-raw stringArray          Read list of source-file names from file without any processing of lines (use - to read from stdin)
+      --files-from0 stringArray             Read list of source-file names from file using NUL as separator (use - to read from stdin)
+  -f, --filter stringArray                  Add a file filtering rule
+      --filter-from stringArray             Read file filtering patterns from a file (use - to read from stdin)
+      --hash-filter string                  Partition filenames by hash k/n or randomly @/n
+      --ignore-case                         Ignore case in filters (case insensitive)
+      --include stringArray                 Include files matching pattern
+      --include-from stringArray            Read file include patterns from file (use - to read from stdin)
+      --max-age Duration                    Only transfer files younger than this in s or suffix ms|s|m|h|d|w|M|y (default off)
+      --max-depth int                       If set limits the recursion depth to this (default -1)
+      --max-size SizeSuffix                 Only transfer files smaller than this in KiB or suffix B|K|M|G|T|P (default off)
+      --metadata-exclude stringArray        Exclude metadatas matching pattern
+      --metadata-exclude-from stringArray   Read metadata exclude patterns from file (use - to read from stdin)
+      --metadata-filter stringArray         Add a metadata filtering rule
+      --metadata-filter-from stringArray    Read metadata filtering patterns from a file (use - to read from stdin)
+      --metadata-include stringArray        Include metadatas matching pattern
+      --metadata-include-from stringArray   Read metadata include patterns from file (use - to read from stdin)
+      --min-age Duration                    Only transfer files older than this in s or suffix ms|s|m|h|d|w|M|y (default off)
+      --min-size SizeSuffix                 Only transfer files bigger than this in KiB or suffix B|K|M|G|T|P (default off)
+
+Flags for listing directories (flag group Listing):
+      --default-time Time   Time to show if modtime is unknown for files and directories (default 2000-01-01T00:00:00Z)
+      --fast-list           Use recursive list if available; uses more memory but fewer transactions
+
+Use "rclone [command] --help" for more information about a command.
+Use "rclone help flags" for to see the global flags.
+Use "rclone help backends" for a list of supported services.
+--- docker run --rm IMG lsf --help ---
+List the contents of the source path (directories and objects) to
+standard output in a form which is easy to parse by scripts.  By
+default this will just be the names of the objects and directories,
+one per line.  The directories will have a / suffix.
+
+E.g.
+
+```console
+$ rclone lsf swift:bucket
+bevajer5jef
+canole
+diwogej7
+ferejej3gux/
+fubuwic
+```
+
+Use the `--format` option to control what gets listed.  By default this
+is just the path, but you can use these parameters to control the
+output:
+
+```text
+p - path
+s - size
+t - modification time
+h - hash
+i - ID of object
+o - Original ID of underlying object
+m - MimeType of object if known
+e - encrypted name
+T - tier of storage if known, e.g. "Hot" or "Cool"
+M - Metadata of object in JSON blob format, eg {"key":"value"}
+```
+
+Some backends use composite IDs. In particular, Google Drive shortcuts are
+normally dereferenced, and their "i" field contains the target object's ID
+followed by the shortcut's ID, separated by a tab. This tab is part of the ID
+field and is not changed by `--separator`. Use `--drive-skip-shortcuts` to omit
+shortcut entries.
+
+So if you wanted the path, size and modification time, you would use
+`--format "pst"`, or maybe `--format "tsp"` to put the path last.
+
+E.g.
+
+```console
+$ rclone lsf  --format "tsp" swift:bucket
+2016-06-25 18:55:41;60295;bevajer5jef
+2016-06-25 18:55:43;90613;canole
+2016-06-25 18:55:43;94467;diwogej7
+2018-04-26 08:50:45;0;ferejej3gux/
+2016-06-25 18:55:40;37600;fubuwic
+```
+
+If you specify "h" in the format you will get the MD5 hash by default,
+use the `--hash` flag to change which hash you want.  Note that this
+can be returned as an empty string if it isn't available on the object
+(and for directories), "ERROR" if there was an error reading it from
+the object and "UNSUPPORTED" if that object does not support that hash
+type.
+
+For example, to emulate the md5sum command you can use
+
+```console
+rclone lsf -R --hash MD5 --format hp --separator "  " --files-only .
+```
+
+E.g.
+
+```console
+$ rclone lsf -R --hash MD5 --format hp --separator "  " --files-only swift:bucket
+7908e352297f0f530b84a756f188baa3  bevajer5jef
+cd65ac234e6fea5925974a51cdd865cc  canole
+03b5341b4f234b9d984d03ad076bae91  diwogej7
+8fd37c3810dd660778137ac3a66cc06d  fubuwic
+99713e14a4c4ff553acaf1930fad985b  gixacuh7ku
+```
+
+(Though "rclone md5sum ." is an easier way of typing this.)
+
+By default the separator is ";" this can be changed with the
+`--separator` flag.  Note that separators aren't escaped in the path so
+putting it last is a good strategy.
+
+E.g.
+
+```console
+$ rclone lsf  --separator "," --format "tshp" swift:bucket
+2016-06-25 18:55:41,60295,7908e352297f0f530b84a756f188baa3,bevajer5jef
+2016-06-25 18:55:43,90613,cd65ac234e6fea5925974a51cdd865cc,canole
+2016-06-25 18:55:43,94467,03b5341b4f234b9d984d03ad076bae91,diwogej7
+2018-04-26 08:52:53,0,,ferejej3gux/
+2016-06-25 18:55:40,37600,8fd37c3810dd660778137ac3a66cc06d,fubuwic
+```
+
+You can output in CSV standard format.  This will escape things in "
+if they contain,
+
+E.g.
+
+```console
+$ rclone lsf --csv --files-only --format ps remote:path
+test.log,22355
+test.sh,449
+"this file contains a comma, in the file name.txt",6
+```
+
+Note that the `--absolute` parameter is useful for making lists of files
+to pass to an rclone copy with the `--files-from-raw` flag.
+
+For example, to find all the files modified within one day and copy
+those only (without traversing the whole directory structure):
+
+```console
+rclone lsf --absolute --files-only --max-age 1d /path/to/local > new_files
+rclone copy --files-from-raw new_files /path/to/local remote:path
+```
+
+The default time format is `'2006-01-02 15:04:05'`.
+[Other formats](https://pkg.go.dev/time#pkg-constants) can be specified with
+the `--time-format` flag. Examples:
+
+```console
+rclone lsf remote:path --format pt --time-format 'Jan 2, 2006 at 3:04pm (MST)'
+rclone lsf remote:path --format pt --time-format '2006-01-02 15:04:05.000000000'
+rclone lsf remote:path --format pt --time-format '2006-01-02T15:04:05.999999999Z07:00'
+rclone lsf remote:path --format pt --time-format RFC3339
+rclone lsf remote:path --format pt --time-format DateOnly
+rclone lsf remote:path --format pt --time-format max
+rclone lsf remote:path --format pt --time-format unix
+rclone lsf remote:path --format pt --time-format unixnano
+```
+
+`--time-format max` will automatically truncate `2006-01-02 15:04:05.000000000`
+to the maximum precision supported by the remote.
+
+Any of the filtering options can be applied to this command.
+
+There are several related list commands
+
+- `ls` to list size and path of objects only
+- `lsl` to list modification time, size and path of objects only
+- `lsd` to list directories only
+- `lsf` to list objects and directories in easy to parse format
+- `lsjson` to list objects and directories in JSON format
+
+`ls`,`lsl`,`lsd` are designed to be human-readable.
+`lsf` is designed to be human and machine-readable.
+`lsjson` is designed to be machine-readable.
+
+Note that `ls` and `lsl` recurse by default - use `--max-depth 1` to stop the recursion.
+
+The other list commands `lsd`,`lsf`,`lsjson` do not recurse by default -
+use `-R` to make them recurse.
+
+List commands prefer a recursive method that uses more memory but fewer
+transactions by default. Use `--disable ListR` to suppress the behavior.
+See [`--fast-list`](/docs/#fast-list) for more details.
+
+Listing a nonexistent directory will produce an error except for
+remotes which can't have empty directories (e.g. s3, swift, or gcs -
+the bucket-based remotes).
+
+Usage:
+  rclone lsf remote:path [flags]
+
+Flags:
+      --absolute             Put a leading / in front of path names
+      --csv                  Output in CSV format
+  -d, --dir-slash            Append a slash to directory names (default true)
+      --dirs-only            Only list directories
+      --files-only           Only list files
+  -F, --format string        Output format - see  help for details (default "p")
+      --hash h               Use this hash when h is used in the format MD5|SHA-1|DropboxHash (default "md5")
+  -h, --help                 help for lsf
+  -R, --recursive            Recurse into the listing
+  -s, --separator string     Separator for the items in the format (default ";")
+  -t, --time-format string   Specify a custom time format - see docs for details (default: 2006-01-02 15:04:05)
+
+Flags for filtering directory listings (flag group Filter):
+      --delete-excluded                     Delete files on dest excluded from sync
+      --exclude stringArray                 Exclude files matching pattern
+      --exclude-from stringArray            Read file exclude patterns from file (use - to read from stdin)
+      --exclude-if-present stringArray      Exclude directories if filename is present
+      --files-from stringArray              Read list of source-file names from file (use - to read from stdin)
+      --files-from-raw stringArray          Read list of source-file names from file without any processing of lines (use - to read from stdin)
+      --files-from0 stringArray             Read list of source-file names from file using NUL as separator (use - to read from stdin)
+  -f, --filter stringArray                  Add a file filtering rule
+      --filter-from stringArray             Read file filtering patterns from a file (use - to read from stdin)
+      --hash-filter string                  Partition filenames by hash k/n or randomly @/n
+      --ignore-case                         Ignore case in filters (case insensitive)
+      --include stringArray                 Include files matching pattern
+      --include-from stringArray            Read file include patterns from file (use - to read from stdin)
+      --max-age Duration                    Only transfer files younger than this in s or suffix ms|s|m|h|d|w|M|y (default off)
+      --max-depth int                       If set limits the recursion depth to this (default -1)
+      --max-size SizeSuffix                 Only transfer files smaller than this in KiB or suffix B|K|M|G|T|P (default off)
+      --metadata-exclude stringArray        Exclude metadatas matching pattern
+      --metadata-exclude-from stringArray   Read metadata exclude patterns from file (use - to read from stdin)
+      --metadata-filter stringArray         Add a metadata filtering rule
+      --metadata-filter-from stringArray    Read metadata filtering patterns from a file (use - to read from stdin)
+      --metadata-include stringArray        Include metadatas matching pattern
+      --metadata-include-from stringArray   Read metadata include patterns from file (use - to read from stdin)
+      --min-age Duration                    Only transfer files older than this in s or suffix ms|s|m|h|d|w|M|y (default off)
+      --min-size SizeSuffix                 Only transfer files bigger than this in KiB or suffix B|K|M|G|T|P (default off)
+
+Flags for listing directories (flag group Listing):
+      --default-time Time   Time to show if modtime is unknown for files and directories (default 2000-01-01T00:00:00Z)
+      --fast-list           Use recursive list if available; uses more memory but fewer transactions
+
+Use "rclone [command] --help" for more information about a command.
+Use "rclone help flags" for to see the global flags.
+Use "rclone help backends" for a list of supported services.
+--- docker run --rm IMG deletefile --help ---
+Remove a single file from remote.  Unlike `delete` it cannot be used to
+remove a directory and it doesn't obey include/exclude filters - if the
+specified file exists, it will always be removed.
+
+Usage:
+  rclone deletefile remote:path [flags]
+
+Flags:
+  -h, --help   help for deletefile
+
+Important flags useful for most commands (flag group Important):
+  -n, --dry-run         Do a trial run with no permanent changes
+  -i, --interactive     Enable interactive mode
+  -v, --verbose count   Print lots more stuff (repeat for more)
+
+Use "rclone [command] --help" for more information about a command.
+Use "rclone help flags" for to see the global flags.
+Use "rclone help backends" for a list of supported services.
+--- copy --help (immutable, files-from-raw lines) ---
+      --immutable                                   Do not modify files, fail if existing files have been modified
+      --inplace                                     Download directly to destination file instead of atomic download to temp/rename
+      --files-from-raw stringArray          Read list of source-file names from file without any processing of lines (use - to read from stdin)
+      --files-from0 stringArray             Read list of source-file names from file using NUL as separator (use - to read from stdin)
+--- help flags s3 (upload-cutoff, chunk-size, disable-checksum) ---
+      --s3-chunk-size SizeSuffix                            Chunk size to use for uploading (default 5Mi)
+      --s3-copy-cutoff SizeSuffix                           Cutoff for switching to multipart copy (default 4.656Gi)
+      --s3-disable-checksum                                 Don't store MD5 checksum with object metadata
+      --s3-disable-http2                                    Disable usage of http2 for S3 backends
+      --s3-upload-cutoff SizeSuffix                         Cutoff for switching to chunked upload (default 200Mi)
+      --s3-use-accelerate-endpoint                          If true use the AWS S3 accelerated endpoint
+      --s3-use-multipart-etag Tristate                      Whether to use ETag in multipart uploads for verification (default unset)
+      --s3-use-multipart-uploads Tristate                   Set if rclone should use multipart uploads (default unset)
+
+=== STEP 2: pytest run (verbatim) ===
+
+##### [detection/d0] baseline-copy :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable
+##### rc=0 seconds=1.15
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:06 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+
+##### [detection/d0] D0-whole :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=0 seconds=0.98
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:07 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:29:07 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Sn8H9}:parquet': 0 differences found
+2026/10/07 11:29:07 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Sn8H9}:parquet': 4 matching files
+
+#####
+LABEL|detection|d1|PRODUCT|PASS|expected=rc 0 on identical content|actual=rc 0
+OBS|detection|o3|ciphertext overhead per object (bytes): [48]
+
+##### [detection/d0] D0-lsf-pe :: rclone lsf -R --files-only --format pe BACKUPS3CRYPT:parquet
+##### rc=0 seconds=1.04
+----- stdout (last 3000 chars)
+raw/a.parquet;8ogm88qvuqp5pdqun9vktunedc
+raw/interval=1m/symbol=BTCUSDT/date=2026-09-30/part.parquet;s9nduj0qr1avbfs5mllo38tn0o
+raw/c.parquet;mhd5d1gr1aiefir3417gp6tjdo
+raw/b.parquet;rq0s6n2aor126e8076i0u3ufs0
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:08 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+OBS|detection|o3|ciphertext objects by size rank: {'raw/a.parquet': 'k6ftmunveg41dpnfvkoebems60/03g1o5r8dgcb2pe0a6grm8cmp4/8ogm88qvuqp5pdqun9vktunedc', 'raw/b.parquet': 'k6ftmunveg41dpnfvkoebems60/03g1o5r8dgcb2pe0a6grm8cmp4/rq0s6n2aor126e8076i0u3ufs0', 'raw/c.parquet': 'k6ftmunveg41dpnfvkoebems60/03g1o5r8dgcb2pe0a6grm8cmp4/mhd5d1gr1aiefir3417gp6tjdo', 'raw/interval=1m/symbol=BTCUSDT/date=2026-09-30/part.parquet': 'k6ftmunveg41dpnfvkoebems60/03g1o5r8dgcb2pe0a6grm8cmp4/d94vjcj20u734d24dea06m1sqc/f2aio8qih4hbu1cfk3gfoit9sg/7o09l4jj43j5pflmdi46bp3aks/s9nduj0qr1avbfs5mllo38tn0o'}
+
+##### [detection/a1] baseline-copy :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable
+##### rc=0 seconds=1.00
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:11 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+
+##### [detection/a1] A1-control-check-size-only :: rclone check --size-only --one-way LOCAL BACKUPS3CRYPT:parquet
+##### rc=0 seconds=0.96
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:12 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:29:12 ERROR : No common hash found - not using a hash for checks
+2026/10/07 11:29:12 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 0 differences found
+2026/10/07 11:29:12 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 4 matching files
+
+#####
+LABEL|detection|h1|HARNESS|PASS|expected=size-only check passes on a same-size change|actual=rc 0
+
+##### [detection/a1] A1-control-copy-immutable-size-only :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable --size-only
+##### rc=0 seconds=0.97
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:13 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+
+##### [detection/a1] A1-control-cat-remote-a :: rclone cat BACKUPS3CRYPT:parquet/raw/a.parquet
+##### rc=0 seconds=0.91
+----- stdout (last 3000 chars)
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+----- stderr (last 3000 chars)
+2026/10/07 11:29:14 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h2|HARNESS|PASS|expected=old size-only push exits 0 and the remote still holds the old bytes|actual=rc 0, remote a is old bytes: True
+
+##### [detection/a1] A1-whole :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=1 seconds=0.94
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:15 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:29:15 ERROR : raw/a.parquet: hashes differ (BACKUPS3CRYPT{TvuSM}:parquet) "526adc0173c92e7c3cbbce9426ff4b2d" vs (local:/mnt/m0) "5bc04f41251ebbf33b1f2ffea0eea114"
+2026/10/07 11:29:15 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 1 differences found
+2026/10/07 11:29:15 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 1 errors while checking
+2026/10/07 11:29:15 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 3 matching files
+2026/10/07 11:29:15 NOTICE: Failed to cryptcheck: 1 differences found
+
+#####
+LABEL|detection|a1|PRODUCT|PASS|expected=non-zero on same size, same mtime|actual=rc 1
+OBS|detection|p1|default output names the differing path: True
+
+##### [detection/a1] A1-whole-report--combined :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --combined -
+##### rc=1 seconds=1.00
+----- stdout (last 3000 chars)
+= raw/b.parquet
+* raw/a.parquet
+= raw/c.parquet
+= raw/interval=1m/symbol=BTCUSDT/date=2026-09-30/part.parquet
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:16 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:29:16 ERROR : raw/a.parquet: hashes differ (BACKUPS3CRYPT{TvuSM}:parquet) "526adc0173c92e7c3cbbce9426ff4b2d" vs (local:/mnt/m0) "5bc04f41251ebbf33b1f2ffea0eea114"
+2026/10/07 11:29:16 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 1 differences found
+2026/10/07 11:29:16 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 1 errors while checking
+2026/10/07 11:29:16 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 3 matching files
+2026/10/07 11:29:16 NOTICE: Failed to cryptcheck: 1 differences found
+
+#####
+OBS|detection|p1|--combined -: rc 1, names path: True
+
+##### [detection/a1] A1-whole-report--differ :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --differ -
+##### rc=1 seconds=1.00
+----- stdout (last 3000 chars)
+raw/a.parquet
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:17 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:29:17 ERROR : raw/a.parquet: hashes differ (BACKUPS3CRYPT{TvuSM}:parquet) "526adc0173c92e7c3cbbce9426ff4b2d" vs (local:/mnt/m0) "5bc04f41251ebbf33b1f2ffea0eea114"
+2026/10/07 11:29:17 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 1 differences found
+2026/10/07 11:29:17 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 1 errors while checking
+2026/10/07 11:29:17 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 3 matching files
+2026/10/07 11:29:17 NOTICE: Failed to cryptcheck: 1 differences found
+
+#####
+OBS|detection|p1|--differ -: rc 1, names path: True
+
+##### [detection/a1] A1-whole-report--missing-on-dst :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --missing-on-dst -
+##### rc=1 seconds=0.98
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:18 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:29:18 ERROR : raw/a.parquet: hashes differ (BACKUPS3CRYPT{TvuSM}:parquet) "526adc0173c92e7c3cbbce9426ff4b2d" vs (local:/mnt/m0) "5bc04f41251ebbf33b1f2ffea0eea114"
+2026/10/07 11:29:18 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 1 differences found
+2026/10/07 11:29:18 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 1 errors while checking
+2026/10/07 11:29:18 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 3 matching files
+2026/10/07 11:29:18 NOTICE: Failed to cryptcheck: 1 differences found
+
+#####
+OBS|detection|p1|--missing-on-dst -: rc 1, names path: False
+
+##### [detection/a1] A1-whole-report--error :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --error -
+##### rc=1 seconds=0.94
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:19 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:29:19 ERROR : raw/a.parquet: hashes differ (BACKUPS3CRYPT{TvuSM}:parquet) "526adc0173c92e7c3cbbce9426ff4b2d" vs (local:/mnt/m0) "5bc04f41251ebbf33b1f2ffea0eea114"
+2026/10/07 11:29:19 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 1 differences found
+2026/10/07 11:29:19 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 1 errors while checking
+2026/10/07 11:29:19 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 3 matching files
+2026/10/07 11:29:19 NOTICE: Failed to cryptcheck: 1 differences found
+
+#####
+OBS|detection|p1|--error -: rc 1, names path: False
+
+##### [detection/a1] A1-whole-after-reset :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=0 seconds=0.96
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:20 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:29:20 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 0 differences found
+2026/10/07 11:29:20 NOTICE: Encrypted drive 'BACKUPS3CRYPT{TvuSM}:parquet': 4 matching files
+
+#####
+LABEL|detection|h5|HARNESS|PASS|expected=reset local tree passes again|actual=rc 0
+
+##### [detection/a2] baseline-copy :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable
+##### rc=0 seconds=1.00
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:23 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+
+##### [detection/a2] A2-whole :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=1 seconds=0.91
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:24 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:29:24 ERROR : raw/a.parquet: hashes differ (BACKUPS3CRYPT{JEWd5}:parquet) "5b9668afdf86c0a567b2a29a9f93935f" vs (local:/mnt/m0) "c74f362ddf8e1a7692a618feb07e0da9"
+2026/10/07 11:29:24 NOTICE: Encrypted drive 'BACKUPS3CRYPT{JEWd5}:parquet': 1 differences found
+2026/10/07 11:29:24 NOTICE: Encrypted drive 'BACKUPS3CRYPT{JEWd5}:parquet': 1 errors while checking
+2026/10/07 11:29:24 NOTICE: Encrypted drive 'BACKUPS3CRYPT{JEWd5}:parquet': 3 matching files
+2026/10/07 11:29:24 NOTICE: Failed to cryptcheck: 1 differences found
+
+#####
+LABEL|detection|a2|PRODUCT|PASS|expected=non-zero on same size, new mtime|actual=rc 1
+
+##### [detection/a3] baseline-copy :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable
+##### rc=0 seconds=1.01
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:27 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+
+##### [detection/a3] A3-whole :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=1 seconds=0.82
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:28 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:29:28 ERROR : raw/a.parquet: sizes differ
+2026/10/07 11:29:28 NOTICE: Encrypted drive 'BACKUPS3CRYPT{GeSIO}:parquet': 1 differences found
+2026/10/07 11:29:28 NOTICE: Encrypted drive 'BACKUPS3CRYPT{GeSIO}:parquet': 1 errors while checking
+2026/10/07 11:29:28 NOTICE: Encrypted drive 'BACKUPS3CRYPT{GeSIO}:parquet': 3 matching files
+2026/10/07 11:29:28 NOTICE: Failed to cryptcheck: 1 differences found
+
+#####
+LABEL|detection|a3|PRODUCT|PASS|expected=non-zero on a different size|actual=rc 1
+
+##### [detection/a4] baseline-copy :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable
+##### rc=0 seconds=0.80
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:30 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+
+##### [detection/a4] A4-whole :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=0 seconds=0.83
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:31 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:29:31 NOTICE: Encrypted drive 'BACKUPS3CRYPT{t3nd4}:parquet': 0 differences found
+2026/10/07 11:29:31 NOTICE: Encrypted drive 'BACKUPS3CRYPT{t3nd4}:parquet': 4 matching files
+
+#####
+LABEL|detection|d2|PRODUCT|PASS|expected=rc 0 after an mtime-only change|actual=rc 0
+
+##### [detection/b1] baseline-copy :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable
+##### rc=0 seconds=0.82
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:34 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+
+##### [detection/b1] B1-raw-before :: rclone lsf -R --files-only --format hsp BACKUPS3:bkt-a858ae8e
+##### rc=0 seconds=0.74
+----- stdout (last 1500 chars)
+f10331290607940c6515cf748d4d2fa4;1548;7t56odpj2gsgctdkt6gvqqa808/nhbjis6lt03cgi2a212k6f88u8/5jksheceknoas8203elcmutvmk/pjbcrgemjlr5fobdj1i2s9ok90/u9ktf2qrm360m20eqmd9m2j7dc/4cvsru2gsad2cqftcj6rj4sgss
+bd80c47b1f6597b07f6ffa1ccdae8e54;1348;7t56odpj2gsgctdkt6gvqqa808/nhbjis6lt03cgi2a212k6f88u8/d5ndimpmttmqlpruius8tloa94
+2e7a5b56e953e899cdcaf033a422ef3a;1448;7t56odpj2gsgctdkt6gvqqa808/nhbjis6lt03cgi2a212k6f88u8/df3grf3un2pp98orvr6n741ng0
+69b048a80fe9c7e84dc6e8173663e50a;1248;7t56odpj2gsgctdkt6gvqqa808/nhbjis6lt03cgi2a212k6f88u8/lke2jl1fkbs3a75aivbadli8nc
+
+----- stderr (last 1500 chars)
+2026/10/07 11:29:35 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+
+##### [detection/b1] B1-raw-after :: rclone lsf -R --files-only --format hsp BACKUPS3:bkt-a858ae8e
+##### rc=0 seconds=0.73
+----- stdout (last 1500 chars)
+f10331290607940c6515cf748d4d2fa4;1548;7t56odpj2gsgctdkt6gvqqa808/nhbjis6lt03cgi2a212k6f88u8/5jksheceknoas8203elcmutvmk/pjbcrgemjlr5fobdj1i2s9ok90/u9ktf2qrm360m20eqmd9m2j7dc/4cvsru2gsad2cqftcj6rj4sgss
+bd80c47b1f6597b07f6ffa1ccdae8e54;1348;7t56odpj2gsgctdkt6gvqqa808/nhbjis6lt03cgi2a212k6f88u8/d5ndimpmttmqlpruius8tloa94
+2e7a5b56e953e899cdcaf033a422ef3a;1448;7t56odpj2gsgctdkt6gvqqa808/nhbjis6lt03cgi2a212k6f88u8/df3grf3un2pp98orvr6n741ng0
+4033511b18702af0df7b9c9ca724cc1e;1248;7t56odpj2gsgctdkt6gvqqa808/nhbjis6lt03cgi2a212k6f88u8/lke2jl1fkbs3a75aivbadli8nc
+
+----- stderr (last 1500 chars)
+2026/10/07 11:29:36 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h3|HARNESS|PASS|expected=the server shows the same size and a different hash after the out-of-band write|actual=exec rc 0, listed True, same size True, hash changed True
+
+##### [detection/b1] B1-whole :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=1 seconds=0.80
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:36 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:29:36 ERROR : raw/a.parquet: hashes differ (BACKUPS3CRYPT{Nc0an}:parquet) "69b048a80fe9c7e84dc6e8173663e50a" vs (local:/mnt/m0) "4033511b18702af0df7b9c9ca724cc1e"
+2026/10/07 11:29:36 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Nc0an}:parquet': 1 differences found
+2026/10/07 11:29:36 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Nc0an}:parquet': 1 errors while checking
+2026/10/07 11:29:36 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Nc0an}:parquet': 3 matching files
+2026/10/07 11:29:36 NOTICE: Failed to cryptcheck: 1 differences found
+
+#####
+LABEL|detection|b1|PRODUCT|PASS|expected=non-zero (body)|actual=rc 1
+
+##### [detection/b2] baseline-copy :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable
+##### rc=0 seconds=0.84
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:39 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+
+##### [detection/b2] B2-raw-before :: rclone lsf -R --files-only --format hsp BACKUPS3:bkt-fa48cb7b
+##### rc=0 seconds=0.71
+----- stdout (last 1500 chars)
+6f224b1407e21ead641f1a24bf6363aa;1248;5820vjkt5dm48mb69v3es1k594/9s0nea80hlmtbddnqqgp8u93o4/77c7rv397qjlbn824e9s88qbh4
+919110de21274dfbec5fca9b7d629d97;1348;5820vjkt5dm48mb69v3es1k594/9s0nea80hlmtbddnqqgp8u93o4/7gb7sf25lagj96ihu8ujbjhi20
+4b70bf9d1bc24c2380b927eed696a82f;1548;5820vjkt5dm48mb69v3es1k594/9s0nea80hlmtbddnqqgp8u93o4/9ce9m87v1m7ogideda8cpsu2m0/re2es7tg4l08i6s06bg33v9pn8/k7nqug01ld6ug9d3dufelag510/17j1r81eptkpqb5lnn3fs86b8o
+46d84b661a97f826914e18414ee978c5;1448;5820vjkt5dm48mb69v3es1k594/9s0nea80hlmtbddnqqgp8u93o4/un1f5ad76eu64nto21qvnhdid8
+
+----- stderr (last 1500 chars)
+2026/10/07 11:29:40 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+
+##### [detection/b2] B2-raw-after :: rclone lsf -R --files-only --format hsp BACKUPS3:bkt-fa48cb7b
+##### rc=0 seconds=0.71
+----- stdout (last 1500 chars)
+0e346ea74103742f9931fdef9fba4612;1248;5820vjkt5dm48mb69v3es1k594/9s0nea80hlmtbddnqqgp8u93o4/77c7rv397qjlbn824e9s88qbh4
+919110de21274dfbec5fca9b7d629d97;1348;5820vjkt5dm48mb69v3es1k594/9s0nea80hlmtbddnqqgp8u93o4/7gb7sf25lagj96ihu8ujbjhi20
+4b70bf9d1bc24c2380b927eed696a82f;1548;5820vjkt5dm48mb69v3es1k594/9s0nea80hlmtbddnqqgp8u93o4/9ce9m87v1m7ogideda8cpsu2m0/re2es7tg4l08i6s06bg33v9pn8/k7nqug01ld6ug9d3dufelag510/17j1r81eptkpqb5lnn3fs86b8o
+46d84b661a97f826914e18414ee978c5;1448;5820vjkt5dm48mb69v3es1k594/9s0nea80hlmtbddnqqgp8u93o4/un1f5ad76eu64nto21qvnhdid8
+
+----- stderr (last 1500 chars)
+2026/10/07 11:29:41 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h3|HARNESS|PASS|expected=the server shows the same size and a different hash after the out-of-band write|actual=exec rc 0, listed True, same size True, hash changed True
+
+##### [detection/b2] B2-whole :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=1 seconds=0.81
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:41 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:29:41 ERROR : raw/a.parquet: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+2026/10/07 11:29:41 NOTICE: Encrypted drive 'BACKUPS3CRYPT{I6ENU}:parquet': 0 differences found
+2026/10/07 11:29:41 NOTICE: Encrypted drive 'BACKUPS3CRYPT{I6ENU}:parquet': 2 errors while checking
+2026/10/07 11:29:41 NOTICE: Encrypted drive 'BACKUPS3CRYPT{I6ENU}:parquet': 3 matching files
+2026/10/07 11:29:41 NOTICE: Failed to cryptcheck with 2 errors: last error was: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+
+#####
+LABEL|detection|b2|PRODUCT|PASS|expected=non-zero (whole)|actual=rc 1
+
+##### [detection/b3] baseline-copy :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable
+##### rc=0 seconds=0.86
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:44 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+
+##### [detection/b3] B3-copyto-through-crypt :: rclone copyto WORK\other-a.bin BACKUPS3CRYPT:parquet/raw/a.parquet
+##### rc=0 seconds=0.82
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:45 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+
+##### [detection/b3] B3-whole :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=1 seconds=0.87
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:46 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:29:46 ERROR : raw/a.parquet: hashes differ (BACKUPS3CRYPT{bsuV0}:parquet) "2439ac84f460886dc5764c591536ed49" vs (local:/mnt/m0) "eb72f6099ea22dc7b5da75fc5b841d4a"
+2026/10/07 11:29:46 NOTICE: Encrypted drive 'BACKUPS3CRYPT{bsuV0}:parquet': 1 differences found
+2026/10/07 11:29:46 NOTICE: Encrypted drive 'BACKUPS3CRYPT{bsuV0}:parquet': 1 errors while checking
+2026/10/07 11:29:46 NOTICE: Encrypted drive 'BACKUPS3CRYPT{bsuV0}:parquet': 3 matching files
+2026/10/07 11:29:46 NOTICE: Failed to cryptcheck: 1 differences found
+
+#####
+LABEL|detection|h6|HARNESS|PASS|expected=overwrite through crypt rc 0|actual=rc 0
+LABEL|detection|b3|PRODUCT|PASS|expected=non-zero after crypt overwrite|actual=rc 1
+
+##### [detection/b4] baseline-copy :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable
+##### rc=0 seconds=0.79
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:48 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+
+##### [detection/b4] B4-raw-before :: rclone lsf -R --files-only --format hsp BACKUPS3:bkt-1c043cdf
+##### rc=0 seconds=0.70
+----- stdout (last 1500 chars)
+f7d2869383b041654732adf97ca6cde1;1248;fs81paqtvubdidq07tkl71scko/449fk39dptmiouksf3c6epbm3o/ftnvuu15i7es848didn7v82j8c
+a8da93bab5d736c1e69a2a94725c4ab5;1448;fs81paqtvubdidq07tkl71scko/449fk39dptmiouksf3c6epbm3o/grh197uimf2jc9du2vt39f69cc
+7ed15a777e5459e6515b2083f9c1bb50;1348;fs81paqtvubdidq07tkl71scko/449fk39dptmiouksf3c6epbm3o/ppst3ddmjkluc0gb3ppopufg4o
+e6af229806c85ec524ad5f4e6b56305f;1548;fs81paqtvubdidq07tkl71scko/449fk39dptmiouksf3c6epbm3o/ssvaldto6huo29n3v7j48qkccc/6ui8d931o2s00qp1qbain49lmo/qrrq6e181ptroncl7qklevi1no/2s03fmug1ehn2as20j50ohkh3o
+
+----- stderr (last 1500 chars)
+2026/10/07 11:29:49 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+
+##### [detection/b4] B4-copyto-through-raw-s3 :: rclone copyto WORK\garbage.bin BACKUPS3:bkt-1c043cdf/fs81paqtvubdidq07tkl71scko/449fk39dptmiouksf3c6epbm3o/ftnvuu15i7es848didn7v82j8c
+##### rc=0 seconds=0.75
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:50 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+
+##### [detection/b4] B4-raw-after :: rclone lsf -R --files-only --format hsp BACKUPS3:bkt-1c043cdf
+##### rc=0 seconds=0.71
+----- stdout (last 1500 chars)
+35511eeff195cff0a101f6a1e94f2df9;1248;fs81paqtvubdidq07tkl71scko/449fk39dptmiouksf3c6epbm3o/ftnvuu15i7es848didn7v82j8c
+a8da93bab5d736c1e69a2a94725c4ab5;1448;fs81paqtvubdidq07tkl71scko/449fk39dptmiouksf3c6epbm3o/grh197uimf2jc9du2vt39f69cc
+7ed15a777e5459e6515b2083f9c1bb50;1348;fs81paqtvubdidq07tkl71scko/449fk39dptmiouksf3c6epbm3o/ppst3ddmjkluc0gb3ppopufg4o
+e6af229806c85ec524ad5f4e6b56305f;1548;fs81paqtvubdidq07tkl71scko/449fk39dptmiouksf3c6epbm3o/ssvaldto6huo29n3v7j48qkccc/6ui8d931o2s00qp1qbain49lmo/qrrq6e181ptroncl7qklevi1no/2s03fmug1ehn2as20j50ohkh3o
+
+----- stderr (last 1500 chars)
+2026/10/07 11:29:50 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h7|HARNESS|PASS|expected=raw overwrite rc 0, same size, hash changed|actual=rc 0, seen True
+
+##### [detection/b4] B4-whole :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=1 seconds=0.83
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:51 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:29:51 ERROR : raw/a.parquet: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+2026/10/07 11:29:51 NOTICE: Encrypted drive 'BACKUPS3CRYPT{qbWbk}:parquet': 0 differences found
+2026/10/07 11:29:51 NOTICE: Encrypted drive 'BACKUPS3CRYPT{qbWbk}:parquet': 2 errors while checking
+2026/10/07 11:29:51 NOTICE: Encrypted drive 'BACKUPS3CRYPT{qbWbk}:parquet': 3 matching files
+2026/10/07 11:29:51 NOTICE: Failed to cryptcheck with 2 errors: last error was: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+
+#####
+LABEL|detection|b4|PRODUCT|PASS|expected=non-zero after raw S3 overwrite|actual=rc 1
+
+##### [detection/c1] baseline-copy :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable
+##### rc=0 seconds=0.86
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:54 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+
+##### [detection/c1] C1-raw-before :: rclone lsf -R --files-only --format hsp BACKUPS3:bkt-88c2a419
+##### rc=0 seconds=0.72
+----- stdout (last 1500 chars)
+bf66e5421e7222e7f5f8679defd8c306;1448;l8f30i4etep51m41t5vvom47j8/i8stgal1jgekp1ol12ilhe6dr4/9m0b0eeg307t5t830jki5nj4qc
+06acf70bb3a3df0bdc128660352af1f9;1248;l8f30i4etep51m41t5vvom47j8/i8stgal1jgekp1ol12ilhe6dr4/p1svdfgav4tse4cjbv3sidivf8
+b139938424d619304d383d83dd4c0f61;1548;l8f30i4etep51m41t5vvom47j8/i8stgal1jgekp1ol12ilhe6dr4/rdas0e5gbliuum95uh1vsfl8s0/qei3t0fe0kvoivjv0k09alh0fo/506p1bsil07t9pgdalsst239t8/io5ubie3fv2f2erhq5v2ab2j40
+85acccae2679f30872df65f567fb1fbe;1348;l8f30i4etep51m41t5vvom47j8/i8stgal1jgekp1ol12ilhe6dr4/vrjas47ou18mcsjrtfpupsp34o
+
+----- stderr (last 1500 chars)
+2026/10/07 11:29:54 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+
+##### [detection/c1] C1-raw-after :: rclone lsf -R --files-only --format hsp BACKUPS3:bkt-88c2a419
+##### rc=0 seconds=0.74
+----- stdout (last 1500 chars)
+bf66e5421e7222e7f5f8679defd8c306;1448;l8f30i4etep51m41t5vvom47j8/i8stgal1jgekp1ol12ilhe6dr4/9m0b0eeg307t5t830jki5nj4qc
+06acf70bb3a3df0bdc128660352af1f9;1248;l8f30i4etep51m41t5vvom47j8/i8stgal1jgekp1ol12ilhe6dr4/p1svdfgav4tse4cjbv3sidivf8
+b139938424d619304d383d83dd4c0f61;1548;l8f30i4etep51m41t5vvom47j8/i8stgal1jgekp1ol12ilhe6dr4/rdas0e5gbliuum95uh1vsfl8s0/qei3t0fe0kvoivjv0k09alh0fo/506p1bsil07t9pgdalsst239t8/io5ubie3fv2f2erhq5v2ab2j40
+
+----- stderr (last 1500 chars)
+2026/10/07 11:29:57 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h3|HARNESS|PASS|expected=the server no longer lists the removed object|actual=exec rc 0, still listed False
+
+##### [detection/c1] C1-whole :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=1 seconds=0.89
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:29:58 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:29:58 ERROR : raw/b.parquet: file not in Encrypted drive 'BACKUPS3CRYPT{jJjWR}:parquet'
+2026/10/07 11:29:58 NOTICE: Encrypted drive 'BACKUPS3CRYPT{jJjWR}:parquet': 1 files missing
+2026/10/07 11:29:58 NOTICE: Encrypted drive 'BACKUPS3CRYPT{jJjWR}:parquet': 1 differences found
+2026/10/07 11:29:58 NOTICE: Encrypted drive 'BACKUPS3CRYPT{jJjWR}:parquet': 1 errors while checking
+2026/10/07 11:29:58 NOTICE: Encrypted drive 'BACKUPS3CRYPT{jJjWR}:parquet': 3 matching files
+2026/10/07 11:29:58 NOTICE: Failed to cryptcheck: 1 differences found
+
+#####
+LABEL|detection|c1|PRODUCT|PASS|expected=non-zero after out-of-band removal|actual=rc 1
+
+##### [detection/c2] baseline-copy :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable
+##### rc=0 seconds=0.82
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:00 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+
+##### [detection/c2] C2-deletefile :: rclone deletefile BACKUPS3CRYPT:parquet/raw/b.parquet
+##### rc=0 seconds=0.87
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:01 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+
+##### [detection/c2] C2-whole :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=1 seconds=0.84
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:02 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:02 ERROR : raw/b.parquet: file not in Encrypted drive 'BACKUPS3CRYPT{XR91o}:parquet'
+2026/10/07 11:30:02 NOTICE: Encrypted drive 'BACKUPS3CRYPT{XR91o}:parquet': 1 files missing
+2026/10/07 11:30:02 NOTICE: Encrypted drive 'BACKUPS3CRYPT{XR91o}:parquet': 1 differences found
+2026/10/07 11:30:02 NOTICE: Encrypted drive 'BACKUPS3CRYPT{XR91o}:parquet': 1 errors while checking
+2026/10/07 11:30:02 NOTICE: Encrypted drive 'BACKUPS3CRYPT{XR91o}:parquet': 3 matching files
+2026/10/07 11:30:02 NOTICE: Failed to cryptcheck: 1 differences found
+
+#####
+LABEL|detection|h8|HARNESS|PASS|expected=deletefile rc 0|actual=rc 0
+LABEL|detection|c2|PRODUCT|PASS|expected=non-zero after deletefile|actual=rc 1
+
+##### [detection/x1] baseline-copy :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable
+##### rc=0 seconds=0.91
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:04 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+
+##### [detection/x1] X1-remote-only-z :: rclone copyto WORK\z.parquet BACKUPS3CRYPT:parquet/raw/z.parquet
+##### rc=0 seconds=0.79
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:05 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+
+##### [detection/x1] X1-whole :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=0 seconds=0.77
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:06 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:06 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Lc_Rd}:parquet': 0 differences found
+2026/10/07 11:30:06 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Lc_Rd}:parquet': 4 matching files
+
+#####
+LABEL|detection|h10|HARNESS|PASS|expected=remote-only upload rc 0|actual=rc 0
+LABEL|detection|e1|PRODUCT|PASS|expected=rc 0 with a remote-only extra file|actual=rc 0
+
+##### [detection/x1] X1-whole-without-one-way :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet
+##### rc=1 seconds=0.81
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:07 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:07 ERROR : raw/z.parquet: file not in Local file system at /mnt/m0
+2026/10/07 11:30:07 NOTICE: Local file system at /mnt/m0: 1 files missing
+2026/10/07 11:30:07 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Lc_Rd}:parquet': 1 differences found
+2026/10/07 11:30:07 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Lc_Rd}:parquet': 1 errors while checking
+2026/10/07 11:30:07 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Lc_Rd}:parquet': 4 matching files
+2026/10/07 11:30:07 NOTICE: Failed to cryptcheck: 1 differences found
+
+#####
+OBS|detection|o1|without --one-way: rc 1
+
+##### [detection/subset-plain] baseline-copy :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable
+##### rc=0 seconds=0.81
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:09 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+
+##### [detection/subset-plain] plain-corrupt-through-raw-s3 :: rclone copyto WORK\garbage.bin BACKUPS3:bkt-164710ff/qfnfsarsv4vb1rn5jpbhkoa6fs/98l3k3hkkqgqsn9l6e882u3dr0/br67l2fhpj7lii7md027chp4v4
+##### rc=0 seconds=0.79
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:10 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+
+##### [detection/subset-plain] plain-whole-control :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=1 seconds=0.79
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:11 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:11 ERROR : raw/a.parquet: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+2026/10/07 11:30:11 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Q52w9}:parquet': 0 differences found
+2026/10/07 11:30:11 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Q52w9}:parquet': 2 errors while checking
+2026/10/07 11:30:11 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Q52w9}:parquet': 3 matching files
+2026/10/07 11:30:11 NOTICE: Failed to cryptcheck with 2 errors: last error was: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+
+#####
+LABEL|detection|h9-plain|HARNESS|PASS|expected=raw overwrite rc 0 and the whole-tree check fails (one corrupted path exists)|actual=rc 0, whole rc 1
+
+##### [detection/subset-plain] plain-F1-bad :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --files-from-raw WORK\F1-bad.txt
+##### rc=1 seconds=0.84
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:12 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:12 ERROR : raw/a.parquet: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+2026/10/07 11:30:12 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Q52w9}:parquet': 0 differences found
+2026/10/07 11:30:12 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Q52w9}:parquet': 2 errors while checking
+2026/10/07 11:30:12 NOTICE: Failed to cryptcheck with 2 errors: last error was: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+
+#####
+
+##### [detection/subset-plain] plain-F1-good :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --files-from-raw WORK\F1-good.txt
+##### rc=0 seconds=0.83
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:13 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:13 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Q52w9}:parquet': 0 differences found
+2026/10/07 11:30:13 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Q52w9}:parquet': 1 matching files
+
+#####
+
+##### [detection/subset-plain] plain-F2-bad :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --include /raw/a.parquet
+##### rc=1 seconds=0.77
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:14 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:14 ERROR : raw/a.parquet: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+2026/10/07 11:30:14 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Q52w9}:parquet': 0 differences found
+2026/10/07 11:30:14 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Q52w9}:parquet': 2 errors while checking
+2026/10/07 11:30:14 NOTICE: Failed to cryptcheck with 2 errors: last error was: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+
+#####
+
+##### [detection/subset-plain] plain-F2-good :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --include /raw/c.parquet
+##### rc=0 seconds=0.77
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:14 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:14 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Q52w9}:parquet': 0 differences found
+2026/10/07 11:30:14 NOTICE: Encrypted drive 'BACKUPS3CRYPT{Q52w9}:parquet': 1 matching files
+
+#####
+
+##### [detection/subset-hive] baseline-copy :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable
+##### rc=0 seconds=0.83
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:17 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+
+##### [detection/subset-hive] hive-corrupt-through-raw-s3 :: rclone copyto WORK\garbage.bin BACKUPS3:bkt-c70a8947/d4rnhn4p8gplbb4p4nvp4gimp0/64a25oc2hb3an831hpmmloqdvk/fl1c0m1i3m4hdcpsnrddm1o36o/k1ec9292jk2odkgaf785qspghc/7a614frbgd5uqmcan5e7eu4of0/f93be1fklni051f37sjjnm3fpg
+##### rc=0 seconds=0.84
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:18 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+
+##### [detection/subset-hive] hive-whole-control :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=1 seconds=0.78
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:18 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:19 ERROR : raw/interval=1m/symbol=BTCUSDT/date=2026-09-30/part.parquet: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+2026/10/07 11:30:19 NOTICE: Encrypted drive 'BACKUPS3CRYPT{CKDOI}:parquet': 0 differences found
+2026/10/07 11:30:19 NOTICE: Encrypted drive 'BACKUPS3CRYPT{CKDOI}:parquet': 2 errors while checking
+2026/10/07 11:30:19 NOTICE: Encrypted drive 'BACKUPS3CRYPT{CKDOI}:parquet': 3 matching files
+2026/10/07 11:30:19 NOTICE: Failed to cryptcheck with 2 errors: last error was: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+
+#####
+LABEL|detection|h9-hive|HARNESS|PASS|expected=raw overwrite rc 0 and the whole-tree check fails (one corrupted path exists)|actual=rc 0, whole rc 1
+
+##### [detection/subset-hive] hive-F1-bad :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --files-from-raw WORK\F1-bad.txt
+##### rc=1 seconds=0.89
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:19 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:19 ERROR : raw/interval=1m/symbol=BTCUSDT/date=2026-09-30/part.parquet: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+2026/10/07 11:30:19 NOTICE: Encrypted drive 'BACKUPS3CRYPT{CKDOI}:parquet': 0 differences found
+2026/10/07 11:30:19 NOTICE: Encrypted drive 'BACKUPS3CRYPT{CKDOI}:parquet': 2 errors while checking
+2026/10/07 11:30:19 NOTICE: Failed to cryptcheck with 2 errors: last error was: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+
+#####
+
+##### [detection/subset-hive] hive-F1-good :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --files-from-raw WORK\F1-good.txt
+##### rc=0 seconds=0.83
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:20 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:20 NOTICE: Encrypted drive 'BACKUPS3CRYPT{CKDOI}:parquet': 0 differences found
+2026/10/07 11:30:20 NOTICE: Encrypted drive 'BACKUPS3CRYPT{CKDOI}:parquet': 1 matching files
+
+#####
+
+##### [detection/subset-hive] hive-F2-bad :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --include /raw/interval=1m/symbol=BTCUSDT/date=2026-09-30/part.parquet
+##### rc=1 seconds=0.77
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:21 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:21 ERROR : raw/interval=1m/symbol=BTCUSDT/date=2026-09-30/part.parquet: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+2026/10/07 11:30:21 NOTICE: Encrypted drive 'BACKUPS3CRYPT{CKDOI}:parquet': 0 differences found
+2026/10/07 11:30:21 NOTICE: Encrypted drive 'BACKUPS3CRYPT{CKDOI}:parquet': 2 errors while checking
+2026/10/07 11:30:21 NOTICE: Failed to cryptcheck with 2 errors: last error was: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+
+#####
+
+##### [detection/subset-hive] hive-F2-good :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --include /raw/c.parquet
+##### rc=0 seconds=0.83
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:22 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:22 NOTICE: Encrypted drive 'BACKUPS3CRYPT{CKDOI}:parquet': 0 differences found
+2026/10/07 11:30:22 NOTICE: Encrypted drive 'BACKUPS3CRYPT{CKDOI}:parquet': 1 matching files
+
+#####
+LABEL|detection|s1|PRODUCT-ROW|PASS|expected=F1 list form detects the corrupted path (plain and hive)|actual=plain/hive {'F1-bad': True, 'F1-good': True, 'F2-bad': True, 'F2-good': True}/{'F1-bad': True, 'F1-good': True, 'F2-bad': True, 'F2-good': True}
+LABEL|detection|s2|PRODUCT-ROW|PASS|expected=F1 list form leaves the clean path alone (scope control)|actual=plain/hive {'F1-bad': True, 'F1-good': True, 'F2-bad': True, 'F2-good': True}/{'F1-bad': True, 'F1-good': True, 'F2-bad': True, 'F2-good': True}
+LABEL|detection|s3|PRODUCT-ROW|PASS|expected=F2 include form detects the corrupted path (plain and hive)|actual=plain/hive {'F1-bad': True, 'F1-good': True, 'F2-bad': True, 'F2-good': True}/{'F1-bad': True, 'F1-good': True, 'F2-bad': True, 'F2-good': True}
+LABEL|detection|s4|PRODUCT-ROW|PASS|expected=F2 include form leaves the clean path alone (scope control)|actual=plain/hive {'F1-bad': True, 'F1-good': True, 'F2-bad': True, 'F2-good': True}/{'F1-bad': True, 'F1-good': True, 'F2-bad': True, 'F2-good': True}
+LABEL|detection|s-pair|PRODUCT|PASS|expected=at least one of (s1,s2) or (s3,s4) holds|actual=s1=True s2=True s3=True s4=True
+OBS|detection|form|subset form to use: F1
+
+##### [detection/mech] U1-copy-files-from-raw :: rclone copy LOCAL BACKUPS3CRYPT:parquet --files-from-raw WORK\u1.txt --immutable
+##### rc=0 seconds=0.86
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:24 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+
+##### [detection/mech] U1-lsf :: rclone lsf -R --files-only BACKUPS3CRYPT:parquet/
+##### rc=0 seconds=0.79
+----- stdout (last 3000 chars)
+raw/a.parquet
+raw/interval=1m/symbol=BTCUSDT/date=2026-09-30/part.parquet
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:25 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|u1|PRODUCT|PASS|expected=exactly the two listed files uploaded|actual=rc 0, listed ['raw/a.parquet', 'raw/interval=1m/symbol=BTCUSDT/date=2026-09-30/part.parquet'], objects 2
+
+##### [detection/mech] U2-copy-files-from-raw :: rclone copy LOCAL BACKUPS3CRYPT:parquet --files-from-raw WORK\u2.txt --immutable
+##### rc=0 seconds=0.87
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:26 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|u2|PRODUCT|PASS|expected=one object added, earlier objects identical (path, size, mtime)|actual=rc 0, objects 3, earlier kept True
+
+##### [detection/mech] O4-immutable-mtime-change :: rclone copy LOCAL BACKUPS3CRYPT:parquet --files-from-raw WORK\o4.txt --immutable
+##### rc=6 seconds=0.82
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:27 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:27 ERROR : raw/a.parquet: Source and destination exist but do not match: immutable file modified
+2026/10/07 11:30:27 ERROR : Can't retry any of the errors - not attempting retries
+2026/10/07 11:30:27 NOTICE: Failed to copy: immutable file modified
+
+#####
+OBS|detection|o4|copy of an existing path with a new local mtime under --immutable: rc 6
+
+##### [detection/mech] L1-lsf :: rclone lsf -R --files-only BACKUPS3CRYPT:parquet/
+##### rc=0 seconds=0.89
+----- stdout (last 3000 chars)
+raw/a.parquet
+raw/interval=1m/symbol=BTCUSDT/date=2026-09-30/part.parquet
+raw/b.parquet
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:28 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|l1|PRODUCT|PASS|expected=decrypted relative file paths only|actual=rc 0, ['raw/a.parquet', 'raw/interval=1m/symbol=BTCUSDT/date=2026-09-30/part.parquet', 'raw/b.parquet']
+
+##### [detection/empty] L2-lsf-missing-dir :: rclone lsf -R --files-only BACKUPS3CRYPT:parquet/
+##### rc=3 seconds=0.78
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:30 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:30 NOTICE: Failed to lsf: error in ListJSON: directory not found
+
+#####
+LABEL|detection|l2|PRODUCT|PASS|expected=exit code in {0, 3, 4} and nothing printed|actual=rc 3
+
+##### [detection/mech] CAT1-copyto-manifest :: rclone copyto WORK\manifest.json BACKUPS3CRYPT:snapshots/20260930T031500Z/manifest.json --immutable
+##### rc=0 seconds=0.80
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:31 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+
+##### [detection/mech] CAT1-cat :: rclone cat BACKUPS3CRYPT:snapshots/20260930T031500Z/manifest.json
+##### rc=0 seconds=0.78
+----- stdout (last 3000 chars)
+{
+  "parquet/raw/a.parquet": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
+----- stderr (last 3000 chars)
+2026/10/07 11:30:32 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|detection|cat1|PRODUCT|PASS|expected=cat returns exactly the local manifest text|actual=rc 0, rc 0, equal True
+OBS|detection|final|WHOLE = cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+
+PROOF-RESULT detection PRODUCT=[] HARNESS=[]
+.
+##### [compensation/comp] publish-pg.dump-20260930T031500Z :: rclone copyto C:\Users\admin\AppData\Local\Temp\pytest-of-Tungdd10\pytest-479\test_onb_proof_manifest_compen0\s1\bundle\pg.dump BACKUPS3CRYPT:snapshots/20260930T031500Z/pg.dump --immutable
+##### rc=0 seconds=0.85
+----- stdout (last 600 chars)
+
+----- stderr (last 600 chars)
+2026/10/07 11:30:34 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|compensation|h11|HARNESS|PASS|expected=pg.dump upload rc 0|actual=20260930T031500Z
+
+##### [compensation/comp] publish-manifest.json-20260930T031500Z :: rclone copyto C:\Users\admin\AppData\Local\Temp\pytest-of-Tungdd10\pytest-479\test_onb_proof_manifest_compen0\s1\bundle\manifest.json BACKUPS3CRYPT:snapshots/20260930T031500Z/manifest.json --immutable
+##### rc=0 seconds=0.81
+----- stdout (last 600 chars)
+
+----- stderr (last 600 chars)
+2026/10/07 11:30:35 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|compensation|h11|HARNESS|PASS|expected=manifest upload rc 0|actual=20260930T031500Z
+
+##### [compensation/comp] publish-pg.dump-20261001T031500Z :: rclone copyto C:\Users\admin\AppData\Local\Temp\pytest-of-Tungdd10\pytest-479\test_onb_proof_manifest_compen0\s2\bundle\pg.dump BACKUPS3CRYPT:snapshots/20261001T031500Z/pg.dump --immutable
+##### rc=0 seconds=0.79
+----- stdout (last 600 chars)
+
+----- stderr (last 600 chars)
+2026/10/07 11:30:36 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|compensation|h11|HARNESS|PASS|expected=pg.dump upload rc 0|actual=20261001T031500Z
+
+##### [compensation/comp] publish-manifest.json-20261001T031500Z :: rclone copyto C:\Users\admin\AppData\Local\Temp\pytest-of-Tungdd10\pytest-479\test_onb_proof_manifest_compen0\s2\bundle\manifest.json BACKUPS3CRYPT:snapshots/20261001T031500Z/manifest.json --immutable
+##### rc=0 seconds=0.77
+----- stdout (last 600 chars)
+
+----- stderr (last 600 chars)
+2026/10/07 11:30:37 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|compensation|h11|HARNESS|PASS|expected=manifest upload rc 0|actual=20261001T031500Z
+LABEL|compensation|h12|HARNESS|PASS|expected=exactly one new server object after the DAY2 manifest|actual=1
+
+##### [compensation/comp] M1-cryptcheck-intact-manifest :: rclone cryptcheck C:\Users\admin\AppData\Local\Temp\pytest-of-Tungdd10\pytest-479\test_onb_proof_manifest_compen0\s2\bundle BACKUPS3CRYPT:snapshots/20261001T031500Z --include /manifest.json
+##### rc=0 seconds=0.83
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:38 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:38 NOTICE: Encrypted drive 'BACKUPS3CRYPT{SgZwp}:snapshots/20261001T031500Z': 0 differences found
+2026/10/07 11:30:38 NOTICE: Encrypted drive 'BACKUPS3CRYPT{SgZwp}:snapshots/20261001T031500Z': 1 matching files
+
+#####
+LABEL|compensation|m1|PRODUCT|PASS|expected=rc 0 on the intact manifest|actual=rc 0
+
+##### [compensation/comp] M2-corrupt-through-raw-s3 :: rclone copyto WORK\garbage.bin BACKUPS3:bkt-be4eea6c/s7t07jqvitsbj1ftmjfokl7l6k/ktkbk72mq27se0tb118kav13ms8ho3gm3079gd1vtkkkp2ubos3g/hd53k8i6dmjt3fm6b75hd11hfk
+##### rc=0 seconds=0.80
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:39 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+
+##### [compensation/comp] M2-cryptcheck-corrupt-manifest :: rclone cryptcheck C:\Users\admin\AppData\Local\Temp\pytest-of-Tungdd10\pytest-479\test_onb_proof_manifest_compen0\s2\bundle BACKUPS3CRYPT:snapshots/20261001T031500Z --include /manifest.json
+##### rc=1 seconds=0.75
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:39 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:40 ERROR : manifest.json: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+2026/10/07 11:30:40 NOTICE: Encrypted drive 'BACKUPS3CRYPT{SgZwp}:snapshots/20261001T031500Z': 0 differences found
+2026/10/07 11:30:40 NOTICE: Encrypted drive 'BACKUPS3CRYPT{SgZwp}:snapshots/20261001T031500Z': 2 errors while checking
+2026/10/07 11:30:40 NOTICE: Failed to cryptcheck with 2 errors: last error was: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+
+#####
+LABEL|compensation|h13|HARNESS|PASS|expected=raw overwrite rc 0|actual=rc 0
+LABEL|compensation|m2|PRODUCT|PASS|expected=non-zero on the corrupted manifest|actual=rc 1
+
+##### [compensation/comp] M3-deletefile-manifest :: rclone deletefile BACKUPS3CRYPT:snapshots/20261001T031500Z/manifest.json
+##### rc=0 seconds=0.74
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:40 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+
+##### [compensation/comp] M3-lsf-snapshots :: rclone lsf -R --files-only BACKUPS3CRYPT:snapshots/
+##### rc=0 seconds=0.76
+----- stdout (last 3000 chars)
+20260930T031500Z/manifest.json
+20260930T031500Z/pg.dump
+20261001T031500Z/pg.dump
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:42 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+
+##### [compensation/comp] M3-cryptcheck-day1-manifest :: rclone cryptcheck C:\Users\admin\AppData\Local\Temp\pytest-of-Tungdd10\pytest-479\test_onb_proof_manifest_compen0\s1\bundle BACKUPS3CRYPT:snapshots/20260930T031500Z --include /manifest.json
+##### rc=0 seconds=0.82
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:43 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:43 NOTICE: Encrypted drive 'BACKUPS3CRYPT{SgZwp}:snapshots/20260930T031500Z': 0 differences found
+2026/10/07 11:30:43 NOTICE: Encrypted drive 'BACKUPS3CRYPT{SgZwp}:snapshots/20260930T031500Z': 1 matching files
+
+#####
+LABEL|compensation|m3|PRODUCT|PASS|expected=deletefile removes only that manifest; DAY2 is not complete; DAY2 pg.dump and DAY1 manifest remain|actual=rc 0, complete ['20260930T031500Z'], objects 4 -> 3, day1 rc 0
+
+##### [compensation/comp] M4-deletefile-missing :: rclone deletefile BACKUPS3CRYPT:snapshots/20261001T031500Z/manifest.json
+##### rc=4 seconds=0.81
+----- stdout (last 3000 chars)
+
+----- stderr (last 3000 chars)
+2026/10/07 11:30:44 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:44 ERROR : Attempt 1/3 failed with 1 errors and: BACKUPS3CRYPT:snapshots/20261001T031500Z/manifest.json is a directory or doesn't exist: object not found
+2026/10/07 11:30:44 ERROR : Attempt 2/3 failed with 1 errors and: BACKUPS3CRYPT:snapshots/20261001T031500Z/manifest.json is a directory or doesn't exist: object not found
+2026/10/07 11:30:44 ERROR : Attempt 3/3 failed with 1 errors and: BACKUPS3CRYPT:snapshots/20261001T031500Z/manifest.json is a directory or doesn't exist: object not found
+2026/10/07 11:30:44 NOTICE: Failed to deletefile: BACKUPS3CRYPT:snapshots/20261001T031500Z/manifest.json is a directory or doesn't exist: object not found
+
+#####
+OBS|compensation|m4|deletefile of a path that does not exist: rc 4
+
+PROOF-RESULT compensation PRODUCT=[] HARNESS=[]
+.COST|label|double, not real S3 (no network latency, no request cost, Docker Desktop on WSL2, bind mounts, one docker run per rclone call)
+COST|machine|cpu_count=16 platform=Windows-10-10.0.19045-SP0 docker=29.5.3 docker_ncpu_mem=16 8235704320
+COST|baseline|median docker run rclone version seconds=0.76 all=[0.76, 0.79, 0.76]
+
+##### [cost/cost0] 250x64KiB-first-upload :: rclone copy LOCAL BACKUPS3CRYPT:parquet --files-from-raw WORK\all.txt --immutable
+##### rc=0 seconds=1.85
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:30:51 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-250x64KiB-first-upload|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|250x64KiB|first-upload|seconds=1.85
+
+##### [cost/cost0] 250x64KiB-recursive-listing :: rclone lsf -R --files-only BACKUPS3CRYPT:parquet/
+##### rc=0 seconds=1.10
+----- stdout (last 400 chars)
+USDT/date=2026-01-19/part.parquet
+raw/interval=1m/symbol=SYM5USDT/date=2026-01-04/part.parquet
+raw/interval=1m/symbol=SYM5USDT/date=2026-01-14/part.parquet
+raw/interval=1m/symbol=SYM5USDT/date=2026-01-01/part.parquet
+raw/interval=1m/symbol=SYM5USDT/date=2026-01-07/part.parquet
+raw/interval=1m/symbol=SYM5USDT/date=2026-01-02/part.parquet
+raw/interval=1m/symbol=SYM5USDT/date=2026-01-27/part.parquet
+
+----- stderr (last 400 chars)
+2026/10/07 11:30:53 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-250x64KiB-recursive-listing|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|250x64KiB|recursive-listing|seconds=1.10
+
+##### [cost/cost0] 250x64KiB-manifest-publish :: rclone copyto C:\Users\admin\AppData\Local\Temp\pytest-of-Tungdd10\pytest-479\test_onb_proof_cost0\tier0\bundle\manifest.json BACKUPS3CRYPT:snapshots/20260930T031500Z/manifest.json --immutable
+##### rc=0 seconds=1.10
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:30:54 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-250x64KiB-manifest-publish|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|250x64KiB|manifest-publish|seconds=1.10
+
+##### [cost/cost0] 250x64KiB-manifest-cat :: rclone cat BACKUPS3CRYPT:snapshots/20260930T031500Z/manifest.json
+##### rc=0 seconds=1.03
+----- stdout (last 400 chars)
+a3a0b232d7bd56032d5b231d1a2c4f5b",
+  "parquet/raw/interval=1m/symbol=SYM7USDT/date=2026-01-30/part.parquet": "064473f236e53c46762956329d5313eed89f830aa0a7104c4002e561c96f6ed9",
+  "parquet/raw/interval=1m/symbol=SYM7USDT/date=2026-01-31/part.parquet": "d9eede55bdf42109eba3041d4b233d991554f5b404ca8db3f7f3de7550b93595",
+  "pg.dump": "7ac5d2917c93d7486e8d6de1045da832cd727339d4dd0903ebaaaa62edd3443e"
+}
+----- stderr (last 400 chars)
+2026/10/07 11:30:55 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-250x64KiB-manifest-cat|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|250x64KiB|manifest-cat|seconds=1.03
+
+##### [cost/cost0] 250x64KiB-whole-cryptcheck-1 :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=0 seconds=1.56
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:30:58 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:30:58 NOTICE: Encrypted drive 'BACKUPS3CRYPT{pfaKs}:parquet': 0 differences found
+2026/10/07 11:30:58 NOTICE: Encrypted drive 'BACKUPS3CRYPT{pfaKs}:parquet': 250 matching files
+
+#####
+LABEL|cost|hc-250x64KiB-whole-cryptcheck-1|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|250x64KiB|whole-cryptcheck-1|seconds=1.56
+COST|250x64KiB|whole-cryptcheck-1 container|not observable
+
+##### [cost/cost0] 250x64KiB-whole-cryptcheck-2 :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=0 seconds=1.57
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:31:01 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:31:01 NOTICE: Encrypted drive 'BACKUPS3CRYPT{pfaKs}:parquet': 0 differences found
+2026/10/07 11:31:01 NOTICE: Encrypted drive 'BACKUPS3CRYPT{pfaKs}:parquet': 250 matching files
+
+#####
+LABEL|cost|hc-250x64KiB-whole-cryptcheck-2|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|250x64KiB|whole-cryptcheck-2|seconds=1.57
+
+##### [cost/cost0] 250x64KiB-subset-1-files-from-raw :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --files-from-raw WORK\sub1.txt
+##### rc=0 seconds=1.32
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:31:02 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:31:02 NOTICE: Encrypted drive 'BACKUPS3CRYPT{pfaKs}:parquet': 0 differences found
+2026/10/07 11:31:02 NOTICE: Encrypted drive 'BACKUPS3CRYPT{pfaKs}:parquet': 1 matching files
+
+#####
+LABEL|cost|hc-250x64KiB-subset-1-files-from-raw|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|250x64KiB|subset-1-files-from-raw|seconds=1.32
+
+##### [cost/cost0] 250x64KiB-subset-10-files-from-raw :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --files-from-raw WORK\sub10.txt
+##### rc=0 seconds=1.35
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:31:04 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:31:04 NOTICE: Encrypted drive 'BACKUPS3CRYPT{pfaKs}:parquet': 0 differences found
+2026/10/07 11:31:04 NOTICE: Encrypted drive 'BACKUPS3CRYPT{pfaKs}:parquet': 10 matching files
+
+#####
+LABEL|cost|hc-250x64KiB-subset-10-files-from-raw|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|250x64KiB|subset-10-files-from-raw|seconds=1.35
+
+##### [cost/cost0] 250x64KiB-subset-1-include :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --include /raw/interval=1m/symbol=SYM0USDT/date=2026-01-01/part.parquet
+##### rc=0 seconds=1.11
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:31:05 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:31:05 NOTICE: Encrypted drive 'BACKUPS3CRYPT{pfaKs}:parquet': 0 differences found
+2026/10/07 11:31:05 NOTICE: Encrypted drive 'BACKUPS3CRYPT{pfaKs}:parquet': 1 matching files
+
+#####
+LABEL|cost|hc-250x64KiB-subset-1-include|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|250x64KiB|subset-1-include|seconds=1.11
+
+##### [cost/cost0] 250x64KiB-old-push-immutable-size-only :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable --size-only
+##### rc=0 seconds=2.15
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:31:06 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-250x64KiB-old-push-immutable-size-only|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|250x64KiB|old-push-immutable-size-only|seconds=2.15
+COST|250x64KiB|summary|files=250 file_bytes=65536 plaintext_total=16384000 ciphertext_total=16396000 server_objects=250 manifest_bytes=35835 stage_s=1.60 verify_bundle_s=0.23 verify_problems=0
+
+##### [cost/cost1] 1000x64KiB-first-upload :: rclone copy LOCAL BACKUPS3CRYPT:parquet --files-from-raw WORK\all.txt --immutable
+##### rc=0 seconds=4.37
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:31:20 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-1000x64KiB-first-upload|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|1000x64KiB|first-upload|seconds=4.37
+
+##### [cost/cost1] 1000x64KiB-recursive-listing :: rclone lsf -R --files-only BACKUPS3CRYPT:parquet/
+##### rc=0 seconds=1.08
+----- stdout (last 400 chars)
+USDT/date=2026-02-18/part.parquet
+raw/interval=1m/symbol=SYM6USDT/date=2026-01-30/part.parquet
+raw/interval=1m/symbol=SYM6USDT/date=2026-02-14/part.parquet
+raw/interval=1m/symbol=SYM6USDT/date=2026-03-16/part.parquet
+raw/interval=1m/symbol=SYM6USDT/date=2026-04-21/part.parquet
+raw/interval=1m/symbol=SYM6USDT/date=2026-04-10/part.parquet
+raw/interval=1m/symbol=SYM6USDT/date=2026-01-09/part.parquet
+
+----- stderr (last 400 chars)
+2026/10/07 11:31:24 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-1000x64KiB-recursive-listing|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|1000x64KiB|recursive-listing|seconds=1.08
+
+##### [cost/cost1] 1000x64KiB-manifest-publish :: rclone copyto C:\Users\admin\AppData\Local\Temp\pytest-of-Tungdd10\pytest-479\test_onb_proof_cost0\tier1\bundle\manifest.json BACKUPS3CRYPT:snapshots/20260930T031500Z/manifest.json --immutable
+##### rc=0 seconds=1.02
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:31:26 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-1000x64KiB-manifest-publish|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|1000x64KiB|manifest-publish|seconds=1.02
+
+##### [cost/cost1] 1000x64KiB-manifest-cat :: rclone cat BACKUPS3CRYPT:snapshots/20260930T031500Z/manifest.json
+##### rc=0 seconds=1.16
+----- stdout (last 400 chars)
+21c15cd7e7d953030624fc344c8fa9cc",
+  "parquet/raw/interval=1m/symbol=SYM7USDT/date=2026-05-04/part.parquet": "89635152f93fbd0aa464e50a771fa1e3f10b40996b5d477323d8f70d598c9894",
+  "parquet/raw/interval=1m/symbol=SYM7USDT/date=2026-05-05/part.parquet": "0f974217e3fdd1ea3efe32875c37a3f62803b697c3b23ea97e3ed2a94674fffc",
+  "pg.dump": "7ac5d2917c93d7486e8d6de1045da832cd727339d4dd0903ebaaaa62edd3443e"
+}
+----- stderr (last 400 chars)
+2026/10/07 11:31:27 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-1000x64KiB-manifest-cat|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|1000x64KiB|manifest-cat|seconds=1.16
+
+##### [cost/cost1] 1000x64KiB-whole-cryptcheck-1 :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=0 seconds=2.64
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:31:29 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:31:31 NOTICE: Encrypted drive 'BACKUPS3CRYPT{WkpVn}:parquet': 0 differences found
+2026/10/07 11:31:31 NOTICE: Encrypted drive 'BACKUPS3CRYPT{WkpVn}:parquet': 1000 matching files
+
+#####
+LABEL|cost|hc-1000x64KiB-whole-cryptcheck-1|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|1000x64KiB|whole-cryptcheck-1|seconds=2.64
+COST|1000x64KiB|whole-cryptcheck-1 container|peak CPU 198.0%, peak memory 34.7 MiB, last NetIO 2.44MB / 1.5MB, last BlockIO 53.2kB / 0B, samples 1
+
+##### [cost/cost1] 1000x64KiB-whole-cryptcheck-2 :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=0 seconds=2.82
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:31:32 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:31:34 NOTICE: Encrypted drive 'BACKUPS3CRYPT{WkpVn}:parquet': 0 differences found
+2026/10/07 11:31:34 NOTICE: Encrypted drive 'BACKUPS3CRYPT{WkpVn}:parquet': 1000 matching files
+
+#####
+LABEL|cost|hc-1000x64KiB-whole-cryptcheck-2|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|1000x64KiB|whole-cryptcheck-2|seconds=2.82
+
+##### [cost/cost1] 1000x64KiB-subset-1-files-from-raw :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --files-from-raw WORK\sub1.txt
+##### rc=0 seconds=1.08
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:31:35 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:31:35 NOTICE: Encrypted drive 'BACKUPS3CRYPT{WkpVn}:parquet': 0 differences found
+2026/10/07 11:31:35 NOTICE: Encrypted drive 'BACKUPS3CRYPT{WkpVn}:parquet': 1 matching files
+
+#####
+LABEL|cost|hc-1000x64KiB-subset-1-files-from-raw|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|1000x64KiB|subset-1-files-from-raw|seconds=1.08
+
+##### [cost/cost1] 1000x64KiB-subset-10-files-from-raw :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --files-from-raw WORK\sub10.txt
+##### rc=0 seconds=1.19
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:31:36 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:31:37 NOTICE: Encrypted drive 'BACKUPS3CRYPT{WkpVn}:parquet': 0 differences found
+2026/10/07 11:31:37 NOTICE: Encrypted drive 'BACKUPS3CRYPT{WkpVn}:parquet': 10 matching files
+
+#####
+LABEL|cost|hc-1000x64KiB-subset-10-files-from-raw|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|1000x64KiB|subset-10-files-from-raw|seconds=1.19
+
+##### [cost/cost1] 1000x64KiB-subset-1-include :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --include /raw/interval=1m/symbol=SYM0USDT/date=2026-01-01/part.parquet
+##### rc=0 seconds=1.06
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:31:37 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:31:38 NOTICE: Encrypted drive 'BACKUPS3CRYPT{WkpVn}:parquet': 0 differences found
+2026/10/07 11:31:38 NOTICE: Encrypted drive 'BACKUPS3CRYPT{WkpVn}:parquet': 1 matching files
+
+#####
+LABEL|cost|hc-1000x64KiB-subset-1-include|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|1000x64KiB|subset-1-include|seconds=1.06
+
+##### [cost/cost1] 1000x64KiB-old-push-immutable-size-only :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable --size-only
+##### rc=0 seconds=1.91
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:31:39 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-1000x64KiB-old-push-immutable-size-only|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|1000x64KiB|old-push-immutable-size-only|seconds=1.91
+COST|1000x64KiB|summary|files=1000 file_bytes=65536 plaintext_total=65536000 ciphertext_total=65584000 server_objects=1000 manifest_bytes=143085 stage_s=6.77 verify_bundle_s=0.96 verify_problems=0
+
+##### [cost/cost2] 4000x64KiB-first-upload :: rclone copy LOCAL BACKUPS3CRYPT:parquet --files-from-raw WORK\all.txt --immutable
+##### rc=0 seconds=13.80
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:32:22 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-4000x64KiB-first-upload|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|4000x64KiB|first-upload|seconds=13.80
+
+##### [cost/cost2] 4000x64KiB-recursive-listing :: rclone lsf -R --files-only BACKUPS3CRYPT:parquet/
+##### rc=0 seconds=1.43
+----- stdout (last 400 chars)
+USDT/date=2027-01-17/part.parquet
+raw/interval=1m/symbol=SYM4USDT/date=2027-01-21/part.parquet
+raw/interval=1m/symbol=SYM4USDT/date=2026-05-28/part.parquet
+raw/interval=1m/symbol=SYM4USDT/date=2026-02-05/part.parquet
+raw/interval=1m/symbol=SYM4USDT/date=2027-01-29/part.parquet
+raw/interval=1m/symbol=SYM4USDT/date=2026-03-27/part.parquet
+raw/interval=1m/symbol=SYM4USDT/date=2027-01-31/part.parquet
+
+----- stderr (last 400 chars)
+2026/10/07 11:32:36 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-4000x64KiB-recursive-listing|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|4000x64KiB|recursive-listing|seconds=1.43
+
+##### [cost/cost2] 4000x64KiB-manifest-publish :: rclone copyto C:\Users\admin\AppData\Local\Temp\pytest-of-Tungdd10\pytest-479\test_onb_proof_cost0\tier2\bundle\manifest.json BACKUPS3CRYPT:snapshots/20260930T031500Z/manifest.json --immutable
+##### rc=0 seconds=1.04
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:32:38 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-4000x64KiB-manifest-publish|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|4000x64KiB|manifest-publish|seconds=1.04
+
+##### [cost/cost2] 4000x64KiB-manifest-cat :: rclone cat BACKUPS3CRYPT:snapshots/20260930T031500Z/manifest.json
+##### rc=0 seconds=0.94
+----- stdout (last 400 chars)
+c5c6783cf9b3bd91750fe6a46af13dcd",
+  "parquet/raw/interval=1m/symbol=SYM7USDT/date=2027-05-14/part.parquet": "cead3bfe04d8b545aa5c350fb76c8c2c3b2ae495a370af74c1c9cdae11f376a1",
+  "parquet/raw/interval=1m/symbol=SYM7USDT/date=2027-05-15/part.parquet": "eb0c96fdfa9a0c14f63ab062be2c45354faf2a94222a41d9e23a0a8dd817cca5",
+  "pg.dump": "7ac5d2917c93d7486e8d6de1045da832cd727339d4dd0903ebaaaa62edd3443e"
+}
+----- stderr (last 400 chars)
+2026/10/07 11:32:39 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-4000x64KiB-manifest-cat|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|4000x64KiB|manifest-cat|seconds=0.94
+
+##### [cost/cost2] 4000x64KiB-whole-cryptcheck-1 :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=0 seconds=7.58
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:32:41 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:32:48 NOTICE: Encrypted drive 'BACKUPS3CRYPT{SOw5s}:parquet': 0 differences found
+2026/10/07 11:32:48 NOTICE: Encrypted drive 'BACKUPS3CRYPT{SOw5s}:parquet': 4000 matching files
+
+#####
+LABEL|cost|hc-4000x64KiB-whole-cryptcheck-1|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|4000x64KiB|whole-cryptcheck-1|seconds=7.58
+COST|4000x64KiB|whole-cryptcheck-1 container|peak CPU 204.2%, peak memory 36.8 MiB, last NetIO 7.7MB / 4.61MB, last BlockIO 12.3kB / 0B, samples 2
+
+##### [cost/cost2] 4000x64KiB-whole-cryptcheck-2 :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=0 seconds=7.65
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:32:51 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:32:57 NOTICE: Encrypted drive 'BACKUPS3CRYPT{SOw5s}:parquet': 0 differences found
+2026/10/07 11:32:57 NOTICE: Encrypted drive 'BACKUPS3CRYPT{SOw5s}:parquet': 4000 matching files
+
+#####
+LABEL|cost|hc-4000x64KiB-whole-cryptcheck-2|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|4000x64KiB|whole-cryptcheck-2|seconds=7.65
+
+##### [cost/cost2] 4000x64KiB-subset-1-files-from-raw :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --files-from-raw WORK\sub1.txt
+##### rc=0 seconds=1.37
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:32:58 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:32:59 NOTICE: Encrypted drive 'BACKUPS3CRYPT{SOw5s}:parquet': 0 differences found
+2026/10/07 11:32:59 NOTICE: Encrypted drive 'BACKUPS3CRYPT{SOw5s}:parquet': 1 matching files
+
+#####
+LABEL|cost|hc-4000x64KiB-subset-1-files-from-raw|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|4000x64KiB|subset-1-files-from-raw|seconds=1.37
+
+##### [cost/cost2] 4000x64KiB-subset-10-files-from-raw :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --files-from-raw WORK\sub10.txt
+##### rc=0 seconds=1.62
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:33:00 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:33:00 NOTICE: Encrypted drive 'BACKUPS3CRYPT{SOw5s}:parquet': 0 differences found
+2026/10/07 11:33:00 NOTICE: Encrypted drive 'BACKUPS3CRYPT{SOw5s}:parquet': 10 matching files
+
+#####
+LABEL|cost|hc-4000x64KiB-subset-10-files-from-raw|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|4000x64KiB|subset-10-files-from-raw|seconds=1.62
+
+##### [cost/cost2] 4000x64KiB-subset-1-include :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --include /raw/interval=1m/symbol=SYM0USDT/date=2026-01-01/part.parquet
+##### rc=0 seconds=1.35
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:33:01 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:33:02 NOTICE: Encrypted drive 'BACKUPS3CRYPT{SOw5s}:parquet': 0 differences found
+2026/10/07 11:33:02 NOTICE: Encrypted drive 'BACKUPS3CRYPT{SOw5s}:parquet': 1 matching files
+
+#####
+LABEL|cost|hc-4000x64KiB-subset-1-include|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|4000x64KiB|subset-1-include|seconds=1.35
+
+##### [cost/cost2] 4000x64KiB-old-push-immutable-size-only :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable --size-only
+##### rc=0 seconds=5.43
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:33:03 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-4000x64KiB-old-push-immutable-size-only|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|4000x64KiB|old-push-immutable-size-only|seconds=5.43
+COST|4000x64KiB|summary|files=4000 file_bytes=65536 plaintext_total=262144000 ciphertext_total=262336000 server_objects=4000 manifest_bytes=572085 stage_s=29.38 verify_bundle_s=3.78 verify_problems=0
+
+##### [cost/cost3] 8x32768KiB-first-upload :: rclone copy LOCAL BACKUPS3CRYPT:parquet --files-from-raw WORK\all.txt --immutable
+##### rc=0 seconds=2.42
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:33:18 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-8x32768KiB-first-upload|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|8x32768KiB|first-upload|seconds=2.42
+
+##### [cost/cost3] 8x32768KiB-recursive-listing :: rclone lsf -R --files-only BACKUPS3CRYPT:parquet/
+##### rc=0 seconds=0.77
+----- stdout (last 400 chars)
+USDT/date=2026-01-01/part.parquet
+raw/interval=1m/symbol=SYM0USDT/date=2026-01-01/part.parquet
+raw/interval=1m/symbol=SYM7USDT/date=2026-01-01/part.parquet
+raw/interval=1m/symbol=SYM2USDT/date=2026-01-01/part.parquet
+raw/interval=1m/symbol=SYM5USDT/date=2026-01-01/part.parquet
+raw/interval=1m/symbol=SYM1USDT/date=2026-01-01/part.parquet
+raw/interval=1m/symbol=SYM4USDT/date=2026-01-01/part.parquet
+
+----- stderr (last 400 chars)
+2026/10/07 11:33:21 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-8x32768KiB-recursive-listing|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|8x32768KiB|recursive-listing|seconds=0.77
+
+##### [cost/cost3] 8x32768KiB-manifest-publish :: rclone copyto C:\Users\admin\AppData\Local\Temp\pytest-of-Tungdd10\pytest-479\test_onb_proof_cost0\tier3\bundle\manifest.json BACKUPS3CRYPT:snapshots/20260930T031500Z/manifest.json --immutable
+##### rc=0 seconds=0.81
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:33:21 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-8x32768KiB-manifest-publish|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|8x32768KiB|manifest-publish|seconds=0.81
+
+##### [cost/cost3] 8x32768KiB-manifest-cat :: rclone cat BACKUPS3CRYPT:snapshots/20260930T031500Z/manifest.json
+##### rc=0 seconds=0.78
+----- stdout (last 400 chars)
+52bbafab1731eb1cea70c26ed8c7ebf9",
+  "parquet/raw/interval=1m/symbol=SYM6USDT/date=2026-01-01/part.parquet": "0972367e594385079540b19bd4d96784e269796fa1938010aa71feaec8c25c38",
+  "parquet/raw/interval=1m/symbol=SYM7USDT/date=2026-01-01/part.parquet": "52d065ab40e09cb86be85ce634a2c93b8e71fb06f3c320303f0446d664d55cfd",
+  "pg.dump": "7ac5d2917c93d7486e8d6de1045da832cd727339d4dd0903ebaaaa62edd3443e"
+}
+----- stderr (last 400 chars)
+2026/10/07 11:33:22 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-8x32768KiB-manifest-cat|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|8x32768KiB|manifest-cat|seconds=0.78
+
+##### [cost/cost3] 8x32768KiB-whole-cryptcheck-1 :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=0 seconds=1.71
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:33:24 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:33:25 NOTICE: Encrypted drive 'BACKUPS3CRYPT{nzx1Z}:parquet': 0 differences found
+2026/10/07 11:33:25 NOTICE: Encrypted drive 'BACKUPS3CRYPT{nzx1Z}:parquet': 8 matching files
+
+#####
+LABEL|cost|hc-8x32768KiB-whole-cryptcheck-1|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|8x32768KiB|whole-cryptcheck-1|seconds=1.71
+COST|8x32768KiB|whole-cryptcheck-1 container|not observable
+
+##### [cost/cost3] 8x32768KiB-whole-cryptcheck-2 :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+##### rc=0 seconds=1.57
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:33:27 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:33:28 NOTICE: Encrypted drive 'BACKUPS3CRYPT{nzx1Z}:parquet': 0 differences found
+2026/10/07 11:33:28 NOTICE: Encrypted drive 'BACKUPS3CRYPT{nzx1Z}:parquet': 8 matching files
+
+#####
+LABEL|cost|hc-8x32768KiB-whole-cryptcheck-2|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|8x32768KiB|whole-cryptcheck-2|seconds=1.57
+
+##### [cost/cost3] 8x32768KiB-subset-1-files-from-raw :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --files-from-raw WORK\sub1.txt
+##### rc=0 seconds=1.18
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:33:29 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:33:29 NOTICE: Encrypted drive 'BACKUPS3CRYPT{nzx1Z}:parquet': 0 differences found
+2026/10/07 11:33:29 NOTICE: Encrypted drive 'BACKUPS3CRYPT{nzx1Z}:parquet': 1 matching files
+
+#####
+LABEL|cost|hc-8x32768KiB-subset-1-files-from-raw|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|8x32768KiB|subset-1-files-from-raw|seconds=1.18
+
+##### [cost/cost3] 8x32768KiB-subset-10-files-from-raw :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --files-from-raw WORK\sub10.txt
+##### rc=0 seconds=1.51
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:33:30 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:33:31 NOTICE: Encrypted drive 'BACKUPS3CRYPT{nzx1Z}:parquet': 0 differences found
+2026/10/07 11:33:31 NOTICE: Encrypted drive 'BACKUPS3CRYPT{nzx1Z}:parquet': 8 matching files
+
+#####
+LABEL|cost|hc-8x32768KiB-subset-10-files-from-raw|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|8x32768KiB|subset-10-files-from-raw|seconds=1.51
+
+##### [cost/cost3] 8x32768KiB-subset-1-include :: rclone cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --include /raw/interval=1m/symbol=SYM0USDT/date=2026-01-01/part.parquet
+##### rc=0 seconds=1.08
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:33:31 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 11:33:32 NOTICE: Encrypted drive 'BACKUPS3CRYPT{nzx1Z}:parquet': 0 differences found
+2026/10/07 11:33:32 NOTICE: Encrypted drive 'BACKUPS3CRYPT{nzx1Z}:parquet': 1 matching files
+
+#####
+LABEL|cost|hc-8x32768KiB-subset-1-include|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|8x32768KiB|subset-1-include|seconds=1.08
+
+##### [cost/cost3] 8x32768KiB-old-push-immutable-size-only :: rclone copy LOCAL BACKUPS3CRYPT:parquet --immutable --size-only
+##### rc=0 seconds=0.82
+----- stdout (last 400 chars)
+
+----- stderr (last 400 chars)
+2026/10/07 11:33:32 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+
+#####
+LABEL|cost|hc-8x32768KiB-old-push-immutable-size-only|HARNESS|PASS|expected=rc 0|actual=rc 0
+COST|8x32768KiB|old-push-immutable-size-only|seconds=0.82
+COST|8x32768KiB|summary|files=8 file_bytes=33554432 plaintext_total=268435456 ciphertext_total=268501248 server_objects=8 manifest_bytes=1229 stage_s=1.04 verify_bundle_s=0.53 verify_problems=0
+COST|growth|first-upload|files 250->1000|seconds 1.85->4.37|ratio 2.37
+COST|growth|recursive-listing|files 250->1000|seconds 1.10->1.08|ratio 0.98
+COST|growth|whole-cryptcheck-1|files 250->1000|seconds 1.56->2.64|ratio 1.70
+COST|growth|whole-cryptcheck-2|files 250->1000|seconds 1.57->2.82|ratio 1.80
+COST|growth|old-push-immutable-size-only|files 250->1000|seconds 2.15->1.91|ratio 0.89
+COST|growth|first-upload|files 1000->4000|seconds 4.37->13.80|ratio 3.16
+COST|growth|recursive-listing|files 1000->4000|seconds 1.08->1.43|ratio 1.33
+COST|growth|whole-cryptcheck-1|files 1000->4000|seconds 2.64->7.58|ratio 2.87
+COST|growth|whole-cryptcheck-2|files 1000->4000|seconds 2.82->7.65|ratio 2.71
+COST|growth|old-push-immutable-size-only|files 1000->4000|seconds 1.91->5.43|ratio 2.85
+COST|growth|first-upload|files 4000->8|seconds 13.80->2.42|ratio 0.18
+COST|growth|recursive-listing|files 4000->8|seconds 1.43->0.77|ratio 0.54
+COST|growth|whole-cryptcheck-1|files 4000->8|seconds 7.58->1.71|ratio 0.23
+COST|growth|whole-cryptcheck-2|files 4000->8|seconds 7.65->1.57|ratio 0.20
+COST|growth|old-push-immutable-size-only|files 4000->8|seconds 5.43->0.82|ratio 0.15
+COST|per-file|first-upload|files=250|ms_per_file=7.4
+COST|per-file|whole-cryptcheck-1|files=250|ms_per_file=6.2
+COST|per-file|first-upload|files=1000|ms_per_file=4.4
+COST|per-file|whole-cryptcheck-1|files=1000|ms_per_file=2.6
+COST|per-file|first-upload|files=4000|ms_per_file=3.5
+COST|per-file|whole-cryptcheck-1|files=4000|ms_per_file=1.9
+COST|per-file|first-upload|files=8|ms_per_file=303.0
+COST|per-file|whole-cryptcheck-1|files=8|ms_per_file=214.1
+COST|json|[{"first-upload": 1.8465605000965297, "recursive-listing": 1.102866600267589, "manifest-publish": 1.1040270999073982, "manifest-cat": 1.0295630004256964, "whole-cryptcheck-1": 1.556624099612236, "whole-cryptcheck-2": 1.5689623998478055, "subset-1-files-from-raw": 1.316506200004369, "subset-10-files-from-raw": 1.3510308000259101, "subset-1-include": 1.110328699927777, "old-push-immutable-size-only": 2.151812800206244, "files": 250.0}, {"first-upload": 4.369544200133532, "recursive-listing": 1.0794903999194503, "manifest-publish": 1.0221081995405257, "manifest-cat": 1.162959299981594, "whole-cryptcheck-1": 2.6412229002453387, "whole-cryptcheck-2": 2.8208451000973582, "subset-1-files-from-raw": 1.076745199970901, "subset-10-files-from-raw": 1.194133199751377, "subset-1-include": 1.0599735998548567, "old-push-immutable-size-only": 1.9072466003708541, "files": 1000.0}, {"first-upload": 13.80246810009703, "recursive-listing": 1.4322561998851597, "manifest-publish": 1.0354317999444902, "manifest-cat": 0.9419578998349607, "whole-cryptcheck-1": 7.575752000324428, "whole-cryptcheck-2": 7.646087700035423, "subset-1-files-from-raw": 1.369163400027901, "subset-10-files-from-raw": 1.6178986001759768, "subset-1-include": 1.3476769998669624, "old-push-immutable-size-only": 5.4343140996061265, "files": 4000.0}, {"first-upload": 2.4241425995714962, "recursive-listing": 0.7701568999327719, "manifest-publish": 0.8129418999888003, "manifest-cat": 0.780617699958384, "whole-cryptcheck-1": 1.7129222000949085, "whole-cryptcheck-2": 1.5652542002499104, "subset-1-files-from-raw": 1.1776807000860572, "subset-10-files-from-raw": 1.5137248001992702, "subset-1-include": 1.080788199789822, "old-push-immutable-size-only": 0.8217033999972045, "files": 8.0}]
+
+PROOF-RESULT cost PRODUCT=[] HARNESS=[]
+.
+=================================== PASSES ====================================
+=========================== short test summary info ===========================
+PASSED tests/test_docker_backup_remote.py::test_onb_proof_detection
+PASSED tests/test_docker_backup_remote.py::test_onb_proof_manifest_compensation
+PASSED tests/test_docker_backup_remote.py::test_onb_proof_cost
+3 passed, 3 deselected in 273.26s (0:04:33)
+EXIT 0
+
+=== LABEL / OBS / PROOF-RESULT LINES (extracted verbatim from the run above) ===
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+LABEL|detection|d1|PRODUCT|PASS|expected=rc 0 on identical content|actual=rc 0
+OBS|detection|o3|ciphertext overhead per object (bytes): [48]
+OBS|detection|o3|ciphertext objects by size rank: {'raw/a.parquet': 'k6ftmunveg41dpnfvkoebems60/03g1o5r8dgcb2pe0a6grm8cmp4/8ogm88qvuqp5pdqun9vktunedc', 'raw/b.parquet': 'k6ftmunveg41dpnfvkoebems60/03g1o5r8dgcb2pe0a6grm8cmp4/rq0s6n2aor126e8076i0u3ufs0', 'raw/c.parquet': 'k6ftmunveg41dpnfvkoebems60/03g1o5r8dgcb2pe0a6grm8cmp4/mhd5d1gr1aiefir3417gp6tjdo', 'raw/interval=1m/symbol=BTCUSDT/date=2026-09-30/part.parquet': 'k6ftmunveg41dpnfvkoebems60/03g1o5r8dgcb2pe0a6grm8cmp4/d94vjcj20u734d24dea06m1sqc/f2aio8qih4hbu1cfk3gfoit9sg/7o09l4jj43j5pflmdi46bp3aks/s9nduj0qr1avbfs5mllo38tn0o'}
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+LABEL|detection|h1|HARNESS|PASS|expected=size-only check passes on a same-size change|actual=rc 0
+LABEL|detection|h2|HARNESS|PASS|expected=old size-only push exits 0 and the remote still holds the old bytes|actual=rc 0, remote a is old bytes: True
+LABEL|detection|a1|PRODUCT|PASS|expected=non-zero on same size, same mtime|actual=rc 1
+OBS|detection|p1|default output names the differing path: True
+OBS|detection|p1|--combined -: rc 1, names path: True
+OBS|detection|p1|--differ -: rc 1, names path: True
+OBS|detection|p1|--missing-on-dst -: rc 1, names path: False
+OBS|detection|p1|--error -: rc 1, names path: False
+LABEL|detection|h5|HARNESS|PASS|expected=reset local tree passes again|actual=rc 0
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+LABEL|detection|a2|PRODUCT|PASS|expected=non-zero on same size, new mtime|actual=rc 1
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+LABEL|detection|a3|PRODUCT|PASS|expected=non-zero on a different size|actual=rc 1
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+LABEL|detection|d2|PRODUCT|PASS|expected=rc 0 after an mtime-only change|actual=rc 0
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+LABEL|detection|h3|HARNESS|PASS|expected=the server shows the same size and a different hash after the out-of-band write|actual=exec rc 0, listed True, same size True, hash changed True
+LABEL|detection|b1|PRODUCT|PASS|expected=non-zero (body)|actual=rc 1
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+LABEL|detection|h3|HARNESS|PASS|expected=the server shows the same size and a different hash after the out-of-band write|actual=exec rc 0, listed True, same size True, hash changed True
+LABEL|detection|b2|PRODUCT|PASS|expected=non-zero (whole)|actual=rc 1
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+LABEL|detection|h6|HARNESS|PASS|expected=overwrite through crypt rc 0|actual=rc 0
+LABEL|detection|b3|PRODUCT|PASS|expected=non-zero after crypt overwrite|actual=rc 1
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+LABEL|detection|h7|HARNESS|PASS|expected=raw overwrite rc 0, same size, hash changed|actual=rc 0, seen True
+LABEL|detection|b4|PRODUCT|PASS|expected=non-zero after raw S3 overwrite|actual=rc 1
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+LABEL|detection|h3|HARNESS|PASS|expected=the server no longer lists the removed object|actual=exec rc 0, still listed False
+LABEL|detection|c1|PRODUCT|PASS|expected=non-zero after out-of-band removal|actual=rc 1
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+LABEL|detection|h8|HARNESS|PASS|expected=deletefile rc 0|actual=rc 0
+LABEL|detection|c2|PRODUCT|PASS|expected=non-zero after deletefile|actual=rc 1
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+LABEL|detection|h10|HARNESS|PASS|expected=remote-only upload rc 0|actual=rc 0
+LABEL|detection|e1|PRODUCT|PASS|expected=rc 0 with a remote-only extra file|actual=rc 0
+OBS|detection|o1|without --one-way: rc 1
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+LABEL|detection|h9-plain|HARNESS|PASS|expected=raw overwrite rc 0 and the whole-tree check fails (one corrupted path exists)|actual=rc 0, whole rc 1
+LABEL|detection|h0|HARNESS|PASS|expected=baseline copy rc 0, four ciphertext objects, one constant overhead|actual=rc 0, mapped True, overheads [48]
+LABEL|detection|h9-hive|HARNESS|PASS|expected=raw overwrite rc 0 and the whole-tree check fails (one corrupted path exists)|actual=rc 0, whole rc 1
+LABEL|detection|s1|PRODUCT-ROW|PASS|expected=F1 list form detects the corrupted path (plain and hive)|actual=plain/hive {'F1-bad': True, 'F1-good': True, 'F2-bad': True, 'F2-good': True}/{'F1-bad': True, 'F1-good': True, 'F2-bad': True, 'F2-good': True}
+LABEL|detection|s2|PRODUCT-ROW|PASS|expected=F1 list form leaves the clean path alone (scope control)|actual=plain/hive {'F1-bad': True, 'F1-good': True, 'F2-bad': True, 'F2-good': True}/{'F1-bad': True, 'F1-good': True, 'F2-bad': True, 'F2-good': True}
+LABEL|detection|s3|PRODUCT-ROW|PASS|expected=F2 include form detects the corrupted path (plain and hive)|actual=plain/hive {'F1-bad': True, 'F1-good': True, 'F2-bad': True, 'F2-good': True}/{'F1-bad': True, 'F1-good': True, 'F2-bad': True, 'F2-good': True}
+LABEL|detection|s4|PRODUCT-ROW|PASS|expected=F2 include form leaves the clean path alone (scope control)|actual=plain/hive {'F1-bad': True, 'F1-good': True, 'F2-bad': True, 'F2-good': True}/{'F1-bad': True, 'F1-good': True, 'F2-bad': True, 'F2-good': True}
+LABEL|detection|s-pair|PRODUCT|PASS|expected=at least one of (s1,s2) or (s3,s4) holds|actual=s1=True s2=True s3=True s4=True
+OBS|detection|form|subset form to use: F1
+LABEL|detection|u1|PRODUCT|PASS|expected=exactly the two listed files uploaded|actual=rc 0, listed ['raw/a.parquet', 'raw/interval=1m/symbol=BTCUSDT/date=2026-09-30/part.parquet'], objects 2
+LABEL|detection|u2|PRODUCT|PASS|expected=one object added, earlier objects identical (path, size, mtime)|actual=rc 0, objects 3, earlier kept True
+OBS|detection|o4|copy of an existing path with a new local mtime under --immutable: rc 6
+LABEL|detection|l1|PRODUCT|PASS|expected=decrypted relative file paths only|actual=rc 0, ['raw/a.parquet', 'raw/interval=1m/symbol=BTCUSDT/date=2026-09-30/part.parquet', 'raw/b.parquet']
+LABEL|detection|l2|PRODUCT|PASS|expected=exit code in {0, 3, 4} and nothing printed|actual=rc 3
+LABEL|detection|cat1|PRODUCT|PASS|expected=cat returns exactly the local manifest text|actual=rc 0, rc 0, equal True
+OBS|detection|final|WHOLE = cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+PROOF-RESULT detection PRODUCT=[] HARNESS=[]
+LABEL|compensation|h11|HARNESS|PASS|expected=pg.dump upload rc 0|actual=20260930T031500Z
+LABEL|compensation|h11|HARNESS|PASS|expected=manifest upload rc 0|actual=20260930T031500Z
+LABEL|compensation|h11|HARNESS|PASS|expected=pg.dump upload rc 0|actual=20261001T031500Z
+LABEL|compensation|h11|HARNESS|PASS|expected=manifest upload rc 0|actual=20261001T031500Z
+LABEL|compensation|h12|HARNESS|PASS|expected=exactly one new server object after the DAY2 manifest|actual=1
+LABEL|compensation|m1|PRODUCT|PASS|expected=rc 0 on the intact manifest|actual=rc 0
+LABEL|compensation|h13|HARNESS|PASS|expected=raw overwrite rc 0|actual=rc 0
+LABEL|compensation|m2|PRODUCT|PASS|expected=non-zero on the corrupted manifest|actual=rc 1
+LABEL|compensation|m3|PRODUCT|PASS|expected=deletefile removes only that manifest; DAY2 is not complete; DAY2 pg.dump and DAY1 manifest remain|actual=rc 0, complete ['20260930T031500Z'], objects 4 -> 3, day1 rc 0
+OBS|compensation|m4|deletefile of a path that does not exist: rc 4
+PROOF-RESULT compensation PRODUCT=[] HARNESS=[]
+LABEL|cost|hc-250x64KiB-first-upload|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-250x64KiB-recursive-listing|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-250x64KiB-manifest-publish|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-250x64KiB-manifest-cat|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-250x64KiB-whole-cryptcheck-1|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-250x64KiB-whole-cryptcheck-2|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-250x64KiB-subset-1-files-from-raw|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-250x64KiB-subset-10-files-from-raw|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-250x64KiB-subset-1-include|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-250x64KiB-old-push-immutable-size-only|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-1000x64KiB-first-upload|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-1000x64KiB-recursive-listing|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-1000x64KiB-manifest-publish|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-1000x64KiB-manifest-cat|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-1000x64KiB-whole-cryptcheck-1|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-1000x64KiB-whole-cryptcheck-2|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-1000x64KiB-subset-1-files-from-raw|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-1000x64KiB-subset-10-files-from-raw|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-1000x64KiB-subset-1-include|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-1000x64KiB-old-push-immutable-size-only|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-4000x64KiB-first-upload|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-4000x64KiB-recursive-listing|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-4000x64KiB-manifest-publish|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-4000x64KiB-manifest-cat|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-4000x64KiB-whole-cryptcheck-1|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-4000x64KiB-whole-cryptcheck-2|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-4000x64KiB-subset-1-files-from-raw|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-4000x64KiB-subset-10-files-from-raw|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-4000x64KiB-subset-1-include|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-4000x64KiB-old-push-immutable-size-only|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-8x32768KiB-first-upload|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-8x32768KiB-recursive-listing|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-8x32768KiB-manifest-publish|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-8x32768KiB-manifest-cat|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-8x32768KiB-whole-cryptcheck-1|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-8x32768KiB-whole-cryptcheck-2|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-8x32768KiB-subset-1-files-from-raw|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-8x32768KiB-subset-10-files-from-raw|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-8x32768KiB-subset-1-include|HARNESS|PASS|expected=rc 0|actual=rc 0
+LABEL|cost|hc-8x32768KiB-old-push-immutable-size-only|HARNESS|PASS|expected=rc 0|actual=rc 0
+PROOF-RESULT cost PRODUCT=[] HARNESS=[]
+
+=== FINDINGS (Task 1, rclone v1.75.1, S3 double, crypt remote) ===
+Run: the final full run above (3 passed, 0 skipped, TRADING_CI_STRICT=1). Harness fixes used: 1 of 2 (see HARNESS-FIX 1 below).
+
+HOW cryptcheck WORKS HERE (from its own help text and the transcript): it reads the nonce from each remote
+object, encrypts the local file with that nonce and compares the MD5 of the underlying S3 object with the MD5
+of what it just encrypted. This only works because the underlying remote reports MD5 (the double does).
+Real S3 multipart objects (rclone --s3-upload-cutoff default 200Mi) do not carry an MD5 ETag: NOT covered by
+this proof (largest object here is 32 MiB); this is the reason D064 demands the real-S3 stage (Task 4).
+
+FINAL ARGV (LOCAL = the local parquet directory of the bundle, LIST = a list file, one relative path per line, LF):
+  WHOLE          cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way
+                 base form: the DEFAULT output of a failing WHOLE already names the differing or missing path
+                 (OBS[p1] True for a1), so no report flag is needed; a1f and c2f were therefore not required.
+  SUBSET (F1)    cryptcheck LOCAL BACKUPS3CRYPT:parquet --one-way --files-from-raw LIST
+                 (s1+s2 hold for the plain and the hive path; F2 `--include /<path>` also holds, s3+s4)
+  UPLOAD         copy LOCAL BACKUPS3CRYPT:parquet --files-from-raw LIST --immutable
+  LIST           lsf -R --files-only BACKUPS3CRYPT:parquet/
+  CAT            cat BACKUPS3CRYPT:snapshots/<id>/manifest.json
+  CHECK-MANIFEST cryptcheck BUNDLE BACKUPS3CRYPT:snapshots/<id> --include /manifest.json
+  CHECK-PG       cryptcheck BUNDLE BACKUPS3CRYPT:snapshots/<id> --include /pg.dump
+                 (this exact form is the one the existing test_push_list_pull_cryptcheck_... already runs against the
+                 double; the pg.dump form itself was not re-run in this proof, only the manifest form M1/M2)
+  DELETE         deletefile BACKUPS3CRYPT:snapshots/<id>/manifest.json
+
+EXIT CODES
+  failing check (a1 a2 a3 b1 b2 b3 b4 c1 c2, subset bad, m2, o1 without --one-way): 1
+  passing check: 0
+  copy --immutable of an existing path whose local mtime changed (OBS o4): 6, line
+    "ERROR : raw/a.parquet: Source and destination exist but do not match: immutable file modified"
+  lsf of a missing directory: 3, stdout empty, line "Failed to lsf: error in ListJSON: directory not found"
+  deletefile of a path that does not exist: 4, lines "... is a directory or doesn't exist: object not found"
+    (rclone retries it 3 times: Attempt 1/3, 2/3, 3/3, then "Failed to deletefile")
+
+OUTPUT LINES THAT NAME THE PATH
+  same size changed (a1 a2 b1 b3):  ERROR : raw/a.parquet: hashes differ (BACKUPS3CRYPT{..}:parquet) "<md5>" vs (local:/mnt/m0) "<md5>"
+  different size (a3):               ERROR : raw/a.parquet: sizes differ
+  header/body garbage (b2 b4 m2):   ERROR : raw/a.parquet: error computing hash: failed to open object to read nonce: not an encrypted file - bad magic string
+  missing on remote (c1 c2):        ERROR : raw/b.parquet: file not in Encrypted drive 'BACKUPS3CRYPT{..}:parquet'
+  remote-only extra without --one-way (o1): ERROR : raw/z.parquet: file not in Local file system at /mnt/m0
+  summary line of every failure:    NOTICE: Failed to cryptcheck: 1 differences found   (or "... with 2 errors: last error was: ...")
+  --differ - prints the bare path "raw/a.parquet" on stdout; --combined - prints "= path" / "* path" lines;
+  --missing-on-dst - and --error - print nothing on stdout for a hash difference.
+
+OTHER FACTS
+  ciphertext overhead: 48 bytes per object for plaintexts up to 64 KiB (32 header + 16 per 64 KiB block); 8224 for 32 MiB
+  out-of-band visibility: a same-size body rewrite and a whole-object rewrite are visible through the server at once
+    (raw lsf shows same size, different hash); an out-of-band removal is NOT visible until the server container is
+    restarted (its directory listing is cached): that was HARNESS-FIX 1.
+  without --one-way a remote-only extra file fails the check (rc 1); with --one-way it passes (e1).
+  `check --size-only --one-way` passes a same-size change (h1) and the old `copy --immutable --size-only` exits 0 and
+  leaves the remote with the old bytes (h2): the old behaviour is reproduced by the controls.
+  U1/U2: copy --files-from-raw uploads exactly the listed files and leaves earlier objects identical.
+  L1: lsf prints decrypted relative file paths only (hive paths with = included), in arbitrary order.
+  CAT1: cat returns exactly the manifest text. M3: deletefile removes only that one object (4 -> 3 server objects),
+  list_complete_snapshots then returns only the other snapshot, the pg.dump of the snapshot stays, the other manifest
+  still passes its cryptcheck. The temporary-name-plus-rename alternative was NOT proven and NOT used.
+
+HARNESS-FIX 1 (of at most 2): after the first clean run only HARNESS[h3] failed, for arm C1 (the server still listed an
+  object removed out of band, docker exec rc 0). Fix: restart the server container after the out-of-band removal and
+  wait until a raw lsf works (switch _PROOF_RESTART_SERVER_AFTER_OOB, applied to arm C1 only). After it h3 holds for B1, B2
+  and C1 and no HARNESS label failed. No second fix was needed. h3 is therefore satisfied: NO deviation from SPEC line 35.
+
+COST (double, not real S3; Docker Desktop on WSL2, bind mounts, one docker run per rclone call, 16 CPUs, no network latency;
+  median docker run rclone version = 0.76 s is the per-call floor). Seconds, final run:
+  tier             files  file size  plaintext   ciphertext  manifest  first upload  lsf -R  manifest put  cat   WHOLE-1  WHOLE-2  subset1  subset10  subset1(--include)  old push step
+  250 x 64 KiB      250   64 KiB     16.4 MB     16.4 MB     35835 B   1.85          1.10    1.10          1.03  1.56     1.57     1.32     1.35      1.11                2.15
+  1000 x 64 KiB    1000   64 KiB     65.5 MB     65.6 MB    143085 B   4.37          1.08    1.02          1.16  2.64     2.82     1.08     1.19      1.06                1.91
+  4000 x 64 KiB    4000   64 KiB    262.1 MB    262.3 MB    572085 B  13.80          1.43    1.04          0.94  7.58     7.65     1.37     1.62      1.35                5.43
+  8 x 32 MiB          8   32 MiB    268.4 MB    268.5 MB      1229 B   2.42          0.77    0.81          0.78  1.71     1.57     1.18     1.51      1.08                0.82
+  local verify_bundle: 0.23 / 0.96 / 3.78 / 0.53 s; staging with backup(): 1.60 / 6.77 / 29.38 / 1.04 s
+  growth (observations only, no thresholds, no extrapolation): WHOLE-1 1.56 -> 2.64 -> 7.58 s for 250 -> 1000 -> 4000 files
+    (ratios 1.70 and 2.87 for factors of 4); per file 6.2 / 2.6 / 1.9 ms; first upload 7.4 / 4.4 / 3.5 ms per file;
+    old push step 2.15 / 1.91 / 5.43 s. The 4000 -> 8 row printed above is a change of shape (few large files), not a growth step.
+  client container during WHOLE-1 (docker stats, 1 s sampling, 1-2 samples because the check is short):
+    1000 tier: peak CPU 198.0%, peak memory 34.7 MiB, last NetIO 2.44MB / 1.5MB, last BlockIO 53.2kB / 0B
+    4000 tier: peak CPU 204.2%, peak memory 36.8 MiB, last NetIO 7.7MB / 4.61MB, last BlockIO 12.3kB / 0B
+    250 and 8 file tiers: not observable (the check ended before the first sample)
+  No operation ran longer than 30 minutes, no tier was skipped, and no time limit was set or implied.
+
+PRODUCT LABELS (all PASS in the final run): d1 d2 a1 a2 a3 b1 b2 b3 b4 c1 c2 e1 s1 s2 s3 s4 s-pair u1 u2 l1 l2 cat1 m1 m2 m3
+HARNESS LABELS (all PASS in the final run): h0 h1 h2 h3(B1 B2 C1) h5 h6 h7 h8 h9-plain h9-hive h10 h11 h12 h13
+OBS: o1 (rc 1 without --one-way), o3 (overhead 48), o4 (rc 6), m4 (rc 4), p1, form (F1), final (WHOLE base form)
+
+PROOF-OUTCOME: PASS
