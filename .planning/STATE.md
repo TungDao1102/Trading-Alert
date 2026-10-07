@@ -526,13 +526,13 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 - EC2 creation date: not set. The host is an AWS EC2 instance in ap-southeast-1 (Singapore), chosen 2026-10-07 (D061); until it exists the collector runs on a dev machine (`.planning/phases/13.1-deployment-ci/13.1-CONTEXT.md`, 13.1-OPEN-DECISIONS UAT 8-10, D042, D050, D061).
 - Container registry push and deploy on tag: needs a registry and VPS decision; no owner phase (`13.1-CONTEXT.md` Deferred Ideas, D050).
 - Legacy Parquet partitions with a different Decimal scale: repair is optional, operator decision, no deadline (`.planning/phases/13-research-data-foundation-fixes/deferred-items.md` item 3, `scripts/repair_parquet_scale.py`).
-- Phase 13.1 WR-05 (decided 2026-10-07, D062: `trading` joins sudo; implementation in Phase 16) and CR-01 (decided, D062: `--checksum` on the Parquet push; implementation in Phase 16) are decided; WR-06 (split `env_file` per service; ROADMAP Phase 24 G3-029) is still open and must precede any live key: `.planning/phases/13.1-deployment-ci/13.1-OPEN-DECISIONS.md`.
+- Phase 13.1 WR-05 is implemented (commit 7148528, D062); CR-01 is replaced by D064 (manifest comparison plus post-upload `cryptcheck`; a real rclone run showed that `--checksum` falls back to `--size-only` on a crypt remote) and its implementation is a quick task with the proof first, before the first real backup; WR-06 (split `env_file` per service; ROADMAP Phase 24 G3-029) is still open and must precede any live key: `.planning/phases/13.1-deployment-ci/13.1-OPEN-DECISIONS.md`.
 - Values of the reconcile cadence, stale-feed and WS-silence thresholds (T-06) and the WR-07 ordering rules (G2-026): ROADMAP Phase 20.
 - Sibling-approval expiry rule for `uq_approvals_one_decided_per_plan`: ROADMAP Phase 23 item G4-042.
 - `asyncio.to_thread` or an async pool for the synchronous PostgreSQL store, or a recorded decision: ROADMAP Phase 24 item G4-040.
 - Research-gate as a required status check on master, or a recorded waiver: ROADMAP Phase 26 item G1-001.
 - Phase 16 open items (D061): the durable location for `pinned_epoch.json` and `registry_diff.jsonl` (the plan proposes, the user approves) and the closure-chain checkpoints (hypothesis and parameter grid approval, research run authorization, exact-hash allowlist entry) decided when Phase 16 executes; the paper exit values were ratified on 2026-10-07 (D061 item D).
-- Decided 2026-10-07 and removed from this list: freeze-check host, per-bar parity and kill-gate WR timing (D061 items A, B, F), the plan that carries protocol v2.1.0 (done, D060) and WR-05 and CR-01 (D062).
+- Decided 2026-10-07 and removed from this list: freeze-check host, per-bar parity and kill-gate WR timing (D061 items A, B, F), the plan that carries protocol v2.1.0 (done, D060) and WR-05 (implemented) and the CR-01 decision (replaced by D064).
 
 ## Commitments with dates
 

@@ -51,7 +51,7 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 - [ ] **PAPER-01**: Realtime paper engine ingests WS market data with warm-up/reconnect/resync, evaluates closed candles only, and journals gaps without fabricating signals *(Originally mapped to Phase 7; Phase 16 closes it when Phase 16 criteria 1, 2 and 7 hold, D061 item J.)*
 - [ ] **PAPER-02**: Paper loop records system vs user-executed vs opportunity (skipped/expired) attribution with signal/approve/order/fill timestamps *(Originally mapped to Phase 7; Phase 16 closes it when Phase 16 criteria 3 and 5 hold, D061 item J.)*
-- [ ] **PAPER-03**: Forward evidence accumulates over wall-clock observation (3–6 months envelope) with no tuning on the paper stream *(Originally mapped to Phase 7. D061 item J: Phase 16 starts the stream with a trial soak and leaves this Pending; the long soak keeps accumulating through Phases 18 to 25 and Phase 26 verifies the observation window and the no-tuning rule and closes it. Closing it on a trial soak would be false against the text above.)*
+- [ ] **PAPER-03**: Forward evidence accumulates over wall-clock observation (3–6 months envelope) with no tuning on the paper stream *(Originally mapped to Phase 7. D061 item J: Phase 16 starts the stream with a trial soak and leaves this Pending; the long soak keeps accumulating through Phases 18 to 25 and Phase 26 verifies the observation window and the no-tuning rule and closes it. Closing it on a trial soak would be false against the text above. Test events (D063 item 3), planned restarts and gaps never count as covered time or as forward evidence.)*
 
 ### Approval
 
@@ -180,3 +180,4 @@ Evidence levels (a requirement can sit at any one; they do not imply each other)
 *Requirements defined: 2026-09-19 after initialization*
 *Last updated: 2026-09-30 after Phase 11 (F-116 additions: 13 requirement IDs registered, mapped to phases 13-26)*
 *Evidence-level review 2026-10-07: EXEC-01, EXEC-02, OPS-01, OPS-02 set to Pending; BKTS-03 re-mapped to Phase 16; OPS-06 owners noted*
+*D063 and D065 notes 2026-10-07: PAPER-03 wording clarified (test events, planned restarts and gaps are never evidence); no requirement status changed*
