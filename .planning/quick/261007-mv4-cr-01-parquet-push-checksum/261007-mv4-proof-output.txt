@@ -1,0 +1,540 @@
+
+##### arm=immutable-only step=N rc=0 copied=True seconds=1.1 plain=False
+t-4f36a385/ndn7mj2en9ios2g4sempcabrpc"
+2026/10/07 10:08:48 DEBUG : fs cache: renaming cache item "BACKUPS3CRYPT:parquet" to be canonical "BACKUPS3CRYPT{G76qD}:parquet"
+2026/10/07 10:08:48 DEBUG : raw/a.parquet: Need to transfer - File not found at Destination
+2026/10/07 10:08:48 DEBUG : raw/b.parquet: Need to transfer - File not found at Destination
+2026/10/07 10:08:48 DEBUG : Encrypted drive 'BACKUPS3CRYPT{G76qD}:parquet': Waiting for checks to finish
+2026/10/07 10:08:48 DEBUG : Encrypted drive 'BACKUPS3CRYPT{G76qD}:parquet': Waiting for transfers to finish
+2026/10/07 10:08:48 INFO  : S3 bucket bkt-4f36a385 path ndn7mj2en9ios2g4sempcabrpc: Bucket "bkt-4f36a385" created with ACL ""
+2026/10/07 10:08:48 DEBUG : raw/b.parquet: Computing md5 hash of encrypted source
+2026/10/07 10:08:48 DEBUG : raw/a.parquet: Computing md5 hash of encrypted source
+2026/10/07 10:08:48 DEBUG : raw/a.parquet: md5 = e08c609dc282b0c1da72353b7cf20751 OK
+2026/10/07 10:08:48 DEBUG : raw/b.parquet: md5 = a78ddc90068ec86c2143265dd5ce6915 OK
+2026/10/07 10:08:48 DEBUG : raw/a.parquet: size = 1200 OK
+2026/10/07 10:08:48 DEBUG : raw/b.parquet: size = 1200 OK
+2026/10/07 10:08:48 INFO  : raw/a.parquet: Copied (new)
+2026/10/07 10:08:48 INFO  : raw/b.parquet: Copied (new)
+2026/10/07 10:08:48 INFO  : 
+Transferred:   	    2.438 KiB / 2.438 KiB, 100%, 0 B/s, ETA -
+Checks:                 0 / 0, -, Listed 3
+Transferred:            2 / 2, 100%
+Elapsed time:         0.0s
+
+2026/10/07 10:08:48 DEBUG : 7 go routines active
+
+#####
+
+##### arm=immutable-only step=U rc=6 copied=False seconds=1.0 plain=False
+me "BACKUPS3{3zSdM}:bkt-4f36a385/ndn7mj2en9ios2g4sempcabrpc"
+2026/10/07 10:08:53 DEBUG : fs cache: renaming cache item "BACKUPS3CRYPT:parquet" to be canonical "BACKUPS3CRYPT{G76qD}:parquet"
+2026/10/07 10:08:53 DEBUG : raw/a.parquet: size = 1200 OK
+2026/10/07 10:08:53 DEBUG : raw/b.parquet: size = 1200 OK
+2026/10/07 10:08:53 DEBUG : Encrypted drive 'BACKUPS3CRYPT{G76qD}:parquet': Waiting for checks to finish
+2026/10/07 10:08:53 DEBUG : raw/a.parquet: Modification times differ by -2160h0m0s: 2027-01-05 10:08:48.1374591 +0000 UTC, 2026-10-07 10:08:48.1374591 +0000 UTC
+2026/10/07 10:08:53 ERROR : raw/a.parquet: Source and destination exist but do not match: immutable file modified
+2026/10/07 10:08:53 DEBUG : raw/b.parquet: Modification times differ by -2160h0m0s: 2027-01-05 10:08:48.1385102 +0000 UTC, 2026-10-07 10:08:48.1385102 +0000 UTC
+2026/10/07 10:08:53 ERROR : raw/b.parquet: Source and destination exist but do not match: immutable file modified
+2026/10/07 10:08:53 DEBUG : Encrypted drive 'BACKUPS3CRYPT{G76qD}:parquet': Waiting for transfers to finish
+2026/10/07 10:08:53 ERROR : Can't retry any of the errors - not attempting retries
+2026/10/07 10:08:53 INFO  : 
+Transferred:   	          0 B / 0 B, -, 0 B/s, ETA -
+Errors:                 2 (no need to retry)
+Checks:                 2 / 2, 100%, Listed 6
+Elapsed time:         0.0s
+
+2026/10/07 10:08:53 DEBUG : 7 go routines active
+2026/10/07 10:08:53 NOTICE: Failed to copy with 2 errors: last error was: immutable file modified
+
+#####
+
+##### arm=immutable-only step=Z rc=0 copied=True seconds=1.0 plain=False
+name "BACKUPS3{3zSdM}:bkt-4f36a385/ndn7mj2en9ios2g4sempcabrpc"
+2026/10/07 10:08:55 DEBUG : fs cache: renaming cache item "BACKUPS3CRYPT:parquet" to be canonical "BACKUPS3CRYPT{G76qD}:parquet"
+2026/10/07 10:08:55 DEBUG : raw/a.parquet: size = 1200 OK
+2026/10/07 10:08:55 DEBUG : raw/b.parquet: size = 1200 OK
+2026/10/07 10:08:55 DEBUG : raw/c.parquet: Need to transfer - File not found at Destination
+2026/10/07 10:08:55 DEBUG : Encrypted drive 'BACKUPS3CRYPT{G76qD}:parquet': Waiting for checks to finish
+2026/10/07 10:08:55 DEBUG : raw/a.parquet: Size and modification time the same (differ by 0s, within tolerance 1ns)
+2026/10/07 10:08:55 DEBUG : raw/a.parquet: Unchanged skipping
+2026/10/07 10:08:55 DEBUG : raw/b.parquet: Size and modification time the same (differ by 0s, within tolerance 1ns)
+2026/10/07 10:08:55 DEBUG : raw/b.parquet: Unchanged skipping
+2026/10/07 10:08:55 DEBUG : Encrypted drive 'BACKUPS3CRYPT{G76qD}:parquet': Waiting for transfers to finish
+2026/10/07 10:08:55 DEBUG : raw/c.parquet: Computing md5 hash of encrypted source
+2026/10/07 10:08:55 DEBUG : raw/c.parquet: md5 = cdbc790887be8ee7d6cbcb94da58c067 OK
+2026/10/07 10:08:55 DEBUG : raw/c.parquet: size = 1200 OK
+2026/10/07 10:08:55 INFO  : raw/c.parquet: Copied (new)
+2026/10/07 10:08:55 INFO  : 
+Transferred:   	    1.219 KiB / 1.219 KiB, 100%, 0 B/s, ETA -
+Checks:                 2 / 2, 100%, Listed 7
+Transferred:            1 / 1, 100%
+Elapsed time:         0.0s
+
+2026/10/07 10:08:55 DEBUG : 7 go routines active
+
+#####
+
+##### arm=immutable-only step=X rc=0 copied=False seconds=1.1 plain=False
+07 10:08:57 DEBUG : fs cache: switching user supplied name "BACKUPS3:bkt-4f36a385/ndn7mj2en9ios2g4sempcabrpc" for canonical name "BACKUPS3{3zSdM}:bkt-4f36a385/ndn7mj2en9ios2g4sempcabrpc"
+2026/10/07 10:08:57 DEBUG : fs cache: renaming cache item "BACKUPS3CRYPT:parquet" to be canonical "BACKUPS3CRYPT{G76qD}:parquet"
+2026/10/07 10:08:57 DEBUG : raw/a.parquet: size = 1200 OK
+2026/10/07 10:08:57 DEBUG : raw/b.parquet: size = 1200 OK
+2026/10/07 10:08:57 DEBUG : raw/c.parquet: size = 1200 OK
+2026/10/07 10:08:57 DEBUG : Encrypted drive 'BACKUPS3CRYPT{G76qD}:parquet': Waiting for checks to finish
+2026/10/07 10:08:57 DEBUG : raw/b.parquet: Size and modification time the same (differ by 0s, within tolerance 1ns)
+2026/10/07 10:08:57 DEBUG : raw/b.parquet: Unchanged skipping
+2026/10/07 10:08:57 DEBUG : raw/c.parquet: Size and modification time the same (differ by 0s, within tolerance 1ns)
+2026/10/07 10:08:57 DEBUG : raw/c.parquet: Unchanged skipping
+2026/10/07 10:08:57 DEBUG : raw/a.parquet: Size and modification time the same (differ by 0s, within tolerance 1ns)
+2026/10/07 10:08:57 DEBUG : raw/a.parquet: Unchanged skipping
+2026/10/07 10:08:57 DEBUG : Encrypted drive 'BACKUPS3CRYPT{G76qD}:parquet': Waiting for transfers to finish
+2026/10/07 10:08:57 INFO  : There was nothing to transfer
+2026/10/07 10:08:57 INFO  : 
+Transferred:   	          0 B / 0 B, -, 0 B/s, ETA -
+Checks:                 3 / 3, 100%, Listed 8
+Elapsed time:         0.0s
+
+2026/10/07 10:08:57 DEBUG : 9 go routines active
+
+#####
+
+##### arm=immutable-only step=Y rc=6 copied=False seconds=1.0 plain=False
+ache item "BACKUPS3CRYPT:parquet" to be canonical "BACKUPS3CRYPT{G76qD}:parquet"
+2026/10/07 10:08:59 DEBUG : raw/a.parquet: size = 1200 OK
+2026/10/07 10:08:59 DEBUG : raw/b.parquet: size = 1200 OK
+2026/10/07 10:08:59 DEBUG : Encrypted drive 'BACKUPS3CRYPT{G76qD}:parquet': Waiting for checks to finish
+2026/10/07 10:08:59 DEBUG : raw/c.parquet: size = 1200 OK
+2026/10/07 10:08:59 DEBUG : raw/a.parquet: Modification times differ by -2160h0m0s: 2027-01-05 10:08:48.1374591 +0000 UTC, 2026-10-07 10:08:48.1374591 +0000 UTC
+2026/10/07 10:08:59 ERROR : raw/a.parquet: Source and destination exist but do not match: immutable file modified
+2026/10/07 10:08:59 DEBUG : raw/c.parquet: Size and modification time the same (differ by 0s, within tolerance 1ns)
+2026/10/07 10:08:59 DEBUG : raw/c.parquet: Unchanged skipping
+2026/10/07 10:08:59 DEBUG : raw/b.parquet: Size and modification time the same (differ by 0s, within tolerance 1ns)
+2026/10/07 10:08:59 DEBUG : raw/b.parquet: Unchanged skipping
+2026/10/07 10:08:59 DEBUG : Encrypted drive 'BACKUPS3CRYPT{G76qD}:parquet': Waiting for transfers to finish
+2026/10/07 10:08:59 ERROR : Can't retry any of the errors - not attempting retries
+2026/10/07 10:08:59 INFO  : 
+Transferred:   	          0 B / 0 B, -, 0 B/s, ETA -
+Errors:                 1 (no need to retry)
+Checks:                 3 / 3, 100%, Listed 8
+Elapsed time:         0.0s
+
+2026/10/07 10:08:59 DEBUG : 8 go routines active
+2026/10/07 10:08:59 NOTICE: Failed to copy: immutable file modified
+
+#####
+
+##### arm=immutable-only violated expectations: []
+.
+##### arm=size-only step=N rc=0 copied=True seconds=1.0 plain=False
+t-61e4535a/a76os8lslc1l983ab0k81tvpds"
+2026/10/07 10:09:03 DEBUG : fs cache: renaming cache item "BACKUPS3CRYPT:parquet" to be canonical "BACKUPS3CRYPT{uDrxh}:parquet"
+2026/10/07 10:09:03 DEBUG : raw/a.parquet: Need to transfer - File not found at Destination
+2026/10/07 10:09:03 DEBUG : raw/b.parquet: Need to transfer - File not found at Destination
+2026/10/07 10:09:03 DEBUG : Encrypted drive 'BACKUPS3CRYPT{uDrxh}:parquet': Waiting for checks to finish
+2026/10/07 10:09:03 DEBUG : Encrypted drive 'BACKUPS3CRYPT{uDrxh}:parquet': Waiting for transfers to finish
+2026/10/07 10:09:03 INFO  : S3 bucket bkt-61e4535a path a76os8lslc1l983ab0k81tvpds: Bucket "bkt-61e4535a" created with ACL ""
+2026/10/07 10:09:03 DEBUG : raw/a.parquet: Computing md5 hash of encrypted source
+2026/10/07 10:09:03 DEBUG : raw/b.parquet: Computing md5 hash of encrypted source
+2026/10/07 10:09:03 DEBUG : raw/a.parquet: md5 = 62a329b4e1dcabb2ded03598ea720763 OK
+2026/10/07 10:09:03 DEBUG : raw/a.parquet: size = 1200 OK
+2026/10/07 10:09:03 INFO  : raw/a.parquet: Copied (new)
+2026/10/07 10:09:03 DEBUG : raw/b.parquet: md5 = bfab078925acb8f18404ac155c37d61a OK
+2026/10/07 10:09:03 DEBUG : raw/b.parquet: size = 1200 OK
+2026/10/07 10:09:03 INFO  : raw/b.parquet: Copied (new)
+2026/10/07 10:09:03 INFO  : 
+Transferred:   	    2.438 KiB / 2.438 KiB, 100%, 0 B/s, ETA -
+Checks:                 0 / 0, -, Listed 3
+Transferred:            2 / 2, 100%
+Elapsed time:         0.0s
+
+2026/10/07 10:09:03 DEBUG : 7 go routines active
+
+#####
+
+##### arm=size-only step=U rc=0 copied=False seconds=1.0 plain=False
+BACKUPS3_REGION
+2026/10/07 10:09:07 DEBUG : Setting endpoint="http://172.17.0.2:9000" for "BACKUPS3" from environment variable RCLONE_CONFIG_BACKUPS3_ENDPOINT
+2026/10/07 10:09:07 DEBUG : fs cache: renaming cache item "BACKUPS3:bkt-61e4535a/a76os8lslc1l983ab0k81tvpds" to be canonical "BACKUPS3{3zSdM}:bkt-61e4535a/a76os8lslc1l983ab0k81tvpds"
+2026/10/07 10:09:07 DEBUG : fs cache: switching user supplied name "BACKUPS3:bkt-61e4535a/a76os8lslc1l983ab0k81tvpds" for canonical name "BACKUPS3{3zSdM}:bkt-61e4535a/a76os8lslc1l983ab0k81tvpds"
+2026/10/07 10:09:07 DEBUG : fs cache: renaming cache item "BACKUPS3CRYPT:parquet" to be canonical "BACKUPS3CRYPT{uDrxh}:parquet"
+2026/10/07 10:09:07 DEBUG : raw/a.parquet: size = 1200 OK
+2026/10/07 10:09:07 DEBUG : raw/a.parquet: Sizes identical
+2026/10/07 10:09:07 DEBUG : raw/a.parquet: Unchanged skipping
+2026/10/07 10:09:07 DEBUG : raw/b.parquet: size = 1200 OK
+2026/10/07 10:09:07 DEBUG : raw/b.parquet: Sizes identical
+2026/10/07 10:09:07 DEBUG : raw/b.parquet: Unchanged skipping
+2026/10/07 10:09:07 DEBUG : Encrypted drive 'BACKUPS3CRYPT{uDrxh}:parquet': Waiting for checks to finish
+2026/10/07 10:09:07 DEBUG : Encrypted drive 'BACKUPS3CRYPT{uDrxh}:parquet': Waiting for transfers to finish
+2026/10/07 10:09:07 INFO  : There was nothing to transfer
+2026/10/07 10:09:07 INFO  : 
+Transferred:   	          0 B / 0 B, -, 0 B/s, ETA -
+Checks:                 2 / 2, 100%, Listed 6
+Elapsed time:         0.0s
+
+2026/10/07 10:09:07 DEBUG : 5 go routines active
+
+#####
+
+##### arm=size-only step=Z rc=0 copied=True seconds=1.0 plain=False
+9 DEBUG : fs cache: switching user supplied name "BACKUPS3:bkt-61e4535a/a76os8lslc1l983ab0k81tvpds" for canonical name "BACKUPS3{3zSdM}:bkt-61e4535a/a76os8lslc1l983ab0k81tvpds"
+2026/10/07 10:09:09 DEBUG : fs cache: renaming cache item "BACKUPS3CRYPT:parquet" to be canonical "BACKUPS3CRYPT{uDrxh}:parquet"
+2026/10/07 10:09:09 DEBUG : raw/c.parquet: Need to transfer - File not found at Destination
+2026/10/07 10:09:09 DEBUG : raw/a.parquet: size = 1200 OK
+2026/10/07 10:09:09 DEBUG : raw/a.parquet: Sizes identical
+2026/10/07 10:09:09 DEBUG : raw/a.parquet: Unchanged skipping
+2026/10/07 10:09:09 DEBUG : raw/b.parquet: size = 1200 OK
+2026/10/07 10:09:09 DEBUG : Encrypted drive 'BACKUPS3CRYPT{uDrxh}:parquet': Waiting for checks to finish
+2026/10/07 10:09:09 DEBUG : raw/b.parquet: Sizes identical
+2026/10/07 10:09:09 DEBUG : raw/b.parquet: Unchanged skipping
+2026/10/07 10:09:09 DEBUG : Encrypted drive 'BACKUPS3CRYPT{uDrxh}:parquet': Waiting for transfers to finish
+2026/10/07 10:09:09 DEBUG : raw/c.parquet: Computing md5 hash of encrypted source
+2026/10/07 10:09:09 DEBUG : raw/c.parquet: md5 = 86a00c7e216d8a488d4f7d8a04d1f55c OK
+2026/10/07 10:09:09 DEBUG : raw/c.parquet: size = 1200 OK
+2026/10/07 10:09:09 INFO  : raw/c.parquet: Copied (new)
+2026/10/07 10:09:09 INFO  : 
+Transferred:   	    1.219 KiB / 1.219 KiB, 100%, 0 B/s, ETA -
+Checks:                 2 / 2, 100%, Listed 7
+Transferred:            1 / 1, 100%
+Elapsed time:         0.0s
+
+2026/10/07 10:09:09 DEBUG : 5 go routines active
+
+#####
+
+##### arm=size-only step=X rc=0 copied=False seconds=0.9 plain=False
+DEBUG : fs cache: renaming cache item "BACKUPS3:bkt-61e4535a/a76os8lslc1l983ab0k81tvpds" to be canonical "BACKUPS3{3zSdM}:bkt-61e4535a/a76os8lslc1l983ab0k81tvpds"
+2026/10/07 10:09:11 DEBUG : fs cache: switching user supplied name "BACKUPS3:bkt-61e4535a/a76os8lslc1l983ab0k81tvpds" for canonical name "BACKUPS3{3zSdM}:bkt-61e4535a/a76os8lslc1l983ab0k81tvpds"
+2026/10/07 10:09:11 DEBUG : fs cache: renaming cache item "BACKUPS3CRYPT:parquet" to be canonical "BACKUPS3CRYPT{uDrxh}:parquet"
+2026/10/07 10:09:11 DEBUG : raw/a.parquet: size = 1200 OK
+2026/10/07 10:09:11 DEBUG : raw/a.parquet: Sizes identical
+2026/10/07 10:09:11 DEBUG : raw/a.parquet: Unchanged skipping
+2026/10/07 10:09:11 DEBUG : raw/b.parquet: size = 1200 OK
+2026/10/07 10:09:11 DEBUG : raw/b.parquet: Sizes identical
+2026/10/07 10:09:11 DEBUG : raw/b.parquet: Unchanged skipping
+2026/10/07 10:09:11 DEBUG : Encrypted drive 'BACKUPS3CRYPT{uDrxh}:parquet': Waiting for checks to finish
+2026/10/07 10:09:11 DEBUG : raw/c.parquet: size = 1200 OK
+2026/10/07 10:09:11 DEBUG : raw/c.parquet: Sizes identical
+2026/10/07 10:09:11 DEBUG : raw/c.parquet: Unchanged skipping
+2026/10/07 10:09:11 DEBUG : Encrypted drive 'BACKUPS3CRYPT{uDrxh}:parquet': Waiting for transfers to finish
+2026/10/07 10:09:11 INFO  : There was nothing to transfer
+2026/10/07 10:09:11 INFO  : 
+Transferred:   	          0 B / 0 B, -, 0 B/s, ETA -
+Checks:                 3 / 3, 100%, Listed 8
+Elapsed time:         0.0s
+
+2026/10/07 10:09:11 DEBUG : 5 go routines active
+
+#####
+
+##### arm=size-only step=Y rc=0 copied=False seconds=1.0 plain=False
+DEBUG : fs cache: renaming cache item "BACKUPS3:bkt-61e4535a/a76os8lslc1l983ab0k81tvpds" to be canonical "BACKUPS3{3zSdM}:bkt-61e4535a/a76os8lslc1l983ab0k81tvpds"
+2026/10/07 10:09:13 DEBUG : fs cache: switching user supplied name "BACKUPS3:bkt-61e4535a/a76os8lslc1l983ab0k81tvpds" for canonical name "BACKUPS3{3zSdM}:bkt-61e4535a/a76os8lslc1l983ab0k81tvpds"
+2026/10/07 10:09:13 DEBUG : fs cache: renaming cache item "BACKUPS3CRYPT:parquet" to be canonical "BACKUPS3CRYPT{uDrxh}:parquet"
+2026/10/07 10:09:13 DEBUG : raw/a.parquet: size = 1200 OK
+2026/10/07 10:09:13 DEBUG : raw/a.parquet: Sizes identical
+2026/10/07 10:09:13 DEBUG : raw/a.parquet: Unchanged skipping
+2026/10/07 10:09:13 DEBUG : raw/c.parquet: size = 1200 OK
+2026/10/07 10:09:13 DEBUG : raw/c.parquet: Sizes identical
+2026/10/07 10:09:13 DEBUG : raw/b.parquet: size = 1200 OK
+2026/10/07 10:09:13 DEBUG : raw/b.parquet: Sizes identical
+2026/10/07 10:09:13 DEBUG : raw/b.parquet: Unchanged skipping
+2026/10/07 10:09:13 DEBUG : Encrypted drive 'BACKUPS3CRYPT{uDrxh}:parquet': Waiting for checks to finish
+2026/10/07 10:09:13 DEBUG : raw/c.parquet: Unchanged skipping
+2026/10/07 10:09:13 DEBUG : Encrypted drive 'BACKUPS3CRYPT{uDrxh}:parquet': Waiting for transfers to finish
+2026/10/07 10:09:13 INFO  : There was nothing to transfer
+2026/10/07 10:09:13 INFO  : 
+Transferred:   	          0 B / 0 B, -, 0 B/s, ETA -
+Checks:                 3 / 3, 100%, Listed 8
+Elapsed time:         0.0s
+
+2026/10/07 10:09:13 DEBUG : 5 go routines active
+
+#####
+
+##### arm=size-only violated expectations: []
+.
+##### arm=checksum step=N rc=0 copied=True seconds=0.9 plain=False
+t-628dd230/gkp6ue11kvmip94ad74vdtmflg"
+2026/10/07 10:09:17 DEBUG : fs cache: renaming cache item "BACKUPS3CRYPT:parquet" to be canonical "BACKUPS3CRYPT{z1Wlo}:parquet"
+2026/10/07 10:09:17 DEBUG : raw/a.parquet: Need to transfer - File not found at Destination
+2026/10/07 10:09:17 DEBUG : raw/b.parquet: Need to transfer - File not found at Destination
+2026/10/07 10:09:17 DEBUG : Encrypted drive 'BACKUPS3CRYPT{z1Wlo}:parquet': Waiting for checks to finish
+2026/10/07 10:09:17 DEBUG : Encrypted drive 'BACKUPS3CRYPT{z1Wlo}:parquet': Waiting for transfers to finish
+2026/10/07 10:09:17 INFO  : S3 bucket bkt-628dd230 path gkp6ue11kvmip94ad74vdtmflg: Bucket "bkt-628dd230" created with ACL ""
+2026/10/07 10:09:17 DEBUG : raw/b.parquet: Computing md5 hash of encrypted source
+2026/10/07 10:09:17 DEBUG : raw/b.parquet: md5 = 9b38e71e9b3bfa742a8583aed83ead6f OK
+2026/10/07 10:09:17 DEBUG : raw/b.parquet: size = 1200 OK
+2026/10/07 10:09:17 INFO  : raw/b.parquet: Copied (new)
+2026/10/07 10:09:17 DEBUG : raw/a.parquet: Computing md5 hash of encrypted source
+2026/10/07 10:09:17 DEBUG : raw/a.parquet: md5 = 2d9e378ea31bacd0417a85a3e8dbfec0 OK
+2026/10/07 10:09:17 DEBUG : raw/a.parquet: size = 1200 OK
+2026/10/07 10:09:17 INFO  : raw/a.parquet: Copied (new)
+2026/10/07 10:09:17 INFO  : 
+Transferred:   	    2.438 KiB / 2.438 KiB, 100%, 0 B/s, ETA -
+Checks:                 0 / 0, -, Listed 3
+Transferred:            2 / 2, 100%
+Elapsed time:         0.0s
+
+2026/10/07 10:09:17 DEBUG : 5 go routines active
+
+#####
+
+##### arm=checksum step=U rc=0 copied=False seconds=0.9 plain=False
+:bkt-628dd230/gkp6ue11kvmip94ad74vdtmflg" to be canonical "BACKUPS3{3zSdM}:bkt-628dd230/gkp6ue11kvmip94ad74vdtmflg"
+2026/10/07 10:09:21 DEBUG : fs cache: switching user supplied name "BACKUPS3:bkt-628dd230/gkp6ue11kvmip94ad74vdtmflg" for canonical name "BACKUPS3{3zSdM}:bkt-628dd230/gkp6ue11kvmip94ad74vdtmflg"
+2026/10/07 10:09:21 DEBUG : fs cache: renaming cache item "BACKUPS3CRYPT:parquet" to be canonical "BACKUPS3CRYPT{z1Wlo}:parquet"
+2026/10/07 10:09:21 DEBUG : raw/a.parquet: size = 1200 OK
+2026/10/07 10:09:21 NOTICE: Encrypted drive 'BACKUPS3CRYPT{z1Wlo}:parquet': --checksum is in use but the source and destination have no hashes in common; falling back to --size-only
+2026/10/07 10:09:21 DEBUG : raw/a.parquet: Size of src and dst objects identical
+2026/10/07 10:09:21 DEBUG : raw/a.parquet: Unchanged skipping
+2026/10/07 10:09:21 DEBUG : Encrypted drive 'BACKUPS3CRYPT{z1Wlo}:parquet': Waiting for checks to finish
+2026/10/07 10:09:21 DEBUG : raw/b.parquet: size = 1200 OK
+2026/10/07 10:09:21 DEBUG : raw/b.parquet: Size of src and dst objects identical
+2026/10/07 10:09:21 DEBUG : raw/b.parquet: Unchanged skipping
+2026/10/07 10:09:21 DEBUG : Encrypted drive 'BACKUPS3CRYPT{z1Wlo}:parquet': Waiting for transfers to finish
+2026/10/07 10:09:21 INFO  : There was nothing to transfer
+2026/10/07 10:09:21 INFO  : 
+Transferred:   	          0 B / 0 B, -, 0 B/s, ETA -
+Checks:                 2 / 2, 100%, Listed 6
+Elapsed time:         0.0s
+
+2026/10/07 10:09:21 DEBUG : 5 go routines active
+
+#####
+
+##### arm=checksum step=Z rc=0 copied=True seconds=1.0 plain=False
+che item "BACKUPS3CRYPT:parquet" to be canonical "BACKUPS3CRYPT{z1Wlo}:parquet"
+2026/10/07 10:09:23 DEBUG : raw/c.parquet: Need to transfer - File not found at Destination
+2026/10/07 10:09:23 DEBUG : raw/b.parquet: size = 1200 OK
+2026/10/07 10:09:23 DEBUG : Encrypted drive 'BACKUPS3CRYPT{z1Wlo}:parquet': Waiting for checks to finish
+2026/10/07 10:09:23 NOTICE: Encrypted drive 'BACKUPS3CRYPT{z1Wlo}:parquet': --checksum is in use but the source and destination have no hashes in common; falling back to --size-only
+2026/10/07 10:09:23 DEBUG : raw/b.parquet: Size of src and dst objects identical
+2026/10/07 10:09:23 DEBUG : raw/b.parquet: Unchanged skipping
+2026/10/07 10:09:23 DEBUG : raw/a.parquet: size = 1200 OK
+2026/10/07 10:09:23 DEBUG : raw/a.parquet: Size of src and dst objects identical
+2026/10/07 10:09:23 DEBUG : raw/a.parquet: Unchanged skipping
+2026/10/07 10:09:23 DEBUG : Encrypted drive 'BACKUPS3CRYPT{z1Wlo}:parquet': Waiting for transfers to finish
+2026/10/07 10:09:23 DEBUG : raw/c.parquet: Computing md5 hash of encrypted source
+2026/10/07 10:09:23 DEBUG : raw/c.parquet: md5 = c681dc97465a8a0a4c76257c45051009 OK
+2026/10/07 10:09:23 DEBUG : raw/c.parquet: size = 1200 OK
+2026/10/07 10:09:23 INFO  : raw/c.parquet: Copied (new)
+2026/10/07 10:09:23 INFO  : 
+Transferred:   	    1.219 KiB / 1.219 KiB, 100%, 0 B/s, ETA -
+Checks:                 2 / 2, 100%, Listed 7
+Transferred:            1 / 1, 100%
+Elapsed time:         0.0s
+
+2026/10/07 10:09:23 DEBUG : 5 go routines active
+
+#####
+
+##### arm=checksum step=X rc=0 copied=False seconds=1.0 plain=False
+d230/gkp6ue11kvmip94ad74vdtmflg" for canonical name "BACKUPS3{3zSdM}:bkt-628dd230/gkp6ue11kvmip94ad74vdtmflg"
+2026/10/07 10:09:25 DEBUG : fs cache: renaming cache item "BACKUPS3CRYPT:parquet" to be canonical "BACKUPS3CRYPT{z1Wlo}:parquet"
+2026/10/07 10:09:25 DEBUG : raw/c.parquet: size = 1200 OK
+2026/10/07 10:09:25 NOTICE: Encrypted drive 'BACKUPS3CRYPT{z1Wlo}:parquet': --checksum is in use but the source and destination have no hashes in common; falling back to --size-only
+2026/10/07 10:09:25 DEBUG : raw/c.parquet: Size of src and dst objects identical
+2026/10/07 10:09:25 DEBUG : raw/c.parquet: Unchanged skipping
+2026/10/07 10:09:25 DEBUG : raw/a.parquet: size = 1200 OK
+2026/10/07 10:09:25 DEBUG : raw/a.parquet: Size of src and dst objects identical
+2026/10/07 10:09:25 DEBUG : raw/a.parquet: Unchanged skipping
+2026/10/07 10:09:25 DEBUG : raw/b.parquet: size = 1200 OK
+2026/10/07 10:09:25 DEBUG : raw/b.parquet: Size of src and dst objects identical
+2026/10/07 10:09:25 DEBUG : raw/b.parquet: Unchanged skipping
+2026/10/07 10:09:25 DEBUG : Encrypted drive 'BACKUPS3CRYPT{z1Wlo}:parquet': Waiting for checks to finish
+2026/10/07 10:09:25 DEBUG : Encrypted drive 'BACKUPS3CRYPT{z1Wlo}:parquet': Waiting for transfers to finish
+2026/10/07 10:09:25 INFO  : There was nothing to transfer
+2026/10/07 10:09:25 INFO  : 
+Transferred:   	          0 B / 0 B, -, 0 B/s, ETA -
+Checks:                 3 / 3, 100%, Listed 8
+Elapsed time:         0.0s
+
+2026/10/07 10:09:25 DEBUG : 5 go routines active
+
+#####
+
+##### arm=checksum step=X-PLAIN rc=0 copied=False seconds=1.0 plain=True
+2026/10/07 10:09:27 NOTICE: Config file "/config/rclone/rclone.conf" not found - using defaults
+2026/10/07 10:09:27 NOTICE: Encrypted drive 'BACKUPS3CRYPT{z1Wlo}:parquet': --checksum is in use but the source and destination have no hashes in common; falling back to --size-only
+
+#####
+
+##### arm=checksum step=Y rc=0 copied=False seconds=1.0 plain=False
+d230/gkp6ue11kvmip94ad74vdtmflg" for canonical name "BACKUPS3{3zSdM}:bkt-628dd230/gkp6ue11kvmip94ad74vdtmflg"
+2026/10/07 10:09:29 DEBUG : fs cache: renaming cache item "BACKUPS3CRYPT:parquet" to be canonical "BACKUPS3CRYPT{z1Wlo}:parquet"
+2026/10/07 10:09:29 DEBUG : raw/c.parquet: size = 1200 OK
+2026/10/07 10:09:29 NOTICE: Encrypted drive 'BACKUPS3CRYPT{z1Wlo}:parquet': --checksum is in use but the source and destination have no hashes in common; falling back to --size-only
+2026/10/07 10:09:29 DEBUG : raw/c.parquet: Size of src and dst objects identical
+2026/10/07 10:09:29 DEBUG : raw/c.parquet: Unchanged skipping
+2026/10/07 10:09:29 DEBUG : raw/b.parquet: size = 1200 OK
+2026/10/07 10:09:29 DEBUG : raw/b.parquet: Size of src and dst objects identical
+2026/10/07 10:09:29 DEBUG : raw/b.parquet: Unchanged skipping
+2026/10/07 10:09:29 DEBUG : raw/a.parquet: size = 1200 OK
+2026/10/07 10:09:29 DEBUG : raw/a.parquet: Size of src and dst objects identical
+2026/10/07 10:09:29 DEBUG : raw/a.parquet: Unchanged skipping
+2026/10/07 10:09:29 DEBUG : Encrypted drive 'BACKUPS3CRYPT{z1Wlo}:parquet': Waiting for checks to finish
+2026/10/07 10:09:29 DEBUG : Encrypted drive 'BACKUPS3CRYPT{z1Wlo}:parquet': Waiting for transfers to finish
+2026/10/07 10:09:29 INFO  : There was nothing to transfer
+2026/10/07 10:09:29 INFO  : 
+Transferred:   	          0 B / 0 B, -, 0 B/s, ETA -
+Checks:                 3 / 3, 100%, Listed 8
+Elapsed time:         0.0s
+
+2026/10/07 10:09:29 DEBUG : 5 go routines active
+
+#####
+
+##### arm=checksum violated expectations: ['PRODUCT [checksum] step X: expected non-zero return code', "PRODUCT [checksum] step X: expected 'immutable' in an ERROR line", 'PRODUCT [checksum] step X-PLAIN: expected non-zero return code', 'PRODUCT [checksum] step Y: expected non-zero return code', "PRODUCT [checksum] step Y: expected 'immutable' in an ERROR line"]
+F
+================================== FAILURES ===================================
+___________ test_cr01_proof_checksum_on_the_crypt_remote[checksum] ____________
+
+s3_double = S3Double(server='t131-s3-59797cf1', address='172.17.0.2', access_key='1a13b4c4a5d886d69598', secret_key='3b6aa5225e0030f87f6073f5c7c3e25296369f8b')
+tmp_path = WindowsPath('C:/Users/admin/AppData/Local/Temp/pytest-of-Tungdd10/pytest-470/test_cr01_proof_checksum_on_th2')
+arm = 'checksum', extra = ['--checksum']
+
+    @pytest.mark.parametrize(
+        ("arm", "extra"),
+        [
+            pytest.param("immutable-only", [], id="immutable-only"),
+            pytest.param("size-only", ["--size-only"], id="size-only"),
+            pytest.param("checksum", ["--checksum"], id="checksum"),
+        ],
+    )
+    def test_cr01_proof_checksum_on_the_crypt_remote(
+        s3_double: S3Double, tmp_path: Path, arm: str, extra: list[str]
+    ) -> None:
+        bucket = s3_double.new_bucket()
+        env = s3_double.env_for(bucket, passphrase=secrets.token_hex(8), salt=secrets.token_hex(8))
+        runner = s3_double.runner(env)
+        local = tmp_path / "parquet"
+        (local / "raw").mkdir(parents=True)
+        originals: dict[str, tuple[bytes, int]] = {}
+    
+        def create(name: str, letter: str) -> None:
+            path = local / "raw" / name
+            path.write_bytes(letter.encode() * _PROOF_SIZE)
+            originals[name] = (path.read_bytes(), path.stat().st_mtime_ns)
+    
+        def reset_local() -> None:
+            for name, (data, mtime) in originals.items():
+                path = local / "raw" / name
+                path.write_bytes(data)
+                os.utime(path, ns=(mtime, mtime))
+    
+        def overwrite(name: str, letter: str, mtime_ns: int) -> None:
+            path = local / "raw" / name
+            path.write_bytes(letter.encode() * _PROOF_SIZE)
+            os.utime(path, ns=(mtime_ns, mtime_ns))
+    
+        def remote_a() -> str:
+            return runner(["cat", "BACKUPS3CRYPT:parquet/raw/a.parquet"], {}).stdout
+    
+        problems: list[str] = []
+    
+        def expect(ok: bool, label: str, step: str, what: str) -> None:
+            if not ok:
+                problems.append(f"{label} [{arm}] step {step}: expected {what}")
+    
+        def push(step: str, *, plain: bool = False) -> tuple[int, bool, str]:
+            argv = ["copy", str(local), "BACKUPS3CRYPT:parquet", "--immutable", *extra]
+            if not plain:
+                argv.append("-vv")
+            started = time.monotonic()
+            result = runner(argv, {})
+            seconds = time.monotonic() - started
+            copied = "Copied" in result.stderr
+            tail = result.stderr[-(400 if plain else 1500) :]
+            print(
+                f"\n##### arm={arm} step={step} rc={result.returncode} copied={copied} "
+                f"seconds={seconds:.1f} plain={plain}\n{tail}\n#####"
+            )
+            errors = " ".join(ln for ln in result.stderr.splitlines() if "ERROR" in ln).lower()
+            return result.returncode, copied, errors
+    
+        product = "PRODUCT" if arm == "checksum" else "HARNESS"
+        original_a = "A" * _PROOF_SIZE
+    
+        create("a.parquet", "A")
+        create("b.parquet", "B")
+        orig_a_mtime = originals["a.parquet"][1]
+    
+        # N: new files
+        rc, copied, _ = push("N")
+        expect(rc == 0, "HARNESS", "N", "return code 0")
+        expect(copied, "HARNESS", "N", "'Copied' in stderr")
+        expect(remote_a() == original_a, "HARNESS", "N", "remote a equals the original bytes")
+        objs_n = s3_double.objects(bucket)
+        expect(len(objs_n) >= 2, "HARNESS", "N", "at least two server objects")
+    
+        # U: mtime only
+        time.sleep(2)
+        for name in originals:
+            later = originals[name][1] + _DAYS_90_NS
+            os.utime(local / "raw" / name, ns=(later, later))
+        rc, copied, _ = push("U")
+        objs_u = s3_double.objects(bucket)
+        if arm == "immutable-only":
+            expect(rc != 0, "HARNESS", "U", "non-zero return code (the original CR-01 defect)")
+        elif arm == "size-only":
+            expect(rc == 0, "HARNESS", "U", "return code 0")
+            expect(not copied, "HARNESS", "U", "no 'Copied'")
+        else:
+            expect(rc == 0, product, "U", "return code 0")
+            expect(not copied, product, "U", "no 'Copied'")
+            expect(objs_u == objs_n, product, "U", "server objects identical to the set after N")
+        expect(remote_a() == original_a, product, "U", "remote a equals the original bytes")
+        reset_local()
+    
+        # Z: new file
+        create("c.parquet", "C")
+        rc, copied, _ = push("Z")
+        objs_z = s3_double.objects(bucket)
+        expect(rc == 0, product, "Z", "return code 0")
+        expect(copied, "HARNESS", "Z", "'Copied' in stderr")
+        expect(objs_n <= objs_z, product, "Z", "earlier objects unchanged")
+        expect(len(objs_z) == len(objs_n) + 1, product, "Z", "exactly one new object")
+        expect(remote_a() == original_a, product, "Z", "remote a equals the original bytes")
+        reset_local()
+    
+        # X: same size, different content, ORIGINAL mtime
+        overwrite("a.parquet", "X", orig_a_mtime)
+        rc, _, errors = push("X")
+        if arm == "size-only":
+            expect(rc == 0, "HARNESS", "X", "return code 0 (the silent skip)")
+        elif arm == "checksum":
+            expect(rc != 0, "PRODUCT", "X", "non-zero return code")
+            expect("immutable" in errors, "PRODUCT", "X", "'immutable' in an ERROR line")
+        expect(remote_a() == original_a, product, "X", "remote a equals the original bytes")
+        reset_local()
+    
+        if arm == "checksum":
+            overwrite("a.parquet", "X", orig_a_mtime)
+            rc, _, errors = push("X-PLAIN", plain=True)
+            expect(rc != 0, "PRODUCT", "X-PLAIN", "non-zero return code")
+            expect(remote_a() == original_a, "PRODUCT", "X-PLAIN", "remote a unchanged")
+            reset_local()
+    
+        # Y: same size, different content, NEW mtime
+        overwrite("a.parquet", "Y", orig_a_mtime + _DAYS_90_NS)
+        rc, _, errors = push("Y")
+        if arm == "size-only":
+            expect(rc == 0, "HARNESS", "Y", "return code 0 (the silent skip)")
+        elif arm == "checksum":
+            expect(rc != 0, "PRODUCT", "Y", "non-zero return code")
+            expect("immutable" in errors, "PRODUCT", "Y", "'immutable' in an ERROR line")
+        expect(remote_a() == original_a, product, "Y", "remote a equals the original bytes")
+        reset_local()
+    
+        print(f"\n##### arm={arm} violated expectations: {problems}")
+>       assert not problems, "; ".join(problems)
+E       AssertionError: PRODUCT [checksum] step X: expected non-zero return code; PRODUCT [checksum] step X: expected 'immutable' in an ERROR line; PRODUCT [checksum] step X-PLAIN: expected non-zero return code; PRODUCT [checksum] step Y: expected non-zero return code; PRODUCT [checksum] step Y: expected 'immutable' in an ERROR line
+E       assert not ['PRODUCT [checksum] step X: expected non-zero return code', "PRODUCT [checksum] step X: expected 'immutable' in an ER... [checksum] step Y: expected non-zero return code', "PRODUCT [checksum] step Y: expected 'immutable' in an ERROR line"]
+
+tests\test_docker_backup_remote.py:537: AssertionError
+=================================== PASSES ====================================
+=========================== short test summary info ===========================
+PASSED tests/test_docker_backup_remote.py::test_cr01_proof_checksum_on_the_crypt_remote[immutable-only]
+PASSED tests/test_docker_backup_remote.py::test_cr01_proof_checksum_on_the_crypt_remote[size-only]
+FAILED tests/test_docker_backup_remote.py::test_cr01_proof_checksum_on_the_crypt_remote[checksum]
+1 failed, 2 passed, 3 deselected in 49.87s

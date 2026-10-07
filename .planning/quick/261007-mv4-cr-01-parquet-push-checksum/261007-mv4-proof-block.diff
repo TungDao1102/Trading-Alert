@@ -1,0 +1,153 @@
+diff --git a/tests/test_docker_backup_remote.py b/tests/test_docker_backup_remote.py
+index 73ec819..135f3f2 100644
+--- a/tests/test_docker_backup_remote.py
++++ b/tests/test_docker_backup_remote.py
+@@ -393,3 +393,148 @@ def test_a_wrong_crypt_key_is_refused_by_every_operation(
+     _set_env(monkeypatch, good)
+     remote.check_sentinel(good_runner)  # the right key still works
+     assert remote.list_snapshots(good_runner) == [remote.snapshot_id(DAY1)]
++
++
++# --- CR-01 PROOF BEGIN (temporary, removed by Task 2) ---
++_PROOF_SIZE = 1200
++_DAYS_90_NS = 90 * 86_400 * 1_000_000_000
++
++
++@pytest.mark.parametrize(
++    ("arm", "extra"),
++    [
++        pytest.param("immutable-only", [], id="immutable-only"),
++        pytest.param("size-only", ["--size-only"], id="size-only"),
++        pytest.param("checksum", ["--checksum"], id="checksum"),
++    ],
++)
++def test_cr01_proof_checksum_on_the_crypt_remote(
++    s3_double: S3Double, tmp_path: Path, arm: str, extra: list[str]
++) -> None:
++    bucket = s3_double.new_bucket()
++    env = s3_double.env_for(bucket, passphrase=secrets.token_hex(8), salt=secrets.token_hex(8))
++    runner = s3_double.runner(env)
++    local = tmp_path / "parquet"
++    (local / "raw").mkdir(parents=True)
++    originals: dict[str, tuple[bytes, int]] = {}
++
++    def create(name: str, letter: str) -> None:
++        path = local / "raw" / name
++        path.write_bytes(letter.encode() * _PROOF_SIZE)
++        originals[name] = (path.read_bytes(), path.stat().st_mtime_ns)
++
++    def reset_local() -> None:
++        for name, (data, mtime) in originals.items():
++            path = local / "raw" / name
++            path.write_bytes(data)
++            os.utime(path, ns=(mtime, mtime))
++
++    def overwrite(name: str, letter: str, mtime_ns: int) -> None:
++        path = local / "raw" / name
++        path.write_bytes(letter.encode() * _PROOF_SIZE)
++        os.utime(path, ns=(mtime_ns, mtime_ns))
++
++    def remote_a() -> str:
++        return runner(["cat", "BACKUPS3CRYPT:parquet/raw/a.parquet"], {}).stdout
++
++    problems: list[str] = []
++
++    def expect(ok: bool, label: str, step: str, what: str) -> None:
++        if not ok:
++            problems.append(f"{label} [{arm}] step {step}: expected {what}")
++
++    def push(step: str, *, plain: bool = False) -> tuple[int, bool, str]:
++        argv = ["copy", str(local), "BACKUPS3CRYPT:parquet", "--immutable", *extra]
++        if not plain:
++            argv.append("-vv")
++        started = time.monotonic()
++        result = runner(argv, {})
++        seconds = time.monotonic() - started
++        copied = "Copied" in result.stderr
++        tail = result.stderr[-(400 if plain else 1500) :]
++        print(
++            f"\n##### arm={arm} step={step} rc={result.returncode} copied={copied} "
++            f"seconds={seconds:.1f} plain={plain}\n{tail}\n#####"
++        )
++        errors = " ".join(ln for ln in result.stderr.splitlines() if "ERROR" in ln).lower()
++        return result.returncode, copied, errors
++
++    product = "PRODUCT" if arm == "checksum" else "HARNESS"
++    original_a = "A" * _PROOF_SIZE
++
++    create("a.parquet", "A")
++    create("b.parquet", "B")
++    orig_a_mtime = originals["a.parquet"][1]
++
++    # N: new files
++    rc, copied, _ = push("N")
++    expect(rc == 0, "HARNESS", "N", "return code 0")
++    expect(copied, "HARNESS", "N", "'Copied' in stderr")
++    expect(remote_a() == original_a, "HARNESS", "N", "remote a equals the original bytes")
++    objs_n = s3_double.objects(bucket)
++    expect(len(objs_n) >= 2, "HARNESS", "N", "at least two server objects")
++
++    # U: mtime only
++    time.sleep(2)
++    for name in originals:
++        later = originals[name][1] + _DAYS_90_NS
++        os.utime(local / "raw" / name, ns=(later, later))
++    rc, copied, _ = push("U")
++    objs_u = s3_double.objects(bucket)
++    if arm == "immutable-only":
++        expect(rc != 0, "HARNESS", "U", "non-zero return code (the original CR-01 defect)")
++    elif arm == "size-only":
++        expect(rc == 0, "HARNESS", "U", "return code 0")
++        expect(not copied, "HARNESS", "U", "no 'Copied'")
++    else:
++        expect(rc == 0, product, "U", "return code 0")
++        expect(not copied, product, "U", "no 'Copied'")
++        expect(objs_u == objs_n, product, "U", "server objects identical to the set after N")
++    expect(remote_a() == original_a, product, "U", "remote a equals the original bytes")
++    reset_local()
++
++    # Z: new file
++    create("c.parquet", "C")
++    rc, copied, _ = push("Z")
++    objs_z = s3_double.objects(bucket)
++    expect(rc == 0, product, "Z", "return code 0")
++    expect(copied, "HARNESS", "Z", "'Copied' in stderr")
++    expect(objs_n <= objs_z, product, "Z", "earlier objects unchanged")
++    expect(len(objs_z) == len(objs_n) + 1, product, "Z", "exactly one new object")
++    expect(remote_a() == original_a, product, "Z", "remote a equals the original bytes")
++    reset_local()
++
++    # X: same size, different content, ORIGINAL mtime
++    overwrite("a.parquet", "X", orig_a_mtime)
++    rc, _, errors = push("X")
++    if arm == "size-only":
++        expect(rc == 0, "HARNESS", "X", "return code 0 (the silent skip)")
++    elif arm == "checksum":
++        expect(rc != 0, "PRODUCT", "X", "non-zero return code")
++        expect("immutable" in errors, "PRODUCT", "X", "'immutable' in an ERROR line")
++    expect(remote_a() == original_a, product, "X", "remote a equals the original bytes")
++    reset_local()
++
++    if arm == "checksum":
++        overwrite("a.parquet", "X", orig_a_mtime)
++        rc, _, errors = push("X-PLAIN", plain=True)
++        expect(rc != 0, "PRODUCT", "X-PLAIN", "non-zero return code")
++        expect(remote_a() == original_a, "PRODUCT", "X-PLAIN", "remote a unchanged")
++        reset_local()
++
++    # Y: same size, different content, NEW mtime
++    overwrite("a.parquet", "Y", orig_a_mtime + _DAYS_90_NS)
++    rc, _, errors = push("Y")
++    if arm == "size-only":
++        expect(rc == 0, "HARNESS", "Y", "return code 0 (the silent skip)")
++    elif arm == "checksum":
++        expect(rc != 0, "PRODUCT", "Y", "non-zero return code")
++        expect("immutable" in errors, "PRODUCT", "Y", "'immutable' in an ERROR line")
++    expect(remote_a() == original_a, product, "Y", "remote a equals the original bytes")
++    reset_local()
++
++    print(f"\n##### arm={arm} violated expectations: {problems}")
++    assert not problems, "; ".join(problems)
++
++
++# --- CR-01 PROOF END ---
