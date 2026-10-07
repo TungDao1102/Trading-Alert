@@ -42,7 +42,7 @@ key-files:
 key-decisions:
   - "Annotate-only: a mark hole outside a closing-bar fallback is recorded in coverage_note and nothing else changes (no event, price, time, cost, fallback_applied or count); what a hole should do to a trade is OQ-1, left to the user"
   - "SIMULATOR_SEMANTICS_VERSION stays 2.0.0: nothing the simulator prices or books changes"
-  - "The accepted double note (a mid-bar window sees a hole, the later closing-bar scan resolves the same hole by fallback) is documented by a test, not de-duplicated"
+  - "[Superseded by review fix WR-03, see the section at the end] The accepted double note (a mid-bar window sees a hole, the later closing-bar scan resolves the same hole by fallback) is documented by a test, not de-duplicated"
 
 duration: about 12 min (36 to 48 minutes past 10 local, 2026-10-07)
 completed: 2026-10-07
@@ -106,3 +106,12 @@ None.
 - Created file exists: `tests/test_backtest_mark_hole_coverage.py` (12 tests).
 - Commits exist: fb6f3c8, 1c7291e, 7e3ca94, 3de7208, fbd93dd (`git log --oneline` shows all five; `git rev-list --count BASE..HEAD` = 5 at SUMMARY write).
 - All task acceptance criteria re-run and passing.
+
+## Update after the mark-hole deep review (2026-10-07)
+
+The deep review 14-REVIEW-MARK-HOLES.md found 5 warnings; all were fixed (14-REVIEW-MARK-HOLES-FIX.md). Where they change what this SUMMARY says:
+
+- **No more double note (WR-03).** A closing-bar fallback now drops or cuts back any hole span a mid-bar window had already noted for the minutes it claims, so the note is the same however the windows are cut. The "accepted double note" and the test that pinned it (Test L) are superseded; the replacement test was added in the fix. One window-cut dependence remains by design: a position stopped out inside a mid-bar window never meets the closing-bar fallback (existing engine decision D-33).
+- **Bounded note (WR-01).** At most 20 hole spans are listed and the rest are counted (`MAX_LISTED_MARK_HOLE_SPANS`, annotation text only).
+- **Digest consequence (WR-05).** Written into BACKTEST_SPEC section 4, section 10, `src/backtest/semantics.py` and the `lifecycle.py` docstring: hole-free input is unchanged; with a hole inside a position's life only the `coverage_note` text moves, with it the trade payload bytes and derived hashes, while the semantics version stays 2.0.0.
+- WR-02 (extra boundary tests) and WR-04 (spec fill-minute wording) are test and documentation fixes. Info items IN-01..IN-03 stay open by choice.

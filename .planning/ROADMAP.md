@@ -1089,3 +1089,13 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 **Deferred at:** 2026-10-07 during /gsd-verify-work 15 session completion
 **Follow-ups:**
 - [ ] Test 9: hoãn — revisit whether to reject a TP1 inside the far half of the entry zone after the research re-run (D054 item g) (deferred 2026-10-07)
+
+### Phase 999.2: Research runner owner (BACKLOG)
+
+**Goal:** Give an owner to the research-runner items that Phase 14 deferred to "the Phase 15 research runner", which no phase plans
+**Source phase:** 14
+**Recorded at:** 2026-10-07 during the Phase 14 close (user agreed)
+**Follow-ups:**
+- [ ] `modeled_costs_per_unit` is `None` on v2 filled `TradeRecord`s (14-12 item, D052): decide whether the runner restores it
+- [ ] No production caller of `read_code_version` plus `assemble` exists outside tests (D052): the runner must call them so a real run produces an `ExperimentRecord`; Phase 26 only owns holdout-once enforcement
+- [ ] OQ-1 (deferred-items.md "Open decisions for the user"): how a trade held through mark-price holes is treated in the evidence, to decide with the real count from the first real-data research run

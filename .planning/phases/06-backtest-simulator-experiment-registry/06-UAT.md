@@ -156,16 +156,18 @@ verified: uv run mypy src/backtest/ --strict: Success no issues in 6 source file
 
 ### 23. Entry-expiry clock uses simulated bar time (G3)
 expected: Limit expiry resolved against the replayed bar's time, not a single fixture now_utc
-result: skipped
-reason: Known gap G3 (CR-04): simulator.py ~758/881 still use the fixture single now_utc; owned by Phase 14 (Backtest Simulator Causality Rewrite, success criterion 6). Not an issue for Phase 6.
+result: pass
+source: closed by Phase 14 (success criterion 6), checked 2026-10-07
+reason_before: Known gap G3 (CR-04): simulator.py ~758/881 still used the fixture single now_utc; owned by Phase 14.
+evidence: 14-VERIFICATION.md criterion 6: `_entry_now_utc` is gone and expiry is judged per minute (`close_time <= expiry_utc`); tests `test_plan_a_fills_on_bar_n_plus_2_before_expiry`, `test_plan_b_expires...` and goldens `g3_fill_before_expiry`, `g3_expire_after` pass. Note: the Phase 6 evidence itself stays VOID (D052); this only closes the G3 item.
 
 ## Summary
 
 total: 23
-passed: 22
+passed: 23
 issues: 0
 pending: 0
-skipped: 1
+skipped: 0
 blocked: 0
 
 ## Gaps
