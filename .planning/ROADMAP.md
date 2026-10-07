@@ -51,7 +51,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 14: Backtest Simulator Causality Rewrite** - Fills only after the signal bar, multi-bar holding, TP1/TP2 ladder, funding, mark-price triggers (completed 2026-10-07)
 - [x] **Phase 15: Strategy Geometry Correction** - Trend-pullback SL outside zone, confirmed pivots, min stop distance; families match their sheets (completed 2026-10-07)
 - [ ] **Phase 16: Paper Runtime Composition + SHADOW Approval Mode** - Runnable paper process (M3), fixed WS await, simulated fills, SHADOW APPROVE/SKIP journaled with no order path (D040); soak can start
-- [ ] **Phase 17: Operational Persistence Layer** - PostgreSQL journal/approval/execution stores, integrity constraints, durable approval consumption, write-ahead intent
+- [x] **Phase 17: Operational Persistence Layer** - PostgreSQL journal/approval/execution stores, integrity constraints, durable approval consumption, write-ahead intent (completed 2026-10-07)
 - [ ] **Phase 18: Binance User-Data Stream + Exchange Error Taxonomy** - listenKey + ORDER/ALGO/ACCOUNT events, error-code mapping, demo/testnet switch, clock checks
 - [ ] **Phase 19: Execution Plan Binding + Pre-Placement Checks** - Symbol/side/qty bound to the approved plan, live-price check, SL-reject fallback (absorbs old Phase 15)
 - [ ] **Phase 20: Reconcile + SAFE_MODE Hardening + Alerts** - No blind spots, pending-entry SL kept, auto SL re-place (D034), durable SAFE_MODE, operational alerts
@@ -738,7 +738,7 @@ Plans:
 
 **Audit refs**: F-202, F-404, F-403, F-406, F-411, F-412, F-410, F-126, F-951, F-703, F-603, F-606
 
-**Plans:** 15/15 plans executed
+**Plans:** 15/15 plans complete
 
 Plans:
 **Wave 1**
@@ -1068,7 +1068,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 14. Backtest Simulator Causality Rewrite | 17/17 | Complete    | 2026-10-07 |
 | 15. Strategy Geometry Correction | 18/18 | Complete    | 2026-10-07 |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 0/TBD | Not started | - |
-| 17. Operational Persistence Layer | 15/15 | In Progress|  |
+| 17. Operational Persistence Layer | 15/15 | Complete    | 2026-10-07 |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |
 | 19. Execution Plan Binding + Pre-Placement Checks | 0/TBD | Not started | - |
 | 20. Reconcile + SAFE_MODE Hardening + Alerts | 0/TBD | Not started | - |
