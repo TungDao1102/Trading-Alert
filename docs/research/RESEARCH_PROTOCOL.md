@@ -1,10 +1,10 @@
 # Research Protocol (Frozen)
 
-> **Protocol version:** v2.0.0
+> **Protocol version:** v2.1.0
 > **Status:** FROZEN
 > **Frozen on:** 2026-09-19
-> **Amended on:** 2026-10-05
-> **Supersedes:** v1.1.0
+> **Amended on:** 2026-10-07
+> **Supersedes:** v2.0.0
 
 ## §0 Identity, status, and one-way flow
 
@@ -18,7 +18,7 @@ This document is the **frozen research contract** for the Binance Futures resear
 **Living-doc firewall (one-way flow).** `docs/research/TRADING_STRATEGY_RESEARCH.md` is the living draft for new ideas, candidate families, and open questions. The protocol doc copies methodology *out of* the living draft once. After the protocol is frozen, any new learning enters the protocol **only** via a versioned amendment:
 
 - clarification or wording fix → bump to `v1.0.x` (semantics unchanged);
-- semantic change to dataset splits, cost model, execution simulation, or acceptance gates → bump to `v1.1.0` or `v2.0.0` per Semantic Versioning; add a `Supersedes` line and a migration paragraph.
+- semantic change to dataset splits, cost model, execution simulation, or acceptance gates → bump a minor or major version per Semantic Versioning (precedents: `v1.1.0` minor, `v2.0.0` major, `v2.1.0` minor); add a `Supersedes` line and a migration paragraph.
 
 A semantic change to the protocol triggers a new strategy-version lineage downstream (see `docs/strategy/TRADING_STRATEGY_SPEC.md` §12 Strategy versioning). Living-draft edits never modify a frozen protocol section in place.
 
@@ -30,7 +30,11 @@ This is a semantic amendment (dataset splits, cost and execution assumptions, ac
 
 This is a semantic amendment (execution simulation) per D032, D043 and D052. The v1.1.0 text is unchanged in git history at commit `7a80af52146d7a8112cab3536143c179050a02d2` and is superseded, not edited. What changes: the backtest simulator is rebuilt as a cross-bar event loop. A plan created at the close of strategy bar N is active from bar N+1 and the signal bar is never examined for a fill; a limit fills only on a trade-price 1m trade-through of one tick; SL and TP trigger on mark-price 1m klines (D037); the exit policy is the live TP1/TP2 ladder (TP1 is a reduce-only partial of half the filled quantity, TP2 closes the remainder, the stop is unchanged after TP1); funding is modeled at every actual `fundingTime`; constraints are point-in-time; a simulated ledger carries equity, positions, resting entries and the daily loss; one R denominator is shared with live; `simulator_semantics_version` 2.0.0 joins the experiment identity. **All earlier backtest evidence is void** (D052): the v1 simulator examined the signal bar, filled at a touch, booked a single-exit TP1 and ignored funding and the ledger. What does not change: every pre-registered threshold, the split proportions, the variant budget and multiple-testing correction, the single-use holdout rule, the D030 kill-gate firing rule, the identity tuple in §5 and the `Frozen on` clock start (2026-09-19, so the D013 six-month clock is not restarted). Downstream strategy-version lineages restart per `docs/strategy/TRADING_STRATEGY_SPEC.md` §12: the evidence-bearing strategy sets are the new versioned sets created in Phase 15, not the sets that existed before this amendment.
 
-**Numeric-gate status (v1.1.0).** The acceptance thresholds, split proportions, variant budget, multiple-testing correction and holdout rule are pre-registered numerically in §1 and §4 per D032 and D043, before any Validation run. Strategy parameters (ATR multipliers, RR minima, expiry hours) stay versioned parameter-set values owned by the family sheets and the registry (§5). A pre-registered value changes only by a new protocol version (v1.2.0) and a new candidate lineage, never after a result is seen.
+### Migration (v2.0.0 to v2.1.0)
+
+This is a semantic amendment (acceptance gate G5) per D057 and D060. The v2.0.0 text is unchanged in git history at commit `6857c1d9f488f2fa6ec02f452697bde4c68da419` and is superseded, not edited. What changes: G5 gains a floor of at least 30 closed trades in the holdout, counted exactly as G1 counts closed trades; fewer than 30 means the candidate cannot pass G5 and the holdout counts as consumed for that lineage (never re-run on the same holdout; a re-evaluation needs a new amendment and a new lineage); 30 or more only makes the candidate eligible for evaluation and is not evidence of an edge; no softer threshold and no new status vocabulary exist. `docs/research/holdout_consumed.json` moves to schema `holdout-consumed/2`, where each entry carries its own `protocol_version` beside `lineage_id`, `candidate_sha256`, `consumed_at_utc` and `decision_ref`. What does not change: G1 to G4, the 40/40/20 split and the walk-forward folds, the cost model, the execution simulation (`simulator_semantics_version` 2.0.0), the variant budget and multiple-testing correction, the D030 kill-gate firing rule, the `Frozen on` clock start (2026-09-19, so the D013 six-month clock is not restarted) and the strategy versions. Nothing is applied backwards: no holdout entry and no kill-gate decision exists, so v2.0.0 stays historical and no result was produced under it.
+
+**Numeric-gate status (v1.1.0).** The acceptance thresholds, split proportions, variant budget, multiple-testing correction and holdout rule are pre-registered numerically in §1 and §4 per D032 and D043, before any Validation run. Strategy parameters (ATR multipliers, RR minima, expiry hours) stay versioned parameter-set values owned by the family sheets and the registry (§5). A pre-registered value changes only by a new protocol version and a new candidate lineage, never after a result is seen.
 
 ---
 
@@ -229,21 +233,21 @@ A strategy may proceed only when **all ten** methodology criteria are met. Each 
 
 ### Pre-registered thresholds (v1.1.0)
 
-Pre-registered per D032 and D043 before any Validation run. Every number below is fixed at freeze; a change forces protocol v1.2.0 and a new candidate lineage, and no value is ever changed after a result is seen.
+Pre-registered per D032 and D043 before any Validation run. Every number below is fixed at freeze; a change forces a new protocol version and a new candidate lineage, and no value is ever changed after a result is seen.
 
-**Variant budget:** N = 25 per family, counting every parameter combination evaluated in Development or Validation, logged in the experiment record; exceeding it needs v1.2.0.
+**Variant budget:** N = 25 per family, counting every parameter combination evaluated in Development or Validation, logged in the experiment record; exceeding it needs a new protocol version.
 
 1. **G1 (trade floor)** — at least 100 closed trades pooled across the four Validation folds and at least 30 closed trades in each Validation fold; a candidate below the floor cannot pass and the floor is never lowered after the freeze.
 2. **G2 (expectancy)** — mean net R per trade after full costs (taker entry fee, exit fee, funding, slippage) over the pooled Validation trades is above 0 and the lower bound of the 95% block-bootstrap interval of that mean is above 0.
 3. **G3 (multiple testing)** — one-sided seeded stationary block-bootstrap p-value for the hypothesis that mean net R is at most 0, Holm-Bonferroni adjusted at family-wise alpha = 0.05 over the family's counted variants; the candidate passes only when its adjusted p-value is below 0.05.
 4. **G4 (drawdown)** — maximum drawdown of the pooled Validation equity curve is at most 20% of research equity, using the same equity base and risk_rate convention as the risk engine.
-5. **G5 (single-use holdout)** — the candidate lineage evaluates the final holdout (the last 20% of the dataset by time) exactly once, after G1-G4 pass, with parameters frozen; it passes when mean net R after full costs is above 0 and maximum drawdown is at most 20% on the holdout block (trade count reported, no floor).
+5. **G5 (single-use holdout)** — the candidate lineage evaluates the final holdout (the last 20% of the dataset by time) exactly once, after G1-G4 pass, with parameters frozen; it requires at least 30 closed trades in the holdout, counted exactly as G1 counts closed trades, and it passes only when mean net R after full costs is above 0 and maximum drawdown is at most 20% on the holdout block. A candidate with fewer than 30 closed trades in the holdout cannot pass G5, the holdout counts as consumed for that lineage, and it is never re-run on the same holdout; a re-evaluation needs a new protocol amendment and a new candidate lineage. The floor is never lowered after the freeze. Thirty is an eligibility floor for the statistical evaluation, never evidence of an edge.
 
 Holm-Bonferroni is applied per family; selecting one of the three families is an additional uncorrected layer, so the worst-case family-wise false-pass rate across three families is about 14% (1 minus 0.95 cubed); a cross-family correction needs an amendment.
 
 A candidate passes only when G1-G5 all pass. A human may reject a candidate that passes; a human may never pass a candidate that fails (D032, D043).
 
-**Holdout consumed marker.** Before the holdout is evaluated the harness appends `lineage_id`, `candidate_sha256`, `consumed_at_utc` and `decision_ref` to `docs/research/holdout_consumed.json`, `candidate_sha256` being the hash of `strategy_id`, `strategy_version` and the candidate `parameter_set_hash`. A second evaluation of an already listed `lineage_id` or `candidate_sha256` is a violation and the result is void. Lineage means a `strategy_id` plus its `strategy_version` line; successive lineages on one holdout window erode it, which the marker makes countable.
+**Holdout consumed marker.** Before the holdout is evaluated the harness appends `lineage_id`, `candidate_sha256`, `consumed_at_utc`, `decision_ref` and `protocol_version` (the protocol version in force when the entry is written; schema `holdout-consumed/2`) to `docs/research/holdout_consumed.json`, `candidate_sha256` being the hash of `strategy_id`, `strategy_version` and the candidate `parameter_set_hash`. A second evaluation of an already listed `lineage_id` or `candidate_sha256` is a violation and the result is void. Lineage means a `strategy_id` plus its `strategy_version` line; successive lineages on one holdout window erode it, which the marker makes countable.
 
 **Power note.** With sigma about 1.2 R and Holm over 25 variants the trade floor detects only a large edge, about 0.35 R. The trade rate is unmeasured until the Phase 14 causal simulator exists, so D043 records that the floor may be unreachable at the decided dataset depth; that shortfall is reported, never papered over.
 
@@ -404,7 +408,7 @@ Until all three land, the doc is `DRAFT` in effect, regardless of what the heade
 ### Amendment procedure
 
 - **Clarification / wording** (no semantic change) → bump to `v1.0.x`. Header `Status: FROZEN` is preserved. A DECISIONS row records the clarification.
-- **Semantic change** to dataset splits, cost model, execution simulation, or acceptance gates → bump to `v1.1.0` (minor) or `v2.0.0` (major). A `Supersedes` line replaces the `none` line. A migration paragraph summarizes the change. A DECISIONS row records the amendment. A semantic change triggers a new strategy-version lineage per `docs/strategy/TRADING_STRATEGY_SPEC.md` §12.
+- **Semantic change** to dataset splits, cost model, execution simulation, or acceptance gates → bump a minor or major version per Semantic Versioning (precedents: `v1.1.0` minor, `v2.0.0` major, `v2.1.0` minor). A `Supersedes` line replaces the `none` line. A migration paragraph summarizes the change. A DECISIONS row records the amendment. A semantic change triggers a new strategy-version lineage per `docs/strategy/TRADING_STRATEGY_SPEC.md` §12.
 
 ### Living-draft firewall (operational)
 
@@ -415,3 +419,4 @@ Until all three land, the doc is `DRAFT` in effect, regardless of what the heade
 - **v1.0.1 — 2026-09-29 — D030 (clarification).** Wording-only correction of the "Kill gate D013" firing rule to conform to D013 (fires only when at least three independently specified families were tested AND at least six calendar months elapsed since the freeze AND none holds a recorded passing decision); the earlier disjunctive shortfall list contradicted D013 and is removed. No dataset split, cost model, execution assumption, acceptance gate, threshold or numeric value changed. `Status`, `Frozen on` and `Supersedes` are unchanged.
 - **v1.1.0 — 2026-09-30 — D043 (semantic).** Implements D032. Pre-registers numeric acceptance thresholds (G1-G5: trade floor, expectancy with bootstrap bound, Holm-Bonferroni correction over N = 25 variants per family, drawdown ceiling, single-use holdout), fixes the 40/40/20 split with four walk-forward Validation folds, adds the append-only `docs/research/holdout_consumed.json` marker, removes any human pass override, and aligns costs and execution to D036 (taker entry fee), D037 (mark-price protective triggers), D038 (`partial_fill_fraction` 1.0) and D039 (point-in-time research universe) with one canonical quantization order. The research-gate freeze step is now version-bound to the header. `Frozen on` is unchanged (the D013 clock is not restarted); `Amended on` and `Supersedes: v1.0.1` are added. The D030 kill-gate firing rule is untouched.
 - **v2.0.0 - 2026-10-05 - D052 (semantic).** Execution simulation rebuilt for causality (Phase 14): a plan is active from bar N+1, fills need a one-tick trade-price trade-through at the live limit, SL and TP trigger on mark-price minutes, the TP1/TP2 ladder mirrors live, funding is charged at actual `fundingTime` instants, constraints are point-in-time, a simulated ledger and one R denominator are used, and `simulator_semantics_version` 2.0.0 joins the experiment identity. All earlier backtest evidence is void. Thresholds, splits, the D030 firing rule and the identity tuple are unchanged. `Frozen on` is unchanged (the D013 clock is not restarted); `Amended on` is 2026-10-05 and `Supersedes: v1.1.0`. The version pins in the gate code and tests are read from this header from now on.
+- **v2.1.0 - 2026-10-07 - D060 (semantic).** Implements D057. G5 gains a floor of at least 30 closed trades in the holdout (counted as G1 counts them); fewer than 30 cannot pass G5 and consumes the holdout for that lineage; 30 is an eligibility floor, never an edge claim, and is never lowered after the freeze. `holdout_consumed.json` schema moves to `holdout-consumed/2` with a per-entry `protocol_version`. Nothing else changed and nothing is applied backwards (no holdout entry or kill-gate decision exists). `Frozen on` is unchanged (the D013 clock is not restarted); `Amended on` is 2026-10-07 and `Supersedes: v2.0.0`.

@@ -1,4 +1,5 @@
-"""Tests for the protocol gate module (Phase 11, plan 11-01; D032, D043; v2.0.0 by D052).
+"""Tests for the protocol gate module (Phase 11, plan 11-01; D032, D043; v2.0.0 by D052,
+v2.1.0 by D057/D060).
 
 The real-repository test proves gates PR-01..PR-10 hold today; the negative tests feed
 each pure check a deliberately broken input so a regression in the protocol text, the
@@ -27,6 +28,7 @@ VALID_ENTRY: dict[str, Any] = {
     "candidate_sha256": "a" * 64,
     "consumed_at_utc": "2026-10-01T00:00:00Z",
     "decision_ref": "D044",
+    "protocol_version": "v2.1.0",
 }
 
 
@@ -45,7 +47,7 @@ def _version() -> str:
 
 def _doc(entries: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {
-        "schema": "holdout-consumed/1",
+        "schema": "holdout-consumed/2",
         "protocol_version": _version(),
         "entries": copy.deepcopy(entries if entries is not None else []),
     }
@@ -163,8 +165,28 @@ def test_holdout_entry_missing_consumed_at_fails() -> None:
 
 def test_holdout_bad_schema_fails() -> None:
     doc = _doc()
-    doc["schema"] = "holdout-consumed/2"
+    doc["schema"] = "holdout-consumed/1"
     assert any("schema" in p for p in gate.check_holdout_marker(doc))
+
+
+def test_holdout_entry_without_protocol_version_fails() -> None:
+    entry = {k: v for k, v in VALID_ENTRY.items() if k != "protocol_version"}
+    problems = gate.check_holdout_marker(_doc([entry]))
+    assert any("protocol_version" in p for p in problems)
+
+
+def test_holdout_entry_malformed_protocol_version_fails() -> None:
+    for bad in ("2.1.0", "v2.1", "v2.1.0-rc1", "", None, 210):
+        entry = {**VALID_ENTRY, "protocol_version": bad}
+        problems = gate.check_holdout_marker(_doc([entry]))
+        assert any("protocol_version is not vX.Y.Z" in p for p in problems), bad
+
+
+def test_g5_holdout_floor_phrase_required() -> None:
+    text = _protocol()
+    assert gate.check_preregistration(text) == []
+    stripped = text.replace("at least 30 closed trades in the holdout", "some closed trades")
+    assert any("in the holdout" in p for p in gate.check_preregistration(stripped))
 
 
 def test_quantization_order_swapped_fails() -> None:

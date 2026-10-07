@@ -1,4 +1,5 @@
-"""Protocol gate module (Phase 11, plan 11-01; D032, D043; amended to v2.0.0 by D052).
+"""Protocol gate module (Phase 11, plan 11-01; D032, D043; amended to v2.0.0 by D052,
+to v2.1.0 by D057/D060).
 
 Executable checks that keep the frozen research protocol, the DECISIONS row, the
 DOC_STATUS index, the holdout consumed marker and the BACKTEST_SPEC pointers
@@ -59,6 +60,7 @@ REQUIRED_PREREGISTRATION_PHRASES: tuple[str, ...] = (
     "the last 20% of the dataset by time",
     "at least 100 closed trades pooled across the four Validation folds",
     "at least 30 closed trades in each Validation fold",
+    "at least 30 closed trades in the holdout",
     "lower bound of the 95% block-bootstrap interval",
     "20% of research equity",
     "N = 25",
@@ -89,9 +91,10 @@ FORBIDDEN_HOLDOUT_KEYS = frozenset(
 )
 HOLDOUT_TOP_KEYS = frozenset({"schema", "protocol_version", "entries"})
 HOLDOUT_ENTRY_KEYS = frozenset(
-    {"lineage_id", "candidate_sha256", "consumed_at_utc", "decision_ref"}
+    {"lineage_id", "candidate_sha256", "consumed_at_utc", "decision_ref", "protocol_version"}
 )
-HOLDOUT_SCHEMA = "holdout-consumed/1"
+HOLDOUT_SCHEMA = "holdout-consumed/2"
+_VERSION_RE = re.compile(r"v\d+\.\d+\.\d+")
 
 QUANTIZATION_ORDER: tuple[str, ...] = (
     "stepSize",
@@ -249,7 +252,7 @@ def check_holdout_marker(doc: Any) -> list[str]:
     if doc.get("schema") != HOLDOUT_SCHEMA:
         problems.append(f"schema is not {HOLDOUT_SCHEMA!r}")
     version = doc.get("protocol_version")
-    if not isinstance(version, str) or not re.fullmatch(r"v\d+\.\d+\.\d+", version):
+    if not isinstance(version, str) or not _VERSION_RE.fullmatch(version):
         problems.append("protocol_version is not vX.Y.Z")
     entries = doc.get("entries")
     if not isinstance(entries, list):
@@ -282,6 +285,9 @@ def check_holdout_marker(doc: Any) -> list[str]:
         decision_ref = entry.get("decision_ref")
         if not isinstance(decision_ref, str) or not decision_ref:
             problems.append(f"entry {index} decision_ref is empty")
+        entry_version = entry.get("protocol_version")
+        if not isinstance(entry_version, str) or not _VERSION_RE.fullmatch(entry_version):
+            problems.append(f"entry {index} protocol_version is not vX.Y.Z")
     return problems
 
 

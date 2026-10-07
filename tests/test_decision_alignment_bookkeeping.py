@@ -383,10 +383,10 @@ def _header_version() -> str:
 
 
 def test_current_header_version_row_is_required_by_dc03() -> None:
-    """DC-03 also binds the row of the header version (v2.0.0, D052), not only the D043 row."""
+    """DC-03 also binds the row of the header version (v2.1.0, D060), not only the D043 row."""
     version = _header_version()
     text = _read(DECISIONS)
-    assert f"protocol {version} frozen" in bk._decision_row(text, "D052")
+    assert f"protocol {version} frozen" in bk._decision_row(text, "D060")
     assert (
         _dc(decisions=text.replace(f"protocol {version} frozen", "protocol frozen"))["DC-03"]
         is False
