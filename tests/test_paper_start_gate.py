@@ -598,6 +598,49 @@ def test_recompute_parameter_set_hash_rejects_a_traversing_id(tmp_path: Path) ->
         )
 
 
+def test_gate_reads_the_set_file_once_and_judges_the_bytes_it_hashed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review WR-05: hash, rationale verdict and allowlist all come from one read of the file.
+
+    The first read of the set file returns content A (no rationale tables). Every later read
+    returns content B (an incomplete rationale). A gate that read the file again would judge B
+    while it hashed A; the single-read gate judges A end to end.
+    """
+    import src.paper.freeze as freeze
+    from src.paper.freeze import _load_parameter_set_with_root, pin_stream_epoch
+
+    path_a = write_set(tmp_path, spec=None)
+    bytes_a = path_a.read_bytes()
+    hash_a = _load_parameter_set_with_root(STRATEGY_ID, SET_ID, tmp_path).parameter_set_hash
+    spec = complete_rationale(parsed_params(BASE_SET))
+    del spec[sorted(spec)[0]]
+    bytes_b = write_set(tmp_path, spec=spec).read_bytes()
+    path_a.write_bytes(bytes_a)
+    assert bytes_a != bytes_b
+
+    _inject(monkeypatch, _entry(STRATEGY_ID, SET_ID, hash_a))
+    reads: list[Path] = []
+    original = Path.read_bytes
+
+    def flaky_read_bytes(self: Path) -> bytes:
+        if self == path_a:
+            reads.append(self)
+            return bytes_a if len(reads) == 1 else bytes_b
+        return original(self)
+
+    monkeypatch.setattr(Path, "read_bytes", flaky_read_bytes)
+    epoch = pin_stream_epoch(
+        strategy_id=STRATEGY_ID,
+        parameter_set_id=SET_ID,
+        opened_at_utc=datetime(2026, 10, 7, 10, 0, tzinfo=UTC),
+        registry_root=tmp_path,
+    )
+    assert len(reads) == 1
+    assert epoch.parameter_set_hash == hash_a
+    assert freeze.PAPER_START_ALLOWLIST[0].parameter_set_hash == hash_a
+
+
 def test_flag_is_keyword_only_and_strict_by_default() -> None:
     from src.paper.freeze import pin_stream_epoch
     from src.paper.loop import run_paper_tick
