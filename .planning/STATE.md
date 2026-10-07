@@ -522,18 +522,16 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 - D055 execution model (protective stop before or after the entry fill, -4509): OPEN, waits for the Phase 18 Demo probe; `docs/DECISIONS.md` D055, ROADMAP Phase 18 and the D055 items in Phases 24 and 25.
 - OQ-1 (how a trade held through mark-price holes counts in the evidence): `.planning/phases/14-backtest-causality-rewrite/deferred-items.md`; ROADMAP Backlog 999.2 (Phase 16 inherited item D052-open covers the related `modeled_costs_per_unit` question).
-- VPS provisioning date: not set; until a VPS exists the collector runs on a dev machine (`.planning/phases/13.1-deployment-ci/13.1-CONTEXT.md`, 13.1-OPEN-DECISIONS UAT 8-10, D042, D050).
+- EC2 creation date: not set. The host is an AWS EC2 instance in ap-southeast-1 (Singapore), chosen 2026-10-07 (D061); until it exists the collector runs on a dev machine (`.planning/phases/13.1-deployment-ci/13.1-CONTEXT.md`, 13.1-OPEN-DECISIONS UAT 8-10, D042, D050, D061).
 - Container registry push and deploy on tag: needs a registry and VPS decision; no owner phase (`13.1-CONTEXT.md` Deferred Ideas, D050).
 - Legacy Parquet partitions with a different Decimal scale: repair is optional, operator decision, no deadline (`.planning/phases/13-research-data-foundation-fixes/deferred-items.md` item 3, `scripts/repair_parquet_scale.py`).
 - Phase 13.1 WR-05 (decided 2026-10-07, D062: `trading` joins sudo; implementation in Phase 16) and CR-01 (decided, D062: `--checksum` on the Parquet push; implementation in Phase 16) are decided; WR-06 (split `env_file` per service; ROADMAP Phase 24 G3-029) is still open and must precede any live key: `.planning/phases/13.1-deployment-ci/13.1-OPEN-DECISIONS.md`.
-- Which plan carries the research protocol v2.1.0 amendment of D057 (30-trade G5 floor): not yet named; D057 is not in force until it lands (ROADMAP Phase 26 item D057).
-- Host that runs the hourly paper freeze check: ROADMAP Phase 16 item G2-009.
-- Whether the kill-gate review items WR-01, WR-06, WR-12 and WR-13 move ahead of Phase 26: ROADMAP Phase 16 item G2-038.
-- Per-bar verdict parity between paper and backtest, or recording the limitation: ROADMAP Phase 16 item G2-008.
 - Values of the reconcile cadence, stale-feed and WS-silence thresholds (T-06) and the WR-07 ordering rules (G2-026): ROADMAP Phase 20.
 - Sibling-approval expiry rule for `uq_approvals_one_decided_per_plan`: ROADMAP Phase 23 item G4-042.
 - `asyncio.to_thread` or an async pool for the synchronous PostgreSQL store, or a recorded decision: ROADMAP Phase 24 item G4-040.
 - Research-gate as a required status check on master, or a recorded waiver: ROADMAP Phase 26 item G1-001.
+- Phase 16 values and locations (D061): the numbers of the paper exit criteria (trial soak length, runtime coverage minimum, time-of-day rule and the others), the durable location for `pinned_epoch.json` and `registry_diff.jsonl`, and the sudo scope for WR-05 (D062); the checkpoints of the closure chain (hypothesis and parameter grid, research run authorization, exact-hash allowlist entry) are decided by the user when Phase 16 executes.
+- Decided 2026-10-07 and removed from this list: freeze-check host, per-bar parity and kill-gate WR timing (D061 items A, B, F), the plan that carries protocol v2.1.0 (done, D060) and WR-05 and CR-01 (D062).
 
 ## Commitments with dates
 
