@@ -490,6 +490,48 @@ def test_no_module_under_src_enables_the_flag_or_touches_the_allowlist() -> None
     assert _scan_src_violations(REPO_ROOT / "src") == []
 
 
+NON_BOOL_FLAGS: tuple[Any, ...] = ("False", "0", "no", "yes", "", 1, 0, 1.0, None, [], ["x"])
+
+
+@pytest.mark.parametrize("bad", NON_BOOL_FLAGS, ids=repr)
+def test_pin_stream_epoch_rejects_a_non_bool_flag(bad: Any) -> None:
+    """Review WR-01: only the bool True may switch the gate off; anything else is a TypeError."""
+    from src.paper.freeze import pin_stream_epoch
+
+    with pytest.raises(TypeError, match="allow_unrationalized"):
+        pin_stream_epoch(
+            strategy_id="trend-pullback",
+            parameter_set_id="baseline-v3",
+            opened_at_utc=datetime(2026, 10, 7, 10, 0, tzinfo=UTC),
+            allow_unrationalized=bad,
+        )
+
+
+@pytest.mark.parametrize("bad", NON_BOOL_FLAGS, ids=repr)
+def test_run_paper_tick_rejects_a_non_bool_flag_before_anything_else(
+    bad: Any, spies: dict[str, list[int]]
+) -> None:
+    from src.paper.loop import run_paper_tick
+
+    with pytest.raises(TypeError, match="allow_unrationalized"):
+        run_paper_tick({}, allow_unrationalized=bad)
+    _assert_no_candle_work(spies)
+
+
+def test_the_flag_is_honoured_only_as_the_bool_true() -> None:
+    from src.paper.freeze import pin_stream_epoch
+
+    opened = datetime(2026, 10, 7, 10, 0, tzinfo=UTC)
+    kwargs: dict[str, Any] = {
+        "strategy_id": "trend-pullback",
+        "parameter_set_id": "baseline-v3",
+        "opened_at_utc": opened,
+    }
+    with pytest.raises(UnrationalizedParameterSet):
+        pin_stream_epoch(**kwargs, allow_unrationalized=False)
+    assert pin_stream_epoch(**kwargs, allow_unrationalized=True).evidence_claim_open is True
+
+
 def test_flag_is_keyword_only_and_strict_by_default() -> None:
     from src.paper.freeze import pin_stream_epoch
     from src.paper.loop import run_paper_tick
