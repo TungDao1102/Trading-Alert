@@ -417,24 +417,51 @@ FLAG = "allow_unrationalized"
 ALLOWLIST = "PAPER_START_ALLOWLIST"
 FLAG_FILES = frozenset({"paper/freeze.py", "paper/loop.py"})
 ALLOWLIST_FILE = "paper/freeze.py"
+FORWARD_FILE = "paper/loop.py"
+FORWARD_FUNCTION = "run_paper_tick"
+
+
+def _target_names(target: ast.AST) -> list[str]:
+    """Names, attribute names and constant string subscripts inside an assignment target."""
+    names: list[str] = []
+    for sub in ast.walk(target):
+        if isinstance(sub, ast.Name):
+            names.append(sub.id)
+        elif isinstance(sub, ast.Attribute):
+            names.append(sub.attr)
+        elif (
+            isinstance(sub, ast.Subscript)
+            and isinstance(sub.slice, ast.Constant)
+            and isinstance(sub.slice.value, str)
+        ):
+            names.append(sub.slice.value)
+    return names
 
 
 def _bound_names(node: ast.AST) -> list[str]:
-    """Names (or attribute names) a statement binds, rebinds or deletes."""
-    targets: list[ast.expr] = []
+    """Names (or attribute names) a statement or expression binds, rebinds or deletes.
+
+    Covers assignment, annotated and augmented assignment, del, walrus, for, comprehension
+    and with targets, def, class, except-as, import-as and `globals()["NAME"] = ...`.
+    """
+    targets: list[ast.AST] = []
     if isinstance(node, ast.Assign):
         targets = list(node.targets)
     elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
         targets = [node.target]
     elif isinstance(node, ast.Delete):
         targets = list(node.targets)
+    elif isinstance(node, (ast.NamedExpr, ast.For, ast.AsyncFor, ast.comprehension)):
+        targets = [node.target]
+    elif isinstance(node, (ast.With, ast.AsyncWith)):
+        targets = [item.optional_vars for item in node.items if item.optional_vars is not None]
     names: list[str] = []
     for target in targets:
-        for sub in ast.walk(target):
-            if isinstance(sub, ast.Name):
-                names.append(sub.id)
-            elif isinstance(sub, ast.Attribute):
-                names.append(sub.attr)
+        names.extend(_target_names(target))
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        names.append(node.name)
+    if isinstance(node, ast.ExceptHandler) and node.name:
+        names.append(node.name)
     if isinstance(node, (ast.Import, ast.ImportFrom)):
         names.extend((alias.asname or alias.name) for alias in node.names)
     return names
@@ -462,38 +489,82 @@ def _allowlist_binding_violations(tree: ast.Module, rel: str) -> list[str]:
             found.append(f"{rel}:{node.lineno}: {ALLOWLIST} declared global or nonlocal")
         elif ALLOWLIST in _bound_names(node) and id(node) not in allowed:
             found.append(f"{rel}:{node.lineno}: {ALLOWLIST} rebound, extended or deleted")
+        elif isinstance(node, ast.Call) and any(kw.arg == ALLOWLIST for kw in node.keywords):
+            found.append(f"{rel}:{node.lineno}: {ALLOWLIST} passed as a keyword argument")
+        elif isinstance(node, ast.Constant) and node.value == ALLOWLIST:
+            found.append(f"{rel}:{node.lineno}: {ALLOWLIST} named as a string")
     return found
+
+
+def _calls_with_scope(tree: ast.Module) -> list[tuple[ast.Call, str | None]]:
+    """Every call in the tree with the name of its innermost enclosing function (or None)."""
+    calls: list[tuple[ast.Call, str | None]] = []
+
+    def visit(node: ast.AST, scope: str | None) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            scope = node.name
+        if isinstance(node, ast.Call):
+            calls.append((node, scope))
+        for child in ast.iter_child_nodes(node):
+            visit(child, scope)
+
+    visit(tree, None)
+    return calls
+
+
+def _flag_value_violation(value: ast.expr, rel: str, scope: str | None) -> str | None:
+    """Why a keyword value for the flag is not allowed, or None when it is.
+
+    Allowed: the literal False, and run_paper_tick forwarding its own parameter by name.
+    """
+    if isinstance(value, ast.Constant) and value.value is False:
+        return None
+    if (
+        isinstance(value, ast.Name)
+        and value.id == FLAG
+        and rel == FORWARD_FILE
+        and scope == FORWARD_FUNCTION
+    ):
+        return None
+    if isinstance(value, ast.Constant) and value.value is True:
+        return f"call passes {FLAG} as the constant True"
+    return (
+        f"call passes {FLAG} as something other than the literal False "
+        f"or {FORWARD_FUNCTION} forwarding its own {FLAG}"
+    )
 
 
 def _scan_src_violations(root: Path) -> list[str]:
     """AST scan of every *.py under root: the test-only flag and the allowlist (plan 15-17).
 
-    Reports, sorted: a call passing the flag as the constant True; a dict literal keyed by the
-    flag name; any mention of the flag outside paper/freeze.py and paper/loop.py; any mention
-    of the allowlist name outside paper/freeze.py; and in paper/freeze.py anything but one
-    module-level tuple-literal binding (rebinding, augmented assignment, global, del,
-    setattr/delattr naming it). A name built at runtime is not visible to this check.
+    Reports, sorted: a call passing the flag as anything but the literal False (or
+    run_paper_tick forwarding its own flag by name); a dict literal keyed by the flag name; any
+    mention of the flag outside paper/freeze.py and paper/loop.py; any mention of the allowlist
+    name outside paper/freeze.py; and in paper/freeze.py anything but one module-level
+    tuple-literal binding (rebinding by assignment, augmented assignment, walrus, for, with,
+    def, class, except, import, global, del, `globals()["NAME"]`, keyword argument, a string
+    equal to the name, setattr/delattr naming it).
+
+    Not covered: a name built at runtime, `**kwargs` forwarding, and the CONTENT of the tuple
+    literal. That the allowlist is empty is asserted by
+    test_production_allowlist_is_empty_by_user_decision, not by this scan.
     """
     found: list[str] = []
     for path in sorted(root.rglob("*.py")):
         rel = path.relative_to(root).as_posix()
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source)
+        for call, scope in _calls_with_scope(tree):
+            for kw in call.keywords:
+                if kw.arg == FLAG:
+                    problem = _flag_value_violation(kw.value, rel, scope)
+                    if problem is not None:
+                        found.append(f"{rel}:{call.lineno}: {problem}")
+            if isinstance(call.func, ast.Name) and call.func.id in {"setattr", "delattr"}:
+                if any(isinstance(a, ast.Constant) and a.value == ALLOWLIST for a in call.args):
+                    found.append(f"{rel}:{call.lineno}: {call.func.id} names {ALLOWLIST}")
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                for kw in node.keywords:
-                    if (
-                        kw.arg == FLAG
-                        and isinstance(kw.value, ast.Constant)
-                        and kw.value.value is True
-                    ):
-                        found.append(
-                            f"{rel}:{node.lineno}: call passes {FLAG} as the constant True"
-                        )
-                if isinstance(node.func, ast.Name) and node.func.id in {"setattr", "delattr"}:
-                    if any(isinstance(a, ast.Constant) and a.value == ALLOWLIST for a in node.args):
-                        found.append(f"{rel}:{node.lineno}: {node.func.id} names {ALLOWLIST}")
-            elif isinstance(node, ast.Dict):
+            if isinstance(node, ast.Dict):
                 for key in node.keys:
                     if isinstance(key, ast.Constant) and key.value == FLAG:
                         found.append(f"{rel}:{node.lineno}: dict key {FLAG}")
