@@ -351,3 +351,87 @@ def test_a_hole_seen_mid_bar_and_resolved_at_the_bar_close_carries_both_notes() 
     first, second = resolved.coverage_note.split(" | ")
     assert first.startswith(prefix(at(12, 15), at(12, 29)))
     assert second.startswith(f"{NOTE_PREFIX}{at(12, 15).isoformat()}; ")
+
+
+# --------------------------------------------------------------------------- #
+# Review WR-01: the note stays bounded however many holes a long position crosses.
+# --------------------------------------------------------------------------- #
+
+# Annotation-text cap (an implementation constant, not a strategy parameter): the first
+# LISTED_CAP hole spans are written out, every further span is only counted.
+LISTED_CAP = 20
+
+
+def _single_minute_holes(hour: int, count: int) -> set[datetime]:
+    """`count` single-minute holes at minutes 1, 3, 5 ... of `hour` (each its own span)."""
+    return {at(hour, 1 + 2 * index) for index in range(count)}
+
+
+def _advance_bar_less(source: Any, end: datetime) -> PlanState:
+    state, _ = advance(
+        long_state(), source=source, start_exclusive=SIGNAL_CLOSE, end_inclusive=end, bar=None
+    )
+    return state
+
+
+def test_a_long_position_over_many_holes_lists_a_bounded_number_of_spans_and_counts_the_rest() -> (
+    None
+):
+    holes = _single_minute_holes(11, 30) | _single_minute_holes(12, 30)  # 60 spans
+    source = long_fill_source(mark_holes=holes)
+    end = close_of(at(13, 59))
+    one = _advance_bar_less(source, end)
+    control = _advance_bar_less(long_fill_source(), end)
+
+    note = one.coverage_note
+    assert note is not None
+    assert note.count(NOTE_PREFIX) == LISTED_CAP
+    assert "mark_price_1m_missing_40_further_spans_not_listed" in note
+    # Bounded: a 60-hole run is no longer than 21 single-hole notes.
+    single = _advance_bar_less(long_fill_source(mark_holes={at(11, 1)}), end).coverage_note
+    assert single is not None
+    assert len(note) < 22 * len(single)
+    # Annotate-only: nothing but the note moves.
+    assert dataclasses.replace(one, coverage_note=None) == control
+    assert one.fallback_applied is False
+
+
+def test_the_capped_note_is_path_independent_and_prefix_invariant() -> None:
+    holes = _single_minute_holes(11, 30) | _single_minute_holes(12, 30)
+    source = long_fill_source(mark_holes=holes)
+    one = _advance_bar_less(source, close_of(at(13, 59)))
+    stepped = long_state()
+    previous = SIGNAL_CLOSE
+    for end in (
+        close_of(at(10, 59)),
+        close_of(at(11, 59)),
+        close_of(at(12, 59)),
+        close_of(at(13, 59)),
+    ):
+        stepped, _ = advance(
+            stepped, source=source, start_exclusive=previous, end_inclusive=end, bar=None
+        )
+        previous = end
+    assert stepped.coverage_note == one.coverage_note
+    # Prefix-invariant: the spans listed after hour 11 alone are the first spans listed later.
+    after_11 = _advance_bar_less(source, close_of(at(11, 59))).coverage_note
+    assert after_11 is not None
+    assert "mark_price_1m_missing_10_further_spans_not_listed" in after_11
+    assert one.coverage_note is not None
+    assert after_11.split(" | ")[:LISTED_CAP] == one.coverage_note.split(" | ")[:LISTED_CAP]
+
+
+def test_exactly_the_cap_is_listed_in_full_and_one_more_span_is_counted() -> None:
+    at_cap = _advance_bar_less(
+        long_fill_source(mark_holes=_single_minute_holes(11, LISTED_CAP)), close_of(at(11, 59))
+    ).coverage_note
+    assert at_cap is not None
+    assert at_cap.count(NOTE_PREFIX) == LISTED_CAP
+    assert "further_spans_not_listed" not in at_cap
+    over = _advance_bar_less(
+        long_fill_source(mark_holes=_single_minute_holes(11, LISTED_CAP + 1)),
+        close_of(at(11, 59)),
+    ).coverage_note
+    assert over is not None
+    assert over.count(NOTE_PREFIX) == LISTED_CAP
+    assert "mark_price_1m_missing_1_further_spans_not_listed" in over
