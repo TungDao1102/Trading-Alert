@@ -319,6 +319,11 @@ def _grid_floor(value: datetime) -> datetime:
     return value.replace(second=0, microsecond=0)
 
 
+def _last_minute_open(bar: Candle) -> datetime:
+    """Open time of the last 1m minute of the strategy `bar` (its close minus 1 ms, floored)."""
+    return _grid_floor(bar.close_time_utc - timedelta(milliseconds=1))
+
+
 def _first_missing_mark_open(
     state: PlanState, *, mark: tuple[Candle, ...], bar: Candle
 ) -> datetime | None:
@@ -335,7 +340,7 @@ def _first_missing_mark_open(
     if entry_time is None:
         return None
     first = max(_grid_floor(entry_time), bar.open_time_utc)
-    last = (bar.close_time_utc - timedelta(milliseconds=1)).replace(second=0, microsecond=0)
+    last = _last_minute_open(bar)
     present = {minute.open_time_utc for minute in mark}
     expected = first
     while expected <= last:
@@ -487,7 +492,11 @@ def advance(
             span = _skipped_span(settled, mark_minute.open_time_utc)
             if span is not None:
                 new_notes.append(_skipped_note(span))
-            settled = mark_minute.open_time_utc
+            settled = (
+                mark_minute.open_time_utc
+                if settled is None
+                else max(settled, mark_minute.open_time_utc)
+            )
             current = _apply_legs(
                 current,
                 resolve_mark_minute(state=current, mark_minute=mark_minute, is_fill_minute=False),
@@ -495,6 +504,12 @@ def advance(
             )
             if current.phase == PHASE_CLOSED:
                 break
+        if current.phase == PHASE_OPEN and first_missing is not None:
+            # Minutes before the bar region are never covered by the closing-bar scan; the part
+            # from `first_missing` on stays the fallback's (no second note for it).
+            straddle = _skipped_span(settled, first_missing)
+            if straddle is not None:
+                new_notes.append(_skipped_note(straddle))
         if new_notes or settled != current.mark_settled_through_utc:
             current = replace(
                 current,
@@ -508,7 +523,12 @@ def advance(
             note = resolution.coverage_note
             if current.coverage_note is not None:
                 note = f"{current.coverage_note} | {note}"
-            current = replace(current, fallback_applied=True, coverage_note=note)
+            current = replace(
+                current,
+                fallback_applied=True,
+                coverage_note=note,
+                mark_settled_through_utc=_last_minute_open(bar),
+            )
             current = _apply_legs(current, resolution.legs, events)
 
     return current, tuple(events)
@@ -547,6 +567,9 @@ def finalize_at_data_end(
     through the data) is closed at the last mark close at or before `data_end_utc` with
     exit kind END_OF_DATA (a flagged exit, never SL or TP); that needs the minute `source`,
     and without one it raises `ValueError` so no open position can silently pass through.
+    The position is expected to have been advanced through `data_end_utc` first, as the
+    engine does; the whole minutes missing between its settle marker and the data end are
+    annotated in `coverage_note` (annotation only, plan 14-17).
     """
     _require_utc(data_end_utc, "data_end_utc")
     if state.phase == PHASE_CLOSED:
@@ -558,6 +581,14 @@ def finalize_at_data_end(
             )
         leg = end_of_data_exit(state=state, data_end_utc=data_end_utc, source=source)
         closed, exit_event = _apply_leg(state, leg)
+        # The last whole minute completed by the data end: a partial last minute is never
+        # reported missing (the nominal kline close is the open plus 59.999 s).
+        last_whole = _grid_floor(data_end_utc + timedelta(milliseconds=1) - _MINUTE)
+        trailing = _skipped_span(state.mark_settled_through_utc, last_whole + _MINUTE)
+        if trailing is not None:
+            closed = replace(
+                closed, coverage_note=_join_notes(closed.coverage_note, [_skipped_note(trailing)])
+            )
         return closed, (exit_event,)
     pending = replace(
         state,
