@@ -583,7 +583,7 @@ Plans:
 
 **Audit refs**: F-120, F-901, F-902, F-102, F-804, F-905, F-305, F-204, F-123, F-118, F-602, F-805, F-904; carry-over from Phase 6 (`.planning/phases/06-backtest-simulator-experiment-registry/06-VERIFICATION.md`)
 
-**Plans:** 16/16 plans executed
+**Plans:** 16/17 plans executed
 
 Plans:
 **Wave 1**
@@ -617,6 +617,9 @@ Plans:
 
 **Wave 8** *(blocked on Wave 7 completion)*
 - [x] 14-16-PLAN.md — Protocol v2.0.0 amendment, D052/D053, spec updates, ROADMAP criterion 2 rewording (D-39), void markers
+
+**Wave 9** *(gap closure: UAT test 6, review finding WR-09 remaining gap)*
+- [ ] 14-17-PLAN.md — Mark-price holes in windows with no strategy bar are detected and leave a coverage note that reaches the report (annotate-only, no result change for hole-free runs; what a hole should do to a trade is left to the user, OQ-1) (G-14-06, WR-09)
 
 ### Phase 15: Strategy Geometry Correction
 
