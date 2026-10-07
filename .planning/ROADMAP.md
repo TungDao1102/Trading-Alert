@@ -636,7 +636,7 @@ Readiness evidence: docs/research/GEOMETRY_AUDIT.md 'Re-run readiness (criterion
 
 **Audit refs**: F-301, F-113, F-909
 
-**Plans:** 15/15 plans executed
+**Plans:** 15/18 plans executed
 
 Plans:
 
@@ -678,6 +678,13 @@ Plans:
 
 **Wave 12** *(blocked on Wave 11 completion)*
 - [x] 15-15-PLAN.md — Criterion-4 readiness (smoke and census on v6 sets), final audit verdicts, D054 with regeneration inventory
+
+**Wave 13** *(gap closure: UAT G-15-10, G-15-11)*
+- [ ] 15-16-PLAN.md — D054 labels the three -v4 override values as comparison reference points, not evidence-backed parameters (G-15-10, docs only, no params edit)
+- [ ] 15-17-PLAN.md — Checkpoint (blocking-human, never auto-selected): may older sets without rationale tables start paper; run_paper_tick calls pin_stream_epoch before any feed event; src guard on the test-only flag (G-15-11)
+
+**Wave 14** *(blocked on Wave 13 completion)*
+- [ ] 15-18-PLAN.md — D054 item (i) records the paper-start gate and the user's decision; IN-01 fixed; file-by-file closure sweep (G-15-11)
 
 ### Phase 16: Paper Runtime Composition + SHADOW Approval Mode
 
