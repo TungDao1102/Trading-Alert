@@ -3,12 +3,12 @@ status: complete
 phase: 15-strategy-geometry-correction
 source: 15-01-SUMMARY.md .. 15-15-SUMMARY.md, 15-VERIFICATION.md
 started: 2026-10-07T00:00:00Z
-updated: 2026-10-07T00:00:00Z
+updated: 2026-10-07T12:00:00Z
 ---
 
 ## Current Test
 
-[testing complete — 2 issues recorded (G-15-10, G-15-11), gap-closure planning in progress]
+[testing complete - both gaps re-tested and resolved 2026-10-07; tests 8 and 9 stay skipped]
 
 Note: Phase 15 is a backend phase with no UI. At the user's request, Claude answered tests 1-8
 from evidence it ran itself (not from the user's own observation), the same way Phase 14 did.
@@ -74,21 +74,23 @@ reason: "Deferred follow-up: hoãn" (user chose to keep current behavior and def
 
 ### 10. Three -v4 override values (baseline-no-trade-v4 minimum_rr 100; baseline-simple-trend-v4 zone_tolerance_atr 1.0 and minimum_rr 0.5)
 expected: The user confirms what these values are, and D054 states it.
-result: issue
-reported: "Là mốc đối chứng, ghi rõ"
-severity: minor
+result: pass
+source: automated (claude), re-test after gap closure 15-16
+reported_before: "Là mốc đối chứng, ghi rõ" (severity minor, gap G-15-10)
+evidence: docs/DECISIONS.md D054 row now contains "comparison reference points", "not evidence-backed parameters" and the user's reply verbatim; tests/test_kill_gate_docs.py (12) passes; no file under params/ changed since 3df767a; PA-01..PA-08 ok
 
 ### 11. Paper-stream gate (pin_stream_epoch) is called where a paper stream starts
 expected: Starting a paper stream with a set that lacks rationale or has PLACEHOLDER values is refused.
-result: issue
-reported: "Nối ngay trong Phase 15"
-severity: major
+result: pass
+source: automated (claude), re-test after gap closure 15-17 + review fixes WR-01..WR-05
+reported_before: "Nối ngay trong Phase 15" (severity major, gap G-15-11)
+evidence: live call pin_stream_epoch over all 25 committed sets -> 25 refused (UnrationalizedParameterSet), 0 accepted, 0 other errors, PAPER_START_ALLOWLIST == (); allow_unrationalized="False"/1/None -> TypeError; tests/test_paper_start_gate.py (70) passes; run_paper_tick gate runs before any candle, account, constraint or cost parse (spies, WR-03)
 
 ## Summary
 
 total: 11
-passed: 7
-issues: 2
+passed: 9
+issues: 0
 pending: 0
 skipped: 2
 blocked: 0
@@ -97,7 +99,8 @@ blocked: 0
 
 - gap_id: G-15-10
   truth: "The three -v4 override values are labelled as comparison reference points, not evidence-backed parameters, in D054 and the rationale tables"
-  status: failed
+  status: resolved
+  resolved_by: 15-16 (commits 8f39735, 641da99)
   reason: "User reported: Là mốc đối chứng, ghi rõ"
   severity: minor
   test: 10
@@ -113,7 +116,8 @@ blocked: 0
 
 - gap_id: G-15-11
   truth: "run_paper_tick or the paper-start path calls pin_stream_epoch, so a set without rationale or with PLACEHOLDER values is refused"
-  status: failed
+  status: resolved
+  resolved_by: 15-17, 15-18, review fixes WR-01..WR-05 (commits 9c56347..a35558c, 97cf55c..6a12634, 549329b)
   reason: "User reported: Nối ngay trong Phase 15"
   severity: major
   test: 11
