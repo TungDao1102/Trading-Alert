@@ -344,3 +344,51 @@ def test_import_with_the_empty_allowlist_emits_no_error_or_warning() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
+
+
+# --------------------------------------------------------------------------- #
+# Guards over src/ (IN-01): the test-only flag and the allowlist stay untouchable.
+# --------------------------------------------------------------------------- #
+
+
+def _write(root: Path, rel: str, text: str) -> None:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_guard_helper_reports_every_seeded_violation(tmp_path: Path) -> None:
+    _write(tmp_path, "paper/x.py", "def f(g):\n    return g(allow_unrationalized=True)\n")
+    _write(tmp_path, "other/y.py", 'CFG = {"allow_unrationalized": True}\n')
+    _write(tmp_path, "other/z.py", "allow_unrationalized = 1\n")
+    _write(tmp_path, "other/w.py", "import freeze\nfreeze.PAPER_START_ALLOWLIST = ()\n")
+    _write(
+        tmp_path,
+        "paper/freeze.py",
+        "PAPER_START_ALLOWLIST = []\n"
+        "def rebind():\n"
+        "    global PAPER_START_ALLOWLIST\n"
+        "    PAPER_START_ALLOWLIST = ()\n"
+        "def poke(mod):\n"
+        '    setattr(mod, "PAPER_START_ALLOWLIST", ())\n',
+    )
+    found = _scan_src_violations(tmp_path)
+    joined = "\n".join(found)
+    assert "paper/x.py" in joined and "constant True" in joined
+    assert "other/y.py" in joined and "dict key" in joined
+    assert "other/z.py" in joined and "allow_unrationalized" in joined
+    assert "other/w.py" in joined and "PAPER_START_ALLOWLIST" in joined
+    assert "not a tuple literal" in joined
+    assert "global" in joined
+    assert "setattr" in joined
+    assert "rebound" in joined
+
+
+def test_guard_helper_accepts_the_allowed_forms(tmp_path: Path) -> None:
+    _write(tmp_path, "paper/freeze.py", "PAPER_START_ALLOWLIST: tuple[int, ...] = ()\n")
+    _write(tmp_path, "paper/loop.py", "def f(allow_unrationalized=False):\n    return 1\n")
+    assert _scan_src_violations(tmp_path) == []
+
+
+def test_no_module_under_src_enables_the_flag_or_touches_the_allowlist() -> None:
+    assert _scan_src_violations(REPO_ROOT / "src") == []
