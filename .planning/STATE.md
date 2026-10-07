@@ -4,17 +4,16 @@ milestone: v0.3
 current_phase: 14
 current_phase_name: Backtest Simulator Causality Rewrite
 status: planning
-stopped_at: Phase 15 complete, ready to plan Phase 14
-last_updated: "2026-10-07T02:59:00.761Z"
+stopped_at: Completed 14-17-PLAN.md
+last_updated: "2026-10-07T03:48:59.253Z"
 last_activity: 2026-10-07
 last_activity_desc: Phase 15 complete, transitioned to Phase 14
-state_head: 770401f3b9844f237e2417ca4cc8cc21ec946b3b
+state_head: fbd93dd16cb051d092b33a72bedb0534410e0af7
 progress:
   total_phases: 29
   completed_phases: 16
-  total_plans: 143
-  completed_plans: 142
-  percent: 54
+  total_plans: 144
+  completed_plans: 143
 milestone_name: milestone
 ---
 
@@ -32,9 +31,9 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 14 — Backtest Simulator Causality Rewrite
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-10-07 — Phase 15 complete, transitioned to Phase 14
+Plan: 17 of 17 plans executed
+Status: Phase 14: 17 of 17 plans executed, awaiting verification
+Last activity: 2026-10-07 — Plan 14-17 complete (mark-hole coverage notes, annotate-only; OQ-1 left to the user)
 
 Progress: [█████░░░░░] 54%
 
@@ -191,6 +190,7 @@ Progress: [█████░░░░░] 54%
 | Phase 15 P16 | 10 min | 1 tasks | 2 files |
 | Phase 15 P17 | 6 min | 3 tasks | 8 files |
 | Phase 15 P18 | 8 min | 2 tasks | 3 files |
+| Phase 14 P17 | 12 min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -463,6 +463,7 @@ Recent decisions affecting current work:
 - [Phase 15]: D054: Phase 15 geometry correction recorded once with the compiled regeneration inventory; no amendment of RESEARCH_PROTOCOL v2.0.0 needed; re-run readiness verified on the Phase-14 engine for all three baseline-v6 sets (equal digests, census invariant_violations 0)
 - [Phase 15]: D054 records the user's 2026-10-07 answer: the three -v4 override values are comparison reference points, not evidence-backed parameters; in-file DECISION/D054 label stays (hash-locked)
 - [Phase 15]: 15-17: run_paper_tick runs the stream-start gate (pin_stream_epoch) at its top before any candle is parsed; sets without rationale tables need an exact-hash PAPER_START_ALLOWLIST entry; allowlist ships empty (checkpoint 15-17-01 Option B, D-27 unchanged)
+- [Phase 14]: 14-17: mark holes outside a closing-bar fallback are annotated in coverage_note only (annotate-only); OQ-1 (count/exclude/void) left to the user; SIMULATOR_SEMANTICS_VERSION stays 2.0.0
 
 ### Pending Todos
 
@@ -517,6 +518,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-07T02:21:05.867Z
-Stopped at: Phase 15 complete, ready to plan Phase 14
+Last session: 2026-10-07T03:48:58.205Z
+Stopped at: Completed 14-17-PLAN.md
 Resume file: None
