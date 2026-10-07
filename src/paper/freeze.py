@@ -81,6 +81,7 @@ from src.domain.rationale import (
 from src.domain.registry import (
     REGISTRY_ROOT,
     ParameterSet,
+    _check_registry_segment,
     _parse_and_validate,
 )
 
@@ -291,6 +292,8 @@ def _recompute_parameter_set_hash(
     hash matches what `load_parameter_set` would compute (D-04
     byte-stability).
     """
+    _check_registry_segment(strategy_id, "strategy_id")
+    _check_registry_segment(parameter_set_id, "parameter_set_id")
     path = registry_root / strategy_id / f"{parameter_set_id}.toml"
     if not path.is_file():
         raise FileNotFoundError(f"registry file missing: {path}")
@@ -321,6 +324,8 @@ def _load_parameter_set_with_root(
     """
     from src.domain.registry import UnregisteredParameterSet
 
+    _check_registry_segment(strategy_id, "strategy_id")
+    _check_registry_segment(parameter_set_id, "parameter_set_id")
     path = registry_root / strategy_id / f"{parameter_set_id}.toml"
     if not path.is_file():
         raise UnregisteredParameterSet(f"{strategy_id}/{parameter_set_id}")
