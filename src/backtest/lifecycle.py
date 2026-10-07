@@ -17,6 +17,12 @@ stop); plan 14-02 added simulated-minute expiry, CANDLE_CLOSE invalidation, `can
 and the resting half of `finalize_at_data_end`. The TP1/TP2 ladder, stop gaps and the
 OPEN-state END_OF_DATA close land in plan 14-07.
 
+Plan 14-17 adds the mark-hole annotation: while a position is open, a gap of more than one
+minute between consecutive walked mark minutes is recorded in `PlanState.coverage_note`
+(annotation only: nothing is resolved, repriced or counted, and `fallback_applied` is
+untouched). The internal marker `mark_settled_through_utc` tracks how far mark coverage is
+settled and is never copied into a record.
+
 The module imports NOTHING from Polars/pandas/NumPy/Binance SDK/
 SQLAlchemy/Pydantic — stdlib + Decimal + `src/core/_decimal.py` only,
 mirroring the Phase-4 D-10 / Phase-5 D-05 purity precedent.
@@ -105,6 +111,10 @@ class PlanState:
     exit_price: Decimal | None = None
     exit_time_utc: datetime | None = None
     resolved_at_utc: datetime | None = None
+    # Open time of the last mark minute whose coverage is settled for an OPEN position
+    # (walked, resolved by a bar fallback, or the minute before the fill). Internal: never
+    # copied into a record (plan 14-17).
+    mark_settled_through_utc: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.direction not in _DIRECTIONS:
@@ -200,6 +210,7 @@ def _fill(state: PlanState, minute: Candle) -> tuple[PlanState, LifecycleEvent]:
         entry_time_utc=minute.close_time_utc,
         remaining_quantity=state.fill_quantity,
         entry_kind=entry_kind,
+        mark_settled_through_utc=minute.open_time_utc - _MINUTE,
     )
     event = LifecycleEvent(
         kind=EVENT_FILL,
@@ -334,6 +345,30 @@ def _first_missing_mark_open(
     return None
 
 
+def _skipped_span(
+    settled: datetime | None, next_open: datetime
+) -> tuple[datetime, datetime] | None:
+    """First and last whole mark minute missing between `settled` and `next_open`, if any."""
+    if settled is None or next_open - settled <= _MINUTE:
+        return None
+    return settled + _MINUTE, next_open - _MINUTE
+
+
+def _skipped_note(span: tuple[datetime, datetime]) -> str:
+    """Coverage note for minutes with no mark price outside any bar-close fallback (14-17)."""
+    first, last = span
+    return (
+        f"mark_price_1m_missing_from_{first.isoformat()}_to_{last.isoformat()}; "
+        "stop and targets not evaluated minute by minute for the missing minutes"
+    )
+
+
+def _join_notes(existing: str | None, extra: list[str]) -> str | None:
+    """Join an existing coverage note and new notes with ' | '; None when both are empty."""
+    parts = ([existing] if existing else []) + extra
+    return " | ".join(parts) if parts else None
+
+
 def advance(
     state: PlanState,
     *,
@@ -359,7 +394,9 @@ def advance(
     OPEN: mark minutes opening at or after the entry time are walked through
     `resolve_mark_minute` (stop first, TP1 partial, TP2). When `bar` closes the window and
     the bar has a hole in its mark minutes, the walk stops at the hole and the rest of the bar
-    resolves once at the bar close through `resolve_fallback_hour` (D-12, D-33).
+    resolves once at the bar close through `resolve_fallback_hour` (D-12, D-33). A hole
+    outside a closing-bar fallback (for example an hour in which the symbol has no strategy
+    bar) is only annotated in `coverage_note`; nothing is resolved or repriced (plan 14-17).
     """
     if state.phase == PHASE_CLOSED:
         return state, ()
@@ -399,6 +436,8 @@ def advance(
                         ),
                         events,
                     )
+                    if current.phase == PHASE_OPEN:
+                        current = replace(current, mark_settled_through_utc=fill_mark.open_time_utc)
                     break
                 break
             if is_touch_only(
@@ -438,11 +477,17 @@ def advance(
                 bar=bar,
             )
         )
+        settled = current.mark_settled_through_utc
+        new_notes: list[str] = []
         for mark_minute in mark:
             if mark_minute.open_time_utc < current.entry_time_utc:
                 continue
             if first_missing is not None and mark_minute.open_time_utc >= first_missing:
                 break  # the rest of the bar resolves at the bar close, not minute by minute
+            span = _skipped_span(settled, mark_minute.open_time_utc)
+            if span is not None:
+                new_notes.append(_skipped_note(span))
+            settled = mark_minute.open_time_utc
             current = _apply_legs(
                 current,
                 resolve_mark_minute(state=current, mark_minute=mark_minute, is_fill_minute=False),
@@ -450,6 +495,12 @@ def advance(
             )
             if current.phase == PHASE_CLOSED:
                 break
+        if new_notes or settled != current.mark_settled_through_utc:
+            current = replace(
+                current,
+                mark_settled_through_utc=settled,
+                coverage_note=_join_notes(current.coverage_note, new_notes),
+            )
         if current.phase == PHASE_OPEN and bar is not None and first_missing is not None:
             resolution = resolve_fallback_hour(
                 state=current, bar=bar, first_missing_open_utc=first_missing

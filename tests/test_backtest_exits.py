@@ -22,6 +22,7 @@ min notional 5; SL 98.00, TP1 104.00, TP2 108.00; filled 0.5):
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -644,7 +645,10 @@ def test_a_window_that_ends_mid_bar_never_resolves_a_hole() -> None:
         end_inclusive=close_of(at(12, 30)),
         bar=None,
     )
-    assert mid == open_state  # nothing resolved, nothing flagged
+    # Nothing resolved, nothing flagged; only the settle marker advanced (12:00-12:14 walked,
+    # the hole starts 12:15).
+    assert mid.mark_settled_through_utc == at(12, 14)
+    assert replace(mid, mark_settled_through_utc=open_state.mark_settled_through_utc) == open_state
     assert mid_events == ()
     bar12 = strategy_bar(12, o="101.00", h="101.50", low="97.90", c="99.00")
     resolved, _ = advance(
