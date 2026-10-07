@@ -475,13 +475,12 @@ Recent decisions affecting current work:
 ### Blockers/Concerns
 
 - Paper forward observation (Phase 7) is wall-clock bound (3–6 months) — dominates calendar regardless of code velocity
-- OI history irrecoverable outside ~30-day window — OI collector must start in Phase 2 day one
+- OI history irrecoverable outside ~30-day window — OI collector must start in Phase 2 day one (the collector exists in `src/data`; the dated commitment of D059 item 4 is under Commitments with dates)
 - Algo-Order field details MEDIUM confidence — re-verify against current Binance docs before Phase 9 wiring
-- ApprovalResult value set is a planner assumption (D-10) — user confirmation pending
-- evaluate_risk currently passes absolute amounts directly; Phase-7+ caller must convert registry rates to absolute amounts before calling
+- evaluate_risk takes absolute amounts: the backtest ledger (`src/backtest/ledger.py`) and the paper loop (`src/paper/loop.py`) convert registry rates through `resolve_absolute_thresholds`; the live caller (live risk-input producer) is owned by Phase 24 success criterion 1
 - WS-connect gap (07-04 follow-up) blocks soak start; Phase 8 construction can proceed in parallel
-- 08-02 LIVE-TAP GATE: TELEGRAM_BOT_TOKEN + TELEGRAM_AUTHORIZED_CHAT_ID must be provisioned and a real APPROVE/SKIP tap + unknown-chat rejection must be operator-confirmed before plan 08-02 can be marked status: complete (currently halted)
-- Phase 09 Plan 04 task 3 (testnet rehearsal plus credential provisioning plus LIVE-TAP clearance GATE) is gate=blocking-human and cannot be executed or fabricated by the executor — awaiting operator attestation with real testnet order ids, RESEARCH A1 verdict, credential provisioning confirmation, and Telegram APPROVE/SKIP/unknown-chat tap evidence
+- 08-02 LIVE-TAP GATE: partly cleared. Real APPROVE and SKIP taps were observed (`09-DEMO-REHEARSAL-FINDINGS.md`, dry-run `taps`: SKIP and APPROVE passed); the unknown-chat tap is still NOT_REHEARSED and the live Telegram check is deferred to Phases 23/24 (08-VERIFICATION, accepted by the operator 2026-10-04; ROADMAP Phase 24 item G2-014)
+- Phase 09 Plan 04 task 3 (Demo rehearsal plus credential provisioning plus LIVE-TAP clearance) is only partly done: the Demo runs of 2026-10-05 stopped at SL placement with -4509 (D055, execution model OPEN) and credential provisioning is not attested, so EXEC-01 and OPS-02 stay Pending until real Demo evidence exists (`09-DEMO-REHEARSAL-FINDINGS.md`); owners Phases 24/25
 
 ### Quick Tasks Completed
 
@@ -506,18 +505,40 @@ Items acknowledged and deferred at milestone close, most recent first:
 |----------|------|--------|-------------|-----------|
 | Pending decision | Maker/post-only entries instead of taker (operator idea 2026-10-04). D036 currently says no GTX in V1 and entry fee modeled as taker; changing it needs a new decision plus Phase 12 and Phase 14 changes. Details in `.planning/LIVE-TEST-2026-10-04.md` | Awaiting operator | 2026-10-04 | v0.3 |
 | Live test findings | Telegram and Binance Demo probe: findings and owners (Phases 16, 22, 23, 24) recorded in `.planning/LIVE-TEST-2026-10-04.md` and ROADMAP | Recorded | 2026-10-04 | v0.3 |
-| Phase 6 carry-over | Gap G3: entry-expiry check uses the fixture's single `now_utc` (`simulator.py` ~758/~881), not the simulated bar time. Written into ROADMAP Phase 14 success criterion 6 | Deferred to Phase 14 | 2026-10-04 | v0.3 |
 | Phase 7 carry-over | Live WS ingestion (`PaperWsAdapter` missing `await`, `soak_smoke.log` ws_subscribe=BLOCKED), runnable paper process, SC3 soak evidence (`pinned_epoch.json`, `registry_diff.jsonl` all CLEAN). PAPER-01..03 stay Pending. Written into ROADMAP Phase 16 success criteria 7-9 | Deferred to Phase 16 | 2026-10-04 | v0.3 |
 | Phase 8 carry-over | Live Telegram callback check, read-only Binance reconcile, real-stack RUNBOOK drill | Deferred to Phases 20/23/24/25 | 2026-10-04 | v0.3 |
 | Phase 9 carry-over | Testnet rehearsal (needs signed-request adapter and a trading-permission demo key), 6 unconfirmed exchange facts in 09-REVIEW-FIX.md (confirm before Phase 24 wiring), hard-coded HEADROOM_LIMIT=200 | Deferred to Phases 24/25 | 2026-10-04 | v0.3 |
 | Phase 10 carry-over | Kill-gate review findings WR-01, WR-06, WR-12, WR-13 (decide before the first report on real evidence), WR-10 (enable flow) | Deferred to Phase 26 / Phase 24 | 2026-10-04 | v0.3 |
 | Phase 11 carry-over | Re-confirm ALGO_UPDATE wording and the 24h WebSocket lifetime against Binance pages | Deferred to before Phase 18 | 2026-10-04 | v0.3 |
 | Phase 2 carry-over | Backup drill: PostgreSQL dump and restore proof (operator hand-copied data/raw on 2026-10-04) | Deferred to Phase 13.1 remote drill | 2026-10-04 | v0.3 |
-| Rate-to-absolute conversion | Phase-7+ caller converts registry rates to absolute amounts before calling check_portfolio | Deferred to Phase 7+ | 2026-09-25 | v0.3 |
-| Enum promotion | setup_type, regime, order_role, side, position_side, order_type, time_in_force, event_type, entity_type | Deferred to Phase 4 | 2026-09-22 | v0.3 |
-| trades table | Logical user-executed trade entity (DATA_MODEL §2.6) | Deferred to Phase 5 | 2026-09-22 | v0.3 |
-| experiment_runs table | Backtest/research reproducibility (DATA_MODEL §2.12) | Deferred to Phase 6 | 2026-09-22 | v0.3 |
-| Registry DB mirror | DB table mirroring registry rows for experiment-join queryability | Deferred to Phase 6 (files canonical) | 2026-09-22 | v0.3 |
+| Enum promotion | Partly done: `SetupType`, `OrderRole` and `Direction` (side, position_side) exist in `src/domain/enums.py`. Still plain values: regime, order_type, time_in_force; event_type and entity_type are validated strings in `src/domain/journal.py`. Phase 4 is closed; no owner phase | Remaining part has no owner | 2026-09-22 | v0.3 |
+| trades table | Logical user-executed trade entity (DATA_MODEL §2.6) | Not built in V1 (D045 item a) | 2026-09-22 | v0.3 |
+| experiment_runs table | Backtest/research reproducibility (DATA_MODEL §2.12) | Not built in V1 (D045 item a, `docs/data/DATA_MODEL.md` §2.12) | 2026-09-22 | v0.3 |
+| Registry DB mirror | DB table mirroring registry rows for experiment-join queryability | Not built; parameter-set files stay canonical (no registry table in `src/db/models.py`); Phase 6 is closed and no phase owns it | 2026-09-22 | v0.3 |
+
+## Open user decisions (2026-10-07)
+
+Recorded as open; none is decided here. Each line names where the item is owned.
+
+- D055 execution model (protective stop before or after the entry fill, -4509): OPEN, waits for the Phase 18 Demo probe; `docs/DECISIONS.md` D055, ROADMAP Phase 18 and the D055 items in Phases 24 and 25.
+- OQ-1 (how a trade held through mark-price holes counts in the evidence): `.planning/phases/14-backtest-causality-rewrite/deferred-items.md`; ROADMAP Backlog 999.2 (Phase 16 inherited item D052-open covers the related `modeled_costs_per_unit` question).
+- VPS provisioning date: not set; until a VPS exists the collector runs on a dev machine (`.planning/phases/13.1-deployment-ci/13.1-CONTEXT.md`, 13.1-OPEN-DECISIONS UAT 8-10, D042, D050).
+- Container registry push and deploy on tag: needs a registry and VPS decision; no owner phase (`13.1-CONTEXT.md` Deferred Ideas, D050).
+- Legacy Parquet partitions with a different Decimal scale: repair is optional, operator decision, no deadline (`.planning/phases/13-research-data-foundation-fixes/deferred-items.md` item 3, `scripts/repair_parquet_scale.py`).
+- Phase 13.1 WR-05 (who administers the host after hardening), WR-06 (split `env_file` per service; ROADMAP Phase 24 G3-029) and CR-01 (`--size-only` on the Parquet push; ROADMAP Phase 26 G3-030): `.planning/phases/13.1-deployment-ci/13.1-OPEN-DECISIONS.md`.
+- Which plan carries the research protocol v2.1.0 amendment of D057 (30-trade G5 floor): not yet named; D057 is not in force until it lands (ROADMAP Phase 26 item D057).
+- Host that runs the hourly paper freeze check: ROADMAP Phase 16 item G2-009.
+- Whether the kill-gate review items WR-01, WR-06, WR-12 and WR-13 move ahead of Phase 26: ROADMAP Phase 16 item G2-038.
+- Per-bar verdict parity between paper and backtest, or recording the limitation: ROADMAP Phase 16 item G2-008.
+- Values of the reconcile cadence, stale-feed and WS-silence thresholds (T-06) and the WR-07 ordering rules (G2-026): ROADMAP Phase 20.
+- Sibling-approval expiry rule for `uq_approvals_one_decided_per_plan`: ROADMAP Phase 23 item G4-042.
+- `asyncio.to_thread` or an async pool for the synchronous PostgreSQL store, or a recorded decision: ROADMAP Phase 24 item G4-040.
+- Research-gate as a required status check on master, or a recorded waiver: ROADMAP Phase 26 item G1-001.
+
+## Commitments with dates
+
+- OI collector must be running and writing OI data successfully no later than 2026-10-08 (user commitment, D059 item 4); a deployment that does not ingest does not count, and the repository cannot enforce the date.
+- Decisions D055-D059 were recorded on 2026-10-07 in `docs/DECISIONS.md`.
 
 ## Session Continuity
 
