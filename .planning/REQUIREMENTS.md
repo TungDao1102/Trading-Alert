@@ -49,9 +49,9 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 ### Paper & Forward Validation
 
-- [ ] **PAPER-01**: Realtime paper engine ingests WS market data with warm-up/reconnect/resync, evaluates closed candles only, and journals gaps without fabricating signals
-- [ ] **PAPER-02**: Paper loop records system vs user-executed vs opportunity (skipped/expired) attribution with signal/approve/order/fill timestamps
-- [ ] **PAPER-03**: Forward evidence accumulates over wall-clock observation (3–6 months envelope) with no tuning on the paper stream
+- [ ] **PAPER-01**: Realtime paper engine ingests WS market data with warm-up/reconnect/resync, evaluates closed candles only, and journals gaps without fabricating signals *(Originally mapped to Phase 7; Phase 16 closes it when Phase 16 criteria 1, 2 and 7 hold, D061 item J.)*
+- [ ] **PAPER-02**: Paper loop records system vs user-executed vs opportunity (skipped/expired) attribution with signal/approve/order/fill timestamps *(Originally mapped to Phase 7; Phase 16 closes it when Phase 16 criteria 3 and 5 hold, D061 item J.)*
+- [ ] **PAPER-03**: Forward evidence accumulates over wall-clock observation (3–6 months envelope) with no tuning on the paper stream *(Originally mapped to Phase 7. D061 item J: Phase 16 starts the stream with a trial soak and leaves this Pending; the long soak keeps accumulating through Phases 18 to 25 and Phase 26 verifies the observation window and the no-tuning rule and closes it. Closing it on a trial soak would be false against the text above.)*
 
 ### Approval
 
@@ -140,9 +140,9 @@ Evidence levels (a requirement can sit at any one; they do not imply each other)
 | BKTS-01 | Phase 6 | Complete |
 | BKTS-02 | Phase 6 | Complete |
 | BKTS-03 | Phase 16 | Pending |
-| PAPER-01 | Phase 7 | Pending |
-| PAPER-02 | Phase 7 | Pending |
-| PAPER-03 | Phase 7 | Pending |
+| PAPER-01 | Phase 16 | Pending |
+| PAPER-02 | Phase 16 | Pending |
+| PAPER-03 | Phase 26 | Pending |
 | APRV-01 | Phase 8 | Complete |
 | APRV-02 | Phase 8 | Complete |
 | EXEC-01 | Phase 9 | Pending |
