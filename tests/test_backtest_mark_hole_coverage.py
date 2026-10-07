@@ -323,34 +323,69 @@ def test_a_noted_closed_trade_passes_the_record_validator() -> None:
     validate_trade_record(record_of(final), data_start_utc=SIGNAL_CLOSE, data_end_utc=at(14))
 
 
-def test_a_hole_seen_mid_bar_and_resolved_at_the_bar_close_carries_both_notes() -> None:
-    # Documents the accepted double note: a mid-bar window sees the hole (continuity note) and
-    # the later closing-bar window resolves the same hole by fallback (fallback note).
+def _mid_then_closing(
+    source: Any, bars_before: list[Any], mid_end: datetime, closing_bar: Any
+) -> PlanState:
+    """Walk `bars_before`, then a mid-bar window ending at `mid_end`, then the closing bar."""
+    state, _ = walk_hours(long_state(), source, bars_before)
+    start = bars_before[-1].close_time_utc
+    state, _ = advance(state, source=source, start_exclusive=start, end_inclusive=mid_end, bar=None)
+    state, _ = advance(
+        state,
+        source=source,
+        start_exclusive=mid_end,
+        end_inclusive=closing_bar.close_time_utc,
+        bar=closing_bar,
+    )
+    return state
+
+
+def test_a_hole_seen_mid_bar_and_resolved_at_the_bar_close_carries_one_note() -> None:
+    # Review WR-03: a mid-bar window that walks past the hole must not leave a second note for
+    # minutes the closing-bar fallback then claims; the note is the same however windows are cut.
     holes = {at(12, m) for m in range(15, 30)}
     source = long_fill_source(mark_holes=holes)
-    open_state, _ = walk_hours(long_state(), source, [flat_bar(10), flat_bar(11)])
-    mid, _ = advance(
-        open_state,
-        source=source,
-        start_exclusive=flat_bar(11).close_time_utc,
-        end_inclusive=close_of(at(12, 30)),
-        bar=None,
-    )
     bar12 = strategy_bar(12, o="101.00", h="101.50", low="97.90", c="99.00")
-    resolved, _ = advance(
-        mid,
-        source=source,
-        start_exclusive=close_of(at(12, 30)),
-        end_inclusive=bar12.close_time_utc,
-        bar=bar12,
-    )
-    assert resolved.exit_kind == "SL"
-    assert resolved.exit_price == Decimal("98.00")
-    assert resolved.exit_time_utc == BAR_12_CLOSE
-    assert resolved.coverage_note is not None
-    first, second = resolved.coverage_note.split(" | ")
-    assert first.startswith(prefix(at(12, 15), at(12, 29)))
-    assert second.startswith(f"{NOTE_PREFIX}{at(12, 15).isoformat()}; ")
+    via_mid = _mid_then_closing(source, [flat_bar(10), flat_bar(11)], close_of(at(12, 30)), bar12)
+    direct, _ = walk_hours(long_state(), source, [flat_bar(10), flat_bar(11), bar12])
+    assert via_mid.exit_kind == "SL"
+    assert via_mid.exit_price == Decimal("98.00")
+    assert via_mid.exit_time_utc == BAR_12_CLOSE
+    assert via_mid.coverage_note is not None
+    assert via_mid.coverage_note.count(NOTE_PREFIX) == 1
+    assert via_mid.coverage_note.startswith(f"{NOTE_PREFIX}{at(12, 15).isoformat()}; ")
+    assert via_mid == direct
+
+
+def test_a_mid_bar_note_that_straddles_the_bar_open_is_cut_back_to_the_part_before_the_bar() -> (
+    None
+):
+    # Holes 11:50-12:05 straddle the open of bar 12. A mid-bar window walks 12:06 and notes the
+    # whole span; the closing-bar window then claims 12:00 on by fallback, so the note must end
+    # up as in the direct run: 11:50-11:59 plus the fallback note.
+    holes = {at(11, m) for m in range(50, 60)} | {at(12, m) for m in range(0, 6)}
+    source = long_fill_source(mark_holes=holes)
+    via_mid = _mid_then_closing(source, [flat_bar(10)], close_of(at(12, 30)), QUIET_BAR_12)
+    direct, _ = walk_hours(long_state(), source, [flat_bar(10), QUIET_BAR_12])
+    assert via_mid.coverage_note is not None
+    first, second = via_mid.coverage_note.split(" | ")
+    assert first.startswith(prefix(at(11, 50), at(11, 59)))
+    assert second.startswith(f"{NOTE_PREFIX}{at(12, 0).isoformat()}; resolved_at_strategy_bar")
+    assert via_mid == direct
+
+
+def test_a_mid_bar_note_wholly_before_the_bar_region_is_kept() -> None:
+    # 11:20-11:29 lies in an hour with no strategy bar, before the bar-12 region; the fallback
+    # claims only 12:40 on, so the earlier note stays untouched.
+    holes = {at(11, m) for m in range(20, 30)} | {at(12, m) for m in range(40, 50)}
+    source = long_fill_source(mark_holes=holes)
+    via_mid = _mid_then_closing(source, [flat_bar(10)], close_of(at(12, 30)), QUIET_BAR_12)
+    direct, _ = walk_hours(long_state(), source, [flat_bar(10), QUIET_BAR_12])
+    assert via_mid == direct
+    assert via_mid.coverage_note is not None
+    first, second = via_mid.coverage_note.split(" | ")
+    assert first.startswith(prefix(at(11, 20), at(11, 29)))
+    assert second.startswith(f"{NOTE_PREFIX}{at(12, 40).isoformat()}; resolved_at_strategy_bar")
 
 
 # --------------------------------------------------------------------------- #
