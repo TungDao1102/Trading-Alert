@@ -530,7 +530,7 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 - Sibling-approval expiry rule for `uq_approvals_one_decided_per_plan`: ROADMAP Phase 23 item G4-042.
 - `asyncio.to_thread` or an async pool for the synchronous PostgreSQL store, or a recorded decision: ROADMAP Phase 24 item G4-040.
 - Research-gate as a required status check on master, or a recorded waiver: ROADMAP Phase 26 item G1-001.
-- Phase 16 values and locations (D061): the numbers of the paper exit criteria (trial soak length, runtime coverage minimum, time-of-day rule and the others), the durable location for `pinned_epoch.json` and `registry_diff.jsonl`, and the sudo scope for WR-05 (D062); the checkpoints of the closure chain (hypothesis and parameter grid, research run authorization, exact-hash allowlist entry) are decided by the user when Phase 16 executes.
+- Phase 16 open items (D061): the durable location for `pinned_epoch.json` and `registry_diff.jsonl` (the plan proposes, the user approves) and the closure-chain checkpoints (hypothesis and parameter grid approval, research run authorization, exact-hash allowlist entry) decided when Phase 16 executes; the paper exit values were ratified on 2026-10-07 (D061 item D).
 - Decided 2026-10-07 and removed from this list: freeze-check host, per-bar parity and kill-gate WR timing (D061 items A, B, F), the plan that carries protocol v2.1.0 (done, D060) and WR-05 and CR-01 (D062).
 
 ## Commitments with dates
