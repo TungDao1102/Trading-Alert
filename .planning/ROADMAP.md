@@ -776,7 +776,7 @@ Plans:
 
 **Success Criteria**:
 1. A user-data stream is implemented: listenKey lifecycle; ORDER_TRADE_UPDATE, ALGO_UPDATE (including `o.rm`) and ACCOUNT_UPDATE handling; the `/private` WS URL. It feeds `fold_fills` and reconciliation. REST is the fallback (F-104, F-054).
-2. A demo or testnet probe records the actual not-found codes for GET order and GET algoOrder. Adapter mappings are keyed on `status_code`, including -2011, -2013, -2019, -4164, -1021 and -2021 (F-501, F-205, F-503, F-502).
+2. A demo or testnet probe records the actual not-found codes for GET order and GET algoOrder. The same probe also records two Phase 17 facts that the live docs do not state (docs/SOURCES.md, "Facts verified for Phase 17"): the error code returned for a duplicate `clientAlgoId` on a new algo order (-4116 is documented only for `clientOrderId`), and whether an id is accepted again once the first order is FILLED or CANCELED. Phase 17's `BinanceSemanticsFakeAdapter` is corrected if the probe disagrees with it. Adapter mappings are keyed on `status_code`, including -2011, -2013, -2019, -4164, -1021 and -2021 (F-501, F-205, F-503, F-502).
 3. The client configuration supports:
    - explicit REST timeouts;
    - API key loading;
