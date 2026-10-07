@@ -1,7 +1,7 @@
 ---
 phase: 15-strategy-geometry-correction
-verified: 2026-10-06T00:00:00Z
-status: human_needed
+verified: 2026-10-07T02:54:22Z
+status: passed
 score: 4/4 must-haves verified
 covered_files:
   - .planning/phases/15-strategy-geometry-correction/15-01-PLAN.md
@@ -34,6 +34,12 @@ covered_files:
   - .planning/phases/15-strategy-geometry-correction/15-14-SUMMARY.md
   - .planning/phases/15-strategy-geometry-correction/15-15-PLAN.md
   - .planning/phases/15-strategy-geometry-correction/15-15-SUMMARY.md
+  - .planning/phases/15-strategy-geometry-correction/15-16-PLAN.md
+  - .planning/phases/15-strategy-geometry-correction/15-16-SUMMARY.md
+  - .planning/phases/15-strategy-geometry-correction/15-17-PLAN.md
+  - .planning/phases/15-strategy-geometry-correction/15-17-SUMMARY.md
+  - .planning/phases/15-strategy-geometry-correction/15-18-PLAN.md
+  - .planning/phases/15-strategy-geometry-correction/15-18-SUMMARY.md
   - docs/research/GEOMETRY_AUDIT.md
   - params/breakout-retest/baseline-v6.toml
   - params/range-mr/baseline-v6.toml
@@ -46,27 +52,33 @@ covered_files:
   - src/domain/rationale.py
   - src/domain/registry.py
   - src/paper/freeze.py
-covered_digest: "v2:sha256:577659e88a84d1166ea1f6cededd02c3408c3042b8f6c053589c020e79d1d7dd"
+  - src/paper/loop.py
+covered_digest: "v2:sha256:63409e6f2d12b6ed1bfc00a6ffa161d34b812b326180f4e5c7cbd38c2b0ac069"
 behavior_unverified: 0
 overrides_applied: 0
-human_verification:
-  - test: "Decide whether the planner should also reject a TP1 that lies on the profit side of the entry reference but inside the far half of the entry zone"
-    expected: "Either a recorded decision to keep the current rule (TP1 only has to be strictly on the profit side of the entry_ref midpoint) or a one-line tightening of _geometry_rejection in src/core/planner.py with a test"
-    why_human: "Safety/geometry rule with money impact. D054 item (g) and the 15-04 observation deliberately left it for a user decision. The verifier did not choose it."
-  - test: "Confirm the DECISION/D054 basis recorded for the three -v4 override values (baseline-no-trade-v4 minimum_rr 100; baseline-simple-trend-v4 zone_tolerance_atr 1.0 and minimum_rr 0.5)"
-    expected: "User accepts the DECISION/D054 labels, or names a different basis"
-    why_human: "Parameter provenance is a parameter choice. The 15-08 checkpoint text gave no basis for these three values; the basis was taken from the wording of plan 15-09 and was flagged in the 15-08 SUMMARY for user attention. D054 records them as ratified with the single reply 'ratify', which the verifier can only read in the SUMMARY, not independently confirm."
-  - test: "Acknowledge that baseline-v6 (16/29, 17/31, 22/36 PLACEHOLDER keys) and both -v4 sets (15 and 14 PLACEHOLDER keys) are research-only, and that the PLACEHOLDER refusal gate has no production caller yet (review IN-01)"
-    expected: "Accepted for Phase 15; Phase 16 start-up must call pin_stream_epoch (or an equivalent) so the refusal is enforced where a stream starts"
-    why_human: "Accepting PLACEHOLDER-grade parameter values and deferring gate wiring is a risk acceptance. pin_stream_epoch refuses these sets when called, but nothing under src/ calls it, and run_paper_tick loads any set."
+re_verification:
+  previous_status: human_needed
+  previous_score: 4/4
+  gaps_closed:
+    - "Human item 2 (-v4 override basis): user reply recorded verbatim in D054 (15-UAT.md test 10, plan 15-16)"
+    - "Human item 3 (PLACEHOLDER sets / unwired gate, review IN-01): gate wired into run_paper_tick with an empty exact-hash allowlist by user decision (15-UAT.md test 11, checkpoint 15-17-01, plans 15-17 and 15-18)"
+    - "Human item 1 (TP1 in far half of entry zone): user decision 'hoãn' recorded (15-UAT.md test 9, ROADMAP Backlog 999.1); current rule kept for now"
+  gaps_remaining: []
+  regressions: []
+coincidental_reliance_items:
+  - truth: "Criterion 3 enforcement: a set without rationale or with PLACEHOLDER keys cannot start a paper stream (run_paper_tick gate)"
+    reason: undeclared-precondition
+    harden: "The rationale/allowlist verdict is formed from the file under src.paper.freeze.REGISTRY_ROOT while the loop runs the set loaded under src.domain.registry.REGISTRY_ROOT. Both names bind the same Path object in production, and the loop's hash-equality check catches any [parameters] divergence, but nothing enforces that the two roots are equal; a file differing only in [rationale] tables under a rebound root would be judged on the other file (open Info IN-05 of 15-REVIEW-PAPER-GATE.md). Resolve the root at call time or pass the loaded path into pin_stream_epoch."
 ---
 
 # Phase 15: Strategy Geometry Correction Verification Report
 
 **Phase Goal:** Each family's implemented geometry matches its family sheet and is economically sane before any research run is trusted.
-**Verified:** 2026-10-06
-**Status:** human_needed (all four ROADMAP criteria are met in the code; three decisions are left to the user)
-**Re-verification:** No, initial verification
+**Verified:** 2026-10-07T02:54:22Z
+**Status:** passed
+**Re-verification:** Yes. This report replaces the earlier one.
+
+**Previous report (2026-10-06):** status human_needed, score 4/4. All four ROADMAP criteria were met in the code. Three decisions were left to the user: (1) TP1 in the far half of the entry zone, (2) the basis of the three -v4 override values, (3) accepting PLACEHOLDER-grade sets while the refusal gate had no production caller (review IN-01). Since then, gap-closure plans 15-16, 15-17 and 15-18 ran, and review fixes WR-01..WR-05 of the paper-gate review landed. This re-verification checks every new claim against the code and git, and does a regression check on the geometry code.
 
 ## Goal Achievement
 
@@ -74,70 +86,94 @@ human_verification:
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| 1 | Trend-pullback: SL outside the entry zone with a minimum ATR distance; swings use confirmed pivots only, excluding the evaluated bar, so a setup cannot fire on a new 20-bar low (F-301) | VERIFIED | `src/core/pivots.py` read in full: candidates `t <= i - right`, so the evaluated bar only confirms; tie rule non-strict left / strict right; `None` when no pivot, no trailing-extreme fallback; `_validate` rejects `lookback < right + 1`. `src/core/strategy.py::_detect_pivot_setup` (line 214) uses it, no fallback; wired from `evaluate` (line 854) behind `geometry_version`. `src/core/planner.py::_pivot_geometry` puts the stop at `zone_lower - entry_buffer - sl_buffer` (LONG) / `zone_upper + entry_buffer + sl_buffer` (SHORT), i.e. beyond the outer edge of the whole entry zone. `_geometry_rejection` is called once for every plan (planner.py:592), on quantized stored prices, before the RR gate: STOP_TOO_TIGHT if SL not strictly outside the zone, INVALIDATED if the signal bar traded through SL, STOP_TOO_TIGHT if below `min_stop_atr` x ATR (when the key is present), RR_TOO_LOW if TP1 not on the profit side. Tests pass: `test_core_pivots` (17, incl. evaluated-bar-never-the-level, 300-bar prefix invariance, poisoned later candles), `test_core_strategy_geometry` (7, incl. p9 regression "new low beyond tolerance does not signal"), `test_planner_geometry` (88), `test_geometry_property` (25). |
-| 2 | Implemented geometries of all three families match the sheets' Stage baselines, or a DECISIONS entry records the deviation (F-113) | VERIFIED | `docs/research/GEOMETRY_AUDIT.md`: 20 family-cell rows, final, no PARAMETER verdict left (5 MATCH, 8 FIX, 7 DEVIATION, matching D054 item (a)). Each FIX row names its implementing function and each exists (`pivot_at`, `_detect_pivot_setup`, `_pivot_geometry`, `_breakout_retest_geometry`, `_range_mr_geometry`, `_resolve_regime_pivots`, `_detect_breakout_retest_levels`/`_find_retest_bar`, `tp_mode` T_MID). D054 in `docs/DECISIONS.md` (line 58) lists all 7 deviations with reasons. `tests/test_geometry_audit_doc.py` (20) passes. Family sheets carry "3.2 Implemented as (Phase 15, D054)" in all three files. GLOSSARY and CONFIGURATION key table updated (geometry_version, pivot_left_bars, pivot_right_bars, tp_mode, min_stop_atr). |
-| 3 | New versioned parameter sets record a rationale for every value; no fixture seed values (F-909) | VERIFIED | Loaded all five new sets through the real registry: baseline-v6 trend-pullback hash 2c4f1528 (29 params), breakout-retest 289d47ac (31), range-mr c9023e47 (36), baseline-no-trade-v4 98e541ee (29), baseline-simple-trend-v4 27f4c18b (29); `check_rationale` returns 0 problems for all five; hashes equal D054 and `tests/fixtures/phase4/parameters.json`. Every value carries a basis from STRUCTURAL/COST_GUARD/DECISION/EXPERIMENT/PLACEHOLDER. Values with no empirical or structural basis are labelled PLACEHOLDER (16, 17, 22, 15, 14 keys), not passed off as tuned. `git diff bbb4bca..HEAD -- params` shows only 5 added files; all 20 older sets are byte-untouched. Tests pass: `test_rationale` (34), `test_registry` (167 incl. WR-01 cross-key rule), `test_registry_gate`, `test_decision_alignment_params` (58), `python -m scripts.decision_alignment.params` PA-01..PA-08 all ok. |
-| 4 | Research re-run under protocol v2.0.0 is ready on the Phase-14 engine (run itself out of scope) | VERIFIED | GEOMETRY_AUDIT.md "Re-run readiness" defines the F8 check and records, per family, two smoke runs with equal digests, only canonical no-trade codes, and census `invariant_violations 0`; D054 (h) repeats it and lists what the re-run still needs. No backtest or re-run was started by the verifier; the recorded smoke/census runs were not re-executed (data-dependent, minutes each). The machine-checkable parts were re-run: `test_geometry_census` (30), `test_geometry_property` (25), `test_backtest_determinism` (16), `test_backtest_simulator` (63), `test_backtest_engine_strategy` (11), `test_backtest_experiment`, `test_cost_parity`, `test_paper_parity`, `test_phase6_fixture_geometry` (CRLF normalization fix F12 holds) all pass. |
+| 1 | Trend-pullback: SL outside the entry zone with a minimum ATR distance. Swings use confirmed pivots only, excluding the evaluated bar, so a setup cannot fire on a new 20-bar low (F-301) | VERIFIED | Regression check: `git diff cb8e0d6..HEAD` (cb8e0d6 = previous verification commit) shows no change under `src/core`, `src/domain/registry.py`, `src/risk`, `src/backtest`, `params`, `tests/fixtures` or `docs/research`. The full analysis from the previous report still applies (`pivot_at` candidates `t <= i - right`; `_pivot_geometry` stop beyond the outer zone edge; `_geometry_rejection` runs once per plan after quantization and before the RR gate). Re-run here, one process per file: test_core_pivots 17, test_core_strategy_geometry 7, test_planner_geometry 88, test_geometry_property 25, test_core_planner 17, test_prefix_invariance 3, test_no_lookahead 4. All passed. |
+| 2 | Implemented geometries of all three families match the sheets' Stage baselines, or a DECISIONS entry records the deviation (F-113) | VERIFIED | GEOMETRY_AUDIT.md and the family sheets are unchanged since the previous verification. D054 item (a) still lists 5 MATCH, 8 FIX and 7 DEVIATION, each deviation with a reason. Re-run: test_geometry_audit_doc 20, test_core_strategy_breakout_retest 30, test_core_strategy_range_mr 36, test_phase6_fixture_geometry 119. All passed. |
+| 3 | New versioned parameter sets record a rationale for every value; no fixture seed values are used (F-909) | VERIFIED | Rationale: test_rationale 34, test_registry 167, test_registry_gate 7, test_decision_alignment_params 58, and `python -m scripts.decision_alignment.params` PA-01..PA-08 all ok. "No fixture seed values" is defined by 15-CONTEXT D-16: no value may be inherited *silently*. A value with no basis must be marked PLACEHOLDER, and a PLACEHOLDER set cannot be frozen for paper. Some new sets do keep Phase 3 seed numbers (4-6 rationale entries per set say "Phase 3 seed value ... no empirical basis yet"), but each one is labelled PLACEHOLDER. The paper refusal of D-16 is now enforced at the real paper entry point. A live `pin_stream_epoch` sweep over all 25 committed sets refused 25, accepted 0, with 0 other errors. The five Phase 15 sets were refused for "PLACEHOLDER keys"; the 20 older sets were refused as "missing rationale tables and not in the approved allowlist". `PAPER_START_ALLOWLIST == ()`. `run_paper_tick` (src/paper/loop.py:338-363) runs `require_bool_flag`, `load_parameter_set`, the version check, `pin_stream_epoch` and the hash-equality check before any `_parse_account_state`, `build_cost_model` or `_parse_candle` (lines 368-375) and before the feed loop. The -v4 overrides are labelled as comparison reference points in D054 (see Decisions below). |
+| 4 | A research re-run under protocol v2.0.0 is ready to start on the Phase-14 engine; the run itself is out of scope | VERIFIED | The readiness record (GEOMETRY_AUDIT.md "Re-run readiness", D054 item (h)) is unchanged. The machine-checkable parts were re-run: test_geometry_census 30, test_backtest_determinism 16, test_backtest_simulator 63, test_paper_parity 5, test_cost_parity 9. All passed. Not re-executed here: the real-data smoke runs and the census on BTCUSDT (UAT test 8, skipped; data-dependent, minutes of runtime). Their digests are the ones recorded in 15-15-SUMMARY.md and D054 (h). Per criterion 4, the research re-run itself is outside Phase 15 and was not started. |
 
-**Score:** 4/4 truths verified (0 present-but-behavior-unverified)
+**Score:** 4/4 truths verified (0 present but behavior-unverified)
+
+### User Decisions on the Previous Report's Human Items (recorded, not decided by the verifier)
+
+| # | Item | Recorded user decision (verbatim) | Where recorded | Verifier's check |
+|---|------|-----------------------------------|----------------|------------------|
+| 1 | TP1 on the profit side of the entry reference but inside the far half of the entry zone | "hoãn" (keep the current behaviour and defer) | 15-UAT.md test 9: `result: skipped`, `reason: "Deferred follow-up: hoãn" (user chose to keep current behavior and defer, after Claude's recommendation; the minimum-RR gate at the zone mid still applies)`. Deferred Follow-Ups: "hoãn — revisit whether to reject a TP1 inside the far half of the entry zone after the research re-run (D054 item g)". ROADMAP.md line 1082-1088, Phase 999.1 (BACKLOG). | This is a recorded decision to keep the current rule for now and revisit after the research re-run. It is **not** approval of a money-affecting tightening, and none was made: `_geometry_rejection` is unchanged since cb8e0d6 and still only requires TP1 strictly on the profit side of `entry_ref`. No ROADMAP criterion requires the tightening. Note: D054 item (g) still says "left for a user decision" and does not mention the deferral. The deferral lives in 15-UAT.md and ROADMAP 999.1 only (Info, see Anti-Patterns). |
+| 2 | Basis of the three -v4 override values | "Là mốc đối chứng, ghi rõ" (they are comparison reference points, write it down clearly) | docs/DECISIONS.md D054 item (d) (commit 641da99): "User confirmation of what these three values are (2026-10-07, 15-UAT.md test 10, user reply verbatim: "Là mốc đối chứng, ghi rõ" ...) ... are comparison reference points for the RESEARCH_PROTOCOL Baselines comparison ..., not evidence-backed parameters; no data, backtest, research run or experiment supports them, they were not tuned". 15-UAT.md test 10. | D054 text read directly. The files are hash-locked and keep basis DECISION with ref D054 (baseline-no-trade-v4 `minimum_rr = 100`; baseline-simple-trend-v4 `zone_tolerance_atr = 1.0`, `minimum_rr = 0.5`, all read from the files). `git diff 3df767a..HEAD -- params tests/fixtures` is empty. test_kill_gate_docs (12, includes `test_d054_v4_overrides_are_comparison_reference_points`) passes. |
+| 3 | PLACEHOLDER-grade sets and the unwired refusal gate (IN-01) | "Nối ngay trong Phase 15" (wire it now, in Phase 15). Checkpoint 15-17-01 Reply 1: "B — chỉ cho phép các tập tham số được chỉ định đích danh và gắn với hash của từng tập. ..."; Reply 2: "đồng ý cả hai, sửa plan 15-17 và chạy lại checker" | 15-UAT.md test 11; 15-17-SUMMARY.md "Decided-by: user (verbatim replies 2026-10-07)"; D054 item (i) (commit 549329b) | Verified in code and by a live run, see truth 3 and the spot-checks below. The allowlist is empty, so no committed set can start a paper stream today. That is the decided safe state. Phase 16 needs a fully rationalized set with no PLACEHOLDER key, or a new user checkpoint that adds an exact-hash entry. |
 
 ### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `src/core/pivots.py` | confirmed pivots, pure, prefix-invariant | VERIFIED | 120 lines, wired from strategy.py and planner.py (18 callers per codegraph) |
-| `src/core/planner.py` | corrected geometry per family + shared validator | VERIFIED | `_pivot_geometry`, `_breakout_retest_geometry`, `_range_mr_geometry`, `_geometry_rejection` all present and on the plan path |
-| `src/core/strategy.py` | pivot setup, anchored B, pivot regime C | VERIFIED | gated on `geometry_version`; legacy path kept byte for byte |
-| `src/domain/rationale.py`, `src/domain/registry.py` | rationale check; optional keys with ranges | VERIFIED | 0 rationale problems on the five sets; WR-01 fix present |
-| `src/paper/freeze.py` | PLACEHOLDER refusal | VERIFIED (not wired in prod) | `_require_rationalized` raises `UnrationalizedParameterSet`; see IN-01 |
-| `params/**/baseline-v6.toml`, `-v4` sets | 5 new sets | VERIFIED | hashes match pins |
-| `docs/research/GEOMETRY_AUDIT.md`, D054, sheets | audit and deviations | VERIFIED | see truth 2 |
+| `src/core/pivots.py`, `planner.py`, `strategy.py` | Corrected geometry | VERIFIED | Unchanged since the previous verification; tests re-run green |
+| `src/domain/rationale.py` | Rationale check | VERIFIED | WR-05 added `check_rationale_text` and `placeholder_keys_text`; the path-based functions now delegate to them, one read each |
+| `src/paper/freeze.py` | `PaperAllowlistEntry`, empty `PAPER_START_ALLOWLIST`, `require_bool_flag`, `_read_registry_file` (segment check + single read), `_require_rationalized` / `_require_allowlisted` | VERIFIED | Lines 312-447 and 484-573 read. Bypass only on `allow_unrationalized is True` (line 536) |
+| `src/paper/loop.py` | Gate at the top of `run_paper_tick` | VERIFIED (WIRED) | Lines 338-363: the gate runs before any other `case_input` parse |
+| `tests/test_paper_start_gate.py` | Gate, allowlist branch and AST guard tests | VERIFIED | 70 tests pass (16 from 15-17, the rest from WR-01..WR-05) |
+| `docs/DECISIONS.md` D054 items (d), (i) | -v4 label; paper-start gate record | VERIFIED | Text read; doc tests pass |
+| `15-REVIEW-DISPOSITION.md` | IN-01 fixed | VERIFIED | `IN-01 | info | fixed`, open 5 (IN-02..IN-06) |
 
 ### Key Link Verification
 
 | From | To | Via | Status |
 |------|----|-----|--------|
-| `evaluate` | `_detect_pivot_setup` | `geometry_version(parameter_set)` branch, strategy.py:853-854 | WIRED |
-| `plan` | `_geometry_rejection` | single call, planner.py:592, after quantization, before RR gate | WIRED (all sets, legacy included) |
-| `_pivot_geometry` | `pivot_at` | same setup candles as the detector | WIRED |
-| `pin_stream_epoch` | `_require_rationalized` | freeze.py:342-351 | WIRED inside the function; the function itself has no production caller (IN-01) |
+| `run_paper_tick` | `pin_stream_epoch` | loop.py:352, after load and version check, before line 365 onward | WIRED (production caller now exists; IN-01 closed) |
+| `pin_stream_epoch` | `_require_rationalized` | freeze.py:536-543, skipped only when the flag `is True` | WIRED |
+| `_require_rationalized` | `_require_allowlisted` / `check_rationale_text` + `placeholder_keys_text` | branches on a top-level `rationale` key (tomllib) | WIRED |
+| `_require_allowlisted` | `PAPER_START_ALLOWLIST` | module attribute read at call time | WIRED |
+| `run_paper_tick` | hash equality | loop.py:358-363, `ValueError` on mismatch | WIRED |
+| `evaluate` / `plan` | `_detect_pivot_setup` / `_geometry_rejection` | unchanged since previous verification | WIRED |
 
-### Behavioral Spot-Checks (file by file, never the full suite)
+### Behavioral Spot-Checks
 
-All passed unless noted. test_core_pivots 17, test_core_strategy_geometry 7, test_planner_geometry 88, test_registry 167, test_registry_gate 7, test_rationale 34, test_paper_freeze 10, test_kill_gate_docs 10, test_decision_alignment_params 58, test_decision_alignment_bookkeeping 46, test_geometry_audit_doc 20, test_core_strategy_breakout_retest 30, test_core_strategy_range_mr 36, test_core_planner 17, test_geometry_property 25, test_geometry_census 30, test_analytics_files (1 skip, pre-existing), test_phase6_fixture_geometry, test_backtest_simulator, test_backtest_engine_strategy, test_backtest_experiment, test_cost_parity, test_cost_per_unit, test_domain_no_float, test_paper_parity, test_backtest_determinism. Also `ruff check`, `ruff format --check` (388 files) and `mypy src` (149 files) clean.
+| Behavior | Command | Result | Status |
+|----------|---------|--------|--------|
+| Every committed set refused at paper start | live script calling `pin_stream_epoch` on all `params/*/*.toml` | total 25, refused 25 (UnrationalizedParameterSet), accepted 0, other 0 | PASS |
+| Allowlist empty | `freeze.PAPER_START_ALLOWLIST` | `()` | PASS |
+| Non-bool flag fails closed (WR-01) | `allow_unrationalized="False"`, `1`, `None`, `0` | TypeError for each | PASS |
+| Path traversal refused (WR-04) | `strategy_id="../trend-pullback"` | UnregisteredParameterSet | PASS |
+| src never enables the flag | `git grep -E "allow_unrationalized\s*=\s*True" -- src` | empty; flag appears only in freeze.py and loop.py | PASS |
+| Allowlist not referenced outside its module | `git grep PAPER_START_ALLOWLIST -- src` | freeze.py only (definition, one read, docstrings) | PASS |
+| Byte-identical outputs | `git diff 3df767a..HEAD -- params tests/fixtures`; `git status` | empty | PASS |
+| Test files, one pytest process each | see list | all exit 0, 0 failed, 0 skipped | PASS |
 
-Not run, need CI: PostgreSQL tests (skipped without `TEST_DATABASE_URL`, including 20 of 22 in `tests/test_plan_hash_roundtrip_pg.py`), and docker/bootstrap/deploy tests (test_bootstrap, test_deploy_backup_scripts, test_docker_*).
+Test files run (passed count): test_paper_start_gate 70, test_paper_freeze 10, test_paper_parity 5, test_paper_closed_candle 5, test_paper_feed_gates 5, test_paper_reviewfix_pins 9, test_cost_parity 9, test_kill_gate_docs 12, test_rationale 34, test_geometry_audit_doc 20, test_decision_alignment_params 58, test_decision_alignment_bookkeeping 46, test_core_pivots 17, test_core_strategy_geometry 7, test_planner_geometry 88, test_geometry_property 25, test_registry 167, test_registry_gate 7, test_core_strategy_breakout_retest 30, test_core_strategy_range_mr 36, test_core_planner 17, test_geometry_census 30, test_backtest_determinism 16, test_backtest_simulator 63, test_phase6_fixture_geometry 119, test_prefix_invariance 3, test_no_lookahead 4. Also `ruff check` passed, `ruff format --check` passed (428 files), and `mypy src` found no issues (149 files).
+
+**Not run (CI-only or out of scope):** PostgreSQL tests (skip without `TEST_DATABASE_URL`), docker, bootstrap and deploy tests, the full suite in one process (Windows rule), the real-data smoke and census runs (UAT test 8), and the research re-run (outside Phase 15 per criterion 4).
+
+### Probe Execution
+
+No probe scripts are declared by the phase. Step 7c: SKIPPED.
 
 ### Requirements Coverage
 
-STRAT-01 and STRAT-02 are listed for Phase 15 in ROADMAP; REQUIREMENTS.md maps both to Phase 4 (Complete). The Phase 15 plans re-touch the same engine, and the behavior in those requirements (closed-candle features, pure strategy function, deterministic SignalIds) is still covered: prefix invariance, determinism and SignalId tests pass. No orphaned requirement. No change to REQUIREMENTS.md is needed.
+| Requirement | Source Plans | Description | Status | Evidence |
+|-------------|-------------|-------------|--------|----------|
+| STRAT-01 | 15-03..06, 15-14, 15-15, 15-17 | Closed-candle features with warm-up gates | SATISFIED | REQUIREMENTS.md maps it to Phase 4 (Complete). Phase 15 re-touches the engine; prefix-invariance, no-lookahead and pivot confirmation tests pass. The paper gate refuses before any candle is parsed. |
+| STRAT-02 | all 18 plans | Pure strategy function, deterministic SignalIds | SATISFIED | Determinism, parity and SignalId snapshot tests pass. Plans 15-16..15-18 changed no strategy output (no fixture or params diff). |
+
+No orphaned requirement. REQUIREMENTS.md needs no change.
 
 ### Anti-Patterns Found
 
-None blocking. No TBD/FIXME/XXX in any file modified by the phase source, scripts or params.
+| File | Line | Pattern | Severity | Impact |
+|------|------|---------|----------|--------|
+| src/paper/freeze.py, src/paper/loop.py, src/domain/rationale.py, tests/test_paper_start_gate.py | - | TBD/FIXME/XXX | none found | - |
+| docs/DECISIONS.md | D054 (g) | Still says the TP1 far-half rule is "left for a user decision"; the user's "hoãn" deferral is recorded only in 15-UAT.md and ROADMAP 999.1 | Info | Doc consistency only. The current behaviour matches the decision. |
+| src/paper/freeze.py / loop.py | - | Open Info IN-01..IN-05 of 15-REVIEW-PAPER-GATE.md (allowlist entry not self-validated; stale docstrings; per-tick gate and exception ordering; test nits; two REGISTRY_ROOT bindings) | Info | Open by the user's choice; all fail closed. IN-05 also listed under coincidental_reliance_items. |
+| src/ | - | Open Info IN-02..IN-06 of 15-REVIEW.md | Info | Open by the user's choice; none blocks a criterion |
 
-### Known Caveats Confirmed (reported, not hidden)
-
-| Caveat | Confirmed | Evidence |
-|--------|-----------|----------|
-| PLACEHOLDER-heavy v6 sets are research-only and refused at `pin_stream_epoch` | Yes, with the IN-01 limit | 16/29, 17/31, 22/36 (v6) and 15, 14 (-v4) PLACEHOLDER keys. The refusal exists and is tested, but nothing under `src/` calls `pin_stream_epoch`, and `run_paper_tick` loads any set. Enforcement belongs to the Phase 16 start-up. |
-| TP1 inside the far half of the entry zone is not rejected | Yes | `_geometry_rejection` only requires TP1 strictly on the profit side of `entry_ref`. Left for a user decision (human item 1). |
-| Signed-leg RR now affects all sets | Yes | planner.py:~618: `tp1_leg = tp1 - entry_ref` (LONG) / `entry_ref - tp1` (SHORT), RR gate uses the signed leg. |
-| Legacy Family A plans are now STOP_TOO_TIGHT | Yes | Validator is universal (called for every set); D054 (c) records it; legacy tests migrated in 15-13. |
-| 6 Info review findings (IN-01..06) open | Yes | `15-REVIEW-DISPOSITION.md`: WR-01 fixed (e0593a6), IN-01..06 `open`. None blocks a criterion. |
-| TDD gate: 15-09 and 15-10 lack `test(15-NN)` RED commits | Yes (advisory) | `git log` shows `test(15-NN)` commits for plans 02-07 and 11-13 only. 15-09 describes its RED step inside a feature commit (a1aac86); 15-10 and 15-09 are parameter/fixture-generator plans. Process note only; behavior is covered by tests that pass now. |
+The paper-gate fix report marks WR-01 and WR-02 as "requires human verification (logic change in a fail-closed gate)". The verifier checked WR-01 live (TypeError for each non-bool flag value tried). WR-02 is covered by the seeded-violation guard tests in test_paper_start_gate (passing) and by the clean `git grep` of src/. The guard's documented blind spots (runtime-built names, `**kwargs` forwarding) remain an accepted residual (T-15-38).
 
 ### Human Verification Required
 
-1. **TP1 far-half-of-zone rule.** Test: decide whether to reject a TP1 that is on the profit side of the entry reference but inside the far half of the entry zone. Expected: a recorded keep, or a one-line tightening in `_geometry_rejection` plus a test. Why human: money/safety rule, deliberately deferred by D054 (g).
-2. **Basis of the three -v4 overrides.** Test: confirm DECISION/D054 for baseline-no-trade-v4 `minimum_rr` 100 and baseline-simple-trend-v4 `zone_tolerance_atr` 1.0, `minimum_rr` 0.5. Expected: accepted or re-labelled. Why human: parameter provenance; flagged in 15-08 SUMMARY; the "ratify" reply is only evidenced by SUMMARY text.
-3. **Risk acceptance of PLACEHOLDER-grade sets and the unwired refusal gate (IN-01).** Expected: accepted for Phase 15, with the Phase 16 stream start-up required to call `pin_stream_epoch`. Why human: risk acceptance.
+None open. All three items of the previous report have a recorded user decision (see the decisions table). Item 1 is a recorded decision to defer and keep the current rule (ROADMAP Backlog 999.1), not an approval of a change.
 
 ### Gaps Summary
 
-No gaps. Every ROADMAP criterion is backed by code and by passing targeted tests. The status is `human_needed` only because three decisions were explicitly reserved for the user and the verifier must not resolve them. The research re-run itself, PostgreSQL tests and docker/bootstrap tests are outside what was run here.
+No gaps. All four ROADMAP criteria hold in the current code, and targeted tests re-run green. The previous report's three human items each have a recorded user decision, quoted verbatim above with file citations. The only residuals are open Info findings (5 + 5, left open by the user's choice), one doc-consistency note on D054 (g), and the advisory IN-05 root-binding reliance. None of these blocks the phase goal. What was not run is listed above (PostgreSQL, docker, bootstrap and deploy tests in CI; the real-data smoke and census; the research re-run, which is out of scope).
 
 ---
 
-_Verified: 2026-10-06_
+_Verified: 2026-10-07T02:54:22Z_
 _Verifier: Claude (gsd-verifier)_
