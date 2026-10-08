@@ -683,15 +683,15 @@ Critical path: 16-01 then the smoke on the execution machine, then 16-04/16-03, 
 
 | # | Claim | Section | Risk if Wrong |
 |---|-------|---------|---------------|
-| A1 | Telegram allows one long-polling consumer per bot token (409 conflict otherwise) | Pitfall P17 | A second poller on the dev machine silently steals callbacks from the soak |
-| A2 | Binance accepts an unauthenticated connection to `/private/stream` (the SDK opens it for every client) | D5 | A connect refusal could make `create_connection` produce fewer connections than expected |
-| A3 | Object Lock can be enabled for an existing bucket, or must be set at creation (unconfirmed; docs.aws returned 403) | S2 | An evidence bucket without Object Lock cannot be fixed later |
-| A4 | No extra charge for Object Lock/Versioning; noncurrent versions billed as storage | S2 | Cost estimate for O-12 wrong |
-| A5 | S3 default retention is bucket-wide, not per prefix | S2 point 4 | Backup retention purge could break under a shared bucket |
-| A6 | `rclone --checksum` over a crypt remote (no stored hash) falls back to size-based comparison | S2 | CR-01 does not give the tamper detection the user expects |
-| A7 | GitHub does not auto-disable scheduled workflows in a PRIVATE repository for inactivity (fetched pages state it for public repositories only) | S1 | Silent end of freeze ticks |
-| A8 | Binance offers no mark-price KLINE websocket stream (inferred only from the SDK having none) | D9 | A cheaper live mark source may exist |
-| A9 | EBS encryption-by-default and S3 default encryption (SSE-S3) behave as D042 assumes (pages not fetched) | Environment | D042 acceptance checks wrongly skipped |
+| A1 | Telegram allows one long-polling consumer per bot token (409 conflict otherwise) | Pitfall P17 | A second poller on the dev machine silently steals callbacks from the soak | **[G6: webhook/getUpdates exclusion CITED; the two-poller 409 text is still UNVERIFIED]**
+| A2 | Binance accepts an unauthenticated connection to `/private/stream` (the SDK opens it for every client) | D5 | A connect refusal could make `create_connection` produce fewer connections than expected | **[G5: still UNVERIFIED]** Connect page lists `/public`, `/market`, `/private (user data)` and says nothing about `/private` without a listen key.
+| A3 | Object Lock can be enabled for an existing bucket, or must be set at creation (unconfirmed; docs.aws returned 403) | S2 | An evidence bucket without Object Lock cannot be fixed later | **[2026-10-08 gaps result G9: CITED]** Object Lock CAN be enabled on an existing versioned bucket; once enabled it cannot be disabled and versioning cannot be suspended.
+| A4 | No extra charge for Object Lock/Versioning; noncurrent versions billed as storage | S2 | Cost estimate for O-12 wrong | **[G10: partly CITED]** Versioning: "Normal Amazon S3 rates apply for every version" (CITED). A separate Object Lock charge is still NOT confirmed (UNVERIFIED).
+| A5 | S3 default retention is bucket-wide, not per prefix | S2 point 4 | Backup retention purge could break under a shared bucket | **[G10: CITED, bucket level]** Default retention is a bucket property; the pages describe no per-prefix default; an explicit per-object setting overrides it. A purge (permanent delete by version) of a locked version returns 403; a simple delete adds a delete marker.
+| A6 | `rclone --checksum` over a crypt remote (no stored hash) falls back to size-based comparison | S2 | CR-01 does not give the tamper detection the user expects | **[2026-10-07 D064 real rclone 1.75.1 run: PROVEN]** `--checksum` falls back to `--size-only` on a crypt remote; the backup chain now decides identity by SHA-256 manifest comparison plus `rclone cryptcheck` (D064, D066). G19 (real-S3 repeat) was NOT attempted.
+| A7 | GitHub does not auto-disable scheduled workflows in a PRIVATE repository for inactivity (fetched pages state it for public repositories only) | S1 | Silent end of freeze ticks | **[G15: still UNVERIFIED]** The docs name public repositories only.
+| A8 | Binance offers no mark-price KLINE websocket stream (inferred only from the SDK having none) | D9 | A cheaper live mark source may exist | **[G4: still UNVERIFIED]** Two reads of the market-streams page showed no mark-price kline section; the dedicated URL returned the landing page.
+| A9 | EBS encryption-by-default and S3 default encryption (SSE-S3) behave as D042 assumes (pages not fetched) | Environment | D042 acceptance checks wrongly skipped | **[G11, G12]** S3 SSE-S3 default encryption: CITED. EBS: encryption by default is a Region setting that must be turned on (default key `aws/ebs`); whether it is already on in a new account is NOT stated, so D042 acceptance must check `get-ebs-encryption-by-default` in ap-southeast-1.
 | A10 | The tick (features over up to 1000 bars x 5 symbols) completes well within a bar interval on the EC2 instance type chosen in O-12 | Pitfall P10 | Backlog at the 1h/4h boundary |
 | A11 | REST `markPriceKlines` returns the just-closed 1m bar within a short time of the minute close (lag unknown) | D9, Pattern 5 | Fill detection delayed or holes |
 | A12 | Binance delivers each closed kline (`x=true`) once per stream between reconnects | Pitfall P6 | Dedup must still be kept (it is) |
@@ -896,6 +896,26 @@ Evidence a human must produce (blocking-human, measurable): the smoke evidence f
 
 ### Tertiary (LOW confidence)
 - Items tagged `[ASSUMED]` in the Assumptions Log.
+
+## Gaps Resolution (2026-10-08, from 16-RESEARCH-GAPS-RESULT.md)
+
+Merged by the planning side. Read through the WebFetch summariser, so quotes are not guaranteed verbatim. Only CITED sub-points changed a label above; every UNVERIFIED sub-point stays `[ASSUMED]` and is a blocking-human check or a test on the host.
+
+| Gap | Now CITED (URL family, read 2026-10-08) | Still UNVERIFIED |
+|-----|-----------------------------------------|------------------|
+| G1 | Kline stream `<symbol>@kline_<interval>`, 250 ms, `t` start, `T` close, `x` "Is this kline closed?" (developers.binance.com catalog ws-streams/market). Doc example `T = t + 59999` agrees with close = open + interval - 1 ms for the WS stream | JSON example in the page does not show `x` inside `k` in the summary |
+| G2 | `GET /fapi/v1/klines`, weights 1/2/5/10, default limit 500, max 1500, field [6] "Close time" | The sentence defining close time (the `open + interval - 1 ms` fact for REST rests on the 2026-10-07 live row); whether the last row can be unfinished |
+| G3 | 24 h lifetime; ping every 3 min, pong deadline 10 min; 10 incoming messages/s; 1024 streams per connection (Connect page) | Limit on NEW connection attempts per IP and window |
+| G4, G5 | Endpoint list `/public`, `/market`, `/private` | Mark-price kline stream existence (absence reported by summary only); `/private` without a listen key |
+| G6-G8 | `getUpdates` does not work while a webhook is set; FAQ limits 1 msg/s per chat, 20 msg/min per group, about 30 msg/s bulk, 429 + `retry_after`; `callback_data` 1-64 bytes; bot "must call answerCallbackQuery" | 409 conflict text for two pollers; callback wait/validity; "message is not modified"; edit time limit |
+| G9-G12 | Object Lock on existing bucket; versioning required and cannot be suspended; compliance vs governance; default retention is a bucket property; delete behaviour; SSE-S3 default, no cost; EBS default key `aws/ebs`, Region setting | Object Lock separate charge; bucket-policy enforcement of SSE-KMS; EBS default state of a new account |
+| G13 | Public IPv4 in-use $0.005/h; Budgets monitoring free, action-enabled budgets $0.10/day after the first two | All ap-southeast-1 instance, EBS gp3 and S3 prices (pricing pages gave no regional tables) |
+| G14 | Time Sync endpoint 169.254.169.123; AL2023 default chrony; Ubuntu needs manual chrony config | Stock Ubuntu image default |
+| G15, G16 | schedule delay/dropped jobs, 5-min floor, default branch, public-repo 60-day rule, `workflow_dispatch` needs default branch and write access; cache 7 days / 10 GB; retention 90 days default, 1-400 private | Retry or detection of missed runs, numeric delay bound, private-repo auto-disable |
+| G17, G18 | rclone S3 MD5, `X-Amz-Meta-Md5chksum` for multipart/SSE objects; crypt stores no hashes; `cryptcheck` needs a checksum on the underlying remote; `--s3-versions`, `--s3-version-at`; Object Lock Content-MD5 | `purge` on a locked or versioned path inside a bucket |
+| G19 | not attempted | everything; superseded for the backup chain by the D064 real run |
+
+Consistency notes found while merging: (1) the S3 features page used above says versioning is "automatically enabled" with Object Lock, the user guide says it must be enabled first; the plan must enable versioning explicitly. (2) Statements in this file that CR-01 is "not implemented" or "outside Phase 16" are stale: D064 replaced it and D066 added the strict snapshot coupling; the `backup_remote.py` line references in S2 point to the pre-D064 code and must be re-read before use. (3) D065 is Accepted (2026-10-07) and ROADMAP SC8, Depends on and Phase 26 are aligned to it.
 
 ## Verification Gaps
 
