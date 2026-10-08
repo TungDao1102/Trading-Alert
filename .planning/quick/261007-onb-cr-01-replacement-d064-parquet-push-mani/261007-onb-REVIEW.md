@@ -155,6 +155,8 @@ states `pg.dump` of the new snapshot is on the remote).
 
 ### WR-06: RUNBOOK 11.8 gives no recovery for two states the design makes permanent, and the DB backup is coupled to Parquet health (user decision)
 
+**Disposition (2026-10-08): item 3 decided, items 1 and 2 partly open.** Item 3 (the coupling): kept strict, recorded as D066, no code change. RUNBOOK 11.8 now states what exists on the remote, that a restore fails at pull before the database is touched, and that an older snapshot must be proven by `pull --snapshot ID` because the shared parquet tree can break several snapshots. Items 1 and 2 (how to resume pushing after an unreadable manifest of a complete snapshot, or a known Parquet object lost on the remote): RUNBOOK still says a manual action on the remote needs its own decision; no route is chosen. This stays user-owned (D066).
+
 **File:** `docs/operations/RUNBOOK.md` section 11.8 and "Parquet push" paragraph; code `src/ops/backup_remote.py:384-386, 419-425, 558`
 **Evidence:**
 1. `unreadable manifest of complete snapshot <id>` is a hard failure for every later push (code 366-383). 11.8 says

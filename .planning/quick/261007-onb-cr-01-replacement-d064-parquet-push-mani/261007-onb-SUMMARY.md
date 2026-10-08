@@ -25,8 +25,10 @@ Cost on the double (not real S3): whole-tree cryptcheck 1.6 s / 2.6 s / 7.6 s fo
 
 ## Review (`261007-onb-REVIEW.md`): 0 CR, 7 WR, 4 IN
 Fixed: WR-01..05, IN-04. Left open on purpose:
-- WR-06: a damaged remote Parquet object blocks publication of every PostgreSQL snapshot; no recovery steps for
-  an unreadable manifest or a lost known object. USER DECISION (decouple or not).
+- WR-06: DECIDED 2026-10-08 as D066 (keep the strict coupling of pg.dump and the Parquet tree; no standalone
+  PostgreSQL backup; separation only through a later evidence-based decision). RUNBOOK 11.8 documents the
+  restore flow and the check for an older snapshot. Still open and user-owned: how to resume pushing after an
+  unreadable manifest of a complete snapshot or a known Parquet object lost on the remote.
 - WR-07: cryptcheck trusted by exit code only (no matching-count check); belongs to the real-S3 proof.
 - IN-01, IN-02, IN-03 (SIGTERM does not trigger the compensating delete; covered by window W1).
 
