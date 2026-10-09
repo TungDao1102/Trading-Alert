@@ -211,6 +211,49 @@ def validate_candidate(
     )
 
 
+def _point_structure(point: GridPoint, strategy_id: str, registry_root: Path) -> GridListing:
+    """Structure verdict of one grid point: loads, complete rationale table, hash as listed."""
+    path = registry_root / strategy_id / f"{point.parameter_set_id}.toml"
+    try:
+        _check_registry_segment(strategy_id, "strategy_id")
+        _check_registry_segment(point.parameter_set_id, "parameter_set_id")
+        if not path.is_file():
+            return GridListing(point.parameter_set_id, False, "no set file in the registry")
+        loaded = _load(path, strategy_id, point.parameter_set_id)
+        problems = check_rationale_text(loaded.text, loaded.path)
+    except Exception as error:  # noqa: BLE001 - every loader failure is a structure verdict
+        return GridListing(point.parameter_set_id, False, _describe(error, path))
+    if problems:
+        return GridListing(
+            point.parameter_set_id, False, "rationale table incomplete: " + "; ".join(problems)
+        )
+    if loaded.parameter_set_hash != point.parameter_set_hash:
+        return GridListing(
+            point.parameter_set_id, False, "file hash differs from the hash listed in the grid"
+        )
+    return GridListing(point.parameter_set_id, True, "")
+
+
+def list_grid(grid_path: Path, *, registry_root: Path) -> tuple[GridListing, ...]:
+    """Every grid point in the grid file's own order with its structure verdict only.
+
+    No result of any kind enters this function, and nothing here reorders the points: the order
+    of the returned tuple is the order of the grid file (L-03, L-10).
+    """
+    grid = load_grid(grid_path)
+    return tuple(_point_structure(point, grid.strategy_id, registry_root) for point in grid.points)
+
+
+def _render_listing(entries: Sequence[GridListing]) -> str:
+    lines = []
+    for entry in entries:
+        if entry.structurally_valid:
+            lines.append(f"{entry.parameter_set_id} {STRUCTURALLY_VALID}")
+        else:
+            lines.append(f"{entry.parameter_set_id} {STRUCTURALLY_INVALID}: {entry.reason}")
+    return "\n".join(lines) + "\n"
+
+
 def _render_check(result: CandidateCheck) -> str:
     if not result.valid:
         lines = ["INVALID", *(f"reason: {reason}" for reason in result.reasons)]
@@ -229,7 +272,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Read-only candidate-registration check (D-28).",
         allow_abbrev=False,
     )
-    parser.add_argument("--check", type=Path, required=True, help="Candidate set TOML file.")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check", type=Path, help="Candidate set TOML file to validate.")
+    mode.add_argument(
+        "--list-grid",
+        action="store_true",
+        help="List every grid point in grid order with its structure verdict only.",
+    )
     parser.add_argument("--grid", type=Path, required=True, help="Approved parameter grid JSON.")
     parser.add_argument("--pin-file", type=Path, default=DEFAULT_PIN_FILE, help="Pin JSON file.")
     parser.add_argument(
@@ -239,11 +288,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Registry root directory (default: src.domain.registry.REGISTRY_ROOT).",
     )
     args = parser.parse_args(argv)
+    registry_root = resolve_registry_root(args.registry_root)
+    if args.list_grid:
+        try:
+            entries = list_grid(args.grid, registry_root=registry_root)
+        except (ManifestError, OSError, ValueError) as error:
+            sys.stderr.write(f"grid file {args.grid.name} is unusable: {error}\n")
+            return EXIT_INVALID
+        sys.stdout.write(_render_listing(entries))
+        return EXIT_VALID
     result = validate_candidate(
         args.check,
         grid_path=args.grid,
         pin_path=args.pin_file,
-        registry_root=resolve_registry_root(args.registry_root),
+        registry_root=registry_root,
     )
     sys.stdout.write(_render_check(result))
     return EXIT_VALID if result.valid else EXIT_INVALID

@@ -344,21 +344,9 @@ def test_list_grid_follows_the_file_order_with_structure_only(
     assert re.search(forbidden, out.lower()) is None
 
 
-_WRITE_ATTRS = {
-    "write_text",
-    "write_bytes",
-    "replace",
-    "rename",
-    "unlink",
-    "rmdir",
-    "mkdir",
-    "touch",
-    "remove",
-    "copy",
-    "copyfile",
-    "move",
-    "rmtree",
-}
+_WRITE_ATTRS = {"write_text", "write_bytes", "rename", "unlink", "rmdir", "mkdir", "touch"}
+# Names that are harmless on a str or a dict (replace, remove, copy) but write on os or shutil.
+_WRITE_ATTRS_ON_OS = {"replace", "remove", "copy", "copyfile", "move", "rmtree", "rename"}
 
 
 def _write_violations(source: str) -> list[str]:
@@ -370,6 +358,13 @@ def _write_violations(source: str) -> list[str]:
             func = node.func
             if isinstance(func, ast.Attribute) and func.attr in _WRITE_ATTRS:
                 found.append(f"call .{func.attr}")
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr in _WRITE_ATTRS_ON_OS
+                and isinstance(func.value, ast.Name)
+                and func.value.id in {"os", "shutil"}
+            ):
+                found.append(f"call {func.value.id}.{func.attr}")
             if isinstance(func, ast.Name) and func.id == "open":
                 mode: ast.expr | None = node.args[1] if len(node.args) > 1 else None
                 for keyword in node.keywords:
