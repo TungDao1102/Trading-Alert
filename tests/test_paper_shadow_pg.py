@@ -36,12 +36,14 @@ from src.paper.shadow_confirm import (
     EVENT_SHADOW_CONFIRM_REJECTED,
     EVENT_SHADOW_CONFIRMED,
     ConfirmBook,
+    assert_no_stranded_approvals,
 )
 from src.persistence.approvals import PgApprovalStore
 from src.persistence.engine import make_sync_engine
 from src.persistence.entities import PgTradingEntityStore
 from src.persistence.journal import PgJournalStore
 from src.persistence.uow import OperationalDatabase
+from telegram import error as tg_error
 
 from tests.test_paper_shadow_confirm import T_PRESS, Harness
 
@@ -256,3 +258,32 @@ async def test_confirm_after_a_restart_is_rejected_and_the_expiry_row_exists(pg_
         assert len(rejected) == 1 and rejected[0][0] is not None and rejected[0][1] is not None
         # A decided approval is never reverted.
         assert approved_id(second.engine) == approval_id
+
+
+# --------------------------------------------------------------------------- #
+# Task 4, test 7: a CARD_DELIVERY_FAILED expiry replays on PostgreSQL and strands nothing.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_card_delivery_failed_expiry_replays_without_a_new_row(pg_db: str) -> None:
+    with process_on(pg_db) as proc:
+        h = Harness(stores=proc.stores)
+        await h.alert()
+        h.bot.queue_error(tg_error.BadRequest("Message to edit not found"))
+        h.bot.queue_error(tg_error.NetworkError("down"))
+        apr, _ = h.alert_buttons()
+        await h.tap(apr, "q-apr")
+        approval_id = approved_id(proc.engine)
+        correlation = f"shadow-confirm:{approval_id}"
+        assert journal_types(proc.engine, correlation) == [EVENT_SHADOW_CONFIRM_EXPIRED]
+        expired = proc.stores.journal_for_correlation(correlation)[0]
+        assert json.loads(expired.payload_json)["reason"] == "CARD_DELIVERY_FAILED"
+        rows_before = count(proc.engine, JournalEventRow)
+
+        # The same event written a second time (a redelivered callback, a re-run sweep).
+        proc.stores.record_journal(expired)
+        ConfirmBook(proc.stores, clock=lambda: T_PRESS).expire_on_restart(T_PRESS)
+
+        assert count(proc.engine, JournalEventRow) == rows_before
+        assert_no_stranded_approvals(proc.stores, T_PRESS + timedelta(minutes=5))
+        assert approved_id(proc.engine) == approval_id

@@ -307,7 +307,7 @@ def make_callback_update(
     query_id: str,
     message_chat_id: int = CHAT_ID,
     from_user_id: int | None = USER_ID,
-    message_id: int = 1,
+    message_id: int | None = 1,
     answer: Any = None,
 ) -> Any:
     """A PTB-shaped update for `on_callback`: a callback query with an awaitable `answer`.

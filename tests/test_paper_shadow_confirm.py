@@ -147,7 +147,7 @@ class Harness:
         *,
         chat_id: int = CHAT_ID,
         user: int | None = USER_ID,
-        message_id: int = 1,
+        message_id: int | None = 1,
     ) -> DispatchResult:
         update = make_callback_update(
             data=data,
