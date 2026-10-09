@@ -15,8 +15,8 @@ No network, no wall clock: every instant is an explicit argument.
 from __future__ import annotations
 
 import ast
-from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -32,13 +32,29 @@ from src.domain.enums import SignalStatus
 from src.domain.signal import Signal
 from src.paper import shadow_fill
 from src.paper.loop import BarOutcome
-from src.paper.shadow_fill import FundingHistory, ShadowFillDriver
+from src.paper.shadow import ConfirmOutcome
+from src.paper.shadow_fill import (
+    STATUS_CONFIRM_BEFORE_SIGNAL_CLOSE,
+    STATUS_CONFIRM_NOT_SUCCESSFUL,
+    STATUS_ELIGIBLE,
+    STATUS_NO_MINUTE_BEFORE_EXPIRY,
+    STATUS_PLAN_EXPIRED,
+    FillEligibility,
+    FundingHistory,
+    ShadowFillDriver,
+    eligibility_start_for,
+)
 
 from tests.backtest_case_helpers import (
     DATA_END,
     SIGNAL_CLOSE,
     SYMBOL,
+    at,
     fixed_risk_fn,
+    flat_minutes,
+    funding_row,
+    minute_close,
+    minute_row,
 )
 from tests.test_backtest_engine import tracer_case
 
@@ -242,3 +258,312 @@ def test_an_outcome_that_did_not_pass_risk_is_refused() -> None:
     driver = _driver(parsed, expected)
     with pytest.raises(ValueError, match="risk_passed"):
         driver.open(rejected, eligibility_start_utc=SIGNAL_CLOSE)
+
+
+# --------------------------------------------------------------------------- #
+# Task 3 - Q-B eligibility start (confirm-plus-one, decided by the user 2026-10-09)
+# --------------------------------------------------------------------------- #
+
+PLAN_EXPIRY = SIGNAL_CLOSE + timedelta(hours=4)
+
+
+def _eligibility(confirmed_at: datetime | None, **overrides: Any) -> FillEligibility:
+    arguments: dict[str, Any] = {
+        "signal_close_utc": SIGNAL_CLOSE,
+        "plan_expiry_utc": PLAN_EXPIRY,
+        "confirm_outcome": ConfirmOutcome.CONFIRMED,
+        "confirmed_at_utc": confirmed_at,
+    }
+    arguments.update(overrides)
+    return eligibility_start_for(**arguments)
+
+
+def test_the_start_is_the_confirm_floored_to_the_minute_plus_exactly_one_minute() -> None:
+    confirmed = datetime(2026, 1, 5, 10, 5, 30, 250000, tzinfo=UTC)
+    eligibility = _eligibility(confirmed)
+    assert eligibility.is_eligible
+    assert eligibility.status == STATUS_ELIGIBLE
+    assert eligibility.eligibility_start_utc == at(10, 6)
+
+
+def test_the_plus_one_is_applied_once_even_at_the_last_millisecond_of_the_minute() -> None:
+    last_ms = datetime(2026, 1, 5, 10, 5, 59, 999000, tzinfo=UTC)
+    assert _eligibility(last_ms).eligibility_start_utc == at(10, 6)
+
+
+def test_a_confirm_exactly_on_a_minute_boundary_excludes_the_minute_opening_then() -> None:
+    eligibility = _eligibility(at(10, 5))
+    assert eligibility.eligibility_start_utc == at(10, 6)
+    # The minute opening at 10:05 closes at 10:05:59.999, not after the start: never read.
+    assert minute_close(at(10, 5)) <= at(10, 6)
+    # The first minute that can be read opens at floor + 1 minute.
+    assert minute_close(at(10, 6)) > at(10, 6)
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        ConfirmOutcome.CANCELLED,
+        ConfirmOutcome.EXPIRED_TTL,
+        ConfirmOutcome.REJECTED_PLAN_EXPIRED,
+        ConfirmOutcome.REJECTED_USER_MISMATCH,
+        ConfirmOutcome.REJECTED_OTHER,
+    ],
+)
+def test_a_confirm_that_did_not_succeed_starts_nothing(outcome: ConfirmOutcome) -> None:
+    eligibility = _eligibility(at(10, 5), confirm_outcome=outcome)
+    assert not eligibility.is_eligible
+    assert eligibility.status == STATUS_CONFIRM_NOT_SUCCESSFUL
+    assert eligibility.eligibility_start_utc is None
+
+
+def test_a_successful_outcome_without_a_recorded_confirm_instant_starts_nothing() -> None:
+    eligibility = _eligibility(None)
+    assert not eligibility.is_eligible
+    assert eligibility.status == STATUS_CONFIRM_NOT_SUCCESSFUL
+
+
+def test_an_expired_plan_starts_nothing() -> None:
+    at_expiry = _eligibility(PLAN_EXPIRY)
+    after_expiry = _eligibility(PLAN_EXPIRY + timedelta(minutes=5))
+    assert at_expiry.status == STATUS_PLAN_EXPIRED
+    assert after_expiry.status == STATUS_PLAN_EXPIRED
+    assert at_expiry.eligibility_start_utc is None and after_expiry.eligibility_start_utc is None
+
+
+def test_a_confirm_in_the_last_minute_of_the_plan_leaves_no_minute_to_read() -> None:
+    eligibility = _eligibility(PLAN_EXPIRY - timedelta(seconds=10))
+    assert eligibility.status == STATUS_NO_MINUTE_BEFORE_EXPIRY
+    assert not eligibility.is_eligible
+
+
+def test_a_confirm_before_the_signal_close_is_refused() -> None:
+    eligibility = _eligibility(SIGNAL_CLOSE - timedelta(seconds=1))
+    assert eligibility.status == STATUS_CONFIRM_BEFORE_SIGNAL_CLOSE
+    assert not eligibility.is_eligible
+
+
+def test_naive_and_non_utc_instants_are_refused() -> None:
+    with pytest.raises(ValueError, match="UTC"):
+        _eligibility(datetime(2026, 1, 5, 10, 5))
+    plus_seven = datetime(2026, 1, 5, 17, 5, tzinfo=timezone(timedelta(hours=7)))
+    with pytest.raises(ValueError, match="UTC"):
+        _eligibility(plus_seven)
+
+
+def test_the_audit_record_carries_signal_close_approve_confirm_and_start() -> None:
+    confirmed = datetime(2026, 1, 5, 10, 5, 30, tzinfo=UTC)
+    approved = datetime(2026, 1, 5, 10, 5, 10, tzinfo=UTC)
+    audit = _eligibility(confirmed, approved_at_utc=approved).to_audit_dict()
+    assert audit == {
+        "signal_close_utc": SIGNAL_CLOSE.isoformat(),
+        "approved_at_utc": approved.isoformat(),
+        "confirmed_at_utc": confirmed.isoformat(),
+        "eligibility_start_utc": at(10, 6).isoformat(),
+        "plan_expiry_utc": PLAN_EXPIRY.isoformat(),
+        "status": STATUS_ELIGIBLE,
+    }
+    # An ineligible confirm still reports what it knows and a null start.
+    refused = _eligibility(None, confirm_outcome=ConfirmOutcome.CANCELLED).to_audit_dict()
+    assert refused["eligibility_start_utc"] is None
+    assert refused["status"] == STATUS_CONFIRM_NOT_SUCCESSFUL
+
+
+def test_the_threshold_depends_only_on_the_recorded_confirm_instant() -> None:
+    """A restart rebuilds the threshold from the journaled ISO text and gets the same instant."""
+    confirmed = datetime(2026, 1, 5, 10, 5, 30, 250000, tzinfo=UTC)
+    first = _eligibility(confirmed)
+    replayed = _eligibility(datetime.fromisoformat(confirmed.isoformat()))
+    assert first == replayed
+    assert first.eligibility_start_utc == replayed.eligibility_start_utc
+
+
+def test_the_module_reads_no_clock() -> None:
+    tree = ast.parse(SHADOW_FILL_PATH.read_text(encoding="utf-8"))
+    clock_names = {"now", "utcnow", "today", "time", "monotonic", "perf_counter"}
+    called = {
+        n.func.attr
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    }
+    assert called.isdisjoint(clock_names), called & clock_names
+
+
+# --- fills against the threshold -------------------------------------------------------------
+
+
+def _trade_minutes(through: set[int], *, count: int = 30) -> list[dict[str, str]]:
+    """Minutes 10:00.. of which only those at the given minute numbers trade through 100.00."""
+    rows = []
+    for index in range(count):
+        if index in through:
+            prices = ("100.20", "100.30", "99.80", "100.00")
+        else:
+            prices = ("100.60", "100.70", "100.40", "100.60")
+        rows.append(minute_row(SYMBOL, at(10, index), *prices, kind="trade"))
+    return rows
+
+
+def _threshold_case(through: set[int]) -> dict[str, Any]:
+    mark = [
+        *flat_minutes(SYMBOL, at(10, 0), 40, "100.00", kind="mark"),
+        minute_row(SYMBOL, at(10, 40), "98.50", "98.60", "97.90", "98.20", kind="mark"),
+    ]
+    return tracer_case(trade_minutes=_trade_minutes(through), mark_minutes=mark)
+
+
+class _RecordingSource:
+    """A MinuteSource that remembers which trade and mark minutes the lifecycle was shown."""
+
+    def __init__(self, inner: ListMinuteSource) -> None:
+        self._inner = inner
+        self.trade_opens: list[datetime] = []
+        self.mark_opens: list[datetime] = []
+
+    def trade_minutes(
+        self, symbol: str, start_exclusive: datetime, end_inclusive: datetime
+    ) -> Sequence[Candle]:
+        minutes = self._inner.trade_minutes(symbol, start_exclusive, end_inclusive)
+        self.trade_opens.extend(m.open_time_utc for m in minutes)
+        return minutes
+
+    def mark_minutes(
+        self, symbol: str, start_exclusive: datetime, end_inclusive: datetime
+    ) -> Sequence[Candle]:
+        minutes = self._inner.mark_minutes(symbol, start_exclusive, end_inclusive)
+        self.mark_opens.extend(m.open_time_utc for m in minutes)
+        return minutes
+
+
+def _confirmed_driver(
+    case: dict[str, Any], confirmed_at: datetime
+) -> tuple[ShadowFillDriver, ParsedCase, dict[str, Any], FillEligibility]:
+    parsed = parse_case_input(case)
+    expected = simulate(case, risk_fn=fixed_risk_fn(QUANTITY, REALIZED_RISK))
+    eligibility = _eligibility(confirmed_at)
+    driver = _driver(parsed, expected)
+    assert driver.open_confirmed(_outcome(parsed), eligibility).opened
+    return driver, parsed, expected, eligibility
+
+
+def test_no_fill_before_the_threshold_and_the_confirm_minute_is_never_used() -> None:
+    # Minute 10:05 (the confirm minute) trades through the limit; 10:06-10:09 do not;
+    # 10:10 does. A start at the confirm minute or the signal close would fill at 10:05.
+    case = _threshold_case({5, 10})
+    confirmed = datetime(2026, 1, 5, 10, 5, 30, tzinfo=UTC)
+    driver, parsed, _expected, eligibility = _confirmed_driver(case, confirmed)
+    source = _RecordingSource(_source(case))
+
+    driver.advance_to(at(10, 9), source, funding=_funding(parsed))  # before the 10:10 fill
+    assert driver.events == ()
+    driver.advance_to(DATA_END, source, funding=_funding(parsed))
+
+    fills = [e for e in driver.events if e.kind == "FILL"]
+    assert len(fills) == 1
+    assert fills[0].time_utc == minute_close(at(10, 10))
+    assert eligibility.eligibility_start_utc == at(10, 6)
+    assert min(source.trade_opens) == at(10, 6)
+    # No minute that closes at or before the threshold was shown to the lifecycle at all.
+    assert all(minute_close(opened) > at(10, 6) for opened in source.trade_opens)
+    assert at(10, 5) not in source.trade_opens
+
+
+def test_when_the_first_eligible_minute_trades_through_it_fills_exactly_there() -> None:
+    case = _threshold_case({5, 6, 10})
+    driver, parsed, _expected, _eligibility_ = _confirmed_driver(
+        case, datetime(2026, 1, 5, 10, 5, 30, tzinfo=UTC)
+    )
+    source = _RecordingSource(_source(case))
+    driver.advance_to(DATA_END, source, funding=_funding(parsed))
+
+    fills = [e for e in driver.events if e.kind == "FILL"]
+    assert [f.time_utc for f in fills] == [minute_close(at(10, 6))]
+    assert source.trade_opens.count(at(10, 6)) == 1
+
+
+def test_a_confirm_on_the_boundary_does_not_fill_on_the_minute_opening_then() -> None:
+    case = _threshold_case({5, 10})
+    driver, parsed, _expected, eligibility = _confirmed_driver(case, at(10, 5))
+    driver.advance_to(DATA_END, _source(case), funding=_funding(parsed))
+
+    assert eligibility.eligibility_start_utc == at(10, 6)
+    fills = [e for e in driver.events if e.kind == "FILL"]
+    assert [f.time_utc for f in fills] == [minute_close(at(10, 10))]
+
+
+def test_the_first_eligible_minute_is_processed_once_across_windows_and_replays() -> None:
+    case = _threshold_case({6})
+    driver, parsed, _expected, _eligibility_ = _confirmed_driver(
+        case, datetime(2026, 1, 5, 10, 5, 30, tzinfo=UTC)
+    )
+    source = _RecordingSource(_source(case))
+    funding = _funding(parsed)
+    for now in (at(10, 5), at(10, 6), at(10, 7), at(10, 7), at(10, 6), at(10, 8)):
+        driver.advance_to(now, source, funding=funding)
+
+    assert source.trade_opens.count(at(10, 6)) == 1
+    assert len([e for e in driver.events if e.kind == "FILL"]) == 1
+    assert len([b for b in driver.bookings if b.kind == "FILL"]) == 1
+
+
+def test_restart_and_replay_give_the_same_threshold_and_no_duplicate_fill() -> None:
+    case = _threshold_case({6})
+    confirmed = datetime(2026, 1, 5, 10, 5, 30, tzinfo=UTC)
+    driver, parsed, expected, first_eligibility = _confirmed_driver(case, confirmed)
+    funding = _funding(parsed)
+    driver.advance_to(at(10, 20), _source(case), funding=funding)
+
+    # A restart: nothing survives but the journaled confirm instant; everything is rebuilt.
+    restarted = _driver(parsed, expected)
+    second_eligibility = _eligibility(datetime.fromisoformat(confirmed.isoformat()))
+    assert restarted.open_confirmed(_outcome(parsed), second_eligibility).opened
+    restarted.advance_to(at(10, 20), _source(case), funding=funding)
+
+    assert second_eligibility.eligibility_start_utc == first_eligibility.eligibility_start_utc
+    assert restarted.eligibility_start_utc == driver.eligibility_start_utc
+    assert restarted.bookings == driver.bookings
+    assert restarted.events == driver.events
+    # Replaying the same window on either driver adds nothing.
+    assert restarted.advance_to(at(10, 20), _source(case), funding=funding) == ()
+    assert len([b for b in restarted.bookings if b.kind == "FILL"]) == 1
+
+
+def test_an_ineligible_confirm_cannot_open_a_fill_simulation() -> None:
+    case = _threshold_case({6})
+    parsed = parse_case_input(case)
+    expected = simulate(case, risk_fn=fixed_risk_fn(QUANTITY, REALIZED_RISK))
+    refused = _eligibility(None, confirm_outcome=ConfirmOutcome.CANCELLED)
+    driver = _driver(parsed, expected)
+    with pytest.raises(ValueError, match="not eligible"):
+        driver.open_confirmed(_outcome(parsed), refused)
+    assert not driver.is_opened
+    with pytest.raises(RuntimeError, match="no plan is open"):
+        driver.advance_to(DATA_END, _source(case))
+
+
+def test_funding_is_booked_with_the_engine_functions_on_the_open_position() -> None:
+    """A non-zero funding instant inside the open stretch matches the simulate trade."""
+    rows = [
+        funding_row(SYMBOL, instant, rate)
+        for instant, rate in (
+            (datetime(2026, 1, 4, 16, 0, tzinfo=UTC), "0"),
+            (at(0), "0"),
+            (at(8), "0"),
+            (at(10, 20), "0.0001"),
+            (at(16), "0"),
+            (datetime(2026, 1, 6, 0, 0, tzinfo=UTC), "0"),
+        )
+    ]
+    case = tracer_case(funding=rows)
+    expected = simulate(case, risk_fn=fixed_risk_fn(QUANTITY, REALIZED_RISK))
+    parsed = parse_case_input(case)
+    driver = _driver(parsed, expected)
+    driver.open(_outcome(parsed), eligibility_start_utc=SIGNAL_CLOSE)
+    driver.advance_to(at(10, 30), _source(case), funding=_funding(parsed))
+    driver.advance_to(DATA_END, _source(case), funding=_funding(parsed))
+
+    assert driver.funding_event_count == 1
+    # LONG with a positive rate pays: -15.928 x 100 x 0.0001.
+    assert driver.funding_amount == Decimal("-0.1592800")
+    assert [b.kind for b in driver.bookings] == ["FILL", "FUNDING", "EXIT"]
+    assert driver.trade_record().to_dict() == expected["trades"][0]
