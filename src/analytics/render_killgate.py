@@ -13,6 +13,7 @@ from types import MappingProxyType
 
 from src.analytics.gates import GATE_IDS, GATE_LABELS
 from src.analytics.killgate import KillGateVerdict
+from src.analytics.killgate_guard import not_concluded_line
 from src.analytics.no_trade import NoTradeCategory, NoTradeRow, NoTradeSection
 from src.analytics.render_common import (
     DISPLAY_TZ_NAME,
@@ -113,8 +114,15 @@ _NO_TRADE_LABELS: MappingProxyType[NoTradeCategory, str] = MappingProxyType(
 )
 
 
-def render_header(report: JournalDepthReport) -> list[str]:
-    """The two-column header table, rows in the exact UI-SPEC order."""
+def render_header(report: JournalDepthReport, blocked_by: tuple[str, ...] = ()) -> list[str]:
+    """The two-column header table, rows in the exact UI-SPEC order.
+
+    With `blocked_by` (D061 F) the kill-gate state row carries the NOT CONCLUDED text instead of
+    the evaluated state.
+    """
+    state_cell = (
+        not_concluded_line(blocked_by) if blocked_by else report.kill_gate.verdict.state.value
+    )
     rows = [
         ["Report digest", f"sha256:{report.digest()}"],
         ["As of (UTC)", fmt_utc(report.as_of_utc)],
@@ -122,7 +130,7 @@ def render_header(report: JournalDepthReport) -> list[str]:
         ["Timezone note", TIMEZONE_NOTE],
         ["Generator", f"{GENERATOR_NAME} + {ANALYTICS_SCHEMA_VERSION}"],
         ["Read-only statement", READ_ONLY_STATEMENT],
-        ["Kill gate state", report.kill_gate.verdict.state.value],
+        ["Kill gate state", state_cell],
         ["Live orders", md_cell(report.live_posture)],
     ]
     return md_table(["Field", "Value"], [":---", ":---"], rows)
@@ -316,8 +324,54 @@ def _decision_reference_lines(refs: tuple[str, ...]) -> list[str]:
     return [f"- {md_cell(ref) or _MISSING}" for ref in sorted(set(refs))]
 
 
-def render_section_kill_gate(report: JournalDepthReport) -> list[str]:
-    """`## 1. Kill Gate`: banner, budget, clock, family matrices, NO_TRADE, decisions, effect."""
+WITHHELD_EXPLANATION = (
+    "No kill-gate conclusion is shown on real evidence while the listed review items are "
+    "unresolved. The verdict, budget, clock and family matrices are withheld; the NO_TRADE "
+    "counts and decision references below and sections 2 to 10 are unaffected."
+)
+
+
+def _render_withheld_kill_gate(
+    report: JournalDepthReport, blocked_by: tuple[str, ...]
+) -> list[str]:
+    """`## 1. Kill Gate` without a conclusion: marker, NO_TRADE counts, decision references."""
+    kill_gate = report.kill_gate
+    no_trade_sections = sorted(
+        kill_gate.no_trade, key=lambda item: EVIDENCE_ORDER.index(item.evidence)
+    )
+    blocks: list[list[str]] = [
+        [f"## {SECTION_TITLES[0]}"],
+        [f"> **KILL GATE: {not_concluded_line(blocked_by)}** {_EM_DASH} {WITHHELD_EXPLANATION}"],
+    ]
+    index = 1
+    for section in no_trade_sections:
+        blocks.extend(
+            [
+                [f"### 1.{index} NO_TRADE by reason category ({section.evidence.value})"],
+                [evidence_caption(section.evidence)],
+                _no_trade_table(section),
+            ]
+        )
+        index += 1
+    blocks.extend(
+        [
+            [f"### 1.{index} Decision references"],
+            _decision_reference_lines(kill_gate.decision_refs),
+            [ENABLEMENT_CLOSING],
+        ]
+    )
+    return join_blocks(blocks)
+
+
+def render_section_kill_gate(
+    report: JournalDepthReport, blocked_by: tuple[str, ...] = ()
+) -> list[str]:
+    """`## 1. Kill Gate`: banner, budget, clock, family matrices, NO_TRADE, decisions, effect.
+
+    With `blocked_by` (D061 F) the conclusion is withheld and replaced by a NOT CONCLUDED block.
+    """
+    if blocked_by:
+        return _render_withheld_kill_gate(report, blocked_by)
     kill_gate = report.kill_gate
     verdict = kill_gate.verdict
     no_trade_sections = sorted(

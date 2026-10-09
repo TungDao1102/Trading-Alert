@@ -29,6 +29,7 @@ from src.analytics.family import (
 )
 from src.analytics.gates import FamilyGateFacts
 from src.analytics.killgate import ResetRecord
+from src.analytics.killgate_guard import EvidenceClass
 from src.analytics.types import OutcomeContext
 from src.backtest.experiment import (
     ExperimentRecord,
@@ -400,6 +401,7 @@ class EvidenceFile:
     backtest: tuple[BacktestEvidence, ...]
     paper: tuple[PaperRecord, ...]
     research_universe: tuple[str, ...]
+    evidence_class: EvidenceClass = EvidenceClass.REAL
 
 
 def _reject_constant(_name: str) -> Any:
@@ -699,10 +701,25 @@ def _load_paper_record(raw: Any, index: int) -> PaperRecord:
         raise EvidenceFileError(f"{where}: invalid paper record ({type(exc).__name__})") from None
 
 
+def _load_evidence_class(doc: Mapping[str, Any]) -> EvidenceClass:
+    """Default-deny fixture marker (REV-11, T-16-11): absent means REAL.
+
+    The only accepted explicit value is the literal "fixture"; anything else is refused, so a
+    typo or a "real" spelling can never be mistaken for a downgrade.
+    """
+    if "evidence_class" not in doc:
+        return EvidenceClass.REAL
+    if doc["evidence_class"] != EvidenceClass.FIXTURE.value:
+        raise EvidenceFileError("evidence: 'evidence_class' must be absent or the string 'fixture'")
+    return EvidenceClass.FIXTURE
+
+
 def load_evidence_file(path: Path) -> EvidenceFile:
     """Load an `analytics-evidence/2` file fail-closed into typed objects (T-10-30/31, T-14-29).
 
     A file of any other schema (the void pre-Phase-14 `analytics-evidence/1`) is refused.
+    An optional top-level `evidence_class: "fixture"` marks test evidence (REV-11); a file
+    without it is real evidence.
     """
     doc = _read_json_object(path, EvidenceFileError, "evidence")
     if doc.get("schema") != EVIDENCE_SCHEMA:
@@ -715,6 +732,7 @@ def load_evidence_file(path: Path) -> EvidenceFile:
         raise EvidenceFileError("evidence: 'backtest' must be a list")
     if not isinstance(raw_paper, list):
         raise EvidenceFileError("evidence: 'paper' must be a list")
+    evidence_class = _load_evidence_class(doc)
     research_universe = _parse_symbols(raw_universe, where)
     backtest = tuple(_load_backtest_entry(raw, i) for i, raw in enumerate(raw_backtest))
     for index, entry in enumerate(backtest):
@@ -728,6 +746,7 @@ def load_evidence_file(path: Path) -> EvidenceFile:
         backtest=backtest,
         paper=tuple(_load_paper_record(raw, i) for i, raw in enumerate(raw_paper)),
         research_universe=research_universe,
+        evidence_class=evidence_class,
     )
 
 

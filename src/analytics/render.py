@@ -61,10 +61,14 @@ def _count_truncations(sections: list[list[str]]) -> int:
     return sum(line.count(TRUNCATION_MARKER) for section in sections for line in section)
 
 
-def render_markdown(report: JournalDepthReport) -> str:
-    """Render the full report: header, then sections 1-10 in the fixed order."""
+def render_markdown(report: JournalDepthReport, blocked_by: tuple[str, ...] = ()) -> str:
+    """Render the full report: header, then sections 1-10 in the fixed order.
+
+    `blocked_by` (D061 F) lists unresolved review items: the kill-gate verdict is then replaced
+    by a NOT CONCLUDED marker in the header and in section 1; every other section is unchanged.
+    """
     rendered = [
-        render_section_kill_gate(report),
+        render_section_kill_gate(report, blocked_by),
         render_section_evidence_overview(report),
         render_section_full_report(report),
         render_section_dual_universe(report),
@@ -75,7 +79,7 @@ def render_markdown(report: JournalDepthReport) -> str:
         [],  # section 9 needs the truncation count of every other section
         render_section_provenance(report),
     ]
-    header = render_header(report)
+    header = render_header(report, blocked_by)
     rendered[8] = render_section_incomplete(report, _count_truncations([header, *rendered]))
     if len(rendered) != len(SECTION_TITLES):
         raise RenderError("rendered section count does not match SECTION_TITLES")

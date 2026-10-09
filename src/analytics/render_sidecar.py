@@ -23,6 +23,7 @@ from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
 
+from src.analytics.killgate_guard import NOT_CONCLUDED, RULE_REF, not_concluded_line
 from src.analytics.report import JournalDepthReport
 from src.domain.canonical import canonical_scalars
 
@@ -91,15 +92,32 @@ def markdown_sha256(markdown_text: str) -> str:
     return hashlib.sha256(markdown_text.encode("utf-8")).hexdigest()
 
 
-def build_sidecar(report: JournalDepthReport, markdown_text: str) -> dict[str, Any]:
-    """The sidecar payload for one report and the Markdown rendered from it."""
-    return {
+def _report_plain(report: JournalDepthReport, blocked_by: tuple[str, ...]) -> Any:
+    """The report tree as plain data; with `blocked_by` the evaluated state is withheld."""
+    plain = to_plain(report)
+    if blocked_by:
+        plain["kill_gate"]["verdict"]["state"] = NOT_CONCLUDED
+    return plain
+
+
+def build_sidecar(
+    report: JournalDepthReport, markdown_text: str, blocked_by: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    """The sidecar payload for one report and the Markdown rendered from it.
+
+    With `blocked_by` (D061 F) the kill-gate state in the report body is replaced by
+    NOT CONCLUDED and a `kill_gate_withheld` object names the blocking review items.
+    """
+    payload: dict[str, Any] = {
         "schema_version": SIDECAR_SCHEMA_VERSION,
         "report_digest": report.digest(),
         "markdown_sha256": markdown_sha256(markdown_text),
         "as_of_utc": to_plain(report.as_of_utc),
-        "report": to_plain(report),
+        "report": _report_plain(report, blocked_by),
     }
+    if blocked_by:
+        payload["kill_gate_withheld"] = {"blocked_by": list(blocked_by), "rule_ref": RULE_REF}
+    return payload
 
 
 def sidecar_text(payload: Mapping[str, Any]) -> str:
@@ -129,6 +147,7 @@ def verify_render(
     sidecar_value: str,
     *,
     report: JournalDepthReport | None = None,
+    blocked_by: tuple[str, ...] = (),
 ) -> list[str]:
     """Problems found in a Markdown/sidecar pair; an empty list means they are consistent.
 
@@ -160,6 +179,14 @@ def verify_render(
     if report is not None:
         if digest != report.digest():
             problems.append("report_digest differs from the recomputed report digest")
-        if payload["report"] != to_plain(report):
+        if payload["report"] != _report_plain(report, blocked_by):
             problems.append("report body differs from the report tree")
+    if blocked_by:
+        withheld = payload.get("kill_gate_withheld")
+        if not isinstance(withheld, dict) or withheld.get("blocked_by") != list(blocked_by):
+            problems.append("kill_gate_withheld does not name the blocking review items")
+        if not_concluded_line(blocked_by) not in markdown_text:
+            problems.append("the Markdown does not carry the NOT CONCLUDED marker")
+    elif "kill_gate_withheld" in payload:
+        problems.append("kill_gate_withheld is present without a blocking review item")
     return problems

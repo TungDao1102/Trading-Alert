@@ -69,6 +69,15 @@ from src.analytics.killgate import (
     reset_from_event,
     resets_from_events,
 )
+from src.analytics.killgate_guard import (
+    DEFAULT_REGISTRY_PATH,
+    EvidenceClass,
+    KillGateReportBlocked,
+    ReviewRegistryError,
+    load_review_registry,
+    not_concluded_line,
+    require_report_conclusion_allowed,
+)
 from src.analytics.lifecycle import (
     normalize_backtest_lifecycle,
     normalize_live_lifecycle,
@@ -159,6 +168,7 @@ class CliArgs:
     seed: int
     no_db: bool
     reports_root: Path
+    review_registry: Path
 
 
 # --------------------------------------------------------------------------- #
@@ -202,6 +212,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=_DEFAULT_REPORTS_ROOT,
         help="confinement root for output (test hook; default <repo>/data/reports)",
     )
+    parser.add_argument(
+        "--review-registry",
+        dest="review_registry",
+        type=Path,
+        default=DEFAULT_REGISTRY_PATH,
+        help="kill-gate review registry that gates the conclusion on real evidence (D061 F)",
+    )
     return parser
 
 
@@ -222,6 +239,7 @@ def parse_args(argv: Sequence[str] | None = None) -> CliArgs:
         seed=namespace.seed,
         no_db=namespace.no_db,
         reports_root=namespace.reports_root,
+        review_registry=namespace.review_registry,
     )
 
 
@@ -604,11 +622,13 @@ def _live_inputs(database: _DatabaseData, raw_root: Path) -> EvidenceInputs:
 # --------------------------------------------------------------------------- #
 
 
-def _render_pair(report: JournalDepthReport) -> tuple[str, bytes, bytes]:
+def _render_pair(
+    report: JournalDepthReport, blocked_by: tuple[str, ...] = ()
+) -> tuple[str, bytes, bytes]:
     """(file stem, Markdown bytes, sidecar bytes), verified to agree before any write."""
-    markdown = render_markdown(report)
-    sidecar = sidecar_text(build_sidecar(report, markdown))
-    problems = verify_render(markdown, sidecar, report=report)
+    markdown = render_markdown(report, blocked_by)
+    sidecar = sidecar_text(build_sidecar(report, markdown, blocked_by))
+    problems = verify_render(markdown, sidecar, report=report, blocked_by=blocked_by)
     if problems:
         raise _RenderVerificationError("; ".join(problems))
     return report_file_stem(report), markdown.encode("utf-8"), sidecar.encode("utf-8")
@@ -641,6 +661,7 @@ _MESSAGE_FAILURES = (
     AnalyticsInputError,
     KillGateInputError,
     RenderError,
+    ReviewRegistryError,
 )
 # Foreign failures whose messages may carry file paths or contents: reported by type name
 # only (WR-03). ValueError is the last resort (UnicodeDecodeError, TOMLDecodeError, the
@@ -711,6 +732,24 @@ def _record_step(url: str, factory_fn: SessionFactoryFn, report: JournalDepthRep
     return 0
 
 
+def _report_blockers(args: CliArgs) -> tuple[str, ...]:
+    """Ids of unresolved review items that forbid a kill-gate conclusion (D061 F).
+
+    Evidence is REAL unless the evidence file explicitly marks itself fixture (REV-11); a run
+    without an evidence file (database rows only) is therefore REAL. The registry is read on
+    every run, so an unreadable or malformed registry fails the run closed.
+    """
+    registry = load_review_registry(args.review_registry)
+    evidence_class = EvidenceClass.REAL
+    if args.evidence is not None:
+        evidence_class = load_evidence_file(args.evidence).evidence_class
+    try:
+        require_report_conclusion_allowed(registry, evidence_class)
+    except KillGateReportBlocked as blocked:
+        return blocked.blocking_ids
+    return ()
+
+
 def _run(args: CliArgs, now_fn: ClockFn | None, session_factory_fn: SessionFactoryFn | None) -> int:
     database_url = _database_url(args)
     if args.record and database_url is None:
@@ -721,16 +760,27 @@ def _run(args: CliArgs, now_fn: ClockFn | None, session_factory_fn: SessionFacto
     factory_fn = make_session_factory if session_factory_fn is None else session_factory_fn
     as_of = _resolve_as_of(args, now_fn)
     out_dir = confine_output_dir(args.out_dir, args.reports_root).resolve()
+    blocked_by = _report_blockers(args)
+    if blocked_by and args.record:
+        # Nothing is written or journaled: a recorded verdict on real evidence is what D061 F
+        # forbids. A plain report run (no --record) still produces the journal-depth report.
+        return _fail(
+            "kill-gate conclusion withheld: unresolved review items "
+            f"{', '.join(blocked_by)} (D061 F)"
+        )
     database = None if database_url is None else _read_database(database_url, factory_fn)
     report = build_journal_depth_report(
         _build_inputs(args, as_of, database), base_seed=args.seed, resamples=args.resamples
     )
-    stem, markdown, sidecar = _render_pair(report)
+    stem, markdown, sidecar = _render_pair(report, blocked_by)
     report_path, sidecar_path = _write_pair(out_dir, stem, markdown, sidecar)
     print(f"Report: {report_path}")
     print(f"Sidecar: {sidecar_path}")
     print(f"Digest: sha256:{report.digest()}")
-    print(f"Kill gate: {report.kill_gate.verdict.state.value}")
+    if blocked_by:
+        print(f"Kill gate: {not_concluded_line(blocked_by)}")
+    else:
+        print(f"Kill gate: {report.kill_gate.verdict.state.value}")
     if args.record and database_url is not None:
         return _record_step(database_url, factory_fn, report)
     return 0

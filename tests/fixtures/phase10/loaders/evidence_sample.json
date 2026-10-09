@@ -168,6 +168,7 @@
       ]
     }
   ],
+  "evidence_class": "fixture",
   "paper": [
     {
       "approval_acted_at_utc": "2026-02-01T08:00:30+00:00",
