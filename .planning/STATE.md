@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: executing
-stopped_at: Completed 16-16-PLAN.md
-last_updated: "2026-10-09T15:00:02.882Z"
+stopped_at: Completed 16-19-PLAN.md
+last_updated: "2026-10-09T15:47:53.141Z"
 last_activity: 2026-10-09
 last_activity_desc: Phase 16 execution started
-state_head: 319a5d581448891bd91ec0aa4bb5b50d8ecf2d5f
+state_head: 15ff5d57672b02a373c546a73bcc2151a799de4c
 progress:
   total_phases: 29
   completed_phases: 17
   total_plans: 194
-  completed_plans: 162
+  completed_plans: 163
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
-Plan: 6 of 50
+Plan: 7 of 50
 Status: Ready to execute
 Last activity: 2026-10-09 — Phase 16 execution started
 
@@ -212,6 +212,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P18 | 35 min | 3 tasks | 6 files |
 | Phase 16 P35 | 12 min | 2 tasks | 5 files |
 | Phase 16 P16 | 12min | 3 tasks | 4 files |
+| Phase 16 P19 | 55min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -516,6 +517,8 @@ Recent decisions affecting current work:
 - [Phase 16]: 16-18: plateau/mark-hole/cost-field reporting is reporting only; per-point figures are existing backtest report outputs over pooled Validation trades, axis values ordered numerically, no marker or ordering by a metric
 - [Phase 16]: 16-35: SHADOW approval delay is the measured acted - requested of the approval row for a human action; APPROVAL_DELAY_LAG_SECONDS only for records with no human action (SIMULATE leg) — D-15, SC3; new PaperRecord fields are optional and omitted from the canonical output when absent so every pinned digest is unchanged (Q-K)
 - [Phase 16]: Q-J (user): paper runtime state is journal rows only (PgRuntimeState via PgJournalStore, entity PaperRuntime); no migration, no table
+- [Phase 16]: [16-19] Q-B (user): SHADOW fill eligibility = recorded CONFIRM instant floored to the minute plus one minute, passed as advance start_exclusive; no simulator change
+- [Phase 16]: [16-19] Live 1m trade and mark minutes by REST polling; poll cadence and close lag are required inputs (O-07); driver advances only to the shared settled watermark
 
 ### Pending Todos
 
@@ -592,6 +595,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-09T15:00:02.347Z
-Stopped at: Completed 16-16-PLAN.md
+Last session: 2026-10-09T15:47:52.747Z
+Stopped at: Completed 16-19-PLAN.md
 Resume file: None
