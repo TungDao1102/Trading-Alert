@@ -54,19 +54,9 @@ SCANNED_FILES = (
     "src/backtest/report.py",
     # Phase 7.1 plan 07.1-01 — registry↔cost binding helper (D-05 purity).
     "src/backtest/binding.py",
-    # Phase 7 plan 07-01 — pure paper-loop tracer (D-02 purity).
-    "src/paper/__init__.py",
-    "src/paper/loop.py",
+    # Phase 7 plan 07-01: the paper WS adapter; src/paper/*.py and src/research/*.py are
+    # scanned by glob (SCANNED_GLOBS below, Phase 16 plan 16-10).
     "src/adapters/paper_ws.py",
-    # Phase 7 plan 07-03 — paper attribution vocabulary + record assembly (D-03 purity).
-    "src/paper/attribution.py",
-    "src/paper/journal.py",
-    # Phase 7 plan 07-04 — paper freeze monitor (D-04 purity).
-    "src/paper/freeze.py",
-    # Phase 7 plan 07-04 — paper SIMULATE notify (D-05 purity).
-    "src/paper/notify.py",
-    # Phase 16 plan 16-08 - shared runtime vocabulary (pure, Decimal prices, no float).
-    "src/paper/vocabulary.py",
     # Phase 10 - pure analytics core (D-01/D-05 purity). The CLI edge (cli.py) and the two
     # analytics adapters are float/clock-guarded by tests/test_analytics_edge_guards.py, which
     # also fails if a pure module is missing from this list.
@@ -134,7 +124,17 @@ def _find_float_calls(src: str) -> list[tuple[int, str]]:
 
 # Phase 14 plan 14-01: packages scanned by glob, so a module added by a later plan can
 # never be silently skipped by the explicit list above (registration trap, D-26).
-SCANNED_GLOBS = ("src/backtest/*.py",)
+SCANNED_GLOBS = ("src/backtest/*.py", "src/paper/*.py", "src/research/*.py")
+
+# Modules matched by a glob above that are NOT float-scanned, each with a one-line reason.
+# Adding an entry needs a reason; weakening the scan instead is not allowed (Phase 16,
+# plan 16-10). Every other src/paper and src/research module passes the full scan.
+FLOAT_SCAN_EXCLUDED: dict[str, str] = {
+    "src/paper/shadow.py": (
+        "tenacity retry-wait arithmetic in seconds (float is the tenacity wait type; "
+        "no price, quantity or risk value is computed with it)"
+    ),
+}
 
 
 def _repo_root() -> Path:
@@ -146,7 +146,11 @@ def _glob_scanned_files() -> list[str]:
     root = _repo_root()
     matched: set[str] = set()
     for pattern in SCANNED_GLOBS:
-        matched.update(p.relative_to(root).as_posix() for p in root.glob(pattern))
+        matched.update(
+            rel
+            for rel in (p.relative_to(root).as_posix() for p in root.glob(pattern))
+            if rel not in FLOAT_SCAN_EXCLUDED
+        )
     return sorted(matched)
 
 

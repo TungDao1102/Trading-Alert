@@ -342,7 +342,7 @@ def test_window_drift_changes_a_feature_digest(
 def test_a_conflicting_duplicate_bar_fails_closed() -> None:
     case = _case_input()
     bars = _all_bars(case)
-    clash = replace(bars[3], close=bars[3].close + 1)
+    clash = replace(bars[3], volume=bars[3].volume + 1)
     with pytest.raises(ValueError, match="conflicting"):
         decision_surface([*bars, clash], context=_per_bar_context(case))
 
