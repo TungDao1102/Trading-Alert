@@ -1339,3 +1339,579 @@ Hôm nay bạn không có lệnh chạy được cho các giai đoạn DEMO đ�
 Những điều không bao giờ làm: không đặt khóa live trước khi WR-06 xong; không bỏ qua giai đoạn nào; không chỉnh tham số theo kết quả soak hay backtest; không coi một lần chạy ở trạng thái DEGRADED là bằng chứng.
 
 Nguồn: `.planning/ROADMAP.md`, `docs/DECISIONS.md`, `.env.example`, `docker-compose.yml`
+
+## 10. Vận hành hằng ngày
+
+Mọi lệnh ở mục này chạy trong thư mục `/opt/trading` bằng user `trading` trên `[MÁY EC2]`, trừ khi bước nói khác.
+
+#### Bước 10.1 Bảy service của compose [ĐÃ XÂY] [CHƯA XÂY] [CHƯA XÁC MINH]
+
+**Chạy ở:** `[MÁY EC2]`
+
+Compose đặt tên project cố định là `trading`, nên các volume tên là `trading_pgdata` và tương tự. Dữ liệu chỉ nằm trong các volume có tên (Docker volume là một vùng lưu trữ do Docker quản lý, sống lâu hơn container): `pgdata`, `rawdata`, `backupdata`, `logs`. Mọi service ghi nhật ký kiểu json-file, xoay vòng ở 10 MB và giữ 5 tệp.
+
+| Service | Việc của nó | Profile | `docker compose up -d` có khởi động? | Khởi động lại | Kiểm tra sức khỏe | Volume | Trạng thái |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `postgres` | cơ sở dữ liệu PostgreSQL 17, công bố chỉ trên `127.0.0.1` | không | có | unless-stopped | `pg_isready`, mỗi 10 giây | `pgdata` | `[ĐÃ XÂY]` |
+| `db-upgrade` | chạy một lần `alembic upgrade head`; collector chờ nó thành công | không | có, rồi thoát | `"no"` | tắt | không | `[ĐÃ XÂY]` |
+| `collector` | thu Open Interest và funding mỗi 5 phút | không | có | unless-stopped | `python -m src.data.collector --healthcheck`, mỗi 60 giây, sáu phút khởi động | `rawdata`, `logs` | `[ĐÃ XÂY]` |
+| `paper` | khung giữ chỗ chạy là thoát (Phase 16) | `paper` | không | `"no"` | tắt | không | `[CHƯA XÂY]` |
+| `live` | khung giữ chỗ chạy là thoát (Phase 24) | `live` | không | `"no"` | tắt | không | `[CHƯA XÂY]` |
+| `backup` | một lần sao lưu theo lịch (`scheduled`) trong image ops | `ops` | không (được `deploy/backup.sh` gọi) | `"no"` | tắt | `rawdata` chỉ-đọc, `backupdata` | `[ĐÃ XÂY]` |
+| `ops` | hộp công cụ cho `deploy/*.sh` (khôi phục, diễn tập, cutover); mặc định chỉ in trợ giúp | `ops` | không | `"no"` | tắt | `rawdata`, `backupdata`, `logs` | `[ĐÃ XÂY]` |
+
+#### Bước 10.2 Các lệnh vòng đời [ĐÃ XÂY] [CHƯA XÁC MINH]
+
+**Chạy ở:** `[MÁY EC2]`
+
+```bash
+docker compose ps
+```
+
+```bash
+docker compose up -d
+```
+
+```bash
+docker compose stop collector
+```
+
+```bash
+docker compose start collector
+```
+
+```bash
+docker compose restart collector
+```
+
+```bash
+docker compose --profile ops build
+```
+
+Chạy một lệnh một lần trong hộp công cụ `ops` (ví dụ liệt kê thư mục sao lưu):
+
+```bash
+docker compose --profile ops run --rm -T --no-deps ops ls /app/data/backup
+```
+
+Để chạy một stack thứ hai từ cùng một checkout (kiểm thử, diễn tập), hai biến môi trường `TRADING_ENV_FILE` (tệp env khác, mặc định `.env`) và `COMPOSE_PROJECT_NAME` (tên project) được cả compose lẫn các script deploy tôn trọng. Quy tắc cần nhớ: dừng collector làm mất vĩnh viễn các phút Open Interest; đừng dừng nó vì tiện.
+
+#### Bước 10.3 Sức khỏe [ĐÃ XÂY] [CHƯA XÁC MINH]
+
+**Chạy ở:** `[MÁY EC2]`
+
+Đầu dò của collector thoát 0 chỉ khi mọi symbol trong danh sách thu đều có mốc Open Interest mới hơn hai lần chu kỳ VÀ mốc funding mới hơn một khoảng 8 giờ cộng biên. Trên cơ sở dữ liệu mới chưa có mốc nào, nên có sáu phút khởi động. Docker không tự khởi động lại một container "unhealthy", nên đây chỉ là thông tin; bạn tự xem cột trạng thái của:
+
+```bash
+docker compose ps
+```
+
+Chạy đầu dò bằng tay (chưa từng thử trên máy thật `[CHƯA XÁC MINH]`):
+
+```bash
+docker compose exec collector /app/.venv/bin/python -m src.data.collector --healthcheck
+```
+
+#### Bước 10.4 Nhật ký [ĐÃ XÂY] [CHƯA XÁC MINH]
+
+**Chạy ở:** `[MÁY EC2]`
+
+```bash
+docker compose logs --tail 200 collector
+```
+
+```bash
+docker compose logs --since 1h collector
+```
+
+Nhật ký json-file xoay vòng ở 10 MB với 5 tệp mỗi service; volume `logs` giữ nhật ký ứng dụng. Nhật ký của timer sao lưu nằm ở systemd:
+
+```bash
+journalctl -u trading-backup
+```
+
+Quy tắc che bí mật (D050, `src/ops/redaction.py`): việc che dựa trên GIÁ TRỊ của các biến môi trường mà tên chứa PASSWORD, SECRET, TOKEN, API_KEY, ACCESS_KEY, CRYPT hoặc PRIVATE. Vì vậy một biến bí mật mới phải giữ tên khớp quy tắc đó; đừng bao giờ đổi tên một biến bí mật thành tên không khớp.
+
+#### Bước 10.5 Di chuyển cơ sở dữ liệu (migration) [ĐÃ XÂY] [CHƯA XÁC MINH]
+
+**Chạy ở:** `[MÁY EC2]`
+
+Service `db-upgrade` chạy `alembic upgrade head` và chặn collector cho tới khi nó thành công. Để áp dụng một migration mới, dùng `docker compose up -d` (đó cũng là điều `deploy/update.sh` làm); RUNBOOK không ghi một lệnh riêng nào khác. Xem kết quả:
+
+```bash
+docker compose logs --tail 50 db-upgrade
+```
+
+Không có hạ cấp tự động. Migration `0004_persistence_integrity` (ràng buộc, bảng `execution_intents`, các trigger chỉ-thêm...) do `db-upgrade` áp dụng, không phải `deploy/migrate.sh` (script đó là cutover nhà cung cấp). Một lần quay lại mã (rollback) không chạy `alembic downgrade`; nếu mã cũ không đọc được lược đồ đã migrate, hãy khôi phục bản sao lưu trước cập nhật (mục 6.5, RUNBOOK 14.4).
+
+#### Bước 10.6 Bí mật và `.env`; bảng xoay vòng [ĐÃ XÂY] [CHƯA XÁC MINH]
+
+**Chạy ở:** `[MÁY EC2]`
+
+`.env` nằm ở `/opt/trading/.env`, quyền 0600, chủ là `trading`. Kiểm tra cấu hình bằng `-q` và chỉ bằng `-q`:
+
+```bash
+docker compose config -q
+```
+
+Lý do: lệnh `config` không có `-q` in ra môi trường đã phân giải, gồm mọi mật khẩu thật. Nếu lỡ làm vậy và đầu ra đã đi vào đâu đó, coi các bí mật đó là lộ.
+
+| Họ bí mật | Repository ghi gì | Repository KHÔNG ghi |
+| --- | --- | --- |
+| `POSTGRES_PASSWORD` | bootstrap yêu cầu ít nhất 16 ký tự và chỉ gồm chữ, số, `.`, `_`, `~`, `-` | cách đổi sau này. Đổi giá trị trong `.env` không tự đổi mật khẩu đã nằm sẵn trong volume `pgdata` đang có: đó là hành vi chung của PostgreSQL, không có trong repository `[CHƯA XÁC MINH]` |
+| `BACKUP_S3_ACCESS_KEY_ID`, `BACKUP_S3_SECRET_ACCESS_KEY` | một biến thiếu thì lệnh dừng và nêu tên biến | quy trình xoay khóa ở nhà cung cấp `[CHƯA XÁC MINH]` |
+| `BACKUP_CRYPT_PASSWORD`, `BACKUP_CRYPT_PASSWORD2` | giá trị là kết quả `rclone obscure`; MẤT hoặc ĐỔI cụm mật khẩu gốc thì mọi bản sao lưu cũ không đọc được | quy trình mã hóa lại sao lưu cũ; đừng đổi tùy tiện |
+| Khóa Binance | khóa có quyền rút tiền tắt, giới hạn IP; tên biến tách riêng theo môi trường (OPS-06) | quy trình xoay `[CHƯA XÁC MINH]` |
+| `TELEGRAM_BOT_TOKEN` | lấy từ BotFather, mỗi môi trường một bot (Q-L) | quy trình thu hồi và tạo lại `[CHƯA XÁC MINH]` |
+
+#### Bước 10.7 Làm mới các pin (image, GitHub Actions) [ĐÃ XÂY] [CHƯA XÁC MINH]
+
+**Chạy ở:** `[MÁY CÓ MẠNG]` cho `--lookup`; `[MÁY PHÁT TRIỂN]` đủ cho `--list`
+
+"Pin" là việc ghim một image hay một action vào một giá trị chính xác (thẻ cộng digest) để bản dựng tái lập được. Việc làm mới luôn có chủ ý và không bao giờ tự động (D050). Thủ tục (RUNBOOK 16.2) bằng lời thường: chạy `--lookup` để xem mục nào "MOVED"; đọc ghi chú phát hành của mọi mục đã đổi trước khi chấp nhận; sửa mọi nơi xuất hiện và các bảng của RUNBOOK mục 16 trong MỘT commit; dùng digest của chỉ mục (index digest) của thẻ, không dùng digest riêng của từng kiến trúc; chạy các kiểm thử dưới đây rồi để CI dựng và chạy job docker trước khi triển khai; sau một thay đổi lớn hoặc nhỏ của Python hay PostgreSQL, diễn tập `deploy/update.sh --ref <commit-sha>` trên một máy không phải sản xuất. Ngoại lệ duy nhất: `postgresql-client-17` trong image `ops` cố ý trôi trong phiên bản 17 vì kho PostgreSQL bỏ các bản vá cũ.
+
+```bash
+uv run pytest tests/test_deploy_docs.py tests/test_deploy_images.py tests/test_deploy_workflows.py
+```
+
+### Thẻ lệnh: deploy/refresh-pins.sh
+
+**Mục đích:** liệt kê các image, phiên bản công cụ và GitHub Actions được ghim trong checkout này, hoặc hỏi các registry và GitHub xem pin nào đã đổi. Chỉ ĐỌC: không bao giờ sửa tệp nào.
+
+**Khi nào chạy:** khi bạn cân nhắc làm mới các pin (bước 10.7); không có lịch.
+
+**Chạy ở máy nào:** `--list` chạy offline ở bất kỳ máy có checkout (`[MÁY PHÁT TRIỂN]`); `--lookup` cần mạng, `curl` và `git` (`[MÁY CÓ MẠNG]`).
+
+**Lệnh:**
+
+```bash
+deploy/refresh-pins.sh --list
+```
+
+```bash
+deploy/refresh-pins.sh --lookup
+```
+
+Cờ: `--list` (offline, in một dòng `<name>:<tag>@sha256:<digest>` cho mỗi image, rồi `uv-version`, `python-version` và một dòng `<owner/repo>@<sha> <tag>` cho mỗi action), `--lookup` (online, in `unchanged` hoặc `MOVED` bên cạnh từng pin), `-h`/`--help`.
+
+**Chạy thử:** Không áp dụng: script không có `--dry-run` vì nó vốn chỉ đọc và không đổi gì; `--list` là chế độ offline an toàn nhất.
+
+**Dấu hiệu thành công:** `--list` in danh sách pin và thoát 0. `--lookup` in `unchanged` cho từng pin chưa đổi và thoát 0.
+
+**Mã thoát:** 0 thành công và với `-h`. 2 khi không đưa đối số nào hoặc cờ lạ (`usage_error`). Với `--lookup`: 1 khi thiếu `curl` hay `git` (`die`), và 1 khi có ít nhất một tra cứu không trả về gì ("lookup failed").
+
+**Khi lỗi:** `lookup failed` thường là lỗi mạng hay registry; chạy lại một lần rồi báo. Không có tùy chọn ghi đè nào.
+
+**Không bao giờ:** sửa một tệp; tự động nâng pin; thay thế cho commit được duyệt ở bước 10.7.
+
+#### Bước 10.8 Kéo dữ liệu nghiên cứu về máy phát triển (RUNBOOK 19.5) [ĐÃ XÂY] [CHƯA XÁC MINH]
+
+**Chạy ở:** máy sẽ nhận dữ liệu, cần cấu hình `BACKUP_*` và mạng (hôm nay `[MÁY PHÁT TRIỂN]` không có mạng, nên máy nào làm việc này là `[QUYẾT ĐỊNH CỦA BẠN]`)
+
+Dữ liệu nghiên cứu (Parquet cùng `pg.dump` trong cùng bundle) đến máy nhận qua chuỗi sao lưu có sẵn: máy chủ đẩy một snapshot lên kho ngoài mã hóa và máy nhận kéo về, không có ssh nào từ máy nhận tới máy chủ. Máy nhận phải có cùng cấu hình `BACKUP_*` như máy chủ, nên cụm mật khẩu và một khóa truy cập bucket sẽ tồn tại ở máy thứ hai và các quy tắc giữ khóa phải áp dụng cho nó. Ít nhất một snapshot hoàn chỉnh phải có trên remote, mà bản sao lưu thật đầu tiên chờ cổng D064.
+
+Thay `<UTC timestamp>` bằng giờ UTC hiện tại dạng `YYYYMMDDTHHMMSSZ`; đích không được tồn tại hoặc phải trống. Ba lệnh theo đúng thứ tự (kéo và kiểm; kiểm lại độc lập; chép vào thư mục dữ liệu thô không ghi đè):
+
+```bash
+docker compose --profile ops run --rm -T --no-deps ops /app/.venv/bin/python -m src.ops.backup pull --dest /app/data/backup/pull-<UTC timestamp>
+```
+
+```bash
+docker compose --profile ops run --rm -T --no-deps ops /app/.venv/bin/python -m src.ops.backup verify --bundle-root /app/data/backup/pull-<UTC timestamp>
+```
+
+```bash
+docker compose --profile ops run --rm -T --no-deps ops /app/.venv/bin/python -m src.ops.backup restore --bundle-root /app/data/backup/pull-<UTC timestamp> --parquet-target /app/data/raw --skip-db --force
+```
+
+Bản mới nhất hoàn chỉnh được dùng; để kéo một bản có tên, thêm `--snapshot <snapshot id>` vào lệnh đầu. Khi thành công, lệnh đầu in `pull-OK snapshot=<id> dest=...`. Lệnh thứ hai thoát 0 nghĩa là mọi tệp khớp manifest; mọi kết quả khác thì dừng, đừng chép. Lệnh thứ ba (`--skip-db` chỉ khôi phục Parquet; `--force` chỉ cần vì thư mục dữ liệu thô đã có dữ liệu và không cho ghi đè) không bao giờ ghi đè: nếu một đường dẫn đã tồn tại với nội dung khác, nó dừng với `already exists in the target with different content` và không chép gì. Đó là một phát hiện để điều tra, không phải lý do để xóa tệp đích hay đổi tùy chọn. Chỉ đưa tệp từ bundle kéo về vào thư mục dữ liệu thô bằng bước thứ ba, không bao giờ chép tay.
+
+#### Bước 10.9 Ổ đĩa và vệ sinh volume [THỦ CÔNG]
+
+**Chạy ở:** `[MÁY EC2]`
+
+Cây Parquet chỉ lớn dần và không bao giờ bị xóa. Xem dung lượng bằng các lệnh chung:
+
+```bash
+df -h
+```
+
+Dọn các thư mục `restore-<timestamp>` và `drill-<timestamp>` cũ như ở bước 6.7. KHÔNG BAO GIỜ chạy lệnh `down` kèm cờ xóa volume, và không chạy lệnh dọn dẹp volume hay hệ thống của Docker: chúng xóa dữ liệu nghiên cứu không thể thay thế.
+
+#### Bước 10.10 Đồng bộ thời gian [ĐÃ XÂY] [CHƯA XÁC MINH]
+
+**Chạy ở:** `[MÁY EC2]`
+
+Bootstrap thay `systemd-timesyncd` bằng chrony và dừng nếu độ lệch vượt `--max-drift-ms` (mặc định 100 ms). Kiểm tra bất cứ lúc nào:
+
+```bash
+chronyc tracking
+```
+
+Nguồn: `docs/operations/RUNBOOK.md`, `docker-compose.yml`, `deploy/refresh-pins.sh`, `docs/operations/SECURITY_AND_OPERATIONS.md`, `src/ops/redaction.py`, `Dockerfile`, `.env.example`
+
+## 11. Cập nhật và quay lại phiên bản cũ
+
+Không có tag git nào trong repository, nên mọi ví dụ `--ref` ở đây dùng `<commit-sha>`; một tag bạn tự tạo và tự đẩy lên remote cũng dùng được.
+
+#### Bước 11.1 Trước khi cập nhật [ĐÃ XÂY] [CHƯA XÁC MINH]
+
+**Chạy ở:** `[MÁY EC2]` bằng user `trading` trong `/opt/trading`
+
+1. Cây làm việc phải sạch (cây có thay đổi chưa commit bị từ chối). Kiểm tra:
+
+```bash
+git status
+```
+
+2. Đích phải là một commit hoặc tag bạn đã xem lại, và remote phải có nó `[CHƯA XÁC MINH]`.
+3. Cả hai image (`trading-alert:dev` và `trading-alert-ops:dev`, hoặc theo `IMAGE_TAG` của bạn) phải đang có trên máy: chúng là thứ mà việc quay lại sẽ trả về. Bước 4.9 đã dựng chúng.
+4. Diễn tập để đọc kế hoạch:
+
+```bash
+deploy/update.sh --ref <commit-sha> --dry-run
+```
+
+#### Bước 11.2 Cập nhật [ĐÃ XÂY] [CHƯA XÁC MINH]
+
+**Chạy ở:** `[MÁY EC2]` bằng user `trading`
+
+```bash
+deploy/update.sh --ref <commit-sha>
+```
+
+Thứ tự theo phần đầu của script: từ chối nếu cây bẩn; ghi commit hiện tại và ID của hai image vào `.deploy/last-good.env` (bản ghi cũ giữ lại thành `last-good.env.prev`); chạy `deploy/backup.sh` (một bản sao lưu lỗi dừng cập nhật); gắn thẻ `:rollback` cho hai image; `git fetch --tags origin`; `git checkout --detach` tới ref; `docker compose --profile ops build`; `docker compose up -d`. Cờ `--skip-backup` bỏ qua bản sao lưu và là một rủi ro bạn tự nhận, đặc biệt khi cập nhật có migration.
+
+#### Bước 11.3 Kiểm tra sau cập nhật [ĐÃ XÂY] [CHƯA XÁC MINH]
+
+**Chạy ở:** `[MÁY EC2]`
+
+```bash
+git rev-parse HEAD
+```
+
+```bash
+docker compose ps
+```
+
+```bash
+docker compose logs --tail 100 collector
+```
+
+Đối chiếu commit in ra với `<commit-sha>` bạn muốn; kiểm tra `db-upgrade` đã thoát thành công và collector lên lại (bước 10.5).
+
+#### Bước 11.4 Quay lại phiên bản cũ [ĐÃ XÂY] [CHƯA XÁC MINH]
+
+**Chạy ở:** `[MÁY EC2]` bằng user `trading`
+
+```bash
+deploy/update.sh --rollback --dry-run
+```
+
+```bash
+deploy/update.sh --rollback
+```
+
+#### Bước 11.5 Giới hạn cần biết (RUNBOOK 14.4) [ĐÃ XÂY]
+
+**Chạy ở:** `[MÁY EC2]`
+
+- Quay lại chỉ trả mã và image. Một migration lược đồ mà bản mới đã áp dụng KHÔNG được hoàn tác. Nếu mã cũ không đọc được lược đồ đã migrate, hãy khôi phục bản sao lưu trước cập nhật bằng `deploy/restore.sh` (mục 6.5) thay vì quay lại. Đó là lý do `--skip-backup` nguy hiểm khi có migration.
+- Mỗi lần chạy `--ref` ghi đè `.deploy/last-good.env`. Sau một cập nhật hỏng nửa chừng, chạy `--ref` lần nữa sẽ ghi trạng thái nửa-cập-nhật đó thành "bản tốt cuối". Luôn quay lại TRƯỚC (hoặc sửa nguyên nhân), rồi mới cập nhật lại.
+- `--rollback` trên một máy chưa từng cập nhật bằng `--ref` dừng với "no rollback state".
+- Soak: một lần cập nhật khởi động lại tiến trình paper, là thời gian chưa bao phủ theo D063 mục 1 một khi runtime tồn tại (bước 7.9).
+
+### Thẻ lệnh: deploy/update.sh
+
+**Mục đích:** đưa stack đang chạy tới một ref git, hoặc đưa nó về đúng các image đã chạy trước đó.
+
+**Khi nào chạy:** khi bạn muốn triển khai một phiên bản mới đã xem lại; hoặc để quay lại sau một cập nhật không ổn.
+
+**Chạy ở máy nào:** `[MÁY EC2]` bằng user `trading` trong checkout (không dùng root).
+
+**Lệnh:**
+
+```bash
+deploy/update.sh --ref <commit-sha> --skip-backup
+```
+
+```bash
+deploy/update.sh --rollback
+```
+
+Hai chế độ. Chế độ cập nhật: `--ref REF` (bắt buộc, không được bắt đầu bằng dấu gạch), tùy chọn `--skip-backup` (chỉ dùng với `--ref`) và `--dry-run`. Chế độ quay lại: `--rollback` (kèm `--dry-run` nếu muốn), không dùng chung với `--ref` và `--skip-backup`. `-h`/`--help` in cách dùng. Các biến môi trường `COMPOSE_PROJECT_NAME`, `TRADING_ENV_FILE` và `IMAGE_TAG` (mặc định `dev`) được tôn trọng.
+
+Tệp trạng thái: `.deploy/last-good.env` (quyền 0600, bị gitignore, được phân tích chứ không bao giờ `source`) chứa `GIT_SHA`, `APP_IMAGE_ID` và `OPS_IMAGE_ID`; bản trước là `last-good.env.prev`. Khi chạy lại một cập nhật dở (checkout đã ở REF và có bản ghi hợp lệ), script giữ nguyên bản ghi và các thẻ `:rollback` để quay lại vẫn về bản tốt cuối.
+
+**Chạy thử:** cả hai chế độ có `--dry-run`:
+
+```bash
+deploy/update.sh --ref <commit-sha> --dry-run
+```
+
+```bash
+deploy/update.sh --rollback --dry-run
+```
+
+**Dấu hiệu thành công:** cập nhật in "updated to <REF>; undo with: deploy/update.sh --rollback". Quay lại kết thúc bằng `docker compose up -d --no-build` và một cảnh báo rằng migration không bị hoàn tác.
+
+**Mã thoát:** 0 khi thành công và với `-h`. 2 khi lỗi cờ (`usage_error`): không đưa `--ref` hay `--rollback`, dùng chung `--ref` với `--rollback`, `--skip-backup` cùng `--rollback`, hoặc ref bắt đầu bằng dấu gạch. 1 cho mọi lỗi `die`: cây làm việc có thay đổi chưa commit, hai image không tồn tại cục bộ để quay lại, không có trạng thái quay lại ("no rollback state"), tệp trạng thái hỏng, hoặc ID image không khớp với bản ghi. Một lệnh con lỗi (build, up) làm script thoát với mã của lệnh đó, suy ra từ `set -e` `[CHƯA XÁC MINH]`.
+
+**Khi lỗi:** "the working tree has uncommitted changes": commit hoặc bỏ thay đổi. "images ... must exist locally": dựng bằng `docker compose --profile ops build` (bước 4.9). "image ... is ..., recorded was ...; refusing to roll back": thẻ `:rollback` không còn trỏ vào image đã ghi nên script dừng trước khi đổi gì; lúc này hãy khôi phục từ bản sao lưu (mục 6.5). "no rollback state ...": máy chưa từng cập nhật bằng `--ref`, không có gì để quay về.
+
+**Không bao giờ:** hoàn tác một migration lược đồ; chạy bằng cờ `--ref` mà đầu vào là một nhánh cục bộ chưa xem lại; dùng `--skip-backup` qua một migration mà không có bản sao lưu khác; chạy lại `--ref` sau một cập nhật hỏng mà chưa quay lại.
+
+Nguồn: `docs/operations/RUNBOOK.md`, `deploy/update.sh`, `deploy/backup.sh`, `docker-compose.yml`, `docs/DECISIONS.md`
+
+## 12. Khẩn cấp
+
+Mục tiêu mặc định là bảo toàn vốn và tính toàn vẹn trạng thái, không phải tiếp tục giao dịch cho nhanh (RUNBOOK mục 1). Bảng dưới trích đúng hành động của RUNBOOK các mục 2 đến 10 và 12, kèm trạng thái xây dựng và thời điểm áp dụng. Trong SHADOW không có lệnh hay vị thế nào, nên các tình huống về sàn áp dụng từ giai đoạn DEMO trở đi; các tình huống cấp máy chủ ở nửa cuối bảng áp dụng ngay bây giờ. Các hàng cấp máy chủ chỉ dùng lệnh đã có trong hướng dẫn này.
+
+#### Bước 12.1 Tình huống về sàn và trạng thái hệ thống (từ DEMO trở đi) [CHƯA XÂY]
+
+**Chạy ở:** `[MÁY CÓ MẠNG]` (xem trực tiếp trên sàn), `[MÁY EC2]` (cơ sở dữ liệu)
+
+| Tình huống | Làm ngay | Trạng thái xây dựng | Áp dụng khi nào |
+| --- | --- | --- | --- |
+| SAFE_MODE: không đối chiếu được trạng thái, dữ liệu thị trường cũ, lệnh bảo vệ thiếu hay không chắc, nghi thực thi trùng, sàn hành xử bất thường, cơ sở dữ liệu hỏng hoặc không dùng được | 1) đặt SAFE_MODE; 2) chặn lệnh VÀO mới (lệnh bảo vệ và lệnh chỉ-giảm vẫn được phép, D034); 3) kiểm tra trực tiếp vị thế trên Binance; 4) kiểm tra lệnh thường đang mở; 5) kiểm tra lệnh algo/điều kiện đang mở; 6) kiểm tra mỗi vị thế có bảo vệ đúng không, thiếu thì sang hàng kế; 7) đối chiếu trạng thái cục bộ; 8) chỉ sau đó mới cân nhắc tiếp tục | SAFE_MODE bền qua khởi động lại và cách thoát là Phase 20 `[CHƯA XÂY]` | từ DEMO |
+| Vị thế không có SL xác nhận | SAFE_MODE; báo động ngay; hỏi vị thế chuẩn trên Binance; hỏi lệnh bảo vệ/algo. Đích của D034 là tự đặt lại SL tại SL gốc sau kiểm tra rủi ro (không bao giờ rộng hơn), và nếu SL bị từ chối thì đóng vị thế bằng lệnh chỉ-giảm rồi báo động mức cao. Nhưng thang tự động đó là Phase 20 và CHƯA XÂY: cho tới lúc đó hệ thống chỉ vào SAFE_MODE và báo động, còn BẠN phải tự đặt SL hoặc đóng vị thế thủ công trên sàn. Đừng chờ hành động tự động | Phase 20 `[CHƯA XÂY]` | từ DEMO |
+| Lệnh bảo vệ mồ côi (còn hoạt động khi vị thế đã bằng 0 hoặc kế hoạch đã đóng) | xác định mồ côi; xác nhận vị thế bằng 0; hủy các lệnh bảo vệ/algo liên quan; ghi nhật ký việc hủy; quét lại. Một SL đi cùng một lệnh VÀO còn chờ khớp KHÔNG phải mồ côi (F-401, D034) | quét định kỳ và theo sự kiện là Phase 20 `[CHƯA XÂY]` | từ DEMO |
+| Nghi phê duyệt hay lệnh bị trùng | SAFE_MODE; không thử lại mù quáng; tra mã/băm phê duyệt; xem `clientOrderId`/`algoClientId`/trạng thái lệnh trên sàn; đối chiếu; chỉ tiếp tục khi chứng minh được ý định thực thi là duy nhất. Nguồn sự thật là PostgreSQL (D051), đọc bằng các lệnh SELECT chỉ-đọc ở dưới | các bảng `approvals` và `execution_intents` đã có từ Phase 17 (đã hoàn thành); nối vào tiến trình thật là Phase 24 `[CHƯA XÂY]` | từ DEMO |
+| Telegram gửi lại cùng một callback | một callback lặp lại với cùng mã phê duyệt phải trả trạng thái hiện tại và không bao giờ tạo thêm ý định thực thi. Một callback `callback_query.id` được gửi lại không ghi thêm hàng nhật ký. Sau khi kế hoạch hết hạn, lớp callback vẫn trả "approval expired" ngay cả khi kế hoạch đã chạy: kiểm tra `execution_intents` trước khi kết luận là chưa đặt gì | lưu trữ và phát lại đã có từ Phase 17 (đã hoàn thành); thẻ xác nhận hai bước là Phase 23 `[CHƯA XÂY]` | từ SHADOW (phát lại) và từ DEMO |
+| Dữ liệu thị trường cũ (thời gian hiện tại trừ nến đóng cuối vượt ngưỡng) | KHÔNG tín hiệu mới; KHÔNG lệnh vào mới; kết nối lại hoặc dựng lại; kiểm tra tính liên tục của nến; chỉ tiếp tục sau khi kiểm tra sức khỏe | phát hiện và xử lý ở Phase 20 `[CHƯA XÂY]` | từ DEMO (và với soak: khoảng trống được ghi, mục 7) |
+| WebSocket ngắt | kết nối lại; làm mới giờ máy chủ nếu cần; dựng lại trạng thái tài khoản/thị trường; so với trạng thái cục bộ; khôi phục đăng ký; kiểm tra nến đóng mới nhất; rồi tiếp tục | bù REST sau đứt kết nối đã có ở supervisor (kế hoạch 16-08, mức đồ giả); dòng dữ liệu người dùng là Phase 18 `[CHƯA XÂY]` | từ SHADOW (dữ liệu công khai) |
+| Cơ sở dữ liệu hỏng hoặc không dùng được | SAFE_MODE chỉ chặn lệnh VÀO mới; một sự cố cơ sở dữ liệu không được chặn hành động giảm rủi ro (D034); giữ nguyên bảo vệ phía sàn; khôi phục cơ sở dữ liệu hoặc chuyển sang giám sát chỉ-đọc; đối chiếu sau khi hồi phục. Các kho PostgreSQL thất bại theo hướng an toàn: trước khi gửi lệnh vào thì là NO_TRADE; sau khi lệnh có thể đã tồn tại thì lần ghi lỗi đầu vào SAFE_MODE với lý do `DB_FAILURE`. `UNRESOLVED_EXECUTION_INTENT` nghĩa là một lệnh vào có thể tồn tại mà hệ thống không thấy: tra ý định, hỏi Binance theo mã client, rồi hủy hoặc nhận lệnh bằng tay; đừng sửa hàng ý định | cách xử lý thất bại theo hướng an toàn đã có từ Phase 17 (đã hoàn thành); khởi động lại khôi phục và thoát SAFE_MODE thuộc Phase 20 và 24 `[CHƯA XÂY]` | từ DEMO |
+| Binance suy giảm hay chậm | KHÔNG suy ra một lệnh không tồn tại chỉ vì hết thời gian chờ; truy vấn và đối chiếu TRƯỚC khi thử lại bất kỳ yêu cầu lệnh có chữ ký nào | bảng phân loại lỗi sàn là Phase 18 `[CHƯA XÂY]` | từ DEMO |
+| Đóng vị thế bằng tay | việc đóng tay phải rõ ràng và được ghi là `ManualExit` với các trường `actor`, `reason`, `requested_at_utc`, `exchange_confirmation`; sau đó tiến trình đối chiếu phải hủy các lệnh bảo vệ mồ côi | ghi `ManualExit` và hủy mồ côi tự động là Phase 20 `[CHƯA XÂY]` | từ DEMO |
+
+Ba truy vấn chỉ-đọc cho hàng "nghi phê duyệt hay lệnh bị trùng" (chép từ RUNBOOK mục 5; chạy bằng `psql` trên PostgreSQL của stack với user và cơ sở dữ liệu trong `.env`, cách chạy `psql` cụ thể trên máy chủ không được RUNBOOK nêu `[CHƯA XÁC MINH]`). KHÔNG BAO GIỜ `UPDATE` hay `DELETE` các bảng này bằng tay: các bảng nhật ký chỉ-thêm sẽ từ chối bằng lỗi "append-only".
+
+```sql
+-- the approval and its consumption state
+SELECT approval_id, trade_plan_id, status, consumption_status, consumed_at_utc
+  FROM approvals WHERE trade_plan_id = '<trade plan id>';
+
+-- the write-ahead intent rows of the plan, one per role
+SELECT role, intent_status, client_order_id, algo_client_id, exchange_order_id,
+       outcome_recorded, outcome_is_no_trade, outcome_reason_code, intended_at_utc, sent_at_utc
+  FROM execution_intents WHERE trade_plan_id = '<trade plan id>' ORDER BY role;
+
+-- every intent that is not resolved
+SELECT approval_id, role, intent_status, intended_at_utc
+  FROM execution_intents WHERE intent_status IN ('INTENDED', 'SENT', 'UNKNOWN')
+ ORDER BY intended_at_utc;
+```
+
+Cách đọc: `consumption_status = CONSUMED` nghĩa là phê duyệt đã tới bước đặt lệnh và có đúng một hàng ENTRY. `ACKED` là sàn đã nhận, `REJECTED` là sàn chắc chắn không nhận, còn `INTENDED`, `SENT` hoặc `UNKNOWN` là lệnh vào có thể có hoặc không trên sàn: hỏi Binance theo `client_order_id` (ENTRY) hay `algo_client_id` (chân bảo vệ) và đừng phê duyệt lại. Một phê duyệt `UNCONSUMED` chưa đặt gì.
+
+#### Bước 12.2 Tình huống cấp máy chủ (áp dụng ngay) [ĐÃ XÂY] [CHƯA XÁC MINH]
+
+**Chạy ở:** `[MÁY EC2]`, và `[MÁY CÓ MẠNG]` cho AWS console và Binance
+
+| Tình huống | Làm ngay | Trạng thái xây dựng | Áp dụng khi nào |
+| --- | --- | --- | --- |
+| Collector dừng | `docker compose ps` rồi `docker compose logs --tail 200 collector`; nếu chỉ dừng thì `docker compose start collector`. Các phút Open Interest đã mất là mất vĩnh viễn: ghi khoảng trống như một khoảng trống bao phủ (D059 mục 4) | `[ĐÃ XÂY]` | ngay |
+| Máy chủ không với tới được | kiểm tra trạng thái instance trong AWS console `[THỦ CÔNG]`; sau khi máy lên lại, các service có `restart: unless-stopped` tự lên cùng Docker; kiểm tra bằng `docker compose ps`; ghi khoảng trống bao phủ. Cách khởi động lại instance không được repository mô tả | `[CHƯA XÁC MINH]` | ngay |
+| Ổ đĩa đầy | `df -h` để xem; dọn thư mục `restore-` và `drill-` cũ (bước 6.7); KHÔNG xóa volume và không dùng lệnh dọn dẹp của Docker. Cây Parquet chỉ lớn dần: nếu vẫn đầy, tăng ổ là quyết định của bạn | `[ĐÃ XÂY]` | ngay |
+| S3 không với tới được | bản sao lưu lỗi một cách thấy được; đọc `journalctl -u trading-backup`; dữ liệu cục bộ vẫn nguyên; chạy lại sau; nếu kéo dài, báo lại. Bảng 11.8 ở bước 6.8 phân biệt lỗi mạng với lỗi nội dung | `[ĐÃ XÂY]` | ngay |
+| Địa chỉ công khai đổi (whitelist bị hỏng) | các khóa Binance giới hạn theo IP sẽ bị từ chối; dùng Elastic IP để tránh việc này; nếu địa chỉ đã đổi, cập nhật whitelist (bước 8.2) và chạy lại phép ping vùng (bước 3.7) | `[THỦ CÔNG]` | ngay (khi đã có khóa) |
+| Xóa nhầm volume | khôi phục từ bản sao lưu: `deploy/restore.sh` (mục 6.5) lên máy đã bootstrap; điều kiện là cổng D064 đã qua, nếu chưa thì sao lưu thật chưa tồn tại và dữ liệu có thể không khôi phục được | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` | ngay |
+
+Nguồn: `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`, `docker-compose.yml`, `docs/operations/SECURITY_AND_OPERATIONS.md`
+
+## 13. Xử lý sự cố
+
+#### Bước 13.1 Bảng triệu chứng [ĐÃ XÂY] [CHƯA XÁC MINH]
+
+**Chạy ở:** `[MÁY EC2]` (trừ khi cột xử lý nói khác)
+
+| Triệu chứng | Nguyên nhân thường gặp | Cách xử lý | Nguồn |
+| --- | --- | --- | --- |
+| `bad interpreter` khi chạy một script `deploy/*.sh` | script có dấu xuống dòng CRLF của Windows | chép lại từ một bản checkout sạch hoặc `git archive`, không từ cây Windows cũ | RUNBOOK 13.2 |
+| bootstrap dừng ở bước SSH với thông báo `lock-out guard` | tài khoản `trading` chưa có mật khẩu dùng được | trong phiên root chạy `passwd trading` rồi chạy lại đúng lệnh bootstrap | RUNBOOK 13.4, D062 |
+| bootstrap từ chối hệ điều hành (`unsupported OS`) | hệ điều hành không phải Ubuntu 22.04, 24.04 hay Debian 12 | dùng một ảnh được hỗ trợ; không có gì bị đổi | `deploy/bootstrap.sh` |
+| bootstrap báo tệp bí mật có `change_me` hoặc ký tự CR | `.env.example` còn giá trị mẫu, hoặc tệp lưu bằng CRLF | điền giá trị thật, bỏ hay sửa `DATABASE_URL`, lưu bằng LF | `deploy/bootstrap.sh` |
+| bootstrap báo `clock drift ... exceeds` hoặc `chronyc waitsync did not report` | đồng hồ chưa đồng bộ trong giới hạn `--max-drift-ms` | đọc `chronyc tracking` và `chronyc sources`, chờ rồi chạy lại | RUNBOOK 13.4, 19.3 |
+| collector báo unhealthy trong sáu phút đầu | chưa có mốc nào trên cơ sở dữ liệu mới (thời gian khởi động) | chờ hết sáu phút rồi xem `docker compose ps` | RUNBOOK 13.6 |
+| `docker compose` báo `POSTGRES_USER required in .env` hoặc `POSTGRES_PASSWORD required in .env` | thiếu `.env` hoặc biến rỗng | điền biến trong `/opt/trading/.env` rồi dùng `docker compose config -q` | `docker-compose.yml` |
+| không kết nối được PostgreSQL từ bên ngoài | PostgreSQL chỉ công bố trên `127.0.0.1` (chủ ý) | dùng đường hầm SSH từ máy bạn, ví dụ `ssh -L 5432:127.0.0.1:5432 trading@<elastic-ip>`; không mở cổng | `docker-compose.yml`, RUNBOOK 13.4 |
+| `update.sh` từ chối vì "the working tree has uncommitted changes" | cây làm việc bẩn | commit hoặc bỏ thay đổi | `deploy/update.sh` |
+| `update.sh` báo hai image "must exist locally" | chưa dựng image | chạy `docker compose --profile ops build` rồi thử lại | `deploy/update.sh` |
+| quay lại dừng với "image ... is ..., recorded was ...; refusing to roll back" | thẻ `:rollback` không còn trỏ vào image đã ghi | không ép; khôi phục từ bản sao lưu (mục 6.5) | `deploy/update.sh`, RUNBOOK 14.3 |
+| quay lại báo "no rollback state" | máy chưa từng cập nhật bằng `--ref` | không có gì để quay về; không cần làm gì | RUNBOOK 14.4 |
+| `migrate.sh` thoát 1 | hoặc báo cáo "mất dữ liệu", hoặc một lỗi kiểm tra trước; đọc dòng `ERROR:` để phân biệt | nếu mất dữ liệu: dừng, điều tra, máy cũ còn nguyên | RUNBOOK 15.4 |
+| `migrate.sh` thoát 2 | đối số sai hoặc tệp đầu vào không đọc được | sửa đối số hay tệp rồi chạy lại | `deploy/migrate.sh` |
+| `migrate.sh` thoát 3 | khoảng trống Open Interest vượt `--max-gap-minutes` | đây là dữ liệu, không phải lỗi cần thử lại; quyết định khoảng trống có quan trọng hay không | RUNBOOK 15.4 |
+| `migrate.sh` từ chối vì `data/backup/cutover/pg.dump` đã tồn tại | còn sót từ một lần thử trước | kiểm tra rồi tự tay xóa ở bên báo | RUNBOOK 15.3 |
+| `migrate.sh` hoặc ssh báo lỗi kiểm tra khóa máy chủ | máy cũ không có trong `known_hosts` của thư mục khóa | thêm khóa máy chủ lấy từ kênh tin cậy (bước 5.4) | RUNBOOK 15.1 |
+| backup báo thiếu một biến `BACKUP_...` | chưa đặt biến trong `.env` | thêm biến (bước 6.1); thông báo chỉ nêu tên | RUNBOOK 11.1 |
+| `parquet push refused`, `parquet verification failed`, `manifest verification failed`, `rclone ... failed (exit N)` | các nhóm lỗi đẩy Parquet | dùng bảng ở bước 6.8 | RUNBOOK 11.8 |
+| restore từ chối đích không trống | cơ sở dữ liệu hay thư mục Parquet đích đã có dữ liệu | dùng máy trống; chỉ dùng `--force` khi hiểu rõ, và nó vẫn không ghi đè | RUNBOOK 11.5 |
+| diễn tập lỗi ở phép so sánh | collector vừa thêm một hàng symbol mới | chạy lại diễn tập | RUNBOOK 11.6 |
+| ping vùng không trả `200` | vùng hay địa chỉ không được Binance chấp nhận | DỪNG, không cài gì, ghi lại và báo | RUNBOOK 19.2 |
+| `soak_host_acceptance.py` thoát 1 | một điều kiện thiếu, chưa đầy đủ hoặc không PASS | làm điều kiện được nêu rồi cập nhật tệp | `scripts/soak_host_acceptance.py` |
+| `soak_host_acceptance.py` thoát 2 | tệp không dùng được hoặc một trường trông giống bí mật | xóa thứ giống bí mật, giữ trích đoạn không nhạy cảm; xoay vòng bí mật nếu lỡ dán | `scripts/soak_host_acceptance.py` |
+| tài khoản AWS bị đóng | gói Free tự đóng khoảng 2027-01-25 hoặc khi hết tín dụng | chuyển sang gói Paid trước mốc đó (điều kiện `PAID_PLAN`) | RUNBOOK 19.3, `16-DEC-O-12` |
+| kiểm thử bị bỏ qua hoặc đỏ khi có `TRADING_CI_STRICT` | thiếu hạ tầng (bash, Docker, compose, shellcheck) trên máy chạy | cài hạ tầng thiếu; đó không phải lỗi mã | RUNBOOK 18 |
+| Telegram im lặng | chưa rõ; có thể sai token hay mã chat, bot khác cùng polling, hoặc chưa có tiến trình nào gửi (runtime chưa xây) `[CHƯA XÁC MINH]` | kiểm tra bước 8.1; hỏi trong phiên lập kế hoạch | `.env.example` |
+| heartbeat im lặng | repository không gửi heartbeat nào | tự dựng ngoài repository (bước 8.3) | RUNBOOK 11.4 |
+| bạn tự khóa mình ngoài máy sau bootstrap | đóng phiên root trước khi thử phiên `trading` và `sudo -v` | dùng cách khôi phục của nhà cung cấp; lần sau giữ phiên root tới khi bước 4.6 xong | RUNBOOK 13.4 |
+| lỡ chạy lệnh `config` của compose mà thiếu `-q` | đã in môi trường phân giải, gồm bí mật | coi các bí mật đã in là lộ và thay chúng | RUNBOOK 11.7 |
+
+Nguồn: `docs/operations/RUNBOOK.md`, `deploy/bootstrap.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `scripts/soak_host_acceptance.py`, `docker-compose.yml`
+
+## 14. Bảng tra nhanh mọi lệnh
+
+Mọi dòng bên dưới được chép từ các thẻ lệnh và các mục trước; cột "Mục" chỉ chỗ có giải thích. Nhãn trạng thái ở cột cuối: `[ĐÃ XÂY]` nghĩa là script tồn tại, `[CHƯA XÁC MINH]` nghĩa là chưa chạy trên máy thật.
+
+### Bootstrap, cập nhật, di chuyển, refresh-pins
+
+| Việc | Máy | Lệnh | Mục | Nhãn |
+| --- | --- | --- | --- | --- |
+| bootstrap, chạy thử | `[MÁY EC2]` | `sudo deploy/bootstrap.sh --dry-run --secrets-file /root/secrets.env --repo git@example.com:me/trading.git --ref <commit-sha> --authorized-keys /root/authorized_keys` | 4.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| bootstrap, chạy thật với mọi cờ (`--secrets-file`, `--repo`, `--ref`, `--authorized-keys`, `--dir`, `--user`, `--deploy-key`, `--max-drift-ms`) | `[MÁY EC2]` | `sudo deploy/bootstrap.sh --secrets-file /root/secrets.env --repo git@example.com:me/trading.git --ref <commit-sha> --authorized-keys /root/authorized_keys --dir /opt/trading --user trading --deploy-key /root/deploy_key --max-drift-ms 100` | 4.4 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| thư viện hàm dùng chung `lib.sh` (`die`, `run`, `DRY_RUN`) | không chạy | được `source` bởi các script khác, không có cờ và không bao giờ chạy trực tiếp | thẻ `deploy/bootstrap.sh` | `[ĐÃ XÂY]` |
+| update, cập nhật (`--ref`, `--skip-backup`, `--dry-run`) | `[MÁY EC2]` | `deploy/update.sh --ref <commit-sha> --skip-backup --dry-run` | 11.2 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| update, quay lại (`--rollback`) | `[MÁY EC2]` | `deploy/update.sh --rollback --dry-run` | 11.4 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| migrate, chạy thử (`--dry-run`) | `[MÁY EC2]` | `deploy/migrate.sh --dry-run trading@old.example local` | 5.6 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| migrate, chạy thật (`--max-gap-minutes`, `--wait-seconds`, `--key-source`) | `[MÁY EC2]` | `deploy/migrate.sh --max-gap-minutes 60 --wait-seconds 900 --key-source ~/.ssh/trading-migrate trading@old.example local` | 5.7 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| migrate, chỉ in lại báo cáo (`--report-only`) | `[MÁY EC2]` | `deploy/migrate.sh --report-only --max-gap-minutes 30 trading@old.example local` | 5.8 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| refresh-pins, liệt kê offline (`--list`) | `[MÁY PHÁT TRIỂN]` | `deploy/refresh-pins.sh --list` | 10.7 | `[ĐÃ XÂY]` |
+| refresh-pins, tra cứu online (`--lookup`) | `[MÁY CÓ MẠNG]` | `deploy/refresh-pins.sh --lookup` | 10.7 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+
+### Sao lưu, khôi phục, diễn tập, hai unit systemd
+
+| Việc | Máy | Lệnh | Mục | Nhãn |
+| --- | --- | --- | --- | --- |
+| backup, khởi tạo remote (`--init-remote`) | `[MÁY EC2]` | `deploy/backup.sh --init-remote --dry-run` | 6.2 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| backup, cài timer (`--install-timer`) | `[MÁY EC2]` | `sudo deploy/backup.sh --install-timer --dry-run` | 6.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| backup, chạy một lần ngay (`--dry-run`) | `[MÁY EC2]` | `deploy/backup.sh --dry-run` | 6.4 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| restore (`--snapshot`, `--force`, `--no-start`, `--dry-run`) | `[MÁY EC2]` | `deploy/restore.sh --snapshot 20260930T031500Z --force --no-start --dry-run` | 6.5 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| diễn tập khôi phục (`--dry-run`) | `[MÁY EC2]` | `deploy/backup-drill.sh --dry-run` | 6.6 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| diễn tập bundle cục bộ trên Windows (`scripts/backup-drill.ps1`) | `[MÁY PHÁT TRIỂN]` hoặc `[MÁY CŨ]` Windows | `powershell -NoProfile -File scripts/backup-drill.ps1` | thẻ `scripts/backup-drill.ps1` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-backup.service`: xem trạng thái | `[MÁY EC2]` | `systemctl status trading-backup` | 6.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-backup.service`: xem nhật ký | `[MÁY EC2]` | `journalctl -u trading-backup` | 6.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-backup.timer`: xem lịch | `[MÁY EC2]` | `systemctl list-timers trading-backup.timer` | 6.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+
+### Nghiệm thu và kiểm tra hồ sơ
+
+| Việc | Máy | Lệnh | Mục | Nhãn |
+| --- | --- | --- | --- | --- |
+| kiểm tra hồ sơ nghiệm thu (`scripts/soak_host_acceptance.py`) | máy có repository và `uv` | `uv run python scripts/soak_host_acceptance.py acceptance.json` | 3.8 | `[ĐÃ XÂY]` |
+| ping Binance từ máy EC2 | `[MÁY EC2]` | `curl -sS -o /dev/null -w "%{http_code}" https://fapi.binance.com/fapi/v1/ping` | 3.7 | `[CHƯA XÁC MINH]` |
+| đồng bộ thời gian | `[MÁY EC2]` | `chronyc tracking` | 10.10 | `[CHƯA XÁC MINH]` |
+
+### Compose: vòng đời, sức khỏe, nhật ký
+
+Bảy service: `postgres`, `db-upgrade`, `collector`, `paper` (profile `paper`, khung giữ chỗ), `live` (profile `live`, khung giữ chỗ), `backup` (profile `ops`), `ops` (profile `ops`). Project cố định tên `trading`.
+
+| Việc | Máy | Lệnh | Mục | Nhãn |
+| --- | --- | --- | --- | --- |
+| xem trạng thái | `[MÁY EC2]` | `docker compose ps` | 10.2 | `[ĐÃ XÂY]` |
+| khởi động stack | `[MÁY EC2]` | `docker compose up -d` | 10.2 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| dừng, khởi động, khởi động lại collector | `[MÁY EC2]` | `docker compose stop collector`, `docker compose start collector`, `docker compose restart collector` | 10.2 | `[ĐÃ XÂY]` |
+| dựng image | `[MÁY EC2]` | `docker compose --profile ops build` | 4.9 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| kiểm tra cấu hình (luôn có `-q`) | `[MÁY EC2]` | `docker compose config -q` | 10.6 | `[ĐÃ XÂY]` |
+| nhật ký collector | `[MÁY EC2]` | `docker compose logs --tail 200 collector` | 10.4 | `[ĐÃ XÂY]` |
+| đầu dò sức khỏe của collector (`--healthcheck`) | `[MÁY EC2]` | `docker compose exec collector /app/.venv/bin/python -m src.data.collector --healthcheck` | 10.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| một lệnh một lần trong hộp công cụ `ops` | `[MÁY EC2]` | `docker compose --profile ops run --rm -T --no-deps ops ls /app/data/backup` | 10.2 | `[ĐÃ XÂY]` |
+
+### Lệnh `python -m src.ops.backup` qua image ops (kéo dữ liệu nghiên cứu)
+
+| Việc | Máy | Lệnh | Mục | Nhãn |
+| --- | --- | --- | --- | --- |
+| pull (kéo và kiểm) | máy nhận dữ liệu | `docker compose --profile ops run --rm -T --no-deps ops /app/.venv/bin/python -m src.ops.backup pull --dest /app/data/backup/pull-<UTC timestamp>` | 10.8 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| verify (kiểm lại độc lập) | máy nhận dữ liệu | `docker compose --profile ops run --rm -T --no-deps ops /app/.venv/bin/python -m src.ops.backup verify --bundle-root /app/data/backup/pull-<UTC timestamp>` | 10.8 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| restore, chỉ Parquet, không ghi đè | máy nhận dữ liệu | `docker compose --profile ops run --rm -T --no-deps ops /app/.venv/bin/python -m src.ops.backup restore --bundle-root /app/data/backup/pull-<UTC timestamp> --parquet-target /app/data/raw --skip-db --force` | 10.8 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+
+### Chưa xây
+
+| Việc | Máy | Lệnh | Mục | Nhãn |
+| --- | --- | --- | --- | --- |
+| điểm vào của tiến trình paper | `[MÁY EC2]` | chưa có lệnh chạy được (xem bước 7.4); tên dự kiến `python -m src.paper.runtime` | 7.4 | `[CHƯA XÂY]` |
+| các giai đoạn DEMO, CANARY, LIVE | `[MÁY CÓ MẠNG]` | chưa có lệnh nào | 9 | `[CHƯA XÂY]` |
+
+Nguồn: `deploy/bootstrap.sh`, `deploy/lib.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `deploy/refresh-pins.sh`, `deploy/backup.sh`, `deploy/restore.sh`, `deploy/backup-drill.sh`, `deploy/systemd/trading-backup.service`, `deploy/systemd/trading-backup.timer`, `scripts/soak_host_acceptance.py`, `scripts/backup-drill.ps1`, `docker-compose.yml`, `docs/operations/RUNBOOK.md`
+
+## 15. Danh sách kiểm tra cuối cùng
+
+Mỗi mục dẫn tới phần giải thích. Các mục chưa thể làm vì chưa xây được để trống và gắn nhãn `[CHƯA XÂY]`.
+
+### Trước khi tạo máy
+
+- [ ] Tôi biết tài khoản AWS ở gói Free đóng khoảng 2027-01-25 và sẽ chuyển sang gói Paid trước đó (mục 2.1)
+- [ ] Tôi đã tự ghi năm giá trị của quyết định O-12 theo lời của mình (mục 2.2)
+- [ ] Tôi đã tạo cặp khóa SSH và khóa riêng không rời máy tôi (mục 2.3)
+- [ ] Tệp `authorized_keys` có ít nhất một khóa công khai hợp lệ (mục 2.4)
+- [ ] Tệp bí mật soạn ở máy có mạng: không còn `change_me`, mật khẩu PostgreSQL hợp lệ, dùng LF, không có `BINANCE_LIVE_*` (mục 2.5)
+- [ ] Tôi có một commit hoặc tag cho `--ref` và đã kiểm tra remote có nó (mục 2.6)
+- [ ] Cụm mật khẩu sao lưu đã được đổi sang dạng obscured và bản gốc nằm ngoài VPS (mục 2.7)
+
+### Máy EC2
+
+- [ ] Hệ điều hành là Ubuntu 22.04, Ubuntu 24.04 hoặc Debian 12 (mục 3.1)
+- [ ] Elastic IP đã gắn vào instance (mục 3.2)
+- [ ] Mã hóa EBS đã được kiểm tra và, nếu cần, bật theo quyết định của tôi (mục 3.3)
+- [ ] Security group chỉ mở SSH và không có luật vào cho PostgreSQL (mục 3.4)
+- [ ] Ngân sách có cảnh báo và tài khoản đã ở gói Paid (mục 3.5)
+- [ ] Bucket S3 riêng tư, mã hóa mặc định, bật versioning, mới và trống (mục 3.6)
+- [ ] Phép ping tới `fapi.binance.com` từ instance trả `200` trước khi cài gì (mục 3.7)
+- [ ] Tôi đã đọc kế hoạch `--dry-run` của bootstrap, nhất là các dòng ufw và sshd (mục 4.3)
+- [ ] Bootstrap chạy xong, tôi đã đặt `passwd trading` và thử `sudo -v` ở phiên SSH thứ hai trước khi đóng phiên root (mục 4.6)
+- [ ] Tôi đã làm đủ 8 mục trong danh sách của người vận hành (mục 4.7)
+- [ ] `.env` có quyền `600 trading` và tệp bí mật đã chép đã bị xóa (mục 4.8)
+- [ ] `docker compose config -q` và `docker compose --profile ops build` đều qua; tôi chưa chạy `docker compose up -d` trước cutover (mục 4.9)
+
+### Collector và di chuyển
+
+- [ ] Tôi đã kiểm tra các điều kiện tiên quyết của máy cũ, kể cả lưu ý Docker Desktop (mục 5.3)
+- [ ] Thư mục khóa di chuyển có `id_ed25519` và `known_hosts`, và ssh không tương tác thử được (mục 5.5)
+- [ ] Tôi đã đọc kết quả `deploy/migrate.sh --dry-run` (mục 5.6)
+- [ ] Cutover có mã thoát 0, hoặc mã 3 mà tôi đã quyết định chấp nhận (mục 5.8)
+- [ ] Khoảng trống Open Interest được ghi như khoảng trống bao phủ (mục 5.9)
+- [ ] Chỉ sau mã 0 tôi mới tắt máy cũ, rồi cập nhật whitelist, chuyển heartbeat, xóa thư mục khóa (mục 5.11)
+
+### Sao lưu
+
+- [ ] Các biến `BACKUP_*` đã nằm trong `/opt/trading/.env` (mục 6.1)
+- [ ] `deploy/backup.sh --init-remote` đã chạy đúng một lần trên bucket trống (mục 6.2)
+- [ ] Timer đã cài và `systemctl list-timers trading-backup.timer` liệt kê nó (mục 6.3)
+- [ ] Một lần diễn tập `deploy/backup-drill.sh` đã thành công (mục 6.6)
+- [ ] Cổng D064 (bằng chứng trên S3 thật) đã qua và `BACKUP_REAL_S3_GATE` là PASS `[CHƯA XÂY]` (mục 6)
+
+### Kênh bên ngoài
+
+- [ ] Bot Telegram riêng cho máy soak đã tạo trong BotFather và token không bị dán đi đâu (mục 8.1)
+- [ ] Mỗi khóa Binance bị giới hạn ở đúng Elastic IP và quyền rút tiền tắt (mục 8.2)
+- [ ] Dịch vụ heartbeat bên ngoài đã đăng ký và cảnh báo đã được thử (mục 8.3)
+- [ ] `acceptance.json` có đủ 16 điều kiện PASS và `soak_host_acceptance.py` thoát 0 (mục 3.8)
+
+### Sẵn sàng cho soak Phase 16
+
+- [ ] Cả 49 kế hoạch của Phase 16 đã xong `[CHƯA XÂY]` (mục 7.3)
+- [ ] Tiến trình paper có điểm vào chạy được `[CHƯA XÂY]` (mục 7.4)
+- [ ] Giả thuyết, lưới tham số, lệnh cho phép chạy nghiên cứu và ứng viên đã được tôi duyệt hoặc chỉ định `[CHƯA XÂY]` (mục 7.6)
+- [ ] Tôi đã cho phép đúng một băm trong `PAPER_START_ALLOWLIST` `[CHƯA XÂY]` (mục 7.6)
+- [ ] Trial soak 14 ngày đạt các tiêu chí đã phê chuẩn và tôi đã tuyên bố đạt `[CHƯA XÂY]` (mục 7.7)
+
+### Cổng go-live (tất cả để trống)
+
+- [ ] Phase 18 đến 25 đã xong và được kiểm chứng `[CHƯA XÂY]` (mục 9.2)
+- [ ] Bộ kịch bản demo và soak demo ít nhất 3 tuần không có sai lệch không giải thích `[CHƯA XÂY]` (mục 9.3)
+- [ ] CANARY với khóa chỉ-đọc và tài khoản phụ nhỏ không có sai lệch `[CHƯA XÂY]` (mục 9.3)
+- [ ] Điều kiện của `enable()` ở Phase 26 đều đạt `[CHƯA XÂY]` (mục 9.3)
+
+### Phụ lục: Hướng dẫn này không làm được gì
+
+Những thứ còn chưa quyết định hoặc chưa được kiểm chứng, và hướng dẫn này không tự quyết:
+
+- Năm giá trị O-12 (loại máy, dung lượng ổ, ngân sách, vòng đời S3, dịch vụ heartbeat và chu kỳ): `[QUYẾT ĐỊNH CỦA BẠN]`.
+- Nơi lưu bằng chứng bền vững của soak (quyết định mở O-01) và nơi ghi các khoảng trống bao phủ.
+- Máy nào kéo dữ liệu nghiên cứu về (mục 10.8) và máy nào giữ `acceptance.json` (mục 3.8).
+- Mô hình thực thi D055 (đặt SL trước hay sau khi vào lệnh): còn là quyết định mở.
+- Cách an toàn để biết mã chat Telegram, cách thu hồi token và cách lấy phiên root trên ảnh AWS: chưa được repository ghi.
+- Mọi giá cả của AWS ngoài hai mức đã nêu ở bước 3.2 và 3.5, và mọi giao diện console của AWS, Binance, Telegram.
+
+Nguồn đã đọc ngày 2026-10-09 tại commit `97a92a6`: `docs/operations/RUNBOOK.md`, `docs/operations/SECURITY_AND_OPERATIONS.md`, `docs/DECISIONS.md`, `docker-compose.yml`, `Dockerfile`, `.env.example`, `deploy/bootstrap.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `deploy/backup.sh`, `deploy/restore.sh`, `deploy/backup-drill.sh`, `deploy/refresh-pins.sh`, `deploy/lib.sh`, `scripts/soak_host_acceptance.py`, `scripts/backup-drill.ps1`, `.planning/ROADMAP.md`, `.planning/phases/16-paper-runtime-composition/16-CONTEXT.md`.
+
+Nguồn: `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`, `.planning/ROADMAP.md`, `.planning/phases/16-paper-runtime-composition/16-CONTEXT.md`, `.env.example`
