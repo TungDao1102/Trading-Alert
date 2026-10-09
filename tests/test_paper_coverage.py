@@ -22,8 +22,10 @@ from src.paper.coverage import (
     CoverageReport,
     HealthInterval,
     HealthThresholds,
+    TickTimingSummary,
     coverage_report,
     derive_health_intervals,
+    tick_timing_summary,
 )
 from src.paper.vocabulary import GapReason, HealthState, RuntimeEventType
 
@@ -716,3 +718,123 @@ def test_derived_intervals_feed_the_coverage_report() -> None:
     )
     assert [u.reason for u in report.uncovered] == [GapReason.WS_RECONNECT_WINDOW]
     assert report.covered_hours == Decimal(5 * 3600 - 2) / Decimal(3600)
+
+
+# --------------------------------------------------------------------------- #
+# Task 4: report-only tick timing summary (research A10 and P20).
+# --------------------------------------------------------------------------- #
+
+
+def _stats(
+    at: datetime,
+    *,
+    duration_ms: int,
+    queue_depth: int = 0,
+    dropped: dict[str, int] | None = None,
+    batch_seq: int = 0,
+) -> _Rec:
+    by_reason = dropped or {}
+    return _Rec(
+        RuntimeEventType.PAPER_TICK_STATS,
+        EPOCH,
+        None,
+        None,
+        at,
+        {
+            "batch_seq": batch_seq,
+            "bars_in": 1,
+            "duration_ms": duration_ms,
+            "queue_depth_before": queue_depth,
+            "dropped_total": sum(by_reason.values()),
+            "dropped_by_reason": by_reason,
+        },
+    )
+
+
+def test_tick_timing_summary_reports_duration_depth_and_drops() -> None:
+    """Test 4: integers only; the median of an even count is the lower middle value."""
+    records = [
+        _stats(_ts(1, 0, 2), duration_ms=5, queue_depth=0),
+        _stats(_ts(2, 0, 2), duration_ms=9, queue_depth=3, dropped={"FUTURE_CLOSE": 1}),
+        _stats(_ts(3, 0, 2), duration_ms=1, queue_depth=1, batch_seq=1),
+        _stats(_ts(4, 0, 2), duration_ms=7, queue_depth=2, dropped={"FUTURE_CLOSE": 2, "X": 1}),
+        _bar(1),  # other event types are ignored
+        _start(_ts(0)),
+    ]
+    summary = tick_timing_summary(records)
+
+    assert isinstance(summary, TickTimingSummary)
+    assert summary.tick_count == 4
+    assert summary.duration_ms_min == 1
+    assert summary.duration_ms_median == 5
+    assert summary.duration_ms_max == 9
+    assert summary.queue_depth_max == 3
+    assert summary.dropped_total == 4
+    assert summary.dropped_by_reason == (("FUTURE_CLOSE", 3), ("X", 1))
+    assert summary.first_tick_utc == _ts(1, 0, 2)
+    assert summary.last_tick_utc == _ts(4, 0, 2)
+    for value in (summary.duration_ms_min, summary.duration_ms_median, summary.duration_ms_max):
+        assert type(value) is int
+    with pytest.raises(AttributeError):
+        summary.tick_count = 1  # type: ignore[misc]
+
+
+def test_tick_timing_summary_odd_count_median_and_determinism() -> None:
+    records = [
+        _stats(_ts(h, 0, 2), duration_ms=d, batch_seq=h) for h, d in ((1, 30), (2, 10), (3, 20))
+    ]
+    first = tick_timing_summary(records)
+    assert first.duration_ms_median == 20
+    shuffled = list(records)
+    random.Random(3).shuffle(shuffled)
+    assert tick_timing_summary(shuffled) == first
+    assert tick_timing_summary(list(records)) == first
+
+
+def test_tick_timing_summary_without_records_has_tick_count_zero() -> None:
+    summary = tick_timing_summary([_bar(1), _start(_ts(0))])
+    assert summary.tick_count == 0
+    assert summary.duration_ms_min is None
+    assert summary.duration_ms_median is None
+    assert summary.duration_ms_max is None
+    assert summary.queue_depth_max is None
+    assert summary.dropped_total == 0
+    assert summary.dropped_by_reason == ()
+    assert summary.first_tick_utc is None and summary.last_tick_utc is None
+
+
+def test_tick_timing_summary_refuses_a_malformed_record() -> None:
+    bad = _Rec(RuntimeEventType.PAPER_TICK_STATS, EPOCH, None, None, _ts(1), {"duration_ms": "5"})
+    with pytest.raises(ValueError, match="PAPER_TICK_STATS"):
+        tick_timing_summary([bad])
+
+
+def test_tick_timing_summary_is_an_observation_never_a_criterion() -> None:
+    """Test 4 (AST): no comparison against a numeric literal or a threshold-like name."""
+    tree = ast.parse(Path(inspect.getsourcefile(coverage_module) or "").read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "tick_timing_summary"
+    )
+    forbidden_words = ("threshold", "ceiling", "grace", "limit", "silence", "lateness", "bound")
+    offenders: list[str] = []
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Compare):
+            continue
+        for operand in [node.left, *node.comparators]:
+            if isinstance(operand, ast.Constant) and isinstance(operand.value, int | float):
+                if not isinstance(operand.value, bool):
+                    offenders.append(f"numeric literal {operand.value!r}")
+            name = (
+                operand.id
+                if isinstance(operand, ast.Name)
+                else operand.attr
+                if isinstance(operand, ast.Attribute)
+                else ""
+            )
+            if any(word in name.lower() for word in forbidden_words):
+                offenders.append(f"name {name}")
+    assert offenders == []
+    # The summary also has no parameter that could carry a limit.
+    assert [a.arg for a in function.args.args] == ["records"]

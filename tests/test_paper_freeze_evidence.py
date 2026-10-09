@@ -503,3 +503,166 @@ def test_parse_github_runs_reads_the_rest_run_list() -> None:
         assert parsed[1].run_started_at_utc is None
     with pytest.raises(ValueError, match="runs"):
         parse_github_runs(json.dumps({"nope": []}))
+
+
+# --------------------------------------------------------------------------- #
+# Task 4: grace semantics (never CLEAN) and earlier-epoch evidence kept as auxiliary.
+# --------------------------------------------------------------------------- #
+
+GRACE_VALUES = (0, 1, 60, 300, 1800, 3599)
+
+
+def _hand_assigned_clean_slots(runs: list[GithubRun], lines: list[DiffLogEntry]) -> set[datetime]:
+    """Slots that have a CLEAN schedule-run line assigned (computed by hand, hourly cron 0)."""
+    clean_ids = {
+        entry.run_metadata["run_id"]
+        for entry in lines
+        if entry.outcome == "clean"
+        and entry.run_metadata is not None
+        and entry.run_metadata.get("schedule") == CRON
+    }
+    return {
+        run.created_at_utc.replace(minute=0, second=0, microsecond=0)
+        for run in runs
+        if run.event == "schedule" and run.run_id in clean_ids
+    }
+
+
+def test_no_grace_value_turns_a_slot_without_a_clean_line_into_clean() -> None:
+    """Test 1 (REV-02, REV-18): the grace only separates a late valid run from a missing one."""
+    runs, lines = _good([1, 2, 4, 5, 6])  # slot 03:00 has no run and no line
+    # Slot 04:00 also gets a late extra run, 10 minutes after the slot, with a CLEAN line.
+    runs = [r for r in runs if r.run_id != "1004"]
+    lines = [entry for entry in lines if entry.run_metadata["run_id"] != "1004"]
+    runs.append(_run(1004, _at(4, 10)))
+    lines.append(_clean(1004, _at(4, 10, 40)))
+
+    eligible = _hand_assigned_clean_slots(runs, lines)
+    satisfied_by_grace: dict[int, set[datetime]] = {}
+    for grace in GRACE_VALUES:
+        report = _report(runs, lines, grace=grace)
+        reasons = {g.slot_utc: g.reason for g in report.gaps}
+        assert reasons[_at(3)] is EvidenceGapReason.NO_RUN_FOUND, grace
+        assert set(report.satisfied_slots) <= eligible, grace
+        assert _at(3) not in report.satisfied_slots, grace
+        satisfied_by_grace[grace] = set(report.satisfied_slots)
+        # The late run at 04:10 is late-but-valid (600 s) or beyond the grace; nothing else moves.
+        if grace >= 600:
+            assert _at(4) in report.satisfied_slots
+        else:
+            assert reasons[_at(4)] is EvidenceGapReason.RUN_LATE_BEYOND_GRACE
+    # The grace only decides whether an existing late run counts: the runs created 12 s after
+    # their slot are valid from 12 s on, the run created 600 s after slot 04:00 from 600 s on.
+    for grace, current in satisfied_by_grace.items():
+        expected: set[datetime] = set()
+        if grace >= 12:
+            expected |= {_at(1), _at(2), _at(5), _at(6)}
+        if grace >= 600:
+            expected.add(_at(4))
+        assert current == expected, grace
+
+
+@pytest.mark.parametrize("grace", [3600, 3601, 7200])
+def test_a_grace_at_or_above_the_slot_interval_is_refused(grace: int) -> None:
+    """Test 2: one run could stand for two slots."""
+    runs, lines = _good([1, 2, 3, 4, 5, 6])
+    with pytest.raises(ValueError, match="one run could stand for two slots"):
+        _report(runs, lines, grace=grace)
+
+
+def test_a_negative_or_non_integer_grace_is_refused() -> None:
+    for bad in (-1, 1.5, True, "300"):
+        with pytest.raises(ValueError, match="grace_seconds"):
+            _report([], [], grace=bad)  # type: ignore[arg-type]
+
+
+def test_each_run_serves_at_most_its_own_slot_even_with_the_widest_grace() -> None:
+    """Test 2: a CLEAN run created almost one interval late satisfies only that slot."""
+    # Slot 02:00 is served by a run created at 02:59:59 (3599 s late); nothing exists for 03:00.
+    late = _run(2002, _at(2, 59, 59))
+    late_line = _clean(2002, _at(3, 0, 30))
+    runs, lines = _good([1, 4, 5, 6])
+    report = _report([*runs, late], [*lines, late_line], grace=3599)
+
+    assert _at(2) in report.satisfied_slots
+    assert _at(3) not in report.satisfied_slots
+    assert [(g.slot_utc, g.reason) for g in report.gaps] == [
+        (_at(3), EvidenceGapReason.NO_RUN_FOUND)
+    ]
+
+
+def test_a_lone_run_created_after_the_next_slot_does_not_satisfy_the_earlier_slot() -> None:
+    """The run created for slot S+1 belongs to S+1, so S stays a gap."""
+    only_late = _run(2003, _at(4, 0, 5))  # belongs to 04:00 whatever its line says
+    line = _clean(2003, _at(4, 0, 30))
+    runs, lines = _good([1, 2, 5, 6])
+    report = _report([*runs, only_late], [*lines, line], grace=3599)
+    reasons = {g.slot_utc: g.reason for g in report.gaps}
+    assert reasons == {_at(3): EvidenceGapReason.NO_RUN_FOUND}
+    assert _at(4) in report.satisfied_slots
+
+
+def test_a_manual_run_never_satisfies_a_slot_whatever_its_time() -> None:
+    runs, lines = _good([1, 2, 4, 5, 6])
+    runs.append(_run(3003, _at(3, 0, 1), event="workflow_dispatch"))
+    lines.append(_clean(3003, _at(3, 0, 20), event="workflow_dispatch", schedule=""))
+    for grace in GRACE_VALUES:
+        report = _report(runs, lines, grace=grace)
+        assert _at(3) not in report.satisfied_slots
+        assert any(g.slot_utc == _at(3) for g in report.gaps)
+
+
+def test_earlier_epoch_evidence_is_auxiliary_and_reproducible_with_its_own_pin() -> None:
+    """Test 3 (REV-18): evidence before the new pin never completes the new trial."""
+    # Epoch E1: pin P1 00:10, window to 06:00, slot 03:00 missing -> EvidenceGap -> new pin.
+    e1_runs, e1_lines = _good([1, 2, 4, 5, 6])
+    # Epoch E2: new pin P2 07:10, window to 12:00, every slot present.
+    p2 = _at(7, 10)
+    end2 = _at(12, 0)
+    e2_runs, e2_lines = _good([8, 9, 10, 11, 12])
+    both_runs = [*e1_runs, *e2_runs]
+    both_lines = [*e1_lines, *e2_lines]
+    runs_snapshot, lines_snapshot = list(both_runs), list(both_lines)
+
+    new_trial = _report(both_runs, both_lines, pin=p2, end=end2)
+    assert new_trial.qualifying_from_pin is True
+    assert new_trial.gaps == ()
+    assert new_trial.satisfied_slots == tuple(_at(h) for h in range(8, 13))
+    aux = new_trial.auxiliary
+    assert aux.run_count == 5 and aux.line_count == 5
+    assert aux.runs == tuple(e1_runs) and aux.lines == tuple(e1_lines)
+    assert all(a is b for a, b in zip(aux.runs, e1_runs, strict=True))
+    assert aux.first_utc == _at(1, 0, 12)
+    assert aux.last_utc == _at(6, 0, 40)
+    assert "earlier epoch evidence is auxiliary" in new_trial.statement
+    assert "cannot complete the freeze criterion of the new trial" in new_trial.statement
+
+    # Earlier-epoch evidence alone never satisfies a slot of the new window.
+    only_old = _report(e1_runs, e1_lines, pin=p2, end=end2)
+    assert only_old.satisfied_slots == ()
+    assert {g.reason for g in only_old.gaps} == {EvidenceGapReason.NO_RUN_FOUND}
+    assert only_old.qualifying_from_pin is False
+
+    # With the old pin the same inputs reproduce E1's EvidenceGap exactly.
+    old_trial = _report(both_runs, both_lines, pin=PIN, end=END)
+    only_e1 = _report(e1_runs, e1_lines, pin=PIN, end=END)
+    assert old_trial.gaps == only_e1.gaps
+    assert [(g.slot_utc, g.reason) for g in old_trial.gaps] == [
+        (_at(3), EvidenceGapReason.NO_RUN_FOUND)
+    ]
+    assert (both_runs, both_lines) == (runs_snapshot, lines_snapshot)
+
+
+def test_a_report_without_earlier_evidence_has_an_empty_auxiliary_field() -> None:
+    runs, lines = _good([1, 2, 3, 4, 5, 6])
+    report = _report(runs, lines)
+    assert report.auxiliary.run_count == 0 and report.auxiliary.line_count == 0
+    assert report.auxiliary.first_utc is None and report.auxiliary.last_utc is None
+    assert "auxiliary" not in report.statement
+
+
+def test_a_skipped_line_before_the_pin_is_auxiliary_evidence() -> None:
+    runs, lines = _good([1, 2, 3, 4, 5, 6])
+    report = _report(runs, [_skipped(_at(0, 5)), *lines])
+    assert report.auxiliary.line_count == 1
+    assert report.qualifying_from_pin is True
