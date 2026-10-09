@@ -25,18 +25,21 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from binance_common.configuration import ConfigurationWebSocketStreams
+from binance_common.constants import DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL
 from binance_sdk_derivatives_trading_usds_futures.websocket_streams import (
     DerivativesTradingUsdsFuturesWebSocketStreams,
 )
-from binance_sdk_derivatives_trading_usds_futures.websocket_streams.models.enums import (
-    KlineCandlestickStreamsIntervalEnum,
-)
 
 log = structlog.get_logger()
+
+# Intervals the paper runtime subscribes to. The SDK builds the stream name with
+# `str()` of the interval argument, so a plain string ("1h" -> btcusdt@kline_1h) is
+# required; the SDK interval Enum would yield an invalid stream name (research (b)).
+ALLOWED_INTERVALS: frozenset[str] = frozenset({"1m", "1h", "4h"})
 
 # --------------------------------------------------------------------------- #
 # Frozen domain dataclass — the public contract of the adapter.
@@ -131,14 +134,24 @@ class PaperWsAdapter:
         ws_client: DerivativesTradingUsdsFuturesWebSocketStreams | None = None,
         configuration: ConfigurationWebSocketStreams | None = None,
     ) -> None:
+        self._configuration: ConfigurationWebSocketStreams = (
+            configuration
+            if configuration is not None
+            else ConfigurationWebSocketStreams(
+                stream_url=DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL
+            )
+        )
         if ws_client is not None:
             self._ws: DerivativesTradingUsdsFuturesWebSocketStreams = ws_client
         else:
-            self._ws = DerivativesTradingUsdsFuturesWebSocketStreams(
-                configuration or ConfigurationWebSocketStreams()
-            )
+            self._ws = DerivativesTradingUsdsFuturesWebSocketStreams(self._configuration)
 
-    def subscribe(
+    @property
+    def configuration(self) -> ConfigurationWebSocketStreams:
+        """The SDK configuration this adapter builds its client from."""
+        return self._configuration
+
+    async def subscribe(
         self,
         *,
         symbol: str,
@@ -156,10 +169,15 @@ class PaperWsAdapter:
         Returns the underlying SDK stream handle so callers can manage
         the subscription lifecycle (close, reconnect, etc.).
         """
-        interval_enum = _interval_to_enum(interval)
-        handle = self._ws.kline_candlestick_streams(
-            symbol=symbol,
-            interval=interval_enum,
+        if interval not in ALLOWED_INTERVALS:
+            raise ValueError(
+                f"unsupported interval {interval!r}; supported: {sorted(ALLOWED_INTERVALS)}"
+            )
+        # The SDK types `interval` as its Enum but builds the stream name with str(); the
+        # plain string is what produces `btcusdt@kline_1h` (research (b)).
+        handle = await self._ws.kline_candlestick_streams(
+            symbol=symbol.lower(),
+            interval=cast(Any, interval),
             id=stream_id,
         )
 
@@ -193,44 +211,12 @@ class PaperWsAdapter:
                 return
             on_kline(kline)
 
-        if hasattr(handle, "on_message"):
-            handle.on_message(_on_message)
-        else:
-            # Fail loud (CR-04): returning a handle with no dispatch
-            # registered is a silent dead subscription. The installed
-            # SDK's RequestStreamHandle exposes on()/unsubscribe();
-            # wiring dispatch onto it is pre-soak work — until then,
-            # refuse loudly rather than stream into the void.
-            log.error(
-                "paper_ws.dispatch_unsupported",
-                handle_type=type(handle).__name__,
-            )
-            raise RuntimeError(
-                f"WS handle {type(handle).__name__} has no on_message; "
-                "dispatch unwired (pre-soak wiring required)"
-            )
+        handle.on("message", _on_message)
         return handle
 
-    def connect(self) -> Any:
-        """Open the underlying WS connection (CR-04 connect path).
-
-        Delegates to the SDK client's `create_connection()` entrypoint
-        (verified on the installed
-        `binance-sdk-derivatives-trading-usds-futures` streams client).
-        Raises loudly when the client exposes no connection entrypoint.
-        Full subscribe-against-live-connection smoke verification stays
-        pre-soak work (the known BLOCKED gap) — this method makes the
-        path explicit instead of absent.
-        """
-        for entry in ("create_connection", "init_connection", "connect"):
-            factory = getattr(self._ws, entry, None)
-            if callable(factory):
-                return factory()
-        log.error(
-            "paper_ws.connect_unsupported",
-            client_type=type(self._ws).__name__,
-        )
-        raise RuntimeError(f"WS client {type(self._ws).__name__} exposes no connection entrypoint")
+    async def connect(self) -> None:
+        """Open the SDK connections (awaited; the SDK method is a coroutine)."""
+        await self._ws.create_connection()  # type: ignore[no-untyped-call]  # SDK is untyped
 
     def reconnect(self, handle: Any) -> None:
         """Delegate reconnect to the SDK handle (fail-loud, CR-04)."""
@@ -271,34 +257,6 @@ class PaperWsAdapter:
 # --------------------------------------------------------------------------- #
 # Helpers.
 # --------------------------------------------------------------------------- #
-
-
-_INTERVAL_TO_ENUM: dict[str, KlineCandlestickStreamsIntervalEnum] = {
-    "1m": KlineCandlestickStreamsIntervalEnum.INTERVAL_1m,
-    "3m": KlineCandlestickStreamsIntervalEnum.INTERVAL_3m,
-    "5m": KlineCandlestickStreamsIntervalEnum.INTERVAL_5m,
-    "15m": KlineCandlestickStreamsIntervalEnum.INTERVAL_15m,
-    "30m": KlineCandlestickStreamsIntervalEnum.INTERVAL_30m,
-    "1h": KlineCandlestickStreamsIntervalEnum.INTERVAL_1h,
-    "2h": KlineCandlestickStreamsIntervalEnum.INTERVAL_2h,
-    "4h": KlineCandlestickStreamsIntervalEnum.INTERVAL_4h,
-    "6h": KlineCandlestickStreamsIntervalEnum.INTERVAL_6h,
-    "8h": KlineCandlestickStreamsIntervalEnum.INTERVAL_8h,
-    "12h": KlineCandlestickStreamsIntervalEnum.INTERVAL_12h,
-    "1d": KlineCandlestickStreamsIntervalEnum.INTERVAL_1d,
-    "3d": KlineCandlestickStreamsIntervalEnum.INTERVAL_3d,
-    "1w": KlineCandlestickStreamsIntervalEnum.INTERVAL_1w,
-}
-
-
-def _interval_to_enum(interval: str) -> KlineCandlestickStreamsIntervalEnum:
-    """Map a canonical interval string to the SDK enum value."""
-    enum_value = _INTERVAL_TO_ENUM.get(interval)
-    if enum_value is None:
-        raise ValueError(
-            f"unsupported interval {interval!r}; supported: {sorted(_INTERVAL_TO_ENUM)}"
-        )
-    return enum_value
 
 
 def _as_dict(value: Any) -> dict[str, Any] | None:

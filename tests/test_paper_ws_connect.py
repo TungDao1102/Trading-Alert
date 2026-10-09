@@ -21,8 +21,8 @@ from typing import Any
 
 import pytest
 from binance_common.constants import DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL
-
 from src.adapters.paper_ws import Kline, PaperWsAdapter
+
 from tests.paper_ws_fakes import FakeSdkWsClient, make_kline_model
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
