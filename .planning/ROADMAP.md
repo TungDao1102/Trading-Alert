@@ -695,7 +695,7 @@ Plans:
 
 **Depends on**: Phase 12, Phase 13.1, Phase 15, Phase 17
 
-**Plans**: 14/49 plans executed (16-01 to 16-49; plan-checker 2026-10-09: 0 blockers; open user questions Q-A to Q-Q are asked at the blocking-human checkpoints)
+**Plans**: 14/50 plans executed (16-01 to 16-50; plan-checker 2026-10-09: 0 blockers on 16-01 to 16-49; 16-50 added 2026-10-09 for the healthchecks.io heartbeat sender chosen by the user; open user questions Q-A to Q-Q are asked at the blocking-human checkpoints)
 
 **Requirements**: PAPER-01, PAPER-02
 
@@ -799,6 +799,7 @@ Plans:
 - [ ] 16-47-PLAN.md
 - [ ] 16-48-PLAN.md
 - [ ] 16-49-PLAN.md
+- [ ] 16-50-PLAN.md
 - [ ] TBD (run /gsd-plan-phase 16 to break down)
 
 ### Phase 17: Operational Persistence Layer
@@ -1119,6 +1120,7 @@ Plans:
 - [G3-005] Promote `NO_FILL` and `HEALTH_CHECK_FAILED` into the RejectionReason enum and update GLOSSARY 9.3 (source: docs/GLOSSARY.md:207-208, docs/DECISIONS.md D044 item (1); decision: D044)
 - [G2-035] Phase 9 review Info IN-01 (pyproject.toml E501 ignore), IN-05 (headroom fixture 198+3), IN-06 (`plan_hash=approval.trade_plan_id` at `src/execution/manager.py:532`) and IN-07 (`src/ops/health.py:404` accepts error_count above total_count) were carried here as warnings and need triage or a won't-fix note (source: .planning/phases/09-live-execution-rollout/09-REVIEW-DISPOSITION.md:94-118,153; decision: none required)
 - [T-02] OPS-06 (separate paper and live credentials, WR-06, provider disk encryption) is Pending and mapped to closed Phase 13.1; the WR-06 half belongs here and the disk-encryption half to Phase 26 (source: .planning/REQUIREMENTS.md:79,158; decision: none required, the REQUIREMENTS re-map is a separate change)
+- [16-50] Phase 16 plan 16-50 ships the external heartbeat sender (`deploy/heartbeat.sh` with a systemd timer, service healthchecks.io, D042 condition 1) and it probes the collector only. The paper and live process probes, and the external monitor's coverage of every long-running process that criterion 4 requires, are built here (source: .planning/phases/16-paper-runtime-composition/16-50-PLAN.md; decision: the user chose healthchecks.io on 2026-10-09, recorded in .planning/phases/16-paper-runtime-composition/decisions/16-DEC-O-12.md with the interval and grace still open)
 
 **Plans:** 0 plans
 
@@ -1252,7 +1254,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 13.1. Deployment & CI | 12/12 | Complete | 2026-10-04 |
 | 14. Backtest Simulator Causality Rewrite | 17/17 | Complete    | 2026-10-07 |
 | 15. Strategy Geometry Correction | 18/18 | Complete    | 2026-10-07 |
-| 16. Paper Runtime Composition + SHADOW Approval Mode | 14/49 | In Progress|  |
+| 16. Paper Runtime Composition + SHADOW Approval Mode | 14/50 | In Progress|  |
 | 17. Operational Persistence Layer | 15/15 | Complete    | 2026-10-07 |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |
 | 19. Execution Plan Binding + Pre-Placement Checks | 0/TBD | Not started | - |

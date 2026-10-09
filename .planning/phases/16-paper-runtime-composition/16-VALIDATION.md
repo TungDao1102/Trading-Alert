@@ -9,7 +9,7 @@ created: "2026-10-08"
 
 # Phase 16 — Validation Strategy
 
-> Seeded from the "Validation Architecture" section of `16-RESEARCH.md`. Rows marked REV were added because RESEARCH predates REV-15..REV-18 (D065) and does not cover them. Plan/Task columns filled by the planner audit of 2026-10-08 (49 plans, 16-01..16-49); rows below the first block were added for behaviours the plans introduce. Task ids read `16-NN Tn`.
+> Seeded from the "Validation Architecture" section of `16-RESEARCH.md`. Rows marked REV were added because RESEARCH predates REV-15..REV-18 (D065) and does not cover them. Plan/Task columns filled by the planner audit of 2026-10-08 (49 plans, 16-01..16-49; plan 16-50 was added on 2026-10-09, making 50 plans, 16-01..16-50, with its rows at the end of the map); rows below the first block were added for behaviours the plans introduce. Task ids read `16-NN Tn`.
 
 ---
 
@@ -87,6 +87,8 @@ Each row is a behavior with at least one task that has an `<automated>` command 
 | Grace never CLEAN; earlier epoch auxiliary (REV-02, REV-18) | 16-15 T2, T3, T4; 16-25 T2; 16-30 T1; 16-34 T3 | PAPER-01 | one run satisfies at most one slot; a grace at or above the slot interval is refused; earlier-epoch evidence is returned untouched as auxiliary | unit | `PYTHONPATH=. uv run pytest tests/test_paper_freeze_evidence.py tests/test_paper_exit_evaluator.py tests/test_soak_evidence_export.py -q` | ❌ W0 | ⬜ pending |
 | Exit-code table and refusal hold | 16-22 T1; 16-32 T1; 16-33 T1 | PAPER-01 | refusal codes 3 to 6 are disjoint from the crash status 1 and from 7; `--hold-on-refusal` keeps a refused container up; the compose command passes it | unit + static | `PYTHONPATH=. uv run pytest tests/test_paper_runtime_compose.py tests/test_soak_compose.py tests/test_soak_runbook.py -q` | ❌ W0 | ⬜ pending |
 | No late signal independent of Q-D (D-06, L-11) | 16-29 T1 | PAPER-01 | no bar closed during downtime reaches `evaluate_closed_bar` under any of the three evaluation rules, with a negative control | unit | `PYTHONPATH=. uv run pytest tests/test_paper_runtime_restart.py -q` | ❌ W0 | ⬜ pending |
+| External heartbeat sender (D042 condition 1; healthchecks.io, user choice 2026-10-09) | 16-50 T1, T2, T4 | PAPER-01 | success ping only while the collector probe passes; fail ping only with `--fail-ping`; the only docker subcommand is `exec` (static check with negative control); the URL never appears in output, argv, units, logs or acceptance.json (a sentinel is asserted absent in every test; the validator exits 2 on a ping-URL-shaped value); `--install-timer` refuses to run without `--interval-seconds`; no catch-up in the timer | unit (stub docker, stub curl, loopback-only real curl) | `TRADING_CI_STRICT=1 PYTHONPATH=. uv run pytest tests/test_deploy_heartbeat.py tests/test_soak_runbook.py -q` | ❌ W0 | ⬜ pending |
+| Heartbeat documentation, source register and guide (D-34, L-07, O-12) | 16-50 T3, T4 | PAPER-01 | RUNBOOK 11.4, 11.9, 13.5, 17, 19.3 and 19.4 describe the sender and name no interval or grace number; SOURCES rows carry URL, date and the not-verified-live label; the O-12 record names the service and leaves interval and grace open; the guide has a card for every new deploy file | text | `PYTHONPATH=. uv run pytest tests/test_deploy_docs.py tests/test_soak_runbook.py tests/test_deploy_guide_vi.py -q` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -113,6 +115,7 @@ Each row is a behavior with at least one task that has an `<automated>` command 
 | Host start gate (`SKIPPED (allowlist empty)`) | PAPER-01 (SC1) | 16-40 T2 | only a real host | evidence file with commit, image id, log excerpt, exit code |
 | EC2 acceptance per D042 condition (encrypted EBS, chrony, Elastic IP, budget alert, Object Lock, restore drill) | PAPER-01 | 16-20 T2, T3; 16-49 T3; 16-43 T2 | only a real host | acceptance table; check `get-ebs-encryption-by-default` in ap-southeast-1 (state of a new account is not documented) |
 | Trial soak exports and freeze ticks | PAPER-01 (SC8) | 16-43 T2, T3; 16-44 T1 | wall-clock | 14 calendar days, 95 percent HEALTHY coverage, every scheduled tick CLEAN |
+| Real healthchecks.io ping, alert and recovery for a stopped collector; systemd credential delivery to the `trading` user; timer firing | PAPER-01 (D042 condition 1) | 16-50 operator verification (not an executor step) | needs the EC2 host with the collector on it and the real monitor | set the URL with `--set-url`, install the timer with the user's interval, stop the collector longer than the check's period plus grace, confirm the alert and the recovery notice, record the UTC times in `evidence/16-50-operator-verification.md` (never the URL) |
 
 ---
 
