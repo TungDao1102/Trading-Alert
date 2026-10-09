@@ -22,10 +22,17 @@ from typing import Any
 import pytest
 from binance_common.constants import DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL
 from src.adapters.paper_ws import Kline, PaperWsAdapter
+from structlog.testing import capture_logs
 
-from tests.paper_ws_fakes import FakeSdkWsClient, make_kline_model
+from tests.paper_ws_fakes import FakeSdkWsClient, fresh_sdk_stream_map, make_kline_model
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def sdk_stream_map(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Isolate the SDK module-global stream map per test (research D7)."""
+    return fresh_sdk_stream_map(monkeypatch)
 
 
 def _kline_payload(*, t: int = 1_000, T: int = 2_000) -> dict[str, Any]:
@@ -186,3 +193,263 @@ async def test_malformed_payload_does_not_kill_stream() -> None:
     fake.handles[0]._emit({"stream": "s", "data": {"k": _kline_payload()}})
 
     assert len(received) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Lifecycle on the real SDK shape (Task 3): connect check, events, unsubscribe,
+# close, rebuild and diagnostics.
+# --------------------------------------------------------------------------- #
+
+_OWN_STREAMS = ("btcusdt@kline_1h", "ethusdt@kline_4h")
+
+
+async def _two_stream_adapter(
+    first: FakeSdkWsClient, clients: list[FakeSdkWsClient]
+) -> tuple[PaperWsAdapter, list[Kline], list[Kline]]:
+    """Adapter on `first`, rebuilding through a factory that records the clients it builds."""
+
+    def factory(_configuration: Any) -> Any:
+        client = FakeSdkWsClient()
+        clients.append(client)
+        return client
+
+    adapter = PaperWsAdapter(ws_client=first, client_factory=factory)  # type: ignore[arg-type]
+    await adapter.connect()
+    btc: list[Kline] = []
+    eth: list[Kline] = []
+    await adapter.subscribe(symbol="btcusdt", interval="1h", on_kline=btc.append)
+    await adapter.subscribe(symbol="ethusdt", interval="4h", on_kline=eth.append)
+    return adapter, btc, eth
+
+
+async def test_connect_without_any_sdk_connection_raises_and_logs() -> None:
+    """D4: the SDK swallows a failed connect; the adapter must not look healthy."""
+    fake = FakeSdkWsClient(produce_connection=False)
+    adapter = PaperWsAdapter(ws_client=fake)  # type: ignore[arg-type]
+
+    with capture_logs() as logs, pytest.raises(ConnectionError):
+        await adapter.connect()
+
+    assert any(entry["event"] == "paper_ws.connect_failed" for entry in logs)
+
+
+@pytest.mark.parametrize("event", ["open", "reconnect", "close", "error"])
+async def test_on_connection_registers_lifecycle_events_on_the_sdk_client(event: str) -> None:
+    fake = FakeSdkWsClient()
+    adapter = PaperWsAdapter(ws_client=fake)  # type: ignore[arg-type]
+    await adapter.connect()
+
+    def callback(*_args: Any) -> None:
+        return None
+
+    adapter.on_connection(event, callback)
+
+    assert fake.connection_callbacks[event] == [callback]
+
+
+@pytest.mark.parametrize("event", ["ping", "pong", "message", "bogus"])
+async def test_on_connection_rejects_other_events(event: str) -> None:
+    fake = FakeSdkWsClient()
+    adapter = PaperWsAdapter(ws_client=fake)  # type: ignore[arg-type]
+    await adapter.connect()
+
+    with pytest.raises(ValueError, match="unsupported connection event"):
+        adapter.on_connection(event, lambda *_a: None)
+
+    assert not fake.connection_callbacks
+
+
+async def test_on_connection_before_connect_is_applied_after_connect() -> None:
+    """The SDK drops a connection callback when no connection exists yet."""
+    fake = FakeSdkWsClient()
+    adapter = PaperWsAdapter(ws_client=fake)  # type: ignore[arg-type]
+
+    def callback(*_args: Any) -> None:
+        return None
+
+    adapter.on_connection("reconnect", callback)
+    assert fake.dropped_connection_callbacks == 0  # not forwarded while unconnected
+    await adapter.connect()
+
+    assert fake.connection_callbacks["reconnect"] == [callback]
+
+
+async def test_unsubscribe_awaits_the_handle_and_close_awaits_close_connection() -> None:
+    fake = FakeSdkWsClient()
+    adapter = PaperWsAdapter(ws_client=fake)  # type: ignore[arg-type]
+    await adapter.connect()
+    handle = await adapter.subscribe(symbol="btcusdt", interval="1h", on_kline=lambda _k: None)
+
+    await adapter.unsubscribe(handle)
+    assert handle._unsubscribed == 1
+
+    await adapter.close()
+    assert fake.close_calls == 1
+    assert fake.connections == []
+
+
+async def test_rebuild_after_unsolicited_close_resubscribes_own_streams_only(
+    sdk_stream_map: Any,
+) -> None:
+    first = FakeSdkWsClient()
+    clients: list[FakeSdkWsClient] = []
+    adapter, btc, eth = await _two_stream_adapter(first, clients)
+    foreign = object()
+    sdk_stream_map.stream_connections_map["foo@kline_1m"] = foreign
+    old_handles = list(first.handles)
+    assert [len(h._callbacks) for h in old_handles] == [1, 1]
+
+    first.simulate_unsolicited_close()
+    # The SDK keeps the dead connection's stream names (D3): a plain re-subscribe sends nothing.
+    assert set(_OWN_STREAMS) <= set(sdk_stream_map.stream_connections_map)
+
+    await adapter.rebuild()
+
+    assert len(clients) == 1
+    new = clients[0]
+    assert new.create_connection_calls == 1
+    assert new.subscribe_frames == list(_OWN_STREAMS)  # SUBSCRIBE really sent for both
+    assert [(s, i) for s, i, _ in new.kline_calls] == [("btcusdt", "1h"), ("ethusdt", "4h")]
+    assert sdk_stream_map.stream_connections_map["foo@kline_1m"] is foreign  # foreign untouched
+    # P3 duplicate-callback guard: one callback per new handle, none added to the old handles.
+    assert [len(h._callbacks) for h in new.handles] == [1, 1]
+    assert [len(h._callbacks) for h in old_handles] == [1, 1]
+    assert first.close_calls == 1  # the dead client was released best-effort
+    # The same caller callbacks keep working through the new handles.
+    new.handles[0]._emit(make_kline_model(is_closed=True))
+    new.handles[1]._emit(make_kline_model(symbol="ETHUSDT", interval="4h", is_closed=True))
+    assert len(btc) == 1
+    assert len(eth) == 1
+
+
+async def test_rebuild_reapplies_connection_callbacks_on_the_new_client() -> None:
+    first = FakeSdkWsClient()
+    clients: list[FakeSdkWsClient] = []
+    adapter, _btc, _eth = await _two_stream_adapter(first, clients)
+
+    def callback(*_args: Any) -> None:
+        return None
+
+    adapter.on_connection("close", callback)
+    first.simulate_unsolicited_close()
+    await adapter.rebuild()
+
+    assert clients[0].connection_callbacks["close"] == [callback]
+
+
+async def test_rebuild_does_not_resubscribe_an_unsubscribed_stream() -> None:
+    first = FakeSdkWsClient()
+    clients: list[FakeSdkWsClient] = []
+    adapter, _btc, _eth = await _two_stream_adapter(first, clients)
+    await adapter.unsubscribe(first.handles[0])
+
+    first.simulate_unsolicited_close()
+    await adapter.rebuild()
+
+    assert clients[0].subscribe_frames == ["ethusdt@kline_4h"]
+
+
+def test_adapter_has_no_reconnect_or_schedule_reconnect() -> None:
+    """The SDK owns reconnection; the handle has no such operations (D1)."""
+    adapter = PaperWsAdapter(ws_client=FakeSdkWsClient())  # type: ignore[arg-type]
+
+    assert not hasattr(adapter, "reconnect")
+    assert not hasattr(adapter, "schedule_reconnect")
+
+
+async def test_unsolicited_and_user_initiated_close_paths_are_distinguishable() -> None:
+    """Test 6: the live smoke reads `last_rebuild` to know which path it exercised."""
+    first = FakeSdkWsClient()
+    clients: list[FakeSdkWsClient] = []
+    adapter, _btc, _eth = await _two_stream_adapter(first, clients)
+    assert adapter.last_rebuild is None
+
+    first.simulate_unsolicited_close()
+    await adapter.rebuild()
+    unsolicited = adapter.last_rebuild
+    assert unsolicited is not None
+    assert unsolicited.stale_stream_names_found == _OWN_STREAMS
+    assert unsolicited.connections_before == 2  # public + private survived the market drop
+    assert unsolicited.connections_after == 3
+
+    second = clients[0]
+    await second.close_connection()  # user-initiated: the SDK forgets the streams
+    await adapter.rebuild()
+    user_initiated = adapter.last_rebuild
+    assert user_initiated is not None
+    assert user_initiated.stale_stream_names_found == ()
+    assert user_initiated.connections_before == 0
+    assert user_initiated.connections_after == 3
+    assert len(clients) == 2
+    assert clients[1].subscribe_frames == list(_OWN_STREAMS)
+
+
+async def test_diagnostics_reports_connections_and_stale_streams() -> None:
+    first = FakeSdkWsClient()
+
+    def factory(_configuration: Any) -> Any:
+        return FakeSdkWsClient()
+
+    adapter = PaperWsAdapter(ws_client=first, client_factory=factory)  # type: ignore[arg-type]
+    before = adapter.diagnostics()
+    assert before.connection_count == 0
+    assert before.subscribed_streams == ()
+    assert before.stale_stream_names == ()
+
+    await adapter.connect()
+    await adapter.subscribe(symbol="btcusdt", interval="1h", on_kline=lambda _k: None)
+    await adapter.subscribe(symbol="ethusdt", interval="4h", on_kline=lambda _k: None)
+    connected = adapter.diagnostics()
+    assert connected.connection_count == len(first.connections) == 3
+    assert connected.subscribed_streams == _OWN_STREAMS
+    assert connected.stale_stream_names == ()
+
+    first.simulate_unsolicited_close()
+    dropped = adapter.diagnostics()
+    assert dropped.connection_count == 2
+    assert dropped.stale_stream_names == _OWN_STREAMS  # mapped to a connection that is gone
+
+    # Frozen value holding only plain types (no SDK type leaks out).
+    with pytest.raises(FrozenInstanceError):
+        dropped.connection_count = 9  # type: ignore[misc]
+    assert type(dropped.connection_count) is int
+    assert all(
+        type(name) is str for name in dropped.subscribed_streams + dropped.stale_stream_names
+    )
+
+
+def test_sdk_log_bridge_forwards_sdk_errors_to_structlog() -> None:
+    """D4: the SDK reports through root `logging.error`; the bridge makes it structured output."""
+    import logging
+
+    from src.adapters.paper_ws import install_sdk_log_bridge
+
+    install_sdk_log_bridge()
+    install_sdk_log_bridge()  # idempotent
+    root = logging.getLogger()
+    record = logging.LogRecord(
+        name="root",
+        level=logging.ERROR,
+        pathname="C:/x/site-packages/binance_common/websocket.py",
+        lineno=194,
+        msg="WebSocket failed to connect: boom",
+        args=(),
+        exc_info=None,
+    )
+    foreign = logging.LogRecord(
+        name="root",
+        level=logging.ERROR,
+        pathname="C:/x/site-packages/other/lib.py",
+        lineno=1,
+        msg="unrelated",
+        args=(),
+        exc_info=None,
+    )
+
+    with capture_logs() as logs:
+        root.handle(record)
+        root.handle(foreign)
+
+    sdk_logs = [entry for entry in logs if entry["event"] == "paper_ws.sdk_log"]
+    assert len(sdk_logs) == 1
+    assert "boom" in sdk_logs[0]["message"]

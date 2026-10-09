@@ -15,9 +15,12 @@ dicts (research D8): the real callback payload is a `KlineCandlestickStreamsResp
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable
 from typing import Any
 
+from binance_common import websocket as sdk_websocket
+from binance_common.websocket import StreamConnectionsMap
 from binance_sdk_derivatives_trading_usds_futures.websocket_streams.models import (
     KlineCandlestickStreamsResponse,
     KlineCandlestickStreamsResponseK,
@@ -67,12 +70,36 @@ def make_kline_model(
     )
 
 
+def fresh_sdk_stream_map(monkeypatch: Any) -> StreamConnectionsMap:
+    """Replace the SDK's module-global stream map with an empty one for one test (research D7).
+
+    `binance_common.websocket.global_stream_connections` is shared by every client in the
+    process, so any behavioural test must isolate it. `monkeypatch` restores the original on
+    teardown. Both the fakes and `PaperWsAdapter` read the attribute at call time.
+    """
+    replacement = StreamConnectionsMap()
+    monkeypatch.setattr(sdk_websocket, "global_stream_connections", replacement)
+    return replacement
+
+
+def _sdk_stream_map() -> dict[Any, Any]:
+    stream_map: dict[Any, Any] = sdk_websocket.global_stream_connections.stream_connections_map
+    return stream_map
+
+
+class FakeConnection:
+    """Stand-in for `binance_common.websocket.WebSocketConnection` (identity only)."""
+
+    def __init__(self, connection_id: int, url_path: str) -> None:
+        self.id = connection_id
+        self.url_path = url_path
+
+
 class FakeStreamHandle:
     """Mirrors `binance_common.websocket.RequestStreamHandle`.
 
-    Public members are exactly `on` (sync) and `unsubscribe` (async); `emit` and
-    the recorded state are underscore-free test helpers kept off the public
-    surface by living in `_`-prefixed names, so `public members == {on, unsubscribe}`.
+    Public members are exactly `on` (sync) and `unsubscribe` (async). Recorded state and the
+    `_emit` helper are underscore-prefixed so they stay off the mirrored public surface.
     """
 
     def __init__(self, stream: str) -> None:
@@ -96,17 +123,43 @@ class FakeStreamHandle:
 
 
 class FakeSdkWsClient:
-    """Mirrors `DerivativesTradingUsdsFuturesWebSocketStreams` (async surface only)."""
+    """Mirrors `DerivativesTradingUsdsFuturesWebSocketStreams` (async surface only).
 
-    def __init__(self) -> None:
+    Behaviour copied from the installed SDK source (research D3, D4, D5, D7):
+
+    - `create_connection` opens one connection per url path (market, public, private).
+      `produce_connection=False` models the SDK swallowing a failed connect (D4).
+    - `kline_candlestick_streams` maps the stream to the market connection in the module-global
+      stream map and sends SUBSCRIBE only for streams not already mapped (D3).
+    - `simulate_unsolicited_close()` mirrors `_discard_connection`: the dead connection leaves
+      `connections`, "close" connection callbacks fire, the stream names STAY in the map.
+    - `close_connection()` mirrors the user-initiated `_close_one`: connections leave
+      `connections` and their stream names are forgotten.
+    - `on_connection` registers only when connections exist (the SDK warns and drops otherwise)
+      and ignores an exact duplicate registration.
+    """
+
+    URL_PATHS = ("market", "public", "private")
+
+    def __init__(self, *, produce_connection: bool = True) -> None:
+        self.produce_connection = produce_connection
         self.connections: list[Any] = []
         self.create_connection_calls = 0
+        self.close_calls = 0
         self.kline_calls: list[tuple[str, Any, Any]] = []
+        self.subscribe_frames: list[str] = []
         self.handles: list[FakeStreamHandle] = []
+        self.connection_callbacks: dict[str, list[Callable[..., None]]] = defaultdict(list)
+        self.dropped_connection_callbacks = 0
+        self._next_connection_id = 1
 
     async def create_connection(self) -> None:
         self.create_connection_calls += 1
-        self.connections.append(object())
+        if not self.produce_connection:
+            return
+        for url_path in self.URL_PATHS:
+            self.connections.append(FakeConnection(self._next_connection_id, url_path))
+            self._next_connection_id += 1
 
     async def kline_candlestick_streams(
         self,
@@ -115,12 +168,27 @@ class FakeSdkWsClient:
         id: str | None = None,  # noqa: A002 - mirrors the SDK parameter name
     ) -> FakeStreamHandle:
         self.kline_calls.append((str(symbol), interval, id))
-        handle = FakeStreamHandle(f"{symbol}@kline_{interval}")
+        stream = f"{symbol}@kline_{interval}"
+        market = [c for c in self.connections if c.url_path == "market"]
+        if not market:
+            raise ValueError("No WebSocket connections available.")
+        stream_map = _sdk_stream_map()
+        if stream not in stream_map:
+            stream_map[stream] = market[0]
+            self.subscribe_frames.append(stream)
+        handle = FakeStreamHandle(stream)
         self.handles.append(handle)
         return handle
 
     async def close_connection(self, connection: Any = None, close_session: bool = True) -> None:
-        self.connections.clear()
+        self.close_calls += 1
+        closing = list(self.connections) if connection is None else [connection]
+        stream_map = _sdk_stream_map()
+        for closed in closing:
+            if closed in self.connections:
+                self.connections.remove(closed)
+            for stream in [name for name, mapped in stream_map.items() if mapped is closed]:
+                stream_map.pop(stream, None)
 
     def on_connection(
         self,
@@ -130,3 +198,18 @@ class FakeSdkWsClient:
     ) -> None:
         if event not in SUPPORTED_CONNECTION_EVENTS:
             raise ValueError(f"Unsupported connection event: {event}")
+        if not self.connections:
+            self.dropped_connection_callbacks += 1
+            return
+        if callback not in self.connection_callbacks[event]:
+            self.connection_callbacks[event].append(callback)
+
+    # -- test helpers (not part of the mirrored SDK surface) --
+
+    def simulate_unsolicited_close(self) -> None:
+        """Mirror the SDK's unsolicited CLOSE: emit close, discard, keep the stream names."""
+        market = [c for c in self.connections if c.url_path == "market"]
+        for dead in market:
+            for callback in list(self.connection_callbacks["close"]):
+                callback()
+            self.connections.remove(dead)
