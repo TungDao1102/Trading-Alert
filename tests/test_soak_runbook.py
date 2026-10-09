@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from scripts import soak_host_acceptance as sha
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

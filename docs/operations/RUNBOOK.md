@@ -485,3 +485,27 @@ How to read a red run: open the failed job, then the failed step. A skipped-test
 Three older workflows keep their logic and now share the same pins: `registry-gate` and `research-gate` run on pull requests and pushes to master, and `paper_freeze_check` is a scheduled and manually dispatchable workflow. They are referenced, not merged.
 
 **D-23 serial-run note.** `tests/test_backfill_cli.py` showed rare intermittent failures on the Windows development machine under heavy load (about 1 run in 15 to 30 while Docker pulls and a second pytest ran concurrently; the test returns exit code 1 from its generic exception branch). It was never changed and no retry, marker or suppression was added. CI runs the suite serially on a fresh Linux runner; if that test fails there, treat it as a real finding. It is logged in `.planning/phases/13.1-deployment-ci/deferred-items.md`.
+
+## 19. Soak host (EC2) provisioning, migration and data path
+
+This section is text for the person who creates the host (D061 hosts, D042, D-34). The repository never creates, changes or deletes an AWS resource, and no step here runs from a test. Every AWS, rclone and distribution fact below carries its URL and the read date 2026-10-08; those facts come from `16-RESEARCH-GAPS-RESULT.md`, were read through a fetch tool that summarises the page, and are **not verified live**: before a decision depends on a fact, read the page again. A number the user owns (instance type, EBS size, budget amount, S3 lifecycle and retention) is never written here: wherever one is needed the text says "value from decision record 16-DEC-O-12".
+
+### 19.1 Prerequisites
+
+1. The host runs Ubuntu 22.04, Ubuntu 24.04 or Debian 12, because `deploy/bootstrap.sh` refuses any other OS (section 13). The region is ap-southeast-1 (Singapore), D061 hosts.
+2. WR-05 (D062) is implemented: commit 7148528 makes `trading` a sudo user with a password and no passwordless rule (13.4, 13.5). The D064 Parquet push is implemented (commit e9a030c and D066, section 11) and tested against an S3 double only; its real-S3 gate is still open (the "Real-S3 gate" paragraph in section 11).
+3. The development machine can run the checks in 19.5 (`docker compose --profile ops`) and holds the off-host copy of the secrets file and the backup passphrases (section 11, "Key custody").
+4. A text file named `acceptance.json` is kept on the development machine, not on the host and not in git. It holds one entry per condition id of 19.3 with `status`, `command`, `evidence` (a short excerpt) and `checked_at` (UTC). Never paste a key, token, password or the content of `.env` into it. `uv run python scripts/soak_host_acceptance.py acceptance.json` exits 0 only when every condition is `PASS` with a command, an evidence excerpt and a UTC time; it exits 1 and names the first missing or non-PASS condition; it exits 2, without printing the value, when a field holds something that looks like a secret.
+5. Only the OI collector moves on the provisioning weekend (19.4). The Phase 16 paper runtime does not exist yet at that point.
+
+### 19.2 First action on the instance: public ping to fapi.binance.com
+
+Before anything is installed or configured, log in to the new instance and run, on the instance:
+
+```text
+curl -sS -o /dev/null -w "%{http_code}" https://fapi.binance.com/fapi/v1/ping
+```
+
+Pass condition: the printed status is `200` (HTTP 200). This is condition `REGION_PING_FAPI` of 19.3. Run it again after the Elastic IP is associated if the instance first used another public address, because Binance sees the address the instance actually uses.
+
+If it fails (any other status, a timeout or a TLS error), stop: do not install anything, the region or IP is not accepted. Record the output as evidence and report it. Choosing another region or address is a new decision for the user; this section does not make it.
