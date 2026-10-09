@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: executing
-stopped_at: Completed 16-14-PLAN.md
-last_updated: "2026-10-09T07:03:38.647Z"
+stopped_at: Completed 16-15-PLAN.md
+last_updated: "2026-10-09T13:32:09.002Z"
 last_activity: 2026-10-09
 last_activity_desc: Phase 16 execution started
-state_head: c41e21f6b0b59c49765c9722190f24f43acd8ea5
+state_head: fa65953919f9d4da04a79a62969ca3aedc234703
 progress:
   total_phases: 29
   completed_phases: 17
   total_plans: 194
-  completed_plans: 157
+  completed_plans: 158
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
-Plan: 15 of 50
+Plan: 2 of 50
 Status: Ready to execute
 Last activity: 2026-10-09 — Phase 16 execution started
 
@@ -207,6 +207,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P12 | n/a | 3 tasks | 4 files |
 | Phase 16 P13 | single session | 2 tasks | 2 files |
 | Phase 16 P14 | n/a | 3 tasks | 3 files |
+| Phase 16 P15 | 22 min | 4 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -504,6 +505,8 @@ Recent decisions affecting current work:
 - [Phase 16]: 16-13: candidate validator prints the parameter_set_hash only for a VALID candidate; --list-grid shows structure verdicts only, in grid-file order (D-28, L-03)
 - [Phase 16]: O-12 postponed by user (no connectivity); EC2 creation (16-20) blocked until O-12 values recorded
 - [Phase 16]: Q-L: separate Telegram bot token for the soak host (user creates it, token never pasted)
+- [Phase 16]: 16-15: a freeze slot is satisfied only by a CLEAN line linked to a schedule-event run of the exported run list with the evaluated cron string and run_attempt 1; a re-run line is INVALID_LINE and grace is refused at or above 3600 s — A re-run executes later than the slot and a grace at or above the slot interval lets one run stand for two slots; both would fill a missed tick (REV-02, REV-18, T-16-114)
+- [Phase 16]: 16-15: after every RUNTIME_START the time to the first live feed message is uncovered (WS_RECONNECT_WINDOW) and only LIVE_WS bar records prove a live arrival — Matches plan 16-29 HEALTH_STATE_CHANGED rule and REV-01 (time the runtime did not observe the feed is not covered); fails closed if the payload contract is not matched
 
 ### Pending Todos
 
@@ -580,6 +583,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-09T07:03:37.528Z
-Stopped at: Completed 16-14-PLAN.md
+Last session: 2026-10-09T13:32:08.636Z
+Stopped at: Completed 16-15-PLAN.md
 Resume file: None
