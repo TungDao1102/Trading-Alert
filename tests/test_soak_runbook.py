@@ -222,3 +222,106 @@ def test_every_repository_path_section_19_names_exists() -> None:
     assert {"deploy/migrate.sh", "deploy/restore.sh", "scripts/soak_host_acceptance.py"} <= paths
     for relative in sorted(paths):
         assert (REPO_ROOT / relative).is_file(), f"section 19 names a missing file: {relative}"
+
+
+# --------------------------------------------------------------------------- 19.5 to 19.7
+
+BACKUP_CLI = REPO_ROOT / "src" / "ops" / "backup.py"
+PULL_COMMAND = (
+    "docker compose --profile ops run --rm -T --no-deps ops /app/.venv/bin/python "
+    "-m src.ops.backup pull --dest /app/data/backup/pull-<UTC timestamp>"
+)
+COPY_COMMAND = (
+    "docker compose --profile ops run --rm -T --no-deps ops /app/.venv/bin/python "
+    "-m src.ops.backup restore --bundle-root /app/data/backup/pull-<UTC timestamp> "
+    "--parquet-target /app/data/raw --skip-db --force"
+)
+
+
+def _backup_cli_source() -> str:
+    return BACKUP_CLI.read_text(encoding="utf-8")
+
+
+def test_19_5_gives_the_exact_pull_and_the_no_overwrite_copy_commands() -> None:
+    body = _subsection("19.5")
+    assert body, "section 19 has no 19.5"
+    assert PULL_COMMAND in body
+    assert COPY_COMMAND in body
+    assert "--snapshot" in body
+    assert "src.ops.backup verify --bundle-root /app/data/backup/pull-<UTC timestamp>" in body
+    for phrase in (
+        "BACKUP_",
+        "section 11",
+        "never overwrite",
+        "raw files are immutable",
+        "already exists in the target with different content",
+    ):
+        assert phrase in body, f"19.5 lacks: {phrase}"
+
+
+def test_the_backup_cli_has_every_subcommand_and_flag_19_5_uses() -> None:
+    source = _backup_cli_source()
+    for subcommand in ("pull", "verify", "restore"):
+        assert f'sub.add_parser(\n        "{subcommand}"' in source or (
+            f'sub.add_parser("{subcommand}"' in source
+        ), f"src/ops/backup.py has no subcommand {subcommand}"
+    for flag in (
+        "--dest",
+        "--snapshot",
+        "--bundle-root",
+        "--parquet-target",
+        "--skip-db",
+        "--force",
+    ):
+        assert f'"{flag}"' in source, f"src/ops/backup.py has no flag {flag}"
+    body = _subsection("19.5")
+    for flag in re.findall(r"--[a-z][a-z-]*", body):
+        allowed = {"--profile", "--rm", "--no-deps", "--dest", "--snapshot", "--bundle-root"}
+        allowed |= {"--parquet-target", "--skip-db", "--force"}
+        assert flag in allowed, f"19.5 uses an undeclared flag: {flag}"
+
+
+def test_19_6_lists_the_rev_08_facts_each_with_url_and_read_date() -> None:
+    body = _subsection("19.6")
+    assert body, "section 19 has no 19.6"
+    for phrase in (
+        "S3 Versioning",
+        "can be enabled on an existing bucket",
+        "cannot be disabled",
+        "GOVERNANCE",
+        "COMPLIANCE",
+        "bucket default retention",
+        "per-object retention",
+        "403",
+        "Hashes are not stored for crypt",
+        "BACKUP_CRYPT_PASSWORD",
+        "BACKUP_CRYPT_PASSWORD2",
+        "24 hour",
+        "inference",
+        "UNVERIFIED",
+        "apply_retention",
+        "push_snapshot",
+        "rclone purge",
+        "Git hashes do not make S3 immutable",
+        "an Actions cache is never a source of truth",
+    ):
+        assert phrase in body, f"19.6 lacks: {phrase}"
+    urls = re.findall(r"https://[^\s)]+", body)
+    assert len(urls) >= 6
+    assert body.count("read 2026-10-08") >= len(set(urls)) - 1
+    assert body.rstrip().endswith("No option is selected here; the decision is O-01 (plan 16-30).")
+
+
+def test_19_6_cites_functions_that_exist_in_the_backup_chain() -> None:
+    source = (REPO_ROOT / "src" / "ops" / "backup_remote.py").read_text(encoding="utf-8")
+    body = _subsection("19.6")
+    for name in re.findall(r"`(\w+)`", body):
+        if name in {"apply_retention", "push_snapshot", "check_sentinel", "init_sentinel"}:
+            assert f"def {name}(" in source, f"19.6 names a missing function: {name}"
+
+
+def test_19_7_points_to_the_real_host_only_list_in_section_17() -> None:
+    body = _subsection("19.7")
+    assert body, "section 19 has no 19.7"
+    assert "section 17" in body
+    assert "Only a real host can show" in body
