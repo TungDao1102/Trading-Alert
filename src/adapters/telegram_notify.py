@@ -203,6 +203,64 @@ def build_skip_keyboard(signal_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("SKIP", callback_data=skp_data)]])
 
 
+def build_shadow_decision_keyboard(signal_id: str) -> InlineKeyboardMarkup:
+    """Build the SHADOW decision keyboard: one row, an APPROVE and a SKIP button.
+
+    Button contract (Phase 16, plan 16-04, D-16, F-961): SHADOW alerts use the live `APR:` and
+    `SKP:` prefixes ONLY. Both buttons carry the same short id (`sha256(signal_id)[:32]`), so one
+    short-id mapping backs the pair, and both are backed by a PENDING approval row. The
+    SIMULATE-only keyboard (`build_simulate_keyboard`, inert `SIM:`/`SKIP:` data that resolves to
+    SIMULATE_RECORDED and never advances an approval) is never sent by SHADOW code; it stays in
+    this module only for wire-format stability (Phase 7 D-05).
+
+    Each payload is `APR:`/`SKP:` (4 bytes) + 32 hex = 36 bytes, under Telegram's 64-byte limit;
+    `_short_signal_id_with_prefix` re-checks the ceiling.
+    """
+    apr_data = _short_signal_id_with_prefix(signal_id, APR_PREFIX)
+    skp_data = _short_signal_id_with_prefix(signal_id, SKP_PREFIX)
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("APPROVE", callback_data=apr_data),
+                InlineKeyboardButton("SKIP", callback_data=skp_data),
+            ]
+        ]
+    )
+
+
+class TelegramTextBot(Protocol):
+    """Structural type for the plain-text send and edit surface of `telegram.Bot`."""
+
+    async def send_message(
+        self,
+        *,
+        chat_id: str | int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> object: ...
+
+    async def edit_message_text(
+        self,
+        *,
+        chat_id: str | int,
+        message_id: int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> object: ...
+
+
+async def send_text(
+    bot: TelegramTextBot,
+    chat_id: str | int,
+    text: str,
+    keyboard: InlineKeyboardMarkup | None = None,
+) -> object:
+    """Send one text message, with an optional keyboard."""
+    return await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+
+
 # --------------------------------------------------------------------------- #
 # format_approve — PTB-free 12-field renderer (mirrors format_simulate).
 # --------------------------------------------------------------------------- #
@@ -320,9 +378,12 @@ __all__ = [
     "SKIP_PREFIX",
     "TELEGRAM_CALLBACK_DATA_MAX_BYTES",
     "TelegramBot",
+    "TelegramTextBot",
     "build_approve_keyboard",
+    "build_shadow_decision_keyboard",
     "build_simulate_keyboard",
     "build_skip_keyboard",
     "format_approve",
     "send_simulate",
+    "send_text",
 ]
