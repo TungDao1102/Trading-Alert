@@ -8,11 +8,19 @@ What it is. A single-file operator and CI tool that composes the project's `Pape
 `PaperSupervisor` on PUBLIC market data only and writes one redacted evidence file. `--dry-run`
 (the CI mode) drives the same pipeline over the SDK-shaped fakes of `tests/paper_ws_fakes.py` on a
 virtual clock, so it never touches the network and never waits. The evidence of a dry run carries
-`proof_class` "FAKE": fake-level evidence never closes PAPER-01 (SC9).
+`proof_class` "FAKE": fake-level evidence never closes PAPER-01 (SC9). `--live` exists for the
+blocking-human plan 16-21 only and must never be run by an automated task.
 
 Safety posture. The script constructs no order adapter, imports nothing from `src.execution` and
-holds no credential. Evidence is scrubbed through `src.ops.redaction` before it is written and
-re-scanned after the write; a file that fails the scan is deleted.
+holds no credential. `--live` refuses to start when any environment variable name starts with
+BINANCE_ (exit 3, the name only is printed) and needs the explicit operator flag
+`--i-am-on-the-connected-machine`. Evidence is scrubbed through `src.ops.redaction` before it is
+written and re-scanned after the write; a file that fails the scan is deleted.
+
+Forced disconnect. The step never uses the SDK's own close API (the user-initiated path forgets
+the stream names and so cannot show the dead-subscription defect, research D3 and P4). It drops
+the transport beneath the SDK connection, and the evidence proves the path through the stale
+stream names that `PaperWsAdapter.rebuild` found in the SDK global stream map.
 
 Measurements are observations for the O-07 table (plan 16-27), not thresholds. No value measured
 here is compared with a limit.
@@ -21,21 +29,26 @@ Exit codes::
 
     0  the run completed and every requested step is OK or NOT_RUN
     1  the run completed but the subscribe was blocked or a step reported ERROR (evidence written)
-    2  refused before any network call (usage)
+    2  refused before any network call (usage, missing operator flag)
+    3  refused: a trade-capable (BINANCE_*) environment variable is present
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import hashlib
 import heapq
 import importlib.metadata
+import io
 import itertools
 import json
 import os
 import re
 import sys
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+import zipfile
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -46,12 +59,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import httpx  # noqa: E402
 from binance_common import websocket as sdk_websocket  # noqa: E402
 from binance_common.websocket import StreamConnectionsMap  # noqa: E402
-from src.adapters.binance_public import Kline, MarkKline  # noqa: E402
-from src.adapters.paper_ws import ALLOWED_INTERVALS, PaperWsAdapter  # noqa: E402
+from src.adapters.binance_public import BinancePublicMarketData, Kline, MarkKline  # noqa: E402
+from src.adapters.paper_ws import ALLOWED_INTERVALS, LIFECYCLE_EVENTS, PaperWsAdapter  # noqa: E402
 from src.adapters.paper_ws import Kline as WsKline  # noqa: E402
-from src.ops.redaction import Redactor  # noqa: E402
+from src.data.archive import (  # noqa: E402
+    ArchiveError,
+    archive_zip_url,
+    fetch_archive_klines,
+    make_archive_client,
+)
+from src.ops.redaction import Redactor, configure_logging  # noqa: E402
 from src.paper.supervisor import PaperSupervisor  # noqa: E402
 from src.paper.vocabulary import (  # noqa: E402
     INTERVAL_MS,
@@ -66,18 +86,28 @@ from src.paper.vocabulary import (  # noqa: E402
 
 EVIDENCE_SCHEMA = "paper-ws-smoke-evidence/schema-1"
 DEFAULT_EVIDENCE_DIR = (
-    REPO_ROOT / ".planning" / "phases" / "16-paper-runtime-composition" / ("evidence")
+    REPO_ROOT / ".planning" / "phases" / "16-paper-runtime-composition" / "evidence"
 )
 OBSERVATIONS_NOTE = "measurements are observations for the O-07 table (plan 16-27), not thresholds"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_REFUSED = 2
+EXIT_TRADE_CAPABLE = 3
 
 ALLOWED_STATUSES: frozenset[str] = frozenset({"OK", "NOT_RUN", "ERROR"})
 SUBSCRIBE_STATUSES: frozenset[str] = frozenset({"OK", "BLOCKED", "NOT_RUN"})
 MODES: frozenset[str] = frozenset({"dry-run", "live"})
 PROOF_CLASSES: frozenset[str] = frozenset({"FAKE", "REAL_SMOKE"})
+DISCONNECT_METHODS: tuple[str, ...] = ("transport-drop", "ws-close")
+
+# Tool guard against a reconnect storm while the new-connection rate limit is UNVERIFIED
+# (research G3(c)). It is a guard on this tool, not a trading threshold.
+SDK_RECONNECT_FLOOR_SECONDS = 300
+
+PATH_UNSOLICITED = "unsolicited"
+PATH_UNPROVEN = "solicited-or-unknown"
+OUTAGE_STATEMENT = "no bar closed during the outage"
 
 # Every measurement object the evidence must carry, requested or not (schema completeness).
 MEASUREMENT_KEYS: tuple[str, ...] = (
@@ -111,6 +141,7 @@ SDK_DISTRIBUTION = "binance-sdk-derivatives-trading-usds-futures"
 SDK_COMMON_DISTRIBUTION = "binance-common"
 
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{5,20}$")
+_DAY_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _ONE_MS = timedelta(milliseconds=1)
 
@@ -150,6 +181,13 @@ def _not_run(**extra: Any) -> dict[str, Any]:
     return {"status": "NOT_RUN", **extra}
 
 
+def effective_sdk_interval(config: SmokeConfig) -> int:
+    """The SDK rotation interval in force: the override, else the installed SDK's own value."""
+    if config.sdk_reconnect_interval_seconds is not None:
+        return config.sdk_reconnect_interval_seconds
+    return int(sdk_websocket.AUTO_RECONNECT_INTERVAL_SECONDS)
+
+
 # --------------------------------------------------------------------------- #
 # Configuration.
 # --------------------------------------------------------------------------- #
@@ -164,6 +202,24 @@ class SmokeConfig:
     symbol: str
     intervals: tuple[str, ...]
     duration_seconds: int
+    operator_flag: bool = False
+    force_disconnect_after_seconds: int | None = None
+    disconnect_method: str = "transport-drop"
+    sdk_reconnect_interval_seconds: int | None = None
+    recovery_wait_seconds: int = 120
+    archive_fetch: bool = True
+    archive_day: str | None = None
+
+    def settings(self) -> dict[str, Any]:
+        return {
+            "duration_seconds": self.duration_seconds,
+            "force_disconnect_after_seconds": self.force_disconnect_after_seconds,
+            "disconnect_method": self.disconnect_method,
+            "sdk_reconnect_interval_seconds": self.sdk_reconnect_interval_seconds,
+            "recovery_wait_seconds": self.recovery_wait_seconds,
+            "archive_fetch": self.archive_fetch,
+            "archive_day": self.archive_day,
+        }
 
 
 @dataclass(frozen=True)
@@ -172,7 +228,8 @@ class DryRunConfig:
 
     `host_behind_server_ms`: Binance server time equals the host clock plus this value.
     `arrival_latency_ms`: how long after a bar's close the fake feed delivers the closed event
-    (measured on the server clock). `connect_error`: makes the fake `create_connection` raise.
+    (on the server clock). `connect_error`: makes the fake `create_connection` raise.
+    `archive_mode`: "ok", "not_found" (HTTP 404) or "network_error" for the fake archive host.
     """
 
     start_utc: datetime = datetime(2026, 10, 9, 11, 59, 30, tzinfo=UTC)
@@ -181,6 +238,7 @@ class DryRunConfig:
     url_paths: tuple[str, ...] = ("market", "public", "private")
     duplicate_closed_events: bool = False
     connect_error: Exception | None = None
+    archive_mode: str = "ok"
 
 
 # --------------------------------------------------------------------------- #
@@ -222,10 +280,9 @@ class VirtualClock:
     """Virtual time for `--dry-run`: sleeping advances time instead of waiting.
 
     Scheduled actions (the fake feed) and sleepers share one timer heap. Whichever coroutine
-    sleeps pumps the heap in time order, so concurrent sleepers (the main loop and the REST lag
-    probe) interleave correctly. After each fired timer the loop yields a few times and awaits
-    the optional `settle` hook (the supervisor's `wait_idle`) so a triggered recovery finishes
-    before time moves on.
+    sleeps pumps the heap in time order, so concurrent sleepers interleave correctly. After each
+    fired timer the loop yields a few times and awaits the optional `settle` hook (the
+    supervisor's `wait_idle`) so a triggered recovery finishes before time moves on.
     """
 
     SETTLE_YIELDS = 6
@@ -274,7 +331,7 @@ class VirtualClock:
 
 
 # --------------------------------------------------------------------------- #
-# Evidence: schema, validator, atomic scrubbed writer.
+# Evidence: schema, validators, atomic scrubbed writer.
 # --------------------------------------------------------------------------- #
 
 
@@ -338,6 +395,44 @@ def check_evidence_schema(evidence: object) -> list[str]:
     return problems
 
 
+@dataclass(frozen=True)
+class CheckResult:
+    ok: bool
+    reason: str
+
+
+def check_forced_disconnect(evidence: object) -> CheckResult:
+    """Did the forced disconnect prove the unsolicited path and a recovery? (plan 16-21 reuses it)
+
+    Requires `path_exercised` "unsolicited" (derived from stale stream names found by the
+    rebuild), at least one stale entry, zero close-API calls, at least one closed event after
+    the resume, and either a gap record or the explicit "no bar closed during the outage"
+    statement. A disconnect that went through the SDK's own close API fails with the reason
+    "unsolicited path not proven".
+    """
+    if not isinstance(evidence, Mapping):
+        return CheckResult(False, "evidence is not an object")
+    forced = evidence.get("forced_disconnect")
+    if not isinstance(forced, Mapping):
+        return CheckResult(False, "forced_disconnect missing")
+    if forced.get("status") == "NOT_RUN":
+        return CheckResult(False, "forced disconnect not run")
+    stale = forced.get("stale_stream_entries_before_rebuild")
+    if (
+        forced.get("path_exercised") != PATH_UNSOLICITED
+        or not stale
+        or forced.get("close_api_calls") != 0
+    ):
+        return CheckResult(False, "unsolicited path not proven")
+    if int(forced.get("closed_events_after_resume") or 0) < 1:
+        return CheckResult(False, "no closed event after the resume")
+    if not forced.get("gap_records") and forced.get("outage_statement") != OUTAGE_STATEMENT:
+        return CheckResult(
+            False, "the outage shows neither a gap record nor the no-bar-closed statement"
+        )
+    return CheckResult(True, "unsolicited path proven")
+
+
 def write_evidence(
     evidence: Mapping[str, Any], directory: Path, stem: str, redactor: Redactor
 ) -> Path:
@@ -391,6 +486,7 @@ class Collectors:
     backfill: list[BarObservation] = field(default_factory=list)
     gaps: list[GapObservation] = field(default_factory=list)
     connection_events: list[tuple[str, datetime]] = field(default_factory=list)
+    sdk_events: list[tuple[str, datetime]] = field(default_factory=list)
     open_events_dropped: int = 0
 
     def on_closed_bar(self, bar: TaggedBar) -> None:
@@ -407,15 +503,18 @@ class Collectors:
 
 
 class ObservedWsAdapter:
-    """Delegating wrapper around `PaperWsAdapter` that counts forming (open) updates.
+    """Delegating wrapper around `PaperWsAdapter` that the supervisor drives.
 
-    The supervisor ignores forming klines by design; this wrapper sees them on their way in so
-    the evidence can state how many were dropped. It satisfies the supervisor's `WsAdapterLike`.
+    It counts forming (open) updates on their way to the supervisor, which ignores them by
+    design, and keeps every `RebuildReport` the adapter produced, so the forced-disconnect step
+    can read the report of the first rebuild after the drop even if later rebuilds overwrite
+    `last_rebuild`. It satisfies the supervisor's `WsAdapterLike`.
     """
 
     def __init__(self, inner: PaperWsAdapter, collectors: Collectors) -> None:
         self._inner = inner
         self._collectors = collectors
+        self.rebuild_reports: list[Any] = []
 
     async def connect(self) -> None:
         await self._inner.connect()
@@ -448,6 +547,121 @@ class ObservedWsAdapter:
 
     async def rebuild(self) -> None:
         await self._inner.rebuild()
+        if self._inner.last_rebuild is not None:
+            self.rebuild_reports.append(self._inner.last_rebuild)
+
+
+# --------------------------------------------------------------------------- #
+# Unsolicited transport drop (live). Never the SDK's own close API.
+# --------------------------------------------------------------------------- #
+
+
+def _drop_transport(connection: Any) -> None:
+    """End the TCP connection beneath an SDK connection without a WebSocket close handshake.
+
+    Closes the aiohttp response that backs the connection's websocket, like a network failure.
+    The SDK's receive loop then ends and takes its unsolicited-close branch: `close` is emitted,
+    the connection is discarded and its stream names stay in the global map (research D3).
+    `tests/test_paper_ws_smoke_evidence.py` pins the aiohttp attribute path this relies on.
+    """
+    connection.websocket._response.close()
+
+
+async def drop_connections(connections: Sequence[Any], method: str) -> None:
+    """Drop every SDK connection through one of the two unsolicited paths.
+
+    `transport-drop`: `_drop_transport`. `ws-close`: an awaited `close()` on the aiohttp
+    websocket object itself, still unsolicited from the SDK's view because the SDK's
+    `close_initiated` flag stays unset.
+    """
+    if method not in DISCONNECT_METHODS:
+        raise ValueError(f"unsupported disconnect method {method!r}; use {DISCONNECT_METHODS}")
+    if not connections:
+        raise RuntimeError("no SDK connection to drop")
+    for connection in connections:
+        if method == "transport-drop":
+            _drop_transport(connection)
+        else:
+            await connection.websocket.close()
+
+
+@contextlib.contextmanager
+def sdk_reconnect_override(config: SmokeConfig) -> Iterator[None]:
+    """Shorten the SDK's rotation timer for this process only, and restore it in a finally.
+
+    Applied only in `--live` mode with the option given. The SDK reads the module attribute when
+    it opens a connection, so it must be in force before the adapter connects. Nothing under
+    `src/` ever assigns it; the natural 23 h rotation is observed in the trial soak.
+    """
+    seconds = config.sdk_reconnect_interval_seconds
+    if config.mode != "live" or seconds is None:
+        yield
+        return
+    original = sdk_websocket.AUTO_RECONNECT_INTERVAL_SECONDS
+    sdk_websocket.AUTO_RECONNECT_INTERVAL_SECONDS = seconds
+    try:
+        yield
+    finally:
+        sdk_websocket.AUTO_RECONNECT_INTERVAL_SECONDS = original
+
+
+# --------------------------------------------------------------------------- #
+# Archive recording client (http status and sha256 of the zip payload).
+# --------------------------------------------------------------------------- #
+
+
+class _RecordingResponse:
+    def __init__(self, owner: _RecordingArchiveClient, response: Any, is_zip: bool) -> None:
+        self._owner = owner
+        self._response = response
+        self._is_zip = is_zip
+
+    @property
+    def status_code(self) -> int:
+        return int(self._response.status_code)
+
+    @property
+    def headers(self) -> Any:
+        return self._response.headers
+
+    async def aiter_bytes(self) -> AsyncIterator[bytes]:
+        digest = hashlib.sha256()
+        async for chunk in self._response.aiter_bytes():
+            digest.update(chunk)
+            yield chunk
+        if self._is_zip:
+            self._owner.zip_sha256 = digest.hexdigest()
+
+
+class _RecordingStream:
+    def __init__(self, owner: _RecordingArchiveClient, manager: Any, is_zip: bool) -> None:
+        self._owner = owner
+        self._manager = manager
+        self._is_zip = is_zip
+
+    async def __aenter__(self) -> _RecordingResponse:
+        response = await self._manager.__aenter__()
+        if self._is_zip:
+            self._owner.zip_status = int(response.status_code)
+            self._owner.zip_sha256 = None
+        return _RecordingResponse(self._owner, response, self._is_zip)
+
+    async def __aexit__(self, *exc_info: Any) -> Any:
+        return await self._manager.__aexit__(*exc_info)
+
+
+class _RecordingArchiveClient:
+    """Wraps the archive HTTP client so the evidence can state the zip's status and sha256."""
+
+    def __init__(self, inner: httpx.AsyncClient) -> None:
+        self._inner = inner
+        self.zip_status: int | None = None
+        self.zip_sha256: str | None = None
+
+    def stream(self, method: str, url: str, params: Any = None) -> _RecordingStream:
+        return _RecordingStream(
+            self, self._inner.stream(method, url, params=params), url.endswith(".zip")
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -478,6 +692,15 @@ class PublicDataLike(Protocol):
 
 
 @dataclass
+class DryRunHandles:
+    """The dry-run internals a test may inspect after a run."""
+
+    clients: list[Any]
+    public: _DryRunPublic
+    clock: VirtualClock
+
+
+@dataclass
 class SmokeRig:
     """The environment of one run. `real` is True only for the built-in live rig."""
 
@@ -485,8 +708,13 @@ class SmokeRig:
     clock: SmokeClock
     adapter: PaperWsAdapter
     public: PublicDataLike
+    drop: Callable[[str], Awaitable[None]]
+    close_api_calls: Callable[[], int]
+    close_api_call_source: str
+    archive_client: Callable[[], httpx.AsyncClient]
     bind_supervisor: Callable[[PaperSupervisor], None] = lambda _supervisor: None
     cleanup: Callable[[], None] = lambda: None
+    fakes: DryRunHandles | None = None
 
 
 class _DryRunPublic:
@@ -576,6 +804,45 @@ def _load_fakes() -> Any:
     return paper_ws_fakes
 
 
+def _archive_zip_bytes(symbol: str, stamp: str) -> bytes:
+    """A one-member daily 1h archive zip (24 rows) in the data.binance.vision layout."""
+    day_start = datetime.fromisoformat(stamp).replace(tzinfo=UTC)
+    lines = [
+        "open_time,open,high,low,close,volume,close_time,quote_volume,count,"
+        "taker_buy_volume,taker_buy_quote_volume,ignore"
+    ]
+    for hour in range(24):
+        open_ms = _to_ms(day_start) + hour * 3_600_000
+        lines.append(
+            f"{open_ms},100.0,101.0,99.0,100.5,10.0,{open_ms + 3_599_999},1000.0,5,5.0,500.0,0"
+        )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(f"{symbol}-1h-{stamp}.csv", "\n".join(lines) + "\n")
+    return buffer.getvalue()
+
+
+def _fake_archive_client(symbol: str, mode: str) -> httpx.AsyncClient:
+    """An httpx client over a mock transport that plays the data.binance.vision host."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if mode == "network_error":
+            raise httpx.ConnectError("simulated network failure", request=request)
+        if mode == "not_found":
+            return httpx.Response(404)
+        url = str(request.url)
+        stamp_match = re.search(r"-1h-(\d{4}-\d{2}-\d{2})\.zip", url)
+        if stamp_match is None:
+            return httpx.Response(404)
+        blob = _archive_zip_bytes(symbol, stamp_match.group(1))
+        if url.endswith(".CHECKSUM"):
+            zip_name = url.rsplit("/", 1)[1].removesuffix(".CHECKSUM")
+            return httpx.Response(200, text=f"{hashlib.sha256(blob).hexdigest()}  {zip_name}\n")
+        return httpx.Response(200, content=blob)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
+
+
 def build_dry_run_rig(config: SmokeConfig, dry: DryRunConfig) -> SmokeRig:
     """A rig over the SDK-shaped fakes, a virtual clock and a scripted public feed."""
     fakes = _load_fakes()
@@ -583,6 +850,7 @@ def build_dry_run_rig(config: SmokeConfig, dry: DryRunConfig) -> SmokeRig:
     saved_map = sdk_websocket.global_stream_connections
     sdk_websocket.global_stream_connections = StreamConnectionsMap()
     clients: list[Any] = []
+    rotation_seconds = effective_sdk_interval(config)
 
     class _ScriptedClient(fakes.FakeSdkWsClient):  # type: ignore[misc]
         URL_PATHS = dry.url_paths
@@ -591,6 +859,7 @@ def build_dry_run_rig(config: SmokeConfig, dry: DryRunConfig) -> SmokeRig:
             super().__init__()
             self.dead = False
             clients.append(self)
+            clock.schedule(clock.now() + timedelta(seconds=rotation_seconds), self._rotate)
 
         async def create_connection(self) -> None:
             if dry.connect_error is not None:
@@ -600,6 +869,13 @@ def build_dry_run_rig(config: SmokeConfig, dry: DryRunConfig) -> SmokeRig:
         def simulate_unsolicited_close(self) -> None:
             self.dead = True
             super().simulate_unsolicited_close()
+
+        def _rotate(self) -> None:
+            """The SDK's in-place rotation: a `reconnect` event on the live client."""
+            if self.dead or clients[-1] is not self or not self.connections:
+                return
+            for callback in list(self.connection_callbacks["reconnect"]):
+                callback()
 
     def _factory(_configuration: Any) -> Any:
         return _ScriptedClient()
@@ -649,6 +925,9 @@ def build_dry_run_rig(config: SmokeConfig, dry: DryRunConfig) -> SmokeRig:
             )
             boundary += step
 
+    async def _drop(_method: str) -> None:
+        clients[-1].simulate_unsolicited_close()
+
     def _bind(supervisor: PaperSupervisor) -> None:
         clock.settle = supervisor.wait_idle
 
@@ -660,92 +939,368 @@ def build_dry_run_rig(config: SmokeConfig, dry: DryRunConfig) -> SmokeRig:
         clock=clock,
         adapter=adapter,
         public=public,
+        drop=_drop,
+        close_api_calls=lambda: int(clients[-1].close_calls),
+        close_api_call_source="fake-client-counter",
+        archive_client=lambda: _fake_archive_client(config.symbol, dry.archive_mode),
         bind_supervisor=_bind,
         cleanup=_cleanup,
+        fakes=DryRunHandles(clients=clients, public=public, clock=clock),
+    )
+
+
+def build_live_rig(config: SmokeConfig) -> SmokeRig:
+    """The real rig: the default SDK stream client, a credential-free REST adapter, real time.
+
+    Nothing here reads credentials or constructs an order adapter. Plan 16-21 runs it.
+    """
+    adapter = PaperWsAdapter()
+
+    async def _drop(method: str) -> None:
+        await drop_connections(adapter.sdk_connections(), method)
+
+    return SmokeRig(
+        real=True,
+        clock=RealClock(),
+        adapter=adapter,
+        public=BinancePublicMarketData(),
+        drop=_drop,
+        # The script never calls a close API (an AST test enforces it), so its own count is 0.
+        close_api_calls=lambda: 0,
+        close_api_call_source="script-ast-guard",
+        archive_client=make_archive_client,
     )
 
 
 # --------------------------------------------------------------------------- #
-# Orchestration.
+# One smoke run.
 # --------------------------------------------------------------------------- #
 
 
-def _seed_cursors(supervisor: PaperSupervisor, config: SmokeConfig, server_now: datetime) -> None:
-    """Seed each pair's cursor with the last close before `server_now` (runtime does P8 too)."""
-    now_ms = _to_ms(server_now)
-    for interval in config.intervals:
-        step = INTERVAL_MS[interval]
-        supervisor.record_close(config.symbol, interval, _from_ms(now_ms // step * step - 1))
+def _bar_dicts(observations: Sequence[BarObservation]) -> list[dict[str, str]]:
+    return [
+        {"interval": o.interval, "close_time_utc": _iso(o.close_time_utc)} for o in observations
+    ]
+
+
+def _gap_dicts(observations: Sequence[GapObservation]) -> list[dict[str, str]]:
+    return [
+        {
+            "symbol": g.record.symbol,
+            "interval": g.record.interval,
+            "expected_close_utc": _iso(g.record.expected_close_utc),
+            "reason": str(g.record.reason),
+            "detected_at_utc": _iso(g.record.detected_at_utc),
+        }
+        for g in observations
+    ]
+
+
+class SmokeRun:
+    """The state and steps of one smoke run; `run_smoke` composes them in order."""
+
+    def __init__(self, config: SmokeConfig, rig: SmokeRig) -> None:
+        self.config = config
+        self.rig = rig
+        self.clock = rig.clock
+        proof_class = "REAL_SMOKE" if (config.mode == "live" and rig.real) else "FAKE"
+        self.evidence = new_evidence(
+            mode=config.mode,
+            proof_class=proof_class,
+            symbol=config.symbol,
+            intervals=config.intervals,
+            started_at=self.clock.now(),
+            settings=config.settings(),
+        )
+        self.collectors = Collectors(self.clock)
+        self.observed = ObservedWsAdapter(rig.adapter, self.collectors)
+        self.supervisor = PaperSupervisor(
+            ws_adapter=self.observed,
+            rest_adapter=rig.public,
+            symbols=(config.symbol,),
+            intervals=config.intervals,
+            on_closed_bar=self.collectors.on_closed_bar,
+            on_backfill=self.collectors.on_backfill,
+            on_gap=self.collectors.on_gap,
+            on_connection_event=self.collectors.on_connection_event,
+            clock=self.clock.now,
+        )
+        rig.bind_supervisor(self.supervisor)
+        self._started = False
+        self._drop_seen: asyncio.Event | None = None
+        self._disconnected_at: datetime | None = None
+        self._resumed_at: datetime | None = None
+        for event in LIFECYCLE_EVENTS:
+            self.observed.on_connection(event, self._make_observer(event))
+
+    def _make_observer(self, event: str) -> Callable[..., None]:
+        def _observer(*_args: Any, **_kwargs: Any) -> None:
+            self.collectors.sdk_events.append((event, self.clock.now()))
+            if event in ("close", "error") and self._drop_seen is not None:
+                self._drop_seen.set()
+
+        return _observer
+
+    # -- lifecycle ------------------------------------------------------------------------- #
+
+    async def start(self) -> bool:
+        """Seed the cursors, connect and subscribe. False when the subscribe is blocked."""
+        try:
+            server_now = await self.rig.public.server_time()
+        except Exception:
+            server_now = self.clock.now()
+        now_ms = _to_ms(server_now)
+        for interval in self.config.intervals:
+            step = INTERVAL_MS[interval]
+            # The runtime seeds its cursor from restored state (P8); the smoke seeds the last
+            # close before the exchange's now so a later verification has a base to start from.
+            self.supervisor.record_close(
+                self.config.symbol, interval, _from_ms(now_ms // step * step - 1)
+            )
+        try:
+            await self.supervisor.start()
+        except Exception as exc:
+            self.evidence["ws_subscribe"] = {
+                "status": "BLOCKED",
+                "reason": _describe(exc),
+                "subscribed_streams": [],
+            }
+            return False
+        self._started = True
+        self.evidence["ws_subscribe"] = {
+            "status": "OK",
+            "reason": None,
+            "subscribed_streams": [
+                f"{self.config.symbol.lower()}@kline_{interval}"
+                for interval in self.config.intervals
+            ],
+        }
+        return True
+
+    async def stop(self) -> None:
+        if self._started:
+            await self.supervisor.stop()
+            self._started = False
+
+    async def _settle(self) -> None:
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await self.supervisor.wait_idle()
+
+    # -- steps ----------------------------------------------------------------------------- #
+
+    async def archive_fetch(self) -> None:
+        """One data.binance.vision fetch (G3-026): url, http status, rows, sha256 of the zip."""
+        if not self.config.archive_fetch:
+            return
+        stamp = self.config.archive_day or (self.clock.now() - timedelta(days=2)).date().isoformat()
+        url = archive_zip_url(self.config.symbol, "1h", "daily", stamp)
+        result: dict[str, Any] = {
+            "status": "ERROR",
+            "url": url,
+            "stamp": stamp,
+            "http_status": None,
+            "rows": None,
+            "sha256": None,
+            "attempts": 0,
+            "error": None,
+            "fetched_at_utc": None,
+        }
+        attempts = 2 if self.config.mode == "live" else 1
+        client = self.rig.archive_client()
+        try:
+            for attempt in range(1, attempts + 1):
+                recorder = _RecordingArchiveClient(client)
+                result["attempts"] = attempt
+                try:
+                    rows = await fetch_archive_klines(
+                        recorder,  # type: ignore[arg-type]
+                        self.config.symbol,
+                        "1h",
+                        "daily",
+                        stamp,
+                    )
+                except Exception as exc:
+                    result["error"] = _describe(exc)
+                    result["http_status"] = recorder.zip_status
+                    # Only a transport failure (the base class) is worth the single retry.
+                    if type(exc) is ArchiveError and attempt < attempts:
+                        await self.clock.sleep(1.0)
+                        continue
+                else:
+                    result.update(
+                        status="OK",
+                        http_status=recorder.zip_status,
+                        rows=len(rows),
+                        sha256=recorder.zip_sha256,
+                        error=None,
+                    )
+                break
+        finally:
+            await client.aclose()
+        result["fetched_at_utc"] = _iso(self.clock.now())
+        self.evidence["archive_fetch"] = result
+
+    async def forced_disconnect(
+        self, *, drop: Callable[[], Awaitable[None]] | None = None
+    ) -> dict[str, Any]:
+        """Drop the connections through an unsolicited path and record how the runtime recovered.
+
+        `path_exercised` is "unsolicited" only when the first rebuild after the drop found stale
+        stream names in the SDK global map (the SDK keeps them on an unsolicited close and
+        forgets them on a user-initiated one) and no close API was called during the drop.
+        """
+        method = self.config.disconnect_method
+        action = drop if drop is not None else (lambda: self.rig.drop(method))
+        self._drop_seen = asyncio.Event()
+        reports_before = len(self.observed.rebuild_reports)
+        calls_before = self.rig.close_api_calls()
+        self._disconnected_at = self.clock.now()
+        result: dict[str, Any] = {
+            "status": "ERROR",
+            "method": method,
+            "path_exercised": PATH_UNPROVEN,
+            "close_api_calls": None,
+            "close_api_call_source": self.rig.close_api_call_source,
+            "stale_stream_entries_before_rebuild": [],
+            "rebuild_count": 0,
+            "disconnected_at_utc": _iso(self._disconnected_at),
+            "resumed_at_utc": None,
+            "closed_events_after_resume": 0,
+            "backfill_bars": [],
+            "gap_records": [],
+            "outage_statement": None,
+            "connection_events": [],
+            "real": self.rig.real,
+            "error": None,
+        }
+        self.evidence["forced_disconnect"] = result
+        try:
+            await action()
+            result["close_api_calls"] = self.rig.close_api_calls() - calls_before
+            seen = await self.clock.wait_event(self._drop_seen, self.config.recovery_wait_seconds)
+            await self._settle()
+        except Exception as exc:
+            result["error"] = _describe(exc)
+            return result
+        finally:
+            self._drop_seen = None
+        reports = self.observed.rebuild_reports[reports_before:]
+        result["rebuild_count"] = len(reports)
+        if not reports:
+            result["error"] = (
+                "close event seen but no rebuild completed"
+                if seen
+                else "no close event and no rebuild within the recovery wait"
+            )
+            return result
+        stale = list(reports[0].stale_stream_names_found)
+        result["stale_stream_entries_before_rebuild"] = stale
+        if stale and result["close_api_calls"] == 0:
+            result["path_exercised"] = PATH_UNSOLICITED
+        self._resumed_at = self.clock.now()
+        result["resumed_at_utc"] = _iso(self._resumed_at)
+        result["status"] = "OK"
+        return result
+
+    async def listen(self) -> None:
+        """Hold the subscription for the duration, with the forced disconnect at its offset."""
+        begin = self.clock.now()
+        end = begin + timedelta(seconds=self.config.duration_seconds)
+        if self.config.force_disconnect_after_seconds is not None:
+            offset = timedelta(seconds=self.config.force_disconnect_after_seconds)
+            await self.clock.sleep_until(begin + offset)
+            await self.forced_disconnect()
+        await self.clock.sleep_until(end)
+        await self._settle()
+
+    # -- evidence assembly ----------------------------------------------------------------- #
+
+    def _finalize_forced_disconnect(self) -> None:
+        forced = self.evidence["forced_disconnect"]
+        if forced["status"] != "OK" or self._resumed_at is None or self._disconnected_at is None:
+            return
+        collectors = self.collectors
+        resumed, dropped = self._resumed_at, self._disconnected_at
+        forced["closed_events_after_resume"] = sum(
+            1 for o in collectors.closed if o.received_at_utc >= resumed
+        )
+        forced["backfill_bars"] = _bar_dicts(
+            [o for o in collectors.backfill if o.received_at_utc >= dropped]
+        )
+        forced["gap_records"] = _gap_dicts(
+            [g for g in collectors.gaps if g.received_at_utc >= dropped]
+        )
+        forced["connection_events"] = [
+            {"event": name, "at_utc": _iso(at)}
+            for name, at in collectors.connection_events
+            if at >= dropped
+        ]
+        if not forced["backfill_bars"] and not forced["gap_records"]:
+            forced["outage_statement"] = OUTAGE_STATEMENT
+
+    def _finalize_sdk_reconnect(self) -> None:
+        collectors = self.collectors
+        interval = effective_sdk_interval(self.config)
+        reconnects = [at for name, at in collectors.sdk_events if name == "reconnect"]
+        result: dict[str, Any] = {
+            "status": "NOT_RUN",
+            "mode": "default" if self.config.sdk_reconnect_interval_seconds is None else "override",
+            "interval_seconds_effective": interval,
+            "reconnect_events": len(reconnects),
+            "first_reconnect_at_utc": None,
+            "closed_events_after_reconnect": 0,
+            "backfill_bars": [],
+            "gap_records": [],
+            "real": self.rig.real,
+            "error": None,
+        }
+        if reconnects:
+            first = min(reconnects)
+            result["status"] = "OK"
+            result["first_reconnect_at_utc"] = _iso(first)
+            result["closed_events_after_reconnect"] = sum(
+                1 for o in collectors.closed if o.received_at_utc >= first
+            )
+            result["backfill_bars"] = _bar_dicts(
+                [o for o in collectors.backfill if o.received_at_utc >= first]
+            )
+            result["gap_records"] = _gap_dicts(
+                [g for g in collectors.gaps if g.received_at_utc >= first]
+            )
+        elif self._started and self.config.duration_seconds > interval:
+            result["status"] = "ERROR"
+            result["error"] = "no reconnect event although the run outlasted the interval"
+        self.evidence["sdk_reconnect"] = result
+
+    def finalize(self) -> None:
+        collectors = self.collectors
+        counts: dict[str, int] = {}
+        for observation in collectors.closed:
+            counts[observation.interval] = counts.get(observation.interval, 0) + 1
+        self.evidence["closed_events_by_interval"] = dict(sorted(counts.items()))
+        self.evidence["open_events_dropped"] = collectors.open_events_dropped
+        self._finalize_forced_disconnect()
+        self._finalize_sdk_reconnect()
+        self.evidence["finished_at_utc"] = _iso(self.clock.now())
+
+    def exit_code(self) -> int:
+        blocked = self.evidence["ws_subscribe"]["status"] == "BLOCKED"
+        errored = any(self.evidence[key]["status"] == "ERROR" for key in MEASUREMENT_KEYS)
+        return EXIT_FAILED if blocked or errored else EXIT_OK
 
 
 async def run_smoke(config: SmokeConfig, rig: SmokeRig) -> tuple[dict[str, Any], int]:
     """Run the smoke once and return (evidence, exit code)."""
-    clock = rig.clock
-    proof_class = "REAL_SMOKE" if (config.mode == "live" and rig.real) else "FAKE"
-    started = clock.now()
-    evidence = new_evidence(
-        mode=config.mode,
-        proof_class=proof_class,
-        symbol=config.symbol,
-        intervals=config.intervals,
-        started_at=started,
-        settings={"duration_seconds": config.duration_seconds},
-    )
-    collectors = Collectors(clock)
-    observed = ObservedWsAdapter(rig.adapter, collectors)
-    supervisor = PaperSupervisor(
-        ws_adapter=observed,
-        rest_adapter=rig.public,
-        symbols=(config.symbol,),
-        intervals=config.intervals,
-        on_closed_bar=collectors.on_closed_bar,
-        on_backfill=collectors.on_backfill,
-        on_gap=collectors.on_gap,
-        on_connection_event=collectors.on_connection_event,
-        clock=clock.now,
-    )
-    rig.bind_supervisor(supervisor)
-
+    run = SmokeRun(config, rig)
     try:
-        server_now = await rig.public.server_time()
-    except Exception:
-        server_now = clock.now()
-    _seed_cursors(supervisor, config, server_now)
-
-    blocked = False
-    try:
-        await supervisor.start()
-    except Exception as exc:
-        evidence["ws_subscribe"] = {
-            "status": "BLOCKED",
-            "reason": _describe(exc),
-            "subscribed_streams": [],
-        }
-        blocked = True
-    else:
-        evidence["ws_subscribe"] = {
-            "status": "OK",
-            "reason": None,
-            "subscribed_streams": [
-                f"{config.symbol.lower()}@kline_{interval}" for interval in config.intervals
-            ],
-        }
-        try:
-            begin = clock.now()
-            await clock.sleep_until(begin + timedelta(seconds=config.duration_seconds))
-            await supervisor.wait_idle()
-        finally:
-            await supervisor.stop()
-
-    counts: dict[str, int] = {}
-    for observation in collectors.closed:
-        counts[observation.interval] = counts.get(observation.interval, 0) + 1
-    evidence["closed_events_by_interval"] = dict(sorted(counts.items()))
-    evidence["open_events_dropped"] = collectors.open_events_dropped
-    evidence["finished_at_utc"] = _iso(clock.now())
-
-    failed = blocked or any(evidence[key]["status"] == "ERROR" for key in MEASUREMENT_KEYS)
-    return evidence, EXIT_FAILED if failed else EXIT_OK
+        if await run.start():
+            await run.archive_fetch()
+            await run.listen()
+    finally:
+        await run.stop()
+    run.finalize()
+    return run.evidence, run.exit_code()
 
 
 # --------------------------------------------------------------------------- #
@@ -756,10 +1311,18 @@ async def run_smoke(config: SmokeConfig, rig: SmokeRig) -> tuple[dict[str, Any],
 def _build_parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(
         prog="paper_ws_smoke",
-        description="Public-data WebSocket smoke recorder (dry run only in this build).",
+        description="Public-data WebSocket smoke recorder (--live is for plan 16-21 only).",
         allow_abbrev=False,
     )
-    parser.add_argument("--dry-run", action="store_true", required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true", help="fakes and a virtual clock (CI mode)")
+    mode.add_argument("--live", action="store_true", help="the real SDK on mainnet (plan 16-21)")
+    parser.add_argument(
+        "--i-am-on-the-connected-machine",
+        action="store_true",
+        dest="operator_flag",
+        help="required with --live: the operator confirms the machine and its environment",
+    )
     parser.add_argument("--out", type=Path, default=DEFAULT_EVIDENCE_DIR)
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--intervals", default="1m,1h")
@@ -769,6 +1332,22 @@ def _build_parser() -> argparse.ArgumentParser:
         default=600,
         help="how long the smoke listens after the subscribe (a tool setting, not a threshold)",
     )
+    parser.add_argument("--force-disconnect-after-seconds", type=int, default=None)
+    parser.add_argument("--disconnect-method", choices=DISCONNECT_METHODS, default="transport-drop")
+    parser.add_argument(
+        "--sdk-reconnect-interval-seconds",
+        type=int,
+        default=None,
+        help=f"shorten the SDK rotation timer (floor {SDK_RECONNECT_FLOOR_SECONDS} s, tool guard)",
+    )
+    parser.add_argument(
+        "--recovery-wait-seconds",
+        type=int,
+        default=120,
+        help="how long to wait for the close event after the drop (a tool timeout)",
+    )
+    parser.add_argument("--archive-fetch", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--archive-day", default=None, help="YYYY-MM-DD, default: two days ago")
     return parser
 
 
@@ -787,12 +1366,32 @@ def parse_config(argv: Sequence[str] | None) -> SmokeConfig:
             )
     if args.duration_seconds <= 0:
         raise UsageError("--duration-seconds must be positive")
+    force = args.force_disconnect_after_seconds
+    if force is not None and not 0 < force < args.duration_seconds:
+        raise UsageError("--force-disconnect-after-seconds must be inside the duration")
+    rotation = args.sdk_reconnect_interval_seconds
+    if rotation is not None and rotation < SDK_RECONNECT_FLOOR_SECONDS:
+        raise UsageError(
+            f"--sdk-reconnect-interval-seconds below {SDK_RECONNECT_FLOOR_SECONDS} is refused "
+            "(reconnect-storm guard while the new-connection rate limit is UNVERIFIED)"
+        )
+    if args.recovery_wait_seconds <= 0:
+        raise UsageError("--recovery-wait-seconds must be positive")
+    if args.archive_day is not None and not _DAY_RE.fullmatch(str(args.archive_day)):
+        raise UsageError("--archive-day must look like YYYY-MM-DD")
     return SmokeConfig(
-        mode="dry-run",
+        mode="live" if args.live else "dry-run",
         out_dir=Path(args.out),
         symbol=symbol,
         intervals=intervals,
         duration_seconds=int(args.duration_seconds),
+        operator_flag=bool(args.operator_flag),
+        force_disconnect_after_seconds=force,
+        disconnect_method=str(args.disconnect_method),
+        sdk_reconnect_interval_seconds=rotation,
+        recovery_wait_seconds=int(args.recovery_wait_seconds),
+        archive_fetch=bool(args.archive_fetch),
+        archive_day=args.archive_day,
     )
 
 
@@ -807,6 +1406,7 @@ def main(
     *,
     environ: Mapping[str, str] | None = None,
     dry_run_config: DryRunConfig | None = None,
+    rig_factory: Callable[[SmokeConfig], SmokeRig] | None = None,
 ) -> int:
     """Single entry point. Every seam defaults to the real implementation."""
     env: Mapping[str, str] = os.environ if environ is None else environ
@@ -815,11 +1415,35 @@ def main(
     except UsageError as exc:
         print(f"refused (UsageError): {exc}", file=sys.stderr)
         return EXIT_REFUSED
-    rig = build_dry_run_rig(config, dry_run_config or DryRunConfig())
-    try:
-        evidence, code = asyncio.run(run_smoke(config, rig))
-    finally:
-        rig.cleanup()
+    if config.mode == "live":
+        # Public data only: a trade-capable key in this environment is a reason not to start.
+        # Only the NAME is ever printed.
+        names = sorted(name for name in env if name.upper().startswith("BINANCE_"))
+        if names:
+            for name in names:
+                print(f"refused: trade-capable variable present: {name}", file=sys.stderr)
+            return EXIT_TRADE_CAPABLE
+        if not config.operator_flag:
+            print(
+                "refused: --live needs --i-am-on-the-connected-machine (plan 16-21 only)",
+                file=sys.stderr,
+            )
+            return EXIT_REFUSED
+        if rig_factory is None:
+            configure_logging(env)
+    if rig_factory is None:
+
+        def rig_factory(cfg: SmokeConfig) -> SmokeRig:
+            if cfg.mode == "live":
+                return build_live_rig(cfg)
+            return build_dry_run_rig(cfg, dry_run_config or DryRunConfig())
+
+    with sdk_reconnect_override(config):
+        rig = rig_factory(config)
+        try:
+            evidence, code = asyncio.run(run_smoke(config, rig))
+        finally:
+            rig.cleanup()
     path = write_evidence(
         evidence,
         config.out_dir,

@@ -704,3 +704,19 @@ def test_an_override_interval_fires_at_the_override(tmp_path: Path) -> None:
     )
     assert evidence["sdk_reconnect"]["reconnect_events"] == 1
     assert evidence["sdk_reconnect"]["mode"] == "override"
+
+
+async def test_the_adapter_exposes_a_read_only_snapshot_of_the_sdk_connections() -> None:
+    from src.adapters.paper_ws import PaperWsAdapter
+
+    from tests.paper_ws_fakes import FakeSdkWsClient
+
+    client = FakeSdkWsClient()
+    adapter = PaperWsAdapter(ws_client=client)  # type: ignore[arg-type]
+    assert adapter.sdk_connections() == ()
+
+    await adapter.connect()
+    snapshot = adapter.sdk_connections()
+
+    assert isinstance(snapshot, tuple)
+    assert [c.url_path for c in snapshot] == ["market", "public", "private"]

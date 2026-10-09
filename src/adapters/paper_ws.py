@@ -458,6 +458,15 @@ class PaperWsAdapter:
             connections_after=self.last_rebuild.connections_after,
         )
 
+    def sdk_connections(self) -> tuple[Any, ...]:
+        """Read-only snapshot of the SDK connection objects of the current client.
+
+        Used by the public-data live smoke (plan 16-17) to drop the transport beneath the SDK
+        connections; nothing in the paper runtime uses it. The objects are SDK internals and
+        must not leave operator tooling.
+        """
+        return tuple(self._ws.connections)
+
     def diagnostics(self) -> WsDiagnostics:
         """Read-only snapshot: SDK connection count, own streams, own streams left stale.
 
