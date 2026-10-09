@@ -22,6 +22,13 @@ modeling the user-executed-sim leg. It is calibrated against measured
 Telegram latency in Phase 10, never blocking Phase 7. The constant
 lives here (not in journal.py) because it is part of the attribution
 vocabulary, not the assembly contract.
+
+Phase 16 (plan 16-35, D-15, SC3): the constant is now ONLY the documented
+default for a record with no human action (the paper simulator's own
+SIMULATE approval leg). Wherever a human acted in the SHADOW chain, the
+approval delay is the measured `acted_at_utc - requested_at_utc` of the
+approval row, with the confirm timestamps, and `assemble_paper_record`
+never replaces it by signal + the constant.
 """
 
 from __future__ import annotations
@@ -42,7 +49,8 @@ class AttributionKind(str, Enum):
     OPPORTUNITY = "opportunity"
 
 
-# Approval-delay lag constant (FLAGGED ASSUMPTION, PAPER-02 unclassified).
+# Approval-delay lag constant (FLAGGED ASSUMPTION, PAPER-02 unclassified). Since plan 16-35
+# it is only the default for records with no human action (D-15).
 # Models the user-executed-sim leg: the simulated approval `acted_at_utc`
 # equals `signal.detected_at_utc + APPROVAL_DELAY_LAG_SECONDS`. Calibrated
 # against measured Telegram latency in Phase 10, never blocking Phase 7.

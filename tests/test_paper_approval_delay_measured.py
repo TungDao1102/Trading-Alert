@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from src.paper.attribution import APPROVAL_DELAY_LAG_SECONDS, AttributionKind
 from src.paper.journal import (
     PaperRecord,
@@ -61,7 +60,7 @@ def _detected(case: dict[str, Any]) -> datetime:
 
 
 def _human_approval(case: dict[str, Any], *, action: str = "APPROVE") -> dict[str, Any]:
-    """An approval row with a real human action: requested 3 s after the signal, acted 47 s later."""
+    """A real human approval: requested 3 s after the signal, acted 47 s later."""
     requested = _detected(case) + timedelta(seconds=3)
     approval = dict(case["approval"])
     approval["action"] = action
@@ -126,7 +125,7 @@ def test_a_shadow_record_with_a_real_approval_carries_the_measured_delay() -> No
 
 
 def test_the_measured_delay_is_not_overridden_by_signal_plus_the_constant() -> None:
-    """Must fail on the old behaviour (T-16-81): a real timestamp is never replaced by signal + 30 s.
+    """Must fail on the old behaviour (T-16-81): a real timestamp is never replaced by the lag.
 
     The old assembler raised for any acted_at_utc other than signal + 30 s; the new one records
     the real value and the delay differs from the constant.
@@ -254,4 +253,3 @@ def test_paper_record_validates_the_new_fields() -> None:
         PaperRecord(**{**fields, "confirmed_at_utc": datetime(2026, 9, 19, 9, 5)})
     with pytest.raises(ValueError, match="test_only"):
         PaperRecord(**{**fields, "test_only": "yes"})
-

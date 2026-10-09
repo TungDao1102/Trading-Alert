@@ -30,6 +30,14 @@ from src.domain.canonical import sha256_hex
 
 from .attribution import APPROVAL_DELAY_LAG_SECONDS, AttributionKind
 
+# The only mode a Phase 16 record may carry (D-15). A record without a mode is a production-path
+# record of Phases 7 to 10 and keeps its canonical form byte for byte.
+SHADOW_MODE = "SHADOW"
+
+# Approval actions that are a real human decision (GLOSSARY section 4). SIMULATE is the paper
+# simulator's own approval leg: no human acted, so the documented constant applies.
+_HUMAN_ACTIONS = frozenset({"APPROVE", "SKIP_USER", "SKIP_BUSY", "CANCEL"})
+
 # --------------------------------------------------------------------------- #
 # Validation helpers — local copies (D-12 fail-closed).
 # --------------------------------------------------------------------------- #
@@ -47,6 +55,13 @@ def _require_utc_aware(value: datetime | None, field_name: str) -> None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     if value.utcoffset() != timedelta(0):
         raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
+
+
+def _require_not_before(
+    earlier: datetime | None, later: datetime | None, later_name: str, earlier_name: str
+) -> None:
+    if earlier is not None and later is not None and later < earlier:
+        raise ValueError(f"{later_name} is before {earlier_name}")
 
 
 # --------------------------------------------------------------------------- #
@@ -76,6 +91,17 @@ class PaperRecord:
       - `reason_code`: the rejection/skip/expire reason code for
         opportunity and NO_TRADE rows; empty string for system and
         user-executed-sim rows that passed the chain.
+
+    Phase 16 (plan 16-35, D-15) adds optional SHADOW fields, all omitted
+    from the canonical output when absent so every earlier digest is
+    unchanged:
+      - `mode`: None for the Phase 7 to 10 production-path records, "SHADOW"
+        for a record of the SHADOW chain.
+      - `approval_requested_at_utc`: when the approval was requested; with
+        `approval_acted_at_utc` it gives the measured approval delay.
+      - `confirm_requested_at_utc` / `confirmed_at_utc`: the D041 confirm step.
+      - `test_only`: True marks a record produced by a test; written only when
+        True (absent means a production record).
     """
 
     attribution: AttributionKind
@@ -93,6 +119,11 @@ class PaperRecord:
     approval_acted_at_utc: datetime | None
     order_submitted_at_utc: datetime | None
     fill_time_utc: datetime | None
+    mode: str | None = None
+    approval_requested_at_utc: datetime | None = None
+    confirm_requested_at_utc: datetime | None = None
+    confirmed_at_utc: datetime | None = None
+    test_only: bool = False
 
     def __post_init__(self) -> None:
         # D-12: identity completeness — empty fields rejected loudly.
@@ -111,6 +142,26 @@ class PaperRecord:
         _require_utc_aware(self.approval_acted_at_utc, "approval_acted_at_utc")
         _require_utc_aware(self.order_submitted_at_utc, "order_submitted_at_utc")
         _require_utc_aware(self.fill_time_utc, "fill_time_utc")
+        # Plan 16-35 SHADOW fields (all optional).
+        if self.mode is not None and self.mode != SHADOW_MODE:
+            raise ValueError(f"mode must be None or {SHADOW_MODE!r}, got {self.mode!r}")
+        if not isinstance(self.test_only, bool):
+            raise ValueError("test_only must be a bool")
+        _require_utc_aware(self.approval_requested_at_utc, "approval_requested_at_utc")
+        _require_utc_aware(self.confirm_requested_at_utc, "confirm_requested_at_utc")
+        _require_utc_aware(self.confirmed_at_utc, "confirmed_at_utc")
+        _require_not_before(
+            self.approval_requested_at_utc,
+            self.approval_acted_at_utc,
+            "approval_acted_at_utc",
+            "approval_requested_at_utc",
+        )
+        _require_not_before(
+            self.confirm_requested_at_utc,
+            self.confirmed_at_utc,
+            "confirmed_at_utc",
+            "confirm_requested_at_utc",
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -154,6 +205,55 @@ def _identity_from_no_trade(case: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _is_human_action(approval: dict[str, Any]) -> bool:
+    """True when the approval row records a real human decision (D-15).
+
+    A missing or unknown `action` fails closed: guessing "no human" would put the 30 s
+    constant where a measured delay belongs.
+    """
+    action = approval.get("action")
+    if action in _HUMAN_ACTIONS:
+        return True
+    if action == "SIMULATE":
+        return False
+    raise ValueError(f"approval['action'] must name an approval action, got {action!r}")
+
+
+def _measured_approval(approval: dict[str, Any]) -> tuple[datetime, datetime]:
+    """The measured (requested, acted) pair of a human approval row."""
+    requested = _parse_utc(approval.get("requested_at_utc"))
+    if requested is None:
+        raise ValueError("a human action needs approval['requested_at_utc'] to measure the delay")
+    acted = _parse_utc(approval.get("acted_at_utc"))
+    if acted is None:
+        raise ValueError(
+            "a human action needs approval['acted_at_utc']: the constant lag is only for "
+            "records with no human action"
+        )
+    if acted < requested:
+        raise ValueError("approval acted_at_utc is before requested_at_utc")
+    return requested, acted
+
+
+def _confirm_timestamps(
+    confirm: dict[str, Any] | None, acted_at_utc: datetime
+) -> tuple[datetime, datetime]:
+    """The (confirm_requested, confirmed) pair a filled SHADOW record must carry."""
+    if confirm is None:
+        raise ValueError("a filled SHADOW record needs the confirm timestamps")
+    issued = _parse_utc(confirm.get("confirm_requested_at_utc"))
+    confirmed = _parse_utc(confirm.get("confirmed_at_utc"))
+    if issued is None or confirmed is None:
+        raise ValueError(
+            "a filled SHADOW record needs confirm_requested_at_utc and confirmed_at_utc"
+        )
+    if issued < acted_at_utc:
+        raise ValueError("confirm_requested_at_utc is before the approval acted_at_utc")
+    if confirmed < issued:
+        raise ValueError("confirmed_at_utc is before confirm_requested_at_utc")
+    return issued, confirmed
+
+
 # --------------------------------------------------------------------------- #
 # Public entry point — assemble_paper_record.
 # --------------------------------------------------------------------------- #
@@ -169,6 +269,9 @@ def assemble_paper_record(
     fill: dict[str, Any] | None,
     skip_reason: str | None = None,
     expired_at_utc: str | None = None,
+    mode: str | None = None,
+    confirm: dict[str, Any] | None = None,
+    test_only: bool = False,
 ) -> list[PaperRecord]:
     """Assemble a paper record (or pair) from a loop outcome.
 
@@ -192,11 +295,27 @@ def assemble_paper_record(
     every row carries the stream epoch identifier for future Parquet
     extraction partitioned by epoch.
 
+    Phase 16 (plan 16-35, D-15, SC3): with `mode="SHADOW"` and an approval
+    row that records a real human action (`action` APPROVE, SKIP_USER,
+    SKIP_BUSY or CANCEL), the approval delay is the measured
+    `acted_at_utc - requested_at_utc` of that row and the `confirm` mapping
+    (`confirm_requested_at_utc`, `confirmed_at_utc`) is carried on the
+    user-executed-sim row; the signal + `APPROVAL_DELAY_LAG_SECONDS`
+    constant is used only for a record with no human action (SIMULATE).
+    Without `mode` the behaviour is exactly that of Phases 7 to 10.
+
     The function is a pure function of its inputs — no I/O, no clock
     reads, no randomness. The ORM layer maps these records onto
     existing seven-entity rows via `src/db/mappers.py` (D-02 single-Base
     ORM discipline, no new tables).
     """
+    if mode is not None and mode != SHADOW_MODE:
+        raise ValueError(f"mode must be None or {SHADOW_MODE!r}, got {mode!r}")
+    if test_only and mode != SHADOW_MODE:
+        raise ValueError("test_only is only valid for mode='SHADOW'")
+    if confirm is not None and mode != SHADOW_MODE:
+        raise ValueError("confirm timestamps are only valid for mode='SHADOW'")
+
     # Build the identity tuple from the signal + trade_plan.
     identity = {
         "strategy_id": signal["strategy_id"],
@@ -225,22 +344,36 @@ def assemble_paper_record(
     if approval is not None and order is not None and fill is not None:
         if skip_reason is not None or expired_at_utc is not None:
             raise ValueError("ambiguous outcome: filled legs with skip_reason/expired_at_utc set")
-        # The simulated approval acted_at_utc equals signal time + lag.
-        simulated_acted_at_utc = signal_detected_at_utc + timedelta(
-            seconds=APPROVAL_DELAY_LAG_SECONDS
-        )
-        # Cross-check a caller-supplied approval timestamp (WR-05a):
-        # silently ignoring a disagreeing acted_at_utc hides caller
-        # confusion about who owns approval timing (the assembler does).
-        raw_acted = approval.get("acted_at_utc")
-        if raw_acted is not None:
-            caller_acted = _parse_utc(raw_acted)
-            if caller_acted != simulated_acted_at_utc:
+        human = mode == SHADOW_MODE and _is_human_action(approval)
+        approval_requested_at_utc: datetime | None = None
+        confirm_requested_at_utc: datetime | None = None
+        confirmed_at_utc: datetime | None = None
+        if human:
+            if approval.get("action") != "APPROVE":
                 raise ValueError(
-                    "approval['acted_at_utc'] disagrees with the simulated "
-                    f"signal+lag time: {raw_acted!r} != "
-                    f"{simulated_acted_at_utc.isoformat()}"
+                    f"filled legs need an APPROVE human action, got {approval.get('action')!r}"
                 )
+            approval_requested_at_utc, simulated_acted_at_utc = _measured_approval(approval)
+            confirm_requested_at_utc, confirmed_at_utc = _confirm_timestamps(
+                confirm, simulated_acted_at_utc
+            )
+        else:
+            # No human action: the simulated approval acted_at_utc equals signal time + lag.
+            simulated_acted_at_utc = signal_detected_at_utc + timedelta(
+                seconds=APPROVAL_DELAY_LAG_SECONDS
+            )
+            # Cross-check a caller-supplied approval timestamp (WR-05a):
+            # silently ignoring a disagreeing acted_at_utc hides caller
+            # confusion about who owns approval timing (the assembler does).
+            raw_acted = approval.get("acted_at_utc")
+            if raw_acted is not None:
+                caller_acted = _parse_utc(raw_acted)
+                if caller_acted != simulated_acted_at_utc:
+                    raise ValueError(
+                        "approval['acted_at_utc'] disagrees with the simulated "
+                        f"signal+lag time: {raw_acted!r} != "
+                        f"{simulated_acted_at_utc.isoformat()}"
+                    )
         order_submitted_at_utc = _parse_utc(order["submitted_at_utc"])
         fill_time_utc = _parse_utc(fill["fill_time_utc"])
 
@@ -260,6 +393,8 @@ def assemble_paper_record(
             approval_acted_at_utc=None,
             order_submitted_at_utc=None,
             fill_time_utc=None,
+            mode=mode,
+            test_only=test_only,
         )
         user_executed_sim_row = PaperRecord(
             attribution=AttributionKind.USER_EXECUTED_SIM,
@@ -277,6 +412,11 @@ def assemble_paper_record(
             approval_acted_at_utc=simulated_acted_at_utc,
             order_submitted_at_utc=order_submitted_at_utc,
             fill_time_utc=fill_time_utc,
+            mode=mode,
+            approval_requested_at_utc=approval_requested_at_utc,
+            confirm_requested_at_utc=confirm_requested_at_utc,
+            confirmed_at_utc=confirmed_at_utc,
+            test_only=test_only,
         )
         return [system_row, user_executed_sim_row]
 
@@ -422,6 +562,46 @@ def assemble_no_trade_record(
 # --------------------------------------------------------------------------- #
 
 
+def canonical_record_dict(record: PaperRecord) -> dict[str, Any]:
+    """The canonical-JSON-safe dict of one record, the unit of `paper_records_digest`.
+
+    The fifteen Phase 7 keys come first, in their original order. The Phase 16 SHADOW keys
+    (`mode`, `approval_requested_at_utc`, `confirm_requested_at_utc`, `confirmed_at_utc`,
+    `test_only`) are written only when set, so a record without them hashes exactly as it did
+    before plan 16-35 (T-16-82).
+    """
+
+    def _iso(value: datetime | None) -> str | None:
+        return None if value is None else value.isoformat()
+
+    out: dict[str, Any] = {
+        "attribution": record.attribution.value,
+        "epoch_id": record.epoch_id,
+        "strategy_id": record.strategy_id,
+        "strategy_version": record.strategy_version,
+        "parameter_set_id": record.parameter_set_id,
+        "parameter_set_hash": record.parameter_set_hash,
+        "experiment_id": record.experiment_id,
+        "symbol": record.symbol,
+        "signal_id": record.signal_id,
+        "plan_hash": record.plan_hash,
+        "reason_code": record.reason_code,
+        "signal_detected_at_utc": _iso(record.signal_detected_at_utc),
+        "approval_acted_at_utc": _iso(record.approval_acted_at_utc),
+        "order_submitted_at_utc": _iso(record.order_submitted_at_utc),
+        "fill_time_utc": _iso(record.fill_time_utc),
+    }
+    if record.mode is not None:
+        out["mode"] = record.mode
+    for name in ("approval_requested_at_utc", "confirm_requested_at_utc", "confirmed_at_utc"):
+        value = getattr(record, name)
+        if value is not None:
+            out[name] = value.isoformat()
+    if record.test_only:
+        out["test_only"] = True
+    return out
+
+
 def paper_records_digest(records: list[PaperRecord]) -> str:
     """Compute the canonical digest of a list of PaperRecord instances.
 
@@ -434,41 +614,7 @@ def paper_records_digest(records: list[PaperRecord]) -> str:
     dicts, one per record. The sort key is `(attribution, signal_id,
     plan_hash)` so the digest is stable across Python dict ordering.
     """
-    payload: list[dict[str, Any]] = []
-    for record in records:
-        payload.append(
-            {
-                "attribution": record.attribution.value,
-                "epoch_id": record.epoch_id,
-                "strategy_id": record.strategy_id,
-                "strategy_version": record.strategy_version,
-                "parameter_set_id": record.parameter_set_id,
-                "parameter_set_hash": record.parameter_set_hash,
-                "experiment_id": record.experiment_id,
-                "symbol": record.symbol,
-                "signal_id": record.signal_id,
-                "plan_hash": record.plan_hash,
-                "reason_code": record.reason_code,
-                "signal_detected_at_utc": (
-                    record.signal_detected_at_utc.isoformat()
-                    if record.signal_detected_at_utc is not None
-                    else None
-                ),
-                "approval_acted_at_utc": (
-                    record.approval_acted_at_utc.isoformat()
-                    if record.approval_acted_at_utc is not None
-                    else None
-                ),
-                "order_submitted_at_utc": (
-                    record.order_submitted_at_utc.isoformat()
-                    if record.order_submitted_at_utc is not None
-                    else None
-                ),
-                "fill_time_utc": (
-                    record.fill_time_utc.isoformat() if record.fill_time_utc is not None else None
-                ),
-            }
-        )
+    payload = [canonical_record_dict(record) for record in records]
     # Sort by (attribution, signal_id, plan_hash) for stable ordering.
     payload.sort(
         key=lambda r: (
@@ -481,7 +627,9 @@ def paper_records_digest(records: list[PaperRecord]) -> str:
 
 
 __all__ = [
+    "SHADOW_MODE",
     "PaperRecord",
+    "canonical_record_dict",
     "assemble_paper_record",
     "assemble_no_trade_record",
     "paper_records_digest",
