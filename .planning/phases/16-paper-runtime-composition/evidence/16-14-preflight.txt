@@ -1,0 +1,37 @@
+16-14 preflight: EC2 host prerequisites (read-only checks)
+Run at (UTC): 2026-10-09T06:47:58Z
+Repository HEAD at run time: 1d5e7b9 (branch develop)
+No AWS call, no Telegram call, no .env read.
+
+Check 1 - WR-05 commit is an ancestor of HEAD
+  command: git merge-base --is-ancestor 7148528 HEAD
+  result: exit 0 (PASS)
+  commit:  7148528 fix(deploy): trading user joins sudo with a password (D062 WR-05)
+
+Check 2 - D064 Parquet push implementation is an ancestor of HEAD
+  command: git merge-base --is-ancestor e9a030c HEAD
+  result: exit 0 (PASS)
+  commit:  e9a030c fix(backup): close review findings WR-01..05 on the D064 Parquet push
+
+Check 3 - no passwordless sudo rule in the bootstrap script
+  command: grep -n "NOPASSWD" deploy/bootstrap.sh
+  result: no output, grep exit 1 (PASS; no NOPASSWD line exists)
+
+Check 4 - RUNBOOK structure
+  command: grep -n "^## 19\.\|11\.8" docs/operations/RUNBOOK.md
+  result: "## 19. Soak host (EC2) provisioning, migration and data path" at line 489;
+          section 11.8 "When the Parquet push fails" at line 233 (PASS)
+  decision-record references: "16-DEC-O-12" appears 6 times in docs/operations/RUNBOOK.md (PASS)
+
+Check 5 - soak runbook tests
+  command: .venv/Scripts/python -m pytest tests/test_soak_runbook.py -q -p no:cacheprovider
+  result: 18 passed (PASS)
+
+D064 real-S3 gate status, as stated in RUNBOOK section 11 ("Real-S3 gate") and 19.1 item 2:
+  OPEN. The Parquet push is tested against an S3 double only. The condition BACKUP_REAL_S3_GATE
+  of RUNBOOK 19.3 is therefore not PASS, and no real backup runs until it is. This file does not
+  change that status.
+
+Conclusion: every prerequisite check passed. The host decisions (O-12 and Q-L) may be presented.
+Note: the open real-S3 gate does not block the provisioning weekend (only the collector moves);
+it blocks the first real backup (RUNBOOK 19.4 item 6).
