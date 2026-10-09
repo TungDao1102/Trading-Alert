@@ -28,7 +28,16 @@ Public surface (the only symbols downstream code uses):
     07.1 binding gate (CostModelBindingMismatch on inequality, bare
     KeyError on absent slice keys), and return the StreamEpoch. It is
     called by `run_paper_tick` (src/paper/loop.py) at the start of every
-    paper tick, before any candle is parsed (G-15-11, D-16, D-27).
+    paper tick, before any candle is parsed (G-15-11, D-16, D-27): a
+    per-call gate. The runtime (plan 16-22) adds a once-per-process start
+    gate and persists the pinned epoch once; this module persists nothing
+    on a pin.
+  - `resolve_registry_root(...)` — the registry root a call judges: an
+    explicit override, else `src.domain.registry.REGISTRY_ROOT` read at
+    call time (never bound at import, review IN-05).
+  - `load_parameter_set_at_root(...)` — load a ParameterSet from an
+    explicit registry root; `run_paper_tick` uses it so the loop and the
+    gate read the same root.
   - `check_registry_unchanged(...)` — re-read the registry, compare
     canonical hashes, append one JSONL entry to the diff log. Returns
     a FreezeCheckOutcome: on a clean tick current_epoch == pinned_epoch
@@ -73,6 +82,7 @@ import structlog
 
 from src.backtest.binding import assert_cost_model_binds_registry
 from src.backtest.costs import CostModel, build_cost_model, cost_slice
+from src.domain import registry as _registry
 from src.domain.canonical import sha256_hex
 from src.domain.rationale import (
     UnrationalizedParameterSet,
@@ -80,7 +90,6 @@ from src.domain.rationale import (
     placeholder_keys_text,
 )
 from src.domain.registry import (
-    REGISTRY_ROOT,
     ParameterSet,
     _check_registry_segment,
     _parse_and_validate,
@@ -330,21 +339,39 @@ def _read_registry_file(
     return path, path.read_bytes().decode("utf-8")
 
 
+def resolve_registry_root(registry_root: Path | None = None) -> Path:
+    """The registry root a call judges: the explicit override, else the live registry root.
+
+    `src.domain.registry.REGISTRY_ROOT` is read here, at call time, and never copied at import
+    (review IN-05): the gate and the loop therefore cannot hold two different bindings.
+    """
+    return registry_root if registry_root is not None else _registry.REGISTRY_ROOT
+
+
 def _load_parameter_set_with_root(
     strategy_id: str,
     parameter_set_id: str,
     registry_root: Path,
 ) -> ParameterSet:
-    """Load a ParameterSet from a possibly-non-default registry root.
+    """Load a ParameterSet from an explicit registry root.
 
-    Mirrors `load_parameter_set` (src/domain/registry.py) but
-    allows tests to point at a tmp registry root. Reuses the same
-    `_parse_and_validate` helper so the canonical-hash construction
-    matches what `load_parameter_set` would compute against the real
-    root (D-04 byte-stability).
+    Mirrors `load_parameter_set` (src/domain/registry.py: same segment checks, same
+    `_parse_and_validate`) but takes the root as an argument instead of reading the registry
+    module global, so tests and `run_paper_tick` can pin the exact root they judge. The
+    canonical hash construction matches what `load_parameter_set` computes for the same file
+    (D-04 byte-stability).
     """
     path, text = _read_registry_file(strategy_id, parameter_set_id, registry_root)
     return _parameter_set_from_text(text, path, strategy_id, parameter_set_id)
+
+
+def load_parameter_set_at_root(
+    strategy_id: str,
+    parameter_set_id: str,
+    registry_root: Path,
+) -> ParameterSet:
+    """Public entry to `_load_parameter_set_with_root` for `run_paper_tick` (review IN-05)."""
+    return _load_parameter_set_with_root(strategy_id, parameter_set_id, registry_root)
 
 
 def _parameter_set_from_text(
@@ -507,7 +534,7 @@ def _require_rationalized(
 
 
 # --------------------------------------------------------------------------- #
-# pin_stream_epoch — pin (parameterSetId, parameterSetHash) at stream start.
+# pin_stream_epoch — pin (parameterSetId, parameterSetHash); a per-call gate.
 # --------------------------------------------------------------------------- #
 
 
@@ -520,7 +547,11 @@ def pin_stream_epoch(
     registry_root: Path | None = None,
     allow_unrationalized: bool = False,
 ) -> StreamEpoch:
-    """Pin a parameter set at stream start (D-04).
+    """Pin a parameter set (D-04) and judge it against the paper-start policy.
+
+    This is a per-call gate: it persists nothing and carries no state between calls
+    (`run_paper_tick` calls it on every tick). The runtime of plan 16-22 adds a
+    once-per-process start gate and pins the epoch once.
 
     Loads the registry ParameterSet, builds the CostModel from the
     registry's cost-key slice, and runs the 07.1 binding gate. Returns
@@ -535,8 +566,9 @@ def pin_stream_epoch(
             against the registry slice. If None, a CostModel is
             built from the registry's cost-key slice (trivially
             binding).
-        registry_root: Optional registry root override (for tests).
-            Defaults to `src.domain.registry.REGISTRY_ROOT`.
+        registry_root: Optional registry root override. Defaults to
+            `src.domain.registry.REGISTRY_ROOT`, read at call time (review IN-05), so a
+            caller that loaded the set from that root judges the same file here.
         allow_unrationalized: Test-only escape hatch for pinning legacy
             sets that carry no `[rationale.<key>]` tables. The default is
             strict: a set with a missing or incomplete rationale, or with
@@ -559,7 +591,7 @@ def pin_stream_epoch(
     """
     require_bool_flag(allow_unrationalized)
     _require_utc_aware(opened_at_utc, "opened_at_utc")
-    root = registry_root if registry_root is not None else REGISTRY_ROOT
+    root = resolve_registry_root(registry_root)
     path, text = _read_registry_file(strategy_id, parameter_set_id, root)
     parameter_set = _parameter_set_from_text(text, path, strategy_id, parameter_set_id)
 
@@ -638,7 +670,7 @@ def check_registry_unchanged(
             uses datetime.now(UTC). Defaults to wall-clock for
             soak-runtime use.
     """
-    root = registry_root if registry_root is not None else REGISTRY_ROOT
+    root = resolve_registry_root(registry_root)
     if now_utc is None:
         now_utc = datetime.now(UTC)
     if now_utc.tzinfo is None:
@@ -880,7 +912,7 @@ def _cli_main(argv: list[str] | None = None) -> int:
         "--registry-root",
         type=Path,
         default=None,
-        help="Registry root directory (default: src/domain/registry.py:REGISTRY_ROOT).",
+        help="Registry root directory (default: src.domain.registry.REGISTRY_ROOT).",
     )
     args = parser.parse_args(argv)
 

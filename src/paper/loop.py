@@ -7,11 +7,14 @@ and dispatches each closed event through the IDENTICAL Phase-4 core
 plus Phase-5 risk call chain the backtest executes. No paper-local
 setup logic, no simplified sizing, no cost-free path.
 
-The module imports NOTHING from Polars/pandas/NumPy/Binance SDK/
-SQLAlchemy/Pydantic — stdlib + Decimal + `src/core/_decimal.py` only,
-mirroring the Phase-4 D-10 / Phase-5 D-05 / Phase-6 D-05 purity
-precedent. The WS surface lives behind `src/adapters/paper_ws.py`
-(adapter-boundary isolation, RESEARCH §Pattern 1).
+The module imports nothing from Polars/pandas/NumPy/Binance SDK/
+SQLAlchemy/Pydantic, mirroring the Phase-4 D-10 / Phase-5 D-05 /
+Phase-6 D-05 purity precedent. Beyond stdlib, Decimal and
+`src/core/_decimal.py` it imports the project-owned `src.backtest`,
+`src.core`, `src.domain`, `src.risk` and `src.paper.freeze` surfaces
+(the last pulls `structlog` for its own logging). The WS surface lives
+behind `src/adapters/paper_ws.py` (adapter-boundary isolation, RESEARCH
+§Pattern 1).
 """
 
 from __future__ import annotations
@@ -33,9 +36,13 @@ from src.core.types import (
     Candle,
     MarketSnapshot,
 )
-from src.domain.registry import load_parameter_set
 from src.domain.trade_plan import TradePlan
-from src.paper.freeze import pin_stream_epoch, require_bool_flag
+from src.paper.freeze import (
+    load_parameter_set_at_root,
+    pin_stream_epoch,
+    require_bool_flag,
+    resolve_registry_root,
+)
 from src.risk.gating import evaluate_risk
 from src.risk.portfolio import resolve_absolute_thresholds
 from src.risk.types import ConstraintSnapshot, OpenPosition
@@ -316,13 +323,16 @@ def run_paper_tick(
 ) -> dict[str, Any]:
     """Run the paper loop on a feed sequence.
 
-    The stream-start gate runs first, before any candle is parsed or feed event read:
-    the parameter set is loaded, its strategy_version checked and `pin_stream_epoch`
-    called. A set with a missing or incomplete rationale or a PLACEHOLDER key raises
-    `UnrationalizedParameterSet` (D-16, D-27); a set without rationale tables needs an
-    exact-hash entry in the approved paper-start allowlist of `src/paper/freeze.py`,
-    which is empty by the user's decision at checkpoint 15-17-01. `allow_unrationalized`
-    is for tests only; src/ never turns it on.
+    The per-call gate runs first, on every call, before any candle is parsed or feed event
+    read: the registry root is resolved once, the parameter set is loaded from it, its
+    strategy_version checked and `pin_stream_epoch` called with that same root, so the gate
+    and the loop judge one file. A set with a missing or incomplete rationale or a
+    PLACEHOLDER key raises `UnrationalizedParameterSet` (D-16, D-27); a set without
+    rationale tables needs an exact-hash entry in the approved paper-start allowlist of
+    `src/paper/freeze.py`, which is empty by the user's decision at checkpoint 15-17-01.
+    `allow_unrationalized` is for tests only; src/ never turns it on. The pinned epoch is
+    used here only for its hash and is not persisted: the runtime (plan 16-22) adds a
+    once-per-process start gate and pins the epoch once.
 
     Returns a canonical-JSON-safe outcome dict with keys:
       - `signals`: list of Signal dicts emitted by the engine
@@ -331,9 +341,26 @@ def run_paper_tick(
       - `feed_events_processed`: count of events that passed the gate
       - `feed_events_dropped`: count of events that failed the gate
 
-    The function is a pure function of the input dict + injected
-    `now_utc` (read from `case_input["now_utc"]`). No clock reads,
-    no I/O, no randomness.
+    Apart from the registry reads below, the function is a pure function of the input dict +
+    injected `now_utc` (read from `case_input["now_utc"]`): no clock reads, no randomness.
+    Its outcome also depends on the registry files under the resolved registry root and on
+    the approved paper-start allowlist of `src/paper/freeze.py` (module-level, read per call).
+
+    Raises:
+        TypeError: `allow_unrationalized` is not a bool (checked first).
+        UnregisteredParameterSet: the parameter set file does not exist or an id is not a
+            safe registry path segment.
+        ValueError: `case_input["strategy_version"]` differs from the registry's, or the
+            hash the gate judged differs from the hash the loop loaded. The strategy_version
+            check runs BEFORE the rationale gate, so a stale fixture version on a refused set
+            raises this `ValueError`, not `UnrationalizedParameterSet`. This order is the
+            contract (moving it would change which exception a caller sees). A caller that
+            maps `UnrationalizedParameterSet` to "refused by policy" must catch both.
+        UnrationalizedParameterSet: rationale missing or incomplete, a PLACEHOLDER key, or no
+            exact-hash allowlist entry for a set without rationale tables.
+        KeyError: a cost-slice key is missing from the registry set (fail closed, never
+            translated, 07.1 D-02), or a required `case_input` field is absent once the
+            gate has passed.
     """
     require_bool_flag(allow_unrationalized)  # review WR-01: only a real bool, before anything else
     strategy_id = case_input["strategy_id"]
@@ -341,8 +368,10 @@ def run_paper_tick(
     parameter_set_id = case_input["parameter_set_id"]
     now_utc = _parse_utc_aware(case_input["now_utc"], "now_utc")
 
-    # Stream-start gate (G-15-11): nothing below this block runs for a refused set.
-    parameter_set = load_parameter_set(strategy_id, parameter_set_id)
+    # Per-call gate (G-15-11): nothing below this block runs for a refused set. The registry
+    # root is resolved ONCE and used for both the load and the gate (review IN-05).
+    registry_root = resolve_registry_root()
+    parameter_set = load_parameter_set_at_root(strategy_id, parameter_set_id, registry_root)
     if parameter_set.strategy_version != strategy_version:
         raise ValueError(
             f"fixture strategy_version={strategy_version!r} != "
@@ -353,11 +382,12 @@ def run_paper_tick(
         strategy_id=strategy_id,
         parameter_set_id=parameter_set_id,
         opened_at_utc=now_utc,
+        registry_root=registry_root,
         allow_unrationalized=allow_unrationalized,
     )
     if epoch.parameter_set_hash != parameter_set.parameter_set_hash:
         raise ValueError(
-            f"stream-start gate judged parameter_set_hash={epoch.parameter_set_hash!r} but the "
+            f"per-call gate judged parameter_set_hash={epoch.parameter_set_hash!r} but the "
             f"loop loaded parameter_set_hash={parameter_set.parameter_set_hash!r} "
             f"for {strategy_id}/{parameter_set_id}"
         )

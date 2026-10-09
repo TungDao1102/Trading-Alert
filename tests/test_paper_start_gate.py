@@ -1,4 +1,4 @@
-"""Plan 15-17: the paper stream-start gate on run_paper_tick (G-15-11, D-16, D-27).
+"""Plan 15-17: the paper per-call gate on run_paper_tick (G-15-11, D-16, D-27).
 
 `run_paper_tick` checks the parameter set at its very top, before any candle is parsed.
 A set whose rationale is missing or incomplete, or that carries a PLACEHOLDER key, cannot
@@ -27,6 +27,7 @@ import pytest
 from src.domain.canonical import sha256_hex
 from src.domain.rationale import UnrationalizedParameterSet
 from src.domain.registry import load_parameter_set
+from src.paper.freeze import load_parameter_set_at_root
 
 from tests.test_paper_parity import (
     PARITY_FIXTURE_DIR,
@@ -188,11 +189,15 @@ def _entry(strategy_id: str, parameter_set_id: str, parameter_set_hash: str) -> 
 
 
 def _production_hash(strategy_id: str, parameter_set_id: str) -> str:
-    """Hash of the committed params/ file through the registry parse path (freeze.py's root)."""
-    from src.paper.freeze import REGISTRY_ROOT, _load_parameter_set_with_root
+    """Hash of the committed params/ file through the registry parse path.
+
+    The root is the repo's own params/ directory, not `registry.REGISTRY_ROOT`, because the
+    tests that call this patch the registry root to a tmp registry.
+    """
+    from src.paper.freeze import _load_parameter_set_with_root
 
     return _load_parameter_set_with_root(
-        strategy_id, parameter_set_id, REGISTRY_ROOT
+        strategy_id, parameter_set_id, REPO_ROOT / "params"
     ).parameter_set_hash
 
 
@@ -307,7 +312,6 @@ def test_injected_entry_never_admits_a_set_that_has_rationale_tables(
     monkeypatch: pytest.MonkeyPatch, spies: dict[str, list[int]], tmp_path: Path
 ) -> None:
     import src.domain.registry as domain_registry
-    import src.paper.freeze as freeze
     from src.paper.freeze import pin_stream_epoch
     from src.paper.loop import run_paper_tick
 
@@ -324,7 +328,6 @@ def test_injected_entry_never_admits_a_set_that_has_rationale_tables(
     del spec[sorted(spec)[0]]
     write_set(tmp_path, spec=spec)
     monkeypatch.setattr(domain_registry, "REGISTRY_ROOT", tmp_path)
-    monkeypatch.setattr(freeze, "REGISTRY_ROOT", tmp_path)
     tmp_hash = load_parameter_set(STRATEGY_ID, SET_ID).parameter_set_hash
     _inject(monkeypatch, _entry(STRATEGY_ID, SET_ID, tmp_hash))
     with pytest.raises(UnrationalizedParameterSet) as excinfo2:
@@ -346,58 +349,246 @@ def test_fully_rationalized_set_runs_without_the_flag(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import src.domain.registry as domain_registry
-    import src.paper.freeze as freeze
-    from src.backtest.costs import cost_slice
     from src.paper.loop import run_paper_tick
 
     write_rationalized_set(tmp_path)
     monkeypatch.setattr(domain_registry, "REGISTRY_ROOT", tmp_path)
-    monkeypatch.setattr(freeze, "REGISTRY_ROOT", tmp_path)
-    parameter_set = load_parameter_set(STRATEGY_ID, SET_ID)
 
+    case = _case_for_tmp_set()
+    strict = run_paper_tick(case)
+    flagged = run_paper_tick(case, allow_unrationalized=True)
+    # The digest equality with the flagged run is the real assertion (review IN-04): the gate
+    # changes nothing about what runs. `feed_events_processed` only counts events that passed
+    # the closed-candle gate, so it is kept as a sanity check, not as proof that evaluate ran.
+    assert sha256_hex(strict) == sha256_hex(flagged)
+    assert strict["feed_events_processed"] >= 1
+
+
+def _case_for_tmp_set() -> dict[str, Any]:
+    """A clean-run tick input re-pointed at STRATEGY_ID/SET_ID of the (already patched) registry."""
+    from src.backtest.costs import cost_slice
+
+    parameter_set = load_parameter_set(STRATEGY_ID, SET_ID)
     case = _clean_run_input()
     case["parameter_set_id"] = SET_ID
     case["strategy_version"] = parameter_set.strategy_version
     case["cost_model"] = {k: str(v) for k, v in cost_slice(parameter_set.params).items()}
+    return case
 
-    strict = run_paper_tick(case)
-    flagged = run_paper_tick(case, allow_unrationalized=True)
-    assert strict["feed_events_processed"] >= 1
-    assert sha256_hex(strict) == sha256_hex(flagged)
+
+def _rich_and_poor_roots(tmp_path: Path) -> tuple[Path, Path]:
+    """Two registries with byte-identical [parameters] but different rationale tables.
+
+    `rich` carries a complete rationale (the loop may run it); `poor` carries none (the empty
+    allowlist refuses it). The hash excludes `[rationale]`, so both files hash the same and only
+    the verdict tells them apart (review IN-05).
+    """
+    rich, poor = tmp_path / "rich", tmp_path / "poor"
+    write_rationalized_set(rich)
+    write_set(poor, spec=None)
+    assert (
+        load_parameter_set_at_root(STRATEGY_ID, SET_ID, rich).parameter_set_hash
+        == load_parameter_set_at_root(STRATEGY_ID, SET_ID, poor).parameter_set_hash
+    )
+    return rich, poor
+
+
+def test_gate_and_loop_resolve_one_registry_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review IN-05: the verdict applies to the file the loop runs, in both directions.
+
+    The loop's registry root is `registry.REGISTRY_ROOT`. A stale module-level binding of that
+    name elsewhere (the old `freeze.REGISTRY_ROOT`, bound at import) must never decide the
+    verdict: it is set to the OTHER registry on purpose, `raising=False` so the test also runs
+    once the binding no longer exists.
+    """
+    import src.domain.registry as domain_registry
+    import src.paper.freeze as freeze
+    from src.paper.loop import run_paper_tick
+
+    rich, poor = _rich_and_poor_roots(tmp_path)
+
+    # Direction 1: the loop runs the rich file; a stale poor binding must not refuse it.
+    monkeypatch.setattr(domain_registry, "REGISTRY_ROOT", rich)
+    monkeypatch.setattr(freeze, "REGISTRY_ROOT", poor, raising=False)
+    outcome = run_paper_tick(_case_for_tmp_set())
+    assert outcome["feed_events_processed"] >= 1
+
+    # Direction 2 (the dangerous one): the loop would run the poor file; a stale rich binding
+    # must not wave it through.
+    monkeypatch.setattr(domain_registry, "REGISTRY_ROOT", poor)
+    monkeypatch.setattr(freeze, "REGISTRY_ROOT", rich, raising=False)
+    with pytest.raises(UnrationalizedParameterSet) as excinfo:
+        run_paper_tick(_case_for_tmp_set())
+    assert "missing rationale tables" in str(excinfo.value)
+
+
+def test_pin_stream_epoch_resolves_the_registry_root_at_call_time(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review IN-05: with no explicit root the live `registry.REGISTRY_ROOT` is read per call."""
+    import src.domain.registry as domain_registry
+    from src.paper.freeze import pin_stream_epoch, resolve_registry_root
+
+    rich, poor = _rich_and_poor_roots(tmp_path)
+    opened = datetime(2026, 10, 8, 10, 0, tzinfo=UTC)
+    kwargs: dict[str, Any] = {
+        "strategy_id": STRATEGY_ID,
+        "parameter_set_id": SET_ID,
+        "opened_at_utc": opened,
+    }
+
+    monkeypatch.setattr(domain_registry, "REGISTRY_ROOT", rich)
+    assert resolve_registry_root() == rich
+    assert pin_stream_epoch(**kwargs).parameter_set_id == SET_ID
+
+    monkeypatch.setattr(domain_registry, "REGISTRY_ROOT", poor)
+    assert resolve_registry_root() == poor
+    with pytest.raises(UnrationalizedParameterSet):
+        pin_stream_epoch(**kwargs)
+
+    explicit = tmp_path / "explicit"
+    assert resolve_registry_root(explicit) == explicit
+
+
+def test_run_paper_tick_hands_the_gate_the_root_it_loaded_from(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review IN-05: one resolution per call; the gate receives exactly the loop's root."""
+    import src.domain.registry as domain_registry
+    import src.paper.loop as loop
+
+    rich, _poor = _rich_and_poor_roots(tmp_path)
+    monkeypatch.setattr(domain_registry, "REGISTRY_ROOT", rich)
+    seen: list[Path | None] = []
+    original = loop.pin_stream_epoch
+
+    def recording_pin(**kwargs: Any) -> Any:
+        seen.append(kwargs.get("registry_root"))
+        return original(**kwargs)
+
+    monkeypatch.setattr(loop, "pin_stream_epoch", recording_pin)
+    loop.run_paper_tick(_case_for_tmp_set())
+    assert seen == [rich]
+
+
+def _write_odd_rationale_set(root: Path, *, mode: str) -> Path:
+    """baseline-v5 params plus an empty `[rationale]` table, or a scalar `rationale = "x"`."""
+    base = BASE_SET.read_bytes().decode("utf-8")
+    if mode == "scalar":
+        text = 'rationale = "x"\n' + base
+    else:
+        text = base.rstrip("\n") + "\n\n[rationale]\n"
+    path = root / STRATEGY_ID / f"{SET_ID}.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(text.encode("utf-8"))
+    return path
+
+
+@pytest.mark.parametrize("mode", ["empty-table", "scalar"])
+def test_an_empty_or_scalar_rationale_is_judged_on_the_rationale_branch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str
+) -> None:
+    """Review IN-04: a `rationale` key of any shape means "has rationale tables".
+
+    Such a set is refused by the rationale check and an exact-hash allowlist entry for it does
+    not help, so the allowlist branch ("not in the approved allowlist") is never reached.
+    """
+    from src.paper.freeze import pin_stream_epoch
+
+    _write_odd_rationale_set(tmp_path, mode=mode)
+    registry_hash = load_parameter_set_at_root(STRATEGY_ID, SET_ID, tmp_path).parameter_set_hash
+    _inject(monkeypatch, _entry(STRATEGY_ID, SET_ID, registry_hash))
+    with pytest.raises(UnrationalizedParameterSet) as excinfo:
+        pin_stream_epoch(
+            strategy_id=STRATEGY_ID,
+            parameter_set_id=SET_ID,
+            opened_at_utc=datetime(2026, 10, 8, 10, 0, tzinfo=UTC),
+            registry_root=tmp_path,
+        )
+    message = str(excinfo.value)
+    assert f"{STRATEGY_ID}/{SET_ID}" in message
+    assert "rationale problems" in message
+    assert "not in the approved allowlist" not in message
+
+
+def _tampered_v3_registry(tmp_path: Path) -> Path:
+    """A tmp registry whose trend-pullback/baseline-v3 differs from params/ in one value."""
+    text = (REPO_ROOT / "params" / "trend-pullback" / "baseline-v3.toml").read_text(
+        encoding="utf-8"
+    )
+    key_line = next(line for line in text.splitlines() if line.startswith("zone_tolerance_atr"))
+    target = tmp_path / "trend-pullback" / "baseline-v3.toml"
+    target.parent.mkdir(parents=True)
+    target.write_text(text.replace(key_line, "zone_tolerance_atr = 0.6", 1), encoding="utf-8")
+    return tmp_path
 
 
 def test_gate_and_loop_must_judge_the_same_file(
-    monkeypatch: pytest.MonkeyPatch, spies: dict[str, list[int]], tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    import src.domain.registry as domain_registry
-    from src.paper.loop import run_paper_tick
+    """Review IN-05: with the registry root moved, the gate judges the file the loop loaded.
 
-    source = REPO_ROOT / "params" / "trend-pullback" / "baseline-v3.toml"
-    text = source.read_text(encoding="utf-8")
-    target = tmp_path / "trend-pullback" / "baseline-v3.toml"
-    target.parent.mkdir(parents=True)
-    key_line = next(line for line in text.splitlines() if line.startswith("zone_tolerance_atr"))
-    target.write_text(text.replace(key_line, "zone_tolerance_atr = 0.6", 1), encoding="utf-8")
-    monkeypatch.setattr(domain_registry, "REGISTRY_ROOT", tmp_path)
+    Before plan 16-02 the gate kept its import-time root (params/) and the loop's own hash check
+    was the only thing that noticed the two files differed. Now both read the moved root, so the
+    pinned epoch carries the hash of the tampered file and the run goes ahead.
+    """
+    import src.domain.registry as domain_registry
+    import src.paper.loop as loop
+
+    root = _tampered_v3_registry(tmp_path)
+    monkeypatch.setattr(domain_registry, "REGISTRY_ROOT", root)
     loaded = load_parameter_set("trend-pullback", "baseline-v3").parameter_set_hash
     production = _production_hash("trend-pullback", "baseline-v3")
     assert loaded != production
 
+    epochs: list[Any] = []
+    original = loop.pin_stream_epoch
+
+    def recording_pin(**kwargs: Any) -> Any:
+        epoch = original(**kwargs)
+        epochs.append(epoch)
+        return epoch
+
+    monkeypatch.setattr(loop, "pin_stream_epoch", recording_pin)
+    loop.run_paper_tick(_clean_run_input(), allow_unrationalized=True)
+    assert [e.parameter_set_hash for e in epochs] == [loaded]
+
+
+def test_a_gate_that_judged_another_hash_than_the_loop_loaded_is_refused_before_any_candle(
+    monkeypatch: pytest.MonkeyPatch, spies: dict[str, list[int]]
+) -> None:
+    """The loop's own hash-equality check stays as a backstop and fails closed."""
+    import src.paper.loop as loop
+
+    loaded = load_parameter_set("trend-pullback", "baseline-v3").parameter_set_hash
+    other = "0" * 64
+    original = loop.pin_stream_epoch
+
+    def disagreeing_pin(**kwargs: Any) -> Any:
+        return dataclasses.replace(original(**kwargs), parameter_set_hash=other)
+
+    monkeypatch.setattr(loop, "pin_stream_epoch", disagreeing_pin)
     with pytest.raises(ValueError, match="parameter_set_hash") as excinfo:
-        run_paper_tick(_clean_run_input(), allow_unrationalized=True)
+        loop.run_paper_tick(_clean_run_input(), allow_unrationalized=True)
     assert loaded in str(excinfo.value)
-    assert production in str(excinfo.value)
-    assert spies["_parse_candle"] == []
+    assert other in str(excinfo.value)
+    assert "per-call gate judged" in str(excinfo.value)
+    _assert_no_candle_work(spies)
 
 
 def test_import_with_the_empty_allowlist_emits_no_error_or_warning() -> None:
+    """Importing the loop and the gate is silent under `-W error` and the allowlist is empty."""
     result = subprocess.run(
         [
             sys.executable,
             "-W",
             "error",
             "-c",
-            "import src.paper.loop; from src.paper.freeze import PAPER_START_ALLOWLIST",
+            "import src.paper.loop; "
+            "from src.paper.freeze import PAPER_START_ALLOWLIST; "
+            "print(repr(PAPER_START_ALLOWLIST))",
         ],
         cwd=REPO_ROOT,
         capture_output=True,
@@ -406,6 +597,7 @@ def test_import_with_the_empty_allowlist_emits_no_error_or_warning() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
+    assert result.stdout.strip() == "()"
 
 
 # --------------------------------------------------------------------------- #
@@ -599,15 +791,22 @@ def test_guard_helper_reports_every_seeded_violation(tmp_path: Path) -> None:
         '    setattr(mod, "PAPER_START_ALLOWLIST", ())\n',
     )
     found = _scan_src_violations(tmp_path)
-    joined = "\n".join(found)
-    assert "paper/x.py" in joined and "constant True" in joined
-    assert "other/y.py" in joined and "dict key" in joined
-    assert "other/z.py" in joined and "allow_unrationalized" in joined
-    assert "other/w.py" in joined and "PAPER_START_ALLOWLIST" in joined
-    assert "not a tuple literal" in joined
-    assert "global" in joined
-    assert "setattr" in joined
-    assert "rebound" in joined
+
+    def reported(path: str, *needles: str) -> bool:
+        """True when one reported line starts with this file's path and holds every needle."""
+        return any(
+            line.startswith(f"{path}:") and all(needle in line for needle in needles)
+            for line in found
+        )
+
+    assert reported("paper/x.py", "constant True")
+    assert reported("other/y.py", "dict key", FLAG)
+    assert reported("other/z.py", "mentions", FLAG)
+    assert reported("other/w.py", "mentions", ALLOWLIST)
+    assert reported("paper/freeze.py", "not a tuple literal")
+    assert reported("paper/freeze.py", "declared global")
+    assert reported("paper/freeze.py", "setattr names", ALLOWLIST)
+    assert reported("paper/freeze.py", "rebound")
 
 
 def test_guard_helper_accepts_the_allowed_forms(tmp_path: Path) -> None:
@@ -855,7 +1054,15 @@ def test_run_paper_tick_passes_its_own_flag_through_by_name() -> None:
     (keyword,) = [kw for kw in calls[0].keywords if kw.arg == FLAG]
     assert isinstance(keyword.value, ast.Name)
     assert keyword.value.id == FLAG
-    assert {kw.arg for kw in calls[0].keywords}.isdisjoint({"cost_model", "registry_root"})
+    # The gate receives the registry root the loop loaded from (review IN-05) and no caller-side
+    # cost model; every other keyword is fixed by the signature.
+    assert {kw.arg for kw in calls[0].keywords} == {
+        "strategy_id",
+        "parameter_set_id",
+        "opened_at_utc",
+        "registry_root",
+        FLAG,
+    }
 
 
 def test_allowlist_entry_shape_and_privacy() -> None:
