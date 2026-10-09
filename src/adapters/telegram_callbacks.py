@@ -47,6 +47,8 @@ from typing import TYPE_CHECKING, Any
 
 from src.adapters.telegram_notify import (
     APR_PREFIX,
+    CNF_PREFIX,
+    CXL_PREFIX,
     SIM_PREFIX,
     SKIP_PREFIX,
     SKP_PREFIX,
@@ -58,7 +60,7 @@ from src.approval.binding import ApprovalRejected, Callback
 from src.approval.mapping import ShortIdMapping, make_short_id_mapping
 from src.approval.replay import resolve_callback
 from src.domain.approval import Approval
-from src.domain.enums import ApprovalAction, RejectionReason
+from src.domain.enums import ApprovalAction, ApprovalResult, RejectionReason
 from src.domain.journal import JournalEvent, correlated_event_id
 
 if TYPE_CHECKING:
@@ -106,9 +108,16 @@ class CallbackKind(str, Enum):
     APPROVE = "APPROVE"
     SKIP = "SKIP"
     SIMULATE_RECORDED = "SIMULATE_RECORDED"
+    # SHADOW confirm step (Phase 16, plan 16-11, D041). These two never move an approval:
+    # they are routed to the injected `confirm_handler`, not to `dispatch_callback`.
+    CONFIRM = "CONFIRM"
+    CANCEL = "CANCEL"
 
 
 def _callback_kind_to_action(kind: CallbackKind) -> ApprovalAction:
+    if kind in (CallbackKind.CONFIRM, CallbackKind.CANCEL):
+        # A confirm press must never be mistaken for an approval decision.
+        raise ValueError(f"{kind.value} is not an approval action")
     if kind == CallbackKind.APPROVE:
         return ApprovalAction.APPROVE
     return ApprovalAction.SKIP_USER
@@ -135,10 +144,10 @@ class ParsedCallback:
 def parse_callback_data(raw: str) -> ParsedCallback:
     """Strictly parse a Telegram `callback_data` payload (D-02).
 
-    Accepts the four prefixes — `APR:`, `SKP:`, `SIM:`, `SKIP:` —
-    followed by exactly 32 lowercase hex chars. Any other shape
-    raises `ValueError` so the receiver can journal the malformed
-    receipt and skip the chat gate.
+    Accepts the six prefixes — `APR:`, `SKP:`, `SIM:`, `SKIP:` and, for the SHADOW confirm
+    step (plan 16-11), `CNF:` and `CXL:` — followed by exactly 32 lowercase hex chars. Any
+    other shape raises `ValueError` so the receiver can journal the malformed receipt and skip
+    the chat gate.
 
     The 64-byte Telegram ceiling is enforced at parse time too: a
     payload longer than `TELEGRAM_CALLBACK_DATA_MAX_BYTES` raises
@@ -163,6 +172,12 @@ def parse_callback_data(raw: str) -> ParsedCallback:
     elif raw.startswith(SKIP_PREFIX):
         prefix = SKIP_PREFIX
         kind = CallbackKind.SIMULATE_RECORDED
+    elif raw.startswith(CNF_PREFIX):
+        prefix = CNF_PREFIX
+        kind = CallbackKind.CONFIRM
+    elif raw.startswith(CXL_PREFIX):
+        prefix = CXL_PREFIX
+        kind = CallbackKind.CANCEL
     else:
         raise ValueError(f"callback_data has no recognized prefix: {raw[:8]!r}...")
     short_id = raw[len(prefix) :]
@@ -173,6 +188,33 @@ def parse_callback_data(raw: str) -> ParsedCallback:
     if any(c not in "0123456789abcdef" for c in short_id):
         raise ValueError(f"short_id must be lowercase hex, got {short_id!r}")
     return ParsedCallback(raw=raw, kind=kind, short_id=short_id)
+
+
+@dataclass(frozen=True)
+class CallbackPress:
+    """What the SHADOW confirm layer is told about one button press (plan 16-11).
+
+    Built by `on_callback` AFTER the authorized-chat gate. `from_user_id` is the Telegram user
+    who pressed (`query.from_user.id`, None when Telegram gave none) and `message_id` the id of
+    the message carrying the button. User-id authorization stays Phase 23: the confirm layer
+    only BINDS the confirm to the user that pressed APPROVE.
+    """
+
+    parsed: ParsedCallback
+    chat_id: int
+    authorized_chat_id: int
+    from_user_id: int | None
+    message_id: int | None
+    callback_at_utc: datetime
+    correlation_id: str
+
+
+@dataclass(frozen=True)
+class ConfirmReply:
+    """The confirm handler's verdict on a CNF:/CXL: press: `ok` and the detail for the reply."""
+
+    ok: bool
+    text: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -313,6 +355,23 @@ def dispatch_callback(
         correlation_id=correlation_id,
     )
     journal_receipt(receipt)
+
+    # CONFIRM / CANCEL never enter the approval transitions (plan 16-11): fail closed if one
+    # ever reaches this function, instead of reading it as a SKIP.
+    if parsed.kind in (CallbackKind.CONFIRM, CallbackKind.CANCEL):
+        _journal_outcome(
+            journal_receipt,
+            parsed=parsed,
+            ok=False,
+            reason_code=RejectionReason.INVALIDATED,
+            callback_at_utc=callback_at_utc,
+            correlation_id=correlation_id,
+        )
+        return DispatchResult(
+            ok=False,
+            kind=parsed.kind,
+            reason_code=RejectionReason.INVALIDATED,
+        )
 
     # SIMULATE-only buttons do NOT advance approval state (D-02 +
     # 08-01 D-11). Record the receipt, return early.
@@ -623,6 +682,25 @@ def _journal_outcome(
 # DispatchResult without going through the resolve_callback path.
 DispatchCallable = Callable[..., DispatchResult]
 
+# SHADOW confirm hooks (plan 16-11). `ConfirmHandler` serves CNF:/CXL: presses; `ApprovedHandler`
+# runs after a press reached APPROVED and returns True when it delivered its own reply (the
+# confirmation card), so the generic outcome reply is skipped.
+ConfirmHandler = Callable[[CallbackPress], Awaitable[ConfirmReply]]
+ApprovedHandler = Callable[[CallbackPress, DispatchResult], Awaitable[bool]]
+
+
+async def answer_callback_safely(query: Any) -> None:
+    """Clear the Telegram spinner once, without text, and never let a failure escape.
+
+    `answerCallbackQuery` is cosmetic: the callback is processed through the gates whether or
+    not it succeeds. A failure (an expired query, a network fault, a rate limit) is logged by
+    exception class only, never retried, and never raised.
+    """
+    try:
+        await query.answer()
+    except Exception as exc:  # noqa: BLE001 - cosmetic call; the press is still processed
+        log.warning("telegram.callback.answer_failed: %s", type(exc).__name__)
+
 
 async def on_callback(
     update: Update,
@@ -632,6 +710,9 @@ async def on_callback(
     binding_context_resolver: Callable[[str], dict[str, Any] | None],
     dispatch: DispatchCallable,
     reply_text_fn: Callable[[int, str], Awaitable[None]] | None = None,
+    confirm_handler: ConfirmHandler | None = None,
+    approved_handler: ApprovedHandler | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> DispatchResult:
     """PTB `CallbackQueryHandler` entry point.
 
@@ -646,12 +727,18 @@ async def on_callback(
 
     The handler NEVER touches approval state directly. All state
     mutation goes through `dispatch_callback` -> `resolve_callback`.
+
+    SHADOW confirm step (plan 16-11, all optional, default None keeps the behaviour above):
+    `confirm_handler` serves `CNF:` / `CXL:` presses after the chat gate (they never enter
+    `dispatch_callback`; without a handler they are refused); `approved_handler` runs after a
+    press reached APPROVED; `clock` replaces the wall clock for the press time (tests).
     """
     query = update.callback_query
     if query is None:
         raise ValueError("update.callback_query must not be None")
-    # Step 1: spinner clear (always — even on malformed input).
-    await query.answer()
+    # Step 1: spinner clear (always — even on malformed input). A failure of this purely
+    # cosmetic call never stops the press from being parsed and dispatched through the gates.
+    await answer_callback_safely(query)
     if query.data is None or query.data == "":
         raise ValueError("callback query carries no data")
     if query.message is None:
@@ -670,7 +757,7 @@ async def on_callback(
     query_id = getattr(query, "id", None)
     if not isinstance(query_id, str) or query_id == "":
         raise ValueError("callback query carries no id")
-    callback_at_utc = datetime.now(UTC)
+    callback_at_utc = datetime.now(UTC) if clock is None else clock()
     correlation_id = f"cbq:{query_id}"
 
     if not authorized_chat_gate(
@@ -694,6 +781,29 @@ async def on_callback(
 
         return result
 
+    from_user = getattr(query, "from_user", None)
+    from_user_id = getattr(from_user, "id", None)
+    message_id = getattr(query.message, "message_id", None)
+    press = CallbackPress(
+        parsed=parsed,
+        chat_id=callback_chat_id,
+        authorized_chat_id=authorized_chat_id,
+        from_user_id=from_user_id if isinstance(from_user_id, int) else None,
+        message_id=message_id if isinstance(message_id, int) else None,
+        callback_at_utc=callback_at_utc,
+        correlation_id=correlation_id,
+    )
+
+    if parsed.kind in (CallbackKind.CONFIRM, CallbackKind.CANCEL):
+        if confirm_handler is None:
+            raise ValueError("a confirm callback needs a confirm_handler")
+        reply = await confirm_handler(press)
+        if reply_text_fn is not None:
+            confirm_chat_id = getattr(query.message, "chat_id", None)
+            if confirm_chat_id is not None:
+                await reply_text_fn(int(confirm_chat_id), reply.text)
+        return DispatchResult(ok=reply.ok, kind=parsed.kind)
+
     binding = binding_context_resolver(parsed.short_id)
     raw_token = ""
     if binding is not None:
@@ -709,7 +819,17 @@ async def on_callback(
         binding_context=binding,
     )
 
-    if reply_text_fn is not None:
+    handled = False
+    if (
+        approved_handler is not None
+        and parsed.kind is CallbackKind.APPROVE
+        and result.ok
+        and result.approval is not None
+        and result.approval.status == ApprovalResult.APPROVED
+    ):
+        handled = await approved_handler(press, result)
+
+    if reply_text_fn is not None and not handled:
         text = _render_outcome_text(result, parsed)
         # query.message is typed as Message | MaybeInaccessibleMessage;
         # the chat_id attribute is only on Message. Guard with getattr
@@ -773,7 +893,11 @@ def build_application(
 # telegram_notify.py (PTB-free) and is exposed here for the
 # approval-messaging path that needs to render the alert message.
 __all__ = [
+    "ApprovedHandler",
     "CallbackKind",
+    "CallbackPress",
+    "ConfirmHandler",
+    "ConfirmReply",
     "DispatchCallable",
     "DispatchResult",
     "EVENT_TYPE_CALLBACK_RECEIVED",
@@ -786,6 +910,7 @@ __all__ = [
     "SaveAtomic",
     "SHORT_ID_HEX_LEN",
     "TelegramBot",
+    "answer_callback_safely",
     "authorized_chat_gate",
     "build_application",
     "dispatch_callback",

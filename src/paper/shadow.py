@@ -16,6 +16,9 @@ What lives here:
     wraps `dispatch_callback` so a decision is stamped and journaled.
   - `send_shadow_alert`: parents first, journal first, then the send.
   - Restart handling: raw tokens do not survive a restart, so pending approvals are expired.
+  - Plan 16-11 (D041): the confirm card, the confirm result and the card-delivery-failure notice
+    are composed here too (`ShadowMessageKind.CONFIRM_*`); the confirm state machine itself
+    lives in `src/paper/shadow_confirm.py`.
 
 Button contract (F-961): SHADOW alerts use the live `APR:` and `SKP:` buttons only
 (`build_shadow_decision_keyboard`). The SIMULATE-only keyboard (inert `SIM:`/`SKIP:` data) is
@@ -125,11 +128,14 @@ def require_shadow(mode: Mode) -> None:
 
 
 class ShadowMessageKind(str, Enum):
-    """Every kind of text the SHADOW layer sends (plan 16-11 adds the confirm kinds)."""
+    """Every kind of text the SHADOW layer sends (plan 16-11 added the three confirm kinds)."""
 
     ALERT = "ALERT"
     DECISION_RESULT = "DECISION_RESULT"
     SEND_FAILURE_NOTICE = "SEND_FAILURE_NOTICE"
+    CONFIRM_CARD = "CONFIRM_CARD"
+    CONFIRM_RESULT = "CONFIRM_RESULT"
+    CARD_DELIVERY_FAILED = "CARD_DELIVERY_FAILED"
 
 
 class ShadowDecisionOutcome(str, Enum):
@@ -140,6 +146,48 @@ class ShadowDecisionOutcome(str, Enum):
     REPLAYED = "REPLAYED"
     REJECTED_APPROVAL_EXPIRED = "REJECTED_APPROVAL_EXPIRED"
     REJECTED_OTHER = "REJECTED_OTHER"
+
+
+class ConfirmOutcome(str, Enum):
+    """What a CONFIRM or CANCEL press amounted to, as shown to the operator (plan 16-11)."""
+
+    CONFIRMED = "CONFIRMED"
+    CANCELLED = "CANCELLED"
+    EXPIRED_TTL = "EXPIRED_TTL"
+    REJECTED_PLAN_EXPIRED = "REJECTED_PLAN_EXPIRED"
+    REJECTED_USER_MISMATCH = "REJECTED_USER_MISMATCH"
+    REJECTED_OTHER = "REJECTED_OTHER"
+
+
+@dataclass(frozen=True)
+class ConfirmCardFields:
+    """The values of the SHADOW confirmation card (D041), already computed by the caller.
+
+    `entry_ref` is the adverse edge of the entry zone (the sizing basis of RISK_MANAGEMENT:
+    LONG entry_max, SHORT entry_min), so `notional` and `estimated_loss` are the conservative
+    figures. `mark_price` is None when the injected provider had none; the card then says so.
+    """
+
+    symbol: str
+    side: str
+    quantity: Decimal
+    entry_ref: Decimal
+    stop_loss: Decimal
+    notional: Decimal
+    estimated_loss: Decimal
+    mark_price: Decimal | None
+    plan_expiry_utc: datetime
+    plan_remaining_seconds: int
+    confirm_ttl_seconds: int
+    confirm_until_utc: datetime
+
+
+def _plain(value: Decimal) -> str:
+    """A Decimal without exponent or trailing zeros (`48.00` -> `48`, `0.080` -> `0.08`)."""
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
 
 
 def format_time_pair(instant_utc: datetime) -> str:
@@ -164,6 +212,9 @@ def render_shadow_message(
     failure_kind: str = "",
     retry_after_seconds: int | None = None,
     signal_id: str = "",
+    card: ConfirmCardFields | None = None,
+    confirm_outcome: ConfirmOutcome | None = None,
+    confirm_requested_at_utc: datetime | None = None,
 ) -> str:
     """Compose a SHADOW text: label, mode, the kind's lines, every time as a UTC + local pair.
 
@@ -197,6 +248,51 @@ def render_shadow_message(
         if signal_id != "":
             lines.append(f"Signal: {signal_id}")
         lines.append("Nothing was approved.")
+    elif kind is ShadowMessageKind.CONFIRM_CARD:
+        if card is None:
+            raise ValueError("a CONFIRM_CARD needs its card fields")
+        mark = "mark price unavailable" if card.mark_price is None else _plain(card.mark_price)
+        lines.extend(
+            [
+                "Confirm this SHADOW plan? No real order will be placed.",
+                f"Symbol: {card.symbol}",
+                f"Side: {card.side}",
+                f"Quantity: {_plain(card.quantity)}",
+                f"Entry (adverse edge): {_plain(card.entry_ref)}",
+                f"Stop loss: {_plain(card.stop_loss)}",
+                f"Notional: {_plain(card.notional)} quote",
+                f"Estimated loss at SL: {_plain(card.estimated_loss)} quote",
+                f"Mark price: {mark}",
+                f"Plan expiry: {format_time_pair(card.plan_expiry_utc)} "
+                f"(remaining {card.plan_remaining_seconds} s)",
+                f"Confirm within {card.confirm_ttl_seconds} s "
+                f"(until {format_time_pair(card.confirm_until_utc)})",
+            ]
+        )
+    elif kind is ShadowMessageKind.CONFIRM_RESULT:
+        if confirm_outcome is None:
+            raise ValueError("a CONFIRM_RESULT needs an outcome")
+        lines.append(f"Confirm: {confirm_outcome.value}")
+        if detail != "":
+            lines.append(f"Detail: {detail}")
+        if confirm_requested_at_utc is not None:
+            lines.append(f"Confirm requested: {format_time_pair(confirm_requested_at_utc)}")
+        if expiry_utc is not None:
+            lines.append(f"Plan expiry: {format_time_pair(expiry_utc)}")
+        lines.append(
+            "Nothing was simulated."
+            if confirm_outcome is not ConfirmOutcome.CONFIRMED
+            else "SHADOW only: no order was placed."
+        )
+    elif kind is ShadowMessageKind.CARD_DELIVERY_FAILED:
+        if failure_kind == "":
+            raise ValueError("a CARD_DELIVERY_FAILED notice needs a failure kind")
+        lines.append(f"Confirmation card not delivered: {failure_kind}")
+        if signal_id != "":
+            lines.append(f"Signal: {signal_id}")
+        if expiry_utc is not None:
+            lines.append(f"Plan expiry: {format_time_pair(expiry_utc)}")
+        lines.append("The plan was approved but cannot be confirmed. Nothing was simulated.")
     else:  # pragma: no cover - the enum is closed
         raise ValueError(f"unknown SHADOW message kind {kind!r}")
     lines.append(f"Time: {format_time_pair(now_utc)}")
@@ -351,6 +447,7 @@ class ShadowApprovalBook:
         self._stores = stores
         self._clock = clock
         self._contexts: dict[str, dict[str, Any]] = {}
+        self._plans: dict[str, tuple[Signal, TradePlan]] = {}
         self._last: DecisionRecord | None = None
 
     def issue(self, *, signal: Signal, plan: TradePlan, now_utc: datetime) -> IssuedApprovals:
@@ -376,6 +473,7 @@ class ShadowApprovalBook:
             trade_plan_id=plan.trade_plan_id,
             created_at_utc=now_utc,
         )
+        self._plans[mapping.short_id] = (signal, plan)
         self._contexts[mapping.short_id] = {
             "plan_hash": plan.plan_hash,
             "strategy_version": signal.strategy_version,
@@ -396,6 +494,14 @@ class ShadowApprovalBook:
         """The `binding_context_resolver`: the binding context for a short id, or None."""
         context = self._contexts.get(short_id)
         return None if context is None else dict(context)
+
+    def plan_context(self, short_id: str) -> tuple[Signal, TradePlan] | None:
+        """The signal and plan behind a short id (memory only, like the raw tokens), or None.
+
+        The confirm layer (plan 16-11) renders the confirmation card from it. After a restart
+        the context is gone, which is consistent with the raw tokens being gone.
+        """
+        return self._plans.get(short_id)
 
     def take_last_decision(self) -> DecisionRecord | None:
         """Return and clear the record of the last `dispatch` (read by the reply function)."""
@@ -738,6 +844,22 @@ async def send_shadow_alert(
 # --------------------------------------------------------------------------- #
 
 
+@dataclass(frozen=True)
+class ConfirmRecord:
+    """What the last CONFIRM or CANCEL press amounted to (consumed by the reply function)."""
+
+    outcome: ConfirmOutcome
+    detail: str
+    confirm_requested_at_utc: datetime | None
+    plan_expiry_utc: datetime | None
+
+
+class ConfirmResultSource(Protocol):
+    """The confirm book as the reply function sees it: it hands over the last press record."""
+
+    def take_last_result(self) -> ConfirmRecord | None: ...
+
+
 def _outcome_from_text(text: str) -> ShadowDecisionOutcome:
     """Fail-closed fallback when no dispatch record exists: only an explicit OK counts."""
     if text.startswith("OK: APPROVED"):
@@ -755,6 +877,7 @@ def make_shadow_reply_fn(
     mode: Mode,
     clock: Callable[[], datetime],
     book: ShadowApprovalBook | None = None,
+    confirm_book: ConfirmResultSource | None = None,
 ) -> Callable[[int, str], Awaitable[None]]:
     """The `reply_text_fn` for `on_callback`: every outcome text goes through the composer.
 
@@ -762,21 +885,34 @@ def make_shadow_reply_fn(
     With the approval `book`, the outcome (APPROVED, SKIPPED, REPLAYED, expired, rejected) comes
     from the book's record of the last dispatch; without it, from the text, failing closed. The
     decision is already made when the reply goes out, so a failed reply is logged and never
-    raised into the handler.
+    raised into the handler. With the `confirm_book` (plan 16-11), the reply to a CONFIRM or
+    CANCEL press is a CONFIRM_RESULT message built from the book's record of that press.
     """
     require_shadow(mode)
 
     async def reply(chat_id: int, text: str) -> None:
-        record = None if book is None else book.take_last_decision()
-        outcome = _outcome_from_text(text) if record is None else record.outcome
-        message = render_shadow_message(
-            ShadowMessageKind.DECISION_RESULT,
-            mode=mode,
-            now_utc=clock(),
-            outcome=outcome,
-            detail=text,
-            expiry_utc=None if record is None else record.expiry_utc,
-        )
+        confirm_record = None if confirm_book is None else confirm_book.take_last_result()
+        if confirm_record is not None:
+            message = render_shadow_message(
+                ShadowMessageKind.CONFIRM_RESULT,
+                mode=mode,
+                now_utc=clock(),
+                confirm_outcome=confirm_record.outcome,
+                detail=confirm_record.detail,
+                confirm_requested_at_utc=confirm_record.confirm_requested_at_utc,
+                expiry_utc=confirm_record.plan_expiry_utc,
+            )
+        else:
+            record = None if book is None else book.take_last_decision()
+            outcome = _outcome_from_text(text) if record is None else record.outcome
+            message = render_shadow_message(
+                ShadowMessageKind.DECISION_RESULT,
+                mode=mode,
+                now_utc=clock(),
+                outcome=outcome,
+                detail=text,
+                expiry_utc=None if record is None else record.expiry_utc,
+            )
         try:
             await send_text(bot, chat_id, message)
         except TelegramSendError as exc:
@@ -864,6 +1000,10 @@ def invalidate_pending_on_restart(stores: ShadowStores, now_utc: datetime) -> Re
 __all__ = [
     "DISPLAY_ZONE",
     "SHADOW_LABEL",
+    "ConfirmCardFields",
+    "ConfirmOutcome",
+    "ConfirmRecord",
+    "ConfirmResultSource",
     "DecisionRecord",
     "IssuedApprovals",
     "Mode",

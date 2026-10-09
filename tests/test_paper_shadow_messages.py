@@ -255,8 +255,17 @@ CATALOGUE: list[tuple[ShadowMessageKind, dict[str, Any]]] = [
 ]
 
 
+# Plan 16-11 catalogues the confirm kinds in tests/test_paper_shadow_confirm.py, which also
+# asserts that the two catalogues together name every ShadowMessageKind.
+CONFIRM_KINDS = {
+    ShadowMessageKind.CONFIRM_CARD,
+    ShadowMessageKind.CONFIRM_RESULT,
+    ShadowMessageKind.CARD_DELIVERY_FAILED,
+}
+
+
 def test_the_catalogue_names_every_message_kind_and_every_outcome() -> None:
-    assert {kind for kind, _ in CATALOGUE} == set(ShadowMessageKind)
+    assert {kind for kind, _ in CATALOGUE} == set(ShadowMessageKind) - CONFIRM_KINDS
     outcomes = {
         fields["outcome"] for kind, fields in CATALOGUE if kind is ShadowMessageKind.DECISION_RESULT
     }

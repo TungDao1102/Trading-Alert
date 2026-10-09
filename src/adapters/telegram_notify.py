@@ -144,6 +144,9 @@ APR_PREFIX: str = "APR:"
 SKP_PREFIX: str = "SKP:"
 SIM_PREFIX: str = "SIM:"
 SKIP_PREFIX: str = "SKIP:"
+# SHADOW confirm step (Phase 16, plan 16-11, D041): the second press after APPROVE.
+CNF_PREFIX: str = "CNF:"
+CXL_PREFIX: str = "CXL:"
 
 
 def _short_signal_id_with_prefix(signal_id: str, prefix: str) -> str:
@@ -229,6 +232,28 @@ def build_shadow_decision_keyboard(signal_id: str) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("APPROVE", callback_data=apr_data),
                 InlineKeyboardButton("SKIP", callback_data=skp_data),
+            ]
+        ]
+    )
+
+
+def build_confirm_keyboard(signal_id: str) -> InlineKeyboardMarkup:
+    """Build the SHADOW confirmation keyboard: one row, a CONFIRM and a CANCEL button.
+
+    Phase 16, plan 16-11 (D041, L-13). The callback data is `CNF:<short>` / `CXL:<short>` with
+    the same short id (`sha256(signal_id)[:32]`) as the alert it replaces, 36 bytes each. The
+    confirm token itself never travels in the callback data: it is held in memory by the
+    SHADOW confirm layer and looked up by this short id.
+    """
+    cnf_data = _short_signal_id_with_prefix(signal_id, CNF_PREFIX)
+    cxl_data = _short_signal_id_with_prefix(signal_id, CXL_PREFIX)
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("CONFIRM", callback_data=cnf_data),
+                InlineKeyboardButton("CANCEL", callback_data=cxl_data),
             ]
         ]
     )
@@ -368,6 +393,21 @@ async def edit_text(
         raise TelegramSendError(classify_telegram_error(exc)) from None
 
 
+async def edit_to_confirm_card(
+    bot: TelegramTextBot,
+    chat_id: str | int,
+    message_id: int,
+    text: str,
+    keyboard: InlineKeyboardMarkup,
+) -> object:
+    """Edit the alert message into the SHADOW confirmation card (plan 16-11).
+
+    A failure arrives as a `TelegramSendError` with a classified failure, exactly as for
+    `edit_text` (`MESSAGE_NOT_MODIFIED` included: the caller decides that it counts as success).
+    """
+    return await edit_text(bot, chat_id, message_id, text, keyboard)
+
+
 # --------------------------------------------------------------------------- #
 # format_approve — PTB-free 12-field renderer (mirrors format_simulate).
 # --------------------------------------------------------------------------- #
@@ -480,6 +520,8 @@ def format_approve(
 
 __all__ = [
     "APR_PREFIX",
+    "CNF_PREFIX",
+    "CXL_PREFIX",
     "SKP_PREFIX",
     "SIM_PREFIX",
     "SKIP_PREFIX",
@@ -490,11 +532,13 @@ __all__ = [
     "TelegramSendError",
     "TelegramTextBot",
     "build_approve_keyboard",
+    "build_confirm_keyboard",
     "build_shadow_decision_keyboard",
     "build_simulate_keyboard",
     "build_skip_keyboard",
     "classify_telegram_error",
     "edit_text",
+    "edit_to_confirm_card",
     "format_approve",
     "send_simulate",
     "send_text",
