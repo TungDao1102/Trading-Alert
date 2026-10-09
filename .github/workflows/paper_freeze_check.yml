@@ -15,6 +15,22 @@
 # Operator alternative: a soak-host scheduled process (cron, systemd
 # timer, etc.) calling the same CLI. Either satisfies D-04; CI is
 # cheaper, a process is more immediate.
+#
+# Plan 16-09 (L-01, D-21): the CLI runs with --from-allowlist, so no
+# strategy or parameter-set id is written here. It checks the one set
+# the paper-start allowlist authorizes and appends a SKIPPED line while
+# that allowlist is empty (SKIPPED is neither clean nor a failure). Every
+# line is stamped with the run id, run attempt, event name, cron string
+# (PAPER_EVENT_SCHEDULE) and commit, so a reconciler can tell scheduled
+# ticks from manual runs.
+#
+# What this check proves, and what it does not (D-22, L-01): it proves
+# registry immutability for the checked set, nothing more. It never
+# proves that the paper host ran, that the feed was healthy or that any
+# bar was evaluated. A scheduled run that did not happen writes no line;
+# that gap is detected outside this workflow and is an EVIDENCE_GAP,
+# never a clean tick. The Actions cache holds the pinned state: it is
+# operational state, not evidence (caches unused for 7 days are removed).
 
 name: Paper Freeze Check
 
@@ -72,13 +88,14 @@ jobs:
           PAPER_REGISTRY_ROOT: ${{ github.workspace }}/params
           PAPER_PINNED_STATE: ${{ github.workspace }}/logs/paper/pinned_epoch.json
           PAPER_DIFF_LOG: ${{ github.workspace }}/logs/paper/registry_diff.jsonl
+          # Empty on workflow_dispatch; the cron string on a scheduled run.
+          PAPER_EVENT_SCHEDULE: ${{ github.event.schedule }}
         run: |
           mkdir -p "$(dirname "$PAPER_DIFF_LOG")"
           set +e
           uv run python -m src.paper.freeze \
             --check \
-            --strategy-id trend-pullback \
-            --parameter-set-id baseline-v3 \
+            --from-allowlist \
             --diff-log "$PAPER_DIFF_LOG" \
             --pinned-state "$PAPER_PINNED_STATE" \
             --registry-root "$PAPER_REGISTRY_ROOT"

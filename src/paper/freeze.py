@@ -50,9 +50,20 @@ Public surface (the only symbols downstream code uses):
     success, non-zero on missing state.
 
 `PaperAllowlistEntry` and `PAPER_START_ALLOWLIST` are module-internal policy
-data read only by `pin_stream_epoch`. The allowlist is empty by the user's
-decision at checkpoint 15-17-01 (Option B), is consulted only for sets without
-rationale tables, and is guarded by tests/test_paper_start_gate.py.
+data read by `pin_stream_epoch` and, through the accessors `allowlist_entries()`
+and `find_allowlist_entry()`, by the freeze CLI and the runtime (plan 16-22).
+The allowlist is empty by the user's decision at checkpoint 15-17-01 (Option B),
+is consulted only for sets without rationale tables, and is guarded by
+tests/test_paper_start_gate.py.
+
+Plan 16-09 adds `--from-allowlist` to the CLI (`run_allowlist_check_cli`): the
+ids come from the allowlist, never from the caller. An empty allowlist appends
+one `FreezeSkippedEntry` line (outcome "SKIPPED", reason "allowlist empty") and
+exits 0; it is never a clean tick and never falls back to a set. One entry is
+checked exactly like the explicit-id call, plus the rule that the pinned hash
+equals the entry's hash. Every line may carry `run_metadata` (run id, attempt,
+event name, cron string, commit) read from five named environment variables, so
+a reconciler can tell scheduled ticks from manual runs.
 
 The module owns the freeze-monitor slice: registry reads go through
 `src/domain/registry.py`, cost-key binding through `src/backtest/`
@@ -170,23 +181,29 @@ class DiffLogEntry:
     pinned_hash: str
     current_hash: str
     outcome: str  # "clean" or "REGISTRY_DIFF"
+    run_metadata: Mapping[str, str] | None = None
+    """Run identity copied from the runner environment (plan 16-09); rendered only when set."""
 
     def __post_init__(self) -> None:
         if self.checked_at_utc.tzinfo is None:
             raise ValueError("checked_at_utc must be UTC-aware")
         if self.outcome not in ("clean", "REGISTRY_DIFF"):
             raise ValueError(f"outcome must be 'clean' or 'REGISTRY_DIFF', got {self.outcome!r}")
+        _check_run_metadata(self.run_metadata)
 
     def to_jsonl(self) -> str:
         """Render this entry as a single-line JSON string for the diff log."""
+        payload: dict[str, object] = {
+            "checked_at_utc": self.checked_at_utc.astimezone(UTC).isoformat(),
+            "epoch_id": self.epoch_id,
+            "pinned_hash": self.pinned_hash,
+            "current_hash": self.current_hash,
+            "outcome": self.outcome,
+        }
+        if self.run_metadata is not None:
+            payload["run_metadata"] = dict(self.run_metadata)
         return json.dumps(
-            {
-                "checked_at_utc": self.checked_at_utc.astimezone(UTC).isoformat(),
-                "epoch_id": self.epoch_id,
-                "pinned_hash": self.pinned_hash,
-                "current_hash": self.current_hash,
-                "outcome": self.outcome,
-            },
+            payload,
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
@@ -761,6 +778,7 @@ def check_registry_unchanged(
     registry_root: Path | None = None,
     diff_log_path: Path | None = None,
     now_utc: datetime | None = None,
+    run_metadata: Mapping[str, str] | None = None,
 ) -> FreezeCheckOutcome:
     """Re-read the registry and compare canonical hashes (D-04).
 
@@ -784,6 +802,8 @@ def check_registry_unchanged(
         now_utc: UTC-aware datetime marking the check time. If None,
             uses datetime.now(UTC). Defaults to wall-clock for
             soak-runtime use.
+        run_metadata: Optional run identity (see `read_run_metadata`) written on the
+            diff-log line; None writes the line exactly as before plan 16-09.
     """
     root = resolve_registry_root(registry_root)
     if now_utc is None:
@@ -808,6 +828,7 @@ def check_registry_unchanged(
             pinned_hash=pinned_epoch.parameter_set_hash,
             current_hash=current_hash,
             outcome="clean",
+            run_metadata=run_metadata,
         )
         if diff_log_path is not None:
             _append_diff_entry(diff_log_path, diff_entry)
@@ -842,6 +863,7 @@ def check_registry_unchanged(
         pinned_hash=pinned_epoch.parameter_set_hash,
         current_hash=current_hash,
         outcome="REGISTRY_DIFF",
+        run_metadata=run_metadata,
     )
     if diff_log_path is not None:
         _append_diff_entry(diff_log_path, diff_entry)
@@ -924,6 +946,8 @@ def run_check_cli(
     diff_log_path: Path,
     registry_root: Path | None = None,
     now_utc: datetime | None = None,
+    expected_hash: str | None = None,
+    run_metadata: Mapping[str, str] | None = None,
 ) -> int:
     """Run one tick of the freeze check (CLI entry point).
 
@@ -934,6 +958,10 @@ def run_check_cli(
     The CLI's `--strategy-id/--parameter-set-id` must match the pinned
     file (WR-15): checking pair B against pair A's state is a silent
     wrong-answer success without this gate.
+
+    When `expected_hash` is given (the allowlist mode, plan 16-09) the pinned state must
+    also carry exactly that hash: a state pinned to any other hash than the one the user
+    approved is refused with 1 and no line is written.
 
     Returns:
         0 on a clean tick.
@@ -958,11 +986,22 @@ def run_check_cli(
         )
         return 1
 
+    if expected_hash is not None and pinned_epoch.parameter_set_hash != expected_hash:
+        log.error(
+            "paper.freeze.cli_pinned_hash_not_approved",
+            strategy_id=pinned_epoch.strategy_id,
+            parameter_set_id=pinned_epoch.parameter_set_id,
+            pinned_hash=pinned_epoch.parameter_set_hash,
+            approved_hash=expected_hash,
+        )
+        return 1
+
     outcome = check_registry_unchanged(
         pinned_epoch,
         registry_root=registry_root,
         diff_log_path=diff_log_path,
         now_utc=now_utc,
+        run_metadata=run_metadata,
     )
 
     # On rollover, persist the new pinned state so the next tick
@@ -1014,8 +1053,17 @@ def run_allowlist_check_cli(
             entries=len(entries),
         )
         return 1
-    log.error("paper.freeze.cli_allowlist_entry_not_supported", reason="not implemented yet")
-    return 1
+    entry = entries[0]
+    return run_check_cli(
+        strategy_id=entry.strategy_id,
+        parameter_set_id=entry.parameter_set_id,
+        pinned_state_path=pinned_state_path,
+        diff_log_path=diff_log_path,
+        registry_root=registry_root,
+        now_utc=now_utc,
+        expected_hash=entry.parameter_set_hash,
+        run_metadata=run_metadata,
+    )
 
 
 def _cli_main(argv: list[str] | None = None) -> int:
@@ -1110,6 +1158,7 @@ def _cli_main(argv: list[str] | None = None) -> int:
         diff_log_path=args.diff_log,
         registry_root=args.registry_root,
         now_utc=None,
+        run_metadata=read_run_metadata(),
     )
 
 

@@ -279,8 +279,10 @@ def _argv(tmp_path: Path, registry_root: Path, pinned: Path) -> list[str]:
 def _mutate_set(registry_root: Path) -> None:
     target = registry_root / STRATEGY_ID / f"{PARAMETER_SET_ID}.toml"
     text = target.read_text(encoding="utf-8")
-    assert "fee_rate_entry" in text
-    target.write_text(text.replace("fee_rate_entry", "fee_rate_entry_x", 1), encoding="utf-8")
+    assert "fee_rate_entry = 0.0002" in text
+    target.write_text(
+        text.replace("fee_rate_entry = 0.0002", "fee_rate_entry = 0.0003", 1), encoding="utf-8"
+    )
 
 
 def test_one_entry_clean_tick_exits_zero_and_checks_exactly_that_set(
