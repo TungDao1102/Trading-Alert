@@ -588,7 +588,11 @@ def test_common_guide_is_utf8_lf_vietnamese_and_has_no_emoji() -> None:
     assert GUIDE.is_file(), "docs/operations/DEPLOY_GUIDE.vi.md does not exist"
     raw = GUIDE.read_bytes()
     text = raw.decode("utf-8")  # strict: raises on invalid UTF-8
-    assert b"\r" not in raw, "the guide must use LF line endings only"
+    # LF in the repository; a Windows checkout with autocrlf may turn all of them into CRLF, so
+    # only a mixture (or a stray CR) is a defect.
+    crlf, lf = raw.count(b"\r\n"), raw.count(b"\n")
+    assert crlf in (0, lf), "the guide mixes LF and CRLF line endings"
+    assert raw.count(b"\r") == crlf, "the guide has a stray carriage return"
     assert not text.startswith("﻿"), "the guide must not start with a BOM"
     diacritics = len(_VI_CHARS.findall(_nfc(text)))
     assert diacritics >= 2000, f"only {diacritics} Vietnamese diacritic characters"
