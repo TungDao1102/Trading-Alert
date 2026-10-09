@@ -177,7 +177,7 @@ def test_manifest_and_grid_hashes_are_canonical_and_change_with_any_field(
         "universe_id": "research-universe-v2",
         "symbols": (SYMBOL, "ETHUSDT"),
         "dataset_id": "0" * 64,
-        "development_end_utc": datetime(2026, 7, 6, tzinfo=UTC),
+        "development_start_utc": datetime(2026, 6, 30, tzinfo=UTC),
         "holdout_end_utc": datetime(2026, 7, 12, tzinfo=UTC),
         "strategy_interval": "4h",
         "data_source_version": "test-2",
