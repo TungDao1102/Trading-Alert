@@ -4,10 +4,10 @@ milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: planning
-stopped_at: Phase 17 complete, ready to plan Phase 16
+stopped_at: Phase 16 planned (49 plans, plan-checked), ready to execute
 last_updated: "2026-10-07T10:06:35.640Z"
 last_activity: 2026-10-07
-last_activity_desc: Phase 17 complete, transitioned to Phase 16
+last_activity_desc: Phase 16 plans audited, revised and plan-checked
 state_head: 7148528c030c750cd0bf713b0d9c32923665eee9
 progress:
   total_phases: 29
@@ -27,7 +27,7 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 16 — Paper Runtime Composition + SHADOW Approval Mode (ready to plan)
+**Current focus:** Phase 16 — Paper Runtime Composition + SHADOW Approval Mode (planned, ready to execute)
 
 ## Current Position
 
@@ -543,5 +543,5 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 ## Session Continuity
 
 Last session: 2026-10-07T03:48:58.205Z
-Stopped at: Phase 17 complete, ready to plan Phase 16
+Stopped at: Phase 16 planned (49 plans, plan-checked), ready to execute
 Resume file: None
