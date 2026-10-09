@@ -63,9 +63,10 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import tomllib
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import structlog
@@ -393,6 +394,35 @@ class PaperAllowlistEntry:
     """ISO date of the user's approval."""
     basis: str
     """The user checkpoint and decision row that approved the entry."""
+
+    def __post_init__(self) -> None:
+        """Fail loudly on a malformed entry (review IN-01), naming the offending field.
+
+        A malformed hash would never match and the user's approval would sit in the allowlist
+        as a dead entry with only a generic refusal, so every field is checked at construction.
+        """
+        for field in dataclasses.fields(self):
+            value = getattr(self, field.name)
+            if not isinstance(value, str):
+                raise TypeError(f"{field.name} must be a str, got {type(value).__name__}")
+        if re.fullmatch(r"[0-9a-f]{64}", self.parameter_set_hash) is None:
+            raise ValueError(
+                "parameter_set_hash must be a 64-char lowercase hex SHA256 string, "
+                f"got {self.parameter_set_hash!r}"
+            )
+        for text_field in ("strategy_id", "parameter_set_id", "purpose", "basis"):
+            if getattr(self, text_field).strip() == "":
+                raise ValueError(f"{text_field} must be a non-empty, non-blank string")
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", self.approved_at) is None:
+            raise ValueError(
+                f"approved_at must be an ISO date YYYY-MM-DD, got {self.approved_at!r}"
+            )
+        try:
+            date.fromisoformat(self.approved_at)
+        except ValueError as exc:
+            raise ValueError(
+                f"approved_at must be a real ISO date YYYY-MM-DD, got {self.approved_at!r}"
+            ) from exc
 
 
 # Checkpoint 15-17-01, Option B (user decision of 2026-10-07): the approved paper-start

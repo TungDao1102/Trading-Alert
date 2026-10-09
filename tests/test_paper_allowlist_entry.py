@@ -13,7 +13,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-
 from src.domain.rationale import UnrationalizedParameterSet
 from src.paper.freeze import PAPER_START_ALLOWLIST, PaperAllowlistEntry, pin_stream_epoch
 
