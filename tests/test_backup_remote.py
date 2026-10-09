@@ -105,7 +105,7 @@ def _make_bundle(tmp_path: Path, *, with_parquet: bool = True) -> Path:
 # --------------------------------------------------------------------------- #
 
 
-def test_rclone_env_maps_all_eight_variables() -> None:
+def test_rclone_env_maps_all_variables() -> None:
     mapped = remote.rclone_env(S3_ENV)
 
     assert mapped == {
@@ -113,6 +113,7 @@ def test_rclone_env_maps_all_eight_variables() -> None:
         "RCLONE_CONFIG_BACKUPS3_PROVIDER": "Other",
         "RCLONE_CONFIG_BACKUPS3_ENDPOINT": "https://s3.example.invalid",
         "RCLONE_CONFIG_BACKUPS3_REGION": "us-east-1",
+        "RCLONE_CONFIG_BACKUPS3_NO_CHECK_BUCKET": "true",
         "RCLONE_CONFIG_BACKUPS3_ACCESS_KEY_ID": "AccessIdValue12345",
         "RCLONE_CONFIG_BACKUPS3_SECRET_ACCESS_KEY": "SecretKeyValue-abcdef-98765",
         "RCLONE_CONFIG_BACKUPS3CRYPT_TYPE": "crypt",
@@ -142,6 +143,28 @@ def test_rclone_env_empty_value_counts_as_missing_and_lists_every_name() -> None
 
     assert "BACKUP_S3_BUCKET" in str(excinfo.value)
     assert "BACKUP_S3_REGION" in str(excinfo.value)
+
+
+def test_rclone_env_aws_without_endpoint_is_allowed() -> None:
+    base = {k: v for k, v in S3_ENV.items() if k != "BACKUP_S3_ENDPOINT"}
+
+    for environ in (
+        {**base, "BACKUP_S3_PROVIDER": "AWS"},
+        {**base, "BACKUP_S3_PROVIDER": "AWS", "BACKUP_S3_ENDPOINT": ""},
+    ):
+        mapped = remote.rclone_env(environ)
+
+        assert mapped["RCLONE_CONFIG_BACKUPS3_PROVIDER"] == "AWS"
+        assert mapped["RCLONE_CONFIG_BACKUPS3_ENDPOINT"] == ""
+
+
+def test_rclone_env_other_without_endpoint_names_endpoint() -> None:
+    environ = {**S3_ENV, "BACKUP_S3_PROVIDER": "Other", "BACKUP_S3_ENDPOINT": ""}
+
+    with pytest.raises(RemoteConfigError) as excinfo:
+        remote.rclone_env(environ)
+
+    assert "BACKUP_S3_ENDPOINT" in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------- #

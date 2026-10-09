@@ -76,6 +76,13 @@ S3_VARIABLES: tuple[str, ...] = (
 )
 CRYPT_VARIABLES: tuple[str, ...] = ("BACKUP_CRYPT_PASSWORD", "BACKUP_CRYPT_PASSWORD2")
 
+# Providers whose S3 endpoint rclone resolves from the region alone. Only
+# `Other` (Backblaze B2 style S3-compatible stores) needs an explicit
+# BACKUP_S3_ENDPOINT. This matches .env.example and RUNBOOK §11, and avoids
+# the explicit-endpoint path on which rclone sends AWS CreateBucket without a
+# LocationConstraint (IllegalLocationConstraintException on real S3).
+PROVIDERS_WITHOUT_ENDPOINT: frozenset[str] = frozenset({"aws", "wasabi"})
+
 SENTINEL_PATH = "_sentinel/sentinel.txt"
 SENTINEL_CONTENT = "trading-alert backup sentinel format=1\n"
 
@@ -122,10 +129,15 @@ def rclone_env(environ: Mapping[str, str]) -> dict[str, str]:
     """Map ``BACKUP_S3_*`` / ``BACKUP_CRYPT_*`` to the ``RCLONE_CONFIG_*`` form.
 
     ``BACKUP_CRYPT_PASSWORD`` and ``BACKUP_CRYPT_PASSWORD2`` must already be ``rclone obscure``
-    output (rclone refuses a raw passphrase). Raises ``RemoteConfigError`` listing every missing
-    or empty variable by name.
+    output (rclone refuses a raw passphrase). ``BACKUP_S3_ENDPOINT`` may be empty
+    when ``BACKUP_S3_PROVIDER`` is AWS or Wasabi (rclone resolves the endpoint
+    from the region); any other provider requires it. Raises ``RemoteConfigError``
+    listing every missing or empty variable by name.
     """
-    missing = [name for name in (*S3_VARIABLES, *CRYPT_VARIABLES) if not environ.get(name, "")]
+    required = [name for name in S3_VARIABLES if name != "BACKUP_S3_ENDPOINT"]
+    if environ.get("BACKUP_S3_PROVIDER", "").strip().lower() not in PROVIDERS_WITHOUT_ENDPOINT:
+        required.append("BACKUP_S3_ENDPOINT")
+    missing = [name for name in (*required, *CRYPT_VARIABLES) if not environ.get(name, "")]
     if missing:
         raise RemoteConfigError(
             "backup configuration is incomplete; set: " + ", ".join(sorted(missing))
@@ -135,8 +147,16 @@ def rclone_env(environ: Mapping[str, str]) -> dict[str, str]:
     return {
         f"{s3}TYPE": "s3",
         f"{s3}PROVIDER": environ["BACKUP_S3_PROVIDER"],
-        f"{s3}ENDPOINT": environ["BACKUP_S3_ENDPOINT"],
+        f"{s3}ENDPOINT": environ.get("BACKUP_S3_ENDPOINT", ""),
         f"{s3}REGION": environ["BACKUP_S3_REGION"],
+        # Never let rclone create the bucket: it is created out-of-band by the
+        # operator (RUNBOOK §11 / guide 3.6) and init-remote already verifies
+        # emptiness through listing. Skipping the existence check also avoids
+        # the spurious CreateBucket path: S3 answers HeadBucket with 404
+        # (instead of 403) to least-privilege IAM users, which rclone reads as
+        # "bucket missing" and then fails CreateBucket with
+        # IllegalLocationConstraintException on regional endpoints.
+        f"{s3}NO_CHECK_BUCKET": "true",
         f"{s3}ACCESS_KEY_ID": environ["BACKUP_S3_ACCESS_KEY_ID"],
         f"{s3}SECRET_ACCESS_KEY": environ["BACKUP_S3_SECRET_ACCESS_KEY"],
         f"{crypt}TYPE": "crypt",
