@@ -695,7 +695,7 @@ Plans:
 
 **Depends on**: Phase 12, Phase 13.1, Phase 15, Phase 17
 
-**Plans**: 17/50 plans executed (16-01 to 16-50; plan-checker 2026-10-09: 0 blockers on 16-01 to 16-49; 16-50 added 2026-10-09 for the healthchecks.io heartbeat sender chosen by the user; open user questions Q-A to Q-Q are asked at the blocking-human checkpoints)
+**Plans**: 18/50 plans executed (16-01 to 16-50; plan-checker 2026-10-09: 0 blockers on 16-01 to 16-49; 16-50 added 2026-10-09 for the healthchecks.io heartbeat sender chosen by the user; open user questions Q-A to Q-Q are asked at the blocking-human checkpoints)
 
 **Requirements**: PAPER-01, PAPER-02
 
@@ -784,7 +784,7 @@ Plans:
 - [ ] 16-32-PLAN.md
 - [ ] 16-33-PLAN.md
 - [ ] 16-34-PLAN.md
-- [ ] 16-35-PLAN.md
+- [x] 16-35-PLAN.md
 - [ ] 16-36-PLAN.md
 - [ ] 16-37-PLAN.md
 - [ ] 16-38-PLAN.md
@@ -1254,7 +1254,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 13.1. Deployment & CI | 12/12 | Complete | 2026-10-04 |
 | 14. Backtest Simulator Causality Rewrite | 17/17 | Complete    | 2026-10-07 |
 | 15. Strategy Geometry Correction | 18/18 | Complete    | 2026-10-07 |
-| 16. Paper Runtime Composition + SHADOW Approval Mode | 17/50 | In Progress|  |
+| 16. Paper Runtime Composition + SHADOW Approval Mode | 18/50 | In Progress|  |
 | 17. Operational Persistence Layer | 15/15 | Complete    | 2026-10-07 |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |
 | 19. Execution Plan Binding + Pre-Placement Checks | 0/TBD | Not started | - |

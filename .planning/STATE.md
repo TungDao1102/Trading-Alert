@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: executing
-stopped_at: Completed 16-18-PLAN.md
-last_updated: "2026-10-09T14:37:32.602Z"
+stopped_at: Completed 16-35-PLAN.md
+last_updated: "2026-10-09T14:51:29.195Z"
 last_activity: 2026-10-09
 last_activity_desc: Phase 16 execution started
-state_head: 94856416f6aa8effdff309d54d6f99aff8db831b
+state_head: 8c6de16d1972bc98bfcaf255edeb96078cba575b
 progress:
   total_phases: 29
   completed_phases: 17
   total_plans: 194
-  completed_plans: 160
+  completed_plans: 161
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
-Plan: 4 of 50
+Plan: 5 of 50
 Status: Ready to execute
 Last activity: 2026-10-09 — Phase 16 execution started
 
@@ -210,6 +210,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P15 | 22 min | 4 tasks | 3 files |
 | Phase 16 P17 | 35min | 4 tasks | 4 files |
 | Phase 16 P18 | 35 min | 3 tasks | 6 files |
+| Phase 16 P35 | 12 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -512,6 +513,7 @@ Recent decisions affecting current work:
 - [Phase 16]: 16-17: path_exercised is unsolicited only when the first rebuild after the drop found stale stream names and no close API was called; a fake rig is never labelled REAL_SMOKE, even in --live mode
 - [Phase 16]: 16-17: --live checks BINANCE_* environment names before the operator flag (exit 3 before exit 2) and prints only the name; the SDK rotation override (floor 300 s) is process-local and restored in a finally block
 - [Phase 16]: 16-18: plateau/mark-hole/cost-field reporting is reporting only; per-point figures are existing backtest report outputs over pooled Validation trades, axis values ordered numerically, no marker or ordering by a metric
+- [Phase 16]: 16-35: SHADOW approval delay is the measured acted - requested of the approval row for a human action; APPROVAL_DELAY_LAG_SECONDS only for records with no human action (SIMULATE leg) — D-15, SC3; new PaperRecord fields are optional and omitted from the canonical output when absent so every pinned digest is unchanged (Q-K)
 
 ### Pending Todos
 
@@ -588,6 +590,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-09T14:37:32.234Z
-Stopped at: Completed 16-18-PLAN.md
+Last session: 2026-10-09T14:51:28.652Z
+Stopped at: Completed 16-35-PLAN.md
 Resume file: None
