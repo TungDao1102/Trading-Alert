@@ -18,7 +18,13 @@ from src.research import plateau as plateau_module
 from src.research import run as research_run
 from src.research.manifest import GridPoint, ParameterGrid
 from src.research.plateau import PlateauError, plateau_report, render_plateau
-from src.research.report import render_run_report
+from src.research.report import (
+    COST_FIELD_LINE,
+    MARK_HOLE_MARKER,
+    count_mark_hole_trades,
+    mark_hole_line,
+    render_run_report,
+)
 from src.research.run import run_research
 
 from tests.test_research_runner import (  # noqa: F401 - fixtures are used by name
@@ -192,6 +198,114 @@ def test_render_run_report_puts_feasibility_before_plateau() -> None:
     plateau = plateau_report(
         _grid_2x2(), _summaries({"p11": "0.1", "p12": "0.2", "p21": "0.3", "p22": "0.4"})
     )
-    lines = render_run_report(feasibility_lines=["feasibility x", "G5 line"], plateau=plateau)
+    lines = render_run_report(
+        feasibility_lines=["feasibility x", "G5 line"],
+        plateau=plateau,
+        mark_hole_trade_counts={"p11": 0, "p12": 0, "p21": 0, "p22": 0},
+    )
     assert lines[:2] == ["feasibility x", "G5 line"]
-    assert all(line.startswith("plateau") for line in lines[2:])
+    plateau_lines = render_plateau(plateau)
+    assert lines[2 : 2 + len(plateau_lines)] == plateau_lines
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: mark-hole trade count (OQ-1, report only) and the cost-field limitation.
+# --------------------------------------------------------------------------- #
+
+OQ1_TAIL = (
+    "(unclassified; methodology is a user decision before any candidate is evaluated "
+    "with this metric, OQ-1, D063 item 8)"
+)
+
+
+def _filled(note: str | None, *, entry_kind: str = "ENTRY_FILLED", outcome: str = "OK") -> dict:
+    return {
+        "trade_id": "t",
+        "outcome_kind": outcome,
+        "entry_kind": entry_kind,
+        "exit_kind": "TP2",
+        "coverage_note": note,
+    }
+
+
+def test_count_mark_hole_trades_counts_filled_trades_with_a_mark_hole_note_only() -> None:
+    hole = f"{MARK_HOLE_MARKER}_from_2026-01-01T00:00:00+00:00_to_2026-01-01T00:05:00+00:00; x"
+    trades = [
+        _filled(hole),
+        _filled(f"fallback note | {hole}"),
+        _filled(None),
+        _filled("some other note"),
+        _filled(hole, entry_kind="REJECT", outcome="REJECT"),
+        _filled(hole, entry_kind="PARTIAL_FILL"),
+    ]
+    assert count_mark_hole_trades(trades) == 3
+
+
+def test_mark_hole_marker_is_the_text_the_lifecycle_writes() -> None:
+    from datetime import UTC, datetime
+
+    from src.backtest import lifecycle
+
+    first = datetime(2026, 1, 1, tzinfo=UTC)
+    note = lifecycle._skipped_note((first, first))
+    assert MARK_HOLE_MARKER in note
+
+
+def test_mark_hole_line_states_the_count_unclassified_and_names_the_decision() -> None:
+    line = mark_hole_line(7, "p11")
+    assert f"trades held through mark-price holes: 7 {OQ1_TAIL}" in line
+    assert "p11" in line
+    assert VERDICT_WORDS.search(line) is None
+    for word in FORBIDDEN_WORDS:
+        assert word not in line.lower()
+
+
+def test_cost_field_line_is_the_exact_limitation_statement() -> None:
+    assert COST_FIELD_LINE == (
+        "modeled_costs_per_unit is None on v2 filled TradeRecords (D052-open, O-10); "
+        "no figure uses it"
+    )
+
+
+def test_run_research_prints_the_mark_hole_count_and_the_cost_limitation(
+    store: Path,  # noqa: F811
+    tmp_path: Path,
+    spies: Any,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manifest = _manifest(store, tmp_path)
+    grid = _grid()
+    run_research(
+        manifest=manifest,
+        grid=grid,
+        authorization=_authorization(manifest, grid),
+        raw_root=store,
+        output_dir=tmp_path / "experiments",
+        repo_root=REPO_ROOT,
+    )
+    stdout = capsys.readouterr().out
+    lines = stdout.splitlines()
+    hole_lines = [
+        line for line in lines if line.startswith("trades held through mark-price holes:")
+    ]
+    assert len(hole_lines) == 1 and OQ1_TAIL in hole_lines[0]
+    assert lines.count(COST_FIELD_LINE) == 1
+    assert VERDICT_WORDS.search(stdout) is None, stdout
+
+
+def test_the_mark_hole_count_enters_no_plateau_or_feasibility_figure() -> None:
+    plateau = plateau_report(
+        _grid_2x2(), _summaries({"p11": "0.1", "p12": "0.2", "p21": "0.3", "p22": "0.4"})
+    )
+    few = render_run_report(
+        feasibility_lines=["f"],
+        plateau=plateau,
+        mark_hole_trade_counts={"p11": 0, "p12": 0, "p21": 0, "p22": 0},
+    )
+    many = render_run_report(
+        feasibility_lines=["f"],
+        plateau=plateau,
+        mark_hole_trade_counts={"p11": 9, "p12": 8, "p21": 7, "p22": 6},
+    )
+    keep = [line for line in few if not line.startswith("trades held through")]
+    assert keep == [line for line in many if not line.startswith("trades held through")]
