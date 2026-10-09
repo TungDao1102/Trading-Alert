@@ -1,30 +1,31 @@
-"""Paper-loop REST resync module (Phase 7, plan 07-02, task 1).
+"""Paper-loop REST resync module (Phase 7 plan 07-02, corrected in Phase 16 plan 16-08).
 
-Per D-01 (flag-never-fabricate): the paper loop's resync module
-REST-backfills missed closes after a disconnect or 24h rotation, and
-journals any holes the exchange cannot fill as explicit gap records.
-The module NEVER synthesizes a candle for a window the exchange did
-not return — holes stay holes, and the journal layer persists them
-without a parallel table (gap dicts reuse the `CollectorGap` field
-shape: symbol, data_class, expected_utc, observed_utc, reason).
+Per D-01 (flag-never-fabricate): the resync module REST-backfills missed closes after a
+disconnect or SDK rotation, and reports any hole the exchange cannot fill as an explicit
+`GapRecord` with a reason code. The module NEVER synthesizes a candle for a window the
+exchange did not return: holes stay holes, and the runtime journals the records.
 
-The module is the adapter-surface owner for REST backfill: SDK response
-types enter only as `Kline` values via `src/adapters/binance_usdm.py`,
-and interval arithmetic reuses `src/data/backfill.py`. The WS
-surface stays behind `src/adapters/paper_ws.py`; the REST adapter
-surface stays behind `src/adapters/binance_usdm.py`.
+Phase 16 (research Pitfall P1): real Binance bars close at open + interval - 1 ms, so the
+expected slots are anchored on open times of the exchange grid, not on `last_close_utc`
+itself. Returned bars are `TaggedBar` values tagged `SourceTag.REST_BACKFILL`; a REST bar
+can never be evaluated as a live signal (L-11).
+
+The module is the owner of REST backfill: the public-data `Kline` type comes from
+`src/adapters/binance_public.py`, interval arithmetic from the shared vocabulary, and the
+WS surface stays behind `src/adapters/paper_ws.py`.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Protocol
 
 import structlog
 import tenacity
 
-from src.adapters.binance_usdm import Kline
-from src.data.backfill import interval_ms
+from src.adapters.binance_public import Kline
+
+from .vocabulary import INTERVAL_MS, GapReason, GapRecord, SourceTag, TaggedBar
 
 log = structlog.get_logger()
 
@@ -56,7 +57,7 @@ RESYNC_WAIT_MAX_SECONDS: int = 60
 class AdapterLike(Protocol):
     """Anything that quacks like the project adapter for kline REST.
 
-    The real `BinanceUsdmAdapter` satisfies this; tests inject a
+    The real `BinancePublicMarketData` satisfies this; tests inject a
     `FakeAdapter` that records its `start_ms` argument for audit.
     """
 
@@ -88,15 +89,17 @@ def _datetime_to_ms(value: datetime) -> int:
     return (delta.days * 86400 + delta.seconds) * 1000 + delta.microseconds // 1000
 
 
-def _data_class_for(interval: str) -> str:
-    """Map a canonical interval string to the paper-journal data_class.
+def _ms_to_utc(ms: int) -> datetime:
+    """Convert integer epoch milliseconds to a UTC datetime (exact, no float)."""
+    return _EPOCH_UTC + timedelta(milliseconds=ms)
 
-    Per D-01: the journal layer persists gap rows on the existing
-    `CollectorGap` table with a `data_class` discriminator. Paper
-    streams use `paper-<interval>` so downstream consumers can
-    distinguish paper gaps from OI/funding gaps.
-    """
-    return f"paper-{interval}"
+
+def _step_ms(interval: str) -> int:
+    """Interval length in milliseconds; an unknown interval fails loudly."""
+    try:
+        return INTERVAL_MS[interval]
+    except KeyError:
+        raise ValueError(f"unknown interval {interval!r}") from None
 
 
 def _expected_open_times(
@@ -104,26 +107,47 @@ def _expected_open_times(
     now_utc: datetime,
     step_ms: int,
 ) -> list[datetime]:
-    """Build the contiguous list of expected candle open_times.
+    """Build the contiguous list of expected candle open times on the exchange grid.
 
-    The first expected open_time is `last_close_utc` (the next candle
-    starts when the previous one closes); the last is the largest
-    `last_close_utc + k*step_ms` whose close_time `<= now_utc`.
-    Returns an empty list when `last_close_utc + step_ms > now_utc`
-    (no missed closes to backfill).
+    Exchange bars close at open + interval - 1 ms (research Pitfall P1), so the first
+    expected open is the first grid point at or after `last_close_utc + 1 ms`, which is
+    `last_open + interval` when `last_close_utc` is a real close. Anchoring on the grid (not
+    on `last_close_utc` itself) is what keeps real bars from being reported as phantom gaps.
+    The last expected open is the largest grid point whose close (open + interval - 1 ms) is
+    `<= now_utc`. Returns an empty list when no close is due yet.
 
-    The diff uses open_time (not close_time) so each expected slot maps
-    to exactly one exchange row; the caller diffs against CLOSED rows
-    only, so a slot whose row is still forming is reported as a
-    forming_at_observed_time gap, never as silent coverage.
+    The diff uses open time (not close time) so each expected slot maps to exactly one
+    exchange row; the caller diffs against CLOSED rows only, so a slot whose row is not closed
+    yet is reported as a gap, never as silent coverage.
     """
-    step = timedelta(milliseconds=step_ms)
+    next_open_ms = -(-(_datetime_to_ms(last_close_utc) + 1) // step_ms) * step_ms
+    now_ms = _datetime_to_ms(now_utc)
     out: list[datetime] = []
-    t = last_close_utc
-    while t + step <= now_utc:
-        out.append(t)
-        t += step
+    while next_open_ms + step_ms - 1 <= now_ms:
+        out.append(_ms_to_utc(next_open_ms))
+        next_open_ms += step_ms
     return out
+
+
+def expected_close_times(
+    last_close_utc: datetime, now_utc: datetime, interval: str
+) -> list[datetime]:
+    """The closes due after `last_close_utc` up to and including `now_utc`.
+
+    Used by the supervisor to name every close it could not recover when a whole backfill
+    fails (each becomes a `GapRecord`).
+    """
+    if last_close_utc.tzinfo is None:
+        raise ValueError("last_close_utc must be UTC-aware")
+    if now_utc.tzinfo is None:
+        raise ValueError("now_utc must be UTC-aware")
+    step_ms = _step_ms(interval)
+    return [
+        open_utc + timedelta(milliseconds=step_ms - 1)
+        for open_utc in _expected_open_times(
+            last_close_utc.astimezone(UTC), now_utc.astimezone(UTC), step_ms
+        )
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -138,23 +162,21 @@ async def backfill_missed_closes(
     interval: str,
     last_close_utc: datetime,
     now_utc: datetime,
-) -> tuple[list[Kline], list[dict[str, Any]]]:
-    """Backfill missed closes via REST klines, journaling holes as gaps.
+) -> tuple[list[TaggedBar], list[GapRecord]]:
+    """Backfill missed closes via REST klines, reporting holes as gap records.
 
-    Per D-01: the function pages `adapter.klines` from
-    `ms(last_close_utc)` with `limit=1500` under a tenacity-bounded
-    retry, drops any candle whose `close_time_utc > now_utc` (forming
-    candle), diffs the returned closes against the contiguous
-    expectation to find holes, and returns the available closes in
-    `close_time_utc` order plus one gap dict per hole.
-
-    The gap dicts reuse the `CollectorGap` field shape (symbol,
-    data_class, expected_utc, observed_utc, reason) so the journal
-    layer persists them without a parallel table.
+    Per D-01: the function pages `adapter.klines` from `ms(last_close_utc)` with
+    `limit=1500` under a tenacity-bounded retry, drops any candle whose
+    `close_time_utc > now_utc` (forming candle), diffs the returned closes against the
+    contiguous expectation on the exchange grid to find holes, and returns the available
+    closes in `close_time_utc` order plus one `GapRecord` per hole.
 
     Returns `(closes, gaps)`:
-      - `closes`: list of `Kline` instances in `close_time_utc` order
-      - `gaps`: list of gap dicts, one per hole the exchange did not fill
+      - `closes`: `TaggedBar` values tagged `SourceTag.REST_BACKFILL`, carrying the interval
+        of the request, in `close_time_utc` order
+      - `gaps`: one `GapRecord` per expected close the exchange did not fill
+        (`GapReason.EXCHANGE_NO_CANDLE`); a due slot whose only row is not closed yet is
+        reported as `GapReason.UNKNOWN` (CR-09: never silent coverage)
     """
     # Normalize to UTC for arithmetic (callers may pass any tz-aware
     # datetime; the adapter's ms math is UTC-anchored).
@@ -165,7 +187,7 @@ async def backfill_missed_closes(
     last_close_utc = last_close_utc.astimezone(UTC)
     now_utc = now_utc.astimezone(UTC)
 
-    step_ms = interval_ms(interval)
+    step_ms = _step_ms(interval)
     start_ms = _datetime_to_ms(last_close_utc)
     now_ms = _datetime_to_ms(now_utc)
 
@@ -173,7 +195,7 @@ async def backfill_missed_closes(
     # Retry transient faults only — programming errors (ValueError,
     # KeyError, TypeError) fail immediately instead of burning the
     # 120 s budget and masking deterministic faults as transient
-    # (WR-02; mirrors src/data/backfill.py fetch_page_with_retry).
+    # (WR-02).
     def _is_transient(exc: BaseException) -> bool:
         return not isinstance(exc, (ValueError, KeyError, TypeError))
 
@@ -240,29 +262,35 @@ async def backfill_missed_closes(
     # Build the contiguous expectation and diff against CLOSED rows
     # only (CR-09): a slot whose only exchange row is still forming
     # contributes no close, so diffing against raw_page would mark it
-    # "covered" while downstream sees a missing bar. Slots present in
-    # the raw page but absent from closed get an explicit
-    # forming_at_observed_time gap (retryable) rather than silence.
+    # "covered" while downstream sees a missing bar. A slot present in
+    # the raw page but absent from closed gets its own reason (UNKNOWN)
+    # rather than silence.
     expected_open_times = _expected_open_times(last_close_utc, now_utc, step_ms)
     closed_open_times = {k.open_time_utc for k in closed}
     raw_open_times = {k.open_time_utc for k in raw_page}
-    gaps: list[dict[str, Any]] = []
+    gaps: list[GapRecord] = []
     for expected_open in expected_open_times:
-        if expected_open not in closed_open_times:
-            expected_close = expected_open + timedelta(milliseconds=step_ms)
-            if expected_open in raw_open_times:
-                reason = "forming_at_observed_time"
-            else:
-                reason = "exchange_returned_no_candle_for_expected_close"
-            gaps.append(
-                {
-                    "symbol": symbol,
-                    "data_class": _data_class_for(interval),
-                    "expected_utc": expected_close,
-                    "observed_utc": now_utc,
-                    "reason": reason,
-                }
+        if expected_open in closed_open_times:
+            continue
+        if expected_open in raw_open_times:
+            reason = GapReason.UNKNOWN
+            log.warning(
+                "paper.resync.slot_not_closed",
+                symbol=symbol,
+                interval=interval,
+                open_time=expected_open.isoformat(),
             )
+        else:
+            reason = GapReason.EXCHANGE_NO_CANDLE
+        gaps.append(
+            GapRecord(
+                symbol=symbol,
+                interval=interval,
+                expected_close_utc=expected_open + timedelta(milliseconds=step_ms - 1),
+                reason=reason,
+                detected_at_utc=now_utc,
+            )
+        )
 
     log.info(
         "paper.resync.complete",
@@ -274,14 +302,30 @@ async def backfill_missed_closes(
         gaps=len(gaps),
     )
 
-    return closed, gaps
+    bars = [
+        TaggedBar(
+            symbol=symbol,
+            interval=interval,
+            open_time_utc=k.open_time_utc,
+            close_time_utc=k.close_time_utc,
+            open=k.open,
+            high=k.high,
+            low=k.low,
+            close=k.close,
+            volume=k.volume,
+            source=SourceTag.REST_BACKFILL,
+        )
+        for k in closed
+    ]
+    return bars, gaps
 
 
 __all__ = [
-    "AdapterLike",
     "RESYNC_MAX_ATTEMPTS",
     "RESYNC_MAX_DELAY_SECONDS",
-    "RESYNC_WAIT_MULTIPLIER_SECONDS",
     "RESYNC_WAIT_MAX_SECONDS",
+    "RESYNC_WAIT_MULTIPLIER_SECONDS",
+    "AdapterLike",
     "backfill_missed_closes",
+    "expected_close_times",
 ]
