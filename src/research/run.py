@@ -6,8 +6,9 @@ and every development / validation-fold window: case input from the published st
 `simulator.run`, `read_code_version`, `experiment.assemble`, one experiment record file named
 by its `experiment_id`. The holdout is never simulated here. The runner prints one neutral
 line per record (identifiers and a trade count), then the G1 feasibility counts per grid point
-(plan 16-12, reporting only), and no verdict, ranking or selection, and it writes nothing
-outside the output directory.
+(plan 16-12, reporting only), then the parameter-plateau section over the grid (plan 16-18,
+reporting only), and no verdict, ranking or selection, and it writes nothing outside the
+output directory.
 """
 
 from __future__ import annotations
@@ -45,6 +46,8 @@ from .manifest import (
     load_manifest,
     research_splits,
 )
+from .plateau import plateau_report
+from .report import render_run_report, summarize_trades
 
 EXIT_OK = 0
 EXIT_REFUSED = 2
@@ -242,7 +245,10 @@ def run_research(
             records.append(record)
             trade_lists.append(trade_list)
 
-    feasibility_lines = _feasibility_lines(manifest, grid, records, trade_lists)
+    report_lines = render_run_report(
+        feasibility_lines=_feasibility_lines(manifest, grid, records, trade_lists),
+        plateau=plateau_report(grid, _plateau_summaries(manifest, grid, records, trade_lists)),
+    )
     for record in records:
         _refuse_if_recorded(output_dir, record)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -260,9 +266,36 @@ def run_research(
             f"split_start_utc={record.split_start_utc.isoformat()} trades={len(trade_list)}",
             flush=True,
         )
-    for line in feasibility_lines:
+    for line in report_lines:
         print(line, flush=True)
     return tuple(records)
+
+
+def _plateau_summaries(
+    manifest: DatasetManifest,
+    grid: ParameterGrid,
+    records: Sequence[ExperimentRecord],
+    trade_lists: Sequence[Sequence[Mapping[str, Any]]],
+) -> dict[str, dict[str, object]]:
+    """Existing report figures per grid point over its pooled Validation trades (D-27).
+
+    Reporting only: the figures come from `src.backtest.report.build` unchanged and never enter
+    a record. A point owns one consecutive block of records (see `_feasibility_lines`).
+    """
+    per_point = len(research_splits(manifest))
+    summaries: dict[str, dict[str, object]] = {}
+    for index, point in enumerate(grid.points):
+        validation = [
+            i
+            for i in range(index * per_point, (index + 1) * per_point)
+            if records[i].split_role == "VALIDATION"
+        ]
+        summaries[point.parameter_set_id] = summarize_trades(
+            experiment_record=records[validation[0]],
+            trade_records=[t for i in validation for t in trade_lists[i]],
+            built_at_utc=manifest.validation_end_utc,
+        )
+    return summaries
 
 
 def _feasibility_lines(
