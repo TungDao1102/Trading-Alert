@@ -385,3 +385,47 @@ KILL_GATE
 ```
 
 Keys of the durable system-state event log (D-22).
+
+## 13. Paper runtime vocabulary (Phase 16)
+
+Terms of the paper runtime, the SHADOW approval mode and the freeze-check evidence rules. The code that emits each one is named in its entry; where a rule is the user's to set, the entry points to the record and states no value of its own. Decision rows are in `docs/DECISIONS.md`.
+
+### CONTEXT_BAR
+
+Reason code of a 4h feed event that only extends the context window and is never evaluated as a signal bar. `run_paper_tick` in `src/paper/loop.py` appends it to `no_trade_records` (stage `feed_gate`) for every closed 4h event and moves on, so a 4h close never reaches the 1h setup series (CR-08). Phase 16 plan 16-09 confirmed it against `src/paper/loop.py`. Authority: D-05 of the Phase 16 context.
+
+### DUPLICATE_BAR
+
+Reason code of a closed 1h feed event whose open time was already seen, in the warmed-up history or earlier in the same call. `run_paper_tick` records it in `no_trade_records` (stage `feed_gate`) and does not evaluate the bar again (WR-04); this is how a reconnect or a REST backfill that re-delivers a bar stays harmless.
+
+### SHADOW
+
+The first stage of the safe release path SHADOW, DEMO, CANARY, LIVE (D040). Signals and APPROVE or SKIP decisions are journaled with simulated fills on real market data. Every SHADOW message and record is labelled "SHADOW — no real order". No trade-capable API key is loaded and no order adapter is constructed, so a SHADOW approval cannot reach an exchange.
+
+### SKIPPED (freeze-check line)
+
+Outcome of a line the hourly freeze check appends to `registry_diff.jsonl` while the paper-start allowlist is empty: reason `allowlist empty`, written by `python -m src.paper.freeze --check --from-allowlist` (`FreezeSkippedEntry`, plan 16-09). It is neither a clean tick nor a failure, it proves nothing about any parameter set, and it is not counted against the L-04 freeze-continuity criterion before the epoch pin. Authority: D061 item A, D-21. Not the `SKIPPED` value of `ApprovalResult` in section 10.
+
+### EVIDENCE_GAP
+
+A scheduled freeze tick that is missing, so late that no valid evidence exists, invalid, or whose workflow produced no result. It is never CLEAN, never interpolated and never filled from neighbouring ticks, and no tolerance applies because GitHub Actions may delay or drop a scheduled run. It breaks the qualifying trial freeze window, so the qualifying 14-day trial restarts with a new epoch pin; runtime evidence collected before stays as auxiliary evidence and cannot complete the freeze criterion of the new trial. A run that did not happen writes no line, so the gap is found outside the workflow (reconciler, plan 16-15). Authority: D063 item 2 and D065 item 4 (REV-02, REV-18). The grace after which a late tick counts as a gap is the user's ratified value, not a default of the code.
+
+### PLANNED_RESTART
+
+Gap reason code of a restart the operator chose, kept distinct from a crash or maintenance for audit. It is always uncovered: it is never removed from the coverage denominator and a gap that has a reason is still uncovered. Authority: D063 item 1 (REV-01).
+
+### HEALTHY
+
+Feed health state in which the runtime observes the feed as the user's healthy-feed definition requires. Only HEALTHY time is covered by the runtime-coverage measure; the denominator is the whole fixed trial window. The numeric definition (silence, stale-bar age, reconnect bounds) is the user's O-07 table and is not restated here. Authority: D063 item 1.
+
+### DEGRADED
+
+Feed health state between HEALTHY and DISCONNECTED. DEGRADED time is not covered, and a maximum for a continuous DEGRADED state exists whose number is the user's (O-07 table). Authority: D063 item 1.
+
+### LIVE_WS, REST_WARMUP, REST_BACKFILL
+
+The three source tags of a bar (`SourceTag` in `src/paper/vocabulary.py`). A closed `LIVE_WS` bar is the only kind that can be evaluated for a signal. A `REST_WARMUP` bar closed while the process was down: it extends history and gap accounting and is never evaluated, so no late or fabricated signal exists (L-11, D061). Whether a `REST_BACKFILL` bar, recovered by REST while the process stayed up, may be evaluated is the user's decision Q-D, recorded by plan 16-24 in `.planning/phases/16-paper-runtime-composition/decisions/16-DEC-Q-D.md`; this entry states no rule of its own.
+
+### test_only
+
+Marker carried by every record of the pre-soak rehearsal of the SHADOW APPROVE, CONFIRM, journal path. The rehearsal runs before the trial soak in its own window on an explicit test-only path with its own test identifier, does not bypass the paper-start allowlist, and is excluded from every count: signals, trades, parity evidence, G1 to G5 and PAPER-03. The trial soak starts from a clean state afterwards. Authority: D063 item 3 (REV-03).
