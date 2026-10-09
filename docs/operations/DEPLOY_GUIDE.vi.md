@@ -1399,6 +1399,13 @@ Quyết định `16-DEC-Q-L` (ngày 2026-10-09) là "separate-bot": máy soak d�
 - Thu hồi hay tạo lại token trong BotFather nếu nghi bị lộ: việc đó nằm ngoài repository và là `[CHƯA XÁC MINH]`.
 - Hành vi dự kiến của thông báo: mọi thông báo SHADOW mang nhãn "SHADOW — no real order" và nhấn APPROVE chỉ chuyển thông báo thành thẻ xác nhận (D041); chỉ nút CONFIRM, mã CONFIRM riêng, dùng một lần, hiệu lực mặc định 60 giây, mới được ghi nhận. Các mô-đun cho phần này đã xây ở mức đồ giả (16-04, 16-11) nhưng chưa nối vào một tiến trình chạy được (16-31), nên `[CHƯA XÂY]` ở cấp vận hành.
 
+> **Hỏi nhanh về bot Telegram (đáp bằng lời thường)**
+>
+> 1. **Tạo bot riêng được không?** Được: tạo bằng BotFather như một bot thứ hai, tách hẳn: lệnh `/newbot`, tên riêng, username riêng, token riêng (`16-DEC-Q-L`). Token không dán vào đâu cả (mục 8.1). Hai token không bao giờ được hai tiến trình cùng polling một lúc. Các bước và câu hỏi chi tiết của BotFather `[CHƯA XÁC MINH]`.
+> 2. **Có cần tạo group không?** Không. Chat riêng (private) với từng bot là đủ. Cổng `authorized_chat_gate` trong `src/adapters/telegram_callbacks.py` chỉ so mã chat của cú bấm với `TELEGRAM_AUTHORIZED_CHAT_ID`. Với chat riêng, mã này nhiều khả năng chính là mã Telegram của bạn `[CHƯA XÁC MINH]` (repository không nói). Dùng group thì Telegram cho phép, nhưng repository chưa thử, và ai trong group cũng bấm được nút vì việc kiểm theo mã người dùng là Phase 23, chưa xây (docstring `src/paper/shadow.py`). Hành vi trong group `[CHƯA XÁC MINH]`. Khuyến nghị: chat riêng.
+> 3. **Người lạ tìm ra username bot rồi bấm /start thì sao?** Telegram không chặn được việc đó. Trong `src/` không có xử lý lệnh `/start` hay lệnh nào khác (chỉ có bộ xử lý cú bấm nút), tin nhắn của hệ thống chỉ gửi tới mã chat đã cấu hình, và cú bấm từ mã chat khác bị cổng từ chối. Nên: chọn username khó đoán; bạn là người đầu tiên bấm Start; nếu nghi lộ token thì thu hồi trong BotFather (lệnh và các bước chính xác `[CHƯA XÁC MINH]`, xem tài liệu BotFather).
+> 4. **healthchecks.io báo về Telegram bằng gì?** Bằng tích hợp (bot) của chính họ, bạn nối với chat của bạn ngay trên trang healthchecks.io `[CHƯA XÁC MINH]`, hãy đọc tài liệu của họ. Nó độc lập với các bot của dự án này, và token của dự án không bao giờ đưa cho họ.
+
 #### Bước 8.2 Binance: khóa nào cần ở giai đoạn nào [THỦ CÔNG] [CHƯA XÂY]
 
 > - **Để làm gì:** Cho biết khóa Binance nào cần ở giai đoạn nào, và giới hạn mỗi khóa ở đúng IP của máy với quyền rút tiền tắt (whitelist).
