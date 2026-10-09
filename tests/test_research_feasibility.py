@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -187,3 +188,82 @@ def test_run_research_appends_feasibility_and_leaves_records_unchanged(
         assert raw == research_run._record_text(record)
         assert "feasibility" not in json.loads(raw)
     assert research_run.feasibility_report is feasibility_report
+
+
+# --------------------------------------------------------------------------- #
+# Q-O (user decision: not-assessed): the G5 floor is not assessed, the holdout is untouched.
+# --------------------------------------------------------------------------- #
+
+G5_LINE = "G5 floor not assessed (holdout untouched)"
+FEASIBILITY_SOURCE = Path(feasibility.__file__)
+
+
+def test_g5_line_is_the_exact_not_assessed_wording() -> None:
+    assert feasibility.G5_NOT_ASSESSED_LINE == G5_LINE
+    assert VERDICT_WORDS.search(G5_LINE) is None
+
+
+def test_feasibility_report_counts_development_trades_beside_validation() -> None:
+    report = feasibility_report(
+        [_closed(30)] * 4,
+        parameter_set_id="p",
+        development_trades=[*_closed(7), _trade("END_OF_DATA")],
+    )
+    assert report.development_closed == 7
+    assert report.development_end_of_data == 1
+    text = "\n".join(render_feasibility(report))
+    assert "development_closed=7" in text
+
+
+def test_feasibility_never_touches_the_simulator_or_the_holdout_marker() -> None:
+    source = FEASIBILITY_SOURCE.read_text(encoding="utf-8")
+    assert "holdout_consumed" not in source
+    assert "simulator" not in source
+    assert "holdout_start" not in source and "holdout_end" not in source
+
+
+def test_feasibility_code_paths_never_call_simulator_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        calls.append(args)
+        raise AssertionError("the feasibility gate must not simulate anything")
+
+    monkeypatch.setattr(research_run.simulator, "run", forbidden)
+    report = feasibility_report(
+        [_closed(5)] * 4, parameter_set_id="p", development_trades=_closed(3)
+    )
+    render_feasibility(report)
+    assert calls == []
+
+
+def test_run_research_prints_the_g5_line_once_and_never_requests_a_holdout_split(
+    store: Path,  # noqa: F811
+    tmp_path: Path,
+    spies: Any,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    holdout_marker = REPO_ROOT / "docs" / "research" / "holdout_consumed.json"
+    marker_before = holdout_marker.read_bytes()
+    manifest = _manifest(store, tmp_path)
+    grid = _grid()
+    run_research(
+        manifest=manifest,
+        grid=grid,
+        authorization=_authorization(manifest, grid),
+        raw_root=store,
+        output_dir=tmp_path / "experiments",
+        repo_root=REPO_ROOT,
+    )
+    stdout = capsys.readouterr().out
+    assert stdout.splitlines().count(G5_LINE) == 1
+    assert "development_closed=" in stdout
+    assert VERDICT_WORDS.search(stdout) is None, stdout
+    # Spy on simulator.run: every requested window ends at or before the holdout start.
+    assert spies.windows
+    for start, end in spies.windows:
+        assert datetime.fromisoformat(end) <= manifest.holdout_start_utc, (start, end)
+        assert datetime.fromisoformat(start) < manifest.holdout_start_utc, (start, end)
+    assert holdout_marker.read_bytes() == marker_before
