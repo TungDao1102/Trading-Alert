@@ -28,8 +28,8 @@ from src.backtest.engine import simulate
 from src.backtest.funding import FundingCoverageError
 from src.backtest.series import ListMinuteSource, parse_minute_row
 from src.core.types import Candle
-from src.domain.signal import Signal
 from src.domain.enums import SignalStatus
+from src.domain.signal import Signal
 from src.paper import shadow_fill
 from src.paper.loop import BarOutcome
 from src.paper.shadow_fill import FundingHistory, ShadowFillDriver
