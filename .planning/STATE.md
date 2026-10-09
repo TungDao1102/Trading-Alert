@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: executing
-stopped_at: Completed 16-08-PLAN.md
-last_updated: "2026-10-09T05:07:47.905Z"
+stopped_at: Completed 16-09-PLAN.md
+last_updated: "2026-10-09T05:19:19.980Z"
 last_activity: 2026-10-09
 last_activity_desc: Phase 16 execution started
-state_head: 0eb1544267348dde7bfecf972a2047c51f2b0a67
+state_head: e1dc8e3f17b5f4878308f9a321e592dee16cec52
 progress:
   total_phases: 29
   completed_phases: 17
   total_plans: 193
-  completed_plans: 151
+  completed_plans: 152
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
-Plan: 9 of 49
+Plan: 10 of 49
 Status: Ready to execute
 Last activity: 2026-10-09 — Phase 16 execution started
 
@@ -201,6 +201,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P06 | two sessions | 3 tasks | 6 files |
 | Phase 16 P07 | 15 min | 3 tasks | 3 files |
 | Phase 16 P08 | 27 min | 3 tasks | 12 files |
+| Phase 16 P09 | 10 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -489,6 +490,7 @@ Recent decisions affecting current work:
 - [Phase 16]: One rotation owner: the SDK owns the 23 h rotation and reconnection; the supervisor reacts to open/reconnect/close/error events with a REST verification backfill and adds no timer
 - [Phase 16]: Gap reason names the window being verified (WS_RECONNECT_WINDOW or WS_DISCONNECTED on rebuild exhaustion); live bars are held during a pending recovery so the monotonic cursor never skips a recoverable bar
 - [Phase 16]: Resync expected slots are anchored on the exchange grid (close = open + interval - 1 ms), fixing phantom gaps; tenacity loops no longer retry task cancellation
+- [Phase 16]: Plan 16-09: freeze CLI --from-allowlist writes one SKIPPED line for an empty allowlist, checks the single approved entry with the pinned hash equal to the entry hash, and exits 1 on two entries (ambiguous allowlist); find_allowlist_entry raises on duplicate ids; every line may carry run_metadata from five named environment variables
 
 ### Pending Todos
 
@@ -564,6 +566,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-09T05:07:46.924Z
-Stopped at: Completed 16-08-PLAN.md
+Last session: 2026-10-09T05:19:18.859Z
+Stopped at: Completed 16-09-PLAN.md
 Resume file: None
