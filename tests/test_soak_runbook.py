@@ -110,3 +110,115 @@ def test_runbook_section_19_exists_and_the_region_ping_is_the_first_host_action(
     assert command in first_action
     assert "HTTP 200" in first_action
     assert "do not install anything" in first_action
+
+
+# --------------------------------------------------------------------------- 19.3 and 19.4
+
+
+def _acceptance_rows() -> list[dict[str, str]]:
+    """Rows of the 19.3 table whose header row starts with ``| Condition id |``."""
+    lines = _subsection("19.3").split("\n")
+    start = next((i for i, ln in enumerate(lines) if ln.startswith("| Condition id |")), None)
+    assert start is not None, "19.3 has no '| Condition id |' table"
+    headers = [c.strip() for c in lines[start].strip().strip("|").split("|")]
+    rows: list[dict[str, str]] = []
+    for ln in lines[start + 2 :]:
+        if not ln.startswith("|"):
+            break
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        rows.append(dict(zip(headers, cells, strict=True)))
+    return rows
+
+
+def test_19_3_names_a_command_and_a_pass_condition_for_every_required_condition() -> None:
+    rows = _acceptance_rows()
+    ids = [row["Condition id"].strip("`") for row in rows]
+    assert ids == list(sha.REQUIRED_CONDITIONS), "19.3 must list the validator ids in order"
+    for row in rows:
+        name = row["Condition id"]
+        assert row["Command"].strip("`"), f"{name}: no command"
+        assert row["Pass condition"], f"{name}: no pass condition"
+        assert row["Source"], f"{name}: no source"
+
+
+def test_19_3_external_facts_carry_a_url_the_read_date_and_the_not_verified_label() -> None:
+    cited = 0
+    for row in _acceptance_rows():
+        source = row["Source"]
+        if "https://" in source:
+            cited += 1
+            assert "2026-10-08" in source, f"{row['Condition id']}: no read date"
+            assert "not verified live" in source, f"{row['Condition id']}: no label"
+    assert cited >= 4
+
+
+def test_19_3_ebs_default_encryption_is_checked_because_the_initial_state_is_undocumented() -> None:
+    body = _subsection("19.3")
+    assert "aws ec2 get-ebs-encryption-by-default --region ap-southeast-1" in body
+    assert "initial state" in body
+    assert "not documented" in body
+
+
+def test_19_3_chrony_uses_the_amazon_time_sync_service_line() -> None:
+    body = _subsection("19.3")
+    assert "server 169.254.169.123 prefer iburst minpoll 4 maxpoll 4" in body
+    assert "/etc/chrony/chrony.conf" in body
+    assert "chronyc tracking" in body
+    assert "chronyc sources" in body
+
+
+def test_19_3_checks_sudo_asks_for_a_password_without_naming_a_bypass_rule() -> None:
+    row = next(r for r in _acceptance_rows() if "SUDO_WITH_PASSWORD" in r["Condition id"])
+    assert "sudo -k" in row["Command"]
+    assert "sudo -v" in row["Command"]
+
+
+def test_19_4_only_the_collector_moves_and_the_oi_gap_is_a_coverage_gap() -> None:
+    body = _subsection("19.4")
+    assert body, "section 19 has no 19.4"
+    for phrase in (
+        "only the collector moves",
+        "deploy/migrate.sh",
+        "coverage gap",
+        "D059",
+        "full history",
+        "UAT 8",
+        "UAT 9",
+        "UAT 10",
+        "section 13",
+        "section 15",
+    ):
+        assert phrase in body, f"19.4 lacks: {phrase}"
+
+
+def test_19_4_waits_for_the_real_s3_gate_and_a_restore_drill_before_the_long_soak() -> None:
+    body = _subsection("19.4")
+    assert "D064 real-S3 gate" in body
+    assert "11.6" in body
+    assert "before the long soak" in body
+    assert "first real backup" in body
+
+
+INSTANCE_TYPE = re.compile(r"\b[a-z]\d[a-z]?\.(?:nano|micro|small|medium|large|xlarge|\d+xlarge)\b")
+SIZE_UNIT = re.compile(r"\d\s?(?:GB|GiB|TB|TiB)\b|\bGB\b")
+CURRENCY = re.compile(r"\$\s?\d|\d\s?(?:USD|EUR)\b")
+
+
+def test_section_19_fills_no_number_the_user_owns() -> None:
+    section = _section19()
+    assert "16-DEC-O-12" in section
+    assert not INSTANCE_TYPE.findall(section), "an instance type name is written"
+    assert not SIZE_UNIT.findall(section), "a storage size is written"
+    for line in section.split("\n"):
+        if CURRENCY.search(line):
+            # the one cited price: public IPv4 per hour (G13), with its URL and read date
+            assert "0.005" in line and "https://aws.amazon.com/vpc/pricing/" in line, line
+            assert "2026-10-08" in line
+
+
+def test_every_repository_path_section_19_names_exists() -> None:
+    section = _section19()
+    paths = set(re.findall(r"\b((?:deploy|scripts)/[\w.-]+\.(?:sh|py|ps1))\b", section))
+    assert {"deploy/migrate.sh", "deploy/restore.sh", "scripts/soak_host_acceptance.py"} <= paths
+    for relative in sorted(paths):
+        assert (REPO_ROOT / relative).is_file(), f"section 19 names a missing file: {relative}"
