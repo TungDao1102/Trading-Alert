@@ -3,9 +3,9 @@
   "gaps_count": 1,
   "gap": {
     "symbol": "BTCUSDT",
-    "data_class": "paper-1h",
-    "expected_utc": "2026-09-19T12:00:00+00:00",
-    "observed_utc": "2026-09-19T13:00:00+00:00",
-    "reason": "exchange_returned_no_candle_for_expected_close"
+    "interval": "1h",
+    "expected_close_utc": "2026-09-19T11:59:59.999+00:00",
+    "detected_at_utc": "2026-09-19T13:00:00+00:00",
+    "reason": "EXCHANGE_NO_CANDLE"
   }
 }

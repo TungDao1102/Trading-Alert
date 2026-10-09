@@ -37,7 +37,7 @@ PHASE7_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase7"
 
 
 def _make_rest_kline(symbol: str, interval: str, open_utc: datetime, close_utc: datetime) -> Any:
-    from src.adapters.binance_usdm import Kline
+    from src.adapters.binance_public import Kline
 
     return Kline(
         symbol=symbol,
@@ -82,14 +82,22 @@ def test_long_outage_pages_past_single_page_cap() -> None:
     from src.paper.resync import backfill_missed_closes
 
     symbol, interval = "BTCUSDT", "1h"
-    last = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    first_open = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
     hour = timedelta(hours=1)
+    # Real Binance rows close at open + interval - 1 ms (plan 16-08, Pitfall P1); the last
+    # close is the millisecond before the first open.
+    last = first_open - timedelta(milliseconds=1)
     # 1500 closes fill page one exactly; 2 more force a second page.
     closes = [
-        _make_rest_kline(symbol, interval, last + i * hour, last + (i + 1) * hour)
+        _make_rest_kline(
+            symbol,
+            interval,
+            first_open + i * hour,
+            first_open + (i + 1) * hour - timedelta(milliseconds=1),
+        )
         for i in range(1502)
     ]
-    now = last + 1502 * hour
+    now = first_open + 1502 * hour
     adapter = _PaginatingAdapter(closes=closes)
 
     async def _call() -> tuple[list[Any], list[dict[str, Any]]]:

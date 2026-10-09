@@ -1,29 +1,19 @@
-"""Phase 7 paper-loop resync tests (plan 07-02, task 1).
+"""Paper-loop resync tests (Phase 7 plan 07-02 task 1, extended in Phase 16 plan 16-08).
 
-Per D-01: the paper loop's resync module REST-backfills missed closes
-after a disconnect or 24h rotation, and journals any holes the exchange
-cannot fill as explicit gap records. The module NEVER synthesizes a
-candle for a window the exchange did not return (flag-never-fabricate).
+Per D-01 (flag-never-fabricate): the resync module REST-backfills missed closes and reports any
+hole the exchange cannot fill as an explicit `GapRecord`. The module NEVER synthesizes a candle
+for a window the exchange did not return.
 
-Three behaviors pinned here:
-  1. Clean backfill: a FakeAdapter page containing the missed closes
-     returns exactly those closes in order and emits zero gap records.
-  2. Unrecoverable gap: a FakeAdapter page with a hole the exchange
-     cannot fill returns the available closes and journals exactly one
-     gap record with symbol, data_class paper-1h, expected_utc,
-     observed_utc, and a non-empty reason.
-  3. Forming-candle drop: a still-forming candle (close_time_utc after
-     now_utc) in the REST page is dropped before any downstream use.
-
-The test loads the golden fixture pair (input.json + expected.json)
-from `tests/fixtures/phase7/reconnect_resync/` and
-`tests/fixtures/phase7/unrecoverable_gap/`, feeds the sequence through
-the resync entrypoint with an injected FakeAdapter, and asserts the
-outcome matches the expected counts and gap-record shape.
+Phase 16 (plan 16-08, research Pitfall P1): real Binance rows close at open + interval - 1 ms,
+so a backfill that anchored its expected slots on `last_close_utc` itself reported one phantom
+gap per returned bar. Every test below builds rows with the real shape; the Phase 7 golden
+fixtures (`tests/fixtures/phase7/reconnect_resync`, `unrecoverable_gap`) were re-shaped to match.
+No network is touched.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -32,17 +22,51 @@ from typing import Any
 
 import pytest
 import tenacity
+from src.adapters.binance_public import Kline, _row_to_kline
+from src.paper.resync import backfill_missed_closes, expected_close_times
+from src.paper.vocabulary import GapReason, GapRecord, SourceTag, TaggedBar
 
 PHASE7_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase7"
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+# Live GET /fapi/v1/klines?symbol=BTCUSDT&interval=1h&limit=2, 2026-10-07 (research
+# "Real-shaped fixture rows for backfill tests"; prices are exchange data).
+ROW0 = [
+    1791360000000,
+    "84094.70",
+    "84139.20",
+    "83902.50",
+    "83909.90",
+    "5844.590",
+    1791363599999,
+    "490868445.00560",
+    179437,
+    "2473.352",
+    "207729461.40190",
+    "0",
+]
+ROW1 = [
+    1791363600000,
+    "83909.90",
+    "83965.50",
+    "83603.00",
+    "83749.00",
+    "7821.908",
+    1791367199999,
+    "655296503.76730",
+    125134,
+    "3519.234",
+    "294835835.39980",
+    "0",
+]
 
 
 @pytest.fixture(autouse=True)
 def _no_retry_sleep(monkeypatch: Any) -> None:
     """Bypass production retry sleeps (Group A option 1).
 
-    The resync backfill path (7 attempts, exponential backoff) sleeps
-    ~40-50s when the adapter raises a transient error. Unit tests must
-    assert the per-symbol isolation logic without burning the
+    The resync backfill path (7 attempts, exponential backoff) sleeps ~40-50s when the adapter
+    raises a transient error. Unit tests must assert the isolation logic without burning the
     production sleep budget.
     """
     monkeypatch.setattr(
@@ -69,21 +93,19 @@ def _parse_utc(raw: str) -> datetime:
     return value.astimezone(UTC)
 
 
-def _build_kline(symbol: str, interval: str, row: dict[str, Any]) -> Any:
-    """Build a frozen Kline from a fixture row dict.
+def _ms(value: datetime) -> int:
+    """Exact integer milliseconds since the epoch (never a float round trip)."""
+    delta = value - _EPOCH
+    return (delta.days * 86400 + delta.seconds) * 1000 + delta.microseconds // 1000
 
-    Mirrors the adapter's `_row_to_kline` shape: open_time, open, high,
-    low, close, volume, close_time, quote_volume, trade_count.
-    """
-    from src.adapters.binance_usdm import Kline
 
-    open_ms = int(_parse_utc(row["open_time_utc"]).timestamp() * 1000)
-    close_ms = int(_parse_utc(row["close_time_utc"]).timestamp() * 1000)
+def _build_kline(symbol: str, interval: str, row: dict[str, Any]) -> Kline:
+    """Build a frozen Kline from a fixture row dict."""
     return Kline(
         symbol=symbol,
         interval=interval,
-        open_time_utc=datetime.fromtimestamp(open_ms / 1000, tz=UTC),
-        close_time_utc=datetime.fromtimestamp(close_ms / 1000, tz=UTC),
+        open_time_utc=_parse_utc(row["open_time_utc"]),
+        close_time_utc=_parse_utc(row["close_time_utc"]),
         open=Decimal(str(row["open"])),
         high=Decimal(str(row["high"])),
         low=Decimal(str(row["low"])),
@@ -95,11 +117,9 @@ def _build_kline(symbol: str, interval: str, row: dict[str, Any]) -> Any:
 
 
 class FakeAdapter:
-    """Fake Binance adapter for resync tests.
+    """Fake public-data adapter for resync tests.
 
-    Records every `klines` call's `start_ms` argument and returns the
-    pre-configured page of Klines. Tests inject this in place of the
-    real adapter so unit tests never touch the network.
+    Records every `klines` call's `start_ms` argument and returns the pre-configured page.
     """
 
     def __init__(self, *, page: list[Any] | None = None) -> None:
@@ -118,20 +138,30 @@ class FakeAdapter:
         return list(self._page)
 
 
+def _run(
+    adapter: Any, symbol: str, interval: str, last_close_utc: datetime, now_utc: datetime
+) -> tuple[list[TaggedBar], list[GapRecord]]:
+    """Run the async resync entry point synchronously."""
+
+    async def _call() -> tuple[list[TaggedBar], list[GapRecord]]:
+        return await backfill_missed_closes(
+            adapter,
+            symbol=symbol,
+            interval=interval,
+            last_close_utc=last_close_utc,
+            now_utc=now_utc,
+        )
+
+    return asyncio.run(_call())
+
+
 # --------------------------------------------------------------------------- #
-# Test 1 — clean backfill returns exactly the missed closes, zero gaps.
+# Golden fixtures (re-shaped to the real close = open + interval - 1 ms).
 # --------------------------------------------------------------------------- #
 
 
 def test_reconnect_resync_returns_missed_closes_with_zero_gaps() -> None:
-    """Beh. 1: a complete page returns the missed closes in order.
-
-    The fixture pins a 3-close hole (10:00 → 13:00) that the FakeAdapter
-    fills completely. The resync module must return all 3 closes in
-    close_time_utc order and emit zero gap records.
-    """
-    from src.paper.resync import backfill_missed_closes
-
+    """A complete page returns the missed closes in order and no gap."""
     case_dir = PHASE7_FIXTURES_DIR / "reconnect_resync"
     case_input = _load_input(case_dir)
     expected = _load_expected(case_dir)
@@ -144,42 +174,24 @@ def test_reconnect_resync_returns_missed_closes_with_zero_gaps() -> None:
     page = [_build_kline(symbol, interval, r) for r in case_input["missed_closes"]]
     adapter = FakeAdapter(page=page)
 
-    closes, gaps = _run(backfill_missed_closes, adapter, symbol, interval, last_close_utc, now_utc)
+    closes, gaps = _run(adapter, symbol, interval, last_close_utc, now_utc)
 
-    assert len(closes) == expected["closes_count"], (
-        f"expected {expected['closes_count']} closes, got {len(closes)}"
-    )
-    assert len(gaps) == expected["gaps_count"], (
-        f"expected {expected['gaps_count']} gaps, got {len(gaps)}"
-    )
+    assert len(gaps) == expected["gaps_count"], f"expected no gap, got {gaps}"
+    assert len(closes) == expected["closes_count"]
     assert closes[0].close_time_utc == _parse_utc(expected["first_close_utc"])
     assert closes[-1].close_time_utc == _parse_utc(expected["last_close_utc"])
 
-    # The adapter must have been called with start_ms = ms(last_close_utc).
+    # The adapter is called with start_ms = ms(last_close_utc).
     assert len(adapter.klines_calls) == 1
     call = adapter.klines_calls[0]
     assert call[0] == symbol
     assert call[1] == interval
-    assert call[2] == int(last_close_utc.timestamp() * 1000)
+    assert call[2] == _ms(last_close_utc)
     assert call[4] == 1500  # limit
 
 
-# --------------------------------------------------------------------------- #
-# Test 2 — unrecoverable gap journals exactly one gap record.
-# --------------------------------------------------------------------------- #
-
-
-def test_unrecoverable_gap_journals_exactly_one_gap_record() -> None:
-    """Beh. 2: a hole the exchange cannot fill becomes one gap record.
-
-    The fixture pins a 3-close hole (10:00 → 13:00) where the
-    FakeAdapter returns only 2 closes (11:00 and 13:00), missing the
-    12:00 close. The resync module must return the 2 available closes
-    and journal exactly one gap record with the canonical CollectorGap
-    field shape.
-    """
-    from src.paper.resync import backfill_missed_closes
-
+def test_unrecoverable_gap_yields_exactly_one_gap_record() -> None:
+    """A hole the exchange cannot fill becomes one typed GapRecord."""
     case_dir = PHASE7_FIXTURES_DIR / "unrecoverable_gap"
     case_input = _load_input(case_dir)
     expected = _load_expected(case_dir)
@@ -190,112 +202,171 @@ def test_unrecoverable_gap_journals_exactly_one_gap_record() -> None:
     now_utc = _parse_utc(case_input["now_utc"])
 
     page = [_build_kline(symbol, interval, r) for r in case_input["missed_closes"]]
-    adapter = FakeAdapter(page=page)
+    closes, gaps = _run(FakeAdapter(page=page), symbol, interval, last_close_utc, now_utc)
 
-    closes, gaps = _run(backfill_missed_closes, adapter, symbol, interval, last_close_utc, now_utc)
-
-    assert len(closes) == expected["closes_count"], (
-        f"expected {expected['closes_count']} closes, got {len(closes)}"
-    )
-    assert len(gaps) == expected["gaps_count"], (
-        f"expected {expected['gaps_count']} gaps, got {len(gaps)}"
-    )
-
+    assert len(closes) == expected["closes_count"]
+    assert len(gaps) == expected["gaps_count"]
     gap = gaps[0]
     expected_gap = expected["gap"]
-    assert gap["symbol"] == expected_gap["symbol"]
-    assert gap["data_class"] == expected_gap["data_class"]
-    assert gap["expected_utc"] == _parse_utc(expected_gap["expected_utc"])
-    assert gap["observed_utc"] == _parse_utc(expected_gap["observed_utc"])
-    assert gap["reason"] == expected_gap["reason"]
-    assert gap["reason"] != "", "gap reason must be non-empty"
+    assert isinstance(gap, GapRecord)
+    assert gap.symbol == expected_gap["symbol"]
+    assert gap.interval == expected_gap["interval"]
+    assert gap.expected_close_utc == _parse_utc(expected_gap["expected_close_utc"])
+    assert gap.detected_at_utc == _parse_utc(expected_gap["detected_at_utc"])
+    assert gap.reason is GapReason[expected_gap["reason"]]
 
 
 # --------------------------------------------------------------------------- #
-# Test 3 — forming candle (close_time_utc > now_utc) is dropped.
+# Plan 16-08 Task 2, Test 1: real-shaped rows produce no phantom gap (Pitfall P1).
 # --------------------------------------------------------------------------- #
 
 
-def test_forming_candle_in_page_is_dropped_before_use() -> None:
-    """Beh. 3: a still-forming candle in the REST page is dropped.
+def test_real_shaped_rows_produce_the_closes_and_zero_gaps() -> None:
+    """Two live rows (close = open + interval - 1 ms) return both closes and no gap.
 
-    The FakeAdapter returns 2 closes: one closed (close_time_utc <=
-    now_utc) and one forming (close_time_utc > now_utc). The resync
-    module must drop the forming candle and return only the closed one.
+    The pre-fix code returned one phantom `exchange_returned_no_candle_for_expected_close`
+    gap per returned bar here, because its expected slots started AT `last_close_utc`.
     """
-    from src.paper.resync import backfill_missed_closes
+    page = [_row_to_kline("BTCUSDT", "1h", ROW0), _row_to_kline("BTCUSDT", "1h", ROW1)]
+    last_close_utc = datetime(2026, 10, 7, 7, 59, 59, 999000, tzinfo=UTC)
+    now_utc = datetime(2026, 10, 7, 10, 0, 5, tzinfo=UTC)
 
-    symbol = "BTCUSDT"
-    interval = "1h"
-    last_close_utc = datetime(2026, 9, 19, 10, 0, tzinfo=UTC)
-    now_utc = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
+    closes, gaps = _run(FakeAdapter(page=page), "BTCUSDT", "1h", last_close_utc, now_utc)
 
-    closed_open = datetime(2026, 9, 19, 10, 0, tzinfo=UTC)
-    closed_close = datetime(2026, 9, 19, 11, 0, tzinfo=UTC)
-    forming_open = datetime(2026, 9, 19, 11, 0, tzinfo=UTC)
-    forming_close = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)  # == now_utc, NOT after
-
-    # Make the second candle strictly forming: close_time > now_utc.
-    forming_close = now_utc + timedelta(seconds=1)
-
-    closed_kline = _build_kline(
-        symbol,
-        interval,
-        {
-            "open_time_utc": closed_open.isoformat(),
-            "close_time_utc": closed_close.isoformat(),
-            "open": "100.00",
-            "high": "100.10",
-            "low": "99.95",
-            "close": "100.05",
-            "volume": "1.0",
-        },
-    )
-    forming_kline = _build_kline(
-        symbol,
-        interval,
-        {
-            "open_time_utc": forming_open.isoformat(),
-            "close_time_utc": forming_close.isoformat(),
-            "open": "100.05",
-            "high": "100.15",
-            "low": "100.00",
-            "close": "100.10",
-            "volume": "1.0",
-        },
-    )
-    adapter = FakeAdapter(page=[closed_kline, forming_kline])
-
-    closes, gaps = _run(backfill_missed_closes, adapter, symbol, interval, last_close_utc, now_utc)
-
-    # Only the closed candle survives; the forming one is dropped.
-    assert len(closes) == 1, f"expected 1 close (forming dropped), got {len(closes)}"
-    assert closes[0].close_time_utc == closed_close
-    # The dropped forming candle leaves a visible hole: the 11:00 slot
-    # contributes no close, so exactly one forming_at_observed_time gap
-    # is journaled (CR-09 — never silent coverage).
-    assert len(gaps) == 1, f"forming slot must produce one gap, got {gaps}"
-    assert gaps[0]["reason"] == "forming_at_observed_time"
+    assert gaps == [], f"phantom gaps for real-shaped rows: {gaps}"
+    assert [bar.close_time_utc for bar in closes] == [
+        datetime(2026, 10, 7, 8, 59, 59, 999000, tzinfo=UTC),
+        datetime(2026, 10, 7, 9, 59, 59, 999000, tzinfo=UTC),
+    ]
+    assert closes[0].open == Decimal("84094.70")
+    assert closes[1].close == Decimal("83749.00")
 
 
 # --------------------------------------------------------------------------- #
-# Helpers.
+# Test 2: a genuinely missing bar yields exactly one GapRecord.
 # --------------------------------------------------------------------------- #
 
 
-def _run(
-    func: Any, adapter: Any, symbol: str, interval: str, last_close_utc: datetime, now_utc: datetime
-) -> tuple[list[Any], list[dict[str, Any]]]:
-    """Run an async resync function synchronously via asyncio.run."""
-    import asyncio
+def test_a_missing_bar_between_two_returned_bars_is_one_exchange_no_candle_gap() -> None:
+    row_after_gap = list(ROW1)
+    row_after_gap[0] = ROW1[0] + 3_600_000  # slot 2 opens, slot 1 is missing
+    row_after_gap[6] = ROW1[6] + 3_600_000
+    page = [_row_to_kline("BTCUSDT", "1h", ROW0), _row_to_kline("BTCUSDT", "1h", row_after_gap)]
+    last_close_utc = datetime(2026, 10, 7, 7, 59, 59, 999000, tzinfo=UTC)
+    now_utc = datetime(2026, 10, 7, 11, 0, 5, tzinfo=UTC)
 
-    async def _call() -> tuple[list[Any], list[dict[str, Any]]]:
-        return await func(
-            adapter,
-            symbol=symbol,
-            interval=interval,
-            last_close_utc=last_close_utc,
-            now_utc=now_utc,
+    closes, gaps = _run(FakeAdapter(page=page), "BTCUSDT", "1h", last_close_utc, now_utc)
+
+    assert len(closes) == 2
+    assert gaps == [
+        GapRecord(
+            symbol="BTCUSDT",
+            interval="1h",
+            expected_close_utc=datetime(2026, 10, 7, 9, 59, 59, 999000, tzinfo=UTC),
+            reason=GapReason.EXCHANGE_NO_CANDLE,
+            detected_at_utc=now_utc,
         )
+    ]
 
-    return asyncio.run(_call())
+
+# --------------------------------------------------------------------------- #
+# Test 3: every returned bar is a REST_BACKFILL TaggedBar with the request's interval.
+# --------------------------------------------------------------------------- #
+
+
+def test_returned_bars_are_rest_backfill_tagged_with_the_request_interval() -> None:
+    four_hours_ms = 14_400_000
+    first_open = 1_791_360_000_000  # 08:00 UTC, on the 4h grid
+    rows = [
+        [
+            first_open + i * four_hours_ms,
+            "100.00",
+            "100.10",
+            "99.95",
+            "100.05",
+            "1.0",
+            first_open + (i + 1) * four_hours_ms - 1,
+            "0",
+            0,
+            "0",
+            "0",
+            "0",
+        ]
+        for i in range(2)
+    ]
+    page = [_row_to_kline("BTCUSDT", "4h", row) for row in rows]
+    last_close_utc = datetime(2026, 10, 7, 7, 59, 59, 999000, tzinfo=UTC)
+    now_utc = datetime(2026, 10, 7, 16, 0, 1, tzinfo=UTC)
+
+    closes, gaps = _run(FakeAdapter(page=page), "BTCUSDT", "4h", last_close_utc, now_utc)
+
+    assert gaps == []
+    assert len(closes) == 2
+    for bar in closes:
+        assert isinstance(bar, TaggedBar)
+        assert bar.source is SourceTag.REST_BACKFILL
+        assert bar.interval == "4h"
+        assert bar.symbol == "BTCUSDT"
+
+
+# --------------------------------------------------------------------------- #
+# Test 4: a forming last row is dropped, as before.
+# --------------------------------------------------------------------------- #
+
+
+def test_forming_last_row_is_dropped_before_use() -> None:
+    page = [_row_to_kline("BTCUSDT", "1h", ROW0), _row_to_kline("BTCUSDT", "1h", ROW1)]
+    last_close_utc = datetime(2026, 10, 7, 7, 59, 59, 999000, tzinfo=UTC)
+    # 09:30: the 09:00 bar is still forming (closes at 09:59:59.999).
+    now_utc = datetime(2026, 10, 7, 9, 30, tzinfo=UTC)
+
+    closes, gaps = _run(FakeAdapter(page=page), "BTCUSDT", "1h", last_close_utc, now_utc)
+
+    assert [bar.close_time_utc for bar in closes] == [
+        datetime(2026, 10, 7, 8, 59, 59, 999000, tzinfo=UTC)
+    ]
+    assert gaps == [], "a bar that has not closed yet is not an expected close"
+
+
+def test_an_inconsistent_forming_row_for_a_due_slot_is_an_unknown_gap() -> None:
+    """CR-09: a due slot whose only row is not closed leaves a visible hole, never silence."""
+    anomalous = list(ROW0)
+    anomalous[6] = ROW0[0] + 3_600_000  # close time one ms late: not closed at 08:59:59.999
+    page = [_row_to_kline("BTCUSDT", "1h", anomalous)]
+    last_close_utc = datetime(2026, 10, 7, 7, 59, 59, 999000, tzinfo=UTC)
+    now_utc = datetime(2026, 10, 7, 8, 59, 59, 999000, tzinfo=UTC)
+
+    closes, gaps = _run(FakeAdapter(page=page), "BTCUSDT", "1h", last_close_utc, now_utc)
+
+    assert closes == []
+    assert [(gap.expected_close_utc, gap.reason) for gap in gaps] == [
+        (datetime(2026, 10, 7, 8, 59, 59, 999000, tzinfo=UTC), GapReason.UNKNOWN)
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# The expected-close grid.
+# --------------------------------------------------------------------------- #
+
+
+def test_expected_close_times_follow_the_exchange_grid() -> None:
+    last_close_utc = datetime(2026, 10, 7, 7, 59, 59, 999000, tzinfo=UTC)
+
+    due = expected_close_times(last_close_utc, datetime(2026, 10, 7, 10, 0, 5, tzinfo=UTC), "1h")
+
+    assert due == [
+        datetime(2026, 10, 7, 8, 59, 59, 999000, tzinfo=UTC),
+        datetime(2026, 10, 7, 9, 59, 59, 999000, tzinfo=UTC),
+    ]
+    assert expected_close_times(last_close_utc, last_close_utc + timedelta(minutes=59), "1h") == []
+
+
+def test_naive_datetimes_are_rejected() -> None:
+    with pytest.raises(ValueError, match="UTC-aware"):
+        _run(
+            FakeAdapter(),
+            "BTCUSDT",
+            "1h",
+            datetime(2026, 10, 7, 8, 0),
+            datetime(2026, 10, 7, 9, 0, tzinfo=UTC),
+        )
