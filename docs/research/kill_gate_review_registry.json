@@ -1,0 +1,46 @@
+{
+  "schema": "kill-gate-review-registry/1",
+  "decision_refs": ["D061 F", "D063 item 9", "D065 item 1"],
+  "items": [
+    {
+      "id": "WR-01",
+      "state": "UNRESOLVED",
+      "blocks_report": true,
+      "blocks_live_enable": false,
+      "source": ".planning/phases/10-journal-depth-kill-gate-operations/10-VERIFICATION.md line 193: family-independence check is partly vacuous; gate code owned by Phase 26",
+      "fix_commit": null
+    },
+    {
+      "id": "WR-06",
+      "state": "UNRESOLVED",
+      "blocks_report": true,
+      "blocks_live_enable": false,
+      "source": ".planning/phases/10-journal-depth-kill-gate-operations/10-VERIFICATION.md line 194: BACKTEST block pools every experiment's trades; Phase 26",
+      "fix_commit": null
+    },
+    {
+      "id": "WR-10",
+      "state": "UNRESOLVED",
+      "blocks_report": false,
+      "blocks_live_enable": true,
+      "source": ".planning/phases/10-journal-depth-kill-gate-operations/10-REVIEW-DISPOSITION.md line 50: LiveEnablementController.enable trusts a caller-supplied kill-gate state; live-enable flow phase",
+      "fix_commit": null
+    },
+    {
+      "id": "WR-12",
+      "state": "UNRESOLVED",
+      "blocks_report": true,
+      "blocks_live_enable": false,
+      "source": ".planning/phases/10-journal-depth-kill-gate-operations/10-VERIFICATION.md line 195: --record accepts an arbitrary decisions file and file-only resets bypass the journal; Phase 26",
+      "fix_commit": null
+    },
+    {
+      "id": "WR-13",
+      "state": "UNRESOLVED",
+      "blocks_report": true,
+      "blocks_live_enable": false,
+      "source": ".planning/phases/10-journal-depth-kill-gate-operations/10-VERIFICATION.md line 196: gate cells G07/G08/G10 turn MET from self-reported booleans; Phase 26",
+      "fix_commit": null
+    }
+  ]
+}

@@ -77,6 +77,7 @@ SCANNED_FILES = (
     "src/analytics/gates.py",
     "src/analytics/inputs.py",
     "src/analytics/killgate.py",
+    "src/analytics/killgate_guard.py",
     "src/analytics/latency.py",
     "src/analytics/lifecycle.py",
     "src/analytics/live_outcomes.py",
