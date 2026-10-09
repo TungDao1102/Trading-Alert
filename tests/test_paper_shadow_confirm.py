@@ -75,7 +75,9 @@ Recheck = Callable[[Any, TradePlan, datetime], RejectionReason | None]
 
 
 class Harness:
-    """Stores, bot, a movable clock, both books and the callbacks wired into `on_callback`."""
+    """Stores, bot, a movable clock, both books and the callbacks wired into `on_callback`.
+
+    `stores` replaces the in-memory stores (the PostgreSQL tests pass real ones)."""
 
     def __init__(
         self,
@@ -83,9 +85,10 @@ class Harness:
         ttl: int | None = None,
         mark: Decimal | None = MARK,
         recheck: Recheck | None = None,
+        stores: Any = None,
     ) -> None:
         self.trace: list[str] = []
-        self.stores = InMemoryShadowStores(self.trace)
+        self.stores = InMemoryShadowStores(self.trace) if stores is None else stores
         self.bot = FakeBot(self.trace)
         self.now = T_PRESS
         self.mark = mark
