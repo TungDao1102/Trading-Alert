@@ -306,9 +306,23 @@ def test_only_minutes_closed_before_now_minus_the_lag_are_stored() -> None:
         assert trade_opens == [at(10, m) for m in range(5)]
         assert mark_opens == trade_opens
         assert (result.trade_minutes_added, result.mark_minutes_added) == (5, 5)
-        # The forming minute 10:05 was served by the feed (open <= horizon is not guaranteed
-        # closed) but never stored.
         assert at(10, 5) not in trade_opens
+
+    asyncio.run(scenario())
+
+
+def test_a_forming_minute_served_by_the_feed_is_dropped_not_stored() -> None:
+    async def scenario() -> None:
+        feed, source = FakeFeed(), LiveMinuteSource()
+        # The horizon falls inside the 10:05 minute, so the feed (which bounds by OPEN time)
+        # serves the forming 10:05 minute too; it must not be stored.
+        now = at(10, 5, 30) + timedelta(seconds=LAG)
+        result = await _poller(feed, source).poll_once(SYMBOL, now_utc=now, since_utc=at(10, 0))
+
+        assert any(end >= ms(at(10, 5)) for _n, _i, _s, end, _l in feed.calls if end is not None)
+        assert source.last_open_utc(SYMBOL, "trade") == at(10, 4)
+        assert source.last_open_utc(SYMBOL, "mark") == at(10, 4)
+        assert result.settled_through_utc == at(10, 5, 30)
 
     asyncio.run(scenario())
 

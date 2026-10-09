@@ -9,9 +9,16 @@ does not change `src/backtest`: when the eligibility start equals the signal clo
 record is byte-equal to the `simulate` trade for the same minutes (the tracer test). If a
 simulator change ever turns out to be needed, work stops and a new decision is recorded (L-02).
 
-When a confirmed plan becomes fill-eligible is the user's Q-B decision. The chosen instant is
-passed to `advance` as `start_exclusive`; the simulator already clamps a start to the signal
-close, so a later start needs no simulator change.
+When a confirmed plan becomes fill-eligible is the user's Q-B decision, recorded 2026-10-09 as
+`confirm-plus-one` (`decisions/16-DEC-Q-B.md`): the instant the system recorded on the successful
+SHADOW_CONFIRMED event, floored to the minute, plus exactly one minute. `eligibility_start_for`
+computes it from that recorded instant only (never from card creation, APPROVE or a wall clock),
+and the result is passed to `advance` as `start_exclusive`. `advance` selects minutes by CLOSE
+time in `(start_exclusive, end_inclusive]` and already clamps a start to the signal close, so no
+simulator change is needed: the first eligible minute is the one OPENING at floor + 1 minute,
+strictly after the confirm instant, and the minute containing the confirm is never read. The
+difference from the backtest (a fill from the signal close) is the human approval delay and is
+intentional.
 
 Pure and deterministic: no clock, no I/O, no float. Every instant is an argument, so a restart
 that replays the same inputs reproduces the same threshold, the same fills and the same record.
@@ -58,8 +65,18 @@ from src.paper.loop import BarOutcome
 from src.risk.types import ConstraintSnapshot
 
 _ZERO = Decimal("0")
+_MINUTE = timedelta(minutes=1)
 _MIN_QTY_REJECT = "MIN_QTY_REJECT"
 _RISK_PASSED = "risk_passed"
+# The `ConfirmOutcome.CONFIRMED` value of `src.paper.shadow` (a str-valued enum), compared by
+# value so this module does not import the Telegram-facing shadow module.
+_CONFIRMED = "CONFIRMED"
+
+STATUS_ELIGIBLE = "ELIGIBLE"
+STATUS_CONFIRM_NOT_SUCCESSFUL = "CONFIRM_NOT_SUCCESSFUL"
+STATUS_CONFIRM_BEFORE_SIGNAL_CLOSE = "CONFIRM_BEFORE_SIGNAL_CLOSE"
+STATUS_PLAN_EXPIRED = "PLAN_EXPIRED"
+STATUS_NO_MINUTE_BEFORE_EXPIRY = "NO_MINUTE_BEFORE_EXPIRY"
 
 
 def _require_utc(value: datetime, field_name: str) -> None:
@@ -67,6 +84,95 @@ def _require_utc(value: datetime, field_name: str) -> None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
     if value.utcoffset() != timedelta(0):
         raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
+
+
+@dataclass(frozen=True)
+class FillEligibility:
+    """When a confirmed SHADOW plan may start filling, with every instant that explains it.
+
+    `signal_close_utc`, `approved_at_utc` (optional: the APPROVE press), `confirmed_at_utc` (the
+    instant recorded on the SHADOW_CONFIRMED event) and `eligibility_start_utc` are all kept so
+    the journal can record the whole chain (`to_audit_dict`). `eligibility_start_utc` is None
+    unless `status` is `ELIGIBLE`: a confirm that did not succeed, a plan that expired and a
+    confirm with no readable minute left before expiry start no fill simulation.
+    """
+
+    signal_close_utc: datetime
+    plan_expiry_utc: datetime
+    confirmed_at_utc: datetime | None
+    approved_at_utc: datetime | None
+    eligibility_start_utc: datetime | None
+    status: str
+
+    @property
+    def is_eligible(self) -> bool:
+        return self.status == STATUS_ELIGIBLE and self.eligibility_start_utc is not None
+
+    def to_audit_dict(self) -> dict[str, str | None]:
+        """Journal-able form: ISO-8601 UTC text (None when the instant does not exist)."""
+
+        def text(value: datetime | None) -> str | None:
+            return value.isoformat() if value is not None else None
+
+        return {
+            "signal_close_utc": text(self.signal_close_utc),
+            "approved_at_utc": text(self.approved_at_utc),
+            "confirmed_at_utc": text(self.confirmed_at_utc),
+            "eligibility_start_utc": text(self.eligibility_start_utc),
+            "plan_expiry_utc": text(self.plan_expiry_utc),
+            "status": self.status,
+        }
+
+
+def eligibility_start_for(
+    *,
+    signal_close_utc: datetime,
+    plan_expiry_utc: datetime,
+    confirm_outcome: str,
+    confirmed_at_utc: datetime | None,
+    approved_at_utc: datetime | None = None,
+) -> FillEligibility:
+    """Q-B `confirm-plus-one`: the recorded CONFIRM instant floored to the minute, plus one minute.
+
+    `confirmed_at_utc` must be the `confirmed_at_utc` the system recorded on the successful
+    SHADOW_CONFIRMED event, so a restart that reads the journal reproduces the same threshold;
+    this function reads no clock. The plus-one is applied exactly once. The result is the
+    `start_exclusive` for `advance`: minutes are selected by close time, so the minute opening at
+    the floored confirm instant (which contains the confirm, or opens exactly at it) closes at or
+    before the start and is never read, and the first minute read opens at floor + 1 minute.
+
+    No fill simulation starts (`is_eligible` is False, start None) when the CONFIRM was not a
+    success (`confirm_outcome` other than CONFIRMED, or no recorded instant), when it is dated
+    before the signal close, when it is at or after the plan expiry (inclusive boundary, as the
+    confirm gate), or when the computed start is not before the expiry.
+    """
+    _require_utc(signal_close_utc, "signal_close_utc")
+    _require_utc(plan_expiry_utc, "plan_expiry_utc")
+    if confirmed_at_utc is not None:
+        _require_utc(confirmed_at_utc, "confirmed_at_utc")
+    if approved_at_utc is not None:
+        _require_utc(approved_at_utc, "approved_at_utc")
+
+    def verdict(status: str, start: datetime | None = None) -> FillEligibility:
+        return FillEligibility(
+            signal_close_utc=signal_close_utc,
+            plan_expiry_utc=plan_expiry_utc,
+            confirmed_at_utc=confirmed_at_utc,
+            approved_at_utc=approved_at_utc,
+            eligibility_start_utc=start,
+            status=status,
+        )
+
+    if confirm_outcome != _CONFIRMED or confirmed_at_utc is None:
+        return verdict(STATUS_CONFIRM_NOT_SUCCESSFUL)
+    if confirmed_at_utc < signal_close_utc:
+        return verdict(STATUS_CONFIRM_BEFORE_SIGNAL_CLOSE)
+    if confirmed_at_utc >= plan_expiry_utc:
+        return verdict(STATUS_PLAN_EXPIRED)
+    start = confirmed_at_utc.replace(second=0, microsecond=0) + _MINUTE
+    if start >= plan_expiry_utc:
+        return verdict(STATUS_NO_MINUTE_BEFORE_EXPIRY)
+    return verdict(STATUS_ELIGIBLE, start)
 
 
 @dataclass(frozen=True)
@@ -122,6 +228,7 @@ class ShadowFillDriver:
         self._state: PlanState | None = None
         self._regime: str | None = None
         self._eligibility_start_utc: datetime | None = None
+        self._eligibility: FillEligibility | None = None
         self._advanced_to: datetime | None = None
         self._bookings: list[Booking] = []
         self._events: list[LifecycleEvent] = []
@@ -190,6 +297,26 @@ class ShadowFillDriver:
         self._eligibility_start_utc = eligibility_start_utc
         self._advanced_to = close
         return ShadowOpenResult(opened=True, reason_code="OK")
+
+    def open_confirmed(self, outcome: BarOutcome, eligibility: FillEligibility) -> ShadowOpenResult:
+        """`open` with the Q-B start of a successful CONFIRM; an ineligible confirm opens nothing.
+
+        The eligibility must belong to this bar (same signal close). The audit chain (signal
+        close, APPROVE, CONFIRM, computed start) stays available as `eligibility`.
+        """
+        if not eligibility.is_eligible or eligibility.eligibility_start_utc is None:
+            raise ValueError(
+                f"the confirm is not eligible to start a fill simulation: {eligibility.status}"
+            )
+        if eligibility.signal_close_utc != outcome.closed_candle.close_time_utc:
+            raise ValueError(
+                f"the eligibility is for signal close {eligibility.signal_close_utc.isoformat()}, "
+                f"not for this bar closing {outcome.closed_candle.close_time_utc.isoformat()}"
+            )
+        result = self.open(outcome, eligibility_start_utc=eligibility.eligibility_start_utc)
+        if result.opened:
+            self._eligibility = eligibility
+        return result
 
     # ------------------------------------------------------------------ advance
 
@@ -334,6 +461,11 @@ class ShadowFillDriver:
         return self._opened()[1]
 
     @property
+    def eligibility(self) -> FillEligibility | None:
+        """The audited eligibility the plan was opened with (None when opened with a raw start)."""
+        return self._eligibility
+
+    @property
     def advanced_to_utc(self) -> datetime:
         return self._opened()[2]
 
@@ -348,7 +480,14 @@ def _item_order(item: tuple[datetime, int, Booking]) -> tuple[datetime, int]:
 
 
 __all__ = [
+    "STATUS_CONFIRM_BEFORE_SIGNAL_CLOSE",
+    "STATUS_CONFIRM_NOT_SUCCESSFUL",
+    "STATUS_ELIGIBLE",
+    "STATUS_NO_MINUTE_BEFORE_EXPIRY",
+    "STATUS_PLAN_EXPIRED",
+    "FillEligibility",
     "FundingHistory",
     "ShadowFillDriver",
     "ShadowOpenResult",
+    "eligibility_start_for",
 ]
