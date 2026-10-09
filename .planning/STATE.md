@@ -529,6 +529,7 @@ Recent decisions affecting current work:
 | 260930-d0b | Record D042 single-VPS deployment; pull VPS hardening + collector deployment into Phase 13 | 2026-09-30 | 2660fb6 | [260930-d0b-record-single-vps-deployment-decision-d0](./quick/260930-d0b-record-single-vps-deployment-decision-d0/) |
 | 261007-mkw | WR-05 (D062): trading user joins sudo with a password, lock-out guard, no passwordless rule | 2026-10-07 | 7148528 | [261007-mkw-wr-05-d062-trading-user-joins-sudo-with-](./quick/261007-mkw-wr-05-d062-trading-user-joins-sudo-with-/) |
 | 261007-onb | CR-01 replacement (D064): Parquet push by manifest SHA-256 plus cryptcheck (double only; real-S3 gate pending) | 2026-10-07 | e9a030c | [261007-onb-cr-01-replacement-d064-parquet-push-mani](./quick/261007-onb-cr-01-replacement-d064-parquet-push-mani/) |
+| 261009-jqi | Vietnamese operator deploy/operations guide docs/operations/DEPLOY_GUIDE.vi.md plus traceability checker | 2026-10-09 | 894d359 | [261009-jqi-vietnamese-operator-deployment-guide-dep](./quick/261009-jqi-vietnamese-operator-deployment-guide-dep/) |
 
 ### Roadmap Evolution
 
