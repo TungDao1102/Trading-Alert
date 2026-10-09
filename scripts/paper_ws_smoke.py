@@ -46,6 +46,7 @@ import itertools
 import json
 import os
 import re
+import statistics
 import sys
 import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
@@ -104,6 +105,11 @@ DISCONNECT_METHODS: tuple[str, ...] = ("transport-drop", "ws-close")
 # Tool guard against a reconnect storm while the new-connection rate limit is UNVERIFIED
 # (research G3(c)). It is a guard on this tool, not a trading threshold.
 SDK_RECONNECT_FLOOR_SECONDS = 300
+
+# The SDK opens one socket per url path (research D5): market, public, private.
+EXPECTED_SDK_PATHS = 3
+LAG_SETTING_LABEL = "measurement setting, not a threshold"
+WEIGHT_NOT_EXPOSED_REASON = "not exposed by the SDK response"
 
 PATH_UNSOLICITED = "unsolicited"
 PATH_UNPROVEN = "solicited-or-unknown"
@@ -209,6 +215,9 @@ class SmokeConfig:
     recovery_wait_seconds: int = 120
     archive_fetch: bool = True
     archive_day: str | None = None
+    rest_lag_probe_minutes: int = 0
+    rest_lag_poll_interval_ms: int | None = None
+    rest_lag_max_wait_seconds: int | None = None
 
     def settings(self) -> dict[str, Any]:
         return {
@@ -219,6 +228,9 @@ class SmokeConfig:
             "recovery_wait_seconds": self.recovery_wait_seconds,
             "archive_fetch": self.archive_fetch,
             "archive_day": self.archive_day,
+            "rest_lag_probe_minutes": self.rest_lag_probe_minutes,
+            "rest_lag_poll_interval_ms": self.rest_lag_poll_interval_ms,
+            "rest_lag_max_wait_seconds": self.rest_lag_max_wait_seconds,
         }
 
 
@@ -230,6 +242,8 @@ class DryRunConfig:
     `arrival_latency_ms`: how long after a bar's close the fake feed delivers the closed event
     (on the server clock). `connect_error`: makes the fake `create_connection` raise.
     `archive_mode`: "ok", "not_found" (HTTP 404) or "network_error" for the fake archive host.
+    `rest_trade_lag_ms` / `rest_mark_lag_ms`: how long after a minute close the fake REST
+    serves the just-closed 1m trade / mark bar (server clock).
     """
 
     start_utc: datetime = datetime(2026, 10, 9, 11, 59, 30, tzinfo=UTC)
@@ -239,6 +253,8 @@ class DryRunConfig:
     duplicate_closed_events: bool = False
     connect_error: Exception | None = None
     archive_mode: str = "ok"
+    rest_trade_lag_ms: int = 0
+    rest_mark_lag_ms: int = 0
 
 
 # --------------------------------------------------------------------------- #
@@ -279,18 +295,21 @@ class RealClock:
 class VirtualClock:
     """Virtual time for `--dry-run`: sleeping advances time instead of waiting.
 
-    Scheduled actions (the fake feed) and sleepers share one timer heap. Whichever coroutine
-    sleeps pumps the heap in time order, so concurrent sleepers interleave correctly. After each
-    fired timer the loop yields a few times and awaits the optional `settle` hook (the
-    supervisor's `wait_idle`) so a triggered recovery finishes before time moves on.
+    Scheduled actions (the fake feed) and sleepers share one timer heap. A single pump task pops
+    the timers in time order, runs the action or wakes the sleeper, and then yields several times
+    and awaits the optional `settle` hook (the supervisor's `wait_idle`) so every woken coroutine
+    and any triggered recovery finishes before time moves on. One pump (not one per sleeper) is
+    what keeps concurrent sleepers, such as the main loop and the REST lag probe, ordered.
     """
 
-    SETTLE_YIELDS = 6
+    SETTLE_YIELDS = 12
 
     def __init__(self, start: datetime) -> None:
         self._now = start
         self._timers: list[tuple[datetime, int, Callable[[], None] | None, Any]] = []
         self._sequence = itertools.count()
+        self._waiters: list[asyncio.Future[None]] = []
+        self._pump_task: asyncio.Task[None] | None = None
         self.settle: Callable[[], Awaitable[None]] | None = None
 
     def now(self) -> datetime:
@@ -305,20 +324,36 @@ class VirtualClock:
         if self.settle is not None:
             await self.settle()
 
+    def _has_waiters(self) -> bool:
+        self._waiters = [waiter for waiter in self._waiters if not waiter.done()]
+        return bool(self._waiters)
+
+    async def _pump(self) -> None:
+        try:
+            while self._has_waiters():
+                at, _seq, action, future = heapq.heappop(self._timers)
+                self._now = max(self._now, at)
+                if action is not None:
+                    action()
+                elif future is not None and not future.done():
+                    future.set_result(None)
+                await self._settle()
+        except Exception as exc:
+            # A failing scheduled action must not leave sleepers hanging forever.
+            for waiter in self._waiters:
+                if not waiter.done():
+                    waiter.set_exception(exc)
+
     async def sleep(self, seconds: float) -> None:
         await self.sleep_until(self._now + timedelta(seconds=seconds))
 
     async def sleep_until(self, moment: datetime) -> None:
         waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._waiters.append(waiter)
         heapq.heappush(self._timers, (max(moment, self._now), next(self._sequence), None, waiter))
-        while not waiter.done():
-            at, _seq, action, future = heapq.heappop(self._timers)
-            self._now = max(self._now, at)
-            if action is not None:
-                action()
-            elif future is not None and not future.done():
-                future.set_result(None)
-            await self._settle()
+        if self._pump_task is None or self._pump_task.done():
+            self._pump_task = asyncio.get_running_loop().create_task(self._pump())
+        await waiter
 
     async def wait_event(self, event: asyncio.Event, timeout_seconds: float) -> bool:
         for _ in range(self.SETTLE_YIELDS):
@@ -729,7 +764,12 @@ class _DryRunPublic:
         return self._clock.now() + timedelta(milliseconds=self._dry.host_behind_server_ms)
 
     def _slots(
-        self, interval: str, start_ms: int | None, end_ms: int | None, limit: int
+        self,
+        interval: str,
+        start_ms: int | None,
+        end_ms: int | None,
+        limit: int,
+        lag_ms: int,
     ) -> list[int]:
         step = INTERVAL_MS[interval]
         now_ms = _to_ms(self._server_now())
@@ -737,7 +777,10 @@ class _DryRunPublic:
         opens: list[int] = []
         open_ms = first
         while open_ms <= now_ms and len(opens) < limit:
-            if end_ms is None or open_ms <= end_ms:
+            closes_at = open_ms + step
+            # A closed bar is served `lag_ms` after its close; the forming bar is always served.
+            visible = closes_at > now_ms or closes_at + lag_ms <= now_ms
+            if visible and (end_ms is None or open_ms <= end_ms):
                 opens.append(open_ms)
             open_ms += step
         return opens
@@ -766,7 +809,9 @@ class _DryRunPublic:
                 quote_volume=Decimal("0"),
                 trade_count=0,
             )
-            for open_ms in self._slots(interval, start_ms, end_ms, limit)
+            for open_ms in self._slots(
+                interval, start_ms, end_ms, limit, self._dry.rest_trade_lag_ms
+            )
         ]
 
     async def mark_klines(
@@ -790,7 +835,9 @@ class _DryRunPublic:
                 close=Decimal("100.05"),
                 price_tick_count=0,
             )
-            for open_ms in self._slots(interval, start_ms, end_ms, limit)
+            for open_ms in self._slots(
+                interval, start_ms, end_ms, limit, self._dry.rest_mark_lag_ms
+            )
         ]
 
     async def server_time(self) -> datetime:
@@ -973,6 +1020,151 @@ def build_live_rig(config: SmokeConfig) -> SmokeRig:
 
 
 # --------------------------------------------------------------------------- #
+# Measurements. Every number is an observation; none is compared with a limit.
+# --------------------------------------------------------------------------- #
+
+
+def summarize_arrival(observations: Sequence[BarObservation]) -> dict[str, Any]:
+    """Per interval: count, min and max of (receipt time minus the bar's close time) in ms.
+
+    `future_close_events` counts closed events whose close time is later than their receipt time
+    on the injected clock (the skew case in which the runtime tick would drop a valid bar); they
+    stay in the closed counts.
+    """
+    latencies: dict[str, list[int]] = {}
+    future_close_events = 0
+    for observation in observations:
+        latency_ms = (observation.received_at_utc - observation.close_time_utc) // _ONE_MS
+        latencies.setdefault(observation.interval, []).append(latency_ms)
+        if observation.close_time_utc > observation.received_at_utc:
+            future_close_events += 1
+    return {
+        "status": "OK" if latencies else "NOT_RUN",
+        "definition": "receipt time on the injected clock minus the bar close time, milliseconds",
+        "by_interval": {
+            interval: {"count": len(values), "min": min(values), "max": max(values)}
+            for interval, values in sorted(latencies.items())
+        },
+        "future_close_events": future_close_events,
+    }
+
+
+@dataclass(frozen=True)
+class SkewReading:
+    """One clock-skew reading: the server time that was read and the skew (or an error string)."""
+
+    server_time: datetime | None
+    value: int | str
+
+
+async def measure_clock_skew(public: PublicDataLike, clock: SmokeClock) -> SkewReading:
+    """Binance server time minus the injected clock, milliseconds (includes request latency)."""
+    try:
+        server = await public.server_time()
+    except Exception as exc:
+        return SkewReading(None, _describe(exc))
+    return SkewReading(server, _to_ms(server) - _to_ms(clock.now()))
+
+
+def describe_connection_count(
+    after_connect: int | None, after_rebuild: int | None
+) -> dict[str, Any]:
+    """The SDK socket count after connect and after the forced-disconnect rebuild (D5, A2)."""
+    if after_connect is None:
+        return _not_run(expected_sdk_paths=EXPECTED_SDK_PATHS)
+    return {
+        "status": "OK",
+        "after_connect": after_connect,
+        "after_rebuild": after_rebuild,
+        "expected_sdk_paths": EXPECTED_SDK_PATHS,
+        "private_established": after_connect >= EXPECTED_SDK_PATHS,
+    }
+
+
+async def run_rest_lag_probe(
+    *,
+    public: PublicDataLike,
+    clock: SmokeClock,
+    symbol: str,
+    minutes: int,
+    poll_interval_ms: int,
+    max_wait_seconds: int,
+) -> list[dict[str, Any]]:
+    """For each of `minutes` consecutive UTC minute closes, poll the public 1m trade and mark
+    klines until the just-closed bar appears or the maximum wait ends.
+
+    Lag is measured on the injected (host) clock from the minute boundary to the first poll that
+    saw the bar; it uses only the credential-free public adapter and awaits REST calls only, so it
+    never blocks the WebSocket receive loop.
+    """
+    results: list[dict[str, Any]] = []
+    boundary = _from_ms((_to_ms(clock.now()) // 60_000 + 1) * 60_000)
+    for _ in range(minutes):
+        await clock.sleep_until(boundary)
+        open_dt = boundary - timedelta(minutes=1)
+        open_ms = _to_ms(open_dt)
+        deadline = boundary + timedelta(seconds=max_wait_seconds)
+        trade_seen: int | None = None
+        mark_seen: int | None = None
+        polls = 0
+        while True:
+            polls += 1
+            if trade_seen is None:
+                trade_rows = await public.klines(symbol, "1m", start_ms=open_ms, limit=2)
+                if any(row.open_time_utc == open_dt for row in trade_rows):
+                    trade_seen = _to_ms(clock.now()) - _to_ms(boundary)
+            if mark_seen is None:
+                mark_rows = await public.mark_klines(symbol, "1m", start_ms=open_ms, limit=2)
+                if any(row.open_time_utc == open_dt for row in mark_rows):
+                    mark_seen = _to_ms(clock.now()) - _to_ms(boundary)
+            if trade_seen is not None and mark_seen is not None:
+                break
+            if clock.now() >= deadline:
+                break
+            await clock.sleep(poll_interval_ms / 1000)
+        results.append(
+            {
+                "boundary_utc": _iso(boundary),
+                "trade_first_seen_after_close_ms": trade_seen,
+                "mark_first_seen_after_close_ms": mark_seen,
+                "polls": polls,
+            }
+        )
+        boundary += timedelta(minutes=1)
+    return results
+
+
+def summarize_rest_lag(minutes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Maxima and (low) medians of the per-minute lags; `not_seen_count` counts every
+    (minute, series) pair whose bar never appeared within the maximum wait."""
+    trade = [
+        m["trade_first_seen_after_close_ms"]
+        for m in minutes
+        if m["trade_first_seen_after_close_ms"] is not None
+    ]
+    mark = [
+        m["mark_first_seen_after_close_ms"]
+        for m in minutes
+        if m["mark_first_seen_after_close_ms"] is not None
+    ]
+    return {
+        "trade_max_ms": max(trade) if trade else None,
+        "trade_median_ms": statistics.median_low(trade) if trade else None,
+        "mark_max_ms": max(mark) if mark else None,
+        "mark_median_ms": statistics.median_low(mark) if mark else None,
+        "not_seen_count": 2 * len(minutes) - len(trade) - len(mark),
+    }
+
+
+def _weight_used_1m(public: PublicDataLike) -> tuple[int | None, str | None]:
+    """The SDK's rate-limit weight header, only when the adapter exposes it (introspected)."""
+    exposed = getattr(public, "last_weight_used_1m", None)
+    if isinstance(exposed, int):
+        return exposed, None
+    return None, WEIGHT_NOT_EXPOSED_REASON
+
+
+# --------------------------------------------------------------------------- #
 # One smoke run.
 # --------------------------------------------------------------------------- #
 
@@ -1030,6 +1222,11 @@ class SmokeRun:
         self._drop_seen: asyncio.Event | None = None
         self._disconnected_at: datetime | None = None
         self._resumed_at: datetime | None = None
+        self._skew_start: int | str | None = None
+        self._skew_end: int | str | None = None
+        self._after_connect: int | None = None
+        self._after_rebuild: int | None = None
+        self._probe_task: asyncio.Task[None] | None = None
         for event in LIFECYCLE_EVENTS:
             self.observed.on_connection(event, self._make_observer(event))
 
@@ -1045,10 +1242,9 @@ class SmokeRun:
 
     async def start(self) -> bool:
         """Seed the cursors, connect and subscribe. False when the subscribe is blocked."""
-        try:
-            server_now = await self.rig.public.server_time()
-        except Exception:
-            server_now = self.clock.now()
+        reading = await measure_clock_skew(self.rig.public, self.clock)
+        self._skew_start = reading.value
+        server_now = reading.server_time if reading.server_time is not None else self.clock.now()
         now_ms = _to_ms(server_now)
         for interval in self.config.intervals:
             step = INTERVAL_MS[interval]
@@ -1067,6 +1263,7 @@ class SmokeRun:
             }
             return False
         self._started = True
+        self._after_connect = self.rig.adapter.diagnostics().connection_count
         self.evidence["ws_subscribe"] = {
             "status": "OK",
             "reason": None,
@@ -1078,6 +1275,9 @@ class SmokeRun:
         return True
 
     async def stop(self) -> None:
+        if self._probe_task is not None and not self._probe_task.done():
+            self._probe_task.cancel()
+            await asyncio.gather(self._probe_task, return_exceptions=True)
         if self._started:
             await self.supervisor.stop()
             self._started = False
@@ -1194,6 +1394,7 @@ class SmokeRun:
                 else "no close event and no rebuild within the recovery wait"
             )
             return result
+        self._after_rebuild = self.rig.adapter.diagnostics().connection_count
         stale = list(reports[0].stale_stream_names_found)
         result["stale_stream_entries_before_rebuild"] = stale
         if stale and result["close_api_calls"] == 0:
@@ -1203,16 +1404,67 @@ class SmokeRun:
         result["status"] = "OK"
         return result
 
+    async def _probe(self) -> None:
+        """The REST 1m lag probe as one task: REST calls only, finished before the drop."""
+        config = self.config
+        assert config.rest_lag_poll_interval_ms is not None
+        assert config.rest_lag_max_wait_seconds is not None
+        weight, weight_reason = _weight_used_1m(self.rig.public)
+        result: dict[str, Any] = {
+            "status": "ERROR",
+            "minutes": [],
+            "summary": None,
+            "settings": {
+                "poll_interval_ms": config.rest_lag_poll_interval_ms,
+                "max_wait_seconds": config.rest_lag_max_wait_seconds,
+                "label": LAG_SETTING_LABEL,
+            },
+            "measured_against": "host clock; read together with clock_skew_ms",
+            "weight_used_1m": weight,
+            "weight_used_1m_reason": weight_reason,
+            "error": "probe did not finish",
+        }
+        self.evidence["rest_minute_lag"] = result
+        try:
+            minutes = await run_rest_lag_probe(
+                public=self.rig.public,
+                clock=self.clock,
+                symbol=config.symbol,
+                minutes=config.rest_lag_probe_minutes,
+                poll_interval_ms=config.rest_lag_poll_interval_ms,
+                max_wait_seconds=config.rest_lag_max_wait_seconds,
+            )
+        except Exception as exc:
+            result["error"] = _describe(exc)
+            return
+        result["minutes"] = minutes
+        result["summary"] = summarize_rest_lag(minutes)
+        result["status"] = "OK"
+        result["error"] = None
+
+    async def _await_probe(self) -> None:
+        if self._probe_task is not None:
+            await self._probe_task
+
     async def listen(self) -> None:
-        """Hold the subscription for the duration, with the forced disconnect at its offset."""
+        """Hold the subscription for the duration, with the forced disconnect at its offset.
+
+        The REST lag probe starts here as its own task; the forced disconnect waits for it, so the
+        two measurements never overlap.
+        """
         begin = self.clock.now()
         end = begin + timedelta(seconds=self.config.duration_seconds)
+        if self.config.rest_lag_probe_minutes:
+            self._probe_task = asyncio.create_task(self._probe())
         if self.config.force_disconnect_after_seconds is not None:
             offset = timedelta(seconds=self.config.force_disconnect_after_seconds)
             await self.clock.sleep_until(begin + offset)
+            await self._await_probe()
             await self.forced_disconnect()
         await self.clock.sleep_until(end)
+        await self._await_probe()
         await self._settle()
+        self._skew_end = (await measure_clock_skew(self.rig.public, self.clock)).value
 
     # -- evidence assembly ----------------------------------------------------------------- #
 
@@ -1273,6 +1525,24 @@ class SmokeRun:
             result["error"] = "no reconnect event although the run outlasted the interval"
         self.evidence["sdk_reconnect"] = result
 
+    def _describe_skew(self) -> dict[str, Any]:
+        readings = (self._skew_start, self._skew_end)
+        if any(isinstance(reading, str) for reading in readings):
+            status = "ERROR"
+        elif all(isinstance(reading, int) for reading in readings):
+            status = "OK"
+        else:
+            status = "NOT_RUN"
+        return {
+            "status": status,
+            "start": self._skew_start,
+            "end": self._skew_end,
+            "definition": (
+                "Binance server time minus the injected clock at the call, milliseconds; "
+                "positive means the host clock is behind; includes the request latency"
+            ),
+        }
+
     def finalize(self) -> None:
         collectors = self.collectors
         counts: dict[str, int] = {}
@@ -1282,6 +1552,11 @@ class SmokeRun:
         self.evidence["open_events_dropped"] = collectors.open_events_dropped
         self._finalize_forced_disconnect()
         self._finalize_sdk_reconnect()
+        self.evidence["connection_count"] = describe_connection_count(
+            self._after_connect, self._after_rebuild
+        )
+        self.evidence["arrival_latency_ms_by_interval"] = summarize_arrival(collectors.closed)
+        self.evidence["clock_skew_ms"] = self._describe_skew()
         self.evidence["finished_at_utc"] = _iso(self.clock.now())
 
     def exit_code(self) -> int:
@@ -1348,6 +1623,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--archive-fetch", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--archive-day", default=None, help="YYYY-MM-DD, default: two days ago")
+    parser.add_argument(
+        "--rest-lag-probe-minutes",
+        type=int,
+        default=0,
+        help="poll REST 1m trade and mark klines for this many minute closes (0: off)",
+    )
+    parser.add_argument(
+        "--rest-lag-poll-interval-ms",
+        type=int,
+        default=None,
+        help="probe poll interval; required with the probe; a measurement setting, no default",
+    )
+    parser.add_argument(
+        "--rest-lag-max-wait-seconds",
+        type=int,
+        default=None,
+        help="probe maximum wait per minute; required with the probe; no default",
+    )
     return parser
 
 
@@ -1379,6 +1672,16 @@ def parse_config(argv: Sequence[str] | None) -> SmokeConfig:
         raise UsageError("--recovery-wait-seconds must be positive")
     if args.archive_day is not None and not _DAY_RE.fullmatch(str(args.archive_day)):
         raise UsageError("--archive-day must look like YYYY-MM-DD")
+    if args.rest_lag_probe_minutes < 0:
+        raise UsageError("--rest-lag-probe-minutes must not be negative")
+    if args.rest_lag_probe_minutes:
+        if args.rest_lag_poll_interval_ms is None or args.rest_lag_max_wait_seconds is None:
+            raise UsageError(
+                "--rest-lag-probe-minutes needs --rest-lag-poll-interval-ms and "
+                "--rest-lag-max-wait-seconds (measurement settings, no defaults)"
+            )
+        if args.rest_lag_poll_interval_ms <= 0 or args.rest_lag_max_wait_seconds <= 0:
+            raise UsageError("the --rest-lag-* settings must be positive")
     return SmokeConfig(
         mode="live" if args.live else "dry-run",
         out_dir=Path(args.out),
@@ -1392,6 +1695,9 @@ def parse_config(argv: Sequence[str] | None) -> SmokeConfig:
         recovery_wait_seconds=int(args.recovery_wait_seconds),
         archive_fetch=bool(args.archive_fetch),
         archive_day=args.archive_day,
+        rest_lag_probe_minutes=int(args.rest_lag_probe_minutes),
+        rest_lag_poll_interval_ms=args.rest_lag_poll_interval_ms,
+        rest_lag_max_wait_seconds=args.rest_lag_max_wait_seconds,
     )
 
 

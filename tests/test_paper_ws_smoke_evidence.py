@@ -795,8 +795,10 @@ def test_a_host_clock_behind_the_server_yields_future_close_events(tmp_path: Pat
     arrival = evidence["arrival_latency_ms_by_interval"]
     # Every closed event is received 2.85 s before its own close time on the host clock: the
     # case in which the runtime tick would drop a valid bar. They stay in the closed counts.
-    assert arrival["future_close_events"] == 3
-    assert evidence["closed_events_by_interval"] == {"1h": 1, "1m": 2}
+    # The server is 3 s ahead, so the third 1m close (server 12:02:00) is also delivered inside
+    # the 150 s run: 1m closes at 12:00, 12:01 and 12:02 plus the 1h close at 12:00.
+    assert arrival["future_close_events"] == 4
+    assert evidence["closed_events_by_interval"] == {"1h": 1, "1m": 3}
     assert arrival["by_interval"]["1m"]["min"] < 0
 
 
