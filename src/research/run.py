@@ -5,8 +5,9 @@ parameter-set check, constraint-file check, dataset-identity check, then for eve
 and every development / validation-fold window: case input from the published store,
 `simulator.run`, `read_code_version`, `experiment.assemble`, one experiment record file named
 by its `experiment_id`. The holdout is never simulated here. The runner prints one neutral
-line per record (identifiers and a trade count) and no verdict, ranking or selection, and it
-writes nothing outside the output directory.
+line per record (identifiers and a trade count), then the G1 feasibility counts per grid point
+(plan 16-12, reporting only), and no verdict, ranking or selection, and it writes nothing
+outside the output directory.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import argparse
 import hashlib
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from .authorization import (
     load_authorization,
     require_authorized,
 )
+from .feasibility import feasibility_report, render_feasibility
 from .manifest import (
     DatasetManifest,
     GridPoint,
@@ -143,7 +145,7 @@ def _run_split(
     raw_root: Path,
     constraints: list[dict[str, Any]],
     code_version: Any,
-) -> tuple[ExperimentRecord, int]:
+) -> tuple[ExperimentRecord, list[dict[str, Any]]]:
     parameter_set = load_parameter_set(grid.strategy_id, point.parameter_set_id)
     cost_dict = {key: str(value) for key, value in cost_slice(parameter_set.params).items()}
     data = build_case_input_data(
@@ -190,7 +192,7 @@ def _run_split(
         split_end_utc=window.end_utc,
         **identity,
     )
-    return record, len(output["trades"])
+    return record, list(output["trades"])
 
 
 def _record_text(record: ExperimentRecord) -> str:
@@ -224,10 +226,10 @@ def run_research(
 
     code_version = read_code_version(repo_root)
     records: list[ExperimentRecord] = []
-    trade_counts: list[int] = []
+    trade_lists: list[list[dict[str, Any]]] = []
     for point in grid.points:
         for window in research_splits(manifest):
-            record, trades = _run_split(
+            record, trade_list = _run_split(
                 manifest=manifest,
                 grid=grid,
                 point=point,
@@ -238,12 +240,13 @@ def run_research(
             )
             _refuse_if_recorded(output_dir, record)
             records.append(record)
-            trade_counts.append(trades)
+            trade_lists.append(trade_list)
 
+    feasibility_lines = _feasibility_lines(manifest, grid, records, trade_lists)
     for record in records:
         _refuse_if_recorded(output_dir, record)
     output_dir.mkdir(parents=True, exist_ok=True)
-    for record, trades in zip(records, trade_counts, strict=True):
+    for record, trade_list in zip(records, trade_lists, strict=True):
         try:
             with (output_dir / f"{record.experiment_id}.json").open(
                 "x", encoding="utf-8"
@@ -254,10 +257,34 @@ def run_research(
         print(
             f"recorded experiment_id={record.experiment_id} "
             f"parameter_set_id={record.parameter_set_id} split_role={record.split_role} "
-            f"split_start_utc={record.split_start_utc.isoformat()} trades={trades}",
+            f"split_start_utc={record.split_start_utc.isoformat()} trades={len(trade_list)}",
             flush=True,
         )
+    for line in feasibility_lines:
+        print(line, flush=True)
     return tuple(records)
+
+
+def _feasibility_lines(
+    manifest: DatasetManifest,
+    grid: ParameterGrid,
+    records: Sequence[ExperimentRecord],
+    trade_lists: Sequence[Sequence[Mapping[str, Any]]],
+) -> list[str]:
+    """G1 feasibility counts per grid point (D-26): reporting only, never part of a record.
+
+    Records are in grid-point order, `research_splits` order within a point, so a point owns
+    one consecutive block; its Validation folds are the VALIDATION entries of that block.
+    """
+    per_point = len(research_splits(manifest))
+    lines: list[str] = []
+    for index, point in enumerate(grid.points):
+        block = range(index * per_point, (index + 1) * per_point)
+        folds = [trade_lists[i] for i in block if records[i].split_role == "VALIDATION"]
+        lines.extend(
+            render_feasibility(feasibility_report(folds, parameter_set_id=point.parameter_set_id))
+        )
+    return lines
 
 
 def _refuse_if_recorded(output_dir: Path, record: ExperimentRecord) -> None:
