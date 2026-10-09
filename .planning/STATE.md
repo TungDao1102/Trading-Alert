@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: executing
-stopped_at: Completed 16-09-PLAN.md
-last_updated: "2026-10-09T05:19:19.980Z"
+stopped_at: Completed 16-10-PLAN.md
+last_updated: "2026-10-09T05:31:05.019Z"
 last_activity: 2026-10-09
 last_activity_desc: Phase 16 execution started
-state_head: e1dc8e3f17b5f4878308f9a321e592dee16cec52
+state_head: 9165eb39ae095316a7e0644f713f04a5debb49e3
 progress:
   total_phases: 29
   completed_phases: 17
   total_plans: 193
-  completed_plans: 152
+  completed_plans: 153
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
-Plan: 10 of 49
+Plan: 11 of 49
 Status: Ready to execute
 Last activity: 2026-10-09 — Phase 16 execution started
 
@@ -202,6 +202,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P07 | 15 min | 3 tasks | 3 files |
 | Phase 16 P08 | 27 min | 3 tasks | 12 files |
 | Phase 16 P09 | 10 min | 3 tasks | 4 files |
+| Phase 16 P10 | 10 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -491,6 +492,8 @@ Recent decisions affecting current work:
 - [Phase 16]: Gap reason names the window being verified (WS_RECONNECT_WINDOW or WS_DISCONNECTED on rebuild exhaustion); live bars are held during a pending recovery so the monotonic cursor never skips a recoverable bar
 - [Phase 16]: Resync expected slots are anchored on the exchange grid (close = open + interval - 1 ms), fixing phantom gaps; tenacity loops no longer retry task cancellation
 - [Phase 16]: Plan 16-09: freeze CLI --from-allowlist writes one SKIPPED line for an empty allowlist, checks the single approved entry with the pinned hash equal to the entry hash, and exits 1 on two entries (ambiguous allowlist); find_allowlist_entry raises on duplicate ids; every line may carry run_metadata from five named environment variables
+- [Phase 16]: 16-10: evaluate_closed_bar takes the caller's setup/context candle lists (tick keeps whole-series behaviour, no digest moves); BarBuffers cut the engine windows 1000/300 with bisect_right and cap at window plus one bar — D-02 byte-identity of run_paper_tick; research P6/P7 window and 4h-before-1h parity with the engine
+- [Phase 16]: 16-10: decision_surface is a non-semantic observer (no simulator import, tolerance-zero surface_digest); a conflicting duplicate bar raises; src/paper/shadow.py excluded from the float glob scan with a stated reason (tenacity seconds) — L-02/D061 B and G2-008; plan fallback of an explicit justified exclusion instead of weakening the scan
 
 ### Pending Todos
 
@@ -566,6 +569,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-09T05:19:18.859Z
-Stopped at: Completed 16-09-PLAN.md
+Last session: 2026-10-09T05:30:44.933Z
+Stopped at: Completed 16-10-PLAN.md
 Resume file: None
