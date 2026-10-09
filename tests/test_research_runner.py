@@ -763,3 +763,74 @@ def test_runner_source_never_references_the_holdout_marker_or_the_allowlist() ->
         text = path.read_text(encoding="utf-8")
         assert "holdout_consumed" not in text, path.name
         assert "PAPER_START_ALLOWLIST" not in text, path.name
+
+
+# --------------------------------------------------------------------------- #
+# Plan 16-18 Task 3 (D-30, G4-009, G3-012): timing hook without tracemalloc, deferred items.
+# --------------------------------------------------------------------------- #
+
+DEFERRED_FEATURE_STATEMENT = (
+    "incremental feature series deferred (D052 item h); any change must be an "
+    "exact-equivalence refactor"
+)
+COST_TO_RISK_STATEMENT = "max_cost_to_risk unchanged (D046 item 6)"
+
+
+def test_time_run_records_wall_seconds_per_split_and_never_starts_tracemalloc(
+    inputs: _Inputs,
+    store: Path,
+    tmp_path: Path,
+    spies: _Spies,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import tracemalloc
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the runner must not start tracemalloc")
+
+    ticks = iter(float(n) * 0.5 for n in range(1000))
+    monkeypatch.setattr(tracemalloc, "start", forbidden)
+    monkeypatch.setattr(research_run, "perf_counter", lambda: next(ticks))
+
+    out_timed = tmp_path / "timed"
+    assert main([*_argv(inputs, store, out_timed), "--time-run"]) == 0
+    stdout = capsys.readouterr().out
+    timing = [line for line in stdout.splitlines() if line.startswith("timing ")]
+    assert len(timing) == 5
+    assert all("wall_seconds=0.500" in line for line in timing)
+    assert [("split_role=DEVELOPMENT" in line) for line in timing] == [
+        True,
+        False,
+        False,
+        False,
+        False,
+    ]
+    assert VERDICT_WORDS.search(stdout) is None, stdout
+
+    # The experiment records are byte-identical with and without the flag.
+    out_plain = tmp_path / "plain"
+    assert main(_argv(inputs, store, out_plain)) == 0
+    assert "timing " not in capsys.readouterr().out
+    assert _tree_digest(out_timed) == _tree_digest(out_plain)
+
+
+def test_run_log_states_the_deferred_items_and_the_untouched_cost_guard(
+    inputs: _Inputs,
+    store: Path,
+    tmp_path: Path,
+    spies: _Spies,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(_argv(inputs, store, tmp_path / "experiments")) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines.count(DEFERRED_FEATURE_STATEMENT) == 1
+    assert lines.count(COST_TO_RISK_STATEMENT) == 1
+
+
+def test_runner_source_has_no_tracemalloc_and_params_stay_untouched() -> None:
+    assert "tracemalloc" not in (REPO_ROOT / "src" / "research" / "run.py").read_text(
+        encoding="utf-8"
+    )
+    for path in sorted((REPO_ROOT / "src" / "research").glob("*.py")):
+        assert "tracemalloc" not in path.read_text(encoding="utf-8"), path.name
