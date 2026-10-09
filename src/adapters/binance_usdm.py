@@ -69,7 +69,7 @@ import asyncio
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
@@ -81,6 +81,9 @@ from binance_sdk_derivatives_trading_usds_futures import (
     RateLimitBanError,
     TooManyRequestsError,
 )
+from src.adapters.binance_public import BinancePublicMarketData, _ms_to_utc
+from src.adapters.binance_public import Kline as Kline
+from src.adapters.binance_public import _row_to_kline as _row_to_kline
 
 log = structlog.get_logger()
 
@@ -171,27 +174,6 @@ def _cancel_retry_predicate(exc: BaseException) -> bool:
 # --------------------------------------------------------------------------- #
 # Frozen domain dataclasses — the public contract of the adapter.
 # --------------------------------------------------------------------------- #
-
-
-@dataclass(frozen=True)
-class Kline:
-    """One kline row, normalized to project types.
-
-    `close_time_utc <= now_utc` is the invariant callers MUST enforce before
-    accepting a kline (RESEARCH §Pitfall 1 — never include the forming candle).
-    """
-
-    symbol: str
-    interval: str
-    open_time_utc: datetime
-    close_time_utc: datetime
-    open: Decimal
-    high: Decimal
-    low: Decimal
-    close: Decimal
-    volume: Decimal
-    quote_volume: Decimal
-    trade_count: int
 
 
 @dataclass(frozen=True)
@@ -522,11 +504,6 @@ def _decimal_to_wire(value: Decimal) -> Any:
     return format(value, "f")
 
 
-def _ms_to_utc(ms: int) -> datetime:
-    """Convert a millisecond Unix epoch to a tz-aware UTC datetime."""
-    return datetime.fromtimestamp(ms / 1000, tz=UTC)
-
-
 # The installed SDK's canonical rate-limit errors. `is_rate_limit_error`
 # matches `isinstance` against these real classes (not name substrings),
 # pinned by `test_rate_limit_predicate_pins_canonical_sdk_error_names` —
@@ -586,40 +563,6 @@ def is_invalid_symbol_error(exc: BaseException) -> bool:
     return isinstance(exc, BadRequestError) and exc.status_code == INVALID_SYMBOL_CODE
 
 
-def _row_to_kline(symbol: str, interval: str, row: Sequence[Any]) -> Kline:
-    """Map one raw kline list (12-field tuple) to a `Kline`.
-
-    Per Binance docs the order is:
-        0  open_time                int ms
-        1  open                     str Decimal
-        2  high                     str Decimal
-        3  low                      str Decimal
-        4  close                    str Decimal
-        5  volume                   str Decimal
-        6  close_time               int ms
-        7  quote_asset_volume       str Decimal
-        8  number_of_trades         int
-        9  taker_buy_base_volume    str Decimal
-        10 taker_buy_quote_volume   str Decimal
-        11 ignore                   str
-    """
-    if len(row) < 9:
-        raise ValueError(f"kline row too short ({len(row)} cols): {row!r}")
-    return Kline(
-        symbol=symbol,
-        interval=interval,
-        open_time_utc=_ms_to_utc(int(row[0])),
-        close_time_utc=_ms_to_utc(int(row[6])),
-        open=Decimal(str(row[1])),
-        high=Decimal(str(row[2])),
-        low=Decimal(str(row[3])),
-        close=Decimal(str(row[4])),
-        volume=Decimal(str(row[5])),
-        quote_volume=Decimal(str(row[7])),
-        trade_count=int(row[8]),
-    )
-
-
 def _row_to_mark_kline(symbol: str, interval: str, row: Sequence[Any]) -> MarkKline:
     """Map one raw markPriceKlines list (12-field row) to a `MarkKline`.
 
@@ -658,6 +601,7 @@ class BinanceUsdmAdapter:
 
     def __init__(self, sdk_client: DerivativesTradingUsdsFutures | None = None) -> None:
         self._sdk: DerivativesTradingUsdsFutures = sdk_client or DerivativesTradingUsdsFutures()
+        self._public = BinancePublicMarketData(sdk_client=self._sdk)
 
     # ----- klines ---------------------------------------------------------- #
 
@@ -669,27 +613,8 @@ class BinanceUsdmAdapter:
         end_ms: int | None = None,
         limit: int = 1500,
     ) -> list[Kline]:
-        """Fetch one page of klines. Always returns the raw list shape
-        (a list of 12-field lists) projected to `Kline` instances.
-
-        `start_ms` / `end_ms` are inclusive open-time bounds per Binance
-        docs (verified at implementation time against installed SDK).
-
-        The underlying SDK call is synchronous (returns `ApiResponse`
-        directly); we run it in a worker thread so the async paginator
-        can interleave multiple pages across symbols without blocking.
-        """
-        response = await asyncio.to_thread(
-            self._sdk.rest_api.kline_candlestick_data,
-            symbol=symbol,
-            interval=interval,  # type: ignore[arg-type]
-            start_time=start_ms,
-            end_time=end_ms,
-            limit=limit,
-        )
-        # `data()` is a list[list[Any]] — see exchange_info_sample pattern.
-        raw = response.data()
-        return [_row_to_kline(symbol, interval, row) for row in raw]
+        """Fetch one page of klines; delegates to `BinancePublicMarketData` (plan 16-03)."""
+        return await self._public.klines(symbol, interval, start_ms, end_ms, limit)
 
     async def mark_klines(
         self,

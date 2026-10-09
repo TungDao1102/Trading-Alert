@@ -9,9 +9,7 @@ client stands in for the REST client.
 
 from __future__ import annotations
 
-import ast
 import asyncio
-from pathlib import Path
 from typing import Any
 
 import src.adapters.binance_public as public_mod
