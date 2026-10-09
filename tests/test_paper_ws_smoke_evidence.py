@@ -198,4 +198,3 @@ def test_the_schema_validator_accepts_every_combination_of_ok_and_not_run(
         for key in MEASUREMENT_KEYS:
             variant[key]["status"] = status
         assert smoke.check_evidence_schema(variant) == []
-
