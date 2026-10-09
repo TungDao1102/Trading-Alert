@@ -551,3 +551,69 @@ On the provisioning weekend only the collector moves: the host holds PostgreSQL 
 4. **Report.** Read the report (15.4). Exit 0 means nothing was lost and the OI gap is within the threshold; exit 3 is data, not a failure to retry. The OI gap printed by `deploy/migrate.sh` is recorded as a coverage gap (D059 item 4, L-14): every gap after 2026-10-08 is written down with its start, end and cause, and the dataset is never called full history while a known gap exists. The Open Interest history Binance serves is limited to roughly the latest month (`docs/SOURCES.md`), so the minutes cannot be backfilled.
 5. **After a clean report** only a human shuts the old collector's machine down, updates the Binance IP whitelist to the Elastic IP and moves the heartbeat monitor (15.6). Then run the acceptance checks of 19.3 in order and validate the file: `uv run python scripts/soak_host_acceptance.py acceptance.json`.
 6. **Backups.** The first real backup waits for the D064 real-S3 gate (section 11, "Real-S3 gate"; condition `BACKUP_REAL_S3_GATE`). A restore drill (11.6) runs on the host before the long soak, and so does the first verified pull to the development machine (19.5). A backup is not valid until a drill passes (11.6).
+
+### 19.5 Pulling research data to the development machine
+
+The research data (Parquet, plus the PostgreSQL dump in the same bundle) reaches the development machine over the existing backup chain: the host pushes a snapshot to the encrypted off-host store (section 11) and the development machine pulls it. No ssh from the development machine to the host is involved.
+
+Prerequisites. The development machine holds the same `BACKUP_*` configuration as the host (11.1), including both obscured crypt passwords, so the passphrases and a bucket access key then exist on a second machine and the key custody rules of section 11 apply to it as well. The images are built there (`docker compose --profile ops build`). At least one complete snapshot exists on the remote: the first real backup waits for the D064 real-S3 gate (19.4).
+
+1. Pull and verify. Replace `<UTC timestamp>` with the current UTC time as `YYYYMMDDTHHMMSSZ`; the destination must not exist or be empty:
+
+```text
+docker compose --profile ops run --rm -T --no-deps ops /app/.venv/bin/python -m src.ops.backup pull --dest /app/data/backup/pull-<UTC timestamp>
+```
+
+   The newest complete snapshot is used. To pull a named one add `--snapshot <snapshot id>` (an id of the form `YYYYMMDDTHHMMSSZ`, listed by the push output `push-OK snapshot=<id>`). On success it prints `pull-OK snapshot=<id> dest=...`. The pull copies the snapshot folder, fetches exactly the Parquet files the manifest names and checks every file against the manifest SHA-256; a missing or altered object stops it with `pulled bundle failed verification` (11.8). The interpreter is the venv one (`/app/.venv/bin/python`) because bare `python` in the image is the base interpreter without the project packages (the comment above the health check in the `Dockerfile`).
+
+2. Verify the pulled bundle once more, independently of the pull:
+
+```text
+docker compose --profile ops run --rm -T --no-deps ops /app/.venv/bin/python -m src.ops.backup verify --bundle-root /app/data/backup/pull-<UTC timestamp>
+```
+
+   Exit 0 means every file hashes to its manifest entry and the file set equals the manifest. Anything else: stop, do not copy.
+
+3. Copy the verified Parquet tree into the development raw root without overwriting anything:
+
+```text
+docker compose --profile ops run --rm -T --no-deps ops /app/.venv/bin/python -m src.ops.backup restore --bundle-root /app/data/backup/pull-<UTC timestamp> --parquet-target /app/data/raw --skip-db --force
+```
+
+   `--skip-db` restores the Parquet files only and leaves the development database alone. `--force` is needed only because the development raw root already holds data; it does not allow overwriting. The command verifies the bundle again, checks every target path before it copies anything, skips a file that already exists with identical content and copies the rest through a temporary name. The copy must never overwrite an existing file, because raw files are immutable: if a path already exists in the target with different content the command aborts with `already exists in the target with different content` and copies nothing. That is a finding to investigate (T-16-18), not a reason to delete the target file or to rerun with another option; no option exists that overwrites.
+
+Rules. Pulled files enter the research raw root only through step 3, after steps 1 and 2 succeeded; never copy files out of the pulled bundle by hand. The `pull-<UTC timestamp>` directory stays in the `backupdata` volume until you remove it by hand (11.7). Loading the PostgreSQL dump of the bundle into a development database is a different step (`restore-db`) and is not part of this data path.
+
+### 19.6 Durable evidence storage study (REV-08)
+
+Question under study: where the Phase 16 evidence (`pinned_epoch.json`, `registry_diff.jsonl`, coverage artifacts, exit-criteria output) is kept durably, with S3 as the canonical copy and a Git manifest of hashes as the index. This section collects facts and their interaction with the backup chain as it is now (`src/ops/backup_remote.py`, re-read for D064 and D066). It selects nothing.
+
+**Facts.** Each carries its page and the read date; all are not verified live (summarised by a fetch tool, `16-RESEARCH-GAPS-RESULT.md`).
+
+- Object Lock works only in buckets that have S3 Versioning enabled (https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html, read 2026-10-08, not verified live).
+- Object Lock can be enabled on an existing bucket, once S3 Versioning is on; once enabled it cannot be disabled and versioning cannot be suspended (https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock-configure.html, read 2026-10-08, not verified live).
+- GOVERNANCE versus COMPLIANCE. In COMPLIANCE mode no user, root included, can overwrite or delete a protected object version, and the mode and period cannot be shortened. In GOVERNANCE mode a version is protected unless the user has the `s3:BypassGovernanceRetention` permission and sends the bypass header (https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html, read 2026-10-08, not verified live).
+- A bucket default retention (days or years) is a bucket property applied to every object version placed in the bucket; the retain-until date is computed from each version's creation time; an explicit per-object retention setting overrides the bucket default. The pages describe no per-prefix default. An object that is already in the bucket is not described as changed by a later default (https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock-configure.html, read 2026-10-08, not verified live).
+- A permanent delete of a locked version (a delete request with a version id) returns 403 Access Denied; a simple delete (no version id) returns 200 OK and inserts a delete marker (https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html, read 2026-10-08, not verified live).
+- Versioning cost: normal S3 rates apply for every version of an object (https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html, read 2026-10-08, not verified live). Whether Object Lock itself has a separate charge is UNVERIFIED: neither the Object Lock pages nor the pricing page read stated one.
+- rclone crypt: "Hashes are not stored for crypt"; `rclone cryptcheck` is the check to use instead of `rclone check`, and it needs a checksum on the underlying remote (https://rclone.org/crypt/ and https://rclone.org/commands/rclone_cryptcheck/, read 2026-10-08, not verified live).
+- rclone with S3 Object Lock: it computes and sends Content-MD5 when Object Lock parameters are set, accepts a retention mode and date, shows versions with `--s3-versions`, and `rclone backend cleanup-hidden` deletes old hidden versions (https://rclone.org/s3/, read 2026-10-08, not verified live). What `rclone purge` does for a path inside a versioned bucket, and what it does when it meets a locked version, is UNVERIFIED: the purge page says only "Remove the path and all of its contents" (https://rclone.org/commands/rclone_purge/, read 2026-10-08, not verified live).
+- GitHub Actions cache entries not accessed for over 7 days are removed, and the default repository limit evicts the oldest first (https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching, read 2026-10-08, not verified live). Git hashes do not make S3 immutable, and an Actions cache is never a source of truth.
+
+**Interaction with the backup chain.**
+
+1. Readability. The chain writes through an rclone `crypt` layer, so object names and contents in the bucket are ciphertext. Evidence written through that remote is unreadable off-host, by the GitHub runner or by an auditor, without `BACKUP_CRYPT_PASSWORD` and `BACKUP_CRYPT_PASSWORD2` (research S2 interaction 1); handing those to GitHub widens the exposure of the key. Evidence stored outside the crypt layer is a different remote with its own configuration mapping.
+2. Integrity. Crypt stores no plaintext hash, so ETags and rclone checksums say nothing about plaintext. The chain relies on `rclone cryptcheck` after each upload and on the SHA-256 manifest inside each snapshot (`push_snapshot`). A Git manifest of SHA-256 values would be an independent plaintext check for evidence files; it is an index, not protection of the S3 objects.
+3. Writes. `push_snapshot` uploads Parquet and `pg.dump` with `--immutable`, never deletes `parquet/`, and removes only a just-published `manifest.json` that failed its check (`rclone deletefile`, two attempts). Uploads without overwrite are compatible with versioning and with Object Lock. This is an inference, not tested: under a bucket default retention that compensating `deletefile` would at most add a delete marker (a simple delete, 200 OK), and whether rclone issues a permanent delete of the locked version instead is UNVERIFIED.
+4. Retention. `apply_retention` deletes `snapshots/<id>` folders with `rclone purge` and raises `RemoteError` on a non-zero exit, which turns the scheduled backup red; it runs only after a push has been verified. This is an inference: under a COMPLIANCE default on the backup bucket a permanent delete of a locked version returns 403 (above), so the purge would be refused until the lock expires, but the behaviour of `rclone purge` on a locked or versioned path is UNVERIFIED, so it may also fail differently or leave hidden versions. With versioning only, a purge leaves hidden old versions and storage is not freed until `rclone backend cleanup-hidden` or a lifecycle rule for noncurrent versions runs; no such control exists in the repository and it is an operator action (value from decision record 16-DEC-O-12). A backup bucket and an evidence bucket should therefore not silently share one default retention; per-object retention on evidence writes is the alternative, since the default is bucket-wide.
+5. Sentinel. `check_sentinel` and `init_sentinel` assume a dedicated bucket that is completely empty at `--init-remote`; evidence objects must not be placed in the bucket before it, and a second remote needs its own configuration mapping.
+6. Provider-side protection. RUNBOOK 11.1 item 4 already asks for bucket versioning or object lock as an operator control; no code checks it and no test can prove it is on (section 17, row 11.7).
+7. Host loss. Journal rows reach the development machine through `pg.dump` in the daily snapshot (11.3, 11.4), so on loss of the host up to a 24 hour loss window of evidence is exposed unless evidence is published more often or at event time.
+
+Not covered by any source read: whether Object Lock changes the S3 request or storage price (UNVERIFIED), the exact IAM actions rclone needs for retention calls, and the real-S3 behaviour of the D064 gate itself (19.3, `BACKUP_REAL_S3_GATE`).
+
+No option is selected here; the decision is O-01 (plan 16-30).
+
+### 19.7 Things only the host can show
+
+The list at the end of section 17, "Only a real host can show", holds the apt install on each OS, ufw/sshd/chrony effects, the Docker and ufw interplay, the `docker run` rsync path, a systemd timer firing, provider disk encryption, the Binance IP whitelist, the heartbeat monitor, a real bucket at scale and a real provider-to-provider cutover. Every check of 19.3 and every UAT item of 19.4 belongs to that list: no test in this repository shows any of them. `tests/test_soak_runbook.py` proves only that this section names commands that exist and that the validator behaves as described.
