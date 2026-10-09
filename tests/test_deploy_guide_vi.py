@@ -17,7 +17,12 @@ Document contract enforced here (see the quick plan 261009-jqi):
 * any other command is a generic OS helper, a line found verbatim in the repository operations
   documents and scripts, or labelled ``CHƯA XÁC MINH`` / ``CHƯA XÂY``;
 * no secret, token, key, real public IP address, instance-type name or passwordless-sudo tag;
-* built-state labels never over-claim (Phase 16 plans, ROADMAP phases 18 to 26).
+* built-state labels never over-claim (Phase 16 plans, ROADMAP phases 18 to 26);
+* every section, operation card and major step opens with a three-line block (what it is for,
+  which problem it solves, how important it is) whose importance carries a tag and a repository
+  basis;
+* the heartbeat is healthchecks.io, its sender (plan 16-50) is labelled not built while 16-50 has no
+  SUMMARY, its free-plan facts stay unverified, and no ping URL appears.
 """
 
 from __future__ import annotations
@@ -153,6 +158,42 @@ ALLOWED_IPS = {"127.0.0.1", "0.0.0.0", "169.254.169.123"}
 ALLOWED_IP_PREFIXES = ("192.0.2.", "198.51.100.", "203.0.113.")
 SECRET_NAME_PARTS = ("PASSWORD", "SECRET", "TOKEN", "API_KEY", "ACCESS_KEY", "CRYPT")
 DECISION_IDS = ("D040", "D041", "D042", "D050", "D059", "D061", "D062", "D064")
+PURPOSE_LABELS = tuple(_nfc(s) for s in ("Để làm gì", "Giải quyết vấn đề gì", "Mức quan trọng"))
+IMPORTANCE_TAGS = tuple(_nfc(s) for s in ("BẮT BUỘC", "NÊN LÀM", "TÙY CHỌN", "CHƯA RÕ"))
+# What an importance line may rest on: a decision id, an operations document, a decision record, or
+# an explicit statement that the level is the guide's own judgement or that the repo is silent.
+PURPOSE_BASIS = re.compile(
+    _nfc(
+        r"D0\d\d|RUNBOOK|ROADMAP|Q-L|O-12|OPS-06|"
+        r"đánh giá của hướng dẫn|quy ước của chính hướng dẫn|repository (?:không|chưa)"
+    ),
+    re.I,
+)
+# Steps of sections 3 to 9 that must open with the block (the others are covered by their section).
+PURPOSE_STEPS = (
+    "3.1",
+    "3.2",
+    "3.3",
+    "3.4",
+    "3.5",
+    "3.6",
+    "3.7",
+    "3.8",
+    "3.9",
+    "3.10",
+    "3.11",
+    "6.1",
+    "7.1",
+    "7.6",
+    "7.7",
+    "8.1",
+    "8.2",
+    "8.3",
+    "9.1",
+    "9.3",
+    "9.4",
+)
+PHASE16_PLAN_COUNT = 50
 
 
 # --------------------------------------------------------------------------------------------
@@ -615,6 +656,10 @@ def test_common_no_secret_shaped_content() -> None:
         "uuid inside a url": re.compile(
             r"https?://\S*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
         ),
+        "heartbeat ping host": re.compile(r"hc-ping\.com|healthchecks\.io/ping", re.I),
+        "healthchecks.io url other than the pricing page": re.compile(
+            r"https?://(?:[\w-]+\.)*healthchecks\.io/(?!pricing/?(?:[\s)`.,;:]|$))", re.I
+        ),
     }
     for number, line in enumerate(text.split("\n"), start=1):
         for rule, pattern in patterns.items():
@@ -908,7 +953,7 @@ def test_part2_sections_cards_phase_table_and_anchors() -> None:
         ]
     )
     rows = set(re.findall(r"^\|\s*(16-\d\d)\s*\|", text, re.M))
-    expected = {f"16-{n:02d}" for n in range(1, 50)}
+    expected = {f"16-{n:02d}" for n in range(1, PHASE16_PLAN_COUNT + 1)}
     if rows != expected:
         problems.append(
             f"Phase 16 table rows differ: missing {sorted(expected - rows)}, "
@@ -1005,3 +1050,181 @@ def test_final_governing_decisions_are_cited() -> None:
     text = _guide()
     missing = [d for d in DECISION_IDS if d not in text]
     assert not missing, f"decisions never cited: {missing}"
+
+
+# --------------------------------------------------------------------------------------------
+# Purpose blocks: what each section, card and major step is for, and how much it matters
+# --------------------------------------------------------------------------------------------
+
+
+def _purpose_block(lines: list[str], heading_index: int) -> list[str] | None:
+    """The three block lines that open the item whose heading is at ``heading_index``."""
+    cursor = heading_index + 1
+    while cursor < len(lines) and not lines[cursor].strip():
+        cursor += 1
+    block = lines[cursor : cursor + 3]
+    if len(block) < 3:
+        return None
+    for label, line in zip(PURPOSE_LABELS, block, strict=True):
+        if not line.startswith(f"> - **{label}:** "):
+            return None
+    return block
+
+
+def _purpose_problems(where: str, block: list[str] | None) -> list[str]:
+    if block is None:
+        return [
+            f"{where}: does not open with the three-line block "
+            f"({', '.join(PURPOSE_LABELS)}) as '> - **label:** text' lines"
+        ]
+    problems: list[str] = []
+    for label, line in zip(PURPOSE_LABELS, block, strict=True):
+        body = line.split(":** ", 1)[1].strip()
+        if len(body) < 30:
+            problems.append(f"{where}: field '{label}' is too short to be useful")
+    importance = block[2]
+    if not any(f"**{tag}**" in importance for tag in IMPORTANCE_TAGS):
+        problems.append(f"{where}: importance has no bold tag from {IMPORTANCE_TAGS}")
+    if not PURPOSE_BASIS.search(importance):
+        problems.append(f"{where}: importance names no decision, document or stated judgement")
+    if _nfc("**CHƯA RÕ**") in importance and not re.search(
+        _nfc(r"repository (?:không|chưa)"), importance
+    ):
+        problems.append(f"{where}: CHƯA RÕ must say in words that the repository is silent")
+    return problems
+
+
+def _step_region(text: str, ident: str) -> str:
+    match = re.search(rf"^#### Bước {re.escape(ident)} .*$", text, re.M)
+    assert match, f"step {ident} is missing"
+    rest = text[match.end() :]
+    nxt = re.search(r"^#{1,4} ", rest, re.M)
+    return text[match.start() : match.end() + (nxt.start() if nxt else len(rest))]
+
+
+def test_final_every_section_opens_with_the_purpose_block() -> None:
+    lines = _guide().split("\n")
+    problems: list[str] = []
+    for index, line in enumerate(lines):
+        head = re.match(r"^## (\d+)\. ", line)
+        if head:
+            problems += _purpose_problems(f"section {head.group(1)}", _purpose_block(lines, index))
+    assert not problems, "\n".join(problems)
+
+
+def test_final_every_operation_card_opens_with_the_purpose_block() -> None:
+    text = _guide()
+    lines = text.split("\n")
+    problems: list[str] = []
+    cards = _cards(text)
+    assert len(cards) >= 11, f"only {len(cards)} operation cards"
+    for card in cards:
+        problems += _purpose_problems(f"card {card.path}", _purpose_block(lines, card.line - 1))
+    assert not problems, "\n".join(problems)
+
+
+def test_final_major_steps_open_with_the_purpose_block() -> None:
+    lines = _guide().split("\n")
+    problems: list[str] = []
+    for ident in PURPOSE_STEPS:
+        pattern = re.compile(rf"^#### Bước {re.escape(ident)} ")
+        found = [i for i, ln in enumerate(lines) if pattern.match(ln)]
+        if len(found) != 1:
+            problems.append(f"step {ident}: found {len(found)} headings")
+            continue
+        problems += _purpose_problems(f"step {ident}", _purpose_block(lines, found[0]))
+    assert not problems, "\n".join(problems)
+
+
+def test_final_every_importance_line_is_tagged() -> None:
+    """An importance line is never untagged prose, wherever it sits."""
+    stray = [
+        f"line {n}: {line[:60]}"
+        for n, line in enumerate(_guide().split("\n"), start=1)
+        if line.startswith(f"> - **{PURPOSE_LABELS[2]}:**")
+        and not any(f"**{tag}**" in line for tag in IMPORTANCE_TAGS)
+    ]
+    assert not stray, "\n".join(stray)
+
+
+# --------------------------------------------------------------------------------------------
+# Phase 16 count and the heartbeat (plan 16-50 is planned, not built)
+# --------------------------------------------------------------------------------------------
+
+
+def test_final_phase16_count_is_fifty_everywhere() -> None:
+    text = _guide()
+    stale = [s for s in ("14/49", "49 kế hoạch", "đến 16-49", "Cả 49") if _nfc(s) in text]
+    assert not stale, f"stale plan counts: {stale}"
+    assert f"14/{PHASE16_PLAN_COUNT}" in text, "the 14/50 progress figure is missing"
+    assert _nfc(f"14 trong {PHASE16_PLAN_COUNT} kế hoạch") in text
+    assert _nfc(f"Bảng đủ {PHASE16_PLAN_COUNT} kế hoạch") in text
+
+
+def test_final_heartbeat_is_healthchecks_io_and_the_sender_is_labelled_not_built() -> None:
+    text = _guide()
+    sections = _sections(text)
+    region = _step_region(text, "8.3")
+    heading = region.split("\n", 1)[0]
+    built, not_built, unverified = (f"[{label}]" for label in STATUS_LABELS[:3])
+    # Plan 16-50 may not exist yet while it is being written: its file is never required here.
+    sender_built = (PHASE16_DIR / "16-50-SUMMARY.md").is_file()
+    problems: list[str] = []
+
+    # the chosen service, everywhere a reader may meet the heartbeat
+    for number in (1, 2, 3, 8, 13, 14, 15):
+        if "healthchecks.io" not in sections.get(number, ""):
+            problems.append(f"section {number} does not name healthchecks.io")
+    if "healthchecks.io" not in heading:
+        problems.append("the heading of step 8.3 does not name healthchecks.io")
+    if "2026-10-09" not in region or _nfc("QUYẾT ĐỊNH CỦA BẠN") not in region:
+        problems.append("step 8.3 must date the choice and leave interval and grace to the user")
+
+    # the sender is planned as 16-50 and stays not built while 16-50 has no SUMMARY
+    row = next((ln for ln in text.split("\n") if re.match(r"^\|\s*16-50\s*\|", ln)), "")
+    if not row:
+        problems.append("the Phase 16 table has no 16-50 row")
+    if not sender_built:
+        if not_built not in heading:
+            problems.append("step 8.3 is not labelled CHƯA XÂY while 16-50 has no SUMMARY")
+        if not_built not in row or built in row:
+            problems.append("the 16-50 row must be CHƯA XÂY, not ĐÃ XÂY, while it has no SUMMARY")
+        paired = [ln for ln in text.split("\n") if "healthchecks.io" in ln and not_built in ln]
+        if not paired:
+            problems.append("no line pairs healthchecks.io with the CHƯA XÂY label")
+    if "16-50" not in region:
+        problems.append("step 8.3 never names plan 16-50")
+    if "```" in region:
+        problems.append("step 8.3 has a code fence: the manual interim option has no command")
+    for needed in (_nfc("[THỦ CÔNG]"), unverified, _nfc("RUNBOOK 11.4")):
+        if needed not in region:
+            problems.append(f"step 8.3 lacks {needed}")
+
+    # free-plan facts verified only in part from third-party pages stay labelled
+    region_lines = region.split("\n")
+    for fact in ("20 check", "100 bản ghi log", _nfc("ping mỗi phút")):
+        hits = [ln for ln in region_lines if fact in ln]
+        if not hits:
+            problems.append(f"free-plan fact '{fact}' is missing")
+        elif not all(unverified in ln for ln in hits):
+            problems.append(f"free-plan fact '{fact}' is not labelled CHƯA XÁC MINH on its line")
+    if "https://healthchecks.io/pricing/" not in region:
+        problems.append("step 8.3 does not point to the healthchecks.io pricing page")
+
+    # purposes, limits and the secret URL
+    lowered = region.casefold()
+    for phrase in (
+        "d042 điều kiện 1",
+        "d059",
+        "heartbeat_monitor_alert_received",
+        "thông báo phục hồi",
+        "không phải cảnh báo giao dịch",
+        "không phải tín hiệu sức khỏe nghiệp vụ",
+        "không bảo vệ vị thế",
+        "sl luôn nằm trên sàn",
+        "url ping là bí mật",
+        "d050",
+    ):
+        if _nfc(phrase) not in lowered:
+            problems.append(f"step 8.3 lacks '{phrase}'")
+    assert not problems, "\n".join(problems)

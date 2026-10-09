@@ -6,6 +6,10 @@ Hướng dẫn này đi từ một tài khoản AWS mới (vùng ap-southeast-1)
 
 ## 0. Cách đọc hướng dẫn này
 
+> - **Để làm gì:** Giải thích cách đọc cả tài liệu: bốn loại máy, bốn nhãn trạng thái, thẻ lệnh, ký hiệu thay thế và quy tắc về bí mật.
+> - **Giải quyết vấn đề gì:** Tránh ba lỗi hay gặp của người mới: chạy lệnh nhầm máy, tưởng "đã xây" nghĩa là "đã chạy thử trên máy thật", và dán bí mật vào nơi không an toàn.
+> - **Mức quan trọng:** **BẮT BUỘC** đọc trước khi gõ bất kỳ lệnh nào. Đây là quy ước của chính hướng dẫn này; repository không quy định mức quan trọng của việc đọc.
+
 ### Bốn loại máy
 
 Mọi bước đều ghi một thẻ máy, vì nhầm máy là lỗi phổ biến nhất của người mới.
@@ -40,8 +44,8 @@ Mọi giá trị bạn phải tự điền được viết trong dấu ngoặc n
 
 ### Quy tắc về bí mật
 
-- Mật khẩu, khóa truy cập, token bot, địa chỉ URL của dịch vụ giám sát, cụm mật khẩu sao lưu: không dán vào chat, lịch sử shell (shell history), issue, commit hay tài liệu này. Tài liệu này chỉ chứa TÊN biến, không chứa giá trị.
-- Các số liệu của bạn về máy EC2 (loại máy, dung lượng ổ, ngân sách, vòng đời S3, dịch vụ heartbeat) chưa được chọn (quyết định `16-DEC-O-12` là hoãn). Chúng được ghi là `[QUYẾT ĐỊNH CỦA BẠN]` và không có số nào trong tài liệu này.
+- Mật khẩu, khóa truy cập, token bot, địa chỉ URL ping của dịch vụ giám sát (healthchecks.io), cụm mật khẩu sao lưu: không dán vào chat, lịch sử shell (shell history), issue, commit hay tài liệu này. Tài liệu này chỉ chứa TÊN biến, không chứa giá trị.
+- Các số liệu của bạn về máy EC2 (loại máy, dung lượng ổ, ngân sách, vòng đời S3, chu kỳ và thời gian ân hạn của heartbeat) chưa được chọn (quyết định `16-DEC-O-12` là hoãn). Chúng được ghi là `[QUYẾT ĐỊNH CỦA BẠN]` và không có số nào trong tài liệu này. Riêng dịch vụ heartbeat thì bạn đã chọn healthchecks.io ngày 2026-10-09 (mục 8.3).
 
 ### Lưu ý riêng cho Windows
 
@@ -54,6 +58,10 @@ Mục 1 là bức tranh tổng thể. Mục 2 đến 5 dựng máy và chuyển 
 Nguồn: `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`, `deploy/lib.sh`, `docs/operations/SECURITY_AND_OPERATIONS.md`
 
 ## 1. Bức tranh tổng thể
+
+> - **Để làm gì:** Cho bạn bản đồ tổng thể: có những máy nào, ai làm gì ở đâu, cái gì đã xây và cái gì chưa, và đường tối thiểu hôm nay.
+> - **Giải quyết vấn đề gì:** Không bị lạc giữa nhiều mục, và biết ngay phần nào chưa có code nên chưa thể làm.
+> - **Mức quan trọng:** **NÊN LÀM** đọc một lần, không có thao tác nào; bỏ qua được nếu bạn đã nắm mô hình. Mức này là đánh giá của hướng dẫn này, repository không quy định.
 
 ### Các máy và dịch vụ
 
@@ -72,7 +80,7 @@ Nguồn: `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`, `deploy/lib.sh`, `do
  |  ufw, SSH chỉ khóa, chrony    |
  +-------------------------------+     +------------------------------+
         ^                               | Dịch vụ heartbeat bên ngoài  |
-        | migrate.sh (rsync qua ssh)    | (chưa chọn, xem mục 8.3)     |
+        | migrate.sh (rsync qua ssh)    | (healthchecks.io, xem 8.3)   |
  [MÁY CŨ] (collector hôm nay)           +------------------------------+
 ```
 
@@ -93,7 +101,8 @@ Nguồn: `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`, `deploy/lib.sh`, `do
 | --- | --- | --- |
 | `deploy/bootstrap.sh`, `update.sh`, `migrate.sh`, `backup.sh`, `restore.sh`, `backup-drill.sh`, `refresh-pins.sh` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` | Có kiểm thử với đồ giả; chưa script nào chạy trên máy thật (RUNBOOK 17) |
 | Collector và chuỗi sao lưu | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` | Cổng D064 (bằng chứng trên S3 thật) vẫn mở, xem mục 6 |
-| Paper runtime và SHADOW | một phần: 14 trong 49 kế hoạch của Phase 16 | Mục 7 |
+| Paper runtime và SHADOW | một phần: 14 trong 50 kế hoạch của Phase 16 | Mục 7 |
+| Bộ gửi heartbeat ra ngoài VPS (tới healthchecks.io) | `[CHƯA XÂY]` | Kế hoạch 16-50 "Off-host heartbeat sender"; chưa có code; mục 8.3 |
 | Live runtime | `[CHƯA XÂY]` | Service `live` trong compose chỉ là khung báo lỗi, đến Phase 24 |
 
 ### Mốc thời gian đã quyết định
@@ -110,6 +119,10 @@ Nguồn: `docs/operations/RUNBOOK.md`, `docker-compose.yml`, `docs/DECISIONS.md`
 
 ## 2. Chuẩn bị trước khi bắt đầu
 
+> - **Để làm gì:** Gom mọi thứ phải có trước khi chạm vào máy EC2: tài khoản AWS, các giá trị chưa chọn, khóa SSH, tệp khóa được phép, tệp bí mật, quyền vào repository, bucket S3 và cụm mật khẩu mã hóa sao lưu.
+> - **Giải quyết vấn đề gì:** Bootstrap từ chối chạy khi thiếu khóa hợp lệ hoặc tệp bí mật sai; chuẩn bị trước tránh dừng giữa chừng và tránh tự khóa mình ngoài máy.
+> - **Mức quan trọng:** **BẮT BUỘC** (bootstrap kiểm tra khóa và tệp bí mật trước khi đổi bất cứ điều gì, mục 4). Riêng các giá trị của O-12 đang hoãn nên bước tạo máy bị chặn (bước 2.2).
+
 Mục này gom mọi thứ cần có trước khi chạm vào máy EC2. Phần lớn là việc ở `[MÁY CÓ MẠNG]`. Mục này không tạo tài nguyên AWS nào; việc tạo nằm ở mục 3.
 
 #### Bước 2.1 Biết rõ tài khoản AWS của bạn [THỦ CÔNG] [CHƯA XÁC MINH]
@@ -120,11 +133,11 @@ Mục này gom mọi thứ cần có trước khi chạm vào máy EC2. Phần l
 - Vùng cố định là ap-southeast-1 (Singapore). Đây là quyết định D061 hosts; máy phải ping được `fapi.binance.com` (mục 3.7) trước khi cài bất cứ thứ gì.
 - Gói Free có đủ để chạy máy EC2 này hay không thì chưa được quyết định và chưa được xác minh; đừng giả định.
 
-#### Bước 2.2 Năm giá trị bạn chưa chọn (quyết định O-12) [THỦ CÔNG]
+#### Bước 2.2 Các giá trị bạn chưa chọn (quyết định O-12) [THỦ CÔNG]
 
 **Chạy ở:** `[MÁY CÓ MẠNG]` (bạn trả lời trong phiên làm việc với agent lập kế hoạch)
 
-Quyết định `16-DEC-O-12` được bạn ghi ngày 2026-10-09 với lựa chọn "postpone" (hoãn). Hiện không có con số nào được chọn. Năm giá trị còn để trống, mỗi giá trị là `[QUYẾT ĐỊNH CỦA BẠN]`:
+Quyết định `16-DEC-O-12` được bạn ghi ngày 2026-10-09 với lựa chọn "postpone" (hoãn). Hiện không có con số nào được chọn. Có năm hạng mục; bốn hạng mục còn để trống hoàn toàn và hạng mục thứ năm (heartbeat) mới có dịch vụ, chưa có chu kỳ. Mỗi giá trị còn thiếu là `[QUYẾT ĐỊNH CỦA BẠN]`:
 
 | Giá trị | Trạng thái |
 | --- | --- |
@@ -132,9 +145,10 @@ Quyết định `16-DEC-O-12` được bạn ghi ngày 2026-10-09 với lựa ch
 | Dung lượng ổ EBS | `[QUYẾT ĐỊNH CỦA BẠN]` |
 | Số tiền cảnh báo ngân sách và địa chỉ nhận cảnh báo | `[QUYẾT ĐỊNH CỦA BẠN]` |
 | Vòng đời và thời hạn lưu của S3 | `[QUYẾT ĐỊNH CỦA BẠN]` |
-| Dịch vụ heartbeat bên ngoài và chu kỳ | `[QUYẾT ĐỊNH CỦA BẠN]` |
+| Dịch vụ heartbeat bên ngoài | healthchecks.io, bạn chọn ngày 2026-10-09 (việc ghi vào tệp `16-DEC-O-12` do agent lập kế hoạch làm; bản tệp đó mà hướng dẫn này đọc ngày 2026-10-09 chưa có dòng này) |
+| Chu kỳ và thời gian ân hạn (grace period) của heartbeat | `[QUYẾT ĐỊNH CỦA BẠN]` |
 
-Hậu quả của việc hoãn: kế hoạch 16-20 (tạo máy EC2 và chuyển collector) bị chặn cho tới khi bạn ghi các giá trị này, và trong lúc đó collector vẫn ở máy cũ, mọi khoảng trống Open Interest được ghi là khoảng trống bao phủ (D059 mục 4). Theo kế hoạch 16-14, cách ghi lại giá trị là bạn trả lời bằng lựa chọn "values" kèm từng con số theo đúng lời bạn viết; agent ghi vào hồ sơ quyết định. Đừng tự sửa tay tệp quyết định và đừng nhờ ai đề xuất con số hộ bạn.
+Hậu quả của việc hoãn các giá trị còn thiếu: kế hoạch 16-20 (tạo máy EC2 và chuyển collector) bị chặn cho tới khi bạn ghi các giá trị này, và trong lúc đó collector vẫn ở máy cũ, mọi khoảng trống Open Interest được ghi là khoảng trống bao phủ (D059 mục 4). Theo kế hoạch 16-14, cách ghi lại giá trị là bạn trả lời bằng lựa chọn "values" kèm từng con số theo đúng lời bạn viết; agent ghi vào hồ sơ quyết định. Đừng tự sửa tay tệp quyết định và đừng nhờ ai đề xuất con số hộ bạn.
 
 #### Bước 2.3 Tạo cặp khóa SSH [THỦ CÔNG]
 
@@ -206,9 +220,17 @@ Nguồn: `docs/operations/RUNBOOK.md`, `deploy/bootstrap.sh`, `.env.example`, `.
 
 ## 3. Tạo và nghiệm thu máy EC2
 
+> - **Để làm gì:** Tạo máy EC2 trên AWS và nghiệm thu nó theo 16 điều kiện của D042: vùng, IP cố định, mã hóa ổ, tường lửa, ngân sách, bucket sao lưu, đồng hồ, SSH chỉ khóa.
+> - **Giải quyết vấn đề gì:** Một máy đơn là một điểm hỏng đơn (D042); các điều kiện này bảo đảm máy ở vùng Binance chấp nhận, có địa chỉ cố định để giới hạn khóa sàn, không để lộ cơ sở dữ liệu ra ngoài và có cảnh báo chi phí.
+> - **Mức quan trọng:** **BẮT BUỘC** nếu bạn đi tiếp tới soak: D061 hosts quy định cả trial soak lẫn soak dài chạy trên một máy EC2 ở ap-southeast-1 dựng theo các điều kiện D042. Mỗi bước bên dưới có mức riêng.
+
 Repository không bao giờ tạo, sửa hay xóa tài nguyên AWS nào; mọi bước ở mục này do bạn làm tay hoặc bằng AWS CLI của bạn (RUNBOOK 19). Tên nút và màn hình của AWS console có thể khác với những gì bạn thấy; tài liệu này không mô tả chúng `[CHƯA XÁC MINH]`. Mọi dữ kiện về AWS dưới đây được chép từ RUNBOOK 19, nơi chúng được đọc ngày 2026-10-08 và ghi là "chưa xác minh trực tiếp": trước khi một quyết định dựa vào chúng, hãy đọc lại trang gốc.
 
 #### Bước 3.1 Tạo instance và chọn hệ điều hành [THỦ CÔNG] [CHƯA XÁC MINH]
+
+> - **Để làm gì:** Chọn hệ điều hành và tạo máy chủ ảo (instance) sẽ chạy toàn bộ stack.
+> - **Giải quyết vấn đề gì:** Bootstrap chỉ chạy trên Ubuntu 22.04, Ubuntu 24.04 hoặc Debian 12; chọn sai ảnh (ví dụ Amazon Linux) thì phải dựng lại.
+> - **Mức quan trọng:** **BẮT BUỘC** (D061 hosts: một máy EC2 ở ap-southeast-1). Loại máy và dung lượng ổ là giá trị của bạn, chưa chọn (O-12).
 
 **Chạy ở:** `[MÁY CÓ MẠNG]`
 
@@ -218,11 +240,19 @@ Repository không bao giờ tạo, sửa hay xóa tài nguyên AWS nào; mọi b
 
 #### Bước 3.2 Gắn Elastic IP [THỦ CÔNG] [CHƯA XÁC MINH]
 
+> - **Để làm gì:** Gắn một địa chỉ IP công khai cố định (Elastic IP) vào máy.
+> - **Giải quyết vấn đề gì:** Không có nó, địa chỉ đổi mỗi lần máy khởi động lại: hỏng đường `ssh` và làm khóa Binance giới hạn theo IP bị từ chối.
+> - **Mức quan trọng:** **BẮT BUỘC** (D061 hosts: Elastic IP cố định; D042 điều kiện 4: IP cố định là danh sách cho phép của khóa API; điều kiện `ELASTIC_IP`). Có chi phí nhỏ, xem bước 3.10.
+
 **Chạy ở:** `[MÁY CÓ MẠNG]`
 
 Elastic IP là một địa chỉ IP công khai cố định gắn vào máy của bạn; không có nó địa chỉ đổi mỗi khi máy khởi động lại. Địa chỉ này vừa là nơi bạn `ssh` tới vừa là địa chỉ bạn đưa vào danh sách IP cho phép (IP whitelist) của khóa Binance sau này (D042 điều kiện 4). Một địa chỉ IPv4 công khai đang dùng, kể cả Elastic IP, bị tính phí 0,005 USD mỗi giờ (RUNBOOK 19.3, chưa xác minh trực tiếp).
 
 #### Bước 3.3 Mã hóa ổ đĩa EBS [THỦ CÔNG] [CHƯA XÁC MINH]
+
+> - **Để làm gì:** Bảo đảm ổ đĩa EBS của máy được mã hóa.
+> - **Giải quyết vấn đề gì:** Ổ không mã hóa làm lộ `.env` và dữ liệu nếu ổ bị chụp lại hay lấy đi; D045 dựa vào mã hóa ổ của nhà cung cấp thay cho mã hóa bí mật trong ứng dụng.
+> - **Mức quan trọng:** **BẮT BUỘC** (D061 hosts: EBS mã hóa; hai điều kiện `EBS_ENCRYPTED_BY_DEFAULT` và `EBS_ROOT_VOLUME_ENCRYPTED` nằm trong 16 điều kiện).
 
 **Chạy ở:** `[MÁY CÓ MẠNG]` (cần AWS CLI đã đăng nhập)
 
@@ -242,11 +272,19 @@ Cách thay thế là yêu cầu mã hóa rõ ràng khi tạo ổ gốc rồi ghi
 
 #### Bước 3.4 Security group [THỦ CÔNG] [CHƯA XÁC MINH]
 
+> - **Để làm gì:** Cấu hình tường lửa phía AWS (security group): chỉ mở SSH, chỉ cho địa chỉ bạn chọn.
+> - **Giải quyết vấn đề gì:** Một cổng PostgreSQL hay cổng lạ mở ra internet là cửa vào cho kẻ tấn công; ufw trên máy không điều khiển các cổng do Docker công bố.
+> - **Mức quan trọng:** **BẮT BUỘC** (D042 điều kiện 3: cổng mở tối thiểu; điều kiện `POSTGRES_NOT_PUBLIC`).
+
 **Chạy ở:** `[MÁY CÓ MẠNG]`
 
 Security group là tường lửa phía AWS. Chỉ mở cổng SSH, và chỉ cho địa chỉ nơi bạn chọn truy cập. Không mở cổng PostgreSQL ở chiều vào. Lưu ý: `ufw` trên máy không điều khiển các cổng do Docker công bố, nên kiểm soát thật là việc compose chỉ công bố `127.0.0.1` (điều kiện `POSTGRES_NOT_PUBLIC`).
 
 #### Bước 3.5 Cảnh báo ngân sách và chuyển gói Paid [THỦ CÔNG] [CHƯA XÁC MINH]
+
+> - **Để làm gì:** Đặt cảnh báo ngân sách (Budget) và chuyển tài khoản sang gói Paid.
+> - **Giải quyết vấn đề gì:** Chi phí tăng bất ngờ mà không ai biết; gói Free tự đóng khoảng 2027-01-25 hoặc khi hết tín dụng, kéo theo mất máy.
+> - **Mức quan trọng:** **BẮT BUỘC** (D061 hosts: cảnh báo ngân sách và gói trả phí; điều kiện `BUDGET_ALERT` và `PAID_PLAN`). Số tiền là giá trị của bạn.
 
 **Chạy ở:** `[MÁY CÓ MẠNG]`
 
@@ -254,11 +292,19 @@ Tạo ít nhất một ngân sách (Budget) có thông báo gửi tới địa c
 
 #### Bước 3.6 Bucket S3 sao lưu [THỦ CÔNG] [CHƯA XÁC MINH]
 
+> - **Để làm gì:** Tạo bucket S3 riêng tư, mã hóa mặc định, bật versioning, làm nơi chứa bản sao lưu ngoài máy.
+> - **Giải quyết vấn đề gì:** Sao lưu nằm trên chính máy EC2 thì mất máy là mất cả bản sao lưu; bucket công khai, hoặc xóa sạch được bằng một khóa bị lộ, là rủi ro.
+> - **Mức quan trọng:** **BẮT BUỘC** (D042 điều kiện 2, D061 hosts: bucket S3 riêng tư mã hóa; ba điều kiện `S3_BUCKET_PRIVATE`, `S3_DEFAULT_ENCRYPTION`, `S3_VERSIONING`). Object lock và vòng đời là biện pháp và giá trị của bạn.
+
 **Chạy ở:** `[MÁY CÓ MẠNG]`
 
 Bucket phải riêng tư (chặn truy cập công khai), có mã hóa mặc định, bật versioning, mới và hoàn toàn trống. Vòng đời và thời hạn lưu là `[QUYẾT ĐỊNH CỦA BẠN]` (O-12). Tạo một khóa truy cập chỉ có quyền trên bucket này. Bật versioning hoặc object lock với thời hạn giữ là một biện pháp do bạn tự làm để khóa bị lộ không xóa được lịch sử (RUNBOOK 11.1 mục 4). Cảnh báo quan trọng: cổng D064 (chứng minh `cryptcheck` trên S3 thật) vẫn mở, nên chưa có bản sao lưu thật nào được chạy và điều kiện `BACKUP_REAL_S3_GATE` chưa PASS. Chi tiết ở mục 6.
 
 #### Bước 3.7 Hành động đầu tiên trên instance: ping Binance [THỦ CÔNG] [CHƯA XÁC MINH]
+
+> - **Để làm gì:** Lệnh đầu tiên trên máy mới: hỏi Binance xem địa chỉ của máy có được chấp nhận không.
+> - **Giải quyết vấn đề gì:** Một số vùng hoặc địa chỉ bị Binance chặn; phát hiện sau khi đã cài và chạy thì mất công và có thể mất dữ liệu.
+> - **Mức quan trọng:** **BẮT BUỘC** (D061 hosts: xác nhận bằng ping công khai trước khi cam kết; điều kiện `REGION_PING_FAPI`). Không in ra 200 thì DỪNG.
 
 **Chạy ở:** `[MÁY EC2]` (đăng nhập bằng khóa SSH; trước khi cài bất cứ thứ gì)
 
@@ -269,6 +315,10 @@ curl -sS -o /dev/null -w "%{http_code}" https://fapi.binance.com/fapi/v1/ping
 Điều kiện đạt: lệnh in ra `200`. Đây là điều kiện `REGION_PING_FAPI`. Chạy lại lần nữa sau khi Elastic IP đã được gắn nếu lần đầu máy dùng địa chỉ khác, vì Binance nhìn thấy địa chỉ mà máy thật sự dùng. Nếu kết quả là bất cứ thứ gì khác `200` (mã khác, hết thời gian chờ, lỗi TLS): DỪNG, không cài gì, ghi lại kết quả làm bằng chứng và báo lại. Chọn vùng hay địa chỉ khác là một quyết định mới của bạn; hướng dẫn này không quyết định thay.
 
 #### Bước 3.8 Bảng nghiệm thu theo điều kiện D042 [THỦ CÔNG] [CHƯA XÁC MINH]
+
+> - **Để làm gì:** Hồ sơ `acceptance.json` ghi 16 điều kiện nghiệm thu máy: lệnh đã chạy, bằng chứng ngắn, giờ UTC, và một script kiểm tra hồ sơ.
+> - **Giải quyết vấn đề gì:** Không có bằng chứng thì "máy đạt chuẩn" chỉ là lời nói; hồ sơ buộc mỗi điều kiện có lệnh, kết quả và thời điểm, và chặn bí mật lọt vào.
+> - **Mức quan trọng:** **BẮT BUỘC** để tuyên bố máy đã nghiệm thu (RUNBOOK 19.1 mục 4: thoát 0 chỉ khi đủ 16 PASS). Việc tệp này chặn bước nào của soak thì repository chưa nêu.
 
 **Chạy ở:** `[MÁY CÓ MẠNG]` cho các lệnh `aws` và `[MÁY EC2]` cho các lệnh trên máy; điền kết quả vào `acceptance.json`.
 
@@ -283,7 +333,7 @@ Có 16 điều kiện, mỗi điều kiện một mã. Chạy lệnh, chép kế
 | `S3_BUCKET_PRIVATE` | `[MÁY CÓ MẠNG]` | sau khi tạo bucket | `aws s3api get-public-access-block --bucket <backup bucket>` | cả bốn thiết lập chặn đều `true`; không có chính sách hay ACL cho phép công khai | `[CHƯA XÁC MINH]` |
 | `S3_DEFAULT_ENCRYPTION` | `[MÁY CÓ MẠNG]` | sau khi tạo bucket | `aws s3api get-bucket-encryption --bucket <backup bucket>` | có một quy tắc mã hóa mặc định (SSE-S3 là mặc định của mọi bucket); không cần SSE-KMS vì chuỗi sao lưu đã mã hóa ở máy | `[CHƯA XÁC MINH]` |
 | `S3_VERSIONING` | `[MÁY CÓ MẠNG]` | sau khi tạo bucket | `aws s3api get-bucket-versioning --bucket <backup bucket>` | kết quả có `"Status": "Enabled"` | `[CHƯA XÁC MINH]` |
-| `HEARTBEAT_MONITOR_ALERT_RECEIVED` | `[MÁY EC2]` | sau cutover (collector đã chạy trên EC2) | trong `/opt/trading`: `docker compose stop collector`, chờ lâu hơn chu kỳ của dịch vụ giám sát (giá trị `[QUYẾT ĐỊNH CỦA BẠN]`), rồi `docker compose start collector` | một cảnh báo từ dịch vụ bên ngoài đã tới bạn khi collector dừng, và một thông báo phục hồi theo sau khi khởi động lại; ghi cả hai giờ UTC | `[CHƯA XÁC MINH]` |
+| `HEARTBEAT_MONITOR_ALERT_RECEIVED` | `[MÁY EC2]` | sau cutover (collector đã chạy trên EC2) | trong `/opt/trading`: `docker compose stop collector`, chờ lâu hơn chu kỳ cộng thời gian ân hạn đã đặt ở healthchecks.io (hai giá trị đó là `[QUYẾT ĐỊNH CỦA BẠN]`), rồi `docker compose start collector` | một cảnh báo từ dịch vụ bên ngoài đã tới bạn khi collector dừng, và một thông báo phục hồi theo sau khi khởi động lại; ghi cả hai giờ UTC. Cần một bộ gửi tín hiệu: kế hoạch 16-50 `[CHƯA XÂY]` hoặc cách thủ công của bạn (mục 8.3) | `[CHƯA XÁC MINH]` `[CHƯA XÂY]` |
 | `CHRONY_SYNCED` | `[MÁY EC2]` | sau bootstrap | `chronyc tracking` và `chronyc sources` | `chronyc sources` liệt kê `169.254.169.123` với dấu nguồn được chọn, và độ lệch `System time` của `chronyc tracking` nhỏ hơn giới hạn của bootstrap (`--max-drift-ms`, mặc định 100 ms) | `[CHƯA XÁC MINH]` |
 | `BUDGET_ALERT` | `[MÁY CÓ MẠNG]` | ngay | `aws budgets describe-budgets --account-id <account id>` và `aws budgets describe-notifications-for-budget --account-id <account id> --budget-name <budget name>` | có ít nhất một ngân sách và nó có thông báo với người nhận; số tiền là `[QUYẾT ĐỊNH CỦA BẠN]` | `[CHƯA XÁC MINH]` |
 | `PAID_PLAN` | `[MÁY CÓ MẠNG]` | ngay | mở trang Billing and Cost Management trong trình duyệt và đọc gói tài khoản (không có lệnh) | gói là gói trả phí, không phải gói free; ghi tên gói và ngày | `[THỦ CÔNG]` |
@@ -313,6 +363,10 @@ RUNBOOK 19.1 mục 4 nói tệp này nằm ở máy phát triển. Vì máy đó
 
 ### Thẻ lệnh: scripts/soak_host_acceptance.py
 
+> - **Để làm gì:** Kiểm tra tệp `acceptance.json` đã đủ 16 điều kiện nghiệm thu máy EC2, mỗi điều kiện có lệnh, bằng chứng ngắn và giờ UTC.
+> - **Giải quyết vấn đề gì:** Biến "tôi nghĩ máy đạt" thành hồ sơ kiểm được, và chặn bí mật lọt vào hồ sơ (thoát 2 mà không in giá trị).
+> - **Mức quan trọng:** **BẮT BUỘC** để tuyên bố máy đã nghiệm thu (RUNBOOK 19.1 mục 4: thoát 0 chỉ khi đủ 16 PASS). Script không tự quyết điều kiện có thật sự đạt; việc nó chặn bước nào của soak thì repository chưa nêu.
+
 **Mục đích:** kiểm tra tệp `acceptance.json` đã điền: mỗi trong 16 điều kiện bắt buộc phải có, có `status` là `PASS`, có `command`, `evidence` và thời điểm `checked_at` kiểu UTC. Nó không tự quyết điều kiện có thật sự đạt hay không.
 
 **Khi nào chạy:** sau khi bạn đã chạy các kiểm tra ở bước 3.8 (và lại sau cutover ở mục 5), trước khi coi máy là nghiệm thu.
@@ -337,11 +391,15 @@ uv run python scripts/soak_host_acceptance.py acceptance.json
 
 **Không bao giờ:** kết nối tới máy chủ, AWS hay mạng; in giá trị trông như bí mật; tự quyết một điều kiện đã đạt.
 
-#### Bước 3.9 Ghi chú: chrony, chi phí, heartbeat [THỦ CÔNG] [CHƯA XÁC MINH]
+#### Bước 3.9 Đồng bộ đồng hồ với chrony (G14) [THỦ CÔNG] [CHƯA XÁC MINH]
 
-**Chạy ở:** `[MÁY EC2]` cho chrony, `[MÁY CÓ MẠNG]` cho phần còn lại.
+> - **Để làm gì:** Bảo đảm đồng hồ máy đồng bộ với nguồn giờ của AWS bằng chrony (G14).
+> - **Giải quyết vấn đề gì:** Đồng hồ lệch làm sai dấu thời gian của dữ liệu và nhật ký; runtime chỉ đọc UTC (D-35) nên cần nguồn giờ đúng.
+> - **Mức quan trọng:** **BẮT BUỘC** kiểm tra (điều kiện `CHRONY_SYNCED`; D042 điều kiện 5). Dòng cấu hình thêm tay chỉ cần nếu `chronyc sources` chưa liệt kê nguồn của AWS; trang AWS không bảo đảm ảnh Ubuntu đã có sẵn và không bao quát Debian 12.
 
-- Chrony (G14): trên Ubuntu trang AWS đưa ra bước thủ công, cài `chrony` (bootstrap đã làm) rồi thêm dòng sau vào `/etc/chrony/chrony.conf` và khởi động lại chrony. Trang không nói ảnh Ubuntu gốc đã có sẵn dòng này, và không bao quát Debian 12, nên hãy đọc `chronyc sources` trên máy rồi mới quyết, đừng giả định. Runtime chỉ đọc UTC (D-35); không có gì trong repository theo dõi độ lệch sau khi khởi động (D042 điều kiện 5 đòi hỏi theo dõi, để cho một kế hoạch sau).
+**Chạy ở:** `[MÁY EC2]`
+
+Trên Ubuntu trang AWS đưa ra bước thủ công: cài `chrony` (bootstrap đã làm) rồi thêm dòng sau vào `/etc/chrony/chrony.conf` và khởi động lại chrony. Trang không nói ảnh Ubuntu gốc đã có sẵn dòng này, và không bao quát Debian 12, nên hãy đọc `chronyc sources` trên máy rồi mới quyết, đừng giả định. Runtime chỉ đọc UTC (D-35); không có gì trong repository theo dõi độ lệch sau khi khởi động (D042 điều kiện 5 đòi hỏi theo dõi, để cho một kế hoạch sau).
 
 ```text
 server 169.254.169.123 prefer iburst minpoll 4 maxpoll 4
@@ -351,12 +409,33 @@ server 169.254.169.123 prefer iburst minpoll 4 maxpoll 4
 sudo systemctl restart chrony
 ```
 
-- Chi phí: giá tính toán, lưu trữ và yêu cầu S3 chưa đọc được trong đợt nghiên cứu nên vẫn chưa xác minh. Không có con số nào của bạn (loại máy, dung lượng, ngân sách, vòng đời) được viết ở đây.
-- Heartbeat: dịch vụ và chu kỳ là lựa chọn của bạn (O-12). Repository này không gửi heartbeat nào (RUNBOOK 11.4), nên phép thử chỉ có ý nghĩa nếu tín hiệu bạn đăng ký phụ thuộc vào việc collector đang chạy. URL mà dịch vụ giám sát cấp cho bạn là một bí mật: không dán nó vào `acceptance.json`. Dừng collector làm gián đoạn thu thập, và các phút Open Interest mất theo cách đó là mất vĩnh viễn: chỉ làm phép thử này khi bạn chấp nhận cái giá đó, và ghi khoảng trống kết quả là một khoảng trống bao phủ.
+#### Bước 3.10 Chi phí AWS [THỦ CÔNG] [CHƯA XÁC MINH]
+
+> - **Để làm gì:** Ghi nhận các khoản chi phí AWS đã biết và chưa biết.
+> - **Giải quyết vấn đề gì:** Tránh bất ngờ về hóa đơn: biết khoản nào đã có nguồn (IPv4 công khai, Budgets) và khoản nào chưa đọc được (giá máy, ổ, yêu cầu S3).
+> - **Mức quan trọng:** **CHƯA RÕ** như một bước riêng: repository không quy định việc ghi chi phí, chỉ đòi cảnh báo ngân sách (bước 3.5). Mọi mức giá còn `[CHƯA XÁC MINH]` và số tiền là giá trị của bạn (O-12).
+
+**Chạy ở:** `[MÁY CÓ MẠNG]`
+
+Giá tính toán, lưu trữ và yêu cầu S3 chưa đọc được trong đợt nghiên cứu nên vẫn chưa xác minh. Không có con số nào của bạn (loại máy, dung lượng, ngân sách, vòng đời) được viết ở đây. Hai mức giá đã có nguồn nằm ở bước 3.2 và 3.5.
+
+#### Bước 3.11 Heartbeat và phép thử nghiệm thu [THỦ CÔNG] [CHƯA XÁC MINH] [CHƯA XÂY]
+
+> - **Để làm gì:** Làm phép thử nghiệm thu heartbeat: dừng collector rồi xem cảnh báo từ dịch vụ bên ngoài có tới không.
+> - **Giải quyết vấn đề gì:** Một heartbeat chưa từng được thử thì chưa biết có báo được khi cần hay không.
+> - **Mức quan trọng:** **BẮT BUỘC** (điều kiện `HEARTBEAT_MONITOR_ALERT_RECEIVED`; D042 điều kiện 1). Chưa làm được hôm nay vì bộ gửi tín hiệu chưa xây (kế hoạch 16-50).
+
+**Chạy ở:** `[MÁY EC2]` cho phép thử, `[MÁY CÓ MẠNG]` cho tài khoản dịch vụ
+
+Dịch vụ đã chọn là healthchecks.io; chu kỳ và thời gian ân hạn là lựa chọn của bạn (O-12). Phần giải thích đầy đủ, các giới hạn và dữ kiện về gói miễn phí nằm ở bước 8.3. Điều cần nhớ khi làm phép thử `HEARTBEAT_MONITOR_ALERT_RECEIVED` ở bước 3.8: repository chưa có bộ gửi tín hiệu (kế hoạch 16-50, `[CHƯA XÂY]`), nên phép thử chỉ có ý nghĩa nếu cách bạn tự dựng làm tín hiệu phụ thuộc vào việc collector đang chạy. URL ping mà dịch vụ cấp cho bạn là một bí mật: không dán nó vào `acceptance.json`. Dừng collector làm gián đoạn thu thập, và các phút Open Interest mất theo cách đó là mất vĩnh viễn: chỉ làm phép thử này khi bạn chấp nhận cái giá đó, và ghi khoảng trống kết quả là một khoảng trống bao phủ (D059 mục 4).
 
 Nguồn: `docs/operations/RUNBOOK.md`, `scripts/soak_host_acceptance.py`, `deploy/bootstrap.sh`, `docs/DECISIONS.md`
 
 ## 4. Dựng máy chủ với bootstrap
+
+> - **Để làm gì:** Biến máy mới thành máy Docker đã gia cố: user vận hành `trading`, SSH chỉ khóa, ufw, chrony, repository đúng phiên bản và `.env` quyền 0600.
+> - **Giải quyết vấn đề gì:** Làm tay hàng chục bước dễ sai thứ tự và dễ tự khóa mình ngoài máy; script làm theo thứ tự cố định, chạy lại được, có chốt chống tự khóa (D042 điều kiện 3, D062).
+> - **Mức quan trọng:** **BẮT BUỘC** trong đường đi của hướng dẫn này (RUNBOOK 13 là đường dựng máy chuẩn); repository không mô tả cách dựng tay thay thế.
 
 `deploy/bootstrap.sh` biến một máy Ubuntu 22.04, Ubuntu 24.04 hoặc Debian 12 mới tinh thành một máy Docker đã gia cố, có repository ở đúng phiên bản và `.env` đã đặt. Nó chỉ dùng apt, ufw, sshd, chrony và Docker Engine thường, không dùng công cụ dòng lệnh của nhà cung cấp đám mây. Nó idempotent: chạy lần hai trên máy đã cấu hình xong thì không thay đổi gì thêm. Thứ tự bên trong: kiểm tra trước (OS, công cụ, quyền root, tệp bí mật, khóa), gói cơ bản (`ca-certificates`, `curl`, `git`, `ufw`, `sudo`), kho apt của Docker và Docker Engine kèm plugin compose, user `trading` vào nhóm `docker` và `sudo` cùng khóa đã cho phép, ufw (mặc định chặn chiều vào, cho phép chiều ra, mở mọi cổng SSH mà `sshd -T` báo, rồi bật), gia cố SSH, chrony, checkout ở đúng `--ref`, và `.env`. Nó không khởi động stack.
 
@@ -447,7 +526,7 @@ Chỉ khi cả hai đều thành công mới đóng phiên root. Nếu không, b
 Bootstrap in danh sách này ở cuối. Bằng lời đơn giản:
 
 1. Khóa API Binance phải bị giới hạn ở địa chỉ IP công khai của máy này (IP whitelist) và quyền rút tiền phải tắt (mục 8.2).
-2. Đăng ký một dịch vụ heartbeat bên ngoài VPS để một máy im lặng thì có người biết (mục 8.3).
+2. Đăng ký một dịch vụ heartbeat bên ngoài VPS (dịch vụ đã chọn là healthchecks.io; bộ gửi chưa xây) để một máy im lặng thì có người biết (mục 8.3).
 3. Cụm mật khẩu mã hóa sao lưu phải được giữ ngoài VPS; mất nó thì mọi bản sao lưu không thể phục hồi (mục 6).
 4. Thử phiên SSH thứ hai, kể cả `sudo -v`, trước khi đóng phiên đầu.
 5. Mã hóa ổ đĩa của nhà cung cấp phải bật hoặc được xác nhận bật.
@@ -492,6 +571,10 @@ docker compose --profile ops build
 Trong cuối tuần dựng máy, KHÔNG chạy `docker compose up -d`: nó sẽ khởi động một collector ghi vào cơ sở dữ liệu mới trước lúc cutover, trong khi cutover khôi phục vào một cơ sở dữ liệu trống (RUNBOOK 19.4 mục 1). Việc khởi động stack chờ tới mục 5.
 
 ### Thẻ lệnh: deploy/bootstrap.sh
+
+> - **Để làm gì:** Dựng máy mới thành máy Docker đã gia cố: user `trading`, SSH chỉ khóa, ufw, chrony, repository ở đúng `--ref` và `.env` quyền 0600; không khởi động stack.
+> - **Giải quyết vấn đề gì:** Làm tay dễ sai thứ tự và dễ tự khóa mình ngoài máy; script chạy lại được, có `--dry-run` và chốt chống tự khóa (D042 điều kiện 3, D062).
+> - **Mức quan trọng:** **BẮT BUỘC** trong đường đi của hướng dẫn này (RUNBOOK 13 là đường dựng máy chuẩn); repository không mô tả cách dựng tay thay thế.
 
 **Mục đích:** biến máy mới thành máy Docker đã gia cố với repository ở `--ref` và `.env` đã đặt (chi tiết ở đầu mục 4). Thư viện `deploy/lib.sh` là tệp hàm dùng chung (`die`, `run`, `DRY_RUN`, `write_if_changed`...) được script này nạp bằng `source`; nó không có cờ và không bao giờ được chạy trực tiếp.
 
@@ -548,6 +631,10 @@ sudo deploy/bootstrap.sh --dry-run --secrets-file /root/secrets.env --repo git@e
 Nguồn: `docs/operations/RUNBOOK.md`, `deploy/bootstrap.sh`, `deploy/lib.sh`, `docs/DECISIONS.md`
 
 ## 5. Triển khai collector và chuyển dữ liệu từ máy cũ
+
+> - **Để làm gì:** Đưa collector (thu Open Interest và funding) lên máy EC2: bắt đầu trống, hoặc chuyển dữ liệu từ máy cũ bằng `deploy/migrate.sh`.
+> - **Giải quyết vấn đề gì:** Mỗi phút collector không chạy là mất vĩnh viễn một phút Open Interest (D059 mục 4: Binance chỉ giữ khoảng một tháng); chuyển máy có kiểm tra để biết đúng mình mất bao nhiêu.
+> - **Mức quan trọng:** **BẮT BUỘC** đưa collector chạy ổn định trên EC2 (D061 hosts: collector chuyển lên EC2 trước soak dài). Còn dùng `migrate.sh` hay bắt đầu trống là **TÙY CHỌN**, tùy bạn có dữ liệu cũ cần nối liền hay không.
 
 #### Bước 5.1 Collector làm gì [ĐÃ XÂY] [CHƯA XÁC MINH]
 
@@ -643,6 +730,10 @@ Thứ tự cố định: (1) kiểm tra trước, kể cả từ chối tiếp t
 Việc truyền dữ liệu là rsync qua ssh trong container `ops` của máy mới chạy bằng root, với `--ignore-existing`, không có tùy chọn xóa nào, loại bỏ tệp tạm, và kiểm tra khóa máy chủ nghiêm ngặt theo `known_hosts` đã gắn. Mặc định phía xa chạy `docker run` image ops trên máy cũ với các volume cũ gắn chỉ-đọc. Đường thay thế `sudo rsync` không có script và chưa được kiểm thử; nếu cần, làm các bước đồng bộ bằng tay.
 
 ### Thẻ lệnh: deploy/migrate.sh
+
+> - **Để làm gì:** Chuyển collector, kho Parquet và cơ sở dữ liệu từ máy cũ sang máy mới trong một lần cutover có thứ tự cố định, rồi in báo cáo khoảng trống.
+> - **Giải quyết vấn đề gì:** Mỗi phút collector ngừng là mất vĩnh viễn một phút Open Interest (D059 mục 4); script giữ khoảng trống nhỏ, không xóa gì ở máy cũ và cho bạn con số khoảng trống chính xác.
+> - **Mức quan trọng:** **TÙY CHỌN**: chỉ cần khi bạn có dữ liệu cũ muốn nối liền (bước 5.2). Bắt đầu trống và ghi khoảng trống bao phủ là lựa chọn hợp lệ của bạn (D059 mục 4).
 
 **Mục đích:** chuyển collector đang chạy, kho Parquet và cơ sở dữ liệu của nó từ một máy CŨ sang máy MỚI với một khoảng trống dữ liệu có giới hạn và được báo cáo. Nó không bao giờ tắt máy nào.
 
@@ -740,6 +831,10 @@ Nguồn: `docs/operations/RUNBOOK.md`, `deploy/migrate.sh`, `docker-compose.yml`
 
 ## 6. Sao lưu, khôi phục và diễn tập
 
+> - **Để làm gì:** Sao lưu hằng ngày có mã hóa lên S3 riêng, khôi phục lên máy trống, và diễn tập để biết bản sao lưu dùng được.
+> - **Giải quyết vấn đề gì:** Mất máy hay xóa nhầm volume sẽ mất dữ liệu nghiên cứu không thu lại được (nhất là Open Interest); một bản sao lưu chưa từng khôi phục thử thì chưa đáng tin.
+> - **Mức quan trọng:** **BẮT BUỘC** (D042 điều kiện 2: sao lưu mã hóa ngoài VPS, có lịch, quy tắc giữ và một lần diễn tập thật; D061 hosts: có sao lưu trước soak dài). Cảnh báo: cổng D064 chưa qua nên chưa có bản sao lưu thật nào chạy.
+
 > **CẢNH BÁO.** Cổng D064 (bằng chứng trên một remote S3 thật, qua lớp crypt, kể cả đối tượng multipart) vẫn mở. Điều kiện `BACKUP_REAL_S3_GATE` chưa PASS. Vì vậy chưa có bản sao lưu thật nào được chạy, và mọi thứ ở mục này mới được kiểm thử với một S3 giả (S3 double). Đừng coi một bản sao lưu là đã bảo vệ dữ liệu của bạn cho tới khi cổng này qua và một lần diễn tập (restore drill) thành công.
 
 ### Chuỗi sao lưu bằng lời thường
@@ -752,6 +847,10 @@ Nguồn: `docs/operations/RUNBOOK.md`, `deploy/migrate.sh`, `docker-compose.yml`
 - Quản lý khóa: mất cụm mật khẩu crypt thì mọi bản sao lưu không thể phục hồi, và với khóa sai bucket trông như trống hoặc rối loạn; công cụ từ chối tiếp tục chứ không coi đó là kho trống. Giữ bản gốc của cụm mật khẩu và muối (`BACKUP_CRYPT_PASSWORD2`) ngoài VPS, trong trình quản lý mật khẩu cộng một bản ngoại tuyến.
 
 #### Bước 6.1 Cấu hình remote [ĐÃ XÂY] [CHƯA XÁC MINH]
+
+> - **Để làm gì:** Khai báo các biến `BACKUP_*` để bản sao lưu được mã hóa và đẩy lên S3 của bạn.
+> - **Giải quyết vấn đề gì:** Thiếu biến thì lệnh dừng và nêu tên biến; mất cụm mật khẩu thì mọi bản sao lưu không phục hồi được.
+> - **Mức quan trọng:** **BẮT BUỘC** (D042 điều kiện 2). Bật versioning hoặc object lock là biện pháp RUNBOOK 11 giao cho người vận hành; repository không ép.
 
 **Chạy ở:** `[MÁY CÓ MẠNG]` (tạo bucket, khóa, đổi cụm mật khẩu), rồi `[MÁY EC2]` (đặt biến)
 
@@ -824,7 +923,7 @@ deploy/backup.sh --dry-run
 deploy/backup.sh
 ```
 
-Thứ tự: dump cơ sở dữ liệu, sao lưu Parquet, kiểm bundle với manifest sha256, đẩy lên (Parquet mới, rồi `cryptcheck` cây Parquet, rồi `pg.dump` và `cryptcheck` của nó, rồi kiểm bundle với manifest lần hai, rồi `manifest.json` và `cryptcheck` của nó), rồi áp dụng việc giữ lại. Bước nào lỗi thì lệnh, và cả unit systemd, lỗi một cách thấy được. Chú ý: không có gì trong repository ping một dịch vụ giám sát bên ngoài; nếu bạn không đăng ký một heartbeat ngoài VPS thì một máy chết hay một unit lỗi sẽ im lặng (mục 8.3).
+Thứ tự: dump cơ sở dữ liệu, sao lưu Parquet, kiểm bundle với manifest sha256, đẩy lên (Parquet mới, rồi `cryptcheck` cây Parquet, rồi `pg.dump` và `cryptcheck` của nó, rồi kiểm bundle với manifest lần hai, rồi `manifest.json` và `cryptcheck` của nó), rồi áp dụng việc giữ lại. Bước nào lỗi thì lệnh, và cả unit systemd, lỗi một cách thấy được. Chú ý: hôm nay không có gì trong repository ping một dịch vụ giám sát bên ngoài (bộ gửi heartbeat là kế hoạch 16-50, `[CHƯA XÂY]`); nếu bạn không có heartbeat ngoài VPS (healthchecks.io, mục 8.3) thì một máy chết hay một unit lỗi sẽ im lặng.
 
 #### Bước 6.5 Khôi phục lên một máy trống [ĐÃ XÂY] [CHƯA XÁC MINH]
 
@@ -896,6 +995,10 @@ Snapshot đầu tiên kéo về không lỗi là bản mới nhất đã kiểm;
 
 ### Thẻ lệnh: deploy/backup.sh
 
+> - **Để làm gì:** Chạy một bản sao lưu mã hóa lên S3 ngay bây giờ, hoặc khởi tạo remote lần đầu, hoặc cài timer hằng ngày.
+> - **Giải quyết vấn đề gì:** Mất máy hay xóa nhầm volume sẽ mất dữ liệu nghiên cứu không thu lại được; bản sao lưu nằm ngoài VPS và mã hóa nên nhà cung cấp chỉ thấy bản mã.
+> - **Mức quan trọng:** **BẮT BUỘC** (D042 điều kiện 2; D061 hosts: có sao lưu trước soak dài). Cảnh báo: cổng D064 chưa qua nên chưa có bản sao lưu thật nào.
+
 **Mục đích:** lớp vỏ gọi `python -m src.ops.backup` trong image ops của compose, với ba chế độ: chạy một bản sao lưu theo lịch ngay bây giờ, khởi tạo remote lần đầu, hoặc cài timer hằng ngày. Nó không giữ logic sao lưu, mã hóa hay remote nào.
 
 **Khi nào chạy:** chế độ `--init-remote` đúng một lần trên bucket trống; chế độ `--install-timer` một lần khi dựng máy; chế độ trần mỗi khi bạn muốn một bản sao lưu ngay (timer gọi nó mỗi ngày) và trước mỗi lần cập nhật.
@@ -938,9 +1041,13 @@ sudo deploy/backup.sh --install-timer --dry-run
 
 **Khi lỗi:** một biến `BACKUP_*` thiếu: lệnh nêu tên biến (bước 6.1). Lỗi đẩy Parquet: bảng ở bước 6.8. `--install-timer must run as root`: chạy với `sudo`.
 
-**Không bao giờ:** xóa gì ngoài các thư mục `snapshots/<id>` theo quy tắc giữ lại; ghi đè một đối tượng từ xa; cung cấp tùy chọn ép buộc; ping một dịch vụ giám sát bên ngoài.
+**Không bao giờ:** xóa gì ngoài các thư mục `snapshots/<id>` theo quy tắc giữ lại; ghi đè một đối tượng từ xa; cung cấp tùy chọn ép buộc; ping một dịch vụ giám sát bên ngoài (hôm nay là vậy; bộ gửi heartbeat của kế hoạch 16-50 là `[CHƯA XÂY]`, mục 8.3).
 
 ### Thẻ lệnh: deploy/systemd/trading-backup.service
+
+> - **Để làm gì:** Đơn vị systemd gọi `deploy/backup.sh` mỗi khi timer kích hoạt.
+> - **Giải quyết vấn đề gì:** Bản sao lưu lỗi làm unit lỗi một cách thấy được thay vì im lặng; chạy bằng user `trading` có quyền docker.
+> - **Mức quan trọng:** **BẮT BUỘC** nếu bạn muốn sao lưu tự động (D042 điều kiện 2 đòi có lịch); bạn cài bằng một lệnh và không sửa tay. Lưu ý: unit lỗi vẫn không tự báo cho bạn nếu không có heartbeat (RUNBOOK 11.4, mục 8.3).
 
 **Mục đích:** unit systemd kiểu oneshot gọi `deploy/backup.sh` mỗi lần timer kích hoạt, để một bản sao lưu lỗi làm unit lỗi một cách thấy được.
 
@@ -974,6 +1081,10 @@ journalctl -u trading-backup
 
 ### Thẻ lệnh: deploy/systemd/trading-backup.timer
 
+> - **Để làm gì:** Hẹn giờ kích hoạt bản sao lưu mỗi ngày lúc 03:15 UTC, và chạy bù nếu máy tắt đúng lúc đó.
+> - **Giải quyết vấn đề gì:** Không ai phải nhớ sao lưu; `Persistent=true` chạy bù lần lỡ, `RandomizedDelaySec=5m` tránh dồn nhiều máy vào cùng một giây.
+> - **Mức quan trọng:** **BẮT BUỘC** nếu bạn muốn sao lưu tự động (D042 điều kiện 2: có lịch).
+
 **Mục đích:** timer kích hoạt `trading-backup.service` hằng ngày lúc 03:15 UTC.
 
 **Khi nào chạy:** không chạy tay. `OnCalendar=*-*-* 03:15:00 UTC`; `Persistent=true` để một lần bị lỡ trong lúc máy tắt được chạy bù sau đó; `RandomizedDelaySec=5m` để nhiều máy không cùng đập nhà cung cấp trong cùng một giây; `Unit=trading-backup.service`.
@@ -1001,6 +1112,10 @@ systemctl list-timers trading-backup.timer
 **Không bao giờ:** thay lịch bằng tay trong bản đã cài (bộ cài ghi lại); coi timer đang bật là bằng chứng bản sao lưu có hiệu lực trước khi cổng D064 qua và một lần diễn tập thành công.
 
 ### Thẻ lệnh: deploy/restore.sh
+
+> - **Để làm gì:** Khôi phục bản sao lưu đã kiểm mới nhất từ S3 lên một máy trống.
+> - **Giải quyết vấn đề gì:** Dựng lại sau khi mất máy, hoặc quay về từ migration mà mã cũ không đọc được; script từ chối bundle bị sửa và không bao giờ ghi đè tệp Parquet.
+> - **Mức quan trọng:** **BẮT BUỘC** phải có khả năng này và đã diễn tập (D042 điều kiện 2: một lần diễn tập khôi phục thật); bản thân lệnh chỉ chạy khi có sự cố.
 
 **Mục đích:** khôi phục bản sao lưu đã kiểm mới nhất từ xa lên một máy TRỐNG.
 
@@ -1032,6 +1147,10 @@ deploy/restore.sh --dry-run
 
 ### Thẻ lệnh: deploy/backup-drill.sh
 
+> - **Để làm gì:** Diễn tập cả chuỗi sao lưu và khôi phục vào một cơ sở dữ liệu tạm, rồi so số hàng với bản sống mà không đụng dữ liệu sống.
+> - **Giải quyết vấn đề gì:** Một bản sao lưu chưa từng khôi phục thử thì chưa biết có dùng được; diễn tập phát hiện khóa sai hay bundle hỏng trước khi bạn cần đến nó.
+> - **Mức quan trọng:** **BẮT BUỘC** (D042 điều kiện 2: có một lần diễn tập khôi phục thật; RUNBOOK: bản sao lưu chưa hợp lệ cho tới khi một lần diễn tập qua). Chu kỳ định kỳ là quyết định của bạn.
+
 **Mục đích:** chứng minh cả chuỗi sao lưu mà không đụng dữ liệu sống: sao lưu, đẩy, kéo snapshot vào `data/backup/drill-<UTC timestamp>`, kiểm, khôi phục vào một cơ sở dữ liệu tạm tên `<db>_drill_<YYYYMMDDHHMMSS>`, so sánh số hàng `collector_watermarks` với bản sống rồi xóa cơ sở dữ liệu tạm.
 
 **Khi nào chạy:** sau khi dựng xong, sau mọi thay đổi nhà cung cấp, khóa hay image, và định kỳ về sau (chu kỳ `[QUYẾT ĐỊNH CỦA BẠN]`).
@@ -1062,6 +1181,10 @@ deploy/backup-drill.sh --dry-run
 
 ### Thẻ lệnh: scripts/backup-drill.ps1
 
+> - **Để làm gì:** Diễn tập bundle sao lưu cục bộ trên Windows (hai pha backup rồi drill), không qua S3.
+> - **Giải quyết vấn đề gì:** Cho người dùng Windows kiểm một bundle cục bộ của Phase 2; nó không kiểm chuỗi S3 mã hóa của Phase 13.1.
+> - **Mức quan trọng:** **TÙY CHỌN**: script thuộc Phase 2 và không đụng chuỗi S3 của D050; hướng dẫn này không coi nó là bước bắt buộc và nó không thay `deploy/backup-drill.sh`.
+
 **Mục đích:** lớp vỏ PowerShell mỏng chạy hai lệnh con `backup` rồi `drill` của `python -m src.ops.backup` trên một bundle cục bộ; mọi logic nằm trong module Python, script chỉ chuyển đối số và đưa mã thoát ra ngoài. Script này không gọi `push`, `pull` hay `drill-remote`, nên không đụng tới chuỗi S3 mã hóa của Phase 13.1; nó thuộc giai đoạn Phase 2 (bundle cục bộ), và trên Linux việc của nó là `deploy/backup-drill.sh`.
 
 **Khi nào chạy:** chỉ khi bạn ở trên Windows và muốn diễn tập bundle cục bộ; không phải bước bắt buộc của hướng dẫn này.
@@ -1090,11 +1213,19 @@ Nguồn: `docs/operations/RUNBOOK.md`, `deploy/backup.sh`, `deploy/restore.sh`, 
 
 ## 7. Paper runtime và soak SHADOW (Phase 16)
 
+> - **Để làm gì:** Mô tả tiến trình paper và soak SHADOW của Phase 16: bảng 50 kế hoạch, điểm vào, chuỗi đóng phase và tiêu chí thoát.
+> - **Giải quyết vấn đề gì:** Cho bạn thấy chính xác phần nào đã có và phần nào chưa (14 trong 50 kế hoạch), để không đi tìm lệnh không tồn tại và biết mình phải quyết định gì ở từng cổng.
+> - **Mức quan trọng:** **BẮT BUỘC** về mặt con đường (D061 mục J: Phase 16 chỉ đóng sau chuỗi này) nhưng hôm nay chỉ để đọc, vì chưa có lệnh nào chạy được.
+
 #### Bước 7.1 Phase 16 làm gì, bằng lời thường [CHƯA XÂY]
+
+> - **Để làm gì:** Giải thích bằng lời thường Phase 16 làm ra gì: tiến trình paper, thông báo SHADOW, nhật ký quyết định, khớp lệnh mô phỏng.
+> - **Giải quyết vấn đề gì:** Cho bạn biết mục đích của soak (quan sát theo đồng hồ treo tường, không có đường nào tới lệnh thật, D040) trước khi bạn trả tiền thuê máy.
+> - **Mức quan trọng:** **NÊN LÀM** đọc; không có thao tác. Mức này là đánh giá của hướng dẫn này.
 
 **Chạy ở:** đọc, không chạy gì (`[MÁY PHÁT TRIỂN]` cho mã, `[MÁY EC2]` cho soak)
 
-Phase 16 dựng một tiến trình paper chạy được: nó theo dõi dữ liệu thị trường Binance trực tiếp, tạo tín hiệu và kế hoạch, và gửi cho bạn các thông báo Telegram nhãn SHADOW kèm nút APPROVE/SKIP rồi bước CONFIRM (D041), ghi nhật ký quyết định cùng các lần khớp lệnh mô phỏng, và không có bất kỳ đường nào dẫn tới một lệnh thật (D040). Mục đích là bắt đầu một đợt soak tính theo đồng hồ treo tường để quan sát. Những tiêu chí thành công (SC) quan trọng với người vận hành, theo ROADMAP: SC2 adapter WebSocket thật sự `await` lời gọi SDK; SC3 nút SIMULATE hoạt động và độ trễ phê duyệt được đo chứ không cố định 30 giây; SC5 thông báo ghi rõ "SHADOW" và mọi quyết định được ghi nhật ký; SC6 cô lập cứng (không khóa giao dịch, không adapter lệnh); SC7 một lần smoke trực tiếp; SC8 và SC9 trial soak và quy tắc đóng yêu cầu. Hôm nay mới có 14 trong 49 kế hoạch.
+Phase 16 dựng một tiến trình paper chạy được: nó theo dõi dữ liệu thị trường Binance trực tiếp, tạo tín hiệu và kế hoạch, và gửi cho bạn các thông báo Telegram nhãn SHADOW kèm nút APPROVE/SKIP rồi bước CONFIRM (D041), ghi nhật ký quyết định cùng các lần khớp lệnh mô phỏng, và không có bất kỳ đường nào dẫn tới một lệnh thật (D040). Mục đích là bắt đầu một đợt soak tính theo đồng hồ treo tường để quan sát. Những tiêu chí thành công (SC) quan trọng với người vận hành, theo ROADMAP: SC2 adapter WebSocket thật sự `await` lời gọi SDK; SC3 nút SIMULATE hoạt động và độ trễ phê duyệt được đo chứ không cố định 30 giây; SC5 thông báo ghi rõ "SHADOW" và mọi quyết định được ghi nhật ký; SC6 cô lập cứng (không khóa giao dịch, không adapter lệnh); SC7 một lần smoke trực tiếp; SC8 và SC9 trial soak và quy tắc đóng yêu cầu. Hôm nay mới có 14 trong 50 kế hoạch.
 
 #### Bước 7.2 Hôm nay máy EC2 chạy được gì [ĐÃ XÂY] [CHƯA XÁC MINH]
 
@@ -1102,11 +1233,11 @@ Phase 16 dựng một tiến trình paper chạy được: nó theo dõi dữ li
 
 Chỉ ba service chạy theo mặc định: `postgres`, `db-upgrade` (chạy một lần) và `collector`. Service `paper` trong compose (profile `paper`) là một khung giữ chỗ chạy là thoát ngay: nó in "paper runner not implemented yet: arrives in Phase 16" và `restart` là `"no"`. Bạn không có gì để khởi động bằng profile `paper` hôm nay.
 
-#### Bước 7.3 Bảng đủ 49 kế hoạch của Phase 16 [ĐÃ XÂY] [CHƯA XÂY] [CHƯA XÁC MINH]
+#### Bước 7.3 Bảng đủ 50 kế hoạch của Phase 16 [ĐÃ XÂY] [CHƯA XÂY] [CHƯA XÁC MINH]
 
 **Chạy ở:** `[MÁY CÓ MẠNG]` (chỉ để đọc; không có máy nào chạy gì ở bước này)
 
-Quy tắc đọc: 16-01 đến 16-14 có tệp SUMMARY trong `.planning/phases/16-paper-runtime-composition/`, nên được ghi `[ĐÃ XÂY]`; 16-15 đến 16-49 chưa có, nên là `[CHƯA XÂY]`. Lưu ý: "đã xây" nghĩa là code và kiểm thử ở mức đồ giả; chưa có gì chạy trên máy EC2, nên các hàng cần bằng chứng trên máy thật, sàn thật hay Telegram thật còn mang thêm `[CHƯA XÁC MINH]`. Ngày đọc: 2026-10-09.
+Quy tắc đọc: 16-01 đến 16-14 có tệp SUMMARY trong `.planning/phases/16-paper-runtime-composition/`, nên được ghi `[ĐÃ XÂY]`; 16-15 đến 16-50 chưa có, nên là `[CHƯA XÂY]`. Kế hoạch 16-50 "Off-host heartbeat sender" (bộ gửi heartbeat ra ngoài VPS) được thêm sau 16-49: ROADMAP đọc ngày 2026-10-09 chưa kể 16-50 (danh sách của nó dừng ở 16-49), nên con số 50 của hướng dẫn này đi trước ROADMAP cho tới khi ROADMAP được cập nhật. Lưu ý: "đã xây" nghĩa là code và kiểm thử ở mức đồ giả; chưa có gì chạy trên máy EC2, nên các hàng cần bằng chứng trên máy thật, sàn thật hay Telegram thật còn mang thêm `[CHƯA XÁC MINH]`. Ngày đọc: 2026-10-09.
 
 | Kế hoạch | Việc | Trạng thái | Dùng ở bước nào |
 | --- | --- | --- | --- |
@@ -1159,6 +1290,7 @@ Quy tắc đọc: 16-01 đến 16-14 có tệp SUMMARY trong `.planning/phases/1
 | 16-47 | Cài vào code hai quyết định lưu trữ bằng chứng và cách freeze check lấy epoch đã ghim | `[CHƯA XÂY]` | 7.7 |
 | 16-48 | Bạn chỉ định ứng viên hợp lệ trong số các ứng viên đã đăng ký | `[CHƯA XÂY]` | 7.6 |
 | 16-49 | Cấu hình đích lưu bằng chứng bền vững bạn đã chọn và chứng minh đường công bố bằng gói thử | `[CHƯA XÂY]` | 7.7 |
+| 16-50 | Bộ gửi heartbeat ra ngoài VPS ("Off-host heartbeat sender") để dịch vụ giám sát bên ngoài, đã chọn là healthchecks.io, biết khi tín hiệu dừng | `[CHƯA XÂY]` | 3.11, 8.3 |
 
 #### Bước 7.4 Điểm vào của runtime [CHƯA XÂY]
 
@@ -1180,6 +1312,10 @@ Cấu hình triển khai soak cụ thể (kế hoạch 16-32) và phần vận h
 
 #### Bước 7.6 Chuỗi đóng (closure chain) và ai quyết định từng bước [THỦ CÔNG] [CHƯA XÂY]
 
+> - **Để làm gì:** Chuỗi bước và ai quyết định từng bước để Phase 16 đóng: giả thuyết, lưới tham số, lệnh cho chạy nghiên cứu, ứng viên, băm trong allowlist, trial soak.
+> - **Giải quyết vấn đề gì:** Không có gì tự tiến: mọi bước chạm Binance hay Telegram cần người, và không giá trị nào được chọn từ kết quả backtest.
+> - **Mức quan trọng:** **BẮT BUỘC** (D061 mục J). Hôm nay `PAPER_START_ALLOWLIST` rỗng là trạng thái an toàn hợp lệ, không phải lỗi.
+
 **Chạy ở:** `[MÁY CÓ MẠNG]` cho mọi bước chạm Binance hoặc Telegram
 
 Phase 16 chỉ đóng sau chuỗi dưới đây (D061 mục J). Mọi bước chạm Binance hoặc Telegram là blocking-human: không có gì tự tiến.
@@ -1195,6 +1331,10 @@ Phase 16 chỉ đóng sau chuỗi dưới đây (D061 mục J). Mọi bước ch
 Không được chọn bất kỳ giá trị nào từ kết quả backtest hay nghiên cứu. Hai câu hỏi bằng chứng mở (OQ-1 về lệnh giữ qua lỗ hổng mark price, và O-10 về chi phí mô hình) được hỏi bạn sau lần nghiên cứu thật đầu (16-41).
 
 #### Bước 7.7 Tiêu chí thoát đã phê chuẩn và bằng chứng [CHƯA XÂY]
+
+> - **Để làm gì:** Liệt kê tiêu chí thoát bạn đã phê chuẩn ngày 2026-10-07 cho trial soak 14 ngày.
+> - **Giải quyết vấn đề gì:** Quyết định trước thế nào là "đạt" để không chọn ngưỡng sau khi đã thấy kết quả (D061 mục D).
+> - **Mức quan trọng:** **BẮT BUỘC** (D061 mục D: đổi bất kỳ tiêu chí nào trước khi trial bắt đầu phải có sự chấp thuận mới của bạn). Chưa có code đo chúng.
 
 **Chạy ở:** `[MÁY EC2]` tạo bằng chứng; `[MÁY CÓ MẠNG]` đọc kết quả
 
@@ -1232,13 +1372,21 @@ Hai việc, đều chưa xây và đều blocking-human. Lần smoke trực ti�
 
 **Chạy ở:** `[MÁY CÓ MẠNG]`
 
-Làm được hôm nay: hoàn thành mục 2 đến 6; chuẩn bị bot Telegram riêng (mục 8.1). Phải chờ: quyết định O-12 để tạo máy; mọi thứ từ 16-15 đến 16-49. Không có tiến trình paper để khởi động, không có epoch để ghim và không có trial để đo.
+Làm được hôm nay: hoàn thành mục 2 đến 6; chuẩn bị bot Telegram riêng (mục 8.1). Phải chờ: quyết định O-12 để tạo máy; mọi thứ từ 16-15 đến 16-50. Không có tiến trình paper để khởi động, không có epoch để ghim và không có trial để đo.
 
 Nguồn: `.planning/ROADMAP.md`, `.planning/phases/16-paper-runtime-composition/16-CONTEXT.md`, `docker-compose.yml`, `docs/DECISIONS.md`, `.planning/phases/16-paper-runtime-composition/16-22-PLAN.md`
 
 ## 8. Telegram, Binance và giám sát bên ngoài
 
+> - **Để làm gì:** Ba kênh ra ngoài máy: bot Telegram riêng cho máy soak, khóa Binance theo từng giai đoạn kèm danh sách IP cho phép (whitelist), và dịch vụ heartbeat giám sát từ ngoài VPS.
+> - **Giải quyết vấn đề gì:** Hai nơi dùng chung một token bot có thể giành cú bấm của nhau (Q-L); khóa Binance sai quyền hay không giới hạn IP là rủi ro mất tiền; một máy im lặng không ai biết nếu không có giám sát bên ngoài.
+> - **Mức quan trọng:** Bot Telegram riêng và heartbeat là **BẮT BUỘC** (Q-L; D042 điều kiện 1). Khóa Binance không cần ở SHADOW; whitelist IP là **BẮT BUỘC** từ lúc có khóa đầu tiên (D042 điều kiện 4).
+
 #### Bước 8.1 Bot Telegram riêng cho máy soak (quyết định Q-L) [THỦ CÔNG] [CHƯA XÁC MINH]
+
+> - **Để làm gì:** Tạo một bot Telegram riêng cho máy soak, tách khỏi bot của máy phát triển.
+> - **Giải quyết vấn đề gì:** Telegram chỉ cho một bên polling mỗi token (giả định A1, chưa xác minh trực tiếp), nên hai nơi dùng chung token có thể âm thầm giành cú bấm APPROVE/SKIP của nhau (Pitfall P17).
+> - **Mức quan trọng:** **BẮT BUỘC** cho SHADOW có thông báo (quyết định `16-DEC-Q-L`: bot riêng). Chưa có tiến trình gửi thông báo nên chưa thử được.
 
 **Chạy ở:** `[MÁY CÓ MẠNG]` (ứng dụng Telegram của bạn)
 
@@ -1253,6 +1401,10 @@ Quyết định `16-DEC-Q-L` (ngày 2026-10-09) là "separate-bot": máy soak d�
 
 #### Bước 8.2 Binance: khóa nào cần ở giai đoạn nào [THỦ CÔNG] [CHƯA XÂY]
 
+> - **Để làm gì:** Cho biết khóa Binance nào cần ở giai đoạn nào, và giới hạn mỗi khóa ở đúng IP của máy với quyền rút tiền tắt (whitelist).
+> - **Giải quyết vấn đề gì:** Khóa lộ mà không giới hạn IP hay còn quyền rút tiền thì kẻ cắp lấy được tiền; khóa live trên máy soak vi phạm OPS-06.
+> - **Mức quan trọng:** SHADOW không cần khóa nào. Whitelist IP và tắt quyền rút là **BẮT BUỘC** từ lúc có khóa đầu tiên (D042 điều kiện 4; RUNBOOK 13.5 mục 1); địa chỉ đổi thì phải cập nhật.
+
 **Chạy ở:** `[MÁY CÓ MẠNG]`
 
 - Soak SHADOW chỉ dùng dữ liệu thị trường công khai và KHÔNG cần khóa nào.
@@ -1262,21 +1414,58 @@ Quyết định `16-DEC-Q-L` (ngày 2026-10-09) là "separate-bot": máy soak d�
 - Quy tắc IP whitelist: mỗi khóa Binance bị giới hạn ở đúng Elastic IP của máy, quyền rút tiền tắt, và danh sách IP được cập nhật sau mỗi lần cutover hay khi địa chỉ đổi (D042 điều kiện 4; RUNBOOK 13.5 mục 1 và 15.6). Giao diện Binance để làm việc đó không được repository mô tả; việc này là `[THỦ CÔNG]` và chưa được kiểm chứng.
 - Phép ping vùng ở bước 3.7 vẫn là phép thử đầu tiên: Binance phải chấp nhận địa chỉ của máy.
 
-#### Bước 8.3 Dịch vụ heartbeat bên ngoài [THỦ CÔNG] [CHƯA XÂY]
+#### Bước 8.3 Dịch vụ heartbeat bên ngoài: healthchecks.io [THỦ CÔNG] [CHƯA XÂY] [CHƯA XÁC MINH]
 
-**Chạy ở:** `[MÁY CÓ MẠNG]`
+> - **Để làm gì:** Một dịch vụ bên ngoài VPS (đã chọn: healthchecks.io) nhận tín hiệu "còn sống" đều đặn và báo cho bạn khi tín hiệu ngừng.
+> - **Giải quyết vấn đề gì:** Collector hay cả máy chết trong im lặng thì mỗi phút Open Interest mất là mất vĩnh viễn (D059 mục 4); không có giám sát từ ngoài thì bạn chỉ biết khi tự mở máy xem.
+> - **Mức quan trọng:** **BẮT BUỘC** (D042 điều kiện 1; điều kiện `HEARTBEAT_MONITOR_ALERT_RECEIVED`). Bộ gửi tín hiệu chưa xây (kế hoạch 16-50), và heartbeat chỉ báo cho bạn, không bảo vệ vị thế.
 
-- Repository này không gửi heartbeat nào (RUNBOOK 11.4). D042 điều kiện 1 đòi một dịch vụ giám sát ngoài VPS báo cho bạn khi một tiến trình chạy dài dừng, vì một máy đơn là một điểm hỏng đơn.
-- Dịch vụ và chu kỳ là `[QUYẾT ĐỊNH CỦA BẠN]` (O-12 đang hoãn). URL mà dịch vụ giám sát cấp cho bạn là một bí mật, không dán vào `acceptance.json`, chat hay tài liệu này.
-- Phép thử `HEARTBEAT_MONITOR_ALERT_RECEIVED` (RUNBOOK 19.3, bước 3.8) dừng collector rồi khởi động lại; nó làm mất vĩnh viễn các phút Open Interest trong lúc dừng, và khoảng trống đó phải được ghi là khoảng trống bao phủ.
-- Có kế hoạch nào xây bộ gửi heartbeat ra dịch vụ ngoài không? Tìm "heartbeat" trong các tệp kế hoạch của Phase 16: các kế hoạch 16-07 và 16-14 chỉ nói về điều kiện nghiệm thu và quyết định của bạn; các kế hoạch 16-15, 16-16, 16-24, 16-26, 16-30 và 16-43 nói về các hàng heartbeat nội bộ của runtime trong cơ sở dữ liệu soak (dùng để tính độ bao phủ). Không kế hoạch nào xây một bộ gửi tín hiệu tới dịch vụ giám sát ngoài VPS, nên nó là `[CHƯA XÂY]`. Mọi cách bạn tự dựng nằm ngoài repository và chưa được kiểm chứng.
-- Chú ý cho timer sao lưu: nếu máy chết thì bản sao lưu im lặng. Dịch vụ heartbeat nên mong một tín hiệu mỗi ngày (RUNBOOK 11.4).
+**Chạy ở:** `[MÁY CÓ MẠNG]` (đăng ký tài khoản, tạo check, đặt chu kỳ), `[MÁY EC2]` (nơi bộ gửi tín hiệu sẽ chạy)
+
+**Đã chọn gì.** Bạn chọn healthchecks.io làm dịch vụ heartbeat ngày 2026-10-09 (quyết định của người dùng, thuộc hạng mục heartbeat của `16-DEC-O-12`). Chu kỳ và thời gian ân hạn (grace period) vẫn là `[QUYẾT ĐỊNH CỦA BẠN]`; hướng dẫn này không viết con số nào.
+
+**Dùng để làm gì (năm mục đích).**
+
+1. Phát hiện collector hoặc cả máy chết trong im lặng. D042 điều kiện 1 đòi một dịch vụ giám sát NGOÀI VPS báo cho bạn khi một tiến trình chạy dài dừng, vì một máy đơn là một điểm hỏng đơn.
+2. Rút ngắn thời gian mất dữ liệu không bù được: các phút Open Interest không thu được là mất vĩnh viễn (D059 mục 4: `openInterestHist` chỉ phục vụ khoảng một tháng), nên biết sớm có giá trị hơn biết muộn.
+3. Là nội dung của điều kiện nghiệm thu `HEARTBEAT_MONITOR_ALERT_RECEIVED` (bước 3.8): cảnh báo phải thật sự tới bạn khi collector dừng.
+4. Cho thông báo phục hồi (recovery notice) khi tín hiệu quay lại; phép thử nghiệm thu đòi cả cảnh báo lẫn thông báo phục hồi.
+5. Bắt trường hợp timer sao lưu im lặng: RUNBOOK 11.4 nói một máy chết hay một unit lỗi là im lặng nếu không có dịch vụ mong một tín hiệu mỗi ngày. Chu kỳ thật vẫn là của bạn, và hai mục đích (collector, sao lưu) có thể cần hai chu kỳ khác nhau; hướng dẫn này không chọn thay.
+
+**Những gì heartbeat KHÔNG làm.**
+
+- Nó không phải cảnh báo giao dịch: không báo tín hiệu, kế hoạch, lệnh, khớp hay lời lỗ.
+- Nó không phải tín hiệu sức khỏe nghiệp vụ: một ping đúng giờ chỉ nói bộ gửi còn chạy, không chứng minh dữ liệu đúng, không có khoảng trống hay feed khỏe. Tín hiệu chỉ có ý nghĩa nếu nó phụ thuộc vào việc collector đang chạy (RUNBOOK 19.3).
+- Nó không bảo vệ vị thế: SL luôn nằm trên sàn (D042 điều kiện 1), nên heartbeat sống hay chết thì vị thế đã đặt vẫn được bảo vệ phía sàn. Heartbeat chỉ báo cho bạn.
+
+**Gói miễn phí của healthchecks.io `[CHƯA XÁC MINH]`.** Các dữ kiện sau chỉ được xác minh một phần, từ trang của bên thứ ba chứ chưa đọc trực tiếp trang giá chính thức. Hãy đọc https://healthchecks.io/pricing/ trước khi một quyết định dựa vào chúng:
+
+- 20 check cho gói miễn phí `[CHƯA XÁC MINH]`;
+- 100 bản ghi log (log entries) cho mỗi check `[CHƯA XÁC MINH]`;
+- chưa tìm thấy giới hạn số ping mỗi ngày `[CHƯA XÁC MINH]`: "không thấy giới hạn" không có nghĩa là không có;
+- giới hạn tần suất ping mỗi phút chưa được xác nhận `[CHƯA XÁC MINH]`.
+
+**URL ping là bí mật.** Ai có URL mà dịch vụ cấp cho một check đều báo "còn sống" thay được máy của bạn. Không bao giờ để nó trong git, nhật ký, `acceptance.json`, chat, issue hay tài liệu này; hướng dẫn này không có URL nào. Khi bộ gửi được xây, tên biến chứa URL chưa được repository định nghĩa `[CHƯA XÂY]`; lưu ý cho người viết kế hoạch đó: bộ che bí mật của D050 che theo tên biến chứa PASSWORD, SECRET, TOKEN, API_KEY, ACCESS_KEY, CRYPT hoặc PRIVATE, nên một tên không khớp thì URL có thể lọt vào nhật ký.
+
+**Bộ gửi tín hiệu: kế hoạch 16-50 "Off-host heartbeat sender" `[CHƯA XÂY]`.** Nó thuộc Phase 16 và chưa có code, chưa có lệnh, chưa có SUMMARY. Đừng nhầm với các hàng heartbeat nội bộ của runtime trong cơ sở dữ liệu soak (các kế hoạch 16-15, 16-16, 16-24, 16-26, 16-30 và 16-43 nói về chúng, để tính độ bao phủ): chúng không gửi gì ra ngoài. Các kế hoạch 16-07 và 16-14 chỉ nói điều kiện nghiệm thu và quyết định của bạn.
+
+**Cách tạm thời, tự làm ngoài repository `[THỦ CÔNG]` `[CHƯA XÁC MINH]`.** Trong lúc chờ 16-50 bạn có thể tự đặt một bộ gửi phía bạn, ví dụ một cron hoặc systemd timer gọi URL ping. Hướng dẫn này không đưa lệnh vì repository không có lệnh nào để chép và cách này chưa từng được chạy thử. Nếu tín hiệu chỉ nói "máy còn bật" mà không phụ thuộc collector thì phép thử `HEARTBEAT_MONITOR_ALERT_RECEIVED` không có ý nghĩa.
+
+**Đối chiếu với RUNBOOK.** RUNBOOK 11.4 (đọc ngày 2026-10-09) nói không có gì trong repository ping một dịch vụ giám sát và gọi nó là heartbeat hoặc dead-man's-switch. Hôm nay câu đó đúng. Khi 16-50 được xây, RUNBOOK sẽ được người thực hiện kế hoạch sửa (không phải hướng dẫn này); lúc đó RUNBOOK thắng và hướng dẫn này phải được cập nhật theo.
 
 Nguồn: `.env.example`, `.planning/phases/16-paper-runtime-composition/decisions/16-DEC-Q-L.md`, `.planning/phases/16-paper-runtime-composition/16-RESEARCH.md`, `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`
 
 ## 9. Lộ trình SHADOW, DEMO, CANARY, LIVE
 
+> - **Để làm gì:** Cho thấy lộ trình phát hành SHADOW, DEMO, CANARY, LIVE theo D040 và D041, và các phase 18 đến 26 còn phải xây.
+> - **Giải quyết vấn đề gì:** Ngăn nhảy cóc sang tiền thật: mỗi giai đoạn có tiêu chí thoát viết sẵn, APPROVE không bao giờ đặt lệnh, chỉ CONFIRM mới đặt.
+> - **Mức quan trọng:** Thứ tự giai đoạn là **BẮT BUỘC**, không bỏ qua giai đoạn nào (D040). Với bạn hôm nay mục này chỉ để đọc (**NÊN LÀM** đọc một lần), vì DEMO đến LIVE chưa có code.
+
 #### Bước 9.1 Con đường an toàn từ D040 và D041 [CHƯA XÂY]
+
+> - **Để làm gì:** Mô tả con đường SHADOW, DEMO, CANARY, LIVE (D040) và bước xác nhận hai lần APPROVE rồi CONFIRM (D041).
+> - **Giải quyết vấn đề gì:** Ngăn một lệnh thật bị đặt chỉ vì một cú bấm: APPROVE chỉ mở thẻ xác nhận, chỉ CONFIRM (mã riêng, dùng một lần, hết hạn nhanh) mới đặt lệnh.
+> - **Mức quan trọng:** **BẮT BUỘC** (D040: không bỏ qua giai đoạn nào; D041). Hôm nay chỉ để đọc vì chưa có code cho DEMO đến LIVE.
 
 **Chạy ở:** `[MÁY CÓ MẠNG]` (đọc; hôm nay bạn không có lệnh nào cho các giai đoạn DEMO đến LIVE)
 
@@ -1284,7 +1473,7 @@ D040 quy định con đường phát hành an toàn SHADOW, DEMO, CANARY, LIVE, 
 
 | Giai đoạn | Cái gì chạy | Khóa nạp | Lệnh | Tiêu chí thoát | Phase xây | Trạng thái |
 | --- | --- | --- | --- | --- | --- | --- |
-| SHADOW | tiến trình paper trên dữ liệu thị trường công khai; thông báo có nhãn, APPROVE/SKIP rồi CONFIRM; khớp lệnh mô phỏng; không đường nào tới lệnh thật | không khóa giao dịch nào | không có (không dựng adapter lệnh) | trial soak đạt các tiêu chí ở bước 7.7 và chuỗi đóng ở bước 7.6 | Phase 16 (đang thực hiện, 14/49), Phase 17 đã xong | `[CHƯA XÂY]` ở cấp vận hành |
+| SHADOW | tiến trình paper trên dữ liệu thị trường công khai; thông báo có nhãn, APPROVE/SKIP rồi CONFIRM; khớp lệnh mô phỏng; không đường nào tới lệnh thật | không khóa giao dịch nào | không có (không dựng adapter lệnh) | trial soak đạt các tiêu chí ở bước 7.7 và chuỗi đóng ở bước 7.6 | Phase 16 (đang thực hiện, 14/50), Phase 17 đã xong | `[CHƯA XÂY]` ở cấp vận hành |
 | DEMO | APPROVE rồi CONFIRM đặt lệnh trên Binance Demo Trading (demo-fapi.binance.com) | khóa demo/testnet | chỉ lệnh trên tài khoản demo | bộ kịch bản demo tự động qua và một soak demo nhiều tuần với không có sai lệch không giải thích, không có vị thế nào thiếu SL phía sàn, không có lệnh vào trùng | Phase 18 đến 25 | `[CHƯA XÂY]` |
 | CANARY | khóa mainnet chỉ-đọc xác minh exchangeInfo, hoa hồng, giá mark và số dư thật; rồi một tài khoản phụ nhỏ biệt lập (cỡ USD 50 đến 100, cỡ tối thiểu) giao dịch khi người vận hành theo dõi | khóa chỉ-đọc, rồi khóa của tài khoản phụ | lệnh thật cỡ nhỏ | số lệnh đã đăng ký trước, không có sai lệch | Phase 26 | `[CHƯA XÂY]` |
 | LIVE | chỉ sau khi tiêu chí thoát CANARY đạt | `BINANCE_LIVE_*` chỉ trong env riêng của triển khai live | lệnh thật | do Phase 26 xác định | Phase 24 và 26 | `[CHƯA XÂY]` |
@@ -1297,7 +1486,7 @@ Phase 27 (đồng tiền định giá cấu hình được, sẵn sàng USDC) n�
 
 | Phase | Mục tiêu | Phụ thuộc | Trạng thái |
 | --- | --- | --- | --- |
-| Phase 16 | tiến trình paper chạy được và chế độ phê duyệt SHADOW | Phase 12, 13.1, 15, 17 | đang thực hiện, 14/49 kế hoạch (bước 7.3) |
+| Phase 16 | tiến trình paper chạy được và chế độ phê duyệt SHADOW | Phase 12, 13.1, 15, 17 | đang thực hiện, 14/50 kế hoạch (bước 7.3) |
 | Phase 17 | lớp lưu trữ PostgreSQL cho nhật ký, phê duyệt, thực thi | trước đó | xong ngày 2026-10-07 `[ĐÃ XÂY]` |
 | Phase 18 | luồng dữ liệu người dùng của Binance (listenKey, sự kiện lệnh, thuật toán, tài khoản), bảng phân loại lỗi sàn, công tắc demo/testnet | Phase 17 | `[CHƯA XÂY]` |
 | Phase 19 | cái bạn phê duyệt đúng là cái được đặt (cùng cặp, chiều, khối lượng không lớn hơn), SL bị từ chối không để vị thế trần | Phase 17, 18 | `[CHƯA XÂY]` |
@@ -1310,6 +1499,10 @@ Phase 27 (đồng tiền định giá cấu hình được, sẵn sàng USDC) n�
 | Phase 26 | cổng sẵn sàng go-live: bật live chỉ bằng hành động khẳng định | Phase 25 | `[CHƯA XÂY]` |
 
 #### Bước 9.3 Các cổng quan trọng, trích từ ROADMAP [CHƯA XÂY]
+
+> - **Để làm gì:** Các cổng trước khi lên tiền thật: bộ kịch bản demo, soak demo ít nhất 3 tuần, điều kiện của `enable()` ở Phase 26, CANARY.
+> - **Giải quyết vấn đề gì:** Chặn việc bật live khi còn sai lệch chưa giải thích, vị thế thiếu SL phía sàn, hoặc khi trạng thái DEGRADED bị coi là bằng chứng.
+> - **Mức quan trọng:** **BẮT BUỘC** trước LIVE (ROADMAP Phase 25 và 26; D040, D056, D058, D065). Chưa xây.
 
 **Chạy ở:** `[MÁY CÓ MẠNG]` (đọc)
 
@@ -1327,6 +1520,10 @@ pytest -m demo
 
 #### Bước 9.4 Bạn làm gì ở mỗi cổng, và những điều không bao giờ làm [THỦ CÔNG] [CHƯA XÂY]
 
+> - **Để làm gì:** Nói rõ phần việc của con người ở từng cổng go-live và những điều không bao giờ làm.
+> - **Giải quyết vấn đề gì:** Tránh để agent hay script tự quyết thay bạn các việc an toàn như cho phép chạy nghiên cứu, chỉ định ứng viên, bật `enable()`.
+> - **Mức quan trọng:** **BẮT BUỘC** (D061 mục H: agent không bao giờ tự quyết các việc này). Chưa xây.
+
 **Chạy ở:** `[MÁY CÓ MẠNG]`
 
 Hôm nay bạn không có lệnh chạy được cho các giai đoạn DEMO đến LIVE. Bằng lời:
@@ -1341,6 +1538,10 @@ Những điều không bao giờ làm: không đặt khóa live trước khi WR-
 Nguồn: `.planning/ROADMAP.md`, `docs/DECISIONS.md`, `.env.example`, `docker-compose.yml`
 
 ## 10. Vận hành hằng ngày
+
+> - **Để làm gì:** Các lệnh dùng hằng ngày: xem trạng thái, nhật ký, sức khỏe, migration, bí mật, làm mới pin, ổ đĩa, đồng bộ giờ.
+> - **Giải quyết vấn đề gì:** Biết một lệnh đúng cho từng việc và tránh các lệnh nguy hiểm: lệnh `config` của compose không có `-q` (in cả bí mật), xóa volume, dừng collector tùy tiện.
+> - **Mức quan trọng:** **BẮT BUỘC** nắm các quy tắc an toàn (luôn `-q` khi kiểm tra cấu hình, không xóa volume, không dừng collector vì tiện; RUNBOOK). Phần còn lại là **TÙY CHỌN**, tra khi cần.
 
 Mọi lệnh ở mục này chạy trong thư mục `/opt/trading` bằng user `trading` trên `[MÁY EC2]`, trừ khi bước nói khác.
 
@@ -1476,6 +1677,10 @@ uv run pytest tests/test_deploy_docs.py tests/test_deploy_images.py tests/test_d
 
 ### Thẻ lệnh: deploy/refresh-pins.sh
 
+> - **Để làm gì:** Liệt kê hoặc tra cứu các pin (image, phiên bản công cụ, GitHub Actions) xem pin nào đã đổi; chỉ đọc.
+> - **Giải quyết vấn đề gì:** Giúp việc nâng pin có chủ ý (D050: không bao giờ tự động) thay vì để image hay action trôi âm thầm.
+> - **Mức quan trọng:** **TÙY CHỌN**: không có lịch, chỉ khi bạn cân nhắc làm mới pin (D050).
+
 **Mục đích:** liệt kê các image, phiên bản công cụ và GitHub Actions được ghim trong checkout này, hoặc hỏi các registry và GitHub xem pin nào đã đổi. Chỉ ĐỌC: không bao giờ sửa tệp nào.
 
 **Khi nào chạy:** khi bạn cân nhắc làm mới các pin (bước 10.7); không có lịch.
@@ -1552,6 +1757,10 @@ Nguồn: `docs/operations/RUNBOOK.md`, `docker-compose.yml`, `deploy/refresh-pin
 
 ## 11. Cập nhật và quay lại phiên bản cũ
 
+> - **Để làm gì:** Cập nhật stack lên một commit đã xem lại và quay lại bản tốt cuối bằng `deploy/update.sh`.
+> - **Giải quyết vấn đề gì:** Cập nhật tay dễ để lại trạng thái nửa vời; script sao lưu trước, ghi lại image tốt cuối và cho đường quay lại (quay lại không hoàn tác migration lược đồ).
+> - **Mức quan trọng:** **TÙY CHỌN** cho tới khi bạn có phiên bản mới cần triển khai; từ lúc đó **NÊN LÀM** dùng script này, vì RUNBOOK không mô tả đường cập nhật nào khác.
+
 Không có tag git nào trong repository, nên mọi ví dụ `--ref` ở đây dùng `<commit-sha>`; một tag bạn tự tạo và tự đẩy lên remote cũng dùng được.
 
 #### Bước 11.1 Trước khi cập nhật [ĐÃ XÂY] [CHƯA XÁC MINH]
@@ -1623,6 +1832,10 @@ deploy/update.sh --rollback
 
 ### Thẻ lệnh: deploy/update.sh
 
+> - **Để làm gì:** Đưa stack đang chạy lên một commit đã xem lại, hoặc quay về đúng các image của lần chạy trước.
+> - **Giải quyết vấn đề gì:** Cập nhật tay dễ bỏ sót sao lưu hoặc để trạng thái nửa vời; script từ chối cây bẩn, sao lưu trước, ghi image tốt cuối và cho đường quay lại (migration lược đồ thì không hoàn tác được).
+> - **Mức quan trọng:** **NÊN LÀM** dùng nó mỗi khi triển khai phiên bản mới (RUNBOOK 14 chỉ mô tả đường này). Chưa cần nếu chưa có gì để cập nhật.
+
 **Mục đích:** đưa stack đang chạy tới một ref git, hoặc đưa nó về đúng các image đã chạy trước đó.
 
 **Khi nào chạy:** khi bạn muốn triển khai một phiên bản mới đã xem lại; hoặc để quay lại sau một cập nhật không ổn.
@@ -1664,6 +1877,10 @@ deploy/update.sh --rollback --dry-run
 Nguồn: `docs/operations/RUNBOOK.md`, `deploy/update.sh`, `deploy/backup.sh`, `docker-compose.yml`, `docs/DECISIONS.md`
 
 ## 12. Khẩn cấp
+
+> - **Để làm gì:** Bảng "làm ngay" cho tình huống khẩn: SAFE_MODE, vị thế không có SL, lệnh trùng, collector dừng, máy mất, ổ đầy, S3 lỗi.
+> - **Giải quyết vấn đề gì:** Lúc có sự cố không phải đi tìm cách; mục tiêu mặc định là bảo toàn vốn và tính toàn vẹn trạng thái (RUNBOOK mục 1).
+> - **Mức quan trọng:** **NÊN LÀM** đọc một lần trước khi cần. Các hàng về sàn chỉ áp dụng từ DEMO; các hàng cấp máy chủ (bước 12.2) áp dụng ngay. Mức này là đánh giá của hướng dẫn này.
 
 Mục tiêu mặc định là bảo toàn vốn và tính toàn vẹn trạng thái, không phải tiếp tục giao dịch cho nhanh (RUNBOOK mục 1). Bảng dưới trích đúng hành động của RUNBOOK các mục 2 đến 10 và 12, kèm trạng thái xây dựng và thời điểm áp dụng. Trong SHADOW không có lệnh hay vị thế nào, nên các tình huống về sàn áp dụng từ giai đoạn DEMO trở đi; các tình huống cấp máy chủ ở nửa cuối bảng áp dụng ngay bây giờ. Các hàng cấp máy chủ chỉ dùng lệnh đã có trong hướng dẫn này.
 
@@ -1710,7 +1927,7 @@ Cách đọc: `consumption_status = CONSUMED` nghĩa là phê duyệt đã tới
 
 | Tình huống | Làm ngay | Trạng thái xây dựng | Áp dụng khi nào |
 | --- | --- | --- | --- |
-| Collector dừng | `docker compose ps` rồi `docker compose logs --tail 200 collector`; nếu chỉ dừng thì `docker compose start collector`. Các phút Open Interest đã mất là mất vĩnh viễn: ghi khoảng trống như một khoảng trống bao phủ (D059 mục 4) | `[ĐÃ XÂY]` | ngay |
+| Collector dừng | `docker compose ps` rồi `docker compose logs --tail 200 collector`; nếu chỉ dừng thì `docker compose start collector`. Các phút Open Interest đã mất là mất vĩnh viễn: ghi khoảng trống như một khoảng trống bao phủ (D059 mục 4). Heartbeat (mục 8.3) là thứ sẽ báo cho bạn biết sớm, khi bộ gửi tồn tại | `[ĐÃ XÂY]` | ngay |
 | Máy chủ không với tới được | kiểm tra trạng thái instance trong AWS console `[THỦ CÔNG]`; sau khi máy lên lại, các service có `restart: unless-stopped` tự lên cùng Docker; kiểm tra bằng `docker compose ps`; ghi khoảng trống bao phủ. Cách khởi động lại instance không được repository mô tả | `[CHƯA XÁC MINH]` | ngay |
 | Ổ đĩa đầy | `df -h` để xem; dọn thư mục `restore-` và `drill-` cũ (bước 6.7); KHÔNG xóa volume và không dùng lệnh dọn dẹp của Docker. Cây Parquet chỉ lớn dần: nếu vẫn đầy, tăng ổ là quyết định của bạn | `[ĐÃ XÂY]` | ngay |
 | S3 không với tới được | bản sao lưu lỗi một cách thấy được; đọc `journalctl -u trading-backup`; dữ liệu cục bộ vẫn nguyên; chạy lại sau; nếu kéo dài, báo lại. Bảng 11.8 ở bước 6.8 phân biệt lỗi mạng với lỗi nội dung | `[ĐÃ XÂY]` | ngay |
@@ -1720,6 +1937,10 @@ Cách đọc: `consumption_status = CONSUMED` nghĩa là phê duyệt đã tới
 Nguồn: `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`, `docker-compose.yml`, `docs/operations/SECURITY_AND_OPERATIONS.md`
 
 ## 13. Xử lý sự cố
+
+> - **Để làm gì:** Bảng triệu chứng, nguyên nhân thường gặp và cách xử lý cho các lỗi hay gặp khi dựng và vận hành.
+> - **Giải quyết vấn đề gì:** Không đoán mò khi gặp thông báo lỗi; mỗi hàng chỉ nguồn trong RUNBOOK hoặc script.
+> - **Mức quan trọng:** **TÙY CHỌN**: chỉ tra khi gặp lỗi. Mức này là đánh giá của hướng dẫn này.
 
 #### Bước 13.1 Bảng triệu chứng [ĐÃ XÂY] [CHƯA XÁC MINH]
 
@@ -1754,13 +1975,18 @@ Nguồn: `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`, `docker-compose.yml`
 | tài khoản AWS bị đóng | gói Free tự đóng khoảng 2027-01-25 hoặc khi hết tín dụng | chuyển sang gói Paid trước mốc đó (điều kiện `PAID_PLAN`) | RUNBOOK 19.3, `16-DEC-O-12` |
 | kiểm thử bị bỏ qua hoặc đỏ khi có `TRADING_CI_STRICT` | thiếu hạ tầng (bash, Docker, compose, shellcheck) trên máy chạy | cài hạ tầng thiếu; đó không phải lỗi mã | RUNBOOK 18 |
 | Telegram im lặng | chưa rõ; có thể sai token hay mã chat, bot khác cùng polling, hoặc chưa có tiến trình nào gửi (runtime chưa xây) `[CHƯA XÁC MINH]` | kiểm tra bước 8.1; hỏi trong phiên lập kế hoạch | `.env.example` |
-| heartbeat im lặng | repository không gửi heartbeat nào | tự dựng ngoài repository (bước 8.3) | RUNBOOK 11.4 |
+| không nhận được cảnh báo nào dù collector đã dừng (heartbeat im lặng) | bộ gửi chưa tồn tại (kế hoạch 16-50 `[CHƯA XÂY]`), hoặc cách tự dựng của bạn không phụ thuộc collector, hoặc chưa được thử `[CHƯA XÁC MINH]` | đăng ký healthchecks.io và dựng bộ gửi thủ công hoặc chờ 16-50 (bước 8.3), rồi làm phép thử ở bước 3.8 | RUNBOOK 11.4 |
+| nhận cảnh báo thiếu tín hiệu từ dịch vụ heartbeat | collector dừng, máy không với tới được, hoặc chính bộ gửi dừng `[CHƯA XÁC MINH]` | làm theo hàng "Collector dừng" và "Máy chủ không với tới được" ở bước 12.2; ghi khoảng trống bao phủ | D042 điều kiện 1, D059 mục 4 |
 | bạn tự khóa mình ngoài máy sau bootstrap | đóng phiên root trước khi thử phiên `trading` và `sudo -v` | dùng cách khôi phục của nhà cung cấp; lần sau giữ phiên root tới khi bước 4.6 xong | RUNBOOK 13.4 |
 | lỡ chạy lệnh `config` của compose mà thiếu `-q` | đã in môi trường phân giải, gồm bí mật | coi các bí mật đã in là lộ và thay chúng | RUNBOOK 11.7 |
 
 Nguồn: `docs/operations/RUNBOOK.md`, `deploy/bootstrap.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `scripts/soak_host_acceptance.py`, `docker-compose.yml`
 
 ## 14. Bảng tra nhanh mọi lệnh
+
+> - **Để làm gì:** Bảng tra mọi lệnh trong tài liệu, kèm máy chạy, mục giải thích và nhãn trạng thái.
+> - **Giải quyết vấn đề gì:** Tìm lại đúng lệnh nhanh mà không đọc lại cả tài liệu, kể cả các lệnh `--dry-run`.
+> - **Mức quan trọng:** **TÙY CHỌN** (tra cứu); nó không thay cho việc đọc thẻ lệnh trước lần chạy đầu tiên. Mức này là đánh giá của hướng dẫn này.
 
 Mọi dòng bên dưới được chép từ các thẻ lệnh và các mục trước; cột "Mục" chỉ chỗ có giải thích. Nhãn trạng thái ở cột cuối: `[ĐÃ XÂY]` nghĩa là script tồn tại, `[CHƯA XÁC MINH]` nghĩa là chưa chạy trên máy thật.
 
@@ -1830,17 +2056,22 @@ Bảy service: `postgres`, `db-upgrade`, `collector`, `paper` (profile `paper`, 
 | --- | --- | --- | --- | --- |
 | điểm vào của tiến trình paper | `[MÁY EC2]` | chưa có lệnh chạy được (xem bước 7.4); tên dự kiến `python -m src.paper.runtime` | 7.4 | `[CHƯA XÂY]` |
 | các giai đoạn DEMO, CANARY, LIVE | `[MÁY CÓ MẠNG]` | chưa có lệnh nào | 9 | `[CHƯA XÂY]` |
+| bộ gửi heartbeat tới healthchecks.io (kế hoạch 16-50) | `[MÁY EC2]` | chưa có lệnh chạy được; cách thủ công của bạn nằm ngoài repository và chưa được kiểm chứng | 8.3 | `[CHƯA XÂY]` `[CHƯA XÁC MINH]` |
 
 Nguồn: `deploy/bootstrap.sh`, `deploy/lib.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `deploy/refresh-pins.sh`, `deploy/backup.sh`, `deploy/restore.sh`, `deploy/backup-drill.sh`, `deploy/systemd/trading-backup.service`, `deploy/systemd/trading-backup.timer`, `scripts/soak_host_acceptance.py`, `scripts/backup-drill.ps1`, `docker-compose.yml`, `docs/operations/RUNBOOK.md`
 
 ## 15. Danh sách kiểm tra cuối cùng
+
+> - **Để làm gì:** Danh sách tick cuối cùng, mỗi mục dẫn về mục giải thích; mục chưa làm được vì chưa xây thì để trống.
+> - **Giải quyết vấn đề gì:** Thấy ở một chỗ mình còn thiếu gì trước khi tạo máy, trước khi soak và trước go-live.
+> - **Mức quan trọng:** **NÊN LÀM** dùng như bản kiểm lại; mức quan trọng của từng mục là mức của mục được dẫn tới. Đánh giá của hướng dẫn này.
 
 Mỗi mục dẫn tới phần giải thích. Các mục chưa thể làm vì chưa xây được để trống và gắn nhãn `[CHƯA XÂY]`.
 
 ### Trước khi tạo máy
 
 - [ ] Tôi biết tài khoản AWS ở gói Free đóng khoảng 2027-01-25 và sẽ chuyển sang gói Paid trước đó (mục 2.1)
-- [ ] Tôi đã tự ghi năm giá trị của quyết định O-12 theo lời của mình (mục 2.2)
+- [ ] Tôi đã tự ghi các giá trị còn thiếu của quyết định O-12 (loại máy, ổ, ngân sách, vòng đời S3, chu kỳ và ân hạn của heartbeat) theo lời của mình (mục 2.2)
 - [ ] Tôi đã tạo cặp khóa SSH và khóa riêng không rời máy tôi (mục 2.3)
 - [ ] Tệp `authorized_keys` có ít nhất một khóa công khai hợp lệ (mục 2.4)
 - [ ] Tệp bí mật soạn ở máy có mạng: không còn `change_me`, mật khẩu PostgreSQL hợp lệ, dùng LF, không có `BINANCE_LIVE_*` (mục 2.5)
@@ -1883,12 +2114,13 @@ Mỗi mục dẫn tới phần giải thích. Các mục chưa thể làm vì ch
 
 - [ ] Bot Telegram riêng cho máy soak đã tạo trong BotFather và token không bị dán đi đâu (mục 8.1)
 - [ ] Mỗi khóa Binance bị giới hạn ở đúng Elastic IP và quyền rút tiền tắt (mục 8.2)
-- [ ] Dịch vụ heartbeat bên ngoài đã đăng ký và cảnh báo đã được thử (mục 8.3)
+- [ ] Một check healthchecks.io đã đăng ký với chu kỳ và thời gian ân hạn do tôi chọn, và URL ping được giữ bí mật (mục 8.3)
+- [ ] Bộ gửi heartbeat (kế hoạch 16-50) đã xây và phép thử `HEARTBEAT_MONITOR_ALERT_RECEIVED` đã cho cả cảnh báo lẫn thông báo phục hồi `[CHƯA XÂY]` (mục 3.8)
 - [ ] `acceptance.json` có đủ 16 điều kiện PASS và `soak_host_acceptance.py` thoát 0 (mục 3.8)
 
 ### Sẵn sàng cho soak Phase 16
 
-- [ ] Cả 49 kế hoạch của Phase 16 đã xong `[CHƯA XÂY]` (mục 7.3)
+- [ ] Cả 50 kế hoạch của Phase 16 đã xong, kể cả 16-50 bộ gửi heartbeat `[CHƯA XÂY]` (mục 7.3)
 - [ ] Tiến trình paper có điểm vào chạy được `[CHƯA XÂY]` (mục 7.4)
 - [ ] Giả thuyết, lưới tham số, lệnh cho phép chạy nghiên cứu và ứng viên đã được tôi duyệt hoặc chỉ định `[CHƯA XÂY]` (mục 7.6)
 - [ ] Tôi đã cho phép đúng một băm trong `PAPER_START_ALLOWLIST` `[CHƯA XÂY]` (mục 7.6)
@@ -1900,12 +2132,14 @@ Mỗi mục dẫn tới phần giải thích. Các mục chưa thể làm vì ch
 - [ ] Bộ kịch bản demo và soak demo ít nhất 3 tuần không có sai lệch không giải thích `[CHƯA XÂY]` (mục 9.3)
 - [ ] CANARY với khóa chỉ-đọc và tài khoản phụ nhỏ không có sai lệch `[CHƯA XÂY]` (mục 9.3)
 - [ ] Điều kiện của `enable()` ở Phase 26 đều đạt `[CHƯA XÂY]` (mục 9.3)
+- [ ] Heartbeat ngoài VPS vẫn hoạt động cho mọi tiến trình chạy dài của máy live (D042 điều kiện 1); nó chỉ báo cho tôi, SL vẫn nằm trên sàn `[CHƯA XÂY]` (mục 8.3)
 
 ### Phụ lục: Hướng dẫn này không làm được gì
 
 Những thứ còn chưa quyết định hoặc chưa được kiểm chứng, và hướng dẫn này không tự quyết:
 
-- Năm giá trị O-12 (loại máy, dung lượng ổ, ngân sách, vòng đời S3, dịch vụ heartbeat và chu kỳ): `[QUYẾT ĐỊNH CỦA BẠN]`.
+- Các giá trị O-12 còn thiếu (loại máy, dung lượng ổ, ngân sách, vòng đời S3, chu kỳ và thời gian ân hạn của heartbeat; dịch vụ healthchecks.io đã chọn): `[QUYẾT ĐỊNH CỦA BẠN]`.
+- Các dữ kiện gói miễn phí của healthchecks.io (20 check, 100 bản ghi log mỗi check, giới hạn ping): chỉ xác minh một phần từ trang bên thứ ba, `[CHƯA XÁC MINH]`.
 - Nơi lưu bằng chứng bền vững của soak (quyết định mở O-01) và nơi ghi các khoảng trống bao phủ.
 - Máy nào kéo dữ liệu nghiên cứu về (mục 10.8) và máy nào giữ `acceptance.json` (mục 3.8).
 - Mô hình thực thi D055 (đặt SL trước hay sau khi vào lệnh): còn là quyết định mở.
