@@ -196,3 +196,32 @@ def test_float_guard_catches_literals_and_decimal_float() -> None:
     assert _find_float_calls("from decimal import Decimal\nx = Decimal(0.5)\n") != []
     assert _find_float_calls('x = Decimal("0.5")\n') == []
     assert _find_float_calls("x = 1\n") == []
+
+
+def test_every_paper_and_research_module_is_scanned_by_the_float_guard() -> None:
+    """Every src/paper and src/research module, including ones later plans add, is scanned.
+
+    The paper and research packages are scanned by glob (Phase 16, plan 16-10), so a module
+    a later Phase 16 plan adds is covered without anyone remembering to list it. A module
+    is skipped only through `FLOAT_SCAN_EXCLUDED`, each entry with a one-line reason.
+    """
+    root = _repo_root()
+    modules = sorted(
+        p.relative_to(root).as_posix()
+        for pattern in ("src/paper/*.py", "src/research/*.py")
+        for p in root.glob(pattern)
+    )
+    assert {"src/paper/bars.py", "src/paper/loop.py", "src/paper/surface.py"} <= set(modules)
+    scanned = set(_all_scanned_files())
+    missing = [rel for rel in modules if rel not in scanned and rel not in FLOAT_SCAN_EXCLUDED]
+    assert not missing, f"paper/research modules not covered by the float guard: {missing}"
+    assert "src/adapters/paper_ws.py" in scanned
+
+
+def test_float_scan_exclusions_are_justified_and_exist() -> None:
+    """An exclusion needs a non-empty reason and must name a real file (no stale entries)."""
+    root = _repo_root()
+    for rel, reason in FLOAT_SCAN_EXCLUDED.items():
+        assert reason.strip(), f"{rel}: an exclusion needs a one-line reason"
+        assert (root / rel).is_file(), f"{rel}: excluded file does not exist"
+        assert rel not in SCANNED_FILES
