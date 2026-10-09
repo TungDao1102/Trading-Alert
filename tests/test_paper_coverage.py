@@ -7,16 +7,25 @@ continuous non-HEALTHY block is reported against a ceiling that has no default.
 
 from __future__ import annotations
 
+import ast
+import dataclasses
+import inspect
+import random
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
+from src.paper import coverage as coverage_module
 from src.paper.coverage import (
     CoverageReport,
     HealthInterval,
+    HealthThresholds,
     coverage_report,
+    derive_health_intervals,
 )
-from src.paper.vocabulary import GapReason, HealthState
+from src.paper.vocabulary import GapReason, HealthState, RuntimeEventType
 
 WINDOW_START = datetime(2026, 11, 1, tzinfo=UTC)
 WINDOW_END = datetime(2026, 11, 15, tzinfo=UTC)
@@ -314,3 +323,396 @@ def test_the_report_is_frozen_and_input_is_not_mutated() -> None:
     assert intervals == snapshot
     with pytest.raises(AttributeError):
         report.covered_hours = Decimal("1")  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: derive_health_intervals from recorded runtime events.
+# --------------------------------------------------------------------------- #
+
+EPOCH = "e" * 64
+OTHER_EPOCH = "f" * 64
+PAIR = ("BTCUSDT", "1h")
+
+
+def _ts(hour: int, minute: int = 0, second: int = 0) -> datetime:
+    return datetime(2026, 11, 1, hour, minute, second, tzinfo=UTC)
+
+
+@dataclasses.dataclass(frozen=True)
+class _Rec:
+    event_type: RuntimeEventType
+    epoch_id: str
+    symbol: str | None
+    interval: str | None
+    occurred_at_utc: datetime
+    payload: Mapping[str, object]
+
+
+def _start(at: datetime, epoch: str = EPOCH) -> _Rec:
+    return _Rec(RuntimeEventType.RUNTIME_START, epoch, None, None, at, {})
+
+
+def _stop(at: datetime, epoch: str = EPOCH) -> _Rec:
+    return _Rec(RuntimeEventType.RUNTIME_STOP, epoch, None, None, at, {})
+
+
+def _drop(at: datetime, epoch: str = EPOCH) -> _Rec:
+    return _Rec(RuntimeEventType.WS_DISCONNECT, epoch, None, None, at, {})
+
+
+def _reconnect(at: datetime, epoch: str = EPOCH) -> _Rec:
+    return _Rec(RuntimeEventType.WS_RECONNECT, epoch, None, None, at, {})
+
+
+def _close_of(hour: int) -> datetime:
+    """Close time (exchange convention: open + interval - 1 ms) of the 1h bar ending at `hour`."""
+    return _ts(hour) - timedelta(milliseconds=1)
+
+
+def _bar(hour: int, *, delay_seconds: int = 2, epoch: str = EPOCH, source: str = "LIVE_WS") -> _Rec:
+    tick = _ts(hour) + timedelta(seconds=delay_seconds)
+    return _Rec(
+        RuntimeEventType.PAPER_BAR_PROCESSED,
+        epoch,
+        PAIR[0],
+        PAIR[1],
+        _close_of(hour),
+        {"source": source, "tick_time_utc": tick.isoformat()},
+    )
+
+
+def _gap(hour: int, reason: GapReason) -> _Rec:
+    return _Rec(
+        RuntimeEventType.PAPER_GAP,
+        EPOCH,
+        PAIR[0],
+        PAIR[1],
+        _ts(hour, 0, 30),
+        {"expected_close_utc": _close_of(hour).isoformat(), "reason": reason.value},
+    )
+
+
+def _tick_stats(at: datetime, *, duration_ms: int = 5) -> _Rec:
+    return _Rec(
+        RuntimeEventType.PAPER_TICK_STATS,
+        EPOCH,
+        None,
+        None,
+        at,
+        {"duration_ms": duration_ms},
+    )
+
+
+def _declared(at: datetime, state: HealthState, reason: GapReason | None = None) -> _Rec:
+    payload: dict[str, object] = {"state": state.value}
+    if reason is not None:
+        payload["reason"] = reason.value
+    return _Rec(RuntimeEventType.HEALTH_STATE_CHANGED, EPOCH, None, None, at, payload)
+
+
+THRESHOLDS = HealthThresholds(
+    max_ws_message_silence_seconds=7200,
+    max_closed_bar_lateness_seconds=600,
+    continuous_uncovered_ceiling_seconds=4 * 3600,
+    freeze_tick_grace_seconds=300,
+)
+DERIVE_START = _ts(0)
+DERIVE_END = _ts(6)
+
+
+def _derive(
+    records: list[_Rec],
+    *,
+    expected: tuple[tuple[str, str], ...] = (PAIR,),
+    thresholds: HealthThresholds = THRESHOLDS,
+    epoch: str = EPOCH,
+) -> list[tuple[datetime, datetime, HealthState, GapReason | None]]:
+    out = derive_health_intervals(
+        records,
+        epoch_id=epoch,
+        window_start_utc=DERIVE_START,
+        window_end_utc=DERIVE_END,
+        intervals_expected=expected,
+        thresholds=thresholds,
+    )
+    return [(i.start_utc, i.end_utc, i.state, i.reason) for i in out]
+
+
+def _healthy_day(extra: list[_Rec] | None = None) -> list[_Rec]:
+    base = [_start(_ts(0))] + [_bar(h) for h in range(1, 7)]
+    return base + (extra or [])
+
+
+STARTUP_WAIT = (_ts(0), _ts(1, 0, 2), HealthState.DISCONNECTED, GapReason.WS_RECONNECT_WINDOW)
+
+
+def test_healthy_only_while_up_connected_fresh_and_every_bar_on_time() -> None:
+    """Test 1: the start-up wait before the first live message is not HEALTHY; then HEALTHY."""
+    assert _derive(_healthy_day()) == [
+        STARTUP_WAIT,
+        (_ts(1, 0, 2), _ts(6), HealthState.HEALTHY, None),
+    ]
+
+
+def test_a_ws_disconnect_until_reconnect_is_disconnected_with_its_reason() -> None:
+    records = _healthy_day([_drop(_ts(3, 30)), _reconnect(_ts(3, 30, 40))])
+    assert _derive(records) == [
+        STARTUP_WAIT,
+        (_ts(1, 0, 2), _ts(3, 30), HealthState.HEALTHY, None),
+        (_ts(3, 30), _ts(3, 30, 40), HealthState.DISCONNECTED, GapReason.WS_DISCONNECTED),
+        (_ts(3, 30, 40), _ts(6), HealthState.HEALTHY, None),
+    ]
+
+
+def test_an_unrecovered_disconnect_lasts_to_the_window_end() -> None:
+    records = [_start(_ts(0)), _bar(1), _bar(2), _drop(_ts(2, 30))]
+    result = _derive(records, expected=())
+    assert result[-1] == (_ts(2, 30), _ts(6), HealthState.DISCONNECTED, GapReason.WS_DISCONNECTED)
+
+
+def test_silence_longer_than_the_limit_is_degraded_from_the_limit_on() -> None:
+    """Message evidence is the live closed bar, the tick stats record or a reconnect."""
+    records = [_start(_ts(0)), _tick_stats(_ts(0, 5)), _tick_stats(_ts(1, 0))]
+    result = _derive(records, expected=())
+    assert result == [
+        (_ts(0), _ts(0, 5), HealthState.DISCONNECTED, GapReason.WS_RECONNECT_WINDOW),
+        (_ts(0, 5), _ts(3, 0), HealthState.HEALTHY, None),
+        (_ts(3, 0), _ts(6), HealthState.DEGRADED, GapReason.UNKNOWN),
+    ]
+
+
+def test_a_late_bar_makes_the_wait_beyond_the_lateness_limit_degraded() -> None:
+    """Bar 3 arrives 20 min after its close; the limit is 10 min: [close + 600 s, arrival)."""
+    records = [_start(_ts(0))] + [_bar(h) for h in (1, 2, 4, 5, 6)] + [_bar(3, delay_seconds=1200)]
+    expected_start = _close_of(3) + timedelta(seconds=600)
+    assert _derive(records) == [
+        STARTUP_WAIT,
+        (_ts(1, 0, 2), expected_start, HealthState.HEALTHY, None),
+        (expected_start, _ts(3, 20), HealthState.DEGRADED, GapReason.UNKNOWN),
+        (_ts(3, 20), _ts(6), HealthState.HEALTHY, None),
+    ]
+
+
+def test_a_missing_bar_is_unhealthy_from_its_close_until_the_feed_is_seen_again() -> None:
+    """A bar that never arrived: not healthy from its close to the next live arrival."""
+    records = [_start(_ts(0))] + [_bar(h) for h in (1, 2, 4, 5, 6)]
+    assert _derive(records) == [
+        STARTUP_WAIT,
+        (_ts(1, 0, 2), _close_of(3), HealthState.HEALTHY, None),
+        (_close_of(3), _ts(4, 0, 2), HealthState.DEGRADED, GapReason.UNKNOWN),
+        (_ts(4, 0, 2), _ts(6), HealthState.HEALTHY, None),
+    ]
+
+
+def test_a_recorded_gap_gives_the_missing_bar_its_reason() -> None:
+    records = [_start(_ts(0))] + [_bar(h) for h in (1, 2, 4, 5, 6)]
+    records.append(_gap(3, GapReason.EXCHANGE_NO_CANDLE))
+    result = _derive(records)
+    assert (
+        _close_of(3),
+        _ts(4, 0, 2),
+        HealthState.DEGRADED,
+        GapReason.EXCHANGE_NO_CANDLE,
+    ) in result
+
+
+def test_a_bar_that_did_not_come_from_the_live_stream_is_not_proof_of_a_live_feed() -> None:
+    """A REST backfill row recovers history but does not show the live feed delivered it."""
+    records = [_start(_ts(0))] + [_bar(h) for h in (1, 2, 4, 5, 6)]
+    records.append(_bar(3, source="REST_BACKFILL", delay_seconds=30))
+    result = _derive(records)
+    assert (_close_of(3), _ts(4, 0, 2), HealthState.DEGRADED, GapReason.UNKNOWN) in result
+
+
+def test_a_declared_non_healthy_state_is_kept_until_the_next_declaration() -> None:
+    records = _healthy_day(
+        [
+            _declared(_ts(2, 30), HealthState.DEGRADED, GapReason.MAINTENANCE),
+            _declared(_ts(3, 0), HealthState.HEALTHY),
+        ]
+    )
+    assert _derive(records) == [
+        STARTUP_WAIT,
+        (_ts(1, 0, 2), _ts(2, 30), HealthState.HEALTHY, None),
+        (_ts(2, 30), _ts(3, 0), HealthState.DEGRADED, GapReason.MAINTENANCE),
+        (_ts(3, 0), _ts(6), HealthState.HEALTHY, None),
+    ]
+
+
+def test_a_stop_then_start_is_a_planned_restart_and_both_are_uncovered() -> None:
+    """Test 2: STOP followed by START labels the gap PLANNED_RESTART."""
+    records = [
+        _start(_ts(0)),
+        _bar(1),
+        _bar(2),
+        _stop(_ts(2, 20)),
+        _start(_ts(3, 5)),
+        _bar(4),
+        _bar(5),
+        _bar(6),
+    ]
+    assert _derive(records) == [
+        STARTUP_WAIT,
+        (_ts(1, 0, 2), _ts(2, 20), HealthState.HEALTHY, None),
+        (_ts(2, 20), _ts(3, 5), HealthState.DISCONNECTED, GapReason.PLANNED_RESTART),
+        (_ts(3, 5), _ts(4, 0, 2), HealthState.DISCONNECTED, GapReason.WS_RECONNECT_WINDOW),
+        (_ts(4, 0, 2), _ts(6), HealthState.HEALTHY, None),
+    ]
+
+
+def test_a_start_with_no_preceding_stop_is_a_crash_after_the_last_evidence() -> None:
+    """Test 2: START without a STOP is a CRASH from the last evidence of the previous run."""
+    records = [
+        _start(_ts(0)),
+        _bar(1),
+        _bar(2),
+        _start(_ts(3, 10)),
+        _bar(4),
+        _bar(5),
+        _bar(6),
+    ]
+    result = _derive(records)
+    assert (_ts(2, 0, 2), _ts(3, 10), HealthState.DISCONNECTED, GapReason.CRASH) in result
+    assert result[-1] == (_ts(4, 0, 2), _ts(6), HealthState.HEALTHY, None)
+
+
+def test_time_before_the_first_start_is_process_down() -> None:
+    records = [_start(_ts(2)), _bar(3), _bar(4), _bar(5), _bar(6)]
+    result = _derive(records)
+    assert result[0] == (_ts(0), _ts(2), HealthState.DISCONNECTED, GapReason.PROCESS_DOWN)
+
+
+def test_a_stop_that_is_never_followed_by_a_start_is_process_down() -> None:
+    records = [_start(_ts(0)), _bar(1), _bar(2), _stop(_ts(2, 30))]
+    result = _derive(records, expected=())
+    assert result[-1] == (_ts(2, 30), _ts(6), HealthState.DISCONNECTED, GapReason.PROCESS_DOWN)
+
+
+def test_no_records_at_all_is_not_covered() -> None:
+    assert _derive([]) == [(_ts(0), _ts(6), HealthState.DISCONNECTED, GapReason.PROCESS_DOWN)]
+
+
+def test_health_thresholds_have_no_default_and_reject_non_positive_values() -> None:
+    """Test 3: every field is required; zero, negative, bool and non-int are refused."""
+    with pytest.raises(TypeError):
+        HealthThresholds()  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        HealthThresholds(  # type: ignore[call-arg]
+            max_ws_message_silence_seconds=1,
+            max_closed_bar_lateness_seconds=1,
+            continuous_uncovered_ceiling_seconds=1,
+        )
+    for field in dataclasses.fields(HealthThresholds):
+        assert field.default is dataclasses.MISSING, field.name
+        assert field.default_factory is dataclasses.MISSING, field.name
+    good = {
+        "max_ws_message_silence_seconds": 1,
+        "max_closed_bar_lateness_seconds": 1,
+        "continuous_uncovered_ceiling_seconds": 1,
+        "freeze_tick_grace_seconds": 1,
+    }
+    for name in good:
+        for bad in (0, -5, True, 1.5, "10"):
+            with pytest.raises(ValueError, match=name):
+                HealthThresholds(**{**good, name: bad})  # type: ignore[arg-type]
+
+
+def test_the_module_source_has_no_numeric_default_for_the_user_owned_names() -> None:
+    """Test 3 (AST): no class field, parameter default or constant carries a numeric value."""
+    source = Path(inspect.getsourcefile(coverage_module) or "").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    names = {
+        "max_ws_message_silence_seconds",
+        "max_closed_bar_lateness_seconds",
+        "continuous_uncovered_ceiling_seconds",
+        "freeze_tick_grace_seconds",
+        "grace_seconds",
+    }
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.target.id in names and node.value is not None:
+                offenders.append(f"field {node.target.id}")
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in names:
+                    offenders.append(f"assignment {target.id}")
+        if isinstance(node, ast.FunctionDef):
+            args = node.args
+            positional = [*args.posonlyargs, *args.args]
+            defaults = [None] * (len(positional) - len(args.defaults)) + list(args.defaults)
+            pairs = list(zip(positional, defaults, strict=True)) + list(
+                zip(args.kwonlyargs, args.kw_defaults, strict=True)
+            )
+            for arg, default in pairs:
+                if arg.arg in names and default is not None:
+                    offenders.append(f"default {node.name}({arg.arg})")
+    assert offenders == []
+
+
+def test_derivation_is_deterministic_and_independent_of_input_order() -> None:
+    """Test 4: the same records always give the same intervals, in whatever order they arrive."""
+    records = _healthy_day(
+        [_drop(_ts(3, 30)), _reconnect(_ts(3, 30, 40)), _gap(5, GapReason.CRASH)]
+    )
+    first = _derive(records)
+    assert first == _derive(list(records))
+    shuffled = list(records)
+    random.Random(7).shuffle(shuffled)
+    assert first == _derive(shuffled)
+    assert first == _derive(list(reversed(records)))
+
+
+def test_records_of_an_earlier_epoch_are_ignored_and_not_mutated() -> None:
+    """Test 5 (REV-18): earlier-epoch runtime records never change the judged epoch's intervals."""
+    mine = _healthy_day([_drop(_ts(3, 30)), _reconnect(_ts(3, 30, 40))])
+    earlier = [
+        _start(_ts(0), OTHER_EPOCH),
+        _bar(1, epoch=OTHER_EPOCH),
+        _drop(_ts(1, 30), OTHER_EPOCH),
+        _stop(_ts(2), OTHER_EPOCH),
+        _reconnect(_ts(5), OTHER_EPOCH),
+        _bar(3, epoch=OTHER_EPOCH),
+    ]
+    combined = mine + earlier
+    snapshot = list(combined)
+    assert _derive(combined) == _derive(mine)
+    assert combined == snapshot
+
+
+def test_a_naive_record_time_is_refused() -> None:
+    bad = _Rec(
+        RuntimeEventType.RUNTIME_START,
+        EPOCH,
+        None,
+        None,
+        datetime(2026, 11, 1),  # noqa: DTZ001
+        {},
+    )
+    with pytest.raises(ValueError, match="UTC"):
+        _derive([bad])
+
+
+def test_an_unknown_expected_interval_is_refused() -> None:
+    with pytest.raises(ValueError, match="interval"):
+        _derive(_healthy_day(), expected=(("BTCUSDT", "7m"),))
+
+
+def test_derived_intervals_feed_the_coverage_report() -> None:
+    """The two functions compose: the start-up wait is the only uncovered stretch."""
+    derived = derive_health_intervals(
+        _healthy_day(),
+        epoch_id=EPOCH,
+        window_start_utc=DERIVE_START,
+        window_end_utc=DERIVE_END,
+        intervals_expected=(PAIR,),
+        thresholds=THRESHOLDS,
+    )
+    report = coverage_report(
+        window_start_utc=DERIVE_START,
+        window_end_utc=DERIVE_END,
+        intervals=derived,
+        continuous_uncovered_ceiling_seconds=THRESHOLDS.continuous_uncovered_ceiling_seconds,
+    )
+    assert [u.reason for u in report.uncovered] == [GapReason.WS_RECONNECT_WINDOW]
+    assert report.covered_hours == Decimal(5 * 3600 - 2) / Decimal(3600)
