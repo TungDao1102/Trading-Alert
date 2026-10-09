@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: executing
-stopped_at: Completed 16-13-PLAN.md
-last_updated: "2026-10-09T06:46:48.260Z"
+stopped_at: Completed 16-14-PLAN.md
+last_updated: "2026-10-09T07:03:38.647Z"
 last_activity: 2026-10-09
 last_activity_desc: Phase 16 execution started
-state_head: eaf2f553748c61d56691a5b810747c8e3264aab8
+state_head: c41e21f6b0b59c49765c9722190f24f43acd8ea5
 progress:
   total_phases: 29
   completed_phases: 17
   total_plans: 193
-  completed_plans: 156
+  completed_plans: 157
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
-Plan: 14 of 49
+Plan: 15 of 49
 Status: Ready to execute
 Last activity: 2026-10-09 — Phase 16 execution started
 
@@ -206,6 +206,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P11 | 24 min | 4 tasks | 9 files |
 | Phase 16 P12 | n/a | 3 tasks | 4 files |
 | Phase 16 P13 | single session | 2 tasks | 2 files |
+| Phase 16 P14 | n/a | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -501,6 +502,8 @@ Recent decisions affecting current work:
 - [Phase 16]: [16-11] Card delivery fails closed: edit (429 honoured inside the remaining TTL only), one fallback send, else EXPIRED CARD_DELIVERY_FAILED; not-modified is success; answerCallbackQuery failure is logged by class and never aborts the gates — T-16-112: an approved plan must never sit with no card and no journaled outcome; expire_due / expire_on_restart and assert_no_stranded_approvals state and repair the invariant
 - [Phase 16]: Q-O: user chose not-assessed; G5 floor printed as 'G5 floor not assessed (holdout untouched)'; holdout never counted, extrapolated or simulated
 - [Phase 16]: 16-13: candidate validator prints the parameter_set_hash only for a VALID candidate; --list-grid shows structure verdicts only, in grid-file order (D-28, L-03)
+- [Phase 16]: O-12 postponed by user (no connectivity); EC2 creation (16-20) blocked until O-12 values recorded
+- [Phase 16]: Q-L: separate Telegram bot token for the soak host (user creates it, token never pasted)
 
 ### Pending Todos
 
@@ -576,6 +579,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-09T06:46:47.061Z
-Stopped at: Completed 16-13-PLAN.md
+Last session: 2026-10-09T07:03:37.528Z
+Stopped at: Completed 16-14-PLAN.md
 Resume file: None
