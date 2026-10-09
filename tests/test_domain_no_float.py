@@ -65,6 +65,8 @@ SCANNED_FILES = (
     "src/paper/freeze.py",
     # Phase 7 plan 07-04 — paper SIMULATE notify (D-05 purity).
     "src/paper/notify.py",
+    # Phase 16 plan 16-08 - shared runtime vocabulary (pure, Decimal prices, no float).
+    "src/paper/vocabulary.py",
     # Phase 10 - pure analytics core (D-01/D-05 purity). The CLI edge (cli.py) and the two
     # analytics adapters are float/clock-guarded by tests/test_analytics_edge_guards.py, which
     # also fails if a pure module is missing from this list.

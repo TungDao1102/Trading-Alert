@@ -383,4 +383,3 @@ async def test_advance_last_close_is_atomic_under_threads() -> None:
     assert len(results) == 32
     assert results.count(True) == 1
     assert rig.supervisor._last_close[("BTCUSDT", "1h")] == _close_dt(5)
-
