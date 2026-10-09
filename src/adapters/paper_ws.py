@@ -13,21 +13,25 @@ Dataclass conventions mirror `src/adapters/binance_usdm.py`:
   - All fields are `frozen=True` so an immutable value flows through
     the pipeline and cannot be accidentally mutated.
 
-The adapter is constructible with an injected fake `ws_client` so unit
-tests never touch the network. The fake client must expose
-`kline_candlestick_streams(symbol, interval, id=None)` returning a
-handle with `on_message(callback)` and `reconnect()` / `close()`.
+Phase 16 (plan 16-01): the adapter is written on the real SDK shape. Every SDK call is
+awaited, the interval is a plain string, the default configuration carries the SDK PROD
+stream URL, and the stream handle is used only through `on` / `unsubscribe`. The adapter is
+constructible with an injected SDK-shaped fake (`tests/paper_ws_fakes.py`, bound to the
+installed SDK by `tests/test_paper_ws_contract.py`) so unit tests never touch the network.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
+from urllib.parse import urlsplit, urlunsplit
 
 import structlog
+from binance_common import websocket as sdk_websocket
 from binance_common.configuration import ConfigurationWebSocketStreams
 from binance_common.constants import DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL
 from binance_sdk_derivatives_trading_usds_futures.websocket_streams import (
@@ -112,6 +116,114 @@ def _normalize_kline_payload(
 
 
 # --------------------------------------------------------------------------- #
+# SDK log bridge (research D4): the SDK reports through root `logging.*` calls.
+# --------------------------------------------------------------------------- #
+
+_SDK_PATH_MARKERS: tuple[str, ...] = ("/binance_common/", "/binance_sdk_")
+
+
+class _SdkLogBridge(logging.Handler):
+    """Forward WARNING+ records raised inside the Binance SDK packages to structlog.
+
+    `WebSocketCommon.connect` swallows every exception and reports it with the root
+    `logging.error(...)` function (research D4), so without a handler a failed connect
+    is invisible in the structured output. Records from other libraries are ignored.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            path = record.pathname.replace("\\", "/")
+            if not any(marker in path for marker in _SDK_PATH_MARKERS):
+                return
+            emit = log.error if record.levelno >= logging.ERROR else log.warning
+            emit("paper_ws.sdk_log", sdk_level=record.levelname, message=record.getMessage())
+        except Exception:
+            self.handleError(record)
+
+
+def install_sdk_log_bridge() -> None:
+    """Attach the SDK log bridge to the stdlib root logger once (idempotent)."""
+    root = logging.getLogger()
+    if any(isinstance(handler, _SdkLogBridge) for handler in root.handlers):
+        return
+    root.addHandler(_SdkLogBridge())
+
+
+def _safe_url(url: str | None) -> str | None:
+    """Drop userinfo and query from a URL before logging (no credentials in logs)."""
+    if not url:
+        return url
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    netloc = f"{host}:{parts.port}" if parts.port else host
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+def _sdk_stream_map() -> dict[Any, Any]:
+    """The SDK's module-global stream-name -> connection map (research D3/D7).
+
+    Looked up through the module at call time so tests can swap it for an isolated map.
+    """
+    stream_map: dict[Any, Any] = sdk_websocket.global_stream_connections.stream_connections_map
+    return stream_map
+
+
+# --------------------------------------------------------------------------- #
+# Frozen value types returned by the adapter (no SDK type inside).
+# --------------------------------------------------------------------------- #
+
+# Connection lifecycle events the runtime may observe (ping/pong are not lifecycle events).
+LIFECYCLE_EVENTS: tuple[str, ...] = ("open", "reconnect", "close", "error")
+
+ClientFactory = Callable[
+    [ConfigurationWebSocketStreams], DerivativesTradingUsdsFuturesWebSocketStreams
+]
+
+
+@dataclass(frozen=True)
+class RebuildReport:
+    """What `PaperWsAdapter.rebuild` found, so a live smoke can tell the two close paths apart.
+
+    `stale_stream_names_found` lists the adapter's own stream names that were still in the SDK
+    global stream map when `rebuild` started: non-empty after an unsolicited close (the SDK's
+    discard path keeps the names, research D3), empty after a user-initiated close (the SDK
+    forgets them). The counts are SDK connections before and after the rebuild (D5: the SDK
+    opens one socket per url path).
+    """
+
+    stale_stream_names_found: tuple[str, ...]
+    connections_before: int
+    connections_after: int
+
+
+@dataclass(frozen=True)
+class WsDiagnostics:
+    """Read-only snapshot for operators and the live smoke evidence."""
+
+    connection_count: int
+    subscribed_streams: tuple[str, ...]
+    stale_stream_names: tuple[str, ...]
+
+
+@dataclass
+class _Subscription:
+    """One recorded kline subscription, kept so `rebuild` can replay it."""
+
+    symbol: str
+    interval: str
+    on_kline: Callable[[Kline], None]
+    stream_id: str | None
+    handle: Any = None
+
+    @property
+    def stream_name(self) -> str:
+        return f"{self.symbol.lower()}@kline_{self.interval}"
+
+
+# --------------------------------------------------------------------------- #
 # Adapter — single owner of WS Streams imports.
 # --------------------------------------------------------------------------- #
 
@@ -119,20 +231,26 @@ def _normalize_kline_payload(
 class PaperWsAdapter:
     """Project-owned wrapper around `DerivativesTradingUsdsFuturesWebSocketStreams`.
 
-    Constructed without arguments → uses the default `prod` WS host.
-    Tests inject a fake `ws_client` (any object exposing
-    `kline_candlestick_streams(symbol, interval, id=None)` returning a
-    handle with `on_message(callback)` and `reconnect()` / `close()`)
-    so unit tests never touch the network.
+    Every SDK call is awaited (`create_connection` and `kline_candlestick_streams` are
+    coroutines). The real `RequestStreamHandle` exposes only `on` and `unsubscribe`, so the
+    adapter has no handle-level reconnect or close. The SDK owns reconnection (23 h rotation,
+    serverShutdown reconnect, research D2); the adapter only reports connection events
+    through `on_connection`, and offers `rebuild` for the one case the SDK does not recover
+    from: an unsolicited close (research D3).
 
-    The adapter normalizes SDK response models to frozen `Kline`
-    instances — SDK types never leak past the boundary.
+    Tests inject a fake `ws_client` and a `client_factory` (see `tests/paper_ws_fakes.py`,
+    which `tests/test_paper_ws_contract.py` binds to the installed SDK) so unit tests never
+    touch the network.
+
+    The adapter normalizes SDK response models to frozen `Kline` instances; SDK types never
+    leave this module. It never touches an order or account endpoint.
     """
 
     def __init__(
         self,
         ws_client: DerivativesTradingUsdsFuturesWebSocketStreams | None = None,
         configuration: ConfigurationWebSocketStreams | None = None,
+        client_factory: ClientFactory | None = None,
     ) -> None:
         self._configuration: ConfigurationWebSocketStreams = (
             configuration
@@ -141,15 +259,69 @@ class PaperWsAdapter:
                 stream_url=DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL
             )
         )
+        self._client_factory: ClientFactory = (
+            client_factory
+            if client_factory is not None
+            else DerivativesTradingUsdsFuturesWebSocketStreams
+        )
         if ws_client is not None:
             self._ws: DerivativesTradingUsdsFuturesWebSocketStreams = ws_client
         else:
-            self._ws = DerivativesTradingUsdsFuturesWebSocketStreams(self._configuration)
+            self._ws = self._client_factory(self._configuration)
+        self._subscriptions: list[_Subscription] = []
+        self._connection_callbacks: list[tuple[str, Callable[..., None]]] = []
+        self.last_rebuild: RebuildReport | None = None
 
     @property
     def configuration(self) -> ConfigurationWebSocketStreams:
         """The SDK configuration this adapter builds its client from."""
         return self._configuration
+
+    # -- connection ---------------------------------------------------------- #
+
+    async def connect(self) -> None:
+        """Open the SDK connections and fail loudly when none was produced.
+
+        `WebSocketCommon.connect` swallows every exception and returns None (research D4), so
+        `create_connection` never raises on a failed connect: the connection list is checked
+        instead, and `ConnectionError` is raised so a dead stream is never silent.
+        """
+        install_sdk_log_bridge()
+        await self._ws.create_connection()  # type: ignore[no-untyped-call]  # SDK is untyped
+        if not self._ws.connections:
+            log.error(
+                "paper_ws.connect_failed",
+                client_type=type(self._ws).__name__,
+                stream_url=_safe_url(self._configuration.stream_url),
+            )
+            raise ConnectionError("Binance WS create_connection produced no connection")
+        # The SDK registers a connection callback only on existing connections and copies it
+        # to replacement connections, so (re-)apply the recorded callbacks after a connect.
+        for event, callback in self._connection_callbacks:
+            self._ws.on_connection(event, callback)
+
+    def on_connection(self, event: str, callback: Callable[..., None]) -> None:
+        """Observe an SDK connection event (open, reconnect, close or error).
+
+        The callback runs on the event-loop thread (research D6): it must only record or
+        enqueue, never block or do I/O. Recorded so it is re-applied after `connect` and
+        `rebuild`.
+        """
+        if event not in LIFECYCLE_EVENTS:
+            raise ValueError(
+                f"unsupported connection event {event!r}; supported: {list(LIFECYCLE_EVENTS)}"
+            )
+        if (event, callback) not in self._connection_callbacks:
+            self._connection_callbacks.append((event, callback))
+        if self._ws.connections:
+            self._ws.on_connection(event, callback)
+
+    async def close(self) -> None:
+        """User-initiated shutdown: close every SDK connection and forget the subscriptions."""
+        await self._ws.close_connection()
+        self._subscriptions.clear()
+
+    # -- subscriptions ------------------------------------------------------- #
 
     async def subscribe(
         self,
@@ -161,24 +333,40 @@ class PaperWsAdapter:
     ) -> Any:
         """Subscribe to a kline stream and dispatch each event to `on_kline`.
 
-        `symbol` is the lowercase Binance symbol (e.g. "btcusdt").
-        `interval` is the canonical interval string (e.g. "1h", "4h").
-        `on_kline` receives a frozen `Kline` per event.
+        `symbol` is the Binance symbol (e.g. "btcusdt"); the SDK stream name is lowercase.
+        `interval` is one of `ALLOWED_INTERVALS` ("1m", "1h", "4h").
+        `on_kline` receives a frozen `Kline` per event (forming candles included; filtering
+        stays in the supervisor).
         `stream_id` is an optional unique request ID.
 
-        Returns the underlying SDK stream handle so callers can manage
-        the subscription lifecycle (close, reconnect, etc.).
+        Returns the underlying SDK stream handle; pass it to `unsubscribe`.
         """
         if interval not in ALLOWED_INTERVALS:
             raise ValueError(
                 f"unsupported interval {interval!r}; supported: {sorted(ALLOWED_INTERVALS)}"
             )
+        sub = _Subscription(
+            symbol=symbol, interval=interval, on_kline=on_kline, stream_id=stream_id
+        )
+        await self._open_stream(sub)
+        self._subscriptions.append(sub)
+        return sub.handle
+
+    async def unsubscribe(self, handle: Any) -> None:
+        """Unsubscribe one stream (awaits the SDK handle) and stop replaying it on rebuild."""
+        await handle.unsubscribe()
+        self._subscriptions = [sub for sub in self._subscriptions if sub.handle is not handle]
+
+    async def _open_stream(self, sub: _Subscription) -> None:
+        symbol = sub.symbol
+        interval = sub.interval
+        on_kline = sub.on_kline
         # The SDK types `interval` as its Enum but builds the stream name with str(); the
         # plain string is what produces `btcusdt@kline_1h` (research (b)).
         handle = await self._ws.kline_candlestick_streams(
             symbol=symbol.lower(),
             interval=cast(Any, interval),
-            id=stream_id,
+            id=sub.stream_id,
         )
 
         def _on_message(message: Any) -> None:
@@ -212,46 +400,82 @@ class PaperWsAdapter:
             on_kline(kline)
 
         handle.on("message", _on_message)
-        return handle
+        sub.handle = handle
 
-    async def connect(self) -> None:
-        """Open the SDK connections (awaited; the SDK method is a coroutine)."""
-        await self._ws.create_connection()  # type: ignore[no-untyped-call]  # SDK is untyped
+    # -- recovery and diagnostics -------------------------------------------- #
 
-    def reconnect(self, handle: Any) -> None:
-        """Delegate reconnect to the SDK handle (fail-loud, CR-04)."""
-        if hasattr(handle, "reconnect"):
-            handle.reconnect()
-        else:
-            log.error(
-                "paper_ws.reconnect_unsupported",
-                handle_type=type(handle).__name__,
-            )
-            raise RuntimeError(
-                f"WS handle {type(handle).__name__} has no reconnect; rotation impossible"
-            )
+    def _own_stream_names(self) -> tuple[str, ...]:
+        return tuple(sub.stream_name for sub in self._subscriptions)
 
-    def schedule_reconnect(self, handle: Any) -> None:
-        """Delegate schedule_reconnect to the SDK handle (fail-loud)."""
-        if hasattr(handle, "schedule_reconnect"):
-            handle.schedule_reconnect()
-        else:
-            log.error(
-                "paper_ws.schedule_reconnect_unsupported",
-                handle_type=type(handle).__name__,
-            )
-            raise RuntimeError(f"WS handle {type(handle).__name__} has no schedule_reconnect")
+    def _forget_own_streams(self) -> None:
+        """Remove this adapter's own stream names from the SDK global stream map.
 
-    def close(self, handle: Any) -> None:
-        """Close the stream handle (fail-loud, CR-04)."""
-        if hasattr(handle, "close"):
-            handle.close()
-        else:
-            log.error(
-                "paper_ws.close_unsupported",
-                handle_type=type(handle).__name__,
-            )
-            raise RuntimeError(f"WS handle {type(handle).__name__} has no close")
+        After an unsolicited close the SDK's `_discard_connection` does not forget the dead
+        connection's streams (research D3), and `WebSocketStreamBase.subscribe` skips every
+        stream still in the map, so a plain re-subscribe would send nothing. The map is
+        module-global and shared by all clients (research D7), so only the exact names this
+        adapter subscribed are removed; foreign entries are never touched.
+
+        UNVERIFIED LIVE until plan 16-21: this behaviour is derived from reading
+        `binance_common` 4.4.0, not from a forced disconnect against Binance.
+        """
+        stream_map = _sdk_stream_map()
+        for name in self._own_stream_names():
+            stream_map.pop(name, None)
+
+    async def rebuild(self) -> None:
+        """Recover from an unsolicited close: fresh client, reconnect, replay subscriptions.
+
+        Records a `RebuildReport` (`last_rebuild`) BEFORE touching the SDK stream map so a live
+        smoke can prove which close path it exercised. The supervisor ignores the result.
+        """
+        own_names = self._own_stream_names()
+        stream_map = _sdk_stream_map()
+        stale_found = tuple(name for name in own_names if name in stream_map)
+        connections_before = len(self._ws.connections)
+
+        try:
+            # Release the remaining sockets and the aiohttp session of the dead client.
+            await self._ws.close_connection()
+        except Exception as exc:
+            log.warning("paper_ws.rebuild_old_close_failed", error=repr(exc))
+        self._forget_own_streams()
+
+        self._ws = self._client_factory(self._configuration)
+        await self.connect()
+        for sub in self._subscriptions:
+            await self._open_stream(sub)
+
+        self.last_rebuild = RebuildReport(
+            stale_stream_names_found=stale_found,
+            connections_before=connections_before,
+            connections_after=len(self._ws.connections),
+        )
+        log.info(
+            "paper_ws.rebuilt",
+            stale_stream_names_found=list(stale_found),
+            connections_before=connections_before,
+            connections_after=self.last_rebuild.connections_after,
+        )
+
+    def diagnostics(self) -> WsDiagnostics:
+        """Read-only snapshot: SDK connection count, own streams, own streams left stale.
+
+        A stale name is one of the adapter's own streams still mapped in the SDK global map to
+        a connection that is no longer open.
+        """
+        stream_map = _sdk_stream_map()
+        live = list(self._ws.connections)
+        stale: list[str] = []
+        for name in self._own_stream_names():
+            mapped = stream_map.get(name)
+            if mapped is not None and not any(mapped is connection for connection in live):
+                stale.append(name)
+        return WsDiagnostics(
+            connection_count=len(live),
+            subscribed_streams=self._own_stream_names(),
+            stale_stream_names=tuple(stale),
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -314,4 +538,12 @@ def _extract_kline_payload(message: Any) -> dict[str, Any] | None:
     return None
 
 
-__all__ = ["Kline", "PaperWsAdapter"]
+__all__ = [
+    "ALLOWED_INTERVALS",
+    "LIFECYCLE_EVENTS",
+    "Kline",
+    "PaperWsAdapter",
+    "RebuildReport",
+    "WsDiagnostics",
+    "install_sdk_log_bridge",
+]
