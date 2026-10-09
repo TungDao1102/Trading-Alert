@@ -13,10 +13,13 @@ No network is touched.
 
 from __future__ import annotations
 
+import ast
+import asyncio
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -25,7 +28,9 @@ from src.adapters.binance_public import Kline
 from src.adapters.paper_ws import PaperWsAdapter
 from src.paper.supervisor import PaperSupervisor
 from src.paper.vocabulary import (
+    GapReason,
     GapRecord,
+    RuntimeEventType,
     SourceTag,
     TaggedBar,
 )
@@ -146,6 +151,7 @@ def _make_rig(
     intervals: tuple[str, ...] = ("1h",),
     now: datetime | None = None,
     factory_error: Exception | None = None,
+    live_sink_error: Exception | None = None,
 ) -> _Rig:
     """Build a supervisor over the real adapter and an SDK-shaped fake client.
 
@@ -172,6 +178,8 @@ def _make_rig(
     clock_now = now if now is not None else _close_dt(6) + timedelta(seconds=2)
 
     def _on_live(bar: TaggedBar) -> None:
+        if live_sink_error is not None:
+            raise live_sink_error
         live.append(bar)
         order.append(("live", bar.close_time_utc))
 
@@ -383,3 +391,379 @@ async def test_advance_last_close_is_atomic_under_threads() -> None:
     assert len(results) == 32
     assert results.count(True) == 1
     assert rig.supervisor._last_close[("BTCUSDT", "1h")] == _close_dt(5)
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: SDK connection events, one rotation owner, backfill and gap sinks.
+# --------------------------------------------------------------------------- #
+
+_NOW3 = _close_dt(3) + timedelta(seconds=2)
+
+
+def _fire(rig: _Rig, event: str, *, client_index: int = 0) -> None:
+    """Fire an SDK connection event on a fake client (the SDK runs these on the loop thread)."""
+    client = rig.clients[client_index]
+    for callback in list(client.connection_callbacks[event]):
+        callback()
+
+
+def _pages(*slots: int, symbol: str = "BTCUSDT", interval: str = "1h") -> _FakeRest:
+    return _FakeRest({(symbol, interval): [_rest_bar(symbol, interval, slot) for slot in slots]})
+
+
+def _gap(slot: int, reason: GapReason, *, at: datetime = _NOW3, symbol: str = "BTCUSDT") -> Any:
+    return GapRecord(
+        symbol=symbol,
+        interval="1h",
+        expected_close_utc=_close_dt(slot),
+        reason=reason,
+        detected_at_utc=at,
+    )
+
+
+async def test_reconnect_event_backfills_from_the_last_close_into_the_sinks() -> None:
+    """The SDK rotation arrives as a 'reconnect' event: REST verification, nothing only logged."""
+    rig = _make_rig(rest=_pages(1, 3), now=_NOW3)
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+
+    _fire(rig, "reconnect")
+    await rig.supervisor.wait_idle()
+
+    assert rig.rest.klines_calls == [("BTCUSDT", "1h", _ms(_close_dt(0)))]
+    assert [bar.close_time_utc for bar in rig.backfilled] == [_close_dt(1), _close_dt(3)]
+    assert all(bar.source is SourceTag.REST_BACKFILL for bar in rig.backfilled)
+    assert all(bar.interval == "1h" for bar in rig.backfilled)
+    assert rig.gaps == [_gap(2, GapReason.WS_RECONNECT_WINDOW)]
+    assert rig.live == []
+    assert rig.events == [(str(RuntimeEventType.WS_RECONNECT), _NOW3)]
+
+
+async def test_open_event_triggers_the_same_verification_without_a_reconnect_record() -> None:
+    rig = _make_rig(rest=_pages(1, 2, 3), now=_NOW3)
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+
+    _fire(rig, "open")
+    await rig.supervisor.wait_idle()
+
+    assert len(rig.rest.klines_calls) == 1
+    assert [bar.close_time_utc for bar in rig.backfilled] == [_close_dt(i) for i in (1, 2, 3)]
+    assert rig.gaps == []
+    assert rig.events == [], "an open event with no preceding drop is not a reconnect"
+
+
+async def test_unsolicited_close_rebuilds_then_backfills_and_records_both_events() -> None:
+    rig = _make_rig(rest=_pages(1, 2, 3), now=_NOW3)
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+
+    rig.fake.simulate_unsolicited_close()
+    await rig.supervisor.wait_idle()
+
+    assert len(rig.clients) == 2, "rebuild builds a fresh SDK client"
+    assert rig.adapter.last_rebuild is not None
+    assert rig.adapter.last_rebuild.stale_stream_names_found == ("btcusdt@kline_1h",)
+    assert rig.events == [
+        (str(RuntimeEventType.WS_DISCONNECT), _NOW3),
+        (str(RuntimeEventType.WS_RECONNECT), _NOW3),
+    ]
+    assert [bar.close_time_utc for bar in rig.backfilled] == [_close_dt(i) for i in (1, 2, 3)]
+    assert rig.gaps == []
+    # The rebuilt stream resumes: a live closed bar on the new client reaches the sink.
+    _emit(rig, "BTCUSDT", "1h", 4, client_index=1)
+    assert [bar.close_time_utc for bar in rig.live] == [_close_dt(4)]
+
+
+async def test_error_event_also_rebuilds() -> None:
+    rig = _make_rig(rest=_pages(1, 2, 3), now=_NOW3)
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+
+    _fire(rig, "error")
+    await rig.supervisor.wait_idle()
+
+    assert len(rig.clients) == 2
+    assert [name for name, _at in rig.events] == ["WS_DISCONNECT", "WS_RECONNECT"]
+
+
+async def test_rebuild_exhaustion_still_backfills_and_reports_ws_disconnected_gaps() -> None:
+    """CR-02 kept: an unrecoverable WS still runs the REST backfill; unrecovered closes are gaps."""
+    rest = _FakeRest({("BTCUSDT", "1h"): RuntimeError("rest down")})
+    rig = _make_rig(rest=rest, now=_NOW3, factory_error=ConnectionError("ws dead"))
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+
+    with capture_logs() as captured:
+        rig.fake.simulate_unsolicited_close()
+        await rig.supervisor.wait_idle()
+
+    assert any(entry["event"] == "paper.supervisor.reconnect_exhausted" for entry in captured)
+    assert rig.events == [(str(RuntimeEventType.WS_DISCONNECT), _NOW3)], "no reconnect happened"
+    assert len(rest.klines_calls) >= 1, "the backfill ran despite the exhausted rebuild"
+    assert rig.gaps == [_gap(i, GapReason.WS_DISCONNECTED) for i in (1, 2, 3)]
+    assert rig.backfilled == []
+
+
+async def test_rebuild_exhaustion_with_a_working_rest_recovers_the_bars() -> None:
+    rig = _make_rig(rest=_pages(1, 2, 3), now=_NOW3, factory_error=ConnectionError("ws dead"))
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+
+    rig.fake.simulate_unsolicited_close()
+    await rig.supervisor.wait_idle()
+
+    assert [bar.close_time_utc for bar in rig.backfilled] == [_close_dt(i) for i in (1, 2, 3)]
+    assert rig.gaps == []
+
+
+async def test_a_close_event_fired_during_our_own_rebuild_does_not_rebuild_again() -> None:
+    rig = _make_rig(rest=_pages(1, 2, 3), now=_NOW3)
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+    original_rebuild = rig.adapter.rebuild
+
+    async def _rebuild_that_closes_the_old_client() -> None:
+        _fire(rig, "close")  # the SDK reports the old connection closing during our rebuild
+        await original_rebuild()
+
+    rig.adapter.rebuild = _rebuild_that_closes_the_old_client  # type: ignore[method-assign]
+
+    rig.fake.simulate_unsolicited_close()
+    await rig.supervisor.wait_idle()
+
+    assert len(rig.clients) == 2, "exactly one rebuild"
+    assert [name for name, _at in rig.events] == ["WS_DISCONNECT", "WS_RECONNECT"]
+
+
+# --------------------------------------------------------------------------- #
+# One rotation owner (P3): the SDK rotates, the supervisor only reacts.
+# --------------------------------------------------------------------------- #
+
+
+def test_no_scheduled_rotation_path_remains() -> None:
+    for name in ("on_disconnect", "_reconnect_with_retry", "_resubscribe_and_backfill"):
+        assert not hasattr(PaperSupervisor, name), name
+    tree = ast.parse(Path("src/paper/supervisor.py").read_text(encoding="utf-8"))
+    timers = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr in {"call_later", "call_at"}
+    }
+    assert timers == set(), "the supervisor must not run its own rotation timer"
+
+
+async def test_supervisor_never_closes_or_resubscribes_on_its_own() -> None:
+    rig = _make_rig(rest=_pages(), now=_NOW3)
+    await rig.supervisor.start()
+    subscribed = len(rig.fake.kline_calls)
+
+    await asyncio.sleep(0.05)
+
+    assert rig.fake.close_calls == 0
+    assert all(handle._unsubscribed == 0 for handle in rig.fake.handles)
+    assert len(rig.fake.kline_calls) == subscribed
+    assert rig.fake.create_connection_calls == 1
+
+
+async def test_sdk_rotation_is_one_verification_backfill_and_no_resubscribe() -> None:
+    rig = _make_rig(rest=_pages(1, 2, 3), now=_NOW3)
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+    subscribed = len(rig.fake.kline_calls)
+
+    _fire(rig, "reconnect")  # the SDK's 23 h replacement of the connection
+    await rig.supervisor.wait_idle()
+
+    assert len(rig.rest.klines_calls) == 1
+    assert len(rig.fake.kline_calls) == subscribed, "no re-subscribe by the supervisor"
+    assert rig.fake.close_calls == 0
+    assert all(handle._unsubscribed == 0 for handle in rig.fake.handles)
+    assert len(rig.clients) == 1, "no rebuild for a reconnect event"
+
+
+# --------------------------------------------------------------------------- #
+# P8: seeding the cursor before start.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_seeded_close_lets_a_cold_start_backfill_from_the_restored_close() -> None:
+    rig = _make_rig(rest=_pages(1, 2, 3), now=_NOW3)
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))  # restored state, before start()
+    await rig.supervisor.start()
+
+    with capture_logs() as captured:
+        _fire(rig, "open")
+        await rig.supervisor.wait_idle()
+
+    assert rig.rest.klines_calls == [("BTCUSDT", "1h", _ms(_close_dt(0)))]
+    assert not any(entry["event"] == "paper.supervisor.no_last_close" for entry in captured)
+
+
+async def test_without_a_seed_the_missing_cursor_is_loud_and_nothing_is_fetched() -> None:
+    rig = _make_rig(rest=_pages(1, 2, 3), now=_NOW3)
+    await rig.supervisor.start()
+
+    with capture_logs() as captured:
+        _fire(rig, "open")
+        await rig.supervisor.wait_idle()
+
+    assert rig.rest.klines_calls == []
+    errors = [e for e in captured if e["event"] == "paper.supervisor.no_last_close"]
+    assert len(errors) == 1
+    assert errors[0]["log_level"] == "error"
+
+
+# --------------------------------------------------------------------------- #
+# Sinks: gaps are records, never only logs (P9); no duplicate gaps, no duplicate bars (D-28).
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_gap_seen_by_two_verifications_is_reported_once() -> None:
+    rig = _make_rig(rest=_pages(1), now=_close_dt(2) + timedelta(seconds=2))
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+
+    _fire(rig, "reconnect")
+    await rig.supervisor.wait_idle()
+    _fire(rig, "reconnect")
+    await rig.supervisor.wait_idle()
+
+    assert [gap.expected_close_utc for gap in rig.gaps] == [_close_dt(2)]
+
+
+async def test_a_rest_fake_ignoring_start_ms_cannot_produce_a_duplicate_bar() -> None:
+    rest = _FakeRest({("BTCUSDT", "1h"): [_rest_bar("BTCUSDT", "1h", i) for i in (1, 2, 3)]})
+    rest.ignore_start = True
+    rig = _make_rig(rest=rest, now=_NOW3)
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+
+    _fire(rig, "reconnect")
+    await rig.supervisor.wait_idle()
+    _fire(rig, "reconnect")
+    await rig.supervisor.wait_idle()
+
+    closes = [bar.close_time_utc for bar in rig.backfilled]
+    assert closes == [_close_dt(1), _close_dt(2), _close_dt(3)]
+    assert rig.supervisor._last_close[("BTCUSDT", "1h")] == _close_dt(3)
+
+
+async def test_one_failing_pair_reports_its_gaps_while_the_healthy_pair_still_dispatches() -> None:
+    rest = _FakeRest(
+        {
+            ("BTCUSDT", "1h"): RuntimeError("adapter_error: simulated outage"),
+            ("ETHUSDT", "1h"): [_rest_bar("ETHUSDT", "1h", i) for i in (1, 2, 3)],
+        }
+    )
+    rig = _make_rig(rest=rest, symbols=("BTCUSDT", "ETHUSDT"), now=_NOW3)
+    for symbol in ("BTCUSDT", "ETHUSDT"):
+        rig.supervisor.record_close(symbol, "1h", _close_dt(0))
+    await rig.supervisor.start()
+
+    _fire(rig, "reconnect")
+    await rig.supervisor.wait_idle()
+
+    assert [(bar.symbol, bar.close_time_utc) for bar in rig.backfilled] == [
+        ("ETHUSDT", _close_dt(i)) for i in (1, 2, 3)
+    ]
+    assert rig.gaps == [_gap(i, GapReason.WS_RECONNECT_WINDOW, symbol="BTCUSDT") for i in (1, 2, 3)]
+    assert {call[0] for call in rest.klines_calls} == {"BTCUSDT", "ETHUSDT"}
+
+
+async def test_a_failing_live_sink_is_logged_and_becomes_an_unknown_gap() -> None:
+    rig = _make_rig(live_sink_error=RuntimeError("queue full"))
+    await rig.supervisor.start()
+
+    with capture_logs() as captured:
+        _emit(rig, "BTCUSDT", "1h", 0)
+
+    assert any(entry["event"] == "paper.supervisor.sink_failed" for entry in captured)
+    assert rig.gaps == [
+        GapRecord(
+            symbol="BTCUSDT",
+            interval="1h",
+            expected_close_utc=_close_dt(0),
+            reason=GapReason.UNKNOWN,
+            detected_at_utc=rig.supervisor._clock(),
+        )
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Live bars arriving while a recovery is running are held, so none is skipped (D-28).
+# --------------------------------------------------------------------------- #
+
+
+class _GatedRest(_FakeRest):
+    def __init__(self, pages: dict[tuple[str, str], list[Kline] | Exception]) -> None:
+        super().__init__(pages)
+        self.gate = asyncio.Event()
+
+    async def klines(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 1500,
+    ) -> list[Kline]:
+        await self.gate.wait()
+        return await super().klines(symbol, interval, start_ms, end_ms, limit)
+
+
+async def test_a_live_bar_during_recovery_is_delivered_after_the_backfilled_bars() -> None:
+    now = _close_dt(4) + timedelta(seconds=2)
+    rest = _GatedRest({("BTCUSDT", "1h"): [_rest_bar("BTCUSDT", "1h", i) for i in (1, 2, 3)]})
+    rig = _make_rig(rest=rest, now=now)
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+
+    _fire(rig, "reconnect")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    _emit(rig, "BTCUSDT", "1h", 4)  # WS resumed and delivered the next bar mid-recovery
+    assert rig.order == [], "the live bar waits for the recovery"
+
+    rest.gate.set()
+    await rig.supervisor.wait_idle()
+
+    assert rig.order == [
+        ("backfill", _close_dt(1)),
+        ("backfill", _close_dt(2)),
+        ("backfill", _close_dt(3)),
+        ("live", _close_dt(4)),
+    ]
+    assert rig.gaps == [], "the held live bar covers its own slot"
+
+
+async def test_stop_unsubscribes_closes_and_ignores_later_events() -> None:
+    rig = _make_rig(rest=_pages(1, 2, 3), now=_NOW3)
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+
+    await rig.supervisor.stop()
+    _fire(rig, "close")
+    _fire(rig, "reconnect")
+    await rig.supervisor.wait_idle()
+
+    assert all(handle._unsubscribed == 1 for handle in rig.fake.handles)
+    assert rig.fake.close_calls == 1
+    assert rig.events == []
+    assert rig.rest.klines_calls == []
+    assert rig.supervisor._handles == []
+
+
+async def test_stop_cancels_a_recovery_that_is_still_running() -> None:
+    rest = _GatedRest({("BTCUSDT", "1h"): [_rest_bar("BTCUSDT", "1h", 1)]})
+    rig = _make_rig(rest=rest, now=_NOW3)
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+    _fire(rig, "reconnect")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    await asyncio.wait_for(rig.supervisor.stop(), timeout=2)
+
+    assert rig.backfilled == []
+    assert rig.supervisor._held == []
