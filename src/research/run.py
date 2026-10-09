@@ -34,7 +34,7 @@ from .authorization import (
     load_authorization,
     require_authorized,
 )
-from .feasibility import feasibility_report, render_feasibility
+from .feasibility import G5_NOT_ASSESSED_LINE, feasibility_report, render_feasibility
 from .manifest import (
     DatasetManifest,
     GridPoint,
@@ -281,9 +281,19 @@ def _feasibility_lines(
     for index, point in enumerate(grid.points):
         block = range(index * per_point, (index + 1) * per_point)
         folds = [trade_lists[i] for i in block if records[i].split_role == "VALIDATION"]
+        development = [
+            t for i in block if records[i].split_role == "DEVELOPMENT" for t in trade_lists[i]
+        ]
         lines.extend(
-            render_feasibility(feasibility_report(folds, parameter_set_id=point.parameter_set_id))
+            render_feasibility(
+                feasibility_report(
+                    folds,
+                    parameter_set_id=point.parameter_set_id,
+                    development_trades=development,
+                )
+            )
         )
+    lines.append(G5_NOT_ASSESSED_LINE)
     return lines
 
 
