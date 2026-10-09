@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: executing
-stopped_at: Completed 16-05-PLAN.md
-last_updated: "2026-10-09T04:07:43.954Z"
+stopped_at: Completed 16-06-PLAN.md
+last_updated: "2026-10-09T04:28:32.262Z"
 last_activity: 2026-10-09
 last_activity_desc: Phase 16 execution started
-state_head: 5aeb5a7b7228547bd8c5af65553a16594ec666e0
+state_head: b5cec7478b5598bec261a1b37fa4a69d9e703621
 progress:
   total_phases: 29
   completed_phases: 17
   total_plans: 193
-  completed_plans: 148
+  completed_plans: 149
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
-Plan: 6 of 49
+Plan: 7 of 49
 Status: Ready to execute
 Last activity: 2026-10-09 — Phase 16 execution started
 
@@ -198,6 +198,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P03 | 14 min | 2 tasks | 3 files |
 | Phase 16 P04 | 15 min | 3 tasks | 5 files |
 | Phase 16 P05 | 9 min | 3 tasks | 11 files |
+| Phase 16 P06 | two sessions | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -480,6 +481,8 @@ Recent decisions affecting current work:
 - [Phase 16]: Telegram errors classified once in the adapter; retry_after honoured inside the existing NOTIFY_* budget, never slept past it
 - [Phase 16]: 16-05: blocked --record on real evidence exits 1 before any write or journal append; blocked plain runs still write the journal-depth pair with the kill-gate section NOT CONCLUDED
 - [Phase 16]: 16-05: review registry loader requires the five canonical ids and REV-15 scopes, so deleting an item or flipping a scope cannot unblock a report
+- [Phase 16]: 16-06: O-03a decided by the user, option a (user-committed JSON authorization file); only --authorization <path> is accepted
+- [Phase 16]: 16-06: experiment_already_recorded is checked after each window is assembled and before any write, since experiment_id exists only after assemble
 
 ### Pending Todos
 
@@ -555,6 +558,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-09T04:07:42.822Z
-Stopped at: Completed 16-05-PLAN.md
+Last session: 2026-10-09T04:28:30.982Z
+Stopped at: Completed 16-06-PLAN.md
 Resume file: None
