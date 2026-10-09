@@ -3,18 +3,17 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
-status: planning
-stopped_at: Phase 16 planned (49 plans, plan-checked), ready to execute
-last_updated: "2026-10-07T10:06:35.640Z"
-last_activity: 2026-10-07
-last_activity_desc: Phase 16 plans audited, revised and plan-checked
-state_head: 7148528c030c750cd0bf713b0d9c32923665eee9
+status: executing
+stopped_at: Completed 16-01-PLAN.md
+last_updated: "2026-10-09T03:04:00.749Z"
+last_activity: 2026-10-09
+last_activity_desc: Phase 16 execution started
+state_head: 8bcb863f52d08c9c86de374b048cb86baaf781b8
 progress:
   total_phases: 29
   completed_phases: 17
-  total_plans: 144
-  completed_plans: 143
-  percent: 61
+  total_plans: 193
+  completed_plans: 144
 milestone_name: milestone
 ---
 
@@ -27,14 +26,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 16 — Paper Runtime Composition + SHADOW Approval Mode (planned, ready to execute)
+**Current focus:** Phase 16 — Paper Runtime Composition + SHADOW Approval Mode
 
 ## Current Position
 
-Phase: 16 — Paper Runtime Composition + SHADOW Approval Mode
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-10-07 — Phase 17 complete, transitioned to Phase 16
+Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
+Plan: 2 of 49
+Status: Ready to execute
+Last activity: 2026-10-09 — Phase 16 execution started
 
 Progress: [██████░░░░] 61%
 
@@ -194,6 +193,7 @@ Progress: [██████░░░░] 61%
 | Phase 15 P17 | 6 min | 3 tasks | 8 files |
 | Phase 15 P18 | 8 min | 2 tasks | 3 files |
 | Phase 14 P17 | 12 min | 3 tasks | 5 files |
+| Phase 16 P01 | 14 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -467,6 +467,7 @@ Recent decisions affecting current work:
 - [Phase 15]: D054 records the user's 2026-10-07 answer: the three -v4 override values are comparison reference points, not evidence-backed parameters; in-file DECISION/D054 label stays (hash-locked)
 - [Phase 15]: 15-17: run_paper_tick runs the stream-start gate (pin_stream_epoch) at its top before any candle is parsed; sets without rationale tables need an exact-hash PAPER_START_ALLOWLIST entry; allowlist ships empty (checkpoint 15-17-01 Option B, D-27 unchanged)
 - [Phase 14]: 14-17: mark holes outside a closing-bar fallback are annotated in coverage_note only (annotate-only); OQ-1 (count/exclude/void) left to the user; SIMULATOR_SEMANTICS_VERSION stays 2.0.0
+- [Phase 16]: 16-01: SDK owns WS reconnection/rotation; PaperWsAdapter has no handle-level reconnect/close, uses on_connection events plus rebuild() (own stream names only) for unsolicited close
 
 ### Pending Todos
 
@@ -542,6 +543,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-07T03:48:58.205Z
-Stopped at: Phase 16 planned (49 plans, plan-checked), ready to execute
+Last session: 2026-10-09T03:03:30.323Z
+Stopped at: Completed 16-01-PLAN.md
 Resume file: None
