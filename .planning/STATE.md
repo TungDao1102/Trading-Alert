@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: executing
-stopped_at: Completed 16-07-PLAN.md
-last_updated: "2026-10-09T04:41:05.516Z"
+stopped_at: Completed 16-08-PLAN.md
+last_updated: "2026-10-09T05:07:47.905Z"
 last_activity: 2026-10-09
 last_activity_desc: Phase 16 execution started
-state_head: 929ff43e805345d21f8d3b088c7b230d59e06a0f
+state_head: 0eb1544267348dde7bfecf972a2047c51f2b0a67
 progress:
   total_phases: 29
   completed_phases: 17
   total_plans: 193
-  completed_plans: 150
+  completed_plans: 151
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
-Plan: 8 of 49
+Plan: 9 of 49
 Status: Ready to execute
 Last activity: 2026-10-09 — Phase 16 execution started
 
@@ -200,6 +200,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P05 | 9 min | 3 tasks | 11 files |
 | Phase 16 P06 | two sessions | 3 tasks | 6 files |
 | Phase 16 P07 | 15 min | 3 tasks | 3 files |
+| Phase 16 P08 | 27 min | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -485,6 +486,9 @@ Recent decisions affecting current work:
 - [Phase 16]: 16-06: O-03a decided by the user, option a (user-committed JSON authorization file); only --authorization <path> is accepted
 - [Phase 16]: 16-06: experiment_already_recorded is checked after each window is assembled and before any write, since experiment_id exists only after assemble
 - [Phase 16]: 16-07: pulled research data is copied into the development raw root only with src.ops.backup restore --skip-db --parquet-target --force after pull and verify; no option overwrites a raw file
+- [Phase 16]: One rotation owner: the SDK owns the 23 h rotation and reconnection; the supervisor reacts to open/reconnect/close/error events with a REST verification backfill and adds no timer
+- [Phase 16]: Gap reason names the window being verified (WS_RECONNECT_WINDOW or WS_DISCONNECTED on rebuild exhaustion); live bars are held during a pending recovery so the monotonic cursor never skips a recoverable bar
+- [Phase 16]: Resync expected slots are anchored on the exchange grid (close = open + interval - 1 ms), fixing phantom gaps; tenacity loops no longer retry task cancellation
 
 ### Pending Todos
 
@@ -560,6 +564,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-09T04:41:04.471Z
-Stopped at: Completed 16-07-PLAN.md
+Last session: 2026-10-09T05:07:46.924Z
+Stopped at: Completed 16-08-PLAN.md
 Resume file: None
