@@ -72,8 +72,10 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import re
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -185,6 +187,89 @@ class DiffLogEntry:
                 "current_hash": self.current_hash,
                 "outcome": self.outcome,
             },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Run metadata + FreezeSkippedEntry — tick identification for the reconciler (plan 16-09).
+# --------------------------------------------------------------------------- #
+
+# The only environment variables a diff-log line copies run metadata from, with the key each is
+# written under. GITHUB_* are runner defaults; PAPER_EVENT_SCHEDULE is set by the workflow from
+# `github.event.schedule` (the cron string; empty on a manual run). Nothing else is ever read.
+RUN_METADATA_ENV: tuple[tuple[str, str], ...] = (
+    ("GITHUB_RUN_ID", "run_id"),
+    ("GITHUB_RUN_ATTEMPT", "run_attempt"),
+    ("GITHUB_EVENT_NAME", "event_name"),
+    ("GITHUB_SHA", "commit"),
+    ("PAPER_EVENT_SCHEDULE", "schedule"),
+)
+_RUN_METADATA_KEYS = frozenset(key for _, key in RUN_METADATA_ENV)
+
+
+def read_run_metadata(environ: Mapping[str, str] | None = None) -> dict[str, str] | None:
+    """Collect run metadata from the five named variables, or None when none is set.
+
+    A variable that is present but empty is kept as an empty string: `github.event.schedule` is
+    empty on a `workflow_dispatch` run and the line must say so rather than omit the key. A
+    variable that is absent is omitted. With none of the five present the result is None and the
+    line carries no `run_metadata` key, so lines written outside Actions are unchanged.
+    """
+    source = os.environ if environ is None else environ
+    found = {key: source[name] for name, key in RUN_METADATA_ENV if name in source}
+    return found or None
+
+
+def _check_run_metadata(run_metadata: Mapping[str, str] | None) -> None:
+    if run_metadata is None:
+        return
+    for key, value in run_metadata.items():
+        if key not in _RUN_METADATA_KEYS:
+            raise ValueError(f"run_metadata key {key!r} is not one of {sorted(_RUN_METADATA_KEYS)}")
+        if not isinstance(value, str):
+            raise ValueError(f"run_metadata[{key!r}] must be a str, got {type(value).__name__}")
+
+
+@dataclass(frozen=True)
+class FreezeSkippedEntry:
+    """One JSONL line written when the freeze check has nothing to check (plan 16-09, D-21).
+
+    The outcome is always "SKIPPED". It is written while the paper-start allowlist is empty: no
+    parameter set is authorized, so the registry has nothing to be unchanged against. It is not a
+    clean tick and proves nothing about any set; it only records that the check ran. A SKIPPED
+    line is not counted against L-04 before the pin. `DiffLogEntry` keeps its two outcomes.
+    """
+
+    checked_at_utc: datetime
+    reason: str
+    run_metadata: Mapping[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.checked_at_utc.tzinfo is None:
+            raise ValueError("checked_at_utc must be UTC-aware")
+        if not isinstance(self.reason, str) or self.reason.strip() == "":
+            raise ValueError("reason must be a non-blank string")
+        _check_run_metadata(self.run_metadata)
+
+    @property
+    def outcome(self) -> str:
+        return "SKIPPED"
+
+    def to_jsonl(self) -> str:
+        """Render this entry as a single-line JSON string, in the style of `DiffLogEntry`."""
+        payload: dict[str, object] = {
+            "checked_at_utc": self.checked_at_utc.astimezone(UTC).isoformat(),
+            "outcome": self.outcome,
+            "reason": self.reason,
+        }
+        if self.run_metadata is not None:
+            payload["run_metadata"] = dict(self.run_metadata)
+        return json.dumps(
+            payload,
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
@@ -457,6 +542,36 @@ class PaperAllowlistEntry:
 # update of the decision-record test in tests/test_paper_start_gate.py. An entry never
 # admits a set that has rationale tables (D-27 unchanged).
 PAPER_START_ALLOWLIST: tuple[PaperAllowlistEntry, ...] = ()
+
+
+def allowlist_entries() -> tuple[PaperAllowlistEntry, ...]:
+    """The approved paper-start allowlist, read at call time (plan 16-09).
+
+    This and `find_allowlist_entry` are the only accessors other code may use; the runtime
+    (plan 16-22) and the freeze CLI go through them and never name the tuple itself, so the
+    AST guard in tests/test_paper_start_gate.py keeps the name inside this module.
+    """
+    return PAPER_START_ALLOWLIST
+
+
+def find_allowlist_entry(strategy_id: str, parameter_set_id: str) -> PaperAllowlistEntry | None:
+    """The allowlist entry for exactly these ids, or None when none is listed.
+
+    Lookup only, by exact string equality; the entry's hash is what admits a set, not this call.
+
+    Raises:
+        ValueError: more than one entry lists these ids. Nothing is guessed (fail closed).
+    """
+    matches = [
+        entry
+        for entry in allowlist_entries()
+        if entry.strategy_id == strategy_id and entry.parameter_set_id == parameter_set_id
+    ]
+    if len(matches) > 1:
+        raise ValueError(
+            f"ambiguous allowlist: {len(matches)} entries list {strategy_id}/{parameter_set_id}"
+        )
+    return matches[0] if matches else None
 
 
 def require_bool_flag(value: object) -> None:
@@ -740,7 +855,7 @@ def check_registry_unchanged(
     )
 
 
-def _append_diff_entry(path: Path, entry: DiffLogEntry) -> None:
+def _append_diff_entry(path: Path, entry: DiffLogEntry | FreezeSkippedEntry) -> None:
     """Append one JSONL line to the diff log, creating parent dirs.
 
     Append-only history (D-04): the file is never rewritten or
@@ -864,6 +979,45 @@ def run_check_cli(
 # --------------------------------------------------------------------------- #
 
 
+def run_allowlist_check_cli(
+    *,
+    pinned_state_path: Path,
+    diff_log_path: Path,
+    registry_root: Path | None = None,
+    run_metadata: Mapping[str, str] | None = None,
+    now_utc: datetime | None = None,
+) -> int:
+    """Run one freeze-check tick for whatever the paper-start allowlist authorizes (D-21, L-01).
+
+    The ids come from the allowlist, never from the caller, so no fallback set can be named.
+
+    Returns:
+        0 when the allowlist is empty (one SKIPPED line is appended; nothing is pinned or
+          checked, and no clean line is ever written for it).
+        1 when the allowlist is not usable (more than one entry: "ambiguous allowlist").
+        Otherwise the exit code of `run_check_cli` for the single listed entry.
+    """
+    entries = allowlist_entries()
+    if len(entries) == 0:
+        when = datetime.now(UTC) if now_utc is None else now_utc
+        _append_diff_entry(
+            diff_log_path,
+            FreezeSkippedEntry(
+                checked_at_utc=when, reason="allowlist empty", run_metadata=run_metadata
+            ),
+        )
+        return 0
+    if len(entries) > 1:
+        log.error(
+            "paper.freeze.cli_ambiguous_allowlist",
+            reason="ambiguous allowlist",
+            entries=len(entries),
+        )
+        return 1
+    log.error("paper.freeze.cli_allowlist_entry_not_supported", reason="not implemented yet")
+    return 1
+
+
 def _cli_main(argv: list[str] | None = None) -> int:
     """Parse argv and dispatch to the check subcommand.
 
@@ -874,6 +1028,14 @@ def _cli_main(argv: list[str] | None = None) -> int:
           --diff-log logs/paper/registry_diff.jsonl \\
           [--pinned-state logs/paper/pinned_epoch.json] \\
           [--registry-root params]
+
+      python -m src.paper.freeze --check --from-allowlist \\
+          --diff-log logs/paper/registry_diff.jsonl \\
+          [--pinned-state logs/paper/pinned_epoch.json] \\
+          [--registry-root params]
+
+    With `--from-allowlist` the ids come from the paper-start allowlist and the two id flags are
+    forbidden; without it both are required (today's behaviour).
     """
     import argparse
 
@@ -887,14 +1049,22 @@ def _cli_main(argv: list[str] | None = None) -> int:
         help="Run one freeze-check tick (required).",
     )
     parser.add_argument(
+        "--from-allowlist",
+        action="store_true",
+        help=(
+            "Check the parameter set the paper-start allowlist authorizes; SKIPPED while it is "
+            "empty. Forbids --strategy-id and --parameter-set-id."
+        ),
+    )
+    parser.add_argument(
         "--strategy-id",
-        required=True,
-        help="Strategy id (e.g. trend-pullback).",
+        default=None,
+        help="Strategy id (e.g. trend-pullback); required without --from-allowlist.",
     )
     parser.add_argument(
         "--parameter-set-id",
-        required=True,
-        help="Parameter set id (e.g. baseline-v3).",
+        default=None,
+        help="Parameter set id (e.g. baseline-v3); required without --from-allowlist.",
     )
     parser.add_argument(
         "--diff-log",
@@ -919,6 +1089,20 @@ def _cli_main(argv: list[str] | None = None) -> int:
     if not args.check:
         parser.error("--check is required")
 
+    if args.from_allowlist:
+        if args.strategy_id is not None or args.parameter_set_id is not None:
+            parser.error("--from-allowlist forbids --strategy-id and --parameter-set-id")
+        return run_allowlist_check_cli(
+            pinned_state_path=args.pinned_state,
+            diff_log_path=args.diff_log,
+            registry_root=args.registry_root,
+            run_metadata=read_run_metadata(),
+            now_utc=None,
+        )
+
+    if args.strategy_id is None or args.parameter_set_id is None:
+        parser.error("--strategy-id and --parameter-set-id are required without --from-allowlist")
+
     return run_check_cli(
         strategy_id=args.strategy_id,
         parameter_set_id=args.parameter_set_id,
@@ -932,11 +1116,16 @@ def _cli_main(argv: list[str] | None = None) -> int:
 __all__ = [
     "StreamEpoch",
     "DiffLogEntry",
+    "FreezeSkippedEntry",
     "FreezeCheckOutcome",
     "pin_stream_epoch",
     "check_registry_unchanged",
     "write_pinned_state",
     "load_pinned_state",
     "run_check_cli",
+    "run_allowlist_check_cli",
+    "allowlist_entries",
+    "find_allowlist_entry",
+    "read_run_metadata",
     "_cli_main",
 ]
