@@ -24,12 +24,15 @@ from __future__ import annotations
 
 import bisect
 import json
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Context, Decimal
+from enum import StrEnum
 from typing import Protocol
 
+from src.paper.freeze import DiffLogEntry, FreezeSkippedEntry
 from src.paper.vocabulary import INTERVAL_MS, GapReason, HealthState, RuntimeEventType
 
 # --------------------------------------------------------------------------- #
@@ -708,3 +711,454 @@ def derive_health_intervals(
     base = HealthInterval(window_start_utc, window_end_utc, HealthState.HEALTHY, None)
     segments = _tile(window_start_utc, window_end_utc, [base, *bad])
     return tuple(HealthInterval(s.start_utc, s.end_utc, s.state, s.reason) for s in segments)
+
+
+# --------------------------------------------------------------------------- #
+# Freeze-tick continuity (REV-02, REV-18): expected slots, EVIDENCE_GAP, segments.
+# --------------------------------------------------------------------------- #
+
+SLOT_INTERVAL_SECONDS = 3600  # the freeze workflow is hourly; one slot per cron minute per hour
+RESTART_RULE = "qualifying trial restarts with a new epoch pin (D065 item 4)"
+_HOURLY_CRON = re.compile(r"([0-9]|[1-5][0-9]) \* \* \* \*")
+_SLOT_STEP = timedelta(seconds=SLOT_INTERVAL_SECONDS)
+
+
+class EvidenceGapReason(StrEnum):
+    """Why an expected scheduled freeze slot has no valid CLEAN evidence."""
+
+    NO_RUN_FOUND = "NO_RUN_FOUND"
+    RUN_WITHOUT_LINE = "RUN_WITHOUT_LINE"
+    RUN_LATE_BEYOND_GRACE = "RUN_LATE_BEYOND_GRACE"
+    INVALID_LINE = "INVALID_LINE"
+    SCHEDULE_MISMATCH = "SCHEDULE_MISMATCH"
+
+
+# Which reason is reported when several runs are assigned to one unsatisfied slot.
+_GAP_PRECEDENCE: tuple[EvidenceGapReason, ...] = (
+    EvidenceGapReason.INVALID_LINE,
+    EvidenceGapReason.SCHEDULE_MISMATCH,
+    EvidenceGapReason.RUN_WITHOUT_LINE,
+    EvidenceGapReason.RUN_LATE_BEYOND_GRACE,
+)
+
+
+@dataclass(frozen=True)
+class EvidenceGap:
+    """An expected scheduled freeze slot without valid CLEAN evidence (never CLEAN)."""
+
+    slot_utc: datetime
+    schedule: str
+    reason: EvidenceGapReason
+    detected_at_utc: datetime
+    run_id: str | None
+
+    def __post_init__(self) -> None:
+        _require_utc("slot_utc", self.slot_utc)
+        _require_utc("detected_at_utc", self.detected_at_utc)
+
+
+@dataclass(frozen=True)
+class GithubRun:
+    """One workflow run from the exported GitHub run list (REST workflow runs, research S1)."""
+
+    run_id: str
+    event: str
+    status: str
+    conclusion: str | None
+    created_at_utc: datetime
+    run_started_at_utc: datetime | None
+    run_attempt: int
+    head_sha: str
+
+    def __post_init__(self) -> None:
+        _require_utc("created_at_utc", self.created_at_utc)
+        if self.run_started_at_utc is not None:
+            _require_utc("run_started_at_utc", self.run_started_at_utc)
+
+
+_LINE_OUTCOMES = frozenset({"clean", "REGISTRY_DIFF", "SKIPPED"})
+
+
+@dataclass(frozen=True)
+class FreezeLine:
+    """A freeze-check log line reduced to what the reconciler reads.
+
+    `outcome` is "clean", "REGISTRY_DIFF" or "SKIPPED" for a valid line and "INVALID" for one
+    that could not be read; `checked_at_utc` is None when not even the time could be read.
+    """
+
+    checked_at_utc: datetime | None
+    outcome: str
+    run_metadata: Mapping[str, str] | None
+    detail: str = ""
+
+    def __post_init__(self) -> None:
+        if self.checked_at_utc is not None:
+            _require_utc("checked_at_utc", self.checked_at_utc)
+
+    @property
+    def run_id(self) -> str | None:
+        return None if self.run_metadata is None else self.run_metadata.get("run_id")
+
+
+def _normalise_line(line: DiffLogEntry | FreezeSkippedEntry | FreezeLine) -> FreezeLine:
+    if isinstance(line, FreezeLine):
+        return line
+    if isinstance(line, DiffLogEntry):
+        return FreezeLine(line.checked_at_utc, line.outcome, line.run_metadata)
+    if isinstance(line, FreezeSkippedEntry):
+        return FreezeLine(line.checked_at_utc, "SKIPPED", line.run_metadata, line.reason)
+    raise TypeError(f"unsupported freeze log line type {type(line).__name__}")
+
+
+def parse_freeze_log(text: str) -> tuple[FreezeLine, ...]:
+    """Parse the JSONL text of `registry_diff.jsonl`; a bad line becomes an INVALID FreezeLine.
+
+    Nothing is dropped silently: an unreadable line is returned (with whatever time and run
+    metadata could still be read) so the reconciler can count it or tie it to its run.
+    """
+    parsed: list[FreezeLine] = []
+    for raw in text.splitlines():
+        if raw.strip() == "":
+            continue
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            parsed.append(FreezeLine(None, "INVALID", None, "not valid JSON"))
+            continue
+        if not isinstance(data, dict):
+            parsed.append(FreezeLine(None, "INVALID", None, "not a JSON object"))
+            continue
+        try:
+            checked = _payload_time(data, "checked_at_utc")
+        except ValueError:
+            checked = None
+        metadata = data.get("run_metadata")
+        run_metadata: dict[str, str] | None = None
+        if isinstance(metadata, dict) and all(
+            isinstance(k, str) and isinstance(v, str) for k, v in metadata.items()
+        ):
+            run_metadata = dict(metadata)
+        outcome = data.get("outcome")
+        if isinstance(outcome, str) and outcome in _LINE_OUTCOMES and checked is not None:
+            parsed.append(FreezeLine(checked, outcome, run_metadata))
+        else:
+            parsed.append(FreezeLine(checked, "INVALID", run_metadata, "unreadable line"))
+    return tuple(parsed)
+
+
+def parse_github_runs(text: str) -> tuple[GithubRun, ...]:
+    """Parse the exported run list: a JSON array of runs or an object with `workflow_runs`."""
+    data = json.loads(text)
+    items = data.get("workflow_runs") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        raise ValueError("expected a JSON array of runs or an object with a workflow_runs array")
+    runs: list[GithubRun] = []
+    for item in items:
+        created = _payload_time(item, "created_at")
+        if created is None:
+            raise ValueError("a workflow run has no created_at")
+        conclusion = item.get("conclusion")
+        runs.append(
+            GithubRun(
+                run_id=str(item["id"]),
+                event=str(item["event"]),
+                status=str(item.get("status", "")),
+                conclusion=None if conclusion is None else str(conclusion),
+                created_at_utc=created,
+                run_started_at_utc=_payload_time(item, "run_started_at"),
+                run_attempt=int(item.get("run_attempt", 1)),
+                head_sha=str(item.get("head_sha", "")),
+            )
+        )
+    return tuple(runs)
+
+
+def _cron_minute(cron: str) -> int:
+    match = _HOURLY_CRON.fullmatch(cron) if isinstance(cron, str) else None
+    if match is None:
+        raise ValueError(f"cron must be the hourly form 'M * * * *' with M from 0 to 59: {cron!r}")
+    return int(match.group(1))
+
+
+def expected_slots(pin_utc: datetime, window_end_utc: datetime, cron: str) -> tuple[datetime, ...]:
+    """Every hourly slot of `cron` strictly after the pin and not after the window end.
+
+    Only the hourly form `M * * * *` is understood; anything else raises (fail closed rather
+    than misread a schedule). The grid follows the cron minute and nothing else (checkpoint
+    Q-Q of plan 16-30 may move the minute; every slot is treated identically).
+    """
+    minute = _cron_minute(cron)
+    _require_utc("pin_utc", pin_utc)
+    _require_utc("window_end_utc", window_end_utc)
+    pin = pin_utc.astimezone(UTC)
+    slot = pin.replace(minute=minute, second=0, microsecond=0)
+    if slot <= pin:
+        slot += _SLOT_STEP
+    slots: list[datetime] = []
+    while slot <= window_end_utc:
+        slots.append(slot)
+        slot += _SLOT_STEP
+    return tuple(slots)
+
+
+def _latest_slot_not_after(moment: datetime, minute: int) -> datetime:
+    slot = moment.astimezone(UTC).replace(minute=minute, second=0, microsecond=0)
+    if slot > moment:
+        slot -= _SLOT_STEP
+    return slot
+
+
+@dataclass(frozen=True)
+class FreezeBreak:
+    """A non-CLEAN line after the pin (REGISTRY_DIFF, SKIPPED or unreadable): ends continuity."""
+
+    at_utc: datetime
+    outcome: str
+    run_id: str | None
+
+
+@dataclass(frozen=True)
+class FreezeSegment:
+    """A maximal run of consecutive satisfied slots; the first one starts at the pin."""
+
+    start_utc: datetime
+    end_utc: datetime
+    slot_count: int
+
+
+@dataclass(frozen=True)
+class FreezeSlotResult:
+    """The verdict for one expected slot."""
+
+    slot_utc: datetime
+    status: str  # "SATISFIED", "EVIDENCE_GAP" or "BROKEN_BY_LINE"
+    run_id: str | None
+
+
+@dataclass(frozen=True)
+class FreezeEvidenceReport:
+    """Freeze-tick continuity from the pin to the window end (REV-02, REV-18).
+
+    Freeze integrity only: it says nothing about whether the host ran or the feed was healthy
+    (that is `CoverageReport`, a separate evidence set).
+    """
+
+    pin_utc: datetime
+    window_end_utc: datetime
+    cron: str
+    grace_seconds: int
+    slots: tuple[datetime, ...]
+    satisfied_slots: tuple[datetime, ...]
+    slot_results: tuple[FreezeSlotResult, ...]
+    gaps: tuple[EvidenceGap, ...]
+    breaks: tuple[FreezeBreak, ...]
+    segments: tuple[FreezeSegment, ...]
+    unplaced_line_count: int
+    qualifying_from_pin: bool
+    statement: str
+
+
+_SATISFIED = "SATISFIED"
+_GAP = "EVIDENCE_GAP"
+_BROKEN = "BROKEN_BY_LINE"
+
+
+def _line_verdict(line: FreezeLine, cron: str) -> str:
+    """SATISFIED, BROKEN or the gap reason name for one line of the slot's run."""
+    if line.outcome in ("REGISTRY_DIFF", "SKIPPED"):
+        return _BROKEN
+    if line.outcome != "clean":
+        return EvidenceGapReason.INVALID_LINE.value
+    meta = line.run_metadata or {}
+    if meta.get("event_name") != "schedule":
+        return EvidenceGapReason.INVALID_LINE.value
+    if meta.get("schedule") != cron:
+        return EvidenceGapReason.SCHEDULE_MISMATCH.value
+    if meta.get("run_attempt", "1") != "1":
+        # A re-run happens later than the slot; its line is not the tick evidence of the slot.
+        return EvidenceGapReason.INVALID_LINE.value
+    return _SATISFIED
+
+
+def _run_verdict(
+    run: GithubRun, slot: datetime, cron: str, grace: timedelta, lines: Sequence[FreezeLine]
+) -> str:
+    if run.created_at_utc - slot > grace:
+        return EvidenceGapReason.RUN_LATE_BEYOND_GRACE.value
+    if not lines:
+        return EvidenceGapReason.RUN_WITHOUT_LINE.value
+    verdicts = {_line_verdict(line, cron) for line in lines}
+    for verdict in (
+        _SATISFIED,
+        _BROKEN,
+        EvidenceGapReason.SCHEDULE_MISMATCH.value,
+        EvidenceGapReason.INVALID_LINE.value,
+    ):
+        if verdict in verdicts:
+            return verdict
+    return EvidenceGapReason.INVALID_LINE.value
+
+
+def freeze_evidence_report(
+    *,
+    pin_utc: datetime,
+    window_end_utc: datetime,
+    cron: str,
+    lines: Sequence[DiffLogEntry | FreezeSkippedEntry | FreezeLine],
+    runs: Sequence[GithubRun],
+    grace_seconds: int,
+    detected_at_utc: datetime,
+) -> FreezeEvidenceReport:
+    """Reconcile the expected slot grid with the freeze-check lines and the exported run list.
+
+    A slot is satisfied only by a CLEAN line of a schedule-event run assigned to it (the run is
+    assigned to the latest slot not after its `created_at`, so a run serves exactly one slot),
+    created no later than `grace_seconds` after the slot, whose recorded cron string equals
+    `cron`. Anything else is an `EvidenceGap` (never CLEAN, never interpolated, never filled
+    from a neighbouring tick); the qualifying trial then restarts with a new epoch pin (REV-02,
+    REV-18). A non-CLEAN line after the pin (REGISTRY_DIFF, SKIPPED, unreadable) also ends the
+    continuity window. Lines and runs at or before the pin are not evaluated.
+
+    `grace_seconds` is the user's number (no default); it bounds only how late a valid scheduled
+    run may start. The function returns records; it never writes `registry_diff.jsonl`.
+    """
+    slots = expected_slots(pin_utc, window_end_utc, cron)
+    _require_utc("detected_at_utc", detected_at_utc)
+    if isinstance(grace_seconds, bool) or not isinstance(grace_seconds, int) or grace_seconds < 0:
+        raise ValueError(f"grace_seconds must be a non-negative integer, got {grace_seconds!r}")
+    grace = timedelta(seconds=grace_seconds)
+    minute = _cron_minute(cron)
+    slot_set = set(slots)
+
+    normalised = [_normalise_line(line) for line in lines]
+    dated = [n for n in normalised if n.checked_at_utc is not None]
+    unplaced = len(normalised) - len(dated)
+    lines_by_run: dict[str, list[FreezeLine]] = {}
+    for line in normalised:
+        if line.run_id is not None:
+            lines_by_run.setdefault(line.run_id, []).append(line)
+
+    assigned: dict[datetime, list[GithubRun]] = {}
+    for run in sorted(runs, key=lambda r: (r.created_at_utc, r.run_id)):
+        if run.event != "schedule" or run.created_at_utc <= pin_utc:
+            continue
+        slot = _latest_slot_not_after(run.created_at_utc, minute)
+        if slot in slot_set:
+            assigned.setdefault(slot, []).append(run)
+
+    results: list[FreezeSlotResult] = []
+    gaps: list[EvidenceGap] = []
+    for slot in slots:
+        slot_runs = assigned.get(slot, [])
+        verdicts = [
+            (run, _run_verdict(run, slot, cron, grace, lines_by_run.get(run.run_id, [])))
+            for run in slot_runs
+        ]
+        satisfied = next((run for run, verdict in verdicts if verdict == _SATISFIED), None)
+        if satisfied is not None:
+            results.append(FreezeSlotResult(slot, _SATISFIED, satisfied.run_id))
+        elif any(verdict == _BROKEN for _, verdict in verdicts):
+            broken = next(run for run, verdict in verdicts if verdict == _BROKEN)
+            results.append(FreezeSlotResult(slot, _BROKEN, broken.run_id))
+        else:
+            reason = EvidenceGapReason.NO_RUN_FOUND
+            run_id: str | None = None
+            for candidate in _GAP_PRECEDENCE:
+                match = next((run for run, verdict in verdicts if verdict == candidate.value), None)
+                if match is not None:
+                    reason, run_id = candidate, match.run_id
+                    break
+            gaps.append(EvidenceGap(slot, cron, reason, detected_at_utc, run_id))
+            results.append(FreezeSlotResult(slot, _GAP, run_id))
+
+    breaks = sorted(
+        (
+            FreezeBreak(n.checked_at_utc, n.outcome, n.run_id)
+            for n in dated
+            if n.checked_at_utc is not None
+            and n.outcome != "clean"
+            and pin_utc < n.checked_at_utc <= window_end_utc
+        ),
+        key=lambda b: (b.at_utc, b.outcome, b.run_id or ""),
+    )
+
+    segments = _segments(pin_utc, slots, {r.slot_utc: r.status for r in results}, breaks)
+    satisfied_slots = tuple(r.slot_utc for r in results if r.status == _SATISFIED)
+    qualifying = bool(slots) and len(satisfied_slots) == len(slots) and not breaks and unplaced == 0
+    return FreezeEvidenceReport(
+        pin_utc=pin_utc,
+        window_end_utc=window_end_utc,
+        cron=cron,
+        grace_seconds=grace_seconds,
+        slots=slots,
+        satisfied_slots=satisfied_slots,
+        slot_results=tuple(results),
+        gaps=tuple(gaps),
+        breaks=tuple(breaks),
+        segments=segments,
+        unplaced_line_count=unplaced,
+        qualifying_from_pin=qualifying,
+        statement=_freeze_statement(slots, gaps, breaks, unplaced),
+    )
+
+
+def _segments(
+    pin_utc: datetime,
+    slots: Sequence[datetime],
+    status: Mapping[datetime, str],
+    breaks: Sequence[FreezeBreak],
+) -> tuple[FreezeSegment, ...]:
+    """Maximal runs of consecutive satisfied slots, split by any gap or non-CLEAN line."""
+    events = [(b.at_utc, 0) for b in breaks] + [(slot, 1) for slot in slots]
+    events.sort()
+    segments: list[FreezeSegment] = []
+    current: list[datetime] = []
+
+    def flush() -> None:
+        if current:
+            start = pin_utc if current[0] == slots[0] else current[0]
+            segments.append(FreezeSegment(start, current[-1], len(current)))
+            current.clear()
+
+    for moment, kind in events:
+        if kind == 1 and status[moment] == _SATISFIED:
+            current.append(moment)
+        else:
+            flush()
+    flush()
+    return tuple(segments)
+
+
+def _freeze_statement(
+    slots: Sequence[datetime],
+    gaps: Sequence[EvidenceGap],
+    breaks: Sequence[FreezeBreak],
+    unplaced: int,
+) -> str:
+    base = (
+        "Freeze integrity evidence only (registry immutability from the epoch pin); "
+        "runtime health is a separate report."
+    )
+    problems: list[str] = []
+    if gaps:
+        problems.append(
+            f"{len(gaps)} EVIDENCE_GAP slot(s), first at {gaps[0].slot_utc.isoformat()}: "
+            "a missing, late, failed, manual or mismatched tick is never CLEAN and is never "
+            "interpolated or filled from neighbouring ticks."
+        )
+    if breaks:
+        problems.append(
+            f"{len(breaks)} non-CLEAN line(s) after the pin (REGISTRY_DIFF, SKIPPED or "
+            "unreadable) end the continuity window."
+        )
+    if unplaced:
+        problems.append(f"{unplaced} unreadable line(s) cannot be placed in time.")
+    if problems:
+        return f"{base} {' '.join(problems)} The {RESTART_RULE}."
+    if not slots:
+        return f"{base} No scheduled slot lies between the pin and the window end: not qualifying."
+    return (
+        f"{base} Every expected scheduled slot from the pin to the window end is satisfied by a "
+        "CLEAN line of a schedule run."
+    )
