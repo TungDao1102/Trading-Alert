@@ -19,12 +19,15 @@ behind `src/adapters/paper_ws.py` (adapter-boundary isolation, RESEARCH
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from src.backtest.binding import assert_sizing_costs_bind_registry
 from src.backtest.costs import (
+    CostModel,
     build_cost_model,
     cost_rates_from_model,
     guard_rates_from_params,
@@ -36,6 +39,8 @@ from src.core.types import (
     Candle,
     MarketSnapshot,
 )
+from src.domain.registry import ParameterSet
+from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
 from src.paper.freeze import (
     load_parameter_set_at_root,
@@ -45,7 +50,7 @@ from src.paper.freeze import (
 )
 from src.risk.gating import evaluate_risk
 from src.risk.portfolio import resolve_absolute_thresholds
-from src.risk.types import ConstraintSnapshot, OpenPosition
+from src.risk.types import ConstraintSnapshot, OpenPosition, PortfolioVerdict
 
 # --------------------------------------------------------------------------- #
 # Validation helpers — local copies (D-12 fail-closed).
@@ -312,6 +317,178 @@ def check_feed_freshness(
 
 
 # --------------------------------------------------------------------------- #
+# Typed per-bar evaluation — the body of run_paper_tick, extracted (D-02).
+# --------------------------------------------------------------------------- #
+
+# Stages a closed 1h bar can end at, in chain order (strategy -> planner -> risk -> risk_passed).
+BAR_STAGES: tuple[str, ...] = ("strategy", "planner", "risk", "risk_passed")
+
+
+@dataclass(frozen=True)
+class BarContext:
+    """Everything the per-bar chain needs besides the bar and its windows (D-02).
+
+    One context is shared by every bar of a run: the symbol, the registry parameter set, the
+    account and constraint snapshots, the cost model, the portfolio state the risk gates read,
+    the plan TTL and the absolute portfolio thresholds (already converted from registry rates).
+    """
+
+    symbol: str
+    strategy_version: str
+    parameter_set: ParameterSet
+    account_state: AccountState
+    constraint_snapshot: ConstraintSnapshot
+    cost_model: CostModel
+    open_positions: Sequence[OpenPosition]
+    daily_loss_quote: Decimal | None
+    ttl: timedelta
+    absolute_thresholds: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class BarOutcome:
+    """The typed result of one closed 1h bar through evaluate -> plan -> evaluate_risk.
+
+    `stage` is where the chain ended (`BAR_STAGES`). `signal` is set from the planner stage on,
+    `trade_plan` and `verdict` from the risk stage on; a strategy-stage NO_TRADE carries none of
+    the three. `reason_code` is the stage's reason ("OK" for `risk_passed`). `regime` is the 4h
+    regime verdict the strategy resolved, or None when it stopped before the regime was known.
+    """
+
+    closed_candle: Candle
+    stage: str
+    reason_code: str
+    signal: Signal | None = None
+    trade_plan: TradePlan | None = None
+    verdict: PortfolioVerdict | None = None
+    regime: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.stage not in BAR_STAGES:
+            raise ValueError(f"BarOutcome: unknown stage {self.stage!r}; expected {BAR_STAGES}")
+        _require_non_empty(self.reason_code, "reason_code")
+
+
+def evaluate_closed_bar(
+    context: BarContext,
+    closed_candle: Candle,
+    setup_candles: list[Candle],
+    context_candles: list[Candle],
+) -> BarOutcome:
+    """Run one closed 1h bar through the shared strategy, planner and risk chain.
+
+    `setup_candles` is the closed 1h series ending at `closed_candle` and `context_candles` the
+    closed 4h series at or before its close; the caller cuts the windows (the paper tick passes
+    its whole series, the runtime and the decision surface pass the engine windows). Pure: no
+    clock, no I/O. The feed gates, warm-up gate and duplicate-bar handling stay with the caller.
+    """
+    snapshot = MarketSnapshot(
+        symbol=context.symbol,
+        setup_candles=setup_candles,
+        context_candles=context_candles,
+        source_timeframe="1h",
+    )
+
+    # Strategy gate.
+    setup_result = evaluate(
+        snapshot=snapshot,
+        account_state=context.account_state,
+        strategy_version=context.strategy_version,
+        parameter_set=context.parameter_set,
+    )
+    if setup_result.is_no_trade:
+        return BarOutcome(
+            closed_candle=closed_candle,
+            stage="strategy",
+            reason_code=setup_result.reason_code,
+            regime=setup_result.regime,
+        )
+
+    signal = setup_result.signal
+    assert signal is not None
+
+    # Planner.
+    plan_result = plan(
+        signal=signal,
+        setup_candles=setup_candles,
+        parameter_set=context.parameter_set,
+        account_state=context.account_state,
+        created_at_utc=closed_candle.close_time_utc,
+    )
+    if plan_result.is_no_trade:
+        return BarOutcome(
+            closed_candle=closed_candle,
+            stage="planner",
+            reason_code=plan_result.reason_code,
+            signal=signal,
+            regime=setup_result.regime,
+        )
+
+    trade_plan = plan_result.trade_plan
+    assert trade_plan is not None
+
+    # Risk pipeline.
+    cost_rates = cost_rates_from_model(context.cost_model)
+    min_stop_distance_rate, max_cost_to_risk = guard_rates_from_params(context.parameter_set.params)
+    verdict = evaluate_risk(
+        trade_plan=trade_plan,
+        candidate_position_side=signal.direction,
+        account_state=context.account_state,
+        constraint_snapshot=context.constraint_snapshot,
+        open_positions=context.open_positions,
+        daily_loss_quote=context.daily_loss_quote,
+        now_utc=closed_candle.close_time_utc,
+        ttl=context.ttl,
+        cost_rates=cost_rates,
+        min_stop_distance_rate=min_stop_distance_rate,
+        max_cost_to_risk=max_cost_to_risk,
+        minimum_risk_utilization_after_rounding=Decimal(
+            str(context.parameter_set.params["minimum_risk_utilization_after_rounding"])
+        ),
+        parameter_set=context.absolute_thresholds,
+    )
+    if verdict.is_no_trade:
+        return BarOutcome(
+            closed_candle=closed_candle,
+            stage="risk",
+            reason_code=verdict.reason_code,
+            signal=signal,
+            trade_plan=trade_plan,
+            verdict=verdict,
+            regime=setup_result.regime,
+        )
+
+    # Risk passed — the tick emits a paper record (no simulated fill here; the runtime adds it).
+    return BarOutcome(
+        closed_candle=closed_candle,
+        stage="risk_passed",
+        reason_code="OK",
+        signal=signal,
+        trade_plan=trade_plan,
+        verdict=verdict,
+        regime=setup_result.regime,
+    )
+
+
+def _outcome_to_record(outcome: BarOutcome) -> dict[str, Any]:
+    """Project a BarOutcome to the exact `no_trade_records` dict the tick has always emitted."""
+    record: dict[str, Any] = {
+        "reason_code": outcome.reason_code,
+        "bar_close_utc": outcome.closed_candle.close_time_utc.isoformat(),
+        "stage": outcome.stage,
+    }
+    if outcome.stage == "strategy":
+        return record
+    assert outcome.signal is not None
+    record["signal_id"] = outcome.signal.signal_id
+    if outcome.stage == "planner":
+        return record
+    assert outcome.trade_plan is not None
+    record["trade_plan_id"] = outcome.trade_plan.trade_plan_id
+    return record
+
+
+# --------------------------------------------------------------------------- #
 # Public entry point — run_paper_tick.
 # --------------------------------------------------------------------------- #
 
@@ -413,6 +590,19 @@ def run_paper_tick(
         equity=account_state.equity,
     )
 
+    bar_context = BarContext(
+        symbol=symbol,
+        strategy_version=strategy_version,
+        parameter_set=parameter_set,
+        account_state=account_state,
+        constraint_snapshot=constraint_snapshot,
+        cost_model=cost_model,
+        open_positions=tuple(open_positions),
+        daily_loss_quote=daily_loss_quote,
+        ttl=ttl,
+        absolute_thresholds=absolute_thresholds,
+    )
+
     # Sort warmed-up bars by close_time_utc ascending (deterministic).
     sorted_1h = sorted(warmed_up_1h, key=lambda c: c.close_time_utc)
     sorted_4h = sorted(warmed_up_4h, key=lambda c: c.close_time_utc)
@@ -506,107 +696,19 @@ def run_paper_tick(
             continue
         seen_open_times.add(closed_candle.open_time_utc)
 
-        # Build the snapshot: closed 1H bars (warmed-up + this event) +
-        # closed 4H context bars (warmed-up + this call's 4h closes,
-        # filtered to <= event close).
+        # Closed 1H bars (warmed-up + this event) + closed 4H context bars (warmed-up + this
+        # call's 4h closes, filtered to <= event close). The whole series is passed; the
+        # runtime and the decision surface cut the engine windows themselves.
         closed_setup = sorted_1h + [closed_candle]
         closed_context = [
             c for c in sorted_4h + extra_context if c.close_time_utc <= closed_candle.close_time_utc
         ]
-        snapshot = MarketSnapshot(
-            symbol=symbol,
-            setup_candles=closed_setup,
-            context_candles=closed_context,
-            source_timeframe="1h",
-        )
-
-        # Strategy gate.
-        setup_result = evaluate(
-            snapshot=snapshot,
-            account_state=account_state,
-            strategy_version=strategy_version,
-            parameter_set=parameter_set,
-        )
-        if setup_result.is_no_trade:
-            no_trade_records.append(
-                {
-                    "reason_code": setup_result.reason_code,
-                    "bar_close_utc": closed_candle.close_time_utc.isoformat(),
-                    "stage": "strategy",
-                }
-            )
-            continue
-
-        signal = setup_result.signal
-        assert signal is not None
-        signals.append(_signal_to_dict(signal))
-
-        # Planner.
-        plan_result = plan(
-            signal=signal,
-            setup_candles=closed_setup,
-            parameter_set=parameter_set,
-            account_state=account_state,
-            created_at_utc=closed_candle.close_time_utc,
-        )
-        if plan_result.is_no_trade:
-            no_trade_records.append(
-                {
-                    "reason_code": plan_result.reason_code,
-                    "bar_close_utc": closed_candle.close_time_utc.isoformat(),
-                    "stage": "planner",
-                    "signal_id": signal.signal_id,
-                }
-            )
-            continue
-
-        trade_plan = plan_result.trade_plan
-        assert trade_plan is not None
-        trade_plans.append(_trade_plan_to_dict(trade_plan))
-
-        # Risk pipeline.
-        cost_rates = cost_rates_from_model(cost_model)
-        min_stop_distance_rate, max_cost_to_risk = guard_rates_from_params(parameter_set.params)
-        verdict = evaluate_risk(
-            trade_plan=trade_plan,
-            candidate_position_side=signal.direction,
-            account_state=account_state,
-            constraint_snapshot=constraint_snapshot,
-            open_positions=open_positions,
-            daily_loss_quote=daily_loss_quote,
-            now_utc=closed_candle.close_time_utc,
-            ttl=ttl,
-            cost_rates=cost_rates,
-            min_stop_distance_rate=min_stop_distance_rate,
-            max_cost_to_risk=max_cost_to_risk,
-            minimum_risk_utilization_after_rounding=Decimal(
-                str(parameter_set.params["minimum_risk_utilization_after_rounding"])
-            ),
-            parameter_set=absolute_thresholds,
-        )
-        if verdict.is_no_trade:
-            no_trade_records.append(
-                {
-                    "reason_code": verdict.reason_code,
-                    "bar_close_utc": closed_candle.close_time_utc.isoformat(),
-                    "stage": "risk",
-                    "signal_id": signal.signal_id,
-                    "trade_plan_id": trade_plan.trade_plan_id,
-                }
-            )
-            continue
-
-        # Risk passed — emit a paper record (tracer slice: no simulated
-        # fill yet; Phase 7 plan 07-02 adds the simulated-fill path).
-        no_trade_records.append(
-            {
-                "reason_code": "OK",
-                "bar_close_utc": closed_candle.close_time_utc.isoformat(),
-                "stage": "risk_passed",
-                "signal_id": signal.signal_id,
-                "trade_plan_id": trade_plan.trade_plan_id,
-            }
-        )
+        outcome = evaluate_closed_bar(bar_context, closed_candle, closed_setup, closed_context)
+        if outcome.signal is not None:
+            signals.append(_signal_to_dict(outcome.signal))
+        if outcome.trade_plan is not None:
+            trade_plans.append(_trade_plan_to_dict(outcome.trade_plan))
+        no_trade_records.append(_outcome_to_record(outcome))
 
     return {
         "signals": signals,
@@ -617,4 +719,12 @@ def run_paper_tick(
     }
 
 
-__all__ = ["run_paper_tick", "STALENESS_THRESHOLD_SECONDS", "WARMUP_MIN_BARS"]
+__all__ = [
+    "BAR_STAGES",
+    "STALENESS_THRESHOLD_SECONDS",
+    "WARMUP_MIN_BARS",
+    "BarContext",
+    "BarOutcome",
+    "evaluate_closed_bar",
+    "run_paper_tick",
+]
