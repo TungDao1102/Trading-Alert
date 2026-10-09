@@ -937,6 +937,23 @@ class FreezeSlotResult:
 
 
 @dataclass(frozen=True)
+class AuxiliaryEvidence:
+    """Lines and runs at or before the epoch pin: kept untouched, never counted (REV-18).
+
+    Evidence of an earlier epoch (one ended by an EVIDENCE_GAP or replaced by a new pin) stays
+    readable and reproducible with its own pin, but it cannot satisfy a slot of the new trial.
+    The tuples hold the caller's own objects, in input order.
+    """
+
+    lines: tuple[DiffLogEntry | FreezeSkippedEntry | FreezeLine, ...]
+    runs: tuple[GithubRun, ...]
+    line_count: int
+    run_count: int
+    first_utc: datetime | None
+    last_utc: datetime | None
+
+
+@dataclass(frozen=True)
 class FreezeEvidenceReport:
     """Freeze-tick continuity from the pin to the window end (REV-02, REV-18).
 
@@ -955,6 +972,7 @@ class FreezeEvidenceReport:
     breaks: tuple[FreezeBreak, ...]
     segments: tuple[FreezeSegment, ...]
     unplaced_line_count: int
+    auxiliary: AuxiliaryEvidence
     qualifying_from_pin: bool
     statement: str
 
@@ -1027,6 +1045,11 @@ def freeze_evidence_report(
     _require_utc("detected_at_utc", detected_at_utc)
     if isinstance(grace_seconds, bool) or not isinstance(grace_seconds, int) or grace_seconds < 0:
         raise ValueError(f"grace_seconds must be a non-negative integer, got {grace_seconds!r}")
+    if grace_seconds >= SLOT_INTERVAL_SECONDS:
+        raise ValueError(
+            f"grace_seconds {grace_seconds} is not below the slot interval "
+            f"({SLOT_INTERVAL_SECONDS} s): one run could stand for two slots (REV-02, REV-18)"
+        )
     grace = timedelta(seconds=grace_seconds)
     minute = _cron_minute(cron)
     slot_set = set(slots)
@@ -1034,6 +1057,7 @@ def freeze_evidence_report(
     normalised = [_normalise_line(line) for line in lines]
     dated = [n for n in normalised if n.checked_at_utc is not None]
     unplaced = len(normalised) - len(dated)
+    auxiliary = _auxiliary(pin_utc, lines, normalised, runs)
     lines_by_run: dict[str, list[FreezeLine]] = {}
     for line in normalised:
         if line.run_id is not None:
@@ -1098,8 +1122,34 @@ def freeze_evidence_report(
         breaks=tuple(breaks),
         segments=segments,
         unplaced_line_count=unplaced,
+        auxiliary=auxiliary,
         qualifying_from_pin=qualifying,
-        statement=_freeze_statement(slots, gaps, breaks, unplaced),
+        statement=_freeze_statement(slots, gaps, breaks, unplaced, auxiliary),
+    )
+
+
+def _auxiliary(
+    pin_utc: datetime,
+    lines: Sequence[DiffLogEntry | FreezeSkippedEntry | FreezeLine],
+    normalised: Sequence[FreezeLine],
+    runs: Sequence[GithubRun],
+) -> AuxiliaryEvidence:
+    """Everything at or before the pin, as the caller's own objects (never copied or edited)."""
+    kept_lines: list[DiffLogEntry | FreezeSkippedEntry | FreezeLine] = []
+    moments: list[datetime] = []
+    for original, line in zip(lines, normalised, strict=True):
+        if line.checked_at_utc is not None and line.checked_at_utc <= pin_utc:
+            kept_lines.append(original)
+            moments.append(line.checked_at_utc)
+    kept_runs = [run for run in runs if run.created_at_utc <= pin_utc]
+    moments.extend(run.created_at_utc for run in kept_runs)
+    return AuxiliaryEvidence(
+        lines=tuple(kept_lines),
+        runs=tuple(kept_runs),
+        line_count=len(kept_lines),
+        run_count=len(kept_runs),
+        first_utc=min(moments) if moments else None,
+        last_utc=max(moments) if moments else None,
     )
 
 
@@ -1135,6 +1185,7 @@ def _freeze_statement(
     gaps: Sequence[EvidenceGap],
     breaks: Sequence[FreezeBreak],
     unplaced: int,
+    auxiliary: AuxiliaryEvidence,
 ) -> str:
     base = (
         "Freeze integrity evidence only (registry immutability from the epoch pin); "
@@ -1154,11 +1205,90 @@ def _freeze_statement(
         )
     if unplaced:
         problems.append(f"{unplaced} unreadable line(s) cannot be placed in time.")
+    note = ""
+    if auxiliary.line_count or auxiliary.run_count:
+        note = (
+            " Note: earlier epoch evidence is auxiliary and cannot complete the freeze "
+            f"criterion of the new trial ({auxiliary.line_count} line(s) and "
+            f"{auxiliary.run_count} run(s) at or before the pin, kept untouched)."
+        )
     if problems:
-        return f"{base} {' '.join(problems)} The {RESTART_RULE}."
+        return f"{base} {' '.join(problems)} The {RESTART_RULE}.{note}"
     if not slots:
-        return f"{base} No scheduled slot lies between the pin and the window end: not qualifying."
+        empty = "No scheduled slot lies between the pin and the window end: not qualifying."
+        return f"{base} {empty}{note}"
     return (
         f"{base} Every expected scheduled slot from the pin to the window end is satisfied by a "
-        "CLEAN line of a schedule run."
+        f"CLEAN line of a schedule run.{note}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Report-only tick timing summary (research A10 and P20).
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class TickTimingSummary:
+    """What the runtime measured about its own ticks. An observation, never a criterion.
+
+    It makes two assumptions visible: that a tick finishes well inside a bar interval (A10) and
+    that a host clock running behind drops closed bars (P20, `dropped_by_reason`). It is compared
+    with no limit anywhere and feeds no decision.
+    """
+
+    tick_count: int
+    duration_ms_min: int | None
+    duration_ms_median: int | None
+    duration_ms_max: int | None
+    queue_depth_max: int | None
+    dropped_total: int
+    dropped_by_reason: tuple[tuple[str, int], ...]
+    first_tick_utc: datetime | None
+    last_tick_utc: datetime | None
+
+
+def _tick_counter(payload: Mapping[str, object], key: str) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(
+            f"PAPER_TICK_STATS payload[{key!r}] must be a non-negative integer, got {value!r}"
+        )
+    return value
+
+
+def _tick_dropped_by_reason(payload: Mapping[str, object]) -> Mapping[str, int]:
+    raw = payload.get("dropped_by_reason")
+    if not isinstance(raw, Mapping):
+        raise ValueError("PAPER_TICK_STATS payload['dropped_by_reason'] must be a mapping")
+    return {str(reason): _tick_counter(raw, str(reason)) for reason in raw}
+
+
+def tick_timing_summary(records: Iterable[RuntimeRecordLike]) -> TickTimingSummary:
+    """Summarise the PAPER_TICK_STATS records: durations, queue depth, drops by reason.
+
+    Integers only. The median is the lower middle value. Records of other event types are
+    ignored; with no tick record `tick_count` is 0 and the optional fields are None.
+    """
+    ticks = [r for r in records if r.event_type is RuntimeEventType.PAPER_TICK_STATS]
+    for tick in ticks:
+        _require_utc("occurred_at_utc", tick.occurred_at_utc)
+    durations = sorted(_tick_counter(t.payload, "duration_ms") for t in ticks)
+    depths = [_tick_counter(t.payload, "queue_depth_before") for t in ticks]
+    dropped_total = sum(_tick_counter(t.payload, "dropped_total") for t in ticks)
+    by_reason: dict[str, int] = {}
+    for tick in ticks:
+        for reason, count in _tick_dropped_by_reason(tick.payload).items():
+            by_reason[reason] = by_reason.get(reason, 0) + count
+    times = [t.occurred_at_utc for t in ticks]
+    return TickTimingSummary(
+        tick_count=len(ticks),
+        duration_ms_min=durations[0] if durations else None,
+        duration_ms_median=durations[(len(durations) - 1) // 2] if durations else None,
+        duration_ms_max=durations[-1] if durations else None,
+        queue_depth_max=max(depths) if depths else None,
+        dropped_total=dropped_total,
+        dropped_by_reason=tuple(sorted(by_reason.items())),
+        first_tick_utc=min(times) if times else None,
+        last_tick_utc=max(times) if times else None,
     )
