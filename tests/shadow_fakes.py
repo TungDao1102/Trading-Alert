@@ -28,7 +28,7 @@ from typing import Any
 from src.approval.mapping import ShortIdMapping
 from src.approval.replay import ApprovalAlreadyDecided
 from src.domain.approval import Approval
-from src.domain.enums import ApprovalResult, SignalStatus, TradePlanStatus
+from src.domain.enums import ApprovalAction, ApprovalResult, SignalStatus, TradePlanStatus
 from src.domain.journal import JournalEvent
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
@@ -204,6 +204,17 @@ class InMemoryShadowStores:
     def list_pending_approvals(self) -> list[Approval]:
         return [a for a in self.approvals.values() if a.status == ApprovalResult.PENDING]
 
+    def list_approved_approvals(self) -> list[Approval]:
+        """APPROVE-action approvals that reached APPROVED (the confirm layer's sweep input)."""
+        return [
+            a
+            for a in self.approvals.values()
+            if a.status == ApprovalResult.APPROVED and a.action == ApprovalAction.APPROVE
+        ]
+
+    def journal_for_correlation(self, correlation_id: str) -> list[JournalEvent]:
+        return [event for event in self.journal if event.correlation_id == correlation_id]
+
     # ---- helpers ------------------------------------------------------- #
 
     def _put_mapping(self, mapping: ShortIdMapping) -> None:
@@ -231,6 +242,7 @@ class SentMessage:
     chat_id: int | str
     text: str
     reply_markup: Any
+    message_id: int | None = None
 
 
 class FakeBot:
@@ -254,8 +266,9 @@ class FakeBot:
         self.trace.append("send")
         if self._errors:
             raise self._errors.pop(0)
-        self.sent.append(SentMessage(chat_id, text, reply_markup))
-        return SimpleNamespace(message_id=len(self.sent))
+        message_id = len(self.sent) + 1
+        self.sent.append(SentMessage(chat_id, text, reply_markup, message_id))
+        return SimpleNamespace(message_id=message_id)
 
     async def edit_message_text(
         self, *, chat_id: int | str, message_id: int, text: str, reply_markup: Any = None
@@ -264,7 +277,7 @@ class FakeBot:
         self.trace.append("edit")
         if self._errors:
             raise self._errors.pop(0)
-        self.edited.append(SentMessage(chat_id, text, reply_markup))
+        self.edited.append(SentMessage(chat_id, text, reply_markup, message_id))
         return SimpleNamespace(message_id=message_id)
 
 
@@ -283,18 +296,34 @@ class RecordingSleep:
         self.calls.append(seconds)
 
 
-def make_callback_update(
-    *, data: str, chat_id: int, query_id: str, message_chat_id: int = CHAT_ID
-) -> Any:
-    """A PTB-shaped update for `on_callback`: a callback query with an awaitable `answer`."""
+USER_ID = 777001
+OTHER_USER_ID = 777002
 
-    async def _answer() -> None:
+
+def make_callback_update(
+    *,
+    data: str,
+    chat_id: int,
+    query_id: str,
+    message_chat_id: int = CHAT_ID,
+    from_user_id: int | None = USER_ID,
+    message_id: int = 1,
+    answer: Any = None,
+) -> Any:
+    """A PTB-shaped update for `on_callback`: a callback query with an awaitable `answer`.
+
+    `answer` replaces the default no-op `query.answer` (a test passes a recording or failing
+    coroutine function). `from_user_id=None` models a press without a user.
+    """
+
+    async def _answer(*args: Any, **kwargs: Any) -> None:
         return None
 
     query = SimpleNamespace(
         id=query_id,
         data=data,
-        answer=_answer,
-        message=SimpleNamespace(chat_id=message_chat_id),
+        answer=_answer if answer is None else answer,
+        message=SimpleNamespace(chat_id=message_chat_id, message_id=message_id),
+        from_user=None if from_user_id is None else SimpleNamespace(id=from_user_id),
     )
     return SimpleNamespace(callback_query=query, effective_chat=SimpleNamespace(id=chat_id))
