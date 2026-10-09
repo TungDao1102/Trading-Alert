@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: executing
-stopped_at: Completed 16-17-PLAN.md
-last_updated: "2026-10-09T14:08:42.304Z"
+stopped_at: Completed 16-18-PLAN.md
+last_updated: "2026-10-09T14:37:32.602Z"
 last_activity: 2026-10-09
 last_activity_desc: Phase 16 execution started
-state_head: c8ef31b012a37050cfda3e7f18ed7421b4509410
+state_head: 94856416f6aa8effdff309d54d6f99aff8db831b
 progress:
   total_phases: 29
   completed_phases: 17
   total_plans: 194
-  completed_plans: 159
+  completed_plans: 160
 milestone_name: milestone
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
-Plan: 3 of 50
+Plan: 4 of 50
 Status: Ready to execute
 Last activity: 2026-10-09 — Phase 16 execution started
 
@@ -209,6 +209,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P14 | n/a | 3 tasks | 3 files |
 | Phase 16 P15 | 22 min | 4 tasks | 3 files |
 | Phase 16 P17 | 35min | 4 tasks | 4 files |
+| Phase 16 P18 | 35 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -510,6 +511,7 @@ Recent decisions affecting current work:
 - [Phase 16]: 16-15: after every RUNTIME_START the time to the first live feed message is uncovered (WS_RECONNECT_WINDOW) and only LIVE_WS bar records prove a live arrival — Matches plan 16-29 HEALTH_STATE_CHANGED rule and REV-01 (time the runtime did not observe the feed is not covered); fails closed if the payload contract is not matched
 - [Phase 16]: 16-17: path_exercised is unsolicited only when the first rebuild after the drop found stale stream names and no close API was called; a fake rig is never labelled REAL_SMOKE, even in --live mode
 - [Phase 16]: 16-17: --live checks BINANCE_* environment names before the operator flag (exit 3 before exit 2) and prints only the name; the SDK rotation override (floor 300 s) is process-local and restored in a finally block
+- [Phase 16]: 16-18: plateau/mark-hole/cost-field reporting is reporting only; per-point figures are existing backtest report outputs over pooled Validation trades, axis values ordered numerically, no marker or ordering by a metric
 
 ### Pending Todos
 
@@ -586,6 +588,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-09T14:08:41.945Z
-Stopped at: Completed 16-17-PLAN.md
+Last session: 2026-10-09T14:37:32.234Z
+Stopped at: Completed 16-18-PLAN.md
 Resume file: None
