@@ -299,3 +299,30 @@ def test_time_pair_is_utc_and_ho_chi_minh() -> None:
     assert format_time_pair(T0) == "2026-10-09 03:00:00 UTC (2026-10-09 10:00:00 Asia/Ho_Chi_Minh)"
     with pytest.raises(ValueError, match="UTC-aware"):
         format_time_pair(T0.replace(tzinfo=None))
+
+
+_PAIR = "2026-10-09 03:00:00 UTC (2026-10-09 10:00:00 Asia/Ho_Chi_Minh)"
+_LABEL = "SHADOW — no real order"
+
+
+@pytest.mark.parametrize(
+    "bad_text",
+    [
+        "hello",
+        f"{_LABEL}\nTime: {_PAIR}",  # no mode
+        f"{_LABEL}\nMode: SHADOW",  # no time at all
+        f"{_LABEL}\nMode: SHADOW\nTime: 2026-10-09 03:00:00 UTC",  # one zone only
+        f"Mode: SHADOW\nTime: {_PAIR}",  # no label
+        f"{_LABEL}\nMode: SHADOW\nTime: {_PAIR}\nExpiry: 2026-10-09 07:00:00 UTC",  # lone UTC
+        f"{_LABEL}\nMode: SHADOW\nTime: 2026-10-09 03:00:00 UTC (2026-10-09 11:00:00 "
+        "Asia/Ho_Chi_Minh)",  # wrong offset
+    ],
+)
+def test_the_fake_bot_guard_rejects_unlabelled_or_single_zone_text(bad_text: str) -> None:
+    """Negative control: the guard that every other test relies on does fail on bad text."""
+    with pytest.raises(AssertionError):
+        assert_shadow_text(bad_text)
+
+
+def test_the_fake_bot_guard_accepts_a_good_text() -> None:
+    assert_shadow_text(f"{_LABEL}\nMode: SHADOW\nTime: {_PAIR}")

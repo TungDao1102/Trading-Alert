@@ -30,8 +30,12 @@ extension point so paper-core reuse keeps adapter isolation
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+import math
+import warnings
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from enum import Enum
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -251,14 +255,117 @@ class TelegramTextBot(Protocol):
     ) -> object: ...
 
 
+# --------------------------------------------------------------------------- #
+# Plan 16-04 (D-12, D-16): Telegram failures are classified HERE, once.
+# --------------------------------------------------------------------------- #
+
+
+class TelegramFailureKind(str, Enum):
+    """How a Telegram call failed, as far as the SHADOW layer needs to know.
+
+    `RATE_LIMITED` carries the server's retry_after. `MESSAGE_NOT_MODIFIED` is the benign edit of
+    a message to identical text. `TRANSIENT` is a network fault or timeout (worth a bounded
+    retry). `REJECTED` is a refusal a retry cannot fix (bad request, bot blocked, invalid token,
+    chat migrated). `UNKNOWN` is everything else and is never swallowed.
+
+    The mapping follows python-telegram-bot's documented exception classes; the wording of the
+    live Bot API error texts is not verified against the live service here (recorded in
+    docs/SOURCES.md by plan 16-17).
+    """
+
+    RATE_LIMITED = "RATE_LIMITED"
+    MESSAGE_NOT_MODIFIED = "MESSAGE_NOT_MODIFIED"
+    TRANSIENT = "TRANSIENT"
+    REJECTED = "REJECTED"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class TelegramFailure:
+    """A classified failure. `detail` is the exception CLASS NAME only: never message text."""
+
+    kind: TelegramFailureKind
+    retry_after_seconds: int | None
+    detail: str
+
+
+class TelegramSendError(Exception):
+    """A send or edit failed; carries the classified failure (no python-telegram-bot type)."""
+
+    def __init__(self, failure: TelegramFailure) -> None:
+        super().__init__(f"telegram {failure.kind.value}: {failure.detail}")
+        self.failure = failure
+
+
+def _whole_seconds(value: object) -> int:
+    """`RetryAfter.retry_after` is an int, or a timedelta once PTB_TIMEDELTA is on; round up."""
+    seconds = value.total_seconds() if isinstance(value, timedelta) else float(str(value))
+    return max(0, math.ceil(seconds))
+
+
+def classify_telegram_error(exc: BaseException) -> TelegramFailure:
+    """Map an exception to a `TelegramFailure` (the only place that knows PTB's classes).
+
+    Order matters: python-telegram-bot's `BadRequest` and `TimedOut` are subclasses of
+    `NetworkError`, so they are tested first.
+    """
+    from telegram import error as tg_error
+
+    detail = type(exc).__name__
+    if isinstance(exc, tg_error.RetryAfter):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # reading retry_after as int is deprecated in PTB 22.2
+            retry_after = exc.retry_after
+        return TelegramFailure(
+            TelegramFailureKind.RATE_LIMITED, _whole_seconds(retry_after), detail
+        )
+    if isinstance(exc, tg_error.BadRequest):
+        if "message is not modified" in str(exc).lower():
+            return TelegramFailure(TelegramFailureKind.MESSAGE_NOT_MODIFIED, None, detail)
+        return TelegramFailure(TelegramFailureKind.REJECTED, None, detail)
+    if isinstance(exc, (tg_error.Forbidden, tg_error.InvalidToken, tg_error.ChatMigrated)):
+        return TelegramFailure(TelegramFailureKind.REJECTED, None, detail)
+    if isinstance(exc, (tg_error.NetworkError, tg_error.TimedOut)):
+        return TelegramFailure(TelegramFailureKind.TRANSIENT, None, detail)
+    return TelegramFailure(TelegramFailureKind.UNKNOWN, None, detail)
+
+
 async def send_text(
     bot: TelegramTextBot,
     chat_id: str | int,
     text: str,
     keyboard: InlineKeyboardMarkup | None = None,
 ) -> object:
-    """Send one text message, with an optional keyboard."""
-    return await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+    """Send one text message, with an optional keyboard.
+
+    Any failure other than a programming error (ValueError, KeyError, TypeError) is raised as a
+    `TelegramSendError` carrying the classified failure. The original exception is not chained:
+    its message may carry request details.
+    """
+    try:
+        return await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+    except (ValueError, KeyError, TypeError):
+        raise
+    except Exception as exc:  # noqa: BLE001 - classified, never swallowed
+        raise TelegramSendError(classify_telegram_error(exc)) from None
+
+
+async def edit_text(
+    bot: TelegramTextBot,
+    chat_id: str | int,
+    message_id: int,
+    text: str,
+    keyboard: InlineKeyboardMarkup | None = None,
+) -> object:
+    """Edit one message's text (same failure handling as `send_text`)."""
+    try:
+        return await bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id, text=text, reply_markup=keyboard
+        )
+    except (ValueError, KeyError, TypeError):
+        raise
+    except Exception as exc:  # noqa: BLE001 - classified, never swallowed
+        raise TelegramSendError(classify_telegram_error(exc)) from None
 
 
 # --------------------------------------------------------------------------- #
@@ -378,11 +485,16 @@ __all__ = [
     "SKIP_PREFIX",
     "TELEGRAM_CALLBACK_DATA_MAX_BYTES",
     "TelegramBot",
+    "TelegramFailure",
+    "TelegramFailureKind",
+    "TelegramSendError",
     "TelegramTextBot",
     "build_approve_keyboard",
     "build_shadow_decision_keyboard",
     "build_simulate_keyboard",
     "build_skip_keyboard",
+    "classify_telegram_error",
+    "edit_text",
     "format_approve",
     "send_simulate",
     "send_text",

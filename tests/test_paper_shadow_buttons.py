@@ -556,3 +556,21 @@ def test_shadow_module_imports_no_telegram_and_no_execution() -> None:
     assert not [m for m in modules if m == "src.execution" or m.startswith("src.execution.")]
     # The checker is not vacuous: it does see the imports that are there.
     assert "src.adapters.telegram_notify" in modules
+
+
+def test_shadow_module_never_references_the_inert_simulate_keyboard() -> None:
+    path = Path(__file__).resolve().parent.parent / "src" / "paper" / "shadow.py"
+    names = {
+        node.id
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Name)
+    }
+    imported = {
+        alias.name
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+
+    assert not {"build_simulate_keyboard", "send_simulate"} & (names | imported)
+    assert "build_shadow_decision_keyboard" in imported

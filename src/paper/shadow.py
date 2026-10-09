@@ -48,16 +48,21 @@ from typing import Any, Final, Protocol
 from zoneinfo import ZoneInfo
 
 import structlog
+from tenacity import AsyncRetrying, RetryCallState, RetryError, wait_random_exponential
 
 from src.adapters.telegram_callbacks import CallbackKind, DispatchResult, ParsedCallback
 from src.adapters.telegram_callbacks import dispatch_callback as _dispatch_callback
 from src.adapters.telegram_notify import (
+    TelegramFailure,
+    TelegramFailureKind,
+    TelegramSendError,
     TelegramTextBot,
     build_shadow_decision_keyboard,
     format_approve,
     send_text,
 )
 from src.approval.mapping import ShortIdMapping, make_short_id_mapping
+from src.approval.replay import ApprovalAlreadyDecided
 from src.approval.tokens import issue_one_time_token, token_hash_of
 from src.backtest.semantics import TP1_QUANTITY_FRACTION
 from src.domain.approval import Approval
@@ -66,6 +71,12 @@ from src.domain.enums import ApprovalAction, ApprovalResult, RejectionReason
 from src.domain.journal import JournalEvent, correlated_event_id
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
+from src.paper.notify import (
+    NOTIFY_MAX_ATTEMPTS,
+    NOTIFY_MAX_DELAY_SECONDS,
+    NOTIFY_WAIT_MAX_SECONDS,
+    NOTIFY_WAIT_MULTIPLIER_SECONDS,
+)
 
 log = structlog.get_logger()
 
@@ -77,6 +88,8 @@ EVENT_SHADOW_ALERT_PENDING: Final = "SHADOW_ALERT_PENDING"
 EVENT_SHADOW_ALERT_SENT: Final = "SHADOW_ALERT_SENT"
 EVENT_SHADOW_ALERT_FAILED: Final = "SHADOW_ALERT_FAILED"
 EVENT_APPROVAL_EXPIRED: Final = "APPROVAL_EXPIRED"
+EVENT_PENDING_INVALIDATED: Final = "SHADOW_PENDING_INVALIDATED"
+REASON_RUNTIME_RESTART: Final = "RUNTIME_RESTART"
 
 _CONTEXT_SKIP_TOKEN: Final = "skip_raw_token"
 
@@ -489,12 +502,17 @@ def _classify(result: DispatchResult, prior: Approval | None) -> ShadowDecisionO
 
 @dataclass(frozen=True)
 class ShadowSendOutcome:
-    """What `send_shadow_alert` did. It never raises on a send failure and never approves."""
+    """What `send_shadow_alert` did. It never raises on a send failure and never approves.
+
+    On failure `failure` is the classified failure and `notice_text` the SHADOW-labelled failure
+    notice (journaled; no further Telegram text is sent after a failure).
+    """
 
     sent: bool
     attempts: int
     short_id: str
-    error_class: str
+    failure: TelegramFailure | None = None
+    notice_text: str = ""
 
 
 def _alert_event(
@@ -529,6 +547,99 @@ def _alert_event(
     )
 
 
+# --------------------------------------------------------------------------- #
+# Bounded send retry: the notify_simulate pattern, with retry_after honoured.
+# --------------------------------------------------------------------------- #
+
+
+def _failure_of(exc: BaseException | None) -> TelegramFailure:
+    if isinstance(exc, TelegramSendError):
+        return exc.failure
+    name = "UnknownError" if exc is None else type(exc).__name__
+    return TelegramFailure(TelegramFailureKind.UNKNOWN, None, name)
+
+
+def _failure_of_state(retry_state: RetryCallState) -> TelegramFailure:
+    outcome = retry_state.outcome
+    return _failure_of(None if outcome is None else outcome.exception())
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Transient faults only: programming errors and refusals fail at once (WR-02, fail closed)."""
+    if isinstance(exc, (ValueError, KeyError, TypeError)):
+        return False
+    if isinstance(exc, TelegramSendError):
+        return exc.failure.kind in (
+            TelegramFailureKind.RATE_LIMITED,
+            TelegramFailureKind.TRANSIENT,
+            TelegramFailureKind.UNKNOWN,
+        )
+    return True
+
+
+def _retryable_state(retry_state: RetryCallState) -> bool:
+    outcome = retry_state.outcome
+    if outcome is None or not outcome.failed:
+        return False
+    exc = outcome.exception()
+    return exc is not None and _is_retryable(exc)
+
+
+def _remaining_budget(retry_state: RetryCallState) -> float:
+    return NOTIFY_MAX_DELAY_SECONDS - (retry_state.seconds_since_start or 0.0)
+
+
+def _stop(retry_state: RetryCallState) -> bool:
+    """The `notify_simulate` stop (attempts or delay), plus: never wait past the budget."""
+    if retry_state.attempt_number >= NOTIFY_MAX_ATTEMPTS:
+        return True
+    remaining = _remaining_budget(retry_state)
+    if remaining <= 0:
+        return True
+    retry_after = _failure_of_state(retry_state).retry_after_seconds
+    return retry_after is not None and retry_after > remaining
+
+
+_BACKOFF = wait_random_exponential(
+    multiplier=NOTIFY_WAIT_MULTIPLIER_SECONDS, max=NOTIFY_WAIT_MAX_SECONDS
+)
+
+
+def _wait(retry_state: RetryCallState) -> float:
+    """The larger of the jittered backoff and retry_after, never past the remaining budget."""
+    retry_after = _failure_of_state(retry_state).retry_after_seconds or 0
+    wanted = max(float(_BACKOFF(retry_state)), float(retry_after))
+    return max(0.0, min(wanted, _remaining_budget(retry_state)))
+
+
+async def _send_bounded(
+    bot: TelegramTextBot,
+    chat_id: int | str,
+    text: str,
+    keyboard: Any,
+    sleep: Callable[[float], Awaitable[None]],
+) -> tuple[int, TelegramFailure | None]:
+    """Send with the existing retry budget. Returns `(attempts, failure or None)`; never raises."""
+    attempts = 0
+    try:
+        async for attempt in AsyncRetrying(
+            stop=_stop,
+            wait=_wait,
+            retry=_retryable_state,
+            reraise=True,
+            sleep=sleep,
+        ):
+            with attempt:
+                attempts += 1
+                await send_text(bot, chat_id, text, keyboard)
+    except RetryError as exc:  # pragma: no cover - reraise=True re-raises the cause instead
+        attempt_exc = exc.last_attempt.exception() if exc.last_attempt else None
+        return attempts, _failure_of(attempt_exc)
+    except Exception as exc:  # noqa: BLE001 - classified and journaled, never raised
+        return attempts, _failure_of(exc)
+    return attempts, None
+
+
 async def send_shadow_alert(
     *,
     stores: ShadowStores,
@@ -543,8 +654,12 @@ async def send_shadow_alert(
     now_utc: datetime,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> ShadowSendOutcome:
-    """Persist the parents and PENDING approvals, journal, then send the labelled alert."""
-    del sleep  # the bounded retry arrives with the failure paths
+    """Persist the parents and PENDING approvals, journal, then send the labelled alert.
+
+    Order: parents first (signal, plan, both approvals, the short-id mapping), the journal row
+    next, the send last. A send failure is journaled with its classified kind and approves
+    nothing; the approvals stay PENDING. The sleep is injectable so tests never wait.
+    """
     require_shadow(mode)
     text = format_shadow_alert(
         signal=signal,
@@ -588,25 +703,162 @@ async def send_shadow_alert(
             },
         )
     )
-    attempts = 1
-    error_class = ""
-    try:
-        await send_text(bot, chat_id, text, keyboard)
-    except Exception as exc:  # noqa: BLE001 - journaled by class name, never raised into the loop
-        error_class = type(exc).__name__
-    if error_class == "":
+    attempts, failure = await _send_bounded(bot, chat_id, text, keyboard, sleep)
+    if failure is None:
         stores.record_journal(_event(EVENT_SHADOW_ALERT_SENT, "sent", {"attempts": attempts}))
-    else:
+        return ShadowSendOutcome(sent=True, attempts=attempts, short_id=short_id)
+    notice = render_shadow_message(
+        ShadowMessageKind.SEND_FAILURE_NOTICE,
+        mode=mode,
+        now_utc=now_utc,
+        failure_kind=failure.kind.value,
+        retry_after_seconds=failure.retry_after_seconds,
+        signal_id=signal.signal_id,
+    )
+    stores.record_journal(
+        _event(
+            EVENT_SHADOW_ALERT_FAILED,
+            "failed",
+            {
+                "attempts": attempts,
+                "kind": failure.kind.value,
+                "retry_after_seconds": failure.retry_after_seconds,
+                "error_class": failure.detail,
+                "notice_text": notice,
+            },
+        )
+    )
+    return ShadowSendOutcome(
+        sent=False, attempts=attempts, short_id=short_id, failure=failure, notice_text=notice
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Decision replies: the only other sender in this module.
+# --------------------------------------------------------------------------- #
+
+
+def _outcome_from_text(text: str) -> ShadowDecisionOutcome:
+    """Fail-closed fallback when no dispatch record exists: only an explicit OK counts."""
+    if text.startswith("OK: APPROVED"):
+        return ShadowDecisionOutcome.APPROVED
+    if text.startswith("OK: SKIPPED"):
+        return ShadowDecisionOutcome.SKIPPED
+    if RejectionReason.APPROVAL_EXPIRED.value in text:
+        return ShadowDecisionOutcome.REJECTED_APPROVAL_EXPIRED
+    return ShadowDecisionOutcome.REJECTED_OTHER
+
+
+def make_shadow_reply_fn(
+    bot: TelegramTextBot,
+    *,
+    mode: Mode,
+    clock: Callable[[], datetime],
+    book: ShadowApprovalBook | None = None,
+) -> Callable[[int, str], Awaitable[None]]:
+    """The `reply_text_fn` for `on_callback`: every outcome text goes through the composer.
+
+    The adapter's own outcome string becomes only the `detail` of a DECISION_RESULT message.
+    With the approval `book`, the outcome (APPROVED, SKIPPED, REPLAYED, expired, rejected) comes
+    from the book's record of the last dispatch; without it, from the text, failing closed. The
+    decision is already made when the reply goes out, so a failed reply is logged and never
+    raised into the handler.
+    """
+    require_shadow(mode)
+
+    async def reply(chat_id: int, text: str) -> None:
+        record = None if book is None else book.take_last_decision()
+        outcome = _outcome_from_text(text) if record is None else record.outcome
+        message = render_shadow_message(
+            ShadowMessageKind.DECISION_RESULT,
+            mode=mode,
+            now_utc=clock(),
+            outcome=outcome,
+            detail=text,
+            expiry_utc=None if record is None else record.expiry_utc,
+        )
+        try:
+            await send_text(bot, chat_id, message)
+        except TelegramSendError as exc:
+            log.warning(
+                "paper.shadow.reply_failed",
+                kind=exc.failure.kind.value,
+                detail=exc.failure.detail,
+            )
+
+    return reply
+
+
+# --------------------------------------------------------------------------- #
+# Restart: raw tokens do not survive, so pending approvals are expired (Pitfall P13).
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class RestartReport:
+    """Approvals decided EXPIRED by the sweep, and those left PENDING.
+
+    PostgreSQL allows ONE decided approval per plan, so the sibling of an expired approval
+    cannot be decided; it stays PENDING with a token nobody holds any more, which makes it
+    undecidable.
+    """
+
+    expired: list[Approval]
+    left_pending: list[Approval]
+
+
+def invalidate_pending_on_restart(stores: ShadowStores, now_utc: datetime) -> RestartReport:
+    """Decide every PENDING approval EXPIRED (reason RUNTIME_RESTART) and journal it.
+
+    The alternative, deterministic tokens that survive a restart, would be a design change that
+    needs its own decision and is not taken: expiring fails closed with no new token design.
+    """
+    expired: list[Approval] = []
+    left_pending: list[Approval] = []
+    for pending in sorted(stores.list_pending_approvals(), key=lambda a: a.approval_id):
+        decided = replace(
+            pending,
+            result=ApprovalResult.EXPIRED,
+            status=ApprovalResult.EXPIRED,
+            acted_at_utc=now_utc,
+            actor_id=pending.actor_id or REASON_RUNTIME_RESTART,
+        )
+        try:
+            stores.save_atomic(decided, None)
+        except ApprovalAlreadyDecided:
+            left_pending.append(pending)
+            outcome = "LEFT_PENDING_SIBLING_DECIDED"
+        else:
+            expired.append(decided)
+            outcome = ApprovalResult.EXPIRED.value
         stores.record_journal(
-            _event(
-                EVENT_SHADOW_ALERT_FAILED,
-                "failed",
-                {"attempts": attempts, "error_class": error_class},
+            JournalEvent(
+                journal_event_id=correlated_event_id(
+                    prefix="shadow",
+                    correlation_id=f"approval:{pending.approval_id}",
+                    event_type=EVENT_PENDING_INVALIDATED,
+                    entity_id=pending.approval_id,
+                    step="restart",
+                ),
+                occurred_at_utc=now_utc,
+                event_type=EVENT_PENDING_INVALIDATED,
+                entity_type="Approval",
+                entity_id=pending.approval_id,
+                correlation_id=f"approval:{pending.approval_id}",
+                signal_id=pending.signal_id,
+                trade_plan_id=pending.trade_plan_id,
+                approval_id=pending.approval_id,
+                payload_json=_journal_payload(
+                    {
+                        "reason_code": REASON_RUNTIME_RESTART,
+                        "outcome": outcome,
+                        "previous_status": ApprovalResult.PENDING.value,
+                        "mode": Mode.SHADOW.value,
+                    }
+                ),
             )
         )
-    return ShadowSendOutcome(
-        sent=error_class == "", attempts=attempts, short_id=short_id, error_class=error_class
-    )
+    return RestartReport(expired=expired, left_pending=left_pending)
 
 
 __all__ = [
@@ -616,6 +868,7 @@ __all__ = [
     "IssuedApprovals",
     "Mode",
     "ModeNotConstructible",
+    "RestartReport",
     "ShadowApprovalBook",
     "ShadowDecisionOutcome",
     "ShadowMessageKind",
@@ -623,6 +876,8 @@ __all__ = [
     "ShadowStores",
     "format_shadow_alert",
     "format_time_pair",
+    "invalidate_pending_on_restart",
+    "make_shadow_reply_fn",
     "render_shadow_message",
     "require_shadow",
     "send_shadow_alert",
