@@ -720,3 +720,236 @@ async def test_the_adapter_exposes_a_read_only_snapshot_of_the_sdk_connections()
 
     assert isinstance(snapshot, tuple)
     assert [c.url_path for c in snapshot] == ["market", "public", "private"]
+
+
+# --------------------------------------------------------------------------- #
+# Task 4: measurement fields (socket count, arrival latency, clock skew, REST 1m lag).
+# --------------------------------------------------------------------------- #
+
+LAG_ARGS = ("--rest-lag-poll-interval-ms", "250", "--rest-lag-max-wait-seconds", "5")
+
+
+def test_the_sdk_socket_count_is_recorded_after_connect(tmp_path: Path) -> None:
+    _rig, evidence, code = _run_rig(out=tmp_path)
+
+    counts = evidence["connection_count"]
+    assert code == 0
+    assert counts["status"] == "OK"
+    assert counts["after_connect"] == 3
+    assert counts["after_rebuild"] is None, "no forced disconnect, no rebuild"
+    assert counts["expected_sdk_paths"] == 3
+    assert counts["private_established"] is True
+
+
+def test_two_sockets_are_an_observation_not_a_failure(tmp_path: Path) -> None:
+    dry = smoke.DryRunConfig(url_paths=("market", "public"))
+
+    _rig, evidence, code = _run_rig(out=tmp_path, dry=dry)
+
+    counts = evidence["connection_count"]
+    assert code == 0
+    assert counts["after_connect"] == 2
+    assert counts["private_established"] is False
+    assert smoke.check_evidence_schema(evidence) == []
+
+
+def test_the_socket_count_after_the_rebuild_is_recorded(tmp_path: Path) -> None:
+    _rig, evidence, _code = _run_rig("--force-disconnect-after-seconds", "20", out=tmp_path)
+
+    counts = evidence["connection_count"]
+    assert counts["after_connect"] == 3
+    assert counts["after_rebuild"] == 3
+
+
+def test_arrival_latency_is_receipt_minus_close_per_interval_on_the_injected_clock(
+    tmp_path: Path,
+) -> None:
+    _rig, evidence, _code = _run_rig(out=tmp_path)
+
+    arrival = evidence["arrival_latency_ms_by_interval"]
+    assert arrival["status"] == "OK"
+    # The fake feed delivers 150 ms after the boundary; the close time is boundary - 1 ms.
+    assert arrival["by_interval"]["1m"] == {"count": 2, "min": 151, "max": 151}
+    assert arrival["by_interval"]["1h"] == {"count": 1, "min": 151, "max": 151}
+    assert arrival["future_close_events"] == 0
+
+
+def test_clock_skew_is_server_time_minus_the_injected_clock_at_start_and_end(
+    tmp_path: Path,
+) -> None:
+    dry = smoke.DryRunConfig(host_behind_server_ms=3000)
+
+    _rig, evidence, _code = _run_rig(out=tmp_path, dry=dry)
+
+    skew = evidence["clock_skew_ms"]
+    assert skew["status"] == "OK"
+    assert skew["start"] == 3000, "server time is ahead of the host clock"
+    assert skew["end"] == 3000
+
+
+def test_a_host_clock_behind_the_server_yields_future_close_events(tmp_path: Path) -> None:
+    dry = smoke.DryRunConfig(host_behind_server_ms=3000)
+
+    _rig, evidence, _code = _run_rig(out=tmp_path, dry=dry)
+
+    arrival = evidence["arrival_latency_ms_by_interval"]
+    # Every closed event is received 2.85 s before its own close time on the host clock: the
+    # case in which the runtime tick would drop a valid bar. They stay in the closed counts.
+    assert arrival["future_close_events"] == 3
+    assert evidence["closed_events_by_interval"] == {"1h": 1, "1m": 2}
+    assert arrival["by_interval"]["1m"]["min"] < 0
+
+
+def test_a_failing_server_time_is_an_error_string_in_the_skew_object(tmp_path: Path) -> None:
+    config = smoke.parse_config(
+        ["--dry-run", "--out", str(tmp_path), "--duration-seconds", "150", "--no-archive-fetch"]
+    )
+    rig = smoke.build_dry_run_rig(config, smoke.DryRunConfig())
+
+    async def failing_server_time() -> Any:
+        raise TimeoutError("time endpoint unreachable")
+
+    rig.public.server_time = failing_server_time  # type: ignore[method-assign]
+    try:
+        evidence, code = asyncio.run(smoke.run_smoke(config, rig))
+    finally:
+        rig.cleanup()
+
+    skew = evidence["clock_skew_ms"]
+    assert code == 1
+    assert skew["status"] == "ERROR"
+    assert isinstance(skew["start"], str)
+    assert "TimeoutError" in skew["start"]
+    assert smoke.check_evidence_schema(evidence) == []
+
+
+def test_the_rest_lag_probe_records_lag_equal_to_polls_times_the_poll_interval(
+    tmp_path: Path,
+) -> None:
+    dry = smoke.DryRunConfig(rest_trade_lag_ms=750, rest_mark_lag_ms=1500)
+
+    _rig, evidence, code = _run_rig(
+        "--rest-lag-probe-minutes", "2", *LAG_ARGS, out=tmp_path, dry=dry
+    )
+
+    lag = evidence["rest_minute_lag"]
+    assert code == 0
+    assert lag["status"] == "OK"
+    assert [m["trade_first_seen_after_close_ms"] for m in lag["minutes"]] == [750, 750]
+    assert [m["mark_first_seen_after_close_ms"] for m in lag["minutes"]] == [1500, 1500]
+    assert [m["polls"] for m in lag["minutes"]] == [7, 7]
+    assert lag["summary"] == {
+        "trade_max_ms": 750,
+        "trade_median_ms": 750,
+        "mark_max_ms": 1500,
+        "mark_median_ms": 1500,
+        "not_seen_count": 0,
+    }
+    assert lag["settings"]["poll_interval_ms"] == 250
+    assert lag["settings"]["max_wait_seconds"] == 5
+    assert lag["settings"]["label"] == "measurement setting, not a threshold"
+
+
+def test_a_bar_that_never_appears_is_recorded_as_not_seen(tmp_path: Path) -> None:
+    dry = smoke.DryRunConfig(rest_trade_lag_ms=60_000, rest_mark_lag_ms=500)
+
+    _rig, evidence, _code = _run_rig(
+        "--rest-lag-probe-minutes", "1", *LAG_ARGS, out=tmp_path, dry=dry
+    )
+
+    minute = evidence["rest_minute_lag"]["minutes"][0]
+    assert minute["trade_first_seen_after_close_ms"] is None
+    assert minute["mark_first_seen_after_close_ms"] == 500
+    assert evidence["rest_minute_lag"]["summary"]["not_seen_count"] == 1
+    assert evidence["rest_minute_lag"]["summary"]["trade_max_ms"] is None
+
+
+@pytest.mark.parametrize(
+    "partial",
+    [(), ("--rest-lag-poll-interval-ms", "250"), ("--rest-lag-max-wait-seconds", "5")],
+)
+def test_the_probe_settings_are_required_whenever_the_probe_is_requested(
+    tmp_path: Path, partial: tuple[str, ...]
+) -> None:
+    code = smoke.main(
+        ["--dry-run", "--out", str(tmp_path), "--rest-lag-probe-minutes", "1", *partial],
+        environ={},
+    )
+
+    assert code == 2
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_no_probe_means_not_run_and_the_note_names_the_o07_table(tmp_path: Path) -> None:
+    _rig, evidence, _code = _run_rig(out=tmp_path)
+
+    assert evidence["rest_minute_lag"]["status"] == "NOT_RUN"
+    assert smoke.check_evidence_schema(evidence) == []
+    assert (
+        "observations for the O-07 table (plan 16-27), not thresholds"
+        in (evidence["observations_note"])
+    )
+
+
+def test_the_rate_limit_weight_is_null_with_a_reason_when_the_sdk_does_not_expose_it(
+    tmp_path: Path,
+) -> None:
+    _rig, evidence, _code = _run_rig("--rest-lag-probe-minutes", "1", *LAG_ARGS, out=tmp_path)
+
+    lag = evidence["rest_minute_lag"]
+    assert lag["weight_used_1m"] is None
+    assert lag["weight_used_1m_reason"] == "not exposed by the SDK response"
+
+
+def test_the_probe_finishes_before_the_forced_disconnect_starts(tmp_path: Path) -> None:
+    dry = smoke.DryRunConfig(rest_trade_lag_ms=750, rest_mark_lag_ms=1500)
+
+    _rig, evidence, _code = _run_rig(
+        "--rest-lag-probe-minutes",
+        "1",
+        *LAG_ARGS,
+        "--force-disconnect-after-seconds",
+        "10",
+        out=tmp_path,
+        dry=dry,
+    )
+
+    # The probe covers the 12:00:00 close and ends at 12:00:01.500; the drop was requested at
+    # 11:59:40 but waits for the probe so the two measurements never overlap.
+    assert evidence["rest_minute_lag"]["status"] == "OK"
+    assert evidence["forced_disconnect"]["disconnected_at_utc"] >= "2026-10-09T12:00:01.500Z"
+    assert smoke.check_forced_disconnect(evidence).ok
+
+
+MEASUREMENT_FUNCTIONS = (
+    "summarize_arrival",
+    "measure_clock_skew",
+    "run_rest_lag_probe",
+    "summarize_rest_lag",
+    "describe_connection_count",
+)
+
+
+def test_no_measured_value_is_compared_with_a_numeric_literal() -> None:
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+    assert set(MEASUREMENT_FUNCTIONS) <= set(functions), "measurement functions must exist"
+    offenders: list[str] = []
+    for name in MEASUREMENT_FUNCTIONS:
+        for node in ast.walk(functions[name]):
+            if not isinstance(node, ast.Compare):
+                continue
+            operands = [node.left, *node.comparators]
+            for operand in operands:
+                is_number = (
+                    isinstance(operand, ast.Constant)
+                    and isinstance(operand.value, int | float)
+                    and not isinstance(operand.value, bool)
+                )
+                if is_number:
+                    offenders.append(f"{name}:{node.lineno}")
+    assert offenders == []
