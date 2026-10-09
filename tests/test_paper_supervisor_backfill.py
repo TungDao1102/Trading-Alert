@@ -767,3 +767,26 @@ async def test_stop_cancels_a_recovery_that_is_still_running() -> None:
 
     assert rig.backfilled == []
     assert rig.supervisor._held == []
+
+
+async def test_stop_cancels_a_rebuild_that_is_still_running() -> None:
+    """Cancellation is never retried by the bounded rebuild loop."""
+    rig = _make_rig(rest=_pages(), now=_NOW3)
+    await rig.supervisor.start()
+    blocked = asyncio.Event()
+    attempts = 0
+
+    async def _rebuild_that_never_finishes() -> None:
+        nonlocal attempts
+        attempts += 1
+        await blocked.wait()
+
+    rig.adapter.rebuild = _rebuild_that_never_finishes  # type: ignore[method-assign]
+    rig.fake.simulate_unsolicited_close()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    await asyncio.wait_for(rig.supervisor.stop(), timeout=2)
+
+    assert attempts == 1, "a cancelled rebuild is not retried"
+    assert rig.events == [(str(RuntimeEventType.WS_DISCONNECT), rig.supervisor._clock())]

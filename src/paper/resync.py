@@ -17,6 +17,7 @@ WS surface stays behind `src/adapters/paper_ws.py`.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
@@ -197,7 +198,9 @@ async def backfill_missed_closes(
     # 120 s budget and masking deterministic faults as transient
     # (WR-02).
     def _is_transient(exc: BaseException) -> bool:
-        return not isinstance(exc, (ValueError, KeyError, TypeError))
+        # Cancellation is never transient: tenacity records any BaseException as a failed
+        # attempt, so without this a cancelled backfill (supervisor stop) would be retried.
+        return not isinstance(exc, (ValueError, KeyError, TypeError, asyncio.CancelledError))
 
     retry = tenacity.retry_if_exception(_is_transient)
     stop = tenacity.stop_after_attempt(RESYNC_MAX_ATTEMPTS) | tenacity.stop_after_delay(
