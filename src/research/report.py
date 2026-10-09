@@ -36,6 +36,14 @@ COST_FIELD_LINE: Final = (
     "modeled_costs_per_unit is None on v2 filled TradeRecords (D052-open, O-10); no figure uses it"
 )
 
+# Deferred and untouched items, stated in every run log (D-30; D052 item h, D046 item 6, G3-012).
+# Nothing in feature code or in a parameter set changes in this plan.
+DEFERRED_FEATURE_LINE: Final = (
+    "incremental feature series deferred (D052 item h); any change must be an "
+    "exact-equivalence refactor"
+)
+COST_TO_RISK_LINE: Final = "max_cost_to_risk unchanged (D046 item 6)"
+
 
 def count_mark_hole_trades(trades: Sequence[Mapping[str, Any]]) -> int:
     """Filled trades whose `coverage_note` records a mark-price hole (OQ-1, report only).
@@ -110,11 +118,15 @@ def render_run_report(
         *render_plateau(plateau),
         *(mark_hole_line(count, pid) for pid, count in mark_hole_trade_counts.items()),
         COST_FIELD_LINE,
+        DEFERRED_FEATURE_LINE,
+        COST_TO_RISK_LINE,
     ]
 
 
 __all__ = [
     "COST_FIELD_LINE",
+    "COST_TO_RISK_LINE",
+    "DEFERRED_FEATURE_LINE",
     "MARK_HOLE_MARKER",
     "count_mark_hole_trades",
     "mark_hole_line",

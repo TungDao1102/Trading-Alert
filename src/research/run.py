@@ -19,6 +19,7 @@ import json
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from src.adapters.code_version import read_code_version
@@ -212,6 +213,7 @@ def run_research(
     raw_root: Path,
     output_dir: Path,
     repo_root: Path,
+    time_run: bool = False,
 ) -> tuple[ExperimentRecord, ...]:
     """Run the authorized manifest and grid over the development and validation windows.
 
@@ -221,6 +223,10 @@ def run_research(
     assembled and again over all records before the first write: a rerun stops at its first
     window and writes nothing. Records are written only after every window has run, each to
     `<experiment_id>.json` created exclusively (an existing file is never overwritten).
+
+    `time_run` (D-30, G4-009) adds one `timing` line per split to the run log: wall seconds from
+    `perf_counter`, never written into a record, so identity and digests do not move. No
+    memory tracing is started.
     """
     require_authorized(authorization, manifest=manifest, grid=grid)
     _check_grid_is_registered(grid)
@@ -230,8 +236,10 @@ def run_research(
     code_version = read_code_version(repo_root)
     records: list[ExperimentRecord] = []
     trade_lists: list[list[dict[str, Any]]] = []
+    timing_lines: list[str] = []
     for point in grid.points:
         for window in research_splits(manifest):
+            started = perf_counter()
             record, trade_list = _run_split(
                 manifest=manifest,
                 grid=grid,
@@ -241,6 +249,13 @@ def run_research(
                 constraints=constraints,
                 code_version=code_version,
             )
+            elapsed = perf_counter() - started
+            if time_run:
+                timing_lines.append(
+                    f"timing parameter_set_id={point.parameter_set_id} "
+                    f"split_role={window.role} split_start_utc={window.start_utc.isoformat()} "
+                    f"wall_seconds={elapsed:.3f}"
+                )
             _refuse_if_recorded(output_dir, record)
             records.append(record)
             trade_lists.append(trade_list)
@@ -267,7 +282,7 @@ def run_research(
             f"split_start_utc={record.split_start_utc.isoformat()} trades={len(trade_list)}",
             flush=True,
         )
-    for line in report_lines:
+    for line in [*report_lines, *timing_lines]:
         print(line, flush=True)
     return tuple(records)
 
@@ -378,6 +393,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--raw-root", type=Path, required=True, help="published data root")
     parser.add_argument("--output-dir", type=Path, required=True, help="experiment record dir")
     parser.add_argument("--repo-root", type=Path, default=_REPO_ROOT, help="git repository root")
+    parser.add_argument(
+        "--time-run",
+        action="store_true",
+        help="print wall-clock seconds per split in the run log (no memory tracing; records "
+        "are unchanged)",
+    )
     return parser
 
 
@@ -399,6 +420,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raw_root=args.raw_root,
             output_dir=args.output_dir,
             repo_root=args.repo_root,
+            time_run=args.time_run,
         )
     except RunNotAuthorized as exc:
         print(f"run refused: {exc.reason}", file=sys.stderr)
