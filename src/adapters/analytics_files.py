@@ -141,6 +141,14 @@ _PAPER_DATETIME_FIELDS = (
     "order_submitted_at_utc",
     "fill_time_utc",
 )
+# Plan 16-35 (D-15): optional SHADOW keys of a paper record. Absent means None / False, so an
+# evidence file written before Phase 16 loads exactly as before; any other unknown key is still
+# refused by `PaperRecord(**fields)`.
+_PAPER_OPTIONAL_DATETIME_FIELDS = (
+    "approval_requested_at_utc",
+    "confirm_requested_at_utc",
+    "confirmed_at_utc",
+)
 _FAMILY_DECISION_KEYS = (
     "family_id",
     "status",
@@ -695,6 +703,12 @@ def _load_paper_record(raw: Any, index: int) -> PaperRecord:
     for name in _PAPER_DATETIME_FIELDS:
         value = _require_key(raw, name, EvidenceFileError, where)
         fields[name] = None if value is None else _parse_utc(value, name, EvidenceFileError, where)
+    for name in _PAPER_OPTIONAL_DATETIME_FIELDS:
+        if name in raw:
+            value = raw[name]
+            fields[name] = (
+                None if value is None else _parse_utc(value, name, EvidenceFileError, where)
+            )
     try:
         return PaperRecord(**fields)
     except Exception as exc:  # missing/extra field or identity validation failure

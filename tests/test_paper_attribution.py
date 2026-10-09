@@ -869,3 +869,38 @@ def test_unknown_attribution_string_raises_value_error() -> None:
         assert False, "unknown status string must raise ValueError"
     except ValueError:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Plan 16-35 - the SHADOW attribution of an untouched plan is the existing PAPER-02 rule.
+# --------------------------------------------------------------------------- #
+
+
+def test_shadow_attribution_of_an_untouched_expired_plan_matches_the_existing_rule() -> None:
+    """07-CONTEXT D-03 (line 24): expired plans are retained as opportunity with a reason code.
+
+    The legacy assembler (Case 3) gives `[system, opportunity(EXPIRED)]` for an expired plan;
+    `attribute_shadow_outcome` returns the same pair for a SHADOW plan nobody touched.
+    """
+    from src.paper.attribution import (
+        AttributionKind,
+        ShadowOutcome,
+        attribute_shadow_outcome,
+    )
+    from src.paper.journal import assemble_paper_record
+
+    case_dir = PHASE7_FIXTURES_DIR / "attribution_split"
+    case_input = _load_input(case_dir)
+    expired_case = next(c for c in case_input["cases"] if c["kind"] == "expired")
+    records = assemble_paper_record(
+        epoch_id=case_input["epoch_id"],
+        signal=expired_case["signal"],
+        trade_plan=expired_case["trade_plan"],
+        approval=None,
+        order=None,
+        fill=None,
+        expired_at_utc=expired_case["expired_at_utc"],
+    )
+    kind, reason = attribute_shadow_outcome(ShadowOutcome(plan_expired=True))
+    assert (records[1].attribution, records[1].reason_code) == (kind, reason)
+    assert kind == AttributionKind.OPPORTUNITY and reason == "EXPIRED"

@@ -28,7 +28,13 @@ from typing import Any
 
 from src.domain.canonical import sha256_hex
 
-from .attribution import APPROVAL_DELAY_LAG_SECONDS, AttributionKind
+from .attribution import (
+    APPROVAL_DELAY_LAG_SECONDS,
+    EVENT_CONFIRMED,
+    AttributionKind,
+    ShadowOutcome,
+    attribute_shadow_outcome,
+)
 
 # The only mode a Phase 16 record may carry (D-15). A record without a mode is a production-path
 # record of Phases 7 to 10 and keeps its canonical form byte for byte.
@@ -254,6 +260,72 @@ def _confirm_timestamps(
     return issued, confirmed
 
 
+def _assemble_shadow_unfilled(
+    *,
+    kind: AttributionKind,
+    reason: str,
+    epoch_id: str,
+    identity: dict[str, str],
+    signal_detected_at_utc: datetime,
+    approval: dict[str, Any] | None,
+    confirm: dict[str, Any] | None,
+    test_only: bool,
+) -> list[PaperRecord]:
+    """Rows of a SHADOW plan that was never executed: system alone, or system + opportunity."""
+
+    def _row(
+        attribution: AttributionKind, reason_code: str, **extra: datetime | None
+    ) -> PaperRecord:
+        return PaperRecord(
+            attribution=attribution,
+            epoch_id=epoch_id,
+            strategy_id=identity["strategy_id"],
+            strategy_version=identity["strategy_version"],
+            parameter_set_id=identity["parameter_set_id"],
+            parameter_set_hash=identity["parameter_set_hash"],
+            experiment_id=identity["experiment_id"],
+            symbol=identity["symbol"],
+            signal_id=identity["signal_id"],
+            plan_hash=identity["plan_hash"],
+            reason_code=reason_code,
+            signal_detected_at_utc=signal_detected_at_utc,
+            approval_acted_at_utc=extra.get("approval_acted_at_utc"),
+            order_submitted_at_utc=None,
+            fill_time_utc=None,
+            mode=SHADOW_MODE,
+            approval_requested_at_utc=extra.get("approval_requested_at_utc"),
+            confirm_requested_at_utc=extra.get("confirm_requested_at_utc"),
+            confirmed_at_utc=extra.get("confirmed_at_utc"),
+            test_only=test_only,
+        )
+
+    system_row = _row(AttributionKind.SYSTEM, "")
+    if kind == AttributionKind.SYSTEM:
+        if approval is not None or confirm is not None:
+            raise ValueError("an untouched plan carries no approval or confirm data")
+        return [system_row]
+
+    requested: datetime | None = None
+    acted: datetime | None = None
+    if approval is not None:
+        if _is_human_action(approval):
+            requested = _parse_utc(approval.get("requested_at_utc"))
+            acted = _parse_utc(approval.get("acted_at_utc"))
+    issued: datetime | None = None
+    if confirm is not None:
+        if confirm.get("confirmed_at_utc") is not None:
+            raise ValueError("a confirmed plan is not an opportunity")
+        issued = _parse_utc(confirm.get("confirm_requested_at_utc"))
+    opportunity_row = _row(
+        AttributionKind.OPPORTUNITY,
+        reason,
+        approval_requested_at_utc=requested,
+        approval_acted_at_utc=acted,
+        confirm_requested_at_utc=issued,
+    )
+    return [system_row, opportunity_row]
+
+
 # --------------------------------------------------------------------------- #
 # Public entry point — assemble_paper_record.
 # --------------------------------------------------------------------------- #
@@ -272,6 +344,7 @@ def assemble_paper_record(
     mode: str | None = None,
     confirm: dict[str, Any] | None = None,
     test_only: bool = False,
+    shadow_outcome: ShadowOutcome | None = None,
 ) -> list[PaperRecord]:
     """Assemble a paper record (or pair) from a loop outcome.
 
@@ -303,6 +376,13 @@ def assemble_paper_record(
     user-executed-sim row; the signal + `APPROVAL_DELAY_LAG_SECONDS`
     constant is used only for a record with no human action (SIMULATE).
     Without `mode` the behaviour is exactly that of Phases 7 to 10.
+
+    With `shadow_outcome` (SHADOW only) the attribution of the plan comes from
+    `attribute_shadow_outcome`: APPROVE then CONFIRM is the filled pair; SKIP,
+    CANCEL, a refused press, a confirm cancel or expiry and an untouched
+    expired plan give `[system_row, opportunity_row]` with the reason from
+    the journal; an untouched plan that has not expired gives `[system_row]`.
+    Order and fill legs are refused unless the outcome is user-executed-sim.
 
     The function is a pure function of its inputs — no I/O, no clock
     reads, no randomness. The ORM layer maps these records onto
@@ -339,6 +419,36 @@ def assemble_paper_record(
         raise ValueError("ambiguous outcome: skip_reason and expired_at_utc both set")
     if skip_reason is not None and not skip_reason:
         raise ValueError("skip_reason must be a non-empty string")
+
+    if mode == SHADOW_MODE and shadow_outcome is None and approval is not None:
+        if order is not None and fill is not None and _is_human_action(approval):
+            # Filled legs with a human APPROVE: the only outcome that can fill is APPROVE + CONFIRM.
+            shadow_outcome = ShadowOutcome(approval_action="APPROVE", confirm_event=EVENT_CONFIRMED)
+    if shadow_outcome is not None:
+        if mode != SHADOW_MODE:
+            raise ValueError("shadow_outcome is only valid for mode='SHADOW'")
+        if skip_reason is not None or expired_at_utc is not None:
+            raise ValueError("ambiguous outcome: shadow_outcome with skip_reason/expired_at_utc")
+        kind, shadow_reason = attribute_shadow_outcome(shadow_outcome)
+        if kind != AttributionKind.USER_EXECUTED_SIM:
+            if order is not None or fill is not None:
+                raise ValueError(f"order/fill legs given for a {kind.value} outcome")
+            return _assemble_shadow_unfilled(
+                kind=kind,
+                reason=shadow_reason,
+                epoch_id=epoch_id,
+                identity=identity,
+                signal_detected_at_utc=signal_detected_at_utc,
+                approval=approval,
+                confirm=confirm,
+                test_only=test_only,
+            )
+        if approval is None or order is None or fill is None:
+            raise ValueError(
+                "PARTIAL_LEG: a user-executed-sim outcome needs approval, order and fill"
+            )
+        if not _is_human_action(approval):
+            raise ValueError("a user-executed-sim outcome needs a human approval action")
 
     # Case 1: filled in simulation — system + user-executed-sim.
     if approval is not None and order is not None and fill is not None:
