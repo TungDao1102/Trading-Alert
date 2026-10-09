@@ -8,8 +8,10 @@ write. What the authorization says and when it is written belong to the user (O-
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 
 from .manifest import DatasetManifest, ParameterGrid, grid_hash, manifest_hash
 
@@ -30,6 +32,64 @@ class RunAuthorization:
     manifest_hash: str
     authorized_at_utc: datetime
     statement: str
+    authorized_by: str
+
+
+_AUTHORIZATION_KEYS = frozenset(
+    {"grid_sha256", "manifest_sha256", "authorized_at_utc", "statement", "authorized_by"}
+)
+
+
+def _is_hex64(value: object) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    )
+
+
+def _reject_number(text: str) -> object:
+    raise ValueError("fractional numbers are not part of an authorization file")
+
+
+def load_authorization(path: Path) -> RunAuthorization:
+    """Read the user-committed authorization file (checkpoint O-03a, option a).
+
+    The file is a JSON object with exactly `grid_sha256` and `manifest_sha256` (64 lowercase
+    hex), `authorized_at_utc` (ISO-8601 with a UTC offset), `statement` and `authorized_by`
+    (non-empty strings). An absent or unreadable file is `RunNotAuthorized("missing")`;
+    anything else wrong with it is `RunNotAuthorized("malformed")`.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        raise RunNotAuthorized("missing") from None
+    try:
+        payload = json.loads(text, parse_float=_reject_number)
+    except ValueError:
+        raise RunNotAuthorized("malformed") from None
+    if not isinstance(payload, dict) or set(payload) != _AUTHORIZATION_KEYS:
+        raise RunNotAuthorized("malformed")
+    if not (_is_hex64(payload["grid_sha256"]) and _is_hex64(payload["manifest_sha256"])):
+        raise RunNotAuthorized("malformed")
+    for key in ("statement", "authorized_by"):
+        value = payload[key]
+        if not isinstance(value, str) or not value.strip():
+            raise RunNotAuthorized("malformed")
+    stamp = payload["authorized_at_utc"]
+    if not isinstance(stamp, str):
+        raise RunNotAuthorized("malformed")
+    try:
+        authorized_at = datetime.fromisoformat(stamp)
+    except ValueError:
+        raise RunNotAuthorized("malformed") from None
+    if authorized_at.tzinfo is None or authorized_at.utcoffset() != timedelta(0):
+        raise RunNotAuthorized("malformed")
+    return RunAuthorization(
+        grid_hash=payload["grid_sha256"],
+        manifest_hash=payload["manifest_sha256"],
+        authorized_at_utc=authorized_at,
+        statement=payload["statement"],
+        authorized_by=payload["authorized_by"],
+    )
 
 
 def require_authorized(
@@ -47,4 +107,4 @@ def require_authorized(
         raise RunNotAuthorized("manifest_hash_mismatch")
 
 
-__all__ = ["RunAuthorization", "RunNotAuthorized", "require_authorized"]
+__all__ = ["RunAuthorization", "RunNotAuthorized", "load_authorization", "require_authorized"]

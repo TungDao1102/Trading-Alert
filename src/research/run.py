@@ -11,6 +11,7 @@ writes nothing outside the output directory.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import sys
@@ -26,18 +27,36 @@ from src.data.case_input import ENGINE_SERIES, build_case_input_data
 from src.data.minute_source import ParquetMinuteSource
 from src.domain.registry import load_parameter_set
 
-from .authorization import RunAuthorization, require_authorized
+from .authorization import (
+    RunAuthorization,
+    RunNotAuthorized,
+    load_authorization,
+    require_authorized,
+)
 from .manifest import (
     DatasetManifest,
     GridPoint,
     ManifestError,
     ParameterGrid,
     SplitWindow,
+    load_grid,
+    load_manifest,
     research_splits,
 )
 
 EXIT_OK = 0
 EXIT_REFUSED = 2
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+class ExperimentAlreadyRecorded(Exception):  # noqa: N818 - the name is the plan's public contract
+    """A record for this `experiment_id` already exists: a new iteration is a new registration."""
+
+    def __init__(self, experiment_id: str) -> None:
+        self.experiment_id = experiment_id
+        super().__init__(f"experiment_already_recorded: {experiment_id}")
+
 
 _RUN_TYPE = "CANDIDATE"
 _CONSTRAINT_KEY = "constraint_history"
@@ -124,7 +143,7 @@ def _run_split(
     raw_root: Path,
     constraints: list[dict[str, Any]],
     code_version: Any,
-) -> ExperimentRecord:
+) -> tuple[ExperimentRecord, int]:
     parameter_set = load_parameter_set(grid.strategy_id, point.parameter_set_id)
     cost_dict = {key: str(value) for key, value in cost_slice(parameter_set.params).items()}
     data = build_case_input_data(
@@ -171,13 +190,7 @@ def _run_split(
         split_end_utc=window.end_utc,
         **identity,
     )
-    print(
-        f"recorded experiment_id={record.experiment_id} "
-        f"parameter_set_id={point.parameter_set_id} split_role={window.role} "
-        f"split_start_utc={window.start_utc.isoformat()} trades={len(output['trades'])}",
-        flush=True,
-    )
-    return record
+    return record, len(output["trades"])
 
 
 def _record_text(record: ExperimentRecord) -> str:
@@ -198,7 +211,10 @@ def run_research(
     """Run the authorized manifest and grid over the development and validation windows.
 
     Every refusal (authorization, registry hash, constraint file, dataset identity) happens
-    before any simulation. Records are written only after every window has run, each to
+    before any simulation. An `experiment_id` is only known once `assemble` has built the
+    record, so the rerun check (`ExperimentAlreadyRecorded`) runs right after each window is
+    assembled and again over all records before the first write: a rerun stops at its first
+    window and writes nothing. Records are written only after every window has run, each to
     `<experiment_id>.json` created exclusively (an existing file is never overwritten).
     """
     require_authorized(authorization, manifest=manifest, grid=grid)
@@ -208,39 +224,101 @@ def run_research(
 
     code_version = read_code_version(repo_root)
     records: list[ExperimentRecord] = []
+    trade_counts: list[int] = []
     for point in grid.points:
         for window in research_splits(manifest):
-            records.append(
-                _run_split(
-                    manifest=manifest,
-                    grid=grid,
-                    point=point,
-                    window=window,
-                    raw_root=raw_root,
-                    constraints=constraints,
-                    code_version=code_version,
-                )
+            record, trades = _run_split(
+                manifest=manifest,
+                grid=grid,
+                point=point,
+                window=window,
+                raw_root=raw_root,
+                constraints=constraints,
+                code_version=code_version,
             )
+            _refuse_if_recorded(output_dir, record)
+            records.append(record)
+            trade_counts.append(trades)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
     for record in records:
-        with (output_dir / f"{record.experiment_id}.json").open("x", encoding="utf-8") as handle:
-            handle.write(_record_text(record))
+        _refuse_if_recorded(output_dir, record)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for record, trades in zip(records, trade_counts, strict=True):
+        try:
+            with (output_dir / f"{record.experiment_id}.json").open(
+                "x", encoding="utf-8"
+            ) as handle:
+                handle.write(_record_text(record))
+        except FileExistsError:
+            raise ExperimentAlreadyRecorded(record.experiment_id) from None
+        print(
+            f"recorded experiment_id={record.experiment_id} "
+            f"parameter_set_id={record.parameter_set_id} split_role={record.split_role} "
+            f"split_start_utc={record.split_start_utc.isoformat()} trades={trades}",
+            flush=True,
+        )
     return tuple(records)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Entrypoint. The authorization input form is chosen by the user at checkpoint O-03a.
+def _refuse_if_recorded(output_dir: Path, record: ExperimentRecord) -> None:
+    if (output_dir / f"{record.experiment_id}.json").exists():
+        raise ExperimentAlreadyRecorded(record.experiment_id)
 
-    Until that form is implemented, no command line can authorize a run, so every invocation
-    is refused (fail closed).
-    """
-    del argv
-    print(
-        "run refused: no authorization input form is implemented (checkpoint O-03a pending)",
-        file=sys.stderr,
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m src.research.run",
+        allow_abbrev=False,
+        description=(
+            "Run an authorized research experiment (infrastructure only: no verdict, no "
+            "ranking, no selection). The only accepted authorization form is a "
+            "user-committed JSON file (checkpoint O-03a, option a)."
+        ),
     )
-    return EXIT_REFUSED
+    parser.add_argument("--manifest", type=Path, required=True, help="dataset manifest JSON")
+    parser.add_argument("--grid", type=Path, required=True, help="parameter grid JSON")
+    parser.add_argument(
+        "--authorization",
+        type=Path,
+        default=None,
+        help="user-committed authorization JSON (grid_sha256, manifest_sha256, "
+        "authorized_at_utc, statement, authorized_by)",
+    )
+    parser.add_argument("--raw-root", type=Path, required=True, help="published data root")
+    parser.add_argument("--output-dir", type=Path, required=True, help="experiment record dir")
+    parser.add_argument("--repo-root", type=Path, default=_REPO_ROOT, help="git repository root")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Entrypoint: refuse (exit 2, cause on stderr) unless the authorization file binds the
+    grid and manifest hashes of the files re-read from disk right now (REV-04, REV-05).
+    """
+    args = _parser().parse_args(argv)
+    try:
+        authorization = (
+            load_authorization(args.authorization) if args.authorization is not None else None
+        )
+        manifest = load_manifest(args.manifest)
+        grid = load_grid(args.grid)
+        run_research(
+            manifest=manifest,
+            grid=grid,
+            authorization=authorization,
+            raw_root=args.raw_root,
+            output_dir=args.output_dir,
+            repo_root=args.repo_root,
+        )
+    except RunNotAuthorized as exc:
+        print(f"run refused: {exc.reason}", file=sys.stderr)
+        return EXIT_REFUSED
+    except ManifestError as exc:
+        print(f"run refused: manifest_or_grid_invalid: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    except ExperimentAlreadyRecorded as exc:
+        print(f"run refused: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    return EXIT_OK
 
 
 if __name__ == "__main__":  # pragma: no cover

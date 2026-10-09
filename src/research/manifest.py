@@ -12,9 +12,12 @@ module defines the shape and the hash, never a value.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any
 
 from src.data.coverage import GapRange
@@ -253,6 +256,188 @@ def research_splits(manifest: DatasetManifest) -> tuple[SplitWindow, ...]:
     return tuple(windows)
 
 
+def _reject_float(text: str) -> Any:
+    raise ManifestError(
+        "a JSON number with a fraction or exponent is refused: write it as a string"
+    )
+
+
+def read_json_object(path: Path, what: str) -> dict[str, Any]:
+    """Read a UTF-8 JSON object from `path`; floats are refused (Decimal-only values)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ManifestError(f"{what} file unreadable ({type(exc).__name__})") from None
+    try:
+        loaded = json.loads(text, parse_float=_reject_float, parse_constant=_reject_float)
+    except ManifestError:
+        raise
+    except ValueError:
+        raise ManifestError(f"{what} file is not valid JSON") from None
+    if not isinstance(loaded, dict):
+        raise ManifestError(f"{what} file must hold a JSON object")
+    return loaded
+
+
+def _exact_keys(payload: Mapping[str, Any], expected: frozenset[str], what: str) -> None:
+    keys = set(payload)
+    if keys != expected:
+        missing = sorted(expected - keys)
+        extra = sorted(keys - expected)
+        raise ManifestError(f"{what} has missing keys {missing} and unknown keys {extra}")
+
+
+def _text(payload: Mapping[str, Any], key: str, what: str) -> str:
+    value = payload[key]
+    if not isinstance(value, str):
+        raise ManifestError(f"{what} {key} must be a string")
+    return value
+
+
+def _utc(payload: Mapping[str, Any], key: str, what: str) -> datetime:
+    try:
+        value = datetime.fromisoformat(_text(payload, key, what))
+    except ValueError:
+        raise ManifestError(f"{what} {key} must be an ISO-8601 UTC timestamp") from None
+    if value.tzinfo is None or value.utcoffset() != timedelta(0):
+        raise ManifestError(f"{what} {key} must carry a UTC offset (Z or +00:00)")
+    return value
+
+
+def _decimal(payload: Mapping[str, Any], key: str, what: str) -> Decimal:
+    try:
+        return Decimal(_text(payload, key, what))
+    except InvalidOperation:
+        raise ManifestError(f"{what} {key} must be a decimal string") from None
+
+
+def _list(payload: Mapping[str, Any], key: str, what: str) -> list[Any]:
+    value = payload[key]
+    if not isinstance(value, list):
+        raise ManifestError(f"{what} {key} must be a list")
+    return value
+
+
+def _object(value: object, what: str) -> Mapping[str, Any]:
+    if not isinstance(value, dict):
+        raise ManifestError(f"{what} must be an object")
+    return value
+
+
+_MANIFEST_KEYS = frozenset(
+    {
+        "universe_id",
+        "symbols",
+        "dataset_id",
+        "development_start_utc",
+        "development_end_utc",
+        "validation_start_utc",
+        "validation_end_utc",
+        "holdout_start_utc",
+        "holdout_end_utc",
+        "strategy_interval",
+        "context_interval",
+        "data_source",
+        "data_source_version",
+        "excluded_periods",
+        "known_gaps",
+        "equity",
+        "risk_rate",
+        "constraint_source",
+        "constraint_sha256",
+    }
+)
+_PERIOD_KEYS = frozenset({"start_utc", "end_utc", "reason"})
+_GAP_KEYS = frozenset({"series", "symbol", "interval", "start_utc", "end_utc", "missing"})
+_POINT_KEYS = frozenset({"parameter_set_id", "parameter_set_hash", "varied"})
+
+
+def load_manifest(path: Path) -> DatasetManifest:
+    """Parse a manifest JSON file into a `DatasetManifest` (strict keys, UTC, Decimal strings)."""
+    payload = read_json_object(path, "manifest")
+    what = "manifest"
+    _exact_keys(payload, _MANIFEST_KEYS, what)
+    symbols = _list(payload, "symbols", what)
+    if any(not isinstance(sym, str) for sym in symbols):
+        raise ManifestError("manifest symbols must be strings")
+    periods: list[Period] = []
+    for item in _list(payload, "excluded_periods", what):
+        row = _object(item, "excluded period")
+        _exact_keys(row, _PERIOD_KEYS, "excluded period")
+        periods.append(
+            Period(
+                _utc(row, "start_utc", "excluded period"),
+                _utc(row, "end_utc", "excluded period"),
+                _text(row, "reason", "excluded period"),
+            )
+        )
+    gaps: list[GapRange] = []
+    for item in _list(payload, "known_gaps", what):
+        row = _object(item, "known gap")
+        _exact_keys(row, _GAP_KEYS, "known gap")
+        missing = row["missing"]
+        if not isinstance(missing, int) or isinstance(missing, bool) or missing < 1:
+            raise ManifestError("known gap missing must be a positive integer")
+        gaps.append(
+            GapRange(
+                series=_text(row, "series", "known gap"),
+                symbol=_text(row, "symbol", "known gap"),
+                interval=_text(row, "interval", "known gap"),
+                start_utc=_utc(row, "start_utc", "known gap"),
+                end_utc=_utc(row, "end_utc", "known gap"),
+                missing=missing,
+            )
+        )
+    return DatasetManifest(
+        universe_id=_text(payload, "universe_id", what),
+        symbols=tuple(symbols),
+        dataset_id=_text(payload, "dataset_id", what),
+        development_start_utc=_utc(payload, "development_start_utc", what),
+        development_end_utc=_utc(payload, "development_end_utc", what),
+        validation_start_utc=_utc(payload, "validation_start_utc", what),
+        validation_end_utc=_utc(payload, "validation_end_utc", what),
+        holdout_start_utc=_utc(payload, "holdout_start_utc", what),
+        holdout_end_utc=_utc(payload, "holdout_end_utc", what),
+        strategy_interval=_text(payload, "strategy_interval", what),
+        context_interval=_text(payload, "context_interval", what),
+        data_source=_text(payload, "data_source", what),
+        data_source_version=_text(payload, "data_source_version", what),
+        excluded_periods=tuple(periods),
+        known_gaps=tuple(gaps),
+        equity=_decimal(payload, "equity", what),
+        risk_rate=_decimal(payload, "risk_rate", what),
+        constraint_source=_text(payload, "constraint_source", what),
+        constraint_sha256=_text(payload, "constraint_sha256", what),
+    )
+
+
+def load_grid(path: Path) -> ParameterGrid:
+    """Parse a parameter-grid JSON file into a `ParameterGrid` (strict keys)."""
+    payload = read_json_object(path, "grid")
+    _exact_keys(payload, frozenset({"strategy_id", "points"}), "grid")
+    points: list[GridPoint] = []
+    for item in _list(payload, "points", "grid"):
+        row = _object(item, "grid point")
+        _exact_keys(row, _POINT_KEYS, "grid point")
+        varied: list[tuple[str, str]] = []
+        for pair in _list(row, "varied", "grid point"):
+            if (
+                not isinstance(pair, list)
+                or len(pair) != 2
+                or not all(isinstance(part, str) for part in pair)
+            ):
+                raise ManifestError("grid point varied must be a list of [key, value] strings")
+            varied.append((pair[0], pair[1]))
+        points.append(
+            GridPoint(
+                parameter_set_id=_text(row, "parameter_set_id", "grid point"),
+                parameter_set_hash=_text(row, "parameter_set_hash", "grid point"),
+                varied=tuple(varied),
+            )
+        )
+    return ParameterGrid(strategy_id=_text(payload, "strategy_id", "grid"), points=tuple(points))
+
+
 __all__ = [
     "DEVELOPMENT",
     "VALIDATION",
@@ -263,6 +448,9 @@ __all__ = [
     "Period",
     "SplitWindow",
     "grid_hash",
+    "load_grid",
+    "load_manifest",
     "manifest_hash",
+    "read_json_object",
     "research_splits",
 ]
