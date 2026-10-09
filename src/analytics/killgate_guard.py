@@ -31,6 +31,7 @@ __all__ = [
     "KillGateReportBlocked",
     "ReviewItem",
     "ReviewRegistryError",
+    "live_enable_allowed",
     "load_review_registry",
     "not_concluded_line",
     "require_report_conclusion_allowed",
@@ -187,6 +188,20 @@ def unresolved_live_enable_blockers(items: Iterable[ReviewItem]) -> tuple[str, .
             for item in _require_items(items)
             if item.blocks_live_enable and not item.resolved
         )
+    )
+
+
+def live_enable_allowed(items: Iterable[ReviewItem]) -> bool:
+    """True only when every `blocks_live_enable` item is RESOLVED with a fix commit.
+
+    This is the reader Phase 26 binds `LiveEnablementController.enable` to (ROADMAP Phase 26
+    item [D065-WR], D065 item 1): `enable()` must call it and journal the registry state it
+    used. The binding is not built here and `src/execution/enablement.py` is untouched; WR-10
+    (`enable` trusts a caller-supplied kill-gate state) stays UNRESOLVED until that phase.
+    """
+    return not any(
+        item.blocks_live_enable and not (item.resolved and item.fix_commit)
+        for item in _require_items(items)
     )
 
 
