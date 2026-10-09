@@ -9,12 +9,28 @@ reconciler of plan 16-15 can tell scheduled ticks from manual runs.
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import re
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+# The one cron line the freeze workflow is expected to carry. Today it is the line already on
+# master (hourly at minute 0). The cron minute is the user's checkpoint Q-Q (plan 16-30); plan
+# 16-47 changes only this constant, to the line recorded in decisions/16-DEC-Q-Q.md. It must stay
+# of the hourly form `M * * * *` (M from 0 to 59), the only form the reconciler of plan 16-15
+# accepts. Moving the cron does not relax the rule that a missing tick is an EVIDENCE_GAP.
+EXPECTED_FREEZE_CRON = "0 * * * *"
+HOURLY_CRON_RE = re.compile(r"^([0-9]|[1-5][0-9]) \* \* \* \*$")
+ROOT = Path(__file__).resolve().parent.parent
+WORKFLOW = ROOT / ".github" / "workflows" / "paper_freeze_check.yml"
+REPO_PARAMS = ROOT / "params"
+STRATEGY_ID = "trend-pullback"
+PARAMETER_SET_ID = "baseline-v3"
 
 RUN_ENV = {
     "GITHUB_RUN_ID": "1234567890",
@@ -186,3 +202,389 @@ def test_a_manual_dispatch_is_recorded_with_an_empty_schedule(
         "event_name": "workflow_dispatch",
         "schedule": "",
     }
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: the non-empty allowlist path, run metadata on every line, the workflow.
+# --------------------------------------------------------------------------- #
+
+
+def _registry_copy(tmp_path: Path) -> Path:
+    root = tmp_path / "params"
+    shutil.copytree(REPO_PARAMS, root)
+    return root
+
+
+def _set_hash(registry_root: Path) -> str:
+    from src.paper.freeze import _recompute_parameter_set_hash
+
+    return _recompute_parameter_set_hash(
+        strategy_id=STRATEGY_ID, parameter_set_id=PARAMETER_SET_ID, registry_root=registry_root
+    )
+
+
+def _entry(parameter_set_hash: str, *, parameter_set_id: str = PARAMETER_SET_ID) -> Any:
+    from src.paper.freeze import PaperAllowlistEntry
+
+    return PaperAllowlistEntry(
+        strategy_id=STRATEGY_ID,
+        parameter_set_id=parameter_set_id,
+        parameter_set_hash=parameter_set_hash,
+        purpose="test-only entry",
+        approved_at="2026-10-09",
+        basis="tests/test_paper_freeze_allowlist_mode.py (injected, never production)",
+    )
+
+
+def _inject(monkeypatch: pytest.MonkeyPatch, *entries: Any) -> None:
+    import src.paper.freeze as freeze
+
+    monkeypatch.setattr(freeze, "PAPER_START_ALLOWLIST", tuple(entries))
+
+
+def _pin(tmp_path: Path, registry_root: Path, *, state_set_id: str = PARAMETER_SET_ID) -> Path:
+    """Write a pinned-state file for the registry's current state; return its path.
+
+    `state_set_id` rewrites the parameter set id recorded in the state (the hash stays the one
+    of baseline-v3), to build a state that belongs to another set than the allowlist entry.
+    """
+    from src.paper.freeze import pin_stream_epoch, write_pinned_state
+
+    epoch = pin_stream_epoch(
+        strategy_id=STRATEGY_ID,
+        parameter_set_id=PARAMETER_SET_ID,
+        opened_at_utc=datetime(2026, 10, 9, 0, 0, tzinfo=UTC),
+        registry_root=registry_root,
+        allow_unrationalized=True,
+    )
+    epoch = dataclasses.replace(epoch, parameter_set_id=state_set_id)
+    path = tmp_path / "pinned_epoch.json"
+    write_pinned_state(epoch, path)
+    return path
+
+
+def _argv(tmp_path: Path, registry_root: Path, pinned: Path) -> list[str]:
+    return [
+        "--check",
+        "--from-allowlist",
+        "--diff-log",
+        str(tmp_path / "registry_diff.jsonl"),
+        "--pinned-state",
+        str(pinned),
+        "--registry-root",
+        str(registry_root),
+    ]
+
+
+def _mutate_set(registry_root: Path) -> None:
+    target = registry_root / STRATEGY_ID / f"{PARAMETER_SET_ID}.toml"
+    text = target.read_text(encoding="utf-8")
+    assert "fee_rate_entry" in text
+    target.write_text(text.replace("fee_rate_entry", "fee_rate_entry_x", 1), encoding="utf-8")
+
+
+def test_one_entry_clean_tick_exits_zero_and_checks_exactly_that_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.paper.freeze import _cli_main
+
+    root = _registry_copy(tmp_path)
+    _inject(monkeypatch, _entry(_set_hash(root)))
+    pinned = _pin(tmp_path, root)
+
+    assert _cli_main(_argv(tmp_path, root, pinned)) == 0
+
+    lines = _lines(tmp_path / "registry_diff.jsonl")
+    assert [line["outcome"] for line in lines] == ["clean"]
+    assert lines[0]["pinned_hash"] == lines[0]["current_hash"] == _set_hash(root)
+
+
+def test_one_entry_registry_change_is_a_rollover_exit_three(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.paper.freeze import _cli_main, load_pinned_state
+
+    root = _registry_copy(tmp_path)
+    approved = _set_hash(root)
+    _inject(monkeypatch, _entry(approved))
+    pinned = _pin(tmp_path, root)
+    _mutate_set(root)
+
+    code = _cli_main(_argv(tmp_path, root, pinned))
+
+    assert code == 3
+    lines = _lines(tmp_path / "registry_diff.jsonl")
+    assert [line["outcome"] for line in lines] == ["REGISTRY_DIFF"]
+    assert load_pinned_state(pinned).parameter_set_hash != approved
+
+
+def test_one_entry_missing_pinned_state_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.paper.freeze import _cli_main
+
+    root = _registry_copy(tmp_path)
+    _inject(monkeypatch, _entry(_set_hash(root)))
+
+    code = _cli_main(_argv(tmp_path, root, tmp_path / "absent.json"))
+
+    assert code == 2
+    assert not (tmp_path / "registry_diff.jsonl").exists()
+
+
+def test_one_entry_with_other_ids_than_the_pinned_state_exits_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.paper.freeze import _cli_main
+
+    root = _registry_copy(tmp_path)
+    _inject(monkeypatch, _entry(_set_hash(root)))
+    pinned = _pin(tmp_path, root, state_set_id="baseline-v2")
+
+    assert _cli_main(_argv(tmp_path, root, pinned)) == 1
+    assert not (tmp_path / "registry_diff.jsonl").exists()
+
+
+def test_pinned_hash_must_equal_the_entry_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pinned state for the same ids but another hash than the user approved is refused."""
+    from src.paper.freeze import _cli_main
+
+    root = _registry_copy(tmp_path)
+    _inject(monkeypatch, _entry("1" * 64))
+    pinned = _pin(tmp_path, root)
+
+    assert _cli_main(_argv(tmp_path, root, pinned)) == 1
+    assert not (tmp_path / "registry_diff.jsonl").exists(), "no clean line for an unapproved hash"
+
+
+def test_two_entries_are_ambiguous_exit_one_and_nothing_is_guessed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.paper.freeze import _cli_main
+    from structlog.testing import capture_logs
+
+    root = _registry_copy(tmp_path)
+    _inject(
+        monkeypatch,
+        _entry(_set_hash(root)),
+        _entry("2" * 64, parameter_set_id="baseline-v2"),
+    )
+    pinned = _pin(tmp_path, root)
+
+    with capture_logs() as logs:
+        code = _cli_main(_argv(tmp_path, root, pinned))
+
+    assert code == 1
+    assert any("ambiguous allowlist" in str(event.get("reason", "")) for event in logs)
+    assert not (tmp_path / "registry_diff.jsonl").exists()
+
+
+def test_find_allowlist_entry_is_exact_and_refuses_duplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.paper.freeze import allowlist_entries, find_allowlist_entry
+
+    assert allowlist_entries() == ()
+    assert find_allowlist_entry(STRATEGY_ID, PARAMETER_SET_ID) is None
+
+    first = _entry("a" * 64)
+    _inject(monkeypatch, first)
+    assert allowlist_entries() == (first,)
+    assert find_allowlist_entry(STRATEGY_ID, PARAMETER_SET_ID) is first
+    assert find_allowlist_entry(STRATEGY_ID, "baseline-v2") is None
+    assert find_allowlist_entry("range-mr", PARAMETER_SET_ID) is None
+
+    _inject(monkeypatch, first, _entry("b" * 64))
+    with pytest.raises(ValueError, match="ambiguous allowlist"):
+        find_allowlist_entry(STRATEGY_ID, PARAMETER_SET_ID)
+
+
+def test_clean_and_rollover_lines_carry_run_metadata_when_the_variables_are_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.paper.freeze import _cli_main
+
+    root = _registry_copy(tmp_path)
+    _inject(monkeypatch, _entry(_set_hash(root)))
+    pinned = _pin(tmp_path, root)
+    for name, value in RUN_ENV.items():
+        monkeypatch.setenv(name, value)
+
+    assert _cli_main(_argv(tmp_path, root, pinned)) == 0
+    _mutate_set(root)
+    assert _cli_main(_argv(tmp_path, root, pinned)) == 3
+
+    clean, rollover = _lines(tmp_path / "registry_diff.jsonl")
+    assert clean["outcome"] == "clean"
+    assert rollover["outcome"] == "REGISTRY_DIFF"
+    assert clean["run_metadata"] == RUN_METADATA
+    assert rollover["run_metadata"] == RUN_METADATA
+
+
+def test_explicit_id_mode_also_stamps_run_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.paper.freeze import _cli_main
+
+    root = _registry_copy(tmp_path)
+    pinned = _pin(tmp_path, root)
+    for name, value in RUN_ENV.items():
+        monkeypatch.setenv(name, value)
+
+    code = _cli_main(
+        [
+            "--check",
+            "--strategy-id",
+            STRATEGY_ID,
+            "--parameter-set-id",
+            PARAMETER_SET_ID,
+            "--diff-log",
+            str(tmp_path / "registry_diff.jsonl"),
+            "--pinned-state",
+            str(pinned),
+            "--registry-root",
+            str(root),
+        ]
+    )
+
+    assert code == 0
+    assert _lines(tmp_path / "registry_diff.jsonl")[0]["run_metadata"] == RUN_METADATA
+
+
+def test_lines_without_run_metadata_are_byte_identical_to_the_pinned_shape() -> None:
+    """DiffLogEntry renders exactly the pre-16-09 bytes when no metadata is attached."""
+    from src.paper.freeze import DiffLogEntry
+
+    entry = DiffLogEntry(
+        checked_at_utc=datetime(2026, 10, 9, 5, 0, tzinfo=UTC),
+        epoch_id="e" * 64,
+        pinned_hash="a" * 64,
+        current_hash="a" * 64,
+        outcome="clean",
+    )
+    expected = (
+        '{"checked_at_utc":"2026-10-09T05:00:00+00:00",'
+        '"current_hash":"' + "a" * 64 + '","epoch_id":"' + "e" * 64 + '",'
+        '"outcome":"clean","pinned_hash":"' + "a" * 64 + '"}'
+    )
+    assert entry.to_jsonl() == expected
+    with_meta = DiffLogEntry(
+        checked_at_utc=entry.checked_at_utc,
+        epoch_id=entry.epoch_id,
+        pinned_hash=entry.pinned_hash,
+        current_hash=entry.current_hash,
+        outcome="clean",
+        run_metadata=RUN_METADATA,
+    )
+    assert json.loads(with_meta.to_jsonl())["run_metadata"] == RUN_METADATA
+    with pytest.raises(ValueError, match="run_metadata"):
+        DiffLogEntry(
+            checked_at_utc=entry.checked_at_utc,
+            epoch_id=entry.epoch_id,
+            pinned_hash=entry.pinned_hash,
+            current_hash=entry.current_hash,
+            outcome="clean",
+            run_metadata={"unknown": "x"},
+        )
+
+
+def test_run_metadata_reads_only_the_five_named_variables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.paper.freeze import read_run_metadata
+
+    assert read_run_metadata({}) is None
+    assert read_run_metadata({"GITHUB_TOKEN": "secret", "PATH": "/bin"}) is None
+    mixed = {**RUN_ENV, "GITHUB_TOKEN": "secret", "GITHUB_REPOSITORY": "a/b"}
+    assert read_run_metadata(mixed) == RUN_METADATA
+    monkeypatch.setenv("GITHUB_RUN_ID", "77")
+    assert read_run_metadata() == {"run_id": "77"}
+
+
+# ----- the workflow text -----------------------------------------------------------------
+
+
+def _workflow_text() -> str:
+    return WORKFLOW.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+
+CRON_ITEM_RE = re.compile(r"^\s*-\s+cron:\s*[\"']?([^\"'#]*?)[\"']?\s*(?:#.*)?$")
+
+
+def _cron_lines(text: str) -> list[str]:
+    """The `- cron:` list items of the schedule (comment lines are ignored)."""
+    found: list[str] = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        match = CRON_ITEM_RE.match(line)
+        if match is not None:
+            found.append(match.group(1).strip())
+    return found
+
+
+def _check_freeze_cron(text: str) -> None:
+    crons = _cron_lines(text)
+    assert len(crons) == 1, f"expected exactly one cron entry, got {crons}"
+    assert crons[0] == EXPECTED_FREEZE_CRON, f"cron {crons[0]!r} != {EXPECTED_FREEZE_CRON!r}"
+
+
+def test_expected_cron_is_of_the_hourly_form_the_reconciler_accepts() -> None:
+    assert HOURLY_CRON_RE.match(EXPECTED_FREEZE_CRON) is not None
+    for bad in ("*/5 * * * *", "0 */2 * * *", "60 * * * *", "0 * * * 1", "0 0 * * *"):
+        assert HOURLY_CRON_RE.match(bad) is None, bad
+
+
+def test_workflow_has_exactly_the_expected_cron_line() -> None:
+    _check_freeze_cron(_workflow_text())
+
+
+def test_cron_check_fails_on_a_changed_a_second_or_a_missing_cron() -> None:
+    """Negative control: the checker is not vacuous."""
+    text = _workflow_text()
+    changed = text.replace(f'"{EXPECTED_FREEZE_CRON}"', '"17 * * * *"', 1)
+    assert changed != text
+    with pytest.raises(AssertionError, match="cron"):
+        _check_freeze_cron(changed)
+    doubled = text.replace(
+        f'    - cron: "{EXPECTED_FREEZE_CRON}"\n',
+        f'    - cron: "{EXPECTED_FREEZE_CRON}"\n    - cron: "30 * * * *"\n',
+        1,
+    )
+    assert doubled != text
+    with pytest.raises(AssertionError, match="exactly one"):
+        _check_freeze_cron(doubled)
+    commented_only = re.sub(r"^(\s*)- cron:", r"\1# - cron:", text, flags=re.MULTILINE)
+    assert commented_only != text
+    with pytest.raises(AssertionError, match="exactly one"):
+        _check_freeze_cron(commented_only)
+
+
+def test_workflow_reads_the_allowlist_and_hard_codes_no_set() -> None:
+    text = _workflow_text()
+    assert "--from-allowlist" in text
+    assert "--strategy-id" not in text
+    assert "--parameter-set-id" not in text
+    assert "trend-pullback" not in text
+    assert "baseline-v3" not in text
+
+
+def test_workflow_stamps_the_schedule_and_keeps_its_hardening() -> None:
+    from tests.test_deploy_workflows import PINNED_USES_RE, USES_RE
+
+    text = _workflow_text()
+    assert "PAPER_EVENT_SCHEDULE: ${{ github.event.schedule }}" in text
+    assert re.search(r"^permissions:\s*\n  contents: read\s*$", text, re.MULTILINE)
+    assert "persist-credentials: false" in text
+    uses = [m.group(0) for m in USES_RE.finditer(text)]
+    pinned = [m.group(0) for m in PINNED_USES_RE.finditer(text)]
+    assert uses and uses == pinned, "every action must be pinned to a commit SHA"
+
+
+def test_workflow_header_says_what_the_check_does_not_prove() -> None:
+    header = _workflow_text().split("name: Paper Freeze Check")[0].lower()
+    assert "registry immutability" in header
+    assert "never" in header and "host" in header
+    assert "cache" in header and "not evidence" in header
