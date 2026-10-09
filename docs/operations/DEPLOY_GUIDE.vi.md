@@ -1237,7 +1237,7 @@ Chỉ ba service chạy theo mặc định: `postgres`, `db-upgrade` (chạy m�
 
 **Chạy ở:** `[MÁY CÓ MẠNG]` (chỉ để đọc; không có máy nào chạy gì ở bước này)
 
-Quy tắc đọc: 16-01 đến 16-14 có tệp SUMMARY trong `.planning/phases/16-paper-runtime-composition/`, nên được ghi `[ĐÃ XÂY]`; 16-15 đến 16-50 chưa có, nên là `[CHƯA XÂY]`. Kế hoạch 16-50 "Off-host heartbeat sender" (bộ gửi heartbeat ra ngoài VPS) được thêm sau 16-49: ROADMAP đọc ngày 2026-10-09 chưa kể 16-50 (danh sách của nó dừng ở 16-49), nên con số 50 của hướng dẫn này đi trước ROADMAP cho tới khi ROADMAP được cập nhật. Lưu ý: "đã xây" nghĩa là code và kiểm thử ở mức đồ giả; chưa có gì chạy trên máy EC2, nên các hàng cần bằng chứng trên máy thật, sàn thật hay Telegram thật còn mang thêm `[CHƯA XÁC MINH]`. Ngày đọc: 2026-10-09.
+Quy tắc đọc: 16-01 đến 16-14 có tệp SUMMARY trong `.planning/phases/16-paper-runtime-composition/`, nên được ghi `[ĐÃ XÂY]`; 16-15 đến 16-50 chưa có, nên là `[CHƯA XÂY]`. Kế hoạch 16-50 "Off-host heartbeat sender" (bộ gửi heartbeat ra ngoài VPS) được thêm sau 16-49; ROADMAP đọc ngày 2026-10-09 đã kể đủ 16-01 đến 16-50. Kế hoạch 16-50 hiện bị chặn cho tới khi bạn ghi hai giá trị O-12 (chu kỳ gửi và thời gian ân hạn của dịch vụ giám sát) vào bản ghi quyết định O-12; agent không tự chọn hai giá trị đó. Kế hoạch 16-43 (khởi động trial soak) phụ thuộc vào 16-50: bộ gửi heartbeat phải xây xong và phép thử `HEARTBEAT_MONITOR_ALERT_RECEIVED` phải đạt trước khi epoch được ghim (D042 điều kiện 1). Lưu ý: "đã xây" nghĩa là code và kiểm thử ở mức đồ giả; chưa có gì chạy trên máy EC2, nên các hàng cần bằng chứng trên máy thật, sàn thật hay Telegram thật còn mang thêm `[CHƯA XÁC MINH]`. Ngày đọc: 2026-10-09.
 
 | Kế hoạch | Việc | Trạng thái | Dùng ở bước nào |
 | --- | --- | --- | --- |
@@ -1283,14 +1283,14 @@ Quy tắc đọc: 16-01 đến 16-14 có tệp SUMMARY trong `.planning/phases/1
 | 16-40 | Chạy buổi diễn tập tín hiệu thử với các cú chạm Telegram thật | `[CHƯA XÂY]` | 7.10 |
 | 16-41 | Đưa hai câu hỏi bằng chứng mở (OQ-1 và O-10) cho bạn sau lần nghiên cứu thật đầu | `[CHƯA XÂY]` | 7.6 |
 | 16-42 | Bạn cho phép đúng một băm trong PAPER_START_ALLOWLIST | `[CHƯA XÂY]` | 7.6 |
-| 16-43 | Paper bắt đầu, epoch được ghim, trial soak khởi động | `[CHƯA XÂY]` | 7.6 |
+| 16-43 | Paper bắt đầu, epoch được ghim, trial soak khởi động; phụ thuộc cả 16-50 (bộ gửi heartbeat phải xây xong trước) | `[CHƯA XÂY]` | 7.6 |
 | 16-44 | Trial soak đạt tiêu chí đã phê chuẩn và bạn tuyên bố đạt | `[CHƯA XÂY]` | 7.6 |
 | 16-45 | Giả thuyết và lưới tham số do bạn viết hoặc duyệt | `[CHƯA XÂY]` | 7.6 |
 | 16-46 | Lệnh riêng của bạn cho phép chạy nghiên cứu, rồi lần chạy thật đầu tiên | `[CHƯA XÂY]` | 7.6 |
 | 16-47 | Cài vào code hai quyết định lưu trữ bằng chứng và cách freeze check lấy epoch đã ghim | `[CHƯA XÂY]` | 7.7 |
 | 16-48 | Bạn chỉ định ứng viên hợp lệ trong số các ứng viên đã đăng ký | `[CHƯA XÂY]` | 7.6 |
 | 16-49 | Cấu hình đích lưu bằng chứng bền vững bạn đã chọn và chứng minh đường công bố bằng gói thử | `[CHƯA XÂY]` | 7.7 |
-| 16-50 | Bộ gửi heartbeat ra ngoài VPS ("Off-host heartbeat sender") để dịch vụ giám sát bên ngoài, đã chọn là healthchecks.io, biết khi tín hiệu dừng | `[CHƯA XÂY]` | 3.11, 8.3 |
+| 16-50 | Bộ gửi heartbeat ra ngoài VPS ("Off-host heartbeat sender") để dịch vụ giám sát bên ngoài, đã chọn là healthchecks.io, biết khi tín hiệu dừng; hiện bị chặn cho tới khi bạn ghi hai giá trị O-12 (chu kỳ và thời gian ân hạn), và 16-43 phải chờ kế hoạch này | `[CHƯA XÂY]` | 3.11, 8.3 |
 
 #### Bước 7.4 Điểm vào của runtime [CHƯA XÂY]
 
@@ -1325,7 +1325,7 @@ Phase 16 chỉ đóng sau chuỗi dưới đây (D061 mục J). Mọi bước ch
 3. Một LỆNH RIÊNG của bạn cho phép chạy nghiên cứu (16-46); duyệt lưới không có nghĩa là cho phép chạy. Trước đó phải có bản sửa giao thức v2.2.0 (16-28, D065) như một nhiệm vụ tiên quyết riêng.
 4. Một ứng viên hợp lệ (có lý do, đã đăng ký trước, đúng cấu trúc, không còn PLACEHOLDER, đã đăng ký và có băm) được bạn chỉ định (16-48). Nó KHÔNG cần qua G1 đến G5, và G1 đến G5 không bao giờ dùng để xếp hạng ứng viên.
 5. Bạn cho phép đúng băm đó trong `PAPER_START_ALLOWLIST` bằng `strategy_id`, `parameter_set_id` và SHA-256 64 ký tự cùng `purpose`, `approved_at`, `basis` (16-42). Hôm nay allowlist RỖNG theo quyết định của bạn; đó là trạng thái an toàn hợp lệ, không phải lỗi.
-6. Paper bắt đầu và epoch được ghim (16-43). Mỗi chuyển trạng thái là một lệnh rõ ràng của bạn.
+6. Paper bắt đầu và epoch được ghim (16-43), sau khi bộ gửi heartbeat 16-50 đã xây và phép thử cảnh báo đã đạt. Mỗi chuyển trạng thái là một lệnh rõ ràng của bạn.
 7. Trial soak đạt các tiêu chí đã phê chuẩn và bạn tuyên bố đạt (16-44).
 
 Không được chọn bất kỳ giá trị nào từ kết quả backtest hay nghiên cứu. Hai câu hỏi bằng chứng mở (OQ-1 về lệnh giữ qua lỗ hổng mark price, và O-10 về chi phí mô hình) được hỏi bạn sau lần nghiên cứu thật đầu (16-41).
