@@ -146,6 +146,8 @@ async def test_without_a_message_id_the_card_goes_out_as_the_one_fallback_send()
     assert h.trace.count("edit") == 0
     assert h.bot.sent[1].text == h.confirm.get(short_id).card_text  # type: ignore[union-attr]
     assert only(h, EVENT_SHADOW_CONFIRM_ISSUED)["delivery"] == "fallback_send"
+    # Nobody pressed: the periodic sweep expires the token at its TTL, then nothing is stranded.
+    assert h.confirm.expire_due(LATE) == approved_ids(h)
     assert_nothing_stranded(h)
 
 

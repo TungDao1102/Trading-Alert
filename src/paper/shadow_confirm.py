@@ -55,9 +55,12 @@ from src.adapters.telegram_callbacks import (
 )
 from src.adapters.telegram_notify import (
     TelegramFailure,
+    TelegramFailureKind,
+    TelegramSendError,
     TelegramTextBot,
     build_confirm_keyboard,
     edit_to_confirm_card,
+    send_text,
 )
 from src.approval.tokens import issue_one_time_token, token_hash_of
 from src.domain.approval import Approval
@@ -65,6 +68,7 @@ from src.domain.enums import ApprovalResult, RejectionReason
 from src.domain.journal import JournalEvent, correlated_event_id
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
+from src.paper.notify import NOTIFY_MAX_ATTEMPTS
 from src.paper.shadow import (
     ConfirmCardFields,
     ConfirmOutcome,
@@ -88,6 +92,8 @@ EVENT_SHADOW_CONFIRM_CANCELLED: Final = "SHADOW_CONFIRM_CANCELLED"
 EVENT_SHADOW_CONFIRM_EXPIRED: Final = "SHADOW_CONFIRM_EXPIRED"
 # Not terminal: a press that was refused (another user, another chat, no confirm context).
 EVENT_SHADOW_CONFIRM_REJECTED: Final = "SHADOW_CONFIRM_REJECTED"
+# Not terminal: the best-effort failure notice itself could not be sent.
+EVENT_SHADOW_CONFIRM_NOTICE_FAILED: Final = "SHADOW_CONFIRM_NOTICE_FAILED"
 
 TERMINAL_CONFIRM_EVENTS: Final = (
     EVENT_SHADOW_CONFIRMED,
@@ -103,10 +109,14 @@ REASON_USER_MISMATCH: Final = "USER_MISMATCH"
 REASON_CHAT_MISMATCH: Final = "CHAT_MISMATCH"
 REASON_NO_CONFIRM_CONTEXT: Final = "NO_CONFIRM_CONTEXT"
 REASON_RECHECK_ERROR: Final = "RECHECK_ERROR"
-REASON_APPROVAL_NOT_APPROVED: Final = "APPROVAL_NOT_APPROVED"
+REASON_CONFIRM_ALREADY_EXPIRED: Final = "CONFIRM_ALREADY_EXPIRED"
 
 DELIVERY_EDIT: Final = "edit"
+DELIVERY_FALLBACK_SEND: Final = "fallback_send"
 
+_NOTICE_SENT: Final = "sent"
+_NOTICE_SKIPPED_RATE_LIMITED: Final = "skipped_rate_limited"
+_NOTICE_FAILED: Final = "failed"
 
 RecheckFn = Callable[[Signal, TradePlan, datetime], RejectionReason | None]
 OnConfirmedFn = Callable[[Approval, TradePlan, datetime], None]
@@ -125,6 +135,10 @@ class ConfirmStores(Protocol):
     def lookup_by_short_id(self, short_id: str) -> tuple[str, str] | None: ...
     def list_approved_approvals(self) -> list[Approval]: ...
     def journal_for_correlation(self, correlation_id: str) -> list[JournalEvent]: ...
+
+
+class StrandedApprovals(AssertionError):
+    """An approved plan is past the confirm TTL with no terminal confirm event (T-16-112)."""
 
 
 # --------------------------------------------------------------------------- #
@@ -235,6 +249,11 @@ def _payload(payload: Mapping[str, Any]) -> str:
 def _require_utc(value: datetime, field: str) -> None:
     if value.tzinfo is None:
         raise ValueError(f"{field} must be UTC-aware, got naive datetime")
+
+
+def _message_id_of(result: object) -> int | None:
+    value = getattr(result, "message_id", None)
+    return value if isinstance(value, int) else None
 
 
 # --------------------------------------------------------------------------- #
@@ -483,6 +502,50 @@ class ConfirmBook:
         entry.delivered = True
         entry.message_id = message_id
 
+    def abort_delivery(
+        self,
+        entry: ConfirmEntry,
+        *,
+        failure: TelegramFailure,
+        notice: str,
+        attempts: int,
+        now_utc: datetime,
+    ) -> None:
+        """No card could be delivered: EXPIRED with reason CARD_DELIVERY_FAILED, token invalid."""
+        if entry.state is not ConfirmState.PENDING:
+            return
+        self._terminate(
+            entry,
+            state=ConfirmState.EXPIRED,
+            outcome=ConfirmOutcome.REJECTED_OTHER,
+            reason=REASON_CARD_DELIVERY_FAILED,
+            now_utc=now_utc,
+            event_type=EVENT_SHADOW_CONFIRM_EXPIRED,
+            extra={
+                "failure_kind": failure.kind.value,
+                "retry_after_seconds": failure.retry_after_seconds,
+                "error_class": failure.detail,
+                "attempts": attempts,
+                "failure_notice": notice,
+            },
+        )
+
+    def record_notice_failed(
+        self, entry: ConfirmEntry, failure: TelegramFailure, now_utc: datetime
+    ) -> None:
+        """The best-effort failure notice failed too: journal it, change nothing else."""
+        self._journal(
+            entry,
+            EVENT_SHADOW_CONFIRM_NOTICE_FAILED,
+            "notice_failed",
+            now_utc,
+            {
+                "failure_kind": failure.kind.value,
+                "retry_after_seconds": failure.retry_after_seconds,
+                "error_class": failure.detail,
+            },
+        )
+
     # ---- terminal transitions ------------------------------------------- #
 
     def _terminate(
@@ -504,8 +567,8 @@ class ConfirmBook:
             body["cancelled_at_utc"] = now_utc.isoformat()
         if state is ConfirmState.EXPIRED:
             body["expired_at_utc"] = now_utc.isoformat()
-        elapsed = (now_utc - entry.issued_at_utc).total_seconds()
-        body["elapsed_seconds"] = max(0.0, elapsed)
+        # Integer milliseconds: no float anywhere in this module (Decimal-only guard).
+        body["elapsed_ms"] = max(0, (now_utc - entry.issued_at_utc) // timedelta(milliseconds=1))
         if extra:
             body.update(extra)
         self._journal(entry, event_type, "terminal", now_utc, body)
@@ -527,8 +590,30 @@ class ConfirmBook:
         )
         return result
 
-    def _replay(self, entry: ConfirmEntry) -> ConfirmResult:
-        """A press on a decided confirm replays the existing outcome; nothing is written."""
+    def _replay(
+        self,
+        entry: ConfirmEntry,
+        *,
+        kind: str,
+        from_user_id: int | None,
+        now_utc: datetime,
+        correlation_id: str,
+    ) -> ConfirmResult:
+        """A press on a decided confirm replays the existing outcome.
+
+        CONFIRMED and CANCELLED replays write nothing. A press on an EXPIRED confirm hit a dead
+        token (a TTL that ran out, a failed card delivery, a restart): the attempt itself is
+        journaled (idempotent per callback query) and simulates nothing.
+        """
+        if entry.state is ConfirmState.EXPIRED:
+            self._journal_rejection(
+                entry,
+                reason=REASON_CONFIRM_ALREADY_EXPIRED,
+                presented_user_id=from_user_id,
+                now_utc=now_utc,
+                correlation_id=correlation_id,
+                kind=kind,
+            )
         if entry.state is ConfirmState.CONFIRMED:
             return self._result(entry, ConfirmOutcome.CONFIRMED, "CONFIRMED", replayed=True)
         if entry.state is ConfirmState.CANCELLED:
@@ -712,7 +797,13 @@ class ConfirmBook:
         if refused is not None:
             return refused
         if entry.state is not ConfirmState.PENDING:
-            return self._replay(entry)
+            return self._replay(
+                entry,
+                kind="CONFIRM",
+                from_user_id=from_user_id,
+                now_utc=now_utc,
+                correlation_id=correlation_id,
+            )
         if now_utc >= entry.expires_at_utc:  # boundary inclusive, as binding.py
             return self._expire_ttl(entry, now_utc)
         rejection = self._binding_gate(entry, now_utc)
@@ -788,7 +879,13 @@ class ConfirmBook:
         if refused is not None:
             return refused
         if entry.state is not ConfirmState.PENDING:
-            return self._replay(entry)
+            return self._replay(
+                entry,
+                kind="CANCEL",
+                from_user_id=from_user_id,
+                now_utc=now_utc,
+                correlation_id=correlation_id,
+            )
         if now_utc >= entry.expires_at_utc:
             return self._expire_ttl(entry, now_utc)
         self._terminate(
@@ -802,6 +899,18 @@ class ConfirmBook:
         return self._result(entry, ConfirmOutcome.CANCELLED, "CANCELLED", replayed=False)
 
     # ---- sweeps ---------------------------------------------------------- #
+
+    def expire_if_due(self, short_id: str, now_utc: datetime) -> bool:
+        """Expire one outstanding confirm whose TTL has run out. True when it was expired."""
+        entry = self._entries.get(short_id)
+        if (
+            entry is None
+            or entry.state is not ConfirmState.PENDING
+            or now_utc < entry.expires_at_utc
+        ):
+            return False
+        self._expire_ttl(entry, now_utc)
+        return True
 
     def expire_due(self, now_utc: datetime) -> list[str]:
         """Journal EXPIRED for every confirm past its TTL, and repair stranded approvals.
@@ -870,9 +979,64 @@ class ConfirmBook:
         return swept
 
 
+def assert_no_stranded_approvals(
+    stores: ConfirmStores,
+    now_utc: datetime,
+    *,
+    ttl_seconds: int = CONFIRM_TTL_SECONDS_DEFAULT,
+) -> None:
+    """Raise `StrandedApprovals` unless every approved plan past the TTL has one terminal event.
+
+    The invariant of T-16-112: after APPROVE a plan can never sit with no confirm card and no
+    journaled outcome. Each APPROVED approval older than `ttl_seconds` must have exactly one
+    SHADOW_CONFIRMED, SHADOW_CONFIRM_CANCELLED or SHADOW_CONFIRM_EXPIRED event (any reason).
+    """
+    _require_utc(now_utc, "now_utc")
+    stranded: list[str] = []
+    for approval in sorted(stores.list_approved_approvals(), key=lambda a: a.approval_id):
+        acted = approval.acted_at_utc or approval.requested_at_utc
+        if now_utc < acted + timedelta(seconds=ttl_seconds):
+            continue
+        events = stores.journal_for_correlation(_correlation(approval.approval_id))
+        terminal = [e for e in events if e.event_type in TERMINAL_CONFIRM_EVENTS]
+        if len(terminal) != 1:
+            stranded.append(f"{approval.approval_id} ({len(terminal)} terminal events)")
+    if stranded:
+        raise StrandedApprovals(
+            "approved plans without exactly one confirm outcome: " + ", ".join(stranded)
+        )
+
+
 # --------------------------------------------------------------------------- #
-# Card delivery.
+# Card delivery: edit, one fallback send, fail closed.
 # --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class CardDelivery:
+    """What `deliver_confirm_card` did. It never raises on a Telegram failure."""
+
+    delivered: bool
+    delivery: str
+    message_id: int | None
+    attempts: int
+    failure: TelegramFailure | None
+
+
+def _failure_of(exc: BaseException) -> TelegramFailure:
+    if isinstance(exc, TelegramSendError):
+        return exc.failure
+    return TelegramFailure(TelegramFailureKind.UNKNOWN, None, type(exc).__name__)
+
+
+async def _try_edit(
+    bot: TelegramTextBot, chat_id: int, message_id: int, text: str, keyboard: Any
+) -> TelegramFailure | None:
+    try:
+        await edit_to_confirm_card(bot, chat_id, message_id, text, keyboard)
+    except Exception as exc:  # noqa: BLE001 - every failure is classified, never raised
+        return _failure_of(exc)
+    return None
 
 
 async def deliver_confirm_card(
@@ -883,24 +1047,124 @@ async def deliver_confirm_card(
     chat_id: int,
     message_id: int | None,
     mode: Mode,
-) -> None:
-    """Edit the alert into the confirmation card and journal SHADOW_CONFIRM_ISSUED.
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    replay: bool = False,
+) -> CardDelivery:
+    """Edit the alert into the card; on failure one fallback send; else expire the confirm.
 
-    A failure to edit propagates as a `TelegramSendError` (failure handling follows).
+    Edit: a 429 is honoured inside the REMAINING confirm TTL (the anchor stays the issue time):
+    the wait is the server's retry_after, and a retry_after longer than the remaining window
+    stops the edit at once with no sleep. `MESSAGE_NOT_MODIFIED` counts as success. Any other
+    failure goes straight to the fallback: exactly one `send_text` of the same card (same token,
+    same issue time, same keyboard). When that fails too, or the edit was throttled beyond the
+    window, the confirm is journaled EXPIRED with reason CARD_DELIVERY_FAILED and its token is
+    invalid; one best-effort notice is attempted (not while Telegram is throttling us) and its
+    own failure is journaled. A decided approval is never reverted.
+
+    With `replay=True` (a repeated APPROVE press) the stored card is edited back in once; a
+    failure is logged and nothing is journaled, the confirm keeps its state.
     """
     require_shadow(mode)
-    if message_id is None:
-        raise ValueError("the alert message id is needed to edit it into the card")
     keyboard = build_confirm_keyboard(entry.signal.signal_id)
-    await edit_to_confirm_card(bot, chat_id, message_id, entry.card_text, keyboard)
-    book.record_issued(
-        entry,
-        delivery=DELIVERY_EDIT,
-        message_id=message_id,
-        attempts=1,
-        edit_failure=None,
-        now_utc=book.now(),
+    clock = book.now
+
+    def remaining() -> timedelta:
+        return timedelta(seconds=entry.ttl_seconds) - (clock() - entry.issued_at_utc)
+
+    attempts = 0
+    edit_failure: TelegramFailure | None = None
+    if message_id is not None:
+        while True:
+            attempts += 1
+            edit_failure = await _try_edit(bot, chat_id, message_id, entry.card_text, keyboard)
+            if (
+                edit_failure is None
+                or edit_failure.kind is TelegramFailureKind.MESSAGE_NOT_MODIFIED
+            ):
+                edit_failure = None
+                break
+            if (
+                edit_failure.kind is not TelegramFailureKind.RATE_LIMITED
+                or attempts >= NOTIFY_MAX_ATTEMPTS
+            ):
+                break
+            retry_after = edit_failure.retry_after_seconds or 0
+            window = remaining()
+            if timedelta(seconds=retry_after) > window or window <= timedelta(0):
+                break
+            await sleep(retry_after)
+        if edit_failure is None:
+            return await _delivered(
+                book, entry, DELIVERY_EDIT, message_id, attempts, None, replay=replay
+            )
+    if replay:
+        log.warning(
+            "paper.shadow_confirm.replay_edit_failed",
+            kind=None if edit_failure is None else edit_failure.kind.value,
+        )
+        return CardDelivery(False, DELIVERY_EDIT, message_id, attempts, edit_failure)
+
+    throttled = (
+        edit_failure is not None
+        and edit_failure.kind is TelegramFailureKind.RATE_LIMITED
+        and timedelta(seconds=edit_failure.retry_after_seconds or 0) > remaining()
     )
+    last_failure = edit_failure
+    if not throttled:
+        attempts += 1
+        try:
+            sent = await send_text(bot, chat_id, entry.card_text, keyboard)
+        except Exception as exc:  # noqa: BLE001 - every failure is classified, never raised
+            last_failure = _failure_of(exc)
+        else:
+            return await _delivered(
+                book,
+                entry,
+                DELIVERY_FALLBACK_SEND,
+                _message_id_of(sent),
+                attempts,
+                edit_failure,
+                replay=False,
+            )
+    failure = last_failure or TelegramFailure(TelegramFailureKind.UNKNOWN, None, "NoMessageId")
+    notice = _NOTICE_SKIPPED_RATE_LIMITED if throttled else _NOTICE_SENT
+    book.abort_delivery(entry, failure=failure, notice=notice, attempts=attempts, now_utc=clock())
+    if not throttled:
+        notice_text = render_shadow_message(
+            ShadowMessageKind.CARD_DELIVERY_FAILED,
+            mode=mode,
+            now_utc=clock(),
+            failure_kind=failure.kind.value,
+            signal_id=entry.signal.signal_id,
+            expiry_utc=entry.plan.expiry_utc,
+        )
+        try:
+            await send_text(bot, chat_id, notice_text)
+        except Exception as exc:  # noqa: BLE001 - best effort; journaled, changes nothing
+            book.record_notice_failed(entry, _failure_of(exc), clock())
+    return CardDelivery(False, "", None, attempts, failure)
+
+
+async def _delivered(
+    book: ConfirmBook,
+    entry: ConfirmEntry,
+    delivery: str,
+    message_id: int | None,
+    attempts: int,
+    edit_failure: TelegramFailure | None,
+    *,
+    replay: bool,
+) -> CardDelivery:
+    if not replay:
+        book.record_issued(
+            entry,
+            delivery=delivery,
+            message_id=message_id,
+            attempts=attempts,
+            edit_failure=edit_failure,
+            now_utc=book.now(),
+        )
+    return CardDelivery(True, delivery, message_id, attempts, None)
 
 
 # --------------------------------------------------------------------------- #
@@ -931,8 +1195,23 @@ def make_confirm_callbacks(
         """After APPROVE: edit the alert into the confirmation card. True when it was handled."""
         short_id = press.parsed.short_id
         now = press.callback_at_utc
-        if confirm.get(short_id) is not None:
-            return False  # a repeated APPROVE press: the generic REPLAYED reply
+        existing = confirm.get(short_id)
+        if existing is not None:
+            # A repeated APPROVE press: replay to the existing confirm, never a second token.
+            confirm.expire_if_due(short_id, now)
+            if existing.state is not ConfirmState.PENDING or not existing.delivered:
+                return False
+            await deliver_confirm_card(
+                book=confirm,
+                entry=existing,
+                bot=bot,
+                chat_id=press.chat_id,
+                message_id=press.message_id,
+                mode=mode,
+                sleep=sleep,
+                replay=True,
+            )
+            return True
         context = approvals.plan_context(short_id)
         if context is None or result.approval is None:
             return False
@@ -954,6 +1233,7 @@ def make_confirm_callbacks(
             chat_id=press.chat_id,
             message_id=press.message_id,
             mode=mode,
+            sleep=sleep,
         )
         approvals.take_last_decision()
         return True
@@ -991,14 +1271,18 @@ __all__ = [
     "EVENT_SHADOW_CONFIRM_CANCELLED",
     "EVENT_SHADOW_CONFIRM_EXPIRED",
     "EVENT_SHADOW_CONFIRM_ISSUED",
+    "EVENT_SHADOW_CONFIRM_NOTICE_FAILED",
     "EVENT_SHADOW_CONFIRM_REJECTED",
     "TERMINAL_CONFIRM_EVENTS",
+    "CardDelivery",
     "ConfirmBook",
     "ConfirmCallbacks",
     "ConfirmEntry",
     "ConfirmResult",
     "ConfirmState",
     "ConfirmStores",
+    "StrandedApprovals",
+    "assert_no_stranded_approvals",
     "deliver_confirm_card",
     "make_confirm_callbacks",
     "render_confirm_card",
