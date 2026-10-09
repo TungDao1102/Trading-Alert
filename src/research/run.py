@@ -47,7 +47,7 @@ from .manifest import (
     research_splits,
 )
 from .plateau import plateau_report
-from .report import render_run_report, summarize_trades
+from .report import count_mark_hole_trades, render_run_report, summarize_trades
 
 EXIT_OK = 0
 EXIT_REFUSED = 2
@@ -248,6 +248,7 @@ def run_research(
     report_lines = render_run_report(
         feasibility_lines=_feasibility_lines(manifest, grid, records, trade_lists),
         plateau=plateau_report(grid, _plateau_summaries(manifest, grid, records, trade_lists)),
+        mark_hole_trade_counts=_mark_hole_counts(manifest, grid, trade_lists),
     )
     for record in records:
         _refuse_if_recorded(output_dir, record)
@@ -269,6 +270,26 @@ def run_research(
     for line in report_lines:
         print(line, flush=True)
     return tuple(records)
+
+
+def _mark_hole_counts(
+    manifest: DatasetManifest,
+    grid: ParameterGrid,
+    trade_lists: Sequence[Sequence[Mapping[str, Any]]],
+) -> dict[str, int]:
+    """Filled trades held through mark-price holes per grid point (OQ-1, D-29): a bare count
+    over every simulated window of the point, never classified and never part of a record."""
+    per_point = len(research_splits(manifest))
+    return {
+        point.parameter_set_id: count_mark_hole_trades(
+            [
+                t
+                for trades in trade_lists[index * per_point : (index + 1) * per_point]
+                for t in trades
+            ]
+        )
+        for index, point in enumerate(grid.points)
+    }
 
 
 def _plateau_summaries(
