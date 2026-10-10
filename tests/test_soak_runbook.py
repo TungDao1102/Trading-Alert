@@ -325,3 +325,40 @@ def test_19_7_points_to_the_real_host_only_list_in_section_17() -> None:
     assert body, "section 19 has no 19.7"
     assert "section 17" in body
     assert "Only a real host can show" in body
+
+
+# --------------------------------------------------------------------------- heartbeat (16-50)
+
+
+def test_19_3_heartbeat_row_and_paragraph_describe_the_sender() -> None:
+    row = next(
+        r for r in _acceptance_rows() if "HEARTBEAT_MONITOR_ALERT_RECEIVED" in r["Condition id"]
+    )
+    assert "an alert from the external monitor reached the operator" in row["Pass condition"]
+    assert "a recovery notice followed the start" in row["Pass condition"]
+    assert "11.9" in row["Command"] + row["Source"]
+    assert "https://" not in row["Source"], "the Source cell must not carry a URL"
+    command = row["Command"]
+    assert "/opt/trading" in command and "docker compose stop collector" in command
+    assert "period plus" in command and "grace" in command and "16-DEC-O-12" in command
+    body = _subsection("19.3")
+    assert "This repository sends no heartbeat" not in body
+    start = body.index("**Heartbeat monitor.**")
+    paragraph = body[start : body.index("\n\n", start)]
+    for phrase in (
+        "healthchecks.io",
+        "deploy/heartbeat.sh",
+        "11.9",
+        "scripts/soak_host_acceptance.py",
+        "exits 2",
+        "coverage gap",
+        "16-DEC-O-12",
+    ):
+        assert phrase in paragraph, f"the Heartbeat monitor paragraph lacks: {phrase}"
+
+
+def test_19_4_item_5_stores_the_ping_url_on_the_new_host_before_the_old_timer_goes() -> None:
+    body = _subsection("19.4")
+    item = next(ln for ln in body.splitlines() if ln.startswith("5. "))
+    assert "11.9" in item and "--set-url" in item
+    assert "before the old host's timer is disabled" in item

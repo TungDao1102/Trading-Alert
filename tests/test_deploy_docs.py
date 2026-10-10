@@ -356,6 +356,7 @@ SCRIPT_SECTION = {
     "backup.sh": 11,
     "restore.sh": 11,
     "backup-drill.sh": 11,
+    "heartbeat.sh": 11,
 }
 
 
@@ -659,3 +660,133 @@ def test_doc_status_logs_d050_and_sources_has_the_phase_facts() -> None:
     for sha, _tag in _workflow_actions().values():
         assert sha in section, "SOURCES must carry every pinned action SHA"
     assert "ASSUMED" in section
+
+
+# --------------------------------------------------------------------------- plan 16-50 heartbeat
+
+DECISION_O12 = (
+    REPO_ROOT
+    / ".planning"
+    / "phases"
+    / "16-paper-runtime-composition"
+    / "decisions"
+    / "16-DEC-O-12.md"
+)
+HEARTBEAT_COMMANDS = (
+    "sudo deploy/heartbeat.sh --set-url",
+    "sudo deploy/heartbeat.sh --install-timer --interval-seconds <N>",
+)
+# a number followed by a unit of time: an interval, grace or period value the user owns
+TIME_VALUE = re.compile(r"\b\d+\s?(?:s|sec|secs|seconds?|m|min|mins|minutes?|h|hours?)\b")
+
+
+def _subsection(text: str, number: str) -> str:
+    """Body of ``### <number> ...`` up to the next heading ('' when absent)."""
+    match = re.search(rf"^### {re.escape(number)} [^\n]*\n(.*?)(?=^##|\Z)", text, re.M | re.S)
+    return match.group(0) if match else ""
+
+
+def test_section_17_lists_the_heartbeat_sender_with_only_the_allowed_labels() -> None:
+    rows = _table_rows(_section(_runbook(), 17), "Step")
+    row = next((r for r in rows if r["Step"] == "11.9"), None)
+    assert row is not None, "section 17 has no 11.9 row"
+    labels = {label.strip() for label in row["Tested by"].split(";")}
+    assert labels == {"local test", "real host (operator)"}
+    notes = row["Notes"]
+    for phrase in ("stub", "loopback", "real host"):
+        assert phrase in notes, f"the 11.9 notes lack: {phrase}"
+    steps = [r["Step"] for r in rows]
+    assert steps.index("11.9") == steps.index("11.8") + 1
+
+
+def test_section_11_9_describes_the_sender_without_a_monitor_number() -> None:
+    body = _subsection(_section(_runbook(), 11), "11.9")
+    assert body.startswith("### 11.9 External heartbeat for the collector (healthchecks.io)")
+    missing = _missing(
+        body,
+        (
+            "healthchecks.io",
+            "2026-10-09",
+            "16-DEC-O-12",
+            "src.data.collector --healthcheck",
+            "only while",
+            "/etc/trading/heartbeat.url",
+            "--set-url",
+            "--install-timer",
+            "--interval-seconds",
+            "--fail-ping",
+            "--url-file",
+            "--dry-run",
+            "no default",
+            "dashboard",
+            "grace",
+            "exit code",
+            "never stops",
+            "catch-up",
+            "PLACEHOLDER",
+            ".env",
+            "acceptance.json",
+            "shell history",
+            "Phase 24",
+            "per-bar",
+            "docs/SOURCES.md",
+            "operator verification of plan 16-50",
+        ),
+    )
+    assert not missing, f"11.9 lacks: {missing}"
+    for command in HEARTBEAT_COMMANDS:
+        assert f"\n{command}\n" in body, f"11.9 lacks the command line: {command}"
+    assert "```text" in body
+    for code in ("0", "1", "2", "3", "4"):
+        assert re.search(rf"\b{code}\b", body.split("xit code", 1)[1][:900])
+    assert not TIME_VALUE.findall(body), TIME_VALUE.findall(body)
+    assert "https://" not in body, "11.9 must not name a ping URL"
+
+
+def test_section_11_4_no_longer_says_the_repository_pings_nothing() -> None:
+    body = _subsection(_section(_runbook(), 11), "11.4")
+    assert "Nothing in this repository pings an external monitor" not in body
+    assert "11.9" in body
+    assert "backup unit itself sends no ping" in body
+
+
+def test_section_13_5_and_19_point_to_the_sender() -> None:
+    text = _runbook()
+    checklist = _subsection(_section(text, 13), "13.5")
+    item = next(ln for ln in checklist.splitlines() if ln.startswith("2."))
+    assert "deploy/heartbeat.sh" in item and "11.9" in item
+    assert "This repository sends no heartbeat" not in text
+
+
+def test_sources_records_the_facts_read_for_plan_16_50() -> None:
+    sources = _read(SOURCES)
+    assert len(re.findall(r"^## Facts read for plan 16-50 \(2026-10-09\)$", sources, re.M)) == 1
+    section = sources.split("## Facts read for plan 16-50 (2026-10-09)", 1)[1]
+    section = re.split(r"^## ", section, maxsplit=1, flags=re.M)[0]
+    rows = [ln for ln in section.splitlines() if ln.startswith("| ") and "https://" in ln]
+    urls = ("https://healthchecks.io/docs/http_api/", "https://github.com/systemd/systemd")
+    for url in urls:
+        row = next((r for r in rows if url in r), None)
+        assert row is not None, f"no SOURCES row for {url}"
+        assert "2026-10-09" in row and "not verified live" in row
+    assert "UNVERIFIED" in section
+    for point in ("first systemd release", "owner and mode", "no start timeout"):
+        assert point in section, f"the UNVERIFIED sub-points lack: {point}"
+    curl_rows = [ln for ln in section.splitlines() if "curl" in ln and ln.startswith("| ")]
+    assert curl_rows and "not fetched" in curl_rows[0]
+
+
+def test_the_o12_record_names_the_service_and_leaves_interval_and_grace_open() -> None:
+    text = _read(DECISION_O12)
+    lines = text.splitlines()
+    assert "option: postpone" in lines
+    for line in (
+        "heartbeat_service: healthchecks.io",
+        "heartbeat_service decided by: user",
+        "heartbeat_service date: 2026-10-09",
+        "heartbeat_service words: thêm healthchecks.io vào plan",
+    ):
+        assert line in lines, f"the O-12 record lacks: {line}"
+    assert any(ln.startswith("heartbeat_service words (translation") for ln in lines)
+    assert any(ln.startswith("heartbeat_interval: open") for ln in lines)
+    assert any(ln.startswith("heartbeat_grace: open") for ln in lines)
