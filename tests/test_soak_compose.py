@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from src.paper.runtime import build_parser
 from src.paper.runtime_config import ALLOWED_ENV_NAMES, REFUSAL_CODES, ExitCode
+
 from tests.infra_helpers import compose_cli_available, find_bash, infra_skip
 from tests.test_deploy_compose import _hermetic_env, _write_project
 
@@ -97,9 +97,7 @@ def _health_scalar(block: str, key: str) -> str:
     return match.group(1)
 
 
-def restart_loop_problems(
-    command: Sequence[str], probe: Sequence[str], restart: str
-) -> list[str]:
+def restart_loop_problems(command: Sequence[str], probe: Sequence[str], restart: str) -> list[str]:
     """Why a service definition could loop on a configuration refusal (empty means it cannot).
 
     The runtime exits with 3 to 6 on a refusal; `on-failure` restarts every non-zero exit, so the
@@ -304,9 +302,9 @@ def test_soak_template_lists_every_name_the_services_read_and_no_other() -> None
 
 
 def test_soak_template_header_states_the_shared_env_file_and_the_refusal() -> None:
-    header = "\n".join(
-        line for line in _template_lines() if line.lstrip().startswith("#")
-    ).replace("\n# ", " ")
+    header = "\n".join(line for line in _template_lines() if line.lstrip().startswith("#")).replace(
+        "\n# ", " "
+    )
     assert "x-app" in header
     assert "env_file" in header
     assert "BACKUP_" in header
@@ -412,7 +410,13 @@ def test_wrapper_refuses_down_with_volumes_when_the_project_comes_from_the_envir
 
 @pytest.mark.parametrize(
     "args",
-    [["down"], ["ps"], ["up", "-d"], ["--profile", "paper", "up", "-d", "paper"], ["logs", "paper"]],
+    [
+        ["down"],
+        ["ps"],
+        ["up", "-d"],
+        ["--profile", "paper", "up", "-d", "paper"],
+        ["logs", "paper"],
+    ],
     ids=lambda a: " ".join(a),
 )
 def test_wrapper_forwards_every_other_command_to_the_soak_project(args: list[str]) -> None:
