@@ -13,6 +13,7 @@ in-memory reference port (the PostgreSQL variant is `tests/test_paper_runtime_re
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
@@ -689,3 +690,249 @@ def test_downtime_gaps_use_the_exchange_grid_and_the_previous_runs_end() -> None
     assert {g.detected_at_utc for g in gaps} == {RESTART}
     nothing = module.downtime_gaps(restored, now_utc=C, symbols=("BTCUSDT",), intervals=("1h",))
     assert nothing == (), "no close is due yet: nothing is downtime"
+
+
+# ---------------------------------------------------------------------------------------------- #
+# Task 2, Test 1: the pinned state file and the stored EPOCH_PINNED record must agree.
+# ---------------------------------------------------------------------------------------------- #
+
+
+def pin_record(epoch: StreamEpoch, *, parameter_set_hash: str | None = None) -> RuntimeRecord:
+    return RuntimeRecord(
+        event_type=RuntimeEventType.EPOCH_PINNED,
+        epoch_id=epoch.epoch_id,
+        occurred_at_utc=epoch.opened_at_utc,
+        payload={
+            "strategy_id": epoch.strategy_id,
+            "parameter_set_id": epoch.parameter_set_id,
+            "parameter_set_hash": parameter_set_hash or epoch.parameter_set_hash,
+        },
+    )
+
+
+def test_check_epoch_consistency_accepts_a_match_and_refuses_everything_else(live: Live) -> None:
+    module = restart_module()
+    epoch = live.epoch
+
+    module.check_epoch_consistency(epoch, live.state)  # the pin run recorded it: no exception
+
+    empty = InMemoryRuntimeState()
+    with pytest.raises(module.EpochMismatch, match="no EPOCH_PINNED"):
+        module.check_epoch_consistency(epoch, empty)
+
+    other_hash = InMemoryRuntimeState()
+    other_hash.record(pin_record(epoch, parameter_set_hash="f" * 64))
+    with pytest.raises(module.EpochMismatch, match="differs"):
+        module.check_epoch_consistency(epoch, other_hash)
+
+    other_time = InMemoryRuntimeState()
+    other_time.record(
+        RuntimeRecord(
+            event_type=RuntimeEventType.EPOCH_PINNED,
+            epoch_id=epoch.epoch_id,
+            occurred_at_utc=epoch.opened_at_utc + timedelta(seconds=1),
+            payload=dict(pin_record(epoch).payload),
+        )
+    )
+    with pytest.raises(module.EpochMismatch, match="differs"):
+        module.check_epoch_consistency(epoch, other_time)
+
+
+def test_a_restart_with_a_missing_or_different_pin_record_exits_6_before_any_subscription(
+    live: Live, capsys: pytest.CaptureFixture[str]
+) -> None:
+    epoch = live.epoch
+    missing = InMemoryRuntimeState()
+    different = InMemoryRuntimeState()
+    different.record(pin_record(epoch, parameter_set_hash="f" * 64))
+
+    for state in (missing, different):
+
+        async def script(_h: Live) -> None:
+            raise AssertionError("the loop must not start")
+
+        code = live.start(
+            script, state=state, public=WarmPublic(RESTART), clock=FixedClock(RESTART)
+        )
+
+        assert code == 6, "ADMISSION_OR_EPOCH_MISMATCH: a refusal held by the compose command"
+        assert live.client.handles == [], "nothing was subscribed"
+        assert not state.records(epoch.epoch_id, {RuntimeEventType.RUNTIME_START})
+    assert "EPOCH_PINNED" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------------------------- #
+# Task 2, Test 2: a bar recorded before the stop is never recorded or evaluated twice.
+# ---------------------------------------------------------------------------------------------- #
+
+
+def test_a_bar_recorded_before_the_stop_is_not_recorded_or_evaluated_again_after_a_restart(
+    live: Live, evaluations: list[Candle], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = DowntimeRig(live, "history-only", monkeypatch)
+    rig.seed()  # the processed record of bar 245
+    (original,) = live.records(RuntimeEventType.PAPER_BAR_PROCESSED)
+    seen_by_pipeline: list[datetime] = []
+
+    class Spy:
+        def handle(self, bars: Any, *, now_utc: datetime) -> PipelineResult:
+            batch = list(bars)
+            seen_by_pipeline.extend(b.close_time_utc for b in batch)
+            return rig.pipeline.handle(batch, now_utc=now_utc)
+
+    async def script(h: Live) -> None:
+        await wait_until(lambda: len(h.client.handles) == 4)
+        rig.clock.now = rig.last_processed.close_time_utc + timedelta(seconds=1)
+        rig.emit(h, rig.last_processed)  # re-delivered by the feed after the restart
+        await asyncio.sleep(0.3)
+
+    rig.public.rows = {}  # an exchange that returns nothing: only the restored state remains
+    assert live.start(script, clock=rig.clock, public=rig.public, pipeline=Spy()) == 0
+
+    assert live.records(RuntimeEventType.PAPER_BAR_PROCESSED) == [original], (
+        "no second record and no conflict"
+    )
+    assert evaluations == []
+    assert rig.last_processed.close_time_utc not in seen_by_pipeline, (
+        "the supervisor cursor, seeded from the restored close, drops it before the pipeline"
+    )
+
+
+def test_the_pipeline_treats_the_restored_last_close_as_already_processed() -> None:
+    case = _case_input()
+    setup = exchange_candles(_setup_bars(case), HOUR)
+    parameter_set = _parameter_set(case)
+    state = InMemoryRuntimeState()
+    pipeline = BarPipeline(
+        epoch=StreamEpoch(
+            epoch_id="a" * 64,
+            strategy_id=case["strategy_id"],
+            parameter_set_id=case["parameter_set_id"],
+            parameter_set_hash=parameter_set.parameter_set_hash,
+            opened_at_utc=setup[0].close_time_utc,
+        ),
+        parameter_set=parameter_set,
+        context_factory=lambda candle: _bar_context(case, candle.close_time_utc),
+        buffers=BarBuffers(),
+        state=state,
+        sibling_4h_wait_seconds=30,
+        fetch_4h_bar=lambda _symbol, _close: None,
+    )
+    processed = setup[10]
+    pipeline.seed_processed({("BTCUSDT", "1h"): processed.close_time_utc})
+
+    bar = TaggedBar(
+        symbol=processed.symbol,
+        interval=processed.interval,
+        open_time_utc=processed.open_time_utc,
+        close_time_utc=processed.close_time_utc,
+        open=processed.open,
+        high=processed.high,
+        low=processed.low,
+        close=processed.close,
+        volume=processed.volume,
+        source=SourceTag.LIVE_WS,
+    )
+    result = pipeline.handle([bar], now_utc=processed.close_time_utc + timedelta(seconds=1))
+
+    assert result.duplicates == (bar,)
+    assert result.recorded == () and result.evaluated == ()
+    assert list(state.records("a" * 64)) == []
+
+
+def test_the_supervisor_cursor_falls_back_to_the_restored_close_when_the_warm_up_is_empty(
+    live: Live, supervisor_trace: SupervisorTrace
+) -> None:
+    public = WarmPublic(RESTART, rows={})  # the exchange returns no row at all
+    run_restart(live, with_stop=True, public=public, emit_live=False)
+
+    assert ("BTCUSDT", "1h", C) in supervisor_trace.seeded
+    assert ("BTCUSDT", "4h", C) in supervisor_trace.seeded
+
+
+# ---------------------------------------------------------------------------------------------- #
+# Task 2, Test 3: exchange holes and repeated restarts leave exactly one record per close.
+# ---------------------------------------------------------------------------------------------- #
+
+
+def test_a_close_the_exchange_does_not_return_is_an_exchange_hole_not_a_planned_restart(
+    live: Live,
+) -> None:
+    hole_open = DOWNTIME_CLOSES[1] + ONE_MS - HOUR
+    public = WarmPublic(RESTART, omit_opens=[("BTCUSDT", "1h", hole_open)])
+    run_restart(live, with_stop=True, public=public, emit_live=False)
+
+    gaps = live.records(RuntimeEventType.PAPER_GAP)
+    assert gap_triples(gaps) == sorted(
+        [
+            ("BTCUSDT", "1h", DOWNTIME_CLOSES[0].isoformat(), "PLANNED_RESTART"),
+            ("BTCUSDT", "1h", DOWNTIME_CLOSES[1].isoformat(), "EXCHANGE_NO_CANDLE"),
+            ("BTCUSDT", "1h", DOWNTIME_CLOSES[2].isoformat(), "PLANNED_RESTART"),
+        ]
+    )
+
+
+def test_a_close_older_than_the_requested_window_keeps_the_restart_reason() -> None:
+    module = restart_module()
+    state = InMemoryRuntimeState()
+    epoch_id = "e" * 64
+    old_close = RESTART.replace(minute=0) - timedelta(hours=1300) - ONE_MS
+    state.record(
+        RuntimeRecord.bar_processed(
+            epoch_id=epoch_id, symbol="BTCUSDT", interval="1h", close_time_utc=old_close
+        )
+    )
+    restored = module.restore_runtime(state, epoch_id)
+    warm = asyncio.run(module.warm_up(WarmPublic(RESTART), ("BTCUSDT",), ("1h",), RESTART))
+
+    gaps = module.downtime_gaps(
+        restored, now_utc=RESTART, symbols=("BTCUSDT",), intervals=("1h",), warm=warm
+    )
+
+    assert len(gaps) == 1300  # every close after the processed one, up to 18:59:59.999
+    assert {g.reason.value for g in gaps} == {"CRASH"}, "never stopped, and the exchange has all"
+    first_requested = RESTART.replace(minute=0) - timedelta(hours=1000) - ONE_MS
+    older = [g for g in gaps if g.expected_close_utc < first_requested]
+    assert len(older) == 300, "closes outside the requested window are not exchange holes"
+
+
+def test_a_repeated_restart_never_rewrites_a_recorded_gap_with_another_reason() -> None:
+    module = restart_module()
+    state = InMemoryRuntimeState()
+    epoch_id = "e" * 64
+    for kind, at in (
+        (RuntimeEventType.RUNTIME_START, START_AT),
+        (RuntimeEventType.RUNTIME_STOP, STOP_AT),
+    ):
+        state.record(RuntimeRecord(event_type=kind, epoch_id=epoch_id, occurred_at_utc=at))
+    state.record(
+        RuntimeRecord.bar_processed(
+            epoch_id=epoch_id, symbol="BTCUSDT", interval="1h", close_time_utc=C
+        )
+    )
+    first = module.downtime_gaps(
+        module.restore_runtime(state, epoch_id),
+        now_utc=RESTART,
+        symbols=("BTCUSDT",),
+        intervals=("1h",),
+    )
+    # The first restart recorded only C + 1h as PLANNED_RESTART, then crashed.
+    state.record(module.restart_gap_record(epoch_id, first[0]))
+    state.record(
+        RuntimeRecord(
+            event_type=RuntimeEventType.RUNTIME_START,
+            epoch_id=epoch_id,
+            occurred_at_utc=RESTART,
+        )
+    )
+
+    restored = module.restore_runtime(state, epoch_id)  # the previous run is a START: a crash
+    gaps = module.downtime_gaps(
+        restored,
+        now_utc=RESTART + timedelta(minutes=1),
+        symbols=("BTCUSDT",),
+        intervals=("1h",),
+    )
+
+    assert [g.expected_close_utc for g in gaps] == list(DOWNTIME_CLOSES[1:])
+    assert {g.reason.value for g in gaps} == {"CRASH"}
