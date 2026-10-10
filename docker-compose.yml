@@ -95,19 +95,41 @@ services:
       start_period: 6m
       retries: 3
 
-  # Paper runner placeholder. No entrypoint exists yet: Phase 16 (paper) replaces this
-  # command and defines the service probe (D-06). It fails fast with a message instead of
-  # running an invented command, and disables the inherited collector HEALTHCHECK.
+  # Paper runtime (Phase 16, D-01, D-32): `python -m src.paper.runtime` with its own probe, which
+  # reports healthy only while the last processed closed bar is younger than the ratified age.
+  # Interval, timeout, start period and retries copy the collector's. The probe feeds no
+  # evidence criterion: coverage is computed from records.
+  #  - restart `on-failure`: an empty allowlist makes the runtime exit 0 by design, and
+  #    `unless-stopped` would restart that in a loop; a crash (exit 1 or 7) restarts and shows
+  #    up later as a CRASH gap. No restart cap: a cap of N would stop the runtime for good after
+  #    N quick crashes during a short database outage, which costs coverage.
+  #  - `on-failure` restarts every non-zero exit and Compose cannot exclude codes, so a
+  #    configuration refusal would loop, each restart writing RUNTIME_START and gap rows. The
+  #    refusal codes are 3 (trade-capable variable), 4 (configuration not ratified), 5 (no
+  #    pinned epoch) and 6 (admission or epoch mismatch). `--hold-on-refusal` logs the refusal and
+  #    keeps the container up, unhealthy, and it exits with the refusal code only when stopped.
+  #  - logs holds logs/paper/pinned_epoch.json and registry_diff.jsonl.
+  #  - WR-06 (per-service env_file split) stays Phase 24: every x-app service shares one
+  #    env_file, so this container also sees any BACKUP_ variable in it. The runtime refuses any
+  #    BINANCE_ name at start as the second barrier. The soak runs as its own project
+  #    (`deploy/compose-soak.sh`, project trading-soak, own pgdata volume).
   paper:
     <<: *app
     profiles: ["paper"]
-    restart: "no"
-    command:
-      - /app/.venv/bin/python
-      - -c
-      - "raise SystemExit('paper runner not implemented yet: arrives in Phase 16')"
+    restart: "on-failure"
+    environment: *database-env
+    depends_on:
+      db-upgrade:
+        condition: service_completed_successfully
+    volumes:
+      - logs:/app/logs
+    command: ["/app/.venv/bin/python", "-m", "src.paper.runtime", "--hold-on-refusal"]
     healthcheck:
-      disable: true
+      test: ["CMD", "/app/.venv/bin/python", "-m", "src.paper.runtime", "--healthcheck"]
+      interval: 60s
+      timeout: 15s
+      start_period: 6m
+      retries: 3
 
   # Live runner placeholder, never part of the default stack. No entrypoint yet: Phase 24
   # (live) replaces this command and defines the service probe (D-06). Live credentials use
