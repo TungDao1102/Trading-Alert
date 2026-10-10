@@ -350,3 +350,98 @@ def test_a_section_without_a_human_action_keeps_the_synthetic_label(
     assert delay["user_execution"]["n_signals"] == 0
     assert delay["synthetic_lag_label"] is not None
     assert SYNTHETIC_LABEL in markdown
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: the report states the soak rule and no metric was added (D-18).
+# --------------------------------------------------------------------------- #
+
+SOAK_SENTENCE = "Soak evidence never feeds a value into trading logic (D-18)."
+SHADOW_KEYS = (
+    "mode",
+    "approval_requested_at_utc",
+    "confirm_requested_at_utc",
+    "confirmed_at_utc",
+    "test_only",
+)
+# Display counters of the PAPER block (plan 16-36): counts of rows, not metrics.
+COUNTER_KEYS = {"shadow_records", "test_only_excluded"}
+
+
+def _without_shadow_fields(document: dict[str, Any]) -> dict[str, Any]:
+    stripped = copy.deepcopy(document)
+    for record in stripped["paper"]:
+        for key in SHADOW_KEYS:
+            record.pop(key, None)
+    return stripped
+
+
+def _names(markdown: str) -> set[str]:
+    """Section headings and table column names: the metric and section vocabulary of a report."""
+    lines = markdown.split("\n")
+    names = {line for line in lines if line.startswith("#")}
+    for index, line in enumerate(lines[1:], start=1):
+        if line.startswith("| :---") or line.startswith("| ---"):
+            names.add(lines[index - 1])
+    return names
+
+
+def _key_paths(value: Any, prefix: str = "") -> set[str]:
+    if isinstance(value, dict):
+        paths: set[str] = set()
+        for key, child in value.items():
+            paths.add(f"{prefix}/{key}")
+            paths |= _key_paths(child, f"{prefix}/{key}")
+        return paths
+    if isinstance(value, list):
+        paths = set()
+        for child in value:
+            paths |= _key_paths(child, f"{prefix}[]")
+        return paths
+    return set()
+
+
+def test_a_report_of_shadow_evidence_states_the_soak_rule_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, markdown = _report_of(tmp_path, "shadow", _shadow_rows(), capsys)
+    assert markdown.split("\n").count(SOAK_SENTENCE) == 1
+
+
+def test_a_report_without_shadow_records_does_not_carry_the_sentence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    document = _without_shadow_fields(_export(_shadow_rows()))
+    _, _, _, markdown = _run_cli(tmp_path, _write(tmp_path, document), capsys)
+    assert SOAK_SENTENCE not in markdown
+
+
+def test_shadow_evidence_adds_no_metric_or_section_to_the_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    shadow_dir = tmp_path / "shadow"
+    plain_dir = tmp_path / "plain"
+    shadow_dir.mkdir()
+    plain_dir.mkdir()
+    document = _export(_shadow_rows())
+    _, _, shadow_sidecar, shadow_md = _run_cli(shadow_dir, _write(shadow_dir, document), capsys)
+    plain_doc = _without_shadow_fields(document)
+    _, _, plain_sidecar, plain_md = _run_cli(plain_dir, _write(plain_dir, plain_doc), capsys)
+
+    assert _names(shadow_md) == _names(plain_md)
+    shadow_paths = _key_paths(shadow_sidecar["report"])
+    plain_paths = _key_paths(plain_sidecar["report"])
+    only_shadow = {path.rsplit("/", 1)[-1] for path in shadow_paths - plain_paths}
+    assert only_shadow <= COUNTER_KEYS
+    assert plain_paths - shadow_paths == set()
+
+
+def test_the_new_sentence_obeys_the_byte_rules_of_the_renderer(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, markdown = _report_of(tmp_path, "bytes", _shadow_rows(), capsys)
+    assert "\r" not in markdown
+    assert markdown.endswith("\n") and not markdown.endswith("\n\n")
+    line = next(line for line in markdown.split("\n") if line.startswith("Soak evidence"))
+    assert line == line.rstrip()
+    assert line == SOAK_SENTENCE
