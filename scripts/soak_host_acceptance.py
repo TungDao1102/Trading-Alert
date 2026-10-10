@@ -73,6 +73,18 @@ PASS = "PASS"
 _ENTRY_FIELDS: tuple[str, ...] = ("status", "command", "evidence", "checked_at")
 _UTC_TIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 
+# Plan 16-50: the ping URL of the external heartbeat monitor is a secret (whoever holds it can send
+# a success ping and hide an outage). The shape rules of ``src.ops.redaction`` do not know it, so
+# these patterns do: an http(s) URL with a UUID-shaped path segment (the form of a check's ping
+# URL), and any URL on the hosted monitor's ping domain (the slug form carries a ping key instead
+# of a UUID; the domain is from the plan author's knowledge, not read from the docs page, see
+# docs/SOURCES.md). An AWS ARN with ``key/<uuid>`` is not a URL and does not match.
+_UUID = r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+_PING_URL_SHAPES: tuple[re.Pattern[str], ...] = (
+    re.compile(rf"(?i)https?://[^\s\"'<>]*/{_UUID}(?![0-9A-Fa-f-])"),
+    re.compile(r"(?i)https?://(?:[a-z0-9-]+\.)*hc-ping\.com(?![a-z0-9.-])"),
+)
+
 
 class InputProblem(Exception):
     """The file cannot be used; the message never carries a value from the file."""
@@ -102,33 +114,41 @@ def _load(path: Path) -> tuple[str, Mapping[str, Any]]:
     return raw, document
 
 
+def _secret_looking(value: str, redactor: Redactor) -> bool:
+    """True when the redactor would change ``value`` or it holds a ping-URL shape (plan 16-50)."""
+    if redactor.scrub(value) != value:
+        return True
+    return any(shape.search(value) for shape in _PING_URL_SHAPES)
+
+
 def _scan_for_secrets(document: Mapping[str, Any], redactor: Redactor) -> None:
     """Raise ``InputProblem`` naming the condition and field of the first secret-looking value.
 
     Every string leaf is scrubbed on its own with the shape rules of ``src.ops.redaction`` plus
-    the values of secret-named environment variables of this process; a leaf the scrub would
-    change is a finding. Only the condition id (a known constant) and the field name are used in
+    the values of secret-named environment variables of this process, and checked against the
+    ping-URL shapes of plan 16-50; a leaf the scrub would change, or one of that shape, is a
+    finding. Only the condition id (a known constant) and the field name are used in
     the message, never the leaf.
     """
     top_level = {"schema", "conditions"}
     for key, value in document.items():
         if key not in top_level:
             raise InputProblem("the acceptance file has an unexpected top-level field")
-        if isinstance(value, str) and redactor.scrub(value) != value:
+        if isinstance(value, str) and _secret_looking(value, redactor):
             raise InputProblem(f"secret-looking value in top-level field '{key}'")
     conditions = document.get("conditions")
     if not isinstance(conditions, dict):
         return
     for condition_id, entry in conditions.items():
         label = condition_id if condition_id in REQUIRED_CONDITIONS else "<unknown condition>"
-        if redactor.scrub(str(condition_id)) != str(condition_id):
+        if _secret_looking(str(condition_id), redactor):
             raise InputProblem("secret-looking value in a condition id")
         if not isinstance(entry, dict):
             continue
         for field, value in entry.items():
             if field not in _ENTRY_FIELDS:
                 raise InputProblem(f"unexpected field in condition {label}")
-            if isinstance(value, str) and redactor.scrub(value) != value:
+            if isinstance(value, str) and _secret_looking(value, redactor):
                 raise InputProblem(f"secret-looking value in condition {label}, field '{field}'")
 
 
