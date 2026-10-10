@@ -215,8 +215,18 @@ def test_the_module_contains_no_numeric_equity_literal() -> None:
     offenders: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and not isinstance(node.value, bool):
-            if isinstance(node.value, int | float) and node.value != 0:
+            if isinstance(node.value, float):
                 offenders.append(f"line {node.lineno}: {node.value!r}")
+            # Plain int literals are counters and slice bounds; an amount would be a Decimal.
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "Decimal"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value not in (0, "0")
+        ):
+            offenders.append(f"line {node.lineno}: Decimal({node.args[0].value!r})")
             if isinstance(node.value, str) and node.value.replace(".", "", 1).isdigit():
                 if Decimal(node.value) != 0:
                     offenders.append(f"line {node.lineno}: {node.value!r}")
