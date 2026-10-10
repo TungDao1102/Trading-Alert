@@ -884,7 +884,7 @@ def _row(
         for r in fixture.records
         if r["event_type"] == event_type.value
         and r["interval"] == interval
-        and r["occurred_at_utc"] == close
+        and (r["payload"].get("expected_close_utc") or r["occurred_at_utc"]) == close
     ]
     assert len(matches) == 1
     return matches[0]

@@ -23,15 +23,19 @@ REAL_SOAK): there is no parameter that sets it.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
+from pathlib import Path
 
+from src.core.types import Candle
 from src.paper.bars import CONTEXT_INTERVAL, SETUP_INTERVAL
 from src.paper.coverage import (
     RESTART_RULE,
+    SLOT_INTERVAL_SECONDS,
     CoverageReport,
     FreezeEvidenceReport,
     HealthInterval,
@@ -42,8 +46,11 @@ from src.paper.coverage import (
     tick_timing_summary,
 )
 from src.paper.evidence_bundle import DiffRecord, EvidenceBundle
+from src.paper.loop import BAR_STAGES, BarContext, check_feed_freshness
+from src.paper.pipeline import REASON_HISTORY_DISCONTINUITY, REASON_SIBLING_4H_MISSING
 from src.paper.runtime_state import RuntimeRecord
-from src.paper.vocabulary import HealthState
+from src.paper.surface import REASON_DUPLICATE_BAR, decision_surface, gate_record
+from src.paper.vocabulary import INTERVAL_MS, GapReason, HealthState, RuntimeEventType
 
 # DECISION D061 item D, 2026-10-07: trial soak length, in calendar days.
 TRIAL_CALENDAR_DAYS = 14
@@ -184,6 +191,49 @@ class TrialEvaluation:
 
 
 # --------------------------------------------------------------------------- #
+# Inputs only the runtime checks need: the Q-D rule and the parity replay context.
+# --------------------------------------------------------------------------- #
+
+
+class BackfillRule(StrEnum):
+    """The user's Q-D decision on REST_BACKFILL bars (decisions/16-DEC-Q-D.md)."""
+
+    HISTORY_ONLY = "history-only"
+    FRESH_WITHIN_BOUND = "fresh-within-bound"
+
+
+def read_backfill_rule(path: Path) -> BackfillRule:
+    """Read the `option:` line of the Q-D decision file. There is no default.
+
+    Raises:
+        FileNotFoundError: the decision file does not exist.
+        ValueError: the file has no `option:` line, or names an option this code does not know.
+    """
+    for line in path.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip() == "option":
+            try:
+                return BackfillRule(value.strip())
+            except ValueError:
+                raise ValueError(f"{path.name}: unknown Q-D option {value.strip()!r}") from None
+    raise ValueError(f"{path.name} has no 'option:' line")
+
+
+@dataclass(frozen=True)
+class ParityReplay:
+    """What the parity replay needs besides the recorded bars (D061 item D, L-04).
+
+    `context` is the `BarContext` (or a callable returning it per 1h bar) the live runtime
+    decided with; `history_bars` are the REST warm-up bars the runtime loaded before its first
+    live bar (they are history, never recorded as processed). Without them the replay would
+    reject the first live bars as under-warmed while the live runtime did not.
+    """
+
+    context: BarContext | Callable[[Candle], BarContext]
+    history_bars: tuple[Candle, ...] = ()
+
+
+# --------------------------------------------------------------------------- #
 # Small helpers.
 # --------------------------------------------------------------------------- #
 
@@ -305,10 +355,16 @@ def _freeze_continuity(inputs: _FreezeInputs) -> CriterionResult:
 
 
 def _lines_after_pin(inputs: _FreezeInputs) -> list[DiffRecord]:
+    """Freeze lines of this trial: after the pin, up to one slot after the window end.
+
+    The line of the last slot is written after the window end, so the bound is one slot interval
+    later; anything beyond belongs to a later epoch and is auxiliary (REV-18).
+    """
+    last = inputs.window_end_utc + timedelta(seconds=SLOT_INTERVAL_SECONDS)
     return [
         r
         for r in inputs.diff_records
-        if r.checked_at_utc is not None and r.checked_at_utc > inputs.pin_utc
+        if r.checked_at_utc is not None and inputs.pin_utc < r.checked_at_utc <= last
     ]
 
 
@@ -381,8 +437,12 @@ class _RuntimeInputs:
     epoch_id: str
     window_start_utc: datetime
     window_end_utc: datetime
+    symbols: tuple[str, ...]
     records: tuple[RuntimeRecord, ...]
     coverage: CoverageReport
+    backfill_rule: BackfillRule
+    parity: ParityReplay | None
+    other_epoch_records_in_window: tuple[tuple[str, int], ...]
 
 
 def _coverage_criterion(inputs: _RuntimeInputs) -> CriterionResult:
@@ -424,9 +484,417 @@ def _ceiling_criterion(inputs: _RuntimeInputs) -> CriterionResult:
     return CriterionResult("continuous uncovered time", report.ceiling_pass, evidence)
 
 
+_PROBLEM_LIMIT = 20
+
+
+def _with_problems(name: str, summary: Sequence[str], problems: Sequence[str]) -> CriterionResult:
+    """A criterion that passes exactly when it found no problem; problems are listed capped."""
+    evidence = [*summary, *problems[:_PROBLEM_LIMIT]]
+    if len(problems) > _PROBLEM_LIMIT:
+        evidence.append(f"... and {len(problems) - _PROBLEM_LIMIT} more")
+    return CriterionResult(name, not problems, tuple(evidence))
+
+
+def _read_time(payload: Mapping[str, object], key: str) -> datetime | None:
+    """A UTC-aware time from a payload value, or None when absent or unreadable."""
+    value = payload.get(key)
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _pair(record: RuntimeRecord) -> str:
+    return f"{record.symbol} {record.interval}"
+
+
+def _processed(records: Sequence[RuntimeRecord]) -> list[RuntimeRecord]:
+    chosen = [r for r in records if r.event_type is RuntimeEventType.PAPER_BAR_PROCESSED]
+    return sorted(chosen, key=lambda r: (r.occurred_at_utc, r.symbol or "", r.interval or ""))
+
+
+def _gap_records(records: Sequence[RuntimeRecord]) -> list[RuntimeRecord]:
+    chosen = [r for r in records if r.event_type is RuntimeEventType.PAPER_GAP]
+    return sorted(chosen, key=lambda r: (r.occurred_at_utc, r.symbol or "", r.interval or ""))
+
+
+def _gaps_explained(inputs: _RuntimeInputs) -> CriterionResult:
+    """Every gap carries a known reason that is not UNKNOWN; no bar is late or fabricated."""
+    problems: list[str] = []
+    gaps = _gap_records(inputs.records)
+    bars = _processed(inputs.records)
+    reasons: Counter[str] = Counter()
+    for gap in gaps:
+        close = _read_time(gap.payload, "expected_close_utc")
+        label = f"{_pair(gap)} close {close.isoformat() if close else 'unknown'}"
+        raw = gap.payload.get("reason")
+        if raw is None:
+            problems.append(f"PAPER_GAP {label} has no reason code")
+            continue
+        try:
+            reason = GapReason(str(raw))
+        except ValueError:
+            problems.append(f"PAPER_GAP {label} has an unknown reason code {raw!r}")
+            continue
+        reasons[reason.value] += 1
+        if reason is GapReason.UNKNOWN:
+            problems.append(f"unexplained gap: PAPER_GAP {label} has reason UNKNOWN")
+    sources: Counter[str] = Counter()
+    for bar in bars:
+        close = bar.occurred_at_utc
+        label = f"{_pair(bar)} close {close.isoformat()}"
+        source = str(bar.payload.get("source"))
+        sources[source] += 1
+        if source == "REST_BACKFILL":
+            if inputs.backfill_rule is BackfillRule.HISTORY_ONLY:
+                problems.append(
+                    f"late or fabricated bar: {label} was recorded from REST_BACKFILL, which the "
+                    f"Q-D rule ({inputs.backfill_rule.value}) never evaluates"
+                )
+            else:
+                problems.append(
+                    f"late or fabricated bar: {label} was recorded from REST_BACKFILL and there "
+                    f"is no ratified bound to check its age against "
+                    f"({inputs.backfill_rule.value})"
+                )
+        elif source == "REST_WARMUP":
+            problems.append(
+                f"late or fabricated bar: {label} was recorded from REST_WARMUP (history only)"
+            )
+        elif source != "LIVE_WS":
+            problems.append(f"late or fabricated bar: {label} has an unknown source {source!r}")
+        tick = _read_time(bar.payload, "tick_time_utc")
+        if tick is None:
+            problems.append(f"late or fabricated bar: {label} has no readable tick time")
+        elif tick < close:
+            problems.append(f"late or fabricated bar: {label} was processed before it closed")
+    by_source = ", ".join(f"{k}={v}" for k, v in sorted(sources.items())) or "none"
+    by_reason = ", ".join(f"{k}={v}" for k, v in sorted(reasons.items())) or "none"
+    summary = (
+        f"{len(bars)} processed bar record(s) by source: {by_source}; "
+        f"{len(gaps)} PAPER_GAP record(s) by reason: {by_reason}",
+        f"Q-D rule in force: {inputs.backfill_rule.value}",
+    )
+    return _with_problems("gaps explained, no fabricated bar", summary, problems)
+
+
+@dataclass(frozen=True)
+class _Run:
+    start: datetime
+    end: datetime | None
+
+
+def _runs(records: Sequence[RuntimeRecord]) -> list[_Run]:
+    """Runs from RUNTIME_START and RUNTIME_STOP; a START with no STOP before the next START ends
+    at that next START."""
+    markers = sorted(
+        (
+            r
+            for r in records
+            if r.event_type in (RuntimeEventType.RUNTIME_START, RuntimeEventType.RUNTIME_STOP)
+        ),
+        key=lambda r: (r.occurred_at_utc, r.event_type is RuntimeEventType.RUNTIME_START),
+    )
+    runs: list[_Run] = []
+    opened: datetime | None = None
+    for marker in markers:
+        if marker.event_type is RuntimeEventType.RUNTIME_START:
+            if opened is not None:
+                runs.append(_Run(opened, marker.occurred_at_utc))
+            opened = marker.occurred_at_utc
+        elif opened is not None:
+            runs.append(_Run(opened, marker.occurred_at_utc))
+            opened = None
+    if opened is not None:
+        runs.append(_Run(opened, None))
+    return runs
+
+
+def _restart_warmup(inputs: _RuntimeInputs) -> CriterionResult:
+    """A bar that closed while the process was down never produces a signal (D061 item 1)."""
+    runs = _runs(inputs.records)
+    problems: list[str] = []
+    checked = 0
+    for bar in _processed(inputs.records):
+        if bar.payload.get("stage") not in BAR_STAGES:
+            continue  # a feed-gate reject or a context bar decides nothing
+        checked += 1
+        tick = _read_time(bar.payload, "tick_time_utc")
+        if tick is None:
+            continue  # reported by the gap check
+        label = f"{_pair(bar)} close {bar.occurred_at_utc.isoformat()}"
+        run = next((r for r in runs if r.start <= tick and (r.end is None or tick <= r.end)), None)
+        if run is None:
+            problems.append(f"evaluated bar {label} has no recorded run around its tick time")
+        elif bar.occurred_at_utc <= run.start:
+            problems.append(
+                f"evaluated bar {label} closed while the process was down (before the start at "
+                f"{run.start.isoformat()}): no late signal may exist"
+            )
+    summary = (
+        f"{len(runs)} run(s) from RUNTIME_START and RUNTIME_STOP records; "
+        f"{checked} evaluated bar(s) checked against the start of their run",
+    )
+    return _with_problems("restart warm-up before the first evaluated bar", summary, problems)
+
+
+def _no_duplicate_signal(inputs: _RuntimeInputs) -> CriterionResult:
+    bars = _processed(inputs.records)
+    keys = Counter((r.symbol, r.interval, r.occurred_at_utc) for r in bars)
+    problems = [
+        f"duplicate signal: {count} PAPER_BAR_PROCESSED records for {symbol} {interval} close "
+        f"{close.isoformat()}"
+        for (symbol, interval, close), count in sorted(
+            keys.items(), key=lambda item: (item[0][2], item[0][0] or "", item[0][1] or "")
+        )
+        if count > 1
+    ]
+    signal_bars: dict[str, set[tuple[str | None, str | None, datetime]]] = {}
+    for bar in bars:
+        surface = bar.payload.get("surface")
+        signal_id = surface.get("signal_id") if isinstance(surface, Mapping) else None
+        if isinstance(signal_id, str) and signal_id:
+            signal_bars.setdefault(signal_id, set()).add(
+                (bar.symbol, bar.interval, bar.occurred_at_utc)
+            )
+    problems.extend(
+        f"duplicate signal: signal id {signal_id} appears on {len(places)} bars"
+        for signal_id, places in sorted(signal_bars.items())
+        if len(places) > 1
+    )
+    summary = (
+        f"{len(bars)} PAPER_BAR_PROCESSED record(s) read; {len(signal_bars)} distinct signal id(s)",
+    )
+    return _with_problems("no duplicate signal", summary, problems)
+
+
+def _expected_closes(interval: str, start_utc: datetime, end_utc: datetime) -> list[datetime]:
+    """Close times (open + interval - 1 ms, on the epoch grid) in [start_utc, end_utc)."""
+    step = INTERVAL_MS[interval]
+    origin = datetime(1970, 1, 1, tzinfo=UTC)
+    start_ms = (start_utc - origin) // timedelta(milliseconds=1)
+    k = -((-(start_ms + 1)) // step)  # ceil((start_ms + 1) / step)
+    closes: list[datetime] = []
+    while True:
+        close = origin + timedelta(milliseconds=k * step - 1)
+        if close >= end_utc:
+            return closes
+        closes.append(close)
+        k += 1
+
+
+def _no_missing_row(inputs: _RuntimeInputs) -> CriterionResult:
+    have: set[tuple[str | None, str | None, datetime]] = {
+        (r.symbol, r.interval, r.occurred_at_utc) for r in _processed(inputs.records)
+    }
+    for gap in _gap_records(inputs.records):
+        expected = _read_time(gap.payload, "expected_close_utc")
+        if expected is not None:
+            have.add((gap.symbol, gap.interval, expected))
+    expected_total = 0
+    problems: list[str] = []
+    for symbol in inputs.symbols:
+        for interval in EVALUATED_INTERVALS:
+            for close in _expected_closes(interval, inputs.window_start_utc, inputs.window_end_utc):
+                expected_total += 1
+                if (symbol, interval, close) not in have:
+                    problems.append(
+                        f"missing journal row: {symbol} {interval} close {close.isoformat()} has "
+                        "neither a processed record nor a gap record"
+                    )
+    summary = (
+        f"{expected_total} expected closed bar(s) ({', '.join(inputs.symbols)} x "
+        f"{', '.join(EVALUATED_INTERVALS)}) from the pin to the window end; "
+        f"{len(problems)} without a record",
+    )
+    return _with_problems("no missing journal row", summary, problems)
+
+
+def _no_test_signal(inputs: _RuntimeInputs) -> CriterionResult:
+    """REV-03: the test signal runs only in a rehearsal before the soak (every record test_only)."""
+    problems = [
+        f"test signal inside the soak window: {r.event_type.value} at "
+        f"{r.occurred_at_utc.isoformat()} is marked test_only"
+        for r in sorted(inputs.records, key=lambda r: (r.occurred_at_utc, r.event_type.value))
+        if r.payload.get("test_only") not in (None, False)
+    ]
+    summary = (f"{len(inputs.records)} runtime record(s) of the judged epoch read",)
+    return _with_problems("no test signal inside the soak window", summary, problems)
+
+
+def _one_epoch(inputs: _RuntimeInputs) -> CriterionResult:
+    problems = [
+        f"{count} runtime record(s) of epoch {epoch_id} lie inside the trial window: more than "
+        "one epoch_id"
+        for epoch_id, count in inputs.other_epoch_records_in_window
+    ]
+    summary = (
+        f"judged epoch {inputs.epoch_id}; runtime records of earlier epochs before the pin are "
+        "auxiliary and are not read here",
+    )
+    return _with_problems("runtime records of one epoch", summary, problems)
+
+
+# --------------------------------------------------------------------------- #
+# Parity (tolerance zero) over the recorded bars and the live surface records.
+# --------------------------------------------------------------------------- #
+
+_PIPELINE_ONLY_GATES = frozenset({REASON_HISTORY_DISCONTINUITY, REASON_SIBLING_4H_MISSING})
+_PARITY_NAME = "parity (tolerance zero)"
+
+
+def _candle_from(bar: Mapping[str, object]) -> Candle:
+    def moment(key: str) -> datetime:
+        value = _read_time(bar, key)
+        if value is None:
+            raise ValueError(f"bar {key} is not a UTC time")
+        return value
+
+    try:
+        return Candle(
+            symbol=str(bar["symbol"]),
+            interval=str(bar["interval"]),
+            open_time_utc=moment("open_time_utc"),
+            close_time_utc=moment("close_time_utc"),
+            open=Decimal(str(bar["open"])),
+            high=Decimal(str(bar["high"])),
+            low=Decimal(str(bar["low"])),
+            close=Decimal(str(bar["close"])),
+            volume=Decimal(str(bar["volume"])),
+        )
+    except (KeyError, InvalidOperation) as exc:
+        raise ValueError(f"bar field unreadable: {exc!r}") from None
+
+
+def _close_ms(moment: datetime) -> int:
+    return (moment - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(milliseconds=1)
+
+
+def parity_criterion(
+    records: Sequence[RuntimeRecord], replay: ParityReplay | None
+) -> CriterionResult:
+    """Replay the recorded bars through the shared chain and compare every live surface record.
+
+    The replay uses `decision_surface` (the function the live pipeline's mapping is shared with)
+    over the history bars and the bars recorded in the PAPER_BAR_PROCESSED payloads. The recorded
+    tick time decides the freshness gate (`check_feed_freshness`), so a DATA_STALE gate record is
+    reproduced from the record, not assumed. HISTORY_DISCONTINUITY and SIBLING_4H_MISSING gate
+    records depend on the pipeline's own buffers and are counted, not compared. The tolerance is
+    `PARITY_TOLERANCE` (zero): any differing record fails.
+    """
+    if replay is None:
+        return CriterionResult(
+            _PARITY_NAME,
+            False,
+            (
+                "NOT EVALUATED: no replay context was supplied, so the recorded decisions were "
+                "not compared with a replay (a missing comparison is never a PASS)",
+            ),
+        )
+    bars = _processed(records)
+    if not bars:
+        return CriterionResult(
+            _PARITY_NAME, False, ("no processed bar record to replay (nothing was compared)",)
+        )
+    problems: list[str] = []
+    recorded: list[tuple[RuntimeRecord, Candle, dict[str, object]]] = []
+    for record in bars:
+        bar, surface = record.payload.get("bar"), record.payload.get("surface")
+        label = f"{_pair(record)} close {record.occurred_at_utc.isoformat()}"
+        if not isinstance(bar, Mapping) or not isinstance(surface, Mapping):
+            problems.append(f"{label}: the record carries no bar or no surface to compare")
+            continue
+        try:
+            candle = _candle_from(bar)
+        except ValueError as exc:
+            problems.append(f"{label}: {exc}")
+            continue
+        recorded.append((record, candle, dict(surface)))
+
+    replayed: dict[tuple[str, str, datetime], dict[str, object]] = {}
+    refused = False
+    if recorded:
+        try:
+            produced = decision_surface(
+                [*replay.history_bars, *(candle for _, candle, _ in recorded)],
+                context=replay.context,
+            )
+        except ValueError as exc:
+            problems.append(f"the replay refused the recorded bars: {exc}")
+            refused = True
+            produced = ()
+        for item in produced:
+            if item.reason_code != REASON_DUPLICATE_BAR:
+                replayed.setdefault(
+                    (item.symbol, item.interval, item.bar_close_utc), item.to_dict()
+                )
+
+    compared = 0
+    skipped = 0
+    stages: Counter[str] = Counter()
+    mismatches: list[str] = []
+    for record, candle, live in recorded:
+        stages[str(live.get("stage"))] += 1
+        if live.get("stage") == "feed_gate" and live.get("reason_code") in _PIPELINE_ONLY_GATES:
+            skipped += 1
+            continue
+        tick = _read_time(record.payload, "tick_time_utc")
+        stale = None
+        if candle.interval == SETUP_INTERVAL and tick is not None:
+            stale = check_feed_freshness({"T": _close_ms(candle.close_time_utc)}, tick)
+        key = (candle.symbol, candle.interval, candle.close_time_utc)
+        expected: dict[str, object] | None
+        if stale is not None:
+            expected = dict(gate_record(candle, stale).to_dict())
+        else:
+            expected = replayed.get(key)
+        label = f"{_pair(record)} close {candle.close_time_utc.isoformat()}"
+        if expected is None:
+            if not refused:
+                problems.append(f"{label}: the replay produced no record for this bar")
+            continue
+        compared += 1
+        differing = [k for k in sorted({*live, *expected}) if live.get(k) != expected.get(k)]
+        if differing:
+            mismatches.append(
+                f"{label}: differs in {', '.join(differing)} (recorded stage "
+                f"{live.get('stage')} {live.get('reason_code')}, replay stage "
+                f"{expected.get('stage')} {expected.get('reason_code')})"
+            )
+    by_stage = ", ".join(f"{k}={v}" for k, v in sorted(stages.items()))
+    summary = [
+        f"{compared} recorded surface record(s) compared with the replay of "
+        f"{len(replay.history_bars)} history bar(s) and {len(recorded)} recorded bar(s); "
+        f"tolerance {PARITY_TOLERANCE}, {len(mismatches)} difference(s)",
+        f"recorded stages: {by_stage or 'none'}; pipeline-only gate records not compared: "
+        f"{skipped}",
+    ]
+    failed = len(mismatches) > PARITY_TOLERANCE or bool(problems)
+    evidence = [*summary, *problems, *mismatches[:_PROBLEM_LIMIT]]
+    if len(mismatches) > _PROBLEM_LIMIT:
+        evidence.append(f"... and {len(mismatches) - _PROBLEM_LIMIT} more difference(s)")
+    return CriterionResult(_PARITY_NAME, not failed, tuple(evidence))
+
+
 def _runtime_group(inputs: _RuntimeInputs) -> CriterionGroup:
     return CriterionGroup(
-        "runtime health", (_coverage_criterion(inputs), _ceiling_criterion(inputs))
+        "runtime health",
+        (
+            _coverage_criterion(inputs),
+            _ceiling_criterion(inputs),
+            _gaps_explained(inputs),
+            _restart_warmup(inputs),
+            _no_duplicate_signal(inputs),
+            _no_missing_row(inputs),
+            _no_test_signal(inputs),
+            _one_epoch(inputs),
+            parity_criterion(inputs.records, inputs.parity),
+        ),
     )
 
 
@@ -491,13 +959,17 @@ def evaluate_trial(
     thresholds: HealthThresholds,
     cron: str,
     symbols: Sequence[str],
+    backfill_rule: BackfillRule,
+    parity: ParityReplay | None,
 ) -> TrialEvaluation:
     """Judge the manifest's epoch from one verified bundle.
 
     `thresholds` are the user-ratified numbers (O-07) and `cron` is the recorded schedule of the
     freeze workflow; neither has a default. `symbols` are the scope of the ratified configuration:
-    every closed 1h and 4h bar of each must be accounted for. The grace is passed only to
-    `freeze_evidence_report`, where it can never turn a gap into CLEAN.
+    every closed 1h and 4h bar of each must be accounted for. `backfill_rule` is the user's Q-D
+    option read from its decision file (`read_backfill_rule`). `parity` is the replay context; None
+    means parity is NOT EVALUATED and the criterion fails (a missing comparison is never a PASS).
+    The grace is passed only to `freeze_evidence_report`, where it can never turn a gap into CLEAN.
     """
     if not isinstance(thresholds, HealthThresholds):
         raise TypeError("thresholds must be the HealthThresholds of the ratified configuration")
@@ -551,12 +1023,21 @@ def evaluate_trial(
         report=freeze,
         in_window_gap_records=in_window_gaps,
     )
+    foreign = Counter(
+        r.epoch_id
+        for r in bundle.records
+        if r.epoch_id != bundle.epoch_id and pin < r.occurred_at_utc <= end
+    )
     runtime_inputs = _RuntimeInputs(
         epoch_id=bundle.epoch_id,
         window_start_utc=start,
         window_end_utc=end,
+        symbols=tuple(symbols),
         records=mine,
         coverage=coverage,
+        backfill_rule=backfill_rule,
+        parity=parity,
+        other_epoch_records_in_window=tuple(sorted(foreign.items())),
     )
     groups = (
         CriterionGroup("trial definition", (_trial_window(pin, start, end),)),
@@ -588,11 +1069,15 @@ __all__ = [
     "RESTART_RULE",
     "TIME_OF_DAY_LABEL",
     "TRIAL_CALENDAR_DAYS",
+    "BackfillRule",
     "CriterionGroup",
     "CriterionResult",
+    "ParityReplay",
     "ProofClass",
     "TimeOfDayDistribution",
     "TrialEvaluation",
     "bundle_proof_class",
     "evaluate_trial",
+    "parity_criterion",
+    "read_backfill_rule",
 ]
