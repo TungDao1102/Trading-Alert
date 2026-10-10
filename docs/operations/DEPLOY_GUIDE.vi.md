@@ -1460,7 +1460,127 @@ Quyết định `16-DEC-Q-L` (ngày 2026-10-09) là "separate-bot": máy soak d�
 
 **Đối chiếu với RUNBOOK.** RUNBOOK 11.4 (đọc ngày 2026-10-09) nói không có gì trong repository ping một dịch vụ giám sát và gọi nó là heartbeat hoặc dead-man's-switch. Hôm nay câu đó đúng. Khi 16-50 được xây, RUNBOOK sẽ được người thực hiện kế hoạch sửa (không phải hướng dẫn này); lúc đó RUNBOOK thắng và hướng dẫn này phải được cập nhật theo.
 
-Nguồn: `.env.example`, `.planning/phases/16-paper-runtime-composition/decisions/16-DEC-Q-L.md`, `.planning/phases/16-paper-runtime-composition/16-RESEARCH.md`, `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`
+### Thẻ lệnh: deploy/heartbeat.sh
+
+> - **Để làm gì:** Gửi tín hiệu "còn sống" của collector ra dịch vụ giám sát ngoài VPS (healthchecks.io), cất URL ping vào tệp chỉ root đọc được và cài timer gửi định kỳ.
+> - **Giải quyết vấn đề gì:** Collector hay cả máy chết trong im lặng thì Open Interest mất vĩnh viễn; tín hiệu chỉ được gửi khi đầu dò collector qua, nên dừng collector làm tín hiệu im và dịch vụ bên ngoài báo cho bạn.
+> - **Mức quan trọng:** **BẮT BUỘC** (D042 điều kiện 1; RUNBOOK 11.9; điều kiện `HEARTBEAT_MONITOR_ALERT_RECEIVED`). Nó chỉ báo cho bạn, không bảo vệ vị thế: SL luôn nằm trên sàn.
+
+**Mục đích:** script có ba chế độ. Chế độ trần chạy đầu dò chỉ-đọc của collector (`python -m src.data.collector --healthcheck` trong service `collector`) rồi gửi đúng một ping thành công, và chỉ khi đầu dò qua. `--set-url` cất URL ping vào tệp chỉ root đọc được. `--install-timer --interval-seconds <N>` cài `trading-heartbeat.service` và `trading-heartbeat.timer`. Nó không giữ logic giám sát nào và không bao giờ dừng hay khởi động lại collector.
+
+**Khi nào chạy:** `--set-url` một lần, sau khi bạn tạo check ở dịch vụ bên ngoài (bước 8.3). `--install-timer` một lần sau `--set-url`, với `<N>` là chu kỳ ping bạn đã ghi ở `16-DEC-O-12` (hướng dẫn này không chọn con số). Chế độ trần do timer gọi; bạn chỉ chạy tay khi muốn thử một lần. Chỉ chạy sau khi collector đã nằm trên máy EC2 (mục 5).
+
+**Chạy ở máy nào:** `[MÁY EC2]`; hai chế độ đầu bằng `sudo` (cần root), chế độ trần bằng user `trading` hoặc do timer gọi.
+
+**Lệnh:**
+
+```bash
+sudo deploy/heartbeat.sh --set-url
+```
+
+```bash
+sudo deploy/heartbeat.sh --install-timer --interval-seconds <N>
+```
+
+```bash
+deploy/heartbeat.sh
+```
+
+Cờ: `--set-url` (đọc một dòng từ đầu vào chuẩn, không hiện lại, cất vào tệp chế độ 0600), `--install-timer` (cài hai unit và bật timer), `--interval-seconds` (chu kỳ ping tính bằng giây; bắt buộc đi cùng `--install-timer` và không có mặc định), `--fail-ping` (đầu dò hỏng thì gửi một ping báo hỏng), `--url-file` (đường dẫn tuyệt đối của tệp URL khác), `--dry-run` (in kế hoạch), `-h`/`--help`. Hai cờ `--set-url` và `--install-timer` không dùng chung được. Biến môi trường `HEARTBEAT_URL_FILE`, `HEARTBEAT_FAIL_PING` và `HEARTBEAT_STEP_TIMEOUT_SECONDS` được tôn trọng.
+
+**Chạy thử:** mỗi chế độ có `--dry-run` riêng, in việc sẽ làm mà không làm:
+
+```bash
+deploy/heartbeat.sh --dry-run
+```
+
+```bash
+sudo deploy/heartbeat.sh --set-url --dry-run
+```
+
+```bash
+sudo deploy/heartbeat.sh --install-timer --interval-seconds <N> --dry-run
+```
+
+Chế độ trần với `--dry-run` vẫn đọc và kiểm tra tệp URL, nên thoát 4 nếu tệp thiếu hay sai.
+
+**Dấu hiệu thành công:** chế độ trần thoát 0 và nhật ký có dòng `heartbeat: success ping delivered`; bảng điều khiển của dịch vụ bên ngoài ghi một ping. `--set-url` in thông báo đã cất URL (không in giá trị). Chế độ cài timer: `systemctl list-timers trading-heartbeat.timer` liệt kê timer. Việc tín hiệu thật sự tới dịch vụ bên ngoài chỉ máy thật mới chứng minh được `[CHƯA XÁC MINH]`.
+
+**Mã thoát:** 0 đầu dò qua và ping đã gửi (hoặc `--dry-run`); 1 đầu dò collector hỏng (đúng thiết kế: tín hiệu im); 2 lỗi cờ hoặc biến môi trường; 3 đầu dò qua nhưng ping không tới nơi (nhật ký ghi `curl exit <n>`, không ghi URL); 4 tệp URL thiếu, sai định dạng hay cho nhóm hoặc người khác đọc.
+
+**Khi lỗi:** mã 4: chạy `sudo deploy/heartbeat.sh --set-url` hoặc sửa chế độ tệp về 0600; thông báo không bao giờ in nội dung URL. Mã 3: lỗi mạng, URL sai hay dịch vụ từ chối; chạy lại sau, nếu lặp lại hãy đọc `journalctl -u trading-heartbeat`. Mã 1: xem `docker compose logs --tail 200 collector` và bước 10.3. Việc systemd chuyển URL cho user `trading` qua `LoadCredential` chỉ máy thật mới chứng minh được `[CHƯA XÁC MINH]`.
+
+**Không bao giờ:** dán URL ping vào `.env`, `acceptance.json`, chat hay lịch sử shell; chạy script dưới `bash -x` (script từ chối); để script đụng tới collector ngoài đầu dò chỉ-đọc; tự chọn chu kỳ hay thời gian ân hạn thay bạn; bật `--fail-ping` mà không hiểu rằng ping báo hỏng báo ngay và bỏ qua thời gian ân hạn; coi một ping đúng giờ là bằng chứng dữ liệu đúng hay vị thế an toàn.
+
+### Thẻ lệnh: deploy/systemd/trading-heartbeat.service
+
+> - **Để làm gì:** Đơn vị systemd chạy `deploy/heartbeat.sh` một lần mỗi khi timer kích hoạt: dò collector rồi gửi một ping.
+> - **Giải quyết vấn đề gì:** Tín hiệu bên ngoài chạy tự động và không bao giờ làm ảnh hưởng collector; URL ping được systemd chuyển qua `LoadCredential` từ tệp chỉ root đọc được nên không nằm trong tệp unit hay `.env`.
+> - **Mức quan trọng:** **BẮT BUỘC** nếu bạn muốn giám sát ngoài VPS (D042 điều kiện 1; RUNBOOK 11.9); bạn cài bằng một lệnh và không sửa tay.
+
+**Mục đích:** unit systemd kiểu oneshot chạy `deploy/heartbeat.sh` bằng user `trading`. Nó chỉ sắp thứ tự sau mạng và docker, không có phụ thuộc, khởi động lại hay móc lỗi nào tới unit khác.
+
+**Khi nào chạy:** không chạy tay. Nó được cài bởi `sudo deploy/heartbeat.sh --install-timer --interval-seconds <N>` và được `trading-heartbeat.timer` gọi. Các thiết lập đáng biết: `User=trading`, `LoadCredential` trỏ tới tệp URL, `HEARTBEAT_FAIL_PING` (0 hoặc 1 tùy `--fail-ping` lúc cài), `WorkingDirectory` và `ExecStart` mang thẻ thay thế thư mục checkout mà bộ cài điền.
+
+**Chạy ở máy nào:** `[MÁY EC2]`, dưới systemd.
+
+**Lệnh:** cài bằng lệnh sau; xem trạng thái và nhật ký bằng hai lệnh còn lại.
+
+```bash
+sudo deploy/heartbeat.sh --install-timer --interval-seconds <N>
+```
+
+```bash
+systemctl status trading-heartbeat
+```
+
+```bash
+journalctl -u trading-heartbeat
+```
+
+**Chạy thử:** Không áp dụng cho chính tệp unit, vì nó không được chạy tay. Để xem trước việc cài, dùng lệnh `sudo deploy/heartbeat.sh --install-timer --interval-seconds <N> --dry-run` ở thẻ `deploy/heartbeat.sh`.
+
+**Dấu hiệu thành công:** `systemctl status trading-heartbeat` cho thấy lần chạy gần nhất thoát thành công và `journalctl -u trading-heartbeat` không chứa URL nào `[CHƯA XÁC MINH]`.
+
+**Mã thoát:** unit lỗi khi script thoát khác 0: 1 đầu dò collector hỏng, 3 ping không tới nơi, 4 tệp URL thiếu hay sai. Một đầu dò hỏng làm unit lỗi nhưng không đụng tới collector.
+
+**Khi lỗi:** đọc `journalctl -u trading-heartbeat`. Nếu unit không khởi động được vì không tìm thấy tệp credential, chạy lại `sudo deploy/heartbeat.sh --set-url`. Quyền sở hữu và chế độ của bản credential mà systemd giao cho user `trading` chỉ máy thật mới chứng minh được `[CHƯA XÁC MINH]`.
+
+**Không bao giờ:** sửa tay bản đã cài trong `/etc/systemd/system` (bộ cài ghi lại khi nội dung khác); thêm `Requires`, `Restart` hay `OnFailure` vào unit này; đổi `User=` sang tài khoản không thuộc nhóm docker.
+
+### Thẻ lệnh: deploy/systemd/trading-heartbeat.timer
+
+> - **Để làm gì:** Hẹn giờ gọi `trading-heartbeat.service` theo chu kỳ bạn đặt khi cài, tính từ lúc máy khởi động và từ lần chạy trước.
+> - **Giải quyết vấn đề gì:** Tín hiệu đều đặn để dịch vụ bên ngoài phát hiện khi nó ngừng; không chạy bù và không trễ ngẫu nhiên nên một lần máy tắt không bị che bằng một ping bù.
+> - **Mức quan trọng:** **BẮT BUỘC** nếu bạn muốn giám sát ngoài VPS (D042 điều kiện 1; RUNBOOK 11.9). Chu kỳ là của bạn (`16-DEC-O-12`), không có mặc định.
+
+**Mục đích:** timer kích hoạt `trading-heartbeat.service` sau mỗi chu kỳ bạn đã truyền cho `--interval-seconds`, kể từ lúc khởi động (`OnBootSec`) và kể từ lần chạy trước (`OnUnitActiveSec`).
+
+**Khi nào chạy:** không chạy tay. Cố ý không có `Persistent` và không có `RandomizedDelaySec`: một ping gửi bù sau thời gian tắt máy sẽ che đúng sự cố mà dịch vụ bên ngoài sinh ra để báo. `AccuracySec` là thiết lập cấu trúc, không phải giá trị giám sát.
+
+**Chạy ở máy nào:** `[MÁY EC2]`, dưới systemd.
+
+**Lệnh:** timer được cài và bật bởi cùng lệnh cài, và kiểm tra bằng:
+
+```bash
+sudo deploy/heartbeat.sh --install-timer --interval-seconds <N>
+```
+
+```bash
+systemctl list-timers trading-heartbeat.timer
+```
+
+**Chạy thử:** Không áp dụng cho chính tệp unit. Xem trước bằng `sudo deploy/heartbeat.sh --install-timer --interval-seconds <N> --dry-run`.
+
+**Dấu hiệu thành công:** `systemctl list-timers trading-heartbeat.timer` liệt kê timer với thời điểm kích hoạt kế tiếp.
+
+**Mã thoát:** timer không có mã thoát; kết quả nằm ở unit service mà nó kích hoạt.
+
+**Khi lỗi:** timer không xuất hiện: chạy lại lệnh cài và đọc đầu ra của nó. Muốn đổi chu kỳ thì chạy lại lệnh cài với `<N>` mới, bộ cài ghi lại timer và khởi động lại nó. Việc timer kích hoạt đúng chu kỳ chỉ máy thật mới chứng minh được `[CHƯA XÁC MINH]`.
+
+**Không bao giờ:** thêm `Persistent=true` hay trễ ngẫu nhiên vào timer này; đặt chu kỳ ping dài hơn chu kỳ của check ở dịch vụ bên ngoài (hai giá trị phải phù hợp nhau, và cả hai là của bạn); sửa tay bản đã cài (bộ cài ghi lại).
+
+Nguồn: `.env.example`, `.planning/phases/16-paper-runtime-composition/decisions/16-DEC-Q-L.md`, `.planning/phases/16-paper-runtime-composition/16-RESEARCH.md`, `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`
 
 ## 9. Lộ trình SHADOW, DEMO, CANARY, LIVE
 
@@ -2026,6 +2146,17 @@ Mọi dòng bên dưới được chép từ các thẻ lệnh và các mục tr
 | unit `trading-backup.service`: xem nhật ký | `[MÁY EC2]` | `journalctl -u trading-backup` | 6.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | unit `trading-backup.timer`: xem lịch | `[MÁY EC2]` | `systemctl list-timers trading-backup.timer` | 6.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 
+### Heartbeat ra ngoài VPS, hai unit systemd
+
+| Việc | Máy | Lệnh | Mục | Nhãn |
+| --- | --- | --- | --- | --- |
+| heartbeat, cất URL ping (`--set-url`) | `[MÁY EC2]` | `sudo deploy/heartbeat.sh --set-url` | thẻ `deploy/heartbeat.sh` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| heartbeat, cài timer (`--install-timer`, `--interval-seconds`, `--fail-ping`, `--url-file`) | `[MÁY EC2]` | `sudo deploy/heartbeat.sh --install-timer --interval-seconds <N> --fail-ping --url-file /etc/trading/heartbeat.url --dry-run` | thẻ `deploy/heartbeat.sh` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| heartbeat, một lần thử không gửi gì (`--dry-run`) | `[MÁY EC2]` | `deploy/heartbeat.sh --dry-run` | thẻ `deploy/heartbeat.sh` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-heartbeat.service`: xem trạng thái | `[MÁY EC2]` | `systemctl status trading-heartbeat` | thẻ `deploy/systemd/trading-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-heartbeat.service`: xem nhật ký | `[MÁY EC2]` | `journalctl -u trading-heartbeat` | thẻ `deploy/systemd/trading-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-heartbeat.timer`: xem lịch | `[MÁY EC2]` | `systemctl list-timers trading-heartbeat.timer` | thẻ `deploy/systemd/trading-heartbeat.timer` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+
 ### Nghiệm thu và kiểm tra hồ sơ
 
 | Việc | Máy | Lệnh | Mục | Nhãn |
@@ -2065,7 +2196,7 @@ Bảy service: `postgres`, `db-upgrade`, `collector`, `paper` (profile `paper`, 
 | các giai đoạn DEMO, CANARY, LIVE | `[MÁY CÓ MẠNG]` | chưa có lệnh nào | 9 | `[CHƯA XÂY]` |
 | bộ gửi heartbeat tới healthchecks.io (kế hoạch 16-50) | `[MÁY EC2]` | chưa có lệnh chạy được; cách thủ công của bạn nằm ngoài repository và chưa được kiểm chứng | 8.3 | `[CHƯA XÂY]` `[CHƯA XÁC MINH]` |
 
-Nguồn: `deploy/bootstrap.sh`, `deploy/lib.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `deploy/refresh-pins.sh`, `deploy/backup.sh`, `deploy/restore.sh`, `deploy/backup-drill.sh`, `deploy/systemd/trading-backup.service`, `deploy/systemd/trading-backup.timer`, `scripts/soak_host_acceptance.py`, `scripts/backup-drill.ps1`, `docker-compose.yml`, `docs/operations/RUNBOOK.md`
+Nguồn: `deploy/bootstrap.sh`, `deploy/lib.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `deploy/refresh-pins.sh`, `deploy/backup.sh`, `deploy/restore.sh`, `deploy/backup-drill.sh`, `deploy/systemd/trading-backup.service`, `deploy/systemd/trading-backup.timer`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`, `scripts/soak_host_acceptance.py`, `scripts/backup-drill.ps1`, `docker-compose.yml`, `docs/operations/RUNBOOK.md`
 
 ## 15. Danh sách kiểm tra cuối cùng
 
