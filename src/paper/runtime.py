@@ -60,7 +60,7 @@ import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -82,7 +82,13 @@ from src.paper.freeze import (
     write_pinned_state,
 )
 from src.paper.loop import BarContext
-from src.paper.market_inputs import make_sibling_fetcher
+from src.paper.market_inputs import (
+    ConstraintProvider,
+    make_context_factory,
+    make_sibling_fetcher,
+    measure_clock_skew,
+    refresh_forever,
+)
 from src.paper.pipeline import BarPipeline, HeldBar, PipelineResult
 from src.paper.runtime_config import (
     ConfigNotRatified,
@@ -237,7 +243,12 @@ def _state_from_env(values: Mapping[str, str]) -> RuntimeStatePort:
     return PgRuntimeState(OperationalDatabase(create_engine(url, future=True)))
 
 
-def _epoch_record(event_type: RuntimeEventType, epoch: StreamEpoch, at: datetime) -> RuntimeRecord:
+def _epoch_record(
+    event_type: RuntimeEventType,
+    epoch: StreamEpoch,
+    at: datetime,
+    extra: Mapping[str, Any] | None = None,
+) -> RuntimeRecord:
     return RuntimeRecord(
         event_type=event_type,
         epoch_id=epoch.epoch_id,
@@ -246,6 +257,7 @@ def _epoch_record(event_type: RuntimeEventType, epoch: StreamEpoch, at: datetime
             "strategy_id": epoch.strategy_id,
             "parameter_set_id": epoch.parameter_set_id,
             "parameter_set_hash": epoch.parameter_set_hash,
+            **(extra or {}),
         },
     )
 
@@ -381,8 +393,10 @@ class _LiveLoop:
         wiring: LoopWiring,
         pipeline: HandlesBars,
         supervisor_factory: Callable[[_LiveLoop], PaperSupervisor],
+        constraints: ConstraintProvider | None = None,
     ) -> None:
         self._context = context
+        self._constraints = constraints
         self._epoch_id = context.epoch.epoch_id
         self._state = context.state
         self._clock = context.clock
@@ -524,6 +538,13 @@ class _LiveLoop:
         except Exception as exc:
             raise RuntimeFailClosed(f"the WebSocket start failed ({type(exc).__name__})") from exc
         consumer = asyncio.create_task(self._consume())
+        if self._constraints is not None:
+            every = timedelta(seconds=self._context.config.timing.exchange_info_refresh_seconds)
+            self._tasks.add(
+                asyncio.create_task(
+                    refresh_forever(self._constraints, every=every, sleep=self._sleep)
+                )
+            )
         stopper: asyncio.Future[None] = asyncio.ensure_future(self._stop_waiter())
         failed: asyncio.Future[Any] = asyncio.ensure_future(self._stop.wait())
         try:
@@ -550,6 +571,15 @@ class _LiveLoop:
         await asyncio.gather(*self._record_tasks, return_exceptions=True)
 
 
+def _resolve_public(wiring: LoopWiring) -> Any:
+    """The public adapter of the wiring, or the credential-free production one."""
+    if wiring.public is not None:
+        return wiring.public
+    from src.adapters.binance_public import BinancePublicMarketData
+
+    return BinancePublicMarketData()
+
+
 async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None) -> None:
     """Run the live paper loop for an admitted, started process until it is told to stop.
 
@@ -557,26 +587,44 @@ async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None
     `RuntimeFailClosed` (or the persistence errors `main` maps to the same exit code) after the
     adapter has been unsubscribed and closed, when the loop stopped itself.
     """
-    from src.adapters.binance_public import BinancePublicMarketData
     from src.adapters.paper_ws import PaperWsAdapter
 
     live = wiring if wiring is not None else LoopWiring()
     config = context.config
     epoch = context.epoch
     loop = asyncio.get_running_loop()
-    public = live.public if live.public is not None else BinancePublicMarketData()
+    public = _resolve_public(live)
 
     pipeline = live.pipeline
+    constraints: ConstraintProvider | None = None
     if pipeline is None:
-        if live.context_factory is None:
-            raise RuntimeFailClosed("no BarContext factory is bound")
         parameter_set = load_parameter_set_at_root(
             epoch.strategy_id, epoch.parameter_set_id, resolve_registry_root(context.registry_root)
         )
+        factory = live.context_factory
+        if factory is None:
+            if live.risk_inputs is None:
+                raise RuntimeFailClosed("the risk inputs port is not bound")
+            constraints = ConstraintProvider(
+                public=public, symbols=config.symbols, clock=context.clock
+            )
+            try:
+                await constraints.refresh()
+            except Exception as exc:
+                raise RuntimeFailClosed(
+                    f"the first exchangeInfo refresh failed ({type(exc).__name__})"
+                ) from exc
+            factory = make_context_factory(
+                parameter_set=parameter_set,
+                constraints=constraints,
+                risk_inputs=live.risk_inputs,
+                account=config.account,
+                ttl_seconds=config.timing.constraint_snapshot_ttl_seconds,
+            )
         pipeline = BarPipeline(
             epoch=epoch,
             parameter_set=parameter_set,
-            context_factory=live.context_factory,
+            context_factory=factory,
             buffers=BarBuffers(),
             state=context.state,
             sibling_4h_wait_seconds=config.timing.sibling_4h_wait_seconds,
@@ -599,7 +647,11 @@ async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None
         )
 
     await _LiveLoop(
-        context=context, wiring=live, pipeline=pipeline, supervisor_factory=build_supervisor
+        context=context,
+        wiring=live,
+        pipeline=pipeline,
+        supervisor_factory=build_supervisor,
+        constraints=constraints,
     ).run()
 
 
@@ -660,6 +712,20 @@ def main(
         port = state if state is not None else _state_from_env(values)
     except ConfigNotRatified as exc:
         return refuse(ExitCode.CONFIG_NOT_RATIFIED, str(exc))
+
+    live_wiring: LoopWiring | None = None
+    if run_loop is None:
+        live_wiring = wiring if wiring is not None else LoopWiring()
+        if (
+            live_wiring.pipeline is None
+            and live_wiring.context_factory is None
+            and live_wiring.risk_inputs is None
+        ):
+            return refuse(
+                ExitCode.CONFIG_NOT_RATIFIED,
+                "the risk inputs port is not bound: open positions and the daily loss have no "
+                "default implementation in src (plan 16-31 binds them to the SHADOW ledger)",
+            )
 
     pinned_path: Path = args.pinned_state
     if args.pin_epoch:
@@ -722,12 +788,25 @@ def main(
             # epoch no run uses, while the reverse order would leave a trial with no pin record.
             port.record(_epoch_record(RuntimeEventType.EPOCH_PINNED, epoch, epoch.opened_at_utc))
             write_pinned_state(epoch, pinned_path)
-        port.record(_epoch_record(RuntimeEventType.RUNTIME_START, epoch, now()))
+        start_extra: dict[str, Any] = {}
+        if run_loop is None and live_wiring is not None:
+            public = _resolve_public(live_wiring)
+            live_wiring = replace(live_wiring, public=public)
+            try:
+                skew_ms = asyncio.run(measure_clock_skew(public, now))
+            except Exception as exc:
+                raise RuntimeFailClosed(
+                    f"the clock-skew check against Binance server time failed "
+                    f"({type(exc).__name__})"
+                ) from exc
+            start_extra["clock_skew_ms"] = skew_ms
+            structlog.get_logger().info("clock skew measured", clock_skew_ms=skew_ms)
+        port.record(_epoch_record(RuntimeEventType.RUNTIME_START, epoch, now(), start_extra))
         structlog.get_logger().info("runtime start", epoch_id=epoch.epoch_id)
         if run_loop is not None:
             run_loop(context)
         else:
-            asyncio.run(run_admitted(context, wiring))
+            asyncio.run(run_admitted(context, live_wiring))
         port.record(_epoch_record(RuntimeEventType.RUNTIME_STOP, epoch, now()))
     except (PersistenceError, RuntimeRecordConflict, RuntimeFailClosed) as exc:
         detail = str(exc) if isinstance(exc, RuntimeFailClosed) else type(exc).__name__

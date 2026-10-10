@@ -47,7 +47,7 @@ PAPER_SRC = REPO_ROOT / "src" / "paper"
 
 TTL_SECONDS = 16  # the CONFIG_TEXT constraint_snapshot_ttl_seconds of the admission rig
 REFRESH_SECONDS = 17  # its exchange_info_refresh_seconds
-ACCOUNT = AccountConfig(initial_equity=Decimal("1000"), risk_rate=Decimal("0.01"))
+ACCOUNT = AccountConfig(initial_equity=Decimal("1000"), risk_rate=Decimal("0.005"))
 
 
 class SteppingClock:
@@ -127,7 +127,7 @@ def verdict_of(context: Any, close: datetime) -> Any:
     """Run the context through the real shared risk pipeline for a plan sized at the close."""
     min_stop, max_cost = guard_rates_from_params(context.parameter_set.params)
     return evaluate_risk(
-        trade_plan=_mk_trade_plan(risk_rate="0.01", risk_budget="10"),
+        trade_plan=_mk_trade_plan(risk_rate="0.005", risk_budget="5"),
         candidate_position_side="LONG",
         account_state=context.account_state,
         constraint_snapshot=context.constraint_snapshot,
