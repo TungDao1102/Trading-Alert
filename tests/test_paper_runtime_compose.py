@@ -71,7 +71,7 @@ def test_empty_allowlist_exits_zero_skipped_and_builds_nothing(
 
 def test_module_entrypoint_answers_help() -> None:
     completed = subprocess.run(
-        [sys.executable, "-I", "-m", "src.paper.runtime", "--help"],
+        [sys.executable, "-m", "src.paper.runtime", "--help"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
