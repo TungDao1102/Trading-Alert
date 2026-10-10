@@ -45,6 +45,7 @@ __all__ = [
 
 REPORT_TITLE = "Journal Depth + Kill-Gate Report"
 _STEM_DIGEST_CHARS = 12
+SOAK_EVIDENCE_SENTENCE = "Soak evidence never feeds a value into trading logic (D-18)."
 TEST_ONLY_EXCLUDED_LINE = "test_only records excluded: {count} (D063 item 3)"
 
 
@@ -67,11 +68,14 @@ def _count_truncations(sections: list[list[str]]) -> int:
 def _paper_statements(report: JournalDepthReport) -> list[str]:
     """Plain-text statements about the PAPER evidence, printed under the evidence overview.
 
-    Only data the report already carries is stated: the number of `test_only` rehearsal rows
+    Only data the report already carries is stated: that SHADOW soak evidence is present and
+    never feeds a value into trading logic (D-18), and the number of `test_only` rehearsal rows
     that were excluded before any count (REV-03, D063 item 3). Nothing here is a metric.
     """
     paper = next(block for block in report.evidence if block.kind is EvidenceKind.PAPER)
     lines: list[list[str]] = []
+    if paper.shadow_records > 0:
+        lines.append([SOAK_EVIDENCE_SENTENCE])
     if paper.test_only_excluded > 0:
         lines.append([TEST_ONLY_EXCLUDED_LINE.format(count=paper.test_only_excluded)])
     return join_blocks(lines)
