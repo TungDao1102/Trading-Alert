@@ -1308,7 +1308,43 @@ Vòng lặp sống, pipeline từng nến, sổ cái mô phỏng, bộ tạo kh�
 
 **Chạy ở:** `[MÁY EC2]` (khi các kế hoạch tồn tại)
 
-Cấu hình triển khai soak cụ thể (kế hoạch 16-32) và phần vận hành soak của runbook (16-33) chưa tồn tại. Các quy tắc ĐÃ quyết định (D061 hosts) mà chúng sẽ tuân theo: cơ sở dữ liệu soak tách khỏi cơ sở dữ liệu phát triển và kiểm thử; soak chạy từ một image đã ghim chứ không từ cây làm việc; sao lưu phải tồn tại trước soak dài; và không bao giờ chạy `docker compose down` kèm cờ xóa volume trên project soak. Cách một image "đã ghim" được tạo ra (CI hôm nay không đẩy image nào) cũng là việc của 16-33.
+Kế hoạch 16-32 đã thêm cấu hình triển khai soak vào repository (`[ĐÃ XÂY]` `[CHƯA XÁC MINH]`: chưa chạy trên máy thật). Service `paper` trong `docker-compose.yml` chạy tiến trình paper với cờ `--hold-on-refusal` và probe thật `--healthcheck`, dùng volume `logs`, chính sách restart `on-failure`: khi allowlist rỗng tiến trình thoát 0 và không bị khởi động lại, còn khi cấu hình bị từ chối (mã thoát 3 đến 6) container ở lại, báo không khỏe, thay vì lặp lại khởi động. Script `deploy/compose-soak.sh` luôn chạy project `trading-soak` (volume cơ sở dữ liệu riêng, tách khỏi stack phát triển và các cơ sở dữ liệu kiểm thử) và từ chối lệnh `down` kèm cờ xóa volume (thẻ lệnh bên dưới). Mẫu `deploy/soak.env.example` chỉ liệt kê tên biến, không có giá trị và không có tên khóa giao dịch; một biến có tên bắt đầu bằng tiền tố của khóa giao dịch làm tiến trình paper từ chối khởi động. 
+
+Mọi service `x-app` dùng chung một env_file nên container paper cũng thấy các biến `BACKUP_*` cho tới khi tách env_file theo service ở Phase 24 (WR-06). Phần vận hành soak của runbook (16-33) vẫn chưa tồn tại. Các quy tắc ĐÃ quyết định (D061 hosts): cơ sở dữ liệu soak tách khỏi cơ sở dữ liệu phát triển và kiểm thử; soak chạy từ một image đã ghim chứ không từ cây làm việc; sao lưu phải tồn tại trước soak dài; và không bao giờ chạy `docker compose down` kèm cờ xóa volume trên project soak. Cách một image "đã ghim" được tạo ra (CI hôm nay không đẩy image nào) là việc của 16-33.
+
+### Thẻ lệnh: deploy/compose-soak.sh
+
+> - **Để làm gì:** Chạy `docker compose` chỉ trên project soak `trading-soak` và từ chối mọi lệnh `down` kèm cờ xóa volume.
+> - **Giải quyết vấn đề gì:** Một lệnh gõ nhầm có thể xóa volume cơ sở dữ liệu của soak, nơi giữ bằng chứng của trial; script chặn điều đó và giữ soak tách khỏi stack phát triển (project `trading`).
+> - **Mức quan trọng:** **BẮT BUỘC** cho mọi lệnh compose trên máy soak (D061 mục hosts: lệnh `down` kèm cờ xóa volume không bao giờ chạy trên project soak).
+
+**Mục đích:** chuyển mọi lệnh `docker compose` sang project `trading-soak` (volume như `trading-soak_pgdata`) và từ chối `down` kèm `-v` hoặc `--volumes`, dù cờ nằm ở đâu và dù tên project được đưa vào bằng cờ `-p`, cờ `--project-name` hay biến `COMPOSE_PROJECT_NAME`. Cờ `-p` hay `--project-name` trỏ sang project khác cũng bị từ chối.
+
+**Khi nào chạy:** thay cho `docker compose` trong mọi thao tác trên máy soak (khởi động, xem trạng thái, xem nhật ký, dừng).
+
+**Chạy ở máy nào:** `[MÁY EC2]`, trong checkout; biến `TRADING_ENV_FILE` chọn tệp môi trường soak (tạo từ `deploy/soak.env.example`, đặt ngoài checkout, quyền 0600).
+
+**Lệnh:**
+
+```bash
+deploy/compose-soak.sh ps
+```
+
+```bash
+deploy/compose-soak.sh up -d
+```
+
+Mọi đối số được chuyển nguyên cho compose của project soak; chọn profile `paper` bằng cờ `--profile paper` của compose đặt trước lệnh con.
+
+**Chạy thử:** đặt `DRY_RUN=1` trong môi trường: script chỉ in lệnh sẽ chạy và không chạy gì (script không có cờ riêng để chạy thử).
+
+**Dấu hiệu thành công:** script in lệnh compose sẽ chạy, bắt đầu bằng dấu cộng và có cờ `-p` với project trading-soak, rồi thoát với mã của chính lệnh compose.
+
+**Mã thoát:** 0 khi `docker compose` thành công. 1 khi script từ chối (`down` kèm cờ xóa volume, hoặc tên project khác `trading-soak`) với thông báo "refused: ...". Các mã khác là mã của `docker compose`.
+
+**Khi lỗi:** thông báo "refused: down -v on the soak project" nghĩa là lệnh bị chặn có chủ ý; đừng tìm cách vòng qua. Muốn xóa volume soak là quyết định của con người trên máy chủ, sau một buổi diễn tập khôi phục, không bao giờ qua script này.
+
+**Không bao giờ:** gõ trực tiếp `docker compose` kèm `down` và cờ xóa volume trên project soak; đặt giá trị khóa giao dịch vào tệp môi trường soak; chép tệp môi trường thật vào git.
 
 #### Bước 7.6 Chuỗi đóng (closure chain) và ai quyết định từng bước [THỦ CÔNG] [CHƯA XÂY]
 
@@ -1374,7 +1410,7 @@ Hai việc, đều chưa xây và đều blocking-human. Lần smoke trực ti�
 
 Làm được hôm nay: hoàn thành mục 2 đến 6; chuẩn bị bot Telegram riêng (mục 8.1). Phải chờ: quyết định O-12 để tạo máy; mọi thứ từ 16-15 đến 16-50. Không có tiến trình paper để khởi động, không có epoch để ghim và không có trial để đo.
 
-Nguồn: `.planning/ROADMAP.md`, `.planning/phases/16-paper-runtime-composition/16-CONTEXT.md`, `docker-compose.yml`, `docs/DECISIONS.md`, `.planning/phases/16-paper-runtime-composition/16-22-PLAN.md`
+Nguồn: `.planning/ROADMAP.md`, `.planning/phases/16-paper-runtime-composition/16-CONTEXT.md`, `docker-compose.yml`, `docs/DECISIONS.md`, `.planning/phases/16-paper-runtime-composition/16-22-PLAN.md`, `deploy/compose-soak.sh`, `deploy/soak.env.example`
 
 ## 8. Telegram, Binance và giám sát bên ngoài
 
@@ -2133,6 +2169,7 @@ Mọi dòng bên dưới được chép từ các thẻ lệnh và các mục tr
 | migrate, chỉ in lại báo cáo (`--report-only`) | `[MÁY EC2]` | `deploy/migrate.sh --report-only --max-gap-minutes 30 trading@old.example local` | 5.8 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | refresh-pins, liệt kê offline (`--list`) | `[MÁY PHÁT TRIỂN]` | `deploy/refresh-pins.sh --list` | 10.7 | `[ĐÃ XÂY]` |
 | refresh-pins, tra cứu online (`--lookup`) | `[MÁY CÓ MẠNG]` | `deploy/refresh-pins.sh --lookup` | 10.7 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| soak, chạy compose trên project `trading-soak` (script từ chối `down` kèm cờ xóa volume) | `[MÁY EC2]` | `deploy/compose-soak.sh ps` | 7.5 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 
 ### Sao lưu, khôi phục, diễn tập, hai unit systemd
 
@@ -2197,7 +2234,7 @@ Bảy service: `postgres`, `db-upgrade`, `collector`, `paper` (profile `paper`, 
 | điểm vào của tiến trình paper | `[MÁY EC2]` | chưa có lệnh chạy được (xem bước 7.4); tên dự kiến `python -m src.paper.runtime` | 7.4 | `[CHƯA XÂY]` |
 | các giai đoạn DEMO, CANARY, LIVE | `[MÁY CÓ MẠNG]` | chưa có lệnh nào | 9 | `[CHƯA XÂY]` |
 
-Nguồn: `deploy/bootstrap.sh`, `deploy/lib.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `deploy/refresh-pins.sh`, `deploy/backup.sh`, `deploy/restore.sh`, `deploy/backup-drill.sh`, `deploy/systemd/trading-backup.service`, `deploy/systemd/trading-backup.timer`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`, `scripts/soak_host_acceptance.py`, `scripts/backup-drill.ps1`, `docker-compose.yml`, `docs/operations/RUNBOOK.md`
+Nguồn: `deploy/bootstrap.sh`, `deploy/lib.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `deploy/refresh-pins.sh`, `deploy/backup.sh`, `deploy/restore.sh`, `deploy/backup-drill.sh`, `deploy/systemd/trading-backup.service`, `deploy/systemd/trading-backup.timer`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`, `scripts/soak_host_acceptance.py`, `scripts/backup-drill.ps1`, `docker-compose.yml`, `docs/operations/RUNBOOK.md`, `deploy/compose-soak.sh`
 
 ## 15. Danh sách kiểm tra cuối cùng
 
