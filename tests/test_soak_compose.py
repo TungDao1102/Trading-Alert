@@ -247,3 +247,73 @@ def test_soak_project_renders_with_its_own_volume_names(tmp_path: Path) -> None:
     assert paper["healthcheck"]["test"] == PAPER_PROBE
     assert paper["restart"] == "on-failure"
     assert not paper.get("ports")
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: the soak environment template.
+# --------------------------------------------------------------------------- #
+
+_ASSIGNMENT = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
+
+
+def _template_lines() -> list[str]:
+    assert SOAK_ENV_EXAMPLE.is_file(), "deploy/soak.env.example does not exist"
+    return SOAK_ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+
+
+def _template_assignments() -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    for line in _template_lines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = _ASSIGNMENT.match(line)
+        assert match is not None, f"not a NAME= line: {line[:40]!r}"
+        found.append((match.group(1), match.group(2)))
+    return found
+
+
+def _env_example_names() -> set[str]:
+    names: set[str] = set()
+    for line in ENV_EXAMPLE.read_text(encoding="utf-8").splitlines():
+        match = _ASSIGNMENT.match(line)
+        if match:
+            names.add(match.group(1))
+    return names
+
+
+def test_soak_template_has_names_only_and_no_binance_name() -> None:
+    text = "\n".join(_template_lines())
+    assert "BINANCE_" not in text
+    assignments = _template_assignments()
+    assert assignments, "template lists no variable"
+    assert all(value == "" for _, value in assignments)
+    assert not any(name.startswith("BINANCE_") for name, _ in assignments)
+    names = [name for name, _ in assignments]
+    assert len(names) == len(set(names)), "a name is listed twice"
+
+
+def test_soak_template_lists_every_name_the_services_read_and_no_other() -> None:
+    # Collector and paper read the database and runtime names (ALLOWED_ENV_NAMES); the backup
+    # service reads every BACKUP_ name of .env.example; compose interpolates IMAGE_TAG.
+    backup_names = {n for n in _env_example_names() if n.startswith("BACKUP_")}
+    assert backup_names, ".env.example lists no BACKUP_ name"
+    expected = set(ALLOWED_ENV_NAMES) | backup_names | {"IMAGE_TAG"}
+    actual = {name for name, _ in _template_assignments()}
+    assert expected - actual == set(), "missing from the template"
+    assert actual - expected == set(), "unexpected in the template"
+
+
+def test_soak_template_header_states_the_shared_env_file_and_the_refusal() -> None:
+    header = "\n".join(
+        line for line in _template_lines() if line.lstrip().startswith("#")
+    ).replace("\n# ", " ")
+    assert "x-app" in header
+    assert "env_file" in header
+    assert "BACKUP_" in header
+    assert "WR-06" in header
+    assert "Phase 24" in header
+    assert "BINANCE" in header
+    assert "refuses to start" in header
+    assert "even" in header and "empty" in header
+    assert "TRADING_ENV_FILE" in header
+    assert "names only" in header.lower()
