@@ -38,7 +38,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -118,7 +120,9 @@ _NOTICE_SENT: Final = "sent"
 _NOTICE_SKIPPED_RATE_LIMITED: Final = "skipped_rate_limited"
 _NOTICE_FAILED: Final = "failed"
 
-RecheckFn = Callable[[Signal, TradePlan, datetime], RejectionReason | None]
+# A re-check returns None to pass or the reason: a `RejectionReason`, or a plain code text for the
+# labels that are not enum members (the engine's CONFLICT_WITH_OPEN_POSITION).
+RecheckFn = Callable[[Signal, TradePlan, datetime], RejectionReason | str | None]
 OnConfirmedFn = Callable[[Approval, TradePlan, datetime], None]
 MarkPriceFn = Callable[[str], Decimal | None]
 
@@ -135,6 +139,48 @@ class ConfirmStores(Protocol):
     def lookup_by_short_id(self, short_id: str) -> tuple[str, str] | None: ...
     def list_approved_approvals(self) -> list[Approval]: ...
     def journal_for_correlation(self, correlation_id: str) -> list[JournalEvent]: ...
+
+
+class ReserveOutcome(Protocol):
+    """What a reservation attempt amounted to (`src/paper/shadow_ledger.py:ReserveResult`)."""
+
+    @property
+    def reserved(self) -> bool: ...
+    @property
+    def reason_code(self) -> str: ...
+
+
+class ReservationPort(Protocol):
+    """The exposure reservation of the Q-C decision `reserve-at-confirm` (plan 16-23).
+
+    `section()` is the serialized section the CONFIRM runs in: recheck, the SHADOW_CONFIRMED
+    journal write and `reserve` happen inside it, so no other CONFIRM can interleave. `check` is
+    the full capacity check on the current ledger and runs BEFORE the journal write; a failure
+    rejects the CONFIRM. `confirm_payload` returns the reservation facts merged into the
+    SHADOW_CONFIRMED payload (the journal is the source of truth for recovery). `reserve` runs only
+    after that write succeeded.
+    """
+
+    def section(self) -> AbstractContextManager[Any]: ...
+    def check(self, signal: Signal, plan: TradePlan, now_utc: datetime) -> str | None: ...
+    def confirm_payload(
+        self,
+        *,
+        approval: Approval,
+        signal: Signal,
+        plan: TradePlan,
+        short_id: str,
+        confirmed_at_utc: datetime,
+    ) -> Mapping[str, Any]: ...
+    def reserve(
+        self,
+        *,
+        approval: Approval,
+        signal: Signal,
+        plan: TradePlan,
+        short_id: str,
+        confirmed_at_utc: datetime,
+    ) -> ReserveOutcome: ...
 
 
 class StrandedApprovals(AssertionError):
@@ -222,6 +268,12 @@ class ConfirmEntry:
     decided_at_utc: datetime | None = None
     delivered: bool = False
     message_id: int | None = None
+    # The SHADOW_CONFIRMED append raised, so whether it committed is unknown: the next press
+    # reconciles against the journal before doing anything else (plan 16-23).
+    confirm_append_unknown: bool = False
+    # The CONFIRM is journaled but the reservation step has not completed: a repeated press
+    # retries it (idempotent) so the ledger never lacks a journaled reservation.
+    reservation_pending: bool = False
 
     @property
     def expires_at_utc(self) -> datetime:
@@ -278,6 +330,7 @@ class ConfirmBook:
         mark_price: MarkPriceFn | None = None,
         recheck: RecheckFn | None = None,
         on_confirmed: OnConfirmedFn | None = None,
+        reservations: ReservationPort | None = None,
     ) -> None:
         if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
             raise ValueError(f"ttl_seconds must be a positive integer, got {ttl_seconds!r}")
@@ -289,6 +342,8 @@ class ConfirmBook:
         self._mark_price = mark_price
         self._recheck = recheck
         self._on_confirmed = on_confirmed
+        self._reservations = reservations
+        self._lock = threading.RLock()
         self._entries: dict[str, ConfirmEntry] = {}
         self._last: ConfirmRecord | None = None
 
@@ -750,14 +805,18 @@ class ConfirmBook:
         return None
 
     def _run_recheck(self, entry: ConfirmEntry, now_utc: datetime) -> str | None:
-        if self._recheck is None:
-            return None
+        """The injected re-check, then the reservation capacity check; fail closed on any error."""
         try:
-            reason = self._recheck(entry.signal, entry.plan, now_utc)
+            if self._recheck is not None:
+                reason = self._recheck(entry.signal, entry.plan, now_utc)
+                if reason is not None:
+                    return reason.value if isinstance(reason, RejectionReason) else reason
+            if self._reservations is not None:
+                return self._reservations.check(entry.signal, entry.plan, now_utc)
         except Exception as exc:  # noqa: BLE001 - fail closed: a broken re-check rejects
             log.warning("paper.shadow_confirm.recheck_failed", error_class=type(exc).__name__)
             return REASON_RECHECK_ERROR
-        return None if reason is None else reason.value
+        return None
 
     # ---- CONFIRM / CANCEL ------------------------------------------------ #
 
@@ -774,8 +833,42 @@ class ConfirmBook:
         """A CNF: press. CONFIRMED only for the approving user, once, inside the TTL, after the
         binding gate and the injected re-check; every other outcome is journaled and simulates
         nothing. A repeat press replays the existing outcome.
+
+        With a `ReservationPort` (plan 16-23, Q-C `reserve-at-confirm`) the whole press runs in
+        its serialized section: re-check and capacity check (before the journal write), the
+        SHADOW_CONFIRMED write, then the reservation. A failed check or write reserves nothing.
         """
         _require_utc(now_utc, "now_utc")
+        with self._lock:
+            if self._reservations is None:
+                return self._handle_confirm_locked(
+                    short_id=short_id,
+                    chat_id=chat_id,
+                    authorized_chat_id=authorized_chat_id,
+                    from_user_id=from_user_id,
+                    now_utc=now_utc,
+                    correlation_id=correlation_id,
+                )
+            with self._reservations.section():
+                return self._handle_confirm_locked(
+                    short_id=short_id,
+                    chat_id=chat_id,
+                    authorized_chat_id=authorized_chat_id,
+                    from_user_id=from_user_id,
+                    now_utc=now_utc,
+                    correlation_id=correlation_id,
+                )
+
+    def _handle_confirm_locked(
+        self,
+        *,
+        short_id: str,
+        chat_id: int,
+        authorized_chat_id: int,
+        from_user_id: int | None,
+        now_utc: datetime,
+        correlation_id: str,
+    ) -> ConfirmResult:
         entry = self._entries.get(short_id)
         if entry is None:
             return self._reject_unknown(
@@ -796,6 +889,9 @@ class ConfirmBook:
         )
         if refused is not None:
             return refused
+        if entry.state is ConfirmState.CONFIRMED and entry.reservation_pending:
+            # Journaled CONFIRMED but the reservation step did not complete: finish it (idempotent).
+            return self._finish_confirm(entry, entry.decided_at_utc or now_utc)
         if entry.state is not ConfirmState.PENDING:
             return self._replay(
                 entry,
@@ -804,6 +900,13 @@ class ConfirmBook:
                 now_utc=now_utc,
                 correlation_id=correlation_id,
             )
+        if entry.confirm_append_unknown:
+            # An earlier SHADOW_CONFIRMED append has an unknown outcome: the journal decides. A
+            # journal that cannot be read raises here (fail closed: nothing reserved).
+            stored = self._stored_confirmed(entry)
+            if stored is not None:
+                return self._adopt_stored_confirm(entry, stored)
+            entry.confirm_append_unknown = False
         if now_utc >= entry.expires_at_utc:  # boundary inclusive, as binding.py
             return self._expire_ttl(entry, now_utc)
         rejection = self._binding_gate(entry, now_utc)
@@ -815,19 +918,97 @@ class ConfirmBook:
             return self._reject_terminal(
                 entry, recheck_reason, ConfirmOutcome.REJECTED_OTHER, now_utc
             )
-        self._terminate(
-            entry,
-            state=ConfirmState.CONFIRMED,
-            outcome=ConfirmOutcome.CONFIRMED,
-            reason="CONFIRMED",
-            now_utc=now_utc,
-            event_type=EVENT_SHADOW_CONFIRMED,
-            extra={"plan_hash": entry.plan.plan_hash, "ttl_seconds": entry.ttl_seconds},
-        )
+        extra: dict[str, Any] = {
+            "plan_hash": entry.plan.plan_hash,
+            "ttl_seconds": entry.ttl_seconds,
+        }
+        if self._reservations is not None:
+            try:
+                extra.update(
+                    self._reservations.confirm_payload(
+                        approval=entry.approval,
+                        signal=entry.signal,
+                        plan=entry.plan,
+                        short_id=entry.short_id,
+                        confirmed_at_utc=now_utc,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - fail closed: no reservation facts, no confirm
+                log.warning(
+                    "paper.shadow_confirm.reservation_payload_failed",
+                    error_class=type(exc).__name__,
+                )
+                return self._reject_terminal(
+                    entry, REASON_RECHECK_ERROR, ConfirmOutcome.REJECTED_OTHER, now_utc
+                )
+        try:
+            self._terminate(
+                entry,
+                state=ConfirmState.CONFIRMED,
+                outcome=ConfirmOutcome.CONFIRMED,
+                reason="CONFIRMED",
+                now_utc=now_utc,
+                event_type=EVENT_SHADOW_CONFIRMED,
+                extra=extra,
+            )
+        except Exception:
+            # The append raised: it may or may not have committed. Reconcile against the journal
+            # before anything else; an event that did commit is the authoritative CONFIRM.
+            entry.confirm_append_unknown = True
+            stored = self._stored_confirmed(entry)  # raises when unreadable: fail closed
+            if stored is None:
+                entry.confirm_append_unknown = False
+                raise
+            return self._adopt_stored_confirm(entry, stored)
+        return self._finish_confirm(entry, now_utc)
+
+    def _stored_confirmed(self, entry: ConfirmEntry) -> JournalEvent | None:
+        """The SHADOW_CONFIRMED event of this approval in the journal, or None when absent."""
+        for event in self._stores.journal_for_correlation(_correlation(entry.approval.approval_id)):
+            if event.event_type == EVENT_SHADOW_CONFIRMED:
+                return event
+        return None
+
+    def _adopt_stored_confirm(self, entry: ConfirmEntry, stored: JournalEvent) -> ConfirmResult:
+        """Treat a committed SHADOW_CONFIRMED as the CONFIRM; reuse its stored confirm instant."""
+        loaded = json.loads(stored.payload_json) if stored.payload_json else {}
+        raw = loaded.get("confirmed_at_utc") if isinstance(loaded, dict) else None
+        if not isinstance(raw, str):
+            raise ValueError("the stored SHADOW_CONFIRMED has no confirmed_at_utc")
+        confirmed_at = datetime.fromisoformat(raw)
+        entry.state = ConfirmState.CONFIRMED
+        entry.outcome = ConfirmOutcome.CONFIRMED
+        entry.reason = "CONFIRMED"
+        entry.decided_at_utc = confirmed_at
+        entry.confirm_append_unknown = False
+        return self._finish_confirm(entry, confirmed_at)
+
+    def _finish_confirm(self, entry: ConfirmEntry, confirmed_at_utc: datetime) -> ConfirmResult:
+        """After SHADOW_CONFIRMED is journaled: reserve the exposure, then notify `on_confirmed`.
+
+        A reservation that cannot be made (never expected inside the serialized section) is
+        journaled by the reservation layer as refused and the press is reported as NOT confirmed,
+        so a refused plan never reaches `on_confirmed`. A reserve that raises leaves
+        `reservation_pending` set; a repeated press retries it.
+        """
         result = self._result(entry, ConfirmOutcome.CONFIRMED, "CONFIRMED", replayed=False)
+        if self._reservations is not None:
+            entry.reservation_pending = True
+            outcome = self._reservations.reserve(
+                approval=entry.approval,
+                signal=entry.signal,
+                plan=entry.plan,
+                short_id=entry.short_id,
+                confirmed_at_utc=confirmed_at_utc,
+            )
+            entry.reservation_pending = False
+            if not outcome.reserved:
+                return self._result(
+                    entry, ConfirmOutcome.REJECTED_OTHER, outcome.reason_code, replayed=False
+                )
         if self._on_confirmed is not None:
             # State is already CONFIRMED, so a replay can never reach this call a second time.
-            self._on_confirmed(entry.approval, entry.plan, now_utc)
+            self._on_confirmed(entry.approval, entry.plan, confirmed_at_utc)
         return result
 
     def _reject_terminal(
@@ -1281,6 +1462,8 @@ __all__ = [
     "ConfirmResult",
     "ConfirmState",
     "ConfirmStores",
+    "ReservationPort",
+    "ReserveOutcome",
     "StrandedApprovals",
     "assert_no_stranded_approvals",
     "deliver_confirm_card",

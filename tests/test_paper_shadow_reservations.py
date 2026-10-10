@@ -167,14 +167,17 @@ class RecordingStores:
 class Rig:
     """One paper epoch: stores, ledger and reservations; `restart()` builds a fresh process."""
 
-    def __init__(self, stores: FaultyStores | None = None) -> None:
+    def __init__(
+        self, stores: FaultyStores | None = None, params: dict[str, Any] | None = None
+    ) -> None:
         self.stores = stores if stores is not None else FaultyStores()
+        self.params = dict(PARAMS) if params is None else params
         self.bases: dict[str, ReservationBasis] = {}
         self.ledger, self.reservations = self._build()
 
     def _build(self) -> tuple[ShadowLedger, ShadowReservations]:
         ledger = ShadowLedger(
-            initial_equity=EQUITY, parameter_set_params=PARAMS, started_at_utc=START
+            initial_equity=EQUITY, parameter_set_params=self.params, started_at_utc=START
         )
         return ledger, ShadowReservations(ledger, self.stores, basis_for=self._basis)
 
@@ -185,6 +188,7 @@ class Rig:
         """A new process on the same journal and the same basis source (nothing else survives)."""
         other = Rig.__new__(Rig)
         other.stores = self.stores
+        other.params = self.params
         other.bases = self.bases
         other.ledger, other.reservations = other._build()
         return other
@@ -403,8 +407,6 @@ async def test_a_waiting_reservation_counts_in_the_next_confirms_risk_inputs() -
     [
         # Cluster cap 50: BTC and ETH LONG count as one cluster (30 + 30).
         (("BTCUSDT", "30"), ("ETHUSDT", "30"), "CLUSTER_CAP_REJECT"),
-        # Aggregate cap 100 outside the cluster (60 + 60).
-        (("DOGEUSDT", "60"), ("ADAUSDT", "60"), "AGGREGATE_CAP_REJECT"),
         # Same symbol twice: the engine's own conflict label.
         (("BTCUSDT", "10"), ("BTCUSDT", "10"), "CONFLICT_WITH_OPEN_POSITION"),
     ],
@@ -439,10 +441,30 @@ async def test_the_position_count_gate_applies_to_reservations() -> None:
     assert len(rig.positions()) == 2
 
 
+def _three_positions_allowed() -> dict[str, Any]:
+    """baseline-v5 with a third position allowed, so the aggregate cap (100) is what binds."""
+    return {**PARAMS, "max_open_positions": 3}
+
+
+async def test_the_aggregate_cap_applies_to_the_sum_of_reservations() -> None:
+    rig = Rig(params=_three_positions_allowed())
+    plans = [
+        await approved(rig, n, symbol=symbol, risk="40")
+        for n, symbol in enumerate(("DOGEUSDT", "ADAUSDT", "LINKUSDT"), start=1)
+    ]
+    assert press_confirm(*plans[0]).outcome is ConfirmOutcome.CONFIRMED
+    assert press_confirm(*plans[1]).outcome is ConfirmOutcome.CONFIRMED
+    third = press_confirm(*plans[2])  # 40 + 40 + 40 = 120 > 100
+    assert third.reason == "AGGREGATE_CAP_REJECT"
+    assert len(rig.positions()) == 2
+
+
 async def test_two_concurrent_reserves_cannot_exceed_the_remaining_capacity() -> None:
-    rig = Rig()
-    h1, s1 = await approved(rig, 1, symbol="DOGEUSDT", risk="60")
-    h2, s2 = await approved(rig, 2, symbol="ADAUSDT", risk="60")
+    rig = Rig(params=_three_positions_allowed())
+    first, first_short = await approved(rig, 1, symbol="DOGEUSDT", risk="40")
+    assert press_confirm(first, first_short).outcome is ConfirmOutcome.CONFIRMED
+    h1, s1 = await approved(rig, 2, symbol="ADAUSDT", risk="40")
+    h2, s2 = await approved(rig, 3, symbol="LINKUSDT", risk="40")
     barrier = threading.Barrier(2)
     results: list[Any] = []
 
@@ -470,7 +492,7 @@ async def test_two_concurrent_reserves_cannot_exceed_the_remaining_capacity() ->
         thread.join()
     assert sorted(r.reserved for r in results) == [False, True]
     assert [r.reason_code for r in results if not r.reserved] == ["AGGREGATE_CAP_REJECT"]
-    assert len(rig.positions()) == 1
+    assert len(rig.positions()) == 2  # the first CONFIRM plus exactly one of the racers
     assert len(types(rig.stores, EVENT_SHADOW_RESERVATION_REFUSED)) == 1
 
 
@@ -983,7 +1005,7 @@ def test_a_fill_turns_the_reservation_into_one_position_without_double_counting(
     source = _source(rig.case)
     funding = _funding(rig.parsed)
 
-    driver.advance_to(at(10, 1), source, funding=funding)
+    driver.advance_to(at(10, 2), source, funding=funding)
     reservations.sync(held.key, driver)
 
     assert reservations.pending_reservations() == ()
@@ -1102,7 +1124,7 @@ def test_open_positions_cannot_be_rebuilt_without_a_driver() -> None:
     ledger, reservations = rig.build()
     held = rig.confirm(reservations)
     driver = rig.driver_for(PositionRecord(held, Decimal(QUANTITY), CONFIRMED_AT))
-    driver.advance_to(at(10, 1), _source(rig.case), funding=_funding(rig.parsed))
+    driver.advance_to(at(10, 2), _source(rig.case), funding=_funding(rig.parsed))
     reservations.sync(held.key, driver)
     _ledger2, fresh = rig.build()
     with pytest.raises(ValueError, match="driver_for"):
