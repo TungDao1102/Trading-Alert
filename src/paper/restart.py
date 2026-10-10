@@ -34,7 +34,12 @@ from typing import Protocol
 from src.adapters.binance_public import Kline
 from src.backtest.semantics import CONTEXT_WINDOW_BARS, STRATEGY_WINDOW_BARS
 from src.paper.resync import expected_close_times
-from src.paper.runtime_state import RuntimeRecord, RuntimeStatePort, latest_marker
+from src.paper.runtime_state import (
+    RuntimeRecord,
+    RuntimeStatePort,
+    latest_marker,
+    record_sort_key,
+)
 from src.paper.vocabulary import (
     INTERVAL_MS,
     GapReason,
@@ -139,12 +144,17 @@ def downtime_gaps(
     now_utc: datetime,
     symbols: Sequence[str],
     intervals: Sequence[str],
+    warm: WarmUp | None = None,
 ) -> tuple[GapRecord, ...]:
     """One gap per close that is due after each pair's last processed close, up to `now_utc`.
 
-    The closes come from the exchange grid (close = open + interval - 1 ms). A pair with no
-    processed bar has no recorded baseline and yields no gap: nothing was expected from a feed
-    that never delivered. A close that already has a gap record is skipped (first writer wins).
+    The closes come from the exchange grid (close = open + interval - 1 ms). The reason is
+    PLANNED_RESTART or CRASH (the previous run's end), except for a close the REST warm-up asked
+    for and the exchange did not return: that is EXCHANGE_NO_CANDLE, so each expected close has
+    exactly one record or one explained gap. A close older than the requested window cannot be
+    judged and keeps the restart reason. A pair with no processed bar has no recorded baseline and
+    yields no gap: nothing was expected from a feed that never delivered. A close that already
+    has a gap record is skipped (first writer wins), so a repeated restart never rewrites one.
     """
     _require_utc("now_utc", now_utc)
     reason = restored.downtime_reason
@@ -154,15 +164,21 @@ def downtime_gaps(
             last = restored.last_closes.get((symbol, interval))
             if last is None:
                 continue
+            step = timedelta(milliseconds=INTERVAL_MS[interval])
             for close in expected_close_times(last, now_utc, interval):
                 if (symbol, interval, close) in restored.recorded_gaps:
                     continue
+                gap_reason = reason
+                if warm is not None and warm.is_exchange_hole(
+                    symbol, interval, close + _ONE_MS - step
+                ):
+                    gap_reason = GapReason.EXCHANGE_NO_CANDLE
                 gaps.append(
                     GapRecord(
                         symbol=symbol,
                         interval=interval,
                         expected_close_utc=close,
-                        reason=reason,
+                        reason=gap_reason,
                         detected_at_utc=now_utc,
                     )
                 )
@@ -223,12 +239,23 @@ class WarmUp:
     """The REST snapshot that rebuilds the engine windows.
 
     `bars` are tagged REST_WARMUP (history only, never evaluated, never recorded);
-    `newest_close` is the newest closed bar of each pair, the supervisor's seed.
+    `newest_close` is the newest closed bar of each pair, the seed of the supervisor cursor;
+    `requested_first_open` is the first open time the request asked for and `returned_opens` the
+    open times of the closed bars the exchange returned, per pair (they classify exchange holes).
     """
 
     snapshot_utc: datetime
     bars: tuple[TaggedBar, ...]
     newest_close: Mapping[Pair, datetime]
+    requested_first_open: Mapping[Pair, datetime]
+    returned_opens: Mapping[Pair, frozenset[datetime]]
+
+    def is_exchange_hole(self, symbol: str, interval: str, open_time: datetime) -> bool:
+        """True when the request covered this open time and the exchange did not return it."""
+        first = self.requested_first_open.get((symbol, interval))
+        if first is None or open_time < first:
+            return False
+        return open_time not in self.returned_opens.get((symbol, interval), frozenset())
 
 
 async def warm_up(
@@ -241,6 +268,8 @@ async def warm_up(
     _require_utc("now_utc", now_utc)
     bars: list[TaggedBar] = []
     newest: dict[Pair, datetime] = {}
+    first_open: dict[Pair, datetime] = {}
+    returned: dict[Pair, frozenset[datetime]] = {}
     now_ms = _ms(now_utc)
     for symbol in symbols:
         for interval in intervals:
@@ -270,14 +299,45 @@ async def warm_up(
                         source=SourceTag.REST_WARMUP,
                     )
                 )
+            first_open[(symbol, interval)] = _UNIX_ORIGIN + timedelta(milliseconds=start_ms)
+            returned[(symbol, interval)] = frozenset(k.open_time_utc for k in closed)
             if closed:
                 newest[(symbol, interval)] = closed[-1].close_time_utc
-    return WarmUp(snapshot_utc=now_utc, bars=tuple(bars), newest_close=newest)
+    return WarmUp(
+        snapshot_utc=now_utc,
+        bars=tuple(bars),
+        newest_close=newest,
+        requested_first_open=first_open,
+        returned_opens=returned,
+    )
 
 
-def supervisor_cursors(restored: RestoredState, warm: WarmUp) -> dict[Pair, datetime]:
-    """The close the supervisor resumes each pair from: the newest of the warm-up snapshot."""
-    return dict(warm.newest_close)
+def supervisor_cursors(
+    restored: RestoredState,
+    warm: WarmUp,
+    *,
+    symbols: Sequence[str],
+    intervals: Sequence[str],
+) -> dict[Pair, datetime]:
+    """The close the supervisor resumes each pair from.
+
+    The newest close of the warm-up snapshot (the downtime closes are already gaps); a pair the
+    exchange returned nothing for falls back to its restored last processed close, so a bar
+    processed before the stop is never delivered again and a reconnect still has a cursor. The
+    cursor never moves behind a processed close.
+    """
+    out: dict[Pair, datetime] = {}
+    for symbol in symbols:
+        for interval in intervals:
+            pair = (symbol, interval)
+            known = [
+                close
+                for close in (warm.newest_close.get(pair), restored.last_closes.get(pair))
+                if close is not None
+            ]
+            if known:
+                out[pair] = max(known)
+    return out
 
 
 @dataclass(frozen=True)
@@ -293,6 +353,63 @@ class RestartPlan:
     restored: RestoredState
     warm: WarmUp
     gaps: tuple[GapRecord, ...]
+
+
+# --------------------------------------------------------------------------- #
+# Epoch consistency.
+# --------------------------------------------------------------------------- #
+
+
+class EpochMismatch(Exception):
+    """The pinned state file and the stored EPOCH_PINNED record do not agree (fail closed)."""
+
+
+class PinnedLike(Protocol):
+    """The identity of the pinned epoch (`StreamEpoch`)."""
+
+    @property
+    def epoch_id(self) -> str: ...
+
+    @property
+    def strategy_id(self) -> str: ...
+
+    @property
+    def parameter_set_id(self) -> str: ...
+
+    @property
+    def parameter_set_hash(self) -> str: ...
+
+    @property
+    def opened_at_utc(self) -> datetime: ...
+
+
+def check_epoch_consistency(pinned: PinnedLike, state: RuntimeStatePort) -> None:
+    """A restart never mints an epoch: the pin file must match the latest stored pin record.
+
+    Raises `EpochMismatch` when the state port holds no EPOCH_PINNED record for the pinned epoch
+    or when the latest one differs in strategy, parameter set, hash or opening time. The port is
+    keyed by epoch id, so a record of another epoch is simply not this epoch's pin.
+    """
+    pins = state.records(pinned.epoch_id, {RuntimeEventType.EPOCH_PINNED})
+    if not pins:
+        raise EpochMismatch("no EPOCH_PINNED record for the pinned epoch in the runtime state")
+    latest = max(pins, key=record_sort_key)
+    differing = [
+        name
+        for name, expected in (
+            ("strategy_id", pinned.strategy_id),
+            ("parameter_set_id", pinned.parameter_set_id),
+            ("parameter_set_hash", pinned.parameter_set_hash),
+        )
+        if latest.payload.get(name) != expected
+    ]
+    if latest.occurred_at_utc != pinned.opened_at_utc:
+        differing.append("opened_at_utc")
+    if differing:
+        raise EpochMismatch(
+            "the latest EPOCH_PINNED record differs from the pinned state in: "
+            + ", ".join(differing)
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -317,11 +434,14 @@ def apply_restart_fence(bar: TaggedBar, fence_utc: datetime) -> TaggedBar:
 __all__ = [
     "GAP_DETAIL_RESTART",
     "WARMUP_BARS",
+    "EpochMismatch",
     "KlinesLike",
+    "PinnedLike",
     "RestartPlan",
     "RestoredState",
     "WarmUp",
     "apply_restart_fence",
+    "check_epoch_consistency",
     "downtime_gaps",
     "health_record",
     "restart_gap_record",

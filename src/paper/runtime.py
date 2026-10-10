@@ -63,7 +63,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 import structlog
 
@@ -91,8 +91,10 @@ from src.paper.market_inputs import (
 )
 from src.paper.pipeline import BarPipeline, HeldBar, PipelineResult
 from src.paper.restart import (
+    EpochMismatch,
     RestartPlan,
     apply_restart_fence,
+    check_epoch_consistency,
     downtime_gaps,
     health_record,
     restart_gap_record,
@@ -299,6 +301,13 @@ class RuntimeFailClosed(Exception):
     """
 
 
+@runtime_checkable
+class SeedsProcessed(Protocol):
+    """A pipeline that can mark restored bars as already processed (`BarPipeline`)."""
+
+    def seed_processed(self, last_closes: Mapping[tuple[str, str], datetime]) -> None: ...
+
+
 class HandlesBars(Protocol):
     """What the consumer needs from the pipeline (`BarPipeline`; a double in tests)."""
 
@@ -427,6 +436,7 @@ class _LiveLoop:
     ) -> None:
         self._context = context
         self._restart = restart
+        self._symbols = context.config.symbols
         # Closes at or before this instant can only be history (see `apply_restart_fence`).
         self._fence: datetime | None = None
         self._live_seen = False
@@ -599,7 +609,12 @@ class _LiveLoop:
             )
             if result.evaluated or result.recorded:
                 raise RuntimeFailClosed("the REST warm-up evaluated or recorded a bar")
-        for (symbol, interval), close in supervisor_cursors(plan.restored, plan.warm).items():
+        if isinstance(self._pipeline, SeedsProcessed):
+            self._pipeline.seed_processed(plan.restored.last_closes)
+        cursors = supervisor_cursors(
+            plan.restored, plan.warm, symbols=self._symbols, intervals=LOOP_INTERVALS
+        )
+        for (symbol, interval), close in cursors.items():
             self._supervisor.record_close(symbol, interval, close)
         self._fence = plan.snapshot_utc
 
@@ -737,7 +752,11 @@ async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None
         restored=restored,
         warm=warm,
         gaps=downtime_gaps(
-            restored, now_utc=snapshot, symbols=config.symbols, intervals=LOOP_INTERVALS
+            restored,
+            now_utc=snapshot,
+            symbols=config.symbols,
+            intervals=LOOP_INTERVALS,
+            warm=warm,
         ),
     )
 
@@ -962,6 +981,9 @@ def main(
         registry_root=registry_root,
     )
     try:
+        if not newly_pinned:
+            # A restart never mints an epoch: the pin file and the stored pin record must agree.
+            check_epoch_consistency(epoch, port)
         if newly_pinned:
             # Recorded before the file is written: a failed write leaves an orphan record of an
             # epoch no run uses, while the reverse order would leave a trial with no pin record.
@@ -989,6 +1011,8 @@ def main(
         else:
             asyncio.run(run_admitted(context, live_wiring))
         port.record(_epoch_record(RuntimeEventType.RUNTIME_STOP, epoch, now()))
+    except EpochMismatch as exc:
+        return refuse(ExitCode.ADMISSION_OR_EPOCH_MISMATCH, str(exc))
     except (PersistenceError, RuntimeRecordConflict, RuntimeFailClosed) as exc:
         detail = str(exc) if isinstance(exc, RuntimeFailClosed) else type(exc).__name__
         print(

@@ -891,7 +891,7 @@ def test_a_close_older_than_the_requested_window_keeps_the_restart_reason() -> N
 
     assert len(gaps) == 1300  # every close after the processed one, up to 18:59:59.999
     assert {g.reason.value for g in gaps} == {"CRASH"}, "never stopped, and the exchange has all"
-    first_requested = RESTART.replace(minute=0) - timedelta(hours=1000) - ONE_MS
+    first_requested = RESTART.replace(minute=0) - timedelta(hours=999) - ONE_MS
     older = [g for g in gaps if g.expected_close_utc < first_requested]
     assert len(older) == 300, "closes outside the requested window are not exchange holes"
 

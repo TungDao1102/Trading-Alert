@@ -53,7 +53,7 @@ Pure module: the tick time is injected (no clock read), no sleeping, no float, a
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -251,6 +251,19 @@ class BarPipeline:
         # Every bar accepted into history, by (symbol, interval, open time): one entry per closed
         # bar, a few bytes each, so it is kept for the life of the process.
         self._seen: dict[tuple[str, str, datetime], Candle] = {}
+        # Open times of bars a previous run already processed (restored after a restart): a
+        # redelivery of one is a duplicate, whatever the warm-up window still holds.
+        self._processed_before_start: set[tuple[str, str, datetime]] = set()
+
+    def seed_processed(self, last_closes: Mapping[tuple[str, str], datetime]) -> None:
+        """Mark each pair's restored last processed close as already handled (plan 16-29).
+
+        Called once after the REST warm-up and before the first live bar. The bar is only marked,
+        not added to history: the warm-up already did that when the exchange still returns it.
+        """
+        for (symbol, interval), close in last_closes.items():
+            step = timedelta(milliseconds=INTERVAL_MS[interval])
+            self._processed_before_start.add((symbol, interval, close + _ONE_MS - step))
 
     def handle(self, bars: Iterable[TaggedBar], *, now_utc: datetime) -> PipelineResult:
         """Process a batch of tagged bars at the injected tick time `now_utc`."""
@@ -309,6 +322,9 @@ class BarPipeline:
         if stored is not None:
             if stored != candle:
                 raise _conflict(bar)
+            batch.duplicates.append(bar)
+            return
+        if (bar.symbol, bar.interval, bar.open_time_utc) in self._processed_before_start:
             batch.duplicates.append(bar)
             return
 
