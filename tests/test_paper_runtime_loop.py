@@ -555,3 +555,202 @@ def test_the_monotonic_reading_feeds_only_the_tick_stats_record() -> None:
         func = node.func
         name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
         assert name == "_tick_stats_record", f"a monotonic reading reaches {name}()"
+
+
+# ---------------------------------------------------------------------------------------------- #
+# Task 3: the healthcheck probe (research Pitfall P5: liveness is not health) and the Q-D key.
+# ---------------------------------------------------------------------------------------------- #
+
+MAX_BAR_AGE = timedelta(seconds=20)  # healthcheck_max_bar_age_seconds of the admission rig
+Q_D_DECISION = (
+    REPO_ROOT / ".planning" / "phases" / "16-paper-runtime-composition" / "decisions"
+) / "16-DEC-Q-D.md"
+README = REPO_ROOT / "config" / "paper" / "README.md"
+# The key plan 16-24 / Q-D would have added had the user chosen "fresh-within-bound".
+Q_D_KEY = "backfill_eval_max_age_seconds"
+
+
+class Probe:
+    """Drives `main(["--healthcheck"])` against the state of a pinned `Live` runtime."""
+
+    def __init__(self, live: Live) -> None:
+        self.live = live
+
+    def _marker(self, event_type: RuntimeEventType, at: datetime) -> None:
+        self.live.state.record(
+            RuntimeRecord(
+                event_type=event_type, epoch_id=self.live.epoch.epoch_id, occurred_at_utc=at
+            )
+        )
+
+    def start(self, at: datetime) -> None:
+        self._marker(RuntimeEventType.RUNTIME_START, at)
+
+    def stop(self, at: datetime) -> None:
+        self._marker(RuntimeEventType.RUNTIME_STOP, at)
+
+    def bar(self, close: datetime) -> None:
+        self.live.state.record(
+            RuntimeRecord.bar_processed(
+                epoch_id=self.live.epoch.epoch_id,
+                symbol="BTCUSDT",
+                interval="1h",
+                close_time_utc=close,
+                payload={"source": SourceTag.LIVE_WS.value},
+            )
+        )
+
+    def run(self, now: datetime, *, environ: dict[str, str] | None = None) -> int:
+        return runtime.main(
+            ["--healthcheck", "--pinned-state", str(self.live.rig.pinned_path)],
+            environ=self.live.rig.environ() if environ is None else environ,
+            state=self.live.state,
+            registry_root=self.live.rig.root,
+            clock=FixedClock(now),
+        )
+
+
+@pytest.fixture
+def probe(live: Live) -> Probe:
+    return Probe(live)
+
+
+def test_healthy_while_the_last_processed_bar_is_younger_than_the_maximum_age(
+    probe: Probe, capsys: pytest.CaptureFixture[str]
+) -> None:
+    probe.start(NOW)
+    probe.bar(NOW + timedelta(seconds=1))
+
+    assert probe.run(NOW + timedelta(seconds=1) + MAX_BAR_AGE) == 0
+    assert capsys.readouterr().out.startswith("healthy")
+    assert probe.run(NOW + timedelta(seconds=1) + MAX_BAR_AGE + timedelta(seconds=1)) == 1
+    assert "unhealthy" in capsys.readouterr().out
+
+
+def test_a_running_process_that_processes_no_bar_turns_unhealthy_after_the_maximum_age(
+    probe: Probe,
+) -> None:
+    probe.start(NOW)
+
+    assert probe.run(NOW + MAX_BAR_AGE) == 0, "a fresh start gets one maximum age for its first bar"
+    assert probe.run(NOW + MAX_BAR_AGE + timedelta(seconds=1)) == 1
+
+
+def test_a_bar_from_before_the_latest_start_does_not_count_as_progress(probe: Probe) -> None:
+    probe.bar(NOW - timedelta(seconds=5))
+    probe.start(NOW)
+
+    assert probe.run(NOW + MAX_BAR_AGE) == 0
+    assert probe.run(NOW + MAX_BAR_AGE + timedelta(seconds=1)) == 1
+
+
+def test_a_stopped_process_is_unhealthy(probe: Probe) -> None:
+    probe.start(NOW)
+    probe.bar(NOW + timedelta(seconds=1))
+    probe.stop(NOW + timedelta(seconds=2))
+
+    assert probe.run(NOW + timedelta(seconds=3)) == 1
+
+
+def test_the_healthcheck_never_prints_an_environment_value(
+    probe: Probe, capsys: pytest.CaptureFixture[str]
+) -> None:
+    probe.start(NOW)
+    probe.bar(NOW + timedelta(seconds=1))
+    environ = {
+        **probe.live.rig.environ(),
+        "TELEGRAM_BOT_TOKEN": "tg-secret-token-value",
+        "DATABASE_URL": "postgresql://user:db-secret-password@host/db",
+        "UNRELATED_NAME": "unrelated-value",
+    }
+    assert probe.run(NOW + timedelta(seconds=2), environ=environ) == 0
+    with_key = {**environ, "BINANCE_API_KEY": "binance-secret-key-value"}
+    assert probe.run(NOW + timedelta(seconds=2), environ=with_key) == 1
+
+    out = capsys.readouterr()
+    text = out.out + out.err
+    assert "BINANCE_API_KEY" in text, "the offending NAME may be reported"
+    for value in (
+        "tg-secret-token-value",
+        "db-secret-password",
+        "unrelated-value",
+        "binance-secret-key-value",
+    ):
+        assert value not in text
+
+
+def test_a_held_refusal_is_never_reported_healthy(probe: Probe, tmp_path: Path) -> None:
+    probe.start(NOW)
+    probe.bar(NOW + timedelta(seconds=1))
+    at = NOW + timedelta(seconds=2)
+    healthy_env = probe.live.rig.environ()
+    assert probe.run(at, environ=healthy_env) == 0, "control: this environment is healthy"
+
+    unratified = tmp_path / "unratified.toml"
+    unratified.write_text("[health]\nmax_ws_message_silence_seconds = 11\n", encoding="utf-8")
+    wrong_set = {**healthy_env, "PAPER_PARAMETER_SET_ID": "some-other-set"}
+    no_config = {k: v for k, v in healthy_env.items() if k != "PAPER_RUNTIME_CONFIG"}
+
+    assert probe.run(at, environ={**healthy_env, "BINANCE_API_KEY": ""}) == 1
+    assert probe.run(at, environ={**healthy_env, "PAPER_RUNTIME_CONFIG": str(unratified)}) == 1
+    assert probe.run(at, environ=no_config) == 1
+    assert probe.run(at, environ=wrong_set) == 1
+
+
+def test_an_empty_allowlist_is_not_healthy_either(
+    probe: Probe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.paper.freeze as freeze
+
+    probe.start(NOW)
+    probe.bar(NOW + timedelta(seconds=1))
+    monkeypatch.setattr(freeze, "PAPER_START_ALLOWLIST", ())
+
+    assert probe.run(NOW + timedelta(seconds=2)) == 1
+
+
+# ---- Q-D: the configuration part of the recorded decision --------------------------------- #
+
+
+def _valid_config_dict() -> dict[str, dict[str, Any]]:
+    import tomllib
+
+    from tests.test_paper_runtime_admission import CONFIG_TEXT
+
+    return tomllib.loads(CONFIG_TEXT)
+
+
+def test_q_d_option_history_only_means_no_age_key_anywhere() -> None:
+    from src.paper.runtime_config import ConfigNotRatified, parse_runtime_config
+
+    text = Q_D_DECISION.read_text(encoding="utf-8")
+    option = next(
+        line.split(":", 1)[1].strip() for line in text.splitlines() if line.startswith("option:")
+    )
+    if option != "history-only":
+        pytest.fail(
+            "Q-D now records a different option: load_runtime_config must require the age key "
+            "under [timing] and config/paper/README.md must list it with the owner Q-D"
+        )
+    assert Q_D_KEY not in README.read_text(encoding="utf-8")
+    raw = _valid_config_dict()
+    raw["timing"][Q_D_KEY] = 30
+    with pytest.raises(ConfigNotRatified, match=f"timing.{Q_D_KEY}"):
+        parse_runtime_config(raw)
+
+
+def test_a_key_nothing_reads_is_refused_in_every_section() -> None:
+    from src.paper.runtime_config import ConfigNotRatified, parse_runtime_config
+
+    for section, key in (("health", "invented_seconds"), ("account", "leverage")):
+        raw = _valid_config_dict()
+        raw[section][key] = 1
+        with pytest.raises(ConfigNotRatified, match=f"{section}.{key}"):
+            parse_runtime_config(raw)
+    parse_runtime_config(_valid_config_dict())  # control: the complete file is accepted
+
+
+def test_the_readme_documents_the_probe_and_the_unknown_key_rule_without_a_value() -> None:
+    text = README.read_text(encoding="utf-8")
+    assert "--healthcheck" in text
+    assert "unknown key" in text
