@@ -90,6 +90,16 @@ from src.paper.market_inputs import (
     refresh_forever,
 )
 from src.paper.pipeline import BarPipeline, HeldBar, PipelineResult
+from src.paper.restart import (
+    RestartPlan,
+    apply_restart_fence,
+    downtime_gaps,
+    health_record,
+    restart_gap_record,
+    restore_runtime,
+    supervisor_cursors,
+    warm_up,
+)
 from src.paper.runtime_config import (
     ConfigNotRatified,
     ExitCode,
@@ -100,7 +110,14 @@ from src.paper.runtime_config import (
 )
 from src.paper.runtime_state import RuntimeRecord, RuntimeRecordConflict, RuntimeStatePort
 from src.paper.supervisor import PaperSupervisor
-from src.paper.vocabulary import GapRecord, RuntimeEventType, TaggedBar
+from src.paper.vocabulary import (
+    GapReason,
+    GapRecord,
+    HealthState,
+    RuntimeEventType,
+    SourceTag,
+    TaggedBar,
+)
 from src.persistence.errors import PersistenceError
 
 SKIPPED_EVENT = "SKIPPED (allowlist empty)"
@@ -131,6 +148,9 @@ class RuntimeContext:
     env: Mapping[str, str]
     clock: Callable[[], datetime]
     registry_root: Path | None
+    # The time of this run's own RUNTIME_START (set by `main`): markers before it are the previous
+    # run, which tells a planned restart from a crash (plan 16-29).
+    started_at_utc: datetime | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -402,9 +422,14 @@ class _LiveLoop:
         wiring: LoopWiring,
         pipeline: HandlesBars,
         supervisor_factory: Callable[[_LiveLoop], PaperSupervisor],
+        restart: RestartPlan,
         constraints: ConstraintProvider | None = None,
     ) -> None:
         self._context = context
+        self._restart = restart
+        # Closes at or before this instant can only be history (see `apply_restart_fence`).
+        self._fence: datetime | None = None
+        self._live_seen = False
         self._constraints = constraints
         self._epoch_id = context.epoch.epoch_id
         self._state = context.state
@@ -454,6 +479,15 @@ class _LiveLoop:
         )
 
     def _enqueue(self, bar: TaggedBar) -> None:
+        if self._fence is not None:
+            bar = apply_restart_fence(bar, self._fence)
+        if bar.source is SourceTag.LIVE_WS and not self._live_seen:
+            # The first live closed event after the warm-up ends the declared DISCONNECTED state.
+            self._live_seen = True
+            # Strictly after the DISCONNECTED record of this start: a health record is keyed on
+            # its time, so two states in the same millisecond would be one conflicting record.
+            at = max(self._clock(), self._restart.started_at_utc + timedelta(milliseconds=1))
+            self._spawn_record(health_record(self._epoch_id, HealthState.HEALTHY, at))
         try:
             self._queue.put_nowait(bar)
         except asyncio.QueueFull:
@@ -541,7 +575,36 @@ class _LiveLoop:
 
     # ---- run and teardown ------------------------------------------------------------------ #
 
+    async def _restore_before_subscribing(self) -> None:
+        """Record the downtime, rebuild the engine windows and seed the supervisor (plan 16-29).
+
+        Everything here happens before the first subscription, so the first live bar meets full
+        windows, a seeded cursor and a fence; a warm-up bar is history, never a record.
+        """
+        plan = self._restart
+        records = [
+            health_record(
+                self._epoch_id,
+                HealthState.DISCONNECTED,
+                plan.started_at_utc,
+                GapReason.WS_RECONNECT_WINDOW,
+            ),
+            *(restart_gap_record(self._epoch_id, gap) for gap in plan.gaps),
+        ]
+        for record in records:
+            await asyncio.to_thread(self._state.record, record)
+        if plan.warm.bars:
+            result = await asyncio.to_thread(
+                self._pipeline.handle, plan.warm.bars, now_utc=plan.snapshot_utc
+            )
+            if result.evaluated or result.recorded:
+                raise RuntimeFailClosed("the REST warm-up evaluated or recorded a bar")
+        for (symbol, interval), close in supervisor_cursors(plan.restored, plan.warm).items():
+            self._supervisor.record_close(symbol, interval, close)
+        self._fence = plan.snapshot_utc
+
     async def run(self) -> None:
+        await self._restore_before_subscribing()
         try:
             await self._supervisor.start()
         except Exception as exc:
@@ -655,11 +718,35 @@ async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None
             clock=context.clock,
         )
 
+    snapshot = context.clock()
+    started = context.started_at_utc if context.started_at_utc is not None else snapshot
+    try:
+        restored = await asyncio.to_thread(
+            restore_runtime, context.state, epoch.epoch_id, current_start_utc=started
+        )
+        warm = await warm_up(public, config.symbols, LOOP_INTERVALS, snapshot)
+    except (PersistenceError, RuntimeRecordConflict):
+        raise
+    except Exception as exc:
+        raise RuntimeFailClosed(
+            f"the restart restore or the REST warm-up failed ({type(exc).__name__})"
+        ) from exc
+    plan = RestartPlan(
+        started_at_utc=started,
+        snapshot_utc=snapshot,
+        restored=restored,
+        warm=warm,
+        gaps=downtime_gaps(
+            restored, now_utc=snapshot, symbols=config.symbols, intervals=LOOP_INTERVALS
+        ),
+    )
+
     await _LiveLoop(
         context=context,
         wiring=live,
         pipeline=pipeline,
         supervisor_factory=build_supervisor,
+        restart=plan,
         constraints=constraints,
     ).run()
 
@@ -893,7 +980,9 @@ def main(
                 ) from exc
             start_extra["clock_skew_ms"] = skew_ms
             structlog.get_logger().info("clock skew measured", clock_skew_ms=skew_ms)
-        port.record(_epoch_record(RuntimeEventType.RUNTIME_START, epoch, now(), start_extra))
+        started_at = now()
+        context = replace(context, started_at_utc=started_at)
+        port.record(_epoch_record(RuntimeEventType.RUNTIME_START, epoch, started_at, start_extra))
         structlog.get_logger().info("runtime start", epoch_id=epoch.epoch_id)
         if run_loop is not None:
             run_loop(context)
