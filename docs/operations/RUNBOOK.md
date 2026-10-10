@@ -643,3 +643,59 @@ No option is selected here; the decision is O-01 (plan 16-30).
 ### 19.7 Things only the host can show
 
 The list at the end of section 17, "Only a real host can show", holds the apt install on each OS, ufw/sshd/chrony effects, the Docker and ufw interplay, the `docker run` rsync path, a systemd timer firing, provider disk encryption, the Binance IP whitelist, the heartbeat monitor, a real bucket at scale and a real provider-to-provider cutover. Every check of 19.3 and every UAT item of 19.4 belongs to that list: no test in this repository shows any of them. `tests/test_soak_runbook.py` proves only that this section names commands that exist and that the validator behaves as described.
+
+## 20. Soak project operations
+
+This section says how the soak project is operated once it exists on the soak host (19) and the paper runtime is built. It applies D-32 and the reviewer decisions REV-01, REV-03 and REV-17 (D063, D065). It writes no number the user owns: the trial window, the 95 percent coverage and the 14 days are L-04 values (D061), and the O-07 and O-12 values stay in their decision records.
+
+### 20.1 Project and wrapper
+
+The soak is its own compose project, `trading-soak`, with its own volumes (`trading-soak_pgdata` and the others), apart from the development stack and from the rehearsal (20.4). Every soak command goes through `deploy/compose-soak.sh`; no hand-typed raw `docker compose` command is used for the soak. The wrapper pins the project, refuses a `-p` or `--project-name` that names another project and refuses `down` together with `-v` or `--volumes`. The volume-removing form (`down -v`, or `down --volumes`) is never run on `trading-soak`: its database volume holds the soak evidence, and the runbook shows no such command. If a volume ever has to go, it is a by-hand action on the host after a restore drill (20.5), never through the wrapper.
+
+```text
+TRADING_ENV_FILE=/path/to/soak.env deploy/compose-soak.sh --profile paper up -d
+deploy/compose-soak.sh ps
+deploy/compose-soak.sh logs paper
+deploy/compose-soak.sh stop paper
+```
+
+The environment file for the soak is made from `deploy/soak.env.example`: names only, no trade-capable name (`BINANCE_` anything makes the runtime refuse to start, D-13).
+
+**Exit codes of `python -m src.paper.runtime`.** The compose command passes `--hold-on-refusal` and the restart policy is `on-failure`, which restarts on any non-zero status and has no per-code exclusion list. The table below is what keeps a refusal from becoming a restart loop (T-16-110). It lists every member of `ExitCode` in `src/paper/runtime_config.py`.
+
+| Name | Code | Meaning and what happens |
+| --- | --- | --- |
+| `OK` | 0 | a clean stop, or SKIPPED because the paper-start allowlist admits nothing; exits 0 and is not restarted |
+| `USAGE` | 2 | a malformed command line (argparse's own status); the command line does not change on a restart, so fix the compose command |
+| `TRADE_KEY_REFUSED` | 3 | a trade-capable variable name is present in the environment; refusal |
+| `CONFIG_NOT_RATIFIED` | 4 | the runtime configuration file is not ratified; refusal |
+| `NO_PINNED_EPOCH` | 5 | no pinned epoch; refusal |
+| `ADMISSION_OR_EPOCH_MISMATCH` | 6 | the allowlist admission or the epoch does not match; refusal |
+| `FAIL_CLOSED_RUNTIME` | 7 | the runtime failed closed on a condition a restart can clear (lost data, lost connection); restarted, and the time shows as a CRASH gap |
+
+A refusal (codes 3 to 6) can never succeed on a retry, because only a human action changes the outcome. With `--hold-on-refusal` the process logs the refusal and stays up, so the paper container is up and unhealthy instead of looping. The operator reads the refusal reason in the container log (`deploy/compose-soak.sh logs paper`) and must stop the container before correcting the cause (remove the variable, ratify the file, pin the epoch, fix the allowlist), then starts it again. SKIPPED exits 0 and is not restarted. A crash, or code 7, is restarted by the compose policy and appears as a CRASH gap in the coverage evidence: it is uncovered like every other gap (20.2).
+
+### 20.2 Deploys during the trial soak
+
+Every stop or deploy during the trial is a PLANNED_RESTART (glossary) and is never covered: the coverage denominator is the whole fixed trial window, only HEALTHY time counts, and a gap that has a reason is still uncovered (REV-01). The trial is 14 calendar days, which is 336 h; 95 percent of 336 h leaves about 16.8 h for all uncovered time together (REV-17): planned restarts, crashes, DEGRADED time, disconnects and maintenance share that one budget. A deploy therefore spends budget that no crash may need, so batch changes, prefer a change before the trial starts, and keep the stop short.
+
+- Stop the paper service cleanly (`deploy/compose-soak.sh stop paper`) rather than killing the container: a clean stop writes the stop record, and the gap then carries the reason PLANNED_RESTART; a killed process shows as a CRASH gap. Both are uncovered.
+- Write down the UTC time and the cause of each stop and deploy next to the evidence; the audit reads the gap reason, but the cause is only in your note.
+- A change of the image, the allowlist or the runtime configuration during the trial is a restart and spends the budget above; changing any ratified L-04 value before the trial starts needs a new user approval (L-04).
+- Never run the volume-removing form of `down` to "start clean": it deletes the evidence of the trial (20.1).
+
+### 20.3 Telegram bot
+
+The soak uses a separate bot, by the user's decision recorded in `decisions/16-DEC-Q-L.md` (16-DEC-Q-L, option `separate-bot`). The user creates the bot with BotFather and the token is never pasted anywhere: not into a chat with an assistant, not into this repository, not into an evidence file and not onto a command line. It reaches the host only through the soak environment file of 20.1, which is not committed.
+
+### 20.4 Rehearsal before the trial
+
+The pre-soak rehearsal of the SHADOW APPROVE, CONFIRM, journal path (REV-03, glossary `test_only`) runs before the trial in its own project, `trading-rehearsal`, with its own volumes and its own environment file, and never in trading-soak. Its records carry the rehearsal marker and are excluded from every count: signals, trades, parity evidence, the exit criteria G1 to G5 and PAPER-03. It does not bypass the paper-start allowlist. When the rehearsal is finished, the trial soak starts from a clean state of its own project; the soak database is not used as a scratch pad for the rehearsal at any point.
+
+### 20.5 Backups and restore drill before the long soak
+
+Before the long soak starts, the host has a verified backup chain: a backup run now (11.4) that completes, then the restore drill (11.6) that passes. A backup is not valid until a drill passes. The drill restores into a scratch target, the scratch database that the drill creates and drops, and never into the soak database: a restore into the soak database would replace the evidence it is supposed to protect. The first real backup waits for the D064 real-S3 gate (section 11, "Real-S3 gate"; 19.4 item 6), and the first verified pull to the development machine (19.5) is part of the same readiness. Run the drill again after any change of provider, key or image (11.6).
+
+### 20.6 Image
+
+The soak never runs from a working-tree bind mount. How the pinned soak image is produced is the user's decision: recipe per `decisions/16-DEC-Q-I.md`. Until that record exists, no soak image is built.
