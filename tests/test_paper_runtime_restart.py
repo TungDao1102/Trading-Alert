@@ -32,11 +32,16 @@ from src.paper import runtime
 from src.paper.bars import BarBuffers
 from src.paper.freeze import StreamEpoch
 from src.paper.pipeline import BarPipeline, PipelineResult
-from src.paper.runtime_state import InMemoryRuntimeState, RuntimeRecord
+from src.paper.runtime_state import (
+    InMemoryRuntimeState,
+    RuntimeRecord,
+    RuntimeStatePort,
+    runtime_event_id,
+)
 from src.paper.supervisor import PaperSupervisor
 from src.paper.vocabulary import RuntimeEventType, SourceTag, TaggedBar
 
-from tests.paper_ws_fakes import make_kline_model
+from tests.paper_ws_fakes import FakeSdkWsClient, make_kline_model
 from tests.test_paper_decision_surface import (
     PASSING_BAR,
     _bar_context,
@@ -173,7 +178,7 @@ class WarmPublic(FakePublic):
 class RecordingPipeline:
     """A pipeline double: logs every batch, 'evaluates' closed LIVE_WS 1h bars, records them."""
 
-    def __init__(self, state: InMemoryRuntimeState | None = None, epoch_id: str = "") -> None:
+    def __init__(self, state: RuntimeStatePort | None = None, epoch_id: str = "") -> None:
         self.batches: list[tuple[list[TaggedBar], datetime]] = []
         self.evaluated: list[TaggedBar] = []
         self._state = state
@@ -199,9 +204,9 @@ class RecordingPipeline:
         return PipelineResult(evaluated=tuple(object() for _ in live_1h))  # type: ignore[misc]
 
 
-def seed_history(live_rig: Live, *, with_stop: bool) -> None:
+def seed_history(live_rig: Live, *, with_stop: bool, state: RuntimeStatePort | None = None) -> None:
     """The state a stopped process leaves behind: START, processed closes up to C, maybe STOP."""
-    state = live_rig.state
+    state = state if state is not None else live_rig.state
     epoch = live_rig.epoch
     base = {
         "strategy_id": epoch.strategy_id,
@@ -936,3 +941,127 @@ def test_a_repeated_restart_never_rewrites_a_recorded_gap_with_another_reason() 
 
     assert [g.expected_close_utc for g in gaps] == list(DOWNTIME_CLOSES[1:])
     assert {g.reason.value for g in gaps} == {"CRASH"}
+
+
+# ---------------------------------------------------------------------------------------------- #
+# Task 3 (shared with tests/test_paper_runtime_restart_pg.py): one full stop-and-start session.
+#
+# The same driver runs on the in-memory reference port here and on `PgRuntimeState` in the
+# PostgreSQL test, so the behaviour proven locally is the behaviour asked of the real store.
+# ---------------------------------------------------------------------------------------------- #
+
+StateFactory = Callable[[], RuntimeStatePort]
+SESSION_LIVE_OPENS = (
+    datetime(2026, 10, 10, 19, 0, tzinfo=UTC),
+    datetime(2026, 10, 10, 20, 0, tzinfo=UTC),
+)
+# Every 1h close of BTCUSDT between the last processed bar (C) and the end of the session.
+SESSION_EXPECTED_CLOSES = tuple(C + k * HOUR for k in range(6))
+
+
+def bar_and_gap_ids(state: RuntimeStatePort, epoch_id: str) -> set[str]:
+    """Ids of the records keyed on a bar close (never on the wall clock)."""
+    wanted = {RuntimeEventType.PAPER_BAR_PROCESSED, RuntimeEventType.PAPER_GAP}
+    return {runtime_event_id(r) for r in state.records(epoch_id, wanted)}
+
+
+def run_session(live_rig: Live, state: RuntimeStatePort, *, restart_at: datetime = RESTART) -> None:
+    """Pin records, history up to C and a STOP, then a restart with two closed live 1h bars."""
+    epoch_id = live_rig.epoch.epoch_id
+    for record in live_rig.state.records(epoch_id):  # the pin run: EPOCH_PINNED, START, STOP
+        state.record(record)
+    seed_history(live_rig, with_stop=True, state=state)
+    live_rig.client = FakeSdkWsClient()
+    live_rig.clients = [live_rig.client]
+    clock = FixedClock(restart_at)
+    public = WarmPublic(restart_at)
+    pipeline = RecordingPipeline(state=state, epoch_id=epoch_id)
+
+    def processed(close: datetime) -> bool:
+        return any(
+            r.symbol == "BTCUSDT" and r.interval == "1h" and r.occurred_at_utc == close
+            for r in state.records(epoch_id, {RuntimeEventType.PAPER_BAR_PROCESSED})
+        )
+
+    async def script(h: Live) -> None:
+        await wait_until(lambda: len(h.client.handles) == 4)
+        for opened in SESSION_LIVE_OPENS:
+            clock.now = opened + HOUR + timedelta(seconds=1)
+            h.emit("BTCUSDT", "1h", open_time=opened)
+            await wait_until(lambda opened=opened: processed(opened + HOUR - ONE_MS))
+
+    code = live_rig.start(
+        script,
+        state=state,
+        clock=clock,
+        public=public,
+        pipeline=pipeline,
+        monotonic_ms=lambda: 0,
+    )
+    assert code == 0
+
+
+def assert_every_expected_close_has_one_record(state: RuntimeStatePort, epoch_id: str) -> None:
+    processed = [
+        r.occurred_at_utc
+        for r in state.records(epoch_id, {RuntimeEventType.PAPER_BAR_PROCESSED})
+        if (r.symbol, r.interval) == ("BTCUSDT", "1h")
+    ]
+    gaps = [
+        datetime.fromisoformat(str(r.payload["expected_close_utc"]))
+        for r in state.records(epoch_id, {RuntimeEventType.PAPER_GAP})
+        if (r.symbol, r.interval) == ("BTCUSDT", "1h")
+    ]
+    accounted = sorted([*processed, *gaps])
+    assert accounted == list(SESSION_EXPECTED_CLOSES), (
+        "exactly one processed record or one gap record per expected close"
+    )
+
+
+def contract_full_session_accounts_for_every_close(live_rig: Live, make: StateFactory) -> None:
+    state = make()
+    run_session(live_rig, state)
+
+    assert_every_expected_close_has_one_record(state, live_rig.epoch.epoch_id)
+    reasons = {
+        str(r.payload["reason"])
+        for r in state.records(live_rig.epoch.epoch_id, {RuntimeEventType.PAPER_GAP})
+    }
+    assert reasons == {"PLANNED_RESTART"}
+
+
+def contract_replaying_the_session_inserts_nothing(live_rig: Live, make: StateFactory) -> None:
+    state = make()
+    run_session(live_rig, state)
+    epoch_id = live_rig.epoch.epoch_id
+    before = [runtime_event_id(r) for r in state.records(epoch_id)]
+
+    run_session(live_rig, state)  # the very same session again, on the same store
+
+    after = [runtime_event_id(r) for r in state.records(epoch_id)]
+    assert sorted(after) == sorted(before), "a replay inserts zero rows and raises no conflict"
+    assert_every_expected_close_has_one_record(state, epoch_id)
+
+
+def contract_ids_do_not_depend_on_the_wall_clock(
+    live_rig: Live, make_first: StateFactory, make_second: StateFactory
+) -> None:
+    first, second = make_first(), make_second()
+    run_session(live_rig, first, restart_at=RESTART)
+    run_session(live_rig, second, restart_at=RESTART + timedelta(seconds=37))
+
+    epoch_id = live_rig.epoch.epoch_id
+    assert bar_and_gap_ids(first, epoch_id) == bar_and_gap_ids(second, epoch_id)
+    assert bar_and_gap_ids(first, epoch_id), "the comparison is not vacuous"
+
+
+def test_a_full_session_accounts_for_every_close_in_memory(live: Live) -> None:
+    contract_full_session_accounts_for_every_close(live, InMemoryRuntimeState)
+
+
+def test_replaying_the_whole_session_inserts_nothing_in_memory(live: Live) -> None:
+    contract_replaying_the_session_inserts_nothing(live, InMemoryRuntimeState)
+
+
+def test_record_ids_do_not_depend_on_the_wall_clock_in_memory(live: Live) -> None:
+    contract_ids_do_not_depend_on_the_wall_clock(live, InMemoryRuntimeState, InMemoryRuntimeState)
