@@ -1,0 +1,18 @@
+# Timer for the external heartbeat ping (plan 16-50). The interval is the operator's value
+# (decisions/16-DEC-O-12.md), passed to `deploy/heartbeat.sh --install-timer --interval-seconds N`;
+# it has no default. The first ping comes one interval after boot and every following one an
+# interval after the previous run.
+# Catch-up (a persistent timer) and a randomised delay are absent on purpose: a ping sent after
+# downtime would hide the very outage the external monitor exists to report.
+[Unit]
+Description=Trading stack: external heartbeat ping timer
+
+[Timer]
+OnBootSec=@INTERVAL_SECONDS@s
+OnUnitActiveSec=@INTERVAL_SECONDS@s
+# STRUCTURAL (not a monitor value): the default accuracy lets a timer slip by up to a minute.
+AccuracySec=1s
+Unit=trading-heartbeat.service
+
+[Install]
+WantedBy=timers.target

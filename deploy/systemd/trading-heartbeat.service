@@ -1,0 +1,22 @@
+# External heartbeat ping for the collector (plan 16-50, D042 condition 1). Installed by
+# `deploy/heartbeat.sh --install-timer --interval-seconds N`, which substitutes the checkout
+# directory, the URL file path and the fail-ping flag for the tokens below.
+# One run probes the collector (read-only) and pings an external monitor only while the probe
+# passes; it never stops, restarts or otherwise touches the collector, and a failed ping only fails
+# this oneshot unit (`systemctl status trading-heartbeat`, `journalctl -u trading-heartbeat`).
+# The ping URL is a secret: it lives in a root-only file, and systemd hands this unit a private copy
+# of it as a credential, so the unprivileged operator account never needs to read the original.
+# There is deliberately no dependency, restart or failure link to any other unit. User must be the
+# operator account that is in the docker group (deploy/bootstrap.sh creates `trading`).
+[Unit]
+Description=Trading stack: external heartbeat ping for the collector
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=trading
+WorkingDirectory=@TRADING_DIR@
+LoadCredential=heartbeat-url:@URL_FILE@
+Environment=HEARTBEAT_FAIL_PING=@FAIL_PING@
+ExecStart=/usr/bin/env bash @TRADING_DIR@/deploy/heartbeat.sh

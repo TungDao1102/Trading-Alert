@@ -5,6 +5,14 @@ set -Eeuo pipefail
 # Usage:
 #   deploy/heartbeat.sh [--fail-ping] [--url-file PATH] [--dry-run]
 #                                  one run: probe the collector, then ping the external monitor
+#   deploy/heartbeat.sh --set-url [--url-file PATH] [--dry-run]
+#                                  (root) store the ping URL, read as one line from standard input
+#                                  without echo, in the root-only URL file (mode 0600)
+#   deploy/heartbeat.sh --install-timer --interval-seconds N [--fail-ping] [--url-file PATH]
+#                       [--dry-run]
+#                                  (root) install trading-heartbeat.service and
+#                                  trading-heartbeat.timer and enable the timer; N is the
+#                                  operator's ping interval in seconds and has no default
 #   deploy/heartbeat.sh -h | --help
 #
 # One run executes the collector probe (`python -m src.data.collector --healthcheck` inside the
@@ -42,14 +50,28 @@ DEFAULT_STEP_TIMEOUT_SECONDS=15
 # Allow-list for the ping URL: https only; letters, digits, dot, underscore, tilde, colon, slash and
 # hyphen. No userinfo, query, fragment, quote, backslash or whitespace can pass.
 URL_PATTERN='^https://[A-Za-z0-9][A-Za-z0-9._~:/-]*$'
+# Allow-list for a URL file path that is baked into a unit (no whitespace and no systemd
+# specifier characters such as the percent sign).
+UNIT_PATH_PATTERN='^/[A-Za-z0-9._/+=,~-]+$'
+
+TOKEN_DIR='@TRADING_DIR@'
+TOKEN_URL_FILE='@URL_FILE@'
+TOKEN_FAIL_PING='@FAIL_PING@'
+TOKEN_INTERVAL='@INTERVAL_SECONDS@'
+UNITS=(trading-heartbeat.service trading-heartbeat.timer)
+TIMER_UNIT=trading-heartbeat.timer
 
 FAIL_PING=0
+SET_URL=0
+INSTALL_TIMER=0
+INTERVAL_GIVEN=0
+INTERVAL=
 URL_FILE_FLAG=
 STEP_TIMEOUT=
 COMPOSE=()
 
 usage() {
-  sed -n '3,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '3,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
 usage_error() {
@@ -73,6 +95,14 @@ parse_args() {
         URL_FILE_FLAG=$2
         shift
         ;;
+      --set-url) SET_URL=1 ;;
+      --install-timer) INSTALL_TIMER=1 ;;
+      --interval-seconds)
+        (($# >= 2)) || usage_error "--interval-seconds needs a number of seconds"
+        INTERVAL_GIVEN=1
+        INTERVAL=$2
+        shift
+        ;;
       --dry-run) DRY_RUN=1 ;;
       -h | --help)
         usage
@@ -92,6 +122,33 @@ parse_args() {
   if [[ ! $STEP_TIMEOUT =~ ^[1-9][0-9]*$ ]]; then
     usage_error "HEARTBEAT_STEP_TIMEOUT_SECONDS must be a positive integer"
   fi
+  if ((SET_URL && INSTALL_TIMER)); then
+    usage_error "--set-url and --install-timer cannot be combined"
+  fi
+  if ((INTERVAL_GIVEN && !INSTALL_TIMER)); then
+    usage_error "--interval-seconds is only valid with --install-timer"
+  fi
+  if ((INSTALL_TIMER)); then
+    ((INTERVAL_GIVEN)) || usage_error "--install-timer needs --interval-seconds N (the operator's value; no default exists)"
+    [[ $INTERVAL =~ ^[1-9][0-9]*$ ]] || usage_error "--interval-seconds must be a positive integer"
+  fi
+  local candidate
+  for candidate in "$URL_FILE_FLAG" "${HEARTBEAT_URL_FILE:-}"; do
+    if [[ -n $candidate && ! $candidate =~ $UNIT_PATH_PATTERN ]]; then
+      usage_error "a URL file path must be absolute and hold only letters, digits and . _ / + = , ~ -"
+    fi
+  done
+}
+
+# url_file_path: the URL file path without the test prefix (the value a unit must carry).
+url_file_path() {
+  if [[ -n $URL_FILE_FLAG ]]; then
+    printf '%s' "$URL_FILE_FLAG"
+  elif [[ -n ${HEARTBEAT_URL_FILE:-} ]]; then
+    printf '%s' "$HEARTBEAT_URL_FILE"
+  else
+    printf '%s' "$DEFAULT_URL_FILE"
+  fi
 }
 
 # resolve_url_source: sets URL_SOURCE (a file path) and URL_IS_CREDENTIAL (1 for the systemd
@@ -101,12 +158,8 @@ resolve_url_source() {
   if [[ -n ${CREDENTIALS_DIRECTORY:-} && -e ${CREDENTIALS_DIRECTORY}/$CREDENTIAL_NAME ]]; then
     URL_SOURCE="${CREDENTIALS_DIRECTORY}/$CREDENTIAL_NAME"
     URL_IS_CREDENTIAL=1
-  elif [[ -n $URL_FILE_FLAG ]]; then
-    URL_SOURCE="$(p "$URL_FILE_FLAG")"
-  elif [[ -n ${HEARTBEAT_URL_FILE:-} ]]; then
-    URL_SOURCE="$(p "$HEARTBEAT_URL_FILE")"
   else
-    URL_SOURCE="$(p "$DEFAULT_URL_FILE")"
+    URL_SOURCE="$(p "$(url_file_path)")"
   fi
 }
 
@@ -165,14 +218,8 @@ deliver() {
   log "heartbeat: $1 ping delivered"
 }
 
-main() {
-  if [[ $- == *x* ]]; then
-    printf 'ERROR: refusing to run under xtrace: it would print the ping URL\n' >&2
-    exit 2
-  fi
-  parse_args "$@"
-  export DRY_RUN
-  cd "$REPO_ROOT"
+# run_once: probe the collector, then ping according to the verdict.
+run_once() {
   load_url
   compose_init
   if ((!DRY_RUN)); then
@@ -196,6 +243,96 @@ main() {
     log "heartbeat: collector probe failed; no ping sent"
   fi
   return 1
+}
+
+require_root() {
+  if [[ -z ${TRADING_ROOT_PREFIX:-} && ${EUID} -ne 0 ]]; then
+    die "$1 must run as root (sudo deploy/heartbeat.sh $1 ...)"
+  fi
+}
+
+# set_url: read one line from standard input without echo and store it, mode 0600. The value is
+# never printed; it is passed to write_if_changed as a shell argument, never to a command.
+set_url() {
+  require_root --set-url
+  local line="" path
+  path="$(p "$(url_file_path)")"
+  if [[ -t 0 ]]; then
+    printf 'Paste the ping URL (input is hidden): ' >&2
+  fi
+  IFS= read -rs line || [[ -n $line ]] || url_die "no ping URL was provided on standard input"
+  if [[ -t 0 ]]; then
+    printf '\n' >&2
+  fi
+  validate_url_text "$line" || url_die "the input is not exactly one https URL of allowed characters (content not shown)"
+  write_if_changed "$path" "$line" 0600
+  if ((DRY_RUN)); then
+    log "heartbeat: would store the ping URL in $path (value not shown)"
+    return 0
+  fi
+  chmod 0600 -- "$path"
+  if ((WROTE)); then
+    log "heartbeat: ping URL stored in $path (value not shown)"
+  else
+    log "heartbeat: ping URL in $path unchanged (value not shown)"
+  fi
+}
+
+# install_timer: write the two units with the operator's values and enable the timer.
+install_timer() {
+  require_root --install-timer
+  [[ $REPO_ROOT != *[[:space:]]* ]] || die "checkout path contains whitespace: $REPO_ROOT"
+  # a pattern replacement must not treat an ampersand in a path as the matched text
+  shopt -u patsub_replacement 2>/dev/null || true
+  local unit_url_file url_path unit_dir content changed=0 unit
+  unit_url_file="$(url_file_path)"
+  url_path="$(p "$unit_url_file")"
+  if [[ ! -f $url_path ]]; then
+    if ((DRY_RUN)); then
+      warn "no ping URL file at $url_path yet; run 'sudo deploy/heartbeat.sh --set-url' before the real install"
+    else
+      url_die "no ping URL file at $url_path; run 'sudo deploy/heartbeat.sh --set-url' first"
+    fi
+  fi
+  unit_dir="$(p /etc/systemd/system)"
+  for unit in "${UNITS[@]}"; do
+    [[ -f $SCRIPT_DIR/systemd/$unit ]] || die "missing unit template: deploy/systemd/$unit"
+    content="$(<"$SCRIPT_DIR/systemd/$unit")"
+    content="${content//"$TOKEN_DIR"/$REPO_ROOT}"
+    content="${content//"$TOKEN_URL_FILE"/$unit_url_file}"
+    content="${content//"$TOKEN_FAIL_PING"/$FAIL_PING}"
+    content="${content//"$TOKEN_INTERVAL"/$INTERVAL}"
+    write_if_changed "$unit_dir/$unit" "$content"
+    if ((WROTE)); then
+      changed=1
+    fi
+  done
+  if ((changed)); then
+    run systemctl daemon-reload
+  fi
+  run systemctl enable --now "$TIMER_UNIT"
+  if ((changed)); then
+    run systemctl restart "$TIMER_UNIT"
+  fi
+}
+
+main() {
+  if [[ $- == *x* ]]; then
+    printf 'ERROR: refusing to run under xtrace: it would print the ping URL\n' >&2
+    exit 2
+  fi
+  parse_args "$@"
+  export DRY_RUN
+  cd "$REPO_ROOT"
+  if ((SET_URL)); then
+    set_url
+    return 0
+  fi
+  if ((INSTALL_TIMER)); then
+    install_timer
+    return 0
+  fi
+  run_once
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
