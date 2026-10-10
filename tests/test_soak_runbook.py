@@ -9,12 +9,17 @@ acceptance file is machine-checked without ever printing a secret-looking value.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 from scripts import soak_host_acceptance as sha
+
+from tests.infra_helpers import find_bash, infra_skip
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNBOOK = REPO_ROOT / "docs" / "operations" / "RUNBOOK.md"
@@ -535,3 +540,128 @@ def test_20_1_lists_every_exit_code_and_the_hold_on_refusal_rule() -> None:
         "CRASH",
     ):
         assert phrase in body, f"20.1 lacks: {phrase}"
+
+
+# --------------------------------------------------------------------------- 16-33 task 3
+# Q-I decision (host-build-recorded): the soak image is built on the host at a recorded commit.
+
+
+DECISION_Q_I = REPO_ROOT / ".planning/phases/16-paper-runtime-composition/decisions/16-DEC-Q-I.md"
+SOAK_IMAGE_SCRIPT = REPO_ROOT / "deploy" / "soak-image.sh"
+
+
+def _git(repo: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", *args], cwd=repo, capture_output=True, text=True, check=True, timeout=60
+    )
+    return proc.stdout.strip()
+
+
+def _recipe_repo(tmp_path: Path) -> Path:
+    """A throwaway git repository holding copies of the deploy scripts, clean and committed."""
+    repo = tmp_path / "checkout"
+    (repo / "deploy").mkdir(parents=True)
+    for name in ("soak-image.sh", "lib.sh", "compose-soak.sh"):
+        source = REPO_ROOT / "deploy" / name
+        assert source.is_file(), f"deploy/{name} does not exist"
+        shutil.copyfile(source, repo / "deploy" / name)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "test")
+    _git(repo, "config", "core.autocrlf", "false")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    return repo
+
+
+def _run_recipe(repo: Path, state_dir: Path) -> subprocess.CompletedProcess[str]:
+    bash = find_bash()
+    if bash is None:
+        infra_skip("bash not found")
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in {"DRY_RUN", "IMAGE_TAG", "COMPOSE_PROJECT_NAME", "TRADING_ENV_FILE"}
+    }
+    env["DRY_RUN"] = "1"
+    env["TRADING_DEPLOY_STATE_DIR"] = state_dir.as_posix()
+    return subprocess.run(
+        [bash, (repo / "deploy" / "soak-image.sh").as_posix()],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env=env,
+    )
+
+
+def test_q_i_decision_is_recorded_by_the_user() -> None:
+    text = DECISION_Q_I.read_text(encoding="utf-8")
+    assert re.search(r"^option: host-build-recorded$", text, re.M)
+    assert re.search(r"^decided by: user$", text, re.M)
+    assert re.search(r"^date: \d{4}-\d{2}-\d{2}$", text, re.M)
+    assert re.search(r"^words: .+", text, re.M)
+
+
+def test_soak_image_dry_run_prints_the_commit_build_and_the_record(tmp_path: Path) -> None:
+    repo = _recipe_repo(tmp_path)
+    commit = _git(repo, "rev-parse", "HEAD")
+    proc = _run_recipe(repo, tmp_path / "state")
+    assert proc.returncode == 0, proc.stderr.strip()[:300]
+    out = proc.stdout
+    assert f"trading-alert:{commit}" in out
+    assert f"trading-alert-ops:{commit}" in out
+    assert "compose-soak.sh --profile ops build" in out
+    assert "soak-image.env" in out
+    assert f"GIT_SHA={commit}" in out
+    assert "APP_IMAGE_ID=" in out and "OPS_IMAGE_ID=" in out
+    assert not (tmp_path / "state").exists(), "a dry run must write nothing"
+
+
+def test_soak_image_refuses_a_modified_tracked_file(tmp_path: Path) -> None:
+    repo = _recipe_repo(tmp_path)
+    with (repo / "deploy" / "lib.sh").open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write("# local edit\n")
+    proc = _run_recipe(repo, tmp_path / "state")
+    assert proc.returncode != 0
+    assert "uncommitted" in proc.stderr
+    assert "+ " not in proc.stdout, "nothing may be announced as run on a dirty tree"
+
+
+def test_soak_image_refuses_an_untracked_file(tmp_path: Path) -> None:
+    repo = _recipe_repo(tmp_path)
+    (repo / "stray.py").write_text("x = 1\n", encoding="utf-8")
+    proc = _run_recipe(repo, tmp_path / "state")
+    assert proc.returncode != 0
+    assert "uncommitted" in proc.stderr
+
+
+def test_20_6_gives_the_recipe_commands_and_the_bind_mount_rule() -> None:
+    body = _sub20("20.6")
+    for phrase in (
+        "decisions/16-DEC-Q-I.md",
+        "host-build-recorded",
+        "deploy/soak-image.sh",
+        "soak-image.env",
+        "IMAGE_TAG",
+        "deploy/compose-soak.sh",
+        "never runs from a working-tree bind mount",
+        "refuses a dirty working tree",
+        "not automatic fallbacks",
+    ):
+        assert phrase in body, f"20.6 lacks: {phrase}"
+    assert (REPO_ROOT / "deploy" / "soak-image.sh").is_file()
+
+
+def test_20_6_requires_a_rebuild_after_the_allowlist_commit_and_relates_update_sh() -> None:
+    body = _sub20("20.6")
+    for phrase in (
+        "allowlist is a source constant",
+        "O-04",
+        "16-42",
+        "rebuilt after the allowlist commit",
+        "deploy/update.sh",
+        "last-good.env",
+    ):
+        assert phrase in body, f"20.6 lacks: {phrase}"
