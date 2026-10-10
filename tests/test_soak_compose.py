@@ -317,3 +317,196 @@ def test_soak_template_header_states_the_shared_env_file_and_the_refusal() -> No
     assert "even" in header and "empty" in header
     assert "TRADING_ENV_FILE" in header
     assert "names only" in header.lower()
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: the down -v guard of deploy/compose-soak.sh.
+# --------------------------------------------------------------------------- #
+
+REFUSAL_MESSAGE = "refused: down -v on the soak project"
+
+_DOWN_VOLUMES = [
+    ["down", "-v"],
+    ["down", "--volumes"],
+    ["down", "--remove-orphans", "-v"],
+    ["--profile", "paper", "down", "--volumes"],
+    ["-p", SOAK_PROJECT, "down", "-v"],
+    ["--project-name", SOAK_PROJECT, "down", "--volumes"],
+    ["--project-name=" + SOAK_PROJECT, "down", "-v"],
+]
+
+
+def _bash() -> str:
+    bash = find_bash()
+    if bash is None:
+        infra_skip("bash not found")
+    return bash
+
+
+def _wrapper_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    env = {
+        k: v
+        for k, v in _hermetic_env().items()
+        if k not in {"COMPOSE_PROJECT_NAME", "TRADING_ENV_FILE", "DRY_RUN"}
+    }
+    # DRY_RUN=1 always: even an unexpectedly allowed command would only be printed.
+    env["DRY_RUN"] = "1"
+    env.update(extra or {})
+    return env
+
+
+def _run_wrapper(
+    args: Sequence[str], extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    assert SOAK_WRAPPER.is_file(), "deploy/compose-soak.sh does not exist"
+    return subprocess.run(
+        [_bash(), SOAK_WRAPPER.as_posix(), *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        cwd=REPO_ROOT,
+        env=_wrapper_env(extra_env),
+    )
+
+
+def _run_predicate(args: Sequence[str]) -> int:
+    """Exit status of the guard predicate for `args` (0 = the arguments remove volumes)."""
+    assert SOAK_WRAPPER.is_file(), "deploy/compose-soak.sh does not exist"
+    proc = subprocess.run(
+        [
+            _bash(),
+            "-c",
+            'source "$1"; shift; soak_args_remove_volumes "$@"',
+            "soak",
+            SOAK_WRAPPER.as_posix(),
+            *args,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        cwd=REPO_ROOT,
+        env=_wrapper_env(),
+    )
+    assert proc.returncode in (0, 1), f"predicate failed to run: {proc.stderr.strip()[:200]}"
+    return proc.returncode
+
+
+@pytest.mark.parametrize("args", _DOWN_VOLUMES, ids=[" ".join(a) for a in _DOWN_VOLUMES])
+def test_wrapper_refuses_down_with_volumes(args: list[str]) -> None:
+    proc = _run_wrapper(args)
+    assert proc.returncode != 0
+    assert REFUSAL_MESSAGE in proc.stderr
+    assert "+ docker" not in proc.stdout, "a refused command must not be announced as run"
+
+
+def test_wrapper_refuses_down_with_volumes_when_the_project_comes_from_the_environment() -> None:
+    proc = _run_wrapper(["down", "-v"], {"COMPOSE_PROJECT_NAME": SOAK_PROJECT})
+    assert proc.returncode != 0
+    assert REFUSAL_MESSAGE in proc.stderr
+    proc = _run_wrapper(["down", "--volumes"], {"COMPOSE_PROJECT_NAME": SOAK_PROJECT})
+    assert proc.returncode != 0
+    assert REFUSAL_MESSAGE in proc.stderr
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["down"], ["ps"], ["up", "-d"], ["--profile", "paper", "up", "-d", "paper"], ["logs", "paper"]],
+    ids=lambda a: " ".join(a),
+)
+def test_wrapper_forwards_every_other_command_to_the_soak_project(args: list[str]) -> None:
+    proc = _run_wrapper(args)
+    assert proc.returncode == 0, proc.stderr.strip()[:300]
+    first = proc.stdout.splitlines()[0]
+    assert first == "+ docker compose -p trading-soak " + " ".join(args)
+
+
+def test_wrapper_refuses_another_project_name() -> None:
+    for args in (["-p", "trading", "ps"], ["--project-name", "trading", "ps"]):
+        proc = _run_wrapper(args)
+        assert proc.returncode != 0
+        assert SOAK_PROJECT in proc.stderr
+        assert "+ docker" not in proc.stdout
+
+
+def test_wrapper_pins_the_project_even_when_the_environment_names_another() -> None:
+    proc = _run_wrapper(["ps"], {"COMPOSE_PROJECT_NAME": "trading"})
+    assert proc.returncode == 0, proc.stderr.strip()[:300]
+    assert proc.stdout.splitlines()[0] == "+ docker compose -p trading-soak ps"
+
+
+def test_guard_predicate_negative_control() -> None:
+    assert _run_predicate(["down", "-v"]) == 0
+    assert _run_predicate(["down", "--volumes"]) == 0
+    assert _run_predicate(["down"]) == 1
+    assert _run_predicate(["up", "-d"]) == 1
+    assert _run_predicate(["down", "--remove-orphans"]) == 1
+
+
+_COMPOSE_DOWN_VOLUMES = re.compile(
+    r"\bdocker(?:\s+|-)compose\b.*\bdown\b(?=.*(?:\s-[A-Za-z]*v[A-Za-z]*(?:\s|$)|\s--volumes\b))"
+)
+
+
+def unguarded_down_volumes(lines: Sequence[str]) -> list[str]:
+    """Command lines that run `docker compose ... down` with volume removal.
+
+    A call through `deploy/compose-soak.sh` never matches (the wrapper refuses it), comment
+    lines and the wrapper's own `die` message are prose, not invocations.
+    """
+    found: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(("#", "die ", "printf ")):
+            continue
+        if _COMPOSE_DOWN_VOLUMES.search(stripped):
+            found.append(stripped)
+    return found
+
+
+def fenced_code_lines(markdown: str) -> list[str]:
+    """The lines inside fenced code blocks of a markdown text (prose is excluded)."""
+    inside = False
+    collected: list[str] = []
+    for line in markdown.splitlines():
+        if line.lstrip().startswith("```"):
+            inside = not inside
+            continue
+        if inside:
+            collected.append(line)
+    return collected
+
+
+def test_scan_negative_control_finds_seeded_unguarded_commands() -> None:
+    seeded = [
+        "docker compose -p trading-soak down -v",
+        "COMPOSE_PROJECT_NAME=trading-soak docker compose down --volumes",
+        "docker compose --profile paper down --remove-orphans -v",
+        "docker-compose -p trading-soak down -v",
+    ]
+    assert unguarded_down_volumes(seeded) == seeded
+    harmless = [
+        "docker compose -p trading-soak down",
+        "deploy/compose-soak.sh down",
+        "deploy/compose-soak.sh down -v",
+        "# docker compose down -v is never run on the soak project",
+        "docker compose up -d --remove-orphans",
+    ]
+    assert unguarded_down_volumes(harmless) == []
+    markdown = "Never run docker compose down -v here.\n\n```bash\ndocker compose down -v\n```\n"
+    assert unguarded_down_volumes(fenced_code_lines(markdown)) == ["docker compose down -v"]
+    assert unguarded_down_volumes(fenced_code_lines("Never run docker compose down -v.")) == []
+
+
+def test_runbook_and_deploy_scripts_hold_no_unguarded_down_with_volumes() -> None:
+    assert SOAK_WRAPPER.is_file(), "deploy/compose-soak.sh does not exist"
+    found: dict[str, list[str]] = {}
+    runbook = unguarded_down_volumes(fenced_code_lines(RUNBOOK.read_text(encoding="utf-8")))
+    if runbook:
+        found[RUNBOOK.name] = runbook
+    for script in sorted(DEPLOY_DIR.glob("*.sh")):
+        hits = unguarded_down_volumes(script.read_text(encoding="utf-8").splitlines())
+        if hits:
+            found[script.name] = hits
+    assert found == {}
