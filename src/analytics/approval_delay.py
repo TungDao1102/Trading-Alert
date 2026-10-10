@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 
-from src.analytics.lifecycle import LifecyclePath, LifecycleRecord
+from src.analytics.lifecycle import LifecyclePath, LifecycleRecord, paper_delay_is_synthetic
 from src.analytics.stats import (
     dist_stat,
     estimate_mean,
@@ -405,7 +405,9 @@ def build_approval_delay(
         for r in ordered
         if r.path is LifecyclePath.OPPORTUNITY
     ]
-    is_paper = evidence is EvidenceKind.PAPER
+    # D-15 / P15: the synthetic-lag label stays for paper records with no human action only;
+    # a section whose user-executed approvals were all measured carries no such label.
+    is_paper = evidence is EvidenceKind.PAPER and paper_delay_is_synthetic(ordered)
     buckets: tuple[DelayBucketRow, ...] = ()
     measured_delay: DistStat | None = None
     delay_incomplete: tuple[tuple[str, int], ...] = ()

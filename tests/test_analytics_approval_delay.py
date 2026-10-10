@@ -23,6 +23,7 @@ from src.analytics.approval_delay import (
     build_approval_delay,
     delay_bucket_for,
 )
+from src.analytics.latency import build_execution_quality
 from src.analytics.lifecycle import LifecyclePath, LifecycleRecord
 from src.analytics.types import AnalyticsInputError, EvidenceKind
 from src.domain.enums import ApprovalResult
@@ -412,3 +413,70 @@ def test_paper_constant_is_unchanged() -> None:
     assert APPROVAL_DELAY_LAG_SECONDS == 30
     text = PAPER_ATTRIBUTION_SRC.read_text(encoding="utf-8")
     assert "APPROVAL_DELAY_LAG_SECONDS: int = 30" in text
+
+
+# --------------------------------------------------------------------------- #
+# Plan 16-36 Task 2: a measured delay is never labelled SYNTHETIC LAG (D-15, P15)
+# --------------------------------------------------------------------------- #
+
+
+def _paper_user_record(signal: str, *, synthetic_lag: bool) -> LifecycleRecord:
+    return make_lifecycle_record(
+        evidence=EvidenceKind.PAPER,
+        source_id=signal,
+        signal_id=signal,
+        path=LifecyclePath.USER_EXECUTED,
+        approval_result=ApprovalResult.APPROVED,
+        signal_detected_at_utc="2026-02-02T08:00:00+00:00",
+        approved_at_utc="2026-02-02T08:00:50+00:00",
+        synthetic_lag=synthetic_lag,
+    )
+
+
+def _paper_delay(records: list[LifecycleRecord]) -> ApprovalDelaySection:
+    return build_approval_delay(
+        records,
+        evidence=EvidenceKind.PAPER,
+        realized_r_by_signal={},
+        hypothetical_r_by_signal={},
+        base_seed=SEED,
+        resamples=RESAMPLES,
+    )
+
+
+def test_measured_paper_delays_carry_no_synthetic_lag_label() -> None:
+    section = _paper_delay([_paper_user_record("SIG-M", synthetic_lag=False)])
+    assert section.synthetic_lag_label is None
+    assert section.synthetic_lag_seconds is None
+    assert section.user_execution.n_signals == 1
+
+
+def test_a_synthetic_user_record_keeps_the_label() -> None:
+    section = _paper_delay([_paper_user_record("SIG-S", synthetic_lag=True)])
+    assert section.synthetic_lag_label == SYNTHETIC_LAG_LABEL
+    assert section.synthetic_lag_seconds == APPROVAL_DELAY_LAG_SECONDS
+
+
+def test_a_mixed_section_keeps_the_label_for_its_synthetic_records() -> None:
+    section = _paper_delay(
+        [
+            _paper_user_record("SIG-M", synthetic_lag=False),
+            _paper_user_record("SIG-S", synthetic_lag=True),
+        ]
+    )
+    assert section.synthetic_lag_label == SYNTHETIC_LAG_LABEL
+
+
+def test_a_paper_section_without_a_user_executed_record_keeps_the_label() -> None:
+    assert _paper_delay([]).synthetic_lag_label == SYNTHETIC_LAG_LABEL
+
+
+def test_the_execution_quality_section_follows_the_same_rule() -> None:
+    measured = build_execution_quality(
+        [_paper_user_record("SIG-M", synthetic_lag=False)], evidence=EvidenceKind.PAPER
+    )
+    synthetic = build_execution_quality(
+        [_paper_user_record("SIG-S", synthetic_lag=True)], evidence=EvidenceKind.PAPER
+    )
+    assert measured.synthetic_lag_seconds is None
+    assert synthetic.synthetic_lag_seconds == APPROVAL_DELAY_LAG_SECONDS

@@ -14,6 +14,7 @@ from src.analytics.lifecycle import (
     LifecyclePath,
     LifecycleRecord,
     LiveLifecycleResult,
+    exclude_test_only,
     normalize_backtest_lifecycle,
     normalize_live_lifecycle,
     normalize_paper_lifecycle,
@@ -160,6 +161,83 @@ def test_paper_duplicate_attribution_fails_closed() -> None:
     rows = [make_paper_record(row) for row in data["records"]]
     with pytest.raises(AnalyticsInputError):
         normalize_paper_lifecycle([*rows, rows[0]])
+
+
+# --------------------------------------------------------------------------- #
+# Plan 16-36 Task 2: measured delay labels and test_only exclusion (D-15, D-18, REV-03)
+# --------------------------------------------------------------------------- #
+
+
+def _paper_rows() -> list[Any]:
+    return [make_paper_record(row) for row in load_input("paper_lifecycle")["records"]]
+
+
+def _as_shadow_human(rows: list[Any]) -> list[Any]:
+    """The user-executed-sim row of SIG-A carries a measured approval request time."""
+    out: list[Any] = []
+    for row in rows:
+        if row.attribution.value == "user-executed-sim":
+            row = replace(
+                row,
+                mode="SHADOW",
+                approval_requested_at_utc=parse_utc("2026-02-02T08:00:03+00:00"),
+                approval_acted_at_utc=parse_utc("2026-02-02T08:00:50+00:00"),
+                order_submitted_at_utc=parse_utc("2026-02-02T08:01:20+00:00"),
+                fill_time_utc=parse_utc("2026-02-02T08:07:31+00:00"),
+                confirm_requested_at_utc=parse_utc("2026-02-02T08:00:51+00:00"),
+                confirmed_at_utc=parse_utc("2026-02-02T08:01:10+00:00"),
+            )
+        out.append(row)
+    return out
+
+
+def test_a_user_executed_row_with_a_measured_approval_is_not_synthetic_lag() -> None:
+    lifecycle = normalize_paper_lifecycle(_as_shadow_human(_paper_rows()))
+    sig_a = next(r for r in lifecycle if r.signal_id == "SIG-A")
+    assert sig_a.path is LifecyclePath.USER_EXECUTED
+    assert sig_a.synthetic_lag is False
+    assert sig_a.approved_at_utc == parse_utc("2026-02-02T08:00:50+00:00")
+    # The approval request time is the delivery-request proxy, as it is for LIVE evidence.
+    assert sig_a.delivery_requested_at_utc == parse_utc("2026-02-02T08:00:03+00:00")
+    assert seconds_between(sig_a.signal_detected_at_utc, sig_a.approved_at_utc) == D("50")
+
+
+def test_a_user_executed_row_without_a_human_action_keeps_the_synthetic_lag() -> None:
+    lifecycle = normalize_paper_lifecycle(_paper_rows())
+    sig_a = next(r for r in lifecycle if r.signal_id == "SIG-A")
+    assert sig_a.path is LifecyclePath.USER_EXECUTED
+    assert sig_a.synthetic_lag is True
+    assert sig_a.delivery_requested_at_utc is None
+    # A SHADOW record with no human action (the SIMULATE leg) is still synthetic.
+    simulated = [
+        replace(row, mode="SHADOW") if row.attribution.value == "user-executed-sim" else row
+        for row in _paper_rows()
+    ]
+    again = next(r for r in normalize_paper_lifecycle(simulated) if r.signal_id == "SIG-A")
+    assert again.synthetic_lag is True
+
+
+def _with_test_only(rows: list[Any]) -> list[Any]:
+    rehearsal = [
+        replace(row, signal_id=f"{row.signal_id}-T", mode="SHADOW", test_only=True)
+        for row in rows
+        if row.signal_id is not None
+    ]
+    return [*rows, *rehearsal]
+
+
+def test_exclude_test_only_drops_the_rehearsal_rows_and_counts_them() -> None:
+    rows = _paper_rows()
+    mixed = _with_test_only(rows)
+    kept, excluded = exclude_test_only(mixed)
+    assert kept == tuple(rows)
+    assert excluded == len(mixed) - len(rows) > 0
+    assert exclude_test_only(rows) == (tuple(rows), 0)
+
+
+def test_the_paper_normalizer_never_sees_a_test_only_row() -> None:
+    rows = _paper_rows()
+    assert normalize_paper_lifecycle(_with_test_only(rows)) == normalize_paper_lifecycle(rows)
 
 
 # --------------------------------------------------------------------------- #

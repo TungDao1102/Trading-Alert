@@ -79,6 +79,7 @@ from src.analytics.killgate_guard import (
     require_report_conclusion_allowed,
 )
 from src.analytics.lifecycle import (
+    exclude_test_only,
     normalize_backtest_lifecycle,
     normalize_live_lifecycle,
     normalize_paper_lifecycle,
@@ -118,7 +119,7 @@ from src.domain.registry import (
     StrategyKeyOutsideRegistry,
     UnregisteredParameterSet,
 )
-from src.paper.journal import PaperRecord
+from src.paper.journal import SHADOW_MODE, PaperRecord
 
 __all__ = ["CliArgs", "main", "parse_args"]
 
@@ -340,12 +341,17 @@ def _backtest_inputs(
     )
 
 
-def _paper_inputs(records: Sequence[PaperRecord]) -> EvidenceInputs:
+def _paper_inputs(all_records: Sequence[PaperRecord]) -> EvidenceInputs:
+    # REV-03 (D063 item 3): rehearsal rows are dropped once, here, so the lifecycle, the
+    # NO_TRADE counts and the epoch provenance all see the same rows; the number is reported.
+    records, excluded = exclude_test_only(all_records)
     return EvidenceInputs(
         kind=EvidenceKind.PAPER,
         lifecycle=normalize_paper_lifecycle(records),
         no_trades=tuple(no_trade_from_paper(records)),
         paper_epoch_ids=tuple(sorted({record.epoch_id for record in records})),
+        shadow_records=sum(1 for record in records if record.mode == SHADOW_MODE),
+        test_only_excluded=excluded,
     )
 
 
