@@ -86,6 +86,7 @@ class Harness:
         mark: Decimal | None = MARK,
         recheck: Recheck | None = None,
         stores: Any = None,
+        reservations: Any = None,
     ) -> None:
         self.trace: list[str] = []
         self.stores = InMemoryShadowStores(self.trace) if stores is None else stores
@@ -102,6 +103,7 @@ class Harness:
             mark_price=lambda symbol: self.mark,
             recheck=recheck,
             on_confirmed=lambda a, p, t: self.confirmed.append((a, p, t)),
+            reservations=reservations,
             **kwargs,
         )
         self.callbacks = make_confirm_callbacks(
