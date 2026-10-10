@@ -147,7 +147,11 @@ class Rig:
         return path
 
     def run(
-        self, *args: str, env: dict[str, str] | None = None, script: str = "heartbeat.sh"
+        self,
+        *args: str,
+        env: dict[str, str] | None = None,
+        script: str = "heartbeat.sh",
+        stdin: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         full_env = dict(os.environ)
         for name in SCRUBBED_VARS:
@@ -161,13 +165,20 @@ class Rig:
             }
         )
         full_env.update(env or {})
-        return subprocess.run(
+        raw = subprocess.run(
             [self.bash, (self.base / "driver.sh").as_posix(), (DEPLOY / script).as_posix(), *args],
             capture_output=True,
-            text=True,
             env=full_env,
             check=False,
             timeout=120,
+            # bytes in, bytes out: text mode would turn the newline of the piped URL into CRLF
+            input=(stdin or "").encode("utf-8"),
+        )
+        return subprocess.CompletedProcess(
+            raw.args,
+            raw.returncode,
+            raw.stdout.decode("utf-8", errors="replace"),
+            raw.stderr.decode("utf-8", errors="replace"),
         )
 
 
@@ -479,3 +490,272 @@ def test_the_real_curl_accepts_the_option_set_and_reports_a_refused_connection(
     assert "curl exit 7" in proc.stderr, proc.stderr
     for blob in (proc.stdout, proc.stderr, "\n".join(made.lines())):
         assert TOKEN not in blob and "127.0.0.1" not in blob
+
+
+# === Task 2: secret storage, timer installation and the unit templates ============================
+
+SERVICE = "trading-heartbeat.service"
+TIMER = "trading-heartbeat.timer"
+INTERVAL = "123"  # an arbitrary test value, not a recommendation
+
+
+def _unit_dir(made: Rig) -> Path:
+    return made.prefix / "etc" / "systemd" / "system"
+
+
+def _systemctl(made: Rig) -> list[str]:
+    return [ln for ln in made.lines() if ln.startswith("systemctl ")]
+
+
+def _checkout_as_bash_sees_it(made: Rig) -> str:
+    out = subprocess.run(
+        [made.bash, "-c", 'cd "$1" && pwd', "_", REPO_ROOT.as_posix()],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.stdout.strip()
+
+
+def _directive_lines(text: str) -> list[str]:
+    return [ln.strip() for ln in _strip_comments(text).splitlines() if ln.strip()]
+
+
+# --- --set-url -----------------------------------------------------------------------------------
+
+
+def test_set_url_stores_the_line_from_stdin_with_mode_0600_and_never_shows_it(rig: Rig) -> None:
+    rig.url_path.unlink()
+    proc = rig.run("--set-url", stdin=SENTINEL_URL + "\n")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert rig.url_path.read_text(encoding="utf-8").strip() == SENTINEL_URL
+    assert f"+ write {rig.url_path.as_posix()}" in proc.stdout
+    assert "stored" in proc.stderr and "not shown" in proc.stderr
+    assert rig.lines() == []
+    assert_no_secret(proc, rig)
+    if _posix_modes():
+        assert rig.url_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_set_url_twice_with_the_same_value_writes_nothing_the_second_time(rig: Rig) -> None:
+    rig.url_path.unlink()
+    assert rig.run("--set-url", stdin=SENTINEL_URL + "\n").returncode == 0
+    again = rig.run("--set-url", stdin=SENTINEL_URL + "\n")
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert "+ write " not in again.stdout
+    assert_no_secret(again, rig)
+
+
+def test_set_url_honours_the_url_file_flag(rig: Rig) -> None:
+    proc = rig.run("--set-url", "--url-file", "/etc/trading/custom.url", stdin=OTHER_URL + "\n")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    custom = rig.prefix / "etc" / "trading" / "custom.url"
+    assert custom.read_text(encoding="utf-8").strip() == OTHER_URL
+    assert rig.url_path.read_text(encoding="utf-8").strip() == SENTINEL_URL  # untouched
+
+
+@pytest.mark.parametrize("name", ["http-scheme", "query", "empty", "crlf"])
+def test_set_url_refuses_invalid_input_and_writes_nothing(rig: Rig, name: str) -> None:
+    rig.url_path.unlink()
+    proc = rig.run("--set-url", stdin=INVALID_CONTENT[name])
+    assert proc.returncode == 4, proc.stdout + proc.stderr
+    assert not rig.url_path.exists()
+    assert_no_secret(proc, rig)
+
+
+def test_set_url_dry_run_writes_nothing(rig: Rig) -> None:
+    rig.url_path.unlink()
+    proc = rig.run("--set-url", "--dry-run", stdin=SENTINEL_URL + "\n")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not rig.url_path.exists()
+    assert "+ write " in proc.stdout
+    assert_no_secret(proc, rig)
+
+
+# --- no default interval -------------------------------------------------------------------------
+
+
+def _install(*extra: str) -> list[str]:
+    return ["--install-timer", "--interval-seconds", INTERVAL, *extra]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--install-timer"],
+        ["--install-timer", "--interval-seconds", "0"],
+        ["--install-timer", "--interval-seconds", "-1"],
+        ["--install-timer", "--interval-seconds", "1.5"],
+        ["--install-timer", "--interval-seconds", "abc"],
+        ["--install-timer", "--interval-seconds", ""],
+        ["--install-timer", "--interval-seconds"],
+        ["--interval-seconds", INTERVAL],
+        ["--set-url", "--install-timer", "--interval-seconds", INTERVAL],
+        _install("--url-file", "relative/heartbeat.url"),
+        _install("--url-file", "/etc/tr ading/x.url"),
+        _install("--url-file", "/etc/tr%ading/x.url"),
+        _install("--url-file", "/etc/tr@ding/x.url"),
+    ],
+)
+def test_install_timer_without_a_valid_operator_interval_is_a_usage_error(
+    rig: Rig, args: list[str]
+) -> None:
+    proc = rig.run(*args, stdin=SENTINEL_URL + "\n")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert rig.lines() == []
+    assert not (rig.prefix / "etc" / "systemd").exists()
+
+
+# --- --install-timer -----------------------------------------------------------------------------
+
+
+def test_install_timer_writes_both_units_and_enables_the_timer(rig: Rig) -> None:
+    proc = rig.run(*_install())
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    service = (_unit_dir(rig) / SERVICE).read_text(encoding="utf-8")
+    timer = (_unit_dir(rig) / TIMER).read_text(encoding="utf-8")
+    checkout = _checkout_as_bash_sees_it(rig)
+    for text in (service, timer):
+        assert "@" not in text.replace("@@", ""), "a substitution token was left behind"
+    lines = service.splitlines()
+    assert f"WorkingDirectory={checkout}" in lines
+    assert f"ExecStart=/usr/bin/env bash {checkout}/deploy/heartbeat.sh" in lines
+    assert "LoadCredential=heartbeat-url:/etc/trading/heartbeat.url" in lines
+    assert "Environment=HEARTBEAT_FAIL_PING=0" in lines
+    assert f"OnBootSec={INTERVAL}s" in timer.splitlines()
+    assert f"OnUnitActiveSec={INTERVAL}s" in timer.splitlines()
+    assert _systemctl(rig) == [
+        "systemctl daemon-reload",
+        f"systemctl enable --now {TIMER}",
+        f"systemctl restart {TIMER}",
+    ]
+    assert rig.docker_lines() == [] and rig.curl_lines() == []
+
+
+def test_install_timer_with_fail_ping_and_a_custom_url_file_bakes_both_into_the_service(
+    rig: Rig,
+) -> None:
+    custom = _write(rig.prefix / "opt" / "secrets" / "hb.url", SENTINEL_URL + "\n")
+    if _posix_modes():
+        custom.chmod(0o600)
+    proc = rig.run(*_install("--fail-ping", "--url-file", "/opt/secrets/hb.url"))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    service = (_unit_dir(rig) / SERVICE).read_text(encoding="utf-8").splitlines()
+    assert "Environment=HEARTBEAT_FAIL_PING=1" in service
+    assert "LoadCredential=heartbeat-url:/opt/secrets/hb.url" in service
+
+
+def test_a_second_identical_install_writes_nothing_but_still_enables_the_timer(rig: Rig) -> None:
+    assert rig.run(*_install()).returncode == 0
+    before = len(rig.lines())
+    second = rig.run(*_install())
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert "+ write " not in second.stdout
+    assert rig.lines()[before:] == [f"systemctl enable --now {TIMER}"]
+
+
+def test_a_different_interval_rewrites_the_timer_and_restarts_it(rig: Rig) -> None:
+    assert rig.run(*_install()).returncode == 0
+    before = len(rig.lines())
+    proc = rig.run("--install-timer", "--interval-seconds", "456")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.count("+ write ") == 1
+    assert "OnBootSec=456s" in (_unit_dir(rig) / TIMER).read_text(encoding="utf-8")
+    assert rig.lines()[before:] == [
+        "systemctl daemon-reload",
+        f"systemctl enable --now {TIMER}",
+        f"systemctl restart {TIMER}",
+    ]
+
+
+def test_install_timer_dry_run_changes_nothing_and_announces_the_writes(rig: Rig) -> None:
+    proc = rig.run(*_install("--dry-run"))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not (rig.prefix / "etc" / "systemd").exists()
+    assert rig.lines() == []
+    assert proc.stdout.count("+ write ") == 2
+
+
+def test_install_timer_needs_the_url_file_first_but_a_dry_run_only_warns(rig: Rig) -> None:
+    rig.url_path.unlink()
+    real = rig.run(*_install())
+    assert real.returncode != 0, real.stdout + real.stderr
+    assert "--set-url" in real.stderr
+    assert not (rig.prefix / "etc" / "systemd").exists()
+    assert rig.lines() == []
+    dry = rig.run(*_install("--dry-run"))
+    assert dry.returncode == 0, dry.stdout + dry.stderr
+    assert "--set-url" in dry.stderr
+
+
+# --- the unit templates --------------------------------------------------------------------------
+
+LINK_DIRECTIVE = re.compile(
+    r"^(Requires|Requisite|BindsTo|PartOf|Conflicts|Restart|OnFailure|OnSuccess|Upholds)\w*\s*=",
+    re.IGNORECASE,
+)
+
+
+def test_the_service_is_a_oneshot_with_no_link_to_the_collector() -> None:
+    lines = _directive_lines((UNITS / SERVICE).read_text(encoding="utf-8"))
+    assert "Type=oneshot" in lines and "User=trading" in lines
+    assert "Wants=network-online.target" in lines
+    after = [ln for ln in lines if ln.startswith("After=")]
+    assert after and "network-online.target" in after[0] and "docker.service" in after[0]
+    assert [ln for ln in lines if LINK_DIRECTIVE.match(ln)] == []
+    assert "WorkingDirectory=@TRADING_DIR@" in lines
+    assert "LoadCredential=heartbeat-url:@URL_FILE@" in lines
+    assert "ExecStart=/usr/bin/env bash @TRADING_DIR@/deploy/heartbeat.sh" in lines
+
+
+def test_the_timer_has_no_catch_up_no_random_delay_and_a_tokenised_interval() -> None:
+    text = (UNITS / TIMER).read_text(encoding="utf-8")
+    lines = _directive_lines(text)
+    assert [
+        ln for ln in lines if re.match(r"^(Persistent|RandomizedDelaySec|OnCalendar)", ln)
+    ] == []
+    assert "OnBootSec=@INTERVAL_SECONDS@s" in lines
+    assert "OnUnitActiveSec=@INTERVAL_SECONDS@s" in lines
+    assert f"Unit={SERVICE}" in lines and "WantedBy=timers.target" in lines
+    raw = text.splitlines()
+    idx = next(i for i, ln in enumerate(raw) if ln.startswith("AccuracySec="))
+    assert "STRUCTURAL" in raw[idx - 1] or "STRUCTURAL" in raw[idx]
+
+
+def test_neither_the_units_nor_the_script_hold_a_url_or_a_monitor_host_name() -> None:
+    script = _strip_comments((DEPLOY / "heartbeat.sh").read_text(encoding="utf-8"))
+    literal = [ln for ln in script.splitlines() if "https://" in ln or "http://" in ln]
+    assert len(literal) == 1 and literal[0].startswith("URL_PATTERN="), literal
+    for path in (DEPLOY / "heartbeat.sh", UNITS / SERVICE, UNITS / TIMER):
+        text = path.read_text(encoding="utf-8").lower()
+        for banned in ("hc-ping", "healthchecks.io", "uuid"):
+            assert banned not in text, f"{path.name} names {banned!r}"
+    for path in (UNITS / SERVICE, UNITS / TIMER):
+        assert "://" not in path.read_text(encoding="utf-8")
+
+
+def test_the_heartbeat_units_do_not_collide_with_the_backup_units() -> None:
+    assert (UNITS / "trading-backup.service").exists() and (UNITS / "trading-backup.timer").exists()
+    for name in (SERVICE, TIMER):
+        assert (UNITS / name).exists()
+        assert "trading-backup" not in (UNITS / name).read_text(encoding="utf-8")
+
+
+# --- the secret survives the whole path ----------------------------------------------------------
+
+
+def test_the_url_is_in_no_unit_file_and_no_output_across_set_url_install_and_run(
+    rig: Rig,
+) -> None:
+    rig.url_path.unlink()
+    steps = [
+        rig.run("--set-url", stdin=SENTINEL_URL + "\n"),
+        rig.run(*_install()),
+        rig.run(),
+    ]
+    for proc in steps:
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert_no_secret(proc, rig)
+    for unit in (SERVICE, TIMER):
+        text = (_unit_dir(rig) / unit).read_text(encoding="utf-8")
+        assert not any(marker in text for marker in SECRET_MARKERS)
