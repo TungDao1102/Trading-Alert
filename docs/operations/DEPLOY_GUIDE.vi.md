@@ -102,7 +102,7 @@ Nguồn: `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`, `deploy/lib.sh`, `do
 | `deploy/bootstrap.sh`, `update.sh`, `migrate.sh`, `backup.sh`, `restore.sh`, `backup-drill.sh`, `refresh-pins.sh` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` | Có kiểm thử với đồ giả; chưa script nào chạy trên máy thật (RUNBOOK 17) |
 | Collector và chuỗi sao lưu | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` | Cổng D064 (bằng chứng trên S3 thật) vẫn mở, xem mục 6 |
 | Paper runtime và SHADOW | một phần: 14 trong 50 kế hoạch của Phase 16 | Mục 7 |
-| Bộ gửi heartbeat ra ngoài VPS (tới healthchecks.io) | `[CHƯA XÂY]` | Kế hoạch 16-50 "Off-host heartbeat sender"; chưa có code; mục 8.3 |
+| Bộ gửi heartbeat ra ngoài VPS (tới healthchecks.io) | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` | Kế hoạch 16-50 "Off-host heartbeat sender": script `deploy/heartbeat.sh` và hai unit đã có, kiểm thử bằng đồ giả; chưa cài và chưa chạy trên máy thật, vì chu kỳ và thời gian ân hạn chưa được bạn chọn; mục 8.3 |
 | Live runtime | `[CHƯA XÂY]` | Service `live` trong compose chỉ là khung báo lỗi, đến Phase 24 |
 
 ### Mốc thời gian đã quyết định
@@ -145,7 +145,7 @@ Quyết định `16-DEC-O-12` được bạn ghi ngày 2026-10-09 với lựa ch
 | Dung lượng ổ EBS | `[QUYẾT ĐỊNH CỦA BẠN]` |
 | Số tiền cảnh báo ngân sách và địa chỉ nhận cảnh báo | `[QUYẾT ĐỊNH CỦA BẠN]` |
 | Vòng đời và thời hạn lưu của S3 | `[QUYẾT ĐỊNH CỦA BẠN]` |
-| Dịch vụ heartbeat bên ngoài | healthchecks.io, bạn chọn ngày 2026-10-09 (việc ghi vào tệp `16-DEC-O-12` do agent lập kế hoạch làm; bản tệp đó mà hướng dẫn này đọc ngày 2026-10-09 chưa có dòng này) |
+| Dịch vụ heartbeat bên ngoài | healthchecks.io, bạn chọn ngày 2026-10-09 (đã ghi vào tệp `16-DEC-O-12` bởi kế hoạch 16-50 với dòng `heartbeat_service`) |
 | Chu kỳ và thời gian ân hạn (grace period) của heartbeat | `[QUYẾT ĐỊNH CỦA BẠN]` |
 
 Hậu quả của việc hoãn các giá trị còn thiếu: kế hoạch 16-20 (tạo máy EC2 và chuyển collector) bị chặn cho tới khi bạn ghi các giá trị này, và trong lúc đó collector vẫn ở máy cũ, mọi khoảng trống Open Interest được ghi là khoảng trống bao phủ (D059 mục 4). Theo kế hoạch 16-14, cách ghi lại giá trị là bạn trả lời bằng lựa chọn "values" kèm từng con số theo đúng lời bạn viết; agent ghi vào hồ sơ quyết định. Đừng tự sửa tay tệp quyết định và đừng nhờ ai đề xuất con số hộ bạn.
@@ -333,7 +333,7 @@ Có 16 điều kiện, mỗi điều kiện một mã. Chạy lệnh, chép kế
 | `S3_BUCKET_PRIVATE` | `[MÁY CÓ MẠNG]` | sau khi tạo bucket | `aws s3api get-public-access-block --bucket <backup bucket>` | cả bốn thiết lập chặn đều `true`; không có chính sách hay ACL cho phép công khai | `[CHƯA XÁC MINH]` |
 | `S3_DEFAULT_ENCRYPTION` | `[MÁY CÓ MẠNG]` | sau khi tạo bucket | `aws s3api get-bucket-encryption --bucket <backup bucket>` | có một quy tắc mã hóa mặc định (SSE-S3 là mặc định của mọi bucket); không cần SSE-KMS vì chuỗi sao lưu đã mã hóa ở máy | `[CHƯA XÁC MINH]` |
 | `S3_VERSIONING` | `[MÁY CÓ MẠNG]` | sau khi tạo bucket | `aws s3api get-bucket-versioning --bucket <backup bucket>` | kết quả có `"Status": "Enabled"` | `[CHƯA XÁC MINH]` |
-| `HEARTBEAT_MONITOR_ALERT_RECEIVED` | `[MÁY EC2]` | sau cutover (collector đã chạy trên EC2) | trong `/opt/trading`: `docker compose stop collector`, chờ lâu hơn chu kỳ cộng thời gian ân hạn đã đặt ở healthchecks.io (hai giá trị đó là `[QUYẾT ĐỊNH CỦA BẠN]`), rồi `docker compose start collector` | một cảnh báo từ dịch vụ bên ngoài đã tới bạn khi collector dừng, và một thông báo phục hồi theo sau khi khởi động lại; ghi cả hai giờ UTC. Cần một bộ gửi tín hiệu: kế hoạch 16-50 `[CHƯA XÂY]` hoặc cách thủ công của bạn (mục 8.3) | `[CHƯA XÁC MINH]` `[CHƯA XÂY]` |
+| `HEARTBEAT_MONITOR_ALERT_RECEIVED` | `[MÁY EC2]` | sau cutover (collector đã chạy trên EC2) | trong `/opt/trading`: `docker compose stop collector`, chờ lâu hơn chu kỳ cộng thời gian ân hạn đã đặt ở healthchecks.io (hai giá trị đó là `[QUYẾT ĐỊNH CỦA BẠN]`), rồi `docker compose start collector` | một cảnh báo từ dịch vụ bên ngoài đã tới bạn khi collector dừng, và một thông báo phục hồi theo sau khi khởi động lại; ghi cả hai giờ UTC. Cần bộ gửi tín hiệu của kế hoạch 16-50 (`deploy/heartbeat.sh`, mục 8.3) đã được cài | `[CHƯA XÁC MINH]` |
 | `CHRONY_SYNCED` | `[MÁY EC2]` | sau bootstrap | `chronyc tracking` và `chronyc sources` | `chronyc sources` liệt kê `169.254.169.123` với dấu nguồn được chọn, và độ lệch `System time` của `chronyc tracking` nhỏ hơn giới hạn của bootstrap (`--max-drift-ms`, mặc định 100 ms) | `[CHƯA XÁC MINH]` |
 | `BUDGET_ALERT` | `[MÁY CÓ MẠNG]` | ngay | `aws budgets describe-budgets --account-id <account id>` và `aws budgets describe-notifications-for-budget --account-id <account id> --budget-name <budget name>` | có ít nhất một ngân sách và nó có thông báo với người nhận; số tiền là `[QUYẾT ĐỊNH CỦA BẠN]` | `[CHƯA XÁC MINH]` |
 | `PAID_PLAN` | `[MÁY CÓ MẠNG]` | ngay | mở trang Billing and Cost Management trong trình duyệt và đọc gói tài khoản (không có lệnh) | gói là gói trả phí, không phải gói free; ghi tên gói và ngày | `[THỦ CÔNG]` |
@@ -423,11 +423,11 @@ Giá tính toán, lưu trữ và yêu cầu S3 chưa đọc được trong đợ
 
 > - **Để làm gì:** Làm phép thử nghiệm thu heartbeat: dừng collector rồi xem cảnh báo từ dịch vụ bên ngoài có tới không.
 > - **Giải quyết vấn đề gì:** Một heartbeat chưa từng được thử thì chưa biết có báo được khi cần hay không.
-> - **Mức quan trọng:** **BẮT BUỘC** (điều kiện `HEARTBEAT_MONITOR_ALERT_RECEIVED`; D042 điều kiện 1). Chưa làm được hôm nay vì bộ gửi tín hiệu chưa xây (kế hoạch 16-50).
+> - **Mức quan trọng:** **BẮT BUỘC** (điều kiện `HEARTBEAT_MONITOR_ALERT_RECEIVED`; D042 điều kiện 1). Cần bộ gửi tín hiệu của kế hoạch 16-50 (`deploy/heartbeat.sh`, đã xây nhưng chưa cài) và hai giá trị O-12 của bạn; phép thử này chờ cho tới sau khi bộ gửi được cài và trước kế hoạch 16-43.
 
 **Chạy ở:** `[MÁY EC2]` cho phép thử, `[MÁY CÓ MẠNG]` cho tài khoản dịch vụ
 
-Dịch vụ đã chọn là healthchecks.io; chu kỳ và thời gian ân hạn là lựa chọn của bạn (O-12). Phần giải thích đầy đủ, các giới hạn và dữ kiện về gói miễn phí nằm ở bước 8.3. Điều cần nhớ khi làm phép thử `HEARTBEAT_MONITOR_ALERT_RECEIVED` ở bước 3.8: repository chưa có bộ gửi tín hiệu (kế hoạch 16-50, `[CHƯA XÂY]`), nên phép thử chỉ có ý nghĩa nếu cách bạn tự dựng làm tín hiệu phụ thuộc vào việc collector đang chạy. URL ping mà dịch vụ cấp cho bạn là một bí mật: không dán nó vào `acceptance.json`. Dừng collector làm gián đoạn thu thập, và các phút Open Interest mất theo cách đó là mất vĩnh viễn: chỉ làm phép thử này khi bạn chấp nhận cái giá đó, và ghi khoảng trống kết quả là một khoảng trống bao phủ (D059 mục 4).
+Dịch vụ đã chọn là healthchecks.io; chu kỳ và thời gian ân hạn là lựa chọn của bạn (O-12). Phần giải thích đầy đủ, các giới hạn và dữ kiện về gói miễn phí nằm ở bước 8.3. Điều cần nhớ khi làm phép thử `HEARTBEAT_MONITOR_ALERT_RECEIVED` ở bước 3.8: bộ gửi của kế hoạch 16-50 (`deploy/heartbeat.sh`) chỉ ping khi đầu dò collector qua, nên dừng collector làm tín hiệu im; phép thử cần bộ gửi đó đã được cài (bước 8.3). URL ping mà dịch vụ cấp cho bạn là một bí mật: không dán nó vào `acceptance.json`. Dừng collector làm gián đoạn thu thập, và các phút Open Interest mất theo cách đó là mất vĩnh viễn: chỉ làm phép thử này khi bạn chấp nhận cái giá đó, và ghi khoảng trống kết quả là một khoảng trống bao phủ (D059 mục 4).
 
 Nguồn: `docs/operations/RUNBOOK.md`, `scripts/soak_host_acceptance.py`, `deploy/bootstrap.sh`, `docs/DECISIONS.md`
 
@@ -526,7 +526,7 @@ Chỉ khi cả hai đều thành công mới đóng phiên root. Nếu không, b
 Bootstrap in danh sách này ở cuối. Bằng lời đơn giản:
 
 1. Khóa API Binance phải bị giới hạn ở địa chỉ IP công khai của máy này (IP whitelist) và quyền rút tiền phải tắt (mục 8.2).
-2. Đăng ký một dịch vụ heartbeat bên ngoài VPS (dịch vụ đã chọn là healthchecks.io; bộ gửi chưa xây) để một máy im lặng thì có người biết (mục 8.3).
+2. Đăng ký một dịch vụ heartbeat bên ngoài VPS (dịch vụ đã chọn là healthchecks.io; bộ gửi là `deploy/heartbeat.sh`, bước 8.3) để một máy im lặng thì có người biết (mục 8.3).
 3. Cụm mật khẩu mã hóa sao lưu phải được giữ ngoài VPS; mất nó thì mọi bản sao lưu không thể phục hồi (mục 6).
 4. Thử phiên SSH thứ hai, kể cả `sudo -v`, trước khi đóng phiên đầu.
 5. Mã hóa ổ đĩa của nhà cung cấp phải bật hoặc được xác nhận bật.
@@ -1041,13 +1041,13 @@ sudo deploy/backup.sh --install-timer --dry-run
 
 **Khi lỗi:** một biến `BACKUP_*` thiếu: lệnh nêu tên biến (bước 6.1). Lỗi đẩy Parquet: bảng ở bước 6.8. `--install-timer must run as root`: chạy với `sudo`.
 
-**Không bao giờ:** xóa gì ngoài các thư mục `snapshots/<id>` theo quy tắc giữ lại; ghi đè một đối tượng từ xa; cung cấp tùy chọn ép buộc; ping một dịch vụ giám sát bên ngoài (hôm nay là vậy; bộ gửi heartbeat của kế hoạch 16-50 là `[CHƯA XÂY]`, mục 8.3).
+**Không bao giờ:** xóa gì ngoài các thư mục `snapshots/<id>` theo quy tắc giữ lại; ghi đè một đối tượng từ xa; cung cấp tùy chọn ép buộc; ping một dịch vụ giám sát bên ngoài (unit sao lưu không ping gì; bộ gửi heartbeat là một script riêng, `deploy/heartbeat.sh`, mục 8.3, và nó chỉ dò collector).
 
 ### Thẻ lệnh: deploy/systemd/trading-backup.service
 
 > - **Để làm gì:** Đơn vị systemd gọi `deploy/backup.sh` mỗi khi timer kích hoạt.
 > - **Giải quyết vấn đề gì:** Bản sao lưu lỗi làm unit lỗi một cách thấy được thay vì im lặng; chạy bằng user `trading` có quyền docker.
-> - **Mức quan trọng:** **BẮT BUỘC** nếu bạn muốn sao lưu tự động (D042 điều kiện 2 đòi có lịch); bạn cài bằng một lệnh và không sửa tay. Lưu ý: unit lỗi vẫn không tự báo cho bạn nếu không có heartbeat (RUNBOOK 11.4, mục 8.3).
+> - **Mức quan trọng:** **BẮT BUỘC** nếu bạn muốn sao lưu tự động (D042 điều kiện 2 đòi có lịch); bạn cài bằng một lệnh và không sửa tay. Lưu ý: unit lỗi vẫn không tự báo cho bạn; heartbeat của collector ở mục 8.3 không bao phủ sao lưu (RUNBOOK 11.4).
 
 **Mục đích:** unit systemd kiểu oneshot gọi `deploy/backup.sh` mỗi lần timer kích hoạt, để một bản sao lưu lỗi làm unit lỗi một cách thấy được.
 
@@ -1237,7 +1237,7 @@ Chỉ ba service chạy theo mặc định: `postgres`, `db-upgrade` (chạy m�
 
 **Chạy ở:** `[MÁY CÓ MẠNG]` (chỉ để đọc; không có máy nào chạy gì ở bước này)
 
-Quy tắc đọc: 16-01 đến 16-14 có tệp SUMMARY trong `.planning/phases/16-paper-runtime-composition/`, nên được ghi `[ĐÃ XÂY]`; 16-15 đến 16-50 chưa có, nên là `[CHƯA XÂY]`. Kế hoạch 16-50 "Off-host heartbeat sender" (bộ gửi heartbeat ra ngoài VPS) được thêm sau 16-49; ROADMAP đọc ngày 2026-10-09 đã kể đủ 16-01 đến 16-50. Kế hoạch 16-50 hiện bị chặn cho tới khi bạn ghi hai giá trị O-12 (chu kỳ gửi và thời gian ân hạn của dịch vụ giám sát) vào bản ghi quyết định O-12; agent không tự chọn hai giá trị đó. Kế hoạch 16-43 (khởi động trial soak) phụ thuộc vào 16-50: bộ gửi heartbeat phải xây xong và phép thử `HEARTBEAT_MONITOR_ALERT_RECEIVED` phải đạt trước khi epoch được ghim (D042 điều kiện 1). Lưu ý: "đã xây" nghĩa là code và kiểm thử ở mức đồ giả; chưa có gì chạy trên máy EC2, nên các hàng cần bằng chứng trên máy thật, sàn thật hay Telegram thật còn mang thêm `[CHƯA XÁC MINH]`. Ngày đọc: 2026-10-09.
+Quy tắc đọc: 16-01 đến 16-14 có tệp SUMMARY trong `.planning/phases/16-paper-runtime-composition/`, nên được ghi `[ĐÃ XÂY]`; từ 16-15 trở đi chưa có (trừ 16-50, xem dưới), nên là `[CHƯA XÂY]`. Kế hoạch 16-50 "Off-host heartbeat sender" (bộ gửi heartbeat ra ngoài VPS) được thêm sau 16-49; ROADMAP đọc ngày 2026-10-09 đã kể đủ 16-01 đến 16-50. Kế hoạch 16-50 đã có tệp SUMMARY (script `deploy/heartbeat.sh` và hai unit, kiểm thử bằng đồ giả); việc cài nó vẫn chờ bạn ghi hai giá trị O-12 (chu kỳ gửi và thời gian ân hạn của dịch vụ giám sát) vào bản ghi quyết định O-12; agent không tự chọn hai giá trị đó. Kế hoạch 16-43 (khởi động trial soak) phụ thuộc vào 16-50: bộ gửi heartbeat phải xây xong và phép thử `HEARTBEAT_MONITOR_ALERT_RECEIVED` phải đạt trước khi epoch được ghim (D042 điều kiện 1). Lưu ý: "đã xây" nghĩa là code và kiểm thử ở mức đồ giả; chưa có gì chạy trên máy EC2, nên các hàng cần bằng chứng trên máy thật, sàn thật hay Telegram thật còn mang thêm `[CHƯA XÁC MINH]`. Ngày đọc: 2026-10-09.
 
 | Kế hoạch | Việc | Trạng thái | Dùng ở bước nào |
 | --- | --- | --- | --- |
@@ -1290,7 +1290,7 @@ Quy tắc đọc: 16-01 đến 16-14 có tệp SUMMARY trong `.planning/phases/1
 | 16-47 | Cài vào code hai quyết định lưu trữ bằng chứng và cách freeze check lấy epoch đã ghim | `[CHƯA XÂY]` | 7.7 |
 | 16-48 | Bạn chỉ định ứng viên hợp lệ trong số các ứng viên đã đăng ký | `[CHƯA XÂY]` | 7.6 |
 | 16-49 | Cấu hình đích lưu bằng chứng bền vững bạn đã chọn và chứng minh đường công bố bằng gói thử | `[CHƯA XÂY]` | 7.7 |
-| 16-50 | Bộ gửi heartbeat ra ngoài VPS ("Off-host heartbeat sender") để dịch vụ giám sát bên ngoài, đã chọn là healthchecks.io, biết khi tín hiệu dừng; hiện bị chặn cho tới khi bạn ghi hai giá trị O-12 (chu kỳ và thời gian ân hạn), và 16-43 phải chờ kế hoạch này | `[CHƯA XÂY]` | 3.11, 8.3 |
+| 16-50 | Bộ gửi heartbeat ra ngoài VPS ("Off-host heartbeat sender") để dịch vụ giám sát bên ngoài, đã chọn là healthchecks.io, biết khi tín hiệu dừng; đã xây (script `deploy/heartbeat.sh` và hai unit); việc cài nó vẫn chờ bạn ghi hai giá trị O-12 (chu kỳ và thời gian ân hạn) và phép thử `HEARTBEAT_MONITOR_ALERT_RECEIVED`, và 16-43 phải chờ phép thử đó | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` | 3.11, 8.3 |
 
 #### Bước 7.4 Điểm vào của runtime [CHƯA XÂY]
 
@@ -1325,7 +1325,7 @@ Phase 16 chỉ đóng sau chuỗi dưới đây (D061 mục J). Mọi bước ch
 3. Một LỆNH RIÊNG của bạn cho phép chạy nghiên cứu (16-46); duyệt lưới không có nghĩa là cho phép chạy. Trước đó phải có bản sửa giao thức v2.2.0 (16-28, D065) như một nhiệm vụ tiên quyết riêng.
 4. Một ứng viên hợp lệ (có lý do, đã đăng ký trước, đúng cấu trúc, không còn PLACEHOLDER, đã đăng ký và có băm) được bạn chỉ định (16-48). Nó KHÔNG cần qua G1 đến G5, và G1 đến G5 không bao giờ dùng để xếp hạng ứng viên.
 5. Bạn cho phép đúng băm đó trong `PAPER_START_ALLOWLIST` bằng `strategy_id`, `parameter_set_id` và SHA-256 64 ký tự cùng `purpose`, `approved_at`, `basis` (16-42). Hôm nay allowlist RỖNG theo quyết định của bạn; đó là trạng thái an toàn hợp lệ, không phải lỗi.
-6. Paper bắt đầu và epoch được ghim (16-43), sau khi bộ gửi heartbeat 16-50 đã xây và phép thử cảnh báo đã đạt. Mỗi chuyển trạng thái là một lệnh rõ ràng của bạn.
+6. Paper bắt đầu và epoch được ghim (16-43), sau khi bộ gửi heartbeat 16-50 đã xây, đã cài và phép thử cảnh báo đã đạt. Mỗi chuyển trạng thái là một lệnh rõ ràng của bạn.
 7. Trial soak đạt các tiêu chí đã phê chuẩn và bạn tuyên bố đạt (16-44).
 
 Không được chọn bất kỳ giá trị nào từ kết quả backtest hay nghiên cứu. Hai câu hỏi bằng chứng mở (OQ-1 về lệnh giữ qua lỗ hổng mark price, và O-10 về chi phí mô hình) được hỏi bạn sau lần nghiên cứu thật đầu (16-41).
@@ -1421,11 +1421,11 @@ Quyết định `16-DEC-Q-L` (ngày 2026-10-09) là "separate-bot": máy soak d�
 - Quy tắc IP whitelist: mỗi khóa Binance bị giới hạn ở đúng Elastic IP của máy, quyền rút tiền tắt, và danh sách IP được cập nhật sau mỗi lần cutover hay khi địa chỉ đổi (D042 điều kiện 4; RUNBOOK 13.5 mục 1 và 15.6). Giao diện Binance để làm việc đó không được repository mô tả; việc này là `[THỦ CÔNG]` và chưa được kiểm chứng.
 - Phép ping vùng ở bước 3.7 vẫn là phép thử đầu tiên: Binance phải chấp nhận địa chỉ của máy.
 
-#### Bước 8.3 Dịch vụ heartbeat bên ngoài: healthchecks.io [THỦ CÔNG] [CHƯA XÂY] [CHƯA XÁC MINH]
+#### Bước 8.3 Dịch vụ heartbeat bên ngoài: healthchecks.io [THỦ CÔNG] [ĐÃ XÂY] [CHƯA XÁC MINH]
 
 > - **Để làm gì:** Một dịch vụ bên ngoài VPS (đã chọn: healthchecks.io) nhận tín hiệu "còn sống" đều đặn và báo cho bạn khi tín hiệu ngừng.
 > - **Giải quyết vấn đề gì:** Collector hay cả máy chết trong im lặng thì mỗi phút Open Interest mất là mất vĩnh viễn (D059 mục 4); không có giám sát từ ngoài thì bạn chỉ biết khi tự mở máy xem.
-> - **Mức quan trọng:** **BẮT BUỘC** (D042 điều kiện 1; điều kiện `HEARTBEAT_MONITOR_ALERT_RECEIVED`). Bộ gửi tín hiệu chưa xây (kế hoạch 16-50), và heartbeat chỉ báo cho bạn, không bảo vệ vị thế.
+> - **Mức quan trọng:** **BẮT BUỘC** (D042 điều kiện 1; điều kiện `HEARTBEAT_MONITOR_ALERT_RECEIVED`). Bộ gửi tín hiệu là kế hoạch 16-50 (`deploy/heartbeat.sh`, đã xây, chưa chạy trên máy thật), và heartbeat chỉ báo cho bạn, không bảo vệ vị thế.
 
 **Chạy ở:** `[MÁY CÓ MẠNG]` (đăng ký tài khoản, tạo check, đặt chu kỳ), `[MÁY EC2]` (nơi bộ gửi tín hiệu sẽ chạy)
 
@@ -1437,7 +1437,7 @@ Quyết định `16-DEC-Q-L` (ngày 2026-10-09) là "separate-bot": máy soak d�
 2. Rút ngắn thời gian mất dữ liệu không bù được: các phút Open Interest không thu được là mất vĩnh viễn (D059 mục 4: `openInterestHist` chỉ phục vụ khoảng một tháng), nên biết sớm có giá trị hơn biết muộn.
 3. Là nội dung của điều kiện nghiệm thu `HEARTBEAT_MONITOR_ALERT_RECEIVED` (bước 3.8): cảnh báo phải thật sự tới bạn khi collector dừng.
 4. Cho thông báo phục hồi (recovery notice) khi tín hiệu quay lại; phép thử nghiệm thu đòi cả cảnh báo lẫn thông báo phục hồi.
-5. Bắt trường hợp timer sao lưu im lặng: RUNBOOK 11.4 nói một máy chết hay một unit lỗi là im lặng nếu không có dịch vụ mong một tín hiệu mỗi ngày. Chu kỳ thật vẫn là của bạn, và hai mục đích (collector, sao lưu) có thể cần hai chu kỳ khác nhau; hướng dẫn này không chọn thay.
+5. Bắt trường hợp timer sao lưu im lặng: bộ gửi của repository chỉ dò collector, nên việc này cần một check riêng bạn tự đăng ký (RUNBOOK 11.4). Hai mục đích (collector, sao lưu) có thể cần hai chu kỳ khác nhau, và chu kỳ thật là của bạn; hướng dẫn này không chọn thay.
 
 **Những gì heartbeat KHÔNG làm.**
 
@@ -1452,13 +1452,15 @@ Quyết định `16-DEC-Q-L` (ngày 2026-10-09) là "separate-bot": máy soak d�
 - chưa tìm thấy giới hạn số ping mỗi ngày `[CHƯA XÁC MINH]`: "không thấy giới hạn" không có nghĩa là không có;
 - giới hạn tần suất ping mỗi phút chưa được xác nhận `[CHƯA XÁC MINH]`.
 
-**URL ping là bí mật.** Ai có URL mà dịch vụ cấp cho một check đều báo "còn sống" thay được máy của bạn. Không bao giờ để nó trong git, nhật ký, `acceptance.json`, chat, issue hay tài liệu này; hướng dẫn này không có URL nào. Khi bộ gửi được xây, tên biến chứa URL chưa được repository định nghĩa `[CHƯA XÂY]`; lưu ý cho người viết kế hoạch đó: bộ che bí mật của D050 che theo tên biến chứa PASSWORD, SECRET, TOKEN, API_KEY, ACCESS_KEY, CRYPT hoặc PRIVATE, nên một tên không khớp thì URL có thể lọt vào nhật ký.
+**URL ping là bí mật.** Ai có URL mà dịch vụ cấp cho một check đều báo "còn sống" thay được máy của bạn. Không bao giờ để nó trong git, nhật ký, `acceptance.json`, chat, issue hay tài liệu này; hướng dẫn này không có URL nào. Bộ gửi của repository cất URL trong một tệp chỉ root đọc được (`/etc/trading/heartbeat.url`, chế độ 0600), không đặt nó thành biến môi trường hay biến `.env`, vì bộ che bí mật của D050 che theo tên biến (PASSWORD, SECRET, TOKEN, API_KEY, ACCESS_KEY, CRYPT, PRIVATE) và một tên không khớp thì URL có thể lọt vào nhật ký; công cụ nghiệm thu `scripts/soak_host_acceptance.py` thoát 2 trên mọi giá trị trông như URL ping.
 
-**Bộ gửi tín hiệu: kế hoạch 16-50 "Off-host heartbeat sender" `[CHƯA XÂY]`.** Nó thuộc Phase 16 và chưa có code, chưa có lệnh, chưa có SUMMARY. Đừng nhầm với các hàng heartbeat nội bộ của runtime trong cơ sở dữ liệu soak (các kế hoạch 16-15, 16-16, 16-24, 16-26, 16-30 và 16-43 nói về chúng, để tính độ bao phủ): chúng không gửi gì ra ngoài. Các kế hoạch 16-07 và 16-14 chỉ nói điều kiện nghiệm thu và quyết định của bạn.
+**Bộ gửi tín hiệu: kế hoạch 16-50 "Off-host heartbeat sender" `[ĐÃ XÂY]`.** Nó thuộc Phase 16: script `deploy/heartbeat.sh` và hai unit `trading-heartbeat.service`, `trading-heartbeat.timer` đã có (các thẻ lệnh bên dưới và RUNBOOK 11.9), kiểm thử bằng đồ giả; chưa cài và chưa chạy trên máy thật, nên mọi bước trên máy EC2 còn `[CHƯA XÁC MINH]`. Thứ tự: tạo check và đặt chu kỳ cùng thời gian ân hạn ở dịch vụ bên ngoài (`[QUYẾT ĐỊNH CỦA BẠN]`, ghi ở `16-DEC-O-12`); cất URL bằng `sudo deploy/heartbeat.sh --set-url`; cài timer bằng `sudo deploy/heartbeat.sh --install-timer --interval-seconds <N>`; rồi làm phép thử ở bước 3.8. Đừng nhầm với các hàng heartbeat nội bộ của runtime trong cơ sở dữ liệu soak (các kế hoạch 16-15, 16-16, 16-24, 16-26, 16-30 và 16-43 nói về chúng, để tính độ bao phủ): chúng không gửi gì ra ngoài. Các kế hoạch 16-07 và 16-14 chỉ nói điều kiện nghiệm thu và quyết định của bạn.
 
-**Cách tạm thời, tự làm ngoài repository `[THỦ CÔNG]` `[CHƯA XÁC MINH]`.** Trong lúc chờ 16-50 bạn có thể tự đặt một bộ gửi phía bạn, ví dụ một cron hoặc systemd timer gọi URL ping. Hướng dẫn này không đưa lệnh vì repository không có lệnh nào để chép và cách này chưa từng được chạy thử. Nếu tín hiệu chỉ nói "máy còn bật" mà không phụ thuộc collector thì phép thử `HEARTBEAT_MONITOR_ALERT_RECEIVED` không có ý nghĩa.
+**Phạm vi.** Bộ gửi chỉ dò collector; đầu dò cho tiến trình paper và live thuộc Phase 24 trong ROADMAP.
 
-**Đối chiếu với RUNBOOK.** RUNBOOK 11.4 (đọc ngày 2026-10-09) nói không có gì trong repository ping một dịch vụ giám sát và gọi nó là heartbeat hoặc dead-man's-switch. Hôm nay câu đó đúng. Khi 16-50 được xây, RUNBOOK sẽ được người thực hiện kế hoạch sửa (không phải hướng dẫn này); lúc đó RUNBOOK thắng và hướng dẫn này phải được cập nhật theo.
+**Nếu bạn vẫn muốn tự dựng một bộ gửi riêng `[THỦ CÔNG]` `[CHƯA XÁC MINH]`.** Không cần, vì repository đã có `deploy/heartbeat.sh`. Nếu bạn vẫn dựng một bộ gửi ngoài repository, hướng dẫn này không đưa lệnh nào cho cách đó và nó chưa từng được chạy thử; nếu tín hiệu chỉ nói "máy còn bật" mà không phụ thuộc collector thì phép thử `HEARTBEAT_MONITOR_ALERT_RECEIVED` không có ý nghĩa.
+
+**Đối chiếu với RUNBOOK.** RUNBOOK 11.4 (đọc ngày 2026-10-09) từng nói không có gì trong repository ping một dịch vụ giám sát. Kế hoạch 16-50 đã sửa câu đó và thêm RUNBOOK 11.9; khi RUNBOOK và hướng dẫn này khác nhau thì RUNBOOK thắng và hướng dẫn này phải được cập nhật theo.
 
 ### Thẻ lệnh: deploy/heartbeat.sh
 
@@ -2054,7 +2056,7 @@ Cách đọc: `consumption_status = CONSUMED` nghĩa là phê duyệt đã tới
 
 | Tình huống | Làm ngay | Trạng thái xây dựng | Áp dụng khi nào |
 | --- | --- | --- | --- |
-| Collector dừng | `docker compose ps` rồi `docker compose logs --tail 200 collector`; nếu chỉ dừng thì `docker compose start collector`. Các phút Open Interest đã mất là mất vĩnh viễn: ghi khoảng trống như một khoảng trống bao phủ (D059 mục 4). Heartbeat (mục 8.3) là thứ sẽ báo cho bạn biết sớm, khi bộ gửi tồn tại | `[ĐÃ XÂY]` | ngay |
+| Collector dừng | `docker compose ps` rồi `docker compose logs --tail 200 collector`; nếu chỉ dừng thì `docker compose start collector`. Các phút Open Interest đã mất là mất vĩnh viễn: ghi khoảng trống như một khoảng trống bao phủ (D059 mục 4). Heartbeat (mục 8.3) là thứ sẽ báo cho bạn biết sớm, khi bạn đã cài bộ gửi | `[ĐÃ XÂY]` | ngay |
 | Máy chủ không với tới được | kiểm tra trạng thái instance trong AWS console `[THỦ CÔNG]`; sau khi máy lên lại, các service có `restart: unless-stopped` tự lên cùng Docker; kiểm tra bằng `docker compose ps`; ghi khoảng trống bao phủ. Cách khởi động lại instance không được repository mô tả | `[CHƯA XÁC MINH]` | ngay |
 | Ổ đĩa đầy | `df -h` để xem; dọn thư mục `restore-` và `drill-` cũ (bước 6.7); KHÔNG xóa volume và không dùng lệnh dọn dẹp của Docker. Cây Parquet chỉ lớn dần: nếu vẫn đầy, tăng ổ là quyết định của bạn | `[ĐÃ XÂY]` | ngay |
 | S3 không với tới được | bản sao lưu lỗi một cách thấy được; đọc `journalctl -u trading-backup`; dữ liệu cục bộ vẫn nguyên; chạy lại sau; nếu kéo dài, báo lại. Bảng 11.8 ở bước 6.8 phân biệt lỗi mạng với lỗi nội dung | `[ĐÃ XÂY]` | ngay |
@@ -2102,7 +2104,7 @@ Nguồn: `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`, `docker-compose.yml`
 | tài khoản AWS bị đóng | gói Free tự đóng khoảng 2027-01-25 hoặc khi hết tín dụng | chuyển sang gói Paid trước mốc đó (điều kiện `PAID_PLAN`) | RUNBOOK 19.3, `16-DEC-O-12` |
 | kiểm thử bị bỏ qua hoặc đỏ khi có `TRADING_CI_STRICT` | thiếu hạ tầng (bash, Docker, compose, shellcheck) trên máy chạy | cài hạ tầng thiếu; đó không phải lỗi mã | RUNBOOK 18 |
 | Telegram im lặng | chưa rõ; có thể sai token hay mã chat, bot khác cùng polling, hoặc chưa có tiến trình nào gửi (runtime chưa xây) `[CHƯA XÁC MINH]` | kiểm tra bước 8.1; hỏi trong phiên lập kế hoạch | `.env.example` |
-| không nhận được cảnh báo nào dù collector đã dừng (heartbeat im lặng) | bộ gửi chưa tồn tại (kế hoạch 16-50 `[CHƯA XÂY]`), hoặc cách tự dựng của bạn không phụ thuộc collector, hoặc chưa được thử `[CHƯA XÁC MINH]` | đăng ký healthchecks.io và dựng bộ gửi thủ công hoặc chờ 16-50 (bước 8.3), rồi làm phép thử ở bước 3.8 | RUNBOOK 11.4 |
+| không nhận được cảnh báo nào dù collector đã dừng (heartbeat im lặng) | bộ gửi chưa được cài hoặc chưa có URL ping, timer chưa bật, chu kỳ ping dài hơn chu kỳ của check, hoặc chưa được thử `[CHƯA XÁC MINH]` | đăng ký healthchecks.io rồi cài `deploy/heartbeat.sh` (`sudo deploy/heartbeat.sh --set-url`, rồi `sudo deploy/heartbeat.sh --install-timer --interval-seconds <N>`, bước 8.3), rồi làm phép thử ở bước 3.8 | RUNBOOK 11.4 |
 | nhận cảnh báo thiếu tín hiệu từ dịch vụ heartbeat | collector dừng, máy không với tới được, hoặc chính bộ gửi dừng `[CHƯA XÁC MINH]` | làm theo hàng "Collector dừng" và "Máy chủ không với tới được" ở bước 12.2; ghi khoảng trống bao phủ | D042 điều kiện 1, D059 mục 4 |
 | bạn tự khóa mình ngoài máy sau bootstrap | đóng phiên root trước khi thử phiên `trading` và `sudo -v` | dùng cách khôi phục của nhà cung cấp; lần sau giữ phiên root tới khi bước 4.6 xong | RUNBOOK 13.4 |
 | lỡ chạy lệnh `config` của compose mà thiếu `-q` | đã in môi trường phân giải, gồm bí mật | coi các bí mật đã in là lộ và thay chúng | RUNBOOK 11.7 |
@@ -2146,7 +2148,7 @@ Mọi dòng bên dưới được chép từ các thẻ lệnh và các mục tr
 | unit `trading-backup.service`: xem nhật ký | `[MÁY EC2]` | `journalctl -u trading-backup` | 6.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | unit `trading-backup.timer`: xem lịch | `[MÁY EC2]` | `systemctl list-timers trading-backup.timer` | 6.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 
-### Heartbeat ra ngoài VPS, hai unit systemd
+### Heartbeat ra ngoài VPS (healthchecks.io), hai unit systemd
 
 | Việc | Máy | Lệnh | Mục | Nhãn |
 | --- | --- | --- | --- | --- |
@@ -2194,7 +2196,6 @@ Bảy service: `postgres`, `db-upgrade`, `collector`, `paper` (profile `paper`, 
 | --- | --- | --- | --- | --- |
 | điểm vào của tiến trình paper | `[MÁY EC2]` | chưa có lệnh chạy được (xem bước 7.4); tên dự kiến `python -m src.paper.runtime` | 7.4 | `[CHƯA XÂY]` |
 | các giai đoạn DEMO, CANARY, LIVE | `[MÁY CÓ MẠNG]` | chưa có lệnh nào | 9 | `[CHƯA XÂY]` |
-| bộ gửi heartbeat tới healthchecks.io (kế hoạch 16-50) | `[MÁY EC2]` | chưa có lệnh chạy được; cách thủ công của bạn nằm ngoài repository và chưa được kiểm chứng | 8.3 | `[CHƯA XÂY]` `[CHƯA XÁC MINH]` |
 
 Nguồn: `deploy/bootstrap.sh`, `deploy/lib.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `deploy/refresh-pins.sh`, `deploy/backup.sh`, `deploy/restore.sh`, `deploy/backup-drill.sh`, `deploy/systemd/trading-backup.service`, `deploy/systemd/trading-backup.timer`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`, `scripts/soak_host_acceptance.py`, `scripts/backup-drill.ps1`, `docker-compose.yml`, `docs/operations/RUNBOOK.md`
 
@@ -2253,12 +2254,12 @@ Mỗi mục dẫn tới phần giải thích. Các mục chưa thể làm vì ch
 - [ ] Bot Telegram riêng cho máy soak đã tạo trong BotFather và token không bị dán đi đâu (mục 8.1)
 - [ ] Mỗi khóa Binance bị giới hạn ở đúng Elastic IP và quyền rút tiền tắt (mục 8.2)
 - [ ] Một check healthchecks.io đã đăng ký với chu kỳ và thời gian ân hạn do tôi chọn, và URL ping được giữ bí mật (mục 8.3)
-- [ ] Bộ gửi heartbeat (kế hoạch 16-50) đã xây và phép thử `HEARTBEAT_MONITOR_ALERT_RECEIVED` đã cho cả cảnh báo lẫn thông báo phục hồi `[CHƯA XÂY]` (mục 3.8)
+- [ ] Bộ gửi heartbeat (kế hoạch 16-50) đã được cài và phép thử `HEARTBEAT_MONITOR_ALERT_RECEIVED` đã cho cả cảnh báo lẫn thông báo phục hồi `[CHƯA XÁC MINH]` (mục 3.8)
 - [ ] `acceptance.json` có đủ 16 điều kiện PASS và `soak_host_acceptance.py` thoát 0 (mục 3.8)
 
 ### Sẵn sàng cho soak Phase 16
 
-- [ ] Cả 50 kế hoạch của Phase 16 đã xong, kể cả 16-50 bộ gửi heartbeat `[CHƯA XÂY]` (mục 7.3)
+- [ ] Cả 50 kế hoạch của Phase 16 đã xong, kể cả 16-50 bộ gửi heartbeat (đã có SUMMARY, chưa cài) `[CHƯA XÂY]` (mục 7.3)
 - [ ] Tiến trình paper có điểm vào chạy được `[CHƯA XÂY]` (mục 7.4)
 - [ ] Giả thuyết, lưới tham số, lệnh cho phép chạy nghiên cứu và ứng viên đã được tôi duyệt hoặc chỉ định `[CHƯA XÂY]` (mục 7.6)
 - [ ] Tôi đã cho phép đúng một băm trong `PAPER_START_ALLOWLIST` `[CHƯA XÂY]` (mục 7.6)
@@ -2270,7 +2271,7 @@ Mỗi mục dẫn tới phần giải thích. Các mục chưa thể làm vì ch
 - [ ] Bộ kịch bản demo và soak demo ít nhất 3 tuần không có sai lệch không giải thích `[CHƯA XÂY]` (mục 9.3)
 - [ ] CANARY với khóa chỉ-đọc và tài khoản phụ nhỏ không có sai lệch `[CHƯA XÂY]` (mục 9.3)
 - [ ] Điều kiện của `enable()` ở Phase 26 đều đạt `[CHƯA XÂY]` (mục 9.3)
-- [ ] Heartbeat ngoài VPS vẫn hoạt động cho mọi tiến trình chạy dài của máy live (D042 điều kiện 1); nó chỉ báo cho tôi, SL vẫn nằm trên sàn `[CHƯA XÂY]` (mục 8.3)
+- [ ] Heartbeat ngoài VPS vẫn hoạt động cho mọi tiến trình chạy dài của máy live (D042 điều kiện 1); nó chỉ báo cho tôi, SL vẫn nằm trên sàn; bộ gửi hiện chỉ dò collector, đầu dò cho paper và live thuộc Phase 24 `[CHƯA XÂY]` (mục 8.3)
 
 ### Phụ lục: Hướng dẫn này không làm được gì
 
