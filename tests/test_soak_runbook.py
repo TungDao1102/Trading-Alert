@@ -362,3 +362,46 @@ def test_19_4_item_5_stores_the_ping_url_on_the_new_host_before_the_old_timer_go
     item = next(ln for ln in body.splitlines() if ln.startswith("5. "))
     assert "11.9" in item and "--set-url" in item
     assert "before the old host's timer is disabled" in item
+
+
+# --------------------------------------------------------------------------- ping URL guard (16-50)
+
+FAKE_UUID = "00000000-1111-4222-8333-444444444444"  # FAKE, never a real check
+PING_URL_VALUES = {
+    "uuid-path": f"https://monitor.invalid/{FAKE_UUID}",
+    "uuid-path-with-suffix": f"alert received after https://monitor.invalid/{FAKE_UUID}/fail",
+    "uuid-http": f"http://monitor.invalid:8000/ping/{FAKE_UUID}",
+    "ping-domain-slug": "https://hc-ping.com/FAKEPINGKEY0000/fake-slug",
+    "ping-domain-subdomain": "curl -fsS https://eu.hc-ping.com/FAKEPINGKEY0000/fake-slug",
+}
+
+
+@pytest.mark.parametrize("name", sorted(PING_URL_VALUES))
+@pytest.mark.parametrize("field", ["evidence", "command"])
+def test_a_ping_url_shaped_value_exits_2_naming_the_condition_and_field_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], name: str, field: str
+) -> None:
+    value = PING_URL_VALUES[name]
+    document = _filled(HEARTBEAT_MONITOR_ALERT_RECEIVED=_entry(**{field: value}))
+    assert sha.main([str(_write(tmp_path, document))]) == 2
+    out = capsys.readouterr()
+    text = out.out + out.err
+    assert "HEARTBEAT_MONITOR_ALERT_RECEIVED" in text and field in text
+    for fragment in (FAKE_UUID, "FAKEPINGKEY0000", "fake-slug", "monitor.invalid"):
+        assert fragment not in text
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        f"arn:aws:kms:ap-southeast-1:123456789012:key/{FAKE_UUID}",
+        "HTTP 200 from https://fapi.binance.com/fapi/v1/ping",
+        "alert at 2026-10-11T08:00:00Z, recovery at 2026-10-11T08:09:00Z",
+    ],
+    ids=["aws-arn", "binance-ping", "times-only"],
+)
+def test_evidence_that_only_resembles_a_ping_url_still_passes(
+    tmp_path: Path, evidence: str
+) -> None:
+    document = _filled(S3_DEFAULT_ENCRYPTION=_entry(evidence=evidence))
+    assert sha.main([str(_write(tmp_path, document))]) == 0
