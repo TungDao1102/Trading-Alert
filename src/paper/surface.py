@@ -30,6 +30,7 @@ from src.paper.bars import CONTEXT_INTERVAL, SETUP_INTERVAL, BarBuffers, group_b
 from src.paper.loop import (
     BAR_STAGES,
     BarContext,
+    BarOutcome,
     check_feature_validity,
     evaluate_closed_bar,
 )
@@ -98,7 +99,8 @@ def surface_digest(records: Iterable[DecisionSurfaceRecord]) -> str:
     )
 
 
-def _feature_digest(context: BarContext, symbol: str, setup_window: list[Candle]) -> str:
+def feature_digest(context: BarContext, symbol: str, setup_window: list[Candle]) -> str:
+    """SHA-256 of the canonical JSON of the last-bar `FeatureFrame` of the setup window."""
     frame = compute_features(
         symbol=symbol,
         interval=SETUP_INTERVAL,
@@ -106,6 +108,52 @@ def _feature_digest(context: BarContext, symbol: str, setup_window: list[Candle]
         parameter_set=context.parameter_set,
     )
     return sha256_hex({"frame": asdict(frame)})
+
+
+def gate_record(candle: Candle, reason_code: str) -> DecisionSurfaceRecord:
+    """The record of a bar a feed gate stopped before the chain (no features computed)."""
+    return DecisionSurfaceRecord(
+        symbol=candle.symbol,
+        interval=candle.interval,
+        bar_close_utc=candle.close_time_utc,
+        stage=STAGE_FEED_GATE,
+        reason_code=reason_code,
+    )
+
+
+def context_record(candle: Candle) -> DecisionSurfaceRecord:
+    """The record of a 4h context bar: it extends the context window and decides nothing."""
+    return DecisionSurfaceRecord(
+        symbol=candle.symbol,
+        interval=candle.interval,
+        bar_close_utc=candle.close_time_utc,
+        stage=STAGE_CONTEXT,
+        reason_code=REASON_CONTEXT_BAR,
+    )
+
+
+def outcome_record(
+    candle: Candle, outcome: BarOutcome, *, digest: str | None
+) -> DecisionSurfaceRecord:
+    """The record of a bar the chain evaluated: stage, reason and the ids it reached.
+
+    This is the single mapping from a `BarOutcome` to a record; `decision_surface` (replay) and
+    the runtime pipeline (live) both use it, so their digests are comparable with tolerance zero.
+    """
+    sized = None if outcome.verdict is None else outcome.verdict.sized
+    return DecisionSurfaceRecord(
+        symbol=candle.symbol,
+        interval=candle.interval,
+        bar_close_utc=candle.close_time_utc,
+        stage=outcome.stage,
+        reason_code=outcome.reason_code,
+        feature_digest=digest,
+        signal_id=None if outcome.signal is None else outcome.signal.signal_id,
+        plan_hash=None if outcome.trade_plan is None else outcome.trade_plan.plan_hash,
+        risk_reason=None if outcome.verdict is None else outcome.verdict.reason_code,
+        sized_quantity=None if sized is None else sized.quantity,
+        regime=outcome.regime,
+    )
 
 
 def decision_surface(
@@ -141,29 +189,13 @@ def decision_surface(
                         f"conflicting duplicate bar for {candle.symbol} {candle.interval} "
                         f"open {candle.open_time_utc.isoformat()}"
                     )
-                records.append(
-                    DecisionSurfaceRecord(
-                        symbol=candle.symbol,
-                        interval=candle.interval,
-                        bar_close_utc=candle.close_time_utc,
-                        stage=STAGE_FEED_GATE,
-                        reason_code=REASON_DUPLICATE_BAR,
-                    )
-                )
+                records.append(gate_record(candle, REASON_DUPLICATE_BAR))
                 continue
             seen[key] = candle
             buffers.add(candle)
 
             if candle.interval == CONTEXT_INTERVAL:
-                records.append(
-                    DecisionSurfaceRecord(
-                        symbol=candle.symbol,
-                        interval=candle.interval,
-                        bar_close_utc=candle.close_time_utc,
-                        stage=STAGE_CONTEXT,
-                        reason_code=REASON_CONTEXT_BAR,
-                    )
-                )
+                records.append(context_record(candle))
                 continue
 
             bar_context = context(candle) if callable(context) else context
@@ -177,42 +209,27 @@ def decision_surface(
 
             gate = check_feature_validity(setup_window[:-1], context_window)
             if gate is not None:
-                records.append(
-                    DecisionSurfaceRecord(
-                        symbol=candle.symbol,
-                        interval=candle.interval,
-                        bar_close_utc=close,
-                        stage=STAGE_FEED_GATE,
-                        reason_code=gate,
-                    )
-                )
+                records.append(gate_record(candle, gate))
                 continue
 
-            digest = _feature_digest(bar_context, candle.symbol, setup_window)
+            digest = feature_digest(bar_context, candle.symbol, setup_window)
             outcome = evaluate_closed_bar(bar_context, candle, setup_window, context_window)
-            sized = None if outcome.verdict is None else outcome.verdict.sized
-            records.append(
-                DecisionSurfaceRecord(
-                    symbol=candle.symbol,
-                    interval=candle.interval,
-                    bar_close_utc=close,
-                    stage=outcome.stage,
-                    reason_code=outcome.reason_code,
-                    feature_digest=digest,
-                    signal_id=None if outcome.signal is None else outcome.signal.signal_id,
-                    plan_hash=None if outcome.trade_plan is None else outcome.trade_plan.plan_hash,
-                    risk_reason=None if outcome.verdict is None else outcome.verdict.reason_code,
-                    sized_quantity=None if sized is None else sized.quantity,
-                    regime=outcome.regime,
-                )
-            )
+            records.append(outcome_record(candle, outcome, digest=digest))
     return tuple(records)
 
 
 __all__ = [
+    "REASON_CONTEXT_BAR",
+    "REASON_DUPLICATE_BAR",
+    "STAGE_CONTEXT",
+    "STAGE_FEED_GATE",
     "SURFACE_SCHEMA",
     "SURFACE_STAGES",
     "DecisionSurfaceRecord",
+    "context_record",
     "decision_surface",
+    "feature_digest",
+    "gate_record",
+    "outcome_record",
     "surface_digest",
 ]
