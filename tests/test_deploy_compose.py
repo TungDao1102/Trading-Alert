@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 
 HEALTH_PROBE = ["/app/.venv/bin/python", "-m", "src.data.collector", "--healthcheck"]
+PAPER_PROBE = ["CMD", "/app/.venv/bin/python", "-m", "src.paper.runtime", "--healthcheck"]
 BASE_VARS = ("POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "POSTGRES_PORT")
 _SCRUBBED_ENV_PREFIXES = ("POSTGRES_", "COMPOSE_", "TRADING_ENV_FILE", "IMAGE_TAG", "DATABASE_URL")
 
@@ -246,7 +247,7 @@ def test_profiles_add_exactly_their_services(
     assert set(services) == DEFAULT | extra
 
 
-@pytest.mark.parametrize(("service", "phase"), [("paper", "Phase 16"), ("live", "Phase 24")])
+@pytest.mark.parametrize(("service", "phase"), [("live", "Phase 24")])
 def test_placeholders_fail_fast_naming_the_owning_phase(
     tmp_path: Path, service: str, phase: str
 ) -> None:
@@ -318,6 +319,8 @@ def test_every_service_has_its_own_healthcheck_decision(tmp_path: Path) -> None:
     services = _services(compose_config(tmp_path, profiles=("paper", "live", "ops")))
     for name, svc in services.items():
         assert "healthcheck" in svc, f"{name} must state a healthcheck decision explicitly"
+    # The paper service is no longer a placeholder: it carries the runtime's own probe (16-32).
+    assert services["paper"]["healthcheck"]["test"] == PAPER_PROBE
 
 
 def test_profile_services_need_no_backup_or_live_variables(tmp_path: Path) -> None:
