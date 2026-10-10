@@ -46,8 +46,13 @@ _DIGEST_LENGTH = 64
 def _structural(value: Any) -> Any:
     """Dataclasses and mappings become dicts, sequences become lists; scalars pass through."""
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        # A dataclass may name fields that are left out while they are zero (plan 16-36): the
+        # SHADOW counters of a report without SHADOW evidence keep its sidecar byte for byte.
+        omit_when_zero: tuple[str, ...] = getattr(type(value), "SIDECAR_OMIT_WHEN_ZERO", ())
         return {
-            item.name: _structural(getattr(value, item.name)) for item in dataclasses.fields(value)
+            item.name: _structural(getattr(value, item.name))
+            for item in dataclasses.fields(value)
+            if not (item.name in omit_when_zero and getattr(value, item.name) == 0)
         }
     if isinstance(value, Mapping):
         converted: dict[str, Any] = {}

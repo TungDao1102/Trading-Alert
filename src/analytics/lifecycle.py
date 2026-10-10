@@ -189,6 +189,7 @@ def _normalize_paper_group(signal_id: str, rows: Sequence[PaperRecord]) -> Lifec
     fill_at: datetime | None = None
     reason_code = base.reason_code
     synthetic_lag = False
+    delivery_requested: datetime | None = None
     entry_filled: bool | None = None
     if user_sim is not None:
         path = LifecyclePath.USER_EXECUTED
@@ -197,7 +198,11 @@ def _normalize_paper_group(signal_id: str, rows: Sequence[PaperRecord]) -> Lifec
         order_at = user_sim.order_submitted_at_utc
         fill_at = user_sim.fill_time_utc
         reason_code = user_sim.reason_code
-        synthetic_lag = True
+        # D-15 / P15: a record whose approval was measured (a SHADOW human action carries the
+        # request time next to the acted time) is reported as measured; only a record with no
+        # human action keeps the fixed-constant approval time and the synthetic-lag flag.
+        delivery_requested = user_sim.approval_requested_at_utc
+        synthetic_lag = delivery_requested is None
         if order_at is not None:
             entry_filled = fill_at is not None
     elif opportunity is not None:
@@ -218,7 +223,7 @@ def _normalize_paper_group(signal_id: str, rows: Sequence[PaperRecord]) -> Lifec
         path=path,
         approval_result=approval_result,
         signal_detected_at_utc=detected,
-        delivery_requested_at_utc=None,
+        delivery_requested_at_utc=delivery_requested,
         approved_at_utc=approved_at,
         order_submitted_at_utc=order_at,
         fill_time_utc=fill_at,
@@ -232,15 +237,40 @@ def _normalize_paper_group(signal_id: str, rows: Sequence[PaperRecord]) -> Lifec
     )
 
 
+def exclude_test_only(records: Sequence[PaperRecord]) -> tuple[tuple[PaperRecord, ...], int]:
+    """The paper rows that are not rehearsal rows, and how many `test_only` rows were dropped.
+
+    REV-03 (D063 item 3): a `test_only` record is produced by a test and never counts as a
+    signal, a trade, a delay or an outcome. The edge calls this once and hands the same kept
+    rows to every paper normalizer, so each count sees the same filtered set; the dropped
+    number is printed in the report.
+    """
+    kept = tuple(record for record in records if not record.test_only)
+    return kept, len(records) - len(kept)
+
+
+def paper_delay_is_synthetic(records: Sequence[LifecycleRecord]) -> bool:
+    """True when a PAPER section's approval delay is (or may be) the fixed constant.
+
+    A section whose user-executed records are all measured is not labelled SYNTHETIC LAG
+    (D-15, P15). A section with a synthetic user-executed record, and a section with no
+    user-executed record at all (nothing measured to show), keep the label as before.
+    """
+    user = [record for record in records if record.path is LifecyclePath.USER_EXECUTED]
+    return not user or any(record.synthetic_lag for record in user)
+
+
 def normalize_paper_lifecycle(records: Sequence[PaperRecord]) -> tuple[LifecycleRecord, ...]:
     """Group paper rows by signal_id into LifecycleRecords sorted by signal_id.
 
     NO_TRADE rows (signal_id None) are not lifecycle records and are skipped
-    here (they are counted elsewhere). The paper approval time is the fixed
-    approval-delay constant, so user-executed rows carry `synthetic_lag=True`.
+    here (they are counted elsewhere). `test_only` rehearsal rows are dropped first
+    (REV-03). A user-executed row whose approval was measured (SHADOW human action)
+    carries the measured request and acted times and `synthetic_lag=False`; one with
+    no human action carries the fixed approval-delay constant and `synthetic_lag=True`.
     """
     groups: dict[str, list[PaperRecord]] = {}
-    for record in records:
+    for record in exclude_test_only(records)[0]:
         if record.signal_id is None:
             continue
         groups.setdefault(record.signal_id, []).append(record)

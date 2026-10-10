@@ -21,7 +21,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
-from src.analytics.lifecycle import LifecycleRecord
+from src.analytics.lifecycle import LifecycleRecord, paper_delay_is_synthetic
 from src.analytics.stats import dist_stat, percent, seconds_between, seed_for
 from src.analytics.types import (
     DEFAULT_BASE_SEED,
@@ -364,7 +364,9 @@ def build_execution_quality(
         expiry_rate=expiry_rate,
         deviation=deviation,
         synthetic_lag_seconds=(
-            APPROVAL_DELAY_LAG_SECONDS if evidence is EvidenceKind.PAPER else None
+            APPROVAL_DELAY_LAG_SECONDS
+            if evidence is EvidenceKind.PAPER and paper_delay_is_synthetic(ordered)
+            else None
         ),
         base_seed=base_seed,
         resamples=resamples,

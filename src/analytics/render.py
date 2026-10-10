@@ -14,6 +14,7 @@ from src.analytics.render_common import (
     SECTION_TITLES,
     TRUNCATION_MARKER,
     RenderError,
+    join_blocks,
     md_cell,
 )
 from src.analytics.render_killgate import (
@@ -32,6 +33,7 @@ from src.analytics.render_metrics import (
     render_section_slices,
 )
 from src.analytics.report import JournalDepthReport
+from src.analytics.types import EvidenceKind
 
 __all__ = [
     "REPORT_TITLE",
@@ -43,6 +45,7 @@ __all__ = [
 
 REPORT_TITLE = "Journal Depth + Kill-Gate Report"
 _STEM_DIGEST_CHARS = 12
+TEST_ONLY_EXCLUDED_LINE = "test_only records excluded: {count} (D063 item 3)"
 
 
 def _check_byte_rules(text: str) -> None:
@@ -61,6 +64,19 @@ def _count_truncations(sections: list[list[str]]) -> int:
     return sum(line.count(TRUNCATION_MARKER) for section in sections for line in section)
 
 
+def _paper_statements(report: JournalDepthReport) -> list[str]:
+    """Plain-text statements about the PAPER evidence, printed under the evidence overview.
+
+    Only data the report already carries is stated: the number of `test_only` rehearsal rows
+    that were excluded before any count (REV-03, D063 item 3). Nothing here is a metric.
+    """
+    paper = next(block for block in report.evidence if block.kind is EvidenceKind.PAPER)
+    lines: list[list[str]] = []
+    if paper.test_only_excluded > 0:
+        lines.append([TEST_ONLY_EXCLUDED_LINE.format(count=paper.test_only_excluded)])
+    return join_blocks(lines)
+
+
 def render_markdown(report: JournalDepthReport, blocked_by: tuple[str, ...] = ()) -> str:
     """Render the full report: header, then sections 1-10 in the fixed order.
 
@@ -69,7 +85,7 @@ def render_markdown(report: JournalDepthReport, blocked_by: tuple[str, ...] = ()
     """
     rendered = [
         render_section_kill_gate(report, blocked_by),
-        render_section_evidence_overview(report),
+        join_blocks([render_section_evidence_overview(report), _paper_statements(report)]),
         render_section_full_report(report),
         render_section_dual_universe(report),
         render_section_approval_delay(report),

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from types import MappingProxyType
+from typing import ClassVar
 
 from src.analytics.approval_delay import ApprovalDelaySection, build_approval_delay
 from src.analytics.clock import ClockStart
@@ -146,7 +147,10 @@ class EvidenceInputs:
 
     Sequences are frozen to tuples and mappings to read-only sorted-key copies at
     construction. `notes` (Task 2 ledger inputs) and `experiments`/`paper_epoch_ids`
-    feed provenance only; they never change a statistic.
+    feed provenance only; they never change a statistic. `shadow_records` (paper rows of the
+    SHADOW chain that were counted) and `test_only_excluded` (rehearsal rows dropped before
+    any count, REV-03) are display counters of the PAPER kind (plan 16-36); like the notes
+    they change no statistic.
     """
 
     kind: EvidenceKind
@@ -165,10 +169,16 @@ class EvidenceInputs:
     experiments: tuple[ExperimentRecord, ...] = ()
     paper_epoch_ids: tuple[str, ...] = ()
     notes: tuple[InputNote, ...] = ()
+    shadow_records: int = 0
+    test_only_excluded: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, EvidenceKind):
             raise AnalyticsInputError("kind must be an EvidenceKind")
+        _require_count(self.shadow_records, "shadow_records")
+        _require_count(self.test_only_excluded, "test_only_excluded")
+        if self.kind is not EvidenceKind.PAPER and (self.shadow_records or self.test_only_excluded):
+            raise AnalyticsInputError("SHADOW record counts belong to PAPER evidence only")
         object.__setattr__(self, "notes", tuple(self.notes))
         for note in self.notes:
             if not isinstance(note, InputNote):
@@ -263,21 +273,31 @@ class EvidenceBlock:
     slices: SlicesSection
     dual_universe: DualUniverseView
     no_trade: NoTradeSection
+    shadow_records: int = 0
+    test_only_excluded: int = 0
+
+    # Fields the JSON sidecar leaves out while they are zero (like the digest, plan 16-36).
+    SIDECAR_OMIT_WHEN_ZERO: ClassVar[tuple[str, ...]] = ("shadow_records", "test_only_excluded")
 
     def digest(self) -> str:
-        return sha256_hex(
-            {
-                "kind": self.kind,
-                "has_data": self.has_data,
-                "core": self.core.digest(),
-                "excursion": self.excursion.digest(),
-                "execution_quality": self.execution_quality.digest(),
-                "approval_delay": self.approval_delay.digest(),
-                "slices": self.slices.digest(),
-                "dual_universe": self.dual_universe.digest(),
-                "no_trade": self.no_trade.digest(),
-            }
-        )
+        payload: dict[str, object] = {
+            "kind": self.kind,
+            "has_data": self.has_data,
+            "core": self.core.digest(),
+            "excursion": self.excursion.digest(),
+            "execution_quality": self.execution_quality.digest(),
+            "approval_delay": self.approval_delay.digest(),
+            "slices": self.slices.digest(),
+            "dual_universe": self.dual_universe.digest(),
+            "no_trade": self.no_trade.digest(),
+        }
+        # Plan 16-36: the SHADOW counters enter the digest only when set, so every report
+        # without SHADOW evidence keeps its digest byte for byte.
+        if self.shadow_records:
+            payload["shadow_records"] = self.shadow_records
+        if self.test_only_excluded:
+            payload["test_only_excluded"] = self.test_only_excluded
+        return sha256_hex(payload)
 
 
 @dataclass(frozen=True)
@@ -452,6 +472,8 @@ def build_evidence_block(
             resamples=resamples,
         ),
         no_trade=count_no_trades(no_trades, evidence=kind, research_symbols=research_symbols),
+        shadow_records=inputs.shadow_records,
+        test_only_excluded=inputs.test_only_excluded,
     )
 
 
