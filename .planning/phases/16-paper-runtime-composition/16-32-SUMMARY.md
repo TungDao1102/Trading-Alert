@@ -46,7 +46,7 @@ key-decisions:
 patterns-established:
   - "Restart-loop guard: restart_loop_problems(command, probe, restart) checked against the real service and a seeded one"
 
-requirements-completed: [PAPER-01]
+requirements-completed: []
 
 coverage:
   - id: D1
