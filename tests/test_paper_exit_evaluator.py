@@ -365,9 +365,8 @@ def test_tracer_a_14_day_fixture_trial_is_judged_criterion_by_criterion(
     distribution = evaluation.time_of_day
     assert "reported, not a pass condition" in distribution.label
     assert len(distribution.covered_hours_by_hour_of_day) == 24
-    assert (
-        sum(distribution.covered_hours_by_hour_of_day.values()) == evaluation.coverage.covered_hours
-    )
+    covered_us = sum(distribution.covered_microseconds_by_hour_of_day.values())
+    assert Decimal(covered_us) / Decimal(3_600_000_000) == evaluation.coverage.covered_hours
     assert evaluation.proof_class is ProofClass.FAKE
 
 
