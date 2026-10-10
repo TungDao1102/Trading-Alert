@@ -233,11 +233,22 @@ def _section(raw: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     return section if isinstance(section, dict) else {}
 
 
+def _refuse_unknown_keys(raw: Mapping[str, Any], problems: list[str]) -> None:
+    """A key no code reads is refused: an unused threshold is a value nobody ratified for a use.
+
+    This is also how the recorded Q-D decision (REST backfill bars are history only) is honoured:
+    no age or freshness key exists for them, so a file that carries one is refused.
+    """
+    for name, keys in REQUIRED_KEYS.items():
+        for key in sorted(set(_section(raw, name)) - set(keys)):
+            problems.append(f"{name}.{key} (unknown key: nothing reads it)")
+
+
 def parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
     """Validate a parsed TOML document; every key of every section is required.
 
     A missing section makes each of its keys missing, so the error names exactly what the file
-    still has to carry.
+    still has to carry. A key that is not part of the contract is refused too.
 
     Raises:
         ConfigNotRatified: naming every missing or invalid `<section>.<key>`.
@@ -249,6 +260,7 @@ def parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
     equity = _read_decimal(account, "initial_equity", problems)
     risk_rate = _read_decimal(account, "risk_rate", problems)
     symbols = _read_symbols(_section(raw, "scope"), problems)
+    _refuse_unknown_keys(raw, problems)
     if problems or equity is None or risk_rate is None:
         raise ConfigNotRatified(problems)
     return RuntimeConfig(

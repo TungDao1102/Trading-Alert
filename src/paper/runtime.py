@@ -156,6 +156,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--healthcheck",
+        action="store_true",
+        help=(
+            "Container probe: print healthy and exit with status zero only while the last "
+            "processed closed bar is younger than the ratified maximum age; otherwise print "
+            "unhealthy and a reason and exit with status one."
+        ),
+    )
+    parser.add_argument(
         "--pinned-state",
         type=Path,
         default=DEFAULT_PINNED_STATE,
@@ -655,6 +664,80 @@ async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None
     ).run()
 
 
+def _healthcheck(
+    *,
+    env: Mapping[str, str],
+    pinned_path: Path,
+    state: RuntimeStatePort | None,
+    registry_root: Path | None,
+    now: Callable[[], datetime],
+) -> int:
+    """The container probe: 0 only for a running process that keeps processing closed bars.
+
+    Liveness is not health (research P5): a process that is up but processes nothing, a held
+    refusal (`--hold-on-refusal` keeps the container up after a refusal) and a stopped process all
+    report unhealthy. The start gate's own refusal checks run first, so the probe exits 1 wherever
+    the start would be refused. Only the NAMES of offending variables are ever printed.
+    """
+
+    def unhealthy(reason: str) -> int:
+        print(f"unhealthy: {reason}")
+        return 1
+
+    trade_names = refuse_trade_capable_env(env)
+    if trade_names:
+        return unhealthy("trade-capable variable present: " + ", ".join(trade_names))
+    if not allowlist_entries():
+        return unhealthy("the allowlist admits nothing: no paper process runs")
+    values = read_env(env)
+    absent = [
+        name for name in ("PAPER_STRATEGY_ID", "PAPER_PARAMETER_SET_ID") if not values.get(name)
+    ]
+    if absent:
+        return unhealthy("runtime configuration not ratified: " + ", ".join(absent))
+    entry, why_not = _admit(
+        values["PAPER_STRATEGY_ID"], values["PAPER_PARAMETER_SET_ID"], registry_root
+    )
+    if entry is None:
+        return unhealthy(why_not or "not admitted")
+    try:
+        config = load_runtime_config(values.get("PAPER_RUNTIME_CONFIG"))
+    except ConfigNotRatified as exc:
+        return unhealthy(str(exc))
+    if not pinned_path.is_file():
+        return unhealthy("no pinned epoch")
+    try:
+        epoch = load_pinned_state(pinned_path)
+    except (OSError, ValueError, KeyError, TypeError):
+        return unhealthy("the pinned state is unreadable")
+    if epoch.parameter_set_hash != entry.parameter_set_hash:
+        return unhealthy("the pinned state does not match the admitted allowlist entry")
+    try:
+        port = state if state is not None else _state_from_env(values)
+        marker = port.latest_runtime_marker(epoch.epoch_id)
+        closes = port.last_close_by_pair(epoch.epoch_id)
+    except ConfigNotRatified as exc:
+        return unhealthy(str(exc))
+    except Exception as exc:  # the probe must answer, never crash, on a store problem
+        return unhealthy(f"the runtime state is unreadable ({type(exc).__name__})")
+
+    if marker is None or marker.event_type is not RuntimeEventType.RUNTIME_START:
+        return unhealthy("no running process is recorded")
+    max_age = timedelta(seconds=config.timing.healthcheck_max_bar_age_seconds)
+    at = now()
+    started = marker.occurred_at_utc
+    last_bar = max(closes.values(), default=None)
+    if last_bar is not None and last_bar >= started:
+        if at - last_bar <= max_age:
+            print("healthy")
+            return 0
+        return unhealthy("the last processed closed bar is older than the maximum age")
+    if at - started <= max_age:
+        print("healthy: waiting for the first closed bar since the start")
+        return 0
+    return unhealthy("no closed bar was processed within the maximum age after the start")
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -676,6 +759,15 @@ def main(
     stopper = wait_for_stop if wait_for_stop is not None else wait_for_stop_signal
     now = clock if clock is not None else _utc_now
     hold: bool = args.hold_on_refusal
+
+    if args.healthcheck:
+        return _healthcheck(
+            env=env,
+            pinned_path=args.pinned_state,
+            state=state,
+            registry_root=registry_root,
+            now=now,
+        )
 
     def refuse(code: ExitCode, reason: str) -> int:
         return _refuse(code, reason, hold=hold, wait_for_stop=stopper)

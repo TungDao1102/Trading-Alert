@@ -47,6 +47,22 @@ Grace of the freeze check (REV-02, REV-18), one sentence per line:
 
 - `symbols` - the non-empty list of distinct symbols the run covers.
 
+Every key above is required, and a key that is not listed is refused as an unknown key:
+nothing reads it, so a value for it would be an unused threshold. In particular no age or
+freshness key exists for REST backfill bars (decision Q-D, option history-only): such bars only
+extend history and are never evaluated.
+
+## Healthcheck
+
+`python -m src.paper.runtime --healthcheck` is the container probe. It prints `healthy` and exits
+with status zero only while the last processed closed bar is younger than
+`healthcheck_max_bar_age_seconds`; a freshly started process gets one such age for its first bar.
+It prints `unhealthy` with a reason and exits with status one in every other case: no bar
+processed in time, a stopped process, and every condition under which the start gate itself would
+refuse (a trade-capable variable, an unratified configuration, no admission or no pinned epoch), so
+a container held after a refusal is reported unhealthy at once. It reads only the allowed
+environment names and never prints a value.
+
 ## Two gate layers: do not confuse them
 
 - **Layer one, the runtime process gate** (`src/paper/runtime.py`, user decision Q-A,
