@@ -23,8 +23,11 @@ REAL_SOAK): there is no parameter that sets it.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -45,7 +48,7 @@ from src.paper.coverage import (
     freeze_evidence_report,
     tick_timing_summary,
 )
-from src.paper.evidence_bundle import DiffRecord, EvidenceBundle
+from src.paper.evidence_bundle import MANIFEST_NAME, DiffRecord, EvidenceBundle
 from src.paper.loop import BAR_STAGES, BarContext, check_feed_freshness
 from src.paper.pipeline import REASON_HISTORY_DISCONTINUITY, REASON_SIBLING_4H_MISSING
 from src.paper.runtime_state import RuntimeRecord
@@ -1059,25 +1062,286 @@ def evaluate_trial(
     )
 
 
+# --------------------------------------------------------------------------- #
+# Requirement closure rule (ROADMAP SC9, D061 item J).
+# --------------------------------------------------------------------------- #
+
+# ROADMAP SC9 and D061 item J: PAPER-01 completes when criteria SC1, SC2 and SC7 hold, PAPER-02
+# when SC3 and SC5 hold. PAPER-03 asks for a 3 to 6 month wall-clock observation with no tuning and
+# stays Pending until Phase 26. Nothing here closes on fake-level evidence (phase 7 was closed with
+# these requirements unmet, so Phase 16 must not repeat that).
+REQUIREMENT_CRITERIA: Mapping[str, tuple[str, ...]] = {
+    "PAPER-01": ("SC1", "SC2", "SC7"),
+    "PAPER-02": ("SC3", "SC5"),
+}
+PAPER_03 = "PAPER-03"
+PAPER_03_STATUS = "Pending, Phase 26"
+STATUS_CLOSABLE = "CLOSABLE"
+STATUS_NOT_CLOSABLE = "NOT CLOSABLE"
+
+# What each criterion needs: a list of slots, each slot the proof classes that can fill it. A
+# criterion holds only when every slot has at least one item. CODE can fill a slot only where the
+# plan names the code-level contract test as a companion (SC2); it never replaces a REAL slot.
+CRITERION_SLOTS: Mapping[str, tuple[tuple[ProofClass, ...], ...]] = {
+    "SC1": ((ProofClass.REAL_SOAK,),),
+    "SC2": ((ProofClass.CODE,), (ProofClass.REAL_SMOKE,)),
+    "SC3": ((ProofClass.REAL_REHEARSAL, ProofClass.REAL_SOAK),),
+    "SC5": ((ProofClass.REAL_REHEARSAL, ProofClass.REAL_SOAK),),
+    "SC7": ((ProofClass.REAL_SMOKE,),),
+}
+_SLOT_NOTE: Mapping[ProofClass, str] = {ProofClass.CODE: " (the code-level contract test)"}
+_REAL_CLASSES = frozenset({ProofClass.REAL_SMOKE, ProofClass.REAL_REHEARSAL, ProofClass.REAL_SOAK})
+
+# Sub-claims of SC5 that one rehearsal cannot exercise: they stay CODE and PostgreSQL proof only,
+# and are printed so the user's O-11 (v) declaration sees them. They never turn a FAIL into a PASS.
+SC5_CODE_ONLY_SUBCLAIMS: tuple[str, ...] = (
+    "SKIP journaling",
+    "CANCEL journaling",
+    "expiry journaling",
+)
+
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+_SMOKE_CLASSES = (ProofClass.FAKE, ProofClass.REAL_SMOKE)
+_REHEARSAL_CLASSES = (ProofClass.FAKE, ProofClass.REAL_REHEARSAL)
+
+
+@dataclass(frozen=True)
+class EvidenceItem:
+    """One piece of evidence for a criterion: where it came from and the hash of its file.
+
+    Build items with `bundle_evidence_item`, `smoke_evidence_item`, `rehearsal_evidence_item` and
+    `code_evidence_item`: each takes the proof class from the source of the evidence and none has a
+    parameter that sets it.
+    """
+
+    criterion: str
+    proof_class: ProofClass
+    path: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        if self.criterion not in CRITERION_SLOTS:
+            raise ValueError(
+                f"unknown criterion {self.criterion!r}; expected one of {list(CRITERION_SLOTS)}"
+            )
+        if not isinstance(self.proof_class, ProofClass):
+            raise ValueError("proof_class must be a ProofClass")
+        if not isinstance(self.path, str) or self.path == "":
+            raise ValueError("path must be a non-empty string")
+        if not isinstance(self.sha256, str) or _SHA256_HEX.fullmatch(self.sha256) is None:
+            raise ValueError("sha256 must be 64 lowercase hex characters")
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _json_proof_class(path: Path, allowed: Sequence[ProofClass]) -> ProofClass:
+    """The `proof_class` field of an evidence file written by its own script."""
+    try:
+        data = json.loads(path.read_bytes())
+    except ValueError:
+        raise ValueError(f"{path.name} is not valid JSON") from None
+    claimed = data.get("proof_class") if isinstance(data, dict) else None
+    for proof_class in allowed:
+        if claimed == proof_class.value:
+            return proof_class
+    raise ValueError(
+        f"{path.name}: proof_class must be one of {[p.value for p in allowed]}, got {claimed!r}"
+    )
+
+
+def _require_criterion(criterion: str, allowed: Sequence[str], what: str) -> None:
+    if criterion not in allowed:
+        raise ValueError(
+            f"{what} evidence cannot support criterion {criterion!r}; use one of {list(allowed)}"
+        )
+
+
+def bundle_evidence_item(bundle: EvidenceBundle, evaluation: TrialEvaluation) -> EvidenceItem:
+    """SC1 evidence from a trial bundle: its proof class follows the manifest source only.
+
+    A trial evaluation that failed is not evidence of anything; the item is refused.
+    """
+    if evaluation.epoch_id != bundle.epoch_id or evaluation.bundle_source != bundle.source:
+        raise ValueError("the evaluation does not belong to this bundle")
+    if not evaluation.passed:
+        raise ValueError("a failed trial evaluation is not evidence for SC1")
+    manifest = bundle.path / MANIFEST_NAME
+    return EvidenceItem(
+        criterion="SC1",
+        proof_class=bundle_proof_class(bundle.source),
+        path=str(manifest),
+        sha256=_file_sha256(manifest),
+    )
+
+
+def smoke_evidence_item(criterion: str, path: Path) -> EvidenceItem:
+    """Live-smoke evidence (SC2, SC7): the file's own `proof_class` (FAKE or REAL_SMOKE)."""
+    _require_criterion(criterion, ("SC2", "SC7"), "smoke")
+    return EvidenceItem(
+        criterion=criterion,
+        proof_class=_json_proof_class(path, _SMOKE_CLASSES),
+        path=str(path),
+        sha256=_file_sha256(path),
+    )
+
+
+def rehearsal_evidence_item(criterion: str, path: Path) -> EvidenceItem:
+    """Rehearsal evidence (SC3, SC5): the file's own `proof_class` (REAL_REHEARSAL only in live)."""
+    _require_criterion(criterion, ("SC3", "SC5"), "rehearsal")
+    return EvidenceItem(
+        criterion=criterion,
+        proof_class=_json_proof_class(path, _REHEARSAL_CLASSES),
+        path=str(path),
+        sha256=_file_sha256(path),
+    )
+
+
+def code_evidence_item(criterion: str, path: Path) -> EvidenceItem:
+    """A code-level proof: a test file. Supporting evidence, never sufficient on its own."""
+    if not (path.name.startswith("test_") and path.suffix == ".py"):
+        raise ValueError(f"{path.name} is not a test file (test_*.py): CODE proof comes from tests")
+    return EvidenceItem(
+        criterion=criterion,
+        proof_class=ProofClass.CODE,
+        path=str(path),
+        sha256=_file_sha256(path),
+    )
+
+
+@dataclass(frozen=True)
+class CriterionClosure:
+    """One criterion: whether every slot it needs is filled, and the items behind it."""
+
+    criterion: str
+    satisfied: bool
+    real_items: tuple[EvidenceItem, ...]
+    supporting_items: tuple[EvidenceItem, ...]
+    missing: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RequirementClosure:
+    """One requirement: CLOSABLE, NOT CLOSABLE, or (PAPER-03) Pending, Phase 26."""
+
+    requirement: str
+    closable: bool
+    status: str
+    criteria: tuple[CriterionClosure, ...]
+
+
+@dataclass(frozen=True)
+class ClosureVerdict:
+    """The closure state of PAPER-01, PAPER-02 and PAPER-03, with the disclosures to print."""
+
+    requirements: tuple[RequirementClosure, ...]
+    disclosures: tuple[str, ...]
+
+    def render(self) -> str:
+        lines = ["Requirement closure (ROADMAP SC9, D061 item J)"]
+        for requirement in self.requirements:
+            lines.append(f"{requirement.requirement}: {requirement.status}")
+            for criterion in requirement.criteria:
+                state = "satisfied" if criterion.satisfied else "NOT satisfied"
+                lines.append(f"    {criterion.criterion}: {state}")
+                for item in (*criterion.real_items, *criterion.supporting_items):
+                    role = "real" if item.proof_class in _REAL_CLASSES else "supporting only"
+                    lines.append(
+                        f"        {item.proof_class.value} ({role}) {item.path} "
+                        f"sha256 {item.sha256}"
+                    )
+                lines.extend(f"        missing: {text}" for text in criterion.missing)
+        lines.extend(self.disclosures)
+        return "\n".join(lines)
+
+
+def _class_names(classes: Sequence[ProofClass]) -> str:
+    return " or ".join(c.value for c in classes)
+
+
+def _criterion_closure(criterion: str, items: Sequence[EvidenceItem]) -> CriterionClosure:
+    mine = sorted(
+        (i for i in items if i.criterion == criterion),
+        key=lambda i: (i.proof_class.value, i.path, i.sha256),
+    )
+    missing: list[str] = []
+    for slot in CRITERION_SLOTS[criterion]:
+        if not any(i.proof_class in slot for i in mine):
+            note = _SLOT_NOTE.get(slot[0], "") if len(slot) == 1 else ""
+            missing.append(f"a {_class_names(slot)} item for {criterion}{note}")
+    return CriterionClosure(
+        criterion=criterion,
+        satisfied=not missing,
+        real_items=tuple(i for i in mine if i.proof_class in _REAL_CLASSES),
+        supporting_items=tuple(i for i in mine if i.proof_class not in _REAL_CLASSES),
+        missing=tuple(missing),
+    )
+
+
+def closure_verdict(items: Iterable[EvidenceItem]) -> ClosureVerdict:
+    """Which requirements are closable on the evidence given (pure, order independent).
+
+    PAPER-01 and PAPER-02 are CLOSABLE only when every criterion they depend on has its REAL
+    evidence (see `CRITERION_SLOTS`); FAKE and CODE items are listed as supporting and never
+    sufficient. PAPER-03 is never closable here.
+    """
+    given = tuple(items)
+    for item in given:
+        if not isinstance(item, EvidenceItem):
+            raise TypeError("closure_verdict takes EvidenceItem values built from their sources")
+    requirements: list[RequirementClosure] = []
+    for requirement, criteria in REQUIREMENT_CRITERIA.items():
+        closures = tuple(_criterion_closure(c, given) for c in criteria)
+        closable = all(c.satisfied for c in closures)
+        requirements.append(
+            RequirementClosure(
+                requirement=requirement,
+                closable=closable,
+                status=STATUS_CLOSABLE if closable else STATUS_NOT_CLOSABLE,
+                criteria=closures,
+            )
+        )
+    requirements.append(RequirementClosure(PAPER_03, False, PAPER_03_STATUS, ()))
+    disclosures = tuple(
+        f"SC5 sub-claim {subclaim}: CODE and PG proof only, disclosed (a rehearsal cannot "
+        "exercise it; for the user's O-11 (v) declaration; it never turns a FAIL into a PASS)"
+        for subclaim in SC5_CODE_ONLY_SUBCLAIMS
+    )
+    return ClosureVerdict(requirements=tuple(requirements), disclosures=disclosures)
+
+
 __all__ = [
     "AUXILIARY_HEADING",
     "DECISION_LABEL",
     "EVALUATED_INTERVALS",
     "MIN_COVERAGE_FRACTION",
     "OBSERVATIONS_HEADING",
+    "PAPER_03_STATUS",
     "PARITY_TOLERANCE",
+    "REQUIREMENT_CRITERIA",
     "RESTART_RULE",
+    "SC5_CODE_ONLY_SUBCLAIMS",
     "TIME_OF_DAY_LABEL",
     "TRIAL_CALENDAR_DAYS",
     "BackfillRule",
+    "ClosureVerdict",
+    "CriterionClosure",
     "CriterionGroup",
     "CriterionResult",
+    "EvidenceItem",
     "ParityReplay",
     "ProofClass",
+    "RequirementClosure",
     "TimeOfDayDistribution",
     "TrialEvaluation",
     "bundle_proof_class",
+    "bundle_evidence_item",
+    "closure_verdict",
+    "code_evidence_item",
     "evaluate_trial",
     "parity_criterion",
     "read_backfill_rule",
+    "rehearsal_evidence_item",
+    "smoke_evidence_item",
 ]
