@@ -405,3 +405,133 @@ def test_evidence_that_only_resembles_a_ping_url_still_passes(
 ) -> None:
     document = _filled(S3_DEFAULT_ENCRYPTION=_entry(evidence=evidence))
     assert sha.main([str(_write(tmp_path, document))]) == 0
+
+
+# --------------------------------------------------------------------------- section 20 (16-33)
+
+SECTION_20_HEADING = "## 20. Soak project operations"
+SECTION_20_SUBSECTIONS = (
+    "20.1 Project and wrapper",
+    "20.2 Deploys during the trial soak",
+    "20.3 Telegram bot",
+    "20.4 Rehearsal before the trial",
+    "20.5 Backups and restore drill before the long soak",
+    "20.6 Image",
+)
+
+
+def _section20() -> str:
+    match = re.search(r"^## 20\. [^\n]*\n(.*?)(?=^## \d+\. |\Z)", _runbook(), re.M | re.S)
+    return match.group(0) if match else ""
+
+
+def _sub20(number: str) -> str:
+    match = re.search(
+        rf"^### {re.escape(number)} [^\n]*\n(.*?)(?=^##|\Z)", _section20(), re.M | re.S
+    )
+    return match.group(0) if match else ""
+
+
+def _fenced_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    inside = False
+    for line in text.split("\n"):
+        if line.lstrip().startswith("```"):
+            inside = not inside
+            continue
+        if inside:
+            lines.append(line)
+    return lines
+
+
+def test_section_20_has_the_heading_and_subsections_20_1_to_20_6() -> None:
+    assert re.search(rf"^{re.escape(SECTION_20_HEADING)}$", _runbook(), re.M)
+    for title in SECTION_20_SUBSECTIONS:
+        assert re.search(rf"^### {re.escape(title)}$", _section20(), re.M), title
+
+
+def test_20_1_names_the_wrapper_and_forbids_down_with_volumes() -> None:
+    body = _sub20("20.1")
+    assert "deploy/compose-soak.sh" in body
+    assert "trading-soak" in body
+    assert "never" in body and "down -v" in body
+    assert (REPO_ROOT / "deploy" / "compose-soak.sh").is_file()
+
+
+def test_20_2_every_deploy_is_an_uncovered_planned_restart_with_the_derived_budget() -> None:
+    body = _sub20("20.2")
+    for phrase in (
+        "PLANNED_RESTART",
+        "never covered",
+        "336",
+        "95 percent",
+        "16.8",
+        "REV-01",
+        "REV-17",
+    ):
+        assert phrase in body, f"20.2 lacks: {phrase}"
+    assert "all uncovered time together" in body
+
+
+def test_20_3_states_the_recorded_telegram_rule_and_holds_no_token() -> None:
+    body = _sub20("20.3")
+    decision = (
+        REPO_ROOT / ".planning/phases/16-paper-runtime-composition/decisions/16-DEC-Q-L.md"
+    ).read_text(encoding="utf-8")
+    assert "option: separate-bot" in decision
+    for phrase in ("16-DEC-Q-L", "separate bot", "BotFather", "never pasted"):
+        assert phrase in body, f"20.3 lacks: {phrase}"
+    assert not re.search(r"\d{6,}:[A-Za-z0-9_-]{20,}", body), "a token-shaped value is written"
+
+
+def test_20_4_the_rehearsal_runs_in_its_own_project_before_the_trial() -> None:
+    body = _sub20("20.4")
+    for phrase in ("trading-rehearsal", "before the trial", "REV-03", "never in trading-soak"):
+        assert phrase in body, f"20.4 lacks: {phrase}"
+
+
+def test_20_5_requires_a_backup_and_a_restore_drill_into_a_scratch_target() -> None:
+    body = _sub20("20.5")
+    for phrase in (
+        "11.4",
+        "11.6",
+        "before the long soak",
+        "scratch",
+        "never into the soak database",
+    ):
+        assert phrase in body, f"20.5 lacks: {phrase}"
+
+
+def test_20_6_points_to_the_image_decision_record() -> None:
+    body = _sub20("20.6")
+    assert "decisions/16-DEC-Q-I.md" in body
+
+
+def test_no_fenced_line_of_section_20_runs_down_with_volumes() -> None:
+    lines = _fenced_lines(_section20())
+    assert lines, "section 20 has no fenced command to scan"
+    for line in lines:
+        assert not re.search(r"\bdown\b.*(?:\s-\w*v\w*\b|--volumes)", line), line
+
+
+def test_20_1_lists_every_exit_code_and_the_hold_on_refusal_rule() -> None:
+    from src.paper.runtime_config import ExitCode
+
+    body = _sub20("20.1")
+    for member in ExitCode:
+        row = next((ln for ln in body.split("\n") if f"`{member.name}`" in ln), None)
+        assert row is not None, f"20.1 has no line for ExitCode.{member.name}"
+        assert re.search(rf"\b{int(member)}\b", row), f"{member.name}: code {int(member)} missing"
+        assert len(row.split("|")) >= 4 and row.split("|")[-2].strip(), f"{member.name}: no meaning"
+    for phrase in (
+        "--hold-on-refusal",
+        "codes 3 to 6",
+        "unhealthy",
+        "container log",
+        "stop the container before",
+        "SKIPPED",
+        "exits 0",
+        "not restarted",
+        "CRASH",
+    ):
+        assert phrase in body, f"20.1 lacks: {phrase}"
