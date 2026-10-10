@@ -1,0 +1,249 @@
+{
+  "archive_fetch": {
+    "attempts": 1,
+    "error": null,
+    "fetched_at_utc": "2026-10-10T09:09:38.416Z",
+    "http_status": 200,
+    "rows": 24,
+    "sha256": "1a9a987b6b278e0dcfa92af363a41420133739e1c1e0aab9168cf548535b1c1a",
+    "stamp": "2026-10-08",
+    "status": "OK",
+    "url": "https://data.binance.vision/data/futures/um/daily/klines/BTCUSDT/1h/BTCUSDT-1h-2026-10-08.zip"
+  },
+  "arrival_latency_ms_by_interval": {
+    "by_interval": {
+      "1h": {
+        "count": 4,
+        "max": -110,
+        "min": -519
+      },
+      "1m": {
+        "count": 250,
+        "max": 2344,
+        "min": -587
+      },
+      "4h": {
+        "count": 1,
+        "max": -416,
+        "min": -416
+      }
+    },
+    "definition": "receipt time on the injected clock minus the bar close time, milliseconds",
+    "future_close_events": 165,
+    "status": "OK"
+  },
+  "binance_common_version": "4.4.0",
+  "clock_skew_ms": {
+    "definition": "Binance server time minus the injected clock at the call, milliseconds; positive means the host clock is behind; includes the request latency",
+    "end": 580,
+    "start": 182,
+    "status": "OK"
+  },
+  "closed_events_by_interval": {
+    "1h": 4,
+    "1m": 250,
+    "4h": 1
+  },
+  "connection_count": {
+    "after_connect": 3,
+    "after_rebuild": 3,
+    "expected_sdk_paths": 3,
+    "private_established": true,
+    "status": "OK"
+  },
+  "finished_at_utc": "2026-10-10T13:19:38.710Z",
+  "forced_disconnect": {
+    "backfill_bars": [],
+    "close_api_call_source": "script-ast-guard",
+    "close_api_calls": 0,
+    "closed_events_after_resume": 240,
+    "connection_events": [
+      {
+        "at_utc": "2026-10-10T09:24:38.520Z",
+        "event": "WS_DISCONNECT"
+      },
+      {
+        "at_utc": "2026-10-10T09:24:40.788Z",
+        "event": "WS_RECONNECT"
+      },
+      {
+        "at_utc": "2026-10-10T10:24:38.953Z",
+        "event": "WS_RECONNECT"
+      },
+      {
+        "at_utc": "2026-10-10T10:24:39.383Z",
+        "event": "WS_RECONNECT"
+      },
+      {
+        "at_utc": "2026-10-10T10:24:39.669Z",
+        "event": "WS_RECONNECT"
+      },
+      {
+        "at_utc": "2026-10-10T11:24:44.389Z",
+        "event": "WS_RECONNECT"
+      },
+      {
+        "at_utc": "2026-10-10T11:24:44.826Z",
+        "event": "WS_RECONNECT"
+      },
+      {
+        "at_utc": "2026-10-10T11:24:45.110Z",
+        "event": "WS_RECONNECT"
+      },
+      {
+        "at_utc": "2026-10-10T12:24:49.890Z",
+        "event": "WS_RECONNECT"
+      },
+      {
+        "at_utc": "2026-10-10T12:24:50.368Z",
+        "event": "WS_RECONNECT"
+      },
+      {
+        "at_utc": "2026-10-10T12:24:50.675Z",
+        "event": "WS_RECONNECT"
+      }
+    ],
+    "disconnected_at_utc": "2026-10-10T09:24:38.435Z",
+    "error": null,
+    "gap_records": [],
+    "method": "transport-drop",
+    "outage_statement": "no bar closed during the outage",
+    "path_exercised": "unsolicited",
+    "real": true,
+    "rebuild_count": 1,
+    "resumed_at_utc": "2026-10-10T09:24:41.202Z",
+    "stale_stream_entries_before_rebuild": [
+      "btcusdt@kline_1m",
+      "btcusdt@kline_1h",
+      "btcusdt@kline_4h"
+    ],
+    "status": "OK"
+  },
+  "intervals": [
+    "1m",
+    "1h",
+    "4h"
+  ],
+  "mode": "live",
+  "observations_note": "measurements are observations for the O-07 table (plan 16-27), not thresholds",
+  "open_events_dropped": 67334,
+  "proof_class": "REAL_SMOKE",
+  "rest_minute_lag": {
+    "error": null,
+    "measured_against": "host clock; read together with clock_skew_ms",
+    "minutes": [
+      {
+        "boundary_utc": "2026-10-10T09:10:00.000Z",
+        "mark_first_seen_after_close_ms": 192,
+        "polls": 1,
+        "trade_first_seen_after_close_ms": 98
+      },
+      {
+        "boundary_utc": "2026-10-10T09:11:00.000Z",
+        "mark_first_seen_after_close_ms": 188,
+        "polls": 1,
+        "trade_first_seen_after_close_ms": 95
+      },
+      {
+        "boundary_utc": "2026-10-10T09:12:00.000Z",
+        "mark_first_seen_after_close_ms": 197,
+        "polls": 1,
+        "trade_first_seen_after_close_ms": 107
+      },
+      {
+        "boundary_utc": "2026-10-10T09:13:00.000Z",
+        "mark_first_seen_after_close_ms": 191,
+        "polls": 1,
+        "trade_first_seen_after_close_ms": 101
+      },
+      {
+        "boundary_utc": "2026-10-10T09:14:00.000Z",
+        "mark_first_seen_after_close_ms": 198,
+        "polls": 1,
+        "trade_first_seen_after_close_ms": 104
+      },
+      {
+        "boundary_utc": "2026-10-10T09:15:00.000Z",
+        "mark_first_seen_after_close_ms": 201,
+        "polls": 1,
+        "trade_first_seen_after_close_ms": 101
+      },
+      {
+        "boundary_utc": "2026-10-10T09:16:00.000Z",
+        "mark_first_seen_after_close_ms": 200,
+        "polls": 1,
+        "trade_first_seen_after_close_ms": 103
+      },
+      {
+        "boundary_utc": "2026-10-10T09:17:00.000Z",
+        "mark_first_seen_after_close_ms": 186,
+        "polls": 1,
+        "trade_first_seen_after_close_ms": 96
+      },
+      {
+        "boundary_utc": "2026-10-10T09:18:00.000Z",
+        "mark_first_seen_after_close_ms": 187,
+        "polls": 1,
+        "trade_first_seen_after_close_ms": 96
+      },
+      {
+        "boundary_utc": "2026-10-10T09:19:00.000Z",
+        "mark_first_seen_after_close_ms": 206,
+        "polls": 1,
+        "trade_first_seen_after_close_ms": 112
+      }
+    ],
+    "settings": {
+      "label": "measurement setting, not a threshold",
+      "max_wait_seconds": 30,
+      "poll_interval_ms": 1000
+    },
+    "status": "OK",
+    "summary": {
+      "mark_max_ms": 206,
+      "mark_median_ms": 192,
+      "not_seen_count": 0,
+      "trade_max_ms": 112,
+      "trade_median_ms": 101
+    },
+    "weight_used_1m": null,
+    "weight_used_1m_reason": "not exposed by the SDK response"
+  },
+  "schema": "paper-ws-smoke-evidence/schema-1",
+  "sdk_reconnect": {
+    "backfill_bars": [],
+    "closed_events_after_reconnect": 179,
+    "error": null,
+    "first_reconnect_at_utc": "2026-10-10T10:24:38.947Z",
+    "gap_records": [],
+    "interval_seconds_effective": 3600,
+    "mode": "override",
+    "real": true,
+    "reconnect_events": 9,
+    "status": "OK"
+  },
+  "sdk_version": "17.4.0",
+  "settings": {
+    "archive_day": null,
+    "archive_fetch": true,
+    "disconnect_method": "transport-drop",
+    "duration_seconds": 15000,
+    "force_disconnect_after_seconds": 900,
+    "recovery_wait_seconds": 120,
+    "rest_lag_max_wait_seconds": 30,
+    "rest_lag_poll_interval_ms": 1000,
+    "rest_lag_probe_minutes": 10,
+    "sdk_reconnect_interval_seconds": 3600
+  },
+  "started_at_utc": "2026-10-10T09:09:35.283Z",
+  "symbol": "BTCUSDT",
+  "ws_subscribe": {
+    "reason": null,
+    "status": "OK",
+    "subscribed_streams": [
+      "btcusdt@kline_1m",
+      "btcusdt@kline_1h",
+      "btcusdt@kline_4h"
+    ]
+  }
+}

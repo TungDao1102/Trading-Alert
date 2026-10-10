@@ -1,0 +1,17 @@
+16-21 SC7 check of evidence/16-21-ws-smoke-live.json (2026-10-10)
+proof_class            REAL_SMOKE                          PASS
+sdk_version            17.4.0                              PASS
+binance_common_version 4.4.0                               PASS
+ws_subscribe           OK (kline_1m, kline_1h, kline_4h)   PASS
+closed events          1m=250 1h=4 4h=1                    PASS
+forced_disconnect      OK, path "unsolicited", transport-drop, rebuild_count=1,
+                       3 stale entries before rebuild, no gap, no backfill   PASS
+sdk_reconnect          OK (9 reconnect events, interval 3600s override)      PASS
+archive fetch          HTTP 200, 24 rows, sha256 recorded                   PASS
+rest_minute_lag        OK, 10 minutes, mark median 192 ms, trade median 101 ms, not_seen 0
+secrets                none in file (only match: the field name binance_common_version)
+Observations only (O-07, plan 16-27), not thresholds:
+ - clock_skew_ms 182..580 (host clock behind Binance); negative arrival latencies and 165 future_close_events follow from that skew.
+ - 1m arrival latency max 2344 ms.
+ - open_events_dropped 67334 (open events are not used).
+ - weight_used_1m not exposed by the SDK.
