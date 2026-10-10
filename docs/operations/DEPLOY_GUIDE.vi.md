@@ -1310,7 +1310,9 @@ Vòng lặp sống, pipeline từng nến, sổ cái mô phỏng, bộ tạo kh�
 
 Kế hoạch 16-32 đã thêm cấu hình triển khai soak vào repository (`[ĐÃ XÂY]` `[CHƯA XÁC MINH]`: chưa chạy trên máy thật). Service `paper` trong `docker-compose.yml` chạy tiến trình paper với cờ `--hold-on-refusal` và probe thật `--healthcheck`, dùng volume `logs`, chính sách restart `on-failure`: khi allowlist rỗng tiến trình thoát 0 và không bị khởi động lại, còn khi cấu hình bị từ chối (mã thoát 3 đến 6) container ở lại, báo không khỏe, thay vì lặp lại khởi động. Script `deploy/compose-soak.sh` luôn chạy project `trading-soak` (volume cơ sở dữ liệu riêng, tách khỏi stack phát triển và các cơ sở dữ liệu kiểm thử) và từ chối lệnh `down` kèm cờ xóa volume (thẻ lệnh bên dưới). Mẫu `deploy/soak.env.example` chỉ liệt kê tên biến, không có giá trị và không có tên khóa giao dịch; một biến có tên bắt đầu bằng tiền tố của khóa giao dịch làm tiến trình paper từ chối khởi động. 
 
-Mọi service `x-app` dùng chung một env_file nên container paper cũng thấy các biến `BACKUP_*` cho tới khi tách env_file theo service ở Phase 24 (WR-06). Phần vận hành soak của runbook (16-33) vẫn chưa tồn tại. Các quy tắc ĐÃ quyết định (D061 hosts): cơ sở dữ liệu soak tách khỏi cơ sở dữ liệu phát triển và kiểm thử; soak chạy từ một image đã ghim chứ không từ cây làm việc; sao lưu phải tồn tại trước soak dài; và không bao giờ chạy `docker compose down` kèm cờ xóa volume trên project soak. Cách một image "đã ghim" được tạo ra (CI hôm nay không đẩy image nào) là việc của 16-33.
+Mọi service `x-app` dùng chung một env_file nên container paper cũng thấy các biến `BACKUP_*` cho tới khi tách env_file theo service ở Phase 24 (WR-06). Kế hoạch 16-33 đã thêm mục 20 của runbook, phần vận hành project soak (chỉ qua script bọc, mỗi lần triển khai trong trial là PLANNED_RESTART không được phủ, bot Telegram riêng, diễn tập trong project riêng, sao lưu và diễn tập khôi phục trước soak dài). Các quy tắc ĐÃ quyết định (D061 hosts): cơ sở dữ liệu soak tách khỏi cơ sở dữ liệu phát triển và kiểm thử; soak chạy từ một image đã ghim chứ không từ cây làm việc; sao lưu phải tồn tại trước soak dài; và không bao giờ chạy `docker compose down` kèm cờ xóa volume trên project soak. Cách một image "đã ghim" được tạo ra (CI hôm nay không đẩy image nào) do người dùng quyết định ngày 2026-10-10 (Q-I, lựa chọn `host-build-recorded`): dựng trên máy chủ tại một commit đã ghi, gắn thẻ bằng commit và ghi mã image.
+
+Script `deploy/soak-image.sh` thực hiện việc đó (thẻ lệnh bên dưới; `[ĐÃ XÂY]` `[CHƯA XÁC MINH]`: chưa chạy trên máy thật). Hai lựa chọn còn lại không phải phương án dự phòng tự động.
 
 ### Thẻ lệnh: deploy/compose-soak.sh
 
@@ -1345,6 +1347,36 @@ Mọi đối số được chuyển nguyên cho compose của project soak; ch�
 **Khi lỗi:** thông báo "refused: down -v on the soak project" nghĩa là lệnh bị chặn có chủ ý; đừng tìm cách vòng qua. Muốn xóa volume soak là quyết định của con người trên máy chủ, sau một buổi diễn tập khôi phục, không bao giờ qua script này.
 
 **Không bao giờ:** gõ trực tiếp `docker compose` kèm `down` và cờ xóa volume trên project soak; đặt giá trị khóa giao dịch vào tệp môi trường soak; chép tệp môi trường thật vào git.
+
+### Thẻ lệnh: deploy/soak-image.sh
+
+> - **Để làm gì:** Dựng image của soak ngay trên máy chủ từ một commit sạch, gắn thẻ image bằng commit đó và ghi lại commit cùng mã image.
+> - **Giải quyết vấn đề gì:** CI hôm nay không đẩy image nào, nên "image đã ghim" cần một cách làm cụ thể; script từ chối cây làm việc còn thay đổi chưa commit, để bằng chứng của trial luôn trỏ tới đúng một commit và một image, và soak không bao giờ chạy từ thư mục làm việc.
+> - **Mức quan trọng:** **BẮT BUỘC** trước khi khởi động soak và sau mỗi commit đổi allowlist hoặc mã nguồn (D-32 và mục 20.6 của RUNBOOK; quyết định Q-I của người dùng, lựa chọn `host-build-recorded`, ghi ở `16-DEC-Q-I.md`).
+
+**Mục đích:** dựng `trading-alert:<commit>` và `trading-alert-ops:<commit>` (commit đầy đủ 40 ký tự) bằng `deploy/compose-soak.sh`, kiểm tra cây làm việc và HEAD không đổi trong lúc dựng, rồi ghi `GIT_SHA`, `IMAGE_TAG`, `APP_IMAGE_ID` và `OPS_IMAGE_ID` vào `.deploy/soak-image.env` (quyền 0600, không vào git; bản cũ giữ thành `soak-image.env.prev`, mỗi lần dựng được nối vào `.deploy/soak-image.history`). Tệp này tách khỏi `last-good.env` của `deploy/update.sh`, vì `update.sh` ghi đè `last-good.env` ở mỗi lần chạy `--ref`.
+
+**Khi nào chạy:** trên máy soak, sau khi checkout đúng commit cần chạy và sau commit đổi allowlist (allowlist là hằng số trong mã nguồn nên image phải được dựng lại sau commit đó); mỗi lần triển khai trong lúc trial cũng bắt đầu bằng lệnh này và là một PLANNED_RESTART không được tính là thời gian có phủ.
+
+**Chạy ở máy nào:** `[MÁY EC2]`, trong checkout; cần Docker và bộ công cụ dựng image như bước khởi động đầu tiên của mục 13.6 của runbook.
+
+**Lệnh:**
+
+```bash
+deploy/soak-image.sh
+```
+
+Sau đó khởi động soak qua script bọc với biến `IMAGE_TAG` bằng giá trị `GIT_SHA` đã ghi, theo lệnh đã cho ở mục 20.6 của runbook (cờ `--no-build` của compose giữ cho compose không dựng thêm gì).
+
+**Chạy thử:** `deploy/soak-image.sh --dry-run` in các lệnh và bản ghi sẽ ghi, không dựng và không ghi gì; việc từ chối cây làm việc bẩn vẫn áp dụng.
+
+**Dấu hiệu thành công:** script in dòng `commit`, hai dòng `image`, lệnh dựng bắt đầu bằng dấu cộng, bản ghi bốn dòng và dòng "soak image recorded"; `docker image inspect --format '{{.Id}}' trading-alert:<commit>` in đúng giá trị `APP_IMAGE_ID` đã ghi.
+
+**Mã thoát:** 0 khi dựng và ghi xong. 1 khi cây làm việc có thay đổi chưa commit (kể cả tệp chưa theo dõi), HEAD đổi trong lúc dựng, hoặc image không tồn tại sau khi dựng. 2 khi dùng tùy chọn sai. Các mã khác là mã của lệnh dựng.
+
+**Khi lỗi:** thông báo "uncommitted changes" nghĩa là phải commit hoặc bỏ thay đổi trước, rồi chạy lại; đừng sửa tệp trong lúc đang dựng. Nếu lệnh dựng lỗi, không có bản ghi nào được ghi và không được khởi động soak từ một image không có bản ghi.
+
+**Không bao giờ:** khởi động soak từ thư mục làm việc gắn vào container (bind mount) hoặc từ một image không có dòng trong `.deploy/soak-image.history`; sửa tay `soak-image.env`; dùng `deploy/update.sh` cho project soak.
 
 #### Bước 7.6 Chuỗi đóng (closure chain) và ai quyết định từng bước [THỦ CÔNG] [CHƯA XÂY]
 
@@ -2170,6 +2202,7 @@ Mọi dòng bên dưới được chép từ các thẻ lệnh và các mục tr
 | refresh-pins, liệt kê offline (`--list`) | `[MÁY PHÁT TRIỂN]` | `deploy/refresh-pins.sh --list` | 10.7 | `[ĐÃ XÂY]` |
 | refresh-pins, tra cứu online (`--lookup`) | `[MÁY CÓ MẠNG]` | `deploy/refresh-pins.sh --lookup` | 10.7 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | soak, chạy compose trên project `trading-soak` (script từ chối `down` kèm cờ xóa volume) | `[MÁY EC2]` | `deploy/compose-soak.sh ps` | 7.5 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| soak, dựng image từ commit sạch và ghi lại commit cùng mã image (`--dry-run` chỉ in) | `[MÁY EC2]` | `deploy/soak-image.sh --dry-run` | 7.5 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 
 ### Sao lưu, khôi phục, diễn tập, hai unit systemd
 
@@ -2234,7 +2267,7 @@ Bảy service: `postgres`, `db-upgrade`, `collector`, `paper` (profile `paper`, 
 | điểm vào của tiến trình paper | `[MÁY EC2]` | chưa có lệnh chạy được (xem bước 7.4); tên dự kiến `python -m src.paper.runtime` | 7.4 | `[CHƯA XÂY]` |
 | các giai đoạn DEMO, CANARY, LIVE | `[MÁY CÓ MẠNG]` | chưa có lệnh nào | 9 | `[CHƯA XÂY]` |
 
-Nguồn: `deploy/bootstrap.sh`, `deploy/lib.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `deploy/refresh-pins.sh`, `deploy/backup.sh`, `deploy/restore.sh`, `deploy/backup-drill.sh`, `deploy/systemd/trading-backup.service`, `deploy/systemd/trading-backup.timer`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`, `scripts/soak_host_acceptance.py`, `scripts/backup-drill.ps1`, `docker-compose.yml`, `docs/operations/RUNBOOK.md`, `deploy/compose-soak.sh`
+Nguồn: `deploy/bootstrap.sh`, `deploy/lib.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `deploy/refresh-pins.sh`, `deploy/backup.sh`, `deploy/restore.sh`, `deploy/backup-drill.sh`, `deploy/systemd/trading-backup.service`, `deploy/systemd/trading-backup.timer`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`, `scripts/soak_host_acceptance.py`, `scripts/backup-drill.ps1`, `docker-compose.yml`, `docs/operations/RUNBOOK.md`, `deploy/compose-soak.sh`, `deploy/soak-image.sh`
 
 ## 15. Danh sách kiểm tra cuối cùng
 

@@ -698,4 +698,18 @@ Before the long soak starts, the host has a verified backup chain: a backup run 
 
 ### 20.6 Image
 
-The soak never runs from a working-tree bind mount. How the pinned soak image is produced is the user's decision: recipe per `decisions/16-DEC-Q-I.md`. Until that record exists, no soak image is built.
+The soak never runs from a working-tree bind mount: the paper service runs from an image built from a named commit, not from the files of a checkout. How that image is produced is the user's decision of 2026-10-10, recorded in `decisions/16-DEC-Q-I.md`: option `host-build-recorded`, build on the host at a recorded commit. No CI step pushes an image (D050 deferred the registry), so the image is not CI-produced; the commit and the image id are what the evidence cites. The options `registry` and `ci-save-transfer` were considered and are not automatic fallbacks: adopting either later is a new user decision, and `registry` also needs a new DECISIONS entry because it reopens D050.
+
+On the soak host, in the checkout, with the commit to run checked out and nothing else changed:
+
+```text
+deploy/soak-image.sh --dry-run
+deploy/soak-image.sh
+IMAGE_TAG=<commit> TRADING_ENV_FILE=/path/to/soak.env deploy/compose-soak.sh --profile paper up -d --no-build
+```
+
+`deploy/soak-image.sh` refuses a dirty working tree (any uncommitted change, tracked or untracked, because the working tree is the build context). It builds `trading-alert:<commit>` and `trading-alert-ops:<commit>` with the soak wrapper, where `<commit>` is the full 40 character output of `git rev-parse HEAD`, checks that the tree and HEAD did not change during the build, and records the commit and both image ids in `.deploy/soak-image.env` (mode 0600, gitignored; the previous record is kept as `soak-image.env.prev` and every build is appended to `.deploy/soak-image.history`). The soak starts only from an image built this way, with `IMAGE_TAG` set to the recorded `GIT_SHA`; `--no-build` keeps compose from building anything else. Before the start, `docker image inspect --format '{{.Id}}' trading-alert:<commit>` must print the recorded `APP_IMAGE_ID`. The trial evidence names `GIT_SHA` and `APP_IMAGE_ID` from that file, and the host needs the build toolchain that the image build uses (`docker compose --profile ops build`, section 13.6).
+
+The paper-start allowlist is a source constant (O-04, plan 16-42), so the image must be rebuilt after the allowlist commit: an image built before that commit carries the earlier allowlist. Build, record and start only after the allowlist commit exists.
+
+**Relation to `deploy/update.sh`.** `deploy/update.sh` (14) updates the ordinary stack: it records `.deploy/last-good.env`, checks out a ref, builds and starts, and it does not go through `deploy/compose-soak.sh`, so the guard of 20.1 does not apply to it. It is not used for the soak project: every `--ref` run overwrites `last-good.env` (14.4), while `soak-image.env` and the history file are the record of which image the soak ran. A deploy during the trial is a new commit, `deploy/soak-image.sh`, `deploy/compose-soak.sh stop paper` and a start with the new `IMAGE_TAG`, and it is a PLANNED_RESTART (20.2). To return to an earlier image, start again with the `IMAGE_TAG` of an earlier line of the history file (the older image stays on the host, because tags are per commit); that is also a PLANNED_RESTART, and a database schema migration applied by the newer image is not undone (14.4).
