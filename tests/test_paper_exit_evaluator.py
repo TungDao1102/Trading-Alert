@@ -9,6 +9,7 @@ plan 16-30 writes; its proof class is FAKE because its manifest source is "fixtu
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
 import inspect
 import json
@@ -21,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from src.core.types import Candle
 from src.paper import coverage as coverage_module
 from src.paper import evidence_bundle as bundle_module
 from src.paper import exit_criteria as exit_module
@@ -35,15 +37,31 @@ from src.paper.exit_criteria import (
     MIN_COVERAGE_FRACTION,
     PARITY_TOLERANCE,
     TRIAL_CALENDAR_DAYS,
+    BackfillRule,
+    ParityReplay,
     ProofClass,
     TrialEvaluation,
     evaluate_trial,
+    parity_criterion,
+    read_backfill_rule,
 )
 from src.paper.runtime_state import RuntimeRecord
+from src.paper.surface import context_record, gate_record
 from src.paper.vocabulary import GapReason, RuntimeEventType
+
+from tests.test_paper_decision_surface import _bar_context, _case_input, _per_bar_context
+from tests.test_paper_runtime_pipeline import Fixture as PipelineFixture
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "evaluate_trial_soak.py"
+QD_DECISION = (
+    REPO_ROOT
+    / ".planning"
+    / "phases"
+    / "16-paper-runtime-composition"
+    / "decisions"
+    / "16-DEC-Q-D.md"
+)
 
 EPOCH_ID = "e" * 64
 OTHER_EPOCH_ID = "d" * 64
@@ -163,15 +181,35 @@ def record_row(
     }
 
 
-def _bar_payload(close: datetime, tick: datetime, interval: str) -> dict[str, Any]:
+def _candle(close: datetime, interval: str) -> Candle:
     open_time = close + ONE_MS - timedelta(hours=1 if interval == "1h" else 4)
+    return Candle(
+        symbol=SYMBOL,
+        interval=interval,
+        open_time_utc=open_time,
+        close_time_utc=close,
+        open=Decimal("100"),
+        high=Decimal("101"),
+        low=Decimal("99"),
+        close=Decimal("100"),
+        volume=Decimal("10"),
+    )
+
+
+def _bar_payload(close: datetime, tick: datetime, interval: str) -> dict[str, Any]:
+    """A processed-bar payload as the pipeline writes it. With fewer than 200 4h bars the
+    warm-up gate rejects every 1h bar, so the recorded surface is a feed-gate record."""
+    candle = _candle(close, interval)
+    surface = (
+        gate_record(candle, "WARMUP_INSUFFICIENT") if interval == "1h" else context_record(candle)
+    )
     return {
         "source": "LIVE_WS",
         "tick_time_utc": _iso(tick),
         "bar": {
             "symbol": SYMBOL,
             "interval": interval,
-            "open_time_utc": _iso(open_time),
+            "open_time_utc": _iso(candle.open_time_utc),
             "close_time_utc": _iso(close),
             "open": "100",
             "high": "101",
@@ -179,9 +217,10 @@ def _bar_payload(close: datetime, tick: datetime, interval: str) -> dict[str, An
             "close": "100",
             "volume": "10",
         },
-        "stage": "feed_gate" if interval == "1h" else "context",
-        "reason_code": "WARMUP_INSUFFICIENT" if interval == "1h" else "CONTEXT_BAR",
+        "stage": surface.stage,
+        "reason_code": surface.reason_code,
         "plan_hash": None,
+        "surface": surface.to_dict(),
     }
 
 
@@ -199,6 +238,10 @@ def trial_rows(
     restart spans no close; the 2-hour disconnect swallows two 1h closes, each recorded as a
     PAPER_GAP with its reason.
     """
+    stop_at = pin + (STOP_AT - PIN)
+    restart_at = pin + (RESTART_AT - PIN)
+    drop_at = pin + (DROP_AT - PIN)
+    reconnect_at = pin + (RECONNECT_AT - PIN)
     records: list[dict[str, Any]] = [
         record_row(RuntimeEventType.RUNTIME_START, pin, epoch_id=epoch_id),
         record_row(RuntimeEventType.WS_RECONNECT, pin, epoch_id=epoch_id),
@@ -206,7 +249,7 @@ def trial_rows(
     for k in range(1, hours + 1):
         tick = pin + timedelta(hours=k)
         close = tick - ONE_MS
-        down = with_disturbances and (DROP_AT < tick <= RECONNECT_AT)
+        down = with_disturbances and (drop_at < tick <= reconnect_at)
         if down:
             for interval in ("1h", "4h") if k % 4 == 0 else ("1h",):
                 records.append(
@@ -250,11 +293,11 @@ def trial_rows(
             )
         )
     if with_disturbances:
-        records.append(record_row(RuntimeEventType.RUNTIME_STOP, STOP_AT, epoch_id=epoch_id))
-        records.append(record_row(RuntimeEventType.RUNTIME_START, RESTART_AT, epoch_id=epoch_id))
-        records.append(record_row(RuntimeEventType.WS_RECONNECT, RESTART_AT, epoch_id=epoch_id))
-        records.append(record_row(RuntimeEventType.WS_DISCONNECT, DROP_AT, epoch_id=epoch_id))
-        records.append(record_row(RuntimeEventType.WS_RECONNECT, RECONNECT_AT, epoch_id=epoch_id))
+        records.append(record_row(RuntimeEventType.RUNTIME_STOP, stop_at, epoch_id=epoch_id))
+        records.append(record_row(RuntimeEventType.RUNTIME_START, restart_at, epoch_id=epoch_id))
+        records.append(record_row(RuntimeEventType.WS_RECONNECT, restart_at, epoch_id=epoch_id))
+        records.append(record_row(RuntimeEventType.WS_DISCONNECT, drop_at, epoch_id=epoch_id))
+        records.append(record_row(RuntimeEventType.WS_RECONNECT, reconnect_at, epoch_id=epoch_id))
 
     minute = int(cron.split()[0])
     diff_lines: list[dict[str, Any]] = []
@@ -316,10 +359,34 @@ def trial_bundle(trial_dir: Path) -> EvidenceBundle:
     return load_evidence_bundle(trial_dir)
 
 
+_PARITY: list[ParityReplay] = []
+
+
+def fixture_parity() -> ParityReplay:
+    """Replay inputs for the synthetic fixture: any context of the symbol (the fixture never
+    leaves the warm-up gate, so the context is read for its symbol only)."""
+    if not _PARITY:
+        case = _case_input()
+        context = _bar_context(case, PIN)
+        _PARITY.append(ParityReplay(context=lambda _candle: context))
+    return _PARITY[0]
+
+
 def _evaluate(
-    bundle: EvidenceBundle, *, thresholds: HealthThresholds = THRESHOLDS
+    bundle: EvidenceBundle,
+    *,
+    thresholds: HealthThresholds = THRESHOLDS,
+    backfill_rule: BackfillRule = BackfillRule.HISTORY_ONLY,
+    parity: ParityReplay | None = None,
 ) -> TrialEvaluation:
-    return evaluate_trial(bundle, thresholds=thresholds, cron=CRON, symbols=(SYMBOL,))
+    return evaluate_trial(
+        bundle,
+        thresholds=thresholds,
+        cron=CRON,
+        symbols=(SYMBOL,),
+        backfill_rule=backfill_rule,
+        parity=fixture_parity() if parity is None else parity,
+    )
 
 
 def _result(evaluation: TrialEvaluation, name_part: str) -> Any:
@@ -517,7 +584,7 @@ def test_evaluate_trial_requires_thresholds_and_cron_with_no_default(
     with pytest.raises(TypeError):
         evaluate_trial(trial_bundle, thresholds=THRESHOLDS, symbols=(SYMBOL,))  # type: ignore[call-arg]
     parameters = inspect.signature(evaluate_trial).parameters
-    for name in ("thresholds", "cron", "symbols"):
+    for name in ("thresholds", "cron", "symbols", "backfill_rule", "parity"):
         assert parameters[name].default is inspect.Parameter.empty
 
 
@@ -674,9 +741,12 @@ def test_cli_writes_the_printed_lines_and_the_exit_code_follows_the_verdict(
             str(config),
             "--workflow",
             str(_workflow(tmp_path)),
+            "--q-d-decision",
+            str(QD_DECISION),
             "--out",
             str(out),
-        ]
+        ],
+        parity=fixture_parity(),
     )
     printed = capsys.readouterr().out
     assert code == 0
@@ -702,9 +772,12 @@ def test_cli_exits_one_when_a_criterion_fails(
             str(config),
             "--workflow",
             str(_workflow(tmp_path)),
+            "--q-d-decision",
+            str(QD_DECISION),
             "--out",
             str(out),
-        ]
+        ],
+        parity=fixture_parity(),
     )
     printed = capsys.readouterr().out
     assert code == 1
@@ -727,6 +800,8 @@ def test_cli_refuses_a_tampered_bundle_with_exit_two(
             str(config),
             "--workflow",
             str(_workflow(tmp_path)),
+            "--q-d-decision",
+            str(QD_DECISION),
             "--out",
             str(tmp_path / "evaluation.txt"),
         ]
@@ -734,3 +809,540 @@ def test_cli_refuses_a_tampered_bundle_with_exit_two(
     assert code == 2
     assert "runtime_records.jsonl" in capsys.readouterr().err
     assert not (tmp_path / "evaluation.txt").exists()
+
+
+def test_without_the_replay_seam_the_command_line_does_not_pass_parity(
+    trial_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The command line has no replay context of its own: parity is NOT EVALUATED, never PASS."""
+    script = _load_script()
+    config = tmp_path / "paper-runtime.toml"
+    config.write_text(RATIFIED_CONFIG, encoding="utf-8")
+    code = script.main(
+        [
+            "--bundle",
+            str(trial_dir),
+            "--config",
+            str(config),
+            "--workflow",
+            str(_workflow(tmp_path)),
+            "--q-d-decision",
+            str(QD_DECISION),
+            "--out",
+            str(tmp_path / "evaluation.txt"),
+        ]
+    )
+    printed = capsys.readouterr().out
+    assert code == 1
+    assert "FAIL  parity" in printed
+    assert "NOT EVALUATED" in printed
+
+
+def test_the_command_line_requires_the_q_d_decision_file(trial_dir: Path, tmp_path: Path) -> None:
+    script = _load_script()
+    config = tmp_path / "paper-runtime.toml"
+    config.write_text(RATIFIED_CONFIG, encoding="utf-8")
+    with pytest.raises(SystemExit) as raised:
+        script.main(
+            [
+                "--bundle",
+                str(trial_dir),
+                "--config",
+                str(config),
+                "--workflow",
+                str(_workflow(tmp_path)),
+                "--out",
+                str(tmp_path / "evaluation.txt"),
+            ]
+        )
+    assert raised.value.code == 2
+
+
+# =========================================================================== #
+# Task 2: parity, gap, restart, duplicate, missing-row, test-signal and epoch checks.
+# =========================================================================== #
+
+
+def _names(evaluation: TrialEvaluation) -> list[str]:
+    return [r.name for g in evaluation.groups for r in g.results]
+
+
+def _evaluated_with(tmp_path: Path, mutate: Any = None, **kwargs: Any) -> TrialEvaluation:
+    fixture = make_fixture()
+    if mutate is not None:
+        mutate(fixture)
+    return _evaluate(_write_and_load(fixture, tmp_path / "bundle"), **kwargs)
+
+
+def _row(
+    fixture: TrialFixture, event_type: RuntimeEventType, k: int, interval: str
+) -> dict[str, Any]:
+    """The record row of an event type at the close of the k-th hour of the trial."""
+    close = _iso(PIN + timedelta(hours=k) - ONE_MS)
+    matches = [
+        r
+        for r in fixture.records
+        if r["event_type"] == event_type.value
+        and r["interval"] == interval
+        and r["occurred_at_utc"] == close
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def test_the_all_pass_fixture_passes_every_criterion_of_every_group(
+    trial_bundle: EvidenceBundle,
+) -> None:
+    evaluation = _evaluate(trial_bundle)
+    failing = [r.name for g in evaluation.groups for r in g.results if not r.passed]
+    assert failing == []
+    assert evaluation.passed
+    for expected in (
+        "gaps explained",
+        "restart warm-up",
+        "no duplicate signal",
+        "no missing journal row",
+        "no test signal",
+        "runtime records of one epoch",
+        "parity",
+    ):
+        assert any(expected in name for name in _names(evaluation)), expected
+
+
+# ---- Test 1: parity, tolerance zero --------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def parity_world() -> tuple[PipelineFixture, tuple[RuntimeRecord, ...], ParityReplay]:
+    from tests.test_paper_decision_surface import PASSING_BAR
+
+    fx = PipelineFixture()
+    fx.warm_up()
+    fx.pipeline.handle([fx.live()], now_utc=fx.now)
+    records = tuple(fx.bar_records())
+    replay = ParityReplay(
+        context=_per_bar_context(fx.case),
+        history_bars=(*fx.setup[:PASSING_BAR], *fx.context),
+    )
+    return fx, records, replay
+
+
+def _with_payload(record: RuntimeRecord, **changes: Any) -> RuntimeRecord:
+    payload = dict(record.payload)
+    payload.update(changes)
+    return RuntimeRecord(
+        event_type=record.event_type,
+        epoch_id=record.epoch_id,
+        occurred_at_utc=record.occurred_at_utc,
+        symbol=record.symbol,
+        interval=record.interval,
+        payload=payload,
+    )
+
+
+def test_parity_replays_the_recorded_bars_and_matches_the_live_surface(
+    parity_world: tuple[PipelineFixture, tuple[RuntimeRecord, ...], ParityReplay],
+) -> None:
+    _, records, replay = parity_world
+    result = parity_criterion(records, replay)
+    assert result.passed, result.evidence
+    text = "\n".join(result.evidence)
+    assert "risk_passed" in text
+    assert f"tolerance {PARITY_TOLERANCE}" in text
+
+
+def test_one_altered_recorded_feature_digest_fails_parity_and_names_the_bar_close(
+    parity_world: tuple[PipelineFixture, tuple[RuntimeRecord, ...], ParityReplay],
+) -> None:
+    fx, records, replay = parity_world
+    [record] = records
+    surface = dict(record.payload["surface"])
+    surface["feature_digest"] = "0" * 64
+    altered = _with_payload(record, surface=surface)
+    result = parity_criterion((altered,), replay)
+    assert not result.passed
+    text = "\n".join(result.evidence)
+    assert fx.last_1h.close_time_utc.isoformat() in text
+    assert "feature_digest" in text
+
+
+def test_parity_without_a_replay_context_is_not_evaluated_and_never_passes(
+    parity_world: tuple[PipelineFixture, tuple[RuntimeRecord, ...], ParityReplay],
+) -> None:
+    _, records, _ = parity_world
+    result = parity_criterion(records, None)
+    assert not result.passed
+    assert "NOT EVALUATED" in "\n".join(result.evidence)
+    empty = parity_criterion((), fixture_parity())
+    assert not empty.passed
+    assert "no processed bar" in "\n".join(empty.evidence)
+
+
+def test_a_stale_tick_is_replayed_from_the_recorded_tick_time(
+    parity_world: tuple[PipelineFixture, tuple[RuntimeRecord, ...], ParityReplay],
+) -> None:
+    fx, records, replay = parity_world
+    [record] = records
+    late_tick = (fx.last_1h.close_time_utc + timedelta(seconds=61)).isoformat()
+    stale_surface = gate_record(fx.last_1h, "DATA_STALE").to_dict()
+    honest = _with_payload(record, tick_time_utc=late_tick, surface=stale_surface)
+    assert parity_criterion((honest,), replay).passed
+    # The same late tick with an evaluated surface is a decision the freshness gate forbids.
+    dishonest = _with_payload(record, tick_time_utc=late_tick)
+    result = parity_criterion((dishonest,), replay)
+    assert not result.passed
+    assert "DATA_STALE" in "\n".join(result.evidence)
+
+
+# ---- Test 2: gaps, no fabricated bar -------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("reason", ["UNKNOWN", "SOMETHING_ELSE", None])
+def test_a_gap_without_a_real_reason_code_fails(tmp_path: Path, reason: str | None) -> None:
+    def mutate(fixture: TrialFixture) -> None:
+        gap = _row(fixture, RuntimeEventType.PAPER_GAP, 173, "1h")
+        if reason is None:
+            del gap["payload"]["reason"]
+        else:
+            gap["payload"]["reason"] = reason
+
+    evaluation = _evaluated_with(tmp_path, mutate)
+    result = _result(evaluation, "gaps explained")
+    assert not result.passed
+    assert (PIN + timedelta(hours=173) - ONE_MS).isoformat() in "\n".join(result.evidence)
+
+
+@pytest.mark.parametrize("source", ["REST_WARMUP", "REST_BACKFILL", "SOMEWHERE"])
+def test_an_evaluated_bar_from_warmup_or_backfill_is_late_or_fabricated(
+    tmp_path: Path, source: str
+) -> None:
+    def mutate(fixture: TrialFixture) -> None:
+        _row(fixture, RuntimeEventType.PAPER_BAR_PROCESSED, 40, "1h")["payload"]["source"] = source
+
+    result = _result(_evaluated_with(tmp_path, mutate), "gaps explained")
+    assert not result.passed
+    assert "late or fabricated bar" in "\n".join(result.evidence)
+
+
+def test_a_bar_processed_before_it_closed_is_fabricated(tmp_path: Path) -> None:
+    def mutate(fixture: TrialFixture) -> None:
+        row = _row(fixture, RuntimeEventType.PAPER_BAR_PROCESSED, 40, "1h")
+        row["payload"]["tick_time_utc"] = _iso(PIN + timedelta(hours=40) - timedelta(minutes=5))
+
+    result = _result(_evaluated_with(tmp_path, mutate), "gaps explained")
+    assert not result.passed
+    assert "late or fabricated bar" in "\n".join(result.evidence)
+
+
+def test_the_q_d_rule_is_read_from_the_decision_file_and_never_defaulted(tmp_path: Path) -> None:
+    assert read_backfill_rule(QD_DECISION) is BackfillRule.HISTORY_ONLY
+    fresh = tmp_path / "q-d.md"
+    fresh.write_text("option: fresh-within-bound\ndecided by: user\n", encoding="utf-8")
+    assert read_backfill_rule(fresh) is BackfillRule.FRESH_WITHIN_BOUND
+    for text in ("decided by: user\n", "option: something-else\n", ""):
+        bad = tmp_path / "bad.md"
+        bad.write_text(text, encoding="utf-8")
+        with pytest.raises(ValueError, match="option"):
+            read_backfill_rule(bad)
+    with pytest.raises(FileNotFoundError):
+        read_backfill_rule(tmp_path / "missing.md")
+    assert inspect.signature(read_backfill_rule).parameters["path"].default is (
+        inspect.Parameter.empty
+    )
+
+
+def test_a_backfill_bar_is_not_accepted_under_fresh_within_bound_without_a_ratified_bound(
+    tmp_path: Path,
+) -> None:
+    def mutate(fixture: TrialFixture) -> None:
+        row = _row(fixture, RuntimeEventType.PAPER_BAR_PROCESSED, 40, "1h")
+        row["payload"]["source"] = "REST_BACKFILL"
+
+    evaluation = _evaluated_with(tmp_path, mutate, backfill_rule=BackfillRule.FRESH_WITHIN_BOUND)
+    result = _result(evaluation, "gaps explained")
+    assert not result.passed
+    assert "no ratified bound" in "\n".join(result.evidence)
+
+
+# ---- Test 3: restart, duplicates, missing rows ---------------------------------------------- #
+
+
+def test_a_bar_that_closed_while_the_process_was_down_is_never_evaluated(tmp_path: Path) -> None:
+    def mutate(fixture: TrialFixture) -> None:
+        close = RESTART_AT - timedelta(minutes=10)
+        tick = RESTART_AT + timedelta(minutes=1)
+        payload = _bar_payload(close, tick, "1h")
+        payload["stage"] = "risk_passed"
+        payload["reason_code"] = "OK"
+        fixture.records.append(
+            record_row(
+                RuntimeEventType.PAPER_BAR_PROCESSED,
+                close,
+                symbol=SYMBOL,
+                interval="1h",
+                payload=payload,
+            )
+        )
+
+    result = _result(_evaluated_with(tmp_path, mutate), "restart warm-up")
+    assert not result.passed
+    assert "closed while the process was down" in "\n".join(result.evidence)
+
+
+def test_an_evaluated_bar_after_the_restart_passes_the_restart_check(tmp_path: Path) -> None:
+    def mutate(fixture: TrialFixture) -> None:
+        row = _row(fixture, RuntimeEventType.PAPER_BAR_PROCESSED, 100, "1h")
+        row["payload"]["stage"] = "risk_passed"
+        row["payload"]["reason_code"] = "OK"
+
+    result = _result(_evaluated_with(tmp_path, mutate), "restart warm-up")
+    assert result.passed, result.evidence
+
+
+def test_two_records_for_one_bar_are_a_duplicate_signal(tmp_path: Path) -> None:
+    def mutate(fixture: TrialFixture) -> None:
+        original = _row(fixture, RuntimeEventType.PAPER_BAR_PROCESSED, 10, "1h")
+        fixture.records.append(json.loads(json.dumps(original)))
+
+    result = _result(_evaluated_with(tmp_path, mutate), "no duplicate signal")
+    assert not result.passed
+    assert "duplicate signal" in "\n".join(result.evidence)
+
+
+def test_one_signal_id_on_two_bars_is_a_duplicate_signal(tmp_path: Path) -> None:
+    def mutate(fixture: TrialFixture) -> None:
+        for k in (10, 11):
+            row = _row(fixture, RuntimeEventType.PAPER_BAR_PROCESSED, k, "1h")
+            row["payload"]["surface"]["signal_id"] = "sig-1"
+
+    result = _result(_evaluated_with(tmp_path, mutate), "no duplicate signal")
+    assert not result.passed
+    assert "sig-1" in "\n".join(result.evidence)
+
+
+def test_an_expected_close_with_neither_a_bar_nor_a_gap_is_a_missing_journal_row(
+    tmp_path: Path,
+) -> None:
+    def mutate(fixture: TrialFixture) -> None:
+        fixture.records.remove(_row(fixture, RuntimeEventType.PAPER_BAR_PROCESSED, 50, "1h"))
+        fixture.records.remove(_row(fixture, RuntimeEventType.PAPER_GAP, 173, "1h"))
+
+    result = _result(_evaluated_with(tmp_path, mutate), "no missing journal row")
+    assert not result.passed
+    text = "\n".join(result.evidence)
+    assert "missing journal row" in text
+    assert (PIN + timedelta(hours=50) - ONE_MS).isoformat() in text
+    assert (PIN + timedelta(hours=173) - ONE_MS).isoformat() in text
+
+
+# ---- Test 4: REV-03, REV-18, SC8 ------------------------------------------------------------ #
+
+
+def test_a_test_only_record_inside_the_soak_window_fails_the_trial(tmp_path: Path) -> None:
+    def mutate(fixture: TrialFixture) -> None:
+        row = _row(fixture, RuntimeEventType.PAPER_BAR_PROCESSED, 60, "1h")
+        row["payload"]["test_only"] = True
+
+    evaluation = _evaluated_with(tmp_path, mutate)
+    result = _result(evaluation, "no test signal")
+    assert not result.passed
+    assert "test signal inside the soak window" in "\n".join(result.evidence)
+    assert not evaluation.passed
+
+
+def test_an_evidence_gap_record_fails_freeze_and_names_the_restart_rule(tmp_path: Path) -> None:
+    def mutate(fixture: TrialFixture) -> None:
+        fixture.gaps.append(
+            {
+                "slot_utc": _iso(PIN + timedelta(days=3, minutes=17)),
+                "schedule": CRON,
+                "reason": "NO_RUN_FOUND",
+                "detected_at_utc": _iso(PIN + timedelta(days=3, hours=2)),
+                "run_id": None,
+            }
+        )
+
+    result = _result(_evaluated_with(tmp_path, mutate), "freeze continuity")
+    assert not result.passed
+    assert "qualifying trial restarts with a new epoch pin (D065 item 4)" in "\n".join(
+        result.evidence
+    )
+
+
+def test_a_runtime_record_of_another_epoch_inside_the_window_fails(tmp_path: Path) -> None:
+    def mutate(fixture: TrialFixture) -> None:
+        fixture.records.append(
+            record_row(
+                RuntimeEventType.WS_RECONNECT, PIN + timedelta(days=5), epoch_id=OTHER_EPOCH_ID
+            )
+        )
+
+    result = _result(_evaluated_with(tmp_path, mutate), "runtime records of one epoch")
+    assert not result.passed
+    assert OTHER_EPOCH_ID in "\n".join(result.evidence)
+
+
+# ---- Test 5: two separate result groups ----------------------------------------------------- #
+
+
+def test_freeze_and_runtime_criteria_read_disjoint_inputs() -> None:
+    freeze_fields = {f.name for f in dataclasses.fields(exit_module._FreezeInputs)}
+    runtime_fields = {f.name for f in dataclasses.fields(exit_module._RuntimeInputs)}
+    runtime_only = {"records", "coverage", "parity", "backfill_rule", "symbols"}
+    freeze_only = {"diff_records", "report", "pinned_hash", "pinned_epoch_id"}
+    assert runtime_only <= runtime_fields and not (runtime_only & freeze_fields)
+    assert freeze_only <= freeze_fields and not (freeze_only & runtime_fields)
+
+
+def test_removing_all_runtime_records_changes_no_freeze_result_and_the_reverse(
+    trial_bundle: EvidenceBundle,
+) -> None:
+    base = {g.name: g for g in _evaluate(trial_bundle).groups}
+
+    no_runtime = {
+        g.name: g for g in _evaluate(dataclasses.replace(trial_bundle, records=())).groups
+    }
+    assert no_runtime["freeze integrity"] == base["freeze integrity"]
+    assert not no_runtime["runtime health"].results[0].passed
+
+    stripped = dataclasses.replace(
+        trial_bundle, freeze_lines=(), diff_records=(), runs=(), evidence_gaps=()
+    )
+    no_freeze = _evaluate(stripped)
+    assert {g.name: g for g in no_freeze.groups}["runtime health"] == base["runtime health"]
+    assert not no_freeze.freeze.qualifying_from_pin
+
+
+def test_the_grace_reaches_only_the_freeze_reconciler() -> None:
+    source = Path(inspect.getsourcefile(exit_module) or "").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    uses = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "freeze_tick_grace_seconds"
+    ]
+    assert len(uses) == 1
+    calls = [
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "freeze_evidence_report"
+        and any(kw.value is uses[0] for kw in call.keywords)
+    ]
+    assert len(calls) == 1
+
+
+# ---- Test 6: earlier epoch is auxiliary (REV-18) -------------------------------------------- #
+
+E1 = "1" * 64
+E2 = "2" * 64
+E2_PIN = PIN + timedelta(days=20)
+
+
+def _two_epoch_fixture(epoch: str) -> tuple[TrialFixture, dict[str, Any]]:
+    """Inputs holding E1 (ended by a missing freeze tick) and E2 (pinned 20 days later)."""
+    records1, lines1, runs1 = trial_rows(epoch_id=E1, pin=PIN)
+    missing = runs1.pop(100)
+    lines1 = [ln for ln in lines1 if ln["run_metadata"]["run_id"] != str(missing["id"])]
+    records2, lines2, runs2 = trial_rows(epoch_id=E2, pin=E2_PIN)
+    for run in runs2:
+        run["id"] += 5000
+    for line in lines2:
+        line["run_metadata"]["run_id"] = str(int(line["run_metadata"]["run_id"]) + 5000)
+    slot1 = datetime.fromisoformat(missing["created_at"]) - timedelta(seconds=20)
+    gap1 = {
+        "slot_utc": _iso(slot1),
+        "schedule": CRON,
+        "reason": "NO_RUN_FOUND",
+        "detected_at_utc": _iso(slot1 + timedelta(hours=2)),
+        "run_id": None,
+    }
+    pin = PIN if epoch == E1 else E2_PIN
+    fixture = TrialFixture(
+        epoch_id=epoch,
+        pin=pin,
+        window_end=pin + timedelta(days=14),
+        records=records1 + records2,
+        diff_lines=lines1 + lines2,
+        runs=runs1 + runs2,
+        gaps=[gap1],
+    )
+    return fixture, gap1
+
+
+def _bytes_of(directory: Path) -> dict[str, bytes]:
+    return {p.name: p.read_bytes() for p in sorted(directory.iterdir())}
+
+
+def test_earlier_epoch_evidence_is_auxiliary_and_never_qualifies_the_new_trial(
+    tmp_path: Path,
+) -> None:
+    fixture, _ = _two_epoch_fixture(E2)
+    directory = fixture.write(tmp_path / "e2")
+    before = _bytes_of(directory)
+    bundle = load_evidence_bundle(directory)
+    snapshot = (bundle.records, bundle.freeze_lines, bundle.runs, bundle.evidence_gaps)
+
+    evaluation = _evaluate(bundle)
+    assert evaluation.passed, [
+        (r.name, r.evidence) for g in evaluation.groups for r in g.results if not r.passed
+    ]
+    text = evaluation.render()
+    assert "auxiliary evidence (not qualifying)" in text
+    assert f"runtime records of earlier epoch {E1}" in text
+    assert "EVIDENCE_GAP records of earlier epochs: 1" in text
+    assert "freeze lines at or before the pin: 335" in text
+    assert "earlier-epoch evidence cannot complete the freeze criterion of the new trial" in text
+    # Nothing was dropped or edited: the files and the parsed inputs are unchanged.
+    assert _bytes_of(directory) == before
+    assert (bundle.records, bundle.freeze_lines, bundle.runs, bundle.evidence_gaps) == snapshot
+    # No E1 item satisfied a slot or coloured an interval of E2.
+    assert evaluation.freeze.satisfied_slots[0] > E2_PIN
+    assert len(evaluation.freeze.slots) == 336
+    assert evaluation.coverage.window_start_utc == E2_PIN
+
+
+def test_evaluating_the_same_inputs_as_epoch_e1_reproduces_its_evidence_gap(
+    tmp_path: Path,
+) -> None:
+    fixture, gap1 = _two_epoch_fixture(E1)
+    evaluation = _evaluate(_write_and_load(fixture, tmp_path / "e1"))
+    freeze = _result(evaluation, "freeze continuity")
+    assert not freeze.passed
+    assert [g.slot_utc for g in evaluation.freeze.gaps] == [
+        datetime.fromisoformat(gap1["slot_utc"])
+    ]
+    assert "qualifying trial restarts with a new epoch pin (D065 item 4)" in "\n".join(
+        freeze.evidence
+    )
+    # E2's lines and records are auxiliary to E1 and do not break E1's other criteria.
+    assert _result(evaluation, "single epoch").passed
+    assert _result(evaluation, "runtime records of one epoch").passed
+
+
+# ---- Test 7: observations are report-only --------------------------------------------------- #
+
+
+def test_observations_are_report_only_and_change_no_verdict(tmp_path: Path) -> None:
+    loaded_base = _write_and_load(make_fixture(), tmp_path / "base")
+    changed = make_fixture()
+    ticks = [
+        row
+        for row in changed.records
+        if row["event_type"] == RuntimeEventType.PAPER_TICK_STATS.value
+    ]
+    for row in ticks:
+        row["payload"]["duration_ms"] = 9000
+        row["payload"]["queue_depth_before"] = 40
+    ticks[0]["payload"]["dropped_total"] = 1
+    ticks[0]["payload"]["dropped_by_reason"] = {"FUTURE_CLOSE": 1}
+    loaded_changed = _write_and_load(changed, tmp_path / "changed")
+
+    first, second = _evaluate(loaded_base), _evaluate(loaded_changed)
+    assert first.groups == second.groups
+    assert first.observations != second.observations
+    assert any("FUTURE_CLOSE=1" in line for line in second.observations)
+    assert any("max 9000" in line for line in second.observations)
+    assert "observations (not criteria)" in second.render()
+    assert first.passed and second.passed
