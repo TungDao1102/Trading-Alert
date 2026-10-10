@@ -1,0 +1,101 @@
+{
+  "schema": "soak-host-acceptance/1",
+  "conditions": {
+    "REGION_PING_FAPI": {
+      "status": "PENDING",
+      "command": "curl -sS -o /dev/null -w \"%{http_code}\" https://fapi.binance.com/fapi/v1/ping",
+      "evidence": "",
+      "checked_at": null
+    },
+    "ELASTIC_IP": {
+      "status": "PENDING",
+      "command": "aws ec2 describe-addresses --region ap-southeast-1 --query Addresses[].{IP:PublicIp,AllocationId:AllocationId,AttachedInstance:InstanceId}",
+      "evidence": "",
+      "checked_at": null
+    },
+    "EBS_ENCRYPTED_BY_DEFAULT": {
+      "status": "PENDING",
+      "command": "aws ec2 enable-ebs-encryption-by-default --region ap-southeast-1",
+      "evidence": "",
+      "checked_at": null
+    },
+    "EBS_ROOT_VOLUME_ENCRYPTED": {
+      "status": "PENDING",
+      "command": "aws ec2 describe-volumes --region ap-southeast-1 --filters Name=attachment.instance-id,Values=i-055f77185ab4903d9 --query Volumes[*].Encrypted",
+      "evidence": "",
+      "checked_at": null
+    },
+    "S3_BUCKET_PRIVATE": {
+      "status": "PENDING",
+      "command": "aws s3api get-public-access-block --bucket mrtung-trading-bucket ; aws s3api get-bucket-policy-status --bucket mrtung-trading-bucket ; aws s3api get-bucket-acl --bucket mrtung-trading-bucket",
+      "evidence": "",
+      "checked_at": null
+    },
+    "S3_DEFAULT_ENCRYPTION": {
+      "status": "PENDING",
+      "command": "aws s3api get-bucket-encryption --bucket mrtung-trading-bucket",
+      "evidence": "",
+      "checked_at": null
+    },
+    "S3_VERSIONING": {
+      "status": "PENDING",
+      "command": "aws s3api get-bucket-versioning --bucket mrtung-trading-bucket",
+      "evidence": "",
+      "checked_at": null
+    },
+    "HEARTBEAT_MONITOR_ALERT_RECEIVED": {
+      "status": "PENDING",
+      "command": "docker compose stop collector ; cho qua chu ky + grace ; docker compose start collector",
+      "evidence": "",
+      "checked_at": null
+    },
+    "CHRONY_SYNCED": {
+      "status": "PENDING",
+      "command": "chronyc tracking ; chronyc sources",
+      "evidence": "",
+      "checked_at": null
+    },
+    "BUDGET_ALERT": {
+      "status": "PENDING",
+      "command": "aws budgets describe-budgets --account-id <account-id> ; aws budgets describe-notifications-for-budget --account-id <account-id> --budget-name <budget-name>",
+      "evidence": "",
+      "checked_at": null
+    },
+    "PAID_PLAN": {
+      "status": "PENDING",
+      "command": "mo trang Billing and Cost Management trong trinh duyet, doc goi tai khoan (khong co lenh)",
+      "evidence": "",
+      "checked_at": null
+    },
+    "SSH_KEY_ONLY": {
+      "status": "PENDING",
+      "command": "sudo sshd -T ; ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no trading@<elastic-ip>",
+      "evidence": "",
+      "checked_at": null
+    },
+    "POSTGRES_NOT_PUBLIC": {
+      "status": "PENDING",
+      "command": "docker compose ps postgres ; sudo ss -ltn ; aws ec2 describe-security-groups --region ap-southeast-1",
+      "evidence": "",
+      "checked_at": null
+    },
+    "ENV_FILE_MODE_0600": {
+      "status": "PENDING",
+      "command": "stat -c \"%a %U\" /opt/trading/.env",
+      "evidence": "",
+      "checked_at": null
+    },
+    "SUDO_WITH_PASSWORD": {
+      "status": "PENDING",
+      "command": "sudo -k ; sudo -v ; passwd -S trading",
+      "evidence": "",
+      "checked_at": null
+    },
+    "BACKUP_REAL_S3_GATE": {
+      "status": "PENDING",
+      "command": "khong co lenh trong repository - bang chung D064",
+      "evidence": "",
+      "checked_at": null
+    }
+  }
+}
