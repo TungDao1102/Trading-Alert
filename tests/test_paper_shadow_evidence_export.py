@@ -73,18 +73,23 @@ def _confirm(case: dict[str, Any]) -> dict[str, str]:
 
 
 def _row(
-    epoch_id: str, case: dict[str, Any], *, test_only: bool = False, **kwargs: Any
+    epoch_id: str,
+    case: dict[str, Any],
+    *,
+    test_only: bool = False,
+    tag: str = "",
+    **kwargs: Any,
 ) -> ShadowRow:
+    signal = dict(case["signal"])
+    trade_plan = dict(case["trade_plan"])
+    signal["signal_id"] += tag
+    trade_plan["plan_hash"] += tag
     return ShadowRow(
-        epoch_id=epoch_id,
-        signal=case["signal"],
-        trade_plan=case["trade_plan"],
-        test_only=test_only,
-        **kwargs,
+        epoch_id=epoch_id, signal=signal, trade_plan=trade_plan, test_only=test_only, **kwargs
     )
 
 
-def _shadow_rows(*, test_only: bool = False) -> list[ShadowRow]:
+def _shadow_rows(*, test_only: bool = False, tag: str = "") -> list[ShadowRow]:
     """APPROVE then CONFIRM, a SKIP, an expired press and an untouched plan."""
     epoch_id, cases = _cases()
     filled = cases["filled_simulation"]
@@ -98,6 +103,7 @@ def _shadow_rows(*, test_only: bool = False) -> list[ShadowRow]:
             epoch_id,
             filled,
             test_only=test_only,
+            tag=tag,
             approval=_approval(filled, "APPROVE"),
             order=filled["order"],
             fill=filled["fill"],
@@ -110,6 +116,7 @@ def _shadow_rows(*, test_only: bool = False) -> list[ShadowRow]:
             epoch_id,
             skipped,
             test_only=test_only,
+            tag=tag,
             approval=_approval(skipped, "SKIP_USER"),
             shadow_outcome=ShadowOutcome(approval_action="SKIP_USER"),
         ),
@@ -117,10 +124,11 @@ def _shadow_rows(*, test_only: bool = False) -> list[ShadowRow]:
             epoch_id,
             expired,
             test_only=test_only,
+            tag=tag,
             approval=_approval(expired, "APPROVE"),
             shadow_outcome=ShadowOutcome(approval_rejection_reason="APPROVAL_EXPIRED"),
         ),
-        _row(epoch_id, untouched, test_only=test_only, shadow_outcome=ShadowOutcome()),
+        _row(epoch_id, untouched, test_only=test_only, tag=tag, shadow_outcome=ShadowOutcome()),
     ]
 
 
@@ -257,3 +265,88 @@ def test_measured_timestamps_and_the_test_only_flag_reach_the_file() -> None:
     assert all(r["test_only"] is True for r in document["paper"])
     plain = _export(_shadow_rows())
     assert all("test_only" not in r for r in plain["paper"])
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: measured labels and the test_only exclusion reach the report (REV-03).
+# --------------------------------------------------------------------------- #
+
+EXCLUDED_LINE = "test_only records excluded: {n} (D063 item 3)"
+SYNTHETIC_LABEL = "SYNTHETIC LAG"
+
+
+def _report_of(
+    tmp_path: Path, name: str, rows: list[ShadowRow], capsys: pytest.CaptureFixture[str]
+) -> tuple[dict[str, Any], str]:
+    folder = tmp_path / name
+    folder.mkdir()
+    _, _, sidecar, markdown = _run_cli(folder, _write(folder, _export(rows)), capsys)
+    return sidecar, markdown
+
+
+def test_test_only_rows_are_excluded_from_every_paper_count_and_the_report_says_so(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    real = _shadow_rows()
+    rehearsal = _shadow_rows(test_only=True, tag="-T")
+    n_rehearsal_records = sum(
+        len(r["paper"]) for r in [_export(rehearsal)]
+    )  # system + user/opportunity rows
+    assert n_rehearsal_records == 7
+
+    base_sidecar, base_md = _report_of(tmp_path, "base", real, capsys)
+    mixed_sidecar, mixed_md = _report_of(tmp_path, "mixed", [*real, *rehearsal], capsys)
+
+    base_paper = _paper_block(base_sidecar)
+    mixed_paper = _paper_block(mixed_sidecar)
+    for section in ("approval_delay", "execution_quality", "no_trade", "core", "slices"):
+        assert mixed_paper[section] == base_paper[section], section
+    assert mixed_paper["has_data"] is True
+    assert mixed_sidecar["report"]["provenance"] == base_sidecar["report"]["provenance"]
+    assert EXCLUDED_LINE.format(n=7) in mixed_md
+    assert "test_only records excluded" not in base_md
+
+
+def test_only_test_only_rows_leave_the_paper_block_empty_but_counted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sidecar, markdown = _report_of(tmp_path, "only", _shadow_rows(test_only=True), capsys)
+    paper = _paper_block(sidecar)
+    assert paper["has_data"] is False
+    assert paper["approval_delay"]["system"]["n_signals"] == 0
+    assert EXCLUDED_LINE.format(n=7) in markdown
+
+
+def test_measured_shadow_delays_are_not_labelled_synthetic_lag_in_the_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sidecar, markdown = _report_of(tmp_path, "measured", _shadow_rows(), capsys)
+    paper = _paper_block(sidecar)
+    assert paper["approval_delay"]["synthetic_lag_label"] is None
+    assert paper["approval_delay"]["synthetic_lag_seconds"] is None
+    assert paper["execution_quality"]["synthetic_lag_seconds"] is None
+    assert SYNTHETIC_LABEL not in markdown
+
+
+def test_a_section_without_a_human_action_keeps_the_synthetic_label(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The filled simulation of the Phase 7 fixture: SIMULATE approval, no human action.
+    epoch_id, cases = _cases()
+    case = cases["filled_simulation"]
+    row = ShadowRow(
+        epoch_id=epoch_id,
+        signal=case["signal"],
+        trade_plan=case["trade_plan"],
+        approval=case["approval"],
+        order=case["order"],
+        fill=case["fill"],
+        shadow_outcome=ShadowOutcome(approval_action="APPROVE", confirm_event="SHADOW_CONFIRMED"),
+    )
+    with pytest.raises(ValueError):
+        _export([row])  # a SIMULATE leg cannot be a SHADOW user-executed-sim record
+    sidecar, markdown = _report_of(tmp_path, "system", _shadow_rows()[3:], capsys)
+    delay = _paper_block(sidecar)["approval_delay"]
+    assert delay["user_execution"]["n_signals"] == 0
+    assert delay["synthetic_lag_label"] is not None
+    assert SYNTHETIC_LABEL in markdown
