@@ -1,0 +1,21 @@
+plan: 16-28 task 3 (protocol v2.2.0 amendment landed)
+checked: 2026-10-11 (UTC), executor re-ran the checks on develop at 9d2949c
+amendment: quick task 261011-mi1 (D067), route B per decisions/16-DEC-REV-16.md (64f5401)
+landing commit: 3bfcd325cf959e9402a94f4d326f4f785f1b59ef
+amendment commits (f2cceba..9d2949c): f2cceba test RED seventh field; 652e7eb feat data_manifest_hash; 03049db test witnesses v2.2.0; 03573db docs protocol v2.2.0 frozen; 91c1468 test RED PR-11; 3bfcd32 feat PR-11; 9d2949c docs plan and summary
+
+protocol header (docs/research/RESEARCH_PROTOCOL.md lines 3-7):
+> **Protocol version:** v2.2.0
+> **Status:** FROZEN
+> **Frozen on:** 2026-09-19
+> **Amended on:** 2026-10-11
+> **Supersedes:** v2.1.0
+
+check 1: header contains "**Protocol version:** v2.2.0" -> exit 0
+check 2: pytest tests/test_decision_alignment_protocol.py tests/test_research_feasibility.py -> all passed (48 tests)
+check 3 (extra): pytest tests/test_decision_alignment*.py tests/test_research_feasibility.py -> all passed (400 tests)
+check 4 (extra): python scripts/verify_decision_alignment.py all -> ALL_PASS (incl. PR-11, DC-01..DC-06)
+check 5 (extra): git diff f2cceba^ 3bfcd32 -- params uv.lock -> 0 lines (no strategy_version, params or lockfile change)
+check 6 (extra): lines of the G1 and G5 floor sentences changed in RESEARCH_PROTOCOL.md between f2cceba^ and 3bfcd32 -> 0
+holdout_consumed.json: entries [] (protocol_version field moved to v2.2.0 by the amendment)
+route B: seventh identity field data_manifest_hash; experiment_identity_inputs returns data_snapshot_id (case dataset_id) and data_manifest_hash = manifest_hash(manifest) (src/research/run.py, 652e7eb); evidence key optional with default, no schema bump, no fixture change
