@@ -60,7 +60,7 @@ MODES["all"] = tuple(step for mode in MODES for step in MODES[mode])
 # Minimum number of gates each step must return (guards against an emptied
 # module passing vacuously). Set to the counts the modules return today.
 EXPECTED_MIN: dict[str, int] = {
-    "protocol": 10,
+    "protocol": 11,
     "params": 7,
     "universe": 5,
     "ops_risk": 11,

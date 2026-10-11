@@ -27,7 +27,10 @@ from tests.test_analytics_report import (
 )
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
-SIX_IDENTITY_FIELDS = (
+# The identity fields the report provenance lists. The seventh identity field,
+# `data_manifest_hash` (protocol v2.2.0 section 5), is carried by the record and the evidence
+# file and is not rendered by the report provenance (choice of quick 261011-mi1).
+REPORTED_IDENTITY_FIELDS = (
     "experiment_id",
     "strategy_version",
     "parameter_set_id",
@@ -50,7 +53,7 @@ def test_provenance_lists_the_experiment_identity_fields_and_evidence_tag() -> N
     assert len(block.experiments) == 1
     identity = block.experiments[0]
     assert isinstance(identity, ExperimentIdentity)
-    for name in SIX_IDENTITY_FIELDS:
+    for name in REPORTED_IDENTITY_FIELDS:
         assert getattr(identity, name) == raw[name]
     assert identity.universe_hash == raw["universe_hash"]
     assert identity.run_type == "CANDIDATE"

@@ -1,19 +1,21 @@
 """Protocol gate module (Phase 11, plan 11-01; D032, D043; amended to v2.0.0 by D052,
-to v2.1.0 by D057/D060).
+to v2.1.0 by D057/D060, to v2.2.0 by D065/D067).
 
 Executable checks that keep the frozen research protocol, the DECISIONS row, the
-DOC_STATUS index, the holdout consumed marker and the BACKTEST_SPEC pointers
-consistent. ``run()`` returns ``(name, ok, detail)`` tuples PR-01..PR-10; every
-check is also a pure function over text (or a parsed JSON document) so tests can
-inject bad input.
+DOC_STATUS index, the holdout consumed marker, the BACKTEST_SPEC pointers and the seven
+experiment-identity names consistent. ``run()`` returns ``(name, ok, detail)`` tuples
+PR-01..PR-11; every check is also a pure function over text (or a parsed JSON document)
+so tests can inject bad input.
 
-Stdlib plus ``src.domain.canonical.sha256_hex`` only.
+Stdlib plus ``src.domain.canonical.sha256_hex``; PR-11 reads the field names of
+``src.backtest.experiment.ExperimentRecord`` (imported on use).
 """
 
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import Collection
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,8 +28,21 @@ DECISIONS_PATH = REPO_ROOT / "docs" / "DECISIONS.md"
 DOC_STATUS_PATH = REPO_ROOT / "docs" / "DOC_STATUS.md"
 HOLDOUT_PATH = REPO_ROOT / "docs" / "research" / "holdout_consumed.json"
 BACKTEST_SPEC_PATH = REPO_ROOT / "docs" / "backtest" / "BACKTEST_SPEC.md"
+CONFIGURATION_PATH = REPO_ROOT / "docs" / "configuration" / "CONFIGURATION.md"
 
 FROZEN_ON = "2026-09-19"
+
+# The experiment linkage tuple of RESEARCH_PROTOCOL section 5 and CONFIGURATION section 7, in
+# order (protocol v2.2.0, D067: the seventh field dataManifestHash follows dataSnapshotId).
+IDENTITY_LINKAGE_FIELDS: tuple[str, ...] = (
+    "experimentId",
+    "strategyVersion",
+    "parameterSetHash",
+    "dataSnapshotId",
+    "dataManifestHash",
+    "codeVersion",
+    "costModelHash",
+)
 UNIVERSE_MANIFEST = "docs/research/universe/research-universe-v1.toml"
 
 # D030 kill-gate firing rule, copied verbatim from commit 679825c (protocol v1.0.1).
@@ -346,6 +361,66 @@ def check_cost_execution_alignment(protocol: str) -> list[str]:
     return [f"sections 2-3 do not cite {d}" for d in ("D036", "D037", "D038") if d not in section]
 
 
+def _linkage_block(section: str) -> list[str]:
+    """The stripped, non-empty lines of the first fenced text block of ``section``."""
+    match = re.search(r"```text\r?\n(.*?)```", section, re.DOTALL)
+    if match is None:
+        return []
+    return [line.strip() for line in match.group(1).splitlines() if line.strip()]
+
+
+def _linkage_problems(document: str, found: list[str]) -> list[str]:
+    expected = list(IDENTITY_LINKAGE_FIELDS)
+    if found == expected:
+        return []
+    missing = [name for name in expected if name not in found]
+    extra = [name for name in found if name not in expected]
+    problems: list[str] = []
+    if missing:
+        problems.append(f"{document} experiment linkage lacks {', '.join(missing)}")
+    if extra:
+        problems.append(f"{document} experiment linkage has unexpected {', '.join(extra)}")
+    if not missing and not extra:
+        problems.append(f"{document} experiment linkage order is not {', '.join(expected)}")
+    return problems
+
+
+def _snake_case(name: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def check_identity_linkage(
+    protocol: str, configuration: str, record_fields: Collection[str] | None = None
+) -> list[str]:
+    """PR-11: the seven identity names agree across the protocol, CONFIGURATION and the record.
+
+    Section 5 of the protocol and section 7 of CONFIGURATION must each list exactly
+    ``IDENTITY_LINKAGE_FIELDS`` in order, section 5 must say "all seven", and every name
+    (snake_case) must be a field of ``ExperimentRecord`` (``record_fields``, default: the
+    dataclass fields of ``src.backtest.experiment.ExperimentRecord``).
+    """
+    section5 = _between(protocol, "### Experiment linkage tuple", "### Search discipline")
+    section7 = _between(configuration, "## 7. Experiment linkage", "## 8.")
+    problems = _linkage_problems("RESEARCH_PROTOCOL section 5", _linkage_block(section5))
+    problems += _linkage_problems("CONFIGURATION section 7", _linkage_block(section7))
+    if "all seven" not in _norm(section5):
+        problems.append("RESEARCH_PROTOCOL section 5 does not say 'all seven'")
+    if record_fields is None:
+        import dataclasses
+
+        from src.backtest.experiment import ExperimentRecord
+
+        record_fields = {field.name for field in dataclasses.fields(ExperimentRecord)}
+    absent = [
+        _snake_case(name)
+        for name in IDENTITY_LINKAGE_FIELDS
+        if _snake_case(name) not in record_fields
+    ]
+    if absent:
+        problems.append(f"ExperimentRecord lacks the identity field(s) {', '.join(absent)}")
+    return problems
+
+
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
@@ -355,7 +430,7 @@ def _result(name: str, problems: list[str]) -> tuple[str, bool, str]:
 
 
 def run() -> list[tuple[str, bool, str]]:
-    """Evaluate gates PR-01..PR-10 against the real repository files."""
+    """Evaluate gates PR-01..PR-11 against the real repository files."""
     protocol = _read(PROTOCOL_PATH)
     decisions = _read(DECISIONS_PATH)
     doc_status = _read(DOC_STATUS_PATH)
@@ -367,6 +442,10 @@ def run() -> list[tuple[str, bool, str]]:
         spec_problems = check_backtest_spec(_read(BACKTEST_SPEC_PATH), protocol)
     except OSError as exc:
         spec_problems = [f"BACKTEST_SPEC unreadable: {exc}"]
+    try:
+        identity_problems = check_identity_linkage(protocol, _read(CONFIGURATION_PATH))
+    except OSError as exc:
+        identity_problems = [f"CONFIGURATION unreadable: {exc}"]
     return [
         _result("PR-01", check_witnesses(protocol, decisions, doc_status)),
         _result("PR-02", check_header(protocol)),
@@ -378,6 +457,7 @@ def run() -> list[tuple[str, bool, str]]:
         _result("PR-08", spec_problems),
         _result("PR-09", check_universe_reference(protocol)),
         _result("PR-10", check_cost_execution_alignment(protocol)),
+        _result("PR-11", identity_problems),
     ]
 
 
