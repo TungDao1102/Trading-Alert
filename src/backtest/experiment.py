@@ -1,10 +1,11 @@
-"""Experiment registry — six-field identity + typed record + reproduce + baselines.
+"""Experiment registry — seven-field identity + typed record + reproduce + baselines.
 
 Phase 6 (plan 06-02), per D-03 + BACKTEST_SPEC §11 + RESEARCH_PROTOCOL §5: every
-experiment record carries the canonical six-field identity tuple
+experiment record carries the canonical identity tuple
 (`experimentId`, `strategyVersion`, `parameterSetHash` + runtime
-`parameterSetId` alongside, `dataSnapshotId`, `codeVersion`,
-`costModelHash`) plus dataset range, symbol universe, timeframe, full
+`parameterSetId` alongside, `dataSnapshotId`, `dataManifestHash`, `codeVersion`,
+`costModelHash`; six fields until protocol v2.2.0 added `dataManifestHash`,
+D067) plus dataset range, symbol universe, timeframe, full
 parameters, cost assumptions, results, and notes. A record missing any
 field fails the acceptance gate.
 
@@ -71,7 +72,7 @@ class IncompleteExperimentRecord(Exception):
 class ExperimentReproducibilityBroken(Exception):
     """Raised when reproduce byte-check fails (engine drift detected).
 
-    Per D-03: reproduction = re-running the recorded six-field tuple
+    Per D-03: reproduction = re-running the recorded seven-field tuple
     yields byte-identical trade lists. Drift raises this exception.
     """
 
@@ -99,6 +100,22 @@ _DIRTY_SUFFIX = "-dirty"
 def _require_non_empty_str(value: str, field_name: str) -> None:
     if not isinstance(value, str) or value == "":
         raise ValueError(f"{field_name} must be a non-empty string")
+
+
+def _require_manifest_hash(value: object) -> None:
+    """Refuse a `data_manifest_hash` that is not 64 lowercase hex (never echoes a bad value)."""
+    if not isinstance(value, str) or value == "":
+        raise IncompleteExperimentRecord(
+            "data_manifest_hash must be the manifest_hash of the frozen data manifest "
+            "(64 lowercase hex, protocol v2.2.0 section 5)"
+        )
+    try:
+        _require_64_hex(value, "data_manifest_hash")
+    except ValueError:
+        raise IncompleteExperimentRecord(
+            "data_manifest_hash must be the manifest_hash of the frozen data manifest "
+            "(64 lowercase hex, protocol v2.2.0 section 5)"
+        ) from None
 
 
 def _require_64_hex(value: str, field_name: str) -> None:
@@ -221,7 +238,7 @@ class RecordedGap:
 
 
 # --------------------------------------------------------------------------- #
-# ExperimentRecord — frozen value object with six-field identity and typed fields.
+# ExperimentRecord — frozen value object with seven-field identity and typed fields.
 # --------------------------------------------------------------------------- #
 
 
@@ -229,11 +246,14 @@ class RecordedGap:
 class ExperimentRecord:
     """A versioned experiment record (D-03, D-22).
 
-    The six identity fields are:
+    The seven identity fields are:
       - `experiment_id` (64-hex SHA256 over the identity payload)
       - `strategy_version` (string)
       - `parameter_set_hash` (64-hex SHA256 from registry)
       - `data_snapshot_id` (64-hex SHA256 of the dataset version)
+      - `data_manifest_hash` (64-hex `manifest_hash` of the frozen data manifest, protocol
+        v2.2.0 section 5, D067; `None` only on a record read from evidence written before
+        v2.2.0, `assemble` always sets it)
       - `code_version` (string: the git commit, plus `-dirty` for a dirty tree)
       - `cost_model_hash` (64-hex SHA256 from CostModel)
 
@@ -261,6 +281,7 @@ class ExperimentRecord:
     parameter_set_id: str
     parameter_set_hash: str
     data_snapshot_id: str
+    data_manifest_hash: str | None
     code_version: str
     cost_model_hash: str
     time_range_start_utc: datetime
@@ -301,6 +322,8 @@ class ExperimentRecord:
             if not isinstance(value, str) or value == "":
                 raise IncompleteExperimentRecord(f"{fname} must be a non-empty string")
             _require_64_hex(value, fname)
+        if self.data_manifest_hash is not None:
+            _require_manifest_hash(self.data_manifest_hash)
         for fname in ("strategy_version", "code_version"):
             value = getattr(self, fname)
             if not isinstance(value, str) or value == "":
@@ -416,14 +439,22 @@ class ExperimentRecord:
         """Project to a JSON-native dict (the evidence-file shape of `analytics-evidence/2`).
 
         Counts and values serialize as objects, gaps as a list of objects; no key is named
-        `parameters` or `parameters_json` (research-gate tripwire).
+        `parameters` or `parameters_json` (research-gate tripwire). `data_manifest_hash` is
+        emitted only when it is set, so a record read from evidence written before protocol
+        v2.2.0 serializes back to the same object.
         """
+        manifest_identity = (
+            {}
+            if self.data_manifest_hash is None
+            else {"data_manifest_hash": self.data_manifest_hash}
+        )
         return {
             "experiment_id": self.experiment_id,
             "strategy_version": self.strategy_version,
             "parameter_set_id": self.parameter_set_id,
             "parameter_set_hash": self.parameter_set_hash,
             "data_snapshot_id": self.data_snapshot_id,
+            **manifest_identity,
             "code_version": self.code_version,
             "cost_model_hash": self.cost_model_hash,
             "time_range_start_utc": self.time_range_start_utc.isoformat(),
@@ -621,6 +652,7 @@ def assemble(
     strategy_id: str,
     strategy_version: str,
     data_snapshot_id: str,
+    data_manifest_hash: str,
     code_version: CodeVersion,
     cost_model: CostModel,
     time_range_start_utc: datetime,
@@ -639,7 +671,7 @@ def assemble(
 
     Per D-03: the parameter set is loaded from the registry (fail closed
     on `UnregisteredParameterSet`). The `experiment_id` is SHA256 over
-    the canonical payload of the six identity fields plus time range,
+    the canonical payload of the seven identity fields plus time range,
     universe hash, `simulator_semantics_version`, `split_role` and the split boundaries
     (D-02, D-22).
 
@@ -649,6 +681,11 @@ def assemble(
     differ from the code constants, when its `data_window` is not the record's time
     range, when its `dataset_id` is absent or is not `data_snapshot_id`, or when the cost
     model lacks the funding convention. Holdout-once enforcement is Phase 26 (F-960).
+
+    `data_manifest_hash` is the seventh identity field (protocol v2.2.0 section 5, D067): the
+    `manifest_hash` of the frozen data manifest, 64 lowercase hex, required. It joins the
+    `experiment_id` payload; `data_snapshot_id` and its binding to the run's `dataset_id`
+    are unchanged (16-DEC-REV-16, route B).
 
     `run_identity` is the engine output (or any mapping with its `strategy_version`,
     `parameter_set_hash`, `cost_model_hash` and `symbols` keys). The record attests those
@@ -675,6 +712,7 @@ def assemble(
 
     if not isinstance(code_version, CodeVersion):
         raise IncompleteExperimentRecord("code_version must be a CodeVersion (commit and dirty)")
+    _require_manifest_hash(data_manifest_hash)
     if cost_model.funding_convention != FUNDING_CONVENTION:
         raise IncompleteExperimentRecord(
             f"the cost model lacks funding_convention {FUNDING_CONVENTION!r}: a record over a "
@@ -734,6 +772,7 @@ def assemble(
         "strategy_version": strategy_version,
         "parameter_set_hash": parameter_set.parameter_set_hash,
         "data_snapshot_id": data_snapshot_id,
+        "data_manifest_hash": data_manifest_hash,
         "code_version": code_version.text,
         "cost_model_hash": cost_model.cost_model_hash,
         "run_type": run_type,
@@ -753,6 +792,7 @@ def assemble(
         parameter_set_id=parameter_set_id,
         parameter_set_hash=parameter_set.parameter_set_hash,
         data_snapshot_id=data_snapshot_id,
+        data_manifest_hash=data_manifest_hash,
         code_version=code_version.text,
         cost_model_hash=cost_model.cost_model_hash,
         time_range_start_utc=time_range_start_utc,

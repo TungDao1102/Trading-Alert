@@ -134,6 +134,11 @@ _EXPERIMENT_KEYS = (
     *_EXPERIMENT_MAPPING_KEYS,
     "allowed_gaps",
 )
+# Protocol v2.2.0 (D067, REV-16 route B): `data_manifest_hash` is the one OPTIONAL key of the
+# experiment object. Absent means a record written before v2.2.0 and loads as None, so an older
+# evidence file loads exactly as before; present must be 64 lowercase hex (the record validates
+# it). The schema stays analytics-evidence/2; any other unknown key is still refused.
+_EXPERIMENT_OPTIONAL_KEYS = ("data_manifest_hash",)
 _GAP_KEYS = ("series", "symbol", "start_utc", "end_utc")
 _PAPER_DATETIME_FIELDS = (
     "signal_detected_at_utc",
@@ -602,8 +607,9 @@ def _load_gaps(raw: Any, where: str) -> tuple[RecordedGap, ...]:
 def _load_experiment(raw: Any, where: str) -> ExperimentRecord:
     """Build the typed `ExperimentRecord` of an `analytics-evidence/2` experiment object.
 
-    Every key of the closed set must be present and no other key may appear; mappings
-    become the sorted pair tuples the record stores, datetimes must be UTC-aware. The
+    Every key of the closed set must be present, `data_manifest_hash` is the one optional key
+    (absent means None, a record written before protocol v2.2.0) and no other key may appear;
+    mappings become the sorted pair tuples the record stores, datetimes must be UTC-aware. The
     record validates the rest in `__post_init__` (D-22), and any failure is re-raised as
     `EvidenceFileError` without echoing values.
     """
@@ -612,10 +618,15 @@ def _load_experiment(raw: Any, where: str) -> ExperimentRecord:
     label = f"{where}.experiment"
     for name in _EXPERIMENT_KEYS:
         _require_key(raw, name, EvidenceFileError, label)
-    extra = sorted(set(raw) - set(_EXPERIMENT_KEYS))
+    extra = sorted(set(raw) - set(_EXPERIMENT_KEYS) - set(_EXPERIMENT_OPTIONAL_KEYS))
     if extra:
         raise EvidenceFileError(f"{label}: unexpected key {extra[0]!r}")
     fields: dict[str, Any] = {name: raw[name] for name in _EXPERIMENT_PLAIN_KEYS}
+    fields["data_manifest_hash"] = None
+    if "data_manifest_hash" in raw:
+        if not isinstance(raw["data_manifest_hash"], str):
+            raise EvidenceFileError(f"{label}: data_manifest_hash must be 64 lowercase hex")
+        fields["data_manifest_hash"] = raw["data_manifest_hash"]
     for name in _EXPERIMENT_DATETIME_KEYS:
         fields[name] = _parse_utc(raw[name], name, EvidenceFileError, label)
     fields["no_trade_counts"] = _mapping_pairs(

@@ -1,7 +1,7 @@
 """Tests for the Phase 6 experiment registry (plan 06-02) and the typed record (plan 14-15).
 
 Per D-03 + BACKTEST_SPEC §11 + RESEARCH_PROTOCOL §5: every experiment
-record carries the canonical six-field identity tuple
+record carries the canonical seven-field identity tuple
 (`experimentId`, `strategyVersion`, `parameterSetHash` + runtime
 `parameterSetId` alongside, `dataSnapshotId`, `codeVersion`,
 `costModelHash`) plus dataset range, symbol universe, timeframe, full
@@ -82,20 +82,21 @@ def _assemble(**overrides: Any):
 
 def test_experiment_assemble_stable_64_hex_identity() -> None:
     """Beh. 1: assemble with complete inputs returns ExperimentRecord with
-    six 64-hex identity fields and a stable experiment_id across reruns.
+    seven 64-hex identity fields and a stable experiment_id across reruns.
 
-    Per D-03: every experiment record carries the canonical six-field
+    Per D-03: every experiment record carries the canonical seven-field
     identity tuple. All hash fields must be 64-hex strings; the
     experiment_id must be stable across reruns.
     """
     record_a = _assemble()
     record_b = _assemble()
 
-    # All six identity fields must be 64-hex strings.
+    # All seven identity fields must be 64-hex strings.
     for field in (
         "experiment_id",
         "parameter_set_hash",
         "data_snapshot_id",
+        "data_manifest_hash",
         "cost_model_hash",
     ):
         value = getattr(record_a, field)
@@ -137,7 +138,7 @@ def test_experiment_reproduce_byte_identical() -> None:
     """Beh. 3: reproduce with the recorded tuple returns byte-identical
     trade lists via canonical sha256 comparison (D-03 reproducibility).
 
-    Per D-03: reproduction = re-running the recorded six-field tuple
+    Per D-03: reproduction = re-running the recorded seven-field tuple
     yields byte-identical trade lists.
     """
     from src.backtest.experiment import reproduce
@@ -698,6 +699,7 @@ def _simple_trend_record(case: dict, *, result_summary_json: str = "{}"):
         strategy_id=case["strategy_id"],
         strategy_version=case["strategy_version"],
         data_snapshot_id="3" * 64,
+        data_manifest_hash="4" * 64,
         code_version=CodeVersion(commit=CODE_COMMIT, dirty=False),
         cost_model=_build_cost_model(dict(case["cost_model"])),
         time_range_start_utc=start,

@@ -45,6 +45,7 @@ from .manifest import (
     SplitWindow,
     load_grid,
     load_manifest,
+    manifest_hash,
     research_splits,
 )
 from .plateau import plateau_report
@@ -71,11 +72,13 @@ _CONSTRAINT_KEY = "constraint_history"
 def experiment_identity_inputs(manifest: DatasetManifest, dataset_id: str) -> dict[str, str]:
     """The experiment identity inputs derived from the manifest and the case dataset id.
 
-    This is the ONE place the data identity of an experiment is decided (REV-16 is open: the
-    frozen-manifest identity may later become `data_snapshot_id` or a seventh field, an edit
-    made here only). Today `data_snapshot_id` is the case `dataset_id`, unchanged.
+    This is the ONE place the data identity of an experiment is decided. REV-16 is decided as
+    route B (16-DEC-REV-16, protocol v2.2.0 section 5, D067): `data_snapshot_id` stays the
+    case `dataset_id`, and the seventh identity field `data_manifest_hash` is
+    `manifest_hash(manifest)`, the value a run authorization binds as `manifest_sha256`, so a
+    record always names the manifest the user authorized.
     """
-    return {"data_snapshot_id": dataset_id}
+    return {"data_snapshot_id": dataset_id, "data_manifest_hash": manifest_hash(manifest)}
 
 
 def _load_constraints(manifest: DatasetManifest) -> list[dict[str, Any]]:

@@ -368,6 +368,7 @@ RECORD_START = datetime(2026, 1, 1, tzinfo=UTC)
 RECORD_END = datetime(2026, 2, 1, tzinfo=UTC)
 CODE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
 DEFAULT_DATASET_ID = "1" * 64  # the data_snapshot_id `assemble_kwargs` binds by default
+DEFAULT_MANIFEST_HASH = "2" * 64  # the data_manifest_hash `assemble_kwargs` carries by default
 
 
 def strategy_run_summary(
@@ -414,6 +415,7 @@ def assemble_kwargs(**overrides: Any) -> dict[str, Any]:
         "strategy_id": "trend-pullback",
         "strategy_version": "v4.0.0",
         "data_snapshot_id": "1" * 64,
+        "data_manifest_hash": DEFAULT_MANIFEST_HASH,
         "code_version": CodeVersion(commit=CODE_COMMIT, dirty=False),
         "cost_model": build_cost_model(dict(DEFAULT_COST_MODEL)),
         "time_range_start_utc": RECORD_START,
