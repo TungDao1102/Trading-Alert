@@ -76,22 +76,22 @@
     {
       "number": "14",
       "name": "Backtest Simulator Causality Rewrite",
-      "status": "in_progress"
+      "status": "complete"
     },
     {
       "number": "15",
       "name": "Strategy Geometry Correction",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "16",
       "name": "Paper Runtime Composition + SHADOW Approval Mode",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "17",
       "name": "Operational Persistence Layer",
-      "status": "in_progress"
+      "status": "complete"
     },
     {
       "number": "18",
@@ -147,7 +147,7 @@
   "next": {
     "command": "/gsd:progress --next",
     "label": "Advance to the next step",
-    "reason": "Phase 14 of 29 · executing"
+    "reason": "Phase 16 of 29 · executing"
   },
-  "updated_at": "2026-10-04T15:41:46.561Z"
+  "updated_at": "2026-10-10T03:22:12.293Z"
 }
