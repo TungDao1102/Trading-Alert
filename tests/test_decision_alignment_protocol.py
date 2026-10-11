@@ -1,7 +1,7 @@
 """Tests for the protocol gate module (Phase 11, plan 11-01; D032, D043; v2.0.0 by D052,
-v2.1.0 by D057/D060).
+v2.1.0 by D057/D060, v2.2.0 by D065/D067).
 
-The real-repository test proves gates PR-01..PR-10 hold today; the negative tests feed
+The real-repository test proves gates PR-01..PR-11 hold today; the negative tests feed
 each pure check a deliberately broken input so a regression in the protocol text, the
 holdout marker or the BACKTEST_SPEC pointers cannot pass silently.
 """
@@ -22,6 +22,7 @@ DECISIONS = REPO_ROOT / "docs" / "DECISIONS.md"
 DOC_STATUS = REPO_ROOT / "docs" / "DOC_STATUS.md"
 HOLDOUT = REPO_ROOT / "docs" / "research" / "holdout_consumed.json"
 BACKTEST_SPEC = REPO_ROOT / "docs" / "backtest" / "BACKTEST_SPEC.md"
+CONFIGURATION = REPO_ROOT / "docs" / "configuration" / "CONFIGURATION.md"
 
 VALID_ENTRY: dict[str, Any] = {
     "lineage_id": "trend-pullback@v1",
@@ -55,7 +56,7 @@ def _doc(entries: list[dict[str, Any]] | None = None) -> dict[str, Any]:
 
 def test_all_gates_pass_on_the_real_repository() -> None:
     results = gate.run()
-    assert [name for name, _, _ in results] == [f"PR-{i:02d}" for i in range(1, 11)]
+    assert [name for name, _, _ in results] == [f"PR-{i:02d}" for i in range(1, 12)]
     failed = [(name, detail) for name, ok, detail in results if not ok]
     assert failed == []
 
@@ -124,6 +125,71 @@ def test_holdout_real_marker_is_valid() -> None:
     doc = json.loads(HOLDOUT.read_text(encoding="utf-8"))
     assert gate.check_holdout_marker(doc) == []
     assert set(doc) == {"schema", "protocol_version", "entries"}
+    assert doc["protocol_version"] == _version()
+
+
+def _configuration() -> str:
+    return CONFIGURATION.read_text(encoding="utf-8")
+
+
+def test_identity_linkage_names_are_the_seven_v2_2_0_fields() -> None:
+    assert gate.IDENTITY_LINKAGE_FIELDS == (
+        "experimentId",
+        "strategyVersion",
+        "parameterSetHash",
+        "dataSnapshotId",
+        "dataManifestHash",
+        "codeVersion",
+        "costModelHash",
+    )
+
+
+def test_identity_linkage_passes_on_the_real_files() -> None:
+    assert gate.check_identity_linkage(_protocol(), _configuration()) == []
+
+
+def test_identity_linkage_protocol_missing_the_manifest_hash_fails() -> None:
+    text = re.sub(r"^dataManifestHash\r?\n", "", _protocol(), count=1, flags=re.MULTILINE)
+    assert text != _protocol()
+    problems = gate.check_identity_linkage(text, _configuration())
+    assert any("dataManifestHash" in p for p in problems)
+
+
+def test_identity_linkage_swapped_order_fails() -> None:
+    text = (
+        _protocol()
+        .replace("dataSnapshotId\ndataManifestHash", "dataManifestHash\ndataSnapshotId")
+        .replace("dataSnapshotId\r\ndataManifestHash", "dataManifestHash\r\ndataSnapshotId")
+    )
+    assert text != _protocol()
+    problems = gate.check_identity_linkage(text, _configuration())
+    assert any("order" in p for p in problems)
+
+
+def test_identity_linkage_all_seven_reworded_fails() -> None:
+    text = _protocol().replace("without all seven", "without all six")
+    assert text != _protocol()
+    assert any("all seven" in p for p in gate.check_identity_linkage(text, _configuration()))
+
+
+def test_identity_linkage_configuration_missing_the_line_fails() -> None:
+    text = re.sub(r"^dataManifestHash\r?\n", "", _configuration(), count=1, flags=re.MULTILINE)
+    assert text != _configuration()
+    problems = gate.check_identity_linkage(_protocol(), text)
+    assert any("CONFIGURATION" in p and "dataManifestHash" in p for p in problems)
+
+
+def test_identity_linkage_record_without_the_field_fails() -> None:
+    import dataclasses
+
+    from src.backtest.experiment import ExperimentRecord
+
+    fields = {f.name for f in dataclasses.fields(ExperimentRecord)}
+    assert gate.check_identity_linkage(_protocol(), _configuration(), fields) == []
+    problems = gate.check_identity_linkage(
+        _protocol(), _configuration(), fields - {"data_manifest_hash"}
+    )
+    assert any("ExperimentRecord" in p and "data_manifest_hash" in p for p in problems)
 
 
 def test_holdout_valid_entry_passes() -> None:
