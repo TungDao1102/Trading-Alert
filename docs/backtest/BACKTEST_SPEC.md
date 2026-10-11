@@ -79,7 +79,7 @@ Final holdout / forward test
 
 The final holdout must not be used to choose parameters.
 
-Fixed proportions (40% Development, 40% Validation as four consecutive walk-forward test folds, last 20% final holdout, single-use) are pre-registered in `docs/research/RESEARCH_PROTOCOL.md` v2.1.0 §1 and §4 per D032 and D043.
+Fixed proportions (40% Development, 40% Validation as four consecutive walk-forward test folds, last 20% final holdout, single-use) are pre-registered in `docs/research/RESEARCH_PROTOCOL.md` v2.2.0 §1 and §4 per D032 and D043.
 
 ## 8. Walk-forward
 
@@ -153,7 +153,7 @@ Each run stores:
 
 The record carries typed, validated fields (D-22): `no_trade_counts` by reason, `intrabar_tie_break`, `timeframe` and `context_timeframe`, `parameter_values` and `cost_values` (canonical text, the cost values hashing to `cost_model_hash` and carrying `funding_convention`), `simulator_semantics_version`, `code_commit` and `code_dirty` (`code_version` is the commit, plus `-dirty`), `fallback_count`, `end_of_data_count`, `strategy_window_bars` and `context_window_bars`, `allowed_gaps` and the split role with its start and end. A record missing or violating any of them cannot be constructed. The simulator semantics version and the split fields are part of the experiment identity, so a record from the old simulator can never be compared with a new one. The one documented exception is the `coverage_note` text of a run with a mark hole inside a position's life (section 4): it changes the trade bytes and derived digests without a version bump.
 
-The canonical six-field identity tuple required on every experiment record is defined in `docs/research/RESEARCH_PROTOCOL.md` §5 and `docs/configuration/CONFIGURATION.md` §7 (`experimentId`, `strategyVersion`, `parameterSetHash`, `dataSnapshotId`, `codeVersion`, `costModelHash`); the `parameterSetId` runtime identifier is required alongside `parameterSetHash` per the same source. An experiment record missing any of these six fields does not satisfy this section.
+The canonical seven-field identity tuple required on every experiment record is defined in `docs/research/RESEARCH_PROTOCOL.md` §5 and `docs/configuration/CONFIGURATION.md` §7 (`experimentId`, `strategyVersion`, `parameterSetHash`, `dataSnapshotId`, `dataManifestHash`, `codeVersion`, `costModelHash`); the `parameterSetId` runtime identifier is required alongside `parameterSetHash` per the same source. An experiment record missing any of these seven fields does not satisfy this section.
 
 ## 12. Acceptance gates
 
@@ -170,7 +170,7 @@ A strategy may proceed only when:
 9. no critical conclusion depends on a single symbol, quarter, or isolated parameter point;
 10. candidate has been compared against declared baselines.
 
-The numerical acceptance thresholds (trade floor, expectancy bound, multiple-testing correction, drawdown ceiling, single-use holdout with a floor of at least 30 closed trades in the holdout) are pre-registered in `docs/research/RESEARCH_PROTOCOL.md` v2.1.0 §4 per D032, D043 and D060.
+The numerical acceptance thresholds (trade floor, expectancy bound, multiple-testing correction, drawdown ceiling, single-use holdout with a floor of at least 30 closed trades in the holdout) are pre-registered in `docs/research/RESEARCH_PROTOCOL.md` v2.2.0 §4 per D032, D043 and D060.
 
 
 ## 13. Research implementation

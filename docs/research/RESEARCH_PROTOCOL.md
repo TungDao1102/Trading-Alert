@@ -1,10 +1,10 @@
 # Research Protocol (Frozen)
 
-> **Protocol version:** v2.1.0
+> **Protocol version:** v2.2.0
 > **Status:** FROZEN
 > **Frozen on:** 2026-09-19
-> **Amended on:** 2026-10-07
-> **Supersedes:** v2.0.0
+> **Amended on:** 2026-10-11
+> **Supersedes:** v2.1.0
 
 ## §0 Identity, status, and one-way flow
 
@@ -18,7 +18,7 @@ This document is the **frozen research contract** for the Binance Futures resear
 **Living-doc firewall (one-way flow).** `docs/research/TRADING_STRATEGY_RESEARCH.md` is the living draft for new ideas, candidate families, and open questions. The protocol doc copies methodology *out of* the living draft once. After the protocol is frozen, any new learning enters the protocol **only** via a versioned amendment:
 
 - clarification or wording fix → bump to `v1.0.x` (semantics unchanged);
-- semantic change to dataset splits, cost model, execution simulation, or acceptance gates → bump a minor or major version per Semantic Versioning (precedents: `v1.1.0` minor, `v2.0.0` major, `v2.1.0` minor); add a `Supersedes` line and a migration paragraph.
+- semantic change to dataset splits, cost model, execution simulation, acceptance gates, or the experiment identity (section 5) → bump a minor or major version per Semantic Versioning (precedents: `v1.1.0` minor, `v2.0.0` major, `v2.1.0` minor, `v2.2.0` minor); add a `Supersedes` line and a migration paragraph.
 
 A semantic change to the protocol triggers a new strategy-version lineage downstream (see `docs/strategy/TRADING_STRATEGY_SPEC.md` §12 Strategy versioning). Living-draft edits never modify a frozen protocol section in place.
 
@@ -33,6 +33,10 @@ This is a semantic amendment (execution simulation) per D032, D043 and D052. The
 ### Migration (v2.0.0 to v2.1.0)
 
 This is a semantic amendment (acceptance gate G5) per D057 and D060. The v2.0.0 text is unchanged in git history at commit `6857c1d9f488f2fa6ec02f452697bde4c68da419` and is superseded, not edited. What changes: G5 gains a floor of at least 30 closed trades in the holdout, counted exactly as G1 counts closed trades; fewer than 30 means the candidate cannot pass G5 and the holdout counts as consumed for that lineage (never re-run on the same holdout; a re-evaluation needs a new amendment and a new lineage); 30 or more only makes the candidate eligible for evaluation and is not evidence of an edge; no softer threshold and no new status vocabulary exist. `docs/research/holdout_consumed.json` moves to schema `holdout-consumed/2`, where each entry carries its own `protocol_version` beside `lineage_id`, `candidate_sha256`, `consumed_at_utc` and `decision_ref`. What does not change: G1 to G4, the 40/40/20 split and the walk-forward folds, the cost model, the execution simulation (`simulator_semantics_version` 2.0.0), the variant budget and multiple-testing correction, the D030 kill-gate firing rule, the `Frozen on` clock start (2026-09-19, so the D013 six-month clock is not restarted) and the strategy versions. Nothing is applied backwards: no holdout entry and no kill-gate decision exists, so v2.0.0 stays historical and no result was produced under it.
+
+### Migration (v2.1.0 to v2.2.0)
+
+This is a semantic amendment (experiment identity, §5) per D065 item 2 and D067, with route B decided by the user on 2026-10-11 (REV-16). The v2.1.0 text is unchanged in git history at commit `d52cd6a5316ca052a80bfee5190ddeeadbe128c5` and is superseded, not edited. What changes: the experiment linkage tuple gains a seventh field, `dataManifestHash`, the identity of the complete frozen data manifest of the run (`manifest_hash(manifest)`, the sha256 of the canonical manifest, which embeds the dataset id, the research universe, the data source and version, the candle intervals, the exact split boundaries, the excluded and known-gap periods and the constraint source), the same value the run authorization binds as `manifest_sha256`; it joins the `experimentId` payload, so an id computed under v2.2.0 never equals one computed before. What does not change: `dataSnapshotId` keeps its meaning (the dataset id of the day files a run reads, `docs/data/DATA_MODEL.md` §2.13), the dataset id formula and the requirement that a run's dataset id equals the recorded `dataSnapshotId`, G1 to G5 and every threshold, the 40/40/20 split and the walk-forward folds, the cost model, the execution simulation (`simulator_semantics_version` 2.0.0), the variant budget and multiple-testing correction, the D030 kill-gate firing rule, the `holdout_consumed.json` schema, the `Frozen on` clock start (2026-09-19, so the D013 six-month clock is not restarted) and every strategy version and parameter set (D065 item 2: a protocol version change causes no strategy-version bump; no lineage restarts because no experiment has been recorded). Nothing is applied backwards: no holdout entry, experiment record or kill-gate decision exists, so v2.1.0 stays historical and no result was produced under it. An evidence file written before v2.2.0 (fixtures only) carries no `dataManifestHash`.
 
 **Numeric-gate status (v1.1.0).** The acceptance thresholds, split proportions, variant budget, multiple-testing correction and holdout rule are pre-registered numerically in §1 and §4 per D032 and D043, before any Validation run. Strategy parameters (ATR multipliers, RR minima, expiry hours) stay versioned parameter-set values owned by the family sheets and the registry (§5). A pre-registered value changes only by a new protocol version and a new candidate lineage, never after a result is seen.
 
@@ -331,11 +335,12 @@ experimentId
 strategyVersion
 parameterSetHash
 dataSnapshotId
+dataManifestHash
 codeVersion
 costModelHash
 ```
 
-A backtest report is not considered reproducible without all six. `costModelHash` is the hash of the cost snapshot from §2 (entry/exit/funding/slippage/spread fields); `dataSnapshotId` identifies the exact dataset snapshot used; `codeVersion` identifies the strategy/backtest engine code commit.
+A backtest report is not considered reproducible without all seven. `costModelHash` is the hash of the cost snapshot from §2 (entry/exit/funding/slippage/spread fields); `dataSnapshotId` identifies the exact dataset snapshot used (the dataset id of the day files a run reads); `dataManifestHash` is the hash of the complete frozen data manifest of the run, the value the run authorization binds (v2.2.0, D067); `codeVersion` identifies the strategy/backtest engine code commit.
 
 ### Search discipline
 
@@ -408,7 +413,7 @@ Until all three land, the doc is `DRAFT` in effect, regardless of what the heade
 ### Amendment procedure
 
 - **Clarification / wording** (no semantic change) → bump to `v1.0.x`. Header `Status: FROZEN` is preserved. A DECISIONS row records the clarification.
-- **Semantic change** to dataset splits, cost model, execution simulation, or acceptance gates → bump a minor or major version per Semantic Versioning (precedents: `v1.1.0` minor, `v2.0.0` major, `v2.1.0` minor). A `Supersedes` line replaces the `none` line. A migration paragraph summarizes the change. A DECISIONS row records the amendment. A semantic change triggers a new strategy-version lineage per `docs/strategy/TRADING_STRATEGY_SPEC.md` §12.
+- **Semantic change** to dataset splits, cost model, execution simulation, acceptance gates, or the experiment identity (section 5) → bump a minor or major version per Semantic Versioning (precedents: `v1.1.0` minor, `v2.0.0` major, `v2.1.0` minor, `v2.2.0` minor). A `Supersedes` line replaces the `none` line. A migration paragraph summarizes the change. A DECISIONS row records the amendment. A semantic change triggers a new strategy-version lineage per `docs/strategy/TRADING_STRATEGY_SPEC.md` §12.
 
 ### Living-draft firewall (operational)
 
@@ -420,3 +425,4 @@ Until all three land, the doc is `DRAFT` in effect, regardless of what the heade
 - **v1.1.0 — 2026-09-30 — D043 (semantic).** Implements D032. Pre-registers numeric acceptance thresholds (G1-G5: trade floor, expectancy with bootstrap bound, Holm-Bonferroni correction over N = 25 variants per family, drawdown ceiling, single-use holdout), fixes the 40/40/20 split with four walk-forward Validation folds, adds the append-only `docs/research/holdout_consumed.json` marker, removes any human pass override, and aligns costs and execution to D036 (taker entry fee), D037 (mark-price protective triggers), D038 (`partial_fill_fraction` 1.0) and D039 (point-in-time research universe) with one canonical quantization order. The research-gate freeze step is now version-bound to the header. `Frozen on` is unchanged (the D013 clock is not restarted); `Amended on` and `Supersedes: v1.0.1` are added. The D030 kill-gate firing rule is untouched.
 - **v2.0.0 - 2026-10-05 - D052 (semantic).** Execution simulation rebuilt for causality (Phase 14): a plan is active from bar N+1, fills need a one-tick trade-price trade-through at the live limit, SL and TP trigger on mark-price minutes, the TP1/TP2 ladder mirrors live, funding is charged at actual `fundingTime` instants, constraints are point-in-time, a simulated ledger and one R denominator are used, and `simulator_semantics_version` 2.0.0 joins the experiment identity. All earlier backtest evidence is void. Thresholds, splits, the D030 firing rule and the identity tuple are unchanged. `Frozen on` is unchanged (the D013 clock is not restarted); `Amended on` is 2026-10-05 and `Supersedes: v1.1.0`. The version pins in the gate code and tests are read from this header from now on.
 - **v2.1.0 - 2026-10-07 - D060 (semantic).** Implements D057. G5 gains a floor of at least 30 closed trades in the holdout (counted as G1 counts them); fewer than 30 cannot pass G5 and consumes the holdout for that lineage; 30 is an eligibility floor, never an edge claim, and is never lowered after the freeze. `holdout_consumed.json` schema moves to `holdout-consumed/2` with a per-entry `protocol_version`. Nothing else changed and nothing is applied backwards (no holdout entry or kill-gate decision exists). `Frozen on` is unchanged (the D013 clock is not restarted); `Amended on` is 2026-10-07 and `Supersedes: v2.0.0`.
+- **v2.2.0 - 2026-10-11 - D067 (semantic).** Implements D065 item 2 with route B of REV-16. The experiment linkage tuple gains a seventh field, `dataManifestHash` (the `manifest_hash` of the complete frozen data manifest, the value the run authorization binds), which joins the `experimentId` payload. `dataSnapshotId` keeps its meaning, the dataset id formula and the dataset binding of a run are unchanged. Nothing else changed (G1 to G5 and every threshold, splits, costs, execution simulation, variant budget, the D030 rule, the holdout marker schema, every strategy version and parameter set) and nothing is applied backwards (no holdout entry, experiment record or kill-gate decision exists). `Frozen on` is unchanged (the D013 clock is not restarted); `Amended on` is 2026-10-11 and `Supersedes: v2.1.0`.

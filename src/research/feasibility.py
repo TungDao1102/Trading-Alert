@@ -28,14 +28,15 @@ from src.backtest.semantics import (
     PARTIAL_FILL,
 )
 
-# RESEARCH_PROTOCOL.md v2.1.0 G1 (trade floor), D043: at least 100 closed trades pooled across
-# the four Validation folds. Never lowered after the freeze.
+# RESEARCH_PROTOCOL.md G1 (trade floor, unchanged since v2.1.0), D043: at least 100 closed
+# trades pooled across the four Validation folds. Never lowered after the freeze.
 G1_POOLED_FLOOR: Final = 100
-# RESEARCH_PROTOCOL.md v2.1.0 G1, D043: at least 30 closed trades in each Validation fold.
-# Never lowered after the freeze.
+# RESEARCH_PROTOCOL.md G1 (unchanged since v2.1.0), D043: at least 30 closed trades in each
+# Validation fold. Never lowered after the freeze.
 G1_PER_FOLD_FLOOR: Final = 30
-# RESEARCH_PROTOCOL.md v2.1.0 G5, D060: at least 30 closed trades in the holdout, counted as G1
-# counts. Never lowered after the freeze. A constant only: this module never counts the holdout.
+# RESEARCH_PROTOCOL.md G5 (unchanged since v2.1.0), D060: at least 30 closed trades in the
+# holdout, counted as G1 counts. Never lowered after the freeze. A constant only: this module
+# never counts the holdout.
 G5_HOLDOUT_FLOOR: Final = 30
 
 # The G1 closed-exit rule, built from the backtest semantics constants. A test pins these two

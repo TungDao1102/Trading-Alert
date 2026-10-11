@@ -73,12 +73,12 @@ jobs:
 
           echo "Freeze check passed: protocol v${VER} FROZEN with matching DECISIONS row + DOC_STATUS index."
 
-      - name: Identity-tuple check (experiment and backtest records must carry the six identity fields)
+      - name: Identity-tuple check (experiment and backtest records must carry the seven identity fields)
         id: identity
         run: |
           set -eu
-          # The six required identity fields per docs/research/RESEARCH_PROTOCOL.md §5 and docs/configuration/CONFIGURATION.md §7.
-          REQUIRED=(strategyVersion parameterSetId parameterSetHash dataSnapshotId codeVersion costModelHash)
+          # The seven required identity fields per docs/research/RESEARCH_PROTOCOL.md §5 (v2.2.0) and docs/configuration/CONFIGURATION.md §7.
+          REQUIRED=(strategyVersion parameterSetId parameterSetHash dataSnapshotId dataManifestHash codeVersion costModelHash)
 
           # Locate experiment and backtest record files (JSON or YAML) anywhere in the repo.
           # Exclude .git, node_modules, .github (this workflow), and the registry docs themselves.
@@ -112,7 +112,7 @@ jobs:
             exit 1
           fi
 
-          echo "Identity-tuple check passed: ${#FILES[@]} record(s) carry all six required identity fields."
+          echo "Identity-tuple check passed: ${#FILES[@]} record(s) carry all seven required identity fields."
 
       - name: Registry-path tripwire (parameter set files must live under docs/research/registry/)
         id: tripwire

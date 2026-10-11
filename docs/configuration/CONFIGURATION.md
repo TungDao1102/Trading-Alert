@@ -150,9 +150,12 @@ experimentId
 strategyVersion
 parameterSetHash
 dataSnapshotId
+dataManifestHash
 codeVersion
 costModelHash
 ```
+
+`dataSnapshotId` is the dataset id of the day files a run reads (`docs/data/DATA_MODEL.md` section 2.13); `dataManifestHash` is the hash of the complete frozen data manifest of the run, the value the run authorization binds (research protocol v2.2.0 section 5, D067).
 
 No backtest report is considered reproducible without these identifiers.
 

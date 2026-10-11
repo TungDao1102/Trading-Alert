@@ -10,7 +10,7 @@
 - `testing/TESTING_STRATEGY.md`
 - `DECISIONS.md`
 - `TECHNOLOGY_STACK.md`
-- `research/RESEARCH_PROTOCOL.md` — Frozen on 2026-09-19, amended 2026-10-07 (v2.1.0; D029, D030, D043, D052, D057, D060); executable gate at `.github/workflows/research-gate.yml`
+- `research/RESEARCH_PROTOCOL.md` — Frozen on 2026-09-19, amended 2026-10-11 (v2.2.0; D029, D030, D043, D052, D057, D060, D065, D067); executable gate at `.github/workflows/research-gate.yml`
 
 ## Living research
 
@@ -64,3 +64,4 @@
 - 2026-10-07 — `DECISIONS.md` D061 recorded (user decisions with reviewer input): Phase 16 pre-decisions for the freeze check, parity, structure, paper exit criteria process, empty allowlist, kill-gate guard, machine roles, the chain that closes Phase 16 (PAPER-03 stays Pending for Phase 26) and the planned EC2 Singapore host for the long soak. Open items are listed in the row. No code, protocol or parameter file changed.
 - 2026-10-07 — WR-05 implemented per D062: `deploy/bootstrap.sh` (sudo package, `trading` in the sudo group, lock-out guard requiring a usable password, checklist item 6), `operations/RUNBOOK.md` (13.1, 13.4, 13.5, 17) and `13.1-OPEN-DECISIONS.md` updated; no passwordless sudo rule exists; no parameter, protocol or strategy file changed.
 - 2026-10-07 — CR-01 replaced by D064: `src/ops/backup_remote.py` now decides each Parquet path of a push by SHA-256 against the manifests of the complete remote snapshots (a different hash is refused, an orphan left by an interrupted push is verified and adopted), verifies the Parquet tree and `pg.dump` with `rclone cryptcheck` before `manifest.json` is published and removes a manifest that fails its own check; `operations/RUNBOOK.md` section 11 and `13.1-OPEN-DECISIONS.md` follow; proven on rclone 1.75.1 against an S3 double, the real-S3 proof D064 requires is pending. No protocol, parameter or strategy file changed.
+- 2026-10-11 — `research/RESEARCH_PROTOCOL.md` v2.2.0 semantic amendment per D065 item 2 and D067 (experiment identity, REV-16 route B): the experiment linkage tuple gains a seventh field, `dataManifestHash` (the `manifest_hash` of the frozen data manifest, the value the run authorization binds, part of the `experimentId` payload); `dataSnapshotId`, the dataset id formula and the dataset binding are unchanged; G1 to G5 and every threshold are unchanged; the `analytics-evidence/2` experiment object takes `data_manifest_hash` as an optional key (no schema bump); `research/holdout_consumed.json` `protocol_version` moves to v2.2.0 with no entries; `Frozen on` unchanged; nothing applied backwards; no strategy version or parameter set moved; `CONFIGURATION.md`, `BACKTEST_SPEC.md`, `DATA_MODEL.md`, the research-gate identity check and the decision-alignment gate PR-11 follow.

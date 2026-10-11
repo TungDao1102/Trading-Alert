@@ -334,7 +334,7 @@ Do not hard-code current symbol filters into strategy code.
 
 ### 2.12 `experiment_runs`
 
-**V1 status: not built (D045).** Experiment identity is the six-field tuple in file-based experiment records (protocol section 5); the field list below is a design record.
+**V1 status: not built (D045).** Experiment identity is the seven-field tuple in file-based experiment records (protocol section 5); the field list below is a design record.
 
 Backtest/research reproducibility.
 
@@ -344,6 +344,7 @@ strategy_version
 parameter_set_id
 parameter_set_hash
 data_snapshot_id
+data_manifest_hash
 code_version
 cost_model_hash
 time_range_start_utc
