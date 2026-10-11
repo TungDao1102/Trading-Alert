@@ -4,8 +4,8 @@ D-03 declares D013 authoritative over the protocol's originally inverted OR
 wording and demands the resolution be *recorded*, not silently picked. The
 resolution lives in a new DECISIONS row (D030), a clarification amendment to
 the frozen research protocol (v1.0.1, since superseded by the v1.1.0 semantic
-amendment D043, then by the v2.0.0 simulator-semantics amendment D052 and the v2.1.0
-G5 floor D060) and the
+amendment D043, then by the v2.0.0 simulator-semantics amendment D052, the v2.1.0
+G5 floor D060 and the v2.2.0 experiment-identity amendment D067) and the
 DOC_STATUS index.
 
 These tests make that reconciliation regress-proof and re-implement the three
@@ -76,7 +76,7 @@ PINNED_PROTOCOL_LINES = (
     "> **Status:** FROZEN",
     "> **Frozen on:** 2026-09-19",
 )
-EXPECTED_SUPERSEDES = "v2.0.0"
+EXPECTED_SUPERSEDES = "v2.1.0"
 D043_ROW_PREFIX = "| D043 | Research protocol v1.1.0 frozen | Accepted"
 D029_ROW_PREFIX = "| D029 | Research protocol v1.0.0 frozen | Accepted |"
 
@@ -193,9 +193,22 @@ def test_d060_row_present() -> None:
     assert "at least 30 closed trades" in row
 
 
-def test_header_version_is_the_d060_amendment() -> None:
-    """The header version equals the freeze row of the latest amendment (D060 is v2.1.0)."""
-    assert _header_version() == "v2.1.0"
+def test_d067_row_present() -> None:
+    """D067 is recorded once, directly after D066, and freezes protocol v2.2.0 (REV-16 route B)."""
+    lines = _lines(DECISIONS)
+    d067_idx = [i for i, ln in enumerate(lines) if ln.startswith("| D067 |")]
+    d066_idx = [i for i, ln in enumerate(lines) if ln.startswith("| D066 |")]
+    assert len(d067_idx) == 1, "D067 must appear exactly once as a table-row start"
+    assert len(d066_idx) == 1
+    assert d067_idx[0] == d066_idx[0] + 1, "D067 must directly follow D066"
+    row = lines[d067_idx[0]]
+    for token in ("protocol v2.2.0 frozen", "dataManifestHash", "D065", "route B"):
+        assert token in row, f"D067 row must mention {token}"
+
+
+def test_header_version_is_the_d067_amendment() -> None:
+    """The header version equals the freeze row of the latest amendment (D067 is v2.2.0)."""
+    assert _header_version() == "v2.2.0"
 
 
 def test_doc_status_line_not_pending() -> None:
@@ -209,6 +222,7 @@ def test_doc_status_line_not_pending() -> None:
     assert "D030" in index_lines[0]
     assert "D043" in index_lines[0]
     assert "D052" in index_lines[0]
+    assert "D067" in index_lines[0]
     for ln in lines:
         assert not W2_PENDING.search(ln), f"pending marker on DOC_STATUS line: {ln!r}"
 
