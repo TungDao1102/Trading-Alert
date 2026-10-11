@@ -251,6 +251,21 @@ class ReplayRun:
 
 
 @dataclass(frozen=True)
+class ParityUnavailable:
+    """The parity replay cannot be built from the bundle (plan 16-51); `reason` says why.
+
+    Parity is then NOT EVALUATED and the criterion FAILS: a missing comparison is never a PASS.
+    """
+
+    reason: str
+
+
+NO_REPLAY_INPUTS_REASON = (
+    "the bundle carries no recorded replay inputs; it was written by a runtime before plan 16-51"
+)
+
+
+@dataclass(frozen=True)
 class ParityReplay:
     """What the parity replay needs besides the recorded bars (D061 item D, L-04).
 
@@ -478,7 +493,7 @@ class _RuntimeInputs:
     records: tuple[RuntimeRecord, ...]
     coverage: CoverageReport
     backfill_rule: BackfillRule
-    parity: ParityReplay | None
+    parity: ParityReplay | ParityUnavailable | None
     other_epoch_records_in_window: tuple[tuple[str, int], ...]
 
 
@@ -813,7 +828,7 @@ def _close_ms(moment: datetime) -> int:
 
 
 def parity_criterion(
-    records: Sequence[RuntimeRecord], replay: ParityReplay | None
+    records: Sequence[RuntimeRecord], replay: ParityReplay | ParityUnavailable | None
 ) -> CriterionResult:
     """Replay the recorded bars through the shared chain and compare every live surface record.
 
@@ -824,6 +839,8 @@ def parity_criterion(
     records depend on the pipeline's own buffers and are counted, not compared. The tolerance is
     `PARITY_TOLERANCE` (zero): any differing record fails.
     """
+    if isinstance(replay, ParityUnavailable):
+        return CriterionResult(_PARITY_NAME, False, (f"NOT EVALUATED: {replay.reason}",))
     if replay is None or (replay.parameter_set is None and replay.context is None):
         return CriterionResult(
             _PARITY_NAME,
@@ -937,14 +954,25 @@ def build_parity_replay(
     *,
     parameter_set: ParameterSet,
     pinned_parameter_set_hash: str,
-) -> ParityReplay:
+) -> ParityReplay | ParityUnavailable:
     """Build the parity replay from the runtime records of ONE epoch and the registry set.
 
     Run k starts at its RUNTIME_START and ends before the next one; every PAPER_HISTORY_BARS record
     joins the run holding its time, and each run's log is ordered by acceptance sequence. A history
     record outside every run or an unreadable one is kept as a build problem (parity fails on it).
     `pinned_parameter_set_hash` is the epoch's pinned hash; the registry set must carry it.
+
+    Returns `ParityUnavailable` (parity NOT EVALUATED, the criterion fails) when the registry set
+    carries another hash than the pinned one, or when the records hold no replay inputs and no
+    history record (a bundle written by a runtime before plan 16-51).
     """
+    if parameter_set.parameter_set_hash != pinned_parameter_set_hash:
+        return ParityUnavailable(
+            f"the registry parameter set hash {parameter_set.parameter_set_hash} differs from the "
+            f"parameter set hash {pinned_parameter_set_hash} pinned by the epoch"
+        )
+    if not has_recorded_replay_inputs(records):
+        return ParityUnavailable(NO_REPLAY_INPUTS_REASON)
     starts = sorted(
         {r.occurred_at_utc for r in records if r.event_type is RuntimeEventType.RUNTIME_START}
     )
@@ -975,6 +1003,14 @@ def build_parity_replay(
         for index, start in enumerate(starts)
     )
     return ParityReplay(runs=runs, parameter_set=parameter_set, build_problems=tuple(problems))
+
+
+def has_recorded_replay_inputs(records: Sequence[RuntimeRecord]) -> bool:
+    """True when the records hold at least one replay-inputs or history record (plan 16-51)."""
+    return any(
+        r.event_type in (RuntimeEventType.PAPER_REPLAY_INPUTS, RuntimeEventType.PAPER_HISTORY_BARS)
+        for r in records
+    )
 
 
 @dataclass
@@ -1294,15 +1330,16 @@ def evaluate_trial(
     cron: str,
     symbols: Sequence[str],
     backfill_rule: BackfillRule,
-    parity: ParityReplay | None,
+    parity: ParityReplay | ParityUnavailable | None,
 ) -> TrialEvaluation:
     """Judge the manifest's epoch from one verified bundle.
 
     `thresholds` are the user-ratified numbers (O-07) and `cron` is the recorded schedule of the
     freeze workflow; neither has a default. `symbols` are the scope of the ratified configuration:
     every closed 1h and 4h bar of each must be accounted for. `backfill_rule` is the user's Q-D
-    option read from its decision file (`read_backfill_rule`). `parity` is the replay context; None
-    means parity is NOT EVALUATED and the criterion fails (a missing comparison is never a PASS).
+    option read from its decision file (`read_backfill_rule`). `parity` is the replay built from
+    the bundle (`build_parity_replay`) or the test seam; None or `ParityUnavailable` means parity
+    is NOT EVALUATED and the criterion fails (a missing comparison is never a PASS).
     The grace is passed only to `freeze_evidence_report`, where it can never turn a gap into CLEAN.
     """
     if not isinstance(thresholds, HealthThresholds):
@@ -1661,7 +1698,9 @@ __all__ = [
     "CriterionGroup",
     "CriterionResult",
     "EvidenceItem",
+    "NO_REPLAY_INPUTS_REASON",
     "ParityReplay",
+    "ParityUnavailable",
     "ReplayRun",
     "ProofClass",
     "RequirementClosure",
@@ -1673,6 +1712,7 @@ __all__ = [
     "code_evidence_item",
     "evaluate_trial",
     "build_parity_replay",
+    "has_recorded_replay_inputs",
     "parity_criterion",
     "read_backfill_rule",
     "rehearsal_evidence_item",

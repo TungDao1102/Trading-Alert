@@ -759,7 +759,9 @@ def test_a_crash_between_the_inputs_and_the_heartbeat_leaves_a_reported_orphan(
     restart = drive_two_runs(world, crash_on_last=True)
     close = restart.last.close_time_utc
 
-    assert [g.reason.value for g in restart.gaps if g.expected_close_utc == close] == ["CRASH"]
+    # The fixture closes carry whole seconds; the exchange grid close is 999 ms later.
+    grid_close = close + timedelta(milliseconds=999)
+    assert [(g.expected_close_utc, g.reason.value) for g in restart.gaps] == [(grid_close, "CRASH")]
     assert restart.second_evaluated == (restart.final,)
     orphans = [
         r for r in world.records(RuntimeEventType.PAPER_REPLAY_INPUTS) if r.occurred_at_utc == close

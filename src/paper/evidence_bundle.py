@@ -21,6 +21,13 @@ Line shapes:
   (`payload` carries no float; a float is refused);
 - evidence gap: `{"slot_utc", "schedule", "reason", "detected_at_utc", "run_id"}`.
 
+Plan 16-51 adds two runtime record types to `runtime_records.jsonl`, `PAPER_REPLAY_INPUTS` (what
+the risk stage read for an evaluated live bar) and `PAPER_HISTORY_BARS` (every bar the pipeline
+accepted, with its acceptance sequence). The bundle schema stays `soak-evidence-bundle/1` and no
+file is added: the trial evaluator rebuilds the parity replay from these lines and the registry
+parameter set whose hash equals the pin. `runtime_record_line` is the one canonical writer of such
+a line, for every `RuntimeEventType`.
+
 Pure of the clock and the network: it reads the files of one directory and nothing else.
 """
 
@@ -209,6 +216,24 @@ def _parse_diff_records(data: bytes) -> tuple[DiffRecord, ...]:
     return tuple(records)
 
 
+def runtime_record_line(record: RuntimeRecord) -> str:
+    """The `runtime_records.jsonl` line of one record: canonical JSON, no trailing newline.
+
+    The payload is taken from the record's own canonical payload text, so the bytes round-trip:
+    a line read back with `load_evidence_bundle` gives a record with the same
+    `runtime_event_id` and `payload_json` (the exporter of plan 16-30 writes every record with it).
+    """
+    row = {
+        "event_type": record.event_type.value,
+        "epoch_id": record.epoch_id,
+        "occurred_at_utc": record.occurred_at_utc.astimezone(UTC).isoformat(),
+        "symbol": record.symbol,
+        "interval": record.interval,
+        "payload": json.loads(record.payload_json),
+    }
+    return json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
 def _parse_records(data: bytes) -> tuple[RuntimeRecord, ...]:
     records: list[RuntimeRecord] = []
     for number, row in enumerate(_json_rows(FILE_RECORDS, data), start=1):
@@ -324,5 +349,6 @@ __all__ = [
     "DiffRecord",
     "EvidenceBundle",
     "load_evidence_bundle",
+    "runtime_record_line",
     "sha256_of",
 ]
