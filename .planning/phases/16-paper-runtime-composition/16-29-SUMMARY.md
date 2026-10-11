@@ -187,3 +187,6 @@ None beyond the plan's threat model: T-16-66 (late signal from a downtime bar) i
 - Created files exist: `src/paper/restart.py`, `tests/test_paper_runtime_restart.py`, `tests/test_paper_runtime_restart_pg.py`.
 - Commits found: 10499d2, fcb70d9, e1d66d7, d6b5357, 9f722d5.
 - STATE.md and ROADMAP.md untouched; no `.env` read; no network used.
+
+## PostgreSQL verification (orchestrator, 2026-10-11)
+`tests/test_paper_runtime_restart_pg.py` run against the local Compose PostgreSQL 17 (database `trading_test`, user with CREATEDB, throwaway `t17_*_test` databases) with `TRADING_CI_STRICT=1`: 3 passed, 0 skipped, exit 0. This closes the Task 3 acceptance that the executor could not meet on a machine without PostgreSQL. The connection string was supplied through the process environment only and is not recorded here.
