@@ -378,6 +378,7 @@ def test_evidence_sample_loads_into_typed_objects() -> None:
     assert len(evidence.backtest) == 1
     entry = evidence.backtest[0]
     assert entry.experiment.run_type == "CANDIDATE"
+    assert entry.experiment.data_manifest_hash is None  # written before protocol v2.2.0
     assert entry.experiment.time_range_start_utc.tzinfo is not None
     assert [t.trade_id for t in entry.trades] == ["T-1", "T-2"]
     assert entry.trades[0].entry_price == Decimal("100.00")
@@ -608,6 +609,51 @@ def test_a_record_serialized_with_to_dict_loads_back_equal(tmp_path: Path) -> No
 
     loaded = load_evidence_file(_evidence_with(tmp_path, mutate)).backtest[0].experiment
     assert loaded == record
+
+
+def test_the_optional_manifest_hash_key_loads_and_is_validated(tmp_path: Path) -> None:
+    def add(doc: dict[str, Any]) -> None:
+        doc["backtest"][0]["experiment"]["data_manifest_hash"] = "c" * 64
+
+    loaded = load_evidence_file(_evidence_with(tmp_path, add)).backtest[0].experiment
+    assert loaded.data_manifest_hash == "c" * 64
+
+    secret = "C" * 64
+    for bad in (None, 7, secret, "c" * 63):
+
+        def mutate(doc: dict[str, Any], bad: object = bad) -> None:
+            doc["backtest"][0]["experiment"]["data_manifest_hash"] = bad
+
+        with pytest.raises(EvidenceFileError) as info:
+            load_evidence_file(_evidence_with(tmp_path, mutate))
+        assert secret not in str(info.value)
+
+    def other_key(doc: dict[str, Any]) -> None:
+        doc["backtest"][0]["experiment"]["data_manifest_sha"] = "c" * 64
+
+    with pytest.raises(EvidenceFileError, match="unexpected key"):
+        load_evidence_file(_evidence_with(tmp_path, other_key))
+
+
+@pytest.mark.parametrize("manifest_hash_value", ["d" * 64, None])
+def test_a_record_with_or_without_the_manifest_hash_loads_back_equal(
+    tmp_path: Path, manifest_hash_value: str | None
+) -> None:
+    record = make_experiment_record(
+        code_commit="a" * 40,
+        code_version="a" * 40,
+        split_role="VALIDATION",
+        fallback_count=0,
+        end_of_data_count=0,
+        data_manifest_hash=manifest_hash_value,
+    )
+
+    def mutate(doc: dict[str, Any]) -> None:
+        doc["backtest"][0]["experiment"] = record.to_dict()
+
+    loaded = load_evidence_file(_evidence_with(tmp_path, mutate)).backtest[0].experiment
+    assert loaded == record
+    assert loaded.data_manifest_hash == manifest_hash_value
 
 
 def _json_keys(node: Any) -> set[str]:

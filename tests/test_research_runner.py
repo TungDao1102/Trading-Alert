@@ -277,6 +277,8 @@ def test_authorized_run_writes_one_record_per_split_and_no_verdict(
         assert payload["code_commit"] == FAKE_COMMIT
         assert payload["parameter_set_id"] == "baseline-v5"
         assert payload["data_snapshot_id"] == record.data_snapshot_id
+        assert payload["data_manifest_hash"] == manifest_hash(manifest)
+        assert record.data_manifest_hash == manifest_hash(manifest)
     assert {r.split_role for r in records} == {"DEVELOPMENT", "VALIDATION"}
     stdout = capsys.readouterr().out
     assert "experiment_id=" in stdout
@@ -285,10 +287,10 @@ def test_authorized_run_writes_one_record_per_split_and_no_verdict(
     assert holdout_marker.read_bytes() == marker_before
 
 
-def test_identity_inputs_are_computed_in_one_function() -> None:
-    manifest_sentinel: Any = object()
-    inputs = research_run.experiment_identity_inputs(manifest_sentinel, "f" * 64)
-    assert inputs == {"data_snapshot_id": "f" * 64}
+def test_identity_inputs_are_computed_in_one_function(store: Path, tmp_path: Path) -> None:
+    manifest = _manifest(store, tmp_path)
+    inputs = research_run.experiment_identity_inputs(manifest, "f" * 64)
+    assert inputs == {"data_snapshot_id": "f" * 64, "data_manifest_hash": manifest_hash(manifest)}
 
 
 # --------------------------------------------------------------------------- #

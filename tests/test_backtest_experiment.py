@@ -32,6 +32,7 @@ from src.domain.registry import UnregisteredParameterSet, load_parameter_set
 from tests.backtest_case_helpers import (
     CODE_COMMIT,
     DEFAULT_COST_MODEL,
+    DEFAULT_DATASET_ID,
     RECORD_END,
     RECORD_START,
     assemble_kwargs,
@@ -1135,6 +1136,52 @@ def test_assemble_refuses_a_run_over_another_or_no_dataset() -> None:
         _assemble(run_summary=strategy_run_summary(dataset_id=None))
     ok = _assemble(data_snapshot_id="9" * 64, run_summary=strategy_run_summary(dataset_id="9" * 64))
     assert ok.data_snapshot_id == "9" * 64
+
+
+# --------------------------------------------------------------------------- #
+# Quick 261011-mi1 (REV-16 route B, protocol v2.2.0 section 5, D067): the seventh identity
+# field `data_manifest_hash`.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_manifest_hash_is_the_seventh_identity_field() -> None:
+    first = _assemble(data_manifest_hash="a" * 64)
+    second = _assemble(data_manifest_hash="b" * 64)
+
+    assert first.data_manifest_hash == "a" * 64
+    assert first.to_dict()["data_manifest_hash"] == "a" * 64
+    assert first.experiment_id != second.experiment_id
+    assert first.data_snapshot_id == second.data_snapshot_id == DEFAULT_DATASET_ID
+    differing = {key for key, value in first.to_dict().items() if value != second.to_dict()[key]}
+    assert differing == {"experiment_id", "data_manifest_hash"}
+
+
+def test_assemble_requires_the_manifest_hash_keyword() -> None:
+    from src.backtest.experiment import assemble
+
+    kwargs = assemble_kwargs()
+    kwargs.pop("data_manifest_hash", None)
+    with pytest.raises(TypeError, match="data_manifest_hash"):
+        assemble(**kwargs)
+
+
+@pytest.mark.parametrize("bad", [None, "", "A" * 64, "a" * 63, "g" * 64, 7])
+def test_assemble_refuses_a_malformed_manifest_hash(bad: object) -> None:
+    from src.backtest.experiment import IncompleteExperimentRecord
+
+    with pytest.raises(IncompleteExperimentRecord, match="data_manifest_hash"):
+        _assemble(data_manifest_hash=bad)
+
+
+def test_a_record_may_lack_the_manifest_hash_only_as_a_pre_v2_2_0_record() -> None:
+    from src.backtest.experiment import IncompleteExperimentRecord
+
+    legacy = make_experiment_record(data_manifest_hash=None)
+    assert legacy.data_manifest_hash is None
+    assert "data_manifest_hash" not in legacy.to_dict()
+    for bad in ("G" * 64, "", "a" * 63):
+        with pytest.raises(IncompleteExperimentRecord, match="data_manifest_hash"):
+            make_experiment_record(data_manifest_hash=bad)
 
 
 def test_the_record_serializes_without_the_research_gate_keys() -> None:
