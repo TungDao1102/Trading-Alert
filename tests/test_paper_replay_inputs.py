@@ -20,12 +20,11 @@ import asyncio
 import dataclasses
 import json
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-import pytest
 from src.adapters.binance_public import SymbolFilters
 from src.core.types import Candle
 from src.domain.canonical import canonical_bytes
@@ -51,7 +50,7 @@ from tests.test_paper_decision_surface import (
 )
 from tests.test_paper_exit_evaluator import TrialFixture
 from tests.test_paper_runtime_loop import filters
-from tests.test_paper_runtime_pipeline import EPOCH_ID, Fixture, _epoch, _tagged
+from tests.test_paper_runtime_pipeline import EPOCH_ID, Fixture, _epoch
 
 SYMBOL = "BTCUSDT"
 # surface_digest of decision_surface over the Phase 7 parity fixture, measured before plan 16-51.
@@ -321,7 +320,7 @@ def test_the_replay_inputs_record_carries_what_the_risk_stage_read() -> None:
     ]
     assert payload["daily_loss_quote"] == "12.5"
     assert payload["ttl_seconds"] == 30 * ONE_DAY
-    assert inputs.payload_json == canonical_bytes(dict(inputs.payload)).decode("ascii")
+    assert inputs.payload_json == canonical_bytes(payload).decode("ascii")
     _walk_for_floats(payload)
     for key in ("context_digest", "setup_window_digest", "context_window_digest"):
         assert len(payload[key]) == 64

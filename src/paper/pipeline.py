@@ -14,7 +14,7 @@ Source-tag rule (L-11 and the user's Q-D decision "history-only", D-06; ratified
   gate and then `evaluate_closed_bar`.
 - `LIVE_WS` closed 4h bars extend the context window and are recorded as context bars.
 - `REST_WARMUP` bars (closed while the process was down) only extend history. They are never
-  evaluated and never recorded.
+  evaluated and never recorded as processed.
 - `REST_BACKFILL` bars (recovered by REST while the process stayed up) also only extend history,
   in time order. They are never evaluated: no signal, no plan, no approval, no reservation. Every
   such close is recorded as exactly one `PAPER_GAP` with reason `WS_RECONNECT_WINDOW`; the gap
@@ -47,6 +47,17 @@ not evaluated, exactly as `run_paper_tick` treats it. The pipeline only makes th
 bar is listed in `PipelineResult.dropped` with reason `FUTURE_CLOSE` and the exact delta in
 milliseconds, is not added to history and is not recorded as processed (research P20).
 
+Parity replay records (plan 16-51, user decision 16-DEC-PARITY option 1): every bar `_accept`
+stores, from any source and live bars included, is logged with its acceptance sequence `accept_seq`
+in a `PAPER_HISTORY_BARS` record, written before the `PAPER_REPLAY_INPUTS` record of any evaluation
+that can read it and at the end of `handle` when entries are pending. REST_WARMUP and REST_BACKFILL
+bars are still never evaluated and never recorded as processed (L-11, D-06): the log only lets the
+trial evaluator rebuild the windows in the order the buffers received the bars. Each evaluated
+live 1h bar also writes one `PAPER_REPLAY_INPUTS` record (what the risk stage read and
+`window_accept_seq`, the last accepted bar the windows were cut after) just before its heartbeat.
+The heartbeat and gap payloads are unchanged; the new records ride in
+`PipelineResult.replay_records`, not in `recorded`.
+
 Pure module: the tick time is injected (no clock read), no sleeping, no float, and no import from
 `src.backtest.engine`, `src.execution` or `src.adapters`.
 """
@@ -70,6 +81,7 @@ from src.paper.loop import (
     check_feed_freshness,
     evaluate_closed_bar,
 )
+from src.paper.replay_inputs import HistoryEntry, history_log_payload, replay_inputs_payload
 from src.paper.runtime_state import RuntimeRecord, RuntimeStatePort
 from src.paper.surface import (
     DecisionSurfaceRecord,
@@ -133,7 +145,9 @@ class HeldBar:
 class PipelineResult:
     """What one `handle` call did, in processing order (close ascending, 4h before 1h).
 
-    `recorded` holds every record written (heartbeats and gaps); `gaps` the gaps among them.
+    `recorded` holds every heartbeat and gap written; `gaps` the gaps among them. `replay_records`
+    holds the parity-replay records written (`PAPER_HISTORY_BARS` and `PAPER_REPLAY_INPUTS`, plan
+    16-51) in write order.
     """
 
     evaluated: tuple[BarOutcome, ...] = ()
@@ -142,6 +156,7 @@ class PipelineResult:
     held: tuple[HeldBar, ...] = ()
     gaps: tuple[GapRecord, ...] = ()
     dropped: tuple[DroppedBar, ...] = ()
+    replay_records: tuple[RuntimeRecord, ...] = ()
 
 
 def _require_utc(name: str, value: datetime) -> None:
@@ -193,6 +208,7 @@ class _Batch:
         self.held: list[HeldBar] = []
         self.gaps: list[GapRecord] = []
         self.dropped: list[DroppedBar] = []
+        self.replay_records: list[RuntimeRecord] = []
 
     def freeze(self) -> PipelineResult:
         dropped = sorted(self.dropped, key=lambda d: (d.close_time_utc, d.symbol, d.interval))
@@ -203,6 +219,7 @@ class _Batch:
             held=tuple(self.held),
             gaps=tuple(self.gaps),
             dropped=tuple(dropped),
+            replay_records=tuple(self.replay_records),
         )
 
 
@@ -254,6 +271,11 @@ class BarPipeline:
         # Open times of bars a previous run already processed (restored after a restart): a
         # redelivery of one is a duplicate, whatever the warm-up window still holds.
         self._processed_before_start: set[tuple[str, str, datetime]] = set()
+        # The acceptance log of plan 16-51: a counter over every bar `_accept` stores, the entries
+        # not yet written, and the counter of the PAPER_HISTORY_BARS records.
+        self._accept_seq = 0
+        self._pending: list[HistoryEntry] = []
+        self._history_seq = 0
 
     def seed_processed(self, last_closes: Mapping[tuple[str, str], datetime]) -> None:
         """Mark each pair's restored last processed close as already handled (plan 16-29).
@@ -287,6 +309,7 @@ class BarPipeline:
         for _, group in group_by_close(self._one_copy_per_bar(candidates, batch)):
             for bar in group:
                 self._handle_closed_bar(bar, now_utc, batch)
+        self._flush_history(now_utc, batch)
         return batch.freeze()
 
     # ------------------------------------------------------------------ #
@@ -374,14 +397,52 @@ class BarPipeline:
             return
         self._evaluate_live_bar(bar, candle, now_utc, batch)
 
-    def _accept(self, bar: TaggedBar, candle: Candle, batch: _Batch) -> bool:
-        """Add a new closed bar to the history; False when the buffers refuse it."""
+    def _accept(
+        self,
+        bar: TaggedBar,
+        candle: Candle,
+        batch: _Batch,
+        *,
+        fetched_for_close_utc: datetime | None = None,
+    ) -> bool:
+        """Add a new closed bar to the history; False when the buffers refuse it.
+
+        An accepted bar gets the next acceptance sequence and waits in the pending log.
+        """
         if not self._buffers.add(candle):
             # Older than everything a full buffer still retains: it cannot re-enter history.
             batch.duplicates.append(bar)
             return False
         self._seen[(bar.symbol, bar.interval, bar.open_time_utc)] = candle
+        self._pending.append(
+            HistoryEntry(
+                accept_seq=self._accept_seq,
+                source=bar.source.value,
+                candle=candle,
+                fetched_for_close_utc=fetched_for_close_utc,
+            )
+        )
+        self._accept_seq += 1
         return True
+
+    def _flush_history(self, now_utc: datetime, batch: _Batch) -> None:
+        """Write the pending acceptance-log entries as ONE PAPER_HISTORY_BARS record.
+
+        Nothing is written when nothing is pending. The sequence advances and the entries are
+        released only after the state port accepted the record.
+        """
+        if not self._pending:
+            return
+        record = RuntimeRecord(
+            event_type=RuntimeEventType.PAPER_HISTORY_BARS,
+            epoch_id=self._epoch.epoch_id,
+            occurred_at_utc=now_utc,
+            payload=history_log_payload(self._pending, history_seq=self._history_seq),
+        )
+        self._state.record(record)
+        self._history_seq += 1
+        self._pending = []
+        batch.replay_records.append(record)
 
     # ------------------------------------------------------------------ #
     # 4h sibling.
@@ -419,7 +480,7 @@ class BarPipeline:
     def _ingest_fetched_sibling(self, fetched: TaggedBar, now_utc: datetime, batch: _Batch) -> None:
         """A fetched 4h sibling is context only: history plus one gap, like a backfilled bar."""
         sibling = _to_candle(fetched)
-        if self._accept(fetched, sibling, batch):
+        if self._accept(fetched, sibling, batch, fetched_for_close_utc=fetched.close_time_utc):
             self._skip_backfilled(fetched, GAP_DETAIL_SIBLING_FETCHED, now_utc, batch)
 
     # ------------------------------------------------------------------ #
@@ -455,6 +516,23 @@ class BarPipeline:
                 "context parameter_set_hash differs from the pinned epoch's parameter_set_hash"
             )
         digest = feature_digest(context, candle.symbol, setup_window)
+        inputs = RuntimeRecord(
+            event_type=RuntimeEventType.PAPER_REPLAY_INPUTS,
+            epoch_id=self._epoch.epoch_id,
+            occurred_at_utc=close,
+            symbol=candle.symbol,
+            interval=candle.interval,
+            payload=replay_inputs_payload(
+                context,
+                setup_window=setup_window,
+                context_window=context_window,
+                window_accept_seq=self._accept_seq - 1,
+            ),
+        )
+        # Every bar these windows can read is stored before the inputs that name them.
+        self._flush_history(now_utc, batch)
+        self._state.record(inputs)
+        batch.replay_records.append(inputs)
         outcome = evaluate_closed_bar(context, candle, setup_window, context_window)
         batch.evaluated.append(outcome)
         record = outcome_record(candle, outcome, digest=digest)

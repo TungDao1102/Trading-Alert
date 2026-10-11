@@ -79,6 +79,12 @@ class RuntimeEventType(StrEnum):
     # One record per consumer iteration (plan 16-26): tick time, dropped-event counts and the
     # measured tick duration (research P20 and A10).
     PAPER_TICK_STATS = "PAPER_TICK_STATS"
+    # What the risk stage read for one evaluated live 1h bar, keyed like its heartbeat (plan 16-51,
+    # 16-DEC-PARITY option 1): the parity replay of the trial evaluator is built from it.
+    PAPER_REPLAY_INPUTS = "PAPER_REPLAY_INPUTS"
+    # Every bar the pipeline accepted into its history, with its acceptance sequence (plan 16-51,
+    # 16-DEC-PARITY option 1): the order the live windows were cut from.
+    PAPER_HISTORY_BARS = "PAPER_HISTORY_BARS"
     WS_DISCONNECT = "WS_DISCONNECT"
     WS_RECONNECT = "WS_RECONNECT"
     HEALTH_STATE_CHANGED = "HEALTH_STATE_CHANGED"

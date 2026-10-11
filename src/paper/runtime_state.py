@@ -11,12 +11,16 @@ implementation lives in `src/persistence/paper_runtime_state.py`, per the Q-J de
 Ids are a pure function of the record key, never of the wall clock (research Pattern 3 and
 Pitfall P11): `correlated_event_id(prefix="paper", correlation_id=..., ...)` over
 
-- bar-keyed records (PAPER_BAR_PROCESSED, PAPER_GAP):
-  `paper:<epoch>:<symbol>:<interval>:<close_ms>`. A bar record's close is its `occurred_at_utc`;
-  a gap's close is the `expected_close_utc` in its payload, so a gap detected twice (before and
-  after a restart) is the same record;
+- bar-keyed records (PAPER_BAR_PROCESSED, PAPER_REPLAY_INPUTS, PAPER_GAP):
+  `paper:<epoch>:<symbol>:<interval>:<close_ms>`. A bar record's close is its `occurred_at_utc`
+  (the replay-inputs record of plan 16-51 is keyed like its heartbeat; the event type in the hashed
+  material keeps the two ids apart); a gap's close is the `expected_close_utc` in its payload, so a
+  gap detected twice (before and after a restart) is the same record;
 - PAPER_TICK_STATS: `paper:<epoch>:tick:<at_ms>:<batch_seq>` (the tick time is the injected time;
   `batch_seq` is a per-process counter carried in the payload, research P20 and A10);
+- PAPER_HISTORY_BARS (plan 16-51): `paper:<epoch>:history:<at_ms>:<history_seq>` (the injected
+  tick time and a per-pipeline counter carried in the payload, read under the same rule as
+  `batch_seq`);
 - every other runtime marker: `paper:<epoch>:runtime:<at_ms>`.
 
 The event type is part of the hashed material, so two types at the same instant never collide.
@@ -32,7 +36,9 @@ equal values.
 Payload-key contract read by `src/paper/coverage.py` (`RuntimeRecordLike`): PAPER_BAR_PROCESSED
 `source` and `tick_time_utc`; PAPER_GAP `expected_close_utc` and `reason`; HEALTH_STATE_CHANGED
 `state` and `reason`; PAPER_TICK_STATS `batch_seq`, `duration_ms`, `queue_depth_before`,
-`dropped_total`, `dropped_by_reason`.
+`dropped_total`, `dropped_by_reason`. The payloads of PAPER_REPLAY_INPUTS and PAPER_HISTORY_BARS
+are read only by the trial evaluator (`src/paper/replay_inputs.py`, `src/paper/exit_criteria.py`);
+the id rules above read `history_seq` of the latter and nothing of the former.
 """
 
 from __future__ import annotations
@@ -61,7 +67,17 @@ _MAX_EPOCH_ID_LENGTH = 64
 _MAX_SYMBOL_LENGTH = 32
 _MAX_INTERVAL_LENGTH = 8
 
-_BAR_KEYED = frozenset({RuntimeEventType.PAPER_BAR_PROCESSED, RuntimeEventType.PAPER_GAP})
+_BAR_KEYED = frozenset(
+    {
+        RuntimeEventType.PAPER_BAR_PROCESSED,
+        RuntimeEventType.PAPER_REPLAY_INPUTS,
+        RuntimeEventType.PAPER_GAP,
+    }
+)
+# Bar-keyed types whose close is the record's own `occurred_at_utc` (a gap names its close).
+_CLOSE_FROM_TIME = frozenset(
+    {RuntimeEventType.PAPER_BAR_PROCESSED, RuntimeEventType.PAPER_REPLAY_INPUTS}
+)
 _MARKER_EVENTS = frozenset({RuntimeEventType.RUNTIME_START, RuntimeEventType.RUNTIME_STOP})
 
 # Same-instant order of the two markers, matching `src/paper/coverage.py`: a STOP at the same
@@ -190,6 +206,13 @@ def _batch_seq(record: RuntimeRecord) -> int:
     return seq
 
 
+def _history_seq(record: RuntimeRecord) -> int:
+    seq = record.payload.get("history_seq")
+    if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
+        raise ValueError("PAPER_HISTORY_BARS needs payload history_seq (a non-negative integer)")
+    return seq
+
+
 def runtime_correlation_prefix(epoch_id: str) -> str:
     """Prefix shared by every correlation id of one epoch: `paper:<epoch>:`."""
     return f"{EVENT_ID_PREFIX}:{_check_text('epoch_id', epoch_id, _MAX_EPOCH_ID_LENGTH)}:"
@@ -208,13 +231,15 @@ def runtime_correlation_id(record: RuntimeRecord) -> str:
     if record.event_type in _BAR_KEYED:
         if record.symbol is None or record.interval is None:
             raise ValueError(f"{record.event_type.value} needs symbol and interval")
-        if record.event_type is RuntimeEventType.PAPER_BAR_PROCESSED:
+        if record.event_type in _CLOSE_FROM_TIME:
             close_ms = _ms(record.occurred_at_utc)
         else:
             close_ms = _payload_time_ms(record, "expected_close_utc")
         return f"{prefix}{record.symbol}:{record.interval}:{close_ms}"
     if record.event_type is RuntimeEventType.PAPER_TICK_STATS:
         return f"{prefix}tick:{_ms(record.occurred_at_utc)}:{_batch_seq(record)}"
+    if record.event_type is RuntimeEventType.PAPER_HISTORY_BARS:
+        return f"{prefix}history:{_ms(record.occurred_at_utc)}:{_history_seq(record)}"
     return f"{prefix}runtime:{_ms(record.occurred_at_utc)}"
 
 

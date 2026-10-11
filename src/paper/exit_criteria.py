@@ -35,7 +35,8 @@ from enum import StrEnum
 from pathlib import Path
 
 from src.core.types import Candle
-from src.paper.bars import CONTEXT_INTERVAL, SETUP_INTERVAL
+from src.domain.registry import ParameterSet
+from src.paper.bars import CONTEXT_INTERVAL, SETUP_INTERVAL, BarBuffers
 from src.paper.coverage import (
     RESTART_RULE,
     SLOT_INTERVAL_SECONDS,
@@ -51,8 +52,22 @@ from src.paper.coverage import (
 from src.paper.evidence_bundle import MANIFEST_NAME, DiffRecord, EvidenceBundle
 from src.paper.loop import BAR_STAGES, BarContext, check_feed_freshness
 from src.paper.pipeline import REASON_HISTORY_DISCONTINUITY, REASON_SIBLING_4H_MISSING
+from src.paper.replay_inputs import (
+    HistoryEntry,
+    ReplayInputsError,
+    context_from_inputs,
+    parse_history_payload,
+    window_accept_seq_of,
+    window_digest,
+)
 from src.paper.runtime_state import RuntimeRecord
-from src.paper.surface import REASON_DUPLICATE_BAR, decision_surface, gate_record
+from src.paper.surface import (
+    REASON_DUPLICATE_BAR,
+    context_record,
+    decision_surface,
+    gate_record,
+    observe_closed_bar,
+)
 from src.paper.vocabulary import INTERVAL_MS, GapReason, HealthState, RuntimeEventType
 
 # DECISION D061 item D, 2026-10-07: trial soak length, in calendar days.
@@ -223,17 +238,36 @@ def read_backfill_rule(path: Path) -> BackfillRule:
 
 
 @dataclass(frozen=True)
+class ReplayRun:
+    """One process run of the trial: its acceptance log, in acceptance order (plan 16-51).
+
+    The run starts at a RUNTIME_START record and ends before the next one (None for the last run).
+    Every pipeline numbers the bars it accepts from zero, so a log is only meaningful per run.
+    """
+
+    started_at_utc: datetime
+    ended_before_utc: datetime | None
+    log: tuple[HistoryEntry, ...]
+
+
+@dataclass(frozen=True)
 class ParityReplay:
     """What the parity replay needs besides the recorded bars (D061 item D, L-04).
 
-    `context` is the `BarContext` (or a callable returning it per 1h bar) the live runtime
-    decided with; `history_bars` are the REST warm-up bars the runtime loaded before its first
-    live bar (they are history, never recorded as processed). Without them the replay would
-    reject the first live bars as under-warmed while the live runtime did not.
+    Two forms. The bundle form (plan 16-51, `build_parity_replay`) carries `runs` (the acceptance
+    log of each process run) and the registry `parameter_set`: the context of each evaluated bar is
+    rebuilt from its recorded replay inputs and nothing else is supplied. The seam form (plan
+    16-25) carries `context`, the `BarContext` (or a callable returning it per 1h bar) the live
+    runtime decided with, and `history_bars`, the REST warm-up bars the runtime loaded before its
+    first live bar (history, never recorded as processed); it is kept for the fixture tests.
+    `build_problems` are inconsistencies found while the replay was built; each fails parity.
     """
 
-    context: BarContext | Callable[[Candle], BarContext]
+    context: BarContext | Callable[[Candle], BarContext] | None = None
     history_bars: tuple[Candle, ...] = ()
+    runs: tuple[ReplayRun, ...] = ()
+    parameter_set: ParameterSet | None = None
+    build_problems: tuple[str, ...] = ()
 
 
 # --------------------------------------------------------------------------- #
@@ -790,7 +824,7 @@ def parity_criterion(
     records depend on the pipeline's own buffers and are counted, not compared. The tolerance is
     `PARITY_TOLERANCE` (zero): any differing record fails.
     """
-    if replay is None:
+    if replay is None or (replay.parameter_set is None and replay.context is None):
         return CriterionResult(
             _PARITY_NAME,
             False,
@@ -799,6 +833,11 @@ def parity_criterion(
                 "not compared with a replay (a missing comparison is never a PASS)",
             ),
         )
+    if replay.parameter_set is not None:
+        return _parity_from_bundle(records, replay, replay.parameter_set)
+    seam_context = replay.context
+    if seam_context is None:  # unreachable: guarded above; narrows the type for the replay
+        raise AssertionError("a seam replay needs a context")
     bars = _processed(records)
     if not bars:
         return CriterionResult(
@@ -825,7 +864,7 @@ def parity_criterion(
         try:
             produced = decision_surface(
                 [*replay.history_bars, *(candle for _, candle, _ in recorded)],
-                context=replay.context,
+                context=seam_context,
             )
         except ValueError as exc:
             problems.append(f"the replay refused the recorded bars: {exc}")
@@ -879,6 +918,298 @@ def parity_criterion(
     ]
     failed = len(mismatches) > PARITY_TOLERANCE or bool(problems)
     evidence = [*summary, *problems, *mismatches[:_PROBLEM_LIMIT]]
+    if len(mismatches) > _PROBLEM_LIMIT:
+        evidence.append(f"... and {len(mismatches) - _PROBLEM_LIMIT} more difference(s)")
+    return CriterionResult(_PARITY_NAME, not failed, tuple(evidence))
+
+
+def _run_index(starts: Sequence[datetime], moment: datetime) -> int | None:
+    """The index of the run holding `moment`: the last start at or before it (None before all)."""
+    found: int | None = None
+    for index, start in enumerate(starts):
+        if start <= moment:
+            found = index
+    return found
+
+
+def build_parity_replay(
+    records: Sequence[RuntimeRecord],
+    *,
+    parameter_set: ParameterSet,
+    pinned_parameter_set_hash: str,
+) -> ParityReplay:
+    """Build the parity replay from the runtime records of ONE epoch and the registry set.
+
+    Run k starts at its RUNTIME_START and ends before the next one; every PAPER_HISTORY_BARS record
+    joins the run holding its time, and each run's log is ordered by acceptance sequence. A history
+    record outside every run or an unreadable one is kept as a build problem (parity fails on it).
+    `pinned_parameter_set_hash` is the epoch's pinned hash; the registry set must carry it.
+    """
+    starts = sorted(
+        {r.occurred_at_utc for r in records if r.event_type is RuntimeEventType.RUNTIME_START}
+    )
+    logs: list[list[HistoryEntry]] = [[] for _ in starts]
+    problems: list[str] = []
+    history = sorted(
+        (r for r in records if r.event_type is RuntimeEventType.PAPER_HISTORY_BARS),
+        key=lambda r: (r.occurred_at_utc, r.payload_json),
+    )
+    for record in history:
+        when = record.occurred_at_utc.isoformat()
+        try:
+            entries = parse_history_payload(json.loads(record.payload_json))
+        except ReplayInputsError as exc:
+            problems.append(f"history record at {when}: {exc}")
+            continue
+        index = _run_index(starts, record.occurred_at_utc)
+        if index is None:
+            problems.append(f"history record at {when} lies outside every recorded run")
+            continue
+        logs[index].extend(entries)
+    runs = tuple(
+        ReplayRun(
+            started_at_utc=start,
+            ended_before_utc=starts[index + 1] if index + 1 < len(starts) else None,
+            log=tuple(sorted(logs[index], key=lambda e: e.accept_seq)),
+        )
+        for index, start in enumerate(starts)
+    )
+    return ParityReplay(runs=runs, parameter_set=parameter_set, build_problems=tuple(problems))
+
+
+@dataclass
+class _RunFeed:
+    """A fresh buffer set fed from one run's log, in acceptance order."""
+
+    log: tuple[HistoryEntry, ...]
+    buffers: BarBuffers
+    fed: int = 0
+    next_seq: int = 0
+    error: str | None = None
+
+
+class _NoRecordedInputs(Exception):
+    """The replay reached the risk stage of a bar that has no replay-inputs record."""
+
+
+def _advance(feed: _RunFeed, cut: int) -> str | None:
+    """Feed every log entry up to the cut point; the error text when the log cannot reach it."""
+    while feed.error is None and feed.fed < len(feed.log) and feed.log[feed.fed].accept_seq <= cut:
+        entry = feed.log[feed.fed]
+        if entry.accept_seq != feed.next_seq:
+            feed.error = (
+                f"the acceptance log is not contiguous: expected accept_seq {feed.next_seq}, "
+                f"found {entry.accept_seq}"
+            )
+        elif not feed.buffers.add(entry.candle):
+            feed.error = f"the buffers refused logged bar accept_seq {entry.accept_seq}"
+        else:
+            feed.fed += 1
+            feed.next_seq += 1
+    if feed.error is None and feed.next_seq != cut + 1:
+        feed.error = (
+            f"window_accept_seq {cut} is not in the acceptance log (it ends at {feed.next_seq - 1})"
+        )
+    return feed.error
+
+
+@dataclass
+class _Windowed:
+    """A recorded 1h bar waiting for its windows: the cut point and its recorded inputs."""
+
+    slot: int
+    record: RuntimeRecord
+    candle: Candle
+    live: dict[str, object]
+    label: str
+    run: int
+    cut: int
+    inputs: RuntimeRecord | None
+
+
+def _parity_from_bundle(
+    records: Sequence[RuntimeRecord], replay: ParityReplay, parameter_set: ParameterSet
+) -> CriterionResult:
+    """Parity from the bundle alone (plan 16-51): run by run, in acceptance order.
+
+    Each run's log is fed into a fresh `BarBuffers`; every evaluated 1h bar is observed when the
+    feed reaches its cut point (`window_accept_seq` of its replay-inputs record), over windows whose
+    digests must equal the recorded ones, with the context rebuilt from the recorded inputs and
+    verified. A missing record, a gap in the log or a differing window fails and names the bar
+    close.
+    """
+    bars = _processed(records)
+    if not bars:
+        return CriterionResult(
+            _PARITY_NAME, False, ("no processed bar record to replay (nothing was compared)",)
+        )
+    problems: list[str] = list(replay.build_problems)
+    inputs_by_key = {
+        (r.symbol, r.interval, r.occurred_at_utc): r
+        for r in records
+        if r.event_type is RuntimeEventType.PAPER_REPLAY_INPUTS
+    }
+    feeds = [_RunFeed(run.log, BarBuffers()) for run in replay.runs]
+    indexes = [
+        {(e.candle.symbol, e.candle.interval, e.candle.open_time_utc): e for e in r.log}
+        for r in replay.runs
+    ]
+    expected: dict[int, dict[str, object]] = {}
+    waiting: list[_Windowed] = []
+    recorded: list[tuple[RuntimeRecord, Candle, dict[str, object], str]] = []
+    stages: Counter[str] = Counter()
+    skipped = 0
+    for record in bars:
+        bar, surface = record.payload.get("bar"), record.payload.get("surface")
+        label = f"{_pair(record)} close {record.occurred_at_utc.isoformat()}"
+        if not isinstance(bar, Mapping) or not isinstance(surface, Mapping):
+            problems.append(f"{label}: the record carries no bar or no surface to compare")
+            continue
+        try:
+            candle = _candle_from(bar)
+        except ValueError as exc:
+            problems.append(f"{label}: {exc}")
+            continue
+        live = dict(surface)
+        slot = len(recorded)
+        recorded.append((record, candle, live, label))
+        stages[str(live.get("stage"))] += 1
+        if live.get("stage") == "feed_gate" and live.get("reason_code") in _PIPELINE_ONLY_GATES:
+            skipped += 1
+            continue
+        tick = _read_time(record.payload, "tick_time_utc")
+        if tick is None:
+            problems.append(f"{label}: the record carries no tick time")
+            continue
+        run = _run_index([r.started_at_utc for r in replay.runs], tick)
+        if run is None:
+            problems.append(f"{label}: no recorded run holds its tick time {tick.isoformat()}")
+            continue
+        entry = indexes[run].get((candle.symbol, candle.interval, candle.open_time_utc))
+        if entry is None or entry.candle != candle or entry.source != "LIVE_WS":
+            problems.append(f"{label}: the bar is not a LIVE_WS entry of its run's acceptance log")
+            continue
+        if candle.interval == CONTEXT_INTERVAL:
+            expected[slot] = dict(context_record(candle).to_dict())
+            continue
+        if candle.interval != SETUP_INTERVAL:
+            problems.append(f"{label}: unsupported interval {candle.interval!r}")
+            continue
+        stale = check_feed_freshness({"T": _close_ms(candle.close_time_utc)}, tick)
+        if stale is not None:
+            expected[slot] = dict(gate_record(candle, stale).to_dict())
+            continue
+        key = (candle.symbol, candle.interval, candle.close_time_utc)
+        inputs = inputs_by_key.get(key)
+        cut = entry.accept_seq
+        if inputs is not None:
+            try:
+                cut = window_accept_seq_of(json.loads(inputs.payload_json))
+            except ReplayInputsError as exc:
+                problems.append(f"{label}: replay inputs unreadable: {exc}")
+                continue
+        else:
+            for other in replay.runs[run].log:
+                if (
+                    other.fetched_for_close_utc == candle.close_time_utc
+                    and other.candle.symbol == candle.symbol
+                ):
+                    cut = max(cut, other.accept_seq)
+        waiting.append(_Windowed(slot, record, candle, live, label, run, cut, inputs))
+
+    for item in sorted(waiting, key=lambda w: (w.run, w.cut, w.candle.close_time_utc)):
+        feed = feeds[item.run]
+        error = _advance(feed, item.cut)
+        if error is not None:
+            problems.append(f"{item.label}: {error}")
+            continue
+        setup_window = feed.buffers.setup_window(item.candle.symbol, item.candle.close_time_utc)
+        context_window = feed.buffers.context_window(item.candle.symbol, item.candle.close_time_utc)
+        context = None
+        if item.inputs is not None:
+            payload = json.loads(item.inputs.payload_json)
+            try:
+                context = context_from_inputs(
+                    payload, symbol=item.candle.symbol, parameter_set=parameter_set
+                )
+            except ReplayInputsError as exc:
+                problems.append(f"{item.label}: replay inputs refused: {exc}")
+                continue
+            for name, window in (
+                ("setup_window_digest", setup_window),
+                ("context_window_digest", context_window),
+            ):
+                if payload.get(name) != window_digest(window):
+                    problems.append(
+                        f"{item.label}: {name} differs: the window rebuilt from the acceptance "
+                        "log is not the window the runtime evaluated"
+                    )
+                    context = None
+                    break
+            if context is None:
+                continue
+
+        def resolve(found: BarContext | None = context) -> BarContext:
+            if found is None:
+                raise _NoRecordedInputs
+            return found
+
+        try:
+            observed = observe_closed_bar(item.candle, setup_window, context_window, resolve)
+        except _NoRecordedInputs:
+            if item.live.get("stage") in BAR_STAGES:
+                problems.append(f"{item.label}: an evaluated bar has no recorded replay inputs")
+            else:
+                problems.append(
+                    f"{item.label}: the replay reaches the risk stage but no replay inputs were "
+                    f"recorded (recorded stage {item.live.get('stage')} "
+                    f"{item.live.get('reason_code')})"
+                )
+            continue
+        except ValueError as exc:
+            problems.append(f"{item.label}: the replay refused the bar: {exc}")
+            continue
+        expected[item.slot] = dict(observed.to_dict())
+
+    compared = 0
+    mismatches: list[str] = []
+    for slot, (_record, _candle, live, label) in enumerate(recorded):
+        want = expected.get(slot)
+        if want is None:
+            continue
+        compared += 1
+        differing = [k for k in sorted({*live, *want}) if live.get(k) != want.get(k)]
+        if differing:
+            mismatches.append(
+                f"{label}: differs in {', '.join(differing)} (recorded stage "
+                f"{live.get('stage')} {live.get('reason_code')}, replay stage "
+                f"{want.get('stage')} {want.get('reason_code')})"
+            )
+    heartbeat_keys = {(r.symbol, r.interval, r.occurred_at_utc) for r in bars}
+    orphans = [
+        f"orphan replay-inputs record for {key[0]} {key[1]} close {key[2].isoformat()}: no "
+        "heartbeat follows (a crash between the two writes; the close is a CRASH gap); not compared"
+        for key in sorted(inputs_by_key, key=lambda k: (str(k[0]), str(k[1]), k[2]))
+        if key not in heartbeat_keys
+    ]
+    by_stage = ", ".join(f"{k}={v}" for k, v in sorted(stages.items()))
+    logged = sum(len(run.log) for run in replay.runs)
+    summary = [
+        f"{compared} recorded surface record(s) compared with the replay of {logged} logged "
+        f"bar(s) in {len(replay.runs)} run(s) and {len(recorded)} recorded bar(s); "
+        f"tolerance {PARITY_TOLERANCE}, {len(mismatches)} difference(s)",
+        f"recorded stages: {by_stage or 'none'}; pipeline-only gate records not compared: "
+        f"{skipped}",
+    ]
+    failed = len(mismatches) > PARITY_TOLERANCE or bool(problems)
+    evidence = [
+        *summary,
+        *problems[:_PROBLEM_LIMIT],
+        *mismatches[:_PROBLEM_LIMIT],
+        *orphans[:_PROBLEM_LIMIT],
+    ]
+    if len(problems) > _PROBLEM_LIMIT:
+        evidence.append(f"... and {len(problems) - _PROBLEM_LIMIT} more problem(s)")
     if len(mismatches) > _PROBLEM_LIMIT:
         evidence.append(f"... and {len(mismatches) - _PROBLEM_LIMIT} more difference(s)")
     return CriterionResult(_PARITY_NAME, not failed, tuple(evidence))
@@ -1331,6 +1662,7 @@ __all__ = [
     "CriterionResult",
     "EvidenceItem",
     "ParityReplay",
+    "ReplayRun",
     "ProofClass",
     "RequirementClosure",
     "TimeOfDayDistribution",
@@ -1340,6 +1672,7 @@ __all__ = [
     "closure_verdict",
     "code_evidence_item",
     "evaluate_trial",
+    "build_parity_replay",
     "parity_criterion",
     "read_backfill_rule",
     "rehearsal_evidence_item",

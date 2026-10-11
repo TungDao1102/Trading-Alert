@@ -17,6 +17,7 @@ changes none of their hashes (L-02). Stdlib, Decimal and project core types only
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
@@ -156,6 +157,32 @@ def outcome_record(
     )
 
 
+def observe_closed_bar(
+    candle: Candle,
+    setup_window: list[Candle],
+    context_window: list[Candle],
+    context: BarContext | Callable[[], BarContext],
+) -> DecisionSurfaceRecord:
+    """Observe ONE closed 1h bar over its two windows: the gate record or the outcome record.
+
+    The order is the live one: the warm-up gate (`check_feature_validity`) runs first, and only a
+    bar that passes it needs a context. `context` is a `BarContext`, or a zero-argument callable
+    resolved only after the gate passed, so a gated bar never builds a context (plan 16-51: the
+    live pipeline does not call its context factory for such a bar either). The context's symbol
+    must match the bar's. Shared by `decision_surface` and the trial evaluator's parity replay;
+    non-semantic (D-20): every decision comes from `evaluate_closed_bar`.
+    """
+    gate = check_feature_validity(setup_window[:-1], context_window)
+    if gate is not None:
+        return gate_record(candle, gate)
+    bar_context = context() if callable(context) else context
+    if bar_context.symbol != candle.symbol:
+        raise ValueError(f"context symbol {bar_context.symbol!r} != bar symbol {candle.symbol!r}")
+    digest = feature_digest(bar_context, candle.symbol, setup_window)
+    outcome = evaluate_closed_bar(bar_context, candle, setup_window, context_window)
+    return outcome_record(candle, outcome, digest=digest)
+
+
 def decision_surface(
     bars: Iterable[Candle],
     *,
@@ -173,7 +200,9 @@ def decision_surface(
 
     `context` is a `BarContext`, or a callable returning the context for each 1h bar (the
     constraint snapshot, open positions and daily loss at that close). Its symbol must match the
-    bar's. `buffers_factory` builds the buffers; the default is the engine windows.
+    bar's. The callable is called only for a bar the warm-up gate lets through, as the live
+    pipeline does (`observe_closed_bar`). `buffers_factory` builds the buffers; the default is the
+    engine windows.
     """
     buffers = buffers_factory()
     seen: dict[tuple[str, str, datetime], Candle] = {}
@@ -198,23 +227,16 @@ def decision_surface(
                 records.append(context_record(candle))
                 continue
 
-            bar_context = context(candle) if callable(context) else context
-            if bar_context.symbol != candle.symbol:
-                raise ValueError(
-                    f"context symbol {bar_context.symbol!r} != bar symbol {candle.symbol!r}"
-                )
             close = candle.close_time_utc
             setup_window = buffers.setup_window(candle.symbol, close)
             context_window = buffers.context_window(candle.symbol, close)
-
-            gate = check_feature_validity(setup_window[:-1], context_window)
-            if gate is not None:
-                records.append(gate_record(candle, gate))
-                continue
-
-            digest = feature_digest(bar_context, candle.symbol, setup_window)
-            outcome = evaluate_closed_bar(bar_context, candle, setup_window, context_window)
-            records.append(outcome_record(candle, outcome, digest=digest))
+            resolved: BarContext | Callable[[], BarContext]
+            if callable(context):
+                # Bound now, called only if the warm-up gate lets the bar through.
+                resolved = functools.partial(context, candle)
+            else:
+                resolved = context
+            records.append(observe_closed_bar(candle, setup_window, context_window, resolved))
     return tuple(records)
 
 
@@ -230,6 +252,7 @@ __all__ = [
     "decision_surface",
     "feature_digest",
     "gate_record",
+    "observe_closed_bar",
     "outcome_record",
     "surface_digest",
 ]
