@@ -715,6 +715,9 @@ class ShadowCoordinator:
         for position in active:
             await self._advance(position, settled[position.reservation.symbol])
         await asyncio.to_thread(self._sweep, now)
+        # The confirm book is driven by the callback handlers on this thread, so its TTL sweep runs
+        # here too (its state is not shared with the worker thread).
+        self._confirm.expire_due(now)
 
     async def _advance(self, position: _Position, horizon: datetime) -> None:
         symbol = position.reservation.symbol
@@ -765,7 +768,6 @@ class ShadowCoordinator:
         for _key, position in sorted(positions.items()):
             self._journal_closed(position)
         self._reservations.release_expired(now)
-        self._confirm.expire_due(now)
 
     def _journal_closed(self, position: _Position) -> None:
         """Journal SHADOW_POSITION_CLOSED once for a filled position that reached its exit."""
