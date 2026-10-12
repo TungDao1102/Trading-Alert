@@ -13,7 +13,8 @@ an epoch. It runs once per rehearsal database and writes one scrubbed evidence f
 
 `--dry-run` (the CI mode) drives the chain over the in-memory stores, the fake bot and scripted
 public minutes of the repository's test fakes on a virtual clock. It never touches the network
-and never waits; its evidence carries proof class `FAKE`.
+and never waits; its evidence carries proof class `FAKE`. Like the live mode it refuses any
+`BINANCE_` variable first (plan 16-53; the check runs before the mode branch).
 
 `--live-telegram --i-am-the-operator` is the operator's run of plan 16-40 in the compose project
 `trading-rehearsal` (its own database, RUNBOOK 20.4): the real bot of the authorized chat shows
@@ -28,7 +29,7 @@ Exit codes::
     0  the run completed: the position opened and the label was seen (evidence written)
     1  the run ended without an opened position, or failed (evidence written when possible)
     2  refused before any work (usage, or --live-telegram without --i-am-the-operator)
-    3  refused: a trade-capable (BINANCE_*) environment variable is present
+    3  refused: a trade-capable (BINANCE_*) environment variable is present (both modes)
     4  refused: the rehearsal already ran on this database (REV-03: once); nothing was written
     5  refused: the live environment or the ratified configuration is incomplete (names only)
 """
@@ -501,14 +502,15 @@ def main(
     except SystemExit as exc:
         return EXIT_REFUSED if exc.code else EXIT_OK
     out = Path(args.out)
-    if args.dry_run:
-        return _finish(run_dry_rehearsal(out, stores=stores, bot=bot, environ=env))
-    # Live mode. Trade-capable names first: only the NAME is ever printed.
+    # Trade-capable names first, in both modes: only the NAME is ever printed.
     names = refuse_trade_capable_env(env)
     if names:
         for name in names:
             print(f"refused: trade-capable variable present: {name}", file=sys.stderr)
         return EXIT_TRADE_CAPABLE
+    if args.dry_run:
+        return _finish(run_dry_rehearsal(out, stores=stores, bot=bot, environ=env))
+    # Live mode.
     if not args.i_am_the_operator:
         print("refused: --live-telegram needs --i-am-the-operator", file=sys.stderr)
         return EXIT_REFUSED

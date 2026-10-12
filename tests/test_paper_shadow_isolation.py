@@ -514,7 +514,8 @@ def test_negative_control_without_a_trade_variable_the_entry_gets_past_the_refus
 def test_the_dry_run_rehearsal_is_fakes_only_and_constructs_no_real_adapter(
     constructions: list[str], tmp_path: Path
 ) -> None:
-    """The dry run does not run the BINANCE_ refusal (live mode does); it builds fakes only."""
+    """The dry run builds fakes only (it refuses BINANCE_ names too since 16-53, see the
+    rehearsal test file; here the environment is clean)."""
     import scripts.shadow_rehearsal as shadow_rehearsal
 
     out = tmp_path / "dry.json"
