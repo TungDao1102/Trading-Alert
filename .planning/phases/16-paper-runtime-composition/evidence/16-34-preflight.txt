@@ -1,0 +1,3 @@
+check 1: O-07 records "option: values": True
+check 2: every [health]/[timing] key has a "key: value" line: True (11 keys) []
+check 3: no CODE CHANGE REQUESTED line: True
