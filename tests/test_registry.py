@@ -1340,7 +1340,9 @@ def test_committed_sets_carry_no_phase15_key_outside_the_phase15_sets() -> None:
     assert committed
     for path in committed:
         loaded = load_parameter_set(path.parent.name, path.stem)
-        if (path.parent.name, path.stem) in _PHASE15_SET_IDS:
+        if (path.parent.name, path.stem) in _PHASE15_SET_IDS or path.stem.startswith(
+            "research-run-1-"
+        ):  # research-run-1 sets (plan 16-45) carry the Phase 15 geometry keys
             assert loaded.params.get("geometry_version") == 1, f"{path}: Phase 15 set lacks the key"
             continue
         for key in _PHASE15_KEYS:

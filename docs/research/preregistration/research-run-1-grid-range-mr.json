@@ -1,0 +1,357 @@
+{
+  "strategy_id": "range-mr",
+  "points": [
+    {
+      "parameter_set_id": "research-run-1-c01",
+      "parameter_set_hash": "4c8cef243b431c88fbcdb92d304f7e58d6557c9f432ac88f925ce294acad4d0d",
+      "varied": [
+        [
+          "regime_filter_lookback",
+          "50"
+        ],
+        [
+          "zone_min_touches",
+          "2"
+        ],
+        [
+          "range_break_buffer_atr",
+          "0.2"
+        ],
+        [
+          "signal_expiry_hours",
+          "4"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-c02",
+      "parameter_set_hash": "f609c7df5d0e5515befb228085e31499a3c8ae93fed4d7873cbbb972869bf3e5",
+      "varied": [
+        [
+          "regime_filter_lookback",
+          "50"
+        ],
+        [
+          "zone_min_touches",
+          "2"
+        ],
+        [
+          "range_break_buffer_atr",
+          "0.2"
+        ],
+        [
+          "signal_expiry_hours",
+          "8"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-c03",
+      "parameter_set_hash": "1107975c4d428fac1ad9e6ed37556ac55be26b14e41fc92bb3cdf39acf1b060d",
+      "varied": [
+        [
+          "regime_filter_lookback",
+          "50"
+        ],
+        [
+          "zone_min_touches",
+          "2"
+        ],
+        [
+          "range_break_buffer_atr",
+          "0.5"
+        ],
+        [
+          "signal_expiry_hours",
+          "4"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-c04",
+      "parameter_set_hash": "ac7d063d731a86eb0057f8ef8c3fa91e82ab4c943dbc6253c3562354516b64b8",
+      "varied": [
+        [
+          "regime_filter_lookback",
+          "50"
+        ],
+        [
+          "zone_min_touches",
+          "2"
+        ],
+        [
+          "range_break_buffer_atr",
+          "0.5"
+        ],
+        [
+          "signal_expiry_hours",
+          "8"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-c05",
+      "parameter_set_hash": "cea8ea08d4214716e62ac4fbdbb3b9099f7660da9ffc4d197ef1714ffe66fb5d",
+      "varied": [
+        [
+          "regime_filter_lookback",
+          "50"
+        ],
+        [
+          "zone_min_touches",
+          "3"
+        ],
+        [
+          "range_break_buffer_atr",
+          "0.2"
+        ],
+        [
+          "signal_expiry_hours",
+          "4"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-c06",
+      "parameter_set_hash": "4b12d0c8e8c454f8992a2e411bf3e65bf151771928d05f1c296a3c5cb9e3fcb1",
+      "varied": [
+        [
+          "regime_filter_lookback",
+          "50"
+        ],
+        [
+          "zone_min_touches",
+          "3"
+        ],
+        [
+          "range_break_buffer_atr",
+          "0.2"
+        ],
+        [
+          "signal_expiry_hours",
+          "8"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-c07",
+      "parameter_set_hash": "3a584bf7b1c68c006753760ec0ab74c40b32054bfc39b52e34338fddf7a3c493",
+      "varied": [
+        [
+          "regime_filter_lookback",
+          "50"
+        ],
+        [
+          "zone_min_touches",
+          "3"
+        ],
+        [
+          "range_break_buffer_atr",
+          "0.5"
+        ],
+        [
+          "signal_expiry_hours",
+          "4"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-c08",
+      "parameter_set_hash": "870455fcd9fdc488f8b0ff5fab433fd463df7c4f1d2cd8a1eff1345ed7f73487",
+      "varied": [
+        [
+          "regime_filter_lookback",
+          "50"
+        ],
+        [
+          "zone_min_touches",
+          "3"
+        ],
+        [
+          "range_break_buffer_atr",
+          "0.5"
+        ],
+        [
+          "signal_expiry_hours",
+          "8"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-c09",
+      "parameter_set_hash": "64a1ab1ed61d26cbc7fbf5e9d96c528b5778f4ea030240086cce65c1a140f87d",
+      "varied": [
+        [
+          "regime_filter_lookback",
+          "100"
+        ],
+        [
+          "zone_min_touches",
+          "2"
+        ],
+        [
+          "range_break_buffer_atr",
+          "0.2"
+        ],
+        [
+          "signal_expiry_hours",
+          "4"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-c10",
+      "parameter_set_hash": "2f759eead0cb281d148523e7304dd1381cac7981376259c91defce35a44b0cc5",
+      "varied": [
+        [
+          "regime_filter_lookback",
+          "100"
+        ],
+        [
+          "zone_min_touches",
+          "2"
+        ],
+        [
+          "range_break_buffer_atr",
+          "0.2"
+        ],
+        [
+          "signal_expiry_hours",
+          "8"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-c11",
+      "parameter_set_hash": "59c9ab7921e08b9930ac9fd2b62eb554fe7c6cfb7380ae09cbbdabadd4346ca5",
+      "varied": [
+        [
+          "regime_filter_lookback",
+          "100"
+        ],
+        [
+          "zone_min_touches",
+          "2"
+        ],
+        [
+          "range_break_buffer_atr",
+          "0.5"
+        ],
+        [
+          "signal_expiry_hours",
+          "4"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-c12",
+      "parameter_set_hash": "e7b12ed99f050d9ab544023b725268ef7f845120197eb12318638d2e869638d1",
+      "varied": [
+        [
+          "regime_filter_lookback",
+          "100"
+        ],
+        [
+          "zone_min_touches",
+          "2"
+        ],
+        [
+          "range_break_buffer_atr",
+          "0.5"
+        ],
+        [
+          "signal_expiry_hours",
+          "8"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-c13",
+      "parameter_set_hash": "147fab5e5bec9be9be62c9c68014aee13fbdcb8978f9e63e45e1171909d15b8c",
+      "varied": [
+        [
+          "regime_filter_lookback",
+          "100"
+        ],
+        [
+          "zone_min_touches",
+          "3"
+        ],
+        [
+          "range_break_buffer_atr",
+          "0.2"
+        ],
+        [
+          "signal_expiry_hours",
+          "4"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-c14",
+      "parameter_set_hash": "9d431d4c6e134ad429499a6f704669215ba05ed75d57724c9fd912cd0876d048",
+      "varied": [
+        [
+          "regime_filter_lookback",
+          "100"
+        ],
+        [
+          "zone_min_touches",
+          "3"
+        ],
+        [
+          "range_break_buffer_atr",
+          "0.2"
+        ],
+        [
+          "signal_expiry_hours",
+          "8"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-c15",
+      "parameter_set_hash": "e0e885feb72f2eabae7f30d02ec094a74e1425eb46f9e0f084f29d5aa8aa196c",
+      "varied": [
+        [
+          "regime_filter_lookback",
+          "100"
+        ],
+        [
+          "zone_min_touches",
+          "3"
+        ],
+        [
+          "range_break_buffer_atr",
+          "0.5"
+        ],
+        [
+          "signal_expiry_hours",
+          "4"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-c16",
+      "parameter_set_hash": "43d962bd3878e6ab13969350ed429e72fcfeca337c7f85885f068e3fc4fd37ae",
+      "varied": [
+        [
+          "regime_filter_lookback",
+          "100"
+        ],
+        [
+          "zone_min_touches",
+          "3"
+        ],
+        [
+          "range_break_buffer_atr",
+          "0.5"
+        ],
+        [
+          "signal_expiry_hours",
+          "8"
+        ]
+      ]
+    }
+  ]
+}

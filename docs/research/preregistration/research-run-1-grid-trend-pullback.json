@@ -1,0 +1,357 @@
+{
+  "strategy_id": "trend-pullback",
+  "points": [
+    {
+      "parameter_set_id": "research-run-1-a01",
+      "parameter_set_hash": "6f42f70e7e7a107b1be02fc4079fbb70f1408b4307099aa253bd93ebdbce6d87",
+      "varied": [
+        [
+          "pivot_bars",
+          "3"
+        ],
+        [
+          "zone_tolerance_atr",
+          "0.5"
+        ],
+        [
+          "sl_buffer_atr",
+          "0.2"
+        ],
+        [
+          "signal_expiry_hours",
+          "4"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-a02",
+      "parameter_set_hash": "42d82710a38ccf9df4306b3a4912ae1cee797930f3dc9736e3970bbfced93075",
+      "varied": [
+        [
+          "pivot_bars",
+          "3"
+        ],
+        [
+          "zone_tolerance_atr",
+          "0.5"
+        ],
+        [
+          "sl_buffer_atr",
+          "0.2"
+        ],
+        [
+          "signal_expiry_hours",
+          "8"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-a03",
+      "parameter_set_hash": "7cea7cfcc71ffa252f35b632e268b5f86eb50e13f151e66fa01468be72bea53c",
+      "varied": [
+        [
+          "pivot_bars",
+          "3"
+        ],
+        [
+          "zone_tolerance_atr",
+          "0.5"
+        ],
+        [
+          "sl_buffer_atr",
+          "0.5"
+        ],
+        [
+          "signal_expiry_hours",
+          "4"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-a04",
+      "parameter_set_hash": "c1a74622c887299950a71c9573ab324df1a1dc41ea7d0928139cf86f079a5937",
+      "varied": [
+        [
+          "pivot_bars",
+          "3"
+        ],
+        [
+          "zone_tolerance_atr",
+          "0.5"
+        ],
+        [
+          "sl_buffer_atr",
+          "0.5"
+        ],
+        [
+          "signal_expiry_hours",
+          "8"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-a05",
+      "parameter_set_hash": "049bd04e5bf1790c4fde43bbb828b365987022b3ad67eee398ada2d428a1382e",
+      "varied": [
+        [
+          "pivot_bars",
+          "3"
+        ],
+        [
+          "zone_tolerance_atr",
+          "1.0"
+        ],
+        [
+          "sl_buffer_atr",
+          "0.2"
+        ],
+        [
+          "signal_expiry_hours",
+          "4"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-a06",
+      "parameter_set_hash": "688bf86a948eb311de6f81366a66e705777616e89a1ffbf87fd346e63fd0a525",
+      "varied": [
+        [
+          "pivot_bars",
+          "3"
+        ],
+        [
+          "zone_tolerance_atr",
+          "1.0"
+        ],
+        [
+          "sl_buffer_atr",
+          "0.2"
+        ],
+        [
+          "signal_expiry_hours",
+          "8"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-a07",
+      "parameter_set_hash": "232917b82e7e38d8b5fe8f5b1ad198ac582e11313b5482800615386fa5ee6526",
+      "varied": [
+        [
+          "pivot_bars",
+          "3"
+        ],
+        [
+          "zone_tolerance_atr",
+          "1.0"
+        ],
+        [
+          "sl_buffer_atr",
+          "0.5"
+        ],
+        [
+          "signal_expiry_hours",
+          "4"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-a08",
+      "parameter_set_hash": "500c67d47a65438ca8304b6b86d1d86bbe3f8f84b25828c11e5363e71c4b84f0",
+      "varied": [
+        [
+          "pivot_bars",
+          "3"
+        ],
+        [
+          "zone_tolerance_atr",
+          "1.0"
+        ],
+        [
+          "sl_buffer_atr",
+          "0.5"
+        ],
+        [
+          "signal_expiry_hours",
+          "8"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-a09",
+      "parameter_set_hash": "80e112c22ea0eccee65f50fc28ef228a6e6a269df7bc4bb2852da0f15040a3d7",
+      "varied": [
+        [
+          "pivot_bars",
+          "5"
+        ],
+        [
+          "zone_tolerance_atr",
+          "0.5"
+        ],
+        [
+          "sl_buffer_atr",
+          "0.2"
+        ],
+        [
+          "signal_expiry_hours",
+          "4"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-a10",
+      "parameter_set_hash": "c8f5527e5c8f87b62976911da2ee6285f85c946a5efd2140d4ade89fcef73238",
+      "varied": [
+        [
+          "pivot_bars",
+          "5"
+        ],
+        [
+          "zone_tolerance_atr",
+          "0.5"
+        ],
+        [
+          "sl_buffer_atr",
+          "0.2"
+        ],
+        [
+          "signal_expiry_hours",
+          "8"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-a11",
+      "parameter_set_hash": "1ff9f8279163489b937b6befc384126d49091b1fb597ccf11a137b6b8aa7fdce",
+      "varied": [
+        [
+          "pivot_bars",
+          "5"
+        ],
+        [
+          "zone_tolerance_atr",
+          "0.5"
+        ],
+        [
+          "sl_buffer_atr",
+          "0.5"
+        ],
+        [
+          "signal_expiry_hours",
+          "4"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-a12",
+      "parameter_set_hash": "b0b1e2fdbe9ca7afa58effa14e6ef31b30e665eddd3179b4233f9e564209bfa7",
+      "varied": [
+        [
+          "pivot_bars",
+          "5"
+        ],
+        [
+          "zone_tolerance_atr",
+          "0.5"
+        ],
+        [
+          "sl_buffer_atr",
+          "0.5"
+        ],
+        [
+          "signal_expiry_hours",
+          "8"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-a13",
+      "parameter_set_hash": "0268be830726cb9678ff9608a133dc35775e1752e93cb3b17abb63ce569995bd",
+      "varied": [
+        [
+          "pivot_bars",
+          "5"
+        ],
+        [
+          "zone_tolerance_atr",
+          "1.0"
+        ],
+        [
+          "sl_buffer_atr",
+          "0.2"
+        ],
+        [
+          "signal_expiry_hours",
+          "4"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-a14",
+      "parameter_set_hash": "70068af01ca2e6663d79b898fb8a837cae589190b274d7d191c90017f03e77eb",
+      "varied": [
+        [
+          "pivot_bars",
+          "5"
+        ],
+        [
+          "zone_tolerance_atr",
+          "1.0"
+        ],
+        [
+          "sl_buffer_atr",
+          "0.2"
+        ],
+        [
+          "signal_expiry_hours",
+          "8"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-a15",
+      "parameter_set_hash": "5706653911a23882a025524dd312537a11aabed1eed3f4376f633698a8aa87ed",
+      "varied": [
+        [
+          "pivot_bars",
+          "5"
+        ],
+        [
+          "zone_tolerance_atr",
+          "1.0"
+        ],
+        [
+          "sl_buffer_atr",
+          "0.5"
+        ],
+        [
+          "signal_expiry_hours",
+          "4"
+        ]
+      ]
+    },
+    {
+      "parameter_set_id": "research-run-1-a16",
+      "parameter_set_hash": "f284a657be1f6e22f6acb48a83034535236ad6345013f5b1e91a5cbc9b446a17",
+      "varied": [
+        [
+          "pivot_bars",
+          "5"
+        ],
+        [
+          "zone_tolerance_atr",
+          "1.0"
+        ],
+        [
+          "sl_buffer_atr",
+          "0.5"
+        ],
+        [
+          "signal_expiry_hours",
+          "8"
+        ]
+      ]
+    }
+  ]
+}

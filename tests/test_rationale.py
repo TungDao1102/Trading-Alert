@@ -371,7 +371,8 @@ def test_rationale_hash_neutral_on_every_committed_set(tmp_path: Path) -> None:
         if "[rationale." in text:
             # Phase 15 sets carry their own rationale tables: the pin verifies as written.
             verify_parameter_set(source, pin["parameter_set_hash"])
-            assert (strategy_id, set_id) in PHASE15_SETS
+            # research-run-1 sets (plan 16-45) are registered with their own rationale tables too.
+            assert (strategy_id, set_id) in PHASE15_SETS or set_id.startswith("research-run-1-")
             checked += 1
             continue
         spec = {

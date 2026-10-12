@@ -75,6 +75,15 @@ _EXPECTED_CANDIDATE_IDS = {
         "baseline-v6",
     ),
 }
+# Plan 16-45: the 16 research-run-1 grid points of each family are registered candidate sets too.
+_RESEARCH_RUN_1_LETTER = {"breakout-retest": "b", "range-mr": "c", "trend-pullback": "a"}
+_EXPECTED_CANDIDATE_IDS = {
+    family_id: (
+        *ids,
+        *(f"research-run-1-{_RESEARCH_RUN_1_LETTER[family_id]}{n:02d}" for n in range(1, 17)),
+    )
+    for family_id, ids in _EXPECTED_CANDIDATE_IDS.items()
+}
 _BASELINE_IDS = ("baseline-no-trade-v1", "baseline-simple-trend-v1")
 
 

@@ -149,6 +149,294 @@
       "parameter_set_id": "baseline-simple-trend-v4",
       "strategy_version": "v5.0.0",
       "parameter_set_hash": "27f4c18b92b44c28387299edb69be32977e3ab48004c1b0301fbbcc2e0d08c5f"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "research-run-1-a01",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "6f42f70e7e7a107b1be02fc4079fbb70f1408b4307099aa253bd93ebdbce6d87"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "research-run-1-a02",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "42d82710a38ccf9df4306b3a4912ae1cee797930f3dc9736e3970bbfced93075"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "research-run-1-a03",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "7cea7cfcc71ffa252f35b632e268b5f86eb50e13f151e66fa01468be72bea53c"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "research-run-1-a04",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "c1a74622c887299950a71c9573ab324df1a1dc41ea7d0928139cf86f079a5937"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "research-run-1-a05",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "049bd04e5bf1790c4fde43bbb828b365987022b3ad67eee398ada2d428a1382e"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "research-run-1-a06",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "688bf86a948eb311de6f81366a66e705777616e89a1ffbf87fd346e63fd0a525"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "research-run-1-a07",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "232917b82e7e38d8b5fe8f5b1ad198ac582e11313b5482800615386fa5ee6526"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "research-run-1-a08",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "500c67d47a65438ca8304b6b86d1d86bbe3f8f84b25828c11e5363e71c4b84f0"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "research-run-1-a09",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "80e112c22ea0eccee65f50fc28ef228a6e6a269df7bc4bb2852da0f15040a3d7"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "research-run-1-a10",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "c8f5527e5c8f87b62976911da2ee6285f85c946a5efd2140d4ade89fcef73238"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "research-run-1-a11",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "1ff9f8279163489b937b6befc384126d49091b1fb597ccf11a137b6b8aa7fdce"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "research-run-1-a12",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "b0b1e2fdbe9ca7afa58effa14e6ef31b30e665eddd3179b4233f9e564209bfa7"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "research-run-1-a13",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "0268be830726cb9678ff9608a133dc35775e1752e93cb3b17abb63ce569995bd"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "research-run-1-a14",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "70068af01ca2e6663d79b898fb8a837cae589190b274d7d191c90017f03e77eb"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "research-run-1-a15",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "5706653911a23882a025524dd312537a11aabed1eed3f4376f633698a8aa87ed"
+    },
+    {
+      "strategy_id": "trend-pullback",
+      "parameter_set_id": "research-run-1-a16",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "f284a657be1f6e22f6acb48a83034535236ad6345013f5b1e91a5cbc9b446a17"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "research-run-1-b01",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "cc0327c6282aa13f52d8a1b2142f1944c4e7251b8a419659c9f48223b931ae44"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "research-run-1-b02",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "d6a99be6fcb56003106b33d67d5642649176f159242aa2ab022fd2f59d8c20a7"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "research-run-1-b03",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "9584237e0d14dbf26530bb428e9b828e2bc30f610b3f48728da5da5608ad7e94"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "research-run-1-b04",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "b8774d06efb934c7e39d47ed0f0bd520d1d3e98240e9d39a571c0c5fc99773dd"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "research-run-1-b05",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "7002f33f62aee043ce734b7aeb73f466b1af16f44709c146e9c3a8ab08bc8c14"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "research-run-1-b06",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "fb1da4839e7d5de1532c2ea71fc5b63c127a702224ca6a2cf3a97affb6562b8e"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "research-run-1-b07",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "3b4b05cbbe43a71c9a2d3dda5f34b132cc1aa4a5209515dc54e6494bd43e42be"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "research-run-1-b08",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "ed68f21171e9c5b9632a79581a06645f8ae3997d5889a2f6d400bc6653f346c7"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "research-run-1-b09",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "e2465cb118da2aa9733c3008aefdd8055496b9f4f63400b0062f1db9cc283e74"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "research-run-1-b10",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "6780d2be1bab1d404d5945e4cbd19d376a9382833a0d1222d1c5637485bfff29"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "research-run-1-b11",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "2577965b9cfc6e096f960eb242dc0cfdfdfb9760347ac7d4f7ada33b2a1e8c57"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "research-run-1-b12",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "a782cfb96cbf9e4bfd185496ecee7036478e0e55fdaff06f022834c2a9a0acd5"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "research-run-1-b13",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "3e770ffad2bcb7617200dd17409c39ef326ffb13950f5608cb00fa9e03148e31"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "research-run-1-b14",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "71c3c2d0b47ccba068b95779d7f5dc6e8fd5883fc4ec507def3eb5a6960e16d4"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "research-run-1-b15",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "0130ac1acfad6cc0e6f4bde70a8b5edaac208f8886ea3bee8745b59ec1ad04ba"
+    },
+    {
+      "strategy_id": "breakout-retest",
+      "parameter_set_id": "research-run-1-b16",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "e392890aa0d7f5ed9dea9e5a37db4f072164edb6ef33088b296effebdcc5111e"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "research-run-1-c01",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "4c8cef243b431c88fbcdb92d304f7e58d6557c9f432ac88f925ce294acad4d0d"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "research-run-1-c02",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "f609c7df5d0e5515befb228085e31499a3c8ae93fed4d7873cbbb972869bf3e5"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "research-run-1-c03",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "1107975c4d428fac1ad9e6ed37556ac55be26b14e41fc92bb3cdf39acf1b060d"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "research-run-1-c04",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "ac7d063d731a86eb0057f8ef8c3fa91e82ab4c943dbc6253c3562354516b64b8"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "research-run-1-c05",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "cea8ea08d4214716e62ac4fbdbb3b9099f7660da9ffc4d197ef1714ffe66fb5d"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "research-run-1-c06",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "4b12d0c8e8c454f8992a2e411bf3e65bf151771928d05f1c296a3c5cb9e3fcb1"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "research-run-1-c07",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "3a584bf7b1c68c006753760ec0ab74c40b32054bfc39b52e34338fddf7a3c493"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "research-run-1-c08",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "870455fcd9fdc488f8b0ff5fab433fd463df7c4f1d2cd8a1eff1345ed7f73487"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "research-run-1-c09",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "64a1ab1ed61d26cbc7fbf5e9d96c528b5778f4ea030240086cce65c1a140f87d"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "research-run-1-c10",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "2f759eead0cb281d148523e7304dd1381cac7981376259c91defce35a44b0cc5"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "research-run-1-c11",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "59c9ab7921e08b9930ac9fd2b62eb554fe7c6cfb7380ae09cbbdabadd4346ca5"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "research-run-1-c12",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "e7b12ed99f050d9ab544023b725268ef7f845120197eb12318638d2e869638d1"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "research-run-1-c13",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "147fab5e5bec9be9be62c9c68014aee13fbdcb8978f9e63e45e1171909d15b8c"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "research-run-1-c14",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "9d431d4c6e134ad429499a6f704669215ba05ed75d57724c9fd912cd0876d048"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "research-run-1-c15",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "e0e885feb72f2eabae7f30d02ec094a74e1425eb46f9e0f084f29d5aa8aa196c"
+    },
+    {
+      "strategy_id": "range-mr",
+      "parameter_set_id": "research-run-1-c16",
+      "strategy_version": "v5.0.0",
+      "parameter_set_hash": "43d962bd3878e6ab13969350ed429e72fcfeca337c7f85885f068e3fc4fd37ae"
     }
   ]
 }

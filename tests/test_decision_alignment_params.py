@@ -49,7 +49,7 @@ def test_reference_tables_cover_ten_old_and_five_new_sets() -> None:
     assert set(gate.PHASE15_SET_IDS).isdisjoint(gate.PRE_PHASE_HASHES)
     assert set(gate.PHASE15_SET_IDS).isdisjoint(gate.NEW_SET_IDS)
     assert set(gate.PHASE15_SET_IDS).isdisjoint(gate.PHASE12_SET_IDS)
-    assert len(gate.load_pins()) == 25
+    assert len(gate.load_pins()) == 25 + 48  # + research-run-1 (plan 16-45)
 
 
 def test_pa01_passes_on_copy(params_copy: Path) -> None:
@@ -417,5 +417,15 @@ def test_pin_file_key_set_equals_every_recorded_set_table_exactly() -> None:
         | set(gate.NEW_SET_IDS)
         | set(gate.PHASE12_SET_IDS)
         | set(gate.PHASE15_SET_IDS)
+        # Plan 16-45: the 48 research-run-1 grid points (16 per family) are pinned too.
+        | {
+            (family, f"research-run-1-{letter}{n:02d}")
+            for family, letter in (
+                ("trend-pullback", "a"),
+                ("breakout-retest", "b"),
+                ("range-mr", "c"),
+            )
+            for n in range(1, 17)
+        }
     )
     assert set(gate.load_pins()) == expected

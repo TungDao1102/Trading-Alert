@@ -1,0 +1,244 @@
+# params/breakout-retest/research-run-1-b16.toml
+#
+# Research run 1, grid point b16 of 16 (retest_window_bars=10, retest_depth_atr=0.6, zone_tolerance_atr=1.0, signal_expiry_hours=8).
+# Preregistered with the hypothesis and grid approved by the user at decision O-02
+# (.planning/phases/16-paper-runtime-composition/decisions/16-DEC-O-02.md,
+# approve-with-changes, 2026-10-12). Registration is not an authorization to run
+# research (O-03). Written before any result exists; no value comes from a backtest.
+# New immutable set: no committed set was edited. Never edit this file in place;
+# a change is a new set and a new registration.
+#
+# strategy_version stays v5.0.0: the strategy code and geometry are those of
+# baseline-v6; the points differ in parameter values only.
+
+schema_version = 1
+
+[strategy]
+strategy_id = "breakout-retest"
+strategy_version = "v5.0.0"
+
+[parameters]
+# Geometry (Phase 15).
+geometry_version = 1
+min_stop_atr = 0.5
+breakout_confirmation_bars = 1
+
+# Setup geometry (baseline-v6 seed values, each labelled in its rationale table below).
+swing_lookback = 20
+zone_tolerance_atr = 1.0
+entry_buffer_atr = 0.1
+sl_buffer_atr = 0.2
+minimum_rr = 2.0
+signal_expiry_hours = 8
+
+# Family keys.
+retest_window_bars = 10
+retest_depth_atr = 0.6
+atr_period = 14
+
+# Sizing, portfolio and daily-loss gates (RISK_MANAGEMENT sections 4, 8, 11).
+minimum_risk_utilization_after_rounding = 0.6
+max_open_positions = 2
+max_aggregate_open_risk = 0.01
+cluster_cap = 0.005
+daily_loss_warning_threshold = 0.005
+daily_loss_stop_threshold = 0.01
+
+# Cost model (RISK_MANAGEMENT section 3) and Phase 12 guards (D046).
+fee_rate_entry = 0.0005
+fee_rate_exit = 0.0005
+expected_slippage = 0.0001
+constraint_snapshot_ttl_seconds = 2400
+funding_treatment = "ADDITIVE"
+slippage_model = "FIXED_BPS"
+spread_fill_assumptions = "FULL_FILL"
+partial_fill_fraction = 1.0
+working_type = "MARK_PRICE"
+exit_slippage_rate = 0.0003
+min_stop_distance_rate = 0.003
+max_cost_to_risk = 0.15
+commission_rate_ttl_seconds = 3600
+
+[rationale.geometry_version]
+basis = "DECISION"
+value = "1"
+text = "Selects the corrected Phase 15 geometry read by src/core/strategy.py and src/core/planner.py; a design mechanism chosen in CONTEXT D-25, recorded in D054 and ratified at checkpoint 15-08-01."
+ref = "D054"
+
+[rationale.min_stop_atr]
+basis = "EXPERIMENT"
+value = "0.5"
+text = "Minimum distance from the entry reference to the stop in ATR, read by src/core/planner.py (D-08); 0.5 is only proposed in CONTEXT D-08, no spec or decision fixes it, and it is not tuned from any count. Held fixed by the research-run-1 preregistration (O-02, decisions/16-DEC-O-02.md) before any result exists; a preregistered fixed setting, not evidence that the value is good."
+ref = "research-run-1/O-02"
+
+[rationale.breakout_confirmation_bars]
+basis = "STRUCTURAL"
+value = "1"
+text = "Consecutive closes beyond the zone that confirm a breakout, read by src/core/strategy.py; docs/research/families/breakout-retest.md Stage B baseline B1 (a single close beyond the zone)."
+
+[rationale.swing_lookback]
+basis = "EXPERIMENT"
+value = "20"
+text = "Bounds how old a pivot or swing may be, read by src/core/features.py, src/core/strategy.py and src/core/planner.py; Phase 3 seed value (plan 03-01, audit F-909), unchanged since baseline-v1, no empirical basis yet. Held fixed by the research-run-1 preregistration (O-02, decisions/16-DEC-O-02.md) before any result exists; a preregistered fixed setting, not evidence that the value is good."
+ref = "research-run-1/O-02"
+
+[rationale.zone_tolerance_atr]
+basis = "EXPERIMENT"
+value = "1.0"
+text = "Half-width of the zone in ATR. Varied by the research-run-1 grid over {0.5, 1.0}: 0.5 is the baseline-v6 seed, 1.0 is the drafter's design choice (one ATR; a wider zone and a wider stop)."
+ref = "research-run-1/O-02"
+
+[rationale.entry_buffer_atr]
+basis = "EXPERIMENT"
+value = "0.1"
+text = "Buffer added to the zone edges for the entry range in ATR, read by src/core/planner.py; Phase 3 seed value (plan 03-01, audit F-909), unchanged since baseline-v1, no empirical basis yet. Held fixed by the research-run-1 preregistration (O-02, decisions/16-DEC-O-02.md) before any result exists; a preregistered fixed setting, not evidence that the value is good."
+ref = "research-run-1/O-02"
+
+[rationale.sl_buffer_atr]
+basis = "EXPERIMENT"
+value = "0.2"
+text = "Buffer beyond the far zone edge for the stop in ATR, read by src/core/planner.py; Phase 3 seed value (plan 03-01, audit F-909), unchanged since baseline-v1, no empirical basis yet. Held fixed by the research-run-1 preregistration (O-02, decisions/16-DEC-O-02.md) before any result exists; a preregistered fixed setting, not evidence that the value is good."
+ref = "research-run-1/O-02"
+
+[rationale.minimum_rr]
+basis = "EXPERIMENT"
+value = "2.0"
+text = "Minimum reward-to-risk a plan must reach, read by src/core/planner.py; Phase 3 seed value (plan 03-01, audit F-909), unchanged since baseline-v1, no empirical basis yet. Held fixed by the research-run-1 preregistration (O-02, decisions/16-DEC-O-02.md) before any result exists; a preregistered fixed setting, not evidence that the value is good."
+ref = "research-run-1/O-02"
+
+[rationale.signal_expiry_hours]
+basis = "EXPERIMENT"
+value = "8"
+text = "Hours from the source candle close until a signal expires (the plan expiry; O-08). Varied by the research-run-1 grid over {4, 8}: 4 is the baseline-v6 seed, 8 is the drafter's design choice (the next whole multiple of the 4H decision bar)."
+ref = "research-run-1/O-02"
+
+[rationale.retest_window_bars]
+basis = "EXPERIMENT"
+value = "10"
+text = "Bars after the breakout in which the retest must occur. Varied by the research-run-1 grid over {5, 10}: 5 is the baseline-v6 seed, 10 is the drafter's design choice (double)."
+ref = "research-run-1/O-02"
+
+[rationale.retest_depth_atr]
+basis = "EXPERIMENT"
+value = "0.6"
+text = "Maximum distance of the retest from the broken edge in ATR. Varied by the research-run-1 grid over {0.3, 0.6}: 0.3 is the baseline-v6 seed, 0.6 is the drafter's design choice (double)."
+ref = "research-run-1/O-02"
+
+[rationale.atr_period]
+basis = "EXPERIMENT"
+value = "14"
+text = "ATR lookback read by src/core/features.py and src/core/strategy.py; common default, no spec fixes it. Held fixed by the research-run-1 preregistration (O-02, decisions/16-DEC-O-02.md) before any result exists; a preregistered fixed setting, not evidence that the value is good."
+ref = "research-run-1/O-02"
+
+[rationale.minimum_risk_utilization_after_rounding]
+basis = "STRUCTURAL"
+value = "0.6"
+text = "Minimum realized-to-allowed risk after quantization, read by src/risk/quantization.py and src/risk/gating.py; fixed by AGENTS.md Constraints (Quantization) and docs/trading/RISK_MANAGEMENT.md section 11."
+
+[rationale.max_open_positions]
+basis = "EXPERIMENT"
+value = "2"
+text = "Portfolio gate read by src/risk/portfolio.py and src/risk/gating.py; docs/trading/RISK_MANAGEMENT.md section 4 lists it as an initial research placeholder. Held fixed by the research-run-1 preregistration (O-02, decisions/16-DEC-O-02.md) before any result exists; a preregistered fixed setting, not evidence that the value is good."
+ref = "research-run-1/O-02"
+
+[rationale.max_aggregate_open_risk]
+basis = "EXPERIMENT"
+value = "0.01"
+text = "Aggregate open-risk cap read by src/risk/portfolio.py and src/risk/gating.py; docs/trading/RISK_MANAGEMENT.md section 4 lists it as an initial research placeholder. Held fixed by the research-run-1 preregistration (O-02, decisions/16-DEC-O-02.md) before any result exists; a preregistered fixed setting, not evidence that the value is good."
+ref = "research-run-1/O-02"
+
+[rationale.cluster_cap]
+basis = "EXPERIMENT"
+value = "0.005"
+text = "Cluster risk cap read by src/risk/portfolio.py and src/risk/gating.py; docs/trading/RISK_MANAGEMENT.md section 4 gives the cluster limit as TBD. Held fixed by the research-run-1 preregistration (O-02, decisions/16-DEC-O-02.md) before any result exists; a preregistered fixed setting, not evidence that the value is good."
+ref = "research-run-1/O-02"
+
+[rationale.daily_loss_warning_threshold]
+basis = "DECISION"
+value = "0.005"
+text = "Daily-loss WARNING threshold read by src/risk/portfolio.py; D033: thresholds stay as in the params."
+ref = "D033"
+
+[rationale.daily_loss_stop_threshold]
+basis = "DECISION"
+value = "0.01"
+text = "Daily-loss DAILY_STOP threshold read by src/risk/portfolio.py; D033: thresholds stay as in the params."
+ref = "D033"
+
+[rationale.fee_rate_entry]
+basis = "DECISION"
+value = "0.0005"
+text = "Entry fee modeled as taker, read by src/backtest/costs.py and src/risk/cost_rates.py (D036)."
+ref = "D036"
+
+[rationale.fee_rate_exit]
+basis = "DECISION"
+value = "0.0005"
+text = "Exit fee modeled as taker, read by src/backtest/costs.py and src/risk/cost_rates.py (D036)."
+ref = "D036"
+
+[rationale.expected_slippage]
+basis = "DECISION"
+value = "0.0001"
+text = "Entry-side slippage (1 bps) read by src/backtest/costs.py; Phase 12 auto-mode default of D046, item 6 ratified by the operator 2026-10-04."
+ref = "D046"
+
+[rationale.constraint_snapshot_ttl_seconds]
+basis = "DECISION"
+value = "2400"
+text = "Freshness window of the exchange-constraint snapshot. Decision O-07 (user, 2026-10-10, decisions/16-DEC-O-07.md) sets 2400 seconds; baseline-v6 carried 3600. In this repository the field changes the parameter-set hash only: the simulator uses timedelta(0) (src/backtest/engine.py) and the paper runtime takes the TTL from the runtime configuration (src/paper/runtime.py), so this value is not applied by either path."
+ref = "D063"
+
+[rationale.funding_treatment]
+basis = "EXPERIMENT"
+value = "ADDITIVE"
+text = "Funding treatment declared for the cost model, read by src/backtest/costs.py; RESEARCH_PROTOCOL v2.0.0 section 2 requires the field to be declared but fixes no value (Phase 6 fix CR-11/WR-04). Held fixed by the research-run-1 preregistration (O-02, decisions/16-DEC-O-02.md) before any result exists; a preregistered fixed setting, not evidence that the value is good."
+ref = "research-run-1/O-02"
+
+[rationale.slippage_model]
+basis = "EXPERIMENT"
+value = "FIXED_BPS"
+text = "Slippage model declared for the cost model, read by src/backtest/costs.py; RESEARCH_PROTOCOL v2.0.0 section 2 requires the field to be declared but fixes no value (Phase 6 fix CR-11/WR-04). Held fixed by the research-run-1 preregistration (O-02, decisions/16-DEC-O-02.md) before any result exists; a preregistered fixed setting, not evidence that the value is good."
+ref = "research-run-1/O-02"
+
+[rationale.spread_fill_assumptions]
+basis = "EXPERIMENT"
+value = "FULL_FILL"
+text = "Spread and fill assumption declared for the cost model, read by src/backtest/costs.py; RESEARCH_PROTOCOL v2.0.0 section 2 requires the field to be declared but fixes no value (Phase 6 fix CR-11/WR-04). Held fixed by the research-run-1 preregistration (O-02, decisions/16-DEC-O-02.md) before any result exists; a preregistered fixed setting, not evidence that the value is good."
+ref = "research-run-1/O-02"
+
+[rationale.partial_fill_fraction]
+basis = "DECISION"
+value = "1.0"
+text = "Full fills for all canonical cost sets, read by src/backtest/costs.py and src/backtest/engine.py (D038)."
+ref = "D038"
+
+[rationale.working_type]
+basis = "DECISION"
+value = "MARK_PRICE"
+text = "Protective SL/TP trigger price source, read by src/execution/placement.py and src/execution/manager.py (D037)."
+ref = "D037"
+
+[rationale.exit_slippage_rate]
+basis = "DECISION"
+value = "0.0003"
+text = "Stop-market exit slippage (3 bps) read by src/backtest/costs.py, src/backtest/exits.py and src/risk/cost_rates.py; Phase 12 auto-mode default of D046, item 6 ratified by the operator 2026-10-04."
+ref = "D046"
+
+[rationale.min_stop_distance_rate]
+basis = "COST_GUARD"
+value = "0.003"
+text = "Phase 12 cost guard: a stop closer than this fraction of price is rejected as STOP_TOO_TIGHT, read by src/risk/cost_guards.py (D046)."
+ref = "D046"
+
+[rationale.max_cost_to_risk]
+basis = "COST_GUARD"
+value = "0.15"
+text = "Phase 12 cost guard: a plan whose modeled round-trip cost exceeds this share of its risk is rejected as COST_TO_RISK_EXCEEDED, read by src/risk/cost_guards.py (D046)."
+ref = "D046"
+
+[rationale.commission_rate_ttl_seconds]
+basis = "DECISION"
+value = "3600"
+text = "Freshness window of the live commission rate read by src/risk/live_commission.py; Phase 12 auto-mode default of D046, item 6 ratified by the operator 2026-10-04."
+ref = "D046"

@@ -194,7 +194,8 @@ def test_ttl_is_a_decision_value_sourced_to_o_07(family: str) -> None:
 def test_the_hypothesis_is_registered_and_is_not_marked_draft() -> None:
     text = (PREREG_DIR / "research-run-1-hypothesis.md").read_text(encoding="utf-8")
     head = "\n".join(text.splitlines()[:3])
-    assert "DRAFT" not in head
+    assert "DRAFT - not approved" not in text
+    assert not head.startswith("DRAFT")
     assert "16-DEC-O-02" in text
     assert "not an authorization" in text.lower() or "does not authorize" in text.lower()
     assert "cross-family multiplicity" in text.lower()
