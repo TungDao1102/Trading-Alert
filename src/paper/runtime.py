@@ -637,13 +637,37 @@ class _LiveLoop:
             self._supervisor.record_close(symbol, interval, close)
         self._fence = plan.snapshot_utc
 
+    async def _run_shadow_poller(self) -> None:
+        """The SHADOW minute poller as a loop task: any error fails the loop closed."""
+        if self._shadow is None:
+            return
+        try:
+            await self._shadow.run_poller(self._stop)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._fail(exc)
+
     async def run(self) -> None:
         await self._restore_before_subscribing()
+        if self._shadow is not None:
+            # The SHADOW chain starts before the first subscription (plan 16-31): its Telegram
+            # application polls getUpdates in this event loop.
+            try:
+                await self._shadow.start()
+            except Exception as exc:
+                raise RuntimeFailClosed(
+                    f"the SHADOW chain failed to start ({type(exc).__name__})"
+                ) from exc
         try:
             await self._supervisor.start()
         except Exception as exc:
+            if self._shadow is not None:
+                await self._shadow.stop()
             raise RuntimeFailClosed(f"the WebSocket start failed ({type(exc).__name__})") from exc
         consumer = asyncio.create_task(self._consume())
+        if self._shadow is not None:
+            self._tasks.add(asyncio.create_task(self._run_shadow_poller()))
         if self._constraints is not None:
             every = timedelta(seconds=self._context.config.timing.exchange_info_refresh_seconds)
             self._tasks.add(
@@ -669,6 +693,14 @@ class _LiveLoop:
     async def _shutdown(self, consumer: asyncio.Task[None], *waiters: asyncio.Future[Any]) -> None:
         """Unsubscribe and close first, let a running batch finish, then cancel the rest."""
         await self._supervisor.stop()
+        if self._shadow is not None:
+            # Reverse of the start order: the feed first, then the Telegram application.
+            try:
+                await self._shadow.stop()
+            except Exception as exc:
+                log.warning(
+                    "paper runtime: the SHADOW chain did not stop cleanly", error=type(exc).__name__
+                )
         await self._idle.wait()
         pending: list[asyncio.Future[Any]] = [consumer, *waiters, *self._tasks]
         for task in pending:

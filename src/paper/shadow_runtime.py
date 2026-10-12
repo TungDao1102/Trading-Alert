@@ -753,6 +753,7 @@ class ShadowWiring:
     bot: TelegramTextBot | None = None
     confirm_ttl_seconds: int = CONFIRM_TTL_SECONDS_DEFAULT
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    application_factory: Callable[[dict[str, Any]], Any] | None = None
 
 
 def build_coordinator(
@@ -795,6 +796,7 @@ def build_coordinator(
             epoch_id=epoch.epoch_id,
             confirm_ttl_seconds=wiring.confirm_ttl_seconds,
             sleep=wiring.sleep,
+            application_factory=wiring.application_factory,
         )
     except ValueError as exc:
         raise ShadowRuntimeError(f"the SHADOW chain cannot be built: {exc}") from exc
