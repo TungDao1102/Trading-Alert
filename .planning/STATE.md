@@ -4,7 +4,7 @@ milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: executing
-stopped_at: Completed 16-30, 16-31, 16-34, 16-39, 16-51, 16-52; next ready plans 16-38, 16-47
+stopped_at: Completed 16-30, 16-31, 16-34, 16-38, 16-39, 16-47, 16-51, 16-52; next: re-check 16-49, 16-40, 16-37 by dependency
 last_updated: "2026-10-10T03:22:12.243Z"
 last_activity: 2026-10-12
 last_activity_desc: Phase 16 execution started
@@ -13,7 +13,7 @@ progress:
   total_phases: 29
   completed_phases: 17
   total_plans: 194
-  completed_plans: 169
+  completed_plans: 171
 milestone_name: milestone
 ---
 
