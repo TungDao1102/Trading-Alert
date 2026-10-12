@@ -44,16 +44,19 @@ import structlog
 from src.adapters.binance_public import FundingTick
 from src.adapters.telegram_callbacks import DispatchResult, ParsedCallback
 from src.adapters.telegram_notify import TelegramTextBot
-from src.backtest.costs import CostModel
+from src.backtest.costs import CostModel, build_cost_model, cost_slice
 from src.backtest.funding import FundingCoverageError, FundingRow
 from src.backtest.lifecycle import EVENT_FILL
 from src.backtest.semantics import FUNDING_JITTER, FUNDING_MAX_CADENCE
 from src.domain.approval import Approval
+from src.domain.registry import ParameterSet
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
+from src.paper.freeze import StreamEpoch
 from src.paper.live_minutes import LiveMinutePoller, LiveMinuteSource, PublicMinuteFeed
 from src.paper.loop import BarOutcome
 from src.paper.pipeline import PipelineResult
+from src.paper.runtime_config import RuntimeConfig
 from src.paper.shadow import (
     Mode,
     ShadowApprovalBook,
@@ -577,6 +580,72 @@ class ShadowCoordinator:
         return self._confirm.expire_due(self._clock())
 
 
+class SnapshotSource(Protocol):
+    """The point-in-time constraint source (`market_inputs.ConstraintProvider`)."""
+
+    def snapshot_for(self, symbol: str, at_utc: datetime) -> ConstraintSnapshot: ...
+
+
+@dataclass(frozen=True)
+class ShadowWiring:
+    """The seams `run_admitted` builds the SHADOW chain from (`LoopWiring.shadow`).
+
+    Production fills them from the environment (the PostgreSQL stores and the Telegram bot of the
+    authorized chat); tests pass fakes. `bot` may be None when the application provides it.
+    """
+
+    stores: ShadowRuntimeStores
+    chat_id: int
+    bot: TelegramTextBot | None = None
+    confirm_ttl_seconds: int = CONFIRM_TTL_SECONDS_DEFAULT
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+
+
+def build_coordinator(
+    wiring: ShadowWiring,
+    *,
+    epoch: StreamEpoch,
+    config: RuntimeConfig,
+    clock: Callable[[], datetime],
+    parameter_set: ParameterSet,
+    constraints: SnapshotSource,
+    public: ShadowPublicFeed,
+) -> ShadowCoordinator:
+    """The chain of one paper epoch: its ledger starts at the epoch opening with the ratified
+    initial equity (REV-07), its fill cost model is the registry slice of the pinned set.
+    """
+    ledger = ShadowLedger(
+        initial_equity=config.account.initial_equity,
+        parameter_set_params=parameter_set.params,
+        started_at_utc=epoch.opened_at_utc,
+    )
+    fill = FillContext(
+        cost_model=build_cost_model(cost_slice(parameter_set.params)),
+        strategy_version=parameter_set.strategy_version,
+        parameter_set_hash=epoch.parameter_set_hash,
+        constraints_for=constraints.snapshot_for,
+    )
+    try:
+        return ShadowCoordinator(
+            mode=Mode.SHADOW,
+            stores=wiring.stores,
+            bot=wiring.bot,
+            chat_id=wiring.chat_id,
+            clock=clock,
+            ledger=ledger,
+            public=public,
+            fill=fill,
+            minute_poll_interval_seconds=config.timing.minute_poll_interval_seconds,
+            minute_close_lag_seconds=config.timing.minute_close_lag_seconds,
+            experiment_id=epoch.epoch_id,
+            epoch_id=epoch.epoch_id,
+            confirm_ttl_seconds=wiring.confirm_ttl_seconds,
+            sleep=wiring.sleep,
+        )
+    except ValueError as exc:
+        raise ShadowRuntimeError(f"the SHADOW chain cannot be built: {exc}") from exc
+
+
 __all__ = [
     "FillContext",
     "LedgerRiskInputs",
@@ -585,5 +654,8 @@ __all__ = [
     "ShadowPublicFeed",
     "ShadowRuntimeError",
     "ShadowRuntimeStores",
+    "ShadowWiring",
+    "SnapshotSource",
     "bind_risk_inputs",
+    "build_coordinator",
 ]

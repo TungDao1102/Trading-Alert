@@ -68,6 +68,7 @@ from typing import Any, Protocol, runtime_checkable
 import structlog
 
 from src.core.types import Candle
+from src.domain.registry import ParameterSet
 from src.ops.redaction import configure_logging
 from src.paper.bars import BarBuffers
 from src.paper.freeze import (
@@ -111,6 +112,12 @@ from src.paper.runtime_config import (
     refuse_trade_capable_env,
 )
 from src.paper.runtime_state import RuntimeRecord, RuntimeRecordConflict, RuntimeStatePort
+from src.paper.shadow_runtime import (
+    ShadowCoordinator,
+    ShadowRuntimeError,
+    ShadowWiring,
+    build_coordinator,
+)
 from src.paper.supervisor import PaperSupervisor
 from src.paper.vocabulary import (
     GapReason,
@@ -321,7 +328,12 @@ class LoopWiring:
     Every field is optional. Left at None the loop builds the production object: the
     credential-free `BinancePublicMarketData`, a real `PaperWsAdapter`, the real `BarPipeline`, the
     signal-driven stop, the monotonic clock and `asyncio.sleep`. `risk_inputs` (the required
-    open-positions and daily-loss port) has no production default in src: plan 16-31 binds it.
+    open-positions and daily-loss port) has no default implementation in src: plan 16-31 binds it
+    to the SHADOW ledger when `shadow` is given (an explicit `risk_inputs` still wins).
+
+    `shadow` (plan 16-31) is the seam of the SHADOW chain: the stores, the Telegram bot and the
+    authorized chat. With it, `run_admitted` builds the `ShadowCoordinator` and hands every
+    risk-passed bar outcome to it.
     """
 
     ws_client: Any | None = None
@@ -334,6 +346,7 @@ class LoopWiring:
     monotonic_ms: Callable[[], int] | None = None
     sleep: Callable[[timedelta], Awaitable[None]] | None = None
     queue_maxsize: int | None = None
+    shadow: ShadowWiring | None = None
 
 
 def _monotonic_ms() -> int:
@@ -433,9 +446,11 @@ class _LiveLoop:
         supervisor_factory: Callable[[_LiveLoop], PaperSupervisor],
         restart: RestartPlan,
         constraints: ConstraintProvider | None = None,
+        shadow: ShadowCoordinator | None = None,
     ) -> None:
         self._context = context
         self._restart = restart
+        self._shadow = shadow
         self._symbols = context.config.symbols
         # Closes at or before this instant can only be history (see `apply_restart_fence`).
         self._fence: datetime | None = None
@@ -565,6 +580,10 @@ class _LiveLoop:
         await asyncio.to_thread(self._state.record, stats)
         for held in result.held:
             self._schedule_resubmit(held)
+        if self._shadow is not None:
+            # A risk-passed outcome becomes a SHADOW alert (plan 16-31); every other outcome is
+            # ignored. A failed store write raises here and fails the loop closed.
+            await self._shadow.on_result(result)
 
     def _schedule_resubmit(self, held: HeldBar) -> None:
         task = asyncio.get_running_loop().create_task(self._resubmit(held))
@@ -683,15 +702,22 @@ async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None
     public = _resolve_public(live)
 
     pipeline = live.pipeline
+    factory = live.context_factory
     constraints: ConstraintProvider | None = None
-    if pipeline is None:
+    shadow: ShadowCoordinator | None = None
+    parameter_set: ParameterSet | None = None
+    if pipeline is None or live.shadow is not None:
         parameter_set = load_parameter_set_at_root(
             epoch.strategy_id, epoch.parameter_set_id, resolve_registry_root(context.registry_root)
         )
-        factory = live.context_factory
-        if factory is None:
-            if live.risk_inputs is None:
-                raise RuntimeFailClosed("the risk inputs port is not bound")
+        if (
+            pipeline is None
+            and factory is None
+            and live.risk_inputs is None
+            and live.shadow is None
+        ):
+            raise RuntimeFailClosed("the risk inputs port is not bound")
+        if live.shadow is not None or (pipeline is None and factory is None):
             constraints = ConstraintProvider(
                 public=public, symbols=config.symbols, clock=context.clock
             )
@@ -701,10 +727,34 @@ async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None
                 raise RuntimeFailClosed(
                     f"the first exchangeInfo refresh failed ({type(exc).__name__})"
                 ) from exc
+        if live.shadow is not None:
+            if constraints is None:
+                raise RuntimeFailClosed("the SHADOW chain needs the exchange constraints")
+            try:
+                shadow = build_coordinator(
+                    live.shadow,
+                    epoch=epoch,
+                    config=config,
+                    clock=context.clock,
+                    parameter_set=parameter_set,
+                    constraints=constraints,
+                    public=public,
+                )
+            except ShadowRuntimeError as exc:
+                raise RuntimeFailClosed(str(exc)) from exc
+    if pipeline is None:
+        if parameter_set is None:
+            raise RuntimeFailClosed("the parameter set was not loaded")
+        if factory is None:
+            risk_inputs = live.risk_inputs
+            if risk_inputs is None and shadow is not None:
+                risk_inputs = shadow.risk_inputs
+            if risk_inputs is None or constraints is None:
+                raise RuntimeFailClosed("the risk inputs port is not bound")
             factory = make_context_factory(
                 parameter_set=parameter_set,
                 constraints=constraints,
-                risk_inputs=live.risk_inputs,
+                risk_inputs=risk_inputs,
                 account=config.account,
                 ttl_seconds=config.timing.constraint_snapshot_ttl_seconds,
             )
@@ -767,6 +817,7 @@ async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None
         supervisor_factory=build_supervisor,
         restart=plan,
         constraints=constraints,
+        shadow=shadow,
     ).run()
 
 
@@ -918,6 +969,7 @@ def main(
             live_wiring.pipeline is None
             and live_wiring.context_factory is None
             and live_wiring.risk_inputs is None
+            and live_wiring.shadow is None
         ):
             return refuse(
                 ExitCode.CONFIG_NOT_RATIFIED,
