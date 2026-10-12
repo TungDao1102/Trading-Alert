@@ -10,7 +10,9 @@
 # freeze check CLI with the diff-log path. The CLI loads the pinned
 # state from logs/paper/pinned_epoch.json (operator-managed) and
 # appends one JSONL line per tick. On rollover the CLI writes a new
-# pinned-state file so the next tick checks against the new hash.
+# pinned-state file; the next tick starts again from the committed pin
+# (plan 16-47, decision Q-F), so a rollover stays visible every tick
+# until the user commits the new pin.
 #
 # Operator alternative: a soak-host scheduled process (cron, systemd
 # timer, etc.) calling the same CLI. Either satisfies D-04; CI is
@@ -29,16 +31,26 @@
 # proves that the paper host ran, that the feed was healthy or that any
 # bar was evaluated. A scheduled run that did not happen writes no line;
 # that gap is detected outside this workflow and is an EVIDENCE_GAP,
-# never a clean tick. The Actions cache holds the pinned state: it is
-# operational state, not evidence (caches unused for 7 days are removed).
+# never a clean tick.
+#
+# Where the pinned epoch comes from (plan 16-47, decision Q-F
+# commit-pinned-state, decisions/16-DEC-Q-F.md): the file the user
+# commits to master at evidence/paper/pinned_epoch.json after each pin.
+# The step "Use the committed pinned epoch" copies it into logs/paper
+# before the check; no credential or secret is involved. With no
+# committed file there is no pin (a cached copy is removed). The Actions
+# cache keeps only the diff log between ticks: it is operational state,
+# not evidence (caches unused for 7 days are removed).
 
 name: Paper Freeze Check
 
 on:
   schedule:
-    # Hourly. Cadence is at researcher discretion (FLAGGED ASSUMPTION,
-    # PAPER-03 unclassified). Hourly is plenty for a no-change proof.
-    - cron: "0 * * * *"
+    # Hourly at minute 34: the user's recorded choice (decisions/16-DEC-Q-Q.md,
+    # plan 16-47). A minute off the top of the hour is a mitigation of unproven
+    # effect on delayed or dropped scheduled runs (G15, REV-18); a missing tick
+    # is still an EVIDENCE_GAP.
+    - cron: "34 * * * *"
   workflow_dispatch: {}
 
 # Least privilege (review WR-08): a read-only GITHUB_TOKEN, regardless of the repository default,
@@ -81,6 +93,23 @@ jobs:
           key: paper-freeze-state
           restore-keys: |
             paper-freeze-
+
+      # Q-F (commit-pinned-state): the pinned epoch is the file the user
+      # committed to master, not whatever the cache restored. Copied, never
+      # printed. Absent file: no pin (SKIPPED needs none; a non-empty
+      # allowlist then fails loudly with exit code 2).
+      - name: Use the committed pinned epoch
+        env:
+          COMMITTED_PIN: ${{ github.workspace }}/evidence/paper/pinned_epoch.json
+          PAPER_PINNED_STATE: ${{ github.workspace }}/logs/paper/pinned_epoch.json
+        run: |
+          mkdir -p "$(dirname "$PAPER_PINNED_STATE")"
+          if [ -f "$COMMITTED_PIN" ]; then
+            cp -- "$COMMITTED_PIN" "$PAPER_PINNED_STATE"
+          else
+            rm -f -- "$PAPER_PINNED_STATE"
+            echo "::notice::no committed pinned epoch (evidence/paper/pinned_epoch.json)"
+          fi
 
       - name: Run freeze check
         id: freeze
