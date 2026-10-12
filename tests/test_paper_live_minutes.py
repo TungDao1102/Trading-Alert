@@ -364,6 +364,127 @@ def test_the_first_poll_starts_at_since_floored_to_the_minute() -> None:
     asyncio.run(scenario())
 
 
+class StartAfterEndError(Exception):
+    """What Binance answers (HTTP 400) to a kline request whose startTime is after its endTime."""
+
+
+class StrictFeed(FakeFeed):
+    """A FakeFeed that rejects `start_ms > end_ms` like the live exchange does (not transient)."""
+
+    def _reject_inverted_range(self, start_ms: int | None, end_ms: int | None) -> None:
+        if start_ms is not None and end_ms is not None and start_ms > end_ms:
+            raise StartAfterEndError(f"startTime {start_ms} is after endTime {end_ms}")
+
+    async def klines(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 1500,
+    ) -> list[Kline]:
+        self._reject_inverted_range(start_ms, end_ms)
+        return await super().klines(symbol, interval, start_ms, end_ms, limit)
+
+    async def mark_klines(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 1500,
+    ) -> list[MarkKline]:
+        self._reject_inverted_range(start_ms, end_ms)
+        return await super().mark_klines(symbol, interval, start_ms, end_ms, limit)
+
+
+def test_a_first_poll_whose_since_is_after_the_horizon_makes_no_feed_call() -> None:
+    # After a CONFIRM the fill-eligibility start is the minute AFTER the confirm minute, so it is
+    # in the future of the horizon (now - lag) on the first poll.
+    async def scenario() -> None:
+        feed, source = FakeFeed(), LiveMinuteSource()
+        horizon = close_of(at(10, 4))
+        result = await _poller(feed, source).poll_once(
+            SYMBOL, now_utc=horizon + timedelta(seconds=LAG), since_utc=at(10, 6)
+        )
+
+        assert feed.calls == []
+        assert source.last_open_utc(SYMBOL, "trade") is None
+        assert source.last_open_utc(SYMBOL, "mark") is None
+        assert (result.trade_minutes_added, result.mark_minutes_added) == (0, 0)
+        assert result.settled_through_utc == horizon
+
+    asyncio.run(scenario())
+
+
+def test_a_poll_whose_next_cursor_is_after_the_horizon_makes_no_feed_call() -> None:
+    async def scenario() -> None:
+        feed, source = FakeFeed(), LiveMinuteSource()
+        poller = _poller(feed, source)
+        now = close_of(at(10, 4)) + timedelta(seconds=LAG)
+        await poller.poll_once(SYMBOL, now_utc=now, since_utc=at(10, 0))
+        feed.calls.clear()
+
+        # The newest stored minute is 10:04, so the next cursor is 10:05, after this horizon.
+        horizon = close_of(at(10, 4))
+        again = await poller.poll_once(
+            SYMBOL, now_utc=horizon + timedelta(seconds=LAG), since_utc=at(10, 0)
+        )
+
+        assert feed.calls == []
+        assert (again.trade_minutes_added, again.mark_minutes_added) == (0, 0)
+        assert again.settled_through_utc == horizon
+        assert source.last_open_utc(SYMBOL, "trade") == at(10, 4)
+        assert source.last_open_utc(SYMBOL, "mark") == at(10, 4)
+
+    asyncio.run(scenario())
+
+
+def test_a_strict_feed_is_never_asked_for_start_after_end_while_since_is_in_the_future() -> None:
+    async def scenario() -> None:
+        feed, source = StrictFeed(), LiveMinuteSource()
+        poller = _poller(feed, source)
+        since = at(10, 5)  # the minute after the confirm minute
+
+        # Not reachable yet: horizons before 10:05 (the last one is the 10:04 minute's close).
+        for horizon in (close_of(at(10, 2)), close_of(at(10, 3)), close_of(at(10, 4))):
+            result = await poller.poll_once(
+                SYMBOL, now_utc=horizon + timedelta(seconds=LAG), since_utc=since
+            )
+            assert (result.trade_minutes_added, result.mark_minutes_added) == (0, 0)
+            assert result.settled_through_utc == horizon
+        assert feed.calls == []
+
+        # Now reachable: the 10:05, 10:06 and 10:07 minutes have closed.
+        later = close_of(at(10, 7))
+        result = await poller.poll_once(
+            SYMBOL, now_utc=later + timedelta(seconds=LAG), since_utc=since
+        )
+        assert (result.trade_minutes_added, result.mark_minutes_added) == (3, 3)
+        assert result.settled_through_utc == later
+        assert [c.open_time_utc for c in source.trade_minutes(SYMBOL, at(9), at(11))] == [
+            at(10, 5),
+            at(10, 6),
+            at(10, 7),
+        ]
+        assert [c.open_time_utc for c in source.mark_minutes(SYMBOL, at(9), at(11))] == [
+            at(10, 5),
+            at(10, 6),
+            at(10, 7),
+        ]
+        assert all(start <= end for _n, _i, start, end, _l in feed.calls if start and end)
+
+        # The next cursor (10:08) is after an unchanged horizon: still no inverted request.
+        calls_before = len(feed.calls)
+        again = await poller.poll_once(
+            SYMBOL, now_utc=later + timedelta(seconds=LAG), since_utc=since
+        )
+        assert (again.trade_minutes_added, again.mark_minutes_added) == (0, 0)
+        assert len(feed.calls) == calls_before
+
+    asyncio.run(scenario())
+
+
 def test_one_transient_error_is_retried_once_and_the_second_failure_propagates() -> None:
     async def scenario() -> None:
         feed, source = FakeFeed(), LiveMinuteSource()
