@@ -1343,3 +1343,67 @@ def test_releasing_an_exposure_twice_is_not_an_error() -> None:
     ledger.release("plan-1")  # the lifecycle and the expiry sweep may both release one plan
     ledger.release("never-registered")
     assert ledger.ledger.exposures == ()
+
+
+# ---- the application and the poller run inside the loop ---------------------------------------- #
+
+
+def lifecycle_wiring(trace: list[str]) -> tuple[ShadowWiring, FakeApplication]:
+    bot = FakeBot()
+    application = FakeApplication(trace, bot)
+    wiring = ShadowWiring(
+        stores=RuntimeStores(),
+        chat_id=CHAT_ID,
+        bot=bot,
+        sleep=RecordingSleep(),
+        application_factory=lambda kwargs: application,
+    )
+    return wiring, application
+
+
+def test_the_loop_starts_the_application_and_the_poller_and_stops_them_in_reverse(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trace: list[str] = []
+    wiring, _application = lifecycle_wiring(trace)
+    polls: list[int] = []
+
+    async def counting_poll(self: ShadowCoordinator) -> None:
+        polls.append(1)
+        trace.append("poll")
+
+    monkeypatch.setattr(ShadowCoordinator, "poll_once", counting_poll)
+    live.public = RuntimePublic()
+
+    async def script(h: Live) -> None:
+        await wait_until(lambda: len(h.client.handles) == 4 and len(polls) >= 1)
+
+    code = live.start(script, pipeline=SpyPipeline([]), risk_inputs=None, shadow=wiring)
+
+    assert code == 0
+    assert trace[:3] == ["initialize", "start", "updater.start_polling"]
+    assert "poll" in trace
+    assert trace[-3:] == ["updater.stop", "stop", "shutdown"]
+    assert all(h._unsubscribed == 1 for h in live.client.handles), "the feed is closed as well"
+
+
+def test_a_failing_poller_fails_the_loop_closed_and_still_stops_the_application(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trace: list[str] = []
+    wiring, _application = lifecycle_wiring(trace)
+
+    async def failing_poll(self: ShadowCoordinator) -> None:
+        raise ValueError("feed broke")
+
+    monkeypatch.setattr(ShadowCoordinator, "poll_once", failing_poll)
+    live.public = RuntimePublic()
+
+    async def script(h: Live) -> None:
+        await asyncio.Event().wait()  # never stops by itself: the poller failure must
+
+    code = live.start(script, pipeline=SpyPipeline([]), risk_inputs=None, shadow=wiring)
+
+    assert code == 7, "restartable fail-closed exit"
+    assert trace[-3:] == ["updater.stop", "stop", "shutdown"]
+    assert len(live.records(RuntimeEventType.RUNTIME_STOP)) == 1, "no RUNTIME_STOP: a crash marker"
