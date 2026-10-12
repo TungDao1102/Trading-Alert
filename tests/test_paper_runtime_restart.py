@@ -767,6 +767,118 @@ def test_a_restart_with_a_missing_or_different_pin_record_exits_6_before_any_sub
 
 
 # ---------------------------------------------------------------------------------------------- #
+# Plan 16-52: the pin a restart trusts is the latest across ALL epochs (REV-18).
+# ---------------------------------------------------------------------------------------------- #
+
+LATER_EPOCH = "c" * 64
+
+
+def later_pin(
+    epoch: StreamEpoch, *, delta: timedelta, epoch_id: str = LATER_EPOCH
+) -> RuntimeRecord:
+    """An EPOCH_PINNED record of another epoch, `delta` after the pin file's own pin."""
+    return RuntimeRecord(
+        event_type=RuntimeEventType.EPOCH_PINNED,
+        epoch_id=epoch_id,
+        occurred_at_utc=epoch.opened_at_utc + delta,
+        payload=dict(pin_record(epoch).payload),
+    )
+
+
+class CrossEpochProbe:
+    """A state double that answers the cross-epoch query with a fixed list and counts the asks."""
+
+    def __init__(self, inner: InMemoryRuntimeState, answer: Sequence[RuntimeRecord]) -> None:
+        self.inner = inner
+        self.answer = list(answer)
+        self.asked = 0
+
+    def record(self, record: RuntimeRecord) -> None:
+        self.inner.record(record)
+
+    def last_close_by_pair(self, epoch_id: str) -> Any:
+        return self.inner.last_close_by_pair(epoch_id)
+
+    def latest_runtime_marker(self, epoch_id: str) -> RuntimeRecord | None:
+        return self.inner.latest_runtime_marker(epoch_id)
+
+    def records(self, epoch_id: str, event_types: Any = None) -> Sequence[RuntimeRecord]:
+        return self.inner.records(epoch_id, event_types)
+
+    def latest_epoch_pins(self) -> Sequence[RuntimeRecord]:
+        self.asked += 1
+        return list(self.answer)
+
+
+def test_a_restart_under_a_later_pin_of_another_epoch_exits_6_before_any_subscription(
+    live: Live, capsys: pytest.CaptureFixture[str]
+) -> None:
+    epoch = live.epoch
+    seed_history(live, with_stop=True)
+    live.state.record(later_pin(epoch, delta=timedelta(minutes=1)))
+    starts_before = list(live.state.records(epoch.epoch_id, {RuntimeEventType.RUNTIME_START}))
+
+    async def script(_h: Live) -> None:
+        raise AssertionError("the loop must not start")
+
+    code = live.start(
+        script, state=live.state, public=WarmPublic(RESTART), clock=FixedClock(RESTART)
+    )
+
+    assert code == 6, "a superseded pin is a held refusal, as a differing pin record is"
+    assert live.client.handles == [], "nothing was subscribed"
+    assert (
+        list(live.state.records(epoch.epoch_id, {RuntimeEventType.RUNTIME_START})) == starts_before
+    ), "no RUNTIME_START for the refused run"
+    err = capsys.readouterr().err
+    assert LATER_EPOCH in err, "the reason names the later epoch"
+
+
+def test_check_epoch_consistency_is_cross_epoch(live: Live) -> None:
+    module = restart_module()
+    epoch = live.epoch
+
+    later = InMemoryRuntimeState()
+    later.record(pin_record(epoch))
+    later.record(later_pin(epoch, delta=timedelta(seconds=1)))
+    with pytest.raises(module.EpochMismatch, match=LATER_EPOCH) as raised:
+        module.check_epoch_consistency(epoch, later)
+    assert "REV-18" in str(raised.value)
+
+    tie = InMemoryRuntimeState()
+    tie.record(pin_record(epoch))
+    tie.record(later_pin(epoch, delta=timedelta(0)))
+    with pytest.raises(module.EpochMismatch, match="REV-18"):
+        module.check_epoch_consistency(epoch, tie)
+
+    earlier = InMemoryRuntimeState()
+    earlier.record(pin_record(epoch))
+    earlier.record(later_pin(epoch, delta=-timedelta(seconds=1)))
+    module.check_epoch_consistency(epoch, earlier)  # the pin file is the latest pin: accepted
+
+
+def test_negative_control_the_refusal_comes_from_the_cross_epoch_answer(live: Live) -> None:
+    epoch = live.epoch
+    seed_history(live, with_stop=True)
+    live.state.record(later_pin(epoch, delta=timedelta(minutes=1)))
+    probe = CrossEpochProbe(live.state, [pin_record(epoch)])  # the cross-epoch answer: its own pin
+
+    async def script(h: Live) -> None:
+        await wait_until(lambda: len(h.client.handles) == 4)
+
+    code = live.start(
+        script,
+        state=probe,
+        public=WarmPublic(RESTART),
+        clock=FixedClock(RESTART),
+        pipeline=RecordingPipeline(),
+    )
+
+    assert probe.asked >= 1, "the check asked the cross-epoch query"
+    assert code == 0, "with its own pin as the latest answer the restart starts"
+
+
+# ---------------------------------------------------------------------------------------------- #
 # Task 2, Test 2: a bar recorded before the stop is never recorded or evaluated twice.
 # ---------------------------------------------------------------------------------------------- #
 
