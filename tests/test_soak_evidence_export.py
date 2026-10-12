@@ -866,7 +866,20 @@ def test_shadow_rows_are_filtered_to_the_epoch_of_the_bundle(tmp_path: Path) -> 
 # injected uploader: no network, no AWS, no rclone binary.
 # --------------------------------------------------------------------------- #
 
-DESTINATION = "evidence:trading-evidence/paper"
+DESTINATION = "EVIDENCES3:evidence-bucket/paper"
+
+# The fixed evidence configuration names (src/ops/evidence_remote.py); values are fake.
+SECRET_KEY = "Zq9-evidence-secret-KEY-value"
+ACCESS_ID = "EVID-access-id-0001"
+EVIDENCE_ENV = {
+    "EVIDENCE_S3_PROVIDER": "AWS",
+    "EVIDENCE_S3_ENDPOINT": "",
+    "EVIDENCE_S3_REGION": "ap-southeast-1",
+    "EVIDENCE_S3_BUCKET": "evidence-bucket",
+    "EVIDENCE_S3_PREFIX": "paper",
+    "EVIDENCE_S3_ACCESS_KEY_ID": ACCESS_ID,
+    "EVIDENCE_S3_SECRET_ACCESS_KEY": SECRET_KEY,
+}
 
 
 class FakeUploader:
@@ -901,11 +914,10 @@ class FakeUploader:
         return data + b"x" if key.rsplit("/", 1)[-1] in self.corrupt else data
 
 
-def _publish_args(inputs: Inputs, out: Path, *, destination: str = DESTINATION) -> list[str]:
+def _publish_args(inputs: Inputs, out: Path) -> list[str]:
     return [
         *inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=out),
         "--publish",
-        destination,
     ]
 
 
@@ -1013,7 +1025,7 @@ def test_the_publish_subcommand_publishes_an_existing_bundle_after_loading_it(
     args = inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=out)
     assert export.main(args) == export.EXIT_OK
     uploader = FakeUploader()
-    argv = ["publish", "--bundle", str(out), "--destination", DESTINATION]
+    argv = ["publish", "--bundle", str(out)]
     assert export.main(argv, uploader=uploader) == export.EXIT_OK
     assert uploader.puts[-1] == f"{E1}/manifest.json"
 
@@ -1058,29 +1070,126 @@ def test_only_the_recorded_destination_flag_exists(tmp_path: Path, extra: list[s
 
 
 @pytest.mark.parametrize(
-    "destination",
-    [
-        "BACKUPS3CRYPT:bucket/evidence",  # the backup crypt remote is not the evidence remote
-        "backups3:bucket/evidence",
-        "a-local-directory",  # not a remote
-        "C:/evidence",  # a drive letter is a local path
-        "evidence:",  # no bucket or prefix
-        ":s3,access_key_id=AKIAABCDEFGHIJKLMNOP,env_auth=false:bucket/p",  # credential in argv
-        "evidence:bucket/p?secret_access_key=abc",
-        "evidence:bucket/two words",
-    ],
+    "extra",
+    [["--publish", "evidence:bucket/p"], ["--publish", "BACKUPS3CRYPT:bucket/p"]],
 )
-def test_a_destination_that_is_not_a_plain_evidence_remote_is_a_usage_error(
-    tmp_path: Path, destination: str, capsys: pytest.CaptureFixture[str]
+def test_publish_takes_no_free_form_destination(tmp_path: Path, extra: list[str]) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    argv = inputs.argv(
+        source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=tmp_path / "bundle"
+    )
+    with pytest.raises(SystemExit) as raised:
+        export.main([*argv, *extra], uploader=FakeUploader())
+    assert raised.value.code == 2
+    with pytest.raises(SystemExit) as raised_sub:
+        export.main(["publish", "--bundle", str(tmp_path), "--destination", "evidence:b/p"])
+    assert raised_sub.value.code == 2
+
+
+def test_missing_or_empty_evidence_names_exit_naming_only_the_names(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     inputs = one_epoch_inputs(tmp_path / "in")
     out = tmp_path / "bundle"
-    uploader = FakeUploader()
-    code = export.main(_publish_args(inputs, out, destination=destination), uploader=uploader)
+    environ = {
+        **EVIDENCE_ENV,
+        "EVIDENCE_S3_REGION": "",  # empty counts as missing
+        "EVIDENCE_S3_BUCKET": "evidence-bucket",
+    }
+    del environ["EVIDENCE_S3_SECRET_ACCESS_KEY"]
+
+    code = export.main(_publish_args(inputs, out), environ=environ)
+
+    err = capsys.readouterr().err
+    assert code == export.EXIT_INPUT
+    assert "EVIDENCE_S3_REGION" in err and "EVIDENCE_S3_SECRET_ACCESS_KEY" in err
+    for present in ("EVIDENCE_S3_BUCKET", "EVIDENCE_S3_PREFIX", "EVIDENCE_S3_ACCESS_KEY_ID"):
+        assert present not in err, "only the missing names are listed"
+    assert ACCESS_ID not in err and "evidence-bucket" not in err
+    assert not out.exists(), "refused before any export or upload"
+
+
+def test_no_evidence_names_at_all_lists_the_required_ones(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    code = export.main(_publish_args(inputs, tmp_path / "bundle"), environ={})
+    err = capsys.readouterr().err
+    assert code == export.EXIT_INPUT
+    for name in (
+        "EVIDENCE_S3_PROVIDER",
+        "EVIDENCE_S3_REGION",
+        "EVIDENCE_S3_BUCKET",
+        "EVIDENCE_S3_PREFIX",
+        "EVIDENCE_S3_ACCESS_KEY_ID",
+        "EVIDENCE_S3_SECRET_ACCESS_KEY",
+    ):
+        assert name in err
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("EVIDENCE_S3_PREFIX", "/absolute"),
+        ("EVIDENCE_S3_PREFIX", "a/../b"),
+        ("EVIDENCE_S3_PREFIX", "two words"),
+        ("EVIDENCE_S3_PREFIX", "p?secret_access_key=abc"),
+        ("EVIDENCE_S3_PREFIX", "/"),
+        ("EVIDENCE_S3_BUCKET", "bucket/with/slash"),
+        ("EVIDENCE_S3_BUCKET", "bucket:colon"),
+        ("EVIDENCE_S3_PREFIX", "token-in-the-prefix"),
+        ("EVIDENCE_S3_ACCESS_KEY_ID", "BACKUP-shared-id"),  # equal to the backup credential
+    ],
+)
+def test_an_unusable_evidence_value_is_refused_before_any_export(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], name: str, value: str
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    environ = {**EVIDENCE_ENV, "BACKUP_S3_ACCESS_KEY_ID": "BACKUP-shared-id", name: value}
+    code = export.main(_publish_args(inputs, out), environ=environ)
     captured = capsys.readouterr()
     assert code == export.EXIT_INPUT
-    assert "AKIAABCDEFGHIJKLMNOP" not in captured.out + captured.err
-    assert uploader.puts == [] and not out.exists(), "refused before any export or upload"
+    assert name in captured.err
+    if len(value) > 3:
+        assert value not in captured.out + captured.err, "the value is never printed"
+    assert SECRET_KEY not in captured.out + captured.err
+    assert not out.exists()
+
+
+def test_publish_reaches_rclone_through_the_environment_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runner = FakeRclone()
+    seen_env: list[Mapping[str, str]] = []
+
+    def fake_run(
+        argv: Sequence[str], stdin: bytes | None, env: Mapping[str, str]
+    ) -> tuple[int, bytes, bytes]:
+        seen_env.append(env)
+        return runner(argv, stdin)
+
+    monkeypatch.setattr(export, "_run_rclone", fake_run)
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+
+    code = export.main(_publish_args(inputs, out), environ=dict(EVIDENCE_ENV))
+
+    captured = capsys.readouterr()
+    assert code == export.EXIT_OK, captured
+    assert runner.calls
+    for argv, _ in runner.calls:
+        text = " ".join(argv)
+        assert SECRET_KEY not in text and ACCESS_ID not in text
+        assert "EVIDENCES3:evidence-bucket/paper/" in text
+    assert SECRET_KEY not in captured.out + captured.err
+    for env in seen_env:
+        assert env["RCLONE_CONFIG_EVIDENCES3_TYPE"] == "s3"
+        assert env["RCLONE_CONFIG_EVIDENCES3_SECRET_ACCESS_KEY"] == SECRET_KEY
+        assert env["RCLONE_CONFIG_EVIDENCES3_ACCESS_KEY_ID"] == ACCESS_ID
+        assert env["RCLONE_CONFIG_EVIDENCES3_NO_CHECK_BUCKET"] == "true"
+        assert not any("CRYPT" in key for key in env if key.startswith("RCLONE_CONFIG_EVIDENCES3"))
+    assert len(runner.store) == len(manifest_of(out)["files"]) + 1
 
 
 def test_no_credential_value_reaches_the_output(

@@ -739,6 +739,20 @@ def test_20_7_states_the_recorded_cron_reader_crypt_layer_and_loss_window() -> N
     assert "loss window" in body and "hourly" in body and "at most" in body
 
 
+def test_20_7_names_the_fixed_evidence_configuration_and_no_free_form_destination() -> None:
+    from src.ops import evidence_remote as ev
+
+    body = _sub20("20.7")
+    for name in ev.EVIDENCE_VARIABLES:
+        assert f"`{name}`" in body, f"20.7 lacks the name {name}"
+    for phrase in ("deploy/evidence.env.example", ev.EVIDENCE_REMOTE, "no crypt layer"):
+        assert phrase in body, f"20.7 lacks: {phrase}"
+    assert "<remote:bucket/prefix>" not in body and "--destination" not in body
+    assert "not the BACKUP_" in body, "the evidence names are separate from the BACKUP_ names"
+    assert "never in argv" in body or "never in an argument" in body
+    assert "soak.env" in body, "the shared paper environment file is told not to carry them"
+
+
 def test_20_7_names_the_committed_pin_path_the_workflow_reads() -> None:
     from tests.test_paper_freeze_workflow_pin_source import COMMITTED_PIN_PATH
 
