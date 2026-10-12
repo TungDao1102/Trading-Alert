@@ -29,7 +29,7 @@ from src.adapters.telegram_callbacks import DispatchResult, on_callback
 from src.backtest.costs import build_cost_model
 from src.core.types import Candle
 from src.domain.approval import Approval
-from src.domain.enums import ApprovalResult, DailyState
+from src.domain.enums import DailyState
 from src.domain.registry import load_parameter_set
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
@@ -421,7 +421,9 @@ def exposures(rig: Rig) -> list[tuple[str, str, Decimal]]:
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_risk_passed_plan_goes_alert_approve_card_confirm_and_a_simulated_position() -> None:
+async def test_a_risk_passed_plan_goes_alert_approve_card_confirm_and_a_simulated_position() -> (
+    None
+):
     rig = Rig()
     sent = await rig.alert()
 
@@ -687,7 +689,9 @@ def unlabelled_text_sources(source: str) -> list[str]:
     the module) binds to a composed expression.
     """
     tree = ast.parse(source)
-    functions = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    functions = [
+        n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
     by_name: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
     for function in functions:
         by_name.setdefault(function.name, []).append(function)
@@ -709,7 +713,9 @@ def unlabelled_text_sources(source: str) -> list[str]:
             ]
             if assigned:
                 return all(composed(value, scope, depth + 1) for value in assigned)
-            params = [a.arg for a in [*scope.args.posonlyargs, *scope.args.args, *scope.args.kwonlyargs]]
+            params = [
+                a.arg for a in [*scope.args.posonlyargs, *scope.args.args, *scope.args.kwonlyargs]
+            ]
             if expr.id not in params:
                 return False
             position = params.index(expr.id)
@@ -767,9 +773,22 @@ def test_the_text_scan_finds_a_seeded_unlabelled_send() -> None:
     assert unlabelled_text_sources(seeded) == ["go:3: text"]
 
 
-@pytest.mark.parametrize("module", ["shadow_runtime.py", "shadow.py", "shadow_confirm.py"])
-def test_every_send_and_edit_text_comes_from_the_composer(module: str) -> None:
+def text_call_count(source: str) -> int:
+    return sum(
+        1
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and _call_name(node) in TEXT_SENDERS | {"_try_edit"}
+    )
+
+
+@pytest.mark.parametrize(
+    ("module", "expected_calls"),
+    [("shadow_runtime.py", 0), ("shadow.py", 2), ("shadow_confirm.py", 4)],
+)
+def test_every_send_and_edit_text_comes_from_the_composer(module: str, expected_calls: int) -> None:
     source = (SRC / module).read_text(encoding="utf-8")
+    # The scan is not vacuous: it finds the real sends of the two modules that make them.
+    assert text_call_count(source) == expected_calls
     assert unlabelled_text_sources(source) == []
 
 
@@ -784,4 +803,3 @@ def test_the_confirm_entry_card_text_is_assigned_only_from_the_card_composer() -
     ]
     assert values
     assert all(isinstance(v, ast.Call) and _call_name(v) == "render_confirm_card" for v in values)
-

@@ -37,6 +37,7 @@ Atomic write contract (key-link from the plan):
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -680,7 +681,23 @@ def _journal_outcome(
 # Type alias for the dispatch call signature injected into the PTB
 # handler. Tests can build a fake dispatcher that returns a known
 # DispatchResult without going through the resolve_callback path.
-DispatchCallable = Callable[..., DispatchResult]
+DispatchCallable = Callable[..., DispatchResult | Awaitable[DispatchResult]]
+
+
+async def _dispatched(
+    dispatch: DispatchCallable, parsed: ParsedCallback, **kwargs: Any
+) -> DispatchResult:
+    """Run `dispatch` and await its result when it is awaitable.
+
+    A synchronous dispatcher (the default, pure `dispatch_callback`) is called inline. The SHADOW
+    runtime (plan 16-31) passes an async wrapper that runs the synchronous dispatcher in a worker
+    thread, so the blocking database writes of a press never run on the event loop.
+    """
+    result = dispatch(parsed, **kwargs)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
 
 # SHADOW confirm hooks (plan 16-11). `ConfirmHandler` serves CNF:/CXL: presses; `ApprovedHandler`
 # runs after a press reached APPROVED and returns True when it delivered its own reply (the
@@ -764,7 +781,8 @@ async def on_callback(
         callback_chat_id=callback_chat_id,
         authorized_chat_id=authorized_chat_id,
     ):
-        result = dispatch(
+        result = await _dispatched(
+            dispatch,
             parsed,
             callback_chat_id=callback_chat_id,
             authorized_chat_id=authorized_chat_id,
@@ -809,7 +827,8 @@ async def on_callback(
     if binding is not None:
         raw_token = binding.get("raw_token", "")
 
-    result = dispatch(
+    result = await _dispatched(
+        dispatch,
         parsed,
         callback_chat_id=callback_chat_id,
         authorized_chat_id=authorized_chat_id,
@@ -859,8 +878,14 @@ def build_application(
     binding_context_resolver: Callable[[str], dict[str, Any] | None],
     dispatch: DispatchCallable,
     reply_text_fn: Callable[[int, str], Awaitable[None]] | None = None,
+    confirm_handler: ConfirmHandler | None = None,
+    approved_handler: ApprovedHandler | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> Application[Any, Any, Any, Any, Any, Any]:
     """Build a PTB `Application` wired with the approval-callback handler.
+
+    The three optional hooks are the SHADOW confirm step of plan 16-11 (passed through to
+    `on_callback` unchanged); left at None the behaviour is exactly the earlier one.
 
     This is the only function in the codebase that imports
     `telegram.ext.Application`. It MUST NOT be called from any
@@ -881,6 +906,9 @@ def build_application(
             binding_context_resolver=binding_context_resolver,
             dispatch=dispatch,
             reply_text_fn=reply_text_fn,
+            confirm_handler=confirm_handler,
+            approved_handler=approved_handler,
+            clock=clock,
         )
 
     app = ApplicationBuilder().token(token).build()
