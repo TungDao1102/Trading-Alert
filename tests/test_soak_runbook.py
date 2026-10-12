@@ -422,6 +422,7 @@ SECTION_20_SUBSECTIONS = (
     "20.4 Rehearsal before the trial",
     "20.5 Backups and restore drill before the long soak",
     "20.6 Image",
+    "20.7 Exporting trial evidence",
 )
 
 
@@ -665,3 +666,80 @@ def test_20_6_requires_a_rebuild_after_the_allowlist_commit_and_relates_update_s
         "last-good.env",
     ):
         assert phrase in body, f"20.6 lacks: {phrase}"
+
+
+# ----- 20.7 Exporting trial evidence (plan 16-47) ----------------------------------------
+
+
+def _commands_20_7() -> list[list[str]]:
+    """The fenced commands of 20.7 as argv lists (backslash continuations joined)."""
+    import shlex
+
+    joined = "\n".join(_fenced_lines(_sub20("20.7"))).replace("\\\n", " ")
+    commands: list[list[str]] = []
+    for line in joined.split("\n"):
+        if line.strip():
+            commands.append(shlex.split(line.strip(), posix=True))
+    return commands
+
+
+def test_20_7_gives_the_exact_export_publish_and_run_list_commands() -> None:
+    body = _sub20("20.7")
+    assert body, "RUNBOOK 20.7 does not exist"
+    for phrase in (
+        "scripts/export_soak_evidence.py",
+        "--source pg",
+        "--publish",
+        "scripts/export_soak_evidence.py publish",
+        "gh api repos/<owner>/<repo>/actions/workflows/paper_freeze_check.yml/runs --paginate",
+        "gh run download",
+        "registry-diff-",
+        "scripts/evaluate_trial_soak.py",
+        "never a source of truth",
+        "Actions cache",
+        "L-01",
+    ):
+        assert phrase in body, f"20.7 lacks: {phrase}"
+    for path in ("scripts/export_soak_evidence.py", "scripts/evaluate_trial_soak.py"):
+        assert (REPO_ROOT / path).is_file(), path
+
+
+def test_20_7_export_and_publish_commands_use_flags_the_exporter_accepts() -> None:
+    from scripts import export_soak_evidence as export
+
+    seen_export = seen_publish = False
+    for argv in _commands_20_7():
+        if "scripts/export_soak_evidence.py" not in argv:
+            continue
+        tokens = ["x" if t.startswith("<") and t.endswith(">") else t for t in argv]
+        rest = tokens[tokens.index("scripts/export_soak_evidence.py") + 1 :]
+        if rest[:1] == ["publish"]:
+            export._publish_parser().parse_args(rest[1:])
+            seen_publish = True
+        else:
+            args = export._parser().parse_args(rest)
+            assert args.source == "pg"
+            seen_export = True
+    assert seen_export and seen_publish, "20.7 must show both the export and the publish command"
+
+
+def test_20_7_states_the_recorded_cron_reader_crypt_layer_and_loss_window() -> None:
+    from tests.test_paper_freeze_workflow_pin_source import record
+
+    body = _sub20("20.7")
+    cron = record("16-DEC-Q-Q.md")["cron"]
+    o01 = record("16-DEC-O-01.md")
+    assert f"`{cron}`" in body, "the recorded cron is stated"
+    for phrase in ("G15", "REV-18", "unproven", "EVIDENCE_GAP"):
+        assert phrase in body, f"20.7 lacks: {phrase}"
+    assert o01["reader_access"].split(" (")[0] in body, "the recorded reader is stated"
+    assert "outside the backup crypt remote" in body, "the crypt layer is stated"
+    assert "not ciphertext" in body, "no passphrase is needed to read it"
+    assert o01["write_timing"].split(",")[0] in body, "the recorded write timing is stated"
+    assert "loss window" in body and "hourly" in body and "at most" in body
+
+
+def test_20_7_names_the_committed_pin_path_the_workflow_reads() -> None:
+    from tests.test_paper_freeze_workflow_pin_source import COMMITTED_PIN_PATH
+
+    assert COMMITTED_PIN_PATH in _sub20("20.7")
