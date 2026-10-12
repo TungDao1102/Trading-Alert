@@ -79,6 +79,7 @@ from src.backtest.ledger import (
     update_exposure,
 )
 from src.backtest.lifecycle import (
+    EVENT_EXIT,
     EVENT_FILL,
     EVENT_TP1,
     LifecycleEvent,
@@ -236,10 +237,19 @@ class ShadowLedger:
             self._remaining[trade_plan_id] = planned_quantity
 
     def release(self, trade_plan_id: str) -> None:
-        """Drop a plan's exposure (an unfilled plan that reached its expiry)."""
+        """Drop a plan's exposure (an unfilled plan that reached its expiry).
+
+        Idempotent: an exposure the lifecycle already dropped (the plan was cancelled or expired
+        inside the simulated minutes before the expiry sweep ran, plan 16-31) is not an error.
+        """
         with self._lock:
+            self._drop(trade_plan_id)
+
+    def _drop(self, trade_plan_id: str) -> None:
+        """Remove a plan's exposure when it is still registered (caller holds the lock)."""
+        if any(e.trade_plan_id == trade_plan_id for e in self._ledger.exposures):
             self._ledger = remove_exposure(self._ledger, trade_plan_id=trade_plan_id)
-            self._remaining.pop(trade_plan_id, None)
+        self._remaining.pop(trade_plan_id, None)
 
     def admit(
         self,
@@ -361,9 +371,14 @@ class ShadowLedger:
                     filled_quantity=start_state.fill_quantity,
                     remaining_quantity=remaining,
                 )
-            else:  # EXIT, CANCEL, PENDING: the plan no longer carries risk
+            elif event.kind == EVENT_EXIT:
+                # A filled position must still carry its exposure when it exits.
                 self._ledger = remove_exposure(self._ledger, trade_plan_id=plan_id)
                 self._remaining.pop(plan_id, None)
+            else:
+                # CANCEL, PENDING: an unfilled plan no longer carries risk. The expiry sweep may
+                # have released its reservation first (plan 16-31), so this is idempotent.
+                self._drop(plan_id)
 
     # ------------------------------------------------------------------ risk inputs
 
@@ -837,6 +852,20 @@ class ShadowReservations:
             self._filled[key] = reservation
             return True
 
+    def _apply_new_events(self, key: str, driver: ShadowFillDriver) -> None:
+        """Apply the lifecycle events of `driver` not yet applied (caller holds the lock)."""
+        events = driver.events
+        for index in range(self._seen_events.get(key, 0), len(events)):
+            event = events[index]
+            if event.kind == EVENT_FILL and key in self._held:
+                if event.quantity is None:
+                    raise ValueError("a FILL event needs a quantity")
+                self.record_position_opened(
+                    key=key, fill_quantity=event.quantity, opened_at_utc=event.time_utc
+                )
+            self._ledger.apply_event(event, start_state=driver.state)
+            self._seen_events[key] = index + 1
+
     def sync(self, key: str, driver: ShadowFillDriver) -> None:
         """Apply what `driver` produced since the last call: events to exposure, bookings to equity.
 
@@ -845,21 +874,46 @@ class ShadowReservations:
         already-applied events and bookings are skipped.
         """
         with self._ledger.lock:
-            events = driver.events
-            for index in range(self._seen_events.get(key, 0), len(events)):
-                event = events[index]
-                if event.kind == EVENT_FILL and key in self._held:
-                    if event.quantity is None:
-                        raise ValueError("a FILL event needs a quantity")
-                    self.record_position_opened(
-                        key=key, fill_quantity=event.quantity, opened_at_utc=event.time_utc
-                    )
-                self._ledger.apply_event(event, start_state=driver.state)
-                self._seen_events[key] = index + 1
+            self._apply_new_events(key, driver)
             bookings = driver.bookings
             for index in range(self._seen_bookings.get(key, 0), len(bookings)):
                 self._ledger.apply(bookings[index])
                 self._seen_bookings[key] = index + 1
+
+    def sync_many(self, drivers: Mapping[str, ShadowFillDriver]) -> None:
+        """`sync` for several plans at once, with the new bookings applied in time order.
+
+        The Phase 14 ledger needs non-decreasing booking times, and one window can hold bookings
+        of several plans (one exits at 10:04 while another fills at 10:03). Events are applied
+        per plan in key order; the bookings of all plans are then applied sorted by time, symbol,
+        plan, index and key, exactly as `rebuild_from_records` does (plan 16-31).
+        """
+        with self._ledger.lock:
+            pending: list[tuple[datetime, str, str, int, str, Booking]] = []
+            for key in sorted(drivers):
+                driver = drivers[key]
+                self._apply_new_events(key, driver)
+                bookings = driver.bookings
+                for index in range(self._seen_bookings.get(key, 0), len(bookings)):
+                    booking = bookings[index]
+                    pending.append(
+                        (
+                            booking.time_utc,
+                            booking.symbol,
+                            booking.trade_plan_id,
+                            index,
+                            key,
+                            booking,
+                        )
+                    )
+            for _time, _symbol, _plan, _index, _key, booking in sorted(
+                pending, key=lambda item: item[:5]
+            ):
+                self._ledger.apply(booking)
+            for key, driver in drivers.items():
+                self._seen_bookings[key] = max(
+                    self._seen_bookings.get(key, 0), len(driver.bookings)
+                )
 
     # ---- recovery from the journal ---------------------------------------- #
 
