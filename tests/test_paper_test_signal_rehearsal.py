@@ -404,6 +404,27 @@ def test_any_binance_variable_refuses_the_live_mode_and_only_the_name_is_printed
     assert not out.exists() and stores.signals == {}
 
 
+def test_any_binance_variable_refuses_the_dry_run_too_and_only_the_name_is_printed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stores = RuntimeStores()
+    out = tmp_path / "dry.json"
+    secret = "k3y-value-that-must-never-be-printed"
+
+    code = shadow_rehearsal.main(
+        ["--dry-run", "--out", str(out)],
+        environ={"BINANCE_API_KEY": secret, "BINANCE_EMPTY": ""},
+        stores=stores,
+        bot=FakeBot(),
+    )
+
+    err = capsys.readouterr().err
+    assert code == shadow_rehearsal.EXIT_TRADE_CAPABLE == 3
+    assert "BINANCE_API_KEY" in err and "BINANCE_EMPTY" in err
+    assert secret not in err
+    assert not out.exists() and stores.signals == {}
+
+
 def test_telegram_settings_are_read_only_from_the_allowed_names(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
