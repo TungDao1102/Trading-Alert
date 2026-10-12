@@ -67,6 +67,8 @@ def test_runtime_event_type_carries_the_tick_stats_record() -> None:
         "PAPER_BAR_PROCESSED",
         "PAPER_GAP",
         "PAPER_TICK_STATS",
+        "PAPER_REPLAY_INPUTS",
+        "PAPER_HISTORY_BARS",
         "WS_DISCONNECT",
         "WS_RECONNECT",
         "HEALTH_STATE_CHANGED",

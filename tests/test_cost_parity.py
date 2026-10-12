@@ -191,7 +191,10 @@ def _spy_on_evaluate_risk(
 
     def wrapper(**kwargs: Any) -> PortfolioVerdict:
         verdict: PortfolioVerdict = real(**kwargs)
-        sink.append((dict(kwargs), verdict))
+        recorded = dict(kwargs)
+        # The sequence type is no contract: the simulator hands a list, the paper loop a tuple.
+        recorded["open_positions"] = tuple(recorded["open_positions"])
+        sink.append((recorded, verdict))
         return verdict
 
     monkeypatch.setattr(module, "evaluate_risk", wrapper)

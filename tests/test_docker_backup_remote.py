@@ -121,8 +121,17 @@ class S3Double:
         return docker("run", "--rm", RCLONE_IMAGE, "obscure", passphrase).stdout.strip()
 
     def new_bucket(self) -> str:
+        """Create the bucket through the S3 API, as the operator does out of band.
+
+        The adapter sets NO_CHECK_BUCKET, so rclone never creates it; a directory made behind the
+        server's back with ``docker exec`` is invisible to its listing (NoSuchBucket).
+        """
         bucket = unique_name("bkt")
-        docker("exec", self.server, "mkdir", "-p", f"/data/{bucket}")
+        env = self.env_for(bucket, passphrase="bucket-one", salt="bucket-two")
+        # The one call allowed to create it: NO_CHECK_BUCKET also turns `mkdir` into a no-op.
+        no_check = {"RCLONE_CONFIG_BACKUPS3_NO_CHECK_BUCKET": "false"}
+        made = self.runner(env)(["mkdir", remote.raw_bucket_remote(env)], no_check)
+        assert made.returncode == 0, made.stderr
         return bucket
 
     def env_for(self, bucket: str, *, passphrase: str, salt: str) -> dict[str, str]:

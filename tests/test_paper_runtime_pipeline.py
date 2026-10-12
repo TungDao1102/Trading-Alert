@@ -454,8 +454,12 @@ def test_backfill_only_batch_extends_history_and_records_one_gap_per_close(
     ]
     assert [g.reason for g in result.gaps] == [GapReason.WS_RECONNECT_WINDOW] * 2
     assert sorted(result.recorded, key=record_sort_key) == fx.gap_records()
-    # Only gap evidence is written: nothing says the feed was healthy because the backfill worked.
-    assert {r.event_type for r in fx.state.records(EPOCH_ID)} == {RuntimeEventType.PAPER_GAP}
+    # Only gap evidence and the replay history are written: nothing says the feed was healthy
+    # because the backfill worked.
+    assert {r.event_type for r in fx.state.records(EPOCH_ID)} == {
+        RuntimeEventType.PAPER_GAP,
+        RuntimeEventType.PAPER_HISTORY_BARS,
+    }
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -758,7 +762,8 @@ def test_every_arrival_order_of_one_group_gives_byte_identical_records() -> None
         )
 
     baseline = run((0, 1, 2, 3))
-    assert len(baseline[0]) == 2  # the 4h context record and the 1h heartbeat
+    # the 4h context record, the 1h heartbeat, the replay inputs and two history-bar records
+    assert len(baseline[0]) == 5
     assert len(baseline[1]) == 1 and baseline[2] == 1
     for order in itertools.permutations(range(4)):
         assert run(order) == baseline
