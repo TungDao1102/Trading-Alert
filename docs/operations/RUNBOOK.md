@@ -713,3 +713,47 @@ IMAGE_TAG=<commit> TRADING_ENV_FILE=/path/to/soak.env deploy/compose-soak.sh --p
 The paper-start allowlist is a source constant (O-04, plan 16-42), so the image must be rebuilt after the allowlist commit: an image built before that commit carries the earlier allowlist. Build, record and start only after the allowlist commit exists.
 
 **Relation to `deploy/update.sh`.** `deploy/update.sh` (14) updates the ordinary stack: it records `.deploy/last-good.env`, checks out a ref, builds and starts, and it does not go through `deploy/compose-soak.sh`, so the guard of 20.1 does not apply to it. It is not used for the soak project: every `--ref` run overwrites `last-good.env` (14.4), while `soak-image.env` and the history file are the record of which image the soak ran. A deploy during the trial is a new commit, `deploy/soak-image.sh`, `deploy/compose-soak.sh stop paper` and a start with the new `IMAGE_TAG`, and it is a PLANNED_RESTART (20.2). To return to an earlier image, start again with the `IMAGE_TAG` of an earlier line of the history file (the older image stays on the host, because tags are per commit); that is also a PLANNED_RESTART, and a database schema migration applied by the newer image is not undone (14.4).
+
+### 20.7 Exporting trial evidence
+
+This is the procedure for getting the evidence of one epoch off the soak host and into the place the user chose, and for reading the hourly freeze ticks back from GitHub (plan 16-47; D-22, L-01, REV-02, REV-08, REV-18). It applies three decision records and invents no value: `decisions/16-DEC-O-01.md` (where evidence is kept), `decisions/16-DEC-Q-F.md` (how the hourly check gets its pin) and `decisions/16-DEC-Q-Q.md` (the cron minute).
+
+**What the records say.**
+
+- **Where (O-01, option a).** An S3 evidence prefix outside the backup crypt remote, with its own remote and its own credential. Versioning is enabled; there is no Object Lock and no retention. Object Lock can be added later but never removed, so it is the user's later decision, not part of this procedure.
+- **Reader.** The recorded reader is project owner only (the user). GitHub never reads this store: the pin reaches GitHub through a commit (below), so no credential for the evidence store is ever placed on GitHub.
+- **Crypt layer.** The evidence is written outside the backup crypt remote, on a plain S3 remote with no crypt layer, so it is not ciphertext to a holder of the evidence remote's credential and no crypt passphrase is needed to read it. It is also not covered by the encryption of the backup chain (11); what protects it is the bucket policy the user sets in plan 16-49, not this procedure. The two records are compatible because the workflow reads the pin from a commit and never from the store.
+- **Write timing and loss window.** `exporter-schedule`, hourly: the operator runs the export and publish steps below every hour, and nothing on the host writes evidence by itself. The loss window is what was recorded on the host since the last successful publish: at most the last hour while the hourly runs succeed, longer for every skipped or failed run, and everything not yet published if the host disk is lost. The database backups of 11 are a separate copy with their own window; this store is not a backup of the database.
+- **Pin source (Q-F, `commit-pinned-state`).** After each pin the user commits `evidence/paper/pinned_epoch.json` to `master`. The workflow step "Use the committed pinned epoch" copies that file to the path the freeze CLI reads before every check, with no secret and with the read-only token it already had. With no committed file there is no pin and a cached copy is removed. A new pin needs a new commit; until then a rollover is seen again at every tick. The Actions cache keeps only the diff log between ticks and is never a source of truth (L-01): caches unused for 7 days are removed.
+- **Cron (Q-Q).** The workflow runs `34 * * * *`, the user's own choice; the reconciler's slot grid is HH:34. A scheduled workflow change takes effect only on `master` (G15), so plan 16-43 checks `origin/master` before the pin. A minute off the top of the hour is a mitigation of unproven effect on delayed or dropped scheduled runs (G15, REV-18): a missing tick is still an EVIDENCE_GAP, never filled and never counted as clean.
+
+**Evidence remote configuration (fixed names).** The destination and the credentials of the evidence store come only from these environment names, which mirror the `BACKUP_S3_*` pattern of `src/ops/backup_remote.py` with an `EVIDENCE_` prefix and are not the BACKUP_ names: `EVIDENCE_S3_PROVIDER` (AWS, Wasabi or Other), `EVIDENCE_S3_ENDPOINT` (needed only for Other), `EVIDENCE_S3_REGION`, `EVIDENCE_S3_BUCKET`, `EVIDENCE_S3_PREFIX` (required, never empty), `EVIDENCE_S3_ACCESS_KEY_ID` and `EVIDENCE_S3_SECRET_ACCESS_KEY`. A change of provider changes these values only. They map to the rclone remote `EVIDENCES3` (plain S3, no crypt layer, never `BACKUPS3` or `BACKUPS3CRYPT`) in the rclone child process only, so a credential is never in argv and never printed. Use a credential of its own, scoped to this bucket and prefix: the exporter refuses to run when it equals the backup credential. Make the file from `deploy/evidence.env.example` (names only), keep it outside the checkout at mode 0600, and load it only into the shell that runs the export (`set -a; . /path/to/evidence.env; set +a`). It is not added to the shared `soak.env` file, because the paper container shares that file and must not hold this credential; the paper runtime reads none of these names and still refuses any `BINANCE_` name. A missing or empty name, an empty or unsafe prefix, or a credential shared with the backup chain exits 2 before anything is exported or uploaded, and the message lists variable names only.
+
+**1. Fetch the GitHub run list and the diff log.** Run this where the operator is logged in to GitHub (`gh auth login` is the operator's own step; no token is written into the repository, an environment file or a command line). The run list and its records expire (90 days by default, `docs/SOURCES.md`), so fetch before then and copy the files to the host.
+
+```text
+gh api repos/<owner>/<repo>/actions/workflows/paper_freeze_check.yml/runs --paginate --method GET -F per_page=100 --jq '.workflow_runs[]' | jq -s '.' > <github-runs-file>
+gh run download <run-id> --repo <owner>/<repo> --name registry-diff-<run-id> --dir <download-dir>
+```
+
+`<run-id>` is the newest run of the list. The diff log of that run (`registry_diff.jsonl` in `<download-dir>`) is the whole log up to that tick, because the cache carries it from tick to tick; an earlier run's artifact is a shorter copy of the same log. The exporter refuses a run list that is not a list of runs. These two commands were not run on the development machine (no network): the first run on the real repository is the operator's check of the shape.
+
+**2. Export one epoch on the host.** The state comes from the soak database through the environment names the runtime already uses (`DATABASE_URL_SYNC` or `DATABASE_URL`); the URL is never typed on the command line. `<pinned-epoch-file>` is the committed `evidence/paper/pinned_epoch.json` (repeat `--pinned` with an archived pin when an earlier epoch is exported).
+
+```text
+python scripts/export_soak_evidence.py --source pg --epoch <epoch-id> --pinned <pinned-epoch-file> --diff-log <download-dir>/registry_diff.jsonl --github-runs <github-runs-file> --config <runtime-config> --window-start <window-start-utc> --window-end <window-end-utc> --out <new-bundle-dir>
+```
+
+The bundle is one epoch, written to a new directory (an existing one is never overwritten) with `manifest.json` last. A secret-looking value anywhere in it stops the export (exit 3) and removes the partial bundle.
+
+**3. Publish and verify.** With the evidence names loaded, either add the flag `--publish` (it takes no value) to the command above, or publish an exported bundle on its own:
+
+```text
+python scripts/export_soak_evidence.py publish --bundle <new-bundle-dir>
+```
+
+There is no free-form destination: no remote, bucket or prefix is typed on the command line. Objects go to `<epoch-id>/<file>` under `EVIDENCE_S3_BUCKET` and `EVIDENCE_S3_PREFIX`, every file first and `manifest.json` last, each with `rclone rcat --immutable`; a prefix that already holds a manifest is never published over. Then every object is read back and compared with the manifest sha256: exit 0 prints "published and verified"; exit 4 names the file that failed and keeps the local bundle for another attempt. Run it as the hourly step of the recorded schedule; a failed run is simply repeated, and it is never edited by hand.
+
+**4. Evaluate.** Copy the bundle to the development machine (19.5) and run `python scripts/evaluate_trial_soak.py --bundle <new-bundle-dir> --config <runtime-config> --q-d-decision <q-d-decision-file> --out <evaluation-file>`; the bundle is checked against its manifest first, and a gap reconstructed from the run list plus the expected slots is an EVIDENCE_GAP (REV-02).
+
+**Not shown by any test.** Publishing to a real bucket, the output shape of `gh api` and `gh run download`, and the bucket policy are checked only by the operator on the real accounts; `tests/test_soak_evidence_export.py` publishes to an injected fake and `tests/test_paper_freeze_workflow_pin_source.py` holds the workflow to the three records.

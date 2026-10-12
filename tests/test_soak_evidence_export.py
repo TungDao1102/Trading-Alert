@@ -857,3 +857,404 @@ def test_shadow_rows_are_filtered_to_the_epoch_of_the_bundle(tmp_path: Path) -> 
     assert code == export.EXIT_OK
     evidence = load_evidence_file(out / FILE_ANALYTICS)
     assert evidence.paper == ()
+
+
+# --------------------------------------------------------------------------- #
+# Plan 16-47, Task 1: publish to the recorded O-01 destination (option a: an S3 evidence
+# prefix outside the backup crypt remote; versioning enabled, no Object Lock; the user alone
+# reads it; written by the exporter on the operator's schedule). Everything runs against an
+# injected uploader: no network, no AWS, no rclone binary.
+# --------------------------------------------------------------------------- #
+
+DESTINATION = "EVIDENCES3:evidence-bucket/paper"
+
+# The fixed evidence configuration names (src/ops/evidence_remote.py); values are fake.
+SECRET_KEY = "Zq9-evidence-secret-KEY-value"
+ACCESS_ID = "EVID-access-id-0001"
+EVIDENCE_ENV = {
+    "EVIDENCE_S3_PROVIDER": "AWS",
+    "EVIDENCE_S3_ENDPOINT": "",
+    "EVIDENCE_S3_REGION": "ap-southeast-1",
+    "EVIDENCE_S3_BUCKET": "evidence-bucket",
+    "EVIDENCE_S3_PREFIX": "paper",
+    "EVIDENCE_S3_ACCESS_KEY_ID": ACCESS_ID,
+    "EVIDENCE_S3_SECRET_ACCESS_KEY": SECRET_KEY,
+}
+
+
+class FakeUploader:
+    """An in-memory object store with the three operations the publisher uses."""
+
+    def __init__(
+        self,
+        *,
+        objects: Mapping[str, bytes] | None = None,
+        corrupt: Collection[str] = (),
+        fail_put: Collection[str] = (),
+        error_text: str = "put failed",
+    ) -> None:
+        self.objects: dict[str, bytes] = dict(objects or {})
+        self.corrupt = set(corrupt)
+        self.fail_put = set(fail_put)
+        self.error_text = error_text
+        self.puts: list[str] = []
+
+    def listing(self, prefix: str) -> frozenset[str]:
+        head = prefix.rstrip("/") + "/"
+        return frozenset(k[len(head) :] for k in self.objects if k.startswith(head))
+
+    def put(self, key: str, data: bytes) -> None:
+        if key in self.fail_put:
+            raise export.PublishError(self.error_text)
+        self.puts.append(key)
+        self.objects[key] = data
+
+    def get(self, key: str) -> bytes:
+        data = self.objects[key]
+        return data + b"x" if key.rsplit("/", 1)[-1] in self.corrupt else data
+
+
+def _publish_args(inputs: Inputs, out: Path) -> list[str]:
+    return [
+        *inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=out),
+        "--publish",
+    ]
+
+
+def test_tracer_publish_uploads_the_files_then_the_manifest_and_verifies_the_copy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    uploader = FakeUploader()
+
+    code = export.main(_publish_args(inputs, out), uploader=uploader)
+
+    assert code == export.EXIT_OK, capsys.readouterr()
+    manifest = manifest_of(out)
+    keys = [f"{E1}/{name}" for name in manifest["files"]]
+    assert uploader.puts[-1] == f"{E1}/manifest.json", "the manifest is published last"
+    assert sorted(uploader.puts[:-1]) == sorted(keys)
+    assert len(uploader.puts) == len(set(uploader.puts)), "every object once"
+    for name in [*manifest["files"], "manifest.json"]:
+        assert uploader.objects[f"{E1}/{name}"] == (out / name).read_bytes()
+    assert "published" in capsys.readouterr().out
+
+
+def test_a_published_copy_that_differs_from_the_manifest_fails_naming_the_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    uploader = FakeUploader(corrupt={FILE_DIFF})
+
+    code = export.main(_publish_args(inputs, out), uploader=uploader)
+
+    captured = capsys.readouterr()
+    assert code == export.EXIT_PUBLISH != export.EXIT_OK
+    assert FILE_DIFF in captured.err
+    assert _sha((out / FILE_DIFF).read_bytes()) not in captured.err + captured.out
+    assert out.exists(), "the local bundle is kept for another attempt"
+
+
+def test_a_missing_published_object_fails_the_verification(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Dropping(FakeUploader):
+        def put(self, key: str, data: bytes) -> None:
+            if not key.endswith(FILE_GAPS):
+                super().put(key, data)
+
+        def get(self, key: str) -> bytes:
+            if key not in self.objects:
+                raise export.PublishError(f"{key.rsplit('/', 1)[-1]} cannot be read back")
+            return super().get(key)
+
+    inputs = one_epoch_inputs(tmp_path / "in")
+    code = export.main(_publish_args(inputs, tmp_path / "bundle"), uploader=Dropping())
+    assert code == export.EXIT_PUBLISH
+    assert FILE_GAPS in capsys.readouterr().err
+
+
+def test_an_epoch_prefix_that_already_holds_a_manifest_is_never_published_over(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    uploader = FakeUploader(objects={f"{E1}/manifest.json": b"{}"})
+
+    code = export.main(_publish_args(inputs, tmp_path / "bundle"), uploader=uploader)
+
+    assert code == export.EXIT_PUBLISH
+    assert uploader.puts == []
+    assert uploader.objects == {f"{E1}/manifest.json": b"{}"}
+    assert "already published" in capsys.readouterr().err
+
+
+def test_an_interrupted_earlier_publish_is_resumed_only_over_identical_bytes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    seed = tmp_path / "seed"
+    seed_args = inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=seed)
+    assert export.main(seed_args) == export.EXIT_OK
+    same = FakeUploader(objects={f"{E1}/{FILE_PINNED}": (seed / FILE_PINNED).read_bytes()})
+    assert export.main(_publish_args(inputs, tmp_path / "b1"), uploader=same) == export.EXIT_OK
+    assert f"{E1}/{FILE_PINNED}" not in same.puts, "an identical object is left alone"
+
+    other = FakeUploader(objects={f"{E1}/{FILE_PINNED}": b"different"})
+    code = export.main(_publish_args(inputs, tmp_path / "b2"), uploader=other)
+    assert code == export.EXIT_PUBLISH
+    assert FILE_PINNED in capsys.readouterr().err
+    assert other.objects[f"{E1}/{FILE_PINNED}"] == b"different", "never overwritten"
+
+
+def test_a_failed_export_publishes_nothing(tmp_path: Path) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    uploader = FakeUploader()
+    args = _publish_args(inputs, tmp_path / "bundle")
+    args[args.index("--epoch") + 1] = E2  # no --pinned file belongs to it
+    assert export.main(args, uploader=uploader) == export.EXIT_INPUT
+    assert uploader.puts == [] and uploader.objects == {}
+
+
+def test_the_publish_subcommand_publishes_an_existing_bundle_after_loading_it(
+    tmp_path: Path,
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    args = inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=out)
+    assert export.main(args) == export.EXIT_OK
+    uploader = FakeUploader()
+    argv = ["publish", "--bundle", str(out)]
+    assert export.main(argv, uploader=uploader) == export.EXIT_OK
+    assert uploader.puts[-1] == f"{E1}/manifest.json"
+
+    (out / FILE_DIFF).write_bytes(b"edited after export\n")
+    again = FakeUploader()
+    assert export.main(argv, uploader=again) == export.EXIT_INPUT
+    assert again.puts == []
+
+
+def test_option_a_writes_no_git_digest_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work = tmp_path / "cwd"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    assert export.main(_publish_args(inputs, out), uploader=FakeUploader()) == export.EXIT_OK
+    found = [p.name for root in (tmp_path, work) for p in root.rglob("manifest.sha256")]
+    assert found == [], "Git digests belong to options b and e, which are not recorded"
+    assert not (work / "evidence").exists()
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--publish-git", "x"],
+        ["--publish-dir", "somewhere"],
+        ["--git-digests"],
+        ["--publish-github-artifact"],
+    ],
+)
+def test_only_the_recorded_destination_flag_exists(tmp_path: Path, extra: list[str]) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    argv = inputs.argv(
+        source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=tmp_path / "bundle"
+    )
+    with pytest.raises(SystemExit) as raised:
+        export.main([*argv, *extra], uploader=FakeUploader())
+    assert raised.value.code == 2
+    assert not (tmp_path / "bundle").exists()
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [["--publish", "evidence:bucket/p"], ["--publish", "BACKUPS3CRYPT:bucket/p"]],
+)
+def test_publish_takes_no_free_form_destination(tmp_path: Path, extra: list[str]) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    argv = inputs.argv(
+        source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=tmp_path / "bundle"
+    )
+    with pytest.raises(SystemExit) as raised:
+        export.main([*argv, *extra], uploader=FakeUploader())
+    assert raised.value.code == 2
+    with pytest.raises(SystemExit) as raised_sub:
+        export.main(["publish", "--bundle", str(tmp_path), "--destination", "evidence:b/p"])
+    assert raised_sub.value.code == 2
+
+
+def test_missing_or_empty_evidence_names_exit_naming_only_the_names(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    environ = {
+        **EVIDENCE_ENV,
+        "EVIDENCE_S3_REGION": "",  # empty counts as missing
+        "EVIDENCE_S3_BUCKET": "evidence-bucket",
+    }
+    del environ["EVIDENCE_S3_SECRET_ACCESS_KEY"]
+
+    code = export.main(_publish_args(inputs, out), environ=environ)
+
+    err = capsys.readouterr().err
+    assert code == export.EXIT_INPUT
+    assert "EVIDENCE_S3_REGION" in err and "EVIDENCE_S3_SECRET_ACCESS_KEY" in err
+    for present in ("EVIDENCE_S3_BUCKET", "EVIDENCE_S3_PREFIX", "EVIDENCE_S3_ACCESS_KEY_ID"):
+        assert present not in err, "only the missing names are listed"
+    assert ACCESS_ID not in err and "evidence-bucket" not in err
+    assert not out.exists(), "refused before any export or upload"
+
+
+def test_no_evidence_names_at_all_lists_the_required_ones(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    code = export.main(_publish_args(inputs, tmp_path / "bundle"), environ={})
+    err = capsys.readouterr().err
+    assert code == export.EXIT_INPUT
+    for name in (
+        "EVIDENCE_S3_PROVIDER",
+        "EVIDENCE_S3_REGION",
+        "EVIDENCE_S3_BUCKET",
+        "EVIDENCE_S3_PREFIX",
+        "EVIDENCE_S3_ACCESS_KEY_ID",
+        "EVIDENCE_S3_SECRET_ACCESS_KEY",
+    ):
+        assert name in err
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("EVIDENCE_S3_PREFIX", "/absolute"),
+        ("EVIDENCE_S3_PREFIX", "a/../b"),
+        ("EVIDENCE_S3_PREFIX", "two words"),
+        ("EVIDENCE_S3_PREFIX", "p?secret_access_key=abc"),
+        ("EVIDENCE_S3_PREFIX", "/"),
+        ("EVIDENCE_S3_BUCKET", "bucket/with/slash"),
+        ("EVIDENCE_S3_BUCKET", "bucket:colon"),
+        ("EVIDENCE_S3_PREFIX", "token-in-the-prefix"),
+        ("EVIDENCE_S3_ACCESS_KEY_ID", "BACKUP-shared-id"),  # equal to the backup credential
+    ],
+)
+def test_an_unusable_evidence_value_is_refused_before_any_export(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], name: str, value: str
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    environ = {**EVIDENCE_ENV, "BACKUP_S3_ACCESS_KEY_ID": "BACKUP-shared-id", name: value}
+    code = export.main(_publish_args(inputs, out), environ=environ)
+    captured = capsys.readouterr()
+    assert code == export.EXIT_INPUT
+    assert name in captured.err
+    if len(value) > 3:
+        assert value not in captured.out + captured.err, "the value is never printed"
+    assert SECRET_KEY not in captured.out + captured.err
+    assert not out.exists()
+
+
+def test_publish_reaches_rclone_through_the_environment_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runner = FakeRclone()
+    seen_env: list[Mapping[str, str]] = []
+
+    def fake_run(
+        argv: Sequence[str], stdin: bytes | None, env: Mapping[str, str]
+    ) -> tuple[int, bytes, bytes]:
+        seen_env.append(env)
+        return runner(argv, stdin)
+
+    monkeypatch.setattr(export, "_run_rclone", fake_run)
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+
+    code = export.main(_publish_args(inputs, out), environ=dict(EVIDENCE_ENV))
+
+    captured = capsys.readouterr()
+    assert code == export.EXIT_OK, captured
+    assert runner.calls
+    for argv, _ in runner.calls:
+        text = " ".join(argv)
+        assert SECRET_KEY not in text and ACCESS_ID not in text
+        assert "EVIDENCES3:evidence-bucket/paper/" in text
+    assert SECRET_KEY not in captured.out + captured.err
+    for env in seen_env:
+        assert env["RCLONE_CONFIG_EVIDENCES3_TYPE"] == "s3"
+        assert env["RCLONE_CONFIG_EVIDENCES3_SECRET_ACCESS_KEY"] == SECRET_KEY
+        assert env["RCLONE_CONFIG_EVIDENCES3_ACCESS_KEY_ID"] == ACCESS_ID
+        assert env["RCLONE_CONFIG_EVIDENCES3_NO_CHECK_BUCKET"] == "true"
+        assert not any("CRYPT" in key for key in env if key.startswith("RCLONE_CONFIG_EVIDENCES3"))
+    assert len(runner.store) == len(manifest_of(out)["files"]) + 1
+
+
+def test_no_credential_value_reaches_the_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secret = "Zq9-hunter-Pw-evidence"
+    environ = {"EVIDENCE_SECRET_ACCESS_KEY": secret}
+    inputs = one_epoch_inputs(tmp_path / "in")
+    uploader = FakeUploader(fail_put={f"{E1}/{FILE_RUNS}"}, error_text=f"denied for {secret}")
+
+    code = export.main(
+        _publish_args(inputs, tmp_path / "bundle"), uploader=uploader, environ=environ
+    )
+
+    captured = capsys.readouterr()
+    assert code == export.EXIT_PUBLISH
+    assert secret not in captured.out + captured.err
+    assert f"{E1}/manifest.json" not in uploader.objects, "a failed file stops before the manifest"
+
+
+class FakeRclone:
+    """Records argv and the data given on standard input; serves a small object store."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str], bytes | None]] = []
+        self.store: dict[str, bytes] = {}
+
+    def __call__(self, argv: Sequence[str], stdin: bytes | None) -> tuple[int, bytes, bytes]:
+        self.calls.append((list(argv), stdin))
+        verb, *rest = argv
+        target = rest[-1]
+        if verb == "rcat":
+            assert stdin is not None
+            self.store[target] = stdin
+            return 0, b"", b""
+        if verb == "cat":
+            if target not in self.store:
+                return 3, b"", b"object not found"
+            return 0, self.store[target], b""
+        if verb == "lsf":
+            head = target.rstrip("/") + "/"
+            names = [k[len(head) :] for k in self.store if k.startswith(head)]
+            if not names:
+                return 3, b"", b""
+            return 0, "".join(f"{n}\n" for n in names).encode(), b""
+        return 1, b"", b"unknown verb"
+
+
+def test_the_rclone_uploader_passes_only_the_destination_and_the_data() -> None:
+    runner = FakeRclone()
+    uploader = export.RcloneUploader(DESTINATION, runner=runner)
+
+    assert uploader.listing(E1) == frozenset()
+    uploader.put(f"{E1}/a.json", b"payload")
+    assert uploader.get(f"{E1}/a.json") == b"payload"
+    assert uploader.listing(E1) == frozenset({"a.json"})
+    with pytest.raises(export.PublishError):
+        uploader.get(f"{E1}/missing.json")
+
+    for argv, stdin in runner.calls:
+        text = " ".join(argv)
+        assert DESTINATION in text
+        assert "secret" not in text.lower() and "key" not in text.lower()
+        if argv[0] == "rcat":
+            assert "--immutable" in argv, "an object is never replaced"
+            assert stdin == b"payload", "the data travels on standard input, not in argv"
+        else:
+            assert stdin is None

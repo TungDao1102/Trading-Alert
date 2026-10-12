@@ -19,12 +19,12 @@ from typing import Any
 
 import pytest
 
-# The one cron line the freeze workflow is expected to carry. Today it is the line already on
-# master (hourly at minute 0). The cron minute is the user's checkpoint Q-Q (plan 16-30); plan
-# 16-47 changes only this constant, to the line recorded in decisions/16-DEC-Q-Q.md. It must stay
-# of the hourly form `M * * * *` (M from 0 to 59), the only form the reconciler of plan 16-15
-# accepts. Moving the cron does not relax the rule that a missing tick is an EVIDENCE_GAP.
-EXPECTED_FREEZE_CRON = "0 * * * *"
+# The one cron line the freeze workflow is expected to carry: the line recorded in
+# decisions/16-DEC-Q-Q.md (hourly at minute 34, the user's checkpoint Q-Q of plan 16-30; before
+# plan 16-47 it was `0 * * * *`, the line on master). It must stay of the hourly form
+# `M * * * *` (M from 0 to 59), the only form the reconciler of plan 16-15 accepts. Moving the
+# cron does not relax the rule that a missing tick is an EVIDENCE_GAP.
+EXPECTED_FREEZE_CRON = "34 * * * *"
 HOURLY_CRON_RE = re.compile(r"^([0-9]|[1-5][0-9]) \* \* \* \*$")
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "paper_freeze_check.yml"
