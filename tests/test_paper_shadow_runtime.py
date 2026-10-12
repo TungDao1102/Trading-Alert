@@ -320,6 +320,7 @@ class Rig:
         bot: FakeBot | None = None,
         now: datetime = T_ALERT,
         confirm_ttl_seconds: int = 60,
+        application_factory: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
         self.now = now
         self.stores = stores if stores is not None else RuntimeStores()
@@ -330,6 +331,7 @@ class Rig:
             initial_equity=EQUITY, parameter_set_params=PARAMS, started_at_utc=LEDGER_START
         )
         self.confirm_ttl_seconds = confirm_ttl_seconds
+        self.application_factory = application_factory
         self.coordinator = self._build()
 
     def _build(self) -> ShadowCoordinator:
@@ -353,6 +355,7 @@ class Rig:
             epoch_id=EPOCH_ID,
             confirm_ttl_seconds=self.confirm_ttl_seconds,
             sleep=self.sleep,
+            application_factory=self.application_factory,
         )
 
     def restart(self, *, now: datetime | None = None) -> Rig:
@@ -888,3 +891,438 @@ def test_the_start_is_not_refused_when_the_shadow_chain_binds_the_risk_inputs(
     )
     assert code == 0
     assert live.records(RuntimeEventType.RUNTIME_START)
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: positions on live minutes, ledger feedback into the risk verdict, Telegram lifecycle.
+# --------------------------------------------------------------------------- #
+
+import asyncio  # noqa: E402
+import threading  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from src.backtest.ledger import daily_loss_quote  # noqa: E402
+from src.backtest.semantics import EXIT_SL  # noqa: E402
+from src.paper.market_inputs import make_context_factory  # noqa: E402
+from src.paper.runtime_config import AccountConfig  # noqa: E402
+from src.paper.shadow_ledger import (  # noqa: E402
+    EVENT_SHADOW_PLAN_EXPIRED_UNFILLED,
+)
+from src.paper.shadow_runtime import EVENT_SHADOW_POSITION_CLOSED  # noqa: E402
+from structlog.testing import capture_logs  # noqa: E402
+
+HOUR = timedelta(hours=1)
+ETH = "ETHUSDT"
+
+
+def rig_with(public: FakePublic, **kwargs: Any) -> Rig:
+    return Rig(public=public, **kwargs)
+
+
+async def poll_at(rig: Rig, now: datetime) -> None:
+    rig.now = now
+    await rig.coordinator.poll_once()
+
+
+def after_minutes(count: int) -> datetime:
+    """A poll instant whose settled horizon is `count` whole minutes after the first minute."""
+    return FIRST_MINUTE + MINUTE * count + timedelta(seconds=LAG_SECONDS + 1)
+
+
+async def test_positions_advance_on_live_minutes_book_funding_and_record_the_close() -> None:
+    funding = [
+        FundingTick(SYMBOL, T0 - timedelta(hours=2), Decimal("0.0001"), Decimal("50000")),
+        # A funding instant inside the holding window (fill 03:02:59.999, stop 03:04:59.999).
+        FundingTick(
+            SYMBOL, T0 + timedelta(minutes=3, seconds=30), Decimal("0.0001"), Decimal("50000")
+        ),
+    ]
+    rig = rig_with(FakePublic(funding=funding))
+    await rig.approve_and_confirm()
+
+    await poll_at(rig, after_minutes(2))
+    (opened,) = rig.journal(EVENT_SHADOW_POSITION_OPENED)
+    assert (
+        payload(opened)["opened_at_utc"]
+        == (FIRST_MINUTE + MINUTE * 2 - timedelta(milliseconds=1)).isoformat()
+    )
+    assert rig.ledger.equity < EQUITY, "the entry fee is booked on the ledger at the fill"
+    assert rig.journal(EVENT_SHADOW_POSITION_CLOSED) == []
+
+    await poll_at(rig, after_minutes(5))
+    (closed,) = rig.journal(EVENT_SHADOW_POSITION_CLOSED)
+    body = payload(closed)
+    assert body["exit_kind"] == EXIT_SL
+    assert body["trade"]["exit_kind"] == EXIT_SL
+    assert body["trade"]["funding_event_count"] == 1, "funding during the position is booked"
+    assert body["eligibility"]["status"] == "ELIGIBLE"
+    assert body["eligibility"]["eligibility_start_utc"] == FIRST_MINUTE.isoformat()
+    realized = Decimal(body["trade"]["realized_pnl"])
+    assert realized < 0
+    assert rig.ledger.equity == EQUITY + realized
+    assert exposures(rig) == [], "the closed position no longer carries risk"
+    (view,) = rig.coordinator.open_positions()
+    assert view.closed and view.filled
+
+    # Polling again changes nothing and journals nothing twice.
+    await poll_at(rig, after_minutes(5) + timedelta(minutes=1))
+    assert len(rig.journal(EVENT_SHADOW_POSITION_CLOSED)) == 1
+    assert len(rig.journal(EVENT_SHADOW_POSITION_OPENED)) == 1
+    assert rig.ledger.equity == EQUITY + realized
+
+
+async def test_a_poll_with_no_position_reads_no_minutes() -> None:
+    rig = Rig()
+    await rig.alert()
+    rig.now = after_minutes(2)
+    await rig.coordinator.poll_once()
+    assert "klines" not in rig.public.calls
+    assert rig.public.calls.count("mark_klines") == 1, "only the best-effort mark of the alert"
+
+
+async def test_the_next_bars_context_sees_the_open_position_and_the_booked_daily_loss() -> None:
+    rig = Rig()
+    provider = SimpleNamespace(snapshot_for=lambda symbol, at: CONSTRAINTS)
+    factory = make_context_factory(
+        parameter_set=load_parameter_set("trend-pullback", "baseline-v5"),
+        constraints=cast(Any, provider),
+        risk_inputs=rig.coordinator.risk_inputs,
+        account=AccountConfig(initial_equity=EQUITY, risk_rate=Decimal("0.005")),
+        ttl_seconds=3600,
+    )
+    candle = make_outcome().closed_candle
+    later = Candle(
+        symbol=candle.symbol,
+        interval=candle.interval,
+        open_time_utc=candle.open_time_utc + HOUR,
+        close_time_utc=candle.close_time_utc + HOUR,
+        open=candle.open,
+        high=candle.high,
+        low=candle.low,
+        close=candle.close,
+        volume=candle.volume,
+    )
+
+    empty = factory(candle)
+    assert empty.open_positions == () and empty.daily_loss_quote == Decimal("0")
+
+    await rig.approve_and_confirm()
+    reserved = factory(candle)
+    assert [(p.symbol, p.position_side, p.open_risk) for p in reserved.open_positions] == [
+        (SYMBOL, "LONG", Decimal("48"))
+    ]
+
+    await poll_at(rig, after_minutes(5))
+    after = factory(later)
+    assert after.open_positions == ()
+    assert after.daily_loss_quote > 0
+    assert after.daily_loss_quote == daily_loss_quote(rig.ledger.ledger)
+
+
+async def test_a_plan_that_expires_unfilled_releases_its_exposure_once() -> None:
+    quiet = [
+        Bar("50300", "50310", "50290", "50300"),
+    ]
+    count = 250
+    trade: list[Kline] = []
+    mark: list[MarkKline] = []
+    for index in range(count):
+        opened = FIRST_MINUTE + MINUTE * index
+        bar = quiet[0]
+        trade.append(
+            Kline(
+                SYMBOL,
+                "1m",
+                opened,
+                _close(opened),
+                Decimal(bar.open),
+                Decimal(bar.high),
+                Decimal(bar.low),
+                Decimal(bar.close),
+                Decimal("1"),
+                Decimal("1"),
+                1,
+            )
+        )
+        mark.append(
+            MarkKline(
+                SYMBOL,
+                "1m",
+                opened,
+                _close(opened),
+                Decimal(bar.open),
+                Decimal(bar.high),
+                Decimal(bar.low),
+                Decimal(bar.close),
+                1,
+            )
+        )
+    rig = rig_with(FakePublic(trade=trade, mark=mark))
+    await rig.approve_and_confirm()
+    assert exposures(rig) == [(SYMBOL, "LONG", Decimal("48"))]
+
+    # Past the plan expiry (07:00): the lifecycle cancels the plan and the expiry sweep releases
+    # the reservation; both drop the same exposure and neither may fail on the other.
+    await poll_at(rig, T0 + timedelta(hours=4, minutes=10, seconds=30))
+
+    assert exposures(rig) == []
+    (expired,) = rig.journal(EVENT_SHADOW_PLAN_EXPIRED_UNFILLED)
+    assert payload(expired)["reason"] == "PLAN_EXPIRED_UNFILLED"
+    assert rig.journal(EVENT_SHADOW_POSITION_OPENED) == []
+    assert rig.journal(EVENT_SHADOW_POSITION_CLOSED) == []
+    await poll_at(rig, T0 + timedelta(hours=4, minutes=11))
+    assert len(rig.journal(EVENT_SHADOW_PLAN_EXPIRED_UNFILLED)) == 1
+
+
+async def test_two_positions_are_booked_in_time_order_across_symbols() -> None:
+    """One sweep applies the bookings of both plans sorted by time (the ledger needs that)."""
+    rig_trade = scripted_trade(SYMBOL, FIRST_MINUTE) + scripted_trade(ETH, FIRST_MINUTE + MINUTE)
+    rig_mark = scripted_mark(SYMBOL, FIRST_MINUTE) + scripted_mark(ETH, FIRST_MINUTE + MINUTE)
+    funding = [
+        FundingTick(s, T0 - timedelta(hours=2), Decimal("0.0001"), Decimal("50000"))
+        for s in (SYMBOL, ETH)
+    ]
+    rig = rig_with(FakePublic(trade=rig_trade, mark=rig_mark, funding=funding))
+    first = make_outcome(1, realized_risk="10")
+    second = make_outcome(2, symbol=ETH, realized_risk="10")
+    await rig.alert(first)
+    await rig.alert(second)
+    short_a = rig.buttons(0)[0][1].removeprefix("APR:")
+    short_b = rig.buttons(1)[0][1].removeprefix("APR:")
+    await rig.tap(f"APR:{short_a}", "q-a1", at=T_APPROVE)
+    await rig.tap(f"CNF:{short_a}", "q-a2", at=T_CONFIRM)
+    await rig.tap(f"APR:{short_b}", "q-b1", at=T_APPROVE + MINUTE)
+    await rig.tap(f"CNF:{short_b}", "q-b2", at=T_CONFIRM + MINUTE)
+    assert len(rig.coordinator.open_positions()) == 2
+
+    # A single poll covers both plans: plan 1 exits at 03:04:59.999, plan 2 fills at 03:03:59.999.
+    await poll_at(rig, after_minutes(6))
+
+    closed = rig.journal(EVENT_SHADOW_POSITION_CLOSED)
+    assert len(closed) == 2
+    pnl = sum(Decimal(payload(e)["trade"]["realized_pnl"]) for e in closed)
+    assert rig.ledger.equity == EQUITY + pnl
+    assert exposures(rig) == []
+
+
+# ---- the Telegram application lifecycle (Q-L, G6) --------------------------------------------- #
+
+
+class FakeUpdater:
+    def __init__(self, trace: list[str]) -> None:
+        self.trace = trace
+        self.kwargs: dict[str, Any] = {}
+
+    async def start_polling(self, **kwargs: Any) -> None:
+        self.trace.append("updater.start_polling")
+        self.kwargs = kwargs
+
+    async def stop(self) -> None:
+        self.trace.append("updater.stop")
+
+
+class FakeApplication:
+    """The slice of the PTB application the lifecycle touches (never a real one, never network)."""
+
+    def __init__(self, trace: list[str], bot: FakeBot) -> None:
+        self.trace = trace
+        self.bot = bot
+        self.updater = FakeUpdater(trace)
+        self.error_handlers: list[Callable[..., Any]] = []
+
+    async def initialize(self) -> None:
+        self.trace.append("initialize")
+
+    async def start(self) -> None:
+        self.trace.append("start")
+
+    async def stop(self) -> None:
+        self.trace.append("stop")
+
+    async def shutdown(self) -> None:
+        self.trace.append("shutdown")
+
+    def add_error_handler(self, callback: Callable[..., Any]) -> None:
+        self.error_handlers.append(callback)
+
+
+def application_rig(
+    stores: RuntimeStores | None = None,
+) -> tuple[Rig, FakeApplication, list[dict[str, Any]]]:
+    trace: list[str] = []
+    built: list[dict[str, Any]] = []
+    bot = FakeBot()
+    application = FakeApplication(trace, bot)
+
+    def factory(kwargs: dict[str, Any]) -> FakeApplication:
+        built.append(kwargs)
+        return application
+
+    rig = Rig(stores=stores, bot=bot, application_factory=factory)
+    return rig, application, built
+
+
+async def test_the_application_starts_in_order_logs_the_token_rule_and_stops_in_reverse() -> None:
+    rig, application, built = application_rig()
+
+    with capture_logs() as logs:
+        await rig.coordinator.start()
+
+    assert application.trace == ["initialize", "start", "updater.start_polling"]
+    assert application.updater.kwargs["allowed_updates"] == ["callback_query"]
+    assert callable(application.updater.kwargs["error_callback"])
+    assert len(built) == 1
+    assert set(built[0]) >= {
+        "authorized_chat_id",
+        "binding_context_resolver",
+        "dispatch",
+        "reply_text_fn",
+        "confirm_handler",
+        "approved_handler",
+        "clock",
+    }
+    rules = [e for e in logs if e["event"] == "paper.shadow.bot_token_rule"]
+    assert len(rules) == 1 and "separate-bot" in rules[0]["rule"]
+    assert len(application.error_handlers) == 1
+
+    await rig.coordinator.stop()
+    assert application.trace[3:] == ["updater.stop", "stop", "shutdown"]
+    await rig.coordinator.stop()  # idempotent
+    assert application.trace[3:] == ["updater.stop", "stop", "shutdown"]
+
+
+async def test_the_chain_registers_no_webhook() -> None:
+    source = SHADOW_RUNTIME_PATH.read_text(encoding="utf-8")
+    names = {n.attr for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Attribute)} | {
+        n.id for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Name)
+    }
+    assert names & {"run_webhook", "set_webhook", "start_webhook"} == set()
+
+
+class ThreadSpyStores(RuntimeStores):
+    """Records the thread each decided approval is saved on."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.save_threads: list[int] = []
+
+    def save_atomic(self, approval: Approval, mapping: Any) -> None:
+        self.save_threads.append(threading.get_ident())
+        super().save_atomic(approval, mapping)
+
+
+async def test_a_press_is_dispatched_off_the_event_loop() -> None:
+    stores = ThreadSpyStores()
+    rig = Rig(stores=stores)
+    await rig.alert()
+    short = rig.buttons()[0][1].removeprefix("APR:")
+
+    await rig.tap(f"APR:{short}", "q-apr", at=T_APPROVE)
+
+    assert stores.save_threads, "the APPROVE decision was saved"
+    assert threading.get_ident() not in stores.save_threads
+    assert asyncio.iscoroutinefunction(rig.coordinator.callback_kwargs()["dispatch"])
+
+
+# ---- Telegram failures in the running process (research F3) ------------------------------------ #
+
+SECRET = "bot123456:SECRET-TOKEN-VALUE"
+
+
+def telegram_failures() -> list[BaseException]:
+    return [
+        tg_error.RetryAfter(3),
+        tg_error.BadRequest(f"Bad Request: {SECRET}"),
+        tg_error.NetworkError(f"connection reset {SECRET}"),
+        tg_error.Conflict(f"terminated by other getUpdates request {SECRET}"),
+    ]
+
+
+async def test_an_error_that_escaped_a_handler_is_logged_by_class_and_changes_nothing() -> None:
+    rig, application, _built = application_rig()
+    await rig.coordinator.start()
+    await rig.alert()
+    short = rig.buttons()[0][1].removeprefix("APR:")
+    before_journal = list(rig.stores.journal)
+    before_approvals = dict(rig.stores.approvals)
+    (handler,) = application.error_handlers
+
+    with capture_logs() as logs:
+        for failure in telegram_failures():
+            await handler(
+                SimpleNamespace(callback_query=SimpleNamespace(data=f"APR:{short}")),
+                SimpleNamespace(error=failure),
+            )
+
+    assert rig.stores.journal == before_journal, "an error approves, confirms or cancels nothing"
+    assert rig.stores.approvals == before_approvals
+    classes = [e["error_class"] for e in logs if e["event"] == "paper.shadow.telegram_error"]
+    assert classes == ["RetryAfter", "BadRequest", "NetworkError", "Conflict"]
+    rendered = repr(logs)
+    assert SECRET not in rendered and f"APR:{short}" not in rendered
+    assert rig.coordinator.telegram_error_counts == {
+        "RetryAfter": 1,
+        "BadRequest": 1,
+        "NetworkError": 1,
+        "Conflict": 1,
+    }
+    # The runtime and the poller keep working.
+    rig.now = after_minutes(1)
+    await rig.coordinator.poll_once()
+    await rig.coordinator.stop()
+
+
+async def test_a_conflict_logs_the_one_consumer_rule_once_per_process() -> None:
+    rig, application, _built = application_rig()
+    await rig.coordinator.start()
+    (handler,) = application.error_handlers
+    polling_error = application.updater.kwargs["error_callback"]
+
+    with capture_logs() as logs:
+        await handler(None, SimpleNamespace(error=tg_error.Conflict("a")))
+        await handler(None, SimpleNamespace(error=tg_error.Conflict("b")))
+        polling_error(tg_error.Conflict("c"))  # the sync polling error callback
+        polling_error(tg_error.NetworkError("d"))
+
+    conflicts = [e for e in logs if e["event"] == "paper.shadow.bot_token_conflict"]
+    assert len(conflicts) == 1 and "separate-bot" in conflicts[0]["rule"]
+    assert rig.coordinator.telegram_error_counts["Conflict"] == 3
+    assert rig.coordinator.telegram_error_counts["NetworkError"] == 1
+
+
+async def test_an_error_without_an_exception_is_ignored_safely() -> None:
+    rig, application, _built = application_rig()
+    await rig.coordinator.start()
+    (handler,) = application.error_handlers
+    await handler(None, SimpleNamespace(error=None))
+    assert rig.coordinator.telegram_error_counts == {}
+
+
+# ---- the poller task ------------------------------------------------------------------------- #
+
+
+async def test_the_poller_polls_until_the_stop_event_is_set() -> None:
+    rig = Rig()
+    await rig.approve_and_confirm()
+    rig.now = after_minutes(2)
+    stop = asyncio.Event()
+    original = rig.public.klines
+
+    async def klines_then_stop(*args: Any, **kwargs: Any) -> Any:
+        stop.set()  # the first poll sets the stop event; the loop must end after that poll
+        return await original(*args, **kwargs)
+
+    rig.public.klines = klines_then_stop  # type: ignore[method-assign]
+    await asyncio.wait_for(rig.coordinator.run_poller(stop), timeout=5)
+
+    assert rig.journal(EVENT_SHADOW_POSITION_OPENED), "the poll ran before the stop was honoured"
+
+
+async def test_a_failing_poll_ends_the_poller_so_the_runtime_fails_closed() -> None:
+    rig = Rig()
+    await rig.approve_and_confirm()
+    rig.now = after_minutes(2)
+    rig.public.fail_next = ValueError("feed broke")
+
+    with pytest.raises(ValueError, match="feed broke"):
+        await asyncio.wait_for(rig.coordinator.run_poller(asyncio.Event()), timeout=5)
