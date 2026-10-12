@@ -1,0 +1,14 @@
+{
+  "approval_acted_at_utc": "2026-10-09T03:00:25+00:00",
+  "approval_requested_at_utc": "2026-10-09T03:00:05+00:00",
+  "confirm_requested_at_utc": "2026-10-09T03:00:25+00:00",
+  "confirmed_at_utc": "2026-10-09T03:00:35+00:00",
+  "confirmed_within_ttl": true,
+  "label_seen": true,
+  "measured_delay_seconds": 20.0,
+  "position_opened": true,
+  "proof_class": "FAKE",
+  "records_test_only": 16,
+  "records_written": 16,
+  "test_id": "TEST-REHEARSAL-SIGNAL-0001"
+}
