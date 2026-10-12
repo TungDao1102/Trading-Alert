@@ -17,8 +17,11 @@ Every layer has a negative control that proves the scan or the spy can fail.
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -355,3 +358,168 @@ def test_an_allowed_tree_reports_no_violation_and_market_data_is_not_banned(
     closure = _closure(("src.paper.runtime",), tmp_path)
     assert "src.adapters.binance_public" in closure
     assert _violations(closure, tmp_path) == []
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: layer 2, a BINANCE_ variable refuses both entrypoints before anything is built.
+# --------------------------------------------------------------------------- #
+
+SECRET_VALUE = "isolation-secret-value-must-never-be-printed"
+TRADE_NAMES = (
+    "BINANCE_LIVE_API_KEY",
+    "BINANCE_LIVE_API_SECRET",
+    "BINANCE_TESTNET_API_KEY",
+    "BINANCE_TESTNET_API_SECRET",
+    "BINANCE_FOO",
+)
+EVIDENCE_NAME = "unused-evidence.json"
+
+
+@pytest.fixture
+def constructions(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record (and fail) the construction of every real adapter, bot or database engine."""
+    import sqlalchemy
+    import src.adapters.binance_public as binance_public
+    import src.adapters.binance_usdm as binance_usdm
+    import src.adapters.paper_ws as paper_ws
+    import src.adapters.telegram_callbacks as telegram_callbacks
+    import src.persistence.engine as persistence_engine
+    from telegram.ext import ApplicationBuilder
+
+    built: list[str] = []
+
+    def recorder(label: str) -> Callable[..., Any]:
+        def record(*args: Any, **kwargs: Any) -> Any:
+            built.append(label)
+            raise AssertionError(f"{label} was constructed")
+
+        return record
+
+    for owner, attribute, label in (
+        (paper_ws.PaperWsAdapter, "__init__", "PaperWsAdapter"),
+        (binance_public.BinancePublicMarketData, "__init__", "BinancePublicMarketData"),
+        (binance_usdm.BinanceUsdmAdapter, "__init__", "BinanceUsdmAdapter"),
+        (telegram_callbacks, "build_application", "build_application"),
+        (ApplicationBuilder, "build", "telegram ApplicationBuilder.build"),
+        (persistence_engine, "make_sync_engine", "make_sync_engine"),
+        (persistence_engine, "create_engine", "persistence create_engine"),
+        (sqlalchemy, "create_engine", "sqlalchemy.create_engine"),
+    ):
+        monkeypatch.setattr(owner, attribute, recorder(label))
+    return built
+
+
+def _runtime_entry(environ: dict[str, str]) -> int:
+    from src.paper import runtime
+
+    return runtime.main([], environ=environ)
+
+
+def _rehearsal_entry(environ: dict[str, str]) -> int:
+    """The live mode, because only the live mode could reach a bot, the network or a database."""
+    import scripts.shadow_rehearsal as shadow_rehearsal
+
+    return shadow_rehearsal.main(
+        ["--live-telegram", "--i-am-the-operator", "--out", EVIDENCE_NAME],
+        environ=environ,
+    )
+
+
+ENTRIES = {"runtime": _runtime_entry, "rehearsal": _rehearsal_entry}
+
+
+@pytest.mark.parametrize("entry", sorted(ENTRIES))
+@pytest.mark.parametrize("value", [SECRET_VALUE, ""], ids=["non-empty", "empty"])
+@pytest.mark.parametrize("name", TRADE_NAMES)
+def test_a_binance_variable_refuses_with_code_3_and_builds_nothing(
+    entry: str,
+    value: str,
+    name: str,
+    constructions: list[str],
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)  # the evidence path is relative: nothing may land in the repo
+    environ = {
+        "PAPER_STRATEGY_ID": "trend-pullback",
+        "PAPER_PARAMETER_SET_ID": "baseline-v3",
+        "TELEGRAM_BOT_TOKEN": "123456:fake-token",
+        "TELEGRAM_AUTHORIZED_CHAT_ID": "42",
+        "DATABASE_URL": "postgresql+psycopg://u:p@127.0.0.1:1/none",
+        name: value,
+    }
+
+    code = ENTRIES[entry](environ)
+
+    captured = capsys.readouterr()
+    assert code == 3
+    assert constructions == []
+    assert name in captured.err
+    assert SECRET_VALUE not in captured.out + captured.err + caplog.text
+    assert not (tmp_path / EVIDENCE_NAME).exists()
+
+
+@pytest.mark.parametrize("entry", sorted(ENTRIES))
+def test_the_refusal_lists_names_only_and_every_present_name(
+    entry: str,
+    constructions: list[str],
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    environ = {name: f"{SECRET_VALUE}-{index}" for index, name in enumerate(TRADE_NAMES)}
+
+    code = ENTRIES[entry](environ)
+
+    output = capsys.readouterr().err
+    assert code == 3
+    for name in TRADE_NAMES:
+        assert name in output
+    assert SECRET_VALUE not in output + caplog.text
+    assert constructions == []
+
+
+def test_negative_control_the_construction_spies_would_catch_an_adapter(
+    constructions: list[str],
+) -> None:
+    import src.adapters.binance_public as binance_public
+    import src.adapters.binance_usdm as binance_usdm
+    import src.adapters.paper_ws as paper_ws
+
+    for cls in (
+        binance_public.BinancePublicMarketData,
+        binance_usdm.BinanceUsdmAdapter,
+        paper_ws.PaperWsAdapter,
+    ):
+        with pytest.raises(AssertionError, match="was constructed"):
+            cls()
+    assert constructions == ["BinancePublicMarketData", "BinanceUsdmAdapter", "PaperWsAdapter"]
+
+
+def test_negative_control_without_a_trade_variable_the_entry_gets_past_the_refusal(
+    constructions: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The refusal above is caused by the variable: the same environment minus it is not refused."""
+    code = _runtime_entry({"PAPER_STRATEGY_ID": "trend-pullback"})
+
+    assert code != 3
+    assert "trade-capable" not in capsys.readouterr().err
+
+
+def test_the_dry_run_rehearsal_is_fakes_only_and_constructs_no_real_adapter(
+    constructions: list[str], tmp_path: Path
+) -> None:
+    """The dry run does not run the BINANCE_ refusal (live mode does); it builds fakes only."""
+    import scripts.shadow_rehearsal as shadow_rehearsal
+
+    out = tmp_path / "dry.json"
+
+    code = shadow_rehearsal.main(["--dry-run", "--out", str(out)], environ={})
+
+    assert code == 0
+    assert out.is_file()
+    assert constructions == []
