@@ -1407,3 +1407,240 @@ def test_a_failing_poller_fails_the_loop_closed_and_still_stops_the_application(
     assert code == 7, "restartable fail-closed exit"
     assert trace[-3:] == ["updater.stop", "stop", "shutdown"]
     assert len(live.records(RuntimeEventType.RUNTIME_STOP)) == 1, "no RUNTIME_STOP: a crash marker"
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: restart behaviour of the SHADOW chain and per-signal attribution (D-15, P13).
+# --------------------------------------------------------------------------- #
+
+from src.domain.enums import ApprovalAction  # noqa: E402
+from src.paper.attribution import AttributionKind  # noqa: E402
+from src.paper.shadow import EVENT_PENDING_INVALIDATED, approval_id_for  # noqa: E402
+from src.paper.shadow_confirm import EVENT_SHADOW_CONFIRM_REJECTED  # noqa: E402
+from src.paper.shadow_runtime import EVENT_SHADOW_PLAN_CONTEXT, ShadowRuntimeError  # noqa: E402
+
+
+def restart_rig(rig: Rig, *, now: datetime) -> tuple[Rig, FakeApplication, list[int]]:
+    """A restarted process whose application records how many approvals were already swept."""
+    trace: list[str] = []
+    application = FakeApplication(trace, rig.bot)
+    swept_before_polling: list[int] = []
+    original = application.initialize
+
+    async def initialize() -> None:
+        swept_before_polling.append(len(rig.stores.journal_of_type(EVENT_PENDING_INVALIDATED)))
+        await original()
+
+    application.initialize = initialize  # type: ignore[method-assign]
+    other = Rig(
+        stores=rig.stores,
+        public=rig.public,
+        bot=rig.bot,
+        now=now,
+        application_factory=lambda kwargs: application,
+    )
+    return other, application, swept_before_polling
+
+
+async def test_a_restart_expires_pending_approvals_and_confirms_before_polling_begins() -> None:
+    rig = Rig()
+    first = make_outcome(1)
+    second = make_outcome(2)
+    await rig.alert(first)
+    await rig.alert(second)
+    approved_short = rig.buttons(0)[0][1].removeprefix("APR:")
+    pending_short = rig.buttons(1)[0][1].removeprefix("APR:")
+    await rig.tap(f"APR:{approved_short}", "q-apr-1", at=T_APPROVE)  # a card with a live confirm
+
+    restarted, _application, swept_before_polling = restart_rig(
+        rig, now=T_APPROVE + timedelta(seconds=20)
+    )
+    await restarted.coordinator.start()
+
+    assert swept_before_polling == [3], "the sweep ran before the application started polling"
+    invalidated = rig.journal(EVENT_PENDING_INVALIDATED)
+    assert {payload(e)["reason_code"] for e in invalidated} == {"RUNTIME_RESTART"}
+    assert second.trade_plan is not None
+    pending_ids = {approval_id_for(second.trade_plan, a) for a in _both_actions()}
+    expired_ids = {
+        a.approval_id for a in rig.stores.approvals.values() if a.status.value == "EXPIRED"
+    }
+    assert pending_ids <= expired_ids, "both rows of the untouched plan were decided EXPIRED"
+    (confirm_expired,) = rig.journal(EVENT_SHADOW_CONFIRM_EXPIRED)
+    assert payload(confirm_expired)["reason"] == "RUNTIME_RESTART"
+    assert rig.journal(EVENT_SHADOW_CONFIRMED) == []
+
+    # A callback for a pre-restart approval or confirm is rejected, and the reply is labelled.
+    before = len(rig.bot.sent)
+    await restarted.tap(f"APR:{pending_short}", "q-late-apr", at=T_APPROVE + timedelta(seconds=25))
+    await restarted.tap(f"CNF:{approved_short}", "q-late-cnf", at=T_APPROVE + timedelta(seconds=26))
+    assert rig.journal(EVENT_SHADOW_CONFIRMED) == []
+    assert rig.journal(EVENT_SHADOW_CONFIRM_REJECTED), "the late confirm press is journaled"
+    assert restarted.coordinator.open_positions() == ()
+    assert len(rig.bot.sent) > before
+    for message in rig.bot.sent:
+        assert_shadow_text(message.text)
+
+
+def _both_actions() -> tuple[ApprovalAction, ApprovalAction]:
+    return ApprovalAction.APPROVE, ApprovalAction.SKIP_USER
+
+
+async def test_the_restart_sweep_is_idempotent() -> None:
+    rig = Rig()
+    await rig.alert()
+    restarted, _application, _ = restart_rig(rig, now=T_APPROVE)
+    await restarted.coordinator.start()
+    count = len(rig.stores.journal)
+    again, _application2, _ = restart_rig(rig, now=T_APPROVE + timedelta(seconds=5))
+    await again.coordinator.start()
+    assert len(rig.stores.journal) == count
+
+
+async def _uninterrupted(polls: Sequence[datetime]) -> Rig:
+    rig = Rig()
+    await rig.approve_and_confirm()
+    for instant in polls:
+        await poll_at(rig, instant)
+    return rig
+
+
+@pytest.mark.parametrize(
+    ("restart_after", "label"),
+    [(0, "reserved, not filled yet"), (3, "filled and open"), (5, "already closed")],
+)
+async def test_open_positions_are_rebuilt_and_the_ledger_equals_an_uninterrupted_run(
+    restart_after: int, label: str
+) -> None:
+    reference = await _uninterrupted([after_minutes(5), after_minutes(6)])
+
+    rig = Rig()
+    await rig.approve_and_confirm()
+    if restart_after:
+        await poll_at(rig, after_minutes(restart_after))
+    restarted, _application, _ = restart_rig(rig, now=after_minutes(restart_after) + MINUTE)
+    await restarted.coordinator.start()
+    # The rebuilt process continues the position over the minutes it has not seen yet.
+    await poll_at(restarted, after_minutes(5))
+    await poll_at(restarted, after_minutes(6))
+
+    assert restarted.ledger.ledger == reference.ledger.ledger, label
+    assert len(rig.journal(EVENT_SHADOW_POSITION_OPENED)) == 1, label
+    assert len(rig.journal(EVENT_SHADOW_POSITION_CLOSED)) == 1, label
+    (view,) = restarted.coordinator.open_positions()
+    assert view.closed and view.filled, label
+
+
+async def test_a_confirmed_plan_whose_context_was_never_journaled_cannot_be_rebuilt() -> None:
+    rig = Rig()
+    await rig.approve_and_confirm()
+    rig.stores.journal = [
+        e for e in rig.stores.journal if e.event_type != EVENT_SHADOW_PLAN_CONTEXT
+    ]
+    restarted, _application, _ = restart_rig(rig, now=after_minutes(1))
+
+    with pytest.raises(ShadowRuntimeError, match="context"):
+        await restarted.coordinator.start()
+
+
+async def test_the_plan_context_is_journaled_with_the_alert() -> None:
+    rig = Rig()
+    await rig.alert()
+    (context,) = rig.journal(EVENT_SHADOW_PLAN_CONTEXT)
+    body = payload(context)
+    assert body["regime"] == "TREND"
+    assert body["constraints"]["quantity_step_size"] == "0.001"
+    assert body["closed_candle"]["close_time_utc"] == SIGNAL_CLOSE.isoformat()
+    assert body["sized"] == {"quantity": "0.08", "realized_risk": "48"}
+
+
+# ---- per-signal attribution (plan 16-35 from the journaled rows) ------------------------ #
+
+
+def pair(outcome: BarOutcome) -> tuple[Signal, TradePlan]:
+    assert outcome.signal is not None and outcome.trade_plan is not None
+    return outcome.signal, outcome.trade_plan
+
+
+def kinds(records: Sequence[Any]) -> list[tuple[str, str]]:
+    return [(r.attribution.value, r.reason_code) for r in records]
+
+
+async def test_every_signal_of_a_session_gets_its_attribution_from_the_journal() -> None:
+    rig = Rig()
+    outcomes = {n: make_outcome(n) for n in range(1, 8)}
+    for outcome in outcomes.values():
+        await rig.alert(outcome)
+    shorts = {n: rig.buttons(n - 1)[0][1].removeprefix("APR:") for n in outcomes}
+    skips = {n: rig.buttons(n - 1)[1][1] for n in outcomes}
+
+    await rig.tap(skips[2], "q-skp-2", at=T0 + timedelta(seconds=20))
+    for n in (1, 3, 4):
+        await rig.tap(f"APR:{shorts[n]}", f"q-apr-{n}", at=T_APPROVE)
+    await rig.tap(f"CNF:{shorts[1]}", "q-cnf-1", at=T_CONFIRM)
+    await rig.tap(f"CXL:{shorts[3]}", "q-cxl-3", at=T_CONFIRM)
+    await rig.tap(f"CNF:{shorts[4]}", "q-cnf-4", at=T_APPROVE + timedelta(seconds=61))
+    rig.coordinator.expire_due()
+
+    early = rig.coordinator.records_for(*pair(outcomes[7]))
+    assert kinds(early) == [("system", "")], (
+        "an untouched plan that is still valid: engine row only"
+    )
+
+    await poll_at(rig, after_minutes(5))
+    expiry = T0 + timedelta(hours=4, seconds=1)
+    await rig.tap(f"APR:{shorts[6]}", "q-apr-6", at=expiry)  # approval after the plan expiry
+    records = rig.coordinator.paper_records(expiry)
+
+    ids = {n: pair(outcomes[n])[0].signal_id for n in outcomes}
+    assert list(records) == [ids[n] for n in (1, 2, 3, 4, 5, 6, 7)]
+    assert kinds(records[ids[1]]) == [("system", ""), ("user-executed-sim", "")]
+    assert kinds(records[ids[2]]) == [("system", ""), ("opportunity", "SKIP_USER")]
+    assert kinds(records[ids[3]]) == [
+        ("system", ""),
+        ("opportunity", "SHADOW_CONFIRM_CANCELLED"),
+    ]
+    assert kinds(records[ids[4]]) == [
+        ("system", ""),
+        ("opportunity", "SHADOW_CONFIRM_EXPIRED"),
+    ]
+    assert kinds(records[ids[5]]) == [("system", ""), ("opportunity", "EXPIRED")]
+    assert kinds(records[ids[6]]) == [
+        ("system", ""),
+        ("opportunity", "APPROVAL_EXPIRED"),
+    ]
+    assert kinds(records[ids[7]]) == [("system", ""), ("opportunity", "EXPIRED")]
+
+    sim = records[ids[1]][1]
+    assert sim.attribution is AttributionKind.USER_EXECUTED_SIM and sim.mode == "SHADOW"
+    assert sim.approval_requested_at_utc == T_ALERT
+    assert sim.approval_acted_at_utc == T_APPROVE
+    assert sim.approval_acted_at_utc - sim.approval_requested_at_utc == timedelta(seconds=25)
+    assert sim.confirm_requested_at_utc == T_APPROVE
+    assert sim.confirmed_at_utc == T_CONFIRM
+    assert sim.order_submitted_at_utc == T_CONFIRM
+    assert sim.fill_time_utc == FIRST_MINUTE + MINUTE * 2 - timedelta(milliseconds=1)
+    assert all(
+        r.epoch_id == EPOCH_ID and r.experiment_id == "exp-test"
+        for rs in records.values()
+        for r in rs
+    )
+
+
+async def test_a_confirmed_plan_that_has_not_filled_yet_has_no_record_until_it_ends() -> None:
+    rig = Rig()
+    outcome = make_outcome()
+    await rig.approve_and_confirm(outcome=outcome)
+    assert rig.coordinator.records_for(*pair(outcome)) == []
+
+
+async def test_a_restart_expired_plan_is_an_opportunity_with_the_restart_reason() -> None:
+    rig = Rig()
+    outcome = make_outcome()
+    await rig.alert(outcome)
+    restarted, _application, _ = restart_rig(rig, now=T_APPROVE)
+    await restarted.coordinator.start()
+
+    records = restarted.coordinator.records_for(*pair(outcome))
+
+    assert kinds(records) == [("system", ""), ("opportunity", "RUNTIME_RESTART")]
