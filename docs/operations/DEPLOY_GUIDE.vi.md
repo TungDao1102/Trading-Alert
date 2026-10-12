@@ -1314,6 +1314,8 @@ Mọi service `x-app` dùng chung một env_file nên container paper cũng th�
 
 Script `deploy/soak-image.sh` thực hiện việc đó (thẻ lệnh bên dưới; `[ĐÃ XÂY]` `[CHƯA XÁC MINH]`: chưa chạy trên máy thật). Hai lựa chọn còn lại không phải phương án dự phòng tự động.
 
+Kế hoạch 16-47 thêm bước xuất và đăng bằng chứng trial (mục 20.7 của runbook; `[ĐÃ XÂY]` `[CHƯA XÁC MINH]`: chưa chạy trên máy thật, chưa có bucket thật). Nơi lưu là kho S3 riêng cho bằng chứng, không đi qua lớp mã hóa của chuỗi sao lưu. Địa chỉ và thông tin đăng nhập của kho này chỉ đến từ các tên biến cố định `EVIDENCE_S3_*`, khác hẳn các tên `BACKUP_*`; mẫu tên nằm ở tệp `deploy/evidence.env.example` (chỉ có tên, không có giá trị). Tệp thật đặt ngoài checkout, quyền 0600, chỉ nạp vào shell chạy lệnh xuất, và không nằm trong tệp môi trường soak dùng chung với container paper. Lệnh `--publish` không nhận địa chỉ gõ tay.
+
 ### Thẻ lệnh: deploy/compose-soak.sh
 
 > - **Để làm gì:** Chạy `docker compose` chỉ trên project soak `trading-soak` và từ chối mọi lệnh `down` kèm cờ xóa volume.

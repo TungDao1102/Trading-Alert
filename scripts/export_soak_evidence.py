@@ -15,15 +15,19 @@ step (plan 16-47) copies it to the one durable location the user recorded at O-0
 Publishing (decision `16-DEC-O-01`, option a: an S3 evidence prefix OUTSIDE the backup crypt
 remote, versioning enabled, no Object Lock, written by the exporter on the operator's schedule):
 
-    python scripts/export_soak_evidence.py ... --out <new dir> --publish <remote:bucket/prefix>
-    python scripts/export_soak_evidence.py publish --bundle <dir> --destination <remote:bkt/prefix>
+    python scripts/export_soak_evidence.py ... --out <new dir> --publish
+    python scripts/export_soak_evidence.py publish --bundle <dir>
 
-- The destination is an rclone remote spec chosen by the operator at run time; the repository
-  holds no default and no new configuration name. The credential of that remote lives in the
-  operator's rclone configuration or environment, never in argv: a destination that carries a
-  credential, the backup remotes (`BACKUPS3`, `BACKUPS3CRYPT`), a local path or a drive letter
-  is a usage error before anything is exported or uploaded.
-- Objects go to `<destination>/<epoch_id>/<file>`: every file first, `manifest.json` last. An
+- `--publish` takes no value. The destination and the credentials come only from the fixed
+  `EVIDENCE_S3_*` environment names (`src/ops/evidence_remote.py`, template
+  `deploy/evidence.env.example`): provider, endpoint, region, bucket, prefix, access key id and
+  secret. They are separate from the `BACKUP_*` names and from the backup remotes `BACKUPS3` and
+  `BACKUPS3CRYPT`; the evidence remote is the plain S3 remote `EVIDENCES3`, with no crypt layer.
+  They are mapped to `RCLONE_CONFIG_EVIDENCES3_*` in the rclone child process only, so a
+  credential is never in argv. A missing or empty name, an empty or unsafe prefix, or a
+  credential shared with the backup chain exits 2 before anything is exported or uploaded,
+  naming variables and never values.
+- Objects go to `<bucket>/<prefix>/<epoch_id>/<file>`: every file first, `manifest.json` last. An
   epoch prefix that already holds a manifest is never published over; an object that already
   exists is left alone only when its bytes are identical (an interrupted earlier publish) and
   is never replaced. Each upload uses rclone `--immutable`.
@@ -91,6 +95,7 @@ from scripts.evaluate_trial_soak import (  # noqa: E402
     WorkflowError,
     read_workflow_cron,
 )
+from src.ops import evidence_remote  # noqa: E402
 from src.ops.redaction import Redactor, scrub  # noqa: E402
 from src.paper.attribution import ShadowOutcome  # noqa: E402
 from src.paper.coverage import (  # noqa: E402
@@ -176,8 +181,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--publish",
-        metavar="REMOTE:BUCKET/PREFIX",
-        help="after the export, publish the bundle to this evidence remote and verify it (O-01 a)",
+        action="store_true",
+        help="after the export, publish the bundle to the evidence remote configured by the "
+        "EVIDENCE_S3_* environment names and verify it (O-01 a); takes no value",
     )
     return parser
 
@@ -185,13 +191,10 @@ def _parser() -> argparse.ArgumentParser:
 def _publish_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="export_soak_evidence.py publish",
-        description="publish an existing bundle to the O-01 evidence remote and verify it",
+        description="publish an existing bundle to the EVIDENCE_S3_* evidence remote and verify it",
         allow_abbrev=False,
     )
     parser.add_argument("--bundle", required=True, type=Path, help="an exported bundle directory")
-    parser.add_argument(
-        "--destination", required=True, metavar="REMOTE:BUCKET/PREFIX", help="the evidence remote"
-    )
     return parser
 
 
@@ -455,12 +458,6 @@ def _build(
 # Publishing to the recorded durable location (decision 16-DEC-O-01, option a).
 # --------------------------------------------------------------------------- #
 
-# The remotes of the backup crypt chain (`src/ops/backup_remote.py`): evidence never goes there.
-_BACKUP_REMOTES = frozenset({"backups3", "backups3crypt"})
-_DESTINATION_RE = re.compile(r":?[A-Za-z0-9_][A-Za-z0-9_.,=\-]+:[^\s:?*\"'<>|\\][^\s?*\"'<>|\\]*")
-_CREDENTIAL_WORDS = re.compile(
-    r"secret|passw|token|access[_-]?key|key[_-]?id|session|credential", re.I
-)
 _EPOCH_KEY = re.compile(r"[A-Za-z0-9._-]{1,128}")
 _RCLONE_TIMEOUT_S = 900
 _EXCERPT_CHARS = 300
@@ -487,12 +484,16 @@ class Uploader(Protocol):
 RcloneCall = Callable[[Sequence[str], bytes | None], tuple[int, bytes, bytes]]
 
 
-def _run_rclone(argv: Sequence[str], stdin: bytes | None) -> tuple[int, bytes, bytes]:
+def _run_rclone(
+    argv: Sequence[str], stdin: bytes | None, env: Mapping[str, str]
+) -> tuple[int, bytes, bytes]:
+    """Run rclone; the evidence remote's credentials reach it through `env` only (never argv)."""
     binary = os.environ.get("RCLONE_BIN") or "rclone"
     try:
         proc = subprocess.run(
             [binary, *argv],
             input=stdin,
+            env={**os.environ, **env},
             capture_output=True,
             timeout=_RCLONE_TIMEOUT_S,
             check=False,
@@ -510,12 +511,24 @@ def _excerpt(stderr: bytes) -> str:
 
 
 class RcloneUploader:
-    """`Uploader` over the rclone CLI. Credentials are the operator's rclone configuration or
-    environment for the remote; none is passed in argv and none has a default here."""
+    """`Uploader` over the rclone CLI. `destination` is `EVIDENCES3:<bucket>/<prefix>` and `env`
+    the `RCLONE_CONFIG_EVIDENCES3_*` mapping of `src/ops/evidence_remote.py`; the credentials
+    travel in the child environment, never in argv."""
 
-    def __init__(self, destination: str, *, runner: RcloneCall | None = None) -> None:
+    def __init__(
+        self,
+        destination: str,
+        *,
+        runner: RcloneCall | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
         self._base = destination.rstrip("/")
-        self._run = runner if runner is not None else _run_rclone
+        child_env: Mapping[str, str] = {} if env is None else env
+        self._run: RcloneCall = (
+            runner
+            if runner is not None
+            else lambda argv, stdin: _run_rclone(argv, stdin, child_env)
+        )
 
     def _target(self, key: str) -> str:
         return f"{self._base}/{key}"
@@ -542,23 +555,18 @@ class RcloneUploader:
         return out
 
 
-def validate_destination(destination: str) -> str:
-    """The destination when it is a plain remote and prefix; otherwise `InputError`.
-
-    Refused: a local path or drive letter, an empty prefix, whitespace, a backup chain remote,
-    and anything that looks like a credential (argv is visible to every local user)."""
-    if _DESTINATION_RE.fullmatch(destination) is None:
-        raise InputError("--publish must be <remote>:<bucket>/<prefix> with no spaces")
-    if _CREDENTIAL_WORDS.search(destination):
-        raise InputError("--publish must not carry a credential; configure it in rclone")
-    remote = (
-        destination.split(":", 2)[1]
-        if destination.startswith(":")
-        else destination.split(":", 1)[0]
-    )
-    if remote.split(",", 1)[0].lower() in _BACKUP_REMOTES:
-        raise InputError("--publish must not name the backup crypt remote")
-    return destination
+def _publisher(environ: Mapping[str, str], uploader: Uploader | None) -> tuple[Uploader, str]:
+    """The uploader and a label for messages. Without an injected uploader the destination and
+    the credentials come only from the fixed `EVIDENCE_S3_*` names (`src/ops/evidence_remote.py`);
+    an incomplete or unusable configuration is an `InputError` naming variables only."""
+    if uploader is not None:
+        return uploader, "the evidence remote"
+    try:
+        base = evidence_remote.destination(environ)
+        mapped = evidence_remote.rclone_env(environ)
+    except evidence_remote.EvidenceConfigError as exc:
+        raise InputError(str(exc)) from None
+    return RcloneUploader(base, env=mapped), base
 
 
 def publish_bundle(directory: Path, uploader: Uploader) -> tuple[str, int]:
@@ -597,22 +605,18 @@ def publish_bundle(directory: Path, uploader: Uploader) -> tuple[str, int]:
     return epoch_id, len(local) + 1
 
 
-def _publish(
-    directory: Path, destination: str, uploader: Uploader | None, environ: Mapping[str, str]
-) -> int:
+def _publish(directory: Path, uploader: Uploader, label: str, environ: Mapping[str, str]) -> int:
     """Publish and report; maps failures to exit codes without printing a secret value."""
     redactor = Redactor.from_environ(environ)
     try:
-        epoch_id, count = publish_bundle(
-            directory, uploader if uploader is not None else RcloneUploader(destination)
-        )
+        epoch_id, count = publish_bundle(directory, uploader)
     except PublishError as exc:
         print(f"cannot publish: {redactor.scrub(str(exc))}", file=sys.stderr)
         return EXIT_PUBLISH
     except InputError as exc:
         print(f"cannot publish: {redactor.scrub(str(exc))}", file=sys.stderr)
         return EXIT_INPUT
-    print(f"published and verified: {count} object(s) under {epoch_id[:12]}... of {destination}")
+    print(f"published and verified: {count} object(s) under {epoch_id[:12]}... of {label}")
     return EXIT_OK
 
 
@@ -621,7 +625,7 @@ def _main_publish(
 ) -> int:
     args = _publish_parser().parse_args(argv)
     try:
-        destination = validate_destination(args.destination)
+        publisher, label = _publisher(environ, uploader)
         load_evidence_bundle(args.bundle)
         files = {
             path.name: path.read_bytes() for path in sorted(args.bundle.iterdir()) if path.is_file()
@@ -639,7 +643,7 @@ def _main_publish(
             file=sys.stderr,
         )
         return EXIT_SECRET
-    return _publish(args.bundle, destination, uploader, environ)
+    return _publish(args.bundle, publisher, label, environ)
 
 
 def main(
@@ -657,10 +661,11 @@ def main(
     if arguments[:1] == ["publish"]:
         return _main_publish(arguments[1:], uploader, env)
     args = _parser().parse_args(arguments)
-    destination: str | None = None
-    if args.publish is not None:
+    publisher: Uploader | None = None
+    label = ""
+    if args.publish:
         try:
-            destination = validate_destination(args.publish)
+            publisher, label = _publisher(env, uploader)
         except InputError as exc:
             print(f"cannot export: {exc}", file=sys.stderr)
             return EXIT_INPUT
@@ -686,8 +691,8 @@ def main(
         f"bundle written: {args.out.name} (source {args.source}, {record_count} runtime "
         f"record(s), {gap_count} evidence gap(s))"
     )
-    if destination is not None:
-        return _publish(args.out, destination, uploader, env)
+    if publisher is not None:
+        return _publish(args.out, publisher, label, env)
     return EXIT_OK
 
 
