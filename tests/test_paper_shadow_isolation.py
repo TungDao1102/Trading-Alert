@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Callable, Iterator
+from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -523,3 +524,122 @@ def test_the_dry_run_rehearsal_is_fakes_only_and_constructs_no_real_adapter(
     assert code == 0
     assert out.is_file()
     assert constructions == []
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: layer 3, behaviour spies over a full APPROVE then CONFIRM.
+# --------------------------------------------------------------------------- #
+
+ADAPTER_ORDER_METHODS = tuple(sorted(ORDER_SURFACE - {"execute_approved_plan"}))
+
+
+@pytest.fixture
+def order_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Spies on every order-surface method of the order adapter and on `execute_approved_plan`.
+
+    The adapter methods are replaced on the CLASS, so any instance, however built, is spied. The
+    execution entry is replaced in every loaded module that holds a reference to it. A spy
+    records the call and raises, so a reached order path also fails the test loudly.
+    """
+    import sys
+
+    import src.adapters.binance_usdm as binance_usdm
+    import src.execution.manager as manager
+
+    called: list[str] = []
+
+    def spy(label: str) -> Callable[..., Any]:
+        def record(*args: Any, **kwargs: Any) -> Any:
+            called.append(label)
+            raise AssertionError(f"order surface reached: {label}")
+
+        return record
+
+    for method in ADAPTER_ORDER_METHODS:
+        assert hasattr(binance_usdm.BinanceUsdmAdapter, method), method  # the list is not stale
+        monkeypatch.setattr(binance_usdm.BinanceUsdmAdapter, method, spy(f"adapter.{method}"))
+    original = manager.execute_approved_plan
+    for module in list(sys.modules.values()):
+        if getattr(module, "execute_approved_plan", None) is original:
+            monkeypatch.setattr(module, "execute_approved_plan", spy("execute_approved_plan"))
+    return called
+
+
+async def test_a_full_shadow_approve_then_confirm_in_the_runtime_wiring_reaches_no_order_surface(
+    order_calls: list[str],
+) -> None:
+    from src.paper.shadow_confirm import EVENT_SHADOW_CONFIRMED
+    from src.paper.shadow_ledger import EVENT_SHADOW_POSITION_OPENED
+    from src.paper.shadow_runtime import ShadowCoordinator
+
+    from tests.test_paper_shadow_runtime import FIRST_MINUTE, LAG_SECONDS, Rig
+
+    rig = Rig()
+    assert isinstance(rig.coordinator, ShadowCoordinator)
+
+    await rig.approve_and_confirm()
+    rig.now = FIRST_MINUTE + timedelta(minutes=2, seconds=LAG_SECONDS + 1)
+    await rig.coordinator.poll_once()
+
+    # The flow really ran to the simulated position: the isolation result is not vacuous.
+    assert len(rig.bot.sent) >= 2
+    assert len(rig.bot.edited) == 1
+    assert len(rig.journal(EVENT_SHADOW_CONFIRMED)) == 1
+    assert len(rig.journal(EVENT_SHADOW_POSITION_OPENED)) == 1
+    assert rig.coordinator.open_positions()[0].filled is True
+    assert order_calls == []
+
+
+async def test_the_rehearsal_path_in_dry_run_reaches_no_order_surface(
+    order_calls: list[str], tmp_path: Path
+) -> None:
+    import scripts.shadow_rehearsal as shadow_rehearsal
+
+    result = await shadow_rehearsal.run_dry_rehearsal(tmp_path / "rehearsal.json")
+
+    assert result.complete is True
+    assert result.evidence["position_opened"] is True
+    assert result.evidence["confirmed_within_ttl"] is True
+    assert order_calls == []
+
+
+async def test_negative_control_a_deliberate_call_is_recorded_by_the_spies(
+    order_calls: list[str],
+) -> None:
+    import src.adapters.binance_usdm as binance_usdm
+    import src.execution.manager as manager
+
+    adapter = object.__new__(binance_usdm.BinanceUsdmAdapter)  # no SDK client is built
+    for method in ADAPTER_ORDER_METHODS:
+        with pytest.raises(AssertionError, match="order surface reached"):
+            getattr(adapter, method)()
+    with pytest.raises(AssertionError, match="order surface reached"):
+        cast(Any, manager).execute_approved_plan()
+
+    assert order_calls == [
+        *(f"adapter.{m}" for m in ADAPTER_ORDER_METHODS),
+        "execute_approved_plan",
+    ]
+
+
+def test_negative_control_the_spy_list_covers_every_public_order_method_of_the_adapter() -> None:
+    """A new public async method on the adapter must be classified: market data or spied."""
+    import inspect
+
+    import src.adapters.binance_usdm as binance_usdm
+
+    market_data = {
+        "klines",
+        "mark_klines",
+        "open_interest",
+        "open_interest_statistics",
+        "funding_rate",
+        "server_time",
+        "exchange_info",
+    }
+    public_async = {
+        name
+        for name, member in inspect.getmembers(binance_usdm.BinanceUsdmAdapter)
+        if not name.startswith("_") and inspect.iscoroutinefunction(member)
+    }
+    assert public_async - market_data == set(ADAPTER_ORDER_METHODS)
