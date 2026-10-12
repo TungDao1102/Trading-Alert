@@ -303,6 +303,11 @@ class LiveMinutePoller:
     ) -> list[Candle]:
         last = self._source.last_open_utc(symbol, kind)
         cursor = _floor_minute(since_utc) if last is None else last + _MINUTE
+        if cursor > horizon:
+            # Nothing can have closed yet (a minute opened at `cursor` closes after `cursor`), and
+            # the exchange rejects a request whose start is after its end. After a CONFIRM the
+            # eligibility start is the NEXT minute, so this is the normal state for a moment.
+            return []
         collected: list[Candle] = []
         for _page in range(self._max_pages):
             rows = await self._page(symbol, kind, cursor, horizon)
