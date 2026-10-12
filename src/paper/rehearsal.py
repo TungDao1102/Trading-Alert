@@ -89,7 +89,11 @@ TEST_STRATEGY_ID: Final = "TEST-REHEARSAL"
 TEST_STRATEGY_VERSION: Final = "TEST-v0"
 TEST_PARAMETER_SET_ID: Final = "TEST-PARAMS"
 TEST_PARAMETER_SET_HASH: Final = TEST_ID_PREFIX + "0" * 59
+# The label travels in the regime reason code of the alert (`REGIME_TEST SIGNAL`) and in the
+# `TEST-` ids. The persisted `setup_type` must be one of the six values the database allows
+# (`ck_signals_setup_type`), so it cannot carry the label; a long pullback matches the plan.
 TEST_LABEL: Final = "TEST SIGNAL"
+TEST_SETUP_TYPE: Final = "TREND_PULLBACK_LONG"
 
 # Offsets around the observed mark price, as fractions of it. They only make the labelled plan
 # marketable on the next live minutes; they say nothing about any setup.
@@ -131,9 +135,18 @@ class RehearsalAlreadyRan(RehearsalError):
 
 
 class RehearsalMode(StrEnum):
-    """DRY_RUN drives the chain with fakes; the proof class follows the mode, never the caller."""
+    """DRY_RUN drives the chain with fakes; LIVE is the operator's run with real Telegram taps.
+
+    The proof class follows the mode (`proof_class_for`), never a caller-supplied value.
+    """
 
     DRY_RUN = "dry-run"
+    LIVE = "live-telegram"
+
+
+def proof_class_for(mode: RehearsalMode) -> str:
+    """REAL_REHEARSAL only in live mode; a dry run is FAKE and can never claim more (SC9)."""
+    return PROOF_REAL_REHEARSAL if mode is RehearsalMode.LIVE else PROOF_FAKE
 
 
 @dataclass(frozen=True)
@@ -378,7 +391,7 @@ def build_test_outcome(
         parameter_set_hash=TEST_PARAMETER_SET_HASH,
         symbol=settings.symbol,
         direction="LONG",
-        setup_type=TEST_LABEL,
+        setup_type=TEST_SETUP_TYPE,
         source_timeframe="1h",
         source_candle_close_utc=close,
         detected_at_utc=detected,
@@ -448,7 +461,7 @@ def build_test_outcome(
         signal=signal,
         trade_plan=plan,
         verdict=PortfolioVerdict(False, sized, "OK", DailyState.NORMAL),
-        regime=None,
+        regime=TEST_LABEL,
     )
 
 
@@ -656,11 +669,16 @@ async def run_rehearsal(
     sleep: Callable[[float], Awaitable[None]],
     environ: Mapping[str, str],
     press: PressFn | None = None,
+    application_factory: Callable[[dict[str, Any]], Any] | None = None,
 ) -> RehearsalResult:
     """Run the labelled test signal through the SHADOW chain once and write the evidence.
 
     Refuses, before anything is written or sent, when the stores already hold the test signal
-    (`RehearsalAlreadyRan`) or when `out` exists.
+    (`RehearsalAlreadyRan`) or when `out` exists. In live mode `application_factory` builds the
+    Telegram application that receives the operator's real presses (`press` is None); its bot is
+    bound into the recording bot so that every delivered text is seen. A failure while the chain
+    runs still writes the evidence of what happened (it then shows the missing steps) and is
+    raised afterwards as a `RehearsalError` naming the exception class only.
     """
     if stores.get_signal(TEST_SIGNAL_ID) is not None:
         raise RehearsalAlreadyRan(ALREADY_RAN_MESSAGE)
@@ -696,7 +714,13 @@ async def run_rehearsal(
         epoch_id=TEST_EPOCH_ID,
         confirm_ttl_seconds=settings.confirm_ttl_seconds,
         sleep=sleep,
+        application_factory=(
+            None
+            if application_factory is None
+            else _binding_factory(application_factory, recording)
+        ),
     )
+    failure: Exception | None = None
     await coordinator.start()
     try:
         started = clock()
@@ -707,10 +731,13 @@ async def run_rehearsal(
         plan = outcome.trade_plan
         if plan is None:  # pragma: no cover - build_test_outcome always sets it
             raise RehearsalError("the test outcome has no plan")
-        alert = await coordinator.on_outcome(outcome)
-        if alert is None or not alert.sent:
-            raise RehearsalError("the labelled alert was not delivered")
-        await _drive(coordinator, marked, plan, alert, settings, clock, sleep, press)
+        try:
+            alert = await coordinator.on_outcome(outcome)
+            if alert is None or not alert.sent:
+                raise RehearsalError("the labelled alert was not delivered")
+            await _drive(coordinator, marked, plan, alert, settings, clock, sleep, press)
+        except Exception as exc:  # noqa: BLE001 - the evidence of the partial run is still written
+            failure = exc
     finally:
         await coordinator.stop()
     observation = _observe(stores, plan)
@@ -726,9 +753,16 @@ async def run_rehearsal(
         confirm_ttl_seconds=settings.confirm_ttl_seconds,
         records_written=written,
         records_test_only=test_only,
-        proof_class=PROOF_FAKE,
+        proof_class=proof_class_for(mode),
     )
     path = write_evidence(document, out, environ=environ)
+    if failure is not None:
+        if isinstance(failure, RehearsalError):
+            raise failure
+        raise RehearsalError(
+            f"the rehearsal stopped ({type(failure).__name__}); evidence of the partial run "
+            f"is in {path.name}"
+        ) from failure
     row = _shadow_row_of(records, observation)
     return RehearsalResult(
         evidence=document,
@@ -737,6 +771,21 @@ async def run_rehearsal(
         shadow_row=row,
         complete=observation.opened and label_seen,
     )
+
+
+def _binding_factory(
+    factory: Callable[[dict[str, Any]], Any], recording: RecordingBot
+) -> Callable[[dict[str, Any]], Any]:
+    """The application factory that also binds the application's bot into the recording bot."""
+
+    def build(callback_kwargs: dict[str, Any]) -> Any:
+        application = factory(callback_kwargs)
+        application_bot = getattr(application, "bot", None)
+        if application_bot is not None:
+            recording.bind(application_bot)
+        return application
+
+    return build
 
 
 async def _drive(
@@ -770,6 +819,7 @@ __all__ = [
     "TEST_LABEL",
     "TEST_SIGNAL_ID",
     "RecordingBot",
+    "proof_class_for",
     "RehearsalAlreadyRan",
     "RehearsalCoordinator",
     "RehearsalError",

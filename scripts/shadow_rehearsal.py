@@ -15,12 +15,22 @@ an epoch. It runs once per rehearsal database and writes one scrubbed evidence f
 public minutes of the repository's test fakes on a virtual clock. It never touches the network
 and never waits; its evidence carries proof class `FAKE`.
 
+`--live-telegram --i-am-the-operator` is the operator's run of plan 16-40 in the compose project
+`trading-rehearsal` (its own database, RUNBOOK 20.4): the real bot of the authorized chat shows
+the labelled alert, the operator presses APPROVE and CONFIRM, and the simulated position is
+advanced over live public 1m minutes (no credential). It needs the explicit operator flag,
+refuses any `BINANCE_` variable (only the name is printed), reads only the allowed environment
+names (`src/paper/runtime_config.py`), and writes the evidence with proof class
+`REAL_REHEARSAL`. It must never be started by an automated task.
+
 Exit codes::
 
     0  the run completed: the position opened and the label was seen (evidence written)
     1  the run ended without an opened position, or failed (evidence written when possible)
-    2  refused before any work (usage)
+    2  refused before any work (usage, or --live-telegram without --i-am-the-operator)
+    3  refused: a trade-capable (BINANCE_*) environment variable is present
     4  refused: the rehearsal already ran on this database (REV-03: once); nothing was written
+    5  refused: the live environment or the ratified configuration is incomplete (names only)
 """
 
 from __future__ import annotations
@@ -29,7 +39,8 @@ import argparse
 import asyncio
 import os
 import sys
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -42,10 +53,12 @@ if str(REPO_ROOT) not in sys.path:
 from src.adapters.binance_public import FundingTick, Kline, MarkKline  # noqa: E402
 from src.adapters.telegram_notify import TelegramTextBot  # noqa: E402
 from src.domain.approval import Approval  # noqa: E402
-from src.domain.registry import load_parameter_set  # noqa: E402
+from src.domain.registry import ParameterSet, load_parameter_set  # noqa: E402
 from src.domain.signal import Signal  # noqa: E402
 from src.domain.trade_plan import TradePlan  # noqa: E402
+from src.ops.redaction import configure_logging  # noqa: E402
 from src.paper.rehearsal import (  # noqa: E402
+    PressFn,
     RehearsalAlreadyRan,
     RehearsalError,
     RehearsalMode,
@@ -53,13 +66,28 @@ from src.paper.rehearsal import (  # noqa: E402
     RehearsalSettings,
     run_rehearsal,
 )
-from src.paper.shadow_runtime import ShadowCoordinator, ShadowRuntimeStores  # noqa: E402
+from src.paper.runtime_config import (  # noqa: E402
+    ConfigNotRatified,
+    RuntimeConfig,
+    load_runtime_config,
+    read_env,
+    refuse_trade_capable_env,
+)
+from src.paper.shadow_confirm import CONFIRM_TTL_SECONDS_DEFAULT  # noqa: E402
+from src.paper.shadow_runtime import (  # noqa: E402
+    ShadowCoordinator,
+    ShadowPublicFeed,
+    ShadowRuntimeStores,
+    SnapshotSource,
+)
 from src.risk.types import ConstraintSnapshot  # noqa: E402
 
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_REFUSED = 2
+EXIT_TRADE_CAPABLE = 3
 EXIT_ALREADY_RAN = 4
+EXIT_NOT_CONFIGURED = 5
 
 _MINUTE = timedelta(minutes=1)
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -223,10 +251,13 @@ def _memory_stores() -> ShadowRuntimeStores:
     return cast(ShadowRuntimeStores, MemoryStores())
 
 
-def _dry_run_press(
+def dry_run_press(
     clock: VirtualClock, chat_id: int
 ) -> Callable[[ShadowCoordinator, str, str], Awaitable[None]]:
-    """The operator's presses of a dry run: PTB-shaped updates through the real callback path."""
+    """The operator's presses of a dry run: PTB-shaped updates through the real callback path.
+
+    Only fakes use it. A live run has no press function: the operator presses the real buttons.
+    """
     from src.adapters.telegram_callbacks import on_callback
     from tests.shadow_fakes import make_callback_update
 
@@ -270,8 +301,155 @@ async def run_dry_rehearsal(
         constraints=FixedConstraints(DRY_RUN_SYMBOL, DRY_RUN_START - timedelta(hours=1)),
         sleep=clock.sleep,
         environ={} if environ is None else environ,
-        press=_dry_run_press(clock, CHAT_ID),
+        press=dry_run_press(clock, CHAT_ID),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Live mode (the operator's run; never started by an automated task).
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class LiveSetup:
+    """The validated inputs of a live run (names of problems only, never values)."""
+
+    chat_id: int
+    token: str | None
+    database_url: str | None
+    config: RuntimeConfig
+    parameter_set: ParameterSet
+
+
+def _live_setup(
+    values: Mapping[str, str], *, need_token: bool, need_database: bool
+) -> LiveSetup | list[str]:
+    """Read the allowed variables and the ratified configuration; the problems otherwise."""
+    problems: list[str] = []
+    chat_id = 0
+    raw_chat = values.get("TELEGRAM_AUTHORIZED_CHAT_ID", "")
+    try:
+        chat_id = int(raw_chat)
+    except ValueError:
+        problems.append(
+            "TELEGRAM_AUTHORIZED_CHAT_ID" + (" (must be an integer)" if raw_chat else "")
+        )
+    token = values.get("TELEGRAM_BOT_TOKEN") or None
+    if need_token and token is None:
+        problems.append("TELEGRAM_BOT_TOKEN")
+    database_url = values.get("DATABASE_URL_SYNC") or values.get("DATABASE_URL") or None
+    if need_database and database_url is None:
+        problems.append("DATABASE_URL_SYNC or DATABASE_URL")
+    config: RuntimeConfig | None = None
+    try:
+        config = load_runtime_config(values.get("PAPER_RUNTIME_CONFIG"))
+    except ConfigNotRatified as exc:
+        problems.extend(exc.problems)
+    parameter_set: ParameterSet | None = None
+    strategy_id = values.get("PAPER_STRATEGY_ID")
+    parameter_set_id = values.get("PAPER_PARAMETER_SET_ID")
+    if not strategy_id or not parameter_set_id:
+        problems.append("PAPER_STRATEGY_ID and PAPER_PARAMETER_SET_ID")
+    else:
+        try:
+            parameter_set = load_parameter_set(strategy_id, parameter_set_id)
+        except Exception as exc:  # noqa: BLE001 - only the class is reported
+            problems.append(f"the parameter set cannot be loaded ({type(exc).__name__})")
+    if problems or config is None or parameter_set is None:
+        return problems
+    return LiveSetup(chat_id, token, database_url, config, parameter_set)
+
+
+def _pg_stores(url: str) -> tuple[ShadowRuntimeStores, Callable[[], None]]:
+    """The PostgreSQL stores of the rehearsal database and the call that disposes the engine."""
+    from src.persistence.engine import make_sync_engine
+    from src.persistence.shadow_stores import PgShadowStores
+    from src.persistence.uow import OperationalDatabase
+
+    if url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+    engine = make_sync_engine(url)
+    return cast(ShadowRuntimeStores, PgShadowStores(OperationalDatabase(engine))), engine.dispose
+
+
+async def run_live_rehearsal(
+    out: Path,
+    *,
+    setup: LiveSetup,
+    symbol: str,
+    wait_seconds: int,
+    environ: Mapping[str, str],
+    stores: ShadowRuntimeStores | None,
+    bot: TelegramTextBot | None,
+    public: ShadowPublicFeed | None,
+    constraints: SnapshotSource | None,
+    clock: Callable[[], datetime] | None,
+    sleep: Callable[[float], Awaitable[None]] | None,
+    press: PressFn | None,
+    application_factory: Callable[[dict[str, Any]], Any] | None,
+) -> RehearsalResult:
+    """The rehearsal with the operator's real presses. Every port is injectable (tests)."""
+    dispose: Callable[[], None] = lambda: None  # noqa: E731
+    if stores is None:
+        if setup.database_url is None:  # pragma: no cover - _live_setup requires it
+            raise RehearsalError("no database is configured")
+        stores, dispose = _pg_stores(setup.database_url)
+    try:
+        if public is None:
+            from src.adapters.binance_public import BinancePublicMarketData
+
+            public = cast(ShadowPublicFeed, BinancePublicMarketData())
+        now = clock if clock is not None else _utc_now
+        if constraints is None:
+            from src.paper.market_inputs import ConstraintProvider
+
+            provider = ConstraintProvider(
+                public=cast(Any, public), symbols=setup.config.symbols, clock=now
+            )
+            await provider.refresh()
+            constraints = provider
+        if bot is None and application_factory is None:
+            token = setup.token
+            if token is None:  # pragma: no cover - _live_setup requires it
+                raise RehearsalError("no Telegram bot token is configured")
+
+            def build(callback_kwargs: dict[str, Any]) -> Any:
+                from src.adapters.telegram_callbacks import build_application
+
+                return build_application(token=token, **callback_kwargs)
+
+            application_factory = build
+        settings = RehearsalSettings(
+            symbol=symbol,
+            chat_id=setup.chat_id,
+            initial_equity=setup.config.account.initial_equity,
+            risk_rate=setup.config.account.risk_rate,
+            minute_poll_interval_seconds=setup.config.timing.minute_poll_interval_seconds,
+            minute_close_lag_seconds=setup.config.timing.minute_close_lag_seconds,
+            confirm_ttl_seconds=CONFIRM_TTL_SECONDS_DEFAULT,
+            max_wait_seconds=wait_seconds,
+        )
+        return await run_rehearsal(
+            mode=RehearsalMode.LIVE,
+            stores=stores,
+            bot=bot,
+            public=public,
+            clock=now,
+            out=out,
+            settings=settings,
+            parameter_set=setup.parameter_set,
+            constraints=constraints,
+            sleep=sleep if sleep is not None else asyncio.sleep,
+            environ=environ,
+            press=press,
+            application_factory=application_factory,
+        )
+    finally:
+        dispose()
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -279,8 +457,26 @@ def build_parser() -> argparse.ArgumentParser:
         prog="shadow_rehearsal",
         description="Test-only rehearsal of the SHADOW chain with one labelled test signal.",
     )
-    parser.add_argument("--dry-run", action="store_true", help="drive the chain over fakes")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true", help="drive the chain over fakes")
+    mode.add_argument(
+        "--live-telegram",
+        action="store_true",
+        help="real Telegram presses and live public minutes (operator only, plan 16-40)",
+    )
+    parser.add_argument(
+        "--i-am-the-operator",
+        action="store_true",
+        help="required by --live-telegram: the operator runs it in the rehearsal project",
+    )
     parser.add_argument("--out", required=True, help="path of the evidence file to write")
+    parser.add_argument("--symbol", default=None, help="live symbol (default: the first in scope)")
+    parser.add_argument(
+        "--wait-seconds",
+        type=int,
+        default=RehearsalSettings.max_wait_seconds,
+        help="how long a live run waits for the presses and the fill after the alert",
+    )
     return parser
 
 
@@ -290,6 +486,12 @@ def main(
     environ: Mapping[str, str] | None = None,
     stores: ShadowRuntimeStores | None = None,
     bot: TelegramTextBot | None = None,
+    public: ShadowPublicFeed | None = None,
+    constraints: SnapshotSource | None = None,
+    clock: Callable[[], datetime] | None = None,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
+    press: PressFn | None = None,
+    application_factory: Callable[[dict[str, Any]], Any] | None = None,
 ) -> int:
     """Single entry point. Every seam defaults to the real implementation."""
     env: Mapping[str, str] = os.environ if environ is None else environ
@@ -298,16 +500,62 @@ def main(
         args = parser.parse_args(argv)
     except SystemExit as exc:
         return EXIT_REFUSED if exc.code else EXIT_OK
-    if not args.dry_run:
-        print("refused: choose --dry-run", file=sys.stderr)
+    out = Path(args.out)
+    if args.dry_run:
+        return _finish(run_dry_rehearsal(out, stores=stores, bot=bot, environ=env))
+    # Live mode. Trade-capable names first: only the NAME is ever printed.
+    names = refuse_trade_capable_env(env)
+    if names:
+        for name in names:
+            print(f"refused: trade-capable variable present: {name}", file=sys.stderr)
+        return EXIT_TRADE_CAPABLE
+    if not args.i_am_the_operator:
+        print("refused: --live-telegram needs --i-am-the-operator", file=sys.stderr)
         return EXIT_REFUSED
+    values = read_env(env)
+    setup = _live_setup(
+        values, need_token=bot is None and application_factory is None, need_database=stores is None
+    )
+    if isinstance(setup, list):
+        print("refused: not configured: " + ", ".join(setup), file=sys.stderr)
+        return EXIT_NOT_CONFIGURED
+    symbol = args.symbol if args.symbol is not None else setup.config.symbols[0]
+    if symbol not in setup.config.symbols:
+        print("refused: the symbol is not in the configured scope", file=sys.stderr)
+        return EXIT_REFUSED
+    if stores is None:
+        configure_logging(env)
+    return _finish(
+        run_live_rehearsal(
+            out,
+            setup=setup,
+            symbol=symbol,
+            wait_seconds=args.wait_seconds,
+            environ=env,
+            stores=stores,
+            bot=bot,
+            public=public,
+            constraints=constraints,
+            clock=clock,
+            sleep=sleep,
+            press=press,
+            application_factory=application_factory,
+        )
+    )
+
+
+def _finish(run: Coroutine[Any, Any, RehearsalResult]) -> int:
+    """Run the rehearsal and map its outcome to the exit code (class names only on errors)."""
     try:
-        result = asyncio.run(run_dry_rehearsal(Path(args.out), stores=stores, bot=bot, environ=env))
+        result = asyncio.run(run)
     except RehearsalAlreadyRan as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return EXIT_ALREADY_RAN
     except RehearsalError as exc:
         print(f"rehearsal failed: {exc}", file=sys.stderr)
+        return EXIT_FAILED
+    except Exception as exc:  # noqa: BLE001 - never print a message that may carry a URL
+        print(f"rehearsal failed: {type(exc).__name__}", file=sys.stderr)
         return EXIT_FAILED
     print(result.path)
     return EXIT_OK if result.complete else EXIT_FAILED

@@ -15,16 +15,20 @@ import ast
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from scripts import shadow_rehearsal
+from sqlalchemy import text
 from src.paper import rehearsal as rehearsal_module
 from src.paper.evidence_export import evidence_file_bytes, export_shadow_evidence
 from src.paper.rehearsal import RehearsalError, RehearsalMode, proof_class_for, write_evidence
 from src.paper.shadow import SHADOW_LABEL
 from src.paper.shadow_confirm import EVENT_SHADOW_CONFIRMED
 from src.paper.shadow_ledger import EVENT_SHADOW_POSITION_OPENED
+from src.persistence.engine import make_sync_engine
+from src.persistence.shadow_stores import PgShadowStores
+from src.persistence.uow import OperationalDatabase
 
 from tests.shadow_fakes import CHAT_ID, FakeBot
 from tests.test_paper_shadow_evidence_export import (
@@ -455,6 +459,32 @@ def test_live_mode_advances_the_position_on_public_minutes_and_writes_real_rehea
     assert all(_payload(e).get("test_only") is True for e in stores.journal)
 
 
+def test_a_live_run_nobody_presses_ends_with_honest_evidence_and_exit_1(tmp_path: Path) -> None:
+    clock = shadow_rehearsal.VirtualClock(shadow_rehearsal.DRY_RUN_START)
+    stores = RuntimeStores()
+    out = tmp_path / "live.json"
+
+    code = shadow_rehearsal.main(
+        ["--live-telegram", "--i-am-the-operator", "--out", str(out), "--wait-seconds", "30"],
+        environ=_live_env(),
+        stores=stores,
+        bot=FakeBot(),
+        public=CountingPublic(),
+        constraints=shadow_rehearsal.FixedConstraints(
+            shadow_rehearsal.DRY_RUN_SYMBOL, shadow_rehearsal.DRY_RUN_START
+        ),
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+    assert code == shadow_rehearsal.EXIT_FAILED
+    evidence = _evidence(out)
+    assert evidence["position_opened"] is False
+    assert evidence["approval_acted_at_utc"] is None and evidence["measured_delay_seconds"] is None
+    assert evidence["label_seen"] is True
+    assert evidence["records_written"] == evidence["records_test_only"] > 0
+
+
 def test_a_dry_run_can_never_produce_the_real_rehearsal_proof_class(tmp_path: Path) -> None:
     assert proof_class_for(RehearsalMode.DRY_RUN) == "FAKE"
     assert proof_class_for(RehearsalMode.LIVE) == "REAL_REHEARSAL"
@@ -523,3 +553,42 @@ def test_existing_evidence_is_never_overwritten(tmp_path: Path) -> None:
         write_evidence({"test_id": "TEST-X"}, out, environ={})
 
     assert out.read_text(encoding="utf-8") == "keep"
+
+
+# --------------------------------------------------------------------------- #
+# The same rehearsal on the real PostgreSQL stores (skips without TEST_DATABASE_URL).
+# --------------------------------------------------------------------------- #
+
+
+def test_the_rehearsal_runs_once_on_postgresql_and_marks_every_journal_row(
+    pg_db: str, tmp_path: Path
+) -> None:
+    engine = make_sync_engine(pg_db)
+    try:
+        stores = PgShadowStores(OperationalDatabase(engine))
+        first = shadow_rehearsal.main(
+            ["--dry-run", "--out", str(tmp_path / "first.json")],
+            environ={},
+            stores=cast(Any, stores),
+            bot=FakeBot(),
+        )
+        assert first == 0
+        evidence = _evidence(tmp_path / "first.json")
+        assert evidence["position_opened"] is True
+        assert evidence["records_written"] == evidence["records_test_only"] > 0
+        with engine.connect() as conn:
+            rows = conn.execute(text("SELECT payload_json FROM journal_events")).all()
+            signals = conn.execute(text("SELECT signal_id FROM signals")).all()
+        assert rows and all(json.loads(r[0]).get("test_only") is True for r in rows)
+        assert [s[0] for s in signals] == ["TEST-REHEARSAL-SIGNAL-0001"]
+
+        second = shadow_rehearsal.main(
+            ["--dry-run", "--out", str(tmp_path / "second.json")],
+            environ={},
+            stores=cast(Any, stores),
+            bot=FakeBot(),
+        )
+        assert second == shadow_rehearsal.EXIT_ALREADY_RAN
+        assert not (tmp_path / "second.json").exists()
+    finally:
+        engine.dispose()
