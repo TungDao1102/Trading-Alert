@@ -126,6 +126,10 @@ class RehearsalError(RuntimeError):
     """The rehearsal cannot run or continue (fail closed): the message is this module's own."""
 
 
+class RehearsalAlreadyRan(RehearsalError):
+    """The rehearsal database already holds the test signal: the rehearsal runs once (REV-03)."""
+
+
 class RehearsalMode(StrEnum):
     """DRY_RUN drives the chain with fakes; the proof class follows the mode, never the caller."""
 
@@ -653,7 +657,17 @@ async def run_rehearsal(
     environ: Mapping[str, str],
     press: PressFn | None = None,
 ) -> RehearsalResult:
-    """Run the labelled test signal through the SHADOW chain once and write the evidence."""
+    """Run the labelled test signal through the SHADOW chain once and write the evidence.
+
+    Refuses, before anything is written or sent, when the stores already hold the test signal
+    (`RehearsalAlreadyRan`) or when `out` exists.
+    """
+    if stores.get_signal(TEST_SIGNAL_ID) is not None:
+        raise RehearsalAlreadyRan(ALREADY_RAN_MESSAGE)
+    if out.exists():
+        raise RehearsalError(
+            f"{out.name} already exists: the rehearsal evidence is not overwritten"
+        )
     recording = RecordingBot(bot)
     marked = RehearsalStores(stores)
     ledger = ShadowLedger(
@@ -756,6 +770,7 @@ __all__ = [
     "TEST_LABEL",
     "TEST_SIGNAL_ID",
     "RecordingBot",
+    "RehearsalAlreadyRan",
     "RehearsalCoordinator",
     "RehearsalError",
     "RehearsalMode",

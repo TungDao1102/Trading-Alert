@@ -20,6 +20,7 @@ Exit codes::
     0  the run completed: the position opened and the label was seen (evidence written)
     1  the run ended without an opened position, or failed (evidence written when possible)
     2  refused before any work (usage)
+    4  refused: the rehearsal already ran on this database (REV-03: once); nothing was written
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ from src.domain.registry import load_parameter_set  # noqa: E402
 from src.domain.signal import Signal  # noqa: E402
 from src.domain.trade_plan import TradePlan  # noqa: E402
 from src.paper.rehearsal import (  # noqa: E402
+    RehearsalAlreadyRan,
     RehearsalError,
     RehearsalMode,
     RehearsalResult,
@@ -57,6 +59,7 @@ from src.risk.types import ConstraintSnapshot  # noqa: E402
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_REFUSED = 2
+EXIT_ALREADY_RAN = 4
 
 _MINUTE = timedelta(minutes=1)
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -300,6 +303,9 @@ def main(
         return EXIT_REFUSED
     try:
         result = asyncio.run(run_dry_rehearsal(Path(args.out), stores=stores, bot=bot, environ=env))
+    except RehearsalAlreadyRan as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return EXIT_ALREADY_RAN
     except RehearsalError as exc:
         print(f"rehearsal failed: {exc}", file=sys.stderr)
         return EXIT_FAILED
