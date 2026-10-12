@@ -1702,3 +1702,18 @@ def test_the_production_shadow_wiring_needs_the_telegram_chat_and_the_database(
     monkeypatch.setattr("src.adapters.telegram_callbacks.build_application", fake_build_application)
     assert wiring.application_factory({"authorized_chat_id": 4242, "clock": None}) == "application"
     assert captured == {"token": token, "authorized_chat_id": 4242, "clock": None}
+
+
+def test_the_postgresql_stores_implement_every_member_of_the_chain_port() -> None:
+    import typing
+
+    from src.paper.shadow_runtime import ShadowRuntimeStores
+    from src.persistence.shadow_stores import PgShadowStores
+
+    members = typing.get_protocol_members(ShadowRuntimeStores)
+    assert {"list_pending_approvals", "list_approved_approvals", "journal_for_correlation"} <= (
+        members
+    )
+    assert {"get_signal", "get_trade_plan", "get_approval", "record_journal"} <= members
+    missing = sorted(name for name in members if not callable(getattr(PgShadowStores, name, None)))
+    assert missing == []

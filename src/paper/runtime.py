@@ -281,6 +281,45 @@ def _state_from_env(values: Mapping[str, str]) -> RuntimeStatePort:
     return PgRuntimeState(OperationalDatabase(create_engine(url, future=True)))
 
 
+def _pg_shadow_stores(url: str) -> Any:
+    """The PostgreSQL stores of the SHADOW chain (a seam: tests replace it)."""
+    # Imported here so that a SKIPPED start and every refusal never import SQLAlchemy.
+    from src.persistence.engine import make_sync_engine
+    from src.persistence.shadow_stores import PgShadowStores
+    from src.persistence.uow import OperationalDatabase
+
+    return PgShadowStores(OperationalDatabase(make_sync_engine(url)))
+
+
+def _shadow_from_env(values: Mapping[str, str]) -> ShadowWiring | None:
+    """The production SHADOW wiring, or None when the environment does not configure Telegram.
+
+    The bot token and the authorized chat id come from the environment (never logged, never
+    printed); the stores are the PostgreSQL ones (Q-J, no in-memory fallback). The Telegram
+    application is built at start by `build_application` (Q-L: its own bot, one consumer).
+    """
+    token = values.get("TELEGRAM_BOT_TOKEN")
+    chat = values.get("TELEGRAM_AUTHORIZED_CHAT_ID")
+    if not token or not chat:
+        return None
+    try:
+        chat_id = int(chat)
+    except ValueError:
+        raise ConfigNotRatified(["TELEGRAM_AUTHORIZED_CHAT_ID (must be an integer)"]) from None
+    url = values.get("DATABASE_URL_SYNC") or values.get("DATABASE_URL")
+    if not url:
+        raise ConfigNotRatified(["DATABASE_URL_SYNC or DATABASE_URL"])
+
+    def application_factory(callback_kwargs: dict[str, Any]) -> Any:
+        from src.adapters.telegram_callbacks import build_application
+
+        return build_application(token=token, **callback_kwargs)
+
+    return ShadowWiring(
+        stores=_pg_shadow_stores(url), chat_id=chat_id, application_factory=application_factory
+    )
+
+
 def _epoch_record(
     event_type: RuntimeEventType,
     epoch: StreamEpoch,
@@ -1003,11 +1042,20 @@ def main(
             and live_wiring.risk_inputs is None
             and live_wiring.shadow is None
         ):
-            return refuse(
-                ExitCode.CONFIG_NOT_RATIFIED,
-                "the risk inputs port is not bound: open positions and the daily loss have no "
-                "default implementation in src (plan 16-31 binds them to the SHADOW ledger)",
-            )
+            # The production binding of the risk inputs is the SHADOW ledger (plan 16-31), which
+            # needs the Telegram chat and the database of the environment.
+            try:
+                configured = _shadow_from_env(values)
+            except ConfigNotRatified as exc:
+                return refuse(ExitCode.CONFIG_NOT_RATIFIED, str(exc))
+            if configured is None:
+                return refuse(
+                    ExitCode.CONFIG_NOT_RATIFIED,
+                    "the risk inputs port is not bound: open positions and the daily loss have "
+                    "no default implementation in src (they come from the SHADOW ledger, which "
+                    "needs TELEGRAM_BOT_TOKEN and TELEGRAM_AUTHORIZED_CHAT_ID)",
+                )
+            live_wiring = replace(live_wiring, shadow=configured)
 
     pinned_path: Path = args.pinned_state
     if args.pin_epoch:
