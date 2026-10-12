@@ -1,0 +1,72 @@
+16-49 Task 1 preflight (read-only; no AWS call, no network, no .env read)
+date (UTC): 2026-10-12
+source records read: decisions/16-DEC-O-01.md, decisions/16-DEC-Q-F.md, 16-47-SUMMARY.md,
+  docs/operations/RUNBOOK.md 19.6 and 20.7, deploy/evidence.env.example
+
+== Recorded option (16-DEC-O-01.md, verbatim values) ==
+option: a            (S3 evidence prefix OUTSIDE the backup crypt remote; own remote, own credential)
+decided by: user     date: 2026-10-12
+versioning: enabled
+object_lock_mode: none
+retention: none
+reader_access: project owner only (the user); GitHub does not read S3 (Q-F is commit-pinned-state)
+through_crypt_remote: no
+write_timing: exporter-schedule, hourly
+
+== Related record (16-DEC-Q-F.md) ==
+option: commit-pinned-state  (no storage credential on GitHub; the user commits
+  evidence/paper/pinned_epoch.json after each pin)
+  -> the "read-only GitHub secret" of plan Task 3 step "read-from-durable-store" does NOT apply.
+
+== Irreversible setting recorded? ==
+Object Lock (any mode): NO. object_lock_mode and retention are explicit lines and both say "none".
+The only allowed configuration is therefore: versioning enabled, Object Lock NOT enabled, no
+retention (no bucket default retention, no per-object retention).
+Note for the user: enabling versioning is itself not undoable (it can later be suspended, never
+removed), but it is the recorded, low-risk setting. Object Lock, which cannot be disabled once
+enabled (G9) and whose COMPLIANCE retention cannot be shortened (G10), must NOT be switched on
+when the bucket is created (the "Enable Object Lock" box at bucket creation must stay unchecked).
+
+== Configuration to apply (the exact thing Tasks 2 and 3 confirm) ==
+1. A bucket dedicated to evidence, or a prefix of an existing bucket that is NOT the backup
+   bucket (RUNBOOK 19.6 item 5: the backup sentinel assumes an otherwise empty bucket; item 4: a
+   shared bucket default retention would lock backups). Prefer a separate bucket.
+2. Versioning: enabled. Object Lock: not enabled. Retention: none.
+3. Access policy: project owner only. A credential of its own for the exporter, scoped to this
+   bucket and prefix (put, get, list); it must differ from the BACKUP_S3_* credential (the
+   exporter refuses to run when they are equal).
+4. Host environment (names only here, values never recorded in the repository):
+   EVIDENCE_S3_PROVIDER, EVIDENCE_S3_ENDPOINT (needed only for provider Other),
+   EVIDENCE_S3_REGION, EVIDENCE_S3_BUCKET, EVIDENCE_S3_PREFIX (required, never empty),
+   EVIDENCE_S3_ACCESS_KEY_ID, EVIDENCE_S3_SECRET_ACCESS_KEY.
+   Template: deploy/evidence.env.example. File outside the checkout, mode 0600, not the shared
+   soak env file, loaded only into the shell that runs the exporter.
+5. Not part of this configuration: no crypt passphrase, no GitHub secret, no cron change.
+
+== Publish tests (injected uploader, fakes only) ==
+command: uv run --frozen --extra dev pytest tests/test_soak_evidence_export.py tests/test_evidence_remote.py -q -p no:cacheprovider
+  (the plan names .venv/Scripts/python; the same interpreter, run through uv after
+   `uv sync --frozen --extra dev`)
+result tests/test_soak_evidence_export.py: 45 passed, 1 skipped, exit 0
+  skipped: tests/test_soak_evidence_export.py:818, "TEST_DATABASE_URL is not set; PostgreSQL
+  tests cannot run" (the pg-source export test; not a publish test)
+result tests/test_evidence_remote.py: all passed
+publish tests among them: tracer (files first, manifest last, verified copy), copy that differs
+  from the manifest fails naming the file, missing object fails verification, an epoch prefix
+  holding a manifest is never published over, interrupted publish resumed only over identical
+  bytes, failed export publishes nothing, publish subcommand, no free-form destination,
+  rclone reached through the environment only, uploader argv holds only destination and data.
+
+== Offline fail-closed check of the real entry point (no network reached) ==
+`python scripts/export_soak_evidence.py publish --bundle <fake fixture bundle>` with no
+EVIDENCE_S3_* set exits 2 and prints: "cannot publish: evidence configuration is incomplete;
+set: EVIDENCE_S3_ACCESS_KEY_ID, EVIDENCE_S3_BUCKET, EVIDENCE_S3_ENDPOINT, EVIDENCE_S3_PREFIX,
+EVIDENCE_S3_PROVIDER, EVIDENCE_S3_REGION, EVIDENCE_S3_SECRET_ACCESS_KEY" (names only).
+The fake fixture bundle used there was built locally by the fixture source of the exporter
+(manifest source "fixture", 11 runtime records, 0 evidence gaps, epoch aaaa...aaaa).
+
+== Not run ==
+Anything against a real bucket or the real rclone; the PostgreSQL export test.
+
+== Verdict ==
+Irreversible setting recorded: no. Configuration to apply: the one listed above.
