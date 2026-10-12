@@ -32,6 +32,7 @@ own lock.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -49,6 +50,7 @@ from src.backtest.funding import FundingCoverageError, FundingRow
 from src.backtest.lifecycle import EVENT_FILL
 from src.backtest.semantics import FUNDING_JITTER, FUNDING_MAX_CADENCE
 from src.domain.approval import Approval
+from src.domain.journal import JournalEvent, correlated_event_id
 from src.domain.registry import ParameterSet
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
@@ -79,6 +81,7 @@ from src.paper.shadow_fill import (
     eligibility_start_for,
 )
 from src.paper.shadow_ledger import (
+    CORRELATION_PREFIX,
     Reservation,
     ReservationBasis,
     ReservationStores,
@@ -90,6 +93,19 @@ from src.risk.types import ConstraintSnapshot, OpenPosition
 log = structlog.get_logger()
 
 _MINUTE: Final = timedelta(minutes=1)
+
+# Journal event of a filled simulated position reaching its exit (plan 16-31). Written under the
+# correlation of the approval (`shadow-confirm:<approval_id>`) like the reservation events of
+# plan 16-23; none of the fixed-list consumers (terminal confirm events, reservation events)
+# lists it. Its id and payload are pure functions of the position's data.
+EVENT_SHADOW_POSITION_CLOSED: Final = "SHADOW_POSITION_CLOSED"
+
+# Q-L `separate-bot` (decisions/16-DEC-Q-L.md): the SHADOW bot is its own Telegram bot, so exactly
+# one process polls getUpdates for its token. Logged at start and when Telegram reports a
+# Conflict. The token itself is never logged.
+BOT_TOKEN_RULE: Final = (
+    "separate-bot: exactly one getUpdates consumer per bot token (16-DEC-Q-L, RUNBOOK 20.3)"
+)
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 
 
@@ -196,6 +212,10 @@ class _BotProxy:
     def bind(self, bot: TelegramTextBot) -> None:
         self._bot = bot
 
+    @property
+    def is_bound(self) -> bool:
+        return self._bot is not None
+
     def _require(self) -> TelegramTextBot:
         if self._bot is None:
             raise ShadowRuntimeError("the Telegram bot is not bound yet")
@@ -260,6 +280,7 @@ class ShadowCoordinator:
         epoch_id: str,
         confirm_ttl_seconds: int = CONFIRM_TTL_SECONDS_DEFAULT,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        application_factory: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
         require_shadow(mode)
         self._mode = mode
@@ -276,6 +297,12 @@ class ShadowCoordinator:
         self._plans: dict[str, _PlanContext] = {}
         self._positions: dict[str, _Position] = {}
         self._marks: dict[str, Decimal] = {}
+        self._closed_journaled: set[str] = set()
+        self._poll_interval = minute_poll_interval_seconds
+        self._application_factory = application_factory
+        self._application: Any | None = None
+        self._telegram_errors: dict[str, int] = {}
+        self._conflict_logged = False
 
         self._book = ShadowApprovalBook(stores, clock=clock)
         self._reservations = ShadowReservations(ledger, stores, basis_for=self._basis_for)
@@ -567,13 +594,140 @@ class ShadowCoordinator:
         return FundingHistory(rows=rows, loaded_start_utc=start, loaded_end_utc=until)
 
     def _sweep(self, now: datetime) -> None:
-        """Ledger sync of every driver, then the expiry sweeps (worker thread)."""
+        """Ledger sync of every driver, close records, then the expiry sweeps (worker thread)."""
         with self._lock:
-            positions = sorted(self._positions.items())
-        for key, position in positions:
-            self._reservations.sync(key, position.driver)
+            positions = dict(self._positions)
+        self._reservations.sync_many({key: p.driver for key, p in positions.items()})
+        for _key, position in sorted(positions.items()):
+            self._journal_closed(position)
         self._reservations.release_expired(now)
         self._confirm.expire_due(now)
+
+    def _journal_closed(self, position: _Position) -> None:
+        """Journal SHADOW_POSITION_CLOSED once for a filled position that reached its exit."""
+        if position.key in self._closed_journaled or not position.driver.is_closed:
+            return
+        record = position.driver.trade_record()
+        if record.exit_kind is None or record.exit_time_utc is None:
+            # The plan ended without a fill (expiry, invalidation): nothing was held to close.
+            self._closed_journaled.add(position.key)
+            return
+        reservation = position.reservation
+        approval_id = reservation.approval_id
+        correlation = f"{CORRELATION_PREFIX}{approval_id}"
+        self._stores.record_journal(
+            JournalEvent(
+                journal_event_id=correlated_event_id(
+                    prefix="shadow-pos",
+                    correlation_id=correlation,
+                    event_type=EVENT_SHADOW_POSITION_CLOSED,
+                    entity_id=approval_id,
+                    step="closed",
+                ),
+                occurred_at_utc=record.exit_time_utc,
+                event_type=EVENT_SHADOW_POSITION_CLOSED,
+                entity_type="ShadowPosition",
+                entity_id=approval_id,
+                correlation_id=correlation,
+                signal_id=reservation.signal_id,
+                trade_plan_id=reservation.trade_plan_id,
+                approval_id=approval_id,
+                payload_json=json.dumps(
+                    {
+                        "approval_id": approval_id,
+                        "plan_hash": reservation.plan_hash,
+                        "exit_kind": record.exit_kind,
+                        "eligibility": position.eligibility.to_audit_dict(),
+                        "trade": record.to_dict(),
+                        "mode": self._mode.value,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+        )
+        self._closed_journaled.add(position.key)
+
+    async def run_poller(self, stop: asyncio.Event) -> None:
+        """Poll every `minute_poll_interval_seconds` until `stop` is set.
+
+        A poll error ends the loop by propagating, so the caller can fail closed (a feed that
+        cannot be read leaves the simulated positions unmanaged).
+        """
+        while not stop.is_set():
+            await self.poll_once()
+            if stop.is_set():
+                break
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=self._poll_interval)
+            except TimeoutError:
+                continue
+
+    # ---- the Telegram application ------------------------------------------ #
+
+    @property
+    def telegram_error_counts(self) -> dict[str, int]:
+        """Errors that escaped a handler or the polling loop, by exception class name."""
+        return dict(self._telegram_errors)
+
+    async def start(self) -> None:
+        """Start the Telegram application in this event loop (initialize, start, polling).
+
+        Logs the one-consumer-per-token rule first (Q-L). No webhook is configured: getUpdates
+        and a webhook are exclusive (research G6). Without an application factory the chain only
+        sends (rehearsal and tests).
+        """
+        log.info("paper.shadow.bot_token_rule", rule=BOT_TOKEN_RULE)
+        if self._application_factory is None:
+            return
+        application = self._application_factory(self.callback_kwargs())
+        if not self._bot.is_bound and getattr(application, "bot", None) is not None:
+            self._bot.bind(application.bot)
+        application.add_error_handler(self.on_telegram_error)
+        await application.initialize()
+        try:
+            await application.start()
+            await application.updater.start_polling(
+                allowed_updates=["callback_query"], error_callback=self._on_polling_error
+            )
+        except BaseException:
+            await application.shutdown()
+            raise
+        self._application = application
+
+    async def stop(self) -> None:
+        """Stop the application in the reverse order of `start` (idempotent)."""
+        application, self._application = self._application, None
+        if application is None:
+            return
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
+
+    async def on_telegram_error(self, update: object, context: Any) -> None:
+        """The application error handler: log the class, count it, change nothing.
+
+        An exception that escaped a callback handler (`RetryAfter`, `BadRequest`,
+        `NetworkError`, `Conflict`) never approves, confirms or cancels anything and never stops
+        the runtime or the poller. Only the exception class is logged: never a token, callback
+        data or message text.
+        """
+        self._record_telegram_error(getattr(context, "error", None))
+
+    def _on_polling_error(self, error: BaseException) -> None:
+        """The synchronous error callback of the updater's getUpdates loop."""
+        self._record_telegram_error(error)
+
+    def _record_telegram_error(self, error: BaseException | None) -> None:
+        if error is None:
+            return
+        name = type(error).__name__
+        self._telegram_errors[name] = self._telegram_errors.get(name, 0) + 1
+        log.warning("paper.shadow.telegram_error", error_class=name)
+        is_conflict = any(cls.__name__ == "Conflict" for cls in type(error).__mro__)
+        if is_conflict and not self._conflict_logged:
+            self._conflict_logged = True
+            log.error("paper.shadow.bot_token_conflict", rule=BOT_TOKEN_RULE)
 
     def expire_due(self) -> list[str]:
         """Journal EXPIRED for every confirm past its TTL (reason CONFIRM_TTL_ELAPSED)."""
@@ -647,6 +801,8 @@ def build_coordinator(
 
 
 __all__ = [
+    "BOT_TOKEN_RULE",
+    "EVENT_SHADOW_POSITION_CLOSED",
     "FillContext",
     "LedgerRiskInputs",
     "PositionView",

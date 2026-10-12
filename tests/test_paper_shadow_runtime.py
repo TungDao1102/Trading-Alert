@@ -1326,3 +1326,20 @@ async def test_a_failing_poll_ends_the_poller_so_the_runtime_fails_closed() -> N
 
     with pytest.raises(ValueError, match="feed broke"):
         await asyncio.wait_for(rig.coordinator.run_poller(asyncio.Event()), timeout=5)
+
+
+def test_releasing_an_exposure_twice_is_not_an_error() -> None:
+    ledger = ShadowLedger(
+        initial_equity=EQUITY, parameter_set_params=PARAMS, started_at_utc=LEDGER_START
+    )
+    ledger.restore(
+        trade_plan_id="plan-1",
+        symbol=SYMBOL,
+        direction="LONG",
+        sized_realized_risk=Decimal("10"),
+        planned_quantity=Decimal("1"),
+    )
+    ledger.release("plan-1")
+    ledger.release("plan-1")  # the lifecycle and the expiry sweep may both release one plan
+    ledger.release("never-registered")
+    assert ledger.ledger.exposures == ()
