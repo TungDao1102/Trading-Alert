@@ -436,6 +436,11 @@ def _approval_id(plan: TradePlan, action: ApprovalAction) -> str:
     return "apv-" + sha256_hex({"trade_plan_id": plan.trade_plan_id, "action": action.value})[:32]
 
 
+def approval_id_for(plan: TradePlan, action: ApprovalAction) -> str:
+    """The deterministic id of a plan's APPROVE or SKIP_USER approval row (read by plan 16-31)."""
+    return _approval_id(plan, action)
+
+
 class ShadowApprovalBook:
     """Issues approvals, holds the raw tokens (memory only) and wraps `dispatch_callback`.
 
@@ -1009,12 +1014,16 @@ __all__ = [
     "Mode",
     "ModeNotConstructible",
     "RestartReport",
+    "EVENT_APPROVAL_EXPIRED",
+    "EVENT_PENDING_INVALIDATED",
+    "REASON_RUNTIME_RESTART",
     "ShadowApprovalBook",
     "ShadowDecisionOutcome",
     "ShadowMessageKind",
     "ShadowSendOutcome",
     "ShadowStores",
     "format_shadow_alert",
+    "approval_id_for",
     "format_time_pair",
     "invalidate_pending_on_restart",
     "make_shadow_reply_fn",

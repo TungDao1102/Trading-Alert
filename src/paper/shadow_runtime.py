@@ -49,27 +49,41 @@ from src.backtest.costs import CostModel, build_cost_model, cost_slice
 from src.backtest.funding import FundingCoverageError, FundingRow
 from src.backtest.lifecycle import EVENT_FILL
 from src.backtest.semantics import FUNDING_JITTER, FUNDING_MAX_CADENCE
+from src.core.types import Candle
 from src.domain.approval import Approval
+from src.domain.enums import ApprovalAction, ApprovalResult, DailyState
 from src.domain.journal import JournalEvent, correlated_event_id
 from src.domain.registry import ParameterSet
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
+from src.paper.attribution import (
+    EVENT_CONFIRM_EXPIRED,
+    EVENT_CONFIRMED,
+    ShadowOutcome,
+)
 from src.paper.freeze import StreamEpoch
+from src.paper.journal import SHADOW_MODE, PaperRecord, assemble_paper_record
 from src.paper.live_minutes import LiveMinutePoller, LiveMinuteSource, PublicMinuteFeed
 from src.paper.loop import BarOutcome
 from src.paper.pipeline import PipelineResult
 from src.paper.runtime_config import RuntimeConfig
 from src.paper.shadow import (
+    EVENT_APPROVAL_EXPIRED,
+    REASON_RUNTIME_RESTART,
     Mode,
     ShadowApprovalBook,
     ShadowSendOutcome,
     ShadowStores,
+    approval_id_for,
+    invalidate_pending_on_restart,
     make_shadow_reply_fn,
     require_shadow,
     send_shadow_alert,
 )
 from src.paper.shadow_confirm import (
     CONFIRM_TTL_SECONDS_DEFAULT,
+    EVENT_SHADOW_CONFIRMED,
+    TERMINAL_CONFIRM_EVENTS,
     ConfirmBook,
     ConfirmStores,
     make_confirm_callbacks,
@@ -82,13 +96,18 @@ from src.paper.shadow_fill import (
 )
 from src.paper.shadow_ledger import (
     CORRELATION_PREFIX,
+    EVENT_SHADOW_PLAN_EXPIRED_UNFILLED,
+    EVENT_SHADOW_POSITION_OPENED,
+    REASON_PLAN_EXPIRED_UNFILLED,
+    PositionRecord,
     Reservation,
     ReservationBasis,
     ReservationStores,
     ShadowLedger,
     ShadowReservations,
+    reservation_key,
 )
-from src.risk.types import ConstraintSnapshot, OpenPosition
+from src.risk.types import ConstraintSnapshot, OpenPosition, PortfolioVerdict, SizedResult
 
 log = structlog.get_logger()
 
@@ -99,6 +118,13 @@ _MINUTE: Final = timedelta(minutes=1)
 # plan 16-23; none of the fixed-list consumers (terminal confirm events, reservation events)
 # lists it. Its id and payload are pure functions of the position's data.
 EVENT_SHADOW_POSITION_CLOSED: Final = "SHADOW_POSITION_CLOSED"
+
+# The sizing context of an alerted plan (plan 16-31): the regime, the closed signal bar, the
+# constraint snapshot the bar was sized with and the sized facts. A fill driver cannot be rebuilt
+# after a restart without it, because none of these is on the approval, the plan or the
+# reservation. Journaled once with the alert under `shadow-plan:<trade_plan_id>`.
+EVENT_SHADOW_PLAN_CONTEXT: Final = "SHADOW_PLAN_CONTEXT"
+PLAN_CONTEXT_CORRELATION: Final = "shadow-plan:"
 
 # Q-L `separate-bot` (decisions/16-DEC-Q-L.md): the SHADOW bot is its own Telegram bot, so exactly
 # one process polls getUpdates for its token. Logged at start and when Telegram reports a
@@ -236,6 +262,18 @@ class _BotProxy:
         )
 
 
+def _approval_dict(approval: Approval) -> dict[str, str | None]:
+    """The approval row as the paper record assembler reads it (the measured timestamps)."""
+    return {
+        "approval_id": approval.approval_id,
+        "action": approval.action.value,
+        "requested_at_utc": approval.requested_at_utc.isoformat(),
+        "acted_at_utc": None
+        if approval.acted_at_utc is None
+        else approval.acted_at_utc.isoformat(),
+    }
+
+
 def _to_ms(value: datetime) -> int:
     return (value - _EPOCH) // timedelta(milliseconds=1)
 
@@ -298,6 +336,9 @@ class ShadowCoordinator:
         self._positions: dict[str, _Position] = {}
         self._marks: dict[str, Decimal] = {}
         self._closed_journaled: set[str] = set()
+        self._alert_order: list[str] = []
+        self._experiment_id = experiment_id
+        self._close_lag_seconds = minute_close_lag_seconds
         self._poll_interval = minute_poll_interval_seconds
         self._application_factory = application_factory
         self._application: Any | None = None
@@ -422,12 +463,13 @@ class ShadowCoordinator:
                 signal.symbol, outcome.closed_candle.close_time_utc
             )
             self._plans[plan.plan_hash] = _PlanContext(outcome=outcome, constraints=constraints)
+            self._alert_order.append(plan.plan_hash)
         now = self._clock()
         await self._refresh_mark(signal.symbol, now)
         reasons = [signal.setup_type]
         if outcome.regime:
             reasons.append(f"REGIME_{outcome.regime}")
-        return await send_shadow_alert(
+        sent = await send_shadow_alert(
             stores=self._stores,
             book=self._book,
             bot=self._bot,
@@ -440,6 +482,126 @@ class ShadowCoordinator:
             now_utc=now,
             sleep=self._sleep,
         )
+        # The parents exist now (the alert persisted them first), so the context can be journaled.
+        await asyncio.to_thread(self._journal_plan_context, signal, plan, outcome, constraints, now)
+        return sent
+
+    def _journal_plan_context(
+        self,
+        signal: Signal,
+        plan: TradePlan,
+        outcome: BarOutcome,
+        constraints: ConstraintSnapshot,
+        now_utc: datetime,
+    ) -> None:
+        sized = outcome.verdict.sized if outcome.verdict is not None else None
+        if sized is None or sized.quantity is None:
+            raise ShadowRuntimeError("a risk-passed outcome needs a sized verdict")
+        candle = outcome.closed_candle
+        correlation = f"{PLAN_CONTEXT_CORRELATION}{plan.trade_plan_id}"
+        body = {
+            "plan_hash": plan.plan_hash,
+            "regime": outcome.regime,
+            "closed_candle": {
+                "symbol": candle.symbol,
+                "interval": candle.interval,
+                "open_time_utc": candle.open_time_utc.isoformat(),
+                "close_time_utc": candle.close_time_utc.isoformat(),
+                "open": str(candle.open),
+                "high": str(candle.high),
+                "low": str(candle.low),
+                "close": str(candle.close),
+                "volume": str(candle.volume),
+            },
+            "constraints": {
+                "symbol": constraints.symbol,
+                "price_tick_size": str(constraints.price_tick_size),
+                "quantity_step_size": str(constraints.quantity_step_size),
+                "min_quantity": str(constraints.min_quantity),
+                "min_notional": str(constraints.min_notional),
+                "metadata_observed_at_utc": constraints.metadata_observed_at_utc.isoformat(),
+            },
+            "sized": {"quantity": str(sized.quantity), "realized_risk": str(sized.realized_risk)},
+            "mode": self._mode.value,
+        }
+        self._stores.record_journal(
+            JournalEvent(
+                journal_event_id=correlated_event_id(
+                    prefix="shadow-ctx",
+                    correlation_id=correlation,
+                    event_type=EVENT_SHADOW_PLAN_CONTEXT,
+                    entity_id=plan.trade_plan_id,
+                    step="context",
+                ),
+                occurred_at_utc=now_utc,
+                event_type=EVENT_SHADOW_PLAN_CONTEXT,
+                entity_type="ShadowPlan",
+                entity_id=plan.trade_plan_id,
+                correlation_id=correlation,
+                signal_id=signal.signal_id,
+                trade_plan_id=plan.trade_plan_id,
+                payload_json=json.dumps(body, sort_keys=True, separators=(",", ":")),
+            )
+        )
+
+    def _context_from_journal(self, reservation: Reservation) -> _PlanContext:
+        """Rebuild the sizing context of a plan this process did not alert (after a restart)."""
+        signal = self._stores.get_signal(reservation.signal_id)
+        plan = self._stores.get_trade_plan(reservation.trade_plan_id)
+        events = [
+            e
+            for e in self._stores.journal_for_correlation(
+                f"{PLAN_CONTEXT_CORRELATION}{reservation.trade_plan_id}"
+            )
+            if e.event_type == EVENT_SHADOW_PLAN_CONTEXT
+        ]
+        if signal is None or plan is None or not events:
+            raise ShadowRuntimeError(
+                f"no plan context is journaled for {reservation.key}: the simulated plan cannot "
+                "be rebuilt after the restart"
+            )
+        body = json.loads(events[0].payload_json)
+        if body.get("plan_hash") != plan.plan_hash or plan.plan_hash != reservation.plan_hash:
+            raise ShadowRuntimeError(f"the journaled plan context of {reservation.key} differs")
+        c, k, s = body["closed_candle"], body["constraints"], body["sized"]
+        candle = Candle(
+            symbol=c["symbol"],
+            interval=c["interval"],
+            open_time_utc=datetime.fromisoformat(c["open_time_utc"]),
+            close_time_utc=datetime.fromisoformat(c["close_time_utc"]),
+            open=Decimal(c["open"]),
+            high=Decimal(c["high"]),
+            low=Decimal(c["low"]),
+            close=Decimal(c["close"]),
+            volume=Decimal(c["volume"]),
+        )
+        constraints = ConstraintSnapshot(
+            symbol=k["symbol"],
+            price_tick_size=Decimal(k["price_tick_size"]),
+            quantity_step_size=Decimal(k["quantity_step_size"]),
+            min_quantity=Decimal(k["min_quantity"]),
+            min_notional=Decimal(k["min_notional"]),
+            metadata_observed_at_utc=datetime.fromisoformat(k["metadata_observed_at_utc"]),
+        )
+        # The fill driver reads only the planned quantity and the sized risk of the verdict.
+        sized = SizedResult(
+            is_no_trade=False,
+            quantity=Decimal(s["quantity"]),
+            quantity_before_rounding=Decimal(s["quantity"]),
+            quantity_after_rounding=Decimal(s["quantity"]),
+            quantization_decision="ACCEPTED",
+            realized_risk=Decimal(s["realized_risk"]),
+        )
+        outcome = BarOutcome(
+            closed_candle=candle,
+            stage="risk_passed",
+            reason_code="OK",
+            signal=signal,
+            trade_plan=plan,
+            verdict=PortfolioVerdict(False, sized, "OK", DailyState.NORMAL),
+            regime=body.get("regime"),
+        )
+        return _PlanContext(outcome=outcome, constraints=constraints)
 
     # ---- the confirm book's hooks ----------------------------------------- #
 
@@ -504,10 +666,8 @@ class ShadowCoordinator:
     def _build_position(self, reservation: Reservation) -> _Position:
         context = self._plans.get(reservation.plan_hash)
         if context is None:
-            raise ShadowRuntimeError(
-                f"no plan context for reservation {reservation.key}: the plan was not alerted by "
-                "this process"
-            )
+            context = self._context_from_journal(reservation)
+            self._plans[reservation.plan_hash] = context
         approval = self._stores.get_approval(reservation.approval_id)
         eligibility = eligibility_start_for(
             signal_close_utc=reservation.signal_close_utc,
@@ -574,13 +734,17 @@ class ShadowCoordinator:
 
     async def _funding_history(self, position: _Position, until: datetime) -> FundingHistory:
         """The public funding history around the holding window (fails closed on a hole)."""
+        return await self._funding_range(
+            position.reservation.symbol, position.driver.eligibility_start_utc, until
+        )
+
+    async def _funding_range(
+        self, symbol: str, since_utc: datetime, until: datetime
+    ) -> FundingHistory:
         tolerance = FUNDING_MAX_CADENCE + FUNDING_JITTER
-        start = position.driver.eligibility_start_utc - 2 * tolerance
+        start = since_utc - 2 * tolerance
         ticks = await self._public.funding_rate(
-            position.reservation.symbol,
-            start_ms=_to_ms(start),
-            end_ms=_to_ms(until),
-            limit=1000,
+            symbol, start_ms=_to_ms(start), end_ms=_to_ms(until), limit=1000
         )
         rows = tuple(
             FundingRow(
@@ -648,6 +812,192 @@ class ShadowCoordinator:
         )
         self._closed_journaled.add(position.key)
 
+    # ---- restart (D-15, research Pitfall P13) -------------------------------- #
+
+    async def restore(self) -> None:
+        """Fail closed for what a restart cannot carry, and rebuild what it can.
+
+        Raw approval and confirm tokens live in memory only, so every PENDING approval is decided
+        EXPIRED and every outstanding confirm is expired, each journaled with reason
+        RUNTIME_RESTART; a callback for one of them is rejected afterwards. Reserved and open
+        simulated plans are rebuilt from the journal alone (Q-J), replayed over REST 1m history,
+        and the poller continues them.
+        """
+        now = self._clock()
+        await asyncio.to_thread(invalidate_pending_on_restart, self._stores, now)
+        await asyncio.to_thread(self._confirm.expire_on_restart, now)
+        await self._restore_positions(now)
+
+    async def _restore_positions(self, now: datetime) -> None:
+        records = await asyncio.to_thread(self._reservations.load_records)
+        for event in records:
+            if event.event_type == EVENT_SHADOW_POSITION_CLOSED:
+                body = json.loads(event.payload_json)
+                self._closed_journaled.add(
+                    reservation_key(str(body["plan_hash"]), str(body["approval_id"]))
+                )
+        opened = [
+            Reservation.from_payload(json.loads(e.payload_json))
+            for e in records
+            if e.event_type == EVENT_SHADOW_POSITION_OPENED
+        ]
+        horizon = now - timedelta(seconds=self._close_lag_seconds)
+        funding: dict[str, FundingHistory] = {}
+        for symbol in sorted({r.symbol for r in opened}):
+            since = min(r.eligibility_start_utc for r in opened if r.symbol == symbol)
+            await self._poller.poll_once(symbol, now_utc=now, since_utc=since)
+        for reservation in opened:
+            funding[reservation.key] = await self._funding_range(
+                reservation.symbol, reservation.eligibility_start_utc, horizon
+            )
+
+        def driver_for(record: PositionRecord) -> ShadowFillDriver:
+            position = self._build_position(record.reservation)
+            with self._lock:
+                self._positions[position.key] = position
+            return position.driver
+
+        await asyncio.to_thread(
+            self._reservations.rebuild_from_records,
+            records,
+            self._source if opened else None,
+            now_utc=horizon,
+            driver_for=driver_for,
+            funding_for=lambda reservation: funding.get(reservation.key),
+        )
+        await asyncio.to_thread(self._ensure_drivers)
+        with self._lock:
+            positions = sorted(self._positions.items())
+        for _key, position in positions:
+            await asyncio.to_thread(self._journal_closed, position)
+
+    # ---- the paper records of the session (plan 16-35) ----------------------- #
+
+    def paper_records(self, now_utc: datetime | None = None) -> dict[str, list[PaperRecord]]:
+        """The paper records of every plan this process alerted, by signal id, in alert order.
+
+        A plan whose outcome is not decided yet (an outstanding confirm card, a confirmed plan
+        still waiting for its fill) has no entry: records are written at the terminal outcome.
+        """
+        out: dict[str, list[PaperRecord]] = {}
+        with self._lock:
+            alerted = [self._plans[h].outcome for h in self._alert_order]
+        for outcome in alerted:
+            if outcome.signal is None or outcome.trade_plan is None:
+                continue
+            records = self.records_for(outcome.signal, outcome.trade_plan, now_utc)
+            if records:
+                out[outcome.signal.signal_id] = records
+        return out
+
+    def records_for(
+        self, signal: Signal, plan: TradePlan, now_utc: datetime | None = None
+    ) -> list[PaperRecord]:
+        """The attribution of one plan from the journaled approval and confirm rows (D-15).
+
+        APPROVE then CONFIRM with a fill is user-executed-sim with the measured approval delay and
+        the confirm timestamps; SKIP, CANCEL, a refused or expired approval, a confirm that ran
+        out and a restart give an opportunity with the reason; a plan nobody touched is the
+        engine row alone until it expires. An empty list means "not decided yet".
+        """
+        now = self._clock() if now_utc is None else now_utc
+        approve = self._stores.get_approval(approval_id_for(plan, ApprovalAction.APPROVE))
+        skip = self._stores.get_approval(approval_id_for(plan, ApprovalAction.SKIP_USER))
+        signal_dict = {
+            "strategy_id": signal.strategy_id,
+            "strategy_version": signal.strategy_version,
+            "parameter_set_id": signal.parameter_set_id,
+            "parameter_set_hash": signal.parameter_set_hash,
+            "experiment_id": self._experiment_id,
+            "symbol": signal.symbol,
+            "signal_id": signal.signal_id,
+            "detected_at_utc": signal.detected_at_utc.isoformat(),
+        }
+
+        def assemble(
+            outcome: ShadowOutcome,
+            approval: Approval | None = None,
+            *,
+            confirm: dict[str, str] | None = None,
+            order: dict[str, str] | None = None,
+            fill: dict[str, str] | None = None,
+        ) -> list[PaperRecord]:
+            return assemble_paper_record(
+                epoch_id=self._epoch_id,
+                signal=signal_dict,
+                trade_plan={"plan_hash": plan.plan_hash},
+                approval=None if approval is None else _approval_dict(approval),
+                order=order,
+                fill=fill,
+                mode=SHADOW_MODE,
+                confirm=confirm,
+                shadow_outcome=outcome,
+            )
+
+        if skip is not None and skip.status is ApprovalResult.SKIPPED:
+            return assemble(ShadowOutcome(approval_action="SKIP_USER"), skip)
+        if approve is not None and approve.status is ApprovalResult.APPROVED:
+            return self._approved_records(plan, approve, assemble)
+        if any(row is not None and row.status is ApprovalResult.EXPIRED for row in (approve, skip)):
+            # The restart sweep decides ONE row of a plan EXPIRED (the database allows one decided
+            # approval per plan); the sibling stays PENDING with a token nobody holds any more.
+            return assemble(ShadowOutcome(approval_rejection_reason=REASON_RUNTIME_RESTART))
+        for row in (approve, skip):
+            if row is not None and any(
+                e.event_type == EVENT_APPROVAL_EXPIRED
+                for e in self._stores.journal_for_correlation(f"approval:{row.approval_id}")
+            ):
+                return assemble(
+                    ShadowOutcome(approval_rejection_reason="APPROVAL_EXPIRED"), approve
+                )
+        return assemble(ShadowOutcome(plan_expired=now >= plan.expiry_utc))
+
+    def _approved_records(
+        self,
+        plan: TradePlan,
+        approve: Approval,
+        assemble: Callable[..., list[PaperRecord]],
+    ) -> list[PaperRecord]:
+        events = self._stores.journal_for_correlation(f"{CORRELATION_PREFIX}{approve.approval_id}")
+        terminal = [e for e in events if e.event_type in TERMINAL_CONFIRM_EVENTS]
+        if not terminal:
+            return []  # the confirm card is still outstanding
+        event = terminal[0]
+        body = json.loads(event.payload_json)
+        requested = {"confirm_requested_at_utc": str(body["confirm_requested_at_utc"])}
+        if event.event_type != EVENT_SHADOW_CONFIRMED:
+            outcome = ShadowOutcome(
+                approval_action="APPROVE",
+                confirm_event=event.event_type,
+                confirm_reason=body.get("reason"),
+            )
+            return assemble(outcome, approve, confirm=requested)
+        position = self._positions.get(reservation_key(plan.plan_hash, approve.approval_id))
+        fill_time = None
+        if position is not None:
+            fills = [e for e in position.driver.events if e.kind == EVENT_FILL]
+            fill_time = fills[0].time_utc if fills else None
+        if fill_time is None:
+            ended = any(e.event_type == EVENT_SHADOW_PLAN_EXPIRED_UNFILLED for e in events) or (
+                position is not None and position.driver.is_closed
+            )
+            if not ended:
+                return []  # confirmed and resting: nothing happened yet
+            outcome = ShadowOutcome(
+                approval_action="APPROVE",
+                confirm_event=EVENT_CONFIRM_EXPIRED,
+                confirm_reason=REASON_PLAN_EXPIRED_UNFILLED,
+            )
+            return assemble(outcome, approve, confirm=requested)
+        confirmed = str(body["confirmed_at_utc"])
+        return assemble(
+            ShadowOutcome(approval_action="APPROVE", confirm_event=EVENT_CONFIRMED),
+            approve,
+            confirm={**requested, "confirmed_at_utc": confirmed},
+            order={"submitted_at_utc": confirmed},
+            fill={"fill_time_utc": fill_time.isoformat()},
+        )
+
     async def run_poller(self, stop: asyncio.Event) -> None:
         """Poll every `minute_poll_interval_seconds` until `stop` is set.
 
@@ -678,6 +1028,8 @@ class ShadowCoordinator:
         sends (rehearsal and tests).
         """
         log.info("paper.shadow.bot_token_rule", rule=BOT_TOKEN_RULE)
+        # The restart steps run before polling begins: nothing is delivered until they are done.
+        await self.restore()
         if self._application_factory is None:
             return
         application = self._application_factory(self.callback_kwargs())
@@ -804,6 +1156,7 @@ def build_coordinator(
 
 __all__ = [
     "BOT_TOKEN_RULE",
+    "EVENT_SHADOW_PLAN_CONTEXT",
     "EVENT_SHADOW_POSITION_CLOSED",
     "FillContext",
     "LedgerRiskInputs",

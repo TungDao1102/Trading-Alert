@@ -1465,7 +1465,9 @@ async def test_a_restart_expires_pending_approvals_and_confirms_before_polling_b
     expired_ids = {
         a.approval_id for a in rig.stores.approvals.values() if a.status.value == "EXPIRED"
     }
-    assert pending_ids <= expired_ids, "both rows of the untouched plan were decided EXPIRED"
+    # The database allows one decided approval per plan: one row is EXPIRED, its sibling stays
+    # PENDING with a token nobody holds any more (undecidable).
+    assert len(pending_ids & expired_ids) == 1
     (confirm_expired,) = rig.journal(EVENT_SHADOW_CONFIRM_EXPIRED)
     assert payload(confirm_expired)["reason"] == "RUNTIME_RESTART"
     assert rig.journal(EVENT_SHADOW_CONFIRMED) == []
