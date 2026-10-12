@@ -857,3 +857,295 @@ def test_shadow_rows_are_filtered_to_the_epoch_of_the_bundle(tmp_path: Path) -> 
     assert code == export.EXIT_OK
     evidence = load_evidence_file(out / FILE_ANALYTICS)
     assert evidence.paper == ()
+
+
+# --------------------------------------------------------------------------- #
+# Plan 16-47, Task 1: publish to the recorded O-01 destination (option a: an S3 evidence
+# prefix outside the backup crypt remote; versioning enabled, no Object Lock; the user alone
+# reads it; written by the exporter on the operator's schedule). Everything runs against an
+# injected uploader: no network, no AWS, no rclone binary.
+# --------------------------------------------------------------------------- #
+
+DESTINATION = "evidence:trading-evidence/paper"
+
+
+class FakeUploader:
+    """An in-memory object store with the three operations the publisher uses."""
+
+    def __init__(
+        self,
+        *,
+        objects: Mapping[str, bytes] | None = None,
+        corrupt: Collection[str] = (),
+        fail_put: Collection[str] = (),
+        error_text: str = "put failed",
+    ) -> None:
+        self.objects: dict[str, bytes] = dict(objects or {})
+        self.corrupt = set(corrupt)
+        self.fail_put = set(fail_put)
+        self.error_text = error_text
+        self.puts: list[str] = []
+
+    def listing(self, prefix: str) -> frozenset[str]:
+        head = prefix.rstrip("/") + "/"
+        return frozenset(k[len(head) :] for k in self.objects if k.startswith(head))
+
+    def put(self, key: str, data: bytes) -> None:
+        if key in self.fail_put:
+            raise export.PublishError(self.error_text)
+        self.puts.append(key)
+        self.objects[key] = data
+
+    def get(self, key: str) -> bytes:
+        data = self.objects[key]
+        return data + b"x" if key.rsplit("/", 1)[-1] in self.corrupt else data
+
+
+def _publish_args(inputs: Inputs, out: Path, *, destination: str = DESTINATION) -> list[str]:
+    return [
+        *inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=out),
+        "--publish",
+        destination,
+    ]
+
+
+def test_tracer_publish_uploads_the_files_then_the_manifest_and_verifies_the_copy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    uploader = FakeUploader()
+
+    code = export.main(_publish_args(inputs, out), uploader=uploader)
+
+    assert code == export.EXIT_OK, capsys.readouterr()
+    manifest = manifest_of(out)
+    keys = [f"{E1}/{name}" for name in manifest["files"]]
+    assert uploader.puts[-1] == f"{E1}/manifest.json", "the manifest is published last"
+    assert sorted(uploader.puts[:-1]) == sorted(keys)
+    assert len(uploader.puts) == len(set(uploader.puts)), "every object once"
+    for name in [*manifest["files"], "manifest.json"]:
+        assert uploader.objects[f"{E1}/{name}"] == (out / name).read_bytes()
+    assert "published" in capsys.readouterr().out
+
+
+def test_a_published_copy_that_differs_from_the_manifest_fails_naming_the_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    uploader = FakeUploader(corrupt={FILE_DIFF})
+
+    code = export.main(_publish_args(inputs, out), uploader=uploader)
+
+    captured = capsys.readouterr()
+    assert code == export.EXIT_PUBLISH != export.EXIT_OK
+    assert FILE_DIFF in captured.err
+    assert _sha((out / FILE_DIFF).read_bytes()) not in captured.err + captured.out
+    assert out.exists(), "the local bundle is kept for another attempt"
+
+
+def test_a_missing_published_object_fails_the_verification(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Dropping(FakeUploader):
+        def put(self, key: str, data: bytes) -> None:
+            if not key.endswith(FILE_GAPS):
+                super().put(key, data)
+
+        def get(self, key: str) -> bytes:
+            if key not in self.objects:
+                raise export.PublishError(f"{key.rsplit('/', 1)[-1]} cannot be read back")
+            return super().get(key)
+
+    inputs = one_epoch_inputs(tmp_path / "in")
+    code = export.main(_publish_args(inputs, tmp_path / "bundle"), uploader=Dropping())
+    assert code == export.EXIT_PUBLISH
+    assert FILE_GAPS in capsys.readouterr().err
+
+
+def test_an_epoch_prefix_that_already_holds_a_manifest_is_never_published_over(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    uploader = FakeUploader(objects={f"{E1}/manifest.json": b"{}"})
+
+    code = export.main(_publish_args(inputs, tmp_path / "bundle"), uploader=uploader)
+
+    assert code == export.EXIT_PUBLISH
+    assert uploader.puts == []
+    assert uploader.objects == {f"{E1}/manifest.json": b"{}"}
+    assert "already published" in capsys.readouterr().err
+
+
+def test_an_interrupted_earlier_publish_is_resumed_only_over_identical_bytes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    seed = tmp_path / "seed"
+    seed_args = inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=seed)
+    assert export.main(seed_args) == export.EXIT_OK
+    same = FakeUploader(objects={f"{E1}/{FILE_PINNED}": (seed / FILE_PINNED).read_bytes()})
+    assert export.main(_publish_args(inputs, tmp_path / "b1"), uploader=same) == export.EXIT_OK
+    assert f"{E1}/{FILE_PINNED}" not in same.puts, "an identical object is left alone"
+
+    other = FakeUploader(objects={f"{E1}/{FILE_PINNED}": b"different"})
+    code = export.main(_publish_args(inputs, tmp_path / "b2"), uploader=other)
+    assert code == export.EXIT_PUBLISH
+    assert FILE_PINNED in capsys.readouterr().err
+    assert other.objects[f"{E1}/{FILE_PINNED}"] == b"different", "never overwritten"
+
+
+def test_a_failed_export_publishes_nothing(tmp_path: Path) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    uploader = FakeUploader()
+    args = _publish_args(inputs, tmp_path / "bundle")
+    args[args.index("--epoch") + 1] = E2  # no --pinned file belongs to it
+    assert export.main(args, uploader=uploader) == export.EXIT_INPUT
+    assert uploader.puts == [] and uploader.objects == {}
+
+
+def test_the_publish_subcommand_publishes_an_existing_bundle_after_loading_it(
+    tmp_path: Path,
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    args = inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=out)
+    assert export.main(args) == export.EXIT_OK
+    uploader = FakeUploader()
+    argv = ["publish", "--bundle", str(out), "--destination", DESTINATION]
+    assert export.main(argv, uploader=uploader) == export.EXIT_OK
+    assert uploader.puts[-1] == f"{E1}/manifest.json"
+
+    (out / FILE_DIFF).write_bytes(b"edited after export\n")
+    again = FakeUploader()
+    assert export.main(argv, uploader=again) == export.EXIT_INPUT
+    assert again.puts == []
+
+
+def test_option_a_writes_no_git_digest_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work = tmp_path / "cwd"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    assert export.main(_publish_args(inputs, out), uploader=FakeUploader()) == export.EXIT_OK
+    found = [p.name for root in (tmp_path, work) for p in root.rglob("manifest.sha256")]
+    assert found == [], "Git digests belong to options b and e, which are not recorded"
+    assert not (work / "evidence").exists()
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--publish-git", "x"],
+        ["--publish-dir", "somewhere"],
+        ["--git-digests"],
+        ["--publish-github-artifact"],
+    ],
+)
+def test_only_the_recorded_destination_flag_exists(tmp_path: Path, extra: list[str]) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    argv = inputs.argv(
+        source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=tmp_path / "bundle"
+    )
+    with pytest.raises(SystemExit) as raised:
+        export.main([*argv, *extra], uploader=FakeUploader())
+    assert raised.value.code == 2
+    assert not (tmp_path / "bundle").exists()
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "BACKUPS3CRYPT:bucket/evidence",  # the backup crypt remote is not the evidence remote
+        "backups3:bucket/evidence",
+        "a-local-directory",  # not a remote
+        "C:/evidence",  # a drive letter is a local path
+        "evidence:",  # no bucket or prefix
+        ":s3,access_key_id=AKIAABCDEFGHIJKLMNOP,env_auth=false:bucket/p",  # credential in argv
+        "evidence:bucket/p?secret_access_key=abc",
+        "evidence:bucket/two words",
+    ],
+)
+def test_a_destination_that_is_not_a_plain_evidence_remote_is_a_usage_error(
+    tmp_path: Path, destination: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    uploader = FakeUploader()
+    code = export.main(_publish_args(inputs, out, destination=destination), uploader=uploader)
+    captured = capsys.readouterr()
+    assert code == export.EXIT_INPUT
+    assert "AKIAABCDEFGHIJKLMNOP" not in captured.out + captured.err
+    assert uploader.puts == [] and not out.exists(), "refused before any export or upload"
+
+
+def test_no_credential_value_reaches_the_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secret = "Zq9-hunter-Pw-evidence"
+    environ = {"EVIDENCE_SECRET_ACCESS_KEY": secret}
+    inputs = one_epoch_inputs(tmp_path / "in")
+    uploader = FakeUploader(fail_put={f"{E1}/{FILE_RUNS}"}, error_text=f"denied for {secret}")
+
+    code = export.main(
+        _publish_args(inputs, tmp_path / "bundle"), uploader=uploader, environ=environ
+    )
+
+    captured = capsys.readouterr()
+    assert code == export.EXIT_PUBLISH
+    assert secret not in captured.out + captured.err
+    assert f"{E1}/manifest.json" not in uploader.objects, "a failed file stops before the manifest"
+
+
+class FakeRclone:
+    """Records argv and the data given on standard input; serves a small object store."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str], bytes | None]] = []
+        self.store: dict[str, bytes] = {}
+
+    def __call__(self, argv: Sequence[str], stdin: bytes | None) -> tuple[int, bytes, bytes]:
+        self.calls.append((list(argv), stdin))
+        verb, *rest = argv
+        target = rest[-1]
+        if verb == "rcat":
+            assert stdin is not None
+            self.store[target] = stdin
+            return 0, b"", b""
+        if verb == "cat":
+            if target not in self.store:
+                return 3, b"", b"object not found"
+            return 0, self.store[target], b""
+        if verb == "lsf":
+            head = target.rstrip("/") + "/"
+            names = [k[len(head) :] for k in self.store if k.startswith(head)]
+            if not names:
+                return 3, b"", b""
+            return 0, "".join(f"{n}\n" for n in names).encode(), b""
+        return 1, b"", b"unknown verb"
+
+
+def test_the_rclone_uploader_passes_only_the_destination_and_the_data() -> None:
+    runner = FakeRclone()
+    uploader = export.RcloneUploader(DESTINATION, runner=runner)
+
+    assert uploader.listing(E1) == frozenset()
+    uploader.put(f"{E1}/a.json", b"payload")
+    assert uploader.get(f"{E1}/a.json") == b"payload"
+    assert uploader.listing(E1) == frozenset({"a.json"})
+    with pytest.raises(export.PublishError):
+        uploader.get(f"{E1}/missing.json")
+
+    for argv, stdin in runner.calls:
+        text = " ".join(argv)
+        assert DESTINATION in text
+        assert "secret" not in text.lower() and "key" not in text.lower()
+        if argv[0] == "rcat":
+            assert "--immutable" in argv, "an object is never replaced"
+            assert stdin == b"payload", "the data travels on standard input, not in argv"
+        else:
+            assert stdin is None
