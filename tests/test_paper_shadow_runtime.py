@@ -1646,3 +1646,59 @@ async def test_a_restart_expired_plan_is_an_opportunity_with_the_restart_reason(
     records = restarted.coordinator.records_for(*pair(outcome))
 
     assert kinds(records) == [("system", ""), ("opportunity", "RUNTIME_RESTART")]
+
+
+# ---- the production wiring from the environment ------------------------------------------------ #
+
+
+def test_the_production_shadow_wiring_needs_the_telegram_chat_and_the_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.paper import runtime
+    from src.paper.runtime_config import ConfigNotRatified
+
+    token = "123456:test-token-value"
+    assert runtime._shadow_from_env({}) is None
+    assert runtime._shadow_from_env({"TELEGRAM_BOT_TOKEN": token}) is None
+    with pytest.raises(ConfigNotRatified, match="integer"):
+        runtime._shadow_from_env(
+            {
+                "TELEGRAM_BOT_TOKEN": token,
+                "TELEGRAM_AUTHORIZED_CHAT_ID": "not-a-number",
+                "DATABASE_URL_SYNC": "postgresql://u:p@h/db",
+            }
+        )
+    with pytest.raises(ConfigNotRatified, match="DATABASE_URL"):
+        runtime._shadow_from_env(
+            {"TELEGRAM_BOT_TOKEN": token, "TELEGRAM_AUTHORIZED_CHAT_ID": "4242"}
+        )
+
+    seen: list[str] = []
+    stores = RuntimeStores()
+
+    def fake_stores(url: str) -> RuntimeStores:
+        seen.append(url)
+        return stores
+
+    monkeypatch.setattr(runtime, "_pg_shadow_stores", fake_stores)
+    wiring = runtime._shadow_from_env(
+        {
+            "TELEGRAM_BOT_TOKEN": token,
+            "TELEGRAM_AUTHORIZED_CHAT_ID": "4242",
+            "DATABASE_URL_SYNC": "postgresql://u:p@h/db",
+        }
+    )
+    assert wiring is not None
+    assert wiring.chat_id == 4242 and wiring.stores is stores
+    assert seen == ["postgresql://u:p@h/db"]
+    assert wiring.application_factory is not None
+
+    captured: dict[str, Any] = {}
+
+    def fake_build_application(**kwargs: Any) -> str:
+        captured.update(kwargs)
+        return "application"
+
+    monkeypatch.setattr("src.adapters.telegram_callbacks.build_application", fake_build_application)
+    assert wiring.application_factory({"authorized_chat_id": 4242, "clock": None}) == "application"
+    assert captured == {"token": token, "authorized_chat_id": 4242, "clock": None}
