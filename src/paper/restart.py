@@ -384,12 +384,27 @@ class PinnedLike(Protocol):
 
 
 def check_epoch_consistency(pinned: PinnedLike, state: RuntimeStatePort) -> None:
-    """A restart never mints an epoch: the pin file must match the latest stored pin record.
+    """A restart never mints an epoch: the pin file must be the latest pin across ALL epochs.
 
-    Raises `EpochMismatch` when the state port holds no EPOCH_PINNED record for the pinned epoch
-    or when the latest one differs in strategy, parameter set, hash or opening time. The port is
-    keyed by epoch id, so a record of another epoch is simply not this epoch's pin.
+    Raises `EpochMismatch` when the latest EPOCH_PINNED record of the whole runtime state belongs
+    to another epoch than the pin file, or when two epochs share the latest pin instant (REV-18:
+    a new pin starts a new trial, so a superseded pin must not resume). The epoch-scoped
+    comparison follows: the state port must hold an EPOCH_PINNED record for the pinned epoch, and
+    the latest one must agree in strategy, parameter set, hash and opening time.
     """
+    latest_pins = state.latest_epoch_pins()
+    foreign = sorted({p.epoch_id for p in latest_pins if p.epoch_id != pinned.epoch_id})
+    if foreign:
+        shared = len(latest_pins) > 1 and any(p.epoch_id == pinned.epoch_id for p in latest_pins)
+        raise EpochMismatch(
+            (
+                "two epochs share the latest EPOCH_PINNED instant"
+                if shared
+                else "the latest EPOCH_PINNED record belongs to another epoch"
+            )
+            + f" ({', '.join(foreign)}); the pinned state is superseded"
+            " (REV-18: a new pin starts a new trial)"
+        )
     pins = state.records(pinned.epoch_id, {RuntimeEventType.EPOCH_PINNED})
     if not pins:
         raise EpochMismatch("no EPOCH_PINNED record for the pinned epoch in the runtime state")
