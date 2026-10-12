@@ -29,6 +29,7 @@ from src.adapters.telegram_callbacks import (
 from src.domain.approval import Approval
 from src.domain.enums import ApprovalResult, RejectionReason
 from src.domain.trade_plan import TradePlan
+from src.paper.journal import assemble_paper_record
 from src.paper.shadow import (
     SHADOW_LABEL,
     ConfirmCardFields,
@@ -87,6 +88,7 @@ class Harness:
         recheck: Recheck | None = None,
         stores: Any = None,
         reservations: Any = None,
+        dispatch_lag: timedelta = timedelta(0),
     ) -> None:
         self.trace: list[str] = []
         self.stores = InMemoryShadowStores(self.trace) if stores is None else stores
@@ -95,7 +97,9 @@ class Harness:
         self.mark = mark
         self.sleep = RecordingSleep()
         self.confirmed: list[tuple[Approval, TradePlan, datetime]] = []
-        self.book = ShadowApprovalBook(self.stores, clock=lambda: self.now)
+        # `dispatch_lag` models the real runtime: the approval dispatch reads the clock a second
+        # time (in a worker thread), so its `acted_at_utc` is not the press `callback_at_utc`.
+        self.book = ShadowApprovalBook(self.stores, clock=lambda: self.now + dispatch_lag)
         kwargs: dict[str, Any] = {} if ttl is None else {"ttl_seconds": ttl}
         self.confirm = ConfirmBook(
             self.stores,
@@ -246,6 +250,106 @@ async def test_approve_edits_the_alert_into_a_shadow_confirmation_card() -> None
     assert payload(issued[0])["delivery"] == "edit"
     approved = [a for a in h.stores.approvals.values() if a.status == ApprovalResult.APPROVED]
     assert len(approved) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Live-rehearsal gap 2026-10-12: a card is never stamped before the approval it follows.
+# --------------------------------------------------------------------------- #
+
+
+def _approved_row(h: Harness) -> Approval:
+    approved = [a for a in h.stores.approvals.values() if a.status == ApprovalResult.APPROVED]
+    assert len(approved) == 1
+    return approved[0]
+
+
+@pytest.mark.parametrize(
+    ("lag", "expected_offset"),
+    [
+        (timedelta(microseconds=96), timedelta(microseconds=96)),  # the live rehearsal
+        (timedelta(milliseconds=250), timedelta(milliseconds=250)),
+        (timedelta(0), timedelta(0)),  # unchanged: acted_at == callback_at
+        (timedelta(milliseconds=-5), timedelta(0)),  # unchanged: acted_at earlier than the press
+    ],
+)
+async def test_the_card_is_never_stamped_before_the_approval_it_follows(
+    lag: timedelta, expected_offset: timedelta
+) -> None:
+    h = Harness(dispatch_lag=lag)
+    short_id = await h.approve()
+    h.now = T_PRESS + timedelta(seconds=10)
+    await h.tap(f"CNF:{short_id}", "q-cnf")
+
+    approval = _approved_row(h)
+    acted_at = approval.acted_at_utc
+    assert acted_at == T_PRESS + lag  # the approval keeps its own stamp
+    confirmed = h.events(EVENT_SHADOW_CONFIRMED)
+    assert len(confirmed) == 1
+    body = payload(confirmed[0])
+    # The strict journal invariant accepts the pair (it was the ValueError of the live run).
+    confirmed_at = body["confirmed_at_utc"]
+    records = assemble_paper_record(
+        epoch_id="epoch-1",
+        signal={
+            "strategy_id": h.signal.strategy_id,
+            "strategy_version": h.signal.strategy_version,
+            "parameter_set_id": h.signal.parameter_set_id,
+            "parameter_set_hash": h.signal.parameter_set_hash,
+            "experiment_id": "exp-1",
+            "symbol": h.signal.symbol,
+            "signal_id": h.signal.signal_id,
+            "detected_at_utc": h.signal.detected_at_utc.isoformat(),
+        },
+        trade_plan={"plan_hash": h.plan.plan_hash},
+        approval={
+            "approval_id": approval.approval_id,
+            "action": approval.action.value,
+            "requested_at_utc": approval.requested_at_utc.isoformat(),
+            "acted_at_utc": acted_at.isoformat(),
+        },
+        order={"submitted_at_utc": confirmed_at},
+        fill={"fill_time_utc": (T_PRESS + timedelta(minutes=2)).isoformat()},
+        mode="SHADOW",
+        confirm={
+            "confirm_requested_at_utc": body["confirm_requested_at_utc"],
+            "confirmed_at_utc": confirmed_at,
+        },
+    )
+
+    entry = h.confirm.get(short_id)
+    assert entry is not None
+    assert entry.issued_at_utc >= acted_at
+    assert entry.issued_at_utc == T_PRESS + expected_offset
+    # The TTL, the expiry, the rendered card and the journal all follow the one stamp.
+    assert entry.expires_at_utc == entry.issued_at_utc + timedelta(seconds=60)
+    assert h.bot.edited[0].text == render_confirm_card(
+        h.signal,
+        h.plan,
+        mode=Mode.SHADOW,
+        mark_price=MARK,
+        now_utc=entry.issued_at_utc,
+        ttl_seconds=60,
+    )
+    assert body["confirm_requested_at_utc"] == entry.issued_at_utc.isoformat()
+    sim = records[1]
+    assert sim.approval_acted_at_utc == acted_at
+    assert sim.confirm_requested_at_utc == entry.issued_at_utc
+
+
+async def test_a_repeated_approve_press_replays_the_card_issued_after_the_approval() -> None:
+    h = Harness(dispatch_lag=timedelta(microseconds=96))
+    short_id = await h.approve()
+    entry = h.confirm.get(short_id)
+    assert entry is not None
+    issued_at = entry.issued_at_utc
+    h.now = T_PRESS + timedelta(seconds=5)
+    apr, _ = h.alert_buttons()
+
+    await h.tap(apr, "q-apr-again")
+
+    assert h.confirm.get(short_id) is entry
+    assert entry.issued_at_utc == issued_at == T_PRESS + timedelta(microseconds=96)
+    assert len(h.events(EVENT_SHADOW_CONFIRM_ISSUED)) == 1, "one token, one issued event"
 
 
 async def test_the_card_says_when_the_mark_price_is_unavailable() -> None:
