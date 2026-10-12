@@ -125,6 +125,17 @@ Update (plan 16-53): `deploy/compose-rehearsal.sh` now exists (project `trading-
 
 None - Task 1 executed as written, with one command-form difference: the plan's `.venv/Scripts/python` did not exist in this fresh worktree, so `uv run` (and `uv sync --frozen --extra dev`) from the lockfile was used instead. The user's host commands above keep the plan's `.venv/Scripts/python` form for the check commands.
 
+## Gap found by the live rehearsal 2026-10-12
+
+**Gap against plans 16-26 / 16-31 (live minute poller), not a deviation of this plan's own tasks.**
+
+- **Defect:** after a CONFIRM the fill-eligibility start (`since_utc`) is the minute AFTER the confirm minute (Q-B), which is later than the poll horizon (`now_utc - close_lag`). `LiveMinutePoller._fetch` used that as the cursor and `_page` called the public feed with `start_ms > end_ms`. The rehearsal and the SHADOW runtime stopped right after the first CONFIRM. The same happened on a later poll whose next cursor (last stored minute + 1) was past the horizon.
+- **Why the tests missed it:** the `FakeFeed` in `tests/test_paper_live_minutes.py` never rejects `start > end`.
+- **Assumption, NOT verified live:** that Binance answers `start > end` with HTTP 400 (the SDK's BadRequestError), a non-transient error that propagates. The diagnosis came from the code and the stopped runs, not from a live reproduction.
+- **Fix (TDD):** RED `b098c2f` (3 tests; a `StrictFeed` raises on `start_ms > end_ms`) then GREEN `a5fad73`: `_fetch` returns an empty list before any page call when `cursor > horizon`. A poll in that state stores nothing, reports 0/0 added and `settled_through_utc == horizon`. Retry/transient behaviour, paging, validation and the `close_time_utc <= horizon` filter are unchanged; no float and no clock read were added.
+- **Other callers examined (no change needed):** `shadow_runtime._refresh_mark` and `rehearsal.observed_reference_price` send `start_ms=None`; `shadow_runtime._funding_range` (used by `_funding_history` and `_restore_positions`) starts at `since - 2 * (8 h + 60 s)`, so its start cannot pass `until` (the horizon) for an eligibility start about one minute ahead; `_restore_positions` calls the same poller, so it is covered by the fix.
+- **Tests:** `tests/test_paper_live_minutes.py` 25 passed, `tests/test_paper_test_signal_rehearsal.py` 23, `tests/test_paper_shadow_runtime.py` 50, `tests/test_paper_shadow_runtime_pg.py` 2 (no failures); ruff check, ruff format --check and mypy on `src/paper/live_minutes.py` clean.
+
 ## Authentication Gates
 
 None hit in Task 1. Tasks 2 and 3 are `blocking-human` by design (L-07) and were not attempted.
