@@ -803,3 +803,88 @@ def test_the_confirm_entry_card_text_is_assigned_only_from_the_card_composer() -
     ]
     assert values
     assert all(isinstance(v, ast.Call) and _call_name(v) == "render_confirm_card" for v in values)
+
+
+# --------------------------------------------------------------------------- #
+# Task 1: wired into run_admitted - the consumer hands risk-passed outcomes over.
+# --------------------------------------------------------------------------- #
+
+from src.paper.shadow_runtime import ShadowWiring  # noqa: E402
+from src.paper.vocabulary import RuntimeEventType  # noqa: E402
+
+from tests import test_paper_runtime_loop as loop_tests  # noqa: E402
+from tests.test_paper_runtime_loop import PAST_OPEN, Live, wait_until  # noqa: E402
+from tests.test_paper_runtime_loop import FakePublic as LoopPublic  # noqa: E402
+
+# The admitted-runtime fixtures of plan 16-26's loop tests, re-exposed to this module.
+live = loop_tests.live
+_isolated_sdk_stream_map = loop_tests._isolated_sdk_stream_map
+
+
+class SpyPipeline:
+    """A pipeline double: every batch evaluates to the scripted outcomes (HandlesBars)."""
+
+    def __init__(self, outcomes: Sequence[BarOutcome]) -> None:
+        self.outcomes = tuple(outcomes)
+        self.batches: list[int] = []
+
+    def handle(self, bars: Any, *, now_utc: datetime) -> PipelineResult:
+        batch = list(bars)
+        self.batches.append(len(batch))
+        return PipelineResult(evaluated=self.outcomes if batch else ())
+
+
+class RuntimePublic(LoopPublic):
+    """The loop's public fake plus the minute and funding calls the chain reads."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.inner = FakePublic()
+
+    async def mark_klines(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.inner.mark_klines(*args, **kwargs)
+
+    async def funding_rate(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.inner.funding_rate(*args, **kwargs)
+
+
+def test_the_running_loop_hands_a_risk_passed_outcome_to_the_shadow_chain(live: Live) -> None:
+    stores = RuntimeStores()
+    bot = FakeBot()
+    live.public = RuntimePublic()
+    pipeline = SpyPipeline([make_outcome(1), make_outcome(2, stage="strategy")])
+
+    async def script(h: Live) -> None:
+        await wait_until(lambda: len(h.client.handles) == 4)
+        h.emit("BTCUSDT", "1h", open_time=PAST_OPEN)
+        await wait_until(lambda: len(bot.sent) == 1)
+
+    code = live.start(
+        script,
+        pipeline=pipeline,
+        risk_inputs=None,
+        shadow=ShadowWiring(stores=stores, chat_id=CHAT_ID, bot=bot, sleep=RecordingSleep()),
+    )
+
+    assert code == 0
+    assert len(bot.sent) == 1, "only the risk-passed outcome becomes an alert"
+    assert SHADOW_LABEL in bot.sent[0].text and "Mode: SHADOW" in bot.sent[0].text
+    assert len(stores.approvals) == 2, "one APPROVE and one SKIP row"
+
+
+def test_the_start_is_not_refused_when_the_shadow_chain_binds_the_risk_inputs(
+    live: Live,
+) -> None:
+    async def script(h: Live) -> None:
+        await wait_until(lambda: len(h.client.handles) == 4)
+
+    live.public = RuntimePublic()
+    code = live.start(
+        script,
+        pipeline=SpyPipeline([]),
+        risk_inputs=None,
+        context_factory=None,
+        shadow=ShadowWiring(stores=RuntimeStores(), chat_id=CHAT_ID, bot=FakeBot()),
+    )
+    assert code == 0
+    assert live.records(RuntimeEventType.RUNTIME_START)
