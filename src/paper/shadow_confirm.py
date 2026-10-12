@@ -1397,13 +1397,19 @@ def make_confirm_callbacks(
         if context is None or result.approval is None:
             return False
         signal, plan = context
+        # The approval is stamped by its own, later clock read (`ShadowApprovalBook.dispatch`
+        # runs in a worker thread), so its `acted_at_utc` can sit a few microseconds after the
+        # press time. A card is never stamped before the approval it follows (the journal check
+        # `confirm_requested_at_utc >= acted_at_utc` is strict), and the TTL, the expiry and the
+        # journaled `confirm_requested_at_utc` all follow this one stamp.
+        acted_at = result.approval.acted_at_utc
         entry = confirm.issue(
             short_id=short_id,
             approval=result.approval,
             signal=signal,
             plan=plan,
             approving_user_id=press.from_user_id,
-            now_utc=now,
+            now_utc=now if acted_at is None else max(now, acted_at),
         )
         if entry.state is not ConfirmState.PENDING:
             return False
