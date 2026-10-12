@@ -1,0 +1,27 @@
+# Paper runtime configuration v1 (plan 16-34).
+# Every value below is copied from a user decision record and nothing else:
+#   [health], [timing]  -> .planning/phases/16-paper-runtime-composition/decisions/16-DEC-O-07.md (2026-10-10)
+#   [account], [scope]  -> .planning/phases/16-paper-runtime-composition/decisions/16-DEC-O-09.md (2026-10-12)
+# A changed value is a new configuration version and a new qualifying trial (REV-07).
+
+[health]
+max_ws_message_silence_seconds = 3900
+max_closed_bar_lateness_seconds = 10
+continuous_uncovered_ceiling_seconds = 900
+freeze_tick_grace_seconds = 1800
+
+[timing]
+sibling_4h_wait_seconds = 15
+constraint_snapshot_ttl_seconds = 2400
+exchange_info_refresh_seconds = 900
+minute_poll_interval_seconds = 2
+minute_close_lag_seconds = 5
+healthcheck_max_bar_age_seconds = 3900
+rest_backfill_depth_bars = 1500
+
+[account]
+initial_equity = "600"
+risk_rate = "0.005"
+
+[scope]
+symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
