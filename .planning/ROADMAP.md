@@ -800,7 +800,7 @@ Plans:
 - [ ] 16-48-PLAN.md
 - [ ] 16-49-PLAN.md
 - [x] 16-50-PLAN.md
-- [ ] 16-51-PLAN.md
+- [x] 16-51-PLAN.md
 - [ ] 16-52-PLAN.md
 - [ ] TBD (run /gsd-plan-phase 16 to break down)
 

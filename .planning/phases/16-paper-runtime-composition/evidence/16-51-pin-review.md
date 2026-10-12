@@ -88,3 +88,16 @@ None so far. (Task 2 may add entries here with cause; each would be accepted or 
 supervisor,resync,notify,market_inputs,runtime,runtime_config,freeze,restart}.py`,
 `src/{persistence,backtest,core,risk,adapters}/`, `params/`, `config/` or `tests/fixtures/`
 (the Task 3 verify command checks this mechanically; the output is appended at the checkpoint).
+
+## E. Approval (Task 3 checkpoint)
+
+- Approval words (verbatim): "aprrove"
+- Date (UTC): 2026-10-12
+- Approved by: user
+- Order note: the three re-pinned assertions of section B were already applied by commit 5494cb5
+  (`fix(ci): align tests with 16-51 records and NO_CHECK_BUCKET`), before this approval was given.
+  Their content matches section B exactly. The extra no-heartbeat/no-health assertion proposed in
+  B2 is already implied by the exact event-type set equality, so it was not added separately.
+- Task 3 verify run after approval: 17 paper test files passed (1 skipped, the PostgreSQL line, no
+  TEST_DATABASE_URL on this machine: NOT RUN), forbidden paths: [] (no commit of this plan touches
+  a forbidden path).
