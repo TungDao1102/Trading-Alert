@@ -11,6 +11,7 @@ Telegram, no wall clock.
 
 from __future__ import annotations
 
+import ast
 import json
 from datetime import datetime
 from pathlib import Path
@@ -163,3 +164,159 @@ async def test_exporting_the_rehearsal_rows_counts_no_signal_and_reports_the_exc
     assert paper["has_data"] is False
     assert paper["approval_delay"]["system"]["n_signals"] == 0
     assert EXCLUDED_LINE.format(n=len(document["paper"])) in markdown
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: separation from the production path and the once-only rule (REV-03, T-16-90).
+# --------------------------------------------------------------------------- #
+
+REPO = Path(__file__).resolve().parents[1]
+REHEARSAL_SOURCES = (
+    REPO / "src" / "paper" / "rehearsal.py",
+    REPO / "scripts" / "shadow_rehearsal.py",
+)
+PRODUCTION_PATH = (
+    REPO / "src" / "paper" / "runtime.py",
+    REPO / "src" / "paper" / "pipeline.py",
+    REPO / "src" / "paper" / "shadow_runtime.py",
+)
+FORBIDDEN_MODULES = ("src.paper.runtime", "src.paper.pipeline")
+FORBIDDEN_CALLS = frozenset(
+    {"allowlist_entries", "find_allowlist_entry", "pin_stream_epoch", "write_pinned_state"}
+)
+
+
+def _tree(path: Path) -> ast.Module:
+    return ast.parse(path.read_text(encoding="utf-8"))
+
+
+def _imported_modules(tree: ast.Module) -> list[str]:
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            found.append(node.module)
+            found.extend(f"{node.module}.{alias.name}" for alias in node.names)
+    return found
+
+
+def _called_names(tree: ast.Module) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                names.add(node.func.id)
+            elif isinstance(node.func, ast.Attribute):
+                names.add(node.func.attr)
+    return names
+
+
+@pytest.mark.parametrize("path", REHEARSAL_SOURCES, ids=lambda p: p.name)
+def test_the_rehearsal_imports_nothing_of_the_production_start_path(path: Path) -> None:
+    modules = _imported_modules(_tree(path))
+    assert modules
+    bad = [
+        m
+        for m in modules
+        if any(m == forbidden or m.startswith(forbidden + ".") for forbidden in FORBIDDEN_MODULES)
+    ]
+    assert bad == [], f"{path.name} imports the production start path: {bad}"
+
+
+@pytest.mark.parametrize("path", REHEARSAL_SOURCES, ids=lambda p: p.name)
+def test_the_rehearsal_never_reads_the_allowlist_or_pins_an_epoch(path: Path) -> None:
+    tree = _tree(path)
+    assert _called_names(tree) & FORBIDDEN_CALLS == set()
+    mentioned = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
+        n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
+    }
+    assert mentioned & FORBIDDEN_CALLS == set()
+    allowlist_name = "PAPER_START_" + "ALLOWLIST"  # built here: the src scan forbids the name
+    assert allowlist_name not in path.read_text(encoding="utf-8")
+
+
+def _is_true(node: ast.expr | None) -> bool:
+    return isinstance(node, ast.Constant) and node.value is True
+
+
+def _names_test_only(node: ast.expr) -> bool:
+    if isinstance(node, ast.Subscript):
+        return isinstance(node.slice, ast.Constant) and node.slice.value == "test_only"
+    return getattr(node, "attr", getattr(node, "id", "")) == "test_only"
+
+
+def _sets_test_only_true(tree: ast.Module) -> list[int]:
+    """Lines where `test_only` is set to the literal True (keyword, assignment, dict entry).
+
+    Forwarding a variable (`test_only=row.test_only`) is not setting it: only a literal True
+    marks a record, and only the rehearsal may write one.
+    """
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.keyword) and node.arg == "test_only" and _is_true(node.value):
+            lines.append(node.value.lineno)
+        elif isinstance(node, ast.Assign) and _is_true(node.value):
+            if any(_names_test_only(target) for target in node.targets):
+                lines.append(node.lineno)
+        elif isinstance(node, ast.AnnAssign) and _is_true(node.value):
+            if _names_test_only(node.target):
+                lines.append(node.lineno)
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values, strict=True):
+                if isinstance(key, ast.Constant) and key.value == "test_only" and _is_true(value):
+                    lines.append(node.lineno)
+    return lines
+
+
+@pytest.mark.parametrize("path", PRODUCTION_PATH, ids=lambda p: p.name)
+def test_no_production_module_ever_sets_test_only(path: Path) -> None:
+    assert _sets_test_only_true(_tree(path)) == [], f"{path.name} sets test_only"
+
+
+def test_in_the_paper_package_only_the_rehearsal_sets_test_only() -> None:
+    setters = {
+        path.name
+        for path in sorted((REPO / "src" / "paper").glob("*.py"))
+        if _sets_test_only_true(_tree(path))
+    }
+    # journal.py only writes the flag of an already marked record into its canonical dict
+    # (`if record.test_only: out["test_only"] = True`); it never marks a record itself.
+    assert setters == {"journal.py", "rehearsal.py"}
+
+
+def _counts(stores: RuntimeStores) -> tuple[int, ...]:
+    return (
+        len(stores.signals),
+        len(stores.plans),
+        len(stores.approvals),
+        len(stores.mappings),
+        len(stores.journal),
+    )
+
+
+def test_a_second_run_on_the_same_database_refuses_and_writes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stores = RuntimeStores()
+    first = shadow_rehearsal.main(
+        ["--dry-run", "--out", str(tmp_path / "first.json")],
+        environ={},
+        stores=stores,
+        bot=FakeBot(),
+    )
+    assert first == 0
+    capsys.readouterr()
+    before = _counts(stores)
+    second_bot = FakeBot()
+    second_out = tmp_path / "second.json"
+
+    code = shadow_rehearsal.main(
+        ["--dry-run", "--out", str(second_out)], environ={}, stores=stores, bot=second_bot
+    )
+
+    assert code == shadow_rehearsal.EXIT_ALREADY_RAN
+    assert "rehearsal already ran on this database (REV-03: once)" in capsys.readouterr().err
+    assert second_bot.sent == [] and second_bot.edited == []
+    assert not second_out.exists()
+    assert _counts(stores) == before
