@@ -1316,6 +1316,8 @@ Script `deploy/soak-image.sh` thực hiện việc đó (thẻ lệnh bên dư�
 
 Kế hoạch 16-47 thêm bước xuất và đăng bằng chứng trial (mục 20.7 của runbook; `[ĐÃ XÂY]` `[CHƯA XÁC MINH]`: chưa chạy trên máy thật, chưa có bucket thật). Nơi lưu là kho S3 riêng cho bằng chứng, không đi qua lớp mã hóa của chuỗi sao lưu. Địa chỉ và thông tin đăng nhập của kho này chỉ đến từ các tên biến cố định `EVIDENCE_S3_*`, khác hẳn các tên `BACKUP_*`; mẫu tên nằm ở tệp `deploy/evidence.env.example` (chỉ có tên, không có giá trị). Tệp thật đặt ngoài checkout, quyền 0600, chỉ nạp vào shell chạy lệnh xuất, và không nằm trong tệp môi trường soak dùng chung với container paper. Lệnh `--publish` không nhận địa chỉ gõ tay.
 
+Kế hoạch 16-53 thêm script bọc cho buổi diễn tập trước soak (mục 20.4 của runbook; `[ĐÃ XÂY]` `[CHƯA XÁC MINH]`: chưa chạy trên máy thật). Buổi diễn tập chạy trong project riêng `trading-rehearsal`, có volume cơ sở dữ liệu riêng và tệp môi trường riêng đặt ngoài checkout, không bao giờ trong project soak. Script từ chối mọi biến có tên bắt đầu bằng tiền tố của khóa giao dịch (trong môi trường lẫn trong tệp môi trường, chỉ in tên) và từ chối chạy khi project soak còn container đang chạy. Chính `scripts/shadow_rehearsal.py` cũng từ chối biến loại đó ở cả hai chế độ.
+
 ### Thẻ lệnh: deploy/compose-soak.sh
 
 > - **Để làm gì:** Chạy `docker compose` chỉ trên project soak `trading-soak` và từ chối mọi lệnh `down` kèm cờ xóa volume.
@@ -1379,6 +1381,44 @@ Sau đó khởi động soak qua script bọc với biến `IMAGE_TAG` bằng gi
 **Khi lỗi:** thông báo "uncommitted changes" nghĩa là phải commit hoặc bỏ thay đổi trước, rồi chạy lại; đừng sửa tệp trong lúc đang dựng. Nếu lệnh dựng lỗi, không có bản ghi nào được ghi và không được khởi động soak từ một image không có bản ghi.
 
 **Không bao giờ:** khởi động soak từ thư mục làm việc gắn vào container (bind mount) hoặc từ một image không có dòng trong `.deploy/soak-image.history`; sửa tay `soak-image.env`; dùng `deploy/update.sh` cho project soak.
+
+### Thẻ lệnh: deploy/compose-rehearsal.sh
+
+> - **Để làm gì:** Chạy `docker compose` chỉ trên project diễn tập `trading-rehearsal`, tách khỏi project soak và stack phát triển.
+> - **Giải quyết vấn đề gì:** Buổi diễn tập SHADOW dùng bot Telegram thật nên phải có cơ sở dữ liệu riêng, không dính vào cơ sở dữ liệu soak là nơi giữ bằng chứng của trial; script chặn tên project khác, tệp môi trường soak lẫn vào, khóa giao dịch và việc chạy chồng lên soak.
+> - **Mức quan trọng:** **NÊN LÀM** trước khi diễn tập (mục 20.4 của RUNBOOK; ngăn rủi ro T-16-92 của kế hoạch 16-40, đánh giá của hướng dẫn: không bắt buộc về mặt kỹ thuật nhưng thay cho lệnh `docker compose` gõ tay).
+
+**Mục đích:** chuyển mọi lệnh `docker compose` sang project `trading-rehearsal` (volume như `trading-rehearsal_pgdata`), lấy tệp môi trường chỉ từ biến `TRADING_ENV_FILE`, và từ chối trước khi gọi docker khi: biến đó chưa đặt, không đọc được hoặc trỏ vào trong checkout; có biến tên bắt đầu bằng tiền tố của khóa giao dịch trong môi trường hoặc trong tệp; cờ `-p` hay `--project-name` trỏ sang project khác; có cờ `--env-file`; hoặc project soak còn container đang chạy.
+
+**Khi nào chạy:** thay cho `docker compose` trong mọi thao tác của buổi diễn tập (khởi động cơ sở dữ liệu diễn tập, xem trạng thái, dừng), sau khi runtime soak đã thoát ở trạng thái SKIPPED.
+
+**Chạy ở máy nào:** `[MÁY EC2]`, trong checkout; tệp môi trường diễn tập tạo tay, đặt ngoài checkout, quyền 0600, có cổng `POSTGRES_PORT` khác cổng của soak và không có tên khóa giao dịch nào.
+
+**Lệnh:**
+
+```bash
+TRADING_ENV_FILE=/home/trading/rehearsal.env deploy/compose-rehearsal.sh up -d db-upgrade
+```
+
+```bash
+TRADING_ENV_FILE=/home/trading/rehearsal.env deploy/compose-rehearsal.sh ps
+```
+
+```bash
+TRADING_ENV_FILE=/home/trading/rehearsal.env deploy/compose-rehearsal.sh stop
+```
+
+Mọi đối số sau đó được chuyển nguyên cho compose của project diễn tập; `stop` giữ lại volume.
+
+**Chạy thử:** `TRADING_ENV_FILE=/home/trading/rehearsal.env deploy/compose-rehearsal.sh --dry-run up -d db-upgrade` in lệnh compose sẽ chạy, không gọi docker và không kiểm tra project soak (bản chạy thật mới kiểm tra); cờ `--dry-run` chỉ được nhận khi đứng đầu các đối số, và biến `DRY_RUN=1` cho kết quả tương tự.
+
+**Dấu hiệu thành công:** script in dòng bắt đầu bằng dấu cộng, có cờ `-p` với project trading-rehearsal và cờ `--env-file` với tệp diễn tập, rồi thoát với mã của chính lệnh compose.
+
+**Mã thoát:** 0 khi `docker compose` thành công (hoặc khi chạy thử). 1 khi script từ chối với thông báo "refused: ...". 2 khi không có đối số compose nào. Các mã khác là mã của `docker compose`.
+
+**Khi lỗi:** "trade-capable variable present" kèm tên biến nghĩa là phải xóa biến đó khỏi môi trường và khỏi tệp diễn tập (chỉ tên được in, không in giá trị); "has running containers" nghĩa là dừng soak trước bằng `deploy/compose-soak.sh stop` (không xóa volume), rồi chạy lại; đừng tìm cách vòng qua bằng lệnh `docker compose` gõ tay.
+
+**Không bao giờ:** dùng tệp môi trường soak cho buổi diễn tập; đặt giá trị khóa giao dịch hay token vào tệp diễn tập đưa vào git; chạy buổi diễn tập trên cơ sở dữ liệu của project soak.
 
 #### Bước 7.6 Chuỗi đóng (closure chain) và ai quyết định từng bước [THỦ CÔNG] [CHƯA XÂY]
 
@@ -1444,7 +1484,7 @@ Hai việc, đều chưa xây và đều blocking-human. Lần smoke trực ti�
 
 Làm được hôm nay: hoàn thành mục 2 đến 6; chuẩn bị bot Telegram riêng (mục 8.1). Phải chờ: quyết định O-12 để tạo máy; mọi thứ từ 16-15 đến 16-50. Không có tiến trình paper để khởi động, không có epoch để ghim và không có trial để đo.
 
-Nguồn: `.planning/ROADMAP.md`, `.planning/phases/16-paper-runtime-composition/16-CONTEXT.md`, `docker-compose.yml`, `docs/DECISIONS.md`, `.planning/phases/16-paper-runtime-composition/16-22-PLAN.md`, `deploy/compose-soak.sh`, `deploy/soak.env.example`
+Nguồn: `.planning/ROADMAP.md`, `.planning/phases/16-paper-runtime-composition/16-CONTEXT.md`, `docker-compose.yml`, `docs/DECISIONS.md`, `.planning/phases/16-paper-runtime-composition/16-22-PLAN.md`, `deploy/compose-soak.sh`, `deploy/compose-rehearsal.sh`, `deploy/soak.env.example`
 
 ## 8. Telegram, Binance và giám sát bên ngoài
 
@@ -2205,6 +2245,7 @@ Mọi dòng bên dưới được chép từ các thẻ lệnh và các mục tr
 | refresh-pins, tra cứu online (`--lookup`) | `[MÁY CÓ MẠNG]` | `deploy/refresh-pins.sh --lookup` | 10.7 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | soak, chạy compose trên project `trading-soak` (script từ chối `down` kèm cờ xóa volume) | `[MÁY EC2]` | `deploy/compose-soak.sh ps` | 7.5 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | soak, dựng image từ commit sạch và ghi lại commit cùng mã image (`--dry-run` chỉ in) | `[MÁY EC2]` | `deploy/soak-image.sh --dry-run` | 7.5 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| diễn tập, chạy compose trên project `trading-rehearsal` (từ chối biến khóa giao dịch và soak đang chạy; `--dry-run` chỉ in) | `[MÁY EC2]` | `TRADING_ENV_FILE=/home/trading/rehearsal.env deploy/compose-rehearsal.sh --dry-run up -d db-upgrade` | 7.5 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 
 ### Sao lưu, khôi phục, diễn tập, hai unit systemd
 
@@ -2269,7 +2310,7 @@ Bảy service: `postgres`, `db-upgrade`, `collector`, `paper` (profile `paper`, 
 | điểm vào của tiến trình paper | `[MÁY EC2]` | chưa có lệnh chạy được (xem bước 7.4); tên dự kiến `python -m src.paper.runtime` | 7.4 | `[CHƯA XÂY]` |
 | các giai đoạn DEMO, CANARY, LIVE | `[MÁY CÓ MẠNG]` | chưa có lệnh nào | 9 | `[CHƯA XÂY]` |
 
-Nguồn: `deploy/bootstrap.sh`, `deploy/lib.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `deploy/refresh-pins.sh`, `deploy/backup.sh`, `deploy/restore.sh`, `deploy/backup-drill.sh`, `deploy/systemd/trading-backup.service`, `deploy/systemd/trading-backup.timer`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`, `scripts/soak_host_acceptance.py`, `scripts/backup-drill.ps1`, `docker-compose.yml`, `docs/operations/RUNBOOK.md`, `deploy/compose-soak.sh`, `deploy/soak-image.sh`
+Nguồn: `deploy/bootstrap.sh`, `deploy/lib.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `deploy/refresh-pins.sh`, `deploy/backup.sh`, `deploy/restore.sh`, `deploy/backup-drill.sh`, `deploy/systemd/trading-backup.service`, `deploy/systemd/trading-backup.timer`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`, `scripts/soak_host_acceptance.py`, `scripts/backup-drill.ps1`, `docker-compose.yml`, `docs/operations/RUNBOOK.md`, `deploy/compose-soak.sh`, `deploy/compose-rehearsal.sh`, `deploy/soak-image.sh`
 
 ## 15. Danh sách kiểm tra cuối cùng
 

@@ -692,6 +692,17 @@ The soak uses a separate bot, by the user's decision recorded in `decisions/16-D
 
 The pre-soak rehearsal of the SHADOW APPROVE, CONFIRM, journal path (REV-03, glossary `test_only`) runs before the trial in its own project, `trading-rehearsal`, with its own volumes and its own environment file, and never in trading-soak. Its records carry the rehearsal marker and are excluded from every count: signals, trades, parity evidence, the exit criteria G1 to G5 and PAPER-03. It does not bypass the paper-start allowlist. When the rehearsal is finished, the trial soak starts from a clean state of its own project; the soak database is not used as a scratch pad for the rehearsal at any point.
 
+Every rehearsal compose command goes through `deploy/compose-rehearsal.sh` (plan 16-53); no hand-typed raw `docker compose` command is used for it. The wrapper pins the project `trading-rehearsal` (volumes such as `trading-rehearsal_pgdata`, apart from `trading` and `trading-soak`), takes the env file only from `TRADING_ENV_FILE`, and refuses, before any docker call and with exit 1: an env file that is unset, unreadable or inside the checkout; any variable whose name starts with `BINANCE_`, in the environment or in the env file (only the name is printed); a `-p` or `--project-name` flag naming another project; an `--env-file` flag; and a running `trading-soak` project (one `getUpdates` consumer per bot token, and the database port). `--dry-run` as the first argument prints the command and runs no docker. The rehearsal env file is created by hand outside the checkout, mode 0600, with its own `POSTGRES_*` names, a `POSTGRES_PORT` different from the soak's, the rehearsal bot names and no `BINANCE_` name; it is never the soak env file.
+
+```text
+TRADING_ENV_FILE=/home/trading/rehearsal.env deploy/compose-rehearsal.sh --dry-run up -d db-upgrade
+TRADING_ENV_FILE=/home/trading/rehearsal.env deploy/compose-rehearsal.sh up -d db-upgrade
+TRADING_ENV_FILE=/home/trading/rehearsal.env deploy/compose-rehearsal.sh ps
+TRADING_ENV_FILE=/home/trading/rehearsal.env deploy/compose-rehearsal.sh stop
+```
+
+`up -d db-upgrade` starts the rehearsal PostgreSQL and applies the migrations; `stop` ends the project and keeps its volumes. Then run `scripts/shadow_rehearsal.py --live-telegram --i-am-the-operator --out <path>` against that database (plan 16-40, Task 3). The script itself also refuses a `BINANCE_*` variable in both modes (`--dry-run` and `--live-telegram`, exit 3, names only).
+
 ### 20.5 Backups and restore drill before the long soak
 
 Before the long soak starts, the host has a verified backup chain: a backup run now (11.4) that completes, then the restore drill (11.6) that passes. A backup is not valid until a drill passes. The drill restores into a scratch target, the scratch database that the drill creates and drops, and never into the soak database: a restore into the soak database would replace the evidence it is supposed to protect. The first real backup waits for the D064 real-S3 gate (section 11, "Real-S3 gate"; 19.4 item 6), and the first verified pull to the development machine (19.5) is part of the same readiness. Run the drill again after any change of provider, key or image (11.6).

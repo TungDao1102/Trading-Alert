@@ -86,7 +86,15 @@ Then type "host skipped observed".
 ### Task 3: rehearsal with real Telegram taps (RUNBOOK 20.4, 20.3)
 
 1. The soak runtime must be exited in SKIPPED state (Task 2), so that no other poller uses the bot token (one `getUpdates` consumer per bot token, Q-L).
-2. Start a separate compose project `trading-rehearsal` with its own database volume and its own env file; never `trading-soak`, and never the soak database (T-16-92). The repository has no `trading-rehearsal` wrapper (see "Gap" below), so the operator composes this project by hand (without `deploy/compose-soak.sh`, which refuses any other project name).
+2. Start a separate compose project `trading-rehearsal` with its own database volume and its own env file; never `trading-soak`, and never the soak database (T-16-92). Plan 16-53 added the wrapper `deploy/compose-rehearsal.sh` (see "Gap" below); `deploy/compose-soak.sh` refuses any other project name. Create the rehearsal env file by hand outside the checkout (mode 0600, its own `POSTGRES_*` names, a `POSTGRES_PORT` different from the soak's, the rehearsal bot names, no `BINANCE_` name, never the soak env file), stop the soak first (`deploy/compose-soak.sh stop`, no volume removal; the wrapper refuses while any `trading-soak` container runs), then:
+
+```text
+TRADING_ENV_FILE=/home/trading/rehearsal.env deploy/compose-rehearsal.sh --dry-run up -d db-upgrade
+TRADING_ENV_FILE=/home/trading/rehearsal.env deploy/compose-rehearsal.sh up -d db-upgrade
+TRADING_ENV_FILE=/home/trading/rehearsal.env deploy/compose-rehearsal.sh ps
+```
+
+   After the rehearsal: `TRADING_ENV_FILE=/home/trading/rehearsal.env deploy/compose-rehearsal.sh stop` (RUNBOOK 20.4).
 3. In the rehearsal environment (names only: `DATABASE_URL_SYNC` or `DATABASE_URL` pointing at the rehearsal database, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_AUTHORIZED_CHAT_ID`, `PAPER_RUNTIME_CONFIG`, `PAPER_STRATEGY_ID`, `PAPER_PARAMETER_SET_ID`; NO `BINANCE_` name), run:
 
 ```text
@@ -107,9 +115,11 @@ python scripts/shadow_rehearsal.py --live-telegram --i-am-the-operator --out <pa
 
 RUNBOOK 20.4 and the plan name the `trading-rehearsal` project but give no command or compose wrapper for starting it (only `deploy/compose-soak.sh` exists and it refuses other project names). The rehearsal entrypoint itself needs only a reachable PostgreSQL and the env names above, so the user may also run it from any environment with those, but the "own project, own volume" shape of T-16-92 is then the user's to set up. A follow-up plan could add a `deploy/compose-rehearsal.sh`; not done here (out of scope).
 
+Update (plan 16-53): `deploy/compose-rehearsal.sh` now exists (project `trading-rehearsal`, env file from `TRADING_ENV_FILE` outside the checkout, refuses `BINANCE_` names, other project names and a running soak; `--dry-run` prints only). The commands are in Task 3 step 2 above and in RUNBOOK 20.4.
+
 ## Open question for the user (not decided, behavior unchanged)
 
-Should `scripts/shadow_rehearsal.py --dry-run` also refuse `BINANCE_*` variables? Today only `--live-telegram` runs `refuse_trade_capable_env` (plan 16-39 design: the dry run uses fakes only; plan 16-38 deviation 3 recorded the same). Moving the check ahead of the mode branch in `main()` plus one test would make both modes refuse. The source was left as is.
+(Answered yes by the user; implemented in plan 16-53: both modes refuse `BINANCE_*`, exit 3, names only.) Should `scripts/shadow_rehearsal.py --dry-run` also refuse `BINANCE_*` variables? Today only `--live-telegram` runs `refuse_trade_capable_env` (plan 16-39 design: the dry run uses fakes only; plan 16-38 deviation 3 recorded the same). Moving the check ahead of the mode branch in `main()` plus one test would make both modes refuse. The source was left as is.
 
 ## Deviations from Plan
 

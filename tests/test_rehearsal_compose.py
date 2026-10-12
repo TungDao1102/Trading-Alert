@@ -176,9 +176,7 @@ def test_a_missing_or_in_checkout_env_file_is_refused(rig: Rig, mode: str) -> No
 
 
 @pytest.mark.parametrize("dry", [True, False], ids=["dry-run", "live"])
-def test_a_binance_variable_in_the_environment_is_refused_by_name_only(
-    rig: Rig, dry: bool
-) -> None:
+def test_a_binance_variable_in_the_environment_is_refused_by_name_only(rig: Rig, dry: bool) -> None:
     args = (["--dry-run"] if dry else []) + ["ps"]
     proc = rig.run(args, {"BINANCE_API_KEY": SECRET, "BINANCE_EMPTY": ""})
     assert proc.returncode == 1
