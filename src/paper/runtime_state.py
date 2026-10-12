@@ -323,6 +323,15 @@ class RuntimeStatePort(Protocol):
         """The epoch's records (optionally of the given types) in `record_sort_key` order."""
         ...
 
+    def latest_epoch_pins(self) -> Sequence[RuntimeRecord]:
+        """Every EPOCH_PINNED record at the latest pin time across ALL epochs; normally one.
+
+        Cross-epoch on purpose (plan 16-52, REV-18: a new pin starts a new trial): a restart asks
+        which pin is in force, whatever epoch it belongs to. No pin gives an empty sequence; the
+        records are in `record_sort_key` order.
+        """
+        ...
+
 
 class InMemoryRuntimeState:
     """In-memory port: the reference behaviour the PostgreSQL implementation must match."""
@@ -357,6 +366,13 @@ class InMemoryRuntimeState:
             if r.epoch_id == epoch_id and (wanted is None or r.event_type in wanted)
         ]
         return sorted(chosen, key=record_sort_key)
+
+    def latest_epoch_pins(self) -> Sequence[RuntimeRecord]:
+        pins = [r for r in self._by_id.values() if r.event_type is RuntimeEventType.EPOCH_PINNED]
+        if not pins:
+            return []
+        newest = max(r.occurred_at_utc for r in pins)
+        return sorted((r for r in pins if r.occurred_at_utc == newest), key=record_sort_key)
 
 
 __all__ = [

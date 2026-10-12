@@ -22,6 +22,7 @@ from src.paper.runtime_state import (
     RuntimeRecord,
     RuntimeRecordConflict,
     RuntimeStatePort,
+    record_sort_key,
     runtime_event_id,
 )
 from src.paper.vocabulary import RuntimeEventType
@@ -246,6 +247,53 @@ def contract_payload_survives_the_round_trip(make: PortFactory) -> None:
     assert stored.payload["counts"] == (1, 2, 3)
 
 
+def contract_latest_epoch_pins_is_cross_epoch(make: PortFactory) -> None:
+    """Plan 16-52: every EPOCH_PINNED at the latest pin instant across epochs, nothing else."""
+    port = make()
+    assert port.latest_epoch_pins() == []  # no pin: an empty answer
+    port.record(marker(RuntimeEventType.RUNTIME_START, T0 + timedelta(seconds=9)))
+    assert port.latest_epoch_pins() == [], "a non-pin record is not a pin"
+
+    first = marker(
+        RuntimeEventType.EPOCH_PINNED, T0 + timedelta(seconds=1), strategy_id="trend-pullback"
+    )
+    second = marker(
+        RuntimeEventType.EPOCH_PINNED,
+        T0 + timedelta(seconds=2),
+        epoch_id=OTHER_EPOCH,
+        strategy_id="trend-pullback",
+    )
+    port.record(first)
+    assert list(port.latest_epoch_pins()) == [first]
+    port.record(second)
+    assert list(port.latest_epoch_pins()) == [second], "only the later pin, of the other epoch"
+
+    # A later record of any other type, of either epoch, is ignored.
+    port.record(marker(RuntimeEventType.RUNTIME_STOP, T0 + timedelta(hours=1)))
+    port.record(
+        marker(RuntimeEventType.RUNTIME_STOP, T0 + timedelta(hours=1), epoch_id=OTHER_EPOCH)
+    )
+    port.record(bar(5))
+    assert list(port.latest_epoch_pins()) == [second]
+
+    # Two epochs pinned at the same latest instant: both, in the port order.
+    tied = marker(
+        RuntimeEventType.EPOCH_PINNED,
+        T0 + timedelta(seconds=2),
+        strategy_id="trend-pullback",
+    )
+    port.record(tied)
+    answer = list(port.latest_epoch_pins())
+    assert sorted(answer, key=record_sort_key) == answer
+    assert {r.epoch_id for r in answer} == {EPOCH, OTHER_EPOCH}
+    assert all(r.occurred_at_utc == T0 + timedelta(seconds=2) for r in answer)
+
+    # Replaying the pins changes no answer.
+    for pin in (first, second, tied):
+        port.record(pin)
+    assert list(port.latest_epoch_pins()) == answer
+
+
 # --------------------------------------------------------------------------- #
 # In-memory runs of the contract.
 # --------------------------------------------------------------------------- #
@@ -258,6 +306,7 @@ CONTRACTS = [
     contract_a_full_session_replays_to_the_same_rows,
     contract_records_are_filtered_and_ordered,
     contract_payload_survives_the_round_trip,
+    contract_latest_epoch_pins_is_cross_epoch,
 ]
 
 

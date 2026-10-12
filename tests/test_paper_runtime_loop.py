@@ -141,6 +141,9 @@ class BlockingState:
     ) -> Sequence[RuntimeRecord]:
         return self.inner.records(epoch_id, event_types)
 
+    def latest_epoch_pins(self) -> Sequence[RuntimeRecord]:
+        return self.inner.latest_epoch_pins()
+
 
 class FakeMonotonic:
     """The injected monotonic function: pops one prepared reading per call."""

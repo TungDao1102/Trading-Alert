@@ -20,6 +20,12 @@ a plain btree, so the prefix filter is a scan of the journal table filtered by e
 an index range read; that is acceptable for the soak journal and adding an index would be the
 schema change Q-J ruled out.
 
+The one exception is `latest_epoch_pins` (plan 16-52, REV-18: a new pin starts a new trial): a
+restart has to know which EPOCH_PINNED is the latest across ALL epochs, so that query is
+deliberately NOT restricted to an epoch prefix. It is still bounded (entity type "PaperRuntime",
+event type EPOCH_PINNED, the rows at the maximum instant of that subset) and needs no migration,
+no index and no schema change.
+
 The port is synchronous; the runtime wraps it in `asyncio.to_thread` (phase 24 item G4-040 is
 still open). An unreachable database raises `StoreUnavailable` (fail closed), never an
 in-memory fallback.
@@ -34,7 +40,7 @@ import json
 from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.sql.elements import ColumnElement
 
 from src.db.models import JournalEventRow
@@ -152,6 +158,17 @@ class PgRuntimeState:
             statement = statement.where(
                 JournalEventRow.event_type.in_(sorted(t.value for t in event_types))
             )
+        with self._db.transaction() as tx:
+            records = [_record_from_row(row) for row in tx.execute(statement).scalars()]
+        return sorted(records, key=record_sort_key)
+
+    def latest_epoch_pins(self) -> Sequence[RuntimeRecord]:
+        """Every EPOCH_PINNED at the latest pin instant across all epochs (not epoch-scoped)."""
+        pinned = (JournalEventRow.entity_type == ENTITY_TYPE) & (
+            JournalEventRow.event_type == RuntimeEventType.EPOCH_PINNED.value
+        )
+        newest = select(func.max(JournalEventRow.occurred_at_utc)).where(pinned).scalar_subquery()
+        statement = select(JournalEventRow).where(pinned, JournalEventRow.occurred_at_utc == newest)
         with self._db.transaction() as tx:
             records = [_record_from_row(row) for row in tx.execute(statement).scalars()]
         return sorted(records, key=record_sort_key)
