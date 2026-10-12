@@ -13,7 +13,7 @@ affects: [16-43 (soak start)]
 
 requirements-completed: []
 
-status: "tracer and Task 2 done, Task 3 pending user"
+status: "all three tasks done; live rehearsal passed on attempt 3 (2026-10-12)"
 actuals:
   tokens: 1500
   tasks: 1
@@ -35,7 +35,7 @@ completed: 2026-10-12
 
 # Phase 16 Plan 40: Rehearsal window, Task 1 (tracer) Summary
 
-**Status: tracer and Task 2 done (2026-10-12), Task 3 pending user. The plan is NOT complete and PAPER-02 is NOT closed by this work.** The dry-run evidence below is FAKE (virtual clock, scripted market data, fake bot): it proves the rehearsal tool works on this machine and proves nothing about the real host or real Telegram.
+**Status: tracer, Task 2 and Task 3 done (2026-10-12). PAPER-02 is NOT closed by this work (it needs the soak evidence, SC9).** The dry-run evidence below is FAKE (virtual clock, scripted market data, fake bot): it proves the rehearsal tool works on this machine and proves nothing about the real host or real Telegram.
 
 ## What was done (Task 1, tracer)
 
@@ -57,7 +57,7 @@ completed: 2026-10-12
 ## NOT RUN (pending user)
 
 - Task 2 is DONE (user resume signal "host skipped observed", 2026-10-12): `evidence/16-40-host-skipped.md` records commit 4a16da8, image id, the SKIPPED log line and exit 0.
-- Task 3: the live rehearsal with real Telegram taps (needs the soak host, the Q-L bot token, a human). `evidence/16-40-rehearsal-live.json` does not exist. Their automated `<verify>` commands will fail until the user produces those files.
+- Task 3 is DONE: `evidence/16-40-rehearsal-live.json` (attempt 3, 2026-10-12, user ran `scripts/shadow_rehearsal.py --live-telegram --i-am-the-operator`; proof_class REAL_REHEARSAL, label_seen true, measured_delay_seconds 5.619, confirmed_within_ttl true, position_opened true, 16 records all test_only; the plan's automated check printed True). Attempt 1 stopped on the poller defect (partial evidence kept by the user outside the repo as 16-40-rehearsal-live-attempt1-partial.json) and attempt 2 on the CONFIRM stamp defect (no evidence written); both are recorded in the section 'Gap found by the live rehearsal 2026-10-12' and fixed (b098c2f, a5fad73, d08ab96, 263fe70). In the passing run confirm_requested_at_utc equals approval_acted_at_utc. The user's statement is that the rehearsal ran against the separate rehearsal project and database; the orchestrator did not observe the Telegram messages.
 - The PostgreSQL variant of the rehearsal test (no `TEST_DATABASE_URL`).
 
 ## What the user must do for Tasks 2 and 3
