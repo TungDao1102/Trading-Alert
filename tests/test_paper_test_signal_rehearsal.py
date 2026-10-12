@@ -19,12 +19,14 @@ from typing import Any
 
 import pytest
 from scripts import shadow_rehearsal
+from src.paper import rehearsal as rehearsal_module
 from src.paper.evidence_export import evidence_file_bytes, export_shadow_evidence
+from src.paper.rehearsal import RehearsalError, RehearsalMode, proof_class_for, write_evidence
 from src.paper.shadow import SHADOW_LABEL
 from src.paper.shadow_confirm import EVENT_SHADOW_CONFIRMED
 from src.paper.shadow_ledger import EVENT_SHADOW_POSITION_OPENED
 
-from tests.shadow_fakes import FakeBot
+from tests.shadow_fakes import CHAT_ID, FakeBot
 from tests.test_paper_shadow_evidence_export import (
     EXCLUDED_LINE,
     _backtest_part,
@@ -320,3 +322,204 @@ def test_a_second_run_on_the_same_database_refuses_and_writes_nothing(
     assert second_bot.sent == [] and second_bot.edited == []
     assert not second_out.exists()
     assert _counts(stores) == before
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: live mode guards, live minutes and the REAL_REHEARSAL evidence (D-13, D-14).
+# --------------------------------------------------------------------------- #
+
+CONFIG_FILE = REPO / "config" / "paper" / "paper-runtime-v1.toml"
+FAKE_TOKEN = "123456789:" + "A" * 35  # the shape of a Telegram bot token
+
+
+def _live_env(**extra: str) -> dict[str, str]:
+    env = {
+        "TELEGRAM_BOT_TOKEN": FAKE_TOKEN,
+        "TELEGRAM_AUTHORIZED_CHAT_ID": str(CHAT_ID),
+        "PAPER_RUNTIME_CONFIG": str(CONFIG_FILE),
+        "PAPER_STRATEGY_ID": "trend-pullback",
+        "PAPER_PARAMETER_SET_ID": "baseline-v5",
+    }
+    env.update(extra)
+    return env
+
+
+class CountingPublic(shadow_rehearsal.ScriptedPublic):
+    """The scripted public minutes, remembering which adapter calls the chain made."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            shadow_rehearsal.DRY_RUN_START,
+            shadow_rehearsal.DRY_RUN_SYMBOL,
+            shadow_rehearsal.DRY_RUN_PRICE,
+        )
+        self.calls: list[str] = []
+
+    async def klines(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append("klines")
+        return await super().klines(*args, **kwargs)
+
+    async def mark_klines(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append("mark_klines")
+        return await super().mark_klines(*args, **kwargs)
+
+
+def test_the_live_flag_needs_the_operator_flag(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stores = RuntimeStores()
+    out = tmp_path / "live.json"
+
+    code = shadow_rehearsal.main(
+        ["--live-telegram", "--out", str(out)], environ=_live_env(), stores=stores, bot=FakeBot()
+    )
+
+    assert code == shadow_rehearsal.EXIT_REFUSED == 2
+    assert "--i-am-the-operator" in capsys.readouterr().err
+    assert not out.exists() and stores.signals == {}
+
+
+def test_any_binance_variable_refuses_the_live_mode_and_only_the_name_is_printed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stores = RuntimeStores()
+    out = tmp_path / "live.json"
+    secret = "k3y-value-that-must-never-be-printed"
+
+    code = shadow_rehearsal.main(
+        ["--live-telegram", "--i-am-the-operator", "--out", str(out)],
+        environ=_live_env(BINANCE_API_KEY=secret, BINANCE_EMPTY=""),
+        stores=stores,
+        bot=FakeBot(),
+    )
+
+    err = capsys.readouterr().err
+    assert code == shadow_rehearsal.EXIT_TRADE_CAPABLE == 3
+    assert "BINANCE_API_KEY" in err and "BINANCE_EMPTY" in err
+    assert secret not in err
+    assert not out.exists() and stores.signals == {}
+
+
+def test_telegram_settings_are_read_only_from_the_allowed_names(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env = _live_env()
+    del env["TELEGRAM_AUTHORIZED_CHAT_ID"]
+    env["TELEGRAM_CHAT_ID"] = str(CHAT_ID)  # not an allowed name: it must be ignored
+    out = tmp_path / "live.json"
+
+    code = shadow_rehearsal.main(
+        ["--live-telegram", "--i-am-the-operator", "--out", str(out)],
+        environ=env,
+        stores=RuntimeStores(),
+        bot=FakeBot(),
+    )
+
+    err = capsys.readouterr().err
+    assert code == shadow_rehearsal.EXIT_NOT_CONFIGURED
+    assert "TELEGRAM_AUTHORIZED_CHAT_ID" in err
+    assert not out.exists()
+
+
+def test_live_mode_advances_the_position_on_public_minutes_and_writes_real_rehearsal_evidence(
+    tmp_path: Path,
+) -> None:
+    clock = shadow_rehearsal.VirtualClock(shadow_rehearsal.DRY_RUN_START)
+    public = CountingPublic()
+    stores = RuntimeStores()
+    out = tmp_path / "live.json"
+
+    code = shadow_rehearsal.main(
+        ["--live-telegram", "--i-am-the-operator", "--out", str(out)],
+        environ=_live_env(),
+        stores=stores,
+        bot=FakeBot(),
+        public=public,
+        constraints=shadow_rehearsal.FixedConstraints(
+            shadow_rehearsal.DRY_RUN_SYMBOL, shadow_rehearsal.DRY_RUN_START
+        ),
+        clock=clock,
+        sleep=clock.sleep,
+        press=shadow_rehearsal.dry_run_press(clock, CHAT_ID),
+    )
+
+    assert code == 0
+    evidence = _evidence(out)
+    assert set(evidence) == EVIDENCE_KEYS
+    assert evidence["proof_class"] == "REAL_REHEARSAL"
+    assert evidence["position_opened"] is True and evidence["label_seen"] is True
+    assert evidence["records_written"] == evidence["records_test_only"] > 0
+    # The position was advanced by the live-minute poller through the public adapter.
+    assert "klines" in public.calls and "mark_klines" in public.calls
+    assert len(stores.journal_of_type(EVENT_SHADOW_POSITION_OPENED)) == 1
+    assert all(_payload(e).get("test_only") is True for e in stores.journal)
+
+
+def test_a_dry_run_can_never_produce_the_real_rehearsal_proof_class(tmp_path: Path) -> None:
+    assert proof_class_for(RehearsalMode.DRY_RUN) == "FAKE"
+    assert proof_class_for(RehearsalMode.LIVE) == "REAL_REHEARSAL"
+    out = tmp_path / "dry.json"
+    # Even with a complete live environment a dry run stays FAKE.
+    assert shadow_rehearsal.main(["--dry-run", "--out", str(out)], environ=_live_env()) == 0
+    assert _evidence(out)["proof_class"] == "FAKE"
+
+
+# --------------------------------------------------------------------------- #
+# Task 3, test 3: the evidence is scrubbed before the write and scanned after it.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_seeded_secret_in_an_evidence_field_is_scrubbed_before_the_write(
+    tmp_path: Path,
+) -> None:
+    password = "correct-horse-battery-staple"
+    environ = {"TELEGRAM_BOT_TOKEN": FAKE_TOKEN, "POSTGRES_PASSWORD": password}
+    document = {
+        "test_id": "TEST-X",
+        "note": f"token {FAKE_TOKEN} and {password}",
+        "url": "postgresql://u:hunter2hunter2@db/x",
+    }
+    out = tmp_path / "evidence.json"
+
+    write_evidence(document, out, environ=environ)
+
+    text = out.read_text(encoding="utf-8")
+    assert FAKE_TOKEN not in text and password not in text and "hunter2hunter2" not in text
+    assert "[REDACTED]" in text
+    assert "\r" not in text and text.endswith("\n")
+    assert not list(tmp_path.glob(".*.tmp")), "no temp file is left behind"
+
+
+def test_evidence_that_fails_the_post_write_scan_is_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class DriftingRedactor:
+        """Scrubs differently on every call, so the post-write re-scan can never agree."""
+
+        calls = 0
+
+        @classmethod
+        def from_environ(cls, environ: Any) -> DriftingRedactor:
+            return cls()
+
+        def scrub(self, text: str) -> str:
+            type(self).calls += 1
+            return text + " " * type(self).calls
+
+    monkeypatch.setattr(rehearsal_module, "Redactor", DriftingRedactor)
+    out = tmp_path / "evidence.json"
+
+    with pytest.raises(RehearsalError, match="post-write secret scan"):
+        write_evidence({"test_id": "TEST-X"}, out, environ={})
+
+    assert not out.exists()
+
+
+def test_existing_evidence_is_never_overwritten(tmp_path: Path) -> None:
+    out = tmp_path / "evidence.json"
+    out.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(RehearsalError, match="not overwritten"):
+        write_evidence({"test_id": "TEST-X"}, out, environ={})
+
+    assert out.read_text(encoding="utf-8") == "keep"
