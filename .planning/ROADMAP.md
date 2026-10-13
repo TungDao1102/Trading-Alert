@@ -695,7 +695,7 @@ Plans:
 
 **Depends on**: Phase 12, Phase 13.1, Phase 15, Phase 17
 
-**Plans**: 43/53 plans executed (16-01 to 16-36, 16-38, 16-39, 16-47, 16-50 to 16-53; 16-53 added 2026-10-12 for compose-rehearsal.sh and the dry-run BINANCE_* refusal; plan-checker 2026-10-09: 0 blockers on 16-01 to 16-49; 16-50 added 2026-10-09 for the healthchecks.io heartbeat sender chosen by the user; open user questions Q-A to Q-Q are asked at the blocking-human checkpoints)
+**Plans**: 47/54 plans executed (16-01 to 16-36, 16-38 to 16-40, 16-45, 16-47, 16-50 to 16-54; 16-37 has Tasks 1 and the second tracer done, Tasks 2 and 3 wait for the user; 16-54 added 2026-10-13 for the terminal declaration of known_gaps, done the same day; 16-53 added 2026-10-12 for compose-rehearsal.sh and the dry-run BINANCE_* refusal; plan-checker 2026-10-09: 0 blockers on 16-01 to 16-49; 16-50 added 2026-10-09 for the healthchecks.io heartbeat sender chosen by the user; open user questions Q-A to Q-Q are asked at the blocking-human checkpoints)
 
 **Requirements**: PAPER-01, PAPER-02
 
@@ -789,20 +789,21 @@ Plans:
 - [ ] 16-37-PLAN.md
 - [x] 16-38-PLAN.md
 - [x] 16-39-PLAN.md
-- [ ] 16-40-PLAN.md
+- [x] 16-40-PLAN.md
 - [ ] 16-41-PLAN.md
 - [ ] 16-42-PLAN.md
 - [ ] 16-43-PLAN.md
 - [ ] 16-44-PLAN.md
-- [ ] 16-45-PLAN.md
+- [x] 16-45-PLAN.md
 - [ ] 16-46-PLAN.md
 - [x] 16-47-PLAN.md
 - [ ] 16-48-PLAN.md
-- [ ] 16-49-PLAN.md
+- [x] 16-49-PLAN.md
 - [x] 16-50-PLAN.md
 - [x] 16-51-PLAN.md
 - [x] 16-52-PLAN.md
 - [x] 16-53-PLAN.md
+- [x] 16-54-PLAN.md
 - [ ] TBD (run /gsd-plan-phase 16 to break down)
 
 ### Phase 17: Operational Persistence Layer
@@ -1257,7 +1258,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 13.1. Deployment & CI | 12/12 | Complete | 2026-10-04 |
 | 14. Backtest Simulator Causality Rewrite | 17/17 | Complete    | 2026-10-07 |
 | 15. Strategy Geometry Correction | 18/18 | Complete    | 2026-10-07 |
-| 16. Paper Runtime Composition + SHADOW Approval Mode | 43/53 | In Progress|  |
+| 16. Paper Runtime Composition + SHADOW Approval Mode | 47/54 | In Progress|  |
 | 17. Operational Persistence Layer | 15/15 | Complete    | 2026-10-07 |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |
 | 19. Execution Plan Binding + Pre-Placement Checks | 0/TBD | Not started | - |
