@@ -43,3 +43,9 @@ KG-1 reuse DELISTED_CAPPED, required. KG-2 wrapper; KG-2.2 version key none (no 
 ## Still open (not decided here)
 - The REEFUSDT values themselves: terminal_at_utc (expected 2025-01-22T09:00:00Z) and the exact URL (evidence/16-37-constraint-history.md line 67). The page content reached us as a fetch-tool summary, not a verbatim copy; the local data is consistent with 09:00 but does not prove it. The user was asked to open the URL and confirm; until then plan 16-37 Task 3 must not write these values into a manifest. They are the user's O-03b answer.
 - Cross-family multiplicity, the protocol amendment for the constraint assumption, the local/EC2 data comparison, O-03 authorization. This record grants no research execution.
+
+## Addendum 2026-10-13: one field `reason` (answer to the open question of plan 16-54)
+decided by: user
+date: 2026-10-13
+words: reason
+note: asked whether KG-4's "cause" and KG-1's "reason" are one field or two (recommendation: keep one field `reason`). The user answered `reason`. The declaration keeps exactly the four fields symbol, reason (DELISTED_CAPPED), terminal_at_utc, source_url, as built in commits 8bc1485 and 62d379d. No separate `cause` field exists and no code change is needed.
