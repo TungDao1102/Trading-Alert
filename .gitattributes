@@ -10,3 +10,5 @@ docker-compose.yml text eol=lf
 .python-version text eol=lf
 .env.example text eol=lf
 tests/fixtures/cutover/** text eol=lf
+
+docs/research/preregistration/research-run-1-constraints-baseline.json -text

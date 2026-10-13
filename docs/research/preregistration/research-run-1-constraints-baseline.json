@@ -1,0 +1,100 @@
+{
+  "constraint_history": [
+    {
+      "metadata_observed_at_utc": "2026-10-03T03:11:57.803909+00:00",
+      "min_notional": "5",
+      "min_quantity": "1",
+      "price_tick_size": "0.0000001",
+      "quantity_step_size": "1",
+      "symbol": "1000PEPEUSDT"
+    },
+    {
+      "metadata_observed_at_utc": "2026-10-03T03:11:57.803909+00:00",
+      "min_notional": "5",
+      "min_quantity": "0.01",
+      "price_tick_size": "0.01",
+      "quantity_step_size": "0.01",
+      "symbol": "BNBUSDT"
+    },
+    {
+      "metadata_observed_at_utc": "2026-10-03T03:11:57.803909+00:00",
+      "min_notional": "50",
+      "min_quantity": "0.001",
+      "price_tick_size": "0.1",
+      "quantity_step_size": "0.001",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "metadata_observed_at_utc": "2026-10-03T03:11:57.803909+00:00",
+      "min_notional": "5",
+      "min_quantity": "1",
+      "price_tick_size": "0.00001",
+      "quantity_step_size": "1",
+      "symbol": "DOGEUSDT"
+    },
+    {
+      "metadata_observed_at_utc": "2026-10-03T03:11:57.803909+00:00",
+      "min_notional": "5",
+      "min_quantity": "1",
+      "price_tick_size": "0.00000001",
+      "quantity_step_size": "1",
+      "symbol": "DOGSUSDT"
+    },
+    {
+      "metadata_observed_at_utc": "2026-10-03T03:11:57.803909+00:00",
+      "min_notional": "20",
+      "min_quantity": "0.001",
+      "price_tick_size": "0.01",
+      "quantity_step_size": "0.001",
+      "symbol": "ETHUSDT"
+    },
+    {
+      "metadata_observed_at_utc": "2026-10-03T03:11:57.803909+00:00",
+      "min_notional": "5",
+      "min_quantity": "1",
+      "price_tick_size": "0.000001",
+      "quantity_step_size": "1",
+      "symbol": "REEFUSDT"
+    },
+    {
+      "metadata_observed_at_utc": "2026-10-03T03:11:57.803909+00:00",
+      "min_notional": "5",
+      "min_quantity": "0.01",
+      "price_tick_size": "0.01",
+      "quantity_step_size": "0.01",
+      "symbol": "SOLUSDT"
+    },
+    {
+      "metadata_observed_at_utc": "2026-10-03T03:11:57.803909+00:00",
+      "min_notional": "5",
+      "min_quantity": "0.1",
+      "price_tick_size": "0.0001",
+      "quantity_step_size": "0.1",
+      "symbol": "SUIUSDT"
+    },
+    {
+      "metadata_observed_at_utc": "2026-10-03T03:11:57.803909+00:00",
+      "min_notional": "5",
+      "min_quantity": "0.1",
+      "price_tick_size": "0.0001",
+      "quantity_step_size": "0.1",
+      "symbol": "WIFUSDT"
+    },
+    {
+      "metadata_observed_at_utc": "2026-10-03T03:11:57.803909+00:00",
+      "min_notional": "5",
+      "min_quantity": "1",
+      "price_tick_size": "0.0001",
+      "quantity_step_size": "1",
+      "symbol": "WLDUSDT"
+    },
+    {
+      "metadata_observed_at_utc": "2026-10-03T03:11:57.803909+00:00",
+      "min_notional": "5",
+      "min_quantity": "0.1",
+      "price_tick_size": "0.0001",
+      "quantity_step_size": "0.1",
+      "symbol": "XRPUSDT"
+    }
+  ]
+}
