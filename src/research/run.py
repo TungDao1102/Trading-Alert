@@ -134,7 +134,7 @@ def _check_manifest_against_store(manifest: DatasetManifest, raw_root: Path) -> 
         strategy_interval=manifest.strategy_interval,
         context_interval=manifest.context_interval,
         series=ENGINE_SERIES,
-        allow_gaps=manifest.known_gaps,
+        terminal_declarations=manifest.known_gaps,
     )
     if data.dataset_id != manifest.dataset_id:
         raise ManifestError(
@@ -164,7 +164,7 @@ def _run_split(
         strategy_interval=manifest.strategy_interval,
         context_interval=manifest.context_interval,
         series=ENGINE_SERIES,
-        allow_gaps=manifest.known_gaps,
+        terminal_declarations=manifest.known_gaps,
     )
     case = data.to_case_input(
         strategy_id=grid.strategy_id,

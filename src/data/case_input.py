@@ -56,6 +56,7 @@ from src.data.coverage import (
     DEFAULT_OI_INTERVAL_MS,
     TICK_GAP_FACTOR,
     GapRange,
+    _observed_times_ms,
     gap_ranges_for_files,
 )
 from src.data.minute_source import SYMBOL_RE as _SYMBOL_RE
@@ -131,17 +132,63 @@ class CaseInputGapError(CaseInputError):
     """A requested series has an unresolved gap; nothing is padded (D-19).
 
     `gaps` lists every unacknowledged `GapRange`; pass the ones you have
-    inspected back as `allow_gaps` to proceed with a recorded hole.
+    inspected back as `allow_gaps` to proceed with a recorded hole. `refusals` maps a gap
+    to the failed condition of a terminal declaration that was offered for its symbol and
+    refused (plan 16-54, KG-3); the message names that condition.
     """
 
-    def __init__(self, gaps: Sequence[GapRange]) -> None:
+    def __init__(
+        self, gaps: Sequence[GapRange], refusals: Mapping[GapRange, str] | None = None
+    ) -> None:
         self.gaps: tuple[GapRange, ...] = tuple(gaps)
+        self.refusals: dict[GapRange, str] = dict(refusals or {})
         detail = "; ".join(
             f"{g.series}/{g.interval} {g.start_utc.isoformat()}..{g.end_utc.isoformat()}"
             f" missing={g.missing}"
+            + (f" (terminal declaration refused: {self.refusals[g]})" if g in self.refusals else "")
             for g in self.gaps
         )
         super().__init__(f"unresolved gaps in the published store: {detail}")
+
+
+# KG-1 (plan 16-54): the one reason a terminal declaration can carry, the sufficiency-report word.
+TERMINAL_REASON_DELISTED_CAPPED = "DELISTED_CAPPED"
+TERMINAL_REASONS: frozenset[str] = frozenset({TERMINAL_REASON_DELISTED_CAPPED})
+
+
+@dataclass(frozen=True)
+class TerminalDeclaration:
+    """A per-symbol declaration that a symbol's data ends (plan 16-54, KG-2 wrapper, KG-3).
+
+    It names no six-field range and is not a `GapRange`: it is evidence that the series of
+    `symbol` end, not a licence to skip missing data. The builder accepts a detected gap of
+    that symbol under it only when the gap follows the data geometry (`_terminal_refusal`).
+    `source_url` is carried for the manifest hash; the builder never reads or fetches it.
+    """
+
+    symbol: str
+    reason: str
+    terminal_at_utc: datetime
+    source_url: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.symbol, str) or not _SYMBOL_RE.fullmatch(self.symbol):
+            raise CaseInputError("terminal declaration symbol does not match ^[A-Z0-9]+USDT$")
+        if self.reason not in TERMINAL_REASONS:
+            raise CaseInputError(
+                f"terminal declaration reason must be one of {sorted(TERMINAL_REASONS)}"
+            )
+        stamp = self.terminal_at_utc
+        if (
+            not isinstance(stamp, datetime)
+            or stamp.tzinfo is None
+            or stamp.utcoffset() != timedelta(0)
+        ):
+            raise CaseInputError(
+                "terminal declaration terminal_at_utc must be a UTC-aware datetime"
+            )
+        if not isinstance(self.source_url, str) or not self.source_url:
+            raise CaseInputError("terminal declaration source_url must be a non-empty string")
 
 
 # --------------------------------------------------------------------------- #
@@ -361,6 +408,19 @@ def _tick_files(
 # --------------------------------------------------------------------------- #
 
 
+def _series_spec(series: str, interval: str, funding_step_ms: int) -> tuple[int, int | None, str]:
+    """The cadence, the hole tolerance and the time column of one series at one interval.
+
+    `funding_step_ms` is the symbol inferred funding cadence; the funding tolerance is
+    always `FUNDING_TOLERANCE_MS` (the engine cadence plus jitter, D-36).
+    """
+    if series == "funding":
+        return funding_step_ms, FUNDING_TOLERANCE_MS, "funding_time_utc"
+    if series == "open_interest":
+        return DEFAULT_OI_INTERVAL_MS, TICK_GAP_FACTOR * DEFAULT_OI_INTERVAL_MS, "observed_at_utc"
+    return INTERVAL_MS[interval], None, "open_time_utc"
+
+
 def _collect_gaps(
     *,
     wanted: Sequence[str],
@@ -380,18 +440,7 @@ def _collect_gaps(
         if series not in wanted:
             continue
         for interval, files in files_by_series[series]:
-            if series == "funding":
-                step_ms = funding_step_ms
-                max_step_ms: int | None = FUNDING_TOLERANCE_MS
-                time_column = "funding_time_utc"
-            elif series == "open_interest":
-                step_ms = DEFAULT_OI_INTERVAL_MS
-                max_step_ms = TICK_GAP_FACTOR * DEFAULT_OI_INTERVAL_MS
-                time_column = "observed_at_utc"
-            else:
-                step_ms = INTERVAL_MS[interval]
-                max_step_ms = None
-                time_column = "open_time_utc"
+            step_ms, max_step_ms, time_column = _series_spec(series, interval, funding_step_ms)
             gaps.extend(
                 gap_ranges_for_files(
                     files,
@@ -408,21 +457,130 @@ def _collect_gaps(
     return gaps
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _epoch_ms_of(value: datetime) -> int:
+    return (value - _EPOCH) // _MS
+
+
+def _terminal_refusal(
+    gap: GapRange,
+    terminal_at_utc: datetime,
+    observed_ms: Sequence[int],
+    step_ms: int,
+    start_utc: datetime,
+    end_utc: datetime,
+) -> str | None:
+    """Why a terminal declaration does not explain `gap`, or None when it does (KG-3).
+
+    `observed_ms` are the series' own observed instants inside [start_utc, end_utc), read from
+    the files by the builder and never taken from the declaration. The gap is accepted only when
+    it is a trailing hole that runs to exactly the window end, no observation lies at or after
+    the terminal timestamp, its start is the first slot after the last observation (or the
+    window start when the series has no observation in the window), on the series cadence, with
+    a `missing` count equal to the one computed here from that geometry, and that start is at or
+    after the terminal timestamp. A check of only `terminal_at_utc <= gap.start_utc` is not enough.
+    """
+    if gap.end_utc != end_utc:
+        return (
+            "the gap is not trailing: it does not run to the window end, so the series has "
+            "data after the gap start"
+        )
+    end_ms = _epoch_ms_of(end_utc)
+    if observed_ms:
+        last_ms = observed_ms[-1]
+        if _EPOCH + last_ms * _MS >= terminal_at_utc:
+            return "the series has an observation at or after the terminal timestamp"
+        expected_start_ms = last_ms + step_ms
+        expected_missing = (end_ms - last_ms) // step_ms - 1
+    else:
+        expected_start_ms = _epoch_ms_of(start_utc)
+        expected_missing = (end_ms - expected_start_ms) // step_ms
+    if _epoch_ms_of(gap.start_utc) != expected_start_ms:
+        return (
+            "the gap start is not the first slot after the last observation "
+            "(or the window start for a series with no observation)"
+        )
+    if gap.series != "funding" and expected_start_ms % step_ms != 0:
+        return "the gap start is not on the series cadence"
+    if gap.missing != max(1, expected_missing):
+        return "the missing count differs from the count computed from the data geometry"
+    if gap.start_utc < terminal_at_utc:
+        return (
+            "the terminal timestamp is after the gap start: the slots between the last "
+            "observation and the terminal timestamp would be an unexplained loss"
+        )
+    return None
+
+
+def _apply_terminal(
+    gaps: Sequence[GapRange],
+    declarations: Sequence[TerminalDeclaration],
+    context: Mapping[str, tuple[Mapping[str, Sequence[tuple[str, Sequence[Path]]]], int]],
+    start_utc: datetime,
+    end_utc: datetime,
+) -> tuple[frozenset[GapRange], dict[GapRange, str]]:
+    """Split `gaps` by the terminal declarations: (accepted, refused with the failed condition).
+
+    One declaration per symbol. A gap of a symbol without a declaration is neither accepted
+    nor refused here: it stays unresolved for the exact-match path. `context` gives, per
+    symbol, the files of every series and interval and the inferred funding cadence.
+    """
+    by_symbol: dict[str, TerminalDeclaration] = {}
+    for declaration in declarations:
+        if not isinstance(declaration, TerminalDeclaration):
+            raise CaseInputError("terminal_declarations entries must be TerminalDeclaration values")
+        if declaration.symbol in by_symbol:
+            raise CaseInputError(
+                f"more than one terminal declaration for {declaration.symbol}; one per symbol"
+            )
+        by_symbol[declaration.symbol] = declaration
+    accepted: set[GapRange] = set()
+    refused: dict[GapRange, str] = {}
+    for gap in gaps:
+        declared_for = by_symbol.get(gap.symbol)
+        if declared_for is None:
+            continue
+        files_by_series, cadence_ms = context[gap.symbol]
+        files = dict(files_by_series[gap.series])[gap.interval]
+        step_ms, _, time_column = _series_spec(gap.series, gap.interval, cadence_ms)
+        observed = (
+            _observed_times_ms(files, time_column, _epoch_ms_of(start_utc), _epoch_ms_of(end_utc))
+            if files
+            else []
+        )
+        reason = _terminal_refusal(
+            gap, declared_for.terminal_at_utc, observed, step_ms, start_utc, end_utc
+        )
+        if reason is None:
+            accepted.add(gap)
+        else:
+            refused[gap] = reason
+    return frozenset(accepted), refused
+
+
 def _apply_allowed(
-    gaps: Sequence[GapRange], allow_gaps: Sequence[GapRange]
+    gaps: Sequence[GapRange],
+    allow_gaps: Sequence[GapRange],
+    *,
+    declared: frozenset[GapRange] = frozenset(),
+    refusals: Mapping[GapRange, str] | None = None,
 ) -> tuple[GapRange, ...]:
     """Split `gaps` by the acknowledgement list; raise for the unacknowledged rest.
 
     Only an entry equal to an actual gap counts; an entry that matches nothing is
-    ignored and never recorded. Returns the acknowledged gaps in gap order.
+    ignored and never recorded. `declared` are the gaps a terminal declaration explained
+    (`_apply_terminal`, plan 16-54); every other gap still needs the exact six-field match.
+    Returns the acknowledged gaps in gap order.
     """
     for entry in allow_gaps:
         if not isinstance(entry, GapRange):
             raise CaseInputError("allow_gaps entries must be GapRange values")
-    acknowledged = set(allow_gaps)
+    acknowledged = set(allow_gaps) | declared
     unresolved = [g for g in gaps if g not in acknowledged]
     if unresolved:
-        raise CaseInputGapError(unresolved)
+        raise CaseInputGapError(unresolved, refusals)
     return tuple(g for g in gaps if g in acknowledged)
 
 
@@ -549,6 +707,7 @@ def build_case_input_data(
     context_interval: str = "4h",
     series: Sequence[str] = SERIES_ALL,
     allow_gaps: Sequence[GapRange] = (),
+    terminal_declarations: Sequence[TerminalDeclaration] = (),
     with_minute_rows: bool = False,
 ) -> CaseInputData:
     """Build the case-input v2 data for one or more symbols and a whole-UTC-day range.
@@ -557,6 +716,11 @@ def build_case_input_data(
     `with_minute_rows=True` embeds the 1m trade and mark rows; the default leaves them
     out for a lazy `ParquetMinuteSource`. Gap detection and the dataset identity cover the
     1m partitions either way.
+
+    `allow_gaps` acknowledges a hole only by an exact six-field match. `terminal_declarations`
+    (plan 16-54, one per symbol) acknowledges the trailing holes of a symbol whose data ends,
+    but only those that follow the data geometry (`_terminal_refusal`); an interior hole is
+    never explained by a declaration.
     """
     names = _resolve_symbols(symbols, symbol)
     wanted = _validate(
@@ -578,6 +742,7 @@ def build_case_input_data(
     files_of: dict[str, _SymbolFiles] = {}
     funding_of: dict[str, list[Row]] = {}
     gaps: list[GapRange] = []
+    terminal_context: dict[str, tuple[Mapping[str, Sequence[tuple[str, Sequence[Path]]]], int]] = {}
     for name in ordered:
         files = _symbol_files(
             raw_root,
@@ -606,6 +771,7 @@ def build_case_input_data(
             "funding": [(f"{cadence_ms // 3_600_000}h", files.funding)],
             "open_interest": [("5m", files.open_interest)],
         }
+        terminal_context[name] = (files_by_series, cadence_ms)
         gaps.extend(
             _collect_gaps(
                 wanted=wanted,
@@ -616,7 +782,10 @@ def build_case_input_data(
                 funding_step_ms=cadence_ms,
             )
         )
-    allowed_gaps = _apply_allowed(gaps, allow_gaps)
+    declared, refusals = _apply_terminal(
+        gaps, terminal_declarations, terminal_context, start_utc, end_utc
+    )
+    allowed_gaps = _apply_allowed(gaps, allow_gaps, declared=declared, refusals=refusals)
 
     # Phase 2: rows. Rows are grouped by sorted symbol, ascending in time within a symbol.
     used: list[Path] = []
@@ -706,6 +875,9 @@ __all__ = [
     "CaseInputGapError",
     "CaseInputRangeError",
     "FUNDING_TOLERANCE_MS",
+    "TERMINAL_REASONS",
+    "TERMINAL_REASON_DELISTED_CAPPED",
+    "TerminalDeclaration",
     "build_case_input_data",
     "dataset_identity",
     "infer_funding_cadence_ms",

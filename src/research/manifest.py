@@ -2,7 +2,8 @@
 
 The manifest fixes everything a research run reads: universe, dataset identity, the exact
 development / validation / holdout boundaries, candle intervals, data source and version,
-excluded periods, known gaps, the research account inputs and the constraint source. The
+excluded periods, known terminal declarations, the research account inputs and the
+constraint source. The
 grid fixes the strategy and the ordered, registered parameter sets of one experiment. Both
 hash through `src.domain.canonical.sha256_hex` over a canonical dict (Decimal and datetimes
 as strings, UTC only, no float), so the same content always has the same hash and any edit
@@ -19,14 +20,27 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
-from src.data.coverage import GapRange
+from src.data.case_input import (
+    TERMINAL_REASON_DELISTED_CAPPED,
+    TERMINAL_REASONS,
+    CaseInputError,
+    TerminalDeclaration,
+)
 from src.domain.canonical import sha256_hex
 
 DEVELOPMENT = "DEVELOPMENT"
 VALIDATION = "VALIDATION"
 VALIDATION_FOLD_COUNT = 4
 _ONE_DAY = timedelta(days=1)
+
+# KG-1 (plan 16-54): the closed vocabulary of a known-gap reason is exactly one value, the
+# sufficiency-report word DELISTED_CAPPED; the reason is required on every declaration.
+KNOWN_GAP_REASON_DELISTED_CAPPED = TERMINAL_REASON_DELISTED_CAPPED
+KNOWN_GAP_REASONS: frozenset[str] = TERMINAL_REASONS
+# KG-4 (plan 16-54): the only host a declaration source URL may carry; nothing is fetched.
+KNOWN_GAP_SOURCE_HOSTS: frozenset[str] = frozenset({"www.binance.com"})
 
 
 class ManifestError(ValueError):
@@ -39,6 +53,28 @@ def _require_day_boundary(value: object, name: str) -> datetime:
     if (value.hour, value.minute, value.second, value.microsecond) != (0, 0, 0, 0):
         raise ManifestError(f"{name} must be at 00:00:00 UTC (whole UTC days only)")
     return value
+
+
+def _check_source_url(value: object) -> None:
+    """KG-4 shape rule plus the host list; offline, and never echoes the value."""
+    if not isinstance(value, str) or not value:
+        raise ManifestError("known gap source_url must be a non-empty string")
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ManifestError(
+            "known gap source_url must not contain whitespace or control characters"
+        )
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        raise ManifestError("known gap source_url is not a valid URL") from None
+    if parts.scheme != "https":
+        raise ManifestError("known gap source_url must use the https scheme")
+    if not parts.netloc:
+        raise ManifestError("known gap source_url must have a host")
+    if "@" in parts.netloc:
+        raise ManifestError("known gap source_url must not carry user information")
+    if parts.netloc not in KNOWN_GAP_SOURCE_HOSTS:
+        raise ManifestError("known gap source_url host is not in the allowed host list")
 
 
 def _require_hex64(value: object, name: str) -> str:
@@ -76,7 +112,10 @@ class DatasetManifest:
     `dataset_id` is the `dataset_identity` of the published files the runner reads: the
     research window, development start through validation end (the holdout is never read
     here). `constraint_source` is a JSON file of point-in-time exchange constraints and
-    `constraint_sha256` the hash of its bytes.
+    `constraint_sha256` the hash of its bytes. `known_gaps` are the terminal declarations
+    (plan 16-54, KG-2 wrapper): one per symbol, each with a required reason, the terminal
+    instant and the official source, all inside the hash. A hole that no declaration explains
+    is not acknowledged by the manifest.
     """
 
     universe_id: str
@@ -93,7 +132,7 @@ class DatasetManifest:
     data_source: str
     data_source_version: str
     excluded_periods: tuple[Period, ...]
-    known_gaps: tuple[GapRange, ...]
+    known_gaps: tuple[TerminalDeclaration, ...]
     equity: Decimal
     risk_rate: Decimal
     constraint_source: str
@@ -144,6 +183,16 @@ class DatasetManifest:
             and self.risk_rate > 0
         ):
             raise ManifestError("equity and risk_rate must be positive finite Decimals")
+        seen: set[str] = set()
+        for declaration in self.known_gaps:
+            if not isinstance(declaration, TerminalDeclaration):
+                raise ManifestError("known_gaps must hold terminal declarations")
+            if declaration.symbol not in self.symbols:
+                raise ManifestError("a known gap declaration names a symbol outside the universe")
+            if declaration.symbol in seen:
+                raise ManifestError("more than one known gap declaration for a symbol")
+            seen.add(declaration.symbol)
+            _check_source_url(declaration.source_url)
 
     def validation_folds(self) -> tuple[tuple[datetime, datetime], ...]:
         """The four consecutive equal-length walk-forward test folds of the validation block."""
@@ -177,12 +226,10 @@ class DatasetManifest:
             "excluded_periods": [p.canonical() for p in self.excluded_periods],
             "known_gaps": [
                 {
-                    "series": g.series,
                     "symbol": g.symbol,
-                    "interval": g.interval,
-                    "start_utc": g.start_utc,
-                    "end_utc": g.end_utc,
-                    "missing": g.missing,
+                    "reason": g.reason,
+                    "terminal_at_utc": g.terminal_at_utc,
+                    "source_url": g.source_url,
                 }
                 for g in self.known_gaps
             ],
@@ -348,7 +395,7 @@ _MANIFEST_KEYS = frozenset(
     }
 )
 _PERIOD_KEYS = frozenset({"start_utc", "end_utc", "reason"})
-_GAP_KEYS = frozenset({"series", "symbol", "interval", "start_utc", "end_utc", "missing"})
+_GAP_KEYS = frozenset({"symbol", "reason", "terminal_at_utc", "source_url"})
 _POINT_KEYS = frozenset({"parameter_set_id", "parameter_set_hash", "varied"})
 
 
@@ -371,23 +418,26 @@ def load_manifest(path: Path) -> DatasetManifest:
                 _text(row, "reason", "excluded period"),
             )
         )
-    gaps: list[GapRange] = []
+    gaps: list[TerminalDeclaration] = []
     for item in _list(payload, "known_gaps", what):
         row = _object(item, "known gap")
         _exact_keys(row, _GAP_KEYS, "known gap")
-        missing = row["missing"]
-        if not isinstance(missing, int) or isinstance(missing, bool) or missing < 1:
-            raise ManifestError("known gap missing must be a positive integer")
-        gaps.append(
-            GapRange(
-                series=_text(row, "series", "known gap"),
-                symbol=_text(row, "symbol", "known gap"),
-                interval=_text(row, "interval", "known gap"),
-                start_utc=_utc(row, "start_utc", "known gap"),
-                end_utc=_utc(row, "end_utc", "known gap"),
-                missing=missing,
+        reason = _text(row, "reason", "known gap")
+        if reason not in KNOWN_GAP_REASONS:
+            raise ManifestError(f"known gap reason must be one of {sorted(KNOWN_GAP_REASONS)}")
+        source_url = _text(row, "source_url", "known gap")
+        _check_source_url(source_url)
+        try:
+            gaps.append(
+                TerminalDeclaration(
+                    symbol=_text(row, "symbol", "known gap"),
+                    reason=reason,
+                    terminal_at_utc=_utc(row, "terminal_at_utc", "known gap"),
+                    source_url=source_url,
+                )
             )
-        )
+        except CaseInputError as exc:
+            raise ManifestError(str(exc)) from None
     return DatasetManifest(
         universe_id=_text(payload, "universe_id", what),
         symbols=tuple(symbols),
@@ -440,6 +490,9 @@ def load_grid(path: Path) -> ParameterGrid:
 
 __all__ = [
     "DEVELOPMENT",
+    "KNOWN_GAP_REASONS",
+    "KNOWN_GAP_REASON_DELISTED_CAPPED",
+    "KNOWN_GAP_SOURCE_HOSTS",
     "VALIDATION",
     "DatasetManifest",
     "GridPoint",
