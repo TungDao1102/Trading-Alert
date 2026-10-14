@@ -8,6 +8,8 @@ store is read, no network, no ExperimentRecord outside pytest tmp_path, no Holdo
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from fractions import Fraction
@@ -16,6 +18,7 @@ from typing import Any
 
 import pytest
 from src.backtest.case import TerminalSettlementRow, parse_case_input
+from src.backtest.experiment import CodeVersion
 from src.backtest.semantics import (
     TERMINAL_EVALUATION_UNION_ADVERSE_BOUND,
     TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES,
@@ -33,11 +36,15 @@ from src.research.manifest import (
     manifest_hash,
     research_splits,
 )
-from src.research.run import terminal_settlement_case_rows
+from src.research.run import (
+    check_terminal_settlement_evidence,
+    run_research,
+    terminal_settlement_case_rows,
+)
 
 from tests import test_research_known_gap_reason as kg
 from tests import test_research_runner as rr
-from tests.backtest_case_helpers import make_case
+from tests.backtest_case_helpers import constraint_row, make_case
 
 D = Decimal
 REEF = "REEFUSDT"
@@ -905,3 +912,241 @@ def test_whole_range_store_check_ignores_settlements(builder_spy: dict[str, list
     assert first == second
     assert "terminal_settlements" not in second
     assert builder_spy["scenario"] == []  # nothing is turned into a case input
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: the runner recomputes the bounds from the committed evidence, fail closed.
+# --------------------------------------------------------------------------- #
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+ALL_EVIDENCE = (INDEX_PATH, TRADE_PATH, SUPPORT_PATH)
+
+
+def copy_evidence(base: Path, *, leave_out: tuple[str, ...] = ()) -> Path:
+    """A tmp repo root holding byte copies of the committed REEF evidence."""
+    root = base / "repo"
+    for rel in ALL_EVIDENCE:
+        if rel in leave_out:
+            continue
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((REPO_ROOT / rel).read_bytes())
+    return root
+
+
+def rewrite_rows(root: Path, rel: str, mutate: Any) -> str:
+    """Change a kline body, keep it well-formed, and return the new sha256 (re-hashed)."""
+    path = root / rel
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    mutate(rows)
+    raw = json.dumps(rows, separators=(",", ":")).encode("utf-8")
+    path.write_bytes(raw)
+    return hashlib.sha256(raw).hexdigest()
+
+
+def test_runner_recomputes_the_reef_bounds_from_committed_evidence() -> None:
+    assert check_terminal_settlement_evidence(with_settlement(), repo_root=REPO_ROOT) is None
+    assert check_terminal_settlement_evidence(make_manifest(), repo_root=REPO_ROOT) is None
+
+
+def test_a_copy_of_the_evidence_passes_too(tmp_path: Path) -> None:
+    root = copy_evidence(tmp_path)
+    check_terminal_settlement_evidence(with_settlement(), repo_root=root)
+
+
+@pytest.mark.parametrize(
+    ("rel", "label"),
+    [
+        (INDEX_PATH, "index_klines"),
+        (TRADE_PATH, "trade_kline"),
+        (SUPPORT_PATH, "supporting_evidence"),
+    ],
+)
+def test_one_changed_byte_is_a_sha256_mismatch(tmp_path: Path, rel: str, label: str) -> None:
+    root = copy_evidence(tmp_path)
+    path = root / rel
+    path.write_bytes(path.read_bytes() + b" ")
+    with pytest.raises(ManifestError, match=f"{label}.*sha256"):
+        check_terminal_settlement_evidence(with_settlement(), repo_root=root)
+
+
+@pytest.mark.parametrize(
+    ("rel", "label"),
+    [
+        (INDEX_PATH, "index_klines"),
+        (TRADE_PATH, "trade_kline"),
+        (SUPPORT_PATH, "supporting_evidence"),
+    ],
+)
+def test_a_missing_file_is_refused(tmp_path: Path, rel: str, label: str) -> None:
+    root = copy_evidence(tmp_path, leave_out=(rel,))
+    with pytest.raises(ManifestError, match=f"{label}.*unreadable"):
+        check_terminal_settlement_evidence(with_settlement(), repo_root=root)
+
+
+def test_a_rehashed_index_value_is_a_recompute_mismatch(tmp_path: Path) -> None:
+    root = copy_evidence(tmp_path)
+    new_sha = rewrite_rows(root, INDEX_PATH, lambda rows: rows[0].__setitem__(3, "0.000800"))
+    manifest = with_settlement(index_klines=EvidenceFile(INDEX_PATH, new_sha))
+    with pytest.raises(ManifestError, match="nominal_lower"):
+        check_terminal_settlement_evidence(manifest, repo_root=root)
+
+
+def test_a_rehashed_trade_candle_is_a_recompute_mismatch(tmp_path: Path) -> None:
+    root = copy_evidence(tmp_path)
+    new_sha = rewrite_rows(root, TRADE_PATH, lambda rows: rows[0].__setitem__(2, "0.000890"))
+    manifest = with_settlement(trade_kline=EvidenceFile(TRADE_PATH, new_sha))
+    with pytest.raises(ManifestError, match="trade_candle_high"):
+        check_terminal_settlement_evidence(manifest, repo_root=root)
+
+
+def test_a_dropped_index_minute_is_refused_even_when_rehashed(tmp_path: Path) -> None:
+    root = copy_evidence(tmp_path)
+    new_sha = rewrite_rows(root, INDEX_PATH, lambda rows: rows.pop(10))
+    manifest = with_settlement(index_klines=EvidenceFile(INDEX_PATH, new_sha))
+    with pytest.raises(ManifestError, match="does not recompute"):
+        check_terminal_settlement_evidence(manifest, repo_root=root)
+
+
+def test_evidence_that_is_not_kline_json_is_refused_even_when_hashed(tmp_path: Path) -> None:
+    root = copy_evidence(tmp_path)
+    junk = b"not json"
+    (root / TRADE_PATH).write_bytes(junk)
+    trade = EvidenceFile(TRADE_PATH, hashlib.sha256(junk).hexdigest())
+    with pytest.raises(ManifestError, match="does not recompute"):
+        check_terminal_settlement_evidence(with_settlement(trade_kline=trade), repo_root=root)
+
+
+@pytest.mark.parametrize(
+    ("field", "overrides"),
+    [
+        ("trade_candle_low", {"trade_candle_low": D("0.00085"), "price_lower": D("0.00085")}),
+        ("trade_candle_high", {"trade_candle_high": D("0.000869"), "price_upper": D("0.000869")}),
+    ],
+)
+def test_a_self_consistent_manifest_row_that_the_evidence_contradicts_is_refused(
+    field: str, overrides: dict[str, Decimal]
+) -> None:
+    manifest = with_settlement(**overrides)  # the arithmetic of the row alone cannot see this
+    with pytest.raises(ManifestError, match=field):
+        check_terminal_settlement_evidence(manifest, repo_root=REPO_ROOT)
+
+
+def test_a_wrong_window_start_cannot_pass_the_recompute() -> None:
+    manifest = with_settlement(bound_window_start_utc=datetime(2025, 1, 22, 8, 29, tzinfo=UTC))
+    with pytest.raises(ManifestError, match="does not recompute"):
+        check_terminal_settlement_evidence(manifest, repo_root=REPO_ROOT)
+
+
+def test_the_refusal_never_echoes_file_content(tmp_path: Path) -> None:
+    root = copy_evidence(tmp_path)
+    (root / INDEX_PATH).write_bytes(b"SECRET-CONTENT-0.000845")
+    with pytest.raises(ManifestError) as caught:
+        check_terminal_settlement_evidence(with_settlement(), repo_root=root)
+    assert "SECRET" not in str(caught.value)
+    assert "0.000845" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "bad_path",
+    ["../outside.json", "docs/../../outside.json", "/outside.json", "C:/outside.json"],
+)
+def test_evidence_path_outside_the_repo_root_is_refused(tmp_path: Path, bad_path: str) -> None:
+    root = copy_evidence(tmp_path)
+    escaped = EvidenceFile(INDEX_PATH, INDEX_SHA)
+    object.__setattr__(escaped, "path", bad_path)  # a hand-built object that skips the shape check
+    manifest = with_settlement(index_klines=escaped)
+    with pytest.raises(ManifestError, match="outside the repository root"):
+        check_terminal_settlement_evidence(manifest, repo_root=root)
+
+
+def _runner_inputs(tmp_path: Path, manifest: DatasetManifest) -> dict[str, Any]:
+    grid = rr._grid()
+    return {
+        "manifest": manifest,
+        "grid": grid,
+        "authorization": rr._authorization(manifest, grid),
+        "raw_root": tmp_path / "raw",
+        "output_dir": tmp_path / "experiments",
+    }
+
+
+def _runner_manifest(tmp_path: Path, **row_overrides: Any) -> DatasetManifest:
+    constraints = tmp_path / "constraints.json"
+    observed = datetime(2024, 12, 1, tzinfo=UTC)
+    rows = [constraint_row(BTC, observed), constraint_row(REEF, observed)]
+    constraints.write_text(json.dumps({"constraint_history": rows}), encoding="utf-8")
+    return make_manifest(
+        constraint_source=str(constraints),
+        constraint_sha256=hashlib.sha256(constraints.read_bytes()).hexdigest(),
+        terminal_settlements=(reef_settlement(**row_overrides),),
+    )
+
+
+@pytest.fixture
+def run_spies(
+    builder_spy: dict[str, list[Any]], monkeypatch: pytest.MonkeyPatch
+) -> dict[str, list[Any]]:
+    def fake_code_version(repo_root: Path) -> CodeVersion:
+        return CodeVersion(commit="a" * 40, dirty=False)
+
+    monkeypatch.setattr(research_run, "read_code_version", fake_code_version)
+    return builder_spy
+
+
+def test_runner_refuses_tampered_evidence_before_any_simulation(
+    tmp_path: Path, run_spies: dict[str, list[Any]]
+) -> None:
+    root = copy_evidence(tmp_path)
+    path = root / INDEX_PATH
+    path.write_bytes(path.read_bytes() + b" ")
+    manifest = _runner_manifest(tmp_path)
+    with pytest.raises(ManifestError, match="index_klines"):
+        run_research(**_runner_inputs(tmp_path, manifest), repo_root=root)
+    assert run_spies["build"] == []  # not even the store check ran
+    assert run_spies["scenario"] == []  # nothing reached the simulator
+
+
+def test_runner_refuses_a_missing_evidence_file_before_any_simulation(
+    tmp_path: Path, run_spies: dict[str, list[Any]]
+) -> None:
+    root = copy_evidence(tmp_path, leave_out=(TRADE_PATH,))
+    manifest = _runner_manifest(tmp_path)
+    with pytest.raises(ManifestError, match="trade_kline"):
+        run_research(**_runner_inputs(tmp_path, manifest), repo_root=root)
+    assert run_spies["build"] == []
+    assert run_spies["scenario"] == []
+
+
+def test_runner_refuses_a_rehashed_kline_value_before_any_simulation(
+    tmp_path: Path, run_spies: dict[str, list[Any]]
+) -> None:
+    root = copy_evidence(tmp_path)
+    new_sha = rewrite_rows(root, TRADE_PATH, lambda rows: rows[0].__setitem__(2, "0.000890"))
+    manifest = _runner_manifest(tmp_path, trade_kline=EvidenceFile(TRADE_PATH, new_sha))
+    with pytest.raises(ManifestError, match="trade_candle_high"):
+        run_research(**_runner_inputs(tmp_path, manifest), repo_root=root)
+    assert run_spies["build"] == []
+    assert run_spies["scenario"] == []
+
+
+def test_runner_with_intact_evidence_reaches_the_simulation(
+    tmp_path: Path, run_spies: dict[str, list[Any]]
+) -> None:
+    root = copy_evidence(tmp_path)
+    manifest = _runner_manifest(tmp_path)
+    with pytest.raises(_Stop):  # the simulator spy stops the run at the first window
+        run_research(**_runner_inputs(tmp_path, manifest), repo_root=root)
+    assert len(run_spies["build"]) == 2  # the store check, then the first window
+    assert run_spies["scenario"][0]["terminal_settlements"] == [EXPECTED_ROW]
+
+
+def test_runner_checks_the_evidence_after_the_constraint_file(
+    tmp_path: Path, run_spies: dict[str, list[Any]]
+) -> None:
+    root = copy_evidence(tmp_path)
+    path = root / INDEX_PATH
+    path.write_bytes(path.read_bytes() + b" ")
+    manifest = dataclasses.replace(_runner_manifest(tmp_path), constraint_sha256="3" * 64)
+    with pytest.raises(ManifestError, match="constraint"):
+        run_research(**_runner_inputs(tmp_path, manifest), repo_root=root)
