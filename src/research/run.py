@@ -1,7 +1,9 @@
 """Research runner entrypoint: `python -m src.research.run` (Phase 16, plan 16-06, D-24, D-25).
 
 Infrastructure only (L-03). An authorized run goes: authorization check, registered
-parameter-set check, constraint-file check, dataset-identity check, then for every grid point
+parameter-set check, constraint-file check, terminal-settlement evidence check (quick
+261014-nnl: the stored bounds are recomputed from the committed evidence bytes, a mismatch
+refuses), dataset-identity check, then for every grid point
 and every development / validation-fold window: case input from the published store,
 `simulator.run`, `read_code_version`, `experiment.assemble`, one experiment record file named
 by its `experiment_id`. The holdout is never simulated here. The runner prints one neutral
@@ -18,7 +20,7 @@ import hashlib
 import json
 import sys
 from collections.abc import Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from time import perf_counter
 from typing import Any
 
@@ -40,6 +42,7 @@ from .authorization import (
 from .feasibility import G5_NOT_ASSESSED_LINE, feasibility_report, render_feasibility
 from .manifest import (
     DatasetManifest,
+    EvidenceFile,
     GridPoint,
     ManifestError,
     ParameterGrid,
@@ -51,6 +54,7 @@ from .manifest import (
 )
 from .plateau import plateau_report
 from .report import count_mark_hole_trades, render_run_report, summarize_trades
+from .settlement_evidence import SettlementEvidenceError, recompute_settlement_bounds
 
 EXIT_OK = 0
 EXIT_REFUSED = 2
@@ -117,6 +121,76 @@ def _check_grid_is_registered(grid: ParameterGrid) -> None:
                 raise ManifestError(
                     f"varied value for {key!r} in {point.parameter_set_id!r} is not the "
                     "registered value"
+                )
+
+
+def _evidence_bytes(repo_root: Path, evidence: EvidenceFile, label: str) -> bytes:
+    """The bytes of one committed evidence file, confined to `repo_root` and sha256-checked.
+
+    Messages name the field (`label`) only; file content is never echoed.
+    """
+    root = repo_root.resolve()
+    target = (root / evidence.path).resolve()
+    rooted_elsewhere = (
+        PurePosixPath(evidence.path).is_absolute()
+        or PureWindowsPath(evidence.path).is_absolute()
+        or PureWindowsPath(evidence.path).drive != ""
+    )
+    if rooted_elsewhere or not target.is_relative_to(root):
+        raise ManifestError(f"{label} path resolves outside the repository root")
+    try:
+        raw = target.read_bytes()
+    except OSError as exc:
+        raise ManifestError(f"{label} file unreadable ({type(exc).__name__})") from None
+    if hashlib.sha256(raw).hexdigest() != evidence.sha256:
+        raise ManifestError(f"{label} bytes do not match the manifest sha256")
+    return raw
+
+
+def check_terminal_settlement_evidence(manifest: DatasetManifest, repo_root: Path) -> None:
+    """Recompute every stored settlement bound from the committed evidence; refuse a mismatch.
+
+    For each `terminal_settlements` entry (design section 2): resolve each evidence path under
+    `repo_root` (a path that resolves outside it is refused), compare the sha256 of the bytes of
+    the index klines, the trade kline and every supporting file, recompute the nominal bounds,
+    the tick-widened index bounds, the trade candle and the union over [bound_window_start_utc,
+    T) with the stored tick, and compare the nominal fractions and all six Decimals with the
+    entry. Any difference raises `ManifestError` naming the field. A manifest without entries
+    passes without reading anything. Runs before any simulation.
+    """
+    terminals = {g.symbol: g.terminal_at_utc for g in manifest.known_gaps}
+    for entry in manifest.terminal_settlements:
+        label = f"terminal settlement {entry.symbol}"
+        index_raw = _evidence_bytes(repo_root, entry.index_klines, f"{label} index_klines")
+        trade_raw = _evidence_bytes(repo_root, entry.trade_kline, f"{label} trade_kline")
+        for position, support in enumerate(entry.supporting_evidence):
+            _evidence_bytes(repo_root, support, f"{label} supporting_evidence[{position}]")
+        try:
+            recomputed = recompute_settlement_bounds(
+                index_klines=index_raw,
+                trade_kline=trade_raw,
+                window_start_utc=entry.bound_window_start_utc,
+                terminal_at_utc=terminals[entry.symbol],
+                tick=entry.price_tick_size,
+            )
+        except SettlementEvidenceError as exc:
+            raise ManifestError(
+                f"{label}: the committed evidence does not recompute: {exc}"
+            ) from None
+        nominal_lower, nominal_upper = entry.nominal_bounds()
+        for name, expected, stored in (
+            ("nominal_lower", recomputed.nominal_lower, nominal_lower),
+            ("nominal_upper", recomputed.nominal_upper, nominal_upper),
+            ("index_lower", recomputed.index_lower, entry.index_lower),
+            ("index_upper", recomputed.index_upper, entry.index_upper),
+            ("trade_candle_low", recomputed.trade_low, entry.trade_candle_low),
+            ("trade_candle_high", recomputed.trade_high, entry.trade_candle_high),
+            ("price_lower", recomputed.price_lower, entry.price_lower),
+            ("price_upper", recomputed.price_upper, entry.price_upper),
+        ):
+            if expected != stored:
+                raise ManifestError(
+                    f"{label} {name} does not match the value recomputed from the evidence"
                 )
 
 
@@ -255,12 +329,13 @@ def run_research(
 ) -> tuple[ExperimentRecord, ...]:
     """Run the authorized manifest and grid over the development and validation windows.
 
-    Every refusal (authorization, registry hash, constraint file, dataset identity) happens
-    before any simulation. An `experiment_id` is only known once `assemble` has built the
-    record, so the rerun check (`ExperimentAlreadyRecorded`) runs right after each window is
-    assembled and again over all records before the first write: a rerun stops at its first
-    window and writes nothing. Records are written only after every window has run, each to
-    `<experiment_id>.json` created exclusively (an existing file is never overwritten).
+    Every refusal (authorization, registry hash, constraint file, terminal-settlement evidence,
+    dataset identity) happens before any simulation. An `experiment_id` is only known once
+    `assemble` has built the record, so the rerun check (`ExperimentAlreadyRecorded`) runs
+    right after each window is assembled and again over all records before the first write: a
+    rerun stops at its first window and writes nothing. Records are written only after every
+    window has run, each to `<experiment_id>.json` created exclusively (an existing file is
+    never overwritten).
 
     `time_run` (D-30, G4-009) adds one `timing` line per split to the run log: wall seconds from
     `perf_counter`, never written into a record, so identity and digests do not move. No
@@ -269,6 +344,7 @@ def run_research(
     require_authorized(authorization, manifest=manifest, grid=grid)
     _check_grid_is_registered(grid)
     constraints = _load_constraints(manifest)
+    check_terminal_settlement_evidence(manifest, repo_root)
     _check_manifest_against_store(manifest, raw_root)
 
     code_version = read_code_version(repo_root)
