@@ -1,0 +1,106 @@
+Pre-bump regression evidence for the S-B-interval implementation (quick 261014-nnl plan 06; design test 10, first half)
+Run on 2026-10-14 (15:19 UTC) in C:/Users/daotu/OneDrive/Documents/Trading-Alert, branch develop, main working tree. Every command below was run by the executor and its real exit status is shown. Nothing here reads the Holdout, writes an ExperimentRecord outside pytest tmp_path, runs O-03, or fetches anything.
+
+Purpose: at the commit that ends the code of plans 01-06, with SIMULATOR_SEMANTICS_VERSION still at its old value, the whole suite passes and no existing test file was modified since the plan-set base (tests were only added). That is the recorded proof that every input that declares no terminal settlement behaves identically to the code before the plan set. Plan 07 relies on this file for the regeneration comparison.
+
+base_commit: d186b9e5193411cd5c27883a48182bf4eaa6b025
+head_commit: 4366bb1d45facc29dd6b23d308e99f15ee0dc1bf
+(base_commit is the plan_head_before of 261014-nnl-01-SUMMARY.md. head_commit is the last code or test commit; this evidence file is committed after it and changes no code. The git diff commands below were run at head_commit.)
+
+Gate commands (final state, HEAD 4366bb1, the working tree has no change to src, tests, params or fixtures)
+$ uv run --frozen pytest -m "not docker" -q
+  6597 passed, 459 skipped, 0 failed, 0 errors (counted from the progress dots of the log; the repository addopts "-q" together with "-q" prints no summary line)
+  skips are the live-PostgreSQL tests (no TEST_DATABASE_URL) and the other conditional skips already present before the plan set
+  exit=0
+$ uv run --frozen ruff check
+  All checks passed!
+  exit=0
+$ uv run --frozen ruff format --check
+  542 files already formatted
+  exit=0
+$ uv run --frozen mypy src
+  Success: no issues found in 185 source files
+  exit=0
+$ uv lock --check
+  Resolved 60 packages in 4ms
+  exit=0
+
+Version string (not bumped by plans 01-06)
+$ grep -n "SIMULATOR_SEMANTICS_VERSION = " src/backtest/semantics.py
+  24:SIMULATOR_SEMANTICS_VERSION = "2.0.0"
+
+Test-file diff since the base (every line must start with A; an M or a D is a stop condition)
+$ git diff --name-status d186b9e5193411cd5c27883a48182bf4eaa6b025 HEAD -- tests
+  A	tests/test_backtest_terminal_engine.py
+  A	tests/test_backtest_terminal_funding.py
+  A	tests/test_backtest_terminal_settlement.py
+  A	tests/test_research_settlement_evidence.py
+  A	tests/test_research_terminal_settlement_integration.py
+  A	tests/test_research_terminal_settlement_manifest.py
+  A	tests/test_terminal_settlement_consumers.py
+  no M, no D: seven files added, no existing test file modified
+
+Paper, parameters and fixtures untouched since the base
+$ git diff --stat d186b9e5193411cd5c27883a48182bf4eaa6b025 HEAD -- src/paper params tests/fixtures
+  (empty)
+  exit=0
+
+Source files changed since the base (for the record; all other src files are byte-identical to the base)
+$ git diff --name-status d186b9e5193411cd5c27883a48182bf4eaa6b025 HEAD -- src
+  M	src/analytics/lifecycle.py
+  M	src/backtest/case.py
+  M	src/backtest/engine.py
+  M	src/backtest/funding.py
+  M	src/backtest/lifecycle.py
+  M	src/backtest/records.py
+  M	src/backtest/report.py
+  M	src/backtest/semantics.py
+  M	src/research/feasibility.py
+  M	src/research/manifest.py
+  M	src/research/run.py
+  A	src/research/settlement_evidence.py
+
+Commits of the plan set since the base (oldest first)
+  c5d1ba6  docs(16): S-B-interval evidence and implementation authorization
+  f3d3f3f  test(quick-261014-nnl-01): failing tests for the pure settlement-evidence recompute (design test 9)
+  17fca97  feat(quick-261014-nnl-01): pure settlement-evidence recompute (nominal, tick-widened, trade-candle, union bounds)
+  e41f759  docs(quick-261014-nnl-01): summary of plan 01 (evidence and pure settlement recompute)
+  b81e87a  docs(16): record user authorization of plans 02-06 of quick 261014-nnl
+  0428f19  test(quick-261014-nnl-03): failing tracer tests for OPEN settlement at the terminal instant
+  65d0746  feat(quick-261014-nnl-03): settle an OPEN position at the declared terminal instant
+  2959a14  test(quick-261014-nnl-03): OPEN-side settlement semantics, resting cancel and case refusals
+  8be45d9  feat(quick-261014-nnl-03): cancel a resting plan at the terminal instant with SETTLEMENT_CANCEL
+  94bcab0  test(quick-261014-nnl-03): failing funding-clip tests for a declared terminal instant
+  aa5d13d  feat(quick-261014-nnl-03): clip funding coverage at a declared terminal instant
+  60f75b2  docs(quick-261014-nnl-03): summary of plan 03 (terminal-settlement tracer, OPEN side, funding clip)
+  fab81c4  test(quick-261014-nnl-02): failing manifest terminal_settlements tests (guard, cross-validation, canonical omission, loader)
+  b51e259  feat(quick-261014-nnl-02): terminal_settlements manifest entry with cross-validation and Validation guard
+  8a59c93  test(quick-261014-nnl-02): failing builder-rule tests (case rows only for the window containing T)
+  d51f867  feat(quick-261014-nnl-02): case rows for terminal settlements only in the window containing T
+  f837043  test(quick-261014-nnl-02): failing runner evidence-check tests (sha256, recompute, path confinement)
+  7c84c35  feat(quick-261014-nnl-02): runner recomputes settlement bounds from committed evidence before any simulation
+  0bf7a29  docs(quick-261014-nnl-02): summary of plan 02 (manifest terminal_settlements, builder rule, evidence check)
+  95824dd  test(quick-261014-nnl-04): failing engine tests for RESTING at T, dropped symbols and DAILY_STOP
+  9854659  feat(quick-261014-nnl-04): a settled or cancelled symbol joins window.dropped before the DAILY_STOP check
+  1e6eab4  test(quick-261014-nnl-04): failing tests for the terminal no-plan rule and inputs after T
+  4eb39dc  feat(quick-261014-nnl-04): terminal no-plan rule with pinned label position and inputs-after-T check
+  8046558  test(quick-261014-nnl-04): failing tests for the conditional settlement_count summary key
+  996462d  feat(quick-261014-nnl-04): run_summary settlement_count only when the case declares a settlement
+  9f8cef3  docs(quick-261014-nnl-04): summary of plan 04 (dropped symbols, no-plan rule, inputs after T, settlement_count)
+  7405ad3  test(quick-261014-nnl-05): failing tests for settlement counted apart in report and feasibility
+  deaa649  feat(quick-261014-nnl-05): report and feasibility count SETTLEMENT apart from closed trades
+  bdb8456  test(quick-261014-nnl-05): failing test for SETTLEMENT_CANCEL in the analytics lifecycle
+  c893575  feat(quick-261014-nnl-05): analytics lifecycle accepts SETTLEMENT_CANCEL as an unfilled backtest kind
+  b663fb6  docs(quick-261014-nnl-05): summary of plan 05 (consumers count SETTLEMENT apart)
+  4366bb1  test(quick-261014-nnl-06): design tests 1 and 3 through run_research (Validation independent of the settlement bounds)
+
+Hashes
+  sha256 tests/test_research_terminal_settlement_integration.py (as committed at 4366bb1, LF): ede1380809d2682c3317f3120151c6247f4807b2a6bc830bb5f72e0292baf981
+
+Design tests 1 and 3 (tests/test_research_terminal_settlement_integration.py, 5 tests, all passed)
+  test_bounds_never_reach_validation_outputs_or_records
+  test_the_bound_reaches_development_output
+  test_g1_and_plateau_inputs_are_validation_records_only
+  test_development_settlement_is_reported_apart_and_never_counted_closed
+  test_no_g2_g3_g4_producer_reads_development
+  Note: the synthetic store makes the strategy find no trade, so the Validation trade lists of test 1 are empty; the equality that carries the argument is that of the Validation case dicts (equal inputs, deterministic simulator), with the engine-level guard that the bound does reach a settled trade.
