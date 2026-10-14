@@ -52,6 +52,9 @@ _BACKTEST_UNFILLED_KINDS = frozenset(
         "INVALIDATION_CANCEL",
         "DAILY_STOP_CANCEL",
         "PENDING_AT_DATA_END",
+        # semantics.SETTLEMENT_CANCEL (quick 261014-nnl): a RESTING plan cancelled at the
+        # terminal instant of its symbol; the literal matches this module's literal style.
+        "SETTLEMENT_CANCEL",
     }
 )
 _ENTRY_EXPIRY_EVENT_TYPE = "ENTRY_EXPIRY"
@@ -320,8 +323,8 @@ def normalize_backtest_lifecycle(
     """Backtest outcomes -> LifecycleRecords sorted by trade_id (all timestamps None).
 
     `entry_filled` is True for ENTRY_FILLED / PARTIAL_FILL and False for
-    EXPIRED / INVALIDATION_CANCEL / DAILY_STOP_CANCEL / PENDING_AT_DATA_END (and the old
-    TOUCH_NO_FILL); `expired_without_fill` is True
+    EXPIRED / INVALIDATION_CANCEL / DAILY_STOP_CANCEL / SETTLEMENT_CANCEL /
+    PENDING_AT_DATA_END (and the old TOUCH_NO_FILL); `expired_without_fill` is True
     only for EXPIRED. An unknown entry_kind or a duplicate trade_id fails closed.
     """
     records: list[LifecycleRecord] = []
