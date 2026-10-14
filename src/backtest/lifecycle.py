@@ -76,6 +76,7 @@ from .semantics import (
     INVALIDATION_CANCEL,
     PARTIAL_FILL,
     PENDING_AT_DATA_END,
+    SETTLEMENT_CANCEL,
     SETTLEMENT_NOTE_PREFIX,
     TERMINAL_EVALUATION_UNION_ADVERSE_BOUND,
     TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES,
@@ -619,7 +620,7 @@ def advance(
     return current, tuple(events)
 
 
-_CANCEL_KINDS = frozenset({EXPIRED, INVALIDATION_CANCEL, DAILY_STOP_CANCEL})
+_CANCEL_KINDS = frozenset({EXPIRED, INVALIDATION_CANCEL, DAILY_STOP_CANCEL, SETTLEMENT_CANCEL})
 
 
 def cancel_plan(
@@ -640,6 +641,12 @@ def cancel_plan(
         raise ValueError(f"cannot cancel a plan in phase {state.phase}")
     closed, event = _close_resting(state, entry_kind=entry_kind, at_utc=at_utc)
     return closed, (event,)
+
+
+_RESTING_SETTLEMENT_NOTE = (
+    f"{SETTLEMENT_NOTE_PREFIX} {SETTLEMENT_CANCEL} resting entry cancelled at the terminal "
+    "instant (unverified assumption)"
+)
 
 
 def _open_settlement_note(
@@ -677,8 +684,10 @@ def settle_at_terminal(
     closes at `terminal_at_utc` with exit kind SETTLEMENT at the adverse bound of the recorded
     interval: `price_lower` for a LONG, `price_upper` for a SHORT, quantity the remaining
     quantity. The fixed-format note naming side, bound, price and interval is appended to the
-    coverage note. No mark span from the last mark minute to the terminal instant is annotated:
-    the gap is the symbol's delisting, not a data hole (design 3.7).
+    coverage note. A RESTING plan is cancelled at `terminal_at_utc` with entry kind
+    SETTLEMENT_CANCEL (one CANCEL event, no cash) and carries the fixed RESTING note. No mark
+    span from the last mark minute to the terminal instant is annotated: the gap is the
+    symbol's delisting, not a data hole (design 3.7).
 
     Raises:
         ValueError: `terminal_at_utc` is naive, not UTC or not minute-aligned, the prices are not
@@ -721,7 +730,14 @@ def settle_at_terminal(
         )
         closed = replace(closed, note_entries=entries, coverage_note=_render_notes(entries))
         return closed, (event,)
-    raise ValueError("settling a RESTING plan is not supported yet")
+    # RESTING: the entry never filled and the symbol ends at `terminal_at_utc`; cancel it there
+    # with the one new cancel kind and flag the cancel as an unverified assumption.
+    closed, cancel_events = cancel_plan(state, entry_kind=SETTLEMENT_CANCEL, at_utc=terminal_at_utc)
+    entries = closed.note_entries + (
+        _NoteEntry(first=terminal_at_utc, text=_RESTING_SETTLEMENT_NOTE),
+    )
+    closed = replace(closed, note_entries=entries, coverage_note=_render_notes(entries))
+    return closed, cancel_events
 
 
 def finalize_at_data_end(
