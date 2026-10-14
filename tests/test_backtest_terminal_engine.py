@@ -573,3 +573,64 @@ def test_undeclared_symbol_with_data_after_another_symbols_terminal_is_unaffecte
 
     assert [t["entry_kind"] for t in records_of(result, BTC)] == ["PENDING_AT_DATA_END"]
     assert [t["entry_kind"] for t in records_of(result, REEF)] == ["SETTLEMENT_CANCEL"]
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: settlement_count in run_summary, only when the case declares a settlement.
+# --------------------------------------------------------------------------- #
+
+SUMMARY_KEYS = frozenset(
+    {
+        "allowed_gaps_used",
+        "constraints_extrapolated_count",
+        "context_timeframe",
+        "context_window_bars",
+        "data_window",
+        "dataset_id",
+        "end_of_data_count",
+        "fallback_count",
+        "gap_through_stop_count",
+        "intrabar_tie_break",
+        "no_trade_counts",
+        "pending_at_data_end_count",
+        "plan_source",
+        "simulator_semantics_version",
+        "strategy_window_bars",
+        "tie_order_note",
+        "timeframe",
+        "touch_no_fill_total",
+    }
+)
+
+
+def test_run_summary_carries_settlement_count_only_when_the_case_declares_a_settlement() -> None:
+    undeclared = terminal_case()
+    del undeclared["terminal_settlements"]
+    plain = simulate_detailed(undeclared, risk_fn=fixed_risk_fn("10", "50"))
+    declared = simulate_detailed(terminal_case(), risk_fn=fixed_risk_fn("10", "50"))
+
+    assert len(SUMMARY_KEYS) == 18
+    assert set(plain.output["run_summary"]) == SUMMARY_KEYS
+    assert set(declared.output["run_summary"]) == SUMMARY_KEYS | {"settlement_count"}
+    assert declared.output["run_summary"]["settlement_count"] == 0  # only a cancel happened
+    # Every key the undeclared run has keeps its value in the declared run, apart from the
+    # outcome of the plan itself (cancelled at T instead of pending at the data end).
+    assert plain.output["run_summary"]["pending_at_data_end_count"] == 1
+    assert declared.output["run_summary"]["pending_at_data_end_count"] == 0
+
+
+def test_settlement_count_counts_settlement_exits_not_cancels() -> None:
+    # REEFUSDT is settled (open), BTCUSDT is cancelled (resting), SOLUSDT is undeclared and
+    # still open when its marks end, so it closes END_OF_DATA.
+    case = build_case(
+        {REEF: "open", BTC: "rest", SOL: "open"}, terminals={REEF: TERMINAL, BTC: TERMINAL}
+    )
+    result = run(case, {REEF: SMALL, BTC: SMALL, SOL: SMALL})
+
+    summary = result.output["run_summary"]
+    assert [t["exit_kind"] for t in records_of(result, REEF)] == ["SETTLEMENT"]
+    assert [t["entry_kind"] for t in records_of(result, BTC)] == ["SETTLEMENT_CANCEL"]
+    assert [t["exit_kind"] for t in records_of(result, SOL)] == ["END_OF_DATA"]
+    assert summary["settlement_count"] == 1
+    assert summary["end_of_data_count"] == 1
+    assert summary["pending_at_data_end_count"] == 0
