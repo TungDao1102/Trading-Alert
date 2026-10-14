@@ -11,7 +11,11 @@ count, no extrapolation and no protocol change.
 
 The closed-trade rule is the one `src/backtest/report.py` applies: a filled entry
 (ENTRY_FILLED or PARTIAL_FILL with outcome OK) that left by SL or TP2 is closed; a filled
-entry that left at the end of the data is counted apart and is not closed.
+entry that left at the end of the data is counted apart and is not closed. A filled entry the
+terminal settlement closed (SETTLEMENT, quick 261014-nnl) is counted apart the same way: never
+a closed trade, never in the G1 counts. A settlement inside a Validation fold is refused (the
+manifest guard keeps terminal settlements out of Validation; reaching here means it was
+bypassed).
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from typing import Final
 from src.backtest.semantics import (
     ENTRY_FILLED,
     EXIT_END_OF_DATA,
+    EXIT_SETTLEMENT,
     EXIT_SL,
     EXIT_TP2,
     PARTIAL_FILL,
@@ -56,10 +61,11 @@ class FeasibilityError(Exception):
 
 @dataclass(frozen=True)
 class TradeCounts:
-    """Closed trades (G1 rule) and END_OF_DATA trades counted apart."""
+    """Closed trades (G1 rule); END_OF_DATA and SETTLEMENT trades counted apart."""
 
     closed: int
     end_of_data: int
+    settlement: int = 0
 
 
 @dataclass(frozen=True)
@@ -76,16 +82,18 @@ class FeasibilityReport:
     pooled_floor: int
     per_fold_floor: int
     shortfalls: tuple[str, ...]
+    development_settlement: int | None = None
 
 
 def count_closed_trades(trades: Sequence[Mapping[str, object]]) -> TradeCounts:
-    """Count closed trades the way G1 does; END_OF_DATA exits are reported apart.
+    """Count closed trades the way G1 does; END_OF_DATA and SETTLEMENT exits are reported apart.
 
     Records that did not fill are plan outcomes and are not trades. A filled record with any
     other exit is refused rather than counted as a trade of unknown meaning.
     """
     closed = 0
     end_of_data = 0
+    settlement = 0
     for trade in trades:
         filled = trade.get("outcome_kind") == "OK" and trade.get("entry_kind") in FILLED_ENTRY_KINDS
         if not filled:
@@ -95,12 +103,14 @@ def count_closed_trades(trades: Sequence[Mapping[str, object]]) -> TradeCounts:
             closed += 1
         elif exit_kind == EXIT_END_OF_DATA:
             end_of_data += 1
+        elif exit_kind == EXIT_SETTLEMENT:
+            settlement += 1
         else:
             raise FeasibilityError(
                 f"filled trade {trade.get('trade_id')!r} has exit_kind {exit_kind!r}: "
-                f"expected one of {sorted(CLOSED_EXIT_KINDS | {EXIT_END_OF_DATA})}"
+                f"expected one of {sorted(CLOSED_EXIT_KINDS | {EXIT_END_OF_DATA, EXIT_SETTLEMENT})}"
             )
-    return TradeCounts(closed=closed, end_of_data=end_of_data)
+    return TradeCounts(closed=closed, end_of_data=end_of_data, settlement=settlement)
 
 
 def feasibility_report(
@@ -112,10 +122,19 @@ def feasibility_report(
     """Closed-trade counts pooled over the Validation folds and per fold, with the shortfalls.
 
     Folds keep the order they were given (fold 1 is the first); nothing is sorted by a count.
-    The Development window is counted when given and carries no floor.
+    The Development window is counted when given and carries no floor. A terminal settlement
+    inside a Validation fold raises FeasibilityError (defence in depth behind the manifest
+    guard); a Development settlement is reported apart.
     """
     development = None if development_trades is None else count_closed_trades(development_trades)
     counts = [count_closed_trades(fold) for fold in validation_folds]
+    for index, fold_counts in enumerate(counts, start=1):
+        if fold_counts.settlement:
+            raise FeasibilityError(
+                f"fold {index}: {fold_counts.settlement} terminal settlement trade(s) inside "
+                "Validation; the manifest guard refuses a terminal settlement in a Validation "
+                "window, so reaching here means the guard was bypassed"
+            )
     fold_closed = tuple(c.closed for c in counts)
     pooled = sum(fold_closed)
     shortfalls: list[str] = []
@@ -135,6 +154,7 @@ def feasibility_report(
         pooled_floor=G1_POOLED_FLOOR,
         per_fold_floor=G1_PER_FOLD_FLOOR,
         shortfalls=tuple(shortfalls),
+        development_settlement=None if development is None else development.settlement,
     )
 
 
@@ -148,6 +168,8 @@ def render_feasibility(report: FeasibilityReport) -> list[str]:
         else f"development_closed={report.development_closed} "
         f"development_end_of_data={report.development_end_of_data} "
     )
+    if report.development_settlement:
+        development += f"development_settlement={report.development_settlement} "
     lines = [
         f"feasibility parameter_set_id={report.parameter_set_id} "
         f"{development}pooled_closed={report.pooled_closed} pooled_floor={report.pooled_floor} "

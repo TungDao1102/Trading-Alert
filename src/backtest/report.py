@@ -14,8 +14,9 @@ Plan 14-11 (D-34, D-37, D-21): only CLOSED FILLED trades (outcome OK, a filled e
 exit_kind SL or TP2) are trades. They alone feed trade_count, the R distribution, the
 bootstrap, drawdown, stability, baselines and the dual-universe slices, so a plan that
 never filled can never inflate the trade floor. Positions the data end closed
-(END_OF_DATA) are counted apart and kept out of the pooled R; non-fill plan outcomes are
-counted by entry_kind. The plateau section is a fixed NOT_COMPUTED structure until
+(END_OF_DATA) and positions the terminal settlement closed (SETTLEMENT, quick 261014-nnl) are
+each counted apart and kept out of the pooled R; non-fill plan outcomes (SETTLEMENT_CANCEL
+among them) are counted by entry_kind. The plateau section is a fixed NOT_COMPUTED structure until
 BKTS-03 exists: the report neither states nor implies plateau evidence.
 
 The module imports NOTHING from Polars/pandas/NumPy/Binance SDK/
@@ -39,7 +40,14 @@ from src.core._decimal import _add, _div, _mul, _q, _sub
 from src.core.types import _require_utc_aware
 from src.domain.canonical import sha256_hex
 
-from .semantics import ENTRY_FILLED, EXIT_END_OF_DATA, EXIT_SL, EXIT_TP2, PARTIAL_FILL
+from .semantics import (
+    ENTRY_FILLED,
+    EXIT_END_OF_DATA,
+    EXIT_SETTLEMENT,
+    EXIT_SL,
+    EXIT_TP2,
+    PARTIAL_FILL,
+)
 
 LIVE5_SYMBOLS: frozenset[str] = frozenset({"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"})
 
@@ -60,7 +68,9 @@ class CountsSection:
     """Closed-trade counts overall and sliced by symbol/quarter/regime/version.
 
     `trade_count` and every slice cover closed filled trades only (D-37).
-    `end_of_data_count` counts positions the data end closed; `plan_outcome_counts`
+    `end_of_data_count` counts positions the data end closed; `settlement_count` counts
+    positions the terminal settlement closed (never a closed trade; it joins the digest payload
+    only when non-zero, so every settlement-free digest is unchanged); `plan_outcome_counts`
     counts plans that never filled, keyed by `entry_kind` (sorted).
     """
 
@@ -71,19 +81,21 @@ class CountsSection:
     counts_by_version: dict[str, int]
     end_of_data_count: int
     plan_outcome_counts: dict[str, int]
+    settlement_count: int = 0
 
     def digest(self) -> str:
-        return sha256_hex(
-            {
-                "trade_count": self.trade_count,
-                "end_of_data_count": self.end_of_data_count,
-                "plan_outcome_counts": self.plan_outcome_counts,
-                "counts_by_symbol": self.counts_by_symbol,
-                "counts_by_quarter": self.counts_by_quarter,
-                "counts_by_regime": self.counts_by_regime,
-                "counts_by_version": self.counts_by_version,
-            }
-        )
+        payload: dict[str, Any] = {
+            "trade_count": self.trade_count,
+            "end_of_data_count": self.end_of_data_count,
+            "plan_outcome_counts": self.plan_outcome_counts,
+            "counts_by_symbol": self.counts_by_symbol,
+            "counts_by_quarter": self.counts_by_quarter,
+            "counts_by_regime": self.counts_by_regime,
+            "counts_by_version": self.counts_by_version,
+        }
+        if self.settlement_count:
+            payload["settlement_count"] = self.settlement_count
+        return sha256_hex(payload)
 
 
 @dataclass(frozen=True)
@@ -309,9 +321,11 @@ class DualUniverseSection:
 class IntrabarCoverage:
     """1m intrabar coverage aggregation (D-01 + Phase-2 D-09).
 
-    Fallback can occur on a closed trade or on an END_OF_DATA trade, so the population is
-    both; `closed_trades` and `end_of_data_trades` state the two totals and `total_trades`
-    is their sum.
+    Fallback can occur on a closed trade, on an END_OF_DATA trade or on a SETTLEMENT trade,
+    so the population is all three; `closed_trades`, `end_of_data_trades` and
+    `settlement_trades` state the three totals and `total_trades` is their sum.
+    `settlement_trades` joins the digest payload only when non-zero (settlement-free digests
+    are unchanged).
     """
 
     percent: Decimal
@@ -320,18 +334,20 @@ class IntrabarCoverage:
     closed_trades: int
     end_of_data_trades: int
     coverage_notes: tuple[str, ...]
+    settlement_trades: int = 0
 
     def digest(self) -> str:
-        return sha256_hex(
-            {
-                "percent": self.percent,
-                "fallback_count": self.fallback_count,
-                "total_trades": self.total_trades,
-                "closed_trades": self.closed_trades,
-                "end_of_data_trades": self.end_of_data_trades,
-                "coverage_notes": list(self.coverage_notes),
-            }
-        )
+        payload: dict[str, Any] = {
+            "percent": self.percent,
+            "fallback_count": self.fallback_count,
+            "total_trades": self.total_trades,
+            "closed_trades": self.closed_trades,
+            "end_of_data_trades": self.end_of_data_trades,
+            "coverage_notes": list(self.coverage_notes),
+        }
+        if self.settlement_trades:
+            payload["settlement_trades"] = self.settlement_trades
+        return sha256_hex(payload)
 
 
 @dataclass(frozen=True)
@@ -584,18 +600,22 @@ def _quantile(values: Sequence[Decimal], q: Decimal) -> Decimal:
     return _add(sorted_v[lo_idx], _mul(_sub(sorted_v[hi_idx], sorted_v[lo_idx]), frac))
 
 
+_TradeGroup = list[Mapping[str, Any]]
+
+
 def _classify(
     trade_records: Sequence[Mapping[str, Any]],
-) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]], Counter[str]]:
-    """Split records into closed filled trades, END_OF_DATA trades and plan outcomes (D-34).
+) -> tuple[_TradeGroup, _TradeGroup, _TradeGroup, Counter[str]]:
+    """Split records into closed, END_OF_DATA and SETTLEMENT trades and plan outcomes (D-34).
 
     A record that filled (outcome OK, entry ENTRY_FILLED or PARTIAL_FILL) must leave with
-    SL, TP2 or END_OF_DATA; any other exit (a v1 TP1 or EOD, a missing or unknown kind) is
-    refused, never counted as a trade of unknown meaning. Everything else is a plan outcome,
-    counted by `entry_kind`.
+    SL, TP2, END_OF_DATA or SETTLEMENT; any other exit (a v1 TP1 or EOD, a missing or unknown
+    kind) is refused, never counted as a trade of unknown meaning. Everything else is a plan
+    outcome, counted by `entry_kind`.
     """
     closed: list[Mapping[str, Any]] = []
     end_of_data: list[Mapping[str, Any]] = []
+    settlement: list[Mapping[str, Any]] = []
     plan_outcomes: Counter[str] = Counter()
     for trade in trade_records:
         entry_kind = trade.get("entry_kind")
@@ -608,12 +628,15 @@ def _classify(
             closed.append(trade)
         elif exit_kind == EXIT_END_OF_DATA:
             end_of_data.append(trade)
+        elif exit_kind == EXIT_SETTLEMENT:
+            settlement.append(trade)
         else:
             raise ReportBuildError(
                 f"filled trade {trade.get('trade_id')!r} has exit_kind {exit_kind!r}: "
-                f"expected one of {sorted(_CLOSED_EXIT_KINDS | {EXIT_END_OF_DATA})}"
+                f"expected one of "
+                f"{sorted(_CLOSED_EXIT_KINDS | {EXIT_END_OF_DATA, EXIT_SETTLEMENT})}"
             )
-    return closed, end_of_data, plan_outcomes
+    return closed, end_of_data, settlement, plan_outcomes
 
 
 def build(
@@ -644,7 +667,7 @@ def build(
     if not (Decimal("0") < probable <= Decimal("1")):
         raise ReportBuildError(f"probable must be in (0, 1], got {probable}")
 
-    closed_trades, end_of_data_trades, plan_outcomes = _classify(trade_records)
+    closed_trades, end_of_data_trades, settlement_trades, plan_outcomes = _classify(trade_records)
     # WR-06: the engine orders trades by signal close, but results are realized at exit, and
     # holding periods overlap. Drawdown, block bootstrap and stability walk the equity path,
     # so the closed trades are ordered by realized time (exit time, then trade id).
@@ -681,6 +704,7 @@ def build(
         counts_by_version=dict(sorted(by_version.items())),
         end_of_data_count=len(end_of_data_trades),
         plan_outcome_counts=dict(sorted(plan_outcomes.items())),
+        settlement_count=len(settlement_trades),
     )
 
     if n_r == 0:
@@ -852,8 +876,9 @@ def build(
         weak_live_universe_rejection=weak_rejection,
     )
 
-    # Fallback can occur on a closed trade or on an END_OF_DATA trade: both are filled.
-    filled_trades = [*closed_trades, *end_of_data_trades]
+    # Fallback can occur on a closed trade, an END_OF_DATA trade or a SETTLEMENT trade: all
+    # three are filled (a settlement is a filled trade, so its fixed coverage note surfaces).
+    filled_trades = [*closed_trades, *end_of_data_trades, *settlement_trades]
     n_filled = len(filled_trades)
     fallback_count = sum(1 for t in filled_trades if t.get("fallback_applied") is True)
     coverage_notes = tuple(
@@ -878,6 +903,7 @@ def build(
         closed_trades=n_trades,
         end_of_data_trades=len(end_of_data_trades),
         coverage_notes=coverage_notes,
+        settlement_trades=len(settlement_trades),
     )
 
     return UncertaintyReport(
