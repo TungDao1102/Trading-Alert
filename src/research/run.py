@@ -28,6 +28,7 @@ from src.backtest.costs import build_cost_model, cost_slice
 from src.backtest.experiment import ExperimentRecord, assemble
 from src.data.case_input import ENGINE_SERIES, build_case_input_data
 from src.data.minute_source import ParquetMinuteSource
+from src.domain.canonical import canonical_decimal_text
 from src.domain.registry import load_parameter_set
 
 from .authorization import (
@@ -119,6 +120,35 @@ def _check_grid_is_registered(grid: ParameterGrid) -> None:
                 )
 
 
+def terminal_settlement_case_rows(
+    manifest: DatasetManifest, window: SplitWindow
+) -> list[dict[str, str]]:
+    """The `terminal_settlements` case rows of one window (design sections 2 and 4).
+
+    A row is emitted only for a window that contains the declared terminal instant T strictly
+    inside (`start < T < end`): in a run the Development window. Validation folds and the
+    whole-range store check never carry one, and the manifest guard keeps T out of Validation
+    and Holdout in the first place. Rows are in symbol order; every value is a string, and the
+    bounds are written in canonical decimal text.
+    """
+    terminals = {g.symbol: g.terminal_at_utc for g in manifest.known_gaps}
+    rows: list[dict[str, str]] = []
+    for entry in sorted(manifest.terminal_settlements, key=lambda e: e.symbol):
+        terminal = terminals[entry.symbol]
+        if window.start_utc < terminal < window.end_utc:
+            rows.append(
+                {
+                    "symbol": entry.symbol,
+                    "terminal_at_utc": terminal.isoformat(),
+                    "price_lower": canonical_decimal_text(entry.price_lower),
+                    "price_upper": canonical_decimal_text(entry.price_upper),
+                    "kind": entry.kind,
+                    "recorded_evaluation": entry.recorded_evaluation,
+                }
+            )
+    return rows
+
+
 def _check_manifest_against_store(manifest: DatasetManifest, raw_root: Path) -> None:
     if manifest.excluded_periods:
         raise ManifestError(
@@ -166,6 +196,10 @@ def _run_split(
         series=ENGINE_SERIES,
         terminal_declarations=manifest.known_gaps,
     )
+    settlement_rows = terminal_settlement_case_rows(manifest, window)
+    optional_keys: dict[str, Any] = (
+        {"terminal_settlements": settlement_rows} if settlement_rows else {}
+    )
     case = data.to_case_input(
         strategy_id=grid.strategy_id,
         strategy_version=parameter_set.strategy_version,
@@ -173,6 +207,7 @@ def _run_split(
         account_state={"equity": str(manifest.equity), "risk_rate": str(manifest.risk_rate)},
         cost_model=cost_dict,
         constraint_history=constraints,
+        **optional_keys,
     )
     source = ParquetMinuteSource(
         raw_root,
