@@ -57,6 +57,8 @@ INVALIDATION_CANCEL = "INVALIDATION_CANCEL"
 DAILY_STOP_CANCEL = "DAILY_STOP_CANCEL"
 PENDING_AT_DATA_END = "PENDING_AT_DATA_END"
 REJECT = "REJECT"
+# Quick 261014-nnl: a resting entry cancelled at the declared terminal instant of its symbol.
+SETTLEMENT_CANCEL = "SETTLEMENT_CANCEL"
 ENTRY_KINDS = frozenset(
     {
         ENTRY_FILLED,
@@ -66,6 +68,7 @@ ENTRY_KINDS = frozenset(
         DAILY_STOP_CANCEL,
         PENDING_AT_DATA_END,
         REJECT,
+        SETTLEMENT_CANCEL,
     }
 )
 
@@ -73,11 +76,24 @@ ENTRY_KINDS = frozenset(
 EXIT_SL = "SL"
 EXIT_TP2 = "TP2"
 EXIT_END_OF_DATA = "END_OF_DATA"
-EXIT_KINDS = frozenset({EXIT_SL, EXIT_TP2, EXIT_END_OF_DATA})
+# Quick 261014-nnl: an OPEN position of a declared symbol closes at the terminal instant at the
+# adverse bound of the recorded settlement interval (LONG at price_lower, SHORT at price_upper).
+EXIT_SETTLEMENT = "SETTLEMENT"
+EXIT_KINDS = frozenset({EXIT_SL, EXIT_TP2, EXIT_END_OF_DATA, EXIT_SETTLEMENT})
 
 # D-32: one active plan or position per symbol; a re-signal meanwhile is skipped and
 # counted under this summary-counter label (never a new RejectionReason member).
 NO_TRADE_CONFLICT = "CONFLICT_WITH_OPEN_POSITION"
+
+# Quick 261014-nnl (S-B-interval): summary-counter label of a setup that cannot activate before
+# the terminal instant of its symbol (not a RejectionReason; counted by plan 04), the two
+# strings a `terminal_settlements` case row must carry, and the prefix of the fixed-format
+# `coverage_note` piece of a settled trade. Vocabulary only: SIMULATOR_SEMANTICS_VERSION is
+# bumped in plan 07, after the regeneration inventory is approved.
+NO_TRADE_TERMINAL = "TERMINAL_BEFORE_ACTIVATION"
+TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES = "BOUNDED_BY_INDEX_KLINES"
+TERMINAL_EVALUATION_UNION_ADVERSE_BOUND = "UNION_ADVERSE_BOUND"
+SETTLEMENT_NOTE_PREFIX = "terminal_settlement"
 
 # Where a plan came from (strategy-driven run versus a hand-built scripted fixture).
 PLAN_SOURCE_STRATEGY = "STRATEGY"

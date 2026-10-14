@@ -42,7 +42,14 @@ from .lifecycle import (
     LifecycleEvent,
     PlanState,
 )
-from .semantics import ENTRY_KINDS, EXIT_KINDS, EXIT_TP2, REJECT, SIMULATOR_SEMANTICS_VERSION
+from .semantics import (
+    ENTRY_KINDS,
+    EXIT_KINDS,
+    EXIT_SETTLEMENT,
+    EXIT_TP2,
+    REJECT,
+    SIMULATOR_SEMANTICS_VERSION,
+)
 from .validator import validate_trade_record
 
 BOOKING_FILL = "FILL"
@@ -61,9 +68,9 @@ class TradeRecord:
 
     `entry_kind` is one of the `ENTRY_KINDS` of `src/backtest/semantics.py`
     ("ENTRY_FILLED", "PARTIAL_FILL", "EXPIRED", "INVALIDATION_CANCEL",
-    "DAILY_STOP_CANCEL", "PENDING_AT_DATA_END", "REJECT") or, on records produced by
-    the v1 simulator, "TOUCH_NO_FILL". `exit_kind` is one of "SL", "TP2",
-    "END_OF_DATA" (v1: "SL", "TP1", "EOD") or None if the trade never filled.
+    "DAILY_STOP_CANCEL", "PENDING_AT_DATA_END", "REJECT", "SETTLEMENT_CANCEL") or, on
+    records produced by the v1 simulator, "TOUCH_NO_FILL". `exit_kind` is one of "SL", "TP2",
+    "END_OF_DATA", "SETTLEMENT" (v1: "SL", "TP1", "EOD") or None if the trade never filled.
     `outcome_kind` is "OK" for plans that ran their course and "REJECT" for
     risk-rejected plans.
 
@@ -143,10 +150,15 @@ def _exit_slippage_rate(exit_kind: str | None, cost_model: CostModel) -> Decimal
 
     SL (a stop-market order) and END_OF_DATA (a forced market close, D046) use
     `exit_slippage_rate`; TP2 (a resting limit) uses `expected_slippage` (D-10). The TP1
-    partial is not a final exit and takes `expected_slippage` directly.
+    partial is not a final exit and takes `expected_slippage` directly. SETTLEMENT (a position
+    closed at the declared terminal instant at a recorded bound, quick 261014-nnl) carries no
+    slippage: the bound is the price, so no further adverse move is modeled on top of it. Both
+    `booking_for_event` and `build_trade_record` reach this rule, so ledger and record agree.
     """
     if exit_kind not in EXIT_KINDS:
         raise ValueError(f"unknown exit_kind {exit_kind!r}: expected one of {sorted(EXIT_KINDS)}")
+    if exit_kind == EXIT_SETTLEMENT:
+        return Decimal("0")
     if exit_kind == EXIT_TP2:
         return cost_model.expected_slippage
     if cost_model.exit_slippage_rate is None:
@@ -192,7 +204,7 @@ def _tp1_leg_cost(
 def _final_leg_cost(
     price: Decimal, quantity: Decimal, exit_kind: str | None, cost_model: CostModel
 ) -> tuple[Decimal, Decimal]:
-    """Cost of the final leg of kind SL, TP2 or END_OF_DATA (anything else raises)."""
+    """Cost of the final leg of kind SL, TP2, END_OF_DATA or SETTLEMENT (anything else raises)."""
     return _exit_leg_cost(price, quantity, _exit_slippage_rate(exit_kind, cost_model), cost_model)
 
 
@@ -204,7 +216,8 @@ def booking_for_event(event: LifecycleEvent, *, state: PlanState, cost_model: Co
     partial leg (gross on the TP1 quantity minus exit fee and `expected_slippage`
     slippage). EXIT books the final-leg gross PnL minus the exit fee and exit slippage at
     the exit time; SL and END_OF_DATA exits use `exit_slippage_rate`, TP2 uses
-    `expected_slippage` (D-10). Other event kinds raise `ValueError`.
+    `expected_slippage` (D-10) and SETTLEMENT uses zero slippage. Other event kinds raise
+    `ValueError`.
     """
     if event.kind in (EVENT_CANCEL, EVENT_PENDING):
         return Booking(

@@ -47,6 +47,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from src.core.types import Candle
+from src.domain.canonical import canonical_decimal_text
 from src.domain.trade_plan import TradePlan
 
 from .entry import (
@@ -70,10 +71,14 @@ from .semantics import (
     DAILY_STOP_CANCEL,
     ENTRY_FILLED,
     EXIT_KINDS,
+    EXIT_SETTLEMENT,
     EXPIRED,
     INVALIDATION_CANCEL,
     PARTIAL_FILL,
     PENDING_AT_DATA_END,
+    SETTLEMENT_NOTE_PREFIX,
+    TERMINAL_EVALUATION_UNION_ADVERSE_BOUND,
+    TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES,
 )
 from .series import MinuteSource
 
@@ -635,6 +640,88 @@ def cancel_plan(
         raise ValueError(f"cannot cancel a plan in phase {state.phase}")
     closed, event = _close_resting(state, entry_kind=entry_kind, at_utc=at_utc)
     return closed, (event,)
+
+
+def _open_settlement_note(
+    state: PlanState, *, price_lower: Decimal, price_upper: Decimal, price: Decimal
+) -> str:
+    """Fixed-format coverage-note piece of a position settled at the terminal instant.
+
+    Names the side, which bound was used, the price and the whole interval, and says the bound
+    is an unverified assumption. The text depends only on its arguments (quick 261014-nnl).
+    """
+    bound = "price_lower" if state.direction == "LONG" else "price_upper"
+    return (
+        f"{SETTLEMENT_NOTE_PREFIX} {EXIT_SETTLEMENT} side={state.direction} bound={bound} "
+        f"price={canonical_decimal_text(price)} "
+        f"interval=[{canonical_decimal_text(price_lower)}, {canonical_decimal_text(price_upper)}] "
+        f"kind={TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES} "
+        f"evaluation={TERMINAL_EVALUATION_UNION_ADVERSE_BOUND} "
+        "(settlement price unknown; the bound is an unverified assumption)"
+    )
+
+
+def settle_at_terminal(
+    state: PlanState,
+    *,
+    terminal_at_utc: datetime,
+    price_lower: Decimal,
+    price_upper: Decimal,
+    kind: str,
+    recorded_evaluation: str,
+) -> tuple[PlanState, tuple[LifecycleEvent, ...]]:
+    """Settle a plan at the declared terminal instant of its symbol (quick 261014-nnl).
+
+    The state is expected to have been advanced through `terminal_at_utc` first, as the engine
+    does. A CLOSED plan is returned unchanged. An OPEN position (also the remainder after a TP1)
+    closes at `terminal_at_utc` with exit kind SETTLEMENT at the adverse bound of the recorded
+    interval: `price_lower` for a LONG, `price_upper` for a SHORT, quantity the remaining
+    quantity. The fixed-format note naming side, bound, price and interval is appended to the
+    coverage note. No mark span from the last mark minute to the terminal instant is annotated:
+    the gap is the symbol's delisting, not a data hole (design 3.7).
+
+    Raises:
+        ValueError: `terminal_at_utc` is naive, not UTC or not minute-aligned, the prices are not
+            `0 < price_lower < price_upper`, or `kind` / `recorded_evaluation` are not the two
+            vocabulary constants.
+    """
+    _require_utc(terminal_at_utc, "terminal_at_utc")
+    if terminal_at_utc.second != 0 or terminal_at_utc.microsecond != 0:
+        raise ValueError(f"terminal_at_utc must be minute-aligned, got {terminal_at_utc}")
+    if not _ZERO < price_lower < price_upper:
+        raise ValueError(
+            f"settlement bounds must satisfy 0 < price_lower < price_upper, "
+            f"got {price_lower} and {price_upper}"
+        )
+    if kind != TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES:
+        raise ValueError(f"kind must be {TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES!r}, got {kind!r}")
+    if recorded_evaluation != TERMINAL_EVALUATION_UNION_ADVERSE_BOUND:
+        raise ValueError(
+            f"recorded_evaluation must be {TERMINAL_EVALUATION_UNION_ADVERSE_BOUND!r}, "
+            f"got {recorded_evaluation!r}"
+        )
+    if state.phase == PHASE_CLOSED:
+        return state, ()
+    if state.phase == PHASE_OPEN:
+        remaining = state.remaining_quantity
+        if remaining is None:
+            raise ValueError("an OPEN position needs its remaining quantity")
+        price = price_lower if state.direction == "LONG" else price_upper
+        leg = ExitLeg(
+            kind=EXIT_SETTLEMENT, price=price, quantity=remaining, time_utc=terminal_at_utc
+        )
+        closed, event = _apply_leg(state, leg)
+        entries = closed.note_entries + (
+            _NoteEntry(
+                first=terminal_at_utc,
+                text=_open_settlement_note(
+                    state, price_lower=price_lower, price_upper=price_upper, price=price
+                ),
+            ),
+        )
+        closed = replace(closed, note_entries=entries, coverage_note=_render_notes(entries))
+        return closed, (event,)
+    raise ValueError("settling a RESTING plan is not supported yet")
 
 
 def finalize_at_data_end(

@@ -81,6 +81,7 @@ from .lifecycle import (
     cancel_plan,
     finalize_at_data_end,
     new_plan_state,
+    settle_at_terminal,
 )
 from .records import (
     BOOKING_CANCEL,
@@ -250,6 +251,8 @@ class _Engine:
         self.bookings: list[Booking] = []
         self.no_trade_counts: dict[str, int] = {}
         self.used_gaps: list[FundingGap] = []
+        # Declared terminal instants by symbol (quick 261014-nnl); empty for a case without the key.
+        self.terminals = {row.symbol: row for row in parsed.terminal_settlements}
         self.funding_gaps = tuple(
             FundingGap(symbol=g.symbol, start_utc=g.start_utc, end_utc=g.end_utc)
             for g in parsed.allowed_gaps
@@ -378,13 +381,35 @@ class _Engine:
         for symbol in sorted(self.active):
             entity = self.active[symbol]
             start_state = entity.state
-            end_state, events = advance(
-                start_state,
-                source=self.source,
-                start_exclusive=entity.advanced_to,
-                end_inclusive=window_end,
-                bar=self.bar_at.get((symbol, window_end)),
-            )
+            terminal = self.terminals.get(symbol)
+            if terminal is not None and entity.advanced_to < terminal.terminal_at_utc <= window_end:
+                # The declared terminal instant T falls inside this window and is not a window
+                # boundary: advance to T only, settle there, and hand the EXIT to the window's
+                # events BEFORE `_push_funding` reads them, so funding stops at T (design 3.2).
+                end_state, events = advance(
+                    start_state,
+                    source=self.source,
+                    start_exclusive=entity.advanced_to,
+                    end_inclusive=terminal.terminal_at_utc,
+                    bar=self.bar_at.get((symbol, terminal.terminal_at_utc)),
+                )
+                end_state, settle_events = settle_at_terminal(
+                    end_state,
+                    terminal_at_utc=terminal.terminal_at_utc,
+                    price_lower=terminal.price_lower,
+                    price_upper=terminal.price_upper,
+                    kind=terminal.kind,
+                    recorded_evaluation=terminal.recorded_evaluation,
+                )
+                events = (*events, *settle_events)
+            else:
+                end_state, events = advance(
+                    start_state,
+                    source=self.source,
+                    start_exclusive=entity.advanced_to,
+                    end_inclusive=window_end,
+                    bar=self.bar_at.get((symbol, window_end)),
+                )
             if final:
                 end_state, closing = finalize_at_data_end(
                     end_state, data_end_utc=window_end, source=self.source

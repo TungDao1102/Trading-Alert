@@ -22,6 +22,14 @@ on anything it does not recognise. The contract (`case_input_schema` = "backtest
                              entry_min_price, entry_max_price, stop_loss_price, tp1, tp2,
                              expiry_hours, [invalidation_level]}; its presence switches the
                              engine to the scripted front-end
+    terminal_settlements     optional NON-EMPTY list, one row per declared symbol, keys exactly
+                             {symbol, terminal_at_utc, price_lower, price_upper, kind,
+                             recorded_evaluation}, all strings: the terminal instant T (UTC,
+                             minute-aligned, strictly inside data_window), the canonical decimal
+                             text of the two settlement bounds (0 < price_lower < price_upper)
+                             and the two vocabulary strings of `semantics`. An OPEN position of
+                             the symbol closes at T at the adverse bound (quick 261014-nnl).
+                             A case without the key behaves exactly as before.
 
 The v1 keys in `REMOVED_V1_KEYS` are refused with a message naming them (the v1 fixture
 shape carries a fixture clock, a single constraint snapshot and a per-bar intrabar map,
@@ -45,7 +53,7 @@ from typing import Any
 
 from src.core._decimal import _mul
 from src.core.types import AccountState, Candle
-from src.domain.canonical import sha256_hex
+from src.domain.canonical import canonical_decimal_text, sha256_hex
 from src.domain.enums import TradePlanStatus
 from src.domain.ids import derive_child_id
 from src.domain.trade_plan import TradePlan
@@ -53,6 +61,10 @@ from src.domain.trade_plan import TradePlan
 from .constraints import ConstraintHistory, parse_constraint_row
 from .costs import CostModel, build_cost_model
 from .funding import FundingRow, parse_funding_row
+from .semantics import (
+    TERMINAL_EVALUATION_UNION_ADVERSE_BOUND,
+    TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES,
+)
 from .series import ListMinuteSource, MinuteSource, parse_minute_row
 
 CASE_INPUT_SCHEMA = "backtest-case/2"
@@ -83,7 +95,13 @@ REQUIRED_KEYS: tuple[str, ...] = (
     "data_window",
     "allowed_gaps",
 )
-OPTIONAL_KEYS: tuple[str, ...] = ("trade_bars_1m", "mark_bars_1m", "dataset_id", "scripted_plans")
+OPTIONAL_KEYS: tuple[str, ...] = (
+    "trade_bars_1m",
+    "mark_bars_1m",
+    "dataset_id",
+    "scripted_plans",
+    "terminal_settlements",
+)
 
 STRATEGY_INTERVAL = "1h"
 CONTEXT_INTERVAL = "4h"
@@ -121,6 +139,16 @@ _SCRIPTED_REQUIRED = frozenset(
     }
 )
 _SCRIPTED_KEYS = _SCRIPTED_REQUIRED | {"invalidation_level", "regime"}
+_TERMINAL_KEYS = frozenset(
+    {
+        "symbol",
+        "terminal_at_utc",
+        "price_lower",
+        "price_upper",
+        "kind",
+        "recorded_evaluation",
+    }
+)
 _ZERO = Decimal("0")
 
 
@@ -148,6 +176,22 @@ class ScriptedPlan:
 
 
 @dataclass(frozen=True)
+class TerminalSettlementRow:
+    """The declared terminal instant of one symbol and the bounds of its settlement interval.
+
+    An OPEN position of `symbol` closes at `terminal_at_utc` at `price_lower` (LONG) or
+    `price_upper` (SHORT), the adverse bound of the recorded interval (quick 261014-nnl).
+    """
+
+    symbol: str
+    terminal_at_utc: datetime
+    price_lower: Decimal
+    price_upper: Decimal
+    kind: str
+    recorded_evaluation: str
+
+
+@dataclass(frozen=True)
 class ParsedCase:
     """A validated case-input v2. Rows are frozen values; nothing is mutated after parse."""
 
@@ -167,6 +211,8 @@ class ParsedCase:
     allowed_gaps: tuple[AllowedGap, ...]
     dataset_id: str | None
     scripted_plans: tuple[ScriptedPlan, ...] | None
+    # Last and defaulted so every earlier construction keeps working (quick 261014-nnl).
+    terminal_settlements: tuple[TerminalSettlementRow, ...] = ()
 
 
 def _reject_floats(value: object, path: str) -> None:
@@ -544,6 +590,92 @@ def _parse_scripted(
     return tuple(plans)
 
 
+def _terminal_text(row: Mapping[str, Any], key: str, label: str) -> str:
+    """A terminal row value: it must be a non-empty string (no number, no null)."""
+    value = row[key]
+    if not isinstance(value, str):
+        raise TypeError(f"{label}.{key} must be a string, got {type(value).__name__}")
+    return _require_str(value, f"{label}.{key}")
+
+
+def _terminal_price(row: Mapping[str, Any], key: str, label: str) -> Decimal:
+    """A settlement bound: canonical decimal text of a positive finite value."""
+    text = _terminal_text(row, key, label)
+    value = _decimal(text, f"{label}.{key}")
+    if canonical_decimal_text(value) != text:
+        raise ValueError(
+            f"{label}.{key} must be canonical decimal text "
+            f"({canonical_decimal_text(value)!r}), got {text!r}"
+        )
+    if value <= _ZERO:
+        raise ValueError(f"{label}.{key} must be > 0, got {text!r}")
+    return value
+
+
+def _parse_terminal_settlements(
+    raw: object, symbols: tuple[str, ...], start_utc: datetime, end_utc: datetime
+) -> tuple[TerminalSettlementRow, ...]:
+    """Parse the optional `terminal_settlements` key; every defect refuses the whole case.
+
+    A non-empty list; each row has exactly the six keys, all strings. The symbol is in
+    `symbols` and appears once. The instant is UTC, minute-aligned and strictly inside
+    `(start_utc, end_utc)`. The bounds are canonical decimal text with
+    `0 < price_lower < price_upper`. `kind` and `recorded_evaluation` equal the two
+    vocabulary constants. Rows are returned sorted by symbol.
+    """
+    items = _require_list(raw, "terminal_settlements")
+    if not items:
+        raise ValueError("terminal_settlements must not be empty (omit the key instead)")
+    rows: list[TerminalSettlementRow] = []
+    for index, item in enumerate(items):
+        label = f"terminal_settlements[{index}]"
+        row = _require_mapping(item, label)
+        _check_keys(row, required=_TERMINAL_KEYS, allowed=_TERMINAL_KEYS, name=label)
+        symbol = _terminal_text(row, "symbol", label)
+        if symbol not in symbols:
+            raise ValueError(f"{label}.symbol {symbol!r} is not in symbols {list(symbols)}")
+        terminal = _utc(_terminal_text(row, "terminal_at_utc", label), f"{label}.terminal_at_utc")
+        if terminal.second != 0 or terminal.microsecond != 0:
+            raise ValueError(
+                f"{label}.terminal_at_utc must be minute-aligned, got {terminal.isoformat()}"
+            )
+        if not start_utc < terminal < end_utc:
+            raise ValueError(
+                f"{label}.terminal_at_utc {terminal.isoformat()} must lie strictly inside the "
+                f"data window ({start_utc.isoformat()}, {end_utc.isoformat()})"
+            )
+        lower = _terminal_price(row, "price_lower", label)
+        upper = _terminal_price(row, "price_upper", label)
+        if not lower < upper:
+            raise ValueError(f"{label}.price_lower {lower} must be < price_upper {upper}")
+        kind = _terminal_text(row, "kind", label)
+        if kind != TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES:
+            raise ValueError(
+                f"{label}.kind must be {TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES!r}, got {kind!r}"
+            )
+        evaluation = _terminal_text(row, "recorded_evaluation", label)
+        if evaluation != TERMINAL_EVALUATION_UNION_ADVERSE_BOUND:
+            raise ValueError(
+                f"{label}.recorded_evaluation must be "
+                f"{TERMINAL_EVALUATION_UNION_ADVERSE_BOUND!r}, got {evaluation!r}"
+            )
+        rows.append(
+            TerminalSettlementRow(
+                symbol=symbol,
+                terminal_at_utc=terminal,
+                price_lower=lower,
+                price_upper=upper,
+                kind=kind,
+                recorded_evaluation=evaluation,
+            )
+        )
+    rows.sort(key=lambda r: r.symbol)
+    for earlier, later in zip(rows, rows[1:], strict=False):
+        if earlier.symbol == later.symbol:
+            raise ValueError(f"terminal_settlements has two rows for {later.symbol}")
+    return tuple(rows)
+
+
 def parse_case_input(case_input: Mapping[str, Any]) -> ParsedCase:
     """Validate and parse a case-input v2 dict (fail closed on any defect).
 
@@ -598,6 +730,11 @@ def parse_case_input(case_input: Mapping[str, Any]) -> ParsedCase:
         if "scripted_plans" in case
         else None
     )
+    terminals = (
+        _parse_terminal_settlements(case["terminal_settlements"], symbols, start_utc, end_utc)
+        if "terminal_settlements" in case
+        else ()
+    )
     return ParsedCase(
         strategy_id=_require_str(case["strategy_id"], "strategy_id"),
         strategy_version=_require_str(case["strategy_version"], "strategy_version"),
@@ -619,6 +756,7 @@ def parse_case_input(case_input: Mapping[str, Any]) -> ParsedCase:
         allowed_gaps=_parse_gaps(case["allowed_gaps"], symbols),
         dataset_id=dataset_id,
         scripted_plans=scripted,
+        terminal_settlements=terminals,
     )
 
 
@@ -633,5 +771,6 @@ __all__ = [
     "AllowedGap",
     "ParsedCase",
     "ScriptedPlan",
+    "TerminalSettlementRow",
     "parse_case_input",
 ]
