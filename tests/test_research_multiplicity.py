@@ -3,14 +3,15 @@
 One Holm-Bonferroni procedure at family-wise alpha = 0.05 over the 48 candidate-level one-sided
 p-values of the three registered grids (16 per family). The module only corrects p-values it is
 given; the p-value producer does not exist yet. No Holdout, no ExperimentRecord, no market data.
+P-values are Decimal (the repo's Decimal-only scan covers src/research).
 """
 
 from __future__ import annotations
 
 import inspect
 import json
-import math
 import random
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -26,36 +27,37 @@ from src.research.multiplicity import (
     holm_adjust_confirmatory,
 )
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-PREREG_DIR = REPO_ROOT / "docs" / "research" / "preregistration"
+D = Decimal
 
 
-def _canonical(adjusted: dict[str, float]) -> str:
-    return json.dumps(adjusted, sort_keys=False)
+def _canonical(adjusted: dict[str, Decimal]) -> str:
+    return json.dumps({k: str(v) for k, v in adjusted.items()}, sort_keys=False)
+
+
+def _uniform(rng: random.Random) -> Decimal:
+    """A p-value on the grid {1e-6, ..., 1}: 'uniform' to the resolution the tests need."""
+    return D(rng.randrange(1, 10**6 + 1)) / D(10**6)
 
 
 def test_textbook_holm_step_down() -> None:
-    p = {"h1": 0.01, "h2": 0.04, "h3": 0.03, "h4": 0.005}
+    p = {"h1": D("0.01"), "h2": D("0.04"), "h3": D("0.03"), "h4": D("0.005")}
     adjusted = holm_adjust(p)
     # Sorted derivation (m = 4): 0.005*4 = 0.02, 0.01*3 = 0.03, 0.03*2 = 0.06,
     # max(0.04*1, 0.06) = 0.06 (the running maximum makes it non-decreasing).
-    expected = {"h1": 0.03, "h2": 0.06, "h3": 0.06, "h4": 0.02}
-    assert set(adjusted) == set(expected)
-    for key, value in expected.items():
-        assert adjusted[key] == pytest.approx(value, abs=1e-12)
+    assert adjusted == {"h1": D("0.03"), "h2": D("0.06"), "h3": D("0.06"), "h4": D("0.02")}
     ordered = sorted(p, key=lambda k: (p[k], k))
     values = [adjusted[k] for k in ordered]
     assert values == sorted(values)
-    assert all(0.0 <= v <= 1.0 for v in values)
+    assert all(D(0) <= v <= D(1) for v in values)
 
 
 def test_adjusted_values_are_capped_at_one() -> None:
-    adjusted = holm_adjust({"a": 0.6, "b": 0.7, "c": 0.9})
-    assert adjusted == {"a": 1.0, "b": 1.0, "c": 1.0}
+    adjusted = holm_adjust({"a": D("0.6"), "b": D("0.7"), "c": D("0.9")})
+    assert adjusted == {"a": D(1), "b": D(1), "c": D(1)}
 
 
 def test_order_independence_and_ties() -> None:
-    p = {"h1": 0.01, "h2": 0.01, "h3": 0.2, "h4": 0.01, "h5": 0.5}
+    p = {"h1": D("0.01"), "h2": D("0.01"), "h3": D("0.2"), "h4": D("0.01"), "h5": D("0.5")}
     base = holm_adjust(p)
     keys = list(p)
     for seed in range(5):
@@ -66,15 +68,15 @@ def test_order_independence_and_ties() -> None:
     assert base["h1"] == base["h2"] == base["h4"]
     # three tied p = 0.01 over m = 5: the first of the tie carries 5*0.01 and the running
     # maximum gives the whole tie group that value.
-    assert base["h1"] == pytest.approx(0.05, abs=1e-12)
+    assert base["h1"] == D("0.05")
 
 
 def test_global_is_never_smaller_than_per_family() -> None:
     rng = random.Random(20261014)
     ids = confirmatory_hypothesis_ids()
-    p = {hid: rng.random() ** 3 for hid in ids}
+    p = {hid: _uniform(rng) ** 3 for hid in ids}
     global_adj = holm_adjust(p)
-    by_family: dict[str, dict[str, float]] = {}
+    by_family: dict[str, dict[str, Decimal]] = {}
     for hid, value in p.items():
         by_family.setdefault(hid.split("/", 1)[0], {})[hid] = value
     assert sorted(len(v) for v in by_family.values()) == [16, 16, 16]
@@ -133,15 +135,15 @@ def test_multiplicity_error_is_a_manifest_error() -> None:
     assert issubclass(MultiplicityError, ManifestError)
 
 
-def _full_valid() -> dict[str, float]:
-    return {hid: 0.5 for hid in confirmatory_hypothesis_ids()}
+def _full_valid() -> dict[str, Decimal]:
+    return {hid: D("0.5") for hid in confirmatory_hypothesis_ids()}
 
 
 def test_confirmatory_adjustment_accepts_exactly_the_48_ids() -> None:
     out = holm_adjust_confirmatory(_full_valid())
     assert len(out) == 48
     assert set(out) == set(confirmatory_hypothesis_ids())
-    assert all(v == 1.0 for v in out.values())
+    assert all(v == D(1) for v in out.values())
 
 
 def test_confirmatory_adjustment_refuses_a_malformed_set() -> None:
@@ -152,18 +154,18 @@ def test_confirmatory_adjustment_refuses_a_malformed_set() -> None:
         holm_adjust_confirmatory(missing)
 
     extra = _full_valid()
-    extra["trend-pullback/research-run-1-zzz"] = 0.1
+    extra["trend-pullback/research-run-1-zzz"] = D("0.1")
     with pytest.raises(MultiplicityError):
         holm_adjust_confirmatory(extra)
 
     unknown = _full_valid()
     del unknown[ids[0]]
-    unknown["trend-pullback/research-run-1-zzz"] = 0.1
+    unknown["trend-pullback/research-run-1-zzz"] = D("0.1")
     with pytest.raises(MultiplicityError):  # 48 entries, one unknown id
         holm_adjust_confirmatory(unknown)
 
     duplicate = _full_valid()
-    duplicate[" " + ids[0]] = 0.2  # duplicate once whitespace is normalized
+    duplicate[" " + ids[0]] = D("0.2")  # duplicate once whitespace is normalized
     del duplicate[ids[1]]
     with pytest.raises(MultiplicityError):
         holm_adjust_confirmatory(duplicate)
@@ -173,7 +175,20 @@ def test_confirmatory_adjustment_refuses_a_malformed_set() -> None:
 
 
 @pytest.mark.parametrize(
-    "bad", [-0.1, 1.0000001, math.nan, math.inf, 1, 0, True, "0.1", None, Ellipsis]
+    "bad",
+    [
+        D("-0.1"),
+        D("1.0000001"),
+        D("NaN"),
+        D("Infinity"),
+        0.1,  # a float is refused, not converted
+        1,
+        0,
+        True,
+        "0.1",
+        None,
+        Ellipsis,
+    ],
 )
 def test_confirmatory_adjustment_refuses_a_bad_p_value(bad: object) -> None:
     ids = confirmatory_hypothesis_ids()
@@ -189,15 +204,18 @@ def test_holm_adjust_refuses_an_empty_set() -> None:
 
 
 def test_g3_passes_only_strictly_below_alpha() -> None:
-    assert FAMILY_WISE_ALPHA == 0.05
-    assert g3_passes(0.0499999) is True
-    assert g3_passes(0.0) is True
-    assert g3_passes(0.05) is False
-    assert g3_passes(0.5) is False
+    assert FAMILY_WISE_ALPHA == D("0.05")
+    assert g3_passes(D("0.0499999")) is True
+    assert g3_passes(D(0)) is True
+    assert g3_passes(D("0.05")) is False
+    assert g3_passes(D("0.050")) is False
+    assert g3_passes(D("0.5")) is False
     with pytest.raises(MultiplicityError):
-        g3_passes(math.nan)
+        g3_passes(D("NaN"))
     with pytest.raises(MultiplicityError):
-        g3_passes(1.5)
+        g3_passes(D("1.5"))
+    with pytest.raises(MultiplicityError):
+        g3_passes(0.01)  # type: ignore[arg-type]
 
 
 def test_seeded_monte_carlo_family_wise_false_pass_rate() -> None:
@@ -212,7 +230,7 @@ def test_seeded_monte_carlo_family_wise_false_pass_rate() -> None:
     repetitions = 2000
     passes = 0
     for _ in range(repetitions):
-        p = {hid: rng.random() for hid in ids}
+        p = {hid: _uniform(rng) for hid in ids}
         adjusted = holm_adjust(p)
         if any(g3_passes(value) for value in adjusted.values()):
             passes += 1

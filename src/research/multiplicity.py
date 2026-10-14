@@ -12,26 +12,30 @@ computed here.
 
 Scope: this module corrects p-values it is given. The seeded one-sided stationary block-bootstrap
 p-value producer on pooled Validation trades does not exist yet; it is a later plan. Nothing here
-claims that multiplicity is resolved end to end.
+claims that multiplicity is complete end to end.
 
 A hypothesis id is `"<strategy_id>/<parameter_set_id>"`, unique across the three families.
-Statistical code that never gates an order: plain `float` is allowed here.
+P-values are `Decimal` (a bootstrap p-value is the rational (k + 1) / (B + 1)); a float, an int, a
+bool or a string is refused, which keeps the correction free of binary-float noise and inside the
+Decimal-only scan that covers `src/research` (tests/test_domain_no_float.py).
 """
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
+from decimal import Decimal
 from pathlib import Path
 
 from .manifest import ManifestError, load_grid
 
-FAMILY_WISE_ALPHA = 0.05
+FAMILY_WISE_ALPHA = Decimal("0.05")
 EXPECTED_HYPOTHESES = 48
 _EXPECTED_GRID_FILES = 3
 _PER_FAMILY = 16
 _GRID_GLOB = "research-run-1-grid-*.json"
 _DEFAULT_GRID_DIR = Path(__file__).resolve().parents[2] / "docs" / "research" / "preregistration"
+_ZERO = Decimal(0)
+_ONE = Decimal(1)
 
 
 class MultiplicityError(ManifestError):
@@ -65,25 +69,29 @@ def confirmatory_hypothesis_ids(directory: Path | None = None) -> tuple[str, ...
     return tuple(sorted(ids))
 
 
-def _validated(p_by_id: Mapping[str, object]) -> dict[str, float]:
+def _check_probability(value: object, what: str) -> Decimal:
+    if not isinstance(value, Decimal):
+        raise MultiplicityError(f"{what} must be a Decimal")
+    if not value.is_finite() or not _ZERO <= value <= _ONE:
+        raise MultiplicityError(f"{what} must lie in [0, 1]")
+    return value
+
+
+def _validated(p_by_id: Mapping[str, object]) -> dict[str, Decimal]:
     if not p_by_id:
         raise MultiplicityError("an empty hypothesis set cannot be corrected")
-    clean: dict[str, float] = {}
+    clean: dict[str, Decimal] = {}
     for raw_id, raw_p in p_by_id.items():
         if not isinstance(raw_id, str) or not raw_id.strip():
             raise MultiplicityError("a hypothesis id must be a non-empty string")
         hypothesis_id = raw_id.strip()
         if hypothesis_id in clean:
             raise MultiplicityError("duplicate hypothesis id after normalization")
-        if isinstance(raw_p, bool) or not isinstance(raw_p, float):
-            raise MultiplicityError("a p-value must be a float")
-        if math.isnan(raw_p) or not 0.0 <= raw_p <= 1.0:
-            raise MultiplicityError("a p-value must lie in [0, 1]")
-        clean[hypothesis_id] = raw_p
+        clean[hypothesis_id] = _check_probability(raw_p, "a p-value")
     return clean
 
 
-def holm_adjust(p_by_id: Mapping[str, float]) -> dict[str, float]:
+def holm_adjust(p_by_id: Mapping[str, Decimal]) -> dict[str, Decimal]:
     """Holm step-down adjusted p-values over exactly the given hypotheses (m = their count).
 
     Sorted by (p, id); adjusted_j = min(1, max over i <= j of (m - i) * p_i), i from 0. The
@@ -93,15 +101,15 @@ def holm_adjust(p_by_id: Mapping[str, float]) -> dict[str, float]:
     clean = _validated(p_by_id)
     m = len(clean)
     ordered = sorted(clean, key=lambda hypothesis_id: (clean[hypothesis_id], hypothesis_id))
-    adjusted: dict[str, float] = {}
-    running = 0.0
+    adjusted: dict[str, Decimal] = {}
+    running = _ZERO
     for index, hypothesis_id in enumerate(ordered):
-        running = max(running, (m - index) * clean[hypothesis_id])
-        adjusted[hypothesis_id] = min(1.0, running)
+        running = max(running, Decimal(m - index) * clean[hypothesis_id])
+        adjusted[hypothesis_id] = min(_ONE, running)
     return {hypothesis_id: adjusted[hypothesis_id] for hypothesis_id in sorted(adjusted)}
 
 
-def holm_adjust_confirmatory(p_by_id: Mapping[str, float]) -> dict[str, float]:
+def holm_adjust_confirmatory(p_by_id: Mapping[str, Decimal]) -> dict[str, Decimal]:
     """Holm over exactly the 48 registered hypotheses; refuses a missing, extra or unknown id."""
     clean = _validated(p_by_id)
     expected = set(confirmatory_hypothesis_ids())
@@ -115,13 +123,9 @@ def holm_adjust_confirmatory(p_by_id: Mapping[str, float]) -> dict[str, float]:
     return holm_adjust(clean)
 
 
-def g3_passes(adjusted_p: float) -> bool:
+def g3_passes(adjusted_p: Decimal) -> bool:
     """G3: true only when the Holm-adjusted p-value is strictly below the family-wise alpha."""
-    if isinstance(adjusted_p, bool) or not isinstance(adjusted_p, float):
-        raise MultiplicityError("an adjusted p-value must be a float")
-    if math.isnan(adjusted_p) or not 0.0 <= adjusted_p <= 1.0:
-        raise MultiplicityError("an adjusted p-value must lie in [0, 1]")
-    return adjusted_p < FAMILY_WISE_ALPHA
+    return _check_probability(adjusted_p, "an adjusted p-value") < FAMILY_WISE_ALPHA
 
 
 __all__ = [
