@@ -1,0 +1,90 @@
+"""REEFUSDT technical diagnostic (plan 16-37 pre-freeze). Throwaway: scratchpad only.
+Development window only, REEF only, 48 registered points, S0 constraints. No assemble, no
+ExperimentRecord, no holdout_consumed, no run.py main. Prints a whitelist of fields; never PnL."""
+import glob, hashlib, json, sys, traceback
+from datetime import datetime, timezone
+from pathlib import Path
+REPO = Path(r"C:\Users\admin\Music\Trading"); sys.path.insert(0, str(REPO))
+from src.backtest import simulator
+from src.backtest.costs import cost_slice
+from src.data.case_input import ENGINE_SERIES, TerminalDeclaration, build_case_input_data
+from src.data.minute_source import ParquetMinuteSource
+from src.domain.registry import load_parameter_set
+from src.research.manifest import load_grid
+
+RAW = REPO / "data" / "raw"
+INV = Path(sys.argv[1])
+S0_PATH = REPO / "docs/research/preregistration/research-run-1-constraints-baseline.json"
+S0_SHA = "4307eec74feeab04081b872866895f70568f1d289b8a249fc7de702e71e11d3f"
+DEV_START = datetime(2024, 10, 3, tzinfo=timezone.utc)
+DEV_END = datetime(2025, 1, 22, tzinfo=timezone.utc)  # CUT window: whole UTC day, 0 gaps
+BOUNDARY = datetime(2025, 1, 22, 8, 0, tzinfo=timezone.utc)   # last REEF funding instant
+NO_NEW = datetime(2025, 1, 22, 8, 30, tzinfo=timezone.utc)
+SYM = "REEFUSDT"
+
+# 1. preconditions -----------------------------------------------------------
+raw = S0_PATH.read_bytes()
+assert hashlib.sha256(raw).hexdigest() == S0_SHA, "S0 constraint sha256 mismatch"
+rows = [r for r in json.loads(raw)["constraint_history"] if r["symbol"] == SYM]
+assert len(rows) == 1, rows
+checked = 0
+for line in INV.read_text(encoding="utf-8").splitlines():
+    h, rel = line.split("  ", 1)
+    if f"symbol={SYM}/" in rel:
+        got = hashlib.sha256((RAW / rel).read_bytes()).hexdigest()
+        assert got == h, f"inventory mismatch {rel}"
+        checked += 1
+print(f"PRECONDITIONS OK: S0 sha256 verified; {checked} REEF files re-hashed equal to the verified inventory")
+
+decl = TerminalDeclaration(
+    symbol=SYM, reason="DELISTED_CAPPED",
+    terminal_at_utc=datetime(2025, 1, 22, 9, 0, tzinfo=timezone.utc),
+    source_url="https://www.binance.com/en/support/announcement/detail/572715f2d96e47769ebbb967c2a6e445")
+
+def build():
+    return build_case_input_data(
+        RAW, symbols=[SYM], start_utc=DEV_START, end_utc=DEV_END, as_of_day_utc=DEV_END.date(),
+        strategy_interval="1h", context_interval="4h", series=ENGINE_SERIES,
+        terminal_declarations=[])
+
+# 2. 48 points ---------------------------------------------------------------
+points = []
+for g in sorted(glob.glob(str(REPO / "docs/research/preregistration/research-run-1-grid-*.json"))):
+    grid = load_grid(Path(g))
+    points += [(grid, p) for p in grid.points]
+assert len(points) == 48, len(points)
+import os
+_only = os.environ.get('REEF_ONLY')
+if _only:
+    points = [(g, p) for g, p in points if p.parameter_set_id == _only]
+    assert len(points) == 1, _only
+
+def iso(t): return None if t is None else t.isoformat().replace("+00:00", "Z")
+
+for grid, point in points:
+    pid = point.parameter_set_id
+    ps = load_parameter_set(grid.strategy_id, point.parameter_set_id)
+    assert ps.parameter_set_hash == point.parameter_set_hash
+    cost = {k: str(v) for k, v in cost_slice(ps.params).items()}
+    try:
+        data = build()
+        case = data.to_case_input(
+            strategy_id=grid.strategy_id, strategy_version=ps.strategy_version,
+            parameter_set_id=pid, account_state={"equity": "600", "risk_rate": "0.005"},
+            cost_model=cost, constraint_history=rows)
+        src = ParquetMinuteSource(RAW, symbols=[SYM], start_utc=DEV_START, end_utc=DEV_END)
+        out = simulator.run(case, minute_source=src)
+    except BaseException as exc:
+        tb = traceback.extract_tb(exc.__traceback__)[-1]
+        print(f"{pid}\tERROR\t{type(exc).__name__}\t{exc}\t@ {Path(tb.filename).name}:{tb.lineno}")
+        continue
+    tr = out["trades"]; rs = out["run_summary"]
+    eod, pend = [], []
+    for t in tr:
+        if t["entry_kind"] == "PENDING_AT_DATA_END":
+            pend.append(f"signal_close={t['signal_close_utc']}")
+        if t["exit_kind"] == "END_OF_DATA":
+            eod.append(f"entry={t['entry_time_utc']} exit={t['exit_time_utc']} dir={t['direction']}")
+    print(f"{pid}	OK	END_OF_DATA={eod or 'none'}	pending_at_data_end={pend or 'none'}"
+          f"	summary(end_of_data={rs['end_of_data_count']},pending={rs['pending_at_data_end_count']},"
+          f"allowed_gaps_used={len(rs.get('allowed_gaps_used', []))},data_window={rs.get('data_window')})")
