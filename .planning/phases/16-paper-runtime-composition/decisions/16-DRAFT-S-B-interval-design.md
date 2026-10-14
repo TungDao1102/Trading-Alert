@@ -1,0 +1,59 @@
+# 16-DRAFT S-B-interval design (REEFUSDT terminal settlement as a bounded interval)
+
+status: DECIDED by user 2026-10-14 (see 16-DEC-S-B-interval.md); design rev3 = rev2 + option (a). Previously DRAFT rev2 (second independent review, agent adb512e1ce8e4f526: SOUND WITH FIXES, E1-E14 applied except open points M-2 and M-7 in section 8). Design only. No code, no version bump, no manifest freeze. Not a decision until recorded in `16-DEC-S-B-interval.md` with the user's own words.
+date: 2026-10-14. Basis: reviewer choice (e) / S-B-interval, user acceptance of four recommendations, independent adversarial review (agent a87c123628b2bb737, 13 findings B1-B13, model output, not user authority).
+
+## 1. Goal and scope
+Keep REEFUSDT in the 12-symbol universe and the 730-day window. A symbol with a terminal settlement entry gets new semantics; every other symbol and the paper/shadow path stay byte-identical. The settlement price is NOT known; it is bounded by Binance index-price klines of the 30 minutes before the terminal. No proxy (flat 0.000880, last mark close, OHLC average, midpoint) is used as the price.
+
+## 2. Data contract (D1, fixed after review B3, B4, B5, B6)
+- `TerminalDeclaration` keeps EXACTLY four fields (symbol, reason, terminal_at_utc, source_url), per user decision in `16-DEC-GAP-REASON.md` addendum. Untouched.
+- New optional manifest entry `terminal_settlements`, keyed by symbol, emitted in canonical() only when present. Per row: kind BOUNDED_BY_INDEX_KLINES; bound window [08:30:00, 09:00:00) UTC; samples_per_minute 60; nominal bounds stored as STRINGS "5123/6000000" and "347/400000" (used only by the recompute test, compared as Fractions; never serialised as Fraction/float, since 5123/6000000 is not a finite decimal and canonical_scalars emits str(Decimal)); index bound (tick-widened, finite tick-aligned Decimals): index_lower = floor_to_tick(sum(low)/30) - 1 tick = 0.000852, index_upper = ceil_to_tick(sum(high)/30) + 1 tick = 0.000869; trade-candle bound from the 09:00 kline (L 0.000845, H 0.000887); stored price_lower = min(index_lower, trade L) = 0.000845 and price_upper = max(index_upper, trade H) = 0.000887 (DECIDED option (a), union, no proxy) (REEFUSDT tick 0.000001; all 120 index OHLC values on the day are tick multiples). The one-tick justification (covers floor/nearest rounding to the 1e-6 grid) is UNVERIFIED; evidence file paths and sha256; condition text; official_confirmation null; recorded_evaluation UNION_ADVERSE_BOUND.
+- Case schema stays `backtest-case/2`; add optional key `terminal_settlements` with strict per-row key checks. No `/3`.
+- Cross-validation in `DatasetManifest.__post_init__`: each entry's symbol must be in `known_gaps`; T is taken from that declaration's `terminal_at_utc` (the entry carries no T of its own); one entry per symbol; exact key set (loader updated); evidence paths posix, sorted, repo-relative; entry omitted from canonical() when empty. The case builder passes `terminal_settlements` ONLY to windows containing T (Development in run-1); validation folds and whole-range builds do not carry it (whole-range `_check_manifest_against_store` does not simulate); the engine assertion applies only to entries present. S1 manifest carries the same entry (own hash, own O-03; S1 p-values stay outside the Holm).
+- Evidence (klines JSON, sample-day files) is committed under the repo evidence folder. The runner recomputes nominal bounds from the committed file with Fraction/Decimal and fails closed on mismatch. `.gitattributes -text` covers the evidence folder; the request URL and fetch time are recorded inside the hashed evidence. The fapi klines origin is stated as outside the KG4 source_url host rule.
+- Stated assumptions (not facts): settlement = mean of per-second index values over 08:30-09:00; one value per second, 60 per minute; the klines endpoint serves unrevised history; settlement is not truncated or ceiled beyond one tick; fee equals taker fee on settlement; T = 09:00:00.000 exactly. Sample day 2025-01-01 shows containment only for that day and regime (8-decimal index, not tick multiples) and does not test 6-decimal rounding on 2025-01-22. The equal-weight rule (60 samples per minute) is an assumption; without it only [min low, max high] = [0.000822, 0.000923] is assumption-free. The averaging window 08:30-09:00 has no source and has the same status as the dropped 08:30 rule.
+- Known unexplained observation (B13): trade kline 09:00 with open = close = 0.000880, 102 trades; lies above price_upper; not treated as the settlement price.
+
+## 3. Engine semantics (D2, fixed after review B1, B2, B7, B8)
+1. Funding: for a declared symbol pass `loaded_end = min(data_end, T)` to funding_events on EVERY call (engine `_push_funding`, `_funding_slice`). Fail closed unless last funding row + cadence > T; holes before T still raise. Optional kwarg default None, so `shadow_fill.py` and `shadow_runtime.py` are unchanged.
+2. Hook: T is not a window boundary (first window end >= T is 09:59:59.999). `_push_funding` sees only `window.events`, not heap items, so: call `advance(end=min(window_end, T))`, apply the settlement leg to end_state, and append an EVENT_EXIT (exit_kind SETTLEMENT) to `events` BEFORE `_push_funding`. `_EVENT_RANK` and the shadow_fill imports stay unchanged. T must be minute-aligned and no funding row may exist at exactly T (segments are half-open). When a RESTING plan is cancelled at T or a position settled, the symbol joins `window.dropped` (or entities with a terminal event <= at_utc are skipped), so a later DAILY_STOP from another symbol cannot cancel or book it again.
+3. OPEN position at T (including after TP1, remainder only): closes at the adverse bound, LONG -> price_lower, SHORT -> price_upper; exit kind SETTLEMENT; fee = fee_rate_exit x qty x price; slippage 0; ledger and trade record use the same formula.
+4. RESTING plan at T: cancelled at T with ONE new cancel kind (consumers: semantics ENTRY_KINDS, lifecycle `_CANCEL_KINDS`, validator, records, analytics/lifecycle, protocol line 387 "an entry ends exactly one way"); exposure removed; flagged as unverified assumption.
+5. The new no-trade label has a fixed position in `_evaluate_strategy` relative to equity_positive and the conflict check (to be pinned). No 08:30 rule (not in the user-supplied announcement text, unverified, and redundant). Rule derived from verified T: no plan is created when signal_close + 1 minute > T; counted under a no-trade label; applied in `_evaluate_signal`. Existing RESTING plans filling before T follow ordinary rules.
+6. Raise if a declared symbol has any 1h strategy bar, 1m trade/mark minute or funding row closing after T. Context bars (4h) opening before T are allowed (the REEF 4h bar 08:00 closes 11:59:59.999; engine reads context bars only via bisect on signal close).
+7. The gap from the last mark close to T must NOT write the `mark_price_1m_missing` marker (it feeds OQ-1).
+8. `booking_for_event` and `build_trade_record` both get a SETTLEMENT branch (slippage 0); test: sum of ledger bookings equals record.realized_pnl. Trade record states the bound side and values (fixed-format coverage_note or new fields).
+9. Same-minute stop/TP and T cannot coincide (minutes close at :59.999); a stop on minute 08:59 books before settlement; pinned by test.
+
+## 4. Statistics (D3, fixed after review B9, B11, B12)
+- One Holm-Bonferroni over 48 candidate p-values stays. No 96 p-values.
+- SETTLEMENT is counted apart (like END_OF_DATA), with settlement_count in run_summary; the frozen definition of "closed trade" (protocol lines 214, 256, 260, 387) is NOT changed. Consumers that raise on unknown exit kinds (report._classify, feasibility.count_closed_trades, analytics lifecycle/adapter checks) get the new kinds with one vocabulary.
+- Guard in `DatasetManifest.__post_init__`: refuse a bounded settlement with terminal_at_utc >= validation_start_utc (also covers Holdout, which the runner never simulates); engine asserts the terminal lies strictly inside the data window.
+- Protocol v2.4.0 states: G1, G2, G3 (pooled Validation closed trades), G4 use Validation only, G5 Holdout only, Development feeds reporting only; adds a test pinning this. Adverse bound is monotone for the REEF trade net PnL but not a global worst case (equity changes sizing, DAILY_STOP); R below -1 possible; stated in the amendment.
+- "Development feeds reporting only" is NOT claimed: protocol lines 65-66 give Development a selection/training role. Claim is: no G1-G5 input uses Development. The Development equity path and other symbols' Development trades DO depend on the bound (one ledger per window, sizing, DAILY_STOP).
+- Run-1: REEF terminal lies in Development, so settlement uncertainty cannot reach G1-G5.
+
+## 5. Versions and blast radius (B10, M-3)
+Paper decisions and fills are behaviour-identical, but trade_ids and version strings change (`_trade_id` hashes the version; `ExperimentRecord` refuses non-current versions): NOT byte-identical. Plan includes an inventory of stored 2.0.0 artifacts and of protocol text pinning 2.0.0 (protocol lines 31, 35, 39, 43; "execution simulation 2.0.0 unchanged" sentences), DECISIONS.md row, DOC_STATUS.md entry, protocol header/changelog, `docs/backtest/BACKTEST_SPEC.md`. `SIMULATOR_SEMANTICS_VERSION` 2.0.0 -> 2.1.0; protocol v2.4.0 (separate amendment, user decision record per D032/D043/D052 pattern). All trade_ids and experiment_ids change (48 x 5); 40+ tests/fixtures regenerate; manifest hash changes so O-03 is re-issued. No ExperimentRecord exists yet.
+
+## 6. Minimal test set
+1. Two-window synthetic case, lower vs upper bound: Validation trades, run_summary and experiment records byte-equal.
+2. Manifest refuses bounded settlement at or after validation_start (and Holdout range).
+3. Static test: plateau/G1/G2/G4 inputs use only VALIDATION records; Development accepts SETTLEMENT and reports it apart.
+4. Funding: last row 08:00, T 09:00: (a) stop at 08:30, (b) open at T, (c) hole > G before T still raises; no-declaration behavior unchanged.
+5. In-window hook: booking at exactly 09:00:00; side-correct price; fee; zero slippage; TP1 remainder; funding stops at T.
+6. RESTING at T cancelled; later DAILY_STOP does not rebook; exposures empty.
+7. Signal at 08:59:59.999 creates no plan and no exposure.
+8. Declared symbol with data after T raises.
+9. Recompute test of bounds and sha256 from committed evidence.
+10. Regeneration: no-declaration case equals 2.0.0 output apart from the version string and (if `settlement_count` is emitted unconditionally) that key; decide conditional vs unconditional.
+11. DAILY_STOP from another symbol after T in the same window does not rebook the settled/cancelled REEF entity.
+
+## 7. Not done / still forbidden until a decision record exists
+Code changes, version bumps, manifest freeze (16-37 Task 3), O-03/16-46, Holdout reads, ExperimentRecord, editing `holdout_consumed.json`.
+
+## 8. Open points (need the user, not the model)
+- M-2 (SHORT side). The 09:00 trade kline (O=C=0.000880, H=0.000887, L=0.000845) lies above price_upper 0.000869, so a SHORT at the bound is NOT adverse if 0.000880 is the real print. Option (a): interval = union of index bound and the 09:00 trade candle, lower 0.000845, upper 0.000887 (both from facts, no proxy). Option (b): keep the index-only bound, rename `recorded_evaluation` to INDEX_CONDITIONAL and state the SHORT side is not bounded. Reviewer-2 prefers (a). CHOSEN by the user: option (a).
+- M-7 (prerequisite). CONFIRMED by the user 2026-10-14 (T = 09:00Z and the announcement URL). Previously open; recording the amendment before this bakes an unconfirmed T into the hashed manifest.
+- A new decision record from the user is required for `terminal_settlements` (B3), SETTLEMENT counted apart (B9), version bump and protocol v2.4.0.
