@@ -101,6 +101,7 @@ from .semantics import (
     FUNDING_JITTER,
     FUNDING_MAX_CADENCE,
     NO_TRADE_CONFLICT,
+    NO_TRADE_TERMINAL,
     PENDING_AT_DATA_END,
     PLAN_SOURCE_SCRIPTED,
     PLAN_SOURCE_STRATEGY,
@@ -119,6 +120,7 @@ _UNCERTAIN_ACCOUNT_STATE = "UNCERTAIN_ACCOUNT_STATE"
 _MIN_QTY_REJECT = "MIN_QTY_REJECT"
 _SOURCE_TIMEFRAME = "1h"
 _CONTEXT_TIMEFRAME = "4h"
+_ONE_MINUTE = timedelta(minutes=1)
 # Pitfall 12: signals closing together are evaluated in (time, symbol) order, and a symbol
 # earlier in that order claims shared portfolio capacity first (D-18). The bias is stated in
 # every run summary so a reader of the evidence cannot miss it.
@@ -294,6 +296,57 @@ class _Engine:
         for row in parsed.funding_rows:  # already sorted by (symbol, time)
             self.funding_rows.setdefault(row.symbol, []).append(row)
             self.funding_times.setdefault(row.symbol, []).append(row.funding_time_utc)
+        self._check_terminal_inputs()
+
+    def _check_terminal_inputs(self) -> None:
+        """Refuse a run whose declared symbol has input data beyond its terminal instant T.
+
+        A symbol with a declared terminal instant ends at T (quick 261014-nnl, design 3.6), so
+        nothing the simulation could read may lie beyond it: a 1h strategy bar closing after T,
+        a context bar opening at or after T (a 4h bar opening before T may close after it), a
+        funding row at or after T, or a trade or mark minute closing after T. Every defect raises
+        before any simulation, naming the symbol, the series and T. Undeclared symbols are
+        not looked at, so a case without the key behaves exactly as before.
+        """
+        for symbol in sorted(self.terminals):
+            terminal_at = self.terminals[symbol].terminal_at_utc
+            where = f"the terminal instant {terminal_at.isoformat()}"
+            for bar in self.setup_bars.get(symbol, []):
+                if bar.close_time_utc > terminal_at:
+                    raise ValueError(
+                        f"{symbol}: strategy bar closing {bar.close_time_utc.isoformat()} "
+                        f"is after {where}"
+                    )
+            for bar in self.context_bars.get(symbol, []):
+                if bar.open_time_utc >= terminal_at:
+                    raise ValueError(
+                        f"{symbol}: context bar opening {bar.open_time_utc.isoformat()} "
+                        f"is at or after {where}"
+                    )
+            for row in self.funding_rows.get(symbol, []):
+                if row.funding_time_utc >= terminal_at:
+                    raise ValueError(
+                        f"{symbol}: funding row at {row.funding_time_utc.isoformat()} "
+                        f"is at or after {where}"
+                    )
+            for series, minutes in (
+                ("trade", self.source.trade_minutes(symbol, terminal_at, self.data_end)),
+                ("mark", self.source.mark_minutes(symbol, terminal_at, self.data_end)),
+            ):
+                if len(minutes) > 0:
+                    raise ValueError(
+                        f"{symbol}: {series} minute closing "
+                        f"{minutes[0].close_time_utc.isoformat()} is after {where}"
+                    )
+
+    def _terminal_blocks(self, symbol: str, close: datetime) -> bool:
+        """True when a plan signalled at `close` could not become active before the terminal T.
+
+        A plan is active from the first minute closing after the signal close, so a declared
+        symbol gets no plan when `close + 1 minute > T` (quick 261014-nnl, design 3.5).
+        """
+        terminal = self.terminals.get(symbol)
+        return terminal is not None and close + _ONE_MINUTE > terminal.terminal_at_utc
 
     # ------------------------------------------------------------------ main loop
 
@@ -680,6 +733,9 @@ class _Engine:
         if symbol in self.active:
             self._count(NO_TRADE_CONFLICT)
             return
+        if self._terminal_blocks(symbol, close):
+            self._count(NO_TRADE_TERMINAL)  # after the equity and conflict checks (pinned)
+            return
         self._size_and_register(
             symbol, close, scripted.plan, scripted.direction, scripted.signal_id, scripted.regime
         )
@@ -708,6 +764,9 @@ class _Engine:
             return
         if symbol in self.active:
             self._count(NO_TRADE_CONFLICT)
+            return
+        if self._terminal_blocks(symbol, close):
+            self._count(NO_TRADE_TERMINAL)  # after evaluate and the conflict check (pinned)
             return
         planned = build_trade_plan(
             signal=signal,
