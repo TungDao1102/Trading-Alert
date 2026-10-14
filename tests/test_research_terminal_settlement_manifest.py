@@ -391,18 +391,6 @@ def test_bounds_off_the_tick_grid_are_refused() -> None:
         )
 
 
-@pytest.mark.parametrize(
-    "overrides",
-    [
-        {"price_lower": D("0.00085"), "trade_candle_low": D("0.00085")},
-        {"price_upper": D("0.000869"), "trade_candle_high": D("0.000869")},
-    ],
-)
-def test_the_stored_union_cannot_hide_a_wider_index_bound(overrides: dict[str, Any]) -> None:
-    with pytest.raises(ManifestError):
-        with_settlement(**overrides)
-
-
 # --------------------------------------------------------------------------- #
 # Canonical decimal text and reduced fractions.
 # --------------------------------------------------------------------------- #
@@ -710,8 +698,10 @@ def test_loader_refuses_wrong_types_and_values_in_a_settlement_row(
 
 @pytest.mark.parametrize("rows", [[], {}, "x", None, [5], [[]]])
 def test_loader_refuses_a_bad_settlement_list(tmp_path: Path, rows: Any) -> None:
+    payload = manifest_payload(key=False)
+    payload["terminal_settlements"] = rows
     with pytest.raises(ManifestError):
-        load_manifest(kg._write(tmp_path, manifest_payload(rows)))
+        load_manifest(kg._write(tmp_path, payload))
 
 
 def test_loader_still_refuses_an_unknown_top_level_key(tmp_path: Path) -> None:

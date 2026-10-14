@@ -3,7 +3,9 @@
 The manifest fixes everything a research run reads: universe, dataset identity, the exact
 development / validation / holdout boundaries, candle intervals, data source and version,
 excluded periods, known terminal declarations, the research account inputs and the
-constraint source. The
+constraint source, and optionally one bounded terminal settlement per declared symbol (quick
+261014-nnl, `terminal_settlements`; left out of the canonical form when empty, so a manifest
+without one hashes exactly as before). The
 grid fixes the strategy and the ordered, registered parameter sets of one experiment. Both
 hash through `src.domain.canonical.sha256_hex` over a canonical dict (Decimal and datetimes
 as strings, UTC only, no float), so the same content always has the same hash and any edit
@@ -18,17 +20,29 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
+from fractions import Fraction
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit
 
+from src.backtest.semantics import (
+    TERMINAL_EVALUATION_UNION_ADVERSE_BOUND,
+    TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES,
+)
 from src.data.case_input import (
     TERMINAL_REASON_DELISTED_CAPPED,
     TERMINAL_REASONS,
     CaseInputError,
     TerminalDeclaration,
 )
-from src.domain.canonical import sha256_hex
+from src.domain.canonical import canonical_decimal_text, sha256_hex
+
+from .settlement_evidence import (
+    SettlementEvidenceError,
+    parse_fraction_text,
+    tick_widened_bounds,
+    union_bounds,
+)
 
 DEVELOPMENT = "DEVELOPMENT"
 VALIDATION = "VALIDATION"
@@ -41,6 +55,9 @@ KNOWN_GAP_REASON_DELISTED_CAPPED = TERMINAL_REASON_DELISTED_CAPPED
 KNOWN_GAP_REASONS: frozenset[str] = TERMINAL_REASONS
 # KG-4 (plan 16-54): the only host a declaration source URL may carry; nothing is fetched.
 KNOWN_GAP_SOURCE_HOSTS: frozenset[str] = frozenset({"www.binance.com"})
+# Quick 261014-nnl plan 02 (design section 2): a bounded terminal settlement samples the index
+# price 60 times per minute (an unverified assumption, stated in the entry's condition text).
+SAMPLES_PER_MINUTE = 60
 
 
 class ManifestError(ValueError):
@@ -96,6 +113,201 @@ class Period:
         return {"start_utc": self.start_utc, "end_utc": self.end_utc, "reason": self.reason}
 
 
+def _is_minute_aligned_utc(value: object) -> bool:
+    return (
+        isinstance(value, datetime)
+        and value.tzinfo is not None
+        and value.utcoffset() == timedelta(0)
+        and (value.second, value.microsecond) == (0, 0)
+    )
+
+
+@dataclass(frozen=True)
+class EvidenceFile:
+    """A committed evidence file: a posix repo-relative path and the sha256 of its bytes."""
+
+    path: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        path = self.path
+        if (
+            not isinstance(path, str)
+            or not path
+            or "\\" in path
+            or PurePosixPath(path).as_posix() != path
+            or PurePosixPath(path).is_absolute()
+            or PureWindowsPath(path).is_absolute()
+            or PureWindowsPath(path).drive != ""
+            or ".." in PurePosixPath(path).parts
+        ):
+            raise ManifestError(
+                "evidence path must be a clean posix path relative to the repository root "
+                "(no backslash, drive, '..', '.', empty segment or trailing slash)"
+            )
+        _require_hex64(self.sha256, "evidence sha256")
+
+    def canonical(self) -> dict[str, Any]:
+        return {"path": self.path, "sha256": self.sha256}
+
+
+def _canonical_positive_decimal(value: object, name: str) -> Decimal:
+    if not isinstance(value, Decimal):
+        raise ManifestError(f"{name} must be a Decimal")
+    if not value.is_finite() or value <= 0:
+        raise ManifestError(f"{name} must be a finite positive Decimal")
+    # The hash writes str(value); that text is unique per number only when the Decimal carries
+    # no trailing zeros and no positive exponent, which is exactly its canonical spelling.
+    if value.as_tuple() != Decimal(canonical_decimal_text(value)).as_tuple():
+        raise ManifestError(f"{name} must be in canonical decimal text (no trailing zeros)")
+    return value
+
+
+def _fraction_field(value: object, name: str) -> Fraction:
+    if not isinstance(value, str):
+        raise ManifestError(f'{name} must be a string "p/q"')
+    try:
+        return parse_fraction_text(value)
+    except SettlementEvidenceError as exc:
+        raise ManifestError(f"{name}: {exc}") from None
+
+
+@dataclass(frozen=True)
+class TerminalSettlement:
+    """A bounded terminal settlement of one declared symbol (quick 261014-nnl, design section 2).
+
+    The entry has no terminal instant of its own: T is the `terminal_at_utc` of the symbol's
+    `known_gaps` declaration, and the bound window is [`bound_window_start_utc`, T). The nominal
+    bounds are kept as the reduced text "p/q" (never a Fraction or float in the hash). Every
+    stored bound is checked against the tick-widening and union rule at construction, and the
+    runner recomputes them from the committed evidence bytes before any simulation. The entry
+    records an interval, never a settlement price (16-DEC-S-B-interval item 1).
+    """
+
+    symbol: str
+    kind: str
+    recorded_evaluation: str
+    bound_window_start_utc: datetime
+    samples_per_minute: int
+    nominal_lower: str
+    nominal_upper: str
+    price_tick_size: Decimal
+    index_lower: Decimal
+    index_upper: Decimal
+    trade_candle_low: Decimal
+    trade_candle_high: Decimal
+    price_lower: Decimal
+    price_upper: Decimal
+    index_klines: EvidenceFile
+    trade_kline: EvidenceFile
+    supporting_evidence: tuple[EvidenceFile, ...]
+    condition: str
+    official_confirmation: None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.symbol, str) or not self.symbol:
+            raise ManifestError("terminal settlement symbol must be a non-empty string")
+        if self.kind != TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES:
+            raise ManifestError(
+                f"terminal settlement kind must be {TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES!r}"
+            )
+        if self.recorded_evaluation != TERMINAL_EVALUATION_UNION_ADVERSE_BOUND:
+            raise ManifestError(
+                "terminal settlement recorded_evaluation must be "
+                f"{TERMINAL_EVALUATION_UNION_ADVERSE_BOUND!r}"
+            )
+        if not _is_minute_aligned_utc(self.bound_window_start_utc):
+            raise ManifestError("bound_window_start_utc must be a minute-aligned UTC datetime")
+        if isinstance(self.samples_per_minute, bool) or not isinstance(
+            self.samples_per_minute, int
+        ):
+            raise ManifestError("samples_per_minute must be the integer 60")
+        if self.samples_per_minute != SAMPLES_PER_MINUTE:
+            raise ManifestError(f"samples_per_minute must be {SAMPLES_PER_MINUTE}")
+        tick = _canonical_positive_decimal(self.price_tick_size, "price_tick_size")
+        stored: dict[str, Decimal] = {}
+        for name in (
+            "index_lower",
+            "index_upper",
+            "trade_candle_low",
+            "trade_candle_high",
+            "price_lower",
+            "price_upper",
+        ):
+            value = _canonical_positive_decimal(getattr(self, name), name)
+            if value % tick != 0:
+                raise ManifestError(f"{name} is not a multiple of price_tick_size (tick-aligned)")
+            stored[name] = value
+        nominal_lower = _fraction_field(self.nominal_lower, "nominal_lower")
+        nominal_upper = _fraction_field(self.nominal_upper, "nominal_upper")
+        try:
+            index_lower, index_upper = tick_widened_bounds(nominal_lower, nominal_upper, tick=tick)
+            price_lower, price_upper = union_bounds(
+                stored["index_lower"],
+                stored["index_upper"],
+                stored["trade_candle_low"],
+                stored["trade_candle_high"],
+            )
+        except SettlementEvidenceError as exc:
+            raise ManifestError(f"terminal settlement bounds are inconsistent: {exc}") from None
+        for name, expected in (
+            ("index_lower", index_lower),
+            ("index_upper", index_upper),
+            ("price_lower", price_lower),
+            ("price_upper", price_upper),
+        ):
+            if stored[name] != expected:
+                rule = "tick-widened nominal bound" if name.startswith("index") else "union"
+                raise ManifestError(f"{name} does not equal the {rule} it must follow")
+        if not stored["price_lower"] < stored["price_upper"]:
+            raise ManifestError("price_lower must be below price_upper")
+        for name in ("index_klines", "trade_kline"):
+            if not isinstance(getattr(self, name), EvidenceFile):
+                raise ManifestError(f"{name} must be an EvidenceFile")
+        support = self.supporting_evidence
+        if not isinstance(support, tuple) or not all(isinstance(f, EvidenceFile) for f in support):
+            raise ManifestError("supporting_evidence must be a tuple of EvidenceFile")
+        paths = [f.path for f in support]
+        if len(set(paths)) != len(paths):
+            raise ManifestError("supporting_evidence paths must be unique")
+        if paths != sorted(paths):
+            raise ManifestError("supporting_evidence must be sorted by path")
+        if not isinstance(self.condition, str) or not self.condition.strip():
+            raise ManifestError("condition must be a non-empty string")
+        if self.official_confirmation is not None:
+            raise ManifestError("official_confirmation must be null (no official source exists)")
+
+    def nominal_bounds(self) -> tuple[Fraction, Fraction]:
+        """The stored nominal bounds as exact Fractions (parsed from their reduced text)."""
+        return (
+            parse_fraction_text(self.nominal_lower),
+            parse_fraction_text(self.nominal_upper),
+        )
+
+    def canonical(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "kind": self.kind,
+            "recorded_evaluation": self.recorded_evaluation,
+            "bound_window_start_utc": self.bound_window_start_utc,
+            "samples_per_minute": self.samples_per_minute,
+            "nominal_lower": self.nominal_lower,
+            "nominal_upper": self.nominal_upper,
+            "price_tick_size": self.price_tick_size,
+            "index_lower": self.index_lower,
+            "index_upper": self.index_upper,
+            "trade_candle_low": self.trade_candle_low,
+            "trade_candle_high": self.trade_candle_high,
+            "price_lower": self.price_lower,
+            "price_upper": self.price_upper,
+            "index_klines": self.index_klines.canonical(),
+            "trade_kline": self.trade_kline.canonical(),
+            "supporting_evidence": [f.canonical() for f in self.supporting_evidence],
+            "condition": self.condition,
+            "official_confirmation": self.official_confirmation,
+        }
+
+
 @dataclass(frozen=True)
 class SplitWindow:
     """One window the runner simulates: its role and half-open UTC boundaries."""
@@ -116,6 +328,11 @@ class DatasetManifest:
     (plan 16-54, KG-2 wrapper): one per symbol, each with a required reason, the terminal
     instant and the official source, all inside the hash. A hole that no declaration explains
     is not acknowledged by the manifest.
+
+    `terminal_settlements` (quick 261014-nnl) is optional and last: one bounded settlement
+    per declared symbol, keyed by symbol, whose terminal instant is the declaration's and
+    must lie strictly inside the Development window. It is left out of `canonical()` when
+    empty, so a manifest without one keeps its hash.
     """
 
     universe_id: str
@@ -137,6 +354,7 @@ class DatasetManifest:
     risk_rate: Decimal
     constraint_source: str
     constraint_sha256: str
+    terminal_settlements: tuple[TerminalSettlement, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.universe_id or not self.symbols:
@@ -193,6 +411,44 @@ class DatasetManifest:
                 raise ManifestError("more than one known gap declaration for a symbol")
             seen.add(declaration.symbol)
             _check_source_url(declaration.source_url)
+        self._check_terminal_settlements()
+
+    def _check_terminal_settlements(self) -> None:
+        """Design sections 2 and 4: cross-validation and the Validation / Holdout guard."""
+        declared = {g.symbol: g for g in self.known_gaps}
+        settled: set[str] = set()
+        for entry in self.terminal_settlements:
+            if not isinstance(entry, TerminalSettlement):
+                raise ManifestError("terminal_settlements must hold TerminalSettlement entries")
+            if entry.symbol in settled:
+                raise ManifestError("more than one terminal settlement for a symbol")
+            settled.add(entry.symbol)
+            declaration = declared.get(entry.symbol)
+            if declaration is None:
+                raise ManifestError(
+                    f"a terminal settlement for {entry.symbol} needs a known_gaps declaration "
+                    "for that symbol"
+                )
+            terminal = declaration.terminal_at_utc
+            if terminal >= self.validation_start_utc:
+                raise ManifestError(
+                    f"the declared terminal of {entry.symbol} is at or after validation_start_utc: "
+                    "its settlement would reach Validation or Holdout"
+                )
+            if terminal <= self.development_start_utc:
+                raise ManifestError(
+                    f"the declared terminal of {entry.symbol} is at or before "
+                    "development_start_utc: a settlement must lie inside the Development window"
+                )
+            if (terminal.second, terminal.microsecond) != (0, 0):
+                raise ManifestError(
+                    f"the declared terminal of {entry.symbol} must be minute-aligned "
+                    "for a terminal settlement"
+                )
+            if entry.bound_window_start_utc >= terminal:
+                raise ManifestError(
+                    f"bound_window_start_utc of {entry.symbol} must be before the declared terminal"
+                )
 
     def validation_folds(self) -> tuple[tuple[datetime, datetime], ...]:
         """The four consecutive equal-length walk-forward test folds of the validation block."""
@@ -209,7 +465,7 @@ class DatasetManifest:
         )
 
     def canonical(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "universe_id": self.universe_id,
             "symbols": list(self.symbols),
             "dataset_id": self.dataset_id,
@@ -238,6 +494,9 @@ class DatasetManifest:
             "constraint_source": self.constraint_source,
             "constraint_sha256": self.constraint_sha256,
         }
+        if self.terminal_settlements:
+            out["terminal_settlements"] = [t.canonical() for t in self.terminal_settlements]
+        return out
 
 
 @dataclass(frozen=True)
@@ -394,16 +653,106 @@ _MANIFEST_KEYS = frozenset(
         "constraint_sha256",
     }
 )
+_SETTLEMENTS_KEY = "terminal_settlements"
+_SETTLEMENT_KEYS = frozenset(
+    {
+        "symbol",
+        "kind",
+        "recorded_evaluation",
+        "bound_window_start_utc",
+        "samples_per_minute",
+        "nominal_lower",
+        "nominal_upper",
+        "price_tick_size",
+        "index_lower",
+        "index_upper",
+        "trade_candle_low",
+        "trade_candle_high",
+        "price_lower",
+        "price_upper",
+        "index_klines",
+        "trade_kline",
+        "supporting_evidence",
+        "condition",
+        "official_confirmation",
+    }
+)
+_EVIDENCE_KEYS = frozenset({"path", "sha256"})
 _PERIOD_KEYS = frozenset({"start_utc", "end_utc", "reason"})
 _GAP_KEYS = frozenset({"symbol", "reason", "terminal_at_utc", "source_url"})
 _POINT_KEYS = frozenset({"parameter_set_id", "parameter_set_hash", "varied"})
 
 
+def _canonical_decimal(payload: Mapping[str, Any], key: str, what: str) -> Decimal:
+    """A Decimal whose JSON text is already its canonical spelling (one file form per value)."""
+    text = _text(payload, key, what)
+    try:
+        value = Decimal(text)
+        canonical = canonical_decimal_text(value)
+    except (InvalidOperation, ValueError):
+        raise ManifestError(f"{what} {key} must be a finite decimal string") from None
+    if canonical != text:
+        raise ManifestError(f"{what} {key} must be in canonical decimal text, e.g. {canonical!r}")
+    return value
+
+
+def _evidence_file(value: object, what: str) -> EvidenceFile:
+    row = _object(value, what)
+    _exact_keys(row, _EVIDENCE_KEYS, what)
+    return EvidenceFile(path=_text(row, "path", what), sha256=_text(row, "sha256", what))
+
+
+def _terminal_settlement(value: object) -> TerminalSettlement:
+    what = "terminal settlement"
+    row = _object(value, what)
+    _exact_keys(row, _SETTLEMENT_KEYS, what)
+    samples = row["samples_per_minute"]
+    if isinstance(samples, bool) or not isinstance(samples, int):
+        raise ManifestError(f"{what} samples_per_minute must be a JSON integer")
+    return TerminalSettlement(
+        symbol=_text(row, "symbol", what),
+        kind=_text(row, "kind", what),
+        recorded_evaluation=_text(row, "recorded_evaluation", what),
+        bound_window_start_utc=_utc(row, "bound_window_start_utc", what),
+        samples_per_minute=samples,
+        nominal_lower=_text(row, "nominal_lower", what),
+        nominal_upper=_text(row, "nominal_upper", what),
+        price_tick_size=_canonical_decimal(row, "price_tick_size", what),
+        index_lower=_canonical_decimal(row, "index_lower", what),
+        index_upper=_canonical_decimal(row, "index_upper", what),
+        trade_candle_low=_canonical_decimal(row, "trade_candle_low", what),
+        trade_candle_high=_canonical_decimal(row, "trade_candle_high", what),
+        price_lower=_canonical_decimal(row, "price_lower", what),
+        price_upper=_canonical_decimal(row, "price_upper", what),
+        index_klines=_evidence_file(row["index_klines"], "terminal settlement index_klines"),
+        trade_kline=_evidence_file(row["trade_kline"], "terminal settlement trade_kline"),
+        supporting_evidence=tuple(
+            _evidence_file(item, "terminal settlement supporting_evidence entry")
+            for item in _list(row, "supporting_evidence", what)
+        ),
+        condition=_text(row, "condition", what),
+        official_confirmation=row["official_confirmation"],
+    )
+
+
 def load_manifest(path: Path) -> DatasetManifest:
-    """Parse a manifest JSON file into a `DatasetManifest` (strict keys, UTC, Decimal strings)."""
+    """Parse a manifest JSON file into a `DatasetManifest` (strict keys, UTC, Decimal strings).
+
+    The top-level key set is exactly the registered set, plus the optional `terminal_settlements`
+    (a non-empty list; an empty list is refused so one manifest has one file form).
+    """
     payload = read_json_object(path, "manifest")
     what = "manifest"
-    _exact_keys(payload, _MANIFEST_KEYS, what)
+    with_settlements = _SETTLEMENTS_KEY in payload
+    _exact_keys(
+        payload, _MANIFEST_KEYS | {_SETTLEMENTS_KEY} if with_settlements else _MANIFEST_KEYS, what
+    )
+    settlements: list[TerminalSettlement] = []
+    if with_settlements:
+        items = _list(payload, _SETTLEMENTS_KEY, what)
+        if not items:
+            raise ManifestError("manifest terminal_settlements must not be empty (omit the key)")
+        settlements = [_terminal_settlement(item) for item in items]
     symbols = _list(payload, "symbols", what)
     if any(not isinstance(sym, str) for sym in symbols):
         raise ManifestError("manifest symbols must be strings")
@@ -458,6 +807,7 @@ def load_manifest(path: Path) -> DatasetManifest:
         risk_rate=_decimal(payload, "risk_rate", what),
         constraint_source=_text(payload, "constraint_source", what),
         constraint_sha256=_text(payload, "constraint_sha256", what),
+        terminal_settlements=tuple(settlements),
     )
 
 
@@ -494,12 +844,15 @@ __all__ = [
     "KNOWN_GAP_REASON_DELISTED_CAPPED",
     "KNOWN_GAP_SOURCE_HOSTS",
     "VALIDATION",
+    "SAMPLES_PER_MINUTE",
     "DatasetManifest",
+    "EvidenceFile",
     "GridPoint",
     "ManifestError",
     "ParameterGrid",
     "Period",
     "SplitWindow",
+    "TerminalSettlement",
     "grid_hash",
     "load_grid",
     "load_manifest",
