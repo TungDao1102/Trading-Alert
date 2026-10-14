@@ -1,0 +1,14 @@
+{
+  "body_file": "B_indexPriceKlines_before_settlement.body.json",
+  "body_sha256": "56afae6cbbbfe185876432143936d492f727b2fc0236b1d3537c033e714769b8",
+  "fetched_at_utc": "2026-10-14T11:50:06Z",
+  "headers_file": "B_indexPriceKlines_before_settlement.headers.txt",
+  "host_rule_note": "origin host is outside the KG4 source_url host list (www.binance.com); KG4 governs the terminal declaration source_url only",
+  "http_date_header": "Date: Wed, 14 Oct 2026 11:50:06 GMT",
+  "method": "GET",
+  "origin_host": "fapi.binance.com",
+  "request_url": "https://fapi.binance.com/fapi/v1/indexPriceKlines?pair=REEFUSDT&interval=1m&startTime=1737534600000&limit=30",
+  "request_url_source": "re-fetch 2026-10-14",
+  "schema": "fetch-record/1",
+  "scratch_name": "B_indexPriceKlines_before_settlement.body.json"
+}

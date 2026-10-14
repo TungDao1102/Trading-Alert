@@ -1,0 +1,14 @@
+{
+  "body_file": "F_indexklines_sample_day.body.json",
+  "body_sha256": "c3e7ef5b419678031a05fbf33a78067bd5c5590f90823580ac05daa68b39f176",
+  "fetched_at_utc": "2026-10-14T11:50:48Z",
+  "headers_file": "F_indexklines_sample_day.headers.txt",
+  "host_rule_note": "origin host is outside the KG4 source_url host list (www.binance.com); KG4 governs the terminal declaration source_url only",
+  "http_date_header": "Date: Wed, 14 Oct 2026 11:50:48 GMT",
+  "method": "GET",
+  "origin_host": "fapi.binance.com",
+  "request_url": "https://fapi.binance.com/fapi/v1/indexPriceKlines?pair=REEFUSDT&interval=1m&startTime=1735720200000&limit=30",
+  "request_url_source": "re-fetch 2026-10-14",
+  "schema": "fetch-record/1",
+  "scratch_name": "F_indexklines_sample_day.body.json"
+}

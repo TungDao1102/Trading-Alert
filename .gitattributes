@@ -13,3 +13,4 @@ tests/fixtures/cutover/** text eol=lf
 
 docs/research/preregistration/research-run-1-constraints-baseline.json -text
 docs/research/preregistration/research-run-1-constraints-S1.json -text
+docs/research/preregistration/evidence/** -text

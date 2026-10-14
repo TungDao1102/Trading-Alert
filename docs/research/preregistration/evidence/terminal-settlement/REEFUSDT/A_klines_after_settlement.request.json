@@ -1,0 +1,14 @@
+{
+  "body_file": "A_klines_after_settlement.body.json",
+  "body_sha256": "2a82295368afc1fe31f0661e735f458ebc035f106782349b530d3e8f7deb2fa1",
+  "fetched_at_utc": "2026-10-14T11:50:48Z",
+  "headers_file": "A_klines_after_settlement.headers.txt",
+  "host_rule_note": "origin host is outside the KG4 source_url host list (www.binance.com); KG4 governs the terminal declaration source_url only",
+  "http_date_header": "Date: Wed, 14 Oct 2026 11:50:48 GMT",
+  "method": "GET",
+  "origin_host": "fapi.binance.com",
+  "request_url": "https://fapi.binance.com/fapi/v1/klines?symbol=REEFUSDT&interval=1m&startTime=1737536400000&limit=4",
+  "request_url_source": "re-fetch 2026-10-14",
+  "schema": "fetch-record/1",
+  "scratch_name": "A_klines_after_settlement.body.json"
+}
