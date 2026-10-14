@@ -414,6 +414,10 @@ class _Engine:
             "timeframe": _SOURCE_TIMEFRAME,
             "touch_no_fill_total": sum(r.touch_no_fill_count for r in records),
         }
+        if self.parsed.terminal_settlements:
+            # Only a case that declares a settlement carries the key, so every other run keeps
+            # its run_summary key set (quick 261014-nnl, design section 4).
+            summary["settlement_count"] = sum(r.exit_kind == EXIT_SETTLEMENT for r in records)
         return {
             "trades": [record.to_dict() for record in ordered],
             "run_summary": dict(sorted(summary.items())),
@@ -982,8 +986,9 @@ def simulate(
     `data_window`, `dataset_id`, `end_of_data_count`, `fallback_count`,
     `gap_through_stop_count`, `intrabar_tie_break`, `no_trade_counts`,
     `pending_at_data_end_count`, `plan_source`, `simulator_semantics_version`,
-    `strategy_window_bars`, `tie_order_note`, `timeframe`, `touch_no_fill_total`),
-    `strategy_version`,
+    `strategy_window_bars`, `tie_order_note`, `timeframe`, `touch_no_fill_total`, plus
+    `settlement_count` (the number of SETTLEMENT exits) only when the case declares a
+    `terminal_settlements` entry), `strategy_version`,
     `parameter_set_hash`, `cost_model_hash` and `symbols`.
     """
     return simulate_detailed(case_input, risk_fn=risk_fn, minute_source=minute_source).output
