@@ -600,15 +600,20 @@ class _Engine:
         )
         if not segments:
             return
+        terminal = self.terminals.get(symbol)
+        terminal_at = None if terminal is None else terminal.terminal_at_utc
         result = funding_events(
             symbol=symbol,
             direction=start_state.direction,
             segments=segments,
-            rows=self._funding_slice(symbol, segments[0].start_utc, segments[-1].end_utc),
+            rows=self._funding_slice(
+                symbol, segments[0].start_utc, segments[-1].end_utc, terminal_at
+            ),
             mark_source=self.source,
             allowed_gaps=self.funding_gaps,
             loaded_start_utc=self.data_start,
             loaded_end_utc=self.data_end,
+            terminal_at_utc=terminal_at,
         )
         for gap in result.used_allowed_gaps:
             if gap not in self.used_gaps:
@@ -623,20 +628,28 @@ class _Engine:
             )
 
     def _funding_slice(
-        self, symbol: str, start_utc: datetime, end_utc: datetime
+        self,
+        symbol: str,
+        start_utc: datetime,
+        end_utc: datetime,
+        terminal_at_utc: datetime | None = None,
     ) -> list[FundingRow]:
         """The funding rows the coverage rule can read for a window, plus one neighbour per side.
 
         The coverage check looks at `[start - G, end + G]` (G = cadence + jitter) clipped to the
         loaded range, and reports a hole with the nearest real neighbouring instants; handing
         it those rows and one row beyond each edge gives the same verdict as the full history
-        without re-sorting the whole series for every window.
+        without re-sorting the whole series for every window. For a symbol with a declared
+        terminal instant the upper edge is clipped to it as well, so coverage is judged up to
+        that instant and not up to the end of the data (quick 261014-nnl).
         """
         rows = self.funding_rows.get(symbol, [])
         times = self.funding_times.get(symbol, [])
         tolerance = FUNDING_MAX_CADENCE + FUNDING_JITTER
         low = max(start_utc - tolerance, self.data_start)
         high = min(end_utc + tolerance, self.data_end)
+        if terminal_at_utc is not None:
+            high = min(high, terminal_at_utc)
         first = max(bisect_left(times, low) - 1, 0)
         last = min(bisect_right(times, high) + 1, len(rows))
         return rows[first:last]

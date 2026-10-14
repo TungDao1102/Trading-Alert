@@ -196,6 +196,7 @@ def check_funding_coverage(
     loaded_start_utc: datetime,
     loaded_end_utc: datetime,
     allowed_gaps: Sequence[FundingGap],
+    terminal_at_utc: datetime | None = None,
 ) -> tuple[FundingGap, ...]:
     """Fail closed unless the funding history of `symbol` covers the holding window (D-36).
 
@@ -211,15 +212,25 @@ def check_funding_coverage(
     edge). A hole fully covered by a same-symbol allowed gap is accepted and returned;
     anything else raises.
 
+    `terminal_at_utc` (default None, which changes nothing) is the declared terminal instant of
+    a delisted symbol (quick 261014-nnl): the effective loaded end becomes
+    `min(loaded_end_utc, terminal_at_utc)`, so coverage is judged up to the terminal instant and
+    not up to the end of the data, and any funding row of the symbol at or after it raises.
+    Holes before the terminal instant still raise.
+
     Returns:
         The allowed gaps that were actually needed, in order of first use.
 
     Raises:
-        FundingCoverageError: the window leaves the loaded range or a hole is uncovered.
+        FundingCoverageError: the window leaves the loaded range or a hole is uncovered, or a
+            funding row lies at or after `terminal_at_utc`.
         ValueError: a duplicate `funding_time_utc` for the symbol, or an inverted window.
     """
     if window_end_utc < window_start_utc:
         raise ValueError("window_end_utc must not be before window_start_utc")
+    if terminal_at_utc is not None:
+        _refuse_rows_from_terminal(symbol, rows, terminal_at_utc)
+        loaded_end_utc = min(loaded_end_utc, terminal_at_utc)
     if window_start_utc < loaded_start_utc or window_end_utc > loaded_end_utc:
         raise FundingCoverageError(
             f"{symbol} holding window {window_start_utc.isoformat()} to "
@@ -273,6 +284,24 @@ def check_funding_coverage(
     return tuple(used)
 
 
+def _refuse_rows_from_terminal(
+    symbol: str, rows: Sequence[FundingRow], terminal_at_utc: datetime
+) -> None:
+    """Raise when `symbol` has a funding row at or after its declared terminal instant."""
+    _require_utc(terminal_at_utc, "terminal_at_utc")
+    late = sorted(
+        r.funding_time_utc
+        for r in rows
+        if r.symbol == symbol and r.funding_time_utc >= terminal_at_utc
+    )
+    if late:
+        listing = ", ".join(t.isoformat() for t in late)
+        raise FundingCoverageError(
+            f"{symbol} has funding rows at or after its terminal instant "
+            f"{terminal_at_utc.isoformat()}: {listing}"
+        )
+
+
 def _symbol_rows(symbol: str, rows: Sequence[FundingRow]) -> list[FundingRow]:
     """Rows of one symbol sorted by time; a duplicate `funding_time_utc` is refused."""
     own = sorted((r for r in rows if r.symbol == symbol), key=lambda r: r.funding_time_utc)
@@ -324,16 +353,21 @@ def funding_events(
     allowed_gaps: Sequence[FundingGap],
     loaded_start_utc: datetime,
     loaded_end_utc: datetime,
+    terminal_at_utc: datetime | None = None,
 ) -> FundingResult:
     """Book funding for every actual fundingTime inside the open segments (D-14, D-36).
 
     Rows of other symbols are ignored. For each segment the rows with
     `start <= fundingTime < end` are charged on that segment's open quantity, in time
-    order. `allowed_gaps` and the loaded range feed the coverage rule.
+    order. `allowed_gaps` and the loaded range feed the coverage rule. `terminal_at_utc`
+    (default None, which changes nothing) clips the loaded end to the declared terminal instant
+    of a delisted symbol and refuses any own funding row at or after it (quick 261014-nnl).
     """
     if direction not in _DIRECTIONS:
         raise ValueError(f"direction must be LONG or SHORT, got {direction!r}")
     _check_segments(segments)
+    if terminal_at_utc is not None:
+        _refuse_rows_from_terminal(symbol, rows, terminal_at_utc)
     own = _symbol_rows(symbol, rows)
     used: tuple[FundingGap, ...] = ()
     if segments:
@@ -349,6 +383,7 @@ def funding_events(
                 loaded_start_utc=loaded_start_utc,
                 loaded_end_utc=loaded_end_utc,
                 allowed_gaps=allowed_gaps,
+                terminal_at_utc=terminal_at_utc,
             )
     events: list[FundingEvent] = []
     total = Decimal("0")
