@@ -545,6 +545,7 @@ Recent decisions affecting current work:
 | 261007-mkw | WR-05 (D062): trading user joins sudo with a password, lock-out guard, no passwordless rule | 2026-10-07 | 7148528 | [261007-mkw-wr-05-d062-trading-user-joins-sudo-with-](./quick/261007-mkw-wr-05-d062-trading-user-joins-sudo-with-/) |
 | 261007-onb | CR-01 replacement (D064): Parquet push by manifest SHA-256 plus cryptcheck (double only; real-S3 gate pending) | 2026-10-07 | e9a030c | [261007-onb-cr-01-replacement-d064-parquet-push-mani](./quick/261007-onb-cr-01-replacement-d064-parquet-push-mani/) |
 | 261009-jqi | Vietnamese operator deploy/operations guide docs/operations/DEPLOY_GUIDE.vi.md plus traceability checker | 2026-10-09 | 894d359 | [261009-jqi-vietnamese-operator-deployment-guide-dep](./quick/261009-jqi-vietnamese-operator-deployment-guide-dep/) |
+| 261014-cvk | Research protocol v2.3.0: declared exchange-constraint assumption (D068) and one global Holm for G3 over 48 hypotheses (D069) | 2026-10-14 | f80e0a2 | [261014-cvk-protocol-v2-3-0-amendment-d068-d069-land](./quick/261014-cvk-protocol-v2-3-0-amendment-d068-d069-land/) |
 
 ### Roadmap Evolution
 

@@ -1,0 +1,46 @@
+Landing check for research protocol v2.3.0 (quick 261014-cvk; D068, D069)
+Run on 2026-10-14 in C:/Users/admin/Music/Trading, branch develop. Every command below was run by the executor and its real exit status is shown. Nothing here reads the Holdout, writes an ExperimentRecord or runs O-03.
+
+Commits of the quick task (oldest first; base before the task was 47c624d)
+  fab893e  docs(quick-261014-cvk): plan and user adoption record (16-DEC-V230)
+  85f4836  feat(quick-261014-cvk): Holm step-down over the 48 registered hypotheses (first version, float)
+  f80e0a2  docs(quick-261014-cvk): research protocol v2.3.0 (D068, D069), DOC_STATUS, holdout marker, witnesses
+  059a42d  docs(quick-261014-cvk): hypothesis addendum and hypothesis-file pin
+  d44d6a1  fix(quick-261014-cvk): Holm module takes Decimal p-values (Decimal-only scan covers src/research)
+
+Gate commands (final state, HEAD d44d6a1)
+$ .venv/Scripts/python scripts/verify_decision_alignment.py all
+  last lines: PASS DC-06 / ALL_PASS all
+  exit=0
+$ uv run pytest -m "not docker"
+  6251 passed, 471 skipped, 28 deselected, 26 warnings in 1300.68s (0:21:40)
+  exit=0
+  (An earlier full run at f80e0a2/059a42d had 1 failure, tests/test_domain_no_float.py::test_domain_mapper_registry_path_has_no_float_call,
+   caused by float literals in src/research/multiplicity.py; fixed by commit d44d6a1 and the full run above was repeated.)
+$ uv run ruff check
+  All checks passed!
+  exit=0
+$ uv run ruff format --check
+  534 files already formatted
+  exit=0
+$ uv run mypy src
+  Success: no issues found in 184 source files
+  exit=0
+$ uv lock --check
+  Resolved 60 packages in 1ms
+  exit=0
+
+Byte and scope checks (base 47c624d against HEAD)
+  G1 sentence of RESEARCH_PROTOCOL.md: identical
+  G5 sentence of RESEARCH_PROTOCOL.md: identical
+  git diff --stat 47c624d HEAD -- params tests/fixtures: empty
+  docs/research/preregistration/research-run-1-hypothesis.md and src/analytics/gates.py: unchanged
+  git show HEAD:<path> carriage returns in every changed blob (17 files): 0 (LF)
+  exactly one DECISIONS row carries "protocol v2.3.0 frozen": D068 (grep -c = 1); D069 does not
+  EXPECTED_MIN in scripts/verify_decision_alignment.py unchanged (no PR/DC check added)
+
+Monte Carlo of the Holm module (seed 261014, 2000 repetitions of 48 uniform null p-values on a 1e-6 grid)
+  repetitions with at least one G3 pass: 85 of 2000 (0.0425); bound asserted: 0 < rate <= 0.065
+
+Not run (out of scope by the plan): the O-03b manifest freeze, the S1 constraint file, the REEFUSDT diagnostic,
+any research run or authorization, the p-value producer, docker-marked tests (excluded by -m "not docker").
