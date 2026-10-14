@@ -9,6 +9,7 @@ holdout. Approval and registration are not an authorization to run research (O-0
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 from decimal import Decimal
@@ -200,3 +201,25 @@ def test_the_hypothesis_is_registered_and_is_not_marked_draft() -> None:
     assert "not an authorization" in text.lower() or "does not authorize" in text.lower()
     assert "cross-family multiplicity" in text.lower()
     assert (PREREG_DIR / "research-run-1-hypothesis-DRAFT.md").is_file()
+
+
+# Quick 261014-cvk (protocol v2.3.0, D068 and D069): the approved hypothesis file is never edited;
+# an addendum records the global Holm and the declared constraint assumption.
+HYPOTHESIS_SHA256_LF = "5e580ac8559ff748a642da0594406d0b7cc01a36ef08404acec0262d0f98e230"
+CONSTRAINT_BASELINE_SHA256 = "4307eec74feeab04081b872866895f70568f1d289b8a249fc7de702e71e11d3f"
+
+
+def test_the_approved_hypothesis_file_is_not_edited() -> None:
+    raw = (PREREG_DIR / "research-run-1-hypothesis.md").read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(raw).hexdigest() == HYPOTHESIS_SHA256_LF
+
+
+def test_the_v230_addendum_records_the_global_holm_and_the_constraint_assumption() -> None:
+    path = PREREG_DIR / "research-run-1-hypothesis-ADDENDUM-v2.3.0.md"
+    text = path.read_text(encoding="utf-8")
+    for token in ("v2.3.0", "D068", "D069", "global Holm", CONSTRAINT_BASELINE_SHA256):
+        assert token in text, token
+    assert "16-DEC-V230" in text
+    assert "NOT an authorization" in text
+    baseline = PREREG_DIR / "research-run-1-constraints-baseline.json"
+    assert hashlib.sha256(baseline.read_bytes()).hexdigest() == CONSTRAINT_BASELINE_SHA256
