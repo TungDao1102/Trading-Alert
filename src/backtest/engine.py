@@ -97,12 +97,14 @@ from .semantics import (
     CONTEXT_WINDOW_BARS,
     DAILY_STOP_CANCEL,
     EXIT_END_OF_DATA,
+    EXIT_SETTLEMENT,
     FUNDING_JITTER,
     FUNDING_MAX_CADENCE,
     NO_TRADE_CONFLICT,
     PENDING_AT_DATA_END,
     PLAN_SOURCE_SCRIPTED,
     PLAN_SOURCE_STRATEGY,
+    SETTLEMENT_CANCEL,
     SIMULATOR_SEMANTICS_VERSION,
     STRATEGY_WINDOW_BARS,
     TIE_BREAK,
@@ -467,6 +469,11 @@ class _Engine:
                     booking = self._not_before_last_booking(booking)
                 self._book(booking)
                 self._update_exposure(entity, start_state, event)
+                if event.exit_kind == EXIT_SETTLEMENT or event.entry_kind == SETTLEMENT_CANCEL:
+                    # A symbol settled or cancelled at its terminal instant is finished: a later
+                    # DAILY_STOP of another symbol must neither cancel nor book it again
+                    # (quick 261014-nnl, design 3.2). Added BEFORE the DAILY_STOP check below.
+                    window.dropped.add(symbol)
                 if event.kind == EVENT_FILL and start_state.phase == PHASE_RESTING:
                     self._push_funding(window, symbol, entity, window_end)
             if booking.kind not in (BOOKING_CANCEL, BOOKING_PENDING) and cancel_resting_required(
