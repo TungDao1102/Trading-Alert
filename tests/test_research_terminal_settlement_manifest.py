@@ -15,22 +15,29 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from src.backtest.case import TerminalSettlementRow, parse_case_input
 from src.backtest.semantics import (
     TERMINAL_EVALUATION_UNION_ADVERSE_BOUND,
     TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES,
 )
 from src.data.case_input import TerminalDeclaration
 from src.domain.canonical import canonical_scalars, sha256_hex
+from src.research import run as research_run
 from src.research.manifest import (
     DatasetManifest,
     EvidenceFile,
     ManifestError,
+    SplitWindow,
     TerminalSettlement,
     load_manifest,
     manifest_hash,
+    research_splits,
 )
+from src.research.run import terminal_settlement_case_rows
 
 from tests import test_research_known_gap_reason as kg
+from tests import test_research_runner as rr
+from tests.backtest_case_helpers import make_case
 
 D = Decimal
 REEF = "REEFUSDT"
@@ -735,3 +742,166 @@ def test_loader_wraps_a_recompute_mismatch_as_a_manifest_error(tmp_path: Path) -
 def test_a_settlement_dataclass_keeps_the_declaration_untouched() -> None:
     fields = [f.name for f in dataclasses.fields(TerminalDeclaration)]
     assert fields == ["symbol", "reason", "terminal_at_utc", "source_url"]
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: the builder rule. Only the window that contains T gets case rows.
+# --------------------------------------------------------------------------- #
+
+EXPECTED_ROW = {
+    "symbol": REEF,
+    "terminal_at_utc": "2025-01-22T09:00:00+00:00",
+    "price_lower": "0.000845",
+    "price_upper": "0.000887",
+    "kind": "BOUNDED_BY_INDEX_KLINES",
+    "recorded_evaluation": "UNION_ADVERSE_BOUND",
+}
+
+
+def test_only_the_window_containing_the_terminal_gets_case_rows() -> None:
+    manifest = with_settlement()
+    splits = research_splits(manifest)
+    assert [w.role for w in splits] == [
+        "DEVELOPMENT",
+        "VALIDATION",
+        "VALIDATION",
+        "VALIDATION",
+        "VALIDATION",
+    ]
+    assert terminal_settlement_case_rows(manifest, splits[0]) == [EXPECTED_ROW]
+    for fold in splits[1:]:
+        assert terminal_settlement_case_rows(manifest, fold) == []
+    day = timedelta(days=1)
+    starts_at_t = SplitWindow("DEVELOPMENT", TERMINAL, TERMINAL + day)
+    ends_at_t = SplitWindow("DEVELOPMENT", TERMINAL - day, TERMINAL)
+    straddles = SplitWindow("DEVELOPMENT", TERMINAL - day, TERMINAL + day)
+    assert terminal_settlement_case_rows(manifest, starts_at_t) == []
+    assert terminal_settlement_case_rows(manifest, ends_at_t) == []
+    assert terminal_settlement_case_rows(manifest, straddles) == [EXPECTED_ROW]
+
+
+def test_a_manifest_without_settlements_gives_no_case_rows() -> None:
+    manifest = make_manifest()
+    for window in research_splits(manifest):
+        assert terminal_settlement_case_rows(manifest, window) == []
+
+
+def test_case_rows_follow_symbol_order_and_carry_only_strings() -> None:
+    btc_row = reef_settlement(symbol=BTC)
+    btc_gap = TerminalDeclaration(BTC, "DELISTED_CAPPED", TERMINAL + timedelta(days=2), REEF_URL)
+    manifest = make_manifest(
+        known_gaps=(reef_declaration(), btc_gap),
+        terminal_settlements=(reef_settlement(), dataclasses.replace(btc_row)),
+    )
+    development = research_splits(manifest)[0]
+    rows = terminal_settlement_case_rows(manifest, development)
+    assert [r["symbol"] for r in rows] == [BTC, REEF]
+    assert rows[0]["terminal_at_utc"] == "2025-01-24T09:00:00+00:00"
+    assert all(isinstance(v, str) for row in rows for v in row.values())
+
+
+def test_case_rows_parse_through_the_backtest_case_contract() -> None:
+    manifest = with_settlement()
+    rows = terminal_settlement_case_rows(manifest, research_splits(manifest)[0])
+    case = make_case(
+        symbols=(REEF,),
+        scripted=[],
+        data_start=datetime(2025, 1, 22, tzinfo=UTC),
+        data_end=datetime(2025, 1, 23, tzinfo=UTC),
+    )
+    case["terminal_settlements"] = rows
+    parsed = parse_case_input(case)
+    assert parsed.terminal_settlements == (
+        TerminalSettlementRow(
+            symbol=REEF,
+            terminal_at_utc=TERMINAL,
+            price_lower=D("0.000845"),
+            price_upper=D("0.000887"),
+            kind="BOUNDED_BY_INDEX_KLINES",
+            recorded_evaluation="UNION_ADVERSE_BOUND",
+        ),
+    )
+
+
+class _Stop(Exception):  # noqa: N818 - a test sentinel, not an error type
+    """Raised by the simulator spy once the case has been captured."""
+
+
+class _FakeData:
+    dataset_id = "1" * 64
+
+    def __init__(self, sink: list[dict[str, Any]]) -> None:
+        self._sink = sink
+
+    def to_case_input(self, **scenario: Any) -> dict[str, Any]:
+        self._sink.append(scenario)
+        return {"data_window": {"start_utc": "x", "end_utc": "y"}}
+
+
+@pytest.fixture
+def builder_spy(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
+    """Replace the store builder, the minute source and the simulator with recording fakes."""
+    calls: dict[str, list[Any]] = {"build": [], "scenario": []}
+
+    def fake_build(raw_root: Path, **kwargs: Any) -> _FakeData:
+        calls["build"].append(kwargs)
+        return _FakeData(calls["scenario"])
+
+    def fake_run(case_input: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        raise _Stop
+
+    monkeypatch.setattr(research_run, "build_case_input_data", fake_build)
+    monkeypatch.setattr(research_run, "ParquetMinuteSource", lambda *a, **k: object())
+    monkeypatch.setattr(research_run.simulator, "run", fake_run)
+    return calls
+
+
+def _split_scenario(
+    calls: dict[str, list[Any]], manifest: DatasetManifest, window: SplitWindow
+) -> dict[str, Any]:
+    with pytest.raises(_Stop):
+        research_run._run_split(
+            manifest=manifest,
+            grid=rr._grid(),
+            point=rr._grid().points[0],
+            window=window,
+            raw_root=Path("unused"),
+            constraints=[],
+            code_version=None,
+        )
+    return calls["scenario"][-1]
+
+
+def test_run_split_passes_rows_only_to_the_window_containing_the_terminal(
+    builder_spy: dict[str, list[Any]],
+) -> None:
+    manifest = with_settlement()
+    development, *folds = research_splits(manifest)
+    assert _split_scenario(builder_spy, manifest, development)["terminal_settlements"] == [
+        EXPECTED_ROW
+    ]
+    for fold in folds:
+        assert "terminal_settlements" not in _split_scenario(builder_spy, manifest, fold)
+
+
+def test_run_split_scenario_is_unchanged_without_settlements(
+    builder_spy: dict[str, list[Any]],
+) -> None:
+    plain = make_manifest()
+    declared = with_settlement()
+    development = research_splits(plain)[0]
+    before = _split_scenario(builder_spy, plain, development)
+    assert "terminal_settlements" not in before
+    after = _split_scenario(builder_spy, declared, development)
+    assert {k: v for k, v in after.items() if k != "terminal_settlements"} == before
+
+
+def test_whole_range_store_check_ignores_settlements(builder_spy: dict[str, list[Any]]) -> None:
+    plain = make_manifest()
+    declared = with_settlement()
+    research_run._check_manifest_against_store(plain, Path("unused"))
+    research_run._check_manifest_against_store(declared, Path("unused"))
+    first, second = builder_spy["build"]
+    assert first == second
+    assert "terminal_settlements" not in second
+    assert builder_spy["scenario"] == []  # nothing is turned into a case input
