@@ -164,4 +164,6 @@ For every family both smoke runs exited 0 with `digests_match=true` and the same
 4. A measurement of trade-floor reachability, which is still unmeasured; the floor is never lowered to rescue signal volume (D-17).
 5. Point-in-time exchange constraints for the window; this check used one BTCUSDT row observed on 2026-10-05, back-extrapolated (D-30), which is not valid for strategy evaluation.
 
+Since 2026-10-14 a research run may use back-extrapolated constraints only as the declared assumption of D068 (decision `16-DEC-O-03b-constraint`), with the `extrapolated` count reported and the sensitivity scenarios pre-registered; the plumbing-check conclusion of this audit is unchanged.
+
 **PLACEHOLDER values.** 16 (trend-pullback), 17 (breakout-retest) and 22 (range-mr) keys of the three baseline-v6 sets carry basis PLACEHOLDER, so `pin_stream_epoch` refuses them: baseline-v6 stays out of paper freezing until experiments supply an EXPERIMENT basis (D-16).

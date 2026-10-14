@@ -1,5 +1,5 @@
 """Protocol gate module (Phase 11, plan 11-01; D032, D043; amended to v2.0.0 by D052,
-to v2.1.0 by D057/D060, to v2.2.0 by D065/D067).
+to v2.1.0 by D057/D060, to v2.2.0 by D065/D067, to v2.3.0 by D068/D069).
 
 Executable checks that keep the frozen research protocol, the DECISIONS row, the
 DOC_STATUS index, the holdout consumed marker, the BACKTEST_SPEC pointers and the seven
@@ -81,7 +81,10 @@ REQUIRED_PREREGISTRATION_PHRASES: tuple[str, ...] = (
     "N = 25",
     "Holm-Bonferroni",
     "alpha = 0.05",
-    "about 14%",
+    "one Holm-Bonferroni procedure",
+    "ONE set of 48 candidate-level p-values",
+    "across the three families",
+    "never reset per family",
     "A candidate passes only when G1-G5 all pass",
     "holdout_consumed.json",
     "candidate_sha256",

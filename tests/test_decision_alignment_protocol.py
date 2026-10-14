@@ -1,5 +1,5 @@
 """Tests for the protocol gate module (Phase 11, plan 11-01; D032, D043; v2.0.0 by D052,
-v2.1.0 by D057/D060, v2.2.0 by D065/D067).
+v2.1.0 by D057/D060, v2.2.0 by D065/D067, v2.3.0 by D068/D069).
 
 The real-repository test proves gates PR-01..PR-11 hold today; the negative tests feed
 each pure check a deliberately broken input so a regression in the protocol text, the
@@ -107,6 +107,26 @@ def test_required_phrase_removed_fails() -> None:
     assert any("Holm-Bonferroni" in p for p in gate.check_preregistration(text))
     text = _protocol().replace("N = 25", "N = 50")
     assert any("N = 25" in p for p in gate.check_preregistration(text))
+
+
+def test_v230_multiplicity_phrases_are_required_and_the_old_wording_is_gone() -> None:
+    text = _protocol()
+    assert "about 14%" not in text
+    assert "about 14%" not in gate.REQUIRED_PREREGISTRATION_PHRASES
+    for phrase in (
+        "one Holm-Bonferroni procedure",
+        "ONE set of 48 candidate-level p-values",
+        "across the three families",
+        "never reset per family",
+        "Holm-Bonferroni",
+        "alpha = 0.05",
+        "N = 25",
+    ):
+        assert phrase in gate.REQUIRED_PREREGISTRATION_PHRASES
+        assert phrase in text.replace("**", "").replace("`", "")
+    # a G3 line that falls back to the per-family wording fails PR-04
+    per_family = text.replace("across the three families", "inside each family")
+    assert any("across the three families" in p for p in gate.check_preregistration(per_family))
 
 
 def test_forbidden_phrase_present_fails() -> None:

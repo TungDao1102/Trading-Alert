@@ -5,7 +5,8 @@ wording and demands the resolution be *recorded*, not silently picked. The
 resolution lives in a new DECISIONS row (D030), a clarification amendment to
 the frozen research protocol (v1.0.1, since superseded by the v1.1.0 semantic
 amendment D043, then by the v2.0.0 simulator-semantics amendment D052, the v2.1.0
-G5 floor D060 and the v2.2.0 experiment-identity amendment D067) and the
+G5 floor D060, the v2.2.0 experiment-identity amendment D067 and the v2.3.0
+constraint-assumption and cross-family multiplicity amendments D068 and D069) and the
 DOC_STATUS index.
 
 These tests make that reconciliation regress-proof and re-implement the three
@@ -76,7 +77,7 @@ PINNED_PROTOCOL_LINES = (
     "> **Status:** FROZEN",
     "> **Frozen on:** 2026-09-19",
 )
-EXPECTED_SUPERSEDES = "v2.1.0"
+EXPECTED_SUPERSEDES = "v2.2.0"
 D043_ROW_PREFIX = "| D043 | Research protocol v1.1.0 frozen | Accepted"
 D029_ROW_PREFIX = "| D029 | Research protocol v1.0.0 frozen | Accepted |"
 
@@ -206,9 +207,89 @@ def test_d067_row_present() -> None:
         assert token in row, f"D067 row must mention {token}"
 
 
-def test_header_version_is_the_d067_amendment() -> None:
-    """The header version equals the freeze row of the latest amendment (D067 is v2.2.0)."""
-    assert _header_version() == "v2.2.0"
+def test_d068_d069_rows_present() -> None:
+    """D068 and D069 follow D067 in order; only D068 carries the v2.3.0 freeze phrase."""
+    lines = _lines(DECISIONS)
+    d067 = [i for i, ln in enumerate(lines) if ln.startswith("| D067 |")]
+    d068 = [i for i, ln in enumerate(lines) if ln.startswith("| D068 |")]
+    d069 = [i for i, ln in enumerate(lines) if ln.startswith("| D069 |")]
+    assert len(d067) == len(d068) == len(d069) == 1
+    assert d068[0] == d067[0] + 1, "D068 must directly follow D067"
+    assert d069[0] == d068[0] + 1, "D069 must directly follow D068"
+    assert "protocol v2.2.0 frozen" in lines[d067[0]], "D067 keeps its history"
+    assert "protocol v2.3.0 frozen" in lines[d068[0]]
+    assert "protocol v2.3.0 frozen" not in lines[d069[0]]
+    assert sum("protocol v2.3.0 frozen" in ln for ln in lines) == 1
+    for row in (lines[d068[0]], lines[d069[0]]):
+        assert "D032" in row
+        assert "D043" in row
+    assert "extrapolated" in lines[d068[0]]
+    assert "4307eec74feeab04081b872866895f70568f1d289b8a249fc7de702e71e11d3f" in lines[d068[0]]
+    assert "one Holm-Bonferroni procedure" in lines[d069[0]]
+    # no claim of end-to-end resolution while the p-value producer does not exist
+    assert not re.search(r"\bsolved\b|fully implemented", lines[d069[0]])
+    assert "not built" in lines[d069[0]]
+
+
+def test_v230_constraint_assumption_text() -> None:
+    """The protocol states the declared constraint assumption, S0 and S1 and the Holdout rule."""
+    text = _read(PROTOCOL)
+    assert "### Exchange-constraint assumption (v2.3.0)" in text
+    assert "4307eec74feeab04081b872866895f70568f1d289b8a249fc7de702e71e11d3f" in text
+    for word in ("extrapolated", "S0", "S1", "valid only under the stated constraint assumption"):
+        assert word in text, word
+    assert "The Holdout is never read to compare scenarios" in text
+    assert "S1 p-values never enter the correction of G3" in text
+    assert "Constraint assumption (v2.3.0)" in text
+    assert "Constraint sensitivity (v2.3.0)" in text
+    # the lineage statement is made once: registration lineage is not the holdout lineage
+    assert text.count("*Registration lineage*") == 1
+    assert "`strategy_version` stays `v5.0.0`" in text
+
+
+def test_v230_g3_text_and_power_note() -> None:
+    text = _read(PROTOCOL)
+    g3 = [ln for ln in text.splitlines() if ln.startswith("3. **G3 (multiple testing)**")]
+    assert len(g3) == 1
+    for phrase in ("one Holm-Bonferroni procedure", "ONE set of 48", "alpha = 0.05", "p = 1"):
+        assert phrase in g3[0], phrase
+    assert "about 14%" not in text
+    assert "across the three families" in text
+    assert "0.05/48 = 0.00104" in text
+    assert not re.search(r"\bsolved\b|fully implemented", text)
+
+
+# Byte-pinned from the base commit of quick 261014-cvk: v2.3.0 must not touch G1 or G5.
+G1_SENTENCE = (
+    "1. **G1 (trade floor)** — at least 100 closed trades pooled across the four "
+    "Validation folds and at least 30 closed trades in each Validation fold; a "
+    "candidate below the floor cannot pass and the floor is never lowered after "
+    "the freeze."
+)
+G5_SENTENCE = (
+    "5. **G5 (single-use holdout)** — the candidate lineage evaluates the final "
+    "holdout (the last 20% of the dataset by time) exactly once, after G1-G4 "
+    "pass, with parameters frozen; it requires at least 30 closed trades in the "
+    "holdout, counted exactly as G1 counts closed trades, and it passes only when "
+    "mean net R after full costs is above 0 and maximum drawdown is at most 20% "
+    "on the holdout block. A candidate with fewer than 30 closed trades in the "
+    "holdout cannot pass G5, the holdout counts as consumed for that lineage, and "
+    "it is never re-run on the same holdout; a re-evaluation needs a new protocol "
+    "amendment and a new candidate lineage. The floor is never lowered after the "
+    "freeze. Thirty is an eligibility floor for the statistical evaluation, never "
+    "evidence of an edge."
+)
+
+
+def test_g1_and_g5_sentences_are_byte_identical_to_the_base() -> None:
+    lines = _read(PROTOCOL).splitlines()
+    assert G1_SENTENCE in lines
+    assert G5_SENTENCE in lines
+
+
+def test_header_version_is_the_d068_amendment() -> None:
+    """The header version equals the freeze row of the latest amendment (D068 is v2.3.0)."""
+    assert _header_version() == "v2.3.0"
 
 
 def test_doc_status_line_not_pending() -> None:
@@ -223,6 +304,8 @@ def test_doc_status_line_not_pending() -> None:
     assert "D043" in index_lines[0]
     assert "D052" in index_lines[0]
     assert "D067" in index_lines[0]
+    assert "D068" in index_lines[0]
+    assert "D069" in index_lines[0]
     for ln in lines:
         assert not W2_PENDING.search(ln), f"pending marker on DOC_STATUS line: {ln!r}"
 
