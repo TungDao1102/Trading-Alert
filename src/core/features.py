@@ -312,6 +312,78 @@ def _detect_gaps(candles: list[Candle], expected: timedelta | None) -> list[bool
     return flags
 
 
+def _ema_last(closes: list[Decimal], period: int) -> Decimal | None:
+    """The EMA of the last close, or None while warming up; the value `_ema_series` ends on.
+
+    Same SMA seed and recurrence as `_ema_series`; the caller holds the pinned `_PREC` context.
+    """
+    if period <= 0:
+        raise ValueError(f"EMA period must be > 0, got {period}")
+    n = len(closes)
+    if n < period:
+        return None
+    seed = closes[0]
+    for i in range(1, period):
+        seed = seed + closes[i]
+    seed = seed / Decimal(period)
+    alpha = Decimal(2) / Decimal(period + 1)
+    one_minus_alpha = Decimal(1) - alpha
+    prev = seed
+    for i in range(period, n):
+        prev = alpha * closes[i] + one_minus_alpha * prev
+    return prev
+
+
+def _atr_last(candles: list[Candle], period: int) -> Decimal | None:
+    """The Wilder ATR of the last bar, or None while warming up; the value `_atr_series` ends on.
+
+    Same true-range rule and recurrence as `_atr_series`; the caller holds the pinned `_PREC`
+    context.
+    """
+    if period <= 0:
+        raise ValueError(f"ATR period must be > 0, got {period}")
+    n = len(candles)
+    if n < period + 1:
+        return None
+    trs: list[Decimal] = []
+    prev_close: Decimal | None = None
+    for c in candles:
+        if prev_close is None:
+            trs.append(c.high - c.low)
+        else:
+            hl = c.high - c.low
+            hc = abs(c.high - prev_close)
+            lc = abs(c.low - prev_close)
+            if hl >= hc and hl >= lc:
+                trs.append(hl)
+            elif hc >= lc:
+                trs.append(hc)
+            else:
+                trs.append(lc)
+        prev_close = c.close
+    seed = trs[0]
+    for i in range(1, period):
+        seed = seed + trs[i]
+    seed = seed / Decimal(period)
+    prev = seed
+    period_less_one = Decimal(period - 1)
+    divisor = Decimal(period)
+    for i in range(period, n):
+        prev = (period_less_one * prev + trs[i]) / divisor
+    return prev
+
+
+def _swing_last(candles: list[Candle], lookback: int) -> tuple[Decimal | None, Decimal | None]:
+    """The trailing swing (high, low) at the last bar, or (None, None) while warming up."""
+    if lookback <= 0:
+        raise ValueError(f"swing lookback must be > 0, got {lookback}")
+    last = len(candles) - 1
+    if last < lookback - 1:
+        return None, None
+    window = candles[last - lookback + 1 : last + 1]
+    return max(c.high for c in window), min(c.low for c in window)
+
+
 # --------------------------------------------------------------------------- #
 # Public entry point — compute_features.
 # --------------------------------------------------------------------------- #
@@ -374,50 +446,58 @@ def compute_features(
         zone_tolerance_atr = Decimal(str(zone_tolerance_atr))
 
     closes = [c.close for c in candles]
-
-    ema_20 = _ema_series(closes, _EMA_FAST_PERIOD)
-    ema_50 = _ema_series(closes, _EMA_MID_PERIOD)
-    ema_200 = _ema_series(closes, _EMA_SLOW_PERIOD)
-    atr_14 = _atr_series(candles, _atr_period_from_params(parameter_set))
-    swing_high = _swing_series(candles, swing_lookback, high=True)
-    swing_low = _swing_series(candles, swing_lookback, high=False)
-    zone_upper, zone_lower = _zone_series(
-        candles, atr_14, swing_low, swing_high, zone_tolerance_atr
-    )
-
-    # Gap detection — invalidate features spanning a gap.
-    expected = _expected_bar_duration(candles, interval)
-    gap_flags = _detect_gaps(candles, expected)
-    if any(gap_flags):
-        # Mark every feature at and after the first gap as GAP_IN_SOURCE.
-        first_gap = gap_flags.index(True)
-        for series in (
-            ema_20,
-            ema_50,
-            ema_200,
-            atr_14,
-            swing_high,
-            swing_low,
-            zone_upper,
-            zone_lower,
-        ):
-            for i in range(first_gap, len(series)):
-                if series[i].valid:
-                    series[i] = _invalid(REASON_GAP_IN_SOURCE)
-
     last = len(candles) - 1
-    last_close_utc = candles[last].close_time_utc
+
+    # Only the last bar's features are read by every caller, so only they are computed. The
+    # recurrences run over the whole window (the seed is the window's first bars) and every
+    # operation rounds at `_PREC`, exactly as the series helpers do; the helpers stay for the
+    # other callers. The order of the checks below is the order of the series helpers.
+    with localcontext() as ctx:
+        ctx.prec = _PREC
+        ema_20 = _ema_last(closes, _EMA_FAST_PERIOD)
+        ema_50 = _ema_last(closes, _EMA_MID_PERIOD)
+        ema_200 = _ema_last(closes, _EMA_SLOW_PERIOD)
+        atr_14 = _atr_last(candles, _atr_period_from_params(parameter_set))
+        swing_high, swing_low = _swing_last(candles, swing_lookback)
+        if atr_14 is not None and swing_high is not None and swing_low is not None:
+            half_width = zone_tolerance_atr * atr_14
+            zone_lower: Decimal | None = swing_low - half_width
+            zone_upper: Decimal | None = swing_high + half_width
+        else:
+            zone_lower = zone_upper = None
+
+    # Gap detection — a feature at or after the first gap is GAP_IN_SOURCE. The last bar is
+    # never before the first gap, so a valid last-bar feature becomes GAP_IN_SOURCE and a
+    # warm-up one keeps its warm-up reason.
+    expected = _expected_bar_duration(candles, interval)
+    has_gap = any(_detect_gaps(candles, expected))
+
+    def last_bar(value: Decimal | None) -> FeatureOutput:
+        if value is None:
+            return _invalid(REASON_WARMUP_INSUFFICIENT)
+        if has_gap:
+            return _invalid(REASON_GAP_IN_SOURCE)
+        return _ok(value)
+
+    f_ema_20 = last_bar(ema_20)
+    f_ema_50 = last_bar(ema_50)
+    f_ema_200 = last_bar(ema_200)
+    f_atr_14 = last_bar(atr_14)
+    f_swing_high = last_bar(swing_high)
+    f_swing_low = last_bar(swing_low)
+    f_zone_upper = last_bar(zone_upper)
+    f_zone_lower = last_bar(zone_lower)
 
     # Whole-bar validity = AND of all required features at the last bar.
     required = (
-        ema_20[last],
-        ema_50[last],
-        ema_200[last],
-        atr_14[last],
-        swing_high[last],
-        swing_low[last],
-        zone_upper[last],
-        zone_lower[last],
+        f_ema_20,
+        f_ema_50,
+        f_ema_200,
+        f_atr_14,
+        f_swing_high,
+        f_swing_low,
+        f_zone_upper,
+        f_zone_lower,
     )
     features_valid = all(f.valid for f in required)
 
@@ -425,16 +505,16 @@ def compute_features(
         symbol=symbol,
         interval=interval,
         bar_index=last,
-        bar_close_utc=last_close_utc,
+        bar_close_utc=candles[last].close_time_utc,
         features_valid=features_valid,
-        ema_20=ema_20[last],
-        ema_50=ema_50[last],
-        ema_200=ema_200[last],
-        atr_14=atr_14[last],
-        swing_high=swing_high[last],
-        swing_low=swing_low[last],
-        zone_upper=zone_upper[last],
-        zone_lower=zone_lower[last],
+        ema_20=f_ema_20,
+        ema_50=f_ema_50,
+        ema_200=f_ema_200,
+        atr_14=f_atr_14,
+        swing_high=f_swing_high,
+        swing_low=f_swing_low,
+        zone_upper=f_zone_upper,
+        zone_lower=f_zone_lower,
     )
 
 
