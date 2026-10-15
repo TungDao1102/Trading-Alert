@@ -1,0 +1,43 @@
+Landing check for research protocol v2.4.0 (quick 261014-nnl plan 10; D070, D071)
+Run on 2026-10-15 in C:/Users/admin/Music/Trading, branch develop, main working tree. Every command below was run by the executor and its real exit status is shown. Nothing here reads the Holdout, writes an ExperimentRecord or runs O-03. No document, source, test, script, params or holdout_consumed.json was edited by this plan.
+
+head_commit: 1faef1cf6ecd420a7e7bfd012311f175e463e4e6
+base_commit: d186b9e5193411cd5c27883a48182bf4eaa6b025
+(base_commit is the base_commit line of 16-S-B-interval-prebump-check.txt. head_commit is the plan 09 summary commit; the protocol v2.4.0 landing commit is 006c480, so the gates ran on the tree that contains it. This evidence file is committed after head_commit and changes no code. Working tree at the run: only .planning/config.json modified and .gsd/, .planning/milestone.lock untracked, none of them read by a gate.)
+Precondition: 16-DEC-V240-marker.md reads "block-12-execution: authorized"; the plan 09 SUMMARY is status complete (landed).
+
+Gate commands (HEAD 1faef1c)
+$ .venv/Scripts/python scripts/verify_decision_alignment.py all
+  last lines: PASS DC-05 / PASS DC-06 / ALL_PASS all
+  exit=0
+$ uv run pytest -m "not docker" -q   (run once, with --junitxml and -p no:cacheprovider added so exact counts exist; the repository addopts "-q" together with "-q" prints no summary line)
+  junit totals: tests=7071 failures=0 errors=0 skipped=471 -> 6600 passed (derived: 7071 - 471); the docker-marked tests are deselected by -m "not docker" (the deselected count is not in the junit file and was not measured in this run)
+  exit=0
+  skipped by reason: 452 "TEST_DATABASE_URL is not set; PostgreSQL tests cannot run", 1 "live-PG analytics store test requires TEST_DATABASE_URL" (453 PostgreSQL in total, TEST_DATABASE_URL unset on this host, so the PostgreSQL tests were NOT run); 12 shellcheck not on PATH; 4 file modes do not exist on Windows; 1 NTFS cannot represent POSIX modes; 1 symlinks unavailable on this platform
+  collected 7071 = 7060 (plan 07) + 11 new tests of plan 09 (10 in tests/test_research_protocol_v240.py, 1 d070/d071 rows test in tests/test_decision_alignment_bookkeeping.py)
+  skipped count 471 equals plan 07's host baseline (453 DB, 12 shellcheck, 6 Windows)
+$ uv run ruff check
+  All checks passed!
+  exit=0
+$ uv run ruff format --check
+  544 files already formatted
+  exit=0
+$ uv run mypy src
+  Success: no issues found in 185 source files
+  exit=0
+$ uv lock --check
+  Resolved 60 packages in 1ms
+  exit=0
+
+Byte and scope checks (base d186b9e against HEAD 1faef1c)
+  G1 sentence of RESEARCH_PROTOCOL.md (line "1. **G1 ..."): identical
+  G5 sentence of RESEARCH_PROTOCOL.md (line "5. **G5 ..."): identical
+    (sha256 of the two lines together, base and HEAD, both 6fcd210242c9105b9ed5cfa890421532f0ae7bc64d0c903cdb2e06e2e63abc9c)
+  git diff --stat d186b9e HEAD -- params src/paper: empty (0 lines)
+  LF check, git show HEAD:<path> carriage returns per blob, 0 for each of the 15 text blobs edited by plans 08-09 (a -text attribute applies to none of them):
+    16-AMEND-v2.4.0-DRAFT.md, 16-DEC-V240.md (plan 08), 16-DEC-V240-marker.md, 261014-nnl-09-SUMMARY.md, docs/DECISIONS.md, docs/DOC_STATUS.md,
+    docs/backtest/BACKTEST_SPEC.md, docs/research/RESEARCH_PROTOCOL.md, docs/research/holdout_consumed.json, scripts/decision_alignment/protocol.py,
+    tests/test_decision_alignment_bookkeeping.py, tests/test_decision_alignment_protocol.py, tests/test_kill_gate_docs.py, tests/test_research_protocol_v240.py,
+    .github/workflows/research-gate.yml (git attribute text=set, eol=lf via *.yml)
+
+Not run (out of scope by the plan): the manifest freeze (16-37 Task 3), O-03 or 16-46, any Holdout read, any ExperimentRecord, docker-marked tests (excluded by -m "not docker"), the PostgreSQL tests (no TEST_DATABASE_URL on this host), git push.
