@@ -547,6 +547,7 @@ Recent decisions affecting current work:
 | 261009-jqi | Vietnamese operator deploy/operations guide docs/operations/DEPLOY_GUIDE.vi.md plus traceability checker | 2026-10-09 | 894d359 | [261009-jqi-vietnamese-operator-deployment-guide-dep](./quick/261009-jqi-vietnamese-operator-deployment-guide-dep/) |
 | 261014-cvk | Research protocol v2.3.0: declared exchange-constraint assumption (D068) and one global Holm for G3 over 48 hypotheses (D069) | 2026-10-14 | f80e0a2 | [261014-cvk-protocol-v2-3-0-amendment-d068-d069-land](./quick/261014-cvk-protocol-v2-3-0-amendment-d068-d069-land/) |
 | 261014-nnl | S-B-interval: REEFUSDT terminal settlement as a bounded interval (manifest terminal_settlements, engine SETTLEMENT/SETTLEMENT_CANCEL, simulator 2.1.0, protocol v2.4.0 D070/D071); 10 plans, gates green, REEF diagnostic 48/48 | 2026-10-15 | ded32f7 | [261014-nnl-plan-s-b-interval-implementation-plan-on](./quick/261014-nnl-plan-s-b-interval-implementation-plan-on/) |
+| 261015-mvq | compute_features computes the last bar only, byte-identical (core performance; 14x on the function, 3-10x on engine runs; simulator stays 2.1.0) | 2026-10-15 | a64e6af | [261015-mvq-optimise-compute-features-last-bar-only-](./quick/261015-mvq-optimise-compute-features-last-bar-only-/) |
 
 ### Roadmap Evolution
 
