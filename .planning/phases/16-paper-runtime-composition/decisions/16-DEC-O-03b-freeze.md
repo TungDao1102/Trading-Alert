@@ -19,3 +19,7 @@ Changing any value, or this file, is a new registration and a new experiment (RE
 
 ## Not authorized by this record
 The S1 manifest (own values, own file and hash, own words), the grid hashes and any run authorization (plan 16-46, the user writes it), any run, any Holdout read, `docs/research/holdout_consumed.json`, ExperimentRecord, push.
+
+## Authorization files (2026-10-15)
+
+The user typed: "Tôi, Tung Dao, ủy quyền chạy research run 1 kịch bản S0 cho cả ba grid (trend-pullback, breakout-retest, range-mr) với manifest đã freeze, và cho phép Claude tạo ba file ủy quyền". This amends O-03a option (a) (user writes the files): Claude wrote the three files on that instruction. Files: `docs/research/preregistration/research-run-1-authorization-<family>.json`, authorized_at_utc 2026-10-15T11:30:22+00:00. `load_authorization` accepts all three and manifest and grid hashes equal the runner's own hashes. No simulation was run by this step.
