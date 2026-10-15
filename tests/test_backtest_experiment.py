@@ -800,7 +800,7 @@ def _canonical_value_text(value: object) -> str:
 
 def test_assemble_binds_the_run_summary_into_typed_fields() -> None:
     record = _assemble()
-    assert record.simulator_semantics_version == "2.0.0"
+    assert record.simulator_semantics_version == "2.1.0"
     assert record.intrabar_tie_break == "STOP_FIRST"
     assert record.no_trade_counts == (("CONFLICT_WITH_OPEN_POSITION", 3), ("RR_TOO_LOW", 5))
     assert (record.timeframe, record.context_timeframe) == ("1h", "4h")
@@ -1199,7 +1199,7 @@ def test_the_record_serializes_without_the_research_gate_keys() -> None:
         return set()
 
     assert not ({"parameters", "parameters_json"} & keys(document))
-    assert document["simulator_semantics_version"] == "2.0.0"
+    assert document["simulator_semantics_version"] == "2.1.0"
     assert document["no_trade_counts"] == {"CONFLICT_WITH_OPEN_POSITION": 3, "RR_TOO_LOW": 5}
     assert json.loads(text) == document
 

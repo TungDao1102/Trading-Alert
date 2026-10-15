@@ -33,7 +33,8 @@ Digest consequence (WR-05): for input without a mark hole inside a position's li
 changes (`coverage_note` stays None and every record byte and digest is as before). For input
 with such a hole only the `coverage_note` text moves, and with it the trade payload bytes and the
 hashes derived from them; no price, time, cost, count or event moves, and
-`SIMULATOR_SEMANTICS_VERSION` stays 2.0.0.
+`SIMULATOR_SEMANTICS_VERSION` stayed 2.0.0 at the time (2.0.0 at the time; the version moved
+to 2.1.0 with the terminal settlement, D070).
 
 The module imports NOTHING from Polars/pandas/NumPy/Binance SDK/
 SQLAlchemy/Pydantic — stdlib + Decimal + `src/core/_decimal.py` only,

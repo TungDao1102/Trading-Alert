@@ -504,7 +504,7 @@ def test_the_v2_sample_carries_every_typed_experiment_field_and_validated_trades
     evidence = load_evidence_file(EVIDENCE_SAMPLE)
     entry = evidence.backtest[0]
     record = entry.experiment
-    assert record.simulator_semantics_version == "2.0.0"
+    assert record.simulator_semantics_version == "2.1.0"
     assert record.intrabar_tie_break == "STOP_FIRST"
     assert record.code_version == record.code_commit  # a clean tree
     assert record.code_dirty is False

@@ -19,9 +19,10 @@ from decimal import Decimal
 # Documented exception (plan 14-17, review WR-05): the annotate-only mark-hole coverage note is
 # NOT a semantics change. For input without a mark hole inside a position's life nothing changes;
 # for input with such a hole only the `coverage_note` text moves, and with it the trade payload
-# bytes and the hashes derived from them, while this version stays 2.0.0 because no price, time,
-# cost, count or event moves.
-SIMULATOR_SEMANTICS_VERSION = "2.0.0"
+# bytes and the hashes derived from them, while the version stayed 2.0.0 at the time because no
+# price, time, cost, count or event moved (2.0.0 at the time; the version moved to 2.1.0 with the
+# terminal settlement, D070).
+SIMULATOR_SEMANTICS_VERSION = "2.1.0"
 
 # D-27 (resolved by the user 2026-10-04): TP1 closes half the position. A code constant
 # covered by SIMULATOR_SEMANTICS_VERSION, NOT a registry tunable; no params/ file changes.
@@ -88,8 +89,8 @@ NO_TRADE_CONFLICT = "CONFLICT_WITH_OPEN_POSITION"
 # Quick 261014-nnl (S-B-interval): summary-counter label of a setup that cannot activate before
 # the terminal instant of its symbol (not a RejectionReason; counted by plan 04), the two
 # strings a `terminal_settlements` case row must carry, and the prefix of the fixed-format
-# `coverage_note` piece of a settled trade. Vocabulary only: SIMULATOR_SEMANTICS_VERSION is
-# bumped in plan 07, after the regeneration inventory is approved.
+# `coverage_note` piece of a settled trade. Vocabulary only when added; SIMULATOR_SEMANTICS_VERSION
+# moved to 2.1.0 in plan 07 (D070) after the regeneration inventory was approved.
 NO_TRADE_TERMINAL = "TERMINAL_BEFORE_ACTIVATION"
 TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES = "BOUNDED_BY_INDEX_KLINES"
 TERMINAL_EVALUATION_UNION_ADVERSE_BOUND = "UNION_ADVERSE_BOUND"
