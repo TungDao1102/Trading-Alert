@@ -860,3 +860,9 @@ __all__ = [
     "read_json_object",
     "research_splits",
 ]
+
+
+if __name__ == "__main__":  # pragma: no cover - thin entry point, tested through manifest_build
+    from src.research.manifest_build import main as _build_main
+
+    raise SystemExit(_build_main())
