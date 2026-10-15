@@ -6,7 +6,7 @@ current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: executing
 stopped_at: Completed 16-30, 16-31, 16-34, 16-38, 16-39, 16-47, 16-51, 16-52; tracers done for 16-40 and 16-49 (Tasks 2-3 wait for the user: host + Telegram, bucket + O-01 apply reply)
 last_updated: "2026-10-10T03:22:12.243Z"
-last_activity: 2026-10-13
+last_activity: 2026-10-15
 last_activity_desc: Phase 16 execution started
 state_head: 577767b5b88a19ff7d7c4de06bc3fc6020ea766a
 progress:
@@ -31,9 +31,9 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
-Plan: 1 of 50
+Plan: 54 plans in Phase 16, 48 with a SUMMARY (open: 16-37, 16-40, 16-41, 16-42, 16-43, 16-44, 16-46, 16-48, 16-49; gate is 16-37 Task 3, the O-03b manifest freeze)
 Status: Executing Phase 16
-Last activity: 2026-10-12 — plans 16-30, 16-31, 16-34, 16-39, 16-51, 16-52 complete
+Last activity: 2026-10-15 — REEFUSDT terminal settlement as a bounded interval landed (quick 261014-nnl: simulator 2.1.0, protocol v2.4.0 D070/D071); REEF diagnostic on the new code: 48 of 48 points run (old: 33 FundingCoverageError). Manifest NOT frozen, O-03 to be re-issued, S0/S1 manifests need the REEF terminal_settlements row
 
 Progress: [██████░░░░] 61%
 
@@ -546,6 +546,7 @@ Recent decisions affecting current work:
 | 261007-onb | CR-01 replacement (D064): Parquet push by manifest SHA-256 plus cryptcheck (double only; real-S3 gate pending) | 2026-10-07 | e9a030c | [261007-onb-cr-01-replacement-d064-parquet-push-mani](./quick/261007-onb-cr-01-replacement-d064-parquet-push-mani/) |
 | 261009-jqi | Vietnamese operator deploy/operations guide docs/operations/DEPLOY_GUIDE.vi.md plus traceability checker | 2026-10-09 | 894d359 | [261009-jqi-vietnamese-operator-deployment-guide-dep](./quick/261009-jqi-vietnamese-operator-deployment-guide-dep/) |
 | 261014-cvk | Research protocol v2.3.0: declared exchange-constraint assumption (D068) and one global Holm for G3 over 48 hypotheses (D069) | 2026-10-14 | f80e0a2 | [261014-cvk-protocol-v2-3-0-amendment-d068-d069-land](./quick/261014-cvk-protocol-v2-3-0-amendment-d068-d069-land/) |
+| 261014-nnl | S-B-interval: REEFUSDT terminal settlement as a bounded interval (manifest terminal_settlements, engine SETTLEMENT/SETTLEMENT_CANCEL, simulator 2.1.0, protocol v2.4.0 D070/D071); 10 plans, gates green, REEF diagnostic 48/48 | 2026-10-15 | ded32f7 | [261014-nnl-plan-s-b-interval-implementation-plan-on](./quick/261014-nnl-plan-s-b-interval-implementation-plan-on/) |
 
 ### Roadmap Evolution
 
