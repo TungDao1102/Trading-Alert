@@ -1,0 +1,321 @@
+"""12-symbol Development probe on ONE grid point (research-run-1-a01), simulator semantics 2.1.0 /
+protocol v2.4.0 (plan 16-37, quick 261014-nnl landed). Throwaway: scratchpad only. STAGE 1 of the
+user-authorised 12-symbol diagnostic ("ok theo khuyen nghi, chay 12 symbol truoc", 2026-10-15).
+S0 constraints, Development window [2024-10-03, 2025-07-22) only. No Validation or Holdout data read,
+no assemble, no ExperimentRecord, no holdout_consumed, no run.py main, no manifest file written,
+no code change. Prints a whitelist of COUNTS; never PnL, equity, R, win rate or any ranking.
+Memory guard: a thread samples this process' working set and the system's available physical memory
+every 0.5 s and aborts the process cleanly (exit 3) above WS_LIMIT or below AVAIL_FLOOR.
+Usage: python -I probe12_a01_v240.py <inventory.sha256>"""
+import ctypes, glob, hashlib, json, os, re, sys, threading, time, traceback
+from ctypes import wintypes
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
+
+T0 = time.perf_counter()
+REPO = Path(r"C:\Users\admin\Music\Trading"); sys.path.insert(0, str(REPO))
+
+# ---- memory guard (Windows, ctypes; no psutil) -----------------------------------------------
+class _PMC(ctypes.Structure):
+    _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+class _MS(ctypes.Structure):
+    _fields_ = [("dwLength", wintypes.DWORD), ("dwMemoryLoad", wintypes.DWORD),
+                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+_k32 = ctypes.WinDLL("kernel32", use_last_error=True); _psapi = ctypes.WinDLL("psapi", use_last_error=True)
+_k32.GetCurrentProcess.restype = wintypes.HANDLE
+_psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PMC), wintypes.DWORD]
+GIB = 1024 ** 3
+WS_LIMIT = 3 * GIB          # abort when this process' working set exceeds 3 GiB
+AVAIL_FLOOR = 1 * GIB       # abort when system available physical memory drops below 1 GiB
+def _mem():
+    pmc = _PMC(); pmc.cb = ctypes.sizeof(pmc)
+    _psapi.GetProcessMemoryInfo(_k32.GetCurrentProcess(), ctypes.byref(pmc), pmc.cb)
+    ms = _MS(); ms.dwLength = ctypes.sizeof(ms); _k32.GlobalMemoryStatusEx(ctypes.byref(ms))
+    return pmc, ms
+_state = {"phase": "start", "peak_ws": 0, "min_avail": 1 << 62}
+def _guard():
+    while True:
+        pmc, ms = _mem()
+        _state["peak_ws"] = max(_state["peak_ws"], pmc.WorkingSetSize, pmc.PeakWorkingSetSize)
+        _state["min_avail"] = min(_state["min_avail"], ms.ullAvailPhys)
+        if pmc.WorkingSetSize > WS_LIMIT or ms.ullAvailPhys < AVAIL_FLOOR:
+            print(f"MEMORY_ABORT\tphase={_state['phase']}\tworking_set_gib={pmc.WorkingSetSize/GIB:.2f}"
+                  f"\tavail_gib={ms.ullAvailPhys/GIB:.2f}\tpeak_ws_gib={_state['peak_ws']/GIB:.2f}"
+                  f"\telapsed_s={time.perf_counter()-T0:.0f}", flush=True)
+            os._exit(3)
+        time.sleep(0.5)
+threading.Thread(target=_guard, daemon=True).start()
+def phase(name):
+    _state["phase"] = name
+    pmc, ms = _mem()
+    print(f"PHASE\t{name}\telapsed_s={time.perf_counter()-T0:.1f}\tws_gib={pmc.WorkingSetSize/GIB:.2f}"
+          f"\tpeak_ws_gib={max(pmc.PeakWorkingSetSize,_state['peak_ws'])/GIB:.2f}"
+          f"\tavail_gib={ms.ullAvailPhys/GIB:.2f}", flush=True)
+
+from src.backtest import engine as bt_engine
+from src.backtest.costs import cost_slice
+from src.backtest.semantics import (
+    SIMULATOR_SEMANTICS_VERSION, TERMINAL_EVALUATION_UNION_ADVERSE_BOUND,
+    TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES)
+from src.data.case_input import ENGINE_SERIES, TerminalDeclaration, build_case_input_data
+from src.data.minute_source import ParquetMinuteSource
+from src.domain.canonical import sha256_hex
+from src.domain.registry import load_parameter_set
+from src.research import run as research_run
+from src.research.manifest import (
+    DatasetManifest, EvidenceFile, TerminalSettlement, load_grid, research_splits)
+from src.research.settlement_evidence import fraction_text, recompute_settlement_bounds
+from src.risk.gating import evaluate_risk
+
+RAW = REPO / "data" / "raw"
+INV = Path(sys.argv[1])
+POINT_ID = "research-run-1-a01"                      # STAGE 1: this one point only
+S0_PATH = REPO / "docs/research/preregistration/research-run-1-constraints-baseline.json"
+S0_SHA = "4307eec74feeab04081b872866895f70568f1d289b8a249fc7de702e71e11d3f"
+LISTING_SHA = "b9b8426a31a2821d27d07fc49457cabcdc7cd887910b8185269de3bfa5982b34"
+DATASET_ID = "34a1efa2622b04eca14af58365d5d9d539525e8982c1271e1a9d5b006d18d7d2"
+SYM = "REEFUSDT"
+UTC = timezone.utc
+DEV_START = datetime(2024, 10, 3, tzinfo=UTC)
+DEV_END = datetime(2025, 7, 22, tzinfo=UTC)
+TERMINAL = datetime(2025, 1, 22, 9, 0, tzinfo=UTC)
+EV = "docs/research/preregistration/evidence/terminal-settlement/REEFUSDT"
+CONDITION = (
+    "unverified assumptions: settlement is the mean of per-second index values over "
+    "08:30-09:00 UTC, 60 equal-weight samples per minute, klines serve unrevised history, "
+    "rounding within one tick; the 09:00 trade candle (open = close = 0.000880, 102 trades) "
+    "lies above the index bound and is not read as the settlement price")
+
+# 1. preconditions -----------------------------------------------------------
+phase("preconditions")
+inv_bytes = INV.read_bytes()
+assert hashlib.sha256(inv_bytes).hexdigest() == LISTING_SHA, "inventory listing sha256 mismatch"
+raw = S0_PATH.read_bytes()
+assert hashlib.sha256(raw).hexdigest() == S0_SHA, "S0 constraint sha256 mismatch"
+s0_rows = json.loads(raw)["constraint_history"]
+SYMBOLS = sorted({r["symbol"] for r in s0_rows})
+assert len(SYMBOLS) == 12 and SYM in SYMBOLS, SYMBOLS
+rows = [r for r in s0_rows if r["symbol"] == SYM]
+assert len(rows) == 1, rows
+files = {}
+for line in inv_bytes.decode("utf-8").splitlines():
+    h, rel = line.split("  ", 1)
+    m = re.search(r"date=(\d{4}-\d{2}-\d{2})", rel)
+    if m and m.group(1) < "2026-05-10":
+        files[rel] = h
+ds = sha256_hex({"files": [{"path": p, "sha256": files[p]} for p in sorted(files)]})
+assert ds == DATASET_ID, f"dataset id from inventory {ds}"
+# Re-hash every Development-window file of the 12 symbols (date < 2025-07-22) against the inventory,
+# plus every REEFUSDT file. Files outside the Development window of other symbols are not read.
+checked_dev = checked_reef = 0
+for rel, h in files.items():
+    m = re.search(r"date=(\d{4}-\d{2}-\d{2})", rel)
+    is_reef = f"symbol={SYM}/" in rel
+    if is_reef or m.group(1) < "2025-07-22":
+        got = hashlib.sha256((RAW / rel).read_bytes()).hexdigest()
+        assert got == h, f"inventory mismatch {rel}"
+        checked_dev += 1
+        checked_reef += is_reef
+print(f"PRECONDITIONS OK: S0 sha256 verified; listing sha256 verified; dataset id {DATASET_ID} "
+      f"derived from the inventory ({len(files)} runner-read files); {checked_dev} files "
+      f"(all 12 symbols, date < 2025-07-22, plus all {checked_reef} REEF files) re-hashed equal to "
+      f"the inventory; symbols={SYMBOLS}; simulator_semantics_version={SIMULATOR_SEMANTICS_VERSION}",
+      flush=True)
+
+# 2. REEF declaration and terminal_settlements row, through the landed code paths -----
+phase("manifest")
+decl = TerminalDeclaration(
+    symbol=SYM, reason="DELISTED_CAPPED", terminal_at_utc=TERMINAL,
+    source_url="https://www.binance.com/en/support/announcement/detail/572715f2d96e47769ebbb967c2a6e445")
+INDEX_PATH = f"{EV}/B_indexPriceKlines_before_settlement.body.json"
+TRADE_PATH = f"{EV}/A_klines_after_settlement.body.json"
+SUPPORT_PATH = f"{EV}/F_indexklines_sample_day.body.json"
+sha = lambda p: hashlib.sha256((REPO / p).read_bytes()).hexdigest()
+tick = Decimal(rows[0]["price_tick_size"])
+window_start = datetime(2025, 1, 22, 8, 30, tzinfo=UTC)
+rec = recompute_settlement_bounds(
+    index_klines=(REPO / INDEX_PATH).read_bytes(), trade_kline=(REPO / TRADE_PATH).read_bytes(),
+    window_start_utc=window_start, terminal_at_utc=TERMINAL, tick=tick)
+assert (rec.price_lower, rec.price_upper) == (Decimal("0.000845"), Decimal("0.000887")), rec
+assert (rec.index_lower, rec.index_upper) == (Decimal("0.000852"), Decimal("0.000869")), rec
+assert (rec.trade_low, rec.trade_high) == (Decimal("0.000845"), Decimal("0.000887")), rec
+settlement = TerminalSettlement(
+    symbol=SYM, kind=TERMINAL_KIND_BOUNDED_BY_INDEX_KLINES,
+    recorded_evaluation=TERMINAL_EVALUATION_UNION_ADVERSE_BOUND,
+    bound_window_start_utc=window_start, samples_per_minute=60,
+    nominal_lower=fraction_text(rec.nominal_lower), nominal_upper=fraction_text(rec.nominal_upper),
+    price_tick_size=tick, index_lower=rec.index_lower, index_upper=rec.index_upper,
+    trade_candle_low=rec.trade_low, trade_candle_high=rec.trade_high,
+    price_lower=rec.price_lower, price_upper=rec.price_upper,
+    index_klines=EvidenceFile(INDEX_PATH, sha(INDEX_PATH)),
+    trade_kline=EvidenceFile(TRADE_PATH, sha(TRADE_PATH)),
+    supporting_evidence=(EvidenceFile(SUPPORT_PATH, sha(SUPPORT_PATH)),),
+    condition=CONDITION, official_confirmation=None)
+manifest = DatasetManifest(
+    universe_id="research-universe-v1", symbols=tuple(SYMBOLS), dataset_id=DATASET_ID,
+    development_start_utc=DEV_START, development_end_utc=DEV_END,
+    validation_start_utc=DEV_END, validation_end_utc=datetime(2026, 5, 10, tzinfo=UTC),
+    holdout_start_utc=datetime(2026, 5, 10, tzinfo=UTC),
+    holdout_end_utc=datetime(2026, 10, 3, tzinfo=UTC),
+    strategy_interval="1h", context_interval="4h", data_source="binance-usdm-public",
+    data_source_version="diagnostic-v240-12sym", excluded_periods=(), known_gaps=(decl,),
+    equity=Decimal("600"), risk_rate=Decimal("0.005"), constraint_source=str(S0_PATH),
+    constraint_sha256=S0_SHA, terminal_settlements=(settlement,))
+constraints = research_run._load_constraints(manifest)          # sha256 + the 12 rows, as the runner
+assert len(constraints) == 12, len(constraints)
+research_run.check_terminal_settlement_evidence(manifest, REPO)  # recompute from committed bytes
+dev_window = research_splits(manifest)[0]
+assert dev_window.role == "DEVELOPMENT", dev_window.role
+case_rows = research_run.terminal_settlement_case_rows(manifest, dev_window)
+assert len(case_rows) == 1 and case_rows[0]["terminal_at_utc"] == "2025-01-22T09:00:00+00:00", case_rows
+assert case_rows[0]["price_lower"] == "0.000845" and case_rows[0]["price_upper"] == "0.000887"
+LOWER, UPPER = Decimal(case_rows[0]["price_lower"]), Decimal(case_rows[0]["price_upper"])
+print(f"CHECKS OK: runner evidence check passed; case row {json.dumps(case_rows[0], sort_keys=True)}; "
+      f"12 constraint rows loaded", flush=True)
+
+# 3. the single point ---------------------------------------------------------
+points = []
+for g in sorted(glob.glob(str(REPO / "docs/research/preregistration/research-run-1-grid-*.json"))):
+    grid = load_grid(Path(g))
+    points += [(grid, p) for p in grid.points]
+assert len(points) == 48, len(points)
+points = [(g, p) for g, p in points if p.parameter_set_id == POINT_ID]
+assert len(points) == 1, POINT_ID
+grid, point = points[0]
+ps = load_parameter_set(grid.strategy_id, point.parameter_set_id)
+assert ps.parameter_set_hash == point.parameter_set_hash
+cost = {k: str(v) for k, v in cost_slice(ps.params).items()}
+
+def iso(t): return None if t is None else t.isoformat().replace("+00:00", "Z")
+def dt(s): return None if s is None else datetime.fromisoformat(s)
+def cnt(items):
+    d = {}
+    for i in items: d[str(i)] = d.get(str(i), 0) + 1
+    return dict(sorted(d.items()))
+
+wall0 = time.perf_counter()
+try:
+    phase("build_case_input_data")
+    t_a = time.perf_counter()
+    data = build_case_input_data(
+        RAW, symbols=list(manifest.symbols), start_utc=dev_window.start_utc, end_utc=dev_window.end_utc,
+        as_of_day_utc=DEV_END.date(), strategy_interval="1h", context_interval="4h",
+        series=ENGINE_SERIES, terminal_declarations=list(manifest.known_gaps))
+    phase("to_case_input")
+    t_b = time.perf_counter()
+    case = data.to_case_input(
+        strategy_id=grid.strategy_id, strategy_version=ps.strategy_version,
+        parameter_set_id=point.parameter_set_id,
+        account_state={"equity": str(manifest.equity), "risk_rate": str(manifest.risk_rate)},
+        cost_model=cost, constraint_history=constraints, terminal_settlements=case_rows)
+    funding_by_sym = {}
+    for r in case["funding"]:
+        funding_by_sym.setdefault(r["symbol"], []).append(datetime.fromisoformat(r["funding_time_utc"]))
+    n_funding = {s: len(v) for s, v in funding_by_sym.items()}
+    last_reef_funding = max(funding_by_sym[SYM])
+    phase("simulate")
+    t_c = time.perf_counter()
+    src = ParquetMinuteSource(RAW, symbols=list(manifest.symbols), start_utc=dev_window.start_utc,
+                              end_utc=dev_window.end_utc)
+    erun = bt_engine.simulate_detailed(case, risk_fn=evaluate_risk, minute_source=src)  # = simulator.run + ledger
+    out = erun.output
+    t_d = time.perf_counter()
+    phase("done")
+except BaseException as exc:
+    tb = traceback.extract_tb(exc.__traceback__)[-1]
+    print(f"{POINT_ID}\tERROR\t{type(exc).__name__}\t{exc}\t@ {Path(tb.filename).name}:{tb.lineno}", flush=True)
+    print(f"WALL\tseconds={time.perf_counter()-wall0:.1f}\tpeak_ws_gib={_state['peak_ws']/GIB:.2f}"
+          f"\tmin_avail_gib={_state['min_avail']/GIB:.2f}", flush=True)
+    sys.exit(2)
+
+tr = out["trades"]; rs = out["run_summary"]
+print(f"WALL\tseconds_total_point={t_d-wall0:.1f}\tbuild_s={t_b-t_a:.1f}\tto_case_input_s={t_c-t_b:.1f}"
+      f"\tsimulate_s={t_d-t_c:.1f}\tprocess_s={time.perf_counter()-T0:.1f}"
+      f"\tpeak_ws_gib={_state['peak_ws']/GIB:.3f}\tmin_avail_gib={_state['min_avail']/GIB:.2f}", flush=True)
+print(f"SUMMARY\t{POINT_ID}\tsemver={rs['simulator_semantics_version']}\tn_records={len(tr)}"
+      f"\tsettlement_count={rs.get('settlement_count', 'ABSENT')}\tend_of_data_count={rs['end_of_data_count']}"
+      f"\tpending_at_data_end_count={rs['pending_at_data_end_count']}"
+      f"\tallowed_gaps_used={len(rs.get('allowed_gaps_used', []))}"
+      f"\tno_trade_counts={json.dumps(rs['no_trade_counts'], sort_keys=True)}", flush=True)
+print(f"FUNDING_ROWS_PER_SYMBOL\t{json.dumps(dict(sorted(n_funding.items())))}"
+      f"\tlast_reef_funding_row={iso(last_reef_funding)}", flush=True)
+
+# per symbol counts
+for s in SYMBOLS:
+    rec_s = [t for t in tr if t["symbol"] == s]
+    rejects = [t["reason_code"] for t in rec_s if t["entry_kind"] == "REJECT"]
+    print(f"SYMBOL\t{s}\tn_records={len(rec_s)}\texit_kinds={cnt([t['exit_kind'] for t in rec_s if t['exit_kind']])}"
+          f"\tentry_kinds={cnt([t['entry_kind'] for t in rec_s])}\treject_reason_codes={cnt(rejects)}"
+          f"\tdaily_stop_cancel={sum(t['entry_kind']=='DAILY_STOP_CANCEL' for t in rec_s)}"
+          f"\tsettlement_cancel={sum(t['entry_kind']=='SETTLEMENT_CANCEL' for t in rec_s)}", flush=True)
+print(f"ALL_EXIT_KINDS\t{cnt([t['exit_kind'] for t in tr if t['exit_kind']])}"
+      f"\tALL_ENTRY_KINDS\t{cnt([t['entry_kind'] for t in tr])}", flush=True)
+
+# REEF specifics ---------------------------------------------------------------
+reef = [t for t in tr if t["symbol"] == SYM]
+settle = [t for t in reef if t["exit_kind"] == "SETTLEMENT"]
+cancel = [t for t in reef if t["entry_kind"] == "SETTLEMENT_CANCEL"]
+for t in settle:
+    px = Decimal(t["exit_price"]); xt = dt(t["exit_time_utc"]); et = dt(t["entry_time_utc"])
+    side = "lower" if px == LOWER else "upper" if px == UPPER else "NEITHER"
+    exp_f = sum(1 for f in funding_by_sym[SYM] if et <= f < xt)
+    print(f"REEF_SETTLEMENT\tdirection={t['direction']}\tbound_used={side}"
+          f"\texpected_bound={'lower' if t['direction']=='LONG' else 'upper'}\tentry={iso(et)}\texit={iso(xt)}"
+          f"\texit_equals_T={xt == TERMINAL}\tfunding_event_count={t['funding_event_count']}"
+          f"\tfunding_rows_entry_le_t_lt_exit={exp_f}"
+          f"\tmark_price_1m_missing_in_note={'mark_price_1m_missing' in (t['coverage_note'] or '')}", flush=True)
+    print(f"REEF_SETTLEMENT_NOTE\t{t['coverage_note']}", flush=True)
+print(f"REEF_SETTLEMENT_n={len(settle)}\tREEF_SETTLEMENT_CANCEL_n={len(cancel)}", flush=True)
+for t in cancel:
+    print(f"REEF_SETTLEMENT_CANCEL\tdirection={t['direction']}\tsignal_close={t['signal_close_utc']}"
+          f"\tresolved_at={t['resolved_at_utc']}\tentry_time={t['entry_time_utc']}", flush=True)
+reef_end_ok = all(dt(t["exit_time_utc"]) <= TERMINAL for t in reef if t["exit_time_utc"])
+print(f"REEF_no_exit_after_T={reef_end_ok}\tREEF_entry_after_T="
+      f"{sum(1 for t in reef if t['entry_time_utc'] and dt(t['entry_time_utc']) >= TERMINAL)}"
+      f"\tREEF_records_with_resolved_at_eq_T={sum(1 for t in reef if dt(t['resolved_at_utc']) == TERMINAL)}", flush=True)
+
+# REEF entity alive in the last hours before T and effect on other symbols' plans ------
+def reef_alive_at(ts):
+    for t in reef:
+        a = dt(t["signal_close_utc"])
+        b = dt(t["exit_time_utc"]) or dt(t["resolved_at_utc"])
+        if a is not None and b is not None and a <= ts < b and t["entry_kind"] != "REJECT":
+            return True
+    return False
+for hours in (6, 24):
+    lo = TERMINAL - timedelta(hours=hours)
+    others = [t for t in tr if t["symbol"] != SYM and t["signal_close_utc"]
+              and lo <= dt(t["signal_close_utc"]) < TERMINAL]
+    alive = [t for t in others if reef_alive_at(dt(t["signal_close_utc"]))]
+    print(f"BEFORE_T_{hours}h\tother_symbol_records_total={len(others)}"
+          f"\twith_reef_entity_alive={len(alive)}"
+          f"\tother_rejects_total={sum(t['entry_kind']=='REJECT' for t in others)}"
+          f"\tother_rejects_with_reef_alive={cnt([t['reason_code'] for t in alive if t['entry_kind']=='REJECT'])}"
+          f"\tother_entry_kinds_with_reef_alive={cnt([t['entry_kind'] for t in alive])}", flush=True)
+reef_alive_signals = sorted({t["signal_close_utc"] for t in reef if t["signal_close_utc"]
+                             and TERMINAL - timedelta(hours=24) <= dt(t["signal_close_utc"]) < TERMINAL})
+print(f"REEF_records_with_signal_in_last_24h_before_T={len(reef_alive_signals)}", flush=True)
+print(f"DAILY_STOP_CANCEL_all_symbols_on_2025-01-22="
+      f"{sum(1 for t in tr if t['entry_kind']=='DAILY_STOP_CANCEL' and dt(t['resolved_at_utc']) and dt(t['resolved_at_utc']).date().isoformat()=='2025-01-22')}", flush=True)
+
+# ledger after T ------------------------------------------------------------------
+led = erun.ledger
+exp_by_sym = cnt([e.symbol for e in led.exposures])
+reef_exp = [e for e in led.exposures if e.symbol == SYM]
+bk = [b for b in erun.bookings if b.symbol == SYM]
+bk_after = [b for b in bk if b.time_utc > TERMINAL]
+bk_at = [b for b in bk if b.time_utc == TERMINAL]
+print(f"LEDGER_FINAL\texposures_by_symbol={exp_by_sym}\treef_open_exposure_count={len(reef_exp)}"
+      f"\treef_bookings_after_T={len(bk_after)}\treef_bookings_at_T={cnt([b.kind for b in bk_at])}"
+      f"\tbookings_total={len(erun.bookings)}", flush=True)
+phase("end")
+print(f"FINAL_PEAK\tpeak_working_set_gib={_state['peak_ws']/GIB:.3f}\tmin_avail_gib={_state['min_avail']/GIB:.2f}"
+      f"\tprocess_wall_s={time.perf_counter()-T0:.1f}", flush=True)
