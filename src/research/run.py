@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from decimal import Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from time import perf_counter
 from typing import Any
@@ -112,6 +113,30 @@ def _load_constraints(manifest: DatasetManifest) -> list[dict[str, Any]]:
     return kept
 
 
+# A grid label that stands for several registered parameters set to the same value.
+_VARIED_ALIASES = {"pivot_bars": ("pivot_left_bars", "pivot_right_bars")}
+
+
+def _varied_value_is_registered(params: Mapping[str, Any], key: str, value: str) -> bool:
+    """True when every registered parameter behind `key` equals `value` numerically.
+
+    The grid writes values as text (`"1.0"`) and the registry loads TOML numbers (`1`), so
+    the comparison is by number, not by spelling. `pivot_bars` is the grid label for the
+    left and right pivot widths, which the registered sets keep equal.
+    """
+    names = _VARIED_ALIASES.get(key, (key,))
+    for name in names:
+        if name not in params:
+            return False
+        try:
+            if Decimal(str(params[name])) != Decimal(value):
+                return False
+        except InvalidOperation:
+            if str(params[name]) != value:
+                return False
+    return True
+
+
 def _check_grid_is_registered(grid: ParameterGrid) -> None:
     for point in grid.points:
         loaded = load_parameter_set(grid.strategy_id, point.parameter_set_id)
@@ -121,7 +146,7 @@ def _check_grid_is_registered(grid: ParameterGrid) -> None:
                 "registry hash"
             )
         for key, value in point.varied:
-            if key not in loaded.params or str(loaded.params[key]) != value:
+            if not _varied_value_is_registered(loaded.params, key, value):
                 raise ManifestError(
                     f"varied value for {key!r} in {point.parameter_set_id!r} is not the "
                     "registered value"

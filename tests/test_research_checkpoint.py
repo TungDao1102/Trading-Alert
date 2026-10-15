@@ -314,3 +314,14 @@ def test_a_record_is_never_left_half_written(
     victim.write_text(victim.read_text(encoding="utf-8")[:50], encoding="utf-8")
     with pytest.raises(ExperimentAlreadyRecorded, match="truncated"):
         _run(store, tmp_path, out, checkpoint=tmp_path / "ckpt")
+
+
+def test_a_varied_value_is_compared_by_number_and_the_pivot_label_covers_both_widths() -> None:
+    params = {"pivot_left_bars": 3, "pivot_right_bars": 3, "zone_tolerance_atr": 1}
+    check = research_run._varied_value_is_registered
+    assert check(params, "pivot_bars", "3")
+    assert check(params, "zone_tolerance_atr", "1.0")
+    assert not check(params, "pivot_bars", "5")
+    assert not check({**params, "pivot_right_bars": 5}, "pivot_bars", "3")
+    assert not check(params, "zone_tolerance_atr", "1.5")
+    assert not check(params, "unknown", "1")
