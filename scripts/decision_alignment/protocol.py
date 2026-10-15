@@ -1,5 +1,5 @@
 """Protocol gate module (Phase 11, plan 11-01; D032, D043; amended to v2.0.0 by D052,
-to v2.1.0 by D057/D060, to v2.2.0 by D065/D067, to v2.3.0 by D068/D069).
+to v2.1.0 by D057/D060, to v2.2.0 by D065/D067, to v2.3.0 by D068/D069, to v2.4.0 by D070).
 
 Executable checks that keep the frozen research protocol, the DECISIONS row, the
 DOC_STATUS index, the holdout consumed marker, the BACKTEST_SPEC pointers and the seven

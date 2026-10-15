@@ -34,7 +34,7 @@ If 1m mark coverage is missing for part of a strategy bar, the remainder of that
 
 While a position is open the simulator walks the mark minutes in order. The fill minute counts as walked when its mark price exists (its stop is checked, its targets are not) and as missing when it does not. When two consecutive walked minutes are more than one minute apart, or when a position closed `END_OF_DATA` has whole minutes missing before the data end, the missing minutes carry no mark price, so no stop or target is evaluated minute by minute for them. This applies to minutes outside any strategy-bar fallback, for example an hour in which the symbol has no strategy bar; a hole inside a strategy bar is resolved by the fallback above, and minutes before that bar's region, which the fallback does not cover, are noted separately. The trade's `coverage_note` records the first and last missing minute of each span. A position lists at most the first 20 spans and counts the rest in one closing piece (an annotation-text cap, not a strategy parameter). A hole that a mid-bar window already saw and the closing-bar fallback later claims is recorded once, by the fallback note, so for a position that stays open the note does not depend on where the windows were cut. This is annotation only: it does not set `fallback_applied`, changes no price, time or count, and the report lists the note under its intrabar coverage notes. Digest consequence: for input without a mark hole inside a position's life nothing changes; for input with such a hole only the `coverage_note` text moves, and with it the trade payload bytes and the hashes derived from them, while `simulator_semantics_version` stays 2.0.0 because nothing priced or booked changes.
 
-Exit ladder: TP1 is a reduce-only partial of half the filled quantity (`TP1_QUANTITY_FRACTION` 0.5, a code constant covered by `simulator_semantics_version`), TP2 closes the remainder, the stop is unchanged after TP1. A position is carried until SL, TP2 or data end; there is no time stop. A position open at data end closes at the last mark close as `END_OF_DATA`.
+Exit ladder: TP1 is a reduce-only partial of half the filled quantity (`TP1_QUANTITY_FRACTION` 0.5, a code constant covered by `simulator_semantics_version`), TP2 closes the remainder, the stop is unchanged after TP1. A position is carried until SL, TP2, data end or the declared terminal instant of its symbol; there is no time stop. A position open at data end closes at the last mark close as `END_OF_DATA`; a position open at a declared terminal instant closes as `SETTLEMENT` (section 6).
 
 ## 5. Fees and funding
 
@@ -62,6 +62,7 @@ Backtest must model:
 - one plan or position per symbol: a re-signal meanwhile is skipped and counted as a conflict with an open position,
 - DAILY_STOP cancels resting entries (`DAILY_STOP_CANCEL`) and leaves the protective stops of open positions in place (D033); resting entries count toward the portfolio gates (D035),
 - data end: an open position closes at the last mark close as `END_OF_DATA`, a resting plan is `PENDING_AT_DATA_END` (never `EXPIRED`); both are kept as records, counted and reported separately and excluded from pooled R and the closed-trade floor.
+- terminal settlement (protocol v2.4.0, D070): for a symbol with a declared terminal instant T and a `terminal_settlements` manifest entry, an open position closes at T as `SETTLEMENT` at the adverse end of the recorded interval (LONG at `price_lower`, SHORT at `price_upper`, exit fee at the exit rate, zero slippage), a resting plan ends as `SETTLEMENT_CANCEL`, no plan is created when the signal close plus one minute is after T (`TERMINAL_BEFORE_ACTIVATION`), funding stops at T and a symbol with a settlement entry and input past T is refused; the end states are kept as records, counted and reported separately and excluded from pooled R and the closed-trade floor.
 
 Several symbols run in sorted (time, symbol) order; output, tie order and hashes are byte-stable, and appending later bars cannot change earlier trades (prefix invariance, END_OF_DATA and PENDING_AT_DATA_END records excepted).
 
@@ -79,7 +80,7 @@ Final holdout / forward test
 
 The final holdout must not be used to choose parameters.
 
-Fixed proportions (40% Development, 40% Validation as four consecutive walk-forward test folds, last 20% final holdout, single-use) are pre-registered in `docs/research/RESEARCH_PROTOCOL.md` v2.3.0 §1 and §4 per D032 and D043.
+Fixed proportions (40% Development, 40% Validation as four consecutive walk-forward test folds, last 20% final holdout, single-use) are pre-registered in `docs/research/RESEARCH_PROTOCOL.md` v2.4.0 §1 and §4 per D032 and D043.
 
 ## 8. Walk-forward
 
@@ -170,7 +171,7 @@ A strategy may proceed only when:
 9. no critical conclusion depends on a single symbol, quarter, or isolated parameter point;
 10. candidate has been compared against declared baselines.
 
-The numerical acceptance thresholds (trade floor, expectancy bound, multiple-testing correction, drawdown ceiling, single-use holdout with a floor of at least 30 closed trades in the holdout) are pre-registered in `docs/research/RESEARCH_PROTOCOL.md` v2.3.0 §4 per D032, D043, D060 and D069.
+The numerical acceptance thresholds (trade floor, expectancy bound, multiple-testing correction, drawdown ceiling, single-use holdout with a floor of at least 30 closed trades in the holdout) are pre-registered in `docs/research/RESEARCH_PROTOCOL.md` v2.4.0 §4 per D032, D043, D060 and D069.
 
 
 ## 13. Research implementation

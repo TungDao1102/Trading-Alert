@@ -5,9 +5,9 @@ wording and demands the resolution be *recorded*, not silently picked. The
 resolution lives in a new DECISIONS row (D030), a clarification amendment to
 the frozen research protocol (v1.0.1, since superseded by the v1.1.0 semantic
 amendment D043, then by the v2.0.0 simulator-semantics amendment D052, the v2.1.0
-G5 floor D060, the v2.2.0 experiment-identity amendment D067 and the v2.3.0
-constraint-assumption and cross-family multiplicity amendments D068 and D069) and the
-DOC_STATUS index.
+G5 floor D060, the v2.2.0 experiment-identity amendment D067, the v2.3.0
+constraint-assumption and cross-family multiplicity amendments D068 and D069 and the
+v2.4.0 terminal-settlement amendment D070) and the DOC_STATUS index.
 
 These tests make that reconciliation regress-proof and re-implement the three
 research-gate witnesses from ``.github/workflows/research-gate.yml`` so an
@@ -77,7 +77,7 @@ PINNED_PROTOCOL_LINES = (
     "> **Status:** FROZEN",
     "> **Frozen on:** 2026-09-19",
 )
-EXPECTED_SUPERSEDES = "v2.2.0"
+EXPECTED_SUPERSEDES = "v2.3.0"
 D043_ROW_PREFIX = "| D043 | Research protocol v1.1.0 frozen | Accepted"
 D029_ROW_PREFIX = "| D029 | Research protocol v1.0.0 frozen | Accepted |"
 
@@ -231,6 +231,27 @@ def test_d068_d069_rows_present() -> None:
     assert "not built" in lines[d069[0]]
 
 
+def test_d070_d071_rows_present() -> None:
+    """D070 and D071 follow D069 in order; only D070 carries the v2.4.0 freeze phrase."""
+    lines = _lines(DECISIONS)
+    d069 = [i for i, ln in enumerate(lines) if ln.startswith("| D069 |")]
+    d070 = [i for i, ln in enumerate(lines) if ln.startswith("| D070 |")]
+    d071 = [i for i, ln in enumerate(lines) if ln.startswith("| D071 |")]
+    assert len(d069) == len(d070) == len(d071) == 1
+    assert d070[0] == d069[0] + 1, "D070 must directly follow D069"
+    assert d071[0] == d070[0] + 1, "D071 must directly follow D070"
+    assert "protocol v2.4.0 frozen" in lines[d070[0]]
+    assert "protocol v2.4.0 frozen" not in lines[d071[0]]
+    assert "protocol v2.3.0 frozen" not in lines[d070[0]]
+    assert sum("protocol v2.4.0 frozen" in ln for ln in lines) == 1
+    for row in (lines[d070[0]], lines[d071[0]]):
+        assert len(row.split(" | ")) == 4, "four cells, no pipe inside a cell"
+        assert "<LANDING_DATE>" not in row
+        assert "<TO BE COMPILED" not in row
+        assert "D032" in row or "D070" in row
+    assert "f80e0a2d8f58e5cb96ba4633373fd195cd9529ee" in lines[d070[0]]
+
+
 def test_v230_constraint_assumption_text() -> None:
     """The protocol states the declared constraint assumption, S0 and S1 and the Holdout rule."""
     text = _read(PROTOCOL)
@@ -287,9 +308,9 @@ def test_g1_and_g5_sentences_are_byte_identical_to_the_base() -> None:
     assert G5_SENTENCE in lines
 
 
-def test_header_version_is_the_d068_amendment() -> None:
-    """The header version equals the freeze row of the latest amendment (D068 is v2.3.0)."""
-    assert _header_version() == "v2.3.0"
+def test_header_version_is_the_d070_amendment() -> None:
+    """The header version equals the freeze row of the latest amendment (D070 is v2.4.0)."""
+    assert _header_version() == "v2.4.0"
 
 
 def test_doc_status_line_not_pending() -> None:
@@ -306,6 +327,7 @@ def test_doc_status_line_not_pending() -> None:
     assert "D067" in index_lines[0]
     assert "D068" in index_lines[0]
     assert "D069" in index_lines[0]
+    assert "D070" in index_lines[0]
     for ln in lines:
         assert not W2_PENDING.search(ln), f"pending marker on DOC_STATUS line: {ln!r}"
 

@@ -1,5 +1,5 @@
 """Tests for the protocol gate module (Phase 11, plan 11-01; D032, D043; v2.0.0 by D052,
-v2.1.0 by D057/D060, v2.2.0 by D065/D067, v2.3.0 by D068/D069).
+v2.1.0 by D057/D060, v2.2.0 by D065/D067, v2.3.0 by D068/D069, v2.4.0 by D070).
 
 The real-repository test proves gates PR-01..PR-11 hold today; the negative tests feed
 each pure check a deliberately broken input so a regression in the protocol text, the
