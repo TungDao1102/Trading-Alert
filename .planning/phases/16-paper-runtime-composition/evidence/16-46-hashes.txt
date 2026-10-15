@@ -1,0 +1,27 @@
+16-46 Task 1: hashes to bind and the refusal on the real inputs (2026-10-15, code HEAD 0e0a08d)
+No simulation was run, no authorization file exists or was written, nothing was pushed.
+
+Hashes computed with the runner's own functions (src.research.manifest.manifest_hash / grid_hash):
+manifest_sha256 (frozen S0 manifest, docs/research/preregistration/research-run-1-manifest.json):
+ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569
+grid_sha256 trend-pullback (docs/research/preregistration/research-run-1-grid-trend-pullback.json, 16 points a01..a16):
+13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411
+grid_sha256 breakout-retest (docs/research/preregistration/research-run-1-grid-breakout-retest.json, 16 points b01..b16):
+2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069
+grid_sha256 range-mr (docs/research/preregistration/research-run-1-grid-range-mr.json, 16 points c01..c16):
+3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6
+
+The three grid hashes equal the values recorded at registration (16-45-SUMMARY.md lines 88 to 90).
+File sha256 of the inputs (bytes): manifest fdf2259ec3e2ec052e4cb2b11b165ce6213870ce893ab6a812852787cdff8490 (see 16-DEC-O-03b-freeze.md).
+
+Refusal on the real inputs, run from the repository root, with the real manifest and each real grid, no authorization:
+  python -m src.research.run --manifest docs/research/preregistration/research-run-1-manifest.json --grid <grid> --raw-root data/raw --output-dir <scratch dir> --time-run
+  trend-pullback : "run refused: missing", exit 2
+  breakout-retest: "run refused: missing", exit 2
+  range-mr       : "run refused: missing", exit 2
+And with --authorization pointing at a file that does not exist (docs/research/preregistration/research-run-1-authorization-trend-pullback.json): "run refused: missing", exit 2.
+The refusal comes from require_authorized before any simulation (RunNotAuthorized("missing")); the output directory was not created.
+
+One authorization file is needed per grid (the runner takes one grid and one authorization). Each file is a JSON object with exactly these keys:
+  grid_sha256, manifest_sha256, authorized_at_utc (ISO-8601 with a UTC offset), statement, authorized_by
+The user writes these files (checkpoint O-03a, option a); the assistant writes none.
