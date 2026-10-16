@@ -52,6 +52,7 @@ from tests.support.limits import (
 from tests.support.limits import (
     TEST_ONLY_RATE_LIMIT_RETRY_AFTER_CAP_SECONDS as CAP,
 )
+from tests.support.limits import test_only_signed_call_policy
 
 MAX_ATTEMPTS = usdm_mod._RECONCILER_CANCEL_MAX_ATTEMPTS
 START = datetime(2026, 10, 16, 12, 0, 0, tzinfo=UTC)
@@ -196,11 +197,26 @@ class ScriptedRest:
 def _adapter(
     gate: RestRateLimitGate | None = None,
 ) -> tuple[BinanceUsdmAdapter, ScriptedRest, RecordingSleep]:
+    # Plan 18-13: a signed call needs the ratified SignedCallPolicy, and the policy needs the
+    # shared gate, so an adapter a test builds without a gate gets a private one of its own.
+    gate = gate if gate is not None else _gate(VirtualClock())
     rest = ScriptedRest()
     sleep = RecordingSleep()
     adapter = BinanceUsdmAdapter(
         sdk_client=SimpleNamespace(rest_api=rest),  # type: ignore[arg-type]
         rest_gate=gate,
+        sleep=sleep,
+        signed_call_policy=test_only_signed_call_policy(),
+    )
+    return adapter, rest, sleep
+
+
+def _ungated_adapter() -> tuple[BinanceUsdmAdapter, ScriptedRest, RecordingSleep]:
+    """No gate and no signed policy: only the public delegations can run (plan 18-13)."""
+    rest = ScriptedRest()
+    sleep = RecordingSleep()
+    adapter = BinanceUsdmAdapter(
+        sdk_client=SimpleNamespace(rest_api=rest),  # type: ignore[arg-type]
         sleep=sleep,
     )
     return adapter, rest, sleep
@@ -278,6 +294,18 @@ METHODS: dict[str, tuple[Callable[[BinanceUsdmAdapter], Any], str]] = {
     "exchange_info": (lambda a: a.exchange_info(), "exchange_information"),
 }
 METHOD_NAMES = sorted(METHODS)
+# The public-data delegations: no recvWindow, no signed policy needed (plan 18-13).
+PUBLIC_METHOD_NAMES = sorted(
+    {
+        "klines",
+        "mark_klines",
+        "open_interest",
+        "open_interest_statistics",
+        "funding_rate",
+        "server_time",
+        "exchange_info",
+    }
+)
 
 
 def test_every_method_succeeds_through_the_fake() -> None:
@@ -650,12 +678,14 @@ def test_placement_is_refused_without_sending_while_restricted(
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("method", METHOD_NAMES)
+# Plan 18-13: a signed method cannot run without the policy and the shared gate (see
+# tests/test_binance_usdm_signed_calls.py), so the ungated case covers the public delegations.
+@pytest.mark.parametrize("method", PUBLIC_METHOD_NAMES)
 def test_without_a_gate_a_rate_limit_raises_after_one_call_and_nothing_is_refused(
     method: str,
 ) -> None:
     call, sdk_name = METHODS[method]
-    adapter, rest, sleep = _adapter()
+    adapter, rest, sleep = _ungated_adapter()
     for exc in (
         TooManyRequestsError("slow down", -1003, None),
         RateLimitBanError("banned", -1003, None),

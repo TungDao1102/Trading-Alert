@@ -87,7 +87,9 @@ from binance_sdk_derivatives_trading_usds_futures import (
     RateLimitBanError,
     TooManyRequestsError,
 )
+from src.adapters.binance_clock import ClockDriftGuard, DriftBlockReason
 from src.adapters.binance_errors import error_facts_from_exception
+from src.adapters.binance_limits import SignedCallPolicy
 from src.adapters.binance_public import (
     BinancePublicMarketData,
     _gated_rest_call,
@@ -155,6 +157,48 @@ _RECONCILER_CANCEL_WAIT_MAX_SECONDS: int = 10
 # attempt and surface every failure; the execution manager probes by the
 # deterministic client id (EXECUTION_SPEC §10) and decides.
 # --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- #
+# Signed calls (plan 18-13, D-14, F-505).
+#
+# Every signed SDK call goes through `BinanceUsdmAdapter._sdk_call`, which
+# forwards the ratified `SignedCallPolicy.recv_window_ms` explicitly (no
+# exchange default decides the replay window), runs the shared REST gate check
+# first, records a 418 or 429 in the gate and notifies the optional -1021 hook.
+# It never retries and never sleeps for any category.
+# --------------------------------------------------------------------------- #
+
+_RATE_LIMIT_CATEGORIES: frozenset[ExchangeErrorCategory] = frozenset(
+    {ExchangeErrorCategory.IP_BANNED, ExchangeErrorCategory.RATE_LIMITED}
+)
+
+
+class SignedCallPolicyMissing(Exception):  # noqa: N818 - a refusal, not an error of the caller
+    """A signed call refused before the gate and the SDK: no `SignedCallPolicy` is configured.
+
+    Fail closed (D-14): without the ratified recvWindow a signed request would silently use
+    the exchange default, a replay window nobody chose.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "signed call refused before sending: no SignedCallPolicy configured "
+            "(the recvWindow must be explicit)"
+        )
+
+
+class EntriesBlocked(Exception):  # noqa: N818 - a refusal, not an error of the caller
+    """A new entry refused before sending because the clock-drift guard blocks entries.
+
+    `reason` is the guard's `DriftBlockReason` (never measured, measurement failed, out of
+    limits, stale). Protective orders, cancels, queries and snapshots are never blocked by
+    the drift guard.
+    """
+
+    def __init__(self, reason: DriftBlockReason) -> None:
+        self.reason = reason
+        super().__init__(f"new entry refused before sending: clock drift guard {reason}")
 
 
 def _is_order_absent(exc: BaseException, call_kind: CallKind) -> bool:
@@ -516,6 +560,24 @@ class BinanceUsdmAdapter:
 
     `sleep` (keyword only, default `asyncio.sleep`) serves only the waits of
     the STATUS_UNKNOWN cancel retry, so tests inject a recording sleep.
+
+    `signed_call_policy` (keyword only, plan 18-13) is the ratified
+    `SignedCallPolicy` loaded from the limits file: every signed SDK call
+    carries `recv_window=signed_call_policy.recv_window_ms`. Without it every
+    signed method raises `SignedCallPolicyMissing` before the gate check and
+    before the SDK is touched (fail closed); the public-data delegations carry
+    no recvWindow and are unaffected. A policy requires `rest_gate`, and the
+    gate's policy must equal `signed_call_policy.rate_limit` (ValueError).
+
+    `drift_guard` and `clock` (keyword only): when a `ClockDriftGuard` is
+    given, `place_entry` raises `EntriesBlocked` before any SDK call while
+    `drift_guard.entries_allowed(clock())` is False. Protective placement,
+    cancels, queries and snapshots never consult the guard. A guard requires
+    a clock (ValueError).
+
+    `on_clock_skew` (keyword only): called once when a signed call answers
+    -1021 (CLOCK_SKEW), e.g. `ClockDriftGuard.note_clock_skew_error`; the
+    original exception is re-raised and the call is never retried (D-14).
     """
 
     def __init__(
@@ -524,13 +586,79 @@ class BinanceUsdmAdapter:
         *,
         rest_gate: RestRateLimitGate | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
+        signed_call_policy: SignedCallPolicy | None = None,
+        drift_guard: ClockDriftGuard | None = None,
+        clock: Callable[[], datetime] | None = None,
+        on_clock_skew: Callable[[], None] | None = None,
     ) -> None:
+        if signed_call_policy is not None:
+            if not isinstance(signed_call_policy, SignedCallPolicy):
+                raise TypeError("signed_call_policy must be a SignedCallPolicy")
+            if rest_gate is None:
+                raise ValueError(
+                    "signed_call_policy requires rest_gate: signed calls use the one "
+                    "process-wide RestRateLimitGate"
+                )
+            if rest_gate.policy != signed_call_policy.rate_limit:
+                raise ValueError(
+                    "rest_gate.policy must equal signed_call_policy.rate_limit "
+                    "(one ratified rate-limit policy per process)"
+                )
+        if drift_guard is not None:
+            if not isinstance(drift_guard, ClockDriftGuard):
+                raise TypeError("drift_guard must be a ClockDriftGuard")
+            if clock is None:
+                raise ValueError("drift_guard requires clock (an aware-UTC clock callable)")
+        if on_clock_skew is not None and not callable(on_clock_skew):
+            raise TypeError("on_clock_skew must be callable")
         self._sdk: DerivativesTradingUsdsFutures = sdk_client or DerivativesTradingUsdsFutures()
         self._rest_gate = rest_gate
         self._sleep: Callable[[float], Awaitable[None]] = (
             sleep if sleep is not None else asyncio.sleep
         )
+        self._signed_call_policy = signed_call_policy
+        self._drift_guard = drift_guard
+        self._clock = clock
+        self._on_clock_skew = on_clock_skew
         self._public = BinancePublicMarketData(sdk_client=self._sdk, rest_gate=rest_gate)
+
+    def _require_signed_policy(self) -> tuple[SignedCallPolicy, RestRateLimitGate]:
+        """The policy and the shared gate of a signed call, or `SignedCallPolicyMissing`."""
+        policy = self._signed_call_policy
+        gate = self._rest_gate
+        if policy is None or gate is None:
+            raise SignedCallPolicyMissing()
+        return policy, gate
+
+    async def _sdk_call[R](self, call_kind: CallKind, method: Callable[..., R], **kwargs: Any) -> R:
+        """The one path of every signed SDK call (plan 18-13).
+
+        In order: refuse without a policy (`SignedCallPolicyMissing`, nothing checked or
+        sent); run the shared gate check (a ban or a pause refuses unchanged, nothing sent);
+        run `method(recv_window=<policy value>, **kwargs)` in a worker thread. On an
+        exception: classify it with `call_kind`; record a 418 or 429 in the gate; call the
+        -1021 hook once for CLOCK_SKEW (a hook failure is logged by type name only); then
+        re-raise the ORIGINAL exception object. Never retries, never sleeps.
+        """
+        policy, gate = self._require_signed_policy()
+        gate.check()
+        try:
+            return await asyncio.to_thread(method, recv_window=policy.recv_window_ms, **kwargs)
+        except Exception as exc:
+            facts = error_facts_from_exception(exc)
+            category = classify(facts, call_kind)
+            if category in _RATE_LIMIT_CATEGORIES:
+                gate.record(category, facts.retry_after_seconds)
+            elif category is ExchangeErrorCategory.CLOCK_SKEW and self._on_clock_skew is not None:
+                try:
+                    self._on_clock_skew()
+                except Exception as hook_exc:  # noqa: BLE001 - never replaces the original
+                    log.error(
+                        "adapter.signed_call.on_clock_skew_failed",
+                        call_kind=call_kind.value,
+                        error_class=type(hook_exc).__name__,
+                    )
+            raise
 
     def _cancel_retrying(self) -> tenacity.AsyncRetrying:
         """The bounded STATUS_UNKNOWN cancel retry (the four `_RECONCILER_CANCEL_*` ceilings)."""
@@ -913,8 +1041,7 @@ class BinanceUsdmAdapter:
             NewOrderTypeEnum,
         )
 
-        response = await _gated_rest_call(
-            self._rest_gate,
+        response = await self._sdk_call(
             CallKind.PLACEMENT,
             self._sdk.rest_api.new_order,
             symbol=symbol,
@@ -1059,8 +1186,7 @@ class BinanceUsdmAdapter:
         )
 
         try:
-            response = await _gated_rest_call(
-                self._rest_gate,
+            response = await self._sdk_call(
                 CallKind.QUERY,
                 self._sdk.rest_api.query_order,
                 symbol=symbol,
