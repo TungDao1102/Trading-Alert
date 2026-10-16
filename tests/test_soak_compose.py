@@ -181,8 +181,9 @@ def test_restart_loop_guard_catches_a_service_without_the_hold_flag() -> None:
     assert restart_loop_problems(PAPER_COMMAND, PAPER_PROBE[1:], "unless-stopped") != []
 
 
-def test_refusal_codes_are_3_to_6_and_exclude_the_restartable_statuses() -> None:
-    assert REFUSAL_CODES == {3, 4, 5, 6}
+def test_refusal_codes_are_3_to_6_and_8_and_exclude_the_restartable_statuses() -> None:
+    # 8 (INSTANCE_LEASE_HELD) joined the refusals with the single-instance guard (plan 16-55).
+    assert REFUSAL_CODES == {3, 4, 5, 6, 8}
     assert 1 not in REFUSAL_CODES
     assert int(ExitCode.FAIL_CLOSED_RUNTIME) == 7
     assert 7 not in REFUSAL_CODES

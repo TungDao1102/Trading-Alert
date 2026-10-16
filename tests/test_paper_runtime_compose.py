@@ -104,10 +104,17 @@ def test_exit_code_table_is_exactly_the_documented_one() -> None:
         "NO_PINNED_EPOCH": 5,
         "ADMISSION_OR_EPOCH_MISMATCH": 6,
         "FAIL_CLOSED_RUNTIME": 7,
+        "INSTANCE_LEASE_HELD": 8,
     }
-    assert REFUSAL_CODES == frozenset({3, 4, 5, 6})
+    assert REFUSAL_CODES == frozenset({3, 4, 5, 6, 8})
     assert 1 not in REFUSAL_CODES, "status 1 is an uncaught exception and is restartable"
     assert int(ExitCode.FAIL_CLOSED_RUNTIME) not in REFUSAL_CODES
+
+
+def test_readme_names_every_exit_code_member() -> None:
+    text = (REPO_ROOT / "config" / "paper" / "README.md").read_text(encoding="utf-8")
+    for member in ExitCode:
+        assert f"`{member.name}`" in text, f"config/paper/README.md lacks {member.name}"
 
 
 def test_module_docstring_states_which_codes_are_restartable() -> None:
@@ -126,12 +133,16 @@ def _stop_recorder() -> tuple[list[int], object]:
 
 
 def test_hold_on_refusal_holds_until_the_stop_then_returns_the_refusal_code(
-    capsys: pytest.CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     stops, wait_for_stop = _stop_recorder()
     environ = {**BASE_ENV, "BINANCE_LIVE_API_KEY": "x"}
 
-    code = runtime.main(["--hold-on-refusal"], environ=environ, wait_for_stop=wait_for_stop)  # type: ignore[arg-type]
+    code = runtime.main(
+        ["--hold-on-refusal", "--pinned-state", str(tmp_path / "pinned_epoch.json")],
+        environ=environ,
+        wait_for_stop=wait_for_stop,  # type: ignore[arg-type]
+    )
 
     assert code == ExitCode.TRADE_KEY_REFUSED
     assert stops == [1]
@@ -149,14 +160,30 @@ def test_refusal_without_the_flag_returns_at_once(capsys: pytest.CaptureFixture[
     capsys.readouterr()
 
 
-def test_skipped_never_holds_even_with_the_flag(capsys: pytest.CaptureFixture[str]) -> None:
+def test_skipped_holds_with_the_flag_and_returns_0_only_when_stopped(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """16-55 Q1 = A amends the 16-22 rule "SKIPPED never holds" (16-DEC-RESTART-POLICY).
+
+    Under `restart: unless-stopped` an exit 0 is restarted, so SKIPPED holds like a refusal.
+    """
     stops, wait_for_stop = _stop_recorder()
 
     code = runtime.main(
-        ["--hold-on-refusal"],
+        ["--hold-on-refusal", "--pinned-state", str(tmp_path / "pinned_epoch.json")],
         environ=dict(BASE_ENV),
         wait_for_stop=wait_for_stop,  # type: ignore[arg-type]
     )
+
+    assert code == 0
+    assert stops == [1]
+    assert SKIPPED_TEXT in capsys.readouterr().out
+
+
+def test_skipped_without_the_flag_returns_0_at_once(capsys: pytest.CaptureFixture[str]) -> None:
+    stops, wait_for_stop = _stop_recorder()
+
+    code = runtime.main([], environ=dict(BASE_ENV), wait_for_stop=wait_for_stop)  # type: ignore[arg-type]
 
     assert code == 0
     assert stops == []

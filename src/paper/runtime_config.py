@@ -9,19 +9,27 @@ Three things live here, all free of module-level side effects (stdlib plus the p
   `BINANCE_` refuses the start, even with an empty value (SC6, D040, T-16-50). Only names are
   ever reported, never values.
 - The named exit-code table (`ExitCode`, `REFUSAL_CODES`) that guards against a restart loop
-  (T-16-110). The compose restart policy `on-failure` restarts on any non-zero status and has
-  no per-code exclusion list, so the table is what keeps a refusal from looping:
+  (T-16-110). A compose restart policy has no per-code exclusion list (`on-failure` restarts any
+  non-zero status, `unless-stopped` restarts any exit that no `docker stop` preceded), so the
+  table and the hold are what keep a refusal from looping:
 
-  * 0 (OK): a clean stop, or SKIPPED because the allowlist admits nothing. Not restarted.
-  * 3 to 6 (refusals): trade-capable variable, configuration not ratified, no pinned epoch,
-    admission or epoch mismatch. A refusal can never succeed on a retry, because only a human
-    action (remove the variable, ratify the file, pin the epoch, fix the allowlist) changes the
-    outcome. With `--hold-on-refusal` the process therefore stays up instead of exiting.
+  * 0 (OK): a stop the operator requested, the end of a hold, the one-shot `--pin-epoch`, the
+    `--healthcheck` probe, or SKIPPED (the allowlist admits nothing) without `--hold-on-refusal`.
+    No path of the service command relies on exit 0 to stay down (16-DEC-RESTART-POLICY).
+  * 3 to 6 and 8 (refusals): trade-capable variable, configuration not ratified, no pinned epoch,
+    admission or epoch mismatch, and another runtime holding the instance lease of this database
+    (B1-WR-07). A refusal can never succeed on a retry, because only a human action (remove the
+    variable, ratify the file, pin the epoch, fix the allowlist, stop the other runtime) changes
+    the outcome. With `--hold-on-refusal` the process therefore stays up instead of exiting,
+    held and non-operational: it writes no record, starts no loop and leaves an explicit held
+    marker that makes the healthcheck report unhealthy (`src/paper/held_marker.py`). SKIPPED
+    holds the same way under the flag (16-55 Q1 = A).
   * 7 (FAIL_CLOSED_RUNTIME) and 1 (the status of an uncaught exception): restartable. The
-    process failed closed on a runtime condition (lost data, lost connection) that a restart
-    can clear.
-  * 2 (USAGE): a malformed command line, argparse's own status. Not restartable in practice
-    (the command line does not change), but it is not a refusal of the start gate.
+    process failed closed on a runtime condition (lost data, lost connection, a lost instance
+    lease) that a restart can clear.
+  * 2 (USAGE): a malformed command line, argparse's own status, or `--pin-epoch` together with
+    `--hold-on-refusal` (the one-shot pin never holds). Not restartable in practice (the command
+    line does not change), but it is not a refusal of the start gate.
 
 - The runtime configuration file (`RuntimeConfig`, `load_runtime_config`): every user-ratified
   value is required and none has a default in code (L-09, O-07, REV-07).
@@ -69,6 +77,7 @@ class ExitCode(IntEnum):
     NO_PINNED_EPOCH = 5
     ADMISSION_OR_EPOCH_MISMATCH = 6
     FAIL_CLOSED_RUNTIME = 7
+    INSTANCE_LEASE_HELD = 8
 
 
 REFUSAL_CODES: frozenset[int] = frozenset(
@@ -77,6 +86,7 @@ REFUSAL_CODES: frozenset[int] = frozenset(
         int(ExitCode.CONFIG_NOT_RATIFIED),
         int(ExitCode.NO_PINNED_EPOCH),
         int(ExitCode.ADMISSION_OR_EPOCH_MISMATCH),
+        int(ExitCode.INSTANCE_LEASE_HELD),
     }
 )
 

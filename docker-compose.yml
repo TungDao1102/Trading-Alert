@@ -99,15 +99,18 @@ services:
   # reports healthy only while the last processed closed bar is younger than the ratified age.
   # Interval, timeout, start period and retries copy the collector's. The probe feeds no
   # evidence criterion: coverage is computed from records.
-  #  - restart `on-failure`: an empty allowlist makes the runtime exit 0 by design, and
-  #    `unless-stopped` would restart that in a loop; a crash (exit 1 or 7) restarts and shows
-  #    up later as a CRASH gap. No restart cap: a cap of N would stop the runtime for good after
-  #    N quick crashes during a short database outage, which costs coverage.
+  #  - restart `on-failure`: a crash (exit 1 or 7) restarts and shows up later as a CRASH gap. No
+  #    restart cap: a cap of N would stop the runtime for good after N quick crashes during a
+  #    short database outage, which costs coverage. The owner's decision 16-DEC-RESTART-POLICY
+  #    replaces it with `unless-stopped` (plan 16-55 Task 4); the runtime side is in place: with
+  #    `--hold-on-refusal` an empty allowlist (SKIPPED) holds instead of exiting 0.
   #  - `on-failure` restarts every non-zero exit and Compose cannot exclude codes, so a
   #    configuration refusal would loop, each restart writing RUNTIME_START and gap rows. The
   #    refusal codes are 3 (trade-capable variable), 4 (configuration not ratified), 5 (no
-  #    pinned epoch) and 6 (admission or epoch mismatch). `--hold-on-refusal` logs the refusal and
-  #    keeps the container up, unhealthy, and it exits with the refusal code only when stopped.
+  #    pinned epoch), 6 (admission or epoch mismatch) and 8 (another runtime holds the instance
+  #    lease, plan 16-55). `--hold-on-refusal` logs the refusal, writes no record, leaves the held
+  #    marker and keeps the container up, unhealthy; it exits with the refusal code only when
+  #    stopped.
   #  - logs holds logs/paper/pinned_epoch.json and registry_diff.jsonl.
   #  - WR-06 (per-service env_file split) stays Phase 24: every x-app service shares one
   #    env_file, so this container also sees any BACKUP_ variable in it. The runtime refuses any

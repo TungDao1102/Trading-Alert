@@ -5,18 +5,26 @@ Order of `main` (each step may end the process before the next one runs):
 1. Configure redacted logging.
 2. Trade-key refusal: any `BINANCE_*` name in the environment exits 3 (names only are printed).
 3. Start gate: the approved allowlist is read through the freeze accessors only. An empty
-   allowlist logs "SKIPPED (allowlist empty)" and exits 0, before any adapter, database engine
-   or Telegram application is constructed, and with no fallback to any set.
+   allowlist logs "SKIPPED (allowlist empty)" before any adapter, database engine or Telegram
+   application is constructed, and with no fallback to any set. Without `--hold-on-refusal` it
+   exits 0; with the flag it holds like a refusal (16-55 Q1 = A amends the 16-22 rule "SKIPPED
+   never holds": under `restart: unless-stopped` an exit 0 would be restarted in a loop).
 4. Admission (the user's decision Q-A, `runtime-exact-hash-all`): the runtime process gate
    requires an exact-hash allowlist entry for EVERY parameter set, a fully rationalized one
    included. It runs before any candle is parsed and before `pin_stream_epoch`. A missing entry
    or a hash that differs from the registry file's hash exits 6. A match only lets the existing
    validation continue; `pin_stream_epoch` (unchanged) still judges the set afterwards.
 5. The ratified runtime configuration (exit 4 when anything is absent).
-6. The epoch: pinned only on the explicit operator flag `--pin-epoch` when no pinned state
-   exists; every restart loads the stored epoch and never mints one (exit 5 without a pin,
-   exit 6 on any mismatch).
-7. RUNTIME_START, the run, RUNTIME_STOP (recorded only on a clean stop, so a crash leaves a
+6. The single-instance guard (plan 16-55, review B1-WR-07): the instance lease of the state port
+   (a PostgreSQL session advisory lock), taken before the pin branch and before any record. A
+   lease held by another process refuses the start with exit 8 (a refusal, held under
+   `--hold-on-refusal`). The lease is released on every way out and is re-checked by the live
+   loop at every consumer batch and every step of its periodic tasks (exit 7 when lost).
+7. The epoch: pinned only by the one-shot operator command `--pin-epoch` when no pinned state
+   exists; the pin records EPOCH_PINNED, writes the pinned state and exits 0 without
+   RUNTIME_START and without the loop (16-DEC-PIN-COMMAND). Every start loads the stored epoch
+   and never mints one (exit 5 without a pin, exit 6 on any mismatch).
+8. RUNTIME_START, the run, RUNTIME_STOP (recorded only on a clean stop, so a crash leaves a
    START without a STOP, which the coverage code reads as a crash).
 
 Two layers, deliberately different (see config/paper/README.md): the runtime process gate here
@@ -25,9 +33,13 @@ entry is required only for a set without rationale tables). Rationale tables nev
 runtime authorization.
 
 Exit codes are the named table `ExitCode` in `src/paper/runtime_config.py`. With the opt-in
-flag `--hold-on-refusal` (used by the compose service) a refusal does not exit: the process logs
-it, stays up and returns the refusal code only after SIGTERM or SIGINT, so a restart policy can
-never loop on a refusal. SKIPPED and restartable failures are never held.
+flag `--hold-on-refusal` (used by the compose service) a refusal, SKIPPED included, does not
+exit: the process logs it, writes no record, starts no loop, leaves the explicit held marker of
+`src/paper/held_marker.py` (so `--healthcheck` reports unhealthy, even over a fresh bar of an
+earlier run) and returns the code only after SIGTERM or SIGINT, so a restart policy can never
+loop on it. Restartable failures are never held. No path of the service command relies on exit 0
+to stay down: 0 comes only from the probe, the one-shot pin, the end of a hold or the return after
+RUNTIME_STOP following a requested stop (tests/test_paper_runtime_held_state.py).
 
 The live loop (plan 16-26, `run_admitted`) composes the credential-free public adapter, the
 `PaperWsAdapter`, the `PaperSupervisor`, ONE bounded asyncio queue, ONE consumer task and the
@@ -70,6 +82,7 @@ import structlog
 from src.core.types import Candle
 from src.domain.registry import ParameterSet
 from src.ops.redaction import configure_logging
+from src.paper import held_marker
 from src.paper.bars import BarBuffers
 from src.paper.freeze import (
     PaperAllowlistEntry,
@@ -111,7 +124,13 @@ from src.paper.runtime_config import (
     read_env,
     refuse_trade_capable_env,
 )
-from src.paper.runtime_state import RuntimeRecord, RuntimeRecordConflict, RuntimeStatePort
+from src.paper.runtime_state import (
+    INSTANCE_LEASE_SCOPE,
+    InstanceLease,
+    RuntimeRecord,
+    RuntimeRecordConflict,
+    RuntimeStatePort,
+)
 from src.paper.shadow_runtime import (
     ShadowCoordinator,
     ShadowRuntimeError,
@@ -160,6 +179,8 @@ class RuntimeContext:
     # The time of this run's own RUNTIME_START (set by `main`): markers before it are the previous
     # run, which tells a planned restart from a crash (plan 16-29).
     started_at_utc: datetime | None = None
+    # The instance lease `main` holds for this run (plan 16-55); the loop re-checks it.
+    lease: InstanceLease | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -172,16 +193,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--hold-on-refusal",
         action="store_true",
         help=(
-            "On a refusal (exit codes 3 to 6) log it and stay up until SIGTERM or SIGINT "
-            "instead of exiting, so a restart policy cannot loop on it."
+            "On a refusal (exit codes 3 to 6 and 8) or SKIPPED, log it, write the held marker "
+            "and stay up, non-operational, until SIGTERM or SIGINT instead of exiting, so a "
+            "restart policy cannot loop on it."
         ),
     )
     parser.add_argument(
         "--pin-epoch",
         action="store_true",
         help=(
-            "Operator command: pin the epoch of this trial when no pinned state exists. "
-            "Without it a start needs an existing pinned state and reuses its epoch."
+            "One-shot operator command: pin the epoch of this trial when no pinned state "
+            "exists, then exit 0 without starting the loop. Without it a start needs an "
+            "existing pinned state and reuses its epoch. Never combined with --hold-on-refusal."
         ),
     )
     parser.add_argument(
@@ -218,19 +241,118 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _hold(
+    code: ExitCode,
+    refusal: str,
+    *,
+    wait_for_stop: Callable[[], None],
+    marker_dir: Path,
+) -> int:
+    """Hold a refused start: write the held marker, wait for the stop, remove the marker.
+
+    The hold is non-operational: nothing here writes a record or builds a client. A hold whose
+    marker cannot be written is never entered, because without the marker the probe could read
+    an earlier run's fresh bar as healthy (16-DEC-RESTART-POLICY, correction 1): the process exits
+    instead, with the refusal code, or with FAIL_CLOSED_RUNTIME for SKIPPED, never with 0.
+    """
+    try:
+        held_marker.write_marker(marker_dir, code=int(code), refusal=refusal)
+    except OSError as exc:
+        status = int(code) if code is not ExitCode.OK else int(ExitCode.FAIL_CLOSED_RUNTIME)
+        print(
+            f"paper runtime cannot write its held marker ({type(exc).__name__}); exiting with "
+            f"{status} instead of holding, because a hold without the marker could look healthy",
+            file=sys.stderr,
+        )
+        structlog.get_logger().error(
+            "paper runtime held marker not written", refusal=refusal, exit_code=status
+        )
+        return status
+    structlog.get_logger().warning("paper runtime held", refusal=refusal, exit_code=int(code))
+    try:
+        wait_for_stop()
+    finally:
+        try:
+            held_marker.remove_marker(marker_dir)
+        except OSError as exc:
+            structlog.get_logger().error(
+                "paper runtime held marker not removed", error=type(exc).__name__
+            )
+    return int(code)
+
+
 def _refuse(
     code: ExitCode,
     reason: str,
     *,
     hold: bool,
     wait_for_stop: Callable[[], None],
+    marker_dir: Path,
 ) -> int:
     """Report a refusal on stderr and in the log; hold until stopped when asked to."""
     print(f"paper runtime refused (exit {int(code)}): {reason}", file=sys.stderr)
     structlog.get_logger().error("paper runtime refused", exit_code=int(code), reason=reason)
-    if hold:
-        wait_for_stop()
-    return int(code)
+    if not hold:
+        return int(code)
+    return _hold(code, code.name, wait_for_stop=wait_for_stop, marker_dir=marker_dir)
+
+
+def _skip(*, hold: bool, wait_for_stop: Callable[[], None], marker_dir: Path) -> int:
+    """SKIPPED: the allowlist admits nothing. 0 at once, or 0 at the end of a hold."""
+    structlog.get_logger().info(SKIPPED_EVENT)
+    if not hold:
+        return int(ExitCode.OK)
+    return _hold(ExitCode.OK, "SKIPPED", wait_for_stop=wait_for_stop, marker_dir=marker_dir)
+
+
+def _usage_error(message: str) -> int:
+    print(f"paper runtime usage error (exit {int(ExitCode.USAGE)}): {message}", file=sys.stderr)
+    return int(ExitCode.USAGE)
+
+
+def _failed_closed(detail: str) -> int:
+    print(
+        f"paper runtime failed closed (exit {int(ExitCode.FAIL_CLOSED_RUNTIME)}): {detail}",
+        file=sys.stderr,
+    )
+    return int(ExitCode.FAIL_CLOSED_RUNTIME)
+
+
+def _pinned_and_exit(epoch: StreamEpoch) -> int:
+    """The one-shot pin is done (16-DEC-PIN-COMMAND): no RUNTIME_START, no loop, exit 0."""
+    structlog.get_logger().info("epoch pinned; the pin command exits", epoch_id=epoch.epoch_id)
+    print(f"epoch pinned: {epoch.epoch_id}; start the managed paper service now")
+    return int(ExitCode.OK)
+
+
+def _stopped_on_request() -> int:
+    """The loop returned on a requested stop and RUNTIME_STOP is recorded."""
+    return int(ExitCode.OK)
+
+
+def verify_instance_lease(lease: InstanceLease | None) -> None:
+    """Fail closed when the instance lease is lost or cannot be verified (plan 16-55, Test 7).
+
+    A session advisory lock disappears silently with its connection (database restart, network
+    cut, terminated backend), after which a second runtime could take it. The live loop calls
+    this at every consumer batch and every periodic step, so a lost lease is noticed at the next
+    one of them.
+
+    Raises:
+        RuntimeFailClosed: the lease is not held (exit 7, restartable: the restart takes the
+            lease again or is refused).
+    """
+    if lease is None:
+        return
+    try:
+        held = lease.is_held()
+    except Exception:  # noqa: BLE001 - an unverifiable lease is a lost lease
+        held = False
+    if not held:
+        raise RuntimeFailClosed(
+            "the instance lease was lost or cannot be verified: another paper runtime could "
+            "take this epoch (B1-WR-07)"
+        )
 
 
 def _admit(
@@ -497,6 +619,7 @@ class _LiveLoop:
         self._constraints = constraints
         self._epoch_id = context.epoch.epoch_id
         self._state = context.state
+        self._lease = context.lease
         self._clock = context.clock
         self._pipeline = pipeline
         self._queue: asyncio.Queue[TaggedBar] = asyncio.Queue(
@@ -578,6 +701,23 @@ class _LiveLoop:
             log.error("paper runtime failing closed", reason=reason)
         self._stop.set()
 
+    # ---- the instance lease (plan 16-55, B1-WR-07) ----------------------------------------- #
+
+    async def _check_lease(self) -> None:
+        """Verify the lease off the event loop; a lost lease fails the loop closed."""
+        if self._lease is None:
+            return
+        try:
+            await asyncio.to_thread(verify_instance_lease, self._lease)
+        except RuntimeFailClosed as exc:
+            self._fail(exc)
+            raise
+
+    async def _sleep_then_check_lease(self, delay: timedelta) -> None:
+        """The refresh loop's sleep, followed by the lease check of that periodic step."""
+        await self._sleep(delay)
+        await self._check_lease()
+
     # ---- the consumer ---------------------------------------------------------------------- #
 
     async def _consume(self) -> None:
@@ -595,6 +735,7 @@ class _LiveLoop:
             self._fail(exc)
 
     async def _process_batch(self, first: TaggedBar) -> None:
+        await self._check_lease()  # before the batch writes anything
         depth_before = self._queue.qsize() + 1  # the batch itself plus what waits behind it
         bars = [first]
         while True:
@@ -681,7 +822,7 @@ class _LiveLoop:
         if self._shadow is None:
             return
         try:
-            await self._shadow.run_poller(self._stop)
+            await self._shadow.run_poller(self._stop, before_step=self._check_lease)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -711,7 +852,9 @@ class _LiveLoop:
             every = timedelta(seconds=self._context.config.timing.exchange_info_refresh_seconds)
             self._tasks.add(
                 asyncio.create_task(
-                    refresh_forever(self._constraints, every=every, sleep=self._sleep)
+                    refresh_forever(
+                        self._constraints, every=every, sleep=self._sleep_then_check_lease
+                    )
                 )
             )
         stopper: asyncio.Future[None] = asyncio.ensure_future(self._stop_waiter())
@@ -904,13 +1047,27 @@ def _healthcheck(
 
     Liveness is not health (research P5): a process that is up but processes nothing, a held
     refusal (`--hold-on-refusal` keeps the container up after a refusal) and a stopped process all
-    report unhealthy. The start gate's own refusal checks run first, so the probe exits 1 wherever
-    the start would be refused. Only the NAMES of offending variables are ever printed.
+    report unhealthy. The held marker of this container is checked first (plan 16-55), then the
+    start gate's own refusal checks, so the probe exits 1 wherever the start was or would be
+    refused. Only the NAMES of offending variables are ever printed.
     """
 
     def unhealthy(reason: str) -> int:
         print(f"unhealthy: {reason}")
         return 1
+
+    # A held refused start first, before any bar age: the store may hold a fresh bar of an
+    # earlier run (16-DEC-RESTART-POLICY, correction 1). Only this container's marker counts,
+    # and the probe never removes it.
+    try:
+        held = held_marker.read_own_marker(pinned_path.parent)
+    except OSError as exc:
+        return unhealthy(f"the held marker cannot be read ({type(exc).__name__})")
+    if held is not None:
+        return unhealthy(
+            f"the start was refused and this container is held ({held.refusal}, exit "
+            f"{held.code}): it runs no loop; read the container log"
+        )
 
     trade_names = refuse_trade_capable_env(env)
     if trade_names:
@@ -977,9 +1134,10 @@ def main(
     run_loop: Callable[[RuntimeContext], None] | None = None,
     wiring: LoopWiring | None = None,
 ) -> int:
-    """Run the paper process: start gate, admission, epoch, run; returns the exit status.
+    """Run the paper process: start gate, admission, lease, epoch, run; returns the exit status.
 
-    The keyword parameters are test and composition seams; production passes none of them.
+    The keyword parameters are test and composition seams; production passes none of them. Every
+    `return` below is one kind of the exit-0 inventory in tests/test_paper_runtime_held_state.py.
     """
     args = build_parser().parse_args(argv)
     env: Mapping[str, str] = os.environ if environ is None else environ
@@ -987,18 +1145,33 @@ def main(
     stopper = wait_for_stop if wait_for_stop is not None else wait_for_stop_signal
     now = clock if clock is not None else _utc_now
     hold: bool = args.hold_on_refusal
+    pinned_path: Path = args.pinned_state
+    marker_dir = pinned_path.parent
 
     if args.healthcheck:
         return _healthcheck(
             env=env,
-            pinned_path=args.pinned_state,
+            pinned_path=pinned_path,
             state=state,
             registry_root=registry_root,
             now=now,
         )
+    if args.pin_epoch and hold:
+        return _usage_error(
+            "--pin-epoch is a one-shot operator command that never holds "
+            "(16-DEC-PIN-COMMAND); run it without --hold-on-refusal"
+        )
+
+    lease: InstanceLease | None = None
 
     def refuse(code: ExitCode, reason: str) -> int:
-        return _refuse(code, reason, hold=hold, wait_for_stop=stopper)
+        # A held process owns nothing: the lease goes before the hold, so the one-shot pin or a
+        # corrected start can take it while this container waits for its stop.
+        nonlocal lease
+        if lease is not None:
+            lease.release()
+            lease = None
+        return _refuse(code, reason, hold=hold, wait_for_stop=stopper, marker_dir=marker_dir)
 
     trade_names = refuse_trade_capable_env(env)
     if trade_names:
@@ -1008,8 +1181,7 @@ def main(
         )
 
     if not allowlist_entries():
-        structlog.get_logger().info(SKIPPED_EVENT)
-        return int(ExitCode.OK)
+        return _skip(hold=hold, wait_for_stop=stopper, marker_dir=marker_dir)
 
     values = read_env(env)
     absent = [
@@ -1033,57 +1205,78 @@ def main(
     except ConfigNotRatified as exc:
         return refuse(ExitCode.CONFIG_NOT_RATIFIED, str(exc))
 
-    live_wiring: LoopWiring | None = None
-    if run_loop is None:
-        live_wiring = wiring if wiring is not None else LoopWiring()
-        if (
-            live_wiring.pipeline is None
-            and live_wiring.context_factory is None
-            and live_wiring.risk_inputs is None
-            and live_wiring.shadow is None
-        ):
-            # The production binding of the risk inputs is the SHADOW ledger (plan 16-31), which
-            # needs the Telegram chat and the database of the environment.
-            try:
-                configured = _shadow_from_env(values)
-            except ConfigNotRatified as exc:
-                return refuse(ExitCode.CONFIG_NOT_RATIFIED, str(exc))
-            if configured is None:
+    # The single-instance guard (B1-WR-07): before the pin branch and before any record.
+    try:
+        lease = port.acquire_instance_lease(INSTANCE_LEASE_SCOPE)
+    except PersistenceError as exc:
+        return _failed_closed(f"the instance lease could not be taken ({type(exc).__name__})")
+    if lease is None:
+        return refuse(
+            ExitCode.INSTANCE_LEASE_HELD,
+            "another paper runtime or pin holds the instance lease of this database: one "
+            "runtime per epoch (B1-WR-07); stop the other process first",
+        )
+    try:
+        if args.pin_epoch:
+            if pinned_path.exists():
                 return refuse(
-                    ExitCode.CONFIG_NOT_RATIFIED,
-                    "the risk inputs port is not bound: open positions and the daily loss have "
-                    "no default implementation in src (they come from the SHADOW ledger, which "
-                    "needs TELEGRAM_BOT_TOKEN and TELEGRAM_AUTHORIZED_CHAT_ID)",
+                    ExitCode.ADMISSION_OR_EPOCH_MISMATCH,
+                    "a pinned state exists: a new pin restarts the qualifying trial (REV-18), "
+                    "so the operator archives the old state first",
                 )
-            live_wiring = replace(live_wiring, shadow=configured)
+            try:
+                epoch = pin_stream_epoch(
+                    strategy_id=strategy_id,
+                    parameter_set_id=parameter_set_id,
+                    opened_at_utc=now(),
+                    registry_root=registry_root,
+                )
+            except Exception as exc:  # the per-call validation refuses in many typed ways
+                return refuse(
+                    ExitCode.ADMISSION_OR_EPOCH_MISMATCH,
+                    f"pin_stream_epoch refused ({type(exc).__name__}): {exc}",
+                )
+            if epoch.parameter_set_hash != entry.parameter_set_hash:
+                return refuse(
+                    ExitCode.ADMISSION_OR_EPOCH_MISMATCH,
+                    "the pinned set's hash changed between admission and the pin",
+                )
+            try:
+                # Recorded before the file is written: a failed write leaves an orphan record of
+                # an epoch no run uses, while the reverse order would leave a trial with no pin
+                # record.
+                port.record(
+                    _epoch_record(RuntimeEventType.EPOCH_PINNED, epoch, epoch.opened_at_utc)
+                )
+                write_pinned_state(epoch, pinned_path)
+            except (PersistenceError, RuntimeRecordConflict) as exc:
+                return _failed_closed(type(exc).__name__)
+            return _pinned_and_exit(epoch)
 
-    pinned_path: Path = args.pinned_state
-    if args.pin_epoch:
-        if pinned_path.exists():
-            return refuse(
-                ExitCode.ADMISSION_OR_EPOCH_MISMATCH,
-                "a pinned state exists: a new pin restarts the qualifying trial (REV-18), "
-                "so the operator archives the old state first",
-            )
-        try:
-            epoch = pin_stream_epoch(
-                strategy_id=strategy_id,
-                parameter_set_id=parameter_set_id,
-                opened_at_utc=now(),
-                registry_root=registry_root,
-            )
-        except Exception as exc:  # the per-call validation refuses in many typed ways
-            return refuse(
-                ExitCode.ADMISSION_OR_EPOCH_MISMATCH,
-                f"pin_stream_epoch refused ({type(exc).__name__}): {exc}",
-            )
-        if epoch.parameter_set_hash != entry.parameter_set_hash:
-            return refuse(
-                ExitCode.ADMISSION_OR_EPOCH_MISMATCH,
-                "the pinned set's hash changed between admission and the pin",
-            )
-        newly_pinned = True
-    else:
+        live_wiring: LoopWiring | None = None
+        if run_loop is None:
+            live_wiring = wiring if wiring is not None else LoopWiring()
+            if (
+                live_wiring.pipeline is None
+                and live_wiring.context_factory is None
+                and live_wiring.risk_inputs is None
+                and live_wiring.shadow is None
+            ):
+                # The production binding of the risk inputs is the SHADOW ledger (plan 16-31),
+                # which needs the Telegram chat and the database of the environment.
+                try:
+                    configured = _shadow_from_env(values)
+                except ConfigNotRatified as exc:
+                    return refuse(ExitCode.CONFIG_NOT_RATIFIED, str(exc))
+                if configured is None:
+                    return refuse(
+                        ExitCode.CONFIG_NOT_RATIFIED,
+                        "the risk inputs port is not bound: open positions and the daily loss "
+                        "have no default implementation in src (they come from the SHADOW "
+                        "ledger, which needs TELEGRAM_BOT_TOKEN and TELEGRAM_AUTHORIZED_CHAT_ID)",
+                    )
+                live_wiring = replace(live_wiring, shadow=configured)
+
         if not pinned_path.is_file():
             return refuse(
                 ExitCode.NO_PINNED_EPOCH,
@@ -1102,57 +1295,60 @@ def main(
                 ExitCode.ADMISSION_OR_EPOCH_MISMATCH,
                 "the pinned state does not match the admitted allowlist entry",
             )
-        newly_pinned = False
 
-    context = RuntimeContext(
-        epoch=epoch,
-        config=config,
-        state=port,
-        env=values,
-        clock=now,
-        registry_root=registry_root,
-    )
-    try:
-        if not newly_pinned:
-            # A restart never mints an epoch: the pin file and the stored pin record must agree.
-            check_epoch_consistency(epoch, port)
-        if newly_pinned:
-            # Recorded before the file is written: a failed write leaves an orphan record of an
-            # epoch no run uses, while the reverse order would leave a trial with no pin record.
-            port.record(_epoch_record(RuntimeEventType.EPOCH_PINNED, epoch, epoch.opened_at_utc))
-            write_pinned_state(epoch, pinned_path)
-        start_extra: dict[str, Any] = {}
-        if run_loop is None and live_wiring is not None:
-            public = _resolve_public(live_wiring)
-            live_wiring = replace(live_wiring, public=public)
-            try:
-                skew_ms = asyncio.run(measure_clock_skew(public, now))
-            except Exception as exc:
-                raise RuntimeFailClosed(
-                    f"the clock-skew check against Binance server time failed "
-                    f"({type(exc).__name__})"
-                ) from exc
-            start_extra["clock_skew_ms"] = skew_ms
-            structlog.get_logger().info("clock skew measured", clock_skew_ms=skew_ms)
-        started_at = now()
-        context = replace(context, started_at_utc=started_at)
-        port.record(_epoch_record(RuntimeEventType.RUNTIME_START, epoch, started_at, start_extra))
-        structlog.get_logger().info("runtime start", epoch_id=epoch.epoch_id)
-        if run_loop is not None:
-            run_loop(context)
-        else:
-            asyncio.run(run_admitted(context, live_wiring))
-        port.record(_epoch_record(RuntimeEventType.RUNTIME_STOP, epoch, now()))
-    except EpochMismatch as exc:
-        return refuse(ExitCode.ADMISSION_OR_EPOCH_MISMATCH, str(exc))
-    except (PersistenceError, RuntimeRecordConflict, RuntimeFailClosed) as exc:
-        detail = str(exc) if isinstance(exc, RuntimeFailClosed) else type(exc).__name__
-        print(
-            f"paper runtime failed closed (exit {int(ExitCode.FAIL_CLOSED_RUNTIME)}): {detail}",
-            file=sys.stderr,
+        context = RuntimeContext(
+            epoch=epoch,
+            config=config,
+            state=port,
+            env=values,
+            clock=now,
+            registry_root=registry_root,
+            lease=lease,
         )
-        return int(ExitCode.FAIL_CLOSED_RUNTIME)
-    return int(ExitCode.OK)
+        try:
+            # A start never mints an epoch: the pin file and the stored pin record must agree.
+            check_epoch_consistency(epoch, port)
+            # A marker left by a killed hold of this container goes before the start is
+            # recorded (the probe never removes one).
+            try:
+                held_marker.remove_marker(marker_dir)
+            except OSError as exc:
+                raise RuntimeFailClosed(
+                    f"the held marker of this container cannot be removed ({type(exc).__name__})"
+                ) from exc
+            start_extra: dict[str, Any] = {}
+            if run_loop is None and live_wiring is not None:
+                public = _resolve_public(live_wiring)
+                live_wiring = replace(live_wiring, public=public)
+                try:
+                    skew_ms = asyncio.run(measure_clock_skew(public, now))
+                except Exception as exc:
+                    raise RuntimeFailClosed(
+                        f"the clock-skew check against Binance server time failed "
+                        f"({type(exc).__name__})"
+                    ) from exc
+                start_extra["clock_skew_ms"] = skew_ms
+                structlog.get_logger().info("clock skew measured", clock_skew_ms=skew_ms)
+            started_at = now()
+            context = replace(context, started_at_utc=started_at)
+            port.record(
+                _epoch_record(RuntimeEventType.RUNTIME_START, epoch, started_at, start_extra)
+            )
+            structlog.get_logger().info("runtime start", epoch_id=epoch.epoch_id)
+            if run_loop is not None:
+                run_loop(context)
+            else:
+                asyncio.run(run_admitted(context, live_wiring))
+            port.record(_epoch_record(RuntimeEventType.RUNTIME_STOP, epoch, now()))
+        except EpochMismatch as exc:
+            return refuse(ExitCode.ADMISSION_OR_EPOCH_MISMATCH, str(exc))
+        except (PersistenceError, RuntimeRecordConflict, RuntimeFailClosed) as exc:
+            detail = str(exc) if isinstance(exc, RuntimeFailClosed) else type(exc).__name__
+            return _failed_closed(detail)
+        return _stopped_on_request()
+    finally:
+        if lease is not None:
+            lease.release()
 
 
 if __name__ == "__main__":

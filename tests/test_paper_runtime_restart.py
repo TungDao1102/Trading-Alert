@@ -809,6 +809,9 @@ class CrossEpochProbe:
         self.asked += 1
         return list(self.answer)
 
+    def acquire_instance_lease(self, scope: str) -> Any:
+        return self.inner.acquire_instance_lease(scope)
+
 
 def test_a_restart_under_a_later_pin_of_another_epoch_exits_6_before_any_subscription(
     live: Live, capsys: pytest.CaptureFixture[str]

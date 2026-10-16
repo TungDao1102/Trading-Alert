@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
@@ -203,3 +204,86 @@ def test_other_journal_rows_with_a_paper_prefix_are_not_runtime_records(
     state = PgRuntimeState(db)
     assert state.records(EPOCH) == []
     assert state.last_close_by_pair(EPOCH) == {}
+
+
+# ---- plan 16-55 Task 3: the instance lease is a session advisory lock ---------------------- #
+
+
+def _lease_holder_pids(engine: Engine, key: int) -> list[int]:
+    from sqlalchemy import text
+
+    hi, lo = key >> 32, key & 0xFFFFFFFF
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted"
+                " AND classid = CAST(:hi AS oid) AND objid = CAST(:lo AS oid) AND objsubid = 1"
+                " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+            ),
+            {"hi": hi, "lo": lo},
+        ).all()
+    return [int(row[0]) for row in rows]
+
+
+def test_a_second_instance_cannot_take_a_held_lease(db: OperationalDatabase) -> None:
+    from src.paper.runtime_state import INSTANCE_LEASE_SCOPE
+
+    first = PgRuntimeState(db).acquire_instance_lease(INSTANCE_LEASE_SCOPE)
+    assert first is not None
+    try:
+        assert first.is_held()
+        assert PgRuntimeState(db).acquire_instance_lease(INSTANCE_LEASE_SCOPE) is None
+    finally:
+        first.release()
+    again = PgRuntimeState(db).acquire_instance_lease(INSTANCE_LEASE_SCOPE)
+    assert again is not None, "a released lease can be taken by the next instance"
+    again.release()
+
+
+def test_the_lease_ends_when_the_holding_connection_closes(
+    db: OperationalDatabase, engine: Engine
+) -> None:
+    from src.paper.runtime_state import INSTANCE_LEASE_SCOPE, instance_lease_key
+
+    first = PgRuntimeState(db).acquire_instance_lease(INSTANCE_LEASE_SCOPE)
+    assert first is not None
+    (pid,) = _lease_holder_pids(engine, instance_lease_key(INSTANCE_LEASE_SCOPE))
+    with engine.connect() as conn:
+        from sqlalchemy import text
+
+        assert conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid}).scalar_one()
+    assert not first.is_held(), "a terminated backend loses its session advisory lock"
+    first.release()  # best effort on a dead connection, never raises
+    second = PgRuntimeState(db).acquire_instance_lease(INSTANCE_LEASE_SCOPE)
+    assert second is not None, "after the holder's connection is gone the next instance takes it"
+    second.release()
+
+
+def test_a_terminated_lease_backend_fails_the_runtime_closed(
+    db: OperationalDatabase, engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test 7 on PostgreSQL: the runtime's lease check turns the lost lock into exit 7."""
+    import src.domain.registry as domain_registry
+    from sqlalchemy import text
+    from src.paper import runtime
+    from src.paper.runtime_config import ExitCode
+    from src.paper.runtime_state import INSTANCE_LEASE_SCOPE, instance_lease_key
+
+    from tests.test_paper_runtime_admission import _Rig
+    from tests.test_rationale import write_rationalized_set
+
+    rig = _Rig(tmp_path, monkeypatch)
+    rig.state = PgRuntimeState(db)  # type: ignore[assignment]
+    monkeypatch.setattr(domain_registry, "REGISTRY_ROOT", rig.root)
+    write_rationalized_set(rig.root)
+    rig.authorize()
+    assert rig.run("--pin-epoch") == 0
+
+    def loop(context: object) -> None:
+        (pid,) = _lease_holder_pids(engine, instance_lease_key(INSTANCE_LEASE_SCOPE))
+        with engine.connect() as conn:
+            conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+        runtime.verify_instance_lease(context.lease)  # type: ignore[attr-defined]
+
+    assert rig.run(run_loop=loop) == ExitCode.FAIL_CLOSED_RUNTIME
+    assert rig.types().count(RuntimeEventType.RUNTIME_STOP) == 0

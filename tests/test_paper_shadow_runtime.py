@@ -1406,7 +1406,8 @@ def test_a_failing_poller_fails_the_loop_closed_and_still_stops_the_application(
 
     assert code == 7, "restartable fail-closed exit"
     assert trace[-3:] == ["updater.stop", "stop", "shutdown"]
-    assert len(live.records(RuntimeEventType.RUNTIME_STOP)) == 1, "no RUNTIME_STOP: a crash marker"
+    # The pin exits without a run (16-DEC-PIN-COMMAND), so no STOP at all: a crash marker.
+    assert live.records(RuntimeEventType.RUNTIME_STOP) == [], "no RUNTIME_STOP: a crash marker"
 
 
 # --------------------------------------------------------------------------- #
