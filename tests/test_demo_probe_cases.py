@@ -1868,3 +1868,34 @@ async def test_a_case_wait_sleeps_exactly_the_owners_case_timeout(tmp_path: Path
     await run_cases(tmp_path, port, "id_reuse_after_filled", vt=vt)
     config = make_config(tmp_path, execute=True)
     assert vt.sleeps == [config.order_limits.case_timeout_seconds]
+
+
+class _UnusedModeReader:
+    async def get_position_mode(self) -> Any:
+        raise AssertionError("not read in this test")
+
+
+def _ban_flag_adapter(flag: object) -> object:
+    class _Adapter:
+        pass
+
+    adapter = _Adapter()
+    if flag is not None:
+        adapter.banned = flag  # type: ignore[attr-defined]
+    return adapter
+
+
+@pytest.mark.parametrize(
+    ("flag", "expected"), [(False, False), (True, True), (None, True), ("no", True)]
+)
+def test_the_guarded_port_reports_the_adapter_ban_flag_failing_closed(
+    flag: object, expected: bool
+) -> None:
+    port = dp.GuardedProbePort(
+        _ban_flag_adapter(flag),
+        position_mode_reader=_UnusedModeReader(),
+        frames=dp.FrameLog(),
+        guard=lambda: None,
+        mode=dp.MODE_EXECUTE,
+    )
+    assert port.banned is expected

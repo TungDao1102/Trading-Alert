@@ -20,8 +20,10 @@ used to choose a trading parameter (D-17).
 
 Plan 18-17 builds the safety envelope (runner, clock and sleep contracts, cleanup, evidence,
 CLI gates) and the four read-only not-found cases; plan 18-23 registers the cases that send
-orders on this envelope. Until then an ``--execute`` run records every unregistered case as
-ERROR ("no handler registered"); the live run is plan 18-20 (blocking-human).
+orders on this envelope (every id of ``CASE_ORDER`` has a handler). Each order a case sends
+passes one shared bound first (``order_bound_refusal``: never above the owner's approved
+quantity or notional cap; the owner-approved ``market_lot_probe_quantity`` of the optional
+MARKET_LOT_SIZE case is the single exception). The live run is plan 18-20 (blocking-human).
 
 Safety posture (read before running anything):
 
@@ -1949,6 +1951,283 @@ async def _rejected_protective_variants(case: _WriteCase) -> CaseResult:
     return case.observed()
 
 
+# ----- Task 3: the G2-029 additions and the optional cases ---------------------------- #
+
+# The lot-size and market-lot filters recorded by the triggered-exit cases.
+_LOT_FILTERS: tuple[str, ...] = (
+    "min_quantity",
+    "max_quantity",
+    "step_size",
+    "market_lot_min_quantity",
+    "market_lot_max_quantity",
+    "market_lot_step_size",
+)
+MARKET_LOT_CASE = "market_lot_size_out_of_range"
+
+
+async def _below_min_notional_reduce_only_leg(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    trigger = market.far_below(case.fraction)
+    smallest = market.smallest_quantity()
+    notional = smallest * trigger
+    case.detail("smallest_quantity", format(smallest, "f"))
+    case.detail("trigger_price", format(trigger, "f"))
+    case.detail("leg_notional", format(notional, "f"))
+    minimum = market.min_notional
+    if minimum is None:
+        return case.not_observed("the minimum notional filter is unreadable")
+    case.detail("min_notional", format(minimum, "f"))
+    if notional >= minimum:
+        return case.not_observed(
+            f"the smallest valid quantity {format(smallest, 'f')} at trigger "
+            f"{format(trigger, 'f')} has notional {format(notional, 'f')}, not below the "
+            f"minimum notional {format(minimum, 'f')}"
+        )
+    case.check_bounds([(case.quantity, market.marketable_buy()), (smallest, trigger)])
+    placed, status = await case.open_long(market, "bme")
+    if not placed.ok:
+        return case.not_observed(f"entry rejected: {_class_code(placed)}")
+    if status != ORDER_STATUS_FILLED:
+        return case.not_observed(
+            f"no open position: the entry did not fill: status {status or 'unreadable'}"
+        )
+    leg_id = case.client_id("bml")
+    case.detail("client_algo_id", leg_id)
+    leg = await case.conditional(
+        "below_min_notional_leg",
+        client_id=leg_id,
+        side=SIDE_SELL,
+        order_type=ORDER_TYPE_STOP_MARKET,
+        trigger=trigger,
+        quantity=smallest,
+        reduce_only=True,
+    )
+    case.detail("leg_accepted", _flag_text(leg.ok))
+    if leg.ok:
+        await case.algo_status("leg_status", leg_id)
+    return case.observed()
+
+
+def _algo_frames(
+    frames: Sequence[Mapping[str, str]], client_algo_id: str
+) -> list[Mapping[str, str]]:
+    return [
+        frame
+        for frame in frames
+        if frame.get("event_type") == EVENT_ALGO_UPDATE
+        and frame.get("client_algo_id") == client_algo_id
+    ]
+
+
+def _first_field(frames: Sequence[Mapping[str, str]], name: str) -> str | None:
+    return next((frame[name] for frame in frames if frame.get(name)), None)
+
+
+def _record_child_identity(case: _WriteCase, leg_id: str) -> None:
+    """`ai`, `aq`, `rm` of the leg's ALGO_UPDATE frames and `c`, `i` of the child order."""
+    frames = case.frames()
+    algo = _algo_frames(frames, leg_id)
+    actual = _first_field(algo, "actual_order_id")
+    executed = _first_field(algo, "executed_quantity")
+    reject = _first_field(algo, "reject_reason")
+    case.detail("child_ai", actual or "NOT_OBSERVED: no ALGO_UPDATE frame carried ai")
+    case.detail("child_aq", executed or "NOT_OBSERVED: no ALGO_UPDATE frame carried aq")
+    if reject:
+        case.detail("reject_reason", reject)
+    child = next(
+        (
+            frame
+            for frame in frames
+            if actual
+            and frame.get("event_type") == EVENT_ORDER_UPDATE
+            and frame.get("exchange_order_id") == actual
+        ),
+        None,
+    )
+    missing = "NOT_OBSERVED: no child ORDER_TRADE_UPDATE frame"
+    case.detail("child_c", child.get("client_order_id", missing) if child else missing)
+    case.detail("child_i", child.get("exchange_order_id", missing) if child else missing)
+    rest = next(
+        (
+            answer.summary.get("actual_order_id", "")
+            for answer in reversed(case.observations)
+            if answer.ok and answer.operation == "query_algo_order"
+        ),
+        "",
+    )
+    case.detail("rest_actual_order_id", rest or "NOT_OBSERVED: empty or not answered")
+
+
+async def _triggered_exit(
+    case: _WriteCase, *, quantity: Decimal | None, market_lot_probe: bool, tag: str
+) -> CaseResult:
+    """A position from a marketable entry, then a reduce-only STOP_MARKET meant to trigger.
+
+    The trigger is the highest tick-grid price below a fresh mark. One wait of the case
+    timeout for the lifecycle (ended in REST or in the stream frames); the statuses seen, the
+    child order identity and the lot-size filters are recorded. For the MARKET_LOT_SIZE case
+    (`market_lot_probe`) a rejected placement is the finding itself.
+    """
+    market = await case.market()
+    for name in _LOT_FILTERS:
+        case.detail(f"filter_{name}", market.filters.get(name, "not listed"))
+    case.check_bounds([(case.quantity, market.marketable_buy())])
+    case.check_bounds([(quantity, market.just_below())], market_lot_probe=market_lot_probe)
+    placed, status = await case.open_long(market, f"{tag}e")
+    if not placed.ok:
+        return case.not_observed(f"entry rejected: {_class_code(placed)}")
+    if status != ORDER_STATUS_FILLED:
+        return case.not_observed(
+            f"no open position: the entry did not fill: status {status or 'unreadable'}"
+        )
+    fresh = await case.market()
+    leg_id = case.client_id(f"{tag}x")
+    case.detail("client_algo_id", leg_id)
+    leg = await case.conditional(
+        "exit_leg",
+        client_id=leg_id,
+        side=SIDE_SELL,
+        order_type=ORDER_TYPE_STOP_MARKET,
+        trigger=fresh.just_below(),
+        quantity=quantity,
+        reduce_only=True,
+        market_lot_probe=market_lot_probe,
+    )
+    case.detail("exit_leg_accepted", _flag_text(leg.ok))
+    if not leg.ok:
+        if market_lot_probe:
+            return case.observed()
+        return case.not_observed(f"the exit leg was not accepted: {_class_code(leg)}")
+    rest: list[str] = []
+
+    def frame_statuses() -> list[str]:
+        return [frame.get("algo_status", "") for frame in _algo_frames(case.frames(), leg_id)]
+
+    async def ended() -> bool:
+        rest.append(await case.algo_status("exit_query", leg_id))
+        seen = [rest[-1], *frame_statuses()]
+        return any(status in ALGO_ENDED_STATUSES or status == ALGO_ABSENT for status in seen)
+
+    await wait_up_to(case.rig, ended, case.case_timeout_seconds)
+    streamed = frame_statuses()
+    case.detail("algo_statuses_rest", ",".join(status or "unreadable" for status in rest))
+    case.detail("algo_statuses_frames", ",".join(streamed) or "none")
+    _record_child_identity(case, leg_id)
+    progressed = ALGO_LIFECYCLE_STATUSES | ALGO_ENDED_STATUSES
+    if not any(status in progressed for status in [*rest, *streamed]):
+        return case.not_observed(REASON_NOT_TRIGGERED)
+    return case.observed()
+
+
+async def _triggered_market_exit_lifecycle(case: _WriteCase) -> CaseResult:
+    if MARKET_LOT_CASE in case.context.config.case_ids:
+        question = (
+            f"NOT_OBSERVED at the approved size; the optional case {MARKET_LOT_CASE} "
+            "of this run answers it"
+        )
+    else:
+        question = (
+            f"NOT_OBSERVED at the approved size: the optional case {MARKET_LOT_CASE} is not enabled"
+        )
+    case.detail("market_lot_size_question", question)
+    return await _triggered_exit(case, quantity=case.quantity, market_lot_probe=False, tag="tml")
+
+
+async def _market_lot_size_out_of_range(case: _WriteCase) -> CaseResult:
+    approved = case.limits.market_lot_probe_quantity
+    case.detail(
+        "market_lot_probe_quantity",
+        format(approved, "f") if approved is not None else "not approved",
+    )
+    return await _triggered_exit(case, quantity=approved, market_lot_probe=True, tag="mlo")
+
+
+async def _explicit_time_in_force_variant(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    trigger = market.far_below(case.fraction)
+    case.check_bounds([(case.quantity, trigger)])
+    for time_in_force in DOCUMENTED_ALGO_TIME_IN_FORCE:
+        await _place_flat_leg(
+            case,
+            f"leg_{time_in_force}",
+            case.client_id("tif"),
+            trigger,
+            time_in_force=time_in_force,
+        )
+    return case.observed()
+
+
+async def _stream_gap_during_case(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    price = market.far_below(case.fraction)
+    case.check_bounds([(case.quantity, price)])
+    order_id = case.client_id("gap")
+    case.detail("client_order_id", order_id)
+    placed = await case.limit("far_order", client_id=order_id, side=SIDE_BUY, price=price)
+    if not placed.ok:
+        return case.not_observed(f"the far order was rejected: {_class_code(placed)}")
+    gap_marker = case.port.marker()
+    dropped = await case.port.drop_stream_transport()
+    case.detail("transport_dropped", _flag_text(dropped))
+    if not dropped:
+        return case.not_observed(REASON_NO_STREAM)
+
+    async def recovered() -> bool:
+        return StreamState.LIVE.value in case.port.stream_states_since(gap_marker)
+
+    back = await wait_up_to(case.rig, recovered, case.case_timeout_seconds)
+    states = case.port.stream_states_since(gap_marker)
+    case.detail("stream_states_after_drop", ",".join(states) or "none")
+    case.detail("stream_recovered_live", _flag_text(back))
+    await case.reconcile(open_orders=1, open_algo_orders=0, position=Decimal(0))
+    await case.cancel("far_order_cancel", order_id)
+    return case.observed()
+
+
+async def case_below_min_notional_reduce_only_leg(context: CaseContext) -> CaseResult:
+    """G2-029: a reduce-only conditional leg below the minimum notional, on an open position."""
+    return await run_write_case(
+        context,
+        _below_min_notional_reduce_only_leg,
+        case_id="below_min_notional_reduce_only_leg",
+        reduce_only=True,
+    )
+
+
+async def case_triggered_market_exit_lifecycle(context: CaseContext) -> CaseResult:
+    """G2-029: a reduce-only STOP_MARKET that triggers; lifecycle and child order identity."""
+    return await run_write_case(
+        context,
+        _triggered_market_exit_lifecycle,
+        case_id="triggered_market_exit_lifecycle",
+        reduce_only=True,
+    )
+
+
+async def case_explicit_time_in_force_variant(context: CaseContext) -> CaseResult:
+    """Optional: the pre-placed leg once per documented time-in-force value."""
+    return await run_write_case(
+        context,
+        _explicit_time_in_force_variant,
+        case_id="explicit_time_in_force_variant",
+        reduce_only=True,
+    )
+
+
+async def case_stream_gap_during_case(context: CaseContext) -> CaseResult:
+    """Optional: drop the private connection during an open far order; recovery and REST."""
+    return await run_write_case(
+        context, _stream_gap_during_case, case_id="stream_gap_during_case", reduce_only=False
+    )
+
+
+async def case_market_lot_size_out_of_range(context: CaseContext) -> CaseResult:
+    """Optional: the triggered exit with the owner-approved market_lot_probe_quantity."""
+    return await run_write_case(
+        context, _market_lot_size_out_of_range, case_id=MARKET_LOT_CASE, reduce_only=True
+    )
+
+
 async def case_preplaced_stop_reduce_only_flat(context: CaseContext) -> CaseResult:
     """A STOP_MARKET with explicit quantity and reduceOnly while flat (D055)."""
     return await run_write_case(
@@ -2045,6 +2324,11 @@ CASE_HANDLERS: dict[str, CaseHandler] = {
     "full_fill_protective_quantity": case_full_fill_protective_quantity,
     "partial_fill": case_partial_fill,
     "rejected_protective_variants": case_rejected_protective_variants,
+    "below_min_notional_reduce_only_leg": case_below_min_notional_reduce_only_leg,
+    "triggered_market_exit_lifecycle": case_triggered_market_exit_lifecycle,
+    "explicit_time_in_force_variant": case_explicit_time_in_force_variant,
+    "stream_gap_during_case": case_stream_gap_during_case,
+    "market_lot_size_out_of_range": case_market_lot_size_out_of_range,
 }
 
 
@@ -2592,6 +2876,13 @@ class GuardedProbePort:
         self._drop = drop_transport
         self.call_count = 0
         self.mutating_attempts = 0
+
+    @property
+    def banned(self) -> bool:
+        """The adapter's ban flag (read only); an adapter without a readable flag counts as
+        banned, so a write case never attempts its after-ban cleanup on an unknown state."""
+        flag = getattr(self._adapter, "banned", None)
+        return flag if isinstance(flag, bool) else True
 
     def _enter(self, operation: str) -> None:
         self._guard()
