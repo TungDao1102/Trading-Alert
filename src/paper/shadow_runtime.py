@@ -107,6 +107,7 @@ from src.paper.shadow_ledger import (
     CORRELATION_PREFIX,
     EVENT_SHADOW_PLAN_EXPIRED_UNFILLED,
     EVENT_SHADOW_POSITION_OPENED,
+    EVENT_SHADOW_RESERVATION_REFUSED,
     REASON_PLAN_EXPIRED_UNFILLED,
     PositionRecord,
     Reservation,
@@ -155,6 +156,21 @@ _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 
 class ShadowRuntimeError(RuntimeError):
     """The SHADOW chain cannot continue safely (fail closed): the message is this module's own."""
+
+
+class ShadowOpenRefused(ShadowRuntimeError):
+    """The fill driver refused to open a confirmed plan (plan 16-58, B2-CR-03).
+
+    Carries the reservation and the driver's reject code. A pending reservation is released with
+    a journaled SHADOW_RESERVATION_REFUSED; it never stops the poller, `start` or `restore`.
+    """
+
+    def __init__(self, reservation: Reservation, reason_code: str) -> None:
+        super().__init__(
+            f"the confirmed plan {reservation.key} cannot rest as a simulated plan: {reason_code}"
+        )
+        self.reservation = reservation
+        self.reason_code = reason_code
 
 
 @dataclass(frozen=True)
@@ -388,6 +404,7 @@ class ShadowCoordinator:
             mode=mode,
             mark_price=self._mark_price,
             on_confirmed=self._on_confirmed,
+            recheck=self._open_check,
             reservations=self._reservations,
         )
         self._callbacks = make_confirm_callbacks(
@@ -694,11 +711,57 @@ class ShadowCoordinator:
         drivers. The coordinator lock is therefore never held while the ledger lock is waited for.
         """
         snapshot = self._reservations.active()
+        refused: list[ShadowOpenRefused] = []
         with self._lock:
             for reservation in snapshot:
                 if reservation.key in self._positions:
                     continue
-                self._positions[reservation.key] = self._build_position(reservation)
+                try:
+                    self._positions[reservation.key] = self._build_position(reservation)
+                except ShadowOpenRefused as exc:
+                    refused.append(exc)
+        # B2-CR-03: one plan the driver cannot open is released with a journaled refusal; it
+        # never stops the poller or the other plans. Done outside the coordinator lock (the
+        # release takes the ledger lock).
+        for refusal in refused:
+            released = self._reservations.refuse(refusal.reservation.key, refusal.reason_code)
+            log.error(
+                "paper.shadow.reservation_refused",
+                plan_hash=refusal.reservation.plan_hash,
+                reason=refusal.reason_code,
+                released=released,
+            )
+
+    def _new_driver(self, context: _PlanContext) -> ShadowFillDriver:
+        return ShadowFillDriver(
+            cost_model=self._fill.cost_model,
+            constraint_snapshot=context.constraints,
+            strategy_version=self._fill.strategy_version,
+            parameter_set_hash=self._fill.parameter_set_hash,
+            constraints_extrapolated=False,
+        )
+
+    def _open_check(self, signal: Signal, plan: TradePlan, now_utc: datetime) -> str | None:
+        """The CONFIRM-time re-check: could the fill driver open this plan? (B2-CR-03)
+
+        Runs the same `open_confirmed` call `_build_position` makes, on a throw-away driver with
+        the constraint snapshot the plan was sized with, before the reservation is accepted. None
+        when it would open or when another check owns the refusal (no sizing context, a CONFIRM
+        that is not fill-eligible); else the driver reject code.
+        """
+        context = self._plans.get(plan.plan_hash)
+        if context is None:
+            return None  # no sizing basis: the capacity check fails closed
+        eligibility = eligibility_start_for(
+            signal_close_utc=signal.source_candle_close_utc,
+            plan_expiry_utc=plan.expiry_utc,
+            confirm_outcome="CONFIRMED",
+            confirmed_at_utc=now_utc,
+        )
+        if not eligibility.is_eligible:
+            return None  # the reservation check refuses it with its own reason
+        opened = self._new_driver(context).open_confirmed(context.outcome, eligibility)
+        return None if opened.opened else opened.reason_code
 
     def _build_position(self, reservation: Reservation) -> _Position:
         context = self._plans.get(reservation.plan_hash)
@@ -713,19 +776,10 @@ class ShadowCoordinator:
             confirmed_at_utc=reservation.confirmed_at_utc,
             approved_at_utc=None if approval is None else approval.acted_at_utc,
         )
-        driver = ShadowFillDriver(
-            cost_model=self._fill.cost_model,
-            constraint_snapshot=context.constraints,
-            strategy_version=self._fill.strategy_version,
-            parameter_set_hash=self._fill.parameter_set_hash,
-            constraints_extrapolated=False,
-        )
+        driver = self._new_driver(context)
         opened = driver.open_confirmed(context.outcome, eligibility)
         if not opened.opened:
-            raise ShadowRuntimeError(
-                f"the confirmed plan {reservation.key} cannot rest as a simulated plan: "
-                f"{opened.reason_code}"
-            )
+            raise ShadowOpenRefused(reservation, opened.reason_code)
         return _Position(
             key=reservation.key, reservation=reservation, driver=driver, eligibility=eligibility
         )
@@ -804,7 +858,10 @@ class ShadowCoordinator:
         self._reservations.sync_many({key: p.driver for key, p in positions.items()})
         for _key, position in sorted(positions.items()):
             self._journal_closed(position)
-        self._reservations.release_expired(now)
+        # B2-CR-02: expiry follows the DATA horizon the drivers were advanced to (the same value
+        # the minute poller settles through), never the raw wall clock. A fill in the last minutes
+        # before the plan expiry is only booked once its minute is settled.
+        self._reservations.release_expired(now - timedelta(seconds=self._close_lag_seconds))
 
     def _journal_closed(self, position: _Position) -> None:
         """Journal SHADOW_POSITION_CLOSED once for a filled position that reached its exit."""
@@ -1101,15 +1158,24 @@ class ShadowCoordinator:
             fills = [e for e in position.driver.events if e.kind == EVENT_FILL]
             fill_time = fills[0].time_utc if fills else None
         if fill_time is None:
-            ended = any(e.event_type == EVENT_SHADOW_PLAN_EXPIRED_UNFILLED for e in events) or (
-                position is not None and position.driver.is_closed
+            refusals = [e for e in events if e.event_type == EVENT_SHADOW_RESERVATION_REFUSED]
+            ended = (
+                any(e.event_type == EVENT_SHADOW_PLAN_EXPIRED_UNFILLED for e in events)
+                or bool(refusals)
+                or (position is not None and position.driver.is_closed)
             )
             if not ended:
                 return []  # confirmed and resting: nothing happened yet
+            # A reservation the fill driver refused (plan 16-58) carries the driver reject code.
+            reason = (
+                str(json.loads(refusals[0].payload_json).get("reason"))
+                if refusals
+                else REASON_PLAN_EXPIRED_UNFILLED
+            )
             outcome = ShadowOutcome(
                 approval_action="APPROVE",
                 confirm_event=EVENT_CONFIRM_EXPIRED,
-                confirm_reason=REASON_PLAN_EXPIRED_UNFILLED,
+                confirm_reason=reason,
             )
             return assemble(outcome, approve, confirm=requested)
         confirmed = str(body["confirmed_at_utc"])
@@ -1297,6 +1363,7 @@ __all__ = [
     "LedgerRiskInputs",
     "PositionView",
     "ShadowCoordinator",
+    "ShadowOpenRefused",
     "ShadowPublicFeed",
     "ShadowRuntimeError",
     "ShadowRuntimeStores",

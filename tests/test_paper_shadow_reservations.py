@@ -1140,3 +1140,66 @@ def test_the_fill_event_kind_is_what_opens_the_position() -> None:
     driver.advance_to(DATA_END, _source(rig.case), funding=_funding(rig.parsed))
     kinds: Sequence[str] = [e.kind for e in driver.events]
     assert EVENT_FILL in kinds
+
+
+# --------------------------------------------------------------------------- #
+# Plan 16-58: a FILL for an ended reservation fails loudly (B2-CR-02); a pending reservation that
+# cannot rest as a simulated plan is released with a journaled refusal (B2-CR-03).
+# --------------------------------------------------------------------------- #
+
+
+def test_a_fill_for_an_ended_reservation_fails_loudly_and_changes_nothing() -> None:
+    rig = FillRig()
+    ledger, reservations = rig.build()
+    held = rig.confirm(reservations)
+    driver = rig.driver_for(PositionRecord(held, Decimal(QUANTITY), CONFIRMED_AT))
+    # The reservation ended before the fill was processed (the old wall-clock sweep).
+    assert reservations.release_expired(rig.plan.expiry_utc) == [held.approval_id]
+    driver.advance_to(at(10, 2), _source(rig.case), funding=_funding(rig.parsed))
+    assert any(e.kind == EVENT_FILL for e in driver.events)
+
+    with pytest.raises(shadow_ledger.ReservationEndedError, match="ended"):
+        reservations.sync(held.key, driver)
+
+    assert ledger.ledger.exposures == ()
+    assert [e for e in rig.stores.journal if e.event_type == EVENT_SHADOW_POSITION_OPENED] == []
+    with pytest.raises(shadow_ledger.ReservationEndedError):
+        reservations.sync_many({held.key: driver})
+
+
+def test_a_pending_reservation_is_refused_once_with_its_reject_code() -> None:
+    rig = FillRig()
+    ledger, reservations = rig.build()
+    held = rig.confirm(reservations)
+    assert len(ledger.ledger.exposures) == 1
+
+    assert reservations.refuse(held.key, "MIN_QTY_REJECT") is True
+
+    assert ledger.ledger.exposures == () and reservations.pending_reservations() == ()
+    (event,) = [e for e in rig.stores.journal if e.event_type == EVENT_SHADOW_RESERVATION_REFUSED]
+    body = json.loads(event.payload_json)
+    assert body["reason"] == "MIN_QTY_REJECT" and body["plan_hash"] == held.plan_hash
+    assert event.occurred_at_utc == held.confirmed_at_utc, "no sweep or restart clock"
+    # Idempotent, and a rebuild from the journal treats it as ended.
+    assert reservations.refuse(held.key, "MIN_QTY_REJECT") is False
+    assert (
+        len([e for e in rig.stores.journal if e.event_type == EVENT_SHADOW_RESERVATION_REFUSED])
+        == 1
+    )
+    _ledger2, fresh = rig.build()
+    report = fresh.rebuild_from_records(
+        list(rig.stores.journal), None, now_utc=held.confirmed_at_utc + timedelta(minutes=5)
+    )
+    assert report.already_ended == (held.approval_id,) and fresh.pending_reservations() == ()
+
+
+def test_a_position_that_already_opened_cannot_be_refused() -> None:
+    rig = FillRig()
+    _ledger, reservations = rig.build()
+    held = rig.confirm(reservations)
+    driver = rig.driver_for(PositionRecord(held, Decimal(QUANTITY), CONFIRMED_AT))
+    driver.advance_to(at(10, 2), _source(rig.case), funding=_funding(rig.parsed))
+    reservations.sync(held.key, driver)
+
+    with pytest.raises(ValueError, match="already opened"):
+        reservations.refuse(held.key, "MIN_QTY_REJECT")

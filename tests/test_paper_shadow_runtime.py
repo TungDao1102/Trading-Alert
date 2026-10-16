@@ -321,8 +321,12 @@ class Rig:
         now: datetime = T_ALERT,
         confirm_ttl_seconds: int = 60,
         application_factory: Callable[[dict[str, Any]], Any] | None = None,
+        constraints_for: Callable[[str, datetime], ConstraintSnapshot] | None = None,
     ) -> None:
         self.now = now
+        self.constraints_for = (
+            constraints_for if constraints_for is not None else lambda symbol, at: CONSTRAINTS
+        )
         self.stores = stores if stores is not None else RuntimeStores()
         self.public = public if public is not None else FakePublic()
         self.bot = bot if bot is not None else FakeBot()
@@ -347,7 +351,7 @@ class Rig:
                 cost_model=build_cost_model(dict(DEFAULT_COST_MODEL)),
                 strategy_version="v1.0.0",
                 parameter_set_hash="b" * 64,
-                constraints_for=lambda symbol, at: CONSTRAINTS,
+                constraints_for=self.constraints_for,
             ),
             minute_poll_interval_seconds=POLL_SECONDS,
             minute_close_lag_seconds=LAG_SECONDS,
@@ -365,6 +369,7 @@ class Rig:
             bot=self.bot,
             now=self.now if now is None else now,
             confirm_ttl_seconds=self.confirm_ttl_seconds,
+            constraints_for=self.constraints_for,
         )
         return other
 
@@ -1887,3 +1892,232 @@ async def test_a_persisted_alert_is_not_lost_and_the_lost_view_counts_apart() ->
         signal_id != lost.signal.signal_id  # type: ignore[union-attr]
         for signal_id in restarted.coordinator.paper_records()
     )
+
+
+# --------------------------------------------------------------------------- #
+# Plan 16-58: an unsizable confirmed plan never stops the chain (B2-CR-03) and a reservation is
+# released by the data horizon, not the wall clock (B2-CR-02).
+# --------------------------------------------------------------------------- #
+
+from dataclasses import replace  # noqa: E402
+
+from src.paper.shadow_ledger import EVENT_SHADOW_RESERVATION_REFUSED  # noqa: E402
+
+PLAN_EXPIRY = T0 + timedelta(hours=4)
+# TP1 is half of the planned 0.08, so a 0.05 minimum quantity cannot size the TP1 leg.
+UNSIZABLE = replace(CONSTRAINTS, min_quantity=Decimal("0.05"))
+ETH_CONSTRAINTS = replace(CONSTRAINTS, symbol=ETH)
+
+
+def _refusal_code() -> str:
+    """The open check's reject code of the unsizable constraints (read from the driver itself)."""
+    from src.paper.shadow_fill import ShadowFillDriver, eligibility_start_for
+
+    outcome = make_outcome()
+    driver = ShadowFillDriver(
+        cost_model=build_cost_model(dict(DEFAULT_COST_MODEL)),
+        constraint_snapshot=UNSIZABLE,
+        strategy_version="v1.0.0",
+        parameter_set_hash="b" * 64,
+        constraints_extrapolated=False,
+    )
+    eligibility = eligibility_start_for(
+        signal_close_utc=SIGNAL_CLOSE,
+        plan_expiry_utc=PLAN_EXPIRY,
+        confirm_outcome="CONFIRMED",
+        confirmed_at_utc=T_CONFIRM,
+    )
+    opened = driver.open_confirmed(outcome, eligibility)
+    assert not opened.opened
+    return opened.reason_code
+
+
+def _by_symbol(table: dict[str, ConstraintSnapshot]) -> Callable[..., ConstraintSnapshot]:
+    return lambda symbol, at: table[symbol]
+
+
+async def test_a_confirm_the_fill_driver_cannot_open_is_refused_before_any_reservation() -> None:
+    code = _refusal_code()
+    rig = Rig(constraints_for=lambda symbol, at: UNSIZABLE)
+    await rig.alert()
+    short = rig.buttons()[0][1].removeprefix("APR:")
+    await rig.tap(f"APR:{short}", "q-apr-unsizable", at=T_APPROVE)
+    await rig.tap(f"CNF:{short}", "q-cnf-unsizable", at=T_CONFIRM)
+
+    assert rig.journal(EVENT_SHADOW_CONFIRMED) == [], "a refused CONFIRM is never journaled as one"
+    (refused,) = rig.journal(EVENT_SHADOW_CONFIRM_EXPIRED)
+    body = payload(refused)
+    assert body["reason"] == code and body["rejected_at_confirm"] is True
+    assert exposures(rig) == [] and rig.coordinator.open_positions() == ()
+    assert code in rig.bot.sent[-1].text, "the operator's reply names the refusal"
+    await rig.coordinator.poll_once()  # nothing to drive, nothing to raise
+
+
+async def _two_confirms_one_unsizable(*, drive: bool, stores: RuntimeStores | None = None) -> Rig:
+    """BTC (unsizable) and ETH (sizable) confirmed as a build WITHOUT the open check would have.
+
+    The open check at CONFIRM and, when `drive` is False, the driver hook are switched off on the
+    book, which reproduces a reservation written before this fix: it sits in the journal and
+    cannot open.
+    """
+    trade = scripted_trade(SYMBOL) + scripted_trade(ETH)
+    mark = scripted_mark(SYMBOL) + scripted_mark(ETH)
+    funding = [
+        FundingTick(s, T0 - timedelta(hours=2), Decimal("0.0001"), Decimal("50000"))
+        for s in (SYMBOL, ETH)
+    ]
+    rig = Rig(
+        stores=stores,
+        public=FakePublic(trade=trade, mark=mark, funding=funding),
+        constraints_for=_by_symbol({SYMBOL: UNSIZABLE, ETH: ETH_CONSTRAINTS}),
+    )
+    book = rig.coordinator.confirm_book
+    book._recheck = None  # type: ignore[attr-defined]
+    if not drive:
+        book._on_confirmed = None  # type: ignore[attr-defined]
+    await rig.alert(make_outcome(1, realized_risk="10"))
+    await rig.alert(make_outcome(2, symbol=ETH, realized_risk="10"))
+    shorts = [rig.buttons(i)[0][1].removeprefix("APR:") for i in (0, 1)]
+    for index, short in enumerate(shorts):
+        await rig.tap(f"APR:{short}", f"q-apr-{index}", at=T_APPROVE + MINUTE * index)
+        await rig.tap(f"CNF:{short}", f"q-cnf-{index}", at=T_CONFIRM + MINUTE * index)
+    if not drive:
+        assert len(exposures(rig)) == 2, "both plans hold a reservation"
+    return rig
+
+
+async def test_a_reservation_that_cannot_open_is_refused_by_the_press_and_the_poll() -> None:
+    code = _refusal_code()
+    rig = await _two_confirms_one_unsizable(drive=True)
+
+    # The press already tried to give the plan a driver and refused it without raising.
+    (refused,) = rig.journal(EVENT_SHADOW_RESERVATION_REFUSED)
+    assert payload(refused)["reason"] == code
+    assert payload(refused)["plan_hash"] == "1" * 64
+    assert [p.symbol for p in rig.coordinator.open_positions()] == [ETH]
+    assert [s for s, _d, _r in exposures(rig)] == [ETH], "BTC was released"
+
+    await poll_at(rig, after_minutes(3))  # the poller keeps running for the other plan
+    assert len(rig.journal(EVENT_SHADOW_RESERVATION_REFUSED)) == 1
+
+
+async def test_a_poll_step_refuses_a_stored_reservation_that_cannot_open_and_keeps_the_rest() -> (
+    None
+):
+    code = _refusal_code()
+    rig = await _two_confirms_one_unsizable(drive=False)
+    assert rig.coordinator.open_positions() == ()
+
+    await poll_at(rig, after_minutes(3))  # must not raise
+
+    (refused,) = rig.journal(EVENT_SHADOW_RESERVATION_REFUSED)
+    assert payload(refused)["reason"] == code
+    assert [p.symbol for p in rig.coordinator.open_positions()] == [ETH]
+    assert SYMBOL not in [s for s, _d, _r in exposures(rig)]
+
+
+async def test_a_restore_releases_a_reservation_that_cannot_open_and_writes_nothing_twice() -> None:
+    code = _refusal_code()
+    rig = await _two_confirms_one_unsizable(drive=False)
+
+    first = rig.restart(now=T_CONFIRM + 5 * MINUTE)
+    await first.coordinator.restore()  # must not raise
+    (refused,) = first.journal(EVENT_SHADOW_RESERVATION_REFUSED)
+    assert payload(refused)["reason"] == code
+    assert refused.occurred_at_utc == T_CONFIRM, "no restart wall clock in the event"
+    assert [p.symbol for p in first.coordinator.open_positions()] == [ETH]
+    assert [s for s, _d, _r in exposures(first)] == [ETH]
+
+    second = first.restart(now=T_CONFIRM + 6 * MINUTE)
+    await second.coordinator.restore()
+    await poll_at(second, after_minutes(3))
+    assert len(second.journal(EVENT_SHADOW_RESERVATION_REFUSED)) == 1
+    assert [p.symbol for p in second.coordinator.open_positions()] == [ETH]
+
+
+def _minutes_to_expiry(*, fill: bool) -> tuple[list[Kline], list[MarkKline]]:
+    """Quiet minutes from 03:01, then (when `fill`) a touch at 06:58 and a fill at 06:59.
+
+    The fill minute closes at 06:59:59.999, inside the plan (expiry 07:00); the script continues
+    with a flat minute and a drop through the stop at 07:01.
+    """
+    quiet = Bar("50300", "50310", "50290", "50300")
+    tail = list(SCRIPT) if fill else [quiet] * len(SCRIPT)
+    quiet_minutes = int((PLAN_EXPIRY - FIRST_MINUTE) / MINUTE) - 2  # up to the 06:57 minute
+    bars = [quiet] * quiet_minutes + tail
+    trade: list[Kline] = []
+    mark: list[MarkKline] = []
+    for index, bar in enumerate(bars):
+        opened = FIRST_MINUTE + MINUTE * index
+        trade.append(
+            Kline(
+                SYMBOL,
+                "1m",
+                opened,
+                _close(opened),
+                Decimal(bar.open),
+                Decimal(bar.high),
+                Decimal(bar.low),
+                Decimal(bar.close),
+                Decimal("1"),
+                Decimal("1"),
+                1,
+            )
+        )
+        mark.append(
+            MarkKline(
+                SYMBOL,
+                "1m",
+                opened,
+                _close(opened),
+                Decimal(bar.open),
+                Decimal(bar.high),
+                Decimal(bar.low),
+                Decimal(bar.close),
+                1,
+            )
+        )
+    return trade, mark
+
+
+async def test_a_fill_in_the_last_minute_before_expiry_is_not_an_unfilled_expiry() -> None:
+    trade, mark = _minutes_to_expiry(fill=True)
+    rig = Rig(public=FakePublic(trade=trade, mark=mark))
+    await rig.approve_and_confirm()
+    await poll_at(rig, PLAN_EXPIRY - timedelta(minutes=20))  # the quiet minutes
+    assert exposures(rig) == [(SYMBOL, "LONG", Decimal("48"))]
+
+    # The wall clock is past the expiry but the data horizon (now - 5 s) is not: the fill minute
+    # (06:59, closing 06:59:59.999) is not settled yet.
+    await poll_at(rig, PLAN_EXPIRY + timedelta(seconds=2))
+    assert rig.journal(EVENT_SHADOW_PLAN_EXPIRED_UNFILLED) == [], "no false expiry"
+    assert exposures(rig) == [(SYMBOL, "LONG", Decimal("48"))], "still reserved"
+
+    await poll_at(rig, PLAN_EXPIRY + timedelta(seconds=30))
+    (opened,) = rig.journal(EVENT_SHADOW_POSITION_OPENED)
+    assert payload(opened)["opened_at_utc"] == (PLAN_EXPIRY - timedelta(milliseconds=1)).isoformat()
+    assert exposures(rig) == [(SYMBOL, "LONG", Decimal("48"))], "the exposure is registered"
+
+    await poll_at(rig, PLAN_EXPIRY + timedelta(minutes=2, seconds=30))  # the stop, no ValueError
+    (closed,) = rig.journal(EVENT_SHADOW_POSITION_CLOSED)
+    assert payload(closed)["exit_kind"] == EXIT_SL
+    assert exposures(rig) == []
+    assert rig.journal(EVENT_SHADOW_PLAN_EXPIRED_UNFILLED) == []
+
+
+async def test_a_plan_without_a_fill_is_released_once_the_horizon_passed_its_expiry() -> None:
+    trade, mark = _minutes_to_expiry(fill=False)
+    rig = Rig(public=FakePublic(trade=trade, mark=mark))
+    await rig.approve_and_confirm()
+    await poll_at(rig, PLAN_EXPIRY - timedelta(minutes=20))
+
+    await poll_at(rig, PLAN_EXPIRY + timedelta(seconds=2))  # horizon 06:59:57 < expiry
+    assert rig.journal(EVENT_SHADOW_PLAN_EXPIRED_UNFILLED) == []
+    assert len(exposures(rig)) == 1
+
+    await poll_at(rig, PLAN_EXPIRY + timedelta(seconds=30))  # horizon 07:00:25 >= expiry
+    (expired,) = rig.journal(EVENT_SHADOW_PLAN_EXPIRED_UNFILLED)
+    assert payload(expired)["reason"] == "PLAN_EXPIRED_UNFILLED"
+    assert exposures(rig) == []
+    await poll_at(rig, PLAN_EXPIRY + timedelta(minutes=2))
+    assert len(rig.journal(EVENT_SHADOW_PLAN_EXPIRED_UNFILLED)) == 1

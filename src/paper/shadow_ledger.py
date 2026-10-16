@@ -42,7 +42,9 @@ and joined by `plan_hash`:
 - `SHADOW_POSITION_OPENED` (new): the plan filled; the reservation became a position.
 - `SHADOW_PLAN_EXPIRED_UNFILLED` (new, reason `PLAN_EXPIRED_UNFILLED`): the plan reached its expiry
   without a fill; the reservation is released exactly once.
-- `SHADOW_RESERVATION_REFUSED` (new): the reserve step refused after the CONFIRM was journaled.
+- `SHADOW_RESERVATION_REFUSED` (new): the reserve step refused after the CONFIRM was journaled, or
+  the fill driver could not open the confirmed plan (`refuse`, plan 16-58; the reason is the
+  driver reject code).
 
 No existing event can express the end of a confirmed-but-unfilled plan, so these three are added
 to the existing journal (`journal_events.event_type` is a free String(64); no migration, no table).
@@ -127,6 +129,14 @@ _EVENT_ID_PREFIX: Final = "shadow-rsv"
 _ENTITY_TYPE: Final = "ShadowReservation"
 _STEP_OPENED: Final = "position_opened"
 _STEP_TERMINAL: Final = "terminal"
+
+
+class ReservationEndedError(RuntimeError):
+    """A FILL arrived for a reservation that already ended (released, refused or expired).
+
+    The poller must fail closed: booking a fill for an ended plan would register no exposure and
+    fabricate an outcome (plan 16-58, B2-CR-02).
+    """
 
 
 def reservation_key(plan_hash: str, approval_id: str) -> str:
@@ -808,8 +818,52 @@ class ShadowReservations:
             },
         )
 
+    def refuse(self, key: str, reason_code: str) -> bool:
+        """Release a pending reservation that cannot rest as a simulated plan (plan 16-58).
+
+        The fill driver refused to open it (a TP1 leg below the minimum quantity or notional, for
+        example): journal SHADOW_RESERVATION_REFUSED with the reject code first, then free the
+        exposure. The event id is deterministic and its time is the CONFIRM instant, never a sweep
+        or restart clock, so a repeated recovery writes nothing new. Returns False when the key
+        is unknown or already ended; a reservation that already became a position is an integrity
+        error (`ValueError`): its SHADOW_POSITION_OPENED cannot be undone.
+        """
+        with self._ledger.lock:
+            if key in self._ended:
+                return False
+            if key in self._filled:
+                raise ValueError(f"reservation {key!r} already opened as a position")
+            reservation = self._held.get(key)
+            if reservation is None:
+                return False
+            self._stores.record_journal(
+                _journal_event(
+                    event_type=EVENT_SHADOW_RESERVATION_REFUSED,
+                    approval_id=reservation.approval_id,
+                    signal_id=reservation.signal_id,
+                    trade_plan_id=reservation.trade_plan_id,
+                    occurred_at_utc=reservation.confirmed_at_utc,
+                    step=_STEP_TERMINAL,
+                    payload={
+                        "approval_id": reservation.approval_id,
+                        "short_id": reservation.short_id,
+                        "plan_hash": reservation.plan_hash,
+                        "reason": reason_code,
+                    },
+                )
+            )
+            self._ledger.release(reservation.trade_plan_id)
+            del self._held[key]
+            self._ended.add(key)
+            return True
+
     def release_expired(self, now_utc: datetime) -> list[str]:
         """Release every unfilled reservation whose plan reached its expiry, exactly once.
+
+        `now_utc` is the DATA horizon the fill drivers have processed (the wall clock minus the
+        minute close lag), never the raw wall clock: a fill in the last minutes before the expiry
+        is only booked once its minute is settled, and releasing earlier would journal a false
+        SHADOW_PLAN_EXPIRED_UNFILLED (plan 16-58, B2-CR-02).
 
         Journals SHADOW_PLAN_EXPIRED_UNFILLED first, then frees the exposure (a failed write
         changes nothing and is retried by the next sweep). The CONFIRM history stays for audit
@@ -870,6 +924,11 @@ class ShadowReservations:
         events = driver.events
         for index in range(self._seen_events.get(key, 0), len(events)):
             event = events[index]
+            if event.kind == EVENT_FILL and key in self._ended:
+                raise ReservationEndedError(
+                    f"a FILL arrived for the ended reservation {key!r}: the plan was released "
+                    "before its fill was processed, so no position or exposure can be booked"
+                )
             if event.kind == EVENT_FILL and key in self._held:
                 if event.quantity is None:
                     raise ValueError("a FILL event needs a quantity")
@@ -1127,6 +1186,7 @@ __all__ = [
     "RebuildReport",
     "RegisterResult",
     "Reservation",
+    "ReservationEndedError",
     "ReservationBasis",
     "ReservationStores",
     "ReserveResult",
