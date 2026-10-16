@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: executing
-stopped_at: Completed 16-30, 16-31, 16-34, 16-38, 16-39, 16-47, 16-51, 16-52; tracers done for 16-40 and 16-49 (Tasks 2-3 wait for the user: host + Telegram, bucket + O-01 apply reply)
-last_updated: "2026-10-10T03:22:12.243Z"
+stopped_at: 16-55 Task 3 done; stopped before Task 4 (backup-remote collision, user decision)
+last_updated: "2026-10-16T08:36:44.782Z"
 last_activity: 2026-10-15
 last_activity_desc: Phase 16 execution started
-state_head: 577767b5b88a19ff7d7c4de06bc3fc6020ea766a
+state_head: 32fa56d27defeccdecb5f6e0f089cd0461cd5f9e
 progress:
   total_phases: 29
   completed_phases: 17
-  total_plans: 195
-  completed_plans: 172
+  total_plans: 231
+  completed_plans: 196
 milestone_name: milestone
 ---
 
@@ -533,6 +533,7 @@ Recent decisions affecting current work:
 - WS-connect gap (07-04 follow-up) blocks soak start; Phase 8 construction can proceed in parallel
 - 08-02 LIVE-TAP GATE: partly cleared. Real APPROVE and SKIP taps were observed (`09-DEMO-REHEARSAL-FINDINGS.md`, dry-run `taps`: SKIP and APPROVE passed); the unknown-chat tap is still NOT_REHEARSED and the live Telegram check is deferred to Phases 23/24 (08-VERIFICATION, accepted by the operator 2026-10-04; ROADMAP Phase 24 item G2-014)
 - Phase 09 Plan 04 task 3 (Demo rehearsal plus credential provisioning plus LIVE-TAP clearance) is only partly done: the Demo runs of 2026-10-05 stopped at SL placement with -4509 (D055, execution model OPEN) and credential provisioning is not attested, so EXEC-01 and OPS-02 stay Pending until real Demo evidence exists (`09-DEMO-REHEARSAL-FINDINGS.md`); owners Phases 24/25
+- 16-55 stopped before Task 4: soak (trading-soak) and trading backups would collide on one backup remote (no project component in src/ops/backup_remote.py layout); user decides separate BACKUP_S3_BUCKET for the soak or a project prefix in the remote layout
 
 ### Quick Tasks Completed
 
@@ -602,6 +603,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-09T15:47:52.747Z
-Stopped at: Completed 16-19-PLAN.md
-Resume file: None
+Last session: 2026-10-16T08:36:42.793Z
+Stopped at: 16-55 Task 3 done; stopped before Task 4 (backup-remote collision, user decision)
+Resume file: .planning/phases/16-paper-runtime-composition/16-55-SUMMARY.md
