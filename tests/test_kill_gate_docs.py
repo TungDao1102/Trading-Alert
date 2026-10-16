@@ -499,5 +499,10 @@ def test_d054_records_the_paper_start_gate() -> None:
     assert row.count("|") == 5, "D054 must stay one row with no pipe inside a cell"
 
     item_i = row[row.index("(i) Paper-start gate") :]
-    assert not re.search(r"[0-9a-f]{64}", item_i), "item (i) names no set hash (empty allowlist)"
-    assert PAPER_START_ALLOWLIST == (), "the doc says the allowlist is empty; the code must agree"
+    # Checkpoint G4-021 (2026-10-16): the allowlist holds the user's single entry, and item (i)
+    # names that entry's hash and no other set hash. The doc and the code constant must agree.
+    assert len(PAPER_START_ALLOWLIST) == 1
+    assert "Cập nhật 2026-10-16 (checkpoint G4-021" in item_i
+    assert set(re.findall(r"[0-9a-f]{64}", item_i)) == {
+        PAPER_START_ALLOWLIST[0].parameter_set_hash
+    }, "item (i) names exactly the one allowlisted hash"

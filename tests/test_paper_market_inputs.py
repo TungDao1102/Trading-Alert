@@ -362,7 +362,8 @@ def test_runtime_start_records_the_measured_skew_and_reads_server_time_once(
     assert live.start(script, **market_wiring(live)) == 0
 
     starts = live.records(RuntimeEventType.RUNTIME_START)
-    assert [dict(s.payload).get("clock_skew_ms") for s in starts] == [None, 1500]
+    # The pin exits without RUNTIME_START (16-DEC-PIN-COMMAND): the run's start is the only one.
+    assert [dict(s.payload).get("clock_skew_ms") for s in starts] == [1500]
     assert public.server_time_calls == 1
     assert "clock_skew_ms" in capsys.readouterr().out
 
@@ -412,7 +413,7 @@ def test_a_run_without_a_bound_risk_inputs_port_is_refused_before_it_starts(
 
     assert code == ExitCode.CONFIG_NOT_RATIFIED
     assert "risk inputs" in capsys.readouterr().err
-    assert len(live.records(RuntimeEventType.RUNTIME_START)) == 1, "only the pin run started"
+    assert live.records(RuntimeEventType.RUNTIME_START) == [], "the refused run never started"
 
 
 def test_a_closed_bar_through_the_real_market_inputs_is_recorded(live: Live) -> None:

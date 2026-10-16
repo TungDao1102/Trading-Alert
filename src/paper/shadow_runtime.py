@@ -1000,13 +1000,21 @@ class ShadowCoordinator:
             fill={"fill_time_utc": fill_time.isoformat()},
         )
 
-    async def run_poller(self, stop: asyncio.Event) -> None:
+    async def run_poller(
+        self,
+        stop: asyncio.Event,
+        before_step: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         """Poll every `minute_poll_interval_seconds` until `stop` is set.
 
         A poll error ends the loop by propagating, so the caller can fail closed (a feed that
-        cannot be read leaves the simulated positions unmanaged).
+        cannot be read leaves the simulated positions unmanaged). `before_step`, when given, is
+        awaited before every poll step and may raise to end the loop the same way (the runtime's
+        instance-lease check, plan 16-55).
         """
         while not stop.is_set():
+            if before_step is not None:
+                await before_step()
             await self.poll_once()
             if stop.is_set():
                 break

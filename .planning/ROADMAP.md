@@ -695,7 +695,7 @@ Plans:
 
 **Depends on**: Phase 12, Phase 13.1, Phase 15, Phase 17
 
-**Plans**: 47/54 plans executed (16-01 to 16-36, 16-38 to 16-40, 16-45, 16-47, 16-50 to 16-54; 16-37 has Tasks 1 and the second tracer done, Tasks 2 and 3 wait for the user; 16-54 added 2026-10-13 for the terminal declaration of known_gaps, done the same day; 16-53 added 2026-10-12 for compose-rehearsal.sh and the dry-run BINANCE_* refusal; plan-checker 2026-10-09: 0 blockers on 16-01 to 16-49; 16-50 added 2026-10-09 for the healthchecks.io heartbeat sender chosen by the user; open user questions Q-A to Q-Q are asked at the blocking-human checkpoints)
+**Plans**: 53/62 plans executed (16-01 to 16-42 and 16-45 to 16-54; 16-55 to 16-61 added 2026-10-16 from the deep code review (16-REVIEW.md): 16-55 to 16-59 fix the review findings and block 16-43, 16-60 and 16-61 fix the cold research warm-up and rerun research run 1 at simulator 2.2.0; the owner answered every checkpoint of 16-55 to 16-61 on 2026-10-16 (16-DEC-FIXPLANS.md, reviewer text in decisions/16-DEC-FIXPLANS-reviewer-text.md) and the plans now record those decisions; 16-62 added the same day for B1-WR-09 (wire rest_backfill_depth_bars = 1500 into the REST backfill), it runs after 16-59 and records the soak IMAGE_COMMIT; order 16-55, 56, 57, 58, 59, 62, then 16-60 and 16-43 (wave 25), then 16-61 and 16-44 (wave 26); the second secret paper heartbeat URL is a user input before 16-43; 16-37 manifest frozen 2026-10-15, 16-46 research run 1 done 2026-10-16, 16-41 O-06/O-10 decided 2026-10-16, 16-48 candidate research-run-1-a01 designated 2026-10-16; 16-42 to 16-44 wait for the user and the soak host; 16-54 added 2026-10-13 for the terminal declaration of known_gaps, done the same day; 16-53 added 2026-10-12 for compose-rehearsal.sh and the dry-run BINANCE_* refusal; plan-checker 2026-10-09: 0 blockers on 16-01 to 16-49; 16-50 added 2026-10-09 for the healthchecks.io heartbeat sender chosen by the user; open user questions Q-A to Q-Q are asked at the blocking-human checkpoints)
 
 **Requirements**: PAPER-01, PAPER-02
 
@@ -786,24 +786,32 @@ Plans:
 - [x] 16-34-PLAN.md
 - [x] 16-35-PLAN.md
 - [x] 16-36-PLAN.md
-- [ ] 16-37-PLAN.md
+- [x] 16-37-PLAN.md
 - [x] 16-38-PLAN.md
 - [x] 16-39-PLAN.md
 - [x] 16-40-PLAN.md
-- [ ] 16-41-PLAN.md
-- [ ] 16-42-PLAN.md
+- [x] 16-41-PLAN.md
+- [x] 16-42-PLAN.md
 - [ ] 16-43-PLAN.md
 - [ ] 16-44-PLAN.md
 - [x] 16-45-PLAN.md
-- [ ] 16-46-PLAN.md
+- [x] 16-46-PLAN.md
 - [x] 16-47-PLAN.md
-- [ ] 16-48-PLAN.md
+- [x] 16-48-PLAN.md
 - [x] 16-49-PLAN.md
 - [x] 16-50-PLAN.md
 - [x] 16-51-PLAN.md
 - [x] 16-52-PLAN.md
 - [x] 16-53-PLAN.md
 - [x] 16-54-PLAN.md
+- [x] 16-55-PLAN.md - image carries params/ and config/paper/, single-instance guard, unless-stopped with a held unhealthy refused start, pin-and-exit, soak backup unit
+- [ ] 16-56-PLAN.md - feed fails closed (exhausted rebuild exits 7, 120 s watchdog), close lag zero refused, config v2, separate paper heartbeat
+- [ ] 16-57-PLAN.md - acceptance-log flush before heartbeat, crash consistency, canonical config identity refused on mismatch
+- [ ] 16-58-PLAN.md - SHADOW locking, reservations, unsizable plan handling
+- [ ] 16-59-PLAN.md - evidence export per-bundle keys, merged freeze log with missing-tick records, deferred-item dispositions, gate for 16-55 to 16-59
+- [ ] 16-60-PLAN.md - research warm-up 50 days, simulator 2.2.0, protocol v2.5.0, D072 and D073 (after 16-62)
+- [ ] 16-61-PLAN.md - runner hardening, sixth authorization key, sequential rerun at 2.2.0, supersede record (after 16-60)
+- [ ] 16-62-PLAN.md - B1-WR-09: rest_backfill_depth_bars wired into the REST backfill, gate and soak IMAGE_COMMIT (after 16-59, before 16-43 and 16-60)
 - [ ] TBD (run /gsd-plan-phase 16 to break down)
 
 ### Phase 17: Operational Persistence Layer
@@ -1232,6 +1240,8 @@ Plans:
 - [D061-D] The paper exit gate that `enable()` requires is the set of criteria the user ratified before the trial soak (D061 item D), including the runtime coverage fraction and the time-of-day rule; the gate is not redefined here (source: docs/DECISIONS.md D061; decision: D061, clarified by D063 and D065)
 - [D065-WR] `LiveEnablementController.enable` reads the shared kill-gate review registry and refuses while any `blocks_live_enable` item (WR-10) is UNRESOLVED, with an automated test; this phase flips each WR item in the registry with its fix commit, and the Phase 16 report guard stays in force for the four `blocks_report` items until then (source: docs/DECISIONS.md D065 item 1, .planning/phases/10-journal-depth-kill-gate-operations/10-REVIEW-DISPOSITION.md; decision: D065)
 - [D061-F] The WR-01, WR-06, WR-12 and WR-13 fixes of the kill-gate code are done and verified here; the Phase 16 guard stays in force until then (source: docs/DECISIONS.md D061 item F; decision: D061)
+- [B3-CR-02] The kill-gate JSON sidecar leaks the withheld conclusion (found by the Phase 16 deep review, 2026-10-16; deferred here by the user; nobody will re-read Phase 16, so the full finding is stated here). `src/analytics/render_sidecar.py` `_report_plain` (about lines 100-105, used at 121 and 187) replaces only `kill_gate.verdict.state` when `blocked_by` is non-empty; `verdict.any_pass`, `pass_count`, `families_budget_met`, `months_budget_met`, `whole_months`, `sticky`, `verdict.families` and the per-family gate matrix in `kill_gate.families` stay in `report.sidecar.json`, and the state is a deterministic function of them, so a blocked run still shows an INSUFFICIENT_EDGE conclusion in all but name (D061 F forbids this). `verify_render` accepts the pair because it compares against the same partial redaction. Fix: when blocked, replace the whole `kill_gate.verdict` by `{state: NOT_CONCLUDED, rule_ref}` and empty `kill_gate.families`; the report digest may still commit to the full report. Test to add: a blocked sidecar contains none of `any_pass`, `pass_count`, `*_budget_met` or the family rows (today `tests/test_killgate_guard.py` checks only `kill_gate_withheld` and the state). Low urgency until a kill-gate report is produced on real evidence; must be closed before the first one (same trigger as [D061-F]). (source: .planning/phases/16-paper-runtime-composition/16-REVIEW-batch3.md CR-02, 16-REVIEW.md; decision: user, 2026-10-16)
+- [B3-WR-01] Fixture evidence plus a real `DATABASE_URL` can record a verdict (Phase 16 deep review, deferred here by the user, 2026-10-16; not the same item as the older kill-gate review WR-01 named in [D061-F] and [G2-038]). `src/analytics/cli.py` `_report_blockers` (about 741-756) takes the evidence class only from the evidence file, but `_build_inputs` (about 769-791) also reads live journal rows from `DATABASE_URL`. With `--evidence fixture.json --record` and a production `DATABASE_URL`, `blocked_by` is empty, the full verdict is rendered and `_record_step` appends a `KILL_GATE_EVALUATION` to the real journal. The evidence file is also read twice (a TOCTOU). Fix: treat the run as REAL whenever any non-fixture source is read (`evidence_class = REAL` unless an evidence file is given and no database URL is set); at minimum refuse `--record` with fixture evidence; load the evidence file once and pass the same object to both functions. Test to add: fixture evidence with a database URL is REAL and `--record` is refused. (source: .planning/phases/16-paper-runtime-composition/16-REVIEW-batch3.md WR-01; decision: user, 2026-10-16)
 
 **Plans:** 0 plans
 
@@ -1282,7 +1292,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 13.1. Deployment & CI | 12/12 | Complete | 2026-10-04 |
 | 14. Backtest Simulator Causality Rewrite | 17/17 | Complete    | 2026-10-07 |
 | 15. Strategy Geometry Correction | 18/18 | Complete    | 2026-10-07 |
-| 16. Paper Runtime Composition + SHADOW Approval Mode | 47/54 | In Progress|  |
+| 16. Paper Runtime Composition + SHADOW Approval Mode | 53/62 | In Progress|  |
 | 17. Operational Persistence Layer | 15/15 | Complete    | 2026-10-07 |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |
 | 19. Execution Plan Binding + Pre-Placement Checks | 0/TBD | Not started | - |

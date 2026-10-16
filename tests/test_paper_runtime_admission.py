@@ -204,6 +204,18 @@ def test_decision_record_is_runtime_exact_hash_all() -> None:
     assert re.search(r"^decided by: user$", text, re.MULTILINE)
 
 
+@pytest.fixture(autouse=True)
+def _start_from_an_empty_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests exercise the runtime on an empty allowlist unless a test injects entries.
+
+    The production allowlist holds the user's single entry since checkpoint G4-021 (pinned in
+    tests/test_paper_start_gate.py), so each test here starts from an injected empty one.
+    """
+    import src.paper.freeze as freeze
+
+    monkeypatch.setattr(freeze, "PAPER_START_ALLOWLIST", ())
+
+
 def test_empty_allowlist_skips_without_a_fallback_set(
     rig: _Rig, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -325,7 +337,7 @@ def test_admission_refusal_holds_when_asked(rig: _Rig) -> None:
     write_rationalized_set(rig.root)
     rig.authorize_other_set()
 
-    assert rig.run("--pin-epoch", "--hold-on-refusal") == 6
+    assert rig.run("--hold-on-refusal") == 6
     assert rig.stops == 1
 
 
@@ -341,7 +353,8 @@ def test_no_pinned_state_and_no_flag_exits_5(
     assert not admitted.pinned_path.exists()
 
 
-def test_pin_epoch_pins_once_writes_the_file_and_records_both_events(admitted: _Rig) -> None:
+def test_pin_epoch_pins_once_writes_the_file_and_records_only_the_pin(admitted: _Rig) -> None:
+    """Pin-and-exit (16-55 Q3 = A, decisions/16-DEC-PIN-COMMAND.md): no RUNTIME_START."""
     pins: list[int] = []
     writes: list[int] = []
     real_pin, real_write = runtime.pin_stream_epoch, runtime.write_pinned_state
@@ -363,8 +376,7 @@ def test_pin_epoch_pins_once_writes_the_file_and_records_both_events(admitted: _
     assert writes == [1]
     epoch = admitted.pinned()
     types = admitted.types()
-    assert RuntimeEventType.EPOCH_PINNED in types
-    assert RuntimeEventType.RUNTIME_START in types
+    assert types == [RuntimeEventType.EPOCH_PINNED]
     assert (epoch.strategy_id, epoch.parameter_set_id) == (STRATEGY_ID, SET_ID)
     assert epoch.parameter_set_hash == admitted.set_hash()
 
@@ -388,10 +400,10 @@ def test_restart_reuses_the_pinned_epoch_and_never_pins_again(admitted: _Rig) ->
     assert admitted.run(run_loop=remember) == 0
 
     assert pins == []
-    assert seen_epochs == [first.epoch_id, first.epoch_id]
+    assert seen_epochs == [first.epoch_id], "the pin exits; only the restart runs the loop"
     assert admitted.pinned_path.read_bytes() == pinned_bytes
     types = admitted.types()
-    assert types.count(RuntimeEventType.RUNTIME_START) == 2
+    assert types.count(RuntimeEventType.RUNTIME_START) == 1
     assert types.count(RuntimeEventType.EPOCH_PINNED) == 1, "a restart never re-records the pin"
 
 
@@ -435,7 +447,7 @@ def test_clean_shutdown_records_runtime_stop_and_leaves_the_pinned_state_alone(
     assert admitted.run() == 0
 
     assert admitted.pinned_path.read_bytes() == before
-    assert admitted.types().count(RuntimeEventType.RUNTIME_STOP) == 2
+    assert admitted.types().count(RuntimeEventType.RUNTIME_STOP) == 1
 
 
 def test_a_crashing_loop_leaves_a_start_without_a_stop(admitted: _Rig) -> None:
@@ -448,8 +460,8 @@ def test_a_crashing_loop_leaves_a_start_without_a_stop(admitted: _Rig) -> None:
         admitted.run(run_loop=boom)
 
     types = admitted.types()
-    assert types.count(RuntimeEventType.RUNTIME_START) == 2
-    assert types.count(RuntimeEventType.RUNTIME_STOP) == 1
+    assert types.count(RuntimeEventType.RUNTIME_START) == 1
+    assert types.count(RuntimeEventType.RUNTIME_STOP) == 0
 
 
 # ---- runtime configuration: every value required -------------------------------------------- #

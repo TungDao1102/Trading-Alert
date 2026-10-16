@@ -1,0 +1,7 @@
+{
+  "grid_sha256": "13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411",
+  "manifest_sha256": "ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569",
+  "authorized_at_utc": "2026-10-15T11:30:22+00:00",
+  "statement": "Research run 1, scenario S0, grid trend-pullback a01..a16, frozen manifest. File written by Claude on the user's explicit instruction. User's words: \"Tôi, Tung Dao, ủy quyền chạy research run 1 kịch bản S0 cho cả ba grid (trend-pullback, breakout-retest, range-mr) với manifest đã freeze, và cho phép Claude tạo ba file ủy quyền\"",
+  "authorized_by": "Tung Dao"
+}

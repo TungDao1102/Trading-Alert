@@ -99,15 +99,22 @@ services:
   # reports healthy only while the last processed closed bar is younger than the ratified age.
   # Interval, timeout, start period and retries copy the collector's. The probe feeds no
   # evidence criterion: coverage is computed from records.
-  #  - restart `on-failure`: an empty allowlist makes the runtime exit 0 by design, and
-  #    `unless-stopped` would restart that in a loop; a crash (exit 1 or 7) restarts and shows
-  #    up later as a CRASH gap. No restart cap: a cap of N would stop the runtime for good after
-  #    N quick crashes during a short database outage, which costs coverage.
-  #  - `on-failure` restarts every non-zero exit and Compose cannot exclude codes, so a
-  #    configuration refusal would loop, each restart writing RUNTIME_START and gap rows. The
-  #    refusal codes are 3 (trade-capable variable), 4 (configuration not ratified), 5 (no
-  #    pinned epoch) and 6 (admission or epoch mismatch). `--hold-on-refusal` logs the refusal and
-  #    keeps the container up, unhealthy, and it exits with the refusal code only when stopped.
+  #  - restart `unless-stopped`: the owner's decision 16-DEC-RESTART-POLICY (16-55 Q1 = A).
+  #    `on-failure` was dropped because it does not restart a container after a daemon restart
+  #    (Docker documentation, docs/SOURCES.md), so a host reboot or a daemon restart could leave
+  #    the runtime down past the 900 s uncovered ceiling. `unless-stopped` comes back after a
+  #    reboot, a daemon restart and a crash (exit 1 or 7, a CRASH gap), and stays down only after
+  #    a requested `deploy/compose-soak.sh stop paper`. No restart cap: a cap of N would stop the
+  #    runtime for good after N quick crashes during a short database outage.
+  #  - `unless-stopped` restarts every exit no stop preceded, an exit 0 included, and Compose
+  #    cannot exclude codes. So no path of this command relies on exit 0 to stay down: with
+  #    `--hold-on-refusal` a refusal and SKIPPED (an empty allowlist) hold instead of exiting.
+  #    The refusal codes are 3 (trade-capable variable), 4 (configuration not ratified), 5 (no
+  #    pinned epoch), 6 (admission or epoch mismatch) and 8 (another runtime holds the instance
+  #    lease, plan 16-55). A hold writes no record, starts no loop and leaves the held marker of
+  #    its container, so the probe reports it unhealthy; it exits with its code only when stopped.
+  #  - This command never passes `--pin-epoch`: the pin exits 0, which this policy would restart.
+  #    The pin is the one-shot `paper-pin` service below (16-DEC-PIN-COMMAND).
   #  - logs holds logs/paper/pinned_epoch.json and registry_diff.jsonl.
   #  - WR-06 (per-service env_file split) stays Phase 24: every x-app service shares one
   #    env_file, so this container also sees any BACKUP_ variable in it. The runtime refuses any
@@ -116,7 +123,7 @@ services:
   paper:
     <<: *app
     profiles: ["paper"]
-    restart: "on-failure"
+    restart: "unless-stopped"
     environment: *database-env
     depends_on:
       db-upgrade:
@@ -130,6 +137,26 @@ services:
       timeout: 15s
       start_period: 6m
       retries: 3
+
+  # One-shot epoch pin (plan 16-55, 16-DEC-PIN-COMMAND): same image, environment and logs volume
+  # as `paper`, its own profile, `restart: "no"`, so Docker never restarts the pin process. It takes
+  # the instance lease, records EPOCH_PINNED, writes logs/paper/pinned_epoch.json and exits 0
+  # without starting the loop. Run it with `deploy/compose-soak.sh --profile paper-pin run --rm
+  # paper-pin`, then start the managed `paper` service at once (RUNBOOK 20.1). No probe: a
+  # one-shot has nothing to report.
+  paper-pin:
+    <<: *app
+    profiles: ["paper-pin"]
+    restart: "no"
+    environment: *database-env
+    depends_on:
+      db-upgrade:
+        condition: service_completed_successfully
+    volumes:
+      - logs:/app/logs
+    command: ["/app/.venv/bin/python", "-m", "src.paper.runtime", "--pin-epoch"]
+    healthcheck:
+      disable: true
 
   # Live runner placeholder, never part of the default stack. No entrypoint yet: Phase 24
   # (live) replaces this command and defines the service probe (D-06). Live credentials use

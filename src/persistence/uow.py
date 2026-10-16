@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import DBAPIError, IntegrityError, InterfaceError, OperationalError
 from sqlalchemy.orm import Session
 
@@ -50,6 +50,22 @@ class OperationalDatabase:
             raise StoreFailure(
                 f"PostgreSQL error during transaction ({type(exc).__name__}/{driver_error})"
             ) from None
+
+    def dedicated_connection(self) -> Connection:
+        """A connection detached from the pool: closing it ends its database session.
+
+        For session-scoped state such as an advisory lock (the paper runtime's instance lease,
+        plan 16-55): a pooled connection would keep the session, and the lock, after `close`.
+        A connection-level failure becomes `StoreUnavailable` (type name only).
+        """
+        try:
+            connection = self._engine.connect()
+        except (OperationalError, InterfaceError) as exc:
+            raise StoreUnavailable(
+                f"PostgreSQL unavailable while connecting ({type(exc).__name__})"
+            ) from None
+        connection.detach()
+        return connection
 
     def dispose(self) -> None:
         """Close every pooled connection."""

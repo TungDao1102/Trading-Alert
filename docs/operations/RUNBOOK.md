@@ -210,6 +210,8 @@ Retention is 7/4/6: the newest snapshot of each of the last 7 UTC days, 4 ISO we
 
 `sudo deploy/backup.sh --install-timer [--dry-run]` writes `trading-backup.service` (oneshot, `User=trading`, requires docker, two-hour limit) and `trading-backup.timer` (`OnCalendar=*-*-* 03:15:00 UTC`, `Persistent=true` so a missed run happens after downtime, `RandomizedDelaySec=5m`) under `/etc/systemd/system`, substitutes this checkout's directory, runs `systemctl daemon-reload` only when a unit changed and enables the timer. It must run as root and refuses a checkout path with whitespace. Check with `systemctl list-timers trading-backup.timer`, `systemctl status trading-backup` and `journalctl -u trading-backup`.
 
+`sudo deploy/backup.sh --install-soak-timer --soak-env-file <path> [--dry-run]` (plan 16-55) installs the soak project's pair, `trading-soak-backup.service` and `trading-soak-backup.timer`, the same way: same schedule, `COMPOSE_PROJECT_NAME=trading-soak`, and `TRADING_ENV_FILE` set to the absolute soak env file path. It refuses a soak env file whose `BACKUP_S3_BUCKET` is empty or equals the bucket of the trading env file (`TRADING_BACKUP_ENV_FILE`, default this checkout's `.env`). It compares the values and prints names only. Each project backs up into its own bucket, because the remote layout has no project component (20.5). The existing `trading-backup` pair is not touched.
+
 ### 11.4 Run a backup now
 
 `deploy/backup.sh [--dry-run]` runs one scheduled backup: dump the database, back up the Parquet files, verify the bundle against its sha256 manifest, push (new Parquet files, then `cryptcheck` of the Parquet tree, then `pg.dump` and its `cryptcheck`, then a second verification of the bundle against its manifest, then `manifest.json` and its own `cryptcheck`, so a snapshot looks complete only once its files exist and have been verified), then apply retention. A failed step makes the command, and so the systemd unit, fail visibly. The backup unit itself sends no ping: a failed backup unit is visible only in systemd and the journal, and the collector heartbeat of 11.9 does not cover the backup. A monitor for the backup would be a separate check that the operator registers by hand (operator control, bootstrap checklist item 2).
@@ -661,25 +663,40 @@ deploy/compose-soak.sh stop paper
 
 The environment file for the soak is made from `deploy/soak.env.example`: names only, no trade-capable name (`BINANCE_` anything makes the runtime refuse to start, D-13).
 
-**Exit codes of `python -m src.paper.runtime`.** The compose command passes `--hold-on-refusal` and the restart policy is `on-failure`, which restarts on any non-zero status and has no per-code exclusion list. The table below is what keeps a refusal from becoming a restart loop (T-16-110). It lists every member of `ExitCode` in `src/paper/runtime_config.py`.
+**Restart policy.** The `paper` service restarts with `unless-stopped`, by the owner's decision `decisions/16-DEC-RESTART-POLICY.md` (16-55 Q1 = A). The earlier `on-failure` was dropped because it does not restart a container after a Docker daemon restart (Docker documentation, `docs/SOURCES.md`), and a host reboot or a daemon restart must not leave the runtime down: `unless-stopped` brings the container back after a host reboot, a daemon restart and a crash, and keeps it down only after a requested stop (`deploy/compose-soak.sh stop paper`, 20.2). It restarts every exit that no stop preceded, a runtime-initiated exit 0 included, so no path of the service command relies on exit 0 to stay down: the command always carries `--hold-on-refusal` and never `--pin-epoch`.
+
+**Exit codes of `python -m src.paper.runtime`.** No restart policy has a per-code exclusion list. The table below and the hold are what keep a refusal from becoming a restart loop (T-16-110). It lists every member of `ExitCode` in `src/paper/runtime_config.py`.
 
 | Name | Code | Meaning and what happens |
 | --- | --- | --- |
-| `OK` | 0 | a clean stop, or SKIPPED because the paper-start allowlist admits nothing; exits 0 and is not restarted |
-| `USAGE` | 2 | a malformed command line (argparse's own status); the command line does not change on a restart, so fix the compose command |
+| `OK` | 0 | a stop the operator requested (after the stop record), the end of a hold, the one-shot `--pin-epoch`, the `--healthcheck` probe, or SKIPPED (the paper-start allowlist admits nothing) without `--hold-on-refusal`; the service command never exits 0 by itself, so nothing relies on exit 0 to stay down |
+| `USAGE` | 2 | a malformed command line (argparse's own status), or `--pin-epoch` together with `--hold-on-refusal` (the one-shot pin never holds); the command line does not change on a restart, so fix the command |
 | `TRADE_KEY_REFUSED` | 3 | a trade-capable variable name is present in the environment; refusal |
 | `CONFIG_NOT_RATIFIED` | 4 | the runtime configuration file is not ratified; refusal |
 | `NO_PINNED_EPOCH` | 5 | no pinned epoch; refusal |
 | `ADMISSION_OR_EPOCH_MISMATCH` | 6 | the allowlist admission or the epoch does not match; refusal |
-| `FAIL_CLOSED_RUNTIME` | 7 | the runtime failed closed on a condition a restart can clear (lost data, lost connection); restarted, and the time shows as a CRASH gap |
+| `FAIL_CLOSED_RUNTIME` | 7 | the runtime failed closed on a condition a restart can clear (lost data, lost connection, a lost instance lease); restarted, and the time shows as a CRASH gap |
+| `INSTANCE_LEASE_HELD` | 8 | another paper runtime or pin holds the instance lease of the soak database: one runtime per epoch (plan 16-55, review B1-WR-07); refusal |
 
-A refusal (codes 3 to 6) can never succeed on a retry, because only a human action changes the outcome. With `--hold-on-refusal` the process logs the refusal and stays up, so the paper container is up and unhealthy instead of looping. The operator reads the refusal reason in the container log (`deploy/compose-soak.sh logs paper`) and must stop the container before correcting the cause (remove the variable, ratify the file, pin the epoch, fix the allowlist), then starts it again. SKIPPED exits 0 and is not restarted. A crash, or code 7, is restarted by the compose policy and appears as a CRASH gap in the coverage evidence: it is uncovered like every other gap (20.2).
+A refusal (codes 3 to 6 and 8) can never succeed on a retry, because only a human action changes the outcome. With `--hold-on-refusal` the process logs the refusal and stays up, held and non-operational: it writes no record, starts no loop, builds no WebSocket, market-data or Telegram client, and leaves the held marker of its container (`logs/paper/held-refusal-<container>.json`, `src/paper/held_marker.py`). The healthcheck reads that marker first, so the paper container is up and unhealthy instead of looping, even when the soak database holds a fresh bar of an earlier run. The operator reads the refusal reason in the container log (`deploy/compose-soak.sh logs paper`) and must stop the container before correcting the cause (remove the variable, ratify the file, pin the epoch, fix the allowlist, stop the other runtime), then starts it again; the marker goes when the hold ends, and a marker left by a killed hold is removed by the next successful start of the same container. SKIPPED holds the same way under `--hold-on-refusal` (the owner's decision amends the earlier rule "SKIPPED never holds"): under `unless-stopped` an exit 0 would be restarted in a loop. Without the flag (a hand-run command, never the service) it exits 0 at once. A held container is not restarted, because it does not exit; it ends only when it is stopped. A refusal that holds is `INSTANCE_LEASE_HELD` as well. A crash, or code 7, is restarted by the compose policy and appears as a CRASH gap in the coverage evidence: it is uncovered like every other gap (20.2).
+
+**Single instance and the pin.** The runtime takes the instance lease of the soak database (a PostgreSQL session advisory lock) after admission and before the pin or any record, and releases it on every way out; a held process releases it before it waits. The live loop re-checks it at every consumer batch and every step of its periodic tasks and fails closed with code 7 when it is lost, so a lost lease is noticed at the next batch or periodic step. `--pin-epoch` pins the epoch, writes the pinned state and exits 0 without the start record and without the loop (`decisions/16-DEC-PIN-COMMAND.md`). It runs only in the one-shot `paper-pin` service (its own profile, `restart: "no"`, so Docker never restarts the pin); the managed `paper` service never pins.
+
+**Pin sequence.** Pin only after the restart drill of 20.8 passed on every path. Stop a held `paper` container first (`deploy/compose-soak.sh stop paper`), so the pin and the start below are the only steps. Run the one-shot pin and wait for its exit 0, then start the managed service at once as the next operational step, with nothing else in between: the time from the pin to the service start is uncovered and counts toward the `continuous_uncovered_ceiling_seconds` of 900 s (`decisions/16-DEC-O-07.md`).
+
+```text
+IMAGE_TAG=<commit> TRADING_ENV_FILE=/path/to/soak.env deploy/compose-soak.sh --profile paper-pin run --rm paper-pin
+IMAGE_TAG=<commit> TRADING_ENV_FILE=/path/to/soak.env deploy/compose-soak.sh --profile paper up -d --no-build paper
+```
+
+The first command prints `epoch pinned: <epoch id>` and exits 0. Any other exit means nothing was pinned or the pin was refused: read its output, do not start the service, and report it. A pin refused with `INSTANCE_LEASE_HELD` means a `paper` container still runs.
 
 ### 20.2 Deploys during the trial soak
 
 Every stop or deploy during the trial is a PLANNED_RESTART (glossary) and is never covered: the coverage denominator is the whole fixed trial window, only HEALTHY time counts, and a gap that has a reason is still uncovered (REV-01). The trial is 14 calendar days, which is 336 h; 95 percent of 336 h leaves about 16.8 h for all uncovered time together (REV-17): planned restarts, crashes, DEGRADED time, disconnects and maintenance share that one budget. A deploy therefore spends budget that no crash may need, so batch changes, prefer a change before the trial starts, and keep the stop short.
 
 - Stop the paper service cleanly (`deploy/compose-soak.sh stop paper`) rather than killing the container: a clean stop writes the stop record, and the gap then carries the reason PLANNED_RESTART; a killed process shows as a CRASH gap. Both are uncovered.
+- What the restart policy does (`unless-stopped`, 20.1): after a host reboot and after a Docker daemon restart the paper container comes back by itself, together with the collector, and resumes its epoch (the downtime is a gap like every other); after a process crash Docker restarts it. A requested stop, `deploy/compose-soak.sh stop paper`, stays stopped, also across a later daemon restart or reboot, until the operator starts the service again (`deploy/compose-soak.sh --profile paper up -d --no-build paper`). A refused start does not exit: it holds, unhealthy, and is not restarted. The restart drill of 20.8 proves these paths on the soak host before the pin.
 - Write down the UTC time and the cause of each stop and deploy next to the evidence; the audit reads the gap reason, but the cause is only in your note.
 - A change of the image, the allowlist or the runtime configuration during the trial is a restart and spends the budget above; changing any ratified L-04 value before the trial starts needs a new user approval (L-04).
 - Never run the volume-removing form of `down` to "start clean": it deletes the evidence of the trial (20.1).
@@ -707,6 +724,19 @@ TRADING_ENV_FILE=/home/trading/rehearsal.env deploy/compose-rehearsal.sh stop
 
 Before the long soak starts, the host has a verified backup chain: a backup run now (11.4) that completes, then the restore drill (11.6) that passes. A backup is not valid until a drill passes. The drill restores into a scratch target, the scratch database that the drill creates and drops, and never into the soak database: a restore into the soak database would replace the evidence it is supposed to protect. The first real backup waits for the D064 real-S3 gate (section 11, "Real-S3 gate"; 19.4 item 6), and the first verified pull to the development machine (19.5) is part of the same readiness. Run the drill again after any change of provider, key or image (11.6).
 
+**The soak database has its own backup unit and its own bucket (plan 16-55, review B2-WR-07).** `trading-backup` (11.4) sets no project, so it dumps project `trading`, not `trading-soak_pgdata` where the soak evidence lives. The soak project therefore gets its own unit pair, `trading-soak-backup.service` and `trading-soak-backup.timer`, with the schedule of `trading-backup.timer`; the existing pair stays as it is. The remote layout has no project component (`src/ops/backup_remote.py`: `snapshots/<id>/` and `parquet/`), so two projects in one bucket would form one snapshot series and retention would delete one project's daily dump. The soak env file therefore names its own bucket: its `BACKUP_S3_BUCKET` must differ from the bucket of `trading-backup` (the checkout's `.env`), with its own crypt passwords and its own sentinel. The soak bucket is created by the owner before plan 16-43 (an owner action). `--install-soak-timer` refuses an empty `BACKUP_S3_BUCKET` or the trading bucket and prints names only. On the soak host, as the `trading` user for the first two commands and with `sudo` for the install:
+
+```text
+COMPOSE_PROJECT_NAME=trading-soak TRADING_ENV_FILE=/path/to/soak.env deploy/backup.sh --init-remote --dry-run
+COMPOSE_PROJECT_NAME=trading-soak TRADING_ENV_FILE=/path/to/soak.env deploy/backup.sh --init-remote
+sudo deploy/backup.sh --install-soak-timer --soak-env-file /path/to/soak.env --dry-run
+sudo deploy/backup.sh --install-soak-timer --soak-env-file /path/to/soak.env
+systemctl list-timers trading-soak-backup.timer
+COMPOSE_PROJECT_NAME=trading-soak TRADING_ENV_FILE=/path/to/soak.env deploy/backup-drill.sh
+```
+
+`--init-remote` runs once, on the empty soak bucket. The unit runs `deploy/backup.sh` with `COMPOSE_PROJECT_NAME=trading-soak` and `TRADING_ENV_FILE` set to the soak env file. The restore drill covers the soak project with the same two variables (last line): it restores into a scratch database, never into the soak database. A soak backup is not valid until that drill passes. Read the unit's result with `systemctl status trading-soak-backup` and `journalctl -u trading-soak-backup`.
+
 ### 20.6 Image
 
 The soak never runs from a working-tree bind mount: the paper service runs from an image built from a named commit, not from the files of a checkout. How that image is produced is the user's decision of 2026-10-10, recorded in `decisions/16-DEC-Q-I.md`: option `host-build-recorded`, build on the host at a recorded commit. No CI step pushes an image (D050 deferred the registry), so the image is not CI-produced; the commit and the image id are what the evidence cites. The options `registry` and `ci-save-transfer` were considered and are not automatic fallbacks: adopting either later is a new user decision, and `registry` also needs a new DECISIONS entry because it reopens D050.
@@ -720,6 +750,8 @@ IMAGE_TAG=<commit> TRADING_ENV_FILE=/path/to/soak.env deploy/compose-soak.sh --p
 ```
 
 `deploy/soak-image.sh` refuses a dirty working tree (any uncommitted change, tracked or untracked, because the working tree is the build context). It builds `trading-alert:<commit>` and `trading-alert-ops:<commit>` with the soak wrapper, where `<commit>` is the full 40 character output of `git rev-parse HEAD`, checks that the tree and HEAD did not change during the build, and records the commit and both image ids in `.deploy/soak-image.env` (mode 0600, gitignored; the previous record is kept as `soak-image.env.prev` and every build is appended to `.deploy/soak-image.history`). The soak starts only from an image built this way, with `IMAGE_TAG` set to the recorded `GIT_SHA`; `--no-build` keeps compose from building anything else. Before the start, `docker image inspect --format '{{.Id}}' trading-alert:<commit>` must print the recorded `APP_IMAGE_ID`. The trial evidence names `GIT_SHA` and `APP_IMAGE_ID` from that file, and the host needs the build toolchain that the image build uses (`docker compose --profile ops build`, section 13.6).
+
+**What the image holds and the in-image check (plan 16-55, review B2-CR-05).** The runtime image carries the parameter registry (`params/`, read by the runtime as `/app/params`) and the ratified runtime configuration (`config/paper/`), next to the code, the collect list and the migration config; both belong to the frozen decision surface, so they are part of the image and its hash. After the build and the tree check, and before anything is recorded, `deploy/soak-image.sh` runs `scripts/check_image_paths.py` inside the built `trading-alert:<commit>` image with `--network none`: it loads every allowlisted parameter set from `/app/params` (and checks the set's hash against its allowlist entry) and loads the configuration file `/app/config/paper/paper-runtime-v1.toml` with the runtime's own loader. It prints names only. A failure exits non-zero and writes no record, so an image that cannot admit or configure its paper runtime is never recorded. The soak env file sets `PAPER_RUNTIME_CONFIG` to that same in-image path (`/app/config/paper/paper-runtime-v1.toml`); the comment in `deploy/soak.env.example` names it.
 
 The paper-start allowlist is a source constant (O-04, plan 16-42), so the image must be rebuilt after the allowlist commit: an image built before that commit carries the earlier allowlist. Build, record and start only after the allowlist commit exists.
 
@@ -768,3 +800,66 @@ There is no free-form destination: no remote, bucket or prefix is typed on the c
 **4. Evaluate.** Copy the bundle to the development machine (19.5) and run `python scripts/evaluate_trial_soak.py --bundle <new-bundle-dir> --config <runtime-config> --q-d-decision <q-d-decision-file> --out <evaluation-file>`; the bundle is checked against its manifest first, and a gap reconstructed from the run list plus the expected slots is an EVIDENCE_GAP (REV-02).
 
 **Not shown by any test.** Publishing to a real bucket, the output shape of `gh api` and `gh run download`, and the bucket policy are checked only by the operator on the real accounts; `tests/test_soak_evidence_export.py` publishes to an injected fake and `tests/test_paper_freeze_workflow_pin_source.py` holds the workflow to the three records.
+
+### 20.8 Restart drill before the pin
+
+The owner's decision `decisions/16-DEC-RESTART-POLICY.md` (16-55 Q1 = A) requires five paths to be tested before the trial: refused start, requested stop, process crash, host reboot and Docker daemon restart. The development machine cannot show a host reboot or a Docker daemon restart, so plan 16-43 runs this drill on the soak host. Run it on the clean soak project, after the image of 20.6 is built and recorded and before any pin. With no pinned epoch the runtime refuses with `NO_PINNED_EPOCH` (code 5) and holds, so nothing is written to the soak database during the drill. Write the UTC time and the observed outcome of each step into the evidence of plan 16-43. Any path that does not behave as written stops the trial start and is reported as a blocker. **The pin must not happen until every path passed.**
+
+Set `IMAGE_TAG=<commit>` and `TRADING_ENV_FILE=/path/to/soak.env` in the shell first (20.6), so the wrapper commands below use the recorded image and the soak env file.
+
+**(a) Refused start.** Start the managed service:
+
+```text
+deploy/compose-soak.sh --profile paper up -d --no-build
+deploy/compose-soak.sh ps paper
+deploy/compose-soak.sh logs paper
+deploy/compose-soak.sh exec -T paper ls logs/paper
+```
+
+Expected:
+- The container stays up and does not restart.
+- The log shows `paper runtime refused (exit 5)`.
+- `logs/paper` holds the held marker `held-refusal-<container>.json`.
+- Once the probe's start period has passed, `ps` reports the container unhealthy.
+- No paper runtime record exists in the soak database: no `PaperRuntime` journal event.
+
+**(b) Docker daemon restart.**
+
+```text
+sudo systemctl restart docker
+deploy/compose-soak.sh ps paper
+deploy/compose-soak.sh logs paper
+```
+
+Expected: the paper container comes back by itself, without a command from the operator, and holds again. The log shows a new refusal with a later time, and the container is unhealthy again after the start period.
+
+**(c) Host reboot.**
+
+```text
+sudo reboot
+deploy/compose-soak.sh ps paper
+```
+
+Expected: after the host is back and you are logged in again, the paper container is up by itself and holds again. The collector restarts too; its downtime is recorded as a data gap (19.4).
+
+**(d) Process crash.** Kill the container's main process from the host:
+
+```text
+deploy/compose-soak.sh ps -q paper
+docker inspect --format '{{.State.Pid}}' <container id>
+sudo kill -KILL <pid>
+docker inspect --format '{{.RestartCount}}' <container id>
+deploy/compose-soak.sh ps paper
+```
+
+Expected: Docker restarts the container by itself. The restart count goes up by one, and the container holds again.
+
+**(e) Requested stop.**
+
+```text
+deploy/compose-soak.sh stop paper
+sudo systemctl restart docker
+deploy/compose-soak.sh ps -a paper
+```
+
+Expected: the container stays stopped (exited) after the daemon restart, until the operator starts it again. After this step, follow the pin sequence of 20.1 with the service still stopped: pin, then start the managed service at once.

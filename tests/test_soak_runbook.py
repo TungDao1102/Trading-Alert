@@ -757,3 +757,102 @@ def test_20_7_names_the_committed_pin_path_the_workflow_reads() -> None:
     from tests.test_paper_freeze_workflow_pin_source import COMMITTED_PIN_PATH
 
     assert COMMITTED_PIN_PATH in _sub20("20.7")
+
+
+# ----- 16-55 Task 4: restart policy, the pin sequence, the soak backup unit, the drill -------
+
+DRILL_HEADING = "20.8 Restart drill before the pin"
+PIN_RUN = "deploy/compose-soak.sh --profile paper-pin run --rm paper-pin"
+PAPER_UP = "deploy/compose-soak.sh --profile paper up -d --no-build paper"
+
+
+def test_20_1_states_the_restart_policy_the_hold_and_its_marker() -> None:
+    body = _sub20("20.1")
+    for phrase in (
+        "unless-stopped",
+        "decisions/16-DEC-RESTART-POLICY.md",
+        "daemon restart",
+        "held marker",
+        "INSTANCE_LEASE_HELD",
+        "runtime-initiated exit 0",
+    ):
+        assert phrase in body, f"20.1 lacks: {phrase}"
+    assert '"on-failure"' not in body and "policy is `on-failure`" not in body
+
+
+def test_20_1_shows_the_pin_sequence_with_the_service_started_at_once() -> None:
+    body = _sub20("20.1")
+    fenced = _fenced_lines(body)
+    pin = next((i for i, ln in enumerate(fenced) if PIN_RUN in ln), None)
+    up = next((i for i, ln in enumerate(fenced) if PAPER_UP in ln), None)
+    assert pin is not None and up is not None, "20.1 lacks the pin or the start command"
+    assert up == pin + 1, "nothing may stand between the pin and the service start"
+    for phrase in (
+        "decisions/16-DEC-PIN-COMMAND.md",
+        "exit 0",
+        "next operational step",
+        "900",
+        "16-DEC-O-07",
+    ):
+        assert phrase in body, f"20.1 lacks: {phrase}"
+
+
+def test_20_2_says_what_a_reboot_a_daemon_restart_and_a_requested_stop_do() -> None:
+    body = _sub20("20.2")
+    for phrase in (
+        "host reboot",
+        "Docker daemon restart",
+        "comes back by itself",
+        "deploy/compose-soak.sh stop paper",
+        "stays stopped",
+    ):
+        assert phrase in body, f"20.2 lacks: {phrase}"
+
+
+def test_20_5_gives_the_soak_project_its_own_backup_unit_and_bucket() -> None:
+    body = _sub20("20.5")
+    for phrase in (
+        "trading-soak-backup.timer",
+        "--install-soak-timer",
+        "--soak-env-file",
+        "its own bucket",
+        "BACKUP_S3_BUCKET",
+        "trading-backup",
+        "--init-remote",
+        "COMPOSE_PROJECT_NAME=trading-soak",
+    ):
+        assert phrase in body, f"20.5 lacks: {phrase}"
+    assert (REPO_ROOT / "deploy" / "systemd" / "trading-soak-backup.service").is_file()
+
+
+def test_the_restart_drill_lists_the_five_paths_with_commands_and_outcomes() -> None:
+    body = _sub20("20.8")
+    assert re.search(rf"^### {re.escape(DRILL_HEADING)}$", _section20(), re.M)
+    fenced = "\n".join(_fenced_lines(body))
+    for command in (
+        "deploy/compose-soak.sh --profile paper up -d --no-build",
+        "sudo systemctl restart docker",
+        "sudo reboot",
+        "docker inspect --format '{{.State.Pid}}'",
+        "sudo kill -KILL",
+        "deploy/compose-soak.sh stop paper",
+    ):
+        assert command in fenced, f"the drill lacks the command: {command}"
+    for path in (
+        "refused start",
+        "Docker daemon restart",
+        "host reboot",
+        "process crash",
+        "requested stop",
+    ):
+        assert path in body, f"the drill lacks the path: {path}"
+    for phrase in (
+        "NO_PINNED_EPOCH",
+        "unhealthy",
+        "UTC",
+        "16-43",
+        "must not happen until every path passed",
+        "blocker",
+    ):
+        assert phrase in body, f"the drill lacks: {phrase}"
+    assert "down -v" not in fenced and "--volumes" not in fenced

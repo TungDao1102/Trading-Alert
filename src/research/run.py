@@ -7,10 +7,11 @@ refuses), dataset-identity check, then for every grid point
 and every development / validation-fold window: case input from the published store,
 `simulator.run`, `read_code_version`, `experiment.assemble`, one experiment record file named
 by its `experiment_id`. The holdout is never simulated here. The runner prints one neutral
-line per record (identifiers and a trade count), then the G1 feasibility counts per grid point
+line per record (identifiers; a trade count unless `--checkpoint-dir` is given, which prints
+`recorded` or `present` lines instead), then the G1 feasibility counts per grid point
 (plan 16-12, reporting only), then the parameter-plateau section over the grid (plan 16-18,
-reporting only), and no verdict, ranking or selection, and it writes nothing outside the
-output directory.
+reporting only), and no verdict, ranking or selection. It writes nothing outside the output
+directory, except the window files of `--checkpoint-dir` when that option is given.
 """
 
 from __future__ import annotations
@@ -18,8 +19,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from decimal import Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from time import perf_counter
 from typing import Any
@@ -47,6 +51,7 @@ from .manifest import (
     ManifestError,
     ParameterGrid,
     SplitWindow,
+    grid_hash,
     load_grid,
     load_manifest,
     manifest_hash,
@@ -108,6 +113,30 @@ def _load_constraints(manifest: DatasetManifest) -> list[dict[str, Any]]:
     return kept
 
 
+# A grid label that stands for several registered parameters set to the same value.
+_VARIED_ALIASES = {"pivot_bars": ("pivot_left_bars", "pivot_right_bars")}
+
+
+def _varied_value_is_registered(params: Mapping[str, Any], key: str, value: str) -> bool:
+    """True when every registered parameter behind `key` equals `value` numerically.
+
+    The grid writes values as text (`"1.0"`) and the registry loads TOML numbers (`1`), so
+    the comparison is by number, not by spelling. `pivot_bars` is the grid label for the
+    left and right pivot widths, which the registered sets keep equal.
+    """
+    names = _VARIED_ALIASES.get(key, (key,))
+    for name in names:
+        if name not in params:
+            return False
+        try:
+            if Decimal(str(params[name])) != Decimal(value):
+                return False
+        except InvalidOperation:
+            if str(params[name]) != value:
+                return False
+    return True
+
+
 def _check_grid_is_registered(grid: ParameterGrid) -> None:
     for point in grid.points:
         loaded = load_parameter_set(grid.strategy_id, point.parameter_set_id)
@@ -117,7 +146,7 @@ def _check_grid_is_registered(grid: ParameterGrid) -> None:
                 "registry hash"
             )
         for key, value in point.varied:
-            if key not in loaded.params or str(loaded.params[key]) != value:
+            if not _varied_value_is_registered(loaded.params, key, value):
                 raise ManifestError(
                     f"varied value for {key!r} in {point.parameter_set_id!r} is not the "
                     "registered value"
@@ -247,7 +276,7 @@ def _check_manifest_against_store(manifest: DatasetManifest, raw_root: Path) -> 
         )
 
 
-def _run_split(
+def _simulate_split(
     *,
     manifest: DatasetManifest,
     grid: ParameterGrid,
@@ -255,8 +284,12 @@ def _run_split(
     window: SplitWindow,
     raw_root: Path,
     constraints: list[dict[str, Any]],
-    code_version: Any,
-) -> tuple[ExperimentRecord, list[dict[str, Any]]]:
+) -> tuple[str, dict[str, Any]]:
+    """The heavy part of one window: the case from the published store and the simulator output.
+
+    Returns the case `dataset_id` and the engine output; `_assemble_split` turns them into the
+    experiment record.
+    """
     parameter_set = load_parameter_set(grid.strategy_id, point.parameter_set_id)
     cost_dict = {key: str(value) for key, value in cost_slice(parameter_set.params).items()}
     data = build_case_input_data(
@@ -289,8 +322,23 @@ def _run_split(
         start_utc=window.start_utc,
         end_utc=window.end_utc,
     )
-    output = simulator.run(case, minute_source=source)
-    identity = experiment_identity_inputs(manifest, data.dataset_id)
+    return data.dataset_id, simulator.run(case, minute_source=source)
+
+
+def _assemble_split(
+    *,
+    manifest: DatasetManifest,
+    grid: ParameterGrid,
+    point: GridPoint,
+    window: SplitWindow,
+    code_version: Any,
+    dataset_id: str,
+    output: dict[str, Any],
+) -> tuple[ExperimentRecord, list[dict[str, Any]]]:
+    """The cheap part of one window: the experiment record built from a simulator output."""
+    parameter_set = load_parameter_set(grid.strategy_id, point.parameter_set_id)
+    cost_dict = {key: str(value) for key, value in cost_slice(parameter_set.params).items()}
+    identity = experiment_identity_inputs(manifest, dataset_id)
     record = assemble(
         parameter_set_id=point.parameter_set_id,
         strategy_id=grid.strategy_id,
@@ -311,10 +359,177 @@ def _run_split(
     return record, list(output["trades"])
 
 
+def _run_split(
+    *,
+    manifest: DatasetManifest,
+    grid: ParameterGrid,
+    point: GridPoint,
+    window: SplitWindow,
+    raw_root: Path,
+    constraints: list[dict[str, Any]],
+    code_version: Any,
+) -> tuple[ExperimentRecord, list[dict[str, Any]]]:
+    dataset_id, output = _simulate_split(
+        manifest=manifest,
+        grid=grid,
+        point=point,
+        window=window,
+        raw_root=raw_root,
+        constraints=constraints,
+    )
+    return _assemble_split(
+        manifest=manifest,
+        grid=grid,
+        point=point,
+        window=window,
+        code_version=code_version,
+        dataset_id=dataset_id,
+        output=output,
+    )
+
+
 def _record_text(record: ExperimentRecord) -> str:
     return json.dumps(
         record.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
     )
+
+
+class CheckpointInvalid(ValueError):
+    """A checkpoint file does not belong to this run or is damaged (the run stops, no overwrite)."""
+
+
+_CHECKPOINT_SCHEMA = "research-checkpoint/1"
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+    )
+
+
+def _checkpoint_file(checkpoint_dir: Path, point: GridPoint, window: SplitWindow) -> Path:
+    stamp = window.start_utc.strftime("%Y%m%dT%H%M%SZ")
+    return checkpoint_dir / f"{point.parameter_set_id}.{window.role}.{stamp}.json"
+
+
+def _checkpoint_header(
+    *, run_key: Mapping[str, str], point: GridPoint, window: SplitWindow
+) -> dict[str, str]:
+    return {
+        "schema": _CHECKPOINT_SCHEMA,
+        **run_key,
+        "parameter_set_id": point.parameter_set_id,
+        "split_role": window.role,
+        "split_start_utc": window.start_utc.isoformat(),
+        "split_end_utc": window.end_utc.isoformat(),
+    }
+
+
+def _write_checkpoint(
+    path: Path,
+    *,
+    header: Mapping[str, str],
+    dataset_id: str,
+    output: dict[str, Any],
+) -> None:
+    """Save one simulated window (temporary file, then replace: no half-written checkpoint)."""
+    body = {"dataset_id": dataset_id, "output": output}
+    try:
+        body_text = _canonical_json(body)
+    except (TypeError, ValueError):
+        raise CheckpointInvalid("the simulator output is not plain JSON data") from None
+    if json.loads(body_text) != body:
+        raise CheckpointInvalid("the simulator output does not survive a JSON round trip")
+    payload = {
+        **header,
+        "body_sha256": hashlib.sha256(body_text.encode("ascii")).hexdigest(),
+        "body": body,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(_canonical_json(payload), encoding="ascii", newline="\n")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _load_checkpoint(path: Path, *, header: Mapping[str, str]) -> tuple[str, dict[str, Any]]:
+    """Read a checkpoint written by this run; anything else stops the run."""
+    try:
+        payload = json.loads(path.read_text(encoding="ascii"))
+    except (OSError, ValueError):
+        raise CheckpointInvalid(f"{path.name}: unreadable or not valid JSON") from None
+    if not isinstance(payload, dict):
+        raise CheckpointInvalid(f"{path.name}: not a JSON object")
+    body = payload.get("body")
+    if not isinstance(body, dict) or set(payload) != {*header, "body_sha256", "body"}:
+        raise CheckpointInvalid(f"{path.name}: unexpected structure")
+    for key, expected in header.items():
+        if payload.get(key) != expected:
+            raise CheckpointInvalid(f"{path.name}: {key} is not this run's value")
+    body_text = _canonical_json(body)
+    if hashlib.sha256(body_text.encode("ascii")).hexdigest() != payload["body_sha256"]:
+        raise CheckpointInvalid(f"{path.name}: the content does not match its hash")
+    dataset_id, output = body.get("dataset_id"), body.get("output")
+    if not isinstance(dataset_id, str) or not isinstance(output, dict):
+        raise CheckpointInvalid(f"{path.name}: unexpected body")
+    return dataset_id, output
+
+
+def _create_exclusive(path: Path, text: str) -> bool:
+    """Create `path` with `text` all at once; False when the file already exists.
+
+    The text goes to a temporary file first and is then hard-linked to the final name, which
+    fails if the name exists, so an interrupted write never leaves a truncated record.
+    """
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _code_paths_dirty(repo_root: Path) -> list[str]:
+    """Uncommitted or untracked files under the code and parameter directories."""
+    result = subprocess.run(  # noqa: S603 - fixed argument list, no shell
+        ["git", "status", "--porcelain", "--", "src", "params"],  # noqa: S607
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def _write_point_records(output_dir: Path, records: Sequence[ExperimentRecord]) -> None:
+    """Save one grid point's records; a file that already exists must hold the same record."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for record in records:
+        path = output_dir / f"{record.experiment_id}.json"
+        text = _record_text(record)
+        if _create_exclusive(path, text):
+            state = "recorded"
+        else:
+            if path.read_text(encoding="utf-8") != text:
+                raise ExperimentAlreadyRecorded(
+                    f"{record.experiment_id} (the file differs from the record built now; "
+                    "if it is truncated or not valid JSON after an interrupted write, delete "
+                    "that one file and rerun)"
+                ) from None
+            state = "present"
+        print(
+            f"{state} experiment_id={record.experiment_id} "
+            f"parameter_set_id={record.parameter_set_id} split_role={record.split_role} "
+            f"split_start_utc={record.split_start_utc.isoformat()}",
+            flush=True,
+        )
 
 
 def run_research(
@@ -326,16 +541,27 @@ def run_research(
     output_dir: Path,
     repo_root: Path,
     time_run: bool = False,
+    checkpoint_dir: Path | None = None,
 ) -> tuple[ExperimentRecord, ...]:
     """Run the authorized manifest and grid over the development and validation windows.
 
-    Every refusal (authorization, registry hash, constraint file, terminal-settlement evidence,
-    dataset identity) happens before any simulation. An `experiment_id` is only known once
+    Without `checkpoint_dir`: every refusal (authorization, registry hash, constraint file,
+    terminal-settlement evidence, dataset identity) happens before any simulation. An
+    `experiment_id` is only known once
     `assemble` has built the record, so the rerun check (`ExperimentAlreadyRecorded`) runs
     right after each window is assembled and again over all records before the first write: a
     rerun stops at its first window and writes nothing. Records are written only after every
     window has run, each to `<experiment_id>.json` created exclusively (an existing file is
     never overwritten).
+
+    With `checkpoint_dir` the run is resumable and keeps its results as it goes: every simulated
+    window is saved to the checkpoint directory (which must not be the output directory), a
+    grid point's records are written as soon as its windows are done, and a rerun with the same
+    directory reuses the saved windows instead of simulating them again. A saved window is
+    accepted only for the same manifest hash, grid hash, code version, parameter set and window,
+    and only when its content matches its hash. A record file that already exists must be
+    byte-equal to the record built now, otherwise the run stops with `ExperimentAlreadyRecorded`.
+    The records, their ids and the report are the same as without a checkpoint directory.
 
     `time_run` (D-30, G4-009) adds one `timing` line per split to the run log: wall seconds from
     `perf_counter`, never written into a record, so identity and digests do not move. No
@@ -346,56 +572,107 @@ def run_research(
     constraints = _load_constraints(manifest)
     check_terminal_settlement_evidence(manifest, repo_root)
     _check_manifest_against_store(manifest, raw_root)
+    if checkpoint_dir is not None:
+        ck, out = checkpoint_dir.resolve(), output_dir.resolve()
+        if ck == out or ck in out.parents or out in ck.parents:
+            raise CheckpointInvalid(
+                "the checkpoint directory must not be the output directory or nested with it"
+            )
 
+    if checkpoint_dir is not None and (dirty_code := _code_paths_dirty(repo_root)):
+        raise CheckpointInvalid(
+            "src or params has uncommitted changes, so saved windows could mix code versions: "
+            + "; ".join(dirty_code[:5])
+        )
     code_version = read_code_version(repo_root)
+    run_key = {
+        "manifest_sha256": manifest_hash(manifest),
+        "grid_sha256": grid_hash(grid),
+        "code_version": (
+            f"{code_version.commit}-dirty" if code_version.dirty else code_version.commit
+        ),
+    }
     records: list[ExperimentRecord] = []
     trade_lists: list[list[dict[str, Any]]] = []
     timing_lines: list[str] = []
     for point in grid.points:
+        point_records: list[ExperimentRecord] = []
         for window in research_splits(manifest):
             started = perf_counter()
-            record, trade_list = _run_split(
-                manifest=manifest,
-                grid=grid,
-                point=point,
-                window=window,
-                raw_root=raw_root,
-                constraints=constraints,
-                code_version=code_version,
-            )
+            reused = False
+            if checkpoint_dir is None:
+                record, trade_list = _run_split(
+                    manifest=manifest,
+                    grid=grid,
+                    point=point,
+                    window=window,
+                    raw_root=raw_root,
+                    constraints=constraints,
+                    code_version=code_version,
+                )
+            else:
+                path = _checkpoint_file(checkpoint_dir, point, window)
+                header = _checkpoint_header(run_key=run_key, point=point, window=window)
+                if path.exists():
+                    dataset_id, output = _load_checkpoint(path, header=header)
+                    reused = True
+                else:
+                    dataset_id, output = _simulate_split(
+                        manifest=manifest,
+                        grid=grid,
+                        point=point,
+                        window=window,
+                        raw_root=raw_root,
+                        constraints=constraints,
+                    )
+                    _write_checkpoint(path, header=header, dataset_id=dataset_id, output=output)
+                record, trade_list = _assemble_split(
+                    manifest=manifest,
+                    grid=grid,
+                    point=point,
+                    window=window,
+                    code_version=code_version,
+                    dataset_id=dataset_id,
+                    output=output,
+                )
             elapsed = perf_counter() - started
             if time_run:
                 timing_lines.append(
                     f"timing parameter_set_id={point.parameter_set_id} "
                     f"split_role={window.role} split_start_utc={window.start_utc.isoformat()} "
-                    f"wall_seconds={elapsed:.3f}"
+                    f"wall_seconds={elapsed:.3f}" + (" checkpoint=reused" if reused else "")
                 )
-            _refuse_if_recorded(output_dir, record)
+            if checkpoint_dir is None:
+                _refuse_if_recorded(output_dir, record)
             records.append(record)
+            point_records.append(record)
             trade_lists.append(trade_list)
+        if checkpoint_dir is not None:
+            _write_point_records(output_dir, point_records)
 
     report_lines = render_run_report(
         feasibility_lines=_feasibility_lines(manifest, grid, records, trade_lists),
         plateau=plateau_report(grid, _plateau_summaries(manifest, grid, records, trade_lists)),
         mark_hole_trade_counts=_mark_hole_counts(manifest, grid, trade_lists),
     )
-    for record in records:
-        _refuse_if_recorded(output_dir, record)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for record, trade_list in zip(records, trade_lists, strict=True):
-        try:
-            with (output_dir / f"{record.experiment_id}.json").open(
-                "x", encoding="utf-8"
-            ) as handle:
-                handle.write(_record_text(record))
-        except FileExistsError:
-            raise ExperimentAlreadyRecorded(record.experiment_id) from None
-        print(
-            f"recorded experiment_id={record.experiment_id} "
-            f"parameter_set_id={record.parameter_set_id} split_role={record.split_role} "
-            f"split_start_utc={record.split_start_utc.isoformat()} trades={len(trade_list)}",
-            flush=True,
-        )
+    if checkpoint_dir is None:
+        for record in records:
+            _refuse_if_recorded(output_dir, record)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for record, trade_list in zip(records, trade_lists, strict=True):
+            try:
+                with (output_dir / f"{record.experiment_id}.json").open(
+                    "x", encoding="utf-8"
+                ) as handle:
+                    handle.write(_record_text(record))
+            except FileExistsError:
+                raise ExperimentAlreadyRecorded(record.experiment_id) from None
+            print(
+                f"recorded experiment_id={record.experiment_id} "
+                f"parameter_set_id={record.parameter_set_id} split_role={record.split_role} "
+                f"split_start_utc={record.split_start_utc.isoformat()} trades={len(trade_list)}",
+                flush=True,
+            )
     for line in [*report_lines, *timing_lines]:
         print(line, flush=True)
     return tuple(records)
@@ -508,6 +785,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, required=True, help="experiment record dir")
     parser.add_argument("--repo-root", type=Path, default=_REPO_ROOT, help="git repository root")
     parser.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        default=None,
+        help="keep each simulated window here and write a grid point's records as soon as it "
+        "is done; a rerun with the same directory reuses the saved windows (resume). Not the "
+        "output directory; keep it outside the repository",
+    )
+    parser.add_argument(
         "--time-run",
         action="store_true",
         help="print wall-clock seconds per split in the run log (no memory tracing; records "
@@ -535,6 +820,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_dir=args.output_dir,
             repo_root=args.repo_root,
             time_run=args.time_run,
+            checkpoint_dir=args.checkpoint_dir,
         )
     except RunNotAuthorized as exc:
         print(f"run refused: {exc.reason}", file=sys.stderr)
@@ -544,6 +830,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_REFUSED
     except ExperimentAlreadyRecorded as exc:
         print(f"run refused: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    except CheckpointInvalid as exc:
+        print(f"run refused: checkpoint_invalid: {exc}", file=sys.stderr)
         return EXIT_REFUSED
     return EXIT_OK
 

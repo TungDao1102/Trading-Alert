@@ -4,8 +4,9 @@
 A set whose rationale is missing or incomplete, or that carries a PLACEHOLDER key, cannot
 start a paper stream. A set without rationale tables may start only when the approved
 allowlist (`PAPER_START_ALLOWLIST`, src/paper/freeze.py) holds an entry with the same ids and
-the exact `parameter_set_hash`. By the user's decision at checkpoint 15-17-01 (Option B,
-2026-10-07) that allowlist is empty and D-27 is unchanged.
+the exact `parameter_set_hash`. The allowlist shipped empty (checkpoint 15-17-01, Option B,
+2026-10-07); checkpoint G4-021 (2026-10-16, option exact-entry-pin) pinned it to one entry, and
+D-27 is unchanged.
 
 Sets are written into pytest tmp_path registries only; nothing here writes under params/ or
 tests/fixtures/.
@@ -230,12 +231,30 @@ def test_empty_allowlist_refuses_set_without_rationale_before_any_candle(
     _assert_no_candle_work(spies)
 
 
-def test_production_allowlist_is_empty_by_user_decision() -> None:
-    from src.paper.freeze import PAPER_START_ALLOWLIST
+def test_production_allowlist_is_pinned_to_the_users_single_entry() -> None:
+    from src.paper.freeze import PAPER_START_ALLOWLIST, PaperAllowlistEntry
 
-    assert PAPER_START_ALLOWLIST == (), (
-        "PAPER_START_ALLOWLIST ships empty by the user's decision at checkpoint 15-17-01 "
-        "(Option B, 2026-10-07); an entry needs a new user checkpoint and a D054 update"
+    expected = PaperAllowlistEntry(
+        strategy_id="trend-pullback",
+        parameter_set_id="research-run-1-a01",
+        parameter_set_hash="6f42f70e7e7a107b1be02fc4079fbb70f1408b4307099aa253bd93ebdbce6d87",
+        purpose=(
+            "Paper (SHADOW) trial soak của ứng viên đã đăng ký trước đầu tiên của research run 1"
+        ),
+        approved_at="2026-10-16",
+        basis=(
+            "Checkpoint G4-021 (decisions/16-DEC-G4-021.md), chỉ định ứng viên "
+            "(decisions/16-DEC-candidate.md), D054 mục (i)"
+        ),
+    )
+    assert PAPER_START_ALLOWLIST == (expected,), (
+        "PAPER_START_ALLOWLIST is pinned to the user's single entry (checkpoint G4-021, "
+        "2026-10-16, exact-entry-pin); any other entry or edit needs a new user checkpoint "
+        "and a D054 update"
+    )
+    assert (
+        expected.parameter_set_hash
+        == load_parameter_set("trend-pullback", "research-run-1-a01").parameter_set_hash
     )
 
 
@@ -578,8 +597,8 @@ def test_a_gate_that_judged_another_hash_than_the_loop_loaded_is_refused_before_
     _assert_no_candle_work(spies)
 
 
-def test_import_with_the_empty_allowlist_emits_no_error_or_warning() -> None:
-    """Importing the loop and the gate is silent under `-W error` and the allowlist is empty."""
+def test_import_with_the_pinned_allowlist_emits_no_error_or_warning() -> None:
+    """Importing the loop and the gate is silent under `-W error`; the allowlist holds one entry."""
     result = subprocess.run(
         [
             sys.executable,
@@ -588,7 +607,7 @@ def test_import_with_the_empty_allowlist_emits_no_error_or_warning() -> None:
             "-c",
             "import src.paper.loop; "
             "from src.paper.freeze import PAPER_START_ALLOWLIST; "
-            "print(repr(PAPER_START_ALLOWLIST))",
+            "print([e.parameter_set_id for e in PAPER_START_ALLOWLIST])",
         ],
         cwd=REPO_ROOT,
         capture_output=True,
@@ -597,7 +616,7 @@ def test_import_with_the_empty_allowlist_emits_no_error_or_warning() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
-    assert result.stdout.strip() == "()"
+    assert result.stdout.strip() == "['research-run-1-a01']"
 
 
 # --------------------------------------------------------------------------- #
@@ -738,8 +757,8 @@ def _scan_src_violations(root: Path) -> list[str]:
     equal to the name, setattr/delattr naming it).
 
     Not covered: a name built at runtime, `**kwargs` forwarding, and the CONTENT of the tuple
-    literal. That the allowlist is empty is asserted by
-    test_production_allowlist_is_empty_by_user_decision, not by this scan.
+    literal. That the allowlist is the user's single entry is asserted by
+    test_production_allowlist_is_pinned_to_the_users_single_entry, not by this scan.
     """
     found: list[str] = []
     for path in sorted(root.rglob("*.py")):

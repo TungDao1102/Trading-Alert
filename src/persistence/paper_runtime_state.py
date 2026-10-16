@@ -26,6 +26,13 @@ deliberately NOT restricted to an epoch prefix. It is still bounded (entity type
 event type EPOCH_PINNED, the rows at the maximum instant of that subset) and needs no migration,
 no index and no schema change.
 
+The instance lease (plan 16-55, review B1-WR-07) is a PostgreSQL session advisory lock,
+`pg_try_advisory_lock` on the stable 63-bit key of the lease scope, held on a dedicated connection
+outside the pool for the life of the process. It needs no table and no migration. It ends with
+`release` (unlock, then close) or with the session: a closed connection, a database restart or a
+terminated backend drops it silently, which is why the runtime re-checks it (`is_held` reads
+`pg_locks` on the holding session; an error there counts as lost).
+
 The port is synchronous; the runtime wraps it in `asyncio.to_thread` (phase 24 item G4-040 is
 still open). An unreachable database raises `StoreUnavailable` (fail closed), never an
 in-memory fallback.
@@ -37,10 +44,13 @@ the paper package imports no SQLAlchemy.
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.sql.elements import ColumnElement
 
 from src.db.models import JournalEventRow
@@ -50,6 +60,7 @@ from src.paper.runtime_state import (
     RUNTIME_ENTITY_ID,
     RuntimeRecord,
     RuntimeRecordConflict,
+    instance_lease_key,
     latest_marker,
     record_sort_key,
     runtime_correlation_id,
@@ -58,7 +69,7 @@ from src.paper.runtime_state import (
     runtime_event_id,
 )
 from src.paper.vocabulary import RuntimeEventType
-from src.persistence.errors import JournalConflict
+from src.persistence.errors import JournalConflict, StoreUnavailable
 from src.persistence.journal import PgJournalStore
 from src.persistence.uow import OperationalDatabase
 
@@ -91,6 +102,55 @@ def _record_from_row(row: JournalEventRow) -> RuntimeRecord:
         interval=interval,
         payload=payload,
     )
+
+
+_TRY_LOCK = text("SELECT pg_try_advisory_lock(:key)")
+_UNLOCK = text("SELECT pg_advisory_unlock(:key)")
+# The lock as `pg_locks` shows a bigint advisory key: classid is the high half, objid the low half,
+# objsubid 1. Asked on the holding session itself, so a dead session cannot answer yes.
+_HELD = text(
+    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted"
+    " AND pid = pg_backend_pid() AND classid = CAST(:hi AS oid) AND objid = CAST(:lo AS oid)"
+    " AND objsubid = 1"
+)
+
+
+class PgInstanceLease:
+    """A session advisory lock held on a dedicated connection (see the module docstring)."""
+
+    def __init__(self, connection: Connection, key: int) -> None:
+        self._connection = connection
+        self._key = key
+        self._lock = threading.Lock()  # one connection, called from worker threads
+        self._released = False
+
+    def is_held(self) -> bool:
+        with self._lock:
+            if self._released:
+                return False
+            try:
+                count = self._connection.execute(
+                    _HELD, {"hi": self._key >> 32, "lo": self._key & 0xFFFF_FFFF}
+                ).scalar_one()
+                self._connection.rollback()
+            except Exception:  # noqa: BLE001 - an unverifiable lease is a lost lease
+                return False
+            return int(count) == 1
+
+    def release(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+            try:
+                self._connection.execute(_UNLOCK, {"key": self._key})
+                self._connection.commit()
+            except Exception:  # noqa: BLE001 - best effort: closing the session ends the lock
+                pass
+            try:
+                self._connection.close()
+            except Exception:  # noqa: BLE001 - a dead connection may fail to close cleanly
+                pass
 
 
 class PgRuntimeState:
@@ -173,5 +233,29 @@ class PgRuntimeState:
             records = [_record_from_row(row) for row in tx.execute(statement).scalars()]
         return sorted(records, key=record_sort_key)
 
+    def acquire_instance_lease(self, scope: str) -> PgInstanceLease | None:
+        """Try the session advisory lock of `scope` on a new dedicated connection; never waits.
 
-__all__ = ["PgRuntimeState"]
+        Raises:
+            StoreUnavailable: the database cannot be reached (the runtime fails closed).
+        """
+        key = instance_lease_key(scope)
+        connection = self._db.dedicated_connection()
+        try:
+            acquired = bool(connection.execute(_TRY_LOCK, {"key": key}).scalar_one())
+            connection.commit()
+        except (OperationalError, InterfaceError) as exc:
+            connection.close()
+            raise StoreUnavailable(
+                f"PostgreSQL unavailable while taking the instance lease ({type(exc).__name__})"
+            ) from None
+        except BaseException:
+            connection.close()
+            raise
+        if not acquired:
+            connection.close()
+            return None
+        return PgInstanceLease(connection, key)
+
+
+__all__ = ["PgInstanceLease", "PgRuntimeState"]

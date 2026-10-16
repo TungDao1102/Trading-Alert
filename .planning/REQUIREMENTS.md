@@ -44,7 +44,7 @@ Auto-derived in `--auto` mode from the project brief + Core Docs v0.3 + `.planni
 
 - [x] **BKTS-01**: Backtest simulator resolves intrabar SL/TP ordering with 1m data, models limit fills/partials/expiry/invalidation, and applies fees/funding/slippage before any selection decision (Phase 6 evidence is void per D052; re-verified by Phase 14 through tests/test_backtest_entry.py, tests/test_backtest_exits.py, tests/test_backtest_funding.py, tests/test_backtest_ledger.py, tests/test_backtest_expiry_clock.py, tests/test_backtest_goldens.py, tests/test_backtest_determinism.py and tests/test_backtest_chain.py)
 - [x] **BKTS-02**: Every experiment is reproducible from dataset + strategy + parameter set + cost + execution versions and is compared against no-trade and simple-trend baselines (Phase 6 evidence is void per D052; re-verified by Phase 14 through tests/test_backtest_entry.py, tests/test_backtest_exits.py, tests/test_backtest_funding.py, tests/test_backtest_ledger.py, tests/test_backtest_expiry_clock.py, tests/test_backtest_goldens.py, tests/test_backtest_determinism.py and tests/test_backtest_chain.py)
-- [ ] **BKTS-03**: Reports show trade counts and slices (symbol/period/regime/version), R distribution, bootstrap intervals, and parameter-plateau analysis — never a single headline number *(Originally mapped to Phase 6; `src/backtest/report.py` prints "not computed (BKTS-03 pending)". Owner: the Phase 16 research runner (D059 item 5, Backlog 999.2).)*
+- [x] **BKTS-03**: Reports show trade counts and slices (symbol/period/regime/version), R distribution, bootstrap intervals, and parameter-plateau analysis — never a single headline number *(Originally mapped to Phase 6; `src/backtest/report.py` prints "not computed (BKTS-03 pending)". Owner: the Phase 16 research runner (D059 item 5, Backlog 999.2).)*
 - [x] **BKTS-04**: Every experiment record carries the fields the research protocol requires, including NO_TRADE counts with reasons, the intrabar tie-break, timeframe, full parameters and costs, and a verifiable code version
 
 ### Paper & Forward Validation
@@ -139,7 +139,7 @@ Evidence levels (a requirement can sit at any one; they do not imply each other)
 | RISK-02 | Phase 5 | Complete |
 | BKTS-01 | Phase 6 | Complete |
 | BKTS-02 | Phase 6 | Complete |
-| BKTS-03 | Phase 16 | Pending |
+| BKTS-03 | Phase 16 | Complete |
 | PAPER-01 | Phase 16 | Pending |
 | PAPER-02 | Phase 16 | Pending |
 | PAPER-03 | Phase 26 | Pending |

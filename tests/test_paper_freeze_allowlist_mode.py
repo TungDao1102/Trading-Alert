@@ -65,10 +65,13 @@ def _lines(path: Path) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 
 
-def test_empty_allowlist_appends_one_skipped_line_and_exits_zero(tmp_path: Path) -> None:
-    from src.paper.freeze import PAPER_START_ALLOWLIST, _cli_main
+def test_empty_allowlist_appends_one_skipped_line_and_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.paper.freeze import _cli_main, allowlist_entries
 
-    assert PAPER_START_ALLOWLIST == ()
+    _inject(monkeypatch)
+    assert allowlist_entries() == ()
     diff_log = tmp_path / "registry_diff.jsonl"
 
     code = _cli_main(
@@ -92,9 +95,12 @@ def test_empty_allowlist_appends_one_skipped_line_and_exits_zero(tmp_path: Path)
     assert not (tmp_path / "pinned_epoch.json").exists(), "SKIPPED must not pin or write state"
 
 
-def test_two_empty_ticks_append_two_skipped_lines(tmp_path: Path) -> None:
+def test_two_empty_ticks_append_two_skipped_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from src.paper.freeze import _cli_main
 
+    _inject(monkeypatch)
     diff_log = tmp_path / "registry_diff.jsonl"
     argv = ["--check", "--from-allowlist", "--diff-log", str(diff_log)]
     assert _cli_main(argv) == 0
@@ -240,6 +246,16 @@ def _inject(monkeypatch: pytest.MonkeyPatch, *entries: Any) -> None:
     import src.paper.freeze as freeze
 
     monkeypatch.setattr(freeze, "PAPER_START_ALLOWLIST", tuple(entries))
+
+
+@pytest.fixture(autouse=True)
+def _start_from_an_empty_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests exercise the allowlist mode on an empty list unless a test injects entries.
+
+    The production allowlist holds the user's single entry since checkpoint G4-021 (the pin test
+    lives in tests/test_paper_start_gate.py), so every test here starts from an injected empty one.
+    """
+    _inject(monkeypatch)
 
 
 def _pin(tmp_path: Path, registry_root: Path, *, state_set_id: str = PARAMETER_SET_ID) -> Path:
@@ -388,6 +404,7 @@ def test_find_allowlist_entry_is_exact_and_refuses_duplicates(
 ) -> None:
     from src.paper.freeze import allowlist_entries, find_allowlist_entry
 
+    _inject(monkeypatch)
     assert allowlist_entries() == ()
     assert find_allowlist_entry(STRATEGY_ID, PARAMETER_SET_ID) is None
 

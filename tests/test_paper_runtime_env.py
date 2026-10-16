@@ -109,6 +109,18 @@ def test_allowed_names_are_exactly_the_documented_set() -> None:
     assert not any(name.startswith("BINANCE_") for name in ALLOWED_ENV_NAMES)
 
 
+@pytest.fixture(autouse=True)
+def _start_from_an_empty_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests exercise the runtime on an empty allowlist unless a test injects entries.
+
+    The production allowlist holds the user's single entry since checkpoint G4-021 (pinned in
+    tests/test_paper_start_gate.py), so each test here starts from an injected empty one.
+    """
+    import src.paper.freeze as freeze
+
+    monkeypatch.setattr(freeze, "PAPER_START_ALLOWLIST", ())
+
+
 def test_unrelated_variable_is_never_logged(capsys: pytest.CaptureFixture[str]) -> None:
     environ = {**BASE_ENV, "UNRELATED_THING": "leak-me-please"}
 

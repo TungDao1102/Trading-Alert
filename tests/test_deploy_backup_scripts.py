@@ -620,3 +620,131 @@ def test_deploy_state_directory_is_ignored_by_git() -> None:
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
+
+
+# --- 16-55 Task 4: the soak project's own backup unit (review B2-WR-07) ----------------------
+#
+# The remote layout of src/ops/backup_remote.py has no project component, so the soak project
+# (trading-soak) must back up into its OWN bucket with its own crypt passwords and sentinel; on a
+# shared remote the two projects' snapshots would form one series and retention would delete
+# one project's daily dump (evidence/16-55-recheck.md). Decision for plan 16-55: a separate
+# BACKUP_S3_BUCKET in the soak env file (orchestrator, 2026-10-16; no change to the layout).
+
+BASELINE = "5f8269b"
+SOAK_UNITS = ("trading-soak-backup.service", "trading-soak-backup.timer")
+
+
+def _timer_keys(text: str) -> dict[str, str]:
+    keys = ("OnCalendar", "Persistent", "RandomizedDelaySec")
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        name, _, value = line.partition("=")
+        if name in keys:
+            out[name] = value
+    assert set(out) == set(keys), out
+    return out
+
+
+def test_the_soak_backup_units_select_the_soak_project_and_env_file() -> None:
+    service = (UNITS / "trading-soak-backup.service").read_text(encoding="utf-8")
+    assert re.search(r"^Type=oneshot$", service, re.MULTILINE)
+    assert re.search(r"^User=trading$", service, re.MULTILINE)
+    assert re.search(r"^WorkingDirectory=@TRADING_DIR@$", service, re.MULTILINE)
+    assert re.search(r"^Environment=COMPOSE_PROJECT_NAME=trading-soak$", service, re.MULTILINE)
+    assert re.search(r"^Environment=TRADING_ENV_FILE=@SOAK_ENV_FILE@$", service, re.MULTILINE)
+    assert re.search(
+        r"^ExecStart=/usr/bin/env bash @TRADING_DIR@/deploy/backup\.sh$", service, re.M
+    )
+    assert "docker.service" in service
+    timer = (UNITS / "trading-soak-backup.timer").read_text(encoding="utf-8")
+    existing = (UNITS / "trading-backup.timer").read_text(encoding="utf-8")
+    assert _timer_keys(timer) == _timer_keys(existing)
+    assert re.search(r"^Unit=trading-soak-backup\.service$", timer, re.MULTILINE)
+    assert re.search(r"^WantedBy=timers.target$", timer, re.MULTILINE)
+
+
+@pytest.mark.parametrize("name", ["trading-backup.service", "trading-backup.timer"])
+def test_the_existing_backup_units_are_byte_unchanged(name: str) -> None:
+    proc = subprocess.run(
+        ["git", "show", f"{BASELINE}:deploy/systemd/{name}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=True,
+    )
+    assert (UNITS / name).read_bytes().replace(b"\r\n", b"\n") == proc.stdout.replace(
+        b"\r\n", b"\n"
+    )
+
+
+def _env_files(rig: Rig, soak_bucket: str, trading_bucket: str) -> tuple[Path, Path]:
+    soak = _write(rig.base / "soak.env", f"POSTGRES_USER=x\nBACKUP_S3_BUCKET={soak_bucket}\n")
+    trading = _write(rig.base / "trading.env", f"BACKUP_S3_BUCKET={trading_bucket}\n")
+    return soak, trading
+
+
+def _install_soak(rig: Rig, soak: Path, trading: Path) -> subprocess.CompletedProcess[str]:
+    return rig.run(
+        "backup.sh",
+        "--install-soak-timer",
+        "--soak-env-file",
+        soak.as_posix(),
+        env={"TRADING_BACKUP_ENV_FILE": trading.as_posix()},
+    )
+
+
+def test_install_soak_timer_writes_the_soak_units_and_enables_their_timer(rig: Rig) -> None:
+    soak, trading = _env_files(rig, "soak-evidence-bucket", "trading-bucket")
+    proc = _install_soak(rig, soak, trading)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    unit_dir = rig.prefix / "etc" / "systemd" / "system"
+    service = (unit_dir / "trading-soak-backup.service").read_text(encoding="utf-8")
+    timer = (unit_dir / "trading-soak-backup.timer").read_text(encoding="utf-8")
+    checkout = _checkout_as_bash_sees_it(rig)
+    for text in (service, timer):
+        assert "@TRADING_DIR@" not in text and "@SOAK_ENV_FILE@" not in text
+    assert f"WorkingDirectory={checkout}" in service
+    assert f"Environment=TRADING_ENV_FILE={soak.as_posix()}" in service
+    assert "Environment=COMPOSE_PROJECT_NAME=trading-soak" in service
+    assert not (unit_dir / "trading-backup.service").exists(), "the trading pair is untouched"
+    calls = [ln for ln in rig.lines() if ln.startswith("systemctl ")]
+    assert calls == [
+        "systemctl daemon-reload",
+        "systemctl enable --now trading-soak-backup.timer",
+    ]
+    out = proc.stdout + proc.stderr
+    assert "soak-evidence-bucket" not in out and "trading-bucket" not in out
+
+
+def test_install_soak_timer_refuses_the_trading_backup_bucket(rig: Rig) -> None:
+    soak, trading = _env_files(rig, "shared-bucket", "shared-bucket")
+    proc = _install_soak(rig, soak, trading)
+    assert proc.returncode != 0
+    assert "BACKUP_S3_BUCKET" in proc.stderr
+    assert "shared-bucket" not in proc.stdout + proc.stderr, "a value is never printed"
+    assert not (rig.prefix / "etc").exists()
+    assert rig.lines() == []
+
+
+def test_install_soak_timer_refuses_an_empty_soak_bucket(rig: Rig) -> None:
+    soak, trading = _env_files(rig, "", "trading-bucket")
+    proc = _install_soak(rig, soak, trading)
+    assert proc.returncode != 0
+    assert "BACKUP_S3_BUCKET" in proc.stderr
+    assert not (rig.prefix / "etc").exists()
+
+
+def test_install_soak_timer_needs_a_readable_soak_env_file(rig: Rig) -> None:
+    _soak, trading = _env_files(rig, "a", "b")
+    proc = _install_soak(rig, rig.base / "missing.env", trading)
+    assert proc.returncode != 0
+    assert not (rig.prefix / "etc").exists()
+    proc = rig.run("backup.sh", "--install-soak-timer")
+    assert proc.returncode == 2, "the soak env file is a required argument"
+
+
+def test_soak_env_template_keeps_the_bucket_empty_and_says_it_is_its_own() -> None:
+    lines = (DEPLOY / "soak.env.example").read_text(encoding="utf-8").splitlines()
+    assert "BACKUP_S3_BUCKET=" in lines
+    comments = "\n".join(ln for ln in lines if ln.startswith("#"))
+    assert "trading-backup" in comments
+    assert "own bucket" in comments

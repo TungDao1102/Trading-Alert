@@ -40,6 +40,8 @@ ENV_EXAMPLE = REPO_ROOT / ".env.example"
 PYTHON = "/app/.venv/bin/python"
 PAPER_COMMAND = [PYTHON, "-m", "src.paper.runtime", "--hold-on-refusal"]
 PAPER_PROBE = ["CMD", PYTHON, "-m", "src.paper.runtime", "--healthcheck"]
+PIN_COMMAND = [PYTHON, "-m", "src.paper.runtime", "--pin-epoch"]
+PIN_SERVICE = "paper-pin"
 SOAK_PROJECT = "trading-soak"
 
 
@@ -98,20 +100,25 @@ def _health_scalar(block: str, key: str) -> str:
 
 
 def restart_loop_problems(command: Sequence[str], probe: Sequence[str], restart: str) -> list[str]:
-    """Why a service definition could loop on a configuration refusal (empty means it cannot).
+    """Why a service definition could loop on a refusal or stay down (empty means neither).
 
-    The runtime exits with 3 to 6 on a refusal; `on-failure` restarts every non-zero exit, so the
-    command must carry `--hold-on-refusal` (the process then stays up and unhealthy instead).
+    The owner's decision 16-DEC-RESTART-POLICY (16-55 Q1 = A): `unless-stopped`, which restarts
+    any exit that no `docker stop` or `compose stop` preceded (a status 0 included) and comes
+    back after a daemon restart. So the command must carry `--hold-on-refusal` (a refusal and
+    SKIPPED then hold, unhealthy, instead of exiting) and must never carry `--pin-epoch` (the
+    one-shot pin exits 0, which `unless-stopped` would restart: it has its own service).
     """
     problems: list[str] = []
     if "--hold-on-refusal" not in command:
         problems.append("command lacks --hold-on-refusal")
+    if "--pin-epoch" in command:
+        problems.append("command carries --pin-epoch")
     if "--hold-on-refusal" in probe:
         problems.append("healthcheck must not carry --hold-on-refusal")
     if "--healthcheck" not in probe:
         problems.append("healthcheck lacks --healthcheck")
-    if restart != "on-failure":
-        problems.append(f"restart policy is {restart!r}, expected 'on-failure'")
+    if restart != "unless-stopped":
+        problems.append(f"restart policy is {restart!r}, expected 'unless-stopped'")
     return problems
 
 
@@ -129,7 +136,7 @@ def test_paper_service_runs_the_runtime_with_its_probe() -> None:
     block = _service_block("paper")
     assert _flow_list(block, "command") == PAPER_COMMAND
     assert _flow_list(block, "test") == PAPER_PROBE
-    assert _scalar(block, "restart") == "on-failure"
+    assert _scalar(block, "restart") == "unless-stopped"
     assert _flow_list(block, "profiles") == ["paper"]
     assert "disable: true" not in block
     assert "SystemExit" not in block
@@ -176,13 +183,18 @@ def test_compose_paper_service_cannot_restart_loop_on_a_refusal() -> None:
 
 def test_restart_loop_guard_catches_a_service_without_the_hold_flag() -> None:
     seeded_command = [PYTHON, "-m", "src.paper.runtime"]
-    problems = restart_loop_problems(seeded_command, PAPER_PROBE[1:], "on-failure")
+    problems = restart_loop_problems(seeded_command, PAPER_PROBE[1:], "unless-stopped")
     assert problems == ["command lacks --hold-on-refusal"]
-    assert restart_loop_problems(PAPER_COMMAND, PAPER_PROBE[1:], "unless-stopped") != []
+    assert restart_loop_problems(PAPER_COMMAND, PAPER_PROBE[1:], "on-failure") != []
+    pinning = [*PAPER_COMMAND, "--pin-epoch"]
+    assert restart_loop_problems(pinning, PAPER_PROBE[1:], "unless-stopped") == [
+        "command carries --pin-epoch"
+    ]
 
 
-def test_refusal_codes_are_3_to_6_and_exclude_the_restartable_statuses() -> None:
-    assert REFUSAL_CODES == {3, 4, 5, 6}
+def test_refusal_codes_are_3_to_6_and_8_and_exclude_the_restartable_statuses() -> None:
+    # 8 (INSTANCE_LEASE_HELD) joined the refusals with the single-instance guard (plan 16-55).
+    assert REFUSAL_CODES == {3, 4, 5, 6, 8}
     assert 1 not in REFUSAL_CODES
     assert int(ExitCode.FAIL_CLOSED_RUNTIME) == 7
     assert 7 not in REFUSAL_CODES
@@ -196,6 +208,53 @@ def test_compose_comment_names_every_refusal_code() -> None:
         assert words in comment, words
     assert "--hold-on-refusal" in comment
     assert "WR-06" in comment
+
+
+def test_paper_comment_states_the_owner_decision_and_why_on_failure_was_dropped() -> None:
+    comment = _comment_block_before("paper")
+    for phrase in (
+        "16-DEC-RESTART-POLICY",
+        "unless-stopped",
+        "on-failure",
+        "daemon restart",
+        "held marker",
+        "SKIPPED",
+    ):
+        assert phrase in comment, phrase
+
+
+# --------------------------------------------------------------------------- #
+# 16-55 Task 4: the one-shot pin service (16-DEC-PIN-COMMAND).
+# --------------------------------------------------------------------------- #
+
+
+def test_the_pin_has_its_own_one_shot_service_that_docker_never_restarts() -> None:
+    pin = _service_block(PIN_SERVICE)
+    paper = _service_block("paper")
+    assert _flow_list(pin, "command") == PIN_COMMAND
+    assert "--hold-on-refusal" not in _flow_list(pin, "command")
+    assert _scalar(pin, "restart") == "no"
+    assert _flow_list(pin, "profiles") == [PIN_SERVICE]
+    assert _flow_list(pin, "profiles") != _flow_list(paper, "profiles")
+    for line in ("<<: *app", "environment: *database-env"):
+        assert line in pin and line in paper, line
+    volume_lines = re.findall(r"^\s+- (\S+:\S+)\s*$", pin, flags=re.MULTILINE)
+    assert volume_lines == ["logs:/app/logs"]
+    assert re.search(r"^\s+disable: true\s*$", pin, flags=re.MULTILINE), "no probe for a one-shot"
+    assert re.search(
+        r"db-upgrade:\s*\n\s+condition: service_completed_successfully", pin, flags=re.MULTILINE
+    )
+    parsed = build_parser().parse_args(_runtime_args(PIN_COMMAND))
+    assert parsed.pin_epoch is True and parsed.hold_on_refusal is False
+
+
+def test_no_other_service_passes_pin_epoch() -> None:
+    text = COMPOSE_FILE.read_text(encoding="utf-8")
+    code_lines = [ln for ln in text.splitlines() if not ln.strip().startswith("#")]
+    carriers = [ln for ln in code_lines if "--pin-epoch" in ln]
+    assert len(carriers) == 1, carriers
+    assert "--pin-epoch" in _service_block(PIN_SERVICE)
+    assert "--pin-epoch" not in _service_block("paper")
 
 
 def _soak_config(tmp_path: Path) -> dict[str, Any]:
@@ -243,7 +302,7 @@ def test_soak_project_renders_with_its_own_volume_names(tmp_path: Path) -> None:
     paper = config["services"]["paper"]
     assert paper["command"] == PAPER_COMMAND
     assert paper["healthcheck"]["test"] == PAPER_PROBE
-    assert paper["restart"] == "on-failure"
+    assert paper["restart"] == "unless-stopped"
     assert not paper.get("ports")
 
 

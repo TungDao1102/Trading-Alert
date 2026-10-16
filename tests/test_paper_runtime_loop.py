@@ -144,6 +144,9 @@ class BlockingState:
     def latest_epoch_pins(self) -> Sequence[RuntimeRecord]:
         return self.inner.latest_epoch_pins()
 
+    def acquire_instance_lease(self, scope: str) -> Any:
+        return self.inner.acquire_instance_lease(scope)
+
 
 class FakeMonotonic:
     """The injected monotonic function: pops one prepared reading per call."""
@@ -307,8 +310,9 @@ def test_a_closed_kline_reaches_a_heartbeat_record_and_the_stop_is_clean(live: L
     assert heartbeats[0].payload["source"] == SourceTag.LIVE_WS.value
     types = [r.event_type for r in live.records()]
     assert types[0] is RuntimeEventType.EPOCH_PINNED
-    assert types.count(RuntimeEventType.RUNTIME_START) == 2
-    assert types.count(RuntimeEventType.RUNTIME_STOP) == 2
+    # The pin exits without a run (16-DEC-PIN-COMMAND): one START and one STOP, both this run's.
+    assert types.count(RuntimeEventType.RUNTIME_START) == 1
+    assert types.count(RuntimeEventType.RUNTIME_STOP) == 1
     assert live.client.close_calls >= 1, "the stop closes the SDK connection"
     assert all(h._unsubscribed == 1 for h in live.client.handles), "every stream is unsubscribed"
 

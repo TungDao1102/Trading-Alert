@@ -60,8 +60,13 @@ with status zero only while the last processed closed bar is younger than
 It prints `unhealthy` with a reason and exits with status one in every other case: no bar
 processed in time, a stopped process, and every condition under which the start gate itself would
 refuse (a trade-capable variable, an unratified configuration, no admission or no pinned epoch), so
-a container held after a refusal is reported unhealthy at once. It reads only the allowed
-environment names and never prints a value.
+a container held after a refusal is reported unhealthy at once. Before any of these checks and
+before any bar age it reads the held marker of its own container (`src/paper/held_marker.py`):
+while a refused start holds, the probe reports unhealthy even when the store holds a fresh bar
+of an earlier run, for example on a restart refused by an epoch mismatch or by the
+single-instance guard (decision `16-DEC-RESTART-POLICY`). A marker of another container does not
+change this probe, and the probe never removes a marker. It reads only the allowed environment
+names and never prints a value.
 
 ## Two gate layers: do not confuse them
 
@@ -69,8 +74,8 @@ environment names and never prints a value.
    `runtime-exact-hash-all`) requires an exact-hash allowlist entry for **every** parameter set:
    strategy id, parameter set id and the 64-hex hash of the registry file must all match. It runs
    once per process, before any candle is parsed, before any strategy code and before
-   `pin_stream_epoch`. An empty allowlist ends the process as `SKIPPED (allowlist empty)` with
-   exit status zero and no fallback to any set. A missing entry or a different hash is a refusal
+   `pin_stream_epoch`. An empty allowlist is `SKIPPED (allowlist empty)`, with no fallback to
+   any set: exit status zero at once, or a hold under `--hold-on-refusal`. A missing entry or a different hash is a refusal
    (`ADMISSION_OR_EPOCH_MISMATCH`). Note that rationale tables never replace runtime authorization: a fully
    rationalized set without an entry does not start.
 - **Layer two, the per-call rule of `pin_stream_epoch`** (`src/paper/freeze.py`, unchanged, Phase-15 gate) is the
@@ -86,18 +91,29 @@ this plan.
 
 The named table is `ExitCode` in `src/paper/runtime_config.py`.
 
-- `OK` is a clean stop, or `SKIPPED`. It is not restarted.
-- `TRADE_KEY_REFUSED`, `CONFIG_NOT_RATIFIED`, `NO_PINNED_EPOCH` and `ADMISSION_OR_EPOCH_MISMATCH`
-  are refusals. They can never succeed on a retry, so they are not restartable by themselves. A
-  restart policy would loop on them, which is why the compose service passes `--hold-on-refusal`:
-  the process then logs the refusal, stays up (the healthcheck reports it unhealthy) and exits
-  with the refusal code only when it is stopped.
-- `FAIL_CLOSED_RUNTIME` and the interpreter's own crash status are restartable.
-- `USAGE` is a malformed command line.
+- `OK` is a stop the operator requested, the end of a hold, the one-shot `--pin-epoch`, the
+  `--healthcheck` probe, or `SKIPPED` without `--hold-on-refusal`. The service command never
+  exits with it by itself: under `restart: unless-stopped` Docker restarts any exit that no
+  `docker stop` preceded, so no path relies on exit status zero to stay down.
+- `TRADE_KEY_REFUSED`, `CONFIG_NOT_RATIFIED`, `NO_PINNED_EPOCH`, `ADMISSION_OR_EPOCH_MISMATCH`
+  and `INSTANCE_LEASE_HELD` are refusals. They can never succeed on a retry, so they are not
+  restartable by themselves. A restart policy would loop on them, which is why the compose
+  service passes `--hold-on-refusal`: the process then logs the refusal and stays up, held and
+  non-operational (no record, no loop, no client), leaves its held marker (the healthcheck
+  reports it unhealthy) and exits with the refusal code only when it is stopped. `SKIPPED`
+  holds the same way under the flag.
+- `INSTANCE_LEASE_HELD`: another paper runtime or pin holds the instance lease of the database
+  (a PostgreSQL session advisory lock taken before the pin and before any record), so one
+  runtime runs per epoch. A held process releases its lease before it waits.
+- `FAIL_CLOSED_RUNTIME` and the interpreter's own crash status are restartable. A lost instance
+  lease, noticed at the next consumer batch or periodic step of the loop, is one of them.
+- `USAGE` is a malformed command line, or `--pin-epoch` together with `--hold-on-refusal`.
 
 ## Epoch pin
 
-The epoch is pinned only by the operator command `--pin-epoch`, and only when no pinned state
-exists. Every restart loads the stored epoch and reuses its `epoch_id`, so a restart never starts
+The epoch is pinned only by the one-shot operator command `--pin-epoch`, and only when no pinned
+state exists. The pin takes the instance lease, records the pin, writes the pinned state and
+exits with status zero without starting the run (decision `16-DEC-PIN-COMMAND`); the managed
+service is started at once as the next step. Every restart loads the stored epoch and reuses its `epoch_id`, so a restart never starts
 a new trial. A new pin while a pinned state exists is refused: it would restart the qualifying
 trial (REV-18), so the operator archives the old state first.

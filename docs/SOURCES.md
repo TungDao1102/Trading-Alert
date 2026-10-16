@@ -209,3 +209,11 @@ Status of the nine items of the research "UNVERIFIED register" (18-RESEARCH.md) 
 - item 7: still UNVERIFIED (read 2026-10-16: events of the same type on one connection are ordered by `T` and `E`, but nothing is said about ACCOUNT_UPDATE versus ORDER_TRADE_UPDATE; Retry-After is absent from general-info, error-code and the WebSocket API general-info page, so whether Binance sends it is a live observation; among the pages read, a `recvWindow` maximum of 60000 is stated for positionSide/dual and DELETE algoOrder, and none on general-info, `GET /fapi/v1/order` or the POST algoOrder summary; no new-connection rate limit was read).
 - item 8: still UNVERIFIED (the payload field tables did not render on 2026-10-16; the installed SDK model `algo_update_o.py` types `q`, `p`, `tp`, `ap` and `aq` as strict strings, which is the SDK's schema and not a documented guarantee).
 - item 9: still UNVERIFIED (Futures Demo key provisioning is not described on any page read on 2026-10-16; it stays an owner step).
+
+## Facts read for plan 16-55 (2026-10-16)
+
+The restart policy of the paper service (decision 16-DEC-RESTART-POLICY, review B1-WR-11) relies on this Docker documentation fact. It was read by the planner of plan 16-55 and is not verified live; the live proof is the restart drill that plan 16-43 runs on the soak host before the pin (RUNBOOK, "Restart drill before the pin").
+
+| Source URL | Used for | Checked on | Method |
+| --- | --- | --- | --- |
+| https://docs.docker.com/engine/containers/start-containers-automatically/ | Restart policies: `on-failure` "doesn't restart the container if the daemon restarts"; `always` restarts the container whenever it stops; `unless-stopped` is "similar to always, except that when the container is stopped (manually or otherwise), it isn't restarted even after Docker daemon restarts"; a manual stop makes Docker ignore the restart policy until the daemon restarts or the container is restarted by hand. Used for the paper service's `restart: "unless-stopped"`, the held refused start and the one-shot pin service with `restart: "no"` (plan 16-55, evidence/16-55-recheck.md) | 2026-10-16 | WebFetch summary by the planner of plan 16-55, not verified live; MEDIUM confidence |

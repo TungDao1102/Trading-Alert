@@ -13,6 +13,7 @@ tests/fixtures/cutover/** text eol=lf
 
 docs/research/preregistration/research-run-1-constraints-baseline.json -text
 docs/research/preregistration/research-run-1-constraints-S1.json -text
+docs/research/preregistration/research-run-1-manifest.json -text
 docs/research/preregistration/evidence/** -text
 # Phase 18 synthetic user-data frames are pinned byte-for-byte (LF) to their builders.
 tests/fixtures/phase18/synthetic/*.json text eol=lf

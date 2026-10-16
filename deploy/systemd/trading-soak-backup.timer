@@ -1,0 +1,14 @@
+# Daily backup of the soak project at 03:15 UTC, the schedule of trading-backup.timer (plan 16-55);
+# a persistent timer runs a missed backup after downtime; the randomised delay keeps several hosts
+# from hitting the provider in the same second. The two projects push to different buckets.
+[Unit]
+Description=Trading soak project: daily backup timer
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 UTC
+Persistent=true
+RandomizedDelaySec=5m
+Unit=trading-soak-backup.service
+
+[Install]
+WantedBy=timers.target

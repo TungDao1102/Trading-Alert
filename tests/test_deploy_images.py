@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -257,3 +258,219 @@ def test_dockerignore_does_not_exclude_what_the_image_copies() -> None:
     }
     for needed in ("src", "scripts", "alembic.ini", "pyproject.toml", "uv.lock", "docs"):
         assert needed not in entries, f"{needed} is COPY'd by the Dockerfile"
+
+
+# --- 16-55 Task 1: every path the runtime reads at start is in the image (B2-CR-05) ----------
+
+# What the runtime image must carry: the registry (`REGISTRY_ROOT`, /app/params), the ratified
+# runtime configuration (`PAPER_RUNTIME_CONFIG`), the collect list, the migration config, the code.
+RUNTIME_READ_PATHS: tuple[str, ...] = (
+    "params",
+    "config/paper",
+    "docs/research/universe",
+    "alembic.ini",
+    "src",
+    "scripts",
+)
+
+
+def _logical_lines_of(text: str) -> list[str]:
+    """`_logical_lines` over any Dockerfile text (the negative control edits a copy)."""
+    out: list[str] = []
+    current = ""
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not current and (not stripped or stripped.startswith("#")):
+            continue
+        if stripped.endswith("\\"):
+            current += stripped[:-1].rstrip() + " "
+            continue
+        out.append((current + stripped).strip())
+        current = ""
+    if current:
+        out.append(current.strip())
+    return out
+
+
+def runtime_copy_sources(dockerfile_text: str) -> list[str]:
+    """The build-context sources of every COPY of the runtime stage (COPY --from excluded)."""
+    sources: list[str] = []
+    in_runtime = False
+    for line in _logical_lines_of(dockerfile_text):
+        if re.match(r"^FROM\s", line, flags=re.IGNORECASE):
+            in_runtime = bool(re.search(r"\bAS\s+runtime$", line, flags=re.IGNORECASE))
+            continue
+        if not in_runtime or not line.startswith("COPY ") or line.startswith("COPY --from="):
+            continue
+        tokens = [t for t in line.split()[1:] if not t.startswith("--")]
+        sources.extend(t.rstrip("/").removeprefix("./") for t in tokens[:-1])
+    return sources
+
+
+def _dockerignore_patterns(text: str) -> list[str]:
+    return [
+        ln.strip()
+        for ln in text.splitlines()
+        if ln.strip() and not ln.strip().startswith("#") and not ln.strip().startswith("!")
+    ]
+
+
+def dockerignore_excluder(path: str, dockerignore_text: str) -> str | None:
+    """The .dockerignore pattern that excludes `path` (or one of its parents), else None."""
+    import fnmatch
+
+    parts = path.split("/")
+    candidates = ["/".join(parts[: i + 1]) for i in range(len(parts))]
+    for pattern in _dockerignore_patterns(dockerignore_text):
+        bare = pattern.strip("/")
+        for candidate in candidates:
+            if fnmatch.fnmatchcase(candidate, bare):
+                return pattern
+            if bare.startswith("**/") and fnmatch.fnmatchcase(
+                candidate.rsplit("/", 1)[-1], bare[3:]
+            ):
+                return pattern
+    return None
+
+
+def missing_runtime_paths(dockerfile_text: str, dockerignore_text: str) -> list[str]:
+    """Every runtime read path that no runtime COPY carries, or that .dockerignore excludes."""
+    sources = runtime_copy_sources(dockerfile_text)
+    missing: list[str] = []
+    for needed in RUNTIME_READ_PATHS:
+        covered = any(needed == s or needed.startswith(s + "/") for s in sources)
+        excluded = dockerignore_excluder(needed, dockerignore_text)
+        if not covered:
+            missing.append(f"{needed} (no COPY in the runtime stage)")
+        elif excluded is not None:
+            missing.append(f"{needed} (excluded by .dockerignore pattern {excluded})")
+    return missing
+
+
+def test_the_runtime_stage_copies_every_path_the_runtime_reads_at_start() -> None:
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    dockerignore = DOCKERIGNORE.read_text(encoding="utf-8")
+    assert missing_runtime_paths(dockerfile, dockerignore) == []
+    assert "COPY params ./params" in _lines()
+    assert "COPY config/paper ./config/paper" in _lines()
+
+
+def test_the_path_check_names_params_when_its_copy_line_is_removed(tmp_path: Path) -> None:
+    """Negative control: a copy of the Dockerfile without the params COPY line fails."""
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    edited = "\n".join(ln for ln in text.splitlines() if ln.strip() != "COPY params ./params")
+    assert edited != "\n".join(text.splitlines()), "the params COPY line must exist to remove it"
+    copy = tmp_path / "Dockerfile"
+    copy.write_text(edited, encoding="utf-8")
+    missing = missing_runtime_paths(
+        copy.read_text(encoding="utf-8"), DOCKERIGNORE.read_text(encoding="utf-8")
+    )
+    assert missing == ["params (no COPY in the runtime stage)"]
+
+
+def test_the_path_check_names_a_dockerignore_exclusion() -> None:
+    """Negative control: a .dockerignore line that excludes config/ fails the check."""
+    dockerignore = DOCKERIGNORE.read_text(encoding="utf-8") + "\nconfig\n"
+    missing = missing_runtime_paths(DOCKERFILE.read_text(encoding="utf-8"), dockerignore)
+    assert missing == ["config/paper (excluded by .dockerignore pattern config)"]
+
+
+# --- 16-55 Task 1: the in-image load check (scripts/check_image_paths.py) -------------------
+
+RUNTIME_CONFIG_V1 = REPO_ROOT / "config" / "paper" / "paper-runtime-v1.toml"
+
+
+def _check_module() -> Any:
+    import importlib
+
+    return importlib.import_module("scripts.check_image_paths")
+
+
+def _config_values() -> list[str]:
+    import tomllib
+
+    raw = tomllib.loads(RUNTIME_CONFIG_V1.read_text(encoding="utf-8"))
+    values: list[str] = []
+    for section in raw.values():
+        for value in section.values():
+            items = value if isinstance(value, list) else [value]
+            values.extend(str(item) for item in items)
+    return values
+
+
+def test_image_check_passes_on_the_repository_and_prints_names_only(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    check = _check_module()
+    code = check.main(
+        ["--root", str(REPO_ROOT)], environ={"PAPER_RUNTIME_CONFIG": str(RUNTIME_CONFIG_V1)}
+    )
+    captured = capsys.readouterr()
+    assert code == 0, captured.err
+    lines = captured.out.splitlines()
+    assert any("trend-pullback/research-run-1-a01" in ln for ln in lines), lines
+    assert any(RUNTIME_CONFIG_V1.as_posix() in ln for ln in lines), lines
+    text = captured.out + captured.err
+    for value in _config_values():
+        assert f"= {value}" not in text and f"={value}" not in text, value
+    assert "initial_equity" not in text and "risk_rate" not in text
+
+
+def test_image_check_fails_naming_the_set_when_params_is_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    check = _check_module()
+    root = tmp_path / "app"
+    (root / "config" / "paper").mkdir(parents=True)
+    config = root / "config" / "paper" / RUNTIME_CONFIG_V1.name
+    config.write_bytes(RUNTIME_CONFIG_V1.read_bytes())
+    code = check.main(["--root", str(root)], environ={"PAPER_RUNTIME_CONFIG": str(config)})
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "trend-pullback/research-run-1-a01" in captured.err
+
+
+@pytest.mark.parametrize("value", [None, "", "/nonexistent/paper-runtime-v1.toml"])
+def test_image_check_fails_naming_the_variable_when_the_config_is_absent(
+    value: str | None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    check = _check_module()
+    environ = {} if value is None else {"PAPER_RUNTIME_CONFIG": value}
+    code = check.main(["--root", str(REPO_ROOT)], environ=environ)
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "PAPER_RUNTIME_CONFIG" in captured.err
+
+
+def test_image_check_with_an_empty_allowlist_exits_0_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import src.paper.freeze as freeze
+
+    monkeypatch.setattr(freeze, "PAPER_START_ALLOWLIST", ())
+    check = _check_module()
+    code = check.main(
+        ["--root", str(REPO_ROOT)], environ={"PAPER_RUNTIME_CONFIG": str(RUNTIME_CONFIG_V1)}
+    )
+    assert code == 0
+    assert "nothing is allowlisted" in capsys.readouterr().out
+
+
+def test_image_check_runs_as_a_module_from_the_root() -> None:
+    """The image runs `python -m scripts.check_image_paths --root /app` with /app as cwd."""
+    import os
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("BINANCE_")}
+    env["PAPER_RUNTIME_CONFIG"] = str(RUNTIME_CONFIG_V1)
+    proc = subprocess.run(
+        [sys.executable, "-m", "scripts.check_image_paths", "--root", str(REPO_ROOT)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr[-500:]

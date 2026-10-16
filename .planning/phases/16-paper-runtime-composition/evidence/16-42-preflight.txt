@@ -1,0 +1,27 @@
+16-42 Task 1 preflight (read-only, 2026-10-16). Nothing was edited; the allowlist is untouched.
+
+Candidate (from evidence/16-48-candidate.txt, validator output VALID):
+strategy_id: trend-pullback
+parameter_set_id: research-run-1-a01
+parameter_set_hash=6f42f70e7e7a107b1be02fc4079fbb70f1408b4307099aa253bd93ebdbce6d87
+strategy_version: v5.0.0 (all 48 sets)
+
+Q-A rule (decisions/16-DEC-Q-A.md, date 2026-10-10, decided by user):
+option: runtime-exact-hash-all
+words: Chon Option 1: runtime-exact-hash-all.
+(Not change-pin-gate, so no D054 update for a pin-gate change is needed at G4-021.)
+
+Tests that assert the production allowlist is empty, or the empty-allowlist message, and so change when the first entry exists (names and lines read from the files):
+tests/test_paper_start_gate.py
+  - test_production_allowlist_is_empty_by_user_decision (line 233; asserts PAPER_START_ALLOWLIST == ())   <- the test named by the plan
+  - test_empty_allowlist_refuses_set_without_rationale_before_any_candle (line 215; asserts the message "the approved allowlist is empty")
+  - test_import_with_the_empty_allowlist_emits_no_error_or_warning (line 581; empty-allowlist import check)
+tests/test_paper_allowlist_entry.py
+  - test_the_production_allowlist_is_still_the_empty_tuple (line 80; asserts PAPER_START_ALLOWLIST == ())
+tests/test_paper_freeze_allowlist_mode.py
+  - test_empty_allowlist_appends_one_skipped_line_and_exits_zero (line 68; asserts PAPER_START_ALLOWLIST == () at line 71)
+  - test_find_allowlist_entry_is_exact_and_refuses_duplicates (line 386; asserts allowlist_entries() == () at line 391)
+Note: the plan text names only the tests of tests/test_paper_start_gate.py; the suites of the other two files also pin the empty allowlist and are in the verify command of Task 3, so Task 3 must revise them too (or the G4-021 decision must say how).
+Shape tests that stay valid for one entry: test_allowlist_entry_shape_and_privacy (line 1068), the AST guard tests of tests/test_paper_start_gate.py (lines 604 to 880: exactly one module-level tuple-literal binding).
+
+Open checkpoint after this preflight: Task 2 (G4-021, user decision exact-entry-pin or postpone, with the user's D054 item (i) wording); Task 3 (the user commits the entry).

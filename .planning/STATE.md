@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: executing
-stopped_at: Completed 16-30, 16-31, 16-34, 16-38, 16-39, 16-47, 16-51, 16-52; tracers done for 16-40 and 16-49 (Tasks 2-3 wait for the user: host + Telegram, bucket + O-01 apply reply)
-last_updated: "2026-10-10T03:22:12.243Z"
+stopped_at: Completed 16-55-PLAN.md
+last_updated: "2026-10-16T08:51:50.047Z"
 last_activity: 2026-10-15
 last_activity_desc: Phase 16 execution started
-state_head: 577767b5b88a19ff7d7c4de06bc3fc6020ea766a
+state_head: ebba3cb9256fa945c0931a49d2d64d782faa559c
 progress:
   total_phases: 29
   completed_phases: 17
-  total_plans: 195
-  completed_plans: 172
+  total_plans: 231
+  completed_plans: 196
 milestone_name: milestone
 ---
 
@@ -213,6 +213,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P35 | 12 min | 2 tasks | 5 files |
 | Phase 16 P16 | 12min | 3 tasks | 4 files |
 | Phase 16 P19 | 55min | 3 tasks | 5 files |
+| Phase 16 P55 | 120min | 4 tasks | 40 files |
 
 ## Accumulated Context
 
@@ -519,6 +520,8 @@ Recent decisions affecting current work:
 - [Phase 16]: Q-J (user): paper runtime state is journal rows only (PgRuntimeState via PgJournalStore, entity PaperRuntime); no migration, no table
 - [Phase 16]: [16-19] Q-B (user): SHADOW fill eligibility = recorded CONFIRM instant floored to the minute plus one minute, passed as advance start_exclusive; no simulator change
 - [Phase 16]: [16-19] Live 1m trade and mark minutes by REST polling; poll cadence and close lag are required inputs (O-07); driver advances only to the shared settled watermark
+- [Phase 16]: 16-55: soak backups use a separate BACKUP_S3_BUCKET (own crypt passwords, own --init-remote); deploy/backup.sh --install-soak-timer refuses an empty or shared bucket; backup_remote.py layout unchanged (orchestrator option a; owner creates the bucket before 16-43)
+- [Phase 16]: 16-55: instance lease is one fixed paper-runtime scope per database (session advisory lock), not per epoch id, because the pin mints the epoch id after the lease must be held
 
 ### Pending Todos
 
@@ -547,6 +550,11 @@ Recent decisions affecting current work:
 | 261009-jqi | Vietnamese operator deploy/operations guide docs/operations/DEPLOY_GUIDE.vi.md plus traceability checker | 2026-10-09 | 894d359 | [261009-jqi-vietnamese-operator-deployment-guide-dep](./quick/261009-jqi-vietnamese-operator-deployment-guide-dep/) |
 | 261014-cvk | Research protocol v2.3.0: declared exchange-constraint assumption (D068) and one global Holm for G3 over 48 hypotheses (D069) | 2026-10-14 | f80e0a2 | [261014-cvk-protocol-v2-3-0-amendment-d068-d069-land](./quick/261014-cvk-protocol-v2-3-0-amendment-d068-d069-land/) |
 | 261014-nnl | S-B-interval: REEFUSDT terminal settlement as a bounded interval (manifest terminal_settlements, engine SETTLEMENT/SETTLEMENT_CANCEL, simulator 2.1.0, protocol v2.4.0 D070/D071); 10 plans, gates green, REEF diagnostic 48/48 | 2026-10-15 | ded32f7 | [261014-nnl-plan-s-b-interval-implementation-plan-on](./quick/261014-nnl-plan-s-b-interval-implementation-plan-on/) |
+| 261015-mvq | compute_features computes the last bar only, byte-identical (core performance; 14x on the function, 3-10x on engine runs; simulator stays 2.1.0) | 2026-10-15 | a64e6af | [261015-mvq-optimise-compute-features-last-bar-only-](./quick/261015-mvq-optimise-compute-features-last-bar-only-/) |
+| 261015-o9l | Manifest build command (python -m src.research.manifest --build from the O-03b record); draft S0 manifest hash ec161733 outside the repo, not frozen | 2026-10-15 | f0f5366 | [261015-o9l-manifest-build-command-for-the-research-](./quick/261015-o9l-manifest-build-command-for-the-research-/) |
+| 261015-pdb | Research runner: per-point records and window checkpoints (--checkpoint-dir, resume); default behaviour unchanged | 2026-10-15 | (this commit) | [261015-pdb-research-runner-per-point-records-and-sp](./quick/261015-pdb-research-runner-per-point-records-and-sp/) |
+| 261016-pre | Close 16-41, ROADMAP/REQUIREMENTS bookkeeping (BKTS-03 complete), 16-42 Task 1 preflight | 2026-10-16 | (this commit) | [261016-pre-close-16-41-roadmap-state-and-16-42-pre](./quick/261016-pre-close-16-41-roadmap-state-and-16-42-pre/) |
+| 261016-alw | 16-42 Tasks 2 and 3: G4-021 exact-entry-pin, allowlist entry research-run-1-a01, tests and D054 item (i) | 2026-10-16 | (this commit) | [261016-alw-allowlist-entry-research-run-1-a01-g4-021](./quick/261016-alw-allowlist-entry-research-run-1-a01-g4-021/) |
 
 ### Roadmap Evolution
 
@@ -597,6 +605,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-09T15:47:52.747Z
-Stopped at: Completed 16-19-PLAN.md
+Last session: 2026-10-16T08:51:48.795Z
+Stopped at: Completed 16-55-PLAN.md
 Resume file: None

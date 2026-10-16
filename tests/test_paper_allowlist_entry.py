@@ -1,7 +1,8 @@
 """Plan 16-02 (D-03, review IN-01): a `PaperAllowlistEntry` validates every field at construction.
 
-The production allowlist is empty by the user's decision (checkpoint 15-17-01, Option B), so an
-entry only ever exists because the user approved one later. A malformed entry must fail loudly,
+The production allowlist shipped empty (checkpoint 15-17-01, Option B) and holds the user's single
+entry since checkpoint G4-021 (2026-10-16), so an entry only ever exists because the user approved
+one. A malformed entry must fail loudly,
 naming the field, instead of sitting in the tuple as a dead entry that only yields a generic
 refusal. These tests build entries directly and never touch `params/` or the allowlist itself.
 """
@@ -77,8 +78,10 @@ def test_a_non_str_field_raises_type_error_naming_the_field(field: str, value: o
         _build(**{field: value})
 
 
-def test_the_production_allowlist_is_still_the_empty_tuple() -> None:
-    assert PAPER_START_ALLOWLIST == ()
+def test_the_production_allowlist_holds_exactly_the_users_one_entry() -> None:
+    assert [(e.strategy_id, e.parameter_set_id) for e in PAPER_START_ALLOWLIST] == [
+        ("trend-pullback", "research-run-1-a01")
+    ]
 
 
 def test_a_valid_injected_entry_still_never_admits_a_set_with_rationale_tables(

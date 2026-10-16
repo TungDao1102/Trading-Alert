@@ -4,6 +4,9 @@ The paper runtime writes every record that must survive a restart or explain a g
 port (D-04, D-06, L-04 "no duplicate signal and no missing journal row"): the pinned epoch, the
 last processed close per (symbol, interval), gaps, heartbeats and runtime markers.
 
+The port also carries the instance lease (plan 16-55, B1-WR-07): one paper runtime per database,
+taken before any record; the PostgreSQL port holds it as a session advisory lock.
+
 Pure module: stdlib and the pure domain helpers, no SQLAlchemy and no adapter (the PostgreSQL
 implementation lives in `src/persistence/paper_runtime_state.py`, per the Q-J decision
 "journal-only": every record is a journal event, no second persistence mechanism).
@@ -43,6 +46,7 @@ the id rules above read `history_seq` of the latter and nothing of the former.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -297,6 +301,42 @@ def last_closes(records: Sequence[RuntimeRecord]) -> dict[tuple[str, str], datet
     return out
 
 
+# --------------------------------------------------------------------------- #
+# The instance lease: one paper runtime per database (plan 16-55, review B1-WR-07).
+# --------------------------------------------------------------------------- #
+
+# The scope every paper runtime and every pin leases. One scope per database, not one per epoch:
+# the epoch id hashes the opening time, so a pin learns its epoch only by pinning, and the lease
+# must already be held then (before the pin branch and before any record). Only the latest pin is
+# ever runnable (REV-18), so one runtime per database is one runtime per epoch, and a pin can
+# never run beside any runtime of the database.
+INSTANCE_LEASE_SCOPE = "paper-runtime"
+
+_LEASE_KEY_DOMAIN = b"trading-alert:paper-runtime-instance-lease:"
+
+
+def instance_lease_key(scope: str) -> int:
+    """A stable non-negative 63-bit key of a lease scope (the first 8 bytes of a SHA-256).
+
+    PostgreSQL advisory locks take a signed 64-bit key; the top bit is cleared so the key and its
+    two 32-bit halves in `pg_locks` (classid, objid) are the same on every platform.
+    """
+    digest = hashlib.sha256(_LEASE_KEY_DOMAIN + scope.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
+class InstanceLease(Protocol):
+    """A held instance lease. Held for the life of the process until `release`."""
+
+    def is_held(self) -> bool:
+        """True while the lease is still this process's; False when lost or unverifiable."""
+        ...
+
+    def release(self) -> None:
+        """Give the lease up (idempotent, best effort, never raises)."""
+        ...
+
+
 class RuntimeStatePort(Protocol):
     """The one storage port for state that must survive a restart. Synchronous by design:
     the runtime wraps it in `asyncio.to_thread` (phase 24 item G4-040 stays open)."""
@@ -332,12 +372,46 @@ class RuntimeStatePort(Protocol):
         """
         ...
 
+    def acquire_instance_lease(self, scope: str) -> InstanceLease | None:
+        """Take the instance lease of `scope` for this process, or None when another holds it.
+
+        Never waits: a held lease is a refusal of the start (plan 16-55, B1-WR-07). The lease
+        ends with `release` or with the process (PostgreSQL: with the holding session).
+        """
+        ...
+
+
+class InMemoryInstanceLease:
+    """A lease of the in-memory port: held while its port's registry maps the scope to it."""
+
+    def __init__(self, registry: dict[str, InMemoryInstanceLease], scope: str) -> None:
+        self._registry = registry
+        self._scope = scope
+        self._lost = False
+
+    def is_held(self) -> bool:
+        return not self._lost and self._registry.get(self._scope) is self
+
+    def release(self) -> None:
+        if self._registry.get(self._scope) is self:
+            del self._registry[self._scope]
+
+    def lose(self) -> None:
+        """Test seam: the lease disappears, as a session lock does when its connection drops."""
+        self._lost = True
+        self.release()
+
 
 class InMemoryRuntimeState:
-    """In-memory port: the reference behaviour the PostgreSQL implementation must match."""
+    """In-memory port: the reference behaviour the PostgreSQL implementation must match.
+
+    One instance models one database, so its lease registry is shared by every `main` call that
+    is handed the same instance (two processes on one database).
+    """
 
     def __init__(self) -> None:
         self._by_id: dict[str, RuntimeRecord] = {}
+        self._leases: dict[str, InMemoryInstanceLease] = {}
 
     def record(self, record: RuntimeRecord) -> None:
         event_id = runtime_event_id(record)
@@ -374,12 +448,28 @@ class InMemoryRuntimeState:
         newest = max(r.occurred_at_utc for r in pins)
         return sorted((r for r in pins if r.occurred_at_utc == newest), key=record_sort_key)
 
+    def acquire_instance_lease(self, scope: str) -> InMemoryInstanceLease | None:
+        if scope in self._leases:
+            return None
+        lease = InMemoryInstanceLease(self._leases, scope)
+        self._leases[scope] = lease
+        return lease
+
+    def lose_instance_lease(self, scope: str) -> None:
+        """Test seam: the holder of `scope` loses its lease without releasing it."""
+        lease = self._leases.get(scope)
+        if lease is not None:
+            lease.lose()
+
 
 __all__ = [
     "ENTITY_TYPE",
     "EVENT_ID_PREFIX",
+    "INSTANCE_LEASE_SCOPE",
     "RUNTIME_ENTITY_ID",
+    "InMemoryInstanceLease",
     "InMemoryRuntimeState",
+    "InstanceLease",
     "RuntimeRecord",
     "RuntimeRecordConflict",
     "RuntimeStatePort",
@@ -389,6 +479,7 @@ __all__ = [
     "runtime_correlation_id",
     "runtime_correlation_prefix",
     "runtime_entity_id",
+    "instance_lease_key",
     "runtime_event_id",
     "same_content",
 ]

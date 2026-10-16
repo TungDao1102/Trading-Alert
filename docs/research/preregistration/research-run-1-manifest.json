@@ -1,0 +1,75 @@
+{
+  "constraint_sha256": "4307eec74feeab04081b872866895f70568f1d289b8a249fc7de702e71e11d3f",
+  "constraint_source": "docs/research/preregistration/research-run-1-constraints-baseline.json",
+  "context_interval": "4h",
+  "data_source": "binance-usdm-public",
+  "data_source_version": "local-data/raw Parquet snapshot; inventory_sha256=b9b8426a31a2821d27d07fc49457cabcdc7cd887910b8185269de3bfa5982b34; inventory verified 2026-10-13; partitions through 2026-10-02",
+  "dataset_id": "34a1efa2622b04eca14af58365d5d9d539525e8982c1271e1a9d5b006d18d7d2",
+  "development_end_utc": "2025-07-22T00:00:00+00:00",
+  "development_start_utc": "2024-10-03T00:00:00+00:00",
+  "equity": "600",
+  "excluded_periods": [],
+  "holdout_end_utc": "2026-10-03T00:00:00+00:00",
+  "holdout_start_utc": "2026-05-10T00:00:00+00:00",
+  "known_gaps": [
+    {
+      "reason": "DELISTED_CAPPED",
+      "source_url": "https://www.binance.com/en/support/announcement/detail/572715f2d96e47769ebbb967c2a6e445",
+      "symbol": "REEFUSDT",
+      "terminal_at_utc": "2025-01-22T09:00:00+00:00"
+    }
+  ],
+  "risk_rate": "0.005",
+  "strategy_interval": "1h",
+  "symbols": [
+    "1000PEPEUSDT",
+    "BNBUSDT",
+    "BTCUSDT",
+    "DOGEUSDT",
+    "DOGSUSDT",
+    "ETHUSDT",
+    "REEFUSDT",
+    "SOLUSDT",
+    "SUIUSDT",
+    "WIFUSDT",
+    "WLDUSDT",
+    "XRPUSDT"
+  ],
+  "terminal_settlements": [
+    {
+      "bound_window_start_utc": "2025-01-22T08:30:00+00:00",
+      "condition": "unverified assumptions: settlement is the mean of per-second index values over 08:30-09:00 UTC, 60 equal-weight samples per minute, klines serve unrevised history, rounding within one tick; the 09:00 trade candle (open = close = 0.000880, 102 trades) lies above the index bound and is not read as the settlement price",
+      "index_klines": {
+        "path": "docs/research/preregistration/evidence/terminal-settlement/REEFUSDT/B_indexPriceKlines_before_settlement.body.json",
+        "sha256": "56afae6cbbbfe185876432143936d492f727b2fc0236b1d3537c033e714769b8"
+      },
+      "index_lower": "0.000852",
+      "index_upper": "0.000869",
+      "kind": "BOUNDED_BY_INDEX_KLINES",
+      "nominal_lower": "5123/6000000",
+      "nominal_upper": "347/400000",
+      "official_confirmation": null,
+      "price_lower": "0.000845",
+      "price_tick_size": "0.000001",
+      "price_upper": "0.000887",
+      "recorded_evaluation": "UNION_ADVERSE_BOUND",
+      "samples_per_minute": 60,
+      "supporting_evidence": [
+        {
+          "path": "docs/research/preregistration/evidence/terminal-settlement/REEFUSDT/F_indexklines_sample_day.body.json",
+          "sha256": "c3e7ef5b419678031a05fbf33a78067bd5c5590f90823580ac05daa68b39f176"
+        }
+      ],
+      "symbol": "REEFUSDT",
+      "trade_candle_high": "0.000887",
+      "trade_candle_low": "0.000845",
+      "trade_kline": {
+        "path": "docs/research/preregistration/evidence/terminal-settlement/REEFUSDT/A_klines_after_settlement.body.json",
+        "sha256": "2a82295368afc1fe31f0661e735f458ebc035f106782349b530d3e8f7deb2fa1"
+      }
+    }
+  ],
+  "universe_id": "research-universe-v1",
+  "validation_end_utc": "2026-05-10T00:00:00+00:00",
+  "validation_start_utc": "2025-07-22T00:00:00+00:00"
+}
