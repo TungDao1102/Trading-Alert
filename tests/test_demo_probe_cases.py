@@ -8,6 +8,8 @@ file is read through the script's own default path.
 
 from __future__ import annotations
 
+import ast
+import inspect
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -25,6 +27,7 @@ from tests.probe_fakes import (
     FakeProbePort,
     RecordingProbePort,
     error_observation,
+    fake_symbol_filters,
     ok_observation,
     write_probe_limits,
 )
@@ -1393,3 +1396,475 @@ async def test_closeposition_stop_flat_runs_in_hedge_mode_with_the_long_side(
     assert case(document, "closeposition_stop_flat")["status"] == dp.OBSERVED
     (leg,) = sent(port, "new_conditional_order")
     assert leg["position_side"] == "LONG"
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: the G2-029 additions.
+# --------------------------------------------------------------------------- #
+
+BELOW_MIN = "below_min_notional_reduce_only_leg"
+TRIGGERED = "triggered_market_exit_lifecycle"
+
+
+def _filters(**changes: str) -> Any:
+    summary = dict(fake_symbol_filters("BTCUSDT").summary)
+    summary.update(changes)
+    return ok_observation("symbol_filters", summary)
+
+
+async def test_below_min_notional_impossible_is_not_observed_and_sends_nothing(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    # 0.001 * 48000.00 = 48 is not below a minimum notional of 40
+    port.script_call("symbol_filters", 1, _filters(min_notional="40"))
+    document, _, _ = await run_cases(tmp_path, port, BELOW_MIN)
+    record = case(document, BELOW_MIN)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == (
+        "the smallest valid quantity 0.001 at trigger 48000.00 has notional 48.00000, "
+        "not below the minimum notional 40"
+    )
+    assert not any(name in ORDER_SENDS for name in port.names())
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+async def test_below_min_notional_leg_records_accept_or_the_exact_reject(
+    tmp_path: Path, accepted: bool
+) -> None:
+    port = FakeProbePort()
+    if not accepted:
+        port.script(
+            "new_conditional_order",
+            error_observation(
+                "new_conditional_order",
+                code=-4164,
+                category="REJECTED_DEFINITIVE",
+                message="FAKE Order's notional must be no smaller than 100",
+            ),
+        )
+    document, code, _ = await run_cases(tmp_path, port, BELOW_MIN)
+    record = case(document, BELOW_MIN)
+    assert record["status"] == dp.OBSERVED, record
+    (entry,) = sent(port, "new_limit_order")
+    assert entry["price"] == MARKETABLE and entry["quantity"] == APPROVED
+    (leg,) = sent(port, "new_conditional_order")
+    assert leg["quantity"] == Decimal("0.001") and leg["reduce_only"] is True
+    assert leg["trigger_price"] == FAR_BELOW and leg["order_type"] == "STOP_MARKET"
+    details = record["details"]
+    assert details["smallest_quantity"] == "0.001"
+    assert details["leg_notional"] == "48.00000"
+    assert details["leg_accepted"] == ("true" if accepted else "false")
+    if not accepted:
+        error = next(item["error"] for item in record["observations"] if not item["ok"])
+        assert error["code"] == -4164
+    assert record["cleanup"]["status"] == dp.CLEANUP_FLAT
+    assert code == dp.EXIT_OK
+
+
+async def test_below_min_notional_without_a_position_is_not_observed(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.fill_marketable = False
+    document, _, _ = await run_cases(tmp_path, port, BELOW_MIN)
+    record = case(document, BELOW_MIN)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "no open position: the entry did not fill: status NEW"
+    assert sent(port, "new_conditional_order") == []
+
+
+async def test_a_quantity_above_the_approved_one_refuses_the_case_and_sends_nothing(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    # the smallest valid quantity (0.005) is above the approved 0.002; its notional at the
+    # far trigger (240) is below the minimum notional (1000), so the case would send it
+    port.script_call("symbol_filters", 1, _filters(min_quantity="0.005", min_notional="1000"))
+    document, _, _ = await run_cases(tmp_path, port, BELOW_MIN)
+    record = case(document, BELOW_MIN)
+    assert record["status"] == dp.ERROR
+    assert "above the approved quantity" in record["reason"]
+    assert not any(name in ORDER_SENDS for name in port.names())
+
+
+def _trigger_latest(port: FakeProbePort) -> None:
+    port.on_wait.append(lambda: port.trigger_algo(port.open_algo_ids[-1]))
+
+
+async def test_the_triggered_exit_lifecycle_is_observed_with_the_child_identity(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    _trigger_latest(port)
+    vt = VirtualTime()
+    document, code, _ = await run_cases(tmp_path, port, TRIGGERED, vt=vt)
+    record = case(document, TRIGGERED)
+    assert record["status"] == dp.OBSERVED, record
+    (entry,) = sent(port, "new_limit_order")
+    assert entry["price"] == MARKETABLE
+    (leg,) = sent(port, "new_conditional_order")
+    assert leg["order_type"] == "STOP_MARKET" and leg["side"] == "SELL"
+    assert leg["reduce_only"] is True and leg["quantity"] == APPROVED
+    assert leg["trigger_price"] == JUST_BELOW and leg["working_type"] == "MARK_PRICE"
+    assert vt.sleeps == [TEST_ONLY_CASE_TIMEOUT_SECONDS]  # one wait_up_to of the case timeout
+    details = record["details"]
+    assert details["algo_statuses_frames"] == "TRIGGERING,TRIGGERED,FINISHED"
+    assert details["algo_statuses_rest"] == "NEW,FINISHED"
+    assert details["child_ai"] == "FAKE-CHILD-1"
+    assert details["child_aq"] == "0.002"
+    assert details["child_c"] == "FAKE-CHILD-C"
+    assert details["child_i"] == "FAKE-CHILD-1"
+    assert details["filter_market_lot_max_quantity"] == "120"
+    assert details["filter_max_quantity"] == "1000"
+    assert details["market_lot_size_question"] == (
+        "NOT_OBSERVED at the approved size: the optional case market_lot_size_out_of_range "
+        "is not enabled"
+    )
+    assert code == dp.EXIT_OK
+
+
+async def test_the_triggered_exit_not_reached_within_the_case_timeout_is_not_observed(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    vt = VirtualTime()
+    document, _, _ = await run_cases(tmp_path, port, TRIGGERED, vt=vt)
+    record = case(document, TRIGGERED)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "the trigger was not reached within case_timeout_seconds"
+    assert vt.sleeps == [TEST_ONLY_CASE_TIMEOUT_SECONDS]
+    assert record["details"]["child_ai"].startswith("NOT_OBSERVED")
+    assert record["observations"]  # the answers are kept with the reason
+
+
+async def test_a_rejected_exit_leg_is_not_observed_with_the_answer(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.script(
+        "new_conditional_order",
+        error_observation("new_conditional_order", code=-2021, category="REJECTED_DEFINITIVE"),
+    )
+    vt = VirtualTime()
+    document, _, _ = await run_cases(tmp_path, port, TRIGGERED, vt=vt)
+    record = case(document, TRIGGERED)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "the exit leg was not accepted: BAD_REQUEST -2021"
+    assert vt.sleeps == []
+
+
+async def test_the_triggered_exit_names_the_optional_market_lot_case_when_enabled(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    _trigger_latest(port)
+    document, _, _ = await run_cases(
+        tmp_path,
+        port,
+        TRIGGERED,
+        "market_lot_size_out_of_range",
+        optional=("market_lot_size_out_of_range",),
+    )
+    assert case(document, TRIGGERED)["details"]["market_lot_size_question"] == (
+        "NOT_OBSERVED at the approved size; the optional case market_lot_size_out_of_range "
+        "of this run answers it"
+    )
+
+
+@pytest.mark.parametrize("case_id", [BELOW_MIN, TRIGGERED])
+async def test_the_g2_029_cases_are_not_observed_in_hedge_mode(
+    tmp_path: Path, case_id: str
+) -> None:
+    port = FakeProbePort(dual_side=True)
+    document, _, _ = await run_cases(tmp_path, port, case_id)
+    record = case(document, case_id)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "hedge mode: reduceOnly cannot be sent"
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: the optional cases.
+# --------------------------------------------------------------------------- #
+
+
+async def test_the_explicit_time_in_force_variant_sends_one_leg_per_documented_value(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    port.script_call(
+        "new_conditional_order",
+        4,
+        error_observation("new_conditional_order", code=-1106, category="REJECTED_DEFINITIVE"),
+    )
+    document, _, _ = await run_cases(
+        tmp_path, port, "explicit_time_in_force_variant", optional=("explicit_time_in_force",)
+    )
+    record = case(document, "explicit_time_in_force_variant")
+    assert record["status"] == dp.OBSERVED
+    legs = sent(port, "new_conditional_order")
+    assert [kw["time_in_force"] for kw in legs] == ["GTC", "IOC", "FOK", "GTX", "GTD", "RPI"]
+    for kw in legs:
+        _assert_preplaced_leg(kw)
+    assert len({kw["client_algo_id"] for kw in legs}) == 6
+    assert record["details"]["leg_GTD"].startswith("rejected BAD_REQUEST -1106")
+    assert len(record["observations"]) == 6  # one answer each, none retried
+
+
+@pytest.mark.parametrize(
+    ("key", "case_id"),
+    [
+        ("explicit_time_in_force", "explicit_time_in_force_variant"),
+        ("stream_gap", "stream_gap_during_case"),
+        ("market_lot_size_out_of_range", "market_lot_size_out_of_range"),
+    ],
+)
+def test_an_optional_case_runs_only_when_enabled(tmp_path: Path, key: str, case_id: str) -> None:
+    assert case_id not in make_config(tmp_path, execute=True).case_ids
+    assert case_id in make_config(tmp_path, execute=True, optional=(key,)).case_ids
+
+
+async def test_the_stream_gap_case_without_a_stream_is_not_observed(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    document, _, _ = await run_cases(
+        tmp_path, port, "stream_gap_during_case", optional=("stream_gap",)
+    )
+    record = case(document, "stream_gap_during_case")
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "no stream running"
+    assert "drop_stream_transport" in port.names()
+    (order,) = sent(port, "new_limit_order")
+    assert order["price"] == FAR_BELOW
+
+
+async def test_the_stream_gap_case_records_the_recovery_and_reconciles(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.drop_results.append(True)
+    for state in ("UNKNOWN", "CONNECTING", "SYNCING", "LIVE"):
+        port.on_wait.append(lambda state=state: port.emit_state(state))
+    vt = VirtualTime()
+    document, code, _ = await run_cases(
+        tmp_path, port, "stream_gap_during_case", optional=("stream_gap",), vt=vt
+    )
+    record = case(document, "stream_gap_during_case")
+    assert record["status"] == dp.OBSERVED, record
+    assert vt.sleeps == [TEST_ONLY_CASE_TIMEOUT_SECONDS]
+    details = record["details"]
+    assert details["transport_dropped"] == "true"
+    assert details["stream_states_after_drop"] == "UNKNOWN,CONNECTING,SYNCING,LIVE"
+    assert details["stream_recovered_live"] == "true"
+    assert details["reconciliation_expected"] == "open_orders=1 open_algo_orders=0 position=0"
+    assert details["reconciliation_matches"] == "true"
+    assert len(sent(port, "cancel_order")) == 1
+    assert code == dp.EXIT_OK
+
+
+async def test_the_market_lot_case_places_the_owner_approved_quantity(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.script(
+        "new_conditional_order",
+        error_observation(
+            "new_conditional_order",
+            code=-4005,
+            category="REJECTED_DEFINITIVE",
+            message="FAKE Quantity greater than max quantity.",
+        ),
+    )
+    document, _, _ = await run_cases(
+        tmp_path,
+        port,
+        "market_lot_size_out_of_range",
+        optional=("market_lot_size_out_of_range",),
+    )
+    record = case(document, "market_lot_size_out_of_range")
+    # the placement answer is the finding: OBSERVED with the exact answer
+    assert record["status"] == dp.OBSERVED
+    (leg,) = sent(port, "new_conditional_order")
+    assert leg["quantity"] == Decimal("200")  # notional ~12 million: the cap is not applied
+    assert leg["reduce_only"] is True and leg["trigger_price"] == JUST_BELOW
+    error = next(item["error"] for item in record["observations"] if not item["ok"])
+    assert error["code"] == -4005
+    assert record["details"]["market_lot_probe_quantity"] == "200"
+
+
+async def test_the_market_lot_case_accepted_follows_the_lifecycle(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    _trigger_latest(port)
+    document, _, _ = await run_cases(
+        tmp_path,
+        port,
+        "market_lot_size_out_of_range",
+        optional=("market_lot_size_out_of_range",),
+    )
+    record = case(document, "market_lot_size_out_of_range")
+    assert record["status"] == dp.OBSERVED
+    assert record["details"]["algo_statuses_frames"] == "TRIGGERING,TRIGGERED,FINISHED"
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: ban and rate limit in a write case.
+# --------------------------------------------------------------------------- #
+
+REUSE_ALGO = "id_reuse_after_canceled_algo"
+
+
+@pytest.mark.parametrize("port_banned", [False, True])
+async def test_a_ban_in_a_write_case_aborts_the_run_with_one_cleanup_attempt(
+    tmp_path: Path, port_banned: bool
+) -> None:
+    port = FakeProbePort()
+    port.banned = port_banned
+    port.script("cancel_algo_order", ProbeBanned(IP_BAN_418, 600))
+    document, code, _ = await run_cases(tmp_path, port, REUSE_ALGO, "id_reuse_after_filled")
+    assert document["outcome"] == dp.OUTCOME_ABORTED_BAN
+    assert code == dp.EXIT_FAILED
+    assert case(document, REUSE_ALGO)["reason"] == dp.REASON_BAN
+    later = case(document, "id_reuse_after_filled")
+    assert later["status"] == dp.NOT_OBSERVED and later["reason"] == dp.REASON_BAN
+    ban = document["ban"]
+    assert ban["reason"] == IP_BAN_418 and ban["during"] == REUSE_ALGO
+    carrier = sent(port, "new_conditional_order")[0]["client_algo_id"]
+    assert ban["known_state"]["algo_orders_not_known_closed"] == carrier
+    assert ban["case_observations"][0]["ok"] is True  # the carrier's answer is kept
+    after_ban = port.names()[port.names().index("cancel_algo_order") + 1 :]
+    if port_banned:
+        assert after_ban == []
+        assert ban["cleanup_after_ban"]["status"] == dp.CLEANUP_NOT_VERIFIED
+        assert "adapter reports a ban" in ban["cleanup_after_ban"]["reason"]
+    else:
+        assert after_ban[:2] == ["cancel_all_open_orders", "cancel_all_algo_open_orders"]
+        assert after_ban.count("cancel_all_open_orders") == 1  # attempted once
+        assert ban["cleanup_after_ban"]["status"] == dp.CLEANUP_FLAT
+    assert document["cleanup"]["final"]["status"] == dp.CLEANUP_NOT_VERIFIED
+
+
+async def test_a_ban_refusing_the_cleanup_after_a_ban_is_recorded(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.script("cancel_algo_order", ProbeBanned(IP_BAN_418, 600))
+    port.script("cancel_all_open_orders", ProbeBanned(IP_BAN_418, 599))
+    document, _, _ = await run_cases(tmp_path, port, REUSE_ALGO)
+    cleanup = document["ban"]["cleanup_after_ban"]
+    assert cleanup["status"] == dp.CLEANUP_NOT_VERIFIED
+    assert cleanup["reason"] == f"refused: {IP_BAN_418}"
+
+
+async def test_a_rate_limit_answer_in_a_write_case_stops_the_case_and_the_run(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    port.script(
+        "new_conditional_order",
+        error_observation(
+            "new_conditional_order",
+            code=-1003,
+            category="RATE_LIMITED",
+            http_class="TOO_MANY_429",
+            retry_after_seconds=None,
+        ),
+    )
+    document, code, _ = await run_cases(tmp_path, port, "duplicate_client_algo_id", REUSE_ALGO)
+    record = case(document, "duplicate_client_algo_id")
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"].startswith("a rate-limit answer")
+    assert record["observations"][0]["error"]["category"] == "RATE_LIMITED"
+    assert port.names()[-1] == "new_conditional_order"  # nothing after the answer
+    assert document["outcome"] == dp.OUTCOME_ABORTED_BAN
+    assert case(document, REUSE_ALGO)["reason"] == dp.REASON_BAN
+    assert code == dp.EXIT_FAILED
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: completeness of the registry, the dry run and handler purity.
+# --------------------------------------------------------------------------- #
+
+
+def test_every_case_id_has_a_registered_handler() -> None:
+    assert set(dp.CASE_HANDLERS) == set(dp.REQUIRED_CASES) | set(dp.OPTIONAL_CASES.values())
+    assert set(dp.CASE_HANDLERS) == set(dp.CASE_ORDER)
+    for case_id in dp.OPTIONAL_CASES.values():
+        assert case_id in dp.CASE_HANDLERS
+
+
+async def test_the_dry_run_with_every_optional_case_rehearses_every_handler_without_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = make_config(tmp_path, optional=ALL_OPTIONAL)
+    invoked: list[str] = []
+    wrapped: dict[str, dp.CaseHandler] = {}
+    for case_id, handler in dp.CASE_HANDLERS.items():
+
+        def make(cid: str, inner: dp.CaseHandler) -> dp.CaseHandler:
+            async def counting(context: dp.CaseContext) -> dp.CaseResult:
+                invoked.append(cid)
+                return await inner(context)
+
+            return counting
+
+        wrapped[case_id] = make(case_id, handler)
+    monkeypatch.setattr(dp, "CASE_HANDLERS", wrapped)
+    recorder = dp.ProbeRecorder()
+    code = await dp.run_probe(config, dp.build_dry_run_rig(config), recorder)
+    document = recorder.document(config)
+    assert code == dp.EXIT_OK and document["outcome"] == dp.OUTCOME_COMPLETE
+    assert invoked == list(dp.CASE_ORDER)  # every handler once, in CASE_ORDER
+    assert [item["case_id"] for item in document["cases"]] == list(dp.CASE_ORDER)
+    for item in document["cases"]:
+        assert item["status"] == dp.NOT_REHEARSED
+        assert item["handler_registered"] is True
+    assert not [cid for cid, result in recorder.results.items() if result.status == dp.ERROR], {
+        cid: result.reason for cid, result in recorder.results.items()
+    }
+    planned = {item["case_id"]: item["planned_requests"] for item in document["cases"]}
+    assert [r["operation"] for r in planned["duplicate_client_algo_id"]] == [
+        "new_conditional_order",
+        "new_conditional_order",
+        "cancel_algo_order",
+    ]
+    assert any(r["operation"] == "new_limit_order" for r in planned["id_reuse_after_filled"])
+    assert planned["partial_fill"] == []  # derived: nothing is sent
+    for requests in planned.values():
+        for request in requests:
+            if request["operation"].startswith("new_"):
+                assert request["mutating"] is True
+
+
+def _function_nodes(tree: ast.Module) -> dict[str, ast.AST]:
+    return {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+
+def test_no_handler_sleeps_and_every_case_wait_is_the_owners_case_timeout() -> None:
+    tree = ast.parse(Path(dp.__file__).read_text(encoding="utf-8"))
+    functions = _function_nodes(tree)
+    sleep_callers: set[str] = set()
+    waits: list[tuple[str, str, str]] = []
+    for name, node in functions.items():
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            text = ast.unparse(call.func)
+            if text == "sleep" or text.endswith(".sleep"):
+                sleep_callers.add(name)
+            if text == "wait_up_to":
+                assert len(call.args) == 3, ast.unparse(call)
+                waits.append((name, ast.unparse(call.args[0]), ast.unparse(call.args[2])))
+    # the only sleep call of the script is the rig's sleep inside wait_up_to
+    assert sleep_callers == {"wait_up_to"}
+    assert waits, "the write cases wait through wait_up_to"
+    for name, rig, timeout in waits:
+        assert rig.endswith("rig"), (name, rig)
+        if name == "cleanup_symbol":
+            assert timeout == "timeout_seconds"
+        else:
+            assert timeout.endswith("case_timeout_seconds"), (name, timeout)
+    for handler in dp.CASE_HANDLERS.values():
+        source = inspect.getsource(handler)
+        assert "asyncio.sleep" not in source and "time.sleep" not in source
+
+
+async def test_a_case_wait_sleeps_exactly_the_owners_case_timeout(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.fill_marketable = False
+    vt = VirtualTime()
+    await run_cases(tmp_path, port, "id_reuse_after_filled", vt=vt)
+    config = make_config(tmp_path, execute=True)
+    assert vt.sleeps == [config.order_limits.case_timeout_seconds]
