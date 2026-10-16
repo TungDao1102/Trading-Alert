@@ -898,29 +898,29 @@ Plans:
 
 Plans:
 - [x] 18-01-PLAN.md - Re-read Binance docs, new SOURCES section (all 15 pages UNVERIFIED from this machine)
-- [ ] 18-02-PLAN.md - O-18-01 / O-18-04 ratification table and user decision record
-- [ ] 18-03-PLAN.md - User-data event types, ORDER_TRADE_UPDATE tracer, design-review gate
+- [x] 18-02-PLAN.md - O-18-01 / O-18-04 ratification table and user decision record
+- [x] 18-03-PLAN.md - User-data event types, ORDER_TRADE_UPDATE tracer, design-review gate
 - [x] 18-04-PLAN.md - Environment selection, single guarded SDK client factory, credential and listenKey redaction
-- [ ] 18-05-PLAN.md - Exchange error taxonomy
-- [ ] 18-06-PLAN.md - ALGO_UPDATE status classification table
-- [ ] 18-07-PLAN.md - Safety-threshold structures and enforcement
-- [ ] 18-08-PLAN.md - Persistence for user-data callers
-- [ ] 18-09-PLAN.md - Apply ratified limits and environment rows
-- [ ] 18-10-PLAN.md - Not-found slice
-- [ ] 18-11-PLAN.md - User-data stream adapter, listenKey lifecycle
-- [ ] 18-12-PLAN.md - SDK operations for the Demo probe
-- [ ] 18-13-PLAN.md - recvWindow and clock-drift on signed calls
-- [ ] 18-14-PLAN.md - Stream supervisor
-- [ ] 18-15-PLAN.md - Event router
-- [ ] 18-16-PLAN.md - Connected-machine smoke script and dry run
-- [ ] 18-17-PLAN.md - Probe safety envelope and first cases
+- [x] 18-05-PLAN.md - Exchange error taxonomy
+- [x] 18-06-PLAN.md - ALGO_UPDATE status classification table
+- [x] 18-07-PLAN.md - Safety-threshold structures and enforcement
+- [x] 18-08-PLAN.md - Persistence for user-data callers
+- [x] 18-09-PLAN.md - Apply ratified limits and environment rows
+- [x] 18-10-PLAN.md - Not-found slice
+- [x] 18-11-PLAN.md - User-data stream adapter, listenKey lifecycle
+- [x] 18-12-PLAN.md - SDK operations for the Demo probe
+- [x] 18-13-PLAN.md - recvWindow and clock-drift on signed calls
+- [x] 18-14-PLAN.md - Stream supervisor
+- [x] 18-15-PLAN.md - Event router
+- [x] 18-16-PLAN.md - Connected-machine smoke script and dry run
+- [x] 18-17-PLAN.md - Probe safety envelope and first cases
 - [ ] 18-18-PLAN.md - Live smoke on Demo (blocking-human)
 - [ ] 18-19-PLAN.md - Conditional direct-transport fallback
 - [ ] 18-20-PLAN.md - Demo probe run (blocking-human)
 - [ ] 18-21-PLAN.md - Consume evidence in parsers and fake
 - [ ] 18-22-PLAN.md - Phase gate test and integration with develop
-- [ ] 18-23-PLAN.md - Full probe case set
-- [ ] 18-24-PLAN.md - Synthetic fixtures and provenance README
+- [x] 18-23-PLAN.md - Full probe case set
+- [x] 18-24-PLAN.md - Synthetic fixtures and provenance README
 - [ ] 18-25-PLAN.md - Evidence documents
 
 ### Phase 19: Execution Plan Binding + Pre-Placement Checks
