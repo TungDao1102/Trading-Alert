@@ -39,3 +39,12 @@ words:
 > Thêm queue: max cho workflow freeze, kèm ghi tick thiếu.
 
 This amends correction 3. The GitHub concurrency documentation read on 2026-10-16 (not verified live) documents `queue: max` (up to 100 pending runs; invalid together with `cancel-in-progress: true`). Plan 16-59 adds `queue: max` beside `cancel-in-progress: false` in the freeze-check workflow and keeps the explicit missing-tick records; absence of an artifact is never read as clean. The first live run on GitHub is the proof that the key is accepted; the plan's workflow test only checks the text.
+
+## Renumbering 2026-10-16
+
+Bookkeeping only; the owner's decisions above are unchanged (owner informed 2026-10-16). Phase 18 was merged into develop first (merge 6610bd6) and holds the DECISIONS row D072 ("Phase 18 client configuration, user-data stream and exchange error taxonomy"), which keeps its number; docs/DECISIONS.md ends at D072 and gate DC-02 requires contiguous ids. Phase 16's two new rows are therefore:
+
+- D073: protocol v2.5.0 warm-up amendment (named D072 in 16-60 Q1 above and in the reviewer text).
+- D074: regeneration inventory and disposition of the original 240 records (named D073 in 16-60 Q1 and 16-61 above and in the reviewer text).
+
+This replaces the integration step of correction 6: no Phase 18 row is renumbered. The text above and decisions/16-DEC-FIXPLANS-reviewer-text.md are not edited; where they name D072 or D073 for Phase 16, read D073 or D074. Plans 16-60 and 16-61 and ROADMAP.md use the new numbers, and every record that copies the owner's or reviewer's text verbatim adds the mapping line.

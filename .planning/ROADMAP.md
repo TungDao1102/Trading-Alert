@@ -809,7 +809,7 @@ Plans:
 - [ ] 16-57-PLAN.md - acceptance-log flush before heartbeat, crash consistency, canonical config identity refused on mismatch
 - [ ] 16-58-PLAN.md - SHADOW locking, reservations, unsizable plan handling
 - [ ] 16-59-PLAN.md - evidence export per-bundle keys, merged freeze log with missing-tick records, deferred-item dispositions, gate for 16-55 to 16-59
-- [ ] 16-60-PLAN.md - research warm-up 50 days, simulator 2.2.0, protocol v2.5.0, D072 and D073 (after 16-62)
+- [ ] 16-60-PLAN.md - research warm-up 50 days, simulator 2.2.0, protocol v2.5.0, D073 and D074 (after 16-62)
 - [ ] 16-61-PLAN.md - runner hardening, sixth authorization key, sequential rerun at 2.2.0, supersede record (after 16-60)
 - [ ] 16-62-PLAN.md - B1-WR-09: rest_backfill_depth_bars wired into the REST backfill, gate and soak IMAGE_COMMIT (after 16-59, before 16-43 and 16-60)
 - [ ] TBD (run /gsd-plan-phase 16 to break down)
