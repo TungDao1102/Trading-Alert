@@ -55,7 +55,9 @@ def order_trade_update_frame(
 
     The default omits the conditional `o` keys the SDK model documents as
     pushed only in some cases: `M` (AMENDMENT only), `AP` and `cr` (trailing
-    stop only) and `er` (expiry reason).
+    stop only) and `er` (expiry reason). It carries `cp` and `pP` (bools) and
+    `gtd` (int) because the event keeps them (decisions/18-DEC-D01, amend);
+    pass `AP="..."` and `cr="..."` (decimal text) for a trailing-stop frame.
     """
     order: dict[str, Any] = {
         "s": "BTCUSDT",

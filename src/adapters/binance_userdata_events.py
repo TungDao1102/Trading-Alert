@@ -122,6 +122,15 @@ def _optional_bool(value: object, name: str) -> None:
         raise TypeError(f"{name} must be bool, got {type(value).__name__}")
 
 
+def _optional_non_negative_int(value: object, name: str) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be int, got {type(value).__name__}")
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative")
+
+
 # --------------------------------------------------------------------------- #
 # StreamAnomaly.
 # --------------------------------------------------------------------------- #
@@ -228,6 +237,13 @@ class OrderUpdateEvent:
     `trade_id` is the int `t` as text, set only for TRADE and otherwise None
     whatever the wire carries (never synthesized). Quantities and prices are
     non-negative Decimals; `commission` and `realized_profit` may be signed.
+
+    The design gate (decisions/18-DEC-D01-event-types.md) added five optional
+    fields: `close_position` (`o.cp`) and `price_protect` (`o.pP`) as strict
+    bools, `activation_price` (`o.AP`) and `callback_rate` (`o.cr`) as
+    non-negative Decimals (pushed for trailing stops only), and
+    `good_till_date_ms` (`o.gtd`) as the raw non-negative integer: no
+    timestamp meaning is inferred from it without verified documentation.
     """
 
     event_time_utc: datetime  # E
@@ -261,6 +277,12 @@ class OrderUpdateEvent:
     expire_reason: str | None = None  # o.er
     stp_mode: str | None = None  # o.V
     price_match: str | None = None  # o.pm
+    # Added by the design gate (decisions/18-DEC-D01-event-types.md, option amend).
+    close_position: bool | None = None  # o.cp
+    price_protect: bool | None = None  # o.pP
+    activation_price: Decimal | None = None  # o.AP (trailing stop only)
+    callback_rate: Decimal | None = None  # o.cr (trailing stop only)
+    good_till_date_ms: int | None = None  # o.gtd: the raw integer, no meaning inferred
 
     def __post_init__(self) -> None:
         for name in (
@@ -296,14 +318,17 @@ class OrderUpdateEvent:
             "last_filled_quantity",
             "accumulated_filled_quantity",
             "last_filled_price",
+            "activation_price",
+            "callback_rate",
         ):
             _optional_decimal(getattr(self, name), name, non_negative=True)
         for name in ("commission", "realized_profit"):
             _optional_decimal(getattr(self, name), name, non_negative=False)
         for name in ("event_time_utc", "transaction_time_utc", "trade_time_utc"):
             _require_utc(getattr(self, name), name)
-        for name in ("is_maker", "reduce_only"):
+        for name in ("is_maker", "reduce_only", "close_position", "price_protect"):
             _optional_bool(getattr(self, name), name)
+        _optional_non_negative_int(self.good_till_date_ms, "good_till_date_ms")
         if self.trade_id is not None and self.execution_type != _EXECUTION_TYPE_TRADE:
             raise ValueError("trade_id is set only for execution_type TRADE")
 
@@ -513,6 +538,11 @@ def _build_order_update(payload: Mapping[str, Any]) -> OrderUpdateEvent:
         expire_reason=_text_opt(order, "er", p),
         stp_mode=_text_opt(order, "V", p),
         price_match=_text_opt(order, "pm", p),
+        close_position=_flag_opt(order, "cp", p),
+        price_protect=_flag_opt(order, "pP", p),
+        activation_price=_money_opt(order, "AP", p, non_negative=True),
+        callback_rate=_money_opt(order, "cr", p, non_negative=True),
+        good_till_date_ms=_int_id_opt(order, "gtd", p),
     )
 
 

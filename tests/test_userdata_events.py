@@ -123,6 +123,108 @@ def test_trade_frame_parses_to_a_typed_order_update_event() -> None:
         assert not isinstance(value, float)
 
 
+# --------------------------------------------------------------------------- #
+# Design-gate amendment (decisions/18-DEC-D01-event-types.md, option amend):
+# close_position (o.cp), price_protect (o.pP), activation_price (o.AP),
+# callback_rate (o.cr) and good_till_date_ms (o.gtd), all optional.
+# --------------------------------------------------------------------------- #
+
+
+def test_amended_optional_fields_parse_from_the_default_frame() -> None:
+    event = _event(order_trade_update_frame())
+    assert event.close_position is False
+    assert event.price_protect is False
+    # The raw integer is kept; no timestamp meaning is inferred (18-DEC-D01 Q1).
+    assert event.good_till_date_ms == 0
+    assert type(event.good_till_date_ms) is int
+    # AP and cr are pushed only for trailing stops; absent means None.
+    assert event.activation_price is None
+    assert event.callback_rate is None
+
+
+def test_trailing_stop_fields_parse_as_decimals() -> None:
+    frame = order_trade_update_frame(
+        o="TRAILING_STOP_MARKET",
+        ot="TRAILING_STOP_MARKET",
+        AP="61000.10",
+        cr="1.5",
+        cp=True,
+        pP=True,
+        gtd=1_760_086_400_000,
+    )
+    event = _event(frame)
+    assert event.activation_price == Decimal("61000.10")
+    assert event.callback_rate == Decimal("1.5")
+    assert event.close_position is True
+    assert event.price_protect is True
+    assert event.good_till_date_ms == 1_760_086_400_000
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("cp", "false"),
+        ("cp", 0),
+        ("pP", 1),
+        ("pP", "true"),
+        ("AP", 61000),
+        ("AP", 61000.1),
+        ("AP", ""),
+        ("AP", "NaN"),
+        ("AP", "-1"),
+        ("cr", 1.5),
+        ("cr", ""),
+        ("cr", " 1.5"),
+        ("cr", "-0.5"),
+        ("gtd", "0"),
+        ("gtd", -1),
+        ("gtd", True),
+        ("gtd", 1.0),
+    ],
+)
+def test_amended_field_of_the_wrong_wire_type_is_a_field_validation_anomaly(
+    field: str, value: object
+) -> None:
+    anomaly = _anomaly(order_trade_update_frame(**{field: value}))
+    assert anomaly.kind is StreamAnomalyKind.FIELD_VALIDATION
+    assert anomaly.field == f"o.{field}"
+
+
+@pytest.mark.parametrize("field", ["cp", "pP", "AP", "cr", "gtd"])
+def test_amended_fields_are_optional_on_the_wire(field: str) -> None:
+    event = _event(order_trade_update_frame(**{field: OMIT}))
+    attribute = {
+        "cp": "close_position",
+        "pP": "price_protect",
+        "AP": "activation_price",
+        "cr": "callback_rate",
+        "gtd": "good_till_date_ms",
+    }[field]
+    assert getattr(event, attribute) is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"close_position": 1}, TypeError),
+        ({"price_protect": "true"}, TypeError),
+        ({"activation_price": 61000.1}, TypeError),
+        ({"activation_price": Decimal("-1")}, ValueError),
+        ({"callback_rate": "1.5"}, TypeError),
+        ({"callback_rate": Decimal("NaN")}, ValueError),
+        ({"good_till_date_ms": -1}, ValueError),
+        ({"good_till_date_ms": True}, TypeError),
+        ({"good_till_date_ms": 1.0}, TypeError),
+    ],
+)
+def test_order_update_event_validates_the_amended_fields(
+    overrides: dict[str, Any], error: type[Exception]
+) -> None:
+    event = _event(order_trade_update_frame())
+    with pytest.raises(error):
+        dataclasses.replace(event, **overrides)
+
+
 def test_order_update_event_is_frozen() -> None:
     event = _event(order_trade_update_frame())
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -366,6 +468,13 @@ def test_synthetic_frame_validates_against_the_installed_sdk_model() -> None:
     assert model is not None
     assert model.to_dict()["o"] == frame["o"]
     assert _event(UserDataStreamEventsResponse(model)) == _event(frame)
+
+    # The trailing-stop variant (o.AP, o.cr present) also passes the strict SDK model.
+    trailing = order_trade_update_frame(AP="61000.10", cr="1.5", cp=True, pP=True)
+    trailing_model = SdkOrderTradeUpdate.from_dict(trailing)
+    assert trailing_model is not None
+    assert trailing_model.to_dict()["o"] == trailing["o"]
+    assert _event(UserDataStreamEventsResponse(trailing_model)) == _event(trailing)
 
 
 def test_unrecognized_envelope_and_unknown_event_are_anomalies() -> None:
