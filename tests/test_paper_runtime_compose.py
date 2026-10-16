@@ -59,6 +59,18 @@ def construction_spy(monkeypatch: pytest.MonkeyPatch) -> _ConstructionSpy:
     return spy
 
 
+@pytest.fixture(autouse=True)
+def _start_from_an_empty_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests exercise the runtime on an empty allowlist unless a test injects entries.
+
+    The production allowlist holds the user's single entry since checkpoint G4-021 (pinned in
+    tests/test_paper_start_gate.py), so each test here starts from an injected empty one.
+    """
+    import src.paper.freeze as freeze
+
+    monkeypatch.setattr(freeze, "PAPER_START_ALLOWLIST", ())
+
+
 def test_empty_allowlist_exits_zero_skipped_and_builds_nothing(
     construction_spy: _ConstructionSpy, capsys: pytest.CaptureFixture[str]
 ) -> None:
