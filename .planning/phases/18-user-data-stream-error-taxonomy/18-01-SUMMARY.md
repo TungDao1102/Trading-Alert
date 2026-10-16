@@ -107,3 +107,66 @@ None.
 
 - FOUND: tests/test_sources_phase18_section.py, docs/SOURCES.md (section present), docs/integration/BINANCE.md, docs/trading/EXECUTION_SPEC.md
 - FOUND commits: fe12f45, a75343e, 5854085
+
+## Addendum 2026-10-16
+
+After this plan ran, the phase orchestrator re-read the Binance pages with WebFetch on the same day. The old `/docs/derivatives/usds-margined-futures/...` paths answer a landing shell or the WAF challenge. The pages that answered use `https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/<page>` for general pages and `https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/<group>` for REST endpoints. The user-data events are sections of one user-data-streams page, and `api/ws-streams/~schemas` shows only the top-level keys. The results are in a fixed fact sheet. This addendum carries that sheet into the documents. WebFetch passes each page through a small summarising model, so every fact below is not character-exact and not verified live. No fact was added beyond the sheet.
+
+### What changed
+
+- `docs/SOURCES.md`, section "Facts read for Phase 18" only. Rows the sheet covers now have a Method cell that starts with "WebFetch summary" and says "not character-exact" and "not verified live". The facts read go in "Used for". The old URL stays first in each row, and the working URL is added beside it. Two rows are new: the general part of the user-data-streams page (`#connect`) and the WebSocket API general-info page, so the table has 17 rows. A new addendum paragraph explains the URL pattern. The nine register status lines now give the 2026-10-16 reason. The Phase 11 section is untouched, and its sha256 test still passes.
+- `tests/test_sources_phase18_section.py`, written test-first: three new tests. They failed (2 failures) before the SOURCES edit. They check the following. (1) A "WebFetch summary" row cites a working-pattern URL and the date 2026-10-16, and says "not character-exact". (2) The eight pages the sheet covers are recorded as READ. (3) `/private/ws/<listenKey>` and `settlement_autoclose` are each named in a row that says "CONTRADICTS the research baseline", and `Retry-After` and `-4509` are each named as "absent from the page". No existing assertion was weakened, and the required suffixes are unchanged.
+- `docs/trading/EXECUTION_SPEC.md` 6.1. The TRIGGERED, CANCELED and FINISHED rows use the page wording. FINISHED is "filled OR canceled" and does not prove that the protective exit executed. The "FINISHED does not mean filled" bullet now says the same. The trailing-stop bullet cites the change-log entry of 2026-08-21 (two ALGO_UPDATE events, `ia:false` then `ia:true`). The grounding paragraph now records the WebFetch read. Section 8 now records the read Change-Position-Mode facts: weight 1, `dualSidePosition` required, `recvWindow` at most 60000, UM and CM share the setting, -4067 and -4068. No developers.binance.com URL was added, and all pinned phrases of EX-02, EX-03 and EX-06 are kept.
+- `docs/integration/BINANCE.md` section 5. The baseline statements are replaced by the read ones:
+  - listenKey validity is 60 minutes, PUT extends it by 60 minutes, and DELETE answers 200 with no data;
+  - a connection lasts 24 hours;
+  - ping every 3 minutes with a 10-minute pong deadline. This comes from the WebSocket API general-info page, and the doc labels it as such;
+  - the URL is `wss://fstream.binance.com/private/ws/<listenKey>`;
+  - events of the same type are ordered by `T` and `E`;
+  - the ORDER_TRADE_UPDATE `x` and `X` lists, the ALGO_UPDATE statuses, the ACCOUNT_UPDATE `m` list and the `listenKeyExpired` wording;
+  - the change-log entry on the duplicate trailing-stop ALGO_UPDATE.
+
+  The remaining UNVERIFIED items are listed in the section. The file has 6 "verify against current Binance docs" markers.
+
+### Page status after the addendum
+
+| Page | Status |
+| --- | --- |
+| Start-User-Data-Stream (REST `user-data-streams`) | READ, WebFetch summary (error list not on the page) |
+| Keepalive-User-Data-Stream (PUT and DELETE) | READ, WebFetch summary (error lists not on the page) |
+| user-data-streams page, general part and `#connect` (new row) | READ, WebFetch summary |
+| websocket-api-general-info (new row) | READ, WebFetch summary |
+| Event-Listen-Key-Expired | READ, WebFetch summary (section and schema keys) |
+| Change-Position-Mode | READ, WebFetch summary |
+| error-code | READ, WebFetch summary |
+| general-info | READ, WebFetch summary (Demo hosts, 503 variants and base endpoints not in the summary) |
+| Query-Algo-Order (with DELETE algoOrder and GET order) | READ, WebFetch summary (`algoStatus` not enumerated; not-found code not on the page) |
+| change-log | READ, WebFetch summary (first 100000 of 155376 characters) |
+| New Algo Order (catalog `trade`) | READ, WebFetch summary (`recvWindow` maximum not in the summary) |
+| Event-Algo-Order-Update | UNVERIFIED: the `o.*` field table did not render (the status values were read) |
+| Event-Order-Update | UNVERIFIED: the `o.*` field table and the meaning of `t` did not render (the `x` and `X` lists were read) |
+| Event-Balance-and-Position-Update | UNVERIFIED: the `a.*`, `B` and `P` tables did not render (the `m` list was read) |
+| Important-WebSocket-Change-Notice | UNVERIFIED: not covered (SUBSCRIBE format, whether `events=` is accepted) |
+| websocket-market-streams/Connect | UNVERIFIED: not covered (the streams' own ping rule, message and stream limits, new-connection limit) |
+| Live-Subscribing-Unsubscribing-to-streams | UNVERIFIED: not covered (SUBSCRIBE parameter format for a listenKey) |
+
+Not read at all: `GET /fapi/v1/openAlgoOrders` and `DELETE /fapi/v1/order`. Also unread: Demo user-data support and the Demo host, the not-found error codes, and the duplicate `clientAlgoId` code. All nine register items stay "still UNVERIFIED", each with an updated reason.
+
+### Contradictions and differences against the research baseline
+
+1. **URL form (CONTRADICTS).** The user-data-streams page gives `wss://fstream.binance.com/private/ws/<listenKey>`. It has no `?listenKey=` query form and no `events=` parameter. Baseline B3 had `/private/ws?listenKey=<k>&events=...`, taken from the Change Notice page, which was not re-read. Plan 18-11 must not assume the query form, and plan 18-18 settles it live.
+2. **`settlement_autoclose` (CONTRADICTS).** The prefix is absent from the Order Update section. Baseline B5b, a search summary, listed `settlement_autoclose-`.
+3. **FUNDING_FEE `B` and `P` (differs, as far as the summary goes).** The summary says the event carries `B`, and also `P` only for an isolated position. B5b said a cross position carries both `B` and `P`. The tables did not render, so this stays open.
+4. **Retry-After (absent from the page).** It is not on general-info, error-code or the WebSocket API general-info page. This agrees with the B7 and B8 summaries, but no page supports the research assumption A9 that Binance sends the header. The fallback wait for a missing `retry_after` stays required.
+5. **-4509 (absent from the page).** It is not on error-code, which agrees with B7. It stays Demo-observed only, although D-09 lists it as a required code.
+6. **Smaller points.** The ACCOUNT_UPDATE `m` list has 17 values, against 7 in B5b. The change-log is now 155376 characters, against 154346, and its newest entry is 2026-10-15. The New Algo Order summary does not list the `recvWindow` maximum that B9 recorded (60000). The user-data-streams page still lists a "Conditional Order Trigger Reject" section, and whether it is marked deprecated is not in the summary.
+
+### Observation outside this addendum's scope
+
+`src/ops/redaction.py` catches a listenKey by shape only in the forms `listenKey=<value>` and `"listenKey": "<value>"`. Under the path form `/private/ws/<listenKey>`, a logged URL is caught only through the runtime-secret registration (D-13). The plan that builds the connection (18-11) should make sure the key is registered before any URL is logged. No code was changed here.
+
+### Verification (addendum)
+
+- `UV_OFFLINE=1 uv run --frozen --extra dev pytest -m "not docker" tests/test_sources_phase18_section.py tests/test_decision_alignment_exchange.py -q`: all passed (12 in the Phase 18 file, which had 2 failing first).
+- `UV_OFFLINE=1 uv run --frozen --extra dev python scripts/verify_decision_alignment.py docs`: final line `ALL_PASS docs`.
+- `ruff check` and `ruff format --check` on the test file: clean.

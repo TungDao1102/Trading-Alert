@@ -46,6 +46,34 @@ REQUIRED_SUFFIXES = (
     "websocket-market-streams/Live-Subscribing-Unsubscribing-to-streams",
 )
 
+# Addendum of 2026-10-16: the orchestrator re-read pages with WebFetch on the new URL pattern
+# (the old /docs/derivatives/... paths answer a landing shell or a WAF challenge). A row whose
+# Method starts with "WebFetch summary" must cite the working URL, the read date and say that
+# the summary is not character-exact.
+WEBFETCH_READ_DATE = "2026-10-16"
+NOT_CHARACTER_EXACT = "not character-exact"
+WORKING_URL_PREFIXES = (
+    "https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/",
+    "https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/",
+)
+# Pages the 2026-10-16 WebFetch read covered; their rows are READ, not UNVERIFIED.
+WEBFETCH_READ_SUFFIXES = (
+    "user-data-streams/Start-User-Data-Stream",
+    "user-data-streams/Keepalive-User-Data-Stream",
+    "user-data-streams/Event-Listen-Key-Expired",
+    "trade/rest-api/Change-Position-Mode",
+    "error-code",
+    "general-info",
+    "trade/rest-api/Query-Algo-Order",
+    "change-log",
+)
+# Facts the 2026-10-16 read contradicts in the research baseline; each must be named as such.
+BASELINE_CONTRADICTIONS = ("/private/ws/<listenKey>", "settlement_autoclose")
+CONTRADICTS = "CONTRADICTS the research baseline"
+# Items the research relied on that the 2026-10-16 read found absent from the pages read.
+CONFIRMED_ABSENCES = ("Retry-After", "-4509")
+ABSENT = "absent from the page"
+
 # The nine items of the "UNVERIFIED register" in 18-RESEARCH.md; each needs a status line.
 UNVERIFIED_REGISTER_ITEMS = range(1, 10)
 ITEM_STATUS = re.compile(r"^- item (\d+): (now READ|still UNVERIFIED) \(\S", flags=re.MULTILINE)
@@ -129,6 +157,42 @@ def test_phase18_section_unverified_rows_have_failure_text() -> None:
         match = re.search(r"failure:\s*(\S.*)", method)
         assert match is not None, method
         assert match.group(1).strip(), method
+
+
+def _row_urls(cells: list[str]) -> list[str]:
+    return [u.split("#", 1)[0].rstrip("/.,;") for u in HTTPS_URL.findall(cells[0])]
+
+
+def test_phase18_webfetch_rows_cite_working_url_date_and_precision() -> None:
+    for cells in _phase18_rows():
+        method = cells[3]
+        if not method.startswith("WebFetch summary"):
+            continue
+        urls = HTTPS_URL.findall(cells[0])
+        assert any(u.startswith(WORKING_URL_PREFIXES) for u in urls), cells[0]
+        assert WEBFETCH_READ_DATE in cells[2], cells[2]
+        assert NOT_CHARACTER_EXACT in method, method
+
+
+def test_phase18_addendum_pages_are_recorded_as_read() -> None:
+    rows = _phase18_rows()
+    for suffix in WEBFETCH_READ_SUFFIXES:
+        matching = [c for c in rows if any(u.endswith("/" + suffix) for u in _row_urls(c))]
+        assert matching, suffix
+        assert all(c[3].startswith("WebFetch summary") for c in matching), suffix
+
+
+def test_phase18_section_names_the_baseline_contradictions() -> None:
+    rows = _phase18_rows()
+    for fact in BASELINE_CONTRADICTIONS:
+        assert any(
+            fact in exchange.normalise(c[1]) and CONTRADICTS in exchange.normalise(c[1])
+            for c in rows
+        ), fact
+    for fact in CONFIRMED_ABSENCES:
+        assert any(
+            fact in exchange.normalise(c[1]) and ABSENT in exchange.normalise(c[1]) for c in rows
+        ), fact
 
 
 def test_phase18_section_has_a_status_line_per_register_item() -> None:
