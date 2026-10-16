@@ -4,16 +4,16 @@ milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: executing
-stopped_at: Completed 16-55-PLAN.md
-last_updated: "2026-10-16T08:51:50.047Z"
+stopped_at: Completed 16-56-PLAN.md
+last_updated: "2026-10-16T09:41:45.994Z"
 last_activity: 2026-10-15
 last_activity_desc: Phase 16 execution started
-state_head: ebba3cb9256fa945c0931a49d2d64d782faa559c
+state_head: 5114bdc8ae5c51dc6a7c9d184ab69f092127a323
 progress:
   total_phases: 29
   completed_phases: 17
   total_plans: 231
-  completed_plans: 196
+  completed_plans: 216
 milestone_name: milestone
 ---
 
@@ -214,6 +214,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P16 | 12min | 3 tasks | 4 files |
 | Phase 16 P19 | 55min | 3 tasks | 5 files |
 | Phase 16 P55 | 120min | 4 tasks | 40 files |
+| Phase 16 P56 | 50min | 4 tasks | 40 files |
 
 ## Accumulated Context
 
@@ -522,6 +523,10 @@ Recent decisions affecting current work:
 - [Phase 16]: [16-19] Live 1m trade and mark minutes by REST polling; poll cadence and close lag are required inputs (O-07); driver advances only to the shared settled watermark
 - [Phase 16]: 16-55: soak backups use a separate BACKUP_S3_BUCKET (own crypt passwords, own --init-remote); deploy/backup.sh --install-soak-timer refuses an empty or shared bucket; backup_remote.py layout unchanged (orchestrator option a; owner creates the bucket before 16-43)
 - [Phase 16]: 16-55: instance lease is one fixed paper-runtime scope per database (session advisory lock), not per epoch id, because the pin mints the epoch id after the lease must be held
+- [Phase 16]: 16-56: SDK-error mapping is opt-in per BinancePublicMarketData instance (project_transport_errors=True, set by the paper composition root); Phase 18 callers keep SDK types
+- [Phase 16]: 16-56: the silence watchdog has its own injected sleep and monotonic seams (LoopWiring.watchdog_sleep, feed_clock); one guard makes _fail run once
+- [Phase 16]: 16-56: [health] is RuntimeHealthConfig(HealthThresholds) with feed_silence_timeout_seconds; paper-runtime-v2.toml is in force, v1 is history and refused
+- [Phase 16]: 16-56: deploy/heartbeat.sh --target paper install requires --soak-env-file (the unit runs deploy/compose-soak.sh)
 
 ### Pending Todos
 
@@ -605,6 +610,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-16T08:51:48.795Z
-Stopped at: Completed 16-55-PLAN.md
+Last session: 2026-10-16T09:41:44.768Z
+Stopped at: Completed 16-56-PLAN.md
 Resume file: None
