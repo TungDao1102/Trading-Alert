@@ -13,39 +13,87 @@ event loop alone decides the order of everything (the worker thread itself is te
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 from collections.abc import Awaitable, Callable, Iterator
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
 from binance_common.configuration import ConfigurationWebSocketStreams
+from binance_common.errors import (
+    BadRequestError,
+    RateLimitBanError,
+    ServerError,
+    TooManyRequestsError,
+    UnauthorizedError,
+)
+from binance_sdk_derivatives_trading_usds_futures.websocket_streams.models.listen_key_expired import (  # noqa: E501
+    ListenKeyExpired as SdkListenKeyExpired,
+)
+from binance_sdk_derivatives_trading_usds_futures.websocket_streams.models.user_data_stream_events_response import (  # noqa: E501
+    UserDataStreamEventsResponse,
+)
 from src.adapters import binance_userdata_supervisor as sup_mod
 from src.adapters.binance_limits import StreamLimits
-from src.adapters.binance_ratelimit_gate import RestRateLimitGate
+from src.adapters.binance_ratelimit_gate import (
+    IP_BAN_418,
+    RATE_LIMIT_PAUSE_429,
+    RateLimitBanActive,
+    RestRateLimitGate,
+)
 from src.adapters.binance_userdata import (
     ConnectionEvent,
     SdkListenKeyPort,
     SdkUserDataTransport,
     UserDataAdapter,
 )
-from src.adapters.binance_userdata_events import OrderUpdateEvent
+from src.adapters.binance_userdata_events import (
+    ListenKeyExpiredEvent,
+    OrderUpdateEvent,
+    StreamAnomaly,
+)
 from src.adapters.binance_userdata_supervisor import (
+    LivenessSnapshot,
     StreamSnapshot,
     StreamState,
     TrustedEvent,
     UserDataSupervisor,
+    stream_is_stale,
 )
+from src.domain.exchange_errors import ExchangeErrorCategory
 from src.ops import redaction
 
-from tests.support.limits import test_only_rate_limit_policy, test_only_stream_limits
+from tests.support.limits import (
+    TEST_ONLY_KEEPALIVE_FAILURE_TOLERANCE,
+    TEST_ONLY_KEEPALIVE_INTERVAL_SECONDS,
+    TEST_ONLY_MAX_LIVENESS_AGE_SECONDS,
+    TEST_ONLY_PROJECT_ROTATION_INTERVAL_SECONDS,
+    TEST_ONLY_RATE_LIMIT_429_NO_RETRY_AFTER_WAIT_SECONDS,
+    TEST_ONLY_RATE_LIMIT_RETRY_AFTER_CAP_SECONDS,
+    test_only_rate_limit_policy,
+    test_only_stream_limits,
+)
+from tests.support.userdata_frames import listen_key_expired_frame
 from tests.support.virtual_time import VirtualTime
 from tests.userdata_fakes import (
     TEST_ONLY_LISTEN_KEY,
+    TEST_ONLY_SECOND_LISTEN_KEY,
     FakeRestUserDataApi,
     FakeUserDataWsClient,
     fresh_sdk_stream_map,
     make_order_trade_update_message,
 )
+
+KEEPALIVE = TEST_ONLY_KEEPALIVE_INTERVAL_SECONDS
+TOLERANCE = TEST_ONLY_KEEPALIVE_FAILURE_TOLERANCE
+ROTATION = TEST_ONLY_PROJECT_ROTATION_INTERVAL_SECONDS
+WAIT_429 = TEST_ONLY_RATE_LIMIT_429_NO_RETRY_AFTER_WAIT_SECONDS
+CAP = TEST_ONLY_RATE_LIMIT_RETRY_AFTER_CAP_SECONDS
+MAX_AGE = TEST_ONLY_MAX_LIVENESS_AGE_SECONDS
+# The SDK error text planted in every SDK error (never asserted on, never decided from).
+TEST_ONLY_SDK_MESSAGE = "sdk-detail-text"
+_C = ExchangeErrorCategory
 
 TEST_ONLY_STREAM_URL = "wss://example.invalid"
 # Synthetic exchange order ids that tell the delivered events apart.
@@ -114,15 +162,22 @@ class _Factory:
 
 
 class ScriptedSnapshots:
-    """A snapshot provider: counts calls, runs an optional hook, may raise scripted errors."""
+    """A snapshot provider: counts calls, runs an optional hook, may raise scripted errors.
 
-    def __init__(self) -> None:
+    With a gate it behaves like another REST holder of the process: it consults the gate
+    before "sending" and a refused call is not counted.
+    """
+
+    def __init__(self, gate: RestRateLimitGate | None = None) -> None:
+        self.gate = gate
         self.calls = 0
         self.failures: list[BaseException] = []
         self.fail_always: BaseException | None = None
         self.on_call: Callable[[int], Awaitable[None] | None] | None = None
 
     async def __call__(self) -> object:
+        if self.gate is not None:
+            self.gate.check()
         self.calls += 1
         if self.on_call is not None:
             result = self.on_call(self.calls)
@@ -161,7 +216,7 @@ class Rig:
         self.adapter = UserDataAdapter(
             transport=self.transport, listen_keys=self.port, limits=self.limits, clock=self.vt.now
         )
-        self.snapshots_provider = ScriptedSnapshots()
+        self.snapshots_provider = ScriptedSnapshots(self.gate)
         self.states: list[tuple[StreamState, str]] = []
         self.events: list[TrustedEvent] = []
         self.snapshots: list[tuple[StreamSnapshot, int]] = []
@@ -183,10 +238,8 @@ class Rig:
         """The fake client the transport currently holds (the last one built, else the first)."""
         return self.factory.built[-1] if self.factory.built else self.ws
 
-    def emit_order(self, order_id: int) -> int:
-        return self.client().emit_user_event(
-            TEST_ONLY_LISTEN_KEY, make_order_trade_update_message(i=order_id)
-        )
+    def emit_order(self, order_id: int, key: str = TEST_ONLY_LISTEN_KEY) -> int:
+        return self.client().emit_user_event(key, make_order_trade_update_message(i=order_id))
 
     def state_names(self) -> list[StreamState]:
         return [state for state, _ in self.states]
@@ -194,17 +247,41 @@ class Rig:
     def order_ids(self) -> list[tuple[str, bool]]:
         out: list[tuple[str, bool]] = []
         for event in self.events:
-            assert isinstance(event.outcome, OrderUpdateEvent)
-            out.append((event.outcome.exchange_order_id, event.after_gap))
+            if isinstance(event.outcome, OrderUpdateEvent):
+                out.append((event.outcome.exchange_order_id, event.after_gap))
         return out
+
+    def listen_key_posts(self) -> int:
+        return self.rest.calls["start_user_data_stream"]
+
+    def keepalives(self) -> int:
+        return self.rest.calls["keepalive_user_data_stream"]
 
     async def settle(self) -> None:
         await self.vt.settle()
 
+    async def start_live(self) -> None:
+        await self.supervisor.start()
+        await self.settle()
+        assert self.supervisor.state is S.LIVE
+
+    async def stop(self) -> None:
+        await self.supervisor.stop(close_listen_key=False)
+
+
+def limits_with(**overrides: Any) -> StreamLimits:
+    """The TEST_ONLY stream limits with some fields replaced (no rotation unless asked)."""
+    base = dataclasses.replace(test_only_stream_limits(), project_rotation_interval_seconds=None)
+    return dataclasses.replace(base, **overrides)
+
+
+def expiry_message() -> UserDataStreamEventsResponse:
+    """A listenKeyExpired frame through the SDK model (synthetic key, never a credential)."""
+    return UserDataStreamEventsResponse(SdkListenKeyExpired.from_dict(listen_key_expired_frame()))
+
 
 def make_port(rest: FakeRestUserDataApi, gate: RestRateLimitGate) -> SdkListenKeyPort:
-    del gate  # the port takes the shared gate from Task 2 on
-    return SdkListenKeyPort(rest)
+    return SdkListenKeyPort(rest, rest_gate=gate)
 
 
 # --------------------------------------------------------------------------- #
@@ -305,3 +382,516 @@ def test_module_exports() -> None:
     assert {"StreamState", "StreamSnapshot", "TrustedEvent", "UserDataSupervisor"} <= set(
         sup_mod.__all__
     )
+
+
+def sdk_stream_map_of() -> dict[Any, Any]:
+    from binance_common import websocket as sdk_websocket
+
+    stream_map: dict[Any, Any] = sdk_websocket.global_stream_connections.stream_connections_map
+    return stream_map
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: keepalive.
+# --------------------------------------------------------------------------- #
+
+
+async def test_keepalive_success_records_ok_time_and_keeps_live() -> None:
+    rig = Rig(limits=limits_with())
+    await rig.start_live()
+    assert rig.keepalives() == 0
+
+    await rig.vt.advance(KEEPALIVE)
+
+    assert rig.keepalives() == 1
+    liveness = rig.supervisor.liveness()
+    assert liveness.last_keepalive_ok_at_utc == rig.vt.now()
+    assert liveness.consecutive_keepalive_failures == 0
+    assert rig.supervisor.state is S.LIVE
+    assert rig.state_names() == [S.CONNECTING, S.SYNCING, S.LIVE]
+    await rig.stop()
+
+
+async def test_keepalive_count_equals_intervals_elapsed_over_a_long_period() -> None:
+    rig = Rig(limits=limits_with())
+    await rig.start_live()
+    elapsed = 0
+    # Uneven steps, some shorter and some much longer than the interval.
+    for step in (KEEPALIVE // 3, KEEPALIVE, 1, KEEPALIVE * 4 + 5, KEEPALIVE - 6, KEEPALIVE * 9):
+        await rig.vt.advance(step)
+        elapsed += step
+        assert rig.keepalives() == elapsed // KEEPALIVE
+    assert rig.listen_key_posts() == 1
+    assert rig.snapshots_provider.calls == 1
+    await rig.stop()
+
+
+async def test_invalid_listen_key_on_keepalive_rekeys_and_resyncs() -> None:
+    rest = FakeRestUserDataApi(listen_keys=(TEST_ONLY_LISTEN_KEY, TEST_ONLY_SECOND_LISTEN_KEY))
+    rig = Rig(limits=limits_with(), rest=rest)
+    await rig.start_live()
+    stream_map = sdk_stream_map_of()
+    assert TEST_ONLY_LISTEN_KEY in stream_map
+    rest.fail_next("keepalive_user_data_stream", BadRequestError(TEST_ONLY_SDK_MESSAGE, -1125))
+    held_id = TEST_ONLY_ORDER_IDS[2]
+
+    def _emit_on_new_key(call: int) -> None:
+        if call == 2:
+            rig.emit_order(held_id, key=TEST_ONLY_SECOND_LISTEN_KEY)
+
+    rig.snapshots_provider.on_call = _emit_on_new_key
+    await rig.vt.advance(KEEPALIVE)
+
+    assert rig.state_names()[3:] == [S.UNKNOWN, S.SYNCING, S.LIVE]
+    assert rig.states[3][1] == "LISTEN_KEY_INVALID"
+    assert rig.listen_key_posts() == 2
+    # The old key name is forgotten and the NEW key is subscribed.
+    assert TEST_ONLY_LISTEN_KEY not in stream_map
+    assert TEST_ONLY_SECOND_LISTEN_KEY in stream_map
+    assert rig.snapshots_provider.calls == 2
+    assert rig.order_ids() == [(str(held_id), True)]
+    assert rig.failures == []
+    await rig.stop()
+
+
+async def test_listen_key_expired_event_rekeys_and_resyncs() -> None:
+    rest = FakeRestUserDataApi(listen_keys=(TEST_ONLY_LISTEN_KEY, TEST_ONLY_SECOND_LISTEN_KEY))
+    rig = Rig(limits=limits_with(), rest=rest)
+    await rig.start_live()
+    stream_map = sdk_stream_map_of()
+
+    assert rig.client().emit_user_event(TEST_ONLY_LISTEN_KEY, expiry_message()) == 1
+    await rig.settle()
+
+    # The expiry itself is delivered (every outcome type is), then the key is replaced.
+    assert isinstance(rig.events[0].outcome, ListenKeyExpiredEvent)
+    assert rig.events[0].after_gap is False
+    assert rig.state_names()[3:] == [S.UNKNOWN, S.SYNCING, S.LIVE]
+    assert rig.states[3][1] == "LISTEN_KEY_EXPIRED"
+    assert rig.listen_key_posts() == 2
+    assert TEST_ONLY_LISTEN_KEY not in stream_map
+    assert TEST_ONLY_SECOND_LISTEN_KEY in stream_map
+    assert rig.snapshots_provider.calls == 2
+    await rig.stop()
+
+
+async def test_transient_keepalive_failure_below_tolerance_keeps_live() -> None:
+    assert TOLERANCE > 1  # the TEST_ONLY tolerance leaves room for one tolerated failure
+    rig = Rig(limits=limits_with())
+    await rig.start_live()
+    rig.rest.fail_next("keepalive_user_data_stream", ServerError(TEST_ONLY_SDK_MESSAGE, 503))
+
+    await rig.vt.advance(KEEPALIVE)
+
+    assert rig.supervisor.state is S.LIVE
+    assert rig.supervisor.liveness().consecutive_keepalive_failures == 1
+    assert rig.listen_key_posts() == 1
+    assert rig.snapshots_provider.calls == 1
+
+    # A later success resets the counter.
+    await rig.vt.advance(KEEPALIVE)
+    assert rig.supervisor.liveness().consecutive_keepalive_failures == 0
+    assert rig.state_names() == [S.CONNECTING, S.SYNCING, S.LIVE]
+    await rig.stop()
+
+
+async def test_transient_keepalive_failures_at_tolerance_go_unknown_and_rekey() -> None:
+    rig = Rig(limits=limits_with())
+    await rig.start_live()
+    for _ in range(TOLERANCE):
+        rig.rest.fail_next("keepalive_user_data_stream", ServerError(TEST_ONLY_SDK_MESSAGE, 503))
+
+    await rig.vt.advance(KEEPALIVE * (TOLERANCE - 1))
+    assert rig.supervisor.state is S.LIVE
+    await rig.vt.advance(KEEPALIVE)
+
+    assert rig.state_names()[3:] == [S.UNKNOWN, S.SYNCING, S.LIVE]
+    assert rig.states[3][1] == "KEEPALIVE_FAILURES"
+    assert rig.listen_key_posts() == 2
+    assert rig.snapshots_provider.calls == 2
+    assert rig.supervisor.liveness().consecutive_keepalive_failures == 0
+    await rig.stop()
+
+
+async def test_hard_keepalive_failure_reports_category_and_never_loops() -> None:
+    rig = Rig(limits=limits_with())
+    await rig.start_live()
+    rig.rest.fail_next(
+        "keepalive_user_data_stream", UnauthorizedError(TEST_ONLY_SDK_MESSAGE, -2015)
+    )
+
+    await rig.vt.advance(KEEPALIVE)
+    assert rig.supervisor.state is S.UNKNOWN
+    assert rig.failures == ["AUTH_OR_SIGNATURE"]
+
+    await rig.vt.advance(KEEPALIVE * 5)
+    assert rig.keepalives() == 1
+    assert rig.listen_key_posts() == 1
+    assert rig.snapshots_provider.calls == 1
+    assert rig.failures == ["AUTH_OR_SIGNATURE"]
+    assert rig.supervisor.state is S.UNKNOWN
+    await rig.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: the shared rate-limit gate in the supervisor (user amendment 2026-10-16).
+# --------------------------------------------------------------------------- #
+
+
+async def test_keepalive_429_never_triggers_immediate_rekey_or_snapshot() -> None:
+    rig = Rig(limits=limits_with(keepalive_failure_tolerance=1))
+    await rig.start_live()
+    rig.rest.fail_next(
+        "keepalive_user_data_stream", TooManyRequestsError(TEST_ONLY_SDK_MESSAGE, -1003, None)
+    )
+
+    await rig.vt.advance(KEEPALIVE)
+
+    # The 429 paused every REST call of the process; the supervisor is waiting it out.
+    restriction = rig.gate.restriction()
+    assert restriction is not None and restriction.reason == RATE_LIMIT_PAUSE_429
+    assert WAIT_429 in rig.vt.sleeps
+    assert rig.supervisor.state is S.UNKNOWN
+    assert rig.listen_key_posts() == 1
+    assert rig.snapshots_provider.calls == 1
+
+    await rig.vt.advance(WAIT_429 - 1)
+    assert rig.supervisor.state is S.UNKNOWN
+    assert rig.listen_key_posts() == 1
+    assert rig.snapshots_provider.calls == 1
+    assert S.SYNCING not in rig.state_names()[3:]
+
+    await rig.vt.advance(1)
+    assert rig.listen_key_posts() == 2
+    assert rig.snapshots_provider.calls == 2
+    assert rig.state_names()[3:] == [S.UNKNOWN, S.SYNCING, S.LIVE]
+    await rig.stop()
+
+
+async def test_keepalive_429_with_retry_after_waits_capped_value() -> None:
+    rig = Rig(limits=limits_with(keepalive_failure_tolerance=1))
+    await rig.start_live()
+    rig.rest.fail_next(
+        "keepalive_user_data_stream",
+        TooManyRequestsError(TEST_ONLY_SDK_MESSAGE, -1003, CAP * 3),
+    )
+
+    await rig.vt.advance(KEEPALIVE)
+    assert CAP in rig.vt.sleeps
+    assert CAP * 3 not in rig.vt.sleeps
+
+    await rig.vt.advance(CAP - 1)
+    assert rig.listen_key_posts() == 1
+    assert rig.supervisor.state is S.UNKNOWN
+    await rig.vt.advance(1)
+    assert rig.listen_key_posts() == 2
+    assert rig.supervisor.state is S.LIVE
+    await rig.stop()
+
+
+async def test_pause_set_by_another_holder_delays_every_supervisor_rest_step() -> None:
+    margin = 10
+    rig = Rig(limits=limits_with())
+    await rig.start_live()
+
+    # Another holder meets a 429 shortly before the keepalive is due.
+    await rig.vt.advance(KEEPALIVE - margin)
+    rig.gate.record(_C.RATE_LIMITED, None)
+    await rig.vt.advance(margin)
+    assert rig.keepalives() == 0
+    await rig.vt.advance(WAIT_429 - margin - 1)
+    assert rig.keepalives() == 0
+    assert rig.supervisor.state is S.LIVE
+    await rig.vt.advance(1)
+    assert rig.keepalives() == 1
+
+    # A running snapshot cycle: the first attempt after a gap fails while another holder
+    # pauses REST; the next attempt waits the remaining pause and consumes no attempt.
+    def _pause_during_attempt(call: int) -> None:
+        if call == 2:
+            rig.gate.record(_C.RATE_LIMITED, None)
+
+    rig.snapshots_provider.on_call = _pause_during_attempt
+    rig.snapshots_provider.failures.append(RuntimeError("snapshot attempt failed"))
+    rig.ws.simulate_unsolicited_close()
+    await rig.settle()
+    assert rig.snapshots_provider.calls == 2
+    assert rig.supervisor.state is S.SYNCING
+
+    await rig.vt.advance(WAIT_429 - 1)
+    assert rig.snapshots_provider.calls == 2
+    assert rig.supervisor.state is S.SYNCING
+    await rig.vt.advance(2)
+    assert rig.snapshots_provider.calls == 3
+    assert rig.supervisor.state is S.LIVE
+    await rig.stop()
+
+
+async def test_ban_on_listen_key_call_blocks_every_holder() -> None:
+    rig = Rig(limits=limits_with())
+    await rig.start_live()
+    rig.rest.fail_next(
+        "keepalive_user_data_stream", RateLimitBanError(TEST_ONLY_SDK_MESSAGE, -1003, None)
+    )
+
+    await rig.vt.advance(KEEPALIVE)
+
+    restriction = rig.gate.restriction()
+    assert restriction is not None and restriction.reason == IP_BAN_418
+    assert rig.supervisor.state is S.UNKNOWN
+    assert rig.failures == ["RATE_LIMIT_BAN_ACTIVE"]
+    # Another holder of the same gate is refused without sending.
+    other_holder = ScriptedSnapshots(rig.gate)
+    with pytest.raises(RateLimitBanActive):
+        await other_holder()
+    assert other_holder.calls == 0
+
+    await rig.vt.advance(KEEPALIVE * 4)
+    assert rig.failures == ["RATE_LIMIT_BAN_ACTIVE"]
+    assert rig.keepalives() == 1
+    assert rig.listen_key_posts() == 1
+    assert rig.snapshots_provider.calls == 1
+    assert rig.supervisor.state is S.UNKNOWN
+    await rig.stop()
+
+
+async def test_request_resync_during_ban_sends_nothing() -> None:
+    rig = Rig(limits=limits_with())
+    await rig.start_live()
+    rig.rest.fail_next(
+        "keepalive_user_data_stream", RateLimitBanError(TEST_ONLY_SDK_MESSAGE, -1003, None)
+    )
+    await rig.vt.advance(KEEPALIVE)
+    calls_before = dict(rig.rest.calls)
+
+    rig.supervisor.request_resync()
+    await rig.settle()
+
+    assert rig.failures == ["RATE_LIMIT_BAN_ACTIVE", "RATE_LIMIT_BAN_ACTIVE"]
+    assert rig.rest.calls == calls_before
+    assert rig.snapshots_provider.calls == 1
+    assert rig.supervisor.state is S.UNKNOWN
+    await rig.stop()
+
+
+async def test_wait_end_does_not_restore_live() -> None:
+    rig = Rig(limits=limits_with(keepalive_failure_tolerance=1))
+    await rig.start_live()
+    rig.rest.fail_next(
+        "keepalive_user_data_stream", TooManyRequestsError(TEST_ONLY_SDK_MESSAGE, -1003, None)
+    )
+    rig.snapshots_provider.fail_always = RuntimeError("snapshot unavailable")
+    await rig.vt.advance(KEEPALIVE)
+    assert rig.supervisor.state is S.UNKNOWN
+    held_id = TEST_ONLY_ORDER_IDS[3]
+    rig.emit_order(held_id)
+    await rig.settle()
+
+    # The pause ends: nothing becomes LIVE by itself; the snapshot cycle runs and fails.
+    await rig.vt.advance(WAIT_429)
+    assert rig.gate.restriction() is None
+    assert rig.supervisor.state is not S.LIVE
+    await rig.vt.advance(KEEPALIVE)
+    assert rig.supervisor.state is S.UNKNOWN
+    assert S.LIVE not in rig.state_names()[3:]
+    assert rig.failures == ["SNAPSHOT_EXHAUSTED"]
+    assert rig.events == []
+    await rig.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: rotation, SDK reconnect, connection errors.
+# --------------------------------------------------------------------------- #
+
+
+async def test_project_rotation_interval_rebuilds_and_resyncs() -> None:
+    rig = Rig(limits=limits_with(project_rotation_interval_seconds=ROTATION))
+    await rig.start_live()
+
+    await rig.vt.advance(ROTATION - 1)
+    assert rig.factory.built == []
+    await rig.vt.advance(1)
+
+    assert rig.state_names()[3:] == [S.UNKNOWN, S.SYNCING, S.LIVE]
+    assert rig.states[3][1] == "PROJECT_ROTATION"
+    assert len(rig.factory.built) == 1
+    assert rig.adapter.epoch == 2
+    assert rig.snapshots_provider.calls == 2
+
+    # The timer restarts after the rotation's own connect.
+    await rig.vt.advance(ROTATION)
+    assert len(rig.factory.built) == 2
+    assert rig.snapshots_provider.calls == 3
+    await rig.stop()
+
+
+async def test_no_rotation_timer_when_none_and_sdk_reconnect_is_a_gap() -> None:
+    rig = Rig(limits=limits_with())
+    await rig.start_live()
+    assert rig.supervisor._rotation_task is None
+
+    await rig.vt.advance(ROTATION * 3)
+    assert rig.factory.built == []
+    assert rig.snapshots_provider.calls == 1
+
+    rig.ws.emit_connection_event("private", "reconnect")
+    await rig.settle()
+    assert rig.supervisor.state is S.UNKNOWN
+    held_id = TEST_ONLY_ORDER_IDS[0]
+    rig.emit_order(held_id)
+    await rig.settle()
+    assert rig.events == []
+
+    rig.ws.emit_connection_event("private", "open")
+    await rig.settle()
+    assert rig.state_names()[3:] == [S.UNKNOWN, S.SYNCING, S.LIVE]
+    assert rig.states[3][1] == "SDK_RECONNECT"
+    assert rig.snapshots_provider.calls == 2
+    assert rig.factory.built == []
+    assert rig.order_ids() == [(str(held_id), True)]
+    await rig.stop()
+
+
+async def test_error_event_on_open_connection_is_ignored_and_on_closed_one_is_a_loss() -> None:
+    rig = Rig(limits=limits_with())
+    await rig.start_live()
+
+    rig.ws.emit_connection_event("private", "error", RuntimeError("callback failed"))
+    await rig.settle()
+    assert rig.supervisor.state is S.LIVE
+    assert rig.factory.built == []
+
+    private = rig.ws.connection_for("private")
+    assert private is not None
+    private.is_open = False
+    rig.ws.emit_connection_event("private", "error", RuntimeError("socket failed"))
+    await rig.settle()
+    assert rig.state_names()[3:] == [S.UNKNOWN, S.SYNCING, S.LIVE]
+    assert rig.states[3][1] == "CONNECTION_ERROR"
+    assert len(rig.factory.built) == 1
+    await rig.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: liveness and staleness.
+# --------------------------------------------------------------------------- #
+
+
+async def test_ping_and_pong_update_the_liveness_record() -> None:
+    rig = Rig(limits=limits_with())
+    await rig.start_live()
+
+    await rig.vt.advance(5)
+    rig.ws.emit_connection_event("private", "ping", b"payload")
+    await rig.settle()
+    ping_at = rig.vt.now()
+    await rig.vt.advance(7)
+    rig.ws.emit_connection_event("private", "pong", b"payload")
+    await rig.settle()
+
+    liveness = rig.supervisor.liveness()
+    assert isinstance(liveness, LivenessSnapshot)
+    assert liveness.last_ping_at_utc == ping_at
+    assert liveness.last_pong_at_utc == rig.vt.now()
+    assert liveness.last_event_at_utc is None
+    assert liveness.state is S.LIVE
+    assert liveness.epoch == 1
+    assert rig.supervisor.state is S.LIVE
+    await rig.stop()
+
+
+async def test_quiet_account_with_regular_pings_is_not_stale() -> None:
+    ping_every = MAX_AGE // 2
+    rig = Rig(limits=limits_with(keepalive_interval_seconds=MAX_AGE * 100))
+    await rig.start_live()
+    for _ in range(40):
+        await rig.vt.advance(ping_every)
+        rig.ws.emit_connection_event("private", "ping")
+        await rig.settle()
+        liveness = rig.supervisor.liveness()
+        assert not stream_is_stale(liveness, rig.vt.now(), max_liveness_age_seconds=MAX_AGE)
+    assert rig.supervisor.liveness().last_event_at_utc is None
+    # Without pings the same quiet stream turns stale once the age is exceeded.
+    await rig.vt.advance(MAX_AGE + 1)
+    assert stream_is_stale(
+        rig.supervisor.liveness(), rig.vt.now(), max_liveness_age_seconds=MAX_AGE
+    )
+    await rig.stop()
+
+
+def _liveness(**overrides: Any) -> LivenessSnapshot:
+    values: dict[str, Any] = {
+        "state": S.LIVE,
+        "state_since_utc": VirtualTime().now(),
+        "epoch": 1,
+        "last_event_at_utc": None,
+        "last_ping_at_utc": None,
+        "last_pong_at_utc": None,
+        "last_keepalive_ok_at_utc": None,
+        "consecutive_keepalive_failures": 0,
+    }
+    values.update(overrides)
+    return LivenessSnapshot(**values)
+
+
+def test_stream_is_stale_is_pure_and_uses_only_liveness_signals() -> None:
+    start: datetime = VirtualTime().now()
+    limit = timedelta(seconds=MAX_AGE)
+    live = _liveness()
+    # The LIVE entry counts as a liveness signal; staleness means strictly older than the limit.
+    assert not stream_is_stale(live, start + limit, max_liveness_age_seconds=MAX_AGE)
+    assert stream_is_stale(
+        live, start + limit + timedelta(microseconds=1), max_liveness_age_seconds=MAX_AGE
+    )
+    # The latest of ping, pong and keepalive counts; an event never does.
+    later = start + limit
+    for field in ("last_ping_at_utc", "last_pong_at_utc", "last_keepalive_ok_at_utc"):
+        snapshot = _liveness(**{field: later})
+        assert not stream_is_stale(snapshot, later + limit, max_liveness_age_seconds=MAX_AGE)
+    with_event = _liveness(last_event_at_utc=later)
+    assert stream_is_stale(with_event, later + limit + limit, max_liveness_age_seconds=MAX_AGE)
+    # A ratified none computes no verdict.
+    assert not stream_is_stale(live, start + limit * 1000, max_liveness_age_seconds=None)
+    # Not LIVE and no liveness signal at all: stale (fail closed).
+    assert stream_is_stale(_liveness(state=S.UNKNOWN), start, max_liveness_age_seconds=MAX_AGE)
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: queue overflow and anomalies.
+# --------------------------------------------------------------------------- #
+
+
+async def test_queue_overflow_goes_unknown_resyncs_and_releases_only_what_was_held() -> None:
+    queue_max = 2
+    rig = Rig(limits=limits_with(event_queue_max=queue_max))
+    await rig.start_live()
+
+    # A burst larger than the adapter queue arrives before the pump runs.
+    for order_id in TEST_ONLY_ORDER_IDS[:3]:
+        rig.emit_order(order_id)
+    assert rig.adapter.overflowed
+    await rig.settle()
+
+    assert rig.state_names()[3:] == [S.UNKNOWN, S.SYNCING, S.LIVE]
+    assert rig.states[3][1] == "QUEUE_OVERFLOW"
+    assert rig.snapshots_provider.calls == 2
+    assert not rig.adapter.overflowed
+    assert rig.adapter.overflow_count == 1
+    assert rig.order_ids() == [(str(order_id), True) for order_id in TEST_ONLY_ORDER_IDS[:2]]
+    await rig.stop()
+
+
+async def test_anomaly_is_delivered_with_the_same_hold_rule() -> None:
+    rig = Rig(limits=limits_with())
+
+    def _anomaly_during_snapshot(call: int) -> None:
+        rig.client().emit_user_event(TEST_ONLY_LISTEN_KEY, object())
+
+    rig.snapshots_provider.on_call = _anomaly_during_snapshot
+    await rig.start_live()
+    rig.client().emit_user_event(TEST_ONLY_LISTEN_KEY, object())
+    await rig.settle()
+
+    assert [type(event.outcome) for event in rig.events] == [StreamAnomaly, StreamAnomaly]
+    assert [event.after_gap for event in rig.events] == [True, False]
+    await rig.stop()

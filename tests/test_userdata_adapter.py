@@ -15,7 +15,7 @@ import dataclasses
 import io
 import logging
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -35,6 +35,13 @@ from binance_sdk_derivatives_trading_usds_futures.websocket_streams.models.user_
     UserDataStreamEventsResponse,
 )
 from src.adapters import binance_userdata as bud
+from src.adapters.binance_ratelimit_gate import (
+    IP_BAN_418,
+    RATE_LIMIT_PAUSE_429,
+    RateLimitBanActive,
+    RateLimitPauseActive,
+    RestRateLimitGate,
+)
 from src.adapters.binance_userdata import (
     ConnectionEvent,
     ListenKeyFailure,
@@ -61,8 +68,18 @@ from src.ops import redaction
 from src.ops.redaction import RedactingFilter, configure_logging, scrub
 from structlog.testing import capture_logs
 
-from tests.support.ast_guards import float_constructor_calls, forbidden_imports, wall_clock_calls
-from tests.support.limits import test_only_stream_limits
+from tests.support.ast_guards import (
+    float_constructor_calls,
+    forbidden_imports,
+    module_imports,
+    wall_clock_calls,
+)
+from tests.support.limits import (
+    TEST_ONLY_RATE_LIMIT_418_NO_RETRY_AFTER_WAIT_SECONDS,
+    TEST_ONLY_RATE_LIMIT_429_NO_RETRY_AFTER_WAIT_SECONDS,
+    test_only_rate_limit_policy,
+    test_only_stream_limits,
+)
 from tests.support.userdata_frames import order_trade_update_frame
 from tests.userdata_fakes import (
     TEST_ONLY_LISTEN_KEY,
@@ -89,6 +106,11 @@ TEST_ONLY_SDK_MESSAGE = "sdk-detail-text-that-must-not-leak"
 
 def _clock() -> datetime:
     return TEST_ONLY_NOW
+
+
+def _rest_gate() -> RestRateLimitGate:
+    """A fresh process-wide REST gate (plan 18-10) with the TEST_ONLY policy (plan 18-14)."""
+    return RestRateLimitGate(policy=test_only_rate_limit_policy(), clock=_clock)
 
 
 @pytest.fixture(autouse=True)
@@ -364,7 +386,7 @@ class _KeySequence:
 
 
 async def test_listen_key_port_start_returns_the_key_and_registers_it() -> None:
-    port = SdkListenKeyPort(FakeRestUserDataApi())
+    port = SdkListenKeyPort(FakeRestUserDataApi(), rest_gate=_rest_gate())
 
     key = await port.start()
 
@@ -383,7 +405,7 @@ async def test_listen_key_port_runs_the_sdk_call_in_a_worker_thread() -> None:
             seen.append(threading.get_ident())
             return super().start_user_data_stream()
 
-    await SdkListenKeyPort(_ThreadRecordingApi()).start()
+    await SdkListenKeyPort(_ThreadRecordingApi(), rest_gate=_rest_gate()).start()
 
     assert seen and seen[0] != threading.get_ident()
 
@@ -392,7 +414,7 @@ async def test_listen_key_port_start_without_a_key_raises_failure() -> None:
     rest = FakeRestUserDataApi(start_returns_no_key=True)
 
     with pytest.raises(ListenKeyFailure) as excinfo:
-        await SdkListenKeyPort(rest).start()
+        await SdkListenKeyPort(rest, rest_gate=_rest_gate()).start()
 
     assert excinfo.value.category is _C.UNKNOWN_EXCHANGE_ERROR
     assert excinfo.value.retry_after_seconds is None
@@ -400,13 +422,16 @@ async def test_listen_key_port_start_without_a_key_raises_failure() -> None:
 
 
 async def test_keepalive_registers_a_key_carried_by_its_response() -> None:
-    port = SdkListenKeyPort(FakeRestUserDataApi(keepalive_listen_key=TEST_ONLY_SECOND_LISTEN_KEY))
+    port = SdkListenKeyPort(
+        FakeRestUserDataApi(keepalive_listen_key=TEST_ONLY_SECOND_LISTEN_KEY),
+        rest_gate=_rest_gate(),
+    )
 
     await port.keepalive()
 
     _assert_no_key(TEST_ONLY_SECOND_LISTEN_KEY, scrub(f"kept {TEST_ONLY_SECOND_LISTEN_KEY}"))
     # A response without a key is accepted and registers nothing.
-    await SdkListenKeyPort(FakeRestUserDataApi()).keepalive()
+    await SdkListenKeyPort(FakeRestUserDataApi(), rest_gate=_rest_gate()).keepalive()
 
 
 _TRANSLATION_MATRIX: list[tuple[str, Any, type[Exception], ExchangeErrorCategory, int | None]] = [
@@ -499,7 +524,7 @@ async def test_listen_key_translation_matrix(
 ) -> None:
     rest = FakeRestUserDataApi()
     rest.fail_next(method, make_error())
-    port = SdkListenKeyPort(rest)
+    port = SdkListenKeyPort(rest, rest_gate=_rest_gate())
 
     with pytest.raises(expected) as excinfo:
         await getattr(port, _PORT_METHODS[method])()
@@ -566,9 +591,88 @@ async def test_listen_key_port_single_call_site_and_no_retry() -> None:
             rest = FakeRestUserDataApi()
             rest.fail_next(method, error)
             with pytest.raises(expected):
-                await getattr(SdkListenKeyPort(rest), public)()
+                await getattr(SdkListenKeyPort(rest, rest_gate=_rest_gate()), public)()
             assert rest.calls[method] == 1
             assert sum(rest.calls.values()) == 1
+
+
+async def test_listen_key_port_records_and_respects_shared_gate() -> None:
+    # The gate is a required keyword: no port exists without the process-wide gate.
+    with pytest.raises(TypeError):
+        SdkListenKeyPort(FakeRestUserDataApi())  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        SdkListenKeyPort(FakeRestUserDataApi(), rest_gate=object())  # type: ignore[arg-type]
+
+    for method, public in _PORT_METHODS.items():
+        # A pause or a ban set by another holder refuses before sending; the refusal is the
+        # gate's own exception, unchanged, and the SDK fake's counter does not move.
+        for category, refusal in (
+            (_C.RATE_LIMITED, RateLimitPauseActive),
+            (_C.IP_BANNED, RateLimitBanActive),
+        ):
+            gate = _rest_gate()
+            gate.record(category, None)
+            rest = FakeRestUserDataApi()
+            with pytest.raises(refusal) as refused:
+                await getattr(SdkListenKeyPort(rest, rest_gate=gate), public)()
+            assert type(refused.value) is refusal
+            assert sum(rest.calls.values()) == 0
+
+        # A 429 on the call pauses every REST call of the process (here: the next call of
+        # the same port is refused without sending); nothing is retried.
+        gate = _rest_gate()
+        rest = FakeRestUserDataApi()
+        rest.fail_next(method, TooManyRequestsError(TEST_ONLY_SDK_MESSAGE, -1003, None))
+        port = SdkListenKeyPort(rest, rest_gate=gate)
+        with pytest.raises(ListenKeyTransient):
+            await getattr(port, public)()
+        restriction = gate.restriction()
+        assert restriction is not None
+        assert restriction.reason == RATE_LIMIT_PAUSE_429
+        assert restriction.remaining_seconds == TEST_ONLY_RATE_LIMIT_429_NO_RETRY_AFTER_WAIT_SECONDS
+        with pytest.raises(RateLimitPauseActive):
+            await getattr(port, public)()
+        assert rest.calls[method] == 1
+        assert sum(rest.calls.values()) == 1
+
+        # A 429 with a Retry-After pauses for that many seconds.
+        gate = _rest_gate()
+        rest = FakeRestUserDataApi()
+        rest.fail_next(
+            method,
+            TooManyRequestsError(TEST_ONLY_SDK_MESSAGE, -1003, TEST_ONLY_RETRY_AFTER_SECONDS),
+        )
+        with pytest.raises(ListenKeyTransient):
+            await getattr(SdkListenKeyPort(rest, rest_gate=gate), public)()
+        assert gate.remaining_seconds() == TEST_ONLY_RETRY_AFTER_SECONDS
+
+        # A 418 bans REST for the 418 fallback.
+        gate = _rest_gate()
+        rest = FakeRestUserDataApi()
+        rest.fail_next(method, RateLimitBanError(TEST_ONLY_SDK_MESSAGE, -1003, None))
+        port = SdkListenKeyPort(rest, rest_gate=gate)
+        with pytest.raises(ListenKeyFailure):
+            await getattr(port, public)()
+        restriction = gate.restriction()
+        assert restriction is not None
+        assert restriction.reason == IP_BAN_418
+        assert restriction.remaining_seconds == TEST_ONLY_RATE_LIMIT_418_NO_RETRY_AFTER_WAIT_SECONDS
+        with pytest.raises(RateLimitBanActive):
+            await getattr(port, public)()
+        assert sum(rest.calls.values()) == 1
+
+        # Every other failure leaves the gate open.
+        for error in (
+            ServerError(TEST_ONLY_SDK_MESSAGE, 503),
+            BadRequestError(TEST_ONLY_SDK_MESSAGE, -1125),
+            UnauthorizedError(TEST_ONLY_SDK_MESSAGE, -2015),
+        ):
+            gate = _rest_gate()
+            rest = FakeRestUserDataApi()
+            rest.fail_next(method, error)
+            with pytest.raises(bud.ListenKeyError):
+                await getattr(SdkListenKeyPort(rest, rest_gate=gate), public)()
+            assert gate.restriction() is None
 
 
 # --------------------------------------------------------------------------- #
@@ -711,7 +815,9 @@ async def test_rebuild_before_start_is_refused() -> None:
 
 async def test_keepalive_delegates_and_propagates_listen_key_errors_unchanged() -> None:
     rest = FakeRestUserDataApi()
-    adapter, _transport, _ws, _factory, _port = _rig(port=SdkListenKeyPort(rest))
+    now = [TEST_ONLY_NOW]
+    gate = RestRateLimitGate(policy=test_only_rate_limit_policy(), clock=lambda: now[0])
+    adapter, _transport, _ws, _factory, _port = _rig(port=SdkListenKeyPort(rest, rest_gate=gate))
     await adapter.start()
 
     rest.fail_next("keepalive_user_data_stream", BadRequestError(TEST_ONLY_SDK_MESSAGE, -1125))
@@ -720,9 +826,16 @@ async def test_keepalive_delegates_and_propagates_listen_key_errors_unchanged() 
     rest.fail_next("keepalive_user_data_stream", TooManyRequestsError(None, -1003, None))
     with pytest.raises(ListenKeyTransient):
         await adapter.keepalive()
+    # The 429 paused every REST call of the process (plan 18-14): refused unsent, unchanged.
+    with pytest.raises(RateLimitPauseActive):
+        await adapter.keepalive()
+    now[0] += timedelta(seconds=TEST_ONLY_RATE_LIMIT_429_NO_RETRY_AFTER_WAIT_SECONDS)
     rest.fail_next("keepalive_user_data_stream", RateLimitBanError(None, -1003, None))
     with pytest.raises(ListenKeyFailure):
         await adapter.keepalive()
+    with pytest.raises(RateLimitBanActive):
+        await adapter.keepalive()
+    now[0] += timedelta(seconds=TEST_ONLY_RATE_LIMIT_418_NO_RETRY_AFTER_WAIT_SECONDS)
     await adapter.keepalive()
 
     assert rest.calls["keepalive_user_data_stream"] == 4
@@ -734,7 +847,9 @@ async def test_rekey_on_an_open_connection_subscribes_the_new_key_and_forgets_th
     sdk_stream_map: Any,
 ) -> None:
     rest = FakeRestUserDataApi(listen_keys=(TEST_ONLY_LISTEN_KEY, TEST_ONLY_SECOND_LISTEN_KEY))
-    adapter, _transport, ws, factory, _port = _rig(port=SdkListenKeyPort(rest))
+    adapter, _transport, ws, factory, _port = _rig(
+        port=SdkListenKeyPort(rest, rest_gate=_rest_gate())
+    )
     await adapter.start()
 
     await adapter.rekey()
@@ -756,7 +871,9 @@ async def test_rekey_on_an_open_connection_subscribes_the_new_key_and_forgets_th
 
 async def test_rekey_rebuilds_when_the_private_connection_is_gone(sdk_stream_map: Any) -> None:
     rest = FakeRestUserDataApi(listen_keys=(TEST_ONLY_LISTEN_KEY, TEST_ONLY_SECOND_LISTEN_KEY))
-    adapter, _transport, ws, factory, _port = _rig(port=SdkListenKeyPort(rest))
+    adapter, _transport, ws, factory, _port = _rig(
+        port=SdkListenKeyPort(rest, rest_gate=_rest_gate())
+    )
     await adapter.start()
     ws.simulate_unsolicited_close()
 
@@ -923,7 +1040,7 @@ def test_sdk_log_bridge_forwards_sdk_warnings_once_and_ignores_the_rest() -> Non
 
 async def test_sdk_subscribe_line_and_every_repr_carry_no_listen_key() -> None:
     rest = FakeRestUserDataApi()
-    port = SdkListenKeyPort(rest)
+    port = SdkListenKeyPort(rest, rest_gate=_rest_gate())
     adapter, transport, ws, _factory, _port = _rig(port=port)
     await adapter.start()
 
@@ -966,7 +1083,7 @@ async def test_listen_key_registered_on_start_before_return() -> None:
         buffer = io.StringIO()
         configure_logging(environ={}, stream=buffer)
         install_sdk_log_bridge()
-        key = await SdkListenKeyPort(FakeRestUserDataApi()).start()
+        key = await SdkListenKeyPort(FakeRestUserDataApi(), rest_gate=_rest_gate()).start()
 
         with _CapturedRootLogs() as capture:
             logging.getLogger().error(f"Connecting to {_path_url(key)}")
@@ -1090,9 +1207,10 @@ def test_register_runtime_secret_is_the_first_statement_of_every_key_entry_point
 def test_module_has_no_wall_clock_no_float_no_print_and_no_forbidden_import() -> None:
     assert wall_clock_calls(MODULE_PATH) == []
     assert float_constructor_calls(MODULE_PATH) == []
-    assert (
-        forbidden_imports(MODULE_PATH, ("src.paper", "src.adapters.binance_ratelimit_gate")) == []
-    )
+    assert forbidden_imports(MODULE_PATH, ("src.paper",)) == []
+    # Plan 18-14 wired the process-wide REST gate into the listenKey port; it is the only
+    # gate the module may hold (no second rate-limit state).
+    assert "src.adapters.binance_ratelimit_gate" in module_imports(MODULE_PATH)
     tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):

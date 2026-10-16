@@ -26,8 +26,9 @@ match. No exception, event, repr, anomaly or log line of this module carries the
 The listenKey REST calls make exactly one SDK call each and are never retried here: a 429 or a
 418 is reported (`ListenKeyTransient` or `ListenKeyFailure` with the category and the
 Retry-After seconds) per the user's record `decisions/18-DEC-O-18-01.md` and its amendment of
-2026-10-16. The shared REST rate-limit gate of plan 18-10 is wired into
-`SdkListenKeyPort._rest_call` by plan 18-14.
+2026-10-16. The port holds the process-wide REST rate-limit gate of plan 18-10 (plan 18-14):
+`SdkListenKeyPort._rest_call` refuses before sending while a ban or a pause is active and
+records a 418 or a 429 in the gate.
 
 No wall clock is read: every timestamp comes from the injected clock. No number is defined
 here: the queue bound comes from the ratified `StreamLimits`.
@@ -53,6 +54,7 @@ from binance_sdk_derivatives_trading_usds_futures.websocket_streams import (
 )
 from src.adapters.binance_errors import error_facts_from_exception
 from src.adapters.binance_limits import StreamLimits
+from src.adapters.binance_ratelimit_gate import RestRateLimitGate
 from src.adapters.binance_userdata_events import (
     StreamAnomalyKind,
     StreamOutcome,
@@ -182,15 +184,20 @@ _TRANSIENT_CATEGORIES: frozenset[ExchangeErrorCategory] = frozenset(
 )
 
 
-def _translate(exc: BaseException) -> ListenKeyError:
-    """Classify an SDK error of a listenKey call by (class, code, CallKind.LISTEN_KEY)."""
-    facts = error_facts_from_exception(exc)
-    category = classify(facts, CallKind.LISTEN_KEY)
+# The categories the shared REST gate records: a 418 bans, a 429 pauses every REST call of
+# the process (user record 18-DEC-O-18-01.md and its amendment of 2026-10-16).
+_GATE_CATEGORIES: frozenset[ExchangeErrorCategory] = frozenset(
+    {ExchangeErrorCategory.IP_BANNED, ExchangeErrorCategory.RATE_LIMITED}
+)
+
+
+def _translate(category: ExchangeErrorCategory, retry_after_seconds: int | None) -> ListenKeyError:
+    """The listenKey exception of a category classified with `CallKind.LISTEN_KEY`."""
     if category is ExchangeErrorCategory.INVALID_LISTEN_KEY:
-        return ListenKeyInvalid(category, facts.retry_after_seconds)
+        return ListenKeyInvalid(category, retry_after_seconds)
     if category in _TRANSIENT_CATEGORIES:
-        return ListenKeyTransient(category, facts.retry_after_seconds)
-    return ListenKeyFailure(category, facts.retry_after_seconds)
+        return ListenKeyTransient(category, retry_after_seconds)
+    return ListenKeyFailure(category, retry_after_seconds)
 
 
 def _listen_key_of(response: object) -> str | None:
@@ -210,10 +217,16 @@ class SdkListenKeyPort:
 
     The SDK methods are synchronous (`requests`), so each runs in a worker thread. All three
     go through `_rest_call`, the port's only SDK call site.
+
+    `rest_gate` is required: the one process-wide `RestRateLimitGate` of plan 18-10, the same
+    instance every other REST holder of the process uses (plan 18-14).
     """
 
-    def __init__(self, rest_api: _UserDataStreamRestApi) -> None:
+    def __init__(self, rest_api: _UserDataStreamRestApi, *, rest_gate: RestRateLimitGate) -> None:
+        if not isinstance(rest_gate, RestRateLimitGate):
+            raise TypeError("rest_gate must be the process-wide RestRateLimitGate")
         self._rest_api = rest_api
+        self._rest_gate = rest_gate
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}()"
@@ -221,18 +234,24 @@ class SdkListenKeyPort:
     async def _rest_call(self, method: Callable[..., Any], **kwargs: Any) -> Any:
         """Make exactly one SDK call in a worker thread; never retry, never sleep.
 
-        A failure is translated by category; the SDK exception is dropped before the
-        translated one is raised, so neither its text nor its traceback travels on. Plan
-        18-14 adds the process-wide `RestRateLimitGate` of plan 18-10 here (`check()` before
-        sending, `record()` on a 418 or a 429).
+        The shared gate is checked first: while a ban or a pause is active the gate's
+        `RateLimitBanActive` or `RateLimitPauseActive` propagates unchanged and nothing is
+        sent. A failure is classified with `CallKind.LISTEN_KEY`; a 418 (IP_BANNED) or a 429
+        (RATE_LIMITED) is recorded in the gate, which bans or pauses every REST call of the
+        process. The SDK exception is dropped before the translated one is raised, so neither
+        its text nor its traceback travels on.
         """
+        self._rest_gate.check()
         try:
             result = await asyncio.to_thread(method, **kwargs)
         except Exception as exc:
-            translated = _translate(exc)
+            facts = error_facts_from_exception(exc)
+            category = classify(facts, CallKind.LISTEN_KEY)
         else:
             return result
-        raise translated
+        if category in _GATE_CATEGORIES:
+            self._rest_gate.record(category, facts.retry_after_seconds)
+        raise _translate(category, facts.retry_after_seconds)
 
     async def start(self) -> str:
         """`POST /fapi/v1/listenKey`: the key, registered with the redactor before return."""
