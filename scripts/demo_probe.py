@@ -1194,15 +1194,18 @@ class _Market:
         return above - self.tick
 
     def marketable_buy(self) -> Decimal:
-        """A BUY limit that crosses the book: the PERCENT_PRICE upper bound of the mark.
+        """A BUY limit that crosses the book: halfway between the mark and the PERCENT_PRICE edge.
 
-        The port reads no order book, so the best ask is unknown; a BUY limit at the bound
-        fills at the book's best ask and is the highest price the exchange accepts, which also
-        bounds the notional check from above.
+        The port reads no order book, so the best ask is unknown; a BUY limit above the mark
+        fills at the book's best ask. The mark comes from the last one-minute close and can sit
+        above the exchange's own mark, so the price is not put at the band edge: the first live
+        probe (2026-10-16) had its entry refused with -4016 at the edge. Halfway leaves half of
+        the band as room and still bounds the notional check from above.
         """
         if self.multiplier_up is None:
             raise _StopCase("the PERCENT_PRICE filter is unreadable: no marketable price")
-        return self.floor(self.mark * self.multiplier_up)
+        halfway = (Decimal(1) + self.multiplier_up) / 2
+        return self.floor(self.mark * halfway)
 
     def smallest_quantity(self) -> Decimal:
         """The minimum quantity of the lot-size filter, on the step grid."""

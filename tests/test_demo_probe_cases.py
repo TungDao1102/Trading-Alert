@@ -712,7 +712,7 @@ async def test_a_naive_clock_is_refused_before_any_port_call(
 
 FAR_BELOW = Decimal("48000.00")
 FAR_ABOVE = Decimal("72000.00")
-MARKETABLE = Decimal("63000.00")
+MARKETABLE = Decimal("61500.00")  # halfway between the mark 60000 and the band edge 63000
 JUST_BELOW = Decimal("59999.90")
 APPROVED = Decimal("0.002")
 ORDER_SENDS = ("new_limit_order", "new_market_order", "new_conditional_order")
@@ -1899,3 +1899,33 @@ def test_the_guarded_port_reports_the_adapter_ban_flag_failing_closed(
         mode=dp.MODE_EXECUTE,
     )
     assert port.banned is expected
+
+
+def _market(mark: str, up: str | None = "1.0500") -> dp._Market:
+    return dp._Market(
+        mark=Decimal(mark),
+        tick=Decimal("0.1"),
+        step=Decimal("0.0001"),
+        min_quantity=Decimal("0.0001"),
+        min_notional=Decimal("50"),
+        multiplier_up=None if up is None else Decimal(up),
+        filters={},
+    )
+
+
+def test_the_marketable_buy_stays_inside_the_percent_price_band_when_the_mark_is_stale() -> None:
+    """Live finding 2026-10-16 (id_reuse_after_filled, -4016): the mark came from the last
+    one-minute close, which can sit above the exchange's own mark. A BUY at the band edge of
+    that mark was above the exchange cap. The price must cross the book yet leave room for a
+    mark that is lower by a share of the band."""
+    market = _market("82247.1")
+    price = market.marketable_buy()
+    edge = market.mark * Decimal("1.0500")
+    assert market.mark < price < edge
+    # the exchange cap of the live run was 86305.10, the band edge of its own mark 82195.33
+    assert price <= Decimal("86305.10")
+
+
+def test_the_marketable_buy_still_refuses_an_unreadable_band() -> None:
+    with pytest.raises(dp._StopCase):
+        _market("82247.1", up=None).marketable_buy()
