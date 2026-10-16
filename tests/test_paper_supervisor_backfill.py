@@ -137,7 +137,8 @@ class _Rig:
     backfilled: list[TaggedBar] = field(default_factory=list)
     gaps: list[GapRecord] = field(default_factory=list)
     events: list[tuple[str, datetime]] = field(default_factory=list)
-    order: list[tuple[str, datetime]] = field(default_factory=list)
+    order: list[tuple[str, Any]] = field(default_factory=list)
+    fatal: list[str] = field(default_factory=list)
 
     @property
     def fake(self) -> FakeSdkWsClient:
@@ -152,11 +153,14 @@ def _make_rig(
     now: datetime | None = None,
     factory_error: Exception | None = None,
     live_sink_error: Exception | None = None,
+    with_fatal_sink: bool = False,
+    fatal_sink_error: Exception | None = None,
 ) -> _Rig:
     """Build a supervisor over the real adapter and an SDK-shaped fake client.
 
     `clients` collects every fake client the adapter builds (the first is injected, later ones
-    come from `rebuild`). `factory_error` makes every rebuild attempt fail.
+    come from `rebuild`). `factory_error` makes every rebuild attempt fail. `with_fatal_sink`
+    passes the optional `on_fatal` sink (plan 16-56); `fatal_sink_error` makes it raise.
     """
     first = FakeSdkWsClient()
     clients: list[FakeSdkWsClient] = [first]
@@ -187,6 +191,19 @@ def _make_rig(
         backfilled.append(bar)
         order.append(("backfill", bar.close_time_utc))
 
+    def _on_gap(gap: GapRecord) -> None:
+        gaps.append(gap)
+        order.append(("gap", gap.expected_close_utc))
+
+    fatal: list[str] = []
+
+    def _on_fatal(reason: str) -> None:
+        fatal.append(reason)
+        order.append(("fatal", None))
+        if fatal_sink_error is not None:
+            raise fatal_sink_error
+
+    extra: dict[str, Any] = {"on_fatal": _on_fatal} if with_fatal_sink else {}
     supervisor = PaperSupervisor(
         ws_adapter=adapter,  # type: ignore[arg-type]
         rest_adapter=fake_rest,  # type: ignore[arg-type]
@@ -194,9 +211,10 @@ def _make_rig(
         intervals=intervals,
         on_closed_bar=_on_live,
         on_backfill=_on_backfill,
-        on_gap=gaps.append,
+        on_gap=_on_gap,
         on_connection_event=lambda event, at: events.append((str(event), at)),
         clock=lambda: clock_now,
+        **extra,
     )
     return _Rig(
         supervisor=supervisor,
@@ -208,6 +226,7 @@ def _make_rig(
         gaps=gaps,
         events=events,
         order=order,
+        fatal=fatal,
     )
 
 
@@ -488,9 +507,13 @@ async def test_error_event_also_rebuilds() -> None:
 
 
 async def test_rebuild_exhaustion_still_backfills_and_reports_ws_disconnected_gaps() -> None:
-    """CR-02 kept: an unrecoverable WS still runs the REST backfill; unrecovered closes are gaps."""
+    """CR-02 kept, B1-CR-01 added: an unrecoverable WS still runs the REST backfill and its
+    unrecovered closes become gaps; then the fatal sink is called once, so the runtime fails
+    closed (exit 7) instead of staying up deaf."""
     rest = _FakeRest({("BTCUSDT", "1h"): RuntimeError("rest down")})
-    rig = _make_rig(rest=rest, now=_NOW3, factory_error=ConnectionError("ws dead"))
+    rig = _make_rig(
+        rest=rest, now=_NOW3, factory_error=ConnectionError("ws dead"), with_fatal_sink=True
+    )
     rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
     await rig.supervisor.start()
 
@@ -503,6 +526,92 @@ async def test_rebuild_exhaustion_still_backfills_and_reports_ws_disconnected_ga
     assert len(rest.klines_calls) >= 1, "the backfill ran despite the exhausted rebuild"
     assert rig.gaps == [_gap(i, GapReason.WS_DISCONNECTED) for i in (1, 2, 3)]
     assert rig.backfilled == []
+    assert len(rig.fatal) == 1, "the exhausted rebuild ends in the fatal sink, once"
+    assert rig.order[-1] == ("fatal", None), "the fatal sink comes after the backfill's gaps"
+
+
+# ---- plan 16-56 Task 1: the fatal sink of an exhausted rebuild (B1-CR-01) ------------------- #
+
+
+async def test_the_fatal_sink_runs_once_after_the_backfill_handed_over_its_bars_and_gaps() -> None:
+    rest = _pages(1, 3)
+    rig = _make_rig(
+        rest=rest, now=_NOW3, factory_error=ConnectionError("ws dead"), with_fatal_sink=True
+    )
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+
+    rig.fake.simulate_unsolicited_close()
+    await rig.supervisor.wait_idle()
+
+    assert rig.order == [
+        ("backfill", _close_dt(1)),
+        ("backfill", _close_dt(3)),
+        ("gap", _close_dt(2)),
+        ("fatal", None),
+    ]
+    assert len(rig.fatal) == 1
+    assert "rebuild" in rig.fatal[0] and "exhausted" in rig.fatal[0]
+
+
+async def test_a_failing_fatal_sink_is_logged_and_never_propagates() -> None:
+    rig = _make_rig(
+        rest=_pages(1, 2, 3),
+        now=_NOW3,
+        factory_error=ConnectionError("ws dead"),
+        with_fatal_sink=True,
+        fatal_sink_error=RuntimeError("sink broken"),
+    )
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+
+    with capture_logs() as captured:
+        rig.fake.simulate_unsolicited_close()  # the SDK callback path must not raise
+        await rig.supervisor.wait_idle()
+
+    assert len(rig.fatal) == 1
+    failed = [e for e in captured if e["event"] == "paper.supervisor.sink_failed"]
+    assert [e["sink"] for e in failed] == ["on_fatal"]
+    assert not any(e["event"] == "paper.supervisor.event_failed" for e in captured)
+
+
+async def test_a_successful_rebuild_never_calls_the_fatal_sink() -> None:
+    rig = _make_rig(rest=_pages(1, 2, 3), now=_NOW3, with_fatal_sink=True)
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+
+    rig.fake.simulate_unsolicited_close()
+    await rig.supervisor.wait_idle()
+
+    assert len(rig.clients) == 2
+    assert rig.fatal == []
+
+
+async def test_an_exhaustion_during_stop_never_calls_the_fatal_sink() -> None:
+    """A rebuild that fails while the supervisor is stopping is teardown, not a feed failure."""
+    rig = _make_rig(rest=_pages(1), now=_NOW3, with_fatal_sink=True)
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+
+    async def _rebuild_failing_after_stop_began() -> None:
+        rig.supervisor._stopping = True  # the stop has begun while this attempt runs
+        raise ConnectionError("ws dead")
+
+    rig.adapter.rebuild = _rebuild_failing_after_stop_began  # type: ignore[method-assign]
+    rig.fake.simulate_unsolicited_close()
+    await rig.supervisor.wait_idle()
+
+    assert rig.fatal == []
+
+
+def test_the_ratified_rebuild_bounds_are_unchanged() -> None:
+    """16-DEC-O-07 "ratify current": the bounded rebuild keeps its Phase 7 numbers."""
+    from src.paper import supervisor as module
+
+    assert module.SUPERVISOR_MAX_ATTEMPTS == 7
+    assert module.SUPERVISOR_MAX_DELAY_SECONDS == 120
+    assert module.SUPERVISOR_WAIT_MULTIPLIER_SECONDS == 1
+    assert module.SUPERVISOR_WAIT_MAX_SECONDS == 60
 
 
 async def test_rebuild_exhaustion_with_a_working_rest_recovers_the_bars() -> None:

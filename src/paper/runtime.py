@@ -649,6 +649,7 @@ class _LiveLoop:
             "on_backfill": self._sink_backfill,
             "on_gap": self._sink_gap,
             "on_connection_event": self._sink_connection_event,
+            "on_fatal": self._sink_fatal,
         }
 
     def _sink_closed_bar(self, bar: TaggedBar) -> None:
@@ -664,6 +665,10 @@ class _LiveLoop:
         self._spawn_record(
             RuntimeRecord(event_type=event, epoch_id=self._epoch_id, occurred_at_utc=at)
         )
+
+    def _sink_fatal(self, reason: str) -> None:
+        """The supervisor's rebuild was exhausted after its backfill (B1-CR-01): exit 7."""
+        self._fail(RuntimeFailClosed(reason))
 
     def _enqueue(self, bar: TaggedBar) -> None:
         if self._fence is not None:
@@ -995,6 +1000,7 @@ async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None
             on_gap=sinks["on_gap"],
             on_connection_event=sinks["on_connection_event"],
             clock=context.clock,
+            on_fatal=sinks["on_fatal"],
         )
 
     snapshot = context.clock()

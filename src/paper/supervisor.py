@@ -13,7 +13,9 @@ replacement; the supervisor adds no rotation timer. It reacts to the SDK connect
 - `close` / `error`: records `WS_DISCONNECT`, rebuilds the adapter under a bounded retry,
   records `WS_RECONNECT`, then runs the same backfill. When the rebuild is exhausted the
   backfill still runs (CR-02) and every close it cannot recover becomes a `GapRecord`
-  with `GapReason.WS_DISCONNECTED`.
+  with `GapReason.WS_DISCONNECTED`; then the optional `on_fatal` sink is called once
+  (plan 16-56, B1-CR-01), so the composition root fails the process closed (exit 7) and the
+  restart policy restarts it, instead of leaving it up without a feed.
 
 Nothing is only logged (P9): backfilled bars go to `on_backfill` (tagged `REST_BACKFILL`),
 gaps go to `on_gap` with a reason code, connection events go to `on_connection_event`.
@@ -64,6 +66,12 @@ SUPERVISOR_MAX_ATTEMPTS: int = 7
 SUPERVISOR_MAX_DELAY_SECONDS: int = 120
 SUPERVISOR_WAIT_MULTIPLIER_SECONDS: int = 1
 SUPERVISOR_WAIT_MAX_SECONDS: int = 60
+
+# The reason handed to `on_fatal` when the bounded rebuild is exhausted (B1-CR-01).
+EXHAUSTED_REASON = (
+    "the WebSocket rebuild was exhausted after its bounded retry; the REST backfill ran and the "
+    "process fails closed so the restart policy restarts it (B1-CR-01)"
+)
 
 # SDK connection events after which the connection is considered lost and must be rebuilt.
 _DROP_EVENTS = frozenset({"close", "error"})
@@ -126,6 +134,9 @@ class PaperSupervisor:
     - `on_gap(GapRecord)`: an expected close that no bar covers, with a reason code. The same
       (symbol, interval, expected close) is reported at most once.
     - `on_connection_event(RuntimeEventType, datetime)`: `WS_DISCONNECT` / `WS_RECONNECT`.
+    - `on_fatal(str)` (optional, plan 16-56): the bounded rebuild was exhausted and its backfill
+      has run; the feed cannot be trusted any more. Called once per exhaustion with this
+      module's own reason text, never while the supervisor is stopping.
     """
 
     def __init__(
@@ -140,6 +151,7 @@ class PaperSupervisor:
         on_gap: Callable[[GapRecord], None],
         on_connection_event: Callable[[RuntimeEventType, datetime], None],
         clock: Callable[[], datetime] | None = None,
+        on_fatal: Callable[[str], None] | None = None,
     ) -> None:
         self._ws = ws_adapter
         self._rest = rest_adapter
@@ -149,6 +161,7 @@ class PaperSupervisor:
         self._on_backfill = on_backfill
         self._on_gap = on_gap
         self._on_connection_event = on_connection_event
+        self._on_fatal = on_fatal
         self._clock = clock if clock is not None else (lambda: datetime.now(UTC))
         self._last_close: dict[tuple[str, str], datetime] = {}
         # Guards the check-and-set in _advance_last_close. SDK callbacks run on the event-loop
@@ -384,6 +397,16 @@ class PaperSupervisor:
             # case is exactly when the REST backfill matters most.
             reason = GapReason.WS_DISCONNECTED
         await self._backfill_and_emit(reason)
+        if reason is GapReason.WS_DISCONNECTED and not self._stopping:
+            # B1-CR-01: after the backfill, a process without a feed must end (exit 7) so the
+            # restart policy restarts it; a teardown in progress is not a feed failure.
+            self._report_fatal(EXHAUSTED_REASON)
+
+    def _report_fatal(self, reason: str) -> None:
+        if self._on_fatal is None:
+            log.error("paper.supervisor.feed_lost_without_fatal_sink", reason=reason)
+            return
+        self._call_sink("on_fatal", self._on_fatal, reason)
 
     async def _rebuild_with_retry(self) -> bool:
         """Tenacity-bounded `ws.rebuild()`; True when it succeeded, False when exhausted."""
@@ -589,6 +612,7 @@ class PaperSupervisor:
 
 
 __all__ = [
+    "EXHAUSTED_REASON",
     "SUPERVISOR_MAX_ATTEMPTS",
     "SUPERVISOR_MAX_DELAY_SECONDS",
     "SUPERVISOR_WAIT_MAX_SECONDS",
