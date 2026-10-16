@@ -1,1 +1,14 @@
 dry run on the connected machine: PASS
+live Demo smoke 2026-10-16T14:04:46Z (user-run, DEMO, BTCUSDT 0.0008 at 0.96 of mark): evidence user-data-smoke-EVIDENCE-20261016T140446Z.json, proof_class REAL_SMOKE, check_smoke_evidence: no problem, outcome COMPLETE, end_state FLAT, failures none
+a listenKey start: PASS
+b SDK subscription: PASS (private connections: 1)
+c typed NEW and CANCELED via the SDK route: PASS
+d keepalive: PASS
+e forced transport drop UNKNOWN, SYNCING, LIVE: PASS (gap_ms=1431, snapshot_count_after_drop 1)
+f PUT after DELETE: OBSERVED (http_class=BAD_REQUEST, code=-1125, category=INVALID_LISTEN_KEY; equals the assumed -1125)
+g no key, secret, signature or listenKey in logs and evidence: PASS (also grepped in the committed files)
+h evidence passes check_smoke_evidence: PASS
+sdk_route_delivery: PASS
+plan 18-19: not needed (the SDK user_data route delivered typed ORDER_TRADE_UPDATE NEW and CANCELED; no direct transport required)
+clock drift before the run: offset_ms=-298, uncertainty_ms=139, within limits
+Demo serves a listenKey and a user-data socket: observed live (wss://demo-fstream.binance.com via the SDK route)
