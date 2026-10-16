@@ -1515,7 +1515,7 @@ def _describe(exc: BaseException) -> str:
 class SmokeRun:
     """One run of the smoke over a rig; `run()` never raises for a step failure."""
 
-    def __init__(self, config: SmokeConfig, rig: SmokeRig, secrets: Sequence[str] = ()) -> None:
+    def __init__(self, config: SmokeConfig, rig: SmokeRig) -> None:
         self.config = config
         self.rig = rig
         self.symbol = config.symbol
