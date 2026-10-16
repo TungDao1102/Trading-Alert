@@ -37,7 +37,7 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
 from src.adapters import binance_probe
 from src.adapters.binance_probe import SDK_REST_METHODS, BinanceProbeAdapter
 
-from tests.probe_fakes import FakeProbeRest, FakeProbeSdk, make_gate
+from tests.probe_fakes import FakeProbeRest, FakeProbeSdk, make_gate, make_public
 from tests.support.limits import TEST_ONLY_RECV_WINDOW_MS, test_only_signed_call_policy
 
 MODULE_PATH = Path(binance_probe.__file__)
@@ -54,6 +54,11 @@ _SUCCESS_PAYLOADS: dict[str, Any] = {
     "cancel_algo_order": CancelAlgoOrderResponse(algo_id=1, code="200", msg="success"),
     "cancel_all_open_orders": CancelAllOpenOrdersResponse(code=200, msg="done"),
     "cancel_all_algo_open_orders": CancelAllAlgoOpenOrdersResponse(code=200, msg="done"),
+    "current_all_open_orders": [],
+    "current_all_algo_open_orders": [],
+    "position_information_v3": [],
+    "account_trade_list": [],
+    "futures_account_balance_v3": [],
 }
 
 _Q = Decimal("0.010")
@@ -130,6 +135,12 @@ _OPERATIONS: dict[str, _Op] = {
     "cancel_algo_order": lambda a: a.cancel_algo_order(client_algo_id="a1"),
     "cancel_all_open_orders": lambda a: a.cancel_all_open_orders(symbol="BTCUSDT"),
     "cancel_all_algo_open_orders": lambda a: a.cancel_all_algo_open_orders(symbol="BTCUSDT"),
+    "open_orders": lambda a: a.open_orders(symbol="BTCUSDT"),
+    "open_algo_orders": lambda a: a.open_algo_orders(symbol="BTCUSDT"),
+    "positions": lambda a: a.positions(symbol="BTCUSDT"),
+    "user_trades": lambda a: a.user_trades(symbol="BTCUSDT"),
+    "user_trades_of_one_order": lambda a: a.user_trades(symbol="BTCUSDT", order_id=8389765492),
+    "account_balance": lambda a: a.account_balance(),
 }
 
 
@@ -165,8 +176,12 @@ async def _record_all() -> list[tuple[str, dict[str, Any]]]:
         rest = FakeProbeRest()
         for name, payload in _SUCCESS_PAYLOADS.items():
             rest.script(name, payload)
+        gate = make_gate()
         adapter = BinanceProbeAdapter(
-            FakeProbeSdk(rest), policy=test_only_signed_call_policy(), rest_gate=make_gate()
+            FakeProbeSdk(rest),
+            policy=test_only_signed_call_policy(),
+            rest_gate=gate,
+            public=make_public(rest, gate),
         )
         observation = await operation(adapter)
         assert observation.ok is True

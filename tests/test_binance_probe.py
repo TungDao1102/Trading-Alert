@@ -24,12 +24,20 @@ from binance_common.errors import (
     TooManyRequestsError,
 )
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
+    AccountTradeListResponseInner,
     CancelAlgoOrderResponse,
     CancelAllAlgoOpenOrdersResponse,
     CancelAllOpenOrdersResponse,
     CancelOrderResponse,
+    CurrentAllAlgoOpenOrdersResponseInner,
+    CurrentAllOpenOrdersResponseInner,
+    ExchangeInformationResponse,
+    ExchangeInformationResponseSymbolsInner,
+    ExchangeInformationResponseSymbolsInnerFiltersInner,
+    FuturesAccountBalanceV3Response,
     NewAlgoOrderResponse,
     NewOrderResponse,
+    PositionInformationV3ResponseInner,
     QueryAlgoOrderResponse,
     QueryOrderResponse,
 )
@@ -50,11 +58,13 @@ from src.adapters import binance_probe
 from src.adapters.binance_limits import RateLimitPolicy, SignedCallPolicy
 from src.adapters.binance_probe import (
     ERROR_MESSAGE_MAX_CHARS,
+    MARK_PRICE_INTERVAL,
     BinanceProbeAdapter,
     ErrorObservation,
     ProbeBanned,
     ProbeObservation,
 )
+from src.adapters.binance_public import BinancePublicMarketData
 from src.adapters.binance_ratelimit_gate import (
     IP_BAN_418,
     RATE_LIMIT_PAUSE_429,
@@ -63,7 +73,18 @@ from src.adapters.binance_ratelimit_gate import (
 from src.domain.exchange_errors import ExchangeErrorCategory
 from src.ops.redaction import REDACTED, clear_runtime_secrets, register_runtime_secret
 
-from tests.probe_fakes import FakeProbeRest, FakeProbeSdk, VirtualClock, make_gate
+from tests.probe_fakes import (
+    FakeProbeRest,
+    FakeProbeSdk,
+    VirtualClock,
+    make_gate,
+    make_public,
+)
+from tests.support.ast_guards import (
+    float_constructor_calls,
+    forbidden_imports,
+    wall_clock_calls,
+)
 from tests.support.limits import (
     TEST_ONLY_RATE_LIMIT_418_NO_RETRY_AFTER_WAIT_SECONDS,
     TEST_ONLY_RATE_LIMIT_429_NO_RETRY_AFTER_WAIT_SECONDS,
@@ -90,6 +111,7 @@ def _adapter(
         FakeProbeSdk(rest),
         policy=test_only_signed_call_policy(),
         rest_gate=gate,
+        public=make_public(rest, gate),
     )
     return adapter, rest, gate
 
@@ -400,19 +422,25 @@ def test_error_observation_validates_its_fields() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_constructor_requires_the_policy_and_the_gate_as_keywords() -> None:
+def test_constructor_requires_the_policy_the_gate_and_the_public_reader_as_keywords() -> None:
     gate = make_gate()
     policy = test_only_signed_call_policy()
+    public = make_public(FakeProbeRest(), gate)
+    sdk = FakeProbeSdk()
     with pytest.raises(TypeError):
-        BinanceProbeAdapter(FakeProbeSdk(), policy, gate)  # type: ignore[misc]
+        BinanceProbeAdapter(sdk, policy, gate, public)  # type: ignore[misc]
     with pytest.raises(TypeError):
-        BinanceProbeAdapter(FakeProbeSdk(), rest_gate=gate)  # type: ignore[call-arg]
+        BinanceProbeAdapter(sdk, rest_gate=gate, public=public)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
-        BinanceProbeAdapter(FakeProbeSdk(), policy=policy)  # type: ignore[call-arg]
+        BinanceProbeAdapter(sdk, policy=policy, public=public)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
-        BinanceProbeAdapter(FakeProbeSdk(), policy=object(), rest_gate=gate)  # type: ignore[arg-type]
+        BinanceProbeAdapter(sdk, policy=policy, rest_gate=gate)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
-        BinanceProbeAdapter(FakeProbeSdk(), policy=policy, rest_gate=object())  # type: ignore[arg-type]
+        BinanceProbeAdapter(sdk, policy=object(), rest_gate=gate, public=public)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        BinanceProbeAdapter(sdk, policy=policy, rest_gate=object(), public=public)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        BinanceProbeAdapter(sdk, policy=policy, rest_gate=gate, public=object())  # type: ignore[arg-type]
 
 
 def test_constructor_refuses_a_gate_with_another_rate_limit_policy() -> None:
@@ -430,7 +458,19 @@ def test_constructor_refuses_a_gate_with_another_rate_limit_policy() -> None:
                 rate_limit=test_only_signed_call_policy().rate_limit,
             ),
             rest_gate=gate,
+            public=make_public(FakeProbeRest(), gate),
         )
+
+
+def test_constructor_refuses_a_public_reader_without_the_same_gate() -> None:
+    """The mark price and filter reads must be refused during a ban or a pause too."""
+    gate = make_gate()
+    policy = test_only_signed_call_policy()
+    ungated = BinancePublicMarketData(sdk_client=FakeProbeSdk(), rest_gate=None)  # type: ignore[arg-type]
+    other_gate = make_public(FakeProbeRest(), make_gate())
+    for public in (ungated, other_gate):
+        with pytest.raises(ValueError):
+            BinanceProbeAdapter(FakeProbeSdk(), policy=policy, rest_gate=gate, public=public)
 
 
 # --------------------------------------------------------------------------- #
@@ -991,3 +1031,540 @@ def test_module_has_no_retry_construct() -> None:
         and node.func.attr in {"to_thread", "sleep"}
     ]
     assert attributes == ["to_thread"]
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: state capture - open orders, open algo orders, positions, trades, balance,
+# mark price and filters; purity guards.
+# --------------------------------------------------------------------------- #
+
+TEST_ONLY_UPDATE_MS = 1791360000000
+
+
+def _open_order_row(**overrides: Any) -> CurrentAllOpenOrdersResponseInner:
+    fields: dict[str, Any] = {
+        "symbol": TEST_ONLY_SYMBOL,
+        "client_order_id": TEST_ONLY_CLIENT_ORDER_ID,
+        "order_id": 8389765492,
+        "side": "BUY",
+        "position_side": "BOTH",
+        "type": "LIMIT",
+        "time_in_force": "GTC",
+        "status": "NEW",
+        "orig_qty": "0.010",
+        "price": "50000.10",
+        "stop_price": "0",
+        "reduce_only": False,
+        "close_position": False,
+        "update_time": TEST_ONLY_UPDATE_MS,
+    }
+    return CurrentAllOpenOrdersResponseInner(**{**fields, **overrides})
+
+
+def _open_algo_row(**overrides: Any) -> CurrentAllAlgoOpenOrdersResponseInner:
+    fields: dict[str, Any] = {
+        "symbol": TEST_ONLY_SYMBOL,
+        "client_algo_id": TEST_ONLY_CLIENT_ALGO_ID,
+        "algo_id": 3000000123,
+        "algo_type": "CONDITIONAL",
+        "order_type": "STOP_MARKET",
+        "side": "SELL",
+        "position_side": "BOTH",
+        "time_in_force": "GTE_GTC",
+        "algo_status": "NEW",
+        "quantity": "0",
+        "trigger_price": "48000.00",
+        "working_type": "MARK_PRICE",
+        "close_position": True,
+        "reduce_only": True,
+        "update_time": TEST_ONLY_UPDATE_MS,
+    }
+    return CurrentAllAlgoOpenOrdersResponseInner(**{**fields, **overrides})
+
+
+def _position_row(amount: str, **overrides: Any) -> PositionInformationV3ResponseInner:
+    fields: dict[str, Any] = {
+        "symbol": TEST_ONLY_SYMBOL,
+        "position_side": "BOTH",
+        "position_amt": amount,
+        "entry_price": "50000.1",
+        "break_even_price": "50020.1",
+        "mark_price": "50010.00000000",
+        "un_realized_profit": "0.09990000",
+        "liquidation_price": "0",
+        "notional": "500.10000000",
+        "margin_asset": "USDT",
+        "update_time": TEST_ONLY_UPDATE_MS,
+    }
+    return PositionInformationV3ResponseInner(**{**fields, **overrides})
+
+
+async def test_open_orders_reuse_the_production_converter_and_give_text_rows() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "current_all_open_orders",
+        [_open_order_row(), _open_order_row(client_order_id="probe-test-order-0002", order_id=2)],
+    )
+
+    observation = await adapter.open_orders(symbol=TEST_ONLY_SYMBOL)
+
+    assert rest.calls == [
+        (
+            "current_all_open_orders",
+            {"symbol": TEST_ONLY_SYMBOL, "recv_window": TEST_ONLY_RECV_WINDOW_MS},
+        )
+    ]
+    assert observation.ok is True
+    assert observation.operation == "open_orders"
+    summary = dict(observation.summary)
+    assert summary["count"] == "2"
+    assert summary["row_0_client_order_id"] == TEST_ONLY_CLIENT_ORDER_ID
+    assert summary["row_0_exchange_order_id"] == "8389765492"
+    assert summary["row_0_status"] == "NEW"
+    assert summary["row_0_side"] == "BUY"
+    assert summary["row_0_quantity"] == "0.010"
+    assert summary["row_0_price"] == "50000.10"
+    assert summary["row_0_stop_price"] == "0"
+    assert summary["row_0_reduce_only"] == "false"
+    assert summary["row_1_client_order_id"] == "probe-test-order-0002"
+    assert summary["row_1_exchange_order_id"] == "2"
+    assert all(isinstance(value, str) for value in summary.values())
+
+
+async def test_open_orders_with_no_rows_gives_a_zero_count() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script("current_all_open_orders", [])
+
+    observation = await adapter.open_orders(symbol=TEST_ONLY_SYMBOL)
+
+    assert dict(observation.summary) == {"count": "0"}
+
+
+async def test_open_algo_orders_give_text_rows_with_the_trigger_price() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script("current_all_algo_open_orders", [_open_algo_row()])
+
+    observation = await adapter.open_algo_orders(symbol=TEST_ONLY_SYMBOL)
+
+    assert rest.calls == [
+        (
+            "current_all_algo_open_orders",
+            {"symbol": TEST_ONLY_SYMBOL, "recv_window": TEST_ONLY_RECV_WINDOW_MS},
+        )
+    ]
+    summary = dict(observation.summary)
+    assert summary["count"] == "1"
+    assert summary["row_0_client_algo_id"] == TEST_ONLY_CLIENT_ALGO_ID
+    assert summary["row_0_algo_id"] == "3000000123"
+    assert summary["row_0_algo_status"] == "NEW"
+    assert summary["row_0_side"] == "SELL"
+    assert summary["row_0_quantity"] == "0"
+    assert summary["row_0_trigger_price"] == "48000.00"
+    assert summary["row_0_close_position"] == "true"
+    assert "row_0_price" not in summary
+
+
+async def test_positions_drop_zero_amount_rows_like_the_production_snapshot() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "position_information_v3",
+        [
+            _position_row("0.000", position_side="LONG"),
+            _position_row("-0.010", position_side="SHORT"),
+            _position_row("0"),
+        ],
+    )
+
+    observation = await adapter.positions(symbol=TEST_ONLY_SYMBOL)
+
+    assert rest.calls == [
+        (
+            "position_information_v3",
+            {"symbol": TEST_ONLY_SYMBOL, "recv_window": TEST_ONLY_RECV_WINDOW_MS},
+        )
+    ]
+    summary = dict(observation.summary)
+    assert summary["count"] == "1"
+    assert summary["row_0_position_side"] == "SHORT"
+    assert summary["row_0_position_amt"] == "-0.010"
+    assert summary["row_0_entry_price"] == "50000.1"
+    assert summary["row_0_mark_price"] == "50010.00000000"
+    assert not any(key.startswith("row_1_") for key in summary)
+
+
+async def test_user_trades_give_the_trade_id_key_space_as_text() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "account_trade_list",
+        [
+            AccountTradeListResponseInner(
+                id=698759,
+                order_id=8389765492,
+                symbol=TEST_ONLY_SYMBOL,
+                side="BUY",
+                price="50000.10",
+                qty="0.010",
+                commission="0.20000040",
+                commission_asset="USDT",
+                maker=False,
+                time=TEST_ONLY_UPDATE_MS,
+            )
+        ],
+    )
+
+    observation = await adapter.user_trades(symbol=TEST_ONLY_SYMBOL, order_id=8389765492)
+
+    assert rest.calls == [
+        (
+            "account_trade_list",
+            {
+                "symbol": TEST_ONLY_SYMBOL,
+                "order_id": 8389765492,
+                "recv_window": TEST_ONLY_RECV_WINDOW_MS,
+            },
+        )
+    ]
+    assert dict(observation.summary) == {
+        "count": "1",
+        "row_0_trade_id": "698759",
+        "row_0_order_id": "8389765492",
+        "row_0_price": "50000.10",
+        "row_0_qty": "0.010",
+        "row_0_commission": "0.20000040",
+        "row_0_commission_asset": "USDT",
+        "row_0_maker": "false",
+        "row_0_time_ms": str(TEST_ONLY_UPDATE_MS),
+    }
+
+
+async def test_user_trades_without_an_order_id_omit_it() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script("account_trade_list", [])
+
+    observation = await adapter.user_trades(symbol=TEST_ONLY_SYMBOL)
+
+    assert rest.calls[0][1] == {"symbol": TEST_ONLY_SYMBOL, "recv_window": TEST_ONLY_RECV_WINDOW_MS}
+    assert dict(observation.summary) == {"count": "0"}
+
+
+@pytest.mark.parametrize("bad", ["8389765492", True, 1.0])
+async def test_user_trades_order_id_must_be_an_int(bad: Any) -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises(TypeError):
+        await adapter.user_trades(symbol=TEST_ONLY_SYMBOL, order_id=bad)
+    assert rest.calls == []
+
+
+async def test_account_balance_keeps_non_zero_assets_only() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "futures_account_balance_v3",
+        [
+            FuturesAccountBalanceV3Response(
+                asset="USDT", balance="5000.12345678", available_balance="4800.00000000"
+            ),
+            FuturesAccountBalanceV3Response(
+                asset="BNB", balance="0.00000000", available_balance="0.00000000"
+            ),
+            FuturesAccountBalanceV3Response(
+                asset="USDC", balance="-0.50000000", available_balance="0"
+            ),
+        ],
+    )
+
+    observation = await adapter.account_balance()
+
+    assert rest.calls == [("futures_account_balance_v3", {"recv_window": TEST_ONLY_RECV_WINDOW_MS})]
+    assert dict(observation.summary) == {
+        "count": "2",
+        "row_0_asset": "USDT",
+        "row_0_balance": "5000.12345678",
+        "row_0_available_balance": "4800.00000000",
+        "row_1_asset": "USDC",
+        "row_1_balance": "-0.50000000",
+        "row_1_available_balance": "0",
+    }
+
+
+async def test_read_errors_are_data_too() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "position_information_v3",
+        BadRequestError(
+            status_code=-1022, error_message="Signature for this request is not valid."
+        ),
+    )
+
+    observation = await adapter.positions(symbol=TEST_ONLY_SYMBOL)
+
+    assert observation.error == ErrorObservation(
+        http_class="BAD_REQUEST",
+        code=-1022,
+        retry_after_seconds=None,
+        category="AUTH_OR_SIGNATURE",
+        message="Signature for this request is not valid.",
+    )
+
+
+_MARK_ROW = [
+    1791360000000,
+    "84090.10",
+    "84130.00",
+    "83900.00",
+    "83905.50",
+    "0",
+    1791360059999,
+    "0",
+    60,
+    "0",
+    "0",
+    "0",
+]
+
+
+async def test_mark_price_is_the_latest_one_minute_mark_close_as_text() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script("mark_price_kline_candlestick_data", [_MARK_ROW])
+
+    observation = await adapter.mark_price(symbol=TEST_ONLY_SYMBOL)
+
+    ((name, kwargs),) = rest.calls
+    assert name == "mark_price_kline_candlestick_data"
+    assert kwargs["symbol"] == TEST_ONLY_SYMBOL
+    assert kwargs["interval"] == MARK_PRICE_INTERVAL
+    assert kwargs["limit"] == 1
+    assert observation.ok is True
+    assert observation.operation == "mark_price"
+    assert dict(observation.summary) == {
+        "symbol": TEST_ONLY_SYMBOL,
+        "interval": MARK_PRICE_INTERVAL,
+        "count": "1",
+        "close": "83905.50",
+        "open_time_utc": "2026-10-07T08:00:00+00:00",
+        "close_time_utc": "2026-10-07T08:00:59.999000+00:00",
+    }
+
+
+async def test_mark_price_with_no_row_records_a_zero_count() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script("mark_price_kline_candlestick_data", [])
+
+    observation = await adapter.mark_price(symbol=TEST_ONLY_SYMBOL)
+
+    assert dict(observation.summary) == {
+        "symbol": TEST_ONLY_SYMBOL,
+        "interval": MARK_PRICE_INTERVAL,
+        "count": "0",
+    }
+
+
+def _filter_symbol(symbol: str) -> ExchangeInformationResponseSymbolsInner:
+    return ExchangeInformationResponseSymbolsInner(
+        symbol=symbol,
+        contract_type="PERPETUAL",
+        status="TRADING",
+        base_asset="BTC",
+        quote_asset="USDT",
+        margin_asset="USDT",
+        filters=[
+            ExchangeInformationResponseSymbolsInnerFiltersInner(
+                filter_type="PRICE_FILTER", tick_size="0.10"
+            ),
+            ExchangeInformationResponseSymbolsInnerFiltersInner(
+                filter_type="LOT_SIZE", step_size="0.001", min_qty="0.001", max_qty="1000"
+            ),
+            ExchangeInformationResponseSymbolsInnerFiltersInner(
+                filter_type="MIN_NOTIONAL", notional="100"
+            ),
+            ExchangeInformationResponseSymbolsInnerFiltersInner(
+                filter_type="PERCENT_PRICE",
+                multiplier_up="1.0500",
+                multiplier_down="0.9500",
+                multiplier_decimal="4",
+            ),
+        ],
+    )
+
+
+async def test_symbol_filters_come_from_exchange_info_as_text() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "exchange_information",
+        ExchangeInformationResponse(symbols=[_filter_symbol("ETHUSDT"), _filter_symbol("BTCUSDT")]),
+    )
+
+    observation = await adapter.symbol_filters(symbol=TEST_ONLY_SYMBOL)
+
+    assert rest.names() == ["exchange_information"]
+    assert observation.ok is True
+    assert observation.operation == "symbol_filters"
+    assert dict(observation.summary) == {
+        "symbol": TEST_ONLY_SYMBOL,
+        "found": "true",
+        "status": "TRADING",
+        "tick_size": "0.10",
+        "step_size": "0.001",
+        "min_quantity": "0.001",
+        "max_quantity": "1000",
+        "min_notional": "100",
+        "percent_price_multiplier_up": "1.0500",
+        "percent_price_multiplier_down": "0.9500",
+        "percent_price_multiplier_decimals": "4",
+    }
+
+
+async def test_symbol_filters_for_an_unlisted_symbol_record_not_found() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "exchange_information", ExchangeInformationResponse(symbols=[_filter_symbol("ETHUSDT")])
+    )
+
+    observation = await adapter.symbol_filters(symbol=TEST_ONLY_SYMBOL)
+
+    assert dict(observation.summary) == {"symbol": TEST_ONLY_SYMBOL, "found": "false"}
+
+
+async def test_public_reads_record_errors_as_data_and_rate_limits_in_the_gate() -> None:
+    adapter, rest, gate = _adapter()
+    rest.script(
+        "mark_price_kline_candlestick_data",
+        TooManyRequestsError(status_code=-1003, error_message="too many"),
+    )
+
+    observation = await adapter.mark_price(symbol=TEST_ONLY_SYMBOL)
+
+    assert observation.error is not None
+    assert observation.error.category == "RATE_LIMITED"
+    assert adapter.banned is True
+    restriction = gate.restriction()
+    assert restriction is not None
+    assert restriction.reason == RATE_LIMIT_PAUSE_429
+    # The pause the public reader (holding the same gate) recorded.
+    assert restriction.remaining_seconds == TEST_ONLY_RATE_LIMIT_429_NO_RETRY_AFTER_WAIT_SECONDS
+    with pytest.raises(ProbeBanned):
+        await adapter.symbol_filters(symbol=TEST_ONLY_SYMBOL)
+    assert rest.names() == ["mark_price_kline_candlestick_data"]
+
+
+_READ_CALLS = [
+    lambda a: a.open_orders(symbol=TEST_ONLY_SYMBOL),
+    lambda a: a.open_algo_orders(symbol=TEST_ONLY_SYMBOL),
+    lambda a: a.positions(symbol=TEST_ONLY_SYMBOL),
+    lambda a: a.user_trades(symbol=TEST_ONLY_SYMBOL),
+    lambda a: a.account_balance(),
+    lambda a: a.mark_price(symbol=TEST_ONLY_SYMBOL),
+    lambda a: a.symbol_filters(symbol=TEST_ONLY_SYMBOL),
+]
+
+
+@pytest.mark.parametrize("call", _READ_CALLS)
+async def test_state_reads_are_refused_during_a_ban_or_pause(call: Any) -> None:
+    adapter, rest, gate = _adapter()
+    gate.record(ExchangeErrorCategory.RATE_LIMITED, None)
+
+    with pytest.raises(ProbeBanned) as caught:
+        await call(adapter)
+
+    assert rest.calls == []
+    assert caught.value.reason == RATE_LIMIT_PAUSE_429
+
+
+async def test_a_public_refusal_raced_by_another_holder_becomes_probe_banned() -> None:
+    """The gate restricts between the probe's own check and the public reader's check."""
+    rest = FakeProbeRest()
+    gate = make_gate()
+
+    class _RacingPublic(BinancePublicMarketData):
+        async def exchange_info(self) -> Any:
+            gate.record(ExchangeErrorCategory.IP_BANNED, None)
+            return await super().exchange_info()
+
+    racing = _RacingPublic(sdk_client=FakeProbeSdk(rest), rest_gate=gate)  # type: ignore[arg-type]
+    adapter = BinanceProbeAdapter(
+        FakeProbeSdk(rest),
+        policy=test_only_signed_call_policy(),
+        rest_gate=gate,
+        public=racing,
+    )
+
+    with pytest.raises(ProbeBanned) as caught:
+        await adapter.symbol_filters(symbol=TEST_ONLY_SYMBOL)
+
+    assert caught.value.reason == IP_BAN_418
+    assert rest.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Purity guards.
+# --------------------------------------------------------------------------- #
+
+
+def test_module_has_no_float_call_no_wall_clock_and_no_paper_import() -> None:
+    assert float_constructor_calls(MODULE_PATH) == []
+    assert wall_clock_calls(MODULE_PATH) == []
+    assert forbidden_imports(MODULE_PATH, ["src.paper"]) == []
+
+
+def test_purity_guards_catch_a_seeded_violation(tmp_path: Path) -> None:
+    seeded = tmp_path / "seeded.py"
+    seeded.write_text(
+        "import datetime\nfrom src.paper import freeze\n"
+        "x = float('1.0')\ny = datetime.datetime.now()\n",
+        encoding="utf-8",
+    )
+    assert float_constructor_calls(seeded) == [3]
+    assert [name for _, name in wall_clock_calls(seeded)] == ["datetime.datetime.now"]
+    assert forbidden_imports(seeded, ["src.paper"]) == ["src.paper"]
+
+
+_ALLOWED_RETURNS = frozenset({"ProbeObservation", "list[ProbeObservation]"})
+
+
+def _public_coroutine_returns(path: Path) -> dict[str, str]:
+    """Return annotation text of every public coroutine of BinanceProbeAdapter."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    (cls,) = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "BinanceProbeAdapter"
+    ]
+    return {
+        node.name: ast.unparse(node.returns) if node.returns is not None else ""
+        for node in cls.body
+        if isinstance(node, ast.AsyncFunctionDef) and not node.name.startswith("_")
+    }
+
+
+def test_every_public_coroutine_returns_observations_only() -> None:
+    returns = _public_coroutine_returns(MODULE_PATH)
+    assert set(returns) == {
+        "query_order",
+        "query_algo_order",
+        "new_limit_order",
+        "new_market_order",
+        "new_conditional_order",
+        "cancel_order",
+        "cancel_algo_order",
+        "cancel_all_open_orders",
+        "cancel_all_algo_open_orders",
+        "open_orders",
+        "open_algo_orders",
+        "positions",
+        "user_trades",
+        "account_balance",
+        "mark_price",
+        "symbol_filters",
+    }
+    assert {name: text for name, text in returns.items() if text not in _ALLOWED_RETURNS} == {}
+
+
+def test_the_return_walk_catches_a_raw_sdk_return(tmp_path: Path) -> None:
+    seeded = tmp_path / "seeded.py"
+    seeded.write_text(
+        "class BinanceProbeAdapter:\n"
+        "    async def query_order(self) -> ProbeObservation: ...\n"
+        "    async def leak(self) -> QueryOrderResponse: ...\n",
+        encoding="utf-8",
+    )
+    returns = _public_coroutine_returns(seeded)
+    assert {name for name, text in returns.items() if text not in _ALLOWED_RETURNS} == {"leak"}

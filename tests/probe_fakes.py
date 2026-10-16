@@ -14,6 +14,7 @@ import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from src.adapters.binance_public import BinancePublicMarketData
 from src.adapters.binance_ratelimit_gate import RestRateLimitGate
 
 from tests.support.limits import test_only_rate_limit_policy
@@ -86,6 +87,31 @@ class FakeProbeRest:
     def cancel_all_algo_open_orders(self, **kwargs: Any) -> FakeResponse:
         return self._answer("cancel_all_algo_open_orders", kwargs)
 
+    # ----- state capture (plan 18-12 Task 3) ----------------------------- #
+
+    def current_all_open_orders(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("current_all_open_orders", kwargs)
+
+    def current_all_algo_open_orders(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("current_all_algo_open_orders", kwargs)
+
+    def position_information_v3(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("position_information_v3", kwargs)
+
+    def account_trade_list(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("account_trade_list", kwargs)
+
+    def futures_account_balance_v3(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("futures_account_balance_v3", kwargs)
+
+    # ----- public reads, reached through BinancePublicMarketData --------- #
+
+    def mark_price_kline_candlestick_data(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("mark_price_kline_candlestick_data", kwargs)
+
+    def exchange_information(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("exchange_information", kwargs)
+
 
 class FakeProbeSdk:
     """The `DerivativesTradingUsdsFutures` surface the adapter reads: `rest_api`."""
@@ -115,6 +141,11 @@ def make_gate(clock: VirtualClock | None = None) -> RestRateLimitGate:
     )
 
 
+def make_public(rest: FakeProbeRest, gate: RestRateLimitGate) -> BinancePublicMarketData:
+    """The real public reader over the fake REST object, holding `gate` (as plan 18-17 does)."""
+    return BinancePublicMarketData(sdk_client=FakeProbeSdk(rest), rest_gate=gate)  # type: ignore[arg-type]
+
+
 __all__ = [
     "TEST_ONLY_CLOCK_START",
     "FakeProbeRest",
@@ -122,4 +153,5 @@ __all__ = [
     "FakeResponse",
     "VirtualClock",
     "make_gate",
+    "make_public",
 ]
