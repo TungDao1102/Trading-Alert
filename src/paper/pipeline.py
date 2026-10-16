@@ -50,7 +50,9 @@ milliseconds, is not added to history and is not recorded as processed (research
 Parity replay records (plan 16-51, user decision 16-DEC-PARITY option 1): every bar `_accept`
 stores, from any source and live bars included, is logged with its acceptance sequence `accept_seq`
 in a `PAPER_HISTORY_BARS` record, written before the `PAPER_REPLAY_INPUTS` record of any evaluation
-that can read it and at the end of `handle` when entries are pending. REST_WARMUP and REST_BACKFILL
+that can read it, before every heartbeat and every `PAPER_GAP` (plan 16-57, B1-CR-02: a crash
+inside a batch never leaves a record naming a bar the log does not hold) and at the end of `handle`
+when entries are pending. REST_WARMUP and REST_BACKFILL
 bars are still never evaluated and never recorded as processed (L-11, D-06): the log only lets the
 trial evaluator rebuild the windows in the order the buffers received the bars. Each evaluated
 live 1h bar also writes one `PAPER_REPLAY_INPUTS` record (what the risk stage read and
@@ -572,6 +574,8 @@ class BarPipeline:
         self._write_gap(gap, detail, now_utc, batch)
 
     def _write_gap(self, gap: GapRecord, detail: str, now_utc: datetime, batch: _Batch) -> None:
+        # B1-CR-02: the acceptance log is durable before any record that names an accepted bar.
+        self._flush_history(now_utc, batch)
         # The payload carries no tick time, so a replayed gap is the same record (same content).
         record = RuntimeRecord(
             event_type=RuntimeEventType.PAPER_GAP,
@@ -597,6 +601,9 @@ class BarPipeline:
         surface: DecisionSurfaceRecord,
         batch: _Batch,
     ) -> None:
+        # B1-CR-02: a crash after this heartbeat must not leave a bar the parity replay cannot
+        # find, so every pending acceptance-log entry is written first.
+        self._flush_history(now_utc, batch)
         record = RuntimeRecord.bar_processed(
             epoch_id=self._epoch.epoch_id,
             symbol=bar.symbol,

@@ -762,8 +762,9 @@ def test_every_arrival_order_of_one_group_gives_byte_identical_records() -> None
         )
 
     baseline = run((0, 1, 2, 3))
-    # the 4h context record, the 1h heartbeat, the replay inputs and two history-bar records
-    assert len(baseline[0]) == 5
+    # the 4h context record, the 1h heartbeat, the replay inputs and three history-bar records
+    # (B1-CR-02, plan 16-57: the log is also flushed before the 4h heartbeat)
+    assert len(baseline[0]) == 6
     assert len(baseline[1]) == 1 and baseline[2] == 1
     for order in itertools.permutations(range(4)):
         assert run(order) == baseline

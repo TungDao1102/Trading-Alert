@@ -1016,6 +1016,155 @@ def test_the_command_line_builds_the_parity_replay_from_the_bundle_alone(
     assert "NOT EVALUATED" in printed and "hash" in printed
 
 
+# =========================================================================== #
+# Plan 16-57 Task 1 (B1-CR-02): the acceptance log is durable before any record naming its bars.
+# =========================================================================== #
+
+
+class LogFirstState(InMemoryRuntimeState):
+    """A state port that notes every heartbeat or gap whose bar no earlier history record holds."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.logged: set[tuple[str, str, datetime]] = set()
+        self.violations: list[str] = []
+
+    def record(self, record: RuntimeRecord) -> None:
+        super().record(record)
+        if record.event_type is RuntimeEventType.PAPER_HISTORY_BARS:
+            for entry in json.loads(record.payload_json)["entries"]:
+                close = datetime.fromisoformat(entry["close_time_utc"])
+                self.logged.add((entry["symbol"], entry["interval"], close))
+        elif record.event_type is RuntimeEventType.PAPER_BAR_PROCESSED:
+            key = (str(record.symbol), str(record.interval), record.occurred_at_utc)
+            if key not in self.logged:
+                self.violations.append(f"heartbeat {key} before its history entry")
+        elif record.event_type is RuntimeEventType.PAPER_GAP:
+            close = datetime.fromisoformat(json.loads(record.payload_json)["expected_close_utc"])
+            if not any(s == record.symbol and c == close for s, _i, c in self.logged):
+                self.violations.append(f"gap {record.symbol} {close} before its history entry")
+
+
+def _raising_world(state: InMemoryRuntimeState, fail_close: datetime) -> World:
+    """A World whose context factory raises for one close (a crash inside the 1h path)."""
+    world = World(state=state)
+    inner = world.factory
+
+    def factory(candle: Candle) -> BarContext:
+        if candle.close_time_utc == fail_close:
+            raise OSError("simulated crash in the 1h path after the 4h heartbeat")
+        return inner(candle)
+
+    world.factory = factory
+    world.pipeline = world.new_pipeline()
+    return world
+
+
+def test_a_crash_after_a_4h_heartbeat_inside_one_batch_still_passes_parity(
+    tmp_path: Path,
+) -> None:
+    """16-57 Test 1 (B1-CR-02): the committed 4h heartbeat names a bar of the acceptance log."""
+    probe = World()
+    fx = probe.fx
+    final, sibling = fx.setup[249], fx.context[-1]
+    assert sibling.close_time_utc == final.close_time_utc
+    world = _raising_world(LogFirstState(), final.close_time_utc)
+    world.start(fx.now - timedelta(hours=2))
+    world.pipeline.handle(
+        warm_bars(fx, n_1h=249, n_4h=len(fx.context) - 1),
+        now_utc=fx.setup[248].close_time_utc + timedelta(seconds=1),
+    )
+    with pytest.raises(OSError, match="simulated crash"):
+        world.pipeline.handle([live(sibling), live(final)], now_utc=two_seconds_after(final))
+
+    heartbeats = world.records(RuntimeEventType.PAPER_BAR_PROCESSED)
+    assert [(r.interval, r.occurred_at_utc) for r in heartbeats] == [("4h", sibling.close_time_utc)]
+    criterion = world.parity(world.bundle(tmp_path / "bundle"))
+    text = "\n".join(criterion.evidence)
+    assert "not a LIVE_WS entry" not in text, text
+    assert criterion.passed, criterion.evidence
+
+
+def test_gated_heartbeats_and_pipeline_gaps_follow_the_history_record_of_their_bar() -> None:
+    """16-57 Test 2 (B1-CR-02): DATA_STALE, WARMUP_INSUFFICIENT, backfill and sibling gaps."""
+    # WARMUP_INSUFFICIENT: a live bar with no history at all.
+    cold = World(state=LogFirstState())
+    cold.start()
+    cold.pipeline.handle([cold.fx.live()], now_utc=cold.fx.now)
+    [warmup] = cold.records(RuntimeEventType.PAPER_BAR_PROCESSED)
+    assert warmup.payload["reason_code"] == "WARMUP_INSUFFICIENT"
+    assert isinstance(cold.state, LogFirstState)
+    assert cold.state.violations == []
+
+    # DATA_STALE, then a REST_BACKFILL gap.
+    world = World(state=LogFirstState())
+    fx = world.fx
+    stale_bar = fx.setup[248]
+    world.start(fx.now - timedelta(hours=3))
+    world.pipeline.handle(warm_bars(fx, n_1h=240), now_utc=fx.now)
+    world.pipeline.handle([live(stale_bar)], now_utc=stale_bar.close_time_utc + timedelta(hours=1))
+    world.pipeline.handle([_tagged(fx.setup[241], SourceTag.REST_BACKFILL)], now_utc=fx.now)
+    [stale] = world.records(RuntimeEventType.PAPER_BAR_PROCESSED)
+    assert stale.payload["reason_code"] == "DATA_STALE"
+    assert len(world.records(RuntimeEventType.PAPER_GAP)) == 1
+    assert isinstance(world.state, LogFirstState)
+    assert world.state.violations == []
+
+    # A missing 4h sibling: the gap and the SIBLING_4H_MISSING heartbeat follow the 1h entry.
+    sib = World(state=LogFirstState())
+    final = sib.fx.setup[249]
+    sib.start(sib.fx.now - timedelta(hours=2))
+    sib.pipeline.handle(
+        warm_bars(sib.fx, n_1h=249, n_4h=len(sib.fx.context) - 1), now_utc=sib.fx.now
+    )
+    sib.pipeline.handle([live(final)], now_utc=final.close_time_utc + timedelta(seconds=40))
+    [gap] = sib.records(RuntimeEventType.PAPER_GAP)
+    assert gap.payload["reason"] == "EXCHANGE_NO_CANDLE"
+    assert isinstance(sib.state, LogFirstState)
+    assert sib.state.violations == []
+
+
+def test_several_flushes_at_one_tick_time_keep_ids_unique_and_a_replayed_batch_is_a_no_op(
+    tmp_path: Path,
+) -> None:
+    """16-57 Test 3 (B1-CR-02): history_seq per flush, no conflict, accept_seq order."""
+    world = World(state=LogFirstState())
+    fx = world.fx
+    final, sibling = fx.setup[249], fx.context[-1]
+    world.start(fx.now - timedelta(hours=2))
+    world.pipeline.handle(
+        warm_bars(fx, n_1h=249, skip={100}, n_4h=len(fx.context) - 1),
+        now_utc=fx.setup[248].close_time_utc + timedelta(seconds=1),
+    )
+    batch = [
+        _tagged(fx.setup[100], SourceTag.REST_BACKFILL),
+        live(sibling),
+        live(final),
+    ]
+    tick = two_seconds_after(final)
+    result = world.pipeline.handle(batch, now_utc=tick)
+    assert len(result.evaluated) == 1
+
+    at_tick = [
+        r for r in world.records(RuntimeEventType.PAPER_HISTORY_BARS) if r.occurred_at_utc == tick
+    ]
+    assert len(at_tick) >= 3  # one flush before the gap, the 4h heartbeat and the 1h inputs
+    ids = {runtime_event_id(r) for r in world.records()}
+    assert len(ids) == len(world.records())
+    assert isinstance(world.state, LogFirstState)
+    assert world.state.violations == []
+
+    before = len(world.records())
+    again = world.pipeline.handle(batch, now_utc=tick)
+    assert again.recorded == () and again.replay_records == ()
+    assert len(world.records()) == before
+
+    seqs = [e["accept_seq"] for e in logged_entries(world)]
+    assert seqs == sorted(seqs) == list(range(len(seqs)))
+    criterion = world.parity(world.bundle(tmp_path / "bundle"))
+    assert criterion.passed, criterion.evidence
+
+
 # ---- Test 10: PostgreSQL --------------------------------------------------------------------- #
 
 
