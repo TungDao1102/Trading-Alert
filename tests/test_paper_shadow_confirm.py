@@ -868,3 +868,140 @@ def test_the_confirm_module_imports_no_exchange_adapter_and_no_execution() -> No
     assert imported, "the module should import something"
     bad = [m for m in imported if m.startswith(FORBIDDEN_IMPORT_PREFIXES)]
     assert bad == [], f"forbidden imports in shadow_confirm.py: {bad}"
+
+
+# --------------------------------------------------------------------------- #
+# Plan 16-58: replies match their press (B2-WR-03) and redelivered callbacks replay (B2-WR-04).
+# --------------------------------------------------------------------------- #
+
+from src.persistence.errors import JournalConflict  # noqa: E402
+
+
+class StrictJournalStores(InMemoryShadowStores):
+    """The journal rule of `PgJournalStore`: a repeated id with another payload is a conflict."""
+
+    def record_journal(self, event: Any) -> None:
+        for stored in self.journal:
+            if stored.journal_event_id == event.journal_event_id:
+                same = (
+                    stored.event_type == event.event_type
+                    and stored.entity_id == event.entity_id
+                    and stored.correlation_id == event.correlation_id
+                    and stored.payload_json == event.payload_json
+                )
+                if not same:
+                    raise JournalConflict(f"journal id {event.journal_event_id} differs")
+                return
+        super().record_journal(event)
+
+
+async def second_plan_alert(h: Harness) -> tuple[str, str]:
+    """Alert a second, unrelated plan on the same harness: returns its APR: and SKP: data."""
+    h.signal = make_shadow_signal(2)
+    h.plan = make_shadow_plan(h.signal, plan_hash="2" * 64)
+    await h.alert()
+    (_, apr), (_, skp) = keyboard_buttons(h.bot.sent[-1].reply_markup)
+    return apr, skp
+
+
+async def test_a_ttl_sweep_never_becomes_the_reply_to_an_unrelated_press() -> None:
+    h = Harness()
+    await h.approve("q-apr-1")
+    h.now = T_PRESS + timedelta(seconds=CONFIRM_TTL_SECONDS_DEFAULT + 1)
+    assert len(h.confirm.expire_due(h.now)) == 1  # the background sweep expired plan 1's confirm
+
+    _apr, skp = await second_plan_alert(h)
+    await h.tap(skp, "q-skp-2")
+
+    reply = h.bot.sent[-1].text
+    assert "SKIPPED" in reply, reply
+    assert "CONFIRM_TTL_ELAPSED" not in reply and "Confirm:" not in reply
+    assert h.confirm.take_result("cbq:q-skp-2") is None, "a sweep records no reply"
+
+
+async def test_a_confirm_reply_is_built_from_its_own_press_record() -> None:
+    h = Harness()
+    short = await h.approve("q-apr-1")
+    await h.tap(f"CNF:{short}", "q-cnf-1")
+    assert "Confirm: CONFIRMED" in h.bot.sent[-1].text
+    assert h.confirm.take_result("cbq:q-cnf-1") is None, "the reply consumed its record"
+
+    # A redelivery of the same press replays to the existing outcome with its own record.
+    await h.tap(f"CNF:{short}", "q-cnf-1")
+    assert "REPLAYED existing outcome" in h.bot.sent[-1].text
+
+
+async def test_a_press_that_raises_leaves_no_record_for_a_later_press() -> None:
+    from contextlib import nullcontext
+
+    class Port:
+        def section(self) -> Any:
+            return nullcontext()
+
+        def check(self, signal: Any, plan: Any, now_utc: Any) -> str | None:
+            return None
+
+        def confirm_payload(self, **kwargs: Any) -> dict[str, Any]:
+            return {}
+
+        def reserve(self, **kwargs: Any) -> Any:
+            raise ConnectionError("reserve crashed")
+
+    h = Harness(reservations=Port())
+    short = await h.approve("q-apr-1")
+    with pytest.raises(ConnectionError):
+        h.confirm.handle_confirm(
+            short_id=short,
+            chat_id=CHAT_ID,
+            authorized_chat_id=CHAT_ID,
+            from_user_id=USER_ID,
+            now_utc=T_PRESS,
+            correlation_id="cbq:q-cnf-boom",
+        )
+    assert h.confirm.take_result("cbq:q-cnf-boom") is None
+
+    _apr, skp = await second_plan_alert(h)
+    await h.tap(skp, "q-skp-2")
+    assert "SKIPPED" in h.bot.sent[-1].text and "Confirm:" not in h.bot.sent[-1].text
+
+
+async def test_a_redelivered_rejection_replays_with_no_conflict_and_no_wall_clock_payload() -> None:
+    h = Harness(stores=StrictJournalStores())
+    short = await h.approve("q-apr-1")
+
+    def press_as_stranger(at: datetime) -> Any:
+        return h.confirm.handle_confirm(
+            short_id=short,
+            chat_id=CHAT_ID,
+            authorized_chat_id=CHAT_ID,
+            from_user_id=OTHER_USER_ID,
+            now_utc=at,
+            correlation_id="cbq:q-dup",
+        )
+
+    first = press_as_stranger(T_PRESS + timedelta(seconds=1))
+    second = press_as_stranger(T_PRESS + timedelta(seconds=9))  # redelivered, processed later
+
+    assert first.outcome is second.outcome is ConfirmOutcome.REJECTED_USER_MISMATCH
+    (rejected,) = h.events(EVENT_SHADOW_CONFIRM_REJECTED)
+    assert "rejected_at_utc" not in payload(rejected)
+    assert rejected.occurred_at_utc == T_PRESS + timedelta(seconds=1), (
+        "processing time is event time"
+    )
+
+
+async def test_a_redelivered_unknown_context_rejection_replays_with_no_conflict() -> None:
+    h = Harness(stores=StrictJournalStores())
+    stranger_short = "f" * 32
+    for at in (T_PRESS, T_PRESS + timedelta(seconds=7)):
+        result = h.confirm.handle_confirm(
+            short_id=stranger_short,
+            chat_id=CHAT_ID,
+            authorized_chat_id=CHAT_ID,
+            from_user_id=USER_ID,
+            now_utc=at,
+            correlation_id="cbq:q-nocontext",
+        )
+        assert result.outcome is ConfirmOutcome.REJECTED_OTHER
+    (rejected,) = h.events(EVENT_SHADOW_CONFIRM_REJECTED)
+    assert "rejected_at_utc" not in payload(rejected)

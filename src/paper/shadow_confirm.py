@@ -115,6 +115,9 @@ REASON_NO_CONFIRM_CONTEXT: Final = "NO_CONFIRM_CONTEXT"
 REASON_RECHECK_ERROR: Final = "RECHECK_ERROR"
 REASON_CONFIRM_ALREADY_EXPIRED: Final = "CONFIRM_ALREADY_EXPIRED"
 
+# How many press records are kept for replies that have not run yet (a bound, not a tuning knob).
+_RESULT_RECORDS_MAX: Final = 64
+
 DELIVERY_EDIT: Final = "edit"
 DELIVERY_FALLBACK_SEND: Final = "fallback_send"
 
@@ -347,7 +350,11 @@ class ConfirmBook:
         self._reservations = reservations
         self._lock = threading.RLock()
         self._entries: dict[str, ConfirmEntry] = {}
-        self._last: ConfirmRecord | None = None
+        # The reply record of each CONFIRM or CANCEL press, by the press correlation id
+        # (`cbq:<callback query id>`), taken by the reply of that press (plan 16-58, B2-WR-03).
+        # Bounded: a press whose reply never ran cannot grow it without limit.
+        self._results: dict[str, ConfirmRecord] = {}
+        self._press_correlation: str | None = None
         # Set by `_finish_confirm` inside the book lock, taken and called by `handle_confirm`
         # after the locks are released.
         self._deferred_confirmed: tuple[Approval, TradePlan, datetime] | None = None
@@ -365,10 +372,25 @@ class ConfirmBook:
     def get(self, short_id: str) -> ConfirmEntry | None:
         return self._entries.get(short_id)
 
-    def take_last_result(self) -> ConfirmRecord | None:
-        """Return and clear the record of the last CONFIRM or CANCEL press (for the reply)."""
-        record, self._last = self._last, None
-        return record
+    def take_result(self, correlation_id: str | None) -> ConfirmRecord | None:
+        """Return and clear the record of the press with this correlation id (for its reply).
+
+        None for an unknown id, a press that left no record, or no id at all: a reply never
+        borrows the record of another press or of a background sweep.
+        """
+        if correlation_id is None:
+            return None
+        with self._lock:
+            return self._results.pop(correlation_id, None)
+
+    def _store_result(self, record: ConfirmRecord) -> None:
+        """Keep `record` for the reply of the press being handled (sweeps have none)."""
+        press = self._press_correlation
+        if press is None:
+            return
+        self._results[press] = record
+        while len(self._results) > _RESULT_RECORDS_MAX:
+            del self._results[next(iter(self._results))]
 
     # ---- journal -------------------------------------------------------- #
 
@@ -447,7 +469,6 @@ class ConfirmBook:
             {
                 "reason": reason,
                 "kind": kind,
-                "rejected_at_utc": now_utc.isoformat(),
                 "presented_user_id": None if presented_user_id is None else str(presented_user_id),
             },
         )
@@ -642,11 +663,13 @@ class ConfirmBook:
     ) -> ConfirmResult:
         detail = reason if not replayed else f"REPLAYED existing outcome ({reason})"
         result = ConfirmResult(outcome=outcome, replayed=replayed, reason=reason, detail=detail)
-        self._last = ConfirmRecord(
-            outcome=outcome,
-            detail=detail,
-            confirm_requested_at_utc=entry.issued_at_utc,
-            plan_expiry_utc=entry.plan.expiry_utc,
+        self._store_result(
+            ConfirmRecord(
+                outcome=outcome,
+                detail=detail,
+                confirm_requested_at_utc=entry.issued_at_utc,
+                plan_expiry_utc=entry.plan.expiry_utc,
+            )
         )
         return result
 
@@ -766,7 +789,6 @@ class ConfirmBook:
                         "reason": REASON_NO_CONFIRM_CONTEXT,
                         "kind": kind,
                         "short_id": short_id,
-                        "rejected_at_utc": now_utc.isoformat(),
                         "presented_user_id": None if from_user_id is None else str(from_user_id),
                         "mode": self._mode.value,
                     }
@@ -774,11 +796,13 @@ class ConfirmBook:
             )
         )
         detail = REASON_NO_CONFIRM_CONTEXT
-        self._last = ConfirmRecord(
-            outcome=ConfirmOutcome.REJECTED_OTHER,
-            detail=detail,
-            confirm_requested_at_utc=None,
-            plan_expiry_utc=None,
+        self._store_result(
+            ConfirmRecord(
+                outcome=ConfirmOutcome.REJECTED_OTHER,
+                detail=detail,
+                confirm_requested_at_utc=None,
+                plan_expiry_utc=None,
+            )
         )
         return ConfirmResult(ConfirmOutcome.REJECTED_OTHER, False, detail, detail)
 
@@ -852,23 +876,36 @@ class ConfirmBook:
                 from_user_id=from_user_id,
                 now_utc=now_utc,
                 correlation_id=correlation_id,
-            )
+            ),
+            correlation_id,
         )
 
-    def _in_section(self, body: Callable[[], _T]) -> _T:
+    def _in_section(self, body: Callable[[], _T], press_correlation: str | None = None) -> _T:
         """Run `body` under the book lock and, with a reservation port, its serialized section.
 
         Every path that can finish a CONFIRM (a press, an adopted stored CONFIRM) runs here, so
         `on_confirmed` is called once for it AFTER the section and the book lock are released
         (B2-CR-01): the hook may take the coordinator lock without waiting on the ledger lock.
+
+        `press_correlation` is the id of the CONFIRM or CANCEL press being handled; the reply
+        record is stored under it. A sweep passes None and records nothing. A body that raises
+        leaves no record behind (B2-WR-03).
         """
         with self._lock:
             self._deferred_confirmed = None
-            if self._reservations is None:
-                result = body()
-            else:
-                with self._reservations.section():
+            self._press_correlation = press_correlation
+            try:
+                if self._reservations is None:
                     result = body()
+                else:
+                    with self._reservations.section():
+                        result = body()
+            except BaseException:
+                if press_correlation is not None:
+                    self._results.pop(press_correlation, None)
+                raise
+            finally:
+                self._press_correlation = None
             deferred, self._deferred_confirmed = self._deferred_confirmed, None
         if deferred is not None and self._on_confirmed is not None:
             self._on_confirmed(*deferred)
@@ -1078,7 +1115,8 @@ class ConfirmBook:
                 from_user_id=from_user_id,
                 now_utc=now_utc,
                 correlation_id=correlation_id,
-            )
+            ),
+            correlation_id,
         )
 
     def _handle_cancel_locked(

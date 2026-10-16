@@ -494,3 +494,48 @@ async def test_after_a_mixed_failure_sequence_no_approval_is_stranded() -> None:
     assert only(h, EVENT_SHADOW_CONFIRM_EXPIRED)["reason"] == "CARD_DELIVERY_FAILED"
     body = json.loads(h.events(EVENT_SHADOW_CONFIRM_EXPIRED)[0].payload_json)
     assert body["mode"] == "SHADOW"
+
+
+# --------------------------------------------------------------------------- #
+# Plan 16-58, B2-WR-08: an infrastructure error in dispatch is diagnosable and still fails closed.
+# --------------------------------------------------------------------------- #
+
+from src.domain.enums import RejectionReason  # noqa: E402
+
+from tests.shadow_fakes import InMemoryShadowStores  # noqa: E402
+
+
+class DatabaseDown(Exception):
+    """Stands for an OperationalError of the real store."""
+
+
+class FailingSaveStores(InMemoryShadowStores):
+    def save_atomic(self, approval: Any, mapping: Any) -> None:
+        raise DatabaseDown("connection to host=db password=hunter2 refused")
+
+
+async def test_an_infrastructure_error_in_dispatch_is_logged_by_class_and_fails_closed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    h = Harness(stores=FailingSaveStores())
+    await h.alert()
+    apr, _skp = h.alert_buttons()
+
+    with caplog.at_level(logging.ERROR):
+        result = await h.tap(apr, "q-db")
+
+    assert result.ok is False and result.reason_code is RejectionReason.INVALIDATED
+    assert all(a.status is not ApprovalResult.APPROVED for a in h.stores.approvals.values())
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    logged = errors[0].getMessage()
+    assert "DatabaseDown" in logged and "cbq:q-db" in logged
+    assert "hunter2" not in caplog.text and "password" not in caplog.text, "no message text"
+    assert apr not in caplog.text, "no callback data or token"
+
+    # A domain rejection (another chat) is unchanged: refused without an error line.
+    before = len(caplog.records)
+    with caplog.at_level(logging.ERROR):
+        refused = await h.tap(apr, "q-other", chat_id=OTHER_CHAT_ID)
+    assert refused.ok is False
+    assert [r for r in caplog.records[before:] if r.levelno >= logging.ERROR] == []

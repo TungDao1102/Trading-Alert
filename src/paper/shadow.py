@@ -53,7 +53,12 @@ from zoneinfo import ZoneInfo
 import structlog
 from tenacity import AsyncRetrying, RetryCallState, RetryError, wait_random_exponential
 
-from src.adapters.telegram_callbacks import CallbackKind, DispatchResult, ParsedCallback
+from src.adapters.telegram_callbacks import (
+    CallbackKind,
+    DispatchResult,
+    ParsedCallback,
+    current_press_correlation,
+)
 from src.adapters.telegram_callbacks import dispatch_callback as _dispatch_callback
 from src.adapters.telegram_notify import (
     TelegramFailure,
@@ -863,9 +868,9 @@ class ConfirmRecord:
 
 
 class ConfirmResultSource(Protocol):
-    """The confirm book as the reply function sees it: it hands over the last press record."""
+    """The confirm book as the reply function sees it: it hands over the record of one press."""
 
-    def take_last_result(self) -> ConfirmRecord | None: ...
+    def take_result(self, correlation_id: str | None) -> ConfirmRecord | None: ...
 
 
 def _outcome_from_text(text: str) -> ShadowDecisionOutcome:
@@ -894,12 +899,18 @@ def make_shadow_reply_fn(
     from the book's record of the last dispatch; without it, from the text, failing closed. The
     decision is already made when the reply goes out, so a failed reply is logged and never
     raised into the handler. With the `confirm_book` (plan 16-11), the reply to a CONFIRM or
-    CANCEL press is a CONFIRM_RESULT message built from the book's record of that press.
+    CANCEL press is a CONFIRM_RESULT message built from the book's record of that press, found by
+    the press correlation id.
     """
     require_shadow(mode)
 
     async def reply(chat_id: int, text: str) -> None:
-        confirm_record = None if confirm_book is None else confirm_book.take_last_result()
+        # The record of the press this reply answers (its correlation id, set by `on_callback`),
+        # never the last one written: a background sweep or an earlier press that raised cannot
+        # become the reply to an unrelated press (plan 16-58, B2-WR-03).
+        confirm_record = (
+            None if confirm_book is None else confirm_book.take_result(current_press_correlation())
+        )
         if confirm_record is not None:
             message = render_shadow_message(
                 ShadowMessageKind.CONFIRM_RESULT,

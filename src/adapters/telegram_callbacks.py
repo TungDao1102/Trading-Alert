@@ -41,6 +41,7 @@ import inspect
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -69,6 +70,16 @@ if TYPE_CHECKING:
     from telegram.ext import Application, ContextTypes
 
 log = logging.getLogger(__name__)
+
+# The correlation id (`cbq:<callback query id>`) of the press `on_callback` is answering right
+# now. The reply function reads it to pick up the record of THAT press (plan 16-58, B2-WR-03); it
+# is set for the duration of one `on_callback` call and reset afterwards.
+_PRESS_CORRELATION: ContextVar[str | None] = ContextVar("press_correlation_id", default=None)
+
+
+def current_press_correlation() -> str | None:
+    """The correlation id of the press being answered, or None outside `on_callback`."""
+    return _PRESS_CORRELATION.get()
 
 
 # --------------------------------------------------------------------------- #
@@ -522,7 +533,15 @@ def dispatch_callback(
             kind=parsed.kind,
             reason_code=RejectionReason.INVALIDATED,
         )
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - fail closed: nothing was approved
+        # An infrastructure failure (a store or connection error) is not a domain rejection. The
+        # press still ends in INVALIDATED, but the class and the correlation id are logged so the
+        # cause is diagnosable; never the message text, the token or the callback data (B2-WR-08).
+        log.error(
+            "telegram.callback.dispatch_failed: %s correlation_id=%s",
+            type(exc).__name__,
+            correlation_id,
+        )
         _journal_outcome(
             journal_receipt,
             parsed=parsed,
@@ -777,6 +796,40 @@ async def on_callback(
     callback_at_utc = datetime.now(UTC) if clock is None else clock()
     correlation_id = f"cbq:{query_id}"
 
+    token = _PRESS_CORRELATION.set(correlation_id)
+    try:
+        return await _answer_press(
+            query,
+            parsed,
+            callback_chat_id=callback_chat_id,
+            authorized_chat_id=authorized_chat_id,
+            binding_context_resolver=binding_context_resolver,
+            dispatch=dispatch,
+            reply_text_fn=reply_text_fn,
+            confirm_handler=confirm_handler,
+            approved_handler=approved_handler,
+            callback_at_utc=callback_at_utc,
+            correlation_id=correlation_id,
+        )
+    finally:
+        _PRESS_CORRELATION.reset(token)
+
+
+async def _answer_press(
+    query: Any,
+    parsed: ParsedCallback,
+    *,
+    callback_chat_id: int,
+    authorized_chat_id: int,
+    binding_context_resolver: Callable[[str], dict[str, Any] | None],
+    dispatch: DispatchCallable,
+    reply_text_fn: Callable[[int, str], Awaitable[None]] | None,
+    confirm_handler: ConfirmHandler | None,
+    approved_handler: ApprovedHandler | None,
+    callback_at_utc: datetime,
+    correlation_id: str,
+) -> DispatchResult:
+    """The gates, the dispatch and the reply of one press (run by `on_callback`)."""
     if not authorized_chat_gate(
         callback_chat_id=callback_chat_id,
         authorized_chat_id=authorized_chat_id,
@@ -941,6 +994,7 @@ __all__ = [
     "answer_callback_safely",
     "authorized_chat_gate",
     "build_application",
+    "current_press_correlation",
     "dispatch_callback",
     "format_approve",
     "on_callback",
