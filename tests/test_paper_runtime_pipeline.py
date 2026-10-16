@@ -29,6 +29,7 @@ from src.paper.freeze import StreamEpoch, load_parameter_set_at_root, resolve_re
 from src.paper.loop import BarOutcome
 from src.paper.pipeline import BarPipeline, DroppedBar, HeldBar, PipelineResult
 from src.paper.runtime_state import (
+    GapLedger,
     InMemoryRuntimeState,
     RuntimeRecord,
     record_sort_key,
@@ -108,6 +109,7 @@ class Fixture:
             state=self.state,
             sibling_4h_wait_seconds=30,
             fetch_4h_bar=self._fetch_4h_bar,
+            claim_gap=GapLedger().claim,
         )
         self.last_1h = self.setup[PASSING_BAR]
         # The warm-up history: every 1h bar before the passing one, and every 4h bar.
@@ -356,6 +358,7 @@ def test_pipeline_refuses_a_parameter_set_that_is_not_the_pinned_one() -> None:
             state=InMemoryRuntimeState(),
             sibling_4h_wait_seconds=30,
             fetch_4h_bar=lambda symbol, close: None,
+            claim_gap=GapLedger().claim,
         )
 
 
@@ -718,11 +721,20 @@ def test_sibling_wait_and_fetch_are_required_inputs_with_no_default() -> None:
         "context_factory": lambda candle: _bar_context(fx.case, candle.close_time_utc),
         "buffers": BarBuffers(),
         "state": InMemoryRuntimeState(),
+        "claim_gap": GapLedger().claim,
     }
     with pytest.raises(TypeError):
         BarPipeline(**common, fetch_4h_bar=lambda symbol, close: None)
     with pytest.raises(TypeError):
         BarPipeline(**common, sibling_4h_wait_seconds=30)
+    # The shared written-gap set is required too (plan 16-57, B1-WR-05).
+    without_claim = {k: v for k, v in common.items() if k != "claim_gap"}
+    with pytest.raises(TypeError):
+        BarPipeline(
+            **without_claim,
+            sibling_4h_wait_seconds=30,
+            fetch_4h_bar=lambda symbol, close: None,
+        )
 
     tree = ast.parse(PIPELINE_SOURCE.read_text(encoding="utf-8"))
     for node in ast.walk(tree):

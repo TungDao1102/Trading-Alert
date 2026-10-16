@@ -13,9 +13,16 @@ What a restart has to guarantee (D-02, D-04, D-06, L-04, L-11, REV-01, research 
 - The supervisor cursor is seeded with the newest close of the warm-up snapshot, because the
   downtime closes are already recorded as gaps (an empty cursor map hides the downtime gap and
   breaks the post-reconnect backfill).
-- No late signal, whatever the user's Q-D answer is. After a restart the verification backfill
-  that the initial connection event triggers can hand the pipeline a bar that closed at or before
-  the warm-up snapshot (an exchange that was late for a bar the snapshot lacked). A restart fence
+- The seam between the warm-up snapshot and the first subscription is closed by one
+  post-start verification backfill (plan 16-57, B1-WR-01): the runtime awaits
+  `PaperSupervisor.verify_start_seam()` right after `PaperSupervisor.start()`. The SDK's `open`
+  echo fires while the connection is being opened, before the supervisor counts as started, so
+  it is ignored and triggers nothing. The verification backfill runs from the seeded cursors under
+  the supervisor's recovery lock with live bars held; a bar that closed after the snapshot reaches
+  history as REST_BACKFILL with its one PAPER_GAP (Q-D: never evaluated).
+- No late signal, whatever the user's Q-D answer is. The verification backfill (and any later
+  reconnect backfill) can hand the pipeline a bar that closed at or before the warm-up snapshot
+  (an exchange that was late for a bar the snapshot lacked). A restart fence
   (`apply_restart_fence`) re-tags every such non-live bar as history only before it reaches the
   pipeline, so no evaluation rule can turn a downtime bar into a signal. The user's choice only
   governs recoveries of drops while the process stays up.

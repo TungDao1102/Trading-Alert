@@ -9,7 +9,10 @@ One rotation owner (research P3). The SDK owns reconnection and the 23 h connect
 replacement; the supervisor adds no rotation timer. It reacts to the SDK connection events
 (callbacks run on the event-loop thread, research D6, so a callback only schedules a task):
 
-- `open` / `reconnect`: a REST verification backfill from the last close per pair.
+- `open` / `reconnect`: a REST verification backfill from the last close per pair. The `open`
+  the SDK fires while `start()` connects is ignored (the supervisor is not started yet), so the
+  runtime awaits `verify_start_seam()` right after `start()`: the same backfill closes the seam
+  between its REST warm-up snapshot and the first subscription (plan 16-57, B1-WR-01).
 - `close` / `error`: records `WS_DISCONNECT`, rebuilds the adapter under a bounded retry,
   records `WS_RECONNECT`, then runs the same backfill. When the rebuild is exhausted the
   backfill still runs (CR-02) and every close it cannot recover becomes a `GapRecord`
@@ -399,6 +402,24 @@ class PaperSupervisor:
             self._pending_events -= 1
             if self._pending_events == 0:
                 self._flush_held()
+
+    async def verify_start_seam(self) -> None:
+        """One verification backfill right after `start()` (plan 16-57, B1-WR-01).
+
+        The SDK fires `open` when a callback is registered on an already open connection, which
+        happens inside `connect()`, before `start()` has finished, so that echo is ignored. A bar
+        that closed between the runtime's REST warm-up snapshot and the first subscription would
+        otherwise never reach history. This runs the path a connection event takes: one
+        `_backfill_and_emit(GapReason.WS_RECONNECT_WINDOW)` from the seeded cursors, under the
+        recovery lock, with live closed bars held until its bars were handed over. Its depth is
+        the supervisor's REST backfill path (plan 16-62 wires `rest_backfill_depth_bars`).
+        Does nothing when the supervisor is not running.
+        """
+        if not self._started or self._stopping or self._loop is None:
+            log.info("paper.supervisor.start_seam_verification_skipped")
+            return
+        self._pending_events += 1
+        await self._run_event("open")
 
     async def recover_from_silence(self) -> bool:
         """The watchdog's entry into the bounded drop recovery an SDK `close` takes.

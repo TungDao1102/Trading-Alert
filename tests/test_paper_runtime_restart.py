@@ -33,6 +33,7 @@ from src.paper.bars import BarBuffers
 from src.paper.freeze import StreamEpoch
 from src.paper.pipeline import BarPipeline, PipelineResult
 from src.paper.runtime_state import (
+    GapLedger,
     InMemoryRuntimeState,
     RuntimeRecord,
     RuntimeStatePort,
@@ -333,7 +334,11 @@ def test_planned_restart_restores_warms_up_records_the_gaps_and_evaluates_the_ne
         assert max(b.close_time_utc for b in ones) == RESTART.replace(minute=0) - ONE_MS
         assert max(b.close_time_utc for b in fours) == C
         assert all(b.close_time_utc <= RESTART for b in ones + fours), "a forming bar never enters"
-    assert len(public.calls) == 4, "one request per (symbol, interval): no live REST traffic else"
+    # One warm-up request per (symbol, interval), then one post-start seam verification request
+    # per pair (B1-WR-01, plan 16-57); no other REST traffic.
+    assert len(public.calls) == 8, "warm-up and seam verification only: no live REST traffic else"
+    seeded = [ms(RESTART.replace(minute=0) - ONE_MS), ms(C)] * 2  # from the seeded cursors
+    assert [c.start_ms for c in public.calls[4:]] == seeded
 
     # Downtime closes are explained gaps, never bars: PLANNED_RESTART, uncovered, one per close.
     gaps = live.records(RuntimeEventType.PAPER_GAP)
@@ -486,6 +491,7 @@ class DowntimeRig:
             state=live_rig.state,
             sibling_4h_wait_seconds=30,
             fetch_4h_bar=lambda _symbol, _close: None,
+            claim_gap=GapLedger().claim,
         )
         self.rule = RulePipeline(self.pipeline, rule)
         self.clock = FixedClock(self.snapshot)
@@ -937,6 +943,7 @@ def test_the_pipeline_treats_the_restored_last_close_as_already_processed() -> N
         state=state,
         sibling_4h_wait_seconds=30,
         fetch_4h_bar=lambda _symbol, _close: None,
+        claim_gap=GapLedger().claim,
     )
     processed = setup[10]
     pipeline.seed_processed({("BTCUSDT", "1h"): processed.close_time_utc})

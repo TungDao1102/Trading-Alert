@@ -135,6 +135,7 @@ from src.paper.runtime_config import (
 )
 from src.paper.runtime_state import (
     INSTANCE_LEASE_SCOPE,
+    GapLedger,
     InstanceLease,
     RuntimeRecord,
     RuntimeRecordConflict,
@@ -169,7 +170,8 @@ QUEUE_MAXSIZE = 4096
 LOOP_INTERVALS: tuple[str, ...] = ("1h", "4h")
 
 # Origin tag of a PAPER_GAP the supervisor reports (the pipeline writes its own gaps with
-# `GAP_DETAIL_*` tags; a gap detected by both with a different payload would be a conflict).
+# `GAP_DETAIL_*` tags). A close both report is written once: the shared `GapLedger` lets the
+# first writer win (plan 16-57, B1-WR-05).
 GAP_DETAIL_SUPERVISOR = "SUPERVISOR"
 
 log = structlog.get_logger()
@@ -578,6 +580,10 @@ class LoopWiring:
     # neither (time.monotonic and asyncio.sleep).
     feed_clock: Callable[[], float] | None = None
     watchdog_sleep: Callable[[timedelta], Awaitable[None]] | None = None
+    # The shared written-gap set of the gap writers (plan 16-57, B1-WR-05). Left at None the loop
+    # builds one and hands its `claim` to the production pipeline; a test that injects its own
+    # pipeline passes the ledger that pipeline claims through.
+    gap_ledger: GapLedger | None = None
 
 
 def _monotonic_ms() -> int:
@@ -678,9 +684,13 @@ class _LiveLoop:
         restart: RestartPlan,
         constraints: ConstraintProvider | None = None,
         shadow: ShadowCoordinator | None = None,
+        gap_ledger: GapLedger | None = None,
     ) -> None:
         self._context = context
         self._restart = restart
+        # First writer wins per (symbol, interval, expected close) across the restart, the
+        # supervisor and the pipeline (plan 16-57, B1-WR-05).
+        self._gaps = gap_ledger if gap_ledger is not None else GapLedger()
         self._shadow = shadow
         self._symbols = context.config.symbols
         # Closes at or before this instant can only be history (see `apply_restart_fence`).
@@ -741,6 +751,14 @@ class _LiveLoop:
         self._enqueue(bar)
 
     def _sink_gap(self, gap: GapRecord) -> None:
+        if not self._gaps.claim(gap.symbol, gap.interval, gap.expected_close_utc):
+            # B1-WR-05: the pipeline or the restart recorded this close first; its record stands.
+            log.info(
+                "paper runtime: a gap already recorded by another writer is not written again",
+                symbol=gap.symbol,
+                interval=gap.interval,
+            )
+            return
         self._spawn_record(_gap_record(self._epoch_id, gap))
 
     def _sink_connection_event(self, event: RuntimeEventType, at: datetime) -> None:
@@ -978,6 +996,10 @@ class _LiveLoop:
         ]
         for record in records:
             await asyncio.to_thread(self._state.record, record)
+        # Every gap the store held at the restore and every restart gap just written is taken:
+        # a later writer of the same close skips its record (B1-WR-05).
+        self._gaps.seed(plan.restored.recorded_gaps)
+        self._gaps.seed({(g.symbol, g.interval, g.expected_close_utc) for g in plan.gaps})
         if plan.warm.bars:
             result = await asyncio.to_thread(
                 self._pipeline.handle, plan.warm.bars, now_utc=plan.snapshot_utc
@@ -1021,6 +1043,19 @@ class _LiveLoop:
             if self._shadow is not None:
                 await self._shadow.stop()
             raise RuntimeFailClosed(f"the WebSocket start failed ({type(exc).__name__})") from exc
+        # B1-WR-01: the SDK's `open` echo fires inside `start()` and is ignored, so one
+        # verification backfill closes the seam between the warm-up snapshot and the first
+        # subscription. Its bars and gaps are queued before the consumer starts; live bars that
+        # arrive meanwhile are held by the supervisor and delivered after them.
+        try:
+            await self._supervisor.verify_start_seam()
+        except Exception as exc:
+            await self._supervisor.stop()
+            if self._shadow is not None:
+                await self._shadow.stop()
+            raise RuntimeFailClosed(
+                f"the start-up seam verification failed ({type(exc).__name__})"
+            ) from exc
         consumer = asyncio.create_task(self._consume())
         self._tasks.add(asyncio.create_task(self._watch_feed()))
         if self._shadow is not None:
@@ -1097,6 +1132,7 @@ async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None
 
     pipeline = live.pipeline
     factory = live.context_factory
+    gap_ledger = live.gap_ledger if live.gap_ledger is not None else GapLedger()
     constraints: ConstraintProvider | None = None
     shadow: ShadowCoordinator | None = None
     parameter_set: ParameterSet | None = None
@@ -1160,6 +1196,7 @@ async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None
             state=context.state,
             sibling_4h_wait_seconds=config.timing.sibling_4h_wait_seconds,
             fetch_4h_bar=make_sibling_fetcher(public, loop),
+            claim_gap=gap_ledger.claim,
         )
 
     def build_supervisor(owner: _LiveLoop) -> PaperSupervisor:
@@ -1214,6 +1251,7 @@ async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None
         restart=plan,
         constraints=constraints,
         shadow=shadow,
+        gap_ledger=gap_ledger,
     ).run()
 
 

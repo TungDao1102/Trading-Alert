@@ -47,6 +47,7 @@ the id rules above read `history_seq` of the latter and nothing of the former.
 from __future__ import annotations
 
 import hashlib
+import threading
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -462,11 +463,47 @@ class InMemoryRuntimeState:
             lease.lose()
 
 
+GapKey = tuple[str, str, datetime]
+
+
+class GapLedger:
+    """The in-process set of PAPER_GAP keys already written in this epoch (plan 16-57, B1-WR-05).
+
+    A PAPER_GAP id is keyed on (epoch, symbol, interval, expected close), while the payload names
+    the writer (`source`) and its reason. The restart, the supervisor and the pipeline can all
+    see the same close; with this ledger the first writer wins and every later writer skips its
+    write, so no second payload can end the loop with `RuntimeRecordConflict`. The ledger is
+    seeded at start from the gaps the state port already holds and the restart gaps just
+    written. `claim` is atomic: the pipeline calls it from its worker thread and the supervisor
+    sink from the event-loop thread.
+    """
+
+    def __init__(self) -> None:
+        self._keys: set[GapKey] = set()
+        self._lock = threading.Lock()
+
+    def seed(self, keys: Collection[GapKey]) -> None:
+        """Mark gaps written before this point (restored from the store, or by the restart)."""
+        with self._lock:
+            self._keys.update(keys)
+
+    def claim(self, symbol: str, interval: str, expected_close_utc: datetime) -> bool:
+        """True for the first writer of this close (the key is then taken); False afterwards."""
+        key = (symbol, interval, expected_close_utc)
+        with self._lock:
+            if key in self._keys:
+                return False
+            self._keys.add(key)
+            return True
+
+
 __all__ = [
     "ENTITY_TYPE",
     "EVENT_ID_PREFIX",
     "INSTANCE_LEASE_SCOPE",
     "RUNTIME_ENTITY_ID",
+    "GapKey",
+    "GapLedger",
     "InMemoryInstanceLease",
     "InMemoryRuntimeState",
     "InstanceLease",

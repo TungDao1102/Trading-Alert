@@ -236,6 +236,10 @@ class BarPipeline:
     `sibling_4h_wait_seconds` is how long a 1h bar may wait for its 4h sibling at a shared close and
     `fetch_4h_bar(symbol, close_time_utc)` fetches that sibling once at the deadline (None when the
     exchange has no such candle); an exception it raises propagates to the caller.
+    `claim_gap(symbol, interval, expected_close_utc)` is the shared written-gap set of the runtime
+    (`GapLedger.claim`, plan 16-57, B1-WR-05): True when this pipeline is the first writer of that
+    close, False when the supervisor or a restart already wrote it. A refused claim skips only the
+    PAPER_GAP record; the bar still enters history.
     """
 
     def __init__(
@@ -248,6 +252,7 @@ class BarPipeline:
         state: RuntimeStatePort,
         sibling_4h_wait_seconds: int,
         fetch_4h_bar: Callable[[str, datetime], TaggedBar | None],
+        claim_gap: Callable[[str, str, datetime], bool],
     ) -> None:
         if epoch.parameter_set_hash != parameter_set.parameter_set_hash:
             raise ValueError(
@@ -267,6 +272,7 @@ class BarPipeline:
         self._state = state
         self._sibling_4h_wait = timedelta(seconds=sibling_4h_wait_seconds)
         self._fetch_4h_bar = fetch_4h_bar
+        self._claim_gap = claim_gap
         # Every bar accepted into history, by (symbol, interval, open time): one entry per closed
         # bar, a few bytes each, so it is kept for the life of the process.
         self._seen: dict[tuple[str, str, datetime], Candle] = {}
@@ -576,6 +582,9 @@ class BarPipeline:
     def _write_gap(self, gap: GapRecord, detail: str, now_utc: datetime, batch: _Batch) -> None:
         # B1-CR-02: the acceptance log is durable before any record that names an accepted bar.
         self._flush_history(now_utc, batch)
+        if not self._claim_gap(gap.symbol, gap.interval, gap.expected_close_utc):
+            # B1-WR-05: another writer recorded this close first; its record stands.
+            return
         # The payload carries no tick time, so a replayed gap is the same record (same content).
         record = RuntimeRecord(
             event_type=RuntimeEventType.PAPER_GAP,

@@ -846,6 +846,45 @@ async def test_a_live_bar_during_recovery_is_delivered_after_the_backfilled_bars
     assert rig.gaps == [], "the held live bar covers its own slot"
 
 
+async def test_the_start_seam_verification_backfills_once_and_holds_live_bars() -> None:
+    """Plan 16-57, B1-WR-01: the post-start backfill takes the connection-event path."""
+    now = _close_dt(4) + timedelta(seconds=2)
+    rest = _GatedRest({("BTCUSDT", "1h"): [_rest_bar("BTCUSDT", "1h", i) for i in (1, 2, 3)]})
+    rig = _make_rig(rest=rest, now=now)
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+
+    verification = asyncio.ensure_future(rig.supervisor.verify_start_seam())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    _emit(rig, "BTCUSDT", "1h", 4)  # a live bar during the verification is held
+    assert rig.order == []
+    rest.gate.set()
+    await verification
+
+    assert rest.klines_calls == [("BTCUSDT", "1h", _ms(_close_dt(0)))]
+    assert rig.order == [
+        ("backfill", _close_dt(1)),
+        ("backfill", _close_dt(2)),
+        ("backfill", _close_dt(3)),
+        ("live", _close_dt(4)),
+    ]
+    assert rig.events == [], "no drop preceded it: not a reconnect"
+    assert rig.gaps == []
+
+
+async def test_the_start_seam_verification_does_nothing_before_start_or_after_stop() -> None:
+    rig = _make_rig(rest=_pages(1, 2, 3), now=_NOW3)
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.verify_start_seam()
+    assert rig.rest.klines_calls == []
+
+    await rig.supervisor.start()
+    await rig.supervisor.stop()
+    await rig.supervisor.verify_start_seam()
+    assert rig.rest.klines_calls == []
+
+
 async def test_stop_unsubscribes_closes_and_ignores_later_events() -> None:
     rig = _make_rig(rest=_pages(1, 2, 3), now=_NOW3)
     rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))

@@ -65,6 +65,7 @@ from src.paper.restart import (
 )
 from src.paper.runtime_config import AccountConfig
 from src.paper.runtime_state import (
+    GapLedger,
     InMemoryRuntimeState,
     RuntimeRecord,
     RuntimeRecordConflict,
@@ -213,6 +214,7 @@ class World:
             state=self.state,
             sibling_4h_wait_seconds=30,
             fetch_4h_bar=self._fetch,
+            claim_gap=GapLedger().claim,
         )
 
     def _fetch(self, symbol: str, close: datetime) -> TaggedBar | None:
