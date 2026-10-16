@@ -1203,3 +1203,136 @@ def test_a_position_that_already_opened_cannot_be_refused() -> None:
 
     with pytest.raises(ValueError, match="already opened"):
         reservations.refuse(held.key, "MIN_QTY_REJECT")
+
+
+# --------------------------------------------------------------------------- #
+# Plan 16-58: an unknown CONFIRM append is reconciled before CANCEL, a TTL expiry or a late
+# adoption writes anything (B2-WR-02, B2-WR-01).
+# --------------------------------------------------------------------------- #
+
+
+def press_cancel(h: Harness, short_id: str, now: Any = T_PRESS) -> Any:
+    return h.confirm.handle_cancel(
+        short_id=short_id,
+        chat_id=CHAT_ID,
+        authorized_chat_id=CHAT_ID,
+        from_user_id=USER_ID,
+        now_utc=now,
+        correlation_id=f"cb-cancel-{short_id}-{now.isoformat()}",
+    )
+
+
+def terminal_types(rig: Rig) -> list[str]:
+    return [
+        e.event_type
+        for e in rig.stores.journal
+        if e.event_type
+        in (
+            EVENT_SHADOW_CONFIRMED,
+            shadow_confirm.EVENT_SHADOW_CONFIRM_CANCELLED,
+            EVENT_SHADOW_CONFIRM_EXPIRED,
+        )
+    ]
+
+
+async def unknown_confirm(rig: Rig) -> tuple[Harness, str]:
+    """A CONFIRM whose append committed but whose read-back failed (the outcome is unknown)."""
+    h, short_id = await approved(rig, 1)
+    rig.stores.fail_types = {EVENT_SHADOW_CONFIRMED}
+    rig.stores.commit_then_raise = True
+    rig.stores.unreadable = True
+    with pytest.raises(ConnectionError):
+        press_confirm(h, short_id)
+    entry = h.confirm.get(short_id)
+    assert entry is not None and entry.confirm_append_unknown
+    assert terminal_types(rig) == [EVENT_SHADOW_CONFIRMED], "the append did commit"
+    return h, short_id
+
+
+def journal_recovers(rig: Rig) -> None:
+    rig.stores.unreadable = False
+    rig.stores.fail_types = set()
+    rig.stores.commit_then_raise = False
+
+
+async def test_a_cancel_after_an_unknown_confirm_append_adopts_the_confirm() -> None:
+    rig = Rig()
+    h, short_id = await unknown_confirm(rig)
+    journal_recovers(rig)
+
+    result = press_cancel(h, short_id, T_PRESS + timedelta(seconds=10))
+
+    assert result.outcome is ConfirmOutcome.CONFIRMED and result.replayed
+    assert terminal_types(rig) == [EVENT_SHADOW_CONFIRMED], "no second terminal event"
+    assert len(rig.positions()) == 1, "the committed CONFIRM holds its reservation"
+    assert [t[2] for t in h.confirmed] == [T_PRESS], "on_confirmed ran once for the adopted CONFIRM"
+
+
+async def test_a_ttl_sweep_after_an_unknown_confirm_append_adopts_the_confirm() -> None:
+    rig = Rig()
+    h, short_id = await unknown_confirm(rig)
+    journal_recovers(rig)
+    late = T_PRESS + timedelta(seconds=h.confirm.ttl_seconds + 1)
+
+    assert h.confirm.expire_if_due(short_id, late) is False
+    assert terminal_types(rig) == [EVENT_SHADOW_CONFIRMED]
+    assert len(rig.positions()) == 1
+
+    rig2 = Rig()
+    h2, _short2 = await unknown_confirm(rig2)
+    journal_recovers(rig2)
+    assert h2.confirm.expire_due(late) == []
+    assert terminal_types(rig2) == [EVENT_SHADOW_CONFIRMED]
+    assert len(rig2.positions()) == 1
+    assert h2.confirm.expire_due(late + timedelta(seconds=1)) == [], "a second sweep writes nothing"
+
+
+async def test_an_unreadable_journal_blocks_cancel_and_both_sweeps_and_writes_nothing() -> None:
+    rig = Rig()
+    h, short_id = await unknown_confirm(rig)  # the journal is still unreadable
+    rig.stores.fail_types = set()
+    late = T_PRESS + timedelta(seconds=h.confirm.ttl_seconds + 1)
+
+    with pytest.raises(ConnectionError):
+        press_cancel(h, short_id, T_PRESS + timedelta(seconds=10))
+    with pytest.raises(ConnectionError):
+        h.confirm.expire_if_due(short_id, late)
+    with pytest.raises(ConnectionError):
+        h.confirm.expire_due(late)
+
+    assert terminal_types(rig) == [EVENT_SHADOW_CONFIRMED], "nothing was written meanwhile"
+    assert rig.positions() == []
+    entry = h.confirm.get(short_id)
+    assert entry is not None and entry.confirm_append_unknown, "still unknown, still reconcilable"
+
+
+async def test_a_cancel_when_the_unknown_append_did_not_commit_cancels_once() -> None:
+    rig = Rig()
+    h, short_id = await approved(rig, 1)
+    rig.stores.fail_types = {EVENT_SHADOW_CONFIRMED}  # the append failed and committed nothing
+    rig.stores.unreadable = True
+    with pytest.raises(ConnectionError):
+        press_confirm(h, short_id)
+    journal_recovers(rig)
+
+    result = press_cancel(h, short_id, T_PRESS + timedelta(seconds=10))
+
+    assert result.outcome is ConfirmOutcome.CANCELLED and not result.replayed
+    assert terminal_types(rig) == [shadow_confirm.EVENT_SHADOW_CONFIRM_CANCELLED]
+    assert rig.positions() == []
+
+
+async def test_adopting_a_stored_confirm_after_the_ledger_day_moved_on_still_reserves() -> None:
+    rig = Rig()
+    h, short_id = await unknown_confirm(rig)
+    journal_recovers(rig)
+    # A next-day bar reads the risk inputs before the retry: the stored CONFIRM instant (T_PRESS)
+    # now lies before the ledger day it would have been judged on.
+    rig.ledger.risk_inputs(T_PRESS + timedelta(days=1))
+
+    result = press_confirm(h, short_id, T_PRESS + timedelta(seconds=20))
+
+    assert result.outcome is ConfirmOutcome.CONFIRMED
+    assert types(rig.stores, EVENT_SHADOW_RESERVATION_REFUSED) == []
+    (reservation,) = rig.reservations.pending_reservations()
+    assert reservation.confirmed_at_utc == T_PRESS

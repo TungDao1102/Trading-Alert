@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Final, Protocol
+from typing import Any, Final, Protocol, TypeVar
 
 import structlog
 
@@ -83,6 +83,8 @@ from src.paper.shadow import (
 )
 
 log = structlog.get_logger()
+
+_T = TypeVar("_T")
 
 # D041: the SHADOW confirm TTL. It is the human-confirmation window of the two-step flow, not a
 # strategy or risk parameter; REV-12 keeps the approval expiry equal to the plan expiry.
@@ -842,32 +844,51 @@ class ConfirmBook:
         SHADOW_CONFIRMED write, then the reservation. A failed check or write reserves nothing.
         """
         _require_utc(now_utc, "now_utc")
+        return self._in_section(
+            lambda: self._handle_confirm_locked(
+                short_id=short_id,
+                chat_id=chat_id,
+                authorized_chat_id=authorized_chat_id,
+                from_user_id=from_user_id,
+                now_utc=now_utc,
+                correlation_id=correlation_id,
+            )
+        )
+
+    def _in_section(self, body: Callable[[], _T]) -> _T:
+        """Run `body` under the book lock and, with a reservation port, its serialized section.
+
+        Every path that can finish a CONFIRM (a press, an adopted stored CONFIRM) runs here, so
+        `on_confirmed` is called once for it AFTER the section and the book lock are released
+        (B2-CR-01): the hook may take the coordinator lock without waiting on the ledger lock.
+        """
         with self._lock:
+            self._deferred_confirmed = None
             if self._reservations is None:
-                result = self._handle_confirm_locked(
-                    short_id=short_id,
-                    chat_id=chat_id,
-                    authorized_chat_id=authorized_chat_id,
-                    from_user_id=from_user_id,
-                    now_utc=now_utc,
-                    correlation_id=correlation_id,
-                )
+                result = body()
             else:
                 with self._reservations.section():
-                    result = self._handle_confirm_locked(
-                        short_id=short_id,
-                        chat_id=chat_id,
-                        authorized_chat_id=authorized_chat_id,
-                        from_user_id=from_user_id,
-                        now_utc=now_utc,
-                        correlation_id=correlation_id,
-                    )
+                    result = body()
             deferred, self._deferred_confirmed = self._deferred_confirmed, None
-        # B2-CR-01: `on_confirmed` runs after the serialized section and the book lock are gone,
-        # so the hook may take the coordinator lock without waiting on the ledger lock.
         if deferred is not None and self._on_confirmed is not None:
             self._on_confirmed(*deferred)
         return result
+
+    def _reconcile_unknown(self, entry: ConfirmEntry) -> ConfirmResult | None:
+        """Settle an earlier SHADOW_CONFIRMED append of unknown outcome against the journal.
+
+        None when the entry has no unknown append, or the journal shows none committed (the flag
+        is cleared and the caller goes on). A committed one is adopted as the CONFIRM and its
+        result returned: the caller must not write a second terminal event (plan 16-58, B2-WR-02).
+        A journal that cannot be read raises (fail closed: nothing is written).
+        """
+        if not entry.confirm_append_unknown:
+            return None
+        stored = self._stored_confirmed(entry)
+        if stored is not None:
+            return self._adopt_stored_confirm(entry, stored)
+        entry.confirm_append_unknown = False
+        return None
 
     def _handle_confirm_locked(
         self,
@@ -910,13 +931,11 @@ class ConfirmBook:
                 now_utc=now_utc,
                 correlation_id=correlation_id,
             )
-        if entry.confirm_append_unknown:
-            # An earlier SHADOW_CONFIRMED append has an unknown outcome: the journal decides. A
-            # journal that cannot be read raises here (fail closed: nothing reserved).
-            stored = self._stored_confirmed(entry)
-            if stored is not None:
-                return self._adopt_stored_confirm(entry, stored)
-            entry.confirm_append_unknown = False
+        # An earlier SHADOW_CONFIRMED append has an unknown outcome: the journal decides. A
+        # journal that cannot be read raises here (fail closed: nothing reserved).
+        adopted = self._reconcile_unknown(entry)
+        if adopted is not None:
+            return adopted
         if now_utc >= entry.expires_at_utc:  # boundary inclusive, as binding.py
             return self._expire_ttl(entry, now_utc)
         rejection = self._binding_gate(entry, now_utc)
@@ -1046,9 +1065,32 @@ class ConfirmBook:
         correlation_id: str,
     ) -> ConfirmResult:
         """A CXL: press. Journals SHADOW_CONFIRM_CANCELLED; nothing is simulated. A cancel after
-        a decision cannot flip it: it replays the existing outcome.
+        a decision cannot flip it: it replays the existing outcome. A CONFIRM append of unknown
+        outcome is reconciled against the journal first, so a committed CONFIRM is never followed
+        by a second terminal event (B2-WR-02).
         """
         _require_utc(now_utc, "now_utc")
+        return self._in_section(
+            lambda: self._handle_cancel_locked(
+                short_id=short_id,
+                chat_id=chat_id,
+                authorized_chat_id=authorized_chat_id,
+                from_user_id=from_user_id,
+                now_utc=now_utc,
+                correlation_id=correlation_id,
+            )
+        )
+
+    def _handle_cancel_locked(
+        self,
+        *,
+        short_id: str,
+        chat_id: int,
+        authorized_chat_id: int,
+        from_user_id: int | None,
+        now_utc: datetime,
+        correlation_id: str,
+    ) -> ConfirmResult:
         entry = self._entries.get(short_id)
         if entry is None:
             return self._reject_unknown(
@@ -1069,6 +1111,8 @@ class ConfirmBook:
         )
         if refused is not None:
             return refused
+        if entry.state is ConfirmState.PENDING:
+            self._reconcile_unknown(entry)  # adopting a committed CONFIRM makes it non-PENDING
         if entry.state is not ConfirmState.PENDING:
             return self._replay(
                 entry,
@@ -1092,13 +1136,22 @@ class ConfirmBook:
     # ---- sweeps ---------------------------------------------------------- #
 
     def expire_if_due(self, short_id: str, now_utc: datetime) -> bool:
-        """Expire one outstanding confirm whose TTL has run out. True when it was expired."""
+        """Expire one outstanding confirm whose TTL has run out. True when it was expired.
+
+        An unknown CONFIRM append is reconciled against the journal first (B2-WR-02): a committed
+        CONFIRM is adopted and nothing is expired; an unreadable journal raises.
+        """
+        return self._in_section(lambda: self._expire_if_due_locked(short_id, now_utc))
+
+    def _expire_if_due_locked(self, short_id: str, now_utc: datetime) -> bool:
         entry = self._entries.get(short_id)
         if (
             entry is None
             or entry.state is not ConfirmState.PENDING
             or now_utc < entry.expires_at_utc
         ):
+            return False
+        if self._reconcile_unknown(entry) is not None:
             return False
         self._expire_ttl(entry, now_utc)
         return True
@@ -1113,13 +1166,19 @@ class ConfirmBook:
         an ISSUED event only the token is gone (RUNTIME_RESTART).
         """
         _require_utc(now_utc, "now_utc")
+        expired = self._in_section(lambda: self._expire_held_locked(now_utc))
+        expired.extend(self._sweep_orphans(now_utc, require_age=True))
+        return sorted(expired)
+
+    def _expire_held_locked(self, now_utc: datetime) -> list[str]:
         expired: list[str] = []
         for entry in sorted(self._entries.values(), key=lambda e: e.approval.approval_id):
             if entry.state is ConfirmState.PENDING and now_utc >= entry.expires_at_utc:
+                if self._reconcile_unknown(entry) is not None:
+                    continue  # the unknown append had committed: the CONFIRM stands (B2-WR-02)
                 self._expire_ttl(entry, now_utc)
                 expired.append(entry.approval.approval_id)
-        expired.extend(self._sweep_orphans(now_utc, require_age=True))
-        return sorted(expired)
+        return expired
 
     def expire_on_restart(self, now_utc: datetime) -> list[str]:
         """Expire every outstanding confirm of the previous process (raw tokens are gone).

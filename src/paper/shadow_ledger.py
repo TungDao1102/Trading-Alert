@@ -261,6 +261,21 @@ class ShadowLedger:
             self._ledger = remove_exposure(self._ledger, trade_plan_id=trade_plan_id)
         self._remaining.pop(trade_plan_id, None)
 
+    def _view_at(self, at_utc: datetime) -> Ledger:
+        """The ledger as of `at_utc`, rolled to that UTC day on a COPY (plan 16-58, B2-WR-01).
+
+        A CONFIRM or a risk-input read is judged on the day it happens, but it must not move the
+        stored ledger: bookings of the minutes still to be applied (a 23:59 exit processed after
+        00:00) would then fail with "cannot roll the ledger backwards". The stored ledger moves
+        only through bookings. A time inside or before the stored day judges the stored ledger
+        as it is: the roll only goes forward, so a late-adopted CONFIRM instant cannot raise.
+        """
+        _require_utc(at_utc, "at_utc")
+        day_start = at_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        if day_start <= self._ledger.day_start_utc:
+            return self._ledger
+        return roll_to(self._ledger, at_utc)
+
     def admit(
         self,
         *,
@@ -276,11 +291,11 @@ class ShadowLedger:
         portfolio gates of `check_portfolio` (cluster cap, aggregate cap, position count, daily
         stop) over `risk_inputs`, i.e. over open positions AND still-valid reservations. The
         constraint freshness gate was decided on the signal bar; here the snapshot is "observed
-        now". Read-only apart from rolling the UTC day, as the engine does before a signal.
+        now". Read-only: the UTC day is rolled on a copy (`_view_at`), never stored.
         """
         with self._lock:
-            self._ledger = roll_to(self._ledger, now_utc)
-            if not equity_positive(self._ledger):
+            judged = self._view_at(now_utc)
+            if not equity_positive(judged):
                 return RejectionReason.UNCERTAIN_ACCOUNT_STATE.value
             if self.holds_symbol(symbol):
                 return NO_TRADE_CONFLICT
@@ -296,9 +311,9 @@ class ShadowLedger:
                 sized=sized,
                 candidate_symbol=symbol,
                 candidate_position_side=direction,
-                open_positions=open_positions_for_risk(self._ledger),
-                daily_loss_quote=daily_loss_quote(self._ledger),
-                parameter_set=self._ledger.thresholds,
+                open_positions=open_positions_for_risk(judged),
+                daily_loss_quote=daily_loss_quote(judged),
+                parameter_set=judged.thresholds,
                 now_utc=now_utc,
                 ttl=timedelta(0),
                 constraint_observed_at_utc=now_utc,
@@ -396,13 +411,15 @@ class ShadowLedger:
         """`(open_positions, daily_loss_quote)` for the next risk verdict at `now_utc`.
 
         The positions are the full current exposure: open positions AND confirmed-but-unfilled
-        reservations that are still valid (an expired or refused one has been released). Rolls
-        the ledger to the UTC day of `now_utc` first, as the engine does before it evaluates a
-        signal (day PnL resets, thresholds re-resolve against the day-start equity).
+        reservations that are still valid (an expired or refused one has been released). Reads the
+        ledger rolled to the UTC day of `now_utc`, as the engine does before it evaluates a signal
+        (day PnL resets, thresholds re-resolve against the day-start equity). The roll is made on
+        a copy and never stored (plan 16-58, B2-WR-01): the stored ledger moves only through
+        bookings.
         """
         with self._lock:
-            self._ledger = roll_to(self._ledger, now_utc)
-            return open_positions_for_risk(self._ledger), daily_loss_quote(self._ledger)
+            view = self._view_at(now_utc)
+            return open_positions_for_risk(view), daily_loss_quote(view)
 
 
 # --------------------------------------------------------------------------- #
@@ -1110,7 +1127,6 @@ class ShadowReservations:
                 to_replay, minute_source, now_utc, driver_for, funding_for
             )
             restored_pos = [p.reservation.approval_id for p in to_replay]
-            self._ledger.risk_inputs(now_utc)  # roll to the day of `now_utc`, as a signal would
         return RebuildReport(
             restored_reservations=tuple(sorted(restored_res)),
             restored_positions=tuple(sorted(restored_pos)),

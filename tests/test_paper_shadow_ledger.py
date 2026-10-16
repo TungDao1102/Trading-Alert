@@ -284,3 +284,66 @@ def test_the_symbol_is_free_again_after_the_plan_exits() -> None:
     shadow.register(state)
     shadow.apply_event(_event(EVENT_EXIT, EXIT_TIME, "0.5"), start_state=state)
     assert shadow.register(_state("tp-2")).registered
+
+
+# --------------------------------------------------------------------------------------------
+# Plan 16-58, B2-WR-01: a CONFIRM or a risk-input read never rolls the stored ledger.
+# --------------------------------------------------------------------------------------------
+
+LATE = datetime(2026, 1, 5, 23, 59, 59, 999000, tzinfo=UTC)  # the last minute of the day
+AFTER_MIDNIGHT = datetime(2026, 1, 6, 0, 0, 30, tzinfo=UTC)
+
+
+def _admit_other(shadow: ShadowLedger, now_utc: datetime) -> str | None:
+    return shadow.admit(
+        symbol="BNBUSDT",
+        direction="LONG",
+        sized_realized_risk=D("10"),
+        planned_quantity=D("1"),
+        now_utc=now_utc,
+    )
+
+
+def test_a_confirm_after_midnight_leaves_the_day_to_the_booking_stream() -> None:
+    shadow = _shadow()
+    shadow.register(_state())
+    day_before = shadow.ledger.day_start_utc
+
+    assert _admit_other(shadow, AFTER_MIDNIGHT) is None
+    assert shadow.ledger.day_start_utc == day_before, "admit judged a copy, it stored no roll"
+
+    # The exit of the 23:59 minute is applied after the CONFIRM: yesterday's loss, no error.
+    shadow.apply(_booking(LATE, "-10", BOOKING_EXIT))
+    _positions, loss_late = shadow.risk_inputs(LATE)
+    _positions, loss_new_day = shadow.risk_inputs(AFTER_MIDNIGHT)
+    assert loss_late == D("10")
+    assert loss_new_day == D("0"), "the new day starts clean"
+    assert shadow.ledger.day_start_utc == day_before
+
+
+def test_a_risk_input_read_after_midnight_does_not_block_a_late_booking() -> None:
+    shadow = _shadow()
+    shadow.risk_inputs(AFTER_MIDNIGHT)
+    shadow.apply(_booking(LATE, "-10"))  # raised "cannot roll the ledger backwards" before
+    assert shadow.equity == TEST_EQUITY - D("10")
+
+
+def test_the_new_day_thresholds_use_the_equity_after_the_late_booking() -> None:
+    """The day-start equity of the new day includes yesterday's last booking."""
+    shadow = _shadow()
+    shadow.risk_inputs(AFTER_MIDNIGHT)
+    shadow.apply(_booking(LATE, "-1000"))
+    reference = Ledger.start(equity=TEST_EQUITY, parameter_set_params=PARAMS, at_utc=START)
+    reference = apply_booking(reference, _booking(LATE, "-1000"))
+    reference = roll_to(reference, AFTER_MIDNIGHT)
+    positions, loss = shadow.risk_inputs(AFTER_MIDNIGHT)
+    assert positions == open_positions_for_risk(reference)
+    assert loss == daily_loss_quote(reference) == D("0")
+
+
+def test_an_admit_dated_before_the_stored_day_judges_the_stored_ledger() -> None:
+    shadow = _shadow()
+    shadow.apply(_booking(AFTER_MIDNIGHT, "-10"))  # a booking already moved the stored day
+    assert _admit_other(shadow, LATE) is None  # a late-adopted CONFIRM instant must not raise
+    _positions, loss = shadow.risk_inputs(LATE)
+    assert loss == D("10")
