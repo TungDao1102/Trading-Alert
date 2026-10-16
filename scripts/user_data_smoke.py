@@ -2469,8 +2469,13 @@ def main(
     rig_factory: Callable[[SmokeConfig], SmokeRig] | None = None,
     dry_run_scenario: DryRunScenario | None = None,
     sdk_client_factory: Callable[..., Any] | None = None,
+    configure_output: Callable[[Mapping[str, str]], object] | None = None,
 ) -> int:
-    """Single entry point. Every seam defaults to the real implementation."""
+    """Single entry point. Every seam defaults to the real implementation.
+
+    An executed run configures the redacting logging (`configure_logging`) before any
+    credential is loaded; `configure_output` replaces it in tests.
+    """
     env: Mapping[str, str] = os.environ if environ is None else environ
     try:
         config = parse_config(argv)
@@ -2490,8 +2495,8 @@ def main(
         print(f"refused ({type(exc).__name__}): {exc}", file=sys.stderr)
         return EXIT_REFUSED
 
-    if config.mode == MODE_EXECUTE and rig_factory is None:
-        configure_logging(env)
+    if config.mode == MODE_EXECUTE:
+        (configure_output if configure_output is not None else configure_logging)(env)
 
     factory: Callable[[SmokeConfig], SmokeRig]
     if rig_factory is not None:
