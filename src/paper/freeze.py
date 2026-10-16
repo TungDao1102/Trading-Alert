@@ -554,11 +554,27 @@ class PaperAllowlistEntry:
             ) from exc
 
 
-# Checkpoint 15-17-01, Option B (user decision of 2026-10-07): the approved paper-start
-# allowlist is EMPTY. Adding an entry needs a new user checkpoint, a D054 update and an
-# update of the decision-record test in tests/test_paper_start_gate.py. An entry never
-# admits a set that has rationale tables (D-27 unchanged).
-PAPER_START_ALLOWLIST: tuple[PaperAllowlistEntry, ...] = ()
+# Checkpoint 15-17-01, Option B (user decision of 2026-10-07): the allowlist shipped EMPTY.
+# Checkpoint G4-021 (user decision of 2026-10-16, decisions/16-DEC-G4-021.md, option
+# exact-entry-pin) added the single entry below, the candidate designated in plan 16-48.
+# Any other entry, or an edit of this one, needs a new user checkpoint, a D054 update and an
+# update of the pin test in tests/test_paper_start_gate.py. An entry never replaces the
+# rationale and PLACEHOLDER check of a set that has rationale tables (D-27 unchanged).
+PAPER_START_ALLOWLIST: tuple[PaperAllowlistEntry, ...] = (
+    PaperAllowlistEntry(
+        strategy_id="trend-pullback",
+        parameter_set_id="research-run-1-a01",
+        parameter_set_hash=("6f42f70e7e7a107b1be02fc4079fbb70f1408b4307099aa253bd93ebdbce6d87"),
+        purpose=(
+            "Paper (SHADOW) trial soak của ứng viên đã đăng ký trước đầu tiên của research run 1"
+        ),
+        approved_at="2026-10-16",
+        basis=(
+            "Checkpoint G4-021 (decisions/16-DEC-G4-021.md), chỉ định ứng viên "
+            "(decisions/16-DEC-candidate.md), D054 mục (i)"
+        ),
+    ),
+)
 
 
 def allowlist_entries() -> tuple[PaperAllowlistEntry, ...]:
