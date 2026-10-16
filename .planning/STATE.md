@@ -550,6 +550,7 @@ Recent decisions affecting current work:
 | 261015-mvq | compute_features computes the last bar only, byte-identical (core performance; 14x on the function, 3-10x on engine runs; simulator stays 2.1.0) | 2026-10-15 | a64e6af | [261015-mvq-optimise-compute-features-last-bar-only-](./quick/261015-mvq-optimise-compute-features-last-bar-only-/) |
 | 261015-o9l | Manifest build command (python -m src.research.manifest --build from the O-03b record); draft S0 manifest hash ec161733 outside the repo, not frozen | 2026-10-15 | f0f5366 | [261015-o9l-manifest-build-command-for-the-research-](./quick/261015-o9l-manifest-build-command-for-the-research-/) |
 | 261015-pdb | Research runner: per-point records and window checkpoints (--checkpoint-dir, resume); default behaviour unchanged | 2026-10-15 | (this commit) | [261015-pdb-research-runner-per-point-records-and-sp](./quick/261015-pdb-research-runner-per-point-records-and-sp/) |
+| 261016-pre | Close 16-41, ROADMAP/REQUIREMENTS bookkeeping (BKTS-03 complete), 16-42 Task 1 preflight | 2026-10-16 | (this commit) | [261016-pre-close-16-41-roadmap-state-and-16-42-pre](./quick/261016-pre-close-16-41-roadmap-state-and-16-42-pre/) |
 
 ### Roadmap Evolution
 
