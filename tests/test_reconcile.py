@@ -543,6 +543,16 @@ def test_orphan_protective_divergence_classified_and_swept() -> None:
     assert "cancelled" in post_event.payload_json
     assert "phase" in pre_event.payload_json
     assert "phase" in post_event.payload_json
+    # Plan 18-06: the pre-image journals the class beside the raw status.
+    pre_payload = json.loads(pre_event.payload_json)
+    assert pre_payload == {
+        "symbol": "BTCUSDT",
+        "client_algo_id": "xa-1111111111111111111111111111111SL",
+        "algo_status": "NEW",
+        "algo_status_class": "ACTIVE",
+        "update_time_utc": pre_payload["update_time_utc"],
+        "phase": "pre_cancel",
+    }
 
     # Re-scan after the sweep: the orchestrator would also drop
     # the swept algo from local intent, so the post-sweep diff
@@ -814,6 +824,78 @@ def test_transient_position_gap_blocks_premature_sweep() -> None:
     assert adapter.cancel_algo_order_calls == []
     # No journal ORPHAN_SWEEP event for a skipped cancel.
     assert all(e.event_type != "ORPHAN_SWEEP" for e in journal.events)
+
+
+# --------------------------------------------------------------------------- #
+# Plan 18-06 — the sweeper journals the algo status class (diagnosis only).
+# --------------------------------------------------------------------------- #
+
+
+def _pre_image(algo_status: object, *, with_attribute: bool = True) -> dict[str, Any]:
+    from types import SimpleNamespace
+
+    from src.reconcile.sweeper import OrphanSweeper
+
+    fields: dict[str, Any] = {"found": True, "update_time_utc": None}
+    if with_attribute:
+        fields["algo_status"] = algo_status
+    sweeper = OrphanSweeper(adapter=None, journal=_FakeJournal())  # type: ignore[arg-type]
+    event = sweeper._build_pre_image_event(
+        symbol="BTCUSDT",
+        client_algo_id="xa-1111111111111111111111111111111SL",
+        probe=SimpleNamespace(**fields),
+        now_utc=datetime(2026, 9, 19, 11, 0, tzinfo=UTC),
+    )
+    payload: dict[str, Any] = json.loads(event.payload_json)
+    payload["_event_id"] = event.journal_event_id
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("algo_status", "expected_class"),
+    [
+        ("NEW", "ACTIVE"),
+        ("TRIGGERING", "UNKNOWN"),
+        ("TRIGGERED", "UNKNOWN"),
+        ("FINISHED", "UNKNOWN"),
+        ("CANCELED", "UNKNOWN"),
+        ("REJECTED", "TERMINAL_FAILED"),
+        ("EXPIRED", "TERMINAL_FAILED"),
+    ],
+)
+def test_sweeper_pre_image_journals_the_status_class(algo_status: str, expected_class: str) -> None:
+    from src.domain.algo_status import classify_algo_status
+
+    payload = _pre_image(algo_status)
+    assert payload["algo_status"] == algo_status
+    assert payload["algo_status_class"] == classify_algo_status(algo_status).value
+    assert payload["algo_status_class"] == expected_class
+    assert set(payload) - {"_event_id"} == {
+        "symbol",
+        "client_algo_id",
+        "algo_status",
+        "algo_status_class",
+        "update_time_utc",
+        "phase",
+    }
+
+
+@pytest.mark.parametrize("algo_status", [None, "", "new", "SOMETHING_ELSE", 7])
+def test_sweeper_pre_image_unseen_or_missing_status_is_unknown(algo_status: object) -> None:
+    assert _pre_image(algo_status)["algo_status_class"] == "UNKNOWN"
+
+
+def test_sweeper_pre_image_absent_status_attribute_is_unknown() -> None:
+    payload = _pre_image(None, with_attribute=False)
+    assert payload["algo_status"] is None
+    assert payload["algo_status_class"] == "UNKNOWN"
+
+
+def test_sweeper_pre_image_event_id_is_deterministic_on_replay() -> None:
+    first = _pre_image("CANCELED")
+    second = _pre_image("CANCELED")
+    assert first["_event_id"] == second["_event_id"]
+    assert first["_event_id"] != _pre_image("NEW")["_event_id"]
 
 
 # --------------------------------------------------------------------------- #

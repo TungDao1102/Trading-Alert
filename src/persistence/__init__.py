@@ -1,12 +1,22 @@
 """Operational persistence layer (Phase 17): synchronous SQLAlchemy 2.0 repositories.
 
-Module map (no re-exports, so later plans never edit this file):
+Module map (no re-exports; `tests/test_persistence_exit_evidence_pg.py` checks that this list
+names every module of the package):
 
-  - `errors`           typed persistence failures callers translate to NO_TRADE / SAFE_MODE
-  - `engine`           engine factory: UTC pinned per session, pool_pre_ping, fail closed
-  - `uow`              `OperationalDatabase.transaction()` unit of work (D-03)
-  - `execution_state`  `PgExecutionStateStore`: durable approval consumption and
-                       write-ahead execution intents (D-13, D-14, D-15)
+  - `errors`               typed persistence failures callers translate to NO_TRADE / SAFE_MODE
+  - `engine`               engine factory: UTC pinned per session, pool_pre_ping, fail closed
+  - `uow`                  `OperationalDatabase.transaction()` unit of work (D-03)
+  - `journal`              `PgJournalStore`: append-only, replay-idempotent journal (D-10)
+  - `approvals`            `PgApprovalStore`: durable approvals and Telegram callback state
+  - `execution_state`      `PgExecutionStateStore`: durable approval consumption and
+                           write-ahead execution intents (D-13, D-14, D-15)
+  - `entities`             `PgTradingEntityStore`: Signal, TradePlan, Order, Fill and Position
+                           with in-transaction state machines (DOMN-04), evidence-gated
+                           UNKNOWN exits and the Order exchange-state writer (Phase 18)
+  - `snapshots`            `PgPlanConstraintSnapshotStore`: per-plan exchange constraints
+  - `system_state`         `PgSystemStateStore`: SAFE_MODE, enablement and kill gate (D-22)
+  - `paper_runtime_state`  `PgRuntimeState`: journal-only paper runtime state (Phase 16)
+  - `shadow_stores`        `PgShadowStores`: the SHADOW chain's composed stores (Phase 16)
 
 The domain model stays the authority (D-02): repositories accept and return domain
 objects or the stdlib records declared next to the Protocol that consumes them; ORM

@@ -101,22 +101,26 @@ The system must reconcile with Binance rather than trusting local state.
 
 Conditional (algo) orders live in the Binance Algo Service until their condition is met, and only then reach the matching engine. Binance performs no margin check before a conditional order triggers (change-log 2025-11-06), so a stop that was accepted at placement can still fail at trigger. The lifecycle arrives as `ALGO_UPDATE` events; the status field is `X` and the failure reason field is `rm` (`o.rm` on the event payload).
 
-| Status | Meaning |
-| --- | --- |
-| `NEW` | placed in the Algo Service, not yet triggered |
-| `TRIGGERING` | condition met, forwarded to the matching engine |
-| `FINISHED` | the triggered conditional order was filled or canceled in the matching engine |
-| `REJECTED` | denied by the matching engine at trigger, for example a margin check failure |
-| `EXPIRED` | canceled by the system |
+| Status | Class | Meaning |
+| --- | --- | --- |
+| `NEW` | ACTIVE | placed in the Algo Service, not yet triggered |
+| `TRIGGERING` | UNKNOWN | condition met, forwarded to the matching engine |
+| `TRIGGERED` | UNKNOWN | the order has been successfully placed into the matching engine |
+| `FINISHED` | UNKNOWN | the triggered conditional order has been filled or canceled in the matching engine: filled OR canceled, so FINISHED alone does not prove that the protective exit executed |
+| `CANCELED` | UNKNOWN | the conditional order has been canceled |
+| `REJECTED` | TERMINAL_FAILED | denied by the matching engine at trigger, for example a margin check failure |
+| `EXPIRED` | TERMINAL_FAILED | canceled by the system |
+
+Class column (plan 18-06, CONTEXT D-07): each class is one of ACTIVE, TERMINAL_OK, TERMINAL_FAILED and UNKNOWN, copied from `ALGO_STATUS_TABLE` in `src/domain/algo_status.py`; a test compares every row of this table with the code. An unseen value (a status outside the seven above, an empty or missing status, another letter case) is UNKNOWN and fails closed, and only ACTIVE counts as protection confirmed: the attach path confirms a protective leg, and adopts an existing leg, only when the class of its status is ACTIVE, so with this table only `NEW` confirms protection. The classes of `TRIGGERING`, `TRIGGERED`, `FINISHED` and `CANCELED` are the owner's recorded decision of Phase 18 (`.planning/phases/18-user-data-stream-error-taxonomy/decisions/18-DEC-O-18-01.md`, 2026-10-16): all four are UNKNOWN, which means they are not confirmed protection until they are independently verified through Binance; D055 is not decided by this table. No status is TERMINAL_OK. Reconcile and sweeper decisions driven by the class belong to Phase 20; until then the orphan sweeper only journals the class (`algo_status_class`) beside the raw status for diagnosis.
 
 Consequences for the execution layer (F-054):
 
-- FINISHED does not mean filled: the resulting order state and the position must be read from the exchange before the protective exit is treated as executed.
+- FINISHED does not mean filled: Binance defines FINISHED as filled or canceled in the matching engine, so a FINISHED stop proves neither a fill nor protection. The resulting order state and the position must be read from the exchange before the protective exit is treated as executed.
 - REJECTED and EXPIRED can occur at trigger time, after the stop-loss was accepted at placement. "SL accepted" therefore never means "SL will execute"; reconciliation and the D034 ladder in section 9 must cover a stop that fails at trigger.
 - The failure reason is carried in `o.rm` on `ALGO_UPDATE`. A search summary of the change-log reports that the old `CONDITIONAL_ORDER_TRIGGER_REJECT` event was deprecated on 2025-12-15 in favour of `ALGO_UPDATE`; that date was not confirmed on the fetched change-log page, so parse `ALGO_UPDATE` and do not depend on the old event.
-- For trailing stops before trigger the status remains `NEW` and two `NEW` events can arrive (`ia` false, then true).
+- For trailing stops before trigger the status remains `NEW` and two `NEW` events can arrive (`ia` false, then true); the change-log entry of 2026-08-21 (read 2026-10-16) says ALGO_UPDATE events for trailing stop orders may arrive twice, once with `ia:false` and again with `ia:true`, so the event router must deduplicate them.
 
-Grounding and confidence: the official Event-Algo-Order-Update page could not be retrieved on 2026-09-30 (only the documentation shell). The field names come from the installed SDK model `algo_update_o.py` (`X` "Algo Status", `rm` "Algo order failed reason", `ia` "Is activated or not, only meaningful for trailing order") and the status meanings from a search summary of that page, recorded in `SOURCES.md`; verify against current Binance docs before implementation and re-confirm the status list before Phase 18.
+Grounding and confidence: the official Event-Algo-Order-Update page could not be retrieved on 2026-09-30 (only the documentation shell), and neither the Phase 18 research (2026-10-15, the tool returned the documentation landing page) nor the plan 18-01 executor (2026-10-16, every request was answered by a WAF challenge) could read it. Later on 2026-10-16 the page was read at its new location, the Algo Order Update section of the user-data-streams page, with WebFetch, as recorded in `SOURCES.md`, section "Facts read for Phase 18": the seven status values and the `NEW`, `TRIGGERING`, `TRIGGERED`, `FINISHED`, `CANCELED` and `REJECTED` meanings above follow that read, and `EXPIRED` (canceled by the system, with a GTE_GTC example) is the tool's paraphrase, not a quotation. WebFetch passes the page through a small summarising model, so the wording is not guaranteed to be character-exact. The read agrees with the earlier sources: the Phase 18 research search summary of the page (2026-10-15) and the Phase 9 transcription of an archived copy dated 2026-01-13 (`09-EXCHANGE-FACTS.md` Fact 2). The payload field table did not render, so the field names still come from the installed SDK model `algo_update_o.py` (`X` "Algo Status", `rm` "Algo order failed reason", `ia` "Is activated or not, only meaningful for trailing order"). Nothing here is verified live: the connected-machine smoke (plan 18-18) captures real events before the status list and the fields are treated as confirmed; verify against current Binance docs before implementation.
 
 ## 7. Idempotency
 
@@ -171,7 +175,7 @@ The tool must explicitly detect and support the chosen Binance position mode.
 
 Do not assume One-way Mode or Hedge Mode.
 
-Binance documents that position-mode changes have account-level restrictions and can be rejected when open orders/positions exist (error -4067 for open orders, -4068 for an open position, per the installed SDK docstring for `POST /fapi/v1/positionSide/dual`). [Binance Change Position Mode](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Change-Position-Mode) The page text itself was not retrievable on 2026-09-30; verify against current Binance docs before implementation (F-057).
+Binance documents that position-mode changes have account-level restrictions and can be rejected when open orders/positions exist (error -4067 for open orders, -4068 for an open position). [Binance Change Position Mode](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Change-Position-Mode) The page text was not retrievable on 2026-09-30 nor by the plan 18-01 executor on 2026-10-16; later on 2026-10-16 it was read at its new location (the Change Position Mode section of the REST `trade` group) with WebFetch, a small-model summary that is not character-exact (`SOURCES.md`, section "Facts read for Phase 18"): `POST /fapi/v1/positionSide/dual` has weight 1, `dualSidePosition` is required and `recvWindow` is at most 60000; after the CM migration UM and CM share the same setting, so one change flips both; the change is rejected when either side has an open order (-4067) or an open position (-4068). The Phase 18 research summary (2026-10-15) and the installed SDK docstring for the endpoint state the same. Not verified live; verify against current Binance docs before implementation (F-057).
 
 ## 9. Reconciliation loop
 

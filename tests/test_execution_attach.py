@@ -537,6 +537,73 @@ def test_existing_non_active_leg_is_unconfirmed_and_never_re_placed() -> None:
     assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
 
 
+_SEVEN_ALGO_STATUSES = (
+    "NEW",
+    "TRIGGERING",
+    "TRIGGERED",
+    "FINISHED",
+    "CANCELED",
+    "REJECTED",
+    "EXPIRED",
+)
+
+
+@pytest.mark.parametrize("status", _SEVEN_ALGO_STATUSES)
+def test_existing_sl_leg_adoption_follows_the_status_table(status: str) -> None:
+    """Plan 18-06: an existing SL found by the query-by-id probe is adopted
+    exactly when `is_protection_confirmed(status)`; otherwise attach holds
+    ENTRY_WITHOUT_PROTECTIVE and places nothing (the expectation is derived
+    from the table, not from a literal list)."""
+    from src.domain.algo_status import is_protection_confirmed
+
+    expected = _load_expected()
+    adapter = FakeExecutionAdapter(existing_algo_status={expected["sl_algo_client_id"]: status})
+    safe_mode_controller = _RecordingSafeModeController()
+    outcome = _attach(adapter, safe_mode_controller)
+
+    if is_protection_confirmed(status):
+        assert outcome.is_no_trade is False, outcome
+        assert outcome.placed_legs == ("STOP_LOSS", "TAKE_PROFIT_1", "TAKE_PROFIT_2")
+        assert [c["kwargs"]["client_algo_id"] for c in adapter.calls] == [
+            expected["tp1_algo_client_id"],
+            expected["tp2_algo_client_id"],
+        ]
+        assert safe_mode_controller.entered_reasons == []
+    else:
+        assert outcome.is_no_trade is True
+        assert outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
+        assert outcome.failure_detail == f"STOP_LOSS: existing leg status {status!r}"
+        assert outcome.placed_legs == ()
+        assert adapter.calls == []
+        assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
+
+
+@pytest.mark.parametrize("status", (*_SEVEN_ALGO_STATUSES, "", "SOMETHING_ELSE"))
+def test_sl_placement_response_confirmation_follows_the_status_table(status: str) -> None:
+    """Plan 18-06: a `place_algo_protective` response confirms the SL leg
+    exactly when `is_protection_confirmed(status)`."""
+    from src.domain.algo_status import is_protection_confirmed
+
+    class _StatusAdapter(FakeExecutionAdapter):
+        async def place_algo_protective(self, **kwargs: Any) -> Any:
+            await super().place_algo_protective(**kwargs)
+            return _algo_result(status)
+
+    adapter = _StatusAdapter()
+    safe_mode_controller = _RecordingSafeModeController()
+    outcome = _attach(adapter, safe_mode_controller)
+
+    if is_protection_confirmed(status):
+        assert outcome.is_no_trade is False, outcome
+        assert len(adapter.calls) == 3
+        assert safe_mode_controller.entered_reasons == []
+    else:
+        assert outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
+        assert outcome.placed_legs == ()
+        assert len(adapter.calls) == 1
+        assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
+
+
 def test_probe_failure_fails_closed_without_placement() -> None:
     """CR-04: an unknown probe outcome (probe raises) is unconfirmed."""
 

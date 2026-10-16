@@ -16,12 +16,20 @@ Dataclass conventions (unchanged from the order adapter this surface was split f
 When no `sdk_client` is passed, the SDK REST client is built from an explicit configuration
 with no API key and no API secret. Nothing here reads the process environment. The public
 endpoints are unsigned, so a signed request cannot originate from this class.
+
+Optional REST rate-limit gate (plan 18-10): `BinancePublicMarketData(..., rest_gate=gate)`
+runs `gate.check()` before each of its seven delegated REST calls (so a 418 ban or a 429
+pause of the process refuses them without sending) and records a 418 or 429 it meets in the
+gate, then re-raises the original exception; nothing is retried. `BinanceUsdmAdapter` passes
+its own gate, so its public delegations, including `server_time` (the drift guard's time
+source), are refused too. With the default `rest_gate=None` the behavior is unchanged (the
+data jobs, the paper runtime and the Phase 16 scripts stay ungated in Phase 18, a known gap).
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -30,6 +38,9 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from binance_common.configuration import ConfigurationRestAPI
 from binance_sdk_derivatives_trading_usds_futures import DerivativesTradingUsdsFutures
+from src.adapters.binance_errors import error_facts_from_exception
+from src.adapters.binance_ratelimit_gate import RestRateLimitGate
+from src.domain.exchange_errors import CallKind, ExchangeErrorCategory, classify
 
 log = structlog.get_logger()
 
@@ -226,6 +237,51 @@ def _row_to_mark_kline(symbol: str, interval: str, row: Sequence[Any]) -> MarkKl
 
 
 # --------------------------------------------------------------------------- #
+# REST rate-limit gate plumbing (plan 18-10), shared with the order adapter.
+# --------------------------------------------------------------------------- #
+
+_RATE_LIMIT_CATEGORIES: frozenset[ExchangeErrorCategory] = frozenset(
+    {ExchangeErrorCategory.IP_BANNED, ExchangeErrorCategory.RATE_LIMITED}
+)
+
+
+def _record_rate_limit(
+    gate: RestRateLimitGate | None, exc: BaseException, call_kind: CallKind
+) -> None:
+    """Record a 418 or 429 met by a REST call in the shared gate; any other error is left alone.
+
+    The decision uses the SDK class, the int code and the Retry-After seconds only (never
+    message text). The caller re-raises the original exception: nothing is retried.
+    """
+    if gate is None:
+        return
+    facts = error_facts_from_exception(exc)
+    category = classify(facts, call_kind)
+    if category in _RATE_LIMIT_CATEGORIES:
+        gate.record(category, facts.retry_after_seconds)
+
+
+async def _gated_rest_call[**P, R](
+    gate: RestRateLimitGate | None,
+    call_kind: CallKind,
+    func: Callable[P, R],
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> R:
+    """One REST call in a worker thread: gate check first, gate record of a 418 or 429.
+
+    Without a gate this is exactly `asyncio.to_thread(func, *args, **kwargs)`.
+    """
+    if gate is not None:
+        gate.check()
+    try:
+        return await asyncio.to_thread(func, *args, **kwargs)
+    except Exception as exc:
+        _record_rate_limit(gate, exc, call_kind)
+        raise
+
+
+# --------------------------------------------------------------------------- #
 # Adapter — public market data only.
 # --------------------------------------------------------------------------- #
 
@@ -244,12 +300,22 @@ class BinancePublicMarketData:
     etc.) so unit tests never touch the network. The order adapter passes its own client in,
     so one client serves both surfaces there; the SHADOW runtime passes nothing and gets a
     credential-free client.
+
+    `rest_gate` (optional, keyword only) is the process-wide `RestRateLimitGate`: when set,
+    every delegated REST call is refused during a 418 ban or a 429 pause and a 418 or 429 it
+    meets is recorded in the gate. None (the default) leaves the reader ungated.
     """
 
-    def __init__(self, sdk_client: DerivativesTradingUsdsFutures | None = None) -> None:
+    def __init__(
+        self,
+        sdk_client: DerivativesTradingUsdsFutures | None = None,
+        *,
+        rest_gate: RestRateLimitGate | None = None,
+    ) -> None:
         self._sdk: DerivativesTradingUsdsFutures = (
             sdk_client if sdk_client is not None else _credential_free_client()
         )
+        self._rest_gate = rest_gate
 
     # ----- klines ---------------------------------------------------------- #
 
@@ -271,7 +337,9 @@ class BinancePublicMarketData:
         directly); we run it in a worker thread so the async paginator
         can interleave multiple pages across symbols without blocking.
         """
-        response = await asyncio.to_thread(
+        response = await _gated_rest_call(
+            self._rest_gate,
+            CallKind.QUERY,
             self._sdk.rest_api.kline_candlestick_data,
             symbol=symbol,
             interval=interval,  # type: ignore[arg-type]
@@ -298,7 +366,9 @@ class BinancePublicMarketData:
         >1000; rows are 12-field lists with volume "0" (D-29). Runs in a worker
         thread like `klines`; SDK types never leave this module.
         """
-        response = await asyncio.to_thread(
+        response = await _gated_rest_call(
+            self._rest_gate,
+            CallKind.QUERY,
             self._sdk.rest_api.mark_price_kline_candlestick_data,
             symbol=symbol,
             interval=interval,  # type: ignore[arg-type]
@@ -312,7 +382,9 @@ class BinancePublicMarketData:
     # ----- open interest --------------------------------------------------- #
 
     async def open_interest(self, symbol: str) -> OiSnapshot:
-        response = await asyncio.to_thread(self._sdk.rest_api.open_interest, symbol=symbol)
+        response = await _gated_rest_call(
+            self._rest_gate, CallKind.QUERY, self._sdk.rest_api.open_interest, symbol=symbol
+        )
         oi: OpenInterestResponse = response.data()
         # Flag-never-fabricate (D-09): a missing timestamp or measurement
         # must surface loudly, never become epoch-0 or a plausible zero.
@@ -339,7 +411,9 @@ class BinancePublicMarketData:
         downstream consumers can distinguish from canonical day-one
         snapshots.
         """
-        response = await asyncio.to_thread(
+        response = await _gated_rest_call(
+            self._rest_gate,
+            CallKind.QUERY,
             self._sdk.rest_api.open_interest_statistics,
             symbol=symbol,
             period=period,  # type: ignore[arg-type]
@@ -373,7 +447,9 @@ class BinancePublicMarketData:
         end_ms: int | None = None,
         limit: int = 1000,
     ) -> list[FundingTick]:
-        response = await asyncio.to_thread(
+        response = await _gated_rest_call(
+            self._rest_gate,
+            CallKind.QUERY,
             self._sdk.rest_api.get_funding_rate_history,
             symbol=symbol,
             start_time=start_ms,
@@ -419,7 +495,9 @@ class BinancePublicMarketData:
         Lets the CLI bound a run by the exchange clock instead of the host's.
         A missing value raises: an unknown time is never defaulted.
         """
-        response = await asyncio.to_thread(self._sdk.rest_api.check_server_time)
+        response = await _gated_rest_call(
+            self._rest_gate, CallKind.TIME, self._sdk.rest_api.check_server_time
+        )
         payload = response.data()
         if payload is None or payload.server_time is None:
             raise ValueError(f"check_server_time response missing server_time: {payload!r}")
@@ -428,7 +506,9 @@ class BinancePublicMarketData:
     # ----- exchange info --------------------------------------------------- #
 
     async def exchange_info(self) -> list[SymbolFilters]:
-        response = await asyncio.to_thread(self._sdk.rest_api.exchange_information)
+        response = await _gated_rest_call(
+            self._rest_gate, CallKind.QUERY, self._sdk.rest_api.exchange_information
+        )
         info: ExchangeInformationResponse = response.data()
         out: list[SymbolFilters] = []
         drifted: list[str] = []

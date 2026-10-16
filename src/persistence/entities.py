@@ -23,6 +23,20 @@ The PostgreSQL terminal-status triggers of migration 0004 are the second line of
 against a writer that bypasses this class; `tests/test_persistence_transitions_pg.py` proves
 they match `transitions.TERMINAL_STATES`.
 
+UNKNOWN exits (Phase 18 plan 08, G4-034, D051 item i, D-08). An Order or a Position leaves
+`UNKNOWN` only with Binance evidence: `transition_order` and `transition_position` take an
+`ExitEvidence` (REST reconcile or user-data event) for that move and, after the conditional
+UPDATE, append the UNKNOWN_EXIT_EVIDENCE journal event through `PgJournalStore.append` in the
+SAME unit of work, so the status change and its evidence commit together or not at all. Missing
+evidence, or a store constructed without a journal, raises `EvidenceRequired` before anything is
+written. Evidence supplied for a move that does not start in `UNKNOWN` is a ValueError: it is
+never silently ignored.
+
+Exchange state (G4-043). `update_order_exchange_state` is the writer of an Order's
+`exchange_status` and `exchange_order_id` (the stream router of plan 18-15 is its first caller);
+it never changes `local_status`, so it also works on a terminal order. The router finds orders
+through `get_order_by_client_order_id` and `get_order_by_algo_client_id`.
+
 Precision (D-12, F-410, T-17-27). Before any write, every Decimal bound for a NUMERIC column
 must equal `quantize_for_storage(value)`, else `PrecisionError` naming the table and field (never
 the value). PostgreSQL would otherwise round a 19th fractional digit silently and the stored
@@ -51,7 +65,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -84,14 +98,17 @@ from src.domain.fill import Fill
 from src.domain.order import Order
 from src.domain.position import Position
 from src.domain.signal import Signal
+from src.domain.stream_records import ExitEvidence, exit_evidence_event
 from src.domain.trade_plan import TradePlan
 from src.domain.transitions import TransitionKind, assert_transition
 from src.persistence.errors import (
+    EvidenceRequired,
     ParentRowMissing,
     PersistenceError,
     PrecisionError,
     RowConflict,
 )
+from src.persistence.journal import PgJournalStore
 from src.persistence.uow import OperationalDatabase
 
 _SQLSTATE_FOREIGN_KEY_VIOLATION = "23503"
@@ -292,8 +309,41 @@ def _apply[E, R](
 class PgTradingEntityStore:
     """Signal, TradePlan, Order, Fill and Position persistence with DOMN-04 enforcement."""
 
-    def __init__(self, db: OperationalDatabase) -> None:
+    def __init__(self, db: OperationalDatabase, *, journal: PgJournalStore | None = None) -> None:
         self._db = db
+        self._journal = journal
+
+    def _exit_journal(
+        self,
+        label: str,
+        entity_id: str,
+        leaving_unknown: bool,
+        evidence: ExitEvidence | None,
+    ) -> PgJournalStore | None:
+        """The journal that records an UNKNOWN exit, or None for any other move (G4-034).
+
+        Raises:
+            EvidenceRequired: an UNKNOWN exit without evidence, or this store has no journal.
+            ValueError: evidence was supplied for a move that does not leave UNKNOWN.
+            TypeError: `evidence` is not an `ExitEvidence`.
+        """
+        if evidence is not None and not isinstance(evidence, ExitEvidence):
+            raise TypeError(f"evidence must be ExitEvidence, got {type(evidence).__name__}")
+        if not leaving_unknown:
+            if evidence is not None:
+                raise ValueError(
+                    f"{label} {entity_id}: evidence is only accepted for a move out of UNKNOWN"
+                )
+            return None
+        if evidence is None:
+            raise EvidenceRequired(
+                f"{label} {entity_id}: leaving UNKNOWN requires Binance evidence"
+            )
+        if self._journal is None:
+            raise EvidenceRequired(
+                f"{label} {entity_id}: leaving UNKNOWN requires a journal to record the evidence"
+            )
+        return self._journal
 
     @contextmanager
     def _unit(self, tx: Session | None) -> Iterator[Session]:
@@ -390,6 +440,81 @@ class PgTradingEntityStore:
             row = _fetch(session, _ORDER, order_id)
             return None if row is None else _ORDER.from_row(row)
 
+    def get_order_by_client_order_id(
+        self, client_order_id: str, *, tx: Session | None = None
+    ) -> Order | None:
+        """The order holding this `client_order_id`, or None (partial unique index: at most one)."""
+        return self._get_order_by(OrderRow.client_order_id, client_order_id, "client_order_id", tx)
+
+    def get_order_by_algo_client_id(
+        self, algo_client_id: str, *, tx: Session | None = None
+    ) -> Order | None:
+        """The order holding this `algo_client_id`, or None (partial unique index: at most one)."""
+        return self._get_order_by(OrderRow.algo_client_id, algo_client_id, "algo_client_id", tx)
+
+    def _get_order_by(self, column: Any, value: str, name: str, tx: Session | None) -> Order | None:
+        if not isinstance(value, str) or value == "":
+            raise ValueError(f"{name} must be a non-empty string")
+        with self._unit(tx) as session:
+            stmt: Any = (
+                select(OrderRow).where(column == value).execution_options(populate_existing=True)
+            )
+            row: OrderRow | None = session.execute(stmt).scalar_one_or_none()
+            return None if row is None else _ORDER.from_row(row)
+
+    def update_order_exchange_state(
+        self,
+        order_id: str,
+        *,
+        exchange_status: str,
+        exchange_order_id: str | None = None,
+        now_utc: datetime,
+        tx: Session | None = None,
+    ) -> Order:
+        """Record the exchange's view of an order (G4-043); `local_status` is never touched.
+
+        Sets `exchange_status` and `updated_at_utc`; sets `exchange_order_id` when none is stored
+        and keeps the stored one when the argument is None. Works on a terminal order: the
+        migration 0004 trigger guards `local_status` only, and this method writes the same
+        `local_status` back through the conditional UPDATE. An unchanged state is an idempotent
+        no-op returning the stored order.
+
+        Raises:
+            ValueError: `exchange_status` is empty or longer than 32 characters, or
+                `exchange_order_id` is empty or longer than 64 characters.
+            RowConflict: the order does not exist, or a DIFFERENT exchange order id is stored.
+        """
+        if not isinstance(exchange_status, str) or not 0 < len(exchange_status) <= 32:
+            raise ValueError("exchange_status must be a non-empty string of at most 32 characters")
+        if exchange_order_id is not None and (
+            not isinstance(exchange_order_id, str) or not 0 < len(exchange_order_id) <= 64
+        ):
+            raise ValueError(
+                "exchange_order_id must be None or a non-empty string of at most 64 characters"
+            )
+        if now_utc.tzinfo is None or now_utc.utcoffset() != timedelta(0):
+            raise ValueError("now_utc must be a UTC-aware datetime")
+        with self._unit(tx) as session:
+            row = _lock(session, _ORDER, order_id)
+            stored_id = row.exchange_order_id
+            if (
+                exchange_order_id is not None
+                and stored_id is not None
+                and stored_id != exchange_order_id
+            ):
+                raise RowConflict(
+                    f"order {order_id}: a different exchange_order_id is already stored"
+                )
+            new_id = stored_id if exchange_order_id is None else exchange_order_id
+            if row.exchange_status == exchange_status and new_id == stored_id:
+                return _ORDER.from_row(row)
+            changes: dict[str, Any] = {
+                "exchange_status": exchange_status,
+                "exchange_order_id": new_id,
+                "updated_at_utc": now_utc,
+            }
+            return _apply(session, _ORDER, order_id, "local_status", row.local_status, changes)
+
     def transition_order(
         self,
         order_id: str,
@@ -397,13 +522,26 @@ class PgTradingEntityStore:
         *,
         now_utc: datetime,
         tx: Session | None = None,
+        evidence: ExitEvidence | None = None,
     ) -> Order:
-        """Move an order along the DOMN-04 table; CANCELED also sets `canceled_at_utc`."""
+        """Move an order along the DOMN-04 table; CANCELED also sets `canceled_at_utc`.
+
+        A move out of UNKNOWN needs `evidence` and journals it in the same transaction.
+
+        Raises:
+            EvidenceRequired: leaving UNKNOWN without evidence or without a journal.
+            ValueError: evidence for a move that does not start in UNKNOWN.
+            IllegalTransition: the move is not in the table; nothing is written.
+            JournalConflict: the evidence id already holds a different event; rolled back.
+        """
         with self._unit(tx) as session:
             row = _lock(session, _ORDER, order_id)
             old_status = OrderStatus(row.local_status)
             if old_status is new_status:
                 return _ORDER.from_row(row)
+            journal = self._exit_journal(
+                _ORDER.label, order_id, old_status is OrderStatus.UNKNOWN, evidence
+            )
             assert_transition(TransitionKind.ORDER, old_status, new_status)
             changes: dict[str, Any] = {
                 "local_status": new_status.value,
@@ -411,7 +549,23 @@ class PgTradingEntityStore:
             }
             if new_status is OrderStatus.CANCELED:
                 changes["canceled_at_utc"] = now_utc
-            return _apply(session, _ORDER, order_id, "local_status", old_status.value, changes)
+            out: Order = _apply(
+                session, _ORDER, order_id, "local_status", old_status.value, changes
+            )
+            if journal is not None and evidence is not None:
+                journal.append(
+                    session,
+                    exit_evidence_event(
+                        entity_type="ORDER",
+                        entity_id=order_id,
+                        from_status=old_status.value,
+                        to_status=new_status.value,
+                        evidence=evidence,
+                        now_utc=now_utc,
+                        order_id=order_id,
+                    ),
+                )
+            return out
 
     # -------------------------------------------------------------------- fills
 
@@ -495,18 +649,42 @@ class PgTradingEntityStore:
         *,
         now_utc: datetime,
         tx: Session | None = None,
+        evidence: ExitEvidence | None = None,
     ) -> Position:
-        """Move a position along the DOMN-04 table; CLOSED also sets `closed_at_utc`."""
+        """Move a position along the DOMN-04 table; CLOSED also sets `closed_at_utc`.
+
+        A move out of UNKNOWN needs `evidence` and journals it in the same transaction, exactly
+        as `transition_order` does (same exceptions).
+        """
         with self._unit(tx) as session:
             row = _lock(session, _POSITION, position_id)
             old_status = PositionStatus(row.status)
             if old_status is new_status:
                 return _POSITION.from_row(row)
+            journal = self._exit_journal(
+                _POSITION.label, position_id, old_status is PositionStatus.UNKNOWN, evidence
+            )
             assert_transition(TransitionKind.POSITION, old_status, new_status)
             changes: dict[str, Any] = {"status": new_status.value, "updated_at_utc": now_utc}
             if new_status is PositionStatus.CLOSED:
                 changes["closed_at_utc"] = now_utc
-            return _apply(session, _POSITION, position_id, "status", old_status.value, changes)
+            out: Position = _apply(
+                session, _POSITION, position_id, "status", old_status.value, changes
+            )
+            if journal is not None and evidence is not None:
+                journal.append(
+                    session,
+                    exit_evidence_event(
+                        entity_type="POSITION",
+                        entity_id=position_id,
+                        from_status=old_status.value,
+                        to_status=new_status.value,
+                        evidence=evidence,
+                        now_utc=now_utc,
+                        position_id=position_id,
+                    ),
+                )
+            return out
 
 
 __all__ = ["PgTradingEntityStore"]

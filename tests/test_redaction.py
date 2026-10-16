@@ -378,3 +378,55 @@ def test_redaction_module_imports_only_stdlib_and_structlog() -> None:
         else:
             continue
         assert not roots & banned
+
+
+# --------------------------------------------------------------------------- #
+# Plan 18-04 - runtime-registered secrets and the listenKey rules (added cases only).
+# --------------------------------------------------------------------------- #
+
+
+def test_listenkey_names_are_secret_key_name_parts() -> None:
+    assert "listenkey" in redaction.SECRET_KEY_NAME_PARTS
+    assert "listen_key" in redaction.SECRET_KEY_NAME_PARTS
+
+
+def test_listenkey_key_names_are_masked_in_nested_structlog_values() -> None:
+    buffer = io.StringIO()
+    configure_logging(environ={}, stream=buffer)
+    structlog.get_logger().info("ws", payload={"listenKey": "abc", "e": "ORDER_TRADE_UPDATE"})
+    record = json.loads(buffer.getvalue().strip().splitlines()[-1])
+    assert record["payload"] == {"listenKey": "[REDACTED]", "e": "ORDER_TRADE_UPDATE"}
+
+
+def test_listenkey_query_shape_needs_24_characters() -> None:
+    configure_logging(environ={}, stream=io.StringIO())
+    long_value = secrets.token_hex(12)
+    assert scrub(f"listenKey={long_value}") == "listenKey=[REDACTED]"
+    assert scrub("listenKey=short") == "listenKey=short"
+
+
+def test_runtime_secret_is_merged_into_a_configured_redactor() -> None:
+    planted = secrets.token_hex(16)
+    env_secret = secrets.token_hex(16)
+    configure_logging(environ={"X_PASSWORD": env_secret}, stream=io.StringIO())
+    try:
+        redaction.register_runtime_secret(planted)
+        redaction.register_runtime_secret(planted)
+        cleaned = scrub(f"a {planted} b {env_secret} c {quote(planted + '/x', safe='')}")
+        _no_leak(planted, cleaned)
+        _no_leak(env_secret, cleaned)
+        assert cleaned.startswith("a [REDACTED] b [REDACTED] c ")
+    finally:
+        redaction.clear_runtime_secrets()
+    assert planted in scrub(f"a {planted} b")
+
+
+def test_runtime_secret_containing_an_environment_secret_is_masked_whole() -> None:
+    env_secret = secrets.token_hex(8)
+    runtime = "pre" + env_secret + secrets.token_hex(8)
+    configure_logging(environ={"X_PASSWORD": env_secret}, stream=io.StringIO())
+    try:
+        redaction.register_runtime_secret(runtime)
+        assert scrub(f"<{runtime}>") == "<[REDACTED]>"
+    finally:
+        redaction.clear_runtime_secrets()

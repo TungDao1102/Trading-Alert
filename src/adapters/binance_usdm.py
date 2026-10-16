@@ -57,7 +57,9 @@ re-verification policy):
   | place_algo_protective       | new_algo_order(algo_type, symbol, side, type, position_side, trigger_price, close_position, working_type, client_algo_id) | 17.4.0: no signature change; algoType=CONDITIONAL required; closePosition=true mutually exclusive with quantity/reduceOnly; working_type MARK_PRICE for SL/TP triggers.  # noqa: E501
   | query_order_by_client       | query_order(symbol, orig_client_order_id) | 17.4.0: no signature change; `symbol` required, `order_id` / `orig_client_order_id` optional — populate `orig_client_order_id` for no-blind-recovery probe (EXECUTION_SPEC §10).  # noqa: E501
   | get_position_mode           | get_current_position_mode(recv_window) | 17.4.0: no signature change; returns dual_side_position bool (True=hedge, False=one-way); re-checked at placement time per D-02.  # noqa: E501
-  | user_commission_rate       | user_commission_rate(symbol, recv_window) | 17.4.0: `symbol` required, `recv_window` Optional (left to the SDK default); returns UserCommissionRateResponse with Optional str fields (symbol, makerCommissionRate, takerCommissionRate, rpiCommissionRate); strict parse, unknown raises, never zero (Phase 12, D-11).  # noqa: E501
+  | __init__(sdk_client, *, rest_gate, sleep) | (no SDK call) | plan 18-10: `rest_gate` is the process-wide RestRateLimitGate (checked before every REST call, records a 418 or 429; also handed to the inner BinancePublicMarketData); `sleep` serves only the waits of the STATUS_UNKNOWN cancel retry.  # noqa: E501
+  | __init__(..., signed_call_policy, drift_guard, clock, on_clock_skew) | (no SDK call) | plan 18-13: every signed method in this table passes `recv_window=signed_call_policy.recv_window_ms` explicitly through the one helper `_sdk_call` (all eleven SDK methods have a `recv_window` parameter in 17.4.0, pinned offline by tests/test_binance_usdm_signed_calls.py); no policy -> SignedCallPolicyMissing before any SDK call; a configured drift guard blocks `place_entry` only (EntriesBlocked); -1021 calls `on_clock_skew` once and is never retried.  # noqa: E501
+  | user_commission_rate       | user_commission_rate(symbol, recv_window) | 17.4.0: `symbol` required (passed by keyword), `recv_window` explicit (plan 18-13); returns UserCommissionRateResponse with Optional str fields (symbol, makerCommissionRate, takerCommissionRate, rpiCommissionRate); strict parse, unknown raises, never zero (Phase 12, D-11).  # noqa: E501
 
 The 17.3.1 -> 17.4.0 changelog (per RESEARCH Open Question 2): the
 Delta closed during 08-04 was "no public REST method-signature change
@@ -72,8 +74,7 @@ follow the same posture: no signature change in the four new methods.
 from __future__ import annotations
 
 import asyncio
-import re
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -87,6 +88,9 @@ from binance_sdk_derivatives_trading_usds_futures import (
     RateLimitBanError,
     TooManyRequestsError,
 )
+from src.adapters.binance_clock import ClockDriftGuard, DriftBlockReason
+from src.adapters.binance_errors import error_facts_from_exception
+from src.adapters.binance_limits import SignedCallPolicy
 from src.adapters.binance_public import (
     BinancePublicMarketData,
     _ms_to_utc,
@@ -98,6 +102,13 @@ from src.adapters.binance_public import OiSnapshot as OiSnapshot
 from src.adapters.binance_public import SymbolFilters as SymbolFilters
 from src.adapters.binance_public import _row_to_kline as _row_to_kline
 from src.adapters.binance_public import _row_to_mark_kline as _row_to_mark_kline
+from src.adapters.binance_ratelimit_gate import RestGateRefusal, RestRateLimitGate
+from src.domain.exchange_errors import (
+    CallKind,
+    ExchangeErrorCategory,
+    classify,
+    retry_eligible,
+)
 
 log = structlog.get_logger()
 
@@ -120,6 +131,12 @@ if TYPE_CHECKING:
 # turn an orphan protective into a flood of duplicate exchange
 # requests. The ceilings below are module-level named constants so the
 # operator can audit them before live enablement, never mid-run.
+#
+# Plan 18-10: they bound the STATUS_UNKNOWN cancel retry only (5xx, 408,
+# network errors, -1006, -1007). A 429, a 418, a definitive rejection, an
+# auth error or an unknown error is never retried (user record
+# 18-DEC-O-18-01.md, amendment 2026-10-16: a cancel that meets a 429 fails
+# at once and is left to reconciliation).
 # --------------------------------------------------------------------------- #
 
 _RECONCILER_CANCEL_MAX_ATTEMPTS: int = 3
@@ -142,43 +159,77 @@ _RECONCILER_CANCEL_WAIT_MAX_SECONDS: int = 10
 # --------------------------------------------------------------------------- #
 
 
-def _is_transient_reconcile(exc: BaseException) -> bool:
-    """Retry transient faults only; fail closed on programming errors.
+# --------------------------------------------------------------------------- #
+# Signed calls (plan 18-13, D-14, F-505).
+#
+# Every signed SDK call goes through `BinanceUsdmAdapter._sdk_call`, which
+# forwards the ratified `SignedCallPolicy.recv_window_ms` explicitly (no
+# exchange default decides the replay window), runs the shared REST gate check
+# first, records a 418 or 429 in the gate and notifies the optional -1021 hook.
+# It never retries and never sleeps for any category.
+# --------------------------------------------------------------------------- #
 
-    Mirrors the precedent in `src/paper/resync.py` (lines 177-179):
-    programming errors (`ValueError`, `KeyError`, `TypeError`) fail
-    immediately instead of burning the bounded retry budget and
-    masking deterministic faults as transient.
+_RATE_LIMIT_CATEGORIES: frozenset[ExchangeErrorCategory] = frozenset(
+    {ExchangeErrorCategory.IP_BANNED, ExchangeErrorCategory.RATE_LIMITED}
+)
+
+
+class SignedCallPolicyMissing(Exception):  # noqa: N818 - a refusal, not an error of the caller
+    """A signed call refused before the gate and the SDK: no `SignedCallPolicy` is configured.
+
+    Fail closed (D-14): without the ratified recvWindow a signed request would silently use
+    the exchange default, a replay window nobody chose.
     """
-    return not isinstance(exc, (ValueError, KeyError, TypeError))
+
+    def __init__(self) -> None:
+        super().__init__(
+            "signed call refused before sending: no SignedCallPolicy configured "
+            "(the recvWindow must be explicit)"
+        )
 
 
-# Binance codes meaning "this order is not there": -2013 NO_SUCH_ORDER ("Order does not
-# exist.") is what the Demo host returned for GET /fapi/v1/algoOrder with a missing client id
-# (read-only probe 2026-10-05); -2011 is the documented cancel-path code. Mapping a code to
-# not-found enables a retry, so only these two are accepted and everything else raises.
-_NOT_FOUND_CODES: frozenset[int] = frozenset({-2013, -2011})
-_NOT_FOUND_MESSAGE = re.compile(r"(?<!\d)-(?:2013|2011)(?!\d)")
+class EntriesBlocked(Exception):  # noqa: N818 - a refusal, not an error of the caller
+    """A new entry refused before sending because the clock-drift guard blocks entries.
+
+    `reason` is the guard's `DriftBlockReason` (never measured, measurement failed, out of
+    limits, stale). Protective orders, cancels, queries and snapshots are never blocked by
+    the drift guard.
+    """
+
+    def __init__(self, reason: DriftBlockReason) -> None:
+        self.reason = reason
+        super().__init__(f"new entry refused before sending: clock drift guard {reason}")
+
+
+def _is_order_absent(exc: BaseException, call_kind: CallKind) -> bool:
+    """True only for the taxonomy category ORDER_ABSENT of `call_kind` (D-10).
+
+    The decision uses the SDK class, the int Binance code and the call kind only
+    (`src/domain/exchange_errors.py`): -2013 NO_SUCH_ORDER (Demo-observed for GET
+    /fapi/v1/algoOrder) and -2011 on a QUERY or a CANCEL. Exception message text is never
+    read, so a non-SDK exception, a missing or unlisted code, a 5xx or a network error is
+    never "absent" (08-REVIEW IN-10): a wrong "absent" enables a duplicate order.
+    """
+    category = classify(error_facts_from_exception(exc), call_kind)
+    return category is ExchangeErrorCategory.ORDER_ABSENT
 
 
 def _is_order_not_found_error(exc: BaseException) -> bool:
-    """True only for a definitive "order does not exist" answer from the exchange.
-
-    The SDK's `BadRequestError` carries the Binance code in an int `status_code`; when one is
-    present it alone decides. Only an error with no int code (fakes, older wrappers) falls
-    back to the code or `UNKNOWN_ORDER` text in the message.
-    """
-    code = getattr(exc, "status_code", None)
-    if isinstance(code, int) and not isinstance(code, bool):
-        return code in _NOT_FOUND_CODES
-    message = str(exc)
-    return "UNKNOWN_ORDER" in message or _NOT_FOUND_MESSAGE.search(message) is not None
+    """True only for ORDER_ABSENT of a QUERY call; every other error must raise."""
+    return _is_order_absent(exc, CallKind.QUERY)
 
 
 def _cancel_retry_predicate(exc: BaseException) -> bool:
-    if _is_already_canceled_message(str(exc)):
+    """True only for a STATUS_UNKNOWN cancel failure (`retry_eligible(category, CANCEL)`).
+
+    A refusal of the shared REST gate (a ban or a pause set meanwhile by any holder) is
+    never retried; neither is a 429, a 418, ORDER_ABSENT, a definitive rejection, an auth
+    error, an unknown code or a non-SDK exception (programming errors included).
+    """
+    if isinstance(exc, RestGateRefusal):
         return False
-    return _is_transient_reconcile(exc)
+    category = classify(error_facts_from_exception(exc), CallKind.CANCEL)
+    return retry_eligible(category, CallKind.CANCEL)
 
 
 # --------------------------------------------------------------------------- #
@@ -458,11 +509,13 @@ def is_rate_limit_ban_error(exc: BaseException) -> bool:
 
 
 def rate_limit_retry_after_seconds(exc: BaseException) -> int | None:
-    """Whole seconds from the `Retry-After` header carried by a 429, else None."""
-    value = getattr(exc, "retry_after", None)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        return None
-    return value
+    """Whole seconds from the `Retry-After` header carried by a 429 or a 418, else None.
+
+    Delegates to the shared SDK normalizer (`src/adapters/binance_errors.py`) so both agree:
+    a bool, a negative or a non-int value, and any exception that is not the SDK's 418 or
+    429 class, give None.
+    """
+    return error_facts_from_exception(exc).retry_after_seconds
 
 
 # Binance error code for an unknown symbol (`-1121 Invalid symbol.`). The SDK
@@ -493,11 +546,149 @@ class BinanceUsdmAdapter:
     Tests inject a fake `sdk_client` (any object exposing
     `rest_api.kline_candlestick_data` etc.) so unit tests never touch the
     network.
+
+    `rest_gate` (keyword only) is the process-wide `RestRateLimitGate` (plan
+    18-10): every call that reaches `self._sdk.rest_api` runs `rest_gate.check()`
+    first (also before every attempt of the STATUS_UNKNOWN cancel retry) and a
+    418 or 429 it meets is recorded in the gate, then the original exception is
+    re-raised; nothing is retried because of a 418 or a 429. The inner
+    `BinancePublicMarketData` gets the same gate, so the public delegations
+    (`server_time` included) are refused during a ban or a pause too. Without a
+    gate the public delegations are neither refused nor recorded and a 418 or
+    429 raises after one call; the signed methods cannot run without a gate
+    (plan 18-13: a signed policy requires it). No wait exists in this module (the ban and pause lengths are the user's,
+    held by the gate's `RateLimitPolicy`).
+
+    `sleep` (keyword only, default `asyncio.sleep`) serves only the waits of
+    the STATUS_UNKNOWN cancel retry, so tests inject a recording sleep.
+
+    `signed_call_policy` (keyword only, plan 18-13) is the ratified
+    `SignedCallPolicy` loaded from the limits file: every signed SDK call
+    carries `recv_window=signed_call_policy.recv_window_ms`. Without it every
+    signed method raises `SignedCallPolicyMissing` before the gate check and
+    before the SDK is touched (fail closed); the public-data delegations carry
+    no recvWindow and are unaffected. A policy requires `rest_gate`, and the
+    gate's policy must equal `signed_call_policy.rate_limit` (ValueError).
+
+    `drift_guard` and `clock` (keyword only): when a `ClockDriftGuard` is
+    given, `place_entry` raises `EntriesBlocked` before any SDK call while
+    `drift_guard.entries_allowed(clock())` is False. Protective placement,
+    cancels, queries and snapshots never consult the guard. A guard requires
+    a clock (ValueError).
+
+    `on_clock_skew` (keyword only): called once when a signed call answers
+    -1021 (CLOCK_SKEW), e.g. `ClockDriftGuard.note_clock_skew_error`; the
+    original exception is re-raised and the call is never retried (D-14).
     """
 
-    def __init__(self, sdk_client: DerivativesTradingUsdsFutures | None = None) -> None:
+    def __init__(
+        self,
+        sdk_client: DerivativesTradingUsdsFutures | None = None,
+        *,
+        rest_gate: RestRateLimitGate | None = None,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+        signed_call_policy: SignedCallPolicy | None = None,
+        drift_guard: ClockDriftGuard | None = None,
+        clock: Callable[[], datetime] | None = None,
+        on_clock_skew: Callable[[], None] | None = None,
+    ) -> None:
+        if signed_call_policy is not None:
+            if not isinstance(signed_call_policy, SignedCallPolicy):
+                raise TypeError("signed_call_policy must be a SignedCallPolicy")
+            if rest_gate is None:
+                raise ValueError(
+                    "signed_call_policy requires rest_gate: signed calls use the one "
+                    "process-wide RestRateLimitGate"
+                )
+            if rest_gate.policy != signed_call_policy.rate_limit:
+                raise ValueError(
+                    "rest_gate.policy must equal signed_call_policy.rate_limit "
+                    "(one ratified rate-limit policy per process)"
+                )
+        if drift_guard is not None:
+            if not isinstance(drift_guard, ClockDriftGuard):
+                raise TypeError("drift_guard must be a ClockDriftGuard")
+            if clock is None:
+                raise ValueError("drift_guard requires clock (an aware-UTC clock callable)")
+        if on_clock_skew is not None and not callable(on_clock_skew):
+            raise TypeError("on_clock_skew must be callable")
         self._sdk: DerivativesTradingUsdsFutures = sdk_client or DerivativesTradingUsdsFutures()
-        self._public = BinancePublicMarketData(sdk_client=self._sdk)
+        self._rest_gate = rest_gate
+        self._sleep: Callable[[float], Awaitable[None]] = (
+            sleep if sleep is not None else asyncio.sleep
+        )
+        self._signed_call_policy = signed_call_policy
+        self._drift_guard = drift_guard
+        self._clock = clock
+        self._on_clock_skew = on_clock_skew
+        self._public = BinancePublicMarketData(sdk_client=self._sdk, rest_gate=rest_gate)
+
+    def _require_signed_policy(self) -> tuple[SignedCallPolicy, RestRateLimitGate]:
+        """The policy and the shared gate of a signed call, or `SignedCallPolicyMissing`."""
+        policy = self._signed_call_policy
+        gate = self._rest_gate
+        if policy is None or gate is None:
+            raise SignedCallPolicyMissing()
+        return policy, gate
+
+    def _require_entries_allowed(self) -> None:
+        """Raise `EntriesBlocked` while the configured drift guard blocks new entries."""
+        guard = self._drift_guard
+        if guard is None:
+            return
+        if self._clock is None:  # pragma: no cover - the constructor refuses it
+            raise ValueError("drift_guard requires clock")
+        now = self._clock()
+        if guard.entries_allowed(now):
+            return
+        reason = guard.blocked_reason(now)
+        if reason is None:  # pragma: no cover - entries_allowed means blocked_reason is None
+            raise RuntimeError("drift guard disagreed with itself")
+        raise EntriesBlocked(reason)
+
+    async def _sdk_call[R](self, call_kind: CallKind, method: Callable[..., R], **kwargs: Any) -> R:
+        """The one path of every signed SDK call (plan 18-13).
+
+        In order: refuse without a policy (`SignedCallPolicyMissing`, nothing checked or
+        sent); run the shared gate check (a ban or a pause refuses unchanged, nothing sent);
+        run `method(recv_window=<policy value>, **kwargs)` in a worker thread. On an
+        exception: classify it with `call_kind`; record a 418 or 429 in the gate; call the
+        -1021 hook once for CLOCK_SKEW (a hook failure is logged by type name only); then
+        re-raise the ORIGINAL exception object. Never retries, never sleeps.
+        """
+        policy, gate = self._require_signed_policy()
+        gate.check()
+        try:
+            return await asyncio.to_thread(method, recv_window=policy.recv_window_ms, **kwargs)
+        except Exception as exc:
+            facts = error_facts_from_exception(exc)
+            category = classify(facts, call_kind)
+            if category in _RATE_LIMIT_CATEGORIES:
+                gate.record(category, facts.retry_after_seconds)
+            elif category is ExchangeErrorCategory.CLOCK_SKEW and self._on_clock_skew is not None:
+                try:
+                    self._on_clock_skew()
+                except Exception as hook_exc:  # noqa: BLE001 - never replaces the original
+                    log.error(
+                        "adapter.signed_call.on_clock_skew_failed",
+                        call_kind=call_kind.value,
+                        error_class=type(hook_exc).__name__,
+                    )
+            raise
+
+    def _cancel_retrying(self) -> tenacity.AsyncRetrying:
+        """The bounded STATUS_UNKNOWN cancel retry (the four `_RECONCILER_CANCEL_*` ceilings)."""
+        return tenacity.AsyncRetrying(
+            retry=tenacity.retry_if_exception(_cancel_retry_predicate),
+            stop=tenacity.stop_after_attempt(_RECONCILER_CANCEL_MAX_ATTEMPTS)
+            | tenacity.stop_after_delay(_RECONCILER_CANCEL_MAX_DELAY_SECONDS),
+            wait=tenacity.wait_random_exponential(
+                multiplier=_RECONCILER_CANCEL_WAIT_MULTIPLIER_SECONDS,
+                max=_RECONCILER_CANCEL_WAIT_MAX_SECONDS,
+            ),
+            sleep=self._sleep,
+            reraise=True,
+        )
 
     # ----- klines ---------------------------------------------------------- #
 
@@ -583,7 +774,8 @@ class BinanceUsdmAdapter:
                 recommends the symbol-scoped call to avoid heavy
                 responses on busy accounts).
         """
-        response = await asyncio.to_thread(
+        response = await self._sdk_call(
+            CallKind.QUERY,
             self._sdk.rest_api.current_all_open_orders,
             symbol=symbol,
         )
@@ -608,7 +800,8 @@ class BinanceUsdmAdapter:
         with the canonical `client_algo_id` preserved for the sweeper's
         query-by-ID cancel posture.
         """
-        response = await asyncio.to_thread(
+        response = await self._sdk_call(
+            CallKind.QUERY,
             self._sdk.rest_api.current_all_algo_open_orders,
             symbol=symbol,
         )
@@ -634,7 +827,8 @@ class BinanceUsdmAdapter:
         and including it would poison the three-source compare with a
         phantom truth row that has no matching local intent.
         """
-        response = await asyncio.to_thread(
+        response = await self._sdk_call(
+            CallKind.QUERY,
             self._sdk.rest_api.position_information_v3,
             symbol=symbol,
         )
@@ -663,13 +857,15 @@ class BinanceUsdmAdapter:
         # client_algo_id — we always populate the client side because
         # the deterministic-ID derivation guarantees uniqueness.
         try:
-            response = await asyncio.to_thread(
+            response = await self._sdk_call(
+                CallKind.QUERY,
                 self._sdk.rest_api.query_algo_order,
                 client_algo_id=client_algo_id,
             )
         except Exception as exc:  # noqa: BLE001 - SDK wraps unknown codes
-            # Demo answers a missing algo order with -2013 "Order does not
-            # exist." (observed); -2011 is kept for the cancel-path form.
+            # Only ORDER_ABSENT of a QUERY (-2013, observed on Demo, or -2011
+            # as the int code of an SDK 400/404) is "not found"; everything
+            # else, a gate refusal included, raises (fail closed).
             if _is_order_not_found_error(exc):
                 return AlgoOrderProbe(
                     client_algo_id=client_algo_id,
@@ -690,14 +886,15 @@ class BinanceUsdmAdapter:
         """Cancel one open normal order by its deterministic client_order_id.
 
         Per T-8-32 + EXECUTION_SPEC 10: query-by-ID-first posture (the
-        sweeper does the probe before calling cancel), bounded-batch
-        retry mirroring the notify precedent. The cancel is idempotent
-        on retries because `orig_client_order_id` is the deterministic
-        36-char ID from `derive_client_order_id`.
+        sweeper does the probe before calling cancel). Only a
+        STATUS_UNKNOWN failure is retried, within the four
+        `_RECONCILER_CANCEL_*` ceilings; every attempt passes the shared
+        REST gate first. The cancel is idempotent on retries because
+        `orig_client_order_id` is the deterministic 36-char ID from
+        `derive_client_order_id`.
 
-        Never raises on "already canceled" — the SDK normalizes that
-        as a generic API error with code -2011, which we treat as
-        success (the post-condition the caller wanted is satisfied).
+        ORDER_ABSENT of a CANCEL (-2011 or -2013 as the int code of an SDK
+        400/404) is success: the post-condition the caller wanted holds.
 
         Args:
             symbol: The trading pair (Binance requires it).
@@ -705,21 +902,14 @@ class BinanceUsdmAdapter:
                 minted by `derive_client_order_id`.
 
         Raises:
-            Any non-canceled-already SDK error after bounded retries
-            are exhausted.
+            A 429, a 418, a gate refusal, a definitive rejection, an auth
+            error or an unknown error after one SDK call; a STATUS_UNKNOWN
+            error after the bounded retries are exhausted.
         """
-        retry = tenacity.retry_if_exception(_cancel_retry_predicate)
-        stop = tenacity.stop_after_attempt(
-            _RECONCILER_CANCEL_MAX_ATTEMPTS
-        ) | tenacity.stop_after_delay(_RECONCILER_CANCEL_MAX_DELAY_SECONDS)
-        wait = tenacity.wait_random_exponential(
-            multiplier=_RECONCILER_CANCEL_WAIT_MULTIPLIER_SECONDS,
-            max=_RECONCILER_CANCEL_WAIT_MAX_SECONDS,
-        )
-        decorator = tenacity.AsyncRetrying(retry=retry, stop=stop, wait=wait, reraise=True)
 
         async def _do_cancel() -> CancelOrderResponse:
-            response = await asyncio.to_thread(
+            response = await self._sdk_call(
+                CallKind.CANCEL,
                 self._sdk.rest_api.cancel_order,
                 symbol=symbol,
                 orig_client_order_id=orig_client_order_id,
@@ -727,7 +917,7 @@ class BinanceUsdmAdapter:
             return response.data()
 
         async def _do_cancel_with_retry() -> CancelOrderResponse:
-            async for attempt in decorator:
+            async for attempt in self._cancel_retrying():
                 with attempt:
                     return await _do_cancel()
             raise RuntimeError("unreachable: tenacity.AsyncRetrying exhausted without reraise")
@@ -735,11 +925,13 @@ class BinanceUsdmAdapter:
         try:
             await _do_cancel_with_retry()
         except Exception as exc:  # noqa: BLE001 - SDK wraps unknown codes
-            if _is_already_canceled_message(str(exc)):
+            if _is_order_absent(exc, CallKind.CANCEL):
                 log.info(
                     "adapter.cancel_normal_order.already_canceled",
                     symbol=symbol,
                     orig_client_order_id=orig_client_order_id,
+                    error_class=type(exc).__name__,
+                    code=error_facts_from_exception(exc).code,
                 )
                 return
             raise
@@ -752,8 +944,11 @@ class BinanceUsdmAdapter:
     ) -> None:
         """Cancel one open algo order by its deterministic client_algo_id.
 
-        Per T-8-32 + EXECUTION_SPEC 10: query-by-ID-first posture, bounded
-        retry, idempotent on retries. Treats already-canceled as success.
+        Per T-8-32 + EXECUTION_SPEC 10: query-by-ID-first posture,
+        idempotent on retries. Only a STATUS_UNKNOWN failure is retried,
+        within the four `_RECONCILER_CANCEL_*` ceilings, every attempt
+        passing the shared REST gate first. ORDER_ABSENT of a CANCEL is
+        success.
 
         Args:
             symbol: The trading pair (Binance requires it).
@@ -761,28 +956,21 @@ class BinanceUsdmAdapter:
                 `derive_algo_client_id`.
 
         Raises:
-            Any non-canceled-already SDK error after bounded retries
-            are exhausted.
+            A 429, a 418, a gate refusal, a definitive rejection, an auth
+            error or an unknown error after one SDK call; a STATUS_UNKNOWN
+            error after the bounded retries are exhausted.
         """
-        retry = tenacity.retry_if_exception(_cancel_retry_predicate)
-        stop = tenacity.stop_after_attempt(
-            _RECONCILER_CANCEL_MAX_ATTEMPTS
-        ) | tenacity.stop_after_delay(_RECONCILER_CANCEL_MAX_DELAY_SECONDS)
-        wait = tenacity.wait_random_exponential(
-            multiplier=_RECONCILER_CANCEL_WAIT_MULTIPLIER_SECONDS,
-            max=_RECONCILER_CANCEL_WAIT_MAX_SECONDS,
-        )
-        decorator = tenacity.AsyncRetrying(retry=retry, stop=stop, wait=wait, reraise=True)
 
         async def _do_cancel() -> CancelAlgoOrderResponse:
-            response = await asyncio.to_thread(
+            response = await self._sdk_call(
+                CallKind.CANCEL,
                 self._sdk.rest_api.cancel_algo_order,
                 client_algo_id=client_algo_id,
             )
             return response.data()
 
         async def _do_cancel_with_retry() -> CancelAlgoOrderResponse:
-            async for attempt in decorator:
+            async for attempt in self._cancel_retrying():
                 with attempt:
                     return await _do_cancel()
             raise RuntimeError("unreachable: tenacity.AsyncRetrying exhausted without reraise")
@@ -790,21 +978,25 @@ class BinanceUsdmAdapter:
         try:
             await _do_cancel_with_retry()
         except Exception as exc:  # noqa: BLE001 - SDK wraps unknown codes
-            if _is_already_canceled_message(str(exc)):
+            if _is_order_absent(exc, CallKind.CANCEL):
                 log.info(
                     "adapter.cancel_algo_order.already_canceled",
                     symbol=symbol,
                     client_algo_id=client_algo_id,
+                    error_class=type(exc).__name__,
+                    code=error_facts_from_exception(exc).code,
                 )
                 return
             raise
 
     # ----- placement surface (Phase 9, plan 09-01) ----------------------- #
     # These methods are the FIRST line of defense — they place new orders
-    # on the exchange. Every call is bounded by the PLACEMENT-prefixed
-    # tenacity ceilings and uses the string-mediated Decimal-to-edge
-    # conversion (RESEARCH Pattern 1). The execution core never imports
-    # the SDK; only this adapter does.
+    # on the exchange. Each makes exactly one SDK call for every error
+    # class (never retried, 09-REVIEW CR-09, D-11), passes the shared REST
+    # gate first (refused without sending during a 418 ban or a 429 pause)
+    # and uses the string-mediated Decimal-to-edge conversion (RESEARCH
+    # Pattern 1). The execution core never imports the SDK; only this
+    # adapter does.
 
     async def place_entry(
         self,
@@ -850,6 +1042,12 @@ class BinanceUsdmAdapter:
             was accepted and filled. The execution manager probes by the
             deterministic client id and decides.
         """
+        # Plan 18-13: no policy refuses first; then a configured drift guard refuses a NEW
+        # entry while it does not allow entries (never measured, failed, out of limits,
+        # stale), before the gate check and before any SDK call.
+        self._require_signed_policy()
+        self._require_entries_allowed()
+
         from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
             NewOrderResponse,
         )
@@ -859,7 +1057,8 @@ class BinanceUsdmAdapter:
             NewOrderTypeEnum,
         )
 
-        response = await asyncio.to_thread(
+        response = await self._sdk_call(
+            CallKind.PLACEMENT,
             self._sdk.rest_api.new_order,
             symbol=symbol,
             side=NewOrderSideEnum(side),
@@ -956,7 +1155,8 @@ class BinanceUsdmAdapter:
         # orders, so a blind retry is either rejected as a duplicate (the
         # first attempt exists) or silently duplicates a leg (the first
         # attempt already triggered). The manager probes by id instead.
-        response = await asyncio.to_thread(
+        response = await self._sdk_call(
+            CallKind.PLACEMENT,
             self._sdk.rest_api.new_algo_order,
             algo_type=NewAlgoOrderAlgoTypeEnum(algo_type),
             symbol=symbol,
@@ -1001,7 +1201,8 @@ class BinanceUsdmAdapter:
         )
 
         try:
-            response = await asyncio.to_thread(
+            response = await self._sdk_call(
+                CallKind.QUERY,
                 self._sdk.rest_api.query_order,
                 symbol=symbol,
                 orig_client_order_id=orig_client_order_id,
@@ -1039,7 +1240,9 @@ class BinanceUsdmAdapter:
             GetCurrentPositionModeResponse,
         )
 
-        response = await asyncio.to_thread(self._sdk.rest_api.get_current_position_mode)
+        response = await self._sdk_call(
+            CallKind.QUERY, self._sdk.rest_api.get_current_position_mode
+        )
         raw: GetCurrentPositionModeResponse = response.data()
         return PositionModeResult(dual_side_position=bool(raw.dual_side_position))
 
@@ -1048,7 +1251,8 @@ class BinanceUsdmAdapter:
 
         GET /fapi/v1/commissionRate (USER_DATA, IP weight 20) through the
         official SDK `rest_api.user_commission_rate(symbol, recv_window)`;
-        `recv_window` is left to the SDK default. The `rpiCommissionRate`
+        `symbol` is passed by keyword and `recv_window` is the ratified
+        `SignedCallPolicy` value (plan 18-13). The `rpiCommissionRate`
         field is ignored.
 
         Flag-never-fabricate (D-09, D-11): a missing, non-decimal,
@@ -1066,7 +1270,9 @@ class BinanceUsdmAdapter:
             UserCommissionRateResponse,
         )
 
-        response = await asyncio.to_thread(self._sdk.rest_api.user_commission_rate, symbol)
+        response = await self._sdk_call(
+            CallKind.QUERY, self._sdk.rest_api.user_commission_rate, symbol=symbol
+        )
         raw: UserCommissionRateResponse | None = response.data()
         if raw is None:
             raise ValueError(
@@ -1085,17 +1291,6 @@ class BinanceUsdmAdapter:
 # --------------------------------------------------------------------------- #
 # Internal helpers for reconciler snapshot projection.
 # --------------------------------------------------------------------------- #
-
-
-def _is_already_canceled_message(message: str) -> bool:
-    """True when an SDK error message indicates the order is gone.
-
-    Binance uses error code -2011 (UNKNOWN_ORDER) for cancels that
-    target a non-existent order. We match by message code rather than
-    importing the SDK error class hierarchy, since the SDK does not
-    expose typed per-code exceptions.
-    """
-    return "UNKNOWN_ORDER" in message or "-2011" in message
 
 
 def _row_to_open_order_snapshot(

@@ -1107,17 +1107,28 @@ def test_wr19_projectors_route_through_require_helpers() -> None:
 
 def test_wr20_already_canceled_skips_retry() -> None:
     """A gone order succeeds immediately — no 3-attempt / 30s burn."""
+    from binance_common.errors import BadRequestError
     from src.adapters.binance_usdm import _cancel_retry_predicate
 
+    assert _cancel_retry_predicate(BadRequestError("Unknown order sent.", -2011)) is False
+    # Plan 18-10 (D-10): message text no longer decides; a non-SDK error is never retried.
     gone = RuntimeError("APIError(code=-2011): UNKNOWN_ORDER ...")
     assert _cancel_retry_predicate(gone) is False
 
 
 def test_wr20_transient_still_retries_programming_errors_do_not() -> None:
-    """Transient faults retry; deterministic faults fail closed at once."""
+    """Status-unknown faults retry; deterministic and unknown faults fail closed at once.
+
+    Plan 18-10 routes the predicate through the taxonomy: only STATUS_UNKNOWN (5xx, 408,
+    network errors, -1006, -1007) is retried; a non-SDK exception such as RuntimeError is
+    UNKNOWN_EXCHANGE_ERROR and is no longer retried.
+    """
+    from binance_common.errors import NetworkError, ServerError
     from src.adapters.binance_usdm import _cancel_retry_predicate
 
-    assert _cancel_retry_predicate(RuntimeError("timeout")) is True
+    assert _cancel_retry_predicate(ServerError("unavailable", 503)) is True
+    assert _cancel_retry_predicate(NetworkError("timeout")) is True
+    assert _cancel_retry_predicate(RuntimeError("timeout")) is False
     assert _cancel_retry_predicate(ValueError("bad wiring")) is False
     assert _cancel_retry_predicate(TypeError("bad type")) is False
 

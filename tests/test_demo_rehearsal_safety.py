@@ -556,6 +556,83 @@ def test_missing_credentials_refuse_before_any_adapter_is_built(tmp_path: Path) 
 
 
 # --------------------------------------------------------------------------- #
+# Plan 18-13: the ratified signed-call policy and the one REST gate.
+# --------------------------------------------------------------------------- #
+
+
+def test_missing_limits_file_refuses_before_any_adapter_is_built(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "absent-limits.toml"
+    code, factory = run_main(["--scenario", "far", "--limits-file", str(missing)], tmp_path)
+    assert code == dr.EXIT_REFUSED
+    assert factory.builds == 0
+    err = capsys.readouterr().err
+    assert "LimitsFileRefused" in err
+    assert str(missing) in err
+    assert not list(tmp_path.glob("09-DEMO-REHEARSAL-*.json"))
+
+
+def test_invalid_limits_file_refuses_and_names_the_path_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    broken = tmp_path / "broken-limits.toml"
+    broken.write_text("[signed_calls]\nrecv_window_ms = \n", encoding="utf-8")
+    code, factory = run_main(["--scenario", "far", "--limits-file", str(broken)], tmp_path)
+    assert code == dr.EXIT_REFUSED
+    assert factory.builds == 0
+    err = capsys.readouterr().err
+    assert str(broken) in err
+    assert "TOML" not in err  # the loader's problem list is not echoed, only the path
+
+
+def test_limits_file_option_defaults_to_the_ratified_repository_file() -> None:
+    args = dr._build_parser().parse_args([])
+    assert args.limits_file == dr.REPO_ROOT / "config" / "binance" / "binance-limits-v1.toml"
+    assert args.limits_file == dr.DEFAULT_LIMITS_FILE
+    assert dr.load_signed_call_policy(args.limits_file).recv_window_ms > 0
+
+
+def test_default_adapter_factory_carries_the_policy_and_one_shared_gate() -> None:
+    policy = dr.load_signed_call_policy(dr.DEFAULT_LIMITS_FILE)
+    credentials = dr.load_credentials(fake_environ())
+    bundle = dr.default_adapter_factory(credentials, signed_call_policy=policy, clock=fixed_clock)
+    inner = bundle.inner
+    assert inner._signed_call_policy is policy  # noqa: SLF001
+    gate = inner._rest_gate  # noqa: SLF001
+    assert gate is not None
+    assert gate.policy == policy.rate_limit
+    assert inner._public._rest_gate is gate  # noqa: SLF001 - the one gate, shared
+    assert inner._drift_guard is None  # noqa: SLF001 - an operator tool, not the runtime
+
+
+def test_runner_source_builds_exactly_one_rest_gate() -> None:
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    owners: list[str] = []
+
+    class _Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.stack: list[str] = []
+
+        def _visit_def(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        visit_FunctionDef = _visit_def
+        visit_AsyncFunctionDef = _visit_def
+
+        def visit_Call(self, node: ast.Call) -> None:
+            if isinstance(node.func, ast.Name) and node.func.id == "RestRateLimitGate":
+                owners.append(self.stack[-1] if self.stack else "<module>")
+            self.generic_visit(node)
+
+    _Visitor().visit(tree)
+    assert owners == ["default_adapter_factory"]
+    assert "ClockDriftGuard" not in SCRIPT_PATH.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
 # SR-8 evidence hygiene.
 # --------------------------------------------------------------------------- #
 
