@@ -16,3 +16,5 @@ docs/research/preregistration/research-run-1-constraints-S1.json -text
 docs/research/preregistration/evidence/** -text
 # Phase 18 synthetic user-data frames are pinned byte-for-byte (LF) to their builders.
 tests/fixtures/phase18/synthetic/*.json text eol=lf
+# The ratified Binance limits file is pinned by sha256 in docs/DECISIONS.md (plan 18-09).
+config/binance/*.toml -text

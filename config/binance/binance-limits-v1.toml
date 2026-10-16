@@ -1,0 +1,78 @@
+# Binance client, signed-call, clock-drift and user-data stream limits v1 (plan 18-09).
+# Every value below is copied verbatim from the user's decision record
+#   .planning/phases/18-user-data-stream-error-taxonomy/decisions/18-DEC-O-18-01.md
+#   (decided by the user on 2026-10-16, including its section
+#   "Amendment 2026-10-16 (user): 429 semantics"), one `limit <section>.<key>` line each.
+# Values are the user's, copied verbatim by plan 18-09; a change of any value needs a new
+# DECISIONS row. Key meanings and the file format: config/binance/README.md.
+# The word none (a TOML string) is written only for the three nullable keys.
+
+[client]
+rest_timeout_ms = 5000
+sdk_retries = 0
+sdk_backoff_ms = 0
+
+[signed_calls]
+recv_window_ms = 5000
+rate_limit_418_no_retry_after_wait_seconds = 259200
+rate_limit_429_no_retry_after_wait_seconds = 120
+rate_limit_retry_after_cap_seconds = 259200
+
+[drift]
+ahead_limit_ms = 500
+behind_limit_ms = 1000
+include_measurement_uncertainty = true
+max_measurement_age_seconds = 300
+periodic_remeasure_interval_seconds = 60
+
+[stream]
+keepalive_interval_seconds = 1800
+keepalive_failure_tolerance = 1
+project_rotation_interval_seconds = "none"
+reconnect_max_attempts = 7
+reconnect_max_delay_seconds = 120
+reconnect_wait_multiplier_seconds = 1
+reconnect_wait_max_seconds = 60
+sdk_reconnect_delay_ms = 5000
+sdk_reconnect_attempts = 3
+snapshot_deadline_seconds = 20
+snapshot_max_attempts = 7
+snapshot_wait_multiplier_seconds = 1
+snapshot_wait_max_seconds = 10
+max_liveness_age_seconds = "none"
+event_queue_max = 4096
+
+[provenance.client]
+rest_timeout_ms = "DECISION"
+sdk_retries = "DECISION"
+sdk_backoff_ms = "DECISION"
+
+[provenance.signed_calls]
+recv_window_ms = "DECISION"
+rate_limit_418_no_retry_after_wait_seconds = "DECISION"
+rate_limit_429_no_retry_after_wait_seconds = "DECISION"
+rate_limit_retry_after_cap_seconds = "DECISION"
+
+[provenance.drift]
+ahead_limit_ms = "DECISION"
+behind_limit_ms = "DECISION"
+include_measurement_uncertainty = "DECISION"
+max_measurement_age_seconds = "DECISION"
+periodic_remeasure_interval_seconds = "DECISION"
+
+[provenance.stream]
+keepalive_interval_seconds = "DECISION"
+keepalive_failure_tolerance = "DECISION"
+project_rotation_interval_seconds = "DECISION"
+reconnect_max_attempts = "DECISION"
+reconnect_max_delay_seconds = "DECISION"
+reconnect_wait_multiplier_seconds = "DECISION"
+reconnect_wait_max_seconds = "DECISION"
+sdk_reconnect_delay_ms = "DECISION"
+sdk_reconnect_attempts = "DECISION"
+snapshot_deadline_seconds = "DECISION"
+snapshot_max_attempts = "DECISION"
+snapshot_wait_multiplier_seconds = "DECISION"
+snapshot_wait_max_seconds = "DECISION"
+max_liveness_age_seconds = "DECISION"
+event_queue_max = "DECISION"
