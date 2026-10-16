@@ -3,7 +3,8 @@
 One bundle is one directory holding the evidence of ONE epoch. The exporter of plan 16-30 writes
 it; `load_evidence_bundle` is the only reader the evaluator trusts:
 
-    manifest.json            schema, epoch_id, window_start_utc, window_end_utc, source, files
+    manifest.json            schema, epoch_id, window_start_utc, window_end_utc, source, files,
+                             and (plan 16-59) as_of_utc
     pinned_epoch.json        the pinned `StreamEpoch` (as `write_pinned_state` writes it)
     registry_diff.jsonl      the freeze-check log lines (copied whole, never edited)
     github_runs.json         the exported GitHub run list (array or `workflow_runs` object)
@@ -21,6 +22,12 @@ Line shapes:
   (`payload` carries no float; a float is refused);
 - evidence gap: `{"slot_utc", "schedule", "reason", "detected_at_utc", "run_id"}`.
 
+`as_of_utc` (plan 16-59, B2-WR-06) is the instant the exporter judged the freeze ticks as of: a
+tick is judged only when its slot plus the ratified grace is at or before it. A bundle whose
+`as_of_utc` is before `window_end_utc` plus the grace is PARTIAL (an hourly export): it loads and
+is published, but the trial evaluator refuses to judge it (`bundle_is_partial`). A bundle without
+`as_of_utc` (written before plan 16-59) is treated as final.
+
 Plan 16-51 adds two runtime record types to `runtime_records.jsonl`, `PAPER_REPLAY_INPUTS` (what
 the risk stage read for an evaluated live bar) and `PAPER_HISTORY_BARS` (every bar the pipeline
 accepted, with its acceptance sequence). The bundle schema stays `soak-evidence-bundle/1` and no
@@ -37,7 +44,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +107,7 @@ class EvidenceBundle:
     evidence_gaps: tuple[EvidenceGap, ...]
     analytics: Mapping[str, Any] | None
     file_sha256: Mapping[str, str]
+    as_of_utc: datetime | None = None
 
 
 def sha256_of(data: bytes) -> str:
@@ -314,6 +322,12 @@ def load_evidence_bundle(path: Path | str) -> EvidenceBundle:
         raise BundleError(f"{MANIFEST_NAME} epoch_id must be a non-empty string")
     if end <= start:
         raise BundleError(f"{MANIFEST_NAME} window_end_utc must be after window_start_utc")
+    as_of: datetime | None = None
+    if "as_of_utc" in manifest:
+        try:
+            as_of = _parse_utc(manifest["as_of_utc"], "as_of_utc")
+        except ValueError as exc:
+            raise BundleError(f"{MANIFEST_NAME}: {exc}") from None
     analytics = _parse_analytics(contents[FILE_ANALYTICS]) if FILE_ANALYTICS in contents else None
     return EvidenceBundle(
         path=directory,
@@ -329,7 +343,19 @@ def load_evidence_bundle(path: Path | str) -> EvidenceBundle:
         evidence_gaps=_parse_gaps(contents[FILE_GAPS]),
         analytics=analytics,
         file_sha256={name: sha256_of(data) for name, data in sorted(contents.items())},
+        as_of_utc=as_of,
     )
+
+
+def bundle_is_partial(bundle: EvidenceBundle, grace_seconds: int) -> bool:
+    """True when the bundle was exported before the trial could be judged (an hourly export).
+
+    The bundle is final once `as_of_utc` is at or after the window end plus the ratified
+    freeze-tick grace. A bundle without `as_of_utc` was written before plan 16-59: final.
+    """
+    if bundle.as_of_utc is None:
+        return False
+    return bundle.as_of_utc < bundle.window_end_utc + timedelta(seconds=grace_seconds)
 
 
 __all__ = [
@@ -348,6 +374,7 @@ __all__ = [
     "BundleError",
     "DiffRecord",
     "EvidenceBundle",
+    "bundle_is_partial",
     "load_evidence_bundle",
     "runtime_record_line",
     "sha256_of",

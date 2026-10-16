@@ -3,7 +3,7 @@
     python scripts/export_soak_evidence.py --source {pg,fixture} --epoch <epoch_id>
         --pinned <pinned_epoch.json> [--pinned ...] --diff-log <registry_diff.jsonl>
         --github-runs <runs.json> --config <paper-runtime.toml> [--workflow <yml>]
-        --window-start <UTC ISO> --window-end <UTC ISO> --out <new directory>
+        --window-start <UTC ISO> --window-end <UTC ISO> [--as-of <UTC ISO>] --out <new directory>
         [--records <runtime_records.jsonl>]        (fixture source only)
         [--analytics-inputs <analytics_inputs.json>]
 
@@ -47,9 +47,15 @@ What it does, and what it never does:
 - `pinned_epoch.json` is the `--pinned` file whose epoch_id is `--epoch` (pass the current file and
   the archived ones; exactly one must match), copied byte for byte.
 - EVIDENCE_GAP records come from `freeze_evidence_report` (the cron string is read from the
-  freeze workflow file, the grace from the ratified configuration, `detected_at_utc` is the window
-  end, exactly as the evaluator calls it) and go to `evidence_gaps.jsonl`. They are never written
-  into `registry_diff.jsonl` (REV-02).
+  freeze workflow file, the grace from the ratified configuration) and go to
+  `evidence_gaps.jsonl`. They are never written into `registry_diff.jsonl` (REV-02).
+- The export is judged AS OF an instant (plan 16-59, B2-WR-06): `--as-of` (default: the current
+  time, but never later than the window end plus the grace). Only a slot whose slot plus the
+  ratified `freeze_tick_grace_seconds` is at or before it is judged; its gaps carry
+  `detected_at_utc` = the as-of instant, and a slot after it is neither satisfied nor a gap. The
+  manifest records `as_of_utc`. An as-of before the epoch pin or after the window end plus the
+  grace is refused (exit 2). A bundle exported before the window end plus the grace is PARTIAL:
+  `scripts/evaluate_trial_soak.py` refuses to judge it.
 - The proof class follows the source and nothing else: `--source fixture` reads `--records` and
   writes manifest source "fixture"; `--source pg` reads the runtime state port (the soak
   PostgreSQL through `DATABASE_URL_SYNC` / `DATABASE_URL`, the allowed names of
@@ -82,7 +88,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -174,6 +180,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--window-start", required=True, help="UTC ISO-8601 window start")
     parser.add_argument("--window-end", required=True, help="UTC ISO-8601 window end")
+    parser.add_argument(
+        "--as-of",
+        help="UTC ISO-8601 instant the freeze ticks are judged as of (default: now, at most the "
+        "window end plus the ratified grace)",
+    )
     parser.add_argument("--out", required=True, type=Path, help="new bundle directory")
     parser.add_argument("--records", type=Path, help="runtime records file (fixture source only)")
     parser.add_argument(
@@ -383,8 +394,40 @@ def _write_bundle(out: Path, files: Mapping[str, bytes], manifest: Mapping[str, 
         raise
 
 
+def _whole_seconds(moment: datetime) -> datetime:
+    return moment.replace(microsecond=0)
+
+
+def _as_of(
+    args: argparse.Namespace,
+    now: Callable[[], datetime],
+    pin: datetime,
+    final_at: datetime,
+) -> datetime:
+    """The instant the export is judged as of; refused before the pin or after `final_at`."""
+    if args.as_of is not None:
+        as_of = _parse_window(args.as_of, "--as-of")
+        if as_of.microsecond != 0:
+            raise InputError("--as-of must be a whole number of seconds")
+        if as_of < pin:
+            raise InputError("--as-of is before the epoch pin")
+        if as_of > final_at:
+            raise InputError("--as-of is after the window end plus the freeze-tick grace")
+        return as_of
+    current = now()
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise InputError("the clock must be UTC-aware")
+    as_of = min(_whole_seconds(current.astimezone(UTC)), final_at)
+    if as_of < pin:
+        raise InputError("--as-of (the current time) is before the epoch pin")
+    return as_of
+
+
 def _build(
-    args: argparse.Namespace, state: RuntimeStatePort | None, environ: Mapping[str, str]
+    args: argparse.Namespace,
+    state: RuntimeStatePort | None,
+    environ: Mapping[str, str],
+    now: Callable[[], datetime],
 ) -> tuple[dict[str, bytes], dict[str, Any], int, int]:
     """The bundle files and the manifest (without writing anything)."""
     start = _parse_window(args.window_start, "--window-start")
@@ -412,6 +455,8 @@ def _build(
         cron = read_workflow_cron(args.workflow)
     except (ConfigNotRatified, WorkflowError):
         raise InputError("the ratified configuration or the freeze workflow is unusable") from None
+    grace = timedelta(seconds=config.health.freeze_tick_grace_seconds)
+    as_of = _as_of(args, now, pinned.opened_at_utc, end + grace)
 
     if args.source == SOURCE_FIXTURE:
         assert records_file is not None  # checked above
@@ -422,14 +467,15 @@ def _build(
         raise InputError("no runtime record belongs to --epoch")
 
     try:
+        # Only a slot that is already due (slot + grace <= as_of) is judged (B2-WR-06).
         report = freeze_evidence_report(
             pin_utc=pinned.opened_at_utc,
-            window_end_utc=end,
+            window_end_utc=min(end, as_of - grace),
             cron=cron,
             lines=parse_freeze_log(_decode(diff_bytes, args.diff_log.name)),
             runs=parse_github_runs(_decode(runs_bytes, args.github_runs.name)),
             grace_seconds=config.health.freeze_tick_grace_seconds,
-            detected_at_utc=end,
+            detected_at_utc=as_of,
         )
     except (ValueError, KeyError, TypeError):
         raise InputError("the freeze evidence cannot be reconciled with the run list") from None
@@ -448,6 +494,7 @@ def _build(
         "epoch_id": args.epoch,
         "window_start_utc": start.isoformat(),
         "window_end_utc": end.isoformat(),
+        "as_of_utc": as_of.isoformat(),
         "source": args.source,
         "files": {},
     }
@@ -652,10 +699,12 @@ def main(
     state: RuntimeStatePort | None = None,
     environ: Mapping[str, str] | None = None,
     uploader: Uploader | None = None,
+    now: Callable[[], datetime] | None = None,
 ) -> int:
     """Export one epoch. `state` is a test seam for the pg source (a fake or an open port);
     `environ` defaults to the process environment (database URL, secret values to scan for);
-    `uploader` is a test seam for `--publish` (default: rclone)."""
+    `uploader` is a test seam for `--publish` (default: rclone); `now` is the clock the default
+    `--as-of` reads (default: the system clock)."""
     arguments = list(sys.argv[1:] if argv is None else argv)
     env = os.environ if environ is None else environ
     if arguments[:1] == ["publish"]:
@@ -670,7 +719,9 @@ def main(
             print(f"cannot export: {exc}", file=sys.stderr)
             return EXIT_INPUT
     try:
-        files, manifest, record_count, gap_count = _build(args, state, env)
+        files, manifest, record_count, gap_count = _build(
+            args, state, env, now if now is not None else (lambda: datetime.now(UTC))
+        )
     except InputError as exc:
         print(f"cannot export: {exc}", file=sys.stderr)
         return EXIT_INPUT

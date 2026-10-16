@@ -57,6 +57,7 @@ E2 = "b" * 64
 PARAMETER_HASH = "c" * 64
 P1 = datetime(2026, 11, 1, 0, 0, tzinfo=UTC)
 SIX_HOURS = timedelta(hours=6)
+GRACE_SECONDS = 300  # freeze_tick_grace_seconds of the ratified test configuration
 SYMBOL = "BTCUSDT"
 
 
@@ -210,7 +211,11 @@ class Inputs:
         end: datetime,
         out: Path,
         with_records: bool = True,
+        as_of: datetime | None = None,
+        omit_as_of: bool = False,
     ) -> list[str]:
+        """The export arguments. Unless `omit_as_of`, `--as-of` is given: `as_of`, or by default
+        the end of the window plus the ratified freeze-tick grace (a final bundle)."""
         argv = ["--source", source]
         if with_records:
             argv += ["--records", str(self.records)]
@@ -234,6 +239,9 @@ class Inputs:
             "--out",
             str(out),
         ]
+        if not omit_as_of:
+            moment = end + timedelta(seconds=GRACE_SECONDS) if as_of is None else as_of
+            argv += ["--as-of", _iso(moment)]
         if self.analytics is not None:
             argv += ["--analytics-inputs", str(self.analytics)]
         return argv
@@ -522,7 +530,7 @@ def test_evidence_gap_records_go_to_their_own_file_and_no_input_is_touched(
         lines=parse_freeze_log(inputs.diff.read_text(encoding="utf-8")),
         runs=parse_github_runs(inputs.runs.read_text(encoding="utf-8")),
         grace_seconds=300,
-        detected_at_utc=P1 + SIX_HOURS,
+        detected_at_utc=P1 + SIX_HOURS + timedelta(seconds=GRACE_SECONDS),
     ).gaps
     assert len(expected) == 1
     assert bundle.evidence_gaps == expected
@@ -551,6 +559,184 @@ def test_a_session_without_gaps_writes_an_empty_gap_file(tmp_path: Path) -> None
     export.main(inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=out))
     assert (out / FILE_GAPS).read_bytes() == b""
     assert load_evidence_bundle(out).evidence_gaps == ()
+
+
+# --------------------------------------------------------------------------- #
+# As-of exports (plan 16-59, B2-WR-06): only a slot that is already due can be a gap.
+# --------------------------------------------------------------------------- #
+
+FOURTEEN_DAYS = timedelta(days=14)
+
+
+def _empty_freeze_inputs(root: Path) -> Inputs:
+    """A fixed 14-day trial with no freeze line and no run yet."""
+    return write_inputs(
+        root,
+        records=record_rows(sample_records(E1, P1)),
+        pinned=[pinned_row(E1, P1)],
+        diff_lines=[],
+        runs=[],
+    )
+
+
+def _export(argv: list[str]) -> int:
+    """`export.main` with an argparse refusal reported as its exit code (never a crash)."""
+    try:
+        return export.main(argv)
+    except SystemExit as stop:
+        return -1 if not isinstance(stop.code, int) else stop.code
+
+
+def _gap_slots(directory: Path) -> list[str]:
+    rows = [json.loads(r) for r in (directory / FILE_GAPS).read_text(encoding="utf-8").splitlines()]
+    return [row["slot_utc"] for row in rows]
+
+
+def test_an_export_three_hours_into_a_14_day_trial_records_only_the_slots_already_due(
+    tmp_path: Path,
+) -> None:
+    inputs = _empty_freeze_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    as_of = P1 + timedelta(hours=3)
+
+    code = _export(
+        inputs.argv(
+            source="fixture", epoch=E1, start=P1, end=P1 + FOURTEEN_DAYS, out=out, as_of=as_of
+        )
+    )
+
+    assert code == export.EXIT_OK
+    slots = _gap_slots(out)
+    # 00:17, 01:17 and 02:17 are due (slot + 300 s <= 03:00); 03:17 and every later slot are not.
+    assert slots == [_iso(P1 + timedelta(hours=h, minutes=17)) for h in (0, 1, 2)]
+    for line in (out / FILE_GAPS).read_text(encoding="utf-8").splitlines():
+        assert json.loads(line)["detected_at_utc"] == _iso(as_of)
+        assert json.loads(line)["reason"] == "NO_RUN_FOUND"
+    assert manifest_of(out)["as_of_utc"] == _iso(as_of)
+    assert load_evidence_bundle(out).as_of_utc == as_of
+
+
+def test_a_slot_is_due_exactly_when_the_grace_after_it_has_passed(tmp_path: Path) -> None:
+    inputs = _empty_freeze_inputs(tmp_path / "in")
+    due = P1 + timedelta(hours=2, minutes=17, seconds=GRACE_SECONDS)
+    at_boundary = tmp_path / "at-boundary"
+    just_before = tmp_path / "just-before"
+
+    for out, moment in ((at_boundary, due), (just_before, due - timedelta(seconds=1))):
+        argv = inputs.argv(
+            source="fixture", epoch=E1, start=P1, end=P1 + FOURTEEN_DAYS, out=out, as_of=moment
+        )
+        assert _export(argv) == export.EXIT_OK
+
+    assert _iso(P1 + timedelta(hours=2, minutes=17)) in _gap_slots(at_boundary)
+    assert _iso(P1 + timedelta(hours=2, minutes=17)) not in _gap_slots(just_before)
+
+
+def test_the_due_bound_follows_the_ratified_grace_and_no_number_of_its_own(
+    tmp_path: Path,
+) -> None:
+    inputs = _empty_freeze_inputs(tmp_path / "in")
+    text = inputs.config.read_text(encoding="utf-8")
+    assert "freeze_tick_grace_seconds = 300" in text
+    inputs.config.write_text(
+        text.replace("freeze_tick_grace_seconds = 300", "freeze_tick_grace_seconds = 120"),
+        encoding="utf-8",
+    )
+    out = tmp_path / "bundle"
+    # 02:19 is 120 s after the 02:17 slot: due under a 120 s grace, not under 300 s.
+    as_of = P1 + timedelta(hours=2, minutes=19)
+
+    code = _export(
+        inputs.argv(
+            source="fixture", epoch=E1, start=P1, end=P1 + FOURTEEN_DAYS, out=out, as_of=as_of
+        )
+    )
+
+    assert code == export.EXIT_OK
+    assert _iso(P1 + timedelta(hours=2, minutes=17)) in _gap_slots(out)
+
+
+def test_an_as_of_before_the_pin_or_after_the_window_end_plus_grace_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = _empty_freeze_inputs(tmp_path / "in")
+    end = P1 + FOURTEEN_DAYS
+    for name, moment in (
+        ("before-pin", P1 - timedelta(seconds=1)),
+        ("after-end", end + timedelta(seconds=GRACE_SECONDS + 1)),
+    ):
+        out = tmp_path / name
+        code = _export(
+            inputs.argv(source="fixture", epoch=E1, start=P1, end=end, out=out, as_of=moment)
+        )
+        assert code == export.EXIT_INPUT, name
+        assert not out.exists(), name
+        err = capsys.readouterr().err
+        assert "cannot export" in err and "--as-of" in err
+    not_utc = tmp_path / "naive"
+    argv = inputs.argv(source="fixture", epoch=E1, start=P1, end=end, out=not_utc)
+    argv[argv.index("--as-of") + 1] = "2026-11-01T03:00:00"
+    assert _export(argv) == export.EXIT_INPUT
+    assert not not_utc.exists()
+
+
+def test_without_an_as_of_the_injected_now_bounds_the_export(tmp_path: Path) -> None:
+    inputs = _empty_freeze_inputs(tmp_path / "in")
+    end = P1 + FOURTEEN_DAYS
+    early = tmp_path / "early"
+    late = tmp_path / "late"
+    now = P1 + timedelta(hours=3)
+
+    assert (
+        export.main(
+            inputs.argv(source="fixture", epoch=E1, start=P1, end=end, out=early, omit_as_of=True),
+            now=lambda: now,
+        )
+        == export.EXIT_OK
+    )
+    assert manifest_of(early)["as_of_utc"] == _iso(now)
+    assert len(_gap_slots(early)) == 3
+
+    # A final export made long after the window is judged as of window end plus grace.
+    assert (
+        export.main(
+            inputs.argv(source="fixture", epoch=E1, start=P1, end=end, out=late, omit_as_of=True),
+            now=lambda: end + timedelta(days=3),
+        )
+        == export.EXIT_OK
+    )
+    assert manifest_of(late)["as_of_utc"] == _iso(end + timedelta(seconds=GRACE_SECONDS))
+    assert len(_gap_slots(late)) == 336
+
+
+def test_the_hour_three_export_and_the_final_export_differ_only_in_what_is_due(
+    tmp_path: Path,
+) -> None:
+    """Slots after the as-of time are neither satisfied nor gaps; the data stays in the bundle."""
+    diff_lines, runs = freeze_rows(E1, P1, hours=6, first_run_id=1000)
+    inputs = write_inputs(
+        tmp_path / "in",
+        records=record_rows(sample_records(E1, P1)),
+        pinned=[pinned_row(E1, P1)],
+        diff_lines=diff_lines,
+        runs=runs,
+    )
+    out = tmp_path / "bundle"
+    assert (
+        _export(
+            inputs.argv(
+                source="fixture",
+                epoch=E1,
+                start=P1,
+                end=P1 + SIX_HOURS,
+                out=out,
+                as_of=P1 + timedelta(hours=3),
+            )
+        )
+        == export.EXIT_OK
+    )
+    assert _gap_slots(out) == []
+    assert (out / FILE_DIFF).read_bytes() == inputs.diff.read_bytes()
 
 
 # --------------------------------------------------------------------------- #

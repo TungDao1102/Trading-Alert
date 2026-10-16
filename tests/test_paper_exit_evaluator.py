@@ -121,6 +121,7 @@ class TrialFixture:
     runs: list[dict[str, Any]] = field(default_factory=list)
     gaps: list[dict[str, Any]] = field(default_factory=list)
     analytics: dict[str, Any] | None = None
+    as_of: datetime | None = None  # None: a bundle written before plan 16-59 (no as_of_utc)
 
     def pinned_row(self) -> dict[str, Any]:
         return {
@@ -151,6 +152,8 @@ class TrialFixture:
             "source": self.source,
             "files": {name: _sha(data) for name, data in files.items()},
         }
+        if self.as_of is not None:
+            manifest["as_of_utc"] = _iso(self.as_of)
         for name, data in files.items():
             (directory / name).write_bytes(data)
         (directory / "manifest.json").write_text(
@@ -837,6 +840,67 @@ def test_without_the_replay_seam_the_command_line_does_not_pass_parity(
     assert code == 1
     assert "FAIL  parity" in printed
     assert "NOT EVALUATED" in printed
+
+
+def _cli_args(bundle_dir: Path, tmp_path: Path) -> list[str]:
+    config = tmp_path / "paper-runtime.toml"
+    config.write_text(RATIFIED_CONFIG, encoding="utf-8")
+    return [
+        "--bundle",
+        str(bundle_dir),
+        "--config",
+        str(config),
+        "--workflow",
+        str(_workflow(tmp_path)),
+        "--q-d-decision",
+        str(QD_DECISION),
+        "--out",
+        str(tmp_path / "evaluation.txt"),
+    ]
+
+
+def test_a_partial_bundle_loads_but_the_evaluator_refuses_to_judge_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An hourly export (as_of before window end plus grace) is never the trial verdict."""
+    script = _load_script()
+    grace = timedelta(seconds=THRESHOLDS.freeze_tick_grace_seconds)
+    partial_dir = make_fixture(as_of=WINDOW_END + grace - timedelta(seconds=1)).write(
+        tmp_path / "partial"
+    )
+    assert load_evidence_bundle(partial_dir).as_of_utc == WINDOW_END + grace - timedelta(seconds=1)
+
+    code = script.main(_cli_args(partial_dir, tmp_path), parity=fixture_parity())
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "partial" in captured.err
+    assert len(captured.err.strip().splitlines()) == 1
+    assert captured.out == ""
+    assert not (tmp_path / "evaluation.txt").exists()
+
+
+def test_a_final_bundle_and_a_bundle_without_an_as_of_are_judged_as_before(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script = _load_script()
+    grace = timedelta(seconds=THRESHOLDS.freeze_tick_grace_seconds)
+    for name, as_of in (("final", WINDOW_END + grace), ("legacy", None)):
+        directory = make_fixture(as_of=as_of).write(tmp_path / name)
+        out_dir = tmp_path / f"out-{name}"
+        out_dir.mkdir()
+        code = script.main(_cli_args(directory, out_dir), parity=fixture_parity())
+        assert code == 0, name
+        assert "PASS  trial window" in capsys.readouterr().out
+
+
+def test_a_manifest_as_of_that_is_not_a_utc_time_is_refused(tmp_path: Path) -> None:
+    directory = make_fixture(as_of=WINDOW_END).write(tmp_path / "bundle")
+    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    manifest["as_of_utc"] = "2026-11-15T00:00:00"
+    (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(BundleError, match="as_of_utc"):
+        load_evidence_bundle(directory)
 
 
 def test_the_command_line_requires_the_q_d_decision_file(trial_dir: Path, tmp_path: Path) -> None:

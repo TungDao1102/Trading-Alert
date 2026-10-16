@@ -17,8 +17,9 @@ registry set whose hash differs from the pin or a set that cannot be loaded give
 EVALUATED and FAIL, never exit 2.
 
 Exit codes: 0 every criterion passes; 1 at least one criterion fails; 2 the input is unusable (a
-bundle that is incomplete or edited after export, a configuration that is not ratified, a workflow
-file without exactly one schedule cron). A message names the file or key, never a value.
+bundle that is incomplete or edited after export, a PARTIAL bundle whose `as_of_utc` is before the
+window end plus the freeze-tick grace (plan 16-59), a configuration that is not ratified, a
+workflow file without exactly one schedule cron). A message names the file or key, never a value.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ if str(REPO_ROOT) not in sys.path:
 from src.paper.evidence_bundle import (  # noqa: E402
     BundleError,
     EvidenceBundle,
+    bundle_is_partial,
     load_evidence_bundle,
 )
 from src.paper.exit_criteria import (  # noqa: E402
@@ -137,6 +139,13 @@ def main(argv: Sequence[str] | None = None, *, parity: ParityReplay | None = Non
         rule = read_backfill_rule(args.q_d_decision)
     except (BundleError, ConfigNotRatified, WorkflowError, ValueError, OSError) as exc:
         print(f"cannot evaluate: {exc}", file=sys.stderr)
+        return EXIT_INPUT
+    if bundle_is_partial(bundle, config.health.freeze_tick_grace_seconds):
+        print(
+            "cannot evaluate: the bundle is a partial export (as_of_utc is before the window end "
+            "plus the freeze-tick grace); export the final bundle to judge the trial",
+            file=sys.stderr,
+        )
         return EXIT_INPUT
     evaluation = evaluate_trial(
         bundle,
