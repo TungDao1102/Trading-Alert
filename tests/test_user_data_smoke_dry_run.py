@@ -20,6 +20,8 @@ import pytest
 import requests
 from scripts import user_data_smoke as uds
 from src.adapters import binance_client
+from src.adapters.binance_limits import load_binance_limits
+from src.domain.exchange_errors import ExchangeErrorCategory
 from src.ops import redaction
 
 from tests.userdata_fakes import TEST_ONLY_LISTEN_KEY
@@ -241,3 +243,189 @@ def test_the_ratified_limits_file_is_the_default_and_recorded_by_hash(
     assert document["settings"]["limits_file"] == "binance-limits-v1.toml"
     assert document["settings"]["limits_file_sha256"] == uds.sha256_lf(uds.DEFAULT_LIMITS_FILE)
     assert document["settings"]["smoke_limits_file_sha256"] == uds.sha256_lf(smoke_limits)
+
+
+# --------------------------------------------------------------------------- #
+# Scenarios.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_silent_sdk_route_is_fail_and_the_run_still_cleans_up_and_exits_1(
+    tmp_path: Path, smoke_limits: Path
+) -> None:
+    code, rig, document = _run_with(smoke_limits, tmp_path, uds.DryRunScenario(route_silent=True))
+    steps = _steps(document)
+    assert code == uds.EXIT_FAILED
+    assert document["sdk_route_delivery"] == "FAIL"
+    assert document["acceptance"]["c"]["result"] == "FAIL"
+    assert steps["order_new_event"] == "FAILED"
+    assert steps["order_canceled_event"] == "FAILED"
+    assert steps["order_cancel"] == "PASSED"
+    assert steps["account_after"] == "PASSED"
+    assert document["end_state"] == "FLAT"
+    assert steps["stop_and_delete_then_put"] == "PASSED"
+    assert rig.fakes.orders.calls.count("place_entry") == 1
+
+
+def test_a_drift_out_of_limits_aborts_with_exit_3_before_any_order(
+    tmp_path: Path, smoke_limits: Path
+) -> None:
+    ahead = load_binance_limits(uds.DEFAULT_LIMITS_FILE).drift.ahead_limit_ms
+    code, rig, document = _run_with(
+        smoke_limits, tmp_path, uds.DryRunScenario(server_offset_ms=-(ahead + 1_000))
+    )
+    assert code == uds.EXIT_ABORTED
+    assert document["outcome"] == "ABORTED_NO_ORDER"
+    assert document["drift"]["within_limits"] is False
+    assert _steps(document)["preflight"] == "FAILED"
+    assert rig.fakes.orders.calls == []
+    assert rig.fakes.clients == [] or all(not c.subscribe_frames for c in rig.fakes.clients)
+    assert document["sdk_route_delivery"] == "NOT_RUN"
+
+
+def test_preflight_refused_by_paused_gate(tmp_path: Path, smoke_limits: Path) -> None:
+    built: list[uds.SmokeRig] = []
+
+    def factory(config: uds.SmokeConfig) -> uds.SmokeRig:
+        rig = uds.build_dry_run_rig(config)
+        rig.rest_gate.record(ExchangeErrorCategory.RATE_LIMITED, None)
+        built.append(rig)
+        return rig
+
+    code = uds.main(_argv(smoke_limits, tmp_path), environ={}, rig_factory=factory)
+    _, document = _only_evidence(tmp_path)
+    rig = built[0]
+    assert code == uds.EXIT_ABORTED
+    assert document["drift"]["measurement_failed"] is True
+    assert document["drift"]["failure_type"] == "RateLimitPauseActive"
+    assert rig.fakes.public_rest.calls["check_server_time"] == 0
+    assert rig.fakes.orders.calls == []
+
+
+def test_a_non_flat_end_state_is_manual_cleanup_required(
+    tmp_path: Path, smoke_limits: Path
+) -> None:
+    code, _, document = _run_with(
+        smoke_limits, tmp_path, uds.DryRunScenario(end_state_not_flat=True)
+    )
+    assert code == uds.EXIT_FAILED
+    assert document["end_state"] == "MANUAL_CLEANUP_REQUIRED"
+    assert _steps(document)["account_after"] == "FAILED"
+    assert document["account_after"]["positions"]
+    assert document["outcome"] == "FAILED"
+
+
+def test_the_delete_then_put_observation_records_the_fake_class_and_code(
+    tmp_path: Path, smoke_limits: Path
+) -> None:
+    code, rig, document = _run_with(
+        smoke_limits, tmp_path, uds.DryRunScenario(put_after_delete_code=-1125)
+    )
+    observation = document["delete_then_put"]
+    assert code == uds.EXIT_OK
+    assert observation["outcome"] == "ERROR"
+    assert observation["http_class"] == "BAD_REQUEST"
+    assert observation["code"] == -1125
+    assert observation["category"] == "INVALID_LISTEN_KEY"
+    assert observation["delete_ok"] is True
+    assert document["acceptance"]["f"]["result"] == "OBSERVED"
+    calls = rig.fakes.rest_userdata.calls
+    assert calls["close_user_data_stream"] == 1
+    # one keepalive from the keepalive step, one PUT after the DELETE
+    assert calls["keepalive_user_data_stream"] == 2
+
+
+def test_the_forced_drop_goes_unknown_snapshot_live_with_a_measured_gap(
+    tmp_path: Path, smoke_limits: Path
+) -> None:
+    _, rig, document = _run_with(smoke_limits, tmp_path)
+    drop = document["forced_drop"]
+    sequence = [entry["state"] for entry in drop["state_sequence_after_drop"]]
+    assert sequence[:3] == ["UNKNOWN", "SYNCING", "LIVE"]
+    assert drop["snapshot_count_after_drop"] >= 1
+    assert isinstance(drop["gap_ms"], int)
+    # the drop rebuilt the WebSocket client
+    assert len(rig.fakes.clients) == 2
+    assert document["acceptance"]["e"]["result"] == "PASS"
+
+
+def test_the_dry_run_evidence_passes_the_checker_and_the_verdict(
+    tmp_path: Path, smoke_limits: Path
+) -> None:
+    _, _, document = _run_with(smoke_limits, tmp_path)
+    assert uds.check_smoke_evidence(document) == []
+    verdict = uds.smoke_acceptance_verdict(document)
+    assert {letter: verdict[letter]["result"] for letter in "abcdefgh"} == {
+        "a": "PASS",
+        "b": "PASS",
+        "c": "PASS",
+        "d": "PASS",
+        "e": "PASS",
+        "f": "OBSERVED",
+        "g": "PASS",
+        "h": "PASS",
+    }
+    assert all(entry["proof_class"] == "FAKE" for entry in verdict.values())
+    assert document["acceptance"] == verdict
+
+
+def test_an_account_not_flat_before_the_smoke_aborts_before_any_order(
+    tmp_path: Path, smoke_limits: Path
+) -> None:
+    built: list[uds.SmokeRig] = []
+
+    def factory(config: uds.SmokeConfig) -> uds.SmokeRig:
+        rig = uds.build_dry_run_rig(config, uds.DryRunScenario(end_state_not_flat=True))
+        rig.fakes.orders._placed = True  # a position exists before the smoke
+        built.append(rig)
+        return rig
+
+    code = uds.main(_argv(smoke_limits, tmp_path), environ={}, rig_factory=factory)
+    _, document = _only_evidence(tmp_path)
+    assert code == uds.EXIT_ABORTED
+    assert _steps(document)["account_before"] == "FAILED"
+    assert "place_entry" not in built[0].fakes.orders.calls
+
+
+# --------------------------------------------------------------------------- #
+# Raw-frame capture.
+# --------------------------------------------------------------------------- #
+
+
+def test_fixtures_dir_writes_every_raw_payload_scrubbed_with_provenance(
+    tmp_path: Path, smoke_limits: Path
+) -> None:
+    fixtures = tmp_path / "fixtures"
+    code = uds.main(
+        _argv(smoke_limits, tmp_path / "evidence", "--fixtures-dir", str(fixtures)), environ={}
+    )
+    assert code == uds.EXIT_OK
+    names = sorted(p.name for p in fixtures.glob("*.json"))
+    assert names == [
+        "dry-run-001-ORDER_TRADE_UPDATE.json",
+        "dry-run-002-ORDER_TRADE_UPDATE.json",
+    ]
+    payload = json.loads((fixtures / names[0]).read_text(encoding="utf-8"))
+    assert payload["e"] == "ORDER_TRADE_UPDATE"
+    assert payload["o"]["x"] == "NEW"
+    provenance = (fixtures / "provenance.md").read_text(encoding="utf-8")
+    assert all(f"`{name}`: FAKE_DRYRUN" in provenance for name in names)
+    assert "RECORDED_DEMO" not in provenance
+    _, document = _only_evidence(tmp_path / "evidence")
+    assert document["fixtures"]["files"] == names
+
+
+def test_the_dry_run_refuses_the_recorded_demo_fixtures_directory(
+    tmp_path: Path, smoke_limits: Path
+) -> None:
+    target = uds.RECORDED_DEMO_FIXTURES_DIR
+    code = uds.main(_argv(smoke_limits, tmp_path, "--fixtures-dir", str(target)), environ={})
+    assert code == uds.EXIT_REFUSED
+    assert not target.exists() or not any(target.glob("dry-run-*"))
+
+
+def test_without_fixtures_dir_no_frame_is_written(tmp_path: Path, smoke_limits: Path) -> None:
+    _, _, document = _run_with(smoke_limits, tmp_path)
+    assert document["fixtures"]["status"] == "NOT_RUN"
+    assert list(tmp_path.rglob("dry-run-*.json")) == []
+    assert not list(tmp_path.rglob("provenance.md"))
