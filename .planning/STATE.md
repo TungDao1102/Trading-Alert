@@ -3,17 +3,18 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
+current_plan: "58 with Total Plans in Phase: 62 — 56 with a SUMMARY (open: 16-43, 16-44, 16-59, 16-60, 16-61, 16-62; next is 16-59)"
 status: executing
-stopped_at: Completed 16-57-PLAN.md
-last_updated: "2026-10-16T10:20:35.200Z"
+stopped_at: Completed 16-58-PLAN.md
+last_updated: "2026-10-16T13:07:43.478Z"
 last_activity: 2026-10-15
 last_activity_desc: Phase 16 execution started
-state_head: c92401d94d277f74e0334f41ba1f42fe23375aff
+state_head: 7231654fb40ce6361f5e8e8212bb2849a99d3dda
 progress:
   total_phases: 29
   completed_phases: 17
   total_plans: 231
-  completed_plans: 217
+  completed_plans: 218
 milestone_name: milestone
 ---
 
@@ -31,7 +32,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
-Plan: 54 plans in Phase 16, 48 with a SUMMARY (open: 16-37, 16-40, 16-41, 16-42, 16-43, 16-44, 16-46, 16-48, 16-49; gate is 16-37 Task 3, the O-03b manifest freeze)
+Current Plan: 58 with Total Plans in Phase: 62 — 56 with a SUMMARY (open: 16-43, 16-44, 16-59, 16-60, 16-61, 16-62; next is 16-59)
 Status: Executing Phase 16
 Last activity: 2026-10-15 — REEFUSDT terminal settlement as a bounded interval landed (quick 261014-nnl: simulator 2.1.0, protocol v2.4.0 D070/D071); REEF diagnostic on the new code: 48 of 48 points run (old: 33 FundingCoverageError). Manifest NOT frozen, O-03 to be re-issued, S0/S1 manifests need the REEF terminal_settlements row
 
@@ -39,10 +40,11 @@ Progress: [██████░░░░] 61%
 
 ### Cross-phase status (2026-10-16)
 
-- Phase 18 (user-data stream and error taxonomy): offline plans 18-01..18-17, 18-23 and 18-24 are done and merged into develop (merge 6610bd6, not pushed; the DECISIONS row is D072). Open: 18-18 (live Demo smoke) and 18-20 (Demo probe) need the owner with BINANCE_DEMO_API_KEY/SECRET and approved order limits; 18-19 only if 18-18 needs the direct transport; 18-21, 18-22, 18-25 follow the live evidence. The owner finishes Phase 18 on another machine, then reviews the code. No green full-suite run exists for the merged tree yet; PostgreSQL tests are unrun since Docker is off.
-- Phase 16 fix plans: 16-55, 16-56 and 16-57 done on develop (owner decisions in 16-DEC-FIXPLANS.md; 16-57 adds 16-DEC-CONFIG-PIN). Next in order: 16-58, 16-59, 16-62, then 16-60 and 16-43, then 16-61 and 16-44. Phase 16's new DECISIONS rows are D073 (protocol v2.5.0 warm-up amendment) and D074 (regeneration inventory), because Phase 18 took D072.
-- PAUSED at the owner's request after 16-57 (2026-10-16). 16-58 was started and stopped before any change (no commit, clean tree). Resume with 16-58, then 16-59, 16-62, 16-60 and 16-43, 16-61 and 16-44.
-- Owner actions pending: second soak backup bucket with its own crypt passwords; second heartbeat check (period 60 s, grace 120 s) and its secret URL (before 16-43); BINANCE_DEMO_* keys and run limits (before 18-18); turn Docker/PostgreSQL on to run the skipped PostgreSQL tests (see .planning/WINDOWS.md).
+- Phase 18 (user-data stream and error taxonomy): offline plans 18-01..18-17, 18-23 and 18-24 are done and merged into develop (merge 6610bd6, not pushed; the DECISIONS row is D072). Open: 18-18 (live Demo smoke) and 18-20 (Demo probe) need the owner with BINANCE_DEMO_API_KEY/SECRET and approved order limits; 18-19 only if 18-18 needs the direct transport; 18-21, 18-22, 18-25 follow the live evidence. The owner finishes Phase 18 on another machine, then reviews the code. A green full-suite run of the merged tree exists since 16-58 (see the line below); the Phase 18 live checks are still open.
+- Phase 16 fix plans: 16-55, 16-56, 16-57 and 16-58 done on develop (owner decisions in 16-DEC-FIXPLANS.md; 16-57 adds 16-DEC-CONFIG-PIN; 16-58 fixed the SHADOW lock order, refusal of unsizable plans, data-horizon expiry, midnight roll, unknown-append reconcile, per-press replies and the dispatch error log). Next in order: 16-59, 16-62, then 16-60 and 16-43, then 16-61 and 16-44. Phase 16's new DECISIONS rows are D073 (protocol v2.5.0 warm-up amendment) and D074 (regeneration inventory), because Phase 18 took D072.
+- Full suite after 16-58 (2026-10-16): `pytest -m "not docker"` 10071 collected, 10065 passed, 6 skipped, 0 failed; ruff and mypy clean. In that shell TEST_DATABASE_URL was set and the PostgreSQL tests ran (tests/test_paper_shadow_runtime_pg.py passed 3 of 3).
+- Remaining for Phase 23 from 16-58: a distinct canonical rejection reason for store failures (INVALIDATED covers them now, with an error log line by class name).
+- Owner actions pending: second soak backup bucket with its own crypt passwords; second heartbeat check (period 60 s, grace 120 s) and its secret URL (before 16-43); BINANCE_DEMO_* keys and run limits (before 18-18); confirm the PostgreSQL tests run on the owner machine (see .planning/WINDOWS.md; they ran in the 16-58 session).
 
 ## Performance Metrics
 
@@ -223,6 +225,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P55 | 120min | 4 tasks | 40 files |
 | Phase 16 P56 | 50min | 4 tasks | 40 files |
 | Phase 16 P57 | 30 min | 3 tasks | 22 files |
+| Phase 16 P58 | 70 min | 4 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -538,6 +541,9 @@ Recent decisions affecting current work:
 - [Phase 16]: 16-57: configuration identity = SHA-256 of the canonical validated values (canonical decimal text, configured symbol order); EPOCH_PINNED and RUNTIME_START carry it plus raw-file provenance; a different or absent identity refuses with exit 6 held (16-DEC-CONFIG-PIN)
 - [Phase 16]: 16-57: one PAPER_GAP per close across restart, supervisor and pipeline via a shared GapLedger (first writer wins); one post-start seam verification backfill (B1-WR-05, B1-WR-01)
 - [Phase 16]: 16-57: a risk-passed heartbeat without a persisted SHADOW alert is journaled once at start as SHADOW_SIGNAL_LOST and never re-alerted (B1-WR-03, L-11)
+- [Phase 16]: [16-58] A pending reservation the fill driver cannot open is released with SHADOW_RESERVATION_REFUSED (driver reject code, occurred_at = CONFIRM instant); an opened position that cannot be rebuilt stays a loud error
+- [Phase 16]: [16-58] Reservation expiry follows the data horizon (now minus minute_close_lag_seconds); ShadowLedger.admit and risk_inputs judge on a rolled copy and never store a roll
+- [Phase 16]: [16-58] Lock order: the coordinator lock is never held while the ledger lock is awaited; on_confirmed fires after the CONFIRM section; confirm reply records are keyed by the press correlation id
 
 ### Pending Todos
 
@@ -621,6 +627,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-16T10:20:34.073Z
-Stopped at: Completed 16-57-PLAN.md
+Last session: 2026-10-16T13:07:13.865Z
+Stopped at: Completed 16-58-PLAN.md
 Resume file: None
