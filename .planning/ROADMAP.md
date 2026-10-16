@@ -695,7 +695,7 @@ Plans:
 
 **Depends on**: Phase 12, Phase 13.1, Phase 15, Phase 17
 
-**Plans**: 51/54 plans executed (16-01 to 16-41 and 16-45 to 16-54; 16-37 manifest frozen 2026-10-15, 16-46 research run 1 done 2026-10-16, 16-41 O-06/O-10 decided 2026-10-16, 16-48 candidate research-run-1-a01 designated 2026-10-16; 16-42 to 16-44 wait for the user and the soak host; 16-54 added 2026-10-13 for the terminal declaration of known_gaps, done the same day; 16-53 added 2026-10-12 for compose-rehearsal.sh and the dry-run BINANCE_* refusal; plan-checker 2026-10-09: 0 blockers on 16-01 to 16-49; 16-50 added 2026-10-09 for the healthchecks.io heartbeat sender chosen by the user; open user questions Q-A to Q-Q are asked at the blocking-human checkpoints)
+**Plans**: 52/54 plans executed (16-01 to 16-42 and 16-45 to 16-54; 16-37 manifest frozen 2026-10-15, 16-46 research run 1 done 2026-10-16, 16-41 O-06/O-10 decided 2026-10-16, 16-48 candidate research-run-1-a01 designated 2026-10-16; 16-42 to 16-44 wait for the user and the soak host; 16-54 added 2026-10-13 for the terminal declaration of known_gaps, done the same day; 16-53 added 2026-10-12 for compose-rehearsal.sh and the dry-run BINANCE_* refusal; plan-checker 2026-10-09: 0 blockers on 16-01 to 16-49; 16-50 added 2026-10-09 for the healthchecks.io heartbeat sender chosen by the user; open user questions Q-A to Q-Q are asked at the blocking-human checkpoints)
 
 **Requirements**: PAPER-01, PAPER-02
 
@@ -791,7 +791,7 @@ Plans:
 - [x] 16-39-PLAN.md
 - [x] 16-40-PLAN.md
 - [x] 16-41-PLAN.md
-- [ ] 16-42-PLAN.md
+- [x] 16-42-PLAN.md
 - [ ] 16-43-PLAN.md
 - [ ] 16-44-PLAN.md
 - [x] 16-45-PLAN.md
