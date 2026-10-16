@@ -43,7 +43,7 @@ actuals:
   tasks: 3
   commits: 6
 plan_head_before: 091f38fa95f8fd014a844f5d41a8ca66401d92cc
-plan_head_after: dfadd5186d1c3de36cb7d79fbf88f42e4c6a9cee
+plan_head_after: dfadd51a6d0098512391ffa0744f81651f85d37a
 ---
 
 # Phase 18 Plan 23: Demo probe - the cases that send orders Summary
