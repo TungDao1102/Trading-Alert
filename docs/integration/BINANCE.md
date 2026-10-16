@@ -20,6 +20,21 @@ Wrap SDK clients behind project adapters. Do not let SDK-generated/Pydantic resp
 
 The dependency version must be pinned/locked by the project environment and re-verified during upgrades.
 
+### Environments and client configuration (Phase 18)
+
+The environment is chosen explicitly: `DEMO`, `TESTNET` or `LIVE`, matched exactly, with no default and nothing inferred from a host name (`parse_environment` in `src/adapters/binance_client.py`). Each environment has one row of URLs (`ENVIRONMENT_ROWS` in the same module). The owner-open parts of the rows are the user's decision recorded in `.planning/phases/18-user-data-stream-error-taxonomy/decisions/18-DEC-O-18-01.md`, and tests compare the rows with that record:
+
+- DEMO is the smoke and probe environment. REST uses the SDK's Demo constant; the WebSocket Streams URL is the user's recorded value `wss://demo-fstream.binance.com`; the WebSocket API is NOT_CONFIGURED (the phase uses the REST listenKey and WebSocket Streams). Whether Demo Trading serves a listenKey and a user-data stream at that URL is still unverified (section 5); verify against current Binance docs before implementation. The connected-machine smoke (plan 18-18) is the first live check.
+- TESTNET is NOT_CONFIGURED: by the user's decision the legacy testnet stays unconfigured.
+- LIVE uses the SDK production constants for all three surfaces and additionally requires the live enablement state to be enabled; nothing in the client enables LIVE.
+- Selecting a surface that is NOT_CONFIGURED raises `EnvironmentNotConfigured` before any SDK object is built.
+
+One factory: `build_sdk_client` is the only place in `src` that constructs a `DerivativesTradingUsdsFutures` client able to sign requests. It builds the REST, WebSocket Streams and WebSocket API configurations from the one row, gives every surface that was not requested an inert `.invalid` URL, and runs `assert_environment`, which re-reads every surface and accepts only the exact row URL (a host suffix, userinfo, a port, another path or another scheme raises `EndpointViolation`). The guard can be re-run on a built client before use.
+
+Credentials: the variable names per environment are the user's (`CREDENTIAL_SPECS`). DEMO and LIVE have distinct names, and TESTNET has none (asking for them raises `CredentialNamesNotRatified`). Each value is read from the named environment variable or from the file named by `<NAME>_FILE` (an absolute path outside the repository), never from the command line or the repository; setting both is refused. Loaded values are registered with the process redactor.
+
+Client limits and signed calls: the REST timeout, the SDK's own retries and backoff, the explicit recvWindow, the rate-limit waits, the drift limits and the stream limits are the user's values in `config/binance/binance-limits-v1.toml`, loaded by `load_binance_limits` (`src/adapters/binance_limits.py`). This document and the code carry none of the numbers; `config/binance/README.md` explains each key. recvWindow is sent explicitly on every signed call. The clock-drift guard (`ClockDriftGuard`, `src/adapters/binance_clock.py`) fails closed: a missing measurement, a failed measurement, an out-of-limit offset or a stale verdict blocks new entries. An HTTP 418 is never retried and bans REST; a 429 retries no call and pauses every REST call of the process; the end of either wait proves nothing about any order. The decision row is D072 in `DECISIONS.md` ("Phase 18 client configuration, user-data stream and exchange error taxonomy"), which carries the sha256 of the limits file. The recvWindow and rate-limit statements rest on WebFetch summaries of 2026-10-16 (`SOURCES.md`, "Facts read for Phase 18"), not on a live check; verify against current Binance docs before implementation.
+
 ## 3. Market data
 
 Use:

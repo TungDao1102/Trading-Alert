@@ -11,6 +11,7 @@ key) is never read as a value. Every test is offline.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import tomllib
 from pathlib import Path
@@ -328,3 +329,37 @@ def test_demo_and_live_credential_names_are_disjoint() -> None:
     demo = bc.credential_spec_for(bc.Environment.DEMO)
     live = bc.credential_spec_for(bc.Environment.LIVE)
     assert not set(demo.variables) & set(live.variables)
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: the DECISIONS row pins the file.
+# --------------------------------------------------------------------------- #
+
+DECISIONS = REPO_ROOT / "docs" / "DECISIONS.md"
+_ROW_TITLE = (
+    "Phase 18 client configuration, user-data stream and exchange error taxonomy: "
+    "user-ratified thresholds, environments and status classes"
+)
+
+
+def _phase18_row() -> str:
+    """The one DECISIONS row with the Phase 18 title (found by title, not by number)."""
+    rows = [
+        line
+        for line in DECISIONS.read_text(encoding="utf-8").splitlines()
+        if re.match(r"^\| D\d{3} \| ", line) and f"| {_ROW_TITLE} |" in line
+    ]
+    assert len(rows) == 1, "exactly one DECISIONS row carries the Phase 18 title"
+    return rows[0]
+
+
+def test_decisions_row_pins_the_limits_file_hash() -> None:
+    row = _phase18_row()
+    match = re.search(r"sha256\b[^|]*?\b([0-9a-f]{64})\b", row)
+    assert match is not None, "the row carries no 64-hex sha256"
+    normalized = LIMITS_FILE.read_bytes().replace(b"\r\n", b"\n")
+    assert match.group(1) == hashlib.sha256(normalized).hexdigest()
+    assert "config/binance/binance-limits-v1.toml" in row
+    assert "18-DEC-O-18-01.md" in row
+    assert "Amendment 2026-10-16 (user): 429 semantics" in row
+    assert "D055" in row and "OPEN" in row
