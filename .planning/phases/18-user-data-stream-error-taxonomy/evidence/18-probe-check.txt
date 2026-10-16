@@ -1,0 +1,1 @@
+probe dry run on the connected machine: PASS (exit 0, proof_class FAKE, 16 cases NOT_REHEARSED in CASE_ORDER order, zero live port calls, check_probe_evidence no problem; 108 tests pass)
