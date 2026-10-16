@@ -32,9 +32,10 @@ in ``decisions/18-DEC-O-18-01.md``). Selecting an unconfigured surface raises
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
 from urllib.parse import urlsplit
@@ -51,6 +52,7 @@ from binance_common.constants import (
     DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL,
 )
 from binance_sdk_derivatives_trading_usds_futures import DerivativesTradingUsdsFutures
+from src.ops.redaction import register_runtime_secret
 
 # --------------------------------------------------------------------------- #
 # Errors. Messages name the environment, the surface or a variable NAME only; never a
@@ -262,19 +264,100 @@ def credential_spec_for(environment: Environment) -> CredentialSpec:
     return spec
 
 
-def _read_variable(environ: Mapping[str, str], name: str) -> str:
-    value = environ.get(name)
-    if value is None or not value.strip():
-        raise CredentialError(f"environment variable {name} is missing or blank")
-    return value.strip()
+FILE_SUFFIX = "_FILE"
+
+FileReader = Callable[[Path], str]
 
 
-def load_api_credentials(environ: Mapping[str, str], *, spec: CredentialSpec) -> ApiCredentials:
-    """Read the key pair named by ``spec`` from ``environ``. Errors name the variable only."""
-    return ApiCredentials(
-        api_key=_read_variable(environ, spec.key_variable),
-        api_secret=_read_variable(environ, spec.secret_variable),
-    )
+def _read_utf8(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _read_from_file(
+    file_variable: str, raw_path: str, repo_root: Path, read_file: FileReader
+) -> str:
+    """Read one credential from the file named by ``file_variable``. Errors name it only."""
+    if not raw_path.strip():
+        raise CredentialError(f"environment variable {file_variable} is blank")
+    path = Path(raw_path)
+    if not path.is_absolute():
+        raise CredentialError(f"environment variable {file_variable} must name an absolute path")
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise CredentialError(
+            f"environment variable {file_variable} does not name an existing file"
+        ) from None
+    if not resolved.is_file():
+        raise CredentialError(f"environment variable {file_variable} does not name a regular file")
+    if resolved.is_relative_to(repo_root.resolve()):
+        raise CredentialError(
+            f"environment variable {file_variable} names a file inside the repository"
+        )
+    try:
+        content = read_file(resolved)
+    except (OSError, UnicodeDecodeError):
+        raise CredentialError(
+            f"environment variable {file_variable} names a file that cannot be read"
+        ) from None
+    value = content.strip()
+    if not value:
+        raise CredentialError(f"environment variable {file_variable} names an empty file")
+    return value
+
+
+def _load_one(environ: Mapping[str, str], name: str, repo_root: Path, read_file: FileReader) -> str:
+    file_variable = name + FILE_SUFFIX
+    direct = environ.get(name)
+    raw_path = environ.get(file_variable)
+    if direct is not None and raw_path is not None:
+        raise CredentialError(
+            f"ambiguous credential: both {name} and {file_variable} are set; set exactly one"
+        )
+    if raw_path is not None:
+        return _read_from_file(file_variable, raw_path, repo_root, read_file)
+    if direct is None or not direct.strip():
+        raise CredentialError(
+            f"environment variable {name} is missing or blank (set {name} or {file_variable})"
+        )
+    return direct.strip()
+
+
+def load_api_credentials(
+    environ: Mapping[str, str],
+    *,
+    spec: CredentialSpec,
+    repo_root: Path,
+    refuse_if_present: Sequence[CredentialSpec] = (),
+    read_file: FileReader | None = None,
+) -> ApiCredentials:
+    """Load the key pair named by ``spec`` (D-13). Errors name a variable, never a value.
+
+    Each value comes from ``<NAME>`` or from the file named by ``<NAME>_FILE`` (absolute,
+    existing, regular, outside ``repo_root``, non-blank; surrounding whitespace stripped);
+    both set is ambiguous and raises. Only the names of ``spec`` are read, so a LIVE key is
+    never read for DEMO. If any variable of a ``refuse_if_present`` spec (or its ``_FILE``
+    form) is present, nothing is loaded. There is no command-line path. On success the key
+    and the secret are registered with the process redactor.
+    """
+    own = set(spec.variables)
+    for other in refuse_if_present:
+        for name in other.variables:
+            if name in own:
+                raise ValueError("refuse_if_present overlaps the loaded credential names")
+            for candidate in (name, name + FILE_SUFFIX):
+                if candidate in environ:
+                    raise CredentialError(
+                        f"environment variable {candidate} of another environment is set; "
+                        "refusing to load credentials"
+                    )
+    reader = read_file if read_file is not None else _read_utf8
+    root = Path(repo_root)
+    api_key = _load_one(environ, spec.key_variable, root, reader)
+    api_secret = _load_one(environ, spec.secret_variable, root, reader)
+    register_runtime_secret(api_key)
+    register_runtime_secret(api_secret)
+    return ApiCredentials(api_key=api_key, api_secret=api_secret)
 
 
 # --------------------------------------------------------------------------- #

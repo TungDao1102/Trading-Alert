@@ -68,7 +68,7 @@ def _limits() -> bc.ClientLimits:
 
 def _credentials() -> bc.ApiCredentials:
     return bc.load_api_credentials(
-        {"T_KEY": FAKE_KEY, "T_SECRET": FAKE_SECRET}, spec=TEST_ONLY_SPEC
+        {"T_KEY": FAKE_KEY, "T_SECRET": FAKE_SECRET}, spec=TEST_ONLY_SPEC, repo_root=REPO_ROOT
     )
 
 
@@ -174,11 +174,11 @@ def test_load_api_credentials_missing_or_blank_names_the_variable_only(missing: 
     env = {"T_KEY": FAKE_KEY, "T_SECRET": FAKE_SECRET}
     del env[missing]
     with pytest.raises(bc.CredentialError) as info:
-        bc.load_api_credentials(env, spec=TEST_ONLY_SPEC)
+        bc.load_api_credentials(env, spec=TEST_ONLY_SPEC, repo_root=REPO_ROOT)
     assert missing in str(info.value)
     blank = {"T_KEY": FAKE_KEY, "T_SECRET": FAKE_SECRET, missing: "   "}
     with pytest.raises(bc.CredentialError) as info:
-        bc.load_api_credentials(blank, spec=TEST_ONLY_SPEC)
+        bc.load_api_credentials(blank, spec=TEST_ONLY_SPEC, repo_root=REPO_ROOT)
     assert missing in str(info.value)
     assert FAKE_KEY not in str(info.value)
     assert FAKE_SECRET not in str(info.value)

@@ -17,10 +17,14 @@ Two layers decide what is a secret:
      percent-encoded and JSON-escaped variants.
   2. Shapes (no environment needed): URL userinfo passwords, Telegram bot tokens,
      ``signature=<64 hex>``, ``X-MBX-APIKEY`` header values, AWS-style access key
-     ids and PEM private key blocks.
+     ids, PEM private key blocks and Binance listenKeys (``listenKey=<value>`` and the
+     JSON form ``"listenKey": "<value>"``).
+  3. Runtime values (Phase 18, D-13): ``register_runtime_secret`` adds a value that is
+     not in the environment under a secret-looking name (an API key read from a file, a
+     listenKey received from Binance); it is merged into the active redactor.
 
 Structlog keys named like ``password`` / ``secret`` / ``token`` / ``api_key`` /
-``authorization`` / ``signature`` are masked whatever their value.
+``authorization`` / ``signature`` / ``listenKey`` are masked whatever their value.
 
 The module imports only the standard library and structlog. It never applies
 application-level encryption (D045(b)); it only removes text from output.
@@ -66,6 +70,9 @@ SECRET_KEY_NAME_PARTS: tuple[str, ...] = (
     "apikey",
     "authorization",
     "signature",
+    # A listenKey is an account-level credential (Phase 18, research P3).
+    "listenkey",
+    "listen_key",
 )
 
 # Values shorter than this are never collected from the environment (flags such as
@@ -100,6 +107,13 @@ SHAPE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     # AWS-style access key id.
     (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), REDACTED),
+    # Binance listenKey in a query or form: listenKey=<24+ alphanumerics> (Phase 18, P3).
+    (re.compile(r"(?i)(listen_?key=)[A-Za-z0-9]{24,}"), rf"\1{REDACTED}"),
+    # listenKey in a JSON object or a Python dict repr: "listenKey": "<value>".
+    (
+        re.compile(r"(?i)([\"']listen_?key[\"']\s*:\s*[\"'])[^\"'\s]+"),
+        rf"\1{REDACTED}",
+    ),
 )
 
 
@@ -119,11 +133,22 @@ def _variants(value: str) -> set[str]:
     return {form for form in forms if len(form) >= MIN_SECRET_LENGTH}
 
 
+def _alternation(values: frozenset[str]) -> re.Pattern[str] | None:
+    """One regex over ``values``, longest first so a value hiding inside another is not split."""
+    if not values:
+        return None
+    ordered = sorted(values, key=lambda v: (-len(v), v))
+    return re.compile("|".join(re.escape(v) for v in ordered))
+
+
 @dataclass(frozen=True)
 class Redactor:
     """Masks secret values (from the environment) and secret shapes in text."""
 
     _value_pattern: re.Pattern[str] | None
+    # The literal values behind ``_value_pattern`` (lets runtime secrets merge into one
+    # longest-first alternation). Empty for a Redactor built from a bare pattern.
+    _values: frozenset[str] = frozenset()
 
     @classmethod
     def from_environ(cls, environ: Mapping[str, str]) -> Redactor:
@@ -140,8 +165,20 @@ class Redactor:
                 values |= _variants(password)
         if not values:
             return cls(None)
-        ordered = sorted(values, key=lambda v: (-len(v), v))
-        return cls(re.compile("|".join(re.escape(v) for v in ordered)))
+        frozen = frozenset(values)
+        return cls(_alternation(frozen), frozen)
+
+    def with_values(self, extra: frozenset[str]) -> Redactor:
+        """A Redactor that also masks ``extra`` (already expanded into variants)."""
+        if not extra:
+            return self
+        if self._value_pattern is not None and not self._values:
+            # Built from a bare pattern: keep it as the first alternative.
+            runtime = _alternation(extra)
+            assert runtime is not None
+            return Redactor(re.compile(f"{self._value_pattern.pattern}|{runtime.pattern}"))
+        merged = self._values | extra
+        return Redactor(_alternation(merged), merged)
 
     def scrub(self, text: str) -> str:
         """Return ``text`` with secret values and secret shapes replaced."""
@@ -158,12 +195,59 @@ class Redactor:
 
 _active: Redactor | None = None
 
+# Secrets that are not in the environment under a secret-looking name: API keys read from a
+# file or under a neutral variable name, and listenKeys received at runtime (Phase 18, D-13,
+# research P3). Stored as their expanded variants; merged into every active redactor.
+_runtime_lock = threading.Lock()
+_runtime_values: frozenset[str] = frozenset()
+_merged_cache: tuple[Redactor, frozenset[str], Redactor] | None = None
+
+
+def register_runtime_secret(value: str) -> None:
+    """Mask ``value`` (and its encoded variants) on every output path from now on.
+
+    Idempotent; values shorter than ``MIN_SECRET_LENGTH`` (or not text) are ignored so a
+    short flag never becomes a redaction rule.
+    """
+    global _runtime_values
+    if not isinstance(value, str) or len(value) < MIN_SECRET_LENGTH:
+        return
+    forms = _variants(value)
+    with _runtime_lock:
+        if forms <= _runtime_values:
+            return
+        _runtime_values = _runtime_values | forms
+
+
+def clear_runtime_secrets() -> None:
+    """Forget every runtime-registered secret (tests)."""
+    global _runtime_values, _merged_cache
+    with _runtime_lock:
+        _runtime_values = frozenset()
+        _merged_cache = None
+
+
+def _with_runtime(base: Redactor) -> Redactor:
+    """``base`` plus the runtime secrets; recompiles only when either side changed."""
+    global _merged_cache
+    with _runtime_lock:
+        runtime = _runtime_values
+        cached = _merged_cache
+    if not runtime:
+        return base
+    if cached is not None and cached[1] is runtime and cached[0] == base:
+        return cached[2]
+    merged = base.with_values(runtime)
+    with _runtime_lock:
+        if _runtime_values is runtime:
+            _merged_cache = (base, runtime, merged)
+    return merged
+
 
 def _current() -> Redactor:
-    """The configured redactor, else one built fresh from the live environment."""
-    if _active is not None:
-        return _active
-    return Redactor.from_environ(os.environ)
+    """The configured redactor (else one built from the live environment) plus runtime secrets."""
+    base = _active if _active is not None else Redactor.from_environ(os.environ)
+    return _with_runtime(base)
 
 
 def scrub(text: str) -> str:
