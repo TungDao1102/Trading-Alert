@@ -67,6 +67,11 @@ class FillEvent:
     Duck-typed: the fold_fills function accepts both attribute-style
     objects (this dataclass) and dict-style payloads (test fixture
     format). The unique key is `(order_id, exchange_trade_id)`.
+
+    The four optional fields (Phase 18, G3-009) carry the trade's
+    commission, commission asset, realized PnL and maker flag from the
+    user-data stream; they default to None so every earlier caller is
+    unchanged, and they are validated when given.
     """
 
     order_id: str
@@ -77,6 +82,10 @@ class FillEvent:
     fill_price: Decimal
     fill_quantity: Decimal
     fill_time_utc: datetime
+    commission: Decimal | None = None
+    commission_asset: str | None = None
+    realized_pnl: Decimal | None = None
+    is_maker: bool | None = None
 
     def __post_init__(self) -> None:
         for fname in (
@@ -90,6 +99,13 @@ class FillEvent:
         for fname in ("fill_price", "fill_quantity"):
             _require_decimal(getattr(self, fname), fname)
         _require_utc_aware(self.fill_time_utc, "fill_time_utc")
+        for fname in ("commission", "realized_pnl"):
+            if getattr(self, fname) is not None:
+                _require_decimal(getattr(self, fname), fname)
+        if self.commission_asset is not None:
+            _require_non_empty(self.commission_asset, "commission_asset")
+        if self.is_maker is not None and not isinstance(self.is_maker, bool):
+            raise TypeError(f"is_maker must be bool, got {type(self.is_maker).__name__}")
 
 
 @dataclass(frozen=True)
@@ -238,6 +254,10 @@ def fold_fills(
             "fill_price": _get_field(event, "fill_price"),
             "fill_quantity": fill_quantity,
             "fill_time_utc": _get_field(event, "fill_time_utc"),
+            "commission": _get_field(event, "commission"),
+            "commission_asset": _get_field(event, "commission_asset"),
+            "realized_pnl": _get_field(event, "realized_pnl"),
+            "is_maker": _get_field(event, "is_maker"),
         }
 
     # Sort deterministically by (symbol, order_id, exchange_trade_id).
