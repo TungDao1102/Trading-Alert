@@ -387,6 +387,7 @@ def test_a_stale_marker_of_this_container_is_removed_by_the_next_start_before_ru
 # Every `return` of `main` returns one of these calls. Only the four marked True can yield 0.
 RETURN_KINDS: dict[str, bool] = {
     "_healthcheck": True,  # the --healthcheck probe (docker exec, never the service process)
+    "_liveness": True,  # the --liveness probe of the paper heartbeat (docker exec, plan 16-56)
     "_skip": True,  # SKIPPED: 0 at the end of a hold, or at once without --hold-on-refusal
     "_pinned_and_exit": True,  # the one-shot --pin-epoch (never in the service command)
     "_stopped_on_request": True,  # after RUNTIME_STOP, following a requested stop

@@ -1,0 +1,27 @@
+# Separate external heartbeat ping for the PAPER runtime of the soak project (plan 16-56, owner
+# decision 16-DEC-HUNG-RUNTIME, 16-55 Q2 = B). Installed by
+# `deploy/heartbeat.sh --target paper --install-timer --interval-seconds N --soak-env-file PATH`,
+# which substitutes the checkout directory, the paper URL file path, the fail-ping flag and the soak
+# env file for the tokens below.
+# One run executes the read-only liveness probe of the paper service through deploy/compose-soak.sh
+# (`python -m src.paper.runtime --liveness`) and pings the paper check of the external monitor only
+# while it passes: a held refusal, a hung event loop or a silent market feed sends no success ping.
+# It never stops, restarts or otherwise touches the paper runtime; a failed ping only fails this
+# oneshot unit (`systemctl status trading-soak-paper-heartbeat`).
+# The paper ping URL is a secret of its own, never the collector's: it lives in a root-only file,
+# and systemd hands this unit a private copy of it as the credential `heartbeat-paper-url`.
+# There is deliberately no dependency, restart or failure link to any other unit. User must be the
+# operator account that is in the docker group (deploy/bootstrap.sh creates `trading`).
+[Unit]
+Description=Trading soak project: external heartbeat ping for the paper runtime
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=trading
+WorkingDirectory=@TRADING_DIR@
+LoadCredential=heartbeat-paper-url:@URL_FILE@
+Environment=HEARTBEAT_FAIL_PING=@FAIL_PING@
+Environment=TRADING_ENV_FILE=@SOAK_ENV_FILE@
+ExecStart=/usr/bin/env bash @TRADING_DIR@/deploy/heartbeat.sh --target paper

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-# External heartbeat sender for the collector (plan 16-50, D042 condition 1).
+# External heartbeat sender for the collector (plan 16-50, D042 condition 1) and, with
+# --target paper, for the paper runtime of the soak project (plan 16-56, 16-DEC-HUNG-RUNTIME).
 #
 # Usage:
 #   deploy/heartbeat.sh [--fail-ping] [--url-file PATH] [--dry-run]
@@ -13,7 +14,28 @@ set -Eeuo pipefail
 #                                  (root) install trading-heartbeat.service and
 #                                  trading-heartbeat.timer and enable the timer; N is the
 #                                  operator's ping interval in seconds and has no default
+#   deploy/heartbeat.sh --target paper [--fail-ping] [--url-file PATH] [--dry-run]
+#                                  one run of the separate PAPER heartbeat (plan 16-56,
+#                                  16-DEC-HUNG-RUNTIME): probe the paper runtime's liveness
+#                                  (`python -m src.paper.runtime --liveness` inside the paper
+#                                  service of the soak project, through deploy/compose-soak.sh),
+#                                  then ping the paper check of the external monitor
+#   deploy/heartbeat.sh --target paper --set-url [--url-file PATH] [--dry-run]
+#   deploy/heartbeat.sh --target paper --install-timer --interval-seconds N
+#                       --soak-env-file PATH [--fail-ping] [--url-file PATH] [--dry-run]
+#                                  (root) the same for the paper check: its own URL file
+#                                  (/etc/trading/heartbeat-paper.url by default, or
+#                                  HEARTBEAT_PAPER_URL_FILE), its own systemd credential
+#                                  `heartbeat-paper-url`, its own units
+#                                  trading-soak-paper-heartbeat.service and .timer; PATH is the
+#                                  soak env file the unit hands to deploy/compose-soak.sh
 #   deploy/heartbeat.sh -h | --help
+#
+# --target collector (the default) is everything above the paper lines, unchanged. The paper
+# target never reads the collector's URL file or credential, refuses --url-file naming the
+# collector's default file, and its probe passes only while the paper runtime has no held marker
+# and both its event-loop stamp and its last market message are younger than the configured feed
+# silence timeout (never the bar-age healthcheck).
 #
 # One run executes the collector probe (`python -m src.data.collector --healthcheck` inside the
 # compose collector service, read-only) and sends exactly one success ping only while that probe
@@ -58,8 +80,17 @@ TOKEN_DIR='@TRADING_DIR@'
 TOKEN_URL_FILE='@URL_FILE@'
 TOKEN_FAIL_PING='@FAIL_PING@'
 TOKEN_INTERVAL='@INTERVAL_SECONDS@'
+TOKEN_SOAK_ENV='@SOAK_ENV_FILE@'
 UNITS=(trading-heartbeat.service trading-heartbeat.timer)
 TIMER_UNIT=trading-heartbeat.timer
+# The collector's default URL file: the paper target must never use it.
+COLLECTOR_URL_FILE=$DEFAULT_URL_FILE
+# Which check this run serves (--target); the collector is the default and is unchanged.
+TARGET=collector
+PROBE_LABEL=collector
+URL_FILE_ENV_NAME=HEARTBEAT_URL_FILE
+TARGET_ARGS=
+SOAK_ENV_FILE=
 
 FAIL_PING=0
 SET_URL=0
@@ -71,7 +102,8 @@ STEP_TIMEOUT=
 COMPOSE=()
 
 usage() {
-  sed -n '3,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  awk 'NR >= 3 && /^#/ { print; next } NR >= 3 { exit }' "${BASH_SOURCE[0]}" |
+    sed 's/^# \{0,1\}//' >&2
 }
 
 usage_error() {
@@ -103,6 +135,16 @@ parse_args() {
         INTERVAL=$2
         shift
         ;;
+      --target)
+        (($# >= 2)) || usage_error "--target needs collector or paper"
+        TARGET=$2
+        shift
+        ;;
+      --soak-env-file)
+        (($# >= 2)) || usage_error "--soak-env-file needs a path"
+        SOAK_ENV_FILE=$2
+        shift
+        ;;
       --dry-run) DRY_RUN=1 ;;
       -h | --help)
         usage
@@ -112,6 +154,7 @@ parse_args() {
     esac
     shift
   done
+  apply_target
   if [[ ${HEARTBEAT_FAIL_PING:-0} != [01] ]]; then
     usage_error "HEARTBEAT_FAIL_PING must be 0 or 1"
   fi
@@ -133,19 +176,50 @@ parse_args() {
     [[ $INTERVAL =~ ^[1-9][0-9]*$ ]] || usage_error "--interval-seconds must be a positive integer"
   fi
   local candidate
-  for candidate in "$URL_FILE_FLAG" "${HEARTBEAT_URL_FILE:-}"; do
+  for candidate in "$URL_FILE_FLAG" "${!URL_FILE_ENV_NAME:-}"; do
     if [[ -n $candidate && ! $candidate =~ $UNIT_PATH_PATTERN ]]; then
       usage_error "a URL file path must be absolute and hold only letters, digits and . _ / + = , ~ -"
     fi
   done
+  if [[ $TARGET == paper ]]; then
+    if [[ "$(url_file_path)" == "$COLLECTOR_URL_FILE" ]]; then
+      usage_error "the paper heartbeat has its own URL file; it never uses the collector's $COLLECTOR_URL_FILE"
+    fi
+    if ((INSTALL_TIMER)); then
+      [[ -n $SOAK_ENV_FILE ]] || usage_error "--target paper --install-timer needs --soak-env-file PATH (the soak env file of deploy/compose-soak.sh)"
+      [[ $SOAK_ENV_FILE =~ $UNIT_PATH_PATTERN ]] || usage_error "--soak-env-file must be absolute and hold only letters, digits and . _ / + = , ~ -"
+    elif [[ -n $SOAK_ENV_FILE ]]; then
+      usage_error "--soak-env-file is only valid with --target paper --install-timer"
+    fi
+  elif [[ -n $SOAK_ENV_FILE ]]; then
+    usage_error "--soak-env-file is only valid with --target paper --install-timer"
+  fi
+}
+
+# apply_target: select the probe, the URL source and the units of the chosen check.
+apply_target() {
+  case $TARGET in
+    collector) ;;
+    paper)
+      SERVICE=paper
+      PROBE_LABEL="paper liveness"
+      DEFAULT_URL_FILE=/etc/trading/heartbeat-paper.url
+      CREDENTIAL_NAME=heartbeat-paper-url
+      URL_FILE_ENV_NAME=HEARTBEAT_PAPER_URL_FILE
+      UNITS=(trading-soak-paper-heartbeat.service trading-soak-paper-heartbeat.timer)
+      TIMER_UNIT=trading-soak-paper-heartbeat.timer
+      TARGET_ARGS="--target paper "
+      ;;
+    *) usage_error "--target must be collector or paper" ;;
+  esac
 }
 
 # url_file_path: the URL file path without the test prefix (the value a unit must carry).
 url_file_path() {
   if [[ -n $URL_FILE_FLAG ]]; then
     printf '%s' "$URL_FILE_FLAG"
-  elif [[ -n ${HEARTBEAT_URL_FILE:-} ]]; then
-    printf '%s' "$HEARTBEAT_URL_FILE"
+  elif [[ -n ${!URL_FILE_ENV_NAME:-} ]]; then
+    printf '%s' "${!URL_FILE_ENV_NAME}"
   else
     printf '%s' "$DEFAULT_URL_FILE"
   fi
@@ -218,7 +292,7 @@ deliver() {
   log "heartbeat: $1 ping delivered"
 }
 
-# run_once: probe the collector, then ping according to the verdict.
+# run_once: probe the collector (or the paper runtime), then ping according to the verdict.
 run_once() {
   load_url
   compose_init
@@ -228,7 +302,12 @@ run_once() {
   fi
 
   local probe_ok=0
-  if run timeout "$STEP_TIMEOUT" "${COMPOSE[@]}" exec -T "$SERVICE" "$PY" -m src.data.collector --healthcheck; then
+  if [[ $TARGET == paper ]]; then
+    # The soak project only, through its wrapper; the read-only liveness probe (plan 16-56).
+    if run timeout "$STEP_TIMEOUT" bash "$SCRIPT_DIR/compose-soak.sh" exec -T "$SERVICE" "$PY" -m src.paper.runtime --liveness; then
+      probe_ok=1
+    fi
+  elif run timeout "$STEP_TIMEOUT" "${COMPOSE[@]}" exec -T "$SERVICE" "$PY" -m src.data.collector --healthcheck; then
     probe_ok=1
   fi
 
@@ -237,10 +316,10 @@ run_once() {
     return 0
   fi
   if ((FAIL_PING)); then
-    log "heartbeat: collector probe failed; sending a fail ping"
+    log "heartbeat: $PROBE_LABEL probe failed; sending a fail ping"
     deliver fail /fail || true
   else
-    log "heartbeat: collector probe failed; no ping sent"
+    log "heartbeat: $PROBE_LABEL probe failed; no ping sent"
   fi
   return 1
 }
@@ -289,9 +368,16 @@ install_timer() {
   url_path="$(p "$unit_url_file")"
   if [[ ! -f $url_path ]]; then
     if ((DRY_RUN)); then
-      warn "no ping URL file at $url_path yet; run 'sudo deploy/heartbeat.sh --set-url' before the real install"
+      warn "no ping URL file at $url_path yet; run 'sudo deploy/heartbeat.sh ${TARGET_ARGS}--set-url' before the real install"
     else
-      url_die "no ping URL file at $url_path; run 'sudo deploy/heartbeat.sh --set-url' first"
+      url_die "no ping URL file at $url_path; run 'sudo deploy/heartbeat.sh ${TARGET_ARGS}--set-url' first"
+    fi
+  fi
+  if [[ $TARGET == paper && ! -f "$(p "$SOAK_ENV_FILE")" ]]; then
+    if ((DRY_RUN)); then
+      warn "no soak env file at $SOAK_ENV_FILE yet; create it from deploy/soak.env.example before the real install"
+    else
+      die "no soak env file at $SOAK_ENV_FILE; create it from deploy/soak.env.example first"
     fi
   fi
   unit_dir="$(p /etc/systemd/system)"
@@ -302,6 +388,7 @@ install_timer() {
     content="${content//"$TOKEN_URL_FILE"/$unit_url_file}"
     content="${content//"$TOKEN_FAIL_PING"/$FAIL_PING}"
     content="${content//"$TOKEN_INTERVAL"/$INTERVAL}"
+    content="${content//"$TOKEN_SOAK_ENV"/$SOAK_ENV_FILE}"
     write_if_changed "$unit_dir/$unit" "$content"
     if ((WROTE)); then
       changed=1

@@ -869,3 +869,42 @@ def test_the_soak_runbook_names_the_v2_configuration_in_force() -> None:
     assert "paper-runtime-v2.toml" in project
     assert "feed_silence_timeout_seconds" in project
     assert "16-DEC-WS-WATCHDOG" in project
+
+
+# ---- plan 16-56 Task 4: the separate paper heartbeat (16-DEC-HUNG-RUNTIME) ------------------- #
+
+
+def test_the_paper_heartbeat_subsection_states_the_recorded_numbers_and_the_limits() -> None:
+    body = _sub20("20.9")
+    assert body.startswith("### 20.9 Paper heartbeat")
+    for phrase in (
+        "16-DEC-HUNG-RUNTIME",
+        "every 60 s",
+        "period of 60 s",
+        "grace of 120 s",
+        "dashboard",
+        "--liveness",
+        "120 s feed-liveness and loop-alive signal",
+        "not the 3900 s bar-age healthcheck",
+        "held refusal",
+        "hung event loop",
+        "silent feed",
+        "no success ping",
+        "an alert, not proof of recovery",
+        "coverage criterion",
+        "/etc/trading/heartbeat-paper.url",
+        "never the collector's",
+        "trading-soak-paper-heartbeat.service",
+        "trading-soak-paper-heartbeat.timer",
+    ):
+        assert phrase in body, phrase
+    commands = _fenced_lines(body)
+    assert "sudo deploy/heartbeat.sh --target paper --set-url" in commands
+    assert any(
+        line.startswith(
+            "sudo deploy/heartbeat.sh --target paper --install-timer --interval-seconds 60"
+        )
+        and "--soak-env-file" in line
+        for line in commands
+    ), commands
+    assert "https://" not in body

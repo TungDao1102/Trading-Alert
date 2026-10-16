@@ -1650,7 +1650,7 @@ Quyết định `16-DEC-Q-L` (ngày 2026-10-09) là "separate-bot": máy soak d�
 > - **Giải quyết vấn đề gì:** Collector hay cả máy chết trong im lặng thì Open Interest mất vĩnh viễn; tín hiệu chỉ được gửi khi đầu dò collector qua, nên dừng collector làm tín hiệu im và dịch vụ bên ngoài báo cho bạn.
 > - **Mức quan trọng:** **BẮT BUỘC** (D042 điều kiện 1; RUNBOOK 11.9; điều kiện `HEARTBEAT_MONITOR_ALERT_RECEIVED`). Nó chỉ báo cho bạn, không bảo vệ vị thế: SL luôn nằm trên sàn.
 
-**Mục đích:** script có ba chế độ. Chế độ trần chạy đầu dò chỉ-đọc của collector (`python -m src.data.collector --healthcheck` trong service `collector`) rồi gửi đúng một ping thành công, và chỉ khi đầu dò qua. `--set-url` cất URL ping vào tệp chỉ root đọc được. `--install-timer --interval-seconds <N>` cài `trading-heartbeat.service` và `trading-heartbeat.timer`. Nó không giữ logic giám sát nào và không bao giờ dừng hay khởi động lại collector.
+**Mục đích:** script phục vụ hai check: collector (mặc định, như dưới đây) và, với `--target paper`, heartbeat riêng của paper runtime trong project soak (kế hoạch 16-56; đầu dò `--liveness` qua `deploy/compose-soak.sh`, URL riêng, unit riêng, lệnh cài cần thêm `--soak-env-file`; thẻ `deploy/systemd/trading-soak-paper-heartbeat.service`). Với mỗi check, script có ba chế độ. Chế độ trần chạy đầu dò chỉ-đọc của collector (`python -m src.data.collector --healthcheck` trong service `collector`) rồi gửi đúng một ping thành công, và chỉ khi đầu dò qua. `--set-url` cất URL ping vào tệp chỉ root đọc được. `--install-timer --interval-seconds <N>` cài `trading-heartbeat.service` và `trading-heartbeat.timer`. Nó không giữ logic giám sát nào và không bao giờ dừng hay khởi động lại collector.
 
 **Khi nào chạy:** `--set-url` một lần, sau khi bạn tạo check ở dịch vụ bên ngoài (bước 8.3). `--install-timer` một lần sau `--set-url`, với `<N>` là chu kỳ ping bạn đã ghi ở `16-DEC-O-12` (hướng dẫn này không chọn con số). Chế độ trần do timer gọi; bạn chỉ chạy tay khi muốn thử một lần. Chỉ chạy sau khi collector đã nằm trên máy EC2 (mục 5).
 
@@ -1764,7 +1764,75 @@ systemctl list-timers trading-heartbeat.timer
 
 **Không bao giờ:** thêm `Persistent=true` hay trễ ngẫu nhiên vào timer này; đặt chu kỳ ping dài hơn chu kỳ của check ở dịch vụ bên ngoài (hai giá trị phải phù hợp nhau, và cả hai là của bạn); sửa tay bản đã cài (bộ cài ghi lại).
 
-Nguồn: `.env.example`, `.planning/phases/16-paper-runtime-composition/decisions/16-DEC-Q-L.md`, `.planning/phases/16-paper-runtime-composition/16-RESEARCH.md`, `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`
+### Thẻ lệnh: deploy/systemd/trading-soak-paper-heartbeat.service
+
+> - **Để làm gì:** Đơn vị systemd chạy `deploy/heartbeat.sh --target paper` một lần mỗi khi timer kích hoạt: dò độ sống của paper runtime trong project soak rồi gửi một ping tới check riêng của paper.
+> - **Giải quyết vấn đề gì:** Đầu dò container của paper chỉ xét tuổi nến (3900 giây), quá trễ so với trần 900 giây khoảng trống liên tục; một paper bị giữ sau từ chối, một vòng lặp sự kiện bị treo hay một nguồn dữ liệu im lặng phải làm check riêng im đi, tách khỏi heartbeat của collector.
+> - **Mức quan trọng:** **BẮT BUỘC** trước kế hoạch 16-43 (quyết định của chủ dự án `16-DEC-HUNG-RUNTIME`, 16-55 Q2 = B; chỉnh sửa 2 của `16-DEC-FIXPLANS`). Chủ dự án tạo check thứ hai và cất URL ping riêng của nó trước 16-43 (RUNBOOK 20.9).
+
+**Mục đích:** unit oneshot chạy `deploy/heartbeat.sh --target paper` bằng user `trading`. Một lần chạy gọi đầu dò chỉ-đọc `python -m src.paper.runtime --liveness` trong service `paper` qua `deploy/compose-soak.sh`, rồi chỉ gửi ping thành công khi đầu dò thoát 0: container không giữ marker từ chối, và dấu thời gian vòng lặp sự kiện cùng thông điệp thị trường cuối đều mới hơn `feed_silence_timeout_seconds` (`config/paper/paper-runtime-v2.toml`, quyết định `16-DEC-WS-WATCHDOG`). URL ping của paper là bí mật riêng, không bao giờ là URL của collector: tệp root-only `/etc/trading/heartbeat-paper.url`, credential systemd `heartbeat-paper-url`. Unit đặt `TRADING_ENV_FILE` là tệp env soak cho `deploy/compose-soak.sh`.
+
+**Khi nào chạy:** không chạy tay. Cài một lần sau khi đã cất URL, với chu kỳ đã ghi trong `16-DEC-HUNG-RUNTIME` (60 giây; chu kỳ check 60 giây và thời gian ân hạn 120 giây đặt trong bảng điều khiển của healthchecks.io, không đặt trong repository).
+
+**Chạy ở máy nào:** `[MÁY EC2]`, dưới systemd.
+
+**Lệnh:** cất URL, cài, rồi xem trạng thái và nhật ký:
+
+```bash
+sudo deploy/heartbeat.sh --target paper --set-url
+```
+
+```bash
+sudo deploy/heartbeat.sh --target paper --install-timer --interval-seconds 60 --soak-env-file /home/trading/soak.env
+```
+
+```bash
+systemctl status trading-soak-paper-heartbeat
+```
+
+```bash
+journalctl -u trading-soak-paper-heartbeat
+```
+
+**Chạy thử:** Không áp dụng cho chính tệp unit. Xem trước việc cài bằng `sudo deploy/heartbeat.sh --target paper --install-timer --interval-seconds 60 --soak-env-file /home/trading/soak.env --dry-run`.
+
+**Dấu hiệu thành công:** `journalctl -u trading-soak-paper-heartbeat` có dòng `heartbeat: success ping delivered` và không chứa URL nào; check của paper trong bảng điều khiển ghi ping `[CHƯA XÁC MINH]`.
+
+**Mã thoát:** như `deploy/heartbeat.sh`: 0 đầu dò qua và ping đã gửi, 1 đầu dò không qua (paper bị giữ, vòng lặp treo hay nguồn dữ liệu im), 2 lỗi cách dùng, 3 đầu dò qua nhưng ping không tới, 4 nguồn URL thiếu hoặc sai.
+
+**Khi lỗi:** mã 1: đọc `deploy/compose-soak.sh logs paper` và RUNBOOK 20.9; mã 4: chạy lại `sudo deploy/heartbeat.sh --target paper --set-url`. Heartbeat chỉ là cảnh báo, không phải bằng chứng đã phục hồi: một lần paper dừng lâu hơn trần bao phủ vẫn làm trial trượt tiêu chí bao phủ.
+
+**Không bao giờ:** dùng chung URL ping với collector; trỏ `--url-file` của paper vào `/etc/trading/heartbeat.url`; sửa tay bản đã cài trong `/etc/systemd/system`; dựa vào `--healthcheck` (tuổi nến) để cảnh báo paper bị treo.
+
+### Thẻ lệnh: deploy/systemd/trading-soak-paper-heartbeat.timer
+
+> - **Để làm gì:** Hẹn giờ gọi `trading-soak-paper-heartbeat.service` mỗi 60 giây, tính từ lúc máy khởi động và từ lần chạy trước.
+> - **Giải quyết vấn đề gì:** Tín hiệu đều đặn để check riêng của paper phát hiện khi paper ngừng sống; không chạy bù và không trễ ngẫu nhiên nên một lần tắt máy không bị che bằng một ping bù.
+> - **Mức quan trọng:** **BẮT BUỘC** trước kế hoạch 16-43 (`16-DEC-HUNG-RUNTIME`; RUNBOOK 20.9).
+
+**Mục đích:** timer kích hoạt `trading-soak-paper-heartbeat.service` sau mỗi chu kỳ đã truyền cho `--interval-seconds` (giá trị đã ghi là 60 giây), kể từ lúc khởi động (`OnBootSec`) và kể từ lần chạy trước (`OnUnitActiveSec`).
+
+**Khi nào chạy:** không chạy tay; được cài và bật bởi `sudo deploy/heartbeat.sh --target paper --install-timer --interval-seconds 60 --soak-env-file <đường dẫn>`. Cố ý không có `Persistent` và không có `RandomizedDelaySec`.
+
+**Chạy ở máy nào:** `[MÁY EC2]`, dưới systemd.
+
+**Lệnh:**
+
+```bash
+systemctl list-timers trading-soak-paper-heartbeat.timer
+```
+
+**Chạy thử:** Không áp dụng cho chính tệp unit. Xem trước bằng `sudo deploy/heartbeat.sh --target paper --install-timer --interval-seconds 60 --soak-env-file /home/trading/soak.env --dry-run`.
+
+**Dấu hiệu thành công:** `systemctl list-timers trading-soak-paper-heartbeat.timer` liệt kê timer với thời điểm kích hoạt kế tiếp.
+
+**Mã thoát:** timer không có mã thoát; kết quả nằm ở unit service mà nó kích hoạt.
+
+**Khi lỗi:** timer không xuất hiện: chạy lại lệnh cài và đọc đầu ra. Việc timer kích hoạt đúng chu kỳ chỉ máy thật mới chứng minh được `[CHƯA XÁC MINH]`.
+
+**Không bao giờ:** thêm `Persistent=true` hay trễ ngẫu nhiên; đổi chu kỳ khác giá trị đã ghi trong `16-DEC-HUNG-RUNTIME` mà không có quyết định mới của chủ dự án.
+
+Nguồn: `.env.example`, `.planning/phases/16-paper-runtime-composition/decisions/16-DEC-Q-L.md`, `.planning/phases/16-paper-runtime-composition/16-RESEARCH.md`, `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`, `deploy/systemd/trading-soak-paper-heartbeat.service`, `deploy/systemd/trading-soak-paper-heartbeat.timer`, `.planning/phases/16-paper-runtime-composition/decisions/16-DEC-HUNG-RUNTIME.md`
 
 ## 9. Lộ trình SHADOW, DEMO, CANARY, LIVE
 
@@ -2347,6 +2415,11 @@ Mọi dòng bên dưới được chép từ các thẻ lệnh và các mục tr
 | unit `trading-heartbeat.service`: xem trạng thái | `[MÁY EC2]` | `systemctl status trading-heartbeat` | thẻ `deploy/systemd/trading-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | unit `trading-heartbeat.service`: xem nhật ký | `[MÁY EC2]` | `journalctl -u trading-heartbeat` | thẻ `deploy/systemd/trading-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | unit `trading-heartbeat.timer`: xem lịch | `[MÁY EC2]` | `systemctl list-timers trading-heartbeat.timer` | thẻ `deploy/systemd/trading-heartbeat.timer` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| heartbeat riêng của paper, cất URL (`--target`, `--set-url`) | `[MÁY EC2]` | `sudo deploy/heartbeat.sh --target paper --set-url` | thẻ `deploy/systemd/trading-soak-paper-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| heartbeat riêng của paper, cài timer (`--target`, `--install-timer`, `--interval-seconds`, `--soak-env-file`) | `[MÁY EC2]` | `sudo deploy/heartbeat.sh --target paper --install-timer --interval-seconds 60 --soak-env-file /home/trading/soak.env --dry-run` | thẻ `deploy/systemd/trading-soak-paper-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| đầu dò độ sống của paper (`--liveness`) | `[MÁY EC2]` | `deploy/heartbeat.sh --target paper --dry-run` | thẻ `deploy/systemd/trading-soak-paper-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-soak-paper-heartbeat.service`: xem trạng thái | `[MÁY EC2]` | `systemctl status trading-soak-paper-heartbeat` | thẻ `deploy/systemd/trading-soak-paper-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-soak-paper-heartbeat.timer`: xem lịch | `[MÁY EC2]` | `systemctl list-timers trading-soak-paper-heartbeat.timer` | thẻ `deploy/systemd/trading-soak-paper-heartbeat.timer` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 
 ### Nghiệm thu và kiểm tra hồ sơ
 

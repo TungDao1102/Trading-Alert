@@ -1,0 +1,18 @@
+# Timer for the separate paper heartbeat ping (plan 16-56). The interval is the owner's recorded
+# value (decisions/16-DEC-HUNG-RUNTIME.md: paper_heartbeat_interval_seconds), passed to
+# `deploy/heartbeat.sh --target paper --install-timer --interval-seconds N`; it has no default.
+# The check period and the grace are set in the monitor's dashboard, not here.
+# Catch-up (a persistent timer) and a randomised delay are absent on purpose: a ping sent after
+# downtime would hide the very outage the external monitor exists to report.
+[Unit]
+Description=Trading soak project: external heartbeat ping timer for the paper runtime
+
+[Timer]
+OnBootSec=@INTERVAL_SECONDS@s
+OnUnitActiveSec=@INTERVAL_SECONDS@s
+# STRUCTURAL (not a monitor value): the default accuracy lets a timer slip by up to a minute.
+AccuracySec=1s
+Unit=trading-soak-paper-heartbeat.service
+
+[Install]
+WantedBy=timers.target

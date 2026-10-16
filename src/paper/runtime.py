@@ -91,7 +91,7 @@ import structlog
 from src.core.types import Candle
 from src.domain.registry import ParameterSet
 from src.ops.redaction import configure_logging
-from src.paper import held_marker
+from src.paper import held_marker, liveness
 from src.paper.bars import BarBuffers
 from src.paper.freeze import (
     PaperAllowlistEntry,
@@ -190,6 +190,9 @@ class RuntimeContext:
     started_at_utc: datetime | None = None
     # The instance lease `main` holds for this run (plan 16-55); the loop re-checks it.
     lease: InstanceLease | None = None
+    # Where the watchdog writes this container's liveness stamp (plan 16-56; `main` passes the
+    # pinned-state directory). None writes no stamp.
+    liveness_dir: Path | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -223,6 +226,16 @@ def build_parser() -> argparse.ArgumentParser:
             "Container probe: print healthy and exit with status zero only while the last "
             "processed closed bar is younger than the ratified maximum age; otherwise print "
             "unhealthy and a reason and exit with status one."
+        ),
+    )
+    parser.add_argument(
+        "--liveness",
+        action="store_true",
+        help=(
+            "Paper heartbeat probe: print live and exit with status zero only while this "
+            "container holds no held marker and its event-loop stamp and last market message "
+            "are both younger than the configured feed silence timeout; otherwise print not "
+            "live and a reason and exit with status one. Opens no database or network client."
         ),
     )
     parser.add_argument(
@@ -805,6 +818,7 @@ class _LiveLoop:
         bound = float(self._context.config.health.feed_silence_timeout_seconds)
         wake = timedelta(seconds=bound) / 2
         watch_started = self._feed_clock()
+        self._stamp_liveness(watch_started, watch_started)
         silent_since: float | None = None
         recovery_started: float | None = None
         while not self._finished():
@@ -814,6 +828,7 @@ class _LiveLoop:
             now = self._feed_clock()
             last = self._supervisor.last_frame_monotonic
             reference = watch_started if last is None else max(last, watch_started)
+            self._stamp_liveness(now, reference)
             if recovery_started is None or silent_since is None:
                 if now - reference > bound:
                     silent_since, recovery_started = reference, now
@@ -831,6 +846,28 @@ class _LiveLoop:
                     "after the bounded recovery (B1-CR-01, 16-DEC-WS-WATCHDOG)"
                 )
                 return
+
+    def _stamp_liveness(self, now: float, last_frame: float) -> None:
+        """Write this container's liveness stamp from the event loop (plan 16-56 Task 4).
+
+        The wall-clock time of the last message is derived from the feed clock, so the SDK
+        handler's stamp stays one attribute write. A failed write is logged and never fails the
+        loop: the probe then reports not live and the heartbeat stops.
+        """
+        directory = self._context.liveness_dir
+        if directory is None:
+            return
+        at = self._clock()
+        try:
+            liveness.write_liveness(
+                directory,
+                loop_alive_utc=at,
+                last_frame_utc=at - timedelta(seconds=max(0.0, now - last_frame)),
+            )
+        except (OSError, ValueError) as exc:
+            log.warning(
+                "paper runtime: the liveness stamp was not written", error=type(exc).__name__
+            )
 
     def _start_silence_recovery(self) -> None:
         task = asyncio.get_running_loop().create_task(self._recover_from_silence())
@@ -1268,6 +1305,35 @@ def _healthcheck(
     return unhealthy("no closed bar was processed within the maximum age after the start")
 
 
+def _liveness(*, env: Mapping[str, str], pinned_path: Path, now: Callable[[], datetime]) -> int:
+    """The paper heartbeat probe (plan 16-56, 16-DEC-HUNG-RUNTIME, correction 2).
+
+    0 only when this container holds no held marker and its liveness stamp shows an event-loop
+    wake and a market message both within `health.feed_silence_timeout_seconds`. It reads the
+    configuration named by `PAPER_RUNTIME_CONFIG` and two small files; it opens no database,
+    network or Telegram client and prints names and ages only, never a value.
+    """
+
+    def not_live(reason: str) -> int:
+        print(f"not live: {reason}")
+        return 1
+
+    values = read_env(env)
+    try:
+        config = load_runtime_config(values.get("PAPER_RUNTIME_CONFIG"))
+    except ConfigNotRatified as exc:
+        return not_live(str(exc))
+    problem = liveness.liveness_problem(
+        pinned_path.parent,
+        now_utc=now(),
+        bound_seconds=config.health.feed_silence_timeout_seconds,
+    )
+    if problem is not None:
+        return not_live(problem)
+    print("live")
+    return 0
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -1293,6 +1359,8 @@ def main(
     pinned_path: Path = args.pinned_state
     marker_dir = pinned_path.parent
 
+    if args.liveness:
+        return _liveness(env=env, pinned_path=pinned_path, now=now)
     if args.healthcheck:
         return _healthcheck(
             env=env,
@@ -1458,6 +1526,7 @@ def main(
             clock=now,
             registry_root=registry_root,
             lease=lease,
+            liveness_dir=marker_dir,
         )
         try:
             # A start never mints an epoch: the pin file and the stored pin record must agree.

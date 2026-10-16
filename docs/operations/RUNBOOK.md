@@ -277,7 +277,7 @@ sudo deploy/heartbeat.sh --install-timer --interval-seconds <N>
 
 **Fail-open.** The sender never stops or restarts the collector, and a failed ping changes only the exit code: the only `docker` subcommand the script runs is `exec` of the read-only probe, and the two units carry no dependency on, restart of or failure link to any other unit. Open Interest minutes lost to a collector stop are permanent (15.4); this sender cannot cause one.
 
-**Scope.** This sender probes the collector only. Probes for the paper and live processes, and the external monitor's coverage of every long-running process, belong to Phase 24; nothing here changes the paper service probe. "Heartbeat" here means the external ping. It is unrelated to the paper runtime's per-bar heartbeat records (coverage evidence of the Phase 16 runtime).
+**Scope.** Without `--target` (or with `--target collector`) this sender probes the collector only, exactly as above. The separate paper heartbeat of the soak project is the same script with `--target paper`: its own check, its own URL file and credential, its own units, and an install that names the soak env file with `--soak-env-file`; it is described in 20.9 (plan 16-56). Probes for the live processes, and the external monitor's coverage of every long-running process, belong to Phase 24; nothing here changes the paper service's container healthcheck. "Heartbeat" here means the external ping. It is unrelated to the paper runtime's per-bar heartbeat records (coverage evidence of the Phase 16 runtime).
 
 ## 12. Manual close
 
@@ -865,3 +865,30 @@ deploy/compose-soak.sh ps -a paper
 ```
 
 Expected: the container stays stopped (exited) after the daemon restart, until the operator starts it again. After this step, follow the pin sequence of 20.1 with the service still stopped: pin, then start the managed service at once.
+
+### 20.9 Paper heartbeat
+
+The paper runtime has its own external heartbeat, separate from the collector's (11.9), by the owner's decision `decisions/16-DEC-HUNG-RUNTIME.md` (16-55 Q2 = B): one combined alert could not tell a failed host heartbeat from a failed paper process. It is `deploy/heartbeat.sh --target paper` with the two units `trading-soak-paper-heartbeat.service` and `trading-soak-paper-heartbeat.timer` (plan 16-56).
+
+**The recorded numbers.** The timer pings every 60 s (`paper_heartbeat_interval_seconds`, passed as `--interval-seconds 60`). The check in the monitor's dashboard has a period of 60 s and a grace of 120 s (`paper_check_period_seconds`, `paper_check_grace_seconds`); both are set in the dashboard, not in the repository. All three come from 16-DEC-HUNG-RUNTIME. A missed ping therefore alerts within a few minutes, well inside the 900 s `continuous_uncovered_ceiling_seconds` (`decisions/16-DEC-O-07.md`).
+
+**What the probe checks.** One run executes, through `deploy/compose-soak.sh`, the read-only probe `python -m src.paper.runtime --liveness` inside the `paper` service, and sends one success ping only when it exits 0. The probe is the 120 s feed-liveness and loop-alive signal (correction 2 of 16-DEC-FIXPLANS.md), not the 3900 s bar-age healthcheck (`--healthcheck`, `healthcheck_max_bar_age_seconds`). It passes only when the container holds no held marker, and when the liveness stamp that the silence watchdog writes from the event loop shows both an event-loop wake and a market message within `feed_silence_timeout_seconds` (120 s, `config/paper/paper-runtime-v2.toml`, `decisions/16-DEC-WS-WATCHDOG.md`). A held refusal, a hung event loop or a silent feed sends no success ping, so the check goes quiet and the monitor alerts after its period and grace. The probe opens no database or network client and prints names and ages only.
+
+**Not proof of recovery.** The heartbeat is an alert, not proof of recovery. A runtime that stays down long enough to exceed the coverage ceiling still fails the coverage criterion of the trial, whatever the heartbeat showed.
+
+**The URL.** The paper check has its own secret ping URL, never the collector's. It lives in its own root-only file, `/etc/trading/heartbeat-paper.url` (mode 0600), and systemd hands the unit a private copy as the credential `heartbeat-paper-url`. `--target paper` refuses a `--url-file` that names the collector's file. The URL is never an argument, never in the repository, a log, `acceptance.json` or the shell history. The owner creates the check (period and grace as above) before plan 16-43 and stores its URL on the soak host:
+
+```text
+sudo deploy/heartbeat.sh --target paper --set-url
+sudo deploy/heartbeat.sh --target paper --install-timer --interval-seconds 60 --soak-env-file /home/trading/soak.env
+```
+
+The first command reads the URL as one line from standard input without echo. The second writes the two units with the interval of the command (there is no default in code) and the soak env file the unit passes to `deploy/compose-soak.sh`, and enables the timer; add `--dry-run` to either to see what would happen. The step timeout of the script is the existing PLACEHOLDER transport bound of 11.9. Exit codes are those of 11.9. Check the installed units with:
+
+```text
+systemctl status trading-soak-paper-heartbeat
+journalctl -u trading-soak-paper-heartbeat
+systemctl list-timers trading-soak-paper-heartbeat.timer
+```
+
+**Fail-open.** The sender never stops, restarts or touches the paper runtime: the only `docker` subcommand it runs is `exec` of the read-only liveness probe, and the paper units carry no dependency, restart or failure link to any other unit. Live delivery to the monitor, the systemd credential and the timer firing are operator verification on the soak host before plan 16-43.

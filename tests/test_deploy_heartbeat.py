@@ -759,3 +759,226 @@ def test_the_url_is_in_no_unit_file_and_no_output_across_set_url_install_and_run
     for unit in (SERVICE, TIMER):
         text = (_unit_dir(rig) / unit).read_text(encoding="utf-8")
         assert not any(marker in text for marker in SECRET_MARKERS)
+
+
+# --- plan 16-56 Task 4: the separate paper heartbeat (16-DEC-HUNG-RUNTIME, correction 2) --------
+
+PAPER_PROBE_LINE = (
+    f"docker compose -p trading-soak exec -T paper {PY} -m src.paper.runtime --liveness"
+)
+PAPER_SERVICE = "trading-soak-paper-heartbeat.service"
+PAPER_TIMER = "trading-soak-paper-heartbeat.timer"
+PAPER_INTERVAL = "60"  # the recorded paper_heartbeat_interval_seconds of 16-DEC-HUNG-RUNTIME
+SOAK_ENV = "/home/trading/soak.env"
+
+
+def _paper_url_path(made: Rig) -> Path:
+    return made.prefix / "etc" / "trading" / "heartbeat-paper.url"
+
+
+@pytest.fixture
+def paper_rig(tmp_path: Path) -> Rig:
+    """Only the paper URL file exists; the collector's file holds another (fake) URL."""
+    made = _make_rig(tmp_path, ("docker", "curl", "systemctl"))
+    made.write_url(OTHER_URL + "\n")  # the collector's file must never be read for paper
+    path = _write(_paper_url_path(made), SENTINEL_URL + "\n")
+    if _posix_modes():
+        path.chmod(0o600)
+    _write(made.prefix / SOAK_ENV.lstrip("/"), "POSTGRES_USER=\n")
+    return made
+
+
+def test_the_paper_target_runs_only_the_liveness_probe_and_sends_one_ping(paper_rig: Rig) -> None:
+    proc = paper_rig.run("--target", "paper")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert paper_rig.docker_lines() == [PAPER_PROBE_LINE]
+    assert len(paper_rig.curl_lines()) == 1
+    config = paper_rig.curl_stdin(1)
+    assert config.count(SENTINEL_URL) == 1 and OTHER_URL not in config, "the paper URL only"
+    assert_no_secret(proc, paper_rig)
+
+
+def test_a_failed_liveness_probe_sends_no_success_ping(paper_rig: Rig) -> None:
+    """A held refusal, a hung loop or a silent feed: the probe exits 1, so no ping is sent."""
+    proc = paper_rig.run("--target", "paper", env={"STUB_PROBE_RC": "1"})
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert paper_rig.curl_lines() == []
+    assert "paper liveness probe failed" in proc.stderr and "no ping" in proc.stderr
+    assert_no_secret(proc, paper_rig)
+
+
+@pytest.mark.parametrize(
+    ("args", "env"),
+    [
+        ([], {}),
+        ([], {"STUB_PROBE_RC": "1"}),
+        (["--fail-ping"], {"STUB_PROBE_RC": "1"}),
+        ([], {"STUB_CURL_RC": "28"}),
+        (["--dry-run"], {}),
+    ],
+    ids=["pass", "probe-fails", "fail-ping", "ping-fails", "dry-run"],
+)
+def test_the_paper_target_only_ever_runs_docker_exec(
+    paper_rig: Rig, args: list[str], env: dict[str, str]
+) -> None:
+    proc = paper_rig.run("--target", "paper", *args, env=env)
+    assert proc.returncode in {0, 1, 3}, proc.stdout + proc.stderr
+    assert all(
+        ln.startswith("docker compose -p trading-soak exec ") for ln in paper_rig.docker_lines()
+    )
+    assert len(paper_rig.docker_lines()) <= 1
+    assert not any(
+        w in " ".join(paper_rig.docker_lines()) for w in ("restart", "stop", " up", "down")
+    )
+    assert_no_secret(proc, paper_rig)
+
+
+def test_the_paper_target_reads_its_own_credential_never_the_collectors(
+    paper_rig: Rig, tmp_path: Path
+) -> None:
+    cred_dir = tmp_path / "cred"
+    _write(cred_dir / "heartbeat-url", OTHER_URL + "\n")  # the collector's credential name
+    proc = paper_rig.run("--target", "paper", env={"CREDENTIALS_DIRECTORY": cred_dir.as_posix()})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert OTHER_URL not in paper_rig.curl_stdin(1) and SENTINEL_URL in paper_rig.curl_stdin(1)
+    _write(cred_dir / "heartbeat-paper-url", OTHER_URL + "\n")
+    again = paper_rig.run("--target", "paper", env={"CREDENTIALS_DIRECTORY": cred_dir.as_posix()})
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert OTHER_URL in paper_rig.curl_stdin(2), "its own systemd credential wins"
+    assert_no_secret(again, paper_rig)
+
+
+def test_a_missing_paper_url_never_falls_back_to_the_collector_url(paper_rig: Rig) -> None:
+    _paper_url_path(paper_rig).unlink()
+    proc = paper_rig.run("--target", "paper")
+    assert proc.returncode == 4, proc.stdout + proc.stderr
+    assert paper_rig.lines() == []
+    assert_no_secret(proc, paper_rig)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--target", "paper", "--url-file", "/etc/trading/heartbeat.url"],
+        ["--target", "nonsense"],
+        ["--target"],
+        ["--soak-env-file", SOAK_ENV],
+        ["--target", "paper", "--soak-env-file", SOAK_ENV],
+        ["--target", "paper", "--install-timer", "--interval-seconds", PAPER_INTERVAL],
+        [
+            "--target",
+            "paper",
+            "--install-timer",
+            "--interval-seconds",
+            PAPER_INTERVAL,
+            "--soak-env-file",
+            "relative/soak.env",
+        ],
+        ["--target", "paper", "--install-timer", "--soak-env-file", SOAK_ENV],
+    ],
+)
+def test_paper_usage_errors_exit_two_and_run_nothing(paper_rig: Rig, args: list[str]) -> None:
+    proc = paper_rig.run(*args)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert paper_rig.lines() == []
+    assert not (paper_rig.prefix / "etc" / "systemd").exists()
+
+
+def test_paper_set_url_stores_its_own_file(paper_rig: Rig) -> None:
+    _paper_url_path(paper_rig).unlink()
+    proc = paper_rig.run("--target", "paper", "--set-url", stdin=SENTINEL_URL + "\n")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _paper_url_path(paper_rig).read_text(encoding="utf-8").strip() == SENTINEL_URL
+    assert paper_rig.url_path.read_text(encoding="utf-8").strip() == OTHER_URL, "untouched"
+    assert_no_secret(proc, paper_rig)
+
+
+def test_paper_install_timer_writes_the_paper_units_with_the_command_interval(
+    paper_rig: Rig,
+) -> None:
+    proc = paper_rig.run(
+        "--target",
+        "paper",
+        "--install-timer",
+        "--interval-seconds",
+        PAPER_INTERVAL,
+        "--soak-env-file",
+        SOAK_ENV,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    service = (_unit_dir(paper_rig) / PAPER_SERVICE).read_text(encoding="utf-8")
+    timer = (_unit_dir(paper_rig) / PAPER_TIMER).read_text(encoding="utf-8")
+    checkout = _checkout_as_bash_sees_it(paper_rig)
+    for text in (service, timer):
+        assert "@" not in text.replace("@@", ""), "a substitution token was left behind"
+    lines = service.splitlines()
+    assert f"ExecStart=/usr/bin/env bash {checkout}/deploy/heartbeat.sh --target paper" in lines
+    assert "LoadCredential=heartbeat-paper-url:/etc/trading/heartbeat-paper.url" in lines
+    assert f"Environment=TRADING_ENV_FILE={SOAK_ENV}" in lines
+    assert f"OnBootSec={PAPER_INTERVAL}s" in timer.splitlines()
+    assert f"OnUnitActiveSec={PAPER_INTERVAL}s" in timer.splitlines()
+    assert _systemctl(paper_rig) == [
+        "systemctl daemon-reload",
+        f"systemctl enable --now {PAPER_TIMER}",
+        f"systemctl restart {PAPER_TIMER}",
+    ]
+    assert not (_unit_dir(paper_rig) / SERVICE).exists(), "the collector units are not installed"
+    assert_no_secret(proc, paper_rig)
+
+
+def test_the_paper_unit_templates_are_tokenised_oneshots_with_no_link_to_the_runtime() -> None:
+    lines = _directive_lines((UNITS / PAPER_SERVICE).read_text(encoding="utf-8"))
+    assert "Type=oneshot" in lines and "User=trading" in lines
+    assert [ln for ln in lines if LINK_DIRECTIVE.match(ln)] == []
+    assert "LoadCredential=heartbeat-paper-url:@URL_FILE@" in lines
+    assert "Environment=TRADING_ENV_FILE=@SOAK_ENV_FILE@" in lines
+    assert "ExecStart=/usr/bin/env bash @TRADING_DIR@/deploy/heartbeat.sh --target paper" in lines
+    timer = _directive_lines((UNITS / PAPER_TIMER).read_text(encoding="utf-8"))
+    assert "OnBootSec=@INTERVAL_SECONDS@s" in timer
+    assert "OnUnitActiveSec=@INTERVAL_SECONDS@s" in timer
+    assert f"Unit={PAPER_SERVICE}" in timer
+    assert [
+        ln for ln in timer if re.match(r"^(Persistent|RandomizedDelaySec|OnCalendar)", ln)
+    ] == []
+    for path in (UNITS / PAPER_SERVICE, UNITS / PAPER_TIMER):
+        text = path.read_text(encoding="utf-8").lower()
+        assert "://" not in text
+        for banned in ("hc-ping", "healthchecks.io", "uuid"):
+            assert banned not in text
+
+
+def test_every_soak_wrapper_call_in_the_script_is_an_exec() -> None:
+    text = _strip_comments((DEPLOY / "heartbeat.sh").read_text(encoding="utf-8"))
+    calls = [ln for ln in text.splitlines() if '/compose-soak.sh"' in ln]
+    assert calls, "the paper target goes through deploy/compose-soak.sh"
+    assert all(re.search(r"\bexec -T\b", ln) for ln in calls), calls
+
+
+def test_the_secret_survives_set_url_install_and_run_for_the_paper_target(paper_rig: Rig) -> None:
+    _paper_url_path(paper_rig).unlink()
+    steps = [
+        paper_rig.run("--target", "paper", "--set-url", stdin=SENTINEL_URL + "\n"),
+        paper_rig.run(
+            "--target",
+            "paper",
+            "--install-timer",
+            "--interval-seconds",
+            PAPER_INTERVAL,
+            "--soak-env-file",
+            SOAK_ENV,
+        ),
+        paper_rig.run("--target", "paper"),
+    ]
+    for proc in steps:
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert_no_secret(proc, paper_rig)
+    for unit in (PAPER_SERVICE, PAPER_TIMER):
+        text = (_unit_dir(paper_rig) / unit).read_text(encoding="utf-8")
+        assert not any(marker in text for marker in SECRET_MARKERS)
+
+
+def test_the_paper_target_refuses_xtrace_before_reading_the_url(paper_rig: Rig) -> None:
+    proc = paper_rig.run("--target", "paper", env={"SHELLOPTS": "xtrace"})
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert paper_rig.lines() == []
+    assert_no_secret(proc, paper_rig)
