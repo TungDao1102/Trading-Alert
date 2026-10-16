@@ -43,6 +43,7 @@ from tests.support.limits import (
 from tests.support.limits import (
     TEST_ONLY_RATE_LIMIT_RETRY_AFTER_CAP_SECONDS as CAP,
 )
+from tests.support.limits import test_only_signed_call_policy
 
 _C = ExchangeErrorCategory
 START = datetime(2026, 10, 16, 12, 0, 0, tzinfo=UTC)
@@ -468,7 +469,11 @@ def test_public_rate_limit_answer_restricts_shared_gate() -> None:
     assert gate.remaining_seconds() == WAIT_429
 
     other_sdk, other_rest = _sdk()
-    other = BinanceUsdmAdapter(sdk_client=other_sdk, rest_gate=gate)
+    other = BinanceUsdmAdapter(
+        sdk_client=other_sdk,
+        rest_gate=gate,
+        signed_call_policy=test_only_signed_call_policy(),  # plan 18-13: signed calls need it
+    )
     with pytest.raises(RateLimitPauseActive):
         asyncio.run(other.cancel_normal_order(symbol="BTCUSDT", orig_client_order_id="e" * 36))
     assert other_rest.calls["cancel_order"] == 0

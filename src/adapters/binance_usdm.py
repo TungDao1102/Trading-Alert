@@ -58,7 +58,8 @@ re-verification policy):
   | query_order_by_client       | query_order(symbol, orig_client_order_id) | 17.4.0: no signature change; `symbol` required, `order_id` / `orig_client_order_id` optional — populate `orig_client_order_id` for no-blind-recovery probe (EXECUTION_SPEC §10).  # noqa: E501
   | get_position_mode           | get_current_position_mode(recv_window) | 17.4.0: no signature change; returns dual_side_position bool (True=hedge, False=one-way); re-checked at placement time per D-02.  # noqa: E501
   | __init__(sdk_client, *, rest_gate, sleep) | (no SDK call) | plan 18-10: `rest_gate` is the process-wide RestRateLimitGate (checked before every REST call, records a 418 or 429; also handed to the inner BinancePublicMarketData); `sleep` serves only the waits of the STATUS_UNKNOWN cancel retry.  # noqa: E501
-  | user_commission_rate       | user_commission_rate(symbol, recv_window) | 17.4.0: `symbol` required, `recv_window` Optional (left to the SDK default); returns UserCommissionRateResponse with Optional str fields (symbol, makerCommissionRate, takerCommissionRate, rpiCommissionRate); strict parse, unknown raises, never zero (Phase 12, D-11).  # noqa: E501
+  | __init__(..., signed_call_policy, drift_guard, clock, on_clock_skew) | (no SDK call) | plan 18-13: every signed method in this table passes `recv_window=signed_call_policy.recv_window_ms` explicitly through the one helper `_sdk_call` (all eleven SDK methods have a `recv_window` parameter in 17.4.0, pinned offline by tests/test_binance_usdm_signed_calls.py); no policy -> SignedCallPolicyMissing before any SDK call; a configured drift guard blocks `place_entry` only (EntriesBlocked); -1021 calls `on_clock_skew` once and is never retried.  # noqa: E501
+  | user_commission_rate       | user_commission_rate(symbol, recv_window) | 17.4.0: `symbol` required (passed by keyword), `recv_window` explicit (plan 18-13); returns UserCommissionRateResponse with Optional str fields (symbol, makerCommissionRate, takerCommissionRate, rpiCommissionRate); strict parse, unknown raises, never zero (Phase 12, D-11).  # noqa: E501
 
 The 17.3.1 -> 17.4.0 changelog (per RESEARCH Open Question 2): the
 Delta closed during 08-04 was "no public REST method-signature change
@@ -92,7 +93,6 @@ from src.adapters.binance_errors import error_facts_from_exception
 from src.adapters.binance_limits import SignedCallPolicy
 from src.adapters.binance_public import (
     BinancePublicMarketData,
-    _gated_rest_call,
     _ms_to_utc,
 )
 from src.adapters.binance_public import FundingTick as FundingTick
@@ -554,8 +554,9 @@ class BinanceUsdmAdapter:
     re-raised; nothing is retried because of a 418 or a 429. The inner
     `BinancePublicMarketData` gets the same gate, so the public delegations
     (`server_time` included) are refused during a ban or a pause too. Without a
-    gate nothing is refused or recorded and a 418 or 429 raises after one call:
-    no wait exists in this module (the ban and pause lengths are the user's,
+    gate the public delegations are neither refused nor recorded and a 418 or
+    429 raises after one call; the signed methods cannot run without a gate
+    (plan 18-13: a signed policy requires it). No wait exists in this module (the ban and pause lengths are the user's,
     held by the gate's `RateLimitPolicy`).
 
     `sleep` (keyword only, default `asyncio.sleep`) serves only the waits of
@@ -629,6 +630,21 @@ class BinanceUsdmAdapter:
         if policy is None or gate is None:
             raise SignedCallPolicyMissing()
         return policy, gate
+
+    def _require_entries_allowed(self) -> None:
+        """Raise `EntriesBlocked` while the configured drift guard blocks new entries."""
+        guard = self._drift_guard
+        if guard is None:
+            return
+        if self._clock is None:  # pragma: no cover - the constructor refuses it
+            raise ValueError("drift_guard requires clock")
+        now = self._clock()
+        if guard.entries_allowed(now):
+            return
+        reason = guard.blocked_reason(now)
+        if reason is None:  # pragma: no cover - entries_allowed means blocked_reason is None
+            raise RuntimeError("drift guard disagreed with itself")
+        raise EntriesBlocked(reason)
 
     async def _sdk_call[R](self, call_kind: CallKind, method: Callable[..., R], **kwargs: Any) -> R:
         """The one path of every signed SDK call (plan 18-13).
@@ -758,8 +774,7 @@ class BinanceUsdmAdapter:
                 recommends the symbol-scoped call to avoid heavy
                 responses on busy accounts).
         """
-        response = await _gated_rest_call(
-            self._rest_gate,
+        response = await self._sdk_call(
             CallKind.QUERY,
             self._sdk.rest_api.current_all_open_orders,
             symbol=symbol,
@@ -785,8 +800,7 @@ class BinanceUsdmAdapter:
         with the canonical `client_algo_id` preserved for the sweeper's
         query-by-ID cancel posture.
         """
-        response = await _gated_rest_call(
-            self._rest_gate,
+        response = await self._sdk_call(
             CallKind.QUERY,
             self._sdk.rest_api.current_all_algo_open_orders,
             symbol=symbol,
@@ -813,8 +827,7 @@ class BinanceUsdmAdapter:
         and including it would poison the three-source compare with a
         phantom truth row that has no matching local intent.
         """
-        response = await _gated_rest_call(
-            self._rest_gate,
+        response = await self._sdk_call(
             CallKind.QUERY,
             self._sdk.rest_api.position_information_v3,
             symbol=symbol,
@@ -844,8 +857,7 @@ class BinanceUsdmAdapter:
         # client_algo_id — we always populate the client side because
         # the deterministic-ID derivation guarantees uniqueness.
         try:
-            response = await _gated_rest_call(
-                self._rest_gate,
+            response = await self._sdk_call(
                 CallKind.QUERY,
                 self._sdk.rest_api.query_algo_order,
                 client_algo_id=client_algo_id,
@@ -896,8 +908,7 @@ class BinanceUsdmAdapter:
         """
 
         async def _do_cancel() -> CancelOrderResponse:
-            response = await _gated_rest_call(
-                self._rest_gate,
+            response = await self._sdk_call(
                 CallKind.CANCEL,
                 self._sdk.rest_api.cancel_order,
                 symbol=symbol,
@@ -951,8 +962,7 @@ class BinanceUsdmAdapter:
         """
 
         async def _do_cancel() -> CancelAlgoOrderResponse:
-            response = await _gated_rest_call(
-                self._rest_gate,
+            response = await self._sdk_call(
                 CallKind.CANCEL,
                 self._sdk.rest_api.cancel_algo_order,
                 client_algo_id=client_algo_id,
@@ -1032,6 +1042,12 @@ class BinanceUsdmAdapter:
             was accepted and filled. The execution manager probes by the
             deterministic client id and decides.
         """
+        # Plan 18-13: no policy refuses first; then a configured drift guard refuses a NEW
+        # entry while it does not allow entries (never measured, failed, out of limits,
+        # stale), before the gate check and before any SDK call.
+        self._require_signed_policy()
+        self._require_entries_allowed()
+
         from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
             NewOrderResponse,
         )
@@ -1139,8 +1155,7 @@ class BinanceUsdmAdapter:
         # orders, so a blind retry is either rejected as a duplicate (the
         # first attempt exists) or silently duplicates a leg (the first
         # attempt already triggered). The manager probes by id instead.
-        response = await _gated_rest_call(
-            self._rest_gate,
+        response = await self._sdk_call(
             CallKind.PLACEMENT,
             self._sdk.rest_api.new_algo_order,
             algo_type=NewAlgoOrderAlgoTypeEnum(algo_type),
@@ -1225,8 +1240,8 @@ class BinanceUsdmAdapter:
             GetCurrentPositionModeResponse,
         )
 
-        response = await _gated_rest_call(
-            self._rest_gate, CallKind.QUERY, self._sdk.rest_api.get_current_position_mode
+        response = await self._sdk_call(
+            CallKind.QUERY, self._sdk.rest_api.get_current_position_mode
         )
         raw: GetCurrentPositionModeResponse = response.data()
         return PositionModeResult(dual_side_position=bool(raw.dual_side_position))
@@ -1236,7 +1251,8 @@ class BinanceUsdmAdapter:
 
         GET /fapi/v1/commissionRate (USER_DATA, IP weight 20) through the
         official SDK `rest_api.user_commission_rate(symbol, recv_window)`;
-        `recv_window` is left to the SDK default. The `rpiCommissionRate`
+        `symbol` is passed by keyword and `recv_window` is the ratified
+        `SignedCallPolicy` value (plan 18-13). The `rpiCommissionRate`
         field is ignored.
 
         Flag-never-fabricate (D-09, D-11): a missing, non-decimal,
@@ -1254,8 +1270,8 @@ class BinanceUsdmAdapter:
             UserCommissionRateResponse,
         )
 
-        response = await _gated_rest_call(
-            self._rest_gate, CallKind.QUERY, self._sdk.rest_api.user_commission_rate, symbol
+        response = await self._sdk_call(
+            CallKind.QUERY, self._sdk.rest_api.user_commission_rate, symbol=symbol
         )
         raw: UserCommissionRateResponse | None = response.data()
         if raw is None:
