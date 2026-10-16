@@ -30,4 +30,4 @@ The reviewer text (pasted by the user on 2026-10-16, "Phase 16 - Owner decisions
 
 ## Not yet done
 
-Nothing is implemented. Execution order stays 16-55, 56, 57, 58, 59, then the B1-WR-09 plan, 16-60, 16-43, 16-61, 16-44. Remaining owner inputs: the second secret heartbeat URL (before 16-43/EC2), and the weights of plans not yet written.
+Nothing is implemented. Execution order stays 16-55, 56, 57, 58, 59, then the B1-WR-09 plan, 16-60, 16-43, 16-61, 16-44. Remaining owner inputs: the second secret heartbeat URL (before 16-43/EC2), and nothing else (the B1-WR-09 plan is now written as 16-62). On 2026-10-16 the user kept option B for 16-55 Q2: a separate paper heartbeat URL (user words: "giu phuong an B, lam tiep di").
