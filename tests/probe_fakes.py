@@ -66,6 +66,26 @@ class FakeProbeRest:
     def query_algo_order(self, **kwargs: Any) -> FakeResponse:
         return self._answer("query_algo_order", kwargs)
 
+    # ----- placements and cancels (plan 18-12 Task 2) -------------------- #
+
+    def new_order(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("new_order", kwargs)
+
+    def new_algo_order(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("new_algo_order", kwargs)
+
+    def cancel_order(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("cancel_order", kwargs)
+
+    def cancel_algo_order(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("cancel_algo_order", kwargs)
+
+    def cancel_all_open_orders(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("cancel_all_open_orders", kwargs)
+
+    def cancel_all_algo_open_orders(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("cancel_all_algo_open_orders", kwargs)
+
 
 class FakeProbeSdk:
     """The `DerivativesTradingUsdsFutures` surface the adapter reads: `rest_api`."""
