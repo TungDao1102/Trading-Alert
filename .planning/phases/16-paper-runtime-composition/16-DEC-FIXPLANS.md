@@ -31,3 +31,11 @@ The reviewer text (pasted by the user on 2026-10-16, "Phase 16 - Owner decisions
 ## Not yet done
 
 Nothing is implemented. Execution order stays 16-55, 56, 57, 58, 59, then the B1-WR-09 plan, 16-60, 16-43, 16-61, 16-44. Remaining owner inputs: the second secret heartbeat URL (before 16-43/EC2), and nothing else (the B1-WR-09 plan is now written as 16-62). On 2026-10-16 the user kept option B for 16-55 Q2: a separate paper heartbeat URL (user words: "giu phuong an B, lam tiep di").
+
+## Amendment 2026-10-16 (user): freeze workflow queueing
+
+decided by: user
+words:
+> Thêm queue: max cho workflow freeze, kèm ghi tick thiếu.
+
+This amends correction 3. The GitHub concurrency documentation read on 2026-10-16 (not verified live) documents `queue: max` (up to 100 pending runs; invalid together with `cancel-in-progress: true`). Plan 16-59 adds `queue: max` beside `cancel-in-progress: false` in the freeze-check workflow and keeps the explicit missing-tick records; absence of an artifact is never read as clean. The first live run on GitHub is the proof that the key is accepted; the plan's workflow test only checks the text.
