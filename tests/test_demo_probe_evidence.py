@@ -20,7 +20,12 @@ import requests
 from scripts import demo_probe as dp
 from src.adapters import binance_client
 
-from tests.probe_fakes import FakeProbePort, write_probe_limits
+from tests.probe_fakes import (
+    CASE_QUERY_OPERATIONS,
+    MUTATING_OPERATIONS,
+    FakeProbePort,
+    write_probe_limits,
+)
 from tests.support.virtual_time import VirtualTime
 
 _LOOPBACK = {"127.0.0.1", "::1"}
@@ -123,12 +128,11 @@ def test_the_dry_run_records_planned_requests_only(tmp_path: Path, offline: list
     document = _load_only(evidence)
     planned = [request for item in document["cases"] for request in item["planned_requests"]]
     assert planned, "the read-only cases plan their requests"
-    assert {request["operation"] for request in planned} == {
-        "query_order",
-        "query_algo_order",
-        "cancel_order",
-        "cancel_algo_order",
-    }
+    operations = {request["operation"] for request in planned}
+    # the read-only cases (plan 18-17) plan these four; the cases that send orders (plan
+    # 18-23) add order placements and per-id queries and cancels, nothing else
+    assert {"query_order", "query_algo_order", "cancel_order", "cancel_algo_order"} <= operations
+    assert operations <= MUTATING_OPERATIONS | CASE_QUERY_OPERATIONS
     assert document["live_port_calls"] == 0
     for item in document["cases"]:
         assert item["status"] == dp.NOT_REHEARSED

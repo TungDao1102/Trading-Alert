@@ -312,6 +312,19 @@ class FakeProbePort:
     open order ids, open algo ids, position rows and trades. A scripted answer that is an
     exception instance is raised (for example `ProbeBanned`). `flatten_takes_effect=False`
     keeps a position after a reduce-only market order (the CLEANUP_FAILED path).
+
+    Scenario helpers of the write cases (plan 18-23), all FAKE semantics:
+
+    * Fills: a LIMIT BUY priced at or above `mark` fills at once (status FILLED, the position
+      grows by its quantity) unless `fill_marketable` is False (it rests NEW);
+      `partial_fill_quantity` makes it PARTIALLY_FILLED for that quantity instead.
+    * Statuses: `order_status` and `algo_status` keep the last status per client id, so a
+      query after a cancel answers CANCELED (the fake's assumption, not an exchange fact).
+    * Duplicates: placing a client id that is still open answers `duplicate_order_answer` or
+      `duplicate_algo_answer` (FAKE -4116 by default; the algo code is undocumented).
+    * Waits: `on_wait` callables run (and are consumed) when the test rig's sleep runs, so a
+      trigger, a system cancel or a stream recovery can happen "during" a wait.
+    * `banned` is the adapter's ban flag the write cases read after a `ProbeBanned`.
     """
 
     def __init__(self, *, symbol: str = "BTCUSDT", dual_side: bool = False) -> None:
@@ -331,6 +344,92 @@ class FakeProbePort:
         self.raw_log: list[tuple[int, object]] = []
         self.state_log: list[tuple[int, str]] = []
         self.drop_results: list[bool] = []
+        # Scenario state of the write cases (plan 18-23).
+        self.mark = Decimal(FAKE_MARK_PRICE)
+        self.fill_marketable = True
+        self.partial_fill_quantity: Decimal | None = None
+        self.order_status: dict[str, str] = {}
+        self.algo_status: dict[str, str] = {}
+        self.algo_quantity: dict[str, str] = {}
+        self.duplicate_order_answer: ProbeObservation = error_observation(
+            "new_limit_order",
+            code=-4116,
+            category="DUPLICATE_CLIENT_ID",
+            message="FAKE ClientOrderId is duplicated.",
+        )
+        self.duplicate_algo_answer: ProbeObservation = error_observation(
+            "new_conditional_order",
+            code=-4116,
+            category="DUPLICATE_CLIENT_ID",
+            message="FAKE duplicate clientAlgoId.",
+        )
+        self.on_wait: list[Any] = []
+        self.banned = False
+
+    # ----- scenario helpers (plan 18-23) -------------------------------------- #
+
+    def run_wait_hooks(self) -> None:
+        """Run and consume the `on_wait` callables (the test rig's sleep calls this)."""
+        hooks, self.on_wait = self.on_wait, []
+        for hook in hooks:
+            hook()
+
+    def _position_side(self, kwargs: dict[str, Any]) -> str:
+        side = kwargs.get("position_side", "BOTH")
+        return str(side)
+
+    def _add_position(self, side: str, amount: Decimal) -> None:
+        for index, (row_side, held) in enumerate(self.positions_rows):
+            if row_side == side:
+                self.positions_rows[index] = (row_side, held + amount)
+                return
+        self.positions_rows.append((side, amount))
+
+    def system_cancel_algo(self, client_algo_id: str, status: str = "CANCELED") -> None:
+        """The exchange ends an open algo order by itself (FAKE)."""
+        if client_algo_id in self.open_algo_ids:
+            self.open_algo_ids.remove(client_algo_id)
+        self.algo_status[client_algo_id] = status
+        self.emit_frame(
+            {
+                "event_type": "AlgoUpdateEvent",
+                "client_algo_id": client_algo_id,
+                "algo_status": status,
+            }
+        )
+
+    def trigger_algo(
+        self,
+        client_algo_id: str,
+        *,
+        child_order_id: str = "FAKE-CHILD-1",
+        child_client_id: str = "FAKE-CHILD-C",
+        statuses: tuple[str, ...] = ("TRIGGERING", "TRIGGERED", "FINISHED"),
+    ) -> None:
+        """A FAKE trigger: ALGO_UPDATE frames per status, the child ORDER_TRADE_UPDATE, flat."""
+        quantity = self.algo_quantity.get(client_algo_id, "0")
+        for status in statuses:
+            record = {
+                "event_type": "AlgoUpdateEvent",
+                "client_algo_id": client_algo_id,
+                "algo_status": status,
+            }
+            if status in ("TRIGGERED", "FINISHED"):
+                record["actual_order_id"] = child_order_id
+                record["executed_quantity"] = quantity
+            self.emit_frame(record)
+        self.emit_frame(
+            {
+                "event_type": "OrderUpdateEvent",
+                "client_order_id": child_client_id,
+                "exchange_order_id": child_order_id,
+                "order_status": "FILLED",
+            }
+        )
+        if client_algo_id in self.open_algo_ids:
+            self.open_algo_ids.remove(client_algo_id)
+        self.algo_status[client_algo_id] = statuses[-1]
+        self.positions_rows = []
 
     # ----- scripting --------------------------------------------------------- #
 
@@ -371,9 +470,12 @@ class FakeProbePort:
 
     async def query_order(self, *, symbol: str, client_order_id: str) -> ProbeObservation:
         def default() -> ProbeObservation:
-            if client_order_id in self.open_order_ids:
+            status = self.order_status.get(client_order_id)
+            if status is None and client_order_id in self.open_order_ids:
+                status = "NEW"
+            if status is not None:
                 return ok_observation(
-                    "query_order", {"client_order_id": client_order_id, "status": "NEW"}
+                    "query_order", {"client_order_id": client_order_id, "status": status}
                 )
             return error_observation("query_order", code=-2013, category="ORDER_ABSENT")
 
@@ -383,9 +485,12 @@ class FakeProbePort:
 
     async def query_algo_order(self, *, client_algo_id: str) -> ProbeObservation:
         def default() -> ProbeObservation:
-            if client_algo_id in self.open_algo_ids:
+            status = self.algo_status.get(client_algo_id)
+            if status is None and client_algo_id in self.open_algo_ids:
+                status = "NEW"
+            if status is not None:
                 return ok_observation(
-                    "query_algo_order", {"client_algo_id": client_algo_id, "algo_status": "NEW"}
+                    "query_algo_order", {"client_algo_id": client_algo_id, "algo_status": status}
                 )
             return error_observation("query_algo_order", code=-2013, category="ORDER_ABSENT")
 
@@ -393,9 +498,24 @@ class FakeProbePort:
 
     async def new_limit_order(self, **kwargs: Any) -> ProbeObservation:
         def default() -> ProbeObservation:
-            self.open_order_ids.append(kwargs["client_order_id"])
+            client_id = kwargs["client_order_id"]
+            if client_id in self.open_order_ids:
+                return self.duplicate_order_answer
+            marketable = kwargs.get("side") == "BUY" and Decimal(kwargs["price"]) >= self.mark
+            status = "NEW"
+            if marketable and self.fill_marketable:
+                side = self._position_side(kwargs)
+                if self.partial_fill_quantity is not None:
+                    status = "PARTIALLY_FILLED"
+                    self._add_position(side, self.partial_fill_quantity)
+                else:
+                    status = "FILLED"
+                    self._add_position(side, Decimal(kwargs["quantity"]))
+            if status != "FILLED":
+                self.open_order_ids.append(client_id)
+            self.order_status[client_id] = status
             return ok_observation(
-                "new_limit_order", {"client_order_id": kwargs["client_order_id"], "status": "NEW"}
+                "new_limit_order", {"client_order_id": client_id, "status": status}
             )
 
         return self._answer("new_limit_order", kwargs, default)
@@ -417,10 +537,16 @@ class FakeProbePort:
 
     async def new_conditional_order(self, **kwargs: Any) -> ProbeObservation:
         def default() -> ProbeObservation:
-            self.open_algo_ids.append(kwargs["client_algo_id"])
+            client_id = kwargs["client_algo_id"]
+            if client_id in self.open_algo_ids:
+                return self.duplicate_algo_answer
+            self.open_algo_ids.append(client_id)
+            self.algo_status[client_id] = "NEW"
+            quantity = kwargs.get("quantity")
+            self.algo_quantity[client_id] = format(quantity, "f") if quantity is not None else ""
             return ok_observation(
                 "new_conditional_order",
-                {"client_algo_id": kwargs["client_algo_id"], "algo_status": "NEW"},
+                {"client_algo_id": client_id, "algo_status": "NEW"},
             )
 
         return self._answer("new_conditional_order", kwargs, default)
@@ -429,6 +555,7 @@ class FakeProbePort:
         def default() -> ProbeObservation:
             if client_order_id in self.open_order_ids:
                 self.open_order_ids.remove(client_order_id)
+                self.order_status[client_order_id] = "CANCELED"
                 return ok_observation("cancel_order", {"status": "CANCELED"})
             return error_observation("cancel_order", code=-2011, category="ORDER_ABSENT")
 
@@ -440,6 +567,7 @@ class FakeProbePort:
         def default() -> ProbeObservation:
             if client_algo_id in self.open_algo_ids:
                 self.open_algo_ids.remove(client_algo_id)
+                self.algo_status[client_algo_id] = "CANCELED"
                 return ok_observation("cancel_algo_order", {"code": "200"})
             return error_observation("cancel_algo_order", code=-2011, category="ORDER_ABSENT")
 
@@ -447,6 +575,8 @@ class FakeProbePort:
 
     async def cancel_all_open_orders(self, *, symbol: str) -> ProbeObservation:
         def default() -> ProbeObservation:
+            for client_id in self.open_order_ids:
+                self.order_status[client_id] = "CANCELED"
             self.open_order_ids.clear()
             return ok_observation("cancel_all_open_orders", {"code": "200"})
 
@@ -454,6 +584,8 @@ class FakeProbePort:
 
     async def cancel_all_algo_open_orders(self, *, symbol: str) -> ProbeObservation:
         def default() -> ProbeObservation:
+            for client_id in self.open_algo_ids:
+                self.algo_status[client_id] = "CANCELED"
             self.open_algo_ids.clear()
             return ok_observation("cancel_all_algo_open_orders", {"code": "200"})
 
@@ -471,7 +603,16 @@ class FakeProbePort:
         def default() -> ProbeObservation:
             return ok_observation(
                 "open_algo_orders",
-                _rows([{"client_algo_id": cid} for cid in self.open_algo_ids]),
+                _rows(
+                    [
+                        {
+                            "client_algo_id": cid,
+                            "algo_status": self.algo_status.get(cid, "NEW"),
+                            "quantity": self.algo_quantity.get(cid, ""),
+                        }
+                        for cid in self.open_algo_ids
+                    ]
+                ),
             )
 
         return self._answer("open_algo_orders", {"symbol": symbol}, default)

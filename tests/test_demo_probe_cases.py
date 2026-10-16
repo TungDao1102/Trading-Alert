@@ -20,6 +20,7 @@ from src.adapters.binance_probe import ProbeBanned
 from src.adapters.binance_ratelimit_gate import IP_BAN_418
 
 from tests.probe_fakes import (
+    TEST_ONLY_CASE_TIMEOUT_SECONDS,
     TEST_ONLY_CLEANUP_TIMEOUT_SECONDS,
     FakeProbePort,
     RecordingProbePort,
@@ -695,3 +696,375 @@ async def test_a_naive_clock_is_refused_before_any_port_call(
     with pytest.raises(ValueError, match="aware UTC"):
         await dp.run_probe(config, rig, dp.ProbeRecorder())
     assert port.calls == []
+
+
+# =========================================================================== #
+# Plan 18-23: the cases that send orders, on scripted FakeProbePort scenarios.
+# =========================================================================== #
+#
+# The FAKE market (tests/probe_fakes.py): mark 60000.00, tick 0.10, step 0.001, min quantity
+# 0.001, min notional 100, PERCENT_PRICE up 1.0500. TEST_ONLY limits: quantity 0.002, notional
+# cap 150, far_price_fraction 0.80. So a far BUY rests at 48000.00, a far up-trigger sits at
+# 72000.00 (notional 144) and a marketable BUY is priced at the PERCENT_PRICE bound 63000.00.
+
+FAR_BELOW = Decimal("48000.00")
+FAR_ABOVE = Decimal("72000.00")
+MARKETABLE = Decimal("63000.00")
+JUST_BELOW = Decimal("59999.90")
+APPROVED = Decimal("0.002")
+ORDER_SENDS = ("new_limit_order", "new_market_order", "new_conditional_order")
+
+
+def scenario_rig(port: FakeProbePort, vt: VirtualTime | None = None) -> dp.ProbeRig:
+    """A rig whose sleep records the duration, runs the port's wait hooks and moves time."""
+    vt = vt if vt is not None else VirtualTime()
+
+    async def sleep(seconds: int) -> None:
+        vt.sleeps.append(seconds)
+        port.run_wait_hooks()
+        await vt.advance(seconds)
+
+    return dp.ProbeRig(port=port, clock=vt.now, sleep=sleep)
+
+
+async def run_cases(
+    tmp_path: Path,
+    port: FakeProbePort,
+    *case_ids: str,
+    optional: tuple[str, ...] = (),
+    vt: VirtualTime | None = None,
+) -> tuple[dict[str, Any], int, dp.ProbeRecorder]:
+    config = make_config(tmp_path, execute=True, optional=optional, only=case_ids)
+    recorder = dp.ProbeRecorder()
+    code = await dp.run_probe(config, scenario_rig(port, vt), recorder)
+    return recorder.document(config), code, recorder
+
+
+def sent(port: FakeProbePort, operation: str) -> list[dict[str, Any]]:
+    return [kwargs for name, kwargs in port.calls if name == operation]
+
+
+def case_calls(port: FakeProbePort, nth: int = 0) -> list[str]:
+    """The operations the nth case of the run sent, between the market read and its cleanup."""
+    names = port.names()
+    start = names.index("symbol_filters") + 1  # the run's market read precedes every case
+    for _ in range(nth):
+        start = names.index("cancel_all_open_orders", start) + 1
+        start = names.index("open_orders", start)  # skip the cleanup's re-read
+        start = names.index("positions", start) + 1
+    end = names.index("cancel_all_open_orders", start)
+    return names[start:end]
+
+
+# --------------------------------------------------------------------------- #
+# The shared order bound (threat T-18-55).
+# --------------------------------------------------------------------------- #
+
+
+def _limits(tmp_path: Path, *, market_lot: bool = False) -> Any:
+    optional = ("market_lot_size_out_of_range",) if market_lot else ()
+    return make_config(tmp_path, optional=optional).order_limits
+
+
+def test_the_order_bound_accepts_the_approved_quantity_within_the_cap(tmp_path: Path) -> None:
+    limits = _limits(tmp_path)
+    assert dp.order_bound_refusal(limits, quantity=APPROVED, price=Decimal("75000")) is None
+    assert dp.order_bound_refusal(limits, quantity=Decimal("0.001"), price=FAR_ABOVE) is None
+    assert dp.order_bound_refusal(limits, quantity=None, price=FAR_ABOVE) is None
+
+
+def test_the_order_bound_refuses_a_quantity_above_the_approved_one(tmp_path: Path) -> None:
+    refusal = dp.order_bound_refusal(_limits(tmp_path), quantity=Decimal("0.003"), price=FAR_BELOW)
+    assert refusal is not None and "above the approved quantity" in refusal
+
+
+def test_the_order_bound_refuses_a_notional_above_the_cap(tmp_path: Path) -> None:
+    refusal = dp.order_bound_refusal(_limits(tmp_path), quantity=APPROVED, price=Decimal("75000.1"))
+    assert refusal is not None and "above the approved cap" in refusal
+
+
+@pytest.mark.parametrize("quantity", [Decimal("0"), Decimal("-0.001")])
+def test_the_order_bound_refuses_a_quantity_that_is_not_positive(
+    tmp_path: Path, quantity: Decimal
+) -> None:
+    assert dp.order_bound_refusal(_limits(tmp_path), quantity=quantity, price=FAR_BELOW)
+
+
+def test_the_order_bound_refuses_a_price_that_is_not_positive(tmp_path: Path) -> None:
+    assert dp.order_bound_refusal(_limits(tmp_path), quantity=APPROVED, price=Decimal("0"))
+
+
+def test_the_order_bound_refuses_a_quantity_off_the_step_grid(tmp_path: Path) -> None:
+    refusal = dp.order_bound_refusal(
+        _limits(tmp_path), quantity=Decimal("0.0015"), price=FAR_BELOW, step=Decimal("0.001")
+    )
+    assert refusal is not None and "step" in refusal
+
+
+def test_the_market_lot_exception_is_exactly_the_owner_approved_quantity(tmp_path: Path) -> None:
+    limits = _limits(tmp_path, market_lot=True)
+    approved = limits.market_lot_probe_quantity
+    assert approved == Decimal("200")
+    # the notional cap is not applied to the owner-approved market-lot quantity
+    assert (
+        dp.order_bound_refusal(limits, quantity=approved, price=FAR_ABOVE, market_lot_probe=True)
+        is None
+    )
+    assert dp.order_bound_refusal(
+        limits, quantity=Decimal("199"), price=FAR_ABOVE, market_lot_probe=True
+    )
+    not_approved = _limits(tmp_path)
+    assert not_approved.market_lot_probe_quantity is None
+    assert dp.order_bound_refusal(
+        not_approved, quantity=approved, price=FAR_ABOVE, market_lot_probe=True
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Task 1: the carrier cases.
+# --------------------------------------------------------------------------- #
+
+
+async def test_duplicate_client_algo_id_records_both_answers_and_cancels_the_carrier(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    port.duplicate_algo_answer = error_observation(
+        "new_conditional_order",
+        code=-4116,
+        category="DUPLICATE_CLIENT_ID",
+        message="FAKE duplicated clientAlgoId.",
+    )
+    document, code, _ = await run_cases(tmp_path, port, "duplicate_client_algo_id")
+    record = case(document, "duplicate_client_algo_id")
+    assert record["status"] == dp.OBSERVED, record
+    placed = sent(port, "new_conditional_order")
+    assert len(placed) == 2
+    first, second = placed
+    assert first == second
+    assert dp.CLIENT_ID_RE.fullmatch(first["client_algo_id"])
+    assert first["order_type"] == "STOP" and first["side"] == "BUY"
+    assert first["trigger_price"] == FAR_ABOVE and first["price"] == FAR_ABOVE
+    assert first["quantity"] == APPROVED and isinstance(first["quantity"], Decimal)
+    assert first["reduce_only"] is None and first["close_position"] is None
+    assert first["working_type"] == "MARK_PRICE" and first["position_side"] == "BOTH"
+    duplicate = next(item for item in record["observations"] if not item["ok"])
+    assert duplicate["error"] == {
+        "http_class": "BAD_REQUEST",
+        "code": -4116,
+        "retry_after_seconds": None,
+        "category": "DUPLICATE_CLIENT_ID",
+        "message": "FAKE duplicated clientAlgoId.",
+    }
+    assert record["details"]["duplicate_accepted"] == "false"
+    assert [kw["client_algo_id"] for kw in sent(port, "cancel_algo_order")] == [
+        first["client_algo_id"]
+    ]
+    assert record["cleanup"]["status"] == dp.CLEANUP_FLAT
+    assert code == dp.EXIT_OK
+
+
+async def test_duplicate_client_algo_id_with_a_rejected_carrier_is_not_observed(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    port.script(
+        "new_conditional_order",
+        error_observation("new_conditional_order", code=-2027, category="REJECTED_DEFINITIVE"),
+    )
+    document, code, _ = await run_cases(tmp_path, port, "duplicate_client_algo_id")
+    record = case(document, "duplicate_client_algo_id")
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "carrier rejected: BAD_REQUEST -2027"
+    assert len(sent(port, "new_conditional_order")) == 1
+    assert record["observations"][0]["error"]["code"] == -2027
+    assert sent(port, "cancel_algo_order") == []
+    assert code == dp.EXIT_OK
+
+
+@pytest.mark.parametrize("reuse_accepted", [True, False])
+async def test_id_reuse_after_canceled_normal(tmp_path: Path, reuse_accepted: bool) -> None:
+    port = FakeProbePort()
+    if not reuse_accepted:
+        port.script_call(
+            "new_limit_order",
+            1,
+            error_observation("new_limit_order", code=-4116, category="DUPLICATE_CLIENT_ID"),
+        )
+    document, _, _ = await run_cases(tmp_path, port, "id_reuse_after_canceled_normal")
+    record = case(document, "id_reuse_after_canceled_normal")
+    assert record["status"] == dp.OBSERVED
+    first, again = sent(port, "new_limit_order")
+    assert first == again
+    assert first["price"] == FAR_BELOW and first["side"] == "BUY"
+    assert first["quantity"] == APPROVED and first["time_in_force"] == "GTC"
+    assert first["reduce_only"] is None
+    assert record["details"]["reuse_accepted"] == ("true" if reuse_accepted else "false")
+    assert len(sent(port, "cancel_order")) == (2 if reuse_accepted else 1)
+    assert case_calls(port)[:3] == ["mark_price", "symbol_filters", "new_limit_order"]
+
+
+async def test_id_reuse_after_canceled_normal_stops_when_the_cancel_fails(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.script(
+        "cancel_order", error_observation("cancel_order", code=-2011, category="ORDER_ABSENT")
+    )
+    document, _, _ = await run_cases(tmp_path, port, "id_reuse_after_canceled_normal")
+    record = case(document, "id_reuse_after_canceled_normal")
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "the first order was not canceled: BAD_REQUEST -2011"
+    assert len(sent(port, "new_limit_order")) == 1
+
+
+@pytest.mark.parametrize("reuse_accepted", [True, False])
+async def test_id_reuse_after_canceled_algo(tmp_path: Path, reuse_accepted: bool) -> None:
+    port = FakeProbePort()
+    if not reuse_accepted:
+        port.script_call(
+            "new_conditional_order",
+            1,
+            error_observation("new_conditional_order", code=-4116, category="DUPLICATE_CLIENT_ID"),
+        )
+    document, _, _ = await run_cases(tmp_path, port, "id_reuse_after_canceled_algo")
+    record = case(document, "id_reuse_after_canceled_algo")
+    assert record["status"] == dp.OBSERVED
+    first, again = sent(port, "new_conditional_order")
+    assert first == again
+    assert first["order_type"] == "STOP" and first["trigger_price"] == FAR_ABOVE
+    assert record["details"]["reuse_accepted"] == ("true" if reuse_accepted else "false")
+    assert len(sent(port, "cancel_algo_order")) == (2 if reuse_accepted else 1)
+
+
+async def test_id_reuse_after_canceled_algo_with_a_rejected_carrier(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.script(
+        "new_conditional_order",
+        error_observation("new_conditional_order", code=-1111, category="REJECTED_DEFINITIVE"),
+    )
+    document, _, _ = await run_cases(tmp_path, port, "id_reuse_after_canceled_algo")
+    record = case(document, "id_reuse_after_canceled_algo")
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "carrier rejected: BAD_REQUEST -1111"
+    assert sent(port, "cancel_algo_order") == []
+
+
+async def test_id_reuse_after_filled_places_the_same_id_as_a_far_limit(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    vt = VirtualTime()
+    document, code, _ = await run_cases(tmp_path, port, "id_reuse_after_filled", vt=vt)
+    record = case(document, "id_reuse_after_filled")
+    assert record["status"] == dp.OBSERVED, record
+    entry, again = sent(port, "new_limit_order")
+    assert entry["price"] == MARKETABLE and entry["quantity"] == APPROVED
+    assert again["price"] == FAR_BELOW and again["quantity"] == APPROVED
+    assert entry["client_order_id"] == again["client_order_id"]
+    assert record["details"]["entry_statuses"].endswith("FILLED")
+    assert record["details"]["reuse_accepted"] == "true"
+    # the filled entry left a position: the per-case cleanup flattens it
+    assert len(sent(port, "new_market_order")) == 1
+    assert record["cleanup"]["status"] == dp.CLEANUP_FLAT
+    assert vt.sleeps == []  # the fill was visible at the first check: no wait
+    assert code == dp.EXIT_OK
+
+
+async def test_id_reuse_after_filled_is_not_observed_when_the_entry_does_not_fill(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    port.fill_marketable = False
+    vt = VirtualTime()
+    document, _, _ = await run_cases(tmp_path, port, "id_reuse_after_filled", vt=vt)
+    record = case(document, "id_reuse_after_filled")
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "the entry did not fill: status NEW"
+    assert len(sent(port, "new_limit_order")) == 1
+    assert vt.sleeps == [TEST_ONLY_CASE_TIMEOUT_SECONDS]  # one wait of the owner's timeout
+
+
+# --------------------------------------------------------------------------- #
+# Task 1: the common rules (bound, hedge mode, script error, client ids).
+# --------------------------------------------------------------------------- #
+
+
+def _mark(close: str) -> Any:
+    return ok_observation(
+        "mark_price", {"symbol": "BTCUSDT", "interval": "1m", "count": "1", "close": close}
+    )
+
+
+async def test_a_notional_cap_breach_refuses_the_case_and_sends_nothing(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    # call 0 is the run's market read; the case reads the mark again (call 1): it has risen,
+    # so the far up-trigger notional is 0.002 * 96000.00 = 192, above the cap of 150
+    port.script_call("mark_price", 1, _mark("80000.00"))
+    document, code, _ = await run_cases(tmp_path, port, "duplicate_client_algo_id")
+    record = case(document, "duplicate_client_algo_id")
+    assert record["status"] == dp.ERROR
+    assert "above the approved cap" in record["reason"]
+    assert not any(name in ORDER_SENDS for name in case_calls(port))
+    assert record["cleanup"]["status"] == dp.CLEANUP_FLAT
+    assert code == dp.EXIT_FAILED
+
+
+async def test_hedge_mode_makes_a_reduce_only_case_not_observed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Task 1 proves the rule on the wrapper with a stand-in reduce-only body; Task 2 and
+    # Task 3 prove it on every registered reduce-only case.
+    async def body(case: Any) -> dp.CaseResult:
+        raise AssertionError("a reduce-only body must not run in hedge mode")
+
+    async def handler(context: dp.CaseContext) -> dp.CaseResult:
+        return await dp.run_write_case(
+            context, body, case_id="preplaced_stop_reduce_only_flat", reduce_only=True
+        )
+
+    monkeypatch.setitem(dp.CASE_HANDLERS, "preplaced_stop_reduce_only_flat", handler)
+    port = FakeProbePort(dual_side=True)
+    document, _, _ = await run_cases(tmp_path, port, "preplaced_stop_reduce_only_flat")
+    record = case(document, "preplaced_stop_reduce_only_flat")
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "hedge mode: reduceOnly cannot be sent"
+    assert not any(name in ORDER_SENDS for name in port.names())
+
+
+async def test_hedge_mode_uses_the_long_position_side_for_a_carrier(tmp_path: Path) -> None:
+    port = FakeProbePort(dual_side=True)
+    document, _, _ = await run_cases(tmp_path, port, "duplicate_client_algo_id")
+    assert case(document, "duplicate_client_algo_id")["status"] == dp.OBSERVED
+    assert {kw["position_side"] for kw in sent(port, "new_conditional_order")} == {"LONG"}
+
+
+async def test_a_script_error_is_error_and_the_run_continues_to_cleanup(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.script("new_conditional_order", RuntimeError("FAKE script bug"))
+    document, code, recorder = await run_cases(
+        tmp_path, port, "duplicate_client_algo_id", "id_reuse_after_canceled_normal"
+    )
+    record = case(document, "duplicate_client_algo_id")
+    assert record["status"] == dp.ERROR
+    assert record["reason"] == "script error: RuntimeError"
+    assert record["cleanup"]["status"] == dp.CLEANUP_FLAT
+    assert case(document, "id_reuse_after_canceled_normal")["status"] == dp.OBSERVED
+    assert recorder.failures == []  # the handler returned ERROR itself: it never raised
+    assert code == dp.EXIT_FAILED
+
+
+async def test_every_client_id_is_unique_but_the_intended_reuse(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    await run_cases(
+        tmp_path,
+        port,
+        "duplicate_client_algo_id",
+        "id_reuse_after_canceled_normal",
+        "id_reuse_after_canceled_algo",
+        "id_reuse_after_filled",
+    )
+    placed = [
+        kw.get("client_order_id") or kw.get("client_algo_id")
+        for name, kw in port.calls
+        if name in ("new_limit_order", "new_conditional_order")
+    ]
+    assert all(dp.CLIENT_ID_RE.fullmatch(str(value)) for value in placed)
+    # each case places exactly one id twice (the reuse under test); no id crosses cases
+    assert sorted(placed.count(value) for value in set(placed)) == [2, 2, 2, 2]
