@@ -1,0 +1,14 @@
+[order]
+symbol = "BTCUSDT"
+quantity = "0.0008"
+max_notional_quote = "100"
+far_price_fraction = "0.96"
+
+[waits]
+case_timeout_seconds = 30
+cleanup_timeout_seconds = 60
+
+[optional_cases]
+explicit_time_in_force = false
+stream_gap = false
+market_lot_size_out_of_range = false
