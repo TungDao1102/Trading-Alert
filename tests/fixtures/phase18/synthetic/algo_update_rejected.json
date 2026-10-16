@@ -1,0 +1,30 @@
+{
+  "E": 1760000000123,
+  "T": 1760000000120,
+  "e": "ALGO_UPDATE",
+  "o": {
+    "R": true,
+    "S": "SELL",
+    "V": "EXPIRE_MAKER",
+    "X": "REJECTED",
+    "ai": "",
+    "aid": 7000000001,
+    "at": "CONDITIONAL",
+    "caid": "synthetic-sl-0001",
+    "cp": false,
+    "f": "GTC",
+    "gtd": 0,
+    "ia": false,
+    "o": "STOP_MARKET",
+    "p": "0",
+    "pP": false,
+    "pm": "NONE",
+    "ps": "BOTH",
+    "q": "0.010",
+    "rm": "Reduce Only reject",
+    "s": "BTCUSDT",
+    "tp": "58000.00",
+    "tt": 0,
+    "wt": "MARK_PRICE"
+  }
+}

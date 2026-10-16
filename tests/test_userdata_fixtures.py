@@ -15,6 +15,7 @@ No network: the frames come from the builders and the files on disk.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -24,13 +25,24 @@ from typing import Any
 
 import pytest
 from src.adapters.binance_userdata_events import (
+    AccountUpdateEvent,
+    AlgoUpdateEvent,
+    ListenKeyExpiredEvent,
     OrderUpdateEvent,
     parse_stream_message,
     to_fill_event,
 )
 from src.execution.fill_monitor import CurrentPositionView, FillEvent, fold_fills
+from src.ops.redaction import REDACTED, scrub
 
-from tests.support.userdata_frames import FRAME_LABEL, order_trade_update_frame
+from tests.support.userdata_frames import (
+    FRAME_LABEL,
+    SYNTHETIC_LISTEN_KEY,
+    account_update_frame,
+    algo_update_frame,
+    listen_key_expired_frame,
+    order_trade_update_frame,
+)
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "phase18"
 SYNTHETIC_DIR = FIXTURE_ROOT / "synthetic"
@@ -39,10 +51,23 @@ SYNTHETIC_SECTION = "Synthetic frames"
 
 OBSERVED_AT = datetime(2026, 10, 16, 12, 0, 0, tzinfo=UTC)
 
+# The `rm` text of the REJECTED algo fixture: the same synthetic reason the plan 18-03
+# parser tests use, not a reason captured from Binance.
+SYNTHETIC_REJECT_REASON = "Reduce Only reject"
+
 # Each fixture file name -> a zero-argument callable returning the wire dict of the
-# plan 18-03 builder it was written from.
+# plan 18-03 builder it was written from (with the overrides the plan 18-03 tests use).
 FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "order_trade_update_trade.json": order_trade_update_frame,
+    "order_trade_update_new.json": lambda: order_trade_update_frame(
+        x="NEW", X="NEW", l="0", z="0", L="0"
+    ),
+    "algo_update_new.json": algo_update_frame,
+    "algo_update_rejected.json": lambda: algo_update_frame(
+        X="REJECTED", rm=SYNTHETIC_REJECT_REASON
+    ),
+    "account_update_order.json": account_update_frame,
+    "listen_key_expired.json": listen_key_expired_frame,
 }
 
 
@@ -188,3 +213,101 @@ def test_rows_of_other_sections_are_not_compared(tmp_path: Path) -> None:
     other += "| recorded_only.json | ORDER_TRADE_UPDATE | RECORDED_DEMO |\n"
     readme.write_text(text + other, encoding="ascii")
     assert _readme_mismatch(readme, SYNTHETIC_DIR) == (set(), set())
+
+
+# --------------------------------------------------------------------------- #
+# Per-kind parse expectations.
+# --------------------------------------------------------------------------- #
+
+
+def test_new_order_fixture_parses_and_has_no_fill() -> None:
+    event = _parse("order_trade_update_new.json")
+    assert isinstance(event, OrderUpdateEvent)
+    assert event.execution_type == "NEW"
+    assert event.order_status == "NEW"
+    assert event.trade_id is None
+    assert to_fill_event(event) is None
+
+
+def test_new_algo_fixture_parses_to_an_algo_update_event() -> None:
+    event = _parse("algo_update_new.json")
+    assert isinstance(event, AlgoUpdateEvent)
+    assert event.algo_status == "NEW"
+    assert event.reject_reason is None
+
+
+def test_rejected_algo_fixture_keeps_rm_as_a_diagnostic() -> None:
+    event = _parse("algo_update_rejected.json")
+    assert isinstance(event, AlgoUpdateEvent)
+    assert event.algo_status == "REJECTED"
+    assert event.reject_reason == SYNTHETIC_REJECT_REASON
+    assert _load("algo_update_rejected.json")["o"]["rm"] == SYNTHETIC_REJECT_REASON
+
+
+def test_account_update_fixture_parses_with_balance_and_position_rows() -> None:
+    event = _parse("account_update_order.json")
+    assert isinstance(event, AccountUpdateEvent)
+    assert event.reason == "ORDER"
+    assert len(event.balances) >= 1
+    assert len(event.positions) >= 1
+
+
+def test_listen_key_expired_fixture_parses_and_its_key_stays_out_of_the_event() -> None:
+    key = _load("listen_key_expired.json")["listenKey"]
+    event = _parse("listen_key_expired.json")
+    assert isinstance(event, ListenKeyExpiredEvent)
+    assert key not in repr(event)
+    assert key not in str(event)
+
+
+# --------------------------------------------------------------------------- #
+# Secret shapes (D-22, research P3, T-18-73).
+# --------------------------------------------------------------------------- #
+
+_LISTEN_KEY_NAME = re.compile(r"(?i)^listen_?key$")
+
+
+def _mask_listen_key_values(value: Any) -> Any:
+    """`value` with the value under every listenKey-named key replaced by REDACTED.
+
+    This mirrors the redactor's key-name rule: in JSON text it masks the value of a
+    `"listenKey"` key whatever that value is (plan 18-04). Every other value of a fixture
+    must come out of the redactor unchanged.
+    """
+    if isinstance(value, dict):
+        return {
+            key: REDACTED if _LISTEN_KEY_NAME.match(key) else _mask_listen_key_values(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_mask_listen_key_values(item) for item in value]
+    return value
+
+
+@pytest.mark.parametrize("name", sorted(FIXTURE_BUILDERS))
+def test_redactor_changes_no_fixture_value_other_than_the_listen_key_field(name: str) -> None:
+    text = (SYNTHETIC_DIR / name).read_bytes().decode("ascii")
+    expected = _canonical_text(_mask_listen_key_values(json.loads(text)))
+    assert scrub(text) == expected
+    if "listenKey" not in text:
+        assert scrub(text) == text
+
+
+def test_the_dummy_listen_key_is_not_listen_key_shaped() -> None:
+    key = listen_key_expired_frame()["listenKey"]
+    assert key == SYNTHETIC_LISTEN_KEY
+    assert "SYNTHETIC" in key
+    assert "DUMMY" in key
+    # Outside the JSON key-name rule the value itself is not secret-shaped.
+    for text in (key, f"listenKey={key}", f"listen_key={key}", f"?listenKey={key}&x=1"):
+        assert scrub(text) == text
+
+
+def test_a_realistic_listen_key_is_changed_by_the_redactor() -> None:
+    # Negative control: a made-up key of the realistic shape (64 alphanumerics).
+    realistic = ("Ab3" * 22)[:64]
+    assert len(realistic) >= 24
+    for text in (f"listenKey={realistic}", json.dumps({"listenKey": realistic})):
+        scrubbed = scrub(text)
+        assert scrubbed != text
+        assert realistic not in scrubbed
