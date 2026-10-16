@@ -42,6 +42,7 @@ DECISION_RECORD = (
     / "18-DEC-O-18-01.md"
 )
 MANAGER_PATH = REPO_ROOT / "src" / "execution" / "manager.py"
+EXECUTION_SPEC = REPO_ROOT / "docs" / "trading" / "EXECUTION_SPEC.md"
 
 # The documented defaults for the statuses the record does not classify
 # (record text: "NEW is ACTIVE, REJECTED and EXPIRED are TERMINAL_FAILED").
@@ -277,3 +278,38 @@ def test_removed_allow_list_constant_is_gone_and_imported_nowhere() -> None:
                     assert name not in {a.name for a in node.names}, path
                 if isinstance(node, ast.Attribute):
                     assert node.attr != name, path
+
+
+# --------------------------------------------------------------------------- #
+# EXECUTION_SPEC 6.1 shows the class of each status, copied from the code.
+# --------------------------------------------------------------------------- #
+
+
+def _spec_section_6_1() -> str:
+    text = EXECUTION_SPEC.read_text(encoding="utf-8")
+    start = text.index("### 6.1 ")
+    end = text.index("\n## ", start)
+    return text[start:end]
+
+
+def test_execution_spec_6_1_class_column_equals_the_code_table() -> None:
+    section = _spec_section_6_1()
+    assert re.search(r"^\| Status \| Class \| Meaning \|\s*$", section, flags=re.MULTILINE)
+    rows = re.findall(
+        r"^\|\s*`([A-Z_]+)`\s*\|\s*([A-Z_]+)\s*\|[^\n]*\|\s*$", section, flags=re.MULTILINE
+    )
+    doc = dict(rows)
+    assert len(rows) == len(doc) == 7, rows
+    assert doc == {status: entry.klass.value for status, entry in ALGO_STATUS_TABLE.items()}
+
+
+def test_execution_spec_6_1_states_the_fail_closed_rule() -> None:
+    section = _spec_section_6_1()
+    for phrase in (
+        "unseen",
+        "only ACTIVE counts as protection confirmed",
+        "18-DEC-O-18-01",
+        "D055",
+        "Phase 20",
+    ):
+        assert phrase in section, phrase

@@ -101,15 +101,17 @@ The system must reconcile with Binance rather than trusting local state.
 
 Conditional (algo) orders live in the Binance Algo Service until their condition is met, and only then reach the matching engine. Binance performs no margin check before a conditional order triggers (change-log 2025-11-06), so a stop that was accepted at placement can still fail at trigger. The lifecycle arrives as `ALGO_UPDATE` events; the status field is `X` and the failure reason field is `rm` (`o.rm` on the event payload).
 
-| Status | Meaning |
-| --- | --- |
-| `NEW` | placed in the Algo Service, not yet triggered |
-| `TRIGGERING` | condition met, forwarded to the matching engine |
-| `TRIGGERED` | the order has been successfully placed into the matching engine |
-| `FINISHED` | the triggered conditional order has been filled or canceled in the matching engine: filled OR canceled, so FINISHED alone does not prove that the protective exit executed |
-| `CANCELED` | the conditional order has been canceled |
-| `REJECTED` | denied by the matching engine at trigger, for example a margin check failure |
-| `EXPIRED` | canceled by the system |
+| Status | Class | Meaning |
+| --- | --- | --- |
+| `NEW` | ACTIVE | placed in the Algo Service, not yet triggered |
+| `TRIGGERING` | UNKNOWN | condition met, forwarded to the matching engine |
+| `TRIGGERED` | UNKNOWN | the order has been successfully placed into the matching engine |
+| `FINISHED` | UNKNOWN | the triggered conditional order has been filled or canceled in the matching engine: filled OR canceled, so FINISHED alone does not prove that the protective exit executed |
+| `CANCELED` | UNKNOWN | the conditional order has been canceled |
+| `REJECTED` | TERMINAL_FAILED | denied by the matching engine at trigger, for example a margin check failure |
+| `EXPIRED` | TERMINAL_FAILED | canceled by the system |
+
+Class column (plan 18-06, CONTEXT D-07): each class is one of ACTIVE, TERMINAL_OK, TERMINAL_FAILED and UNKNOWN, copied from `ALGO_STATUS_TABLE` in `src/domain/algo_status.py`; a test compares every row of this table with the code. An unseen value (a status outside the seven above, an empty or missing status, another letter case) is UNKNOWN and fails closed, and only ACTIVE counts as protection confirmed: the attach path confirms a protective leg, and adopts an existing leg, only when the class of its status is ACTIVE, so with this table only `NEW` confirms protection. The classes of `TRIGGERING`, `TRIGGERED`, `FINISHED` and `CANCELED` are the owner's recorded decision of Phase 18 (`.planning/phases/18-user-data-stream-error-taxonomy/decisions/18-DEC-O-18-01.md`, 2026-10-16): all four are UNKNOWN, which means they are not confirmed protection until they are independently verified through Binance; D055 is not decided by this table. No status is TERMINAL_OK. Reconcile and sweeper decisions driven by the class belong to Phase 20; until then the orphan sweeper only journals the class (`algo_status_class`) beside the raw status for diagnosis.
 
 Consequences for the execution layer (F-054):
 

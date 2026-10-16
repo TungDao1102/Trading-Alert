@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+from src.domain.algo_status import classify_algo_status
 from src.domain.journal import JournalEvent, content_hash_event_id
 
 # --------------------------------------------------------------------------- #
@@ -308,6 +309,7 @@ class OrphanSweeper:
             "symbol": symbol,
             "client_algo_id": client_algo_id,
             "algo_status": getattr(probe, "algo_status", None),
+            "algo_status_class": classify_algo_status(getattr(probe, "algo_status", None)).value,
             "update_time_utc": _iso(getattr(probe, "update_time_utc", None)),
             "phase": "pre_cancel",
         }
