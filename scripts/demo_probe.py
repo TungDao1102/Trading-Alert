@@ -76,7 +76,7 @@ import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
@@ -1023,6 +1023,709 @@ async def case_cancel_algo_order_not_found(context: CaseContext) -> CaseResult:
     return _not_found_result(answer, probed)
 
 
+# --------------------------------------------------------------------------- #
+# The cases that send orders (plan 18-23): the write-case rules.
+#
+# Every write case runs through `run_write_case`, which applies the common rules: the
+# position mode must be known; a reduce-only based case is NOT_OBSERVED in hedge mode; every
+# order passes the one shared order bound (`order_bound_refusal`) before it is sent, and each
+# handler checks every order it will send before the first one (so a refused case sends
+# nothing and is ERROR); a script error becomes ERROR (the runner's cleanup still runs); a
+# rate-limit answer stops the case (the runner then stops the run); a `ProbeBanned` ends the
+# run after one cleanup attempt when the port reports no ban. No answer is ever retried.
+# Prices are on the tick grid and quantities on the step grid of `symbol_filters`; every
+# wait is one `wait_up_to` of the owner's `case_timeout_seconds`.
+# --------------------------------------------------------------------------- #
+
+WORKING_TYPE_MARK_PRICE = "MARK_PRICE"
+TIME_IN_FORCE_GTC = "GTC"
+ORDER_TYPE_STOP = "STOP"
+ORDER_TYPE_STOP_MARKET = "STOP_MARKET"
+ORDER_TYPE_TAKE_PROFIT_MARKET = "TAKE_PROFIT_MARKET"
+POSITION_SIDE_LONG = "LONG"
+POSITION_SIDE_SHORT = "SHORT"
+# The time-in-force values the New Algo Order documentation lists (research B9, read
+# 2026-10-15): the optional case sends one leg with each, one answer each.
+DOCUMENTED_ALGO_TIME_IN_FORCE: tuple[str, ...] = ("GTC", "IOC", "FOK", "GTX", "GTD", "RPI")
+
+ORDER_STATUS_FILLED = "FILLED"
+ORDER_STATUS_PARTIALLY_FILLED = "PARTIALLY_FILLED"
+ALGO_STATUS_NEW = "NEW"
+# Algo statuses after NEW (research F3); "ended" ones close the lifecycle wait.
+ALGO_LIFECYCLE_STATUSES: frozenset[str] = frozenset({"TRIGGERING", "TRIGGERED", "FINISHED"})
+ALGO_ENDED_STATUSES: frozenset[str] = frozenset({"FINISHED", "CANCELED", "REJECTED", "EXPIRED"})
+ALGO_ABSENT = "ABSENT"
+EVENT_ALGO_UPDATE = "AlgoUpdateEvent"
+EVENT_ORDER_UPDATE = "OrderUpdateEvent"
+STREAM_STARTED = "STARTED"
+CATEGORY_ORDER_ABSENT = "ORDER_ABSENT"
+
+REASON_HEDGE_MODE = "hedge mode: reduceOnly cannot be sent"
+REASON_POSITION_MODE_UNKNOWN = "the position mode is unknown: nothing was sent"
+REASON_PREMISE_NOT_RUN = "premise case not run"
+REASON_LEG_NOT_ACCEPTED = "pre-placed leg not accepted"
+REASON_NO_PARTIAL = "every marketable entry filled completely at the approved size"
+REASON_NO_ENTRY_FILLED = "no marketable entry of this run filled"
+REASON_NO_STREAM = "no stream running"
+REASON_NOT_TRIGGERED = "the trigger was not reached within case_timeout_seconds"
+
+# The case whose leg the dependent D055 cases need, and the cases that open an entry.
+PREPLACED_CASE = "preplaced_stop_reduce_only_flat"
+ENTRY_CASES: tuple[str, ...] = ("id_reuse_after_filled", "full_fill_protective_quantity")
+
+
+class OrderBoundRefused(Exception):  # noqa: N818 - a refusal, like ConfirmationRefused
+    """An order above the owner's approved quantity or notional cap (nothing was sent)."""
+
+
+class _StopCase(Exception):  # noqa: N818 - an internal signal: the case ends NOT_OBSERVED
+    """The case cannot go on (unreadable market, rate-limit answer); `reason` says why."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def order_bound_refusal(
+    limits: DemoOrderLimits,
+    *,
+    quantity: Decimal | None,
+    price: Decimal,
+    step: Decimal | None = None,
+    market_lot_probe: bool = False,
+) -> str | None:
+    """Why an order may not be sent under the owner's probe limits, or None (T-18-55).
+
+    The one bound of every write case: the quantity is positive, on the step grid and never
+    above the approved `quantity`, and `quantity * price` never exceeds `max_notional_quote`
+    (`price` is the order's highest price: limit or trigger). A close-position order has no
+    quantity (None) and passes the quantity rules. The single exception is the optional
+    MARKET_LOT_SIZE case (`market_lot_probe`): its quantity must equal the owner-approved
+    `market_lot_probe_quantity` exactly and the notional cap is not applied to it.
+    """
+    if not price.is_finite() or price <= 0:
+        return f"the price {price} is not positive"
+    if market_lot_probe:
+        approved = limits.market_lot_probe_quantity
+        if approved is None:
+            return "market_lot_probe_quantity is not approved in the probe limits file"
+        if quantity != approved:
+            return f"quantity {quantity} is not the approved market_lot_probe_quantity {approved}"
+        return None
+    if quantity is None:
+        return None
+    if not quantity.is_finite() or quantity <= 0:
+        return f"quantity {quantity} is not positive"
+    if step is not None and quantity % step != 0:
+        return f"quantity {quantity} is not on the step grid {step}"
+    if quantity > limits.quantity:
+        return f"quantity {quantity} is above the approved quantity {limits.quantity}"
+    cap = limits.max_notional_quote
+    if cap is None:
+        return "max_notional_quote is not approved in the probe limits file"
+    notional = quantity * price
+    if notional > cap:
+        return f"notional {notional} is above the approved cap {cap}"
+    return None
+
+
+def _flag_text(value: bool) -> str:
+    return _TRUE if value else _FALSE
+
+
+def _class_code(answer: ProbeObservation) -> str:
+    """``<HTTP class> <code>`` of an error answer (the reason text of a rejected premise)."""
+    error = answer.error
+    if error is None:
+        return "accepted"
+    return f"{error.http_class} {error.code}"
+
+
+def _brief(answer: ProbeObservation) -> str:
+    """One line of an answer for `details`: the status of an accepted one, or the error."""
+    if answer.ok:
+        status = answer.summary.get("status") or answer.summary.get("algo_status")
+        return f"accepted status={status}" if status else "accepted"
+    error = answer.error
+    if error is None:
+        return "rejected"
+    return f"rejected {error.http_class} {error.code} {error.category}: {error.message}"
+
+
+def _positive_decimal(summary: Mapping[str, str], key: str) -> Decimal | None:
+    text = summary.get(key)
+    if not text:
+        return None
+    try:
+        value = Decimal(text)
+    except InvalidOperation:
+        return None
+    return value if value.is_finite() and value > 0 else None
+
+
+@dataclass(frozen=True)
+class _Market:
+    """The mark price and the filters of one case, read fresh from the exchange."""
+
+    mark: Decimal
+    tick: Decimal
+    step: Decimal
+    min_quantity: Decimal
+    min_notional: Decimal | None
+    multiplier_up: Decimal | None
+    filters: Mapping[str, str]
+
+    def floor(self, price: Decimal) -> Decimal:
+        return (price / self.tick).to_integral_value(rounding=ROUND_FLOOR) * self.tick
+
+    def far_below(self, fraction: Decimal) -> Decimal:
+        """A far BUY or a flat protective trigger: mark times the fraction, on the tick grid."""
+        return self.floor(self.mark * fraction)
+
+    def far_above(self, fraction: Decimal) -> Decimal:
+        """A far SELL or an up-trigger: mark times (2 minus the fraction), on the tick grid."""
+        return self.floor(self.mark * (Decimal(2) - fraction))
+
+    def just_below(self) -> Decimal:
+        """The highest tick-grid price strictly below the mark (a trigger meant to trigger)."""
+        above = (self.mark / self.tick).to_integral_value(rounding=ROUND_CEILING) * self.tick
+        return above - self.tick
+
+    def marketable_buy(self) -> Decimal:
+        """A BUY limit that crosses the book: the PERCENT_PRICE upper bound of the mark.
+
+        The port reads no order book, so the best ask is unknown; a BUY limit at the bound
+        fills at the book's best ask and is the highest price the exchange accepts, which also
+        bounds the notional check from above.
+        """
+        if self.multiplier_up is None:
+            raise _StopCase("the PERCENT_PRICE filter is unreadable: no marketable price")
+        return self.floor(self.mark * self.multiplier_up)
+
+    def smallest_quantity(self) -> Decimal:
+        """The minimum quantity of the lot-size filter, on the step grid."""
+        steps = (self.min_quantity / self.step).to_integral_value(rounding=ROUND_CEILING)
+        return steps * self.step
+
+
+def _parse_market(mark: ProbeObservation, filters: ProbeObservation) -> _Market:
+    if not mark.ok:
+        raise _StopCase(f"the mark price is unreadable: {_class_code(mark)}")
+    if not filters.ok or filters.summary.get("found") != _TRUE:
+        raise _StopCase(f"the symbol filters are unreadable: {_class_code(filters)}")
+    close = _positive_decimal(mark.summary, "close")
+    tick = _positive_decimal(filters.summary, "tick_size")
+    step = _positive_decimal(filters.summary, "step_size")
+    min_quantity = _positive_decimal(filters.summary, "min_quantity")
+    if close is None or tick is None or step is None or min_quantity is None:
+        raise _StopCase("the mark price, tick size, step size or minimum quantity is unreadable")
+    return _Market(
+        mark=close,
+        tick=tick,
+        step=step,
+        min_quantity=min_quantity,
+        min_notional=_positive_decimal(filters.summary, "min_notional"),
+        multiplier_up=_positive_decimal(filters.summary, "percent_price_multiplier_up"),
+        filters=dict(filters.summary),
+    )
+
+
+class _WriteCase:
+    """One running write case: its answers, details, the orders it placed, the bound check."""
+
+    def __init__(self, context: CaseContext, case_id: str) -> None:
+        self.context = context
+        self.case_id = case_id
+        self.rig = context.rig
+        self.port = context.rig.port
+        self.symbol = context.config.symbol
+        self.limits = context.config.order_limits
+        self.marker = self.port.marker()
+        self.observations: list[ProbeObservation] = []
+        self.notes: list[str] = []
+        self.details: dict[str, str] = {}
+        self.open_orders: list[str] = []
+        self.open_algos: list[str] = []
+        self.entry_sent = False
+        self.step: Decimal | None = None
+
+    # ----- settings ------------------------------------------------------------ #
+
+    @property
+    def quantity(self) -> Decimal:
+        return self.limits.quantity
+
+    @property
+    def fraction(self) -> Decimal:
+        return self.limits.far_price_fraction
+
+    @property
+    def case_timeout_seconds(self) -> int:
+        """The owner's `case_timeout_seconds`: the only wait number of a write case."""
+        value = self.limits.case_timeout_seconds
+        if value is None:
+            raise ValueError("case_timeout_seconds is not set in the probe limits file")
+        return value
+
+    @property
+    def hedge_mode(self) -> bool:
+        return self.context.recorder.dual_side is True
+
+    def client_id(self, tag: str) -> str:
+        return self.context.recorder.next_client_id(tag)
+
+    def position_side(self, *, long: bool) -> str:
+        """BOTH in one-way mode; LONG or SHORT (the position the order concerns) in hedge mode."""
+        if not self.hedge_mode:
+            return POSITION_SIDE_ONE_WAY
+        return POSITION_SIDE_LONG if long else POSITION_SIDE_SHORT
+
+    # ----- results --------------------------------------------------------------- #
+
+    def result(self, status: str, reason: str | None = None) -> CaseResult:
+        return CaseResult(
+            status=status,
+            observations=tuple(self.observations),
+            reason=reason,
+            notes=tuple(self.notes),
+            details=dict(self.details),
+        )
+
+    def observed(self) -> CaseResult:
+        return self.result(OBSERVED)
+
+    def not_observed(self, reason: str) -> CaseResult:
+        return self.result(NOT_OBSERVED, reason)
+
+    def detail(self, key: str, value: str) -> None:
+        name, index = key, 1
+        while name in self.details:
+            index += 1
+            name = f"{key}_{index}"
+        self.details[name] = value
+
+    def known_state(self) -> dict[str, str]:
+        """What this case last knew it left open (recorded when a ban stops the run)."""
+        return {
+            "orders_not_known_closed": ",".join(self.open_orders),
+            "algo_orders_not_known_closed": ",".join(self.open_algos),
+            "entry_sent": _flag_text(self.entry_sent),
+        }
+
+    # ----- the exchange ------------------------------------------------------------ #
+
+    async def ask(self, label: str, call: Awaitable[ProbeObservation]) -> ProbeObservation:
+        """Send one request (never retried); its answer is data; a rate limit stops the case."""
+        answer = await call
+        self.observations.append(answer)
+        self.detail(label, _brief(answer))
+        reason = _rate_limit_reason(answer)
+        if reason is not None:
+            raise _StopCase(f"a rate-limit answer ({reason}) stopped the case")
+        return answer
+
+    async def market(self) -> _Market:
+        """The fresh mark price and filters (read, not recorded as case answers)."""
+        mark = await self.port.mark_price(symbol=self.symbol)
+        _raise_if_rate_limited(mark)
+        filters = await self.port.symbol_filters(symbol=self.symbol)
+        _raise_if_rate_limited(filters)
+        market = _parse_market(mark, filters)
+        self.step = market.step
+        self.detail("mark_price", format(market.mark, "f"))
+        return market
+
+    def check_bounds(
+        self,
+        orders: Sequence[tuple[Decimal | None, Decimal]],
+        *,
+        market_lot_probe: bool = False,
+    ) -> None:
+        """Refuse (OrderBoundRefused) unless every (quantity, price) passes the order bound."""
+        for quantity, price in orders:
+            refusal = order_bound_refusal(
+                self.limits,
+                quantity=quantity,
+                price=price,
+                step=None if market_lot_probe else self.step,
+                market_lot_probe=market_lot_probe,
+            )
+            if refusal is not None:
+                raise OrderBoundRefused(refusal)
+
+    async def limit(
+        self,
+        label: str,
+        *,
+        client_id: str,
+        side: str,
+        price: Decimal,
+        long: bool = True,
+    ) -> ProbeObservation:
+        """A GTC LIMIT of the approved quantity (bound-checked again just before sending)."""
+        self.check_bounds([(self.quantity, price)])
+        answer = await self.ask(
+            label,
+            self.port.new_limit_order(
+                symbol=self.symbol,
+                side=side,
+                quantity=self.quantity,
+                price=price,
+                client_order_id=client_id,
+                position_side=self.position_side(long=long),
+                time_in_force=TIME_IN_FORCE_GTC,
+                reduce_only=None,
+            ),
+        )
+        if answer.ok and answer.summary.get("status") != ORDER_STATUS_FILLED:
+            self.open_orders.append(client_id)
+        return answer
+
+    async def conditional(
+        self,
+        label: str,
+        *,
+        client_id: str,
+        side: str,
+        order_type: str,
+        trigger: Decimal,
+        quantity: Decimal | None,
+        reduce_only: bool | None = None,
+        close_position: bool | None = None,
+        price: Decimal | None = None,
+        time_in_force: str | None = None,
+        long: bool = True,
+        market_lot_probe: bool = False,
+    ) -> ProbeObservation:
+        """One CONDITIONAL algo order on the mark price (bound-checked just before sending)."""
+        highest = trigger if price is None else max(trigger, price)
+        self.check_bounds([(quantity, highest)], market_lot_probe=market_lot_probe)
+        answer = await self.ask(
+            label,
+            self.port.new_conditional_order(
+                symbol=self.symbol,
+                side=side,
+                order_type=order_type,
+                client_algo_id=client_id,
+                position_side=self.position_side(long=long),
+                trigger_price=trigger,
+                working_type=WORKING_TYPE_MARK_PRICE,
+                quantity=quantity,
+                reduce_only=reduce_only,
+                close_position=close_position,
+                price=price,
+                time_in_force=time_in_force,
+            ),
+        )
+        if answer.ok and client_id not in self.open_algos:
+            self.open_algos.append(client_id)
+        return answer
+
+    async def cancel(self, label: str, client_id: str) -> ProbeObservation:
+        answer = await self.ask(
+            label, self.port.cancel_order(symbol=self.symbol, client_order_id=client_id)
+        )
+        if answer.ok and client_id in self.open_orders:
+            self.open_orders.remove(client_id)
+        return answer
+
+    async def cancel_algo(self, label: str, client_id: str) -> ProbeObservation:
+        answer = await self.ask(label, self.port.cancel_algo_order(client_algo_id=client_id))
+        if answer.ok and client_id in self.open_algos:
+            self.open_algos.remove(client_id)
+        return answer
+
+    async def order_status(self, label: str, client_id: str) -> str:
+        answer = await self.ask(
+            label, self.port.query_order(symbol=self.symbol, client_order_id=client_id)
+        )
+        return answer.summary.get("status", "") if answer.ok else ""
+
+    async def algo_status(self, label: str, client_id: str) -> str:
+        """The algo status text; ABSENT when the exchange answers not-found; '' if unreadable."""
+        answer = await self.ask(label, self.port.query_algo_order(client_algo_id=client_id))
+        if answer.ok:
+            return answer.summary.get("algo_status", "")
+        error = answer.error
+        return ALGO_ABSENT if error is not None and error.category == CATEGORY_ORDER_ABSENT else ""
+
+    async def open_long(self, market: _Market, tag: str) -> tuple[ProbeObservation, str]:
+        """A marketable BUY LIMIT of the approved quantity; one wait for FILLED.
+
+        Returns the placement answer and the last status seen ('' when rejected or
+        unreadable). Every status seen is in `details["entry_statuses"]`, so a dependent case
+        can tell a partial fill from the run record.
+        """
+        client_id = self.client_id(tag)
+        self.detail("entry_client_id", client_id)
+        self.entry_sent = True
+        placed = await self.limit(
+            "entry", client_id=client_id, side=SIDE_BUY, price=market.marketable_buy()
+        )
+        if not placed.ok:
+            return placed, ""
+        statuses = [placed.summary.get("status", "")]
+
+        async def filled() -> bool:
+            statuses.append(await self.order_status("entry_status", client_id))
+            return statuses[-1] == ORDER_STATUS_FILLED
+
+        if statuses[0] != ORDER_STATUS_FILLED:
+            await wait_up_to(self.rig, filled, self.case_timeout_seconds)
+        self.detail("entry_statuses", ",".join(status or "unreadable" for status in statuses))
+        if statuses[-1] == ORDER_STATUS_FILLED and client_id in self.open_orders:
+            self.open_orders.remove(client_id)
+        return placed, statuses[-1]
+
+    def frames(self) -> list[dict[str, str]]:
+        return self.port.frames_since(self.marker)
+
+    def stream_started(self) -> bool:
+        return self.context.recorder.stream.get("status") == STREAM_STARTED
+
+    async def await_frames(self, match: Callable[[Mapping[str, str]], bool]) -> bool:
+        """With a running stream, one wait (case timeout) for a matching frame; else False."""
+        if not self.stream_started():
+            return False
+
+        async def seen() -> bool:
+            return any(match(frame) for frame in self.frames())
+
+        return await wait_up_to(self.rig, seen, self.case_timeout_seconds)
+
+    async def reconcile(
+        self,
+        *,
+        open_orders: int,
+        open_algo_orders: int,
+        position: Decimal,
+    ) -> tuple[dict[str, Any], dict[str, ProbeObservation]]:
+        """Snapshot open orders, open algo orders and positions against the expected state."""
+        summary, answers = await _read_state(self.port, self.symbol)
+        self.observations.extend(answers.values())
+        held = sum((Decimal(row["position_amt"]) for row in summary["positions"]), Decimal(0))
+        expected = (
+            f"open_orders={open_orders} open_algo_orders={open_algo_orders} "
+            f"position={format(position, 'f')}"
+        )
+        observed = (
+            f"open_orders={summary['open_orders']} open_algo_orders={summary['open_algo_orders']} "
+            f"position={format(held, 'f')}"
+        )
+        matches = (
+            summary["readable"] is True
+            and summary["open_orders"] == open_orders
+            and summary["open_algo_orders"] == open_algo_orders
+            and held == position
+        )
+        self.detail("reconciliation_expected", expected)
+        self.detail("reconciliation_observed", observed)
+        self.detail("reconciliation_matches", _flag_text(matches))
+        return summary, answers
+
+
+WriteBody = Callable[[_WriteCase], Awaitable[CaseResult]]
+
+
+def _port_reports_ban(port: ProbePort) -> bool:
+    """The port's ban flag; a port without a readable flag counts as banned (fail closed)."""
+    flag = getattr(port, "banned", None)
+    return flag is not False
+
+
+async def _after_ban(case: _WriteCase, ban: ProbeBanned) -> None:
+    """Record the ban of a write case and attempt the cleanup once if the port reports none."""
+    context = case.context
+    record: dict[str, Any] = {
+        "reason": ban.reason,
+        "retry_after_seconds": ban.retry_after_seconds,
+        "during": case.case_id,
+        "case_observations": list(case.observations),
+        "known_state": case.known_state(),
+    }
+    if _port_reports_ban(case.port):
+        record["cleanup_after_ban"] = {
+            "status": CLEANUP_NOT_VERIFIED,
+            "reason": "not attempted: the adapter reports a ban",
+        }
+    else:
+        try:
+            record["cleanup_after_ban"] = await cleanup_symbol(
+                case.rig,
+                symbol=case.symbol,
+                dual_side=context.recorder.dual_side,
+                timeout_seconds=case.limits.cleanup_timeout_seconds,
+                next_client_id=lambda: context.recorder.next_client_id("flat"),
+            )
+        except ProbeBanned as again:
+            record["cleanup_after_ban"] = {
+                "status": CLEANUP_NOT_VERIFIED,
+                "reason": f"refused: {again.reason}",
+            }
+        except Exception as exc:  # recorded; the run is stopping anyway
+            record["cleanup_after_ban"] = {
+                "status": CLEANUP_NOT_VERIFIED,
+                "reason": f"the cleanup raised {type(exc).__name__}",
+            }
+    if context.recorder.ban is None:
+        context.recorder.ban = record
+
+
+async def run_write_case(
+    context: CaseContext, body: WriteBody, *, case_id: str, reduce_only: bool
+) -> CaseResult:
+    """Run one write case under the common rules; it returns a result and never raises,
+    except `ProbeBanned` (the run stops: plan 18-17's contract)."""
+    dual_side = context.recorder.dual_side
+    if dual_side is None:
+        return CaseResult(status=NOT_OBSERVED, reason=REASON_POSITION_MODE_UNKNOWN)
+    if reduce_only and dual_side:
+        return CaseResult(status=NOT_OBSERVED, reason=REASON_HEDGE_MODE)
+    case = _WriteCase(context, case_id)
+    try:
+        return await body(case)
+    except _StopCase as stop:
+        return case.not_observed(stop.reason)
+    except OrderBoundRefused as refused:
+        return case.result(ERROR, f"order bound: {refused} (nothing more was sent)")
+    except ProbeBanned as ban:
+        await _after_ban(case, ban)
+        raise
+    except Exception as exc:  # a script error: recorded, the runner's cleanup still runs
+        return case.result(ERROR, f"script error: {type(exc).__name__}")
+
+
+def _premise_leg(context: CaseContext) -> str | None:
+    """None when the pre-placed leg of this run was accepted, else the NOT_OBSERVED reason."""
+    premise = context.recorder.results.get(PREPLACED_CASE)
+    if premise is None:
+        return REASON_PREMISE_NOT_RUN
+    if premise.status != OBSERVED or premise.details.get("leg_accepted") != _TRUE:
+        return REASON_LEG_NOT_ACCEPTED
+    return None
+
+
+# ----- Task 1: the carrier cases ------------------------------------------------ #
+
+
+async def _place_carrier(
+    case: _WriteCase, market: _Market, label: str, client_id: str
+) -> ProbeObservation:
+    """The far carrier: a STOP BUY with the up-trigger far above the mark, not reduce-only."""
+    trigger = market.far_above(case.fraction)
+    return await case.conditional(
+        label,
+        client_id=client_id,
+        side=SIDE_BUY,
+        order_type=ORDER_TYPE_STOP,
+        trigger=trigger,
+        price=trigger,
+        quantity=case.quantity,
+    )
+
+
+async def _duplicate_client_algo_id(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    case.check_bounds([(case.quantity, market.far_above(case.fraction))])
+    client_id = case.client_id("dup")
+    case.detail("client_algo_id", client_id)
+    carrier = await _place_carrier(case, market, "carrier", client_id)
+    if not carrier.ok:
+        return case.not_observed(f"carrier rejected: {_class_code(carrier)}")
+    duplicate = await _place_carrier(case, market, "duplicate", client_id)
+    case.detail("duplicate_accepted", _flag_text(duplicate.ok))
+    await case.cancel_algo("carrier_cancel", client_id)
+    return case.observed()
+
+
+async def _id_reuse_after_canceled_normal(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    price = market.far_below(case.fraction)
+    case.check_bounds([(case.quantity, price)])
+    client_id = case.client_id("rcn")
+    case.detail("client_order_id", client_id)
+    first = await case.limit("first", client_id=client_id, side=SIDE_BUY, price=price)
+    if not first.ok:
+        return case.not_observed(f"carrier rejected: {_class_code(first)}")
+    canceled = await case.cancel("first_cancel", client_id)
+    if not canceled.ok:
+        return case.not_observed(f"the first order was not canceled: {_class_code(canceled)}")
+    again = await case.limit("reuse", client_id=client_id, side=SIDE_BUY, price=price)
+    case.detail("reuse_accepted", _flag_text(again.ok))
+    if again.ok:
+        await case.cancel("reuse_cancel", client_id)
+    return case.observed()
+
+
+async def _id_reuse_after_canceled_algo(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    case.check_bounds([(case.quantity, market.far_above(case.fraction))])
+    client_id = case.client_id("rca")
+    case.detail("client_algo_id", client_id)
+    first = await _place_carrier(case, market, "carrier", client_id)
+    if not first.ok:
+        return case.not_observed(f"carrier rejected: {_class_code(first)}")
+    canceled = await case.cancel_algo("carrier_cancel", client_id)
+    if not canceled.ok:
+        return case.not_observed(f"the carrier was not canceled: {_class_code(canceled)}")
+    again = await _place_carrier(case, market, "reuse", client_id)
+    case.detail("reuse_accepted", _flag_text(again.ok))
+    if again.ok:
+        await case.cancel_algo("reuse_cancel", client_id)
+    return case.observed()
+
+
+async def _id_reuse_after_filled(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    far = market.far_below(case.fraction)
+    case.check_bounds([(case.quantity, market.marketable_buy()), (case.quantity, far)])
+    placed, status = await case.open_long(market, "rfl")
+    if not placed.ok:
+        return case.not_observed(f"entry rejected: {_class_code(placed)}")
+    if status != ORDER_STATUS_FILLED:
+        return case.not_observed(f"the entry did not fill: status {status or 'unreadable'}")
+    client_id = case.details["entry_client_id"]
+    again = await case.limit("reuse", client_id=client_id, side=SIDE_BUY, price=far)
+    case.detail("reuse_accepted", _flag_text(again.ok))
+    if again.ok:
+        await case.cancel("reuse_cancel", client_id)
+    return case.observed()
+
+
+async def case_duplicate_client_algo_id(context: CaseContext) -> CaseResult:
+    """A far carrier STOP, the same clientAlgoId again: both answers recorded."""
+    return await run_write_case(
+        context, _duplicate_client_algo_id, case_id="duplicate_client_algo_id", reduce_only=False
+    )
+
+
+async def case_id_reuse_after_canceled_normal(context: CaseContext) -> CaseResult:
+    """A far BUY LIMIT, cancelled, the same client order id placed again."""
+    return await run_write_case(
+        context,
+        _id_reuse_after_canceled_normal,
+        case_id="id_reuse_after_canceled_normal",
+        reduce_only=False,
+    )
+
+
+async def case_id_reuse_after_canceled_algo(context: CaseContext) -> CaseResult:
+    """The far carrier, cancelled, the same clientAlgoId placed again."""
+    return await run_write_case(
+        context,
+        _id_reuse_after_canceled_algo,
+        case_id="id_reuse_after_canceled_algo",
+        reduce_only=False,
+    )
+
+
+async def case_id_reuse_after_filled(context: CaseContext) -> CaseResult:
+    """A marketable entry that fills, then its client id placed again as a far LIMIT."""
+    return await run_write_case(
+        context, _id_reuse_after_filled, case_id="id_reuse_after_filled", reduce_only=False
+    )
+
+
 # The registry the runner walks in CASE_ORDER. A handler never raises for an exchange answer
 # (answers are data); `ProbeBanned` propagates on purpose (the run stops) and any other
 # exception is a bug the runner records as ERROR.
@@ -1031,6 +1734,10 @@ CASE_HANDLERS: dict[str, CaseHandler] = {
     "get_algo_order_not_found": case_get_algo_order_not_found,
     "cancel_order_not_found": case_cancel_order_not_found,
     "cancel_algo_order_not_found": case_cancel_algo_order_not_found,
+    "duplicate_client_algo_id": case_duplicate_client_algo_id,
+    "id_reuse_after_canceled_normal": case_id_reuse_after_canceled_normal,
+    "id_reuse_after_canceled_algo": case_id_reuse_after_canceled_algo,
+    "id_reuse_after_filled": case_id_reuse_after_filled,
 }
 
 
