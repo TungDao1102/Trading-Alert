@@ -14,15 +14,15 @@ Full findings: `16-REVIEW-batch1.md` (runtime, start, pin, restart: 2 critical, 
 
 | Id | Finding | Status |
 |---|---|---|
-| B1-CR-01 | After a long WebSocket outage the supervisor stops retrying, the process stays up, nothing fails closed, `on-failure` never restarts it | claim |
-| B1-CR-02 | Heartbeats committed before their `PAPER_HISTORY_BARS` log entry; a crash in that window leaves heartbeats the parity replay can never match | claim |
-| B2-CR-01 | Two threads take the ledger and coordinator locks in opposite order (CONFIRM vs poll worker): possible deadlock | claim |
-| B2-CR-02 | Reservations released at wall-clock expiry while the fill driver lags; false `SHADOW_PLAN_EXPIRED_UNFILLED`, then `ValueError` at TP1/exit | claim |
-| B2-CR-03 | A confirmed plan the fill driver cannot size raises at start and on every restore: crash-loop until the plan expires | claim |
-| B2-CR-04 | RUNBOOK 20.7 hourly publish exits 4 from the second run (epoch prefix already holds a manifest); the final bundle cannot be published | claim |
+| B1-CR-01 | After a long WebSocket outage the supervisor stops retrying, the process stays up, nothing fails closed, `on-failure` never restarts it | VERIFIED (supervisor.py `_rebuild_with_retry` logs `reconnect_exhausted` and returns False; `_recover_from_drop` backfills once and stops; runtime.py `_LiveLoop.run` has no silence watchdog and no sink for exhaustion) |
+| B1-CR-02 | Heartbeats committed before their `PAPER_HISTORY_BARS` log entry; a crash in that window leaves heartbeats the parity replay can never match | VERIFIED (pipeline.py `_write_heartbeat` commits its own record at once, `_flush_history` runs at the end of `handle`; exit_criteria.py:1124 requires a LIVE_WS entry in the acceptance log for each heartbeat) |
+| B2-CR-01 | Two threads take the ledger and coordinator locks in opposite order (CONFIRM vs poll worker): possible deadlock | VERIFIED (lock order: CONFIRM press holds `ledger.lock` via `reservations.section()` then `_on_confirmed` -> `_ensure_drivers` takes the coordinator `_lock`; the poll worker thread `_ensure_drivers` holds the coordinator `_lock` then `pending_reservations()` takes `ledger.lock`; both RLocks, different threads) |
+| B2-CR-02 | Reservations released at wall-clock expiry while the fill driver lags; false `SHADOW_PLAN_EXPIRED_UNFILLED`, then `ValueError` at TP1/exit | VERIFIED mechanism, narrow window (`release_expired(now)` compares the wall clock to plan expiry while fills are processed only up to `now - close_lag`; the race exists for a sweep inside `close_lag_seconds` after expiry; severity Warning-high, not Critical) |
+| B2-CR-03 | A confirmed plan the fill driver cannot size raises at start and on every restore: crash-loop until the plan expires | VERIFIED (`_build_position` raises `ShadowRuntimeError` when `open_confirmed` refuses; the poll path `_ensure_drivers` is uncaught so `_run_shadow_poller` fails the loop; `_restore_positions` uses the same builder) |
+| B2-CR-04 | RUNBOOK 20.7 hourly publish exits 4 from the second run (epoch prefix already holds a manifest); the final bundle cannot be published | VERIFIED (export_soak_evidence.py:589 refuses an epoch already published; the key is `<epoch_id>/<file>` and RUNBOOK 20.7 states an hourly publish) |
 | B2-CR-05 | `Dockerfile` copies no `params/` and no `config/paper/`, compose mounts only `logs`: the paper service cannot load its parameter set or config | VERIFIED (Dockerfile COPY lines read) |
 | B3-CR-01 | Research windows start cold: no warm-up history before `window.start_utc`; `WARMUP_INSUFFICIENT` is exactly 8756 in every one of the 192 Validation records and 9552 in every one of the 48 Development records (796 hourly bars, about 33 days, per symbol per window; about 45% of a 73-day fold) | VERIFIED (counts read from the committed records) |
-| B3-CR-02 | The kill-gate JSON sidecar keeps `any_pass`, `pass_count`, budget flags and gate matrices when the conclusion is withheld | claim |
+| B3-CR-02 | The kill-gate JSON sidecar keeps `any_pass`, `pass_count`, budget flags and gate matrices when the conclusion is withheld | VERIFIED mechanism, low urgency (`_report_plain` replaces only `kill_gate.verdict.state`; no kill-gate report is produced before Phase 26) |
 
 ## Warning (25) and Info (23)
 
