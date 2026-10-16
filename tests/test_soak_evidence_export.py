@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -29,6 +30,7 @@ from src.paper.evidence_bundle import (
     FILE_ANALYTICS,
     FILE_DIFF,
     FILE_GAPS,
+    FILE_MISSING_TICKS,
     FILE_PINNED,
     FILE_RECORDS,
     FILE_RUNS,
@@ -213,6 +215,7 @@ class Inputs:
         with_records: bool = True,
         as_of: datetime | None = None,
         omit_as_of: bool = False,
+        diff_logs: Sequence[Path] | None = None,
     ) -> list[str]:
         """The export arguments. Unless `omit_as_of`, `--as-of` is given: `as_of`, or by default
         the end of the window plus the ratified freeze-tick grace (a final bundle)."""
@@ -221,9 +224,9 @@ class Inputs:
             argv += ["--records", str(self.records)]
         for pinned in self.pinned:
             argv += ["--pinned", str(pinned)]
+        for diff in [self.diff] if diff_logs is None else diff_logs:
+            argv += ["--diff-log", str(diff)]
         argv += [
-            "--diff-log",
-            str(self.diff),
             "--github-runs",
             str(self.runs),
             "--config",
@@ -329,6 +332,18 @@ def directory_bytes(directory: Path) -> dict[str, bytes]:
     return {path.name: path.read_bytes() for path in sorted(directory.iterdir())}
 
 
+def _artifact_names(manifest: Mapping[str, Any]) -> set[str]:
+    """The names of the original freeze artifacts a bundle keeps next to the derived log."""
+    return {name for name in manifest["files"] if name.startswith("freeze_artifact_")}
+
+
+def _prefix(directory: Path, epoch: str = E1) -> str:
+    """The create-only key prefix of a bundle: `<epoch>/<as_of>-<sha12 of the manifest>`."""
+    manifest_bytes = (directory / "manifest.json").read_bytes()
+    as_of = datetime.fromisoformat(json.loads(manifest_bytes)["as_of_utc"]).astimezone(UTC)
+    return f"{epoch}/{as_of.strftime('%Y%m%dT%H%M%SZ')}-{_sha(manifest_bytes)[:12]}"
+
+
 class RecordingPort(InMemoryRuntimeState):
     """An in-memory port that remembers how `records` was asked."""
 
@@ -366,7 +381,11 @@ def test_tracer_a_fixture_session_exports_to_a_bundle_the_evaluator_accepts(
     assert manifest["schema"] == BUNDLE_SCHEMA
     assert manifest["source"] == "fixture" == bundle.source
     assert manifest["epoch_id"] == E1
-    assert set(manifest["files"]) == {*REQUIRED_FILES, FILE_ANALYTICS}
+    assert set(manifest["files"]) - _artifact_names(manifest) == {
+        *REQUIRED_FILES,
+        FILE_MISSING_TICKS,
+        FILE_ANALYTICS,
+    }
     for name, digest in manifest["files"].items():
         assert _sha((out / name).read_bytes()) == digest
 
@@ -737,6 +756,301 @@ def test_the_hour_three_export_and_the_final_export_differ_only_in_what_is_due(
     )
     assert _gap_slots(out) == []
     assert (out / FILE_DIFF).read_bytes() == inputs.diff.read_bytes()
+
+
+# --------------------------------------------------------------------------- #
+# Merged freeze log and missing ticks (plan 16-59, B2-WR-05; 16-59 Q2 = B, correction 3).
+# --------------------------------------------------------------------------- #
+
+
+def _artifact(root: Path, name: str, lines: Sequence[Mapping[str, Any]]) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / name
+    path.write_bytes(_jsonl(lines))
+    return path
+
+
+@dataclass
+class MergeWorld:
+    inputs: Inputs
+    lines: list[dict[str, Any]]  # the six clean lines of runs 1001 to 1006
+    runs: list[dict[str, Any]]
+    first: Path  # runs 1001 to 1003
+    second: Path  # runs 1001, 1002 and 1004 (run 1003 was lost by an overlap)
+    third: Path  # runs 1004 to 1006
+
+
+def _merge_world(tmp_path: Path) -> MergeWorld:
+    lines, runs = freeze_rows(E1, P1, hours=6, first_run_id=1000)
+    inputs = write_inputs(
+        tmp_path / "in",
+        records=record_rows(sample_records(E1, P1)),
+        pinned=[pinned_row(E1, P1)],
+        diff_lines=lines,
+        runs=runs,
+    )
+    root = tmp_path / "artifacts"
+    return MergeWorld(
+        inputs=inputs,
+        lines=lines,
+        runs=runs,
+        first=_artifact(root, "x.jsonl", lines[0:3]),
+        second=_artifact(root, "y.jsonl", [*lines[0:2], lines[3]]),
+        third=_artifact(root, "z.jsonl", lines[3:6]),
+    )
+
+
+def _merged_argv(world: MergeWorld, out: Path, artifacts: Sequence[Path]) -> list[str]:
+    return world.inputs.argv(
+        source="fixture",
+        epoch=E1,
+        start=P1,
+        end=P1 + SIX_HOURS,
+        out=out,
+        diff_logs=artifacts,
+    )
+
+
+def test_the_exporter_merges_every_run_artifact_into_one_derived_log_with_provenance(
+    tmp_path: Path,
+) -> None:
+    world = _merge_world(tmp_path)
+    out = tmp_path / "bundle"
+    artifacts = [world.first, world.second, world.third]
+
+    assert export.main(_merged_argv(world, out, artifacts)) == export.EXIT_OK
+
+    # Every line of every artifact is there once, in time order: the lost line of run 1003 too.
+    assert (out / FILE_DIFF).read_bytes() == _jsonl(world.lines)
+    bundle = load_evidence_bundle(out)
+    assert len(bundle.freeze_lines) == 6
+    assert bundle.evidence_gaps == ()
+    manifest = manifest_of(out)
+    log = manifest["freeze_log"]
+    assert log["derived"] is True and log["file"] == FILE_DIFF
+    assert "not a byte copy of one artifact" in log["merge"]
+    by_sha = {entry["sha256"]: entry for entry in log["inputs"]}
+    assert [entry["sha256"] for entry in log["inputs"]] == sorted(by_sha), "listed in sha256 order"
+    expected_runs = {
+        world.first: ["1001", "1002", "1003"],
+        world.second: ["1001", "1002", "1004"],
+        world.third: ["1004", "1005", "1006"],
+    }
+    for path, run_ids in expected_runs.items():
+        data = path.read_bytes()
+        entry = by_sha[_sha(data)]
+        assert entry["run_ids"] == run_ids
+        assert entry["file"] == f"freeze_artifact_{_sha(data)[:16]}.jsonl"
+        assert (out / entry["file"]).read_bytes() == data, "the original is kept byte for byte"
+        assert manifest["files"][entry["file"]] == _sha(data)
+    assert _artifact_names(manifest) == {entry["file"] for entry in log["inputs"]}
+
+
+def test_the_derived_log_does_not_depend_on_the_order_of_the_artifacts(tmp_path: Path) -> None:
+    world = _merge_world(tmp_path)
+    orders = {
+        "a": [world.first, world.second, world.third],
+        "b": [world.third, world.first, world.second],
+        "c": [world.second, world.third, world.first, world.first],  # one given twice
+    }
+    for name, artifacts in orders.items():
+        assert export.main(_merged_argv(world, tmp_path / name, artifacts)) == export.EXIT_OK
+    assert directory_bytes(tmp_path / "a") == directory_bytes(tmp_path / "b")
+    assert directory_bytes(tmp_path / "a") == directory_bytes(tmp_path / "c")
+
+
+def test_overlapping_runs_lose_a_line_in_the_newest_artifact_and_the_merge_recovers_it(
+    tmp_path: Path,
+) -> None:
+    """B2-WR-05 model: the restore-keys cache hands the next run the newest cache only."""
+    world = _merge_world(tmp_path)
+    caches: list[tuple[str, list[dict[str, Any]]]] = [("paper-freeze-0", world.lines[0:2])]
+
+    def restore() -> list[dict[str, Any]]:
+        newest = [c for c in caches if c[0].startswith("paper-freeze-")][-1]
+        return list(newest[1])
+
+    run_a = [*restore(), world.lines[2]]  # runs 1003 and 1004 overlap: same state restored
+    run_b = [*restore(), world.lines[3]]
+    caches += [("paper-freeze-1003", run_a), ("paper-freeze-1004", run_b)]
+    run_c = [*restore(), world.lines[4]]
+    assert world.lines[2] not in run_c, "the newest artifact alone has lost the line of run 1003"
+
+    root = tmp_path / "model"
+    artifacts = [
+        _artifact(root, "a.jsonl", run_a),
+        _artifact(root, "b.jsonl", run_b),
+        _artifact(root, "c.jsonl", run_c),
+    ]
+    out = tmp_path / "bundle"
+    assert export.main(_merged_argv(world, out, artifacts)) == export.EXIT_OK
+    assert _jsonl(world.lines[0:5]) == (out / FILE_DIFF).read_bytes()
+
+
+def test_two_different_lines_of_one_run_identity_are_refused_and_a_rerun_is_kept(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = _merge_world(tmp_path)
+    conflicting = dict(world.lines[1])
+    conflicting["checked_at_utc"] = _iso(P1 + timedelta(hours=1, minutes=40))
+    other = _artifact(tmp_path / "conflict", "w.jsonl", [conflicting])
+    out = tmp_path / "refused"
+
+    code = export.main(_merged_argv(world, out, [world.first, other]))
+
+    assert code == export.EXIT_PUBLISH == 4
+    assert not out.exists()
+    err = capsys.readouterr().err
+    assert "1002" in err and "different" in err
+
+    rerun = dict(world.lines[1])
+    rerun["run_metadata"] = {**rerun["run_metadata"], "run_attempt": "2"}
+    rerun["checked_at_utc"] = _iso(P1 + timedelta(hours=7))
+    kept = _artifact(tmp_path / "rerun", "r.jsonl", [rerun])
+    out2 = tmp_path / "kept"
+    assert export.main(_merged_argv(world, out2, [world.first, kept])) == export.EXIT_OK
+    assert len(load_evidence_bundle(out2).freeze_lines) == 4, "attempt 2 is not attempt 1"
+
+
+def test_a_line_without_run_metadata_is_deduplicated_by_its_exact_bytes(tmp_path: Path) -> None:
+    world = _merge_world(tmp_path)
+    skipped = {
+        "checked_at_utc": _iso(P1 - timedelta(hours=1)),
+        "outcome": "SKIPPED",
+        "reason": "allowlist empty",
+    }
+    one = _artifact(tmp_path / "s", "one.jsonl", [skipped, *world.lines[0:1]])
+    two = _artifact(tmp_path / "s", "two.jsonl", [skipped, *world.lines[1:2]])
+    out = tmp_path / "bundle"
+
+    assert export.main(_merged_argv(world, out, [one, two])) == export.EXIT_OK
+
+    text = (out / FILE_DIFF).read_text(encoding="utf-8")
+    assert text.count("allowlist empty") == 1
+    assert len(text.splitlines()) == 3
+
+
+def test_an_artifact_that_cannot_be_read_is_a_refusal_never_skipped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = _merge_world(tmp_path)
+    missing = tmp_path / "artifacts" / "does-not-exist.jsonl"
+    binary = tmp_path / "artifacts" / "binary.jsonl"
+    binary.write_bytes(b"\xff\xfe not text\n")
+    for name, bad in (("missing", missing), ("binary", binary)):
+        out = tmp_path / name
+        assert export.main(_merged_argv(world, out, [world.first, bad])) == export.EXIT_INPUT
+        assert not out.exists()
+        assert bad.name in capsys.readouterr().err
+
+
+def test_a_single_artifact_gives_a_derived_log_equal_to_it_and_is_kept_as_well(
+    tmp_path: Path,
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    assert (
+        export.main(inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=out))
+        == export.EXIT_OK
+    )
+    data = inputs.diff.read_bytes()
+    assert (out / FILE_DIFF).read_bytes() == data
+    manifest = manifest_of(out)
+    assert [e["sha256"] for e in manifest["freeze_log"]["inputs"]] == [_sha(data)]
+    assert (out / f"freeze_artifact_{_sha(data)[:16]}.jsonl").read_bytes() == data
+
+
+def _missing_rows(directory: Path) -> list[dict[str, Any]]:
+    text = (directory / FILE_MISSING_TICKS).read_text(encoding="utf-8")
+    return [json.loads(line) for line in text.splitlines()]
+
+
+def test_a_slot_without_a_usable_line_is_a_gap_and_a_missing_tick_though_every_artifact_is_clean(
+    tmp_path: Path,
+) -> None:
+    diff_lines, runs = freeze_rows(E1, P1, hours=6, first_run_id=1000, skip_hours={3})
+    inputs = write_inputs(
+        tmp_path / "in",
+        records=record_rows(sample_records(E1, P1)),
+        pinned=[pinned_row(E1, P1)],
+        diff_lines=diff_lines,
+        runs=runs,
+    )
+    out = tmp_path / "bundle"
+    assert (
+        export.main(inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=out))
+        == export.EXIT_OK
+    )
+
+    slot = _iso(P1 + timedelta(hours=2, minutes=17))
+    assert _gap_slots(out) == [slot]
+    rows = _missing_rows(out)
+    assert rows == [
+        {
+            "slot_utc": slot,
+            "run_id": None,
+            "status": None,
+            "conclusion": None,
+            "reason": "NO_RUN_FOUND",
+        }
+    ]
+    bundle = load_evidence_bundle(out)
+    assert [(t.slot_utc, t.run_id, t.reason) for t in bundle.missing_ticks] == [
+        (P1 + timedelta(hours=2, minutes=17), None, "NO_RUN_FOUND")
+    ]
+
+
+def test_a_run_cancelled_before_it_produced_a_line_is_recorded_with_its_conclusion(
+    tmp_path: Path,
+) -> None:
+    diff_lines, runs = freeze_rows(E1, P1, hours=6, first_run_id=1000, skip_hours={3})
+    created = P1 + timedelta(hours=2, minutes=17, seconds=20)
+    runs.append(
+        {
+            "id": 9999,
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "cancelled",
+            "created_at": _iso(created),
+            "run_started_at": _iso(created),
+            "run_attempt": 1,
+            "head_sha": "f" * 40,
+        }
+    )
+    inputs = write_inputs(
+        tmp_path / "in",
+        records=record_rows(sample_records(E1, P1)),
+        pinned=[pinned_row(E1, P1)],
+        diff_lines=diff_lines,
+        runs=runs,
+    )
+    out = tmp_path / "bundle"
+    assert (
+        export.main(inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=out))
+        == export.EXIT_OK
+    )
+
+    slot = _iso(P1 + timedelta(hours=2, minutes=17))
+    assert _gap_slots(out) == [slot], "an absent artifact is never read as clean"
+    assert _missing_rows(out) == [
+        {
+            "slot_utc": slot,
+            "run_id": "9999",
+            "status": "completed",
+            "conclusion": "cancelled",
+            "reason": "RUN_WITHOUT_LINE",
+        }
+    ]
+
+
+def test_a_session_without_a_missing_tick_writes_an_empty_missing_tick_file(
+    tmp_path: Path,
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    export.main(inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=out))
+    assert (out / FILE_MISSING_TICKS).read_bytes() == b""
+    assert load_evidence_bundle(out).missing_ticks == ()
 
 
 # --------------------------------------------------------------------------- #
@@ -1118,13 +1432,114 @@ def test_tracer_publish_uploads_the_files_then_the_manifest_and_verifies_the_cop
 
     assert code == export.EXIT_OK, capsys.readouterr()
     manifest = manifest_of(out)
-    keys = [f"{E1}/{name}" for name in manifest["files"]]
-    assert uploader.puts[-1] == f"{E1}/manifest.json", "the manifest is published last"
+    prefix = _prefix(out)
+    keys = [f"{prefix}/{name}" for name in manifest["files"]]
+    assert uploader.puts[-1] == f"{prefix}/manifest.json", "the manifest is published last"
     assert sorted(uploader.puts[:-1]) == sorted(keys)
     assert len(uploader.puts) == len(set(uploader.puts)), "every object once"
     for name in [*manifest["files"], "manifest.json"]:
-        assert uploader.objects[f"{E1}/{name}"] == (out / name).read_bytes()
+        assert uploader.objects[f"{prefix}/{name}"] == (out / name).read_bytes()
     assert "published" in capsys.readouterr().out
+
+
+def test_hourly_and_final_bundles_of_one_epoch_each_publish_under_their_own_key(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """B2-CR-04: the second hourly publish and the final one no longer collide (16-59 Q1 = A)."""
+    inputs = one_epoch_inputs(tmp_path / "in")
+    uploader = FakeUploader()
+    moments = {
+        "hour-1": P1 + timedelta(hours=1),
+        "hour-2": P1 + timedelta(hours=2),
+        "final": P1 + SIX_HOURS + timedelta(seconds=GRACE_SECONDS),
+    }
+    prefixes: dict[str, str] = {}
+    for name, as_of in moments.items():
+        out = tmp_path / name
+        argv = inputs.argv(
+            source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=out, as_of=as_of
+        )
+        assert export.main([*argv, "--publish"], uploader=uploader) == export.EXIT_OK, name
+        prefixes[name] = _prefix(out)
+        compact = as_of.strftime("%Y%m%dT%H%M%SZ")
+        assert re.fullmatch(rf"{E1}/{compact}-[0-9a-f]{{12}}", prefixes[name])
+    assert len(set(prefixes.values())) == 3
+    capsys.readouterr()
+
+    # Nothing was replaced: every object of every bundle is still there with its own bytes.
+    for name, prefix in prefixes.items():
+        for file_name in [*manifest_of(tmp_path / name)["files"], "manifest.json"]:
+            local = (tmp_path / name / file_name).read_bytes()
+            assert uploader.objects[f"{prefix}/{file_name}"] == local
+    assert len(uploader.puts) == len(set(uploader.puts)), "no key was written twice"
+
+
+def test_publishing_the_very_same_bundle_again_uploads_nothing_and_succeeds(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    uploader = FakeUploader()
+    assert export.main(_publish_args(inputs, tmp_path / "b1"), uploader=uploader) == 0
+    puts_after_first = list(uploader.puts)
+    capsys.readouterr()
+
+    # The same inputs give the same bytes, hence the same key: identical bytes are a success.
+    code = export.main(_publish_args(inputs, tmp_path / "b2"), uploader=uploader)
+    assert code == export.EXIT_OK, capsys.readouterr()
+    assert uploader.puts == puts_after_first, "nothing is uploaded a second time"
+    assert directory_bytes(tmp_path / "b1") == directory_bytes(tmp_path / "b2")
+
+    # So does the publish subcommand on the existing bundle.
+    again = export.main(["publish", "--bundle", str(tmp_path / "b1")], uploader=uploader)
+    assert again == export.EXIT_OK
+    assert uploader.puts == puts_after_first
+
+
+def test_different_bytes_at_an_existing_key_are_an_error_and_nothing_is_replaced(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    seed = tmp_path / "seed"
+    argv = inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=seed)
+    assert export.main(argv) == export.EXIT_OK
+    prefix = _prefix(seed)
+
+    forged = FakeUploader(objects={f"{prefix}/manifest.json": b"{}"})
+    code = export.main(_publish_args(inputs, tmp_path / "b1"), uploader=forged)
+    assert code == export.EXIT_PUBLISH
+    assert forged.puts == []
+    assert forged.objects == {f"{prefix}/manifest.json": b"{}"}
+    assert "different content" in capsys.readouterr().err
+
+    partial = FakeUploader(objects={f"{prefix}/{FILE_PINNED}": b"different"})
+    code = export.main(_publish_args(inputs, tmp_path / "b2"), uploader=partial)
+    assert code == export.EXIT_PUBLISH
+    assert FILE_PINNED in capsys.readouterr().err
+    assert partial.objects == {f"{prefix}/{FILE_PINNED}": b"different"}, "never overwritten"
+    assert f"{prefix}/manifest.json" not in partial.objects
+
+
+def test_the_key_comes_from_the_manifest_only_and_a_bundle_without_as_of_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = one_epoch_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    argv = inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=out)
+    assert export.main(argv) == 0
+    manifest = manifest_of(out)
+    del manifest["as_of_utc"]
+    (out / "manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    uploader = FakeUploader()
+
+    code = export.main(["publish", "--bundle", str(out)], uploader=uploader)
+
+    assert code == export.EXIT_INPUT
+    assert uploader.puts == []
+    assert "as_of_utc" in capsys.readouterr().err
+    for flag in ("--key", "--prefix", "--as-of"):
+        with pytest.raises(SystemExit):
+            export.main(["publish", "--bundle", str(out), flag, "x"], uploader=uploader)
+    capsys.readouterr()
 
 
 def test_a_published_copy_that_differs_from_the_manifest_fails_naming_the_file(
@@ -1162,20 +1577,6 @@ def test_a_missing_published_object_fails_the_verification(
     assert FILE_GAPS in capsys.readouterr().err
 
 
-def test_an_epoch_prefix_that_already_holds_a_manifest_is_never_published_over(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    inputs = one_epoch_inputs(tmp_path / "in")
-    uploader = FakeUploader(objects={f"{E1}/manifest.json": b"{}"})
-
-    code = export.main(_publish_args(inputs, tmp_path / "bundle"), uploader=uploader)
-
-    assert code == export.EXIT_PUBLISH
-    assert uploader.puts == []
-    assert uploader.objects == {f"{E1}/manifest.json": b"{}"}
-    assert "already published" in capsys.readouterr().err
-
-
 def test_an_interrupted_earlier_publish_is_resumed_only_over_identical_bytes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1183,15 +1584,16 @@ def test_an_interrupted_earlier_publish_is_resumed_only_over_identical_bytes(
     seed = tmp_path / "seed"
     seed_args = inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=seed)
     assert export.main(seed_args) == export.EXIT_OK
-    same = FakeUploader(objects={f"{E1}/{FILE_PINNED}": (seed / FILE_PINNED).read_bytes()})
+    prefix = _prefix(seed)
+    same = FakeUploader(objects={f"{prefix}/{FILE_PINNED}": (seed / FILE_PINNED).read_bytes()})
     assert export.main(_publish_args(inputs, tmp_path / "b1"), uploader=same) == export.EXIT_OK
-    assert f"{E1}/{FILE_PINNED}" not in same.puts, "an identical object is left alone"
+    assert f"{prefix}/{FILE_PINNED}" not in same.puts, "an identical object is left alone"
 
-    other = FakeUploader(objects={f"{E1}/{FILE_PINNED}": b"different"})
+    other = FakeUploader(objects={f"{prefix}/{FILE_PINNED}": b"different"})
     code = export.main(_publish_args(inputs, tmp_path / "b2"), uploader=other)
     assert code == export.EXIT_PUBLISH
     assert FILE_PINNED in capsys.readouterr().err
-    assert other.objects[f"{E1}/{FILE_PINNED}"] == b"different", "never overwritten"
+    assert other.objects[f"{prefix}/{FILE_PINNED}"] == b"different", "never overwritten"
 
 
 def test_a_failed_export_publishes_nothing(tmp_path: Path) -> None:
@@ -1213,7 +1615,7 @@ def test_the_publish_subcommand_publishes_an_existing_bundle_after_loading_it(
     uploader = FakeUploader()
     argv = ["publish", "--bundle", str(out)]
     assert export.main(argv, uploader=uploader) == export.EXIT_OK
-    assert uploader.puts[-1] == f"{E1}/manifest.json"
+    assert uploader.puts[-1] == f"{_prefix(out)}/manifest.json"
 
     (out / FILE_DIFF).write_bytes(b"edited after export\n")
     again = FakeUploader()
@@ -1384,7 +1786,11 @@ def test_no_credential_value_reaches_the_output(
     secret = "Zq9-hunter-Pw-evidence"
     environ = {"EVIDENCE_SECRET_ACCESS_KEY": secret}
     inputs = one_epoch_inputs(tmp_path / "in")
-    uploader = FakeUploader(fail_put={f"{E1}/{FILE_RUNS}"}, error_text=f"denied for {secret}")
+    seed = tmp_path / "seed"
+    seed_argv = inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=seed)
+    assert export.main(seed_argv) == 0
+    prefix = _prefix(seed)
+    uploader = FakeUploader(fail_put={f"{prefix}/{FILE_RUNS}"}, error_text=f"denied for {secret}")
 
     code = export.main(
         _publish_args(inputs, tmp_path / "bundle"), uploader=uploader, environ=environ
@@ -1393,7 +1799,9 @@ def test_no_credential_value_reaches_the_output(
     captured = capsys.readouterr()
     assert code == export.EXIT_PUBLISH
     assert secret not in captured.out + captured.err
-    assert f"{E1}/manifest.json" not in uploader.objects, "a failed file stops before the manifest"
+    assert f"{prefix}/manifest.json" not in uploader.objects, (
+        "a failed file stops before the manifest"
+    )
 
 
 class FakeRclone:

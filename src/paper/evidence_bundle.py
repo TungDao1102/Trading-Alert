@@ -6,10 +6,17 @@ it; `load_evidence_bundle` is the only reader the evaluator trusts:
     manifest.json            schema, epoch_id, window_start_utc, window_end_utc, source, files,
                              and (plan 16-59) as_of_utc
     pinned_epoch.json        the pinned `StreamEpoch` (as `write_pinned_state` writes it)
-    registry_diff.jsonl      the freeze-check log lines (copied whole, never edited)
+    registry_diff.jsonl      the freeze-check log lines: since plan 16-59 the DERIVED union of
+                             the input artifacts (deduplicated by run identity, ordered by time);
+                             the manifest `freeze_log` lists the inputs and their run ids
     github_runs.json         the exported GitHub run list (array or `workflow_runs` object)
     runtime_records.jsonl    one runtime journal record per line
     evidence_gaps.jsonl      one EVIDENCE_GAP per line (never mixed into registry_diff.jsonl)
+    missing_ticks.jsonl      optional (plan 16-59): one row per scheduled tick without a usable
+                             freeze line, with its run id and the run's conclusion
+    freeze_artifact_<16 hex>.jsonl
+                             optional, one per input artifact (plan 16-59): an original freeze-check
+                             artifact kept byte for byte (<16 hex> = the start of its sha256)
     analytics_evidence.json  optional SHADOW analytics evidence
 
 `files` maps each file name to its SHA-256. Every file is hashed and compared BEFORE it is parsed,
@@ -42,6 +49,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -68,9 +76,12 @@ FILE_RUNS = "github_runs.json"
 FILE_RECORDS = "runtime_records.jsonl"
 FILE_GAPS = "evidence_gaps.jsonl"
 FILE_ANALYTICS = "analytics_evidence.json"
+FILE_MISSING_TICKS = "missing_ticks.jsonl"
+FREEZE_ARTIFACT_PREFIX = "freeze_artifact_"
+FREEZE_ARTIFACT_PATTERN = re.compile(r"freeze_artifact_[0-9a-f]{16}\.jsonl")
 
 REQUIRED_FILES: tuple[str, ...] = (FILE_PINNED, FILE_DIFF, FILE_RUNS, FILE_RECORDS, FILE_GAPS)
-OPTIONAL_FILES: tuple[str, ...] = (FILE_ANALYTICS,)
+OPTIONAL_FILES: tuple[str, ...] = (FILE_MISSING_TICKS, FILE_ANALYTICS)
 KNOWN_FILES: frozenset[str] = frozenset((*REQUIRED_FILES, *OPTIONAL_FILES))
 SOURCES: tuple[str, ...] = ("pg", "fixture")
 
@@ -91,6 +102,21 @@ class DiffRecord:
 
 
 @dataclass(frozen=True)
+class MissingTick:
+    """A scheduled freeze tick without a usable line (plan 16-59, correction 3).
+
+    `run_id`, `status` and `conclusion` are those of the GitHub run assigned to the slot, or None
+    when no run was found for it. The slot is an EVIDENCE_GAP whatever the artifacts say.
+    """
+
+    slot_utc: datetime
+    run_id: str | None
+    status: str | None
+    conclusion: str | None
+    reason: str
+
+
+@dataclass(frozen=True)
 class EvidenceBundle:
     """A verified, parsed bundle of one epoch. Everything in it is the exporter's own data."""
 
@@ -108,6 +134,7 @@ class EvidenceBundle:
     analytics: Mapping[str, Any] | None
     file_sha256: Mapping[str, str]
     as_of_utc: datetime | None = None
+    missing_ticks: tuple[MissingTick, ...] = ()
 
 
 def sha256_of(data: bytes) -> str:
@@ -169,7 +196,7 @@ def _verified_files(directory: Path, manifest: Mapping[str, Any]) -> dict[str, b
     if not isinstance(listed, dict):
         raise BundleError(f"{MANIFEST_NAME} files must map file names to SHA-256 values")
     for name in listed:
-        if name not in KNOWN_FILES:
+        if name not in KNOWN_FILES and FREEZE_ARTIFACT_PATTERN.fullmatch(name) is None:
             raise BundleError(f"{MANIFEST_NAME} lists {name!r}, which is not a bundle file name")
     for name in REQUIRED_FILES:
         if name not in listed:
@@ -283,6 +310,28 @@ def _parse_gaps(data: bytes) -> tuple[EvidenceGap, ...]:
     return tuple(gaps)
 
 
+def _optional_str(value: object) -> str | None:
+    return None if value is None else str(value)
+
+
+def _parse_missing_ticks(data: bytes) -> tuple[MissingTick, ...]:
+    ticks: list[MissingTick] = []
+    for number, row in enumerate(_json_rows(FILE_MISSING_TICKS, data), start=1):
+        try:
+            ticks.append(
+                MissingTick(
+                    slot_utc=_parse_utc(row["slot_utc"], "slot_utc"),
+                    run_id=_optional_str(row.get("run_id")),
+                    status=_optional_str(row.get("status")),
+                    conclusion=_optional_str(row.get("conclusion")),
+                    reason=str(row["reason"]),
+                )
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            raise BundleError(f"{FILE_MISSING_TICKS} line {number}: {exc}") from None
+    return tuple(ticks)
+
+
 def _parse_runs(data: bytes) -> tuple[GithubRun, ...]:
     try:
         return parse_github_runs(data.decode("utf-8"))
@@ -344,6 +393,11 @@ def load_evidence_bundle(path: Path | str) -> EvidenceBundle:
         analytics=analytics,
         file_sha256={name: sha256_of(data) for name, data in sorted(contents.items())},
         as_of_utc=as_of,
+        missing_ticks=(
+            _parse_missing_ticks(contents[FILE_MISSING_TICKS])
+            if FILE_MISSING_TICKS in contents
+            else ()
+        ),
     )
 
 
@@ -363,9 +417,12 @@ __all__ = [
     "FILE_ANALYTICS",
     "FILE_DIFF",
     "FILE_GAPS",
+    "FILE_MISSING_TICKS",
     "FILE_PINNED",
     "FILE_RECORDS",
     "FILE_RUNS",
+    "FREEZE_ARTIFACT_PATTERN",
+    "FREEZE_ARTIFACT_PREFIX",
     "KNOWN_FILES",
     "MANIFEST_NAME",
     "OPTIONAL_FILES",
@@ -374,6 +431,7 @@ __all__ = [
     "BundleError",
     "DiffRecord",
     "EvidenceBundle",
+    "MissingTick",
     "bundle_is_partial",
     "load_evidence_bundle",
     "runtime_record_line",

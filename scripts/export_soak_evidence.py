@@ -1,7 +1,8 @@
 """Export one epoch of the soak trial as a verifiable evidence bundle (Phase 16, plan 16-30).
 
     python scripts/export_soak_evidence.py --source {pg,fixture} --epoch <epoch_id>
-        --pinned <pinned_epoch.json> [--pinned ...] --diff-log <registry_diff.jsonl>
+        --pinned <pinned_epoch.json> [--pinned ...]
+        --diff-log <registry_diff.jsonl> [--diff-log ...]
         --github-runs <runs.json> --config <paper-runtime.toml> [--workflow <yml>]
         --window-start <UTC ISO> --window-end <UTC ISO> [--as-of <UTC ISO>] --out <new directory>
         [--records <runtime_records.jsonl>]        (fixture source only)
@@ -27,10 +28,14 @@ remote, versioning enabled, no Object Lock, written by the exporter on the opera
   credential is never in argv. A missing or empty name, an empty or unsafe prefix, or a
   credential shared with the backup chain exits 2 before anything is exported or uploaded,
   naming variables and never values.
-- Objects go to `<bucket>/<prefix>/<epoch_id>/<file>`: every file first, `manifest.json` last. An
-  epoch prefix that already holds a manifest is never published over; an object that already
-  exists is left alone only when its bytes are identical (an interrupted earlier publish) and
-  is never replaced. Each upload uses rclone `--immutable`.
+- Objects go to `<bucket>/<prefix>/<epoch_id>/<as_of>-<sha12>/<file>` (plan 16-59, decision
+  `16-DEC-EVIDENCE-KEYS`, Q1 = A): `<as_of>` is the manifest `as_of_utc` as `YYYYMMDDTHHMMSSZ` and
+  `<sha12>` the first 12 hex characters of the SHA-256 of the manifest bytes, so every hourly
+  bundle and the final bundle has its own key and the key comes from the manifest only. Every
+  file goes first, `manifest.json` last. Keys are create-only: publishing the very same bundle
+  again finds identical bytes, uploads nothing and succeeds; an object at an exact key whose
+  bytes differ is an error (exit 4) and nothing is ever replaced. Each upload uses rclone
+  `--immutable`. Bucket versioning stays on, with no retention and no Object Lock (O-01).
 - After the upload every published object is read back and checked against the manifest sha256;
   a mismatch or an unreadable object exits 4 and names the file (never its content).
 - No digest file for the Git repository is written: that belongs to options b and e, which are
@@ -40,15 +45,27 @@ What it does, and what it never does:
 
 - One bundle is ONE epoch. The runtime records are those of `--epoch` only (every
   `RuntimeEventType`, `PAPER_REPLAY_INPUTS` and `PAPER_HISTORY_BARS` included: the port is asked
-  with no event-type filter). The freeze lines (`registry_diff.jsonl`) and the GitHub run list are
-  copied whole, byte for byte, whatever the epoch: nothing of another epoch is dropped, edited or
-  filtered, so exporting an earlier epoch after a new pin gives a complete bundle for that epoch
-  next to the new one (REV-18, earlier evidence is auxiliary and stays readable).
+  with no event-type filter). The GitHub run list is copied whole, byte for byte, whatever the
+  epoch. `--diff-log` is given once per downloaded freeze-check run artifact (plan 16-59, decision
+  `16-DEC-FREEZE-LOG-ASSEMBLY`, Q2 = B): the freeze lines of every artifact are merged into ONE
+  derived `registry_diff.jsonl`, deduplicated by run identity `(run_id, run_attempt)` (identical
+  lines collapse, two different lines of one identity are refused with exit 4, a line without run
+  metadata is deduplicated by its exact bytes) and ordered by `checked_at_utc`, so the bytes do
+  not depend on the order of the arguments. The derived file is NOT a byte copy of one artifact:
+  each original artifact is kept byte for byte as `freeze_artifact_<16 hex>.jsonl` and the
+  manifest `freeze_log` lists every input with its sha256 and the run ids it carried. Nothing of
+  another epoch is dropped, edited or filtered, so exporting an earlier epoch after a new pin
+  gives a complete bundle for that epoch next to the new one (REV-18, earlier evidence is
+  auxiliary and stays readable).
 - `pinned_epoch.json` is the `--pinned` file whose epoch_id is `--epoch` (pass the current file and
   the archived ones; exactly one must match), copied byte for byte.
 - EVIDENCE_GAP records come from `freeze_evidence_report` (the cron string is read from the
   freeze workflow file, the grace from the ratified configuration) and go to
   `evidence_gaps.jsonl`. They are never written into `registry_diff.jsonl` (REV-02).
+- `missing_ticks.jsonl` lists every judged tick without a usable freeze line: the gap slots and
+  every scheduled run of the run list that left no freeze line (for example a run GitHub cancelled
+  before it produced an artifact), each with its slot, run id, status and conclusion. A missing
+  artifact is never read as a clean tick (16-DEC-FIXPLANS correction 3).
 - The export is judged AS OF an instant (plan 16-59, B2-WR-06): `--as-of` (default: the current
   time, but never later than the window end plus the grace). Only a slot whose slot plus the
   ratified `freeze_tick_grace_seconds` is at or before it is judged; its gaps carry
@@ -73,13 +90,15 @@ What it does, and what it never does:
 
 Exit codes: 0 bundle written (and published and verified when asked); 2 an input or the
 destination is unusable (named, never its content); 3 a secret-looking value was found (file
-named, nothing written); 4 the publish or its verification failed (the local bundle is kept).
+named, nothing written); 4 the publish or its verification failed (the local bundle is kept), or
+two different freeze lines carry one run identity (nothing written).
 Without `--publish` no network is touched.
 """
 
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import os
 import re
@@ -88,6 +107,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -105,7 +125,10 @@ from src.ops import evidence_remote  # noqa: E402
 from src.ops.redaction import Redactor, scrub  # noqa: E402
 from src.paper.attribution import ShadowOutcome  # noqa: E402
 from src.paper.coverage import (  # noqa: E402
+    SLOT_INTERVAL_SECONDS,
     EvidenceGap,
+    FreezeEvidenceReport,
+    GithubRun,
     freeze_evidence_report,
     parse_freeze_log,
     parse_github_runs,
@@ -115,9 +138,11 @@ from src.paper.evidence_bundle import (  # noqa: E402
     FILE_ANALYTICS,
     FILE_DIFF,
     FILE_GAPS,
+    FILE_MISSING_TICKS,
     FILE_PINNED,
     FILE_RECORDS,
     FILE_RUNS,
+    FREEZE_ARTIFACT_PREFIX,
     MANIFEST_NAME,
     BundleError,
     load_evidence_bundle,
@@ -146,6 +171,9 @@ EXIT_OK = 0
 EXIT_INPUT = 2
 EXIT_SECRET = 3
 EXIT_PUBLISH = 4
+EXIT_CONFLICT = (
+    4  # two different freeze lines carry one run identity (same code as a failed publish)
+)
 
 SOURCE_PG = "pg"
 SOURCE_FIXTURE = "fixture"
@@ -169,7 +197,14 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="pinned_epoch.json (repeat for archived pins); the one of --epoch is exported",
     )
-    parser.add_argument("--diff-log", required=True, type=Path, help="registry_diff.jsonl")
+    parser.add_argument(
+        "--diff-log",
+        required=True,
+        action="append",
+        type=Path,
+        help="a freeze-check run artifact (registry_diff.jsonl); repeat for every available run "
+        "artifact, they are merged into one derived log",
+    )
     parser.add_argument("--github-runs", required=True, type=Path, help="GitHub run list file")
     parser.add_argument("--config", required=True, help="ratified runtime configuration (TOML)")
     parser.add_argument(
@@ -356,6 +391,197 @@ def _jsonl(lines: Sequence[str]) -> bytes:
     return "".join(f"{line}\n" for line in lines).encode("utf-8")
 
 
+# --------------------------------------------------------------------------- #
+# The derived freeze log (plan 16-59, decision 16-DEC-FREEZE-LOG-ASSEMBLY, Q2 = B).
+# --------------------------------------------------------------------------- #
+
+RunIdentity = tuple[str, str]  # (run_id, run_attempt): one execution as GitHub identifies it
+MERGE_DESCRIPTION = (
+    "derived: the union of the lines of the input artifacts, deduplicated by (run_id, "
+    "run_attempt) and ordered by checked_at_utc; not a byte copy of one artifact"
+)
+
+
+class FreezeLogConflict(InputError):
+    """Two different freeze lines carry one run identity: nothing is merged (exit 4)."""
+
+
+@dataclass(frozen=True)
+class _FreezeLine:
+    raw: str
+    identity: RunIdentity | None
+    when: datetime | None
+
+    def sort_key(self) -> tuple[int, datetime, RunIdentity, str]:
+        return (
+            0 if self.when is not None else 1,
+            self.when if self.when is not None else datetime.min.replace(tzinfo=UTC),
+            self.identity if self.identity is not None else ("", ""),
+            self.raw,
+        )
+
+
+@dataclass(frozen=True)
+class FreezeArtifact:
+    """One input artifact, kept byte for byte in the bundle."""
+
+    file_name: str
+    data: bytes
+    sha256: str
+    run_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DerivedFreezeLog:
+    data: bytes
+    artifacts: tuple[FreezeArtifact, ...]  # in sha256 order
+    run_ids: frozenset[str]
+
+
+def _read_freeze_line(raw: str) -> _FreezeLine:
+    """The run identity and time of one line, read with the rules of `parse_freeze_log`."""
+    identity: RunIdentity | None = None
+    when: datetime | None = None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return _FreezeLine(raw, None, None)
+    if not isinstance(data, dict):
+        return _FreezeLine(raw, None, None)
+    metadata = data.get("run_metadata")
+    if (
+        isinstance(metadata, dict)
+        and all(isinstance(k, str) and isinstance(v, str) for k, v in metadata.items())
+        and metadata.get("run_id")
+    ):
+        identity = (metadata["run_id"], metadata.get("run_attempt", "1"))
+    checked = data.get("checked_at_utc")
+    if isinstance(checked, str):
+        try:
+            parsed = datetime.fromisoformat(checked)
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed.tzinfo is not None and parsed.utcoffset() is not None:
+            when = parsed.astimezone(UTC)
+    return _FreezeLine(raw, identity, when)
+
+
+def merge_freeze_logs(paths: Sequence[Path]) -> DerivedFreezeLog:
+    """Merge the lines of every run artifact into one deterministic derived log.
+
+    Identical lines of one run identity collapse; two different lines of one identity raise
+    `FreezeLogConflict`; a line without run metadata is deduplicated by its exact bytes. The
+    result does not depend on the order of `paths` (an artifact given twice counts once). An
+    artifact that cannot be read or is not UTF-8 text is an `InputError`, never skipped.
+    """
+    by_sha: dict[str, bytes] = {}
+    for path in paths:
+        data = _read_bytes(path, path.name)
+        _decode(data, path.name)
+        by_sha.setdefault(sha256_of(data), data)
+
+    by_identity: dict[RunIdentity, _FreezeLine] = {}
+    loose: dict[str, _FreezeLine] = {}
+    artifacts: list[FreezeArtifact] = []
+    names: set[str] = set()
+    for sha in sorted(by_sha):
+        data = by_sha[sha]
+        run_ids: set[str] = set()
+        for raw in data.decode("utf-8").splitlines():
+            if raw.strip() == "":
+                continue
+            line = _read_freeze_line(raw)
+            if line.identity is None:
+                loose.setdefault(raw, line)
+                continue
+            run_ids.add(line.identity[0])
+            seen = by_identity.get(line.identity)
+            if seen is None:
+                by_identity[line.identity] = line
+            elif seen.raw != line.raw:
+                raise FreezeLogConflict(
+                    f"two different freeze lines carry run {line.identity[0]} attempt "
+                    f"{line.identity[1]}; the artifacts are not merged"
+                )
+        file_name = f"{FREEZE_ARTIFACT_PREFIX}{sha[:16]}.jsonl"
+        if file_name in names:
+            raise InputError("two different artifacts share a file name; not merged")
+        names.add(file_name)
+        artifacts.append(FreezeArtifact(file_name, data, sha, tuple(sorted(run_ids))))
+
+    ordered = sorted([*by_identity.values(), *loose.values()], key=_FreezeLine.sort_key)
+    return DerivedFreezeLog(
+        data=_jsonl([line.raw for line in ordered]),
+        artifacts=tuple(artifacts),
+        run_ids=frozenset(identity[0] for identity in by_identity),
+    )
+
+
+def _freeze_log_manifest(derived: DerivedFreezeLog) -> dict[str, Any]:
+    return {
+        "derived": True,
+        "file": FILE_DIFF,
+        "merge": MERGE_DESCRIPTION,
+        "inputs": [
+            {"file": a.file_name, "sha256": a.sha256, "run_ids": list(a.run_ids)}
+            for a in derived.artifacts
+        ],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Missing ticks (16-DEC-FIXPLANS correction 3): never infer a clean tick from a missing artifact.
+# --------------------------------------------------------------------------- #
+
+
+def _missing_tick_line(
+    slot: datetime, run: GithubRun | None, run_id: str | None, reason: str
+) -> tuple[tuple[str, str], str]:
+    slot_text = slot.astimezone(UTC).isoformat()
+    row = {
+        "slot_utc": slot_text,
+        "run_id": run_id,
+        "status": None if run is None else run.status,
+        "conclusion": None if run is None else run.conclusion,
+        "reason": reason,
+    }
+    text = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return (slot_text, run_id or ""), text
+
+
+def missing_ticks(
+    report: FreezeEvidenceReport,
+    runs: Sequence[GithubRun],
+    line_run_ids: frozenset[str],
+    pin: datetime,
+) -> list[str]:
+    """One row per judged tick without a usable freeze line.
+
+    Every EVIDENCE_GAP of the report is a row (with the assigned run's status and conclusion when
+    there is a run), and so is every scheduled run of the run list, after the pin and inside the
+    judged slot grid, that left no freeze line at all (a cancelled or skipped run).
+    """
+    by_id = {run.run_id: run for run in runs}
+    rows: dict[tuple[str, str], str] = {}
+    for gap in report.gaps:
+        run = by_id.get(gap.run_id) if gap.run_id is not None else None
+        key, text = _missing_tick_line(gap.slot_utc, run, gap.run_id, gap.reason.value)
+        rows[key] = text
+    slots = list(report.slots)
+    for run in sorted(runs, key=lambda r: (r.created_at_utc, r.run_id)):
+        if run.event != "schedule" or run.created_at_utc <= pin or run.run_id in line_run_ids:
+            continue
+        index = bisect.bisect_right(slots, run.created_at_utc) - 1
+        if index < 0:
+            continue
+        slot = slots[index]
+        if run.created_at_utc - slot >= timedelta(seconds=SLOT_INTERVAL_SECONDS):
+            continue  # the run belongs to a slot that is not yet due
+        key, text = _missing_tick_line(slot, run, run.run_id, "RUN_WITHOUT_LINE")
+        rows.setdefault(key, text)
+    return [rows[key] for key in sorted(rows)]
+
+
 def _gap_line(gap: EvidenceGap) -> str:
     row = {
         "slot_utc": gap.slot_utc.astimezone(UTC).isoformat(),
@@ -448,7 +674,7 @@ def _build(
             raise InputError("a records file cannot back a pg bundle")
 
     pinned_bytes, pinned = _select_pinned(args.pinned, args.epoch)
-    diff_bytes = _read_bytes(args.diff_log, args.diff_log.name)
+    derived = merge_freeze_logs(args.diff_log)
     runs_bytes = _read_bytes(args.github_runs, args.github_runs.name)
     try:
         config = load_runtime_config(args.config)
@@ -467,13 +693,14 @@ def _build(
         raise InputError("no runtime record belongs to --epoch")
 
     try:
+        runs = parse_github_runs(_decode(runs_bytes, args.github_runs.name))
         # Only a slot that is already due (slot + grace <= as_of) is judged (B2-WR-06).
         report = freeze_evidence_report(
             pin_utc=pinned.opened_at_utc,
             window_end_utc=min(end, as_of - grace),
             cron=cron,
-            lines=parse_freeze_log(_decode(diff_bytes, args.diff_log.name)),
-            runs=parse_github_runs(_decode(runs_bytes, args.github_runs.name)),
+            lines=parse_freeze_log(derived.data.decode("utf-8")),
+            runs=runs,
             grace_seconds=config.health.freeze_tick_grace_seconds,
             detected_at_utc=as_of,
         )
@@ -482,11 +709,16 @@ def _build(
 
     files: dict[str, bytes] = {
         FILE_PINNED: pinned_bytes,
-        FILE_DIFF: diff_bytes,
+        FILE_DIFF: derived.data,
         FILE_RUNS: runs_bytes,
         FILE_RECORDS: _jsonl([runtime_record_line(r) for r in records]),
         FILE_GAPS: _jsonl([_gap_line(g) for g in report.gaps]),
+        FILE_MISSING_TICKS: _jsonl(
+            missing_ticks(report, runs, derived.run_ids, pinned.opened_at_utc)
+        ),
     }
+    for artifact in derived.artifacts:
+        files[artifact.file_name] = artifact.data
     if args.analytics_inputs is not None:
         files[FILE_ANALYTICS] = _analytics_bytes(args.analytics_inputs, args.epoch)
     manifest: dict[str, Any] = {
@@ -496,6 +728,7 @@ def _build(
         "window_end_utc": end.isoformat(),
         "as_of_utc": as_of.isoformat(),
         "source": args.source,
+        "freeze_log": _freeze_log_manifest(derived),
         "files": {},
     }
     return files, manifest, len(records), len(report.gaps)
@@ -515,7 +748,7 @@ class PublishError(Exception):
 
 
 class Uploader(Protocol):
-    """The object store behind `--publish`. Keys are `<epoch_id>/<file name>`."""
+    """The object store behind `--publish`. Keys are `<epoch_id>/<as_of>-<sha12>/<file name>`."""
 
     def listing(self, prefix: str) -> frozenset[str]:
         """File names directly under `prefix` (empty when the prefix does not exist)."""
@@ -616,11 +849,13 @@ def _publisher(environ: Mapping[str, str], uploader: Uploader | None) -> tuple[U
     return RcloneUploader(base, env=mapped), base
 
 
-def publish_bundle(directory: Path, uploader: Uploader) -> tuple[str, int]:
-    """Upload a verified bundle (files first, manifest last) and check the published copy.
+def bundle_prefix(manifest_bytes: bytes) -> tuple[str, str, Mapping[str, str]]:
+    """(epoch_id, key prefix, file digests) of a bundle, from its manifest bytes only.
 
-    Returns (epoch_id, object count). Raises `PublishError` naming the file on any failure."""
-    manifest_bytes = _read_bytes(directory / MANIFEST_NAME, MANIFEST_NAME)
+    The prefix is `<epoch_id>/<as_of>-<sha12>`: `<as_of>` is the manifest `as_of_utc` as
+    `YYYYMMDDTHHMMSSZ` and `<sha12>` the first 12 hex characters of the SHA-256 of the manifest
+    bytes (decision 16-DEC-EVIDENCE-KEYS, Q1 = A). Nothing typed on the command line enters it.
+    """
     try:
         manifest = json.loads(manifest_bytes)
         epoch_id = manifest["epoch_id"]
@@ -629,41 +864,68 @@ def publish_bundle(directory: Path, uploader: Uploader) -> tuple[str, int]:
         raise InputError(f"{MANIFEST_NAME} is not a bundle manifest") from None
     if not isinstance(epoch_id, str) or _EPOCH_KEY.fullmatch(epoch_id) is None:
         raise InputError("the manifest epoch_id is not usable as a storage key")
-    local = {name: _read_bytes(directory / name, name) for name in sorted(digests)}
+    as_of_text = manifest.get("as_of_utc")
+    if not isinstance(as_of_text, str):
+        raise InputError("the manifest has no as_of_utc; export the bundle again")
+    try:
+        as_of = _parse_window(as_of_text, "the manifest as_of_utc")
+    except InputError:
+        raise InputError("the manifest as_of_utc is not a UTC time") from None
+    compact = as_of.strftime("%Y%m%dT%H%M%SZ")
+    return epoch_id, f"{epoch_id}/{compact}-{sha256_of(manifest_bytes)[:12]}", digests
 
-    present = uploader.listing(epoch_id)
-    if MANIFEST_NAME in present:
-        raise PublishError(f"epoch {epoch_id[:12]} is already published; it is never replaced")
+
+def publish_bundle(directory: Path, uploader: Uploader) -> tuple[str, int]:
+    """Upload a verified bundle (files first, manifest last) and check the published copy.
+
+    The key is create-only (16-DEC-EVIDENCE-KEYS): an object that already exists is left alone
+    only when its bytes are identical, publishing a complete bundle again uploads nothing, and
+    different bytes at an existing key raise `PublishError`. Returns (key prefix, object count).
+    """
+    manifest_bytes = _read_bytes(directory / MANIFEST_NAME, MANIFEST_NAME)
+    _, prefix, digests = bundle_prefix(manifest_bytes)
+    local = {name: _read_bytes(directory / name, name) for name in sorted(digests)}
+    manifest_key = f"{prefix}/{MANIFEST_NAME}"
+
+    present = uploader.listing(prefix)
+    complete = MANIFEST_NAME in present
+    if complete and uploader.get(manifest_key) != manifest_bytes:
+        raise PublishError(f"{MANIFEST_NAME} already exists with different content; not replaced")
+    # Check every existing object before anything is uploaded: a conflict changes nothing.
     for name, data in local.items():
-        key = f"{epoch_id}/{name}"
         if name in present:
-            if uploader.get(key) != data:
+            if uploader.get(f"{prefix}/{name}") != data:
                 raise PublishError(f"{name} already exists with different content; not replaced")
-            continue
-        uploader.put(key, data)
-    uploader.put(f"{epoch_id}/{MANIFEST_NAME}", manifest_bytes)
+        elif complete:
+            raise PublishError(f"{name} is missing from a published bundle; not completed")
+    if not complete:
+        for name, data in local.items():
+            if name not in present:
+                uploader.put(f"{prefix}/{name}", data)
+        uploader.put(manifest_key, manifest_bytes)
 
     for name in local:
-        got = uploader.get(f"{epoch_id}/{name}")
+        got = uploader.get(f"{prefix}/{name}")
         if sha256_of(got) != digests[name]:
             raise PublishError(f"{name} does not match the manifest sha256 after publish")
-    if uploader.get(f"{epoch_id}/{MANIFEST_NAME}") != manifest_bytes:
+    if uploader.get(manifest_key) != manifest_bytes:
         raise PublishError(f"{MANIFEST_NAME} does not match the local manifest after publish")
-    return epoch_id, len(local) + 1
+    return prefix, len(local) + 1
 
 
 def _publish(directory: Path, uploader: Uploader, label: str, environ: Mapping[str, str]) -> int:
     """Publish and report; maps failures to exit codes without printing a secret value."""
     redactor = Redactor.from_environ(environ)
     try:
-        epoch_id, count = publish_bundle(directory, uploader)
+        prefix, count = publish_bundle(directory, uploader)
     except PublishError as exc:
         print(f"cannot publish: {redactor.scrub(str(exc))}", file=sys.stderr)
         return EXIT_PUBLISH
     except InputError as exc:
         print(f"cannot publish: {redactor.scrub(str(exc))}", file=sys.stderr)
         return EXIT_INPUT
-    print(f"published and verified: {count} object(s) under {epoch_id[:12]}... of {label}")
+    shown = prefix[:12] + "..." + prefix[prefix.index("/") :]
+    print(f"published and verified: {count} object(s) under {shown} of {label}")
     return EXIT_OK
 
 
@@ -722,6 +984,9 @@ def main(
         files, manifest, record_count, gap_count = _build(
             args, state, env, now if now is not None else (lambda: datetime.now(UTC))
         )
+    except FreezeLogConflict as exc:
+        print(f"cannot export: {exc}", file=sys.stderr)
+        return EXIT_CONFLICT
     except InputError as exc:
         print(f"cannot export: {exc}", file=sys.stderr)
         return EXIT_INPUT

@@ -58,6 +58,19 @@ on:
 permissions:
   contents: read
 
+# Plan 16-59 (B2-WR-05; owner decisions 16-DEC-FREEZE-LOG-ASSEMBLY, Q2 = B, and the queue
+# amendment of 16-DEC-FIXPLANS): two runs never overlap, because each run restores the newest
+# cache and saves under its own key, and an overlap would hand the next run a log without the
+# line of the other. `queue: max` keeps up to 100 pending runs instead of replacing the pending
+# one; it is invalid together with a true `cancel-in-progress`, which must stay false. GitHub
+# documents these keys (docs/SOURCES.md, read 2026-10-16, not verified live): the first live run
+# proves the key is accepted. A run that is still cancelled or dropped is never inferred clean:
+# the exporter merges every run artifact and records each missing tick (RUNBOOK 20.7).
+concurrency:
+  group: paper-freeze-check
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   freeze-check:
     runs-on: ubuntu-24.04

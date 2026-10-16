@@ -230,3 +230,15 @@ def test_paper_freeze_cache_and_upload_logic_unchanged() -> None:
     assert "actions/upload-artifact@" in text
     assert "key: paper-freeze-state" in text
     assert "if-no-files-found: warn" in text
+
+
+def test_paper_freeze_check_runs_one_tick_at_a_time_and_queues_instead_of_cancelling() -> None:
+    """16-59 Q2 (B2-WR-05): a concurrency group, `queue: max`, never cancel-in-progress: true."""
+    text = _read("paper_freeze_check.yml")
+    assert re.search(
+        r"^concurrency:\n  group: paper-freeze-check\n  cancel-in-progress: false\n"
+        r"  queue: max$",
+        text,
+        re.MULTILINE,
+    )
+    assert "cancel-in-progress: true" not in text

@@ -160,6 +160,35 @@ def test_without_a_committed_pin_no_cached_pin_survives(tmp_path: Path) -> None:
     assert not state.exists()
 
 
+# ----- 16-59 Q2 (B2-WR-05): two ticks never run at once --------------------------------------
+
+CONCURRENCY_BLOCK = (
+    "concurrency:\n  group: paper-freeze-check\n  cancel-in-progress: false\n  queue: max\n"
+)
+
+
+def test_the_workflow_serialises_its_runs_and_queues_up_to_the_maximum() -> None:
+    """The owner's decision (16-DEC-FREEZE-LOG-ASSEMBLY, correction 3 and the queue amendment):
+    one run at a time, a pending run is not cancelled by a newer one when `queue: max` allows
+    it, and the combination with `cancel-in-progress: true` (a validation error) never appears."""
+    text = _workflow_text()
+    code = "\n".join(line for line in text.split("\n") if not line.lstrip().startswith("#"))
+    assert ("\n" + CONCURRENCY_BLOCK) in ("\n" + code), "a top-level concurrency block"
+    assert code.count("concurrency:") == 1
+    assert "cancel-in-progress: true" not in code
+    assert code.index("concurrency:") > code.index("permissions:"), "after the permissions block"
+    assert code.index("concurrency:") < code.index("jobs:")
+
+
+def test_the_serialising_block_changes_nothing_else_in_the_workflow() -> None:
+    text = _workflow_text()
+    assert len(_cron_lines(text)) == 1
+    assert re.search(r"^permissions:\s*\n  contents: read\s*$", text, re.MULTILINE)
+    assert "key: paper-freeze-state" in text and "key: paper-freeze-${{ github.run_id }}" in text
+    assert "name: registry-diff-${{ github.run_id }}" in text
+    assert "if: always()" in _step_block(text, "Upload diff log")
+
+
 # ----- Q-Q: the recorded cron line ------------------------------------------------------------
 
 

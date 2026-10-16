@@ -753,6 +753,61 @@ def test_20_7_names_the_fixed_evidence_configuration_and_no_free_form_destinatio
     assert "soak.env" in body, "the shared paper environment file is told not to carry them"
 
 
+GITHUB_CONCURRENCY_URL = (
+    "https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/"
+    "control-the-concurrency-of-workflows-and-jobs"
+)
+
+
+def test_20_7_states_the_per_bundle_key_and_the_create_only_rule() -> None:
+    """16-59 Q1 = A and correction 4 (B2-CR-04): the key layout and what a re-publish means."""
+    body = _sub20("20.7")
+    for phrase in (
+        "<epoch-id>/<as-of>-<sha12>/<file>",
+        "decisions/16-DEC-EVIDENCE-KEYS.md",
+        "create-only",
+        "identical bytes",
+        "different bytes",
+        "nothing is ever replaced",
+        "--as-of",
+        "partial",
+        "versioning",
+        "no Object Lock",
+    ):
+        assert phrase in body, f"20.7 lacks: {phrase}"
+    assert "never published over" not in body, "the single-key rule of plan 16-47 is replaced"
+    assert "<epoch-id>/<file>" not in body
+
+
+def test_20_7_describes_the_merged_log_the_missing_ticks_and_the_concurrency_group() -> None:
+    """16-59 Q2 = B and correction 3 (B2-WR-05): merge, missing ticks, residual queue risk."""
+    body = _sub20("20.7")
+    for phrase in (
+        "decisions/16-DEC-FREEZE-LOG-ASSEMBLY.md",
+        "every available run artifact",
+        "derived",
+        "(run_id, run_attempt)",
+        "missing_ticks.jsonl",
+        "concurrency",
+        "cancel-in-progress: false",
+        "queue: max",
+        "100",
+        "never inferred",
+        GITHUB_CONCURRENCY_URL,
+        "2026-10-16",
+    ):
+        assert phrase in body, f"20.7 lacks: {phrase}"
+    assert "is a shorter copy of the same log" not in body, "the 16-47 claim is withdrawn"
+
+
+def test_sources_records_the_github_concurrency_facts_read_for_plan_16_59() -> None:
+    sources = (REPO_ROOT / "docs" / "SOURCES.md").read_text(encoding="utf-8")
+    assert GITHUB_CONCURRENCY_URL in sources
+    row = next(line for line in sources.splitlines() if GITHUB_CONCURRENCY_URL in line)
+    for phrase in ("queue: max", "2026-10-16", "not verified live"):
+        assert phrase in row, f"the SOURCES row lacks: {phrase}"
+
+
 def test_20_7_names_the_committed_pin_path_the_workflow_reads() -> None:
     from tests.test_paper_freeze_workflow_pin_source import COMMITTED_PIN_PATH
 

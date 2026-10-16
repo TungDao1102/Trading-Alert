@@ -217,3 +217,11 @@ The restart policy of the paper service (decision 16-DEC-RESTART-POLICY, review 
 | Source URL | Used for | Checked on | Method |
 | --- | --- | --- | --- |
 | https://docs.docker.com/engine/containers/start-containers-automatically/ | Restart policies: `on-failure` "doesn't restart the container if the daemon restarts"; `always` restarts the container whenever it stops; `unless-stopped` is "similar to always, except that when the container is stopped (manually or otherwise), it isn't restarted even after Docker daemon restarts"; a manual stop makes Docker ignore the restart policy until the daemon restarts or the container is restarted by hand. Used for the paper service's `restart: "unless-stopped"`, the held refused start and the one-shot pin service with `restart: "no"` (plan 16-55, evidence/16-55-recheck.md) | 2026-10-16 | WebFetch summary by the planner of plan 16-55, not verified live; MEDIUM confidence |
+
+## Facts read for plan 16-59 (2026-10-16)
+
+The concurrency block of the freeze workflow (`.github/workflows/paper_freeze_check.yml`, decision 16-DEC-FREEZE-LOG-ASSEMBLY and the queue amendment of 16-DEC-FIXPLANS) relies on this GitHub documentation. It was read by the planner of plan 16-59 and is not verified live; the first live run on GitHub is the proof that the keys are accepted, and RUNBOOK 20.7 states the residual risk.
+
+| Source URL | Used for | Checked on | Method |
+| --- | --- | --- | --- |
+| https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/control-the-concurrency-of-workflows-and-jobs | Concurrency groups: at most one running run per group; with the default `queue: single` a newly queued run cancels and replaces the pending one; the optional `queue: max` allows up to 100 pending runs; `queue: max` together with `cancel-in-progress: true` is a validation error. Used for `group: paper-freeze-check`, `cancel-in-progress: false` and `queue: max` in the freeze workflow, and for the residual-risk statement of RUNBOOK 20.7 (an additional run beyond the pending limit is cancelled, so a tick can still be missing and is then recorded as a missing tick, never inferred clean) | 2026-10-16 | WebFetch summary by the planner of plan 16-59, not verified live; MEDIUM confidence |
