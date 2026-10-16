@@ -147,3 +147,34 @@ def test_phase11_section_unchanged() -> None:
     body = _section(_sources_text(), exchange.SOURCES_SECTION_TITLE)
     assert body
     assert hashlib.sha256(body.encode("utf-8")).hexdigest() == PHASE11_SECTION_SHA256
+
+
+# --------------------------------------------------------------------------- Task 3
+
+EXECUTION_SPEC = REPO_ROOT / "docs" / "trading" / "EXECUTION_SPEC.md"
+BINANCE = REPO_ROOT / "docs" / "integration" / "BINANCE.md"
+
+ALGO_STATUS_ROWS = ("NEW", "TRIGGERING", "TRIGGERED", "FINISHED", "CANCELED", "REJECTED", "EXPIRED")
+
+
+def test_execution_spec_status_rows() -> None:
+    # Same row match as scripts/decision_alignment/exchange.py::check_algo_status.
+    section = exchange._section(EXECUTION_SPEC.read_text(encoding="utf-8"), 6)
+    rows = {
+        m.group(1) for m in re.finditer(r"^\|\s*`?([A-Z_]+)`?\s*\|", section, flags=re.MULTILINE)
+    }
+    missing = [status for status in ALGO_STATUS_ROWS if status not in rows]
+    assert not missing, missing
+
+
+def test_binance_doc_verify_marker_count() -> None:
+    text = exchange.normalise(BINANCE.read_text(encoding="utf-8"))
+    assert text.count(exchange.VERIFY_MARKER) >= exchange.VERIFY_MARKER_MINIMUM
+
+
+def test_execution_spec_cites_no_unregistered_binance_url() -> None:
+    name, ok, detail = exchange.check_source_register(
+        EXECUTION_SPEC.read_text(encoding="utf-8"), _sources_text()
+    )
+    assert name == "EX-06"
+    assert ok, detail

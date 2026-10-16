@@ -105,7 +105,9 @@ Conditional (algo) orders live in the Binance Algo Service until their condition
 | --- | --- |
 | `NEW` | placed in the Algo Service, not yet triggered |
 | `TRIGGERING` | condition met, forwarded to the matching engine |
+| `TRIGGERED` | placed into the matching engine |
 | `FINISHED` | the triggered conditional order was filled or canceled in the matching engine |
+| `CANCELED` | the conditional order was canceled |
 | `REJECTED` | denied by the matching engine at trigger, for example a margin check failure |
 | `EXPIRED` | canceled by the system |
 
@@ -116,7 +118,7 @@ Consequences for the execution layer (F-054):
 - The failure reason is carried in `o.rm` on `ALGO_UPDATE`. A search summary of the change-log reports that the old `CONDITIONAL_ORDER_TRIGGER_REJECT` event was deprecated on 2025-12-15 in favour of `ALGO_UPDATE`; that date was not confirmed on the fetched change-log page, so parse `ALGO_UPDATE` and do not depend on the old event.
 - For trailing stops before trigger the status remains `NEW` and two `NEW` events can arrive (`ia` false, then true).
 
-Grounding and confidence: the official Event-Algo-Order-Update page could not be retrieved on 2026-09-30 (only the documentation shell). The field names come from the installed SDK model `algo_update_o.py` (`X` "Algo Status", `rm` "Algo order failed reason", `ia` "Is activated or not, only meaningful for trailing order") and the status meanings from a search summary of that page, recorded in `SOURCES.md`; verify against current Binance docs before implementation and re-confirm the status list before Phase 18.
+Grounding and confidence: the official Event-Algo-Order-Update page could not be retrieved on 2026-09-30 (only the documentation shell). The field names come from the installed SDK model `algo_update_o.py` (`X` "Algo Status", `rm` "Algo order failed reason", `ia` "Is activated or not, only meaningful for trailing order") and the status meanings from a search summary of that page, recorded in `SOURCES.md`; verify against current Binance docs before implementation. Result of the Phase 18 re-read: the page could not be read in the research on 2026-10-15 (the tool returned the documentation landing page) nor by the plan 18-01 executor on 2026-10-16 (every request was answered by a WAF challenge), as recorded in `SOURCES.md`, section "Facts read for Phase 18". The `TRIGGERED` and `CANCELED` rows were therefore added from the same kind of source as the other rows, not from a page read: the Phase 18 research search summary of the page (2026-10-15) and the Phase 9 transcription of an archived copy of the page dated 2026-01-13 (`09-EXCHANGE-FACTS.md` Fact 2), which agree on the seven statuses. The status list is not verified live; the connected-machine smoke (plan 18-18) reads the page and captures real events before it is treated as confirmed.
 
 ## 7. Idempotency
 
@@ -171,7 +173,7 @@ The tool must explicitly detect and support the chosen Binance position mode.
 
 Do not assume One-way Mode or Hedge Mode.
 
-Binance documents that position-mode changes have account-level restrictions and can be rejected when open orders/positions exist (error -4067 for open orders, -4068 for an open position, per the installed SDK docstring for `POST /fapi/v1/positionSide/dual`). [Binance Change Position Mode](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Change-Position-Mode) The page text itself was not retrievable on 2026-09-30; verify against current Binance docs before implementation (F-057).
+Binance documents that position-mode changes have account-level restrictions and can be rejected when open orders/positions exist (error -4067 for open orders, -4068 for an open position, per the installed SDK docstring for `POST /fapi/v1/positionSide/dual`). [Binance Change Position Mode](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Change-Position-Mode) The page text itself was not retrievable on 2026-09-30; a tool summary of the page in the Phase 18 research (2026-10-15) gave the same rule and codes, and the executor re-read of 2026-10-16 failed (`SOURCES.md`, section "Facts read for Phase 18"); the same installed SDK docstring adds that after the CM migration UM and CM share one `dualSidePosition` setting, so a change flips both and is rejected if either side has an open order or an open position; verify against current Binance docs before implementation (F-057).
 
 ## 9. Reconciliation loop
 
