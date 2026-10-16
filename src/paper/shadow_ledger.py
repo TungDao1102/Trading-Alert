@@ -609,6 +609,19 @@ class ShadowReservations:
         with self._ledger.lock:
             return tuple(self._filled[k] for k in sorted(self._filled))
 
+    def active(self) -> tuple[Reservation, ...]:
+        """The pending reservations then the positions, read in ONE ledger-lock acquisition.
+
+        The coordinator takes this snapshot BEFORE it takes its own lock and builds the missing
+        fill drivers from it (plan 16-58, B2-CR-01): the ledger lock is never waited for while
+        the coordinator lock is held.
+        """
+        with self._ledger.lock:
+            return (
+                *(self._held[k] for k in sorted(self._held)),
+                *(self._filled[k] for k in sorted(self._filled)),
+            )
+
     # ---- the CONFIRM path ------------------------------------------------ #
 
     def _prepare(

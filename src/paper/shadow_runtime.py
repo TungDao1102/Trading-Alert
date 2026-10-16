@@ -26,7 +26,14 @@ all of which build their text with the one composer.
 Threads: the event loop runs the Telegram application and the poller; every synchronous store
 call of a press (`dispatch_callback`) and of a poll step runs through `asyncio.to_thread`.
 `ShadowLedger` and `ShadowReservations` serialise on the ledger lock; the position table has its
-own lock.
+own lock (the coordinator lock).
+
+Lock order (plan 16-58, B2-CR-01): the ledger lock and the coordinator lock are never nested in
+the coordinator-then-ledger order, and the CONFIRM section never calls back into the coordinator
+while it holds the ledger lock. Concretely: `_ensure_drivers` snapshots the reservations under the
+ledger lock alone and builds the missing drivers under the coordinator lock alone; the rebuild at
+restart publishes its drivers after the ledger section ends; `ConfirmBook` calls `on_confirmed`
+after it released its section. No I/O is added under either lock.
 """
 
 from __future__ import annotations
@@ -680,12 +687,15 @@ class ShadowCoordinator:
     # ---- drivers ------------------------------------------------------------ #
 
     def _ensure_drivers(self) -> None:
-        """Give every reserved or filled plan without a driver one (idempotent)."""
+        """Give every reserved or filled plan without a driver one (idempotent).
+
+        Lock order (B2-CR-01): the reservations are snapshotted under the ledger lock ALONE and
+        the lock is released; only then is the coordinator lock taken to build the missing
+        drivers. The coordinator lock is therefore never held while the ledger lock is waited for.
+        """
+        snapshot = self._reservations.active()
         with self._lock:
-            for reservation in (
-                *self._reservations.pending_reservations(),
-                *self._reservations.positions(),
-            ):
+            for reservation in snapshot:
                 if reservation.key in self._positions:
                     continue
                 self._positions[reservation.key] = self._build_position(reservation)
@@ -959,10 +969,13 @@ class ShadowCoordinator:
                 reservation.symbol, reservation.eligibility_start_utc, horizon
             )
 
+        rebuilt: dict[str, _Position] = {}
+
         def driver_for(record: PositionRecord) -> ShadowFillDriver:
+            # Runs inside the ledger section of `rebuild_from_records`: the coordinator lock is
+            # NOT taken here (B2-CR-01); the positions are published after the rebuild returns.
             position = self._build_position(record.reservation)
-            with self._lock:
-                self._positions[position.key] = position
+            rebuilt[position.key] = position
             return position.driver
 
         await asyncio.to_thread(
@@ -973,6 +986,8 @@ class ShadowCoordinator:
             driver_for=driver_for,
             funding_for=lambda reservation: funding.get(reservation.key),
         )
+        with self._lock:
+            self._positions.update(rebuilt)
         await asyncio.to_thread(self._ensure_drivers)
         with self._lock:
             positions = sorted(self._positions.items())

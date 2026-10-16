@@ -346,6 +346,9 @@ class ConfirmBook:
         self._lock = threading.RLock()
         self._entries: dict[str, ConfirmEntry] = {}
         self._last: ConfirmRecord | None = None
+        # Set by `_finish_confirm` inside the book lock, taken and called by `handle_confirm`
+        # after the locks are released.
+        self._deferred_confirmed: tuple[Approval, TradePlan, datetime] | None = None
 
     # ---- read side ------------------------------------------------------ #
 
@@ -841,7 +844,7 @@ class ConfirmBook:
         _require_utc(now_utc, "now_utc")
         with self._lock:
             if self._reservations is None:
-                return self._handle_confirm_locked(
+                result = self._handle_confirm_locked(
                     short_id=short_id,
                     chat_id=chat_id,
                     authorized_chat_id=authorized_chat_id,
@@ -849,15 +852,22 @@ class ConfirmBook:
                     now_utc=now_utc,
                     correlation_id=correlation_id,
                 )
-            with self._reservations.section():
-                return self._handle_confirm_locked(
-                    short_id=short_id,
-                    chat_id=chat_id,
-                    authorized_chat_id=authorized_chat_id,
-                    from_user_id=from_user_id,
-                    now_utc=now_utc,
-                    correlation_id=correlation_id,
-                )
+            else:
+                with self._reservations.section():
+                    result = self._handle_confirm_locked(
+                        short_id=short_id,
+                        chat_id=chat_id,
+                        authorized_chat_id=authorized_chat_id,
+                        from_user_id=from_user_id,
+                        now_utc=now_utc,
+                        correlation_id=correlation_id,
+                    )
+            deferred, self._deferred_confirmed = self._deferred_confirmed, None
+        # B2-CR-01: `on_confirmed` runs after the serialized section and the book lock are gone,
+        # so the hook may take the coordinator lock without waiting on the ledger lock.
+        if deferred is not None and self._on_confirmed is not None:
+            self._on_confirmed(*deferred)
+        return result
 
     def _handle_confirm_locked(
         self,
@@ -1006,9 +1016,9 @@ class ConfirmBook:
                 return self._result(
                     entry, ConfirmOutcome.REJECTED_OTHER, outcome.reason_code, replayed=False
                 )
-        if self._on_confirmed is not None:
-            # State is already CONFIRMED, so a replay can never reach this call a second time.
-            self._on_confirmed(entry.approval, entry.plan, confirmed_at_utc)
+        # State is already CONFIRMED, so a replay can never set this a second time. The hook runs
+        # in `handle_confirm` once the section is released (B2-CR-01).
+        self._deferred_confirmed = (entry.approval, entry.plan, confirmed_at_utc)
         return result
 
     def _reject_terminal(
