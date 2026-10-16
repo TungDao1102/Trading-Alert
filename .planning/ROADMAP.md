@@ -695,7 +695,7 @@ Plans:
 
 **Depends on**: Phase 12, Phase 13.1, Phase 15, Phase 17
 
-**Plans**: 52/61 plans executed (16-01 to 16-42 and 16-45 to 16-54; 16-55 to 16-61 added 2026-10-16 from the deep code review (16-REVIEW.md): 16-55 to 16-59 fix the review findings and block 16-43, 16-60 and 16-61 fix the cold research warm-up and rerun research run 1 at simulator 2.2.0 and run after 16-59, 16-43 is now wave 24 and 16-44 wave 25; 16-37 manifest frozen 2026-10-15, 16-46 research run 1 done 2026-10-16, 16-41 O-06/O-10 decided 2026-10-16, 16-48 candidate research-run-1-a01 designated 2026-10-16; 16-42 to 16-44 wait for the user and the soak host; 16-54 added 2026-10-13 for the terminal declaration of known_gaps, done the same day; 16-53 added 2026-10-12 for compose-rehearsal.sh and the dry-run BINANCE_* refusal; plan-checker 2026-10-09: 0 blockers on 16-01 to 16-49; 16-50 added 2026-10-09 for the healthchecks.io heartbeat sender chosen by the user; open user questions Q-A to Q-Q are asked at the blocking-human checkpoints)
+**Plans**: 52/62 plans executed (16-01 to 16-42 and 16-45 to 16-54; 16-55 to 16-61 added 2026-10-16 from the deep code review (16-REVIEW.md): 16-55 to 16-59 fix the review findings and block 16-43, 16-60 and 16-61 fix the cold research warm-up and rerun research run 1 at simulator 2.2.0; the owner answered every checkpoint of 16-55 to 16-61 on 2026-10-16 (16-DEC-FIXPLANS.md, reviewer text in decisions/16-DEC-FIXPLANS-reviewer-text.md) and the plans now record those decisions; 16-62 added the same day for B1-WR-09 (wire rest_backfill_depth_bars = 1500 into the REST backfill), it runs after 16-59 and records the soak IMAGE_COMMIT; order 16-55, 56, 57, 58, 59, 62, then 16-60 and 16-43 (wave 25), then 16-61 and 16-44 (wave 26); the second secret paper heartbeat URL is a user input before 16-43; 16-37 manifest frozen 2026-10-15, 16-46 research run 1 done 2026-10-16, 16-41 O-06/O-10 decided 2026-10-16, 16-48 candidate research-run-1-a01 designated 2026-10-16; 16-42 to 16-44 wait for the user and the soak host; 16-54 added 2026-10-13 for the terminal declaration of known_gaps, done the same day; 16-53 added 2026-10-12 for compose-rehearsal.sh and the dry-run BINANCE_* refusal; plan-checker 2026-10-09: 0 blockers on 16-01 to 16-49; 16-50 added 2026-10-09 for the healthchecks.io heartbeat sender chosen by the user; open user questions Q-A to Q-Q are asked at the blocking-human checkpoints)
 
 **Requirements**: PAPER-01, PAPER-02
 
@@ -804,13 +804,14 @@ Plans:
 - [x] 16-52-PLAN.md
 - [x] 16-53-PLAN.md
 - [x] 16-54-PLAN.md
-- [ ] 16-55-PLAN.md - image carries params/ and config/paper/, single-instance guard, restart and hang handling, backup target
-- [ ] 16-56-PLAN.md - feed fails closed (exhausted rebuild exits 7, watchdog) and related warnings
-- [ ] 16-57-PLAN.md - acceptance-log flush before heartbeat, crash consistency, config pin
+- [ ] 16-55-PLAN.md - image carries params/ and config/paper/, single-instance guard, unless-stopped with a held unhealthy refused start, pin-and-exit, soak backup unit
+- [ ] 16-56-PLAN.md - feed fails closed (exhausted rebuild exits 7, 120 s watchdog), close lag zero refused, config v2, separate paper heartbeat
+- [ ] 16-57-PLAN.md - acceptance-log flush before heartbeat, crash consistency, canonical config identity refused on mismatch
 - [ ] 16-58-PLAN.md - SHADOW locking, reservations, unsizable plan handling
-- [ ] 16-59-PLAN.md - evidence export and workflow, deferred-item dispositions, gate for 16-55 to 16-59
-- [ ] 16-60-PLAN.md - research warm-up, simulator 2.2.0, protocol v2.5.0 (after 16-59)
-- [ ] 16-61-PLAN.md - runner hardening, fresh authorization, rerun at 2.2.0, supersede record (after 16-60)
+- [ ] 16-59-PLAN.md - evidence export per-bundle keys, merged freeze log with missing-tick records, deferred-item dispositions, gate for 16-55 to 16-59
+- [ ] 16-60-PLAN.md - research warm-up 50 days, simulator 2.2.0, protocol v2.5.0, D072 and D073 (after 16-62)
+- [ ] 16-61-PLAN.md - runner hardening, sixth authorization key, sequential rerun at 2.2.0, supersede record (after 16-60)
+- [ ] 16-62-PLAN.md - B1-WR-09: rest_backfill_depth_bars wired into the REST backfill, gate and soak IMAGE_COMMIT (after 16-59, before 16-43 and 16-60)
 - [ ] TBD (run /gsd-plan-phase 16 to break down)
 
 ### Phase 17: Operational Persistence Layer
