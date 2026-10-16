@@ -1,6 +1,6 @@
 {
-  "E": 1792160506135,
-  "T": 1792160506135,
+  "E": 1792172185041,
+  "T": 1792172185039,
   "e": "ALGO_UPDATE",
   "o": {
     "R": true,
@@ -8,9 +8,9 @@
     "V": "EXPIRE_MAKER",
     "X": "CANCELED",
     "ai": "",
-    "aid": 1000000243108103,
+    "aid": 1000000243283482,
     "at": "CONDITIONAL",
-    "caid": "dprobe-pre-20261016T142134Z-9",
+    "caid": "dprobe-pre-20261016T173612Z-10",
     "cp": false,
     "f": "GTC",
     "gtd": 0,
@@ -22,7 +22,7 @@
     "ps": "BOTH",
     "q": "0.0008",
     "s": "BTCUSDT",
-    "tp": "78957.2",
+    "tp": "78080.1",
     "tt": 0,
     "wt": "MARK_PRICE"
   }

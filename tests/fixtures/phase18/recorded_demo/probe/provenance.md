@@ -1,6 +1,6 @@
 # Provenance of the Demo probe frames
 
-## execute run of 20261016T142134Z (DEMO, scripts/demo_probe.py)
+## execute run of 20261016T173612Z (DEMO, scripts/demo_probe.py)
 
 - `duplicate_client_algo_id-001-ALGO_UPDATE.json`: RECORDED_DEMO
 - `duplicate_client_algo_id-002-ALGO_UPDATE.json`: RECORDED_DEMO
@@ -12,6 +12,16 @@
 - `id_reuse_after_canceled_algo-002-ALGO_UPDATE.json`: RECORDED_DEMO
 - `id_reuse_after_canceled_algo-003-ALGO_UPDATE.json`: RECORDED_DEMO
 - `id_reuse_after_canceled_algo-004-ALGO_UPDATE.json`: RECORDED_DEMO
+- `id_reuse_after_filled-001-TRADE_LITE.json`: RECORDED_DEMO
+- `id_reuse_after_filled-002-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `id_reuse_after_filled-003-ACCOUNT_UPDATE.json`: RECORDED_DEMO
+- `id_reuse_after_filled-004-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `id_reuse_after_filled-005-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `id_reuse_after_filled-006-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `id_reuse_after_filled-007-TRADE_LITE.json`: RECORDED_DEMO
+- `id_reuse_after_filled-008-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `id_reuse_after_filled-009-ACCOUNT_UPDATE.json`: RECORDED_DEMO
+- `id_reuse_after_filled-010-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
 - `preplaced_stop_reduce_only_flat-001-ALGO_UPDATE.json`: RECORDED_DEMO
 - `preplaced_stop_reduce_only_flat-002-ALGO_UPDATE.json`: RECORDED_DEMO
 - `entry_never_fills_protective_orphan-001-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO

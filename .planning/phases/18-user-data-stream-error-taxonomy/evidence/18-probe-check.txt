@@ -52,3 +52,18 @@ The three assumptions of BinanceSemanticsFakeAdapter (tests/support/fake_binance
 2 a CANCELED order frees its client id (a reused id is accepted): agrees with the probe (normal and algo)
 3 a FILLED order frees its client id: not observed: the entry of id_reuse_after_filled was rejected with -4016 before any fill
 (the 3-day retention rule of the fake is a documentation rule the probe does not test: not observed)
+
+SECOND RUN 2026-10-16T17:36:12Z (rerun after the entry price fix; same limits, DEMO, BTCUSDT 0.0008, optional cases off, transport sdk): evidence demo-probe-EVIDENCE-20261016T173612Z.json
+schema: check_probe_evidence no problem; proof_class REAL_DEMO; outcome COMPLETE; failures none; ban none; cleanup FLAT (open_orders 0, open_algo_orders 0, positions none); overall PASS
+account: USDT balance 4999.75172748 before and 4999.38621485 after (difference -0.36551263)
+secrets: none in the second evidence or in the 57 fixture files (scanned for the key value, the secret value, listenKey and signature shapes)
+fixtures: the run was typed with a truncated --fixtures-dir (tests/fixtures/phase18/recorded_demo/prob), so its frames were written there; they were copied over tests/fixtures/phase18/recorded_demo/probe/ (same file names, which are what the evidence lists) and the stray directory was removed. The probe directory now holds the frames of the second run: the first run's files with the same names are replaced (they stay in git history, commit 2a27afb), plus the ten frames of id_reuse_after_filled.
+case change against the first run: id_reuse_after_filled is now OBSERVED PASS. Still NOT_OBSERVED PASS: partial_fill (every marketable entry filled completely) and triggered_market_exit_lifecycle (the trigger was not reached within case_timeout_seconds). The other 13 cases are OBSERVED as before; the first run's facts above are unchanged.
+
+Fact added for plan 18-21 (second run, copied from the evidence):
+id reuse after FILLED: the entry (client id dprobe-rfl-20261016T173612Z-8, LIMIT BUY 0.0008 at 83366.80, order_id 28636771570) went NEW then FILLED (executed_qty 0.0008, avg_price 81415.0); the same client id placed again as a far LIMIT BUY at 78080.10 was ACCEPTED (status NEW, a new order_id 28636771572) and was then cancelled (CANCELED). ORDER_TRADE_UPDATE, TRADE_LITE and ACCOUNT_UPDATE frames recorded (10 files, id_reuse_after_filled-001 to -010).
+
+The three assumptions of BinanceSemanticsFakeAdapter, updated by the second run:
+1 a client id is unique among OPEN orders: agrees with the probe for clientAlgoId (-4116 while the first is open); not observed for a normal order
+2 a CANCELED order frees its client id: agrees with the probe (normal and algo)
+3 a FILLED order frees its client id: agrees with the probe (normal order: the reused id was accepted after FILLED)
