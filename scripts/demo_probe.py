@@ -1692,6 +1692,307 @@ async def _id_reuse_after_filled(case: _WriteCase) -> CaseResult:
     return case.observed()
 
 
+# ----- Task 2: the D055 cases ------------------------------------------------------ #
+
+
+async def _place_flat_leg(
+    case: _WriteCase, label: str, client_id: str, trigger: Decimal, *, time_in_force: str | None
+) -> ProbeObservation:
+    """The pre-placed protective leg of a long: STOP_MARKET SELL, explicit quantity, reduceOnly."""
+    return await case.conditional(
+        label,
+        client_id=client_id,
+        side=SIDE_SELL,
+        order_type=ORDER_TYPE_STOP_MARKET,
+        trigger=trigger,
+        quantity=case.quantity,
+        reduce_only=True,
+        time_in_force=time_in_force,
+    )
+
+
+def _row_values(answer: ProbeObservation, match_key: str, match: str) -> dict[str, str] | None:
+    """The summary fields of the snapshot row whose `match_key` equals `match`, or None."""
+    count = _count(answer)
+    for index in range(count or 0):
+        prefix = f"row_{index}_"
+        if answer.summary.get(f"{prefix}{match_key}") == match:
+            return {
+                key[len(prefix) :]: value
+                for key, value in answer.summary.items()
+                if key.startswith(prefix)
+            }
+    return None
+
+
+async def _preplaced_stop_reduce_only_flat(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    trigger = market.far_below(case.fraction)
+    case.check_bounds([(case.quantity, trigger)])
+    leg_id = case.client_id("pre")
+    case.detail("client_algo_id", leg_id)
+    leg = await _place_flat_leg(case, "leg", leg_id, trigger, time_in_force=None)
+    case.detail("leg_accepted", _flag_text(leg.ok))
+    if leg.ok:
+        await case.algo_status("leg_status", leg_id)
+        await case.await_frames(lambda frame: frame.get("client_algo_id") == leg_id)
+    await case.reconcile(open_orders=0, open_algo_orders=1 if leg.ok else 0, position=Decimal(0))
+    return case.observed()
+
+
+async def _closeposition_stop_flat(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    trigger = market.far_below(case.fraction)
+    case.check_bounds([(None, trigger)])
+    leg_id = case.client_id("cpf")
+    case.detail("client_algo_id", leg_id)
+    leg = await case.conditional(
+        "close_position_leg",
+        client_id=leg_id,
+        side=SIDE_SELL,
+        order_type=ORDER_TYPE_STOP_MARKET,
+        trigger=trigger,
+        quantity=None,
+        close_position=True,
+    )
+    case.detail("close_position_accepted", _flag_text(leg.ok))
+    if leg.ok:
+        await case.algo_status("close_position_status", leg_id)
+    return case.observed()
+
+
+async def _entry_never_fills_protective_orphan(case: _WriteCase) -> CaseResult:
+    premise = _premise_leg(case.context)
+    if premise is not None:
+        return case.not_observed(premise)
+    market = await case.market()
+    price = market.far_below(case.fraction)
+    trigger = market.far_below(case.fraction)
+    case.check_bounds([(case.quantity, price), (case.quantity, trigger)])
+    entry_id = case.client_id("ore")
+    leg_id = case.client_id("orl")
+    case.detail("entry_client_id", entry_id)
+    case.detail("client_algo_id", leg_id)
+    entry = await case.limit("entry", client_id=entry_id, side=SIDE_BUY, price=price)
+    if not entry.ok:
+        return case.not_observed(f"entry rejected: {_class_code(entry)}")
+    leg = await _place_flat_leg(case, "leg", leg_id, trigger, time_in_force=None)
+    if not leg.ok:
+        return case.not_observed(f"{REASON_LEG_NOT_ACCEPTED} in this case: {_class_code(leg)}")
+    await case.cancel("entry_cancel", entry_id)
+    statuses: list[str] = []
+
+    async def leg_ended() -> bool:
+        statuses.append(await case.algo_status("leg_query", leg_id))
+        return statuses[-1] in ALGO_ENDED_STATUSES or statuses[-1] == ALGO_ABSENT
+
+    await wait_up_to(case.rig, leg_ended, case.case_timeout_seconds)
+    final = statuses[-1]
+    case.detail("leg_status_after_entry_cancel", final or "unreadable")
+    if final == ALGO_STATUS_NEW:
+        orphaned = _TRUE
+    elif final in ALGO_ENDED_STATUSES or final == ALGO_ABSENT:
+        orphaned = _FALSE
+    else:
+        orphaned = "unknown"
+    case.detail("orphaned", orphaned)
+    if orphaned != _FALSE:
+        canceled = await case.cancel_algo("leg_cancel", leg_id)
+        case.detail("leg_cancel_clean", _flag_text(canceled.ok))
+        after = await case.algo_status("leg_query_after_cancel", leg_id)
+        case.detail("leg_status_after_cancel", after or "unreadable")
+    await case.reconcile(open_orders=0, open_algo_orders=0, position=Decimal(0))
+    return case.observed()
+
+
+async def _full_fill_protective_quantity(case: _WriteCase) -> CaseResult:
+    premise = _premise_leg(case.context)
+    if premise is not None:
+        return case.not_observed(premise)
+    market = await case.market()
+    trigger = market.far_below(case.fraction)
+    case.check_bounds([(case.quantity, trigger), (case.quantity, market.marketable_buy())])
+    leg_id = case.client_id("ffl")
+    case.detail("client_algo_id", leg_id)
+    leg = await _place_flat_leg(case, "leg", leg_id, trigger, time_in_force=None)
+    if not leg.ok:
+        return case.not_observed(f"{REASON_LEG_NOT_ACCEPTED} in this case: {_class_code(leg)}")
+    placed, status = await case.open_long(market, "ffe")
+    if not placed.ok:
+        return case.not_observed(f"entry rejected: {_class_code(placed)}")
+    if status != ORDER_STATUS_FILLED:
+        return case.not_observed(f"the entry did not fill: status {status or 'unreadable'}")
+    leg_status = await case.algo_status("leg_query", leg_id)
+    case.detail("leg_status_after_fill", leg_status or "unreadable")
+    summary, answers = await case.reconcile(
+        open_orders=0, open_algo_orders=1, position=case.quantity
+    )
+    held = sum((Decimal(row["position_amt"]) for row in summary["positions"]), Decimal(0))
+    case.detail("position_amount", format(held, "f"))
+    row = _row_values(answers["open_algo_orders"], "client_algo_id", leg_id)
+    leg_quantity = row.get("quantity", "") if row is not None else ""
+    case.detail("leg_quantity", leg_quantity or "not listed")
+    if row is not None and row.get("algo_status"):
+        case.detail("leg_status_listed", row["algo_status"])
+    listed = _positive_decimal({"quantity": leg_quantity}, "quantity")
+    case.detail(
+        "protective_quantity_equals_position",
+        "unknown" if listed is None else _flag_text(listed == held),
+    )
+    return case.observed()
+
+
+def _partially_filled_answers(result: CaseResult) -> list[ProbeObservation]:
+    return [
+        answer
+        for answer in result.observations
+        if answer.ok
+        and answer.operation in ("new_limit_order", "query_order")
+        and answer.summary.get("status") == ORDER_STATUS_PARTIALLY_FILLED
+    ]
+
+
+def _partial_fill_frames(record: Mapping[str, Any]) -> bool:
+    frames = record.get("frames")
+    events = frames.get("events") if isinstance(frames, Mapping) else None
+    return any(
+        isinstance(event, Mapping) and event.get("order_status") == ORDER_STATUS_PARTIALLY_FILLED
+        for event in events or []
+    )
+
+
+def _filled_any(result: CaseResult) -> bool:
+    return any(
+        answer.ok
+        and answer.operation in ("new_limit_order", "query_order")
+        and answer.summary.get("status") == ORDER_STATUS_FILLED
+        for answer in result.observations
+    )
+
+
+async def case_partial_fill(context: CaseContext) -> CaseResult:
+    """Derived, not a new order: did any entry of this run show PARTIALLY_FILLED?"""
+    try:
+        recorder = context.recorder
+        ran = [case_id for case_id in ENTRY_CASES if case_id in recorder.results]
+        if not ran:
+            return CaseResult(status=NOT_OBSERVED, reason=REASON_PREMISE_NOT_RUN)
+        details = {"derived_from": ",".join(ran)}
+        partial: list[ProbeObservation] = []
+        seen_in: list[str] = []
+        for case_id in ran:
+            partial.extend(_partially_filled_answers(recorder.results[case_id]))
+        if partial:
+            seen_in.append("rest")
+        if any(_partial_fill_frames(recorder.records.get(case_id, {})) for case_id in ran):
+            seen_in.append("frames")
+        if seen_in:
+            evidence = partial or [
+                answer for case_id in ran for answer in recorder.results[case_id].observations
+            ]
+            details["seen_in"] = ",".join(seen_in)
+            if evidence:
+                return CaseResult(status=OBSERVED, observations=tuple(evidence), details=details)
+            return CaseResult(
+                status=NOT_OBSERVED,
+                reason="a partial fill frame arrived but no exchange answer was recorded",
+                details=details,
+            )
+        if any(_filled_any(recorder.results[case_id]) for case_id in ran):
+            return CaseResult(status=NOT_OBSERVED, reason=REASON_NO_PARTIAL, details=details)
+        return CaseResult(status=NOT_OBSERVED, reason=REASON_NO_ENTRY_FILLED, details=details)
+    except Exception as exc:  # a script error: recorded, the run continues
+        return CaseResult(status=ERROR, reason=f"script error: {type(exc).__name__}")
+
+
+async def _rejected_protective_variants(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    below = market.far_below(case.fraction)
+    above = market.far_above(case.fraction)
+    case.check_bounds([(None, above), (None, below), (case.quantity, above)])
+    # (a) close-position with no position (a take-profit close, unlike closeposition_stop_flat)
+    await case.conditional(
+        "variant_a_close_position_flat",
+        client_id=case.client_id("rva"),
+        side=SIDE_SELL,
+        order_type=ORDER_TYPE_TAKE_PROFIT_MARKET,
+        trigger=above,
+        quantity=None,
+        close_position=True,
+    )
+    # (b) reduceOnly together with closePosition (documented invalid)
+    if case.hedge_mode:
+        case.detail(
+            "variant_b_reduce_only_with_close_position", f"NOT_OBSERVED: {REASON_HEDGE_MODE}"
+        )
+    else:
+        await case.conditional(
+            "variant_b_reduce_only_with_close_position",
+            client_id=case.client_id("rvb"),
+            side=SIDE_SELL,
+            order_type=ORDER_TYPE_STOP_MARKET,
+            trigger=below,
+            quantity=None,
+            reduce_only=True,
+            close_position=True,
+        )
+    # (c) a SELL stop whose trigger is on the wrong side of the mark (would trigger at once)
+    await case.conditional(
+        "variant_c_wrong_side_trigger",
+        client_id=case.client_id("rvc"),
+        side=SIDE_SELL,
+        order_type=ORDER_TYPE_STOP_MARKET,
+        trigger=above,
+        quantity=case.quantity,
+        long=False,
+    )
+    return case.observed()
+
+
+async def case_preplaced_stop_reduce_only_flat(context: CaseContext) -> CaseResult:
+    """A STOP_MARKET with explicit quantity and reduceOnly while flat (D055)."""
+    return await run_write_case(
+        context, _preplaced_stop_reduce_only_flat, case_id=PREPLACED_CASE, reduce_only=True
+    )
+
+
+async def case_closeposition_stop_flat(context: CaseContext) -> CaseResult:
+    """A close-position STOP_MARKET while flat (-4509 seen in Phase 9; the answer is the fact)."""
+    return await run_write_case(
+        context, _closeposition_stop_flat, case_id="closeposition_stop_flat", reduce_only=False
+    )
+
+
+async def case_entry_never_fills_protective_orphan(context: CaseContext) -> CaseResult:
+    """A far entry plus the pre-placed leg; the entry is cancelled: is the leg orphaned?"""
+    return await run_write_case(
+        context,
+        _entry_never_fills_protective_orphan,
+        case_id="entry_never_fills_protective_orphan",
+        reduce_only=True,
+    )
+
+
+async def case_full_fill_protective_quantity(context: CaseContext) -> CaseResult:
+    """The pre-placed leg, then a marketable entry that fills: leg quantity versus position."""
+    return await run_write_case(
+        context,
+        _full_fill_protective_quantity,
+        case_id="full_fill_protective_quantity",
+        reduce_only=True,
+    )
+
+
+async def case_rejected_protective_variants(context: CaseContext) -> CaseResult:
+    """Three protective variants the docs call invalid; each answer recorded, none retried."""
+    return await run_write_case(
+        context,
+        _rejected_protective_variants,
+        case_id="rejected_protective_variants",
+        reduce_only=False,
+    )
+
+
 async def case_duplicate_client_algo_id(context: CaseContext) -> CaseResult:
     """A far carrier STOP, the same clientAlgoId again: both answers recorded."""
     return await run_write_case(
@@ -1738,6 +2039,12 @@ CASE_HANDLERS: dict[str, CaseHandler] = {
     "id_reuse_after_canceled_normal": case_id_reuse_after_canceled_normal,
     "id_reuse_after_canceled_algo": case_id_reuse_after_canceled_algo,
     "id_reuse_after_filled": case_id_reuse_after_filled,
+    "preplaced_stop_reduce_only_flat": case_preplaced_stop_reduce_only_flat,
+    "closeposition_stop_flat": case_closeposition_stop_flat,
+    "entry_never_fills_protective_orphan": case_entry_never_fills_protective_orphan,
+    "full_fill_protective_quantity": case_full_fill_protective_quantity,
+    "partial_fill": case_partial_fill,
+    "rejected_protective_variants": case_rejected_protective_variants,
 }
 
 
