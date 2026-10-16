@@ -56,7 +56,6 @@ from decimal import ROUND_CEILING, Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, NoReturn, Protocol, TypeVar, cast
-from urllib.parse import urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -64,6 +63,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from binance_common.constants import (  # noqa: E402
     DERIVATIVES_TRADING_USDS_FUTURES_REST_API_DEMO_URL,
+)
+from src.adapters.binance_client import (  # noqa: E402
+    ENVIRONMENT_ROWS,
+    EndpointViolation,
+    Environment,
+    assert_endpoint_url,
 )
 from src.adapters.binance_usdm import (  # noqa: E402
     AlgoOrderProbe,
@@ -300,27 +305,20 @@ def load_credentials(environ: Mapping[str, str]) -> RehearsalCredentials:
 
 
 def assert_demo_base_url(url: object) -> None:
-    """Accept only the exact Demo Trading REST base URL; everything else raises."""
+    """Accept only the exact Demo Trading REST base URL; everything else raises.
+
+    Delegates to the production guard ``src.adapters.binance_client.assert_endpoint_url``
+    against the DEMO environment row (plan 18-04) and keeps this script's error type.
+    """
     if not isinstance(url, str) or not url:
         raise DemoHostViolation("base URL is missing or not text")
-    try:
-        parts = urlsplit(url)
-        port = parts.port
-    except ValueError:
-        raise DemoHostViolation("base URL is not parseable") from None
-    if (
-        parts.scheme != "https"
-        or parts.netloc != DEMO_HOST
-        or parts.hostname != DEMO_HOST
-        or port is not None
-        or parts.username is not None
-        or parts.password is not None
-        or parts.query
-        or parts.fragment
-        or parts.path not in ("", "/")
-        or url != DEMO_BASE_URL
-    ):
+    expected = ENVIRONMENT_ROWS[Environment.DEMO].rest_url
+    if expected is None or expected != DEMO_BASE_URL:
         raise DemoHostViolation(f"base URL is not the Demo Trading host {DEMO_HOST}")
+    try:
+        assert_endpoint_url(url, expected)
+    except EndpointViolation:
+        raise DemoHostViolation(f"base URL is not the Demo Trading host {DEMO_HOST}") from None
 
 
 def assert_demo_sdk_client(client: Any) -> None:

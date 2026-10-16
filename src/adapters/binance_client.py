@@ -168,6 +168,12 @@ INERT_WS_URL = "wss://surface-not-requested.invalid"
 INERT_REST_URL = "https://surface-not-requested.invalid"
 
 
+# The SDK's WebSocket Streams class appends exactly this path to ``stream_url`` the first time
+# the lazy ``websocket_streams`` property is read (``WebSocketStreamBase.__init__``), so the
+# guard accepts the row URL with or without it and nothing else.
+SDK_STREAMS_PATH_SUFFIX = "/stream"
+
+
 def _inert_url(surface: Surface) -> str:
     return INERT_REST_URL if surface is Surface.REST else INERT_WS_URL
 
@@ -439,7 +445,11 @@ def assert_environment(bundle: SdkClientBundle) -> None:
     """Re-read every surface of ``bundle.client`` and check it against the environment row.
 
     A requested surface must carry exactly the row URL; an unrequested surface exactly the
-    inert URL. Fails closed when the SDK object does not expose an expected attribute.
+    inert URL (a streams URL may also carry the SDK's own ``/stream`` suffix, see
+    ``SDK_STREAMS_PATH_SUFFIX``). The REST URL is read through ``client.rest_api`` (the
+    object every request uses); the WebSocket URLs are read from the SDK's configuration
+    attributes without triggering the lazy properties, plus the built surface object if one
+    exists. Fails closed when the SDK object does not expose an expected attribute.
     """
     if not isinstance(bundle.environment, Environment):
         raise EndpointViolation("bundle environment is not an Environment value")
@@ -460,11 +470,22 @@ def assert_environment(bundle: SdkClientBundle) -> None:
             raise EndpointViolation(
                 f"{bundle.environment.value} {surface.value} configuration is not readable"
             ) from None
+        accepted: tuple[str, ...] = (expected,)
+        if surface is Surface.WS_STREAMS:
+            accepted = (expected, expected + SDK_STREAMS_PATH_SUFFIX)
         for actual in actual_urls:
-            try:
-                assert_endpoint_url(actual, expected)
-            except EndpointViolation:
+            if not _matches_any(actual, accepted):
                 raise EndpointViolation(
                     f"{bundle.environment.value} {surface.value} endpoint does not match its "
                     "environment row"
-                ) from None
+                )
+
+
+def _matches_any(actual: object, accepted: tuple[str, ...]) -> bool:
+    for expected in accepted:
+        try:
+            assert_endpoint_url(actual, expected)
+        except EndpointViolation:
+            continue
+        return True
+    return False
