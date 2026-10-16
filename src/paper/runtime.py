@@ -881,7 +881,7 @@ class _LiveLoop:
         episode; a frame arriving after the silence began ends the episode; when the bound
         expires again with no frame since the silence began, the process fails closed.
         """
-        bound = float(self._context.config.health.feed_silence_timeout_seconds)
+        bound = self._context.config.health.feed_silence_timeout_seconds
         wake = timedelta(seconds=bound) / 2
         watch_started = self._feed_clock()
         self._stamp_liveness(watch_started, watch_started)
@@ -928,7 +928,7 @@ class _LiveLoop:
             liveness.write_liveness(
                 directory,
                 loop_alive_utc=at,
-                last_frame_utc=at - timedelta(seconds=max(0.0, now - last_frame)),
+                last_frame_utc=at - timedelta(seconds=max(0, now - last_frame)),
             )
         except (OSError, ValueError) as exc:
             log.warning(
