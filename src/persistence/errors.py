@@ -52,6 +52,14 @@ class PrecisionError(PersistenceError, ValueError):
     """A Decimal does not survive NUMERIC(38,18) unchanged (F-410)."""
 
 
+class EvidenceRequired(PersistenceError):
+    """An Order or Position would leave UNKNOWN without recorded Binance evidence (G4-034).
+
+    Raised when no `ExitEvidence` was supplied or the store has no journal to record it in;
+    nothing is written (D051 item i, D-08).
+    """
+
+
 class ShortIdRebindingRefused(PersistenceError):
     """A short id is already bound to a different (signal, trade plan) pair (research C16)."""
 

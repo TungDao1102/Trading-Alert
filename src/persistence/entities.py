@@ -23,6 +23,15 @@ The PostgreSQL terminal-status triggers of migration 0004 are the second line of
 against a writer that bypasses this class; `tests/test_persistence_transitions_pg.py` proves
 they match `transitions.TERMINAL_STATES`.
 
+UNKNOWN exits (Phase 18 plan 08, G4-034, D051 item i, D-08). An Order or a Position leaves
+`UNKNOWN` only with Binance evidence: `transition_order` and `transition_position` take an
+`ExitEvidence` (REST reconcile or user-data event) for that move and, after the conditional
+UPDATE, append the UNKNOWN_EXIT_EVIDENCE journal event through `PgJournalStore.append` in the
+SAME unit of work, so the status change and its evidence commit together or not at all. Missing
+evidence, or a store constructed without a journal, raises `EvidenceRequired` before anything is
+written. Evidence supplied for a move that does not start in `UNKNOWN` is a ValueError: it is
+never silently ignored.
+
 Precision (D-12, F-410, T-17-27). Before any write, every Decimal bound for a NUMERIC column
 must equal `quantize_for_storage(value)`, else `PrecisionError` naming the table and field (never
 the value). PostgreSQL would otherwise round a 19th fractional digit silently and the stored
@@ -84,14 +93,17 @@ from src.domain.fill import Fill
 from src.domain.order import Order
 from src.domain.position import Position
 from src.domain.signal import Signal
+from src.domain.stream_records import ExitEvidence, exit_evidence_event
 from src.domain.trade_plan import TradePlan
 from src.domain.transitions import TransitionKind, assert_transition
 from src.persistence.errors import (
+    EvidenceRequired,
     ParentRowMissing,
     PersistenceError,
     PrecisionError,
     RowConflict,
 )
+from src.persistence.journal import PgJournalStore
 from src.persistence.uow import OperationalDatabase
 
 _SQLSTATE_FOREIGN_KEY_VIOLATION = "23503"
@@ -292,8 +304,41 @@ def _apply[E, R](
 class PgTradingEntityStore:
     """Signal, TradePlan, Order, Fill and Position persistence with DOMN-04 enforcement."""
 
-    def __init__(self, db: OperationalDatabase) -> None:
+    def __init__(self, db: OperationalDatabase, *, journal: PgJournalStore | None = None) -> None:
         self._db = db
+        self._journal = journal
+
+    def _exit_journal(
+        self,
+        label: str,
+        entity_id: str,
+        leaving_unknown: bool,
+        evidence: ExitEvidence | None,
+    ) -> PgJournalStore | None:
+        """The journal that records an UNKNOWN exit, or None for any other move (G4-034).
+
+        Raises:
+            EvidenceRequired: an UNKNOWN exit without evidence, or this store has no journal.
+            ValueError: evidence was supplied for a move that does not leave UNKNOWN.
+            TypeError: `evidence` is not an `ExitEvidence`.
+        """
+        if evidence is not None and not isinstance(evidence, ExitEvidence):
+            raise TypeError(f"evidence must be ExitEvidence, got {type(evidence).__name__}")
+        if not leaving_unknown:
+            if evidence is not None:
+                raise ValueError(
+                    f"{label} {entity_id}: evidence is only accepted for a move out of UNKNOWN"
+                )
+            return None
+        if evidence is None:
+            raise EvidenceRequired(
+                f"{label} {entity_id}: leaving UNKNOWN requires Binance evidence"
+            )
+        if self._journal is None:
+            raise EvidenceRequired(
+                f"{label} {entity_id}: leaving UNKNOWN requires a journal to record the evidence"
+            )
+        return self._journal
 
     @contextmanager
     def _unit(self, tx: Session | None) -> Iterator[Session]:
@@ -397,13 +442,26 @@ class PgTradingEntityStore:
         *,
         now_utc: datetime,
         tx: Session | None = None,
+        evidence: ExitEvidence | None = None,
     ) -> Order:
-        """Move an order along the DOMN-04 table; CANCELED also sets `canceled_at_utc`."""
+        """Move an order along the DOMN-04 table; CANCELED also sets `canceled_at_utc`.
+
+        A move out of UNKNOWN needs `evidence` and journals it in the same transaction.
+
+        Raises:
+            EvidenceRequired: leaving UNKNOWN without evidence or without a journal.
+            ValueError: evidence for a move that does not start in UNKNOWN.
+            IllegalTransition: the move is not in the table; nothing is written.
+            JournalConflict: the evidence id already holds a different event; rolled back.
+        """
         with self._unit(tx) as session:
             row = _lock(session, _ORDER, order_id)
             old_status = OrderStatus(row.local_status)
             if old_status is new_status:
                 return _ORDER.from_row(row)
+            journal = self._exit_journal(
+                _ORDER.label, order_id, old_status is OrderStatus.UNKNOWN, evidence
+            )
             assert_transition(TransitionKind.ORDER, old_status, new_status)
             changes: dict[str, Any] = {
                 "local_status": new_status.value,
@@ -411,7 +469,23 @@ class PgTradingEntityStore:
             }
             if new_status is OrderStatus.CANCELED:
                 changes["canceled_at_utc"] = now_utc
-            return _apply(session, _ORDER, order_id, "local_status", old_status.value, changes)
+            out: Order = _apply(
+                session, _ORDER, order_id, "local_status", old_status.value, changes
+            )
+            if journal is not None and evidence is not None:
+                journal.append(
+                    session,
+                    exit_evidence_event(
+                        entity_type="ORDER",
+                        entity_id=order_id,
+                        from_status=old_status.value,
+                        to_status=new_status.value,
+                        evidence=evidence,
+                        now_utc=now_utc,
+                        order_id=order_id,
+                    ),
+                )
+            return out
 
     # -------------------------------------------------------------------- fills
 
