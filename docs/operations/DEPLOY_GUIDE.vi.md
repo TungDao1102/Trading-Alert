@@ -1019,7 +1019,11 @@ deploy/backup.sh --init-remote
 sudo deploy/backup.sh --install-timer
 ```
 
-Cờ: `--init-remote` (khởi tạo remote), `--install-timer` (cài hai unit và bật timer), `--dry-run` (in kế hoạch), `-h`/`--help`. Hai cờ `--init-remote` và `--install-timer` không dùng chung được. Biến môi trường `COMPOSE_PROJECT_NAME` và `TRADING_ENV_FILE` được tôn trọng.
+```bash
+sudo deploy/backup.sh --install-soak-timer --soak-env-file /home/trading/soak.env
+```
+
+Cờ: `--init-remote` (khởi tạo remote), `--install-timer` (cài hai unit và bật timer), `--install-soak-timer` cùng `--soak-env-file` (cài cặp unit sao lưu của project soak, kế hoạch 16-55; tệp env soak phải có `BACKUP_S3_BUCKET` riêng, khác bucket của `trading-backup`), `--dry-run` (in kế hoạch), `-h`/`--help`. Hai cờ `--init-remote` và `--install-timer` không dùng chung được. Biến môi trường `COMPOSE_PROJECT_NAME` và `TRADING_ENV_FILE` được tôn trọng.
 
 **Chạy thử:** mỗi chế độ có `--dry-run` riêng, in lệnh sẽ chạy mà không chạy:
 
@@ -1110,6 +1114,74 @@ systemctl list-timers trading-backup.timer
 **Khi lỗi:** timer không xuất hiện: chạy lại lệnh cài và đọc đầu ra của nó. Timer có nhưng không chạy: `systemctl status trading-backup` và `journalctl -u trading-backup`. Việc timer kích hoạt đúng giờ và chạy bù sau thời gian tắt máy chỉ máy thật mới chứng minh được `[CHƯA XÁC MINH]`.
 
 **Không bao giờ:** thay lịch bằng tay trong bản đã cài (bộ cài ghi lại); coi timer đang bật là bằng chứng bản sao lưu có hiệu lực trước khi cổng D064 qua và một lần diễn tập thành công.
+
+### Thẻ lệnh: deploy/systemd/trading-soak-backup.service
+
+> - **Để làm gì:** Đơn vị systemd sao lưu cơ sở dữ liệu của project soak (`trading-soak`), nơi chứa bằng chứng soak.
+> - **Giải quyết vấn đề gì:** Unit `trading-backup` không đặt project nên chỉ sao lưu project `trading`; volume `trading-soak_pgdata` sẽ không được sao lưu nếu thiếu unit này (review B2-WR-07).
+> - **Mức quan trọng:** **BẮT BUỘC** trước soak dài (RUNBOOK 20.5; D061 hosts: có sao lưu trước soak dài). Bucket riêng của soak do chủ dự án tạo trước kế hoạch 16-43.
+
+**Mục đích:** unit oneshot gọi `deploy/backup.sh` với `COMPOSE_PROJECT_NAME=trading-soak` và `TRADING_ENV_FILE` là tệp env soak. Remote sao lưu không có tên project trong đường dẫn, nên project soak phải dùng một bucket riêng với mật khẩu crypt riêng; dùng chung một bucket thì hai project thành một chuỗi snapshot và quy tắc giữ lại sẽ xóa bản sao lưu hằng ngày của một trong hai.
+
+**Khi nào chạy:** không chạy tay. Cài một lần bằng `sudo deploy/backup.sh --install-soak-timer --soak-env-file <đường dẫn tuyệt đối>`, sau khi bucket riêng đã được khởi tạo bằng `--init-remote` cho project soak (RUNBOOK 20.5). Lệnh cài từ chối khi `BACKUP_S3_BUCKET` của tệp env soak rỗng hoặc trùng bucket của tệp `.env` của `trading-backup`, và chỉ in tên biến, không in giá trị.
+
+**Chạy ở máy nào:** `[MÁY EC2]`, dưới systemd.
+
+**Lệnh:** khởi tạo remote của soak, cài, rồi xem trạng thái và nhật ký:
+
+```bash
+COMPOSE_PROJECT_NAME=trading-soak TRADING_ENV_FILE=/home/trading/soak.env deploy/backup.sh --init-remote
+```
+
+```bash
+sudo deploy/backup.sh --install-soak-timer --soak-env-file /home/trading/soak.env
+```
+
+```bash
+systemctl status trading-soak-backup
+```
+
+```bash
+journalctl -u trading-soak-backup
+```
+
+**Chạy thử:** Không áp dụng cho chính tệp unit. Xem trước việc cài bằng `sudo deploy/backup.sh --install-soak-timer --soak-env-file /home/trading/soak.env --dry-run`.
+
+**Dấu hiệu thành công:** `journalctl -u trading-soak-backup` có `push-OK`; lần diễn tập khôi phục cho project soak (`COMPOSE_PROJECT_NAME=trading-soak TRADING_ENV_FILE=/home/trading/soak.env deploy/backup-drill.sh`) thành công.
+
+**Mã thoát:** unit lỗi khi lớp vỏ thoát khác 0. Lệnh cài thoát 1 khi bucket rỗng, trùng bucket của `trading-backup`, tệp env không đọc được, hay đường dẫn không tuyệt đối; thoát 2 khi thiếu `--soak-env-file`.
+
+**Khi lỗi:** đọc `journalctl -u trading-soak-backup`; bucket bị từ chối: tạo bucket riêng cho soak, đặt tên đó vào tệp env soak, chạy `--init-remote` cho project soak rồi cài lại.
+
+**Không bao giờ:** đặt cho tệp env soak cùng bucket với `trading-backup`; sửa tay bản đã cài trong `/etc/systemd/system`; sửa cặp unit `trading-backup` để dùng cho soak.
+
+### Thẻ lệnh: deploy/systemd/trading-soak-backup.timer
+
+> - **Để làm gì:** Hẹn giờ sao lưu project soak mỗi ngày theo đúng lịch của `trading-backup.timer`.
+> - **Giải quyết vấn đề gì:** Bằng chứng soak có bản sao lưu hằng ngày ngoài máy mà không ai phải nhớ; `Persistent=true` chạy bù lần lỡ.
+> - **Mức quan trọng:** **BẮT BUỘC** trước soak dài (RUNBOOK 20.5).
+
+**Mục đích:** timer kích hoạt `trading-soak-backup.service` hằng ngày lúc 03:15 UTC, cùng `OnCalendar`, `Persistent` và `RandomizedDelaySec` với `trading-backup.timer`; hai project đẩy vào hai bucket khác nhau.
+
+**Khi nào chạy:** không chạy tay; được cài và bật bởi `sudo deploy/backup.sh --install-soak-timer --soak-env-file <đường dẫn>`.
+
+**Chạy ở máy nào:** `[MÁY EC2]`, dưới systemd.
+
+**Lệnh:**
+
+```bash
+systemctl list-timers trading-soak-backup.timer
+```
+
+**Chạy thử:** Không áp dụng cho chính tệp unit. Xem trước bằng `sudo deploy/backup.sh --install-soak-timer --soak-env-file /home/trading/soak.env --dry-run`.
+
+**Dấu hiệu thành công:** `systemctl list-timers trading-soak-backup.timer` liệt kê timer với thời điểm kích hoạt kế tiếp.
+
+**Mã thoát:** timer không có mã thoát; kết quả nằm ở unit service mà nó kích hoạt.
+
+**Khi lỗi:** timer không xuất hiện: chạy lại lệnh cài và đọc đầu ra. Việc timer kích hoạt đúng giờ chỉ máy thật mới chứng minh được `[CHƯA XÁC MINH]`.
+
+**Không bao giờ:** coi timer đang bật là bằng chứng bản sao lưu có hiệu lực trước khi một lần diễn tập khôi phục cho project soak thành công.
 
 ### Thẻ lệnh: deploy/restore.sh
 
@@ -1784,7 +1856,7 @@ Nguồn: `.planning/ROADMAP.md`, `docs/DECISIONS.md`, `.env.example`, `docker-co
 
 Mọi lệnh ở mục này chạy trong thư mục `/opt/trading` bằng user `trading` trên `[MÁY EC2]`, trừ khi bước nói khác.
 
-#### Bước 10.1 Bảy service của compose [ĐÃ XÂY] [CHƯA XÂY] [CHƯA XÁC MINH]
+#### Bước 10.1 Tám service của compose [ĐÃ XÂY] [CHƯA XÂY] [CHƯA XÁC MINH]
 
 **Chạy ở:** `[MÁY EC2]`
 
@@ -1795,7 +1867,8 @@ Compose đặt tên project cố định là `trading`, nên các volume tên l�
 | `postgres` | cơ sở dữ liệu PostgreSQL 17, công bố chỉ trên `127.0.0.1` | không | có | unless-stopped | `pg_isready`, mỗi 10 giây | `pgdata` | `[ĐÃ XÂY]` |
 | `db-upgrade` | chạy một lần `alembic upgrade head`; collector chờ nó thành công | không | có, rồi thoát | `"no"` | tắt | không | `[ĐÃ XÂY]` |
 | `collector` | thu Open Interest và funding mỗi 5 phút | không | có | unless-stopped | `python -m src.data.collector --healthcheck`, mỗi 60 giây, sáu phút khởi động | `rawdata`, `logs` | `[ĐÃ XÂY]` |
-| `paper` | khung giữ chỗ chạy là thoát (Phase 16) | `paper` | không | `"no"` | tắt | không | `[CHƯA XÂY]` |
+| `paper` | tiến trình paper `python -m src.paper.runtime --hold-on-refusal`; một lần khởi động bị từ chối thì giữ nguyên, không ghi gì, có dấu giữ và báo không khỏe (RUNBOOK 20.1) | `paper` | không | unless-stopped (quyết định 16-DEC-RESTART-POLICY) | `python -m src.paper.runtime --healthcheck`, mỗi 60 giây, sáu phút khởi động | `logs` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| `paper-pin` | ghim epoch một lần (`--pin-epoch`) rồi thoát 0, không chạy vòng lặp (quyết định 16-DEC-PIN-COMMAND) | `paper-pin` | không | `"no"` | tắt | `logs` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | `live` | khung giữ chỗ chạy là thoát (Phase 24) | `live` | không | `"no"` | tắt | không | `[CHƯA XÂY]` |
 | `backup` | một lần sao lưu theo lịch (`scheduled`) trong image ops | `ops` | không (được `deploy/backup.sh` gọi) | `"no"` | tắt | `rawdata` chỉ-đọc, `backupdata` | `[ĐÃ XÂY]` |
 | `ops` | hộp công cụ cho `deploy/*.sh` (khôi phục, diễn tập, cutover); mặc định chỉ in trợ giúp | `ops` | không | `"no"` | tắt | `rawdata`, `backupdata`, `logs` | `[ĐÃ XÂY]` |
@@ -2260,6 +2333,9 @@ Mọi dòng bên dưới được chép từ các thẻ lệnh và các mục tr
 | unit `trading-backup.service`: xem trạng thái | `[MÁY EC2]` | `systemctl status trading-backup` | 6.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | unit `trading-backup.service`: xem nhật ký | `[MÁY EC2]` | `journalctl -u trading-backup` | 6.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | unit `trading-backup.timer`: xem lịch | `[MÁY EC2]` | `systemctl list-timers trading-backup.timer` | 6.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| backup của project soak, cài timer riêng (`--install-soak-timer`, `--soak-env-file`; bucket riêng) | `[MÁY EC2]` | `sudo deploy/backup.sh --install-soak-timer --soak-env-file /home/trading/soak.env --dry-run` | thẻ `deploy/systemd/trading-soak-backup.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-soak-backup.service`: xem nhật ký | `[MÁY EC2]` | `journalctl -u trading-soak-backup` | thẻ `deploy/systemd/trading-soak-backup.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-soak-backup.timer`: xem lịch | `[MÁY EC2]` | `systemctl list-timers trading-soak-backup.timer` | thẻ `deploy/systemd/trading-soak-backup.timer` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 
 ### Heartbeat ra ngoài VPS (healthchecks.io), hai unit systemd
 
@@ -2282,7 +2358,7 @@ Mọi dòng bên dưới được chép từ các thẻ lệnh và các mục tr
 
 ### Compose: vòng đời, sức khỏe, nhật ký
 
-Bảy service: `postgres`, `db-upgrade`, `collector`, `paper` (profile `paper`, khung giữ chỗ), `live` (profile `live`, khung giữ chỗ), `backup` (profile `ops`), `ops` (profile `ops`). Project cố định tên `trading`.
+Tám service: `postgres`, `db-upgrade`, `collector`, `paper` (profile `paper`, tiến trình paper), `paper-pin` (profile `paper-pin`, ghim epoch một lần), `live` (profile `live`, khung giữ chỗ), `backup` (profile `ops`), `ops` (profile `ops`). Project cố định tên `trading`.
 
 | Việc | Máy | Lệnh | Mục | Nhãn |
 | --- | --- | --- | --- | --- |
