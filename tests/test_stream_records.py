@@ -6,7 +6,9 @@ Pins `src.domain.stream_records`:
     UTC-aware observation time, optional detail of at most 200 characters);
   - `exit_evidence_event` is a pure function of its inputs: deterministic id built by
     `correlated_event_id`, sorted-key compact JSON payload with exactly five text keys, no
-    Decimal, no wall clock, no credential-shaped reference.
+    Decimal, no wall clock, no credential-shaped reference;
+  - `stream_anomaly_event` keys its id on (session, anomaly kind, payload hash), so a duplicate
+    frame in one session is one record; `kind` is a plain string (no adapter import).
 """
 
 from __future__ import annotations
@@ -18,12 +20,16 @@ from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from src.adapters.binance_userdata_events import StreamAnomalyKind
 from src.domain.journal import JournalEvent, correlated_event_id
 from src.domain.stream_records import (
+    STREAM_ANOMALY,
     UNKNOWN_EXIT_EVIDENCE,
+    USER_DATA_STREAM,
     EvidenceSource,
     ExitEvidence,
     exit_evidence_event,
+    stream_anomaly_event,
 )
 
 T_OBS = datetime(2026, 9, 19, 12, 0, 1, 250000, tzinfo=UTC)
@@ -223,3 +229,101 @@ def test_module_is_pure_stdlib_plus_domain_journal() -> None:
     project = {name for name in imported if name.startswith("src")}
     assert project == {"src.domain.journal"}
     assert not any(name.split(".")[0] in {"sqlalchemy", "decimal", "time"} for name in imported)
+
+
+# --------------------------------------------------------------------------- #
+# stream_anomaly_event
+# --------------------------------------------------------------------------- #
+
+SHA = "0123456789abcdef" * 4
+
+
+def anomaly(**overrides: object) -> JournalEvent:
+    values: dict[str, object] = {
+        "kind": "UNKNOWN_ORDER_STATUS",
+        "event_name": "ORDER_TRADE_UPDATE",
+        "field": "o.X",
+        "detail": "o.X: unrecognised value (str)",
+        "payload_sha256": SHA,
+        "observed_at_utc": T_OBS,
+        "session_id": "uds-session-1",
+    }
+    values.update(overrides)
+    return stream_anomaly_event(**values)  # type: ignore[arg-type]
+
+
+def test_stream_anomaly_event_identity_fields() -> None:
+    event = anomaly()
+    assert event.event_type == STREAM_ANOMALY == "STREAM_ANOMALY"
+    assert event.entity_type == USER_DATA_STREAM == "USER_DATA_STREAM"
+    assert event.entity_id == f"UNKNOWN_ORDER_STATUS:{SHA}"
+    assert event.correlation_id == "uds-session-1"
+    assert event.occurred_at_utc == T_OBS
+    assert event.journal_event_id == correlated_event_id(
+        prefix="sa",
+        correlation_id="uds-session-1",
+        event_type="STREAM_ANOMALY",
+        entity_id=f"UNKNOWN_ORDER_STATUS:{SHA}",
+        step=SHA,
+    )
+    assert (event.order_id, event.position_id, event.signal_id) == (None, None, None)
+
+
+def test_stream_anomaly_payload_is_sorted_json_of_exactly_six_keys() -> None:
+    event = anomaly()
+    payload = json.loads(event.payload_json)
+    assert payload == {
+        "kind": "UNKNOWN_ORDER_STATUS",
+        "event_name": "ORDER_TRADE_UPDATE",
+        "field": "o.X",
+        "detail": "o.X: unrecognised value (str)",
+        "payload_sha256": SHA,
+        "observed_at_utc": T_OBS.isoformat(),
+    }
+    assert event.payload_json == json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def test_optional_event_name_and_field_are_json_null() -> None:
+    payload = json.loads(anomaly(event_name=None, field=None).payload_json)
+    assert payload["event_name"] is None and payload["field"] is None
+
+
+def test_duplicate_frame_in_one_session_is_one_record() -> None:
+    first = anomaly()
+    later = anomaly(observed_at_utc=T_OBS + timedelta(seconds=5))
+    assert later.journal_event_id == first.journal_event_id
+
+
+def test_other_session_kind_or_payload_is_another_record() -> None:
+    base = anomaly().journal_event_id
+    assert anomaly(session_id="uds-session-2").journal_event_id != base
+    assert anomaly(kind="MALFORMED_PAYLOAD").journal_event_id != base
+    assert anomaly(payload_sha256="f" * 64).journal_event_id != base
+
+
+def test_every_stream_anomaly_kind_is_accepted_as_plain_text() -> None:
+    for kind in StreamAnomalyKind:
+        assert anomaly(kind=kind.value).entity_id == f"{kind.value}:{SHA}"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"kind": ""},
+        {"kind": "lower_case"},
+        {"kind": "K" * 65},
+        {"payload_sha256": "F" * 64},
+        {"payload_sha256": "0" * 63},
+        {"detail": ""},
+        {"detail": "d" * 201},
+        {"event_name": ""},
+        {"event_name": "e" * 65},
+        {"field": "f" * 65},
+        {"session_id": ""},
+        {"session_id": "s" * 129},
+        {"observed_at_utc": datetime(2026, 9, 19, 12, 0)},  # noqa: DTZ001
+    ],
+)
+def test_stream_anomaly_event_validates_its_inputs(overrides: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        anomaly(**overrides)

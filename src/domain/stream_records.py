@@ -193,6 +193,65 @@ def exit_evidence_event(
     )
 
 
+def stream_anomaly_event(
+    *,
+    kind: str,
+    event_name: str | None,
+    field: str | None,
+    detail: str,
+    payload_sha256: str,
+    observed_at_utc: datetime,
+    session_id: str,
+) -> JournalEvent:
+    """The STREAM_ANOMALY journal event of one anomalous stream message (pure, deterministic).
+
+    The id is keyed on (session, kind, payload hash), so a duplicate frame in one session is one
+    record and a replay is a no-op; the observation time is in the payload but not in the id.
+    `kind` is the anomaly kind's value as plain text (upper-case, at most 64 characters).
+
+    Raises:
+        ValueError: a field is empty, malformed or too long, or `observed_at_utc` is not UTC.
+    """
+    kind_text = _require_text(kind, "kind", EVENT_NAME_MAX_CHARS)
+    if not _ANOMALY_KIND.fullmatch(kind_text):
+        raise ValueError("kind must be an upper-case anomaly kind name")
+    _optional_text(event_name, "event_name", EVENT_NAME_MAX_CHARS)
+    _optional_text(field, "field", FIELD_PATH_MAX_CHARS)
+    _require_text(detail, "detail", DETAIL_MAX_CHARS)
+    if not isinstance(payload_sha256, str) or not _SHA256_HEX.fullmatch(payload_sha256):
+        raise ValueError("payload_sha256 must be 64 lowercase hex characters")
+    _require_utc_aware(observed_at_utc, "observed_at_utc")
+    _require_text(session_id, "session_id", _ID_MAX_CHARS)
+    entity_id = f"{kind_text}:{payload_sha256}"
+    event_id = correlated_event_id(
+        prefix=STREAM_ANOMALY_PREFIX,
+        correlation_id=session_id,
+        event_type=STREAM_ANOMALY,
+        entity_id=entity_id,
+        step=payload_sha256,
+    )
+    payload = _payload(
+        {
+            "detail": detail,
+            "event_name": event_name,
+            "field": field,
+            "kind": kind_text,
+            "observed_at_utc": observed_at_utc.isoformat(),
+            "payload_sha256": payload_sha256,
+        }
+    )
+    return JournalEvent(
+        journal_event_id=event_id,
+        occurred_at_utc=observed_at_utc,
+        event_type=STREAM_ANOMALY,
+        entity_type=USER_DATA_STREAM,
+        entity_id=entity_id,
+        correlation_id=session_id,
+        payload_json=payload,
+        created_at_utc=observed_at_utc,
+    )
+
+
 __all__ = [
     "DETAIL_MAX_CHARS",
     "EXIT_EVIDENCE_ENTITY_TYPES",
@@ -202,4 +261,5 @@ __all__ = [
     "EvidenceSource",
     "ExitEvidence",
     "exit_evidence_event",
+    "stream_anomaly_event",
 ]
