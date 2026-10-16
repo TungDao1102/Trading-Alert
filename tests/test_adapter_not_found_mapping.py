@@ -12,6 +12,7 @@ decides (D-10, 08-REVIEW IN-10).
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -25,6 +26,7 @@ from binance_common.errors import (
     TooManyRequestsError,
 )
 from binance_sdk_derivatives_trading_usds_futures import BadRequestError
+from src.adapters.binance_ratelimit_gate import RestRateLimitGate
 from src.adapters.binance_usdm import (
     INVALID_SYMBOL_CODE,
     BinanceUsdmAdapter,
@@ -34,13 +36,23 @@ from src.adapters.binance_usdm import (
     rate_limit_retry_after_seconds,
 )
 
+from tests.support.limits import test_only_signed_call_policy
+
 
 def _adapter(exc: BaseException) -> BinanceUsdmAdapter:
     def _raise(**_: Any) -> Any:
         raise exc
 
     rest = SimpleNamespace(query_algo_order=_raise, query_order=_raise)
-    return BinanceUsdmAdapter(sdk_client=SimpleNamespace(rest_api=rest))  # type: ignore[arg-type]
+    # Plan 18-13: signed calls need the TEST_ONLY policy and the one shared gate.
+    policy = test_only_signed_call_policy()
+    return BinanceUsdmAdapter(
+        sdk_client=SimpleNamespace(rest_api=rest),  # type: ignore[arg-type]
+        signed_call_policy=policy,
+        rest_gate=RestRateLimitGate(
+            policy=policy.rate_limit, clock=lambda: datetime(2026, 10, 16, tzinfo=UTC)
+        ),
+    )
 
 
 def _bad(code: int | None, msg: str) -> BadRequestError:

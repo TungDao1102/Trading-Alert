@@ -812,7 +812,21 @@ async def test_real_adapter_place_entry_makes_a_single_attempt() -> None:
             raise TimeoutError("read timeout")
 
     rest = _Rest()
-    adapter = BinanceUsdmAdapter(sdk_client=SimpleNamespace(rest_api=rest))  # type: ignore[arg-type]
+    # Plan 18-13: a signed call needs the TEST_ONLY policy and the one shared gate.
+    from datetime import UTC, datetime
+
+    from src.adapters.binance_ratelimit_gate import RestRateLimitGate
+
+    from tests.support.limits import test_only_signed_call_policy
+
+    policy = test_only_signed_call_policy()
+    adapter = BinanceUsdmAdapter(
+        sdk_client=SimpleNamespace(rest_api=rest),  # type: ignore[arg-type]
+        signed_call_policy=policy,
+        rest_gate=RestRateLimitGate(
+            policy=policy.rate_limit, clock=lambda: datetime(2026, 10, 16, tzinfo=UTC)
+        ),
+    )
     with pytest.raises(TimeoutError):
         await adapter.place_entry(
             symbol="BTCUSDT",

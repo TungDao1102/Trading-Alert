@@ -8,6 +8,7 @@ a plausible zero / empty string / silently dropped row.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -24,12 +25,15 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
     GetFundingRateHistoryResponseInner,
     UserCommissionRateResponse,
 )
+from src.adapters.binance_ratelimit_gate import RestRateLimitGate
 from src.adapters.binance_usdm import (
     INVALID_SYMBOL_CODE,
     BinanceUsdmAdapter,
     CommissionRates,
     is_invalid_symbol_error,
 )
+
+from tests.support.limits import TEST_ONLY_RECV_WINDOW_MS, test_only_signed_call_policy
 
 
 def _price_filter(tick_size: str | None) -> Any:
@@ -215,7 +219,17 @@ def _commission_adapter(
     error: Exception | None = None,
 ) -> tuple[BinanceUsdmAdapter, _FakeRest]:
     rest = _FakeRest(commission=payload, commission_error=error)
-    return BinanceUsdmAdapter(sdk_client=_FakeSdk(rest)), rest  # type: ignore[arg-type]
+    # Plan 18-13: a signed call needs the TEST_ONLY policy and the one shared gate.
+    policy = test_only_signed_call_policy()
+    gate = RestRateLimitGate(
+        policy=policy.rate_limit, clock=lambda: datetime(2026, 10, 16, tzinfo=UTC)
+    )
+    adapter = BinanceUsdmAdapter(
+        sdk_client=_FakeSdk(rest),  # type: ignore[arg-type]
+        signed_call_policy=policy,
+        rest_gate=gate,
+    )
+    return adapter, rest
 
 
 def _commission_response(
@@ -241,7 +255,7 @@ def test_user_commission_rate_projects_frozen_dataclass() -> None:
         maker_rate=Decimal("0.0002"),
         taker_rate=Decimal("0.0004"),
     )
-    assert rest.commission_calls == [("BTCUSDT", None)]
+    assert rest.commission_calls == [("BTCUSDT", TEST_ONLY_RECV_WINDOW_MS)]
     with pytest.raises(AttributeError):
         out.taker_rate = Decimal("0.1")  # type: ignore[misc]
 

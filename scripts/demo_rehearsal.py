@@ -70,6 +70,12 @@ from src.adapters.binance_client import (  # noqa: E402
     Environment,
     assert_endpoint_url,
 )
+from src.adapters.binance_limits import (  # noqa: E402
+    LimitsNotRatified,
+    SignedCallPolicy,
+    load_binance_limits,
+)
+from src.adapters.binance_ratelimit_gate import RestRateLimitGate  # noqa: E402
 from src.adapters.binance_usdm import (  # noqa: E402
     AlgoOrderProbe,
     AlgoPlacementResult,
@@ -176,6 +182,9 @@ ENV_TELEGRAM_CHAT = "TELEGRAM_AUTHORIZED_CHAT_ID"
 
 EVIDENCE_SCHEMA = "demo-rehearsal-evidence/schema-1"
 DEFAULT_EVIDENCE_DIR = REPO_ROOT / ".planning" / "phases" / "09-live-execution-rollout"
+# Plan 18-13: the ratified limits file (plan 18-09). Its signed-call policy gives every
+# signed request an explicit recvWindow; no number is chosen here.
+DEFAULT_LIMITS_FILE = REPO_ROOT / "config" / "binance" / "binance-limits-v1.toml"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -239,6 +248,21 @@ class ConfirmationRefused(Exception):  # noqa: N818 - public name fixed by the p
 
 class UsageError(Exception):
     """A bad or forbidden command-line argument."""
+
+
+class LimitsFileRefused(Exception):  # noqa: N818 - a refusal, like ConfirmationRefused
+    """The ratified limits file is missing or invalid; the message names the path only."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"the binance limits file is missing or invalid: {path}")
+
+
+def load_signed_call_policy(path: Path) -> SignedCallPolicy:
+    """The ratified signed-call policy of `path` (plan 18-13), or `LimitsFileRefused`."""
+    try:
+        return load_binance_limits(path).signed
+    except (LimitsNotRatified, ValueError, TypeError):
+        raise LimitsFileRefused(path) from None
 
 
 class RehearsalAbort(Exception):  # noqa: N818 - public name fixed by the plan
@@ -350,12 +374,26 @@ class AdapterBundle:
     guard: Callable[[], None]
 
 
-def default_adapter_factory(credentials: RehearsalCredentials) -> AdapterBundle:
-    """Real Demo client, real adapter built on it, per-call live host re-check."""
+def default_adapter_factory(
+    credentials: RehearsalCredentials,
+    *,
+    signed_call_policy: SignedCallPolicy,
+    clock: Callable[[], datetime],
+) -> AdapterBundle:
+    """Real Demo client, real adapter built on it, per-call live host re-check.
+
+    Plan 18-13: the adapter carries the ratified `signed_call_policy` (explicit recvWindow on
+    every signed call) and the ONE `RestRateLimitGate` of this run, built here once on the
+    script's aware-UTC `clock` and shared by every REST holder of the rehearsal (the adapter
+    and the public reader inside it). No drift guard: the rehearsal is an operator tool.
+    """
     client = build_demo_sdk_client(
         api_key=credentials.binance_api_key, api_secret=credentials.binance_api_secret
     )
-    adapter = BinanceUsdmAdapter(sdk_client=client)
+    gate = RestRateLimitGate(policy=signed_call_policy.rate_limit, clock=clock)
+    adapter = BinanceUsdmAdapter(
+        sdk_client=client, rest_gate=gate, signed_call_policy=signed_call_policy
+    )
     return AdapterBundle(inner=adapter, guard=lambda: assert_demo_sdk_client(client))
 
 
@@ -872,6 +910,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--discovery-timeout-seconds", type=int, default=DEFAULT_DISCOVERY_TIMEOUT_SECONDS
     )
     parser.add_argument("--evidence-dir", type=Path, default=None)
+    parser.add_argument(
+        "--limits-file",
+        type=Path,
+        default=DEFAULT_LIMITS_FILE,
+        help="the ratified Binance limits file (default: config/binance/binance-limits-v1.toml)",
+    )
     return parser
 
 
@@ -2489,7 +2533,8 @@ def main(
                 read_confirmation if read_confirmation is not None else input,
             )
         credentials = load_credentials(env)
-    except (UsageError, ConfirmationRefused, CredentialError) as exc:
+        signed_call_policy = load_signed_call_policy(args.limits_file)
+    except (UsageError, ConfirmationRefused, CredentialError, LimitsFileRefused) as exc:
         print(f"refused ({type(exc).__name__}): {exc}", file=sys.stderr)
         return EXIT_REFUSED
 
@@ -2504,7 +2549,14 @@ def main(
         environ=env,
         clock=now,
     )
-    factory = adapter_factory if adapter_factory is not None else default_adapter_factory
+    factory: Callable[[RehearsalCredentials], AdapterBundle]
+    if adapter_factory is not None:
+        factory = adapter_factory
+    else:
+
+        def factory(creds: RehearsalCredentials) -> AdapterBundle:
+            return default_adapter_factory(creds, signed_call_policy=signed_call_policy, clock=now)
+
     make_channel = channel_factory if channel_factory is not None else default_channel_factory
     runner = scenario_runner if scenario_runner is not None else run_rehearsal
     guarded: GuardedAdapter | None = None

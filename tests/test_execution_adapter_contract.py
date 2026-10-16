@@ -17,9 +17,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from src.adapters.binance_ratelimit_gate import RestRateLimitGate
 from src.adapters.binance_usdm import BinanceUsdmAdapter
 from src.execution.placement import ProtectiveTemplate, size_protectives_to_filled_qty
 from src.risk.types import ConstraintSnapshot
+
+from tests.support.limits import test_only_signed_call_policy
 
 _NOW = datetime(2026, 9, 19, 10, 30, tzinfo=UTC)
 _SL_ID = "xa-194547b9a1659419ecfa4a736a3deceSL"
@@ -83,7 +86,17 @@ class _RecordingRest:
 def _adapter() -> tuple[BinanceUsdmAdapter, _RecordingRest]:
     rest = _RecordingRest()
     sdk = SimpleNamespace(rest_api=rest)
-    return BinanceUsdmAdapter(sdk_client=sdk), rest  # type: ignore[arg-type]
+    # Plan 18-13: a signed call needs the TEST_ONLY policy and the one shared gate.
+    policy = test_only_signed_call_policy()
+    gate = RestRateLimitGate(
+        policy=policy.rate_limit, clock=lambda: datetime(2026, 10, 16, tzinfo=UTC)
+    )
+    adapter = BinanceUsdmAdapter(
+        sdk_client=sdk,  # type: ignore[arg-type]
+        signed_call_policy=policy,
+        rest_gate=gate,
+    )
+    return adapter, rest
 
 
 @pytest.mark.parametrize("position_mode", ["ONE_WAY", "HEDGE"])
