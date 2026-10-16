@@ -41,11 +41,11 @@ SINK_NAMES: tuple[str, ...] = (
 )
 
 
-class TestOnlySinkFailure(RuntimeError):
+class InjectedSinkFailure(RuntimeError):
     """Raised by a sink a test asked to fail."""
 
 
-class TestOnlyJournalFailure(RuntimeError):
+class InjectedJournalFailure(RuntimeError):
     """Raised by the recording journal when a test asked it to fail."""
 
 
@@ -70,7 +70,7 @@ class RecordingSinks:
 
     def _check(self, name: str) -> None:
         if name in self.failing:
-            raise TestOnlySinkFailure(f"TEST_ONLY failure of {name}")
+            raise InjectedSinkFailure(f"TEST_ONLY failure of {name}")
 
     def fill_sink(self, routed: RoutedFill) -> None:
         self._check("fill_sink")
@@ -119,7 +119,7 @@ class RecordingJournal:
     def record(self, event: JournalEvent) -> None:
         self.calls.append(event)
         if self.fail:
-            raise TestOnlyJournalFailure("TEST_ONLY journal failure")
+            raise InjectedJournalFailure("TEST_ONLY journal failure")
         existing = self.events.get(event.journal_event_id)
         if existing is None:
             self.events[event.journal_event_id] = event
@@ -202,7 +202,7 @@ __all__ = [
     "JournalReplayConflict",
     "RecordingJournal",
     "RecordingSinks",
-    "TestOnlyJournalFailure",
-    "TestOnlySinkFailure",
+    "InjectedJournalFailure",
+    "InjectedSinkFailure",
     "make_router",
 ]
