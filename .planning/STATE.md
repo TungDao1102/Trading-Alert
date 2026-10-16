@@ -37,6 +37,13 @@ Last activity: 2026-10-15 — REEFUSDT terminal settlement as a bounded interval
 
 Progress: [██████░░░░] 61%
 
+### Cross-phase status (2026-10-16)
+
+- Phase 18 (user-data stream and error taxonomy): offline plans 18-01..18-17, 18-23 and 18-24 are done and merged into develop (merge 6610bd6, not pushed; the DECISIONS row is D072). Open: 18-18 (live Demo smoke) and 18-20 (Demo probe) need the owner with BINANCE_DEMO_API_KEY/SECRET and approved order limits; 18-19 only if 18-18 needs the direct transport; 18-21, 18-22, 18-25 follow the live evidence. The owner finishes Phase 18 on another machine, then reviews the code. No green full-suite run exists for the merged tree yet; PostgreSQL tests are unrun since Docker is off.
+- Phase 16 fix plans: 16-55 and 16-56 done on develop (owner decisions in 16-DEC-FIXPLANS.md). Next in order: 16-57, 16-58, 16-59, 16-62, then 16-60 and 16-43, then 16-61 and 16-44. Phase 16's new DECISIONS rows are D073 (protocol v2.5.0 warm-up amendment) and D074 (regeneration inventory), because Phase 18 took D072.
+- Owner actions pending: second soak backup bucket with its own crypt passwords; second heartbeat check (period 60 s, grace 120 s) and its secret URL (before 16-43); BINANCE_DEMO_* keys and run limits (before 18-18); turn Docker/PostgreSQL on to run the skipped PostgreSQL tests (see .planning/WINDOWS.md).
+
+
 ## Performance Metrics
 
 **Velocity:**
