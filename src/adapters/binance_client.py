@@ -12,10 +12,13 @@ Rules this module enforces:
 * There is no default environment. ``parse_environment`` accepts exactly ``DEMO``,
   ``TESTNET`` or ``LIVE``; a missing, blank or unknown value raises. Nothing is ever
   inferred from a host name.
-* Every URL comes from one ``EnvironmentRow``, and every row URL is an SDK constant (no
-  host literal lives in this module). A surface (REST, WebSocket Streams, WebSocket API)
-  that was not requested is configured with an inert ``.invalid`` URL so the SDK's lazy
-  properties can never fall back to their mainnet defaults.
+* Every URL comes from one ``EnvironmentRow``. Every row URL is an SDK constant except the
+  DEMO WebSocket Streams URL, for which the SDK has no constant: it is the user's recorded
+  value (plan 18-09), the only host literal in this module, and
+  ``tests/test_binance_client_config.py`` pins it to the record. A surface (REST,
+  WebSocket Streams, WebSocket API) that was not requested is configured with an inert
+  ``.invalid`` URL so the SDK's lazy properties can never fall back to their mainnet
+  defaults.
 * ``assert_environment`` re-reads every surface of a built client and compares it with the
   row before use; ``assert_endpoint_url`` accepts only the exact row URL.
 * LIVE additionally requires an enablement state whose ``is_disabled`` is ``False``. This
@@ -23,10 +26,13 @@ Rules this module enforces:
 * ``ClientLimits`` (F-504: explicit REST timeout, SDK retries and backoff) has no default
   values; the ratified numbers come from plan 18-09, never from this module.
 
-Owner-open values stay unconfigured here: the DEMO WebSocket URLs, the meaning of
-``TESTNET`` and the credential variable names (O-18-01 / O-18-04, recorded by plan 18-09
-in ``decisions/18-DEC-O-18-01.md``). Selecting an unconfigured surface raises
-``EnvironmentNotConfigured``; asking for unratified credential names raises
+The owner-open values (O-18-01 / O-18-04) are the user's decision, recorded in
+``.planning/phases/18-user-data-stream-error-taxonomy/decisions/18-DEC-O-18-01.md`` on
+2026-10-16 and copied here by plan 18-09: the DEMO WebSocket Streams URL is configured, the
+DEMO WebSocket API URL and the whole ``TESTNET`` row stay NOT_CONFIGURED, and the credential
+variable names exist for DEMO and LIVE only. ``tests/test_binance_limits_ratified_file.py``
+compares the rows and the names with the record. Selecting an unconfigured surface raises
+``EnvironmentNotConfigured``; asking for unratified credential names (TESTNET) raises
 ``CredentialNamesNotRatified``.
 """
 
@@ -138,17 +144,21 @@ class EnvironmentRow:
         return self.ws_api_url
 
 
-# Owner-open (O-18-01 / O-18-04): the DEMO WebSocket Streams and WebSocket API URLs and the
-# whole TESTNET row (what TESTNET denotes) are NOT configured here. Plan 18-09 fills them from
-# the owner's record in decisions/18-DEC-O-18-01.md. Every configured URL is an SDK constant.
+# The rows are the user's decision (O-18-01 / O-18-04), copied by plan 18-09 from the record
+# .planning/phases/18-user-data-stream-error-taxonomy/decisions/18-DEC-O-18-01.md (2026-10-16).
+# Every configured URL is an SDK constant except the DEMO WebSocket Streams URL (no SDK
+# constant exists for it). None means NOT_CONFIGURED: selecting that surface raises.
 ENVIRONMENT_ROWS: Mapping[Environment, EnvironmentRow] = MappingProxyType(
     {
         Environment.DEMO: EnvironmentRow(
             environment=Environment.DEMO,
             rest_url=DERIVATIVES_TRADING_USDS_FUTURES_REST_API_DEMO_URL,
-            ws_streams_url=None,
+            # The user's value, record line 44 ("env DEMO ws_streams_url: ...").
+            ws_streams_url="wss://demo-fstream.binance.com",
+            # Record line 45: "env DEMO ws_api_url: NOT_CONFIGURED".
             ws_api_url=None,
         ),
+        # Record line 46: "env TESTNET: NOT_CONFIGURED" (the whole row stays unconfigured).
         Environment.TESTNET: EnvironmentRow(
             environment=Environment.TESTNET,
             rest_url=None,
@@ -250,8 +260,20 @@ class ApiCredentials:
     __str__ = __repr__
 
 
-# Owner-open until plan 18-09 records the names: no environment has ratified names yet.
-CREDENTIAL_SPECS: Mapping[Environment, CredentialSpec] = MappingProxyType({})
+# The user's credential variable NAMES (record 18-DEC-O-18-01.md lines 47 to 50, copied by
+# plan 18-09). TESTNET has no ratified names, so credential_spec_for(TESTNET) still raises.
+CREDENTIAL_SPECS: Mapping[Environment, CredentialSpec] = MappingProxyType(
+    {
+        Environment.DEMO: CredentialSpec(
+            key_variable="BINANCE_DEMO_API_KEY",
+            secret_variable="BINANCE_DEMO_API_SECRET",
+        ),
+        Environment.LIVE: CredentialSpec(
+            key_variable="BINANCE_LIVE_API_KEY",
+            secret_variable="BINANCE_LIVE_API_SECRET",
+        ),
+    }
+)
 
 
 def credential_spec_for(environment: Environment) -> CredentialSpec:

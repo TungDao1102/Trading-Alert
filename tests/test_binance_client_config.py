@@ -50,6 +50,33 @@ FAKE_SECRET = "FAKESECRET0123456789GHIJKL"
 TEST_ONLY_SPEC = bc.CredentialSpec(key_variable="T_KEY", secret_variable="T_SECRET")
 
 
+# The user's decision record (plan 18-09). The DEMO WebSocket expectations below are parsed from
+# its `env DEMO <field>: <value>` lines at test time, never written as literals here.
+DECISION_RECORD = (
+    Path(__file__).resolve().parents[1]
+    / ".planning"
+    / "phases"
+    / "18-user-data-stream-error-taxonomy"
+    / "decisions"
+    / "18-DEC-O-18-01.md"
+)
+NOT_CONFIGURED = "NOT_CONFIGURED"
+
+
+def _record_env_field(environment: str, field_name: str) -> str | None:
+    """The record's `env <ENV> <field>: <value>` value; None for NOT_CONFIGURED."""
+    pattern = re.compile(rf"^env {environment} {field_name}: (\S+)\s*$", flags=re.MULTILINE)
+    found = pattern.findall(DECISION_RECORD.read_text(encoding="utf-8"))
+    assert len(found) == 1, f"the record must carry exactly one env {environment} {field_name}"
+    return None if found[0] == NOT_CONFIGURED else str(found[0])
+
+
+def _record_demo_streams_url() -> str:
+    url = _record_env_field("DEMO", "ws_streams_url")
+    assert url is not None, "the record configures the DEMO WebSocket Streams URL"
+    return url
+
+
 @pytest.fixture(autouse=True)
 def _clean_runtime_secrets() -> Iterator[None]:
     yield
@@ -104,12 +131,12 @@ def test_parse_environment_unknown_value_raises(value: Any) -> None:
         bc.parse_environment(value)
 
 
-def test_environment_rows_come_from_the_sdk_constants() -> None:
+def test_environment_rows_come_from_the_sdk_constants_and_the_record() -> None:
     demo = bc.ENVIRONMENT_ROWS[bc.Environment.DEMO]
     assert demo.rest_url == DERIVATIVES_TRADING_USDS_FUTURES_REST_API_DEMO_URL
-    # Owner-open (O-18-01 / plan 18-09): the DEMO WebSocket URLs are not configured here.
-    assert demo.ws_streams_url is None
-    assert demo.ws_api_url is None
+    # The DEMO WebSocket URLs are the user's record lines (plan 18-09); NOT_CONFIGURED is None.
+    assert demo.ws_streams_url == _record_env_field("DEMO", "ws_streams_url")
+    assert demo.ws_api_url == _record_env_field("DEMO", "ws_api_url")
     live = bc.ENVIRONMENT_ROWS[bc.Environment.LIVE]
     assert live.rest_url == DERIVATIVES_TRADING_USDS_FUTURES_REST_API_PROD_URL
     assert live.ws_streams_url == DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL
@@ -184,11 +211,23 @@ def test_load_api_credentials_missing_or_blank_names_the_variable_only(missing: 
     assert FAKE_SECRET not in str(info.value)
 
 
-def test_credential_names_are_not_ratified_in_this_plan() -> None:
-    assert dict(bc.CREDENTIAL_SPECS) == {}
+def test_credential_names_exist_only_for_the_environments_the_record_names() -> None:
+    record = DECISION_RECORD.read_text(encoding="utf-8")
+    named = set(re.findall(r"^credential ([A-Z]+) [a-z_]+: \S+\s*$", record, flags=re.MULTILINE))
+    assert {environment.value for environment in bc.CREDENTIAL_SPECS} == named
     for environment in bc.Environment:
-        with pytest.raises(bc.CredentialNamesNotRatified):
-            bc.credential_spec_for(environment)
+        if environment.value in named:
+            assert bc.credential_spec_for(environment) is bc.CREDENTIAL_SPECS[environment]
+        else:
+            with pytest.raises(bc.CredentialNamesNotRatified):
+                bc.credential_spec_for(environment)
+
+
+def test_demo_and_live_credential_names_differ() -> None:
+    """OPS-06: test-environment and live credential names never coincide."""
+    demo = bc.credential_spec_for(bc.Environment.DEMO)
+    live = bc.credential_spec_for(bc.Environment.LIVE)
+    assert not set(demo.variables) & set(live.variables)
 
 
 # --------------------------------------------------------------------------- #
@@ -261,10 +300,27 @@ def test_testnet_is_not_configured_and_raises_before_any_sdk_object(
     assert FAKE_KEY not in str(info.value)
 
 
+_DEMO_WS_FIELDS = {bc.Surface.WS_STREAMS: "ws_streams_url", bc.Surface.WS_API: "ws_api_url"}
+
+
 @pytest.mark.parametrize("surface", [bc.Surface.WS_STREAMS, bc.Surface.WS_API])
-def test_demo_websocket_surface_is_not_configured(
+def test_demo_websocket_surface_follows_the_record(
     monkeypatch: pytest.MonkeyPatch, surface: bc.Surface
 ) -> None:
+    """A NOT_CONFIGURED record answer keeps the surface raising before any SDK object."""
+    recorded = _record_env_field("DEMO", _DEMO_WS_FIELDS[surface])
+    if recorded is not None:
+        seen = _patch_transport(monkeypatch)
+        bundle = bc.build_sdk_client(
+            environment=bc.Environment.DEMO,
+            credentials=_credentials(),
+            limits=_limits(),
+            surfaces=frozenset({bc.Surface.REST, surface}),
+        )
+        bc.assert_environment(bundle)
+        assert seen == []
+        return
+
     def no_construction(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("an SDK object was constructed")
 
@@ -278,6 +334,88 @@ def test_demo_websocket_surface_is_not_configured(
         )
     assert "DEMO" in str(info.value)
     assert surface.value in str(info.value)
+
+
+def test_demo_all_surfaces_follow_the_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """All three DEMO surfaces build only when the record configures every one of them."""
+    seen = _patch_transport(monkeypatch)
+    configured = all(
+        _record_env_field("DEMO", name) is not None for name in _DEMO_WS_FIELDS.values()
+    )
+    if configured:
+        bundle = bc.build_sdk_client(
+            environment=bc.Environment.DEMO,
+            credentials=_credentials(),
+            limits=_limits(),
+            surfaces=_ALL_SURFACES,
+        )
+        bc.assert_environment(bundle)
+    else:
+        with pytest.raises(bc.EnvironmentNotConfigured):
+            bc.build_sdk_client(
+                environment=bc.Environment.DEMO,
+                credentials=_credentials(),
+                limits=_limits(),
+                surfaces=_ALL_SURFACES,
+            )
+    assert seen == []
+
+
+def _demo_streams_bundle() -> bc.SdkClientBundle:
+    return bc.build_sdk_client(
+        environment=bc.Environment.DEMO,
+        credentials=_credentials(),
+        limits=_limits(),
+        surfaces=frozenset({bc.Surface.REST, bc.Surface.WS_STREAMS}),
+    )
+
+
+def test_demo_streams_client_carries_the_record_url_and_survives_the_sdk_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _patch_transport(monkeypatch)
+    expected = _record_demo_streams_url()
+    bundle = _demo_streams_bundle()
+    client = bundle.client
+    assert client._websocket_streams_config.stream_url == expected
+    assert client.rest_api.configuration.base_path == (
+        DERIVATIVES_TRADING_USDS_FUTURES_REST_API_DEMO_URL
+    )
+    # The unrequested WebSocket API surface stays inert and unsigned.
+    assert client._websocket_api_config.stream_url == bc.INERT_WS_URL
+    assert client._websocket_api_config.api_key is None
+    streams = client.websocket_streams  # constructs, never connects
+    assert streams.configuration.stream_url == expected + bc.SDK_STREAMS_PATH_SUFFIX
+    bc.assert_environment(bundle)
+    assert seen == []
+
+
+@pytest.mark.parametrize(
+    "foreign",
+    [
+        DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL,
+        DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_TESTNET_URL,
+        bc.INERT_WS_URL,
+        None,
+    ],
+)
+def test_requested_demo_streams_surface_mutation_is_refused(foreign: Any) -> None:
+    bundle = _demo_streams_bundle()
+    bundle.client._websocket_streams_config.stream_url = foreign
+    with pytest.raises(bc.EndpointViolation) as info:
+        bc.assert_environment(bundle)
+    assert "DEMO WS_STREAMS" in str(info.value)
+
+
+def test_requested_demo_streams_near_misses_are_refused_by_the_guard() -> None:
+    expected = _record_demo_streams_url()
+    bundle = _demo_streams_bundle()
+    for miss in _near_misses(expected):
+        bundle.client._websocket_streams_config.stream_url = miss
+        with pytest.raises(bc.EndpointViolation):
+            bc.assert_environment(bundle)
+    bundle.client._websocket_streams_config.stream_url = expected
+    bc.assert_environment(bundle)
 
 
 def test_build_sdk_client_requires_at_least_one_surface() -> None:
@@ -319,6 +457,8 @@ _GUARDED_URLS = {
     "live-rest": DERIVATIVES_TRADING_USDS_FUTURES_REST_API_PROD_URL,
     "live-streams": DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL,
     "live-ws-api": DERIVATIVES_TRADING_USDS_FUTURES_WS_API_PROD_URL,
+    # The user's DEMO WebSocket Streams URL, parsed from the record (plan 18-09).
+    "demo-streams": _record_demo_streams_url(),
 }
 
 
@@ -635,7 +775,15 @@ def test_sdk_client_is_constructed_only_at_the_allowed_sites() -> None:
 
 
 def test_client_module_has_no_host_literal() -> None:
+    """No LIVE host literal; the only host literal is the user's DEMO streams URL (18-09).
+
+    The SDK has no constant for the DEMO WebSocket Streams host, so the row carries the
+    record's URL as a literal. It is allowed exactly once, as the whole string constant, and
+    only when it equals the record line; every other string constant and the rest of the
+    source still carry no LIVE host.
+    """
     source = (REPO_ROOT / "src/adapters/binance_client.py").read_text(encoding="utf-8")
+    allowed = _record_demo_streams_url()
     hosts = {
         urlsplit(url).hostname
         for url in (
@@ -644,12 +792,17 @@ def test_client_module_has_no_host_literal() -> None:
             DERIVATIVES_TRADING_USDS_FUTURES_WS_API_PROD_URL,
         )
     }
+    allowed_constants = 0
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if node.value == allowed:
+                allowed_constants += 1
+                continue
             for host in hosts:
                 assert host is not None
                 assert host not in node.value
-    assert not re.search(r"fapi\.binance\.com|fstream\.binance", source)
+    assert allowed_constants == 1
+    assert not re.search(r"fapi\.binance\.com|fstream\.binance", source.replace(allowed, ""))
 
 
 # --------------------------------------------------------------------------- #

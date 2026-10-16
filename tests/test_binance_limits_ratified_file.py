@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from src.adapters import binance_client as bc
 from src.adapters.binance_limits import (
     CANONICAL_KEYS,
     NULLABLE_KEYS,
@@ -235,3 +236,95 @@ def test_the_rate_limit_fields_come_from_their_own_record_line(record_key: str, 
 
 def test_the_retired_single_wait_key_is_absent_from_the_file() -> None:
     assert "rate_limit_no_retry_after_wait_seconds" not in _toml()["signed_calls"]
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: record -> environment rows and credential specs.
+# --------------------------------------------------------------------------- #
+
+_NOT_CONFIGURED = "NOT_CONFIGURED"
+_URL_FIELDS = ("rest_url", "ws_streams_url", "ws_api_url")
+_ENV_LINE = re.compile(r"^env ([A-Z]+)(?: ([a-z_]+))?: (\S+)\s*$")
+_CREDENTIAL_LINE = re.compile(r"^credential ([A-Z]+) (key_variable|secret_variable): (\S+)\s*$")
+_PROBE_LINE = re.compile(r"^probe environment: (\S+)\s*$")
+
+
+def _record_env_lines() -> list[tuple[str, str | None, str]]:
+    """(environment, field or None for a whole-row answer, value) per `env ` line."""
+    found: list[tuple[str, str | None, str]] = []
+    for line in _record_lines():
+        if not line.startswith("env "):
+            continue
+        match = _ENV_LINE.match(line)
+        assert match is not None, "an 'env ' line of the record is malformed"
+        environment, field_name, value = match.groups()
+        found.append((environment, field_name, value))
+    return found
+
+
+def _record_credentials() -> dict[str, dict[str, str]]:
+    found: dict[str, dict[str, str]] = {}
+    for line in _record_lines():
+        if not line.startswith("credential "):
+            continue
+        match = _CREDENTIAL_LINE.match(line)
+        assert match is not None, "a 'credential ' line of the record is malformed"
+        environment, field_name, value = match.groups()
+        names = found.setdefault(environment, {})
+        assert field_name not in names, f"credential {environment} {field_name} appears twice"
+        names[field_name] = value
+    return found
+
+
+def test_the_record_has_env_credential_and_probe_lines() -> None:
+    env_lines = _record_env_lines()
+    assert env_lines, "the record has no env line"
+    named = {environment for environment, _, _ in env_lines}
+    assert named <= {environment.value for environment in bc.Environment}
+    credentials = _record_credentials()
+    for environment, names in credentials.items():
+        assert environment in {e.value for e in bc.Environment}
+        assert set(names) == {"key_variable", "secret_variable"}, environment
+    probes = [m.group(1) for line in _record_lines() if (m := _PROBE_LINE.match(line))]
+    assert len(probes) == 1
+    assert bc.parse_environment(probes[0]) in bc.ENVIRONMENT_ROWS
+
+
+def test_environment_rows_equal_the_record() -> None:
+    for environment_text, field_name, value in _record_env_lines():
+        row = bc.ENVIRONMENT_ROWS[bc.parse_environment(environment_text)]
+        expected = None if value == _NOT_CONFIGURED else value
+        if field_name is None:
+            # A whole-row answer: NOT_CONFIGURED leaves every surface unconfigured.
+            assert value == _NOT_CONFIGURED, environment_text
+            for name in _URL_FIELDS:
+                assert getattr(row, name) is None, (environment_text, name)
+            continue
+        assert field_name in _URL_FIELDS, field_name
+        assert getattr(row, field_name) == expected, (environment_text, field_name)
+
+
+def test_the_probe_environment_has_its_rest_surface_configured() -> None:
+    probes = [m.group(1) for line in _record_lines() if (m := _PROBE_LINE.match(line))]
+    row = bc.ENVIRONMENT_ROWS[bc.parse_environment(probes[0])]
+    assert row.rest_url is not None
+
+
+def test_credential_specs_equal_the_record() -> None:
+    credentials = _record_credentials()
+    assert {environment.value for environment in bc.CREDENTIAL_SPECS} == set(credentials)
+    for environment_text, names in credentials.items():
+        spec = bc.credential_spec_for(bc.parse_environment(environment_text))
+        assert spec.key_variable == names["key_variable"], environment_text
+        assert spec.secret_variable == names["secret_variable"], environment_text
+    for environment in bc.Environment:
+        if environment.value not in credentials:
+            with pytest.raises(bc.CredentialNamesNotRatified):
+                bc.credential_spec_for(environment)
+
+
+def test_demo_and_live_credential_names_are_disjoint() -> None:
+    """OPS-06 keeps test-environment and live variable names apart."""
+    demo = bc.credential_spec_for(bc.Environment.DEMO)
+    live = bc.credential_spec_for(bc.Environment.LIVE)
+    assert not set(demo.variables) & set(live.variables)
