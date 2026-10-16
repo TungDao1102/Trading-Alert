@@ -34,7 +34,21 @@ REQUIRED_SUFFIXES = (
     "user-data-streams/Keepalive-User-Data-Stream",
     "websocket-market-streams/Important-WebSocket-Change-Notice",
     "websocket-market-streams/Connect",
+    "user-data-streams/Event-Algo-Order-Update",
+    "user-data-streams/Event-Order-Update",
+    "user-data-streams/Event-Balance-and-Position-Update",
+    "user-data-streams/Event-Listen-Key-Expired",
+    "trade/rest-api/Change-Position-Mode",
+    "error-code",
+    "general-info",
+    "trade/rest-api/Query-Algo-Order",
+    "change-log",
+    "websocket-market-streams/Live-Subscribing-Unsubscribing-to-streams",
 )
+
+# The nine items of the "UNVERIFIED register" in 18-RESEARCH.md; each needs a status line.
+UNVERIFIED_REGISTER_ITEMS = range(1, 10)
+ITEM_STATUS = re.compile(r"^- item (\d+): (now READ|still UNVERIFIED) \(\S", flags=re.MULTILINE)
 
 
 def _section(text: str, title_prefix: str) -> str:
@@ -115,6 +129,12 @@ def test_phase18_section_unverified_rows_have_failure_text() -> None:
         match = re.search(r"failure:\s*(\S.*)", method)
         assert match is not None, method
         assert match.group(1).strip(), method
+
+
+def test_phase18_section_has_a_status_line_per_register_item() -> None:
+    body = _section(_sources_text(), PHASE18_TITLE_PREFIX)
+    found = [int(m.group(1)) for m in ITEM_STATUS.finditer(body)]
+    assert sorted(found) == list(UNVERIFIED_REGISTER_ITEMS), found
 
 
 def test_phase18_heading_is_not_the_phase11_heading() -> None:
