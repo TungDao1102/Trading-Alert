@@ -152,7 +152,8 @@ class FakeUserDataWsClient:
     - `create_connection` opens one connection per url path (market, public, private);
       `produce_connection=False` models the SDK swallowing a failed connect (D4). An optional
       `on_create_connection` hook runs first (a test uses it to log the way the SDK reports a
-      swallowed connect failure).
+      swallowed connect failure). An optional `on_user_data` hook receives the listenKey the
+      way the SDK's INFO line "Subscribing to streams on WebSocket" does.
     - `user_data(listenKey)` maps the bare listenKey to the private connection in the
       module-global stream map and records the SUBSCRIBE frame only for a name not already
       mapped (`WebSocketStreamBase.subscribe` filters mapped names).
@@ -174,9 +175,11 @@ class FakeUserDataWsClient:
         *,
         produce_connection: bool = True,
         on_create_connection: Callable[[], None] | None = None,
+        on_user_data: Callable[[str], None] | None = None,
     ) -> None:
         self.produce_connection = produce_connection
         self.on_create_connection = on_create_connection
+        self.on_user_data = on_user_data
         self.connections: list[Any] = []
         self.create_connection_calls = 0
         self.close_calls = 0
@@ -200,6 +203,8 @@ class FakeUserDataWsClient:
             self._next_connection_id += 1
 
     async def user_data(self, listenKey: str) -> FakeUserStreamHandle:  # noqa: N803 - SDK name
+        if self.on_user_data is not None:
+            self.on_user_data(listenKey)
         if not self.connections:
             raise ValueError("No WebSocket connections available.")
         stream_map = _sdk_stream_map()
