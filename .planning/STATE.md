@@ -4,11 +4,11 @@ milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 status: executing
-stopped_at: 16-55 Task 3 done; stopped before Task 4 (backup-remote collision, user decision)
-last_updated: "2026-10-16T08:36:44.782Z"
+stopped_at: Completed 16-55-PLAN.md
+last_updated: "2026-10-16T08:51:50.047Z"
 last_activity: 2026-10-15
 last_activity_desc: Phase 16 execution started
-state_head: 32fa56d27defeccdecb5f6e0f089cd0461cd5f9e
+state_head: ebba3cb9256fa945c0931a49d2d64d782faa559c
 progress:
   total_phases: 29
   completed_phases: 17
@@ -213,6 +213,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P35 | 12 min | 2 tasks | 5 files |
 | Phase 16 P16 | 12min | 3 tasks | 4 files |
 | Phase 16 P19 | 55min | 3 tasks | 5 files |
+| Phase 16 P55 | 120min | 4 tasks | 40 files |
 
 ## Accumulated Context
 
@@ -519,6 +520,8 @@ Recent decisions affecting current work:
 - [Phase 16]: Q-J (user): paper runtime state is journal rows only (PgRuntimeState via PgJournalStore, entity PaperRuntime); no migration, no table
 - [Phase 16]: [16-19] Q-B (user): SHADOW fill eligibility = recorded CONFIRM instant floored to the minute plus one minute, passed as advance start_exclusive; no simulator change
 - [Phase 16]: [16-19] Live 1m trade and mark minutes by REST polling; poll cadence and close lag are required inputs (O-07); driver advances only to the shared settled watermark
+- [Phase 16]: 16-55: soak backups use a separate BACKUP_S3_BUCKET (own crypt passwords, own --init-remote); deploy/backup.sh --install-soak-timer refuses an empty or shared bucket; backup_remote.py layout unchanged (orchestrator option a; owner creates the bucket before 16-43)
+- [Phase 16]: 16-55: instance lease is one fixed paper-runtime scope per database (session advisory lock), not per epoch id, because the pin mints the epoch id after the lease must be held
 
 ### Pending Todos
 
@@ -533,7 +536,6 @@ Recent decisions affecting current work:
 - WS-connect gap (07-04 follow-up) blocks soak start; Phase 8 construction can proceed in parallel
 - 08-02 LIVE-TAP GATE: partly cleared. Real APPROVE and SKIP taps were observed (`09-DEMO-REHEARSAL-FINDINGS.md`, dry-run `taps`: SKIP and APPROVE passed); the unknown-chat tap is still NOT_REHEARSED and the live Telegram check is deferred to Phases 23/24 (08-VERIFICATION, accepted by the operator 2026-10-04; ROADMAP Phase 24 item G2-014)
 - Phase 09 Plan 04 task 3 (Demo rehearsal plus credential provisioning plus LIVE-TAP clearance) is only partly done: the Demo runs of 2026-10-05 stopped at SL placement with -4509 (D055, execution model OPEN) and credential provisioning is not attested, so EXEC-01 and OPS-02 stay Pending until real Demo evidence exists (`09-DEMO-REHEARSAL-FINDINGS.md`); owners Phases 24/25
-- 16-55 stopped before Task 4: soak (trading-soak) and trading backups would collide on one backup remote (no project component in src/ops/backup_remote.py layout); user decides separate BACKUP_S3_BUCKET for the soak or a project prefix in the remote layout
 
 ### Quick Tasks Completed
 
@@ -603,6 +605,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-16T08:36:42.793Z
-Stopped at: 16-55 Task 3 done; stopped before Task 4 (backup-remote collision, user decision)
-Resume file: .planning/phases/16-paper-runtime-composition/16-55-SUMMARY.md
+Last session: 2026-10-16T08:51:48.795Z
+Stopped at: Completed 16-55-PLAN.md
+Resume file: None
