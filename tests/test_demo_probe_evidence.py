@@ -20,7 +20,8 @@ import requests
 from scripts import demo_probe as dp
 from src.adapters import binance_client
 
-from tests.probe_fakes import write_probe_limits
+from tests.probe_fakes import FakeProbePort, write_probe_limits
+from tests.support.virtual_time import VirtualTime
 
 _LOOPBACK = {"127.0.0.1", "::1"}
 
@@ -344,3 +345,253 @@ def test_a_finish_before_the_start_is_a_problem(valid: dict[str, Any]) -> None:
 def test_the_dry_run_cases_cover_case_order(valid: dict[str, Any]) -> None:
     ids = [item["case_id"] for item in valid["cases"]]
     assert ids == list(dp.REQUIRED_CASES)
+
+
+# --------------------------------------------------------------------------- #
+# Executed runs on fakes (Task 2): frames, fixtures and the acceptance verdict.
+# --------------------------------------------------------------------------- #
+
+
+def _config(tmp_path: Path, *extra: str) -> dp.ProbeConfig:
+    limits = write_probe_limits(tmp_path)
+    return dp.parse_config(
+        [
+            "--environment",
+            "DEMO",
+            "--probe-limits-file",
+            str(limits),
+            "--evidence-dir",
+            str(tmp_path / "evidence"),
+            "--execute",
+            *extra,
+        ]
+    )
+
+
+def _instant_rig(port: Any, *, real: bool = True, stream: Any = None) -> dp.ProbeRig:
+    clock = VirtualTime()
+
+    async def sleep(seconds: int) -> None:
+        clock.sleeps.append(seconds)
+        await clock.advance(seconds)
+
+    return dp.ProbeRig(port=port, clock=clock.now, sleep=sleep, real=real, stream=stream)
+
+
+async def _observed(context: dp.CaseContext) -> dp.CaseResult:
+    probed = context.recorder.next_client_id("test")
+    answer = await context.rig.port.query_order(
+        symbol=context.config.symbol, client_order_id=probed
+    )
+    return dp.CaseResult(status=dp.OBSERVED, observations=(answer,))
+
+
+async def _not_observed(context: dp.CaseContext) -> dp.CaseResult:
+    return dp.CaseResult(status=dp.NOT_OBSERVED, reason="FAKE: a partial fill was not induced")
+
+
+async def _executed_document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    handlers = {
+        case_id: (_not_observed if case_id == "partial_fill" else _observed)
+        for case_id in dp.REQUIRED_CASES
+    }
+    monkeypatch.setattr(dp, "CASE_HANDLERS", handlers)
+    config = _config(tmp_path)
+    recorder = dp.ProbeRecorder()
+    code = await dp.run_probe(config, _instant_rig(FakeProbePort()), recorder)
+    assert code == dp.EXIT_OK
+    return recorder.document(config)
+
+
+async def test_an_executed_fake_run_passes_the_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = await _executed_document(tmp_path, monkeypatch)
+    assert dp.check_probe_evidence(document) == []
+    verdict = dp.probe_acceptance_verdict(document)
+    assert verdict["overall"]["result"] == dp.VERDICT_PASS, verdict
+    for case_id in dp.REQUIRED_CASES:
+        assert verdict[case_id]["result"] == dp.VERDICT_PASS
+    assert "NOT_OBSERVED" in verdict["partial_fill"]["reason"]
+
+
+def test_the_dry_run_verdict_reports_every_case_not_rehearsed(valid: dict[str, Any]) -> None:
+    verdict = dp.probe_acceptance_verdict(valid)
+    assert verdict["overall"]["result"] == dp.VERDICT_FAIL
+    for case_id in dp.REQUIRED_CASES:
+        assert verdict[case_id]["result"] == dp.VERDICT_FAIL
+        assert "NOT_REHEARSED" in verdict[case_id]["reason"]
+    assert verdict["proof_class"]["result"] == dp.VERDICT_FAIL
+    assert all(entry["proof_class"] == dp.PROOF_FAKE for entry in verdict.values())
+
+
+def test_the_written_dry_run_carries_the_verdict(valid: dict[str, Any]) -> None:
+    assert valid["acceptance"] == dp.probe_acceptance_verdict(
+        {k: v for k, v in valid.items() if k != "acceptance"}
+    )
+
+
+def _break_observations(document: dict[str, Any]) -> str:
+    document["cases"][0]["observations"] = []
+    return str(document["cases"][0]["case_id"])
+
+
+def _break_answer(document: dict[str, Any]) -> str:
+    del document["cases"][0]["observations"][0]["error"]["category"]
+    return str(document["cases"][0]["case_id"])
+
+
+def _break_reason(document: dict[str, Any]) -> str:
+    item = next(c for c in document["cases"] if c["case_id"] == "partial_fill")
+    item["reason"] = ""
+    return "partial_fill"
+
+
+def _drop_case(document: dict[str, Any]) -> str:
+    document["cases"] = [c for c in document["cases"] if c["case_id"] != "closeposition_stop_flat"]
+    return "closeposition_stop_flat"
+
+
+def _error_case(document: dict[str, Any]) -> str:
+    document["cases"][1]["status"] = dp.ERROR
+    document["cases"][1]["reason"] = "no handler registered"
+    return str(document["cases"][1]["case_id"])
+
+
+@pytest.mark.parametrize(
+    "breaker", [_break_observations, _break_answer, _break_reason, _drop_case, _error_case]
+)
+async def test_a_case_rule_violation_fails_that_case_and_the_overall_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, breaker: Any
+) -> None:
+    document = await _executed_document(tmp_path, monkeypatch)
+    case_id = breaker(document)
+    verdict = dp.probe_acceptance_verdict(document)
+    assert verdict[case_id]["result"] == dp.VERDICT_FAIL
+    assert verdict["overall"]["result"] == dp.VERDICT_FAIL
+
+
+async def test_an_enabled_optional_case_is_required_by_the_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = await _executed_document(tmp_path, monkeypatch)
+    document["settings"]["optional_cases"]["stream_gap"] = True
+    verdict = dp.probe_acceptance_verdict(document)
+    assert verdict["stream_gap_during_case"]["result"] == dp.VERDICT_FAIL
+    assert verdict["overall"]["result"] == dp.VERDICT_FAIL
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "rule"),
+    [
+        (("cleanup", "final", "status"), dp.CLEANUP_FAILED_STATUS, "cleanup"),
+        (("cleanup", "final", "remaining", "open_orders"), 1, "cleanup"),
+        (("cleanup", "final", "remaining", "open_algo_orders"), 2, "cleanup"),
+        (
+            ("cleanup", "final", "remaining", "positions"),
+            [{"symbol": "BTCUSDT", "position_side": "BOTH", "position_amt": "0.002"}],
+            "cleanup",
+        ),
+        (("account_before",), None, "account_state"),
+        (("account_after",), {"status": "NOT_RUN"}, "account_state"),
+        (("label",), "results", "label_and_d055"),
+        (("d055", "status"), "CLOSED", "label_and_d055"),
+        (("proof_class",), dp.PROOF_FAKE, "proof_class"),
+        (("schema",), "other", "evidence"),
+    ],
+)
+async def test_a_rule_violation_fails_its_rule_and_the_overall_verdict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: tuple[str, ...],
+    value: Any,
+    rule: str,
+) -> None:
+    document = await _executed_document(tmp_path, monkeypatch)
+    target = document
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    verdict = dp.probe_acceptance_verdict(document)
+    assert verdict[rule]["result"] == dp.VERDICT_FAIL, verdict[rule]
+    assert verdict["overall"]["result"] == dp.VERDICT_FAIL
+
+
+class _FakeStream:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.started = 0
+        self.stopped = 0
+
+    async def start(self) -> None:
+        self.started += 1
+        if self.fail:
+            raise RuntimeError("FAKE: no LIVE")
+
+    async def stop(self) -> None:
+        self.stopped += 1
+
+
+async def _emitting(context: dp.CaseContext) -> dp.CaseResult:
+    port = context.rig.port
+    assert isinstance(port, FakeProbePort)
+    port.emit_frame(
+        {"event_type": "OrderUpdateEvent", "execution_type": "NEW"},
+        raw={"e": "ORDER_TRADE_UPDATE", "o": {"x": "NEW", "c": "dprobe-FAKE"}},
+    )
+    port.emit_state("LIVE")
+    return await _observed(context)
+
+
+async def test_each_case_records_its_frames_and_fixtures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        dp,
+        "CASE_HANDLERS",
+        {"get_order_not_found": _emitting, "get_algo_order_not_found": _observed},
+    )
+    fixtures = tmp_path / "fixtures"
+    config = _config(
+        tmp_path,
+        "--only",
+        "get_order_not_found,get_algo_order_not_found",
+        "--fixtures-dir",
+        str(fixtures),
+    )
+    stream = _FakeStream()
+    recorder = dp.ProbeRecorder()
+    await dp.run_probe(config, _instant_rig(FakeProbePort(), stream=stream), recorder)
+    document = recorder.document(config)
+    first, second = document["cases"]
+    assert first["frames"]["status"] == dp.OBSERVED
+    assert first["frames"]["events"] == [
+        {"event_type": "OrderUpdateEvent", "execution_type": "NEW"}
+    ]
+    assert first["frames"]["stream_states"] == ["LIVE"]
+    fixture_name = "get_order_not_found-001-ORDER_TRADE_UPDATE.json"
+    assert first["frames"]["fixtures"] == [fixture_name]
+    assert second["frames"]["events"] == []
+    written = json.loads((fixtures / fixture_name).read_text(encoding="utf-8"))
+    assert written["o"]["x"] == "NEW"
+    provenance = (fixtures / "provenance.md").read_text(encoding="utf-8")
+    assert f"`{fixture_name}`: RECORDED_DEMO" in provenance
+    assert stream.started == 1 and stream.stopped == 1
+    assert document["stream"]["status"] == "STARTED"
+
+
+async def test_a_stream_that_does_not_start_leaves_every_frame_field_not_observed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dp, "CASE_HANDLERS", {"get_order_not_found": _observed})
+    config = _config(tmp_path, "--only", "get_order_not_found")
+    stream = _FakeStream(fail=True)
+    recorder = dp.ProbeRecorder()
+    code = await dp.run_probe(config, _instant_rig(FakeProbePort(), stream=stream), recorder)
+    document = recorder.document(config)
+    (item,) = document["cases"]
+    assert item["status"] == dp.OBSERVED
+    assert item["frames"]["status"] == dp.NOT_OBSERVED
+    assert "did not start" in item["frames"]["reason"]
+    assert document["stream"]["status"] == "NOT_STARTED"
+    assert code == dp.EXIT_OK

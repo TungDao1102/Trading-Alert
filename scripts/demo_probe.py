@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import importlib.metadata
 import os
 import re
@@ -76,6 +77,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NoReturn, Protocol
@@ -84,20 +86,58 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from binance_common.configuration import ConfigurationWebSocketStreams  # noqa: E402
 from src.adapters import binance_client  # noqa: E402
 from src.adapters.binance_client import (  # noqa: E402
+    SDK_STREAMS_PATH_SUFFIX,
+    CredentialError,
+    CredentialNamesNotRatified,
+    EndpointViolation,
     Environment,
     EnvironmentNotConfigured,
+    LiveNotEnabled,
     Surface,
+    assert_endpoint_url,
     parse_environment,
 )
+from src.adapters.binance_errors import error_facts_from_exception  # noqa: E402
 from src.adapters.binance_limits import (  # noqa: E402
     BinanceLimits,
     LimitsNotRatified,
+    StreamLimits,
     load_binance_limits,
 )
-from src.adapters.binance_probe import ProbeBanned, ProbeObservation  # noqa: E402
-from src.adapters.binance_ratelimit_gate import IP_BAN_418, RATE_LIMIT_PAUSE_429  # noqa: E402
+from src.adapters.binance_probe import (  # noqa: E402
+    BinanceProbeAdapter,
+    ErrorObservation,
+    ProbeBanned,
+    ProbeObservation,
+)
+from src.adapters.binance_public import BinancePublicMarketData  # noqa: E402
+from src.adapters.binance_ratelimit_gate import (  # noqa: E402
+    IP_BAN_418,
+    RATE_LIMIT_PAUSE_429,
+    RestGateRefusal,
+    RestRateLimitGate,
+)
+from src.adapters.binance_usdm import PositionModeResult  # noqa: E402
+from src.adapters.binance_userdata import (  # noqa: E402
+    PRIVATE_URL_PATH,
+    ListenKeyPort,
+    SdkListenKeyPort,
+    SdkUserDataTransport,
+    UserDataAdapter,
+    capture_raw_user_events,
+    install_sdk_noise_guard,
+)
+from src.adapters.binance_userdata_events import StreamAnomaly  # noqa: E402
+from src.adapters.binance_userdata_supervisor import (  # noqa: E402
+    StreamSnapshot,
+    StreamState,
+    TrustedEvent,
+    UserDataSupervisor,
+)
+from src.domain.exchange_errors import CallKind, classify  # noqa: E402
 from src.ops.operator_evidence import (  # noqa: E402
     EXIT_ABORTED,
     EXIT_FAILED,
@@ -113,7 +153,7 @@ from src.ops.operator_evidence import (  # noqa: E402
     sha256_lf,
     write_evidence_atomic,
 )
-from src.ops.redaction import Redactor  # noqa: E402
+from src.ops.redaction import Redactor, configure_logging  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Constants (tool settings and vocabulary; no safety threshold lives here).
@@ -231,6 +271,38 @@ CLIENT_ID_RE = re.compile(r"^[.A-Z:/a-z0-9_-]{1,36}$")
 SIDE_BUY = "BUY"
 SIDE_SELL = "SELL"
 POSITION_SIDE_ONE_WAY = "BOTH"
+
+# The port operations that change exchange state: unreachable through a dry-run guarded port.
+MUTATING_OPERATIONS: frozenset[str] = frozenset(
+    {
+        "new_limit_order",
+        "new_market_order",
+        "new_conditional_order",
+        "cancel_order",
+        "cancel_algo_order",
+        "cancel_all_open_orders",
+        "cancel_all_algo_open_orders",
+    }
+)
+
+# The acceptance verdict (research C4).
+VERDICT_PASS = "PASS"
+VERDICT_FAIL = "FAIL"
+VERDICT_RULES: tuple[str, ...] = (
+    "cleanup",
+    "account_state",
+    "label_and_d055",
+    "evidence",
+    "proof_class",
+)
+ACCOUNT_READ = "READ"
+
+BANNER = (
+    "Demo probe. Results are demo-observed, not mainnet. The probe records facts and stops: "
+    "D055 stays OPEN and nothing here chooses a model or a trading parameter (D-17). The "
+    "account's listenKey is a singleton: no other process may run on the same account during "
+    "the probe. Run it only with a probe limits file the owner approved (O-18-03)."
+)
 
 FIXTURE_LABEL_EXECUTE = "RECORDED_DEMO"
 FIXTURE_LABEL_DRY_RUN = "FAKE_DRYRUN"
@@ -828,7 +900,7 @@ async def account_state(port: ProbePort, symbol: str) -> dict[str, Any]:
     flag = mode.summary.get("dual_side_position") if mode.ok else None
     dual_side = {_TRUE: True, _FALSE: False}.get(flag) if flag is not None else None
     return {
-        "status": "READ",
+        "status": ACCOUNT_READ,
         "position_mode": mode,
         **answers,
         "balance": balance,
@@ -1058,7 +1130,11 @@ class _ProbeRun:
         _raise_if_rate_limited(mark)
         filters = await port.symbol_filters(symbol=self.config.symbol)
         _raise_if_rate_limited(filters)
-        self.recorder.market = {"status": "READ", "mark_price": mark, "symbol_filters": filters}
+        self.recorder.market = {
+            "status": ACCOUNT_READ,
+            "mark_price": mark,
+            "symbol_filters": filters,
+        }
 
     async def _cleanup(self) -> dict[str, Any]:
         timeout = self.config.order_limits.cleanup_timeout_seconds
@@ -1187,10 +1263,10 @@ class _ProbeRun:
             result = CaseResult(status=ERROR, reason=f"the handler raised {type(exc).__name__}")
         finished = self.now()
         for observation in result.observations:
-            reason = _rate_limit_reason(observation)
-            if reason is not None and not self.banned:
+            limit_reason = _rate_limit_reason(observation)
+            if limit_reason is not None and not self.banned:
                 error = observation.error
-                self._note_ban(reason, error.retry_after_seconds if error else None, case_id)
+                self._note_ban(limit_reason, error.retry_after_seconds if error else None, case_id)
         planned = self._planned()[planned_before:]
         if self.banned:
             cleanup: dict[str, Any] = {"status": CLEANUP_NOT_VERIFIED, "reason": REASON_BAN}
@@ -1241,6 +1317,23 @@ class _ProbeRun:
                     "reason": f"the cleanup raised {type(exc).__name__}",
                 }
 
+    def _write_provenance(self, directory: Path, names: Sequence[str]) -> None:
+        """List the run's fixture files in `provenance.md` with their label (appended)."""
+        label = FIXTURE_LABEL_DRY_RUN if self.dry_run else FIXTURE_LABEL_EXECUTE
+        started = self.recorder.started_utc
+        stamp = _utc_stamp(started) if started is not None else "unknown"
+        provenance = directory / "provenance.md"
+        lines = [] if provenance.exists() else ["# Provenance of the Demo probe frames", ""]
+        lines.append(
+            f"## {self.config.mode} run of {stamp} ({self.config.environment.value}, "
+            "scripts/demo_probe.py)"
+        )
+        lines.append("")
+        lines.extend(f"- `{name}`: {label}" for name in names)
+        lines.append("")
+        with provenance.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write("\n".join(lines) + "\n")
+
     def _outcome(self) -> tuple[str, int]:
         if self.aborted_no_order:
             return OUTCOME_ABORTED_NO_ORDER, EXIT_ABORTED
@@ -1287,6 +1380,8 @@ class _ProbeRun:
         for case_id in self.config.case_ids:
             if case_id not in recorder.records:
                 self._record_not_run(case_id, REASON_BAN if self.banned else reason_left)
+        if self.config.fixtures_dir is not None and recorder.fixtures:
+            self._write_provenance(self.config.fixtures_dir, recorder.fixtures)
         recorder.finished_utc = self.now()
         outcome, code = self._outcome()
         recorder.outcome = outcome
@@ -1312,6 +1407,691 @@ async def run_probe(
     """
     run = _ProbeRun(config, rig, recorder, redactor if redactor is not None else Redactor(None))
     return await run.run()
+
+
+# --------------------------------------------------------------------------- #
+# The live path: guarded port, frame log, stream, live rig (executed runs only).
+# --------------------------------------------------------------------------- #
+
+Guard = Callable[[], None]
+
+
+class MutationRefused(Exception):  # noqa: N818 - a refusal, like ConfirmationRefused
+    """A mutating operation was asked of a dry-run guarded port (nothing was sent)."""
+
+
+class PositionModeReader(Protocol):
+    """The position-mode read of `BinanceUsdmAdapter`."""
+
+    async def get_position_mode(self) -> PositionModeResult: ...
+
+
+def _evidence_text(value: object) -> str:
+    if isinstance(value, bool):
+        return _TRUE if value else _FALSE
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return str(value.value)
+    return str(value)
+
+
+# The typed-event fields copied into a case's frame record, by name (nothing else is copied).
+_EVENT_FIELDS: tuple[str, ...] = (
+    "symbol",
+    "client_order_id",
+    "exchange_order_id",
+    "side",
+    "position_side",
+    "order_type",
+    "original_order_type",
+    "time_in_force",
+    "execution_type",
+    "order_status",
+    "original_quantity",
+    "original_price",
+    "stop_price",
+    "last_filled_quantity",
+    "accumulated_filled_quantity",
+    "last_filled_price",
+    "trade_id",
+    "reduce_only",
+    "close_position",
+    "working_type",
+    "expire_reason",
+    "client_algo_id",
+    "algo_id",
+    "algo_type",
+    "algo_status",
+    "actual_order_id",
+    "actual_order_type",
+    "executed_quantity",
+    "trigger_price",
+    "reject_reason",
+    "reason",
+    "kind",
+    "event_name",
+    "field",
+)
+
+
+def event_record(event: TrustedEvent) -> dict[str, str]:
+    """A typed stream event as text: its type, the gap flags and the named fields present."""
+    outcome = event.outcome
+    record = {
+        "event_type": type(outcome).__name__,
+        "after_gap": _evidence_text(event.after_gap),
+        "connection_epoch": _evidence_text(event.connection_epoch),
+        "received_at_utc": _evidence_text(event.received_at_utc),
+    }
+    for name in _EVENT_FIELDS:
+        value = getattr(outcome, name, None)
+        if value is not None:
+            record[name] = _evidence_text(value)
+    if isinstance(outcome, StreamAnomaly):
+        record["anomaly"] = _TRUE
+    return record
+
+
+class FrameLog:
+    """Typed events, raw payloads and stream states with one shared sequence number."""
+
+    def __init__(self) -> None:
+        self._sequence = 0
+        self._events: list[tuple[int, dict[str, str]]] = []
+        self._raw: list[tuple[int, object]] = []
+        self._states: list[tuple[int, str]] = []
+
+    def _next(self) -> int:
+        self._sequence += 1
+        return self._sequence
+
+    def marker(self) -> int:
+        return self._sequence
+
+    def add_event(self, record: Mapping[str, str]) -> None:
+        self._events.append((self._next(), dict(record)))
+
+    def add_raw(self, payload: object) -> None:
+        self._raw.append((self._next(), payload))
+
+    def add_state(self, state: str) -> None:
+        self._states.append((self._next(), state))
+
+    def events_since(self, marker: int) -> list[dict[str, str]]:
+        return [dict(record) for seq, record in self._events if seq > marker]
+
+    def raw_since(self, marker: int) -> list[object]:
+        return [payload for seq, payload in self._raw if seq > marker]
+
+    def states_since(self, marker: int) -> list[str]:
+        return [state for seq, state in self._states if seq > marker]
+
+
+def _position_mode_failure(exc: Exception) -> ProbeObservation:
+    """A failed position-mode read as data: class, int code, category, the type name."""
+    facts = error_facts_from_exception(exc)
+    category = classify(facts, CallKind.QUERY)
+    return ProbeObservation(
+        operation="position_mode",
+        ok=False,
+        summary={},
+        error=ErrorObservation(
+            http_class=facts.http_class.value,
+            code=facts.code,
+            retry_after_seconds=facts.retry_after_seconds,
+            category=category.value,
+            message=type(exc).__name__,
+        ),
+    )
+
+
+class GuardedProbePort:
+    """The probe port of an executed run; the environment guard runs before every call.
+
+    Explicit delegation only (no attribute passthrough), like the rehearsal's
+    `GuardedAdapter`: in dry-run mode a mutating operation raises `MutationRefused` before
+    the inner adapter is reached. `adapter` is the `BinanceProbeAdapter` (or a fake with its
+    operations), `position_mode_reader` the production adapter's position-mode read, `frames`
+    the run's frame log and `drop_transport` the private-connection drop of the stream.
+    """
+
+    def __init__(
+        self,
+        adapter: Any,
+        *,
+        position_mode_reader: PositionModeReader,
+        frames: FrameLog,
+        guard: Guard,
+        mode: str,
+        drop_transport: Callable[[], Awaitable[bool]] | None = None,
+    ) -> None:
+        if mode not in MODES:
+            raise ValueError(f"unknown mode: {mode!r}")
+        self._adapter = adapter
+        self._reader = position_mode_reader
+        self._frames = frames
+        self._guard = guard
+        self._mode = mode
+        self._drop = drop_transport
+        self.call_count = 0
+        self.mutating_attempts = 0
+
+    def _enter(self, operation: str) -> None:
+        self._guard()
+        if operation in MUTATING_OPERATIONS and self._mode != MODE_EXECUTE:
+            self.mutating_attempts += 1
+            raise MutationRefused(f"{operation} is not reachable in a dry run")
+        self.call_count += 1
+
+    # ----- per-case queries ---------------------------------------------------- #
+
+    async def query_order(self, *, symbol: str, client_order_id: str) -> ProbeObservation:
+        self._enter("query_order")
+        result: ProbeObservation = await self._adapter.query_order(
+            symbol=symbol, client_order_id=client_order_id
+        )
+        return result
+
+    async def query_algo_order(self, *, client_algo_id: str) -> ProbeObservation:
+        self._enter("query_algo_order")
+        result: ProbeObservation = await self._adapter.query_algo_order(
+            client_algo_id=client_algo_id
+        )
+        return result
+
+    # ----- mutating operations ------------------------------------------------- #
+
+    async def new_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        client_order_id: str,
+        position_side: str,
+        time_in_force: str,
+        reduce_only: bool | None,
+    ) -> ProbeObservation:
+        self._enter("new_limit_order")
+        result: ProbeObservation = await self._adapter.new_limit_order(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            price=price,
+            client_order_id=client_order_id,
+            position_side=position_side,
+            time_in_force=time_in_force,
+            reduce_only=reduce_only,
+        )
+        return result
+
+    async def new_market_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        client_order_id: str,
+        position_side: str,
+        reduce_only: bool | None,
+    ) -> ProbeObservation:
+        self._enter("new_market_order")
+        result: ProbeObservation = await self._adapter.new_market_order(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            client_order_id=client_order_id,
+            position_side=position_side,
+            reduce_only=reduce_only,
+        )
+        return result
+
+    async def new_conditional_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        order_type: str,
+        client_algo_id: str,
+        position_side: str,
+        trigger_price: Decimal,
+        working_type: str,
+        quantity: Decimal | None = None,
+        reduce_only: bool | None = None,
+        close_position: bool | None = None,
+        price: Decimal | None = None,
+        time_in_force: str | None = None,
+    ) -> ProbeObservation:
+        self._enter("new_conditional_order")
+        result: ProbeObservation = await self._adapter.new_conditional_order(
+            symbol=symbol,
+            side=side,
+            order_type=order_type,
+            client_algo_id=client_algo_id,
+            position_side=position_side,
+            trigger_price=trigger_price,
+            working_type=working_type,
+            quantity=quantity,
+            reduce_only=reduce_only,
+            close_position=close_position,
+            price=price,
+            time_in_force=time_in_force,
+        )
+        return result
+
+    async def cancel_order(self, *, symbol: str, client_order_id: str) -> ProbeObservation:
+        self._enter("cancel_order")
+        result: ProbeObservation = await self._adapter.cancel_order(
+            symbol=symbol, client_order_id=client_order_id
+        )
+        return result
+
+    async def cancel_algo_order(self, *, client_algo_id: str) -> ProbeObservation:
+        self._enter("cancel_algo_order")
+        result: ProbeObservation = await self._adapter.cancel_algo_order(
+            client_algo_id=client_algo_id
+        )
+        return result
+
+    async def cancel_all_open_orders(self, *, symbol: str) -> ProbeObservation:
+        self._enter("cancel_all_open_orders")
+        result: ProbeObservation = await self._adapter.cancel_all_open_orders(symbol=symbol)
+        return result
+
+    async def cancel_all_algo_open_orders(self, *, symbol: str) -> ProbeObservation:
+        self._enter("cancel_all_algo_open_orders")
+        result: ProbeObservation = await self._adapter.cancel_all_algo_open_orders(symbol=symbol)
+        return result
+
+    # ----- state reads --------------------------------------------------------- #
+
+    async def open_orders(self, *, symbol: str) -> ProbeObservation:
+        self._enter("open_orders")
+        result: ProbeObservation = await self._adapter.open_orders(symbol=symbol)
+        return result
+
+    async def open_algo_orders(self, *, symbol: str) -> ProbeObservation:
+        self._enter("open_algo_orders")
+        result: ProbeObservation = await self._adapter.open_algo_orders(symbol=symbol)
+        return result
+
+    async def positions(self, *, symbol: str) -> ProbeObservation:
+        self._enter("positions")
+        result: ProbeObservation = await self._adapter.positions(symbol=symbol)
+        return result
+
+    async def user_trades(self, *, symbol: str, order_id: int | None = None) -> ProbeObservation:
+        self._enter("user_trades")
+        result: ProbeObservation = await self._adapter.user_trades(symbol=symbol, order_id=order_id)
+        return result
+
+    async def account_balance(self) -> ProbeObservation:
+        self._enter("account_balance")
+        result: ProbeObservation = await self._adapter.account_balance()
+        return result
+
+    async def mark_price(self, *, symbol: str) -> ProbeObservation:
+        self._enter("mark_price")
+        result: ProbeObservation = await self._adapter.mark_price(symbol=symbol)
+        return result
+
+    async def symbol_filters(self, *, symbol: str) -> ProbeObservation:
+        self._enter("symbol_filters")
+        result: ProbeObservation = await self._adapter.symbol_filters(symbol=symbol)
+        return result
+
+    async def position_mode(self) -> ProbeObservation:
+        """The account's position mode as an observation (`dual_side_position` true/false)."""
+        self._enter("position_mode")
+        try:
+            mode = await self._reader.get_position_mode()
+        except RestGateRefusal as refusal:
+            raise ProbeBanned(refusal.reason, refusal.retry_after_seconds) from None
+        except Exception as exc:  # an exchange error is data, like every probe answer
+            return _position_mode_failure(exc)
+        flag = _TRUE if mode.dual_side_position else _FALSE
+        return ProbeObservation(
+            operation="position_mode", ok=True, summary={"dual_side_position": flag}, error=None
+        )
+
+    # ----- the stream ---------------------------------------------------------- #
+
+    def marker(self) -> int:
+        return self._frames.marker()
+
+    def frames_since(self, marker: int) -> list[dict[str, str]]:
+        return self._frames.events_since(marker)
+
+    def raw_frames_since(self, marker: int) -> list[object]:
+        return self._frames.raw_since(marker)
+
+    def stream_states_since(self, marker: int) -> list[str]:
+        return self._frames.states_since(marker)
+
+    async def drop_stream_transport(self) -> bool:
+        if self._drop is None:
+            return False
+        self._guard()
+        return await self._drop()
+
+
+class _GuardedListenKeys:
+    """The listenKey port with the environment guard before each call."""
+
+    def __init__(self, inner: ListenKeyPort, guard: Guard) -> None:
+        self._inner = inner
+        self._guard = guard
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}()"
+
+    async def start(self) -> str:
+        self._guard()
+        return await self._inner.start()
+
+    async def keepalive(self) -> None:
+        self._guard()
+        await self._inner.keepalive()
+
+    async def close(self) -> None:
+        self._guard()
+        await self._inner.close()
+
+
+class _GuardedTransport:
+    """`SdkUserDataTransport` with the environment guard before every connect and rebuild."""
+
+    def __init__(self, inner: SdkUserDataTransport, guard: Guard) -> None:
+        self._inner = inner
+        self._guard = guard
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self._inner!r})"
+
+    async def connect(self, listen_key: str) -> None:
+        self._guard()
+        await self._inner.connect(listen_key)
+
+    async def resubscribe(self, listen_key: str) -> None:
+        self._guard()
+        await self._inner.resubscribe(listen_key)
+
+    async def rebuild(self, listen_key: str) -> None:
+        self._guard()
+        await self._inner.rebuild(listen_key)
+
+    async def close(self) -> None:
+        await self._inner.close()
+
+    def set_message_sink(self, sink: Callable[[object], None]) -> None:
+        self._inner.set_message_sink(sink)
+
+    def set_connection_sink(self, sink: Callable[[str], None]) -> None:
+        self._inner.set_connection_sink(sink)
+
+    def private_connection_open(self) -> bool:
+        return self._inner.private_connection_open()
+
+    def diagnostics(self) -> object:
+        return self._inner.diagnostics()
+
+
+class StreamNotLive(Exception):  # noqa: N818 - a condition of the run, recorded as data
+    """The user-data stream did not reach LIVE; the cases still run without frames."""
+
+
+class LiveStream:
+    """The user-data supervisor of plan 18-14 with the raw-frame tap, for the whole run.
+
+    Typed events, raw payloads and state names go to the run's `FrameLog`; `start` raises
+    `StreamNotLive` (after stopping what it started) when the supervisor is not LIVE; `stop`
+    stops with `close_listen_key=True`.
+    """
+
+    def __init__(
+        self,
+        *,
+        transport: Any,
+        listen_keys: Any,
+        limits: StreamLimits,
+        clock: Callable[[], datetime],
+        sleep: Callable[[float], Awaitable[None]],
+        rest_gate: RestRateLimitGate,
+        snapshot_provider: Callable[[], Awaitable[object]],
+        frames: FrameLog,
+        guard: Guard,
+    ) -> None:
+        self._transport = transport
+        self._listen_keys = listen_keys
+        self._limits = limits
+        self._clock = clock
+        self._sleep = sleep
+        self._rest_gate = rest_gate
+        self._snapshot_provider = snapshot_provider
+        self._frames = frames
+        self._guard = guard
+        self._exits = contextlib.ExitStack()
+        self._supervisor: UserDataSupervisor | None = None
+        self.failures: list[str] = []
+
+    def _on_state(self, state: StreamState, reason: str) -> None:
+        del reason
+        self._frames.add_state(state.value)
+
+    def _on_event(self, event: TrustedEvent) -> None:
+        self._frames.add_event(event_record(event))
+
+    def _on_snapshot(self, snapshot: StreamSnapshot, epoch: int) -> None:
+        del snapshot, epoch
+
+    def _on_failure(self, reason: str) -> None:
+        self.failures.append(reason)
+
+    async def start(self) -> None:
+        self._guard()
+        self._exits.enter_context(capture_raw_user_events(self._frames.add_raw))
+        adapter = UserDataAdapter(
+            transport=self._transport,
+            listen_keys=self._listen_keys,
+            limits=self._limits,
+            clock=self._clock,
+        )
+        self._supervisor = UserDataSupervisor(
+            adapter=adapter,
+            limits=self._limits,
+            clock=self._clock,
+            sleep=self._sleep,
+            rest_gate=self._rest_gate,
+            snapshot_provider=self._snapshot_provider,
+            on_state_change=self._on_state,
+            on_event=self._on_event,
+            on_snapshot=self._on_snapshot,
+            on_failure=self._on_failure,
+        )
+        try:
+            await self._supervisor.start()
+        except BaseException:
+            await self.stop()
+            raise
+        if self._supervisor.state is not StreamState.LIVE:
+            await self.stop()
+            raise StreamNotLive(", ".join(self.failures) or "the stream is not LIVE")
+
+    async def stop(self) -> None:
+        try:
+            if self._supervisor is not None:
+                await self._supervisor.stop(close_listen_key=True)
+        finally:
+            self._supervisor = None
+            self._exits.close()
+
+
+def assert_stream_url(url: object, environment: Environment) -> None:
+    """The streams URL of the transport must be the row URL (with or without the SDK suffix)."""
+    expected = binance_client.ENVIRONMENT_ROWS[environment].ws_streams_url
+    if expected is None:
+        raise EnvironmentNotConfigured(
+            f"environment {environment.value} has no configured URL for surface WS_STREAMS"
+        )
+    for accepted in (expected, expected + SDK_STREAMS_PATH_SUFFIX):
+        try:
+            assert_endpoint_url(url, accepted)
+        except EndpointViolation:
+            continue
+        return
+    raise EndpointViolation(
+        f"{environment.value} WS_STREAMS transport endpoint does not match its environment row"
+    )
+
+
+def _drop_transport(connection: Any) -> None:
+    """End the TCP connection beneath an SDK connection without a WebSocket close handshake.
+
+    Closes the aiohttp response that backs the connection's websocket, like a network
+    failure (copied from `scripts/user_data_smoke.py`, which pins the attribute in a test).
+    """
+    connection.websocket._response.close()
+
+
+def live_clock() -> datetime:
+    """The only wall-clock read of the tool (executed runs only): aware UTC."""
+    return datetime.now(UTC)
+
+
+def build_live_rig(
+    config: ProbeConfig,
+    *,
+    environ: Mapping[str, str],
+    client_factory: Callable[..., Any] | None = None,
+    clock: Callable[[], datetime] | None = None,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
+) -> ProbeRig:
+    """The executed rig: credentials, the guarded SDK client and ONE shared REST gate.
+
+    Constructed only in `--execute` mode, after the typed phrase. The SDK client comes from
+    `build_sdk_client` (REST and WS_STREAMS, the ratified client limits); the presence of a
+    LIVE credential variable refuses; `assert_environment` and the streams-URL check run
+    before every call. One `RestRateLimitGate` (the ratified rate-limit policy, the rig
+    clock) is shared by the probe adapter, its public reader, the position-mode reader, the
+    listenKey port and the supervisor: a 418 ban or a 429 pause stops every REST call.
+    """
+    from binance_sdk_derivatives_trading_usds_futures.websocket_streams import (  # noqa: PLC0415
+        DerivativesTradingUsdsFuturesWebSocketStreams,
+    )
+    from src.adapters.binance_usdm import BinanceUsdmAdapter  # noqa: PLC0415
+
+    rig_clock = clock if clock is not None else live_clock
+    rig_sleep = sleep if sleep is not None else asyncio.sleep
+    environment = config.environment
+    limits = config.limits
+    require_configured(environment)
+    spec = binance_client.credential_spec_for(environment)
+    live_spec = binance_client.credential_spec_for(Environment.LIVE)
+    credentials = binance_client.load_api_credentials(
+        environ, spec=spec, repo_root=REPO_ROOT, refuse_if_present=(live_spec,)
+    )
+    factory = client_factory if client_factory is not None else binance_client.build_sdk_client
+    bundle = factory(
+        environment=environment,
+        credentials=credentials,
+        limits=limits.client,
+        surfaces=SURFACES,
+    )
+    row = binance_client.ENVIRONMENT_ROWS[environment]
+    stream_config = ConfigurationWebSocketStreams(
+        stream_url=row.ws_streams_url,
+        reconnect_delay=limits.stream.sdk_reconnect_delay_ms,
+        reconnect_attempts=limits.stream.sdk_reconnect_attempts,
+    )
+
+    def guard() -> None:
+        binance_client.assert_environment(bundle)
+        assert_stream_url(stream_config.stream_url, environment)
+
+    guard()
+    gate = RestRateLimitGate(policy=limits.signed.rate_limit, clock=rig_clock)
+    public = BinancePublicMarketData(sdk_client=bundle.client, rest_gate=gate)
+    probe = BinanceProbeAdapter(
+        bundle.client,
+        policy=limits.signed,
+        rest_gate=gate,
+        public=public,
+    )
+    usdm = BinanceUsdmAdapter(
+        bundle.client,
+        rest_gate=gate,
+        signed_call_policy=limits.signed,
+        clock=rig_clock,
+    )
+    frames = FrameLog()
+    listen_keys = _GuardedListenKeys(
+        SdkListenKeyPort(bundle.client.rest_api, rest_gate=gate), guard
+    )
+    clients: list[Any] = []
+
+    def ws_factory(configuration: ConfigurationWebSocketStreams) -> Any:
+        client = DerivativesTradingUsdsFuturesWebSocketStreams(configuration)
+        clients.append(client)
+        return client
+
+    transport = _GuardedTransport(
+        SdkUserDataTransport(stream_config, client_factory=ws_factory), guard
+    )
+    install_sdk_noise_guard()
+
+    async def snapshot() -> object:
+        guard()
+        orders = await usdm.snapshot_open_normal_orders(symbol=config.symbol)
+        algo = await usdm.snapshot_open_algo_orders(symbol=config.symbol)
+        positions = await usdm.snapshot_positions(symbol=config.symbol)
+        return {
+            "open_orders": len(orders),
+            "open_algo_orders": len(algo),
+            "positions": len(positions),
+        }
+
+    async def drop() -> bool:
+        private = [
+            connection
+            for connection in (clients[-1].connections if clients else [])
+            if connection.url_path == PRIVATE_URL_PATH
+        ]
+        if not private:
+            return False
+        _drop_transport(private[0])
+        return True
+
+    stream = LiveStream(
+        transport=transport,
+        listen_keys=listen_keys,
+        limits=limits.stream,
+        clock=rig_clock,
+        sleep=rig_sleep,
+        rest_gate=gate,
+        snapshot_provider=snapshot,
+        frames=frames,
+        guard=guard,
+    )
+    port = GuardedProbePort(
+        probe,
+        position_mode_reader=usdm,
+        frames=frames,
+        guard=guard,
+        mode=MODE_EXECUTE,
+        drop_transport=drop,
+    )
+    return ProbeRig(
+        port=port,
+        clock=rig_clock,
+        sleep=rig_sleep,
+        real=True,
+        stream=stream,
+        live_calls=lambda: port.call_count,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1484,6 +2264,138 @@ def check_probe_evidence(document: object) -> list[str]:
     return problems
 
 
+def _verdict(result: str, reason: str, proof_class: object) -> dict[str, Any]:
+    return {"result": result, "reason": reason, "proof_class": proof_class}
+
+
+def _expected_cases(document: Mapping[str, Any]) -> tuple[str, ...]:
+    """Every required case plus each optional case the document's settings enable."""
+    settings = document.get("settings")
+    optional = settings.get("optional_cases") if isinstance(settings, Mapping) else None
+    enabled = {
+        case_id
+        for key, case_id in OPTIONAL_CASES.items()
+        if isinstance(optional, Mapping) and optional.get(key) is True
+    }
+    return tuple(
+        case_id for case_id in CASE_ORDER if case_id in REQUIRED_CASES or case_id in enabled
+    )
+
+
+def _case_verdict(item: object) -> tuple[str, str]:
+    if not isinstance(item, Mapping):
+        return VERDICT_FAIL, "the case was not run"
+    status = item.get("status")
+    if status == OBSERVED:
+        observations = item.get("observations")
+        if not isinstance(observations, list) or not observations:
+            return VERDICT_FAIL, "OBSERVED without observations"
+        for index, answer in enumerate(observations):
+            if not isinstance(answer, Mapping) or not isinstance(answer.get("ok"), bool):
+                return VERDICT_FAIL, f"answer {index} has no ok flag"
+            if answer["ok"]:
+                continue
+            error = answer.get("error")
+            missing = [
+                key for key in _ANSWER_KEYS if not isinstance(error, Mapping) or key not in error
+            ]
+            if missing:
+                return VERDICT_FAIL, f"answer {index} lacks {missing}"
+        return VERDICT_PASS, f"OBSERVED: {len(observations)} exchange answer(s) recorded"
+    if status == NOT_OBSERVED:
+        reason = item.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            return VERDICT_PASS, f"NOT_OBSERVED: {reason}"
+        return VERDICT_FAIL, "NOT_OBSERVED without a reason"
+    if status == NOT_REHEARSED:
+        return VERDICT_FAIL, "NOT_REHEARSED (dry run: nothing was sent)"
+    return VERDICT_FAIL, f"status {status}: {item.get('reason')}"
+
+
+def _cleanup_verdict(document: Mapping[str, Any]) -> tuple[str, str]:
+    cleanup = document.get("cleanup")
+    final = cleanup.get("final") if isinstance(cleanup, Mapping) else None
+    if not isinstance(final, Mapping):
+        return VERDICT_FAIL, "no final cleanup record"
+    remaining = final.get("remaining")
+    if final.get("status") != CLEANUP_FLAT or not isinstance(remaining, Mapping):
+        return VERDICT_FAIL, f"final cleanup status {final.get('status')}"
+    if (
+        remaining.get("open_orders") != 0
+        or remaining.get("open_algo_orders") != 0
+        or remaining.get("positions") != []
+    ):
+        return VERDICT_FAIL, "the final state is not zero orders, zero algo orders and flat"
+    return VERDICT_PASS, "zero open orders, zero open algo orders, flat position"
+
+
+def probe_acceptance_verdict(document: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """PASS or FAIL with a reason per case (research C4) and per rule, plus `overall`.
+
+    A case passes when it is OBSERVED with (class, code, category, message) for each error
+    answer, or NOT_OBSERVED with a reason. The rules: the final cleanup shows zero open orders,
+    zero open algo orders and a flat position; the account state before and after is present;
+    the label and the D055-OPEN statement are present; the evidence passes
+    `check_probe_evidence`; the proof class is REAL_DEMO (FAKE evidence never passes).
+    `overall` is PASS only when every entry passes. Every entry carries the proof class.
+    """
+    proof = document.get("proof_class")
+    by_id = {
+        item.get("case_id"): item
+        for item in document.get("cases") or []
+        if isinstance(item, Mapping)
+    }
+    out: dict[str, dict[str, Any]] = {}
+    for case_id in _expected_cases(document):
+        result, reason = _case_verdict(by_id.get(case_id))
+        out[case_id] = _verdict(result, reason, proof)
+    result, reason = _cleanup_verdict(document)
+    out["cleanup"] = _verdict(result, reason, proof)
+    accounts = [document.get(key) for key in ("account_before", "account_after")]
+    read = all(
+        isinstance(state, Mapping) and state.get("status") == ACCOUNT_READ for state in accounts
+    )
+    out["account_state"] = _verdict(
+        VERDICT_PASS if read else VERDICT_FAIL,
+        "account state recorded before and after" if read else "account state missing",
+        proof,
+    )
+    label = document.get("label")
+    d055 = document.get("d055")
+    status = d055.get("status") if isinstance(d055, Mapping) else None
+    marked = (
+        isinstance(label, str)
+        and LABEL in label
+        and isinstance(status, str)
+        and status.startswith("OPEN")
+    )
+    out["label_and_d055"] = _verdict(
+        VERDICT_PASS if marked else VERDICT_FAIL,
+        "labelled demo-observed, not mainnet; D055 stays OPEN"
+        if marked
+        else "the label or the D055-OPEN statement is missing",
+        proof,
+    )
+    problems = check_probe_evidence(document)
+    out["evidence"] = _verdict(
+        VERDICT_FAIL if problems else VERDICT_PASS,
+        "; ".join(problems[:3]) if problems else "the evidence passes check_probe_evidence",
+        proof,
+    )
+    out["proof_class"] = _verdict(
+        VERDICT_PASS if proof == PROOF_REAL_DEMO else VERDICT_FAIL,
+        "executed on Demo" if proof == PROOF_REAL_DEMO else "FAKE evidence never passes",
+        proof,
+    )
+    failing = sorted(key for key, entry in out.items() if entry["result"] != VERDICT_PASS)
+    out["overall"] = _verdict(
+        VERDICT_FAIL if failing else VERDICT_PASS,
+        f"failing: {failing}" if failing else "every case and every rule passes",
+        proof,
+    )
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Command line.
 # --------------------------------------------------------------------------- #
@@ -1505,8 +2417,19 @@ def main(
     is_tty: Callable[[], bool] | None = None,
     read_confirmation: Callable[[str], str] | None = None,
     rig_factory: Callable[[ProbeConfig], ProbeRig] | None = None,
+    sdk_client_factory: Callable[..., Any] | None = None,
+    configure_output: Callable[[Mapping[str, str]], object] | None = None,
+    clock: Callable[[], datetime] | None = None,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
 ) -> int:
-    """Single entry point. Every seam defaults to the real implementation."""
+    """Single entry point. Every seam defaults to the real implementation.
+
+    The limits files, the environment row and the `--execute` gate are checked before any
+    network call. An executed run configures the redacting logging (`configure_logging`)
+    before any credential is loaded (`configure_output` replaces it in tests) and builds the
+    live rig with `clock` and `sleep` (default `live_clock` and `asyncio.sleep`); a dry run
+    always runs on virtual time.
+    """
     env: Mapping[str, str] = os.environ if environ is None else environ
     try:
         config = parse_config(argv)
@@ -1517,8 +2440,6 @@ def main(
                 is_tty if is_tty is not None else sys.stdin.isatty,
                 read_confirmation if read_confirmation is not None else input,
             )
-            if rig_factory is None:
-                raise UsageError("the live rig is not available in this build")
     except (
         UsageError,
         LimitsFileRefused,
@@ -1528,14 +2449,37 @@ def main(
         print(f"refused ({type(exc).__name__}): {exc}", file=sys.stderr)
         return EXIT_REFUSED
 
-    factory: Callable[[ProbeConfig], ProbeRig] = (
-        rig_factory if rig_factory is not None else build_dry_run_rig
-    )
-    rig = factory(config)
+    if config.mode == MODE_EXECUTE:
+        (configure_output if configure_output is not None else configure_logging)(env)
+
+    factory: Callable[[ProbeConfig], ProbeRig]
+    if rig_factory is not None:
+        factory = rig_factory
+    elif config.mode == MODE_EXECUTE:
+
+        def factory(cfg: ProbeConfig) -> ProbeRig:
+            return build_live_rig(
+                cfg, environ=env, client_factory=sdk_client_factory, clock=clock, sleep=sleep
+            )
+
+    else:
+        factory = build_dry_run_rig
+
+    try:
+        rig = factory(config)
+    except (CredentialError, CredentialNamesNotRatified, EnvironmentNotConfigured) as exc:
+        print(f"refused ({type(exc).__name__}): {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    except (EndpointViolation, LiveNotEnabled) as exc:
+        print(f"ABORTED before any order ({type(exc).__name__}): {exc}", file=sys.stderr)
+        return EXIT_ABORTED
+
+    print(BANNER)
     redactor = Redactor.from_environ(env)
     recorder = ProbeRecorder()
     code = asyncio.run(run_probe(config, rig, recorder, redactor=redactor))
     document = recorder.document(config)
+    document["acceptance"] = probe_acceptance_verdict(document)
     try:
         path = write_evidence_atomic(
             config.evidence_dir, evidence_stem(config, document), document, redactor
@@ -1545,6 +2489,7 @@ def main(
         return EXIT_FAILED
     print(f"evidence: {path}")
     print(f"outcome: {document['outcome']}")
+    print(f"acceptance: {document['acceptance']['overall']['result']}")
     return code
 
 
