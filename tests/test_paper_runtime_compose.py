@@ -303,3 +303,108 @@ def test_the_production_public_adapter_maps_sdk_transport_errors() -> None:
     """The paper path's reader raises project errors, so the poller's one retry can match them."""
     public = runtime._resolve_public(runtime.LoopWiring())
     assert public._project_errors is True
+
+
+# ---- plan 16-56 Task 3: one domain for the loader and the consumers (B1-WR-10, Q2 = A) -------- #
+
+
+def _config_with(rig: object, key: str, value: int) -> None:
+    from tests.test_paper_runtime_admission import CONFIG_TEXT
+
+    lines = [
+        f"{key} = {value}" if line.startswith(f"{key} ") else line
+        for line in CONFIG_TEXT.splitlines()
+    ]
+    rig.config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")  # type: ignore[attr-defined]
+
+
+def test_a_zero_close_lag_exits_4_before_runtime_start_and_5_loads(
+    admitted_rig: object, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from src.paper.vocabulary import RuntimeEventType
+
+    from tests.test_paper_runtime_admission import _Rig
+
+    rig = admitted_rig
+    assert isinstance(rig, _Rig)
+    assert rig.run("--pin-epoch") == 0
+    _config_with(rig, "minute_close_lag_seconds", 0)
+    capsys.readouterr()
+
+    assert rig.run() == ExitCode.CONFIG_NOT_RATIFIED == 4
+    assert "timing.minute_close_lag_seconds" in capsys.readouterr().err
+    assert RuntimeEventType.RUNTIME_START not in rig.types()
+
+    _config_with(rig, "minute_close_lag_seconds", 5)  # the ratified value loads
+    assert (
+        runtime_config.load_runtime_config(str(rig.config_path)).timing.minute_close_lag_seconds
+        == 5
+    )
+
+
+def test_the_loader_and_the_minute_poller_accept_exactly_the_same_close_lag_domain() -> None:
+    import tomllib
+
+    from src.paper.live_minutes import LiveMinutePoller, LiveMinuteSource
+
+    from tests.test_paper_runtime_admission import CONFIG_TEXT
+
+    for value in (-1, 0, 1, 5, 60):
+        raw = tomllib.loads(CONFIG_TEXT)
+        raw["timing"]["minute_close_lag_seconds"] = value
+        try:
+            runtime_config.parse_runtime_config(raw)
+            loader_ok = True
+        except runtime_config.ConfigNotRatified:
+            loader_ok = False
+        try:
+            LiveMinutePoller(
+                feed=object(),  # type: ignore[arg-type]
+                source=LiveMinuteSource(),
+                poll_interval_seconds=1,
+                close_lag_seconds=value,
+            )
+            poller_ok = True
+        except ValueError:
+            poller_ok = False
+        assert loader_ok is poller_ok, value
+
+
+def test_every_timing_value_the_loader_accepts_builds_the_shadow_consumers() -> None:
+    """Test 4: a value `load_runtime_config` accepts never makes a SHADOW consumer raise."""
+    import tomllib
+
+    from tests.test_paper_runtime_admission import CONFIG_TEXT
+
+    for key in runtime_config.TIMING_KEYS:
+        for value in (-1, 0, 1, 2, 3600):
+            raw = tomllib.loads(CONFIG_TEXT)
+            raw["timing"][key] = value
+            try:
+                config = runtime_config.parse_runtime_config(raw)
+            except runtime_config.ConfigNotRatified:
+                continue
+            runtime.check_consumer_domains(config)  # raises ConfigNotRatified otherwise
+
+
+def test_a_consumer_refusing_a_loaded_value_exits_4_before_runtime_start(
+    admitted_rig: object, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A future consumer narrower than the loader still refuses before the record, never after."""
+    import src.paper.live_minutes as live_minutes
+    from src.paper.vocabulary import RuntimeEventType
+
+    from tests.test_paper_runtime_admission import _Rig
+
+    rig = admitted_rig
+    assert isinstance(rig, _Rig)
+    assert rig.run("--pin-epoch") == 0
+    capsys.readouterr()
+
+    def narrower(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("close_lag_seconds must be at least 30")
+
+    monkeypatch.setattr(live_minutes.LiveMinutePoller, "__init__", narrower)
+    assert rig.run() == ExitCode.CONFIG_NOT_RATIFIED
+    assert RuntimeEventType.RUNTIME_START not in rig.types()
+    assert "ValueError" in capsys.readouterr().err

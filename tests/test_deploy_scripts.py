@@ -135,7 +135,7 @@ def test_tracked_deploy_scripts_are_executable_in_the_index() -> None:
 
 # --- 16-55 Task 1: deploy/soak-image.sh runs the in-image load check before it records ------
 
-IN_IMAGE_CONFIG = "/app/config/paper/paper-runtime-v1.toml"
+IN_IMAGE_CONFIG = "/app/config/paper/paper-runtime-v2.toml"
 FAKE_IMAGE_ID = "sha256:" + "ab" * 32
 
 # A docker stub: records each call, answers `image inspect` with a fixed id and exits from

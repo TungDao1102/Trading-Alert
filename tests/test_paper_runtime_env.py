@@ -78,7 +78,7 @@ def test_no_binance_variable_means_no_refusal() -> None:
 def test_read_env_keeps_only_allowed_names() -> None:
     environ = {
         "DATABASE_URL": "postgresql+psycopg://u@h/d",
-        "PAPER_RUNTIME_CONFIG": "config/paper/paper-runtime-v1.toml",
+        "PAPER_RUNTIME_CONFIG": "config/paper/paper-runtime-v2.toml",
         "UNRELATED_THING": "leak-me",
         "PATH": "/usr/bin",
     }

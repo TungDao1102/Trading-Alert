@@ -377,7 +377,7 @@ def test_the_path_check_names_a_dockerignore_exclusion() -> None:
 
 # --- 16-55 Task 1: the in-image load check (scripts/check_image_paths.py) -------------------
 
-RUNTIME_CONFIG_V1 = REPO_ROOT / "config" / "paper" / "paper-runtime-v1.toml"
+RUNTIME_CONFIG = REPO_ROOT / "config" / "paper" / "paper-runtime-v2.toml"
 
 
 def _check_module() -> Any:
@@ -389,7 +389,7 @@ def _check_module() -> Any:
 def _config_values() -> list[str]:
     import tomllib
 
-    raw = tomllib.loads(RUNTIME_CONFIG_V1.read_text(encoding="utf-8"))
+    raw = tomllib.loads(RUNTIME_CONFIG.read_text(encoding="utf-8"))
     values: list[str] = []
     for section in raw.values():
         for value in section.values():
@@ -403,13 +403,13 @@ def test_image_check_passes_on_the_repository_and_prints_names_only(
 ) -> None:
     check = _check_module()
     code = check.main(
-        ["--root", str(REPO_ROOT)], environ={"PAPER_RUNTIME_CONFIG": str(RUNTIME_CONFIG_V1)}
+        ["--root", str(REPO_ROOT)], environ={"PAPER_RUNTIME_CONFIG": str(RUNTIME_CONFIG)}
     )
     captured = capsys.readouterr()
     assert code == 0, captured.err
     lines = captured.out.splitlines()
     assert any("trend-pullback/research-run-1-a01" in ln for ln in lines), lines
-    assert any(RUNTIME_CONFIG_V1.as_posix() in ln for ln in lines), lines
+    assert any(RUNTIME_CONFIG.as_posix() in ln for ln in lines), lines
     text = captured.out + captured.err
     for value in _config_values():
         assert f"= {value}" not in text and f"={value}" not in text, value
@@ -422,15 +422,15 @@ def test_image_check_fails_naming_the_set_when_params_is_missing(
     check = _check_module()
     root = tmp_path / "app"
     (root / "config" / "paper").mkdir(parents=True)
-    config = root / "config" / "paper" / RUNTIME_CONFIG_V1.name
-    config.write_bytes(RUNTIME_CONFIG_V1.read_bytes())
+    config = root / "config" / "paper" / RUNTIME_CONFIG.name
+    config.write_bytes(RUNTIME_CONFIG.read_bytes())
     code = check.main(["--root", str(root)], environ={"PAPER_RUNTIME_CONFIG": str(config)})
     captured = capsys.readouterr()
     assert code == 1
     assert "trend-pullback/research-run-1-a01" in captured.err
 
 
-@pytest.mark.parametrize("value", [None, "", "/nonexistent/paper-runtime-v1.toml"])
+@pytest.mark.parametrize("value", [None, "", "/nonexistent/paper-runtime-v2.toml"])
 def test_image_check_fails_naming_the_variable_when_the_config_is_absent(
     value: str | None, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -450,7 +450,7 @@ def test_image_check_with_an_empty_allowlist_exits_0_and_says_so(
     monkeypatch.setattr(freeze, "PAPER_START_ALLOWLIST", ())
     check = _check_module()
     code = check.main(
-        ["--root", str(REPO_ROOT)], environ={"PAPER_RUNTIME_CONFIG": str(RUNTIME_CONFIG_V1)}
+        ["--root", str(REPO_ROOT)], environ={"PAPER_RUNTIME_CONFIG": str(RUNTIME_CONFIG)}
     )
     assert code == 0
     assert "nothing is allowlisted" in capsys.readouterr().out
@@ -463,7 +463,7 @@ def test_image_check_runs_as_a_module_from_the_root() -> None:
     import sys
 
     env = {k: v for k, v in os.environ.items() if not k.startswith("BINANCE_")}
-    env["PAPER_RUNTIME_CONFIG"] = str(RUNTIME_CONFIG_V1)
+    env["PAPER_RUNTIME_CONFIG"] = str(RUNTIME_CONFIG)
     proc = subprocess.run(
         [sys.executable, "-m", "scripts.check_image_paths", "--root", str(REPO_ROOT)],
         cwd=REPO_ROOT,

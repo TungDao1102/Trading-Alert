@@ -56,6 +56,15 @@ adapter and ends the process with `ExitCode.FAIL_CLOSED_RUNTIME` WITHOUT a RUNTI
 the restart reads the open RUNTIME_START as a crash. A requested stop (SIGTERM or SIGINT)
 unsubscribes, closes the adapter and returns normally; `main` then records RUNTIME_STOP.
 
+The feed fails closed (plan 16-56, B1-CR-01). An exhausted WebSocket rebuild runs its REST
+backfill and then fails the process closed through the supervisor's `on_fatal` sink. The silence
+watchdog (16-DEC-WS-WATCHDOG) wakes at half of `health.feed_silence_timeout_seconds`: when no
+kline frame of any stream has arrived for longer than that bound, it enters the supervisor's
+bounded drop recovery once (the `WS_DISCONNECT` record marks the feed lost, live bars wait for
+the backfill, backfilled bars are history only and never evaluated); when no frame has arrived
+when the bound expires again, it fails the process closed. Both routes share one guard, so the
+process fails closed through `_fail` exactly once. Exit 7, no RUNTIME_STOP.
+
 Every consumer batch writes one PAPER_TICK_STATS record: the tick time, the batch counts, the
 dropped-event counts by reason (a host clock running behind drops closed bars, research P20) and
 the measured duration of the `BarPipeline.handle` call (assumption A10: a tick ends well inside a
@@ -387,6 +396,38 @@ def _admit(
     return entry, None
 
 
+def check_consumer_domains(config: RuntimeConfig) -> None:
+    """Refuse, before RUNTIME_START, a value the loader accepted but a consumer would refuse.
+
+    Builds the one SHADOW consumer with its own domain check (`LiveMinutePoller`, no I/O) from
+    the configuration (plan 16-56, B1-WR-10 Test 4): a `ValueError` or `TypeError` becomes
+    `ConfigNotRatified` (exit 4) instead of a fail-closed exit 7 after the start record.
+    """
+    from src.paper.live_minutes import LiveMinutePoller, LiveMinuteSource
+
+    try:
+        LiveMinutePoller(
+            feed=_NoMinuteFeed(),
+            source=LiveMinuteSource(),
+            poll_interval_seconds=config.timing.minute_poll_interval_seconds,
+            close_lag_seconds=config.timing.minute_close_lag_seconds,
+        )
+    except (ValueError, TypeError) as exc:
+        raise ConfigNotRatified(
+            [f"timing (a consumer refused a loaded value: {type(exc).__name__}: {exc})"]
+        ) from None
+
+
+class _NoMinuteFeed:
+    """The feed of the domain check: never called (the check builds, it does not poll)."""
+
+    async def klines(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("the domain check never polls")
+
+    async def mark_klines(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("the domain check never polls")
+
+
 def _state_from_env(values: Mapping[str, str]) -> RuntimeStatePort:
     """The production state port: journal rows on PostgreSQL (Q-J), never an in-memory fallback.
 
@@ -520,6 +561,10 @@ class LoopWiring:
     sleep: Callable[[timedelta], Awaitable[None]] | None = None
     queue_maxsize: int | None = None
     shadow: ShadowWiring | None = None
+    # The silence watchdog's monotonic seconds and its own sleep (plan 16-56); production binds
+    # neither (time.monotonic and asyncio.sleep).
+    feed_clock: Callable[[], float] | None = None
+    watchdog_sleep: Callable[[timedelta], Awaitable[None]] | None = None
 
 
 def _monotonic_ms() -> int:
@@ -644,6 +689,13 @@ class _LiveLoop:
         self._stop_waiter = (
             wiring.stop_waiter if wiring.stop_waiter is not None else _wait_for_stop_signal
         )
+        self._feed_clock: Callable[[], float] = (
+            wiring.feed_clock if wiring.feed_clock is not None else time.monotonic
+        )
+        self._watchdog_sleep = (
+            wiring.watchdog_sleep if wiring.watchdog_sleep is not None else _real_sleep
+        )
+        self._shutting_down = False
         self._stop = asyncio.Event()
         self._idle = asyncio.Event()
         self._idle.set()
@@ -664,6 +716,11 @@ class _LiveLoop:
             "on_fatal": self._sink_fatal,
         }
 
+    @property
+    def feed_clock(self) -> Callable[[], float]:
+        """The watchdog's monotonic seconds, shared with the supervisor's frame stamp."""
+        return self._feed_clock
+
     def _sink_closed_bar(self, bar: TaggedBar) -> None:
         self._enqueue(bar)
 
@@ -680,7 +737,7 @@ class _LiveLoop:
 
     def _sink_fatal(self, reason: str) -> None:
         """The supervisor's rebuild was exhausted after its backfill (B1-CR-01): exit 7."""
-        self._fail(RuntimeFailClosed(reason))
+        self._fail_feed(reason)
 
     def _enqueue(self, bar: TaggedBar) -> None:
         if self._fence is not None:
@@ -717,6 +774,71 @@ class _LiveLoop:
             reason = str(exc) if isinstance(exc, RuntimeFailClosed) else type(exc).__name__
             log.error("paper runtime failing closed", reason=reason)
         self._stop.set()
+
+    def _fail_feed(self, reason: str) -> None:
+        """The one guard of the two feed routes to exit 7 (the exhaustion sink and the watchdog).
+
+        Neither route calls `_fail` once a failure is stored, the stop is set or the teardown has
+        begun, so the process fails closed through `_fail` exactly once (plan 16-56, Test 1b).
+        """
+        if self._failure is not None or self._stop.is_set() or self._shutting_down:
+            log.info("paper runtime: a later feed failure cause is ignored", reason=reason)
+            return
+        self._fail(RuntimeFailClosed(reason))
+
+    # ---- the silence watchdog (plan 16-56, 16-DEC-WS-WATCHDOG) ------------------------------ #
+
+    def _finished(self) -> bool:
+        return self._stop.is_set() or self._shutting_down or self._failure is not None
+
+    async def _watch_feed(self) -> None:
+        """Detect a silent market connection; recover once within the bounds, else fail closed.
+
+        Wakes at half the bound (a STRUCTURAL sampling rate: a live loop then always has a stamp
+        younger than the bound). The bound is only the configuration's
+        `health.feed_silence_timeout_seconds`. The silence is measured from the supervisor's
+        connection-wide last-frame stamp, or from the watchdog's start before the first frame. A
+        silence longer than the bound starts the supervisor's bounded drop recovery once per
+        episode; a frame arriving after the silence began ends the episode; when the bound
+        expires again with no frame since the silence began, the process fails closed.
+        """
+        bound = float(self._context.config.health.feed_silence_timeout_seconds)
+        wake = timedelta(seconds=bound) / 2
+        watch_started = self._feed_clock()
+        silent_since: float | None = None
+        recovery_started: float | None = None
+        while not self._finished():
+            await self._watchdog_sleep(wake)
+            if self._finished():
+                return
+            now = self._feed_clock()
+            last = self._supervisor.last_frame_monotonic
+            reference = watch_started if last is None else max(last, watch_started)
+            if recovery_started is None or silent_since is None:
+                if now - reference > bound:
+                    silent_since, recovery_started = reference, now
+                    log.error(
+                        "paper runtime: market stream silent, entering the bounded recovery",
+                        silent_seconds=int(now - reference),
+                    )
+                    self._start_silence_recovery()
+            elif last is not None and last > silent_since:
+                log.info("paper runtime: market stream resumed after the recovery")
+                silent_since = recovery_started = None
+            elif now - recovery_started >= bound:
+                self._fail_feed(
+                    "market stream silent: no message on the connection since the silence began, "
+                    "after the bounded recovery (B1-CR-01, 16-DEC-WS-WATCHDOG)"
+                )
+                return
+
+    def _start_silence_recovery(self) -> None:
+        task = asyncio.get_running_loop().create_task(self._recover_from_silence())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _recover_from_silence(self) -> None:
+        await self._supervisor.recover_from_silence()
 
     # ---- the instance lease (plan 16-55, B1-WR-07) ----------------------------------------- #
 
@@ -863,6 +985,7 @@ class _LiveLoop:
                 await self._shadow.stop()
             raise RuntimeFailClosed(f"the WebSocket start failed ({type(exc).__name__})") from exc
         consumer = asyncio.create_task(self._consume())
+        self._tasks.add(asyncio.create_task(self._watch_feed()))
         if self._shadow is not None:
             self._tasks.add(asyncio.create_task(self._run_shadow_poller()))
         if self._constraints is not None:
@@ -891,6 +1014,7 @@ class _LiveLoop:
 
     async def _shutdown(self, consumer: asyncio.Task[None], *waiters: asyncio.Future[Any]) -> None:
         """Unsubscribe and close first, let a running batch finish, then cancel the rest."""
+        self._shutting_down = True  # no feed route may fail the process from here on
         await self._supervisor.stop()
         if self._shadow is not None:
             # Reverse of the start order: the feed first, then the Telegram application.
@@ -1015,6 +1139,7 @@ async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None
             on_connection_event=sinks["on_connection_event"],
             clock=context.clock,
             on_fatal=sinks["on_fatal"],
+            feed_clock=owner.feed_clock,
         )
 
     snapshot = context.clock()
@@ -1221,6 +1346,7 @@ def main(
 
     try:
         config = load_runtime_config(values.get("PAPER_RUNTIME_CONFIG"))
+        check_consumer_domains(config)
         port = state if state is not None else _state_from_env(values)
     except ConfigNotRatified as exc:
         return refuse(ExitCode.CONFIG_NOT_RATIFIED, str(exc))

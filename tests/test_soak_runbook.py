@@ -856,3 +856,16 @@ def test_the_restart_drill_lists_the_five_paths_with_commands_and_outcomes() -> 
     ):
         assert phrase in body, f"the drill lacks: {phrase}"
     assert "down -v" not in fenced and "--volumes" not in fenced
+
+
+# ---- plan 16-56 Task 3: the configuration in force is v2 (16-DEC-WS-WATCHDOG) --------------- #
+
+
+def test_the_soak_runbook_names_the_v2_configuration_in_force() -> None:
+    image = _sub20("20.6")
+    assert "/app/config/paper/paper-runtime-v2.toml" in image
+    assert "paper-runtime-v1.toml" not in image
+    project = _sub20("20.1")
+    assert "paper-runtime-v2.toml" in project
+    assert "feed_silence_timeout_seconds" in project
+    assert "16-DEC-WS-WATCHDOG" in project

@@ -17,6 +17,13 @@ replacement; the supervisor adds no rotation timer. It reacts to the SDK connect
   (plan 16-56, B1-CR-01), so the composition root fails the process closed (exit 7) and the
   restart policy restarts it, instead of leaving it up without a feed.
 
+Silence watchdog (plan 16-56, 16-DEC-WS-WATCHDOG): every kline frame of any stream, forming
+updates included, stamps one connection-wide monotonic time (`last_frame_monotonic`) in the SDK
+handler before the closed-bar filter, as one attribute write with no I/O. The live loop's
+watchdog reads it and, after a silence longer than its bound, calls `recover_from_silence`, which
+enters the same bounded drop recovery an SDK `close` takes (never a second one while a recovery
+is pending).
+
 Nothing is only logged (P9): backfilled bars go to `on_backfill` (tagged `REST_BACKFILL`),
 gaps go to `on_gap` with a reason code, connection events go to `on_connection_event`.
 
@@ -33,10 +40,11 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import structlog
 import tenacity
@@ -152,6 +160,7 @@ class PaperSupervisor:
         on_connection_event: Callable[[RuntimeEventType, datetime], None],
         clock: Callable[[], datetime] | None = None,
         on_fatal: Callable[[str], None] | None = None,
+        feed_clock: Callable[[], float] | None = None,
     ) -> None:
         self._ws = ws_adapter
         self._rest = rest_adapter
@@ -163,6 +172,12 @@ class PaperSupervisor:
         self._on_connection_event = on_connection_event
         self._on_fatal = on_fatal
         self._clock = clock if clock is not None else (lambda: datetime.now(UTC))
+        # The monotonic seconds of the silence watchdog (plan 16-56); injected by the loop.
+        self._feed_clock: Callable[[], float] = (
+            feed_clock if feed_clock is not None else time.monotonic
+        )
+        # The time of the last kline frame of any stream (None before the first frame).
+        self._last_frame_monotonic: float | None = None
         self._last_close: dict[tuple[str, str], datetime] = {}
         # Guards the check-and-set in _advance_last_close. SDK callbacks run on the event-loop
         # thread (research D6), so the lock only protects the race between the live path and
@@ -187,6 +202,11 @@ class PaperSupervisor:
         self._connection_handlers: dict[str, Callable[..., None]] = {
             event: self._make_connection_handler(event) for event in LIFECYCLE_EVENTS
         }
+
+    @property
+    def last_frame_monotonic(self) -> float | None:
+        """The feed-clock time of the last kline frame of any stream (None before the first)."""
+        return self._last_frame_monotonic
 
     def record_close(self, symbol: str, interval: str, close_time_utc: datetime) -> None:
         """Record the last-seen close for a pair.
@@ -282,6 +302,9 @@ class PaperSupervisor:
 
     def _make_kline_handler(self, symbol: str, interval: str) -> Callable[[WsKline], None]:
         def _on_kline(kline: WsKline) -> None:
+            # Any frame resets the one connection-wide silence clock (16-DEC-WS-WATCHDOG,
+            # correction 2): one attribute write, no I/O on the SDK thread.
+            self._last_frame_monotonic = self._feed_clock()
             # Only closed klines advance the dispatch and last-close state. Forming updates
             # (x=False) are ignored by design.
             if not kline.is_closed:
@@ -376,6 +399,36 @@ class PaperSupervisor:
             self._pending_events -= 1
             if self._pending_events == 0:
                 self._flush_held()
+
+    async def recover_from_silence(self) -> bool:
+        """The watchdog's entry into the bounded drop recovery an SDK `close` takes.
+
+        Runs `_recover_from_drop` under the recovery lock, with its `WS_DISCONNECT` record, and
+        holds live closed bars until its backfill has been handed over, exactly like an SDK
+        `close`. Returns False without doing anything when the supervisor is not running or a
+        recovery is already pending or rebuilding (no double recovery). `stop()` cancels it.
+        """
+        if (
+            not self._started
+            or self._stopping
+            or self._rebuilding
+            or self._pending_events > 0
+            or self._loop is None
+        ):
+            log.info("paper.supervisor.silence_recovery_skipped")
+            return False
+        self._pending_events += 1
+        task = cast("asyncio.Task[None] | None", asyncio.current_task())
+        if task is not None:
+            self._tasks.add(task)
+        try:
+            await self._run_event("close")
+        except Exception as exc:  # never into the caller's task: logged like an SDK event
+            log.error("paper.supervisor.event_failed", error=f"{type(exc).__name__}: {exc}")
+        finally:
+            if task is not None:
+                self._tasks.discard(task)
+        return True
 
     async def _verify_after_reconnect(self, event: str) -> None:
         """The SDK replaced or reopened the connection: verify the seam against REST."""

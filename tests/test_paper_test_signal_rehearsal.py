@@ -332,7 +332,7 @@ def test_a_second_run_on_the_same_database_refuses_and_writes_nothing(
 # Task 3: live mode guards, live minutes and the REAL_REHEARSAL evidence (D-13, D-14).
 # --------------------------------------------------------------------------- #
 
-CONFIG_FILE = REPO / "config" / "paper" / "paper-runtime-v1.toml"
+CONFIG_FILE = REPO / "config" / "paper" / "paper-runtime-v2.toml"
 FAKE_TOKEN = "123456789:" + "A" * 35  # the shape of a Telegram bot token
 
 

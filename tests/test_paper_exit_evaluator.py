@@ -687,13 +687,14 @@ max_ws_message_silence_seconds = 5400
 max_closed_bar_lateness_seconds = 60
 continuous_uncovered_ceiling_seconds = 14400
 freeze_tick_grace_seconds = 300
+feed_silence_timeout_seconds = 120
 
 [timing]
 sibling_4h_wait_seconds = 30
 constraint_snapshot_ttl_seconds = 600
 exchange_info_refresh_seconds = 300
 minute_poll_interval_seconds = 60
-minute_close_lag_seconds = 0
+minute_close_lag_seconds = 5
 healthcheck_max_bar_age_seconds = 7200
 rest_backfill_depth_bars = 50
 

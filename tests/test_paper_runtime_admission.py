@@ -46,6 +46,7 @@ max_ws_message_silence_seconds = 11
 max_closed_bar_lateness_seconds = 12
 continuous_uncovered_ceiling_seconds = 13
 freeze_tick_grace_seconds = 14
+feed_silence_timeout_seconds = 300
 
 [timing]
 sibling_4h_wait_seconds = 15
@@ -69,6 +70,7 @@ REQUIRED_KEYS = {
         "max_closed_bar_lateness_seconds",
         "continuous_uncovered_ceiling_seconds",
         "freeze_tick_grace_seconds",
+        "feed_silence_timeout_seconds",
     ),
     "timing": (
         "sibling_4h_wait_seconds",
@@ -514,6 +516,9 @@ def test_missing_section_exits_4(admitted: _Rig, capsys: pytest.CaptureFixture[s
         ("symbols", "symbols = []"),
         ("risk_rate", 'risk_rate = "not-a-number"'),
         ("freeze_tick_grace_seconds", "freeze_tick_grace_seconds = 0"),
+        ("feed_silence_timeout_seconds", "feed_silence_timeout_seconds = 0"),
+        ("feed_silence_timeout_seconds", "feed_silence_timeout_seconds = -1"),
+        ("minute_close_lag_seconds", "minute_close_lag_seconds = 0"),
     ],
 )
 def test_a_value_of_the_wrong_kind_exits_4(admitted: _Rig, key: str, replacement: str) -> None:

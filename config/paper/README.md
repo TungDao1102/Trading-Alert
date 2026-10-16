@@ -1,8 +1,10 @@
 # Paper runtime configuration
 
 This directory holds the ratified runtime configuration of the paper process
-(`python -m src.paper.runtime`). The values file `paper-runtime-v1.toml` is written only by plan
-16-34 from the user's answers. **This README lists the required keys and what they mean. It
+(`python -m src.paper.runtime`). The values file in force is `paper-runtime-v2.toml` (plan 16-56):
+every value of `paper-runtime-v1.toml`, which plan 16-34 wrote from the user's answers and which
+stays unchanged as history, plus the owner's watchdog key (`16-DEC-WS-WATCHDOG`). The loader
+refuses the v1 file for that missing key. **This README lists the required keys and what they mean. It
 carries no value, and the code carries no default for any of them.** The runtime refuses to start
 (`CONFIG_NOT_RATIFIED`) when `PAPER_RUNTIME_CONFIG` is unset, the file is missing or not valid
 TOML, or any key below is absent or invalid.
@@ -21,6 +23,7 @@ One key per line, so the checks of plans 16-27 and 16-34 can parse the list.
 - `max_closed_bar_lateness_seconds` - longest delay of a closed bar before it counts as late.
 - `continuous_uncovered_ceiling_seconds` - longest continuous uncovered time before the run is degraded.
 - `freeze_tick_grace_seconds` - grace of the freeze check, described below.
+- `feed_silence_timeout_seconds` - longest time without any message on the market connection before the live loop enters its bounded recovery; when no message has arrived when this bound expires again, the process fails closed (owner: `16-DEC-WS-WATCHDOG`; distinct from the coverage silence above and from the healthcheck bar age).
 
 Grace of the freeze check (REV-02, REV-18), one sentence per line:
 
@@ -34,7 +37,7 @@ Grace of the freeze check (REV-02, REV-18), one sentence per line:
 - `constraint_snapshot_ttl_seconds` - lifetime of a constraint snapshot before it is stale.
 - `exchange_info_refresh_seconds` - period between exchange-info refreshes.
 - `minute_poll_interval_seconds` - period of the REST minute poll.
-- `minute_close_lag_seconds` - how long after a minute closes it is read (may be zero, all others are strictly positive).
+- `minute_close_lag_seconds` - how long after a minute closes it is read (strictly positive, like every integer of the file; owner: `16-DEC-CLOSE-LAG-ZERO`).
 - `healthcheck_max_bar_age_seconds` - oldest bar the container healthcheck still accepts.
 - `rest_backfill_depth_bars` - unit: bars; how many bars a REST backfill reads.
 

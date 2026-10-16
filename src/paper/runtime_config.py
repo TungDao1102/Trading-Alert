@@ -32,7 +32,12 @@ Three things live here, all free of module-level side effects (stdlib plus the p
     line does not change), but it is not a refusal of the start gate.
 
 - The runtime configuration file (`RuntimeConfig`, `load_runtime_config`): every user-ratified
-  value is required and none has a default in code (L-09, O-07, REV-07).
+  value is required and none has a default in code (L-09, O-07, REV-07). Every integer is
+  strictly positive; `minute_close_lag_seconds` is no exception since plan 16-56 (owner decision
+  16-DEC-CLOSE-LAG-ZERO, B1-WR-10: the loader and the minute poller accept one domain). The file in
+  force is `config/paper/paper-runtime-v2.toml`, which adds the owner's
+  `[health] feed_silence_timeout_seconds` (16-DEC-WS-WATCHDOG); `paper-runtime-v1.toml` is the
+  historical version and is refused for the missing key.
 """
 
 from __future__ import annotations
@@ -116,6 +121,7 @@ HEALTH_KEYS: tuple[str, ...] = (
     "max_closed_bar_lateness_seconds",
     "continuous_uncovered_ceiling_seconds",
     "freeze_tick_grace_seconds",
+    "feed_silence_timeout_seconds",
 )
 TIMING_KEYS: tuple[str, ...] = (
     "sibling_4h_wait_seconds",
@@ -136,10 +142,6 @@ REQUIRED_KEYS: Mapping[str, tuple[str, ...]] = {
     "scope": SCOPE_KEYS,
 }
 
-# The only timing value that may be zero (a bar is read the instant it closes). Every other
-# integer of the file is strictly positive.
-_ZERO_ALLOWED = frozenset({"minute_close_lag_seconds"})
-
 
 class ConfigNotRatified(Exception):
     """The runtime configuration is absent, unreadable or incomplete (exit code 4)."""
@@ -147,6 +149,26 @@ class ConfigNotRatified(Exception):
     def __init__(self, problems: list[str]) -> None:
         self.problems = problems
         super().__init__("runtime configuration not ratified: " + ", ".join(problems))
+
+
+@dataclass(frozen=True)
+class RuntimeHealthConfig(HealthThresholds):
+    """The `[health]` section: the coverage thresholds plus the in-process watchdog bound.
+
+    `feed_silence_timeout_seconds` (plan 16-56, 16-DEC-WS-WATCHDOG) is how long the live loop
+    accepts no message on the market connection before it enters the bounded recovery, and,
+    when no message has arrived when the bound expires again, fails closed. It is distinct from
+    `max_ws_message_silence_seconds` (coverage evidence) and `healthcheck_max_bar_age_seconds`.
+    Required, strictly positive, no default.
+    """
+
+    feed_silence_timeout_seconds: int
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        value = self.feed_silence_timeout_seconds
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("feed_silence_timeout_seconds must be a positive integer")
 
 
 @dataclass(frozen=True)
@@ -174,7 +196,7 @@ class AccountConfig:
 class RuntimeConfig:
     """Every value of the ratified runtime configuration file. No field has a default."""
 
-    health: HealthThresholds
+    health: RuntimeHealthConfig
     timing: TimingConfig
     account: AccountConfig
     symbols: tuple[str, ...]
@@ -193,7 +215,7 @@ def _read_ints(
         value = section[key]
         if isinstance(value, bool) or not isinstance(value, int):
             problems.append(f"{label} (must be an integer)")
-        elif value < 0 or (value == 0 and key not in _ZERO_ALLOWED):
+        elif value <= 0:
             problems.append(f"{label} (must be a positive integer)")
         else:
             out[key] = value
@@ -274,7 +296,7 @@ def parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
     if problems or equity is None or risk_rate is None:
         raise ConfigNotRatified(problems)
     return RuntimeConfig(
-        health=HealthThresholds(**health),
+        health=RuntimeHealthConfig(**health),
         timing=TimingConfig(**timing),
         account=AccountConfig(initial_equity=equity, risk_rate=risk_rate),
         symbols=symbols,

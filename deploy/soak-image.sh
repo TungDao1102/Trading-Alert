@@ -37,7 +37,7 @@ OPS_REPO=trading-alert-ops
 # The ratified runtime configuration inside the image: a fixed name of the committed file, not a
 # user number. The soak env file sets PAPER_RUNTIME_CONFIG to the same path (RUNBOOK 20.6); a move
 # to another configuration file changes this one line.
-IN_IMAGE_RUNTIME_CONFIG=/app/config/paper/paper-runtime-v1.toml
+IN_IMAGE_RUNTIME_CONFIG=/app/config/paper/paper-runtime-v2.toml
 
 usage() {
   sed -n '3,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
