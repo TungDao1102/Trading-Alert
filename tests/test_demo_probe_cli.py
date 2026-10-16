@@ -12,7 +12,9 @@ mode. The AST guard pins the time contract: no `float(` call, wall-clock reads o
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
+import logging
 import socket
 import textwrap
 from collections.abc import Iterator, Mapping
@@ -31,13 +33,18 @@ from binance_sdk_derivatives_trading_usds_futures import DerivativesTradingUsdsF
 from scripts import demo_probe as dp
 from src.adapters import binance_client
 from src.adapters.binance_client import CREDENTIAL_SPECS, Environment, EnvironmentRow
-from src.adapters.binance_probe import ProbeBanned
+from src.adapters.binance_probe import BinanceProbeAdapter, ProbeBanned
 from src.adapters.binance_ratelimit_gate import RATE_LIMIT_PAUSE_429, RestGateRefusal
 from src.adapters.binance_usdm import PositionModeResult
 from src.ops import redaction
 
 from tests.probe_fakes import MUTATING_OPERATIONS, FakeProbePort, write_probe_limits
 from tests.support.ast_guards import WALL_CLOCK_CALLS
+
+# The real SDK client factory and constructor, kept before the autouse fixture replaces them;
+# only the offline construction test restores them (sockets and HTTP stay patched to fail).
+_REAL_BUILD_SDK_CLIENT = binance_client.build_sdk_client
+_REAL_SDK_INIT = DerivativesTradingUsdsFutures.__init__
 
 SCRIPT_PATH = Path(dp.__file__)
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -689,6 +696,40 @@ def test_the_frame_log_slices_by_marker() -> None:
     assert log.raw_since(marker) == [{"e": "ORDER_TRADE_UPDATE"}]
     assert log.states_since(marker) == ["UNKNOWN"]
     assert log.events_since(0) == [{"event_type": "A"}, {"event_type": "B"}]
+
+
+def test_build_live_rig_assembles_offline_with_one_shared_gate(
+    tmp_path: Path, probe_limits: Path, monkeypatch: pytest.MonkeyPatch, forbidden: list[str]
+) -> None:
+    """The real SDK client is constructed offline (no request); sockets stay patched to fail."""
+    monkeypatch.setattr(DerivativesTradingUsdsFutures, "__init__", _REAL_SDK_INIT)
+    config = dp.parse_config([*_argv(probe_limits, tmp_path), "--execute"])
+    root = logging.getLogger()
+    filters_before = list(root.filters)
+    try:
+        rig = dp.build_live_rig(
+            config, environ=_demo_credentials(), client_factory=_REAL_BUILD_SDK_CLIENT
+        )
+    finally:
+        for added in [f for f in root.filters if f not in filters_before]:
+            root.removeFilter(added)
+    assert forbidden == []
+    assert rig.real is True
+    assert rig.clock is dp.live_clock
+    assert rig.sleep is asyncio.sleep
+    port = rig.port
+    assert isinstance(port, dp.GuardedProbePort)
+    probe = port._adapter
+    assert isinstance(probe, BinanceProbeAdapter)
+    gate = probe._rest_gate
+    assert gate.policy == config.limits.signed.rate_limit
+    assert probe._public._rest_gate is gate
+    assert port._reader._rest_gate is gate
+    stream = rig.stream
+    assert isinstance(stream, dp.LiveStream)
+    assert stream._rest_gate is gate
+    assert stream._listen_keys._inner._rest_gate is gate
+    assert rig.live_calls is not None and rig.live_calls() == 0
 
 
 def test_live_clock_is_aware_utc() -> None:
