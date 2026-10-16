@@ -12,11 +12,14 @@ event loop alone decides the order of everything (the worker thread itself is te
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import dataclasses
 import inspect
+import random
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -64,6 +67,12 @@ from src.adapters.binance_userdata_supervisor import (
 from src.domain.exchange_errors import ExchangeErrorCategory
 from src.ops import redaction
 
+from tests.support.ast_guards import (
+    float_constructor_calls,
+    forbidden_imports,
+    module_imports,
+    wall_clock_calls,
+)
 from tests.support.limits import (
     TEST_ONLY_KEEPALIVE_FAILURE_TOLERANCE,
     TEST_ONLY_KEEPALIVE_INTERVAL_SECONDS,
@@ -71,6 +80,12 @@ from tests.support.limits import (
     TEST_ONLY_PROJECT_ROTATION_INTERVAL_SECONDS,
     TEST_ONLY_RATE_LIMIT_429_NO_RETRY_AFTER_WAIT_SECONDS,
     TEST_ONLY_RATE_LIMIT_RETRY_AFTER_CAP_SECONDS,
+    TEST_ONLY_RECONNECT_MAX_ATTEMPTS,
+    TEST_ONLY_RECONNECT_WAIT_MAX_SECONDS,
+    TEST_ONLY_RECONNECT_WAIT_MULTIPLIER_SECONDS,
+    TEST_ONLY_SNAPSHOT_DEADLINE_SECONDS,
+    TEST_ONLY_SNAPSHOT_MAX_ATTEMPTS,
+    TEST_ONLY_SNAPSHOT_WAIT_MAX_SECONDS,
     test_only_rate_limit_policy,
     test_only_stream_limits,
 )
@@ -895,3 +910,319 @@ async def test_anomaly_is_delivered_with_the_same_hold_rule() -> None:
     assert [type(event.outcome) for event in rig.events] == [StreamAnomaly, StreamAnomaly]
     assert [event.after_gap for event in rig.events] == [True, False]
     await rig.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: bounded exhaustion and the explicit resync request.
+# --------------------------------------------------------------------------- #
+
+# Long enough for every bounded cycle of the TEST_ONLY limits to run out.
+EXHAUST_SECONDS = KEEPALIVE - 1
+
+
+async def test_rebuild_exhaustion_is_bounded_reported_once_and_waits_for_resync() -> None:
+    factory = _Factory(produce_connection=False)
+    rig = Rig(limits=limits_with(), factory=factory)
+    await rig.start_live()
+    first_sleep = len(rig.vt.sleeps)
+
+    rig.ws.simulate_unsolicited_close()
+    await rig.vt.advance(EXHAUST_SECONDS)
+
+    assert len(factory.built) == TEST_ONLY_RECONNECT_MAX_ATTEMPTS
+    assert rig.supervisor.state is S.UNKNOWN
+    assert rig.failures == ["REBUILD_EXHAUSTED"]
+    waits = rig.vt.sleeps[first_sleep:]
+    assert waits and max(waits) <= TEST_ONLY_RECONNECT_WAIT_MAX_SECONDS
+
+    # Nothing more happens by itself.
+    await rig.vt.advance(EXHAUST_SECONDS)
+    assert len(factory.built) == TEST_ONLY_RECONNECT_MAX_ATTEMPTS
+    assert rig.failures == ["REBUILD_EXHAUSTED"]
+    assert rig.snapshots_provider.calls == 1
+
+    # An explicit resync runs one more bounded cycle; once the rebuild works it reaches LIVE.
+    factory.produce_connection = True
+    rig.supervisor.request_resync()
+    await rig.vt.advance(EXHAUST_SECONDS)
+    assert len(factory.built) == TEST_ONLY_RECONNECT_MAX_ATTEMPTS + 1
+    assert rig.supervisor.state is S.LIVE
+    assert rig.snapshots_provider.calls == 2
+    await rig.stop()
+
+
+async def test_resync_during_a_ban_does_not_even_rebuild_the_socket() -> None:
+    factory = _Factory(produce_connection=False)
+    rig = Rig(limits=limits_with(), factory=factory)
+    await rig.start_live()
+    rig.ws.simulate_unsolicited_close()
+    await rig.vt.advance(EXHAUST_SECONDS)
+    assert rig.failures == ["REBUILD_EXHAUSTED"]
+    built = len(factory.built)
+
+    rig.gate.record(_C.IP_BANNED, None)  # another holder met a 418
+    factory.produce_connection = True
+    rig.supervisor.request_resync()
+    await rig.vt.advance(EXHAUST_SECONDS)
+
+    assert rig.failures == ["REBUILD_EXHAUSTED", "RATE_LIMIT_BAN_ACTIVE"]
+    assert len(factory.built) == built
+    assert rig.snapshots_provider.calls == 1
+    assert rig.supervisor.state is S.UNKNOWN
+    await rig.stop()
+
+
+async def test_rebuild_retry_is_also_bounded_by_the_virtual_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Full jitter replaced by its upper bound, so the first wait is exactly the multiplier; a
+    # delay bound equal to it is reached when the second attempt fails.
+    monkeypatch.setattr(random, "uniform", lambda low, high: high)
+    multiplier = TEST_ONLY_RECONNECT_WAIT_MULTIPLIER_SECONDS
+    delay = multiplier
+    factory = _Factory(produce_connection=False)
+    rig = Rig(limits=limits_with(reconnect_max_delay_seconds=delay), factory=factory)
+    await rig.start_live()
+
+    rig.ws.simulate_unsolicited_close()
+    await rig.vt.advance(EXHAUST_SECONDS)
+
+    assert TEST_ONLY_RECONNECT_MAX_ATTEMPTS > 2
+    assert len(factory.built) == 2
+    assert rig.failures == ["REBUILD_EXHAUSTED"]
+    await rig.stop()
+
+
+async def test_snapshot_exhaustion_holds_events_until_a_resync_succeeds() -> None:
+    rig = Rig(limits=limits_with())
+    await rig.start_live()
+    rig.snapshots_provider.fail_always = RuntimeError("snapshot unavailable")
+    held_id = TEST_ONLY_ORDER_IDS[1]
+
+    rig.ws.simulate_unsolicited_close()
+    await rig.settle()
+    rig.emit_order(held_id)
+    await rig.vt.advance(EXHAUST_SECONDS)
+
+    assert rig.snapshots_provider.calls == 1 + TEST_ONLY_SNAPSHOT_MAX_ATTEMPTS
+    assert rig.supervisor.state is S.UNKNOWN
+    assert rig.failures == ["SNAPSHOT_EXHAUSTED"]
+    assert rig.events == []
+    await rig.vt.advance(EXHAUST_SECONDS)
+    assert rig.snapshots_provider.calls == 1 + TEST_ONLY_SNAPSHOT_MAX_ATTEMPTS
+    assert rig.events == []
+
+    rig.snapshots_provider.fail_always = None
+    rig.supervisor.request_resync()
+    await rig.settle()
+    assert rig.snapshots_provider.calls == 2 + TEST_ONLY_SNAPSHOT_MAX_ATTEMPTS
+    assert rig.supervisor.state is S.LIVE
+    assert rig.order_ids() == [(str(held_id), True)]
+    assert rig.failures == ["SNAPSHOT_EXHAUSTED"]
+    await rig.stop()
+
+
+async def test_snapshot_attempt_has_a_deadline_on_virtual_time() -> None:
+    rig = Rig(limits=limits_with())
+    await rig.start_live()
+    never: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    async def _hang(call: int) -> None:
+        if call == 2:
+            await never
+
+    rig.snapshots_provider.on_call = _hang
+    rig.ws.simulate_unsolicited_close()
+    await rig.settle()
+    assert rig.supervisor.state is S.SYNCING
+    assert TEST_ONLY_SNAPSHOT_DEADLINE_SECONDS in rig.vt.sleeps
+
+    await rig.vt.advance(TEST_ONLY_SNAPSHOT_DEADLINE_SECONDS - 1)
+    assert rig.snapshots_provider.calls == 2
+    await rig.vt.advance(1 + TEST_ONLY_SNAPSHOT_WAIT_MAX_SECONDS)
+    assert rig.snapshots_provider.calls == 3
+    assert rig.supervisor.state is S.LIVE
+    assert not never.done() or never.cancelled()
+    await rig.stop()
+
+
+async def test_initial_connect_exhaustion_ends_unknown_without_raising() -> None:
+    rig = Rig(limits=limits_with(), ws=FakeUserDataWsClient(produce_connection=False))
+
+    starting = asyncio.ensure_future(rig.supervisor.start())
+    await rig.vt.advance(EXHAUST_SECONDS)
+
+    assert starting.done()
+    assert starting.exception() is None
+    assert rig.state_names() == [S.CONNECTING, S.UNKNOWN]
+    assert rig.failures == ["CONNECT_EXHAUSTED"]
+    assert rig.listen_key_posts() == TEST_ONLY_RECONNECT_MAX_ATTEMPTS
+    assert rig.snapshots_provider.calls == 0
+    await rig.supervisor.stop(close_listen_key=False)
+    assert rig.supervisor.state is S.STOPPED
+
+
+async def test_resync_during_a_pause_waits_first_and_a_pause_is_not_an_attempt() -> None:
+    rig = Rig(limits=limits_with())
+    await rig.start_live()
+    rig.snapshots_provider.fail_always = RuntimeError("snapshot unavailable")
+    rig.ws.simulate_unsolicited_close()
+    await rig.vt.advance(EXHAUST_SECONDS)
+    assert rig.failures == ["SNAPSHOT_EXHAUSTED"]
+    calls = rig.snapshots_provider.calls
+
+    rig.gate.record(_C.RATE_LIMITED, None)
+    rig.supervisor.request_resync()
+    await rig.vt.advance(WAIT_429 - 1)
+    assert rig.snapshots_provider.calls == calls
+    assert rig.supervisor.state is not S.LIVE
+
+    # Another holder pauses REST again in the middle of the cycle: still no extra attempt.
+    def _pause_again(call: int) -> None:
+        if call == calls + 2:
+            rig.gate.record(_C.RATE_LIMITED, None)
+
+    rig.snapshots_provider.on_call = _pause_again
+    await rig.vt.advance(EXHAUST_SECONDS)
+    assert rig.snapshots_provider.calls == calls + TEST_ONLY_SNAPSHOT_MAX_ATTEMPTS
+    assert rig.failures == ["SNAPSHOT_EXHAUSTED", "SNAPSHOT_EXHAUSTED"]
+    assert rig.supervisor.state is S.UNKNOWN
+    await rig.stop()
+
+
+async def test_request_resync_is_ignored_while_live_and_after_stop() -> None:
+    rig = Rig(limits=limits_with())
+    await rig.start_live()
+    rig.supervisor.request_resync()
+    await rig.settle()
+    assert rig.snapshots_provider.calls == 1
+    assert rig.state_names() == [S.CONNECTING, S.SYNCING, S.LIVE]
+
+    await rig.stop()
+    rig.supervisor.request_resync()
+    await rig.settle()
+    assert rig.supervisor.state is S.STOPPED
+    assert rig.supervisor._commands.qsize() == 0
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: stop.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("close_listen_key", [True, False])
+async def test_stop_cancels_every_task_and_is_idempotent(close_listen_key: bool) -> None:
+    rig = Rig(limits=limits_with(project_rotation_interval_seconds=ROTATION))
+    await rig.start_live()
+    # Leave work in flight: a pause makes the next keepalive wait inside the control task,
+    # and a command sits in the queue.
+    rig.gate.record(_C.RATE_LIMITED, None)
+    await rig.vt.advance(KEEPALIVE)
+    rig.supervisor.request_resync()
+    assert rig.supervisor._tasks
+
+    await rig.supervisor.stop(close_listen_key=close_listen_key)
+
+    assert rig.supervisor.state is S.STOPPED
+    assert rig.state_names()[-1] is S.STOPPED
+    assert rig.supervisor._tasks == set()
+    assert rig.supervisor._commands.qsize() == 0
+    assert asyncio.all_tasks() == {asyncio.current_task()}
+    assert rig.rest.calls["close_user_data_stream"] == (1 if close_listen_key else 0)
+    states = list(rig.states)
+
+    await rig.supervisor.stop(close_listen_key=close_listen_key)
+    assert rig.states == states
+    assert rig.rest.calls["close_user_data_stream"] == (1 if close_listen_key else 0)
+
+
+async def test_stop_requires_the_close_listen_key_argument() -> None:
+    rig = Rig(limits=limits_with())
+    await rig.start_live()
+    with pytest.raises(TypeError):
+        await rig.supervisor.stop()  # type: ignore[call-arg]
+    params = inspect.signature(UserDataSupervisor.stop).parameters
+    assert params["close_listen_key"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["close_listen_key"].default is inspect.Parameter.empty
+    await rig.stop()
+
+
+def test_constructor_arguments_are_keyword_only_and_required() -> None:
+    params = list(inspect.signature(UserDataSupervisor.__init__).parameters.values())[1:]
+    assert [p.name for p in params] == [
+        "adapter",
+        "limits",
+        "clock",
+        "sleep",
+        "rest_gate",
+        "snapshot_provider",
+        "on_state_change",
+        "on_event",
+        "on_snapshot",
+        "on_failure",
+    ]
+    for param in params:
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY
+        assert param.default is inspect.Parameter.empty
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: structural guards (D-04, no src.paper, no wall clock, no numbers).
+# --------------------------------------------------------------------------- #
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SUPERVISOR_PATH = REPO_ROOT / "src" / "adapters" / "binance_userdata_supervisor.py"
+SUPERVISOR_MODULE = "src.adapters.binance_userdata_supervisor"
+
+
+def _imports_supervisor(names: list[str]) -> bool:
+    return any(
+        name == SUPERVISOR_MODULE or name.startswith(SUPERVISOR_MODULE + ".") for name in names
+    )
+
+
+def test_no_src_module_imports_the_supervisor() -> None:
+    offenders = [
+        str(path.relative_to(REPO_ROOT))
+        for path in sorted((REPO_ROOT / "src").rglob("*.py"))
+        if path != SUPERVISOR_PATH and _imports_supervisor(module_imports(path))
+    ]
+    assert offenders == []
+
+
+def test_import_guard_negative_control(tmp_path: Path) -> None:
+    wired = tmp_path / "wired.py"
+    wired.write_text(
+        "from src.adapters.binance_userdata_supervisor import UserDataSupervisor\n",
+        encoding="utf-8",
+    )
+    assert _imports_supervisor(module_imports(wired))
+    also = tmp_path / "also.py"
+    also.write_text("import src.adapters.binance_userdata_supervisor as s\n", encoding="utf-8")
+    assert _imports_supervisor(module_imports(also))
+
+
+def test_supervisor_imports_nothing_from_paper() -> None:
+    assert forbidden_imports(SUPERVISOR_PATH, ("src.paper",)) == []
+
+
+def test_supervisor_reads_no_wall_clock_and_calls_no_float() -> None:
+    assert wall_clock_calls(SUPERVISOR_PATH) == []
+    assert float_constructor_calls(SUPERVISOR_PATH) == []
+
+
+def _int_literals(path: Path) -> list[tuple[int, int]]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return sorted(
+        (node.lineno, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and type(node.value) is int
+    )
+
+
+def test_supervisor_defines_no_number_beyond_zero_and_one(tmp_path: Path) -> None:
+    assert [item for item in _int_literals(SUPERVISOR_PATH) if item[1] not in (0, 1)] == []
+    # Negative control: a literal interval is found.
+    planted = tmp_path / "planted.py"
+    planted.write_text("KEEPALIVE_INTERVAL_SECONDS = 1800\n", encoding="utf-8")
+    assert _int_literals(planted) == [(1, 1800)]
