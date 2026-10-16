@@ -34,6 +34,7 @@ from decimal import Decimal
 from typing import Any, Protocol
 
 from src.approval.binding import check_binding_full, check_binding_identity
+from src.domain.algo_status import is_protection_confirmed
 from src.domain.approval import Approval
 from src.domain.enums import (
     ApprovalAction,
@@ -1027,13 +1028,10 @@ def require_protective_confirmation(
     return ProtectiveConfirmationVerdict(is_no_trade=True, reason_code=_ENTRY_WITHOUT_PROTECTIVE)
 
 
-# Algo-order statuses that count as "exists and active" (EXECUTION_SPEC §6).
-# Allow-list, fail closed: anything else (TRIGGERED, FINISHED, CANCELED,
-# REJECTED, EXPIRED, "" …) is unconfirmed. "NEW" is the only status the
-# repo's recorded fixtures carry for a live untriggered algo order; any
-# additional active state must be re-verified against current Binance
-# Algo-order docs before it is added here.
-_ACTIVE_ALGO_STATUSES: frozenset[str] = frozenset({"NEW"})
+# Which algo-order status counts as "exists and active" (EXECUTION_SPEC §6.1)
+# is decided by the classification table in `src/domain/algo_status.py`
+# (plan 18-06, D-07): only the class ACTIVE confirms protection, and an
+# unseen, empty or missing status is UNKNOWN (fail closed).
 
 
 def _get_attr_or_key(obj: Any, name: str) -> Any:
@@ -1048,14 +1046,14 @@ def _is_leg_confirmed(response: Any) -> bool:
 
     09-REVIEW WR-03: the real adapter returns an `AlgoPlacementResult`
     DATACLASS (and maps a missing status to ""), so `algo_status` is read
-    by attribute OR key, and confirmation is an ALLOW-list
-    (`_ACTIVE_ALGO_STATUSES`): `None`, "", REJECTED, EXPIRED, CANCELED,
-    TRIGGERED, any unknown value — all unconfirmed (fail closed, never
-    assume protection exists).
+    by attribute OR key, and confirmation asks `is_protection_confirmed`
+    (class ACTIVE only, `src/domain/algo_status.py`): `None`, "", every
+    status whose class is not ACTIVE and any unknown value are all
+    unconfirmed (fail closed, never assume protection exists).
     """
     if response is None:
         return False
-    return _get_attr_or_key(response, "algo_status") in _ACTIVE_ALGO_STATUSES
+    return is_protection_confirmed(_get_attr_or_key(response, "algo_status"))
 
 
 async def _place_protective_leg(
@@ -1093,7 +1091,7 @@ async def _place_protective_leg(
     probe_found = _get_attr_or_key(probe, "found")
     if probe_found is True:
         status = _get_attr_or_key(probe, "algo_status")
-        if status in _ACTIVE_ALGO_STATUSES:
+        if is_protection_confirmed(status):
             return (True, None)
         return (False, f"{role}: existing leg status {status!r}")
     if probe_found is not False:
