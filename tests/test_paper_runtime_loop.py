@@ -101,7 +101,7 @@ class FakePublic:
     async def server_time(self) -> datetime:
         return self.server
 
-    async def exchange_info(self) -> list[SymbolFilters]:
+    async def exchange_info(self, symbols: Sequence[str] | None = None) -> list[SymbolFilters]:
         self.exchange_info_calls += 1
         return [filters("BTCUSDT"), filters("ETHUSDT")]
 

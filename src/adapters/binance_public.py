@@ -24,6 +24,17 @@ gate, then re-raises the original exception; nothing is retried. `BinanceUsdmAda
 its own gate, so its public delegations, including `server_time` (the drift guard's time
 source), are refused too. With the default `rest_gate=None` the behavior is unchanged (the
 data jobs, the paper runtime and the Phase 16 scripts stay ungated in Phase 18, a known gap).
+
+Project transport errors (plan 16-56, B1-WR-06, D-13 boundary): with
+`project_transport_errors=True` (the paper runtime's composition root sets it) the REST calls of
+the paper path (`klines`, `mark_klines` and the call behind `exchange_info`) turn an SDK server
+or network error into `TransientMarketDataError` and an SDK rate-limit (429) or ban (418) error
+into `MarketDataRateLimited` (`MarketDataRateLimitBan` for a ban), which is NOT transient: a
+caller must never retry it at once. Each carries the SDK class name only, never a response body
+or a URL, so `src/paper` never names an SDK type. The gate (above) still sees the SDK exception
+first. Any other SDK error (an unknown symbol, for example) passes through unchanged. The default
+(False) keeps the SDK types for the order adapter, the probe and the data jobs, whose error
+taxonomy (`src/adapters/binance_errors.py`) classifies the SDK classes.
 """
 
 from __future__ import annotations
@@ -37,6 +48,12 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 from binance_common.configuration import ConfigurationRestAPI
+from binance_common.errors import (
+    NetworkError,
+    RateLimitBanError,
+    ServerError,
+    TooManyRequestsError,
+)
 from binance_sdk_derivatives_trading_usds_futures import DerivativesTradingUsdsFutures
 from src.adapters.binance_errors import error_facts_from_exception
 from src.adapters.binance_ratelimit_gate import RestRateLimitGate
@@ -282,6 +299,46 @@ async def _gated_rest_call[**P, R](
 
 
 # --------------------------------------------------------------------------- #
+# Project error types for the SDK's transport errors (plan 16-56, B1-WR-06).
+# --------------------------------------------------------------------------- #
+
+
+class TransientMarketDataError(Exception):
+    """A Binance server (5xx) or network error of a public call: one immediate retry is allowed.
+
+    The message is the SDK class name only (never a response body or a URL).
+    """
+
+
+class MarketDataRateLimited(Exception):
+    """A Binance rate-limit answer (429): NOT transient, never retried at once.
+
+    The message is the SDK class name only; `retry_after` is the `Retry-After` header in whole
+    seconds when Binance sent one.
+    """
+
+    def __init__(self, sdk_error_name: str, retry_after: int | None = None) -> None:
+        super().__init__(sdk_error_name)
+        self.retry_after = retry_after
+
+
+class MarketDataRateLimitBan(MarketDataRateLimited):
+    """A Binance IP ban (418): requests sent while banned extend the ban, so a caller stops."""
+
+
+def _project_transport_error(exc: Exception) -> Exception | None:
+    """The project error for an SDK transport error, or None to re-raise `exc` unchanged."""
+    name = type(exc).__name__
+    if isinstance(exc, ServerError | NetworkError):
+        return TransientMarketDataError(name)
+    if isinstance(exc, RateLimitBanError):
+        return MarketDataRateLimitBan(name, exc.retry_after)
+    if isinstance(exc, TooManyRequestsError):
+        return MarketDataRateLimited(name, exc.retry_after)
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Adapter — public market data only.
 # --------------------------------------------------------------------------- #
 
@@ -304,6 +361,10 @@ class BinancePublicMarketData:
     `rest_gate` (optional, keyword only) is the process-wide `RestRateLimitGate`: when set,
     every delegated REST call is refused during a 418 ban or a 429 pause and a 418 or 429 it
     meets is recorded in the gate. None (the default) leaves the reader ungated.
+
+    `project_transport_errors` (optional, keyword only, plan 16-56): when True, `klines`,
+    `mark_klines` and `exchange_info` raise the project errors of this module instead of the
+    SDK's server, network, rate-limit and ban errors (see the module docstring).
     """
 
     def __init__(
@@ -311,11 +372,25 @@ class BinancePublicMarketData:
         sdk_client: DerivativesTradingUsdsFutures | None = None,
         *,
         rest_gate: RestRateLimitGate | None = None,
+        project_transport_errors: bool = False,
     ) -> None:
         self._sdk: DerivativesTradingUsdsFutures = (
             sdk_client if sdk_client is not None else _credential_free_client()
         )
         self._rest_gate = rest_gate
+        self._project_errors = project_transport_errors
+
+    async def _paper_path_call[**P, R](
+        self, func: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs
+    ) -> R:
+        """One gated QUERY call of the paper path, with the opt-in project transport errors."""
+        try:
+            return await _gated_rest_call(self._rest_gate, CallKind.QUERY, func, *args, **kwargs)
+        except Exception as exc:
+            mapped = _project_transport_error(exc) if self._project_errors else None
+            if mapped is None:
+                raise
+            raise mapped from None
 
     # ----- klines ---------------------------------------------------------- #
 
@@ -337,9 +412,7 @@ class BinancePublicMarketData:
         directly); we run it in a worker thread so the async paginator
         can interleave multiple pages across symbols without blocking.
         """
-        response = await _gated_rest_call(
-            self._rest_gate,
-            CallKind.QUERY,
+        response = await self._paper_path_call(
             self._sdk.rest_api.kline_candlestick_data,
             symbol=symbol,
             interval=interval,  # type: ignore[arg-type]
@@ -366,9 +439,7 @@ class BinancePublicMarketData:
         >1000; rows are 12-field lists with volume "0" (D-29). Runs in a worker
         thread like `klines`; SDK types never leave this module.
         """
-        response = await _gated_rest_call(
-            self._rest_gate,
-            CallKind.QUERY,
+        response = await self._paper_path_call(
             self._sdk.rest_api.mark_price_kline_candlestick_data,
             symbol=symbol,
             interval=interval,  # type: ignore[arg-type]
@@ -505,14 +576,30 @@ class BinancePublicMarketData:
 
     # ----- exchange info --------------------------------------------------- #
 
-    async def exchange_info(self) -> list[SymbolFilters]:
-        response = await _gated_rest_call(
-            self._rest_gate, CallKind.QUERY, self._sdk.rest_api.exchange_information
-        )
+    async def exchange_info(self, symbols: Sequence[str] | None = None) -> list[SymbolFilters]:
+        """The exchange constraints of the listed contracts (`GET /fapi/v1/exchangeInfo`).
+
+        Without `symbols` (the collector, the backfill CLI, the universe freeze and the order
+        adapter) every listed contract is validated strictly: any drift fails the whole call.
+        With `symbols` (the paper runtime's `ConstraintProvider`, plan 16-56, B1-WR-12) only the
+        requested symbols are validated strictly and returned; a contract the caller did not ask
+        for is never projected, so its drift cannot stop the refresh. Drift of an unrequested
+        contract is logged as one warning naming the symbols only.
+        """
+        response = await self._paper_path_call(self._sdk.rest_api.exchange_information)
         info: ExchangeInformationResponse = response.data()
+        listed = list(info.symbols or [])
+        if symbols is not None:
+            requested = frozenset(symbols)
+            ignored_drift = sorted(
+                str(sym.symbol) for sym in listed if sym.symbol not in requested and _has_drift(sym)
+            )
+            if ignored_drift:
+                log.warning("adapter.exchange_info.unrequested_drift", symbols=ignored_drift)
+            listed = [sym for sym in listed if sym.symbol in requested]
         out: list[SymbolFilters] = []
         drifted: list[str] = []
-        for sym in info.symbols or []:
+        for sym in listed:
             f_price = _find_filter(sym.filters, "PRICE_FILTER")
             f_lot = _find_filter(sym.filters, "LOT_SIZE")
             f_min_notional = _find_filter(sym.filters, "MIN_NOTIONAL")
@@ -621,6 +708,34 @@ class BinancePublicMarketData:
 # --------------------------------------------------------------------------- #
 # Internal helpers for exchange-info projection.
 # --------------------------------------------------------------------------- #
+
+
+def _has_drift(sym: Any) -> bool:
+    """True when a contract lacks a required filter, a numeric filter field or an identity field.
+
+    Only used to name unrequested contracts in a warning; the strict path raises on its own.
+    """
+    f_price = _find_filter(sym.filters, "PRICE_FILTER")
+    f_lot = _find_filter(sym.filters, "LOT_SIZE")
+    f_min_notional = _find_filter(sym.filters, "MIN_NOTIONAL")
+    if f_price is None or f_lot is None or f_min_notional is None:
+        return True
+    if (
+        f_price.tick_size is None
+        or f_lot.step_size is None
+        or f_lot.min_qty is None
+        or f_min_notional.notional is None
+    ):
+        return True
+    identity = (
+        sym.symbol,
+        sym.contract_type,
+        sym.status,
+        sym.base_asset,
+        sym.quote_asset,
+        sym.margin_asset,
+    )
+    return not all(identity)
 
 
 def _find_filter(

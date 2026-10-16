@@ -586,3 +586,130 @@ def test_the_module_reads_no_clock_and_has_no_float() -> None:
         and "binance_sdk_derivatives_trading_usds_futures" not in imported
     )
     assert "time" not in imported
+
+
+# ---- plan 16-56 Task 2: the SDK's own errors reach the one retry (B1-WR-06) ------------------ #
+
+# One page of real-shaped 1m rows the fake SDK serves after its prepared errors.
+_SDK_ROWS = [
+    [
+        ms(FIRST_OPEN + MINUTE * i),
+        "100",
+        "101",
+        "99",
+        "100",
+        "1",
+        ms(close_of(FIRST_OPEN + MINUTE * i)),
+        "100",
+        3,
+        "0",
+        "0",
+        "0",
+    ]
+    for i in range(5)
+]
+
+
+class _SdkResponse:
+    def __init__(self, rows: list[list[Any]]) -> None:
+        self._rows = rows
+
+    def data(self) -> list[list[Any]]:
+        return self._rows
+
+
+class _SdkRest:
+    """The two SDK REST calls of the poller; raises the prepared SDK errors first."""
+
+    def __init__(self, errors: list[Exception]) -> None:
+        self.errors = errors
+        self.kline_calls = 0
+
+    def kline_candlestick_data(self, **_kwargs: Any) -> _SdkResponse:
+        self.kline_calls += 1
+        if self.errors:
+            raise self.errors.pop(0)
+        return _SdkResponse(_SDK_ROWS)
+
+    def mark_price_kline_candlestick_data(self, **_kwargs: Any) -> _SdkResponse:
+        return _SdkResponse(_SDK_ROWS)
+
+
+def _real_adapter(*errors: Exception) -> tuple[Any, _SdkRest]:
+    from src.adapters.binance_public import BinancePublicMarketData
+
+    rest = _SdkRest(list(errors))
+    sdk = type("Sdk", (), {"rest_api": rest})()
+    # Built as the paper runtime builds it: SDK transport errors leave as project errors.
+    return BinancePublicMarketData(sdk_client=sdk, project_transport_errors=True), rest
+
+
+def _poll(feed: Any) -> PollResult:
+    now = close_of(at(10, 4)) + timedelta(seconds=LAG)
+    poller = LiveMinutePoller(
+        feed=feed, source=LiveMinuteSource(), poll_interval_seconds=30, close_lag_seconds=LAG
+    )
+    return asyncio.run(poller.poll_once(SYMBOL, now_utc=now, since_utc=at(10, 0)))
+
+
+def test_one_sdk_server_error_through_the_real_adapter_is_retried_once() -> None:
+    from binance_common.errors import ServerError
+
+    feed, rest = _real_adapter(ServerError("bad gateway", 502))
+    result = _poll(feed)
+    assert result.trade_minutes_added == 5
+    assert rest.kline_calls == 2, "failed once, retried exactly once"
+
+
+def test_one_sdk_network_error_is_retried_and_two_in_a_row_propagate() -> None:
+    from binance_common.errors import NetworkError
+    from src.adapters.binance_public import TransientMarketDataError
+
+    feed, rest = _real_adapter(NetworkError("reset"))
+    assert _poll(feed).trade_minutes_added == 5
+    feed2, rest2 = _real_adapter(NetworkError("reset"), NetworkError("reset"))
+    with pytest.raises(TransientMarketDataError):
+        _poll(feed2)
+    assert rest2.kline_calls == 2, "never a third attempt"
+
+
+def test_a_rate_limit_or_ban_is_never_retried_at_once() -> None:
+    from binance_common.errors import RateLimitBanError, TooManyRequestsError
+    from src.adapters.binance_public import MarketDataRateLimited
+
+    for error in (TooManyRequestsError("slow down", 429), RateLimitBanError("banned", 418)):
+        feed, rest = _real_adapter(error)
+        with pytest.raises(MarketDataRateLimited):
+            _poll(feed)
+        assert rest.kline_calls == 1
+
+
+def test_the_default_retry_tuple_names_the_project_transient_error() -> None:
+    import inspect
+
+    from src.adapters.binance_public import TransientMarketDataError
+
+    default = inspect.signature(LiveMinutePoller).parameters["transient_errors"].default
+    assert TransientMarketDataError in default
+    assert {TimeoutError, ConnectionError} <= set(default)
+
+
+def test_src_paper_imports_nothing_from_binance_common() -> None:
+    """D-13 boundary: SDK types stay inside src/adapters."""
+    paper = LIVE_MINUTES_PATH.parent
+    offenders: list[str] = []
+    for path in sorted(paper.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            offenders.extend(
+                f"{path.name}: {name}"
+                for name in names
+                if name.split(".")[0]
+                in {"binance_common", "binance_sdk_derivatives_trading_usds_futures"}
+            )
+    assert offenders == []

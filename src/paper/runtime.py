@@ -388,19 +388,31 @@ def _admit(
 
 
 def _state_from_env(values: Mapping[str, str]) -> RuntimeStatePort:
-    """The production state port: journal rows on PostgreSQL (Q-J), never an in-memory fallback."""
+    """The production state port: journal rows on PostgreSQL (Q-J), never an in-memory fallback.
+
+    The engine is `make_sync_engine` (plan 16-56, B1-WR-02): connect, lock, statement and pool
+    timeouts, `pool_pre_ping`, TCP keepalives and the UTC session pin, verified by one probe
+    connection. An unreachable database raises `StoreUnavailable` and a session that is not on
+    UTC raises `SessionTimeZoneNotUtc`; `main` maps both to exit 7 before RUNTIME_START.
+
+    Raises:
+        ConfigNotRatified: no database URL, or a URL that does not select PostgreSQL.
+    """
     url = values.get("DATABASE_URL_SYNC") or values.get("DATABASE_URL")
     if not url:
         raise ConfigNotRatified(["DATABASE_URL_SYNC or DATABASE_URL"])
-    if url.startswith("postgresql://"):
-        url = url.replace("postgresql://", "postgresql+psycopg://", 1)
     # Imported here so that a SKIPPED start and every refusal never import SQLAlchemy.
-    from sqlalchemy import create_engine
-
+    from src.persistence.engine import make_sync_engine
     from src.persistence.paper_runtime_state import PgRuntimeState
     from src.persistence.uow import OperationalDatabase
 
-    return PgRuntimeState(OperationalDatabase(create_engine(url, future=True)))
+    try:
+        engine = make_sync_engine(url)
+    except ValueError:
+        raise ConfigNotRatified(
+            ["DATABASE_URL_SYNC or DATABASE_URL (must be a postgresql:// URL)"]
+        ) from None
+    return PgRuntimeState(OperationalDatabase(engine))
 
 
 def _pg_shadow_stores(url: str) -> Any:
@@ -902,7 +914,9 @@ def _resolve_public(wiring: LoopWiring) -> Any:
         return wiring.public
     from src.adapters.binance_public import BinancePublicMarketData
 
-    return BinancePublicMarketData()
+    # SDK transport errors leave the adapter as project errors (B1-WR-06): the minute poller's
+    # one retry names `TransientMarketDataError`, and src/paper never imports an SDK type.
+    return BinancePublicMarketData(project_transport_errors=True)
 
 
 async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None) -> None:
@@ -1210,6 +1224,10 @@ def main(
         port = state if state is not None else _state_from_env(values)
     except ConfigNotRatified as exc:
         return refuse(ExitCode.CONFIG_NOT_RATIFIED, str(exc))
+    except PersistenceError as exc:
+        # StoreUnavailable, SessionTimeZoneNotUtc or another construction failure (B1-WR-02):
+        # restartable, one line naming the type only, never a traceback.
+        return _failed_closed(f"the runtime state database is unusable ({type(exc).__name__})")
 
     # The single-instance guard (B1-WR-07): before the pin branch and before any record.
     try:
@@ -1274,6 +1292,10 @@ def main(
                     configured = _shadow_from_env(values)
                 except ConfigNotRatified as exc:
                     return refuse(ExitCode.CONFIG_NOT_RATIFIED, str(exc))
+                except PersistenceError as exc:
+                    return _failed_closed(
+                        f"the SHADOW store database is unusable ({type(exc).__name__})"
+                    )
                 if configured is None:
                     return refuse(
                         ExitCode.CONFIG_NOT_RATIFIED,

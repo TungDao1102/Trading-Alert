@@ -135,7 +135,7 @@ class ExchangeDouble:
             )
         ]
 
-    async def exchange_info(self) -> list[SymbolFilters]:
+    async def exchange_info(self, symbols: Any = None) -> list[SymbolFilters]:
         return list(self._rows)
 
     async def klines(self, *args: Any, **kwargs: Any) -> list[Any]:

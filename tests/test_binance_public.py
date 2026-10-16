@@ -427,3 +427,210 @@ def test_the_surface_checker_accepts_a_clean_module(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert _public_surface_violations(clean) == []
+
+
+# --------------------------------------------------------------------------- #
+# Plan 16-56 Task 2: SDK errors stay inside the adapter (B1-WR-06, D-13) and exchangeInfo is
+# strict only for the requested symbols (B1-WR-12).
+# --------------------------------------------------------------------------- #
+
+_SECRET_BODY = '{"code":-1000,"msg":"internal body"} https://fapi.binance.com/fapi/v1/klines'
+
+
+class _RaisingRest(_FullFakeRest):
+    """Raises the prepared SDK errors, one per call, then answers normally."""
+
+    def __init__(self, errors: list[Exception]) -> None:
+        super().__init__([ROW0, ROW1])
+        self.errors = errors
+
+    def _maybe_raise(self) -> None:
+        if self.errors:
+            raise self.errors.pop(0)
+
+    def kline_candlestick_data(self, **kwargs: Any) -> _FakeResponse:
+        self._maybe_raise()
+        return super().kline_candlestick_data(**kwargs)
+
+    def mark_price_kline_candlestick_data(self, **kwargs: Any) -> _FakeResponse:
+        self._maybe_raise()
+        return super().mark_price_kline_candlestick_data(**kwargs)
+
+    def exchange_information(self, **kwargs: Any) -> _FakeResponse:
+        self._maybe_raise()
+        return super().exchange_information(**kwargs)
+
+
+def _raising(*errors: Exception, mapped: bool = True, gate: Any = None) -> BinancePublicMarketData:
+    """The real reader over a raising fake, as the paper runtime builds it (opt-in mapping)."""
+    return BinancePublicMarketData(
+        sdk_client=_FakeSdk(_RaisingRest(list(errors))),  # type: ignore[arg-type]
+        rest_gate=gate,
+        project_transport_errors=mapped,
+    )
+
+
+def test_server_and_network_errors_leave_the_adapter_as_the_project_transient_error() -> None:
+    from binance_common.errors import NetworkError, ServerError
+    from src.adapters.binance_public import TransientMarketDataError
+
+    calls = (
+        lambda p: p.klines("BTCUSDT", "1m"),
+        lambda p: p.mark_klines("BTCUSDT", "1m"),
+        lambda p: p.exchange_info(),
+    )
+    for sdk_error in (ServerError(_SECRET_BODY, 503), NetworkError(_SECRET_BODY)):
+        for call in calls:
+            try:
+                asyncio.run(call(_raising(sdk_error)))
+            except TransientMarketDataError as exc:
+                assert str(exc) == type(sdk_error).__name__, "the SDK class name only"
+                assert exc.__cause__ is None and exc.__suppress_context__
+                assert "internal body" not in repr(exc) and "https://" not in repr(exc)
+            else:
+                raise AssertionError(f"{type(sdk_error).__name__} was not mapped")
+
+
+def test_rate_limit_and_ban_errors_are_a_distinct_project_error_that_is_not_transient() -> None:
+    from binance_common.errors import RateLimitBanError, TooManyRequestsError
+    from src.adapters.binance_public import MarketDataRateLimited, TransientMarketDataError
+
+    for sdk_error, is_ban in (
+        (TooManyRequestsError(_SECRET_BODY, 429, retry_after=7), False),
+        (RateLimitBanError(_SECRET_BODY, 418, retry_after=120), True),
+    ):
+        try:
+            asyncio.run(_raising(sdk_error).klines("BTCUSDT", "1m"))
+        except MarketDataRateLimited as exc:
+            assert not isinstance(exc, TransientMarketDataError)
+            assert str(exc) == type(sdk_error).__name__
+            assert "internal body" not in repr(exc)
+            assert isinstance(exc, public_mod.MarketDataRateLimitBan) is is_ban
+            assert exc.retry_after == sdk_error.retry_after
+        else:
+            raise AssertionError(f"{type(sdk_error).__name__} was not mapped")
+
+
+def test_without_the_opt_in_the_sdk_types_are_unchanged() -> None:
+    """The order adapter, the probe and the data jobs classify the SDK classes (Phase 18)."""
+    from binance_common.errors import ServerError, TooManyRequestsError
+
+    for error in (ServerError("x", 503), TooManyRequestsError("x", 429)):
+        try:
+            asyncio.run(_raising(error, mapped=False).klines("BTCUSDT", "1m"))
+        except type(error) as exc:
+            assert exc is error
+        else:
+            raise AssertionError("the SDK error disappeared")
+    order = BinanceUsdmAdapter(sdk_client=_FakeSdk(_RaisingRest([ServerError("x", 503)])))  # type: ignore[arg-type]
+    try:
+        asyncio.run(order.klines("BTCUSDT", "1m"))
+    except ServerError:
+        pass
+    else:
+        raise AssertionError("the order adapter must keep the SDK type")
+
+
+def test_the_rate_limit_gate_still_records_the_sdk_error_before_it_is_mapped() -> None:
+    from binance_common.errors import TooManyRequestsError
+    from src.adapters.binance_public import MarketDataRateLimited
+
+    from tests.probe_fakes import make_gate
+
+    gate = make_gate()
+    try:
+        asyncio.run(_raising(TooManyRequestsError("x", 429, 30), gate=gate).klines("BTCUSDT", "1m"))
+    except MarketDataRateLimited:
+        pass
+    else:
+        raise AssertionError("not mapped")
+    assert gate.restriction() is not None, "the 429 reached the gate"
+
+
+def test_other_sdk_errors_are_not_renamed() -> None:
+    from binance_common.errors import BadRequestError
+
+    error = BadRequestError("Invalid symbol.", -1121)
+    try:
+        asyncio.run(_raising(error).klines("NOPEUSDT", "1m"))
+    except BadRequestError as exc:
+        assert exc is error, "an unknown-symbol answer keeps its SDK type (collector behaviour)"
+    else:
+        raise AssertionError("the BadRequestError disappeared")
+
+
+def _malformed_record(symbol: str) -> Any:
+    """A contract whose LOT_SIZE filter is missing: exchangeInfo drift of that symbol."""
+    return ExchangeInformationResponseSymbolsInner(
+        symbol=symbol,
+        contract_type="PERPETUAL",
+        status="TRADING",
+        base_asset=symbol[:-4],
+        quote_asset="USDT",
+        margin_asset="USDT",
+        filters=[_price_filter(), _notional_filter()],
+    )
+
+
+def _valid_record(symbol: str) -> Any:
+    record = _symbol_record()
+    record.symbol = symbol
+    record.base_asset = symbol[:-4]
+    return record
+
+
+class _InfoRest(_FullFakeRest):
+    def __init__(self, records: list[Any]) -> None:
+        super().__init__([])
+        self.records = records
+
+    def exchange_information(self, **kwargs: Any) -> _FakeResponse:
+        return _FakeResponse(ExchangeInformationResponse(symbols=self.records))
+
+
+def _info(*records: Any) -> BinancePublicMarketData:
+    return BinancePublicMarketData(sdk_client=_FakeSdk(_InfoRest(list(records))))  # type: ignore[arg-type]
+
+
+FIVE = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
+
+
+def test_exchange_info_with_symbols_is_strict_only_for_the_requested_symbols() -> None:
+    from structlog.testing import capture_logs
+
+    public = _info(*(_valid_record(s) for s in FIVE), _malformed_record("ODDUSDT"))
+    with capture_logs() as captured:
+        rows = asyncio.run(public.exchange_info(symbols=FIVE))
+    assert sorted(row.symbol for row in rows) == sorted(FIVE)
+    warnings = [e for e in captured if e["log_level"] == "warning"]
+    assert [e["event"] for e in warnings] == ["adapter.exchange_info.unrequested_drift"]
+    assert warnings[0]["symbols"] == ["ODDUSDT"], "symbol names only"
+    assert not any(e["log_level"] == "error" for e in captured)
+
+
+def test_exchange_info_with_symbols_still_refuses_a_malformed_requested_symbol() -> None:
+    public = _info(*(_valid_record(s) for s in FIVE[1:]), _malformed_record("BTCUSDT"))
+    try:
+        asyncio.run(public.exchange_info(symbols=FIVE))
+    except ValueError as exc:
+        assert "BTCUSDT" in str(exc)
+    else:
+        raise AssertionError("a malformed requested symbol must fail the refresh")
+
+
+def test_exchange_info_without_symbols_keeps_the_strict_all_symbols_behaviour() -> None:
+    """Collector, backfill CLI and universe freeze call it without an argument: unchanged."""
+    public = _info(*(_valid_record(s) for s in FIVE), _malformed_record("ODDUSDT"))
+    try:
+        asyncio.run(public.exchange_info())
+    except ValueError as exc:
+        assert "ODDUSDT" in str(exc)
+    else:
+        raise AssertionError("the all-symbols call must stay strict")
+    order = BinanceUsdmAdapter(sdk_client=_FakeSdk(_InfoRest([_malformed_record("ODDUSDT")])))  # type: ignore[arg-type]
+    try:
+        asyncio.run(order.exchange_info())
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("the order adapter's exchange_info must stay strict")

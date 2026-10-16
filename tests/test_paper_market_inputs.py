@@ -67,7 +67,7 @@ class ChangingPublic(FakePublic):
         super().__init__()
         self.fail_next = False
 
-    async def exchange_info(self) -> list[SymbolFilters]:
+    async def exchange_info(self, symbols: Sequence[str] | None = None) -> list[SymbolFilters]:
         self.exchange_info_calls += 1
         if self.fail_next:
             raise ConnectionError("exchangeInfo unreachable")
@@ -468,3 +468,93 @@ def test_time_is_read_only_through_the_one_clock_and_the_one_monotonic_function(
     assert all(fn == "_monotonic_ms" for fn, _ in monotonic_reads), monotonic_reads
     if module == "market_inputs.py":
         assert clock_reads == [] and monotonic_reads == []
+
+
+# ---- plan 16-56 Task 2: one malformed unrelated contract (B1-WR-12) -------------------------- #
+
+
+class _RecordingPublic(FakePublic):
+    def __init__(self) -> None:
+        super().__init__()
+        self.requested: list[Any] = []
+
+    async def exchange_info(self, symbols: Any = None) -> list[SymbolFilters]:
+        self.requested.append(symbols)
+        return [filters("BTCUSDT"), filters("ETHUSDT")]
+
+
+async def test_the_refresh_asks_exchange_info_for_its_configured_symbols() -> None:
+    public = _RecordingPublic()
+    provider = market_inputs.ConstraintProvider(
+        public=public, symbols=("BTCUSDT", "ETHUSDT"), clock=FixedClock()
+    )
+    await provider.refresh()
+    assert public.requested == [("BTCUSDT", "ETHUSDT")]
+
+
+def _sdk_public(records: list[Any]) -> Any:
+    from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
+        ExchangeInformationResponse,
+    )
+    from src.adapters.binance_public import BinancePublicMarketData
+
+    class _Response:
+        def data(self) -> Any:
+            return ExchangeInformationResponse(symbols=records)
+
+    class _Rest:
+        def exchange_information(self, **_kwargs: Any) -> Any:
+            return _Response()
+
+    sdk = type("Sdk", (), {"rest_api": _Rest()})()
+    return BinancePublicMarketData(sdk_client=sdk)
+
+
+def _record(symbol: str, *, malformed: bool = False) -> Any:
+    from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
+        ExchangeInformationResponseSymbolsInner,
+        ExchangeInformationResponseSymbolsInnerFiltersInner,
+    )
+
+    price = ExchangeInformationResponseSymbolsInnerFiltersInner(
+        filter_type="PRICE_FILTER", tick_size="0.10"
+    )
+    lot = ExchangeInformationResponseSymbolsInnerFiltersInner(
+        filter_type="LOT_SIZE", step_size="0.001", min_qty="0.001", max_qty="1000"
+    )
+    notional = ExchangeInformationResponseSymbolsInnerFiltersInner(
+        filter_type="MIN_NOTIONAL", notional="5"
+    )
+    return ExchangeInformationResponseSymbolsInner(
+        symbol=symbol,
+        contract_type="PERPETUAL",
+        status="TRADING",
+        base_asset=symbol[:-4],
+        quote_asset="USDT",
+        margin_asset="USDT",
+        filters=[price, notional] if malformed else [price, lot, notional],
+    )
+
+
+FIVE_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
+
+
+async def test_one_malformed_unrelated_contract_no_longer_stops_the_refresh() -> None:
+    records = [_record(s) for s in FIVE_SYMBOLS] + [_record("ODDUSDT", malformed=True)]
+    provider = market_inputs.ConstraintProvider(
+        public=_sdk_public(records), symbols=FIVE_SYMBOLS, clock=FixedClock()
+    )
+    await provider.refresh()
+    for symbol in FIVE_SYMBOLS:
+        assert provider.snapshot_for(symbol, NOW).symbol == symbol
+
+
+async def test_a_malformed_configured_symbol_still_fails_the_whole_refresh() -> None:
+    records = [_record(s) for s in FIVE_SYMBOLS[1:]] + [_record("BTCUSDT", malformed=True)]
+    provider = market_inputs.ConstraintProvider(
+        public=_sdk_public(records), symbols=FIVE_SYMBOLS, clock=FixedClock()
+    )
+    with pytest.raises(ValueError, match="BTCUSDT"):
+        await provider.refresh()
+    with pytest.raises(market_inputs.ConstraintsUnavailable):
+        provider.snapshot_for("ETHUSDT", NOW)

@@ -22,8 +22,10 @@ BOTH series are complete: the fill driver must only be advanced to that instant,
 that arrives late would be skipped by the next window and read as a hole.
 
 The module imports nothing from the Binance SDK: the adapter is passed in (anything shaped like
-`BinancePublicMarketData`), and its error types stay the caller's to name through
-`transient_errors`.
+`BinancePublicMarketData`). The default `transient_errors` are the adapter's project type
+`TransientMarketDataError` (an SDK server or network error, plan 16-56, B1-WR-06) plus
+`TimeoutError` and `ConnectionError`; each fetch is retried at most once on one of them. A
+rate-limit or ban answer (`MarketDataRateLimited`) is not transient and is never retried at once.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
 
-from src.adapters.binance_public import Kline, MarkKline
+from src.adapters.binance_public import Kline, MarkKline, TransientMarketDataError
 from src.backtest.series import MinuteSeriesError, _window, validate_minute_series
 from src.core.types import Candle
 
@@ -49,6 +51,12 @@ _INTERVAL = "1m"
 _PAGE_LIMIT = 1500  # Binance maximum for klines and markPriceKlines
 _MAX_PAGES = 20
 _ZERO = Decimal("0")
+# The errors of one fetch that get exactly one immediate retry (B1-WR-06).
+DEFAULT_TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
+    TransientMarketDataError,
+    TimeoutError,
+    ConnectionError,
+)
 
 
 class LiveMinutePollError(RuntimeError):
@@ -226,7 +234,7 @@ class LiveMinutePoller:
         source: LiveMinuteSource,
         poll_interval_seconds: int,
         close_lag_seconds: int,
-        transient_errors: tuple[type[BaseException], ...] = (TimeoutError, ConnectionError),
+        transient_errors: tuple[type[BaseException], ...] = DEFAULT_TRANSIENT_ERRORS,
         page_limit: int = _PAGE_LIMIT,
         max_pages: int = _MAX_PAGES,
     ) -> None:

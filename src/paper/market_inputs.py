@@ -62,7 +62,7 @@ class PublicDataLike(Protocol):
 
     async def server_time(self) -> datetime: ...
 
-    async def exchange_info(self) -> list[SymbolFilters]: ...
+    async def exchange_info(self, symbols: Sequence[str] | None = None) -> list[SymbolFilters]: ...
 
 
 class RiskInputsProvider(Protocol):
@@ -110,7 +110,9 @@ class ConstraintProvider:
 
     async def refresh(self) -> None:
         observed_at = self._clock()
-        rows = {row.symbol: row for row in await self._public.exchange_info()}
+        # Only the configured symbols are validated strictly (B1-WR-12): drift of a contract the
+        # runtime does not trade cannot stop the refresh, a bad configured one still fails it.
+        rows = {row.symbol: row for row in await self._public.exchange_info(self._symbols)}
         built: dict[str, ConstraintSnapshot] = {}
         for symbol in self._symbols:
             row = rows.get(symbol)
