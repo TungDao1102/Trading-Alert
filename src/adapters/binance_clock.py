@@ -13,11 +13,23 @@ No number lives here: every limit comes from ``DriftLimits`` (``src/adapters/bin
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from src.adapters.binance_limits import DriftLimits
+
+# Fixed failure words of a measurement that did not raise but cannot be trusted.
+NAIVE_SERVER_TIME = "NAIVE_SERVER_TIME"
+NOT_A_DATETIME = "NOT_A_DATETIME"
+HOST_CLOCK_BACKWARDS = "HOST_CLOCK_BACKWARDS"
+INVALID_HOST_CLOCK_READING = "INVALID_HOST_CLOCK_READING"
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_ONE_MS = timedelta(milliseconds=1)
+
+ServerTimeSource = Callable[[], Awaitable[datetime]]
 
 
 def _is_strict_int(value: object) -> bool:
@@ -125,6 +137,61 @@ def evaluate_clock_drift(
     )
 
 
+def _utc_ms(moment: datetime) -> int:
+    """Whole milliseconds since the epoch by exact timedelta arithmetic (no float, no timestamp)."""
+    return (moment - _EPOCH) // _ONE_MS
+
+
+async def measure_clock_drift(
+    *,
+    server_time: ServerTimeSource,
+    clock_ms: Callable[[], int],
+    now_utc: Callable[[], datetime],
+    limits: DriftLimits,
+) -> DriftVerdict:
+    """Measure the drift once: ``clock_ms()``, one ``await server_time()``, ``clock_ms()``.
+
+    Never raises for a measurement problem and never retries: an exception of ``server_time``
+    (only its TYPE NAME is kept), a result that is not an aware datetime, a host reading that
+    is not an int or a host clock that went backwards each give a failed verdict, which blocks
+    new entries. Cancellation propagates. ``measured_at_utc`` is ``now_utc()``.
+
+    Raises:
+        ValueError: ``now_utc()`` returned a naive datetime (a wiring error, not a measurement).
+    """
+    before = clock_ms()
+    failure: str | None = None
+    server: object = None
+    try:
+        server = await server_time()
+    except Exception as exc:  # every failure is a failed verdict (fail closed)
+        failure = type(exc).__name__
+    after = clock_ms()
+    measured_at = now_utc()
+    if not _is_aware(measured_at):
+        raise ValueError("now_utc must return an aware datetime")
+    if failure is None:
+        if not _is_strict_int(before) or not _is_strict_int(after):
+            failure = INVALID_HOST_CLOCK_READING
+        elif not isinstance(server, datetime):
+            failure = NOT_A_DATETIME
+        elif not _is_aware(server):
+            failure = NAIVE_SERVER_TIME
+        elif after < before:
+            failure = HOST_CLOCK_BACKWARDS
+    if failure is not None or not isinstance(server, datetime):
+        return DriftVerdict.failed(
+            failure_type=failure or NOT_A_DATETIME, measured_at_utc=measured_at
+        )
+    return evaluate_clock_drift(
+        before_ms=before,
+        server_ms=_utc_ms(server),
+        after_ms=after,
+        limits=limits,
+        measured_at_utc=measured_at,
+    )
+
+
 class DriftBlockReason(StrEnum):
     """Why ``ClockDriftGuard`` blocks new entries."""
 
@@ -139,6 +206,11 @@ class ClockDriftGuard:
 
     Only new entries are gated; protective orders, cancels and reads never consult this guard
     (plan 18-13). The guard keeps no clock of its own: every query takes ``now_utc``.
+
+    A -1021 answer (``note_clock_skew_error``) only requests a re-measure; while that request
+    is pending the last verdict no longer counts as fresh (STALE), because Binance has just
+    contradicted it. Entries are allowed again only after a fresh in-limit measurement, and a
+    -1021 never retries an order (D-14).
     """
 
     def __init__(self, *, limits: DriftLimits) -> None:
@@ -146,6 +218,7 @@ class ClockDriftGuard:
             raise TypeError("limits must be a DriftLimits")
         self._limits = limits
         self._last: DriftVerdict | None = None
+        self._remeasure_requested = False
 
     @property
     def limits(self) -> DriftLimits:
@@ -174,6 +247,8 @@ class ClockDriftGuard:
             return DriftBlockReason.MEASUREMENT_FAILED
         if not last.within_limits:
             return DriftBlockReason.OUT_OF_LIMITS
+        if self._remeasure_requested:
+            return DriftBlockReason.STALE
         if last.measured_at_utc is None:  # pragma: no cover - record() refuses it
             return DriftBlockReason.STALE
         age = now_utc - last.measured_at_utc
@@ -185,10 +260,60 @@ class ClockDriftGuard:
         """True only for a fresh, successful, in-limit verdict."""
         return self.blocked_reason(now_utc) is None
 
+    # -- re-measure ------------------------------------------------------------------------ #
+
+    @property
+    def remeasure_requested(self) -> bool:
+        return self._remeasure_requested
+
+    def request_remeasure(self) -> None:
+        """Ask for a new measurement (the next ``refresh`` clears the request)."""
+        self._remeasure_requested = True
+
+    def needs_remeasure(self, now_utc: datetime) -> bool:
+        """True when a request is pending, no verdict exists, or the periodic interval elapsed."""
+        if not _is_aware(now_utc):
+            raise ValueError("now_utc must be an aware datetime")
+        if self._remeasure_requested or self._last is None:
+            return True
+        interval = self._limits.periodic_remeasure_interval_seconds
+        if interval is None or self._last.measured_at_utc is None:
+            return False
+        return now_utc - self._last.measured_at_utc >= timedelta(seconds=interval)
+
+    async def refresh(
+        self,
+        *,
+        server_time: ServerTimeSource,
+        clock_ms: Callable[[], int],
+        now_utc: Callable[[], datetime],
+    ) -> DriftVerdict:
+        """Measure once, record the verdict and clear the pending request.
+
+        The request is cleared BEFORE the measurement, so a -1021 that arrives while the
+        server-time call is in flight stays pending for the next refresh.
+        """
+        self._remeasure_requested = False
+        verdict = await measure_clock_drift(
+            server_time=server_time, clock_ms=clock_ms, now_utc=now_utc, limits=self._limits
+        )
+        self.record(verdict)
+        return verdict
+
+    def note_clock_skew_error(self) -> None:
+        """The -1021 hook: only requests a re-measure. No I/O, no retry, never re-enables."""
+        self.request_remeasure()
+
 
 __all__ = [
+    "HOST_CLOCK_BACKWARDS",
+    "INVALID_HOST_CLOCK_READING",
+    "NAIVE_SERVER_TIME",
+    "NOT_A_DATETIME",
     "ClockDriftGuard",
     "DriftBlockReason",
     "DriftVerdict",
+    "ServerTimeSource",
     "evaluate_clock_drift",
+    "measure_clock_drift",
 ]
