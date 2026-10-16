@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 10
+open_count: 11
 waived_count: 0
 fixed_count: 1
-total_count: 11
-last_updated: 2026-10-16T10:18:43.567Z
+total_count: 12
+last_updated: 2026-10-16T14:37:27.945Z
 ---
 
 # Broken Windows Ledger
@@ -26,6 +26,7 @@ last_updated: 2026-10-16T10:18:43.567Z
 | 9 | 16 | unrun-verify | tests/test_paper_runtime_restart_pg.py |  | 16-57: the three PostgreSQL restart tests skipped (no TEST_DATABASE_URL); the shared gap ledger, the post-start seam backfill and the configuration identity in EPOCH_PINNED/RUNTIME_START are proven on the in-memory port only | open |  | 2026-10-16T10:18:41.746Z |  |
 | 10 | 16 | unrun-verify | tests/test_soak_evidence_export.py | 818 | 16-57: the PostgreSQL test of the soak evidence export skipped (no TEST_DATABASE_URL); EPOCH_PINNED and RUNTIME_START now carry config_identity_sha256 and config_file_provenance | open |  | 2026-10-16T10:18:42.682Z |  |
 | 11 | 16 | unrun-verify | src/paper/shadow_runtime.py |  | 16-57: the SHADOW_SIGNAL_LOST journal row (no signal or plan id, foreign keys left null) is written through the in-memory SHADOW stores only; PgShadowStores/PgJournalStore were not exercised (PostgreSQL off on the dev machine) | open |  | 2026-10-16T10:18:43.567Z |  |
+| 12 | 16 | unrun-verify | .github/workflows/paper_freeze_check.yml | 72 | GitHub acceptance of the concurrency key 'queue: max' is not verified live (docs read 2026-10-16, no network); plan 16-59 tests only check the text; the first live run on master is the proof | open |  | 2026-10-16T14:37:27.945Z |  |
 
 ````json
 [
@@ -169,6 +170,19 @@ last_updated: 2026-10-16T10:18:43.567Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-16T10:18:43.567Z",
+    "resolved_at": null,
+    "milestone": "v0.3"
+  },
+  {
+    "id": 12,
+    "kind": "unrun-verify",
+    "phase": "16",
+    "file": ".github/workflows/paper_freeze_check.yml",
+    "line": 72,
+    "description": "GitHub acceptance of the concurrency key 'queue: max' is not verified live (docs read 2026-10-16, no network); plan 16-59 tests only check the text; the first live run on master is the proof",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-16T14:37:27.945Z",
     "resolved_at": null,
     "milestone": "v0.3"
   }
