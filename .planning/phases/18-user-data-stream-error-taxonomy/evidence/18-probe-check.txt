@@ -1,1 +1,54 @@
 probe dry run on the connected machine: PASS (exit 0, proof_class FAKE, 16 cases NOT_REHEARSED in CASE_ORDER order, zero live port calls, check_probe_evidence no problem; 108 tests pass)
+live Demo probe 2026-10-16T14:21:34Z (user-run, DEMO, BTCUSDT, quantity 0.0008, 16 required cases, 3 optional cases off, transport sdk): evidence demo-probe-EVIDENCE-20261016T142134Z.json
+label: demo-observed, not mainnet. D055 stays OPEN: this check records facts only and changes no decision file (D-17).
+schema: check_probe_evidence reports no problem; proof_class REAL_DEMO; outcome COMPLETE; failures none; ban none; stream STARTED then stopped
+overall: PASS (probe_acceptance_verdict); 13 cases OBSERVED, 3 NOT_OBSERVED (id_reuse_after_filled, partial_fill, triggered_market_exit_lifecycle; reasons below)
+cleanup: FLAT (final: open_orders 0, open_algo_orders 0, positions none, readable true); every per-case cleanup FLAT
+account: USDT balance 4999.91565348 before and 4999.75172748 after (difference -0.16392600, fees and spread of the small entries and exits); BTC balance 0.01000000 before and after
+secrets: none in the evidence or in the 47 recorded frame files (scanned for the key value, the secret value, listenKey and signature shapes)
+
+case verdicts (all PASS in probe_acceptance_verdict):
+get_order_not_found OBSERVED PASS
+get_algo_order_not_found OBSERVED PASS
+cancel_order_not_found OBSERVED PASS
+cancel_algo_order_not_found OBSERVED PASS
+duplicate_client_algo_id OBSERVED PASS
+id_reuse_after_canceled_normal OBSERVED PASS
+id_reuse_after_canceled_algo OBSERVED PASS
+id_reuse_after_filled NOT_OBSERVED PASS (entry rejected: BAD_REQUEST -4016, the limit price was above the exchange cap 86305.10; no fill happened)
+preplaced_stop_reduce_only_flat OBSERVED PASS
+closeposition_stop_flat OBSERVED PASS
+entry_never_fills_protective_orphan OBSERVED PASS
+full_fill_protective_quantity OBSERVED PASS
+partial_fill NOT_OBSERVED PASS (every marketable entry filled completely at the approved size)
+rejected_protective_variants OBSERVED PASS
+below_min_notional_reduce_only_leg OBSERVED PASS
+triggered_market_exit_lifecycle NOT_OBSERVED PASS (the trigger was not reached within case_timeout_seconds)
+
+Facts for plan 18-21 (copied from the evidence, not interpreted; (http_class, code, category, message)):
+GET order not found: (BAD_REQUEST, -2013, ORDER_ABSENT, "Order does not exist.")
+GET algoOrder not found: (BAD_REQUEST, -2013, ORDER_ABSENT, "Order does not exist.")
+cancel order not found: (BAD_REQUEST, -2011, ORDER_ABSENT, "Unknown order sent.")
+cancel algo order not found: (BAD_REQUEST, -2011, ORDER_ABSENT, "Unknown order sent.")
+duplicate clientAlgoId while the first is open (status NEW): rejected (BAD_REQUEST, -4116, DUPLICATE_CLIENT_ID, "ClientOrderId is duplicated."); the first carrier was cancelled afterwards
+id reuse after CANCELED, normal order: the second order with the same client id was accepted (status NEW, a new order_id), then cancelled
+id reuse after CANCELED, algo order: the second order with the same clientAlgoId was accepted (status NEW, a new algo_id), then cancelled
+id reuse after FILLED: not observed (entry rejected: BAD_REQUEST, -4016, UNKNOWN_EXCHANGE_ERROR, "Limit price can't be higher than 86305.10.")
+pre-placed explicit-quantity reduce-only STOP_MARKET while flat: accepted (status NEW, quantity 0.0008); it stays listed as one open algo order; GET order on its algo id: (BAD_REQUEST, -2013, ORDER_ABSENT, "Order does not exist."); reconciliation open_orders=0 open_algo_orders=1 position=0 matched
+close-position variant while flat: rejected (BAD_REQUEST, -4509, PRECONDITION_NO_POSITION, "Time in Force (TIF) GTE can only be used with open positions. Please ensure that positions are available.")
+orphan observation: the protective STOP_MARKET placed while the entry rests stayed status NEW after the entry was cancelled (leg_status_after_entry_cancel NEW), was still queried as NEW, and cancelled cleanly (leg_cancel_clean true); orphaned true; reconciliation open_orders=0 open_algo_orders=0 position=0 matched
+full-fill protective quantity: entry FILLED at 0.0008 (average price 82254.4); the pre-placed reduce-only STOP_MARKET quantity 0.00080 equals the position amount 0.0008 (protective_quantity_equals_position true); leg status after the fill NEW; reconciliation open_orders=0 open_algo_orders=1 position=0.0008 matched
+partial fill: not observed (every marketable entry filled completely)
+rejected-variant answers: close position while flat (BAD_REQUEST, -4509, PRECONDITION_NO_POSITION, same message as above); reduce-only together with close position (BAD_REQUEST, -1106, UNKNOWN_EXCHANGE_ERROR, "Parameter 'reduceonly' sent when not required."); wrong-side trigger (BAD_REQUEST, -2021, REJECTED_DEFINITIVE, "Order would immediately trigger.")
+below-minimum-notional reduce-only leg: with the position open, a reduce-only STOP_MARKET of quantity 0.0001 (notional 7.890670 against min_notional 50) was ACCEPTED (status NEW); GET order on its algo id: (BAD_REQUEST, -2013, ORDER_ABSENT, "Order does not exist.")
+triggered lifecycle: not observed within case_timeout_seconds; algo statuses seen by REST: NEW, NEW; by frames: NEW; child order identity (ai, aq, child c and i) NOT_OBSERVED (no ALGO_UPDATE frame carried ai or aq, no child ORDER_TRADE_UPDATE frame); REST actual_order_id empty
+REST algoStatus values seen: NEW only
+partial fill and market-lot-size: market lot filters read on Demo (min 0.0001, max 120, step 0.0001); the out-of-range question is NOT_OBSERVED because the optional case was off
+REST trade ids equal stream trade ids: not compared by the probe in this file (no trade-id field in the verdict); the TRADE_LITE and ORDER_TRADE_UPDATE frames of the filled cases are in the fixtures
+frames per case (file names under tests/fixtures/phase18/recorded_demo/probe/, 47 files): duplicate_client_algo_id 2 ALGO_UPDATE; id_reuse_after_canceled_normal 4 ORDER_TRADE_UPDATE; id_reuse_after_canceled_algo 4 ALGO_UPDATE; preplaced_stop_reduce_only_flat 2 ALGO_UPDATE; entry_never_fills_protective_orphan 4 (ORDER_TRADE_UPDATE, ALGO_UPDATE); full_fill_protective_quantity 10, below_min_notional_reduce_only_leg 10, triggered_market_exit_lifecycle 10 (each: ALGO_UPDATE or TRADE_LITE, ORDER_TRADE_UPDATE, ACCOUNT_UPDATE)
+
+The three assumptions of BinanceSemanticsFakeAdapter (tests/support/fake_binance_exchange.py docstring):
+1 a client id is unique among OPEN orders, so a duplicate while the first is open is rejected: agrees with the probe for clientAlgoId (-4116 DUPLICATE_CLIENT_ID); not observed for a normal order
+2 a CANCELED order frees its client id (a reused id is accepted): agrees with the probe (normal and algo)
+3 a FILLED order frees its client id: not observed: the entry of id_reuse_after_filled was rejected with -4016 before any fill
+(the 3-day retention rule of the fake is a documentation rule the probe does not test: not observed)

@@ -1,0 +1,29 @@
+{
+  "E": 1792160503372,
+  "T": 1792160503370,
+  "e": "ALGO_UPDATE",
+  "o": {
+    "R": false,
+    "S": "BUY",
+    "V": "EXPIRE_MAKER",
+    "X": "NEW",
+    "ai": "",
+    "aid": 1000000243108071,
+    "at": "CONDITIONAL",
+    "caid": "dprobe-rca-20261016T142134Z-7",
+    "cp": false,
+    "f": "GTC",
+    "gtd": 0,
+    "ia": false,
+    "o": "STOP",
+    "p": "85536.9",
+    "pP": false,
+    "pm": "NONE",
+    "ps": "BOTH",
+    "q": "0.0008",
+    "s": "BTCUSDT",
+    "tp": "85536.9",
+    "tt": 0,
+    "wt": "MARK_PRICE"
+  }
+}

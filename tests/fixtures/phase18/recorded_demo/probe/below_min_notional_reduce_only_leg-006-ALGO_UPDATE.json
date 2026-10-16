@@ -1,0 +1,29 @@
+{
+  "E": 1792160543758,
+  "T": 1792160543753,
+  "e": "ALGO_UPDATE",
+  "o": {
+    "R": true,
+    "S": "SELL",
+    "V": "EXPIRE_MAKER",
+    "X": "CANCELED",
+    "ai": "",
+    "aid": 1000000243108654,
+    "at": "CONDITIONAL",
+    "caid": "dprobe-bml-20261016T142134Z-20",
+    "cp": false,
+    "f": "GTC",
+    "gtd": 0,
+    "ia": false,
+    "o": "STOP_MARKET",
+    "p": "0",
+    "pP": false,
+    "pm": "NONE",
+    "ps": "BOTH",
+    "q": "0.0001",
+    "s": "BTCUSDT",
+    "tp": "78906.7",
+    "tt": 0,
+    "wt": "MARK_PRICE"
+  }
+}
