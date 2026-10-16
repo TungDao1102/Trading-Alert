@@ -1068,3 +1068,328 @@ async def test_every_client_id_is_unique_but_the_intended_reuse(tmp_path: Path) 
     assert all(dp.CLIENT_ID_RE.fullmatch(str(value)) for value in placed)
     # each case places exactly one id twice (the reuse under test); no id crosses cases
     assert sorted(placed.count(value) for value in set(placed)) == [2, 2, 2, 2]
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: the D055 cases.
+# --------------------------------------------------------------------------- #
+
+PREPLACED = "preplaced_stop_reduce_only_flat"
+ORPHAN = "entry_never_fills_protective_orphan"
+FULL_FILL = "full_fill_protective_quantity"
+REDUCE_ONLY_REJECT = error_observation(
+    "new_conditional_order",
+    code=-2022,
+    category="REJECTED_DEFINITIVE",
+    message="FAKE ReduceOnly Order is rejected.",
+)
+
+
+def _assert_preplaced_leg(kwargs: dict[str, Any]) -> None:
+    assert kwargs["order_type"] == "STOP_MARKET" and kwargs["side"] == "SELL"
+    assert kwargs["trigger_price"] == FAR_BELOW and kwargs["working_type"] == "MARK_PRICE"
+    assert kwargs["quantity"] == APPROVED and kwargs["reduce_only"] is True
+    assert kwargs["close_position"] is None and kwargs["position_side"] == "BOTH"
+
+
+async def test_preplaced_leg_accepted_records_its_status_and_reconciles(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    document, code, _ = await run_cases(tmp_path, port, PREPLACED)
+    record = case(document, PREPLACED)
+    assert record["status"] == dp.OBSERVED
+    (leg,) = sent(port, "new_conditional_order")
+    _assert_preplaced_leg(leg)
+    assert record["details"]["leg_accepted"] == "true"
+    assert record["details"]["leg_status"] == "accepted status=NEW"
+    assert [kw["client_algo_id"] for kw in sent(port, "query_algo_order")] == [
+        leg["client_algo_id"]
+    ]
+    assert record["details"]["reconciliation_expected"] == (
+        "open_orders=0 open_algo_orders=1 position=0"
+    )
+    assert record["details"]["reconciliation_matches"] == "true"
+    assert code == dp.EXIT_OK
+
+
+async def test_preplaced_leg_rejected_records_the_exact_answer(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.script("new_conditional_order", REDUCE_ONLY_REJECT)
+    document, _, _ = await run_cases(tmp_path, port, PREPLACED)
+    record = case(document, PREPLACED)
+    assert record["status"] == dp.OBSERVED
+    assert record["details"]["leg_accepted"] == "false"
+    assert record["observations"][0]["error"]["code"] == -2022
+    assert record["observations"][0]["error"]["message"] == "FAKE ReduceOnly Order is rejected."
+    assert sent(port, "query_algo_order") == []
+    assert record["details"]["reconciliation_expected"] == (
+        "open_orders=0 open_algo_orders=0 position=0"
+    )
+    assert record["details"]["reconciliation_matches"] == "true"
+
+
+async def test_a_reconciliation_that_does_not_match_is_recorded(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    # the leg is accepted but the open algo snapshot of the case (call 1) shows none
+    port.script_call("open_algo_orders", 1, ok_observation("open_algo_orders", {"count": "0"}))
+    document, _, _ = await run_cases(tmp_path, port, PREPLACED)
+    details = case(document, PREPLACED)["details"]
+    assert details["reconciliation_observed"] == "open_orders=0 open_algo_orders=0 position=0"
+    assert details["reconciliation_matches"] == "false"
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+async def test_closeposition_stop_flat_records_the_answer(tmp_path: Path, accepted: bool) -> None:
+    port = FakeProbePort()
+    if not accepted:
+        port.script(
+            "new_conditional_order",
+            error_observation(
+                "new_conditional_order",
+                code=-4509,
+                category="REJECTED_DEFINITIVE",
+                message="FAKE Time in Force (TIF) GTE can only be used with open positions.",
+            ),
+        )
+    document, _, _ = await run_cases(tmp_path, port, "closeposition_stop_flat")
+    record = case(document, "closeposition_stop_flat")
+    assert record["status"] == dp.OBSERVED
+    (leg,) = sent(port, "new_conditional_order")
+    assert leg["order_type"] == "STOP_MARKET" and leg["side"] == "SELL"
+    assert leg["close_position"] is True and leg["quantity"] is None
+    assert leg["reduce_only"] is None and leg["trigger_price"] == FAR_BELOW
+    assert record["details"]["close_position_accepted"] == ("true" if accepted else "false")
+    if not accepted:
+        assert record["observations"][0]["error"]["code"] == -4509
+        assert sent(port, "query_algo_order") == []
+
+
+async def test_orphan_case_with_the_leg_left_open_cancels_it_and_reconciles(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    vt = VirtualTime()
+    document, code, _ = await run_cases(tmp_path, port, PREPLACED, ORPHAN, vt=vt)
+    record = case(document, ORPHAN)
+    assert record["status"] == dp.OBSERVED, record
+    entry = sent(port, "new_limit_order")[-1]
+    leg = sent(port, "new_conditional_order")[-1]
+    assert entry["price"] == FAR_BELOW and entry["side"] == "BUY"
+    _assert_preplaced_leg(leg)
+    calls = case_calls(port, nth=1)
+    assert calls.index("new_limit_order") < calls.index("new_conditional_order")
+    assert calls.index("new_conditional_order") < calls.index("cancel_order")
+    assert vt.sleeps == [TEST_ONLY_CASE_TIMEOUT_SECONDS]  # one wait for a system cancel
+    details = record["details"]
+    assert details["leg_status_after_entry_cancel"] == "NEW"
+    assert details["orphaned"] == "true"
+    assert details["leg_cancel_clean"] == "true"
+    assert [kw["client_algo_id"] for kw in sent(port, "cancel_algo_order")] == [
+        leg["client_algo_id"]
+    ]
+    assert details["reconciliation_expected"] == "open_orders=0 open_algo_orders=0 position=0"
+    assert details["reconciliation_matches"] == "true"
+    assert code == dp.EXIT_OK
+
+
+async def test_orphan_case_with_a_system_cancel_is_not_orphaned(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.on_wait.append(lambda: port.system_cancel_algo(port.open_algo_ids[-1]))
+    document, _, _ = await run_cases(tmp_path, port, PREPLACED, ORPHAN)
+    details = case(document, ORPHAN)["details"]
+    assert details["leg_status_after_entry_cancel"] == "CANCELED"
+    assert details["orphaned"] == "false"
+    assert "leg_cancel_clean" not in details
+    assert sent(port, "cancel_algo_order") == []
+
+
+@pytest.mark.parametrize("dependent", [ORPHAN, FULL_FILL])
+async def test_a_dependent_case_of_a_rejected_leg_sends_nothing(
+    tmp_path: Path, dependent: str
+) -> None:
+    port = FakeProbePort()
+    port.script("new_conditional_order", REDUCE_ONLY_REJECT)
+    document, _, _ = await run_cases(tmp_path, port, PREPLACED, dependent)
+    record = case(document, dependent)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "pre-placed leg not accepted"
+    assert not any(name in ORDER_SENDS for name in case_calls(port, nth=1))
+
+
+@pytest.mark.parametrize("dependent", [ORPHAN, FULL_FILL])
+async def test_a_dependent_case_without_its_premise_case_is_not_observed(
+    tmp_path: Path, dependent: str
+) -> None:
+    port = FakeProbePort()
+    document, _, _ = await run_cases(tmp_path, port, dependent)
+    record = case(document, dependent)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "premise case not run"
+    assert not any(name in ORDER_SENDS for name in port.names())
+
+
+@pytest.mark.parametrize("dependent", [ORPHAN, FULL_FILL])
+async def test_a_dependent_case_whose_own_leg_is_rejected_stops(
+    tmp_path: Path, dependent: str
+) -> None:
+    port = FakeProbePort()
+    port.script_call("new_conditional_order", 1, REDUCE_ONLY_REJECT)
+    document, _, _ = await run_cases(tmp_path, port, PREPLACED, dependent)
+    record = case(document, dependent)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "pre-placed leg not accepted in this case: BAD_REQUEST -2022"
+    # no entry is sent after the rejected leg of the full-fill case
+    if dependent == FULL_FILL:
+        assert sent(port, "new_limit_order") == []
+
+
+async def test_full_fill_compares_the_position_with_the_protective_quantity(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    document, code, _ = await run_cases(tmp_path, port, PREPLACED, FULL_FILL)
+    record = case(document, FULL_FILL)
+    assert record["status"] == dp.OBSERVED, record
+    calls = case_calls(port, nth=1)
+    assert calls.index("new_conditional_order") < calls.index("new_limit_order")
+    leg = sent(port, "new_conditional_order")[-1]
+    entry = sent(port, "new_limit_order")[-1]
+    _assert_preplaced_leg(leg)
+    assert entry["price"] == MARKETABLE and entry["quantity"] == APPROVED
+    details = record["details"]
+    assert details["position_amount"] == "0.002"
+    assert details["leg_quantity"] == "0.002"
+    assert details["leg_status_after_fill"] == "NEW"
+    assert details["protective_quantity_equals_position"] == "true"
+    assert details["reconciliation_expected"] == ("open_orders=0 open_algo_orders=1 position=0.002")
+    assert details["reconciliation_matches"] == "true"
+    assert record["cleanup"]["status"] == dp.CLEANUP_FLAT
+    assert code == dp.EXIT_OK
+
+
+async def test_full_fill_without_a_fill_is_not_observed(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.fill_marketable = False
+    document, _, _ = await run_cases(tmp_path, port, PREPLACED, FULL_FILL)
+    record = case(document, FULL_FILL)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "the entry did not fill: status NEW"
+
+
+async def test_partial_fill_is_derived_from_a_partially_filled_entry(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.partial_fill_quantity = Decimal("0.001")
+    document, _, _ = await run_cases(tmp_path, port, "id_reuse_after_filled", "partial_fill")
+    record = case(document, "partial_fill")
+    assert record["status"] == dp.OBSERVED
+    assert record["observations"]
+    assert all(
+        item["summary"].get("status") == "PARTIALLY_FILLED" for item in record["observations"]
+    )
+    assert record["details"]["derived_from"] == "id_reuse_after_filled"
+    # derived: the case itself sends nothing
+    assert not any(name in ORDER_SENDS for name in case_calls(port, nth=1))
+
+
+async def test_partial_fill_is_seen_in_a_stream_frame_too(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    recorder = dp.ProbeRecorder()
+    recorder.results["id_reuse_after_filled"] = dp.CaseResult(
+        status=dp.OBSERVED,
+        observations=(ok_observation("new_limit_order", {"status": "NEW"}),),
+    )
+    recorder.records["id_reuse_after_filled"] = {
+        "frames": {
+            "events": [{"event_type": "OrderUpdateEvent", "order_status": "PARTIALLY_FILLED"}]
+        }
+    }
+    config = make_config(tmp_path, execute=True)
+    context = dp.CaseContext(rig=scenario_rig(port), config=config, recorder=recorder)
+    result = await dp.CASE_HANDLERS["partial_fill"](context)
+    assert result.status == dp.OBSERVED
+    assert result.details["seen_in"] == "frames"
+
+
+async def test_partial_fill_absent_is_not_observed(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    document, _, _ = await run_cases(tmp_path, port, "id_reuse_after_filled", "partial_fill")
+    record = case(document, "partial_fill")
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "every marketable entry filled completely at the approved size"
+
+
+async def test_partial_fill_with_no_filled_entry_is_not_observed(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.fill_marketable = False
+    document, _, _ = await run_cases(tmp_path, port, "id_reuse_after_filled", "partial_fill")
+    record = case(document, "partial_fill")
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "no marketable entry of this run filled"
+
+
+async def test_partial_fill_without_an_entry_case_is_not_observed(tmp_path: Path) -> None:
+    document, _, _ = await run_cases(tmp_path, FakeProbePort(), "partial_fill")
+    record = case(document, "partial_fill")
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "premise case not run"
+
+
+async def test_rejected_protective_variants_records_each_answer_once(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    answers = [
+        error_observation("new_conditional_order", code=-4509, category="REJECTED_DEFINITIVE"),
+        error_observation("new_conditional_order", code=-1106, category="REJECTED_DEFINITIVE"),
+        error_observation("new_conditional_order", code=-2021, category="REJECTED_DEFINITIVE"),
+    ]
+    port.script("new_conditional_order", *answers)
+    document, _, _ = await run_cases(tmp_path, port, "rejected_protective_variants")
+    record = case(document, "rejected_protective_variants")
+    assert record["status"] == dp.OBSERVED
+    a, b, c = sent(port, "new_conditional_order")  # exactly three: none retried
+    assert a["order_type"] == "TAKE_PROFIT_MARKET" and a["close_position"] is True
+    assert a["quantity"] is None and a["reduce_only"] is None and a["trigger_price"] == FAR_ABOVE
+    assert b["order_type"] == "STOP_MARKET" and b["close_position"] is True
+    assert b["reduce_only"] is True and b["quantity"] is None and b["trigger_price"] == FAR_BELOW
+    assert c["order_type"] == "STOP_MARKET" and c["side"] == "SELL"
+    assert c["trigger_price"] == FAR_ABOVE and c["quantity"] == APPROVED
+    assert c["reduce_only"] is None and c["close_position"] is None
+    assert [item["error"]["code"] for item in record["observations"]] == [-4509, -1106, -2021]
+    details = record["details"]
+    assert details["variant_a_close_position_flat"].startswith("rejected BAD_REQUEST -4509")
+    assert details["variant_b_reduce_only_with_close_position"].startswith("rejected")
+    assert details["variant_c_wrong_side_trigger"].startswith("rejected BAD_REQUEST -2021")
+
+
+async def test_rejected_protective_variants_in_hedge_mode_skip_the_reduce_only_variant(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort(dual_side=True)
+    document, _, _ = await run_cases(tmp_path, port, "rejected_protective_variants")
+    record = case(document, "rejected_protective_variants")
+    assert record["status"] == dp.OBSERVED
+    a, c = sent(port, "new_conditional_order")
+    assert a["position_side"] == "LONG" and c["position_side"] == "SHORT"
+    assert record["details"]["variant_b_reduce_only_with_close_position"] == (
+        "NOT_OBSERVED: hedge mode: reduceOnly cannot be sent"
+    )
+
+
+@pytest.mark.parametrize("case_id", [PREPLACED, ORPHAN, FULL_FILL])
+async def test_the_reduce_only_d055_cases_are_not_observed_in_hedge_mode(
+    tmp_path: Path, case_id: str
+) -> None:
+    port = FakeProbePort(dual_side=True)
+    document, _, _ = await run_cases(tmp_path, port, case_id)
+    record = case(document, case_id)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "hedge mode: reduceOnly cannot be sent"
+    assert not any(name in ORDER_SENDS for name in port.names())
+
+
+async def test_closeposition_stop_flat_runs_in_hedge_mode_with_the_long_side(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort(dual_side=True)
+    document, _, _ = await run_cases(tmp_path, port, "closeposition_stop_flat")
+    assert case(document, "closeposition_stop_flat")["status"] == dp.OBSERVED
+    (leg,) = sent(port, "new_conditional_order")
+    assert leg["position_side"] == "LONG"
