@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 6
+open_count: 10
 waived_count: 0
 fixed_count: 1
-total_count: 7
-last_updated: 2026-10-16T09:39:54.524Z
+total_count: 11
+last_updated: 2026-10-16T10:18:43.567Z
 ---
 
 # Broken Windows Ledger
@@ -22,6 +22,10 @@ last_updated: 2026-10-16T09:39:54.524Z
 | 5 | 16 | unrun-verify | deploy/heartbeat.sh |  | 16-56 paper heartbeat: live ping delivery, the heartbeat-paper-url systemd credential and the 60 s timer are operator verification on the soak host before plan 16-43 (owner creates the second check, period 60 s, grace 120 s, and stores its URL with --target paper --set-url) | open |  | 2026-10-16T09:39:52.894Z |  |
 | 6 | 16 | unrun-verify | src/paper/runtime.py |  | 16-56 silence watchdog proven only with fakes (fake SDK client, injected feed clock and sleep); a real half-open Binance connection and the 120 s bound on live time are first exercised on the soak host (plan 16-43) | open |  | 2026-10-16T09:39:53.728Z |  |
 | 7 | 16 | unrun-verify | deploy/heartbeat.sh |  | 16-56: shellcheck not installed on the dev machine (12 shellcheck tests skipped in the deploy test set) | open |  | 2026-10-16T09:39:54.524Z |  |
+| 8 | 16 | unrun-verify | tests/test_paper_replay_inputs.py | 1185 | 16-57: PostgreSQL round trip of the replay-inputs and history records skipped (no TEST_DATABASE_URL); the extra PAPER_HISTORY_BARS records of B1-CR-02 (one flush before each heartbeat and gap) are proven in memory only | open |  | 2026-10-16T10:18:40.859Z |  |
+| 9 | 16 | unrun-verify | tests/test_paper_runtime_restart_pg.py |  | 16-57: the three PostgreSQL restart tests skipped (no TEST_DATABASE_URL); the shared gap ledger, the post-start seam backfill and the configuration identity in EPOCH_PINNED/RUNTIME_START are proven on the in-memory port only | open |  | 2026-10-16T10:18:41.746Z |  |
+| 10 | 16 | unrun-verify | tests/test_soak_evidence_export.py | 818 | 16-57: the PostgreSQL test of the soak evidence export skipped (no TEST_DATABASE_URL); EPOCH_PINNED and RUNTIME_START now carry config_identity_sha256 and config_file_provenance | open |  | 2026-10-16T10:18:42.682Z |  |
+| 11 | 16 | unrun-verify | src/paper/shadow_runtime.py |  | 16-57: the SHADOW_SIGNAL_LOST journal row (no signal or plan id, foreign keys left null) is written through the in-memory SHADOW stores only; PgShadowStores/PgJournalStore were not exercised (PostgreSQL off on the dev machine) | open |  | 2026-10-16T10:18:43.567Z |  |
 
 ````json
 [
@@ -113,6 +117,58 @@ last_updated: 2026-10-16T09:39:54.524Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-16T09:39:54.524Z",
+    "resolved_at": null,
+    "milestone": "v0.3"
+  },
+  {
+    "id": 8,
+    "kind": "unrun-verify",
+    "phase": "16",
+    "file": "tests/test_paper_replay_inputs.py",
+    "line": 1185,
+    "description": "16-57: PostgreSQL round trip of the replay-inputs and history records skipped (no TEST_DATABASE_URL); the extra PAPER_HISTORY_BARS records of B1-CR-02 (one flush before each heartbeat and gap) are proven in memory only",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-16T10:18:40.859Z",
+    "resolved_at": null,
+    "milestone": "v0.3"
+  },
+  {
+    "id": 9,
+    "kind": "unrun-verify",
+    "phase": "16",
+    "file": "tests/test_paper_runtime_restart_pg.py",
+    "line": null,
+    "description": "16-57: the three PostgreSQL restart tests skipped (no TEST_DATABASE_URL); the shared gap ledger, the post-start seam backfill and the configuration identity in EPOCH_PINNED/RUNTIME_START are proven on the in-memory port only",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-16T10:18:41.746Z",
+    "resolved_at": null,
+    "milestone": "v0.3"
+  },
+  {
+    "id": 10,
+    "kind": "unrun-verify",
+    "phase": "16",
+    "file": "tests/test_soak_evidence_export.py",
+    "line": 818,
+    "description": "16-57: the PostgreSQL test of the soak evidence export skipped (no TEST_DATABASE_URL); EPOCH_PINNED and RUNTIME_START now carry config_identity_sha256 and config_file_provenance",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-16T10:18:42.682Z",
+    "resolved_at": null,
+    "milestone": "v0.3"
+  },
+  {
+    "id": 11,
+    "kind": "unrun-verify",
+    "phase": "16",
+    "file": "src/paper/shadow_runtime.py",
+    "line": null,
+    "description": "16-57: the SHADOW_SIGNAL_LOST journal row (no signal or plan id, foreign keys left null) is written through the in-memory SHADOW stores only; PgShadowStores/PgJournalStore were not exercised (PostgreSQL off on the dev machine)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-16T10:18:43.567Z",
     "resolved_at": null,
     "milestone": "v0.3"
   }
