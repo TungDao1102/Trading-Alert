@@ -41,6 +41,7 @@ from typing import Protocol
 from src.adapters.binance_public import Kline
 from src.backtest.semantics import CONTEXT_WINDOW_BARS, STRATEGY_WINDOW_BARS
 from src.paper.resync import expected_close_times
+from src.paper.runtime_config import CONFIG_IDENTITY_FIELD
 from src.paper.runtime_state import (
     RuntimeRecord,
     RuntimeStatePort,
@@ -390,7 +391,9 @@ class PinnedLike(Protocol):
     def opened_at_utc(self) -> datetime: ...
 
 
-def check_epoch_consistency(pinned: PinnedLike, state: RuntimeStatePort) -> None:
+def check_epoch_consistency(
+    pinned: PinnedLike, state: RuntimeStatePort, *, config_identity: str
+) -> None:
     """A restart never mints an epoch: the pin file must be the latest pin across ALL epochs.
 
     Raises `EpochMismatch` when the latest EPOCH_PINNED record of the whole runtime state belongs
@@ -398,6 +401,13 @@ def check_epoch_consistency(pinned: PinnedLike, state: RuntimeStatePort) -> None
     a new pin starts a new trial, so a superseded pin must not resume). The epoch-scoped
     comparison follows: the state port must hold an EPOCH_PINNED record for the pinned epoch, and
     the latest one must agree in strategy, parameter set, hash and opening time.
+
+    `config_identity` is the identity of the effective configuration of this start
+    (`src.paper.runtime_config.config_identity`, plan 16-57, owner decision 16-DEC-CONFIG-PIN).
+    The pin record must carry the same value: a changed effective value, or a pin record with no
+    identity, is an `EpochMismatch` (exit 6, held under `--hold-on-refusal`). A changed value needs
+    a new pin, which starts a new qualifying trial (REV-07, REV-18). The raw file hash the records
+    also carry is provenance only and is never compared.
     """
     latest_pins = state.latest_epoch_pins()
     foreign = sorted({p.epoch_id for p in latest_pins if p.epoch_id != pinned.epoch_id})
@@ -431,6 +441,20 @@ def check_epoch_consistency(pinned: PinnedLike, state: RuntimeStatePort) -> None
         raise EpochMismatch(
             "the latest EPOCH_PINNED record differs from the pinned state in: "
             + ", ".join(differing)
+        )
+    recorded = latest.payload.get(CONFIG_IDENTITY_FIELD)
+    if not isinstance(recorded, str) or recorded == "":
+        raise EpochMismatch(
+            "the EPOCH_PINNED record carries no configuration identity: the effective "
+            "configuration of this start cannot be compared with the pin (16-DEC-CONFIG-PIN); "
+            "a new pin starts a new trial"
+        )
+    if recorded != config_identity:
+        raise EpochMismatch(
+            "the effective runtime configuration differs from the configuration the epoch was "
+            f"pinned with (configuration identity {config_identity[:12]} != pinned "
+            f"{recorded[:12]}): a changed value needs a new pin and a new trial "
+            "(16-DEC-CONFIG-PIN, REV-07)"
         )
 
 

@@ -23,7 +23,11 @@ Order of `main` (each step may end the process before the next one runs):
 7. The epoch: pinned only by the one-shot operator command `--pin-epoch` when no pinned state
    exists; the pin records EPOCH_PINNED, writes the pinned state and exits 0 without
    RUNTIME_START and without the loop (16-DEC-PIN-COMMAND). Every start loads the stored epoch
-   and never mints one (exit 5 without a pin, exit 6 on any mismatch).
+   and never mints one (exit 5 without a pin, exit 6 on any mismatch). The pin and every
+   RUNTIME_START record the identity of the effective configuration (the SHA-256 of its
+   canonical, validated values) and, labelled as provenance, the raw file SHA-256 and path;
+   every start recomputes the identity and refuses a different one, or a pin without one, with
+   exit 6 (plan 16-57, owner decision 16-DEC-CONFIG-PIN). A comment-only edit is not refused.
 8. RUNTIME_START, the run, RUNTIME_STOP (recorded only on a clean stop, so a crash leaves a
    START without a STOP, which the coverage code reads as a crash).
 
@@ -127,9 +131,11 @@ from src.paper.restart import (
 )
 from src.paper.runtime_config import (
     ConfigNotRatified,
+    ConfigProvenance,
     ExitCode,
     RuntimeConfig,
     load_runtime_config,
+    load_runtime_config_with_provenance,
     read_env,
     refuse_trade_capable_env,
 )
@@ -142,6 +148,7 @@ from src.paper.runtime_state import (
     RuntimeStatePort,
 )
 from src.paper.shadow_runtime import (
+    RiskPassedBar,
     ShadowCoordinator,
     ShadowRuntimeError,
     ShadowWiring,
@@ -195,6 +202,9 @@ class RuntimeContext:
     # Where the watchdog writes this container's liveness stamp (plan 16-56; `main` passes the
     # pinned-state directory). None writes no stamp.
     liveness_dir: Path | None = None
+    # The identity of the effective configuration and the raw-file provenance (plan 16-57,
+    # 16-DEC-CONFIG-PIN): recorded in EPOCH_PINNED and RUNTIME_START, compared at every start.
+    config_provenance: ConfigProvenance | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -630,6 +640,44 @@ def _gap_record(epoch_id: str, gap: GapRecord) -> RuntimeRecord:
     )
 
 
+def _risk_passed_bars(state: RuntimeStatePort, epoch_id: str) -> tuple[RiskPassedBar, ...]:
+    """The epoch's PAPER_BAR_PROCESSED records of stage `risk_passed` (plan 16-57, B1-WR-03).
+
+    A risk-passed heartbeat without a plan hash or a signal id cannot be checked against the
+    SHADOW rows: the start fails closed instead of guessing.
+    """
+    bars: list[RiskPassedBar] = []
+    for record in state.records(epoch_id, {RuntimeEventType.PAPER_BAR_PROCESSED}):
+        payload = record.payload
+        if payload.get("stage") != "risk_passed":
+            continue
+        surface = payload.get("surface")
+        plan_hash = payload.get("plan_hash")
+        signal_id = surface.get("signal_id") if isinstance(surface, Mapping) else None
+        if (
+            not isinstance(plan_hash, str)
+            or not plan_hash
+            or not isinstance(signal_id, str)
+            or not signal_id
+            or record.symbol is None
+            or record.interval is None
+        ):
+            raise RuntimeFailClosed(
+                "a risk-passed heartbeat carries no plan hash or signal id: the SHADOW rows "
+                "cannot be checked against it"
+            )
+        bars.append(
+            RiskPassedBar(
+                symbol=record.symbol,
+                interval=record.interval,
+                bar_close_utc=record.occurred_at_utc,
+                signal_id=signal_id,
+                plan_hash=plan_hash,
+            )
+        )
+    return tuple(bars)
+
+
 def _tick_stats_record(
     *,
     epoch_id: str,
@@ -1030,9 +1078,12 @@ class _LiveLoop:
         await self._restore_before_subscribing()
         if self._shadow is not None:
             # The SHADOW chain starts before the first subscription (plan 16-31): its Telegram
-            # application polls getUpdates in this event loop.
+            # application polls getUpdates in this event loop. Its restore journals every
+            # risk-passed bar of the epoch whose alert never persisted (B1-WR-03); the records
+            # are read here, so the chain never reads the runtime state itself.
+            risk_passed = await asyncio.to_thread(_risk_passed_bars, self._state, self._epoch_id)
             try:
-                await self._shadow.start()
+                await self._shadow.start(risk_passed=risk_passed)
             except Exception as exc:
                 raise RuntimeFailClosed(
                     f"the SHADOW chain failed to start ({type(exc).__name__})"
@@ -1451,7 +1502,7 @@ def main(
         return refuse(ExitCode.ADMISSION_OR_EPOCH_MISMATCH, why_not or "not admitted")
 
     try:
-        config = load_runtime_config(values.get("PAPER_RUNTIME_CONFIG"))
+        config, provenance = load_runtime_config_with_provenance(values.get("PAPER_RUNTIME_CONFIG"))
         check_consumer_domains(config)
         port = state if state is not None else _state_from_env(values)
     except ConfigNotRatified as exc:
@@ -1502,7 +1553,12 @@ def main(
                 # an epoch no run uses, while the reverse order would leave a trial with no pin
                 # record.
                 port.record(
-                    _epoch_record(RuntimeEventType.EPOCH_PINNED, epoch, epoch.opened_at_utc)
+                    _epoch_record(
+                        RuntimeEventType.EPOCH_PINNED,
+                        epoch,
+                        epoch.opened_at_utc,
+                        provenance.record_fields(),
+                    )
                 )
                 write_pinned_state(epoch, pinned_path)
             except (PersistenceError, RuntimeRecordConflict) as exc:
@@ -1565,10 +1621,12 @@ def main(
             registry_root=registry_root,
             lease=lease,
             liveness_dir=marker_dir,
+            config_provenance=provenance,
         )
         try:
-            # A start never mints an epoch: the pin file and the stored pin record must agree.
-            check_epoch_consistency(epoch, port)
+            # A start never mints an epoch: the pin file and the stored pin record must agree,
+            # and so must the effective configuration (16-DEC-CONFIG-PIN, B1-WR-08).
+            check_epoch_consistency(epoch, port, config_identity=provenance.identity)
             # A marker left by a killed hold of this container goes before the start is
             # recorded (the probe never removes one).
             try:
@@ -1577,7 +1635,7 @@ def main(
                 raise RuntimeFailClosed(
                     f"the held marker of this container cannot be removed ({type(exc).__name__})"
                 ) from exc
-            start_extra: dict[str, Any] = {}
+            start_extra: dict[str, Any] = dict(provenance.record_fields())
             if run_loop is None and live_wiring is not None:
                 public = _resolve_public(live_wiring)
                 live_wiring = replace(live_wiring, public=public)

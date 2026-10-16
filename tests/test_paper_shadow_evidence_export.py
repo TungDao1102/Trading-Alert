@@ -445,3 +445,28 @@ def test_the_new_sentence_obeys_the_byte_rules_of_the_renderer(
     line = next(line for line in markdown.split("\n") if line.startswith("Soak evidence"))
     assert line == line.rstrip()
     assert line == SOAK_SENTENCE
+
+
+# --------------------------------------------------------------------------- #
+# Plan 16-57 (B1-WR-03): the lost-signal SHADOW event is counted apart from strategy signals.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_lost_signal_event_is_named_and_never_counted_as_a_strategy_outcome() -> None:
+    from src.paper.attribution import attribute_shadow_outcome
+    from src.paper.shadow_runtime import EVENT_SHADOW_SIGNAL_LOST
+
+    assert EVENT_SHADOW_SIGNAL_LOST == "SHADOW_SIGNAL_LOST"
+    # The attribution reader refuses it as a terminal outcome: a lost signal has no approval,
+    # no plan row and no paper record, so it can never be counted as a strategy signal.
+    with pytest.raises(ValueError, match="not a terminal confirm event"):
+        attribute_shadow_outcome(
+            ShadowOutcome(approval_action="APPROVE", confirm_event=EVENT_SHADOW_SIGNAL_LOST)
+        )
+    with pytest.raises(ValueError):
+        attribute_shadow_outcome(ShadowOutcome(confirm_event=EVENT_SHADOW_SIGNAL_LOST))
+    # The export reads SHADOW rows (signal plus plan), never the journal: the four strategy
+    # signals of a session export unchanged next to any number of lost-signal journal rows.
+    document = _export(_shadow_rows())
+    assert len({r["signal_id"] for r in document["paper"]}) == 4
+    assert EVENT_SHADOW_SIGNAL_LOST not in evidence_file_bytes(document).decode("ascii")

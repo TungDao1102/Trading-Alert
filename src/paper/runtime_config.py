@@ -38,10 +38,22 @@ Three things live here, all free of module-level side effects (stdlib plus the p
   force is `config/paper/paper-runtime-v2.toml`, which adds the owner's
   `[health] feed_silence_timeout_seconds` (16-DEC-WS-WATCHDOG); `paper-runtime-v1.toml` is the
   historical version and is refused for the missing key.
+
+- The configuration identity (plan 16-57, owner decision 16-DEC-CONFIG-PIN, option
+  `refuse-on-value-change`): `config_identity` is the SHA-256 of the canonical form of the
+  validated `RuntimeConfig`, never of the file bytes. The loader validates the complete schema
+  first (a missing or unknown key, or an unknown section, refuses with exit 4 and never reaches
+  the hash) and injects no default. Every key of every section is in the form; integers stay
+  integers, decimals are their canonical text (`canonical_decimal_text`, so "0.005" and "0.0050"
+  are one value), symbols keep their configured order, and the canonical serializer sorts the
+  keys. A comment, whitespace, blank-line or key-order edit leaves the identity unchanged; any
+  changed value changes it. The raw file SHA-256 is recorded beside it as provenance only
+  (`ConfigProvenance`); the guard never compares it.
 """
 
 from __future__ import annotations
 
+import hashlib
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -50,6 +62,7 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Any
 
+from src.domain.canonical import canonical_decimal_text, sha256_hex
 from src.paper.coverage import HealthThresholds
 
 TRADE_KEY_PREFIX = "BINANCE_"
@@ -269,8 +282,12 @@ def _refuse_unknown_keys(raw: Mapping[str, Any], problems: list[str]) -> None:
     """A key no code reads is refused: an unused threshold is a value nobody ratified for a use.
 
     This is also how the recorded Q-D decision (REST backfill bars are history only) is honoured:
-    no age or freshness key exists for them, so a file that carries one is refused.
+    no age or freshness key exists for them, so a file that carries one is refused. A top-level
+    key or section outside the four sections is refused too (plan 16-57: nothing outside the
+    schema is silently ignored, 16-DEC-CONFIG-PIN).
     """
+    for name in sorted(set(raw) - set(REQUIRED_KEYS)):
+        problems.append(f"{name} (unknown section or top-level key: nothing reads it)")
     for name, keys in REQUIRED_KEYS.items():
         for key in sorted(set(_section(raw, name)) - set(keys)):
             problems.append(f"{name}.{key} (unknown key: nothing reads it)")
@@ -312,15 +329,96 @@ def load_runtime_config(path: str | None) -> RuntimeConfig:
     Raises:
         ConfigNotRatified: with the problems named (never the file contents).
     """
+    config, _provenance = load_runtime_config_with_provenance(path)
+    return config
+
+
+# --------------------------------------------------------------------------- #
+# The configuration identity (plan 16-57, 16-DEC-CONFIG-PIN, B1-WR-08, REV-07).
+# --------------------------------------------------------------------------- #
+
+CONFIG_IDENTITY_SCHEMA = "paper-runtime-config-identity/1"
+
+# Payload keys of the configuration identity in EPOCH_PINNED and RUNTIME_START records.
+CONFIG_IDENTITY_FIELD = "config_identity_sha256"
+CONFIG_PROVENANCE_FIELD = "config_file_provenance"
+
+
+def config_identity_payload(config: RuntimeConfig) -> dict[str, Any]:
+    """The canonical form of every effective value, section by section, in schema key order.
+
+    Built from the validated object only, never from the file: every key of `REQUIRED_KEYS` is
+    present (no default can be injected, the loader refused any missing key), integers stay
+    integers, decimals are their canonical text, and the symbols keep their configured order.
+    """
+    return {
+        "schema": CONFIG_IDENTITY_SCHEMA,
+        "health": {key: getattr(config.health, key) for key in HEALTH_KEYS},
+        "timing": {key: getattr(config.timing, key) for key in TIMING_KEYS},
+        "account": {
+            key: canonical_decimal_text(getattr(config.account, key)) for key in ACCOUNT_KEYS
+        },
+        "scope": {"symbols": list(config.symbols)},
+    }
+
+
+def config_identity(config: RuntimeConfig) -> str:
+    """SHA-256 (hex) of `config_identity_payload` under the canonical serializer.
+
+    This is the comparison of the owner's rule (16-DEC-CONFIG-PIN): the pin and every start
+    record it, and a start whose identity differs from the pinned one is refused with exit 6.
+    """
+    return sha256_hex(config_identity_payload(config))
+
+
+@dataclass(frozen=True)
+class ConfigProvenance:
+    """What the pin and every start record about the configuration in force.
+
+    `identity` is `config_identity` of the validated values (the guard compares it). `file_sha256`
+    is the SHA-256 of the raw file bytes and `path` the value of `PAPER_RUNTIME_CONFIG`: both are
+    forensic provenance only and are never compared.
+    """
+
+    identity: str
+    file_sha256: str
+    path: str
+
+    def record_fields(self) -> dict[str, Any]:
+        """The payload fields of EPOCH_PINNED and RUNTIME_START (provenance labelled apart)."""
+        return {
+            CONFIG_IDENTITY_FIELD: self.identity,
+            CONFIG_PROVENANCE_FIELD: {"file_sha256": self.file_sha256, "path": self.path},
+        }
+
+
+def load_runtime_config_with_provenance(
+    path: str | None,
+) -> tuple[RuntimeConfig, ConfigProvenance]:
+    """`load_runtime_config` plus the identity of its values and the raw-file provenance.
+
+    The file is read once: the bytes that were parsed are the bytes hashed for provenance. The
+    identity is computed from the validated object, after every refusal.
+
+    Raises:
+        ConfigNotRatified: with the problems named (never the file contents).
+    """
     if path is None or path.strip() == "":
         raise ConfigNotRatified([CONFIG_VARIABLE])
     file = Path(path)
     if not file.is_file():
         raise ConfigNotRatified([f"{CONFIG_VARIABLE} names a file that does not exist"])
     try:
-        raw = tomllib.loads(file.read_text(encoding="utf-8"))
+        data = file.read_bytes()
+        raw = tomllib.loads(data.decode("utf-8"))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError, OSError):
         raise ConfigNotRatified(
             [f"{CONFIG_VARIABLE} names a file that is not valid TOML"]
         ) from None
-    return parse_runtime_config(raw)
+    config = parse_runtime_config(raw)
+    provenance = ConfigProvenance(
+        identity=config_identity(config),
+        file_sha256=hashlib.sha256(data).hexdigest(),
+        path=path,
+    )
+    return config, provenance

@@ -1718,3 +1718,172 @@ def test_the_postgresql_stores_implement_every_member_of_the_chain_port() -> Non
     assert {"get_signal", "get_trade_plan", "get_approval", "record_journal"} <= members
     missing = sorted(name for name in members if not callable(getattr(PgShadowStores, name, None)))
     assert missing == []
+
+
+# --------------------------------------------------------------------------- #
+# Plan 16-57 Task 3 (B1-WR-03, L-11): a risk-passed bar whose SHADOW rows never persisted.
+# --------------------------------------------------------------------------- #
+
+from src.paper.runtime_state import RuntimeRecord  # noqa: E402
+from src.paper.shadow import EVENT_SHADOW_ALERT_PENDING  # noqa: E402
+
+from tests.paper_ws_fakes import FakeSdkWsClient  # noqa: E402
+
+SIGNAL_LOST = "SHADOW_SIGNAL_LOST"
+
+
+class FailingAlertStores(RuntimeStores):
+    """The SHADOW store loses its database right before the alert's first write."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail = True
+
+    def insert_signal(self, signal: Signal) -> None:
+        if self.fail:
+            raise ConnectionError("the SHADOW database went away before the alert persisted")
+        super().insert_signal(signal)
+
+
+class HeartbeatPipeline:
+    """Records the risk-passed heartbeat like `BarPipeline`, then hands the outcome on."""
+
+    def __init__(self, state: Any, epoch_id: str, outcome: BarOutcome) -> None:
+        self.state = state
+        self.epoch_id = epoch_id
+        self.outcome = outcome
+        self.done = False
+
+    def handle(self, bars: Any, *, now_utc: datetime) -> PipelineResult:
+        batch = list(bars)
+        if not batch or self.done:
+            return PipelineResult()
+        self.done = True
+        bar = batch[0]
+        assert self.outcome.signal is not None and self.outcome.trade_plan is not None
+        plan_hash = self.outcome.trade_plan.plan_hash
+        record = RuntimeRecord.bar_processed(
+            epoch_id=self.epoch_id,
+            symbol=bar.symbol,
+            interval=bar.interval,
+            close_time_utc=bar.close_time_utc,
+            payload={
+                "source": "LIVE_WS",
+                "tick_time_utc": now_utc,
+                "stage": "risk_passed",
+                "reason_code": "OK",
+                "plan_hash": plan_hash,
+                "surface": {
+                    "stage": "risk_passed",
+                    "signal_id": self.outcome.signal.signal_id,
+                    "plan_hash": plan_hash,
+                },
+            },
+        )
+        self.state.record(record)  # the heartbeat is committed before the SHADOW write
+        return PipelineResult(evaluated=(self.outcome,), recorded=(record,))
+
+
+def _fresh_client(rig: Live) -> None:
+    rig.client = FakeSdkWsClient()
+    rig.clients = [rig.client]
+
+
+def _crash_before_the_shadow_write(rig: Live, stores: FailingAlertStores, bot: FakeBot) -> None:
+    """Run 1: the heartbeat is committed, then the alert's store write fails (exit 7)."""
+    rig.public = RuntimePublic()
+    pipeline = HeartbeatPipeline(rig.state, rig.epoch.epoch_id, make_outcome(1))
+
+    async def script(h: Live) -> None:
+        await wait_until(lambda: len(h.client.handles) == 4)
+        h.emit("BTCUSDT", "1h", open_time=PAST_OPEN)
+        await wait_until(lambda: False, timeout=5.0)  # the loop fails closed first
+
+    code = rig.start(
+        script,
+        pipeline=pipeline,
+        risk_inputs=None,
+        shadow=ShadowWiring(stores=stores, chat_id=CHAT_ID, bot=bot, sleep=RecordingSleep()),
+    )
+    assert code == 7
+    [heartbeat] = rig.records(RuntimeEventType.PAPER_BAR_PROCESSED)
+    assert heartbeat.payload["stage"] == "risk_passed"
+    assert stores.signals == {} and stores.plans == {}
+
+
+def _restart(rig: Live, stores: FailingAlertStores, bot: FakeBot) -> int:
+    _fresh_client(rig)
+    stores.fail = False
+
+    async def script(h: Live) -> None:
+        await wait_until(lambda: len(h.client.handles) == 4)
+
+    return rig.start(
+        script,
+        pipeline=SpyPipeline([]),
+        risk_inputs=None,
+        shadow=ShadowWiring(stores=stores, chat_id=CHAT_ID, bot=bot, sleep=RecordingSleep()),
+    )
+
+
+def test_a_signal_lost_before_its_shadow_write_is_journaled_once_at_the_next_start(
+    live: Live,
+) -> None:
+    """The B1-WR-03 re-check and Test 3: detection at restart, explicit journal row, no alert."""
+    stores = FailingAlertStores()
+    bot = FakeBot()
+    _crash_before_the_shadow_write(live, stores, bot)
+    plan_hash = "1" * 64
+
+    assert _restart(live, stores, bot) == 0
+
+    [lost] = stores.journal_of_type(SIGNAL_LOST)
+    body = payload(lost)
+    assert body["plan_hash"] == plan_hash
+    assert body["epoch_id"] == live.epoch.epoch_id
+    assert body["signal_id"] == make_outcome(1).signal.signal_id  # type: ignore[union-attr]
+    assert body["mode"] == "SHADOW"
+    assert lost.signal_id is None and lost.trade_plan_id is None, "no parent row exists"
+    assert "occurred" not in json.dumps(body) and "detected" not in json.dumps(body)
+    # L-11: no late alert, no approval, no plan row.
+    assert bot.sent == []
+    assert stores.approvals == {} and stores.plans == {}
+    assert stores.journal_of_type(EVENT_SHADOW_ALERT_PENDING) == []
+
+    # A second start writes nothing new (replay no-op).
+    before = len(stores.journal)
+    assert _restart(live, stores, bot) == 0
+    assert len(stores.journal) == before
+    assert len(stores.journal_of_type(SIGNAL_LOST)) == 1
+
+
+async def test_a_persisted_alert_is_not_lost_and_the_lost_view_counts_apart() -> None:
+    from src.paper.shadow_runtime import EVENT_SHADOW_SIGNAL_LOST, RiskPassedBar
+
+    rig = Rig()
+    alerted, lost = make_outcome(1), make_outcome(2)
+    await rig.alert(alerted)
+
+    def bar(outcome: BarOutcome) -> RiskPassedBar:
+        assert outcome.signal is not None and outcome.trade_plan is not None
+        return RiskPassedBar(
+            symbol=outcome.closed_candle.symbol,
+            interval=outcome.closed_candle.interval,
+            bar_close_utc=outcome.closed_candle.close_time_utc,
+            signal_id=outcome.signal.signal_id,
+            plan_hash=outcome.trade_plan.plan_hash,
+        )
+
+    restarted = rig.restart(now=T_APPROVE)
+    await restarted.coordinator.start(risk_passed=(bar(alerted), bar(lost)))
+
+    assert EVENT_SHADOW_SIGNAL_LOST == SIGNAL_LOST
+    [event] = rig.journal(SIGNAL_LOST)
+    assert payload(event)["plan_hash"] == "2" * 64
+    assert restarted.coordinator.lost_signals() == ("2" * 64,)
+    # Counted apart from strategy signals: the lost plan is never a paper record or an alert.
+    assert len(rig.bot.sent) == 1
+    assert all(
+        signal_id != lost.signal.signal_id  # type: ignore[union-attr]
+        for signal_id in restarted.coordinator.paper_records()
+    )

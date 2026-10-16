@@ -185,6 +185,16 @@ def _epoch_mismatch(rig: _Rig) -> dict[str, str]:
     return rig.environ()
 
 
+def _config_changed(rig: _Rig) -> dict[str, str]:
+    """Plan 16-57 (16-DEC-CONFIG-PIN): an effective value changed after the pin."""
+    rig.authorize()
+    assert rig.run("--pin-epoch") == 0
+    text = rig.config_path.read_text(encoding="utf-8")
+    rig.config_path.write_text(text.replace('risk_rate = "0.01"', 'risk_rate = "0.02"'))
+    _counting(rig).writes.clear()
+    return rig.environ()
+
+
 def _instance_held(rig: _Rig) -> dict[str, str]:
     rig.authorize()
     assert rig.run("--pin-epoch") == 0
@@ -214,6 +224,12 @@ REFUSALS = [
         ExitCode.ADMISSION_OR_EPOCH_MISMATCH,
         "ADMISSION_OR_EPOCH_MISMATCH",
         id="6-epoch",
+    ),
+    pytest.param(
+        _config_changed,
+        ExitCode.ADMISSION_OR_EPOCH_MISMATCH,
+        "ADMISSION_OR_EPOCH_MISMATCH",
+        id="6-config-identity",
     ),
     pytest.param(
         _instance_held, ExitCode.INSTANCE_LEASE_HELD, "INSTANCE_LEASE_HELD", id="8-instance"

@@ -51,9 +51,32 @@ Grace of the freeze check (REV-02, REV-18), one sentence per line:
 - `symbols` - the non-empty list of distinct symbols the run covers.
 
 Every key above is required, and a key that is not listed is refused as an unknown key:
-nothing reads it, so a value for it would be an unused threshold. In particular no age or
-freshness key exists for REST backfill bars (decision Q-D, option history-only): such bars only
-extend history and are never evaluated.
+nothing reads it, so a value for it would be an unused threshold. A section or top-level key
+other than the four above is refused the same way. In particular no age or freshness key exists
+for REST backfill bars (decision Q-D, option history-only): such bars only extend history and
+are never evaluated.
+
+## Configuration identity
+
+Owner decision `16-DEC-CONFIG-PIN` (16-57 Q1, option `refuse-on-value-change`). The
+configuration is bound to the pinned epoch by its identity:
+
+- The identity is the SHA-256 of the canonical form of the validated values
+  (`config_identity` in `src/paper/runtime_config.py`), never of the file bytes.
+- The loader validates the complete schema first. A missing or unknown key refuses the start
+  (`CONFIG_NOT_RATIFIED`) and never reaches the hash, and no default is injected.
+- Every key of every section is in the form. Integers stay integers. Decimals are their
+  canonical text, so a trailing zero written after the last digit does not make another value.
+  The symbols keep their configured order. The canonical serializer sorts the keys.
+- A change of any value changes the identity, and so does a different symbol order.
+- A comment, a blank line, whitespace or a different key or section order does not change it.
+- The pin (`EPOCH_PINNED`) and every `RUNTIME_START` record the identity
+  (`config_identity_sha256`). Beside it, under `config_file_provenance`, they record the raw file
+  SHA-256 and the path named by `PAPER_RUNTIME_CONFIG`. That provenance is never compared.
+- Every start recomputes the identity. A different identity, or a pin record without one, is
+  refused with `ADMISSION_OR_EPOCH_MISMATCH` before `RUNTIME_START`, and under
+  `--hold-on-refusal` the container holds, unhealthy. A changed value therefore needs a new pin,
+  which starts a new qualifying trial (REV-07, REV-18).
 
 ## Healthcheck
 

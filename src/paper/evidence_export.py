@@ -11,6 +11,11 @@ Pure: no I/O, no clock. The caller writes `evidence_file_bytes(document)` to dis
 real evidence: it carries no `evidence_class` key, so the kill-gate report guard (plan 16-05)
 applies to it. `test_only` rehearsal rows keep their flag; the analytics normalizer excludes and
 counts them (REV-03, D063 item 3).
+
+A `SHADOW_SIGNAL_LOST` journal row (plan 16-57, B1-WR-03: a risk-passed bar whose SHADOW rows
+never persisted before a crash) is not a strategy signal. It has no signal or plan row, so it
+never becomes a `ShadowRow` or a paper record here, and the attribution reader refuses it as an
+outcome. It is counted apart, from the journal (`ShadowCoordinator.lost_signals`).
 """
 
 from __future__ import annotations

@@ -68,7 +68,9 @@ from src.paper.loop import BarOutcome
 from src.paper.pipeline import PipelineResult
 from src.paper.runtime_config import RuntimeConfig
 from src.paper.shadow import (
+    ALERT_CORRELATION_PREFIX,
     EVENT_APPROVAL_EXPIRED,
+    EVENT_SHADOW_ALERT_PENDING,
     REASON_RUNTIME_RESTART,
     Mode,
     ShadowApprovalBook,
@@ -126,6 +128,15 @@ EVENT_SHADOW_POSITION_CLOSED: Final = "SHADOW_POSITION_CLOSED"
 EVENT_SHADOW_PLAN_CONTEXT: Final = "SHADOW_PLAN_CONTEXT"
 PLAN_CONTEXT_CORRELATION: Final = "shadow-plan:"
 
+# A risk-passed bar whose SHADOW signal, plan and alert never persisted before a crash (plan 16-57,
+# B1-WR-03, L-11). Journaled once per (epoch, plan_hash) at the next start, before any new bar is
+# evaluated, and never re-alerted: a late alert would be a late signal. It is not a strategy
+# signal: it has no signal or plan row (the journal row carries no parent id), never becomes a
+# paper record, and is counted apart (`ShadowCoordinator.lost_signals`).
+EVENT_SHADOW_SIGNAL_LOST: Final = "SHADOW_SIGNAL_LOST"
+SIGNAL_LOST_CORRELATION: Final = "shadow-lost:"
+REASON_NOT_PERSISTED_BEFORE_RESTART: Final = "NOT_PERSISTED_BEFORE_RESTART"
+
 # Q-L `separate-bot` (decisions/16-DEC-Q-L.md): the SHADOW bot is its own Telegram bot, so exactly
 # one process polls getUpdates for its token. Logged at start and when Telegram reports a
 # Conflict. The token itself is never logged.
@@ -137,6 +148,21 @@ _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 
 class ShadowRuntimeError(RuntimeError):
     """The SHADOW chain cannot continue safely (fail closed): the message is this module's own."""
+
+
+@dataclass(frozen=True)
+class RiskPassedBar:
+    """A PAPER_BAR_PROCESSED record of stage `risk_passed`, as the composition root reads it.
+
+    The runtime passes these into `ShadowCoordinator.start` / `restore` (plan 16-57): this module
+    never imports the runtime or reads the runtime state port itself.
+    """
+
+    symbol: str
+    interval: str
+    bar_close_utc: datetime
+    signal_id: str
+    plan_hash: str
 
 
 # --------------------------------------------------------------------------- #
@@ -344,6 +370,7 @@ class ShadowCoordinator:
         self._application: Any | None = None
         self._telegram_errors: dict[str, int] = {}
         self._conflict_logged = False
+        self._lost: list[str] = []
 
         self._book = ShadowApprovalBook(stores, clock=clock)
         self._reservations = ShadowReservations(ledger, stores, basis_for=self._basis_for)
@@ -816,7 +843,7 @@ class ShadowCoordinator:
 
     # ---- restart (D-15, research Pitfall P13) -------------------------------- #
 
-    async def restore(self) -> None:
+    async def restore(self, risk_passed: Sequence[RiskPassedBar] = ()) -> None:
         """Fail closed for what a restart cannot carry, and rebuild what it can.
 
         Raw approval and confirm tokens live in memory only, so every PENDING approval is decided
@@ -824,11 +851,90 @@ class ShadowCoordinator:
         RUNTIME_RESTART; a callback for one of them is rejected afterwards. Reserved and open
         simulated plans are rebuilt from the journal alone (Q-J), replayed over REST 1m history,
         and the poller continues them.
+
+        `risk_passed` are the epoch's risk-passed heartbeats, read by the composition root (plan
+        16-57, B1-WR-03). One whose alert never persisted is journaled once as
+        `SHADOW_SIGNAL_LOST` and logged; it is never alerted and gets no approval (L-11).
         """
         now = self._clock()
+        await asyncio.to_thread(self._journal_lost_signals, tuple(risk_passed), now)
         await asyncio.to_thread(invalidate_pending_on_restart, self._stores, now)
         await asyncio.to_thread(self._confirm.expire_on_restart, now)
         await self._restore_positions(now)
+
+    def lost_signals(self) -> tuple[str, ...]:
+        """The plan hashes of the epoch's lost risk-passed signals known at this start, sorted."""
+        with self._lock:
+            return tuple(sorted(self._lost))
+
+    def _alert_persisted(self, bar: RiskPassedBar) -> bool:
+        """True when the alert of this bar's plan was journaled after its parent rows.
+
+        `send_shadow_alert` writes the signal, the plan, both approvals and the mapping first, then
+        the SHADOW_ALERT_PENDING row; that row, naming a stored plan with this plan hash, is the
+        proof that the alert's rows persisted. A send that failed afterwards is already journaled
+        and its approvals are swept by `invalidate_pending_on_restart`.
+        """
+        events = self._stores.journal_for_correlation(f"{ALERT_CORRELATION_PREFIX}{bar.signal_id}")
+        for event in events:
+            if event.event_type != EVENT_SHADOW_ALERT_PENDING or event.trade_plan_id is None:
+                continue
+            plan = self._stores.get_trade_plan(event.trade_plan_id)
+            if plan is not None and plan.plan_hash == bar.plan_hash:
+                return True
+        return False
+
+    def _journal_lost_signals(self, risk_passed: tuple[RiskPassedBar, ...], now: datetime) -> None:
+        """Journal one SHADOW_SIGNAL_LOST per risk-passed bar whose alert never persisted.
+
+        The id is a pure function of the epoch and the plan hash, and the payload holds no
+        wall-clock instant, so a second start finds the row and writes nothing (replay no-op). The
+        row names no signal or plan id: those parent rows do not exist.
+        """
+        seen: set[str] = set()
+        for bar in sorted(risk_passed, key=lambda b: (b.bar_close_utc, b.symbol, b.plan_hash)):
+            if bar.plan_hash in seen or self._alert_persisted(bar):
+                continue
+            seen.add(bar.plan_hash)
+            correlation = f"{SIGNAL_LOST_CORRELATION}{bar.plan_hash}"
+            with self._lock:
+                self._lost.append(bar.plan_hash)
+            log.error(
+                "paper.shadow.signal_lost",
+                plan_hash=bar.plan_hash,
+                symbol=bar.symbol,
+                bar_close_utc=bar.bar_close_utc.isoformat(),
+                reason=REASON_NOT_PERSISTED_BEFORE_RESTART,
+            )
+            if self._stores.journal_for_correlation(correlation):
+                continue  # journaled by an earlier start
+            body = {
+                "epoch_id": self._epoch_id,
+                "plan_hash": bar.plan_hash,
+                "signal_id": bar.signal_id,
+                "symbol": bar.symbol,
+                "interval": bar.interval,
+                "bar_close_utc": bar.bar_close_utc.isoformat(),
+                "reason": REASON_NOT_PERSISTED_BEFORE_RESTART,
+                "mode": self._mode.value,
+            }
+            self._stores.record_journal(
+                JournalEvent(
+                    journal_event_id=correlated_event_id(
+                        prefix="shadow-lost",
+                        correlation_id=correlation,
+                        event_type=EVENT_SHADOW_SIGNAL_LOST,
+                        entity_id=bar.plan_hash,
+                        step=self._epoch_id,
+                    ),
+                    occurred_at_utc=now,
+                    event_type=EVENT_SHADOW_SIGNAL_LOST,
+                    entity_type="ShadowSignal",
+                    entity_id=bar.plan_hash,
+                    correlation_id=correlation,
+                    payload_json=json.dumps(body, sort_keys=True, separators=(",", ":")),
+                )
+            )
 
     async def _restore_positions(self, now: datetime) -> None:
         records = await asyncio.to_thread(self._reservations.load_records)
@@ -1030,16 +1136,16 @@ class ShadowCoordinator:
         """Errors that escaped a handler or the polling loop, by exception class name."""
         return dict(self._telegram_errors)
 
-    async def start(self) -> None:
+    async def start(self, *, risk_passed: Sequence[RiskPassedBar] = ()) -> None:
         """Start the Telegram application in this event loop (initialize, start, polling).
 
         Logs the one-consumer-per-token rule first (Q-L). No webhook is configured: getUpdates
         and a webhook are exclusive (research G6). Without an application factory the chain only
-        sends (rehearsal and tests).
+        sends (rehearsal and tests). `risk_passed` goes to `restore` (plan 16-57).
         """
         log.info("paper.shadow.bot_token_rule", rule=BOT_TOKEN_RULE)
         # The restart steps run before polling begins: nothing is delivered until they are done.
-        await self.restore()
+        await self.restore(risk_passed)
         if self._application_factory is None:
             return
         application = self._application_factory(self.callback_kwargs())
@@ -1168,6 +1274,10 @@ __all__ = [
     "BOT_TOKEN_RULE",
     "EVENT_SHADOW_PLAN_CONTEXT",
     "EVENT_SHADOW_POSITION_CLOSED",
+    "EVENT_SHADOW_SIGNAL_LOST",
+    "REASON_NOT_PERSISTED_BEFORE_RESTART",
+    "SIGNAL_LOST_CORRELATION",
+    "RiskPassedBar",
     "FillContext",
     "LedgerRiskInputs",
     "PositionView",

@@ -92,6 +92,9 @@ EVENT_SHADOW_ALERT_SENT: Final = "SHADOW_ALERT_SENT"
 EVENT_SHADOW_ALERT_FAILED: Final = "SHADOW_ALERT_FAILED"
 EVENT_APPROVAL_EXPIRED: Final = "APPROVAL_EXPIRED"
 EVENT_PENDING_INVALIDATED: Final = "SHADOW_PENDING_INVALIDATED"
+# The correlation of an alert's journal rows (`shadow-alert:<signal_id>`); plan 16-57 reads it at
+# restart to tell an alert that persisted from a risk-passed bar whose alert never did.
+ALERT_CORRELATION_PREFIX: Final = "shadow-alert:"
 REASON_RUNTIME_RESTART: Final = "RUNTIME_RESTART"
 
 _CONTEXT_SKIP_TOKEN: Final = "skip_raw_token"
@@ -637,7 +640,7 @@ def _alert_event(
     now_utc: datetime,
     payload: Mapping[str, Any],
 ) -> JournalEvent:
-    correlation = f"shadow-alert:{signal.signal_id}"
+    correlation = f"{ALERT_CORRELATION_PREFIX}{signal.signal_id}"
     return JournalEvent(
         journal_event_id=correlated_event_id(
             prefix="shadow",

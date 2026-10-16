@@ -32,6 +32,7 @@ from src.paper import runtime
 from src.paper.bars import BarBuffers
 from src.paper.freeze import StreamEpoch
 from src.paper.pipeline import BarPipeline, PipelineResult
+from src.paper.runtime_config import CONFIG_IDENTITY_FIELD, load_runtime_config_with_provenance
 from src.paper.runtime_state import (
     GapLedger,
     InMemoryRuntimeState,
@@ -708,33 +709,45 @@ def test_downtime_gaps_use_the_exchange_grid_and_the_previous_runs_end() -> None
 # ---------------------------------------------------------------------------------------------- #
 
 
-def pin_record(epoch: StreamEpoch, *, parameter_set_hash: str | None = None) -> RuntimeRecord:
+def pin_record(
+    epoch: StreamEpoch, *, parameter_set_hash: str | None = None, identity: str | None = None
+) -> RuntimeRecord:
+    payload = {
+        "strategy_id": epoch.strategy_id,
+        "parameter_set_id": epoch.parameter_set_id,
+        "parameter_set_hash": parameter_set_hash or epoch.parameter_set_hash,
+    }
+    if identity is not None:  # the configuration identity of plan 16-57
+        payload[CONFIG_IDENTITY_FIELD] = identity
     return RuntimeRecord(
         event_type=RuntimeEventType.EPOCH_PINNED,
         epoch_id=epoch.epoch_id,
         occurred_at_utc=epoch.opened_at_utc,
-        payload={
-            "strategy_id": epoch.strategy_id,
-            "parameter_set_id": epoch.parameter_set_id,
-            "parameter_set_hash": parameter_set_hash or epoch.parameter_set_hash,
-        },
+        payload=payload,
     )
+
+
+def rig_identity(live_rig: Live) -> str:
+    """The configuration identity of the rig's configuration file (plan 16-57)."""
+    return load_runtime_config_with_provenance(str(live_rig.rig.config_path))[1].identity
 
 
 def test_check_epoch_consistency_accepts_a_match_and_refuses_everything_else(live: Live) -> None:
     module = restart_module()
     epoch = live.epoch
+    identity = rig_identity(live)
 
-    module.check_epoch_consistency(epoch, live.state)  # the pin run recorded it: no exception
+    # the pin run recorded it: no exception
+    module.check_epoch_consistency(epoch, live.state, config_identity=identity)
 
     empty = InMemoryRuntimeState()
     with pytest.raises(module.EpochMismatch, match="no EPOCH_PINNED"):
-        module.check_epoch_consistency(epoch, empty)
+        module.check_epoch_consistency(epoch, empty, config_identity=identity)
 
     other_hash = InMemoryRuntimeState()
-    other_hash.record(pin_record(epoch, parameter_set_hash="f" * 64))
+    other_hash.record(pin_record(epoch, parameter_set_hash="f" * 64, identity=identity))
     with pytest.raises(module.EpochMismatch, match="differs"):
-        module.check_epoch_consistency(epoch, other_hash)
+        module.check_epoch_consistency(epoch, other_hash, config_identity=identity)
 
     other_time = InMemoryRuntimeState()
     other_time.record(
@@ -742,11 +755,11 @@ def test_check_epoch_consistency_accepts_a_match_and_refuses_everything_else(liv
             event_type=RuntimeEventType.EPOCH_PINNED,
             epoch_id=epoch.epoch_id,
             occurred_at_utc=epoch.opened_at_utc + timedelta(seconds=1),
-            payload=dict(pin_record(epoch).payload),
+            payload=dict(pin_record(epoch, identity=identity).payload),
         )
     )
     with pytest.raises(module.EpochMismatch, match="differs"):
-        module.check_epoch_consistency(epoch, other_time)
+        module.check_epoch_consistency(epoch, other_time, config_identity=identity)
 
 
 def test_a_restart_with_a_missing_or_different_pin_record_exits_6_before_any_subscription(
@@ -846,24 +859,26 @@ def test_a_restart_under_a_later_pin_of_another_epoch_exits_6_before_any_subscri
 def test_check_epoch_consistency_is_cross_epoch(live: Live) -> None:
     module = restart_module()
     epoch = live.epoch
+    identity = rig_identity(live)
 
     later = InMemoryRuntimeState()
-    later.record(pin_record(epoch))
+    later.record(pin_record(epoch, identity=identity))
     later.record(later_pin(epoch, delta=timedelta(seconds=1)))
     with pytest.raises(module.EpochMismatch, match=LATER_EPOCH) as raised:
-        module.check_epoch_consistency(epoch, later)
+        module.check_epoch_consistency(epoch, later, config_identity=identity)
     assert "REV-18" in str(raised.value)
 
     tie = InMemoryRuntimeState()
-    tie.record(pin_record(epoch))
+    tie.record(pin_record(epoch, identity=identity))
     tie.record(later_pin(epoch, delta=timedelta(0)))
     with pytest.raises(module.EpochMismatch, match="REV-18"):
-        module.check_epoch_consistency(epoch, tie)
+        module.check_epoch_consistency(epoch, tie, config_identity=identity)
 
     earlier = InMemoryRuntimeState()
-    earlier.record(pin_record(epoch))
+    earlier.record(pin_record(epoch, identity=identity))
     earlier.record(later_pin(epoch, delta=-timedelta(seconds=1)))
-    module.check_epoch_consistency(epoch, earlier)  # the pin file is the latest pin: accepted
+    # the pin file is the latest pin: accepted
+    module.check_epoch_consistency(epoch, earlier, config_identity=identity)
 
 
 def test_negative_control_the_refusal_comes_from_the_cross_epoch_answer(live: Live) -> None:

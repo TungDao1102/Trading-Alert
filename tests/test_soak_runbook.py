@@ -809,6 +809,22 @@ def test_20_2_says_what_a_reboot_a_daemon_restart_and_a_requested_stop_do() -> N
         assert phrase in body, f"20.2 lacks: {phrase}"
 
 
+def test_20_2_states_the_configuration_identity_rule_of_the_owner() -> None:
+    """Plan 16-57 (16-DEC-CONFIG-PIN): a changed value is refused, a comment edit is not."""
+    body = _sub20("20.2")
+    for phrase in (
+        "16-DEC-CONFIG-PIN",
+        "configuration identity",
+        "exit 6",
+        "new pin",
+        "new qualifying trial",
+        "REV-07",
+        "comment-only",
+        "provenance only",
+    ):
+        assert phrase in body, f"20.2 lacks: {phrase}"
+
+
 def test_20_5_gives_the_soak_project_its_own_backup_unit_and_bucket() -> None:
     body = _sub20("20.5")
     for phrase in (
