@@ -72,7 +72,6 @@ follow the same posture: no signature change in the four new methods.
 from __future__ import annotations
 
 import asyncio
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -87,6 +86,7 @@ from binance_sdk_derivatives_trading_usds_futures import (
     RateLimitBanError,
     TooManyRequestsError,
 )
+from src.adapters.binance_errors import error_facts_from_exception
 from src.adapters.binance_public import (
     BinancePublicMarketData,
     _ms_to_utc,
@@ -98,6 +98,7 @@ from src.adapters.binance_public import OiSnapshot as OiSnapshot
 from src.adapters.binance_public import SymbolFilters as SymbolFilters
 from src.adapters.binance_public import _row_to_kline as _row_to_kline
 from src.adapters.binance_public import _row_to_mark_kline as _row_to_mark_kline
+from src.domain.exchange_errors import CallKind, ExchangeErrorCategory, classify
 
 log = structlog.get_logger()
 
@@ -153,26 +154,22 @@ def _is_transient_reconcile(exc: BaseException) -> bool:
     return not isinstance(exc, (ValueError, KeyError, TypeError))
 
 
-# Binance codes meaning "this order is not there": -2013 NO_SUCH_ORDER ("Order does not
-# exist.") is what the Demo host returned for GET /fapi/v1/algoOrder with a missing client id
-# (read-only probe 2026-10-05); -2011 is the documented cancel-path code. Mapping a code to
-# not-found enables a retry, so only these two are accepted and everything else raises.
-_NOT_FOUND_CODES: frozenset[int] = frozenset({-2013, -2011})
-_NOT_FOUND_MESSAGE = re.compile(r"(?<!\d)-(?:2013|2011)(?!\d)")
+def _is_order_absent(exc: BaseException, call_kind: CallKind) -> bool:
+    """True only for the taxonomy category ORDER_ABSENT of `call_kind` (D-10).
+
+    The decision uses the SDK class, the int Binance code and the call kind only
+    (`src/domain/exchange_errors.py`): -2013 NO_SUCH_ORDER (Demo-observed for GET
+    /fapi/v1/algoOrder) and -2011 on a QUERY or a CANCEL. Exception message text is never
+    read, so a non-SDK exception, a missing or unlisted code, a 5xx or a network error is
+    never "absent" (08-REVIEW IN-10): a wrong "absent" enables a duplicate order.
+    """
+    category = classify(error_facts_from_exception(exc), call_kind)
+    return category is ExchangeErrorCategory.ORDER_ABSENT
 
 
 def _is_order_not_found_error(exc: BaseException) -> bool:
-    """True only for a definitive "order does not exist" answer from the exchange.
-
-    The SDK's `BadRequestError` carries the Binance code in an int `status_code`; when one is
-    present it alone decides. Only an error with no int code (fakes, older wrappers) falls
-    back to the code or `UNKNOWN_ORDER` text in the message.
-    """
-    code = getattr(exc, "status_code", None)
-    if isinstance(code, int) and not isinstance(code, bool):
-        return code in _NOT_FOUND_CODES
-    message = str(exc)
-    return "UNKNOWN_ORDER" in message or _NOT_FOUND_MESSAGE.search(message) is not None
+    """True only for ORDER_ABSENT of a QUERY call; every other error must raise."""
+    return _is_order_absent(exc, CallKind.QUERY)
 
 
 def _cancel_retry_predicate(exc: BaseException) -> bool:
@@ -458,11 +455,13 @@ def is_rate_limit_ban_error(exc: BaseException) -> bool:
 
 
 def rate_limit_retry_after_seconds(exc: BaseException) -> int | None:
-    """Whole seconds from the `Retry-After` header carried by a 429, else None."""
-    value = getattr(exc, "retry_after", None)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        return None
-    return value
+    """Whole seconds from the `Retry-After` header carried by a 429 or a 418, else None.
+
+    Delegates to the shared SDK normalizer (`src/adapters/binance_errors.py`) so both agree:
+    a bool, a negative or a non-int value, and any exception that is not the SDK's 418 or
+    429 class, give None.
+    """
+    return error_facts_from_exception(exc).retry_after_seconds
 
 
 # Binance error code for an unknown symbol (`-1121 Invalid symbol.`). The SDK
