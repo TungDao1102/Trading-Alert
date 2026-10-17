@@ -1,0 +1,25 @@
+16-61 gate on the merged tree before the rerun (runner hardening landed, no rerun yet)
+run on 2026-10-17 from 2026-10-17T08:21:45Z to 2026-10-17T08:37:17Z (UTC)
+branch: develop (merge of Phase 18, 16-60 and the 16-61 hardening)
+commit under test: 1b28ec9ab5c29390c7630d2e6fecd7eb715cc8db (`git status --porcelain --untracked-files=no` printed nothing before the run; untracked .gsd/, .planning/milestone.lock, package.json and package-lock.json pre-exist and are not part of the repository state under test)
+environment: Windows 11, .venv Python 3.13, TRADING_CI_STRICT unset
+PostgreSQL: TEST_DATABASE_URL is set in this shell (127.0.0.1:5432/trading_test) but Docker Desktop cannot start on this machine (WSL engine bootstrap fails, `docker ps` reports it), so no PostgreSQL server answers.
+  First full run on commit d5bdef2 with TEST_DATABASE_URL set: 4 failed, 9742 passed, 6 skipped, 28 deselected, 483 errors in 1850.78 s; every error and 3 of the 4 failures are psycopg ConnectionTimeout (the PostgreSQL tests);
+  the 4th failure was tests/test_research_register.py::test_list_grid_follows_the_file_order_with_structure_only (its helper wrote the same varied value for every grid point; the new duplicate rule refused it). Fixed in commit 1b28ec9 (the test helper only).
+  The PostgreSQL tests therefore have NOT run on the merged tree. They need a running PostgreSQL (the owner starts Docker Desktop or another server) and one more run with TEST_DATABASE_URL set.
+  The run recorded below is the same suite on commit 1b28ec9ab5c29390c7630d2e6fecd7eb715cc8db with TEST_DATABASE_URL unset, so the PostgreSQL tests skip.
+
+exit=0 .venv/Scripts/python -m pytest -m "not docker" -rs -p no:cacheprovider   (TEST_DATABASE_URL unset)
+  9742 passed, 493 skipped, 28 deselected, 26 warnings in 926.87s (0:15:26)
+  skips: 487 PostgreSQL tests ("TEST_DATABASE_URL is not set; PostgreSQL tests cannot run") and the 6 platform skips of the 16-60 gate:
+    SKIPPED [1] tests\test_analytics_files.py:974: symlinks unavailable on this platform: OSError
+    SKIPPED [1] tests\test_bootstrap.py:947: NTFS cannot represent POSIX modes
+    SKIPPED [4] tests\test_deploy_heartbeat.py:401: file modes do not exist on Windows
+exit=0 .venv/Scripts/python -m ruff check
+  All checks passed!
+exit=0 .venv/Scripts/python -m ruff format --check
+  626 files already formatted
+exit=0 .venv/Scripts/python -m mypy src
+  Success: no issues found in 202 source files
+exit=0 uv lock --check
+  Resolved 60 packages in 13ms
