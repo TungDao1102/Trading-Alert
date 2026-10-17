@@ -1,0 +1,65 @@
+16-61 Task 2: owner preconditions and hash verification under simulator semantics 2.2.0
+checked on 2026-10-17T07:47:51Z at HEAD d5067a3d729cd6a9cb9a018b4e0218a73a862ee5
+No simulation was run; no authorization file existed at the time of these checks.
+
+== (1) preconditions ==
+pass: SUMMARY exists: .planning/phases/16-paper-runtime-composition/16-55-SUMMARY.md
+pass: SUMMARY exists: .planning/phases/16-paper-runtime-composition/16-56-SUMMARY.md
+pass: SUMMARY exists: .planning/phases/16-paper-runtime-composition/16-57-SUMMARY.md
+pass: SUMMARY exists: .planning/phases/16-paper-runtime-composition/16-58-SUMMARY.md
+pass: SUMMARY exists: .planning/phases/16-paper-runtime-composition/16-59-SUMMARY.md
+pass: SUMMARY exists: .planning/phases/16-paper-runtime-composition/16-62-SUMMARY.md
+pass: SUMMARY exists: .planning/phases/16-paper-runtime-composition/16-60-SUMMARY.md
+pass: completion commits in git log order 16-55, 16-56, 16-57, 16-58, 16-59, 16-62, 16-60 | command: git log --reverse --grep 'docs(<plan>): (complete|summary)' (last match per plan) | result: 16-55=d781b65; 16-56=1b82a58; 16-57=2f2cb6f; 16-58=a1c2939; 16-59=fbe7ee1; 16-62=f51a5e1; 16-60=a2f78f4
+pass: evidence/16-60-gate.txt holds 6 exit=0 lines and 0 non-zero exit lines | command: regex over the file
+pass: SIMULATOR_SEMANTICS_VERSION at HEAD is '2.2.0' | command: import src.backtest.semantics
+pass: docs/research/RESEARCH_PROTOCOL.md header reads 'Protocol version: v2.5.0' | command: read first 6 lines
+pass: docs/DECISIONS.md rows D072/D073/D074 counts {'D072': 1, 'D073': 1, 'D074': 1} | command: regex '^| Dnnn |'
+pass: D074 contains the owner's supersession paragraph verbatim | command: substring test against decisions/16-DEC-FIXPLANS-reviewer-text.md
+pass: docs/research/holdout_consumed.json equals schema holdout-consumed/2, protocol_version v2.5.0, empty entries | result: {'schema': 'holdout-consumed/2', 'protocol_version': 'v2.5.0', 'entries': []}
+pass: Task 1 is committed | command: git log --grep 'feat(16-61): harden the research runner' | result: d5067a3 feat(16-61): harden the research runner and require the sixth authorization key
+pass: tracked tree is clean | command: git status --porcelain --untracked-files=no | result: (empty)
+pass: Task 1 test command passes | command: pytest tests/test_research_runner_hardening.py tests/test_research_runner.py tests/test_research_checkpoint.py tests/test_research_manifest_build.py tests/test_research_run1_registration.py tests/test_research_warmup.py -q | result: 191 passed in 194.06s (0:03:14)
+pass: Task 1 mypy passes | command: mypy src | result: Success: no issues found in 202 source files
+pass: docs/research/experiments/research-run-1-v2-2-0/ does not exist or is empty | command: path check
+pass: no glob in src/, scripts/, tests/ reads docs/research/experiments/ as a whole | command: git grep experiments + glob/iterdir/listdir/walk | result: no hit
+
+== (2) hashes recomputed with the 2.2.0 code at HEAD (load_manifest then manifest_hash; load_grid then grid_hash) ==
+manifest recomputed=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 expected=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 source=.planning/phases/16-paper-runtime-composition/evidence/16-46-hashes.txt match
+manifest recomputed=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 expected=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 source=docs/research/preregistration/research-run-1-authorization-trend-pullback.json match
+manifest recomputed=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 expected=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 source=docs/research/preregistration/research-run-1-authorization-breakout-retest.json match
+manifest recomputed=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 expected=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 source=docs/research/preregistration/research-run-1-authorization-range-mr.json match
+trend-pullback recomputed=13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411 expected=13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411 source=.planning/phases/16-paper-runtime-composition/evidence/16-46-hashes.txt match
+trend-pullback recomputed=13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411 expected=13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411 source=docs/research/preregistration/research-run-1-authorization-trend-pullback.json match
+trend-pullback recomputed=13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411 expected=13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411 source=.planning/phases/16-paper-runtime-composition/16-45-SUMMARY.md match
+breakout-retest recomputed=2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069 expected=2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069 source=.planning/phases/16-paper-runtime-composition/evidence/16-46-hashes.txt match
+breakout-retest recomputed=2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069 expected=2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069 source=docs/research/preregistration/research-run-1-authorization-breakout-retest.json match
+breakout-retest recomputed=2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069 expected=2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069 source=.planning/phases/16-paper-runtime-composition/16-45-SUMMARY.md match
+range-mr recomputed=3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6 expected=3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6 source=.planning/phases/16-paper-runtime-composition/evidence/16-46-hashes.txt match
+range-mr recomputed=3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6 expected=3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6 source=docs/research/preregistration/research-run-1-authorization-range-mr.json match
+range-mr recomputed=3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6 expected=3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6 source=.planning/phases/16-paper-runtime-composition/16-45-SUMMARY.md match
+
+RESULT: all preconditions pass and every hash matches
+
+== (3) refusals on the real inputs (run from the repository root; the refusal comes before any simulation or store read) ==
+pass: trend-pullback without an authorization | exit=2 stderr='run refused: missing' stdout_empty=True output_dir_created=False
+pass: trend-pullback with the old five-key file | exit=2 stderr='run refused: malformed' stdout_empty=True output_dir_created=False
+pass: breakout-retest without an authorization | exit=2 stderr='run refused: missing' stdout_empty=True output_dir_created=False
+pass: breakout-retest with the old five-key file | exit=2 stderr='run refused: malformed' stdout_empty=True output_dir_created=False
+pass: range-mr without an authorization | exit=2 stderr='run refused: missing' stdout_empty=True output_dir_created=False
+pass: range-mr with the old five-key file | exit=2 stderr='run refused: malformed' stdout_empty=True output_dir_created=False
+RESULT (3): all six refusals as expected
+
+== (4) the three authorization files: NOT WRITTEN, PENDING THE OWNER ==
+STOPPED at this step. The run that executed this plan was told that authorizations are reserved to the owner, and the permission system denied the command that writes the three files
+(auto-mode classifier, reason "Instruction Poisoning"). Nothing was worked around: no authorization file exists, decisions/16-DEC-RERUN-AUTH.md is not written, the research rerun (Task 3) did not start,
+and no research run was made on the real manifest or the real data store (only the six refusals of section (3), which stop before any simulation or store read).
+Everything the owner needs is verified above (preconditions pass, all hashes match). What each file must hold (six keys; the grid hash is the one of the family in the file name):
+  file: docs/research/preregistration/research-run-1-v2-2-0-authorization-<family>.json
+  grid_sha256: trend-pullback 13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411 | breakout-retest 2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069 | range-mr 3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6
+  manifest_sha256: ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569
+  authorized_at_utc: 2026-10-16T07:22:56+00:00 (author date of commit bdbdc11 converted to UTC)
+  statement: "Research run 1 rerun under simulator_semantics_version 2.2.0 and protocol v2.5.0, grid <family>, frozen manifest, 50-day price-only warm-up, no Holdout. File written by Claude on the user's explicit permission (16-DEC-FIXPLANS.md, 2026-10-16). User's words: " + the `words:` line of 16-DEC-FIXPLANS.md verbatim in quotes
+  authorized_by: "Tung Dao"
+  simulator_semantics_version: "2.2.0"
+Owner action: either confirm in this session that the agent may write the three files (then the continuation runs Task 2 step (4) and the record 16-DEC-RERUN-AUTH.md), or write the three files yourself with the values above; then continue the plan at Task 2 step (4) / Task 3.
