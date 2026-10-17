@@ -903,7 +903,7 @@ Plans:
 - [G4-043] Order `exchange_status` and `exchange_order_id` updates have no store method yet; add them with the first caller (source: .planning/phases/17-operational-persistence-layer/17-10-SUMMARY.md:167-168; decision: none required)
 - [D055] The probe cases now listed under criterion 2 feed the -4509 decision: whether protection is placed after the entry fill or pre-placed before it stays OPEN until the user records a new decision row after the probe; alternative (b) with explicit quantity is UNVERIFIED on Demo (source: docs/DECISIONS.md D055; decision: D055, execution model is an open user decision)
 
-**Plans:** 25 plans (2 executed)
+**Plans:** 26 plans (2 executed; 18-26 added 2026-10-17 as a gap-closure plan for the owner's taxonomy decision on -1106, -4016, -4024 and -1125, wave 11, it runs before 18-25)
 
 Plans:
 - [x] 18-01-PLAN.md - Re-read Binance docs, new SOURCES section (all 15 pages UNVERIFIED from this machine)
@@ -930,7 +930,8 @@ Plans:
 - [ ] 18-22-PLAN.md - Phase gate test and integration with develop
 - [x] 18-23-PLAN.md - Full probe case set
 - [x] 18-24-PLAN.md - Synthetic fixtures and provenance README
-- [ ] 18-25-PLAN.md - Evidence documents
+- [ ] 18-25-PLAN.md - Evidence documents (after 18-26: the error-code row of SOURCES for -1106, -4016, -4024 and -1125 is edited there, not here)
+- [ ] 18-26-PLAN.md - Owner taxonomy decision 2026-10-17: -1106, -4016, -4024 REJECTED_DEFINITIVE on placement, -1125 Demo provenance, per-entry read date, SOURCES error-code row, SAFE_MODE branch proof (before 18-25)
 
 ### Phase 19: Execution Plan Binding + Pre-Placement Checks
 
