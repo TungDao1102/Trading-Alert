@@ -1,0 +1,92 @@
+16-63 Task 5 Part A: preconditions, hash verification and refusals under simulator semantics 2.3.0
+checked on 2026-10-17T14:25:42Z at HEAD 2be52607080437a5025d7052831186a9d13b2b8b
+No simulation was run; no authorization file of 2.3.0 exists and the agent wrote none.
+
+== (1) preconditions ==
+pass: SUMMARY exists: .planning/phases/16-paper-runtime-composition/16-55-SUMMARY.md
+pass: SUMMARY exists: .planning/phases/16-paper-runtime-composition/16-56-SUMMARY.md
+pass: SUMMARY exists: .planning/phases/16-paper-runtime-composition/16-57-SUMMARY.md
+pass: SUMMARY exists: .planning/phases/16-paper-runtime-composition/16-58-SUMMARY.md
+pass: SUMMARY exists: .planning/phases/16-paper-runtime-composition/16-59-SUMMARY.md
+pass: SUMMARY exists: .planning/phases/16-paper-runtime-composition/16-60-SUMMARY.md
+pass: SUMMARY exists: .planning/phases/16-paper-runtime-composition/16-62-SUMMARY.md
+pass: evidence/16-63-gate.txt holds 7 exit=0 lines and 0 non-zero exit lines | command: regex over the file
+pass: SIMULATOR_SEMANTICS_VERSION at HEAD is '2.3.0' | command: import src.backtest.semantics
+pass: docs/research/RESEARCH_PROTOCOL.md header reads 'Protocol version: v2.6.0' | command: read first 6 lines
+pass: docs/DECISIONS.md rows D072..D076 counts {'D072': 1, 'D073': 1, 'D074': 1, 'D075': 1, 'D076': 1} | command: regex '^| Dnnn |'
+pass: D076 holds the derived supersession paragraph (two version numbers replaced) and not the D074 form | command: substring test against decisions/16-DEC-FIXPLANS-reviewer-text.md
+pass: holdout marker equals schema holdout-consumed/2, v2.6.0, empty entries | result: {'schema': 'holdout-consumed/2', 'protocol_version': 'v2.6.0', 'entries': []}
+pass: no tracked file under src tests params docs scripts is modified | command: git status --porcelain --untracked-files=no -- src tests params docs scripts | result: (empty)
+pass: docs/research/experiments/research-run-1-v2-3-0/ does not exist | command: path check
+pass: docs/research/experiments/research-run-1-v2-2-0/ does not exist | command: path check
+pass: no glob in src/, scripts/ or tests/ reads docs/research/experiments/ as a whole | command: git grep experiments + glob/iterdir/listdir/walk | result: no hit
+pass: no 2.3.0 authorization file exists yet (the owner writes them) | command: glob
+
+== (2) hashes recomputed with the 2.3.0 code at HEAD (load_manifest then manifest_hash; load_grid then grid_hash) ==
+manifest recomputed=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 expected=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 source=.planning/phases/16-paper-runtime-composition/evidence/16-46-hashes.txt match
+trend-pullback recomputed=13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411 expected=13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411 source=.planning/phases/16-paper-runtime-composition/evidence/16-46-hashes.txt match
+breakout-retest recomputed=2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069 expected=2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069 source=.planning/phases/16-paper-runtime-composition/evidence/16-46-hashes.txt match
+range-mr recomputed=3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6 expected=3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6 source=.planning/phases/16-paper-runtime-composition/evidence/16-46-hashes.txt match
+manifest recomputed=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 expected=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 source=docs/research/preregistration/research-run-1-authorization-trend-pullback.json match
+trend-pullback recomputed=13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411 expected=13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411 source=docs/research/preregistration/research-run-1-authorization-trend-pullback.json match
+manifest recomputed=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 expected=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 source=docs/research/preregistration/research-run-1-v2-2-0-authorization-trend-pullback.json match
+trend-pullback recomputed=13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411 expected=13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411 source=docs/research/preregistration/research-run-1-v2-2-0-authorization-trend-pullback.json match
+trend-pullback recomputed=13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411 expected=13207b306df9a2bc1d580df456b1e6a3d3478eff82c5eb1ff6ac6a9daac14411 source=.planning/phases/16-paper-runtime-composition/16-45-SUMMARY.md match
+manifest recomputed=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 expected=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 source=docs/research/preregistration/research-run-1-authorization-breakout-retest.json match
+breakout-retest recomputed=2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069 expected=2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069 source=docs/research/preregistration/research-run-1-authorization-breakout-retest.json match
+manifest recomputed=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 expected=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 source=docs/research/preregistration/research-run-1-v2-2-0-authorization-breakout-retest.json match
+breakout-retest recomputed=2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069 expected=2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069 source=docs/research/preregistration/research-run-1-v2-2-0-authorization-breakout-retest.json match
+breakout-retest recomputed=2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069 expected=2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069 source=.planning/phases/16-paper-runtime-composition/16-45-SUMMARY.md match
+manifest recomputed=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 expected=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 source=docs/research/preregistration/research-run-1-authorization-range-mr.json match
+range-mr recomputed=3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6 expected=3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6 source=docs/research/preregistration/research-run-1-authorization-range-mr.json match
+manifest recomputed=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 expected=ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569 source=docs/research/preregistration/research-run-1-v2-2-0-authorization-range-mr.json match
+range-mr recomputed=3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6 expected=3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6 source=docs/research/preregistration/research-run-1-v2-2-0-authorization-range-mr.json match
+range-mr recomputed=3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6 expected=3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6 source=.planning/phases/16-paper-runtime-composition/16-45-SUMMARY.md match
+
+RESULT: all preconditions pass and every hash matches
+
+== (3) refusals on the real inputs (run from the repository root; the refusal comes before any simulation or store read) ==
+pass: trend-pullback without an authorization | exit=2 stderr='run refused: missing' stdout_empty=True output_dir_created=False
+pass: trend-pullback with the old five-key file | exit=2 stderr='run refused: malformed' stdout_empty=True output_dir_created=False
+pass: trend-pullback with its 2.2.0 file | exit=2 stderr='run refused: simulator_semantics_version_mismatch' stdout_empty=True output_dir_created=False
+pass: breakout-retest without an authorization | exit=2 stderr='run refused: missing' stdout_empty=True output_dir_created=False
+pass: breakout-retest with the old five-key file | exit=2 stderr='run refused: malformed' stdout_empty=True output_dir_created=False
+pass: breakout-retest with its 2.2.0 file | exit=2 stderr='run refused: simulator_semantics_version_mismatch' stdout_empty=True output_dir_created=False
+pass: range-mr without an authorization | exit=2 stderr='run refused: missing' stdout_empty=True output_dir_created=False
+pass: range-mr with the old five-key file | exit=2 stderr='run refused: malformed' stdout_empty=True output_dir_created=False
+pass: range-mr with its 2.2.0 file | exit=2 stderr='run refused: simulator_semantics_version_mismatch' stdout_empty=True output_dir_created=False
+RESULT (3): all nine refusals as expected
+
+== (4) the signing script and its dry run ==
+script: .planning/phases/16-paper-runtime-composition/scripts/16-63-sign-authorizations.py
+sha256 of the script file: 3bb61687bad860cc8a1d5e2776d8a456a2d703a7a96f051b979b8064fd20a9d9
+py_compile: ok (the compiled cache was removed again)
+The agent ran ONLY the --check form, once. `git status --porcelain -- docs/research/preregistration` was empty before and after it; no authorization file of 2.3.0 exists.
+
+dry run: .venv/Scripts/python .planning/phases/16-paper-runtime-composition/scripts/16-63-sign-authorizations.py --check   (exit=0)
+--- dry run output (verbatim) ---
+all read-only checks pass (clean tree, version 2.3.0, protocol v2.6.0, D072-D076, marker, gate, no output directory, manifest and grid hashes equal the recorded ones)
+repository HEAD: 2be52607080437a5025d7052831186a9d13b2b8b
+files to create (exclusive creation, nothing is overwritten):
+  docs/research/preregistration/research-run-1-v2-3-0-authorization-trend-pullback.json
+  docs/research/preregistration/research-run-1-v2-3-0-authorization-breakout-retest.json
+  docs/research/preregistration/research-run-1-v2-3-0-authorization-range-mr.json
+
+SCOPE TEXT:
+
+I authorize one regenerated research run under `simulator_semantics_version = 2.3.0` and `protocol_version = v2.6.0`, using the accepted 50-day price-only warm-up where pre-window history is available. The run covers exactly the 3 registered strategy families, their existing 48 immutable parameter sets and the five existing Development/Validation windows, generating up to 240 records, one family at a time in the order trend-pullback, breakout-retest, range-mr. The only allowed market-price history is that required by the registered windows and their pre-window warm-up. Do not run the Holdout window, read Holdout prices/returns/metrics or modify the Holdout consumption entries. This authorization is limited to rerunning the registered Development/Validation research under the new semantics. It does not authorize changing parameters, choosing a new candidate from the new results, changing `strategy_version`, consuming Holdout, or making any live-trading decision. The already designated candidate `research-run-1-a01` remains the designated candidate unless I issue a separate decision. The three 2.2.0 authorization files are not used.
+
+STATEMENTS (one per file):
+  [trend-pullback] Research run 1 rerun under simulator_semantics_version 2.3.0 and protocol v2.6.0, grid trend-pullback, frozen manifest, 50-day price-only warm-up, no Holdout. File written by the owner's own script (.planning/phases/16-paper-runtime-composition/scripts/16-63-sign-authorizations.py, run by the owner at repository HEAD 2be52607080437a5025d7052831186a9d13b2b8b) on the owner's explicit decision (decisions/16-DEC-V260.md); the agent did not write this file. Owner's words: "chọn A và đọc chặt, làm đi". Typed confirmation: "AUTHORIZE 2.3.0".
+  [breakout-retest] Research run 1 rerun under simulator_semantics_version 2.3.0 and protocol v2.6.0, grid breakout-retest, frozen manifest, 50-day price-only warm-up, no Holdout. File written by the owner's own script (.planning/phases/16-paper-runtime-composition/scripts/16-63-sign-authorizations.py, run by the owner at repository HEAD 2be52607080437a5025d7052831186a9d13b2b8b) on the owner's explicit decision (decisions/16-DEC-V260.md); the agent did not write this file. Owner's words: "chọn A và đọc chặt, làm đi". Typed confirmation: "AUTHORIZE 2.3.0".
+  [range-mr] Research run 1 rerun under simulator_semantics_version 2.3.0 and protocol v2.6.0, grid range-mr, frozen manifest, 50-day price-only warm-up, no Holdout. File written by the owner's own script (.planning/phases/16-paper-runtime-composition/scripts/16-63-sign-authorizations.py, run by the owner at repository HEAD 2be52607080437a5025d7052831186a9d13b2b8b) on the owner's explicit decision (decisions/16-DEC-V260.md); the agent did not write this file. Owner's words: "chọn A và đọc chặt, làm đi". Typed confirmation: "AUTHORIZE 2.3.0".
+
+--check: nothing was written.
+--- end of dry run output ---
+
+== (5) PART B: the owner runs this (own terminal, repository root) ==
+  cd C:\Users\daotu\OneDrive\Documents\Trading-Alert
+  .venv\Scripts\python.exe .planning\phases\16-paper-runtime-composition\scripts\16-63-sign-authorizations.py
+Optional first, writes nothing:
+  .venv\Scripts\python.exe .planning\phases\16-paper-runtime-composition\scripts\16-63-sign-authorizations.py --check
+Read the scope text, then type exactly: AUTHORIZE 2.3.0   (anything else aborts and writes nothing). Then tell the agent "signed".
