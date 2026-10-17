@@ -695,7 +695,7 @@ Plans:
 
 **Depends on**: Phase 12, Phase 13.1, Phase 15, Phase 17
 
-**Plans**: 57/62 plans executed (16-01 to 16-42 and 16-45 to 16-54; 16-55 to 16-61 added 2026-10-16 from the deep code review (16-REVIEW.md): 16-55 to 16-59 fix the review findings and block 16-43, 16-60 and 16-61 fix the cold research warm-up and rerun research run 1 at simulator 2.2.0; the owner answered every checkpoint of 16-55 to 16-61 on 2026-10-16 (16-DEC-FIXPLANS.md, reviewer text in decisions/16-DEC-FIXPLANS-reviewer-text.md) and the plans now record those decisions; 16-62 added the same day for B1-WR-09 (wire rest_backfill_depth_bars = 1500 into the REST backfill), it runs after 16-59 and records the soak IMAGE_COMMIT; order 16-55, 56, 57, 58, 59, 62, then 16-60 and 16-43 (wave 25), then 16-61 and 16-44 (wave 26); the second secret paper heartbeat URL is a user input before 16-43; 16-37 manifest frozen 2026-10-15, 16-46 research run 1 done 2026-10-16, 16-41 O-06/O-10 decided 2026-10-16, 16-48 candidate research-run-1-a01 designated 2026-10-16; 16-42 to 16-44 wait for the user and the soak host; 16-54 added 2026-10-13 for the terminal declaration of known_gaps, done the same day; 16-53 added 2026-10-12 for compose-rehearsal.sh and the dry-run BINANCE_* refusal; plan-checker 2026-10-09: 0 blockers on 16-01 to 16-49; 16-50 added 2026-10-09 for the healthchecks.io heartbeat sender chosen by the user; open user questions Q-A to Q-Q are asked at the blocking-human checkpoints)
+**Plans**: 58/62 plans executed (16-01 to 16-42 and 16-45 to 16-54; 16-55 to 16-61 added 2026-10-16 from the deep code review (16-REVIEW.md): 16-55 to 16-59 fix the review findings and block 16-43, 16-60 and 16-61 fix the cold research warm-up and rerun research run 1 at simulator 2.2.0; the owner answered every checkpoint of 16-55 to 16-61 on 2026-10-16 (16-DEC-FIXPLANS.md, reviewer text in decisions/16-DEC-FIXPLANS-reviewer-text.md) and the plans now record those decisions; 16-62 added the same day for B1-WR-09 (wire rest_backfill_depth_bars = 1500 into the REST backfill), it runs after 16-59 and records the soak IMAGE_COMMIT; order 16-55, 56, 57, 58, 59, 62, then 16-60 and 16-43 (wave 25), then 16-61 and 16-44 (wave 26); the second secret paper heartbeat URL is a user input before 16-43; 16-37 manifest frozen 2026-10-15, 16-46 research run 1 done 2026-10-16, 16-41 O-06/O-10 decided 2026-10-16, 16-48 candidate research-run-1-a01 designated 2026-10-16; 16-42 to 16-44 wait for the user and the soak host; 16-54 added 2026-10-13 for the terminal declaration of known_gaps, done the same day; 16-53 added 2026-10-12 for compose-rehearsal.sh and the dry-run BINANCE_* refusal; plan-checker 2026-10-09: 0 blockers on 16-01 to 16-49; 16-50 added 2026-10-09 for the healthchecks.io heartbeat sender chosen by the user; open user questions Q-A to Q-Q are asked at the blocking-human checkpoints)
 
 **Requirements**: PAPER-01, PAPER-02
 
@@ -811,7 +811,7 @@ Plans:
 - [x] 16-59-PLAN.md - evidence export per-bundle keys, merged freeze log with missing-tick records, deferred-item dispositions, gate for 16-55 to 16-59
 - [ ] 16-60-PLAN.md - research warm-up 50 days, simulator 2.2.0, protocol v2.5.0, D073 and D074 (after 16-62)
 - [ ] 16-61-PLAN.md - runner hardening, sixth authorization key, sequential rerun at 2.2.0, supersede record (after 16-60)
-- [ ] 16-62-PLAN.md - B1-WR-09: rest_backfill_depth_bars wired into the REST backfill, gate and soak IMAGE_COMMIT (after 16-59, before 16-43 and 16-60)
+- [x] 16-62-PLAN.md - B1-WR-09: rest_backfill_depth_bars wired into the REST backfill, gate and soak IMAGE_COMMIT (after 16-59, before 16-43 and 16-60)
 - [ ] TBD (run /gsd-plan-phase 16 to break down)
 
 ### Phase 17: Operational Persistence Layer
@@ -1292,7 +1292,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 13.1. Deployment & CI | 12/12 | Complete | 2026-10-04 |
 | 14. Backtest Simulator Causality Rewrite | 17/17 | Complete    | 2026-10-07 |
 | 15. Strategy Geometry Correction | 18/18 | Complete    | 2026-10-07 |
-| 16. Paper Runtime Composition + SHADOW Approval Mode | 57/62 | In Progress|  |
+| 16. Paper Runtime Composition + SHADOW Approval Mode | 58/62 | In Progress|  |
 | 17. Operational Persistence Layer | 15/15 | Complete    | 2026-10-07 |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |
 | 19. Execution Plan Binding + Pre-Placement Checks | 0/TBD | Not started | - |
