@@ -52,9 +52,9 @@ def _write_grid(path: Path, points: list[tuple[str, str]]) -> Path:
             {
                 "parameter_set_id": set_id,
                 "parameter_set_hash": digest,
-                "varied": [["minimum_rr", "2"]],
+                "varied": [["minimum_rr", str(2 + index)]],  # distinct per point (plan 16-61)
             }
-            for set_id, digest in points
+            for index, (set_id, digest) in enumerate(points)
         ],
     }
     path.write_text(json.dumps(body, indent=2), encoding="utf-8")
