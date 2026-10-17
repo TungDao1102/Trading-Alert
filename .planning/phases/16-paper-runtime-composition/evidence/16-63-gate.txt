@@ -1,0 +1,17 @@
+16-63 Task 4 gate: full gate on the clean tracked tree at the landing commit 6f599dd (2026-10-17)
+TEST_DATABASE_URL set; container trading-postgres-1 (postgres:17.11-bookworm) healthy; a PostgreSQL test (tests/test_paper_shadow_pg.py) passed with none skipped before the run.
+HEAD 6f599dd; `git status --porcelain --untracked-files=no` empty before the run.
+exit=0 .venv/Scripts/python -m pytest -m "not docker" -q -rs -p no:cacheprovider
+  10257 passed, 6 skipped, 0 failed, 0 errors (progress-line count; the platform skips only: symlinks unavailable (OSError) x1, NTFS cannot represent POSIX modes x1, file modes do not exist on Windows x4; none is a PostgreSQL test). 10257 = 10245 of the Task 2 working-tree run + 12 tests of tests/test_research_protocol_v260.py.
+exit=0 .venv/Scripts/python -m ruff check
+  All checks passed!
+exit=0 .venv/Scripts/python -m ruff format --check
+  628 files already formatted
+exit=0 .venv/Scripts/python -m mypy src
+  Success: no issues found in 202 source files
+exit=0 uv lock --check
+  Resolved 60 packages
+exit=0 git diff --quiet 5f8269b HEAD -- params/ docs/research/experiments/research-run-1 docs/research/preregistration/research-run-1-manifest.json docs/research/preregistration/research-run-1-grid-trend-pullback.json docs/research/preregistration/research-run-1-grid-breakout-retest.json docs/research/preregistration/research-run-1-grid-range-mr.json docs/research/preregistration/research-run-1-authorization-trend-pullback.json docs/research/preregistration/research-run-1-authorization-breakout-retest.json docs/research/preregistration/research-run-1-authorization-range-mr.json
+  unchanged: params/, the 240 records of run 1, the frozen manifest, the three grids and the three five-key authorization files are byte-equal to 5f8269b
+exit=0 git diff --quiet dce3195 HEAD -- docs/research/preregistration/research-run-1-v2-2-0-authorization-trend-pullback.json docs/research/preregistration/research-run-1-v2-2-0-authorization-breakout-retest.json docs/research/preregistration/research-run-1-v2-2-0-authorization-range-mr.json
+  unchanged: the three 2.2.0 authorization files are byte-equal to dce3195
