@@ -213,6 +213,7 @@ def _make_rig(
         on_backfill=_on_backfill,
         on_gap=_on_gap,
         on_connection_event=lambda event, at: events.append((str(event), at)),
+        backfill_depth_bars=1500,  # B1-WR-09: the ratified depth, a required keyword
         clock=lambda: clock_now,
         **extra,
     )

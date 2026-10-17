@@ -49,6 +49,14 @@ RESYNC_MAX_DELAY_SECONDS: int = 120
 RESYNC_WAIT_MULTIPLIER_SECONDS: int = 1
 RESYNC_WAIT_MAX_SECONDS: int = 60
 
+# REST backfill page size and page cap (16-DEC-O-07, "ratify current"; unchanged values). The
+# page size is the exchange maximum rows of `GET /fapi/v1/klines` (docs/SOURCES.md rows of
+# 2026-09-30 and 2026-10-08, MEDIUM): it stays the largest single request. The page cap bounds
+# the walk against a misbehaving adapter. How many closes one backfill requests in total is the
+# ratified `timing.rest_backfill_depth_bars` (plan 16-62, B1-WR-09), handed in by the caller.
+REST_BACKFILL_PAGE_SIZE: int = 1500
+REST_BACKFILL_PAGE_CAP: int = 200
+
 
 # --------------------------------------------------------------------------- #
 # Adapter protocol — the minimum surface resync needs.
@@ -163,22 +171,36 @@ async def backfill_missed_closes(
     interval: str,
     last_close_utc: datetime,
     now_utc: datetime,
+    depth_bars: int,
+    beyond_depth_reason: GapReason,
 ) -> tuple[list[TaggedBar], list[GapRecord]]:
     """Backfill missed closes via REST klines, reporting holes as gap records.
 
-    Per D-01: the function pages `adapter.klines` from `ms(last_close_utc)` with
-    `limit=1500` under a tenacity-bounded retry, drops any candle whose
-    `close_time_utc > now_utc` (forming candle), diffs the returned closes against the
-    contiguous expectation on the exchange grid to find holes, and returns the available
-    closes in `close_time_utc` order plus one `GapRecord` per hole.
+    Per D-01: the function pages `adapter.klines` from `ms(last_close_utc)` under a
+    tenacity-bounded retry, drops any candle whose `close_time_utc > now_utc` (forming
+    candle), diffs the returned closes against the contiguous expectation on the exchange
+    grid to find holes, and returns the available closes in `close_time_utc` order plus one
+    `GapRecord` per hole.
+
+    The request is bounded by `depth_bars` (the ratified `timing.rest_backfill_depth_bars`,
+    plan 16-62, B1-WR-09), newest closes first: at most `depth_bars` closes are requested, each
+    request asks for `min(REST_BACKFILL_PAGE_SIZE, remaining depth)` rows, and the walk is
+    further bounded by `REST_BACKFILL_PAGE_CAP` pages. When more closes are missing than the
+    depth, the walk starts at the oldest of the newest `depth_bars` expected closes and every
+    older expected close becomes a `GapRecord` with `beyond_depth_reason` (the reason of the
+    window being verified); it is never labelled `EXCHANGE_NO_CANDLE` and never dropped, and
+    no bar is fabricated for it. One log line names the count of such closes.
 
     Returns `(closes, gaps)`:
       - `closes`: `TaggedBar` values tagged `SourceTag.REST_BACKFILL`, carrying the interval
         of the request, in `close_time_utc` order
       - `gaps`: one `GapRecord` per expected close the exchange did not fill
-        (`GapReason.EXCHANGE_NO_CANDLE`); a due slot whose only row is not closed yet is
+        (`GapReason.EXCHANGE_NO_CANDLE`), per close beyond the depth
+        (`beyond_depth_reason`); a due slot whose only row is not closed yet is
         reported as `GapReason.UNKNOWN` (CR-09: never silent coverage)
     """
+    if depth_bars < 1:
+        raise ValueError(f"depth_bars must be at least 1, got {depth_bars}")
     # Normalize to UTC for arithmetic (callers may pass any tz-aware
     # datetime; the adapter's ms math is UTC-anchored).
     if last_close_utc.tzinfo is None:
@@ -189,8 +211,23 @@ async def backfill_missed_closes(
     now_utc = now_utc.astimezone(UTC)
 
     step_ms = _step_ms(interval)
-    start_ms = _datetime_to_ms(last_close_utc)
     now_ms = _datetime_to_ms(now_utc)
+
+    # The newest `depth_bars` expected closes are requested; every older one is a gap (B1-WR-09).
+    expected_open_times = _expected_open_times(last_close_utc, now_utc, step_ms)
+    beyond_count = max(0, len(expected_open_times) - depth_bars)
+    beyond_open_times = expected_open_times[:beyond_count]
+    if beyond_count:
+        start_ms = _datetime_to_ms(expected_open_times[beyond_count])
+        log.warning(
+            "paper.resync.beyond_depth",
+            symbol=symbol,
+            interval=interval,
+            closes=beyond_count,
+            depth_bars=depth_bars,
+        )
+    else:
+        start_ms = _datetime_to_ms(last_close_utc)
 
     # Bounded retry: cap attempts AND wall-clock, then fail closed.
     # Retry transient faults only — programming errors (ValueError,
@@ -212,35 +249,38 @@ async def backfill_missed_closes(
     )
     decorator = tenacity.AsyncRetrying(retry=retry, stop=stop, wait=wait, reraise=True)
 
-    async def _fetch_page(cursor_ms: int) -> list[Kline]:
+    async def _fetch_page(cursor_ms: int, limit: int) -> list[Kline]:
         return await adapter.klines(
             symbol=symbol,
             interval=interval,
             start_ms=cursor_ms,
-            limit=1500,
+            limit=limit,
         )
 
-    async def _fetch_page_with_retry(cursor_ms: int) -> list[Kline]:
+    async def _fetch_page_with_retry(cursor_ms: int, limit: int) -> list[Kline]:
         async for attempt in decorator:
             with attempt:
-                return await _fetch_page(cursor_ms)
+                return await _fetch_page(cursor_ms, limit)
         raise RuntimeError("unreachable: tenacity.AsyncRetrying exhausted without reraise")
 
     # Page until the returned page no longer advances toward now_utc
-    # (CR-01): a single 1500-row page silently truncates any outage
-    # longer than 1500 intervals. Each full page advances the cursor
-    # past the last returned open_time; a short page (or an empty
-    # page, or a cursor past now) ends the walk. A page-count cap
-    # keeps a misbehaving adapter from spinning forever — hitting it
-    # is journaled as a truncated backfill, never silent coverage.
+    # (CR-01): a single page silently truncates any outage longer than one page. Each full
+    # page advances the cursor past the last returned open_time; a short page (or an empty
+    # page, a cursor past now, or an exhausted depth) ends the walk. Every request asks for
+    # min(page size, remaining depth) rows (B1-WR-09). A page-count cap keeps a misbehaving
+    # adapter from spinning forever — hitting it is journaled as a truncated backfill,
+    # never silent coverage.
     raw_page: list[Kline] = []
     cursor_ms = start_ms
-    for _ in range(200):
-        page = await _fetch_page_with_retry(cursor_ms)
+    remaining = depth_bars
+    for _ in range(REST_BACKFILL_PAGE_CAP):
+        limit = min(REST_BACKFILL_PAGE_SIZE, remaining)
+        page = await _fetch_page_with_retry(cursor_ms, limit)
         if not page:
             break
         raw_page.extend(page)
-        if len(page) < 1500:
+        remaining -= len(page)
+        if len(page) < limit or remaining <= 0:
             break
         last_open_ms = _datetime_to_ms(page[-1].open_time_utc)
         cursor_ms = last_open_ms + step_ms
@@ -251,7 +291,7 @@ async def backfill_missed_closes(
             "paper.resync.truncated",
             symbol=symbol,
             interval=interval,
-            pages=200,
+            pages=REST_BACKFILL_PAGE_CAP,
             closes=len(raw_page),
         )
 
@@ -268,11 +308,19 @@ async def backfill_missed_closes(
     # "covered" while downstream sees a missing bar. A slot present in
     # the raw page but absent from closed gets its own reason (UNKNOWN)
     # rather than silence.
-    expected_open_times = _expected_open_times(last_close_utc, now_utc, step_ms)
     closed_open_times = {k.open_time_utc for k in closed}
     raw_open_times = {k.open_time_utc for k in raw_page}
-    gaps: list[GapRecord] = []
-    for expected_open in expected_open_times:
+    gaps: list[GapRecord] = [
+        GapRecord(
+            symbol=symbol,
+            interval=interval,
+            expected_close_utc=expected_open + timedelta(milliseconds=step_ms - 1),
+            reason=beyond_depth_reason,
+            detected_at_utc=now_utc,
+        )
+        for expected_open in beyond_open_times
+    ]
+    for expected_open in expected_open_times[beyond_count:]:
         if expected_open in closed_open_times:
             continue
         if expected_open in raw_open_times:
@@ -324,6 +372,8 @@ async def backfill_missed_closes(
 
 
 __all__ = [
+    "REST_BACKFILL_PAGE_CAP",
+    "REST_BACKFILL_PAGE_SIZE",
     "RESYNC_MAX_ATTEMPTS",
     "RESYNC_MAX_DELAY_SECONDS",
     "RESYNC_WAIT_MAX_SECONDS",

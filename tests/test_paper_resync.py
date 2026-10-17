@@ -150,6 +150,9 @@ def _run(
             interval=interval,
             last_close_utc=last_close_utc,
             now_utc=now_utc,
+            # B1-WR-09: the ratified depth (1500) bounds the request; it equals the page size.
+            depth_bars=1500,
+            beyond_depth_reason=GapReason.WS_RECONNECT_WINDOW,
         )
 
     return asyncio.run(_call())
@@ -187,7 +190,7 @@ def test_reconnect_resync_returns_missed_closes_with_zero_gaps() -> None:
     assert call[0] == symbol
     assert call[1] == interval
     assert call[2] == _ms(last_close_utc)
-    assert call[4] == 1500  # limit
+    assert call[4] == 1500  # limit = min(page size 1500, depth 1500) (B1-WR-09)
 
 
 def test_unrecoverable_gap_yields_exactly_one_gap_record() -> None:

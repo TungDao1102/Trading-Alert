@@ -80,6 +80,7 @@ class _PaginatingAdapter:
 def test_long_outage_pages_past_single_page_cap() -> None:
     """A 1500+ close outage backfills completely across pages."""
     from src.paper.resync import backfill_missed_closes
+    from src.paper.vocabulary import GapReason
 
     symbol, interval = "BTCUSDT", "1h"
     first_open = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
@@ -107,6 +108,9 @@ def test_long_outage_pages_past_single_page_cap() -> None:
             interval=interval,
             last_close_utc=last,
             now_utc=now,
+            # B1-WR-09: a depth larger than the 1502-close outage keeps the CR-01 pagination test.
+            depth_bars=3000,
+            beyond_depth_reason=GapReason.WS_RECONNECT_WINDOW,
         )
 
     got_closes, gaps = asyncio.run(_call())
@@ -125,6 +129,7 @@ def test_adapter_value_error_propagates_without_retry() -> None:
     import time
 
     from src.paper.resync import backfill_missed_closes
+    from src.paper.vocabulary import GapReason
 
     class _BuggyAdapter:
         def __init__(self) -> None:
@@ -144,6 +149,8 @@ def test_adapter_value_error_propagates_without_retry() -> None:
                 interval="1h",
                 last_close_utc=datetime(2026, 9, 19, 10, 0, tzinfo=UTC),
                 now_utc=datetime(2026, 9, 19, 13, 0, tzinfo=UTC),
+                depth_bars=1500,  # B1-WR-09: the depth is a required keyword
+                beyond_depth_reason=GapReason.WS_RECONNECT_WINDOW,
             )
         )
     except ValueError:

@@ -73,6 +73,7 @@ from src.data.archive import (  # noqa: E402
     make_archive_client,
 )
 from src.ops.redaction import Redactor, configure_logging  # noqa: E402
+from src.paper.runtime_config import load_runtime_config  # noqa: E402
 from src.paper.supervisor import PaperSupervisor  # noqa: E402
 from src.paper.vocabulary import (  # noqa: E402
     INTERVAL_MS,
@@ -1188,10 +1189,26 @@ def _gap_dicts(observations: Sequence[GapObservation]) -> list[dict[str, str]]:
     ]
 
 
+COMMITTED_RUNTIME_CONFIG = REPO_ROOT / "config" / "paper" / "paper-runtime-v2.toml"
+
+
+def ratified_backfill_depth(environ: Mapping[str, str]) -> int:
+    """The ratified `timing.rest_backfill_depth_bars` (plan 16-62, B1-WR-09), never a typed number.
+
+    Loaded with the runtime's own loader from the file named by `PAPER_RUNTIME_CONFIG`, or from
+    the committed `config/paper/paper-runtime-v2.toml` when the variable is unset.
+    """
+    named = environ.get("PAPER_RUNTIME_CONFIG")
+    path = named if named is not None and named.strip() != "" else str(COMMITTED_RUNTIME_CONFIG)
+    return load_runtime_config(path).timing.rest_backfill_depth_bars
+
+
 class SmokeRun:
     """The state and steps of one smoke run; `run_smoke` composes them in order."""
 
-    def __init__(self, config: SmokeConfig, rig: SmokeRig) -> None:
+    def __init__(
+        self, config: SmokeConfig, rig: SmokeRig, *, environ: Mapping[str, str] | None = None
+    ) -> None:
         self.config = config
         self.rig = rig
         self.clock = rig.clock
@@ -1215,6 +1232,7 @@ class SmokeRun:
             on_backfill=self.collectors.on_backfill,
             on_gap=self.collectors.on_gap,
             on_connection_event=self.collectors.on_connection_event,
+            backfill_depth_bars=ratified_backfill_depth(os.environ if environ is None else environ),
             clock=self.clock.now,
         )
         rig.bind_supervisor(self.supervisor)
@@ -1565,9 +1583,11 @@ class SmokeRun:
         return EXIT_FAILED if blocked or errored else EXIT_OK
 
 
-async def run_smoke(config: SmokeConfig, rig: SmokeRig) -> tuple[dict[str, Any], int]:
+async def run_smoke(
+    config: SmokeConfig, rig: SmokeRig, *, environ: Mapping[str, str] | None = None
+) -> tuple[dict[str, Any], int]:
     """Run the smoke once and return (evidence, exit code)."""
-    run = SmokeRun(config, rig)
+    run = SmokeRun(config, rig, environ=environ)
     try:
         if await run.start():
             await run.archive_fetch()
@@ -1747,7 +1767,7 @@ def main(
     with sdk_reconnect_override(config):
         rig = rig_factory(config)
         try:
-            evidence, code = asyncio.run(run_smoke(config, rig))
+            evidence, code = asyncio.run(run_smoke(config, rig, environ=env))
         finally:
             rig.cleanup()
     path = write_evidence(

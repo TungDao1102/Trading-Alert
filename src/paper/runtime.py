@@ -1262,6 +1262,7 @@ async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None
             on_backfill=sinks["on_backfill"],
             on_gap=sinks["on_gap"],
             on_connection_event=sinks["on_connection_event"],
+            backfill_depth_bars=config.timing.rest_backfill_depth_bars,
             clock=context.clock,
             on_fatal=sinks["on_fatal"],
             feed_clock=owner.feed_clock,

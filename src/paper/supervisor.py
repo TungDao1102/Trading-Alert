@@ -27,6 +27,10 @@ watchdog reads it and, after a silence longer than its bound, calls `recover_fro
 enters the same bounded drop recovery an SDK `close` takes (never a second one while a recovery
 is pending).
 
+REST backfill depth (plan 16-62, B1-WR-09): every backfill above requests at most the configured
+`backfill_depth_bars` closes per symbol and interval, newest first; an older missing close is a
+`GapRecord` with the reason of the window being verified (`src/paper/resync.py`).
+
 Nothing is only logged (P9): backfilled bars go to `on_backfill` (tagged `REST_BACKFILL`),
 gaps go to `on_gap` with a reason code, connection events go to `on_connection_event`.
 
@@ -148,6 +152,10 @@ class PaperSupervisor:
     - `on_fatal(str)` (optional, plan 16-56): the bounded rebuild was exhausted and its backfill
       has run; the feed cannot be trusted any more. Called once per exhaustion with this
       module's own reason text, never while the supervisor is stopping.
+
+    `backfill_depth_bars` (required, no default, plan 16-62): the most closed bars per symbol and
+    interval one REST backfill requests (after a reconnect, after a drop and rebuild, and once
+    after start). The composition root passes the ratified `timing.rest_backfill_depth_bars`.
     """
 
     def __init__(
@@ -161,10 +169,14 @@ class PaperSupervisor:
         on_backfill: Callable[[TaggedBar], None],
         on_gap: Callable[[GapRecord], None],
         on_connection_event: Callable[[RuntimeEventType, datetime], None],
+        backfill_depth_bars: int,
         clock: Callable[[], datetime] | None = None,
         on_fatal: Callable[[str], None] | None = None,
         feed_clock: Callable[[], float] | None = None,
     ) -> None:
+        if isinstance(backfill_depth_bars, bool) or backfill_depth_bars < 1:
+            raise ValueError(f"backfill depth must be at least 1 bar, got {backfill_depth_bars!r}")
+        self._backfill_depth_bars = backfill_depth_bars
         self._ws = ws_adapter
         self._rest = rest_adapter
         self._symbols = symbols
@@ -412,7 +424,7 @@ class PaperSupervisor:
         otherwise never reach history. This runs the path a connection event takes: one
         `_backfill_and_emit(GapReason.WS_RECONNECT_WINDOW)` from the seeded cursors, under the
         recovery lock, with live closed bars held until its bars were handed over. Its depth is
-        the supervisor's REST backfill path (plan 16-62 wires `rest_backfill_depth_bars`).
+        bounded like every supervisor backfill by `backfill_depth_bars` (plan 16-62).
         Does nothing when the supervisor is not running.
         """
         if not self._started or self._stopping or self._loop is None:
@@ -538,6 +550,10 @@ class PaperSupervisor:
         contributes one `GapRecord` per expected close it could not recover (WR-09) and the
         remaining pairs still run. A hole the exchange reported (`EXCHANGE_NO_CANDLE`) is
         re-labelled with the reason of the window that was being verified.
+
+        Each pair's request is bounded by the configured depth (`backfill_depth_bars`, the
+        ratified `timing.rest_backfill_depth_bars`, plan 16-62, B1-WR-09): the newest that many
+        closes are requested and every older missing close is a gap carrying `reason`.
         """
         bars: list[TaggedBar] = []
         gaps: list[GapRecord] = []
@@ -560,6 +576,8 @@ class PaperSupervisor:
                         interval=interval,
                         last_close_utc=last,
                         now_utc=now,
+                        depth_bars=self._backfill_depth_bars,
+                        beyond_depth_reason=reason,
                     )
                 except Exception as exc:
                     log.warning(
