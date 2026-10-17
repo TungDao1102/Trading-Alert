@@ -90,3 +90,60 @@ STATEMENTS (one per file):
 Optional first, writes nothing:
   .venv\Scripts\python.exe .planning\phases\16-paper-runtime-composition\scripts\16-63-sign-authorizations.py --check
 Read the scope text, then type exactly: AUTHORIZE 2.3.0   (anything else aborts and writes nothing). Then tell the agent "signed".
+
+== (6) owner-signed files (Part B done by the owner, Part C verified by the executor) ==
+Part B: the owner ran .planning/phases/16-paper-runtime-composition/scripts/16-63-sign-authorizations.py in their own terminal at repository HEAD be98fd93ee0c7b7fd01ba39fb90cb25dd8d60cdc (a plan 18-26 docs commit had landed after 8bea35b; docs only) and typed `AUTHORIZE 2.3.0`. The script created the three files below and printed a pass line for load_authorization and require_authorized on each (as relayed to the executor by the coordinator; the owner's pasted terminal output itself was not passed to the executor, so it is not reproduced here). The files carry authorized_at_utc 2026-10-17T14:54:52+00:00. The executor did not create or edit them.
+Part C (checked by the executor after "signed", without simulation and without editing; throwaway script outside the repository; file sha256 at the time of the check:
+  research-run-1-v2-3-0-authorization-trend-pullback.json  2cc93deeb7b6165ae836e230e9ff5472d102c2d3875d686c5a2e89ca013d541f
+  research-run-1-v2-3-0-authorization-breakout-retest.json d48002561d2e688c2d0300acd20940b52f0acca7a494b1c384232bc27ed6b2c2
+  research-run-1-v2-3-0-authorization-range-mr.json        08ec473023d9d1419a963f4998e941dcf3085424c003a2f9434b25f2a178e4ec)
+pass: manifest hash recomputed equals recorded (16-46-hashes.txt)
+pass: SIMULATOR_SEMANTICS_VERSION is '2.3.0'
+pass: trend-pullback: UTF-8 JSON, LF, trailing newline
+pass: trend-pullback: six keys in order
+pass: trend-pullback: grid hash recomputed equals recorded
+pass: trend-pullback: file binds its own grid hash and the manifest hash
+pass: trend-pullback: does not carry the breakout-retest grid hash
+pass: trend-pullback: does not carry the range-mr grid hash
+pass: trend-pullback: version 2.3.0
+pass: trend-pullback: authorized_by Tung Dao
+pass: trend-pullback: authorized_at_utc 2026-10-17T14:54:52+00:00
+pass: trend-pullback: load_authorization accepts and require_authorized passes against the real manifest and grid (no simulation)
+pass: trend-pullback: statement names the owner's script, the owner's words and the confirmation; it does not credit the agent as writer
+pass: trend-pullback: statement holds the owner's words
+pass: trend-pullback: statement records the owner's HEAD be98fd93ee0c7b7fd01ba39fb90cb25dd8d60cdc
+pass: trend-pullback: the file is not yet tracked (the executor commits it unchanged, by explicit path)
+pass: breakout-retest: UTF-8 JSON, LF, trailing newline
+pass: breakout-retest: six keys in order
+pass: breakout-retest: grid hash recomputed equals recorded
+pass: breakout-retest: file binds its own grid hash and the manifest hash
+pass: breakout-retest: does not carry the trend-pullback grid hash
+pass: breakout-retest: does not carry the range-mr grid hash
+pass: breakout-retest: version 2.3.0
+pass: breakout-retest: authorized_by Tung Dao
+pass: breakout-retest: authorized_at_utc 2026-10-17T14:54:52+00:00
+pass: breakout-retest: load_authorization accepts and require_authorized passes against the real manifest and grid (no simulation)
+pass: breakout-retest: statement names the owner's script, the owner's words and the confirmation; it does not credit the agent as writer
+pass: breakout-retest: statement holds the owner's words
+pass: breakout-retest: statement records the owner's HEAD be98fd93ee0c7b7fd01ba39fb90cb25dd8d60cdc
+pass: breakout-retest: the file is not yet tracked (the executor commits it unchanged, by explicit path)
+pass: range-mr: UTF-8 JSON, LF, trailing newline
+pass: range-mr: six keys in order
+pass: range-mr: grid hash recomputed equals recorded
+pass: range-mr: file binds its own grid hash and the manifest hash
+pass: range-mr: does not carry the trend-pullback grid hash
+pass: range-mr: does not carry the breakout-retest grid hash
+pass: range-mr: version 2.3.0
+pass: range-mr: authorized_by Tung Dao
+pass: range-mr: authorized_at_utc 2026-10-17T14:54:52+00:00
+pass: range-mr: load_authorization accepts and require_authorized passes against the real manifest and grid (no simulation)
+pass: range-mr: statement names the owner's script, the owner's words and the confirmation; it does not credit the agent as writer
+pass: range-mr: statement holds the owner's words
+pass: range-mr: statement records the owner's HEAD be98fd93ee0c7b7fd01ba39fb90cb25dd8d60cdc
+pass: range-mr: the file is not yet tracked (the executor commits it unchanged, by explicit path)
+pass: the three 2.2.0 files are byte-unchanged vs dce3195
+pass: the three five-key files and the frozen manifest are byte-unchanged vs 5f8269b
+pass: tracked files under docs/research/preregistration are unmodified
+pass: docs/research/experiments/research-run-1-v2-3-0/ still does not exist
+pass: docs/research/experiments/research-run-1-v2-2-0/ still does not exist
+RESULT: ALL PASS

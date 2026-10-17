@@ -1,0 +1,8 @@
+{
+  "grid_sha256": "2ed8577ea225b294eaaa82c4478fee6dbf2b3d5a76eca8f967b5d769171c4069",
+  "manifest_sha256": "ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569",
+  "authorized_at_utc": "2026-10-17T14:54:52+00:00",
+  "statement": "Research run 1 rerun under simulator_semantics_version 2.3.0 and protocol v2.6.0, grid breakout-retest, frozen manifest, 50-day price-only warm-up, no Holdout. File written by the owner's own script (.planning/phases/16-paper-runtime-composition/scripts/16-63-sign-authorizations.py, run by the owner at repository HEAD be98fd93ee0c7b7fd01ba39fb90cb25dd8d60cdc) on the owner's explicit decision (decisions/16-DEC-V260.md); the agent did not write this file. Owner's words: \"chọn A và đọc chặt, làm đi\". Typed confirmation: \"AUTHORIZE 2.3.0\".",
+  "authorized_by": "Tung Dao",
+  "simulator_semantics_version": "2.3.0"
+}
