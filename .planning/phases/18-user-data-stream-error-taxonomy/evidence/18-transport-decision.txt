@@ -1,0 +1,4 @@
+source: user-data-smoke-EVIDENCE-20261016T140446Z.json
+sdk_route_delivery: PASS
+criterion c: PASS (typed NEW and CANCELED via the SDK route)
+transport: sdk

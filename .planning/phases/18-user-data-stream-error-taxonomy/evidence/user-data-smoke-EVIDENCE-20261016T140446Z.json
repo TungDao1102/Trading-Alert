@@ -1,0 +1,314 @@
+{
+  "acceptance": {
+    "a": {
+      "proof_class": "REAL_SMOKE",
+      "reason": "the listenKey start passed",
+      "result": "PASS"
+    },
+    "b": {
+      "proof_class": "REAL_SMOKE",
+      "reason": "subscribed; private connections: 1",
+      "result": "PASS"
+    },
+    "c": {
+      "proof_class": "REAL_SMOKE",
+      "reason": "typed NEW and CANCELED via the SDK route",
+      "result": "PASS"
+    },
+    "d": {
+      "proof_class": "REAL_SMOKE",
+      "reason": "the keepalive passed",
+      "result": "PASS"
+    },
+    "e": {
+      "proof_class": "REAL_SMOKE",
+      "reason": "UNKNOWN, SYNCING, LIVE; gap_ms=1431",
+      "result": "PASS"
+    },
+    "f": {
+      "proof_class": "REAL_SMOKE",
+      "reason": "PUT after DELETE: outcome=ERROR, http_class=BAD_REQUEST, code=-1125, category=INVALID_LISTEN_KEY",
+      "result": "OBSERVED"
+    },
+    "g": {
+      "proof_class": "REAL_SMOKE",
+      "reason": "no key, secret, signature or listenKey found",
+      "result": "PASS"
+    },
+    "h": {
+      "proof_class": "REAL_SMOKE",
+      "reason": "the evidence passes check_smoke_evidence",
+      "result": "PASS"
+    }
+  },
+  "account_after": {
+    "open_algo_orders": 0,
+    "open_order_client_ids": [],
+    "open_orders": 0,
+    "positions": [],
+    "status": "PASSED"
+  },
+  "account_before": {
+    "dual_side_position": false,
+    "open_algo_orders": 0,
+    "open_order_client_ids": [],
+    "open_orders": 0,
+    "positions": [],
+    "status": "PASSED"
+  },
+  "binance_common_version": "4.4.0",
+  "delete_then_put": {
+    "category": "INVALID_LISTEN_KEY",
+    "code": -1125,
+    "delete_ok": true,
+    "http_class": "BAD_REQUEST",
+    "outcome": "ERROR",
+    "status": "PASSED"
+  },
+  "drift": {
+    "ahead_limit_ms": 500,
+    "behind_limit_ms": 1000,
+    "failure_type": null,
+    "measured_at_utc": "2026-10-16T14:04:46.684515+00:00",
+    "measurement_failed": false,
+    "offset_ms": -298,
+    "status": "PASSED",
+    "uncertainty_ms": 139,
+    "within_limits": true
+  },
+  "end_state": "FLAT",
+  "environment": "DEMO",
+  "events": [
+    {
+      "after_gap": false,
+      "client_order_id": "uds-smoke-20261016T140446Z",
+      "connection_epoch": 1,
+      "event_type": "ORDER_TRADE_UPDATE",
+      "execution_type": "NEW",
+      "is_smoke_order": true,
+      "order_status": "NEW",
+      "received_at_utc": "2026-10-16T14:04:49.207413+00:00",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "after_gap": false,
+      "client_order_id": "uds-smoke-20261016T140446Z",
+      "connection_epoch": 1,
+      "event_type": "ORDER_TRADE_UPDATE",
+      "execution_type": "CANCELED",
+      "is_smoke_order": true,
+      "order_status": "CANCELED",
+      "received_at_utc": "2026-10-16T14:04:49.299183+00:00",
+      "symbol": "BTCUSDT"
+    }
+  ],
+  "failures": [],
+  "finished_at_utc": "2026-10-16T14:04:51.221515+00:00",
+  "fixtures": {
+    "files": [
+      "execute-001-ORDER_TRADE_UPDATE.json",
+      "execute-002-ORDER_TRADE_UPDATE.json"
+    ],
+    "status": "PASSED"
+  },
+  "forced_drop": {
+    "dropped_at_utc": "2026-10-16T14:04:49.299469+00:00",
+    "gap_ms": 1431,
+    "method": "transport-drop",
+    "snapshot_count_after_drop": 1,
+    "state_sequence_after_drop": [
+      {
+        "at_utc": "2026-10-16T14:04:49.378293+00:00",
+        "reason": "CONNECTION_CLOSED",
+        "state": "UNKNOWN"
+      },
+      {
+        "at_utc": "2026-10-16T14:04:50.543967+00:00",
+        "reason": "SNAPSHOT",
+        "state": "SYNCING"
+      },
+      {
+        "at_utc": "2026-10-16T14:04:50.809513+00:00",
+        "reason": "SNAPSHOT_OK",
+        "state": "LIVE"
+      }
+    ],
+    "status": "PASSED"
+  },
+  "listen_key": {
+    "close_calls_ok": 1,
+    "errors": [],
+    "start_calls_ok": 1,
+    "status": "PASSED"
+  },
+  "log_scan": {
+    "captured_characters": 1329,
+    "findings": {
+      "api_key": 0,
+      "api_secret": 0,
+      "listen_key": 0,
+      "signature": 0
+    },
+    "status": "PASSED"
+  },
+  "mode": "execute",
+  "notes": [
+    "The account's listenKey is a singleton: no other process may run on the same account during the smoke (a DELETE ends the stream of every holder of the key, research P7)."
+  ],
+  "order": {
+    "client_order_id": "uds-smoke-20261016T140446Z",
+    "exchange_order_id": "28636495127",
+    "exchange_status": "NEW",
+    "far_price_fraction": "0.96",
+    "mark_price": "81952.77257246",
+    "notional": "62.939680",
+    "position_side": "BOTH",
+    "price": "78674.60",
+    "quantity": "0.0008",
+    "side": "BUY",
+    "status": "PASSED",
+    "time_in_force": "GTC",
+    "type": "LIMIT"
+  },
+  "outcome": "COMPLETE",
+  "proof_class": "REAL_SMOKE",
+  "schema": "user-data-smoke-evidence/schema-1",
+  "sdk_route_delivery": "PASS",
+  "sdk_version": "17.4.0",
+  "settings": {
+    "cleanup_timeout_seconds": 60,
+    "event_wait_seconds": 30,
+    "far_price_fraction": "0.96",
+    "limits_file": "binance-limits-v1.toml",
+    "limits_file_sha256": "9f522adcd35d56fa5dddbf79b42ab1f8c1d3f770bda7527caaf2cb28f8c43383",
+    "quantity": "0.0008",
+    "smoke_limits_file": "18-smoke-limits.toml",
+    "smoke_limits_file_sha256": "b4f592847112eb3ddd0645c11a243a93e8b441ca99b4b5bdb498b6eea2ec132d",
+    "transport": "sdk"
+  },
+  "started_at_utc": "2026-10-16T14:04:46.405981+00:00",
+  "state_sequence": [
+    {
+      "at_utc": "2026-10-16T14:04:47.462926+00:00",
+      "reason": "START",
+      "state": "CONNECTING"
+    },
+    {
+      "at_utc": "2026-10-16T14:04:48.748601+00:00",
+      "reason": "SNAPSHOT",
+      "state": "SYNCING"
+    },
+    {
+      "at_utc": "2026-10-16T14:04:49.036082+00:00",
+      "reason": "SNAPSHOT_OK",
+      "state": "LIVE"
+    },
+    {
+      "at_utc": "2026-10-16T14:04:49.378293+00:00",
+      "reason": "CONNECTION_CLOSED",
+      "state": "UNKNOWN"
+    },
+    {
+      "at_utc": "2026-10-16T14:04:50.543967+00:00",
+      "reason": "SNAPSHOT",
+      "state": "SYNCING"
+    },
+    {
+      "at_utc": "2026-10-16T14:04:50.809513+00:00",
+      "reason": "SNAPSHOT_OK",
+      "state": "LIVE"
+    },
+    {
+      "at_utc": "2026-10-16T14:04:51.145566+00:00",
+      "reason": "STOP",
+      "state": "STOPPED"
+    }
+  ],
+  "steps": [
+    {
+      "detail": "limits loaded; environment guard; drift within limits; filters",
+      "name": "preflight",
+      "status": "PASSED"
+    },
+    {
+      "detail": "flat: no open order, no algo order, no position",
+      "name": "account_before",
+      "status": "PASSED"
+    },
+    {
+      "detail": "listenKey started; SDK user_data subscribed; stream LIVE",
+      "name": "stream_start",
+      "status": "PASSED"
+    },
+    {
+      "detail": "PUT /fapi/v1/listenKey returned",
+      "name": "keepalive",
+      "status": "PASSED"
+    },
+    {
+      "detail": "one far LIMIT BUY placed",
+      "name": "order_place",
+      "status": "PASSED"
+    },
+    {
+      "detail": "typed ORDER_TRADE_UPDATE NEW delivered through the SDK user_data route",
+      "name": "order_new_event",
+      "status": "PASSED"
+    },
+    {
+      "detail": "the far order was cancelled (or was already absent)",
+      "name": "order_cancel",
+      "status": "PASSED"
+    },
+    {
+      "detail": "typed ORDER_TRADE_UPDATE CANCELED delivered through the SDK user_data route",
+      "name": "order_canceled_event",
+      "status": "PASSED"
+    },
+    {
+      "detail": "UNKNOWN, snapshot, LIVE after the drop",
+      "name": "forced_drop",
+      "status": "PASSED"
+    },
+    {
+      "detail": "flat: no open order, no algo order, no position",
+      "name": "account_after",
+      "status": "PASSED"
+    },
+    {
+      "detail": "stopped with close_listen_key=True; PUT after DELETE observed",
+      "name": "stop_and_delete_then_put",
+      "status": "PASSED"
+    },
+    {
+      "detail": "no key, secret, signature or listenKey in the captured logs or the evidence",
+      "name": "log_scan",
+      "status": "PASSED"
+    },
+    {
+      "detail": "scrubbed, written atomically to a new name and re-scanned after the write",
+      "name": "evidence_write",
+      "status": "PASSED"
+    }
+  ],
+  "stream_failures": [],
+  "subscription": {
+    "connection_count": 3,
+    "private_connection_count": 1,
+    "status": "PASSED",
+    "subscribed": true,
+    "transport": "sdk"
+  },
+  "symbol": "BTCUSDT",
+  "symbol_filters": {
+    "max_quantity": "1000",
+    "min_notional": "50",
+    "min_quantity": "0.0001",
+    "percent_price_multiplier_down": "0.9500",
+    "percent_price_multiplier_up": "1.0500",
+    "price_tick_size": "0.10",
+    "quantity_step_size": "0.0001",
+    "status": "PASSED",
+    "symbol_status": "TRADING"
+  }
+}

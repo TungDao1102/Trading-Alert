@@ -1,0 +1,8 @@
+[order]
+symbol = "BTCUSDT"
+quantity = "0.0008"
+far_price_fraction = "0.96"
+
+[waits]
+event_wait_seconds = 30
+cleanup_timeout_seconds = 60
