@@ -1,9 +1,11 @@
-"""Design test 10: simulator semantics 2.2.0 moves only version-derived values (nnl-07, 16-60).
+"""Design test 10: simulator semantics 2.3.0 moves only version-derived values (nnl-07, 16-63).
 
-The terminal settlement (D070) moved SIMULATOR_SEMANTICS_VERSION from 2.0.0 to 2.1.0, and the
-research warm-up (plan 16-60, D073) moved it from 2.1.0 to 2.2.0. For a case without
-`terminal_settlements` and without warm-up input (the engine itself is unchanged by both bumps)
-nothing but the version string and the ids hashed from it may move: every other trade field,
+The terminal settlement (D070) moved SIMULATOR_SEMANTICS_VERSION from 2.0.0 to 2.1.0, the
+research warm-up (plan 16-60, D073) moved it from 2.1.0 to 2.2.0, and the TP2 positivity rule of
+the planner (plan 16-63, D075) moved it from 2.2.0 to 2.3.0. For a case without
+`terminal_settlements`, without warm-up input and without a plan whose TP2 is not a positive
+price (the engine itself is unchanged by all three bumps) nothing but the version string and the
+ids hashed from it may move: every other trade field,
 every counter and every note stays byte-identical, and the run summary gains no
 `settlement_count` key.
 
@@ -11,8 +13,9 @@ The reference outputs are not stored: they are recomputed here with the constant
 each earlier version in every module that binds it by name, and their sha256 is checked against
 the values the approved regeneration inventories recorded before the bump
 (`.planning/phases/16-paper-runtime-composition/evidence/16-S-B-interval-regen-inventory.md`,
-section 3, for 2.0.0, and `.../16-60-regen-inventory.md`, section 3, for 2.1.0). The test reads
-only committed case builders and those recorded hashes.
+section 3, for 2.0.0, `.../16-60-regen-inventory.md`, section 3, for 2.1.0 and the 2.2.0 values
+of its section 3, and `.../16-63-regen-inventory.md` for the 2.2.0 capture under the guard). The
+test reads only committed case builders and those recorded hashes.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ from tests.test_backtest_engine import tracer_case
 from tests.test_backtest_engine_strategy import trigger_case
 
 OLD_VERSION = "2.1.0"
-NEW_VERSION = "2.2.0"
+NEW_VERSION = "2.3.0"
 
 # sha256 of the output of an earlier version, serialized as json.dumps(sort_keys, (",", ":"),
 # ensure_ascii), recorded in the approved inventory (section 3) before each constant bump.
@@ -46,6 +49,12 @@ INVENTORY_SHA256 = {
         "scripted_tracer": "8b9b0d596afb78d863e526dfd394e0f306c754871e27c3dff0272a4f6c76e320",
         "strategy_trigger_no_declaration": (
             "6130a3dd9102a16928a1692acde7c164f5a0b3b1e147a53f939f99801c2c1e87"
+        ),
+    },
+    "2.2.0": {
+        "scripted_tracer": "e97d716138bb97e870aa8c28f1abf78db759a8c3266298c9306fc5e9e774c817",
+        "strategy_trigger_no_declaration": (
+            "95a35ac1bc44e883bc7ad62841774bdbabeb0c23881854d23d8cb70aaf59f5be"
         ),
     },
 }
@@ -76,7 +85,7 @@ def _run_under(monkeypatch: pytest.MonkeyPatch, version: str, name: str) -> dict
     return _run(name)
 
 
-def test_semantics_version_is_2_2_0() -> None:
+def test_semantics_version_is_2_3_0() -> None:
     assert semantics.SIMULATOR_SEMANTICS_VERSION == NEW_VERSION
     for module in BINDING_MODULES:
         assert module.SIMULATOR_SEMANTICS_VERSION == NEW_VERSION

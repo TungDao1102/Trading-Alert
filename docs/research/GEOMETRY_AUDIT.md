@@ -45,6 +45,8 @@ Line numbers refer to the code before Phase 15 (`src/core/strategy.py`, `src/cor
 | C | stop | S3 zone invalidation outside the range edge | `zone_lower - sl_buffer`, about 0.2 ATR from the entry reference (planner.py:145, 194) | Stop beyond the far edge of the narrow S/R zone around the range edge, then `sl_buffer_atr` x ATR; must satisfy the shared stop invariant Implemented in `_range_mr_geometry` (src/core/planner.py) from the `sr_far_edge` of `_detect_range_mr_levels`. | FIX | D-22, D-23 |
 | C | target | T-mid: take profit at the range midpoint (Stage C baseline) | The opposite boundary (`zone_upper` for LONG, `zone_lower` for SHORT), which is the sheet's T-opposite variant (planner.py:146, 195) | Optional key `tp_mode` with T_MID for the Stage C set; T_OPPOSITE stays as the named variant that needs its own parameter set later Implemented in `_range_mr_geometry` (src/core/planner.py), `tp_mode` T_MID. | FIX | D-10, D-25 |
 
+**Addendum (protocol v2.6.0, D075).** The target rows above define TP2 as entry +/- 2 x (TP1 - entry) without a positivity condition. For a SHORT whose TP1 lies at or below half of the entry reference that value is not a price (the 2.2.0 rerun of research run 1 stopped on research-run-1-a01, 1000PEPEUSDT, with TP2 -0.0015481). Since protocol v2.6.0 the planner returns NO_TRADE with the existing reason RR_TOO_LOW for a plan whose TP2 is not above zero after storage quantization; the table above is unchanged, and the TP1 definition and the TP2 formula are unchanged.
+
 ## Leakage verdicts (D-13)
 
 Question: does any detector let the evaluated bar (the last closed bar n-1) feed the reference level that it is then compared with? Family A leaks (see the `level` row, features.py:187). Families B and C do not.

@@ -1,5 +1,9 @@
 """Pins for research protocol v2.5.0 (D073, D074): warm-up history for research windows.
 
+Version-tolerant since plan 16-63 (protocol v2.6.0, D075): the header check reads "at least v2.5.0",
+the marker must equal the header version, and the v2.5.0 witnesses (text, rows D073 and D074,
+migration paragraph, log line) are kept unchanged.
+
 Plan 16-60. The amendment changes how a research window is built (candle history loaded before
 its start, indicators only) and moves `SIMULATOR_SEMANTICS_VERSION` from 2.1.0 to 2.2.0. These
 tests pin the user's adopted text byte for byte (read from the decision record, with the one
@@ -78,13 +82,21 @@ def _supersession_paragraph() -> str:
 # --------------------------------------------------------------------------- #
 
 
-def test_the_header_reads_v250_frozen_amended_on_the_landing_date() -> None:
+def _header_version() -> tuple[int, int, int]:
+    match = re.search(r"^> \*\*Protocol version:\*\* v(\d+)\.(\d+)\.(\d+)", _protocol(), re.M)
+    assert match is not None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+def test_the_header_is_at_least_v250_frozen_amended_on_the_landing_date() -> None:
     lines = _protocol().splitlines()
-    assert "> **Protocol version:** v2.5.0" in lines
+    assert _header_version() >= (2, 5, 0)
     assert "> **Status:** FROZEN" in lines
     assert "> **Frozen on:** 2026-09-19" in lines  # unchanged: the D013 clock is not restarted
     assert f"> **Amended on:** {LANDING_DATE}" in lines
-    assert "> **Supersedes:** v2.4.0" in lines
+    # the v2.5.0 log line keeps its Supersedes statement (the header moved on with v2.6.0)
+    log = [ln for ln in _protocol().splitlines() if ln.startswith("- **v2.5.0 - ")]
+    assert len(log) == 1 and "`Supersedes: v2.4.0`" in log[0]
 
 
 def test_the_adopted_v250_text_is_present_byte_for_byte_except_the_row_label() -> None:
@@ -165,9 +177,13 @@ def test_doc_status_index_line_and_log_line_name_v250_d073_and_d074() -> None:
     lines = _read(DOC_STATUS).splitlines()
     index = [ln for ln in lines if ln.startswith("- `research/RESEARCH_PROTOCOL.md`")]
     assert len(index) == 1
-    assert "v2.5.0" in index[0] and "D073" in index[0]
+    assert "D073" in index[0]
     assert f"amended {LANDING_DATE}" in index[0]
-    log = [ln for ln in lines if ln.startswith(f"- {LANDING_DATE} ") and "v2.5.0" in ln]
+    log = [
+        ln
+        for ln in lines
+        if ln.startswith(f"- {LANDING_DATE} ") and "v2.5.0 semantic amendment per D073" in ln
+    ]
     assert len(log) == 1
     assert "D073" in log[0] and "D074" in log[0]
     assert "RESEARCH_PROTOCOL.md" in log[0]
@@ -175,7 +191,12 @@ def test_doc_status_index_line_and_log_line_name_v250_d073_and_d074() -> None:
 
 def test_the_holdout_marker_changed_only_its_protocol_version_and_stays_empty() -> None:
     marker = json.loads(_read(MARKER))
-    assert marker == {"schema": "holdout-consumed/2", "protocol_version": "v2.5.0", "entries": []}
+    major, minor, patch = _header_version()
+    assert marker == {
+        "schema": "holdout-consumed/2",
+        "protocol_version": f"v{major}.{minor}.{patch}",
+        "entries": [],
+    }
 
 
 # --------------------------------------------------------------------------- #

@@ -23,7 +23,11 @@ from decimal import Decimal
 # price, time, cost, count or event moved (2.0.0 at the time; the version moved to 2.1.0 with the
 # terminal settlement, D070). 2.2.0 (plan 16-60, D073) adds the research warm-up span below: for a
 # case without warm-up input nothing but the version string and the ids hashed from it moves.
-SIMULATOR_SEMANTICS_VERSION = "2.2.0"
+# 2.3.0 (plan 16-63, D075) adds the planner rule that a plan whose TP2 is not a positive price
+# is NO_TRADE RR_TOO_LOW; for input where no plan has such a TP2 nothing but the version string
+# and the ids hashed from it moves. A new NO_TRADE outcome moves counts and events, so the
+# annotate-only exception above does not apply and the version moved.
+SIMULATOR_SEMANTICS_VERSION = "2.3.0"
 
 # D-27 (resolved by the user 2026-10-04): TP1 closes half the position. A code constant
 # covered by SIMULATOR_SEMANTICS_VERSION, NOT a registry tunable; no params/ file changes.

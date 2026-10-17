@@ -1,0 +1,72 @@
+16-63 Task 1 RED evidence (tracer + TDD): a SHORT whose TP2 is not a positive price
+================================================================================
+
+base commit 3550d9c14565c517c88d5d1f972b05c5a070716d
+tree: develop, working tree without any change to src/ (planner unmodified at the RED run)
+test file: tests/test_planner_tp2_positive.py (14 tests collected)
+
+command: .venv/Scripts/python -m pytest tests/test_planner_tp2_positive.py -q -p no:cacheprovider -rf
+exit code: 1
+result: 4 failed, 10 passed (all 4 failures are on the planned behaviour, none is an import
+error, fixture crash or zero-tests-collected)
+
+Failing tests and the assertion or exception text of each
+---------------------------------------------------------
+1. test_a_short_whose_tp2_is_negative_is_no_trade_rr_too_low (Test 1)
+   tests/test_planner_tp2_positive.py:146
+   AssertionError: assert False is True
+   where False = PlanResult(is_no_trade=False, trade_plan=TradePlan(... 'READY'>, ...), reason_code='OK').is_no_trade
+   (plan() returned a READY TradePlan whose take_profit_json holds tp2 "-1.940000000000000000"
+   instead of NO_TRADE RR_TOO_LOW.)
+
+2. test_a_tp2_of_exactly_zero_is_no_trade (Test 3, zero side)
+   tests/test_planner_tp2_positive.py:175
+   AssertionError: assert False is True
+   where False = PlanResult(is_no_trade=False, trade_plan=TradePlan(... 'READY'>, ...), reason_code='OK').is_no_trade
+   (plan() returned a READY TradePlan with tp2 "0E-18".)
+
+3. test_the_engine_counts_the_guarded_plan_as_a_reject_and_does_not_raise (Test 6)
+   src\backtest\exits.py:285: ValueError:
+   take_profit_json tp2 must be a positive finite price, got '-1.940000000000000000'
+   (the same exception text as the 2.2.0 rerun of plan 16-61: simulate -> _evaluate_strategy ->
+   _size_and_register -> protective_levels_for_fill -> take_profit_levels; the expected outcome is
+   one REJECT record with reason RR_TOO_LOW and run_summary.no_trade_counts["RR_TOO_LOW"] == 1.)
+
+4. test_the_paper_bar_chain_ends_at_the_planner_for_the_guarded_plan (Test 7, lowered bar)
+   tests/test_planner_tp2_positive.py:363
+   AssertionError: assert 'risk_passed' == 'planner'
+   (the lowered SHORT bar goes through the planner and the risk pipeline and ends risk_passed with
+   a TP2 below zero; the expected stage is "planner" with reason RR_TOO_LOW.)
+
+Tests that hold at RED (and must hold after GREEN)
+--------------------------------------------------
+Test 2 (origin witness: -0.001548100000000000), Test 3 just-below side (TP2 0.01, a TradePlan with
+tp2_rr), Test 4 (long and unlowered short plan_hash), Test 5 (geometry rejection stays first and once),
+Test 6 unlowered half (still fills), Test 7 unlowered half (goes past the planner), Test 8
+(take_profit_levels still refuses tp2 -1.94, 0 and 0E-18 with "positive finite price").
+
+Hand values reproduced by the unmodified code (scratch run, same recipe as the tests)
+--------------------------------------------------------------------------------------
+fixture                         lowering  entry_ref  TP1   TP2                 result today
+intrabar_both_touched (LONG)    0         117.8      123.2 128.6               plan, plan_hash below
+intrabar_both_touched_short     0         132.2      126.8 121.4               plan, plan_hash below
+intrabar_both_touched_short     123.34    8.86       3.46  -1.94               plan (the defect)
+intrabar_both_touched_short     121.4     10.8       5.4   0E-18               plan (the defect, boundary)
+intrabar_both_touched_short     121.39    10.81      5.41  0.01                plan (valid)
+
+plan_hash literals printed by the UNMODIFIED code (pinned in Test 4, never typed)
+-----------------------------------------------------------------------------------
+intrabar_both_touched (LONG)        e461c438d12c68f6551fd013207b76450a54666ec43abae72854130891974d9f
+intrabar_both_touched_short         6cdec18c121d7df8e4bd67f696084c96098d06f0e2a05cf59d5a10ea2792d843
+
+RED gate record
+---------------
+`gsd_run check tdd-red-evidence <record.json>` exists and was run on the persisted record
+(command, exit code 1, junit output of the RED run, target test
+test_a_short_whose_tp2_is_negative_is_no_trade_rr_too_low): verdict RED_EVIDENCE_OK, reason
+target_test_failed, 14 tests, 10 pass, 4 fail, failing tests the four named above.
+Tool note: the checker's Surefire parser reads the testcase name with the pattern name="..." and
+finds it inside classname="..." of pytest's junit attribute order (classname before name), which
+reports every failing test under its class name and gives INVALID_RED / no_target_test_failure.
+The record was therefore given to the checker with the two attributes of each <testcase>
+swapped (name before classname), a mechanical reorder of the same junit file, no value changed.

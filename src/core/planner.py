@@ -415,6 +415,10 @@ def plan(
     the entry zone (STOP_TOO_TIGHT), a signal bar already through the stop (INVALIDATED) or a
     TP1 on the loss side (RR_TOO_LOW). A legacy Family A set therefore still emits its signal
     but never a plan; a legacy B/C plan that satisfies the invariants keeps its plan_hash.
+
+    TP2 must be a positive price after storage quantization; it can only fail for a SHORT whose
+    TP1 is at or below half of entry_ref, and the reason is the existing RR_TOO_LOW (owner
+    decision of 2026-10-17, Option A; the TP1 and TP2 definitions are unchanged).
     """
     # Signal-vs-candles correspondence (CR-08/WR-14) — before touching
     # setup_candles[0], so an empty stream returns NO_TRADE (CR-02).
@@ -624,6 +628,17 @@ def plan(
     else:
         tp2 = quantize_for_storage(_sub(entry_ref, _mul(_q("2"), tp1_leg)))
         tp2_leg = _sub(entry_ref, tp2)
+
+    # TP2 must be a positive price after storage quantization (owner decision of 2026-10-17,
+    # Option A). Only a SHORT can fail: its TP2 is entry_ref - 2 * tp1_leg, which is not above
+    # zero when TP1 sits at or below half of entry_ref; a LONG TP2 is entry_ref plus a positive
+    # leg. The reason is the existing RR_TOO_LOW; no other plan changes.
+    if tp2 <= Decimal("0"):
+        return PlanResult(
+            is_no_trade=True,
+            trade_plan=None,
+            reason_code=RejectionReason.RR_TOO_LOW.value,
+        )
 
     # RR gate — TP1 is structure-derived, so this gate can fire (CR-03).
     realized_rr = _div(tp1_leg, risk)

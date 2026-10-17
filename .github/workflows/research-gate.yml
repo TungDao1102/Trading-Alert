@@ -77,7 +77,7 @@ jobs:
         id: identity
         run: |
           set -eu
-          # The seven required identity fields per docs/research/RESEARCH_PROTOCOL.md §5 (v2.5.0) and docs/configuration/CONFIGURATION.md §7.
+          # The seven required identity fields per docs/research/RESEARCH_PROTOCOL.md §5 (v2.6.0) and docs/configuration/CONFIGURATION.md §7.
           REQUIRED=(strategyVersion parameterSetId parameterSetHash dataSnapshotId dataManifestHash codeVersion costModelHash)
 
           # Locate experiment and backtest record files (JSON or YAML) anywhere in the repo.

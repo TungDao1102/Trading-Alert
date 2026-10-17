@@ -151,7 +151,7 @@ def _cost_model() -> CostModel:
 
 def test_phase_constants_pin_the_user_resolved_tp1_policy() -> None:
     assert Decimal("0.5") == TP1_QUANTITY_FRACTION
-    assert SIMULATOR_SEMANTICS_VERSION == "2.2.0"
+    assert SIMULATOR_SEMANTICS_VERSION == "2.3.0"
     assert POSITION_MODE == "ONE_WAY"
 
 

@@ -7,8 +7,8 @@ the frozen research protocol (v1.0.1, since superseded by the v1.1.0 semantic
 amendment D043, then by the v2.0.0 simulator-semantics amendment D052, the v2.1.0
 G5 floor D060, the v2.2.0 experiment-identity amendment D067, the v2.3.0
 constraint-assumption and cross-family multiplicity amendments D068 and D069 and the
-v2.4.0 terminal-settlement amendment D070 and the v2.5.0 research warm-up amendment D073) and the
-DOC_STATUS index.
+v2.4.0 terminal-settlement amendment D070, the v2.5.0 research warm-up amendment D073 and the
+v2.6.0 take-profit plan validity amendment D075) and the DOC_STATUS index.
 
 These tests make that reconciliation regress-proof and re-implement the three
 research-gate witnesses from ``.github/workflows/research-gate.yml`` so an
@@ -78,7 +78,7 @@ PINNED_PROTOCOL_LINES = (
     "> **Status:** FROZEN",
     "> **Frozen on:** 2026-09-19",
 )
-EXPECTED_SUPERSEDES = "v2.4.0"
+EXPECTED_SUPERSEDES = "v2.5.0"
 D043_ROW_PREFIX = "| D043 | Research protocol v1.1.0 frozen | Accepted"
 D029_ROW_PREFIX = "| D029 | Research protocol v1.0.0 frozen | Accepted |"
 
@@ -309,9 +309,9 @@ def test_g1_and_g5_sentences_are_byte_identical_to_the_base() -> None:
     assert G5_SENTENCE in lines
 
 
-def test_header_version_is_the_d073_amendment() -> None:
-    """The header version equals the freeze row of the latest amendment (D073 is v2.5.0)."""
-    assert _header_version() == "v2.5.0"
+def test_header_version_is_the_d075_amendment() -> None:
+    """The header version equals the freeze row of the latest amendment (D075 is v2.6.0)."""
+    assert _header_version() == "v2.6.0"
 
 
 def test_doc_status_line_not_pending() -> None:
@@ -330,6 +330,7 @@ def test_doc_status_line_not_pending() -> None:
     assert "D069" in index_lines[0]
     assert "D070" in index_lines[0]
     assert "D073" in index_lines[0]
+    assert "D075" in index_lines[0]
     for ln in lines:
         assert not W2_PENDING.search(ln), f"pending marker on DOC_STATUS line: {ln!r}"
 

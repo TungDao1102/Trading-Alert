@@ -317,39 +317,39 @@ REGRESSION_SNAPSHOTS: dict[str, tuple[tuple[str, str | None, bool, int], str]] =
     # name: ((entry_kind, exit_kind, fallback_applied, touch_no_fill_count), digest)
     "intrabar_both_touched": (
         ("ENTRY_FILLED", "SL", False, 0),
-        "d680ad5c27b7fdb9282fed770d248a1afd4fd1d80d80d969cd53318363edf7c6",
+        "7a2d1cefc3233d8151de5ae288557ec6ddb64fbf185e87d03d9d04b4fbd4f5e3",
     ),
     "intrabar_both_touched_short": (
         ("ENTRY_FILLED", "SL", False, 0),
-        "9d3b70d6b873b5b2b50726ddf08f7552200c8276c736d897e3c727211ca64426",
+        "db4d29381258a4a487ce728d05a1ca346d57b8deb6be2fba7b65830575b21acc",
     ),
     "intrabar_missing_fallback": (
         ("ENTRY_FILLED", "SL", True, 0),
-        "f15cf66d1a9d44183135973206de38a54bf112fcc6d11f6d208576cd9066c92a",
+        "3faad7cf6914f29951ec5e25b248f385e823bf9f896f9dffc8f81c06a06ee45f",
     ),
     "limit_touch_no_fill": (
         ("EXPIRED", None, False, 3),
-        "895714437aee40eda63f1c31be3eadbb32f15e553e87cced900a2826c27e1117",
+        "3199a5d9a54bfead8efa53bbfa69ee8e8379f60e05bf174d8df6ea28658d7399",
     ),
     "limit_partial_fill": (
         ("PARTIAL_FILL", "TP2", False, 0),
-        "b9e0894ee38f0f10478f3b4779f1a6ffa24c9baedbeb9ca11e5affe4445b5816",
+        "6d50561ace4a46c6b91a0324010ef922f442e8e6a0f19db0366d5b133409133e",
     ),
     "limit_expiry": (
         ("EXPIRED", None, False, 0),
-        "8659ac4b3eb923796be57243009f5852834e0c822ceb90fcb8c9370a3a8974f2",
+        "682dccafffe97dcffcb702da38e292d49923d562f36dc0349e6c307d7c8df3f4",
     ),
     "invalidation_cancels_entry": (
         ("INVALIDATION_CANCEL", None, False, 0),
-        "1bd01918f0ce151205b2225fb58381c2704f4f690ea2f4115c8665d9b4bf914a",
+        "41cd67566f3b2d58bc71bf58aba87d8e3c9b2c0af0733bc7c41129a5f7dda030",
     ),
     "baselines/no_trade": (
         ("REJECT", None, False, 0),
-        "9196d272105b43c7215cb66e9a1d76f66e997e2151ff71f32a288708632caaae",
+        "6989a2407e9f30d54e999cffe233a4be3f9b7cec56d98b6727ebd3f1a265efe2",
     ),
     "baselines/simple_trend": (
         ("ENTRY_FILLED", "SL", False, 0),
-        "8eafebff30096d51d8657ae6f98aaa1806209dddd8966bdfe1a339fbd5bb5995",
+        "07473f67f123e49dae223ad5f019b1ab10eb9db78c76a8690f19663768a4e6be",
     ),
 }
 

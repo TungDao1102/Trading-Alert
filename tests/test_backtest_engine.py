@@ -166,7 +166,7 @@ def test_output_carries_summary_hashes_and_symbols() -> None:
     assert len(output["cost_model_hash"]) == 64
     summary = output["run_summary"]
     assert summary["plan_source"] == "SCRIPTED"
-    assert summary["simulator_semantics_version"] == SIMULATOR_SEMANTICS_VERSION == "2.2.0"
+    assert summary["simulator_semantics_version"] == SIMULATOR_SEMANTICS_VERSION == "2.3.0"
     assert summary["no_trade_counts"] == {}
     assert summary["allowed_gaps_used"] == []
     # The whole output is canonical-JSON safe.
