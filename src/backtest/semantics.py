@@ -21,8 +21,9 @@ from decimal import Decimal
 # for input with such a hole only the `coverage_note` text moves, and with it the trade payload
 # bytes and the hashes derived from them, while the version stayed 2.0.0 at the time because no
 # price, time, cost, count or event moved (2.0.0 at the time; the version moved to 2.1.0 with the
-# terminal settlement, D070).
-SIMULATOR_SEMANTICS_VERSION = "2.1.0"
+# terminal settlement, D070). 2.2.0 (plan 16-60, D073) adds the research warm-up span below: for a
+# case without warm-up input nothing but the version string and the ids hashed from it moves.
+SIMULATOR_SEMANTICS_VERSION = "2.2.0"
 
 # D-27 (resolved by the user 2026-10-04): TP1 closes half the position. A code constant
 # covered by SIMULATOR_SEMANTICS_VERSION, NOT a registry tunable; no params/ file changes.
@@ -48,6 +49,17 @@ FUNDING_JITTER = timedelta(seconds=60)
 # D-31: the strategy front-end is windowed (1h bars about 1,000, 4h bars about 300).
 STRATEGY_WINDOW_BARS = 1000
 CONTEXT_WINDOW_BARS = 300
+
+# Plan 16-60 (review finding B3-CR-01, 16-DEC-V250 item 1, 16-DEC-FIXPLANS.md 16-60 Q0): the candle
+# history a research window is built with BEFORE its start, for the indicators only (no signal is
+# evaluated before the window start, no Holdout day is ever part of it, and it never starts before
+# the dataset start). STRUCTURAL: it is not a tuned number; it is the whole-day ceiling of the span
+# that fills the engine's two windows above, max(1000 x 1 h, 300 x 4 h) = 1200 h = 50 days, the same
+# depth the paper REST warm-up loads (`src/paper/restart.py`). A code constant covered by
+# SIMULATOR_SEMANTICS_VERSION (it moved to 2.2.0 with it), NOT a registry tunable.
+RESEARCH_WARMUP_SPAN = timedelta(
+    days=-(-max(STRATEGY_WINDOW_BARS * 1, CONTEXT_WINDOW_BARS * 4) // 24)
+)
 
 # D-01/D-34: terminal outcomes of a resting entry. `TOUCH_NO_FILL` is a per-plan counter
 # on the record, never a terminal kind.

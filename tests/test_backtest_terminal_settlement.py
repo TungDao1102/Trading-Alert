@@ -197,7 +197,7 @@ def test_vocabulary_constants_are_pinned() -> None:
     assert semantics.SETTLEMENT_NOTE_PREFIX == "terminal_settlement"
     assert EXIT_SETTLEMENT in EXIT_KINDS
     assert semantics.SETTLEMENT_CANCEL in semantics.ENTRY_KINDS
-    assert semantics.SIMULATOR_SEMANTICS_VERSION == "2.1.0"
+    assert semantics.SIMULATOR_SEMANTICS_VERSION == "2.2.0"
 
 
 def test_tracer_open_long_settles_at_price_lower_at_the_terminal_instant() -> None:

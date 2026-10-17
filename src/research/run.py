@@ -6,7 +6,10 @@ parameter-set check, constraint-file check, terminal-settlement evidence check (
 refuses), dataset-identity check, then for every grid point
 and every development / validation-fold window: case input from the published store,
 `simulator.run`, `read_code_version`, `experiment.assemble`, one experiment record file named
-by its `experiment_id`. The holdout is never simulated here. The runner prints one neutral
+by its `experiment_id`. The holdout is never simulated here. Each case is built with
+`RESEARCH_WARMUP_SPAN` of candle history before its window (plan 16-60, B3-CR-01, indicators
+only; the Development window starts cold because the data begins at `development_start_utc`,
+and the runner prints one neutral `warmup` line saying so). The runner prints one neutral
 line per record (identifiers; a trade count unless `--checkpoint-dir` is given, which prints
 `recorded` or `present` lines instead), then the G1 feasibility counts per grid point
 (plan 16-12, reporting only), then the parameter-plateau section over the grid (plan 16-18,
@@ -23,6 +26,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from time import perf_counter
@@ -32,6 +36,7 @@ from src.adapters.code_version import read_code_version
 from src.backtest import simulator
 from src.backtest.costs import build_cost_model, cost_slice
 from src.backtest.experiment import ExperimentRecord, assemble
+from src.backtest.semantics import RESEARCH_WARMUP_SPAN
 from src.data.case_input import ENGINE_SERIES, build_case_input_data
 from src.data.minute_source import ParquetMinuteSource
 from src.domain.canonical import canonical_decimal_text
@@ -276,6 +281,28 @@ def _check_manifest_against_store(manifest: DatasetManifest, raw_root: Path) -> 
         )
 
 
+def warmup_start(manifest: DatasetManifest, window: SplitWindow) -> datetime:
+    """The first day of candle history a window is built with (plan 16-60, B3-CR-01).
+
+    `RESEARCH_WARMUP_SPAN` before the window start, never before `development_start_utc`: the
+    dataset starts there, so the Development window gets no history (it starts cold) and a
+    fold gets as much as exists up to the span. The end of the history is the window start:
+    the warm-up never reaches the window end, let alone the Holdout.
+    """
+    return max(window.start_utc - RESEARCH_WARMUP_SPAN, manifest.development_start_utc)
+
+
+def _cold_start_lines(manifest: DatasetManifest) -> list[str]:
+    """One neutral line per window that gets no warm-up history (the Development window)."""
+    return [
+        f"warmup span_days={RESEARCH_WARMUP_SPAN.days} window={window.role} "
+        f"split_start_utc={window.start_utc.isoformat()} starts cold: no data exists before "
+        f"development_start_utc={manifest.development_start_utc.isoformat()}"
+        for window in research_splits(manifest)
+        if warmup_start(manifest, window) == window.start_utc
+    ]
+
+
 def _simulate_split(
     *,
     manifest: DatasetManifest,
@@ -287,15 +314,18 @@ def _simulate_split(
 ) -> tuple[str, dict[str, Any]]:
     """The heavy part of one window: the case from the published store and the simulator output.
 
-    Returns the case `dataset_id` and the engine output; `_assemble_split` turns them into the
-    experiment record.
+    The case holds the candle history of `warmup_start` before the window (indicators only,
+    B3-CR-01); its `data_window` and the minute source stay at the window, and the engine
+    evaluates no signal before the window start. Returns the case `dataset_id` (it covers the
+    warm-up days and the window days) and the engine output; `_assemble_split` turns them into
+    the experiment record.
     """
     parameter_set = load_parameter_set(grid.strategy_id, point.parameter_set_id)
     cost_dict = {key: str(value) for key, value in cost_slice(parameter_set.params).items()}
     data = build_case_input_data(
         raw_root,
         symbols=list(manifest.symbols),
-        start_utc=window.start_utc,
+        start_utc=warmup_start(manifest, window),
         end_utc=window.end_utc,
         as_of_day_utc=manifest.validation_end_utc.date(),
         strategy_interval=manifest.strategy_interval,
@@ -308,6 +338,7 @@ def _simulate_split(
         {"terminal_settlements": settlement_rows} if settlement_rows else {}
     )
     case = data.to_case_input(
+        data_window_start_utc=window.start_utc,
         strategy_id=grid.strategy_id,
         strategy_version=parameter_set.strategy_version,
         parameter_set_id=point.parameter_set_id,
@@ -592,6 +623,8 @@ def run_research(
             f"{code_version.commit}-dirty" if code_version.dirty else code_version.commit
         ),
     }
+    for line in _cold_start_lines(manifest):
+        print(line, flush=True)
     records: list[ExperimentRecord] = []
     trade_lists: list[list[dict[str, Any]]] = []
     timing_lines: list[str] = []

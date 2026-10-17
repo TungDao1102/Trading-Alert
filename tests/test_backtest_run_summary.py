@@ -164,7 +164,7 @@ def test_run_facts_echo_the_protocol_constants_and_the_inputs() -> None:
     assert summary["context_timeframe"] == "4h"
     assert summary["strategy_window_bars"] == 1000
     assert summary["context_window_bars"] == 300
-    assert summary["simulator_semantics_version"] == SIMULATOR_SEMANTICS_VERSION == "2.1.0"
+    assert summary["simulator_semantics_version"] == SIMULATOR_SEMANTICS_VERSION == "2.2.0"
     assert summary["plan_source"] == "SCRIPTED"
     assert summary["dataset_id"] == DATASET_ID
     assert summary["data_window"] == {

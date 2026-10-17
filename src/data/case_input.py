@@ -221,8 +221,16 @@ class CaseInputData:
     allowed_gaps: tuple[GapRange, ...]
     with_minute_rows: bool = False
 
-    def to_case_input(self, **scenario: Any) -> dict[str, Any]:
+    def to_case_input(
+        self, *, data_window_start_utc: datetime | None = None, **scenario: Any
+    ) -> dict[str, Any]:
         """Return the case-input v2 dict: builder keys plus `scenario`.
+
+        `data_window_start_utc` (plan 16-60, B3-CR-01) moves only the `data_window.start_utc` of
+        the case: the bars the case holds start at the range the data was built with (the
+        warm-up history), while the window the engine simulates, records and reports starts
+        later. It must be UTC-aware and lie in `[start_utc, end_utc)`; left out, the window is
+        the built range, exactly as before.
 
         A scenario key that collides with a builder key is refused: the store owns the
         market data, the caller owns the strategy identity and the account, cost and
@@ -240,6 +248,19 @@ class CaseInputData:
                 f"the dataset was built without the series {missing} the engine reads, so its "
                 "dataset_id does not cover them; rebuild with every engine series"
             )
+        window_start = self.start_utc
+        if data_window_start_utc is not None:
+            if (
+                not isinstance(data_window_start_utc, datetime)
+                or data_window_start_utc.tzinfo is None
+                or data_window_start_utc.utcoffset() != timedelta(0)
+            ):
+                raise CaseInputError("data_window_start_utc must be a UTC-aware datetime")
+            if not self.start_utc <= data_window_start_utc < self.end_utc:
+                raise CaseInputError(
+                    "data_window_start_utc must lie in [start_utc, end_utc) of the built range"
+                )
+            window_start = data_window_start_utc
         built: dict[str, Any] = {
             "case_input_schema": CASE_INPUT_SCHEMA,
             "symbols": list(self.symbols),
@@ -247,7 +268,7 @@ class CaseInputData:
             "context_bars": [dict(b) for b in self.context_bars],
             "funding": [dict(r) for r in self.funding],
             "data_window": {
-                "start_utc": self.start_utc.isoformat(),
+                "start_utc": window_start.isoformat(),
                 "end_utc": self.end_utc.isoformat(),
             },
             "dataset_id": self.dataset_id,
