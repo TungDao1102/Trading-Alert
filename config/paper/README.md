@@ -39,7 +39,7 @@ Grace of the freeze check (REV-02, REV-18), one sentence per line:
 - `minute_poll_interval_seconds` - period of the REST minute poll.
 - `minute_close_lag_seconds` - how long after a minute closes it is read (strictly positive, like every integer of the file; owner: `16-DEC-CLOSE-LAG-ZERO`).
 - `healthcheck_max_bar_age_seconds` - oldest bar the container healthcheck still accepts.
-- `rest_backfill_depth_bars` - unit: bars; how many bars a REST backfill reads.
+- `rest_backfill_depth_bars` - unit: bars; the most closed bars, per symbol and interval, that one REST backfill of the supervisor requests (after an SDK reconnect, after a drop and rebuild, and once after start); when more closes are missing only the newest that many are requested and every older missing close is recorded as a gap with the reason of the window being verified; backfilled bars are history only and never evaluated (Q-D); the restart warm-up (1000 bars of 1h, 300 bars of 4h) is structural and not governed by this key; the value 1500 is ratified (16-DEC-O-07) and consumed by the code since plan 16-62 (16-DEC-FIXPLANS.md).
 
 ### `[account]` (owner: O-07; exact decimals written as strings)
 
