@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
-current_plan: "62 with Total Plans in Phase: 62 — 58 with a SUMMARY (open: 16-43, 16-44, 16-60, 16-61; next is 16-60 and 16-43, then 16-61 and 16-44)"
+current_plan: "62 with Total Plans in Phase: 62 — 59 with a SUMMARY (open: 16-43, 16-44, 16-61; next is 16-43, then 16-61 and 16-44)"
 status: executing
-stopped_at: Completed 16-62-PLAN.md
-last_updated: "2026-10-17T01:59:21.337Z"
+stopped_at: Completed 16-60-PLAN.md
+last_updated: "2026-10-17T03:38:46.723Z"
 last_activity: 2026-10-15
 last_activity_desc: Phase 16 execution started
-state_head: 7af241b65003fbcfba7178a3e1f8488a0754f6a2
+state_head: 76b1da05738dfd4b418f8fc0b493cccf9ed05639
 progress:
   total_phases: 29
   completed_phases: 17
   total_plans: 231
-  completed_plans: 220
+  completed_plans: 221
 milestone_name: milestone
 ---
 
@@ -32,7 +32,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
-Current Plan: 62 with Total Plans in Phase: 62 — 58 with a SUMMARY (open: 16-43, 16-44, 16-60, 16-61; next is 16-60 and 16-43, then 16-61 and 16-44)
+Current Plan: 62 with Total Plans in Phase: 62 — 59 with a SUMMARY (open: 16-43, 16-44, 16-61; next is 16-43, then 16-61 and 16-44)
 Status: Executing Phase 16
 Last activity: 2026-10-15 — REEFUSDT terminal settlement as a bounded interval landed (quick 261014-nnl: simulator 2.1.0, protocol v2.4.0 D070/D071); REEF diagnostic on the new code: 48 of 48 points run (old: 33 FundingCoverageError). Manifest NOT frozen, O-03 to be re-issued, S0/S1 manifests need the REEF terminal_settlements row
 
@@ -42,6 +42,7 @@ Progress: [██████░░░░] 61%
 
 - Phase 18 (user-data stream and error taxonomy): offline plans 18-01..18-17, 18-23 and 18-24 are done and merged into develop (merge 6610bd6, not pushed; the DECISIONS row is D072). Open: 18-18 (live Demo smoke) and 18-20 (Demo probe) need the owner with BINANCE_DEMO_API_KEY/SECRET and approved order limits; 18-19 only if 18-18 needs the direct transport; 18-21, 18-22, 18-25 follow the live evidence. The owner finishes Phase 18 on another machine, then reviews the code. A green full-suite run of the merged tree exists since 16-58 (see the line below); the Phase 18 live checks are still open.
 - Phase 16 fix plans: 16-55, 16-56, 16-57, 16-58 and 16-59 done on develop (owner decisions in 16-DEC-FIXPLANS.md; 16-57 adds 16-DEC-CONFIG-PIN; 16-58 fixed the SHADOW lock order, refusal of unsizable plans, data-horizon expiry, midnight roll, unknown-append reconcile, per-press replies and the dispatch error log; 16-59 added the as-of export with partial-bundle refusal, per-bundle create-only evidence keys, the merged freeze log with missing-tick records, the workflow concurrency group with queue max and the dispositions in deferred-items.md). The blocking set 16-55 to 16-59 is green on GATE_COMMIT a54f9da47ca8b7b7c6c2488b0d8cb67b506f4ba0 (evidence/16-59-gate.txt); the soak image is NOT built from it, plan 16-62 records the image commit. Plan 16-62 (B1-WR-09) is done: rest_backfill_depth_bars (1500, v2 file unchanged) now bounds every supervisor REST backfill, newest closes first, older missing closes are recorded gaps with the window reason; the soak image is built from IMAGE_COMMIT efae1f3efe3211f75f94e165e5d1c9956b20a6f1 (evidence/16-62-gate.txt, full suite 10118 ran, 10112 passed, 6 skipped, 0 failed; ruff, ruff format, mypy src and uv lock --check clean); the targeted re-review of c654524..efae1f3 is still to run before anything is pushed or merged. Next in order: 16-60 and 16-43, then 16-61 and 16-44. Phase 16's new DECISIONS rows are D073 (protocol v2.5.0 warm-up amendment) and D074 (regeneration inventory), because Phase 18 took D072.
+- Plan 16-60 done on develop (2026-10-17, landing commit c96fa0d, gate commit 76b1da0): research windows get a 50-day price-only warm-up (`RESEARCH_WARMUP_SPAN`), simulator semantics 2.2.0, protocol v2.5.0 with DECISIONS D073 and D074 (the Phase 18 row D072 keeps its number); the Development window starts cold (data begins 2024-10-03); the 240 records of run 1 are unchanged and superseded by D074. Full suite at the landing: 10145 ran, 10139 passed, 6 skipped, 0 failed; ruff, ruff format, mypy src and `uv lock --check` clean. Next: 16-43 (host/owner), then 16-61 (sixth authorization key, three new authorization files, the rerun into `research-run-1-v2-2-0`) and 16-44. BKTS-03 stays open (requirements.ready-ids: blocked).
 - Full suite after 16-59 (2026-10-16, GATE_COMMIT a54f9da): `pytest -m "not docker"` 10099 ran, 10093 passed, 6 skipped, 0 failed; ruff, ruff format, mypy src and `uv lock --check` clean. Earlier, after 16-58: 10071 collected, 10065 passed, 6 skipped, 0 failed. In that shell TEST_DATABASE_URL was set and the PostgreSQL tests ran (tests/test_paper_shadow_runtime_pg.py passed 3 of 3).
 - Remaining for Phase 23 from 16-58: a distinct canonical rejection reason for store failures (INVALIDATED covers them now, with an error log line by class name).
 - Owner actions pending: second soak backup bucket with its own crypt passwords; second heartbeat check (period 60 s, grace 120 s) and its secret URL (before 16-43); BINANCE_DEMO_* keys and run limits (before 18-18); confirm the PostgreSQL tests run on the owner machine (see .planning/WINDOWS.md; they ran in the 16-58 session).
@@ -229,6 +230,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P58 | 70 min | 4 tasks | 12 files |
 | Phase 16 P59 | not measured (suite 15 min) | 4 tasks | 15 files |
 | Phase 16 P62 | not measured (two full suites of 15 min) | 3 tasks | 11 files |
+| Phase 16 P60 | 3h | 4 tasks | 33 files |
 
 ## Accumulated Context
 
@@ -551,6 +553,8 @@ Recent decisions affecting current work:
 - [Phase 16]: [16-59] The freeze log is the union of every run artifact deduplicated by (run_id, run_attempt), originals kept, each tick without a usable line recorded as a missing tick; workflow concurrency with queue max (16-DEC-FREEZE-LOG-ASSEMBLY, Q2 = B)
 - [Phase 16]: [16-59] An export is judged as of an instant and an hourly bundle is partial: the trial evaluator refuses to judge a bundle whose as_of_utc is before window end plus the ratified grace (B2-WR-06)
 - [Phase 16]: 16-62: rest_backfill_depth_bars is a required keyword through build_supervisor into backfill_missed_closes; closes beyond the depth are gaps with the window reason (B1-WR-09)
+- [Phase 16]: 16-60: research windows are built with RESEARCH_WARMUP_SPAN (50 days, STRUCTURAL) of price history before their start; simulator semantics 2.2.0; protocol v2.5.0 with D073 and D074 (B3-CR-01); the Development window starts cold (data begins 2024-10-03)
+- [Phase 16]: 16-60: the original 240 research records stay unchanged and are superseded by the rerun under 2.2.0 (D074, owner's wording); rerun directory research-run-1-v2-2-0 and a sixth authorization key are implemented by 16-61
 
 ### Pending Todos
 
@@ -634,6 +638,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-17T01:59:05.635Z
-Stopped at: Completed 16-62-PLAN.md
+Last session: 2026-10-17T03:38:46.326Z
+Stopped at: Completed 16-60-PLAN.md
 Resume file: None
