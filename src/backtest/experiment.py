@@ -1081,6 +1081,15 @@ def trades_digest(trades: Sequence[Any]) -> str:
     return sha256_hex({"trades": [t.to_dict() for t in trades]})
 
 
+def trades_digest_of_output(trades: Sequence[dict[str, Any]]) -> str:
+    """`trades_digest` of the `trades` of one engine output (plan 16-61, B3-WR-02).
+
+    The trade dicts are rebuilt as typed `TradeRecord`s exactly as `reproduce` rebuilds them, so
+    the digest a runner stores equals the digest `verify_experiment` recomputes.
+    """
+    return trades_digest([_trade_from_dict(t) for t in trades])
+
+
 def stored_trades_digest(record: ExperimentRecord) -> str | None:
     """The persisted `trades_digest` of `record`, or None when it carries none."""
     return _stored_trades_digest(record)
@@ -1227,5 +1236,6 @@ __all__ = [
     "reproduce",
     "stored_trades_digest",
     "trades_digest",
+    "trades_digest_of_output",
     "verify_experiment",
 ]

@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 from src.backtest import simulator
 from src.backtest.experiment import CodeVersion
+from src.backtest.semantics import SIMULATOR_SEMANTICS_VERSION
 from src.data.case_input import ENGINE_SERIES, build_case_input_data
 from src.research import run as research_run
 from src.research.authorization import (
@@ -103,7 +104,7 @@ def _manifest(store: Path, directory: Path, **overrides: Any) -> DatasetManifest
         "known_gaps": (),
         "equity": Decimal("1000"),
         "risk_rate": Decimal("0.005"),
-        "constraint_source": str(constraints_path),
+        "constraint_source": constraints_path.name,
         "constraint_sha256": constraints_sha,
     }
     fields.update(overrides)
@@ -129,6 +130,7 @@ def _authorization(manifest: DatasetManifest, grid: ParameterGrid, **overrides: 
         "authorized_at_utc": datetime(2026, 10, 9, tzinfo=UTC),
         "statement": "synthetic test authorization",
         "authorized_by": "synthetic test user",
+        "simulator_semantics_version": SIMULATOR_SEMANTICS_VERSION,
     }
     fields.update(overrides)
     return RunAuthorization(**fields)
@@ -202,7 +204,8 @@ def test_manifest_and_grid_hashes_are_canonical_and_change_with_any_field(
     assert re.fullmatch(r"[0-9a-f]{64}", gdigest)
     point = grid.points[0]
     assert grid_hash(ParameterGrid("range-mr", grid.points)) != gdigest
-    assert grid_hash(ParameterGrid(grid.strategy_id, (point, point))) != gdigest
+    twin = dataclasses.replace(point, parameter_set_id="baseline-v6", varied=(("minimum_rr", "3"),))
+    assert grid_hash(ParameterGrid(grid.strategy_id, (point, twin))) != gdigest
     other = dataclasses.replace(point, parameter_set_hash="2" * 64)
     assert grid_hash(ParameterGrid(grid.strategy_id, (other,))) != gdigest
     varied = dataclasses.replace(point, varied=(("minimum_rr", "3"),))
@@ -264,7 +267,7 @@ def test_authorized_run_writes_one_record_per_split_and_no_verdict(
         authorization=_authorization(manifest, grid),
         raw_root=store,
         output_dir=out,
-        repo_root=REPO_ROOT,
+        repo_root=tmp_path,
     )
 
     assert len(records) == 5
@@ -309,7 +312,7 @@ def test_run_without_authorization_is_refused_before_simulate(
             authorization=None,
             raw_root=store,
             output_dir=tmp_path / "experiments",
-            repo_root=REPO_ROOT,
+            repo_root=tmp_path,
         )
     assert excinfo.value.reason == "missing"
     assert spies.windows == []
@@ -337,7 +340,7 @@ def test_mismatched_authorization_is_refused_before_simulate(
             authorization=authorization,
             raw_root=store,
             output_dir=tmp_path / "experiments",
-            repo_root=REPO_ROOT,
+            repo_root=tmp_path,
         )
     assert spies.windows == []
 
@@ -356,7 +359,7 @@ def test_runner_never_simulates_the_holdout(store: Path, tmp_path: Path, spies: 
         authorization=_authorization(manifest, grid),
         raw_root=store,
         output_dir=tmp_path / "experiments",
-        repo_root=REPO_ROOT,
+        repo_root=tmp_path,
     )
     assert len(spies.windows) == 5
     for start, end in spies.windows:
@@ -375,7 +378,7 @@ def test_run_rejects_a_dataset_id_that_does_not_match_the_files(
             authorization=_authorization(manifest, grid),
             raw_root=store,
             output_dir=tmp_path / "experiments",
-            repo_root=REPO_ROOT,
+            repo_root=tmp_path,
         )
     assert spies.windows == []
 
@@ -395,7 +398,7 @@ def test_run_rejects_a_grid_point_whose_registered_hash_differs(
             authorization=_authorization(manifest, bad),
             raw_root=store,
             output_dir=tmp_path / "experiments",
-            repo_root=REPO_ROOT,
+            repo_root=tmp_path,
         )
     assert spies.windows == []
 
@@ -457,6 +460,7 @@ def _auth_json(manifest: DatasetManifest, grid: ParameterGrid, **overrides: Any)
         "authorized_at_utc": "2026-10-09T00:00:00Z",
         "statement": "synthetic test authorization",
         "authorized_by": "synthetic test user",
+        "simulator_semantics_version": SIMULATOR_SEMANTICS_VERSION,
     }
     fields.update(overrides)
     return fields
@@ -469,6 +473,7 @@ def _write_json(path: Path, payload: Any) -> Path:
 
 class _Inputs:
     def __init__(self, directory: Path, manifest: DatasetManifest, grid: ParameterGrid) -> None:
+        self.directory = directory
         self.manifest = manifest
         self.grid = grid
         self.manifest_path = _write_json(directory / "manifest.json", _manifest_json(manifest))
@@ -477,9 +482,12 @@ class _Inputs:
 
 
 @pytest.fixture
-def inputs(store: Path, tmp_path: Path) -> _Inputs:
+def inputs(store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Inputs:
+    """The inputs directory is the repository root of the run: the manifest names its constraint
+    file relative to it and the runner only accepts the root the code was imported from."""
     directory = tmp_path / "inputs"
     directory.mkdir()
+    monkeypatch.setattr(research_run, "_REPO_ROOT", directory.resolve())
     return _Inputs(directory, _manifest(store, directory), _grid())
 
 
@@ -500,7 +508,7 @@ def _argv(
         "--output-dir",
         str(out),
         "--repo-root",
-        str(REPO_ROOT),
+        str(inputs.directory),
     ]
     chosen = inputs.auth_path if authorization == "default" else authorization
     if chosen is not None:
@@ -516,6 +524,7 @@ def test_authorization_file_parses_into_a_run_authorization(inputs: _Inputs) -> 
         authorized_at_utc=datetime(2026, 10, 9, tzinfo=UTC),
         statement="synthetic test authorization",
         authorized_by="synthetic test user",
+        simulator_semantics_version=SIMULATOR_SEMANTICS_VERSION,
     )
 
 
@@ -527,6 +536,8 @@ def test_authorization_file_parses_into_a_run_authorization(inputs: _Inputs) -> 
         {"authorized_at_utc": None},
         {"statement": None},
         {"authorized_by": None},
+        {"simulator_semantics_version": None},
+        {"simulator_semantics_version": ""},
         {"grid_sha256": "abc"},
         {"manifest_sha256": "A" * 64},
         {"authorized_at_utc": "2026-10-09T00:00:00"},
@@ -709,7 +720,7 @@ def test_rerun_of_a_recorded_experiment_is_refused_and_never_overwritten(
             authorization=_authorization(inputs.manifest, inputs.grid),
             raw_root=store,
             output_dir=out,
-            repo_root=REPO_ROOT,
+            repo_root=inputs.directory,
         )
     assert main(_argv(inputs, store, out)) == 2
     assert "experiment_already_recorded" in capsys.readouterr().err
@@ -726,7 +737,7 @@ def test_rerun_with_one_existing_record_writes_no_new_file(
         authorization=_authorization(inputs.manifest, inputs.grid),
         raw_root=store,
         output_dir=first,
-        repo_root=REPO_ROOT,
+        repo_root=inputs.directory,
     )
     out = tmp_path / "partial"
     out.mkdir()
@@ -740,7 +751,7 @@ def test_rerun_with_one_existing_record_writes_no_new_file(
             authorization=_authorization(inputs.manifest, inputs.grid),
             raw_root=store,
             output_dir=out,
-            repo_root=REPO_ROOT,
+            repo_root=inputs.directory,
         )
     assert _tree_digest(out) == before
 

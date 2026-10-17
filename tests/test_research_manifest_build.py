@@ -15,6 +15,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from src.backtest.semantics import SIMULATOR_SEMANTICS_VERSION
 from src.data.case_input import ENGINE_SERIES, TerminalDeclaration, build_case_input_data
 from src.research import run as research_run
 from src.research.authorization import RunAuthorization, require_authorized
@@ -323,6 +324,7 @@ def test_authorization_hash_and_identity_manifest_value_are_the_same_object(
         authorized_at_utc=datetime(2026, 10, 15, tzinfo=UTC),
         statement="synthetic test authorization",
         authorized_by="synthetic test user",
+        simulator_semantics_version=SIMULATOR_SEMANTICS_VERSION,
     )
     require_authorized(authorization, manifest=manifest, grid=grid)
     assert authorization.manifest_hash == inputs["data_manifest_hash"]

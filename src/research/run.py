@@ -6,7 +6,10 @@ parameter-set check, constraint-file check, terminal-settlement evidence check (
 refuses), dataset-identity check, then for every grid point
 and every development / validation-fold window: case input from the published store,
 `simulator.run`, `read_code_version`, `experiment.assemble`, one experiment record file named
-by its `experiment_id`. The holdout is never simulated here. Each case is built with
+by its `experiment_id`. The holdout is never simulated here. Each record carries the digest of
+its window's trades in `result_summary_json` (plan 16-61, B3-WR-02), the constraint file is
+read relative to the repository root (B3-WR-03), and `main` refuses a `--repo-root` that is
+not the tree the code was imported from (B3-WR-04). Each case is built with
 `RESEARCH_WARMUP_SPAN` of candle history before its window (plan 16-60, B3-CR-01, indicators
 only; the Development window starts cold because the data begins at `development_start_utc`,
 and the runner prints one neutral `warmup` line saying so). The runner prints one neutral
@@ -35,7 +38,7 @@ from typing import Any
 from src.adapters.code_version import read_code_version
 from src.backtest import simulator
 from src.backtest.costs import build_cost_model, cost_slice
-from src.backtest.experiment import ExperimentRecord, assemble
+from src.backtest.experiment import ExperimentRecord, assemble, trades_digest_of_output
 from src.backtest.semantics import RESEARCH_WARMUP_SPAN
 from src.data.case_input import ENGINE_SERIES, build_case_input_data
 from src.data.minute_source import ParquetMinuteSource
@@ -96,8 +99,31 @@ def experiment_identity_inputs(manifest: DatasetManifest, dataset_id: str) -> di
     return {"data_snapshot_id": dataset_id, "data_manifest_hash": manifest_hash(manifest)}
 
 
-def _load_constraints(manifest: DatasetManifest) -> list[dict[str, Any]]:
-    path = Path(manifest.constraint_source)
+def _confined_path(repo_root: Path, relative: str, label: str) -> Path:
+    """`repo_root / relative`, resolved, refused unless it stays under the resolved `repo_root`.
+
+    An absolute, drive-qualified or parent-relative `relative` is refused as well. Messages name
+    the field (`label`) only.
+    """
+    root = repo_root.resolve()
+    target = (root / relative).resolve()
+    rooted_elsewhere = (
+        PurePosixPath(relative).is_absolute()
+        or PureWindowsPath(relative).is_absolute()
+        or PureWindowsPath(relative).drive != ""
+    )
+    if rooted_elsewhere or not target.is_relative_to(root):
+        raise ManifestError(f"{label} path resolves outside the repository root")
+    return target
+
+
+def _load_constraints(manifest: DatasetManifest, repo_root: Path) -> list[dict[str, Any]]:
+    """The constraint rows of the manifest's symbols, read from `repo_root / constraint_source`.
+
+    The path is relative to the repository root (the manifest builder resolves it the same way),
+    never to the process cwd, and confined to the root (B3-WR-03).
+    """
+    path = _confined_path(repo_root, manifest.constraint_source, "constraint source")
     try:
         raw = path.read_bytes()
     except OSError as exc:
@@ -163,15 +189,7 @@ def _evidence_bytes(repo_root: Path, evidence: EvidenceFile, label: str) -> byte
 
     Messages name the field (`label`) only; file content is never echoed.
     """
-    root = repo_root.resolve()
-    target = (root / evidence.path).resolve()
-    rooted_elsewhere = (
-        PurePosixPath(evidence.path).is_absolute()
-        or PureWindowsPath(evidence.path).is_absolute()
-        or PureWindowsPath(evidence.path).drive != ""
-    )
-    if rooted_elsewhere or not target.is_relative_to(root):
-        raise ManifestError(f"{label} path resolves outside the repository root")
+    target = _confined_path(repo_root, evidence.path, label)
     try:
         raw = target.read_bytes()
     except OSError as exc:
@@ -356,6 +374,15 @@ def _simulate_split(
     return data.dataset_id, simulator.run(case, minute_source=source)
 
 
+def _result_summary_json(output: dict[str, Any]) -> str:
+    """The record's `result_summary_json`: the digest of the window's trades (B3-WR-02).
+
+    `verify_experiment` compares it with the digest of a reproduction, and the byte comparison
+    of an existing record file (`_write_point_records`) covers the trades through it.
+    """
+    return _canonical_json({"trades_digest": trades_digest_of_output(output["trades"])})
+
+
 def _assemble_split(
     *,
     manifest: DatasetManifest,
@@ -385,6 +412,7 @@ def _assemble_split(
         split_role=window.role,
         split_start_utc=window.start_utc,
         split_end_utc=window.end_utc,
+        result_summary_json=_result_summary_json(output),
         **identity,
     )
     return record, list(output["trades"])
@@ -600,7 +628,7 @@ def run_research(
     """
     require_authorized(authorization, manifest=manifest, grid=grid)
     _check_grid_is_registered(grid)
-    constraints = _load_constraints(manifest)
+    constraints = _load_constraints(manifest, repo_root)
     check_terminal_settlement_evidence(manifest, repo_root)
     _check_manifest_against_store(manifest, raw_root)
     if checkpoint_dir is not None:
@@ -812,11 +840,16 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="user-committed authorization JSON (grid_sha256, manifest_sha256, "
-        "authorized_at_utc, statement, authorized_by)",
+        "authorized_at_utc, statement, authorized_by, simulator_semantics_version)",
     )
     parser.add_argument("--raw-root", type=Path, required=True, help="published data root")
     parser.add_argument("--output-dir", type=Path, required=True, help="experiment record dir")
-    parser.add_argument("--repo-root", type=Path, default=_REPO_ROOT, help="git repository root")
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=_REPO_ROOT,
+        help="git repository root; must be the tree this code was imported from",
+    )
     parser.add_argument(
         "--checkpoint-dir",
         type=Path,
@@ -834,11 +867,31 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _is_import_root(repo_root: Path) -> bool:
+    """True when `repo_root` is the directory the running code was imported from (B3-WR-04)."""
+    try:
+        return os.path.samefile(repo_root, _REPO_ROOT)
+    except OSError:
+        return False
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entrypoint: refuse (exit 2, cause on stderr) unless the authorization file binds the
-    grid and manifest hashes of the files re-read from disk right now (REV-04, REV-05).
+    grid and manifest hashes of the files re-read from disk right now (REV-04, REV-05), and the
+    simulator semantics version of the code that runs.
+
+    `--repo-root` must be the tree the code was imported from, so `code_version`, the dirty
+    check and the constraint and evidence files all describe the code and inputs that run; any
+    other root is refused before anything is read, simulated or written.
     """
     args = _parser().parse_args(argv)
+    if not _is_import_root(args.repo_root):
+        print(
+            "run refused: repo_root_mismatch: --repo-root is not the repository root the "
+            "running code was imported from",
+            file=sys.stderr,
+        )
+        return EXIT_REFUSED
     try:
         authorization = (
             load_authorization(args.authorization) if args.authorization is not None else None

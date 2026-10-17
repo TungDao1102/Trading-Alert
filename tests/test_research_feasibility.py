@@ -177,7 +177,7 @@ def test_run_research_appends_feasibility_and_leaves_records_unchanged(
         authorization=_authorization(manifest, grid),
         raw_root=store,
         output_dir=out,
-        repo_root=REPO_ROOT,
+        repo_root=tmp_path,
     )
     stdout = capsys.readouterr().out
     assert "feasibility parameter_set_id=baseline-v5" in stdout
@@ -255,7 +255,7 @@ def test_run_research_prints_the_g5_line_once_and_never_requests_a_holdout_split
         authorization=_authorization(manifest, grid),
         raw_root=store,
         output_dir=tmp_path / "experiments",
-        repo_root=REPO_ROOT,
+        repo_root=tmp_path,
     )
     stdout = capsys.readouterr().out
     assert stdout.splitlines().count(G5_LINE) == 1

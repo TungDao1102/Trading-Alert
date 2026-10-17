@@ -180,7 +180,7 @@ def test_run_research_prints_plateau_after_feasibility_and_leaves_records_unchan
         authorization=_authorization(manifest, grid),
         raw_root=store,
         output_dir=out,
-        repo_root=REPO_ROOT,
+        repo_root=tmp_path,
     )
     lines = capsys.readouterr().out.splitlines()
     g5 = lines.index("G5 floor not assessed (holdout untouched)")
@@ -281,7 +281,7 @@ def test_run_research_prints_the_mark_hole_count_and_the_cost_limitation(
         authorization=_authorization(manifest, grid),
         raw_root=store,
         output_dir=tmp_path / "experiments",
-        repo_root=REPO_ROOT,
+        repo_root=tmp_path,
     )
     stdout = capsys.readouterr().out
     lines = stdout.splitlines()

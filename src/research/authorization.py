@@ -1,7 +1,9 @@
 """The research-run authorization guard (D-25, REV-04, REV-05, T-16-14).
 
 A research run starts only when a user-written authorization binds BOTH the parameter-grid
-hash and the dataset-manifest hash the runner is about to use. `require_authorized` raises
+hash and the dataset-manifest hash the runner is about to use, and names the simulator
+semantics version the code carries (owner decision 16-60 Q4 = B: a file name or a date is a
+human convention, a required key is machine-enforced). `require_authorized` raises
 `RunNotAuthorized` (naming the cause) before any simulation, code-version read or file
 write. What the authorization says and when it is written belong to the user (O-03).
 """
@@ -12,6 +14,8 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+
+from src.backtest.semantics import SIMULATOR_SEMANTICS_VERSION
 
 from .manifest import DatasetManifest, ParameterGrid, grid_hash, manifest_hash
 
@@ -26,17 +30,26 @@ class RunNotAuthorized(Exception):  # noqa: N818 - the name is the plan's public
 
 @dataclass(frozen=True)
 class RunAuthorization:
-    """What the user recorded: the exact grid and manifest hashes, when, and a statement."""
+    """What the user recorded: the exact grid and manifest hashes, when, a statement, and the
+    simulator semantics version the authorization was written for."""
 
     grid_hash: str
     manifest_hash: str
     authorized_at_utc: datetime
     statement: str
     authorized_by: str
+    simulator_semantics_version: str
 
 
 _AUTHORIZATION_KEYS = frozenset(
-    {"grid_sha256", "manifest_sha256", "authorized_at_utc", "statement", "authorized_by"}
+    {
+        "grid_sha256",
+        "manifest_sha256",
+        "authorized_at_utc",
+        "statement",
+        "authorized_by",
+        "simulator_semantics_version",
+    }
 )
 
 
@@ -54,8 +67,9 @@ def load_authorization(path: Path) -> RunAuthorization:
     """Read the user-committed authorization file (checkpoint O-03a, option a).
 
     The file is a JSON object with exactly `grid_sha256` and `manifest_sha256` (64 lowercase
-    hex), `authorized_at_utc` (ISO-8601 with a UTC offset), `statement` and `authorized_by`
-    (non-empty strings). An absent or unreadable file is `RunNotAuthorized("missing")`;
+    hex), `authorized_at_utc` (ISO-8601 with a UTC offset), `statement`, `authorized_by` and
+    `simulator_semantics_version` (non-empty strings). A file with the earlier five keys is
+    malformed: it can start no run. An absent or unreadable file is `RunNotAuthorized("missing")`;
     anything else wrong with it is `RunNotAuthorized("malformed")`.
     """
     try:
@@ -70,7 +84,7 @@ def load_authorization(path: Path) -> RunAuthorization:
         raise RunNotAuthorized("malformed")
     if not (_is_hex64(payload["grid_sha256"]) and _is_hex64(payload["manifest_sha256"])):
         raise RunNotAuthorized("malformed")
-    for key in ("statement", "authorized_by"):
+    for key in ("statement", "authorized_by", "simulator_semantics_version"):
         value = payload[key]
         if not isinstance(value, str) or not value.strip():
             raise RunNotAuthorized("malformed")
@@ -89,6 +103,7 @@ def load_authorization(path: Path) -> RunAuthorization:
         authorized_at_utc=authorized_at,
         statement=payload["statement"],
         authorized_by=payload["authorized_by"],
+        simulator_semantics_version=payload["simulator_semantics_version"],
     )
 
 
@@ -98,13 +113,16 @@ def require_authorized(
     manifest: DatasetManifest,
     grid: ParameterGrid,
 ) -> None:
-    """Raise `RunNotAuthorized` unless the authorization binds this grid and this manifest."""
+    """Raise `RunNotAuthorized` unless the authorization binds this grid, this manifest and the
+    simulator semantics version of the code that is about to run."""
     if authorization is None:
         raise RunNotAuthorized("missing")
     if authorization.grid_hash != grid_hash(grid):
         raise RunNotAuthorized("grid_hash_mismatch")
     if authorization.manifest_hash != manifest_hash(manifest):
         raise RunNotAuthorized("manifest_hash_mismatch")
+    if authorization.simulator_semantics_version != SIMULATOR_SEMANTICS_VERSION:
+        raise RunNotAuthorized("simulator_semantics_version_mismatch")
 
 
 __all__ = ["RunAuthorization", "RunNotAuthorized", "load_authorization", "require_authorized"]

@@ -122,6 +122,28 @@ def _is_minute_aligned_utc(value: object) -> bool:
     )
 
 
+def _require_repo_relative_path(path: object, what: str) -> None:
+    """Refuse anything but a clean posix path relative to the repository root.
+
+    No backslash, drive, absolute form, `..`, `.`, empty segment or trailing slash: the path is
+    later joined to the repository root and must stay under it (B3-WR-03).
+    """
+    if (
+        not isinstance(path, str)
+        or not path
+        or "\\" in path
+        or PurePosixPath(path).as_posix() != path
+        or PurePosixPath(path).is_absolute()
+        or PureWindowsPath(path).is_absolute()
+        or PureWindowsPath(path).drive != ""
+        or ".." in PurePosixPath(path).parts
+    ):
+        raise ManifestError(
+            f"{what} must be a clean posix path relative to the repository root "
+            "(no backslash, drive, '..', '.', empty segment or trailing slash)"
+        )
+
+
 @dataclass(frozen=True)
 class EvidenceFile:
     """A committed evidence file: a posix repo-relative path and the sha256 of its bytes."""
@@ -130,21 +152,7 @@ class EvidenceFile:
     sha256: str
 
     def __post_init__(self) -> None:
-        path = self.path
-        if (
-            not isinstance(path, str)
-            or not path
-            or "\\" in path
-            or PurePosixPath(path).as_posix() != path
-            or PurePosixPath(path).is_absolute()
-            or PureWindowsPath(path).is_absolute()
-            or PureWindowsPath(path).drive != ""
-            or ".." in PurePosixPath(path).parts
-        ):
-            raise ManifestError(
-                "evidence path must be a clean posix path relative to the repository root "
-                "(no backslash, drive, '..', '.', empty segment or trailing slash)"
-            )
+        _require_repo_relative_path(self.path, "evidence path")
         _require_hex64(self.sha256, "evidence sha256")
 
     def canonical(self) -> dict[str, Any]:
@@ -363,6 +371,7 @@ class DatasetManifest:
             raise ManifestError("symbols must be unique")
         _require_hex64(self.dataset_id, "dataset_id")
         _require_hex64(self.constraint_sha256, "constraint_sha256")
+        _require_repo_relative_path(self.constraint_source, "constraint_source")
         bounds = (
             self.development_start_utc,
             self.development_end_utc,
@@ -499,6 +508,19 @@ class DatasetManifest:
         return out
 
 
+def _varied_identity(varied: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
+    """A varied tuple with numeric values in one spelling, so "2" and "2.0" are the same point."""
+    out: list[tuple[str, str]] = []
+    for key, value in varied:
+        try:
+            number = Decimal(value)
+        except InvalidOperation:
+            out.append((key, value))
+            continue
+        out.append((key, str(number.normalize()) if number.is_finite() else value))
+    return tuple(out)
+
+
 @dataclass(frozen=True)
 class GridPoint:
     """One registered parameter set of the grid and the keys it varies."""
@@ -530,6 +552,14 @@ class ParameterGrid:
     def __post_init__(self) -> None:
         if not self.strategy_id or not self.points:
             raise ManifestError("a grid needs a strategy_id and at least one point")
+        ids = [point.parameter_set_id for point in self.points]
+        if len(set(ids)) != len(ids):
+            raise ManifestError("grid has a duplicate parameter_set_id")
+        if len({tuple(key for key, _ in point.varied) for point in self.points}) != 1:
+            raise ManifestError("every grid point must vary the same keys in the same order")
+        tuples = [_varied_identity(point.varied) for point in self.points]
+        if len(set(tuples)) != len(tuples):
+            raise ManifestError("grid has a duplicate varied tuple")
 
     def canonical(self) -> dict[str, Any]:
         return {

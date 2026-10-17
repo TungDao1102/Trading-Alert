@@ -15,12 +15,13 @@ from typing import Any
 
 import pytest
 from src.backtest import simulator
-from src.domain.registry import load_parameter_set
+from src.backtest.experiment import CodeVersion
 from src.research import run as research_run
-from src.research.manifest import GridPoint, ParameterGrid
+from src.research.manifest import ParameterGrid, load_grid
 from src.research.run import CheckpointInvalid, ExperimentAlreadyRecorded, main, run_research
 
 from tests.test_research_runner import (  # noqa: F401 - fixtures are used by name
+    FAKE_COMMIT,
     REPO_ROOT,
     _argv,
     _authorization,
@@ -41,17 +42,15 @@ def _code_paths_clean(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _two_point_grid() -> ParameterGrid:
-    points = []
-    for set_id in ("baseline-v5", "baseline-v6"):
-        loaded = load_parameter_set("trend-pullback", set_id)
-        points.append(
-            GridPoint(
-                parameter_set_id=set_id,
-                parameter_set_hash=loaded.parameter_set_hash,
-                varied=(("minimum_rr", str(loaded.params["minimum_rr"])),),
-            )
-        )
-    return ParameterGrid(strategy_id="trend-pullback", points=tuple(points))
+    """The first two points of the committed trend-pullback grid (distinct varied tuples)."""
+    committed = load_grid(
+        REPO_ROOT
+        / "docs"
+        / "research"
+        / "preregistration"
+        / "research-run-1-grid-trend-pullback.json"
+    )
+    return ParameterGrid(strategy_id=committed.strategy_id, points=committed.points[:2])
 
 
 def _run(
@@ -72,7 +71,7 @@ def _run(
         authorization=_authorization(manifest, chosen),
         raw_root=raw_root,
         output_dir=out,
-        repo_root=REPO_ROOT,
+        repo_root=tmp_path,
         time_run=time_run,
         checkpoint_dir=checkpoint,
     )
@@ -211,8 +210,6 @@ def test_a_checkpoint_of_another_code_version_or_manifest_is_refused(
     checkpoint = tmp_path / "ckpt"
     _run(store, tmp_path, tmp_path / "out", checkpoint=checkpoint)
 
-    from src.backtest.experiment import CodeVersion
-
     monkeypatch.setattr(
         research_run,
         "read_code_version",
@@ -221,8 +218,11 @@ def test_a_checkpoint_of_another_code_version_or_manifest_is_refused(
     with pytest.raises(CheckpointInvalid, match="code_version"):
         _run(store, tmp_path, tmp_path / "out2", checkpoint=checkpoint)
 
-    monkeypatch.undo()
-    monkeypatch.setattr(research_run, "_code_paths_dirty", lambda _root: [])
+    monkeypatch.setattr(
+        research_run,
+        "read_code_version",
+        lambda _root: CodeVersion(commit=FAKE_COMMIT, dirty=False),
+    )
     with pytest.raises(CheckpointInvalid, match="manifest_sha256"):
         _run(
             store,
@@ -258,7 +258,7 @@ def test_a_checkpoint_run_still_refuses_without_authorization_before_simulation(
             authorization=None,
             raw_root=store,
             output_dir=tmp_path / "out",
-            repo_root=REPO_ROOT,
+            repo_root=tmp_path,
             checkpoint_dir=tmp_path / "ckpt",
         )
     assert spies.windows == []

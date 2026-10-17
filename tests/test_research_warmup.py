@@ -129,7 +129,7 @@ def _manifest(
         known_gaps=(),
         equity=Decimal("1000"),
         risk_rate=Decimal("0.005"),
-        constraint_source=str(constraints),
+        constraint_source=constraints.name,
         constraint_sha256=hashlib.sha256(constraints.read_bytes()).hexdigest(),
     )
 
@@ -198,9 +198,11 @@ def _fold(manifest: DatasetManifest, index: int) -> SplitWindow:
     return research_splits(manifest)[1 + index]
 
 
-def _simulate(manifest: DatasetManifest, store: Path, window: SplitWindow) -> tuple[str, Any]:
+def _simulate(
+    manifest: DatasetManifest, store: Path, window: SplitWindow, root: Path
+) -> tuple[str, Any]:
     grid = _grid()
-    constraints = research_run._load_constraints(manifest)
+    constraints = research_run._load_constraints(manifest, root)
     return research_run._simulate_split(
         manifest=manifest,
         grid=grid,
@@ -273,7 +275,7 @@ def test_a_fold_case_holds_the_span_of_history_before_its_start(
     window = _fold(manifest, 0)
     assert window.start_utc - SPAN > manifest.development_start_utc  # not clamped here
 
-    _dataset_id, output = _simulate(manifest, store, window)
+    _dataset_id, output = _simulate(manifest, store, window, tmp_path)
 
     case = seen.cases[-1]
     warm_start = window.start_utc - SPAN
@@ -298,7 +300,7 @@ def test_a_cold_fold_build_still_warms_up_so_the_fix_is_what_removes_the_count(
     manifest = _manifest(store, tmp_path)
     window = _fold(manifest, 0)
     monkeypatch.setattr(research_run, "RESEARCH_WARMUP_SPAN", timedelta(0))
-    _id, cold = _simulate(manifest, store, window)
+    _id, cold = _simulate(manifest, store, window, tmp_path)
     assert _warmup_count(cold) > 0
     assert seen.cases[-1]["data_window"]["start_utc"] == window.start_utc.isoformat()
 
@@ -315,7 +317,7 @@ def test_the_experiment_record_is_the_window_not_the_warmup(
         point=grid.points[0],
         window=window,
         raw_root=store,
-        constraints=research_run._load_constraints(manifest),
+        constraints=research_run._load_constraints(manifest, tmp_path),
         code_version=CodeVersion(commit=FAKE_COMMIT, dirty=False),
     )
     assert record.time_range_start_utc == window.start_utc
@@ -335,7 +337,7 @@ def test_history_of_exactly_the_span_gives_full_setup_and_context_windows(
 ) -> None:
     manifest = _manifest(store, tmp_path)
     window = _fold(manifest, 0)
-    _simulate(manifest, store, window)
+    _simulate(manifest, store, window, tmp_path)
     first = _first_evaluation(seen, window)
     assert first["setup_bars"] == semantics.STRATEGY_WINDOW_BARS
     assert first["context_bars"] == semantics.CONTEXT_WINDOW_BARS
@@ -349,7 +351,7 @@ def test_one_hour_less_history_leaves_the_context_window_one_bar_short(
     window = _fold(manifest, 0)
     hours = int(SPAN / timedelta(hours=1))
     _trim_history_hours(monkeypatch, window, hours - 1)
-    _simulate(manifest, store, window)
+    _simulate(manifest, store, window, tmp_path)
     first = _first_evaluation(seen, window)
     assert first["context_bars"] == semantics.CONTEXT_WINDOW_BARS - 1
     assert first["setup_bars"] == semantics.STRATEGY_WINDOW_BARS
@@ -376,7 +378,7 @@ def test_the_strategys_own_minimum_history_decides_warmup_insufficient(
 
     with monkeypatch.context() as patch:
         _trim_history_hours(patch, window, minimum_hours)
-        _simulate(manifest, store, window)
+        _simulate(manifest, store, window, tmp_path)
     enough = _first_evaluation(seen, window)
     assert enough["context_bars"] == _EMA_SLOW_PERIOD
     assert enough["reason"] != "WARMUP_INSUFFICIENT"
@@ -384,7 +386,7 @@ def test_the_strategys_own_minimum_history_decides_warmup_insufficient(
     seen.evaluations.clear()
     with monkeypatch.context() as patch:
         _trim_history_hours(patch, window, minimum_hours - 1)
-        _simulate(manifest, store, window)
+        _simulate(manifest, store, window, tmp_path)
     short = _first_evaluation(seen, window)
     assert short["context_bars"] == _EMA_SLOW_PERIOD - 1
     assert short["reason"] == "WARMUP_INSUFFICIENT"
@@ -402,7 +404,7 @@ def test_development_window_is_clamped_at_the_dataset_start_and_starts_cold(
     window = research_splits(manifest)[0]
     assert window.role == "DEVELOPMENT"
 
-    _id, output = _simulate(manifest, store, window)
+    _id, output = _simulate(manifest, store, window, tmp_path)
 
     assert seen.builds[-1]["kwargs"]["start_utc"] == manifest.development_start_utc
     case = seen.cases[-1]
@@ -418,7 +420,7 @@ def test_a_fold_with_less_history_than_the_span_is_clamped_at_the_dataset_start(
 ) -> None:
     manifest = _manifest(store, tmp_path, dev_end=SHORT_DEV_END, val_end=SHORT_VAL_END)
     window = _fold(manifest, 0)
-    _simulate(manifest, store, window)
+    _simulate(manifest, store, window, tmp_path)
     assert seen.builds[-1]["kwargs"]["start_utc"] == manifest.development_start_utc
 
 
@@ -436,7 +438,7 @@ def test_the_run_prints_one_neutral_cold_start_line(
         authorization=_authorization(manifest, grid),
         raw_root=store,
         output_dir=tmp_path / "experiments",
-        repo_root=REPO_ROOT,
+        repo_root=tmp_path,
     )
     assert len(records) == 5
     out = capsys.readouterr().out
@@ -460,7 +462,7 @@ def test_no_day_at_or_after_the_holdout_start_is_read_for_any_window(
     manifest = _manifest(store, tmp_path)
     holdout_day = manifest.holdout_start_utc.date().isoformat()
     for window in research_splits(manifest)[1:]:  # the Development window is long and cold
-        _simulate(manifest, store, window)
+        _simulate(manifest, store, window, tmp_path)
     assert len(seen.builds) == 4
     for build in seen.builds:
         kwargs = build["kwargs"]
@@ -483,7 +485,7 @@ def test_no_signal_is_evaluated_before_the_window_and_the_dataset_id_covers_the_
 ) -> None:
     manifest = _manifest(store, tmp_path)
     window = _fold(manifest, 2)
-    dataset_id, output = _simulate(manifest, store, window)
+    dataset_id, output = _simulate(manifest, store, window, tmp_path)
 
     assert seen.evaluations
     assert all(e["close"] >= window.start_utc for e in seen.evaluations)
@@ -559,7 +561,8 @@ def test_a_terminal_instant_inside_the_warmup_builds_without_a_settlement_row(
     ).dataset_id
     world = ts.World(
         store=root,
-        constraint_source=str(constraints),
+        constraint_path=constraints,
+        constraint_source=constraints.name,
         constraint_sha256=hashlib.sha256(constraints.read_bytes()).hexdigest(),
         dataset_id=dataset_id,
         declaration=declaration,

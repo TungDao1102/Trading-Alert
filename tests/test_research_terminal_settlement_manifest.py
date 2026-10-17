@@ -1072,12 +1072,13 @@ def _runner_inputs(tmp_path: Path, manifest: DatasetManifest) -> dict[str, Any]:
 
 
 def _runner_manifest(tmp_path: Path, **row_overrides: Any) -> DatasetManifest:
-    constraints = tmp_path / "constraints.json"
+    (tmp_path / "repo").mkdir(parents=True, exist_ok=True)
+    constraints = tmp_path / "repo" / "constraints.json"  # the repo root of these runs
     observed = datetime(2024, 12, 1, tzinfo=UTC)
     rows = [constraint_row(BTC, observed), constraint_row(REEF, observed)]
     constraints.write_text(json.dumps({"constraint_history": rows}), encoding="utf-8")
     return make_manifest(
-        constraint_source=str(constraints),
+        constraint_source=constraints.name,
         constraint_sha256=hashlib.sha256(constraints.read_bytes()).hexdigest(),
         terminal_settlements=(reef_settlement(**row_overrides),),
     )

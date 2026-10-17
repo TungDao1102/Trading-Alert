@@ -162,6 +162,7 @@ def _settlement(base: Decimal, digests: dict[str, str]) -> TerminalSettlement:
 @dataclass(frozen=True)
 class World:
     store: Path
+    constraint_path: Path
     constraint_source: str
     constraint_sha256: str
     dataset_id: str
@@ -199,7 +200,8 @@ def world(tmp_path_factory: pytest.TempPathFactory) -> World:
     ).dataset_id
     return World(
         store=store,
-        constraint_source=str(constraints),
+        constraint_path=constraints,
+        constraint_source=constraints.name,
         constraint_sha256=hashlib.sha256(constraints.read_bytes()).hexdigest(),
         dataset_id=dataset_id,
         declaration=declaration,
@@ -245,6 +247,7 @@ def _run(world: World, tmp_path: Path, name: str, base: Decimal) -> Captured:
     """One authorized run over a manifest whose evidence lives under tmp_path/<name>/repo."""
     repo_root = tmp_path / name / "repo"
     digests = _write_evidence(repo_root, base)
+    (repo_root / world.constraint_source).write_bytes(world.constraint_path.read_bytes())
     manifest = _manifest(world, _settlement(base, digests))
     grid = _grid()
     cases: list[dict[str, Any]] = []
@@ -401,7 +404,7 @@ def _two_point_grid() -> ParameterGrid:
     second = GridPoint(
         parameter_set_id="baseline-v6",
         parameter_set_hash=first.parameter_set_hash,
-        varied=first.varied,
+        varied=(("minimum_rr", "3"),),  # helper input only: never run against the registry
     )
     return ParameterGrid(strategy_id="trend-pullback", points=(first, second))
 
