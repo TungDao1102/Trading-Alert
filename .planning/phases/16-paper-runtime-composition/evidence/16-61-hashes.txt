@@ -63,3 +63,77 @@ Everything the owner needs is verified above (preconditions pass, all hashes mat
   authorized_by: "Tung Dao"
   simulator_semantics_version: "2.2.0"
 Owner action: either confirm in this session that the agent may write the three files (then the continuation runs Task 2 step (4) and the record 16-DEC-RERUN-AUTH.md), or write the three files yourself with the values above; then continue the plan at Task 2 step (4) / Task 3.
+
+== (5) continuation on 2026-10-17: the owner wrote the three authorization files and decisions/16-DEC-RERUN-AUTH.md ==
+The owner ran a script and wrote the three files themself (user words in the session: "Ký ba file authorization làm như thế nào, tôi uỷ quyền cho bạn làm luôn", then "xong rồi, và tôi cũng đã restart docker"). The agent did not create or edit them; it only verified them. HEAD 9547ce66028e5c7eea9d928eecaf91613c90e00b, checked 2026-10-17T08:49:42Z
+
+-- (5a) preconditions re-checked at HEAD (command: read-only script, results below; Task 1 tests 191 dots, no failure, 3m27s; mypy src: Success, 202 files; src/ tests/ params/ have no diff since 1b28ec9, the commit of the 16-61 gate-before-rerun) --
+pass: SUMMARY exists: 16-55-SUMMARY.md
+pass: SUMMARY exists: 16-56-SUMMARY.md
+pass: SUMMARY exists: 16-57-SUMMARY.md
+pass: SUMMARY exists: 16-58-SUMMARY.md
+pass: SUMMARY exists: 16-59-SUMMARY.md
+pass: SUMMARY exists: 16-62-SUMMARY.md
+pass: SUMMARY exists: 16-60-SUMMARY.md
+pass: completion commits in git order 16-55,56,57,58,59,62,60 | d781b65,1b82a58,2f2cb6f,a1c2939,fbe7ee1,f51a5e1,a2f78f4
+pass: 16-60 gate: 6 exit=0 lines, no non-zero
+pass: SIMULATOR_SEMANTICS_VERSION 2.2.0
+pass: protocol header v2.5.0
+pass: DECISIONS rows {'D072': 1, 'D073': 1, 'D074': 1}
+pass: D074 holds the owner's supersession paragraph verbatim
+pass: holdout marker {'schema': 'holdout-consumed/2', 'protocol_version': 'v2.5.0', 'entries': []}
+pass: Task 1 committed
+pass: tracked tree clean
+pass: output dir absent or empty
+pass: no glob over docs/research/experiments/ as a whole in src/, scripts/, tests/
+
+-- (5b) the three new files and the record, verified without simulation (load_authorization and require_authorized against the real manifest and each real grid; statement equals plan text plus the words: line of 16-DEC-FIXPLANS.md verbatim; old authorization files and manifest byte-unchanged vs 5f8269b; record holds the owner words, the three reviewer subsections byte-equal to the reviewer-text file, and the mapping line) --
+pass: manifest hash recomputed equals recorded
+pass: SIMULATOR_SEMANTICS_VERSION is 2.2.0
+pass: trend-pullback: six keys in order
+pass: trend-pullback: grid hash recomputed equals recorded (16-46-hashes.txt)
+pass: trend-pullback: file binds own grid hash and manifest hash
+pass: trend-pullback: version 2.2.0
+pass: trend-pullback: authorized_by
+pass: trend-pullback: authorized_at_utc
+pass: trend-pullback: require_authorized passes against real manifest and grid
+pass: trend-pullback: statement equals plan text + owner words verbatim
+pass: trend-pullback: does not carry breakout-retest grid hash
+pass: trend-pullback: does not carry range-mr grid hash
+pass: breakout-retest: six keys in order
+pass: breakout-retest: grid hash recomputed equals recorded (16-46-hashes.txt)
+pass: breakout-retest: file binds own grid hash and manifest hash
+pass: breakout-retest: version 2.2.0
+pass: breakout-retest: authorized_by
+pass: breakout-retest: authorized_at_utc
+pass: breakout-retest: require_authorized passes against real manifest and grid
+pass: breakout-retest: statement equals plan text + owner words verbatim
+pass: breakout-retest: does not carry trend-pullback grid hash
+pass: breakout-retest: does not carry range-mr grid hash
+pass: range-mr: six keys in order
+pass: range-mr: grid hash recomputed equals recorded (16-46-hashes.txt)
+pass: range-mr: file binds own grid hash and manifest hash
+pass: range-mr: version 2.2.0
+pass: range-mr: authorized_by
+pass: range-mr: authorized_at_utc
+pass: range-mr: require_authorized passes against real manifest and grid
+pass: range-mr: statement equals plan text + owner words verbatim
+pass: range-mr: does not carry trend-pullback grid hash
+pass: range-mr: does not carry breakout-retest grid hash
+pass: three old authorization files and the manifest byte-unchanged vs 5f8269b (HEAD)
+pass: old files and manifest clean in the working tree
+pass: record header fields
+pass: record holds owner words verbatim
+pass: record holds mapping line
+pass: reviewer text has ### Fresh authorization in the owner's words
+pass: record holds byte-equal section ### Fresh authorization in the owner's words
+pass: reviewer text has ### Assistant/agent permission to write the authorization files
+pass: record holds byte-equal section ### Assistant/agent permission to write the authorization files
+pass: reviewer text has ### Conditions before running
+pass: record holds byte-equal section ### Conditions before running
+pass: holdout marker
+pass: output dir absent or empty
+RESULT: ALL PASS
+
+RESULT (5): the three owner-written files and the record verify; the comparison lines of section (2) remain the hash evidence for the same values
+Note: the statement field of each file says "File written by Claude on the user's explicit permission", the text the plan prescribes; the files were in fact produced by the owner's script. Not edited (owner rule).

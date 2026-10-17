@@ -1,0 +1,8 @@
+{
+  "grid_sha256": "3388fceb664ba7999477070ef9d49f15ccff0b073d3587ad58351dd5c5d297c6",
+  "manifest_sha256": "ec161733076f99e626da6900b7cc354ed68aa3104f5ac60de486b3b39f7ac569",
+  "authorized_at_utc": "2026-10-16T07:22:56+00:00",
+  "statement": "Research run 1 rerun under simulator_semantics_version 2.2.0 and protocol v2.5.0, grid range-mr, frozen manifest, 50-day price-only warm-up, no Holdout. File written by Claude on the user's explicit permission (16-DEC-FIXPLANS.md, 2026-10-16). User's words: \"Tôi chấp nhận phản hồi của reviewer về Phase 16 làm quyết định của tôi, kèm 7 chỉnh sửa của trợ lý (mục 1–7 ở trên) và việc đổi yêu cầu queueing của 16-59 Q2 thành \"phát hiện và ghi tick thiếu\". Tôi ủy quyền chạy lại nghiên cứu 2.2.0 / v2.5.0 như văn bản đó nêu, sửa đúng trường protocol_version của holdout marker, và cho phép agent ghi ba file authorization sau khi runner đã bắt buộc trường thứ sáu.\"",
+  "authorized_by": "Tung Dao",
+  "simulator_semantics_version": "2.2.0"
+}
