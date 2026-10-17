@@ -27,6 +27,7 @@ Pure: standard library only, no wall clock, no float, no randomness.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -78,6 +79,12 @@ class ExchangeErrorCategory(StrEnum):
     UNKNOWN_EXCHANGE_ERROR = "UNKNOWN_EXCHANGE_ERROR"
 
 
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)
+# The Demo probe run whose answers label the codes below (second run 2026-10-16T17:36:12Z;
+# the first run of the same day answered the same codes). Demo evidence, not mainnet.
+DEMO_PROBE_DATE = "2026-10-16"
+
+
 def _is_strict_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -123,10 +130,17 @@ class CodeEntry:
     read_date: str
     evidence: str
     note: str
+    # ISO date of a Demo observation of this code (evidence/18-probe-check.txt), or None.
+    # Additive to `evidence`: a documented code that the Demo probe also answered stays
+    # "documented" (its page reading is unchanged) and carries the Demo date here;
+    # `read_date` is the documentation read date and is never changed by an observation.
+    demo_observed_on: str | None = None
 
     def __post_init__(self) -> None:
         if self.evidence not in EVIDENCE_LABELS:
             raise ValueError(f"unknown evidence label: {self.evidence!r}")
+        if self.demo_observed_on is not None and not _ISO_DATE.fullmatch(self.demo_observed_on):
+            raise ValueError("demo_observed_on must be an ISO date (YYYY-MM-DD) or None")
 
 
 ERROR_TABLE_SOURCE: str = "docs/SOURCES.md, Facts read for Phase 18, error-code row"
@@ -157,6 +171,7 @@ def _entry(
     categories: Mapping[CallKind, ExchangeErrorCategory],
     evidence: str,
     note: str,
+    demo_observed_on: str | None = None,
 ) -> CodeEntry:
     return CodeEntry(
         code=code,
@@ -166,6 +181,7 @@ def _entry(
         read_date=ERROR_TABLE_READ_DATE,
         evidence=evidence,
         note=note,
+        demo_observed_on=demo_observed_on,
     )
 
 
@@ -267,7 +283,9 @@ ERROR_CODE_TABLE: Mapping[int, CodeEntry] = MappingProxyType(
                 "CANCEL_REJECTED",
                 _ABSENT_ON_QUERY_AND_CANCEL,
                 "documented",
-                f"{_REREAD}: 'CANCEL_REJECTED' / 'Unknown order sent'.",
+                f"{_REREAD}: 'CANCEL_REJECTED' / 'Unknown order sent'. Demo probe: DELETE order "
+                "and DELETE algoOrder of an absent order answered -2011 'Unknown order sent.'",
+                DEMO_PROBE_DATE,
             ),
             _entry(
                 -2013,
@@ -275,7 +293,9 @@ ERROR_CODE_TABLE: Mapping[int, CodeEntry] = MappingProxyType(
                 _ABSENT_ON_QUERY_AND_CANCEL,
                 "documented",
                 f"{_REREAD}: 'Order does not exist.'; also Demo-observed for GET "
-                "/fapi/v1/algoOrder (09-DEMO-REHEARSAL-FINDINGS finding 1).",
+                "/fapi/v1/algoOrder (09-DEMO-REHEARSAL-FINDINGS finding 1). Demo probe: GET "
+                "order and GET algoOrder of an absent order answered -2013.",
+                DEMO_PROBE_DATE,
             ),
             # Duplicate client id (placement only).
             _entry(
@@ -284,7 +304,10 @@ ERROR_CODE_TABLE: Mapping[int, CodeEntry] = MappingProxyType(
                 _on(_C.DUPLICATE_CLIENT_ID, _K.PLACEMENT),
                 "documented",
                 f"{_REREAD}: 'clientOrderId is duplicated'. The duplicate clientAlgoId code "
-                "is not on the page (probe).",
+                "is not on the page; the Demo probe observed it as -4116 'ClientOrderId is "
+                "duplicated.' while the first clientAlgoId was open (not observed for a "
+                "normal order).",
+                DEMO_PROBE_DATE,
             ),
             # Position mode.
             _entry(
@@ -310,7 +333,10 @@ ERROR_CODE_TABLE: Mapping[int, CodeEntry] = MappingProxyType(
                 "Absent from the error-code page in the 2026-10-16 read and in baseline B7. "
                 "Observed on the Demo host on 2026-10-05 for a closePosition STOP_MARKET algo "
                 "order placed with no open position: 'Time in Force (TIF) GTE can only be used "
-                "with open positions.' (09-DEMO-REHEARSAL-FINDINGS finding 2; D055 context).",
+                "with open positions.' (09-DEMO-REHEARSAL-FINDINGS finding 2; D055 context). "
+                "The Demo probe of 2026-10-16 observed the same answer for the close-position "
+                "variant while flat.",
+                DEMO_PROBE_DATE,
             ),
             # Definitive rejections of a placement: margin, balance, notional,
             # filters, would-trigger, reduce-only and conditional-order rules.
@@ -383,7 +409,10 @@ ERROR_CODE_TABLE: Mapping[int, CodeEntry] = MappingProxyType(
                 _REJECT_ON_PLACEMENT,
                 "documented",
                 f"{_REREAD}: 'Order would immediately trigger.' Also named in the New Algo "
-                "Order section for a TRAILING_STOP_MARKET activatePrice on the wrong side.",
+                "Order section for a TRAILING_STOP_MARKET activatePrice on the wrong side. "
+                "Demo probe: a wrong-side trigger answered -2021 'Order would immediately "
+                "trigger.'",
+                DEMO_PROBE_DATE,
             ),
             _entry(
                 -4142,
@@ -592,6 +621,7 @@ __all__ = [
     "ERROR_CODE_TABLE",
     "ERROR_TABLE_READ_DATE",
     "ERROR_TABLE_SOURCE",
+    "DEMO_PROBE_DATE",
     "EVIDENCE_LABELS",
     "CallKind",
     "CodeEntry",

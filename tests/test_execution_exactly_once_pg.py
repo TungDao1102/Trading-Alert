@@ -28,6 +28,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from binance_sdk_derivatives_trading_usds_futures import BadRequestError
 from sqlalchemy import text
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
@@ -137,8 +138,10 @@ async def test_fake_rejects_duplicate_open_client_id_with_4116() -> None:
         "new_client_order_id": ENTRY_CLIENT_ID,
     }
     await adapter.place_entry(**kwargs)
-    with pytest.raises(RuntimeError, match="-4116"):
+    with pytest.raises(BadRequestError) as caught:
         await adapter.place_entry(**kwargs)
+    # The SDK's own error class with the int code, not message text (plan 18-21).
+    assert caught.value.status_code == -4116
 
 
 @pytest.mark.parametrize("free", ["fill", "cancel"])
@@ -348,13 +351,13 @@ class _RejectionRecordingAdapter(BinanceSemanticsFakeAdapter):
 
     def __init__(self) -> None:
         super().__init__()
-        self.entry_rejections: list[str] = []
+        self.entry_rejections: list[BadRequestError] = []
 
     async def place_entry(self, **kwargs: Any) -> Any:
         try:
             return await super().place_entry(**kwargs)
-        except RuntimeError as exc:
-            self.entry_rejections.append(str(exc))
+        except BadRequestError as exc:
+            self.entry_rejections.append(exc)
             raise
 
     @property
@@ -506,7 +509,8 @@ async def test_negative_control_open_entry_is_rejected_with_4116_by_the_exchange
     # exchange dedups an open id and nothing else.
     assert len(adapter.calls_to("place_entry")) == 2
     assert len(adapter.entry_rejections) == 1
-    assert "-4116" in adapter.entry_rejections[0]
+    assert type(adapter.entry_rejections[0]) is BadRequestError
+    assert adapter.entry_rejections[0].status_code == -4116
     assert adapter.accepted_entries == 1
     assert len(adapter.open_orders) == 1
 

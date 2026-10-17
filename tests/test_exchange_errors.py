@@ -236,6 +236,56 @@ def test_4509_is_demo_observed_only() -> None:
     assert "documented" not in entry.evidence
 
 
+# The codes the Demo probe observed that are already in the table (evidence/18-probe-check.txt,
+# "Facts for plan 18-21", Demo 2026-10-16, not mainnet): (code, call kind, category, message).
+_PROBE_OBSERVED_IN_TABLE: tuple[tuple[int, CallKind, ExchangeErrorCategory, str], ...] = (
+    (-2013, CallKind.QUERY, _C.ORDER_ABSENT, "Order does not exist."),
+    (-2011, CallKind.CANCEL, _C.ORDER_ABSENT, "Unknown order sent."),
+    (-4116, CallKind.PLACEMENT, _C.DUPLICATE_CLIENT_ID, "ClientOrderId is duplicated."),
+    (-4509, CallKind.PLACEMENT, _C.PRECONDITION_NO_POSITION, "Time in Force (TIF) GTE"),
+    (-2021, CallKind.PLACEMENT, _C.REJECTED_DEFINITIVE, "Order would immediately trigger."),
+)
+# Observed by the probe and NOT in the table: they stay UNKNOWN_EXCHANGE_ERROR until the user
+# decides (an agent does not add a code): -1106 and -4016 (evidence/18-probe-check.txt).
+_PROBE_OBSERVED_NOT_IN_TABLE: tuple[int, ...] = (-1106, -4016)
+
+
+def test_demo_observed_codes_are_exactly_the_probe_observed_codes_in_the_table() -> None:
+    observed = sorted(code for code, entry in ERROR_CODE_TABLE.items() if entry.demo_observed_on)
+    assert observed == sorted(code for code, *_ in _PROBE_OBSERVED_IN_TABLE)
+    assert observed == [-4509, -4116, -2021, -2013, -2011]
+    for code in observed:
+        assert ERROR_CODE_TABLE[code].demo_observed_on == "2026-10-16"
+        # The read date of the documentation is not changed by a Demo observation.
+        assert ERROR_CODE_TABLE[code].read_date == ERROR_TABLE_READ_DATE
+
+
+def test_probe_answers_classify_as_the_probe_check_file_says() -> None:
+    for code, kind, category, _message in _PROBE_OBSERVED_IN_TABLE:
+        facts = ErrorFacts(HttpClass.BAD_REQUEST, code, None)
+        assert classify(facts, kind) is category, code
+    for code in _PROBE_OBSERVED_NOT_IN_TABLE:
+        assert code not in ERROR_CODE_TABLE
+        facts = ErrorFacts(HttpClass.BAD_REQUEST, code, None)
+        for kind in CallKind:
+            assert classify(facts, kind) is _C.UNKNOWN_EXCHANGE_ERROR
+
+
+def test_a_demo_observation_does_not_relabel_a_documented_code() -> None:
+    for code in (-2013, -2011, -4116, -2021):
+        assert ERROR_CODE_TABLE[code].evidence == "documented"
+    assert ERROR_CODE_TABLE[-4509].evidence == "demo-observed"
+    # The duplicate clientAlgoId case was observed as -4116 (DUPLICATE_CLIENT_ID on placement).
+    assert "clientAlgoId" in ERROR_CODE_TABLE[-4116].note
+    assert "observed" in ERROR_CODE_TABLE[-4116].note
+
+
+def test_demo_observed_on_must_be_an_iso_date() -> None:
+    entry = ERROR_CODE_TABLE[-4116]
+    with pytest.raises(ValueError, match="demo_observed_on"):
+        dataclasses.replace(entry, demo_observed_on="yesterday")
+
+
 def test_placement_never_maps_to_order_absent() -> None:
     for entry in ERROR_CODE_TABLE.values():
         assert entry.categories_by_call_kind.get(_K.PLACEMENT) is not _C.ORDER_ABSENT

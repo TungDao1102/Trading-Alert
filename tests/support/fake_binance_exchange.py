@@ -1,4 +1,4 @@
-"""Stateful Binance-semantics fake adapter (Phase 17, D-25, F-603).
+"""Stateful Binance-semantics fake adapter (Phase 17, D-25, F-603; corrected in Phase 18-21).
 
 Models the one exchange rule the audit finding F-126 turns on: Binance's
 `newClientOrderId` / `clientAlgoId` are "a unique id among OPEN orders"
@@ -8,10 +8,36 @@ placing a second entry once the first one is no longer open. The durable
 local intent row is the only line of defense; this fake lets a test prove
 that by actually accepting a reused id after `fill()` / `cancel()`.
 
+Errors are SDK-shaped (plan 18-21): a duplicate id raises the SDK's
+`BadRequestError` with the int code -4116, the same class and code the real
+adapter's error path (`error_facts_from_exception`, then `classify`) sees.
+
+Evidence status of the three assumptions. The source is the Demo probe check file
+`.planning/phases/18-user-data-stream-error-taxonomy/evidence/18-probe-check.txt`
+(second run 2026-10-16T17:36:12Z; lines 66 to 69, with the first run's lines 33 to 36
+and 50 to 53). It is Demo evidence, not mainnet:
+
+1. A client id is unique among OPEN orders, so a duplicate while the first is
+   open is rejected: agrees with the probe for clientAlgoId (-4116) ("1 a client
+   id is unique among OPEN orders: agrees with the probe for clientAlgoId (-4116
+   while the first is open); not observed for a normal order", check file line
+   67). For a normal order this is NOT validated against Demo: not observed.
+2. A CANCELED order frees its client id (a reused id is accepted): agrees with
+   the probe, normal and algo order (check file lines 34, 35 and 68).
+3. A FILLED order frees its client id: agrees with the probe, normal order (the
+   reused id was accepted after FILLED; check file lines 64 and 69). The first
+   probe run could not observe it (the entry was rejected with -4016 before any
+   fill, line 53); the second run did.
+
+The duplicate clientAlgoId code is -4116 with the text "ClientOrderId is
+duplicated." (check file line 33); before the probe the fake raised an
+undocumented-code error (research A8). That is a correction, not a confirmation.
+
 Retention of the order-by-client lookup follows the documented Query Order
 rule: a CANCELED/EXPIRED order with no fills older than 3 days is no longer
 found (`HISTORY_RETENTION`), so "not found" is a definitive absence only
-for young intents.
+for young intents. NOT validated against Demo: it is a documentation rule the
+probe does not test (check file line 54).
 
 The kwargs of every call are bound against the REAL `BinanceUsdmAdapter`
 method signature (09-REVIEW WR-12) so this fake can never drift from the
@@ -27,9 +53,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from binance_sdk_derivatives_trading_usds_futures import BadRequestError
+
 # Binance Query Order: a canceled/expired order with no filled trade older
 # than 3 days is not returned (docs, Query Order "orders not found" rules).
 HISTORY_RETENTION = timedelta(days=3)
+
+# Binance -4116 (duplicated client order id): documented for a normal order, observed on Demo for
+# a duplicate clientAlgoId (probe check file line 33), with the Demo text below.
+DUPLICATE_CLIENT_ID_CODE = -4116
+DUPLICATE_ORDER_MESSAGE = "clientOrderId is duplicated"  # the page text; not observed on Demo
+DUPLICATE_ALGO_MESSAGE = "ClientOrderId is duplicated."  # the Demo text (check file line 33)
 
 STATUS_NEW = "NEW"
 STATUS_FILLED = "FILLED"
@@ -120,8 +154,11 @@ class BinanceSemanticsFakeAdapter:
             self.on_place_entry(dict(kwargs))
         client_id = kwargs["new_client_order_id"]
         if client_id in self.open_orders:
-            # Binance error -4116 DUPLICATED_CLIENT_ORDER_ID, only among OPEN orders.
-            raise RuntimeError("-4116 clientOrderId is duplicated")
+            # Binance error -4116 DUPLICATED_CLIENT_ORDER_ID, only among OPEN orders. The
+            # code is documented; for a normal order it was not observed on Demo (assumption 1).
+            raise BadRequestError(
+                error_message=DUPLICATE_ORDER_MESSAGE, status_code=DUPLICATE_CLIENT_ID_CODE
+            )
         record = ExchangeOrderRecord(
             client_id=client_id,
             symbol=kwargs["symbol"],
@@ -137,8 +174,11 @@ class BinanceSemanticsFakeAdapter:
         self._record_call("place_algo_protective", kwargs)
         client_algo_id = kwargs["client_algo_id"]
         if client_algo_id in self.open_algos:
-            # The docs name no error code for a duplicate algo id (research A8).
-            raise RuntimeError("duplicate clientAlgoId among open orders")
+            # The docs name no error code for a duplicate algo id (research A8); the Demo probe
+            # observed -4116 "ClientOrderId is duplicated." (check file line 33).
+            raise BadRequestError(
+                error_message=DUPLICATE_ALGO_MESSAGE, status_code=DUPLICATE_CLIENT_ID_CODE
+            )
         record = ExchangeOrderRecord(
             client_id=client_algo_id,
             symbol=kwargs["symbol"],
