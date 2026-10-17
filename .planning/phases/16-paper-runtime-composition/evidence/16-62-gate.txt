@@ -1,0 +1,45 @@
+16-62 final gate before the soak image (B1-WR-09 wired)
+run on 2026-10-17 on a clean working tracked tree (untracked .gsd/, .planning/milestone.lock, package.json and package-lock.json pre-exist and are not part of the repository state under test)
+branch: develop
+environment: Windows 11, .venv Python 3.13, TRADING_CI_STRICT unset, TEST_DATABASE_URL set (the PostgreSQL tests ran, none of them is among the skips)
+commit under test: efae1f3efe3211f75f94e165e5d1c9956b20a6f1 (the last commit of plan 16-62 before this evidence commit)
+
+exit=0 .venv/Scripts/python -m pytest -m "not docker" -q -rs -p no:cacheprovider
+  10118 tests ran: 10112 passed, 6 skipped, 0 failed, 0 errors (counted from the progress lines; the quiet configuration prints no final count line). PTBDeprecationWarning (retry_after) from the telegram package in the SHADOW Telegram tests, unrelated to this plan. Wall time about 15 minutes.
+  skip reasons (6):
+    SKIPPED [1] tests\test_analytics_files.py:974: symlinks unavailable on this platform: OSError
+    SKIPPED [1] tests\test_bootstrap.py:947: NTFS cannot represent POSIX modes
+    SKIPPED [4] tests\test_deploy_heartbeat.py:401: file modes do not exist on Windows
+  history: a first full run on commit e7e3f4f failed one test (tests/test_paper_runtime_admission.py::test_readme_lists_every_key_one_per_line_without_values: the README line of the key carried the standalone numbers 1000, 300 and 1500). The README line was corrected in commit efae1f3 (numbers named by reference, not typed) and the full suite was run again from the start on efae1f3; the result above is that second run.
+exit=0 .venv/Scripts/python -m ruff check
+  All checks passed!
+exit=0 .venv/Scripts/python -m ruff format --check
+  618 files already formatted
+exit=0 .venv/Scripts/python -m mypy src
+  Success: no issues found in 202 source files
+exit=0 uv lock --check
+  Resolved 60 packages in 1ms
+
+user-owned inputs unchanged since the review base c654524:
+git diff --name-only c654524 HEAD -- params/ docs/research/preregistration/research-run-1-manifest.json docs/research/preregistration/research-run-1-grid-*.json docs/research/preregistration/research-run-1-authorization-*.json config/paper/paper-runtime-v1.toml
+  (no output: nothing changed)
+
+configuration in force: config/paper/paper-runtime-v2.toml
+git log --format=%H -- config/paper/paper-runtime-v2.toml
+  63ffa580b0ca2667eaf0a8c2cd88ab32b461a832
+  (exactly one commit, the one of plan 16-56: feat(16-56) "feed-silence watchdog with one bounded recovery, zero close lag refused, configuration v2"; plan 16-62 did not touch the file; rest_backfill_depth_bars = 1500 is the ratified value, now consumed by the supervisor's REST backfill)
+
+decision records written by plans 16-55 to 16-59 (all in .planning/phases/16-paper-runtime-composition/decisions/):
+  16-55: 16-DEC-RESTART-POLICY.md, 16-DEC-HUNG-RUNTIME.md, 16-DEC-PIN-COMMAND.md
+  16-56: 16-DEC-WS-WATCHDOG.md, 16-DEC-CLOSE-LAG-ZERO.md
+  16-57: 16-DEC-CONFIG-PIN.md
+  16-58: none (all eight findings held; no owner question)
+  16-59: 16-DEC-EVIDENCE-KEYS.md, 16-DEC-FREEZE-LOG-ASSEMBLY.md
+  16-62: none (the owner decision of 2026-10-16 in 16-DEC-FIXPLANS.md was implemented as written; no new question)
+
+IMAGE_COMMIT=efae1f3efe3211f75f94e165e5d1c9956b20a6f1
+  the commit plan 16-43 checks out on the soak host and builds the soak image from (RUNBOOK 20.6).
+  IMAGE_COMMIT contains no research code of plans 16-60 and 16-61 (they depend on this plan and start after this gate).
+
+targeted re-review range (the outline requires it before anything is pushed or merged; it is not part of this plan):
+  c654524..efae1f3efe3211f75f94e165e5d1c9956b20a6f1
