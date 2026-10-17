@@ -1,0 +1,89 @@
+16-61 Task 3: the 2.2.0 rerun, STOPPED at the first family (trend-pullback). The rerun is NOT complete; breakout-retest and range-mr were not started.
+
+RUN_COMMIT: dce3195f71fbc0c07564dc8f6693e5084fb0cf71 (HEAD of develop when the worktree was made)
+worktree: C:\Users\daotu\trading-rerun-v220 (git worktree add --detach at RUN_COMMIT; clean; import root check printed C:\Users\daotu\trading-rerun-v220)
+SIMULATOR_SEMANTICS_VERSION 2.2.0, protocol v2.5.0
+checkpoint dirs: C:\Users\daotu\rerun-v220-ck\<family> (outside both trees, empty at the start)
+limitation recorded as the owner asked: the first Development window starts cold because the dataset begins 2024-10-03T00:00:00Z (first line of the run log: "warmup span_days=50 window=DEVELOPMENT split_start_utc=2024-10-03T00:00:00+00:00 starts cold: no data exists before development_start_utc=2024-10-03T00:00:00+00:00"); its WARMUP_INSUFFICIENT count is not comparable with the warm Validation folds.
+
+command (trend-pullback), run from the worktree directory, python from the main .venv:
+  python -m src.research.run --manifest docs/research/preregistration/research-run-1-manifest.json --grid docs/research/preregistration/research-run-1-grid-trend-pullback.json --authorization docs/research/preregistration/research-run-1-v2-2-0-authorization-trend-pullback.json --raw-root <main>/data/raw --output-dir <main>/docs/research/experiments/research-run-1-v2-2-0 --repo-root C:\Users\daotu\trading-rerun-v220 --checkpoint-dir C:\Users\daotu\rerun-v220-ck\trend-pullback --time-run
+
+technical state:
+  start 2026-10-17T08:50:31Z, end 2026-10-17T09:03:15Z (12 min 44 s)
+  exit code: 1 (uncaught ValueError, traceback below)
+  experiment records written: 0 (the output directory docs/research/experiments/research-run-1-v2-2-0/ was never created; a grid point's records are written only when all its windows are done)
+  windows saved in the checkpoint directory (point a01 only): research-run-1-a01.DEVELOPMENT.20241003T000000Z.json, research-run-1-a01.VALIDATION.20250722T000000Z.json; the failing window is the next one of point a01 (inferred from the checkpoint files; the log does not name the window)
+  no performance section was inspected; nothing was changed; no retry; the other two families were not started; the checkpoint directories and the worktree were left as they are
+  holdout marker: untouched (entries empty); docs/research/experiments/research-run-1/ untouched
+
+cause as printed (the engine fails closed on a planner trade plan whose take profit is not a positive price):
+  src/backtest/exits.py take_profit_levels raises ValueError: take_profit_json tp2 must be a positive finite price, got '-0.001548100000000000'
+  context read only: src/core/planner.py lines 622-626 compute tp2 = entry_ref -/+ 2 * tp1_leg (short: entry_ref - 2 * tp1_leg); a negative tp2 on a short means the planned take-profit leg exceeds half of the entry price on a very low-priced symbol. Whether this is a planner defect or a legitimate input the engine must skip is a decision about the simulator semantics; it is not taken here (REV-05: no edit to make a run pass).
+
+last lines of the run log (traceback; full log kept in the scratchpad, 5.9 MB, mostly risk.quantize / risk.cost_rates info lines):
+    Traceback (most recent call last):
+      File "<frozen runpy>", line 203, in _run_module_as_main
+      File "<frozen runpy>", line 88, in _run_code
+      File "C:\Users\daotu\trading-rerun-v220\src\research\run.py", line 927, in <module>
+        raise SystemExit(main())
+                         ~~~~^^
+      File "C:\Users\daotu\trading-rerun-v220\src\research\run.py", line 901, in main
+        run_research(
+        ~~~~~~~~~~~~^
+            manifest=manifest,
+            ^^^^^^^^^^^^^^^^^^
+        ...<6 lines>...
+            checkpoint_dir=args.checkpoint_dir,
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        )
+        ^
+      File "C:\Users\daotu\trading-rerun-v220\src\research\run.py", line 681, in run_research
+        dataset_id, output = _simulate_split(
+                             ~~~~~~~~~~~~~~~^
+            manifest=manifest,
+            ^^^^^^^^^^^^^^^^^^
+        ...<4 lines>...
+            constraints=constraints,
+            ^^^^^^^^^^^^^^^^^^^^^^^^
+        )
+        ^
+      File "C:\Users\daotu\trading-rerun-v220\src\research\run.py", line 374, in _simulate_split
+        return data.dataset_id, simulator.run(case, minute_source=source)
+                                ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "C:\Users\daotu\trading-rerun-v220\src\backtest\simulator.py", line 56, in run
+        return simulate(case_input, risk_fn=evaluate_risk, minute_source=minute_source)
+      File "C:\Users\daotu\trading-rerun-v220\src\backtest\engine.py", line 994, in simulate
+        return simulate_detailed(case_input, risk_fn=risk_fn, minute_source=minute_source).output
+               ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "C:\Users\daotu\trading-rerun-v220\src\backtest\engine.py", line 972, in simulate_detailed
+        return _Engine(parsed, parameter_set, source, risk_fn).run()
+               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+      File "C:\Users\daotu\trading-rerun-v220\src\backtest\engine.py", line 362, in run
+        self._evaluate_signal(symbol, close)
+        ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+      File "C:\Users\daotu\trading-rerun-v220\src\backtest\engine.py", line 728, in _evaluate_signal
+        self._evaluate_strategy(symbol, close)
+        ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+      File "C:\Users\daotu\trading-rerun-v220\src\backtest\engine.py", line 793, in _evaluate_strategy
+        self._size_and_register(
+        ~~~~~~~~~~~~~~~~~~~~~~~^
+            symbol,
+            ^^^^^^^
+        ...<4 lines>...
+            result.regime,
+            ^^^^^^^^^^^^^^
+        )
+        ^
+      File "C:\Users\daotu\trading-rerun-v220\src\backtest\engine.py", line 902, in _size_and_register
+        levels = protective_levels_for_fill(
+            plan=trade_plan,
+        ...<2 lines>...
+            constraint_snapshot=pit.snapshot,
+        )
+      File "C:\Users\daotu\trading-rerun-v220\src\backtest\exits.py", line 314, in protective_levels_for_fill
+        tp1, tp2 = take_profit_levels(plan)
+                   ~~~~~~~~~~~~~~~~~~^^^^^^
+      File "C:\Users\daotu\trading-rerun-v220\src\backtest\exits.py", line 285, in take_profit_levels
+        raise ValueError(f"take_profit_json {key} must be a positive finite price, got {raw!r}")
+    ValueError: take_profit_json tp2 must be a positive finite price, got '-0.001548100000000000'

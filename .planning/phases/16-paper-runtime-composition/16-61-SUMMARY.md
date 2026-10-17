@@ -3,7 +3,7 @@ phase: 16-paper-runtime-composition
 plan: 61
 subsystem: research-runner
 status: partial
-blocked_before: "Task 2 step (4): writing the three six-key authorization files and decisions/16-DEC-RERUN-AUTH.md. Authorizations are reserved to the owner for this run, and the permission system denied the write command. Tasks 3 and 4 depend on it and did not start."
+blocked_at: "Task 3, family trend-pullback: the 2.2.0 rerun exited 1 (ValueError take_profit_json tp2 must be a positive finite price) after two windows of point a01; 0 experiment records written. Per the owner rule the rerun stopped; breakout-retest and range-mr were not started; Task 4 (supersede record, note, final gate) was not started because it states that the regenerated records exist."
 tags: [research, runner-hardening, authorization, simulator-semantics-2.2.0, B3-WR-02, B3-WR-03, B3-WR-04, B3-WR-05]
 requires: [16-60]
 requirements: [BKTS-03]
@@ -15,7 +15,9 @@ provides:
   - "ParameterGrid refuses a duplicate parameter_set_id, a duplicate varied tuple (numerically, so 2 and 2.0 are one point) and points that vary different key sequences (B3-WR-05)"
   - "the required sixth authorization key simulator_semantics_version: the five-key form is malformed, a version other than SIMULATOR_SEMANTICS_VERSION is refused as simulator_semantics_version_mismatch (16-60 Q4 = B)"
   - "evidence/16-61-hashes.txt: every owner precondition passes and the manifest hash and the three grid hashes recomputed by the 2.2.0 code match all recorded sources"
-  - "evidence/16-61-gate-before-rerun.txt: the full gate on the merged tree"
+  - "evidence/16-61-gate-before-rerun.txt: the full gate on the merged tree without PostgreSQL; evidence/16-61-gate-with-postgres.txt: the same gate with PostgreSQL, all green"
+  - "the three owner-written six-key authorization files and decisions/16-DEC-RERUN-AUTH.md, verified without simulation and committed (dce3195)"
+  - "evidence/16-61-run-output.txt: the technical state of the stopped rerun"
 affects: [16-61, 16-44]
 key-files:
   created:
@@ -42,18 +44,18 @@ key-decisions:
   - "Tests that used an absolute tmp constraint path now put constraints.json at the root of the repo_root they pass; main tests monkeypatch the module's _REPO_ROOT to that directory."
 duration: "about 5 hours wall; the full suite (31 minutes with PostgreSQL timeouts, 15 minutes without) dominated"
 completed: 2026-10-17
-commits: 3
+commits: 5
 plan_head_before: dde100b994349750e8f018ede609492ec30868db
-plan_head_after: 1b28ec9ab5c29390c7630d2e6fecd7eb715cc8db
+plan_head_after: dce3195f71fbc0c07564dc8f6693e5084fb0cf71
 actuals:
-  tokens: 10500
-  tasks: 1
-  commits: 3
+  tokens: 14000
+  tasks: 2
+  commits: 5
 ---
 
 # Phase 16 Plan 61: Runner hardening and the 2.2.0 rerun Summary (PARTIAL)
 
-Task 1 (the tracer) is done and committed: the runner that will produce the 2.2.0 records attests its trades, reads its inputs from the root it was imported from, refuses duplicate grids, and accepts only an authorization bound to its own simulator version. Task 2 is done through step (3) (preconditions, hash verification, refusals on the real inputs). It stopped at step (4), the writing of the three authorization files, which is reserved to the owner for this run. Tasks 3 (the rerun) and 4 (the supersede record and the final gate) did not start. No research run was made on the real manifest or the real data store.
+Task 1 (the tracer) and Task 2 are done and committed: the runner that will produce the 2.2.0 records attests its trades, reads its inputs from the root it was imported from, refuses duplicate grids and accepts only an authorization bound to its own simulator version; the preconditions, the hash verification and the owner-written authorization files check out. Task 3 (the rerun) STARTED and STOPPED at the first family: trend-pullback exited 1 with 0 experiment records written (see "Task 3: the rerun stopped" below). The rerun is not complete and is not labelled complete. Task 4 (supersede record, note on the 2026-10-16 table, final gate) was not started, because the supersede record states that the regenerated records exist. The plan stays `partial`; BKTS-03 stays open.
 
 ## What was built (Task 1, commit d5067a3)
 
@@ -83,13 +85,35 @@ Hashes (13 comparison lines, all `match`): the manifest hash `ec161733076f99e626
 
 Refusals on the real inputs (six, all as expected, exit 2, output directory never created, nothing on stdout): each family without an authorization prints `run refused: missing`; each family with its old five-key file prints `run refused: malformed`.
 
-## Pending, owner-only
+## Task 2 completion (commit dce3195)
 
-1. **The three authorization files and `decisions/16-DEC-RERUN-AUTH.md` (Task 2 step 4).** Not written. The values are verified and recorded at the end of evidence/16-61-hashes.txt: file `docs/research/preregistration/research-run-1-v2-2-0-authorization-<family>.json` with `grid_sha256` (the family's hash above), `manifest_sha256` `ec161733...ac569`, `authorized_at_utc` `2026-10-16T07:22:56+00:00` (author date of bdbdc11 in UTC), `statement` (the plan's text plus the `words:` line of 16-DEC-FIXPLANS.md in quotes), `authorized_by` `Tung Dao`, `simulator_semantics_version` `2.2.0`. The owner either confirms in the session that the agent may write them (the owner's decision in 16-DEC-FIXPLANS.md already permits it, but this run was told not to sign authorizations and the permission system denied the write), or writes the three files. Then the continuation re-checks the precondition lines at HEAD, writes the record `16-DEC-RERUN-AUTH.md` (layout of 16-DEC-RERUN-AUTH-FORM.md, three reviewer subsections copied by script, correction 7, renumbering mapping line `reviewer text says D072 and D073; recorded as D073 and D074`), verifies the two Task 2 commands that read the files, and commits.
-2. **A running PostgreSQL for the PostgreSQL tests.** Docker Desktop cannot start on this machine (WSL engine bootstrap error), so with `TEST_DATABASE_URL` set 483 tests error with `psycopg ConnectionTimeout` and 3 more fail the same way. The 487 PostgreSQL tests have not run on the merged tree. The owner starts a PostgreSQL (Docker Desktop repair or another server) and the gate is rerun with the variable set.
-3. **Task 3 (the rerun) and Task 4 (supersede record `16-DEC-RUN1-SUPERSEDED.md`, note on the 2026-10-16 feasibility table, final `16-61-gate.txt`)** follow once item 1 is done. Task 3 is a multi-hour sequential run (trend-pullback, breakout-retest, range-mr) in a separate worktree at a fixed commit; the evidence must state that the first Development window starts cold (the data begins 2024-10-03). Task 4's gate must run after the rerun, on a machine with PostgreSQL. `BKTS-03` stays open: `requirements.ready-ids` was not called to mark it, and it was not marked.
+The owner ran a script themself and wrote the three files `docs/research/preregistration/research-run-1-v2-2-0-authorization-{trend-pullback,breakout-retest,range-mr}.json` and `decisions/16-DEC-RERUN-AUTH.md` (session words: "Ký ba file authorization làm như thế nào, tôi uỷ quyền cho bạn làm luôn", then "xong rồi, và tôi cũng đã restart docker"). The agent did not create or edit them; it verified them without simulation and committed them with the evidence (section (5) of evidence/16-61-hashes.txt):
 
-## Gate numbers (evidence/16-61-gate-before-rerun.txt, commit 1b28ec9)
+- preconditions re-checked at HEAD 9547ce6 (18 pass lines, no failure): SUMMARY files and git order 16-55, 56, 57, 58, 59, 62, 60; 16-60 gate 6 `exit=0`; simulator 2.2.0; protocol header v2.5.0; DECISIONS rows D072, D073, D074 once each and D074 holds the owner's paragraph; Holdout marker `holdout-consumed/2`, v2.5.0, empty entries; Task 1 committed; tracked tree clean; output directory absent; no glob over `docs/research/experiments/`. Task 1's six-file test command ran again (191 dots, no failure) and `mypy src` is clean.
+- each file has the six keys in order; `load_authorization` accepts it; `require_authorized` passes against the real manifest and the family's real grid (no simulation); `grid_sha256` is the hash of the family in the file name (checked against the hash recomputed by the 2.2.0 `load_grid` + `grid_hash` and against evidence/16-46-hashes.txt), `manifest_sha256` is `ec161733...ac569`, `simulator_semantics_version` is `2.2.0`, `authorized_at_utc` is `2026-10-16T07:22:56+00:00`, and `statement` equals the plan's text plus the `words:` line of 16-DEC-FIXPLANS.md verbatim.
+- `16-DEC-RERUN-AUTH.md` holds the owner's words, the three reviewer subsections byte-equal to the reviewer-text file, the mapping line `reviewer text says D072 and D073; recorded as D073 and D074` and the owner's note.
+- the three old authorization files and the frozen manifest are byte-unchanged against 5f8269b (Task 2's third verify command passes); Task 2's first and second verify commands pass (13 comparison lines, 13 match; three files, one per family).
+- observation, not edited: each statement says "File written by Claude on the user's explicit permission", the text the plan prescribes, while the files were in fact produced by the owner's script.
+
+## Task 3: the rerun stopped at trend-pullback
+
+Setup: `RUN_COMMIT` dce3195f71fbc0c07564dc8f6693e5084fb0cf71; separate worktree `C:\Users\daotu\trading-rerun-v220` (detached, clean); `r._REPO_ROOT` printed the worktree path; empty checkpoint directories `C:\Users\daotu\rerun-v220-ck\<family>`; main `.venv` python; `--raw-root` the main `data/raw`; `--output-dir` `docs/research/experiments/research-run-1-v2-2-0` in the main tree; `--time-run`. The run ran as one background process per family in the order trend-pullback, breakout-retest, range-mr, stopping at the first non-zero exit.
+
+Result (evidence/16-61-run-output.txt): trend-pullback started 2026-10-17T08:50:31Z and ended 09:03:15Z (12 min 44 s) with exit code 1. Uncaught `ValueError: take_profit_json tp2 must be a positive finite price, got '-0.001548100000000000'` raised by `src/backtest/exits.py` `take_profit_levels` (called from `protective_levels_for_fill` in `_size_and_register`). 0 experiment records were written; the output directory was never created; the checkpoint directory holds 2 saved windows of point a01 (the Development window and the Validation window starting 2025-07-22) and the failing window is the next one of a01 (inferred from the files). The cold-start line for the first Development window was printed and is recorded. No performance section was inspected, nothing was retried, edited or worked around, breakout-retest and range-mr were not started, and the worktree and checkpoint directories were left in place. The Holdout marker and `docs/research/experiments/research-run-1/` are untouched.
+
+Cause as printed, not decided: `src/core/planner.py` computes `tp2 = entry_ref -/+ 2 * tp1_leg`; a negative short `tp2` means the planned take-profit leg exceeds half of the entry price on a very low-priced symbol. The engine fails closed on it. Likely, not verified: the 2.1.0 run never produced this trade plan because indicators were cold for the first ~800 hours of each window; the 50-day warm-up lets signals through earlier. Whether the planner should refuse such a plan (a NO_TRADE reason) or the engine should skip the signal is a change of simulator or planner semantics: that is a decision for the owner and, under REV-05, a new simulator version and new authorizations, not a fix inside this authorization.
+
+## Gate with PostgreSQL (evidence/16-61-gate-with-postgres.txt)
+
+Docker Desktop was restarted by the owner; `trading-postgres-1` (postgres:17.11-bookworm) is healthy and the connection was checked. On HEAD dce3195 with `TEST_DATABASE_URL` set: `pytest -m "not docker" -rs` exit 0, 10229 passed, 6 skipped (platform skips as before), 0 failed, 0 errors, counted from the progress lines because `addopts = "-q"` plus `-q` suppresses the summary line (10229 = 9742 + the 487 PostgreSQL tests); `ruff check` exit 0; `ruff format --check` exit 0 (626 files); `mypy src` exit 0 (202 files); `uv lock --check` exit 0. This closes the earlier gap that the 487 PostgreSQL tests had not run on the merged tree. It is not the plan's post-rerun `16-61-gate.txt`, which does not exist.
+
+## Pending
+
+1. **Owner decision on the trend-pullback failure** (the cause above). No further rerun attempt is made until it is decided. Nothing was run for breakout-retest and range-mr.
+2. **Task 3 (finish) and Task 4** remain open: after the decision, the rerun (probably under a new simulator version and fresh authorizations, REV-05), then `16-DEC-RUN1-SUPERSEDED.md`, the note appended to `16-46-run1-feasibility-table.md` (its committed blob is LF while the working copy is CRLF; the plan's prefix check needs the file rebuilt from the blob bytes plus the note) and `16-61-gate.txt`.
+3. The worktree `C:\Users\daotu\trading-rerun-v220` and `C:\Users\daotu\rerun-v220-ck\` can be kept for diagnosis or removed. `BKTS-03` was not marked complete.
+
+## Gate numbers without PostgreSQL (evidence/16-61-gate-before-rerun.txt, commit 1b28ec9)
 
 `pytest -m "not docker" -rs`, TEST_DATABASE_URL unset: exit 0, 9742 passed, 493 skipped (487 PostgreSQL, 6 platform skips as in the 16-60 gate), 28 deselected, 0 failed, 15m26s. `ruff check` exit 0; `ruff format --check` exit 0 (626 files); `mypy src` exit 0 (202 files); `uv lock --check` exit 0.
 
@@ -105,9 +129,13 @@ The first full run, on commit d5bdef2 with `TEST_DATABASE_URL` set and no Postgr
 
 **4. [Rule 2 - Missing] The key-sequence rule.** The plan allows it only if all three committed grids satisfy it; they do (checked before adding it), so it was added. Commit d5067a3.
 
-**5. Task 2 step (4) not done; Tasks 3 and 4 not started.** See the pending section. Authorizations are the owner's for this run and the write command was denied by the permission system; nothing was worked around.
+**5. Task 2 step (4) was done by the owner, not by the agent.** The agent's earlier write was denied by the permission system; the owner then ran their own script and told the agent to verify. The agent verified and committed the files without editing them.
 
-**6. The gate was run twice, and the PostgreSQL tests did not run.** See the gate section. `evidence/16-61-gate-before-rerun.txt` is an addition to the plan's file list; the plan's `16-61-gate.txt` is the post-rerun gate and does not exist yet.
+**6. Two extra gate evidence files.** `evidence/16-61-gate-before-rerun.txt` (no PostgreSQL) and `evidence/16-61-gate-with-postgres.txt` are additions to the plan's file list; the plan's `16-61-gate.txt` is the post-rerun gate and does not exist.
+
+**7. Task 3 stopped on a family failure; Task 4 not started.** Per the owner rule and the plan (a failed family stops the rerun and is reported, never retried blindly). Not a Rule 1-3 fix: the cause is a simulator/planner semantics question (Rule 4), not fixed here.
+
+**8. STATE.md `completed_plans` checked, not changed.** 231 plans, 228 with a SUMMARY file (3 without: 16-43, 16-44, 18-25); 16-61 is partial, so 227 completed. The value 227 written by the earlier record-session is correct.
 
 ## Known Stubs
 
@@ -121,4 +149,5 @@ None. The new code paths only read files under the repository root the code was 
 
 - Files exist: `tests/test_research_runner_hardening.py`, `evidence/16-61-hashes.txt`, `evidence/16-61-gate-before-rerun.txt`, this summary.
 - Commits exist: `d5067a3` (Task 1), `d5bdef2` (Task 2 evidence), `1b28ec9` (register test fix).
-- Not self-checked because not produced: the three authorization files, `16-DEC-RERUN-AUTH.md`, the 240 records, `16-DEC-RUN1-SUPERSEDED.md`, `16-61-gate.txt`.
+- Files exist and are committed: the three authorization files and `16-DEC-RERUN-AUTH.md` (dce3195, owner-written), `evidence/16-61-run-output.txt`, `evidence/16-61-gate-with-postgres.txt`.
+- Not produced (rerun stopped): the 240 records, `16-61-feasibility-table.md`, `16-DEC-RUN1-SUPERSEDED.md`, the appended note, `16-61-gate.txt`. Self-check of the plan as a whole: NOT COMPLETE, by design.

@@ -1,0 +1,16 @@
+16-61 gate on the merged tree WITH PostgreSQL (TEST_DATABASE_URL set, postgres:17.11-bookworm container trading-postgres-1 healthy, connection checked before the run)
+HEAD dce3195, tracked tree clean, run on 2026-10-17 after the 2.2.0 rerun stopped at trend-pullback. This is NOT the plan's post-rerun gate (16-61-gate.txt): the rerun did not complete, so Task 4 was not done.
+pytest summary line: suppressed (pyproject addopts = -q plus -q gives -qq); counted from the progress lines instead: 10229 passed, 6 skipped (the platform skips listed below), 0 failed, 0 errors. 10229 = 9742 (earlier run without PostgreSQL) + 487 PostgreSQL tests.
+SKIPPED [1] tests\test_analytics_files.py:974: symlinks unavailable on this platform: OSError
+SKIPPED [1] tests\test_bootstrap.py:947: NTFS cannot represent POSIX modes
+SKIPPED [4] tests\test_deploy_heartbeat.py:401: file modes do not exist on Windows
+exit=0 .venv/Scripts/python -m pytest -m not docker -q -rs -p no:cacheprovider
+SKIPPED [4] tests\test_deploy_heartbeat.py:401: file modes do not exist on Windows
+exit=0 .venv/Scripts/python -m ruff check
+All checks passed!
+exit=0 .venv/Scripts/python -m ruff format --check
+626 files already formatted
+exit=0 .venv/Scripts/python -m mypy src
+Success: no issues found in 202 source files
+exit=0 uv lock --check
+Resolved 60 packages in 26ms
