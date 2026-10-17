@@ -19,6 +19,7 @@ from __future__ import annotations
 import ast
 import importlib
 import inspect
+import re
 from pathlib import Path
 
 import pytest
@@ -490,3 +491,53 @@ def test_invariant_9_every_rest_holder_takes_the_shared_gate(
         assert parameter.default is inspect.Parameter.empty, f"{class_name} must require a gate"
     else:
         assert parameter.default is None
+
+
+# --------------------------------------------------------------------------- #
+# The traceability document (written by plan 18-22 Task 2).
+# --------------------------------------------------------------------------- #
+
+TRACEABILITY = PHASE_DIR / "18-TRACEABILITY.md"
+TRACEABILITY_SECTIONS: tuple[str, ...] = (
+    "## 1. Goal and ROADMAP success criteria",
+    "## 2. Requirements and evidence level",
+    "## 3. CONTEXT decisions D-01 to D-22",
+    "## 4. Folded inherited items",
+    "## 5. Owner-only items",
+    "## 6. Research findings, pitfalls and the UNVERIFIED register",
+    "## 7. Deferred ideas confirmed not built",
+    "## Gate run",
+    "## Merge check against develop",
+)
+_NAMED_TEST = re.compile(r"`(test_[a-z0-9_]+\.py)::(test_[a-z0-9_]+)`")
+
+
+def test_phase18_traceability_has_every_requirement_and_decision_row() -> None:
+    text = TRACEABILITY.read_text(encoding="utf-8")
+    missing_sections = [s for s in TRACEABILITY_SECTIONS if s not in text]
+    assert missing_sections == [], f"traceability sections missing: {missing_sections}"
+    lines = text.splitlines()
+    for requirement in REQUIREMENT_TESTS:
+        assert any(line.startswith(f"| {requirement} ") for line in lines), requirement
+    for number in range(1, 23):
+        marker = f"| D-{number:02d} "
+        assert any(line.startswith(marker) for line in lines), f"decision D-{number:02d}"
+    for item in ("G3-001", "G2-028", "G2-029", "G3-009", "G4-034", "G4-043", "D055 probe cases"):
+        assert any(line.startswith(f"| {item}") for line in lines), item
+    for owner in ("O-18-01", "O-18-02", "O-18-03", "O-18-04"):
+        assert any(line.startswith(f"| {owner} ") for line in lines), owner
+    assert not re.search(r"\|\s*MISSING\s*\|", text), "a traceability row says MISSING"
+    assert "D055" in text and "OPEN" in text
+
+
+def test_phase18_traceability_names_only_existing_tests() -> None:
+    text = TRACEABILITY.read_text(encoding="utf-8")
+    named = _NAMED_TEST.findall(text)
+    assert named, "the traceability document names no test"
+    problems = [
+        f"{filename}::{name}"
+        for filename, name in sorted(set(named))
+        if not (ROOT / "tests" / filename).exists()
+        or name not in _test_function_names(ROOT / "tests" / filename)
+    ]
+    assert problems == [], f"traceability names tests that do not exist: {problems}"
