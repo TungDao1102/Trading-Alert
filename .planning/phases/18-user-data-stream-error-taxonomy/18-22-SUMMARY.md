@@ -92,3 +92,7 @@ None.
 ## Self-Check: PASSED
 
 - `tests/test_phase18_gate.py`, `18-TRACEABILITY.md`: present. Commits b7c6a62 and 07fa829: present on `phase-18-smoke`.
+
+## Update 2026-10-18: Tasks 3 and 4 done
+
+Task 3: the user integrated `phase-18-smoke` into `develop` with `git merge --no-ff` (merge commit dde100b; `decisions/18-DEC-INTEGRATION.md`, `option: integrated`). Task 4: the six commands of the gate were run on `develop` at aeff995 (which includes the plan 18-26 commits) and recorded in `18-TRACEABILITY.md` section "Gate run after integration with develop" (commit e1bc268): all exit 0 (10303 passed, 6 Windows platform skips, no PostgreSQL test skipped; `ALL_PASS all`; `uv lock --check` exit 0). The "Open items" entry for Task 3 and Task 4 above is closed by this note.
