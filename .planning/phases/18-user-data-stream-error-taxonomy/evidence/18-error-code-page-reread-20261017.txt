@@ -1,0 +1,22 @@
+Error-code page re-read for the taxonomy codes -1106, -4016, -4024 and -1125
+read date: 2026-10-17 (UTC date of the session)
+read by: the orchestrating assistant with WebFetch (a summary by a small model, not a character-exact copy; the same caveat as every row of docs/SOURCES.md, section "Facts read for Phase 18")
+URLs fetched, both answering with the same page:
+  https://developers.binance.com/docs/derivatives/usds-margined-futures/error-code   (the form the repository's SOURCES row uses)
+  https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/error-code   (the form the reviewer gave)
+page title: Error Codes | Binance Developer Docs
+product section: Futures (USDⓈ-M), Core Trading
+page last modified (as shown by the page): 2026-10-16
+
+rows (each appeared once on the page):
+-1106 PARAM_NOT_REQUIRED: "A parameter was sent when not required." / "Parameter '%s' sent when not required."
+-1125 INVALID_LISTEN_KEY: "This listenKey does not exist. Please use `POST /fapi/v1/listenKey` to recreate `listenKey`"
+-4016 PRICE_HIGHTER_THAN_MULTIPLIER_UP: "Price is higher than mark price multiplier cap."   (the page spells HIGHTER)
+-4024 PRICE_LOWER_THAN_MULTIPLIER_DOWN: "Price is lower than mark price multiplier floor."
+
+notes:
+- The Demo probe of 2026-10-16 answered -1106 with "Parameter 'reduceonly' sent when not required." and -4016 with "Limit price can't be higher than 86305.10." (evidence/18-probe-check.txt). The Demo wording differs from the page wording; the code and the name are the same.
+- -4024 was not observed on the Demo.
+- Out of scope here (listed by the same page, not added): -4131 MARKET_ORDER_REJECT, -4183 and -4184 (stop price multiplier cap and floor).
+- This file is a record of a read made on 2026-10-17. It does not say the page was verified live on 2026-10-16.
+- Secondary technical reference for -1106 in hedge mode (not a source of the table): https://github.com/nautechsystems/nautilus_trader/issues/4231 (reduceOnly sent together with positionSide answered -1106; closed June 2026).
