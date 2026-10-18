@@ -57,8 +57,8 @@ MUTATING_METHODS = (
 
 def fake_environ() -> dict[str, str]:
     return {
-        "BINANCE_TESTNET_API_KEY": FAKE_KEY,
-        "BINANCE_TESTNET_API_SECRET": FAKE_SECRET,
+        "BINANCE_DEMO_API_KEY": FAKE_KEY,
+        "BINANCE_DEMO_API_SECRET": FAKE_SECRET,
         "TELEGRAM_BOT_TOKEN": FAKE_TOKEN,
         "TELEGRAM_AUTHORIZED_CHAT_ID": FAKE_CHAT,
     }
@@ -239,8 +239,8 @@ def test_load_credentials_reads_only_the_four_named_env_vars() -> None:
             assert secret not in rendered
 
     for name in (
-        "BINANCE_TESTNET_API_KEY",
-        "BINANCE_TESTNET_API_SECRET",
+        "BINANCE_DEMO_API_KEY",
+        "BINANCE_DEMO_API_SECRET",
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_AUTHORIZED_CHAT_ID",
     ):
@@ -549,7 +549,7 @@ def test_no_host_symbol_or_base_url_option_exists(tmp_path: Path) -> None:
 
 def test_missing_credentials_refuse_before_any_adapter_is_built(tmp_path: Path) -> None:
     env = fake_environ()
-    del env["BINANCE_TESTNET_API_SECRET"]
+    del env["BINANCE_DEMO_API_SECRET"]
     code, factory = run_main(["--scenario", "far"], tmp_path, environ=env)
     assert code == dr.EXIT_REFUSED
     assert factory.builds == 0

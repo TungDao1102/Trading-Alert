@@ -57,8 +57,8 @@ MUTATING = ("place_entry", "place_algo_protective", "cancel_normal_order", "canc
 
 def environ() -> dict[str, str]:
     return {
-        "BINANCE_TESTNET_API_KEY": FAKE_KEY,
-        "BINANCE_TESTNET_API_SECRET": FAKE_SECRET,
+        "BINANCE_DEMO_API_KEY": FAKE_KEY,
+        "BINANCE_DEMO_API_SECRET": FAKE_SECRET,
         "TELEGRAM_BOT_TOKEN": FAKE_TOKEN,
         "TELEGRAM_AUTHORIZED_CHAT_ID": str(AUTH_CHAT),
     }

@@ -188,7 +188,7 @@ OI_POLL_INTERVAL_SECONDS=300
 IMAGE_TAG=dev
 ```
 
-Tuyệt đối không đặt `BINANCE_LIVE_*` vào tệp của máy paper/soak này (OPS-06). Khóa Binance demo/testnet nếu có dùng tên `BINANCE_TESTNET_API_KEY` và `BINANCE_TESTNET_API_SECRET`, và tách thành tệp riêng cho máy khác.
+Tuyệt đối không đặt `BINANCE_LIVE_*` vào tệp của máy paper/soak này (OPS-06). Khóa Binance Demo nếu có dùng tên `BINANCE_DEMO_API_KEY` và `BINANCE_DEMO_API_SECRET`, và tách thành tệp riêng cho máy khác.
 
 #### Bước 2.6 Quyền truy cập repository [THỦ CÔNG] [CHƯA XÁC MINH]
 
@@ -1597,7 +1597,7 @@ Quyết định `16-DEC-Q-L` (ngày 2026-10-09) là "separate-bot": máy soak d�
 **Chạy ở:** `[MÁY CÓ MẠNG]`
 
 - Soak SHADOW chỉ dùng dữ liệu thị trường công khai và KHÔNG cần khóa nào.
-- Giai đoạn DEMO về sau dùng khóa testnet/demo, tên biến `BINANCE_TESTNET_API_KEY` và `BINANCE_TESTNET_API_SECRET` (người dùng là Phase 18).
+- Giai đoạn DEMO về sau dùng khóa Demo, tên biến `BINANCE_DEMO_API_KEY` và `BINANCE_DEMO_API_SECRET` (người dùng là Phase 18).
 - Giai đoạn CANARY dùng một khóa mainnet CHỈ-ĐỌC (không giao dịch, không rút tiền, giới hạn theo IP của VPS theo D042). Tên biến cho khóa này chưa được repository định nghĩa `[CHƯA XÂY]`.
 - `BINANCE_LIVE_*` chỉ được phép nằm trong tệp env riêng của một triển khai live, không bao giờ trên máy paper/soak (OPS-06). Việc tách `env_file` theo từng service (WR-06) phải làm xong TRƯỚC khi bất kỳ khóa live nào vào `.env` (D061 hosts).
 - Quy tắc IP whitelist: mỗi khóa Binance bị giới hạn ở đúng Elastic IP của máy, quyền rút tiền tắt, và danh sách IP được cập nhật sau mỗi lần cutover hay khi địa chỉ đổi (D042 điều kiện 4; RUNBOOK 13.5 mục 1 và 15.6). Giao diện Binance để làm việc đó không được repository mô tả; việc này là `[THỦ CÔNG]` và chưa được kiểm chứng.
@@ -1853,7 +1853,7 @@ D040 quy định con đường phát hành an toàn SHADOW, DEMO, CANARY, LIVE, 
 | Giai đoạn | Cái gì chạy | Khóa nạp | Lệnh | Tiêu chí thoát | Phase xây | Trạng thái |
 | --- | --- | --- | --- | --- | --- | --- |
 | SHADOW | tiến trình paper trên dữ liệu thị trường công khai; thông báo có nhãn, APPROVE/SKIP rồi CONFIRM; khớp lệnh mô phỏng; không đường nào tới lệnh thật | không khóa giao dịch nào | không có (không dựng adapter lệnh) | trial soak đạt các tiêu chí ở bước 7.7 và chuỗi đóng ở bước 7.6 | Phase 16 (đang thực hiện, 14/50), Phase 17 đã xong | `[CHƯA XÂY]` ở cấp vận hành |
-| DEMO | APPROVE rồi CONFIRM đặt lệnh trên Binance Demo Trading (demo-fapi.binance.com) | khóa demo/testnet | chỉ lệnh trên tài khoản demo | bộ kịch bản demo tự động qua và một soak demo nhiều tuần với không có sai lệch không giải thích, không có vị thế nào thiếu SL phía sàn, không có lệnh vào trùng | Phase 18 đến 25 | `[CHƯA XÂY]` |
+| DEMO | APPROVE rồi CONFIRM đặt lệnh trên Binance Demo Trading (demo-fapi.binance.com) | khóa Demo | chỉ lệnh trên tài khoản demo | bộ kịch bản demo tự động qua và một soak demo nhiều tuần với không có sai lệch không giải thích, không có vị thế nào thiếu SL phía sàn, không có lệnh vào trùng | Phase 18 đến 25 | `[CHƯA XÂY]` |
 | CANARY | khóa mainnet chỉ-đọc xác minh exchangeInfo, hoa hồng, giá mark và số dư thật; rồi một tài khoản phụ nhỏ biệt lập (cỡ USD 50 đến 100, cỡ tối thiểu) giao dịch khi người vận hành theo dõi | khóa chỉ-đọc, rồi khóa của tài khoản phụ | lệnh thật cỡ nhỏ | số lệnh đã đăng ký trước, không có sai lệch | Phase 26 | `[CHƯA XÂY]` |
 | LIVE | chỉ sau khi tiêu chí thoát CANARY đạt | `BINANCE_LIVE_*` chỉ trong env riêng của triển khai live | lệnh thật | do Phase 26 xác định | Phase 24 và 26 | `[CHƯA XÂY]` |
 

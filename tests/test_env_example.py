@@ -86,10 +86,16 @@ def test_assigned_values_are_empty_or_documented_placeholders() -> None:
             assert value == "", f"{name} must be an empty assignment in the template"
 
 
-def test_testnet_credentials_are_empty_active_assignments() -> None:
+def test_demo_credentials_are_empty_active_assignments() -> None:
     assigned = _assignments()
-    assert assigned.get("BINANCE_TESTNET_API_KEY") == ""
-    assert assigned.get("BINANCE_TESTNET_API_SECRET") == ""
+    assert assigned.get("BINANCE_DEMO_API_KEY") == ""
+    assert assigned.get("BINANCE_DEMO_API_SECRET") == ""
+
+
+def test_no_testnet_credential_name_is_invented() -> None:
+    # TESTNET stays NOT_CONFIGURED (O-18-01): the template carries no BINANCE_TESTNET_ name.
+    names = set(_assignments()) | _commented_names()
+    assert not {n for n in names if n.startswith("BINANCE_TESTNET_")}
 
 
 def test_live_credentials_appear_only_on_comment_lines() -> None:
@@ -102,12 +108,12 @@ def test_live_credentials_appear_only_on_comment_lines() -> None:
 
 def test_paper_and_live_credential_names_differ() -> None:
     names = set(_assignments()) | _commented_names()
-    testnet = {n for n in names if n.startswith("BINANCE_TESTNET_")}
+    demo = {n for n in names if n.startswith("BINANCE_DEMO_")}
     live = {n for n in names if n.startswith("BINANCE_LIVE_")}
-    assert testnet and live
-    assert not testnet & live
+    assert demo and live
+    assert not demo & live
     # No credential name without an environment qualifier (would be ambiguous, OPS-06).
-    ambiguous = {n for n in names if n.startswith("BINANCE_") and n not in testnet | live}
+    ambiguous = {n for n in names if n.startswith("BINANCE_") and n not in demo | live}
     assert not ambiguous, f"unqualified Binance credential names: {sorted(ambiguous)}"
 
 

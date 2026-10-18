@@ -17,7 +17,7 @@ Safety posture (read before running anything):
 * ``--execute`` needs an interactive terminal AND an exactly typed phrase, for example
   ``DEMO FAR BTCUSDT``. Anything else exits 2 before any network call.
 * Credentials come only from four environment variables of the current shell session:
-  BINANCE_TESTNET_API_KEY, BINANCE_TESTNET_API_SECRET, TELEGRAM_BOT_TOKEN and
+  BINANCE_DEMO_API_KEY, BINANCE_DEMO_API_SECRET, TELEGRAM_BOT_TOKEN and
   TELEGRAM_AUTHORIZED_CHAT_ID. No file is read for credentials and no other variable is used.
   Set them in the shell session only, never in a file that is committed.
 * Evidence files carry exchange-returned ids only, never a secret, and are scrubbed before
@@ -175,8 +175,8 @@ DEMO_BASE_URL: str = DERIVATIVES_TRADING_USDS_FUTURES_REST_API_DEMO_URL
 DEMO_HOST = "demo-fapi.binance.com"
 SYMBOL = "BTCUSDT"
 
-ENV_BINANCE_KEY = "BINANCE_TESTNET_API_KEY"
-ENV_BINANCE_SECRET = "BINANCE_TESTNET_API_SECRET"  # noqa: S105 - a variable NAME, not a secret
+ENV_BINANCE_KEY = "BINANCE_DEMO_API_KEY"
+ENV_BINANCE_SECRET = "BINANCE_DEMO_API_SECRET"  # noqa: S105 - a variable NAME, not a secret
 ENV_TELEGRAM_TOKEN = "TELEGRAM_BOT_TOKEN"  # noqa: S105 - a variable NAME, not a secret
 ENV_TELEGRAM_CHAT = "TELEGRAM_AUTHORIZED_CHAT_ID"
 

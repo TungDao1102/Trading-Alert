@@ -9,7 +9,7 @@
 - Avoid logging API keys/signatures.
 - Webhook endpoints must be authenticated. TradingView cannot sign requests, so an HMAC signature is not available; V1 has no webhook endpoint, and if one is built the scheme is a secret URL path segment plus a source-IP allow-list (F-052). See `integration/TRADINGVIEW.md` section 5.
 - Separate paper/test credentials from live credentials.
-- Phase 13.1 (D050): `.env` is created by `deploy/bootstrap.sh` from an off-host secrets file with umask 077, mode 0600 and the service user as owner, and no value is ever printed (OPS-06). Paper/test and live credentials use separate variable names (`BINANCE_TESTNET_API_KEY` and `BINANCE_TESTNET_API_SECRET`; `BINANCE_LIVE_API_KEY` and `BINANCE_LIVE_API_SECRET`, commented out until Phase 24), so a paper process can never pick up a live credential by accident.
+- Phase 13.1 (D050): `.env` is created by `deploy/bootstrap.sh` from an off-host secrets file with umask 077, mode 0600 and the service user as owner, and no value is ever printed (OPS-06). Demo and live credentials use separate variable names (`BINANCE_DEMO_API_KEY` and `BINANCE_DEMO_API_SECRET`; `BINANCE_LIVE_API_KEY` and `BINANCE_LIVE_API_SECRET`, commented out until Phase 24), so a paper process can never pick up a live credential by accident.
 - Phase 13.1 (D050): host access is key-only (`PasswordAuthentication no`, `PermitRootLogin no`, enforced by a `00-` sshd drop-in that is verified with `sshd -T`), ufw denies incoming traffic except SSH, and PostgreSQL is published only on `127.0.0.1`. ufw does not govern ports published by Docker, so no other port may be published. The Binance key is restricted to the host's IP and has no withdrawal permission (operator checklist printed by bootstrap).
 
 ## 2. Live safety

@@ -958,7 +958,7 @@ def test_env_file_mode_is_0600(golden: Golden) -> None:
         ("POSTGRES_USER=trading\nPOSTGRES_PASSWORD=''\nPOSTGRES_DB=trading\n", "POSTGRES_PASSWORD"),
         (
             f"POSTGRES_USER=trading\nPOSTGRES_PASSWORD=change_me_please\nPOSTGRES_DB=trading\n"
-            f"BINANCE_TESTNET_API_SECRET={SECRET_PASSWORD}\n",
+            f"BINANCE_DEMO_API_SECRET={SECRET_PASSWORD}\n",
             "POSTGRES_PASSWORD",
         ),
         (

@@ -44,7 +44,13 @@ def events(monkeypatch: pytest.MonkeyPatch) -> _Events:
 
 
 @pytest.mark.parametrize(
-    "name", ["BINANCE_LIVE_API_KEY", "BINANCE_TESTNET_API_SECRET", "BINANCE_FOO"]
+    "name",
+    [
+        "BINANCE_LIVE_API_KEY",
+        "BINANCE_DEMO_API_SECRET",
+        "BINANCE_TESTNET_API_SECRET",  # a stale old name still refuses (prefix guard)
+        "BINANCE_FOO",
+    ],
 )
 @pytest.mark.parametrize("value", [SECRET_VALUE, ""])
 def test_any_binance_variable_refuses_with_code_3_names_only_before_the_allowlist(

@@ -369,8 +369,8 @@ SECRET_VALUE = "isolation-secret-value-must-never-be-printed"
 TRADE_NAMES = (
     "BINANCE_LIVE_API_KEY",
     "BINANCE_LIVE_API_SECRET",
-    "BINANCE_TESTNET_API_KEY",
-    "BINANCE_TESTNET_API_SECRET",
+    "BINANCE_DEMO_API_KEY",
+    "BINANCE_DEMO_API_SECRET",
     "BINANCE_FOO",
 )
 EVIDENCE_NAME = "unused-evidence.json"
