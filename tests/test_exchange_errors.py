@@ -22,6 +22,7 @@ from binance_common.configuration import ConfigurationRestAPI
 from binance_common.utils import send_request
 from src.adapters.binance_errors import error_facts_from_exception
 from src.domain.exchange_errors import (
+    DEMO_SMOKE_DATE,
     ERROR_CODE_TABLE,
     ERROR_TABLE_READ_DATE,
     ERROR_TABLE_REREAD_DATE,
@@ -194,6 +195,8 @@ _EXPECTED_BY_CODE: dict[int, tuple[ExchangeErrorCategory, tuple[CallKind, ...]]]
     -4137: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
     -4138: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
     -4142: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
+    -4016: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
+    -4024: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
     -4164: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
     -4400: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
     -4401: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
@@ -217,7 +220,7 @@ def test_code_classifies_per_call_kind(code: int, http_class: HttpClass) -> None
 
 # The codes of the second read of the error-code page (2026-10-17, plan 18-26). Every other
 # entry keeps the first read date. Changed on purpose, owner decided 2026-10-17.
-_REREAD_CODES: frozenset[int] = frozenset({-1106})
+_REREAD_CODES: frozenset[int] = frozenset({-1106, -4016, -4024, -1125})
 
 
 def _expected_read_date(code: int) -> str:
@@ -264,13 +267,27 @@ _PROBE_OBSERVED_IN_TABLE: tuple[tuple[int, CallKind, ExchangeErrorCategory, str]
         _C.REJECTED_DEFINITIVE,
         "Parameter 'reduceonly' sent when not required.",
     ),
+    (
+        -4016,
+        CallKind.PLACEMENT,
+        _C.REJECTED_DEFINITIVE,
+        "Limit price can't be higher than 86305.10.",
+    ),
+)
+# The Demo user-data smoke answer that is in the table (evidence/18-smoke-check.txt item f,
+# 2026-10-16): a keepalive (PUT) after a delete answered -1125 INVALID_LISTEN_KEY.
+_SMOKE_OBSERVED_IN_TABLE: tuple[tuple[int, CallKind, ExchangeErrorCategory], ...] = (
+    (-1125, CallKind.LISTEN_KEY, _C.INVALID_LISTEN_KEY),
 )
 
 
 def test_demo_observed_codes_are_exactly_the_probe_observed_codes_in_the_table() -> None:
     observed = sorted(code for code, entry in ERROR_CODE_TABLE.items() if entry.demo_observed_on)
-    assert observed == sorted(code for code, *_ in _PROBE_OBSERVED_IN_TABLE)
-    assert observed == [-4509, -4116, -2021, -2013, -2011, -1106]
+    assert observed == sorted(
+        [code for code, *_ in _PROBE_OBSERVED_IN_TABLE]
+        + [code for code, *_ in _SMOKE_OBSERVED_IN_TABLE]
+    )
+    assert observed == [-4509, -4116, -4016, -2021, -2013, -2011, -1125, -1106]
     assert -4024 not in observed
     for code in observed:
         assert ERROR_CODE_TABLE[code].demo_observed_on == "2026-10-16"
@@ -282,10 +299,13 @@ def test_probe_answers_classify_as_the_probe_check_file_says() -> None:
     for code, kind, category, _message in _PROBE_OBSERVED_IN_TABLE:
         facts = ErrorFacts(HttpClass.BAD_REQUEST, code, None)
         assert classify(facts, kind) is category, code
+    for code, kind, category in _SMOKE_OBSERVED_IN_TABLE:
+        facts = ErrorFacts(HttpClass.BAD_REQUEST, code, None)
+        assert classify(facts, kind) is category, code
 
 
 def test_a_demo_observation_does_not_relabel_a_documented_code() -> None:
-    for code in (-2013, -2011, -4116, -2021, -1106):
+    for code in (-2013, -2011, -4116, -2021, -1106, -4016, -4024, -1125):
         assert ERROR_CODE_TABLE[code].evidence == "documented"
     assert ERROR_CODE_TABLE[-4509].evidence == "demo-observed"
     # The duplicate clientAlgoId case was observed as -4116 (DUPLICATE_CLIENT_ID on placement).
@@ -717,3 +737,96 @@ def test_table_is_read_only() -> None:
     assert isinstance(ERROR_CODE_TABLE, Mapping)
     with pytest.raises(TypeError):
         ERROR_CODE_TABLE[-1] = ERROR_CODE_TABLE[-2013]  # type: ignore[index]
+
+
+def test_codes_outside_the_owner_decision_stay_unknown() -> None:
+    """-4131, -4183 and -4184 are listed by the same page and are not added (owner point 5)."""
+    for code in (-4131, -4183, -4184):
+        assert code not in ERROR_CODE_TABLE
+        for http_class in (HttpClass.BAD_REQUEST, HttpClass.NOT_FOUND):
+            facts = ErrorFacts(http_class, code, None)
+            for kind in CallKind:
+                assert classify(facts, kind) is _C.UNKNOWN_EXCHANGE_ERROR, (code, kind)
+
+
+def test_4016_entry_keeps_page_and_demo_wording_apart() -> None:
+    entry = ERROR_CODE_TABLE[-4016]
+    assert entry.name == "PRICE_HIGHTER_THAN_MULTIPLIER_UP"
+    assert entry.evidence == "documented"
+    assert entry.read_date == ERROR_TABLE_REREAD_DATE
+    assert entry.demo_observed_on == "2026-10-16"
+    assert dict(entry.categories_by_call_kind) == {_K.PLACEMENT: _C.REJECTED_DEFINITIVE}
+    for required in (
+        "mark price multiplier cap",
+        "Price is higher than mark price multiplier cap.",
+        "Limit price can't be higher than 86305.10.",
+        "wording differs",
+        "HIGHTER",
+        "no retry",
+        "never evidence that an order is protected",
+        "re-read 2026-10-17",
+        "refreshing the mark price and the filters",
+        "consumer",
+        "Phase 19/20",
+    ):
+        assert required in entry.note, required
+    assert "re-read 2026-10-16" not in entry.note
+
+
+def test_4024_entry_is_documented_and_not_observed_on_demo() -> None:
+    entry = ERROR_CODE_TABLE[-4024]
+    assert entry.name == "PRICE_LOWER_THAN_MULTIPLIER_DOWN"
+    assert entry.evidence == "documented"
+    assert entry.read_date == ERROR_TABLE_REREAD_DATE
+    assert entry.demo_observed_on is None
+    assert dict(entry.categories_by_call_kind) == {_K.PLACEMENT: _C.REJECTED_DEFINITIVE}
+    for required in (
+        "mark price multiplier floor",
+        "Price is lower than mark price multiplier floor.",
+        "not observed on Demo",
+        "no retry",
+        "snapshot",
+        "re-read 2026-10-17",
+    ):
+        assert required in entry.note, required
+    assert "re-read 2026-10-16" not in entry.note
+
+
+def test_1125_keeps_its_mapping_and_records_the_smoke_observation() -> None:
+    entry = ERROR_CODE_TABLE[-1125]
+    assert dict(entry.categories_by_call_kind) == {_K.LISTEN_KEY: _C.INVALID_LISTEN_KEY}
+    assert entry.evidence == "documented"
+    assert entry.demo_observed_on == DEMO_SMOKE_DATE == "2026-10-16"
+    assert entry.read_date == ERROR_TABLE_REREAD_DATE
+    assert "assumed" not in entry.note
+    for required in (
+        "re-read 2026-10-16",
+        "re-read 2026-10-17",
+        "unchanged",
+        "observed on Demo (smoke)",
+        "evidence/18-smoke-check.txt item f",
+        "PUT after DELETE answered BAD_REQUEST -1125 (INVALID_LISTEN_KEY)",
+        "not mainnet",
+    ):
+        assert required in entry.note, required
+    for kind in CallKind:
+        facts = ErrorFacts(HttpClass.BAD_REQUEST, -1125, None)
+        expected = _C.INVALID_LISTEN_KEY if kind is _K.LISTEN_KEY else _C.UNKNOWN_EXCHANGE_ERROR
+        assert classify(facts, kind) is expected
+
+
+def test_sources_row_names_all_four_codes_after_the_marker_and_keeps_the_demo_wording_apart() -> (
+    None
+):
+    segment = _error_code_row()[1].split(_REREAD_MARKER)[1]
+    assert _quoted_codes(segment) == {-1106, -4016, -4024, -1125}
+    for required in (
+        "PRICE_HIGHTER_THAN_MULTIPLIER_UP",
+        "Price is higher than mark price multiplier cap.",
+        "Limit price can't be higher than 86305.10.",
+        "PRICE_LOWER_THAN_MULTIPLIER_DOWN",
+        "Price is lower than mark price multiplier floor.",
+        "-4024 was not observed on Demo",
+        "evidence/18-smoke-check.txt item f",
+    ):
+        assert required in segment, required

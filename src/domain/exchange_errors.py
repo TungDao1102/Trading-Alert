@@ -288,8 +288,13 @@ ERROR_CODE_TABLE: Mapping[int, CodeEntry] = MappingProxyType(
                 "INVALID_LISTEN_KEY",
                 _on(_C.INVALID_LISTEN_KEY, _K.LISTEN_KEY),
                 "documented",
-                f"{_REREAD}: 'This listenKey does not exist.' That a keepalive of an "
-                "expired key answers -1125 is assumed: the listenKey pages list no errors.",
+                f"{_REREAD}: 'This listenKey does not exist.' {_REREAD_2}: the text was seen "
+                "again, unchanged. That a keepalive of an expired key answers -1125 was "
+                "observed on Demo (smoke) on 2026-10-16: evidence/18-smoke-check.txt item f, "
+                "PUT after DELETE answered BAD_REQUEST -1125 (INVALID_LISTEN_KEY). Demo only, "
+                "not mainnet; the Demo observation is not a page statement.",
+                DEMO_SMOKE_DATE,
+                read_date=ERROR_TABLE_REREAD_DATE,
             ),
             # Absence: only a query or a cancel can learn that an order is not there.
             _entry(
@@ -372,6 +377,38 @@ ERROR_CODE_TABLE: Mapping[int, CodeEntry] = MappingProxyType(
                 "this table. No retry; a rejection is never evidence that an order is "
                 "protected.",
                 DEMO_PROBE_DATE,
+                read_date=ERROR_TABLE_REREAD_DATE,
+            ),
+            _entry(
+                -4016,
+                "PRICE_HIGHTER_THAN_MULTIPLIER_UP",
+                _REJECT_ON_PLACEMENT,
+                "documented",
+                f"{_REREAD_2}: 'Price is higher than mark price multiplier cap.' (the page "
+                "spells HIGHTER). Demo probe (case id_reuse_after_filled, 2026-10-16): answered "
+                '-4016 "Limit price can\'t be higher than 86305.10." - the Demo wording '
+                "differs from the page wording; the code and the name agree, so the two texts "
+                "are kept apart. The price was above the mark price multiplier cap. There is "
+                "no retry; a rejection is never evidence that an order is protected. Note "
+                "that refreshing the mark price and the filters after this code is the "
+                "consumer's job (recorded as an "
+                "open follow-up for Phase 19/20); this table does not refresh or reuse a "
+                "price.",
+                DEMO_PROBE_DATE,
+                read_date=ERROR_TABLE_REREAD_DATE,
+            ),
+            _entry(
+                -4024,
+                "PRICE_LOWER_THAN_MULTIPLIER_DOWN",
+                _REJECT_ON_PLACEMENT,
+                "documented",
+                f"{_REREAD_2}: 'Price is lower than mark price multiplier floor.' (price below "
+                "the mark price multiplier floor). This code was not observed on Demo: no "
+                "probe evidence, so no Demo date. There is no retry; a rejection is never "
+                "evidence that an order is "
+                "protected. The table must not assume a snapshot (mark price, filters) was "
+                "refreshed: refreshing it is the consumer's job (open follow-up for "
+                "Phase 19/20).",
                 read_date=ERROR_TABLE_REREAD_DATE,
             ),
             _entry(
