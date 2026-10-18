@@ -887,7 +887,7 @@ Plans:
 3. The client configuration supports:
    - explicit REST timeouts;
    - API key loading;
-   - Demo (`demo-fapi.binance.com`) / testnet / live selection;
+   - Demo (`demo-fapi.binance.com`) / live selection (testnet is NOT_CONFIGURED by the user decision O-18-01);
    - recvWindow with a server-time drift check that fails closed;
    - no retry on 418, and honoring `retry_after`.
    (F-504, F-128, F-505, F-706, F-506)
@@ -952,7 +952,7 @@ This absorbs former Phase 15 (live-price check).
    - TradePlan.status or the invalidation rule says the plan is invalid.
    GTD is used as the exchange-side expiry backstop (F-007, F-016, F-303, F-304, F-959).
 3. If the SL is rejected or not acknowledged within N seconds after a fill, the system does a reduce-only close, alerts, and enters SAFE_MODE (F-007, D034).
-4. `workingType = MARK_PRICE` is recorded on the plan (D037, F-507). TP legs are quantized with MARKET_LOT_SIZE, and there is no MIN_NOTIONAL check on reduce-only legs. The system falls back to a single TP when a leg is below minQty (F-208, F-307, F-056).
+4. `workingType = MARK_PRICE` is recorded on the plan (D037, F-507). TP legs are quantized to the filters read from exchangeInfo (LOT_SIZE; MARKET_LOT_SIZE for a triggered market exit, which the Demo probe did not observe). A reduce-only STOP_MARKET below MIN_NOTIONAL was accepted at placement on Demo (demo-observed, not mainnet; the probe did not observe it trigger or execute and did not test a take-profit leg), so the system does not rely on a MIN_NOTIONAL exemption for reduce-only legs and treats a rejection of such a leg as a possible failure. The system falls back to a single TP when a leg is below minQty (F-208, F-307, F-056).
 
 **Audit refs**: F-302, F-203, F-007, F-016, F-303, F-304, F-959, F-507, F-208, F-307
 
