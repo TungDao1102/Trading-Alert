@@ -52,7 +52,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 15: Strategy Geometry Correction** - Trend-pullback SL outside zone, confirmed pivots, min stop distance; families match their sheets (completed 2026-10-07)
 - [ ] **Phase 16: Paper Runtime Composition + SHADOW Approval Mode** - Runnable paper process (M3), fixed WS await, simulated fills, SHADOW APPROVE/SKIP journaled with no order path (D040); soak can start
 - [x] **Phase 17: Operational Persistence Layer** - PostgreSQL journal/approval/execution stores, integrity constraints, durable approval consumption, write-ahead intent (completed 2026-10-07)
-- [ ] **Phase 18: Binance User-Data Stream + Exchange Error Taxonomy** - listenKey + ORDER/ALGO/ACCOUNT events, error-code mapping, demo/testnet switch, clock checks
+- [x] **Phase 18: Binance User-Data Stream + Exchange Error Taxonomy** - listenKey + ORDER/ALGO/ACCOUNT events, error-code mapping, demo/testnet switch, clock checks (completed 2026-10-18; verification human_needed; D055 stays OPEN; Demo-observed, not mainnet)
 - [ ] **Phase 19: Execution Plan Binding + Pre-Placement Checks** - Symbol/side/qty bound to the approved plan, live-price check, SL-reject fallback (absorbs old Phase 15)
 - [ ] **Phase 20: Reconcile + SAFE_MODE Hardening + Alerts** - No blind spots, pending-entry SL kept, auto SL re-place (D034), durable SAFE_MODE, operational alerts
 - [ ] **Phase 21: Account Equity + Daily Loss from Binance** - Binance-canonical equity and D033 daily-loss state (was Phase 12)
@@ -903,7 +903,7 @@ Plans:
 - [G4-043] Order `exchange_status` and `exchange_order_id` updates have no store method yet; add them with the first caller (source: .planning/phases/17-operational-persistence-layer/17-10-SUMMARY.md:167-168; decision: none required)
 - [D055] The probe cases now listed under criterion 2 feed the -4509 decision: whether protection is placed after the entry fill or pre-placed before it stays OPEN until the user records a new decision row after the probe; alternative (b) with explicit quantity is UNVERIFIED on Demo (source: docs/DECISIONS.md D055; decision: D055, execution model is an open user decision)
 
-**Plans:** 26 plans (2 executed; 18-26 added 2026-10-17 as a gap-closure plan for the owner's taxonomy decision on -1106, -4016, -4024 and -1125, wave 11, it runs before 18-25)
+**Plans:** 26 plans (26 executed, 18-19 skipped by design; 18-26 added 2026-10-17 as a gap-closure plan for the owner's taxonomy decision on -1106, -4016, -4024 and -1125, wave 11, it ran before 18-25)
 
 Plans:
 - [x] 18-01-PLAN.md - Re-read Binance docs, new SOURCES section (all 15 pages UNVERIFIED from this machine)
@@ -923,15 +923,15 @@ Plans:
 - [x] 18-15-PLAN.md - Event router
 - [x] 18-16-PLAN.md - Connected-machine smoke script and dry run
 - [x] 18-17-PLAN.md - Probe safety envelope and first cases
-- [ ] 18-18-PLAN.md - Live smoke on Demo (blocking-human)
-- [ ] 18-19-PLAN.md - Conditional direct-transport fallback
-- [ ] 18-20-PLAN.md - Demo probe run (blocking-human)
-- [ ] 18-21-PLAN.md - Consume evidence in parsers and fake
-- [ ] 18-22-PLAN.md - Phase gate test and integration with develop
+- [x] 18-18-PLAN.md - Live smoke on Demo (blocking-human)
+- [x] 18-19-PLAN.md - Conditional direct-transport fallback (skipped by design: gate result transport sdk)
+- [x] 18-20-PLAN.md - Demo probe run (blocking-human)
+- [x] 18-21-PLAN.md - Consume evidence in parsers and fake
+- [x] 18-22-PLAN.md - Phase gate test and integration with develop
 - [x] 18-23-PLAN.md - Full probe case set
 - [x] 18-24-PLAN.md - Synthetic fixtures and provenance README
-- [ ] 18-25-PLAN.md - Evidence documents (after 18-26: the error-code row of SOURCES for -1106, -4016, -4024 and -1125 is edited there, not here)
-- [ ] 18-26-PLAN.md - Owner taxonomy decision 2026-10-17: -1106, -4016, -4024 REJECTED_DEFINITIVE on placement, -1125 Demo provenance, per-entry read date, SOURCES error-code row, SAFE_MODE branch proof (before 18-25)
+- [x] 18-25-PLAN.md - Evidence documents (after 18-26: the error-code row of SOURCES for -1106, -4016, -4024 and -1125 is edited there, not here)
+- [x] 18-26-PLAN.md - Owner taxonomy decision 2026-10-17: -1106, -4016, -4024 REJECTED_DEFINITIVE on placement, -1125 Demo provenance, per-entry read date, SOURCES error-code row, SAFE_MODE branch proof (before 18-25)
 
 ### Phase 19: Execution Plan Binding + Pre-Placement Checks
 
@@ -1296,7 +1296,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 15. Strategy Geometry Correction | 18/18 | Complete    | 2026-10-07 |
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 59/63 | In Progress|  |
 | 17. Operational Persistence Layer | 15/15 | Complete    | 2026-10-07 |
-| 18. Binance User-Data Stream + Exchange Error Taxonomy | 0/TBD | Not started | - |
+| 18. Binance User-Data Stream + Exchange Error Taxonomy | 26/26 | Complete    | 2026-10-18 |
 | 19. Execution Plan Binding + Pre-Placement Checks | 0/TBD | Not started | - |
 | 20. Reconcile + SAFE_MODE Hardening + Alerts | 0/TBD | Not started | - |
 | 21. Account Equity + Daily Loss from Binance | 0/TBD | Not started | - |

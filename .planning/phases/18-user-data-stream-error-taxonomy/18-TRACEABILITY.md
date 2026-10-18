@@ -10,7 +10,7 @@ Scope: every ROADMAP criterion, requirement id, CONTEXT decision, folded inherit
 
 No requirement, ROADMAP, STATE or DECISIONS file is edited by this plan. D055 stays OPEN.
 
-Plans 18-01 to 18-21, 18-23 and 18-24 have a SUMMARY. Plan 18-25 (documents and the D055 evidence draft for the user) has a PLAN and no SUMMARY: it was not executed when this file was written, so every statement below that depends on it is marked "18-25 pending".
+Plans 18-01 to 18-21, 18-23 and 18-24 had a SUMMARY when this file was written. Plan 18-25 (documents and the D055 evidence draft for the user) was not executed then, so the statements below that depend on it were marked "18-25 pending". Plan 18-25 is done (commits afcfe5e, aedb3b5, fc1c255; `18-25-SUMMARY.md`): where a row below says "18-25 pending", read it as done by 18-25 and see that SUMMARY; the Demo-observed document rows are in `docs/SOURCES.md` and the D055 draft is `decisions/18-DRAFT-D055-evidence-for-user.md`.
 
 ## 1. Goal and ROADMAP success criteria
 
@@ -54,7 +54,7 @@ Plans 18-01 to 18-21, 18-23 and 18-24 have a SUMMARY. Plan 18-25 (documents and 
 | D-17 probe records facts, D055 stays OPEN, fake corrected from evidence | 18-17, 18-20, 18-21 | `test_fake_binance_semantics.py`; gate invariant 8 (D055 row still says "stays OPEN") |
 | D-18 offline plans plus blocking-human plans | 18-02, 18-03, 18-18, 18-19, 18-20, 18-22 | decision records under `decisions/`, evidence under `evidence/` |
 | D-19 documentation re-read first | 18-01, 18-18 | `test_sources_phase18_section.py`; every executor re-read UNVERIFIED (no fetch tool, WAF challenge); orchestrator WebFetch summaries recorded in SOURCES by 18-18, not verified live |
-| D-20 document updates | 18-01 (first part), 18-09, 18-25 | `test_sources_phase18_section.py`, `test_decision_alignment_exchange.py`; the Demo-observed document rows are **18-25 pending** |
+| D-20 document updates | 18-01 (first part), 18-09, 18-25 | `test_sources_phase18_section.py`, `test_decision_alignment_exchange.py`; the Demo-observed document rows were **18-25 pending**; 18-25 is done (afcfe5e, aedb3b5, fc1c255) |
 | D-21 test strategy (pure, parser, supervisor, replay, redaction) | 18-03 to 18-15, 18-24 | the listed test files; `test_userdata_replay.py` for reorder and duplicate |
 | D-22 determinism, no float, no wall clock in pure code, UTC | all | gate invariant 3 (`float_constructor_calls`, `wall_clock_calls`) for seven pure modules |
 
@@ -64,7 +64,7 @@ Plans 18-01 to 18-21, 18-23 and 18-24 have a SUMMARY. Plan 18-25 (documents and 
 |---|---|---|---|
 | G3-001 re-confirm ALGO_UPDATE status list, 24 h WS lifetime, Change-Position-Mode wording on the official pages | 18-01, 18-18 | `test_sources_phase18_section.py`; SOURCES Phase 18 section | Executor re-read UNVERIFIED (no fetch tool). Orchestrator WebFetch summaries recorded 2026-10-16 (60-minute key, 24-hour connection, -1125 confirmed; payload field tables never rendered). The status meanings were Demo-observed only for `NEW` and `CANCELED` |
 | G2-028 `algoStatus` classification table | 18-06, 18-15 | `test_algo_status.py`, `test_userdata_router.py` | Done (offline). REST and frames showed only `NEW` and `CANCELED` on Demo; `CANCELED` is UNKNOWN by the user's record |
-| G2-029 below-minimum-notional reduce-only leg; MARKET_LOT_SIZE for a triggered `*_MARKET` exit | 18-17, 18-23, 18-20 | `evidence/18-probe-check.txt` | Below-minimum case Demo-observed: a reduce-only STOP_MARKET of quantity 0.0001 (notional 7.890670 against min_notional 50) was ACCEPTED. MARKET_LOT_SIZE out-of-range **not observed** (optional case off); lot filters read (min 0.0001, max 120, step 0.0001). BINANCE.md and Phase 19 criterion 4 corrections: **18-25 pending**, proposed in its SUMMARY, not applied |
+| G2-029 below-minimum-notional reduce-only leg; MARKET_LOT_SIZE for a triggered `*_MARKET` exit | 18-17, 18-23, 18-20 | `evidence/18-probe-check.txt` | Below-minimum case Demo-observed: a reduce-only STOP_MARKET of quantity 0.0001 (notional 7.890670 against min_notional 50) was ACCEPTED. MARKET_LOT_SIZE out-of-range **not observed** (optional case off); lot filters read (min 0.0001, max 120, step 0.0001). BINANCE.md corrections: done by 18-25 (aedb3b5). Phase 19 criterion 4 correction: was **18-25 pending**; 18-25 is done and proposed it in `18-25-SUMMARY.md`, and ROADMAP.md was corrected separately (7e73606) |
 | G3-009 commission and commissionAsset parsed | 18-03, 18-24 | `test_userdata_events.py::test_to_fill_event_maps_the_trade_and_carries_commission` | Done offline; Demo frames carry the fields and parse |
 | G4-034 evidence source on UNKNOWN exits | 18-08 | `test_persistence_exit_evidence_pg.py` (PostgreSQL, strict run) | Done offline |
 | G4-043 Order `exchange_status` and `exchange_order_id` store methods | 18-08 | `test_persistence_exit_evidence_pg.py`, `test_stream_records.py` | Done offline |
@@ -75,7 +75,7 @@ Plans 18-01 to 18-21, 18-23 and 18-24 have a SUMMARY. Plan 18-25 (documents and 
 | Item | Decision record | Outcome |
 |---|---|---|
 | O-18-01 safety thresholds | `decisions/18-DEC-O-18-01.md` (27 `limit` lines, four algo classes UNKNOWN, amendment "429 semantics"), `decisions/18-O-18-01-table.md` | Recorded by the user 2026-10-16; written verbatim to `config/binance/binance-limits-v1.toml` by 18-09; pinned by the DECISIONS row (gate invariant 7) |
-| O-18-02 D055 execution model | none (stays open) | **OPEN**. The probe supplied evidence only. The draft for the user (`decisions/18-DRAFT-D055-evidence-for-user.md`) is 18-25 pending |
+| O-18-02 D055 execution model | none (stays open) | **OPEN**. The probe supplied evidence only. The draft for the user (`decisions/18-DRAFT-D055-evidence-for-user.md`) was 18-25 pending; 18-25 is done (fc1c255) |
 | O-18-03 probe authorization | `decisions/18-DEC-O-18-03-smoke.md` (smoke, option values), `decisions/18-DEC-O-18-03.md` (probe, option authorize, plus addendum for the second run) | Both user-run live on Demo 2026-10-16; no agent ran `--execute` |
 | O-18-04 environment choice | `decisions/18-DEC-O-18-01.md` (`probe environment: DEMO`, TESTNET NOT_CONFIGURED) | DEMO; LIVE never used |
 
