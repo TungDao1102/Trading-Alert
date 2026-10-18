@@ -159,3 +159,15 @@ READ-ONLY. No rebase, merge, reset, checkout of another branch, push or force op
 - `git rev-parse develop`: f51a5e18aa170cf40ab58b085f3643643802736b
 - merge base of HEAD and develop: f332cc782ce72626ed137fa5d2acf9eda8524636
 - `git merge-tree --write-tree HEAD develop`: exit 0, printed the tree id e3ca91146fb12fa1fff9b6adb886f0d50091bcf3 and no conflicted file names. So git predicts a clean merge today. Phase 16 can still move `develop` before the integration, and the clean result says nothing about the gates on the integrated tree (Task 4).
+
+## Gate run after integration with develop
+
+Method: `git merge --no-ff phase-18-smoke` on `develop`, run by the session on the user's instruction (`decisions/18-DEC-INTEGRATION.md`, `option: integrated`); nothing pushed. `develop` merge commit: dde100b. The gate ran on `develop` at HEAD aeff99585c9289ed503caae0f80421814353bfda (dde100b is an ancestor). This tree also holds the plan 18-26 commits (d881ab2..aeff995), which came after the merge. Run on 2026-10-18 with PostgreSQL reachable (container `trading-postgres-1`, `TEST_DATABASE_URL` exported, connection check `select 1` passed).
+
+- `TRADING_CI_STRICT=1 uv run pytest -m "not docker" -q -rs`: exit 0 (10303 passed, 6 skipped, 0 failed; the 6 skips are Windows platform skips: symlinks unavailable, NTFS file modes, deploy heartbeat file modes; no PostgreSQL test was skipped. The summary line is suppressed by the double `-q` in `addopts`, so the counts come from the progress lines)
+- `uv run ruff check`: exit 0
+- `uv run ruff format --check`: exit 0 (629 files already formatted)
+- `uv run mypy src`: exit 0 (no issues in 202 source files)
+- `uv lock --check`: exit 0
+- `uv run python scripts/verify_decision_alignment.py all`: exit 0 (ends `ALL_PASS all`)
+- `uv run pytest tests/test_phase18_gate.py -q` (the Phase 18 gate file, also covered by the full run): exit 0 (25 passed)
