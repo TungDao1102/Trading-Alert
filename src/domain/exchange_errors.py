@@ -8,8 +8,10 @@ the Retry-After seconds.
 
 The code table is documentation text read per docs/SOURCES.md section "Facts
 read for Phase 18" (WebFetch summaries, not character-exact and not verified
-live). A code seen only on the Demo host carries the evidence label
-`demo-observed` and is never described as documented.
+live), read on 2026-10-16 and, for -1106, -4016, -4024 and -1125, read again on
+2026-10-17. A code seen only on the Demo host carries the evidence label
+`demo-observed` and is never described as documented; a documented code that the
+Demo also answered keeps `documented` and carries the Demo date separately.
 
 A code or class that is not in the table is UNKNOWN_EXCHANGE_ERROR: ambiguous,
 never "absent", never retried, SAFE_MODE-eligible (D-10).
@@ -83,6 +85,9 @@ _ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)
 # The Demo probe run whose answers label the codes below (second run 2026-10-16T17:36:12Z;
 # the first run of the same day answered the same codes). Demo evidence, not mainnet.
 DEMO_PROBE_DATE = "2026-10-16"
+# The Demo user-data smoke run (20261016T140446Z) that answered -1125 on a keepalive after a
+# delete (evidence/18-smoke-check.txt item f). Demo evidence, not mainnet.
+DEMO_SMOKE_DATE = "2026-10-16"
 
 
 def _is_strict_int(value: object) -> bool:
@@ -108,8 +113,8 @@ class ErrorFacts:
             raise ValueError("retry_after_seconds must be a non-negative int (not a bool) or None")
 
 
-# documented: on the Binance error-code page (the 2026-10-16 re-read or the
-# research baseline B7 of 2026-10-15); demo-observed: seen only on the Demo
+# documented: on the Binance error-code page (the 2026-10-16 re-read, the 2026-10-17 re-read
+# of four codes, or the research baseline B7 of 2026-10-15); demo-observed: seen only on the Demo
 # host, absent from the page; documented-elsewhere: recorded in another
 # docs/SOURCES.md row, not on the Phase 18 error-code reads.
 EVIDENCE_LABELS: frozenset[str] = frozenset({"documented", "demo-observed", "documented-elsewhere"})
@@ -127,6 +132,8 @@ class CodeEntry:
     name: str
     categories_by_call_kind: Mapping[CallKind, ExchangeErrorCategory]
     source: str
+    # ISO date of the documentation read this entry rests on (ERROR_TABLE_READ_DATE unless a
+    # later read of the page is recorded for the entry).
     read_date: str
     evidence: str
     note: str
@@ -139,17 +146,22 @@ class CodeEntry:
     def __post_init__(self) -> None:
         if self.evidence not in EVIDENCE_LABELS:
             raise ValueError(f"unknown evidence label: {self.evidence!r}")
+        if not _ISO_DATE.fullmatch(self.read_date):
+            raise ValueError("read_date must be an ISO date (YYYY-MM-DD)")
         if self.demo_observed_on is not None and not _ISO_DATE.fullmatch(self.demo_observed_on):
             raise ValueError("demo_observed_on must be an ISO date (YYYY-MM-DD) or None")
 
 
 ERROR_TABLE_SOURCE: str = "docs/SOURCES.md, Facts read for Phase 18, error-code row"
 ERROR_TABLE_READ_DATE: str = "2026-10-16"
+# The second read of the error-code page (plan 18-26): -1106, -4016, -4024 and -1125 only.
+ERROR_TABLE_REREAD_DATE: str = "2026-10-17"
 
 _C = ExchangeErrorCategory
 _K = CallKind
 
 _REREAD = "Error-code page, re-read 2026-10-16"
+_REREAD_2 = "Error-code page, re-read 2026-10-17"
 _BASELINE = (
     "Error-code page per research baseline B7 (WebFetch 2026-10-15, 18-RESEARCH.md F4); "
     "not quoted in the 2026-10-16 re-read summary, which found no difference for the "
@@ -172,13 +184,15 @@ def _entry(
     evidence: str,
     note: str,
     demo_observed_on: str | None = None,
+    *,
+    read_date: str = ERROR_TABLE_READ_DATE,
 ) -> CodeEntry:
     return CodeEntry(
         code=code,
         name=name,
         categories_by_call_kind=MappingProxyType(dict(categories)),
         source=ERROR_TABLE_SOURCE,
-        read_date=ERROR_TABLE_READ_DATE,
+        read_date=read_date,
         evidence=evidence,
         note=note,
         demo_observed_on=demo_observed_on,
@@ -340,6 +354,26 @@ ERROR_CODE_TABLE: Mapping[int, CodeEntry] = MappingProxyType(
             ),
             # Definitive rejections of a placement: margin, balance, notional,
             # filters, would-trigger, reduce-only and conditional-order rules.
+            # Owner decision of 2026-10-17 (plan 18-26, decisions/18-DEC-TAXONOMY-CODES.md).
+            _entry(
+                -1106,
+                "PARAM_NOT_REQUIRED",
+                _REJECT_ON_PLACEMENT,
+                "documented",
+                f"{_REREAD_2}: 'A parameter was sent when not required.' / \"Parameter '%s' sent "
+                'when not required." (the official USD-M page is the source). Demo probe '
+                "(case rejected_protective_variants, reduce-only together with close position, "
+                "2026-10-16): answered -1106 \"Parameter 'reduceonly' sent when not required.\" "
+                "- the Demo text is kept apart from the page text. PARAM_NOT_REQUIRED can come "
+                "from a wrongly built request, including reduceOnly sent together with "
+                "positionSide in hedge mode; it is not mapped to POSITION_MODE because the code "
+                "alone does not prove a wrong position mode. nautilus_trader issue 4231 is a "
+                "secondary technical reference for the hedge-mode case only, not a source of "
+                "this table. No retry; a rejection is never evidence that an order is "
+                "protected.",
+                DEMO_PROBE_DATE,
+                read_date=ERROR_TABLE_REREAD_DATE,
+            ),
             _entry(
                 -2019,
                 "MARGIN_NOT_SUFFICIEN",
@@ -620,8 +654,10 @@ def rate_limit_decision(
 __all__ = [
     "ERROR_CODE_TABLE",
     "ERROR_TABLE_READ_DATE",
+    "ERROR_TABLE_REREAD_DATE",
     "ERROR_TABLE_SOURCE",
     "DEMO_PROBE_DATE",
+    "DEMO_SMOKE_DATE",
     "EVIDENCE_LABELS",
     "CallKind",
     "CodeEntry",

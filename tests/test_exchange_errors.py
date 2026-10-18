@@ -24,6 +24,7 @@ from src.adapters.binance_errors import error_facts_from_exception
 from src.domain.exchange_errors import (
     ERROR_CODE_TABLE,
     ERROR_TABLE_READ_DATE,
+    ERROR_TABLE_REREAD_DATE,
     ERROR_TABLE_SOURCE,
     EVIDENCE_LABELS,
     CallKind,
@@ -167,6 +168,8 @@ _EXPECTED_BY_CODE: dict[int, tuple[ExchangeErrorCategory, tuple[CallKind, ...]]]
     -1022: (_C.AUTH_OR_SIGNATURE, _ALL),
     -1111: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
     -1121: (_C.REJECTED_DEFINITIVE, (_K.PLACEMENT, _K.CANCEL, _K.QUERY)),
+    # Added on purpose: the owner decided on 2026-10-17 (plan 18-26, 18-DEC-TAXONOMY-CODES.md).
+    -1106: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
     -1125: (_C.INVALID_LISTEN_KEY, (_K.LISTEN_KEY,)),
     -2010: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
     -2011: (_C.ORDER_ABSENT, (_K.QUERY, _K.CANCEL)),
@@ -212,13 +215,22 @@ def test_code_classifies_per_call_kind(code: int, http_class: HttpClass) -> None
         assert classify(facts, kind) is expected, (code, kind)
 
 
+# The codes of the second read of the error-code page (2026-10-17, plan 18-26). Every other
+# entry keeps the first read date. Changed on purpose, owner decided 2026-10-17.
+_REREAD_CODES: frozenset[int] = frozenset({-1106})
+
+
+def _expected_read_date(code: int) -> str:
+    return ERROR_TABLE_REREAD_DATE if code in _REREAD_CODES else ERROR_TABLE_READ_DATE
+
+
 @pytest.mark.parametrize("code", sorted(_EXPECTED_BY_CODE), ids=lambda c: f"code{c}")
 def test_table_entry_metadata(code: int) -> None:
     entry = ERROR_CODE_TABLE[code]
     assert entry.code == code
     assert entry.name.strip() != ""
     assert entry.source == ERROR_TABLE_SOURCE
-    assert entry.read_date == ERROR_TABLE_READ_DATE
+    assert entry.read_date == _expected_read_date(code)
     assert entry.evidence in EVIDENCE_LABELS
     assert entry.note.strip() != ""
     with pytest.raises(TypeError):
@@ -244,35 +256,36 @@ _PROBE_OBSERVED_IN_TABLE: tuple[tuple[int, CallKind, ExchangeErrorCategory, str]
     (-4116, CallKind.PLACEMENT, _C.DUPLICATE_CLIENT_ID, "ClientOrderId is duplicated."),
     (-4509, CallKind.PLACEMENT, _C.PRECONDITION_NO_POSITION, "Time in Force (TIF) GTE"),
     (-2021, CallKind.PLACEMENT, _C.REJECTED_DEFINITIVE, "Order would immediately trigger."),
+    # Changed on purpose, owner decided 2026-10-17 (plan 18-26): the two codes the probe saw
+    # that the table did not decide (18-21) are now in the table.
+    (
+        -1106,
+        CallKind.PLACEMENT,
+        _C.REJECTED_DEFINITIVE,
+        "Parameter 'reduceonly' sent when not required.",
+    ),
 )
-# Observed by the probe and NOT in the table: they stay UNKNOWN_EXCHANGE_ERROR until the user
-# decides (an agent does not add a code): -1106 and -4016 (evidence/18-probe-check.txt).
-_PROBE_OBSERVED_NOT_IN_TABLE: tuple[int, ...] = (-1106, -4016)
 
 
 def test_demo_observed_codes_are_exactly_the_probe_observed_codes_in_the_table() -> None:
     observed = sorted(code for code, entry in ERROR_CODE_TABLE.items() if entry.demo_observed_on)
     assert observed == sorted(code for code, *_ in _PROBE_OBSERVED_IN_TABLE)
-    assert observed == [-4509, -4116, -2021, -2013, -2011]
+    assert observed == [-4509, -4116, -2021, -2013, -2011, -1106]
+    assert -4024 not in observed
     for code in observed:
         assert ERROR_CODE_TABLE[code].demo_observed_on == "2026-10-16"
         # The read date of the documentation is not changed by a Demo observation.
-        assert ERROR_CODE_TABLE[code].read_date == ERROR_TABLE_READ_DATE
+        assert ERROR_CODE_TABLE[code].read_date == _expected_read_date(code)
 
 
 def test_probe_answers_classify_as_the_probe_check_file_says() -> None:
     for code, kind, category, _message in _PROBE_OBSERVED_IN_TABLE:
         facts = ErrorFacts(HttpClass.BAD_REQUEST, code, None)
         assert classify(facts, kind) is category, code
-    for code in _PROBE_OBSERVED_NOT_IN_TABLE:
-        assert code not in ERROR_CODE_TABLE
-        facts = ErrorFacts(HttpClass.BAD_REQUEST, code, None)
-        for kind in CallKind:
-            assert classify(facts, kind) is _C.UNKNOWN_EXCHANGE_ERROR
 
 
 def test_a_demo_observation_does_not_relabel_a_documented_code() -> None:
-    for code in (-2013, -2011, -4116, -2021):
+    for code in (-2013, -2011, -4116, -2021, -1106):
         assert ERROR_CODE_TABLE[code].evidence == "documented"
     assert ERROR_CODE_TABLE[-4509].evidence == "demo-observed"
     # The duplicate clientAlgoId case was observed as -4116 (DUPLICATE_CLIENT_ID on placement).
@@ -309,27 +322,146 @@ def _error_code_row() -> list[str]:
 
 
 def test_read_date_is_the_latest_checked_on_date_of_the_error_code_row() -> None:
+    """Changed on purpose (owner decided 2026-10-17): the row now records two reads."""
     assert "Facts read for Phase 18" in ERROR_TABLE_SOURCE
     assert "error-code" in ERROR_TABLE_SOURCE
     checked_on = _error_code_row()[2]
     dates = re.findall(r"\d{4}-\d{2}-\d{2}", checked_on)
     assert dates, checked_on
-    assert max(dates) == ERROR_TABLE_READ_DATE
+    assert max(dates) == ERROR_TABLE_REREAD_DATE
+    assert ERROR_TABLE_READ_DATE in dates
+    assert ERROR_TABLE_READ_DATE < ERROR_TABLE_REREAD_DATE
     assert ERROR_TABLE_READ_DATE in _phase18_section()
+    assert ERROR_TABLE_REREAD_DATE in _phase18_section()
+
+
+_REREAD_MARKER = "Re-read 2026-10-17"
+
+
+def _quoted_codes(text: str) -> set[int]:
+    return {int(c) for c in re.findall(r"(?<![\d-])(-\d{4})(?!\d)", text)}
 
 
 def test_reread_codes_match_the_sources_row() -> None:
-    """The codes quoted by the 2026-10-16 re-read are the ones whose note says so."""
+    """The codes quoted before the marker are the ones whose note says re-read 2026-10-16
+    (plus -4509); the codes quoted after it are the ones of the second read (2026-10-17)."""
     used_for = _error_code_row()[1]
-    quoted = {int(c) for c in re.findall(r"(?<![\d-])(-\d{4})(?!\d)", used_for)}
-    assert -4509 in quoted  # named as absent from the page
-    assert "-4509 is absent from the page" in used_for
-    reread = {
+    assert used_for.count(_REREAD_MARKER) == 1
+    before, after = used_for.split(_REREAD_MARKER)
+    quoted_before = _quoted_codes(before)
+    assert -4509 in quoted_before  # named as absent from the page
+    assert "-4509 is absent from the page" in before
+    reread_first = {
         code for code, entry in ERROR_CODE_TABLE.items() if "re-read 2026-10-16" in entry.note
     }
-    assert reread == quoted - {-4509}
-    for code in reread:
+    assert reread_first == quoted_before - {-4509}
+    for code in reread_first:
         assert ERROR_CODE_TABLE[code].evidence == "documented"
+    quoted_after = _quoted_codes(after)
+    reread_second = {
+        code for code, entry in ERROR_CODE_TABLE.items() if "re-read 2026-10-17" in entry.note
+    }
+    by_read_date = {
+        code
+        for code, entry in ERROR_CODE_TABLE.items()
+        if entry.read_date == ERROR_TABLE_REREAD_DATE
+    }
+    assert quoted_after == reread_second == by_read_date == set(_REREAD_CODES)
+    for code in reread_second:
+        assert ERROR_CODE_TABLE[code].evidence == "documented"
+
+
+_ERROR_CODE_ROW_FIRST_CELL = (
+    "https://developers.binance.com/docs/derivatives/usds-margined-futures/error-code; "
+    "working URL https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/"
+    "error-code"
+)
+_OUT_OF_SCOPE_CODES = ("4131", "4183", "4184")
+
+
+def test_error_code_row_keeps_one_row_and_records_the_second_read() -> None:
+    cells = _error_code_row()
+    assert len(cells) == 4
+    assert cells[0] == _ERROR_CODE_ROW_FIRST_CELL
+    segment = cells[1].split(_REREAD_MARKER)[1]
+    for required in (
+        "page last modified 2026-10-16",
+        "18-error-code-page-reread-20261017.txt",
+        "derivatives-trading-usds-futures/error-code",
+        "A parameter was sent when not required.",
+        "Parameter 'reduceonly' sent when not required.",
+        "issue 4231",
+        "secondary",
+    ):
+        assert required in segment, required
+    assert "Demo wording differs" in segment
+    assert "https://" not in segment  # the Nautilus reference carries no URL scheme
+    for number in _OUT_OF_SCOPE_CODES:
+        assert number not in cells[1]
+    assert "re-read 2026-10-17" in cells[2]
+    assert "page last modified 2026-10-16" in cells[2]
+    assert "second read 2026-10-17" in cells[3]
+    assert "18-error-code-page-reread-20261017.txt" in cells[3]
+    # The first read is kept as it was.
+    assert "Read 2026-10-16 (WebFetch summary)" in cells[1]
+
+
+def test_entry_read_date_defaults_to_the_first_read_and_can_be_overridden() -> None:
+    assert ERROR_TABLE_READ_DATE == "2026-10-16"
+    assert ERROR_TABLE_REREAD_DATE == "2026-10-17"
+    assert ERROR_TABLE_REREAD_DATE > ERROR_TABLE_READ_DATE
+    for code, entry in ERROR_CODE_TABLE.items():
+        expected = ERROR_TABLE_REREAD_DATE if code in _REREAD_CODES else ERROR_TABLE_READ_DATE
+        assert entry.read_date == expected, code
+    override = dataclasses.replace(ERROR_CODE_TABLE[-2013], read_date=ERROR_TABLE_REREAD_DATE)
+    assert override.read_date == ERROR_TABLE_REREAD_DATE
+
+
+def test_code_entry_validates_read_date() -> None:
+    entry = ERROR_CODE_TABLE[-2013]
+    with pytest.raises(ValueError, match="read_date"):
+        dataclasses.replace(entry, read_date="yesterday")
+    with pytest.raises(ValueError, match="read_date"):
+        dataclasses.replace(entry, read_date="")
+
+
+def test_only_the_owner_codes_carry_the_second_read_date() -> None:
+    """Changed on purpose (owner decided 2026-10-17): the set is one constant of this file."""
+    second = {c for c, e in ERROR_CODE_TABLE.items() if e.read_date == ERROR_TABLE_REREAD_DATE}
+    assert second == set(_REREAD_CODES)
+    for code, entry in ERROR_CODE_TABLE.items():
+        if code not in _REREAD_CODES:
+            assert entry.read_date == ERROR_TABLE_READ_DATE, code
+
+
+def test_1106_entry_keeps_page_and_demo_wording_apart() -> None:
+    entry = ERROR_CODE_TABLE[-1106]
+    assert entry.name == "PARAM_NOT_REQUIRED"
+    assert entry.evidence == "documented"
+    assert entry.read_date == ERROR_TABLE_REREAD_DATE
+    assert entry.demo_observed_on == "2026-10-16"
+    assert dict(entry.categories_by_call_kind) == {_K.PLACEMENT: _C.REJECTED_DEFINITIVE}
+    for required in (
+        "PARAM_NOT_REQUIRED",
+        "wrongly built request",
+        "reduceOnly",
+        "positionSide",
+        "hedge mode",
+        "not mapped to POSITION_MODE",
+        "official USD-M",
+        "nautilus_trader issue 4231",
+        "secondary",
+        "re-read 2026-10-17",
+        "Parameter 'reduceonly' sent when not required.",
+        "A parameter was sent when not required.",
+        "rejected_protective_variants",
+    ):
+        assert required in entry.note, required
+    assert "re-read 2026-10-16" not in entry.note
+    for kind in CallKind:
+        assert _C.POSITION_MODE is not classify(
+            ErrorFacts(HttpClass.BAD_REQUEST, -1106, None), kind
+        )
 
 
 # --------------------------------------------------------------------------- #
