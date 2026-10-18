@@ -100,6 +100,7 @@ PHASE18_ARTIFACTS: tuple[str, ...] = (
     "tests/test_binance_client_config.py",
     "tests/test_binance_secret_redaction.py",
     "tests/test_exchange_errors.py",
+    "tests/test_exchange_error_rejections.py",
     "tests/test_sdk_error_mapping_contract.py",
     "tests/test_adapter_not_found_mapping.py",
     "tests/test_algo_status.py",
@@ -130,6 +131,7 @@ PHASE18_ARTIFACTS: tuple[str, ...] = (
     ".planning/phases/18-user-data-stream-error-taxonomy/decisions/18-DESIGN-REVIEW-event-types.md",
     ".planning/phases/18-user-data-stream-error-taxonomy/decisions/18-DEC-O-18-03.md",
     ".planning/phases/18-user-data-stream-error-taxonomy/decisions/18-DEC-O-18-03-smoke.md",
+    ".planning/phases/18-user-data-stream-error-taxonomy/decisions/18-DEC-TAXONOMY-CODES.md",
     ".planning/phases/18-user-data-stream-error-taxonomy/decisions/18-smoke-limits.toml",
     ".planning/phases/18-user-data-stream-error-taxonomy/decisions/18-probe-limits.toml",
     ".planning/phases/18-user-data-stream-error-taxonomy/evidence/18-transport-decision.txt",
@@ -141,6 +143,7 @@ PHASE18_ARTIFACTS: tuple[str, ...] = (
 PHASE18_EVIDENCE: tuple[str, ...] = (
     ".planning/phases/18-user-data-stream-error-taxonomy/evidence/18-smoke-check.txt",
     ".planning/phases/18-user-data-stream-error-taxonomy/evidence/18-probe-check.txt",
+    ".planning/phases/18-user-data-stream-error-taxonomy/evidence/18-error-code-page-reread-20261017.txt",
     "tests/fixtures/phase18/recorded_demo/smoke",
     "tests/fixtures/phase18/recorded_demo/probe",
     ".planning/phases/18-user-data-stream-error-taxonomy/decisions/18-DRAFT-D055-evidence-for-user.md",
@@ -310,6 +313,10 @@ REQUIREMENT_TESTS: dict[str, tuple[tuple[str, str], ...]] = {
             "tests/test_execution_attach.py",
             "test_unconfirmed_sl_leg_yields_entry_without_protective",
         ),
+        (
+            "tests/test_exchange_error_rejections.py",
+            "test_tracer_1106_on_the_protective_stop_is_entry_without_protective",
+        ),
         ("tests/test_binance_usdm_error_routing.py", "test_placement_calls_the_sdk_exactly_once"),
         (
             "tests/test_binance_usdm_signed_calls.py",
@@ -321,6 +328,10 @@ REQUIREMENT_TESTS: dict[str, tuple[tuple[str, str], ...]] = {
     "EXEC-02": (
         ("tests/test_exchange_errors.py", "test_sdk_2013_on_query_is_order_absent"),
         ("tests/test_exchange_errors.py", "test_normalizer_never_reads_message_text"),
+        (
+            "tests/test_exchange_error_rejections.py",
+            "test_each_owner_code_classifies_rejected_definitive_on_placement_only",
+        ),
         ("tests/test_sdk_error_mapping_contract.py", "test_tracer_sdk_bad_request_2013"),
         ("tests/test_adapter_not_found_mapping.py", "test_algo_query_maps_not_found_codes"),
         (

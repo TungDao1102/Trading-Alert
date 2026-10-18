@@ -119,13 +119,18 @@ Plans 18-01 to 18-21, 18-23 and 18-24 have a SUMMARY. Plan 18-25 (documents and 
 | UNVERIFIED 8 bare number in money fields | 18-03 | rejected by the parser; never seen on the wire |
 | UNVERIFIED 9 Demo key provisioning steps | none | not observed |
 
-### Codes seen by the smoke and probe and not in `ERROR_CODE_TABLE` (owner decision, not added by this plan)
+### Codes seen by the smoke and probe: decided by the owner on 2026-10-17 (plan 18-26)
 
-| Code | Seen in | Class today |
-|---|---|---|
-| -1106 `Parameter 'reduceonly' sent when not required.` | probe case `rejected_protective_variants` | UNKNOWN_EXCHANGE_ERROR |
-| -4016 `Limit price can't be higher than 86305.10.` | probe first run, `id_reuse_after_filled` | UNKNOWN_EXCHANGE_ERROR |
-| -1125 INVALID_LISTEN_KEY | smoke item f; already in the table, note still says "assumed", not marked `demo_observed_on` | in table |
+The owner's decision is in `decisions/18-DEC-TAXONOMY-CODES.md` (option adopt-with-addition: -4024 added with -4016). The error-code page was read again on 2026-10-17 (`evidence/18-error-code-page-reread-20261017.txt`, page last modified 2026-10-16 as the page shows). The tests are in `tests/test_exchange_error_rejections.py` and `tests/test_exchange_errors.py`; for example `test_exchange_error_rejections.py::test_each_owner_code_classifies_rejected_definitive_on_placement_only`, `test_exchange_error_rejections.py::test_tracer_1106_on_the_protective_stop_is_entry_without_protective` and `test_exchange_errors.py::test_1125_keeps_its_mapping_and_records_the_smoke_observation`.
+
+| Code | Seen in | Class at the time of the evidence | Class now |
+|---|---|---|---|
+| -1106 `Parameter 'reduceonly' sent when not required.` | probe case `rejected_protective_variants` (Demo, 2026-10-16) | UNKNOWN_EXCHANGE_ERROR | REJECTED_DEFINITIVE on PLACEMENT, UNKNOWN elsewhere; documented (page re-read 2026-10-17), `demo_observed_on` 2026-10-16; never POSITION_MODE |
+| -4016 `Limit price can't be higher than 86305.10.` | probe first run, `id_reuse_after_filled` (Demo, 2026-10-16) | UNKNOWN_EXCHANGE_ERROR | REJECTED_DEFINITIVE on PLACEMENT, UNKNOWN elsewhere; documented (page wording PRICE_HIGHTER_THAN_MULTIPLIER_UP kept apart from the Demo wording), `demo_observed_on` 2026-10-16 |
+| -4024 `Price is lower than mark price multiplier floor.` (page text) | not seen on Demo; added by the owner with -4016 | not in the table (UNKNOWN_EXCHANGE_ERROR) | REJECTED_DEFINITIVE on PLACEMENT, UNKNOWN elsewhere; documented on the page re-read 2026-10-17, no `demo_observed_on` |
+| -1125 INVALID_LISTEN_KEY | smoke item f (`PUT after DELETE`, Demo, 2026-10-16) | in the table, note said "assumed", not marked `demo_observed_on` | unchanged mapping (INVALID_LISTEN_KEY on LISTEN_KEY); the note says observed on Demo (smoke); `demo_observed_on` 2026-10-16; evidence stays documented |
+
+Not added: -4131, -4183 and -4184 (listed by the same page). Open items for Phase 19 and 20 (recorded in the decision file, not implemented): the consumer refreshes mark price and filter data after -4016 or -4024 and fails closed if it cannot; a consumer does not derive SAFE_MODE for a rejected protective order from `safe_mode_eligible`; the manager's bounded query-first entry re-send does not consult the taxonomy.
 
 ## 7. Deferred ideas confirmed not built
 
