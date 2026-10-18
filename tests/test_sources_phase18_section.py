@@ -74,6 +74,18 @@ CONTRADICTS = "CONTRADICTS the research baseline"
 CONFIRMED_ABSENCES = ("Retry-After", "-4509")
 ABSENT = "absent from the page"
 
+# Plan 18-25: the subsection that holds the facts observed on Demo (smoke and probe). Its rows
+# are the only rows of the Phase 18 section that may carry a Demo method label.
+DEMO_SUBSECTION_TITLE = "Demo-observed facts"
+DEMO_LABELS = ("Demo probe", "Demo smoke")
+NOT_VERIFIED_ON_MAINNET = "not verified on mainnet"
+NOT_MAINNET = "not mainnet"
+NO_DEMO_FACTS_SENTENCE = "No Demo-observed facts were recorded:"
+PHASE18_DIR = REPO_ROOT / ".planning" / "phases" / "18-user-data-stream-error-taxonomy"
+EVIDENCE_DIR = PHASE18_DIR / "evidence"
+DECISIONS_DIR = PHASE18_DIR / "decisions"
+EVIDENCE_FILE_NAME = re.compile(r"\b([A-Za-z0-9][A-Za-z0-9._-]*\.(?:json|txt))\b")
+
 # The nine items of the "UNVERIFIED register" in 18-RESEARCH.md; each needs a status line.
 UNVERIFIED_REGISTER_ITEMS = range(1, 10)
 ITEM_STATUS = re.compile(r"^- item (\d+): (now READ|still UNVERIFIED) \(\S", flags=re.MULTILINE)
@@ -110,10 +122,21 @@ def _rows(body: str) -> list[list[str]]:
         if not raw.startswith("|"):
             continue
         cells = _cells(raw)
-        if cells and (cells[0] == "Source URL" or set(cells[0]) <= {"-", " ", ":"}):
+        header = cells and cells[0] in ("Source URL", "Source (evidence file)")
+        if cells and (header or set(cells[0]) <= {"-", " ", ":"}):
             continue
         rows.append(cells)
     return rows
+
+
+def _split_demo_subsection(body: str) -> tuple[str, str]:
+    """(body before the Demo-observed subsection, the subsection body; "" when absent)."""
+    match = re.search(rf"^### {re.escape(DEMO_SUBSECTION_TITLE)}[^\n]*\n", body, flags=re.MULTILINE)
+    if match is None:
+        return body, ""
+    rest = body[match.end() :]
+    nxt = re.search(r"^##", rest, flags=re.MULTILINE)
+    return body[: match.start()], (rest[: nxt.start()] if nxt else rest)
 
 
 def _sources_text() -> str:
@@ -123,7 +146,8 @@ def _sources_text() -> str:
 def _phase18_rows() -> list[list[str]]:
     body = _section(_sources_text(), PHASE18_TITLE_PREFIX)
     assert body, f"missing section '## {PHASE18_TITLE_PREFIX}...' in docs/SOURCES.md"
-    rows = _rows(body)
+    # The "Demo-observed facts" subsection (plan 18-25) has its own row shape and its own tests.
+    rows = _rows(_split_demo_subsection(body)[0])
     assert rows, "the Phase 18 section has no table rows"
     return rows
 
@@ -242,3 +266,205 @@ def test_execution_spec_cites_no_unregistered_binance_url() -> None:
     )
     assert name == "EX-06"
     assert ok, detail
+
+
+# --------------------------------------------------------------------------- Plan 18-25
+
+
+def _decision_text(name: str) -> str:
+    path = DECISIONS_DIR / name
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def _evidence_text(name: str) -> str:
+    path = EVIDENCE_DIR / name
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def _smoke_ran() -> bool:
+    """The plan 18-25 rule: decided from the files, not from memory."""
+    check = _evidence_text("18-smoke-check.txt")
+    return (
+        "option: postpone" not in _decision_text("18-DEC-O-18-03-smoke.md")
+        and bool(check)
+        and "smoke postponed by the user" not in check
+    )
+
+
+def _probe_ran() -> bool:
+    check = _evidence_text("18-probe-check.txt")
+    return (
+        "option: postpone" not in _decision_text("18-DEC-O-18-03.md")
+        and bool(check)
+        and "probe postponed by the user" not in check
+    )
+
+
+def demo_subsection_problems(sources_text: str, *, smoke_ran: bool, probe_ran: bool) -> list[str]:
+    """Every rule the "Demo-observed facts" subsection must satisfy; empty when it is fine."""
+    body = _section(sources_text, PHASE18_TITLE_PREFIX)
+    main_body, demo_body = _split_demo_subsection(body)
+    problems: list[str] = []
+    # A Demo label belongs to the subsection only: no row of the main table may carry one.
+    for cells in _rows(main_body):
+        if len(cells) == 4 and any(label in cells[3] for label in DEMO_LABELS):
+            problems.append(f"Demo label outside the subsection: {cells[0][:80]}")
+    if not demo_body.strip():
+        return [*problems, "the subsection 'Demo-observed facts' is absent"]
+    rows = _rows(demo_body)
+    if not smoke_ran and not probe_ran:
+        if rows:
+            problems.append("rows although neither run happened")
+        if NO_DEMO_FACTS_SENTENCE not in demo_body:
+            problems.append("missing the 'No Demo-observed facts were recorded' sentence")
+        return problems
+    if not rows:
+        problems.append("no Demo-observed rows although a run happened")
+    labels_seen: set[str] = set()
+    for cells in rows:
+        if len(cells) != 4:
+            problems.append(f"row is not four columns: {cells[:1]}")
+            continue
+        source, used_for, checked_on, method = cells
+        label = next((lab for lab in DEMO_LABELS if method.startswith(lab)), None)
+        if label is None:
+            problems.append(f"method does not start with a Demo label: {method[:60]}")
+            continue
+        labels_seen.add(label)
+        if not source.startswith(f"{label} evidence "):
+            problems.append(f"source does not start with '{label} evidence ': {source[:60]}")
+        names = EVIDENCE_FILE_NAME.findall(source)
+        if not names:
+            problems.append(f"no evidence file name in the source cell: {source[:60]}")
+        for name in names:
+            if not (EVIDENCE_DIR / name).exists():
+                problems.append(f"evidence file does not exist: {name}")
+        if label == "Demo probe" and not any(n.startswith("demo-probe-EVIDENCE-") for n in names):
+            problems.append(f"a probe row must cite a demo-probe-EVIDENCE file: {source[:60]}")
+        if label == "Demo smoke" and not any(
+            n.startswith("user-data-smoke-EVIDENCE-") for n in names
+        ):
+            problems.append(f"a smoke row must cite a user-data-smoke-EVIDENCE file: {source[:60]}")
+        if NOT_VERIFIED_ON_MAINNET not in method or NOT_MAINNET not in method:
+            problems.append(f"method lacks 'not mainnet' / 'not verified on mainnet': {method}")
+        if not ISO_DATE.search(checked_on):
+            problems.append(f"no date in Checked on: {checked_on}")
+        if not used_for.strip():
+            problems.append("empty Used for cell")
+        if HTTPS_URL.search(source):
+            problems.append(f"a Demo row cites a URL as its source: {source[:60]}")
+    if smoke_ran and "Demo smoke" not in labels_seen:
+        problems.append("the smoke ran and no Demo smoke row exists")
+    if probe_ran and "Demo probe" not in labels_seen:
+        problems.append("the probe ran and no Demo probe row exists")
+    if not smoke_ran and "Demo smoke" in labels_seen:
+        problems.append("a Demo smoke row although the smoke was postponed")
+    if not probe_ran and "Demo probe" in labels_seen:
+        problems.append("a Demo probe row although the probe was postponed")
+    return problems
+
+
+def test_run_flags_follow_the_decision_files() -> None:
+    # Both runs happened on 2026-10-16 (decision files carry no postponement line).
+    assert _smoke_ran()
+    assert _probe_ran()
+
+
+def test_demo_observed_subsection_is_accepted() -> None:
+    problems = demo_subsection_problems(
+        _sources_text(), smoke_ran=_smoke_ran(), probe_ran=_probe_ran()
+    )
+    assert problems == []
+
+
+def test_demo_observed_subsection_sits_inside_the_phase18_section_and_carries_a_date() -> None:
+    body = _section(_sources_text(), PHASE18_TITLE_PREFIX)
+    main_body, demo_body = _split_demo_subsection(body)
+    assert demo_body.strip()
+    assert "Source URL" in main_body
+    heading = re.search(rf"^### {DEMO_SUBSECTION_TITLE}[^\n]*$", body, flags=re.MULTILINE)
+    assert heading is not None
+    assert ISO_DATE.search(heading.group(0)), heading.group(0)
+
+
+def test_demo_label_in_a_main_row_is_rejected_negative_control() -> None:
+    text = _sources_text().replace("\r\n", "\n")
+    marker = "WebFetch summary of the working URL, not character-exact; not verified live."
+    assert marker in text
+    mutated = text.replace(marker, "Demo probe (not mainnet), " + marker, 1)
+    assert mutated != text
+    problems = demo_subsection_problems(mutated, smoke_ran=True, probe_ran=True)
+    assert any("Demo label outside the subsection" in p for p in problems), problems
+
+
+def test_demo_row_without_the_mainnet_caveat_is_rejected_negative_control() -> None:
+    text = _sources_text().replace("\r\n", "\n")
+    row_method = "Demo smoke (not mainnet), REAL_SMOKE evidence, not verified on mainnet"
+    assert row_method in text
+    mutated = text.replace(row_method, "Demo smoke (not mainnet), REAL_SMOKE evidence, verified", 1)
+    assert mutated != text
+    problems = demo_subsection_problems(mutated, smoke_ran=True, probe_ran=True)
+    assert any("not verified on mainnet" in p for p in problems), problems
+
+
+def test_demo_row_with_an_unknown_evidence_file_is_rejected_negative_control() -> None:
+    text = _sources_text().replace("\r\n", "\n")
+    name = "demo-probe-EVIDENCE-20261016T142134Z.json"
+    assert name in text
+    mutated = text.replace(name, "demo-probe-EVIDENCE-19990101T000000Z.json", 1)
+    problems = demo_subsection_problems(mutated, smoke_ran=True, probe_ran=True)
+    assert any("evidence file does not exist" in p for p in problems), problems
+
+
+def test_demo_row_without_an_evidence_file_name_is_rejected_negative_control() -> None:
+    text = _sources_text().replace("\r\n", "\n")
+    name = "user-data-smoke-EVIDENCE-20261016T140446Z.json"
+    assert name in text
+    mutated = text.replace(name, "the smoke", 1)
+    problems = demo_subsection_problems(mutated, smoke_ran=True, probe_ran=True)
+    assert any("must cite a user-data-smoke-EVIDENCE file" in p for p in problems), problems
+
+
+def test_missing_subsection_is_rejected_negative_control() -> None:
+    text = _sources_text().replace("\r\n", "\n")
+    mutated = text.replace(f"### {DEMO_SUBSECTION_TITLE}", "### Something else", 1)
+    problems = demo_subsection_problems(mutated, smoke_ran=True, probe_ran=True)
+    assert any("absent" in p for p in problems), problems
+
+
+def _with_demo_body(demo_body: str) -> str:
+    text = _sources_text().replace("\r\n", "\n")
+    body = _section(text, PHASE18_TITLE_PREFIX)
+    main_body, old_demo = _split_demo_subsection(body)
+    assert old_demo
+    heading = re.search(rf"^### {DEMO_SUBSECTION_TITLE}[^\n]*\n", body, flags=re.MULTILINE)
+    assert heading is not None
+    return text.replace(body, main_body + heading.group(0) + demo_body, 1)
+
+
+def test_postponed_shape_is_accepted_and_invented_rows_are_rejected() -> None:
+    sentence = (
+        f"{NO_DEMO_FACTS_SENTENCE} smoke postponed by the user; probe postponed by the user.\n\n"
+    )
+    shaped = _with_demo_body(sentence)
+    assert demo_subsection_problems(shaped, smoke_ran=False, probe_ran=False) == []
+    # The same text is wrong when a run did happen (no rows although a run happened).
+    assert demo_subsection_problems(shaped, smoke_ran=True, probe_ran=True)
+    # Rows kept although both runs are declared postponed are rejected.
+    assert demo_subsection_problems(_sources_text(), smoke_ran=False, probe_ran=False)
+
+
+def test_a_postponed_smoke_leaves_no_smoke_row() -> None:
+    problems = demo_subsection_problems(_sources_text(), smoke_ran=False, probe_ran=True)
+    assert any("Demo smoke row although the smoke was postponed" in p for p in problems), problems
+
+
+def test_phase17_live_reread_paragraph_points_at_the_probe_answer() -> None:
+    text = _sources_text().replace("\r\n", "\n")
+    start = text.index("### Live re-read of the Phase 17 facts")
+    end = text.index("\n## ", start)
+    section = text[start:end]
+    assert "Still NOT verified live" in section
+    tail = section.split("Still NOT verified live", 1)[1]
+    assert "Phase 18" in tail and "Demo" in tail and "not mainnet" in tail
+    assert "-4116" in tail
