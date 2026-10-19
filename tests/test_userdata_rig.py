@@ -64,7 +64,9 @@ from tests.userdata_fakes import (
     make_order_trade_update_message,
 )
 
-ROUTER_PATH = Path("src/adapters/binance_userdata_router.py")
+ROUTER_PATH = (
+    Path(__file__).resolve().parents[1] / "src" / "adapters" / "binance_userdata_router.py"
+)
 TEST_ONLY_STREAM_URL = "wss://example.invalid"
 # The client order id of the synthetic frame builder's default ORDER_TRADE_UPDATE.
 TEST_ONLY_CLIENT_ID = "synthetic-entry-0001"
