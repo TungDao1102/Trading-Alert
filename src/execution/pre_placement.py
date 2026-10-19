@@ -23,9 +23,10 @@ because of earlier results.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from decimal import Decimal
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 
 from src.domain.enums import TradePlanStatus
 from src.domain.trade_plan import TradePlan
@@ -46,9 +47,22 @@ MARK_PRICE_CROSSED_STOP = "MARK_PRICE_CROSSED_STOP"
 MARK_PRICE_OUTSIDE_ZONE = "MARK_PRICE_OUTSIDE_ZONE"
 HEDGE_MODE_UNSUPPORTED = "HEDGE_MODE_UNSUPPORTED"
 
+# Binance New Order (page read 2026-10-19, research B6): `goodTillDate` must be greater than
+# now + 600 seconds, with second precision, and is mandatory for timeInForce GTD. This is a
+# STRUCTURAL exchange constant, not an owner limit: the owner's own minimum remaining validity is
+# a separate, NOT_CONFIGURED value (`min_remaining_validity_seconds`). Assumption A1: the page's
+# "current time" is Binance server time, which `gtd_clock_margin` covers (research P7).
+GTD_MIN_AHEAD_SECONDS: int = 600
+
 _LONG = "LONG"
 _SHORT = "SHORT"
+_CANDLE_CLOSE = "CANDLE_CLOSE"
 _MILLISECOND = timedelta(milliseconds=1)
+_SECOND = timedelta(seconds=1)
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_DENIED_STATUSES = frozenset(
+    {TradePlanStatus.EXPIRED, TradePlanStatus.INVALIDATED, TradePlanStatus.SUPERSEDED}
+)
 
 
 def _require_side(side: str) -> None:
@@ -124,6 +138,111 @@ class PrePlacementInputs:
             raise ValueError("symbol must be non-empty")
 
 
+def check_plan_status(plan_status: TradePlanStatus) -> str | None:
+    """Deny-list on the plan status (D-09).
+
+    EXPIRED, INVALIDATED and SUPERSEDED refuse; READY, APPROVAL_PENDING and APPROVED pass. A
+    require-APPROVED rule would be wrong: no production code sets APPROVED yet (research F5) and
+    an executed plan stays APPROVED (D051 item i), so it must never be contradicted here.
+    """
+    if plan_status in _DENIED_STATUSES:
+        return PLAN_STATUS_INVALID
+    return None
+
+
+def plan_invalidation_level(trade_plan: TradePlan) -> Decimal:
+    """Parse the plan's CANDLE_CLOSE invalidation level (mirror of the backtest rule, D-35).
+
+    Fails closed with `ValueError` on an unparseable rule, a basis other than CANDLE_CLOSE or a
+    missing, non-string or non-finite level.
+    """
+    try:
+        rule = json.loads(trade_plan.invalidation_rule_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalidation_rule_json is not valid JSON: {exc}") from exc
+    if not isinstance(rule, dict):
+        raise ValueError("invalidation_rule_json must be a JSON object")
+    basis = rule.get("basis")
+    if basis != _CANDLE_CLOSE:
+        raise ValueError(f"invalidation basis must be CANDLE_CLOSE, got {basis!r}")
+    raw = rule.get("level")
+    if not isinstance(raw, str):
+        raise ValueError(f"invalidation level must be a decimal string, got {raw!r}")
+    try:
+        level = Decimal(raw)
+    except InvalidOperation as exc:
+        raise ValueError(f"invalidation level is not a decimal: {raw!r}") from exc
+    if not level.is_finite():
+        raise ValueError(f"invalidation level must be finite, got {raw!r}")
+    return level
+
+
+def bar_close_invalidates(*, bar_close_price: Decimal, level: Decimal, side: str) -> bool:
+    """True when a strategy-bar close is strictly beyond the level (LONG below, SHORT above)."""
+    _require_side(side)
+    if side == _LONG:
+        return bar_close_price < level
+    return bar_close_price > level
+
+
+def check_invalidation(
+    *,
+    trade_plan: TradePlan,
+    side: str,
+    signal_invalidated: bool,
+    latest_closed_bar_close: Decimal | None,
+) -> str | None:
+    """Refuse when the signal or the plan's CANDLE_CLOSE rule says the setup is invalid (D-08).
+
+    A signal with `invalidated_at_utc` set, or a latest closed bar close beyond the level, gives
+    PLAN_INVALIDATED_BEFORE_PLACEMENT (distinct from the enum `RejectionReason.INVALIDATED`). A
+    missing bar close or an unparseable rule gives INVALIDATION_INPUT_UNAVAILABLE (fail closed).
+    """
+    _require_side(side)
+    if signal_invalidated:
+        return PLAN_INVALIDATED_BEFORE_PLACEMENT
+    if latest_closed_bar_close is None:
+        return INVALIDATION_INPUT_UNAVAILABLE
+    try:
+        level = plan_invalidation_level(trade_plan)
+    except ValueError:
+        return INVALIDATION_INPUT_UNAVAILABLE
+    if bar_close_invalidates(bar_close_price=latest_closed_bar_close, level=level, side=side):
+        return PLAN_INVALIDATED_BEFORE_PLACEMENT
+    return None
+
+
+def good_till_date_ms(expiry_utc: datetime) -> int:
+    """The `goodTillDate` value: the expiry floored to whole seconds, as epoch milliseconds."""
+    _require_utc(expiry_utc, "expiry_utc")
+    return ((expiry_utc - _EPOCH) // _SECOND) * 1000
+
+
+def check_remaining_validity(
+    *,
+    expiry_utc: datetime,
+    now_utc: datetime,
+    min_remaining_validity_seconds: int | None,
+    gtd_clock_margin: timedelta,
+) -> str | None:
+    """Refuse when too little validity remains for the owner's minimum or the GTD floor.
+
+    The remaining time is measured to the floored `goodTillDate` second. It must exceed both the
+    owner's `min_remaining_validity_seconds` and `GTD_MIN_AHEAD_SECONDS` plus the clock margin
+    (research B6, P7). An unset owner minimum is LIMITS_NOT_CONFIGURED (D-07).
+    """
+    _require_utc(now_utc, "now_utc")
+    if min_remaining_validity_seconds is None:
+        return LIMITS_NOT_CONFIGURED
+    gtd_instant = _EPOCH + timedelta(milliseconds=good_till_date_ms(expiry_utc))
+    remaining = gtd_instant - now_utc
+    if remaining <= timedelta(seconds=min_remaining_validity_seconds):
+        return VALIDITY_TOO_SHORT
+    if remaining <= timedelta(seconds=GTD_MIN_AHEAD_SECONDS) + gtd_clock_margin:
+        return VALIDITY_TOO_SHORT
+    return None
+
+
 def check_mark_price(
     *,
     side: str,
@@ -167,9 +286,28 @@ def check_mark_price(
 def evaluate_pre_placement(inputs: PrePlacementInputs) -> str | None:
     """First failing reason in the fixed order, or `None` when placement may proceed.
 
-    Order: status, invalidation, remaining validity, symbol free, mark price (the later checks are
-    added by the following tasks of plan 19-03).
+    Order: status, invalidation, remaining validity, symbol free, mark price (the symbol check is
+    added by the next task of plan 19-03).
     """
+    reason = check_plan_status(inputs.plan_status)
+    if reason is not None:
+        return reason
+    reason = check_invalidation(
+        trade_plan=inputs.trade_plan,
+        side=inputs.side,
+        signal_invalidated=inputs.signal_invalidated,
+        latest_closed_bar_close=inputs.latest_closed_bar_close,
+    )
+    if reason is not None:
+        return reason
+    reason = check_remaining_validity(
+        expiry_utc=inputs.expiry_utc,
+        now_utc=inputs.now_utc,
+        min_remaining_validity_seconds=inputs.min_remaining_validity_seconds,
+        gtd_clock_margin=inputs.gtd_clock_margin,
+    )
+    if reason is not None:
+        return reason
     return check_mark_price(
         side=inputs.side,
         mark_price=inputs.mark_price,
