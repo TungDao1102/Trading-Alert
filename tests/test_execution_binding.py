@@ -554,6 +554,7 @@ _ALLOWED_PREFIXES = (
     "__future__",
     "dataclasses",
     "decimal",
+    "json",
     "src.core.planner",
     "src.domain",
     "src.execution.placement",

@@ -26,8 +26,9 @@ before any adapter call.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from src.core.planner import plan_hash_from_fields
 from src.domain.enums import RejectionReason
@@ -208,6 +209,54 @@ def check_working_type(working_type: str) -> str | None:
     return None
 
 
+def check_snapped_geometry(
+    *,
+    side: str,
+    limit_price: Decimal,
+    sl_trigger_price: Decimal,
+    entry_min_price: Decimal,
+    entry_max_price: Decimal,
+) -> str | None:
+    """Post-snap geometry guard (D-03, G4-020).
+
+    Called with the entry limit and the SL trigger AFTER the tick snap. LONG needs
+    `entry_min <= limit <= entry_max`, `sl_trigger < entry_min` and `sl_trigger < limit`;
+    SHORT is the mirror (`sl_trigger > entry_max` and `sl_trigger > limit`). A stop within
+    one tick of the zone edge that snaps onto or past the zone gives
+    `GEOMETRY_INVALID_AFTER_SNAP`. An unknown side is a programming error and raises.
+    """
+    if side not in (_LONG, _SHORT):
+        raise ValueError(f"check_snapped_geometry: unknown side {side!r}")
+    if not (entry_min_price <= limit_price <= entry_max_price):
+        return GEOMETRY_INVALID_AFTER_SNAP
+    if side == _LONG:
+        stop_outside = sl_trigger_price < entry_min_price and sl_trigger_price < limit_price
+    else:
+        stop_outside = sl_trigger_price > entry_max_price and sl_trigger_price > limit_price
+    return None if stop_outside else GEOMETRY_INVALID_AFTER_SNAP
+
+
+def _take_profit_level(levels: object, key: str) -> Decimal:
+    if not isinstance(levels, dict) or key not in levels:
+        raise ValueError(f"take_profit_json has no {key!r} level")
+    raw = levels[key]
+    if not isinstance(raw, str):
+        raise ValueError(f"take_profit_json {key!r} must be a decimal string")
+    try:
+        value = Decimal(raw)
+    except InvalidOperation as exc:
+        raise ValueError(f"take_profit_json {key!r} is not a decimal: {raw!r}") from exc
+    if not value.is_finite() or value <= Decimal("0"):
+        raise ValueError(f"take_profit_json {key!r} must be a finite positive price")
+    return value
+
+
+def take_profit_levels(trade_plan: TradePlan) -> tuple[Decimal, Decimal]:
+    """Parse (tp1, tp2) from `take_profit_json`; anything else raises ValueError (fail closed)."""
+    levels = json.loads(trade_plan.take_profit_json)
+    return _take_profit_level(levels, "tp1"), _take_profit_level(levels, "tp2")
+
+
 __all__ = [
     "GEOMETRY_INVALID_AFTER_SNAP",
     "PLAN_SIDE_MISMATCH",
@@ -221,6 +270,8 @@ __all__ = [
     "BoundPlan",
     "bind_plan",
     "check_quantity_bound",
+    "check_snapped_geometry",
     "check_working_type",
     "recompute_plan_hash",
+    "take_profit_levels",
 ]
