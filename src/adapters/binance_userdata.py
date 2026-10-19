@@ -734,11 +734,23 @@ class UserDataAdapter:
         self._epoch += 1
 
     async def rebuild(self) -> None:
-        """The transport rebuild with the current key; the epoch increases."""
+        """The transport rebuild with the current key; the epoch increases.
+
+        The stored key is proven first with a keepalive: after an outage or a suspend longer
+        than the key's lifetime the SUBSCRIBE of an expired key would succeed at the socket
+        level and deliver nothing. An invalid key (INVALID_LISTEN_KEY) is replaced by a NEW
+        key, as `rekey` does; any other listenKey error propagates and the rebuild is not
+        done (fail closed).
+        """
         key = self._listen_key
         if key is None:
             raise RuntimeError("the adapter has no listenKey: call start() first")
+        try:
+            await self._listen_keys.keepalive()
+        except ListenKeyInvalid:
+            key = await self._listen_keys.start()
         await self._transport.rebuild(key)
+        self._listen_key = key
         self._epoch += 1
 
     async def stop(self, *, close_listen_key: bool) -> None:

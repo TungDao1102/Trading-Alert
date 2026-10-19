@@ -1246,3 +1246,53 @@ async def test_a_task_that_dies_fails_closed_instead_of_staying_live() -> None:
     assert rig.failures == [sup_mod.REASON_TASK_DIED]
 
     await rig.stop()
+
+
+async def test_a_rebuild_proves_the_stored_listen_key_with_a_keepalive() -> None:
+    """Review CR-02 (no-decision part): a rebuild must not resubscribe an unproven key."""
+    rig = Rig()
+    await rig.start_live()
+    assert rig.keepalives() == 0
+
+    rig.ws.simulate_unsolicited_close()
+    await rig.settle()
+
+    assert rig.supervisor.state is S.LIVE
+    assert rig.keepalives() == 1
+    assert rig.listen_key_posts() == 1
+    await rig.stop()
+
+
+async def test_a_rebuild_with_an_expired_listen_key_starts_a_new_key() -> None:
+    rest = FakeRestUserDataApi(listen_keys=(TEST_ONLY_LISTEN_KEY, TEST_ONLY_SECOND_LISTEN_KEY))
+    rig = Rig(rest=rest)
+    await rig.start_live()
+    stream_map = sdk_stream_map_of()
+    rest.fail_next("keepalive_user_data_stream", BadRequestError(TEST_ONLY_SDK_MESSAGE, -1125))
+
+    rig.ws.simulate_unsolicited_close()
+    await rig.settle()
+
+    assert rig.supervisor.state is S.LIVE
+    assert rig.listen_key_posts() == 2
+    assert TEST_ONLY_LISTEN_KEY not in stream_map
+    assert TEST_ONLY_SECOND_LISTEN_KEY in stream_map
+    assert rig.failures == []
+    await rig.stop()
+
+
+async def test_a_rebuild_waits_out_a_rest_pause_before_proving_the_key() -> None:
+    rig = Rig()
+    await rig.start_live()
+    rig.gate.record(ExchangeErrorCategory.RATE_LIMITED, None)
+
+    rig.ws.simulate_unsolicited_close()
+    await rig.settle()
+    assert rig.keepalives() == 0  # refused by the gate, nothing sent
+    assert rig.supervisor.state is not S.LIVE
+
+    await rig.vt.advance(WAIT_429)
+    await rig.settle()
+    assert rig.keepalives() == 1
+    assert rig.supervisor.state is S.LIVE
+    await rig.stop()

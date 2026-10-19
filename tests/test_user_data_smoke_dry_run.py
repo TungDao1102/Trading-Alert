@@ -331,8 +331,9 @@ def test_the_delete_then_put_observation_records_the_fake_class_and_code(
     assert document["acceptance"]["f"]["result"] == "OBSERVED"
     calls = rig.fakes.rest_userdata.calls
     assert calls["close_user_data_stream"] == 1
-    # one keepalive from the keepalive step, one PUT after the DELETE
-    assert calls["keepalive_user_data_stream"] == 2
+    # one keepalive from the keepalive step, one PUT after the DELETE, and one from the
+    # rebuild after the forced drop (the rebuild proves the stored key first; review CR-02)
+    assert calls["keepalive_user_data_stream"] == 3
 
 
 def test_the_forced_drop_goes_unknown_snapshot_live_with_a_measured_gap(

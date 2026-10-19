@@ -15,7 +15,7 @@ state UNKNOWN, reports the failure and waits for an explicit `request_resync()` 
 
 The supervisor holds the process-wide `RestRateLimitGate` of plan 18-10 (user record
 `decisions/18-DEC-O-18-01.md` and its amendment of 2026-10-16). Before every REST step it drives
-(keepalive, listenKey start or rekey, each snapshot attempt) it consults the gate: during a
+(keepalive, listenKey start, rekey or rebuild, each snapshot attempt) it consults the gate: during a
 pause it waits the remaining pause through the injected sleep, sending nothing and consuming no
 attempt; during a ban it stays UNKNOWN, reports `RATE_LIMIT_BAN_ACTIVE` once and sends nothing
 until `request_resync()`. The end of a wait proves nothing: a stream that was UNKNOWN stays
@@ -707,7 +707,7 @@ class UserDataSupervisor:
                 await self._bounded_reconnect(self._gated_rekey, REKEY_EXHAUSTED)
                 self._after_connect(new_key=True)
             elif step is _Step.REBUILD:
-                await self._bounded_reconnect(self._adapter.rebuild, REBUILD_EXHAUSTED)
+                await self._bounded_reconnect(self._gated_rebuild, REBUILD_EXHAUSTED)
                 self._after_connect(new_key=False)
             self._pending_step = _Step.SYNC
             await self._sync()
@@ -722,6 +722,10 @@ class UserDataSupervisor:
 
     async def _gated_rekey(self) -> None:
         await self._gated(self._adapter.rekey)
+
+    async def _gated_rebuild(self) -> None:
+        # The rebuild proves the stored listenKey with a REST keepalive, so it is gated too.
+        await self._gated(self._adapter.rebuild)
 
     def _after_connect(self, *, new_key: bool) -> None:
         self._awaiting_open = False
