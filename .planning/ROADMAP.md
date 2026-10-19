@@ -969,10 +969,26 @@ This absorbs former Phase 15 (live-price check).
 - [G4-020] The planner has no tick size, so a stop within one tick of the zone edge could be snapped by the risk layer; assert SL and entry geometry after tick snap (source: .planning/phases/15-strategy-geometry-correction/15-13-SUMMARY.md:90; decision: D054, accepted limitation)
 - [G4-036] An executed TradePlan stays APPROVED and `expiry_utc` governs only an unfilled entry; nothing may move an executed plan to EXPIRED, so the criterion 2 plan-status check must not contradict this (source: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md:19-20, docs/DECISIONS.md D051 item (i); decision: D051)
 
-**Plans:** 0 plans
+**Plans:** 17 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 19 to break down)
+- [ ] 19-01-PLAN.md - Execution-limits file and loader: four NOT_CONFIGURED keys, live path refuses while unset (D-07, D-13)
+- [ ] 19-02-PLAN.md - Plan binding: hash re-derived, symbol and side from the Signal, quantity bound, snapped geometry, working type (D-01..D-04)
+- [ ] 19-03-PLAN.md - Pre-placement refusals: mark price, validity with the GTD floor, same symbol, status, invalidation, Hedge (D-05..D-09, D-14)
+- [ ] 19-04-PLAN.md - Lot filters and the MARKET_LOT_SIZE close splitter (D-16, D-19)
+- [ ] 19-05-PLAN.md - Adapter reads: mark price, GTD goodTillDate, executed quantity on the probe
+- [ ] 19-06-PLAN.md - Migration 0005 sized_realized_risk with the owner's schema checkpoint (D-22)
+- [ ] 19-07-PLAN.md - Live TP sizing from the real position; EXEC-07 guard (D-18, D-19, O-02, O-03)
+- [ ] 19-08-PLAN.md - Adapter MARKET reduce-only close, pre-send refusal marker, error facts, live lot filters (D-15, D-21)
+- [ ] 19-09-PLAN.md - Store contract: sized realized risk and TP intent quantity; live-outcome read-back (D-20, D-22)
+- [ ] 19-10-PLAN.md - Fake exchange v2: positions, partial fills, -4509, MARKET close, scripted race gates
+- [ ] 19-11-PLAN.md - Protection coordinator tracer: fill-driven closePosition stop, REST confirmation (D-10, D-11, D-12)
+- [ ] 19-12-PLAN.md - Automatic reduce-only MARKET emergency close with splitting and query-before-resend (D-15, D-16, D-17)
+- [ ] 19-13-PLAN.md - Manager pre-placement gates and the live context; rehearsal call site (criteria 1 and 2)
+- [ ] 19-14-PLAN.md - Coordinator failure branches B1-B5, deadlines, CLOSE_REQUIRED (D-12, D-13, criterion 3)
+- [ ] 19-15-PLAN.md - Manager fill-driven placement: GTD entry, hand-off, taxonomy on the entry path, legacy tests rewritten (D-10, D-21)
+- [ ] 19-16-PLAN.md - TP legs after the entry is terminal; attach rewritten; rehearsal fill flow (criterion 4, D-17..D-20)
+- [ ] 19-17-PLAN.md - Phase gate, GLOSSARY codes, owner-gap register, EXEC-07 note
 
 ### Phase 20: Reconcile + SAFE_MODE Hardening + Alerts
 
