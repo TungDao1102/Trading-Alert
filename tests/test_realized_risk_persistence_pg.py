@@ -11,20 +11,30 @@ alembic-built template (`tests/pg_support.py`).
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
+from dataclasses import fields
 from decimal import Decimal
 from typing import Any
 
+import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from src.analytics import live_outcomes
 from src.analytics.live_outcomes import (
     SizedRisk,
     sized_risks_from_entry_intents,
 )
-from src.analytics.types import IncompleteReason
+from src.analytics.types import AnalyticsInputError, IncompleteReason
 from src.domain.enums import ExecutionIntentStatus, OrderRole
-from src.execution.intent_store import IntentRecord
+from src.execution.intent_store import ExecutionIntentStore, IntentRecord
 from src.execution.order_ids import derive_algo_client_id
 
 from tests.support.intent_store_fakes import (
+    AlwaysWinsIntentStore,
+    BarrierBeforeConsume,
+    CrashAfter,
+    FailingIntentStore,
     InMemoryExecutionIntentStore,
 )
 from tests.test_analytics_live_outcomes import _Rows
@@ -220,3 +230,222 @@ async def test_manager_passes_the_risk_verdicts_sized_realized_risk_to_consume()
     assert entry is not None
     assert entry.sized_realized_risk == passed
     assert entry.intended_quantity is not None
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: protective intents with an explicit quantity (D-20).
+# --------------------------------------------------------------------------- #
+
+
+def test_pg_protective_intent_stores_the_explicit_quantity_only_when_given(pg_db: str) -> None:
+    with _store_on(pg_db) as (engine, store):
+        _seed_parent_chain(engine)
+        assert store.consume_and_record_entry_intent(**_consume_kwargs())
+        assert store.record_protective_intent(
+            **_protective_kwargs(
+                OrderRole.TAKE_PROFIT_1.value, TP1_ALGO_ID, intended_quantity=TP1_QUANTITY
+            )
+        )
+        assert store.record_protective_intent(
+            **_protective_kwargs(OrderRole.STOP_LOSS.value, SL_ALGO_ID)
+        )
+        with engine.connect() as conn:
+            stored = dict(
+                conn.execute(
+                    text(
+                        "SELECT role, intended_quantity FROM execution_intents "
+                        "WHERE approval_id = :a"
+                    ),
+                    {"a": APPROVAL_ID},
+                ).all()
+            )
+        assert stored[OrderRole.TAKE_PROFIT_1.value] == TP1_QUANTITY
+        assert stored[OrderRole.STOP_LOSS.value] is None
+        assert stored[OrderRole.ENTRY.value] == Decimal("2.415")
+        # The unresolved listing (what recovery walks) carries the same quantities.
+        by_role = {r.role: r.intended_quantity for r in store.list_unresolved_intents()}
+        assert by_role[OrderRole.TAKE_PROFIT_1.value] == TP1_QUANTITY
+        assert by_role[OrderRole.STOP_LOSS.value] is None
+
+
+def test_pg_protective_quantity_must_be_positive(pg_db: str) -> None:
+    from src.persistence.errors import IntentStateConflict
+
+    with _store_on(pg_db) as (engine, store):
+        _seed_parent_chain(engine)
+        assert store.consume_and_record_entry_intent(**_consume_kwargs())
+        with pytest.raises(IntentStateConflict):
+            store.record_protective_intent(
+                **_protective_kwargs(
+                    OrderRole.TAKE_PROFIT_1.value, TP1_ALGO_ID, intended_quantity=Decimal("0")
+                )
+            )
+
+
+def test_in_memory_store_keeps_both_new_fields() -> None:
+    store = InMemoryExecutionIntentStore()
+    assert store.consume_and_record_entry_intent(**_consume_kwargs(sized_realized_risk=SIZED))
+    store.record_protective_intent(
+        **_protective_kwargs(
+            OrderRole.TAKE_PROFIT_1.value, TP1_ALGO_ID, intended_quantity=TP1_QUANTITY
+        )
+    )
+    store.record_protective_intent(**_protective_kwargs(OrderRole.STOP_LOSS.value, SL_ALGO_ID))
+    entry = store.get_entry(approval_id=APPROVAL_ID)
+    assert entry is not None and entry.sized_realized_risk == SIZED
+    tp1 = store.get_intent(approval_id=APPROVAL_ID, role=OrderRole.TAKE_PROFIT_1.value)
+    stop = store.get_intent(approval_id=APPROVAL_ID, role=OrderRole.STOP_LOSS.value)
+    assert tp1 is not None and tp1.intended_quantity == TP1_QUANTITY
+    assert tp1.sized_realized_risk is None
+    assert stop is not None and stop.intended_quantity is None
+
+
+class _SpyStore(InMemoryExecutionIntentStore):
+    """Records the kwargs of the two methods that gained a parameter."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.consume_calls: list[dict[str, Any]] = []
+        self.protective_calls: list[dict[str, Any]] = []
+
+    def consume_and_record_entry_intent(self, **kwargs: Any) -> bool:
+        self.consume_calls.append(dict(kwargs))
+        return super().consume_and_record_entry_intent(**kwargs)
+
+    def record_protective_intent(self, **kwargs: Any) -> bool:
+        self.protective_calls.append(dict(kwargs))
+        return super().record_protective_intent(**kwargs)
+
+
+_WRAPPERS: dict[str, Callable[[ExecutionIntentStore], ExecutionIntentStore]] = {
+    "CrashAfter": lambda inner: CrashAfter(inner, step="finalize"),
+    "BarrierBeforeConsume": lambda inner: BarrierBeforeConsume(inner, barrier=threading.Barrier(1)),
+    "FailingIntentStore": lambda inner: FailingIntentStore("mark_sent", OSError(), inner=inner),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_WRAPPERS))
+def test_wrapping_doubles_forward_both_new_arguments(name: str) -> None:
+    spy = _SpyStore()
+    store = _WRAPPERS[name](spy)
+    assert store.consume_and_record_entry_intent(**_consume_kwargs(sized_realized_risk=SIZED))
+    assert store.record_protective_intent(
+        **_protective_kwargs(
+            OrderRole.TAKE_PROFIT_1.value, TP1_ALGO_ID, intended_quantity=TP1_QUANTITY
+        )
+    )
+    assert spy.consume_calls[0]["sized_realized_risk"] == SIZED
+    assert spy.protective_calls[0]["intended_quantity"] == TP1_QUANTITY
+    entry = spy.get_entry(approval_id=APPROVAL_ID)
+    assert entry is not None and entry.sized_realized_risk == SIZED
+
+
+def test_always_wins_double_accepts_both_new_arguments() -> None:
+    store = AlwaysWinsIntentStore()
+    assert store.consume_and_record_entry_intent(**_consume_kwargs(sized_realized_risk=SIZED))
+    assert store.record_protective_intent(
+        **_protective_kwargs(
+            OrderRole.TAKE_PROFIT_1.value, TP1_ALGO_ID, intended_quantity=TP1_QUANTITY
+        )
+    )
+
+
+async def test_manager_stop_loss_intent_is_a_close_position_leg_with_no_quantity() -> None:
+    spy = _SpyStore()
+    outcome = await _run_plan(FakeExecutionAdapter(), intent_store=spy)
+    assert outcome.is_no_trade is False
+    stops = [c for c in spy.protective_calls if c["role"] == OrderRole.STOP_LOSS.value]
+    assert len(stops) == 1
+    assert stops[0]["intended_quantity"] is None  # passed explicitly (D-10)
+    assert spy.consume_calls[0]["sized_realized_risk"] > 0
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: constraint, store parity and fail-closed read-back.
+# --------------------------------------------------------------------------- #
+
+_PROTECTIVE_INSERT_WITH_SIZED = text(
+    "INSERT INTO execution_intents (approval_id, role, trade_plan_id, plan_hash, "
+    "algo_client_id, symbol, side, intended_price, sized_realized_risk, "
+    "intent_status, outcome_recorded, intended_at_utc, updated_at_utc) "
+    "VALUES (:a, 'STOP_LOSS', :p, :h, :c, :s, 'SELL', 98, 5, 'INTENDED', false, :t, :t)"
+)
+
+
+def test_database_check_rejects_a_sized_figure_on_a_protective_row(pg_db: str) -> None:
+    with _store_on(pg_db) as (engine, store):
+        _seed_parent_chain(engine)
+        assert store.consume_and_record_entry_intent(**_consume_kwargs())
+        with pytest.raises(IntegrityError) as raised, engine.begin() as conn:
+            conn.execute(
+                _PROTECTIVE_INSERT_WITH_SIZED,
+                {
+                    "a": APPROVAL_ID,
+                    "p": CASE["trade_plan_id"],
+                    "h": PLAN_HASH,
+                    "c": SL_ALGO_ID,
+                    "s": CASE["symbol"],
+                    "t": NOW_UTC,
+                },
+            )
+        assert "ck_execution_intents_sized_realized_risk" in str(raised.value)
+
+
+def test_store_never_writes_the_sized_figure_on_protective_rows(pg_db: str) -> None:
+    with _store_on(pg_db) as (engine, store):
+        _seed_parent_chain(engine)
+        assert store.consume_and_record_entry_intent(**_consume_kwargs(sized_realized_risk=SIZED))
+        for role, algo_id in (
+            (OrderRole.STOP_LOSS.value, SL_ALGO_ID),
+            (OrderRole.TAKE_PROFIT_1.value, TP1_ALGO_ID),
+        ):
+            assert store.record_protective_intent(
+                **_protective_kwargs(role, algo_id, intended_quantity=None)
+            )
+        with engine.connect() as conn:
+            sized = conn.execute(
+                text(
+                    "SELECT count(*) FROM execution_intents "
+                    "WHERE approval_id = :a AND role <> 'ENTRY' AND sized_realized_risk IS NOT NULL"
+                ),
+                {"a": APPROVAL_ID},
+            ).scalar_one()
+        assert sized == 0
+
+
+def test_in_memory_and_pg_stores_return_equal_records_for_the_same_calls(pg_db: str) -> None:
+    memory = InMemoryExecutionIntentStore()
+    assert memory.consume_and_record_entry_intent(**_consume_kwargs(sized_realized_risk=SIZED))
+    memory.record_protective_intent(
+        **_protective_kwargs(
+            OrderRole.TAKE_PROFIT_1.value, TP1_ALGO_ID, intended_quantity=TP1_QUANTITY
+        )
+    )
+    with _store_on(pg_db) as (engine, store):
+        _seed_parent_chain(engine)
+        assert store.consume_and_record_entry_intent(**_consume_kwargs(sized_realized_risk=SIZED))
+        store.record_protective_intent(
+            **_protective_kwargs(
+                OrderRole.TAKE_PROFIT_1.value, TP1_ALGO_ID, intended_quantity=TP1_QUANTITY
+            )
+        )
+        pg_rows = {r.role: r for r in store.list_unresolved_intents()}
+    memory_rows = {r.role: r for r in memory.list_unresolved_intents()}
+    assert pg_rows.keys() == memory_rows.keys() == {"ENTRY", "TAKE_PROFIT_1"}
+    for role, pg_row in pg_rows.items():
+        for field in fields(IntentRecord):
+            assert getattr(pg_row, field.name) == getattr(memory_rows[role], field.name), (
+                role,
+                field.name,
+            )
+
+
+def test_two_entry_rows_of_one_plan_with_different_figures_fail_closed() -> None:
+    first = _plain_record(approval_id="A-1", sized_realized_risk=Decimal("9.876"))
+    same = _plain_record(approval_id="A-2", sized_realized_risk=Decimal("9.876000"))
+    other = _plain_record(approval_id="A-3", sized_realized_risk=Decimal("9.877"))
+    assert sized_risks_from_entry_intents([first, same]) == {
+        "PLAN-A": SizedRisk(realized_risk=Decimal("9.876"), planned_quantity=Decimal("2.0"))
+    }
+    with pytest.raises(AnalyticsInputError):
+        sized_risks_from_entry_intents([first, other])

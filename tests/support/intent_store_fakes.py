@@ -127,6 +127,7 @@ class InMemoryExecutionIntentStore:
         side: str,
         intended_price: Decimal,
         now_utc: datetime,
+        intended_quantity: Decimal | None = None,
     ) -> bool:
         key = (approval_id, role)
         with self._lock:
@@ -141,7 +142,7 @@ class InMemoryExecutionIntentStore:
                 algo_client_id=algo_client_id,
                 symbol=symbol,
                 side=side,
-                intended_quantity=None,
+                intended_quantity=intended_quantity,
                 intended_price=intended_price,
                 intent_status=ExecutionIntentStatus.INTENDED,
                 exchange_order_id=None,
@@ -265,6 +266,7 @@ class AlwaysWinsIntentStore:
         side: str,
         intended_price: Decimal,
         now_utc: datetime,
+        intended_quantity: Decimal | None = None,
     ) -> bool:
         return True
 
@@ -374,6 +376,7 @@ class CrashAfter:
         side: str,
         intended_price: Decimal,
         now_utc: datetime,
+        intended_quantity: Decimal | None = None,
     ) -> bool:
         created = self._inner.record_protective_intent(
             approval_id=approval_id,
@@ -385,6 +388,7 @@ class CrashAfter:
             side=side,
             intended_price=intended_price,
             now_utc=now_utc,
+            intended_quantity=intended_quantity,
         )
         self._maybe_crash("sl_intent")
         return created
@@ -569,6 +573,7 @@ class FailingIntentStore:
         side: str,
         intended_price: Decimal,
         now_utc: datetime,
+        intended_quantity: Decimal | None = None,
     ) -> bool:
         self._maybe_fail("record_protective_intent", role)
         return self._inner.record_protective_intent(
@@ -581,6 +586,7 @@ class FailingIntentStore:
             side=side,
             intended_price=intended_price,
             now_utc=now_utc,
+            intended_quantity=intended_quantity,
         )
 
     def mark_sent(self, *, approval_id: str, role: str, now_utc: datetime) -> None:

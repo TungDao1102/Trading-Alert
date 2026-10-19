@@ -220,8 +220,12 @@ class PgExecutionStateStore:
         side: str,
         intended_price: Decimal,
         now_utc: datetime,
+        intended_quantity: Decimal | None = None,
     ) -> bool:
-        """Insert a protective-leg intent (INTENDED, NULL quantity: close-position leg).
+        """Insert a protective-leg intent (INTENDED).
+
+        `intended_quantity` None stores NULL (a closePosition leg: stop loss, TP2); an
+        explicit quantity (TP1, D-20) is stored as given and must be positive (CHECK).
 
         Returns True when this call created the row and False when the
         (approval_id, role) row already existed. Another unique arbiter (the plan/role
@@ -238,7 +242,7 @@ class PgExecutionStateStore:
             "algo_client_id": algo_client_id,
             "symbol": symbol,
             "side": side,
-            "intended_quantity": None,
+            "intended_quantity": intended_quantity,
             "intended_price": intended_price,
             "intent_status": ExecutionIntentStatus.INTENDED.value,
             "outcome_recorded": False,
