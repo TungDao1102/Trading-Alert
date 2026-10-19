@@ -303,9 +303,14 @@ async def test_an_unregistered_id_in_an_execute_run_is_an_error_and_the_run_cont
     assert record["handler_registered"] is False
     assert case(document, "cancel_order_not_found")["status"] == dp.OBSERVED
     assert document["cleanup"]["final"]["status"] == dp.CLEANUP_FLAT
-    assert port.names()[-3:] == ["open_orders", "open_algo_orders", "positions"] or (
-        "cancel_all_open_orders" in port.names()
-    )
+    # The run still ends with the account re-read (a guard against the `or` that passed always).
+    assert port.names()[-4:] == ["open_orders", "open_algo_orders", "positions", "account_balance"]
+    assert document["cleanup"]["final"]["remaining"] == {
+        "open_orders": 0,
+        "open_algo_orders": 0,
+        "positions": [],
+        "readable": True,
+    }
     assert document["outcome"] == dp.OUTCOME_FAILED
     assert code == dp.EXIT_FAILED
 
