@@ -31,6 +31,7 @@ from src.domain.exchange_errors import (
     retry_eligible,
     safe_mode_eligible,
 )
+from src.execution.order_ids import derive_client_order_id
 
 from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
 from tests.test_binance_usdm_signed_calls import (
@@ -157,9 +158,8 @@ async def test_tracer_1106_on_the_protective_stop_is_entry_without_protective(
     assert len(protective) == 1
     assert protective[0]["kwargs"]["close_position"] is True  # the stop; no take profit exists
     assert methods[-1] == "cancel_normal_order"
-    assert (
-        adapter.calls[-1]["kwargs"]["orig_client_order_id"]
-        == "x-33333333333333333333333333333333EN"
+    assert adapter.calls[-1]["kwargs"]["orig_client_order_id"] == derive_client_order_id(
+        plan_hash=_load_input()["plan_hash"], role="ENTRY"
     )
     assert [json_phase(event) for event in journal.events] == ["pre_cancel", "post_cancel"]
     case_input = _load_input()

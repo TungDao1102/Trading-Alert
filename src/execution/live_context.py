@@ -1,0 +1,87 @@
+"""The live inputs the execution manager needs beyond the approval (Phase 19, plan 19-13).
+
+`execute_approved_plan` binds the approved plan to the symbol, side and size that reach the
+exchange (D-01..D-04, APRV-01), refuses while the owner's execution limits are unset (D-07,
+D-13) and runs the pre-placement checks (D-05..D-09, D-11, D-14, RISK-04). Those gates need
+values the Phase 9 signature never carried: the persisted `Signal`, the per-plan constraint
+snapshot, the execution limits, the protection registry, the latest closed strategy-bar close,
+the GTD clock margin and the TP1 fraction. `LivePlacementContext` bundles them into ONE required
+keyword so the signature churns once and `_GATE_KWARG_KEYS` stays exactly as it was.
+
+The dataclass is pure: it validates types and ranges and holds no number of its own. Every field
+is required and keyword-only, none has a default (a default would be a hidden decision), and the
+caller supplies the numbers: the limits come from the committed limits file, the margin from the
+ratified drift limits, the fraction from the frozen backtest constant.
+
+Recorded, not decided: Q6 - the latest closed bar close is injected (its producer is Phase 24);
+`None` means "not available" and the invalidation check refuses it.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import timedelta
+from decimal import Decimal
+
+from src.domain.signal import Signal
+from src.execution.constraint_snapshot import PlanConstraintSnapshot
+from src.execution.execution_limits import ExecutionLimits
+from src.execution.protection import ProtectionRegistry
+
+_ZERO = Decimal("0")
+_ONE = Decimal("1")
+
+
+@dataclass(frozen=True, kw_only=True)
+class LivePlacementContext:
+    """Everything `execute_approved_plan` needs beyond the approval, the plan and the risk inputs.
+
+    Attributes:
+        signal: The persisted Signal the plan was built from. Symbol and direction come from it
+            (the TradePlan has neither field, research F2).
+        plan_constraint_snapshot: The per-plan exchange constraints; its symbol and trade plan id
+            are cross-checked by the binding and its working type must be MARK_PRICE.
+        execution_limits: The four owner limits; any NOT_CONFIGURED value refuses the placement.
+        protection_registry: The fill-driven protection coordinator's registry view;
+            `blocks_new_entries()` feeds the account-wide unprotected-position check.
+        latest_closed_bar_close: The latest closed strategy-bar close for the invalidation rule,
+            or `None` when it is not available (the invalidation check then refuses).
+        gtd_clock_margin: The drift margin added to the exchange's 600 second `goodTillDate` floor.
+        tp1_quantity_fraction: The TP1 share of the position, in (0, 1].
+    """
+
+    signal: Signal
+    plan_constraint_snapshot: PlanConstraintSnapshot
+    execution_limits: ExecutionLimits
+    protection_registry: ProtectionRegistry
+    latest_closed_bar_close: Decimal | None
+    gtd_clock_margin: timedelta
+    tp1_quantity_fraction: Decimal
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.signal, Signal):
+            raise TypeError("signal must be a Signal")
+        if not isinstance(self.plan_constraint_snapshot, PlanConstraintSnapshot):
+            raise TypeError("plan_constraint_snapshot must be a PlanConstraintSnapshot")
+        if not isinstance(self.execution_limits, ExecutionLimits):
+            raise TypeError("execution_limits must be ExecutionLimits")
+        if not callable(getattr(self.protection_registry, "blocks_new_entries", None)):
+            raise TypeError("protection_registry must provide blocks_new_entries()")
+        bar_close = self.latest_closed_bar_close
+        if bar_close is not None:
+            if not isinstance(bar_close, Decimal):
+                raise TypeError("latest_closed_bar_close must be Decimal or None")
+            if not bar_close.is_finite() or bar_close <= _ZERO:
+                raise ValueError("latest_closed_bar_close must be finite and positive")
+        if not isinstance(self.gtd_clock_margin, timedelta):
+            raise TypeError("gtd_clock_margin must be a timedelta")
+        if self.gtd_clock_margin < timedelta(0):
+            raise ValueError("gtd_clock_margin must be >= 0")
+        fraction = self.tp1_quantity_fraction
+        if not isinstance(fraction, Decimal):
+            raise TypeError("tp1_quantity_fraction must be Decimal")
+        if not fraction.is_finite() or fraction <= _ZERO or fraction > _ONE:
+            raise ValueError("tp1_quantity_fraction must be in (0, 1]")
+
+
+__all__ = ["LivePlacementContext"]

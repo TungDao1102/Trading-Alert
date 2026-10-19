@@ -208,19 +208,40 @@ class RecordingSafeModeController:
         return SafeModeVerdict(is_no_trade=False, reason_code=None)
 
 
-def _live_wiring(**overrides: Any) -> dict[str, Any]:
+class StubProtectionRegistry:
+    """`ProtectionRegistry` stub: `blocks_new_entries` answers a fixed value (plan 19-13)."""
+
+    def __init__(self, *, blocks: bool = False) -> None:
+        self.blocks = blocks
+        self.block_checks = 0
+
+    def blocks_new_entries(self) -> bool:
+        self.block_checks += 1
+        return self.blocks
+
+    def register_resting_entry(self, entry: Any) -> None:  # pragma: no cover - unused here
+        raise AssertionError("the manager must not register an entry in plan 19-13")
+
+    def protection_of(self, plan_hash: str) -> Any:  # pragma: no cover - unused here
+        return None
+
+
+def _live_wiring(*, case_input: dict[str, Any] | None = None, **overrides: Any) -> dict[str, Any]:
     """The required live-safety collaborators for `execute_approved_plan`.
 
     09-REVIEW CR-07/CR-09: SAFE_MODE (and the other live gates) are
-    required arguments — tests wire recording doubles explicitly.
+    required arguments — tests wire recording doubles explicitly. Plan 19-13 adds the
+    `live_context` bundle (Signal, constraint snapshot, TEST_ONLY limits, registry stub).
     """
+    case = case_input if case_input is not None else _load_input()
     wiring: dict[str, Any] = {
         "safe_mode_controller": RecordingSafeModeController(),
         "journal": FakeJournal(),
         "enablement": _enabled_controller(),
-        "gate_kwargs": _build_gate_kwargs(_load_input()),
+        "gate_kwargs": _build_gate_kwargs(case),
         # Fresh in-memory store per call: every test keeps its one-call semantics.
         "intent_store": InMemoryExecutionIntentStore(),
+        "live_context": _build_live_context(case),
     }
     wiring.update(overrides)
     return wiring
@@ -273,6 +294,98 @@ def _build_gate_kwargs(case_input: dict[str, Any], **overrides: Any) -> dict[str
 # --------------------------------------------------------------------------- #
 
 
+def _plan_hash_of(case_input: dict[str, Any]) -> str:
+    """The plan hash re-derived from the fixture's plan fields (plan 19-13, D-01).
+
+    The binding refuses a hash that the planner's algorithm does not reproduce, so the fixture's
+    stored `plan_hash` is only a pin (`test_fixture_plan_hash_is_the_rederived_hash`); every
+    builder takes the hash from the fields, so a test that edits a hashed field stays consistent.
+    """
+    from src.core.planner import plan_hash_from_fields
+
+    return plan_hash_from_fields(
+        signal_id=case_input["signal_id"],
+        entry_min_price=_coerce_decimal(case_input["entry_min_price"], "entry_min_price"),
+        entry_max_price=_coerce_decimal(case_input["entry_max_price"], "entry_max_price"),
+        stop_loss_price=_coerce_decimal(case_input["stop_loss_price"], "stop_loss_price"),
+        take_profit_json=case_input["take_profit_json"],
+        invalidation_rule_json=case_input["invalidation_rule_json"],
+        expiry_utc=_parse_utc(case_input["expiry_utc"]),
+    )
+
+
+def _build_signal(case_input: dict[str, Any], **overrides: Any) -> Any:
+    """The persisted Signal the fixture plan was built from (BTCUSDT LONG)."""
+    from src.domain.enums import SignalStatus
+    from src.domain.signal import Signal
+
+    raw = case_input["signal"]
+    values: dict[str, Any] = {
+        "signal_id": case_input["signal_id"],
+        "strategy_id": raw["strategy_id"],
+        "strategy_version": case_input["strategy_version"],
+        "parameter_set_id": case_input["parameter_set_id"],
+        "parameter_set_hash": case_input["parameter_set_hash"],
+        "symbol": case_input["symbol"],
+        "direction": case_input["candidate_position_side"],
+        "setup_type": raw["setup_type"],
+        "source_timeframe": raw["source_timeframe"],
+        "source_candle_close_utc": _parse_utc(raw["source_candle_close_utc"]),
+        "detected_at_utc": _parse_utc(raw["detected_at_utc"]),
+        "status": SignalStatus.APPROVED,
+        "expires_at_utc": _parse_utc(raw["expires_at_utc"]),
+    }
+    values.update(overrides)
+    return Signal(**values)
+
+
+def _build_plan_snapshot(case_input: dict[str, Any], **overrides: Any) -> Any:
+    """The per-plan constraint snapshot (MARK_PRICE working type) for the fixture plan."""
+    import dataclasses
+
+    from src.execution.constraint_snapshot import (
+        ExchangeFilterExtras,
+        build_plan_constraint_snapshot,
+    )
+
+    snapshot = build_plan_constraint_snapshot(
+        case_input["trade_plan_id"],
+        _build_constraint_snapshot(case_input),
+        ExchangeFilterExtras(),
+        None,
+        "MARK_PRICE",
+        captured_at_utc=_parse_utc(case_input["metadata_observed_at_utc"]),
+    )
+    return dataclasses.replace(snapshot, **overrides) if overrides else snapshot
+
+
+def _build_live_context(case_input: dict[str, Any], **overrides: Any) -> Any:
+    """The `LivePlacementContext` for the fixture plan with the TEST_ONLY execution limits."""
+    from src.execution.live_context import LivePlacementContext
+
+    from tests.support import execution_limits as test_limits
+    from tests.support.limits import TEST_ONLY_AHEAD_LIMIT_MS, TEST_ONLY_BEHIND_LIMIT_MS
+
+    live = case_input["live"]
+    values: dict[str, Any] = {
+        "signal": _build_signal(case_input),
+        "plan_constraint_snapshot": _build_plan_snapshot(case_input),
+        "execution_limits": test_limits.test_only_execution_limits(),
+        "protection_registry": StubProtectionRegistry(),
+        "latest_closed_bar_close": _coerce_decimal(
+            live["latest_closed_bar_close"], "latest_closed_bar_close"
+        ),
+        "gtd_clock_margin": timedelta(
+            milliseconds=max(TEST_ONLY_AHEAD_LIMIT_MS, TEST_ONLY_BEHIND_LIMIT_MS)
+        ),
+        "tp1_quantity_fraction": _coerce_decimal(
+            live["tp1_quantity_fraction"], "tp1_quantity_fraction"
+        ),
+    }
+    values.update(overrides)
+    return LivePlacementContext(**values)
+
+
 def _build_approved_plan(case_input: dict[str, Any]) -> Any:
     """Build a TradePlan from the fixture input."""
     from src.domain.enums import TradePlanStatus
@@ -300,7 +413,7 @@ def _build_approved_plan(case_input: dict[str, Any]) -> Any:
             case_input["quantity_after_rounding"], "quantity_after_rounding"
         ),
         quantization_decision=case_input["quantization_decision"],
-        plan_hash=case_input["plan_hash"],
+        plan_hash=_plan_hash_of(case_input),
         status=TradePlanStatus.APPROVED,
         created_at_utc=_parse_utc(case_input["created_at_utc"]),
     )
@@ -323,7 +436,7 @@ def _build_approval(case_input: dict[str, Any]) -> Any:
         acted_at_utc=_parse_utc(case_input["acted_at_utc"]),
         actor_id=case_input.get("actor_id", ""),
         telegram_message_id=None,
-        request_hash=case_input["plan_hash"],
+        request_hash=_plan_hash_of(case_input),
     )
 
 
@@ -334,7 +447,7 @@ def _build_callback(case_input: dict[str, Any]) -> Any:
     return Callback(
         raw_token=case_input["raw_token"],
         chat_id=case_input["chat_id"],
-        plan_hash=case_input["plan_hash"],
+        plan_hash=_plan_hash_of(case_input),
         strategy_version=case_input["strategy_version"],
         parameter_set_id=case_input["parameter_set_id"],
         parameter_set_hash=case_input["parameter_set_hash"],
@@ -650,7 +763,7 @@ async def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
 
     adapter.entry_exceptions.append(TimeoutError("read timeout — status unknown"))
     adapter._query_response = OrderProbe(  # type: ignore[attr-defined]
-        client_order_id="x-33333333333333333333333333333333EN",
+        client_order_id=_load_expected()["entry_client_order_id"],
         found=True,
         order_id="12345",
         status="NEW",
@@ -691,23 +804,25 @@ async def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
 # --------------------------------------------------------------------------- #
 
 
-async def _run_plan(adapter: FakeExecutionAdapter, **overrides: Any) -> Any:
-    """Run `execute_approved_plan` on the golden fixture with overrides."""
+async def _run_plan(
+    adapter: FakeExecutionAdapter, *, case_input: dict[str, Any] | None = None, **overrides: Any
+) -> Any:
+    """Run `execute_approved_plan` on the golden fixture (or an edited copy) with overrides."""
     from src.execution.manager import execute_approved_plan
 
-    case_input = _load_input()
+    case = case_input if case_input is not None else _load_input()
     kwargs: dict[str, Any] = {
-        "callback": _build_callback(case_input),
-        "approval": _build_approval(case_input),
-        "authorized_chat_id": case_input["chat_id"],
-        "expiry_utc": _parse_utc(case_input["expiry_utc"]),
-        "approval_strategy_version": case_input["strategy_version"],
-        "approval_parameter_set_id": case_input["parameter_set_id"],
-        "approval_parameter_set_hash": case_input["parameter_set_hash"],
-        "now_utc": _parse_utc(case_input["now_utc"]),
+        "callback": _build_callback(case),
+        "approval": _build_approval(case),
+        "authorized_chat_id": case["chat_id"],
+        "expiry_utc": _parse_utc(case["expiry_utc"]),
+        "approval_strategy_version": case["strategy_version"],
+        "approval_parameter_set_id": case["parameter_set_id"],
+        "approval_parameter_set_hash": case["parameter_set_hash"],
+        "now_utc": _parse_utc(case["now_utc"]),
         "adapter": adapter,
-        "risk_kwargs": _build_risk_kwargs(case_input),
-        **_live_wiring(),
+        "risk_kwargs": _build_risk_kwargs(case),
+        **_live_wiring(case_input=case),
     }
     kwargs.update(overrides)
     return await execute_approved_plan(**kwargs)
@@ -717,7 +832,7 @@ def _probe(found: bool) -> Any:
     from src.adapters.binance_usdm import OrderProbe
 
     return OrderProbe(
-        client_order_id="x-33333333333333333333333333333333EN",
+        client_order_id=_load_expected()["entry_client_order_id"],
         found=found,
         order_id="12345" if found else None,
         status="NEW" if found else None,
@@ -974,7 +1089,7 @@ async def test_rejected_sl_cancels_entry_and_forces_safe_mode() -> None:
             "method": "cancel_normal_order",
             "kwargs": {
                 "symbol": "BTCUSDT",
-                "orig_client_order_id": "x-33333333333333333333333333333333EN",
+                "orig_client_order_id": _load_expected()["entry_client_order_id"],
             },
         }
     ]
@@ -1874,3 +1989,286 @@ def test_order_ids_do_not_claim_exchange_side_deduplication() -> None:
     assert "dedupe retries" not in lowered
     assert "impossible by construction" not in lowered
     assert "open orders" in lowered
+
+
+# --------------------------------------------------------------------------- #
+# Phase 19 plan 19-13, Task 1 - LivePlacementContext and the binding gate (1c).
+# --------------------------------------------------------------------------- #
+
+
+def test_fixture_plan_hash_is_the_rederived_hash() -> None:
+    """The fixture's stored plan hash is the planner's own hash of the plan fields (D-01)."""
+    case_input = _load_input()
+    assert case_input["plan_hash"] == _plan_hash_of(case_input)
+    assert _load_expected()["plan_hash"] == case_input["plan_hash"]
+
+
+def test_fixture_plan_quantity_covers_the_risk_sized_quantity() -> None:
+    """F-203: the plan quantity is no longer below what the risk pipeline sizes."""
+    case_input = _load_input()
+    assert _coerce_decimal(case_input["quantity_after_rounding"], "q") == Decimal("2.415")
+
+
+def test_gate_kwarg_keys_are_unchanged() -> None:
+    """Plan 19-13 adds ONE keyword (`live_context`); the gate-kwargs key set is untouched."""
+    from src.execution import manager
+
+    assert manager._GATE_KWARG_KEYS == frozenset(
+        {"open_algo_count", "planned_leg_count", "positions_reconciled"}
+    )
+
+
+def test_execute_approved_plan_takes_live_context_as_a_required_keyword() -> None:
+    import inspect
+
+    from src.execution import manager
+
+    parameter = inspect.signature(manager.execute_approved_plan).parameters["live_context"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+async def test_missing_live_context_raises_before_any_adapter_call() -> None:
+    import pytest
+
+    adapter = FakeExecutionAdapter()
+    with pytest.raises(ValueError, match="live_context is required"):
+        await _run_plan(adapter, live_context=None)
+    assert adapter.calls == []
+
+
+def test_live_context_validates_every_field() -> None:
+    import dataclasses
+
+    import pytest
+    from src.execution.live_context import LivePlacementContext
+
+    context = _build_live_context(_load_input())
+    assert isinstance(context, LivePlacementContext)
+    fields = {f.name: getattr(context, f.name) for f in dataclasses.fields(context)}
+    assert set(fields) == {
+        "signal",
+        "plan_constraint_snapshot",
+        "execution_limits",
+        "protection_registry",
+        "latest_closed_bar_close",
+        "gtd_clock_margin",
+        "tp1_quantity_fraction",
+    }
+    # Every field is required: building without one raises TypeError.
+    for name in fields:
+        partial = {k: v for k, v in fields.items() if k != name}
+        with pytest.raises(TypeError):
+            LivePlacementContext(**partial)
+    bad_values: dict[str, Any] = {
+        "signal": object(),
+        "plan_constraint_snapshot": object(),
+        "execution_limits": object(),
+        "protection_registry": object(),
+        "latest_closed_bar_close": 101.5,
+        "gtd_clock_margin": 0.5,
+        "tp1_quantity_fraction": 0.5,
+    }
+    for name, bad in bad_values.items():
+        with pytest.raises(TypeError):
+            LivePlacementContext(**{**fields, name: bad})
+    for name, bad in (
+        ("latest_closed_bar_close", Decimal("0")),
+        ("latest_closed_bar_close", Decimal("NaN")),
+        ("gtd_clock_margin", timedelta(seconds=-1)),
+        ("tp1_quantity_fraction", Decimal("0")),
+        ("tp1_quantity_fraction", Decimal("1.01")),
+    ):
+        with pytest.raises(ValueError):
+            LivePlacementContext(**{**fields, name: bad})
+    # None is the explicit "bar close not available" value; a fraction of exactly 1 is allowed.
+    assert LivePlacementContext(**{**fields, "latest_closed_bar_close": None}) is not None
+    assert LivePlacementContext(**{**fields, "tp1_quantity_fraction": Decimal("1")}) is not None
+
+
+def test_live_context_module_is_pure() -> None:
+    import ast
+
+    source = (Path(__file__).parents[1] / "src" / "execution" / "live_context.py").read_text(
+        encoding="utf-8"
+    )
+    imported: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+        elif isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+    assert imported <= {
+        "__future__",
+        "dataclasses",
+        "datetime",
+        "decimal",
+        "src.domain.signal",
+        "src.execution.constraint_snapshot",
+        "src.execution.execution_limits",
+        "src.execution.protection",
+    }
+
+
+async def test_golden_case_with_the_live_context_still_places() -> None:
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(adapter)
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+
+
+def _binding_case_variants() -> list[tuple[str, dict[str, Any], str]]:
+    """(label, `_run_plan` overrides, expected reason) for each Task 1 binding refusal."""
+    import dataclasses
+
+    case_input = _load_input()
+    other_plan_hash = "4" * 64
+
+    def risk_with_side(side: str) -> dict[str, Any]:
+        risk_kwargs = _build_risk_kwargs(case_input)
+        risk_kwargs["candidate_position_side"] = side
+        return risk_kwargs
+
+    def risk_with_symbol(symbol: str) -> dict[str, Any]:
+        risk_kwargs = _build_risk_kwargs(case_input)
+        risk_kwargs["constraint_snapshot"] = dataclasses.replace(
+            risk_kwargs["constraint_snapshot"], symbol=symbol
+        )
+        return risk_kwargs
+
+    def risk_with_synthetic_hash() -> dict[str, Any]:
+        risk_kwargs = _build_risk_kwargs(case_input)
+        risk_kwargs["trade_plan"] = dataclasses.replace(
+            risk_kwargs["trade_plan"], plan_hash=other_plan_hash
+        )
+        return risk_kwargs
+
+    live = _build_live_context(case_input)
+    return [
+        (
+            "caller side SHORT on a LONG plan",
+            {"risk_kwargs": risk_with_side("SHORT")},
+            "PLAN_SIDE_MISMATCH",
+        ),
+        (
+            "caller symbol ETHUSDT",
+            {"risk_kwargs": risk_with_symbol("ETHUSDT")},
+            "PLAN_SYMBOL_MISMATCH",
+        ),
+        (
+            "plan snapshot symbol ETHUSDT",
+            {
+                "live_context": dataclasses.replace(
+                    live,
+                    plan_constraint_snapshot=dataclasses.replace(
+                        live.plan_constraint_snapshot, symbol="ETHUSDT"
+                    ),
+                )
+            },
+            "PLAN_SYMBOL_MISMATCH",
+        ),
+        (
+            "plan snapshot of another plan",
+            {
+                "live_context": dataclasses.replace(
+                    live,
+                    plan_constraint_snapshot=dataclasses.replace(
+                        live.plan_constraint_snapshot, trade_plan_id="tp_other"
+                    ),
+                )
+            },
+            "PLAN_SYMBOL_MISMATCH",
+        ),
+        (
+            "synthetic plan hash",
+            {
+                "risk_kwargs": risk_with_synthetic_hash(),
+                "callback": dataclasses.replace(
+                    _build_callback(case_input), plan_hash=other_plan_hash
+                ),
+                "approval": dataclasses.replace(
+                    _build_approval(case_input), request_hash=other_plan_hash
+                ),
+            },
+            "STALE_SETUP",
+        ),
+        (
+            "signal of another strategy version",
+            {
+                "live_context": dataclasses.replace(
+                    live, signal=_build_signal(case_input, strategy_version="v9.9.9")
+                )
+            },
+            "PLAN_SIGNAL_MISMATCH",
+        ),
+        (
+            "signal of another signal id",
+            {
+                "live_context": dataclasses.replace(
+                    live, signal=_build_signal(case_input, signal_id="sig_other")
+                )
+            },
+            "PLAN_SIGNAL_MISMATCH",
+        ),
+        (
+            "signal direction SHORT against LONG geometry",
+            {
+                "live_context": dataclasses.replace(
+                    live, signal=_build_signal(case_input, direction="SHORT")
+                )
+            },
+            "PLAN_SIDE_MISMATCH",
+        ),
+    ]
+
+
+async def test_binding_refusals_are_no_trade_with_zero_calls_and_no_entry_row() -> None:
+    case_input = _load_input()
+    for label, overrides, reason in _binding_case_variants():
+        adapter = FakeExecutionAdapter()
+        store = InMemoryExecutionIntentStore()
+        outcome = await _run_plan(adapter, intent_store=store, **overrides)
+        assert (outcome.is_no_trade, outcome.reason_code) == (True, reason), label
+        assert adapter.calls == [], label
+        assert store.get_entry(approval_id=case_input["approval_id"]) is None, label
+
+
+async def test_a_tampered_working_type_is_refused_before_any_adapter_call() -> None:
+    """D-04: the snapshot cannot be built with another working type, so tamper after the fact."""
+    import dataclasses
+
+    from src.execution.binding import WORKING_TYPE_NOT_MARK_PRICE, check_working_type
+
+    assert check_working_type("MARK_PRICE") is None
+    assert check_working_type("CONTRACT_PRICE") == WORKING_TYPE_NOT_MARK_PRICE
+
+    case_input = _load_input()
+    live = _build_live_context(case_input)
+    snapshot = dataclasses.replace(live.plan_constraint_snapshot)
+    object.__setattr__(snapshot, "working_type", "CONTRACT_PRICE")
+    adapter = FakeExecutionAdapter()
+    store = InMemoryExecutionIntentStore()
+    outcome = await _run_plan(
+        adapter,
+        intent_store=store,
+        live_context=dataclasses.replace(live, plan_constraint_snapshot=snapshot),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, WORKING_TYPE_NOT_MARK_PRICE)
+    assert adapter.calls == []
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+
+
+async def test_replay_returns_the_stored_outcome_before_the_binding_gate() -> None:
+    """APRV-02 / D-09: the replay lookup precedes gate 1c, so a refusing context changes nothing."""
+    import dataclasses
+
+    case_input = _load_input()
+    store = InMemoryExecutionIntentStore()
+    first = await _run_plan(FakeExecutionAdapter(), intent_store=store)
+    assert (first.is_no_trade, first.reason_code) == (False, "OK")
+
+    refusing = dataclasses.replace(
+        _build_live_context(case_input), signal=_build_signal(case_input, strategy_version="v9.9.9")
+    )
+    replay_adapter = FakeExecutionAdapter()
+    replay = await _run_plan(replay_adapter, intent_store=store, live_context=refusing)
+    assert replay == first
+    assert replay_adapter.calls == []

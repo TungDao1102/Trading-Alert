@@ -1,5 +1,5 @@
 {
-  "plan_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+  "plan_hash": "64464f8e874de2316bbf2847a1dbc6ede3f1914cf7ae3dc0e21feb583fd1e7d6",
   "outcome_reason_code": "OK",
   "method_sequence": [
     "get_position_mode",
@@ -7,6 +7,6 @@
     "query_algo_order_by_client",
     "place_algo_protective"
   ],
-  "entry_client_order_id": "x-33333333333333333333333333333333EN",
-  "sl_algo_client_id": "xa-3333333333333333333333333333333SL"
+  "entry_client_order_id": "x-64464f8e874de2316bbf2847a1dbc6edEN",
+  "sl_algo_client_id": "xa-64464f8e874de2316bbf2847a1dbc6eSL"
 }
