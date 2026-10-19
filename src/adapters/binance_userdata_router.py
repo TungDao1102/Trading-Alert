@@ -248,6 +248,9 @@ class StreamDivergenceKind(str, Enum):
     UNKNOWN_STREAM_ORDER = "UNKNOWN_STREAM_ORDER"
     UNKNOWN_STREAM_ALGO = "UNKNOWN_STREAM_ALGO"
     STREAM_ALGO_TERMINAL_FAILED = "STREAM_ALGO_TERMINAL_FAILED"
+    # A sink raised: the event it was handed (a fill, a status hint, an algo update) was not
+    # taken over, so the reconciler must look at the order or algo order it names.
+    SINK_FAILURE = "SINK_FAILURE"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -394,6 +397,12 @@ def _fingerprint(outcome: object) -> str:
     return canonical_payload_sha256({"type": type(outcome).__name__, "fields": _plain(outcome)})
 
 
+def _text_attr(outcome: object, name: str) -> str | None:
+    """A non-empty text attribute of an outcome (an order or algo identity), else None."""
+    value = getattr(outcome, name, None)
+    return value if isinstance(value, str) and value != "" else None
+
+
 def _payload(values: dict[str, str | None]) -> str:
     return json.dumps(values, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
@@ -469,6 +478,8 @@ class UserDataRouter:
         # Journal ids this router already wrote: a duplicate is not re-sent, because the
         # append-only journal rejects the same id with a different observation time.
         self._journaled: set[str] = set()
+        # `after_gap` of the item being routed, for the divergence of a failing sink.
+        self._after_gap = False
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(session_id={self._session_id!r})"
@@ -483,6 +494,7 @@ class UserDataRouter:
         """Hand one trusted outcome to its sinks; never raises except for a failing journal."""
         outcome: object = item.outcome
         tally = _Tally()
+        self._after_gap = item.after_gap
         if isinstance(outcome, OrderUpdateEvent):
             self._route_order(outcome, item, tally)
             return tally.result(handled=True, kind=KIND_ORDER_UPDATE)
@@ -676,7 +688,8 @@ class UserDataRouter:
             route = AlgoRoute(
                 known=known, event=event, status_class=status_class, after_gap=item.after_gap
             )
-            if self._call_sink("algo_sink", self._algo_sink, route, event, tally):
+            algo_sink_ok = self._call_sink("algo_sink", self._algo_sink, route, event, tally)
+            if algo_sink_ok:
                 tally.algo_routes += 1
             if status_class is AlgoStatusClass.TERMINAL_FAILED:
                 self._emit_divergence(
@@ -693,8 +706,10 @@ class UserDataRouter:
                     event,
                     tally,
                 )
-        # Remembered only after every journal write of this update succeeded.
-        self._seen_algo_keys.add(key)
+        # Remembered only after every journal write of this update succeeded and the algo sink
+        # took the update over: a redelivery of an update the sink lost is routed again.
+        if known is None or algo_sink_ok:
+            self._seen_algo_keys.add(key)
 
     def _journal_algo_diagnostic(
         self,
@@ -866,22 +881,41 @@ class UserDataRouter:
     ) -> None:
         tally.sink_failures += 1
         exception_type = type(exc).__name__
+        payload_sha256 = canonical_payload_sha256(
+            {
+                "sink": name,
+                "exception_type": exception_type,
+                "outcome": _fingerprint(outcome),
+            }
+        )
         self._record(
             stream_anomaly_event(
                 kind=ROUTER_SINK_FAILURE,
                 event_name=_event_name(outcome),
                 field=name,
                 detail=f"sink {name} raised {exception_type}"[:200],
-                payload_sha256=canonical_payload_sha256(
-                    {
-                        "sink": name,
-                        "exception_type": exception_type,
-                        "outcome": _fingerprint(outcome),
-                    }
-                ),
+                payload_sha256=payload_sha256,
                 observed_at_utc=self._clock(),
                 session_id=self._session_id,
             )
+        )
+        if name == "divergence_sink":
+            return  # nothing left to surface the failure to; the journal row is the trace
+        # The journal row is deduplicated by its fingerprint and nobody reads it live, so the
+        # loss is also surfaced as a divergence the reconciler sees (fail closed).
+        self._emit_divergence(
+            StreamDivergence(
+                kind=StreamDivergenceKind.SINK_FAILURE,
+                symbol=_text_attr(outcome, "symbol"),
+                client_order_id=_text_attr(outcome, "client_order_id"),
+                client_algo_id=_text_attr(outcome, "client_algo_id"),
+                reason=f"sink {name} raised; the event it was handed was not taken over",
+                anomaly_kind=ROUTER_SINK_FAILURE,
+                payload_sha256=payload_sha256,
+                after_gap=self._after_gap,
+            ),
+            outcome,
+            tally,
         )
 
     def _record(self, event: JournalEvent) -> None:

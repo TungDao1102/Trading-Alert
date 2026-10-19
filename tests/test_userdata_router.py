@@ -743,11 +743,60 @@ def test_other_failing_sinks_are_recorded_and_isolated(
     assert [
         json.loads(r.payload_json)["field"] for r in h.anomaly_records(ROUTER_SINK_FAILURE)
     ] == [failing]
-    if failing == "algo_sink":
-        # The divergence still reaches its sink after the algo sink failed.
-        assert h.divergence_kinds() == [StreamDivergenceKind.STREAM_ALGO_TERMINAL_FAILED]
-    if failing == "fills_fallback":
-        assert h.divergence_kinds() == [StreamDivergenceKind.STREAM_FILL_TOTAL_MISMATCH]
+    if failing == "divergence_sink":
+        assert h.divergence_kinds() == []  # the failing sink is the only way to surface one
+    elif failing == "algo_sink":
+        # The loss is surfaced, and the terminal-failed divergence still reaches its sink.
+        assert h.divergence_kinds() == [
+            StreamDivergenceKind.SINK_FAILURE,
+            StreamDivergenceKind.STREAM_ALGO_TERMINAL_FAILED,
+        ]
+    elif failing == "fills_fallback":
+        assert h.divergence_kinds() == [
+            StreamDivergenceKind.STREAM_FILL_TOTAL_MISMATCH,
+            StreamDivergenceKind.SINK_FAILURE,
+        ]
+    else:
+        assert h.divergence_kinds() == [StreamDivergenceKind.SINK_FAILURE]
+
+
+@pytest.mark.parametrize("failing", ["fill_sink", "exchange_state_sink", "status_hint_sink"])
+def test_a_failing_order_sink_surfaces_a_sink_failure_divergence_with_the_order_identity(
+    failing: str,
+) -> None:
+    """Review WR-04: a lost fill or status must reach the reconciler, not only the journal."""
+    h = Harness()
+    h.sinks.failing.add(failing)
+    h.route_frame(trade(**A), after_gap=True)
+
+    (divergence,) = h.sinks.divergences
+    assert divergence.kind is StreamDivergenceKind.SINK_FAILURE
+    assert divergence.client_order_id == ENTRY.client_id
+    assert divergence.anomaly_kind == ROUTER_SINK_FAILURE
+    assert divergence.after_gap is True
+    assert divergence.payload_sha256 is not None
+    assert "TEST_ONLY failure" not in divergence.reason  # the sink name only, no message
+
+
+def test_an_algo_update_lost_by_a_failing_sink_is_routed_again_on_redelivery() -> None:
+    h = Harness()
+    frame = algo_update_frame(X="NEW")
+    h.sinks.failing.add("algo_sink")
+    first = h.route_frame(frame)
+    assert first.sink_failures == 1
+    assert h.sinks.algo_routes == []
+    assert h.divergence_kinds() == [StreamDivergenceKind.SINK_FAILURE]
+    assert h.divergence_kinds()[0].value == "SINK_FAILURE"
+    assert h.sinks.divergences[0].client_algo_id == STOP.client_id
+
+    h.sinks.failing.discard("algo_sink")
+    second = h.route_frame(frame)
+    assert second.duplicate_algo_updates == 0
+    assert len(h.sinks.algo_routes) == 1
+
+    third = h.route_frame(frame)  # now a real duplicate
+    assert third.duplicate_algo_updates == 1
+    assert len(h.sinks.algo_routes) == 1
 
 
 def test_every_sink_name_is_a_router_keyword() -> None:
