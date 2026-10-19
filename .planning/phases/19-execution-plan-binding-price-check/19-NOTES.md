@@ -71,3 +71,13 @@ Criterion 1 and criterion 3 (stop after fill, N from the probe, Hedge, alert); t
 
 - The probe did NOT meet a MARKET quantity limit: the MARKET_LOT_SIZE case was off (`evidence/18-probe-check.txt` line 46: Demo market lot min 0.0001, max 120, step 0.0001, out-of-range NOT_OBSERVED).
 - Auto-flatten principle needs no new approval: D034 already gives it. Only the parameters are open.
+
+## Phase 18 code review: items skipped as owner decisions (2026-10-19)
+
+Source: `18-user-data-stream-error-taxonomy/18-REVIEW.md` (deep, three parts; ids are `<part>/<id>`) and `18-REVIEW-FIX.md` (26 of 33 critical and warning findings fixed, 7 skipped, nothing in `config/`, `params/` or `docs/DECISIONS.md` touched). These are NOT decided; each needs the owner before it is changed. The reviewer's text is a claim; the orchestrator confirmed only src/CR-01 and the stale-code facts of src/CR-02 and src/WR-02 against the source.
+
+- **src/WR-02, manager and taxonomy (belongs here).** `src/execution/manager.py` never reads the exchange-error taxonomy. `place_entry` is re-sent (`_ENTRY_MAX_ATTEMPTS = 2`), but only after a probe reports definitive absence, so the duplicate-order risk is lower than the review says. What is real: a refusal raised before anything is sent (rate-limit gate, `EntriesBlocked`, `SignedCallPolicyMissing`) is treated like an ambiguous send, which can give a spurious SAFE_MODE or an UNKNOWN intent. Wire the taxonomy here, together with the pre-placement checks.
+- **src/WR-08, `ClientError` class rule.** Every 4xx other than 400/401/403/404/418/429 maps `CLIENT_OTHER -> STATUS_UNKNOWN` (retryable). The rule is ratified in plan 18-05 and pinned by tests; the review says only 408 should be unknown. Changing it needs a new decision.
+- **src/WR-01, retry after a 429.** The supervisor waits out a pause and resends listenKey and snapshot calls (plan 18-14 does this on purpose); the 2026-10-16 amendment says no 429 retry. The two texts disagree; the owner picks one.
+- **src/WR-10, rate-limit response headers.** `ApiResponse.rate_limits` is never read, so the gate is purely reactive. Reading it needs a new limits key in `binance-limits-v1.toml` (a ratified file) and a decision.
+- **src/CR-02 remainder, liveness.** Fixed: `rebuild()` now proves the stored listenKey with a keepalive and starts a new key when it is invalid. Left open: (a) `max_liveness_age_seconds = "none"` is a ratified DECISION value and `stream_is_stale` is called by no production code, so a silent dead stream is detected only by the next keepalive failure (up to 30 min); (b) the SUBSCRIBE acknowledgement check was not confirmable from the SDK source. Decide whether a liveness limit is ratified and where the verdict is enforced.
