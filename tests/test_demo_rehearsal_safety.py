@@ -757,13 +757,19 @@ class _Journal:
         self.events.append(event)
 
 
-def test_live_orders_stay_disabled_by_default() -> None:
+def test_live_orders_stay_disabled_by_default(tmp_path: Path) -> None:
     journal = _Journal()
-    controller = LiveEnablementController(journal=journal)
-    assert controller.is_disabled
-    assert dr is not None
     assert LiveEnablementController(journal=journal).is_disabled
     assert journal.events == []
+    # The rehearsal runner (tracer path) never enables live orders: nothing mutating is sent
+    # and its evidence carries no enablement record (review WR-11).
+    code, factory = run_main(["--scenario", "far"], tmp_path)
+    assert code == 0
+    assert not set(factory.inner.calls) & set(MUTATING_METHODS)
+    (written,) = tmp_path.glob("09-DEMO-REHEARSAL-DRYRUN-far-*.json")
+    data = json.loads(written.read_text(encoding="utf-8"))
+    assert "enablement" not in data.get("details", {})
+    assert data["exchange_orders"] == []
 
 
 def test_tracer_dry_run_main_end_to_end(tmp_path: Path) -> None:

@@ -270,15 +270,27 @@ def test_a_case_status_outside_the_vocabulary_is_a_problem(
     assert any("status" in p for p in dp.check_probe_evidence(document))
 
 
-def test_every_listed_status_is_accepted(valid: dict[str, Any]) -> None:
+def test_the_status_vocabulary_is_the_plan_list() -> None:
     assert dp.CASE_STATUSES == frozenset(
         {"OBSERVED", "NOT_OBSERVED", "NOT_REHEARSED", "SKIPPED_DRY_RUN", "ERROR"}
     )
+
+
+@pytest.mark.parametrize("status", sorted(dp.CASE_STATUSES))
+def test_every_listed_status_is_accepted(valid: dict[str, Any], status: str) -> None:
     document = copy.deepcopy(valid)
-    document["cases"][0] = _observed_case(document)
     document["mode"] = dp.MODE_EXECUTE
     document["proof_class"] = dp.PROOF_REAL_DEMO
+    item = _observed_case(document)
+    if status != dp.OBSERVED:
+        item["status"] = status
+        item["observations"] = []
+        item["reason"] = "TEST_ONLY reason"
+    document["cases"][0] = item
     assert dp.check_probe_evidence(document) == []
+    # The status is what is checked: the same case with a status outside the list is refused.
+    item["status"] = "NOT_A_STATUS"
+    assert any("status" in p for p in dp.check_probe_evidence(document))
 
 
 def test_an_observed_case_without_observations_is_a_problem(valid: dict[str, Any]) -> None:

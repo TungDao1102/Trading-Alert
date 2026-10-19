@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import threading
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -315,8 +316,37 @@ def test_gate_module_is_pure() -> None:
 
 
 def test_one_gate_is_safe_to_share_across_threads() -> None:
+    """Review WR-11: real concurrency, not a check of the lock's type."""
     gate, _ = _gate()
-    assert isinstance(gate._lock, type(__import__("threading").Lock()))  # noqa: SLF001
+    threads_count = 8
+    barrier = threading.Barrier(threads_count)
+    failures: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            barrier.wait()
+            for _ in range(200):
+                gate.record(ExchangeErrorCategory.RATE_LIMITED, 5)
+                try:
+                    gate.check()
+                except RateLimitPauseActive:
+                    pass
+                restriction = gate.restriction()
+                assert restriction is not None
+                assert restriction.reason == "RATE_LIMIT_PAUSE_429"
+        except BaseException as exc:  # noqa: BLE001 - collected and asserted below
+            failures.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(threads_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    final = gate.restriction()
+    assert final is not None
+    assert final.reason == "RATE_LIMIT_PAUSE_429"
 
 
 # --------------------------------------------------------------------------- #
