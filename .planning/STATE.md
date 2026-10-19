@@ -1,20 +1,20 @@
 ---
 gsd_state_version: "1.0"
 milestone: v0.3
-current_phase: 16
-current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
-current_plan: "62 with Total Plans in Phase: 62 — 59 with a SUMMARY (open: 16-43, 16-44, 16-61; next is 16-43, then 16-61 and 16-44)"
+current_phase: 19
+current_phase_name: Execution Plan Binding + Pre-Placement Checks
+current_plan: 1
 status: executing
-stopped_at: "Phase 19 planned: 17 plans, checker passed"
-last_updated: "2026-10-19T06:08:17.821Z"
-last_activity: 2026-10-15
-last_activity_desc: Phase 16 execution started
-state_head: 10e471657189841116a957c8ce017ec19b2f809a
+stopped_at: Completed 19-01-PLAN.md
+last_updated: "2026-10-19T13:00:59.832Z"
+last_activity: 2026-10-19
+last_activity_desc: Phase 19 execution started
+state_head: e47a39b712829aef0eac2a764f3737f03e81e473
 progress:
   total_phases: 29
   completed_phases: 18
   total_plans: 250
-  completed_plans: 229
+  completed_plans: 230
 milestone_name: milestone
 ---
 
@@ -27,14 +27,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 16 — Paper Runtime Composition + SHADOW Approval Mode
+**Current focus:** Phase 19 — Execution Plan Binding + Pre-Placement Checks
 
 ## Current Position
 
-Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
-Current Plan: 62 with Total Plans in Phase: 62 — 59 with a SUMMARY (open: 16-43, 16-44, 16-61; next is 16-43, then 16-61 and 16-44)
-Status: Executing Phase 16
-Last activity: 2026-10-15 — REEFUSDT terminal settlement as a bounded interval landed (quick 261014-nnl: simulator 2.1.0, protocol v2.4.0 D070/D071); REEF diagnostic on the new code: 48 of 48 points run (old: 33 FundingCoverageError). Manifest NOT frozen, O-03 to be re-issued, S0/S1 manifests need the REEF terminal_settlements row
+Phase: 19 (Execution Plan Binding + Pre-Placement Checks) — EXECUTING
+Current Plan: 1
+Status: Executing Phase 19
+Last activity: 2026-10-19 — Phase 19 execution started
 
 Progress: [██████░░░░] 61%
 
@@ -231,6 +231,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P59 | not measured (suite 15 min) | 4 tasks | 15 files |
 | Phase 16 P62 | not measured (two full suites of 15 min) | 3 tasks | 11 files |
 | Phase 16 P60 | 3h | 4 tasks | 33 files |
+| Phase 19 P01 | 28 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -555,6 +556,7 @@ Recent decisions affecting current work:
 - [Phase 16]: 16-62: rest_backfill_depth_bars is a required keyword through build_supervisor into backfill_missed_closes; closes beyond the depth are gaps with the window reason (B1-WR-09)
 - [Phase 16]: 16-60: research windows are built with RESEARCH_WARMUP_SPAN (50 days, STRUCTURAL) of price history before their start; simulator semantics 2.2.0; protocol v2.5.0 with D073 and D074 (B3-CR-01); the Development window starts cold (data begins 2024-10-03)
 - [Phase 16]: 16-60: the original 240 research records stay unchanged and are superseded by the rerun under 2.2.0 (D074, owner's wording); rerun directory research-run-1-v2-2-0 and a sixth authorization key are implemented by 16-61
+- [Phase 19]: 19-01: the D-13 entry terminal timeout key is named entry_terminal_timeout_ms (unit suffix added); the four execution limits live in config/execution/execution-limits-v1.toml, all NOT_CONFIGURED, O-04 stays open
 
 ### Pending Todos
 
@@ -638,6 +640,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-19T06:08:16.520Z
-Stopped at: Phase 19 planned: 17 plans, checker passed
-Resume file: .planning/phases/19-execution-plan-binding-price-check/19-01-PLAN.md
+Last session: 2026-10-19T13:00:57.014Z
+Stopped at: Completed 19-01-PLAN.md
+Resume file: None

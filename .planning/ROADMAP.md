@@ -969,10 +969,10 @@ This absorbs former Phase 15 (live-price check).
 - [G4-020] The planner has no tick size, so a stop within one tick of the zone edge could be snapped by the risk layer; assert SL and entry geometry after tick snap (source: .planning/phases/15-strategy-geometry-correction/15-13-SUMMARY.md:90; decision: D054, accepted limitation)
 - [G4-036] An executed TradePlan stays APPROVED and `expiry_utc` governs only an unfilled entry; nothing may move an executed plan to EXPIRED, so the criterion 2 plan-status check must not contradict this (source: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md:19-20, docs/DECISIONS.md D051 item (i); decision: D051)
 
-**Plans:** 17 plans
+**Plans:** 1/17 plans executed
 
 Plans:
-- [ ] 19-01-PLAN.md - Execution-limits file and loader: four NOT_CONFIGURED keys, live path refuses while unset (D-07, D-13)
+- [x] 19-01-PLAN.md - Execution-limits file and loader: four NOT_CONFIGURED keys, live path refuses while unset (D-07, D-13)
 - [ ] 19-02-PLAN.md - Plan binding: hash re-derived, symbol and side from the Signal, quantity bound, snapped geometry, working type (D-01..D-04)
 - [ ] 19-03-PLAN.md - Pre-placement refusals: mark price, validity with the GTD floor, same symbol, status, invalidation, Hedge (D-05..D-09, D-14)
 - [ ] 19-04-PLAN.md - Lot filters and the MARKET_LOT_SIZE close splitter (D-16, D-19)
@@ -1313,7 +1313,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 59/63 | In Progress|  |
 | 17. Operational Persistence Layer | 15/15 | Complete    | 2026-10-07 |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 26/26 | Complete    | 2026-10-18 |
-| 19. Execution Plan Binding + Pre-Placement Checks | 0/TBD | Not started | - |
+| 19. Execution Plan Binding + Pre-Placement Checks | 1/17 | In Progress | - |
 | 20. Reconcile + SAFE_MODE Hardening + Alerts | 0/TBD | Not started | - |
 | 21. Account Equity + Daily Loss from Binance | 0/TBD | Not started | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
