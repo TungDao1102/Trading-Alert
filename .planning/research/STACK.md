@@ -94,24 +94,27 @@ uv init --python 3.13   # only if scaffolding fresh; else add to existing pyproj
 uv add "binance-sdk-derivatives-trading-usds-futures>=17.3,<18"
 # Algo execution SDK — Phase 3+ evaluation only, NOT V1:
 # uv add "binance-sdk-algo>=3.4,<4"
-uv add "sqlalchemy>=2.0,<2.1" "psycopg[binary,pool]>=3.3,<4" "alembic>=1.19,<2"
-uv add "pydantic>=2.11,<3" "pydantic-settings>=2,<3"
+uv add "sqlalchemy>=2.0,<2.1" "psycopg[binary,pool]>=3.3,<4" "alembic>=1.19.2"
+uv add "pydantic>=2.11,<3" "pydantic-settings>=2"
 
 # Research / analytics
-uv add "polars>=1.44,<2" "pyarrow>=19" "duckdb>=1.5,<2"
-uv add "numpy>=1.26" "scipy>=1.14" "pandas>=2.2"
+uv add "polars>=1.44,<2.0" "pyarrow>=19" "duckdb==1.5.5"
+# Recommended, NOT installed (add only through `uv add`, lockfile in the same change):
+# uv add "numpy>=1.26" "scipy>=1.14" "pandas>=2.2"
 # Exploratory sweeps only (never canonical semantics):
 # uv add "vectorbt>=0.28"
 
 # Edge + Telegram
-uv add "fastapi>=0.141,<0.150" "uvicorn[standard]>=0.52,<0.60" "httpx>=0.28,<0.29"
-uv add "python-telegram-bot>=22.8,<23"
+uv add "httpx>=0.28,<1" "python-telegram-bot>=22.8,<23"
+# Recommended, NOT installed - the TradingView webhook edge is not built:
+# uv add "fastapi>=0.141,<0.150" "uvicorn[standard]>=0.52,<0.60"
 
 # Supporting
-uv add tenacity structlog tzdata pyyaml
+uv add tenacity structlog tzdata
+# No PyYAML/tomli dependency exists: parameter files are TOML, read by stdlib tomllib.
 
 # Dev dependencies
-uv add --dev pytest "pytest-asyncio>=1" respx ruff mypy pre-commit
+uv add --dev pytest "pytest-asyncio>=1.4" respx ruff mypy
 ```
 
 ## Alternatives Considered
@@ -143,13 +146,13 @@ uv add --dev pytest "pytest-asyncio>=1" respx ruff mypy pre-commit
 ## Stack Patterns by Variant
 
 **If Phase 0 (data foundation only):**
-- Install runtime + research + persistence subsets; defer FastAPI/Telegram/Algo SDK. DuckDB + Parquet + collectors + Alembic-baselined PostgreSQL are the whole world. Backup/restore smoke test runs against Compose PostgreSQL 17.
+- Install runtime + research + persistence subsets; defer the Algo SDK. DuckDB + Parquet + collectors + Alembic-baselined PostgreSQL are the whole world. Backup/restore smoke test runs against Compose PostgreSQL 17.
 
 **If Phase 1 (backtest research):**
 - Add the full research subset (Polars/SciPy/VectorBT-exploratory). No networked services required; Binance SDK used only for historical REST pulls and exchangeInfo snapshots (versioned into fixtures).
 
 **If Phase 2 (paper) / Phase 3 (live):**
-- Add FastAPI edge, python-telegram-bot approval loop, full SDK surface (WS streams + user-data + `algoOrder` conditionals). Re-verify SDK minor version and the Futures change-log before wiring order paths — Binance migrates endpoints (Dec 2025 Algo migration precedent) and the code must follow the docs, not memory.
+- The python-telegram-bot approval loop and the full SDK surface (WS streams + user-data + `algoOrder` conditionals) are already installed and in use from Phase 7 onward. Re-verify SDK minor version and the Futures change-log before wiring order paths — Binance migrates endpoints (Dec 2025 Algo migration precedent) and the code must follow the docs, not memory. The FastAPI/uvicorn edge stays deferred: the TradingView webhook is not built.
 
 ## Version Compatibility
 
@@ -163,7 +166,7 @@ uv add --dev pytest "pytest-asyncio>=1" respx ruff mypy pre-commit
 | pytest 9 + pytest-asyncio (auto mode) | Python 3.13 | pytest 8 EOL in plugin ecosystem (pytest-httpx 0.36 requires 9). Do not mix pytest-asyncio with anyio in the same suite |
 | PostgreSQL 17-bookworm image | SQLAlchemy/psycopg/Alembic above | pgvector-style extensions NOT needed in V1; keep the image stock |
 
-## Installed State (uv.lock, checked 2026-10-06)
+## Installed State (uv.lock, checked 2026-10-19)
 
 The tables above are the recommended stack; `pyproject.toml` and `uv.lock` are the installed truth. When they disagree, the lockfile wins for versions and this section wins for what is adopted.
 
@@ -179,7 +182,7 @@ The tables above are the recommended stack; `pyproject.toml` and `uv.lock` are t
 - Binance docs: New/Query Algo Order (`/fapi/v1/algoOrder`, CONDITIONAL types), Algo Trading REST (Future Algo), derivatives change-log (Dec 2025 conditional→Algo migration, `ALGO_UPDATE.o.rm`) — HIGH structure / MEDIUM field detail
 - PyPI: `polars` 1.44.1 (Aug 26 2026), `duckdb` 1.5.5 (Jul 22 2026), `fastapi` 0.141.1 (Jul 29 2026), `uvicorn` 0.52.4 (Aug 19 2026), `python-telegram-bot` 22.8 (Jun 12 2026, Bot API 10.0), `psycopg` 3.3.4→3.3.5 (May 2026), `httpx` 0.28.1 stable / 1.0 dev-pre, `alembic` 1.19.1 (Aug 8 2026), `pytest` 9 / pytest-httpx 0.36 changelog — HIGH
 - Context7 `/websites/sqlalchemy_en_20` (async engine + psycopg_pool patterns), `/pola-rs/polars`, `/duckdb/duckdb-python`, `/websites/psycopg_psycopg3`, `/websites/fastapi_tiangolo`, `/pytest-dev/pytest`, `/pydantic/pydantic` (library IDs resolved, docs sampled for SQLAlchemy-async) — HIGH
-- `docs/TECHNOLOGY_STACK.md` + `docs/SOURCES.md` (canonical decisions D001–D021, re-verification policy) — HIGH (project authority)
+- `docs/TECHNOLOGY_STACK.md` + `docs/SOURCES.md` (canonical decisions D001–D076, re-verification policy) — HIGH (project authority)
 - NumPy/SciPy/pandas/tenacity/structlog/ruff/mypy floors: training knowledge + ecosystem convention, NOT re-verified this pass — MEDIUM; Phase-0 `uv lock` resolution is the acceptance check
 
 ---
