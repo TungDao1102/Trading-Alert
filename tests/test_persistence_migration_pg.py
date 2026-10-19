@@ -540,3 +540,121 @@ def test_sized_realized_risk_check_rejects_protective_zero_and_negative(
     orig: Any = raised.value.orig
     assert orig.sqlstate == _CHECK_VIOLATION
     assert orig.diag.constraint_name == "ck_execution_intents_sized_realized_risk"
+
+
+# --------------------------------------------------------------------------------------
+# Reversible chain and data-bearing upgrade 0004 -> 0005 (Phase 19, D-22)
+# --------------------------------------------------------------------------------------
+def _reflected_inserts(engine: Engine, rows: list[Any]) -> list[tuple[Table, dict[str, Any]]]:
+    """Insert `rows` through reflected tables, with explicit non-NULL column subsets.
+
+    Reflection (not the ORM insert) keeps a 0004 INSERT from mentioning the 0005-only
+    column; NULL-valued attributes are left out so server defaults apply.
+    """
+    columns_of = _present_columns(engine)
+    inserted: list[tuple[Table, dict[str, Any]]] = []
+    with engine.begin() as conn:
+        for row in rows:
+            name = row.__table__.name
+            table = Table(name, MetaData(), autoload_with=engine)
+            present = columns_of(name)
+            values = {
+                c.key: getattr(row, c.key)
+                for c in row.__table__.columns
+                if c.key in present and getattr(row, c.key) is not None
+            }
+            assert values, name
+            conn.execute(table.insert().values(values))
+            inserted.append((table, values))
+    return inserted
+
+
+def _assert_rows_intact(engine: Engine, inserted: list[tuple[Table, dict[str, Any]]]) -> None:
+    with engine.connect() as conn:
+        for table, values in inserted:
+            keys = list(values)
+            reflected = Table(table.name, MetaData(), autoload_with=conn)
+            stored = conn.execute(select(*[reflected.c[k] for k in keys])).all()
+            assert any(dict(zip(keys, row, strict=True)) == values for row in stored), table.name
+
+
+def test_data_bearing_upgrade_0004_to_0005_keeps_every_row(pg_empty_db: str) -> None:
+    run_alembic(pg_empty_db, "upgrade", REVISION_0004)
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert "sized_realized_risk" not in _present_columns(engine)("execution_intents")
+        inserted = _reflected_inserts(
+            engine,
+            [
+                make_signal(1),
+                make_plan(1, 1),
+                make_approval(1, 1, 1),
+                _intent("ENTRY"),
+                _intent("STOP_LOSS"),
+            ],
+        )
+        assert [t.name for t, _ in inserted] == [
+            "signals",
+            "trade_plans",
+            "approvals",
+            "execution_intents",
+            "execution_intents",
+        ]
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "upgrade", "head")
+
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        _assert_rows_intact(engine, inserted)
+        with engine.connect() as conn:
+            figures = conn.execute(
+                text("SELECT role, sized_realized_risk FROM execution_intents ORDER BY role")
+            ).all()
+        assert [tuple(row) for row in figures] == [("ENTRY", None), ("STOP_LOSS", None)]
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_0005_keeps_rows_and_removes_only_the_column(pg_empty_db: str) -> None:
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        insert_and_commit(
+            engine,
+            make_signal(1),
+            make_plan(1, 1),
+            make_approval(1, 1, 1),
+            _intent("ENTRY", sized_realized_risk=Decimal("12.5")),
+            _intent("STOP_LOSS"),
+        )
+        before = _present_columns(engine)("execution_intents")
+        assert "sized_realized_risk" in before
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "downgrade", REVISION_0004)
+
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        after = _present_columns(engine)("execution_intents")
+        assert before - after == {"sized_realized_risk"}
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            roles = (
+                conn.execute(text("SELECT role FROM execution_intents ORDER BY role"))
+                .scalars()
+                .all()
+            )
+            check = conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_constraint "
+                    "WHERE conname = 'ck_execution_intents_sized_realized_risk'"
+                )
+            ).scalar_one()
+        assert version == REVISION_0004
+        assert list(roles) == ["ENTRY", "STOP_LOSS"]
+        assert check == 0
+    finally:
+        engine.dispose()
