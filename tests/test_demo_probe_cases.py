@@ -1934,3 +1934,83 @@ def test_the_marketable_buy_stays_inside_the_percent_price_band_when_the_mark_is
 def test_the_marketable_buy_still_refuses_an_unreadable_band() -> None:
     with pytest.raises(dp._StopCase):
         _market("82247.1", up=None).marketable_buy()
+
+
+# --------------------------------------------------------------------------- #
+# The fakes keep the `ProbePort` signatures (review WR-02).
+# --------------------------------------------------------------------------- #
+
+
+def _port_methods() -> list[str]:
+    return sorted(
+        name
+        for name, member in vars(dp.ProbePort).items()
+        if inspect.isfunction(member) and not name.startswith("_")
+    )
+
+
+def _shape(function: Callable[..., Any]) -> list[tuple[str, Any, bool]]:
+    """(name, kind, has_default) of every parameter except `self`, in order."""
+    return [
+        (parameter.name, parameter.kind, parameter.default is not inspect.Parameter.empty)
+        for parameter in inspect.signature(function).parameters.values()
+        if parameter.name != "self"
+    ]
+
+
+@pytest.mark.parametrize("fake", [FakeProbePort, RecordingProbePort], ids=lambda c: c.__name__)
+def test_the_probe_port_fakes_have_the_protocol_signatures(fake: type) -> None:
+    methods = _port_methods()
+    assert "new_limit_order" in methods and "new_conditional_order" in methods
+    for name in methods:
+        assert hasattr(fake, name), name
+        assert _shape(getattr(fake, name)) == _shape(getattr(dp.ProbePort, name)), name
+
+
+def test_the_probe_adapter_keeps_the_protocol_signatures_it_implements() -> None:
+    from src.adapters.binance_probe import BinanceProbeAdapter
+
+    shared = [name for name in _port_methods() if hasattr(BinanceProbeAdapter, name)]
+    assert {"new_limit_order", "new_market_order", "new_conditional_order"} <= set(shared)
+    for name in shared:
+        assert _shape(getattr(BinanceProbeAdapter, name)) == _shape(getattr(dp.ProbePort, name)), (
+            name
+        )
+
+
+async def test_a_fake_order_for_another_symbol_is_refused() -> None:
+    port = FakeProbePort()
+    with pytest.raises(AssertionError):
+        await port.new_limit_order(
+            symbol="ETHUSDT",
+            side="BUY",
+            quantity=Decimal("0.001"),
+            price=Decimal("1"),
+            client_order_id="c-1",
+            position_side="BOTH",
+            time_in_force="GTC",
+            reduce_only=None,
+        )
+
+
+async def test_a_wrong_side_or_partial_reduce_only_order_does_not_flatten_the_fake() -> None:
+    port = FakeProbePort()
+    port.positions_rows.append(("BOTH", Decimal("0.010")))
+    await port.new_market_order(
+        symbol="BTCUSDT",
+        side="BUY",  # the wrong side for a long
+        quantity=Decimal("0.010"),
+        client_order_id="c-1",
+        position_side="BOTH",
+        reduce_only=True,
+    )
+    assert port.positions_rows == [("BOTH", Decimal("0.010"))]
+    await port.new_market_order(
+        symbol="BTCUSDT",
+        side="SELL",
+        quantity=Decimal("0.004"),  # smaller than the position
+        client_order_id="c-2",
+        position_side="BOTH",
+        reduce_only=True,
+    )
+    assert port.positions_rows == [("BOTH", Decimal("0.006"))]

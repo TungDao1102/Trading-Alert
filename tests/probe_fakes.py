@@ -374,6 +374,9 @@ class FakeProbePort:
         for hook in hooks:
             hook()
 
+    def _require_own_symbol(self, kwargs: dict[str, Any]) -> None:
+        assert kwargs["symbol"] == self.symbol, "an order for another symbol than the fake's"
+
     def _position_side(self, kwargs: dict[str, Any]) -> str:
         side = kwargs.get("position_side", "BOTH")
         return str(side)
@@ -496,8 +499,31 @@ class FakeProbePort:
 
         return self._answer("query_algo_order", {"client_algo_id": client_algo_id}, default)
 
-    async def new_limit_order(self, **kwargs: Any) -> ProbeObservation:
+    async def new_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        client_order_id: str,
+        position_side: str,
+        time_in_force: str,
+        reduce_only: bool | None,
+    ) -> ProbeObservation:
+        kwargs: dict[str, Any] = {
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "price": price,
+            "client_order_id": client_order_id,
+            "position_side": position_side,
+            "time_in_force": time_in_force,
+            "reduce_only": reduce_only,
+        }
+
         def default() -> ProbeObservation:
+            self._require_own_symbol(kwargs)
             client_id = kwargs["client_order_id"]
             if client_id in self.open_order_ids:
                 return self.duplicate_order_answer
@@ -520,14 +546,42 @@ class FakeProbePort:
 
         return self._answer("new_limit_order", kwargs, default)
 
-    async def new_market_order(self, **kwargs: Any) -> ProbeObservation:
+    async def new_market_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        client_order_id: str,
+        position_side: str,
+        reduce_only: bool | None,
+    ) -> ProbeObservation:
+        kwargs: dict[str, Any] = {
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "client_order_id": client_order_id,
+            "position_side": position_side,
+            "reduce_only": reduce_only,
+        }
+
         def default() -> ProbeObservation:
+            self._require_own_symbol(kwargs)
             if self.flatten_takes_effect and kwargs.get("reduce_only") is not False:
-                self.positions_rows = [
-                    row
-                    for row in self.positions_rows
-                    if not (row[0] == kwargs["position_side"] or kwargs["position_side"] == "BOTH")
-                ]
+                # A reducing order shrinks the position of its side by `quantity` (capped at
+                # what is held) and only when it is the opposite side: a SELL reduces a long,
+                # a BUY reduces a short. A wrong-side order leaves the position open.
+                remaining: list[tuple[str, Decimal]] = []
+                for row_side, held in self.positions_rows:
+                    if row_side == kwargs["position_side"] or kwargs["position_side"] == "BOTH":
+                        quantity = kwargs["quantity"]
+                        if kwargs["side"] == "SELL" and held > 0:
+                            held = max(held - quantity, Decimal(0))
+                        elif kwargs["side"] == "BUY" and held < 0:
+                            held = min(held + quantity, Decimal(0))
+                    if held != 0:
+                        remaining.append((row_side, held))
+                self.positions_rows = remaining
             return ok_observation(
                 "new_market_order",
                 {"client_order_id": kwargs["client_order_id"], "status": "FILLED"},
@@ -535,8 +589,39 @@ class FakeProbePort:
 
         return self._answer("new_market_order", kwargs, default)
 
-    async def new_conditional_order(self, **kwargs: Any) -> ProbeObservation:
+    async def new_conditional_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        order_type: str,
+        client_algo_id: str,
+        position_side: str,
+        trigger_price: Decimal,
+        working_type: str,
+        quantity: Decimal | None = None,
+        reduce_only: bool | None = None,
+        close_position: bool | None = None,
+        price: Decimal | None = None,
+        time_in_force: str | None = None,
+    ) -> ProbeObservation:
+        kwargs: dict[str, Any] = {
+            "symbol": symbol,
+            "side": side,
+            "order_type": order_type,
+            "client_algo_id": client_algo_id,
+            "position_side": position_side,
+            "trigger_price": trigger_price,
+            "working_type": working_type,
+            "quantity": quantity,
+            "reduce_only": reduce_only,
+            "close_position": close_position,
+            "price": price,
+            "time_in_force": time_in_force,
+        }
+
         def default() -> ProbeObservation:
+            self._require_own_symbol(kwargs)
             client_id = kwargs["client_algo_id"]
             if client_id in self.open_algo_ids:
                 return self.duplicate_algo_answer
@@ -725,14 +810,87 @@ class RecordingProbePort:
     async def query_algo_order(self, *, client_algo_id: str) -> ProbeObservation:
         return self._plan("query_algo_order", {"client_algo_id": client_algo_id})
 
-    async def new_limit_order(self, **kwargs: Any) -> ProbeObservation:
-        return self._plan("new_limit_order", kwargs)
+    async def new_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        client_order_id: str,
+        position_side: str,
+        time_in_force: str,
+        reduce_only: bool | None,
+    ) -> ProbeObservation:
+        return self._plan(
+            "new_limit_order",
+            {
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "price": price,
+                "client_order_id": client_order_id,
+                "position_side": position_side,
+                "time_in_force": time_in_force,
+                "reduce_only": reduce_only,
+            },
+        )
 
-    async def new_market_order(self, **kwargs: Any) -> ProbeObservation:
-        return self._plan("new_market_order", kwargs)
+    async def new_market_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        client_order_id: str,
+        position_side: str,
+        reduce_only: bool | None,
+    ) -> ProbeObservation:
+        return self._plan(
+            "new_market_order",
+            {
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "client_order_id": client_order_id,
+                "position_side": position_side,
+                "reduce_only": reduce_only,
+            },
+        )
 
-    async def new_conditional_order(self, **kwargs: Any) -> ProbeObservation:
-        return self._plan("new_conditional_order", kwargs)
+    async def new_conditional_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        order_type: str,
+        client_algo_id: str,
+        position_side: str,
+        trigger_price: Decimal,
+        working_type: str,
+        quantity: Decimal | None = None,
+        reduce_only: bool | None = None,
+        close_position: bool | None = None,
+        price: Decimal | None = None,
+        time_in_force: str | None = None,
+    ) -> ProbeObservation:
+        return self._plan(
+            "new_conditional_order",
+            {
+                "symbol": symbol,
+                "side": side,
+                "order_type": order_type,
+                "client_algo_id": client_algo_id,
+                "position_side": position_side,
+                "trigger_price": trigger_price,
+                "working_type": working_type,
+                "quantity": quantity,
+                "reduce_only": reduce_only,
+                "close_position": close_position,
+                "price": price,
+                "time_in_force": time_in_force,
+            },
+        )
 
     async def cancel_order(self, *, symbol: str, client_order_id: str) -> ProbeObservation:
         return self._plan("cancel_order", {"symbol": symbol, "client_order_id": client_order_id})
