@@ -1,9 +1,9 @@
 ---
 phase: "18"
 slug: user-data-stream-error-taxonomy
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: validated
+nyquist_compliant: true
+wave_0_complete: true
 created: "2026-10-15"
 ---
 
@@ -46,83 +46,83 @@ Task id is `18-<plan>-<task>`. Requirement is the requirement list of the plan t
 
 | Task ID | Wave | Requirement | Test Type | Automated Command | File Exists | Status |
 |---------|------|-------------|-----------|-------------------|-------------|--------|
-| 18-01-01 | 1 | EXEC-05,EXEC-01 | doc structure | `uv run pytest -m "not docker" tests/test_sources_phase18_section.py -x` | Wave 0: created here (test_sources_phase18_section.py) | pending |
-| 18-01-02 | 1 | EXEC-05,EXEC-01 | doc structure | `uv run pytest -m "not docker" tests/test_sources_phase18_section.py -x` | Wave 0: created by 18-01-01 | pending |
-| 18-01-03 | 1 | EXEC-05,EXEC-01 | doc structure | `uv run pytest -m "not docker" tests/test_decision_alignment_exchange.py tests/test_sources_phase18_section.py -x` | Wave 0: created by 18-01-01 | pending |
-| 18-02-01 | 1 | OPS-02,EXEC-05,EXEC-01 | record check | inline check, see PLAN 18-02 Task 1 verify | n/a | pending |
-| 18-02-02 | 1 | OPS-02,EXEC-05,EXEC-01 | blocking-human (manual) | inline check, see PLAN 18-02 Task 2 verify | n/a (decision or evidence record) | pending |
-| 18-02-03 | 1 | OPS-02,EXEC-05,EXEC-01 | record check | inline check, see PLAN 18-02 Task 3 verify | n/a | pending |
-| 18-03-01 | 1 | EXEC-05,EXEC-02 | unit | `uv run pytest -m "not docker" tests/test_userdata_events.py tests/test_execution_partials.py tests/test_execution_attach.py -x` | Wave 0: created here (test_userdata_events.py) | pending |
-| 18-03-02 | 1 | EXEC-05,EXEC-02 | blocking-human (manual) | inline check, see PLAN 18-03 Task 2 verify | n/a (decision or evidence record) | pending |
-| 18-03-03 | 1 | EXEC-05,EXEC-02 | unit | `uv run pytest -m "not docker" tests/test_userdata_events.py tests/test_userdata_parsers.py -x` | Wave 0: created here (test_userdata_parsers.py); others by 18-03-01 | pending |
-| 18-04-01 | 1 | OPS-02 | unit | `uv run pytest -m "not docker" tests/test_binance_client_config.py tests/test_demo_rehearsal_safety.py -x` | Wave 0: created here (test_binance_client_config.py) | pending |
-| 18-04-02 | 1 | OPS-02 | unit | `uv run pytest -m "not docker" tests/test_binance_client_config.py tests/test_demo_rehearsal_safety.py tests/test_demo_rehearsal_flow.py -x` | Wave 0: created by 18-04-01 | pending |
-| 18-04-03 | 1 | OPS-02 | unit | `uv run pytest -m "not docker" tests/test_binance_secret_redaction.py tests/test_redaction.py tests/test_binance_client_config.py -x` | Wave 0: created here (test_binance_secret_redaction.py); others by 18-04-01 | pending |
-| 18-05-01 | 2 | EXEC-02,EXEC-01 | contract | `uv run pytest -m "not docker" tests/test_exchange_errors.py tests/test_sdk_error_mapping_contract.py -x` | Wave 0: created here (test_exchange_errors.py, test_sdk_error_mapping_contract.py) | pending |
-| 18-05-02 | 2 | EXEC-02,EXEC-01 | unit | `uv run pytest -m "not docker" tests/test_exchange_errors.py -x` | Wave 0: created by 18-05-01 | pending |
-| 18-05-03 | 2 | EXEC-02,EXEC-01 | contract | `uv run pytest -m "not docker" tests/test_sdk_error_mapping_contract.py tests/test_exchange_errors.py -x` | Wave 0: created by 18-05-01 | pending |
-| 18-06-01 | 2 | EXEC-01,EXEC-02 | unit | `uv run pytest -m "not docker" tests/test_algo_status.py tests/test_execution_attach.py tests/test_execution_manager.py -x` | Wave 0: created here (test_algo_status.py) | pending |
-| 18-06-02 | 2 | EXEC-01,EXEC-02 | doc structure | `uv run pytest -m "not docker" tests/test_algo_status.py tests/test_reconcile.py tests/test_decision_alignment_exchange.py -x` | Wave 0: created by 18-06-01 | pending |
-| 18-07-01 | 2 | OPS-02,EXEC-05 | unit | `uv run pytest -m "not docker" tests/test_binance_limits.py -x` | Wave 0: created here (test_binance_limits.py) | pending |
-| 18-07-02 | 2 | OPS-02,EXEC-05 | unit | `uv run pytest -m "not docker" tests/test_clock_drift.py tests/test_binance_limits.py -x` | Wave 0: created here (test_clock_drift.py); others by 18-07-01 | pending |
-| 18-07-03 | 2 | OPS-02,EXEC-05 | unit | `uv run pytest -m "not docker" tests/test_no_unratified_defaults.py tests/test_binance_limits.py -x` | Wave 0: created here (test_no_unratified_defaults.py); others by 18-07-01 | pending |
-| 18-08-01 | 2 | EXEC-02,EXEC-05 | PostgreSQL integration | `uv run pytest -m "not docker" tests/test_stream_records.py tests/test_persistence_exit_evidence_pg.py tests/test_persistence_transitions_pg.py -x -rs` | Wave 0: created here (test_stream_records.py, test_persistence_exit_evidence_pg.py) | pending |
-| 18-08-02 | 2 | EXEC-02,EXEC-05 | PostgreSQL integration | `uv run pytest -m "not docker" tests/test_stream_records.py tests/test_persistence_exit_evidence_pg.py tests/test_persistence_transitions_pg.py tests/test_persistence_journal_pg.py -x -rs` | Wave 0: created by 18-08-01 | pending |
-| 18-24-01 | 2 | EXEC-05 | unit | `uv run pytest -m "not docker" tests/test_userdata_fixtures.py tests/test_userdata_events.py -x` | Wave 0: created here (test_userdata_fixtures.py); others by 18-03-01 | pending |
-| 18-24-02 | 2 | EXEC-05 | unit | `uv run pytest -m "not docker" tests/test_userdata_fixtures.py tests/test_userdata_events.py tests/test_userdata_parsers.py -x` | Wave 0: created by 18-03-01, 18-03-03, 18-24-01 | pending |
-| 18-09-01 | 3 | OPS-02,EXEC-05 | unit | `uv run pytest -m "not docker" tests/test_binance_limits_ratified_file.py tests/test_binance_limits.py -x` | Wave 0: created here (test_binance_limits_ratified_file.py); others by 18-07-01 | pending |
-| 18-09-02 | 3 | OPS-02,EXEC-05 | unit | `uv run pytest -m "not docker" tests/test_binance_client_config.py tests/test_binance_limits_ratified_file.py tests/test_binance_secret_redaction.py tests/test_demo_rehearsal_safety.py -x` | Wave 0: created by 18-04-01, 18-04-03, 18-09-01 | pending |
-| 18-09-03 | 3 | OPS-02,EXEC-05 | doc structure | `uv run pytest -m "not docker" tests/test_binance_limits_ratified_file.py tests/test_decision_alignment_bookkeeping.py tests/test_decision_alignment_exchange.py -x` | Wave 0: created by 18-09-01 | pending |
-| 18-10-01 | 3 | EXEC-02,EXEC-01 | contract | `uv run pytest -m "not docker" tests/test_adapter_not_found_mapping.py tests/test_binance_public.py tests/test_backfill.py tests/test_universe_freeze.py tests/test_execution_adapter_contract.py -x` | exists | pending |
-| 18-10-02 | 3 | EXEC-02,EXEC-01 | contract + unit (shared rate-limit gate) | `uv run pytest -m "not docker" tests/test_binance_ratelimit_gate.py tests/test_binance_usdm_error_routing.py tests/test_binance_public.py tests/test_adapter_not_found_mapping.py tests/test_execution_adapter_contract.py tests/test_reconcile.py tests/test_execution_manager.py tests/test_backfill.py tests/test_universe_freeze.py -x` | Wave 0: created here (test_binance_ratelimit_gate.py, test_binance_usdm_error_routing.py); test_binance_public.py, test_backfill.py, test_universe_freeze.py exist and must pass unchanged | pending |
-| 18-10-03 | 3 | EXEC-02,EXEC-01 | unit | `uv run pytest -m "not docker" tests/test_binance_usdm_source_guard.py tests/test_binance_usdm_error_routing.py tests/test_adapter_not_found_mapping.py -x` | Wave 0: created here (test_binance_usdm_source_guard.py); others by 18-10-02 | pending |
-| 18-11-01 | 3 | EXEC-05,OPS-02 | fake-driven | `uv run pytest -m "not docker" tests/test_userdata_adapter.py tests/test_userdata_events.py tests/test_paper_ws_connect.py -x` | Wave 0: created here (test_userdata_adapter.py); others by 18-03-01 | pending |
-| 18-11-02 | 3 | EXEC-05,OPS-02 | fake-driven | `uv run pytest -m "not docker" tests/test_userdata_adapter.py -x` | Wave 0: created by 18-11-01 | pending |
-| 18-11-03 | 3 | EXEC-05,OPS-02 | contract + fake-driven | `uv run pytest -m "not docker" tests/test_userdata_contract.py tests/test_userdata_adapter.py tests/test_paper_ws_contract.py -x` | Wave 0: created here (test_userdata_contract.py); others by 18-11-01 | pending |
-| 18-12-01 | 4 | EXEC-01,EXEC-02 | contract | `uv run pytest -m "not docker" tests/test_binance_probe.py tests/test_binance_probe_contract.py -x` | Wave 0: created here (test_binance_probe.py, test_binance_probe_contract.py) | pending |
-| 18-12-02 | 4 | EXEC-01,EXEC-02 | contract | `uv run pytest -m "not docker" tests/test_binance_probe.py tests/test_binance_probe_contract.py -x` | Wave 0: created by 18-12-01 | pending |
-| 18-12-03 | 4 | EXEC-01,EXEC-02 | contract | `uv run pytest -m "not docker" tests/test_binance_probe.py tests/test_binance_probe_contract.py tests/test_binance_public.py -x` | Wave 0: created by 18-12-01 | pending |
-| 18-13-01 | 4 | OPS-02,EXEC-01 | unit | `uv run pytest -m "not docker" tests/test_binance_usdm_signed_calls.py tests/test_binance_usdm_error_routing.py tests/test_binance_usdm_source_guard.py -x` | Wave 0: created here (test_binance_usdm_signed_calls.py); others by 18-10-02, 18-10-03 | pending |
-| 18-13-02 | 4 | OPS-02,EXEC-01 | unit + attach path | `uv run pytest -m "not docker" tests/test_binance_usdm_signed_calls.py tests/test_binance_usdm_error_routing.py tests/test_binance_usdm_source_guard.py tests/test_binance_ratelimit_gate.py tests/test_execution_attach.py tests/test_commission_rates.py -x` | Wave 0: created by 18-10-02, 18-10-03, 18-13-01; test_execution_attach.py exists | pending |
-| 18-13-03 | 4 | OPS-02,EXEC-01 | full suite (regression) | `uv run pytest -m "not docker" -x` | exists | pending |
-| 18-14-01 | 4 | EXEC-05 | fake-driven | `uv run pytest -m "not docker" tests/test_userdata_supervisor.py tests/test_userdata_adapter.py -x` | Wave 0: created here (test_userdata_supervisor.py); others by 18-11-01 | pending |
-| 18-14-02 | 4 | EXEC-05 | fake-driven (incl. the shared gate on the listenKey port) | `uv run pytest -m "not docker" tests/test_userdata_supervisor.py tests/test_userdata_adapter.py tests/test_binance_ratelimit_gate.py -x` | Wave 0: created by 18-14-01, 18-11-01, 18-10-02 | pending |
-| 18-14-03 | 4 | EXEC-05 | fake-driven | `uv run pytest -m "not docker" tests/test_userdata_supervisor.py -x` | Wave 0: created by 18-14-01 | pending |
-| 18-15-01 | 5 | EXEC-05,EXEC-02 | fake-driven | `uv run pytest -m "not docker" tests/test_userdata_rig.py tests/test_userdata_supervisor.py -x` | Wave 0: created here (test_userdata_rig.py); others by 18-14-01 | pending |
-| 18-15-02 | 5 | EXEC-05,EXEC-02 | fake-driven | `uv run pytest -m "not docker" tests/test_userdata_router.py tests/test_userdata_rig.py -x` | Wave 0: created here (test_userdata_router.py); others by 18-15-01 | pending |
-| 18-15-03 | 5 | EXEC-05,EXEC-02 | replay | `uv run pytest -m "not docker" tests/test_userdata_replay.py tests/test_execution_partials.py tests/test_execution_attach.py -x` | Wave 0: created here (test_userdata_replay.py) | pending |
-| 18-16-01 | 5 | EXEC-05,OPS-02 | fake-driven | `uv run pytest -m "not docker" tests/test_operator_evidence.py tests/test_user_data_smoke_dry_run.py -x` | Wave 0: created here (test_operator_evidence.py, test_user_data_smoke_dry_run.py) | pending |
-| 18-16-02 | 5 | EXEC-05,OPS-02 | fake-driven | `uv run pytest -m "not docker" tests/test_user_data_smoke_dry_run.py tests/test_user_data_smoke_evidence.py tests/test_operator_evidence.py -x` | Wave 0: created here (test_user_data_smoke_evidence.py); others by 18-16-01 | pending |
-| 18-16-03 | 5 | EXEC-05,OPS-02 | fake-driven | `uv run pytest -m "not docker" tests/test_user_data_smoke_cli.py tests/test_user_data_smoke_dry_run.py tests/test_user_data_smoke_evidence.py tests/test_demo_rehearsal_safety.py -x` | Wave 0: created here (test_user_data_smoke_cli.py); others by 18-16-01, 18-16-02 | pending |
-| 18-17-01 | 6 | EXEC-01,EXEC-02 | fake-driven | `uv run pytest -m "not docker" tests/test_demo_probe_cases.py tests/test_demo_probe_evidence.py tests/test_operator_evidence.py -x` | Wave 0: created here (test_demo_probe_cases.py, test_demo_probe_evidence.py); others by 18-16-01 | pending |
-| 18-17-02 | 6 | EXEC-01,EXEC-02 | fake-driven | `uv run pytest -m "not docker" tests/test_demo_probe_cli.py tests/test_demo_probe_evidence.py tests/test_demo_probe_cases.py -x` | Wave 0: created here (test_demo_probe_cli.py); others by 18-17-01 | pending |
-| 18-18-01 | 6 | EXEC-05,OPS-02 | fake-driven | `uv run pytest -m "not docker" tests/test_user_data_smoke_evidence.py tests/test_user_data_smoke_dry_run.py -x` | Wave 0: created by 18-16-01, 18-16-02 | pending |
-| 18-18-02 | 6 | EXEC-05,OPS-02 | doc structure | `uv run pytest -m "not docker" tests/test_sources_phase18_section.py tests/test_decision_alignment_exchange.py -x` | Wave 0: created by 18-01-01 | pending |
-| 18-18-03 | 6 | EXEC-05,OPS-02 | blocking-human (manual) | inline check, see PLAN 18-18 Task 3 verify | n/a (decision or evidence record); a recorded postponement also passes | pending |
-| 18-18-04 | 6 | EXEC-05,OPS-02 | record check | inline check, see PLAN 18-18 Task 4 verify | n/a; a recorded postponement also passes | pending |
-| 18-23-01 | 7 | EXEC-01,EXEC-02 | fake-driven | `uv run pytest -m "not docker" tests/test_demo_probe_cases.py tests/test_demo_probe_evidence.py tests/test_demo_probe_cli.py -x` | Wave 0: created by 18-17-01, 18-17-02 | pending |
-| 18-23-02 | 7 | EXEC-01,EXEC-02 | fake-driven | `uv run pytest -m "not docker" tests/test_demo_probe_cases.py tests/test_demo_probe_evidence.py tests/test_demo_probe_cli.py -x` | Wave 0: created by 18-17-01, 18-17-02 | pending |
-| 18-23-03 | 7 | EXEC-01,EXEC-02 | fake-driven | `uv run pytest -m "not docker" tests/test_demo_probe_cases.py tests/test_demo_probe_evidence.py tests/test_demo_probe_cli.py -x` | Wave 0: created by 18-17-01, 18-17-02 | pending |
-| 18-19-01 | 8 | EXEC-05 | record check | inline check, see PLAN 18-19 Task 1 verify | n/a; `transport: none` with the postponement reason also passes | pending |
-| 18-19-02 | 8 | EXEC-05 | fake-driven | `uv run pytest -m "not docker" tests/test_userdata_direct_transport.py tests/test_userdata_adapter.py -x` | Wave 0: created here (test_userdata_direct_transport.py); others by 18-11-01 | pending |
-| 18-19-03 | 8 | EXEC-05 | fake-driven | `uv run pytest -m "not docker" tests/test_user_data_smoke_cli.py tests/test_user_data_smoke_dry_run.py tests/test_user_data_smoke_evidence.py tests/test_demo_probe_cli.py tests/test_demo_probe_evidence.py -x` | Wave 0: created by 18-16-01, 18-16-02, 18-16-03, 18-17-01, 18-17-02 | pending |
-| 18-19-04 | 8 | EXEC-05 | blocking-human (manual) | inline check, see PLAN 18-19 Task 4 verify | n/a (decision or evidence record) | pending |
-| 18-20-01 | 9 | EXEC-01,EXEC-02 | fake-driven | `uv run pytest -m "not docker" tests/test_demo_probe_cases.py tests/test_demo_probe_evidence.py tests/test_demo_probe_cli.py -x` | Wave 0: created by 18-17-01, 18-17-02 | pending |
-| 18-20-02 | 9 | EXEC-01,EXEC-02 | blocking-human (manual) | inline check, see PLAN 18-20 Task 2 verify | n/a (decision or evidence record) | pending |
-| 18-20-03 | 9 | EXEC-01,EXEC-02 | blocking-human (manual) | inline check, see PLAN 18-20 Task 3 verify | n/a (decision or evidence record); a recorded postponement also passes | pending |
-| 18-20-04 | 9 | EXEC-01,EXEC-02 | record check | inline check, see PLAN 18-20 Task 4 verify | n/a; a recorded postponement also passes | pending |
-| 18-21-01 | 10 | EXEC-01,EXEC-02,EXEC-05 | replay + fake-driven | `uv run pytest -m "not docker" tests/test_userdata_recorded_frames.py tests/test_userdata_parsers.py tests/test_userdata_events.py tests/test_userdata_replay.py tests/test_userdata_router.py tests/test_userdata_fixtures.py -x` | Wave 0: created here (test_userdata_recorded_frames.py); others by 18-03-03, 18-03-01, 18-15-03, 18-15-02, 18-24-01; skipped by design when no recorded frame exists | pending |
-| 18-21-02 | 10 | EXEC-01,EXEC-02,EXEC-05 | PostgreSQL integration | `uv run pytest -m "not docker" tests/test_fake_binance_semantics.py tests/test_exchange_errors.py tests/test_execution_manager.py tests/test_execution_exactly_once_pg.py tests/test_execution_write_ahead_pg.py tests/test_approval_replay_pg.py tests/test_callback_redelivery_pg.py tests/test_intent_recovery.py tests/test_intent_recovery_pg.py -x -rs` | Wave 0: created here (test_fake_binance_semantics.py); others by 18-05-01 | pending |
-| 18-25-01 | 11 | EXEC-01,EXEC-02,EXEC-05 | doc structure | `uv run pytest -m "not docker" tests/test_sources_phase18_section.py tests/test_decision_alignment_exchange.py -x` | Wave 0: created by 18-01-01 | pending |
-| 18-25-02 | 11 | EXEC-01,EXEC-02,EXEC-05 | doc structure | `uv run pytest -m "not docker" tests/test_decision_alignment_exchange.py tests/test_decision_alignment_bookkeeping.py tests/test_sources_phase18_section.py -x` | Wave 0: created by 18-01-01 | pending |
-| 18-25-03 | 11 | EXEC-01,EXEC-02,EXEC-05 | record check | inline check, see PLAN 18-25 Task 3 verify | n/a | pending |
-| 18-26-01 | 11 | EXEC-02,EXEC-01 | record + characterization | `uv run pytest -m "not docker" tests/test_exchange_errors.py tests/test_exchange_error_rejections.py tests/test_sources_phase18_section.py tests/test_decision_alignment_exchange.py tests/test_demo_probe_cases.py -x -rs` | Wave 0: created here (test_exchange_error_rejections.py) | pending |
-| 18-26-02 | 11 | EXEC-02,EXEC-01 | characterization + table | `uv run pytest -m "not docker" tests/test_exchange_errors.py tests/test_exchange_error_rejections.py tests/test_sources_phase18_section.py tests/test_decision_alignment_exchange.py -x -rs` | exists | pending |
-| 18-26-03 | 11 | EXEC-02,EXEC-01 | phase gate + full suite (strict, PostgreSQL) | `uv run pytest -m "not docker" tests/test_phase18_gate.py tests/test_exchange_error_rejections.py tests/test_exchange_errors.py -x -rs` | exists | pending |
-| 18-22-01 | 12 | EXEC-01,EXEC-02,EXEC-05,OPS-02 | phase gate | `uv run pytest -m "not docker" tests/test_phase18_gate.py -x` | Wave 0: created here (test_phase18_gate.py) | pending |
-| 18-22-02 | 12 | EXEC-01,EXEC-02,EXEC-05,OPS-02 | full suite (strict, PostgreSQL) | `TRADING_CI_STRICT=1 uv run pytest -m "not docker" -q -rs` | exists | pending |
-| 18-22-03 | 12 | EXEC-01,EXEC-02,EXEC-05,OPS-02 | blocking-human (manual) | inline check, see PLAN 18-22 Task 3 verify | n/a (decision or evidence record) | pending |
-| 18-22-04 | 12 | EXEC-01,EXEC-02,EXEC-05,OPS-02 | record check | inline check, see PLAN 18-22 Task 4 verify | n/a; a recorded deferral also passes | pending |
+| 18-01-01 | 1 | EXEC-05,EXEC-01 | doc structure | `uv run pytest -m "not docker" tests/test_sources_phase18_section.py -x` | Wave 0: created here (test_sources_phase18_section.py) | green |
+| 18-01-02 | 1 | EXEC-05,EXEC-01 | doc structure | `uv run pytest -m "not docker" tests/test_sources_phase18_section.py -x` | Wave 0: created by 18-01-01 | green |
+| 18-01-03 | 1 | EXEC-05,EXEC-01 | doc structure | `uv run pytest -m "not docker" tests/test_decision_alignment_exchange.py tests/test_sources_phase18_section.py -x` | Wave 0: created by 18-01-01 | green |
+| 18-02-01 | 1 | OPS-02,EXEC-05,EXEC-01 | record check | inline check, see PLAN 18-02 Task 1 verify | n/a | manual-only |
+| 18-02-02 | 1 | OPS-02,EXEC-05,EXEC-01 | blocking-human (manual) | inline check, see PLAN 18-02 Task 2 verify | n/a (decision or evidence record) | manual-only |
+| 18-02-03 | 1 | OPS-02,EXEC-05,EXEC-01 | record check | inline check, see PLAN 18-02 Task 3 verify | n/a | manual-only |
+| 18-03-01 | 1 | EXEC-05,EXEC-02 | unit | `uv run pytest -m "not docker" tests/test_userdata_events.py tests/test_execution_partials.py tests/test_execution_attach.py -x` | Wave 0: created here (test_userdata_events.py) | green |
+| 18-03-02 | 1 | EXEC-05,EXEC-02 | blocking-human (manual) | inline check, see PLAN 18-03 Task 2 verify | n/a (decision or evidence record) | manual-only |
+| 18-03-03 | 1 | EXEC-05,EXEC-02 | unit | `uv run pytest -m "not docker" tests/test_userdata_events.py tests/test_userdata_parsers.py -x` | Wave 0: created here (test_userdata_parsers.py); others by 18-03-01 | green |
+| 18-04-01 | 1 | OPS-02 | unit | `uv run pytest -m "not docker" tests/test_binance_client_config.py tests/test_demo_rehearsal_safety.py -x` | Wave 0: created here (test_binance_client_config.py) | green |
+| 18-04-02 | 1 | OPS-02 | unit | `uv run pytest -m "not docker" tests/test_binance_client_config.py tests/test_demo_rehearsal_safety.py tests/test_demo_rehearsal_flow.py -x` | Wave 0: created by 18-04-01 | green |
+| 18-04-03 | 1 | OPS-02 | unit | `uv run pytest -m "not docker" tests/test_binance_secret_redaction.py tests/test_redaction.py tests/test_binance_client_config.py -x` | Wave 0: created here (test_binance_secret_redaction.py); others by 18-04-01 | green |
+| 18-05-01 | 2 | EXEC-02,EXEC-01 | contract | `uv run pytest -m "not docker" tests/test_exchange_errors.py tests/test_sdk_error_mapping_contract.py -x` | Wave 0: created here (test_exchange_errors.py, test_sdk_error_mapping_contract.py) | green |
+| 18-05-02 | 2 | EXEC-02,EXEC-01 | unit | `uv run pytest -m "not docker" tests/test_exchange_errors.py -x` | Wave 0: created by 18-05-01 | green |
+| 18-05-03 | 2 | EXEC-02,EXEC-01 | contract | `uv run pytest -m "not docker" tests/test_sdk_error_mapping_contract.py tests/test_exchange_errors.py -x` | Wave 0: created by 18-05-01 | green |
+| 18-06-01 | 2 | EXEC-01,EXEC-02 | unit | `uv run pytest -m "not docker" tests/test_algo_status.py tests/test_execution_attach.py tests/test_execution_manager.py -x` | Wave 0: created here (test_algo_status.py) | green |
+| 18-06-02 | 2 | EXEC-01,EXEC-02 | doc structure | `uv run pytest -m "not docker" tests/test_algo_status.py tests/test_reconcile.py tests/test_decision_alignment_exchange.py -x` | Wave 0: created by 18-06-01 | green |
+| 18-07-01 | 2 | OPS-02,EXEC-05 | unit | `uv run pytest -m "not docker" tests/test_binance_limits.py -x` | Wave 0: created here (test_binance_limits.py) | green |
+| 18-07-02 | 2 | OPS-02,EXEC-05 | unit | `uv run pytest -m "not docker" tests/test_clock_drift.py tests/test_binance_limits.py -x` | Wave 0: created here (test_clock_drift.py); others by 18-07-01 | green |
+| 18-07-03 | 2 | OPS-02,EXEC-05 | unit | `uv run pytest -m "not docker" tests/test_no_unratified_defaults.py tests/test_binance_limits.py -x` | Wave 0: created here (test_no_unratified_defaults.py); others by 18-07-01 | green |
+| 18-08-01 | 2 | EXEC-02,EXEC-05 | PostgreSQL integration | `uv run pytest -m "not docker" tests/test_stream_records.py tests/test_persistence_exit_evidence_pg.py tests/test_persistence_transitions_pg.py -x -rs` | Wave 0: created here (test_stream_records.py, test_persistence_exit_evidence_pg.py) | green |
+| 18-08-02 | 2 | EXEC-02,EXEC-05 | PostgreSQL integration | `uv run pytest -m "not docker" tests/test_stream_records.py tests/test_persistence_exit_evidence_pg.py tests/test_persistence_transitions_pg.py tests/test_persistence_journal_pg.py -x -rs` | Wave 0: created by 18-08-01 | green |
+| 18-24-01 | 2 | EXEC-05 | unit | `uv run pytest -m "not docker" tests/test_userdata_fixtures.py tests/test_userdata_events.py -x` | Wave 0: created here (test_userdata_fixtures.py); others by 18-03-01 | green |
+| 18-24-02 | 2 | EXEC-05 | unit | `uv run pytest -m "not docker" tests/test_userdata_fixtures.py tests/test_userdata_events.py tests/test_userdata_parsers.py -x` | Wave 0: created by 18-03-01, 18-03-03, 18-24-01 | green |
+| 18-09-01 | 3 | OPS-02,EXEC-05 | unit | `uv run pytest -m "not docker" tests/test_binance_limits_ratified_file.py tests/test_binance_limits.py -x` | Wave 0: created here (test_binance_limits_ratified_file.py); others by 18-07-01 | green |
+| 18-09-02 | 3 | OPS-02,EXEC-05 | unit | `uv run pytest -m "not docker" tests/test_binance_client_config.py tests/test_binance_limits_ratified_file.py tests/test_binance_secret_redaction.py tests/test_demo_rehearsal_safety.py -x` | Wave 0: created by 18-04-01, 18-04-03, 18-09-01 | green |
+| 18-09-03 | 3 | OPS-02,EXEC-05 | doc structure | `uv run pytest -m "not docker" tests/test_binance_limits_ratified_file.py tests/test_decision_alignment_bookkeeping.py tests/test_decision_alignment_exchange.py -x` | Wave 0: created by 18-09-01 | green |
+| 18-10-01 | 3 | EXEC-02,EXEC-01 | contract | `uv run pytest -m "not docker" tests/test_adapter_not_found_mapping.py tests/test_binance_public.py tests/test_backfill.py tests/test_universe_freeze.py tests/test_execution_adapter_contract.py -x` | exists | green |
+| 18-10-02 | 3 | EXEC-02,EXEC-01 | contract + unit (shared rate-limit gate) | `uv run pytest -m "not docker" tests/test_binance_ratelimit_gate.py tests/test_binance_usdm_error_routing.py tests/test_binance_public.py tests/test_adapter_not_found_mapping.py tests/test_execution_adapter_contract.py tests/test_reconcile.py tests/test_execution_manager.py tests/test_backfill.py tests/test_universe_freeze.py -x` | Wave 0: created here (test_binance_ratelimit_gate.py, test_binance_usdm_error_routing.py); test_binance_public.py, test_backfill.py, test_universe_freeze.py exist and must pass unchanged | green |
+| 18-10-03 | 3 | EXEC-02,EXEC-01 | unit | `uv run pytest -m "not docker" tests/test_binance_usdm_source_guard.py tests/test_binance_usdm_error_routing.py tests/test_adapter_not_found_mapping.py -x` | Wave 0: created here (test_binance_usdm_source_guard.py); others by 18-10-02 | green |
+| 18-11-01 | 3 | EXEC-05,OPS-02 | fake-driven | `uv run pytest -m "not docker" tests/test_userdata_adapter.py tests/test_userdata_events.py tests/test_paper_ws_connect.py -x` | Wave 0: created here (test_userdata_adapter.py); others by 18-03-01 | green |
+| 18-11-02 | 3 | EXEC-05,OPS-02 | fake-driven | `uv run pytest -m "not docker" tests/test_userdata_adapter.py -x` | Wave 0: created by 18-11-01 | green |
+| 18-11-03 | 3 | EXEC-05,OPS-02 | contract + fake-driven | `uv run pytest -m "not docker" tests/test_userdata_contract.py tests/test_userdata_adapter.py tests/test_paper_ws_contract.py -x` | Wave 0: created here (test_userdata_contract.py); others by 18-11-01 | green |
+| 18-12-01 | 4 | EXEC-01,EXEC-02 | contract | `uv run pytest -m "not docker" tests/test_binance_probe.py tests/test_binance_probe_contract.py -x` | Wave 0: created here (test_binance_probe.py, test_binance_probe_contract.py) | green |
+| 18-12-02 | 4 | EXEC-01,EXEC-02 | contract | `uv run pytest -m "not docker" tests/test_binance_probe.py tests/test_binance_probe_contract.py -x` | Wave 0: created by 18-12-01 | green |
+| 18-12-03 | 4 | EXEC-01,EXEC-02 | contract | `uv run pytest -m "not docker" tests/test_binance_probe.py tests/test_binance_probe_contract.py tests/test_binance_public.py -x` | Wave 0: created by 18-12-01 | green |
+| 18-13-01 | 4 | OPS-02,EXEC-01 | unit | `uv run pytest -m "not docker" tests/test_binance_usdm_signed_calls.py tests/test_binance_usdm_error_routing.py tests/test_binance_usdm_source_guard.py -x` | Wave 0: created here (test_binance_usdm_signed_calls.py); others by 18-10-02, 18-10-03 | green |
+| 18-13-02 | 4 | OPS-02,EXEC-01 | unit + attach path | `uv run pytest -m "not docker" tests/test_binance_usdm_signed_calls.py tests/test_binance_usdm_error_routing.py tests/test_binance_usdm_source_guard.py tests/test_binance_ratelimit_gate.py tests/test_execution_attach.py tests/test_commission_rates.py -x` | Wave 0: created by 18-10-02, 18-10-03, 18-13-01; test_execution_attach.py exists | green |
+| 18-13-03 | 4 | OPS-02,EXEC-01 | full suite (regression) | `uv run pytest -m "not docker" -x` | exists | manual-only |
+| 18-14-01 | 4 | EXEC-05 | fake-driven | `uv run pytest -m "not docker" tests/test_userdata_supervisor.py tests/test_userdata_adapter.py -x` | Wave 0: created here (test_userdata_supervisor.py); others by 18-11-01 | green |
+| 18-14-02 | 4 | EXEC-05 | fake-driven (incl. the shared gate on the listenKey port) | `uv run pytest -m "not docker" tests/test_userdata_supervisor.py tests/test_userdata_adapter.py tests/test_binance_ratelimit_gate.py -x` | Wave 0: created by 18-14-01, 18-11-01, 18-10-02 | green |
+| 18-14-03 | 4 | EXEC-05 | fake-driven | `uv run pytest -m "not docker" tests/test_userdata_supervisor.py -x` | Wave 0: created by 18-14-01 | green |
+| 18-15-01 | 5 | EXEC-05,EXEC-02 | fake-driven | `uv run pytest -m "not docker" tests/test_userdata_rig.py tests/test_userdata_supervisor.py -x` | Wave 0: created here (test_userdata_rig.py); others by 18-14-01 | green |
+| 18-15-02 | 5 | EXEC-05,EXEC-02 | fake-driven | `uv run pytest -m "not docker" tests/test_userdata_router.py tests/test_userdata_rig.py -x` | Wave 0: created here (test_userdata_router.py); others by 18-15-01 | green |
+| 18-15-03 | 5 | EXEC-05,EXEC-02 | replay | `uv run pytest -m "not docker" tests/test_userdata_replay.py tests/test_execution_partials.py tests/test_execution_attach.py -x` | Wave 0: created here (test_userdata_replay.py) | green |
+| 18-16-01 | 5 | EXEC-05,OPS-02 | fake-driven | `uv run pytest -m "not docker" tests/test_operator_evidence.py tests/test_user_data_smoke_dry_run.py -x` | Wave 0: created here (test_operator_evidence.py, test_user_data_smoke_dry_run.py) | green |
+| 18-16-02 | 5 | EXEC-05,OPS-02 | fake-driven | `uv run pytest -m "not docker" tests/test_user_data_smoke_dry_run.py tests/test_user_data_smoke_evidence.py tests/test_operator_evidence.py -x` | Wave 0: created here (test_user_data_smoke_evidence.py); others by 18-16-01 | green |
+| 18-16-03 | 5 | EXEC-05,OPS-02 | fake-driven | `uv run pytest -m "not docker" tests/test_user_data_smoke_cli.py tests/test_user_data_smoke_dry_run.py tests/test_user_data_smoke_evidence.py tests/test_demo_rehearsal_safety.py -x` | Wave 0: created here (test_user_data_smoke_cli.py); others by 18-16-01, 18-16-02 | green |
+| 18-17-01 | 6 | EXEC-01,EXEC-02 | fake-driven | `uv run pytest -m "not docker" tests/test_demo_probe_cases.py tests/test_demo_probe_evidence.py tests/test_operator_evidence.py -x` | Wave 0: created here (test_demo_probe_cases.py, test_demo_probe_evidence.py); others by 18-16-01 | green |
+| 18-17-02 | 6 | EXEC-01,EXEC-02 | fake-driven | `uv run pytest -m "not docker" tests/test_demo_probe_cli.py tests/test_demo_probe_evidence.py tests/test_demo_probe_cases.py -x` | Wave 0: created here (test_demo_probe_cli.py); others by 18-17-01 | green |
+| 18-18-01 | 6 | EXEC-05,OPS-02 | fake-driven | `uv run pytest -m "not docker" tests/test_user_data_smoke_evidence.py tests/test_user_data_smoke_dry_run.py -x` | Wave 0: created by 18-16-01, 18-16-02 | green |
+| 18-18-02 | 6 | EXEC-05,OPS-02 | doc structure | `uv run pytest -m "not docker" tests/test_sources_phase18_section.py tests/test_decision_alignment_exchange.py -x` | Wave 0: created by 18-01-01 | green |
+| 18-18-03 | 6 | EXEC-05,OPS-02 | blocking-human (manual) | inline check, see PLAN 18-18 Task 3 verify | n/a (decision or evidence record); a recorded postponement also passes | manual-only |
+| 18-18-04 | 6 | EXEC-05,OPS-02 | record check | inline check, see PLAN 18-18 Task 4 verify | n/a; a recorded postponement also passes | manual-only |
+| 18-23-01 | 7 | EXEC-01,EXEC-02 | fake-driven | `uv run pytest -m "not docker" tests/test_demo_probe_cases.py tests/test_demo_probe_evidence.py tests/test_demo_probe_cli.py -x` | Wave 0: created by 18-17-01, 18-17-02 | green |
+| 18-23-02 | 7 | EXEC-01,EXEC-02 | fake-driven | `uv run pytest -m "not docker" tests/test_demo_probe_cases.py tests/test_demo_probe_evidence.py tests/test_demo_probe_cli.py -x` | Wave 0: created by 18-17-01, 18-17-02 | green |
+| 18-23-03 | 7 | EXEC-01,EXEC-02 | fake-driven | `uv run pytest -m "not docker" tests/test_demo_probe_cases.py tests/test_demo_probe_evidence.py tests/test_demo_probe_cli.py -x` | Wave 0: created by 18-17-01, 18-17-02 | green |
+| 18-19-01 | 8 | EXEC-05 | record check | inline check, see PLAN 18-19 Task 1 verify | n/a; `transport: none` with the postponement reason also passes | manual-only |
+| 18-19-02 | 8 | EXEC-05 | fake-driven | `uv run pytest -m "not docker" tests/test_userdata_direct_transport.py tests/test_userdata_adapter.py -x` | Wave 0: created here (test_userdata_direct_transport.py); others by 18-11-01 | n/a (skipped by design: transport sdk) |
+| 18-19-03 | 8 | EXEC-05 | fake-driven | `uv run pytest -m "not docker" tests/test_user_data_smoke_cli.py tests/test_user_data_smoke_dry_run.py tests/test_user_data_smoke_evidence.py tests/test_demo_probe_cli.py tests/test_demo_probe_evidence.py -x` | Wave 0: created by 18-16-01, 18-16-02, 18-16-03, 18-17-01, 18-17-02 | green |
+| 18-19-04 | 8 | EXEC-05 | blocking-human (manual) | inline check, see PLAN 18-19 Task 4 verify | n/a (decision or evidence record) | manual-only |
+| 18-20-01 | 9 | EXEC-01,EXEC-02 | fake-driven | `uv run pytest -m "not docker" tests/test_demo_probe_cases.py tests/test_demo_probe_evidence.py tests/test_demo_probe_cli.py -x` | Wave 0: created by 18-17-01, 18-17-02 | green |
+| 18-20-02 | 9 | EXEC-01,EXEC-02 | blocking-human (manual) | inline check, see PLAN 18-20 Task 2 verify | n/a (decision or evidence record) | manual-only |
+| 18-20-03 | 9 | EXEC-01,EXEC-02 | blocking-human (manual) | inline check, see PLAN 18-20 Task 3 verify | n/a (decision or evidence record); a recorded postponement also passes | manual-only |
+| 18-20-04 | 9 | EXEC-01,EXEC-02 | record check | inline check, see PLAN 18-20 Task 4 verify | n/a; a recorded postponement also passes | manual-only |
+| 18-21-01 | 10 | EXEC-01,EXEC-02,EXEC-05 | replay + fake-driven | `uv run pytest -m "not docker" tests/test_userdata_recorded_frames.py tests/test_userdata_parsers.py tests/test_userdata_events.py tests/test_userdata_replay.py tests/test_userdata_router.py tests/test_userdata_fixtures.py -x` | Wave 0: created here (test_userdata_recorded_frames.py); others by 18-03-03, 18-03-01, 18-15-03, 18-15-02, 18-24-01; skipped by design when no recorded frame exists | green |
+| 18-21-02 | 10 | EXEC-01,EXEC-02,EXEC-05 | PostgreSQL integration | `uv run pytest -m "not docker" tests/test_fake_binance_semantics.py tests/test_exchange_errors.py tests/test_execution_manager.py tests/test_execution_exactly_once_pg.py tests/test_execution_write_ahead_pg.py tests/test_approval_replay_pg.py tests/test_callback_redelivery_pg.py tests/test_intent_recovery.py tests/test_intent_recovery_pg.py -x -rs` | Wave 0: created here (test_fake_binance_semantics.py); others by 18-05-01 | green |
+| 18-25-01 | 11 | EXEC-01,EXEC-02,EXEC-05 | doc structure | `uv run pytest -m "not docker" tests/test_sources_phase18_section.py tests/test_decision_alignment_exchange.py -x` | Wave 0: created by 18-01-01 | green |
+| 18-25-02 | 11 | EXEC-01,EXEC-02,EXEC-05 | doc structure | `uv run pytest -m "not docker" tests/test_decision_alignment_exchange.py tests/test_decision_alignment_bookkeeping.py tests/test_sources_phase18_section.py -x` | Wave 0: created by 18-01-01 | green |
+| 18-25-03 | 11 | EXEC-01,EXEC-02,EXEC-05 | record check | inline check, see PLAN 18-25 Task 3 verify | n/a | manual-only |
+| 18-26-01 | 11 | EXEC-02,EXEC-01 | record + characterization | `uv run pytest -m "not docker" tests/test_exchange_errors.py tests/test_exchange_error_rejections.py tests/test_sources_phase18_section.py tests/test_decision_alignment_exchange.py tests/test_demo_probe_cases.py -x -rs` | Wave 0: created here (test_exchange_error_rejections.py) | green |
+| 18-26-02 | 11 | EXEC-02,EXEC-01 | characterization + table | `uv run pytest -m "not docker" tests/test_exchange_errors.py tests/test_exchange_error_rejections.py tests/test_sources_phase18_section.py tests/test_decision_alignment_exchange.py -x -rs` | exists | green |
+| 18-26-03 | 11 | EXEC-02,EXEC-01 | phase gate + full suite (strict, PostgreSQL) | `uv run pytest -m "not docker" tests/test_phase18_gate.py tests/test_exchange_error_rejections.py tests/test_exchange_errors.py -x -rs` | exists | green |
+| 18-22-01 | 12 | EXEC-01,EXEC-02,EXEC-05,OPS-02 | phase gate | `uv run pytest -m "not docker" tests/test_phase18_gate.py -x` | Wave 0: created here (test_phase18_gate.py) | green |
+| 18-22-02 | 12 | EXEC-01,EXEC-02,EXEC-05,OPS-02 | full suite (strict, PostgreSQL) | `TRADING_CI_STRICT=1 uv run pytest -m "not docker" -q -rs` | exists | manual-only |
+| 18-22-03 | 12 | EXEC-01,EXEC-02,EXEC-05,OPS-02 | blocking-human (manual) | inline check, see PLAN 18-22 Task 3 verify | n/a (decision or evidence record) | manual-only |
+| 18-22-04 | 12 | EXEC-01,EXEC-02,EXEC-05,OPS-02 | record check | inline check, see PLAN 18-22 Task 4 verify | n/a; a recorded deferral also passes | manual-only |
 
 The rows are ordered by wave. Blocking-human tasks (7: 18-02-02, 18-03-02, 18-18-03, 18-19-04, 18-20-02, 18-20-03, 18-22-03) carry an automated record check of the user's decision or evidence file, not a test of the live behavior; record checks (7) read a file the previous task wrote.
 
@@ -181,11 +181,28 @@ Copied from the plans (the command of each task is in the map above). 18-02-01 a
 
 Left for the user at plan acceptance (the planner does not tick these):
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency within one test file per task
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references
+- [x] No watch-mode flags
+- [x] Feedback latency within one test file per task
+- [x] `nyquist_compliant: true` set in frontmatter
 
 **Approval:** pending
+
+## Validation Audit 2026-10-19
+
+Run after the Phase 18 code-review fixes (26 commits, `ef90072` to `6f73e5b`; report `18-REVIEW-FIX.md`). Full suite `pytest -m "not docker"` with the local PostgreSQL 17.11 reachable through `TEST_DATABASE_URL`: exit 0, no failure, no error. The only skips are environmental (symlinks, POSIX file modes, `shellcheck` not on PATH). The 14 PostgreSQL test files ran (about 295 tests, none skipped).
+
+| Metric | Count |
+|--------|-------|
+| Per-task rows | 88 |
+| Set to green (a test file exists and the suite is green) | 60 |
+| Manual-only (decision, evidence or blocking-human record) | 16 |
+| N/A, skipped by design (18-19-02: gate result `transport: sdk`; `tests/test_userdata_direct_transport.py` is never built; 18-19-03 and 18-19-04 have no pytest command and count as manual-only) | 1 |
+| Rows whose Status already held a text outcome (kept) | 11 |
+| Gaps found | 0 |
+| Resolved / Escalated | 0 / 0 |
+
+Not asserted by this audit: the manual-only items stay the owner's (`18-VERIFICATION.md` lists them), and the Approval line in the Sign-Off section is left for the owner to write. The seven review items skipped as owner decisions are recorded in the Phase 19 and Phase 20 notes.
+
