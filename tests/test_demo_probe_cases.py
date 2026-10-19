@@ -1830,11 +1830,27 @@ async def test_the_dry_run_with_every_optional_case_rehearses_every_handler_with
 
 
 def _function_nodes(tree: ast.Module) -> dict[str, ast.AST]:
-    return {
-        node.name: node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
-    }
+    """Every function by qualified name (`Class.method`, `outer.inner`).
+
+    Keyed by bare name, a nested function reusing a name (a local `sleep`) would silently
+    replace the node under analysis (review WR-07); a duplicate qualified name fails instead.
+    """
+    found: dict[str, ast.AST] = {}
+
+    def visit(parent: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(parent):
+            if isinstance(child, ast.ClassDef):
+                visit(child, f"{prefix}{child.name}.")
+            elif isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                qualified = f"{prefix}{child.name}"
+                assert qualified not in found, f"duplicate function {qualified}"
+                found[qualified] = child
+                visit(child, f"{qualified}.")
+            else:
+                visit(child, prefix)
+
+    visit(tree, "")
+    return found
 
 
 def test_no_handler_sleeps_and_every_case_wait_is_the_owners_case_timeout() -> None:
@@ -2014,3 +2030,23 @@ async def test_a_wrong_side_or_partial_reduce_only_order_does_not_flatten_the_fa
         reduce_only=True,
     )
     assert port.positions_rows == [("BOTH", Decimal("0.006"))]
+
+
+def test_function_nodes_keeps_a_nested_function_that_reuses_a_name() -> None:
+    source = (
+        "def outer():@@"
+        "    def sleep():@@"
+        "        return 1@@"
+        "    return sleep@@"
+        "def sleep():@@"
+        "    return 2@@"
+        "class Rig:@@"
+        "    def sleep(self):@@"
+        "        return 3@@"
+    ).replace("@@", chr(10))
+    assert sorted(_function_nodes(ast.parse(source))) == [
+        "Rig.sleep",
+        "outer",
+        "outer.sleep",
+        "sleep",
+    ]

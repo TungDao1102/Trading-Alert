@@ -861,12 +861,20 @@ def time_contract_violations(source: str) -> list[str]:
     """`float(` calls, wall-clock calls outside `live_clock`, direct sleep calls."""
     tree = ast.parse(source)
     bound: dict[str, str] = {}
+    module_alias: dict[str, str] = {}  # `import time as t` -> t: time
+    class_alias: dict[str, str] = {}  # `from datetime import datetime as DT` -> DT: datetime
     for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname and alias.name in {"time", "asyncio", "datetime"}:
+                    module_alias[alias.asname] = alias.name
         if isinstance(node, ast.ImportFrom) and node.module in {"time", "asyncio", "datetime"}:
             for alias in node.names:
                 full = f"{node.module}.{alias.name}"
                 if full in WALL_CLOCK_CALLS or full in _DIRECT_SLEEPS:
                     bound[alias.asname or alias.name] = full
+                if node.module == "datetime" and alias.name in {"datetime", "date"}:
+                    class_alias[alias.asname or alias.name] = alias.name
     found: list[str] = []
 
     class _Visitor(ast.NodeVisitor):
@@ -883,7 +891,18 @@ def time_contract_violations(source: str) -> list[str]:
 
         def visit_Call(self, node: ast.Call) -> None:
             text = ast.unparse(node.func)
+            head, _, rest = text.partition(".")
+            if head in module_alias:
+                text = module_alias[head] + ("." + rest if rest else "")
+            elif head in class_alias and rest:
+                text = class_alias[head] + "." + rest
             name = bound.get(text, text)
+            if name.endswith(".time") and (
+                "get_running_loop()" in name
+                or "get_event_loop()" in name
+                or name.split(".")[-2:] == ["loop", "time"]
+            ):
+                found.append(f"event-loop clock {name} at line {node.lineno}")
             if text in {"float", "builtins.float"}:
                 found.append(f"float call at line {node.lineno}")
             if name in _DIRECT_SLEEPS:
@@ -965,6 +984,42 @@ def test_the_script_reads_the_wall_clock_only_in_live_clock() -> None:
                 sleep(1)
             """,
             "direct sleep call time.sleep",
+        ),
+        (
+            """
+            import time as t
+
+            def stamp():
+                return t.time()
+            """,
+            "wall-clock call time.time outside live_clock",
+        ),
+        (
+            """
+            from datetime import datetime as DT
+
+            def stamp():
+                return DT.now()
+            """,
+            "wall-clock call datetime.now outside live_clock",
+        ),
+        (
+            """
+            import asyncio as aio
+
+            async def pause():
+                await aio.sleep(1)
+            """,
+            "direct sleep call asyncio.sleep",
+        ),
+        (
+            """
+            import asyncio
+
+            def stamp():
+                return asyncio.get_running_loop().time()
+            """,
+            "event-loop clock",
         ),
     ],
 )

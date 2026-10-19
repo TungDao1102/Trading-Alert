@@ -1169,12 +1169,26 @@ def signed_send_violations(source: str) -> list[str]:
             for node in ast.walk(method):
                 if isinstance(node, ast.Call) and _callee_name(node) == "_sdk_call":
                     allowed.update(id(arg) for arg in node.args[1:2])
+            parents = {
+                child: parent
+                for parent in ast.walk(method)
+                for child in ast.iter_child_nodes(parent)
+            }
             for node in ast.walk(method):
                 if isinstance(node, ast.Call) and _callee_name(node) in _SEND_HELPERS:
                     found.append(f"{method.name}: {_callee_name(node)}")
                 if isinstance(node, ast.Attribute) and _is_signed_sdk_attribute(node):
                     if id(node) not in allowed:
                         found.append(f"{method.name}: {node.attr}")
+                # `rest_api` may only be used as the base of `.rest_api.<name>`: an alias
+                # (`rest = self._sdk.rest_api`) or `getattr(<...>.rest_api, name)` would reach a
+                # signed method without the attribute chain the checks above look for.
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == "rest_api"
+                    and not isinstance(parents.get(node), ast.Attribute)
+                ):
+                    found.append(f"{method.name}: rest_api used other than as a base")
     return found
 
 
@@ -1205,3 +1219,22 @@ def test_the_send_guard_reports_a_bypass() -> None:
             "bad_direct: new_algo_order",
         ]
     )
+
+
+def test_the_send_guard_reports_an_alias_and_a_getattr_of_rest_api() -> None:
+    snippet = (
+        "class BinanceUsdmAdapter:@@"
+        "    async def _sdk_call(self, kind, method, **kw):@@"
+        "        return await asyncio.to_thread(method, **kw)@@"
+        "    def bad_alias(self):@@"
+        "        rest = self._sdk.rest_api@@"
+        "        return rest.new_order(symbol='X')@@"
+        "    def bad_getattr(self, name):@@"
+        "        return getattr(self._sdk.rest_api, name)(symbol='X')@@"
+        "    def fine_unsigned(self):@@"
+        "        return self._sdk.rest_api.exchange_information@@"
+    ).replace("@@", chr(10))
+    assert sorted(signed_send_violations(snippet)) == [
+        "bad_alias: rest_api used other than as a base",
+        "bad_getattr: rest_api used other than as a base",
+    ]

@@ -116,13 +116,58 @@ def _from_imported_clock_names(tree: ast.Module) -> dict[str, str]:
     return bound
 
 
+def _import_aliases(tree: ast.Module) -> dict[str, str]:
+    """Local name -> full dotted name for every import, `as` aliases included.
+
+    `import time as t` gives `t -> time`; `from datetime import datetime as DT` gives
+    `DT -> datetime.datetime`. A plain `import a.b` binds `a`.
+    """
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return aliases
+
+
+def _is_loop_time_call(node: ast.Call) -> str | None:
+    """`loop.time()` and `asyncio.get_running_loop().time()` read the loop's monotonic clock."""
+    func = node.func
+    if not (isinstance(func, ast.Attribute) and func.attr == "time"):
+        return None
+    receiver = func.value
+    if isinstance(receiver, ast.Call):
+        inner = _dotted(receiver.func)
+        if inner is not None and inner.split(".")[-1] in {"get_running_loop", "get_event_loop"}:
+            return f"{inner}().time"
+        return None
+    dotted = _dotted(func)
+    if dotted is not None and dotted.split(".")[-2:] == ["loop", "time"]:
+        return dotted
+    return None
+
+
 def wall_clock_calls(path: str | Path) -> list[tuple[int, str]]:
-    """`(line, dotted name)` of every call that reads a wall or monotonic clock."""
+    """`(line, dotted name)` of every call that reads a wall or monotonic clock.
+
+    Import aliases are resolved (`import time as t; t.time()`, `from datetime import datetime
+    as DT; DT.now()`), and the event loop's own clock (`loop.time()`,
+    `asyncio.get_running_loop().time()`) counts as a clock read.
+    """
     tree = _tree(path)
     bound = _from_imported_clock_names(tree)
+    aliases = _import_aliases(tree)
     found: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
+            continue
+        loop_clock = _is_loop_time_call(node)
+        if loop_clock is not None:
+            found.append((node.lineno, loop_clock))
             continue
         dotted = _dotted(node.func)
         if dotted is None:
@@ -130,10 +175,17 @@ def wall_clock_calls(path: str | Path) -> list[tuple[int, str]]:
         if dotted in bound:
             found.append((node.lineno, bound[dotted]))
             continue
-        for target in WALL_CLOCK_CALLS:
-            if dotted == target or dotted.endswith("." + target):
-                found.append((node.lineno, dotted))
-                break
+        written = next(
+            (t for t in WALL_CLOCK_CALLS if dotted == t or dotted.endswith("." + t)), None
+        )
+        if written is not None:
+            found.append((node.lineno, dotted))
+            continue
+        head, _, rest = dotted.partition(".")
+        if head in aliases and aliases[head] != head:
+            resolved = f"{aliases[head]}.{rest}" if rest else aliases[head]
+            if any(resolved == t or resolved.endswith("." + t) for t in WALL_CLOCK_CALLS):
+                found.append((node.lineno, resolved))
     return sorted(found)
 
 

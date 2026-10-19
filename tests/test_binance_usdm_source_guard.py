@@ -21,6 +21,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[1]
 ADAPTER = REPO / "src" / "adapters" / "binance_usdm.py"
 MANAGER = REPO / "src" / "execution" / "manager.py"
@@ -128,34 +130,91 @@ def _is_logger_call(node: ast.AST) -> bool:
     )
 
 
+def _exception_names(tree: ast.AST) -> set[str]:
+    """The typical exception variable names plus every name the code binds to an exception.
+
+    A name is an exception name when an `except ... as name` clause binds it or when a
+    function parameter is annotated with a type that contains `Exception` or `Error`
+    (review WR-07: the fixed list alone missed `except ValueError as caught`).
+    """
+    names = set(EXCEPTION_NAMES)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            arguments = [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+            for argument in arguments:
+                if argument.annotation is None:
+                    continue
+                text = ast.unparse(argument.annotation)
+                if "Exception" in text or "Error" in text:
+                    names.add(argument.arg)
+    return names
+
+
 def message_text_reads(source: str) -> list[str]:
-    """`error_message` attribute reads and `str(<exception name>)` outside logger calls."""
+    """Reads of an exception's message text outside logger calls.
+
+    Flagged: any `error_message` attribute; `str(x)`, `repr(x)` and `format(x)` of an exception
+    name; `x.args` and `x.msg`; `getattr(x, "error_message" | "args" | "msg")`; and an f-string
+    that interpolates an exception name.
+    """
     tree = ast.parse(source)
     parents: dict[ast.AST, ast.AST] = {}
     for parent in ast.walk(tree):
         for child in ast.iter_child_nodes(parent):
             parents[child] = parent
+    names = _exception_names(tree)
+
+    def inside_logger(node: ast.AST) -> bool:
+        ancestor = parents.get(node)
+        while ancestor is not None:
+            if _is_logger_call(ancestor):
+                return True
+            ancestor = parents.get(ancestor)
+        return False
+
     found: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "error_message":
             found.append(f"{node.lineno}: reads .error_message")
         if (
+            isinstance(node, ast.Attribute)
+            and node.attr in {"args", "msg"}
+            and isinstance(node.value, ast.Name)
+            and node.value.id in names
+            and not inside_logger(node)
+        ):
+            found.append(f"{node.lineno}: {node.value.id}.{node.attr} outside a logger call")
+        if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "str"
-            and len(node.args) == 1
+            and node.func.id in {"str", "repr", "format"}
+            and len(node.args) >= 1
             and isinstance(node.args[0], ast.Name)
-            and node.args[0].id in EXCEPTION_NAMES
+            and node.args[0].id in names
+            and not inside_logger(node)
         ):
-            ancestor = parents.get(node)
-            inside_logger = False
-            while ancestor is not None:
-                if _is_logger_call(ancestor):
-                    inside_logger = True
-                    break
-                ancestor = parents.get(ancestor)
-            if not inside_logger:
-                found.append(f"{node.lineno}: str({node.args[0].id}) outside a logger call")
+            found.append(f"{node.lineno}: {node.func.id}({node.args[0].id}) outside a logger call")
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in names
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in {"error_message", "args", "msg"}
+            and not inside_logger(node)
+        ):
+            found.append(f"{node.lineno}: getattr({node.args[0].id}, {node.args[1].value!r})")
+        if (
+            isinstance(node, ast.FormattedValue)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in names
+            and not inside_logger(node)
+        ):
+            found.append(f"{node.lineno}: f-string interpolates {node.value.id}")
     return sorted(found)
 
 
@@ -181,6 +240,39 @@ def test_message_text_guard_reports_each_form() -> None:
         assert message_text_reads(f"text = str({name})\n") == [
             f"1: str({name}) outside a logger call"
         ]
+
+
+@pytest.mark.parametrize(
+    ("snippet", "expected"),
+    [
+        ("text = repr(exc)\n", "1: repr(exc) outside a logger call"),
+        ("text = format(err)\n", "1: format(err) outside a logger call"),
+        ("text = exc.args[0]\n", "1: exc.args outside a logger call"),
+        ("text = exc.msg\n", "1: exc.msg outside a logger call"),
+        ("text = getattr(exc, 'error_message')\n", "1: getattr(exc, 'error_message')"),
+        ("text = f'bad {exc}'\n", "1: f-string interpolates exc"),
+        (
+            "try:\n    pass\nexcept ValueError as caught:\n    text = str(caught)\n",
+            "4: str(caught) outside a logger call",
+        ),
+        (
+            "def f(failure: BaseException) -> str:\n    return str(failure)\n",
+            "2: str(failure) outside a logger call",
+        ),
+    ],
+)
+def test_message_text_guard_reports_the_bypass_forms(snippet: str, expected: str) -> None:
+    assert message_text_reads(snippet) == [expected]
+
+
+def test_message_text_guard_allows_a_logger_f_string_and_unrelated_names() -> None:
+    allowed = (
+        "def f(exc: BaseException, value: int) -> None:\n"
+        "    log.warning('x', detail=f'{exc}', raw=repr(exc))\n"
+        "    text = str(value)\n"
+        "    text = repr(value)\n"
+    )
+    assert message_text_reads(allowed) == []
 
 
 def test_message_text_guard_allows_logger_arguments_only() -> None:
