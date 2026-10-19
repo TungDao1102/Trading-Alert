@@ -1481,3 +1481,97 @@ def test_wr31_callback_simulate_action_rejected() -> None:
         )
     assert exc_info.value.reason_code == RejectionReason.INVALIDATED
     assert store.save_calls == 0
+
+
+# --------------------------------------------------------------------------- #
+# Phase 18 review WR-07: sweeper journals no exception text and isolates journal failures.
+# --------------------------------------------------------------------------- #
+
+_SIGNED_URL_TEXT = "Network error: GET https://x.test/fapi?signature=" + "ab" * 32 + "&timestamp=1"
+
+
+class _PostImageFailingJournal(_FakeJournal):
+    def record(self, event: Any) -> None:
+        if '"phase":"post_cancel"' in event.payload_json.replace(" ", ""):
+            raise RuntimeError("journal down")
+        super().record(event)
+
+
+class _FailureEventFailingJournal(_FakeJournal):
+    def record(self, event: Any) -> None:
+        if "sweep_failed" in event.payload_json:
+            raise RuntimeError("journal down")
+        super().record(event)
+
+
+async def test_review_wr07_failure_events_carry_the_exception_type_only() -> None:
+    adapter = _FakeSweepAdapter(found=True, cancel_exc=RuntimeError(_SIGNED_URL_TEXT))
+    journal = _FakeJournal()
+    sweeper = OrphanSweeper(adapter=adapter, journal=journal)
+    outcome = await sweeper.sweep(
+        _orphan_diff(), position_verifier=lambda symbol: Decimal("0"), now_utc=NOW
+    )
+    assert outcome.skipped[0].reason == "cancel_failed: RuntimeError"
+    assert journal.events
+    assert all("signature" not in e.payload_json for e in journal.events)
+    assert any("cancel_failed: RuntimeError" in e.payload_json for e in journal.events)
+
+
+async def test_review_wr07_probe_failure_event_carries_the_exception_type_only() -> None:
+    adapter = _FakeSweepAdapter(found=True)
+
+    async def broken_probe(*, client_algo_id: str) -> Any:
+        raise RuntimeError(_SIGNED_URL_TEXT)
+
+    adapter.query_algo_order_by_client = broken_probe  # type: ignore[method-assign]
+    journal = _FakeJournal()
+    sweeper = OrphanSweeper(adapter=adapter, journal=journal)
+    outcome = await sweeper.sweep(
+        _orphan_diff(), position_verifier=lambda symbol: Decimal("0"), now_utc=NOW
+    )
+    assert outcome.skipped[0].reason == "probe_failed: RuntimeError"
+    assert all("signature" not in e.payload_json for e in journal.events)
+
+
+async def test_review_wr07_a_post_image_failure_still_counts_the_cancel() -> None:
+    adapter = _FakeSweepAdapter(found=True)
+    journal = _PostImageFailingJournal()
+    sweeper = OrphanSweeper(adapter=adapter, journal=journal)
+    outcome = await sweeper.sweep(
+        _orphan_diff(), position_verifier=lambda symbol: Decimal("0"), now_utc=NOW
+    )
+    assert adapter.cancels == [("BTCUSDT", "algo-orphan-1")]
+    assert outcome.cancelled == (("BTCUSDT", "algo-orphan-1"),)
+    assert outcome.skipped == ()
+    assert any("post_image_failed: RuntimeError" in e.payload_json for e in journal.events)
+
+
+async def test_review_wr07_a_failing_failure_event_does_not_end_the_sweep() -> None:
+    adapter = _FakeSweepAdapter(found=True)
+    calls = {"n": 0}
+
+    async def flaky_cancel(*, symbol: str, client_algo_id: str) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+
+    adapter.cancel_algo_order = flaky_cancel  # type: ignore[method-assign]
+    journal = _FailureEventFailingJournal()
+    sweeper = OrphanSweeper(adapter=adapter, journal=journal)
+    diff = CompareDiff(
+        agreement=False,
+        divergences=(),
+        orphan_protectives=(
+            OrphanProtective(
+                symbol="BTCUSDT", client_algo_id="algo-1", order_role=OrderRole.STOP_LOSS.value
+            ),
+            OrphanProtective(
+                symbol="BTCUSDT",
+                client_algo_id="algo-2",
+                order_role=OrderRole.TAKE_PROFIT_1.value,
+            ),
+        ),
+    )
+    outcome = await sweeper.sweep(diff, position_verifier=lambda symbol: Decimal("0"), now_utc=NOW)
+    assert outcome.cancelled == (("BTCUSDT", "algo-2"),)
+    assert [s.client_algo_id for s in outcome.skipped] == ["algo-1"]

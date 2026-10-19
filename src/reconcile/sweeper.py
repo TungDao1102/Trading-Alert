@@ -215,13 +215,13 @@ class OrphanSweeper:
                     client_algo_id=client_algo_id
                 )
             except Exception as exc:
-                self._journal.record(
-                    self._build_failure_event(
-                        symbol=symbol,
-                        client_algo_id=client_algo_id,
-                        reason=f"probe_failed: {type(exc).__name__}: {exc}",
-                        now_utc=effective_now,
-                    )
+                # Exception TYPE only: an SDK network error embeds the request URL
+                # (signature included) and the journal is append-only (T-18-14).
+                self._record_failure_best_effort(
+                    symbol=symbol,
+                    client_algo_id=client_algo_id,
+                    reason=f"probe_failed: {type(exc).__name__}",
+                    now_utc=effective_now,
                 )
                 skipped.append(
                     SweepSkip(
@@ -259,22 +259,12 @@ class OrphanSweeper:
                     symbol=symbol,
                     client_algo_id=client_algo_id,
                 )
-
-                # Journal the post-image AFTER the cancel.
-                post_event = self._build_post_image_event(
+            except Exception as exc:
+                self._record_failure_best_effort(
                     symbol=symbol,
                     client_algo_id=client_algo_id,
+                    reason=f"cancel_failed: {type(exc).__name__}",
                     now_utc=effective_now,
-                )
-                self._journal.record(post_event)
-            except Exception as exc:
-                self._journal.record(
-                    self._build_failure_event(
-                        symbol=symbol,
-                        client_algo_id=client_algo_id,
-                        reason=f"cancel_failed: {type(exc).__name__}: {exc}",
-                        now_utc=effective_now,
-                    )
                 )
                 skipped.append(
                     SweepSkip(
@@ -285,7 +275,24 @@ class OrphanSweeper:
                 )
                 continue
 
+            # The cancel succeeded: the algo order is gone whatever happens to the
+            # post-image write, so the orphan is counted as cancelled either way.
             cancelled.append((symbol, client_algo_id))
+            try:
+                # Journal the post-image AFTER the cancel.
+                post_event = self._build_post_image_event(
+                    symbol=symbol,
+                    client_algo_id=client_algo_id,
+                    now_utc=effective_now,
+                )
+                self._journal.record(post_event)
+            except Exception as exc:
+                self._record_failure_best_effort(
+                    symbol=symbol,
+                    client_algo_id=client_algo_id,
+                    reason=f"post_image_failed: {type(exc).__name__}",
+                    now_utc=effective_now,
+                )
 
         return SweepOutcome(
             swept_count=len(cancelled),
@@ -295,6 +302,31 @@ class OrphanSweeper:
         )
 
     # ----- internal helpers ---------------------------------------------- #
+
+    def _record_failure_best_effort(
+        self,
+        *,
+        symbol: str,
+        client_algo_id: str,
+        reason: str,
+        now_utc: datetime,
+    ) -> None:
+        """Journal a failure event; a journal error must not end the sweep.
+
+        The failure is already reported in `SweepOutcome` (skipped / cancelled),
+        so a second journal failure here must not abort the remaining orphans.
+        """
+        try:
+            self._journal.record(
+                self._build_failure_event(
+                    symbol=symbol,
+                    client_algo_id=client_algo_id,
+                    reason=reason,
+                    now_utc=now_utc,
+                )
+            )
+        except Exception:  # best effort by design, see the docstring
+            return
 
     def _build_pre_image_event(
         self,
