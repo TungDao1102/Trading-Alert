@@ -8,8 +8,10 @@ Signal reached by plan.signal_id, and every disagreement is a named refusal.
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from src.core.planner import plan, plan_hash_from_fields
@@ -19,6 +21,7 @@ from src.domain.registry import ParameterSet, load_parameter_set
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
 from src.execution.binding import (
+    GEOMETRY_INVALID_AFTER_SNAP,
     PLAN_SIDE_MISMATCH,
     PLAN_SIGNAL_MISMATCH,
     PLAN_SYMBOL_MISMATCH,
@@ -29,11 +32,26 @@ from src.execution.binding import (
     BoundPlan,
     bind_plan,
     check_quantity_bound,
+    check_snapped_geometry,
     check_working_type,
     recompute_plan_hash,
+    take_profit_levels,
+)
+from src.execution.placement import (
+    derive_limit_price,
+    derive_sl_trigger_price,
+    entry_limit_rounding,
+    quantize_price,
+    sl_trigger_rounding,
 )
 
 from tests import geometry_builders
+from tests.support.ast_guards import (
+    float_constructor_calls,
+    forbidden_imports,
+    module_imports,
+    wall_clock_calls,
+)
 
 _PARAMETER_SET_ID = "baseline-v6"
 
@@ -346,3 +364,231 @@ def test_check_working_type() -> None:
     assert check_working_type("MARK_PRICE") is None
     for other in ("CONTRACT_PRICE", "mark_price", "", "UNKNOWN"):
         assert check_working_type(other) == WORKING_TYPE_NOT_MARK_PRICE
+
+
+# --------------------------------------------------------------------------- #
+# Task 3 - snapped geometry (G4-020), take-profit levels and purity.
+# --------------------------------------------------------------------------- #
+
+_TICKS = [Decimal("0.01"), Decimal("0.1"), Decimal("0.5")]
+
+
+def _snap(
+    side: str,
+    *,
+    entry_min: Decimal,
+    entry_max: Decimal,
+    stop: Decimal,
+    tick: Decimal,
+) -> tuple[Decimal, Decimal]:
+    """The limit and SL trigger exactly as the manager snaps them today."""
+    limit = quantize_price(
+        price=derive_limit_price(entry_min_price=entry_min, entry_max_price=entry_max),
+        price_tick_size=tick,
+        direction=entry_limit_rounding(candidate_position_side=side),
+    )
+    sl_trigger = quantize_price(
+        price=derive_sl_trigger_price(stop_loss_price=stop),
+        price_tick_size=tick,
+        direction=sl_trigger_rounding(candidate_position_side=side),
+    )
+    return limit, sl_trigger
+
+
+def _expected_refusal(
+    side: str,
+    *,
+    limit: Decimal,
+    sl_trigger: Decimal,
+    entry_min: Decimal,
+    entry_max: Decimal,
+) -> bool:
+    """Independent statement of D-03: the stop is strictly outside the zone and the limit."""
+    if side == "LONG":
+        return (
+            not (entry_min <= limit <= entry_max) or sl_trigger >= entry_min or sl_trigger >= limit
+        )
+    return not (entry_min <= limit <= entry_max) or sl_trigger <= entry_max or sl_trigger <= limit
+
+
+def test_snapped_geometry_grid_refuses_exactly_the_stop_that_reaches_the_zone() -> None:
+    refused_cases = 0
+    accepted_cases = 0
+    for side in ("LONG", "SHORT"):
+        for tick in _TICKS:
+            for entry_min, entry_max in (
+                (Decimal("100.03"), Decimal("100.37")),
+                (Decimal("100.20"), Decimal("101.20")),
+                (Decimal("100.03"), Decimal("100.04")),  # a zone narrower than most ticks
+            ):
+                for offset in (Decimal("0"), tick / 4, tick / 2, tick, 2 * tick, 5 * tick):
+                    stop = entry_min - offset if side == "LONG" else entry_max + offset
+                    limit, sl_trigger = _snap(
+                        side, entry_min=entry_min, entry_max=entry_max, stop=stop, tick=tick
+                    )
+                    refused = check_snapped_geometry(
+                        side=side,
+                        limit_price=limit,
+                        sl_trigger_price=sl_trigger,
+                        entry_min_price=entry_min,
+                        entry_max_price=entry_max,
+                    )
+                    expected = _expected_refusal(
+                        side,
+                        limit=limit,
+                        sl_trigger=sl_trigger,
+                        entry_min=entry_min,
+                        entry_max=entry_max,
+                    )
+                    assert refused == (GEOMETRY_INVALID_AFTER_SNAP if expected else None), (
+                        side,
+                        tick,
+                        entry_min,
+                        entry_max,
+                        stop,
+                        limit,
+                        sl_trigger,
+                    )
+                    refused_cases += expected
+                    accepted_cases += not expected
+    assert refused_cases > 0
+    assert accepted_cases > 0
+
+
+def test_snapped_geometry_stop_one_tick_below_the_zone_edge_snaps_onto_it() -> None:
+    """LONG, tick 0.5, zone 100.20-101.20, stop 100.10: the stop snaps UP to 100.50 (inside)."""
+    entry_min, entry_max, tick = Decimal("100.20"), Decimal("101.20"), Decimal("0.5")
+    limit, sl_trigger = _snap(
+        "LONG", entry_min=entry_min, entry_max=entry_max, stop=Decimal("100.10"), tick=tick
+    )
+    assert sl_trigger == Decimal("100.5")
+    assert (
+        check_snapped_geometry(
+            side="LONG",
+            limit_price=limit,
+            sl_trigger_price=sl_trigger,
+            entry_min_price=entry_min,
+            entry_max_price=entry_max,
+        )
+        == GEOMETRY_INVALID_AFTER_SNAP
+    )
+
+
+def test_snapped_geometry_accepts_a_stop_clear_of_the_zone() -> None:
+    for side, stop in (("LONG", Decimal("97.40")), ("SHORT", Decimal("102.60"))):
+        entry_min, entry_max, tick = Decimal("97.80"), Decimal("100.20"), Decimal("0.01")
+        limit, sl_trigger = _snap(
+            side, entry_min=entry_min, entry_max=entry_max, stop=stop, tick=tick
+        )
+        assert (
+            check_snapped_geometry(
+                side=side,
+                limit_price=limit,
+                sl_trigger_price=sl_trigger,
+                entry_min_price=entry_min,
+                entry_max_price=entry_max,
+            )
+            is None
+        )
+
+
+def test_snapped_geometry_limit_outside_the_zone_is_refused() -> None:
+    assert (
+        check_snapped_geometry(
+            side="LONG",
+            limit_price=Decimal("101"),
+            sl_trigger_price=Decimal("90"),
+            entry_min_price=Decimal("98"),
+            entry_max_price=Decimal("100"),
+        )
+        == GEOMETRY_INVALID_AFTER_SNAP
+    )
+
+
+def test_snapped_geometry_unknown_side_is_a_programming_error() -> None:
+    with pytest.raises(ValueError):
+        check_snapped_geometry(
+            side="BOTH",
+            limit_price=Decimal("99"),
+            sl_trigger_price=Decimal("90"),
+            entry_min_price=Decimal("98"),
+            entry_max_price=Decimal("100"),
+        )
+
+
+def test_take_profit_levels_parse_tp1_and_tp2() -> None:
+    _signal, trade_plan = _real_plan("LONG")
+    tp1, tp2 = take_profit_levels(trade_plan)
+    prices = json.loads(trade_plan.take_profit_json)
+    assert (tp1, tp2) == (Decimal(prices["tp1"]), Decimal(prices["tp2"]))
+    assert isinstance(tp1, Decimal) and isinstance(tp2, Decimal)
+
+
+@pytest.mark.parametrize(
+    "take_profit_json",
+    [
+        "{}",
+        '{"tp1": "106.0"}',
+        '{"tp2": "112.0"}',
+        '{"tp1": 106.0, "tp2": "112.0"}',
+        '{"tp1": "106.0", "tp2": 112}',
+        '{"tp1": "NaN", "tp2": "112.0"}',
+        '{"tp1": "106.0", "tp2": "Infinity"}',
+        '{"tp1": "abc", "tp2": "112.0"}',
+        '{"tp1": "0", "tp2": "112.0"}',
+        '{"tp1": "-1", "tp2": "112.0"}',
+        "[]",
+        '"text"',
+        "not json",
+    ],
+)
+def test_take_profit_levels_fail_closed(take_profit_json: str) -> None:
+    _signal, trade_plan = _real_plan("LONG")
+    broken = dataclasses.replace(trade_plan, take_profit_json=take_profit_json)
+    with pytest.raises(ValueError):
+        take_profit_levels(broken)
+
+
+_BINDING_PATH = Path(__file__).resolve().parents[1] / "src" / "execution" / "binding.py"
+_ALLOWED_PREFIXES = (
+    "__future__",
+    "dataclasses",
+    "decimal",
+    "src.core.planner",
+    "src.domain",
+    "src.execution.placement",
+)
+
+
+def test_binding_module_is_pure() -> None:
+    forbidden = forbidden_imports(
+        _BINDING_PATH,
+        [
+            "binance*",
+            "sqlalchemy",
+            "pydantic",
+            "polars",
+            "src.adapters",
+            "src.persistence",
+            "src.backtest",
+        ],
+    )
+    assert forbidden == []
+    unexpected = [
+        name
+        for name in module_imports(_BINDING_PATH)
+        if not any(name == p or name.startswith(p + ".") for p in _ALLOWED_PREFIXES)
+    ]
+    assert unexpected == []
+    assert float_constructor_calls(_BINDING_PATH) == []
+    assert wall_clock_calls(_BINDING_PATH) == []
+
+
+def test_purity_guard_reports_a_planted_float_call(tmp_path: Path) -> None:
+    """Negative control: the helper does see a float() call and a clock read."""
+    planted = tmp_path / "planted.py"
+    planted.write_text(
+        "import time\n\n\ndef f(x):\n    time.time()\n    return float(x)\n", encoding="utf-8"
+    )
+    assert float_constructor_calls(planted) == [6]
+    assert [name for _line, name in wall_clock_calls(planted)] == ["time.time"]
