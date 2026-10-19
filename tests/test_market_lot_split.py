@@ -7,15 +7,26 @@ verified (research A7, B8, B9).
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from src.domain.lot_filters import LotFilters
+from src.execution.constraint_snapshot import PlanConstraintSnapshot
 from src.execution.lot_split import (
     CloseSplit,
     is_valid_market_part,
+    lot_filters_from_plan_snapshot,
     next_close_part,
     plan_close_parts,
+    quantize_to_lot,
+)
+from tests.support.ast_guards import (
+    float_constructor_calls,
+    forbidden_imports,
+    module_imports,
+    wall_clock_calls,
 )
 
 D = Decimal
@@ -262,3 +273,153 @@ def test_exhaustive_grid_of_fake_filters() -> None:
     assert cases == (
         len(_STEPS) * len(_MARKET_MIN_STEPS) * len(_MARKET_MAX_STEPS) * (len(_POSITION_STEPS) + 4)
     )
+
+
+# --------------------------------------------------------------------------- #
+# Floor-only quantizer
+# --------------------------------------------------------------------------- #
+
+
+def test_quantize_floors_a_quantity_exactly_on_the_grid_to_itself() -> None:
+    assert quantize_to_lot(quantity=D("0.123"), filters=make_filters(), market_exit=False) == D(
+        "0.123"
+    )
+
+
+def test_quantize_floors_one_step_minus_a_fraction_down() -> None:
+    result = quantize_to_lot(quantity=D("0.1239999"), filters=make_filters(), market_exit=False)
+    assert result == D("0.123")
+
+
+def test_quantize_never_rounds_up() -> None:
+    filters = make_filters(lot_min="0.005", lot_step="0.005")
+    for text in ("0.0099999", "0.01", "0.0149999", "7.777"):
+        result = quantize_to_lot(quantity=D(text), filters=filters, market_exit=False)
+        assert result <= D(text)
+        assert (result - D("0.005")) % D("0.005") == 0
+
+
+def test_quantize_measures_the_grid_from_the_minimum_not_from_zero() -> None:
+    filters = make_filters(lot_min="0.003", lot_step="0.002", market_min="0.003")
+    # valid LOT_SIZE quantities: 0.003, 0.005, 0.007 ...
+    assert quantize_to_lot(quantity=D("0.0069"), filters=filters, market_exit=False) == D("0.005")
+
+
+def test_quantize_market_exit_uses_the_intersection_of_both_steps() -> None:
+    filters = make_filters(
+        lot_min="0.001", lot_step="0.001", market_min="0.01", market_max="1", market_step="0.01"
+    )
+    assert quantize_to_lot(quantity=D("0.555"), filters=filters, market_exit=False) == D("0.555")
+    assert quantize_to_lot(quantity=D("0.555"), filters=filters, market_exit=True) == D("0.55")
+
+
+def test_quantize_returns_zero_below_the_minimum() -> None:
+    filters = make_filters(lot_min="0.01", lot_step="0.01", market_min="0.01")
+    assert quantize_to_lot(quantity=D("0.0099"), filters=filters, market_exit=False) == D("0")
+    assert quantize_to_lot(quantity=D("0.0099"), filters=filters, market_exit=True) == D("0")
+
+
+def test_quantize_returns_zero_when_the_market_grids_never_meet() -> None:
+    filters = make_filters(
+        lot_min="0.002", lot_step="0.004", market_min="0.005", market_max="1", market_step="0.004"
+    )
+    assert quantize_to_lot(quantity=D("0.5"), filters=filters, market_exit=True) == D("0")
+
+
+def test_quantize_caps_at_the_maximum_and_never_exceeds_the_input() -> None:
+    filters = make_filters(lot_max="10", market_max="10")
+    assert quantize_to_lot(quantity=D("25.5"), filters=filters, market_exit=False) == D("10")
+
+
+@pytest.mark.parametrize("bad", [D("0"), D("-1"), D("NaN")])
+def test_quantize_returns_zero_for_non_positive_or_non_finite_input(bad: Decimal) -> None:
+    assert quantize_to_lot(quantity=bad, filters=make_filters(), market_exit=False) == D("0")
+
+
+# --------------------------------------------------------------------------- #
+# Mapping from the per-plan constraint snapshot
+# --------------------------------------------------------------------------- #
+
+_NOW = datetime(2026, 10, 19, 12, 0, tzinfo=UTC)
+
+
+def make_snapshot(**overrides: object) -> PlanConstraintSnapshot:
+    fields: dict[str, object] = {
+        "trade_plan_id": "plan-1",
+        "symbol": "BTCUSDT",
+        "price_tick_size": D("0.1"),
+        "quantity_step_size": D("0.001"),
+        "min_quantity": D("0.001"),
+        "max_quantity": D("1000"),
+        "min_notional": D("100"),
+        "market_lot_min_quantity": D("0.001"),
+        "market_lot_max_quantity": D("120"),
+        "market_lot_step_size": D("0.001"),
+        "percent_price_multiplier_up": None,
+        "percent_price_multiplier_down": None,
+        "percent_price_multiplier_decimals": None,
+        "working_type": "MARK_PRICE",
+        "margin_type": None,
+        "leverage": None,
+        "equity_used": None,
+        "constraints_observed_at_utc": _NOW,
+        "captured_at_utc": _NOW,
+    }
+    fields.update(overrides)
+    return PlanConstraintSnapshot(**fields)  # type: ignore[arg-type]
+
+
+def test_complete_snapshot_maps_to_lot_filters() -> None:
+    filters = lot_filters_from_plan_snapshot(make_snapshot())
+    assert filters == LotFilters(
+        symbol="BTCUSDT",
+        price_tick_size=D("0.1"),
+        lot_min_quantity=D("0.001"),
+        lot_max_quantity=D("1000"),
+        lot_step_size=D("0.001"),
+        market_lot_min_quantity=D("0.001"),
+        market_lot_max_quantity=D("120"),
+        market_lot_step_size=D("0.001"),
+        min_notional=D("100"),
+    )
+
+
+@pytest.mark.parametrize(
+    "unknown",
+    [
+        "max_quantity",
+        "market_lot_min_quantity",
+        "market_lot_max_quantity",
+        "market_lot_step_size",
+    ],
+)
+def test_snapshot_with_an_unknown_filter_maps_to_none(unknown: str) -> None:
+    assert lot_filters_from_plan_snapshot(make_snapshot(**{unknown: None})) is None
+
+
+# --------------------------------------------------------------------------- #
+# Purity
+# --------------------------------------------------------------------------- #
+
+_ROOT = Path(__file__).resolve().parent.parent
+_PURE_MODULES = (
+    _ROOT / "src" / "domain" / "lot_filters.py",
+    _ROOT / "src" / "execution" / "lot_split.py",
+)
+_STDLIB_ALLOWED = {"__future__", "dataclasses", "decimal", "math"}
+
+
+@pytest.mark.parametrize("path", _PURE_MODULES, ids=lambda p: p.name)
+def test_lot_modules_are_pure(path: Path) -> None:
+    for name in module_imports(path):
+        assert (
+            name in _STDLIB_ALLOWED
+            or name == "src.domain"
+            or name.startswith("src.domain.")
+            or name == "src.execution.constraint_snapshot"
+        ), name
+    assert not forbidden_imports(
+        path, ["binance*", "sqlalchemy", "pydantic", "polars", "pandas", "numpy", "src.adapters"]
+    )
+    assert float_constructor_calls(path) == []
+    assert wall_clock_calls(path) == []
