@@ -189,6 +189,12 @@ class BinanceSemanticsFakeAdapter:
         self._entry_prices: dict[str, Decimal] = {}
         # One FillEvent per scripted `fill` (what the user-data stream would deliver).
         self.fill_events: list[Any] = []
+        # State the test sets; an unset value raises, it is never defaulted.
+        self._mark_prices: dict[str, Any] = {}
+        self._mark_price_error: BaseException | None = None
+        self._lot_filters: dict[str, Any] = {}
+        # True: a MARKET close answers like an acknowledgment (NEW, executed unknown).
+        self.market_close_ack_only = False
 
     # ------------------------------------------------------------------ #
     # Contract guard (same check as the existing FakeExecutionAdapter).
@@ -293,6 +299,45 @@ class BinanceSemanticsFakeAdapter:
         record.status = STATUS_CANCELED
         record.updated_at_utc = self.now_utc
         self.algo_history[client_algo_id] = record
+
+    def trigger_stop(self, client_algo_id: str) -> None:
+        """The exchange triggers an open algo: it leaves the open book as FINISHED [ASSUMED].
+
+        A closePosition algo consumes the whole position of its symbol; an explicit-quantity
+        algo reduces it by its quantity, capped at the position. A still-open entry that fills
+        later opens a NEW position (the D-12 B4 race). The trigger price is not compared with
+        the mark price: the test decides when the exchange triggers.
+        """
+        record = self.open_algos.pop(client_algo_id)
+        position = self.positions.get(record.symbol, ZERO)
+        if position != ZERO:
+            if record.close_position or record.quantity is None:
+                closed = abs(position)
+            else:
+                closed = min(record.quantity, abs(position))
+            delta = -closed if position > ZERO else closed
+            self._apply_position_delta(
+                record.symbol, delta, record.trigger_price or self._entry_prices[record.symbol]
+            )
+        record.status = STATUS_FINISHED
+        record.updated_at_utc = self.now_utc
+        self.algo_history[client_algo_id] = record
+
+    def set_mark_price(self, symbol: str, price: Decimal, time_utc: datetime | None = None) -> None:
+        """Set the mark price `get_mark_price` serves for `symbol` (exchange time: `time_utc`)."""
+        from src.adapters.binance_public import MarkPriceReading
+
+        self._mark_prices[symbol] = MarkPriceReading(
+            symbol=symbol, mark_price=price, exchange_time_utc=time_utc or self.now_utc
+        )
+
+    def set_mark_price_error(self, exc: BaseException | None) -> None:
+        """The exception `get_mark_price` raises for a symbol with no price set (None: clear)."""
+        self._mark_price_error = exc
+
+    def set_lot_filters(self, symbol: str, filters: Any) -> None:
+        """Set the `LotFilters` `symbol_lot_filters` serves for `symbol`."""
+        self._lot_filters[symbol] = filters
 
     # ------------------------------------------------------------------ #
     # ExecutionAdapter surface.
@@ -442,6 +487,153 @@ class BinanceSemanticsFakeAdapter:
             update_time_utc=record.update_time_utc,
         )
 
+    async def get_mark_price(self, **kwargs: Any) -> Any:
+        self._bind_real("get_mark_price", kwargs)
+        self._record_call("get_mark_price", kwargs)
+        symbol = kwargs["symbol"]
+        reading = self._mark_prices.get(symbol)
+        if reading is None:
+            if self._mark_price_error is not None:
+                raise self._mark_price_error
+            raise RuntimeError(f"no mark price set for {symbol}")
+        return reading
+
+    async def symbol_lot_filters(self, **kwargs: Any) -> Any:
+        self._bind_real("symbol_lot_filters", kwargs)
+        self._record_call("symbol_lot_filters", kwargs)
+        symbol = kwargs["symbol"]
+        filters = self._lot_filters.get(symbol)
+        if filters is None:
+            raise ValueError(f"no lot filters set for {symbol}")
+        return filters
+
+    @staticmethod
+    def error_facts(exc: BaseException) -> Any:
+        """Same facts as the real adapter (a static, SDK-free classification helper)."""
+        from src.adapters.binance_errors import error_facts_from_exception
+        from src.adapters.binance_usdm import BinanceUsdmAdapter
+
+        inspect.signature(BinanceUsdmAdapter.error_facts).bind(exc)
+        return error_facts_from_exception(exc)
+
+    async def snapshot_open_normal_orders(self, **kwargs: Any) -> Any:
+        from src.adapters.binance_usdm import OpenOrderSnapshot
+
+        self._bind_real("snapshot_open_normal_orders", kwargs)
+        self._record_call("snapshot_open_normal_orders", kwargs)
+        symbol = kwargs.get("symbol")
+        return [
+            OpenOrderSnapshot(
+                symbol=record.symbol,
+                client_order_id=record.client_id,
+                exchange_order_id=record.exchange_id,
+                side=record.side,
+                position_side=record.position_side,
+                order_type=record.order_type,
+                time_in_force=record.time_in_force,
+                status=record.status,
+                quantity=record.quantity if record.quantity is not None else ZERO,
+                price=record.price,
+                stop_price=None,
+                reduce_only=record.reduce_only,
+                close_position=record.close_position,
+                working_type=None,
+                price_protect=None,
+                update_time_utc=record.update_time_utc,
+            )
+            for record in self.open_orders.values()
+            if symbol is None or record.symbol == symbol
+        ]
+
+    async def snapshot_open_algo_orders(self, **kwargs: Any) -> Any:
+        from src.adapters.binance_usdm import OpenAlgoOrderSnapshot
+
+        self._bind_real("snapshot_open_algo_orders", kwargs)
+        self._record_call("snapshot_open_algo_orders", kwargs)
+        symbol = kwargs.get("symbol")
+        return [
+            OpenAlgoOrderSnapshot(
+                symbol=record.symbol,
+                client_algo_id=record.client_id,
+                algo_id=record.exchange_id,
+                algo_type=record.algo_type,
+                order_type=record.order_type,
+                side=record.side,
+                position_side=record.position_side,
+                time_in_force=record.time_in_force,
+                algo_status=record.status,
+                quantity=record.quantity if record.quantity is not None else ZERO,
+                trigger_price=record.trigger_price,
+                price=None,
+                trigger_time_utc=None,
+                working_type=record.working_type,
+                close_position=record.close_position,
+                reduce_only=record.reduce_only,
+                update_time_utc=record.update_time_utc,
+            )
+            for record in self.open_algos.values()
+            if symbol is None or record.symbol == symbol
+        ]
+
+    async def place_market_close(self, **kwargs: Any) -> Any:
+        """A reduce-only MARKET close; the rejection codes are TEST CONVENTIONS (A4/A8)."""
+        from src.adapters.binance_usdm import MarketCloseResult
+
+        self._bind_real("place_market_close", kwargs)
+        self._record_call("place_market_close", kwargs)
+        symbol = kwargs["symbol"]
+        side = kwargs["side"]
+        quantity = _dec(kwargs["quantity"])
+        assert quantity is not None
+        position = self.positions.get(symbol, ZERO)
+        closes_the_position = (side == "SELL" and position > ZERO) or (
+            side == "BUY" and position < ZERO
+        )
+        if position == ZERO or not closes_the_position:
+            # UNPROVEN code (research A4/A8): the fake uses -2022 for a flat position and for a
+            # reduce-only order that would add exposure. Callers treat -2022 and -2024 alike.
+            raise BadRequestError(
+                error_message="ReduceOnly Order is rejected.",
+                status_code=REDUCE_ONLY_REJECT_CODE,
+            )
+        if quantity > abs(position):
+            raise BadRequestError(
+                error_message="Position is not sufficient.",
+                status_code=POSITION_NOT_SUFFICIENT_CODE,
+            )
+        mark = self._mark_prices.get(symbol)
+        fill_price = mark.mark_price if mark is not None else self._entry_prices[symbol]
+        self._apply_position_delta(symbol, -quantity if position > ZERO else quantity, fill_price)
+        client_id = kwargs["new_client_order_id"]
+        record = ExchangeOrderRecord(
+            client_id=client_id,
+            symbol=symbol,
+            status=STATUS_FILLED,
+            created_at_utc=self.now_utc,
+            exchange_id=f"ex-{next(self._ids)}",
+            had_fill=True,
+            updated_at_utc=self.now_utc,
+            quantity=quantity,
+            executed_quantity=quantity,
+            average_price=fill_price,
+            side=side,
+            position_side=kwargs["position_side"],
+            order_type="MARKET",
+            reduce_only=kwargs["position_side"] == "BOTH",
+        )
+        self.history[client_id] = record
+        return MarketCloseResult(
+            symbol=symbol,
+            client_order_id=client_id,
+            exchange_order_id=record.exchange_id,
+            side=side,
+            position_side=kwargs["position_side"],
+            status=STATUS_NEW if self.market_close_ack_only else STATUS_FILLED,
+            executed_quantity=None if self.market_close_ack_only else quantity,
+            average_price=None if self.market_close_ack_only else fill_price,
+            update_time_utc=record.update_time_utc,
+        )
+
     async def snapshot_positions(self, **kwargs: Any) -> Any:
         from src.adapters.binance_usdm import PositionSnapshot
 
@@ -460,7 +652,9 @@ class BinanceSemanticsFakeAdapter:
                     position_amt=amount,
                     entry_price=entry,
                     break_even_price=entry,
-                    mark_price=None,
+                    mark_price=self._mark_prices[sym].mark_price
+                    if sym in self._mark_prices
+                    else None,
                     unrealized_profit=ZERO,
                     liquidation_price=None,
                     notional=None,
