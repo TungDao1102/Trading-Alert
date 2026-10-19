@@ -44,6 +44,7 @@ from datetime import datetime, timedelta
 from src.adapters.binance_limits import RateLimitPolicy
 from src.domain.exchange_errors import (
     ExchangeErrorCategory,
+    PreSendRefusal,
     RateLimitDecision,
     rate_limit_decision,
 )
@@ -55,7 +56,7 @@ _ONE_MICROSECOND = timedelta(microseconds=1)
 _MICROSECONDS_PER_SECOND = 1_000_000
 
 
-class RestGateRefusal(Exception):  # noqa: N818 - a refusal, not an error of the caller
+class RestGateRefusal(PreSendRefusal):  # noqa: N818 - a refusal, not an error of the caller
     """A REST call refused before it was sent because a ban or a pause is active.
 
     `reason` is `IP_BAN_418` or `RATE_LIMIT_PAUSE_429`; `retry_after_seconds` is the whole
