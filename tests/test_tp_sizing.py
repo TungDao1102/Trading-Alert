@@ -25,7 +25,7 @@ def make_filters(
     mkt_min: str | None = None,
     mkt_max: str | None = None,
     mkt_step: str | None = None,
-    min_notional: str = "5",
+    min_notional: str = "0.1",
 ) -> LotFilters:
     return LotFilters(
         symbol="BTCUSDT",
