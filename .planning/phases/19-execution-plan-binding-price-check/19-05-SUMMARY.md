@@ -44,16 +44,19 @@ Provenance: B6 (GTD, goodTillDate) and B10 (premiumIndex) are WebFetch summaries
 
 - `uv run ruff check`: all checks passed; `uv run ruff format --check`: clean; `uv run mypy src`: no issues in 202 source files.
 - `tests/test_live_mark_price_adapter.py`, `tests/test_binance_entry_gtd.py`, `tests/test_binance_usdm_source_guard.py`, `tests/test_execution_adapter_contract.py`, `tests/test_execution_manager.py`, `tests/test_execution_exactly_once_pg.py`: pass (PG tests skip without TEST_DATABASE_URL).
-- `tests/test_binance_usdm_signed_calls.py`: all pass EXCEPT `test_public_signature_is_unchanged[place_entry]` (see deviation).
+- Full `uv run pytest -m "not docker"`: three failures, all stale surface pins in files outside files_modified (see deviation); everything else passes.
 
 ## Deviations from Plan
 
-### Required change in a file outside files_modified (not applied)
+### Required changes in files outside files_modified (not applied, three one-line test edits)
 
-**1. [Rule 3 - Blocking, left to the orchestrator] `tests/test_binance_usdm_signed_calls.py` SIGNATURE_SNAPSHOTS["place_entry"]**
-- **Found during:** Task 2.
-- **Issue:** that file pins the exact public signature of `place_entry` ("Public signatures before plan 18-13"). Adding the keyword `good_till_date` (required by this plan) makes `test_public_signature_is_unchanged[place_entry]` fail with "Left contains one more item: ('good_till_date', 'KEYWORD_ONLY')". The plan's verify command includes this test file but its files_modified does not list it.
-- **Not changed** because of the instruction to touch only files_modified in parallel waves. **Fix to apply at merge:** append `("good_till_date", _K),` after `("new_client_order_id", _K),` in the `place_entry` snapshot (line ~589). No other behavior of that file is affected.
+A full `uv run pytest -m "not docker"` run on p19-05 fails exactly these three tests, all pinning the old adapter surface; each needs a one-line additive edit at merge:
+
+1. `tests/test_binance_usdm_signed_calls.py::test_public_signature_is_unchanged[place_entry]` - SIGNATURE_SNAPSHOTS["place_entry"] (line ~589): add `("good_till_date", _K),` after `("new_client_order_id", _K),`. The plan's own verify command lists this file.
+2. `tests/test_binance_public.py::test_public_module_has_no_order_account_or_credential_surface` - `ALLOWED_REST_CALLS` (around line 306): add `"mark_price"` (premiumIndex is public market data; the violation reported is "rest_api call mark_price is not public data" at binance_public.py line 477).
+3. `tests/test_paper_shadow_isolation.py::test_negative_control_the_spy_list_covers_every_public_order_method_of_the_adapter` - the `market_data` set: add `"get_mark_price"` (it is public market data, not an order method).
+
+Not changed because of the instruction to touch only files_modified in a parallel wave. Every other test in the suite passed (PG tests skipped).
 
 ### Auto-fixed
 
