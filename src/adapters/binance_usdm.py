@@ -98,6 +98,7 @@ from src.adapters.binance_public import (
 from src.adapters.binance_public import FundingTick as FundingTick
 from src.adapters.binance_public import Kline as Kline
 from src.adapters.binance_public import MarkKline as MarkKline
+from src.adapters.binance_public import MarkPriceReading as MarkPriceReading
 from src.adapters.binance_public import OiSnapshot as OiSnapshot
 from src.adapters.binance_public import SymbolFilters as SymbolFilters
 from src.adapters.binance_public import _row_to_kline as _row_to_kline
@@ -744,6 +745,16 @@ class BinanceUsdmAdapter:
     async def server_time(self) -> datetime:
         """Binance server time as a UTC datetime (D-25); delegates to the public adapter."""
         return await self._public.server_time()
+
+    # ----- live mark price (plan 19-05, D-06) ------------------------------- #
+
+    async def get_mark_price(self, *, symbol: str) -> MarkPriceReading:
+        """The live mark price of `symbol`; delegates to the public reader (shared REST gate).
+
+        The adapter takes no clock: the execution manager measures the age of the reading
+        with its injected `now_utc`.
+        """
+        return await self._public.mark_price(symbol)
 
     # ----- exchange info --------------------------------------------------- #
 
