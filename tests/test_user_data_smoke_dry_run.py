@@ -11,19 +11,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
-import requests
 from scripts import user_data_smoke as uds
-from src.adapters import binance_client
 from src.adapters.binance_limits import load_binance_limits
 from src.domain.exchange_errors import ExchangeErrorCategory
 from src.ops import redaction
 
+from tests.support.net_guard import forbid_network_and_sleep
 from tests.userdata_fakes import TEST_ONLY_LISTEN_KEY
 
 TEST_ONLY_SMOKE_LIMITS = """
@@ -38,71 +36,10 @@ cleanup_timeout_seconds = 60
 """
 
 
-class _Forbidden(AssertionError):
-    """Raised by every patched network or sleep entry point."""
-
-
-_LOOPBACK = {"127.0.0.1", "::1"}
-
-
 @pytest.fixture(autouse=True)
 def no_network_no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Fail on any real sleep, HTTP request, name lookup or non-loopback socket connect.
-
-    `socket.socket` is replaced by a subclass that refuses every connect to a non-loopback
-    address: the Windows event loop builds its self-pipe from a loopback socket pair, which
-    must keep working; anything that would reach a network host fails.
-    """
-    reached: list[str] = []
-    real_socket = socket.socket
-
-    class _LoopbackOnlySocket(real_socket):  # type: ignore[misc, valid-type]
-        def connect(self, address: Any) -> None:
-            if not (isinstance(address, tuple) and address[0] in _LOOPBACK):
-                reached.append("socket.connect")
-                raise _Forbidden("socket connect to a network host in the dry run")
-            super().connect(address)
-
-        def connect_ex(self, address: Any) -> int:
-            if not (isinstance(address, tuple) and address[0] in _LOOPBACK):
-                reached.append("socket.connect_ex")
-                raise _Forbidden("socket connect to a network host in the dry run")
-            return int(super().connect_ex(address))
-
-    async def _sleep(delay: float, result: Any = None) -> Any:
-        reached.append("asyncio.sleep")
-        raise _Forbidden("asyncio.sleep called: the dry run must use virtual time")
-
-    def _getaddrinfo(*args: Any, **kwargs: Any) -> Any:
-        reached.append("socket.getaddrinfo")
-        raise _Forbidden("name lookup in the dry run")
-
-    def _create_connection(*args: Any, **kwargs: Any) -> Any:
-        reached.append("socket.create_connection")
-        raise _Forbidden("socket.create_connection in the dry run")
-
-    async def _loop_create_connection(self: Any, *args: Any, **kwargs: Any) -> Any:
-        reached.append("loop.create_connection")
-        raise _Forbidden("loop.create_connection in the dry run")
-
-    def _request(self: Any, *args: Any, **kwargs: Any) -> Any:
-        reached.append("requests")
-        raise _Forbidden("requests.Session.request called: the dry run must not send HTTP")
-
-    def _client_factory(**kwargs: Any) -> Any:
-        reached.append("build_sdk_client")
-        raise _Forbidden("the dry run must not build an SDK client")
-
-    monkeypatch.setattr(asyncio, "sleep", _sleep)
-    monkeypatch.setattr(socket, "socket", _LoopbackOnlySocket)
-    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo)
-    monkeypatch.setattr(socket, "create_connection", _create_connection)
-    monkeypatch.setattr(
-        asyncio.base_events.BaseEventLoop, "create_connection", _loop_create_connection
-    )
-    monkeypatch.setattr(requests.Session, "request", _request)
-    monkeypatch.setattr(binance_client, "build_sdk_client", _client_factory)
-    return reached
+    """Fail on any real sleep, HTTP request, name lookup or non-loopback socket connect."""
+    return forbid_network_and_sleep(monkeypatch)
 
 
 @pytest.fixture(autouse=True)

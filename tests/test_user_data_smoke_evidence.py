@@ -24,6 +24,7 @@ from scripts import user_data_smoke as uds
 from src.adapters.binance_public import SymbolFilters
 from src.ops import redaction
 
+from tests.support.net_guard import forbid_network_and_sleep
 from tests.userdata_fakes import TEST_ONLY_LISTEN_KEY
 
 SCRIPT_PATH = Path(uds.__file__)
@@ -73,11 +74,22 @@ def _dry_run(
     return code, json.loads(path.read_text(encoding="utf-8"))
 
 
+@pytest.fixture(autouse=True)
+def no_network_no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The same guard as the dry-run module: no real sleep, no network, no SDK client."""
+    return forbid_network_and_sleep(monkeypatch)
+
+
 @pytest.fixture(scope="module")
 def valid_document(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     redaction.clear_runtime_secrets()
-    code, document = _dry_run(tmp_path_factory.mktemp("valid"))
+    # Module scope cannot use the function-scoped `monkeypatch`: the guard is applied around
+    # the one real dry run through a context of its own.
+    with pytest.MonkeyPatch.context() as guard:
+        reached = forbid_network_and_sleep(guard)
+        code, document = _dry_run(tmp_path_factory.mktemp("valid"))
     redaction.clear_runtime_secrets()
+    assert reached == []
     assert code == uds.EXIT_OK
     return document
 
