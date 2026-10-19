@@ -205,7 +205,7 @@ def test_the_file_ends_with_a_newline_and_uses_lf() -> None:
 
 def test_the_real_loader_accepts_the_ratified_file_with_the_record_values() -> None:
     record = _record_limits()
-    limits = load_binance_limits(Path("config/binance/binance-limits-v1.toml").resolve())
+    limits = load_binance_limits(LIMITS_FILE)
     assert isinstance(limits, BinanceLimits)
     for dotted, expected in record.items():
         value = _loaded_value(limits, dotted)
