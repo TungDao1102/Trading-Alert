@@ -677,6 +677,7 @@ async def execute_approved_plan(
             intended_quantity=quantity,
             intended_price=limit_price,
             now_utc=now_utc,
+            sized_realized_risk=sized.realized_risk,
         )
     except IntentStateConflict:
         # A second approval for the same plan (or another unique arbiter): the plan

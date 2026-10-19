@@ -16,12 +16,14 @@ R is then `net_pnl / realized_risk` via the shared Phase-6 R helper, where
 `realized_risk = realized_risk_for_fill(sized_realized_risk, planned_quantity,
 filled_quantity)` is the single R denominator that the backtest records use too
 (Phase 14, D-20); `TradePlan.risk_budget` (equity x rate) is no longer a denominator
-anywhere in analytics (F-204). The sized figure is NOT persisted for live rows
-(D-29): the caller supplies it explicitly through `sized_risks`, keyed by
-trade_plan_id, and a candidate without an entry there is
-INCOMPLETE(NO_RISK_VALUE) with `realized_risk` None, never an imputed value. It
-stays INCOMPLETE until a later phase persists the sized figure. Live R also excludes
-funding (`LIVE_R_EXCLUDES`), so it is comparable with backtest R only on
+anywhere in analytics (F-204). The sized figure is persisted on the ENTRY intent row
+since Phase 19 (D-22, migration 0005), written once at approval consumption;
+`sized_risks_from_entry_intents` turns those stored rows into the `sized_risks` input,
+keyed by trade_plan_id. A candidate without an entry there is
+INCOMPLETE(NO_RISK_VALUE) with `realized_risk` None, never an imputed value. Live R
+stays INCOMPLETE(UNVERIFIED_EXCHANGE_SEMANTICS) until the exchange semantics below are
+verified: only NO_RISK_VALUE goes away for plans whose sized figure is stored. Live R
+also excludes funding (`LIVE_R_EXCLUDES`), so it is comparable with backtest R only on
 zero-funding trades.
 
 EXCHANGE-SEMANTICS GATE (fail closed). The rule above is only correct if Binance's
@@ -57,7 +59,7 @@ Evidence is always labelled LIVE and is never pooled with other kinds (D-05).
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -70,6 +72,7 @@ from src.domain.fill import Fill
 from src.domain.order import Order
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
+from src.execution.intent_store import IntentRecord
 from src.risk.realized_risk import realized_risk_for_fill
 
 QUOTE_ASSET = "USDT"
@@ -113,6 +116,32 @@ class SizedRisk:
                 raise AnalyticsInputError(f"SizedRisk.{name} must be Decimal")
             if not value.is_finite() or value <= _ZERO:
                 raise AnalyticsInputError(f"SizedRisk.{name} must be a positive finite Decimal")
+
+
+def sized_risks_from_entry_intents(records: Iterable[IntentRecord]) -> dict[str, SizedRisk]:
+    """Stored ENTRY intent rows -> the `sized_risks` input of `normalize_live_outcomes` (D-22).
+
+    Only ENTRY rows with a stored sized figure and quantity count; any other role, a NULL
+    figure or a NULL quantity is skipped, so such a plan stays INCOMPLETE(NO_RISK_VALUE)
+    rather than getting an imputed number. Two ENTRY rows of one plan with different figures
+    cannot exist under the plan/role unique key; if they ever do, fail closed.
+    """
+    result: dict[str, SizedRisk] = {}
+    for record in records:
+        if record.role != _ENTRY_ROLE:
+            continue
+        if record.sized_realized_risk is None or record.intended_quantity is None:
+            continue
+        sized = SizedRisk(
+            realized_risk=record.sized_realized_risk, planned_quantity=record.intended_quantity
+        )
+        existing = result.get(record.trade_plan_id)
+        if existing is not None and existing != sized:
+            raise AnalyticsInputError(
+                f"conflicting stored sized risk for trade plan {record.trade_plan_id!r}"
+            )
+        result[record.trade_plan_id] = sized
+    return result
 
 
 @dataclass(frozen=True)
@@ -189,11 +218,12 @@ def normalize_live_outcomes(
 ) -> LiveOutcomeResult:
     """Normalize live rows into LIVE TradeOutcomes under the documented net-PnL rules.
 
-    `sized_risks` maps trade_plan_id to the sizing-time `SizedRisk` (D-29: not persisted
-    for live). A candidate with an entry there gets `realized_risk` from
-    `realized_risk_for_fill`; one without stays INCOMPLETE(NO_RISK_VALUE). A filled
-    quantity above the sized planned quantity is a MALFORMED_ROW. An entry that is not
-    a `SizedRisk` fails closed with `AnalyticsInputError`.
+    `sized_risks` maps trade_plan_id to the sizing-time `SizedRisk` (read back from the stored
+    ENTRY intents by `sized_risks_from_entry_intents`, D-22). A candidate with an entry
+    there gets `realized_risk` from `realized_risk_for_fill`; one without stays
+    INCOMPLETE(NO_RISK_VALUE). A filled quantity above the sized planned quantity is a
+    MALFORMED_ROW. An entry that is not a `SizedRisk` fails closed with
+    `AnalyticsInputError`.
 
     One candidate per TradePlan with at least one ENTRY-role order that has a fill.
     Every input is ordered by an explicit total key, so output never depends on

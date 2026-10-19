@@ -67,6 +67,9 @@ class IntentRecord:
     sent_at_utc: datetime | None
     resolved_at_utc: datetime | None
     updated_at_utc: datetime
+    # The sizing-time realized risk (SizedResult.realized_risk), stored once on the ENTRY row at
+    # approval consumption (Phase 19, D-22, migration 0005). None = unknown or not an ENTRY row.
+    sized_realized_risk: Decimal | None = None
 
 
 @runtime_checkable
@@ -95,7 +98,14 @@ class ExecutionIntentStore(Protocol):
         intended_quantity: Decimal,
         intended_price: Decimal,
         now_utc: datetime,
-    ) -> bool: ...
+        sized_realized_risk: Decimal | None = None,
+    ) -> bool:
+        """Insert the ENTRY intent and consume the approval in one transaction.
+
+        `sized_realized_risk` (D-22) is written on the ENTRY row by this same INSERT and never
+        updated later; None means "unknown" (the nullable evidence column stays NULL).
+        """
+        ...
 
     def record_protective_intent(
         self,

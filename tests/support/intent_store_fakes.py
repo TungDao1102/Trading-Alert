@@ -86,6 +86,7 @@ class InMemoryExecutionIntentStore:
         intended_quantity: Decimal,
         intended_price: Decimal,
         now_utc: datetime,
+        sized_realized_risk: Decimal | None = None,
     ) -> bool:
         key = (approval_id, OrderRole.ENTRY.value)
         with self._lock:
@@ -110,6 +111,7 @@ class InMemoryExecutionIntentStore:
                 sent_at_utc=None,
                 resolved_at_utc=None,
                 updated_at_utc=now_utc,
+                sized_realized_risk=sized_realized_risk,
             )
             return True
 
@@ -247,6 +249,7 @@ class AlwaysWinsIntentStore:
         intended_quantity: Decimal,
         intended_price: Decimal,
         now_utc: datetime,
+        sized_realized_risk: Decimal | None = None,
     ) -> bool:
         return True
 
@@ -342,6 +345,7 @@ class CrashAfter:
         intended_quantity: Decimal,
         intended_price: Decimal,
         now_utc: datetime,
+        sized_realized_risk: Decimal | None = None,
     ) -> bool:
         won = self._inner.consume_and_record_entry_intent(
             approval_id=approval_id,
@@ -353,6 +357,7 @@ class CrashAfter:
             intended_quantity=intended_quantity,
             intended_price=intended_price,
             now_utc=now_utc,
+            sized_realized_risk=sized_realized_risk,
         )
         self._maybe_crash("consume")
         return won
@@ -456,6 +461,7 @@ class BarrierBeforeConsume:
         intended_quantity: Decimal,
         intended_price: Decimal,
         now_utc: datetime,
+        sized_realized_risk: Decimal | None = None,
     ) -> bool:
         self._barrier.wait(timeout=self._timeout_seconds)
         return self._inner.consume_and_record_entry_intent(
@@ -468,6 +474,7 @@ class BarrierBeforeConsume:
             intended_quantity=intended_quantity,
             intended_price=intended_price,
             now_utc=now_utc,
+            sized_realized_risk=sized_realized_risk,
         )
 
     def __getattr__(self, name: str) -> Any:
@@ -534,6 +541,7 @@ class FailingIntentStore:
         intended_quantity: Decimal,
         intended_price: Decimal,
         now_utc: datetime,
+        sized_realized_risk: Decimal | None = None,
     ) -> bool:
         self._maybe_fail("consume_and_record_entry_intent")
         return self._inner.consume_and_record_entry_intent(
@@ -546,6 +554,7 @@ class FailingIntentStore:
             intended_quantity=intended_quantity,
             intended_price=intended_price,
             now_utc=now_utc,
+            sized_realized_risk=sized_realized_risk,
         )
 
     def record_protective_intent(
