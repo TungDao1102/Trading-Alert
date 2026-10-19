@@ -45,6 +45,7 @@ from tests.test_execution_attach import FakeExecutionAdapter as AttachAdapter
 from tests.test_execution_attach import _attach, _load_expected
 from tests.test_execution_attach import _RecordingSafeModeController as AttachSafeMode
 from tests.test_execution_manager import (
+    PRE_PLACEMENT_READS,
     FakeExecutionAdapter,
     FakeJournal,
     RecordingSafeModeController,
@@ -310,8 +311,9 @@ async def test_entry_rejection_sequence_is_unchanged_by_the_table(code: int, tex
 
     The manager does not consult the taxonomy, so a rejected ENTRY follows its own bounded
     query-first sequence: the same prices are sent once more after a probe that finds the
-    order absent, and the table adds no call (no mark price, filter or snapshot refresh, no
-    new method). Refreshing them is the consumer's job (open items (a) and (c) of
+    order absent, and the table adds no call (after the plan 19-13 pre-placement reads, which
+    run once before the entry, there is no mark price, filter or snapshot refresh and no new
+    method on the retry). Refreshing them is the consumer's job (open items (a) and (c) of
     decisions/18-DEC-TAXONOMY-CODES.md).
     """
     adapter = FakeExecutionAdapter()
@@ -324,6 +326,7 @@ async def test_entry_rejection_sequence_is_unchanged_by_the_table(code: int, tex
     assert (outcome.is_no_trade, outcome.reason_code) == (True, "EXCHANGE_CONSTRAINT")
     methods = [call["method"] for call in adapter.calls]
     assert methods == [
+        *PRE_PLACEMENT_READS,
         "get_position_mode",
         "place_entry",
         "query_order_by_client",

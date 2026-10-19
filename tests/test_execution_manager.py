@@ -35,6 +35,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import pytest
 from src.domain.enums import KillGateState
 
 from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
@@ -78,6 +79,29 @@ def _coerce_decimal(value: object, field_name: str) -> Decimal:
 # --------------------------------------------------------------------------- #
 
 
+def _mark_reading_for(case_input: dict[str, Any], **overrides: Any) -> Any:
+    """The `MarkPriceReading` the fake answers: the fixture mark price, `mark_age_ms` old."""
+    from src.adapters.binance_public import MarkPriceReading
+
+    live = case_input["live"]
+    values: dict[str, Any] = {
+        "symbol": case_input["symbol"],
+        "mark_price": _coerce_decimal(live["mark_price"], "mark_price"),
+        "exchange_time_utc": _parse_utc(case_input["now_utc"])
+        - timedelta(milliseconds=int(live["mark_age_ms"])),
+    }
+    values.update(overrides)
+    return MarkPriceReading(**values)
+
+
+# The three reads that precede the position-mode read and the placement (plan 19-13, gate 5e).
+PRE_PLACEMENT_READS = [
+    "get_mark_price",
+    "snapshot_open_normal_orders",
+    "snapshot_open_algo_orders",
+]
+
+
 class FakeExecutionAdapter:
     """In-memory adapter that records every placement call.
 
@@ -95,8 +119,18 @@ class FakeExecutionAdapter:
         algo_response: Any | None = None,
         query_response: Any | None = None,
         position_mode: str = "ONE_WAY",
+        case_input: dict[str, Any] | None = None,
     ) -> None:
         self.calls: list[dict[str, Any]] = []
+        # Plan 19-13 pre-placement reads: a fresh mark price inside the zone, no open orders.
+        # `case_input` anchors the default reading's exchange time on the case's own clock.
+        case = case_input if case_input is not None else _load_input()
+        self.mark_reading: Any = _mark_reading_for(case)
+        self.mark_exception: BaseException | None = None
+        self.open_normal_orders: list[Any] = []
+        self.open_algo_orders: list[Any] = []
+        self.normal_orders_exception: BaseException | None = None
+        self.algo_orders_exception: BaseException | None = None
         # Default to a non-None entry response so the happy path doesn't
         # trigger the query-before-retry path. Tests that want to test
         # the ambiguous path explicitly pass entry_response=None.
@@ -129,6 +163,27 @@ class FakeExecutionAdapter:
         from src.adapters.binance_usdm import BinanceUsdmAdapter
 
         inspect.signature(getattr(BinanceUsdmAdapter, method_name)).bind(None, **kwargs)
+
+    async def get_mark_price(self, **kwargs: Any) -> Any:
+        self._bind_real("get_mark_price", kwargs)
+        self.calls.append({"method": "get_mark_price", "kwargs": dict(kwargs)})
+        if self.mark_exception is not None:
+            raise self.mark_exception
+        return self.mark_reading
+
+    async def snapshot_open_normal_orders(self, **kwargs: Any) -> Any:
+        self._bind_real("snapshot_open_normal_orders", kwargs)
+        self.calls.append({"method": "snapshot_open_normal_orders", "kwargs": dict(kwargs)})
+        if self.normal_orders_exception is not None:
+            raise self.normal_orders_exception
+        return list(self.open_normal_orders)
+
+    async def snapshot_open_algo_orders(self, **kwargs: Any) -> Any:
+        self._bind_real("snapshot_open_algo_orders", kwargs)
+        self.calls.append({"method": "snapshot_open_algo_orders", "kwargs": dict(kwargs)})
+        if self.algo_orders_exception is not None:
+            raise self.algo_orders_exception
+        return list(self.open_algo_orders)
 
     async def place_entry(self, **kwargs: Any) -> Any:
         self._bind_real("place_entry", kwargs)
@@ -851,6 +906,7 @@ async def test_definitive_absence_allows_exactly_one_retry() -> None:
 
     assert outcome.is_no_trade is False
     assert [c["method"] for c in adapter.calls] == [
+        *PRE_PLACEMENT_READS,
         "get_position_mode",
         "place_entry",
         "query_order_by_client",
@@ -873,6 +929,7 @@ async def test_probe_failure_fails_closed_to_safe_mode_without_retry_or_sl() -> 
     assert outcome.is_no_trade is True
     assert outcome.reason_code == "RECONCILIATION_REQUIRED"
     assert [c["method"] for c in adapter.calls] == [
+        *PRE_PLACEMENT_READS,
         "get_position_mode",
         "place_entry",
         "query_order_by_client",
@@ -1288,7 +1345,8 @@ async def test_odd_tick_zone_mid_is_floored_for_a_buy_limit() -> None:
     floors to 100.01 (never pays up)."""
     # The zone is a hashed field: the edited case re-derives its plan hash (plan 19-13).
     case_input = {**_load_input(), "entry_min_price": "100.01", "entry_max_price": "100.02"}
-    adapter = FakeExecutionAdapter()
+    adapter = FakeExecutionAdapter(case_input=case_input)
+    adapter.mark_reading = _mark_reading_for(case_input, mark_price=Decimal("100.015"))
 
     outcome = await _run_plan(adapter, case_input=case_input)
 
@@ -1302,17 +1360,21 @@ async def test_odd_tick_zone_mid_is_floored_for_a_buy_limit() -> None:
 # --------------------------------------------------------------------------- #
 
 
-async def test_hedge_mode_sends_explicit_position_side_on_entry_and_sl() -> None:
-    """WR-02: hedge accounts need positionSide LONG/SHORT everywhere."""
+async def test_hedge_mode_is_refused_before_any_order() -> None:
+    """D-14 (was WR-02): a Hedge account is unsupported in V1 and refused before the approval is
+    consumed. The hedge payload matrix stays proven offline in tests/test_execution_modes.py."""
+    case_input = _load_input()
     adapter = FakeExecutionAdapter(position_mode="HEDGE")
-    outcome = await _run_plan(adapter)
+    store = InMemoryExecutionIntentStore()
 
-    assert outcome.is_no_trade is False
-    assert adapter.calls[0]["method"] == "get_position_mode"
-    entry = next(c for c in adapter.calls if c["method"] == "place_entry")
-    sl = next(c for c in adapter.calls if c["method"] == "place_algo_protective")
-    assert entry["kwargs"]["position_side"] == "LONG"
-    assert sl["kwargs"]["position_side"] == "LONG"
+    outcome = await _run_plan(adapter, intent_store=store)
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "HEDGE_MODE_UNSUPPORTED")
+    methods = [c["method"] for c in adapter.calls]
+    assert methods == [*PRE_PLACEMENT_READS, "get_position_mode"]
+    assert "place_entry" not in methods
+    assert "place_algo_protective" not in methods
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
 
 
 async def test_undeterminable_position_mode_fails_closed_before_any_order() -> None:
@@ -1322,7 +1384,7 @@ async def test_undeterminable_position_mode_fails_closed_before_any_order() -> N
 
     assert outcome.is_no_trade is True
     assert outcome.reason_code == "UNCERTAIN_ACCOUNT_STATE"
-    assert [c["method"] for c in adapter.calls] == ["get_position_mode"]
+    assert [c["method"] for c in adapter.calls] == [*PRE_PLACEMENT_READS, "get_position_mode"]
 
 
 def test_resolve_position_mode_maps_only_real_bools() -> None:
@@ -2264,3 +2326,607 @@ async def test_replay_returns_the_stored_outcome_before_the_binding_gate() -> No
     replay = await _run_plan(replay_adapter, intent_store=store, live_context=refusing)
     assert replay == first
     assert replay_adapter.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Phase 19 plan 19-13, Task 2 - limits, quantity, snapped geometry, TP1 sizeable, live
+# reads and the Hedge refusal. Every refusal happens before the approval is consumed.
+# --------------------------------------------------------------------------- #
+
+
+def _open_order(symbol: str = "BTCUSDT") -> Any:
+    from src.adapters.binance_usdm import OpenOrderSnapshot
+
+    return OpenOrderSnapshot(
+        symbol=symbol,
+        client_order_id="x-someone-else",
+        exchange_order_id="9001",
+        side="BUY",
+        position_side="BOTH",
+        order_type="LIMIT",
+        time_in_force="GTC",
+        status="NEW",
+        quantity=Decimal("0.100"),
+        price=Decimal("99.00"),
+        stop_price=None,
+        reduce_only=False,
+        close_position=False,
+        working_type=None,
+        price_protect=None,
+        update_time_utc=datetime(2026, 9, 19, 10, 0, tzinfo=UTC),
+    )
+
+
+def _open_algo(symbol: str = "BTCUSDT") -> Any:
+    from src.adapters.binance_usdm import OpenAlgoOrderSnapshot
+
+    return OpenAlgoOrderSnapshot(
+        symbol=symbol,
+        client_algo_id="xa-someone-else",
+        algo_id="9002",
+        algo_type="CONDITIONAL",
+        order_type="STOP_MARKET",
+        side="SELL",
+        position_side="BOTH",
+        time_in_force="GTC",
+        algo_status="NEW",
+        quantity=Decimal("0"),
+        trigger_price=Decimal("90.00"),
+        price=None,
+        trigger_time_utc=None,
+        working_type="MARK_PRICE",
+        close_position=True,
+        reduce_only=False,
+        update_time_utc=datetime(2026, 9, 19, 10, 0, tzinfo=UTC),
+    )
+
+
+def _reads_only(adapter: FakeExecutionAdapter) -> list[str]:
+    return [c["method"] for c in adapter.calls]
+
+
+def _case_with(**changes: Any) -> dict[str, Any]:
+    """A copy of the golden case; hashed fields re-derive the plan hash through the builders."""
+    return {**_load_input(), **changes}
+
+
+async def _assert_refused_then_placeable(
+    *,
+    label: str,
+    reason: str,
+    adapter: FakeExecutionAdapter,
+    expected_calls: list[str],
+    case_input: dict[str, Any] | None = None,
+    **overrides: Any,
+) -> None:
+    """The refusal is NO_TRADE `reason`, leaves no ENTRY row, and a corrected call still places.
+
+    The corrected call reuses the SAME intent store, so a consumed approval would replay the
+    stored refusal instead of placing: it proves the approval was never consumed.
+    """
+    case = case_input if case_input is not None else _load_input()
+    store = InMemoryExecutionIntentStore()
+    outcome = await _run_plan(adapter, case_input=case_input, intent_store=store, **overrides)
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, reason), label
+    assert _reads_only(adapter) == expected_calls, label
+    assert "place_entry" not in _reads_only(adapter), label
+    assert "place_algo_protective" not in _reads_only(adapter), label
+    assert store.get_entry(approval_id=case["approval_id"]) is None, label
+
+    corrected = FakeExecutionAdapter(case_input=case)
+    placed = await _run_plan(corrected, case_input=case_input, intent_store=store)
+    assert (placed.is_no_trade, placed.reason_code) == (False, "OK"), label
+    assert store.get_entry(approval_id=case["approval_id"]) is not None, label
+
+
+async def test_golden_case_reads_precede_the_position_mode_and_the_placement() -> None:
+    """Plan 19-13, gate 5e: the reads are keyed by the bound symbol and run in a fixed order."""
+    case_input = _load_input()
+    registry = StubProtectionRegistry()
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter, live_context=_build_live_context(case_input, protection_registry=registry)
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    assert _reads_only(adapter)[:4] == [*PRE_PLACEMENT_READS, "get_position_mode"]
+    for call in adapter.calls[:3]:
+        assert call["kwargs"] == {"symbol": "BTCUSDT"}
+    assert registry.block_checks == 1
+
+
+@pytest.mark.parametrize(
+    "limit",
+    [
+        "max_unprotected_ms",
+        "entry_terminal_timeout_ms",
+        "min_remaining_validity_seconds",
+        "max_mark_price_age_ms",
+    ],
+)
+async def test_unset_limit_refuses_with_zero_adapter_calls(limit: str) -> None:
+    """D-07 / D-13 (T-19-34): any NOT_CONFIGURED limit stops the live path before any call."""
+    from tests.support import execution_limits as test_limits
+
+    case_input = _load_input()
+    live = _build_live_context(
+        case_input, execution_limits=test_limits.test_only_execution_limits(**{limit: None})
+    )
+    adapter = FakeExecutionAdapter()
+    store = InMemoryExecutionIntentStore()
+    outcome = await _run_plan(adapter, intent_store=store, live_context=live)
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "LIMITS_NOT_CONFIGURED")
+    assert adapter.calls == []
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+
+
+async def test_the_committed_not_configured_limits_file_refuses_every_live_placement() -> None:
+    """The consequence recorded for the owner: with the committed file nothing places."""
+    from src.execution.execution_limits import load_execution_limits
+
+    path = Path(__file__).parents[1] / "config" / "execution" / "execution-limits-v1.toml"
+    limits = load_execution_limits(path)
+    assert limits.unset_keys() != ()
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter, live_context=_build_live_context(_load_input(), execution_limits=limits)
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "LIMITS_NOT_CONFIGURED")
+    assert adapter.calls == []
+
+
+async def test_risk04_quantity_above_the_approved_quantity_is_never_clipped() -> None:
+    """D-02 / RISK-04 / T-19-32: the risk-sized quantity may not exceed the approved one."""
+    import dataclasses
+
+    case_input = _load_input()
+    risk_kwargs = _build_risk_kwargs(case_input)
+    risk_kwargs["trade_plan"] = dataclasses.replace(
+        risk_kwargs["trade_plan"], quantity_after_rounding=Decimal("2.414")
+    )
+    await _assert_refused_then_placeable_with_risk(
+        label="plan quantity one step below the sized quantity",
+        reason="QUANTITY_ABOVE_APPROVED",
+        risk_kwargs=risk_kwargs,
+    )
+
+
+async def _assert_refused_then_placeable_with_risk(
+    *, label: str, reason: str, risk_kwargs: dict[str, Any]
+) -> None:
+    """Refusal check for a risk_kwargs edit that is not a hashed-field edit (no re-hash needed)."""
+    case_input = _load_input()
+    adapter = FakeExecutionAdapter()
+    store = InMemoryExecutionIntentStore()
+    outcome = await _run_plan(adapter, intent_store=store, risk_kwargs=risk_kwargs)
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, reason), label
+    assert adapter.calls == [], label
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None, label
+    placed = await _run_plan(FakeExecutionAdapter(), intent_store=store)
+    assert (placed.is_no_trade, placed.reason_code) == (False, "OK"), label
+
+
+async def test_risk04_a_quantity_equal_to_the_approved_quantity_places() -> None:
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(adapter)
+    entry = next(c for c in adapter.calls if c["method"] == "place_entry")
+    assert entry["kwargs"]["quantity"] == Decimal("2.415")
+    assert outcome.is_no_trade is False
+
+
+async def test_a_stop_within_one_tick_of_the_zone_edge_is_refused_after_the_snap() -> None:
+    """D-03 / G4-020: stop 99.999 snaps UP to 100.00 = the zone edge, no longer outside it."""
+    case_input = _case_with(stop_loss_price="99.999", quantity_after_rounding="100")
+    adapter = FakeExecutionAdapter(case_input=case_input)
+    await _assert_refused_then_placeable(
+        label="stop snaps onto the zone edge",
+        reason="GEOMETRY_INVALID_AFTER_SNAP",
+        adapter=adapter,
+        expected_calls=[],
+        case_input=case_input,
+    )
+
+
+async def test_a_stop_one_full_tick_outside_the_zone_edge_places() -> None:
+    case_input = _case_with(stop_loss_price="99.98", quantity_after_rounding="100")
+    adapter = FakeExecutionAdapter(case_input=case_input)
+    outcome = await _run_plan(adapter, case_input=case_input)
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+
+
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({"min_quantity": "1.500"}, "MIN_QTY_REJECT"),
+        ({"min_notional": "200.00"}, "NOTIONAL_REJECT"),
+    ],
+)
+async def test_an_unsizeable_tp1_refuses_the_plan_with_no_single_tp_fallback(
+    changes: dict[str, str], reason: str
+) -> None:
+    """O-03 auto default / backtest D-27: TP1 at 50% of 2.415 is below the filter -> NO_TRADE."""
+    case_input = _case_with(**changes)
+    adapter = FakeExecutionAdapter(case_input=case_input)
+    store = InMemoryExecutionIntentStore()
+    outcome = await _run_plan(adapter, case_input=case_input, intent_store=store)
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, reason)
+    assert adapter.calls == []
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+    # The entry itself is sizeable: with TP1 sized at the whole position the plan places.
+    whole = _build_live_context(case_input, tp1_quantity_fraction=Decimal("1"))
+    placed = await _run_plan(
+        FakeExecutionAdapter(case_input=case_input),
+        case_input=case_input,
+        live_context=whole,
+        intent_store=store,
+    )
+    assert (placed.is_no_trade, placed.reason_code) == (False, "OK")
+
+
+async def test_the_tp1_check_follows_the_live_context_fraction() -> None:
+    """A fraction that leaves TP1 unsizeable refuses; this is the same frozen sizing function."""
+    case_input = _case_with(min_quantity="1.500")
+    tiny = _build_live_context(case_input, tp1_quantity_fraction=Decimal("0.1"))
+    adapter = FakeExecutionAdapter(case_input=case_input)
+    outcome = await _run_plan(adapter, case_input=case_input, live_context=tiny)
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "MIN_QTY_REJECT")
+    assert adapter.calls == []
+
+
+def _mark_cases() -> list[tuple[str, dict[str, Any], str]]:
+    case_input = _load_input()
+    stale = _mark_reading_for(
+        case_input,
+        exchange_time_utc=_parse_utc(case_input["now_utc"]) - timedelta(milliseconds=4322),
+    )
+    future = _mark_reading_for(
+        case_input, exchange_time_utc=_parse_utc(case_input["now_utc"]) + timedelta(seconds=1)
+    )
+    return [
+        ("mark at the stop trigger", {"mark": Decimal("98.00")}, "MARK_PRICE_CROSSED_STOP"),
+        ("mark below the stop", {"mark": Decimal("97.50")}, "MARK_PRICE_CROSSED_STOP"),
+        ("mark above the zone", {"mark": Decimal("102.01")}, "MARK_PRICE_OUTSIDE_ZONE"),
+        ("mark below the zone", {"mark": Decimal("99.50")}, "MARK_PRICE_OUTSIDE_ZONE"),
+        (
+            "mark read raises",
+            {"mark_exception": TimeoutError("read timeout")},
+            "MARK_PRICE_UNAVAILABLE",
+        ),
+        ("mark read is stale", {"reading": stale}, "MARK_PRICE_UNAVAILABLE"),
+        ("mark read is from the future", {"reading": future}, "MARK_PRICE_UNAVAILABLE"),
+        ("mark read is unusable", {"reading": object()}, "MARK_PRICE_UNAVAILABLE"),
+    ]
+
+
+async def test_mark_price_refusals_make_only_the_reads_and_leave_the_approval_unconsumed() -> None:
+    case_input = _load_input()
+    for label, spec, reason in _mark_cases():
+        adapter = FakeExecutionAdapter()
+        if "mark" in spec:
+            adapter.mark_reading = _mark_reading_for(case_input, mark_price=spec["mark"])
+        if "mark_exception" in spec:
+            adapter.mark_exception = spec["mark_exception"]
+        if "reading" in spec:
+            adapter.mark_reading = spec["reading"]
+        await _assert_refused_then_placeable(
+            label=label, reason=reason, adapter=adapter, expected_calls=PRE_PLACEMENT_READS
+        )
+
+
+async def test_risk04_a_position_on_the_symbol_is_refused() -> None:
+    """RISK-04 / D-05: a reconciled position on the symbol blocks a second plan on it."""
+    from src.risk.types import OpenPosition
+
+    case_input = _load_input()
+    risk_kwargs = _build_risk_kwargs(case_input)
+    risk_kwargs["open_positions"] = [
+        OpenPosition(
+            symbol="BTCUSDT",
+            position_side="LONG",
+            open_risk=Decimal("1.00"),
+            daily_pnl_contribution=Decimal("0"),
+        )
+    ]
+    adapter = FakeExecutionAdapter()
+    store = InMemoryExecutionIntentStore()
+    outcome = await _run_plan(adapter, intent_store=store, risk_kwargs=risk_kwargs)
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "SYMBOL_HAS_POSITION")
+    assert "place_entry" not in _reads_only(adapter)
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+
+
+async def test_a_position_on_another_symbol_does_not_block() -> None:
+    from src.risk.types import OpenPosition
+
+    risk_kwargs = _build_risk_kwargs(_load_input())
+    risk_kwargs["open_positions"] = [
+        OpenPosition(
+            symbol="ETHUSDT",
+            position_side="LONG",
+            open_risk=Decimal("1.00"),
+            daily_pnl_contribution=Decimal("0"),
+        )
+    ]
+    outcome = await _run_plan(FakeExecutionAdapter(), risk_kwargs=risk_kwargs)
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+
+
+async def test_open_orders_and_unreadable_order_state_refuse() -> None:
+    cases: list[tuple[str, dict[str, Any], str]] = [
+        (
+            "open normal order on the symbol",
+            {"open_normal_orders": [_open_order()]},
+            "SYMBOL_HAS_OPEN_ORDER",
+        ),
+        (
+            "open algo order on the symbol",
+            {"open_algo_orders": [_open_algo()]},
+            "SYMBOL_HAS_OPEN_ORDER",
+        ),
+        (
+            "normal order read raises",
+            {"normal_orders_exception": TimeoutError("read timeout")},
+            "SYMBOL_STATE_UNAVAILABLE",
+        ),
+        (
+            "algo order read raises",
+            {"algo_orders_exception": TimeoutError("read timeout")},
+            "SYMBOL_STATE_UNAVAILABLE",
+        ),
+    ]
+    for label, attrs, reason in cases:
+        adapter = FakeExecutionAdapter()
+        for name, value in attrs.items():
+            setattr(adapter, name, value)
+        await _assert_refused_then_placeable(
+            label=label, reason=reason, adapter=adapter, expected_calls=PRE_PLACEMENT_READS
+        )
+
+
+async def test_an_order_on_another_symbol_does_not_block() -> None:
+    adapter = FakeExecutionAdapter()
+    adapter.open_normal_orders = [_open_order("ETHUSDT")]
+    adapter.open_algo_orders = [_open_algo("ETHUSDT")]
+    outcome = await _run_plan(adapter)
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+
+
+async def test_an_unprotected_position_anywhere_blocks_a_new_entry() -> None:
+    """D-11: the registry's account-wide `blocks_new_entries()` refuses (UNPROTECTED first)."""
+    case_input = _load_input()
+    live = _build_live_context(case_input, protection_registry=StubProtectionRegistry(blocks=True))
+    adapter = FakeExecutionAdapter()
+    adapter.open_normal_orders = [_open_order()]  # also a busy symbol: UNPROTECTED wins
+    store = InMemoryExecutionIntentStore()
+    outcome = await _run_plan(adapter, live_context=live, intent_store=store)
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "UNPROTECTED_POSITION_EXISTS")
+    assert "place_entry" not in _reads_only(adapter)
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+
+
+async def test_plan_status_deny_list_refuses_and_approved_plans_are_not_refused() -> None:
+    """D-09: EXPIRED / INVALIDATED / SUPERSEDED refuse; an executed plan is APPROVED and passes."""
+    import dataclasses
+
+    from src.domain.enums import TradePlanStatus
+
+    for status in (
+        TradePlanStatus.EXPIRED,
+        TradePlanStatus.INVALIDATED,
+        TradePlanStatus.SUPERSEDED,
+    ):
+        risk_kwargs = _build_risk_kwargs(_load_input())
+        risk_kwargs["trade_plan"] = dataclasses.replace(risk_kwargs["trade_plan"], status=status)
+        adapter = FakeExecutionAdapter()
+        store = InMemoryExecutionIntentStore()
+        outcome = await _run_plan(adapter, intent_store=store, risk_kwargs=risk_kwargs)
+        assert (outcome.is_no_trade, outcome.reason_code) == (True, "PLAN_STATUS_INVALID"), status
+        assert "place_entry" not in _reads_only(adapter)
+        assert store.get_entry(approval_id=_load_input()["approval_id"]) is None
+    for status in (
+        TradePlanStatus.READY,
+        TradePlanStatus.APPROVAL_PENDING,
+        TradePlanStatus.APPROVED,
+    ):
+        risk_kwargs = _build_risk_kwargs(_load_input())
+        risk_kwargs["trade_plan"] = dataclasses.replace(risk_kwargs["trade_plan"], status=status)
+        outcome = await _run_plan(FakeExecutionAdapter(), risk_kwargs=risk_kwargs)
+        assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK"), status
+
+
+async def test_invalidation_refusals() -> None:
+    """D-08: an invalidated Signal, a bar close beyond the level or no bar close refuses."""
+    import dataclasses
+
+    case_input = _load_input()
+    base = _build_live_context(case_input)
+    invalidated_at = _parse_utc(case_input["now_utc"]) - timedelta(minutes=1)
+    variants: list[tuple[str, Any, str]] = [
+        (
+            "signal invalidated",
+            dataclasses.replace(
+                base, signal=_build_signal(case_input, invalidated_at_utc=invalidated_at)
+            ),
+            "PLAN_INVALIDATED_BEFORE_PLACEMENT",
+        ),
+        (
+            "bar closed below the LONG level",
+            dataclasses.replace(base, latest_closed_bar_close=Decimal("97.99")),
+            "PLAN_INVALIDATED_BEFORE_PLACEMENT",
+        ),
+        (
+            "no closed bar available",
+            dataclasses.replace(base, latest_closed_bar_close=None),
+            "INVALIDATION_INPUT_UNAVAILABLE",
+        ),
+    ]
+    for label, live, reason in variants:
+        store = InMemoryExecutionIntentStore()
+        adapter = FakeExecutionAdapter()
+        outcome = await _run_plan(adapter, intent_store=store, live_context=live)
+        assert (outcome.is_no_trade, outcome.reason_code) == (True, reason), label
+        assert "place_entry" not in _reads_only(adapter), label
+        assert store.get_entry(approval_id=case_input["approval_id"]) is None, label
+
+
+async def test_remaining_validity_too_short_refuses() -> None:
+    """D-07: 600 s left is not more than the 777 s TEST_ONLY minimum (and the 600 s GTD floor)."""
+    case_input = _case_with(now_utc="2026-09-19T10:50:00+00:00")
+    adapter = FakeExecutionAdapter(case_input=case_input)
+    await _assert_refused_then_placeable(
+        label="600 seconds of validity left",
+        reason="VALIDITY_TOO_SHORT",
+        adapter=adapter,
+        expected_calls=PRE_PLACEMENT_READS,
+        case_input=case_input,
+    )
+
+
+async def test_hedge_refusal_follows_the_pre_placement_refusals() -> None:
+    """A refusal of gate 5e wins over Hedge, and the position mode is then never read."""
+    adapter = FakeExecutionAdapter(position_mode="HEDGE")
+    adapter.mark_reading = _mark_reading_for(_load_input(), mark_price=Decimal("98.00"))
+    outcome = await _run_plan(adapter)
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "MARK_PRICE_CROSSED_STOP")
+    assert "get_position_mode" not in _reads_only(adapter)
+
+
+async def test_hedge_refusal_leaves_the_approval_unconsumed() -> None:
+    case_input = _load_input()
+    store = InMemoryExecutionIntentStore()
+    refused = await _run_plan(FakeExecutionAdapter(position_mode="HEDGE"), intent_store=store)
+    assert (refused.is_no_trade, refused.reason_code) == (True, "HEDGE_MODE_UNSUPPORTED")
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+    placed = await _run_plan(FakeExecutionAdapter(), intent_store=store)
+    assert (placed.is_no_trade, placed.reason_code) == (False, "OK")
+
+
+def _order_pairs() -> list[tuple[str, dict[str, Any], str]]:
+    """Two gates fail at once: the earlier gate's reason must win. (label, overrides, reason)."""
+    import dataclasses
+
+    from tests.support import execution_limits as test_limits
+
+    case_input = _load_input()
+    base = _build_live_context(case_input)
+    unset = test_limits.test_only_execution_limits(max_mark_price_age_ms=None)
+    unset_live = dataclasses.replace(base, execution_limits=unset)
+
+    def risk_no_trade() -> dict[str, Any]:
+        risk_kwargs = _build_risk_kwargs(case_input)
+        risk_kwargs["account_state"] = type(risk_kwargs["account_state"])(
+            equity=Decimal("0.01"), risk_rate=risk_kwargs["account_state"].risk_rate
+        )
+        return risk_kwargs
+
+    def wrong_side() -> dict[str, Any]:
+        risk_kwargs = _build_risk_kwargs(case_input)
+        risk_kwargs["candidate_position_side"] = "SHORT"
+        return risk_kwargs
+
+    def small_plan_quantity() -> dict[str, Any]:
+        risk_kwargs = _build_risk_kwargs(case_input)
+        risk_kwargs["trade_plan"] = dataclasses.replace(
+            risk_kwargs["trade_plan"], quantity_after_rounding=Decimal("2.414")
+        )
+        return risk_kwargs
+
+    from src.execution.enablement import LiveEnablementController
+
+    return [
+        (
+            "binding before limits",
+            {"risk_kwargs": wrong_side(), "live_context": unset_live},
+            "PLAN_SIDE_MISMATCH",
+        ),
+        (
+            "enablement before limits",
+            {
+                "enablement": LiveEnablementController(journal=FakeJournal()),
+                "live_context": unset_live,
+            },
+            "DISABLED",
+        ),
+        (
+            "limits before SAFE_MODE",
+            {
+                "safe_mode_controller": RecordingSafeModeController(in_safe_mode=True),
+                "live_context": unset_live,
+            },
+            "LIMITS_NOT_CONFIGURED",
+        ),
+        (
+            "limits before risk",
+            {"risk_kwargs": risk_no_trade(), "live_context": unset_live},
+            "LIMITS_NOT_CONFIGURED",
+        ),
+        (
+            "headroom gate before quantity bound",
+            {
+                "risk_kwargs": small_plan_quantity(),
+                "gate_kwargs": _build_gate_kwargs(case_input, open_algo_count=196),
+            },
+            "EXCHANGE_CONSTRAINT",
+        ),
+        (
+            "quantity bound before the pre-placement reads",
+            {"risk_kwargs": small_plan_quantity(), "adapter_mark": Decimal("98.00")},
+            "QUANTITY_ABOVE_APPROVED",
+        ),
+        (
+            "plan status before the mark price",
+            {"status": "EXPIRED", "adapter_mark": Decimal("98.00")},
+            "PLAN_STATUS_INVALID",
+        ),
+        (
+            "invalidation before the symbol check",
+            {
+                "live_context": dataclasses.replace(base, latest_closed_bar_close=Decimal("97.00")),
+                "adapter_orders": [_open_order()],
+            },
+            "PLAN_INVALIDATED_BEFORE_PLACEMENT",
+        ),
+        (
+            "symbol check before the mark price",
+            {"adapter_orders": [_open_order()], "adapter_mark": Decimal("98.00")},
+            "SYMBOL_HAS_OPEN_ORDER",
+        ),
+    ]
+
+
+async def test_gate_order_is_pinned_by_failing_two_gates_at_once() -> None:
+    import dataclasses
+
+    for label, overrides, reason in _order_pairs():
+        overrides = dict(overrides)
+        adapter = FakeExecutionAdapter()
+        if "adapter_mark" in overrides:
+            adapter.mark_reading = _mark_reading_for(
+                _load_input(), mark_price=overrides.pop("adapter_mark")
+            )
+        if "adapter_orders" in overrides:
+            adapter.open_normal_orders = overrides.pop("adapter_orders")
+        if "status" in overrides:
+            from src.domain.enums import TradePlanStatus
+
+            risk_kwargs = overrides.get("risk_kwargs") or _build_risk_kwargs(_load_input())
+            risk_kwargs["trade_plan"] = dataclasses.replace(
+                risk_kwargs["trade_plan"], status=TradePlanStatus[overrides.pop("status")]
+            )
+            overrides["risk_kwargs"] = risk_kwargs
+        outcome = await _run_plan(adapter, **overrides)
+        assert (outcome.is_no_trade, outcome.reason_code) == (True, reason), label
+        assert "place_entry" not in _reads_only(adapter), label
+
+
+async def test_pure_refusals_run_before_the_first_read() -> None:
+    """Gates 5b-5d are pure: the quantity, geometry and TP1 refusals make zero adapter calls,
+    even when the mark price would also cross the stop."""
+    for case_input, kwargs in (
+        (_case_with(stop_loss_price="99.999", quantity_after_rounding="100"), {}),
+        (_case_with(min_quantity="1.500"), {}),
+    ):
+        adapter = FakeExecutionAdapter(case_input=case_input)
+        adapter.mark_reading = _mark_reading_for(case_input, mark_price=Decimal("90.00"))
+        outcome = await _run_plan(adapter, case_input=case_input, **kwargs)
+        assert outcome.is_no_trade is True
+        assert adapter.calls == []

@@ -2,6 +2,9 @@
   "plan_hash": "64464f8e874de2316bbf2847a1dbc6ede3f1914cf7ae3dc0e21feb583fd1e7d6",
   "outcome_reason_code": "OK",
   "method_sequence": [
+    "get_mark_price",
+    "snapshot_open_normal_orders",
+    "snapshot_open_algo_orders",
     "get_position_mode",
     "place_entry",
     "query_algo_order_by_client",
