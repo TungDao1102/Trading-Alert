@@ -1226,3 +1226,23 @@ def test_supervisor_defines_no_number_beyond_zero_and_one(tmp_path: Path) -> Non
     planted = tmp_path / "planted.py"
     planted.write_text("KEEPALIVE_INTERVAL_SECONDS = 1800\n", encoding="utf-8")
     assert _int_literals(planted) == [(1, 1800)]
+
+
+async def test_a_task_that_dies_fails_closed_instead_of_staying_live() -> None:
+    """Review WR-05: a crashed timer must not leave the stream LIVE with nothing running."""
+    rig = Rig()
+    await rig.start_live()
+
+    async def _broken_sleep(seconds: float) -> None:
+        raise RuntimeError("timer task crashed")
+
+    # The keepalive timer looks the sleep up again after its first interval.
+    rig.supervisor._sleep = _broken_sleep
+    await rig.vt.advance(KEEPALIVE)
+    await rig.settle()
+
+    assert rig.supervisor.state is S.UNKNOWN
+    assert rig.states[-1] == (S.UNKNOWN, sup_mod.REASON_TASK_DIED)
+    assert rig.failures == [sup_mod.REASON_TASK_DIED]
+
+    await rig.stop()

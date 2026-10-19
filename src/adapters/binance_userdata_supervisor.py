@@ -74,6 +74,7 @@ REASON_PROJECT_ROTATION = "PROJECT_ROTATION"
 REASON_QUEUE_OVERFLOW = "QUEUE_OVERFLOW"
 REASON_STOP = "STOP"
 REASON_INTERNAL_ERROR = "INTERNAL_ERROR"
+REASON_TASK_DIED = "TASK_DIED"
 RATE_LIMIT_BAN_ACTIVE = "RATE_LIMIT_BAN_ACTIVE"
 CONNECT_EXHAUSTED = "CONNECT_EXHAUSTED"
 REBUILD_EXHAUSTED = "REBUILD_EXHAUSTED"
@@ -450,6 +451,12 @@ class UserDataSupervisor:
         exc = task.exception()
         if exc is not None:
             log.error("userdata.supervisor.task_failed", error_type=type(exc).__name__)
+            if not self._stopped:
+                # A dead pump, timer or control task delivers or recovers nothing, so the
+                # stream can no longer be trusted: fail closed instead of staying LIVE.
+                self._halt(REASON_TASK_DIED)
+                if self._start_done is not None and not self._start_done.done():
+                    self._start_done.set_result(None)
 
     def _post(self, command: _Command) -> None:
         if self._stopped:
