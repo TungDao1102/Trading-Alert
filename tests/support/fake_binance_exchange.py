@@ -42,6 +42,42 @@ probe does not test (check file line 54).
 The kwargs of every call are bound against the REAL `BinanceUsdmAdapter`
 method signature (09-REVIEW WR-12) so this fake can never drift from the
 production surface.
+
+Phase 19 additions (plan 19-10). Every rule below carries a provenance label; the fake is an
+offline test double, NOT evidence of mainnet behavior, and a green test against it proves
+only that the code under test agrees with the label, not that the exchange does:
+
+* [DEMO] A `closePosition` STOP_MARKET placed while the position is flat is rejected with
+  -4509 ("Time in Force (TIF) GTE can only be used with open positions. ..."; probe check
+  file line 38). An explicit-quantity reduce-only stop placed while flat is ACCEPTED on Demo
+  (check file line 37), so the fake accepts it too. The -4509 rule is opt-in through
+  `enforce_flat_stop_rejection=True` because the pre-Phase-19 manager places its
+  closePosition stop right after the entry ack (no fill yet) and the legacy tests that use
+  this fake would fail; Phase 19 flow tests construct the fake with the flag.
+* [DOC] `closePosition` cannot be combined with a quantity or `reduceOnly` (New Algo Order,
+  -4137/-4138); the real adapter enforces it, the fake only binds the signature.
+* [ASSUMED, research A5] Partial fills: Demo may never produce one. The fake lets a test
+  script `fill(client_id, quantity=...)`, which keeps the order open as PARTIALLY_FILLED
+  with `executed_quantity` and a volume-weighted `average_price` on the probe.
+* [ASSUMED, research A4/A8] `place_market_close` reduces the position. A close on a flat
+  position raises -2022 and a close above the position raises -2024. The repo taxonomy has
+  both rows, but the 2026-10-19 doc pass found -2022 documented only as a conflict with open
+  orders and -2024 as "Position is not sufficient"; which code a flat-position reduce-only
+  MARKET really gets is UNPROVEN. The fake's choice of -2022 for the flat case is a TEST
+  CONVENTION, and callers must treat -2022 and -2024 identically (requery the position).
+  The fake fills a MARKET close at once and in full; the real response is normally an
+  acknowledgment, so production code must confirm the closed quantity by a position query
+  (`market_close_ack_only=True` makes the fake answer like an acknowledgment).
+* [ASSUMED] `trigger_stop` consumes the position of a closePosition stop in full and leaves
+  the algo FINISHED; the position book is one signed Decimal per symbol (One-way only, Hedge
+  position books are not modeled).
+* Mark price, lot filters, open-order and algo snapshots are served from state the test
+  sets (`set_mark_price`, `set_lot_filters`); an unset value raises, never defaults.
+* Scripted completion gates (`hold`/`release`, `fail_next`, `reject_next_algo`) make every
+  D-12 stop/cancel race a deterministic test; none of them sleeps. A D-12 branch test
+  combines them: hold the cancel, run stop and cancel concurrently, assert the stop
+  completed first through `completed`, release, and drive a late `fill` or `trigger_stop`
+  to reach the B4 branch (a fill after the stop triggered).
 """
 
 from __future__ import annotations
@@ -51,6 +87,7 @@ import itertools
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from binance_sdk_derivatives_trading_usds_futures import BadRequestError
@@ -65,9 +102,29 @@ DUPLICATE_CLIENT_ID_CODE = -4116
 DUPLICATE_ORDER_MESSAGE = "clientOrderId is duplicated"  # the page text; not observed on Demo
 DUPLICATE_ALGO_MESSAGE = "ClientOrderId is duplicated."  # the Demo text (check file line 33)
 
+# Binance -4509: closePosition stop with no open position (Demo-observed only, probe line 38).
+FLAT_CLOSE_POSITION_CODE = -4509
+FLAT_CLOSE_POSITION_MESSAGE = (
+    "Time in Force (TIF) GTE can only be used with open positions. "
+    "Please ensure that positions are available."
+)
+# TEST CONVENTION (research A4/A8): the code a reduce-only MARKET close gets on a flat position
+# is unproven; -2022 and -2024 must be handled identically by callers.
+REDUCE_ONLY_REJECT_CODE = -2022
+POSITION_NOT_SUFFICIENT_CODE = -2024
+
 STATUS_NEW = "NEW"
+STATUS_PARTIALLY_FILLED = "PARTIALLY_FILLED"
 STATUS_FILLED = "FILLED"
 STATUS_CANCELED = "CANCELED"
+STATUS_FINISHED = "FINISHED"
+
+ZERO = Decimal("0")
+
+
+def _dec(value: Any) -> Decimal | None:
+    """Decimal of a quantity or price a caller passed (legacy tests pass strings); None stays."""
+    return None if value is None else Decimal(str(value))
 
 
 @dataclass
@@ -82,6 +139,20 @@ class ExchangeOrderRecord:
     had_fill: bool = False
     # Moves on every state change (fill, cancel); None until the first one.
     updated_at_utc: datetime | None = None
+    # Phase 19 trailing fields (safe defaults so every older construction keeps working).
+    quantity: Decimal | None = None
+    executed_quantity: Decimal = ZERO
+    average_price: Decimal | None = None
+    side: str = ""
+    position_side: str = "BOTH"
+    order_type: str = "LIMIT"
+    time_in_force: str = "GTC"
+    price: Decimal | None = None
+    trigger_price: Decimal | None = None
+    close_position: bool = False
+    reduce_only: bool = False
+    working_type: str | None = None
+    algo_type: str = ""
 
     @property
     def update_time_utc(self) -> datetime:
@@ -97,7 +168,9 @@ class BinanceSemanticsFakeAdapter:
         *,
         position_mode: str = "ONE_WAY",
         now_utc: datetime | None = None,
+        enforce_flat_stop_rejection: bool = False,
     ) -> None:
+        self.enforce_flat_stop_rejection = enforce_flat_stop_rejection
         self.calls: list[dict[str, Any]] = []
         # Injected, settable clock (tests move it to exercise the retention rule).
         self.now_utc: datetime = now_utc or datetime(2026, 9, 19, 10, 30, tzinfo=UTC)
@@ -110,6 +183,12 @@ class BinanceSemanticsFakeAdapter:
         # test reads the write-ahead intent row from a second connection).
         self.on_place_entry: Callable[[dict[str, Any]], None] | None = None
         self._ids = itertools.count(1)
+        self._trade_ids = itertools.count(1)
+        # Signed position per symbol (One-way) and its volume-weighted entry price.
+        self.positions: dict[str, Decimal] = {}
+        self._entry_prices: dict[str, Decimal] = {}
+        # One FillEvent per scripted `fill` (what the user-data stream would deliver).
+        self.fill_events: list[Any] = []
 
     # ------------------------------------------------------------------ #
     # Contract guard (same check as the existing FakeExecutionAdapter).
@@ -131,13 +210,75 @@ class BinanceSemanticsFakeAdapter:
     # Test-side state transitions (what the exchange does on its own).
     # ------------------------------------------------------------------ #
 
-    def fill(self, client_id: str) -> None:
-        """The order fills: it leaves the open book and frees its client id."""
-        record = self.open_orders.pop(client_id)
-        record.status = STATUS_FILLED
+    def fill(
+        self,
+        client_id: str,
+        quantity: Decimal | None = None,
+        price: Decimal | None = None,
+    ) -> None:
+        """The order fills, fully (`quantity=None`, the old behavior) or partially.
+
+        A partial fill keeps the order open as PARTIALLY_FILLED (its client id stays taken); the
+        final fill moves it to the history as FILLED and frees the id. Every fill moves the
+        position and appends a `FillEvent` with a trade id of its own to `fill_events`.
+        """
+        from src.execution.fill_monitor import FillEvent
+
+        record = self.open_orders[client_id]
+        assert record.quantity is not None, "fill() needs an order placed through place_entry"
+        remaining = record.quantity - record.executed_quantity
+        fill_quantity = remaining if quantity is None else quantity
+        if fill_quantity <= ZERO:
+            raise ValueError("fill quantity must be > 0")
+        if fill_quantity > remaining:
+            raise ValueError(
+                f"fill quantity {fill_quantity} exceeds the remaining quantity {remaining}"
+            )
+        fill_price = price if price is not None else record.price
+        assert fill_price is not None, "fill() needs a price (the order has none)"
+        previous_value = record.executed_quantity * (record.average_price or ZERO)
+        record.executed_quantity += fill_quantity
+        record.average_price = (previous_value + fill_quantity * fill_price) / (
+            record.executed_quantity
+        )
         record.had_fill = True
         record.updated_at_utc = self.now_utc
-        self.history[client_id] = record
+        if record.executed_quantity == record.quantity:
+            self.open_orders.pop(client_id)
+            record.status = STATUS_FILLED
+            self.history[client_id] = record
+        else:
+            record.status = STATUS_PARTIALLY_FILLED
+        signed = fill_quantity if record.side == "BUY" else -fill_quantity
+        self._apply_position_delta(record.symbol, signed, fill_price)
+        self.fill_events.append(
+            FillEvent(
+                order_id=record.exchange_id,
+                exchange_trade_id=f"fake-trade-{next(self._trade_ids)}",
+                symbol=record.symbol,
+                side=record.side,
+                position_side=record.position_side,
+                fill_price=fill_price,
+                fill_quantity=fill_quantity,
+                fill_time_utc=self.now_utc,
+            )
+        )
+
+    def _apply_position_delta(self, symbol: str, delta: Decimal, price: Decimal) -> None:
+        """Move the signed position; the entry price is volume-weighted while it grows."""
+        old = self.positions.get(symbol, ZERO)
+        new = old + delta
+        old_price = self._entry_prices.get(symbol, ZERO)
+        if new == ZERO:
+            entry = ZERO
+        elif old == ZERO or (old > ZERO) == (delta > ZERO):
+            entry = (abs(old) * old_price + abs(delta) * price) / abs(new)
+        elif (new > ZERO) == (old > ZERO):
+            entry = old_price  # reduced, not flipped
+        else:
+            entry = price  # flipped through zero: the new side opens at this price
+        self.positions[symbol] = new
+        self._entry_prices[symbol] = entry
 
     def cancel(self, client_id: str) -> None:
         """The order is canceled: it leaves the open book and frees its client id."""
@@ -175,6 +316,12 @@ class BinanceSemanticsFakeAdapter:
             status=STATUS_NEW,
             created_at_utc=self.now_utc,
             exchange_id=f"ex-{next(self._ids)}",
+            quantity=_dec(kwargs["quantity"]),
+            side=kwargs["side"],
+            position_side=kwargs["position_side"],
+            order_type="LIMIT",
+            time_in_force=kwargs["time_in_force"],
+            price=_dec(kwargs["price"]),
         )
         self.open_orders[client_id] = record
         from src.adapters.binance_usdm import EntryPlacementResult
@@ -204,12 +351,30 @@ class BinanceSemanticsFakeAdapter:
             raise BadRequestError(
                 error_message=DUPLICATE_ALGO_MESSAGE, status_code=DUPLICATE_CLIENT_ID_CODE
             )
+        if (
+            self.enforce_flat_stop_rejection
+            and kwargs["close_position"]
+            and self.positions.get(kwargs["symbol"], ZERO) == ZERO
+        ):
+            # [DEMO] probe check file line 38: closePosition while flat answers -4509.
+            raise BadRequestError(
+                error_message=FLAT_CLOSE_POSITION_MESSAGE, status_code=FLAT_CLOSE_POSITION_CODE
+            )
         record = ExchangeOrderRecord(
             client_id=client_algo_id,
             symbol=kwargs["symbol"],
             status=STATUS_NEW,
             created_at_utc=self.now_utc,
             exchange_id=f"algo-{next(self._ids)}",
+            quantity=_dec(kwargs["quantity"]),
+            side=kwargs["side"],
+            position_side=kwargs["position_side"],
+            order_type=kwargs["type"],
+            trigger_price=_dec(kwargs["trigger_price"]),
+            close_position=kwargs["close_position"],
+            reduce_only=bool(kwargs.get("reduce_only") or False),
+            working_type=kwargs["working_type"],
+            algo_type=kwargs["algo_type"],
         )
         self.open_algos[client_algo_id] = record
         from src.adapters.binance_usdm import AlgoPlacementResult
@@ -250,6 +415,8 @@ class BinanceSemanticsFakeAdapter:
             order_id=record.exchange_id,
             status=record.status,
             update_time_utc=record.update_time_utc,
+            executed_quantity=record.executed_quantity,
+            average_price=record.average_price,
         )
 
     async def query_algo_order_by_client(self, **kwargs: Any) -> Any:
@@ -275,6 +442,34 @@ class BinanceSemanticsFakeAdapter:
             update_time_utc=record.update_time_utc,
         )
 
+    async def snapshot_positions(self, **kwargs: Any) -> Any:
+        from src.adapters.binance_usdm import PositionSnapshot
+
+        self._bind_real("snapshot_positions", kwargs)
+        self._record_call("snapshot_positions", kwargs)
+        symbol = kwargs.get("symbol")
+        rows = []
+        for sym, amount in sorted(self.positions.items()):
+            if amount == ZERO or (symbol is not None and sym != symbol):
+                continue
+            entry = self._entry_prices.get(sym, ZERO)
+            rows.append(
+                PositionSnapshot(
+                    symbol=sym,
+                    position_side="BOTH",
+                    position_amt=amount,
+                    entry_price=entry,
+                    break_even_price=entry,
+                    mark_price=None,
+                    unrealized_profit=ZERO,
+                    liquidation_price=None,
+                    notional=None,
+                    margin_asset="USDT",
+                    update_time_utc=self.now_utc,
+                )
+            )
+        return rows
+
     async def get_position_mode(self) -> Any:
         from src.adapters.binance_usdm import PositionModeResult
 
@@ -288,6 +483,9 @@ class BinanceSemanticsFakeAdapter:
         self._record_call("cancel_normal_order", kwargs)
         client_id = kwargs["orig_client_order_id"]
         if client_id in self.open_orders:
+            # A PARTIALLY_FILLED entry ends CANCELED with its executed quantity kept (the
+            # position it opened stays); a FILLED entry is no longer open: a no-op (ORDER_ABSENT
+            # semantics, research P5).
             self.cancel(client_id)
         return None
 
