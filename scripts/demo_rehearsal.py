@@ -71,10 +71,12 @@ from src.adapters.binance_client import (  # noqa: E402
     assert_endpoint_url,
 )
 from src.adapters.binance_limits import (  # noqa: E402
+    DriftLimits,
     LimitsNotRatified,
     SignedCallPolicy,
     load_binance_limits,
 )
+from src.adapters.binance_public import MarkPriceReading  # noqa: E402
 from src.adapters.binance_ratelimit_gate import RestRateLimitGate  # noqa: E402
 from src.adapters.binance_usdm import (  # noqa: E402
     AlgoOrderProbe,
@@ -105,6 +107,7 @@ from src.approval.binding import Callback  # noqa: E402
 from src.approval.mapping import ShortIdMapping, derive_short_id  # noqa: E402
 from src.approval.tokens import issue_one_time_token, token_hash_of  # noqa: E402
 from src.backtest.semantics import TP1_QUANTITY_FRACTION  # noqa: E402
+from src.core.planner import plan_hash_from_fields  # noqa: E402
 from src.core.types import AccountState  # noqa: E402
 from src.domain.approval import Approval  # noqa: E402
 from src.domain.canonical import sha256_hex  # noqa: E402
@@ -114,14 +117,29 @@ from src.domain.enums import (  # noqa: E402
     KillGateState,
     OrderRole,
     QuantizationDecision,
+    SignalStatus,
     TradePlanStatus,
 )
 from src.domain.ids import derive_child_id  # noqa: E402
 from src.domain.journal import JournalEvent, content_hash_event_id  # noqa: E402
+from src.domain.lot_filters import LotFilters  # noqa: E402
 from src.domain.registry import ParameterSet, load_parameter_set  # noqa: E402
+from src.domain.signal import Signal  # noqa: E402
 from src.domain.trade_plan import TradePlan  # noqa: E402
+from src.execution.constraint_snapshot import (  # noqa: E402
+    ExchangeFilterExtras,
+    build_plan_constraint_snapshot,
+)
+from src.execution.emergency_close import MarketEmergencyCloser  # noqa: E402
 from src.execution.enablement import LiveEnablementController  # noqa: E402
+from src.execution.execution_limits import (  # noqa: E402
+    ExecutionLimits,
+    ExecutionLimitsInvalid,
+    load_execution_limits,
+)
 from src.execution.fill_monitor import CurrentPositionView, FillEvent  # noqa: E402
+from src.execution.intent_store import ExecutionIntentStore  # noqa: E402
+from src.execution.live_context import LivePlacementContext  # noqa: E402
 from src.execution.manager import (  # noqa: E402
     LIVE5_SYMBOLS,
     attach_protectives_to_fill,
@@ -137,6 +155,8 @@ from src.execution.placement import (  # noqa: E402
     ProtectiveTemplate,
     quantize_price,
 )
+from src.execution.pre_placement import LIMITS_NOT_CONFIGURED  # noqa: E402
+from src.execution.protection import ProtectionCoordinator  # noqa: E402
 from src.ops.health import (  # noqa: E402
     ALL_CHECK_NAMES,
     CHECK_DB_WRITES,
@@ -185,6 +205,9 @@ DEFAULT_EVIDENCE_DIR = REPO_ROOT / ".planning" / "phases" / "09-live-execution-r
 # Plan 18-13: the ratified limits file (plan 18-09). Its signed-call policy gives every
 # signed request an explicit recvWindow; no number is chosen here.
 DEFAULT_LIMITS_FILE = REPO_ROOT / "config" / "binance" / "binance-limits-v1.toml"
+# Plan 19-13: the owner's four execution limits (plan 19-01). Every value is NOT_CONFIGURED in
+# the committed file, so a run that reaches the order path aborts before any mutation.
+DEFAULT_EXECUTION_LIMITS_FILE = REPO_ROOT / "config" / "execution" / "execution-limits-v1.toml"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -261,6 +284,14 @@ def load_signed_call_policy(path: Path) -> SignedCallPolicy:
     """The ratified signed-call policy of `path` (plan 18-13), or `LimitsFileRefused`."""
     try:
         return load_binance_limits(path).signed
+    except (LimitsNotRatified, ValueError, TypeError):
+        raise LimitsFileRefused(path) from None
+
+
+def load_drift_limits(path: Path) -> DriftLimits:
+    """The ratified clock-drift limits of `path` (plan 19-13: the GTD clock margin)."""
+    try:
+        return load_binance_limits(path).drift
     except (LimitsNotRatified, ValueError, TypeError):
         raise LimitsFileRefused(path) from None
 
@@ -665,6 +696,21 @@ class GuardedAdapter:
 
     async def get_position_mode(self) -> PositionModeResult:
         return await self._call("get_position_mode", lambda: self._inner.get_position_mode())
+
+    async def get_mark_price(self, *, symbol: str) -> MarkPriceReading:
+        """The live mark price of `symbol` (plan 19-13, gate 5e); a read, allowed in DRY_RUN."""
+        return await self._call("get_mark_price", lambda: self._inner.get_mark_price(symbol=symbol))
+
+    async def symbol_lot_filters(self, *, symbol: str) -> LotFilters:
+        """The live lot filters of `symbol` (the protection coordinator reads them); a read."""
+        return await self._call(
+            "symbol_lot_filters", lambda: self._inner.symbol_lot_filters(symbol=symbol)
+        )
+
+    @staticmethod
+    def error_facts(exc: BaseException) -> Any:
+        """The SDK-free error facts of `exc` (pure classification, no request)."""
+        return BinanceUsdmAdapter.error_facts(exc)
 
     async def snapshot_open_normal_orders(
         self, *, symbol: str | None = None
@@ -1157,6 +1203,10 @@ class RunContext:
     run_id: str
     controller: LiveEnablementController | None = None
     health: HealthVerdict | None = None
+    # Plan 19-13. None loads the committed file (execution limits) or the ratified Binance
+    # limits file (drift limits); a test injects a value instead.
+    execution_limits: ExecutionLimits | None = None
+    drift_limits: DriftLimits | None = None
 
 
 def build_context(
@@ -1172,6 +1222,8 @@ def build_context(
     approval_timeout_seconds: int,
     discovery_timeout_seconds: int,
     token_factory: Callable[[], str],
+    execution_limits: ExecutionLimits | None = None,
+    drift_limits: DriftLimits | None = None,
 ) -> RunContext:
     journal = RunJournal()
     return RunContext(
@@ -1189,6 +1241,8 @@ def build_context(
         journal=journal,
         book=ApprovalBook(journal),
         run_id=f"{scenario}-{_utc_stamp(clock())}",
+        execution_limits=execution_limits,
+        drift_limits=drift_limits,
     )
 
 
@@ -1549,19 +1603,24 @@ def derive_plan(
     rr = (tp1 - entry) / (entry - stop)
 
     signal_id = sha256_hex({"run_id": run_id, "role": "signal"})
-    plan_hash = sha256_hex(
-        {
-            "run_id": run_id,
-            "symbol": SYMBOL,
-            "side": "LONG",
-            "entry": entry,
-            "stop": stop,
-            "tp1": tp1,
-            "tp2": tp2,
-            "quantity": quantity,
-            "strategy_id": parameter_set.strategy_id,
-            "parameter_set_hash": parameter_set.parameter_set_hash,
-        }
+    take_profit_json = json.dumps(
+        {"tp1": str(tp1), "tp2": str(tp2)}, sort_keys=True, separators=(",", ":")
+    )
+    # Plan 19-13 (D-01, D-08): the execution binding re-derives the plan hash with the planner's
+    # own algorithm and the pre-placement check reads a CANDLE_CLOSE invalidation rule, so the
+    # rehearsal plan carries both (a bar closing below the stop invalidates a LONG).
+    invalidation_rule_json = json.dumps(
+        {"basis": "CANDLE_CLOSE", "level": str(stop)}, sort_keys=True, separators=(",", ":")
+    )
+    expiry_utc = observed_at + timedelta(seconds=approval_timeout_seconds) + PLAN_EXPIRY_MARGIN
+    plan_hash = plan_hash_from_fields(
+        signal_id=signal_id,
+        entry_min_price=entry,
+        entry_max_price=entry,
+        stop_loss_price=stop,
+        take_profit_json=take_profit_json,
+        invalidation_rule_json=invalidation_rule_json,
+        expiry_utc=expiry_utc,
     )
     trade_plan = TradePlan(
         trade_plan_id=derive_child_id(signal_id, "trade_plan:v1"),
@@ -1571,13 +1630,9 @@ def derive_plan(
         entry_min_price=entry,
         entry_max_price=entry,
         stop_loss_price=stop,
-        take_profit_json=json.dumps(
-            {"tp1": str(tp1), "tp2": str(tp2)}, sort_keys=True, separators=(",", ":")
-        ),
-        invalidation_rule_json=json.dumps(
-            {"basis": "DEMO_REHEARSAL", "level": str(stop)}, sort_keys=True, separators=(",", ":")
-        ),
-        expiry_utc=observed_at + timedelta(seconds=approval_timeout_seconds) + PLAN_EXPIRY_MARGIN,
+        take_profit_json=take_profit_json,
+        invalidation_rule_json=invalidation_rule_json,
+        expiry_utc=expiry_utc,
         expected_rr_json=json.dumps({"rr": str(rr)}, sort_keys=True, separators=(",", ":")),
         risk_rate=risk_rate,
         risk_budget=equity * risk_rate,
@@ -1671,6 +1726,178 @@ async def prepare_plan(ctx: RunContext, scenario: str) -> DerivedPlan:
     ):
         ctx.recorder.add_synthetic_input(text)
     return plan
+
+
+# --------------------------------------------------------------------------- #
+# Live placement context (plan 19-13): what the manager needs beyond the approval.
+# --------------------------------------------------------------------------- #
+
+
+def _resolved_execution_limits(ctx: RunContext) -> ExecutionLimits:
+    """The injected limits, or the committed file. A missing or invalid file aborts the run."""
+    if ctx.execution_limits is None:
+        try:
+            ctx.execution_limits = load_execution_limits(DEFAULT_EXECUTION_LIMITS_FILE)
+        except ExecutionLimitsInvalid as exc:
+            raise RehearsalAbort(f"the execution limits file is unusable: {exc}") from None
+    return ctx.execution_limits
+
+
+def require_execution_limits_set(ctx: RunContext) -> ExecutionLimits:
+    """Abort before any mutation while any execution limit is NOT_CONFIGURED (D-07, D-13).
+
+    The failed step names the unset keys and never a value. With the committed file (every value
+    NOT_CONFIGURED) every order scenario ends here, recorded honestly.
+    """
+    limits = _resolved_execution_limits(ctx)
+    unset = limits.unset_keys()
+    if unset:
+        detail = f"{LIMITS_NOT_CONFIGURED}: {', '.join(unset)}"
+        ctx.recorder.add_step("execution_limits", STEP_FAILED, detail)
+        raise RehearsalAbort(detail)
+    ctx.recorder.add_step("execution_limits", STEP_PASSED, "all four execution limits are set")
+    return limits
+
+
+def _resolved_drift_limits(ctx: RunContext) -> DriftLimits:
+    if ctx.drift_limits is None:
+        ctx.drift_limits = load_drift_limits(DEFAULT_LIMITS_FILE)
+    return ctx.drift_limits
+
+
+class RehearsalAlertSink:
+    """`CriticalAlertSink` of the rehearsal: evidence plus an operator instruction.
+
+    Telegram alert UX is Phase 23, so a critical alert is recorded in the evidence file and
+    printed as an operator instruction at the end of the run; nothing is sent.
+    """
+
+    def __init__(self, ctx: RunContext) -> None:
+        self._ctx = ctx
+
+    def critical(
+        self, *, event: str, plan_hash: str, symbol: str, reason: str, now_utc: datetime
+    ) -> None:
+        alerts = self._ctx.recorder.details.setdefault("critical_alerts", [])
+        alerts.append(
+            _jsonable(
+                {
+                    "event": event,
+                    "plan_hash": plan_hash,
+                    "symbol": symbol,
+                    "reason": reason,
+                    "now_utc": now_utc,
+                }
+            )
+        )
+        _instruct(
+            self._ctx,
+            f"CRITICAL {event} on {symbol} ({reason}): check the Binance Demo UI and close any "
+            "position by hand.",
+        )
+
+
+async def _latest_closed_bar_close(ctx: RunContext, now: datetime) -> Decimal | None:
+    """The close of the latest CLOSED 1h kline, or None when it cannot be read (fail closed)."""
+    try:
+        bars = await ctx.guarded.klines(SYMBOL, "1h", limit=2)
+    except Exception:  # noqa: BLE001 - an unreadable bar means "not available": the gate refuses
+        return None
+    closed = [bar for bar in bars if bar.close_time_utc <= now]
+    return closed[-1].close if closed else None
+
+
+async def build_live_context(
+    ctx: RunContext,
+    plan: DerivedPlan,
+    filters: SymbolFilters,
+    constraints: ConstraintSnapshot,
+    now: datetime,
+    *,
+    safe_mode: SafeModeController,
+    intent_store: ExecutionIntentStore,
+) -> LivePlacementContext:
+    """The `LivePlacementContext` of one rehearsal placement (plan 19-13).
+
+    The Signal is the one the plan is bound to (same id, symbol, LONG, strategy version and
+    parameter set); the constraint snapshot comes from the re-checked filters with the MARK_PRICE
+    working type; the limits are the injected ones or the committed file; the protection
+    coordinator and its emergency closer run over the same guarded adapter; the bar close is read
+    through it; the GTD margin is the larger of the ratified drift limits.
+    """
+    limits = _resolved_execution_limits(ctx)
+    unset = limits.unset_keys()
+    if unset:
+        raise RehearsalAbort(f"{LIMITS_NOT_CONFIGURED}: {', '.join(unset)}")
+    drift = _resolved_drift_limits(ctx)
+    params = plan.parameter_set
+    bar_close = await _latest_closed_bar_close(ctx, now)
+    signal = Signal(
+        signal_id=plan.signal_id,
+        strategy_id=params.strategy_id,
+        strategy_version=params.strategy_version,
+        parameter_set_id=params.parameter_set_id,
+        parameter_set_hash=params.parameter_set_hash,
+        symbol=SYMBOL,
+        direction="LONG",
+        setup_type="DEMO_REHEARSAL",
+        source_timeframe="1h",
+        source_candle_close_utc=plan.observed_at,
+        detected_at_utc=plan.observed_at,
+        status=SignalStatus.APPROVED,
+        expires_at_utc=plan.trade_plan.expiry_utc,
+    )
+    snapshot = build_plan_constraint_snapshot(
+        plan.trade_plan.trade_plan_id,
+        constraints,
+        ExchangeFilterExtras(
+            market_lot_min_quantity=filters.market_lot_min_quantity,
+            market_lot_max_quantity=filters.market_lot_max_quantity,
+            market_lot_step_size=filters.market_lot_step_size,
+            percent_price_multiplier_up=filters.percent_price_multiplier_up,
+            percent_price_multiplier_down=filters.percent_price_multiplier_down,
+            percent_price_multiplier_decimals=filters.percent_price_multiplier_decimals,
+        ),
+        filters.max_quantity,
+        "MARK_PRICE",
+        captured_at_utc=now,
+    )
+    alerts = RehearsalAlertSink(ctx)
+    closer = MarketEmergencyCloser(
+        adapter=cast(Any, ctx.guarded),
+        journal=ctx.journal,
+        safe_mode_controller=safe_mode,
+        alert_sink=alerts,
+        clock=ctx.clock,
+    )
+    coordinator = ProtectionCoordinator(
+        adapter=cast(Any, ctx.guarded),
+        intent_store=intent_store,
+        journal=ctx.journal,
+        safe_mode_controller=safe_mode,
+        alert_sink=alerts,
+        emergency_closer=closer,
+        limits=limits,
+        clock=ctx.clock,
+    )
+    margin = timedelta(milliseconds=max(drift.ahead_limit_ms, drift.behind_limit_ms))
+    ctx.recorder.details["live_context"] = _jsonable(
+        {
+            "latest_closed_bar_close": bar_close,
+            "gtd_clock_margin_ms": int(margin.total_seconds() * 1000),
+            "tp1_quantity_fraction": TP1_QUANTITY_FRACTION,
+            "working_type": snapshot.working_type,
+        }
+    )
+    return LivePlacementContext(
+        signal=signal,
+        plan_constraint_snapshot=snapshot,
+        execution_limits=limits,
+        protection_registry=coordinator,
+        latest_closed_bar_close=bar_close,
+        gtd_clock_margin=margin,
+        tp1_quantity_fraction=TP1_QUANTITY_FRACTION,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -2232,6 +2459,9 @@ async def run_order_scenario(ctx: RunContext, kind: str) -> str:
     channel = _require_channel(ctx)
     guarded = ctx.guarded
     recorder = ctx.recorder
+    # Plan 19-13 (D-07, D-13, T-19-34): unset execution limits end the run here, before the
+    # channel opens, before any approval is requested and before any exchange mutation.
+    require_execution_limits_set(ctx)
     await channel.open(_tap_deps(ctx))
     try:
         verdict = await _require_healthy(ctx)
@@ -2298,6 +2528,16 @@ async def run_order_scenario(ctx: RunContext, kind: str) -> str:
             safe_mode = SafeModeController(adapter=guarded, journal=ctx.journal)
             from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
 
+            intent_store = InMemoryExecutionIntentStore()
+            live_context = await build_live_context(
+                ctx,
+                plan,
+                filters,
+                constraints,
+                now,
+                safe_mode=safe_mode,
+                intent_store=intent_store,
+            )
             open_algos = await guarded.snapshot_open_algo_orders()
             outcome = await execute_approved_plan(
                 callback=callback,
@@ -2324,7 +2564,8 @@ async def run_order_scenario(ctx: RunContext, kind: str) -> str:
                     "planned_leg_count": 3,
                     "positions_reconciled": _probe_passed(verdict, "reconciliation_drift"),
                 },
-                intent_store=InMemoryExecutionIntentStore(),
+                intent_store=intent_store,
+                live_context=live_context,
             )
             result = await _after_placement(ctx, plan, constraints, safe_mode, kind, outcome)
         finally:
@@ -2517,6 +2758,7 @@ def main(
     sleep: Callable[[int], Awaitable[None]] | None = None,
     token_factory: Callable[[], str] | None = None,
     scenario_runner: Callable[[RunContext], Awaitable[str]] | None = None,
+    execution_limits: ExecutionLimits | None = None,
 ) -> int:
     """Single entry point. Every seam defaults to the real implementation."""
     env: Mapping[str, str] = os.environ if environ is None else environ
@@ -2534,6 +2776,7 @@ def main(
             )
         credentials = load_credentials(env)
         signed_call_policy = load_signed_call_policy(args.limits_file)
+        drift_limits = load_drift_limits(args.limits_file)
     except (UsageError, ConfirmationRefused, CredentialError, LimitsFileRefused) as exc:
         print(f"refused ({type(exc).__name__}): {exc}", file=sys.stderr)
         return EXIT_REFUSED
@@ -2579,6 +2822,8 @@ def main(
             approval_timeout_seconds=args.approval_timeout_seconds,
             discovery_timeout_seconds=args.discovery_timeout_seconds,
             token_factory=token_factory if token_factory is not None else issue_one_time_token,
+            execution_limits=execution_limits,
+            drift_limits=drift_limits,
         )
         run_ctx = ctx
 
