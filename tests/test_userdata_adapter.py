@@ -714,7 +714,75 @@ async def test_connection_listener_failure_never_reaches_the_sdk() -> None:
     adapter.set_connection_listener(broken)
     await adapter.start()
 
-    ws.emit_connection_event("private", "close")  # must not raise
+    # The fake isolates callback failures like the SDK does, so "did not raise" proves nothing:
+    # the adapter's own guard has to leave its log entry (review WR-01).
+    with capture_logs() as logs:
+        ws.emit_connection_event("private", "close")
+
+    assert [entry["event"] for entry in logs] == ["userdata.connection_listener_failed"]
+    assert logs[0]["error_type"] == "RuntimeError"
+    assert "listener bug" not in repr(logs)
+
+
+async def test_connection_listener_failure_is_guarded_without_any_fake_in_the_path() -> None:
+    adapter, _transport, _ws, _factory, _port = _rig()
+
+    def broken(event: ConnectionEvent) -> None:
+        raise RuntimeError("listener bug")
+
+    adapter.set_connection_listener(broken)
+    with capture_logs() as logs:
+        adapter._on_connection_event("close")  # must not raise
+
+    assert [entry["event"] for entry in logs] == ["userdata.connection_listener_failed"]
+
+
+async def test_transport_connection_sink_failure_is_logged_by_type_and_not_raised() -> None:
+    _adapter, transport, ws, _factory, _port = _rig()
+    await transport.connect(TEST_ONLY_LISTEN_KEY)
+
+    def broken(name: str) -> None:
+        raise RuntimeError("sink bug")
+
+    transport.set_connection_sink(broken)
+    with capture_logs() as logs:
+        transport._emit_connection("close")  # no fake-side guard in this call
+
+    assert [entry["event"] for entry in logs] == ["userdata.connection_sink_failed"]
+    assert logs[0]["error_type"] == "RuntimeError"
+
+
+async def test_transport_message_sink_failure_is_logged_by_type_and_not_raised() -> None:
+    _adapter, transport, ws, _factory, _port = _rig()
+    await transport.connect(TEST_ONLY_LISTEN_KEY)
+
+    def broken(message: object) -> None:
+        raise RuntimeError("sink bug")
+
+    transport.set_message_sink(broken)
+    with capture_logs() as logs:
+        delivered = ws.emit_user_event(TEST_ONLY_LISTEN_KEY, make_order_trade_update_message())
+
+    assert delivered == 1  # the callback ran and did not raise into the receive loop
+    assert [entry["event"] for entry in logs] == ["userdata.message_sink_failed"]
+    assert logs[0]["error_type"] == "RuntimeError"
+
+
+async def test_a_failing_enqueue_is_logged_by_type_and_not_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _transport, ws, _factory, _port = _rig()
+    await adapter.start()
+
+    def broken(item: object) -> None:
+        raise RuntimeError("queue bug")
+
+    monkeypatch.setattr(adapter, "_enqueue", broken)
+    with capture_logs() as logs:
+        ws.emit_user_event(TEST_ONLY_LISTEN_KEY, make_order_trade_update_message())
+
+    assert [entry["event"] for entry in logs] == ["userdata.raw_callback_failed"]
+    assert logs[0]["error_type"] == "RuntimeError"
 
 
 async def test_connect_twice_does_not_duplicate_callbacks() -> None:
