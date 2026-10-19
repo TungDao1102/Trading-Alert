@@ -82,8 +82,11 @@ only that the code under test agrees with the label, not that the exchange does:
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import inspect
 import itertools
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -160,8 +163,31 @@ class ExchangeOrderRecord:
         return self.updated_at_utc if self.updated_at_utc is not None else self.created_at_utc
 
 
+def _exchange_call(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Wrap an adapter method: bind the kwargs to the REAL signature, record the call, pass the
+    scripted gates (`hold`, `fail_next`), run the body, then log the completion.
+
+    The call is recorded before any gate, so a held or failing call is visible in `calls`; only
+    a call that returns (does not raise) is appended to `completed`.
+    """
+
+    def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(fn)
+        async def wrapper(self: BinanceSemanticsFakeAdapter, **kwargs: Any) -> Any:
+            self._bind_real(name, kwargs)
+            self._record_call(name, kwargs)
+            await self._pass_gates(name)
+            result = await fn(self, **kwargs)
+            self.completed.append(name)
+            return result
+
+        return wrapper
+
+    return decorate
+
+
 class BinanceSemanticsFakeAdapter:
-    """In-memory adapter implementing the seven `ExecutionAdapter` methods."""
+    """In-memory adapter implementing the `ExecutionAdapter` methods and the Phase 19 reads."""
 
     def __init__(
         self,
@@ -195,6 +221,11 @@ class BinanceSemanticsFakeAdapter:
         self._lot_filters: dict[str, Any] = {}
         # True: a MARKET close answers like an acknowledgment (NEW, executed unknown).
         self.market_close_ack_only = False
+        # Scripted completion gates. `completed` lists the methods that returned, in order.
+        self.completed: list[str] = []
+        self._hold_pending: dict[str, deque[asyncio.Event]] = {}
+        self._hold_waiting: dict[str, deque[asyncio.Event]] = {}
+        self._failures: dict[str, deque[BaseException]] = {}
 
     # ------------------------------------------------------------------ #
     # Contract guard (same check as the existing FakeExecutionAdapter).
@@ -300,6 +331,70 @@ class BinanceSemanticsFakeAdapter:
         record.updated_at_utc = self.now_utc
         self.algo_history[client_algo_id] = record
 
+    # ------------------------------------------------------------------ #
+    # Scripted completion gates (D-12 races): deterministic, no sleeping.
+    # ------------------------------------------------------------------ #
+
+    def hold(self, method_name: str) -> None:
+        """The next call of `method_name` records itself, then waits until `release`.
+
+        The body of the call (the state change) runs only after the release, so a test decides
+        which of two concurrent calls the exchange completes first. A hold applies to one call.
+        """
+        self._hold_pending.setdefault(method_name, deque()).append(asyncio.Event())
+
+    def release(self, method_name: str) -> None:
+        """Let the oldest held call of `method_name` continue (or pre-release the next hold)."""
+        waiting = [e for e in self._hold_waiting.get(method_name, ()) if not e.is_set()]
+        pending = [e for e in self._hold_pending.get(method_name, ()) if not e.is_set()]
+        if waiting:
+            waiting[0].set()
+        elif pending:
+            pending[0].set()
+        else:
+            raise ValueError(f"nothing is held for {method_name}")
+
+    def held(self) -> list[str]:
+        """The methods with a call that is waiting for its release, one entry per waiting call."""
+        return [
+            name
+            for name, events in self._hold_waiting.items()
+            for event in events
+            if not event.is_set()
+        ]
+
+    def fail_next(self, method_name: str, exc: BaseException) -> None:
+        """The next call of `method_name` raises `exc` (after it is recorded), once.
+
+        Several scripted failures for one method are consumed in order. The exchange state is
+        untouched by a failed call; to model an AMBIGUOUS failure (the order reached the
+        exchange but the answer was lost), perform the state change yourself (`fill`, `cancel`)
+        and script the failure.
+        """
+        self._failures.setdefault(method_name, deque()).append(exc)
+
+    def reject_next(self, method_name: str, code: int, message: str = "scripted rejection") -> None:
+        """The next call of `method_name` raises the SDK `BadRequestError` with `code`."""
+        self.fail_next(method_name, BadRequestError(error_message=message, status_code=code))
+
+    def reject_next_algo(self, code: int, message: str = "scripted rejection") -> None:
+        """The next `place_algo_protective` is rejected with `code` (for example -2021)."""
+        self.reject_next("place_algo_protective", code, message)
+
+    async def _pass_gates(self, method_name: str) -> None:
+        pending = self._hold_pending.get(method_name)
+        if pending:
+            event = pending.popleft()
+            waiting = self._hold_waiting.setdefault(method_name, deque())
+            waiting.append(event)
+            try:
+                await event.wait()
+            finally:
+                waiting.remove(event)
+        failures = self._failures.get(method_name)
+        if failures:
+            raise failures.popleft()
+
     def trigger_stop(self, client_algo_id: str) -> None:
         """The exchange triggers an open algo: it leaves the open book as FINISHED [ASSUMED].
 
@@ -343,9 +438,8 @@ class BinanceSemanticsFakeAdapter:
     # ExecutionAdapter surface.
     # ------------------------------------------------------------------ #
 
+    @_exchange_call("place_entry")
     async def place_entry(self, **kwargs: Any) -> Any:
-        self._bind_real("place_entry", kwargs)
-        self._record_call("place_entry", kwargs)
         if self.on_place_entry is not None:
             self.on_place_entry(dict(kwargs))
         client_id = kwargs["new_client_order_id"]
@@ -386,9 +480,8 @@ class BinanceSemanticsFakeAdapter:
             update_time_utc=record.update_time_utc,
         )
 
+    @_exchange_call("place_algo_protective")
     async def place_algo_protective(self, **kwargs: Any) -> Any:
-        self._bind_real("place_algo_protective", kwargs)
-        self._record_call("place_algo_protective", kwargs)
         client_algo_id = kwargs["client_algo_id"]
         if client_algo_id in self.open_algos:
             # The docs name no error code for a duplicate algo id (research A8); the Demo probe
@@ -439,11 +532,10 @@ class BinanceSemanticsFakeAdapter:
             update_time_utc=record.update_time_utc,
         )
 
+    @_exchange_call("query_order_by_client")
     async def query_order_by_client(self, **kwargs: Any) -> Any:
         from src.adapters.binance_usdm import OrderProbe
 
-        self._bind_real("query_order_by_client", kwargs)
-        self._record_call("query_order_by_client", kwargs)
         client_id = kwargs["orig_client_order_id"]
         record = self.open_orders.get(client_id) or self._visible_history(self.history, client_id)
         if record is None:
@@ -464,11 +556,10 @@ class BinanceSemanticsFakeAdapter:
             average_price=record.average_price,
         )
 
+    @_exchange_call("query_algo_order_by_client")
     async def query_algo_order_by_client(self, **kwargs: Any) -> Any:
         from src.adapters.binance_usdm import AlgoOrderProbe
 
-        self._bind_real("query_algo_order_by_client", kwargs)
-        self._record_call("query_algo_order_by_client", kwargs)
         client_algo_id = kwargs["client_algo_id"]
         record = self.open_algos.get(client_algo_id) or self._visible_history(
             self.algo_history, client_algo_id
@@ -487,9 +578,8 @@ class BinanceSemanticsFakeAdapter:
             update_time_utc=record.update_time_utc,
         )
 
+    @_exchange_call("get_mark_price")
     async def get_mark_price(self, **kwargs: Any) -> Any:
-        self._bind_real("get_mark_price", kwargs)
-        self._record_call("get_mark_price", kwargs)
         symbol = kwargs["symbol"]
         reading = self._mark_prices.get(symbol)
         if reading is None:
@@ -498,9 +588,8 @@ class BinanceSemanticsFakeAdapter:
             raise RuntimeError(f"no mark price set for {symbol}")
         return reading
 
+    @_exchange_call("symbol_lot_filters")
     async def symbol_lot_filters(self, **kwargs: Any) -> Any:
-        self._bind_real("symbol_lot_filters", kwargs)
-        self._record_call("symbol_lot_filters", kwargs)
         symbol = kwargs["symbol"]
         filters = self._lot_filters.get(symbol)
         if filters is None:
@@ -516,11 +605,10 @@ class BinanceSemanticsFakeAdapter:
         inspect.signature(BinanceUsdmAdapter.error_facts).bind(exc)
         return error_facts_from_exception(exc)
 
+    @_exchange_call("snapshot_open_normal_orders")
     async def snapshot_open_normal_orders(self, **kwargs: Any) -> Any:
         from src.adapters.binance_usdm import OpenOrderSnapshot
 
-        self._bind_real("snapshot_open_normal_orders", kwargs)
-        self._record_call("snapshot_open_normal_orders", kwargs)
         symbol = kwargs.get("symbol")
         return [
             OpenOrderSnapshot(
@@ -545,11 +633,10 @@ class BinanceSemanticsFakeAdapter:
             if symbol is None or record.symbol == symbol
         ]
 
+    @_exchange_call("snapshot_open_algo_orders")
     async def snapshot_open_algo_orders(self, **kwargs: Any) -> Any:
         from src.adapters.binance_usdm import OpenAlgoOrderSnapshot
 
-        self._bind_real("snapshot_open_algo_orders", kwargs)
-        self._record_call("snapshot_open_algo_orders", kwargs)
         symbol = kwargs.get("symbol")
         return [
             OpenAlgoOrderSnapshot(
@@ -575,12 +662,11 @@ class BinanceSemanticsFakeAdapter:
             if symbol is None or record.symbol == symbol
         ]
 
+    @_exchange_call("place_market_close")
     async def place_market_close(self, **kwargs: Any) -> Any:
         """A reduce-only MARKET close; the rejection codes are TEST CONVENTIONS (A4/A8)."""
         from src.adapters.binance_usdm import MarketCloseResult
 
-        self._bind_real("place_market_close", kwargs)
-        self._record_call("place_market_close", kwargs)
         symbol = kwargs["symbol"]
         side = kwargs["side"]
         quantity = _dec(kwargs["quantity"])
@@ -634,11 +720,10 @@ class BinanceSemanticsFakeAdapter:
             update_time_utc=record.update_time_utc,
         )
 
+    @_exchange_call("snapshot_positions")
     async def snapshot_positions(self, **kwargs: Any) -> Any:
         from src.adapters.binance_usdm import PositionSnapshot
 
-        self._bind_real("snapshot_positions", kwargs)
-        self._record_call("snapshot_positions", kwargs)
         symbol = kwargs.get("symbol")
         rows = []
         for sym, amount in sorted(self.positions.items()):
@@ -664,17 +749,16 @@ class BinanceSemanticsFakeAdapter:
             )
         return rows
 
+    @_exchange_call("get_position_mode")
     async def get_position_mode(self) -> Any:
         from src.adapters.binance_usdm import PositionModeResult
 
-        self._record_call("get_position_mode", {})
         if self.position_mode not in ("ONE_WAY", "HEDGE"):
             raise RuntimeError("position mode unavailable")
         return PositionModeResult(dual_side_position=self.position_mode == "HEDGE")
 
+    @_exchange_call("cancel_normal_order")
     async def cancel_normal_order(self, **kwargs: Any) -> Any:
-        self._bind_real("cancel_normal_order", kwargs)
-        self._record_call("cancel_normal_order", kwargs)
         client_id = kwargs["orig_client_order_id"]
         if client_id in self.open_orders:
             # A PARTIALLY_FILLED entry ends CANCELED with its executed quantity kept (the
@@ -683,9 +767,8 @@ class BinanceSemanticsFakeAdapter:
             self.cancel(client_id)
         return None
 
+    @_exchange_call("cancel_algo_order")
     async def cancel_algo_order(self, **kwargs: Any) -> Any:
-        self._bind_real("cancel_algo_order", kwargs)
-        self._record_call("cancel_algo_order", kwargs)
         client_algo_id = kwargs["client_algo_id"]
         if client_algo_id in self.open_algos:
             self.cancel_algo(client_algo_id)
