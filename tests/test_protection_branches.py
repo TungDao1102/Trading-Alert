@@ -521,6 +521,7 @@ async def test_branch_q4_refused_stop_is_journaled_not_sent_and_the_deadline_sti
     assert rig.coordinator.blocks_new_entries() is True
 
     # The next step tries again, by querying the id first.
+    await _advance_ms(rig, 1)  # (the journal keys events by content and time)
     await rig.coordinator.step()
     assert len(rig.journal.by_type("STOP_NOT_SENT")) == 2
     methods = [
@@ -536,7 +537,7 @@ async def test_branch_q4_refused_stop_is_journaled_not_sent_and_the_deadline_sti
     ]
 
     # The deadline keeps running; escalation happens on time and the close is refused too.
-    await _advance_ms(rig, MAX_UNPROTECTED_MS - 2)
+    await _advance_ms(rig, MAX_UNPROTECTED_MS - 3)
     await rig.coordinator.step()
     assert _state(rig) is ProtectionState.UNPROTECTED
     await _advance_ms(rig, 2)

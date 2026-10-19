@@ -16,9 +16,46 @@ A position counts as protected only after a REST query of the stop answers class
 ALGO_UPDATE alone never moves the state. ``blocks_new_entries()`` is True while any registered
 position is UNPROTECTED, CLOSE_REQUIRED or CLOSE_FAILED (RISK-04).
 
-This module is the tracer (branch B0, the happy path) plus REST-only fill detection and the
-router wiring. The failure branches and the two deadlines are plan 19-14, the take-profit legs
-plan 19-16, the manager hand-off plan 19-15, the emergency closer plan 19-12.
+Plan 19-11 built the happy path (branch B0), the REST-only fill detection and the router
+wiring. Plan 19-14 (this revision) adds the failure branches of 19-NOTES.md "Fill, stop and entry
+remainder", verbatim as D-12 requires, and the two SEPARATE deadlines of D-13, both measured from
+the first detected fill in whole milliseconds (``timedelta`` floor division, no float; reaching a
+deadline means escalate):
+
+* B5 ``B5_STOP_REJECTED``: a definitive stop rejection after a fill (``classify`` of the facts
+  from ``adapter.error_facts``, category REJECTED_DEFINITIVE, for example -2021) is never resent;
+  the intent is REJECTED and the plan goes CLOSE_REQUIRED.
+* B1 ``B1_ENTRY_NOT_TERMINAL``: stop confirmed, entry still open ``entry_terminal_timeout_ms``
+  after the first fill: the stop is kept (it is only swept after FLAT), no TP, CLOSE_REQUIRED with
+  the knowingly-accepted reason journaled. This closes a position that has a good stop because an
+  entry cancel was slow (owner note); a wide measured timeout is the mitigation.
+* B2 ``B2_STOP_UNCONFIRMED`` / B3 ``B3_BOTH_AMBIGUOUS``: stop still unconfirmed
+  ``max_unprotected_ms`` after the first fill (entry terminal: B2, entry still open: B3). Before
+  the deadline the stop and the entry are queried by id every step, the entry cancel is re-issued
+  every step, and a stop REST proved absent is re-placed under the same id (never blindly).
+* B4 ``B4_FILL_AFTER_STOP``: a once-confirmed stop that is no longer ACTIVE while a position
+  exists (decided by the position, never by the algo status class, research P6) is never
+  re-placed; the rest is cancelled and the new exposure is closed by MARKET.
+* ``NO_POSITION_ON_STOP_BUT_EXPOSED``: -4509 on the stop reads the position; flat with a terminal
+  entry ends FLAT, an open position goes CLOSE_REQUIRED.
+
+CLOSE_REQUIRED (entered once per plan): SAFE_MODE(``CLOSE_REQUIRED``), a critical alert
+``CLOSE_REQUIRED``, the branch code journaled on the transition, then
+``emergency_closer.close_position``. A close that does not end flat moves the plan to
+CLOSE_FAILED, which keeps blocking new entries and retries the close every step; FLAT needs the
+entry terminal AND REST flat, after which the plan's protective legs are swept by deterministic id
+(``cancel_untriggered_protectives``).
+
+Open, recorded and NOT decided here: Q4 / Phase 18 src/WR-12 (a 418/429 pause refuses the stop,
+the cancel and the close with a pre-send refusal; no exemption is added, every refused call is
+journaled as not sent, the deadline keeps running and the escalation to CLOSE_REQUIRED /
+CLOSE_FAILED with SAFE_MODE and a critical alert is attempted on time, but "never naked" is NOT
+claimed for that window), A3 (whether a closePosition stop is auto-cancelled when the position
+closes, probe 6) and A2 (a GTD expiry reported as EXPIRED and terminal). An exception's message
+text is never read (D-21): only its class and int code through the taxonomy.
+
+The take-profit legs are plan 19-16, the manager hand-off plan 19-15, the emergency closer plan
+19-12.
 
 Design rules:
 
@@ -63,6 +100,7 @@ from src.domain.enums import ExecutionIntentStatus, OrderRole
 from src.domain.exchange_errors import (
     CallKind,
     ExchangeErrorCategory,
+    PreSendRefusal,
     classify,
 )
 from src.domain.journal import JournalEvent, content_hash_event_id, correlated_event_id
@@ -97,6 +135,7 @@ EVENT_STOP_PLACEMENT_FAILED = "PROTECTION_STOP_PLACEMENT_FAILED"
 EVENT_ENTRY_CANCEL_FAILED = "PROTECTION_ENTRY_CANCEL_FAILED"
 EVENT_STEP_ERROR = "PROTECTION_STEP_ERROR"
 EVENT_STOP_NOT_SENT = "STOP_NOT_SENT"
+EVENT_ENTRY_CANCEL_NOT_SENT = "PROTECTION_ENTRY_CANCEL_NOT_SENT"
 EVENT_CLOSE_REQUIRED = "PROTECTION_CLOSE_REQUIRED"
 EVENT_CLOSE_ATTEMPT_ERROR = "PROTECTION_CLOSE_ATTEMPT_ERROR"
 EVENT_SWEEP_FAILED = "PROTECTION_SWEEP_FAILED"
@@ -126,14 +165,16 @@ REASON_CLOSE_FAILED = "CLOSE_FAILED"
 REASON_CLOSE_NOT_SENT = "CLOSE_NOT_SENT"
 REASON_CLOSED_ENTRY_OPEN = "CLOSED_ENTRY_OPEN"
 REASON_STOP_CONSUMED_FLAT = "STOP_CONSUMED_FLAT"
+REASON_NO_POSITION_ON_STOP = "NO_POSITION_ON_STOP"
 
 
 class ProtectionState(str, Enum):
     """The stable protection state names (Phase 20 reads them, research P8).
 
-    This plan implements the transitions AWAITING_FILL -> UNPROTECTED -> PROTECTED_ENTRY_OPEN /
-    PROTECTED and AWAITING_FILL -> ENTRY_ENDED_NO_FILL. The transitions into COMPLETE,
-    TP_UNAVAILABLE (plan 19-16), CLOSE_REQUIRED, FLAT and CLOSE_FAILED (plan 19-14) are later.
+    Implemented: AWAITING_FILL -> UNPROTECTED -> PROTECTED_ENTRY_OPEN / PROTECTED,
+    AWAITING_FILL -> ENTRY_ENDED_NO_FILL (plan 19-11) and, from UNPROTECTED or
+    PROTECTED_ENTRY_OPEN, CLOSE_REQUIRED <-> CLOSE_FAILED -> FLAT (plan 19-14). The transitions
+    into COMPLETE and TP_UNAVAILABLE are plan 19-16.
     """
 
     AWAITING_FILL = "AWAITING_FILL"
@@ -345,6 +386,8 @@ class _PlaceOutcome(Enum):
     PLACED = "PLACED"
     EXISTS = "EXISTS"
     REJECTED = "REJECTED"
+    NO_POSITION = "NO_POSITION"
+    NOT_SENT = "NOT_SENT"
     AMBIGUOUS = "AMBIGUOUS"
 
 
@@ -391,6 +434,12 @@ def _attr(obj: Any, name: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(name)
     return getattr(obj, name, None)
+
+
+def _refusal_reason(exc: BaseException) -> str:
+    """The project-fixed reason of a pre-send refusal (its type name when it carries none)."""
+    reason = getattr(exc, "reason", None)
+    return reason if isinstance(reason, str) and reason != "" else type(exc).__name__
 
 
 def _optional_text(value: object) -> str | None:
@@ -618,6 +667,33 @@ class ProtectionCoordinator:
                 )
             )
             await self._enter_close_required(tracked, BRANCH_B5_STOP_REJECTED)
+        elif outcome is _PlaceOutcome.NO_POSITION:
+            await self._on_no_position_on_stop(tracked)
+
+    async def _on_no_position_on_stop(self, tracked: _Tracked) -> None:
+        """-4509 on the stop: the exchange says there is no position; the position is read.
+
+        Flat with a terminal entry ends the plan (nothing to close, the legs are swept). Open is
+        contradictory and fails closed into CLOSE_REQUIRED. Flat with an open entry, or an
+        unreadable position, keeps the plan UNPROTECTED and watched: the entry cancel is
+        re-issued every step and the deadline decides.
+        """
+        exposed = await self._position_is_open(tracked)
+        if exposed is True:
+            await self._enter_close_required(tracked, BRANCH_NO_POSITION_BUT_EXPOSED)
+        elif exposed is False:
+            entry = tracked.entry
+            answer = await self._guarded(
+                self._adapter.query_order_by_client(
+                    symbol=entry.symbol, orig_client_order_id=entry.entry_client_order_id
+                )
+            )
+            self._apply_entry_answer(tracked, answer)
+            if tracked.entry_terminal_at is not None:
+                self._transition(
+                    tracked, ProtectionState.FLAT, REASON_NO_POSITION_ON_STOP, self._now()
+                )
+                await self._sweep(tracked)
 
     async def _poll_entry(self, tracked: _Tracked) -> None:
         """REST poll of an AWAITING_FILL entry: the fill source when no stream event arrived.
@@ -777,6 +853,18 @@ class ProtectionCoordinator:
                 working_type=entry.working_type,
                 client_algo_id=stop_id,
             )
+        except PreSendRefusal as exc:
+            # Nothing reached the exchange (rate-limit gate, policy missing). The intent stays
+            # SENT (REJECTED is terminal and would forbid the retry), no SAFE_MODE comes from the
+            # refusal itself (D-21), and the deadline keeps running: Q4 is owner-open, so nothing
+            # here claims the position is safe during a 418/429 window.
+            self._journal_note(
+                tracked,
+                EVENT_STOP_NOT_SENT,
+                {"error_type": type(exc).__name__, "reason": _refusal_reason(exc)},
+                self._now(),
+            )
+            return _PlaceOutcome.NOT_SENT
         except Exception as exc:  # noqa: BLE001 - classified below; ambiguity is probed by REST
             category = self._classify_placement(exc)
             self._journal_note(
@@ -790,6 +878,8 @@ class ProtectionCoordinator:
             )
             if category is ExchangeErrorCategory.REJECTED_DEFINITIVE:
                 return _PlaceOutcome.REJECTED
+            if category is ExchangeErrorCategory.PRECONDITION_NO_POSITION:
+                return _PlaceOutcome.NO_POSITION
             return _PlaceOutcome.AMBIGUOUS
         return _PlaceOutcome.PLACED
 
@@ -805,6 +895,13 @@ class ProtectionCoordinator:
         try:
             await self._adapter.cancel_normal_order(
                 symbol=entry.symbol, orig_client_order_id=entry.entry_client_order_id
+            )
+        except PreSendRefusal as exc:
+            self._journal_note(
+                tracked,
+                EVENT_ENTRY_CANCEL_NOT_SENT,
+                {"error_type": type(exc).__name__, "reason": _refusal_reason(exc)},
+                self._now(),
             )
         except Exception as exc:  # noqa: BLE001 - the REST step reads the entry status
             self._journal_note(
@@ -1061,15 +1158,12 @@ class ProtectionCoordinator:
                 tracked, EVENT_CLOSE_ATTEMPT_ERROR, {"error_type": type(exc).__name__}, self._now()
             )
             closed = False
-        now = self._now()
         if closed:
-            if tracked.state is ProtectionState.CLOSE_FAILED:
-                self._transition(
-                    tracked, ProtectionState.CLOSE_REQUIRED, REASON_CLOSED_ENTRY_OPEN, now
-                )
             return True
         if tracked.state is not ProtectionState.CLOSE_FAILED:
-            self._transition(tracked, ProtectionState.CLOSE_FAILED, self._close_failure(), now)
+            self._transition(
+                tracked, ProtectionState.CLOSE_FAILED, self._close_failure(), self._now()
+            )
         return False
 
     def _close_failure(self) -> str:
@@ -1099,11 +1193,18 @@ class ProtectionCoordinator:
                 await self._cancel_entry_remainder(tracked)
         entry_terminal = tracked.entry_terminal_at is not None
         closed = await self._attempt_close(tracked, tracked.close_branch or REASON_CLOSE_FAILED)
-        if closed and entry_terminal:
+        if not closed:
+            return
+        if entry_terminal:
             self._transition(
                 tracked, ProtectionState.FLAT, REASON_CLOSED_ENTRY_TERMINAL, self._now()
             )
             await self._sweep(tracked)
+        elif tracked.state is ProtectionState.CLOSE_FAILED:
+            # Flat now, but the entry is still open and may fill again: keep watching.
+            self._transition(
+                tracked, ProtectionState.CLOSE_REQUIRED, REASON_CLOSED_ENTRY_OPEN, self._now()
+            )
 
     async def _sweep(self, tracked: _Tracked) -> None:
         """Cancel the plan's protective legs by deterministic id once the position is flat."""
@@ -1270,17 +1371,30 @@ class ProtectionCoordinator:
 
 
 __all__ = [
+    "ALERT_CLOSE_REQUIRED",
     "BLOCKING_STATES",
+    "BRANCH_B1_ENTRY_NOT_TERMINAL",
+    "BRANCH_B2_STOP_UNCONFIRMED",
+    "BRANCH_B3_BOTH_AMBIGUOUS",
+    "BRANCH_B4_FILL_AFTER_STOP",
+    "BRANCH_B5_STOP_REJECTED",
+    "BRANCH_NO_POSITION_BUT_EXPOSED",
+    "EVENT_CLOSE_ATTEMPT_ERROR",
+    "EVENT_CLOSE_REQUIRED",
     "EVENT_ENTRY_CANCEL_FAILED",
+    "EVENT_ENTRY_CANCEL_NOT_SENT",
     "EVENT_FILL_QUANTITY_UNKNOWN",
     "EVENT_PROTECTION_TRANSITION",
     "EVENT_REST_FAILED",
     "EVENT_STEP_ERROR",
+    "EVENT_STOP_NOT_SENT",
     "EVENT_STOP_PLACEMENT_FAILED",
+    "EVENT_SWEEP_FAILED",
     "EVENT_UNKNOWN_FILL",
     "FILLED_ENTRY_STATUSES",
     "POSITION_MODE_HEDGE",
     "POSITION_MODE_ONE_WAY",
+    "SAFE_MODE_CLOSE_REQUIRED",
     "SAFE_MODE_DB_FAILURE",
     "TERMINAL_ENTRY_STATUSES",
     "CriticalAlertSink",
