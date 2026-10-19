@@ -46,7 +46,7 @@ from typing import Any, Protocol
 
 from src.domain.journal import JournalEvent, content_hash_event_id
 from src.domain.lot_filters import LotFilters
-from src.execution.lot_split import next_close_part
+from src.execution.lot_split import next_close_part, plan_close_parts
 from src.execution.order_ids import derive_close_order_id
 from src.execution.protection import (
     POSITION_MODE_HEDGE,
@@ -174,30 +174,46 @@ class MarketEmergencyCloser(EmergencyCloser):
         if not isinstance(filters, LotFilters):
             return self._fail(entry, reason, "LOT_FILTERS_UNAVAILABLE", 0, "InvalidFilters")
 
-        quantity = next_close_part(remaining=abs(position), filters=filters)
-        if quantity is None:
-            return self._fail(entry, reason, "NO_VALID_PART", 0, None)
-
-        side = "SELL" if position > _ZERO else "BUY"
-        client_order_id = derive_close_order_id(plan_hash=entry.plan_hash, attempt_no=1)
-        self._journal_attempt(entry, PHASE_PRE_SEND, reason, 1, client_order_id, side, quantity)
-        await self._adapter.place_market_close(
-            symbol=symbol,
-            side=side,
-            position_side=_POSITION_SIDE_ONE_WAY,
-            quantity=quantity,
-            new_client_order_id=client_order_id,
-        )
-        self._journal_attempt(entry, PHASE_POST_SEND, reason, 1, client_order_id, side, quantity)
-
-        try:
-            position = await self._read_position(symbol)
-        except Exception as exc:  # noqa: BLE001 - flat is proven by REST or not at all
-            return self._fail(entry, reason, "POSITION_READ_FAILED", 1, type(exc).__name__)
-        if position != _ZERO:
-            return self._fail(entry, reason, "NOT_FLAT_AFTER_PART", 1, None)
-        self._last_result = EmergencyCloseResult(EmergencyCloseStatus.FLAT, 1, reason)
-        return True
+        # Never more sends than the parts planned from the first REST position (D-15): a part
+        # that does not move the position must not turn into an endless loop.
+        parts_planned = max(len(plan_close_parts(position=abs(position), filters=filters).parts), 1)
+        parts_sent = 0
+        while parts_sent < parts_planned:
+            # Each part is sized from the REST position, never from a running total.
+            quantity = next_close_part(remaining=abs(position), filters=filters)
+            if quantity is None:
+                return self._fail(entry, reason, "NO_VALID_PART", parts_sent, None)
+            side = "SELL" if position > _ZERO else "BUY"
+            attempt_no = parts_sent + 1
+            client_order_id = derive_close_order_id(
+                plan_hash=entry.plan_hash, attempt_no=attempt_no
+            )
+            self._journal_attempt(
+                entry, PHASE_PRE_SEND, reason, attempt_no, client_order_id, side, quantity
+            )
+            await self._adapter.place_market_close(
+                symbol=symbol,
+                side=side,
+                position_side=_POSITION_SIDE_ONE_WAY,
+                quantity=quantity,
+                new_client_order_id=client_order_id,
+            )
+            parts_sent += 1
+            self._journal_attempt(
+                entry, PHASE_POST_SEND, reason, attempt_no, client_order_id, side, quantity
+            )
+            try:
+                position = await self._read_position(symbol)
+            except Exception as exc:  # noqa: BLE001 - flat is proven by REST or not at all
+                return self._fail(
+                    entry, reason, "POSITION_READ_FAILED", parts_sent, type(exc).__name__
+                )
+            if position == _ZERO:
+                self._last_result = EmergencyCloseResult(
+                    EmergencyCloseStatus.FLAT, parts_sent, reason
+                )
+                return True
+        return self._fail(entry, reason, "PARTS_EXHAUSTED", parts_sent, None)
 
     # ------------------------------------------------------------------ #
     # REST reads.
