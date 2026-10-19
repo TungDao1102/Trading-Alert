@@ -279,3 +279,209 @@ async def test_hedge_entry_is_refused_with_value_error_and_nothing_is_sent() -> 
 
 def test_the_closer_implements_the_coordinator_protocol() -> None:
     assert EmergencyCloser in MarketEmergencyCloser.__mro__
+
+
+# --------------------------------------------------------------------------- #
+# Parts above the market maximum, re-check after each part, impossible part (Task 2).
+# --------------------------------------------------------------------------- #
+
+
+def whole_unit_filters(*, market_max: str) -> LotFilters:
+    """FAKE filters on a whole-unit grid so a small position needs several parts."""
+    return lot_filters(market_max=market_max, step="1", minimum="1")
+
+
+def method_order(rig: CloseRig) -> list[str]:
+    return [c["method"] for c in rig.fake.calls]
+
+
+def assert_failed_into_safe_mode(rig: CloseRig, *, code: str) -> None:
+    assert rig.safe_mode.entered_reasons == ["EMERGENCY_CLOSE_FAILED"]
+    assert [(a.event, a.plan_hash, a.symbol, a.reason) for a in rig.alerts.alerts] == [
+        ("EMERGENCY_CLOSE_FAILED", PLAN_HASH, SYMBOL, code)
+    ]
+    assert "failed" in rig.phases()
+    assert rig.closer.last_result is not None
+    assert rig.closer.last_result.status == "CLOSE_FAILED"
+    assert rig.closer.last_result.reason == code
+
+
+async def close(rig: CloseRig, reason: str = "CLOSE_REQUIRED") -> bool:
+    return await rig.closer.close_position(entry=resting_entry_for_tests(), reason=reason)
+
+
+async def test_a_position_above_the_market_maximum_closes_in_three_parts() -> None:
+    rig = make_close_rig(D("12"), filters=whole_unit_filters(market_max="5"))
+
+    closed = await close(rig)
+
+    assert closed is True
+    assert rig.sent_quantities() == [D("5"), D("5"), D("2")]
+    assert rig.sent_ids() == [
+        derive_close_order_id(plan_hash=PLAN_HASH, attempt_no=n) for n in (1, 2, 3)
+    ]
+    # A position read opens the call and follows every send.
+    assert method_order(rig) == [
+        "snapshot_positions",
+        "symbol_lot_filters",
+        "place_market_close",
+        "snapshot_positions",
+        "place_market_close",
+        "snapshot_positions",
+        "place_market_close",
+        "snapshot_positions",
+    ]
+    assert rig.closer.last_result is not None
+    assert rig.closer.last_result.status == "FLAT"
+    assert rig.closer.last_result.parts_sent == 3
+    assert rig.safe_mode.entered_reasons == []
+
+
+async def test_the_next_part_comes_from_the_rest_position_not_a_running_total() -> None:
+    rig = make_close_rig(D("12"), filters=whole_unit_filters(market_max="5"))
+    original = rig.fake.place_market_close
+    calls = 0
+
+    async def with_a_stop_firing(**kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        result = await original(**kwargs)
+        if calls == 1:
+            # The stop fired as well: the exchange now holds 12 - 5 - 3 = 4, not 7.
+            rig.fake._apply_position_delta(SYMBOL, D("-3"), ENTRY_PRICE)
+        return result
+
+    rig.fake.place_market_close = with_a_stop_firing  # type: ignore[method-assign]
+
+    closed = await close(rig)
+
+    assert closed is True
+    assert rig.sent_quantities() == [D("5"), D("4")]
+    assert rig.fake.positions[SYMBOL] == 0
+
+
+async def test_an_unrepresentable_remainder_sends_nothing_and_escalates() -> None:
+    # 0.5 is below the whole-unit minimum: no valid part exists (nothing is rounded up).
+    rig = make_close_rig(D("0.5"), filters=whole_unit_filters(market_max="5"))
+
+    closed = await close(rig)
+
+    assert closed is False
+    assert rig.fake.calls_to("place_market_close") == []
+    assert_failed_into_safe_mode(rig, code="NO_VALID_PART")
+    assert rig.fake.positions[SYMBOL] == D("0.5")
+
+
+async def test_a_failed_live_filter_read_is_the_no_valid_part_branch_without_fallback() -> None:
+    rig = make_close_rig(D("0.004"))
+    rig.fake.fail_next("symbol_lot_filters", RuntimeError("exchangeInfo unavailable"))
+
+    closed = await close(rig)
+
+    assert closed is False
+    assert rig.fake.calls_to("place_market_close") == []
+    assert_failed_into_safe_mode(rig, code="LOT_FILTERS_UNAVAILABLE")
+
+
+async def test_an_unreadable_position_never_declares_safety() -> None:
+    rig = make_close_rig(D("0.004"))
+    rig.fake.fail_next("snapshot_positions", RuntimeError("position read failed"))
+
+    closed = await close(rig)
+
+    assert closed is False
+    assert rig.fake.calls_to("place_market_close") == []
+    assert_failed_into_safe_mode(rig, code="POSITION_READ_FAILED")
+
+
+async def test_a_failed_re_read_after_a_part_stops_without_another_send() -> None:
+    rig = make_close_rig(D("12"), filters=whole_unit_filters(market_max="5"))
+    original = rig.fake.snapshot_positions
+    reads = 0
+
+    async def second_read_fails(**kwargs: Any) -> Any:
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            raise RuntimeError("position read failed")
+        return await original(**kwargs)
+
+    rig.fake.snapshot_positions = second_read_fails  # type: ignore[method-assign]
+
+    closed = await close(rig)
+
+    assert closed is False
+    assert len(rig.fake.calls_to("place_market_close")) == 1
+    assert_failed_into_safe_mode(rig, code="POSITION_READ_FAILED")
+
+
+async def test_a_position_already_flat_sends_nothing_and_is_flat() -> None:
+    rig = make_close_rig(None)
+
+    closed = await close(rig)
+
+    assert closed is True
+    assert rig.fake.calls_to("place_market_close") == []
+    assert rig.closer.last_result is not None
+    assert rig.closer.last_result.status == "FLAT"
+    assert rig.closer.last_result.parts_sent == 0
+    assert rig.safe_mode.entered_reasons == []
+    assert rig.alerts.alerts == []
+
+
+async def test_a_call_never_sends_more_parts_than_the_first_position_needs() -> None:
+    from types import SimpleNamespace
+
+    from src.adapters.binance_usdm import PositionSnapshot
+
+    rig = make_close_rig(D("12"), filters=whole_unit_filters(market_max="5"))
+
+    async def stuck_position(**kwargs: Any) -> Any:
+        rig.fake._record_call("snapshot_positions", kwargs)
+        return [
+            PositionSnapshot(
+                symbol=SYMBOL,
+                position_side="BOTH",
+                position_amt=D("12"),
+                entry_price=ENTRY_PRICE,
+                break_even_price=ENTRY_PRICE,
+                mark_price=None,
+                unrealized_profit=D("0"),
+                liquidation_price=None,
+                notional=None,
+                margin_asset="USDT",
+                update_time_utc=rig.clock.now(),
+            )
+        ]
+
+    async def acknowledged_only(**kwargs: Any) -> Any:
+        rig.fake._record_call("place_market_close", kwargs)
+        return SimpleNamespace(status="NEW")
+
+    rig.fake.snapshot_positions = stuck_position  # type: ignore[method-assign]
+    rig.fake.place_market_close = acknowledged_only  # type: ignore[method-assign]
+
+    closed = await close(rig)
+
+    # plan_close_parts(12) is three parts: the call stops after three sends, never loops on.
+    assert closed is False
+    assert len(rig.fake.calls_to("place_market_close")) == 3
+    assert rig.sent_ids() == [
+        derive_close_order_id(plan_hash=PLAN_HASH, attempt_no=n) for n in (1, 2, 3)
+    ]
+    assert_failed_into_safe_mode(rig, code="PARTS_EXHAUSTED")
+    assert rig.closer.last_result is not None
+    assert rig.closer.last_result.parts_sent == 3
+
+
+async def test_every_failure_path_journals_a_failed_record_with_scalar_fields() -> None:
+    rig = make_close_rig(D("0.5"), filters=whole_unit_filters(market_max="5"))
+
+    await close(rig)
+
+    failed = [e for e in rig.journal.calls if json.loads(e.payload_json)["phase"] == "failed"]
+    assert len(failed) == 1
+    payload = json.loads(failed[0].payload_json)
+    assert payload["code"] == "NO_VALID_PART"
+    assert payload["reason"] == "CLOSE_REQUIRED"
+    assert all(isinstance(v, (str, int, bool)) or v is None for v in payload.values())
