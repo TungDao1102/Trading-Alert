@@ -419,6 +419,10 @@ class OrderProbe:
     order_id: str | None
     status: str | None
     update_time_utc: datetime | None
+    # Plan 19-05 (research F8, D-10 REST fill source): what the exchange reports as executed.
+    # None means the exchange omitted the field (unknown); it is never defaulted to zero.
+    executed_quantity: Decimal | None = None
+    average_price: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -1517,7 +1521,28 @@ def _query_order_to_probe(
         order_id=str(raw.order_id) if raw.order_id is not None else None,
         status=raw.status,
         update_time_utc=_ms_to_utc(int(raw.update_time)) if raw.update_time is not None else None,
+        executed_quantity=_optional_probe_decimal(
+            getattr(raw, "executed_qty", None), "executed_qty"
+        ),
+        average_price=_optional_probe_decimal(getattr(raw, "avg_price", None), "avg_price"),
     )
+
+
+def _optional_probe_decimal(value: Any, field_name: str) -> Decimal | None:
+    """Strict Decimal of an optional query_order field: None stays None, junk raises.
+
+    String-mediated (no float). An absent field is unknown (None), never zero; a present
+    but non-decimal, non-finite or negative value raises, naming the field only.
+    """
+    if value is None:
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except InvalidOperation:
+        raise ValueError(f"query_order {field_name} is not a decimal") from None
+    if not parsed.is_finite() or parsed < 0:
+        raise ValueError(f"query_order {field_name} is not a finite non-negative decimal")
+    return parsed
 
 
 def _require_quantity(value: Any, field_name: str) -> Decimal:
