@@ -10,7 +10,9 @@ with the fake's labelled rules (tests/support/fake_binance_exchange.py), not wit
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from src.domain.enums import ExecutionIntentStatus
@@ -26,9 +28,11 @@ from tests.support.execution_limits import test_only_execution_limits as limits_
 from tests.support.protection_doubles import (
     TEST_ONLY_PLAN_HASH,
     TEST_ONLY_SYMBOL,
+    ProtectionRig,
     make_rig,
     resting_entry_for_tests,
 )
+from tests.support.virtual_time import TEST_ONLY_VIRTUAL_START
 
 D = Decimal
 
@@ -307,3 +311,232 @@ async def test_an_existing_active_stop_is_adopted_not_duplicated() -> None:
     protection = rig.coordinator.protection_of(TEST_ONLY_PLAN_HASH)
     assert protection is not None
     assert protection.state is ProtectionState.PROTECTED
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: REST-only fill detection, zero-fill terminal, duplicates, concurrency.
+# --------------------------------------------------------------------------- #
+
+
+def _stop_and_cancel_calls(rig: ProtectionRig) -> tuple[list[Any], list[Any]]:
+    placements = rig.fake.calls_to("place_algo_protective")
+    cancels = rig.fake.calls_to("cancel_normal_order")
+    return ([c["kwargs"] for c in placements], [c["kwargs"] for c in cancels])
+
+
+async def test_rest_only_fill_gives_the_same_outcome_as_a_stream_fill() -> None:
+    stream = await make_rig()
+    stream.coordinator.fill_sink(stream.stream_fill(D("0.004")))
+    await stream.coordinator.step()
+    await stream.coordinator.step()
+
+    rest = await make_rig()
+    rest.fake.fill(rest.entry_id, quantity=D("0.004"))  # no stream event reaches the sink
+    await rest.coordinator.step()
+    protection = rest.coordinator.protection_of(TEST_ONLY_PLAN_HASH)
+    assert protection is not None
+    assert protection.state is ProtectionState.UNPROTECTED
+    assert rest.coordinator.blocks_new_entries() is True
+    await rest.coordinator.step()
+
+    assert _stop_and_cancel_calls(rest) == _stop_and_cancel_calls(stream)
+    for rig in (stream, rest):
+        protection = rig.coordinator.protection_of(TEST_ONLY_PLAN_HASH)
+        assert protection is not None
+        assert protection.state is ProtectionState.PROTECTED
+        stop_row = rig.stop_row()
+        assert stop_row is not None
+        assert stop_row.intent_status is ExecutionIntentStatus.ACKED
+    assert rest.transitions() == stream.transitions()
+
+
+async def test_every_awaiting_entry_is_polled_over_rest_each_step() -> None:
+    rig = await make_rig()
+    await rig.coordinator.step()
+    await rig.coordinator.step()
+    assert len(rig.fake.calls_to("query_order_by_client")) == 2
+    assert rig.fake.calls_to("place_algo_protective") == []
+    protection = rig.coordinator.protection_of(TEST_ONLY_PLAN_HASH)
+    assert protection is not None
+    assert protection.state is ProtectionState.AWAITING_FILL
+
+
+async def test_a_full_fill_seen_over_rest_places_the_stop() -> None:
+    rig = await make_rig()
+    rig.fake.fill(rig.entry_id)  # the whole 0.010: status FILLED
+    await rig.coordinator.step()
+    assert len(rig.fake.calls_to("place_algo_protective")) == 1
+    await rig.coordinator.step()
+    protection = rig.coordinator.protection_of(TEST_ONLY_PLAN_HASH)
+    assert protection is not None
+    assert protection.state is ProtectionState.PROTECTED
+
+
+def _answer_executed_quantity_unknown(rig: ProtectionRig) -> None:
+    """Make the entry probe answer like an exchange that omitted `executed_quantity`."""
+    original = rig.fake.query_order_by_client
+
+    async def probe(**kwargs: Any) -> Any:
+        answer = await original(**kwargs)
+        return replace(answer, executed_quantity=None)
+
+    rig.fake.query_order_by_client = probe  # type: ignore[method-assign, assignment]
+
+
+async def test_unknown_executed_quantity_on_a_filled_status_is_still_a_first_fill() -> None:
+    rig = await make_rig()
+    rig.fake.fill(rig.entry_id, quantity=D("0.004"))
+    _answer_executed_quantity_unknown(rig)
+    await rig.coordinator.step()
+    assert len(rig.fake.calls_to("place_algo_protective")) == 1
+    assert [e.event_type for e in rig.journal.calls].count("PROTECTION_FILL_QUANTITY_UNKNOWN") == 1
+    protection = rig.coordinator.protection_of(TEST_ONLY_PLAN_HASH)
+    assert protection is not None
+    assert protection.state is ProtectionState.UNPROTECTED
+
+
+@pytest.mark.parametrize("status", ["CANCELED", "EXPIRED"])
+async def test_entry_ended_with_zero_executed_places_nothing(status: str) -> None:
+    rig = await make_rig()
+    rig.fake.cancel(rig.entry_id)
+    if status == "EXPIRED":
+        rig.fake.history[rig.entry_id].status = "EXPIRED"
+    await rig.coordinator.step()
+    protection = rig.coordinator.protection_of(TEST_ONLY_PLAN_HASH)
+    assert protection is not None
+    assert protection.state is ProtectionState.ENTRY_ENDED_NO_FILL
+    assert protection.entry_terminal_at_utc == rig.clock.now()
+    assert rig.fake.calls_to("place_algo_protective") == []
+    assert rig.fake.calls_to("cancel_normal_order") == []
+    assert rig.stop_row() is None
+    assert rig.coordinator.blocks_new_entries() is False
+    assert rig.transitions()[-1] == ("AWAITING_FILL", "ENTRY_ENDED_NO_FILL")
+    await rig.coordinator.step()  # a finished plan is not polled again
+    assert len(rig.fake.calls_to("query_order_by_client")) == 1
+
+
+async def test_ended_entry_with_unknown_executed_quantity_is_settled_by_the_position() -> None:
+    flat = await make_rig()
+    flat.fake.cancel(flat.entry_id)
+    _answer_executed_quantity_unknown(flat)
+    await flat.coordinator.step()
+    protection = flat.coordinator.protection_of(TEST_ONLY_PLAN_HASH)
+    assert protection is not None
+    assert protection.state is ProtectionState.ENTRY_ENDED_NO_FILL
+    assert flat.fake.calls_to("place_algo_protective") == []
+
+    exposed = await make_rig()
+    exposed.fake.fill(exposed.entry_id, quantity=D("0.004"))
+    exposed.fake.cancel(exposed.entry_id)  # partially filled, then canceled
+    _answer_executed_quantity_unknown(exposed)
+    await exposed.coordinator.step()
+    protection = exposed.coordinator.protection_of(TEST_ONLY_PLAN_HASH)
+    assert protection is not None
+    assert protection.state is ProtectionState.UNPROTECTED
+    assert len(exposed.fake.calls_to("place_algo_protective")) == 1
+
+
+async def test_a_canceled_entry_that_kept_a_partial_fill_is_a_first_fill() -> None:
+    rig = await make_rig()
+    rig.fake.fill(rig.entry_id, quantity=D("0.004"))
+    rig.fake.cancel(rig.entry_id)  # CANCELED with 0.004 executed: a position exists
+    await rig.coordinator.step()
+    assert len(rig.fake.calls_to("place_algo_protective")) == 1
+
+
+async def test_replayed_fills_never_place_a_second_stop() -> None:
+    rig = await make_rig()
+    routed = rig.stream_fill(D("0.004"))
+    rig.coordinator.fill_sink(routed)
+    rig.coordinator.fill_sink(routed)
+    await rig.coordinator.step()
+    rig.coordinator.fill_sink(routed)  # replayed after the stop was placed
+    await rig.coordinator.step()
+    rig.coordinator.fill_sink(routed)
+    await rig.coordinator.step()
+    assert len(rig.fake.calls_to("place_algo_protective")) == 1
+    assert len(rig.fake.calls_to("cancel_normal_order")) == 1
+
+
+def _foreign_fill(**overrides: Any) -> Any:
+    from src.adapters.binance_userdata_router import FillSource, RoutedFill
+    from src.execution.fill_monitor import FillEvent
+
+    fields: dict[str, Any] = {
+        "order_id": "ex-777",
+        "exchange_trade_id": "foreign-trade-1",
+        "symbol": "ETHUSDT",
+        "side": "BUY",
+        "position_side": "BOTH",
+        "fill_price": D("2000.00"),
+        "fill_quantity": D("0.5"),
+        "fill_time_utc": TEST_ONLY_VIRTUAL_START,
+    }
+    fields.update(overrides)
+    return RoutedFill(fill=FillEvent(**fields), source=FillSource.USER_DATA_EVENT, after_gap=False)
+
+
+async def test_a_fill_for_an_order_no_plan_owns_is_journaled_not_acted_on() -> None:
+    rig = await make_rig()
+    rig.coordinator.fill_sink(_foreign_fill())  # must not raise
+    await rig.coordinator.step()
+    await rig.coordinator.step()
+    assert rig.fake.calls_to("place_algo_protective") == []
+    unknown = rig.journal.by_type("PROTECTION_UNKNOWN_FILL")
+    assert len(unknown) == 1  # the same fill is journaled once
+    protection = rig.coordinator.protection_of(TEST_ONLY_PLAN_HASH)
+    assert protection is not None
+    assert protection.state is ProtectionState.AWAITING_FILL
+
+
+async def test_a_same_symbol_fill_of_another_order_is_unknown_once_the_entry_id_is_known() -> None:
+    rig = await make_rig()
+    await rig.coordinator.step()  # the REST poll learns the entry's exchange order id
+    rig.coordinator.fill_sink(_foreign_fill(symbol=TEST_ONLY_SYMBOL, order_id="ex-777"))
+    await rig.coordinator.step()
+    assert rig.fake.calls_to("place_algo_protective") == []
+    assert len(rig.journal.by_type("PROTECTION_UNKNOWN_FILL")) == 1
+
+
+async def test_fill_sink_never_raises() -> None:
+    rig = await make_rig()
+    rig.coordinator.fill_sink(object())  # type: ignore[arg-type]
+    assert rig.coordinator.fill_sink_failures == 1
+    await rig.coordinator.step()
+    assert rig.fake.calls_to("place_algo_protective") == []
+
+
+async def test_stop_and_cancel_start_together_cancel_held() -> None:
+    rig = await make_rig()
+    rig.coordinator.fill_sink(rig.stream_fill(D("0.004")))
+    rig.fake.hold("cancel_normal_order")
+
+    stepping = asyncio.create_task(rig.coordinator.step())
+    await rig.clock.settle()
+
+    # The stop completed in the same step while the cancel is still held (D-12).
+    assert "place_algo_protective" in rig.fake.completed
+    assert "cancel_normal_order" not in rig.fake.completed
+    assert len(rig.fake.calls_to("cancel_normal_order")) == 1  # the cancel already started
+    assert stepping.done() is False
+    rig.fake.release("cancel_normal_order")
+    await stepping
+    assert "cancel_normal_order" in rig.fake.completed
+
+
+async def test_stop_and_cancel_start_together_stop_held() -> None:
+    rig = await make_rig()
+    rig.coordinator.fill_sink(rig.stream_fill(D("0.004")))
+    rig.fake.hold("place_algo_protective")
+
+    stepping = asyncio.create_task(rig.coordinator.step())
+    await rig.clock.settle()
+
+    # The cancel completed while the stop placement is held: the cancel does not wait for it.
+    assert "cancel_normal_order" in rig.fake.completed
+    assert "place_algo_protective" not in rig.fake.completed
+    assert len(rig.fake.calls_to("place_algo_protective")) == 1  # the stop already started
+    assert stepping.done() is False
+    rig.fake.release("place_algo_protective")
+    await stepping
+    assert "place_algo_protective" in rig.fake.completed
