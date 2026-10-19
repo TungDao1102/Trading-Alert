@@ -13,8 +13,10 @@ Hand oracles (tick 0.10, LONG zone 99.50-100.60, stop 98.00; SHORT zone 99.50-10
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -23,6 +25,12 @@ from src.domain.enums import TradePlanStatus
 from src.execution.pre_placement import PrePlacementInputs, check_mark_price, evaluate_pre_placement
 
 from tests.backtest_plan_helpers import make_trade_plan
+from tests.support.ast_guards import (
+    float_constructor_calls,
+    forbidden_imports,
+    module_imports,
+    wall_clock_calls,
+)
 
 NOW = datetime(2026, 1, 5, 10, 0, 0, tzinfo=UTC)
 EXPIRY = NOW + timedelta(hours=2)
@@ -415,3 +423,140 @@ def test_evaluate_an_executed_approved_plan_is_not_contradicted() -> None:
     assert evaluate_pre_placement(_inputs(plan_status=TradePlanStatus.APPROVED)) is None
     assert evaluate_pre_placement(_inputs(plan_status=TradePlanStatus.READY)) is None
     assert evaluate_pre_placement(_inputs(plan_status=TradePlanStatus.APPROVAL_PENDING)) is None
+
+
+# --------------------------------------------------------------------------- #
+# check_symbol_free (D-05, D-11)
+# --------------------------------------------------------------------------- #
+
+
+def _free(**over: Any) -> str | None:
+    kwargs: dict[str, Any] = {
+        "symbol": SYMBOL,
+        "position_symbols": frozenset({"ETHUSDT"}),
+        "open_order_symbols": frozenset({"ETHUSDT"}),
+        "any_unprotected": False,
+    }
+    kwargs.update(over)
+    return pp.check_symbol_free(**kwargs)
+
+
+def test_check_symbol_free_verdicts() -> None:
+    assert _free() is None
+    assert _free(position_symbols=frozenset(), open_order_symbols=frozenset()) is None
+    assert _free(position_symbols=frozenset({SYMBOL})) == pp.SYMBOL_HAS_POSITION
+    assert _free(open_order_symbols=frozenset({SYMBOL, "ETHUSDT"})) == pp.SYMBOL_HAS_OPEN_ORDER
+    assert _free(open_order_symbols=None) == pp.SYMBOL_STATE_UNAVAILABLE
+    assert _free(any_unprotected=True) == pp.UNPROTECTED_POSITION_EXISTS
+
+
+def test_check_symbol_free_precedence() -> None:
+    # Unprotected (account-wide) first, then a position, then unreadable orders, then an order.
+    both = {"position_symbols": frozenset({SYMBOL}), "open_order_symbols": frozenset({SYMBOL})}
+    assert _free(any_unprotected=True, **both) == pp.UNPROTECTED_POSITION_EXISTS
+    assert _free(**both) == pp.SYMBOL_HAS_POSITION
+    assert _free(position_symbols=frozenset({SYMBOL}), open_order_symbols=None) == (
+        pp.SYMBOL_HAS_POSITION
+    )
+    assert _free(open_order_symbols=frozenset({SYMBOL})) == pp.SYMBOL_HAS_OPEN_ORDER
+
+
+def test_check_symbol_free_other_symbols_do_not_block() -> None:
+    others = frozenset({"ETHUSDT", "SOLUSDT"})
+    assert _free(position_symbols=others, open_order_symbols=others) is None
+
+
+# --------------------------------------------------------------------------- #
+# check_position_mode (D-14)
+# --------------------------------------------------------------------------- #
+
+
+def test_check_position_mode() -> None:
+    assert pp.check_position_mode("HEDGE") == pp.HEDGE_MODE_UNSUPPORTED
+    assert pp.check_position_mode("ONE_WAY") is None
+    for bad in ("hedge", "", "BOTH", "UNKNOWN"):
+        with pytest.raises(ValueError, match="position mode"):
+            pp.check_position_mode(bad)
+
+
+def test_position_mode_constants_match_the_manager() -> None:
+    from src.execution.manager import POSITION_MODE_HEDGE, POSITION_MODE_ONE_WAY
+
+    assert pp.check_position_mode(POSITION_MODE_HEDGE) == pp.HEDGE_MODE_UNSUPPORTED
+    assert pp.check_position_mode(POSITION_MODE_ONE_WAY) is None
+
+
+# --------------------------------------------------------------------------- #
+# Composite: each of the five checks fails in turn, and the order is pinned
+# --------------------------------------------------------------------------- #
+
+_FAILING_CASES: list[tuple[str, dict[str, Any]]] = [
+    (pp.PLAN_STATUS_INVALID, {"plan_status": TradePlanStatus.SUPERSEDED}),
+    (pp.PLAN_INVALIDATED_BEFORE_PLACEMENT, {"latest_closed_bar_close": D("97.00")}),
+    (pp.VALIDITY_TOO_SHORT, {"expiry_utc": NOW + timedelta(seconds=30)}),
+    (pp.SYMBOL_HAS_POSITION, {"position_symbols": frozenset({SYMBOL})}),
+    (pp.MARK_PRICE_CROSSED_STOP, {"mark_price": D("98.00")}),
+]
+
+
+@pytest.mark.parametrize(("expected", "override"), _FAILING_CASES)
+def test_evaluate_each_check_fails_in_turn(expected: str, override: dict[str, Any]) -> None:
+    assert evaluate_pre_placement(_inputs(**override)) == expected
+
+
+def test_evaluate_first_failure_wins_over_every_later_check() -> None:
+    for index, (expected, _) in enumerate(_FAILING_CASES):
+        merged: dict[str, Any] = {}
+        for _, override in _FAILING_CASES[index:]:
+            merged.update(override)
+        assert evaluate_pre_placement(_inputs(**merged)) == expected
+
+
+def test_evaluate_symbol_free_reasons_flow_through() -> None:
+    assert evaluate_pre_placement(_inputs(open_order_symbols=None)) == pp.SYMBOL_STATE_UNAVAILABLE
+    assert evaluate_pre_placement(_inputs(open_order_symbols=frozenset({SYMBOL}))) == (
+        pp.SYMBOL_HAS_OPEN_ORDER
+    )
+    assert evaluate_pre_placement(_inputs(any_unprotected=True)) == pp.UNPROTECTED_POSITION_EXISTS
+
+
+# --------------------------------------------------------------------------- #
+# RISK-04 and purity guards
+# --------------------------------------------------------------------------- #
+
+_FORBIDDEN_NAME_PARTS = ("loss", "pnl", "target", "drawdown", "streak")
+_SOURCE = Path(pp.__file__)
+
+
+def _public_functions() -> list[Any]:
+    return [
+        obj
+        for name, obj in vars(pp).items()
+        if inspect.isfunction(obj) and not name.startswith("_") and obj.__module__ == pp.__name__
+    ]
+
+
+def test_risk04_no_input_describes_prior_results() -> None:
+    names: list[str] = [f.name for f in dataclasses.fields(PrePlacementInputs)]
+    functions = _public_functions()
+    assert len(functions) >= 10
+    for function in functions:
+        names.extend(inspect.signature(function).parameters)
+    for name in names:
+        assert not any(part in name.lower() for part in _FORBIDDEN_NAME_PARTS), name
+
+
+def test_purity_imports_float_and_clock() -> None:
+    allowed = {
+        "__future__",
+        "json",
+        "dataclasses",
+        "datetime",
+        "decimal",
+        "src.domain.enums",
+        "src.domain.trade_plan",
+    }
+    assert set(module_imports(_SOURCE)) <= allowed
+    assert forbidden_imports(_SOURCE, ["src.backtest", "src.adapters", "src.persistence"]) == []
+    assert float_constructor_calls(_SOURCE) == []
+    assert wall_clock_calls(_SOURCE) == []
