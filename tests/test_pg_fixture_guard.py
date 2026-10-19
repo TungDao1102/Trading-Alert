@@ -181,7 +181,7 @@ def test_template_schema_comes_from_alembic_only(pg_db: str) -> None:
             has_intents = conn.execute(
                 text("SELECT to_regclass('public.execution_intents')")
             ).scalar_one()
-        assert version == "0004_persistence_integrity"
+        assert version == pg_support.alembic_head_revision()
         assert has_intents == "execution_intents"
     finally:
         engine.dispose()

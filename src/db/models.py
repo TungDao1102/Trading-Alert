@@ -543,6 +543,9 @@ class ExecutionIntentRow(Base):
     )
     outcome_is_no_trade: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     outcome_reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Sizing-time realized risk of a live entry (Phase 19, D-22, G4-008, migration 0005).
+    # Written once with the ENTRY INSERT; NULL when never recorded and on protective rows.
+    sized_realized_risk: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
     intended_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     sent_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -602,6 +605,10 @@ class ExecutionIntentRow(Base):
             "OR (NOT outcome_recorded AND outcome_reason_code IS NULL "
             "AND outcome_is_no_trade IS NULL)",
             name="ck_execution_intents_outcome",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "sized_realized_risk IS NULL OR (role = 'ENTRY' AND sized_realized_risk > 0)",
+            name="ck_execution_intents_sized_realized_risk",
         ).ddl_if(dialect="postgresql"),
     )
 

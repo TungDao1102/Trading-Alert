@@ -10,7 +10,9 @@ Every database here is built by `alembic upgrade` (never from ORM metadata, D-23
     name only (research Pitfall 4), so catalog assertions cover the predicates, the
     enum CHECK literals and the triggers.
   * The chain must be reversible (upgrade head, downgrade base, upgrade head) and a
-    data-bearing upgrade 0003 -> 0004 must keep every pre-existing row.
+    data-bearing upgrade 0003 -> 0004 and 0004 -> 0005 must keep every pre-existing row.
+  * Migration 0005 (Phase 19, D-22, G4-008) adds the nullable `sized_realized_risk` column
+    and its named CHECK to `execution_intents`; no test pins the literal head revision.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import re
 import tomllib
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +30,13 @@ from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import MetaData, Table, select, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from src.db.models import (
     Base,
     CollectorGap,
     CollectorWatermark,
     CoverageWindow,
+    ExecutionIntentRow,
     ShortIdMappingRow,
 )
 from src.domain.enums import (
@@ -54,9 +59,12 @@ from src.domain.enums import (
 from src.domain.registry import WORKING_TYPE_VALUES
 from src.persistence.engine import make_sync_engine
 
-from tests.pg_support import run_alembic
+from tests.pg_support import alembic_head_revision, run_alembic
+from tests.support.ast_guards import forbidden_imports
 from tests.support.pg_rows import (
     T0,
+    hexid,
+    insert_and_commit,
     make_approval,
     make_fill,
     make_journal,
@@ -69,6 +77,10 @@ from tests.support.pg_rows import (
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REVISION_0003 = "0003_callback_mapping"
+REVISION_0004 = "0004_persistence_integrity"
+REVISION_0005 = "0005_live_sized_risk"
+MIGRATION_0005 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0005_live_sized_risk.py"
+_CHECK_VIOLATION = "23514"
 
 _AUTOGENERATE_PLUGINS = [
     "alembic.autogenerate.*",
@@ -425,3 +437,106 @@ def test_data_bearing_upgrade_keeps_every_row(pg_empty_db: str) -> None:
         ]
     finally:
         engine.dispose()
+
+
+# --------------------------------------------------------------------------------------
+# Migration 0005: sized_realized_risk (Phase 19, D-22, G4-008)
+# --------------------------------------------------------------------------------------
+def test_migrated_database_is_at_the_script_directory_head(pg_db: str) -> None:
+    assert alembic_head_revision() == REVISION_0005
+    eng = make_sync_engine(pg_db)
+    try:
+        with eng.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        assert version == alembic_head_revision()
+    finally:
+        eng.dispose()
+
+
+def test_migration_0005_imports_no_project_module() -> None:
+    assert forbidden_imports(MIGRATION_0005, ("src", "tests")) == []
+
+
+def test_sized_realized_risk_column_and_check_catalog(engine: Engine) -> None:
+    with engine.connect() as conn:
+        column = conn.execute(
+            text(
+                "SELECT data_type, numeric_precision, numeric_scale, is_nullable "
+                "FROM information_schema.columns WHERE table_schema = 'public' "
+                "AND table_name = 'execution_intents' AND column_name = 'sized_realized_risk'"
+            )
+        ).one()
+        definition = conn.execute(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_execution_intents_sized_realized_risk' AND contype = 'c'"
+            )
+        ).scalar_one()
+    assert tuple(column) == ("numeric", 38, 18, "YES")
+    assert _normalize(definition) == _normalize(
+        "CHECK (sized_realized_risk IS NULL OR (role = 'ENTRY' AND sized_realized_risk > 0))"
+    )
+
+
+def _seed_parents(engine: Engine) -> None:
+    insert_and_commit(engine, make_signal(1), make_plan(1, 1), make_approval(1, 1, 1))
+
+
+def _intent(role: str = "ENTRY", **overrides: Any) -> ExecutionIntentRow:
+    is_entry = role == "ENTRY"
+    values: dict[str, Any] = {
+        "approval_id": hexid(0x2001),
+        "role": role,
+        "trade_plan_id": hexid(0x1001),
+        "plan_hash": "d" * 64,
+        "client_order_id": f"x-{1:032x}EN" if is_entry else None,
+        "algo_client_id": None if is_entry else f"x-{1:032x}{role[:2]}",
+        "symbol": "BTCUSDT",
+        "side": "BUY" if is_entry else "SELL",
+        "intended_quantity": Decimal("0.08"),
+        "intended_price": Decimal("50050"),
+        "intent_status": "INTENDED",
+        "outcome_recorded": False,
+        "intended_at_utc": T0,
+        "updated_at_utc": T0,
+    }
+    values.update(overrides)
+    return ExecutionIntentRow(**values)
+
+
+def test_entry_intent_accepts_a_positive_sized_realized_risk(engine: Engine) -> None:
+    _seed_parents(engine)
+    insert_and_commit(engine, _intent("ENTRY", sized_realized_risk=Decimal("12.5")))
+    with engine.connect() as conn:
+        stored = conn.execute(
+            text("SELECT sized_realized_risk FROM execution_intents WHERE role = 'ENTRY'")
+        ).scalar_one()
+    assert stored == Decimal("12.5")
+
+
+def test_intent_without_a_sized_figure_stores_null(engine: Engine) -> None:
+    _seed_parents(engine)
+    insert_and_commit(engine, _intent("ENTRY"), _intent("STOP_LOSS"))
+    with engine.connect() as conn:
+        stored = conn.execute(text("SELECT sized_realized_risk FROM execution_intents")).all()
+    assert [row[0] for row in stored] == [None, None]
+
+
+@pytest.mark.parametrize(
+    ("role", "value"),
+    [
+        ("STOP_LOSS", Decimal("12.5")),
+        ("TAKE_PROFIT_1", Decimal("1")),
+        ("ENTRY", Decimal("0")),
+        ("ENTRY", Decimal("-3")),
+    ],
+)
+def test_sized_realized_risk_check_rejects_protective_zero_and_negative(
+    engine: Engine, role: str, value: Decimal
+) -> None:
+    _seed_parents(engine)
+    with pytest.raises(IntegrityError) as raised:
+        insert_and_commit(engine, _intent(role, sized_realized_risk=value))
+    orig: Any = raised.value.orig
+    assert orig.sqlstate == _CHECK_VIOLATION
+    assert orig.diag.constraint_name == "ck_execution_intents_sized_realized_risk"
