@@ -64,6 +64,33 @@ class _Grid:
         candidate = top - ((top - self.residue) % self.modulus)
         return candidate if self.lo <= candidate <= self.hi else None
 
+    @property
+    def smallest(self) -> int | None:
+        """Smallest valid quantity, or None when the grid is empty."""
+        first = self.lo + ((self.residue - self.lo) % self.modulus)
+        return first if first <= self.hi else None
+
+    def representable(self, total: int) -> bool:
+        """True when `total` is a sum of valid parts (zero counts: nothing left to close).
+
+        Valid parts are `q_lo + j * modulus` for `j` in `0..J`, so a sum of `n` parts is
+        `n * q_lo + K * modulus` for every `K` in `0..n * J`; a total is reachable when
+        some `n` fits both bounds and the residue condition.
+        """
+        if total == 0:
+            return True
+        q_lo = self.smallest
+        q_hi = self.floor(self.hi)
+        if total < 0 or q_lo is None or q_hi is None:
+            return False
+        n_min = -(-total // q_hi)
+        n_max = total // q_lo
+        period = self.modulus // gcd(q_lo, self.modulus)
+        for n in range(n_min, min(n_max, n_min + period - 1) + 1):
+            if (total - n * q_lo) % self.modulus == 0:
+                return True
+        return False
+
 
 def _grid(filters: LotFilters, *, market_exit: bool, extra: Decimal | None = None) -> _Grid:
     """The valid-quantity grid: LOT_SIZE alone, or its intersection with MARKET_LOT_SIZE.
@@ -125,14 +152,70 @@ def is_valid_market_part(quantity: Decimal, filters: LotFilters) -> bool:
     return True
 
 
+@dataclass(frozen=True)
+class CloseSplit:
+    """The parts of a planned close and whether they sum exactly to the position."""
+
+    parts: tuple[Decimal, ...]
+    complete: bool
+
+
+def _next_part_units(remaining: int, grid: _Grid) -> int | None:
+    """The part to close next, in integer units, or None when no valid part exists.
+
+    The largest valid part is preferred, but never one that strands a tail the exchange
+    would reject (a tail below the minimum, or any tail that is not itself a sum of valid
+    parts) while another choice would close the whole remainder. When the remainder cannot
+    be closed exactly, the largest valid part is returned anyway (closing what can be closed
+    reduces risk) and the caller sees `complete=False` at the end.
+    """
+    candidate = grid.floor(remaining)
+    if candidate is None:
+        return None
+    if not grid.representable(remaining):
+        return candidate
+    smallest = grid.smallest
+    assert smallest is not None  # a valid candidate exists
+    part = candidate
+    while part >= smallest:
+        if grid.representable(remaining - part):
+            return part
+        part -= grid.modulus
+    return candidate  # unreachable: representable(remaining) guarantees a choice above
+
+
+def _non_negative_finite(value: object, name: str) -> Decimal:
+    if not isinstance(value, Decimal):
+        raise TypeError(f"{name} must be Decimal, got {type(value).__name__}")
+    if not value.is_finite() or value < 0:
+        raise ValueError(f"{name} must be finite and >= 0, got {value}")
+    return value
+
+
 def next_close_part(*, remaining: Decimal, filters: LotFilters) -> Decimal | None:
     """One MARKET close quantity valid under LOT_SIZE and MARKET_LOT_SIZE, or None.
 
-    The part never exceeds `remaining`. None means no valid part exists (the caller enters
-    SAFE_MODE and needs manual intervention); nothing is rounded up.
+    The part never exceeds `remaining` and avoids leaving a tail below the minimum. None
+    means no valid part exists (the caller enters SAFE_MODE and needs manual intervention);
+    nothing is rounded up.
     """
     if not isinstance(remaining, Decimal) or not remaining.is_finite() or remaining <= 0:
         return None
     grid = _grid(filters, market_exit=True, extra=remaining)
-    part = grid.floor(_to_units(remaining, grid.places))
+    part = _next_part_units(_to_units(remaining, grid.places), grid)
     return None if part is None else _from_units(part, grid.places)
+
+
+def plan_close_parts(*, position: Decimal, filters: LotFilters) -> CloseSplit:
+    """Split `position` into valid MARKET parts; `complete` only when they sum to it exactly."""
+    size = _non_negative_finite(position, "position")
+    grid = _grid(filters, market_exit=True, extra=size)
+    remaining = _to_units(size, grid.places)
+    parts: list[Decimal] = []
+    while remaining > 0:
+        part = _next_part_units(remaining, grid)
+        if part is None:
+            return CloseSplit(parts=tuple(parts), complete=False)
+        parts.append(_from_units(part, grid.places))
+        remaining -= part
+    return CloseSplit(parts=tuple(parts), complete=True)
