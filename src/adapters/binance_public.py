@@ -42,7 +42,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
@@ -133,6 +133,19 @@ class OiSnapshot:
     observed_at_utc: datetime
     open_interest: Decimal
     source: str = "canonical"
+
+
+@dataclass(frozen=True)
+class MarkPriceReading:
+    """One live mark price of one symbol (`GET /fapi/v1/premiumIndex`, plan 19-05, D-06).
+
+    `exchange_time_utc` is the `time` field of the response (Binance's clock). The adapter
+    takes no clock: the caller measures the age of the reading with its own injected clock.
+    """
+
+    symbol: str
+    mark_price: Decimal
+    exchange_time_utc: datetime
 
 
 @dataclass(frozen=True)
@@ -449,6 +462,49 @@ class BinancePublicMarketData:
         )
         raw = response.data()
         return [_row_to_mark_kline(symbol, interval, row) for row in raw]
+
+    # ----- live mark price ------------------------------------------------- #
+
+    async def mark_price(self, symbol: str) -> MarkPriceReading:
+        """The live mark price of one symbol (`GET /fapi/v1/premiumIndex`).
+
+        Flag-never-fabricate (D-06): an empty response, a list instead of one symbol, a
+        missing or non-finite or non-positive `markPrice`, a missing `time` or another symbol
+        raises `ValueError`. No retry, no fallback value; an SDK exception propagates
+        unchanged. Messages name the field and the symbol only (never the payload).
+        """
+        response = await _gated_rest_call(
+            self._rest_gate, CallKind.QUERY, self._sdk.rest_api.mark_price, symbol=symbol
+        )
+        wrapper = response.data()
+        if wrapper is None:
+            raise ValueError(f"premiumIndex response empty for {symbol}: refusing to fabricate")
+        raw = getattr(wrapper, "actual_instance", None)
+        if raw is None or isinstance(raw, list):
+            raise ValueError(
+                f"premiumIndex response for {symbol} is not a single-symbol answer: "
+                "refusing to fabricate a mark price"
+            )
+        if raw.symbol is None or raw.symbol != symbol:
+            raise ValueError(
+                f"premiumIndex response symbol does not match requested {symbol}: "
+                "refusing to use another symbol's mark price"
+            )
+        text = raw.mark_price
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"premiumIndex markPrice missing for {symbol}")
+        try:
+            price = Decimal(text)
+        except InvalidOperation:
+            raise ValueError(f"premiumIndex markPrice is not a decimal for {symbol}") from None
+        if not price.is_finite() or price <= 0:
+            raise ValueError(f"premiumIndex markPrice is not a positive finite price for {symbol}")
+        time_ms = raw.time
+        if isinstance(time_ms, bool) or not isinstance(time_ms, int):
+            raise ValueError(f"premiumIndex time missing for {symbol}")
+        seconds, millis = divmod(time_ms, 1000)
+        observed = datetime.fromtimestamp(seconds, tz=UTC) + timedelta(milliseconds=millis)
+        return MarkPriceReading(symbol=symbol, mark_price=price, exchange_time_utc=observed)
 
     # ----- open interest --------------------------------------------------- #
 

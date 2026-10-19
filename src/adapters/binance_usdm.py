@@ -98,6 +98,7 @@ from src.adapters.binance_public import (
 from src.adapters.binance_public import FundingTick as FundingTick
 from src.adapters.binance_public import Kline as Kline
 from src.adapters.binance_public import MarkKline as MarkKline
+from src.adapters.binance_public import MarkPriceReading as MarkPriceReading
 from src.adapters.binance_public import OiSnapshot as OiSnapshot
 from src.adapters.binance_public import SymbolFilters as SymbolFilters
 from src.adapters.binance_public import _row_to_kline as _row_to_kline
@@ -418,6 +419,10 @@ class OrderProbe:
     order_id: str | None
     status: str | None
     update_time_utc: datetime | None
+    # Plan 19-05 (research F8, D-10 REST fill source): what the exchange reports as executed.
+    # None means the exchange omitted the field (unknown); it is never defaulted to zero.
+    executed_quantity: Decimal | None = None
+    average_price: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -745,6 +750,16 @@ class BinanceUsdmAdapter:
         """Binance server time as a UTC datetime (D-25); delegates to the public adapter."""
         return await self._public.server_time()
 
+    # ----- live mark price (plan 19-05, D-06) ------------------------------- #
+
+    async def get_mark_price(self, *, symbol: str) -> MarkPriceReading:
+        """The live mark price of `symbol`; delegates to the public reader (shared REST gate).
+
+        The adapter takes no clock: the execution manager measures the age of the reading
+        with its injected `now_utc`.
+        """
+        return await self._public.mark_price(symbol)
+
     # ----- exchange info --------------------------------------------------- #
 
     async def exchange_info(self) -> list[SymbolFilters]:
@@ -1008,6 +1023,7 @@ class BinanceUsdmAdapter:
         quantity: Decimal,
         price: Decimal,
         new_client_order_id: str,
+        good_till_date: int | None = None,
     ) -> EntryPlacementResult:
         """Place a LIMIT entry order via `new_order`.
 
@@ -1023,11 +1039,16 @@ class BinanceUsdmAdapter:
             symbol: The trading pair (e.g. "BTCUSDT").
             side: "BUY" or "SELL".
             position_side: "BOTH" (one-way) or "LONG"/"SHORT" (hedge).
-            time_in_force: "GTC" for LIMIT entries.
+            time_in_force: "GTC" for LIMIT entries, or "GTD" (exchange-side expiry
+                backstop, plan 19-05) which requires `good_till_date`.
             quantity: The quantized quantity (Decimal).
             price: The zone-mid limit price (Decimal).
             new_client_order_id: The deterministic 36-char client_order_id
                 from `derive_client_order_id`.
+            good_till_date: The expiry in epoch milliseconds, an `int`; required with GTD and
+                refused with any other time in force. None (the only default) means "not
+                GTD". The adapter does not compute or range-check it (the pure core does and
+                Binance validates server-side).
 
         Returns:
             An `EntryPlacementResult` with the exchange-assigned order_id
@@ -1042,6 +1063,16 @@ class BinanceUsdmAdapter:
             was accepted and filled. The execution manager probes by the
             deterministic client id and decides.
         """
+        # Plan 19-05: argument validation first (programming errors, nothing sent).
+        if good_till_date is not None and (
+            isinstance(good_till_date, bool) or not isinstance(good_till_date, int)
+        ):
+            raise TypeError("good_till_date must be an int (epoch milliseconds)")
+        if time_in_force == "GTD" and good_till_date is None:
+            raise ValueError("time_in_force GTD requires good_till_date")
+        if good_till_date is not None and time_in_force != "GTD":
+            raise ValueError("good_till_date is only valid with time_in_force GTD")
+
         # Plan 18-13: no policy refuses first; then a configured drift guard refuses a NEW
         # entry while it does not allow entries (never measured, failed, out of limits,
         # stale), before the gate check and before any SDK call.
@@ -1057,6 +1088,10 @@ class BinanceUsdmAdapter:
             NewOrderTypeEnum,
         )
 
+        # goodTillDate is sent only for GTD, so the GTC wire is byte-identical to before.
+        gtd_kwargs: dict[str, Any] = {}
+        if good_till_date is not None:
+            gtd_kwargs["good_till_date"] = good_till_date
         response = await self._sdk_call(
             CallKind.PLACEMENT,
             self._sdk.rest_api.new_order,
@@ -1068,6 +1103,7 @@ class BinanceUsdmAdapter:
             quantity=_decimal_to_wire(quantity),
             price=_decimal_to_wire(price),
             new_client_order_id=new_client_order_id,
+            **gtd_kwargs,
         )
         result: NewOrderResponse = response.data()
         return _new_order_to_entry_result(result)
@@ -1485,7 +1521,28 @@ def _query_order_to_probe(
         order_id=str(raw.order_id) if raw.order_id is not None else None,
         status=raw.status,
         update_time_utc=_ms_to_utc(int(raw.update_time)) if raw.update_time is not None else None,
+        executed_quantity=_optional_probe_decimal(
+            getattr(raw, "executed_qty", None), "executed_qty"
+        ),
+        average_price=_optional_probe_decimal(getattr(raw, "avg_price", None), "avg_price"),
     )
+
+
+def _optional_probe_decimal(value: Any, field_name: str) -> Decimal | None:
+    """Strict Decimal of an optional query_order field: None stays None, junk raises.
+
+    String-mediated (no float). An absent field is unknown (None), never zero; a present
+    but non-decimal, non-finite or negative value raises, naming the field only.
+    """
+    if value is None:
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except InvalidOperation:
+        raise ValueError(f"query_order {field_name} is not a decimal") from None
+    if not parsed.is_finite() or parsed < 0:
+        raise ValueError(f"query_order {field_name} is not a finite non-negative decimal")
+    return parsed
 
 
 def _require_quantity(value: Any, field_name: str) -> Decimal:
