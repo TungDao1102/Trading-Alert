@@ -46,7 +46,7 @@ from src.execution.enablement import LiveEnablementController
 from src.execution.execution_limits import ExecutionLimits
 from src.ops.health import ALL_CHECK_NAMES
 
-from tests.support.execution_limits import test_only_execution_limits
+from tests.support import execution_limits as test_limits
 
 SERVER_NOW = datetime(2026, 10, 5, 12, 0, 0, tzinfo=UTC)
 FAKE_KEY = "FAKEKEY0123456789ABCDEF"
@@ -630,7 +630,11 @@ def run_flow(
     limits = (
         None
         if committed_limits
-        else (execution_limits if execution_limits is not None else test_only_execution_limits())
+        else (
+            execution_limits
+            if execution_limits is not None
+            else test_limits.test_only_execution_limits()
+        )
     )
     chan = (
         channel
@@ -705,7 +709,9 @@ def make_ctx(
         discovery_timeout_seconds=120,
         token_factory=counter_tokens(),
         execution_limits=(
-            execution_limits if execution_limits is not None else test_only_execution_limits()
+            execution_limits
+            if execution_limits is not None
+            else test_limits.test_only_execution_limits()
         ),
     )
 
@@ -1224,7 +1230,7 @@ async def test_build_live_context_binds_to_the_derived_plan() -> None:
     assert live.signal.parameter_set_hash == plan.parameter_set.parameter_set_hash
     assert live.plan_constraint_snapshot.working_type == "MARK_PRICE"
     assert live.plan_constraint_snapshot.trade_plan_id == plan.trade_plan.trade_plan_id
-    assert live.execution_limits == test_only_execution_limits()
+    assert live.execution_limits == test_limits.test_only_execution_limits()
     assert isinstance(live.protection_registry, ProtectionCoordinator)
     assert live.protection_registry.blocks_new_entries() is False
     assert live.tp1_quantity_fraction == TP1_QUANTITY_FRACTION
@@ -1335,7 +1341,7 @@ def test_one_unset_limit_names_only_that_key(tmp_path: Path) -> None:
         tmp_path,
         scenario="far",
         execute=True,
-        execution_limits=test_only_execution_limits(max_mark_price_age_ms=None),
+        execution_limits=test_limits.test_only_execution_limits(max_mark_price_age_ms=None),
     )
     assert code == dr.EXIT_ABORTED
     detail = step(data, "execution_limits")["detail"]
