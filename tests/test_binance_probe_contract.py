@@ -29,6 +29,9 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
     CancelAllAlgoOpenOrdersResponse,
     CancelAllOpenOrdersResponse,
     CancelOrderResponse,
+    ExchangeInformationResponse,
+    ExchangeInformationResponseSymbolsInner,
+    ExchangeInformationResponseSymbolsInnerFiltersInner,
     NewAlgoOrderResponse,
     NewOrderResponse,
     QueryAlgoOrderResponse,
@@ -43,6 +46,62 @@ from tests.support.limits import TEST_ONLY_RECV_WINDOW_MS, test_only_signed_call
 MODULE_PATH = Path(binance_probe.__file__)
 
 _Op = Callable[[BinanceProbeAdapter], Awaitable[Any]]
+
+# The two public SDK reads the adapter makes through `BinancePublicMarketData` (mark price and
+# symbol filters). They are unsigned, so they are not in `SDK_REST_METHODS` and carry no
+# recvWindow, but a mistyped keyword there would surface at the same user checkpoint.
+PUBLIC_SDK_METHODS = frozenset({"mark_price_kline_candlestick_data", "exchange_information"})
+
+# Plain text is accepted for these enum-annotated parameters: the installed SDK copies the
+# value into the request payload unchanged (`MarketDataApi.mark_price_kline_candlestick_data`
+# only checks it is not None), and `BinancePublicMarketData` passes the interval text for the
+# paper path as well.
+_PLAIN_TEXT_PARAMETERS = frozenset({("mark_price_kline_candlestick_data", "interval")})
+
+_MARK_ROW: list[Any] = [
+    1791360000000,
+    "84090.10",
+    "84130.00",
+    "83900.00",
+    "83905.50",
+    "0",
+    1791360059999,
+    "0",
+    60,
+    "0",
+    "0",
+    "0",
+]
+
+
+def _exchange_information() -> ExchangeInformationResponse:
+    filters = ExchangeInformationResponseSymbolsInnerFiltersInner
+    return ExchangeInformationResponse(
+        symbols=[
+            ExchangeInformationResponseSymbolsInner(
+                symbol="BTCUSDT",
+                contract_type="PERPETUAL",
+                status="TRADING",
+                base_asset="BTC",
+                quote_asset="USDT",
+                margin_asset="USDT",
+                filters=[
+                    filters(filter_type="PRICE_FILTER", tick_size="0.10"),
+                    filters(
+                        filter_type="LOT_SIZE", step_size="0.001", min_qty="0.001", max_qty="1000"
+                    ),
+                    filters(filter_type="MIN_NOTIONAL", notional="100"),
+                    filters(
+                        filter_type="PERCENT_PRICE",
+                        multiplier_up="1.0500",
+                        multiplier_down="0.9500",
+                        multiplier_decimal="4",
+                    ),
+                ],
+            )
+        ]
+    )
+
 
 # One driver per adapter operation, with the scripted success payload of each SDK method.
 _SUCCESS_PAYLOADS: dict[str, Any] = {
@@ -59,6 +118,8 @@ _SUCCESS_PAYLOADS: dict[str, Any] = {
     "position_information_v3": [],
     "account_trade_list": [],
     "futures_account_balance_v3": [],
+    "mark_price_kline_candlestick_data": [_MARK_ROW],
+    "exchange_information": _exchange_information(),
 }
 
 _Q = Decimal("0.010")
@@ -141,6 +202,8 @@ _OPERATIONS: dict[str, _Op] = {
     "user_trades": lambda a: a.user_trades(symbol="BTCUSDT"),
     "user_trades_of_one_order": lambda a: a.user_trades(symbol="BTCUSDT", order_id=8389765492),
     "account_balance": lambda a: a.account_balance(),
+    "mark_price": lambda a: a.mark_price(symbol="BTCUSDT"),
+    "symbol_filters": lambda a: a.symbol_filters(symbol="BTCUSDT"),
 }
 
 
@@ -164,7 +227,9 @@ def _check_argument_types(name: str, kwargs: dict[str, Any]) -> None:
     for key, value in kwargs.items():
         assert not isinstance(value, float), (name, key)
         enum_cls = _enum_class(hints.get(key))
-        if enum_cls is not None:
+        if (name, key) in _PLAIN_TEXT_PARAMETERS:
+            assert isinstance(value, str), (name, key, value)
+        elif enum_cls is not None:
             assert isinstance(value, enum_cls), (name, key, value)
         else:
             assert not isinstance(value, Enum), (name, key, value)
@@ -203,12 +268,21 @@ async def test_every_recorded_sdk_call_passes_enum_members_and_no_float() -> Non
 
 async def test_every_recorded_sdk_call_carries_the_policy_recv_window() -> None:
     for name, kwargs in await _record_all():
-        assert kwargs.get("recv_window") == TEST_ONLY_RECV_WINDOW_MS, name
+        if name in PUBLIC_SDK_METHODS:
+            assert "recv_window" not in kwargs, name  # unsigned reads carry no recvWindow
+        else:
+            assert kwargs.get("recv_window") == TEST_ONLY_RECV_WINDOW_MS, name
 
 
 async def test_the_recorded_methods_are_exactly_the_declared_sdk_methods() -> None:
     recorded = {name for name, _ in await _record_all()}
-    assert recorded == set(SDK_REST_METHODS)
+    assert recorded == set(SDK_REST_METHODS) | PUBLIC_SDK_METHODS
+
+
+def test_the_public_reads_exist_on_the_installed_rest_api() -> None:
+    for name in PUBLIC_SDK_METHODS:
+        assert callable(getattr(SdkRestApi, name, None)), name
+        assert name not in SDK_REST_METHODS
 
 
 def test_every_declared_sdk_method_exists_on_the_installed_rest_api() -> None:
@@ -282,3 +356,14 @@ async def test_type_check_rejects_a_plain_string_for_an_enum_parameter() -> None
         _check_argument_types(name, {**kwargs, "side": "BUY"})
     with pytest.raises(AssertionError):
         _check_argument_types(name, {**kwargs, "quantity": 0.01})
+
+
+async def test_the_mark_price_interval_is_the_only_plain_text_exception() -> None:
+    recorded = await _record_all()
+    name, kwargs = next(item for item in recorded if item[0] == "mark_price_kline_candlestick_data")
+    _bind(name, kwargs)
+    _check_argument_types(name, kwargs)
+    with pytest.raises(AssertionError):  # a non-text interval is still refused
+        _check_argument_types(name, {**kwargs, "interval": 1})
+    with pytest.raises(TypeError):
+        _bind(name, {**kwargs, "intervall": kwargs["interval"]})
