@@ -7,6 +7,7 @@ say; they are not evidence of mainnet behavior.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -32,6 +33,7 @@ from tests.support.fake_binance_exchange import (
     STATUS_PARTIALLY_FILLED,
     BinanceSemanticsFakeAdapter,
 )
+from tests.support.virtual_time import yield_to_loop
 
 SYMBOL = "BTCUSDT"
 ENTRY_ID = "test-only-entry-0001"
@@ -423,3 +425,163 @@ async def test_new_methods_bind_against_the_real_adapter_signature() -> None:
         await fake.symbol_lot_filters(sym=SYMBOL)
     with pytest.raises(TypeError):
         await fake.snapshot_open_algo_orders(symbols=[SYMBOL])
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: scripted completion gates for deterministic stop/cancel races (D-12).
+# --------------------------------------------------------------------------- #
+
+RACE_ROUNDS = 20
+
+
+async def _position_with_open_remainder() -> BinanceSemanticsFakeAdapter:
+    fake = _strict()
+    await fake.place_entry(**_entry_kwargs())
+    fake.fill(ENTRY_ID, quantity=Decimal("0.004"), price=Decimal("101.00"))
+    fake.completed.clear()
+    return fake
+
+
+def _start_stop(fake: BinanceSemanticsFakeAdapter) -> asyncio.Task[Any]:
+    return asyncio.create_task(fake.place_algo_protective(**_stop_kwargs()))
+
+
+def _start_cancel(fake: BinanceSemanticsFakeAdapter) -> asyncio.Task[Any]:
+    return asyncio.create_task(
+        fake.cancel_normal_order(symbol=SYMBOL, orig_client_order_id=ENTRY_ID)
+    )
+
+
+async def test_stop_completes_first_while_the_cancel_is_held() -> None:
+    for _ in range(RACE_ROUNDS):
+        fake = await _position_with_open_remainder()
+        fake.hold("cancel_normal_order")
+
+        cancel = _start_cancel(fake)
+        stop = _start_stop(fake)
+        await yield_to_loop()
+        await yield_to_loop()
+
+        # The stop is on the exchange; the held cancel has recorded its call but not acted.
+        assert fake.held() == ["cancel_normal_order"]
+        assert STOP_ID in fake.open_algos
+        assert fake.open_orders[ENTRY_ID].status == STATUS_PARTIALLY_FILLED
+        assert fake.completed == ["place_algo_protective"]
+        assert not cancel.done()
+        assert stop.done()
+
+        fake.release("cancel_normal_order")
+        await asyncio.gather(cancel, stop)
+
+        assert fake.held() == []
+        assert fake.completed == ["place_algo_protective", "cancel_normal_order"]
+        assert ENTRY_ID not in fake.open_orders
+        assert fake.history[ENTRY_ID].status == STATUS_CANCELED
+
+
+async def test_cancel_completes_first_while_the_stop_is_held() -> None:
+    for _ in range(RACE_ROUNDS):
+        fake = await _position_with_open_remainder()
+        fake.hold("place_algo_protective")
+
+        stop = _start_stop(fake)
+        cancel = _start_cancel(fake)
+        await yield_to_loop()
+        await yield_to_loop()
+
+        assert fake.held() == ["place_algo_protective"]
+        assert fake.open_algos == {}
+        assert fake.history[ENTRY_ID].status == STATUS_CANCELED
+        assert fake.completed == ["cancel_normal_order"]
+        assert not stop.done()
+        assert cancel.done()
+        # The held call was recorded the moment it was made.
+        assert fake.calls_to("place_algo_protective")
+
+        fake.release("place_algo_protective")
+        await asyncio.gather(cancel, stop)
+
+        assert fake.completed == ["cancel_normal_order", "place_algo_protective"]
+        assert STOP_ID in fake.open_algos
+
+
+async def test_release_before_the_call_lets_it_pass_and_a_hold_applies_once() -> None:
+    fake = await _position_with_open_remainder()
+    fake.hold("cancel_normal_order")
+    fake.release("cancel_normal_order")
+    await _start_cancel(fake)  # no wait: released in advance
+    assert fake.held() == []
+    # The hold was consumed by that call; a second cancel is not held.
+    await fake.cancel_normal_order(symbol=SYMBOL, orig_client_order_id=ENTRY_ID)
+    assert fake.held() == []
+
+
+async def test_release_without_a_hold_is_a_test_error() -> None:
+    fake = _strict()
+    with pytest.raises(ValueError, match="cancel_normal_order"):
+        fake.release("cancel_normal_order")
+
+
+async def test_fail_next_raises_once_after_recording_the_call() -> None:
+    fake = _strict()
+    boom = TimeoutError("scripted")
+    fake.fail_next("query_order_by_client", boom)
+
+    with pytest.raises(TimeoutError) as caught:
+        await fake.query_order_by_client(symbol=SYMBOL, orig_client_order_id=ENTRY_ID)
+    assert caught.value is boom
+    assert len(fake.calls_to("query_order_by_client")) == 1
+    assert fake.completed == []  # a failed call does not complete
+
+    probe = await fake.query_order_by_client(symbol=SYMBOL, orig_client_order_id=ENTRY_ID)
+    assert probe.found is False
+    assert len(fake.calls_to("query_order_by_client")) == 2
+    assert fake.completed == ["query_order_by_client"]
+
+
+async def test_fail_next_leaves_the_exchange_state_untouched() -> None:
+    fake = await _position_with_open_remainder()
+    fake.fail_next("cancel_normal_order", TimeoutError("ambiguous"))
+    with pytest.raises(TimeoutError):
+        await fake.cancel_normal_order(symbol=SYMBOL, orig_client_order_id=ENTRY_ID)
+    assert ENTRY_ID in fake.open_orders
+
+
+async def test_reject_next_algo_answers_minus_2021_once() -> None:
+    fake = await _position_with_open_remainder()
+    fake.reject_next_algo(-2021)
+
+    with pytest.raises(BadRequestError) as caught:
+        await fake.place_algo_protective(**_stop_kwargs())
+    assert caught.value.status_code == -2021
+    assert fake.open_algos == {}
+    assert len(fake.calls_to("place_algo_protective")) == 1
+
+    placed = await fake.place_algo_protective(**_stop_kwargs())
+    assert placed.algo_status == STATUS_NEW
+
+
+async def test_hold_then_fail_next_fails_after_the_release() -> None:
+    fake = await _position_with_open_remainder()
+    fake.hold("place_algo_protective")
+    fake.reject_next_algo(-2021)
+    stop = _start_stop(fake)
+    await yield_to_loop()
+    assert fake.held() == ["place_algo_protective"]
+    fake.release("place_algo_protective")
+    with pytest.raises(BadRequestError):
+        await stop
+    assert fake.open_algos == {}
+
+
+async def test_gates_never_sleep_for_real(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def forbidden(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("asyncio.sleep must not be used by the fake")
+
+    monkeypatch.setattr(asyncio, "sleep", forbidden)
+    fake = await _position_with_open_remainder()
+    fake.hold("cancel_normal_order")
+    cancel = _start_cancel(fake)
+    await yield_to_loop()
+    fake.release("cancel_normal_order")
+    await cancel
