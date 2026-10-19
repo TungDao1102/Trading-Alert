@@ -224,6 +224,17 @@ class FakeExecutionAdapter:
             return self.query_responses.pop(0)
         return self._query_response
 
+    @staticmethod
+    def error_facts(exc: BaseException) -> Any:
+        """Same facts as the real adapter (plan 19-15, D-21): class, int code, Retry-After."""
+        import inspect
+
+        from src.adapters.binance_errors import error_facts_from_exception
+        from src.adapters.binance_usdm import BinanceUsdmAdapter
+
+        inspect.signature(BinanceUsdmAdapter.error_facts).bind(exc)
+        return error_facts_from_exception(exc)
+
     async def get_position_mode(self) -> Any:
         from src.adapters.binance_usdm import PositionModeResult
 
@@ -932,6 +943,13 @@ async def _run_plan(
     return await execute_approved_plan(**kwargs)
 
 
+def _status_unknown() -> BaseException:
+    """An SDK 5xx: STATUS_UNKNOWN on a placement, the class of failure the retry rule is for."""
+    from binance_common.errors import ServerError
+
+    return ServerError(error_message="status unknown", status_code=503)
+
+
 def _probe(found: bool) -> Any:
     from src.adapters.binance_usdm import OrderProbe
 
@@ -948,7 +966,7 @@ async def test_definitive_absence_allows_exactly_one_retry() -> None:
     """CR-09: an ambiguous entry followed by a DEFINITIVE `found=False`
     probe retries once; the retry's ack is handed to the protection registry (no stop yet)."""
     adapter = FakeExecutionAdapter()
-    adapter.entry_exceptions.append(TimeoutError("status unknown"))
+    adapter.entry_exceptions.append(_status_unknown())
     adapter.query_responses.append(_probe(found=False))
 
     outcome = await _run_plan(adapter)
@@ -1000,7 +1018,7 @@ async def test_indeterminate_probe_is_unknown_not_absent() -> None:
 async def test_repeated_definitive_absence_is_bounded_no_trade() -> None:
     """CR-09: at most two entry attempts; both absent → NO_TRADE, no SL."""
     adapter = FakeExecutionAdapter()
-    adapter.entry_exceptions.extend([RuntimeError("-2019"), RuntimeError("-2019")])
+    adapter.entry_exceptions.extend([_status_unknown(), _status_unknown()])
     adapter.query_responses.extend([_probe(found=False), _probe(found=False)])
     safe_mode_controller = RecordingSafeModeController()
 
@@ -1012,6 +1030,200 @@ async def test_repeated_definitive_absence_is_bounded_no_trade() -> None:
     assert methods.count("place_entry") == 2
     assert "place_algo_protective" not in methods
     assert safe_mode_controller.entered_reasons == []
+
+
+def test_q5_the_second_entry_attempt_is_kept_and_pinned_at_two() -> None:
+    """Q5 (owner-open, recorded not decided): `_ENTRY_MAX_ATTEMPTS == 2` is kept unchanged for
+    STATUS_UNKNOWN and the other ambiguous categories after a definitive-absence probe. The
+    Phase 18 review (src/WR-02) asked for its removal or an explicit decision; neither is made
+    here, so a change of this number must come with that decision."""
+    from src.execution import manager
+
+    assert manager._ENTRY_MAX_ATTEMPTS == 2
+
+
+def _refusals() -> list[tuple[str, BaseException]]:
+    from src.adapters.binance_ratelimit_gate import RestGateRefusal
+    from src.adapters.binance_usdm import DriftBlockReason, EntriesBlocked, SignedCallPolicyMissing
+
+    return [
+        ("rest_gate_refusal", RestGateRefusal("RATE_LIMIT_PAUSE_429", 7)),
+        ("entries_blocked_refusal", EntriesBlocked(DriftBlockReason.NEVER_MEASURED)),
+        ("signed_call_policy_missing_refusal", SignedCallPolicyMissing()),
+    ]
+
+
+@pytest.mark.parametrize(("label", "refusal"), _refusals(), ids=[r[0] for r in _refusals()])
+async def test_refusal_before_send_is_no_trade_without_probe_retry_or_safe_mode(
+    label: str, refusal: BaseException
+) -> None:
+    """D-21, src/WR-02, T-19-40: a PreSendRefusal of `place_entry` sent nothing, so there is
+    nothing to probe, nothing to retry and no reason for SAFE_MODE; the ENTRY intent is REJECTED."""
+    from src.domain.enums import ExecutionIntentStatus
+
+    case_input = _load_input()
+    registry = StubProtectionRegistry()
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.append(refusal)
+    safe_mode = RecordingSafeModeController()
+    store = InMemoryExecutionIntentStore()
+
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        intent_store=store,
+        live_context=_build_live_context(case_input, protection_registry=registry),
+    )
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "ENTRY_REFUSED_BEFORE_SEND"), label
+    methods = [c["method"] for c in adapter.calls]
+    assert methods.count("place_entry") == 1
+    assert "query_order_by_client" not in methods
+    assert "cancel_normal_order" not in methods
+    assert safe_mode.entered_reasons == []
+    assert registry.register_attempts == 0
+    entry = store.get_entry(approval_id=case_input["approval_id"])
+    assert entry is not None
+    assert entry.intent_status == ExecutionIntentStatus.REJECTED
+    assert entry.outcome is not None
+    assert entry.outcome.reason_code == "ENTRY_REFUSED_BEFORE_SEND"
+
+
+async def test_refusal_on_the_second_attempt_is_also_no_trade_before_send() -> None:
+    """A first ambiguous failure whose probe proves absence, then a refusal of the second send:
+    still nothing sent, so NO_TRADE ENTRY_REFUSED_BEFORE_SEND and no SAFE_MODE."""
+    from src.adapters.binance_ratelimit_gate import RestGateRefusal
+
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.extend([_status_unknown(), RestGateRefusal("IP_BAN_418", 60)])
+    adapter.query_responses.append(_probe(found=False))
+    safe_mode = RecordingSafeModeController()
+
+    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode)
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "ENTRY_REFUSED_BEFORE_SEND")
+    assert [c["method"] for c in adapter.calls].count("place_entry") == 2
+    assert safe_mode.entered_reasons == []
+
+
+@pytest.mark.parametrize("code", [-1106, -4016, -4024])
+async def test_a_definitive_rejection_is_no_trade_without_probe_or_second_attempt(
+    code: int,
+) -> None:
+    """REJECTED_DEFINITIVE on a placement (for example -1106, -4016, -4024): the exchange said
+    no, so there is no probe, no second attempt, the intent is REJECTED and no SAFE_MODE."""
+    from binance_common.errors import BadRequestError
+    from src.domain.enums import ExecutionIntentStatus
+
+    case_input = _load_input()
+    registry = StubProtectionRegistry()
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.append(BadRequestError(error_message="rejected", status_code=code))
+    safe_mode = RecordingSafeModeController()
+    store = InMemoryExecutionIntentStore()
+
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        intent_store=store,
+        live_context=_build_live_context(case_input, protection_registry=registry),
+    )
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "EXCHANGE_CONSTRAINT")
+    methods = [c["method"] for c in adapter.calls]
+    assert methods.count("place_entry") == 1
+    assert "query_order_by_client" not in methods
+    assert safe_mode.entered_reasons == []
+    assert registry.register_attempts == 0
+    entry = store.get_entry(approval_id=case_input["approval_id"])
+    assert entry is not None and entry.intent_status == ExecutionIntentStatus.REJECTED
+
+
+async def test_an_unknown_exchange_error_found_by_the_probe_is_handed_off() -> None:
+    """UNKNOWN_EXCHANGE_ERROR (a non-SDK exception): probe first; an order that was found is
+    the entry (EXISTS) and is handed to the protection registry."""
+    case_input = _load_input()
+    registry = StubProtectionRegistry()
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.append(RuntimeError("something nobody mapped"))
+    adapter.query_responses.append(_probe(found=True))
+    safe_mode = RecordingSafeModeController()
+
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        live_context=_build_live_context(case_input, protection_registry=registry),
+    )
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    assert [c["method"] for c in adapter.calls].count("place_entry") == 1
+    assert len(registry.entries) == 1
+    assert safe_mode.entered_reasons == []
+
+
+async def test_an_unknown_exchange_error_absent_by_the_probe_is_never_retried() -> None:
+    """UNKNOWN_EXCHANGE_ERROR with a definitive-absence probe: NO second attempt (it is never
+    retried), SAFE_MODE(UNKNOWN_EXCHANGE_ERROR), RECONCILIATION_REQUIRED, nothing handed off."""
+    from src.domain.enums import ExecutionIntentStatus
+
+    case_input = _load_input()
+    registry = StubProtectionRegistry()
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.append(RuntimeError("something nobody mapped"))
+    adapter.query_responses.append(_probe(found=False))
+    safe_mode = RecordingSafeModeController()
+    store = InMemoryExecutionIntentStore()
+
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        intent_store=store,
+        live_context=_build_live_context(case_input, protection_registry=registry),
+    )
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    methods = [c["method"] for c in adapter.calls]
+    assert methods.count("place_entry") == 1
+    assert methods.count("query_order_by_client") == 1
+    assert safe_mode.entered_reasons == ["UNKNOWN_EXCHANGE_ERROR"]
+    assert registry.register_attempts == 0
+    entry = store.get_entry(approval_id=case_input["approval_id"])
+    assert entry is not None and entry.intent_status == ExecutionIntentStatus.UNKNOWN
+
+
+async def test_a_second_unknown_exchange_error_is_not_retried_either() -> None:
+    """A STATUS_UNKNOWN first failure (absent by the probe) followed by an UNKNOWN_EXCHANGE_ERROR
+    on the second send ends in the same SAFE_MODE: the second error is probed and not retried."""
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.extend([_status_unknown(), RuntimeError("unmapped")])
+    adapter.query_responses.extend([_probe(found=False), _probe(found=False)])
+    safe_mode = RecordingSafeModeController()
+
+    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode)
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    assert [c["method"] for c in adapter.calls].count("place_entry") == 2
+    assert safe_mode.entered_reasons == ["UNKNOWN_EXCHANGE_ERROR"]
+
+
+async def test_a_failing_error_facts_is_treated_as_an_unknown_exchange_error() -> None:
+    """Fail closed: when the adapter cannot classify the exception the failure is unknown."""
+
+    class _NoFacts(FakeExecutionAdapter):
+        @staticmethod
+        def error_facts(exc: BaseException) -> Any:
+            raise RuntimeError("cannot classify")
+
+    adapter = _NoFacts()
+    adapter.entry_exceptions.append(_status_unknown())
+    adapter.query_responses.append(_probe(found=False))
+    safe_mode = RecordingSafeModeController()
+
+    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode)
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    assert [c["method"] for c in adapter.calls].count("place_entry") == 1
+    assert safe_mode.entered_reasons == ["UNKNOWN_EXCHANGE_ERROR"]
 
 
 async def test_real_adapter_place_entry_makes_a_single_attempt() -> None:

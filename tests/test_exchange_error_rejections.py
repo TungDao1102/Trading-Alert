@@ -3,9 +3,10 @@
 Plan 18-26, owner decision of 2026-10-17 (decisions/18-DEC-TAXONOMY-CODES.md). A rejection by
 one of these codes is REJECTED_DEFINITIVE on a placement and UNKNOWN_EXCHANGE_ERROR on every
 other call kind. The taxonomy gives no placement a retry and never makes a rejected protective
-order a protected one: the execution manager decides SAFE_MODE on ANY adapter exception of a
-protective leg and does not read the taxonomy, and these tests assert that branch on the real
-code path, not `safe_mode_eligible`.
+order a protected one: the protection coordinator (plans 19-11 and 19-14, driven after a fill;
+plan 19-15 moved the stop out of the manager) reads the taxonomy for the stop and goes
+CLOSE_REQUIRED on a definitive rejection, and these tests assert that branch on the real code
+path, not `safe_mode_eligible`.
 
 The errors are SDK-shaped (`BadRequestError(error_message=..., status_code=<code>)`). The
 Demo texts below are the ones recorded in evidence/18-probe-check.txt (2026-10-16); the page
@@ -15,7 +16,7 @@ texts are those of evidence/18-error-code-page-reread-20261017.txt. Synthetic, n
 from __future__ import annotations
 
 import asyncio
-import json
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -32,8 +33,9 @@ from src.domain.exchange_errors import (
     safe_mode_eligible,
 )
 from src.execution.order_ids import derive_client_order_id
+from src.execution.protection import ProtectionState
 
-from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
+from tests.support.protection_doubles import TEST_ONLY_PLAN_HASH, ProtectionRig, make_rig
 from tests.test_binance_usdm_signed_calls import (
     RecordingHook,
     _adapter,
@@ -47,10 +49,7 @@ from tests.test_execution_attach import _RecordingSafeModeController as AttachSa
 from tests.test_execution_manager import (
     PRE_PLACEMENT_READS,
     FakeExecutionAdapter,
-    FakeJournal,
     RecordingSafeModeController,
-    _load_input,
-    _probe,
     _run_plan,
 )
 
@@ -99,82 +98,49 @@ def test_tracer_1106_classifies_rejected_definitive_on_placement_only() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Tracer: -1106 on the protective stop still ends in ENTRY_WITHOUT_PROTECTIVE.
+# Tracer: -1106 on the protective stop AFTER A FILL goes CLOSE_REQUIRED (plan 19-15, D-10).
 # --------------------------------------------------------------------------- #
 
 
-class _ProtectiveRaises(FakeExecutionAdapter):
-    """A fake adapter whose protective placement raises the given SDK-shaped error."""
-
-    def __init__(self, error: BaseException) -> None:
-        super().__init__()
-        self.error = error
-
-    async def place_algo_protective(self, **kwargs: Any) -> Any:
-        await super().place_algo_protective(**kwargs)
-        raise self.error
+async def _stop_rejected_after_a_fill(code: int, text: str) -> ProtectionRig:
+    rig = await make_rig(real_closer=True)
+    rig.fake.reject_next_algo(code, text)
+    rig.coordinator.fill_sink(rig.stream_fill(Decimal("0.004")))
+    await rig.coordinator.step()
+    return rig
 
 
-class _NoOpTruth:
-    async def snapshot_open_normal_orders(self, *, symbol: Any = None) -> list[Any]:
-        return []
+def _assert_close_required_after_a_rejected_stop(rig: ProtectionRig) -> None:
+    """B5 semantics: the stop is REJECTED (never ACKED), never resent, the plan is CLOSE_REQUIRED
+    and the exposure is closed by exactly one reduce-only MARKET order."""
+    stop_row = rig.stop_row()
+    assert stop_row is not None
+    assert stop_row.intent_status == ExecutionIntentStatus.REJECTED
+    assert stop_row.intent_status != ExecutionIntentStatus.ACKED
+    protection = rig.coordinator.protection_of(TEST_ONLY_PLAN_HASH)
+    assert protection is not None
+    assert protection.state is ProtectionState.CLOSE_REQUIRED
+    assert rig.coordinator.blocks_new_entries() is True
+    assert rig.safe_mode.entered_reasons == ["CLOSE_REQUIRED"]
+    assert [(a.event, a.reason) for a in rig.alerts.alerts] == [
+        ("CLOSE_REQUIRED", "B5_STOP_REJECTED")
+    ]
+    assert len(rig.fake.calls_to("place_algo_protective")) == 1  # never resent
+    assert len(rig.fake.calls_to("place_market_close")) == 1
 
-    async def snapshot_open_algo_orders(self, *, symbol: Any = None) -> list[Any]:
-        return []
 
-    async def snapshot_positions(self, *, symbol: Any = None) -> list[Any]:
-        return []
-
-
-@pytest.mark.parametrize("controller_kind", ["recording_double", "real_controller"])
-async def test_tracer_1106_on_the_protective_stop_is_entry_without_protective(
-    controller_kind: str,
-) -> None:
-    """The SAFE_MODE decision belongs to the manager (any adapter exception of a protective
-    leg is an unconfirmed leg), not to `safe_mode_eligible`, which is False for -1106."""
-    from src.reconcile.safe_mode import SafeModeController
-
-    recording = RecordingSafeModeController()
-    real = SafeModeController(adapter=_NoOpTruth(), journal=FakeJournal())
-    controller: Any = recording if controller_kind == "recording_double" else real
-    adapter = _ProtectiveRaises(_sdk_error(-1106, DEMO_1106))
-    journal = FakeJournal()
-    store = InMemoryExecutionIntentStore()
-
-    outcome = await _run_plan(
-        adapter, safe_mode_controller=controller, journal=journal, intent_store=store
+async def test_tracer_1106_on_the_protective_stop_after_a_fill_goes_close_required() -> None:
+    """The decision belongs to the coordinator: the taxonomy says REJECTED_DEFINITIVE on a
+    placement, so the stop is not resent and the position is closed. `safe_mode_eligible` stays
+    False for -1106 (SAFE_MODE comes from CLOSE_REQUIRED, not from the taxonomy flag)."""
+    rig = await _stop_rejected_after_a_fill(-1106, DEMO_1106)
+    _assert_close_required_after_a_rejected_stop(rig)
+    # The entry cancel went out through the deterministic entry id.
+    cancels = rig.fake.calls_to("cancel_normal_order")
+    assert cancels
+    assert cancels[0]["kwargs"]["orig_client_order_id"] == derive_client_order_id(
+        plan_hash=TEST_ONLY_PLAN_HASH, role="ENTRY"
     )
-
-    assert (outcome.is_no_trade, outcome.reason_code) == (True, "ENTRY_WITHOUT_PROTECTIVE")
-    if controller_kind == "recording_double":
-        assert recording.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
-    else:
-        assert real.in_safe_mode is True
-        follow_up = FakeExecutionAdapter()
-        blocked = await _run_plan(follow_up, safe_mode_controller=real)
-        assert (blocked.is_no_trade, blocked.reason_code) == (True, "RECONCILIATION_REQUIRED")
-        assert follow_up.calls == []
-    methods = [call["method"] for call in adapter.calls]
-    protective = [call for call in adapter.calls if call["method"] == "place_algo_protective"]
-    assert len(protective) == 1
-    assert protective[0]["kwargs"]["close_position"] is True  # the stop; no take profit exists
-    assert methods[-1] == "cancel_normal_order"
-    assert adapter.calls[-1]["kwargs"]["orig_client_order_id"] == derive_client_order_id(
-        plan_hash=_load_input()["plan_hash"], role="ENTRY"
-    )
-    assert [json_phase(event) for event in journal.events] == ["pre_cancel", "post_cancel"]
-    case_input = _load_input()
-    stop_loss = store.get_intent(approval_id=case_input["approval_id"], role="STOP_LOSS")
-    assert stop_loss is not None
-    assert stop_loss.intent_status == ExecutionIntentStatus.UNKNOWN
-    assert stop_loss.intent_status != ExecutionIntentStatus.ACKED
-    entry = store.get_entry(approval_id=case_input["approval_id"])
-    assert entry is not None and entry.outcome is not None
-    assert entry.outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
-
-
-def json_phase(event: Any) -> str:
-    return str(json.loads(event.payload_json)["phase"])
 
 
 # --------------------------------------------------------------------------- #
@@ -211,22 +177,18 @@ def test_no_owner_code_is_retry_eligible_for_any_call_kind(code: int, text: str)
 
 
 @pytest.mark.parametrize(("code", "text"), OWNER_CASES, ids=OWNER_IDS)
-async def test_safe_mode_eligible_is_false_but_the_manager_branch_still_fires(
+async def test_safe_mode_eligible_is_false_but_the_coordinator_branch_still_fires(
     code: int, text: str
 ) -> None:
-    """The taxonomy says False for the PLACEMENT category of each code; the manager still
-    enters SAFE_MODE because it treats any adapter exception of the stop as unconfirmed."""
+    """The taxonomy says False for the PLACEMENT category of each code; the coordinator still
+    enters SAFE_MODE (CLOSE_REQUIRED) because a definitively rejected stop leaves a fill
+    without protection, and it closes the position instead of resending the stop."""
     facts = error_facts_from_exception(_sdk_error(code, text))
     assert safe_mode_eligible(classify(facts, _K.PLACEMENT)) is False
-    adapter = _ProtectiveRaises(_sdk_error(code, text))
-    safe_mode = RecordingSafeModeController()
 
-    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode)
+    rig = await _stop_rejected_after_a_fill(code, text)
 
-    assert (outcome.is_no_trade, outcome.reason_code) == (True, "ENTRY_WITHOUT_PROTECTIVE")
-    assert safe_mode.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
-    assert [call["method"] for call in adapter.calls].count("place_algo_protective") == 1
-    assert [call["method"] for call in adapter.calls][-1] == "cancel_normal_order"
+    _assert_close_required_after_a_rejected_stop(rig)
 
 
 @pytest.mark.parametrize(("code", "text"), OWNER_CASES, ids=OWNER_IDS)
@@ -305,36 +267,23 @@ def test_rejected_take_profit_in_attach_is_entry_without_protective() -> None:
     assert safe_mode.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
 
 
-@pytest.mark.parametrize(("code", "text"), OWNER_CASES[1:], ids=OWNER_IDS[1:])
-async def test_entry_rejection_sequence_is_unchanged_by_the_table(code: int, text: str) -> None:
-    """Characterization, written and run green BEFORE the -4016 and -4024 rows were added.
-
-    The manager does not consult the taxonomy, so a rejected ENTRY follows its own bounded
-    query-first sequence: the same prices are sent once more after a probe that finds the
-    order absent, and the table adds no call (after the plan 19-13 pre-placement reads, which
-    run once before the entry, there is no mark price, filter or snapshot refresh and no new
-    method on the retry). Refreshing them is the consumer's job (open items (a) and (c) of
-    decisions/18-DEC-TAXONOMY-CODES.md).
-    """
+@pytest.mark.parametrize(("code", "text"), OWNER_CASES, ids=OWNER_IDS)
+async def test_entry_rejection_by_an_owner_code_is_definitive_and_not_retried(
+    code: int, text: str
+) -> None:
+    """Plan 19-15 (D-21): the manager now reads the taxonomy on the entry path. A placement
+    rejected by -1106, -4016 or -4024 is REJECTED_DEFINITIVE, so there is no probe and no second
+    send of the same prices (it replaces the plan 18-26 characterization, which pinned the old
+    probe-then-resend sequence). Refreshing the mark price and the filters after -4016 or
+    -4024 stays the consumer's job (open items (a) and (c) of
+    decisions/18-DEC-TAXONOMY-CODES.md)."""
     adapter = FakeExecutionAdapter()
-    adapter.entry_exceptions.extend([_sdk_error(code, text), _sdk_error(code, text)])
-    adapter.query_responses.extend([_probe(found=False), _probe(found=False)])
+    adapter.entry_exceptions.append(_sdk_error(code, text))
     safe_mode = RecordingSafeModeController()
 
     outcome = await _run_plan(adapter, safe_mode_controller=safe_mode)
 
     assert (outcome.is_no_trade, outcome.reason_code) == (True, "EXCHANGE_CONSTRAINT")
     methods = [call["method"] for call in adapter.calls]
-    assert methods == [
-        *PRE_PLACEMENT_READS,
-        "get_position_mode",
-        "place_entry",
-        "query_order_by_client",
-        "place_entry",
-        "query_order_by_client",
-    ]
-    assert "place_algo_protective" not in methods
-    entries = [call["kwargs"] for call in adapter.calls if call["method"] == "place_entry"]
-    assert len(entries) == 2
-    assert entries[0] == entries[1]
+    assert methods == [*PRE_PLACEMENT_READS, "get_position_mode", "place_entry"]
     assert safe_mode.entered_reasons == []
