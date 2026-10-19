@@ -512,6 +512,8 @@ class ProtectionCoordinator:
             if state is ProtectionState.AWAITING_FILL:
                 if evidence is not None:
                     await self._on_first_fill(tracked, REASON_FIRST_FILL_STREAM)
+                else:
+                    await self._poll_entry(tracked)
             elif state in (ProtectionState.UNPROTECTED, ProtectionState.PROTECTED_ENTRY_OPEN):
                 await self._confirm(tracked)
         except Exception as exc:  # noqa: BLE001 - one plan's failure must not stop the others
@@ -539,6 +541,88 @@ class ProtectionCoordinator:
         for result in results:
             if isinstance(result, BaseException) and not isinstance(result, Exception):
                 raise result
+
+    async def _poll_entry(self, tracked: _Tracked) -> None:
+        """REST poll of an AWAITING_FILL entry: the fill source when no stream event arrived.
+
+        A missed stream event must not leave a fill without a stop (T-19-26). Fail closed:
+        PARTIALLY_FILLED / FILLED is a first fill even when the executed quantity is missing
+        or zero (closePosition needs no quantity); an ended entry whose executed quantity is
+        unknown is settled by the position read.
+        """
+        entry = tracked.entry
+        answer = await self._guarded(
+            self._adapter.query_order_by_client(
+                symbol=entry.symbol, orig_client_order_id=entry.entry_client_order_id
+            )
+        )
+        if isinstance(answer, BaseException):
+            if not isinstance(answer, Exception):
+                raise answer
+            self._journal_note(
+                tracked,
+                EVENT_REST_FAILED,
+                {"call": "query_order_by_client", "error_type": type(answer).__name__},
+                self._now(),
+            )
+            return
+        if _attr(answer, "found") is not True:
+            return
+        order_id = _optional_text(_attr(answer, "order_id"))
+        if order_id is not None:
+            tracked.entry_exchange_order_id = order_id
+        status = _optional_text(_attr(answer, "status"))
+        executed = _attr(answer, "executed_quantity")
+        if not isinstance(executed, Decimal):
+            executed = None
+        if executed is not None and executed > _ZERO:
+            await self._on_first_fill(tracked, REASON_FIRST_FILL_REST)
+        elif status in FILLED_ENTRY_STATUSES:
+            self._note_quantity_unknown(tracked, status)
+            await self._on_first_fill(tracked, REASON_FIRST_FILL_REST)
+        elif status in TERMINAL_ENTRY_STATUSES:
+            if executed is None:
+                exposed = await self._position_is_open(tracked)
+                if exposed is None:
+                    return
+                if exposed:
+                    self._note_quantity_unknown(tracked, status)
+                    await self._on_first_fill(tracked, REASON_FIRST_FILL_REST)
+                    return
+            now = self._now()
+            tracked.entry_terminal_at = now
+            self._transition(
+                tracked, ProtectionState.ENTRY_ENDED_NO_FILL, REASON_ENTRY_ENDED_NO_FILL, now
+            )
+
+    def _note_quantity_unknown(self, tracked: _Tracked, status: str | None) -> None:
+        self._journal_note(
+            tracked,
+            EVENT_FILL_QUANTITY_UNKNOWN,
+            {"status": "NONE" if status is None else status},
+            self._now(),
+        )
+
+    async def _position_is_open(self, tracked: _Tracked) -> bool | None:
+        """True when REST shows a non-zero position of the symbol; None when it cannot be read."""
+        answer = await self._guarded(self._adapter.snapshot_positions(symbol=tracked.entry.symbol))
+        if isinstance(answer, BaseException):
+            if not isinstance(answer, Exception):
+                raise answer
+            self._journal_note(
+                tracked,
+                EVENT_REST_FAILED,
+                {"call": "snapshot_positions", "error_type": type(answer).__name__},
+                self._now(),
+            )
+            return None
+        for row in answer:
+            amount = _attr(row, "position_amt")
+            if _attr(row, "symbol") == tracked.entry.symbol and (
+                not isinstance(amount, Decimal) or amount != _ZERO
+            ):
+                return True
+        return False
 
     def _stop_client_id(self, tracked: _Tracked) -> str:
         return derive_algo_client_id(
