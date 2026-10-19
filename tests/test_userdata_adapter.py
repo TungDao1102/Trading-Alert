@@ -1257,3 +1257,61 @@ def test_noise_guard_scrubs_a_key_bearing_sdk_error_line_for_every_handler() -> 
     assert "Error in callback for key" in output
     assert "[REDACTED]" in output
     _assert_no_key(TEST_ONLY_LISTEN_KEY, output)
+
+
+# --------------------------------------------------------------------------- #
+# Review WR-06: a partial failure leaks no key and leaves no dirty client.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_failed_connect_still_lets_stop_delete_the_listen_key() -> None:
+    adapter, _transport, ws, _factory, port = _rig()
+
+    def _fail(_key: str) -> None:
+        raise RuntimeError("subscribe failed")
+
+    ws.on_user_data = _fail
+    with pytest.raises(RuntimeError):
+        await adapter.start()
+    assert port.starts == 1
+
+    await adapter.stop(close_listen_key=True)
+
+    assert port.closes == 1
+
+
+async def test_a_retried_start_uses_a_fresh_client_instead_of_stacking_connections() -> None:
+    adapter, transport, ws, factory, port = _rig()
+    calls = {"n": 0}
+
+    def _fail_once(_key: str) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("subscribe failed")
+
+    ws.on_user_data = _fail_once
+    with pytest.raises(RuntimeError):
+        await adapter.start()
+    assert len(ws.connections) == 3  # the failed attempt left its connections behind
+
+    await adapter.start()
+
+    assert len(factory.built) == 1  # a fresh client replaced the dirty one
+    assert ws.close_calls == 1  # the dirty client was released
+    assert transport.diagnostics().connection_count == 3
+    assert adapter.epoch == 1
+    assert port.starts == 2
+
+
+async def test_a_stop_whose_transport_close_fails_still_deletes_the_key_and_can_be_rerun() -> None:
+    adapter, _transport, ws, _factory, port = _rig()
+    await adapter.start()
+    ws.close_should_raise = RuntimeError("close failed")
+
+    with pytest.raises(RuntimeError):
+        await adapter.stop(close_listen_key=True)
+    assert port.closes == 1  # the DELETE was attempted in spite of the failed close
+
+    ws.close_should_raise = None
+    await adapter.stop(close_listen_key=False)  # not locked out by the first attempt
+    assert ws.close_calls == 2

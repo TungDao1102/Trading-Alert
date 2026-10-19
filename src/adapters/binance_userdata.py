@@ -556,6 +556,17 @@ class SdkUserDataTransport:
         register_runtime_secret(listen_key)
         install_sdk_log_bridge()
         install_sdk_noise_guard()
+        if self._ws.connections:
+            # A failed earlier attempt left connections on this client (connect raised after
+            # `create_connection`): release them and start on a fresh client, so connections
+            # and callbacks never accumulate across the supervisor's retries.
+            try:
+                await self._ws.close_connection()
+            except Exception as exc:
+                log.warning("userdata.connect_old_close_failed", error_type=type(exc).__name__)
+            self._forget_own_name()
+            self._listen_key = None
+            self._ws = self._client_factory(self._configuration)
         await self._ws.create_connection()  # type: ignore[no-untyped-call]  # SDK is untyped
         if not self._private_connections():
             log.error(
@@ -710,8 +721,10 @@ class UserDataAdapter:
     async def start(self) -> None:
         """Obtain a listenKey from the port, connect the transport; the epoch increases."""
         key = await self._listen_keys.start()
-        await self._transport.connect(key)
+        # Held before the connect: if the connect fails, `stop(close_listen_key=True)` can
+        # still DELETE the key that exists, and a retry's `rebuild` has it.
         self._listen_key = key
+        await self._transport.connect(key)
         self._stopped = False
         self._epoch += 1
 
@@ -761,12 +774,16 @@ class UserDataAdapter:
         """
         if self._stopped:
             return
-        self._stopped = True
-        await self._transport.close()
         key = self._listen_key
+        try:
+            await self._transport.close()
+        finally:
+            # The DELETE is attempted even when the transport close raised, and the adapter
+            # is marked stopped only after the close succeeded, so a failed stop can be re-run.
+            if close_listen_key and key is not None:
+                await self._listen_keys.close()
         self._listen_key = None
-        if close_listen_key and key is not None:
-            await self._listen_keys.close()
+        self._stopped = True
 
     # -- callbacks (event-loop thread, inside the SDK) ----------------------- #
 
