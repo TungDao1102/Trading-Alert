@@ -452,14 +452,25 @@ _ALL_SDK_URLS = (
     DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_TESTNET_URL,
 )
 
-_GUARDED_URLS = {
+_STATIC_GUARDED_URLS = {
     "demo-rest": DERIVATIVES_TRADING_USDS_FUTURES_REST_API_DEMO_URL,
     "live-rest": DERIVATIVES_TRADING_USDS_FUTURES_REST_API_PROD_URL,
     "live-streams": DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL,
     "live-ws-api": DERIVATIVES_TRADING_USDS_FUTURES_WS_API_PROD_URL,
-    # The user's DEMO WebSocket Streams URL, parsed from the record (plan 18-09).
-    "demo-streams": _record_demo_streams_url(),
 }
+# The user's DEMO WebSocket Streams URL is parsed from the record when the test runs, not at
+# import: a record edit (for example NOT_CONFIGURED) must not turn the whole module into one
+# collection error (review WR-04).
+_GUARDED_LABELS = (*_STATIC_GUARDED_URLS, "demo-streams")
+
+
+def _guarded_url(label: str) -> str:
+    if label in _STATIC_GUARDED_URLS:
+        return _STATIC_GUARDED_URLS[label]
+    url = _record_env_field("DEMO", "ws_streams_url")
+    if url is None:
+        pytest.skip("the record answers NOT_CONFIGURED for the DEMO streams URL")
+    return url
 
 
 def _near_misses(expected: str) -> list[object]:
@@ -491,9 +502,9 @@ def _near_misses(expected: str) -> list[object]:
     return misses
 
 
-@pytest.mark.parametrize("label", sorted(_GUARDED_URLS))
+@pytest.mark.parametrize("label", sorted(_GUARDED_LABELS))
 def test_assert_endpoint_url_accepts_only_the_exact_row_url(label: str) -> None:
-    expected = _GUARDED_URLS[label]
+    expected = _guarded_url(label)
     bc.assert_endpoint_url(expected, expected)
     for miss in _near_misses(expected):
         with pytest.raises(bc.EndpointViolation):
