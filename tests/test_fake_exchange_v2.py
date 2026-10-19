@@ -7,16 +7,27 @@ say; they are not evidence of mainnet behavior.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
 from binance_sdk_derivatives_trading_usds_futures import BadRequestError
+from src.adapters.binance_errors import error_facts_from_exception
+from src.adapters.binance_public import MarkPriceReading
+from src.adapters.binance_usdm import (
+    MarketCloseResult,
+    OpenAlgoOrderSnapshot,
+    OpenOrderSnapshot,
+)
+from src.domain.lot_filters import LotFilters
 
 from tests.support.fake_binance_exchange import (
     FLAT_CLOSE_POSITION_CODE,
     STATUS_CANCELED,
     STATUS_FILLED,
+    STATUS_FINISHED,
     STATUS_NEW,
     STATUS_PARTIALLY_FILLED,
     BinanceSemanticsFakeAdapter,
@@ -190,3 +201,225 @@ def test_default_fake_does_not_enforce_the_flat_stop_rule() -> None:
     # The pre-Phase-19 manager places its closePosition stop right after the entry ack, so
     # the legacy tests need the lenient default; the Phase 19 flow tests opt in.
     assert BinanceSemanticsFakeAdapter().enforce_flat_stop_rejection is False
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: exchange reads, stop trigger, MARKET close, lot filters.
+# --------------------------------------------------------------------------- #
+
+NOW = datetime(2026, 10, 19, 12, 0, tzinfo=UTC)
+
+
+def _lot_filters(symbol: str = SYMBOL) -> LotFilters:
+    # TEST_ONLY numbers; not exchange values.
+    return LotFilters(
+        symbol=symbol,
+        price_tick_size=Decimal("0.10"),
+        lot_min_quantity=Decimal("0.001"),
+        lot_max_quantity=Decimal("1000"),
+        lot_step_size=Decimal("0.001"),
+        market_lot_min_quantity=Decimal("0.001"),
+        market_lot_max_quantity=Decimal("120"),
+        market_lot_step_size=Decimal("0.001"),
+        min_notional=Decimal("100"),
+    )
+
+
+async def _open_long(fake: BinanceSemanticsFakeAdapter, quantity: str = "0.010") -> None:
+    await fake.place_entry(**_entry_kwargs(quantity=quantity))
+    fake.fill(ENTRY_ID)
+
+
+async def test_mark_price_is_served_and_an_unset_symbol_raises() -> None:
+    fake = _strict()
+    fake.set_mark_price(SYMBOL, Decimal("100.50"), NOW)
+    reading = await fake.get_mark_price(symbol=SYMBOL)
+    assert isinstance(reading, MarkPriceReading)
+    assert (reading.symbol, reading.mark_price, reading.exchange_time_utc) == (
+        SYMBOL,
+        Decimal("100.50"),
+        NOW,
+    )
+    with pytest.raises(RuntimeError, match="ETHUSDT"):
+        await fake.get_mark_price(symbol="ETHUSDT")
+    configured = TimeoutError("configured")
+    fake.set_mark_price_error(configured)
+    with pytest.raises(TimeoutError) as caught:
+        await fake.get_mark_price(symbol="ETHUSDT")
+    assert caught.value is configured
+    # A symbol that has a price is still served.
+    assert (await fake.get_mark_price(symbol=SYMBOL)).mark_price == Decimal("100.50")
+
+
+async def test_open_order_and_algo_snapshots_are_scoped_by_symbol() -> None:
+    fake = _strict()
+    await fake.place_entry(**_entry_kwargs())
+    await fake.place_entry(**_entry_kwargs(client_id="test-only-entry-0002", symbol="ETHUSDT"))
+    fake.fill(ENTRY_ID, quantity=Decimal("0.004"), price=Decimal("101.00"))
+    await fake.place_algo_protective(**_stop_kwargs())
+
+    btc = await fake.snapshot_open_normal_orders(symbol=SYMBOL)
+    assert [(o.client_order_id, o.status, o.quantity) for o in btc] == [
+        (ENTRY_ID, STATUS_PARTIALLY_FILLED, Decimal("0.010"))
+    ]
+    assert isinstance(btc[0], OpenOrderSnapshot)
+    assert len(await fake.snapshot_open_normal_orders()) == 2
+    assert len(await fake.snapshot_open_normal_orders(symbol="XRPUSDT")) == 0
+
+    algos = await fake.snapshot_open_algo_orders(symbol=SYMBOL)
+    assert isinstance(algos[0], OpenAlgoOrderSnapshot)
+    assert [(a.client_algo_id, a.close_position, a.trigger_price) for a in algos] == [
+        (STOP_ID, True, Decimal("95.00"))
+    ]
+    assert await fake.snapshot_open_algo_orders(symbol="ETHUSDT") == []
+
+
+async def test_trigger_stop_consumes_the_position_and_finishes_the_algo() -> None:
+    fake = _strict()
+    await _open_long(fake)
+    await fake.place_algo_protective(**_stop_kwargs())
+
+    fake.trigger_stop(STOP_ID)
+
+    assert await fake.snapshot_positions(symbol=SYMBOL) == []
+    assert STOP_ID not in fake.open_algos
+    probe = await fake.query_algo_order_by_client(client_algo_id=STOP_ID)
+    assert probe.algo_status == STATUS_FINISHED
+    assert await fake.snapshot_open_algo_orders() == []
+    assert fake.algo_history[STOP_ID].status == STATUS_FINISHED
+
+
+async def test_fill_after_the_stop_triggered_opens_a_new_position() -> None:
+    # The B4 race: the entry remainder is still open when the stop closes the position.
+    fake = _strict()
+    await fake.place_entry(**_entry_kwargs())
+    fake.fill(ENTRY_ID, quantity=Decimal("0.004"), price=Decimal("101.00"))
+    await fake.place_algo_protective(**_stop_kwargs())
+    fake.trigger_stop(STOP_ID)
+    assert await fake.snapshot_positions() == []
+
+    fake.fill(ENTRY_ID, quantity=Decimal("0.006"), price=Decimal("99.00"))
+
+    positions = await fake.snapshot_positions(symbol=SYMBOL)
+    assert [(p.position_amt, p.entry_price) for p in positions] == [
+        (Decimal("0.006"), Decimal("99.00"))
+    ]
+
+
+async def test_market_close_reduces_the_position() -> None:
+    fake = _strict()
+    await _open_long(fake)
+    fake.set_mark_price(SYMBOL, Decimal("102.00"), NOW)
+
+    result = await fake.place_market_close(
+        symbol=SYMBOL,
+        side="SELL",
+        position_side="BOTH",
+        quantity=Decimal("0.004"),
+        new_client_order_id=CLOSE_ID,
+    )
+
+    assert isinstance(result, MarketCloseResult)
+    assert result.status == STATUS_FILLED
+    assert result.executed_quantity == Decimal("0.004")
+    assert result.average_price == Decimal("102.00")
+    assert [p.position_amt for p in await fake.snapshot_positions()] == [Decimal("0.006")]
+    probe = await fake.query_order_by_client(symbol=SYMBOL, orig_client_order_id=CLOSE_ID)
+    assert (probe.status, probe.executed_quantity) == (STATUS_FILLED, Decimal("0.004"))
+
+
+async def test_market_close_on_a_short_position_buys() -> None:
+    fake = _strict()
+    await fake.place_entry(**_entry_kwargs(side="SELL"))
+    fake.fill(ENTRY_ID)
+    await fake.place_market_close(
+        symbol=SYMBOL,
+        side="BUY",
+        position_side="BOTH",
+        quantity=Decimal("0.010"),
+        new_client_order_id=CLOSE_ID,
+    )
+    assert await fake.snapshot_positions() == []
+
+
+@pytest.mark.parametrize(
+    ("setup", "quantity", "code"),
+    [
+        ("flat", "0.010", -2022),  # TEST CONVENTION for a flat position (research A4/A8)
+        ("long", "0.011", -2024),  # above the position
+        ("long_wrong_side", "0.010", -2022),  # a reduce-only order that would add exposure
+    ],
+)
+async def test_market_close_rejections_use_sdk_errors_with_int_codes(
+    setup: str, quantity: str, code: int
+) -> None:
+    fake = _strict()
+    if setup != "flat":
+        await _open_long(fake)
+    side = "BUY" if setup == "long_wrong_side" else "SELL"
+    with pytest.raises(BadRequestError) as caught:
+        await fake.place_market_close(
+            symbol=SYMBOL,
+            side=side,
+            position_side="BOTH",
+            quantity=Decimal(quantity),
+            new_client_order_id=CLOSE_ID,
+        )
+    assert caught.value.status_code == code
+    assert isinstance(caught.value.status_code, int)
+    # The call is recorded and the position is untouched.
+    assert fake.calls_to("place_market_close")
+    expected = [] if setup == "flat" else [Decimal("0.010")]
+    assert [p.position_amt for p in await fake.snapshot_positions()] == expected
+
+
+def test_the_flat_close_code_is_a_labelled_test_convention() -> None:
+    source = (Path(__file__).parent / "support" / "fake_binance_exchange.py").read_text(
+        encoding="utf-8"
+    )
+    assert "TEST CONVENTION" in source
+    assert "UNPROVEN" in source
+
+
+async def test_market_close_ack_only_reports_no_execution_but_moves_the_position() -> None:
+    fake = _strict()
+    fake.market_close_ack_only = True
+    await _open_long(fake)
+    result = await fake.place_market_close(
+        symbol=SYMBOL,
+        side="SELL",
+        position_side="BOTH",
+        quantity=Decimal("0.010"),
+        new_client_order_id=CLOSE_ID,
+    )
+    assert result.status == STATUS_NEW
+    assert result.executed_quantity is None
+    assert await fake.snapshot_positions() == []
+
+
+async def test_lot_filters_are_served_and_unset_raises() -> None:
+    fake = _strict()
+    filters = _lot_filters()
+    fake.set_lot_filters(SYMBOL, filters)
+    assert await fake.symbol_lot_filters(symbol=SYMBOL) == filters
+    with pytest.raises(ValueError, match="ETHUSDT"):
+        await fake.symbol_lot_filters(symbol="ETHUSDT")
+
+
+def test_error_facts_match_the_real_adapter() -> None:
+    fake = _strict()
+    exc = BadRequestError(error_message="x", status_code=-4509)
+    assert fake.error_facts(exc) == error_facts_from_exception(exc)
+    assert fake.error_facts(exc).code == -4509
+
+
+async def test_new_methods_bind_against_the_real_adapter_signature() -> None:
+    fake = _strict()
+    with pytest.raises(TypeError):
+        await fake.get_mark_price(symbol=SYMBOL, unexpected=True)
+    with pytest.raises(TypeError):
+        await fake.place_market_close(symbol=SYMBOL, side="SELL")
+    with pytest.raises(TypeError):
+        await fake.symbol_lot_filters(sym=SYMBOL)
+    with pytest.raises(TypeError):
+        await fake.snapshot_open_algo_orders(symbols=[SYMBOL])
