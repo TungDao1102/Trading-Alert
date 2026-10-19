@@ -7,6 +7,7 @@ TEST_ONLY values from `tests/support/execution_limits.py`, never ratified number
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -279,6 +280,40 @@ def test_the_writer_can_write_a_bad_label_for_refusal_tests(tmp_path: Path) -> N
     )
     with pytest.raises(el.ExecutionLimitsInvalid):
         el.load_execution_limits(path)
+
+
+# --------------------------------------------------------------------------- #
+# config/execution/README.md: the required keys, no values.
+# --------------------------------------------------------------------------- #
+
+README = ROOT / "config" / "execution" / "README.md"
+_KEY_LINE = re.compile(r"^- `([a-z_]+)\.([a-z0-9_]+)` - \S")
+
+
+def test_the_readme_lists_exactly_the_execution_limit_keys() -> None:
+    keys = [
+        (match.group(1), match.group(2))
+        for line in README.read_text(encoding="utf-8").splitlines()
+        if (match := _KEY_LINE.match(line))
+    ]
+    expected = [(s, k) for s, names in el.EXECUTION_LIMIT_KEYS.items() for k in names]
+    assert keys == expected
+
+
+def test_the_readme_carries_no_value_and_states_the_rules() -> None:
+    text = README.read_text(encoding="utf-8")
+    for names in el.EXECUTION_LIMIT_KEYS.values():
+        for name in names:
+            assert not re.search(rf"\b{name}\b`?\s*[=:]\s*[-+]?\d", text), name
+    for word in ("NOT_CONFIGURED", "PLACEHOLDER", "DECISION", "no default", "sha256"):
+        assert word in text, word
+    assert "entry_terminal_timeout_ms" in text
+
+
+def test_the_committed_file_names_only_the_not_configured_word() -> None:
+    text = LIMITS_FILE.read_text(encoding="utf-8")
+    assert not re.search(r"^\s*[a-z_]+\s*=\s*[-+]?\d", text, flags=re.MULTILINE)
+    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 8
 
 
 def test_the_test_only_helper_rejects_an_unknown_field() -> None:
