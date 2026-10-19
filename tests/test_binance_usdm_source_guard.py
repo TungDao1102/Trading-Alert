@@ -39,7 +39,9 @@ REMOVED_NAMES: frozenset[str] = frozenset(
 )
 EXCEPTION_NAMES: frozenset[str] = frozenset({"exc", "e", "err", "error", "exception"})
 LOGGER_METHODS: frozenset[str] = frozenset({"info", "warning", "error", "exception", "debug"})
-PLACEMENT_FUNCTIONS: frozenset[str] = frozenset({"place_entry", "place_algo_protective"})
+PLACEMENT_FUNCTIONS: frozenset[str] = frozenset(
+    {"place_entry", "place_algo_protective", "place_market_close"}
+)
 
 
 def _read(path: Path) -> str:
@@ -354,4 +356,5 @@ def test_placement_guard_reports_loops_awaits_and_tenacity() -> None:
     assert placement_retry_constructs("x = 1\n") == [
         "place_algo_protective: not defined",
         "place_entry: not defined",
+        "place_market_close: not defined",
     ]

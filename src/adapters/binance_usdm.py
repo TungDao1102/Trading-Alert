@@ -202,6 +202,11 @@ class EntriesBlocked(Exception):  # noqa: N818 - a refusal, not an error of the 
         super().__init__(f"new entry refused before sending: clock drift guard {reason}")
 
 
+_MARKET_CLOSE_SIDES: frozenset[str] = frozenset({"BUY", "SELL"})
+_MARKET_CLOSE_POSITION_SIDES: frozenset[str] = frozenset({"BOTH", "LONG", "SHORT"})
+_MAX_CLIENT_ORDER_ID_LEN = 36
+
+
 def _is_order_absent(exc: BaseException, call_kind: CallKind) -> bool:
     """True only for the taxonomy category ORDER_ABSENT of `call_kind` (D-10).
 
@@ -377,6 +382,27 @@ class EntryPlacementResult:
     status: str
     quantity: Decimal
     price: Decimal
+    update_time_utc: datetime
+
+
+@dataclass(frozen=True)
+class MarketCloseResult:
+    """Result of `place_market_close` (new_order MARKET, risk-reducing, plan 19-08, D-15).
+
+    `executed_quantity` and `average_price` are the fields the new-order response reported;
+    None means the response did not carry the field (unknown, never zero). A MARKET order
+    is normally acknowledged before it fills, so the caller confirms the real closed
+    quantity by a position query, not by this result.
+    """
+
+    symbol: str
+    client_order_id: str
+    exchange_order_id: str
+    side: str
+    position_side: str
+    status: str
+    executed_quantity: Decimal | None
+    average_price: Decimal | None
     update_time_utc: datetime
 
 
@@ -1108,6 +1134,92 @@ class BinanceUsdmAdapter:
         result: NewOrderResponse = response.data()
         return _new_order_to_entry_result(result)
 
+    async def place_market_close(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        position_side: str,
+        quantity: Decimal,
+        new_client_order_id: str,
+    ) -> MarketCloseResult:
+        """Send ONE MARKET order that only reduces the position (plan 19-08, D-15, D034).
+
+        D034 approves a reduce-only close when the stop is rejected or unconfirmed. Payload
+        (19-NOTES "Emergency close"): One-way (`position_side` BOTH) sends
+        `reduceOnly=true` with the closing side; Hedge (LONG or SHORT) sends an explicit
+        `positionSide` and no `reduceOnly` (Binance refuses it in Hedge Mode); the side must
+        close the leg (SELL closes LONG, BUY closes SHORT), otherwise the order would add
+        exposure and `ValueError` is raised before anything is sent. Hedge is not verified
+        against the exchange (V1 must not enable it).
+
+        Exactly one SDK call through the shared gate path: never retried and never blocked
+        by the clock-drift guard, which blocks NEW entries only (a risk-reducing call must
+        not wait for a clock measurement). A gate pause or ban still refuses it with nothing
+        sent (owner-open Q4 / Phase 18 src/WR-12: whether risk-reducing calls get an exemption
+        is the owner's decision; none is added here). On an ambiguous failure the caller
+        queries by the deterministic `new_client_order_id` before any resend.
+
+        Args:
+            symbol: The trading pair.
+            side: The closing side, "BUY" or "SELL".
+            position_side: "BOTH" (One-way) or "LONG"/"SHORT" (Hedge).
+            quantity: A positive finite Decimal, already valid under the live lot filters.
+            new_client_order_id: The caller's deterministic id, 1..36 characters.
+
+        Raises:
+            ValueError / TypeError: invalid arguments (nothing sent), or a response without
+                identity or update time (flag, never fabricate).
+            Any SDK or gate error of the single attempt, unchanged.
+        """
+        if side not in _MARKET_CLOSE_SIDES:
+            raise ValueError(f"side must be BUY or SELL, got {side!r}")
+        if position_side not in _MARKET_CLOSE_POSITION_SIDES:
+            raise ValueError(f"position_side must be BOTH, LONG or SHORT, got {position_side!r}")
+        if (position_side == "LONG" and side != "SELL") or (
+            position_side == "SHORT" and side != "BUY"
+        ):
+            raise ValueError(
+                f"a {side} order on position_side {position_side} would add exposure; "
+                "a close must be SELL on LONG or BUY on SHORT"
+            )
+        if not isinstance(quantity, Decimal):
+            raise TypeError(f"quantity must be Decimal, got {type(quantity).__name__}")
+        if not quantity.is_finite() or quantity <= 0:
+            raise ValueError("quantity must be a finite Decimal > 0")
+        if (
+            not isinstance(new_client_order_id, str)
+            or new_client_order_id == ""
+            or len(new_client_order_id) > _MAX_CLIENT_ORDER_ID_LEN
+        ):
+            raise ValueError(
+                f"new_client_order_id must be 1..{_MAX_CLIENT_ORDER_ID_LEN} characters"
+            )
+
+        from binance_sdk_derivatives_trading_usds_futures.rest_api.models.enums import (
+            NewOrderReduceOnlyEnum,
+            NewOrderSideEnum,
+            NewOrderTypeEnum,
+        )
+
+        # One-way only: reduceOnly. Hedge omits the parameter (the consistency check above
+        # already guarantees the Hedge order cannot add exposure).
+        reduce_only_kwargs: dict[str, Any] = {}
+        if position_side == "BOTH":
+            reduce_only_kwargs["reduce_only"] = NewOrderReduceOnlyEnum.TRUE
+        response = await self._sdk_call(
+            CallKind.PLACEMENT,
+            self._sdk.rest_api.new_order,
+            symbol=symbol,
+            side=NewOrderSideEnum(side),
+            type=NewOrderTypeEnum.MARKET,
+            position_side=position_side,
+            quantity=_decimal_to_wire(quantity),
+            new_client_order_id=new_client_order_id,
+            **reduce_only_kwargs,
+        )
+        return _new_order_to_market_close_result(response.data())
+
     async def place_algo_protective(
         self,
         *,
@@ -1479,6 +1591,30 @@ def _new_order_to_entry_result(raw: Any) -> EntryPlacementResult:
         status=raw.status or "",
         quantity=_require_quantity(raw.orig_qty, "orig_qty"),
         price=Decimal(str(raw.price)) if raw.price is not None else Decimal("0"),
+        update_time_utc=_require_update_time_utc(raw.update_time),
+    )
+
+
+def _new_order_to_market_close_result(raw: Any) -> MarketCloseResult:
+    """Project a MARKET `new_order` response into a `MarketCloseResult` (plan 19-08).
+
+    Flag-never-fabricate (D-09): a response without identity fields or update time raises.
+    `executed_qty` and `avg_price` are read as optional (the SDK 17.4.0 response model does
+    not declare `avg_price`): absent is None, never zero.
+    """
+    if not raw.symbol or not raw.client_order_id or raw.order_id is None:
+        raise ValueError(f"new_order response missing identity fields: {raw!r}")
+    return MarketCloseResult(
+        symbol=raw.symbol,
+        client_order_id=raw.client_order_id,
+        exchange_order_id=str(raw.order_id),
+        side=raw.side or "",
+        position_side=raw.position_side or "",
+        status=raw.status or "",
+        executed_quantity=_optional_probe_decimal(
+            getattr(raw, "executed_qty", None), "executed_qty"
+        ),
+        average_price=_optional_probe_decimal(getattr(raw, "avg_price", None), "avg_price"),
         update_time_utc=_require_update_time_utc(raw.update_time),
     )
 

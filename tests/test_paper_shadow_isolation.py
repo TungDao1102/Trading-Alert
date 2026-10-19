@@ -62,6 +62,7 @@ ORDER_SURFACE = frozenset(
     {
         "place_entry",
         "place_algo_protective",
+        "place_market_close",
         "cancel_normal_order",
         "cancel_algo_order",
         "query_order_by_client",
