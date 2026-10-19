@@ -6,12 +6,28 @@ Every filter is a fake: sizing is proven offline, the mainnet filters are not ve
 
 from __future__ import annotations
 
+import ast
+import dataclasses
+from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
+from src.backtest.semantics import TP1_QUANTITY_FRACTION
 from src.domain.lot_filters import LotFilters
+from src.execution.placement import ProtectiveTemplate, size_protectives_to_filled_qty
 from src.execution.tp_sizing import TakeProfitSizing, size_take_profits
+from src.risk.types import ConstraintSnapshot
+
+from tests.support.ast_guards import (
+    float_constructor_calls,
+    forbidden_imports,
+    module_imports,
+    wall_clock_calls,
+)
+
+TP_SIZING_PATH = Path(__file__).resolve().parents[1] / "src" / "execution" / "tp_sizing.py"
 
 D = Decimal
 
@@ -312,3 +328,179 @@ def test_result_invariants() -> None:
             tp2_leg=None,
             tp1_quantity=None,
         )
+
+
+# --------------------------------------------------------------------------- #
+# Byte-identical regression against the frozen sizing (research F12)
+# --------------------------------------------------------------------------- #
+
+# (tick, step) pairs; min quantity equals the step and MARKET_LOT_SIZE equals LOT_SIZE, the
+# input class where both functions apply.
+_GRID_PAIRS = [("0.01", "0.001"), ("0.1", "0.01"), ("0.5", "1")]
+_GRID_QUANTITIES = {
+    "0.001": ["0.001", "0.002", "0.010", "0.0373", "1.2345"],
+    "0.01": ["0.01", "0.03", "0.10", "0.377", "12.345"],
+    "1": ["1", "2", "3", "10", "37.9"],
+}
+_FIXED_AT = datetime(2026, 10, 1, tzinfo=UTC)
+
+
+def _frozen_and_live(
+    *, quantity: str, tick: str, step: str, side: str, mode: str
+) -> tuple[Any, TakeProfitSizing]:
+    entry = D("100")
+    sign = 1 if side == "LONG" else -1
+    tp1 = entry + sign * D("6.004")
+    tp2 = entry + sign * D("10.006")
+    snapshot = ConstraintSnapshot(
+        symbol="BTCUSDT",
+        price_tick_size=D(tick),
+        quantity_step_size=D(step),
+        min_quantity=D(step),
+        min_notional=D("5"),
+        metadata_observed_at_utc=_FIXED_AT,
+    )
+    template = ProtectiveTemplate(
+        stop_loss_trigger_price=entry - sign * D("5"),
+        tp1_trigger_price=tp1,
+        tp2_trigger_price=tp2,
+        tp1_quantity_fraction=TP1_QUANTITY_FRACTION,
+    )
+    frozen = size_protectives_to_filled_qty(
+        filled_quantity=D(quantity),
+        protective_template=template,
+        constraint_snapshot=snapshot,
+        position_mode=mode,
+        candidate_position_side=side,
+    )
+    filters = LotFilters(
+        symbol="BTCUSDT",
+        price_tick_size=D(tick),
+        lot_min_quantity=D(step),
+        lot_max_quantity=D("100000"),
+        lot_step_size=D(step),
+        market_lot_min_quantity=D(step),
+        market_lot_max_quantity=D("100000"),
+        market_lot_step_size=D(step),
+        min_notional=D("5"),
+    )
+    live = size_take_profits(
+        position_quantity=D(quantity),
+        tp1_trigger_price=tp1,
+        tp2_trigger_price=tp2,
+        tp1_quantity_fraction=TP1_QUANTITY_FRACTION,
+        filters=filters,
+        side=side,
+        position_mode=mode,
+        working_type="MARK_PRICE",
+    )
+    return frozen, live
+
+
+def _canonical(leg: dict[str, Any] | None) -> dict[str, str] | None:
+    """Every value as its str() so Decimal exponents are part of the comparison."""
+    return None if leg is None else {key: str(value) for key, value in leg.items()}
+
+
+_REGRESSION_CASES = [
+    (tick, step, quantity, side, mode)
+    for tick, step in _GRID_PAIRS
+    for quantity in _GRID_QUANTITIES[step]
+    for side in ("LONG", "SHORT")
+    for mode in ("ONE_WAY", "HEDGE")
+]
+
+
+@pytest.mark.parametrize(("tick", "step", "quantity", "side", "mode"), _REGRESSION_CASES)
+def test_overlap_is_byte_identical_to_the_frozen_sizing(
+    tick: str, step: str, quantity: str, side: str, mode: str
+) -> None:
+    frozen, live = _frozen_and_live(quantity=quantity, tick=tick, step=step, side=side, mode=mode)
+    assert live.is_no_trade == frozen.is_no_trade
+    assert live.reason_code == frozen.reason_code
+    assert live.tp1_leg == frozen.tp1_leg
+    assert live.tp2_leg == frozen.tp2_leg
+    assert _canonical(live.tp1_leg) == _canonical(frozen.tp1_leg)
+    assert _canonical(live.tp2_leg) == _canonical(frozen.tp2_leg)
+
+
+def test_regression_grid_covers_accepts_and_refusals() -> None:
+    assert len(_REGRESSION_CASES) >= 2 * 2 * 3 * 5
+    outcomes = {
+        _frozen_and_live(quantity=q, tick=t, step=st, side=sd, mode=m)[0].reason_code
+        for t, st, q, sd, m in _REGRESSION_CASES
+    }
+    assert "OK" in outcomes
+    assert outcomes - {"OK"}  # at least one refusal path is compared too
+
+
+# --------------------------------------------------------------------------- #
+# EXEC-07 guard: the TP1 fraction stays a code constant outside src/execution
+# --------------------------------------------------------------------------- #
+
+
+def test_tp1_fraction_constant_and_template_shape_are_unchanged() -> None:
+    assert D("0.5") == TP1_QUANTITY_FRACTION
+    assert str(TP1_QUANTITY_FRACTION) == "0.5"
+    assert [f.name for f in dataclasses.fields(ProtectiveTemplate)] == [
+        "stop_loss_trigger_price",
+        "tp1_trigger_price",
+        "tp2_trigger_price",
+        "tp1_quantity_fraction",
+    ]
+
+
+def test_tp_sizing_defines_no_fraction_constant() -> None:
+    tree = ast.parse(TP_SIZING_PATH.read_text(encoding="utf-8"))
+    offenders: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, float):
+            offenders.append(node.lineno)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "Decimal"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+            and node.args[0].value.strip() in {"0.5", ".5", "0.50"}
+        ):
+            offenders.append(node.lineno)
+    assert offenders == []
+    referenced = [
+        node.lineno
+        for node in ast.walk(tree)
+        if (isinstance(node, ast.Name) and node.id == "TP1_QUANTITY_FRACTION")
+        or (isinstance(node, ast.alias) and node.name == "TP1_QUANTITY_FRACTION")
+    ]
+    assert referenced == []
+
+
+# --------------------------------------------------------------------------- #
+# Purity
+# --------------------------------------------------------------------------- #
+
+
+def test_tp_sizing_is_pure() -> None:
+    assert (
+        forbidden_imports(
+            TP_SIZING_PATH,
+            [
+                "src.backtest",
+                "binance*",
+                "sqlalchemy",
+                "pydantic",
+                "polars",
+                "pandas",
+                "numpy",
+                "httpx",
+                "asyncio",
+                "datetime",
+                "time",
+            ],
+        )
+        == []
+    )
+    assert float_constructor_calls(TP_SIZING_PATH) == []
+    assert wall_clock_calls(TP_SIZING_PATH) == []
+    assert "src.backtest.semantics" not in module_imports(TP_SIZING_PATH)
