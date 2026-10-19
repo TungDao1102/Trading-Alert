@@ -1286,19 +1286,11 @@ async def test_fresher_caller_expiry_cannot_revive_a_stale_plan() -> None:
 async def test_odd_tick_zone_mid_is_floored_for_a_buy_limit() -> None:
     """WR-01: (100.01 + 100.02) / 2 = 100.015 is off-grid; a BUY limit
     floors to 100.01 (never pays up)."""
-    import dataclasses
-
-    case_input = _load_input()
-    risk_kwargs = _build_risk_kwargs(case_input)
-    risk_kwargs["trade_plan"] = dataclasses.replace(
-        risk_kwargs["trade_plan"],
-        entry_min_price=Decimal("100.01"),
-        entry_max_price=Decimal("100.02"),
-    )
-    gate_kwargs = _build_gate_kwargs(case_input)
+    # The zone is a hashed field: the edited case re-derives its plan hash (plan 19-13).
+    case_input = {**_load_input(), "entry_min_price": "100.01", "entry_max_price": "100.02"}
     adapter = FakeExecutionAdapter()
 
-    outcome = await _run_plan(adapter, risk_kwargs=risk_kwargs, gate_kwargs=gate_kwargs)
+    outcome = await _run_plan(adapter, case_input=case_input)
 
     assert outcome.is_no_trade is False, outcome
     entry_call = next(c for c in adapter.calls if c["method"] == "place_entry")
