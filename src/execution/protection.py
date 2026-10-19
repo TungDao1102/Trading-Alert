@@ -60,6 +60,11 @@ from typing import Any, Protocol
 
 from src.domain.algo_status import is_protection_confirmed
 from src.domain.enums import ExecutionIntentStatus, OrderRole
+from src.domain.exchange_errors import (
+    CallKind,
+    ExchangeErrorCategory,
+    classify,
+)
 from src.domain.journal import JournalEvent, content_hash_event_id, correlated_event_id
 from src.execution.constraint_snapshot import PlanConstraintSnapshot
 from src.execution.execution_limits import ExecutionLimits
@@ -71,6 +76,18 @@ POSITION_MODE_ONE_WAY = "ONE_WAY"
 POSITION_MODE_HEDGE = "HEDGE"
 
 SAFE_MODE_DB_FAILURE = "DB_FAILURE"
+SAFE_MODE_CLOSE_REQUIRED = "CLOSE_REQUIRED"
+ALERT_CLOSE_REQUIRED = "CLOSE_REQUIRED"
+
+# The branch codes of 19-NOTES.md "Fill, stop and entry remainder" (D-12): the reason journaled on
+# the transition into CLOSE_REQUIRED, the reason of the critical alert and the reason handed to the
+# emergency closer.
+BRANCH_B1_ENTRY_NOT_TERMINAL = "B1_ENTRY_NOT_TERMINAL"
+BRANCH_B2_STOP_UNCONFIRMED = "B2_STOP_UNCONFIRMED"
+BRANCH_B3_BOTH_AMBIGUOUS = "B3_BOTH_AMBIGUOUS"
+BRANCH_B4_FILL_AFTER_STOP = "B4_FILL_AFTER_STOP"
+BRANCH_B5_STOP_REJECTED = "B5_STOP_REJECTED"
+BRANCH_NO_POSITION_BUT_EXPOSED = "NO_POSITION_ON_STOP_BUT_EXPOSED"
 
 EVENT_PROTECTION_TRANSITION = "PROTECTION_TRANSITION"
 EVENT_FILL_QUANTITY_UNKNOWN = "PROTECTION_FILL_QUANTITY_UNKNOWN"
@@ -79,6 +96,10 @@ EVENT_REST_FAILED = "PROTECTION_REST_FAILED"
 EVENT_STOP_PLACEMENT_FAILED = "PROTECTION_STOP_PLACEMENT_FAILED"
 EVENT_ENTRY_CANCEL_FAILED = "PROTECTION_ENTRY_CANCEL_FAILED"
 EVENT_STEP_ERROR = "PROTECTION_STEP_ERROR"
+EVENT_STOP_NOT_SENT = "STOP_NOT_SENT"
+EVENT_CLOSE_REQUIRED = "PROTECTION_CLOSE_REQUIRED"
+EVENT_CLOSE_ATTEMPT_ERROR = "PROTECTION_CLOSE_ATTEMPT_ERROR"
+EVENT_SWEEP_FAILED = "PROTECTION_SWEEP_FAILED"
 
 # The order statuses that end an entry (research P5): FILLED, and the three "ended without
 # (further) fills" statuses of the router (TERMINAL_NOT_FILLED_STATUSES).
@@ -100,6 +121,10 @@ REASON_STOP_CONFIRMED_ENTRY_TERMINAL = "STOP_CONFIRMED_ENTRY_TERMINAL"
 REASON_STOP_CONFIRMED_ENTRY_OPEN = "STOP_CONFIRMED_ENTRY_OPEN"
 REASON_ENTRY_TERMINAL = "ENTRY_TERMINAL"
 REASON_ENTRY_ENDED_NO_FILL = "ENTRY_ENDED_NO_FILL"
+REASON_CLOSED_ENTRY_TERMINAL = "CLOSED_ENTRY_TERMINAL"
+REASON_CLOSE_FAILED = "CLOSE_FAILED"
+REASON_CLOSE_NOT_SENT = "CLOSE_NOT_SENT"
+REASON_CLOSED_ENTRY_OPEN = "CLOSED_ENTRY_OPEN"
 
 
 class ProtectionState(str, Enum):
@@ -313,6 +338,15 @@ class _QueuedFill:
     source: str
 
 
+class _PlaceOutcome(Enum):
+    """How one stop placement ended (never protection: only REST ACTIVE is)."""
+
+    PLACED = "PLACED"
+    EXISTS = "EXISTS"
+    REJECTED = "REJECTED"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
 class _Tracked:
     """The mutable record of one registered plan (in-process; the exchange is the truth)."""
 
@@ -326,6 +360,8 @@ class _Tracked:
         self.last_reason: str | None = None
         self.entry_exchange_order_id: str | None = None
         self.stop_unknown_recorded = False
+        self.close_branch: str | None = None
+        self.sweep_done = False
 
     def view(self) -> PlanProtection:
         assert self.state is not None
@@ -516,6 +552,10 @@ class ProtectionCoordinator:
                     await self._poll_entry(tracked)
             elif state in (ProtectionState.UNPROTECTED, ProtectionState.PROTECTED_ENTRY_OPEN):
                 await self._confirm(tracked)
+            elif state in (ProtectionState.CLOSE_REQUIRED, ProtectionState.CLOSE_FAILED):
+                await self._close_flow(tracked)
+            elif state is ProtectionState.FLAT and not tracked.sweep_done:
+                await self._sweep(tracked)
         except Exception as exc:  # noqa: BLE001 - one plan's failure must not stop the others
             self._journal_note(
                 tracked,
@@ -541,6 +581,27 @@ class ProtectionCoordinator:
         for result in results:
             if isinstance(result, BaseException) and not isinstance(result, Exception):
                 raise result
+        placed = results[0]
+        if isinstance(placed, _PlaceOutcome):
+            await self._on_place_outcome(tracked, placed)
+
+    async def _on_place_outcome(self, tracked: _Tracked, outcome: _PlaceOutcome) -> None:
+        """React to how a stop placement ended (the stop itself is confirmed only by REST)."""
+        if outcome is _PlaceOutcome.REJECTED:
+            # B5 (D-12): a definitive rejection after a fill is never resent.
+            entry = tracked.entry
+            role = OrderRole.STOP_LOSS.value
+            self._store_write(
+                lambda: self._store.record_result(
+                    approval_id=entry.approval_id,
+                    role=role,
+                    status=ExecutionIntentStatus.REJECTED,
+                    exchange_order_id=None,
+                    exchange_status=None,
+                    now_utc=self._now(),
+                )
+            )
+            await self._enter_close_required(tracked, BRANCH_B5_STOP_REJECTED)
 
     async def _poll_entry(self, tracked: _Tracked) -> None:
         """REST poll of an AWAITING_FILL entry: the fill source when no stream event arrived.
@@ -658,8 +719,13 @@ class ProtectionCoordinator:
         if self._store_write(intend):
             self._store_write(mark_sent)
 
-    async def _place_stop(self, tracked: _Tracked) -> None:
-        """Query-first by the deterministic id, then place the closePosition stop."""
+    async def _place_stop(self, tracked: _Tracked) -> _PlaceOutcome:
+        """Query-first by the deterministic id, then place the closePosition stop.
+
+        Returns how the placement ended; the outcome is never protection (only a REST answer of
+        ACTIVE is). The exception is read through ``error_facts`` + ``classify`` (D-21), never
+        through its message text.
+        """
         entry = tracked.entry
         stop_id = self._stop_client_id(tracked)
         try:
@@ -677,8 +743,8 @@ class ProtectionCoordinator:
         else:
             if _attr(probe, "found") is True:
                 # An existing ACTIVE stop is adopted (confirmed by the REST step); a non-active
-                # one is never re-placed here (the branch logic is plan 19-14).
-                return
+                # one is never re-placed here.
+                return _PlaceOutcome.EXISTS
         try:
             await self._adapter.place_algo_protective(
                 symbol=entry.symbol,
@@ -692,13 +758,28 @@ class ProtectionCoordinator:
                 working_type=entry.working_type,
                 client_algo_id=stop_id,
             )
-        except Exception as exc:  # noqa: BLE001 - ambiguous: the REST step resolves it
+        except Exception as exc:  # noqa: BLE001 - classified below; ambiguity is probed by REST
+            category = self._classify_placement(exc)
             self._journal_note(
                 tracked,
                 EVENT_STOP_PLACEMENT_FAILED,
-                {"error_type": type(exc).__name__},
+                {
+                    "category": "UNCLASSIFIED" if category is None else category.value,
+                    "error_type": type(exc).__name__,
+                },
                 self._now(),
             )
+            if category is ExchangeErrorCategory.REJECTED_DEFINITIVE:
+                return _PlaceOutcome.REJECTED
+            return _PlaceOutcome.AMBIGUOUS
+        return _PlaceOutcome.PLACED
+
+    def _classify_placement(self, exc: Exception) -> ExchangeErrorCategory | None:
+        """The taxonomy category of a placement failure (D-21), from class and code facts only."""
+        try:
+            return classify(self._adapter.error_facts(exc), CallKind.PLACEMENT)
+        except Exception:  # noqa: BLE001 - an unclassifiable failure is ambiguous
+            return None
 
     async def _cancel_entry_remainder(self, tracked: _Tracked) -> None:
         entry = tracked.entry
@@ -839,6 +920,120 @@ class ProtectionCoordinator:
                 REASON_STOP_CONFIRMED_ENTRY_OPEN,
                 now,
             )
+
+    # ------------------------------------------------------------------ #
+    # CLOSE_REQUIRED, the emergency close, FLAT and the orphan sweep (D-12, D034).
+    # ------------------------------------------------------------------ #
+
+    async def _enter_close_required(self, tracked: _Tracked, branch: str) -> None:
+        """Once per plan: SAFE_MODE, critical alert, journaled reason, then the emergency close.
+
+        The stop is never cancelled here (a stop that is still open is kept until the position is
+        flat) and never resent. The entry remainder cancel is issued by the caller's step (the
+        first-fill gather or the supervision step) and re-issued every later step.
+        """
+        entry = tracked.entry
+        now = self._now()
+        tracked.close_branch = branch
+        self._transition(tracked, ProtectionState.CLOSE_REQUIRED, branch, now)
+        if branch == BRANCH_B1_ENTRY_NOT_TERMINAL:
+            # Accepted knowingly (owner note): a position with a good stop is closed because an
+            # entry cancel was slow; the reason is journaled.
+            self._journal_note(
+                tracked,
+                EVENT_CLOSE_REQUIRED,
+                {"accepted_knowingly": "STOP_KEPT_ENTRY_CANCEL_SLOW", "branch": branch},
+                now,
+            )
+        try:
+            self._safe_mode.enter_safe_mode(reason=SAFE_MODE_CLOSE_REQUIRED, now_utc=now)
+        except Exception:  # noqa: BLE001, S110 - the alert and the close still go out
+            pass
+        try:
+            self._alerts.critical(
+                event=ALERT_CLOSE_REQUIRED,
+                plan_hash=entry.plan_hash,
+                symbol=entry.symbol,
+                reason=branch,
+                now_utc=now,
+            )
+        except Exception:  # noqa: BLE001, S110 - SAFE_MODE and the journal row already exist
+            pass
+        await self._attempt_close(tracked, branch)
+
+    async def _attempt_close(self, tracked: _Tracked, reason: str) -> bool:
+        """One emergency close attempt; True only when REST shows the position flat."""
+        try:
+            closed = await self._closer.close_position(entry=tracked.entry, reason=reason)
+        except Exception as exc:  # noqa: BLE001 - a failed close attempt never declares safety
+            self._journal_note(
+                tracked, EVENT_CLOSE_ATTEMPT_ERROR, {"error_type": type(exc).__name__}, self._now()
+            )
+            closed = False
+        now = self._now()
+        if closed:
+            if tracked.state is ProtectionState.CLOSE_FAILED:
+                self._transition(
+                    tracked, ProtectionState.CLOSE_REQUIRED, REASON_CLOSED_ENTRY_OPEN, now
+                )
+            return True
+        if tracked.state is not ProtectionState.CLOSE_FAILED:
+            self._transition(tracked, ProtectionState.CLOSE_FAILED, self._close_failure(), now)
+        return False
+
+    def _close_failure(self) -> str:
+        """Fixed reason text of a close that did not end flat (read from the closer, if offered)."""
+        result = getattr(self._closer, "last_result", None)
+        status = getattr(result, "status", None)
+        if str(getattr(status, "value", status)) == "NOT_SENT":
+            return REASON_CLOSE_NOT_SENT
+        return REASON_CLOSE_FAILED
+
+    async def _close_flow(self, tracked: _Tracked) -> None:
+        """Every step of CLOSE_REQUIRED / CLOSE_FAILED: watch the entry, close until flat.
+
+        The entry is read first (and its remainder cancelled again while it is not terminal);
+        FLAT needs the entry terminal as read BEFORE the close and REST flat after it, so a
+        late fill of a still-open entry is closed on a later step and never missed.
+        """
+        entry = tracked.entry
+        if tracked.entry_terminal_at is None:
+            answer = await self._guarded(
+                self._adapter.query_order_by_client(
+                    symbol=entry.symbol, orig_client_order_id=entry.entry_client_order_id
+                )
+            )
+            self._apply_entry_answer(tracked, answer)
+            if tracked.entry_terminal_at is None:
+                await self._cancel_entry_remainder(tracked)
+        entry_terminal = tracked.entry_terminal_at is not None
+        closed = await self._attempt_close(tracked, tracked.close_branch or REASON_CLOSE_FAILED)
+        if closed and entry_terminal:
+            self._transition(
+                tracked, ProtectionState.FLAT, REASON_CLOSED_ENTRY_TERMINAL, self._now()
+            )
+            await self._sweep(tracked)
+
+    async def _sweep(self, tracked: _Tracked) -> None:
+        """Cancel the plan's protective legs by deterministic id once the position is flat."""
+        # Imported here: ``manager`` imports ``live_context``, which imports this module.
+        from src.execution.manager import cancel_untriggered_protectives
+
+        entry = tracked.entry
+        try:
+            await cancel_untriggered_protectives(
+                plan_hash=entry.plan_hash,
+                symbol=entry.symbol,
+                adapter=self._adapter,  # type: ignore[arg-type]
+                journal=self._journal,
+                now_utc=self._now(),
+            )
+        except Exception as exc:  # noqa: BLE001 - retried by the next step; the legs are journaled
+            self._journal_note(
+                tracked, EVENT_SWEEP_FAILED, {"error_type": type(exc).__name__}, self._now()
+            )
+            return
+        tracked.sweep_done = True
 
     # ------------------------------------------------------------------ #
     # Transitions, journal, store and SAFE_MODE helpers.
