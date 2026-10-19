@@ -587,6 +587,7 @@ SIGNATURE_SNAPSHOTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("quantity", _K),
         ("price", _K),
         ("new_client_order_id", _K),
+        ("good_till_date", _K),
     ),
     "place_algo_protective": (
         ("self", _P),

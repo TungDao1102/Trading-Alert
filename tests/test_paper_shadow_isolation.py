@@ -637,6 +637,7 @@ def test_negative_control_the_spy_list_covers_every_public_order_method_of_the_a
         "funding_rate",
         "server_time",
         "exchange_info",
+        "get_mark_price",
     }
     public_async = {
         name
