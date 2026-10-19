@@ -677,6 +677,7 @@ async def execute_approved_plan(
             intended_quantity=quantity,
             intended_price=limit_price,
             now_utc=now_utc,
+            sized_realized_risk=sized.realized_risk,
         )
     except IntentStateConflict:
         # A second approval for the same plan (or another unique arbiter): the plan
@@ -833,6 +834,7 @@ async def execute_approved_plan(
             side=sl_side,
             intended_price=sl_trigger_price,
             now_utc=now_utc,
+            intended_quantity=None,  # closePosition leg: no quantity (D-10)
         )
         if not created:
             raise IntentStateConflict("STOP_LOSS intent already exists for a first placement")
