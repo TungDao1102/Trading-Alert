@@ -20,11 +20,21 @@ values. The new gates all run BEFORE the approval is consumed, so a refusal leav
 intent row and a later call with corrected inputs can still place; the stored-outcome replay
 stays first and never sees them (APRV-02).
 
-Phase 17 (D-13/D-14/D-15): the approval is consumed durably by writing the ENTRY
-execution intent BEFORE `place_entry` runs, through the `ExecutionIntentStore`
-Protocol, and the STOP_LOSS leg gets its own intent BEFORE `place_algo_protective`
-(F-703). A replayed APPROVE returns the stored outcome with zero adapter calls,
-after the identity checks and before the expiry gate (D-16).
+Phase 19 (plan 19-15, D-10): the single protection model. The manager places ONLY the LIMIT
+entry, as GTD with `goodTillDate` from the plan expiry (the exchange ends the entry itself, D-05),
+and hands the acknowledged entry to the protection coordinator through
+`live_context.protection_registry.register_resting_entry`. The `closePosition` stop is placed
+after the FIRST FILL by `src/execution/protection.py` (Demo rejects it with -4509 while the
+position is flat), so there is no entry-time stop and no STOP_LOSS intent here. A hand-off that
+fails enters SAFE_MODE (PROTECTION_HANDOFF_FAILED), cancels the entry and returns
+RECONCILIATION_REQUIRED. O-01 stays open: this module does not enable live orders; LIVE stays
+blocked until the owner accepts the D055 closure draft and runs the Demo probes.
+
+Phase 17 (D-13/D-14): the approval is consumed durably by writing the ENTRY execution intent
+BEFORE `place_entry` runs, through the `ExecutionIntentStore` Protocol (the STOP_LOSS intent of
+F-703 is now written by the coordinator before its own `place_algo_protective`). A replayed
+APPROVE returns the stored outcome with zero adapter calls, after the identity checks and before
+the expiry gate (D-16).
 
 The exchange is NOT a duplicate-entry guard: Binance treats `newClientOrderId` as
 unique only among OPEN orders, so a FILLED or CANCELED entry frees its id and a
@@ -82,7 +92,9 @@ from src.execution.pre_placement import (
     PrePlacementInputs,
     check_position_mode,
     evaluate_pre_placement,
+    good_till_date_ms,
 )
+from src.execution.protection import RestingEntry
 from src.persistence.errors import IntentStateConflict, PersistenceError
 from src.risk.cost_rates import FEE_SOURCE_ACCOUNT_MAX, CostRates
 from src.risk.gating import evaluate_risk
@@ -438,9 +450,9 @@ async def execute_approved_plan(
           mark price (D-05, D-06, D-08, D-09, D-11).
       5f. Position mode (D-02, D-14): an unreadable mode is UNCERTAIN_ACCOUNT_STATE and a
           Hedge account is HEDGE_MODE_UNSUPPORTED, both before anything is consumed.
-      7. Consume the approval (ENTRY intent), then adapter placement (place_entry then
-         place_algo_protective). The placement itself is unchanged in plan 19-13; plan 19-15
-         replaces it with the fill-driven model.
+      7. Consume the approval (ENTRY intent), then place the GTD LIMIT entry and hand it to the
+         protection registry (plan 19-15, D-10). No protective order is placed here: the stop
+         is placed after the first fill by `src/execution/protection.py`.
 
     This function exists ONLY to place real orders, so every live-safety
     gate is REQUIRED (09-REVIEW CR-07): there is no `None` default that
@@ -466,10 +478,10 @@ async def execute_approved_plan(
         safe_mode_controller: Required `SafeModeController`-like object.
             An entry whose exchange state cannot be determined forces
             SAFE_MODE (EXECUTION_SPEC §10 no-blind-recovery), and an
-            acknowledged entry without a confirmed SL forces SAFE_MODE
-            (ENTRY_WITHOUT_PROTECTIVE).
+            acknowledged entry that cannot be handed to the protection
+            coordinator forces SAFE_MODE (PROTECTION_HANDOFF_FAILED).
         journal: The journal layer (duck-typed `.record(event)`) used
-            for the journal-first cancel of an unprotected entry.
+            for the journal-first cancel of an entry that could not be handed over.
         enablement: Required `LiveEnablementController` for the
             LIVE_ORDERS_DISABLED gate (None raises ValueError).
         gate_kwargs: Required live-state inputs for `decide_placement`
@@ -498,9 +510,9 @@ async def execute_approved_plan(
             NO_TRADE (`RECONCILIATION_REQUIRED`, or `INVALIDATED` for an
             `IntentStateConflict` at consume, i.e. a second approval of the same
             plan) and nothing is placed; after the entry may exist the manager
-            enters SAFE_MODE (`DB_FAILURE`), still places the stop loss by its
-            deterministic id (protection outranks the audit row, D034) and
-            returns `RECONCILIATION_REQUIRED`. Only `PersistenceError` is
+            enters SAFE_MODE (`DB_FAILURE`), still hands the entry to the
+            protection coordinator (protection outranks the audit row, D034)
+            and returns `RECONCILIATION_REQUIRED`. Only `PersistenceError` is
             caught: a crash (any `BaseException`) propagates untouched.
 
     Returns:
@@ -847,6 +859,34 @@ async def execute_approved_plan(
         return ExecutionOutcome(is_no_trade=True, reason_code=position_mode_reason)
     order_position_side = "BOTH"  # One-way is the only supported mode past gate 5f.
 
+    # Gate 5g (plan 19-15, D-10): build the hand-off record BEFORE anything is consumed or sent.
+    # A plan the protection coordinator would refuse by construction (for example a TP1 share of
+    # the whole position) must not reach the exchange only to be cancelled afterwards. Pure: no
+    # adapter call, nothing consumed.
+    try:
+        resting_entry = RestingEntry(
+            approval_id=approval.approval_id,
+            trade_plan_id=trade_plan.trade_plan_id,
+            plan_hash=trade_plan.plan_hash,
+            symbol=bound.symbol,
+            side=bound.side,
+            entry_side=entry_side,
+            exit_side=sl_side,
+            entry_client_order_id=entry_client_order_id,
+            entry_quantity=quantity,
+            sl_trigger_price=sl_trigger_price,
+            tp1_trigger_price=tp1_trigger_price,
+            tp2_trigger_price=tp2_trigger_price,
+            tp1_quantity_fraction=live_context.tp1_quantity_fraction,
+            working_type=live_context.plan_constraint_snapshot.working_type,
+            position_mode=position_mode,
+            plan_constraint_snapshot=live_context.plan_constraint_snapshot,
+            snapshot_ttl=risk_kwargs["ttl"],
+            registered_at_utc=now_utc,
+        )
+    except (TypeError, ValueError):
+        return ExecutionOutcome(is_no_trade=True, reason_code=PROTECTION_INPUTS_INVALID)
+
     # Write-ahead (D-13, D-14 steps 1-2): consume the approval by committing the
     # ENTRY intent (INTENDED) BEFORE any order leaves. Pre-placement NO_TRADE
     # verdicts above never consume (research Open Q1). Losing the race, or
@@ -939,18 +979,22 @@ async def execute_approved_plan(
     except PersistenceError:
         return _reconciliation_required()  # nothing was sent; the INTENDED row stays unresolved
 
-    # Place the entry (LIMIT, GTC).
+    # Place the entry: LIMIT, GTD with goodTillDate = the plan expiry floored to the second
+    # (D-05, T-19-41: the exchange itself ends the entry when the plan expires, even if this
+    # process dies). No protective order is sent here (D-10): the closePosition stop is placed
+    # by the protection coordinator after the first fill, because Demo rejects it with -4509
+    # while the position is flat.
     # 09-REVIEW CR-06: every adapter call is awaited on the caller running event
     # loop (python-telegram-bot / FastAPI). No nested `asyncio.run` — it raises
-    # inside a running loop and would tear down loop-bound adapter resources
-    # between the entry and the SL.
+    # inside a running loop and would tear down loop-bound adapter resources.
     entry_placement = await _place_entry_no_blind_retry(
         adapter=adapter,
         entry_kwargs={
             "symbol": bound.symbol,
             "side": entry_side,
             "position_side": order_position_side,
-            "time_in_force": "GTC",
+            "time_in_force": "GTD",
+            "good_till_date": good_till_date_ms(trade_plan.expiry_utc),
             "quantity": quantity,
             "price": limit_price,
             "new_client_order_id": entry_client_order_id,
@@ -959,7 +1003,7 @@ async def execute_approved_plan(
     entry_state = entry_placement.state
     if entry_state == _ENTRY_STATE_UNKNOWN:
         # Fail closed: the entry may or may not exist on the exchange and
-        # the probe could not tell. No SL, no retry — SAFE_MODE blocks new
+        # the probe could not tell. No retry, nothing handed off — SAFE_MODE blocks new
         # entries while reconciliation resolves the truth.
         _enter_safe_mode(_ENTRY_STATE_UNKNOWN)
         _store_write(
@@ -1002,83 +1046,18 @@ async def execute_approved_plan(
         )
     )
 
-    # Write-ahead for the SL leg (D-14 step 4, F-703): its intent is committed
-    # INTENDED, then SENT, before `place_algo_protective`. If the database fails here
-    # the entry is already on the exchange, so the SL is placed anyway.
-    sl_algo_client_id = derive_algo_client_id(
-        plan_hash=trade_plan.plan_hash, role=OrderRole.STOP_LOSS.value
-    )
-
-    def _record_sl_intent() -> None:
-        created = intent_store.record_protective_intent(
-            approval_id=approval.approval_id,
-            role=OrderRole.STOP_LOSS.value,
-            trade_plan_id=trade_plan.trade_plan_id,
-            plan_hash=trade_plan.plan_hash,
-            algo_client_id=sl_algo_client_id,
-            symbol=bound.symbol,
-            side=sl_side,
-            intended_price=sl_trigger_price,
-            now_utc=now_utc,
-            intended_quantity=None,  # closePosition leg: no quantity (D-10)
-        )
-        if not created:
-            raise IntentStateConflict("STOP_LOSS intent already exists for a first placement")
-
-    if _store_write(_record_sl_intent):
-        _store_write(
-            lambda: intent_store.mark_sent(
-                approval_id=approval.approval_id,
-                role=OrderRole.STOP_LOSS.value,
-                now_utc=now_utc,
-            )
-        )
-
-    # Place the entry-time SL protective leg (CONDITIONAL, STOP_MARKET,
-    # close_position) — the pre-fill safety net. TP1/TP2 are sized to the
-    # ACTUAL filled quantity and attached by `attach_protectives_to_fill`
-    # once fills arrive; that path adopts this SL by its deterministic id
-    # instead of duplicating it (CR-04).
-    #
-    # 09-REVIEW CR-05: the SL result is CHECKED with the same
-    # query-first confirmation logic as attach. OK is returned only when
-    # both the entry identity and the SL are confirmed.
-    sl_confirmed, _sl_failure = await _place_protective_leg(
-        adapter=adapter,
-        symbol=bound.symbol,
-        plan_hash=trade_plan.plan_hash,
-        role=OrderRole.STOP_LOSS.value,
-        leg={
-            "side": sl_side,
-            "algo_type": "CONDITIONAL",
-            "type": "STOP_MARKET",
-            "position_side": order_position_side,
-            "trigger_price": sl_trigger_price,
-            "close_position": True,
-            "quantity": None,
-            "working_type": "MARK_PRICE",
-        },
-    )
-    # SL result: confirmed -> ACKED; not confirmed -> UNKNOWN (reconciliation resolves
-    # the leg against the exchange; the unprotected-entry path below acts immediately).
-    _store_write(
-        lambda: intent_store.record_result(
-            approval_id=approval.approval_id,
-            role=OrderRole.STOP_LOSS.value,
-            status=ExecutionIntentStatus.ACKED if sl_confirmed else ExecutionIntentStatus.UNKNOWN,
-            exchange_order_id=None,
-            exchange_status=None,
-            now_utc=now_utc,
-        )
-    )
-    if not sl_confirmed:
-        # The entry was acknowledged (or found) but has no confirmed stop:
-        # block new entries FIRST, then cancel the entry by its
-        # deterministic id (journal-first). The cancel's own failure is
-        # journaled inside `expire_pending_entry` and must not mask the
-        # NO_TRADE outcome — SAFE_MODE is already in force and
-        # reconciliation resolves any residual exposure.
-        _enter_safe_mode(_ENTRY_WITHOUT_PROTECTIVE)
+    # Hand-off (D-10, T-19-39): the entry is on the exchange (acknowledged or found by the
+    # probe), so the protection coordinator takes it from here: on the first fill it writes the
+    # STOP_LOSS intent and places the closePosition stop. A store failure above never skips
+    # this step (protection outranks the audit row, D034). If the hand-off itself fails nobody
+    # would watch the resting entry, so SAFE_MODE is entered FIRST, the entry is cancelled by
+    # its deterministic id (journal-first) and the caller gets RECONCILIATION_REQUIRED. The
+    # cancel's own failure is journaled inside `expire_pending_entry` and must not mask the
+    # outcome: SAFE_MODE is in force and reconciliation resolves any residual exposure.
+    try:
+        live_context.protection_registry.register_resting_entry(resting_entry)
+    except Exception:  # noqa: BLE001 — any failure to hand the entry over is fail-closed
+        _enter_safe_mode(_PROTECTION_HANDOFF_FAILED)
         try:
             await expire_pending_entry(
                 plan_hash=trade_plan.plan_hash,
@@ -1086,11 +1065,11 @@ async def execute_approved_plan(
                 adapter=adapter,
                 journal=journal,
                 now_utc=now_utc,
-                trigger_reason="protective_unconfirmed",
+                trigger_reason="protection_handoff_failed",
             )
         except Exception:  # noqa: BLE001, S110 — journaled in expire_pending_entry
             pass
-        return _finish(ExecutionOutcome(is_no_trade=True, reason_code=_ENTRY_WITHOUT_PROTECTIVE))
+        return _finish(_reconciliation_required())
 
     return _finish(ExecutionOutcome(is_no_trade=False, reason_code="OK"))
 
@@ -1188,6 +1167,13 @@ _REQUIRED_PROTECTIVE_ROLES: frozenset[str] = frozenset(
 )
 
 _ENTRY_WITHOUT_PROTECTIVE: str = "ENTRY_WITHOUT_PROTECTIVE"
+
+# Plain NO_TRADE reason when the hand-off record cannot be built from the approved plan (gate 5g).
+PROTECTION_INPUTS_INVALID: str = "PROTECTION_INPUTS_INVALID"
+
+# SAFE_MODE reason when an ACKED entry could not be handed to the protection coordinator
+# (plan 19-15, D-10, T-19-39).
+_PROTECTION_HANDOFF_FAILED: str = "PROTECTION_HANDOFF_FAILED"
 
 # SAFE_MODE reason when the operational database fails after an entry may exist
 # (GLOSSARY section 9.4; the same literal `src/ops/drills.py` uses).
@@ -1576,6 +1562,9 @@ _EXPIRY_TRIGGERS: frozenset[str] = frozenset(
         # 09-REVIEW CR-05: the entry was acknowledged but its entry-time
         # SL could not be confirmed — the entry is canceled fail-closed.
         "protective_unconfirmed",
+        # Plan 19-15 (D-10, T-19-39): the entry was acknowledged but could not be handed to
+        # the protection coordinator — nobody would watch it, so it is canceled fail-closed.
+        "protection_handoff_failed",
     }
 )
 

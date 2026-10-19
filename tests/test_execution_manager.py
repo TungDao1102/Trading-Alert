@@ -1213,29 +1213,22 @@ async def test_a_failed_hand_off_cancels_the_entry_and_requires_reconciliation()
     assert entry.outcome.reason_code == "RECONCILIATION_REQUIRED"
 
 
-async def test_a_resting_entry_that_cannot_be_built_is_a_failed_hand_off(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A RestingEntry the coordinator would refuse by construction fails closed the same way
-    (the entry is already ACKED, so it is cancelled and SAFE_MODE is entered)."""
-    from src.execution import manager
-
-    def _refuses(**_kwargs: Any) -> Any:
-        raise ValueError("tp1_quantity_fraction must be below 1")
-
-    monkeypatch.setattr(manager, "RestingEntry", _refuses)
+async def test_a_resting_entry_that_cannot_be_built_is_refused_before_anything_is_sent() -> None:
+    """Gate 5g: a plan the coordinator would refuse by construction (a TP1 share of the whole
+    position) is NO_TRADE PROTECTION_INPUTS_INVALID before the approval is consumed, never an
+    entry that is placed and cancelled afterwards."""
+    case_input = _load_input()
     registry = StubProtectionRegistry()
     adapter = FakeExecutionAdapter()
-    safe_mode_controller = RecordingSafeModeController()
-    outcome = await _run_plan(
-        adapter,
-        safe_mode_controller=safe_mode_controller,
-        live_context=_build_live_context(_load_input(), protection_registry=registry),
+    store = InMemoryExecutionIntentStore()
+    live = _build_live_context(
+        case_input, protection_registry=registry, tp1_quantity_fraction=Decimal("1")
     )
-    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    outcome = await _run_plan(adapter, intent_store=store, live_context=live)
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "PROTECTION_INPUTS_INVALID")
+    assert "place_entry" not in [c["method"] for c in adapter.calls]
     assert registry.register_attempts == 0
-    assert safe_mode_controller.entered_reasons == ["PROTECTION_HANDOFF_FAILED"]
-    assert "cancel_normal_order" in [c["method"] for c in adapter.calls]
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
 
 
 async def test_no_outcome_of_the_manager_places_a_protective_stop() -> None:
@@ -2628,8 +2621,9 @@ async def test_an_unsizeable_tp1_refuses_the_plan_with_no_single_tp_fallback(
     assert (outcome.is_no_trade, outcome.reason_code) == (True, reason)
     assert adapter.calls == []
     assert store.get_entry(approval_id=case_input["approval_id"]) is None
-    # The entry itself is sizeable: with TP1 sized at the whole position the plan places.
-    whole = _build_live_context(case_input, tp1_quantity_fraction=Decimal("1"))
+    # The entry itself is sizeable: with TP1 sized at 90% of the position the plan places (a
+    # share of 1 cannot be handed to the protection coordinator, gate 5g).
+    whole = _build_live_context(case_input, tp1_quantity_fraction=Decimal("0.9"))
     placed = await _run_plan(
         FakeExecutionAdapter(case_input=case_input),
         case_input=case_input,
