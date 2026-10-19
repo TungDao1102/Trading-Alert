@@ -57,6 +57,9 @@ GTD_MIN_AHEAD_SECONDS: int = 600
 _LONG = "LONG"
 _SHORT = "SHORT"
 _CANDLE_CLOSE = "CANDLE_CLOSE"
+# Same strings as `src.execution.manager.POSITION_MODE_*` (pinned by a test, no import here).
+_POSITION_MODE_HEDGE = "HEDGE"
+_POSITION_MODE_ONE_WAY = "ONE_WAY"
 _MILLISECOND = timedelta(milliseconds=1)
 _SECOND = timedelta(seconds=1)
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -283,11 +286,47 @@ def check_mark_price(
     return None
 
 
+def check_symbol_free(
+    *,
+    symbol: str,
+    position_symbols: frozenset[str],
+    open_order_symbols: frozenset[str] | None,
+    any_unprotected: bool,
+) -> str | None:
+    """Refuse a second plan or any exposure on the symbol, or any unprotected position (RISK-04).
+
+    `any_unprotected` is account-wide (D-11) and is checked first. `open_order_symbols` holds the
+    symbols with an open normal or algo order; `None` means the order state could not be read and
+    refuses (SYMBOL_STATE_UNAVAILABLE, fail closed). Other symbols never block.
+    """
+    if any_unprotected:
+        return UNPROTECTED_POSITION_EXISTS
+    if symbol in position_symbols:
+        return SYMBOL_HAS_POSITION
+    if open_order_symbols is None:
+        return SYMBOL_STATE_UNAVAILABLE
+    if symbol in open_order_symbols:
+        return SYMBOL_HAS_OPEN_ORDER
+    return None
+
+
+def check_position_mode(position_mode: str) -> str | None:
+    """Refuse hedge mode (D-14); one-way passes; any other value is a caller bug.
+
+    The manager calls this after the position-mode read, right before consuming the approval.
+    """
+    if position_mode == _POSITION_MODE_HEDGE:
+        return HEDGE_MODE_UNSUPPORTED
+    if position_mode == _POSITION_MODE_ONE_WAY:
+        return None
+    raise ValueError(f"unknown position mode {position_mode!r}")
+
+
 def evaluate_pre_placement(inputs: PrePlacementInputs) -> str | None:
     """First failing reason in the fixed order, or `None` when placement may proceed.
 
-    Order: status, invalidation, remaining validity, symbol free, mark price (the symbol check is
-    added by the next task of plan 19-03).
+    Order: status, invalidation, remaining validity, symbol free, mark price. The position-mode
+    check is separate (`check_position_mode`) because it needs the mode read.
     """
     reason = check_plan_status(inputs.plan_status)
     if reason is not None:
@@ -305,6 +344,14 @@ def evaluate_pre_placement(inputs: PrePlacementInputs) -> str | None:
         now_utc=inputs.now_utc,
         min_remaining_validity_seconds=inputs.min_remaining_validity_seconds,
         gtd_clock_margin=inputs.gtd_clock_margin,
+    )
+    if reason is not None:
+        return reason
+    reason = check_symbol_free(
+        symbol=inputs.symbol,
+        position_symbols=inputs.position_symbols,
+        open_order_symbols=inputs.open_order_symbols,
+        any_unprotected=inputs.any_unprotected,
     )
     if reason is not None:
         return reason
