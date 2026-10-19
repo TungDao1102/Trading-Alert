@@ -152,8 +152,22 @@ PHASE18_EVIDENCE: tuple[str, ...] = (
 )
 
 
+# The planning files below are only required while the phase directory is in the checkout:
+# `/gsd-cleanup` archives it and `/gsd-pr-branch` leaves `.planning/` out (review WR-05). The
+# code-and-fixture inventory (src, scripts, tests, config) stays a hard requirement.
+requires_phase18_planning = pytest.mark.skipif(
+    not PHASE_DIR.is_dir(),
+    reason="the Phase 18 planning directory is not in this checkout (archived or filtered)",
+)
+
+
 def test_phase18_artifacts_exist() -> None:
-    missing = [path for path in PHASE18_ARTIFACTS if not (ROOT / path).exists()]
+    planning_present = PHASE_DIR.is_dir()
+    missing = [
+        path
+        for path in PHASE18_ARTIFACTS
+        if not (ROOT / path).exists() and (planning_present or not path.startswith(".planning/"))
+    ]
     assert missing == [], f"missing Phase 18 artifacts: {missing}"
     assert len(set(PHASE18_ARTIFACTS)) == len(PHASE18_ARTIFACTS)
 
@@ -530,6 +544,7 @@ TRACEABILITY_SECTIONS: tuple[str, ...] = (
 _NAMED_TEST = re.compile(r"`(test_[a-z0-9_]+\.py)::(test_[a-z0-9_]+)`")
 
 
+@requires_phase18_planning
 def test_phase18_traceability_has_every_requirement_and_decision_row() -> None:
     text = TRACEABILITY.read_text(encoding="utf-8")
     missing_sections = [s for s in TRACEABILITY_SECTIONS if s not in text]
@@ -548,6 +563,7 @@ def test_phase18_traceability_has_every_requirement_and_decision_row() -> None:
     assert "D055" in text and "OPEN" in text
 
 
+@requires_phase18_planning
 def test_phase18_traceability_names_only_existing_tests() -> None:
     text = TRACEABILITY.read_text(encoding="utf-8")
     named = _NAMED_TEST.findall(text)

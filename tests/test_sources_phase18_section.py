@@ -12,6 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
+import pytest
 from scripts.decision_alignment import exchange
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -84,6 +85,12 @@ NO_DEMO_FACTS_SENTENCE = "No Demo-observed facts were recorded:"
 PHASE18_DIR = REPO_ROOT / ".planning" / "phases" / "18-user-data-stream-error-taxonomy"
 EVIDENCE_DIR = PHASE18_DIR / "evidence"
 DECISIONS_DIR = PHASE18_DIR / "decisions"
+# The tests that read the phase's decision and evidence files skip, with a reason, when
+# `/gsd-cleanup` archived the directory or `/gsd-pr-branch` left `.planning/` out (review WR-05).
+requires_phase18_planning = pytest.mark.skipif(
+    not PHASE18_DIR.is_dir(),
+    reason="the Phase 18 planning directory is not in this checkout (archived or filtered)",
+)
 EVIDENCE_FILE_NAME = re.compile(r"\b([A-Za-z0-9][A-Za-z0-9._-]*\.(?:json|txt))\b")
 
 # The nine items of the "UNVERIFIED register" in 18-RESEARCH.md; each needs a status line.
@@ -364,12 +371,14 @@ def demo_subsection_problems(sources_text: str, *, smoke_ran: bool, probe_ran: b
     return problems
 
 
+@requires_phase18_planning
 def test_run_flags_follow_the_decision_files() -> None:
     # Both runs happened on 2026-10-16 (decision files carry no postponement line).
     assert _smoke_ran()
     assert _probe_ran()
 
 
+@requires_phase18_planning
 def test_demo_observed_subsection_is_accepted() -> None:
     problems = demo_subsection_problems(
         _sources_text(), smoke_ran=_smoke_ran(), probe_ran=_probe_ran()
