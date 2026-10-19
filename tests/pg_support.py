@@ -33,6 +33,8 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL, Engine, make_url
 from sqlalchemy.pool import NullPool
@@ -109,6 +111,21 @@ def drop_database(server_url: str, name: str) -> None:
             conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
     finally:
         engine.dispose()
+
+
+def alembic_head_revision() -> str:
+    """The single head revision of the Alembic chain, read from the script directory.
+
+    Tests compare a migrated database against this instead of a literal revision id, so
+    adding a migration never needs a test edit. Raises when the chain has several heads.
+    """
+    config = Config(str(REPO_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(REPO_ROOT / "src" / "db" / "alembic"))
+    config.set_main_option("path_separator", "os")
+    heads = ScriptDirectory.from_config(config).get_heads()
+    if len(heads) != 1:
+        raise RuntimeError(f"expected exactly one Alembic head, found {sorted(heads)}")
+    return heads[0]
 
 
 def run_alembic(database_url: str, *args: str) -> None:
