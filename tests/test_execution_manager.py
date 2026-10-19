@@ -38,7 +38,7 @@ from typing import Any
 import pytest
 from src.domain.enums import KillGateState
 
-from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
+from tests.support.intent_store_fakes import AlwaysWinsIntentStore, InMemoryExecutionIntentStore
 
 PHASE9_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase9"
 PLACEMENT_FIXTURE_DIR = PHASE9_FIXTURES_DIR / "placement_sequences"
@@ -859,6 +859,46 @@ async def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
 # --------------------------------------------------------------------------- #
 
 
+class _ExchangeStateBlind:
+    """Adapter proxy whose open-order snapshots answer "no orders" (plan 19-13).
+
+    The negative controls run the manager against a store that never remembers
+    (`AlwaysWinsIntentStore`) to prove that the DURABLE ROW, not the exchange, is the
+    exactly-once guard (F-126, F-951). The manager now also refuses a symbol with an open order
+    (gate 5e), which would stop the second delivery before it reaches the exchange and make
+    those controls vacuous. For them only, the snapshot reads are blinded; every other call is
+    delegated unchanged, so the wrapped fake still records the placements.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def snapshot_open_normal_orders(self, **kwargs: Any) -> list[Any]:
+        return []
+
+    async def snapshot_open_algo_orders(self, **kwargs: Any) -> list[Any]:
+        return []
+
+
+def _prime_mark_price(adapter: Any, case_input: dict[str, Any]) -> None:
+    """Give a stateful exchange fake a fresh mark price when its test set none (plan 19-13).
+
+    `BinanceSemanticsFakeAdapter` raises for a symbol with no mark price, by design. The
+    execution manager now reads the mark price before it places, so the PG and recovery
+    suites that run the manager against that fake get the fixture price here, aged by the
+    fixture's `mark_age_ms`. A fake without `set_mark_price` (this module's own) is untouched.
+    """
+    set_price = getattr(adapter, "set_mark_price", None)
+    known = getattr(adapter, "_mark_prices", None)
+    if set_price is None or not isinstance(known, dict) or case_input["symbol"] in known:
+        return
+    reading = _mark_reading_for(case_input)
+    set_price(case_input["symbol"], reading.mark_price, reading.exchange_time_utc)
+
+
 async def _run_plan(
     adapter: FakeExecutionAdapter, *, case_input: dict[str, Any] | None = None, **overrides: Any
 ) -> Any:
@@ -866,6 +906,7 @@ async def _run_plan(
     from src.execution.manager import execute_approved_plan
 
     case = case_input if case_input is not None else _load_input()
+    _prime_mark_price(adapter, case)
     kwargs: dict[str, Any] = {
         "callback": _build_callback(case),
         "approval": _build_approval(case),
@@ -880,6 +921,8 @@ async def _run_plan(
         **_live_wiring(case_input=case),
     }
     kwargs.update(overrides)
+    if isinstance(kwargs["intent_store"], AlwaysWinsIntentStore):
+        kwargs["adapter"] = _ExchangeStateBlind(kwargs["adapter"])
     return await execute_approved_plan(**kwargs)
 
 
@@ -1344,7 +1387,12 @@ async def test_odd_tick_zone_mid_is_floored_for_a_buy_limit() -> None:
     """WR-01: (100.01 + 100.02) / 2 = 100.015 is off-grid; a BUY limit
     floors to 100.01 (never pays up)."""
     # The zone is a hashed field: the edited case re-derives its plan hash (plan 19-13).
-    case_input = {**_load_input(), "entry_min_price": "100.01", "entry_max_price": "100.02"}
+    case_input = {
+        **_load_input(),
+        "entry_min_price": "100.01",
+        "entry_max_price": "100.02",
+        "quantity_after_rounding": "100",
+    }
     adapter = FakeExecutionAdapter(case_input=case_input)
     adapter.mark_reading = _mark_reading_for(case_input, mark_price=Decimal("100.015"))
 
@@ -2413,8 +2461,8 @@ async def _assert_refused_then_placeable(
     assert "place_algo_protective" not in _reads_only(adapter), label
     assert store.get_entry(approval_id=case["approval_id"]) is None, label
 
-    corrected = FakeExecutionAdapter(case_input=case)
-    placed = await _run_plan(corrected, case_input=case_input, intent_store=store)
+    # The corrected call is the unedited golden case under the same approval id.
+    placed = await _run_plan(FakeExecutionAdapter(), intent_store=store)
     assert (placed.is_no_trade, placed.reason_code) == (False, "OK"), label
     assert store.get_entry(approval_id=case["approval_id"]) is not None, label
 
