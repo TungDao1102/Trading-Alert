@@ -163,7 +163,14 @@ def test_phase18_evidence_is_reported_not_required(capsys: pytest.CaptureFixture
     absent = [path for path in PHASE18_EVIDENCE if not (ROOT / path).exists()]
     print(f"phase 18 evidence present: {present}")
     print(f"phase 18 evidence not (yet) present: {absent}")
-    assert sorted(present + absent) == sorted(PHASE18_EVIDENCE)
+    # Presence is only reported, but the list itself is checked (a partition of the list into
+    # present and absent is true for any filesystem state, so it asserts nothing; review WR-03).
+    assert len(set(PHASE18_EVIDENCE)) == len(PHASE18_EVIDENCE)
+    assert not set(PHASE18_EVIDENCE) & set(PHASE18_ARTIFACTS), "optional and required overlap"
+    for path in PHASE18_EVIDENCE:
+        parts = Path(path).parts
+        assert not Path(path).is_absolute() and ".." not in parts, path
+        assert path.startswith((".planning/", "tests/fixtures/")), path
 
 
 # --------------------------------------------------------------------------- #
