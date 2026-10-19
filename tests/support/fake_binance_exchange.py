@@ -80,6 +80,13 @@ class ExchangeOrderRecord:
     created_at_utc: datetime
     exchange_id: str
     had_fill: bool = False
+    # Moves on every state change (fill, cancel); None until the first one.
+    updated_at_utc: datetime | None = None
+
+    @property
+    def update_time_utc(self) -> datetime:
+        """The `updateTime` an exchange query reports: the last change, else the creation."""
+        return self.updated_at_utc if self.updated_at_utc is not None else self.created_at_utc
 
 
 class BinanceSemanticsFakeAdapter:
@@ -129,18 +136,21 @@ class BinanceSemanticsFakeAdapter:
         record = self.open_orders.pop(client_id)
         record.status = STATUS_FILLED
         record.had_fill = True
+        record.updated_at_utc = self.now_utc
         self.history[client_id] = record
 
     def cancel(self, client_id: str) -> None:
         """The order is canceled: it leaves the open book and frees its client id."""
         record = self.open_orders.pop(client_id)
         record.status = STATUS_CANCELED
+        record.updated_at_utc = self.now_utc
         self.history[client_id] = record
 
     def cancel_algo(self, client_algo_id: str) -> None:
         """An algo order is canceled: it leaves the open book and frees its id."""
         record = self.open_algos.pop(client_algo_id)
         record.status = STATUS_CANCELED
+        record.updated_at_utc = self.now_utc
         self.algo_history[client_algo_id] = record
 
     # ------------------------------------------------------------------ #
@@ -167,7 +177,22 @@ class BinanceSemanticsFakeAdapter:
             exchange_id=f"ex-{next(self._ids)}",
         )
         self.open_orders[client_id] = record
-        return {"order_id": record.exchange_id, "status": STATUS_NEW}
+        from src.adapters.binance_usdm import EntryPlacementResult
+
+        # The same result type the real adapter returns (the manager reads its attributes).
+        return EntryPlacementResult(
+            symbol=kwargs["symbol"],
+            client_order_id=client_id,
+            exchange_order_id=record.exchange_id,
+            side=kwargs["side"],
+            position_side=kwargs["position_side"],
+            order_type="LIMIT",
+            time_in_force=kwargs["time_in_force"],
+            status=STATUS_NEW,
+            quantity=kwargs["quantity"],
+            price=kwargs["price"],
+            update_time_utc=record.update_time_utc,
+        )
 
     async def place_algo_protective(self, **kwargs: Any) -> Any:
         self._bind_real("place_algo_protective", kwargs)
@@ -187,7 +212,22 @@ class BinanceSemanticsFakeAdapter:
             exchange_id=f"algo-{next(self._ids)}",
         )
         self.open_algos[client_algo_id] = record
-        return {"algo_id": record.exchange_id, "algo_status": STATUS_NEW}
+        from src.adapters.binance_usdm import AlgoPlacementResult
+
+        return AlgoPlacementResult(
+            symbol=kwargs["symbol"],
+            client_algo_id=client_algo_id,
+            algo_id=record.exchange_id,
+            algo_type=kwargs["algo_type"],
+            order_type=kwargs["type"],
+            side=kwargs["side"],
+            position_side=kwargs["position_side"],
+            algo_status=STATUS_NEW,
+            trigger_price=kwargs["trigger_price"],
+            close_position=kwargs["close_position"],
+            working_type=kwargs["working_type"],
+            update_time_utc=record.update_time_utc,
+        )
 
     async def query_order_by_client(self, **kwargs: Any) -> Any:
         from src.adapters.binance_usdm import OrderProbe
@@ -209,7 +249,7 @@ class BinanceSemanticsFakeAdapter:
             found=True,
             order_id=record.exchange_id,
             status=record.status,
-            update_time_utc=record.created_at_utc,
+            update_time_utc=record.update_time_utc,
         )
 
     async def query_algo_order_by_client(self, **kwargs: Any) -> Any:
@@ -232,7 +272,7 @@ class BinanceSemanticsFakeAdapter:
             client_algo_id=client_algo_id,
             found=True,
             algo_status=record.status,
-            update_time_utc=record.created_at_utc,
+            update_time_utc=record.update_time_utc,
         )
 
     async def get_position_mode(self) -> Any:

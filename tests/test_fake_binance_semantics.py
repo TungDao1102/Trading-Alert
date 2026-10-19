@@ -183,12 +183,12 @@ async def test_assumption_2_a_canceled_order_frees_its_client_id() -> None:
     await adapter.place_entry(**_entry_kwargs())
     adapter.cancel(CLIENT_ID)
     second = await adapter.place_entry(**_entry_kwargs())
-    assert second["status"] == "NEW"
+    assert second.status == "NEW"
 
     await adapter.place_algo_protective(**_algo_kwargs())
     adapter.cancel_algo(ALGO_ID)
     again = await adapter.place_algo_protective(**_algo_kwargs())
-    assert again["algo_status"] == "NEW"
+    assert again.algo_status == "NEW"
     assert len(adapter.calls_to("place_entry")) == 2
 
 
@@ -199,8 +199,8 @@ async def test_assumption_3_a_filled_order_frees_its_client_id() -> None:
     first = await adapter.place_entry(**_entry_kwargs())
     adapter.fill(CLIENT_ID)
     second = await adapter.place_entry(**_entry_kwargs())
-    assert second["status"] == "NEW"
-    assert second["order_id"] != first["order_id"]  # a new order id, as on Demo
+    assert second.status == "NEW"
+    assert second.exchange_order_id != first.exchange_order_id  # a new order id, as on Demo
 
 
 async def test_retention_rule_is_not_validated_against_demo_and_keeps_its_behavior() -> None:
@@ -212,3 +212,33 @@ async def test_retention_rule_is_not_validated_against_demo_and_keeps_its_behavi
     adapter.now_utc += HISTORY_RETENTION + timedelta(seconds=1)
     probe = await adapter.query_order_by_client(symbol="BTCUSDT", orig_client_order_id=CLIENT_ID)
     assert probe.found is False
+
+
+async def test_the_fake_returns_the_result_types_of_the_real_adapter() -> None:
+    """Review WR-09: the shapes match the production surface, not only the call kwargs."""
+    from src.adapters.binance_usdm import AlgoPlacementResult, EntryPlacementResult
+
+    adapter = BinanceSemanticsFakeAdapter()
+    entry = await adapter.place_entry(**_entry_kwargs())
+    algo = await adapter.place_algo_protective(**_algo_kwargs())
+    assert isinstance(entry, EntryPlacementResult)
+    assert isinstance(algo, AlgoPlacementResult)
+    assert entry.exchange_order_id is not None
+    assert algo.algo_id is not None
+
+
+async def test_the_query_update_time_moves_with_a_fill_or_a_cancel() -> None:
+    adapter = BinanceSemanticsFakeAdapter()
+    await adapter.place_entry(**_entry_kwargs())
+    created = adapter.now_utc
+    adapter.now_utc = created + timedelta(minutes=5)
+    adapter.fill(CLIENT_ID)
+    probe = await adapter.query_order_by_client(symbol="BTCUSDT", orig_client_order_id=CLIENT_ID)
+    assert probe.status == "FILLED"
+    assert probe.update_time_utc == created + timedelta(minutes=5)
+
+    await adapter.place_algo_protective(**_algo_kwargs())
+    adapter.now_utc = created + timedelta(minutes=9)
+    adapter.cancel_algo(ALGO_ID)
+    algo_probe = await adapter.query_algo_order_by_client(client_algo_id=ALGO_ID)
+    assert algo_probe.update_time_utc == created + timedelta(minutes=9)
