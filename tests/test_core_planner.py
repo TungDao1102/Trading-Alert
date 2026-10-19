@@ -729,3 +729,48 @@ def test_plan_result_envelope_validation() -> None:
 
     with pytest.raises(ValueError, match="is_no_trade=False requires a TradePlan"):
         PlanResult(is_no_trade=False, trade_plan=None, reason_code="OK")
+
+
+def test_plan_hash_from_fields_is_the_planner_algorithm(
+    setup_candles: list[Candle],
+    context_candles: list[Candle],
+    parameter_set: ParameterSet,
+    account_state: AccountState,
+) -> None:
+    """The public wrapper equals the private hash on three spellings and the stored plan hash."""
+    from src.core.planner import _plan_hash, plan_hash_from_fields
+
+    base = dict(
+        signal_id="sig",
+        take_profit_json='{"tp1":"1"}',
+        invalidation_rule_json='{"basis":"CANDLE_CLOSE"}',
+        expiry_utc=datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
+    )
+    for a, b, c in [
+        ("50000", "51000", "49000"),
+        ("50000.0", "51000.0", "49000.0"),
+        ("50000.000000000000000000", "51000.000000000000000000", "49000.000000000000000000"),
+    ]:
+        fields = dict(
+            entry_min_price=Decimal(a),
+            entry_max_price=Decimal(b),
+            stop_loss_price=Decimal(c),
+            **base,
+        )
+        assert plan_hash_from_fields(**fields) == _plan_hash(**fields)
+
+    plan_result = _get_signal_and_plan(setup_candles, context_candles, parameter_set, account_state)
+    assert plan_result.trade_plan is not None
+    tp = plan_result.trade_plan
+    assert (
+        plan_hash_from_fields(
+            signal_id=tp.signal_id,
+            entry_min_price=tp.entry_min_price,
+            entry_max_price=tp.entry_max_price,
+            stop_loss_price=tp.stop_loss_price,
+            take_profit_json=tp.take_profit_json,
+            invalidation_rule_json=tp.invalidation_rule_json,
+            expiry_utc=tp.expiry_utc,
+        )
+        == tp.plan_hash
+    )
