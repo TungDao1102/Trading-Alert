@@ -411,3 +411,43 @@ def test_invalid_symbol_predicate() -> None:
     assert not is_invalid_symbol_error(BadRequestError(error_message="x", status_code=-1100))
     assert not is_invalid_symbol_error(ValueError("x"))
     assert not is_invalid_symbol_error(TooManyRequestsError(error_message="slow", status_code=429))
+
+
+def _position_row(**overrides: Any) -> Any:
+    from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
+        PositionInformationV3ResponseInner,
+    )
+
+    fields: dict[str, Any] = {
+        "symbol": "BTCUSDT",
+        "position_side": "BOTH",
+        "position_amt": "0.010",
+        "entry_price": "50000.1",
+        "break_even_price": "50020.1",
+        "mark_price": "50010.0",
+        "un_realized_profit": "0.0999",
+        "liquidation_price": "0",
+        "notional": "500.1",
+        "margin_asset": "USDT",
+        "update_time": 1790770020000,
+    }
+    return PositionInformationV3ResponseInner(**{**fields, **overrides})
+
+
+def test_position_row_with_a_missing_amount_raises_instead_of_reading_flat() -> None:
+    """CR-01: a dropped positionAmt must not become Decimal(0) (the sweeper's flat check)."""
+    from src.adapters.binance_usdm import _row_to_position_snapshot
+
+    with pytest.raises(ValueError, match="positionAmt"):
+        _row_to_position_snapshot(_position_row(position_amt=None))
+
+
+def test_position_row_with_a_complete_amount_projects_the_signed_decimal() -> None:
+    from src.adapters.binance_usdm import _row_to_position_snapshot
+
+    snapshot = _row_to_position_snapshot(_position_row(position_amt="-0.010"))
+    assert snapshot is not None
+    assert snapshot.position_amt == Decimal("-0.010")
+    flat = _row_to_position_snapshot(_position_row(position_amt="0.000"))
+    assert flat is not None
+    assert flat.position_amt == Decimal("0.000")

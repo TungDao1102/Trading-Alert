@@ -1372,12 +1372,18 @@ def _row_to_position_snapshot(
     """
     if not item.symbol:
         raise ValueError(f"position row missing symbol: {item!r}")
+    # A missing amount must never read as a flat position: `snapshot_positions`
+    # drops zero-amount rows, and the orphan sweeper's position-zero check
+    # (T-8-30) would then be satisfied by a fabricated zero (fail closed).
+    if item.position_amt is None:
+        raise ValueError("position row missing positionAmt: refusing to fabricate a flat position")
+    position_amt = Decimal(str(item.position_amt))
+    if not position_amt.is_finite():
+        raise ValueError("position row positionAmt is not finite")
     return PositionSnapshot(
         symbol=item.symbol,
         position_side=item.position_side or "",
-        position_amt=Decimal(str(item.position_amt))
-        if item.position_amt is not None
-        else Decimal("0"),
+        position_amt=position_amt,
         entry_price=Decimal(str(item.entry_price))
         if item.entry_price is not None
         else Decimal("0"),
