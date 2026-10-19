@@ -526,10 +526,14 @@ def test_an_unparseable_file_is_refused(tmp_path: Path) -> None:
 
 def test_a_section_that_is_not_a_table_is_refused(tmp_path: Path) -> None:
     path = tmp_path / "limits.toml"
-    good = tl.write_limits_toml(tmp_path / "good.toml").read_text(encoding="utf-8")
-    path.write_text('stream = "off"\n' + good.replace("[stream]", "[stream_x]"), encoding="utf-8")
-    with pytest.raises(bl.LimitsNotRatified, match="stream"):
+    # Only `stream` is wrong (a scalar); every other table is valid and nothing is renamed, so
+    # the refusal can only come from the "must be a table" check (review WR-10).
+    good = tl.write_limits_toml(tmp_path / "good.toml", drop=["stream"]).read_text(encoding="utf-8")
+    path.write_text('stream = "off"\n' + good, encoding="utf-8")
+    with pytest.raises(bl.LimitsNotRatified) as caught:
         bl.load_binance_limits(path)
+    assert "stream (must be a table)" in str(caught.value)
+    assert "stream_x" not in str(caught.value)
 
 
 def test_a_missing_file_raises_limits_file_missing(tmp_path: Path) -> None:

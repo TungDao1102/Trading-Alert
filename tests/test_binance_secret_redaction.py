@@ -126,12 +126,16 @@ def test_file_loading_refused_inside_the_repository() -> None:
     assert "pyproject" not in message
 
 
-def test_file_loading_refused_inside_the_repository_through_a_relative_hop(
-    tmp_path: Path,
-) -> None:
+def test_file_loading_refused_inside_the_repository_through_a_relative_hop() -> None:
     hop = REPO_ROOT / "src" / ".." / "pyproject.toml"
-    with pytest.raises(bc.CredentialError):
+    with pytest.raises(bc.CredentialError) as info:
         _load({"TEST_ONLY_DEMO_A_FILE": str(hop), "TEST_ONLY_DEMO_B": _value()})
+    message = str(info.value)
+    # Refused for the property named here, not as "relative path" or "unreadable".
+    assert "TEST_ONLY_DEMO_A_FILE" in message
+    assert "repository" in message
+    assert str(hop) not in message
+    assert "pyproject" not in message
 
 
 @pytest.mark.parametrize("case", ["relative", "missing", "directory", "empty", "blank-path"])
