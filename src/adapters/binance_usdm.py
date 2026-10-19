@@ -106,7 +106,9 @@ from src.adapters.binance_public import _row_to_mark_kline as _row_to_mark_kline
 from src.adapters.binance_ratelimit_gate import RestGateRefusal, RestRateLimitGate
 from src.domain.exchange_errors import (
     CallKind,
+    ErrorFacts,
     ExchangeErrorCategory,
+    PreSendRefusal,
     classify,
     retry_eligible,
 )
@@ -175,7 +177,7 @@ _RATE_LIMIT_CATEGORIES: frozenset[ExchangeErrorCategory] = frozenset(
 )
 
 
-class SignedCallPolicyMissing(Exception):  # noqa: N818 - a refusal, not an error of the caller
+class SignedCallPolicyMissing(PreSendRefusal):  # noqa: N818 - a refusal, not an error of the caller
     """A signed call refused before the gate and the SDK: no `SignedCallPolicy` is configured.
 
     Fail closed (D-14): without the ratified recvWindow a signed request would silently use
@@ -189,7 +191,7 @@ class SignedCallPolicyMissing(Exception):  # noqa: N818 - a refusal, not an erro
         )
 
 
-class EntriesBlocked(Exception):  # noqa: N818 - a refusal, not an error of the caller
+class EntriesBlocked(PreSendRefusal):  # noqa: N818 - a refusal, not an error of the caller
     """A new entry refused before sending because the clock-drift guard blocks entries.
 
     `reason` is the guard's `DriftBlockReason` (never measured, measurement failed, out of
@@ -653,6 +655,17 @@ class BinanceUsdmAdapter:
         self._clock = clock
         self._on_clock_skew = on_clock_skew
         self._public = BinancePublicMarketData(sdk_client=self._sdk, rest_gate=rest_gate)
+
+    @staticmethod
+    def error_facts(exc: BaseException) -> ErrorFacts:
+        """The Phase 18 `ErrorFacts` (class, int code, Retry-After) of `exc` (plan 19-08, D-21).
+
+        Lets the SDK-free execution core call `classify` without importing the SDK
+        normalizer. Facts only: no exception message text is read, and the taxonomy and
+        `classify` are unchanged. A `PreSendRefusal` is not an SDK error and yields NON_SDK
+        facts; the caller tests `isinstance(exc, PreSendRefusal)` first.
+        """
+        return error_facts_from_exception(exc)
 
     def _require_signed_policy(self) -> tuple[SignedCallPolicy, RestRateLimitGate]:
         """The policy and the shared gate of a signed call, or `SignedCallPolicyMissing`."""

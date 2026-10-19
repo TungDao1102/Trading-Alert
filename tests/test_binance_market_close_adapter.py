@@ -323,3 +323,121 @@ def test_a_response_without_update_time_raises() -> None:
     )
     with pytest.raises(ValueError, match="update_time"):
         _close(adapter)
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: the PreSendRefusal marker and the error-facts accessor.
+# --------------------------------------------------------------------------- #
+
+
+def test_pre_send_refusal_is_an_exported_exception_in_a_stdlib_only_module() -> None:
+    import ast
+    from pathlib import Path
+
+    import src.domain.exchange_errors as module
+    from src.domain.exchange_errors import PreSendRefusal
+
+    assert issubclass(PreSendRefusal, Exception)
+    assert "PreSendRefusal" in module.__all__
+    tree = ast.parse(Path(module.__file__ or "").read_text(encoding="utf-8"))
+    imported = {
+        (node.module or "").split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+    } | {
+        alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    assert imported <= {"__future__", "re", "collections", "dataclasses", "enum", "types"}
+
+
+def test_the_three_refusal_families_inherit_the_marker_and_keep_their_attributes() -> None:
+    from src.adapters.binance_clock import DriftBlockReason
+    from src.adapters.binance_ratelimit_gate import (
+        IP_BAN_418,
+        RATE_LIMIT_PAUSE_429,
+        RateLimitBanActive,
+        RateLimitPauseActive,
+        RestGateRefusal,
+    )
+    from src.adapters.binance_usdm import SignedCallPolicyMissing
+    from src.domain.exchange_errors import PreSendRefusal
+
+    plain = RestGateRefusal(IP_BAN_418, 5)
+    assert isinstance(plain, PreSendRefusal)
+    assert (plain.reason, plain.retry_after_seconds) == (IP_BAN_418, 5)
+    ban = RateLimitBanActive(7)
+    assert isinstance(ban, PreSendRefusal)
+    assert isinstance(ban, RestGateRefusal)
+    assert ban.reason == IP_BAN_418
+    pause = RateLimitPauseActive(3)
+    assert isinstance(pause, PreSendRefusal)
+    assert pause.reason == RATE_LIMIT_PAUSE_429
+    blocked = EntriesBlocked(DriftBlockReason.NEVER_MEASURED)
+    assert isinstance(blocked, PreSendRefusal)
+    assert blocked.reason is DriftBlockReason.NEVER_MEASURED
+    assert "new entry refused before sending" in str(blocked)
+    missing = SignedCallPolicyMissing()
+    assert isinstance(missing, PreSendRefusal)
+    assert "signed call refused before sending" in str(missing)
+
+
+def test_a_real_exchange_error_and_a_plain_error_are_not_pre_send_refusals() -> None:
+    from binance_common.errors import BadRequestError
+    from src.domain.exchange_errors import PreSendRefusal
+
+    assert not isinstance(BadRequestError("x", -2021), PreSendRefusal)
+    assert not isinstance(RuntimeError("x"), PreSendRefusal)
+
+
+def test_a_gate_refusal_from_the_close_is_a_pre_send_refusal() -> None:
+    from src.domain.exchange_errors import PreSendRefusal
+
+    adapter, rest, gate = _adapter()
+    gate.record(ExchangeErrorCategory.RATE_LIMITED, 30)
+    with pytest.raises(PreSendRefusal):
+        _close(adapter)
+    assert rest.new_order_calls == []
+
+
+def test_error_facts_equals_the_normalizer_for_every_error_shape() -> None:
+    from binance_common.errors import (
+        BadRequestError,
+        ServerError,
+        TooManyRequestsError,
+    )
+    from src.adapters.binance_errors import error_facts_from_exception
+
+    errors: list[BaseException] = [
+        BadRequestError("x", -2021),
+        TooManyRequestsError("x", -1003, None),
+        ServerError("x", 503),
+        RuntimeError("x"),
+    ]
+    for exc in errors:
+        assert BinanceUsdmAdapter.error_facts(exc) == error_facts_from_exception(exc)
+    adapter, _, _ = _adapter()
+    assert adapter.error_facts(errors[0]).code == -2021
+
+
+def test_the_taxonomy_through_error_facts_is_unchanged() -> None:
+    from binance_common.errors import BadRequestError
+    from src.domain.exchange_errors import CallKind, classify
+
+    rejected = classify(
+        BinanceUsdmAdapter.error_facts(BadRequestError("x", -2021)), CallKind.PLACEMENT
+    )
+    assert rejected is ExchangeErrorCategory.REJECTED_DEFINITIVE
+    unknown = classify(BinanceUsdmAdapter.error_facts(RuntimeError("x")), CallKind.PLACEMENT)
+    assert unknown is ExchangeErrorCategory.UNKNOWN_EXCHANGE_ERROR
+
+
+def test_the_http_status_and_retry_after_are_carried_by_error_facts() -> None:
+    from binance_common.errors import TooManyRequestsError
+    from src.domain.exchange_errors import HttpClass
+
+    facts = BinanceUsdmAdapter.error_facts(TooManyRequestsError("x", -1003, None))
+    assert facts.http_class is HttpClass.TOO_MANY_429
+    assert facts.retry_after_seconds is None
