@@ -112,6 +112,7 @@ from src.domain.exchange_errors import (
     classify,
     retry_eligible,
 )
+from src.domain.lot_filters import LotFilters
 
 log = structlog.get_logger()
 
@@ -801,8 +802,47 @@ class BinanceUsdmAdapter:
 
     # ----- exchange info --------------------------------------------------- #
 
-    async def exchange_info(self) -> list[SymbolFilters]:
-        return await self._public.exchange_info()
+    async def exchange_info(self, symbols: Sequence[str] | None = None) -> list[SymbolFilters]:
+        """The exchange constraints; `symbols` limits the strict validation (plan 19-08)."""
+        return await self._public.exchange_info(symbols)
+
+    async def symbol_lot_filters(self, *, symbol: str) -> LotFilters:
+        """The live `LotFilters` of `symbol` from exchangeInfo (plan 19-08, D-16, D-19).
+
+        LOT_SIZE, MARKET_LOT_SIZE, tick and min notional are read at call time, never taken
+        from a default. A symbol that exchangeInfo does not list, a missing LOT_SIZE max or a
+        missing MARKET_LOT_SIZE field raises `ValueError` naming the field and the symbol; a
+        gate refusal or an SDK error of the read propagates unchanged. Whether a failed read
+        during an emergency close may fall back to the plan-time snapshot is owner-open
+        (Q3): this method only reads live and raises.
+        """
+        rows = [f for f in await self.exchange_info([symbol]) if f.symbol == symbol]
+        if not rows:
+            raise ValueError(f"exchangeInfo does not list symbol {symbol!r}")
+        info = rows[0]
+        for name in (
+            "max_quantity",
+            "market_lot_min_quantity",
+            "market_lot_max_quantity",
+            "market_lot_step_size",
+        ):
+            if getattr(info, name) is None:
+                raise ValueError(f"exchangeInfo {name} is missing for symbol {symbol!r}")
+        assert info.max_quantity is not None
+        assert info.market_lot_min_quantity is not None
+        assert info.market_lot_max_quantity is not None
+        assert info.market_lot_step_size is not None
+        return LotFilters(
+            symbol=symbol,
+            price_tick_size=info.price_tick_size,
+            lot_min_quantity=info.min_quantity,
+            lot_max_quantity=info.max_quantity,
+            lot_step_size=info.quantity_step_size,
+            market_lot_min_quantity=info.market_lot_min_quantity,
+            market_lot_max_quantity=info.market_lot_max_quantity,
+            market_lot_step_size=info.market_lot_step_size,
+            min_notional=info.min_notional,
+        )
 
     # ----- reconciler truth surface (Phase 8, plan 08-04) ---------------- #
     # These methods are QUERY-AND-CANCEL ONLY. The reconciler must never

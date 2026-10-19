@@ -7,12 +7,18 @@ Plan 19-08 (EXEC-01, D-15, D-16, D-19, D-21). Every test drives the REAL
 from __future__ import annotations
 
 import asyncio
+import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
+    ExchangeInformationResponse,
+)
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models.enums import (
     NewOrderReduceOnlyEnum,
     NewOrderSideEnum,
@@ -26,6 +32,7 @@ from src.adapters.binance_usdm import (
     MarketCloseResult,
 )
 from src.domain.exchange_errors import ExchangeErrorCategory
+from src.domain.lot_filters import LotFilters
 
 from tests.support.limits import test_only_drift_limits, test_only_signed_call_policy
 
@@ -441,3 +448,125 @@ def test_the_http_status_and_retry_after_are_carried_by_error_facts() -> None:
     facts = BinanceUsdmAdapter.error_facts(TooManyRequestsError("x", -1003, None))
     assert facts.http_class is HttpClass.TOO_MANY_429
     assert facts.retry_after_seconds is None
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: live lot filters from exchangeInfo.
+# --------------------------------------------------------------------------- #
+
+_SAMPLE = Path(__file__).parent / "fixtures" / "exchange_info_sample.json"
+
+
+def _sample_raw() -> dict[str, Any]:
+    loaded: dict[str, Any] = json.loads(_SAMPLE.read_text(encoding="utf-8"))
+    return loaded
+
+
+def _info(raw: dict[str, Any]) -> Any:
+    return ExchangeInformationResponse.from_dict(raw)
+
+
+def _filters_adapter(raw: dict[str, Any]) -> tuple[BinanceUsdmAdapter, RecordingRest, Any]:
+    adapter, rest, gate = _adapter()
+    rest.exchange_information_payload = _info(raw)
+    return adapter, rest, gate
+
+
+def _raw_filter(raw: dict[str, Any], symbol: str, filter_type: str) -> dict[str, Any]:
+    for sym in raw["symbols"]:
+        if sym["symbol"] == symbol:
+            for f in sym["filters"]:
+                if f["filterType"] == filter_type:
+                    found: dict[str, Any] = f
+                    return found
+    raise AssertionError(f"{filter_type} of {symbol} not in the fixture")
+
+
+def test_symbol_lot_filters_maps_the_live_exchange_filters() -> None:
+    raw = _sample_raw()
+    adapter, rest, _ = _filters_adapter(raw)
+    got = asyncio.run(adapter.symbol_lot_filters(symbol="BTCUSDT"))
+    lot = _raw_filter(raw, "BTCUSDT", "LOT_SIZE")
+    market = _raw_filter(raw, "BTCUSDT", "MARKET_LOT_SIZE")
+    price = _raw_filter(raw, "BTCUSDT", "PRICE_FILTER")
+    notional = _raw_filter(raw, "BTCUSDT", "MIN_NOTIONAL")
+    assert isinstance(got, LotFilters)
+    assert got.symbol == "BTCUSDT"
+    assert got.price_tick_size == Decimal(str(price["tickSize"]))
+    assert got.lot_min_quantity == Decimal(str(lot["minQty"]))
+    assert got.lot_max_quantity == Decimal(str(lot["maxQty"]))
+    assert got.lot_step_size == Decimal(str(lot["stepSize"]))
+    assert got.market_lot_min_quantity == Decimal(str(market["minQty"]))
+    assert got.market_lot_max_quantity == Decimal("120")
+    assert got.market_lot_step_size == Decimal(str(market["stepSize"]))
+    assert got.min_notional == Decimal(str(notional["notional"]))
+    assert rest.exchange_information_calls == 1
+
+
+def test_symbol_lot_filters_agrees_with_exchange_info() -> None:
+    adapter, _, _ = _filters_adapter(_sample_raw())
+    (btc,) = [f for f in asyncio.run(adapter.exchange_info()) if f.symbol == "BTCUSDT"]
+    got = asyncio.run(adapter.symbol_lot_filters(symbol="BTCUSDT"))
+    assert got.lot_min_quantity == btc.min_quantity
+    assert got.lot_max_quantity == btc.max_quantity
+    assert got.lot_step_size == btc.quantity_step_size
+    assert got.price_tick_size == btc.price_tick_size
+    assert got.min_notional == btc.min_notional
+
+
+def test_a_symbol_absent_from_exchange_info_raises_naming_it() -> None:
+    adapter, _, _ = _filters_adapter(_sample_raw())
+    with pytest.raises(ValueError, match="NOPEUSDT"):
+        asyncio.run(adapter.symbol_lot_filters(symbol="NOPEUSDT"))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "max_quantity",
+        "market_lot_min_quantity",
+        "market_lot_max_quantity",
+        "market_lot_step_size",
+    ],
+)
+def test_a_missing_filter_field_raises_naming_field_and_symbol(
+    field: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter, _, _ = _filters_adapter(_sample_raw())
+    real = asyncio.run(adapter.exchange_info())
+
+    async def _patched(symbols: Any = None) -> list[Any]:
+        return [replace(f, **{field: None}) if f.symbol == "BTCUSDT" else f for f in real]
+
+    monkeypatch.setattr(adapter, "exchange_info", _patched)
+    with pytest.raises(ValueError, match=rf"BTCUSDT.*{field}|{field}.*BTCUSDT"):
+        asyncio.run(adapter.symbol_lot_filters(symbol="BTCUSDT"))
+
+
+def test_a_missing_market_lot_filter_in_the_payload_raises() -> None:
+    raw = _sample_raw()
+    for sym in raw["symbols"]:
+        sym["filters"] = [f for f in sym["filters"] if f["filterType"] != "MARKET_LOT_SIZE"]
+    adapter, _, _ = _filters_adapter(raw)
+    with pytest.raises(ValueError, match="market_lot"):
+        asyncio.run(adapter.symbol_lot_filters(symbol="BTCUSDT"))
+
+
+def test_drift_of_an_unrelated_symbol_does_not_stop_the_read() -> None:
+    raw = _sample_raw()
+    for sym in raw["symbols"]:
+        if sym["symbol"] == "ETHUSDT":
+            sym["filters"] = [f for f in sym["filters"] if f["filterType"] != "LOT_SIZE"]
+    adapter, _, _ = _filters_adapter(raw)
+    got = asyncio.run(adapter.symbol_lot_filters(symbol="BTCUSDT"))
+    assert got.symbol == "BTCUSDT"
+
+
+def test_a_gate_refusal_of_the_filter_read_propagates_with_nothing_sent() -> None:
+    from src.adapters.binance_ratelimit_gate import RestGateRefusal
+
+    adapter, rest, gate = _filters_adapter(_sample_raw())
+    gate.record(ExchangeErrorCategory.RATE_LIMITED, 30)
+    with pytest.raises(RestGateRefusal):
+        asyncio.run(adapter.symbol_lot_filters(symbol="BTCUSDT"))
+    assert rest.exchange_information_calls == 0
