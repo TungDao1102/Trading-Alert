@@ -346,7 +346,10 @@ class SdkNoiseGuard(logging.Filter):
     """Reject the SDK's account-data and key-bearing INFO lines (below WARNING only).
 
     Attached to the root logger, because the SDK logs through module-level `logging.info`
-    calls. Records from other libraries and records at WARNING and above are untouched.
+    calls. Records from other libraries are untouched. An SDK record at WARNING or above is
+    kept, but its text is scrubbed in place (the SDK's ERROR lines carry the stream name, i.e.
+    the listenKey), so it is redacted for every handler, not only for those that carry a
+    redacting filter.
     """
 
     def __init__(self) -> None:
@@ -354,7 +357,14 @@ class SdkNoiseGuard(logging.Filter):
         self.suppressed_count = 0
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if record.levelno >= logging.WARNING or not _is_sdk_record(record):
+        if not _is_sdk_record(record):
+            return True
+        if record.levelno >= logging.WARNING:
+            try:
+                record.msg = scrub(record.getMessage())
+            except Exception:
+                record.msg = "unreadable SDK log record"
+            record.args = None
             return True
         try:
             message = record.getMessage()

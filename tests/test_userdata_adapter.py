@@ -1225,3 +1225,35 @@ def test_module_has_no_wall_clock_no_float_no_print_and_no_forbidden_import() ->
                             assert text is None or "listen_key" not in text.lower(), (
                                 "an f-string interpolates a listenKey"
                             )
+
+
+def test_noise_guard_scrubs_a_key_bearing_sdk_error_line_for_every_handler() -> None:
+    """Review WR-11: the SDK's ERROR line carries the stream name (the listenKey)."""
+    redaction.register_runtime_secret(TEST_ONLY_LISTEN_KEY)
+    install_sdk_noise_guard()
+    root = logging.getLogger()
+    stream = io.StringIO()
+    plain = logging.StreamHandler(stream)  # deliberately NO RedactingFilter
+    plain.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    record = logging.LogRecord(
+        name="root",
+        level=logging.ERROR,
+        pathname=TEST_ONLY_SDK_PATHNAME,
+        lineno=1,
+        msg="Error in callback for key %s: %s",
+        args=(TEST_ONLY_LISTEN_KEY, "boom"),
+        exc_info=None,
+    )
+    old_level = root.level
+    root.addHandler(plain)
+    root.setLevel(logging.DEBUG)
+    try:
+        root.handle(record)
+    finally:
+        root.removeHandler(plain)
+        root.setLevel(old_level)
+
+    output = stream.getvalue()
+    assert "Error in callback for key" in output
+    assert "[REDACTED]" in output
+    _assert_no_key(TEST_ONLY_LISTEN_KEY, output)
