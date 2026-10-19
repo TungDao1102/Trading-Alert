@@ -1244,7 +1244,10 @@ class BinanceUsdmAdapter:
             CallKind.QUERY, self._sdk.rest_api.get_current_position_mode
         )
         raw: GetCurrentPositionModeResponse = response.data()
-        return PositionModeResult(dual_side_position=bool(raw.dual_side_position))
+        # Detected, never assumed: a dropped/renamed field must not read as one-way.
+        if not isinstance(raw.dual_side_position, bool):
+            raise ValueError("dualSidePosition missing or not a bool")
+        return PositionModeResult(dual_side_position=raw.dual_side_position)
 
     async def user_commission_rate(self, symbol: str) -> CommissionRates:
         """Read the account's maker/taker commission rate for one symbol.

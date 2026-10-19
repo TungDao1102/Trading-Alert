@@ -697,3 +697,14 @@ def test_without_a_gate_a_rate_limit_raises_after_one_call_and_nothing_is_refuse
         assert rest.calls[sdk_name] == before + 1
     _run(call(adapter))
     assert sleep.waits == []
+
+
+@pytest.mark.parametrize("raw", [None, "false", 0])
+def test_position_mode_that_is_not_a_bool_is_refused_not_read_as_one_way(raw: Any) -> None:
+    """WR-09: a dropped or renamed dualSidePosition must never read as ONE_WAY."""
+    adapter, rest, _ = _adapter()
+    rest.get_current_position_mode = lambda **_: _Response(  # type: ignore[attr-defined]
+        SimpleNamespace(dual_side_position=raw)
+    )
+    with pytest.raises(ValueError, match="dualSidePosition"):
+        _run(adapter.get_position_mode())
