@@ -1383,3 +1383,63 @@ async def test_a_stop_whose_transport_close_fails_still_deletes_the_key_and_can_
     ws.close_should_raise = None
     await adapter.stop(close_listen_key=False)  # not locked out by the first attempt
     assert ws.close_calls == 2
+
+
+# --------------------------------------------------------------------------- #
+# Review WR-02: the Windows path form (the owner's platform) is matched as well.
+# --------------------------------------------------------------------------- #
+
+TEST_ONLY_SDK_WINDOWS_PATHNAME = r"C:\x\site-packages\binance_common\websocket.py"
+TEST_ONLY_SDK_FUTURES_WINDOWS_PATHNAME = (
+    r"C:\x\site-packages\binance_sdk_derivatives_trading_usds_futures\websocket_streams\a.py"
+)
+TEST_ONLY_FOREIGN_WINDOWS_PATHNAME = r"C:\x\site-packages\requests\sessions.py"
+
+
+@pytest.mark.parametrize(
+    "pathname", [TEST_ONLY_SDK_WINDOWS_PATHNAME, TEST_ONLY_SDK_FUTURES_WINDOWS_PATHNAME]
+)
+def test_noise_guard_suppresses_sdk_info_lines_on_a_windows_pathname(pathname: str) -> None:
+    guard = install_sdk_noise_guard()
+    before = guard.suppressed_count
+    root = logging.getLogger()
+    account_line = "Received message: {'e': 'ACCOUNT_UPDATE', 'a': {'B': [{'wb': '123.4'}]}}"
+    subscribe_line = f"Subscribing to streams on WebSocket 3: ['{TEST_ONLY_LISTEN_KEY}']"
+    with _CapturedRootLogs() as capture:
+        root.handle(_record(logging.INFO, account_line, pathname))
+        root.handle(_record(logging.INFO, subscribe_line, pathname))
+
+    assert guard.suppressed_count == before + 2
+    output = capture.getvalue()
+    assert "ACCOUNT_UPDATE" not in output
+    _assert_no_key(TEST_ONLY_LISTEN_KEY, output)
+
+
+def test_noise_guard_keeps_a_foreign_windows_pathname_untouched() -> None:
+    guard = install_sdk_noise_guard()
+    before = guard.suppressed_count
+    root = logging.getLogger()
+    with _CapturedRootLogs() as capture:
+        root.handle(
+            _record(
+                logging.INFO, "Received message: kept-foreign", TEST_ONLY_FOREIGN_WINDOWS_PATHNAME
+            )
+        )
+
+    assert guard.suppressed_count == before
+    assert "kept-foreign" in capture.getvalue()
+
+
+def test_sdk_log_bridge_forwards_a_windows_pathname_and_ignores_a_foreign_one() -> None:
+    install_sdk_log_bridge()
+    root = logging.getLogger()
+    with capture_logs() as logs:
+        root.handle(
+            _record(
+                logging.ERROR, "WebSocket failed to connect: boom", TEST_ONLY_SDK_WINDOWS_PATHNAME
+            )
+        )
+        root.handle(_record(logging.ERROR, "unrelated", TEST_ONLY_FOREIGN_WINDOWS_PATHNAME))
+
+    forwarded = [entry for entry in logs if entry["event"] == "userdata.sdk_log"]
+    assert [entry["message"] for entry in forwarded] == ["WebSocket failed to connect: boom"]
