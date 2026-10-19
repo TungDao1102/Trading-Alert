@@ -21,6 +21,9 @@ lives server-side, and the documented client-order-ID rule is
 
   - client_order_id:  "x-" (2) + plan_hash[:32] (32) + role_code (2) = 36
   - algo_client_id:   "xa-" (3) + plan_hash[:31] (31) + role_code (2) = 36
+  - close_order_id:   "xc-" (3) + plan_hash[:29] (29) + attempt_no (4 digits) = 36
+                      (Phase 19, plan 19-12: the automatic reduce-only MARKET close; one id
+                      per attempt, so ROLE_CODES and OrderRole stay untouched)
 
 The charset is a strict subset of the Binance-allowed set
 (`0123456789abcdef-`), so the derivation is always accepted by the
@@ -59,6 +62,9 @@ _CLIENT_PREFIX = "x-"
 _CLIENT_PLAN_SLICE_LEN = 32
 _ALGO_PREFIX = "xa-"
 _ALGO_PLAN_SLICE_LEN = 31
+_CLOSE_PREFIX = "xc-"
+_CLOSE_PLAN_SLICE_LEN = 29
+_CLOSE_MAX_ATTEMPT_NO = 9999
 
 
 def _require_plan_hash(plan_hash: object) -> str:
@@ -150,8 +156,33 @@ def derive_algo_client_id(*, plan_hash: str, role: str) -> str:
     return _ALGO_PREFIX + validated_hash[:_ALGO_PLAN_SLICE_LEN] + role_code
 
 
+def derive_close_order_id(*, plan_hash: str, attempt_no: int) -> str:
+    """Return the deterministic client_order_id of one emergency-close attempt.
+
+    Plan 19-12 (D-15): every part of the automatic reduce-only MARKET close is sent under its
+    own id, ``xc-<plan_hash[:29]><attempt_no:04d>`` (36 characters, the charset of the other
+    derived ids). The same ``(plan_hash, attempt_no)`` always yields the same id, so a probe by
+    client id finds an attempt whose answer was lost, also after a restart. An attempt number is
+    never reused for a second send. Like the other ids this is NOT an exchange-side duplicate
+    guard (Binance treats the id as unique among OPEN orders only): the guard is the
+    query-before-resend rule of the closer.
+
+    Raises:
+        TypeError: plan_hash is not a string, or attempt_no is not an int (a bool is refused).
+        ValueError: plan_hash is not a 64-char lowercase hex string, or attempt_no is not in
+            1..9999.
+    """
+    validated_hash = _require_plan_hash(plan_hash)
+    if isinstance(attempt_no, bool) or not isinstance(attempt_no, int):
+        raise TypeError(f"attempt_no must be int, got {type(attempt_no).__name__}")
+    if not 1 <= attempt_no <= _CLOSE_MAX_ATTEMPT_NO:
+        raise ValueError(f"attempt_no must be in 1..{_CLOSE_MAX_ATTEMPT_NO}, got {attempt_no}")
+    return _CLOSE_PREFIX + validated_hash[:_CLOSE_PLAN_SLICE_LEN] + f"{attempt_no:04d}"
+
+
 __all__ = [
     "ROLE_CODES",
     "derive_client_order_id",
     "derive_algo_client_id",
+    "derive_close_order_id",
 ]
