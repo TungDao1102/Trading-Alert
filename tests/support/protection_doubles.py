@@ -205,9 +205,7 @@ class ProtectionRig:
         return RoutedFill(fill=self.fake.fill_events[-1], source=source, after_gap=after_gap)
 
     def stop_row(self) -> Any:
-        return self.inner_store.get_intent(
-            approval_id=self.entry.approval_id, role="STOP_LOSS"
-        )
+        return self.inner_store.get_intent(approval_id=self.entry.approval_id, role="STOP_LOSS")
 
     def transitions(self) -> list[tuple[str, str]]:
         """The journaled (from, to) pairs in recording order."""
