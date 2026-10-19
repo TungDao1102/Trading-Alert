@@ -34,6 +34,18 @@ GUARDED_NAMES = (
     frozenset(key for keys in CANONICAL_KEYS.values() for key in keys) | RATE_LIMIT_FIELD_NAMES
 )
 
+# The dataclasses that carry the loaded limits: no number may be given to them positionally.
+LIMIT_CLASS_NAMES = frozenset(
+    {
+        "BinanceLimits",
+        "StreamLimits",
+        "RateLimitPolicy",
+        "SignedCallPolicy",
+        "DriftLimits",
+        "ClientLimits",
+    }
+)
+
 # (path relative to the repository root, name) -> the reason the numeric constant is allowed.
 # Every entry needs a one-line reason. The list is empty: the scan found no such constant.
 ALLOW_LIST: dict[tuple[str, str], str] = {}
@@ -84,6 +96,13 @@ def _field_default(value: ast.expr | None) -> ast.expr | None:
     return None
 
 
+def _call_name(node: ast.Call) -> str | None:
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return func.id if isinstance(func, ast.Name) else None
+
+
 def _parameter_defaults(
     node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda,
 ) -> Iterator[tuple[str, ast.expr]]:
@@ -103,7 +122,9 @@ def find_numeric_defaults(source: str, filename: str = "<source>") -> list[tuple
     found: list[tuple[int, str, str]] = []
 
     def hit(line: int, name: str | None, kind: str, value: ast.expr | None) -> None:
-        if name in GUARDED_NAMES and _is_numeric_constant(value):
+        # Compared in lower case: a module constant such as `KEEPALIVE_INTERVAL_SECONDS = 1800`
+        # is the same name spelled the constant way (review WR-04).
+        if name is not None and name.lower() in GUARDED_NAMES and _is_numeric_constant(value):
             found.append((line, name, kind))
 
     for node in ast.walk(ast.parse(source, filename=filename)):
@@ -119,6 +140,11 @@ def find_numeric_defaults(source: str, filename: str = "<source>") -> list[tuple
             hit(node.lineno, _target_name(node.target), "assignment expression", node.value)
         elif isinstance(node, ast.keyword):
             hit(getattr(node, "lineno", 0), node.arg, "keyword argument", node.value)
+        elif isinstance(node, ast.Call) and _call_name(node) in LIMIT_CLASS_NAMES:
+            # A positional number given to a limits dataclass names no field at all.
+            for argument in node.args:
+                if _is_numeric_constant(argument):
+                    found.append((node.lineno, str(_call_name(node)), "positional argument"))
         elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
             for name, default in _parameter_defaults(node):
                 hit(node.lineno, name, "parameter default", default)
@@ -216,6 +242,11 @@ _FORBIDDEN_FORMS = {
     "dict entry": 'cfg = {"reconnect_max_attempts": 7}\n',
     "subscript assignment": 'cfg["max_liveness_age_seconds"] = 30\n',
     "assignment expression": "if (snapshot_deadline_seconds := 20):\n    pass\n",
+    "upper-case constant": "KEEPALIVE_INTERVAL_SECONDS = 1800\n",
+    "upper-case annotated constant": "RECV_WINDOW_MS: int = 5000\n",
+    "class attribute": "class C:\n    RECV_WINDOW_MS = 5\n",
+    "positional limits argument": "StreamLimits(1800, 3)\n",
+    "positional limits argument through a module": "limits_mod.RateLimitPolicy(10, 20, 30)\n",
 }
 
 
@@ -232,6 +263,8 @@ _ALLOWED_FORMS = {
     "string literal": 'event_queue_max = "event_queue_max"\n',
     "unguarded name": "timeout_ms = 5\n",
     "required parameter": "def f(*, retry_after_cap_seconds: int) -> None:\n    pass\n",
+    "upper-case unguarded name": "TIMEOUT_MS = 5\n",
+    "limits object built from loaded values": "StreamLimits(**loaded)\n",
     "field without a default": (
         "from dataclasses import field\nclass C:\n    sdk_retries: int = field(repr=False)\n"
     ),
