@@ -782,6 +782,7 @@ class GuardedAdapter:
         quantity: Decimal,
         price: Decimal,
         new_client_order_id: str,
+        good_till_date: int | None = None,
     ) -> EntryPlacementResult:
         self.mutating_attempts += 1
         if self._mode is RunMode.DRY_RUN:
@@ -792,6 +793,7 @@ class GuardedAdapter:
                     "side": side,
                     "position_side": position_side,
                     "time_in_force": time_in_force,
+                    "good_till_date": good_till_date,
                     "quantity": quantity,
                     "price": price,
                     "new_client_order_id": new_client_order_id,
@@ -821,6 +823,7 @@ class GuardedAdapter:
                 quantity=quantity,
                 price=price,
                 new_client_order_id=new_client_order_id,
+                good_till_date=good_till_date,
             ),
         )
         self._recorder.record_exchange_record(result)
@@ -2262,9 +2265,13 @@ async def _cancel_everything(
     return ok
 
 
-async def _entry_and_stop_probes(
-    ctx: RunContext, plan: DerivedPlan
-) -> tuple[OrderProbe, AlgoOrderProbe]:
+async def _entry_probe(ctx: RunContext, plan: DerivedPlan) -> OrderProbe:
+    """Read back the entry and the open orders. No stop is read: none exists at entry time (D-10).
+
+    The closePosition stop is placed after the first fill by the protection coordinator (the fill
+    scenario still calls `attach_protectives_to_fill` until plan 19-16), so a rehearsal that has
+    only placed the entry has nothing protective to probe.
+    """
     plan_hash = plan.trade_plan.plan_hash
     entry_probe = await ctx.guarded.query_order_by_client(
         symbol=SYMBOL,
@@ -2272,14 +2279,11 @@ async def _entry_and_stop_probes(
             plan_hash=plan_hash, role=OrderRole.ENTRY.value
         ),
     )
-    stop_probe = await ctx.guarded.query_algo_order_by_client(
-        client_algo_id=derive_algo_client_id(plan_hash=plan_hash, role=OrderRole.STOP_LOSS.value)
-    )
     snaps_orders = await ctx.guarded.snapshot_open_normal_orders(symbol=SYMBOL)
     snaps_algos = await ctx.guarded.snapshot_open_algo_orders(symbol=SYMBOL)
     for snapshot in (*snaps_orders, *snaps_algos):
         ctx.recorder.record_exchange_record(snapshot)
-    return entry_probe, stop_probe
+    return entry_probe
 
 
 async def _far_cleanup(ctx: RunContext, plan: DerivedPlan, entry_probe: OrderProbe) -> str:
@@ -2287,7 +2291,7 @@ async def _far_cleanup(ctx: RunContext, plan: DerivedPlan, entry_probe: OrderPro
         ctx.recorder.add_step(
             "cleanup",
             STEP_FAILED,
-            f"entry status is {entry_probe.status!r}, not NEW: the stop is left in place",
+            f"entry status is {entry_probe.status!r}, not NEW: nothing was cancelled",
         )
         _instruct(
             ctx,
@@ -2295,12 +2299,11 @@ async def _far_cleanup(ctx: RunContext, plan: DerivedPlan, entry_probe: OrderPro
             "in the Binance Demo UI.",
         )
         return OUTCOME_FAILED
-    cancelled = await _cancel_everything(ctx, plan, entry=True)
+    cancelled = await _cancel_everything(ctx, plan, entry=True, protectives=False)
     ctx.recorder.add_step(
         "cleanup",
         STEP_PASSED if cancelled else STEP_FAILED,
-        "entry cancelled by deterministic id, then the protective legs (TP1 and TP2 were "
-        "never placed, so their cancels may report unknown orders)",
+        "entry cancelled by deterministic id; no protective leg exists to cancel (D-10)",
     )
     clean = await _confirm_clean(ctx)
     if not (cancelled and clean):
@@ -2603,28 +2606,30 @@ async def _after_placement(
     guarded = ctx.guarded
     if outcome.is_no_trade:
         recorder.add_step(
-            "place_entry_and_stop", STEP_FAILED, f"execute_approved_plan: {outcome.reason_code}"
+            "place_entry", STEP_FAILED, f"execute_approved_plan: {outcome.reason_code}"
         )
         if guarded.mutating_attempts == 0:
             raise RehearsalAbort(f"no order was attempted: {outcome.reason_code}")
-        await _cancel_everything(ctx, plan, entry=True)
+        await _cancel_everything(ctx, plan, entry=True, protectives=False)
         _instruct(ctx, "Check the Binance Demo UI for any leftover order or position.")
         return OUTCOME_FAILED
     if ctx.mode is RunMode.DRY_RUN:
         recorder.add_step(
-            "place_entry_and_stop",
+            "place_entry",
             STEP_SKIPPED_DRY_RUN,
             f"simulated only, {len(recorder.planned_requests)} planned request(s), no order sent",
         )
     else:
         recorder.add_step(
-            "place_entry_and_stop", STEP_PASSED, "entry LIMIT and SL placed through the manager"
+            "place_entry",
+            STEP_PASSED,
+            "entry LIMIT (GTD) placed through the manager; the stop follows the first fill (D-10)",
         )
-    entry_probe, stop_probe = await _entry_and_stop_probes(ctx, plan)
+    entry_probe = await _entry_probe(ctx, plan)
     recorder.add_step(
         "readback",
         STEP_PASSED,
-        f"entry status {entry_probe.status!r}, stop status {stop_probe.algo_status!r}"
+        f"entry status {entry_probe.status!r}; no stop at entry time (D-10)"
         + (" (simulated)" if ctx.mode is RunMode.DRY_RUN else ""),
     )
     if kind == "far":

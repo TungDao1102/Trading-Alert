@@ -379,6 +379,7 @@ class FakeDemoAdapter:
         quantity: Decimal,
         price: Decimal,
         new_client_order_id: str,
+        good_till_date: int | None = None,
     ) -> EntryPlacementResult:
         self._enter(
             "place_entry",
@@ -389,6 +390,7 @@ class FakeDemoAdapter:
             quantity=quantity,
             price=price,
             new_client_order_id=new_client_order_id,
+            good_till_date=good_till_date,
         )
         order_id = self._new_id()
         status = "FILLED" if (self.fill_on_place or self.flip_to_filled_after_place) else "NEW"
@@ -980,44 +982,51 @@ def test_approvals_are_only_ever_created_pending() -> None:
 
 
 def test_far_scenario_sequence_and_cleanup(tmp_path: Path) -> None:
+    """Plan 19-15 (D-10): the manager places only the GTD entry; the far scenario then cancels
+    the entry by id. There is no stop at entry time, so no algo order is placed, probed or
+    cancelled."""
     code, data, adapter, chan = run_flow(tmp_path, scenario="far", execute=True)
     assert code == dr.EXIT_OK
-    assert adapter.mutating_calls() == [
-        "place_entry",
-        "place_algo_protective",
-        "cancel_normal_order",
-        "cancel_algo_order",
-        "cancel_algo_order",
-        "cancel_algo_order",
-    ]
+    assert adapter.mutating_calls() == ["place_entry", "cancel_normal_order"]
     assert adapter.calls.index("get_position_mode") < adapter.calls.index("place_entry")
-    probe_idx = adapter.calls.index("query_algo_order_by_client")
-    assert probe_idx < adapter.calls.index("place_algo_protective")
+    assert "place_algo_protective" not in adapter.calls
+    assert "query_algo_order_by_client" not in adapter.calls
+    assert "cancel_algo_order" not in adapter.calls
     entry_kwargs = next(kw for name, kw in adapter.kwargs_log if name == "place_entry")
     assert entry_kwargs["quantity"] == Decimal("0.004")
     assert entry_kwargs["price"] == Decimal("58500.0")
     assert entry_kwargs["side"] == "BUY" and entry_kwargs["position_side"] == "BOTH"
-    sl_kwargs = next(kw for name, kw in adapter.kwargs_log if name == "place_algo_protective")
-    assert sl_kwargs["type"] == "STOP_MARKET" and sl_kwargs["close_position"] is True
-    assert sl_kwargs["algo_type"] == "CONDITIONAL"
+    assert entry_kwargs["time_in_force"] == "GTD"
+    assert isinstance(entry_kwargs["good_till_date"], int)
+    assert entry_kwargs["good_till_date"] % 1000 == 0  # whole seconds, in epoch milliseconds
     kinds = [o["type"] for o in data["exchange_orders"]]
-    assert kinds == ["EntryPlacementResult", "AlgoPlacementResult"]
+    assert kinds == ["EntryPlacementResult"]
     assert data["exchange_orders"][0]["exchange_order_id"].startswith("ORD-")
-    assert data["exchange_orders"][1]["algo_id"].startswith("ORD-")
+    assert step(data, "place_entry")["status"] == "PASSED"
+    assert "place_entry_and_stop" not in [s["name"] for s in data["steps"]]
+    readback = step(data, "readback")
+    assert readback["status"] == "PASSED"
+    assert "no stop at entry time (D-10)" in readback["detail"]
+    assert "'NEW'" in readback["detail"]
+    assert "no protective leg exists" in step(data, "cleanup")["detail"]
     assert step(data, "account_clean")["status"] == "PASSED"
     assert data["details"]["enablement"]["enabled_in_run"] is True
     assert data["details"]["enablement"]["disabled_after_run"] is True
     assert chan.closed is True
 
 
-def test_far_scenario_entry_no_longer_new_leaves_the_stop_in_place(tmp_path: Path) -> None:
+def test_far_scenario_entry_no_longer_new_leaves_the_position_for_the_operator(
+    tmp_path: Path,
+) -> None:
     adapter = FakeDemoAdapter()
     adapter.flip_to_filled_after_place = True
     code, data, _, _ = run_flow(tmp_path, scenario="far", adapter=adapter, execute=True)
     assert code == dr.EXIT_FAILED
     assert "cancel_algo_order" not in adapter.calls
     assert "cancel_normal_order" not in adapter.calls
+    assert "place_algo_protective" not in adapter.calls  # no stop exists to leave in place
     assert step(data, "cleanup")["status"] == "FAILED"
+    assert "nothing was cancelled" in step(data, "cleanup")["detail"]
     assert any(
         "close the Demo position" in text for text in data["details"]["operator_instructions"]
     )
@@ -1038,7 +1047,7 @@ def test_fill_scenario_attaches_sl_tp1_tp2_with_half_quantity(tmp_path: Path) ->
     assert tp1["reduce_only"] is True
     assert tp1["quantity"] == Decimal("0.002")  # floor(0.004 * 0.5 / 0.001) * 0.001
     assert tp2["quantity"] is None and tp2["reduce_only"] in (None, False)
-    assert len(placed) == 3  # the entry-time stop was adopted, never duplicated
+    assert len(placed) == 3  # SL, TP1, TP2 once each, all placed after the fill (D-10)
     assert "cancel_algo_order" not in adapter.calls
     echoes = data["details"]["leg_echoes"]
     assert sorted(e["order_type"] for e in echoes) == [
@@ -1154,9 +1163,13 @@ def test_evidence_is_deterministic(tmp_path: Path) -> None:
     assert data["exchange_orders"] == []
     assert [p["method"] for p in data["planned_requests"]][:2] == [
         "place_entry",
-        "place_algo_protective",
+        "cancel_normal_order",
     ]
-    assert step(data, "place_entry_and_stop")["status"] == "SKIPPED_DRY_RUN"
+    assert "place_algo_protective" not in [p["method"] for p in data["planned_requests"]]
+    planned_entry = data["planned_requests"][0]["request"]
+    assert planned_entry["time_in_force"] == "GTD"
+    assert isinstance(planned_entry["good_till_date"], int)
+    assert step(data, "place_entry")["status"] == "SKIPPED_DRY_RUN"
 
 
 # --------------------------------------------------------------------------- #
