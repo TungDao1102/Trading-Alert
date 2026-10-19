@@ -244,6 +244,7 @@ async def make_rig(
     place_entry: bool = True,
     register: bool = True,
     real_closer: bool = False,
+    closer_results: Iterable[bool] = (),
     **entry_overrides: Any,
 ) -> ProtectionRig:
     """A coordinator over the fake exchange; the entry is placed on the fake and registered."""
@@ -266,7 +267,7 @@ async def make_rig(
             clock=clock,
         )
     else:
-        closer = ScriptedEmergencyCloser()
+        closer = ScriptedEmergencyCloser(closer_results)
     entry = resting_entry_for_tests(**entry_overrides)
     coordinator = ProtectionCoordinator(
         adapter=fake,
