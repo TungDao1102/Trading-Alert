@@ -180,6 +180,34 @@ def bind_plan(
     )
 
 
+def check_quantity_bound(*, placement_quantity: Decimal, approved_quantity: Decimal) -> str | None:
+    """Refuse a placement quantity above the approved quantity (D-02, RISK-04).
+
+    Returns None when `placement_quantity <= approved_quantity`, else
+    `QUANTITY_ABOVE_APPROVED`. The quantity is never clipped to the approved value: a
+    placement above it is a caller bug and the whole placement is refused. Non-Decimal,
+    non-finite or non-positive input is a programming error and raises.
+    """
+    for name, value in (
+        ("placement_quantity", placement_quantity),
+        ("approved_quantity", approved_quantity),
+    ):
+        if not isinstance(value, Decimal):
+            raise TypeError(f"check_quantity_bound: {name} must be Decimal")
+        if not value.is_finite() or value <= Decimal("0"):
+            raise ValueError(f"check_quantity_bound: {name} must be finite and positive")
+    if placement_quantity > approved_quantity:
+        return QUANTITY_ABOVE_APPROVED
+    return None
+
+
+def check_working_type(working_type: str) -> str | None:
+    """The plan constraint snapshot's working type must be MARK_PRICE (D-04, D037)."""
+    if working_type != PROTECTIVE_WORKING_TYPE:
+        return WORKING_TYPE_NOT_MARK_PRICE
+    return None
+
+
 __all__ = [
     "GEOMETRY_INVALID_AFTER_SNAP",
     "PLAN_SIDE_MISMATCH",
@@ -192,5 +220,7 @@ __all__ = [
     "BindingVerdict",
     "BoundPlan",
     "bind_plan",
+    "check_quantity_bound",
+    "check_working_type",
     "recompute_plan_hash",
 ]
