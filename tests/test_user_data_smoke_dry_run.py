@@ -416,13 +416,48 @@ def test_fixtures_dir_writes_every_raw_payload_scrubbed_with_provenance(
     assert document["fixtures"]["files"] == names
 
 
+@pytest.mark.parametrize("spelling", ["root", "smoke", "dotdot", "relative", "symlink"])
 def test_the_dry_run_refuses_the_recorded_demo_fixtures_directory(
-    tmp_path: Path, smoke_limits: Path
+    tmp_path: Path,
+    smoke_limits: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    spelling: str,
 ) -> None:
-    target = uds.RECORDED_DEMO_FIXTURES_DIR
-    code = uds.main(_argv(smoke_limits, tmp_path, "--fixtures-dir", str(target)), environ={})
+    # A stand-in directory: if the guard ever regresses, the dry run must not write into the
+    # committed Demo evidence that `test_userdata_recorded_frames.py` pins (review WR-07).
+    recorded = tmp_path / "recorded_demo"
+    (recorded / "smoke").mkdir(parents=True)
+    (recorded / "probe").mkdir()
+    monkeypatch.setattr(uds, "RECORDED_DEMO_FIXTURES_DIR", recorded)
+    if spelling == "root":
+        target = str(recorded)
+    elif spelling == "smoke":
+        target = str(recorded / "smoke")
+    elif spelling == "dotdot":
+        target = str(recorded / "smoke" / ".." / "probe")
+    elif spelling == "relative":
+        monkeypatch.chdir(tmp_path)
+        target = str(Path("recorded_demo") / "smoke")
+    else:
+        link = tmp_path / "link_to_recorded"
+        try:
+            link.symlink_to(recorded, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks are not available on this platform")
+        target = str(link)
+
+    code = uds.main(
+        _argv(smoke_limits, tmp_path / "evidence", "--fixtures-dir", target), environ={}
+    )
+
     assert code == uds.EXIT_REFUSED
-    assert not target.exists() or not any(target.glob("dry-run-*"))
+    # Nothing was written: only the two stand-in sub-directories exist.
+    assert sorted(path.name for path in recorded.rglob("*")) == ["probe", "smoke"]
+
+
+def test_the_real_recorded_demo_fixtures_directory_is_a_guarded_path() -> None:
+    assert uds.RECORDED_DEMO_FIXTURES_DIR.name == "recorded_demo"
+    assert uds.RECORDED_DEMO_FIXTURES_DIR.parts[-4:-1] == ("tests", "fixtures", "phase18")
 
 
 def test_without_fixtures_dir_no_frame_is_written(tmp_path: Path, smoke_limits: Path) -> None:
