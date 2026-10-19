@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 import src.adapters.binance_usdm as usdm_mod
+import tenacity
 from binance_common.errors import (
     BadRequestError,
     ClientError,
@@ -55,6 +56,8 @@ from tests.support.limits import (
 from tests.support.limits import test_only_signed_call_policy
 
 MAX_ATTEMPTS = usdm_mod._RECONCILER_CANCEL_MAX_ATTEMPTS
+WAIT_MULTIPLIER_SECONDS = usdm_mod._RECONCILER_CANCEL_WAIT_MULTIPLIER_SECONDS
+WAIT_MAX_SECONDS = usdm_mod._RECONCILER_CANCEL_WAIT_MAX_SECONDS
 START = datetime(2026, 10, 16, 12, 0, 0, tzinfo=UTC)
 UPDATE_MS = 1_791_360_000_000
 ENTRY_ID = "e" * 36
@@ -416,6 +419,11 @@ def test_cancel_retries_status_unknown_up_to_the_ceiling(
     assert info.value is excs[-1], case
     assert rest.calls[sdk_name] == MAX_ATTEMPTS, case
     assert len(sleep.waits) == MAX_ATTEMPTS - 1, case
+    # Each wait is a random draw below the exponential bound of its attempt, capped at the
+    # wait ceiling (review WR-08: the count alone would pass for a zero or an uncapped wait).
+    for index, waited in enumerate(sleep.waits):
+        bound = min(WAIT_MAX_SECONDS, WAIT_MULTIPLIER_SECONDS * 2**index)
+        assert 0 <= waited <= bound, (case, index, waited)
 
 
 @pytest.mark.parametrize("method", sorted(CANCELS))
@@ -708,3 +716,24 @@ def test_position_mode_that_is_not_a_bool_is_refused_not_read_as_one_way(raw: An
     )
     with pytest.raises(ValueError, match="dualSidePosition"):
         _run(adapter.get_position_mode())
+
+
+def test_the_four_cancel_retry_ceilings_are_the_recorded_values() -> None:
+    """Review WR-08: the ceilings are typed here, so a drift in `src` fails a test."""
+    assert usdm_mod._RECONCILER_CANCEL_MAX_ATTEMPTS == 3
+    assert usdm_mod._RECONCILER_CANCEL_MAX_DELAY_SECONDS == 30
+    assert usdm_mod._RECONCILER_CANCEL_WAIT_MULTIPLIER_SECONDS == 1
+    assert usdm_mod._RECONCILER_CANCEL_WAIT_MAX_SECONDS == 10
+
+
+def test_the_cancel_retry_wait_never_exceeds_the_wait_ceiling() -> None:
+    adapter, _, _ = _adapter()
+    retrying = adapter._cancel_retrying()
+    for attempt_number in (1, 2, 3, 10, 40):
+        state = tenacity.RetryCallState(retry_object=retrying, fn=None, args=(), kwargs={})
+        state.attempt_number = attempt_number
+        draws = [retrying.wait(state) for _ in range(200)]
+        bound = min(10, 1 * 2 ** (attempt_number - 1))
+        assert all(0 <= draw <= bound for draw in draws), attempt_number
+    # A far attempt actually reaches the cap region (the wait is not stuck at zero or one).
+    assert max(draws) > 5
