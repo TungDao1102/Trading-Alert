@@ -258,7 +258,8 @@ def _race(
 
 def _assert_one_decision_one_entry(engine: Engine, adapter: BinanceSemanticsFakeAdapter) -> None:
     assert len(adapter.calls_to("place_entry")) == 1
-    assert intent_rows(engine) == [("ENTRY", "ACKED"), ("STOP_LOSS", "ACKED")]
+    # Plan 19-15 (D-10): the manager writes only the ENTRY row; the stop belongs to the coordinator.
+    assert intent_rows(engine) == [("ENTRY", "ACKED")]
     assert decided_approvals(engine) == [("APPROVED", "CONSUMED")]
     assert scalar(engine, "SELECT count(*) FROM approvals") == 1
     assert scalar(engine, "SELECT count(*) FROM execution_intents WHERE role = 'ENTRY'") == 1
