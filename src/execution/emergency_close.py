@@ -44,6 +44,12 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Protocol
 
+from src.domain.exchange_errors import (
+    CallKind,
+    ExchangeErrorCategory,
+    PreSendRefusal,
+    classify,
+)
 from src.domain.journal import JournalEvent, content_hash_event_id
 from src.domain.lot_filters import LotFilters
 from src.execution.lot_split import next_close_part, plan_close_parts
@@ -65,11 +71,29 @@ PHASE_PRE_SEND = "pre_send"
 PHASE_POST_SEND = "post_send"
 PHASE_ALREADY_FLAT = "already_flat"
 PHASE_FAILED = "failed"
+PHASE_NOT_SENT = "not_sent"
+PHASE_REJECTED = "rejected"
+PHASE_AMBIGUOUS = "ambiguous"
+PHASE_ABSENT = "absent"
+PHASE_ENDED_UNFILLED = "ended_unfilled"
 
 _ZERO = Decimal("0")
 _POSITION_SIDE_ONE_WAY = "BOTH"
 _CORRELATION_PREFIX = "emergency_close_"
 _EVENT_ID_PREFIX = "ecl"
+_STATUS_FILLED = "FILLED"
+_REASON_PRE_SEND_REFUSED = "PRE_SEND_REFUSED"
+# Order statuses that end a MARKET close without closing anything by themselves; the position
+# read decides what is left (no assumption about a partial execution).
+_TERMINAL_NOT_FILLED: frozenset[str] = frozenset(
+    {"CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"}
+)
+_DEFINITIVE_REJECTIONS: frozenset[ExchangeErrorCategory] = frozenset(
+    {
+        ExchangeErrorCategory.REJECTED_DEFINITIVE,
+        ExchangeErrorCategory.PRECONDITION_NO_POSITION,
+    }
+)
 
 
 class EmergencyCloseStatus(StrEnum):
@@ -88,6 +112,23 @@ class EmergencyCloseResult:
     status: EmergencyCloseStatus
     parts_sent: int
     reason: str
+
+
+class _Kind(StrEnum):
+    """What one part attempt turned out to be."""
+
+    CLOSED = "CLOSED"  # accepted by the exchange (or found FILLED by id)
+    NO_EFFECT = "NO_EFFECT"  # proven absent, or found ended without filling
+    REJECTED = "REJECTED"  # definitive rejection (-2022, -2024, ...)
+    NOT_SENT = "NOT_SENT"  # PreSendRefusal: nothing left the process
+    UNKNOWN = "UNKNOWN"  # cannot tell whether the attempt exists or what it did
+
+
+@dataclass(frozen=True)
+class _Outcome:
+    kind: _Kind
+    code: str = ""
+    error_type: str | None = None
 
 
 class CloseAdapter(Protocol):
@@ -117,6 +158,28 @@ def _attr(obj: Any, name: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(name)
     return getattr(obj, name, None)
+
+
+async def discover_next_attempt_no(*, adapter: CloseAdapter, symbol: str, plan_hash: str) -> int:
+    """The first attempt number whose id the exchange does not know (definitively absent).
+
+    Probes ``xc-...0001``, ``0002``, ... over REST (there is no attempt table, plan 19-06), so
+    a close started again after a crash never reuses an attempt id. A probe that fails or
+    answers something other than a plain found flag raises: the caller treats the history as
+    unknown and sends nothing. Raises ``ValueError`` when all 9999 numbers are taken.
+    """
+    attempt_no = 1
+    while True:
+        client_order_id = derive_close_order_id(plan_hash=plan_hash, attempt_no=attempt_no)
+        probe = await adapter.query_order_by_client(
+            symbol=symbol, orig_client_order_id=client_order_id
+        )
+        found = _attr(probe, "found")
+        if found is False:
+            return attempt_no
+        if found is not True:
+            raise ValueError("the attempt probe did not answer found or absent")
+        attempt_no += 1
 
 
 class MarketEmergencyCloser(EmergencyCloser):
@@ -174,34 +237,61 @@ class MarketEmergencyCloser(EmergencyCloser):
         if not isinstance(filters, LotFilters):
             return self._fail(entry, reason, "LOT_FILTERS_UNAVAILABLE", 0, "InvalidFilters")
 
+        # An attempt number is never reused, also across restarts: continue after the last
+        # attempt the exchange knows about (a probe failure means the history is unknown).
+        try:
+            attempt_no = await discover_next_attempt_no(
+                adapter=self._adapter, symbol=symbol, plan_hash=entry.plan_hash
+            )
+        except Exception as exc:  # noqa: BLE001 - an unknown attempt history stops the close
+            return self._fail(
+                entry,
+                reason,
+                "ATTEMPT_DISCOVERY_FAILED",
+                0,
+                type(exc).__name__,
+                status=EmergencyCloseStatus.PENDING_UNKNOWN,
+            )
+
         # Never more sends than the parts planned from the first REST position (D-15): a part
-        # that does not move the position must not turn into an endless loop.
+        # that does not move the position must not turn into an endless loop. Attempts proven to
+        # have had no effect are bounded by the same number.
         parts_planned = max(len(plan_close_parts(position=abs(position), filters=filters).parts), 1)
         parts_sent = 0
+        no_effect_attempts = 0
         while parts_sent < parts_planned:
             # Each part is sized from the REST position, never from a running total.
             quantity = next_close_part(remaining=abs(position), filters=filters)
             if quantity is None:
                 return self._fail(entry, reason, "NO_VALID_PART", parts_sent, None)
             side = "SELL" if position > _ZERO else "BUY"
-            attempt_no = parts_sent + 1
-            client_order_id = derive_close_order_id(
-                plan_hash=entry.plan_hash, attempt_no=attempt_no
+            try:
+                client_order_id = derive_close_order_id(
+                    plan_hash=entry.plan_hash, attempt_no=attempt_no
+                )
+            except ValueError:
+                return self._fail(entry, reason, "ATTEMPT_NUMBERS_EXHAUSTED", parts_sent, None)
+            outcome = await self._send_part(
+                entry, reason, attempt_no, client_order_id, side, quantity
             )
-            self._journal_attempt(
-                entry, PHASE_PRE_SEND, reason, attempt_no, client_order_id, side, quantity
-            )
-            await self._adapter.place_market_close(
-                symbol=symbol,
-                side=side,
-                position_side=_POSITION_SIDE_ONE_WAY,
-                quantity=quantity,
-                new_client_order_id=client_order_id,
-            )
-            parts_sent += 1
-            self._journal_attempt(
-                entry, PHASE_POST_SEND, reason, attempt_no, client_order_id, side, quantity
-            )
+            attempt_no += 1  # whatever happened, this id is spent
+            if outcome.kind is _Kind.NOT_SENT:
+                return self._not_sent(entry, reason, parts_sent, outcome.error_type)
+            if outcome.kind is _Kind.UNKNOWN:
+                return self._fail(
+                    entry,
+                    reason,
+                    outcome.code,
+                    parts_sent,
+                    outcome.error_type,
+                    status=EmergencyCloseStatus.PENDING_UNKNOWN,
+                )
+            if outcome.kind is _Kind.CLOSED:
+                parts_sent += 1
+            elif outcome.kind is _Kind.NO_EFFECT:
+                no_effect_attempts += 1
+                if no_effect_attempts > parts_planned:
+                    return self._fail(entry, reason, "SEND_NOT_CONFIRMED", parts_sent, None)
             try:
                 position = await self._read_position(symbol)
             except Exception as exc:  # noqa: BLE001 - flat is proven by REST or not at all
@@ -213,7 +303,106 @@ class MarketEmergencyCloser(EmergencyCloser):
                     EmergencyCloseStatus.FLAT, parts_sent, reason
                 )
                 return True
+            if outcome.kind is _Kind.REJECTED:
+                # The exchange refused the part and the position is still open: -2022 and
+                # -2024 (and every other definitive rejection) end here the same way. The
+                # close is never resent blindly.
+                return self._fail(
+                    entry, reason, "REJECTED_NOT_FLAT", parts_sent, outcome.error_type
+                )
         return self._fail(entry, reason, "PARTS_EXHAUSTED", parts_sent, None)
+
+    # ------------------------------------------------------------------ #
+    # One part: journal-first send, ambiguity resolved by a query, never a blind resend.
+    # ------------------------------------------------------------------ #
+
+    async def _send_part(
+        self,
+        entry: RestingEntry,
+        close_reason: str,
+        attempt_no: int,
+        client_order_id: str,
+        side: str,
+        quantity: Decimal,
+    ) -> _Outcome:
+        def journal(phase: str, error_type: str | None = None) -> None:
+            self._journal_attempt(
+                entry,
+                phase,
+                close_reason,
+                attempt_no,
+                client_order_id,
+                side,
+                quantity,
+                error_type=error_type,
+            )
+
+        journal(PHASE_PRE_SEND)
+        try:
+            answer = await self._adapter.place_market_close(
+                symbol=entry.symbol,
+                side=side,
+                position_side=_POSITION_SIDE_ONE_WAY,
+                quantity=quantity,
+                new_client_order_id=client_order_id,
+            )
+        except PreSendRefusal as exc:
+            # Nothing reached the exchange (rate-limit gate, policy missing): no probe, no
+            # resend. The coordinator's deadline keeps running (Q4 is owner-open).
+            journal(PHASE_NOT_SENT, type(exc).__name__)
+            return _Outcome(_Kind.NOT_SENT, error_type=type(exc).__name__)
+        except Exception as exc:  # noqa: BLE001 - classified below; ambiguity is probed
+            error_type = type(exc).__name__
+            if self._is_definitive_rejection(exc):
+                journal(PHASE_REJECTED, error_type)
+                return _Outcome(_Kind.REJECTED, error_type=error_type)
+            journal(PHASE_AMBIGUOUS, error_type)
+            return await self._resolve_ambiguity(entry, client_order_id, journal)
+        if answer is None:
+            journal(PHASE_AMBIGUOUS)
+            return await self._resolve_ambiguity(entry, client_order_id, journal)
+        journal(PHASE_POST_SEND)
+        return _Outcome(_Kind.CLOSED)
+
+    def _is_definitive_rejection(self, exc: Exception) -> bool:
+        """True when the exchange definitively refused the order (nothing was placed).
+
+        Decided from the facts the adapter extracts (class and int code), never from message
+        text (D-21). -2022 and -2024 are both REJECTED_DEFINITIVE and are not told apart.
+        """
+        try:
+            category = classify(self._adapter.error_facts(exc), CallKind.PLACEMENT)
+        except Exception:  # noqa: BLE001 - an unclassifiable failure is ambiguous
+            return False
+        return category in _DEFINITIVE_REJECTIONS
+
+    async def _resolve_ambiguity(
+        self,
+        entry: RestingEntry,
+        client_order_id: str,
+        journal: Callable[[str], None],
+    ) -> _Outcome:
+        """Query the attempt id; an attempt is never sent twice (T-19-29)."""
+        try:
+            probe = await self._adapter.query_order_by_client(
+                symbol=entry.symbol, orig_client_order_id=client_order_id
+            )
+        except Exception as exc:  # noqa: BLE001 - existence unknown: stop, no resend
+            return _Outcome(_Kind.UNKNOWN, "PROBE_FAILED", type(exc).__name__)
+        found = _attr(probe, "found")
+        if found is False:
+            journal(PHASE_ABSENT)
+            return _Outcome(_Kind.NO_EFFECT)
+        if found is not True:
+            return _Outcome(_Kind.UNKNOWN, "PROBE_INDETERMINATE")
+        status = _attr(probe, "status")
+        if status == _STATUS_FILLED:
+            journal(PHASE_POST_SEND)
+            return _Outcome(_Kind.CLOSED)
+        if status in _TERMINAL_NOT_FILLED:
+            journal(PHASE_ENDED_UNFILLED)
+            return _Outcome(_Kind.NO_EFFECT)
+        return _Outcome(_Kind.UNKNOWN, "ATTEMPT_NOT_TERMINAL")
 
     # ------------------------------------------------------------------ #
     # REST reads.
@@ -245,6 +434,8 @@ class MarketEmergencyCloser(EmergencyCloser):
         code: str,
         parts_sent: int,
         error_type: str | None,
+        *,
+        status: EmergencyCloseStatus = EmergencyCloseStatus.CLOSE_FAILED,
     ) -> bool:
         now = self._clock()
         self._journal_note(
@@ -269,8 +460,29 @@ class MarketEmergencyCloser(EmergencyCloser):
             )
         except Exception:  # noqa: BLE001, S110 - SAFE_MODE and the journal row already exist
             pass
+        self._last_result = EmergencyCloseResult(status, parts_sent, code)
+        return False
+
+    def _not_sent(
+        self, entry: RestingEntry, close_reason: str, parts_sent: int, error_type: str | None
+    ) -> bool:
+        """A pre-send refusal: critical alert, no claim of safety, no SAFE_MODE from here.
+
+        The coordinator's unprotected deadline keeps running and decides (Q4 is owner-open).
+        The refusal itself was journaled as ``not_sent`` before this call.
+        """
+        try:
+            self._alerts.critical(
+                event=ALERT_EMERGENCY_CLOSE_NOT_SENT,
+                plan_hash=entry.plan_hash,
+                symbol=entry.symbol,
+                reason=_REASON_PRE_SEND_REFUSED,
+                now_utc=self._clock(),
+            )
+        except Exception:  # noqa: BLE001, S110 - the journal row already exists
+            pass
         self._last_result = EmergencyCloseResult(
-            EmergencyCloseStatus.CLOSE_FAILED, parts_sent, code
+            EmergencyCloseStatus.NOT_SENT, parts_sent, _REASON_PRE_SEND_REFUSED
         )
         return False
 
@@ -375,4 +587,5 @@ __all__ = [
     "EmergencyCloseResult",
     "EmergencyCloseStatus",
     "MarketEmergencyCloser",
+    "discover_next_attempt_no",
 ]
