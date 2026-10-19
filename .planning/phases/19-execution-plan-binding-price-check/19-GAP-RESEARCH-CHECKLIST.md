@@ -46,5 +46,20 @@ Page: `trade/rest-api/Account-Trade-List`.
 - [ ] E1. exchangeInfo `MARKET_LOT_SIZE`: is the step measured from its own `minQty` like `LOT_SIZE` (assumption A7)?
 - [ ] E2. Mark-price stream `<symbol>@markPrice` (not needed; the plan uses a REST read).
 
+## Result of the research pass (2026-10-19, Claude via WebFetch; second, deeper pass)
+Detail: `19-RESEARCH.md` section "Gap pass results". The paths above are stale for the event pages (they return the portal landing page). Current URLs: index `https://developers.binance.com/en/docs/llms.txt`; user-data events (one page, raw markdown) `https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/user-data-streams.md`; errors `.../derivatives-trading-usds-futures/error-code.md`. The REST pages under `docs/derivatives/usds-margined-futures/trade/rest-api/` still work.
+
+- A1 DONE [DOC]: x = NEW, CANCELED, CALCULATED, EXPIRED, TRADE, AMENDMENT; X = NEW, PARTIALLY_FILLED, FILLED, CANCELED, EXPIRED, EXPIRED_IN_MATCH.
+- A2 OPEN (types confirmed from SDK models: `t` int "Trade Id", `gtd` int, `er` string, `rm` string "Algo order failed reason"; all Optional, presence rule still unproven): `t` is only an example-frame comment ("Trade Id", legacy page); the field schema is embedded OpenAPI the tool cannot render. Owner: open `/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/ws-streams/~schemas#ordertradeupdate` in a browser, or probe 3.
+- A3 DONE [DOC] for the 7 statuses; `o.rm` exists (example "Reduce Only reject"), full value list not documented. Note: the page still documents `CONDITIONAL_ORDER_TRIGGER_REJECT`, which AGENTS.md says is gone: owner to confirm against the changelog.
+- A4 DONE for what the docs say: `er` codes 0-9 (6 = "expired as GTE condition unsatisfied", 8 = "initial order expired after the stop order is triggered"); EXPIRED as x and X. GTD expiry is not named explicitly; the event page's time-in-force list omits GTD.
+- B1 CLOSED AS "DOC IS SILENT": the New Order notes end after the RESULT / STP / GTD-delay bullets; nothing on reduce-only with a flat or smaller position. Error page: -2022 = "conflicts with existing open orders", -2024 = "Position is not sufficient". Which code a flat MARKET reduce-only returns is Demo-probe only.
+- B2 DONE: the mandatory-parameter table shows only LIMIT and MARKET. B3 DONE: "greater than the current time plus 600 seconds and smaller than 253402300799000" (server time not stated). B4 DONE: no `GTE_GTC` (enum GTC, IOC, FOK, GTX, GTD, RPI).
+- C1 OPEN (page silent; -4137/-4138 only cover closePosition vs quantity/reduceOnly; -4509 is not on the error page): Demo probe 1. C2 DONE: no `GTE_GTC` in New Algo Order; it appears only in the ALGO_UPDATE EXPIRED example.
+- D1 OPEN: `realizedPnl` = "Realized Pnl.", no commission statement; no probe exists.
+- E1, E2 not read.
+
+Owner browser pass still needed: A2 (schema), `rm` values, `CONDITIONAL_ORDER_TRIGGER_REJECT` status, E1.
+
 ## After the pass
 Tell Claude which items changed. Items that stay unresolved remain in `19-OWNER-GAPS.md` (plan 19-17) and must be closed or accepted by the owner before LIVE is enabled.
