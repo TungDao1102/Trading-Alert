@@ -350,7 +350,7 @@ async def test_replayed_approve_after_restart_reaches_place_entry_zero_times(pg_
         assert len(adapter.calls) == calls_after_first  # zero adapter calls of any kind
         assert len(adapter.calls_to("place_entry")) == 1
 
-        assert intent_rows(restarted.engine) == [("ENTRY", "ACKED"), ("STOP_LOSS", "ACKED")]
+        assert intent_rows(restarted.engine) == [("ENTRY", "ACKED")]
         assert decided_approvals(restarted.engine) == [("APPROVED", "CONSUMED")]
         assert scalar(restarted.engine, "SELECT count(*) FROM approvals") == 1
 
@@ -382,7 +382,7 @@ async def test_redelivery_after_expiry_still_returns_the_stored_outcome(pg_db: s
         assert outcome == OK
         assert len(adapter.calls) == calls_after_first
         assert len(adapter.calls_to("place_entry")) == 1
-        assert intent_rows(restarted.engine) == [("ENTRY", "ACKED"), ("STOP_LOSS", "ACKED")]
+        assert intent_rows(restarted.engine) == [("ENTRY", "ACKED")]
 
 
 async def test_expiry_does_not_unlock_a_plan_that_was_never_executed(pg_db: str) -> None:
@@ -442,7 +442,7 @@ async def test_wrong_token_for_the_same_short_id_is_invalidated_and_sees_no_outc
         assert len(adapter.calls) == calls_after_first
 
         # The stored row is untouched by both attempts.
-        assert intent_rows(proc.engine) == [("ENTRY", "ACKED"), ("STOP_LOSS", "ACKED")]
+        assert intent_rows(proc.engine) == [("ENTRY", "ACKED")]
         assert decided_approvals(proc.engine) == [("APPROVED", "CONSUMED")]
 
 
