@@ -62,6 +62,13 @@ from src.domain.enums import (
     RejectionReason,
     TradePlanStatus,
 )
+from src.domain.exchange_errors import (
+    CallKind,
+    ExchangeErrorCategory,
+    PreSendRefusal,
+    classify,
+    safe_mode_eligible,
+)
 from src.domain.journal import JournalEvent, content_hash_event_id
 from src.execution.binding import (
     QUANTITY_ABOVE_APPROVED,
@@ -131,7 +138,8 @@ class ExecutionAdapter(Protocol):
     The real `BinanceUsdmAdapter` implements this protocol; tests inject
     a `FakeExecutionAdapter` that records every call. The manager never
     imports the Binance SDK — only the adapter does. Phase 19 (plan 19-13) adds the three
-    pre-placement reads: the live mark price and the open normal and algo orders of the symbol.
+    pre-placement reads: the live mark price and the open normal and algo orders of the symbol;
+    plan 19-15 adds `error_facts`, the SDK-free route to the exchange error taxonomy.
     """
 
     async def place_entry(self, **kwargs: Any) -> Any: ...
@@ -153,6 +161,10 @@ class ExecutionAdapter(Protocol):
     async def snapshot_open_normal_orders(self, *, symbol: str | None = None) -> Any: ...
 
     async def snapshot_open_algo_orders(self, *, symbol: str | None = None) -> Any: ...
+
+    def error_facts(self, exc: BaseException) -> Any:
+        """The Phase 18 `ErrorFacts` (class, int code, Retry-After) of `exc`; facts only (D-21)."""
+        ...
 
 
 # --------------------------------------------------------------------------- #
@@ -218,10 +230,23 @@ _ENTRY_STATE_PLACED = "ENTRY_PLACED"
 _ENTRY_STATE_EXISTS = "ENTRY_EXISTS"
 _ENTRY_STATE_ABSENT = "ENTRY_ABSENT"
 _ENTRY_STATE_UNKNOWN = "ENTRY_STATE_UNKNOWN"
+# Plan 19-15 (D-21): the three states the Phase 18 taxonomy adds on the entry path.
+_ENTRY_STATE_REFUSED = "ENTRY_REFUSED_BEFORE_SEND"
+_ENTRY_STATE_REJECTED = "ENTRY_REJECTED_DEFINITIVE"
+_ENTRY_STATE_UNKNOWN_ERROR = "ENTRY_UNKNOWN_EXCHANGE_ERROR"
+
+# Plain NO_TRADE reason: a request the gate, the drift guard or a missing signed-call policy
+# refused before anything reached the exchange (src/WR-02).
+ENTRY_REFUSED_BEFORE_SEND: str = "ENTRY_REFUSED_BEFORE_SEND"
+# SAFE_MODE reason: the entry failed with an answer the error table cannot explain (D-10).
+_UNKNOWN_EXCHANGE_ERROR: str = "UNKNOWN_EXCHANGE_ERROR"
 
 # Total `place_entry` attempts. A retry happens ONLY after a probe by the
 # deterministic client id DEFINITIVELY reports the order absent
-# (`found is False`); the adapter itself never retries placement.
+# (`found is False`) and only when the failure was not an UNKNOWN_EXCHANGE_ERROR; the adapter
+# itself never retries placement. Q5 (owner-open, recorded not decided): the Phase 18 review
+# (src/WR-02) asked for this second attempt to be removed or explicitly decided; it is kept
+# unchanged here for STATUS_UNKNOWN and the other ambiguous categories.
 _ENTRY_MAX_ATTEMPTS: int = 2
 
 
@@ -242,12 +267,27 @@ def _text_or_none(value: Any) -> str | None:
     return text or None
 
 
+def _placement_failure_category(
+    adapter: ExecutionAdapter, exc: BaseException
+) -> ExchangeErrorCategory:
+    """The taxonomy category of a failed placement, from facts only (D-21).
+
+    The adapter turns the exception into class, int code and Retry-After; `classify` decides
+    from those and the call kind. Nothing here reads exception message text. A failure to
+    obtain or classify the facts is UNKNOWN_EXCHANGE_ERROR (fail closed).
+    """
+    try:
+        return classify(adapter.error_facts(exc), CallKind.PLACEMENT)
+    except Exception:  # noqa: BLE001 — an unclassifiable failure is an unknown one
+        return ExchangeErrorCategory.UNKNOWN_EXCHANGE_ERROR
+
+
 async def _place_entry_no_blind_retry(
     *,
     adapter: ExecutionAdapter,
     entry_kwargs: dict[str, Any],
 ) -> _EntryPlacement:
-    """Place the entry; on ANY ambiguity probe by client id before retrying.
+    """Place the entry; on ambiguity probe by client id before any retry.
 
     The returned `state` is one of:
       - `ENTRY_PLACED`  — the adapter acknowledged the order.
@@ -256,18 +296,32 @@ async def _place_entry_no_blind_retry(
         DEFINITIVELY reported absence (no exposure exists).
       - `ENTRY_STATE_UNKNOWN` — a probe raised or returned an
         indeterminate result (fail closed: caller enters SAFE_MODE).
+      - `ENTRY_REFUSED_BEFORE_SEND` — a `PreSendRefusal` (REST gate pause or ban, entries
+        blocked by the drift guard, missing signed-call policy): nothing reached the exchange,
+        so no probe and no retry (D-21, src/WR-02).
+      - `ENTRY_REJECTED_DEFINITIVE` — the exchange answered REJECTED_DEFINITIVE on a placement
+        (for example -1106, -4016, -4024): no probe and no second attempt.
+      - `ENTRY_UNKNOWN_EXCHANGE_ERROR` — an UNKNOWN_EXCHANGE_ERROR whose probe found the order
+        absent: it is never retried (the caller enters SAFE_MODE). If the probe finds the
+        order, the state is `ENTRY_EXISTS` as for any other failure.
 
-    An exception from `place_entry` (timeout, 5xx, rejection, identity-
-    less response) and a `None` response are both ambiguous: the order
-    may have been accepted. The probe reads `found` by ATTRIBUTE (the
-    real adapter returns an `OrderProbe` dataclass) — anything other
-    than a literal `True`/`False` is unknown.
+    Any other exception from `place_entry` (timeout, 5xx, auth, rate limit) and a `None`
+    response are ambiguous: the order may have been accepted. The probe reads `found` by
+    ATTRIBUTE (the real adapter returns an `OrderProbe` dataclass) — anything other than a
+    literal `True`/`False` is unknown.
     """
     client_order_id = entry_kwargs["new_client_order_id"]
+    never_retry = False
     for _attempt in range(_ENTRY_MAX_ATTEMPTS):
         try:
             response = await adapter.place_entry(**entry_kwargs)
-        except Exception:  # noqa: BLE001 — ambiguous: probe decides
+        except PreSendRefusal:
+            return _EntryPlacement(state=_ENTRY_STATE_REFUSED)
+        except Exception as exc:  # noqa: BLE001 — classified by facts; ambiguous ones are probed
+            category = _placement_failure_category(adapter, exc)
+            if category is ExchangeErrorCategory.REJECTED_DEFINITIVE:
+                return _EntryPlacement(state=_ENTRY_STATE_REJECTED)
+            never_retry = safe_mode_eligible(category)
             response = None
         if response is not None:
             return _EntryPlacement(
@@ -294,7 +348,10 @@ async def _place_entry_no_blind_retry(
             )
         if found is not False:
             return _EntryPlacement(state=_ENTRY_STATE_UNKNOWN)
-        # Definitive absence: the next loop iteration may retry.
+        if never_retry:
+            # Definitive absence, but the failure itself was unexplained: do not send again.
+            return _EntryPlacement(state=_ENTRY_STATE_UNKNOWN_ERROR)
+        # Definitive absence of an explained ambiguity: the next loop iteration may retry.
     return _EntryPlacement(state=_ENTRY_STATE_ABSENT)
 
 
@@ -1017,9 +1074,39 @@ async def execute_approved_plan(
             )
         )
         return _finish(_reconciliation_required())
-    if entry_state == _ENTRY_STATE_ABSENT:
-        # Definitively not on the exchange after bounded attempts — no
-        # exposure exists, so NO_TRADE without SAFE_MODE.
+    if entry_state == _ENTRY_STATE_REFUSED:
+        # Nothing was sent (a PreSendRefusal): no probe, no SAFE_MODE, nothing to hand off.
+        # The ENTRY intent was SENT before the call, so it is closed as REJECTED.
+        _store_write(
+            lambda: intent_store.record_result(
+                approval_id=approval.approval_id,
+                role=OrderRole.ENTRY.value,
+                status=ExecutionIntentStatus.REJECTED,
+                exchange_order_id=None,
+                exchange_status=None,
+                now_utc=now_utc,
+            )
+        )
+        return _finish(ExecutionOutcome(is_no_trade=True, reason_code=ENTRY_REFUSED_BEFORE_SEND))
+    if entry_state == _ENTRY_STATE_UNKNOWN_ERROR:
+        # An answer the error table cannot explain, and the probe found no order: never
+        # resent, SAFE_MODE blocks new entries while reconciliation resolves the truth (D-10).
+        _enter_safe_mode(_UNKNOWN_EXCHANGE_ERROR)
+        _store_write(
+            lambda: intent_store.record_result(
+                approval_id=approval.approval_id,
+                role=OrderRole.ENTRY.value,
+                status=ExecutionIntentStatus.UNKNOWN,
+                exchange_order_id=None,
+                exchange_status=None,
+                now_utc=now_utc,
+            )
+        )
+        return _finish(_reconciliation_required())
+    if entry_state in (_ENTRY_STATE_ABSENT, _ENTRY_STATE_REJECTED):
+        # Definitively not on the exchange after bounded attempts, or definitively rejected by
+        # the exchange (REJECTED_DEFINITIVE) — no exposure exists, so NO_TRADE without
+        # SAFE_MODE.
         _store_write(
             lambda: intent_store.record_result(
                 approval_id=approval.approval_id,
