@@ -67,7 +67,7 @@ from src.domain.exchange_errors import (
 )
 from src.domain.journal import JournalEvent, content_hash_event_id, correlated_event_id
 from src.execution.constraint_snapshot import PlanConstraintSnapshot
-from src.execution.execution_limits import ExecutionLimits
+from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.execution.intent_store import ExecutionIntentStore
 from src.execution.order_ids import derive_algo_client_id
 from src.persistence.errors import IntentStateConflict, PersistenceError
@@ -125,6 +125,7 @@ REASON_CLOSED_ENTRY_TERMINAL = "CLOSED_ENTRY_TERMINAL"
 REASON_CLOSE_FAILED = "CLOSE_FAILED"
 REASON_CLOSE_NOT_SENT = "CLOSE_NOT_SENT"
 REASON_CLOSED_ENTRY_OPEN = "CLOSED_ENTRY_OPEN"
+REASON_STOP_CONSUMED_FLAT = "STOP_CONSUMED_FLAT"
 
 
 class ProtectionState(str, Enum):
@@ -347,6 +348,15 @@ class _PlaceOutcome(Enum):
     AMBIGUOUS = "AMBIGUOUS"
 
 
+class _StopReading(Enum):
+    """What one REST query of the stop answered."""
+
+    ACTIVE = "ACTIVE"
+    ABSENT = "ABSENT"
+    NOT_ACTIVE = "NOT_ACTIVE"
+    UNREADABLE = "UNREADABLE"
+
+
 class _Tracked:
     """The mutable record of one registered plan (in-process; the exchange is the truth)."""
 
@@ -408,6 +418,12 @@ class ProtectionCoordinator:
         clock: Callable[[], datetime],
     ) -> None:
         limits.require_live_ready()
+        max_unprotected_ms = limits.max_unprotected_ms
+        entry_terminal_timeout_ms = limits.entry_terminal_timeout_ms
+        if max_unprotected_ms is None or entry_terminal_timeout_ms is None:
+            raise ExecutionLimitsNotConfigured(("max_unprotected_ms", "entry_terminal_timeout_ms"))
+        self._max_unprotected_ms = max_unprotected_ms
+        self._entry_terminal_timeout_ms = entry_terminal_timeout_ms
         self._adapter = adapter
         self._store = intent_store
         self._journal = journal
@@ -719,7 +735,7 @@ class ProtectionCoordinator:
         if self._store_write(intend):
             self._store_write(mark_sent)
 
-    async def _place_stop(self, tracked: _Tracked) -> _PlaceOutcome:
+    async def _place_stop(self, tracked: _Tracked, *, probe_first: bool = True) -> _PlaceOutcome:
         """Query-first by the deterministic id, then place the closePosition stop.
 
         Returns how the placement ended; the outcome is never protection (only a REST answer of
@@ -729,7 +745,10 @@ class ProtectionCoordinator:
         entry = tracked.entry
         stop_id = self._stop_client_id(tracked)
         try:
-            probe = await self._adapter.query_algo_order_by_client(client_algo_id=stop_id)
+            if probe_first:
+                probe = await self._adapter.query_algo_order_by_client(client_algo_id=stop_id)
+            else:
+                probe = None  # the caller just read a definitive absence by this id
         except Exception as exc:  # noqa: BLE001 - existence unknown: protect anyway (see below)
             # The exchange rejects a second open algo order with the same client id, so placing
             # after a failed probe cannot create a duplicate open stop; not placing would leave
@@ -800,9 +819,16 @@ class ProtectionCoordinator:
     # ------------------------------------------------------------------ #
 
     async def _confirm(self, tracked: _Tracked) -> None:
+        """One supervision step of UNPROTECTED / PROTECTED_ENTRY_OPEN (REST is the truth).
+
+        Reads the stop (until it is confirmed, and while the entry is open afterwards, so a stop
+        that stopped being ACTIVE is seen: B4) and the entry (until terminal) by deterministic id,
+        re-issues the entry cancel while the entry is not terminal, re-places a stop that REST
+        proved absent, and then applies the two separate deadlines of D-13.
+        """
         entry = tracked.entry
-        need_stop = tracked.stop_confirmed_at is None
         need_entry = tracked.entry_terminal_at is None
+        need_stop = tracked.stop_confirmed_at is None or need_entry
         stop_result: Any = None
         entry_result: Any = None
         if need_stop and need_entry:
@@ -827,11 +853,69 @@ class ProtectionCoordinator:
                     symbol=entry.symbol, orig_client_order_id=entry.entry_client_order_id
                 )
             )
-        if need_stop:
-            self._apply_stop_answer(tracked, stop_result)
+        was_confirmed = tracked.stop_confirmed_at is not None
+        reading = self._apply_stop_answer(tracked, stop_result) if need_stop else None
         if need_entry:
             self._apply_entry_answer(tracked, entry_result)
+        if tracked.entry_terminal_at is None:
+            # The entry remainder is cancelled again on every step until REST says it is
+            # terminal (a failed or ambiguous cancel is never taken as done).
+            await self._cancel_entry_remainder(tracked)
+
+        if was_confirmed:
+            if reading in (_StopReading.ABSENT, _StopReading.NOT_ACTIVE):
+                # The stop is no longer ACTIVE (triggered or consumed): never re-placed.
+                await self._on_stop_lost(tracked)
+                return
+            if self._entry_deadline_reached(tracked):
+                await self._enter_close_required(tracked, BRANCH_B1_ENTRY_NOT_TERMINAL)
+                return
+        elif tracked.stop_confirmed_at is None:
+            if reading is _StopReading.ABSENT:
+                # Definitive absence by id: the same id may be placed again, never blindly.
+                outcome = await self._place_stop(tracked, probe_first=False)
+                await self._on_place_outcome(tracked, outcome)
+                if tracked.state is not ProtectionState.UNPROTECTED:
+                    return
+            if self._unprotected_deadline_reached(tracked):
+                branch = (
+                    BRANCH_B2_STOP_UNCONFIRMED
+                    if tracked.entry_terminal_at is not None
+                    else BRANCH_B3_BOTH_AMBIGUOUS
+                )
+                await self._enter_close_required(tracked, branch)
+                return
         self._settle_state(tracked)
+
+    def _elapsed_ms(self, tracked: _Tracked) -> int:
+        """Whole milliseconds since the first fill was detected (integer arithmetic only)."""
+        assert tracked.first_fill_at is not None
+        return (self._now() - tracked.first_fill_at) // timedelta(milliseconds=1)
+
+    def _unprotected_deadline_reached(self, tracked: _Tracked) -> bool:
+        """max_unprotected_ms (D-13): measured from the first fill, reached means escalate."""
+        return self._elapsed_ms(tracked) >= self._max_unprotected_ms
+
+    def _entry_deadline_reached(self, tracked: _Tracked) -> bool:
+        """entry_terminal_timeout_ms (D-13): its own clock, never added to the other."""
+        return (
+            tracked.entry_terminal_at is None
+            and self._elapsed_ms(tracked) >= self._entry_terminal_timeout_ms
+        )
+
+    async def _on_stop_lost(self, tracked: _Tracked) -> None:
+        """A once-confirmed stop is not ACTIVE any more: decide by the position (research P6).
+
+        Exposure without a stop is B4 (a fill after the stop triggered or was consumed): the
+        remainder is cancelled, the new exposure is closed by MARKET, the stop is never re-placed
+        and the plan never carries on. A flat position with a terminal entry just ends the plan.
+        """
+        exposed = await self._position_is_open(tracked)
+        if exposed is True:
+            await self._enter_close_required(tracked, BRANCH_B4_FILL_AFTER_STOP)
+        elif exposed is False and tracked.entry_terminal_at is not None:
+            self._transition(tracked, ProtectionState.FLAT, REASON_STOP_CONSUMED_FLAT, self._now())
+            await self._sweep(tracked)
 
     @staticmethod
     async def _guarded(awaitable: Any) -> Any:
@@ -840,7 +924,7 @@ class ProtectionCoordinator:
         except Exception as exc:  # noqa: BLE001 - returned so the caller journals it
             return exc
 
-    def _apply_stop_answer(self, tracked: _Tracked, answer: Any) -> None:
+    def _apply_stop_answer(self, tracked: _Tracked, answer: Any) -> _StopReading:
         entry = tracked.entry
         role = OrderRole.STOP_LOSS.value
         if isinstance(answer, BaseException):
@@ -852,11 +936,16 @@ class ProtectionCoordinator:
                 {"call": "query_algo_order_by_client", "error_type": type(answer).__name__},
                 self._now(),
             )
-            return
-        if _attr(answer, "found") is not True:
-            return
+            return _StopReading.UNREADABLE
+        found = _attr(answer, "found")
+        if found is False:
+            return _StopReading.ABSENT
+        if found is not True:
+            return _StopReading.UNREADABLE
         status = _optional_text(_attr(answer, "algo_status"))
         if is_protection_confirmed(status):
+            if tracked.stop_confirmed_at is not None:
+                return _StopReading.ACTIVE
             tracked.stop_confirmed_at = self._now()
             self._store_write(
                 lambda: self._store.record_result(
@@ -868,7 +957,8 @@ class ProtectionCoordinator:
                     now_utc=self._now(),
                 )
             )
-        elif not tracked.stop_unknown_recorded:
+            return _StopReading.ACTIVE
+        if tracked.stop_confirmed_at is None and not tracked.stop_unknown_recorded:
             tracked.stop_unknown_recorded = True
             self._store_write(
                 lambda: self._store.record_result(
@@ -880,6 +970,7 @@ class ProtectionCoordinator:
                     now_utc=self._now(),
                 )
             )
+        return _StopReading.NOT_ACTIVE
 
     def _apply_entry_answer(self, tracked: _Tracked, answer: Any) -> None:
         if isinstance(answer, BaseException):
