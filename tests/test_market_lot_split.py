@@ -10,7 +10,6 @@ from dataclasses import replace
 from decimal import Decimal
 
 import pytest
-
 from src.domain.lot_filters import LotFilters
 from src.execution.lot_split import is_valid_market_part, next_close_part
 
