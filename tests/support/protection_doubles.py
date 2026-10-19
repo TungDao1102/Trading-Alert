@@ -13,6 +13,9 @@ code imports this module.
 * `make_rig(...)` wires a `ProtectionCoordinator` over the Phase 19 fake exchange (constructed
   with `enforce_flat_stop_rejection=True`), an in-memory intent store behind an event log,
   a recording journal and virtual time, with the entry placed on the fake and registered.
+  With `real_closer=True` (plan 19-14) the coordinator gets the real `MarketEmergencyCloser`
+  over the same fake (fake lot filters set, sharing the journal, SAFE_MODE and alerts) instead of
+  the scripted closer, so a failure-branch test ends in a real reduce-only MARKET close.
 """
 
 from __future__ import annotations
@@ -25,7 +28,9 @@ from decimal import Decimal
 from typing import Any
 
 from src.adapters.binance_userdata_router import FillSource, RoutedFill
+from src.domain.lot_filters import LotFilters
 from src.execution.constraint_snapshot import PlanConstraintSnapshot
+from src.execution.emergency_close import MarketEmergencyCloser
 from src.execution.execution_limits import ExecutionLimits
 from src.execution.order_ids import derive_algo_client_id, derive_client_order_id
 from src.execution.protection import ProtectionCoordinator, RestingEntry
@@ -92,6 +97,21 @@ class RecordingSafeMode:
     def enter_safe_mode(self, *, reason: str, now_utc: Any = None) -> None:
         self.entered_reasons.append(reason)
         self.in_safe_mode = True
+
+
+def lot_filters_for_tests() -> LotFilters:
+    """FAKE BTCUSDT lot filters (TEST_ONLY numbers, not exchangeInfo) for the real closer."""
+    return LotFilters(
+        symbol=TEST_ONLY_SYMBOL,
+        price_tick_size=Decimal("0.01"),
+        lot_min_quantity=Decimal("0.001"),
+        lot_max_quantity=Decimal("1000"),
+        lot_step_size=Decimal("0.001"),
+        market_lot_min_quantity=Decimal("0.001"),
+        market_lot_max_quantity=Decimal("120"),
+        market_lot_step_size=Decimal("0.001"),
+        min_notional=Decimal("100"),
+    )
 
 
 def complete_constraint_snapshot(**overrides: Any) -> PlanConstraintSnapshot:
@@ -179,7 +199,7 @@ class ProtectionRig:
     journal: RecordingJournal
     safe_mode: RecordingSafeMode
     alerts: RecordingAlerts
-    closer: ScriptedEmergencyCloser
+    closer: ScriptedEmergencyCloser | MarketEmergencyCloser
     clock: VirtualTime
     coordinator: ProtectionCoordinator
     entry: RestingEntry
@@ -223,6 +243,7 @@ async def make_rig(
     limits: ExecutionLimits | None = None,
     place_entry: bool = True,
     register: bool = True,
+    real_closer: bool = False,
     **entry_overrides: Any,
 ) -> ProtectionRig:
     """A coordinator over the fake exchange; the entry is placed on the fake and registered."""
@@ -234,7 +255,18 @@ async def make_rig(
     journal = RecordingJournal()
     safe_mode = RecordingSafeMode()
     alerts = RecordingAlerts()
-    closer = ScriptedEmergencyCloser()
+    closer: ScriptedEmergencyCloser | MarketEmergencyCloser
+    if real_closer:
+        fake.set_lot_filters(TEST_ONLY_SYMBOL, lot_filters_for_tests())
+        closer = MarketEmergencyCloser(
+            adapter=fake,
+            journal=journal,
+            safe_mode_controller=safe_mode,
+            alert_sink=alerts,
+            clock=clock,
+        )
+    else:
+        closer = ScriptedEmergencyCloser()
     entry = resting_entry_for_tests(**entry_overrides)
     coordinator = ProtectionCoordinator(
         adapter=fake,
@@ -299,5 +331,6 @@ __all__ = [
     "RecordingSafeMode",
     "ScriptedEmergencyCloser",
     "complete_constraint_snapshot",
+    "lot_filters_for_tests",
     "resting_entry_for_tests",
 ]
