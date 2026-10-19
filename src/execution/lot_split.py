@@ -23,6 +23,7 @@ from decimal import Decimal
 from math import gcd
 
 from src.domain.lot_filters import LotFilters
+from src.execution.constraint_snapshot import PlanConstraintSnapshot
 
 # --------------------------------------------------------------------------- #
 # Exact integer scaling
@@ -219,3 +220,47 @@ def plan_close_parts(*, position: Decimal, filters: LotFilters) -> CloseSplit:
         parts.append(_from_units(part, grid.places))
         remaining -= part
     return CloseSplit(parts=tuple(parts), complete=True)
+
+
+def quantize_to_lot(*, quantity: Decimal, filters: LotFilters, market_exit: bool) -> Decimal:
+    """Floor `quantity` onto the LOT_SIZE grid, never up (D-19).
+
+    With `market_exit` the quantity is floored onto the intersection of LOT_SIZE and
+    MARKET_LOT_SIZE, because a triggered MARKET exit is checked against both (research A7).
+    The grid is measured from each filter's minimum quantity. The result is also capped at
+    the grid maximum, so it is never above `quantity` and always a valid order quantity.
+    Returns `Decimal("0")` when no valid quantity fits at or below `quantity` (below the
+    minimum, or the two grids never meet): the caller treats that as un-sizeable.
+    """
+    if not isinstance(quantity, Decimal) or not quantity.is_finite() or quantity <= 0:
+        return Decimal("0")
+    grid = _grid(filters, market_exit=market_exit, extra=quantity)
+    floored = grid.floor(_to_units(quantity, grid.places))
+    return Decimal("0") if floored is None else _from_units(floored, grid.places)
+
+
+def lot_filters_from_plan_snapshot(snapshot: PlanConstraintSnapshot) -> LotFilters | None:
+    """Map the per-plan constraint snapshot onto `LotFilters`, None when any value is unknown.
+
+    The snapshot keeps `max_quantity` and the MARKET_LOT_SIZE values as optional because a
+    live read may not have produced them; a close or TP size built from a guess is refused
+    here rather than defaulted (D-16, D-19).
+    """
+    if (
+        snapshot.max_quantity is None
+        or snapshot.market_lot_min_quantity is None
+        or snapshot.market_lot_max_quantity is None
+        or snapshot.market_lot_step_size is None
+    ):
+        return None
+    return LotFilters(
+        symbol=snapshot.symbol,
+        price_tick_size=snapshot.price_tick_size,
+        lot_min_quantity=snapshot.min_quantity,
+        lot_max_quantity=snapshot.max_quantity,
+        lot_step_size=snapshot.quantity_step_size,
+        market_lot_min_quantity=snapshot.market_lot_min_quantity,
+        market_lot_max_quantity=snapshot.market_lot_max_quantity,
+        market_lot_step_size=snapshot.market_lot_step_size,
+        min_notional=snapshot.min_notional,
+    )

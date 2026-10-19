@@ -22,6 +22,7 @@ from src.execution.lot_split import (
     plan_close_parts,
     quantize_to_lot,
 )
+
 from tests.support.ast_guards import (
     float_constructor_calls,
     forbidden_imports,
