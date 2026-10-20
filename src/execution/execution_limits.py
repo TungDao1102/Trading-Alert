@@ -1,6 +1,6 @@
 """The Phase 19 execution limits and their fail-closed loader (plan 19-01; D-07, D-13).
 
-No number lives in this module. The five safety numbers the owner has not chosen yet are
+No number lives in this module. The six safety numbers the owner has not chosen yet are
 optional fields of a frozen dataclass that default to nothing: they reach the process only
 through ``config/execution/execution-limits-v1.toml``, where each value is the word
 ``NOT_CONFIGURED`` until the owner sets it (OWNER-OPEN O-04). While any field is ``None`` the
@@ -42,6 +42,7 @@ EXECUTION_LIMIT_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "max_unprotected_ms",
             "entry_terminal_timeout_ms",
             "entry_unknown_grace_ms",
+            "emergency_close_poll_timeout_ms",
         ),
         "pre_placement": ("min_remaining_validity_seconds", "max_mark_price_age_ms"),
     }
@@ -87,13 +88,17 @@ class ExecutionLimitsNotConfigured(Exception):
 
 @dataclass(frozen=True, kw_only=True)
 class ExecutionLimits:
-    """The five owner-chosen execution limits; ``None`` means NOT_CONFIGURED.
+    """The six owner-chosen execution limits; ``None`` means NOT_CONFIGURED.
 
     ``max_unprotected_ms`` (D-13): the longest tolerated time an entry fill is open without a
     protective stop. ``entry_terminal_timeout_ms`` (D-13): how long the entry order may stay
     non-terminal. ``entry_unknown_grace_ms`` (19-REVIEW WR-05, owner): how long past the GTD
     time of an entry left ENTRY_STATE_UNKNOWN (Q5) the protection coordinator keeps polling it
     at full frequency before it marks the entry unresolved and polls it only every Nth step.
+    ``emergency_close_poll_timeout_ms`` (19-REVIEW WR-03, owner): how long the emergency closer
+    keeps polling a sent reduce-only MARKET close that is not terminal yet before it holds the
+    close as unknown and raises one critical alert; it never sends an overlapping close to
+    shorten the wait, and it is separate from ``max_unprotected_ms``.
     ``min_remaining_validity_seconds`` (D-07): the minimum remaining plan
     validity at placement. ``max_mark_price_age_ms`` (D-07): the maximum age of the mark
     price the price check uses.
@@ -102,6 +107,7 @@ class ExecutionLimits:
     max_unprotected_ms: int | None
     entry_terminal_timeout_ms: int | None
     entry_unknown_grace_ms: int | None
+    emergency_close_poll_timeout_ms: int | None
     min_remaining_validity_seconds: int | None
     max_mark_price_age_ms: int | None
 

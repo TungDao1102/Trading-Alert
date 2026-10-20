@@ -32,7 +32,7 @@ RATE_LIMIT_FIELD_NAMES = frozenset(
     }
 )
 # Phase 19 adds the execution-limit keys of D-07/D-13 (plan 19-01) and the owner's 19-REVIEW
-# WR-05 key `entry_unknown_grace_ms` (five keys).
+# keys `entry_unknown_grace_ms` (WR-05) and `emergency_close_poll_timeout_ms` (WR-03): six keys.
 EXECUTION_LIMIT_NAMES = frozenset(key for keys in EXECUTION_LIMIT_KEYS.values() for key in keys)
 GUARDED_NAMES = (
     frozenset(key for keys in CANONICAL_KEYS.values() for key in keys)
@@ -197,9 +197,10 @@ def test_the_scan_covers_src_and_scripts() -> None:
     assert "src/adapters/binance_limits.py" in relative
     assert "src/adapters/binance_clock.py" in relative
     assert any(name.startswith("scripts/") for name in relative)
-    # 30 ratified Binance-limit names + 5 execution-limit names (the fifth,
-    # entry_unknown_grace_ms, is the owner's 19-REVIEW WR-05 key).
-    assert len(GUARDED_NAMES) == 35
+    # 30 ratified Binance-limit names + 6 execution-limit names (the fifth,
+    # entry_unknown_grace_ms, is the owner's 19-REVIEW WR-05 key; the sixth,
+    # emergency_close_poll_timeout_ms, the owner's WR-03 key).
+    assert len(GUARDED_NAMES) == 36
     assert EXECUTION_LIMIT_NAMES <= GUARDED_NAMES
 
 

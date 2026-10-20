@@ -68,6 +68,7 @@ def test_protection_state_names_are_the_eleven_stable_names() -> None:
         "max_unprotected_ms",
         "entry_terminal_timeout_ms",
         "entry_unknown_grace_ms",
+        "emergency_close_poll_timeout_ms",
         "min_remaining_validity_seconds",
         "max_mark_price_age_ms",
     ],

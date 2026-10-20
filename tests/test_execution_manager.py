@@ -3082,6 +3082,7 @@ async def test_golden_case_reads_precede_the_position_mode_and_the_placement() -
         "max_unprotected_ms",
         "entry_terminal_timeout_ms",
         "entry_unknown_grace_ms",
+        "emergency_close_poll_timeout_ms",
         "min_remaining_validity_seconds",
         "max_mark_price_age_ms",
     ],

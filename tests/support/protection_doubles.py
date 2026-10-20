@@ -257,6 +257,7 @@ async def make_rig(
     safe_mode = RecordingSafeMode()
     alerts = RecordingAlerts()
     closer: ScriptedEmergencyCloser | MarketEmergencyCloser
+    resolved_limits = limits if limits is not None else test_only_execution_limits()
     if real_closer:
         fake.set_lot_filters(TEST_ONLY_SYMBOL, lot_filters_for_tests())
         closer = MarketEmergencyCloser(
@@ -265,6 +266,7 @@ async def make_rig(
             safe_mode_controller=safe_mode,
             alert_sink=alerts,
             clock=clock,
+            limits=resolved_limits,
         )
     else:
         closer = ScriptedEmergencyCloser(closer_results)
@@ -276,7 +278,7 @@ async def make_rig(
         safe_mode_controller=safe_mode,
         alert_sink=alerts,
         emergency_closer=closer,
-        limits=limits if limits is not None else test_only_execution_limits(),
+        limits=resolved_limits,
         clock=clock,
     )
     if place_entry:

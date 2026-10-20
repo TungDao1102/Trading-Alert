@@ -208,7 +208,7 @@ DEFAULT_EVIDENCE_DIR = REPO_ROOT / ".planning" / "phases" / "09-live-execution-r
 # Plan 18-13: the ratified limits file (plan 18-09). Its signed-call policy gives every
 # signed request an explicit recvWindow; no number is chosen here.
 DEFAULT_LIMITS_FILE = REPO_ROOT / "config" / "binance" / "binance-limits-v1.toml"
-# Plan 19-13: the owner's execution limits (plan 19-01; five keys since 19-REVIEW WR-05). Every
+# Plan 19-13: the owner's execution limits (plan 19-01; six keys since 19-REVIEW WR-03). Every
 # value is NOT_CONFIGURED in the committed file, so a run that reaches the order path aborts
 # before any mutation.
 DEFAULT_EXECUTION_LIMITS_FILE = REPO_ROOT / "config" / "execution" / "execution-limits-v1.toml"
@@ -1961,6 +1961,7 @@ async def build_live_context(
         safe_mode_controller=safe_mode,
         alert_sink=alerts,
         clock=ctx.clock,
+        limits=limits,
     )
     coordinator = ProtectionCoordinator(
         adapter=cast(Any, ctx.guarded),

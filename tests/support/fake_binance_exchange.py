@@ -221,6 +221,10 @@ class BinanceSemanticsFakeAdapter:
         self._lot_filters: dict[str, Any] = {}
         # True: a MARKET close answers like an acknowledgment (NEW, executed unknown).
         self.market_close_ack_only = False
+        # True (19-REVIEW WR-03): a MARKET close is booked OPEN as NEW with nothing executed and
+        # the position does not move until the test calls `fill(client_id, price=...)` (or
+        # `cancel`). The answer is the ACK (NEW, executed unknown).
+        self.market_close_rests = False
         # Scripted completion gates. `completed` lists the methods that returned, in order.
         self.completed: list[str] = []
         self._hold_pending: dict[str, deque[asyncio.Event]] = {}
@@ -687,10 +691,35 @@ class BinanceSemanticsFakeAdapter:
                 error_message="Position is not sufficient.",
                 status_code=POSITION_NOT_SUFFICIENT_CODE,
             )
+        client_id = kwargs["new_client_order_id"]
+        if self.market_close_rests:
+            resting = ExchangeOrderRecord(
+                client_id=client_id,
+                symbol=symbol,
+                status=STATUS_NEW,
+                created_at_utc=self.now_utc,
+                exchange_id=f"ex-{next(self._ids)}",
+                quantity=quantity,
+                side=side,
+                position_side=kwargs["position_side"],
+                order_type="MARKET",
+                reduce_only=kwargs["position_side"] == "BOTH",
+            )
+            self.open_orders[client_id] = resting
+            return MarketCloseResult(
+                symbol=symbol,
+                client_order_id=client_id,
+                exchange_order_id=resting.exchange_id,
+                side=side,
+                position_side=kwargs["position_side"],
+                status=STATUS_NEW,
+                executed_quantity=None,
+                average_price=None,
+                update_time_utc=resting.update_time_utc,
+            )
         mark = self._mark_prices.get(symbol)
         fill_price = mark.mark_price if mark is not None else self._entry_prices[symbol]
         self._apply_position_delta(symbol, -quantity if position > ZERO else quantity, fill_price)
-        client_id = kwargs["new_client_order_id"]
         record = ExchangeOrderRecord(
             client_id=client_id,
             symbol=symbol,

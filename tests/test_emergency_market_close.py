@@ -36,6 +36,7 @@ from tests.support.ast_guards import (
     forbidden_imports,
     wall_clock_calls,
 )
+from tests.support.execution_limits import test_only_execution_limits as limits_with
 from tests.support.fake_binance_exchange import BinanceSemanticsFakeAdapter
 from tests.support.protection_doubles import (
     TEST_ONLY_PLAN_HASH,
@@ -129,6 +130,7 @@ def make_close_rig(
     position: Decimal | None,
     *,
     filters: LotFilters | None = None,
+    limits: Any = None,
 ) -> CloseRig:
     """A closer over the fake exchange holding `position` (signed; None: no position)."""
     clock = VirtualTime()
@@ -153,6 +155,7 @@ def make_close_rig(
         safe_mode_controller=safe_mode,
         alert_sink=alerts,
         clock=clock,
+        limits=limits if limits is not None else limits_with(),
     )
     rig = CloseRig(
         fake=fake,
@@ -274,10 +277,13 @@ async def test_tracer_journals_pre_send_before_the_send_and_post_send_after() ->
 
     await rig.closer.close_position(entry=resting_entry_for_tests(), reason="CLOSE_REQUIRED")
 
+    # post_send records the ACK only; "filled" is journaled when a query of the attempt id
+    # proves it FILLED (19-REVIEW WR-03: an ACK is never a close).
     assert rig.log == [
         "journal:pre_send",
         "adapter.place_market_close",
         "journal:post_send",
+        "journal:filled",
     ]
     events = rig.journal.calls
     assert {e.event_type for e in events} == {"EMERGENCY_CLOSE"}
@@ -537,16 +543,29 @@ async def test_a_call_never_sends_more_parts_than_the_first_position_needs() -> 
             )
         ]
 
+    sent: set[str] = set()
+
     async def acknowledged_only(**kwargs: Any) -> Any:
         rig.fake._record_call("place_market_close", kwargs)
+        sent.add(kwargs["new_client_order_id"])
         return SimpleNamespace(status="NEW")
+
+    async def reported_filled(**kwargs: Any) -> Any:
+        # Every sent attempt is reported FILLED by its id, yet the position never moves.
+        rig.fake._record_call("query_order_by_client", kwargs)
+        client_id = kwargs["orig_client_order_id"]
+        if client_id in sent:
+            return probe_found(client_id, "FILLED")
+        return probe_absent(client_id)
 
     rig.fake.snapshot_positions = stuck_position  # type: ignore[method-assign]
     rig.fake.place_market_close = acknowledged_only  # type: ignore[method-assign]
+    rig.fake.query_order_by_client = reported_filled  # type: ignore[method-assign]
 
     closed = await close(rig)
 
-    # plan_close_parts(12) is three parts: the call stops after three sends, never loops on.
+    # plan_close_parts(12) is three parts: the call stops after three confirmed parts, never
+    # loops on. (19-REVIEW WR-03: each part counts only once a query proves it FILLED.)
     assert closed is False
     assert len(rig.fake.calls_to("place_market_close")) == 3
     assert rig.sent_ids() == [
@@ -598,8 +617,13 @@ def probe_found(client_id: str, status: str | None) -> OrderProbe:
 def script_probes(rig: CloseRig, answers: list[Any]) -> None:
     """Replace `query_order_by_client` by a script (an exception in the list is raised)."""
     queue = deque(answers)
+    real = rig.fake.query_order_by_client
 
     async def scripted(**kwargs: Any) -> Any:
+        if not queue:
+            # Script exhausted: the fake's own answer (19-REVIEW WR-03 queries every sent
+            # attempt by its id, so a later attempt is confirmed by the real fake).
+            return await real(**kwargs)
         rig.fake._bind_real("query_order_by_client", kwargs)
         rig.fake._record_call("query_order_by_client", kwargs)
         answer = queue.popleft()
@@ -672,8 +696,32 @@ async def test_an_attempt_found_terminal_without_closing_gets_a_fresh_id_for_the
     assert rig.fake.positions[SYMBOL] == 0
 
 
-@pytest.mark.parametrize("status", ["NEW", "PARTIALLY_FILLED", "SOMETHING_ELSE", None])
-async def test_a_found_but_non_terminal_or_unknown_attempt_stops_without_a_resend(
+@pytest.mark.parametrize("status", ["NEW", "PARTIALLY_FILLED"])
+async def test_a_found_active_attempt_after_an_ambiguous_send_is_pending_without_a_resend(
+    status: str,
+) -> None:
+    """19-REVIEW WR-03: a found, still-active attempt is PENDING until the poll deadline.
+
+    Before WR-03 this ended PENDING_UNKNOWN with SAFE_MODE and an alert at once; now the attempt
+    is known to exist, so it is polled by its id (nothing sent) and the alert waits for the
+    owner's poll deadline (tested below).
+    """
+    rig = make_close_rig(D("0.004"))
+    rig.fake.fail_next("place_market_close", TimeoutError("answer lost"))
+    script_probes(rig, [probe_absent(ID_1), probe_found(ID_1, status)])
+
+    closed = await close(rig)
+
+    assert closed is False
+    assert rig.sent_ids() == [ID_1]
+    assert rig.closer.last_result is not None
+    assert rig.closer.last_result.status == "PENDING"
+    assert rig.safe_mode.entered_reasons == []
+    assert rig.alerts.alerts == []
+
+
+@pytest.mark.parametrize("status", ["SOMETHING_ELSE", None])
+async def test_a_found_attempt_with_an_unreadable_status_stops_without_a_resend(
     status: str | None,
 ) -> None:
     rig = make_close_rig(D("0.004"))
@@ -725,33 +773,39 @@ async def test_a_probe_answer_that_is_not_a_plain_bool_is_indeterminate() -> Non
     assert rig.closer.last_result.status == "PENDING_UNKNOWN"
 
 
-async def test_definitive_absence_sends_the_next_part_under_a_new_attempt_id() -> None:
+async def test_wr03_absence_right_after_an_ambiguous_send_is_unknown_and_never_resent() -> None:
+    """19-REVIEW WR-03 (Q5 applied to the close): found=False after an ambiguous send is UNKNOWN.
+
+    The old closer read this as "proven absent" and sent attempt 0002 at once (and again on
+    every later call). Now no new attempt is created, ever: the attempt is held UNKNOWN, with
+    SAFE_MODE and exactly one critical alert, and every later call only queries 0001 again.
+    """
     rig = make_close_rig(D("0.004"))
     rig.fake.fail_next("place_market_close", TimeoutError("answer lost"))
 
     closed = await close(rig)
 
-    assert closed is True
-    # 0001 never reached the exchange (the fake kept no order); the retry is 0002, never 0001.
-    assert rig.sent_ids() == [ID_1, ID_2]
-    assert probed_ids(rig) == [ID_1, ID_1]
-    assert rig.safe_mode.entered_reasons == []
-
-
-async def test_repeated_definitive_absence_is_bounded_by_the_planned_parts() -> None:
-    rig = make_close_rig(D("0.004"))
-    for _ in range(10):
-        rig.fake.fail_next("place_market_close", TimeoutError("answer lost"))
-
-    closed = await close(rig)
-
-    # One planned part: the first send plus one re-attempt after a proven absence, then stop.
     assert closed is False
-    assert len(rig.sent_ids()) == 2
-    assert len(set(rig.sent_ids())) == 2
+    assert rig.sent_ids() == [ID_1]
+    assert probed_ids(rig) == [ID_1, ID_1]
     assert rig.closer.last_result is not None
-    assert rig.closer.last_result.status == "CLOSE_FAILED"
+    assert rig.closer.last_result.status == "PENDING_UNKNOWN"
+    assert rig.closer.last_result.reason == "ABSENT_AFTER_AMBIGUOUS_SEND"
     assert rig.safe_mode.entered_reasons == ["EMERGENCY_CLOSE_FAILED"]
+    assert [(a.event, a.reason) for a in rig.alerts.alerts] == [
+        ("EMERGENCY_CLOSE_FAILED", "ABSENT_AFTER_AMBIGUOUS_SEND")
+    ]
+
+    for _ in range(5):
+        assert await close(rig) is False
+
+    assert rig.sent_ids() == [ID_1]
+    # Every later call queries the same attempt id and nothing else (no discovery, no 0002).
+    assert probed_ids(rig) == [ID_1] * 7
+    assert rig.closer.last_result.status == "PENDING_UNKNOWN"
+    assert len(rig.alerts.alerts) == 1
+    assert rig.safe_mode.in_safe_mode is True
+    assert rig.fake.positions[SYMBOL] == D("0.004")
 
 
 async def test_a_pre_send_refusal_is_journaled_as_not_sent_and_nothing_is_resent() -> None:
@@ -856,6 +910,7 @@ async def test_a_second_call_after_a_crash_never_reuses_an_attempt_id() -> None:
         safe_mode_controller=rig.safe_mode,
         alert_sink=rig.alerts,
         clock=rig.clock,
+        limits=limits_with(),
     )
 
     assert await fresh.close_position(entry=resting_entry_for_tests(), reason="CLOSE_REQUIRED")
@@ -898,6 +953,294 @@ async def test_a_failing_attempt_discovery_sends_nothing_and_stops_into_safe_mod
     assert rig.closer.last_result.status == "PENDING_UNKNOWN"
     assert rig.safe_mode.entered_reasons == ["EMERGENCY_CLOSE_FAILED"]
     assert [a.event for a in rig.alerts.alerts] == ["EMERGENCY_CLOSE_FAILED"]
+
+
+# --------------------------------------------------------------------------- #
+# 19-REVIEW WR-03 (owner decision): Q5 applied to the close. An ACK is PENDING, never CLOSED;
+# nothing else is sent while the current attempt is not proven terminal; the poll deadline is
+# the owner key protection.emergency_close_poll_timeout_ms (FAKE value 6161 in tests).
+# --------------------------------------------------------------------------- #
+
+POLL_TIMEOUT_MS = 6161  # TEST_ONLY value of tests/support/execution_limits.py
+
+
+def advance_ms(rig: CloseRig, milliseconds: int) -> None:
+    """Move the injected clock by whole milliseconds (exact, no float)."""
+    from datetime import timedelta
+
+    rig.clock._now += timedelta(milliseconds=milliseconds)
+
+
+def resting_close_rig(position: Decimal, **kwargs: Any) -> CloseRig:
+    """A rig whose MARKET closes are acknowledged NEW and rest until the test fills them."""
+    rig = make_close_rig(position, **kwargs)
+    rig.fake.market_close_rests = True
+    return rig
+
+
+def fill_close(rig: CloseRig, client_id: str) -> None:
+    """The exchange executes the resting close `client_id` in full."""
+    rig.fake.fill(client_id, price=ENTRY_PRICE)
+
+
+async def test_wr03_an_ack_new_with_nothing_executed_is_pending_and_nothing_else_is_sent() -> None:
+    rig = resting_close_rig(D("0.004"))
+
+    closed = await close(rig)
+
+    assert closed is False
+    assert rig.sent_ids() == [ID_1]
+    assert rig.closer.last_result is not None
+    assert rig.closer.last_result.status == "PENDING"
+    assert rig.closer.last_result.reason == "ATTEMPT_NOT_TERMINAL"
+    assert rig.closer.last_result.parts_sent == 0
+    # Pending is not a failure: no SAFE_MODE and no alert from the closer before the deadline.
+    assert rig.safe_mode.entered_reasons == []
+    assert rig.alerts.alerts == []
+    assert "post_send" in rig.phases()
+    assert "filled" not in rig.phases()
+
+    # Later calls (the coordinator's next steps) only query the same id: no second order.
+    for _ in range(5):
+        advance_ms(rig, 1000)
+        assert await close(rig) is False
+        assert rig.closer.last_result.status == "PENDING"
+
+    assert rig.sent_ids() == [ID_1]
+    assert probed_ids(rig) == [ID_1] * 7  # discovery, the poll after the ACK, five polls
+    assert rig.fake.positions[SYMBOL] == D("0.004")
+    assert rig.alerts.alerts == []
+
+
+async def test_wr03_polled_to_filled_then_two_flat_reads_is_closed() -> None:
+    rig = resting_close_rig(D("0.004"))
+    assert await close(rig) is False
+    assert rig.closer.last_result is not None
+    assert rig.closer.last_result.status == "PENDING"
+
+    fill_close(rig, ID_1)
+    closed = await close(rig)
+
+    assert closed is True
+    assert rig.sent_ids() == [ID_1]
+    assert rig.closer.last_result.status == "FLAT"
+    assert rig.closer.last_result.parts_sent == 1
+    assert rig.phases().count("filled") == 1
+    assert rig.safe_mode.entered_reasons == []
+    assert rig.alerts.alerts == []
+    # The poll of 0001, then the two consecutive zero reads of CR-03; no discovery, no send.
+    assert [c["method"] for c in rig.fake.calls][-3:] == [
+        "query_order_by_client",
+        "snapshot_positions",
+        "snapshot_positions",
+    ]
+
+
+async def test_wr03_polled_to_filled_with_exposure_left_sends_a_new_id_sized_from_rest() -> None:
+    rig = resting_close_rig(D("0.004"))
+    assert await close(rig) is False
+
+    # While 0001 rests, a late entry fill adds 0.003; then 0001 executes its 0.004.
+    rig.fake._apply_position_delta(SYMBOL, D("0.003"), ENTRY_PRICE)
+    fill_close(rig, ID_1)
+    rig.fake.market_close_rests = False  # the next close executes at once
+
+    closed = await close(rig)
+
+    assert closed is True
+    assert rig.sent_ids() == [ID_1, ID_2]
+    # The next part comes from the REST position read after 0001 was proven FILLED.
+    assert rig.sent_quantities() == [D("0.004"), D("0.003")]
+    assert rig.fake.positions[SYMBOL] == 0
+    assert rig.closer.last_result is not None
+    assert rig.closer.last_result.status == "FLAT"
+    assert rig.closer.last_result.parts_sent == 2
+    assert rig.safe_mode.entered_reasons == []
+    assert rig.alerts.alerts == []
+
+
+async def test_wr03_an_attempt_ended_unfilled_while_pending_gets_a_new_id() -> None:
+    rig = resting_close_rig(D("0.004"))
+    assert await close(rig) is False
+
+    rig.fake.cancel(ID_1)  # e.g. EXPIRED/CANCELED by the exchange without executing
+    rig.fake.market_close_rests = False
+
+    assert await close(rig) is True
+    assert rig.sent_ids() == [ID_1, ID_2]
+    assert "ended_unfilled" in rig.phases()
+
+
+async def test_wr03_discovery_stops_on_a_found_attempt_that_is_not_terminal() -> None:
+    from src.execution.emergency_close import CloseAttemptNotTerminal
+
+    rig = resting_close_rig(D("0.004"))
+    assert await close(rig) is False  # 0001 rests on the exchange as NEW
+
+    with pytest.raises(CloseAttemptNotTerminal) as excinfo:
+        await discover_next_attempt_no(adapter=rig.fake, symbol=SYMBOL, plan_hash=PLAN_HASH)
+    assert excinfo.value.attempt_no == 1
+    assert excinfo.value.client_order_id == ID_1
+
+    # "Restart": a new closer with no memory sees 0001 in the history, adopts it and sends
+    # nothing (the history is unknown while 0001 may still execute).
+    fresh = MarketEmergencyCloser(
+        adapter=rig.fake,
+        journal=rig.journal,
+        safe_mode_controller=rig.safe_mode,
+        alert_sink=rig.alerts,
+        clock=rig.clock,
+        limits=limits_with(),
+    )
+    entry = resting_entry_for_tests()
+    assert await fresh.close_position(entry=entry, reason="CLOSE_REQUIRED") is False
+    assert rig.sent_ids() == [ID_1]
+    assert fresh.last_result is not None
+    assert fresh.last_result.status == "PENDING_UNKNOWN"
+    assert fresh.last_result.reason == "ATTEMPT_HISTORY_NOT_TERMINAL"
+    assert [(a.event, a.reason) for a in rig.alerts.alerts] == [
+        ("EMERGENCY_CLOSE_FAILED", "ATTEMPT_HISTORY_NOT_TERMINAL")
+    ]
+    assert await fresh.close_position(entry=entry, reason="CLOSE_REQUIRED") is False
+    assert rig.sent_ids() == [ID_1]
+    assert len(rig.alerts.alerts) == 1  # one alert per episode
+
+    # Once 0001 is terminal the adopted attempt resolves and the close ends flat.
+    fill_close(rig, ID_1)
+    assert await fresh.close_position(entry=entry, reason="CLOSE_REQUIRED") is True
+    assert rig.sent_ids() == [ID_1]
+
+
+async def test_wr03_the_poll_deadline_holds_unknown_with_one_alert_and_no_second_send() -> None:
+    rig = resting_close_rig(D("0.004"))
+    assert await close(rig) is False
+
+    advance_ms(rig, POLL_TIMEOUT_MS - 1)
+    assert await close(rig) is False
+    assert rig.closer.last_result is not None
+    assert rig.closer.last_result.status == "PENDING"
+    assert rig.alerts.alerts == []
+    assert rig.safe_mode.entered_reasons == []
+
+    advance_ms(rig, 1)  # exactly the deadline: reaching it escalates
+    assert await close(rig) is False
+    assert rig.closer.last_result.status == "PENDING_UNKNOWN"
+    assert rig.closer.last_result.reason == "CLOSE_POLL_DEADLINE_PASSED"
+    assert rig.safe_mode.entered_reasons == ["EMERGENCY_CLOSE_FAILED"]
+    assert [(a.event, a.reason) for a in rig.alerts.alerts] == [
+        ("EMERGENCY_CLOSE_FAILED", "CLOSE_POLL_DEADLINE_PASSED")
+    ]
+
+    # Long past the deadline: still UNKNOWN, SAFE_MODE kept, still exactly one alert, and never
+    # an overlapping close to shorten the wait; the attempt keeps being reconciled by its id.
+    for _ in range(10):
+        advance_ms(rig, 60_000)
+        assert await close(rig) is False
+        assert rig.closer.last_result.status == "PENDING_UNKNOWN"
+    assert rig.sent_ids() == [ID_1]
+    assert len(rig.alerts.alerts) == 1
+    assert rig.safe_mode.in_safe_mode is True
+    assert len([p for p in rig.phases() if p == "failed"]) == 1
+    assert set(probed_ids(rig)) == {ID_1}
+
+    # The exchange finally executes 0001: the episode ends flat, nothing else was sent.
+    fill_close(rig, ID_1)
+    assert await close(rig) is True
+    assert rig.sent_ids() == [ID_1]
+    assert len(rig.alerts.alerts) == 1
+
+
+@pytest.mark.parametrize(
+    ("poll_timeout_ms", "max_unprotected_ms", "unknown_at_ms"),
+    [(50_000, 1, 50_000), (1_000, 10**9, 1_000)],
+)
+async def test_wr03_the_deadline_is_the_new_limit_never_max_unprotected_ms(
+    poll_timeout_ms: int, max_unprotected_ms: int, unknown_at_ms: int
+) -> None:
+    limits = limits_with(
+        emergency_close_poll_timeout_ms=poll_timeout_ms, max_unprotected_ms=max_unprotected_ms
+    )
+    rig = resting_close_rig(D("0.004"), limits=limits)
+    assert await close(rig) is False
+
+    advance_ms(rig, unknown_at_ms - 1)
+    assert await close(rig) is False
+    assert rig.closer.last_result is not None
+    assert rig.closer.last_result.status == "PENDING"
+    advance_ms(rig, 1)
+    assert await close(rig) is False
+    assert rig.closer.last_result.status == "PENDING_UNKNOWN"
+    assert rig.sent_ids() == [ID_1]
+
+
+def test_wr03_the_closer_never_reads_max_unprotected_ms() -> None:
+    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)} | {
+        n.id for n in ast.walk(tree) if isinstance(n, ast.Name)
+    }
+    assert "max_unprotected_ms" not in names
+    assert "emergency_close_poll_timeout_ms" in names
+
+
+def test_wr03_the_closer_refuses_while_its_poll_deadline_is_not_configured() -> None:
+    from src.execution.execution_limits import ExecutionLimitsNotConfigured
+
+    with pytest.raises(ExecutionLimitsNotConfigured) as excinfo:
+        MarketEmergencyCloser(
+            adapter=None,  # type: ignore[arg-type]
+            journal=None,
+            safe_mode_controller=None,
+            alert_sink=None,  # type: ignore[arg-type]
+            clock=None,  # type: ignore[arg-type]
+            limits=limits_with(emergency_close_poll_timeout_ms=None),
+        )
+    assert "emergency_close_poll_timeout_ms" in str(excinfo.value)
+
+
+async def test_wr03_found_false_after_an_ack_is_unknown_and_never_resent() -> None:
+    rig = resting_close_rig(D("0.004"))
+    assert await close(rig) is False
+    # The exchange stops showing the acknowledged attempt (contradicts the ACK).
+    rig.fake.open_orders.pop(ID_1)
+
+    assert await close(rig) is False
+    assert rig.closer.last_result is not None
+    assert rig.closer.last_result.status == "PENDING_UNKNOWN"
+    assert rig.closer.last_result.reason == "ATTEMPT_NOT_FOUND_AFTER_ACK"
+    assert rig.sent_ids() == [ID_1]
+    assert len(rig.alerts.alerts) == 1
+
+
+async def test_wr03_coordinator_keeps_a_resting_close_blocking_and_never_sends_a_second() -> None:
+    from src.execution.protection import ProtectionState
+
+    from tests.support.protection_doubles import make_rig
+
+    rig = await make_rig(real_closer=True)
+    rig.fake.market_close_rests = True
+    rig.fake.reject_next_algo(-2021)  # B5: the stop is rejected after the fill
+    rig.coordinator.fill_sink(rig.stream_fill(D("0.004")))
+
+    await rig.coordinator.step()  # CLOSE_REQUIRED, the close is ACKed NEW and rests
+    protection = rig.coordinator.protection_of(PLAN_HASH)
+    assert protection is not None
+    assert protection.state is ProtectionState.CLOSE_FAILED
+    assert rig.coordinator.blocks_new_entries() is True
+    close_id = rig.fake.calls_to("place_market_close")[0]["kwargs"]["new_client_order_id"]
+
+    for _ in range(4):
+        await rig.coordinator.step()
+    assert len(rig.fake.calls_to("place_market_close")) == 1
+    assert rig.coordinator.blocks_new_entries() is True
+    assert rig.fake.positions[SYMBOL] == D("0.004")
+
+    rig.fake.fill(close_id, price=ENTRY_PRICE)
+    await rig.coordinator.step()
+    protection = rig.coordinator.protection_of(PLAN_HASH)
+    assert protection is not None
+    assert protection.state is ProtectionState.FLAT
+    assert len(rig.fake.calls_to("place_market_close")) == 1
+    assert rig.fake.positions[SYMBOL] == 0
 
 
 # --------------------------------------------------------------------------- #

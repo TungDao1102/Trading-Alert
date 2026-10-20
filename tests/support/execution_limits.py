@@ -27,6 +27,8 @@ TEST_ONLY_EXECUTION_LIMIT_VALUES: Mapping[str, int] = {
     "protection.entry_terminal_timeout_ms": 13333,
     # 19-REVIEW WR-05: a FAKE grace past the GTD time of an ENTRY_STATE_UNKNOWN entry.
     "protection.entry_unknown_grace_ms": 9191,
+    # 19-REVIEW WR-03: a FAKE poll deadline of a sent emergency close (never max_unprotected_ms).
+    "protection.emergency_close_poll_timeout_ms": 6161,
     "pre_placement.min_remaining_validity_seconds": 777,
     "pre_placement.max_mark_price_age_ms": 4321,
 }

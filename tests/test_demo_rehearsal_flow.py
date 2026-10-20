@@ -1596,6 +1596,7 @@ async def test_committed_not_configured_limits_abort_before_any_mutation() -> No
         "protection.max_unprotected_ms",
         "protection.entry_terminal_timeout_ms",
         "protection.entry_unknown_grace_ms",
+        "protection.emergency_close_poll_timeout_ms",
         "pre_placement.min_remaining_validity_seconds",
         "pre_placement.max_mark_price_age_ms",
     ):

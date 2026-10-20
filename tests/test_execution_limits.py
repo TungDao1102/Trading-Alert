@@ -1,8 +1,9 @@
 """The execution-limits file and its fail-closed loader (Phase 19, plan 19-01; D-07, D-13).
 
 The real repository file holds only NOT_CONFIGURED, so every field loads as None and the
-live-readiness check refuses naming every key (five since the owner's 19-REVIEW WR-05 decision
-added `protection.entry_unknown_grace_ms`). Values used in the positive cases are
+live-readiness check refuses naming every key (six since the owner's 19-REVIEW WR-05 and WR-03
+decisions added `protection.entry_unknown_grace_ms` and
+`protection.emergency_close_poll_timeout_ms`). Values used in the positive cases are
 TEST_ONLY values from `tests/support/execution_limits.py`, never ratified numbers.
 """
 
@@ -26,6 +27,7 @@ EXPECTED_UNSET = (
     "protection.max_unprotected_ms",
     "protection.entry_terminal_timeout_ms",
     "protection.entry_unknown_grace_ms",
+    "protection.emergency_close_poll_timeout_ms",
     "pre_placement.min_remaining_validity_seconds",
     "pre_placement.max_mark_price_age_ms",
 )
@@ -45,6 +47,7 @@ def test_the_real_file_loads_with_every_field_unset() -> None:
     assert limits.max_unprotected_ms is None
     assert limits.entry_terminal_timeout_ms is None
     assert limits.entry_unknown_grace_ms is None
+    assert limits.emergency_close_poll_timeout_ms is None
     assert limits.min_remaining_validity_seconds is None
     assert limits.max_mark_price_age_ms is None
     assert limits.unset_keys() == EXPECTED_UNSET
@@ -71,6 +74,7 @@ def test_a_fully_set_document_is_live_ready() -> None:
     assert limits.max_unprotected_ms == 10
     assert limits.entry_terminal_timeout_ms == 11
     assert limits.entry_unknown_grace_ms == 12
+    assert limits.emergency_close_poll_timeout_ms == 13
     assert limits.min_remaining_validity_seconds == 10
     assert limits.max_mark_price_age_ms == 11
     assert limits.unset_keys() == ()
@@ -271,6 +275,7 @@ def test_round_trip_of_an_all_unset_document(tmp_path: Path) -> None:
         max_unprotected_ms=None,
         entry_terminal_timeout_ms=None,
         entry_unknown_grace_ms=None,
+        emergency_close_poll_timeout_ms=None,
         min_remaining_validity_seconds=None,
         max_mark_price_age_ms=None,
     )
@@ -318,8 +323,9 @@ def test_the_readme_carries_no_value_and_states_the_rules() -> None:
 def test_the_committed_file_names_only_the_not_configured_word() -> None:
     text = LIMITS_FILE.read_text(encoding="utf-8")
     assert not re.search(r"^\s*[a-z_]+\s*=\s*[-+]?\d", text, flags=re.MULTILINE)
-    # Five keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth).
-    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 10
+    # Six keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth,
+    # WR-03 the sixth).
+    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 12
 
 
 def test_the_test_only_helper_rejects_an_unknown_field() -> None:
