@@ -36,12 +36,20 @@ TARGET_RELPATHS: tuple[str, ...] = (
     "src/adapters/binance_usdm.py",
     "src/ops/health.py",
     "src/execution/__init__.py",
+    "src/execution/binding.py",
+    "src/execution/emergency_close.py",
     "src/execution/enablement.py",
+    "src/execution/execution_limits.py",
     "src/execution/fill_monitor.py",
     "src/execution/gates.py",
+    "src/execution/live_context.py",
+    "src/execution/lot_split.py",
     "src/execution/manager.py",
     "src/execution/order_ids.py",
     "src/execution/placement.py",
+    "src/execution/pre_placement.py",
+    "src/execution/protection.py",
+    "src/execution/tp_sizing.py",
 )
 
 # Names that, if bound to a string literal in project code, mean a

@@ -330,13 +330,15 @@ REQUIREMENT_TESTS: dict[str, tuple[tuple[str, str], ...]] = {
     "EXEC-01": (
         ("tests/test_algo_status.py", "test_table_keys_equal_the_vocabulary"),
         ("tests/test_algo_status.py", "test_attach_behavior_unchanged_from_new_only_allow_list"),
+        # Rewritten by Phase 19 (plans 19-15 and 19-16): attach places no stop, and a rejected
+        # protective stop is decided by the coordinator (B5, close required).
         (
             "tests/test_execution_attach.py",
-            "test_unconfirmed_sl_leg_yields_entry_without_protective",
+            "test_absent_stop_holds_without_placing_a_stop_or_a_take_profit",
         ),
         (
             "tests/test_exchange_error_rejections.py",
-            "test_tracer_1106_on_the_protective_stop_is_entry_without_protective",
+            "test_tracer_1106_on_the_protective_stop_after_a_fill_goes_close_required",
         ),
         ("tests/test_binance_usdm_error_routing.py", "test_placement_calls_the_sdk_exactly_once"),
         (
