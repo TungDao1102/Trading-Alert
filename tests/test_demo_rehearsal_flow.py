@@ -13,7 +13,7 @@ import ast
 import inspect
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -1066,6 +1066,60 @@ def test_approval_timeout_and_send_failure_place_nothing(tmp_path: Path, failure
     assert data["outcome"] == "ABORTED_NO_ORDER"
     assert chan.results == [] or all(not r.ok for r in chan.results)
     assert FAKE_TOKEN not in json.dumps(data)
+
+
+def test_r3b_each_demo_approval_message_shows_the_quantity_stored_on_its_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    issued_all: list[dr.IssuedApproval] = []
+    original = dr.issue_approval
+
+    def recording(*args: Any, **kwargs: Any) -> dr.IssuedApproval:
+        issued = original(*args, **kwargs)
+        issued_all.append(issued)
+        return issued
+
+    monkeypatch.setattr(dr, "issue_approval", recording)
+    code, _data, _adapter, chan = run_flow(tmp_path, scenario="taps")
+    assert code == dr.EXIT_OK
+    assert len(chan.sent) >= 2
+    for message in chan.sent:
+        matching = [i for i in issued_all if i.signal_id == message.signal_id]
+        assert len(matching) == 1
+        stored = matching[0].approval.approved_quantity
+        assert stored is not None
+        lines = [x for x in message.text.split("\n") if x.startswith("Quantity: ")]
+        assert lines == ["Quantity: " + format(stored, "f")]
+
+
+def test_r3b_a_demo_approval_without_a_stored_quantity_is_never_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = dr.issue_approval
+
+    def without_quantity(*args: Any, **kwargs: Any) -> dr.IssuedApproval:
+        issued = original(*args, **kwargs)
+        return dr.IssuedApproval(
+            approval=replace(issued.approval, approved_quantity=None),
+            raw_token=issued.raw_token,
+            signal_id=issued.signal_id,
+        )
+
+    monkeypatch.setattr(dr, "issue_approval", without_quantity)
+    adapter = FakeDemoAdapter()
+    channel = FakeApprovalChannel(script=approve_script())
+    code, data, _, chan = run_flow(
+        tmp_path, scenario="far", adapter=adapter, channel=channel, execute=True
+    )
+    assert code == dr.EXIT_ABORTED
+    assert data["outcome"] == "ABORTED_NO_ORDER"
+    assert chan.sent == []
+    assert adapter.mutating_calls() == []
+    assert all(failure["step"] != "telegram_send" for failure in data["failures"])
+    assert any(
+        s["status"] == "FAILED" and s["detail"] == "approval carries no approved quantity"
+        for s in data["steps"]
+    )
 
 
 def test_skip_tap_records_skipped_and_places_nothing(tmp_path: Path) -> None:
