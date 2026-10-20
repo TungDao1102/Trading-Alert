@@ -574,3 +574,23 @@ def test_shadow_module_never_references_the_inert_simulate_keyboard() -> None:
 
     assert not {"build_simulate_keyboard", "send_simulate"} & (names | imported)
     assert "build_shadow_decision_keyboard" in imported
+
+
+# --------------------------------------------------------------------------- #
+# Review-fix batch 4 (19-REVIEW WR-01, D078): the approval rows carry the issued quantity.
+# --------------------------------------------------------------------------- #
+
+
+async def test_wr01_the_pending_approvals_carry_the_issued_plan_quantity() -> None:
+    h = Harness()
+    _, _, plan = await h.alert()
+    rows = list(h.stores.approvals.values())
+    assert {row.action for row in rows} == {ApprovalAction.APPROVE, ApprovalAction.SKIP_USER}
+    assert all(row.approved_quantity == plan.quantity_after_rounding for row in rows)
+    assert all(row.approved_quantity is not None for row in rows)
+
+    apr, _ = h.buttons()
+    result = h.press(apr, query="wr01-1")
+    assert result.approval is not None
+    assert result.approval.status == ApprovalResult.APPROVED
+    assert result.approval.approved_quantity == plan.quantity_after_rounding

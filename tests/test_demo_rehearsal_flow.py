@@ -1655,3 +1655,15 @@ def test_the_dry_run_far_scenario_reads_the_mark_price_and_still_sends_nothing(
     assert data["exchange_orders"] == []
     assert step(data, "execution_limits")["status"] == "PASSED"
     assert data["details"]["live_context"]["working_type"] == "MARK_PRICE"
+
+
+def test_wr01_issue_approval_stores_the_plan_quantity_on_both_roles() -> None:
+    """D078: every PENDING approval of the rehearsal carries the issued plan's quantity."""
+    from src.domain.enums import ApprovalAction
+
+    plan = _derive("far")
+    for role, action in (("approve", ApprovalAction.APPROVE), ("skip", ApprovalAction.SKIP_USER)):
+        ctx = make_ctx(FakeDemoAdapter(), FakeApprovalChannel())
+        issued = dr.issue_approval(ctx, plan, role=role, action=action)
+        assert issued.approval.approved_quantity == plan.trade_plan.quantity_after_rounding, role
+        assert issued.approval.approved_quantity is not None

@@ -662,3 +662,119 @@ def test_downgrade_0005_keeps_rows_and_removes_only_the_column(pg_empty_db: str)
         assert check == 0
     finally:
         engine.dispose()
+
+
+# --------------------------------------------------------------------------------------
+# Migration 0006: approved_quantity (Phase 19 review-fix batch 4, D078, 19-REVIEW WR-01)
+# --------------------------------------------------------------------------------------
+def test_migration_0006_imports_no_project_module() -> None:
+    assert forbidden_imports(MIGRATION_0006, ("src", "tests")) == []
+
+
+def test_approved_quantity_column_and_check_catalog(engine: Engine) -> None:
+    with engine.connect() as conn:
+        column = conn.execute(
+            text(
+                "SELECT data_type, numeric_precision, numeric_scale, is_nullable "
+                "FROM information_schema.columns WHERE table_schema = 'public' "
+                "AND table_name = 'approvals' AND column_name = 'approved_quantity'"
+            )
+        ).one()
+        definition = conn.execute(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_approvals_approved_quantity' AND contype = 'c'"
+            )
+        ).scalar_one()
+    assert tuple(column) == ("numeric", 38, 18, "YES")
+    assert _normalize(definition) == _normalize(
+        "CHECK (approved_quantity IS NULL OR approved_quantity > 0)"
+    )
+
+
+def test_approved_quantity_accepts_null_and_a_positive_value(engine: Engine) -> None:
+    insert_and_commit(
+        engine,
+        make_signal(1),
+        make_plan(1, 1),
+        make_approval(1, 1, 1),
+        make_approval(2, 1, 1, approved_quantity=Decimal("2.415")),
+    )
+    with engine.connect() as conn:
+        stored = conn.execute(
+            text("SELECT approval_id, approved_quantity FROM approvals ORDER BY approval_id")
+        ).all()
+    assert [row[1] for row in stored] == [None, Decimal("2.415")]
+
+
+@pytest.mark.parametrize("value", [Decimal("0"), Decimal("-1")])
+def test_approved_quantity_check_rejects_zero_and_negative(engine: Engine, value: Decimal) -> None:
+    insert_and_commit(engine, make_signal(1), make_plan(1, 1))
+    with pytest.raises(IntegrityError) as raised:
+        insert_and_commit(engine, make_approval(1, 1, 1, approved_quantity=value))
+    orig: Any = raised.value.orig
+    assert orig.sqlstate == _CHECK_VIOLATION
+    assert orig.diag.constraint_name == "ck_approvals_approved_quantity"
+
+
+def test_data_bearing_upgrade_0005_to_0006_keeps_every_row_with_null(pg_empty_db: str) -> None:
+    run_alembic(pg_empty_db, "upgrade", REVISION_0005)
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert "approved_quantity" not in _present_columns(engine)("approvals")
+        inserted = _reflected_inserts(
+            engine, [make_signal(1), make_plan(1, 1), make_approval(1, 1, 1)]
+        )
+        assert [t.name for t, _ in inserted] == ["signals", "trade_plans", "approvals"]
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "upgrade", "head")
+
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        _assert_rows_intact(engine, inserted)
+        with engine.connect() as conn:
+            figures = conn.execute(text("SELECT approved_quantity FROM approvals")).all()
+        assert [tuple(row) for row in figures] == [(None,)]
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_0006_keeps_rows_and_removes_only_the_column_and_the_check(
+    pg_empty_db: str,
+) -> None:
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        insert_and_commit(
+            engine,
+            make_signal(1),
+            make_plan(1, 1),
+            make_approval(1, 1, 1, approved_quantity=Decimal("2.415")),
+        )
+        before = _present_columns(engine)("approvals")
+        assert "approved_quantity" in before
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "downgrade", REVISION_0005)
+
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        after = _present_columns(engine)("approvals")
+        assert before - after == {"approved_quantity"}
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            approvals = conn.execute(text("SELECT count(*) FROM approvals")).scalar_one()
+            check = conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_constraint "
+                    "WHERE conname = 'ck_approvals_approved_quantity'"
+                )
+            ).scalar_one()
+        assert version == REVISION_0005
+        assert approvals == 1
+        assert check == 0
+    finally:
+        engine.dispose()

@@ -55,7 +55,12 @@ from src.domain.enums import (
 from src.execution.order_ids import derive_client_order_id
 from src.persistence.approvals import PgApprovalStore
 from src.persistence.engine import make_sync_engine
-from src.persistence.errors import ParentRowMissing, RowConflict, ShortIdRebindingRefused
+from src.persistence.errors import (
+    ParentRowMissing,
+    PrecisionError,
+    RowConflict,
+    ShortIdRebindingRefused,
+)
 from src.persistence.execution_state import PgExecutionStateStore
 from src.persistence.uow import OperationalDatabase
 
@@ -65,6 +70,7 @@ from tests.support.pg_rows import (
     expect_db_error,
     hexid,
     insert_and_commit,
+    make_approval,
     make_plan,
     make_signal,
 )
@@ -233,6 +239,95 @@ def test_insert_pending_without_parents_is_parent_row_missing(
 ) -> None:
     with pytest.raises(ParentRowMissing):
         store.insert_pending(_pending(1))
+
+
+# --------------------------------------------------------------------------- #
+# approved_quantity (19-REVIEW WR-01, D078).
+# --------------------------------------------------------------------------- #
+
+
+def _stored_quantity(engine: Engine, approval_id: str) -> Decimal | None:
+    with Session(engine) as session:
+        value = session.execute(
+            text("SELECT approved_quantity FROM approvals WHERE approval_id = :id"),
+            {"id": approval_id},
+        ).scalar_one()
+    return None if value is None else Decimal(value)
+
+
+def test_insert_pending_persists_the_approved_quantity(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    approval = _pending(1, approved_quantity=Decimal("2.415"))
+    store.insert_pending(approval)
+
+    by_token = store.lookup_by_token_hash(approval.approval_token_hash)
+    assert by_token is not None
+    assert by_token.approved_quantity == Decimal("2.415")
+    assert store.get(approval.approval_id) == approval
+    assert _stored_quantity(seeded, approval.approval_id) == Decimal("2.415")
+
+
+def test_insert_pending_replay_with_the_same_quantity_is_a_noop(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    approval = _pending(1, approved_quantity=Decimal("2.415"))
+    store.insert_pending(approval)
+    store.insert_pending(replace(approval, approved_quantity=Decimal("2.4150")))
+
+    assert _count(seeded, "approvals") == 1
+
+
+def test_insert_pending_replay_with_a_different_quantity_is_a_row_conflict(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    approval = _pending(1, approved_quantity=Decimal("2.415"))
+    store.insert_pending(approval)
+
+    with pytest.raises(RowConflict, match="approved_quantity"):
+        store.insert_pending(replace(approval, approved_quantity=Decimal("2.416")))
+    with pytest.raises(RowConflict, match="approved_quantity"):
+        store.insert_pending(replace(approval, approved_quantity=None))
+    assert _stored_quantity(seeded, approval.approval_id) == Decimal("2.415")
+
+
+def test_insert_pending_refuses_more_than_18_fractional_digits_and_never_rounds(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    too_precise = Decimal("1.0000000000000000019")  # 19 fractional digits
+    with pytest.raises(PrecisionError, match="approved_quantity"):
+        store.insert_pending(_pending(1, approved_quantity=too_precise))
+    assert _count(seeded, "approvals") == 0
+
+    exact = Decimal("1.000000000000000001")  # 18 fractional digits survive
+    store.insert_pending(_pending(1, approved_quantity=exact))
+    assert _stored_quantity(seeded, hexid(0x2001)) == exact
+
+
+def test_a_decision_write_never_changes_the_stored_quantity(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    approval = _pending(1, approved_quantity=Decimal("2.415"))
+    store.insert_pending(approval)
+    inflated = replace(_decided(approval, ApprovalResult.APPROVED), approved_quantity=Decimal("99"))
+
+    store.save_atomic(inflated, None)
+
+    assert _stored_quantity(seeded, approval.approval_id) == Decimal("2.415")
+    stored = store.get(approval.approval_id)
+    assert stored is not None
+    assert stored.status is ApprovalResult.APPROVED
+    assert stored.approved_quantity == Decimal("2.415")
+
+
+def test_a_row_written_without_a_quantity_reads_back_none(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    insert_and_commit(seeded, make_approval(1, 1, 1))
+
+    stored = store.get(hexid(0x2001))
+    assert stored is not None
+    assert stored.approved_quantity is None
 
 
 # --------------------------------------------------------------------------- #

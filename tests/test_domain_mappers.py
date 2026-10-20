@@ -969,3 +969,18 @@ def test_approval_consumption_fields_round_trip_unconsumed(sample_approval: Appr
     assert row.consumption_status == "UNCONSUMED"
     assert row.consumed_at_utc is None
     assert approval_from_row(row) == sample_approval
+
+
+def test_wr01_approval_round_trip_carries_the_approved_quantity(
+    sample_approval: Approval,
+) -> None:
+    """D078: the mapper carries approved_quantity both ways, for a value and for None."""
+    from dataclasses import replace
+    from decimal import Decimal
+
+    assert approval_from_row(approval_to_row(sample_approval)).approved_quantity is None
+
+    with_quantity = replace(sample_approval, approved_quantity=Decimal("2.415"))
+    row = approval_to_row(with_quantity)
+    assert row.approved_quantity == Decimal("2.415")
+    assert approval_from_row(row) == with_quantity

@@ -747,3 +747,25 @@ def test_journal_event_rejects_empty_correlation_or_entity_id() -> None:
     ok = _journal_kwargs()
     ok["payload_json"] = ""
     assert JournalEvent(**ok).payload_json == ""
+
+
+def test_wr01_approval_approved_quantity_is_none_or_a_finite_positive_decimal() -> None:
+    """D078: None (not recorded) and a positive Decimal construct; anything else is refused."""
+    from src.domain.approval import Approval
+
+    assert Approval(**_approval_kwargs()).approved_quantity is None
+    ok = Approval(**_approval_kwargs(), approved_quantity=Decimal("2.415"))
+    assert ok.approved_quantity == Decimal("2.415")
+
+    for bad in (
+        Decimal("0"),
+        Decimal("-1"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        0.5,
+        1,
+        "2.415",
+        True,
+    ):
+        with pytest.raises(ValueError):
+            Approval(**_approval_kwargs(), approved_quantity=bad)  # type: ignore[arg-type]
