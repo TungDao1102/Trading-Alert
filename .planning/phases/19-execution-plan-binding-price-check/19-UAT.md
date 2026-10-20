@@ -69,7 +69,7 @@ evidence: verify_decision_alignment.py all, glossary, reqs: ALL_PASS; tests/test
 expected: The owner's answer ("column-on-entry-intent" or "defer-d22") is recorded in 19-06-SUMMARY.
 result: blocked
 blocked_by: third-party
-reason: Owner decision (the owner is the blocker); the agent does not answer it. Check 19-06-SUMMARY for a recorded answer.
+reason: 19-06-SUMMARY records option column-on-entry-intent as "answered by the orchestrating session, 2026-10-19", not in the owner's own words. The owner should confirm it; the agent does not.
 
 ### 10. WR-06 last-price read
 expected: A last-price read behind the ExecutionAdapter Protocol, so criterion 2 "mark or last price" holds in full.
