@@ -464,7 +464,12 @@ class ShadowApprovalBook:
         self._last: DecisionRecord | None = None
 
     def issue(self, *, signal: Signal, plan: TradePlan, now_utc: datetime) -> IssuedApprovals:
-        """Build the PENDING APPROVE and SKIP approvals and the short-id mapping."""
+        """Build the PENDING APPROVE and SKIP approvals and the short-id mapping.
+
+        Both rows carry `approved_quantity` = the plan's `quantity_after_rounding` (D078,
+        19-REVIEW WR-01), the figure `render_confirm_card` shows. The SKIP row's value is
+        never read; the two rows of one request stay identical.
+        """
         approve_token = issue_one_time_token()
         skip_token = issue_one_time_token()
 
@@ -479,6 +484,7 @@ class ShadowApprovalBook:
                 approval_token_hash=token_hash_of(raw_token),
                 requested_at_utc=now_utc,
                 request_hash=plan.plan_hash,
+                approved_quantity=plan.quantity_after_rounding,
             )
 
         mapping = make_short_id_mapping(

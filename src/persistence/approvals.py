@@ -26,6 +26,12 @@ followed by a re-read that compares the stored `(signal_id, trade_plan_id)`. A s
 a different plan raises `ShortIdRebindingRefused`; inside `save_atomic` that rolls the decision
 back as a whole (migration 0003: re-plans fail closed instead of silently rebinding).
 
+`approved_quantity` (D078, 19-REVIEW WR-01) is part of the request identity and is written once
+with the PENDING row: `insert_pending` refuses a value with more than 18 fractional digits
+(`PrecisionError`, never rounded, because NUMERIC(38,18) would round it, possibly upward). A
+decision updates only `result`, `status` and `acted_at_utc`, so it never rewrites the stored
+quantity.
+
 This store never consumes an approval; consumption belongs to the execution-state transaction
 (`PgExecutionStateStore.consume_and_record_entry_intent`). The raw approval token is never
 stored, logged or put in an error message (only `approval_token_hash`; T-17-25). An unreachable
@@ -50,8 +56,14 @@ from src.db.mappers import (
 )
 from src.db.models import ApprovalRow, ShortIdMappingRow
 from src.domain.approval import Approval
+from src.domain.canonical import quantize_for_storage
 from src.domain.enums import ApprovalResult
-from src.persistence.errors import ParentRowMissing, RowConflict, ShortIdRebindingRefused
+from src.persistence.errors import (
+    ParentRowMissing,
+    PrecisionError,
+    RowConflict,
+    ShortIdRebindingRefused,
+)
 from src.persistence.uow import OperationalDatabase
 
 _SQLSTATE_FOREIGN_KEY_VIOLATION = "23503"
@@ -70,6 +82,7 @@ _IDENTITY_FIELDS: tuple[str, ...] = (
     "approval_token_hash",
     "requested_at_utc",
     "request_hash",
+    "approved_quantity",
 )
 
 
@@ -120,12 +133,17 @@ class PgApprovalStore:
 
         Raises:
             ValueError: the approval is not PENDING (decisions go through `save_atomic`).
+            PrecisionError: `approved_quantity` has more than 18 fractional digits (D078).
             RowConflict: the approval id exists with a different request, or the token hash is
                 already bound to a different approval.
             ParentRowMissing: the signal or trade plan row does not exist yet.
         """
         if approval.status != ApprovalResult.PENDING:
             raise ValueError("insert_pending requires a PENDING approval")
+        quantity = approval.approved_quantity
+        if quantity is not None and quantize_for_storage(quantity) != quantity:
+            # NUMERIC(38,18) would round it, possibly above the issued quantity: refuse (D078).
+            raise PrecisionError("approvals.approved_quantity: more than 18 fractional digits")
         values = _approval_values(approval)
         with self._db.transaction() as session:
             try:
