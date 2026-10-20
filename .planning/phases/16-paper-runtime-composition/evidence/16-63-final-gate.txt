@@ -1,0 +1,22 @@
+16-63 Task 7 final gate: full gate after the 2.3.0 rerun had ended, at HEAD f8453f9 (2026-10-20)
+The full suite ran as the only heavy process on the machine (the three rerun processes and the verification reruns had ended; the rerun worktree was removed before the gate).
+`git status --porcelain --untracked-files=no` before the run: only ` M .planning/config.json` (the owner's local GSD config, not part of this plan, never staged); untracked `.gsd/` and `.planning/milestone.lock` left alone.
+PostgreSQL: TEST_DATABASE_URL was set in the shell (postgresql+psycopg, host 127.0.0.1, port 5432, database trading_test). The server that answered is a native Windows PostgreSQL 17.11 service (`select version()`: "PostgreSQL 17.11 on x86_64-windows, compiled by msvc-19.44.3"), not the Docker container trading-postgres-1 of the earlier gates (Docker was not running). Before the run a PostgreSQL test (tests/test_paper_shadow_pg.py) passed 4 of 4 with none skipped; in the full run no test was skipped for PostgreSQL (skip list below).
+Suite start 2026-10-20T00:13:18Z, end 2026-10-20T00:42:15Z.
+
+exit=0 .venv/Scripts/python -m pytest -m "not docker" -q -rs -p no:cacheprovider
+  10394 passed, 19 skipped, 0 failed, 0 errors (progress-line count; pytest printed no totals line in this mode). Skips: symlinks unavailable (OSError) x1 (tests/test_analytics_files.py:974), NTFS cannot represent POSIX modes x1 (tests/test_bootstrap.py:947), file modes do not exist on Windows x4 (tests/test_deploy_heartbeat.py:401), required tool not found on PATH: shellcheck x12 (tests/infra_helpers.py:50), symlinks are not available on this platform x1 (tests/test_user_data_smoke_dry_run.py:383); none is a PostgreSQL test.
+exit=0 .venv/Scripts/python -m ruff check
+  All checks passed!
+exit=0 .venv/Scripts/python -m ruff format --check
+  631 files already formatted
+exit=0 .venv/Scripts/python -m mypy src
+  Success: no issues found in 202 source files
+exit=0 uv lock --check
+  Resolved 60 packages in 45ms
+exit=0 git diff --quiet 5f8269b HEAD -- params/ docs/research/experiments/research-run-1 docs/research/preregistration/research-run-1-manifest.json docs/research/preregistration/research-run-1-grid-trend-pullback.json docs/research/preregistration/research-run-1-grid-breakout-retest.json docs/research/preregistration/research-run-1-grid-range-mr.json docs/research/preregistration/research-run-1-authorization-trend-pullback.json docs/research/preregistration/research-run-1-authorization-breakout-retest.json docs/research/preregistration/research-run-1-authorization-range-mr.json
+  unchanged: params/, the 240 records of run 1, the frozen manifest, the three grids and the three five-key authorization files are byte-equal to 5f8269b
+exit=0 git diff --quiet dce3195 HEAD -- docs/research/preregistration/research-run-1-v2-2-0-authorization-trend-pullback.json docs/research/preregistration/research-run-1-v2-2-0-authorization-breakout-retest.json docs/research/preregistration/research-run-1-v2-2-0-authorization-range-mr.json
+  unchanged: the three 2.2.0 authorization files are byte-equal to dce3195
+exit=0 git diff --quiet f5ee61a HEAD -- docs/research/preregistration/research-run-1-v2-3-0-authorization-trend-pullback.json docs/research/preregistration/research-run-1-v2-3-0-authorization-breakout-retest.json docs/research/preregistration/research-run-1-v2-3-0-authorization-range-mr.json docs/research/holdout_consumed.json
+  unchanged (extra check, not required by the plan): the three owner-signed 2.3.0 authorization files and the Holdout marker are byte-equal to f5ee61a (marker entries empty, protocol_version v2.6.0)
