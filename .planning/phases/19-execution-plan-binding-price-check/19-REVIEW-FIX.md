@@ -312,12 +312,13 @@ are superseded by this section. WR-01, WR-03, WR-04, WR-07 and IN-01..IN-06 stay
 
 | Finding | Status | Commit |
 |---|---|---|
-| WR-06 | fixed for the MARK price; the LAST price is NOT done (recorded as open work) | `ddea17e4` |
+| WR-06 | fixed for the MARK price; the LAST price was recorded as open work here and was built later by quick task 261020-l4p (see the follow-up below) | `ddea17e4` |
 | WR-05 | fixed: requires human verification (protection safety logic) | `2e5812e1` |
 
 ### WR-06: MARK_PRICE_OUTSIDE_ZONE refused the resting-limit case
 
-**Status:** mark done, last price NOT done.
+**Status:** mark done in this batch; the last price was not done here and was built later by
+quick task 261020-l4p (follow-up below).
 **Owner decision:** D-05 "left the entry zone" means the ADVERSE side only.
 **Files modified:** `src/execution/pre_placement.py`, `tests/test_pre_placement.py`,
 `tests/test_execution_manager.py`, `tests/test_demo_rehearsal_flow.py`,
@@ -339,6 +340,21 @@ meaning), `19-OWNER-GAPS.md` (new row WR-06).
   2. a last-price input to `check_mark_price` and `PrePlacementInputs`, with age and fail-closed
      rules;
   3. gate 5e wiring and tests.
+- **Follow-up, quick task 261020-l4p (2026-10-20): the last price is built.** All three parts:
+  1. `BinancePublicMarketData.last_price` / `BinanceUsdmAdapter.get_last_price` read
+     `GET /fapi/v1/ticker/price` (SDK `symbol_price_ticker`, one symbol) through the shared REST
+     gate, validated like the mark read; `ExecutionAdapter.get_last_price`, the fake exchange,
+     the manager test fake and the Demo rehearsal `GuardedAdapter` (a read, allowed in DRY_RUN)
+     have it too.
+  2. A separate `check_last_price` (not an extra input of `check_mark_price`, which is
+     unchanged) with the codes `LAST_PRICE_UNAVAILABLE`, `LAST_PRICE_CROSSED_STOP` and
+     `LAST_PRICE_OUTSIDE_ZONE`, the same adverse-side zone rule and crossed-stop rule, its own
+     age bound (the new `NOT_CONFIGURED` key `pre_placement.max_last_price_age_ms`) and its own
+     check instant; a zero, negative or non-finite last price refuses as unavailable.
+  3. Gate 5e reads the last price after the mark price and checks it after the mark check,
+     before the position-mode read; a refusal never consumes the approval.
+  The module docstring (Q2), the `check_mark_price` docstring and the `19-OWNER-GAPS.md` rows
+  WR-06 and O-04 were updated. Not observed on Demo; the response shape comes from the SDK model.
 
 **Existing tests changed, and why:**
 - `tests/test_pre_placement.py::test_check_mark_price_position`:
@@ -530,7 +546,7 @@ The WR-06 commit was checked on its own before WR-05 began. These all passed on 
 **Not run or not verified:**
 - The full suite (`-m "not docker"`) and the `-m docker` suite.
 - Any `--execute`, the Demo, or the network.
-- The last-price check, which is not built.
+- The last-price check, which was not built in this batch (built later by quick task 261020-l4p).
 - The low-frequency poll and the grace logic, beyond the fake exchange and virtual time. No real
   step loop exists yet (Phase 24).
 
