@@ -18,7 +18,7 @@ with no API key and no API secret. Nothing here reads the process environment. T
 endpoints are unsigned, so a signed request cannot originate from this class.
 
 Optional REST rate-limit gate (plan 18-10): `BinancePublicMarketData(..., rest_gate=gate)`
-runs `gate.check()` before each of its seven delegated REST calls (so a 418 ban or a 429
+runs `gate.check()` before each of its delegated REST calls (so a 418 ban or a 429
 pause of the process refuses them without sending) and records a 418 or 429 it meets in the
 gate, then re-raises the original exception; nothing is retried. `BinanceUsdmAdapter` passes
 its own gate, so its public delegations, including `server_time` (the drift guard's time
@@ -145,6 +145,20 @@ class MarkPriceReading:
 
     symbol: str
     mark_price: Decimal
+    exchange_time_utc: datetime
+
+
+@dataclass(frozen=True)
+class LastPriceReading:
+    """The latest traded price of one symbol (`GET /fapi/v1/ticker/price`, quick task 261020-l4p).
+
+    "Symbol Price Ticker" answers `{symbol, price, time}` for one symbol. `last_price` is its
+    `price` field and `exchange_time_utc` its `time` field (Binance's clock, the time of the last
+    trade). The adapter takes no clock: the caller measures the age with its own injected clock.
+    """
+
+    symbol: str
+    last_price: Decimal
     exchange_time_utc: datetime
 
 
@@ -505,6 +519,51 @@ class BinancePublicMarketData:
         seconds, millis = divmod(time_ms, 1000)
         observed = datetime.fromtimestamp(seconds, tz=UTC) + timedelta(milliseconds=millis)
         return MarkPriceReading(symbol=symbol, mark_price=price, exchange_time_utc=observed)
+
+    # ----- live last price (quick task 261020-l4p) -------------------------- #
+
+    async def last_price(self, symbol: str) -> LastPriceReading:
+        """The latest traded price of one symbol (`GET /fapi/v1/ticker/price`, weight 1).
+
+        The SDK method is `symbol_price_ticker` (Symbol Price Ticker); it is always called WITH
+        the symbol, so the answer is one `{symbol, price, time}` object, never the all-symbols
+        list. Flag-never-fabricate, like `mark_price`: an empty response, a list, a missing or
+        non-finite or non-positive `price`, a missing `time` or another symbol raises
+        `ValueError`. No retry, no fallback value (the mark price is never substituted); an SDK
+        exception propagates unchanged. Messages name the field and the symbol only.
+        """
+        response = await _gated_rest_call(
+            self._rest_gate, CallKind.QUERY, self._sdk.rest_api.symbol_price_ticker, symbol=symbol
+        )
+        wrapper = response.data()
+        if wrapper is None:
+            raise ValueError(f"ticker/price response empty for {symbol}: refusing to fabricate")
+        raw = getattr(wrapper, "actual_instance", None)
+        if raw is None or isinstance(raw, list):
+            raise ValueError(
+                f"ticker/price response for {symbol} is not a single-symbol answer: "
+                "refusing to fabricate a last price"
+            )
+        if raw.symbol is None or raw.symbol != symbol:
+            raise ValueError(
+                f"ticker/price response symbol does not match requested {symbol}: "
+                "refusing to use another symbol's last price"
+            )
+        text = raw.price
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"ticker/price price missing for {symbol}")
+        try:
+            price = Decimal(text)
+        except InvalidOperation:
+            raise ValueError(f"ticker/price price is not a decimal for {symbol}") from None
+        if not price.is_finite() or price <= 0:
+            raise ValueError(f"ticker/price price is not a positive finite price for {symbol}")
+        time_ms = raw.time
+        if isinstance(time_ms, bool) or not isinstance(time_ms, int):
+            raise ValueError(f"ticker/price time missing for {symbol}")
+        seconds, millis = divmod(time_ms, 1000)
+        observed = datetime.fromtimestamp(seconds, tz=UTC) + timedelta(milliseconds=millis)
+        return LastPriceReading(symbol=symbol, last_price=price, exchange_time_utc=observed)
 
     # ----- open interest --------------------------------------------------- #
 

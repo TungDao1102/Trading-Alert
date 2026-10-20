@@ -97,6 +97,7 @@ from src.adapters.binance_public import (
 )
 from src.adapters.binance_public import FundingTick as FundingTick
 from src.adapters.binance_public import Kline as Kline
+from src.adapters.binance_public import LastPriceReading as LastPriceReading
 from src.adapters.binance_public import MarkKline as MarkKline
 from src.adapters.binance_public import MarkPriceReading as MarkPriceReading
 from src.adapters.binance_public import OiSnapshot as OiSnapshot
@@ -807,6 +808,16 @@ class BinanceUsdmAdapter:
         with its injected clock, read after this call (19-REVIEW CR-01).
         """
         return await self._public.mark_price(symbol)
+
+    # ----- live last price (quick task 261020-l4p, 19-REVIEW WR-06 work item) - #
+
+    async def get_last_price(self, *, symbol: str) -> LastPriceReading:
+        """The latest traded price of `symbol`; delegates to the public reader (shared REST gate).
+
+        `GET /fapi/v1/ticker/price` for one symbol. Like `get_mark_price` the adapter takes no
+        clock: the execution manager measures the age with its injected clock after the reads.
+        """
+        return await self._public.last_price(symbol)
 
     # ----- exchange info --------------------------------------------------- #
 

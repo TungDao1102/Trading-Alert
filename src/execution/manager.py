@@ -149,7 +149,8 @@ class ExecutionAdapter(Protocol):
     imports the Binance SDK — only the adapter does. Phase 19 (plan 19-13) adds the
     pre-placement reads: the live mark price, the open normal and algo orders and (19-REVIEW
     WR-02) the open positions of the symbol; plan 19-15 adds `error_facts`, the SDK-free route to
-    the exchange error taxonomy.
+    the exchange error taxonomy; quick task 261020-l4p adds `get_last_price` (the last traded
+    price, ROADMAP Phase 19 criterion 2).
     """
 
     async def place_entry(self, **kwargs: Any) -> Any: ...
@@ -167,6 +168,8 @@ class ExecutionAdapter(Protocol):
     async def cancel_algo_order(self, *, symbol: str, client_algo_id: str) -> Any: ...
 
     async def get_mark_price(self, *, symbol: str) -> Any: ...
+
+    async def get_last_price(self, *, symbol: str) -> Any: ...
 
     async def snapshot_open_normal_orders(self, *, symbol: str | None = None) -> Any: ...
 
@@ -499,7 +502,7 @@ async def execute_approved_plan(
          evaluated on the risk verdict's own `sized` (WR-05).
       Phase 19 pre-placement gates, all BEFORE the approval is consumed (a refusal leaves no
       ENTRY intent row, so a later call with corrected inputs can still place). The pure
-      refusals come first (no adapter call), then the four reads, then the position mode:
+      refusals come first (no adapter call), then the five reads, then the position mode:
       5b. Quantity bound (D-02, RISK-04): the sized quantity may not exceed the approved
           quantity stored on the approval row (D078); it is refused as
           QUANTITY_ABOVE_APPROVED, never clipped.
@@ -508,11 +511,12 @@ async def execute_approved_plan(
       5d. TP1 sizeable at the sized quantity (O-03 auto default, backtest D-27): the frozen
           protective sizing must accept it, else NO_TRADE with its MIN_QTY_REJECT or
           NOTIONAL_REJECT; there is no single-take-profit fallback.
-      5e. Live reads (mark price, open normal orders, open algo orders and open positions of
-          the symbol, 19-REVIEW WR-02; a failed read is "not available"), then the injected
-          clock (19-REVIEW CR-01), and `evaluate_pre_placement`: plan status, invalidation,
-          remaining validity, same-symbol and account-wide unprotected checks, mark price
-          (D-05, D-06, D-08, D-09, D-11).
+      5e. Live reads (mark price, last price (quick task 261020-l4p), open normal orders,
+          open algo orders and open positions of the symbol, 19-REVIEW WR-02; a failed read is
+          "not available"), then the injected clock (19-REVIEW CR-01), and
+          `evaluate_pre_placement`: plan status, invalidation, remaining validity, same-symbol
+          and account-wide unprotected checks, mark price, last price (D-05, D-06, D-08, D-09,
+          D-11).
       5f. Position mode (D-02, D-14): an unreadable mode is UNCERTAIN_ACCOUNT_STATE and a
           Hedge account is HEDGE_MODE_UNSUPPORTED, both before anything is consumed.
       7. Consume the approval (ENTRY intent), then place the GTD LIMIT entry and hand it to the
@@ -870,10 +874,13 @@ async def execute_approved_plan(
     if tp_sizing.is_no_trade:
         return ExecutionOutcome(is_no_trade=True, reason_code=tp_sizing.reason_code)
 
-    # Gate 5e (D-05, D-06, D-08, D-09, D-11, RISK-04): the four live reads, then the pure
+    # Gate 5e (D-05, D-06, D-08, D-09, D-11, RISK-04): the five live reads, then the pure
     # pre-placement evaluation. A read that fails is "not available" and refuses (fail
     # closed); nothing here consumes the approval.
     mark_reading = await _read_or_none(lambda: adapter.get_mark_price(symbol=bound.symbol))
+    # Quick task 261020-l4p (ROADMAP Phase 19 criterion 2, the WR-06 work item): the last
+    # traded price is read right after the mark price and checked right after it.
+    last_reading = await _read_or_none(lambda: adapter.get_last_price(symbol=bound.symbol))
     normal_orders = await _read_or_none(
         lambda: adapter.snapshot_open_normal_orders(symbol=bound.symbol)
     )
@@ -890,7 +897,7 @@ async def execute_approved_plan(
         any_unprotected = True
     # 19-REVIEW CR-01: the mark age is measured at an instant read from the injected clock
     # AFTER the live reads, never against `now_utc` (taken before them). An unreadable clock is
-    # "not available" and refuses.
+    # "not available" and refuses. The same single reading measures the last-price age.
     mark_checked_at_utc = _clock_or_none(live_context.clock)
     pre_placement_reason = evaluate_pre_placement(
         PrePlacementInputs(
@@ -917,6 +924,10 @@ async def execute_approved_plan(
             mark_time_utc=_mark_time_of(mark_reading),
             mark_checked_at_utc=mark_checked_at_utc,
             max_mark_price_age_ms=live_context.execution_limits.max_mark_price_age_ms,
+            last_price=_last_price_of(last_reading, bound.symbol),
+            last_time_utc=_last_time_of(last_reading, bound.symbol),
+            last_checked_at_utc=mark_checked_at_utc,
+            max_last_price_age_ms=live_context.execution_limits.max_last_price_age_ms,
             sl_trigger_price=sl_trigger_price,
             entry_min_price=trade_plan.entry_min_price,
             entry_max_price=trade_plan.entry_max_price,
@@ -1253,6 +1264,30 @@ def _mark_time_of(reading: Any) -> datetime | None:
     if reading is None:
         return None
     return _utc_or_none(_get_attr_or_key(reading, "exchange_time_utc"))
+
+
+def _last_reading_for(reading: Any, symbol: str) -> Any:
+    """The last-price reading when it names `symbol`, else `None` (another symbol is unusable)."""
+    if reading is None or _get_attr_or_key(reading, "symbol") != symbol:
+        return None
+    return reading
+
+
+def _last_price_of(reading: Any, symbol: str) -> Decimal | None:
+    """The last price of an adapter reading for `symbol`; anything unusable is `None`."""
+    usable = _last_reading_for(reading, symbol)
+    price = _get_attr_or_key(usable, "last_price") if usable is not None else None
+    if not isinstance(price, Decimal) or not price.is_finite() or price <= Decimal("0"):
+        return None
+    return price
+
+
+def _last_time_of(reading: Any, symbol: str) -> datetime | None:
+    """The exchange time of a last-price reading for `symbol` as UTC, or `None`."""
+    usable = _last_reading_for(reading, symbol)
+    if usable is None:
+        return None
+    return _utc_or_none(_get_attr_or_key(usable, "exchange_time_utc"))
 
 
 def _open_order_symbols(symbol: str, row_sets: tuple[Any, ...]) -> frozenset[str] | None:

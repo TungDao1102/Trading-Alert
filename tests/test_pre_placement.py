@@ -11,6 +11,10 @@ Hand oracles (tick 0.10, LONG zone 99.50-100.60, stop 98.00; SHORT zone 99.50-10
     (negative age) and an unset bound refuse as MARK_PRICE_UNAVAILABLE.
     19-REVIEW CR-01: the age is taken at `mark_checked_at_utc` (a clock read AFTER the mark read),
     not at `now_utc`; a reading stamped up to `gtd_clock_margin` ahead of it is age zero.
+    Quick task 261020-l4p (WR-06 work item): the LAST price gets the same zone (adverse side
+    only) and crossed-stop oracles with its own codes (LAST_PRICE_*), its own age bound
+    (`max_last_price_age_ms`) and its own check instant (`last_checked_at_utc`); it runs after
+    the mark-price check.
 """
 
 from __future__ import annotations
@@ -25,7 +29,12 @@ from typing import Any
 import pytest
 import src.execution.pre_placement as pp
 from src.domain.enums import TradePlanStatus
-from src.execution.pre_placement import PrePlacementInputs, check_mark_price, evaluate_pre_placement
+from src.execution.pre_placement import (
+    PrePlacementInputs,
+    check_last_price,
+    check_mark_price,
+    evaluate_pre_placement,
+)
 
 from tests.backtest_plan_helpers import make_trade_plan
 from tests.support.ast_guards import (
@@ -39,6 +48,9 @@ NOW = datetime(2026, 1, 5, 10, 0, 0, tzinfo=UTC)
 EXPIRY = NOW + timedelta(hours=2)
 SYMBOL = "BTCUSDT"
 MAX_AGE_MS = 5000
+# The last price has its OWN age bound (quick task 261020-l4p); a different value than the mark
+# bound proves the two are never mixed up.
+LAST_MAX_AGE_MS = 3000
 
 
 def D(text: str) -> Decimal:  # noqa: N802 - terse fixture helper
@@ -90,12 +102,33 @@ def _inputs(side: str = "LONG", **over: Any) -> PrePlacementInputs:
         "mark_time_utc": NOW - timedelta(milliseconds=1000),
         "mark_checked_at_utc": NOW,
         "max_mark_price_age_ms": MAX_AGE_MS,
+        "last_price": D("100.00"),
+        "last_time_utc": NOW - timedelta(milliseconds=1000),
+        "last_checked_at_utc": NOW,
+        "max_last_price_age_ms": LAST_MAX_AGE_MS,
         "sl_trigger_price": D(stop),
         "entry_min_price": D("99.50"),
         "entry_max_price": D("100.60"),
     }
     base.update(over)
     return PrePlacementInputs(**base)
+
+
+def _last_kwargs(side: str, **over: Any) -> dict[str, Any]:
+    stop = "98.00" if side == "LONG" else "102.00"
+    base: dict[str, Any] = {
+        "side": side,
+        "last_price": D("100.00"),
+        "last_time_utc": NOW - timedelta(milliseconds=1000),
+        "now_utc": NOW,
+        "max_last_price_age_ms": LAST_MAX_AGE_MS,
+        "max_clock_skew": timedelta(0),
+        "sl_trigger_price": D(stop),
+        "entry_min_price": D("99.50"),
+        "entry_max_price": D("100.60"),
+    }
+    base.update(over)
+    return base
 
 
 # --------------------------------------------------------------------------- #
@@ -295,6 +328,167 @@ def test_evaluate_refuses_a_crossed_mark_price() -> None:
     assert evaluate_pre_placement(_inputs("LONG", max_mark_price_age_ms=None)) == (
         pp.MARK_PRICE_UNAVAILABLE
     )
+
+
+# --------------------------------------------------------------------------- #
+# check_last_price (quick task 261020-l4p, ROADMAP Phase 19 criterion 2, WR-06 work item)
+# --------------------------------------------------------------------------- #
+
+
+def test_last_price_codes_are_distinct_plain_strings() -> None:
+    codes = (pp.LAST_PRICE_UNAVAILABLE, pp.LAST_PRICE_CROSSED_STOP, pp.LAST_PRICE_OUTSIDE_ZONE)
+    assert codes == ("LAST_PRICE_UNAVAILABLE", "LAST_PRICE_CROSSED_STOP", "LAST_PRICE_OUTSIDE_ZONE")
+    mark_codes = {pp.MARK_PRICE_UNAVAILABLE, pp.MARK_PRICE_CROSSED_STOP, pp.MARK_PRICE_OUTSIDE_ZONE}
+    assert set(codes).isdisjoint(mark_codes)
+
+
+@pytest.mark.parametrize(
+    ("side", "last", "expected"),
+    [
+        ("LONG", "100.00", None),
+        ("LONG", "99.50", None),  # exact lower edge (the adverse boundary) passes
+        ("LONG", "100.60", None),  # inclusive upper edge
+        ("LONG", "98.00", pp.LAST_PRICE_CROSSED_STOP),  # AT the stop
+        ("LONG", "97.50", pp.LAST_PRICE_CROSSED_STOP),
+        ("LONG", "98.10", pp.LAST_PRICE_OUTSIDE_ZONE),  # above stop, below zone (adverse)
+        ("LONG", "99.49", pp.LAST_PRICE_OUTSIDE_ZONE),  # strictly below entry_min (adverse)
+        ("LONG", "99.40", pp.LAST_PRICE_OUTSIDE_ZONE),  # one tick below entry_min (adverse)
+        ("LONG", "100.70", None),  # favorable side: the GTD LIMIT rests (WR-06 rule)
+        ("LONG", "150.00", None),
+        ("SHORT", "100.00", None),
+        ("SHORT", "99.50", None),  # inclusive lower edge
+        ("SHORT", "100.60", None),  # exact upper edge (the adverse boundary) passes
+        ("SHORT", "102.00", pp.LAST_PRICE_CROSSED_STOP),
+        ("SHORT", "103.00", pp.LAST_PRICE_CROSSED_STOP),
+        ("SHORT", "101.90", pp.LAST_PRICE_OUTSIDE_ZONE),  # below stop, above zone (adverse)
+        ("SHORT", "100.61", pp.LAST_PRICE_OUTSIDE_ZONE),  # strictly above entry_max (adverse)
+        ("SHORT", "100.70", pp.LAST_PRICE_OUTSIDE_ZONE),
+        ("SHORT", "99.40", None),  # favorable side
+        ("SHORT", "50.00", None),
+    ],
+)
+def test_check_last_price_position(side: str, last: str, expected: str | None) -> None:
+    """Same adverse-side-only zone rule and same stop convention as the mark price (WR-06)."""
+    assert check_last_price(**_last_kwargs(side, last_price=D(last))) == expected
+
+
+@pytest.mark.parametrize("side", ["LONG", "SHORT"])
+def test_check_last_price_uses_its_own_age_bound(side: str) -> None:
+    at_bound = NOW - timedelta(milliseconds=LAST_MAX_AGE_MS)
+    assert check_last_price(**_last_kwargs(side, last_time_utc=at_bound)) is None
+    too_old = NOW - timedelta(milliseconds=LAST_MAX_AGE_MS + 1)
+    assert check_last_price(**_last_kwargs(side, last_time_utc=too_old)) == (
+        pp.LAST_PRICE_UNAVAILABLE
+    )
+    # Fresh for the (larger) mark bound but stale for the last-price bound: refused.
+    between = NOW - timedelta(milliseconds=(LAST_MAX_AGE_MS + MAX_AGE_MS) // 2)
+    assert check_last_price(**_last_kwargs(side, last_time_utc=between)) == (
+        pp.LAST_PRICE_UNAVAILABLE
+    )
+    future = NOW + timedelta(milliseconds=1)
+    assert check_last_price(**_last_kwargs(side, last_time_utc=future)) == (
+        pp.LAST_PRICE_UNAVAILABLE
+    )
+    assert check_last_price(**_last_kwargs(side, last_time_utc=NOW)) is None
+
+
+@pytest.mark.parametrize("side", ["LONG", "SHORT"])
+@pytest.mark.parametrize(
+    "missing", ["last_price", "last_time_utc", "now_utc", "max_last_price_age_ms"]
+)
+def test_check_last_price_missing_input_is_unavailable(side: str, missing: str) -> None:
+    assert check_last_price(**_last_kwargs(side, **{missing: None})) == pp.LAST_PRICE_UNAVAILABLE
+
+
+@pytest.mark.parametrize("side", ["LONG", "SHORT"])
+@pytest.mark.parametrize("bad", ["0", "-1.5", "NaN", "Infinity", "-Infinity"])
+def test_check_last_price_non_positive_or_non_finite_is_unavailable(side: str, bad: str) -> None:
+    """Never fabricate: a zero, negative or non-finite last price is unusable, not "crossed"."""
+    assert check_last_price(**_last_kwargs(side, last_price=D(bad))) == pp.LAST_PRICE_UNAVAILABLE
+
+
+def test_check_last_price_unavailable_beats_crossed_and_crossed_beats_outside() -> None:
+    stale_and_crossed = _last_kwargs(
+        "LONG", last_price=D("97.00"), last_time_utc=NOW - timedelta(seconds=60)
+    )
+    assert check_last_price(**stale_and_crossed) == pp.LAST_PRICE_UNAVAILABLE
+    assert check_last_price(**_last_kwargs("LONG", last_price=D("97.00"))) == (
+        pp.LAST_PRICE_CROSSED_STOP
+    )
+
+
+def test_check_last_price_rejects_bad_side_naive_time_and_bad_skew() -> None:
+    with pytest.raises(ValueError, match="side"):
+        check_last_price(**_last_kwargs("BUY"))
+    with pytest.raises(ValueError, match="UTC"):
+        check_last_price(**_last_kwargs("LONG", last_time_utc=datetime(2026, 1, 5, 9, 59, 59)))
+    with pytest.raises(ValueError, match="UTC"):
+        check_last_price(**_last_kwargs("LONG", now_utc=datetime(2026, 1, 5, 10, 0, 0)))
+    with pytest.raises(ValueError, match="max_clock_skew"):
+        check_last_price(**_last_kwargs("LONG", max_clock_skew=timedelta(milliseconds=-1)))
+
+
+@pytest.mark.parametrize("side", ["LONG", "SHORT"])
+def test_check_last_price_tolerates_only_the_bounded_clock_skew(side: str) -> None:
+    skew = timedelta(milliseconds=876)
+    within = _last_kwargs(side, last_time_utc=NOW + skew, max_clock_skew=skew)
+    assert check_last_price(**within) is None
+    beyond = _last_kwargs(
+        side, last_time_utc=NOW + skew + timedelta(milliseconds=1), max_clock_skew=skew
+    )
+    assert check_last_price(**beyond) == pp.LAST_PRICE_UNAVAILABLE
+
+
+def test_evaluate_runs_the_last_price_check_after_the_mark_price_check() -> None:
+    # A valid mark with a bad last price: the last-price code.
+    assert evaluate_pre_placement(_inputs("LONG", last_price=D("98.00"))) == (
+        pp.LAST_PRICE_CROSSED_STOP
+    )
+    assert evaluate_pre_placement(_inputs("SHORT", last_price=D("100.70"))) == (
+        pp.LAST_PRICE_OUTSIDE_ZONE
+    )
+    assert evaluate_pre_placement(_inputs("LONG", last_price=None)) == pp.LAST_PRICE_UNAVAILABLE
+    assert evaluate_pre_placement(_inputs("LONG", max_last_price_age_ms=None)) == (
+        pp.LAST_PRICE_UNAVAILABLE
+    )
+    # Both bad: the mark price is reported first.
+    assert evaluate_pre_placement(
+        _inputs("LONG", mark_price=D("99.40"), last_price=D("98.00"))
+    ) == (pp.MARK_PRICE_OUTSIDE_ZONE)
+    # The favorable side of the zone passes for the last price too.
+    assert evaluate_pre_placement(_inputs("LONG", last_price=D("100.70"))) is None
+
+
+def test_evaluate_last_age_is_measured_at_its_own_check_instant() -> None:
+    stale_at_check = _inputs(
+        last_time_utc=NOW,
+        last_checked_at_utc=NOW + timedelta(milliseconds=LAST_MAX_AGE_MS + 1),
+    )
+    assert evaluate_pre_placement(stale_at_check) == pp.LAST_PRICE_UNAVAILABLE
+    assert evaluate_pre_placement(_inputs(last_checked_at_utc=None)) == pp.LAST_PRICE_UNAVAILABLE
+    fresh_after_now = _inputs(
+        gtd_clock_margin=timedelta(0),
+        last_time_utc=NOW + timedelta(milliseconds=300),
+        last_checked_at_utc=NOW + timedelta(milliseconds=500),
+    )
+    assert evaluate_pre_placement(fresh_after_now) is None
+    future = _inputs(
+        gtd_clock_margin=timedelta(seconds=5),
+        last_time_utc=NOW + timedelta(seconds=5, milliseconds=1),
+        last_checked_at_utc=NOW,
+    )
+    assert evaluate_pre_placement(future) == pp.LAST_PRICE_UNAVAILABLE
+
+
+def test_inputs_validate_the_last_price_fields() -> None:
+    with pytest.raises(TypeError, match="last_price"):
+        _inputs(last_price=100.0)
+    with pytest.raises(ValueError, match="UTC"):
+        _inputs(last_time_utc=datetime(2026, 1, 5, 9, 59, 59))
+    with pytest.raises(ValueError, match="UTC"):
+        _inputs(last_checked_at_utc=datetime(2026, 1, 5, 10, 0, 0))
+    with pytest.raises(TypeError, match="max_last_price_age_ms"):
+        _inputs(max_last_price_age_ms=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -601,6 +795,7 @@ _FAILING_CASES: list[tuple[str, dict[str, Any]]] = [
     (pp.VALIDITY_TOO_SHORT, {"expiry_utc": NOW + timedelta(seconds=30)}),
     (pp.SYMBOL_HAS_POSITION, {"position_symbols": frozenset({SYMBOL})}),
     (pp.MARK_PRICE_CROSSED_STOP, {"mark_price": D("98.00")}),
+    (pp.LAST_PRICE_CROSSED_STOP, {"last_price": D("98.00")}),
 ]
 
 

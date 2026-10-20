@@ -116,10 +116,30 @@ def _mark_reading_for(case_input: dict[str, Any], **overrides: Any) -> Any:
     return MarkPriceReading(**values)
 
 
+def _last_reading_for(case_input: dict[str, Any], **overrides: Any) -> Any:
+    """The `LastPriceReading` the fake answers (quick task 261020-l4p).
+
+    The golden fixture carries one live price, so the default last price equals the fixture
+    mark price, stamped at the same exchange time (inside the zone, fresh at the post-read
+    clock). Tests that need a different last price override it here.
+    """
+    from src.adapters.binance_public import LastPriceReading
+
+    live = case_input["live"]
+    values: dict[str, Any] = {
+        "symbol": case_input["symbol"],
+        "last_price": _coerce_decimal(live["mark_price"], "mark_price"),
+        "exchange_time_utc": _mark_time_for(case_input),
+    }
+    values.update(overrides)
+    return LastPriceReading(**values)
+
+
 # The reads that precede the position-mode read and the placement (plan 19-13, gate 5e; the
-# live position read is 19-REVIEW WR-02).
+# live position read is 19-REVIEW WR-02; the last price is quick task 261020-l4p).
 PRE_PLACEMENT_READS = [
     "get_mark_price",
+    "get_last_price",
     "snapshot_open_normal_orders",
     "snapshot_open_algo_orders",
     "snapshot_positions",
@@ -151,6 +171,9 @@ class FakeExecutionAdapter:
         case = case_input if case_input is not None else _load_input()
         self.mark_reading: Any = _mark_reading_for(case)
         self.mark_exception: BaseException | None = None
+        # Quick task 261020-l4p: a fresh last price inside the zone by default.
+        self.last_reading: Any = _last_reading_for(case)
+        self.last_exception: BaseException | None = None
         self.open_normal_orders: list[Any] = []
         self.open_algo_orders: list[Any] = []
         self.normal_orders_exception: BaseException | None = None
@@ -197,6 +220,13 @@ class FakeExecutionAdapter:
         if self.mark_exception is not None:
             raise self.mark_exception
         return self.mark_reading
+
+    async def get_last_price(self, **kwargs: Any) -> Any:
+        self._bind_real("get_last_price", kwargs)
+        self.calls.append({"method": "get_last_price", "kwargs": dict(kwargs)})
+        if self.last_exception is not None:
+            raise self.last_exception
+        return self.last_reading
 
     async def snapshot_open_normal_orders(self, **kwargs: Any) -> Any:
         self._bind_real("snapshot_open_normal_orders", kwargs)
@@ -947,13 +977,20 @@ def _prime_mark_price(adapter: Any, case_input: dict[str, Any]) -> None:
     execution manager now reads the mark price before it places, so the PG and recovery
     suites that run the manager against that fake get the fixture price here, aged by the
     fixture's `mark_age_ms`. A fake without `set_mark_price` (this module's own) is untouched.
+    Quick task 261020-l4p: the last price is primed the same way (`set_last_price`, the fixture
+    price at the same exchange time) when the test set none.
     """
     set_price = getattr(adapter, "set_mark_price", None)
     known = getattr(adapter, "_mark_prices", None)
-    if set_price is None or not isinstance(known, dict) or case_input["symbol"] in known:
-        return
-    reading = _mark_reading_for(case_input)
-    set_price(case_input["symbol"], reading.mark_price, reading.exchange_time_utc)
+    if set_price is not None and isinstance(known, dict) and case_input["symbol"] not in known:
+        reading = _mark_reading_for(case_input)
+        set_price(case_input["symbol"], reading.mark_price, reading.exchange_time_utc)
+    set_last = getattr(adapter, "set_last_price", None)
+    known_last = getattr(adapter, "_last_prices", None)
+    if set_last is not None and isinstance(known_last, dict):
+        if case_input["symbol"] not in known_last:
+            last = _last_reading_for(case_input)
+            set_last(case_input["symbol"], last.last_price, last.exchange_time_utc)
 
 
 async def _run_plan(
@@ -3198,6 +3235,7 @@ async def test_golden_case_reads_precede_the_position_mode_and_the_placement() -
         "emergency_close_poll_timeout_ms",
         "min_remaining_validity_seconds",
         "max_mark_price_age_ms",
+        "max_last_price_age_ms",
     ],
 )
 async def test_unset_limit_refuses_with_zero_adapter_calls(limit: str) -> None:
@@ -3511,6 +3549,10 @@ async def test_mark_age_a_fresh_mark_stamped_after_now_utc_places() -> None:
     adapter.mark_reading = _mark_reading_for(
         case_input, exchange_time_utc=now + timedelta(seconds=3)
     )
+    # The last price (quick task 261020-l4p) is read in the same window and is as fresh.
+    adapter.last_reading = _last_reading_for(
+        case_input, exchange_time_utc=now + timedelta(seconds=3)
+    )
     calls_seen_by_clock: list[int] = []
 
     def clock() -> datetime:
@@ -3558,6 +3600,114 @@ async def test_mark_age_an_unreadable_clock_refuses() -> None:
             expected_calls=PRE_PLACEMENT_READS,
             live_context=_build_live_context(_load_input(), clock=clock),
         )
+
+
+def _last_cases() -> list[tuple[str, dict[str, Any], str]]:
+    """Quick task 261020-l4p: the last-price refusals at gate 5e (mark price stays valid)."""
+    case_input = _load_input()
+    from tests.support.limits import TEST_ONLY_AHEAD_LIMIT_MS, TEST_ONLY_BEHIND_LIMIT_MS
+
+    checked_at = _post_read_instant(case_input)
+    margin = timedelta(milliseconds=max(TEST_ONLY_AHEAD_LIMIT_MS, TEST_ONLY_BEHIND_LIMIT_MS))
+    # TEST_ONLY max_last_price_age_ms is 2468: one millisecond past it at the post-read clock.
+    stale = _last_reading_for(
+        case_input, exchange_time_utc=checked_at - timedelta(milliseconds=2469)
+    )
+    future = _last_reading_for(
+        case_input, exchange_time_utc=checked_at + margin + timedelta(milliseconds=1)
+    )
+    other_symbol = _last_reading_for(case_input, symbol="ETHUSDT")
+    zero = _last_reading_for(case_input, last_price=Decimal("0"))
+    return [
+        ("last at the stop trigger", {"last": Decimal("98.00")}, "LAST_PRICE_CROSSED_STOP"),
+        ("last below the stop", {"last": Decimal("97.50")}, "LAST_PRICE_CROSSED_STOP"),
+        ("last below the zone", {"last": Decimal("99.50")}, "LAST_PRICE_OUTSIDE_ZONE"),
+        ("last one tick below the zone", {"last": Decimal("99.99")}, "LAST_PRICE_OUTSIDE_ZONE"),
+        (
+            "last read raises",
+            {"last_exception": TimeoutError("read timeout")},
+            "LAST_PRICE_UNAVAILABLE",
+        ),
+        ("last read is stale", {"reading": stale}, "LAST_PRICE_UNAVAILABLE"),
+        ("last read is from the future", {"reading": future}, "LAST_PRICE_UNAVAILABLE"),
+        ("last read is unusable", {"reading": object()}, "LAST_PRICE_UNAVAILABLE"),
+        ("last read is another symbol", {"reading": other_symbol}, "LAST_PRICE_UNAVAILABLE"),
+        ("last price is zero", {"reading": zero}, "LAST_PRICE_UNAVAILABLE"),
+    ]
+
+
+async def test_last_price_refusals_make_only_the_reads_and_leave_the_approval_unconsumed() -> None:
+    """ROADMAP Phase 19 criterion 2: "mark OR last price crossed the SL or left the zone".
+
+    The refusal happens after all gate 5e reads and before the position-mode read; the
+    approval is never consumed, so the corrected call under the same approval still places.
+    """
+    case_input = _load_input()
+    for label, spec, reason in _last_cases():
+        adapter = FakeExecutionAdapter()
+        if "last" in spec:
+            adapter.last_reading = _last_reading_for(case_input, last_price=spec["last"])
+        if "last_exception" in spec:
+            adapter.last_exception = spec["last_exception"]
+        if "reading" in spec:
+            adapter.last_reading = spec["reading"]
+        await _assert_refused_then_placeable(
+            label=label, reason=reason, adapter=adapter, expected_calls=PRE_PLACEMENT_READS
+        )
+
+
+@pytest.mark.parametrize(
+    "last",
+    [Decimal("100.00"), Decimal("102.00"), Decimal("102.01"), Decimal("150.00")],
+)
+async def test_last_price_at_the_edge_or_on_the_favorable_side_places(last: Decimal) -> None:
+    """The WR-06 side rule holds for the last price: a LONG above the zone rests as a GTD LIMIT."""
+    case_input = _load_input()
+    adapter = FakeExecutionAdapter()
+    adapter.last_reading = _last_reading_for(case_input, last_price=last)
+    outcome = await _run_plan(adapter)
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK"), last
+    entries = [c for c in adapter.calls if c["method"] == "place_entry"]
+    assert len(entries) == 1
+    assert entries[0]["kwargs"]["price"] == Decimal(case_input["expected_limit_price"])
+
+
+async def test_last_age_is_measured_at_the_post_read_clock_with_its_own_bound() -> None:
+    """The last price is fresh for the mark bound (4321 ms) but stale for its own (2468 ms)."""
+    case_input = _load_input()
+    now = _parse_utc(case_input["now_utc"])
+    adapter = FakeExecutionAdapter()
+    adapter.mark_reading = _mark_reading_for(case_input, exchange_time_utc=now)
+    adapter.last_reading = _last_reading_for(case_input, exchange_time_utc=now)
+    late = _build_live_context(case_input, clock=lambda: now + timedelta(milliseconds=3000))
+    await _assert_refused_then_placeable(
+        label="last stale at the post-read clock",
+        reason="LAST_PRICE_UNAVAILABLE",
+        adapter=adapter,
+        expected_calls=PRE_PLACEMENT_READS,
+        live_context=late,
+    )
+
+
+async def test_the_clock_is_read_once_after_both_price_reads() -> None:
+    case_input = _load_input()
+    now = _parse_utc(case_input["now_utc"])
+    adapter = FakeExecutionAdapter()
+    calls_seen_by_clock: list[list[str]] = []
+
+    def clock() -> datetime:
+        calls_seen_by_clock.append(_reads_only(adapter))
+        return now + timedelta(seconds=4)
+
+    adapter.mark_reading = _mark_reading_for(
+        case_input, exchange_time_utc=now + timedelta(seconds=3)
+    )
+    adapter.last_reading = _last_reading_for(
+        case_input, exchange_time_utc=now + timedelta(seconds=3)
+    )
+    outcome = await _run_plan(adapter, live_context=_build_live_context(case_input, clock=clock))
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    assert calls_seen_by_clock == [PRE_PLACEMENT_READS]
 
 
 async def test_risk04_a_position_on_the_symbol_is_refused() -> None:
@@ -3930,6 +4080,16 @@ def _order_pairs() -> list[tuple[str, dict[str, Any], str]]:
             {"adapter_orders": [_open_order()], "adapter_mark": Decimal("98.00")},
             "SYMBOL_HAS_OPEN_ORDER",
         ),
+        (
+            "symbol check before the last price",
+            {"adapter_orders": [_open_order()], "adapter_last": Decimal("98.00")},
+            "SYMBOL_HAS_OPEN_ORDER",
+        ),
+        (
+            "mark price before the last price",
+            {"adapter_mark": Decimal("99.50"), "adapter_last": Decimal("98.00")},
+            "MARK_PRICE_OUTSIDE_ZONE",
+        ),
     ]
 
 
@@ -3942,6 +4102,10 @@ async def test_gate_order_is_pinned_by_failing_two_gates_at_once() -> None:
         if "adapter_mark" in overrides:
             adapter.mark_reading = _mark_reading_for(
                 _load_input(), mark_price=overrides.pop("adapter_mark")
+            )
+        if "adapter_last" in overrides:
+            adapter.last_reading = _last_reading_for(
+                _load_input(), last_price=overrides.pop("adapter_last")
             )
         if "adapter_orders" in overrides:
             adapter.open_normal_orders = overrides.pop("adapter_orders")

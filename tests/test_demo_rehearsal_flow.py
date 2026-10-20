@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 from scripts import demo_rehearsal as dr
-from src.adapters.binance_public import MarkPriceReading
+from src.adapters.binance_public import LastPriceReading, MarkPriceReading
 from src.adapters.binance_usdm import (
     AlgoOrderProbe,
     AlgoPlacementResult,
@@ -159,6 +159,9 @@ class FakeDemoAdapter:
         # no flow test moves the gate mark onto the entry any more). A test that wants the
         # mark to have left the zone sets it explicitly.
         self.gate_mark_price: Decimal | None = None
+        # Quick task 261020-l4p: the last price `get_last_price` reports; `None` reports MARK
+        # (on a liquid symbol the last trade sits next to the mark, inside the derived zone).
+        self.gate_last_price: Decimal | None = None
         self._next_id = 1
 
     @staticmethod
@@ -246,6 +249,11 @@ class FakeDemoAdapter:
         self._enter("get_mark_price", symbol=symbol)
         price = self.gate_mark_price if self.gate_mark_price is not None else MARK
         return MarkPriceReading(symbol=symbol, mark_price=price, exchange_time_utc=SERVER_NOW)
+
+    async def get_last_price(self, *, symbol: str) -> LastPriceReading:
+        self._enter("get_last_price", symbol=symbol)
+        price = self.gate_last_price if self.gate_last_price is not None else MARK
+        return LastPriceReading(symbol=symbol, last_price=price, exchange_time_utc=SERVER_NOW)
 
     async def get_position_mode(self) -> PositionModeResult:
         self._enter("get_position_mode")
@@ -1031,6 +1039,24 @@ def test_a_far_mark_above_the_zone_is_the_favorable_side_and_reaches_the_entry(
     assert entry_kwargs["price"] == _derive("far").entry_price
 
 
+@pytest.mark.parametrize("scenario", ["far", "fill"])
+def test_a_last_price_below_the_zone_is_refused_with_the_mark_inside(
+    tmp_path: Path, scenario: str
+) -> None:
+    """Quick task 261020-l4p: the rehearsal reaches the last-price check too.
+
+    The mark stays inside the derived zone; the last price one tick below entry_min (the adverse
+    side of the LONG plan) refuses at gate 5e and nothing is sent.
+    """
+    adapter = FakeDemoAdapter()
+    adapter.gate_last_price = _derive(scenario).trade_plan.entry_min_price - Decimal("0.1")
+    code, data, _, _ = run_flow(tmp_path, scenario=scenario, adapter=adapter, execute=True)
+    assert code == dr.EXIT_ABORTED
+    assert adapter.mutating_calls() == []
+    assert "LAST_PRICE_OUTSIDE_ZONE" in json.dumps(data)
+    assert "MARK_PRICE_OUTSIDE_ZONE" not in json.dumps(data)
+
+
 def test_tp1_quantity_fraction_is_the_backtest_constant() -> None:
     assert dr.TP1_QUANTITY_FRACTION is TP1_QUANTITY_FRACTION
     assert TP1_QUANTITY_FRACTION == Decimal("0.5")
@@ -1630,7 +1656,9 @@ def test_the_read_passthroughs_are_allowed_in_dry_run_and_bind_the_real_signatur
 
     reading = asyncio.run(ctx.guarded.get_mark_price(symbol="BTCUSDT"))
     assert reading.mark_price == MARK
-    assert adapter.calls == ["get_mark_price"]
+    last = asyncio.run(ctx.guarded.get_last_price(symbol="BTCUSDT"))
+    assert last.last_price == MARK
+    assert adapter.calls == ["get_mark_price", "get_last_price"]
     assert ctx.guarded.mutating_attempts == 0
 
 
@@ -1654,6 +1682,7 @@ async def test_committed_not_configured_limits_abort_before_any_mutation() -> No
         "protection.emergency_close_poll_timeout_ms",
         "pre_placement.min_remaining_validity_seconds",
         "pre_placement.max_mark_price_age_ms",
+        "pre_placement.max_last_price_age_ms",
     ):
         assert key in failed[-1]["detail"]
     # nothing else ran: no approval was requested, no channel opened
@@ -1705,6 +1734,9 @@ def test_the_dry_run_far_scenario_reads_the_mark_price_and_still_sends_nothing(
     code, data, adapter, _ = run_flow(tmp_path, scenario="far")
     assert code == dr.EXIT_OK
     assert "get_mark_price" in adapter.calls
+    # Quick task 261020-l4p: gate 5e reads the last price right after the mark price.
+    assert "get_last_price" in adapter.calls
+    assert adapter.calls.index("get_last_price") == adapter.calls.index("get_mark_price") + 1
     assert adapter.mutating_calls() == []
     assert data["exchange_orders"] == []
     assert step(data, "execution_limits")["status"] == "PASSED"

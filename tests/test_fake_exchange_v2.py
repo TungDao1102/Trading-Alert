@@ -253,6 +253,31 @@ async def test_mark_price_is_served_and_an_unset_symbol_raises() -> None:
     assert (await fake.get_mark_price(symbol=SYMBOL)).mark_price == Decimal("100.50")
 
 
+async def test_last_price_is_served_separately_and_an_unset_symbol_raises() -> None:
+    """Quick task 261020-l4p: the last price is its own state, never the mark price."""
+    from src.adapters.binance_public import LastPriceReading
+
+    fake = _strict()
+    fake.set_mark_price(SYMBOL, Decimal("100.50"), NOW)
+    with pytest.raises(RuntimeError, match="no last price set for BTCUSDT"):
+        await fake.get_last_price(symbol=SYMBOL)
+    fake.set_last_price(SYMBOL, Decimal("100.40"), NOW)
+    reading = await fake.get_last_price(symbol=SYMBOL)
+    assert isinstance(reading, LastPriceReading)
+    assert (reading.symbol, reading.last_price, reading.exchange_time_utc) == (
+        SYMBOL,
+        Decimal("100.40"),
+        NOW,
+    )
+    configured = TimeoutError("configured")
+    fake.set_last_price_error(configured)
+    with pytest.raises(TimeoutError) as caught:
+        await fake.get_last_price(symbol="ETHUSDT")
+    assert caught.value is configured
+    with pytest.raises(TypeError):
+        await fake.get_last_price(symbol=SYMBOL, unexpected=True)
+
+
 async def test_open_order_and_algo_snapshots_are_scoped_by_symbol() -> None:
     fake = _strict()
     await fake.place_entry(**_entry_kwargs())

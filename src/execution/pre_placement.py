@@ -2,8 +2,9 @@
 
 Every check is a pure function of injected values and returns a reason code or `None`.
 `evaluate_pre_placement` runs them first-failure-wins in a fixed order (status, invalidation,
-remaining validity, symbol free, mark price). The execution manager (plan 19-13) performs the
-adapter reads and passes the values in; every refusal happens before the approval is consumed.
+remaining validity, symbol free, mark price, last price). The execution manager (plan 19-13)
+performs the adapter reads and passes the values in; every refusal happens before the approval
+is consumed.
 
 The module imports only stdlib, `decimal` and `src.domain`: no clock, no float, no SDK, no
 `src.backtest` (the backtest imports `src.execution.placement`, so the invalidation rule is
@@ -11,10 +12,10 @@ re-implemented here and pinned against the backtest in the tests).
 
 Recorded, not decided:
 
-- Q2: only the mark price is read; the stop triggers on MARK_PRICE (D037). The owner's 19-REVIEW
-  WR-06 decision records a last-price read as an OPEN work item (adapter read, a
-  `check_mark_price` input, tests): see the `check_mark_price` docstring and 19-OWNER-GAPS.md.
-  It is not built yet, so the last price is not checked.
+- Q2: the stop triggers on MARK_PRICE (D037). D-05 names the mark AND the last price, and both
+  are checked before placement: `check_mark_price` (plan 19-03, WR-06) and `check_last_price`
+  (quick task 261020-l4p, the work item the owner's 19-REVIEW WR-06 decision recorded). Each has
+  its own codes, its own owner age bound and its own check instant.
 - Q6: the latest closed strategy-bar close is a required injected value; its producer is Phase 24.
 - Q7: the exchange open-order snapshot is the authority for "another order on the symbol"; an
   intent-store cross-check needs a new store query and is not built here.
@@ -47,6 +48,11 @@ SYMBOL_STATE_UNAVAILABLE = "SYMBOL_STATE_UNAVAILABLE"
 MARK_PRICE_UNAVAILABLE = "MARK_PRICE_UNAVAILABLE"
 MARK_PRICE_CROSSED_STOP = "MARK_PRICE_CROSSED_STOP"
 MARK_PRICE_OUTSIDE_ZONE = "MARK_PRICE_OUTSIDE_ZONE"
+# Quick task 261020-l4p (19-REVIEW WR-06 work item, ROADMAP Phase 19 criterion 2): the same three
+# refusals for the LAST price, with their own names so an audit row says which price refused.
+LAST_PRICE_UNAVAILABLE = "LAST_PRICE_UNAVAILABLE"
+LAST_PRICE_CROSSED_STOP = "LAST_PRICE_CROSSED_STOP"
+LAST_PRICE_OUTSIDE_ZONE = "LAST_PRICE_OUTSIDE_ZONE"
 HEDGE_MODE_UNSUPPORTED = "HEDGE_MODE_UNSUPPORTED"
 
 # Binance New Order (page read 2026-10-19, research B6): `goodTillDate` must be greater than
@@ -97,14 +103,17 @@ class PrePlacementInputs:
     """Every value `evaluate_pre_placement` reads; all fields are required (no defaults).
 
     `None` on a live reading (`latest_closed_bar_close`, `position_symbols`, `open_order_symbols`,
-    `mark_price`, `mark_time_utc`, `mark_checked_at_utc`) and on an owner limit
-    (`min_remaining_validity_seconds`, `max_mark_price_age_ms`) means "not available" and refuses
+    `mark_price`, `mark_time_utc`, `mark_checked_at_utc`, `last_price`, `last_time_utc`,
+    `last_checked_at_utc`) and on an owner limit (`min_remaining_validity_seconds`,
+    `max_mark_price_age_ms`, `max_last_price_age_ms`) means "not available" and refuses
     (D-06, D-07).
 
     `mark_checked_at_utc` is the injected clock read AFTER the mark-price read: the mark age is
     measured against it, never against `now_utc`, which the manager takes before the read
     (19-REVIEW CR-01). `gtd_clock_margin` (the ratified drift bound) is also the most the reading
     may be stamped ahead of `mark_checked_at_utc` before it counts as future-dated.
+    `last_checked_at_utc` plays the same role for the last price (quick task 261020-l4p); the
+    manager passes one clock reading taken after both price reads.
     """
 
     side: str
@@ -124,6 +133,10 @@ class PrePlacementInputs:
     mark_time_utc: datetime | None
     mark_checked_at_utc: datetime | None
     max_mark_price_age_ms: int | None
+    last_price: Decimal | None
+    last_time_utc: datetime | None
+    last_checked_at_utc: datetime | None
+    max_last_price_age_ms: int | None
     sl_trigger_price: Decimal
     entry_min_price: Decimal
     entry_max_price: Decimal
@@ -134,18 +147,24 @@ class PrePlacementInputs:
             raise TypeError("plan_status must be a TradePlanStatus")
         _require_utc(self.expiry_utc, "expiry_utc")
         _require_utc(self.now_utc, "now_utc")
-        if self.mark_time_utc is not None:
-            _require_utc(self.mark_time_utc, "mark_time_utc")
-        if self.mark_checked_at_utc is not None:
-            _require_utc(self.mark_checked_at_utc, "mark_checked_at_utc")
+        for name in (
+            "mark_time_utc",
+            "mark_checked_at_utc",
+            "last_time_utc",
+            "last_checked_at_utc",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                _require_utc(value, name)
         for name in ("sl_trigger_price", "entry_min_price", "entry_max_price"):
             _require_decimal(getattr(self, name), name)
-        for name in ("latest_closed_bar_close", "mark_price"):
+        for name in ("latest_closed_bar_close", "mark_price", "last_price"):
             value = getattr(self, name)
             if value is not None:
                 _require_decimal(value, name)
         _require_optional_int(self.min_remaining_validity_seconds, "min_remaining_validity_seconds")
         _require_optional_int(self.max_mark_price_age_ms, "max_mark_price_age_ms")
+        _require_optional_int(self.max_last_price_age_ms, "max_last_price_age_ms")
         if not isinstance(self.gtd_clock_margin, timedelta):
             raise TypeError("gtd_clock_margin must be a timedelta")
         if not self.symbol:
@@ -290,44 +309,117 @@ def check_mark_price(
     D-05 GTD backstop exists for. The crossed-stop, age and missing-input refusals above are
     independent of this side rule and unchanged.
 
-    OPEN WORK ITEM (owner, 19-REVIEW WR-06 batch 1): D-05 also names the LAST price, and this
-    check reads only the mark price. The adapter has no last-price read (only `get_mark_price`).
-    Still to build, each with tests: (1) a new adapter read of the last price
-    (`src/adapters/binance_usdm.py`, behind the `ExecutionAdapter` Protocol); (2) a last-price
-    input to `check_mark_price` / `PrePlacementInputs`, with its own age and fail-closed rules;
-    (3) manager gate 5e wiring and regression tests. Tracked in 19-OWNER-GAPS.md. Until then the
-    last price is NOT checked.
+    D-05 also names the LAST price: `check_last_price` (quick task 261020-l4p) applies the same
+    rules to it with its own codes and age bound, and `evaluate_pre_placement` runs it right
+    after this check.
     """
+    return _price_reason(
+        side=side,
+        price=mark_price,
+        time_utc=mark_time_utc,
+        time_name="mark_time_utc",
+        now_utc=now_utc,
+        max_age_ms=max_mark_price_age_ms,
+        max_clock_skew=max_clock_skew,
+        sl_trigger_price=sl_trigger_price,
+        entry_min_price=entry_min_price,
+        entry_max_price=entry_max_price,
+        require_positive=False,
+        codes=(MARK_PRICE_UNAVAILABLE, MARK_PRICE_CROSSED_STOP, MARK_PRICE_OUTSIDE_ZONE),
+    )
+
+
+def check_last_price(
+    *,
+    side: str,
+    last_price: Decimal | None,
+    last_time_utc: datetime | None,
+    now_utc: datetime | None,
+    max_last_price_age_ms: int | None,
+    max_clock_skew: timedelta,
+    sl_trigger_price: Decimal,
+    entry_min_price: Decimal,
+    entry_max_price: Decimal,
+) -> str | None:
+    """Refuse when the last traded price is unusable, crossed the stop, or left the zone adversely.
+
+    Quick task 261020-l4p (the 19-REVIEW WR-06 work item; ROADMAP Phase 19 criterion 2: "mark
+    or last price has crossed the SL or left the zone"). Same rules as `check_mark_price`, with
+    the LAST_PRICE_* codes and the last price's own inputs:
+
+    - LAST_PRICE_UNAVAILABLE (D-06 fail closed): a missing price, time or check instant, an unset
+      `max_last_price_age_ms` (its own owner bound, never the mark bound), a reading stamped more
+      than `max_clock_skew` ahead of `now_utc`, a reading older than the bound, and a zero,
+      negative or non-finite price (never treated as a crossed stop: it is no price at all).
+    - LAST_PRICE_CROSSED_STOP: a LONG last price at or below the stop trigger (SHORT: at or
+      above), the `src.backtest.exits.is_sl_touched` convention.
+    - LAST_PRICE_OUTSIDE_ZONE: the ADVERSE side only (the WR-06 owner rule): a LONG strictly
+      below `entry_min_price`, a SHORT strictly above `entry_max_price`; the exact edge passes
+      and the favorable side passes (the GTD LIMIT rests).
+
+    `now_utc` is a clock reading taken AFTER the last-price read (19-REVIEW CR-01). A naive
+    datetime raises `ValueError` (a caller bug, not a market condition).
+    """
+    return _price_reason(
+        side=side,
+        price=last_price,
+        time_utc=last_time_utc,
+        time_name="last_time_utc",
+        now_utc=now_utc,
+        max_age_ms=max_last_price_age_ms,
+        max_clock_skew=max_clock_skew,
+        sl_trigger_price=sl_trigger_price,
+        entry_min_price=entry_min_price,
+        entry_max_price=entry_max_price,
+        require_positive=True,
+        codes=(LAST_PRICE_UNAVAILABLE, LAST_PRICE_CROSSED_STOP, LAST_PRICE_OUTSIDE_ZONE),
+    )
+
+
+def _price_reason(
+    *,
+    side: str,
+    price: Decimal | None,
+    time_utc: datetime | None,
+    time_name: str,
+    now_utc: datetime | None,
+    max_age_ms: int | None,
+    max_clock_skew: timedelta,
+    sl_trigger_price: Decimal,
+    entry_min_price: Decimal,
+    entry_max_price: Decimal,
+    require_positive: bool,
+    codes: tuple[str, str, str],
+) -> str | None:
+    """The shared live-price rule: (unavailable, crossed, outside) codes in that precedence."""
+    unavailable, crossed_stop, outside_zone = codes
     _require_side(side)
     if not isinstance(max_clock_skew, timedelta) or max_clock_skew < timedelta(0):
         raise ValueError("max_clock_skew must be a non-negative timedelta")
-    if (
-        mark_price is None
-        or mark_time_utc is None
-        or now_utc is None
-        or max_mark_price_age_ms is None
-    ):
-        return MARK_PRICE_UNAVAILABLE
+    if price is None or time_utc is None or now_utc is None or max_age_ms is None:
+        return unavailable
     _require_utc(now_utc, "now_utc")
-    _require_utc(mark_time_utc, "mark_time_utc")
-    age = now_utc - mark_time_utc
+    _require_utc(time_utc, time_name)
+    if require_positive and (not price.is_finite() or price <= Decimal("0")):
+        return unavailable
+    age = now_utc - time_utc
     if age < -max_clock_skew:
-        return MARK_PRICE_UNAVAILABLE
-    if age // _MILLISECOND > max_mark_price_age_ms:
-        return MARK_PRICE_UNAVAILABLE
+        return unavailable
+    if age // _MILLISECOND > max_age_ms:
+        return unavailable
     if side == _LONG:
-        crossed = mark_price <= sl_trigger_price
+        crossed = price <= sl_trigger_price
     else:
-        crossed = mark_price >= sl_trigger_price
+        crossed = price >= sl_trigger_price
     if crossed:
-        return MARK_PRICE_CROSSED_STOP
+        return crossed_stop
     # WR-06: only the adverse side refuses; the favorable side is a resting GTD LIMIT.
     if side == _LONG:
-        outside = mark_price < entry_min_price
+        outside = price < entry_min_price
     else:
-        outside = mark_price > entry_max_price
+        outside = price > entry_max_price
     if outside:
-        return MARK_PRICE_OUTSIDE_ZONE
+        return outside_zone
     return None
 
 
@@ -374,8 +466,9 @@ def check_position_mode(position_mode: str) -> str | None:
 def evaluate_pre_placement(inputs: PrePlacementInputs) -> str | None:
     """First failing reason in the fixed order, or `None` when placement may proceed.
 
-    Order: status, invalidation, remaining validity, symbol free, mark price. The position-mode
-    check is separate (`check_position_mode`) because it needs the mode read.
+    Order: status, invalidation, remaining validity, symbol free, mark price, last price (quick
+    task 261020-l4p). The position-mode check is separate (`check_position_mode`) because it
+    needs the mode read.
     """
     reason = check_plan_status(inputs.plan_status)
     if reason is not None:
@@ -404,12 +497,25 @@ def evaluate_pre_placement(inputs: PrePlacementInputs) -> str | None:
     )
     if reason is not None:
         return reason
-    return check_mark_price(
+    reason = check_mark_price(
         side=inputs.side,
         mark_price=inputs.mark_price,
         mark_time_utc=inputs.mark_time_utc,
         now_utc=inputs.mark_checked_at_utc,
         max_mark_price_age_ms=inputs.max_mark_price_age_ms,
+        max_clock_skew=inputs.gtd_clock_margin,
+        sl_trigger_price=inputs.sl_trigger_price,
+        entry_min_price=inputs.entry_min_price,
+        entry_max_price=inputs.entry_max_price,
+    )
+    if reason is not None:
+        return reason
+    return check_last_price(
+        side=inputs.side,
+        last_price=inputs.last_price,
+        last_time_utc=inputs.last_time_utc,
+        now_utc=inputs.last_checked_at_utc,
+        max_last_price_age_ms=inputs.max_last_price_age_ms,
         max_clock_skew=inputs.gtd_clock_margin,
         sl_trigger_price=inputs.sl_trigger_price,
         entry_min_price=inputs.entry_min_price,

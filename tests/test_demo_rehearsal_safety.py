@@ -180,6 +180,10 @@ class RecordingInner:
         self.calls.append("symbol_lot_filters")
         return "LOT-FILTERS-SENTINEL"
 
+    async def get_last_price(self, **kwargs: Any) -> Any:
+        self.calls.append("get_last_price")
+        return "LAST-PRICE-SENTINEL"
+
 
 class CountingFactory:
     """adapter_factory seam that counts builds and hands back one RecordingInner."""
@@ -505,6 +509,9 @@ async def test_dry_run_never_reaches_mutating_methods() -> None:
     # symbol_lot_filters is a read passthrough: allowed in a dry run, never counted as mutating.
     assert await guarded.symbol_lot_filters(symbol="BTCUSDT") == "LOT-FILTERS-SENTINEL"
     assert inner.calls[-1] == "symbol_lot_filters"
+    # Quick task 261020-l4p: the last-price read (gate 5e) is a read passthrough too.
+    assert await guarded.get_last_price(symbol="BTCUSDT") == "LAST-PRICE-SENTINEL"
+    assert inner.calls[-1] == "get_last_price"
     assert guarded.mutating_attempts == len(MUTATING_METHODS)
 
     with pytest.raises(AttributeError):
