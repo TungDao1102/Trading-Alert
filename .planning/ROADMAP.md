@@ -971,7 +971,7 @@ This absorbs former Phase 15 (live-price check).
 - [G4-020] The planner has no tick size, so a stop within one tick of the zone edge could be snapped by the risk layer; assert SL and entry geometry after tick snap (source: .planning/phases/15-strategy-geometry-correction/15-13-SUMMARY.md:90; decision: D054, accepted limitation)
 - [G4-036] An executed TradePlan stays APPROVED and `expiry_utc` governs only an unfilled entry; nothing may move an executed plan to EXPIRED, so the criterion 2 plan-status check must not contradict this (source: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md:19-20, docs/DECISIONS.md D051 item (i); decision: D051)
 
-**Plans:** 16/17 plans executed
+**Plans:** 17/17 plans executed (merged into develop 2026-10-20; the owner read of 19-OWNER-GAPS.md and the full gate on the merged tree are open)
 
 Plans:
 - [x] 19-01-PLAN.md - Execution-limits file and loader: four NOT_CONFIGURED keys, live path refuses while unset (D-07, D-13)
@@ -990,7 +990,7 @@ Plans:
 - [x] 19-14-PLAN.md - Coordinator failure branches B1-B5, deadlines, CLOSE_REQUIRED (D-12, D-13, criterion 3)
 - [x] 19-15-PLAN.md - Manager fill-driven placement: GTD entry, hand-off, taxonomy on the entry path, legacy tests rewritten (D-10, D-21)
 - [x] 19-16-PLAN.md - TP legs after the entry is terminal; attach rewritten; rehearsal fill flow (criterion 4, D-17..D-20)
-- [ ] 19-17-PLAN.md - Phase gate, GLOSSARY codes, owner-gap register, EXEC-07 note
+- [x] 19-17-PLAN.md - Phase gate, GLOSSARY codes, owner-gap register, EXEC-07 note
 
 ### Phase 20: Reconcile + SAFE_MODE Hardening + Alerts
 

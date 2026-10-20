@@ -154,7 +154,7 @@ last_mapped_at: 2026-10-19
 
 ### Canonical edge row
 
-- The AGENTS.md stack block is generated from this file, and the decision-alignment gate
+- AGENTS.md carries the row below (no longer a generated block); the decision-alignment gate
 - AU-03 compares the | FastAPI | row below byte-for-byte against
 - .planning/research/STACK.md. Both files must carry the same row.
 

@@ -5,8 +5,8 @@ current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
 current_plan: "65 with Total Plans in Phase: 65 — 63 done (16-61 closed as partial, its Tasks 3 and 4 done by 16-63; 16-65 done: review fixes and soak IMAGE_COMMIT 9b27da5, superseding 6f73e5b of 16-64); open: 16-43, 16-44; next is the re-review of 6f73e5b..9b27da5, then 16-43 on the soak host"
 status: executing
-stopped_at: Completed 19-16-PLAN.md (worktree p19-15; next 19-17)
-last_updated: "2026-10-20T07:15:17.456Z"
+stopped_at: Phase 19 (17 of 17 plans) merged into develop 2026-10-20; AGENTS.md reduced to a router; next is the owner full gate on the merged tree, then 16-43 on the soak host
+last_updated: "2026-10-20T10:00:00.000Z"
 last_activity: 2026-10-19
 state_head: e0be1935b45442cae13e63e0d51d39b291a5d9de
 progress:
@@ -15,7 +15,7 @@ progress:
   total_plans: 252
   completed_plans: 231
 milestone_name: milestone
-last_activity_desc: Phase 19 execution started
+last_activity_desc: Phase 19 merged into develop; AGENTS.md trimmed to a router
 ---
 
 <!-- STATE-MD-SCHEMA:END:frontmatter -->
@@ -27,7 +27,7 @@ last_activity_desc: Phase 19 execution started
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 19 — Execution Plan Binding + Pre-Placement Checks
+**Current focus:** Phase 16 close-out (plan 16-43 on the soak host after a fresh full gate on the merged tree); Phase 19 is executed and merged, waiting for the owner read of its gap register
 
 ## Current Position
 
@@ -40,6 +40,8 @@ Progress: [██████░░░░] 61%
 
 ### Cross-phase status (2026-10-16)
 
+- Phase 19 (execution plan binding and pre-placement checks): all 17 plans executed on branches phase-19 / p19-15 and merged into develop by the owner (2026-10-20, merges e5ba20a and 6d90d84). Model: fill-driven protection (D-10), GTD LIMIT entry with no entry-time stop, coordinator `src/execution/protection.py`, emergency close, live TP sizing, migration 0005 (sized realized risk); quick task 261020-jua made Q5 true in code (one `place_entry` POST per approval, ambiguous result probed once, otherwise UNKNOWN + SAFE_MODE). Status: complete-pending-owner-read. NOT closed: no requirement is marked complete (EXEC-01, EXEC-02, RISK-04, APRV-01, APRV-02, EXEC-07 stay Pending, no Demo run), D055 stays OPEN (decision rows D077 for D-10 and D078 for Q5 are drafts, not written), live placement stays disabled, the four `NOT_CONFIGURED` limit keys and the 11 Demo probes belong to the owner (`.planning/phases/19-execution-plan-binding-price-check/19-OWNER-GAPS.md`). The whole suite was NOT run on the merged tree; the owner runs the fresh sequential gate and records `IMAGE_COMMIT=<40 hex>` under `.planning/phases/16-paper-runtime-composition/evidence/`, and plan 16-43 must then read that record instead of `16-65-gate.txt` (the 9b27da5 image predates Phase 19).
+- AGENTS.md (2026-10-20): the generated blocks of commit 0884fea (1,222 lines) were removed; the file is now a ~190-line router (rules, commands, tests with `-n 4`, commit-trailer rule, secrets, execution model, source-of-truth order, a table of where to read). `tests/test_agents_md.py` caps it and checks its paths. `.planning/codebase/` and `.planning/research/` each have a README that states role and trust. `.planning/codebase/*.md` were mapped at commit 4e37e15 (before the Phase 16 fix plans and the Phase 19 merge): run `/gsd-map-codebase` to refresh them; do not run `generate-claude-md` on AGENTS.md.
 - Phase 18 (user-data stream and error taxonomy): CLOSED 2026-10-18, status human_needed (no gap, no BLOCKER). All 26 plans are executed on develop (18-19 skipped by design: gate result `transport: sdk`). The user integrated `phase-18-smoke` with `git merge --no-ff` (merge commit dde100b); plan 18-26 recorded the owner's taxonomy decision of 2026-10-17 (-1106, -4016, -4024 REJECTED_DEFINITIVE on placement, -1125 Demo provenance); fix 1291caa made the Demo credential names `BINANCE_DEMO_API_KEY` and `BINANCE_DEMO_API_SECRET`; the verification report is c45bbfc (`18-VERIFICATION.md`, verified at fea8e2e). The gates are green at fea8e2e (`18-TRACEABILITY.md`). Nothing is pushed. All evidence is Demo-observed, not mainnet. Human items left: the user signs `18-VALIDATION.md` (still draft), the no-withdrawal key and IP-allowlist attestation (OPS-02, Phases 24 to 26), and the D055 decision. D055 stays OPEN (no DECISIONS row); the Demo evidence is `decisions/18-DRAFT-D055-evidence-for-user.md` and the adopted direction is noted, not decided, in `.planning/phases/19-execution-plan-binding-price-check/19-NOTES.md` for `/gsd-discuss-phase 19`. Requirements EXEC-01, EXEC-02, EXEC-05 and OPS-02 stay Pending in REQUIREMENTS.md (library-proven, Demo-observed, no running-process proof). Next for Phase 18's successors: Phase 19 discussion, in order after Phase 16 closes.
 - Phase 16 fix plans: 16-55, 16-56, 16-57, 16-58 and 16-59 done on develop (owner decisions in 16-DEC-FIXPLANS.md; 16-57 adds 16-DEC-CONFIG-PIN; 16-58 fixed the SHADOW lock order, refusal of unsizable plans, data-horizon expiry, midnight roll, unknown-append reconcile, per-press replies and the dispatch error log; 16-59 added the as-of export with partial-bundle refusal, per-bundle create-only evidence keys, the merged freeze log with missing-tick records, the workflow concurrency group with queue max and the dispositions in deferred-items.md). The blocking set 16-55 to 16-59 is green on GATE_COMMIT a54f9da47ca8b7b7c6c2488b0d8cb67b506f4ba0 (evidence/16-59-gate.txt); the soak image is NOT built from it, plan 16-62 records the image commit. Plan 16-62 (B1-WR-09) is done: rest_backfill_depth_bars (1500, v2 file unchanged) now bounds every supervisor REST backfill, newest closes first, older missing closes are recorded gaps with the window reason; the soak image is built from IMAGE_COMMIT efae1f3efe3211f75f94e165e5d1c9956b20a6f1 (evidence/16-62-gate.txt, full suite 10118 ran, 10112 passed, 6 skipped, 0 failed; ruff, ruff format, mypy src and uv lock --check clean); the targeted re-review of c654524..efae1f3 is still to run before anything is pushed or merged. Next in order: 16-60 and 16-43, then 16-61 and 16-44. Phase 16's new DECISIONS rows are D073 (protocol v2.5.0 warm-up amendment) and D074 (regeneration inventory), because Phase 18 took D072.
 - Plan 16-63 done on develop (2026-10-20): TP2 positivity guard (NO_TRADE RR_TOO_LOW), simulator semantics 2.3.0, protocol v2.6.0 with D075 and D076 (landing commit 6f599dd). The rerun of research run 1 at 2.3.0 is complete: 240 records in docs/research/experiments/research-run-1-v2-3-0/ (commit b17312a, RUN_COMMIT 58a5374), the three families ran in parallel by owner decision of 2026-10-19 (16-DEC-RERUN-PARALLEL.md), each exit 0 with 80 records; verification rerun all present. The 2.1.0 records are kept and superseded (16-DEC-RUN1-SUPERSEDED.md, f8453f9). Final gate 03e29ee: 10394 passed, 19 skipped (no PostgreSQL skip; native Windows PostgreSQL 17.11 service), ruff, format, mypy, uv lock clean. 16-61 stays partial; its Tasks 3 and 4 were done as 16-63 Tasks 6 and 7. BKTS-03 unchanged (already Complete). Next: plan 16-43 on the soak host, after the soak image is rebuilt from a commit that contains the TP2 guard and the 16-62 gate is repeated (R7, answered 2026-10-19).
@@ -598,6 +600,7 @@ Recent decisions affecting current work:
 | 261016-alw | 16-42 Tasks 2 and 3: G4-021 exact-entry-pin, allowlist entry research-run-1-a01, tests and D054 item (i) | 2026-10-16 | (this commit) | [261016-alw-allowlist-entry-research-run-1-a01-g4-021](./quick/261016-alw-allowlist-entry-research-run-1-a01-g4-021/) |
 | 261020-xd4 | pytest-xdist opt-in parallel run (`-n 4`, about 9-10 min vs 24); default, CI and recorded gates stay sequential | 2026-10-20 | (this commit) | [261020-xd4-pytest-xdist-opt-in-parallel-test-run](./quick/261020-xd4-pytest-xdist-opt-in-parallel-test-run/) |
 | 261020-bkp | backup.sh review fixes, explicit local-only mode (BACKUP_REMOTE=none), D064 real-S3 gate script (result pending until the owner runs it), 16-43 plan and checklist fixes | 2026-10-20 | (this commit) | [261020-bkp-backup-local-only-and-d064-gate](./quick/261020-bkp-backup-local-only-and-d064-gate/) |
+| 261020-jua | Q5: one `place_entry` POST per approval, ambiguous result probed once, else UNKNOWN + SAFE_MODE | 2026-10-20 | 94ad09a | [261020-jua-q5-remove-entry-placement-retry-unknown-](./quick/261020-jua-q5-remove-entry-placement-retry-unknown-/) |
 
 ### Roadmap Evolution
 
@@ -648,6 +651,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-20T00:45:05Z
-Stopped at: Completed 16-63-PLAN.md (2026-10-20); Phase 19 planned: 17 plans, checker passed
-Resume file: .planning/phases/19-execution-plan-binding-price-check/19-01-PLAN.md
+Last session: 2026-10-20T10:00:00Z
+Stopped at: Phase 19 merged into develop (2026-10-20); AGENTS.md reduced to a router; owner gate and 16-43 next
+Resume file: .planning/phases/16-paper-runtime-composition/16-43-CHECKLIST.md
