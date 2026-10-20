@@ -76,7 +76,7 @@ from src.adapters.binance_limits import (  # noqa: E402
     SignedCallPolicy,
     load_binance_limits,
 )
-from src.adapters.binance_public import MarkPriceReading  # noqa: E402
+from src.adapters.binance_public import LastPriceReading, MarkPriceReading  # noqa: E402
 from src.adapters.binance_ratelimit_gate import RestRateLimitGate  # noqa: E402
 from src.adapters.binance_usdm import (  # noqa: E402
     AlgoOrderProbe,
@@ -208,9 +208,9 @@ DEFAULT_EVIDENCE_DIR = REPO_ROOT / ".planning" / "phases" / "09-live-execution-r
 # Plan 18-13: the ratified limits file (plan 18-09). Its signed-call policy gives every
 # signed request an explicit recvWindow; no number is chosen here.
 DEFAULT_LIMITS_FILE = REPO_ROOT / "config" / "binance" / "binance-limits-v1.toml"
-# Plan 19-13: the owner's execution limits (plan 19-01; six keys since 19-REVIEW WR-03). Every
-# value is NOT_CONFIGURED in the committed file, so a run that reaches the order path aborts
-# before any mutation.
+# Plan 19-13: the owner's execution limits (plan 19-01; seven keys since quick task 261020-l4p).
+# Every value is NOT_CONFIGURED in the committed file, so a run that reaches the order path
+# aborts before any mutation.
 DEFAULT_EXECUTION_LIMITS_FILE = REPO_ROOT / "config" / "execution" / "execution-limits-v1.toml"
 
 EXIT_OK = 0
@@ -709,6 +709,11 @@ class GuardedAdapter:
     async def get_mark_price(self, *, symbol: str) -> MarkPriceReading:
         """The live mark price of `symbol` (plan 19-13, gate 5e); a read, allowed in DRY_RUN."""
         return await self._call("get_mark_price", lambda: self._inner.get_mark_price(symbol=symbol))
+
+    async def get_last_price(self, *, symbol: str) -> LastPriceReading:
+        """The last traded price of `symbol` (quick task 261020-l4p, gate 5e); a read, allowed in
+        DRY_RUN."""
+        return await self._call("get_last_price", lambda: self._inner.get_last_price(symbol=symbol))
 
     async def symbol_lot_filters(self, *, symbol: str) -> LotFilters:
         """The live lot filters of `symbol` (the protection coordinator reads them); a read."""

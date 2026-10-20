@@ -431,9 +431,8 @@ def test_check_last_price_rejects_bad_side_naive_time_and_bad_skew() -> None:
 @pytest.mark.parametrize("side", ["LONG", "SHORT"])
 def test_check_last_price_tolerates_only_the_bounded_clock_skew(side: str) -> None:
     skew = timedelta(milliseconds=876)
-    assert check_last_price(**_last_kwargs(side, last_time_utc=NOW + skew, max_clock_skew=skew)) is (
-        None
-    )
+    within = _last_kwargs(side, last_time_utc=NOW + skew, max_clock_skew=skew)
+    assert check_last_price(**within) is None
     beyond = _last_kwargs(
         side, last_time_utc=NOW + skew + timedelta(milliseconds=1), max_clock_skew=skew
     )

@@ -1,11 +1,12 @@
 # Execution protection and pre-placement limits v1 (Phase 19, plan 19-01; D-07, D-13).
-# Purpose: the six safety numbers the owner has not chosen yet.
+# Purpose: the seven safety numbers the owner has not chosen yet.
 #   protection.max_unprotected_ms              D-13: longest tolerated time an entry fill is open without a stop
 #   protection.entry_terminal_timeout_ms       D-13: how long the entry order may stay non-terminal
 #   protection.entry_unknown_grace_ms          19-REVIEW WR-05: grace past the GTD time of an ENTRY_STATE_UNKNOWN entry
 #   protection.emergency_close_poll_timeout_ms 19-REVIEW WR-03: how long a sent emergency close is polled before it is held UNKNOWN
 #   pre_placement.min_remaining_validity_seconds   D-07: minimum remaining plan validity at placement
 #   pre_placement.max_mark_price_age_ms        D-07: maximum age of the mark price used by the price check
+#   pre_placement.max_last_price_age_ms        quick task 261020-l4p (WR-06): maximum age of the last price used by the last-price check
 # Every value is the string NOT_CONFIGURED until the owner fills them after the Demo probes
 # (OWNER-OPEN O-04). The live path refuses while any key is NOT_CONFIGURED. A set value needs
 # a DECISIONS row and the provenance label DECISION. Key meanings and the file format:
@@ -21,6 +22,7 @@ emergency_close_poll_timeout_ms = "NOT_CONFIGURED"
 [pre_placement]
 min_remaining_validity_seconds = "NOT_CONFIGURED"
 max_mark_price_age_ms = "NOT_CONFIGURED"
+max_last_price_age_ms = "NOT_CONFIGURED"
 
 [provenance.protection]
 max_unprotected_ms = "NOT_CONFIGURED"
@@ -31,3 +33,4 @@ emergency_close_poll_timeout_ms = "NOT_CONFIGURED"
 [provenance.pre_placement]
 min_remaining_validity_seconds = "NOT_CONFIGURED"
 max_mark_price_age_ms = "NOT_CONFIGURED"
+max_last_price_age_ms = "NOT_CONFIGURED"

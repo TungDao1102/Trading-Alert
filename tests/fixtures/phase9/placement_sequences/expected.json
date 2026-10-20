@@ -3,6 +3,7 @@
   "outcome_reason_code": "OK",
   "method_sequence": [
     "get_mark_price",
+    "get_last_price",
     "snapshot_open_normal_orders",
     "snapshot_open_algo_orders",
     "snapshot_positions",

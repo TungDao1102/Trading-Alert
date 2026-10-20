@@ -977,13 +977,20 @@ def _prime_mark_price(adapter: Any, case_input: dict[str, Any]) -> None:
     execution manager now reads the mark price before it places, so the PG and recovery
     suites that run the manager against that fake get the fixture price here, aged by the
     fixture's `mark_age_ms`. A fake without `set_mark_price` (this module's own) is untouched.
+    Quick task 261020-l4p: the last price is primed the same way (`set_last_price`, the fixture
+    price at the same exchange time) when the test set none.
     """
     set_price = getattr(adapter, "set_mark_price", None)
     known = getattr(adapter, "_mark_prices", None)
-    if set_price is None or not isinstance(known, dict) or case_input["symbol"] in known:
-        return
-    reading = _mark_reading_for(case_input)
-    set_price(case_input["symbol"], reading.mark_price, reading.exchange_time_utc)
+    if set_price is not None and isinstance(known, dict) and case_input["symbol"] not in known:
+        reading = _mark_reading_for(case_input)
+        set_price(case_input["symbol"], reading.mark_price, reading.exchange_time_utc)
+    set_last = getattr(adapter, "set_last_price", None)
+    known_last = getattr(adapter, "_last_prices", None)
+    if set_last is not None and isinstance(known_last, dict):
+        if case_input["symbol"] not in known_last:
+            last = _last_reading_for(case_input)
+            set_last(case_input["symbol"], last.last_price, last.exchange_time_utc)
 
 
 async def _run_plan(
@@ -3692,8 +3699,12 @@ async def test_the_clock_is_read_once_after_both_price_reads() -> None:
         calls_seen_by_clock.append(_reads_only(adapter))
         return now + timedelta(seconds=4)
 
-    adapter.mark_reading = _mark_reading_for(case_input, exchange_time_utc=now + timedelta(seconds=3))
-    adapter.last_reading = _last_reading_for(case_input, exchange_time_utc=now + timedelta(seconds=3))
+    adapter.mark_reading = _mark_reading_for(
+        case_input, exchange_time_utc=now + timedelta(seconds=3)
+    )
+    adapter.last_reading = _last_reading_for(
+        case_input, exchange_time_utc=now + timedelta(seconds=3)
+    )
     outcome = await _run_plan(adapter, live_context=_build_live_context(case_input, clock=clock))
     assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
     assert calls_seen_by_clock == [PRE_PLACEMENT_READS]

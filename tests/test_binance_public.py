@@ -310,6 +310,8 @@ ALLOWED_REST_CALLS = frozenset(
         "check_server_time",
         "exchange_information",
         "mark_price",
+        # Quick task 261020-l4p: GET /fapi/v1/ticker/price, public market data (no credentials).
+        "symbol_price_ticker",
     }
 )
 ENV_NAMES = frozenset({"environ", "getenv", "getenvb"})
