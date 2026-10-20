@@ -97,15 +97,15 @@ names and never prints a value.
 ## Liveness probe (paper heartbeat)
 
 `python -m src.paper.runtime --liveness` is the probe of the separate paper heartbeat (decision
-`16-DEC-HUNG-RUNTIME`). It exits 0 only when this container holds no held marker and its
-liveness stamp (`liveness-<container>.json` next to the pinned state, schema `paper-liveness/2`)
+`16-DEC-HUNG-RUNTIME`). It exits with status zero only when this container holds no held marker and its
+liveness stamp (`liveness-<container>.json` next to the pinned state, in the stamp schema of version two)
 shows an event-loop wake and a market message, both within `feed_silence_timeout_seconds`. The
 stamp belongs to one process (plan 16-65, `decisions/16-DEC-LIVENESS-FIRST-FRAME.md`): the
 runtime removes it at its start, before any other start step, and again on every exit, fail-closed
 exits included, and it records no message until the first message of this process has arrived, so
 a runtime that crashes and restarts before its feed speaks never passes the probe. A process
 killed without cleanup (kill -9) leaves a stamp that fails the probe within the bound or is
-removed by the next start. A stamp of the older schema `paper-liveness/1` is refused as unreadable.
+removed by the next start. A stamp of the older schema (version one) is refused as unreadable.
 
 ## Two gate layers: do not confuse them
 
