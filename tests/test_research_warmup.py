@@ -28,7 +28,7 @@ from src.backtest import engine as engine_module
 from src.backtest import semantics, simulator
 from src.backtest.experiment import CodeVersion
 from src.core.features import _EMA_SLOW_PERIOD
-from src.data.case_input import ENGINE_SERIES, TerminalDeclaration, build_case_input_data
+from src.data.case_input import ENGINE_SERIES, build_case_input_data
 from src.data.collector import _write_funding_tick
 from src.data.minute_source import ParquetMinuteSource
 from src.data.store import publish_batch, publish_mark_batch
@@ -525,49 +525,14 @@ def test_the_manifest_store_check_and_hash_do_not_move(store: Path, tmp_path: Pa
 
 
 def test_a_terminal_instant_inside_the_warmup_builds_without_a_settlement_row(
-    tmp_path: Path,
+    terminal_lower_run: Any,
 ) -> None:
     from tests import test_research_known_gap_reason as kg
-    from tests import test_research_terminal_settlement_integration as ts
-    from tests.test_case_input_builder import build_store
 
-    root = tmp_path / "raw"
-    build_store(root, start=kg.STORE_START, end=kg.VAL_END, symbols=(kg.LONG,), oi=False)
-    kg._publish_terminal_symbol(root, kg.TERM, kg.STORE_START, kg.CUT)
-    observed = kg.STORE_START - timedelta(days=30)
-    constraints = tmp_path / "constraints.json"
-    constraints.write_text(
-        json.dumps(
-            {
-                "constraint_history": [
-                    constraint_row(kg.LONG, observed),
-                    constraint_row(kg.TERM, observed),
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    declaration = TerminalDeclaration(
-        symbol=kg.TERM, reason=kg.REASON, terminal_at_utc=kg.CUT, source_url=kg.SOURCE_URL
-    )
-    dataset_id = build_case_input_data(
-        root,
-        symbols=[kg.LONG, kg.TERM],
-        start_utc=kg.STORE_START,
-        end_utc=kg.VAL_END,
-        as_of_day_utc=kg.VAL_END.date(),
-        series=ENGINE_SERIES,
-        terminal_declarations=(declaration,),
-    ).dataset_id
-    world = ts.World(
-        store=root,
-        constraint_path=constraints,
-        constraint_source=constraints.name,
-        constraint_sha256=hashlib.sha256(constraints.read_bytes()).hexdigest(),
-        dataset_id=dataset_id,
-        declaration=declaration,
-    )
-    captured = ts._run(world, tmp_path, "run", ts.LOWER_BASE)
+    # The session-shared run of tests/conftest.py (read-only): the terminal world (a
+    # long-history symbol and kg.TERM cut at kg.CUT, constraints observed 30 days before
+    # kg.STORE_START, one DELISTED_CAPPED declaration) run with ts._run(..., ts.LOWER_BASE).
+    captured = terminal_lower_run
 
     folds = research_splits(captured.manifest)[1:]
     assert kg.CUT < folds[0].start_utc  # T lies in Development, i.e. in the fold's warm-up

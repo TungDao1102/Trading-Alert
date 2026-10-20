@@ -23,11 +23,13 @@ Phase-4 additions (plan 04-01):
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 import structlog
@@ -239,3 +241,59 @@ def phase5_parity_cases() -> list[dict]:
 def phase5_frozen_clock() -> datetime:
     """Frozen UTC clock for parity fixtures — 2026-09-19T00:00:00Z."""
     return datetime(2026, 9, 19, tzinfo=UTC)
+
+
+# Quick task 261020-spd (A2): one terminal-settlement world per session, shared read-only by
+# test_research_terminal_settlement_integration.py (`world`, the lower run of `paired`),
+# test_research_known_gap_reason.py (`store`) and test_research_warmup.py (the terminal
+# instant inside the warm-up). Teardown fails if a test changed the store or the run.
+
+
+def _tree_sha256(root: Path) -> dict[str, str]:
+    return {
+        p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
+
+
+@pytest.fixture(scope="session")
+def terminal_world(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Any]:
+    """`build_world` of test_research_terminal_settlement_integration.py, built once."""
+    from tests import test_research_terminal_settlement_integration as ts
+
+    base_dir = tmp_path_factory.mktemp("settlement_integration")
+    world = ts.build_world(base_dir)
+    before = _tree_sha256(base_dir)
+    yield world
+    assert _tree_sha256(base_dir) == before, "a test changed the shared terminal world"
+
+
+def _captured_text(captured: Any) -> str:
+    return json.dumps(
+        {
+            "records": [r.to_dict() for r in captured.records],
+            "cases": captured.cases,
+            "outputs": captured.outputs,
+        },
+        sort_keys=True,
+        default=str,
+    )
+
+
+@pytest.fixture(scope="session")
+def terminal_lower_run(
+    terminal_world: Any, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[Any]:
+    """`_run(terminal_world, ..., "lower", LOWER_BASE)`, run once."""
+    from tests import test_research_terminal_settlement_integration as ts
+
+    captured = ts._run(
+        terminal_world, tmp_path_factory.mktemp("settlement_runs"), "lower", ts.LOWER_BASE
+    )
+    before = _captured_text(captured)
+    manifest = captured.manifest
+    yield captured
+    assert captured.manifest is manifest and _captured_text(captured) == before, (
+        "a test changed the shared terminal run"
+    )

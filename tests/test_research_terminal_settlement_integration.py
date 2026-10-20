@@ -170,9 +170,13 @@ class World:
 
 
 @pytest.fixture(scope="module")
-def world(tmp_path_factory: pytest.TempPathFactory) -> World:
+def world(terminal_world: World) -> World:
+    """The session-shared world of `build_world` (tests/conftest.py, read-only)."""
+    return terminal_world
+
+
+def build_world(base_dir: Path) -> World:
     """A long-history symbol and a REEFUSDT-shaped symbol whose data stops at T in Development."""
-    base_dir = tmp_path_factory.mktemp("settlement_integration")
     store = base_dir / "raw"
     build_store(store, start=STORE_START, end=VAL_END, symbols=(LONG,), oi=False)
     _publish_terminal_symbol(store, TERM, STORE_START, CUT)
@@ -278,11 +282,17 @@ def _run(world: World, tmp_path: Path, name: str, base: Decimal) -> Captured:
 
 
 @pytest.fixture(scope="module")
-def paired(world: World, tmp_path_factory: pytest.TempPathFactory) -> tuple[Captured, Captured]:
-    """The same synthetic run under the lower and under the upper bound set."""
+def paired(
+    world: World, terminal_lower_run: Captured, tmp_path_factory: pytest.TempPathFactory
+) -> tuple[Captured, Captured]:
+    """The same synthetic run under the lower and under the upper bound set.
+
+    The lower run is the session-shared `_run(world, ..., "lower", LOWER_BASE)` of
+    tests/conftest.py (also read by test_research_warmup.py).
+    """
     base_dir = tmp_path_factory.mktemp("settlement_runs")
     return (
-        _run(world, base_dir, "lower", LOWER_BASE),
+        terminal_lower_run,
         _run(world, base_dir, "upper", UPPER_BASE),
     )
 

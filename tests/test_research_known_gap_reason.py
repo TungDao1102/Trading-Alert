@@ -75,11 +75,14 @@ def _publish_terminal_symbol(root: Path, symbol: str, start: datetime, cut: date
 
 
 @pytest.fixture(scope="module")
-def store(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A long-history symbol over the research window and a REEFUSDT-shaped symbol."""
-    root = tmp_path_factory.mktemp("known_gap_reason_store") / "raw"
-    tb.build_store(root, start=STORE_START, end=VAL_END, symbols=(LONG,), oi=False)
-    _publish_terminal_symbol(root, TERM, STORE_START, CUT)
+def store(terminal_world: Any) -> Path:
+    """A long-history symbol over the research window and a REEFUSDT-shaped symbol.
+
+    It is the store of the session-shared terminal world (tests/conftest.py, read-only):
+    `tb.build_store(root, start=STORE_START, end=VAL_END, symbols=(LONG,), oi=False)` and
+    `_publish_terminal_symbol(root, TERM, STORE_START, CUT)`.
+    """
+    root: Path = terminal_world.store
     return root
 
 
