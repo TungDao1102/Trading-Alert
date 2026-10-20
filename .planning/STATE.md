@@ -592,6 +592,7 @@ Recent decisions affecting current work:
 | 261015-pdb | Research runner: per-point records and window checkpoints (--checkpoint-dir, resume); default behaviour unchanged | 2026-10-15 | (this commit) | [261015-pdb-research-runner-per-point-records-and-sp](./quick/261015-pdb-research-runner-per-point-records-and-sp/) |
 | 261016-pre | Close 16-41, ROADMAP/REQUIREMENTS bookkeeping (BKTS-03 complete), 16-42 Task 1 preflight | 2026-10-16 | (this commit) | [261016-pre-close-16-41-roadmap-state-and-16-42-pre](./quick/261016-pre-close-16-41-roadmap-state-and-16-42-pre/) |
 | 261016-alw | 16-42 Tasks 2 and 3: G4-021 exact-entry-pin, allowlist entry research-run-1-a01, tests and D054 item (i) | 2026-10-16 | (this commit) | [261016-alw-allowlist-entry-research-run-1-a01-g4-021](./quick/261016-alw-allowlist-entry-research-run-1-a01-g4-021/) |
+| 261020-jua | Q5: send the entry once (no second place_entry); not-found after an ambiguous error is UNKNOWN + SAFE_MODE; EXECUTION_SPEC 10; owner draft 19-DEC-Q5-DRAFT | 2026-10-20 | fffdb6e | [261020-jua-q5-remove-entry-placement-retry-unknown-](./quick/261020-jua-q5-remove-entry-placement-retry-unknown-/) |
 
 ### Roadmap Evolution
 
