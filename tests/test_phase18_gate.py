@@ -474,8 +474,9 @@ def test_invariant_4_the_ratified_limits_file_loads() -> None:
 
 def test_invariant_5_no_unratified_default_in_src_or_scripts() -> None:
     # Phase 19 adds the execution-limit keys of D-07/D-13 (30 -> 34), then entry_unknown_grace_ms
-    # and emergency_close_poll_timeout_ms from the review fixes (34 -> 36).
-    assert len(unratified_tests.GUARDED_NAMES) == 36
+    # and emergency_close_poll_timeout_ms from the review fixes (34 -> 36), then
+    # max_last_price_age_ms from quick task 261020-l4p (36 -> 37).
+    assert len(unratified_tests.GUARDED_NAMES) == 37
     assert unratified_tests.ALLOW_LIST == {}
     unratified_tests.test_no_canonical_key_gets_a_numeric_constant_in_src_or_scripts()
     unratified_tests.test_no_production_file_imports_the_test_only_limits()

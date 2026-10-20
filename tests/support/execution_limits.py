@@ -31,6 +31,9 @@ TEST_ONLY_EXECUTION_LIMIT_VALUES: Mapping[str, int] = {
     "protection.emergency_close_poll_timeout_ms": 6161,
     "pre_placement.min_remaining_validity_seconds": 777,
     "pre_placement.max_mark_price_age_ms": 4321,
+    # Quick task 261020-l4p: a FAKE last-price age bound, deliberately below the mark bound so a
+    # test can tell the two apart.
+    "pre_placement.max_last_price_age_ms": 2468,
 }
 
 TEST_ONLY_PROVENANCE_LABEL = "DECISION"

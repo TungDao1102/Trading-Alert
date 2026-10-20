@@ -3,7 +3,9 @@
 The real repository file holds only NOT_CONFIGURED, so every field loads as None and the
 live-readiness check refuses naming every key (six since the owner's 19-REVIEW WR-05 and WR-03
 decisions added `protection.entry_unknown_grace_ms` and
-`protection.emergency_close_poll_timeout_ms`). Values used in the positive cases are
+`protection.emergency_close_poll_timeout_ms`; seven since quick task 261020-l4p added
+`pre_placement.max_last_price_age_ms`, the own age bound of the last-price check). Values used
+in the positive cases are
 TEST_ONLY values from `tests/support/execution_limits.py`, never ratified numbers.
 """
 
@@ -30,6 +32,7 @@ EXPECTED_UNSET = (
     "protection.emergency_close_poll_timeout_ms",
     "pre_placement.min_remaining_validity_seconds",
     "pre_placement.max_mark_price_age_ms",
+    "pre_placement.max_last_price_age_ms",
 )
 
 
@@ -50,6 +53,7 @@ def test_the_real_file_loads_with_every_field_unset() -> None:
     assert limits.emergency_close_poll_timeout_ms is None
     assert limits.min_remaining_validity_seconds is None
     assert limits.max_mark_price_age_ms is None
+    assert limits.max_last_price_age_ms is None
     assert limits.unset_keys() == EXPECTED_UNSET
 
 
@@ -77,6 +81,7 @@ def test_a_fully_set_document_is_live_ready() -> None:
     assert limits.emergency_close_poll_timeout_ms == 13
     assert limits.min_remaining_validity_seconds == 10
     assert limits.max_mark_price_age_ms == 11
+    assert limits.max_last_price_age_ms == 12
     assert limits.unset_keys() == ()
     assert limits.require_live_ready() is None
 
@@ -220,6 +225,7 @@ def test_a_mixed_document_loads_and_lists_only_the_unset_keys() -> None:
     for dotted in (
         "pre_placement.min_remaining_validity_seconds",
         "pre_placement.max_mark_price_age_ms",
+        "pre_placement.max_last_price_age_ms",
     ):
         _set(document, dotted, "NOT_CONFIGURED")
         _set(document, f"provenance.{dotted}", "NOT_CONFIGURED")
@@ -228,6 +234,7 @@ def test_a_mixed_document_loads_and_lists_only_the_unset_keys() -> None:
     assert limits.unset_keys() == (
         "pre_placement.min_remaining_validity_seconds",
         "pre_placement.max_mark_price_age_ms",
+        "pre_placement.max_last_price_age_ms",
     )
     with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
         limits.require_live_ready()
@@ -278,6 +285,7 @@ def test_round_trip_of_an_all_unset_document(tmp_path: Path) -> None:
         emergency_close_poll_timeout_ms=None,
         min_remaining_validity_seconds=None,
         max_mark_price_age_ms=None,
+        max_last_price_age_ms=None,
     )
     assert limits.unset_keys() == EXPECTED_UNSET
 
@@ -323,9 +331,9 @@ def test_the_readme_carries_no_value_and_states_the_rules() -> None:
 def test_the_committed_file_names_only_the_not_configured_word() -> None:
     text = LIMITS_FILE.read_text(encoding="utf-8")
     assert not re.search(r"^\s*[a-z_]+\s*=\s*[-+]?\d", text, flags=re.MULTILINE)
-    # Six keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth,
-    # WR-03 the sixth).
-    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 12
+    # Seven keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth,
+    # WR-03 the sixth, quick task 261020-l4p the seventh).
+    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 14
 
 
 def test_the_test_only_helper_rejects_an_unknown_field() -> None:

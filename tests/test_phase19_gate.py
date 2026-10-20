@@ -73,6 +73,8 @@ PHASE19_ARTIFACTS: tuple[str, ...] = (
     "tests/test_pre_placement.py",
     "tests/test_market_lot_split.py",
     "tests/test_live_mark_price_adapter.py",
+    # Quick task 261020-l4p (WR-06 work item, ROADMAP criterion 2): the last-price read.
+    "tests/test_live_last_price_adapter.py",
     "tests/test_binance_entry_gtd.py",
     "tests/test_realized_risk_persistence_pg.py",
     "tests/test_tp_sizing.py",
@@ -150,6 +152,9 @@ PHASE19_SYMBOLS: dict[str, tuple[str, ...]] = {
         "GTD_MIN_AHEAD_SECONDS",
         "HEDGE_MODE_UNSUPPORTED",
         "INVALIDATION_INPUT_UNAVAILABLE",
+        "LAST_PRICE_CROSSED_STOP",
+        "LAST_PRICE_OUTSIDE_ZONE",
+        "LAST_PRICE_UNAVAILABLE",
         "LIMITS_NOT_CONFIGURED",
         "MARK_PRICE_CROSSED_STOP",
         "MARK_PRICE_OUTSIDE_ZONE",
@@ -164,6 +169,7 @@ PHASE19_SYMBOLS: dict[str, tuple[str, ...]] = {
         "VALIDITY_TOO_SHORT",
         "bar_close_invalidates",
         "check_invalidation",
+        "check_last_price",
         "check_mark_price",
         "check_plan_status",
         "check_position_mode",
@@ -212,15 +218,29 @@ PHASE19_SYMBOLS: dict[str, tuple[str, ...]] = {
     ),
     "src.execution.live_context": ("LivePlacementContext",),
     "src.execution.order_ids": ("ROLE_CODES", "derive_close_order_id"),
-    "src.adapters.binance_usdm": ("BinanceUsdmAdapter", "MarketCloseResult"),
+    "src.adapters.binance_usdm": ("BinanceUsdmAdapter", "LastPriceReading", "MarketCloseResult"),
+    "src.adapters.binance_public": ("LastPriceReading", "MarkPriceReading"),
 }
 
-# Methods Phase 19 added to the Binance adapter (plans 19-05 and 19-08).
+# Methods Phase 19 added to the Binance adapter (plans 19-05 and 19-08; `get_last_price` is
+# quick task 261020-l4p, the WR-06 work item).
 PHASE19_ADAPTER_METHODS: tuple[str, ...] = (
     "get_mark_price",
+    "get_last_price",
     "symbol_lot_filters",
     "place_market_close",
 )
+
+
+def test_the_manager_protocol_declares_both_price_reads() -> None:
+    """ROADMAP Phase 19 criterion 2 names the mark AND the last price (quick task 261020-l4p)."""
+    from src.execution.manager import ExecutionAdapter
+
+    for name in ("get_mark_price", "get_last_price"):
+        assert hasattr(ExecutionAdapter, name), f"ExecutionAdapter lacks {name}"
+        parameters = inspect.signature(getattr(ExecutionAdapter, name)).parameters
+        assert list(parameters) == ["self", "symbol"], name
+        assert parameters["symbol"].kind is inspect.Parameter.KEYWORD_ONLY, name
 
 
 def test_phase19_public_symbols_importable() -> None:
@@ -297,6 +317,12 @@ REQUIREMENT_TESTS: dict[str, tuple[tuple[str, str], ...]] = {
     "RISK-04": (
         ("tests/test_pre_placement.py", "test_check_symbol_free_verdicts"),
         ("tests/test_pre_placement.py", "test_check_mark_price_position"),
+        # Quick task 261020-l4p: the last price is checked too (ROADMAP criterion 2).
+        ("tests/test_pre_placement.py", "test_check_last_price_position"),
+        (
+            "tests/test_execution_manager.py",
+            "test_last_price_refusals_make_only_the_reads_and_leave_the_approval_unconsumed",
+        ),
         ("tests/test_execution_binding.py", "test_check_quantity_bound"),
         (
             "tests/test_execution_binding.py",
@@ -558,6 +584,10 @@ NEW_PLAIN_CODES: dict[str, str] = {
     "MARK_PRICE_UNAVAILABLE": "src/execution/pre_placement.py",
     "MARK_PRICE_CROSSED_STOP": "src/execution/pre_placement.py",
     "MARK_PRICE_OUTSIDE_ZONE": "src/execution/pre_placement.py",
+    # Quick task 261020-l4p (WR-06 work item): the last-price refusals.
+    "LAST_PRICE_UNAVAILABLE": "src/execution/pre_placement.py",
+    "LAST_PRICE_CROSSED_STOP": "src/execution/pre_placement.py",
+    "LAST_PRICE_OUTSIDE_ZONE": "src/execution/pre_placement.py",
     "HEDGE_MODE_UNSUPPORTED": "src/execution/pre_placement.py",
     "ENTRY_REFUSED_BEFORE_SEND": "src/execution/manager.py",
     # WR-01 follow-up, quick task 261020-q2d, D078 (6): the consume-time stored-quantity check.

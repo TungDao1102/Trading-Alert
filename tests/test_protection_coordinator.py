@@ -71,6 +71,7 @@ def test_protection_state_names_are_the_eleven_stable_names() -> None:
         "emergency_close_poll_timeout_ms",
         "min_remaining_validity_seconds",
         "max_mark_price_age_ms",
+        "max_last_price_age_ms",
     ],
 )
 def test_constructor_refuses_while_any_limit_is_not_configured(unset: str) -> None:

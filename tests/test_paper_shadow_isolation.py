@@ -639,6 +639,7 @@ def test_negative_control_the_spy_list_covers_every_public_order_method_of_the_a
         "server_time",
         "exchange_info",
         "get_mark_price",
+        "get_last_price",
         "symbol_lot_filters",
     }
     public_async = {

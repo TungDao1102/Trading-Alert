@@ -71,8 +71,9 @@ only that the code under test agrees with the label, not that the exchange does:
 * [ASSUMED] `trigger_stop` consumes the position of a closePosition stop in full and leaves
   the algo FINISHED; the position book is one signed Decimal per symbol (One-way only, Hedge
   position books are not modeled).
-* Mark price, lot filters, open-order and algo snapshots are served from state the test
-  sets (`set_mark_price`, `set_lot_filters`); an unset value raises, never defaults.
+* Mark price, last price, lot filters, open-order and algo snapshots are served from state the
+  test sets (`set_mark_price`, `set_last_price`, `set_lot_filters`); an unset value raises,
+  never defaults (the last price is never derived from the mark price).
 * Scripted completion gates (`hold`/`release`, `fail_next`, `reject_next_algo`) make every
   D-12 stop/cancel race a deterministic test; none of them sleeps. A D-12 branch test
   combines them: hold the cancel, run stop and cancel concurrently, assert the stop
@@ -218,6 +219,9 @@ class BinanceSemanticsFakeAdapter:
         # State the test sets; an unset value raises, it is never defaulted.
         self._mark_prices: dict[str, Any] = {}
         self._mark_price_error: BaseException | None = None
+        # Quick task 261020-l4p: the last price is set separately, never derived from the mark.
+        self._last_prices: dict[str, Any] = {}
+        self._last_price_error: BaseException | None = None
         self._lot_filters: dict[str, Any] = {}
         # True: a MARKET close answers like an acknowledgment (NEW, executed unknown).
         self.market_close_ack_only = False
@@ -434,6 +438,18 @@ class BinanceSemanticsFakeAdapter:
         """The exception `get_mark_price` raises for a symbol with no price set (None: clear)."""
         self._mark_price_error = exc
 
+    def set_last_price(self, symbol: str, price: Decimal, time_utc: datetime | None = None) -> None:
+        """Set the last price `get_last_price` serves for `symbol` (exchange time: `time_utc`)."""
+        from src.adapters.binance_public import LastPriceReading
+
+        self._last_prices[symbol] = LastPriceReading(
+            symbol=symbol, last_price=price, exchange_time_utc=time_utc or self.now_utc
+        )
+
+    def set_last_price_error(self, exc: BaseException | None) -> None:
+        """The exception `get_last_price` raises for a symbol with no price set (None: clear)."""
+        self._last_price_error = exc
+
     def set_lot_filters(self, symbol: str, filters: Any) -> None:
         """Set the `LotFilters` `symbol_lot_filters` serves for `symbol`."""
         self._lot_filters[symbol] = filters
@@ -590,6 +606,16 @@ class BinanceSemanticsFakeAdapter:
             if self._mark_price_error is not None:
                 raise self._mark_price_error
             raise RuntimeError(f"no mark price set for {symbol}")
+        return reading
+
+    @_exchange_call("get_last_price")
+    async def get_last_price(self, **kwargs: Any) -> Any:
+        symbol = kwargs["symbol"]
+        reading = self._last_prices.get(symbol)
+        if reading is None:
+            if self._last_price_error is not None:
+                raise self._last_price_error
+            raise RuntimeError(f"no last price set for {symbol}")
         return reading
 
     @_exchange_call("symbol_lot_filters")
