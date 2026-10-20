@@ -560,6 +560,8 @@ NEW_PLAIN_CODES: dict[str, str] = {
     "MARK_PRICE_OUTSIDE_ZONE": "src/execution/pre_placement.py",
     "HEDGE_MODE_UNSUPPORTED": "src/execution/pre_placement.py",
     "ENTRY_REFUSED_BEFORE_SEND": "src/execution/manager.py",
+    # WR-01 follow-up, quick task 261020-q2d, D078 (6): the consume-time stored-quantity check.
+    "APPROVED_QUANTITY_NOT_CONFIRMED": "src/execution/manager.py",
 }
 
 # New SAFE_MODE entry reasons (plans 19-12, 19-14, 19-15) and the existing reasons whose

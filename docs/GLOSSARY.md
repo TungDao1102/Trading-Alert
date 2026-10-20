@@ -233,6 +233,7 @@ Production code also emits the following plain strings as `reason_code` values o
 | `MARK_PRICE_OUTSIDE_ZONE` | `src/execution/pre_placement.py` | The mark price has left the entry zone on the adverse side (LONG: strictly below the zone minimum; SHORT: strictly above the zone maximum), so the approved entry is no longer valid; a mark on the favorable side is allowed because the GTD LIMIT rests (owner decision, 19-REVIEW WR-06) | proposed canonical, promote in Phase 24 |
 | `HEDGE_MODE_UNSUPPORTED` | `src/execution/pre_placement.py` | The account is in Hedge position mode; V1 places only One-way orders | proposed canonical, promote in Phase 24 |
 | `ENTRY_REFUSED_BEFORE_SEND` | `src/execution/manager.py` | The entry was refused before anything reached the exchange (REST gate pause or ban, entries blocked by the clock-drift guard, missing signed-call policy); no probe, no SAFE_MODE | proposed canonical, promote in Phase 24 |
+| `APPROVED_QUANTITY_NOT_CONFIRMED` | `src/execution/manager.py` | The approval row read inside the consume transaction does not confirm the quantity: its stored `approved_quantity` is NULL, differs from the quantity bound from the caller's approval, or is below the quantity about to be placed (D078 (6)); the transaction rolls back, the approval is not consumed and nothing is sent | proposed canonical, promote in Phase 24 |
 
 ### 9.4 SAFE_MODE entry reasons
 
