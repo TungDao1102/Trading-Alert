@@ -12,8 +12,13 @@ before any adapter call.
   direction are cross-checked against the hash-bound geometry (stop below the zone means
   LONG, above means SHORT), the plan constraint snapshot and the caller; a caller value
   that disagrees is a refusal, never an override.
-- D-02 (RISK-04): a placement quantity above the approved `quantity_after_rounding` is
-  refused with `QUANTITY_ABOVE_APPROVED` and is never clipped; no clipping helper exists.
+- D-02 (RISK-04): a placement quantity above the approved quantity is refused with
+  `QUANTITY_ABOVE_APPROVED` and is never clipped; no clipping helper exists.
+- D078 (19-REVIEW WR-01): the plan hash does not cover `quantity_after_rounding` (D051 c), so
+  the approved quantity is the one stored on the approval row. `bind_plan` requires the plan's
+  quantity to equal it (`PLAN_QUANTITY_MISMATCH`), refuses a row that stores none
+  (`APPROVED_QUANTITY_MISSING`), and the bound plan carries the approval's value, never the
+  caller's plan object, so the placement check compares with what was stored at approval time.
 - D-03 / G4-020: the planner has no tick size (D054 accepted limitation), so
   `check_snapped_geometry` is the post-snap guard: after the entry limit and the SL trigger
   are snapped to the tick grid the stop must still sit strictly outside the entry zone.
@@ -43,6 +48,8 @@ STALE_SETUP = RejectionReason.STALE_SETUP.value
 PLAN_SIGNAL_MISMATCH = "PLAN_SIGNAL_MISMATCH"
 PLAN_SYMBOL_MISMATCH = "PLAN_SYMBOL_MISMATCH"
 PLAN_SIDE_MISMATCH = "PLAN_SIDE_MISMATCH"
+PLAN_QUANTITY_MISMATCH = "PLAN_QUANTITY_MISMATCH"
+APPROVED_QUANTITY_MISSING = "APPROVED_QUANTITY_MISSING"
 QUANTITY_ABOVE_APPROVED = "QUANTITY_ABOVE_APPROVED"
 GEOMETRY_INVALID_AFTER_SNAP = "GEOMETRY_INVALID_AFTER_SNAP"
 WORKING_TYPE_NOT_MARK_PRICE = "WORKING_TYPE_NOT_MARK_PRICE"
@@ -125,11 +132,16 @@ def bind_plan(
     plan_snapshot_trade_plan_id: str,
     caller_symbol: str,
     caller_side: str,
+    approval_quantity: Decimal | None,
 ) -> BindingVerdict:
     """Bind an approved plan to its Signal, or refuse with the first failing reason code.
 
-    Order (first failure wins): hash, signal, symbol, side. Symbol and side are taken from
-    `signal`; the caller's values are only compared against them, never used.
+    Order (first failure wins): hash, signal, symbol, side, quantity. Symbol and side are
+    taken from `signal`; the caller's values are only compared against them, never used.
+    The quantity is not in the plan hash (D051 c), so step 5 compares the plan's
+    `quantity_after_rounding` with `approval_quantity`, the value stored on the approval row
+    (D078): None is `APPROVED_QUANTITY_MISSING`, a different value is `PLAN_QUANTITY_MISMATCH`.
+    A non-Decimal `approval_quantity` is a programming error and raises `TypeError`.
     """
     # 1. Hash: recomputed == stored == callback == approval request (APRV-02).
     recomputed = recompute_plan_hash(trade_plan)
@@ -164,6 +176,14 @@ def bind_plan(
     if _geometry_side(trade_plan) != signal.direction or caller_side != signal.direction:
         return _refuse(PLAN_SIDE_MISMATCH)
 
+    # 5. Quantity (D078): the plan's quantity must equal the one stored on the approval row.
+    if approval_quantity is None:
+        return _refuse(APPROVED_QUANTITY_MISSING)
+    if not isinstance(approval_quantity, Decimal):
+        raise TypeError("bind_plan: approval_quantity must be Decimal or None")
+    if trade_plan.quantity_after_rounding != approval_quantity:
+        return _refuse(PLAN_QUANTITY_MISMATCH)
+
     long = signal.direction == _LONG
     return BindingVerdict(
         ok=True,
@@ -176,7 +196,7 @@ def bind_plan(
             side=signal.direction,
             entry_side=_BUY if long else _SELL,
             exit_side=_SELL if long else _BUY,
-            approved_quantity=trade_plan.quantity_after_rounding,
+            approved_quantity=approval_quantity,
         ),
     )
 
@@ -258,7 +278,9 @@ def take_profit_levels(trade_plan: TradePlan) -> tuple[Decimal, Decimal]:
 
 
 __all__ = [
+    "APPROVED_QUANTITY_MISSING",
     "GEOMETRY_INVALID_AFTER_SNAP",
+    "PLAN_QUANTITY_MISMATCH",
     "PLAN_SIDE_MISMATCH",
     "PLAN_SIGNAL_MISMATCH",
     "PLAN_SYMBOL_MISMATCH",

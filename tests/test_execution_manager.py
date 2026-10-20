@@ -3740,9 +3740,7 @@ def _order_pairs() -> list[tuple[str, dict[str, Any], str]]:
 
     def small_approval() -> Any:
         # D078: the stored approved quantity moves with the plan, so gate 1c passes.
-        return dataclasses.replace(
-            _build_approval(case_input), approved_quantity=Decimal("2.414")
-        )
+        return dataclasses.replace(_build_approval(case_input), approved_quantity=Decimal("2.414"))
 
     def inflated_plan_quantity() -> dict[str, Any]:
         risk_kwargs = _build_risk_kwargs(case_input)

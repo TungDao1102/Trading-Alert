@@ -471,7 +471,9 @@ async def execute_approved_plan(
           ties the plan to its Signal and the approval's strategy version and parameter set,
           and compares the caller's symbol and side with the Signal; then the plan constraint
           snapshot's working type must be MARK_PRICE. Symbol and side used below come from the
-          bound plan, never from a caller value.
+          bound plan, never from a caller value. The plan's quantity must equal the quantity
+          stored on the approval row (D078): none stored is APPROVED_QUANTITY_MISSING, a
+          different one is PLAN_QUANTITY_MISMATCH.
       2. Enablement guard (LIVE_ORDERS_DISABLED → DISABLED).
       2b. Execution limits ready (D-07, D-13): any NOT_CONFIGURED limit is NO_TRADE
           LIMITS_NOT_CONFIGURED, before SAFE_MODE, risk and every adapter call.
@@ -487,8 +489,9 @@ async def execute_approved_plan(
       Phase 19 pre-placement gates, all BEFORE the approval is consumed (a refusal leaves no
       ENTRY intent row, so a later call with corrected inputs can still place). The pure
       refusals come first (no adapter call), then the four reads, then the position mode:
-      5b. Quantity bound (D-02, RISK-04): the sized quantity may not exceed the approved plan
-          quantity; it is refused as QUANTITY_ABOVE_APPROVED, never clipped.
+      5b. Quantity bound (D-02, RISK-04): the sized quantity may not exceed the approved
+          quantity stored on the approval row (D078); it is refused as
+          QUANTITY_ABOVE_APPROVED, never clipped.
       5c. Snapped geometry (D-03): after the tick snap the stop must still sit outside the
           zone (GEOMETRY_INVALID_AFTER_SNAP).
       5d. TP1 sizeable at the sized quantity (O-03 auto default, backtest D-27): the frozen
@@ -670,6 +673,7 @@ async def execute_approved_plan(
         plan_snapshot_trade_plan_id=live_context.plan_constraint_snapshot.trade_plan_id,
         caller_symbol=risk_kwargs["constraint_snapshot"].symbol,
         caller_side=risk_kwargs["candidate_position_side"],
+        approval_quantity=approval.approved_quantity,
     )
     if not binding_verdict.ok or binding_verdict.bound is None:
         return ExecutionOutcome(is_no_trade=True, reason_code=binding_verdict.reason_code)

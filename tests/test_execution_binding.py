@@ -309,7 +309,9 @@ def test_wr01_an_equal_quantity_binds_and_the_bound_carries_the_approval_value()
     assert str(verdict.bound.approved_quantity) == str(stored)
 
 
-@pytest.mark.parametrize("delta", [Decimal("0.000000000000000001"), Decimal("-0.000000000000000001")])
+@pytest.mark.parametrize(
+    "delta", [Decimal("0.000000000000000001"), Decimal("-0.000000000000000001")]
+)
 def test_wr01_a_plan_quantity_that_differs_from_the_approval_is_refused(delta: Decimal) -> None:
     signal, trade_plan = _real_plan("LONG")
     stored = trade_plan.quantity_after_rounding + delta

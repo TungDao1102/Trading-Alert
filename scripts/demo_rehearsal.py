@@ -2051,6 +2051,8 @@ def issue_approval(
         approval_token_hash=token_hash_of(raw_token),
         requested_at_utc=plan.observed_at,
         request_hash=plan.trade_plan.plan_hash,
+        # D078 (19-REVIEW WR-01): the quantity of the plan the request is issued for.
+        approved_quantity=plan.trade_plan.quantity_after_rounding,
     )
     params = plan.parameter_set
     ctx.book.register(

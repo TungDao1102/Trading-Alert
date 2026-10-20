@@ -180,6 +180,7 @@ def approval_to_row(a: Approval) -> ApprovalRow:
         request_hash=a.request_hash,
         consumption_status=a.consumption_status.value,
         consumed_at_utc=a.consumed_at_utc,
+        approved_quantity=a.approved_quantity,
     )
 
 
@@ -205,6 +206,7 @@ def approval_from_row(r: ApprovalRow) -> Approval:
         request_hash=r.request_hash,
         consumption_status=ApprovalConsumptionStatus(r.consumption_status),
         consumed_at_utc=r.consumed_at_utc,
+        approved_quantity=r.approved_quantity,
     )
 
 

@@ -333,7 +333,8 @@ class ApprovalRow(Base):
     `result` (ApprovalResult), and explicit `status` (ApprovalResult) —
     `status` alone answers state (D-11). `acted_at_utc` and
     `telegram_message_id` are nullable: NULL means "transition never
-    happened" / "no Telegram message yet".
+    happened" / "no Telegram message yet". `approved_quantity` is the quantity of
+    the plan the request was issued for; NULL means "not recorded" (D078).
     """
 
     __tablename__ = "approvals"
@@ -360,6 +361,9 @@ class ApprovalRow(Base):
         server_default=text("'UNCONSUMED'"),
     )
     consumed_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Quantity of the plan the request was issued for (Phase 19 review-fix batch 4, D078,
+    # migration 0006). Written once with the PENDING row; NULL = not recorded (pre-0006 rows).
+    approved_quantity: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
 
     # PostgreSQL-only integrity objects: SQLite `create_all` keeps its pre-0004 DDL
     # (`ddl_if`), PostgreSQL (alembic 0004) enforces everything. Names match the migration.
@@ -409,6 +413,10 @@ class ApprovalRow(Base):
             "OR (consumption_status = 'CONSUMED' AND consumed_at_utc IS NOT NULL "
             "AND status = 'APPROVED')",
             name="ck_approvals_consumption_coherent",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "approved_quantity IS NULL OR approved_quantity > 0",
+            name="ck_approvals_approved_quantity",
         ).ddl_if(dialect="postgresql"),
     )
 

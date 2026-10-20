@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from .enums import ApprovalAction, ApprovalConsumptionStatus, ApprovalResult
 
@@ -42,6 +43,11 @@ class Approval:
     durable consumption state (UNCONSUMED by default, never inferred from
     `consumed_at_utc`). CONSUMED requires `status` APPROVED and a UTC
     `consumed_at_utc`; only the execution-state consume transaction sets them.
+
+    Phase 19 review-fix batch 4 (19-REVIEW WR-01, D078): `approved_quantity` is the quantity
+    of the plan the approval request was issued for. It is written once with the PENDING row
+    and never changed by a decision. None means "not recorded" (a row written before
+    migration 0006); such an approval is never placeable (`APPROVED_QUANTITY_MISSING`).
     """
 
     approval_id: str
@@ -58,6 +64,7 @@ class Approval:
     request_hash: str = ""
     consumption_status: ApprovalConsumptionStatus = ApprovalConsumptionStatus.UNCONSUMED
     consumed_at_utc: datetime | None = None  # None = "never consumed" (D-21)
+    approved_quantity: Decimal | None = None  # None = "not recorded" (pre-0006 row, D078)
 
     def __post_init__(self) -> None:
         # D-12: UTC-aware datetimes only.
@@ -83,3 +90,9 @@ class Approval:
                 raise ValueError("CONSUMED approval must have status APPROVED")
         elif self.consumed_at_utc is not None:
             raise ValueError("UNCONSUMED approval must have consumed_at_utc=None")
+        # D078: the approved quantity is None or a finite positive Decimal.
+        if self.approved_quantity is not None:
+            if not isinstance(self.approved_quantity, Decimal):
+                raise ValueError("approved_quantity must be a Decimal or None")
+            if not self.approved_quantity.is_finite() or self.approved_quantity <= Decimal("0"):
+                raise ValueError("approved_quantity must be finite and greater than zero")
