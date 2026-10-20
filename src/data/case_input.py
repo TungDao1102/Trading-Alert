@@ -41,7 +41,7 @@ Design rules (13-CONTEXT D-17..D-22):
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -310,11 +310,30 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _relative_posix(raw_root: Path, path: Path) -> str:
-    try:
-        return path.resolve().relative_to(raw_root.resolve()).as_posix()
-    except ValueError as exc:
-        raise CaseInputError(f"{path} is not under raw root {raw_root}") from exc
+def _relative_posix_to(raw_root: Path) -> Callable[[Path], str]:
+    """A function giving the posix path of a file relative to `raw_root`.
+
+    Each call resolves its file once; `raw_root` is resolved once, on the first call, after
+    that call's file and inside the same `try`: the same result and the same error as
+    resolving both on every call, and no resolve of the root when no file is related.
+    """
+    resolved_root: list[Path] = []
+
+    def relative(path: Path) -> str:
+        try:
+            resolved = path.resolve()
+            if not resolved_root:
+                resolved_root.append(raw_root.resolve())
+            return resolved.relative_to(resolved_root[0]).as_posix()
+        except ValueError as exc:
+            raise CaseInputError(f"{path} is not under raw root {raw_root}") from exc
+
+    return relative
+
+
+def _identity_payload(entries: Mapping[str, str]) -> str:
+    payload = {"files": [{"path": rel, "sha256": entries[rel]} for rel in sorted(entries)]}
+    return sha256_hex(payload)
 
 
 def dataset_identity(raw_root: Path, files: Iterable[Path]) -> str:
@@ -324,11 +343,26 @@ def dataset_identity(raw_root: Path, files: Iterable[Path]) -> str:
     slashes so Windows and POSIX hash identically (no drive letter, no
     backslash in the hashed payload).
     """
+    relative = _relative_posix_to(raw_root)
     entries: dict[str, str] = {}
     for path in files:
-        entries[_relative_posix(raw_root, path)] = _file_sha256(path)
-    payload = {"files": [{"path": rel, "sha256": entries[rel]} for rel in sorted(entries)]}
-    return sha256_hex(payload)
+        # The right side runs first: each file is hashed, then related (the original order).
+        entries[relative(path)] = _file_sha256(path)
+    return _identity_payload(entries)
+
+
+def _files_and_identity(raw_root: Path, used: Sequence[Path]) -> tuple[tuple[str, ...], str]:
+    """The sorted relative paths of `used` and their `dataset_identity`, each file related once.
+
+    As before: every file is related to the root first (the files tuple), then every file is
+    hashed in order, so the first error raised is the same one.
+    """
+    relative = _relative_posix_to(raw_root)
+    related = [(path, relative(path)) for path in used]
+    entries: dict[str, str] = {}
+    for path, rel in related:
+        entries[rel] = _file_sha256(path)
+    return tuple(sorted({rel for _, rel in related})), _identity_payload(entries)
 
 
 # --------------------------------------------------------------------------- #
@@ -867,7 +901,7 @@ def build_case_input_data(
                 files.open_interest, _OI_COLUMNS, "observed_at_utc", symbol=name
             )
 
-    relative = tuple(sorted({_relative_posix(raw_root, p) for p in used}))
+    relative, dataset_id = _files_and_identity(raw_root, used)
     return CaseInputData(
         symbols=tuple(ordered),
         strategy_interval=strategy_interval,
@@ -882,7 +916,7 @@ def build_case_input_data(
         funding=tuple(funding),
         open_interest=tuple(open_interest),
         files=relative,
-        dataset_id=dataset_identity(raw_root, used),
+        dataset_id=dataset_id,
         allowed_gaps=allowed_gaps,
         with_minute_rows=with_minute_rows,
     )
